@@ -391,3 +391,153 @@ fn cas_misaligned_traps_aligned_executes_on_68060() {
     assert_eq!(bus.read_word(0x4000), 0x0009, "aligned CAS swaps");
     assert_eq!(cpu.dar[8], 0x4002, "post-increment commits");
 }
+
+/// Assert an FP-unimplemented trap: vector 11 handler, six-word format $2
+/// frame ($202C) with the given next-PC and EA fields, FPIAR = instruction.
+fn assert_fp_unimp(cpu: &CpuCore, bus: &mut TestBus, instr: u32, next_pc: u32, ea: u32) {
+    assert_eq!(cpu.pc, 0x0340, "must vector through Line-F (11)");
+    let sp = cpu.dar[15];
+    assert_eq!(bus.read_word(sp.wrapping_add(6)), 0x202C, "format $2 frame");
+    assert_eq!(bus.read_long(sp.wrapping_add(2)), next_pc, "next-PC field");
+    assert_eq!(bus.read_long(sp.wrapping_add(8)), ea, "EA field");
+    assert_eq!(cpu.fpiar, instr, "FPIAR holds the faulting instruction");
+}
+
+#[test]
+fn fadd_register_form_executes_natively_on_68060() {
+    let (mut cpu, mut bus) = setup_060();
+    // FADD.X FP0,FP1
+    bus.write_word_at(0x0200, 0xF200);
+    bus.write_word_at(0x0202, 0x00A2); // src FP0? bits: (0<<10)|(1<<7)|0x22
+    cpu.fpr[0] = m68k::fpu::FloatX80::from_f64(2.0);
+    cpu.fpr[1] = m68k::fpu::FloatX80::from_f64(3.0);
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.pc, 0x0204, "FADD must execute, not trap");
+    assert_eq!(cpu.fpr[1].to_f64(), 5.0);
+}
+
+#[test]
+fn fsin_register_form_traps_fp_unimplemented_on_68060() {
+    let (mut cpu, mut bus) = setup_060();
+    // FSIN.X FP0,FP1
+    bus.write_word_at(0x0200, 0xF200);
+    bus.write_word_at(0x0202, 0x008E);
+    cpu.fpr[1] = m68k::fpu::FloatX80::from_f64(9.0);
+    step(&mut cpu, &mut bus);
+    assert_fp_unimp(&cpu, &mut bus, 0x0200, 0x0204, 0);
+    assert_eq!(cpu.fpr[1].to_f64(), 9.0, "FP registers unchanged");
+}
+
+#[test]
+fn fsin_memory_source_traps_with_calculated_ea_on_68060() {
+    let (mut cpu, mut bus) = setup_060();
+    // FSIN.L (A0)+,FP0
+    bus.write_word_at(0x0200, 0xF218);
+    bus.write_word_at(0x0202, 0x400E);
+    cpu.dar[8] = 0x4000;
+    step(&mut cpu, &mut bus);
+    assert_fp_unimp(&cpu, &mut bus, 0x0200, 0x0204, 0x4000);
+    assert_eq!(cpu.dar[8], 0x4004, "calculated EA commits post-increment");
+}
+
+#[test]
+fn fsin_executes_with_escape_flag_on_68060() {
+    let (mut cpu, mut bus) = setup_060();
+    cpu.emulate_unimplemented_060 = true;
+    bus.write_word_at(0x0200, 0xF200);
+    bus.write_word_at(0x0202, 0x008E); // FSIN.X FP0,FP1
+    cpu.fpr[0] = m68k::fpu::FloatX80::from_f64(0.0);
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.pc, 0x0204);
+    assert_eq!(cpu.fpr[1].to_f64(), 0.0, "sin(0) = 0 computed natively");
+}
+
+#[test]
+fn fmovecr_and_fdbcc_trap_fp_unimplemented_on_68060() {
+    let (mut cpu, mut bus) = setup_060();
+    // FMOVECR #$32,FP0 (opclass 2, src_fmt 7)
+    bus.write_word_at(0x0200, 0xF200);
+    bus.write_word_at(0x0202, 0x5C32);
+    step(&mut cpu, &mut bus);
+    assert_fp_unimp(&cpu, &mut bus, 0x0200, 0x0204, 0);
+
+    let (mut cpu, mut bus) = setup_060();
+    // FDBF D0,<disp> (opcode + cond word + displacement word)
+    bus.write_word_at(0x0200, 0xF248);
+    bus.write_word_at(0x0202, 0x0000);
+    bus.write_word_at(0x0204, 0xFFFC);
+    step(&mut cpu, &mut bus);
+    assert_fp_unimp(&cpu, &mut bus, 0x0200, 0x0206, 0);
+}
+
+#[test]
+fn packed_and_dynamic_fmovem_take_their_own_vectors_on_68060() {
+    // Packed-decimal source: FP unsupported data type (vector 55).
+    let (mut cpu, mut bus) = setup_060();
+    bus.write_long_at(55 * 4, 0x0380);
+    bus.write_word_at(0x0200, 0xF210); // FMOVE.P (A0),FP0
+    bus.write_word_at(0x0202, 0x4C00);
+    cpu.dar[8] = 0x4000;
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.pc, 0x0380, "packed operand vectors through 55");
+    let sp = cpu.dar[15];
+    assert_eq!(bus.read_word(sp.wrapping_add(6)), 55 * 4, "format $0 frame");
+    assert_eq!(bus.read_long(sp.wrapping_add(2)), 0x0200, "pre-instruction PC");
+
+    // Dynamic FMOVEM register list: unimplemented <ea> (vector 60).
+    let (mut cpu, mut bus) = setup_060();
+    bus.write_long_at(60 * 4, 0x03A0);
+    bus.write_word_at(0x0200, 0xF210); // FMOVEM.X <dynamic D1>,(A0)
+    bus.write_word_at(0x0202, 0xE810);
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.pc, 0x03A0, "dynamic list vectors through 60");
+}
+
+#[test]
+fn pcr_dfp_takes_the_disabled_frame_on_68060() {
+    let (mut cpu, mut bus) = setup_060();
+    movec_to(&mut cpu, &mut bus, 0x808, 0x02); // set DFP
+    // FADD.X FP0,FP1 at 0x0210
+    bus.write_word_at(0x0210, 0xF200);
+    bus.write_word_at(0x0212, 0x00A2);
+    cpu.pc = 0x0210;
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.pc, 0x0340, "disabled FPU vectors through Line-F");
+    let sp = cpu.dar[15];
+    assert_eq!(bus.read_word(sp.wrapping_add(6)), 0x402C, "format $4 frame");
+    assert_eq!(
+        bus.read_long(sp.wrapping_add(0xC)),
+        0x0210,
+        "PC of the faulted instruction at +$0C"
+    );
+    assert_eq!(bus.read_long(sp.wrapping_add(2)), 0x0210, "restart PC");
+}
+
+#[test]
+fn fsave_writes_060_frames_and_frestore_null_resets() {
+    let (mut cpu, mut bus) = setup_060();
+    // FSAVE -(A0) straight after reset: 12-byte NULL frame.
+    bus.write_word_at(0x0200, 0xF320);
+    cpu.dar[8] = 0x5000;
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.dar[8], 0x4FF4, "060 state frame is 12 bytes");
+    assert_eq!(bus.read_long(0x4FF4), 0, "NULL frame after reset");
+
+    // Touch the FPU, then FSAVE again: IDLE frame (format byte $60).
+    bus.write_word_at(0x0202, 0xF200); // FADD.X FP0,FP1
+    bus.write_word_at(0x0204, 0x00A2);
+    bus.write_word_at(0x0206, 0xF320); // FSAVE -(A0)
+    step(&mut cpu, &mut bus);
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.dar[8], 0x4FE8);
+    assert_eq!(bus.read_long(0x4FE8), 0x0000_6000, "IDLE frame format $60");
+
+    // FRESTORE (A0)+ of a NULL frame resets the FPU.
+    cpu.fpcr = 0x1234;
+    bus.write_long_at(0x6000, 0);
+    bus.write_word_at(0x0208, 0xF358); // FRESTORE (A0)+
+    cpu.dar[8] = 0x6000;
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.dar[8], 0x600C, "FRESTORE consumes 12 bytes");
+    assert_eq!(cpu.fpcr, 0, "NULL frame resets the FPU");
+}

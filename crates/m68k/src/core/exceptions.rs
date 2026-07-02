@@ -30,6 +30,13 @@ pub mod vector {
     /// CAS2, misaligned CAS, 64-bit MUL/DIV) trap here for the OS-side
     /// 68060 software package to emulate.
     pub const UNIMPLEMENTED_INTEGER: u32 = 61;
+    /// 68060: FP operand data types the FPU no longer handles in hardware
+    /// (packed decimal, denormals) - pre-instruction, format $0.
+    pub const FP_UNSUPP_DATA_TYPE: u32 = 55;
+    /// 68060: FP addressing forms dropped from silicon (dynamic-list
+    /// FMOVEM, immediate packed operands, multi-register control-list
+    /// FMOVEM.L #imm) - pre-instruction, format $0.
+    pub const FP_UNIMPLEMENTED_EA: u32 = 60;
 
     // 68020+ MMU exceptions (vector numbers per 68k docs; used by 68030/68040 PMMU).
     pub const MMU_CONFIGURATION_ERROR: u32 = 56;
@@ -435,6 +442,48 @@ impl CpuCore {
         self.exception_processing = false;
 
         self.exception_cycles(vector)
+    }
+
+    /// 68060 "FP unimplemented instruction" exception: Line-F vector with
+    /// the six-word format $2 frame the 68060SP dispatches on (fmt/vector
+    /// word $202C). The frame's PC is the NEXT instruction (every extension
+    /// word must be consumed before calling this), the EA field holds the
+    /// calculated operand address (0 when the operand is not in memory),
+    /// and FPIAR points at the faulting instruction - the 060SP fetches
+    /// the opcode through FPIAR, not the frame.
+    pub(crate) fn take_fp_unimp_060<B: AddressBus>(&mut self, bus: &mut B, ea: u32) -> i32 {
+        self.fpiar = self.ppc;
+        let old_sr = self.get_sr();
+        self.set_s_flag(SFLAG_SET);
+        self.t1_flag = 0;
+        self.t0_flag = 0;
+        let vec_word = (vector::LINE_1111 as u16) << 2;
+        self.push_32(bus, ea);
+        self.push_16(bus, 0x2000 | (vec_word & 0x0FFF));
+        self.push_32(bus, self.pc);
+        self.push_16(bus, old_sr);
+        self.jump_vector(bus, vector::LINE_1111);
+        self.exception_cycles(vector::LINE_1111)
+    }
+
+    /// 68060 "FPU disabled" exception (PCR.DFP set, or an LC/EC060): the
+    /// eight-word format $4 frame ($402C) whose +$0C long holds the PC of
+    /// the faulted instruction so the OS can enable the FPU and restart.
+    /// The stacked PC also restarts the instruction; FPIAR is untouched
+    /// (the FPU never saw the instruction).
+    pub(crate) fn take_fp_disabled_060<B: AddressBus>(&mut self, bus: &mut B) -> i32 {
+        let old_sr = self.get_sr();
+        self.set_s_flag(SFLAG_SET);
+        self.t1_flag = 0;
+        self.t0_flag = 0;
+        let vec_word = (vector::LINE_1111 as u16) << 2;
+        self.push_32(bus, self.ppc); // PC of the faulted instruction
+        self.push_32(bus, 0); // effective address (unused for disabled)
+        self.push_16(bus, 0x4000 | (vec_word & 0x0FFF));
+        self.push_32(bus, self.ppc); // restart the instruction
+        self.push_16(bus, old_sr);
+        self.jump_vector(bus, vector::LINE_1111);
+        self.exception_cycles(vector::LINE_1111)
     }
 
     /// Get cycles for exception processing.

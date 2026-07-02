@@ -241,6 +241,11 @@ fn dispatch_group_f<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
         let w2 = cpu.read_imm_16(bus);
         let cond = (w2 & 0x3F) as u8;
         if ea_mode == 1 {
+            // FDBcc was dropped from 68060 silicon (68060SP emulates it).
+            if cpu.trap_unimpl_060() {
+                cpu.pc = cpu.pc.wrapping_add(2); // skip the displacement word
+                return cpu.take_fp_unimp_060(bus, 0);
+            }
             return cpu.exec_fdbcc(bus, ea_reg, cond);
         }
         if ea_mode == 7 && (2..=4).contains(&ea_reg) {
@@ -249,7 +254,16 @@ fn dispatch_group_f<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 3 => 2,
                 _ => 0,
             };
+            // FTRAPcc was dropped from 68060 silicon.
+            if cpu.trap_unimpl_060() {
+                cpu.pc = cpu.pc.wrapping_add(2 * imm_words);
+                return cpu.take_fp_unimp_060(bus, 0);
+            }
             return cpu.exec_ftrapcc(bus, cond, imm_words);
+        }
+        // FScc was dropped from 68060 silicon.
+        if cpu.trap_unimpl_060() {
+            return cpu.fpu_060_scc_trap(bus, ea_mode, ea_reg as usize);
         }
         return cpu.exec_fscc(bus, ea_mode, ea_reg, cond);
     }
@@ -346,7 +360,7 @@ fn dispatch_group_0<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
         }
         // CAS2 was dropped from 68060 silicon; trap before any extension
         // word is consumed so the 68060SP handler can re-decode it.
-        if cpu.trap_unimpl_int_060() {
+        if cpu.trap_unimpl_060() {
             return cpu.take_exception(bus, super::exceptions::vector::UNIMPLEMENTED_INTEGER);
         }
         return cpu.exec_cas2(bus, opcode);
@@ -421,7 +435,7 @@ fn dispatch_group_0<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             return illegal_instruction(cpu, bus);
         }
         // CHK2/CMP2 were dropped from 68060 silicon.
-        if cpu.trap_unimpl_int_060() {
+        if cpu.trap_unimpl_060() {
             return cpu.take_exception(bus, super::exceptions::vector::UNIMPLEMENTED_INTEGER);
         }
         return cpu.exec_cmp2_chk2(bus, opcode);
@@ -433,7 +447,7 @@ fn dispatch_group_0<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
     if (opcode & 0xF138) == 0x0108 {
         // MOVEP was dropped from 68060 silicon; trap before the displacement
         // word is consumed and before any register or memory access.
-        if cpu.trap_unimpl_int_060() {
+        if cpu.trap_unimpl_060() {
             return cpu.take_exception(bus, super::exceptions::vector::UNIMPLEMENTED_INTEGER);
         }
         let dreg = ((opcode >> 9) & 7) as usize;

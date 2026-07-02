@@ -1048,10 +1048,11 @@ impl CpuCore {
         )
     }
 
-    /// Whether an instruction the 68060 dropped from silicon must take the
-    /// unimplemented-integer trap (vector 61) rather than execute natively.
+    /// Whether an instruction the 68060 dropped from silicon must take its
+    /// unimplemented trap (vector 61 for integer, the FP-unimplemented
+    /// family for FPU ops) rather than execute natively.
     #[inline]
-    pub(crate) fn trap_unimpl_int_060(&self) -> bool {
+    pub(crate) fn trap_unimpl_060(&self) -> bool {
         self.cpu_type == CpuType::M68060 && !self.emulate_unimplemented_060
     }
 

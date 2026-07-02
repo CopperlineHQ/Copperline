@@ -54,7 +54,7 @@ impl CpuCore {
             }
             _ => (self.get_ea_address(bus, mode, size), None),
         };
-        if size != Size::Byte && (addr & 1) != 0 && self.trap_unimpl_int_060() {
+        if size != Size::Byte && (addr & 1) != 0 && self.trap_unimpl_060() {
             return self
                 .take_exception(bus, crate::core::exceptions::vector::UNIMPLEMENTED_INTEGER);
         }
