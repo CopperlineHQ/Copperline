@@ -60,7 +60,7 @@ Stops (each toggles: repeat the command to remove):
 | Command | Effect |
 |---|---|
 | `BREAK ADDR [COND] [IGN N]`, `B` | PC breakpoint, with the Break tab's condition grammar |
-| `WATCH ADDR`, `W` | Memory word watchpoint |
+| `WATCH ADDR [CPU\|BLITTER\|DISK]`, `W` | Memory word watchpoint; the optional filter stops only on that writer |
 | `RWATCH NAME\|OFF` | Custom-register write watch (`RWATCH DMACON`) |
 | `BTRAP V [H]` | Beam trap (decimal position) |
 | `CBREAK ADDR` | Copper breakpoint |
@@ -78,8 +78,27 @@ Inspection and modification:
 | `DIS [ADDR] [N]`, `D` | Disassemble (default: at the PC) |
 | `COPPER [PC\|ADDR] [N]` | Copper list around the live Copper PC |
 | `CUSTOM` | Key custom registers |
+| `BLITS` | Blits started in the traced frame (needs the Frame Analyzer open): control words, size, pointers, beam start/end |
 | `FIND HEXBYTES [START]` | Search CPU-visible memory |
 | `WRITER ADDR` | Last instruction that wrote ADDR (reverse history) |
+| `HISTORY [N]`, `H` | The most recent retired PCs, disassembled (recorded while a debug window is open) |
+| `STACK`, `BT` | Heuristic call-stack walk: stack longwords that look like return addresses after a JSR/BSR |
 | `POKE ADDR VAL` | Write a memory word |
 | `SETREG REG VAL` | Set a CPU register (`SETREG D0 1234`) |
 | `HELP`, `CLEAR`, `CLOSE` | Console housekeeping |
+
+AmigaOS introspection (read-only walks of exec's lists, safe at any
+time -- if the OS is not up yet the command says so instead of printing
+garbage):
+
+| Command | Effect |
+|---|---|
+| `TASKS` | The scheduled task (`>`), then the ready and waiting lists, with priority, state, and name |
+| `LIBS` | Opened libraries with versions (`graphics.library v40.10`) |
+| `DEVS` | Devices with versions |
+| `RESOURCES`, `PORTS` | The resource and message-port lists |
+| `CATCHTASK NAME` | Stop when exec schedules a task whose name contains NAME (case-insensitive); `CATCHTASK` alone clears it |
+
+`CATCHTASK` is the tool for "wake me when my process actually runs": it
+baselines on the currently scheduled task and fires on the next
+reschedule to a matching one, reporting the task's name and address.

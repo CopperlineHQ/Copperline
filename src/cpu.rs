@@ -47,6 +47,9 @@ fn sync_cck_enabled_setting() -> bool {
     }
 }
 
+/// Entries kept in the debugger's recent-PC ring.
+pub const UI_PC_HISTORY_CAP: usize = 64;
+
 pub struct M68kMachine {
     cpu: CpuCore,
     bus: CpuBus,
@@ -78,6 +81,15 @@ pub struct M68kMachine {
     // window polls and surfaces (pause + reopen the debugger).
     ui_breaks: crate::debugger::InteractiveBreaks,
     ui_stop: Option<crate::debugger::DebugStop>,
+    /// ThisTask pointer at the last armed task-catch check, so only a
+    /// reschedule (a change) can fire the catch. Debug-only state.
+    ui_last_this_task: Option<u32>,
+    /// Recent retired-instruction PCs, a debugger-only ring recorded
+    /// while a debug window is open ("how did I get here").
+    ui_pc_history: [u32; UI_PC_HISTORY_CAP],
+    ui_pc_history_next: usize,
+    ui_pc_history_len: usize,
+    ui_pc_history_enabled: bool,
     // COPPERLINE_DBG_SPREN: previous DMACON, to detect the instruction that
     // clears the sprite-DMA-enable bit.
     dbg_prev_dmacon: u16,
@@ -236,6 +248,11 @@ impl M68kMachine {
             dbg: crate::debugger::Debugger::from_env(),
             ui_breaks: crate::debugger::InteractiveBreaks::default(),
             ui_stop: None,
+            ui_last_this_task: None,
+            ui_pc_history: [0; UI_PC_HISTORY_CAP],
+            ui_pc_history_next: 0,
+            ui_pc_history_len: 0,
+            ui_pc_history_enabled: false,
             dbg_prev_dmacon: 0,
             dbg_prev_fc: 0,
             dbg_fc_count: 0,
@@ -954,6 +971,7 @@ impl M68kMachine {
         let mut bus: Bus = deserialize_component(r, "bus")?;
 
         bus.adopt_host_resources(&mut self.bus.bus);
+        bus.adopt_ui_debug_state(&self.bus.bus);
         bus.reset_transient_video_after_state_load();
         // The CPU model travels with the state (cpu_type, timing tables, and
         // address_mask all live in CpuCore); keep the bus adapter's mask copy
@@ -984,6 +1002,14 @@ impl M68kMachine {
             self.last_cacr = !self.cpu.cacr;
             self.apply_cacr_updates();
         }
+        // Re-baseline the interactive stop conditions on the restored
+        // timeline: watch compare values and the scheduled-task pointer
+        // describe state, so carrying pre-restore baselines over would
+        // fire phantom hits on the first step after a restore.
+        self.ui_rebaseline_watches();
+        self.ui_last_this_task = self.ui_peek_this_task();
+        let addrs: Vec<u32> = self.ui_breaks.watches.iter().map(|w| w.addr).collect();
+        self.bus.bus.set_ui_mem_watches(&addrs);
         Ok(())
     }
 
@@ -1075,6 +1101,37 @@ impl M68kMachine {
     }
 
     /// The debugger window's breakpoint/watchpoint set (read-only view).
+    /// Enable/disable the recent-PC ring (cleared on enable). Recording
+    /// costs one array write per retired instruction, so it only runs
+    /// while a debug window has it on.
+    pub fn ui_set_pc_history_enabled(&mut self, enabled: bool) {
+        if enabled && !self.ui_pc_history_enabled {
+            self.ui_pc_history_len = 0;
+            self.ui_pc_history_next = 0;
+        }
+        self.ui_pc_history_enabled = enabled;
+    }
+
+    /// The recent-PC ring, oldest first.
+    pub fn ui_pc_history(&self) -> Vec<u32> {
+        let mut out = Vec::with_capacity(self.ui_pc_history_len);
+        let start = (self.ui_pc_history_next + UI_PC_HISTORY_CAP - self.ui_pc_history_len)
+            % UI_PC_HISTORY_CAP;
+        for i in 0..self.ui_pc_history_len {
+            out.push(self.ui_pc_history[(start + i) % UI_PC_HISTORY_CAP]);
+        }
+        out
+    }
+
+    /// Reset every word watchpoint's compare value to the live memory
+    /// contents (used after timeline jumps).
+    pub fn ui_rebaseline_watches(&mut self) {
+        for i in 0..self.ui_breaks.watches.len() {
+            let addr = self.ui_breaks.watches[i].addr;
+            self.ui_breaks.watches[i].last = self.bus.bus.peek_word_any(addr);
+        }
+    }
+
     pub fn ui_breaks(&self) -> &crate::debugger::InteractiveBreaks {
         &self.ui_breaks
     }
@@ -1104,9 +1161,23 @@ impl M68kMachine {
     /// Toggle a word watchpoint at `addr` (word-aligned), baselining it on
     /// the current memory contents. Returns true when now set.
     pub fn ui_toggle_watch(&mut self, addr: u32) -> bool {
+        self.ui_toggle_watch_filtered(addr, None)
+    }
+
+    /// Like [`Self::ui_toggle_watch`], stopping only on writes from
+    /// `filter`'s source when set. The watched addresses are mirrored
+    /// into the bus (and its DMA engines) for writer attribution.
+    pub fn ui_toggle_watch_filtered(
+        &mut self,
+        addr: u32,
+        filter: Option<crate::debugger::WatchSource>,
+    ) -> bool {
         let addr = addr & crate::debugger::UI_ADDR_MASK & !1;
         let current = self.bus.bus.peek_word_any(addr);
-        self.ui_breaks.toggle_watch(addr, current)
+        let added = self.ui_breaks.toggle_watch(addr, current, filter);
+        let addrs: Vec<u32> = self.ui_breaks.watches.iter().map(|w| w.addr).collect();
+        self.bus.bus.set_ui_mem_watches(&addrs);
+        added
     }
 
     /// Toggle a custom chipset register write watch (a word offset into
@@ -1117,6 +1188,84 @@ impl M68kMachine {
         let added = self.ui_breaks.toggle_reg_watch(off);
         self.bus.bus.set_ui_reg_watches(&self.ui_breaks.reg_watches);
         added
+    }
+
+    /// Arm or clear the scheduled-task catch: stop when exec's ThisTask
+    /// changes to a task whose name contains `target` (matched
+    /// case-insensitively). Arming baselines on the currently scheduled
+    /// task so the catch fires on the next reschedule, not instantly.
+    pub fn ui_set_task_catch(&mut self, target: Option<String>) {
+        self.ui_last_this_task = self.ui_peek_this_task();
+        self.ui_breaks
+            .set_task_catch(target.map(|t| t.to_ascii_uppercase()));
+    }
+
+    /// ExecBase->ThisTask via side-effect-free peeks, when plausible.
+    fn ui_peek_this_task(&self) -> Option<u32> {
+        let peek32 = |addr: u32| {
+            (u32::from(self.bus.bus.peek_word_any(addr)) << 16)
+                | u32::from(self.bus.bus.peek_word_any(addr.wrapping_add(2)))
+        };
+        let execbase = peek32(4);
+        if execbase == 0 || execbase & 1 != 0 || execbase >= 0x0100_0000 {
+            return None;
+        }
+        let task = peek32(execbase.wrapping_add(0x114));
+        (task != 0 && task & 1 == 0 && task < 0x0100_0000).then_some(task)
+    }
+
+    /// The name a task node points at, uppercased for matching.
+    fn ui_task_name(&self, task: u32) -> String {
+        let peek32 = |addr: u32| {
+            (u32::from(self.bus.bus.peek_word_any(addr)) << 16)
+                | u32::from(self.bus.bus.peek_word_any(addr.wrapping_add(2)))
+        };
+        let name_ptr = peek32(task.wrapping_add(10));
+        if name_ptr == 0 || name_ptr >= 0x0100_0000 {
+            return String::new();
+        }
+        let mut name = String::new();
+        for i in 0..30u32 {
+            let addr = name_ptr.wrapping_add(i);
+            let word = self.bus.bus.peek_word_any(addr & !1);
+            let byte = if addr & 1 == 0 {
+                (word >> 8) as u8
+            } else {
+                word as u8
+            };
+            if byte == 0 {
+                break;
+            }
+            name.push(if (0x20..0x7F).contains(&byte) {
+                byte as char
+            } else {
+                '.'
+            });
+        }
+        name
+    }
+
+    /// Fire the task catch when exec reschedules to a matching task.
+    fn ui_check_task_catch(&mut self) {
+        if self.ui_breaks.task_catch.is_none() {
+            return;
+        }
+        let Some(task) = self.ui_peek_this_task() else {
+            return;
+        };
+        if self.ui_last_this_task == Some(task) {
+            return;
+        }
+        self.ui_last_this_task = Some(task);
+        let name = self.ui_task_name(task);
+        let matched = self
+            .ui_breaks
+            .task_catch
+            .as_deref()
+            .is_some_and(|target| name.to_ascii_uppercase().contains(target));
+        if matched {
+            self.ui_stop = Some(crate::debugger::DebugStop::Task { name, addr: task });
+        }
     }
 
     /// Toggle an exception catchpoint (stop when the CPU enters the
@@ -1133,6 +1282,7 @@ impl M68kMachine {
     pub fn ui_breaks_clear(&mut self) {
         self.ui_breaks.clear();
         self.bus.bus.set_ui_reg_watches(&[]);
+        self.bus.bus.set_ui_mem_watches(&[]);
         self.bus.bus.ui_clear_beam_traps();
         self.bus.bus.ui_clear_copper_breaks();
         self.ui_stop = None;
@@ -1204,24 +1354,50 @@ impl M68kMachine {
             self.ui_stop = Some(DebugStop::Breakpoint { pc });
             return;
         }
+        self.ui_check_task_catch();
+        if self.ui_stop.is_some() {
+            return;
+        }
         self.ui_promote_reg_hit();
         if self.ui_stop.is_some() {
             return;
         }
         let writer_pc = self.cpu.ppc & crate::debugger::UI_ADDR_MASK;
-        for watch in &mut self.ui_breaks.watches {
-            let new = self.bus.bus.peek_word_any(watch.addr);
-            if new != watch.last {
-                let old = watch.last;
-                watch.last = new;
-                self.ui_stop = Some(DebugStop::Watch {
-                    addr: watch.addr,
-                    old,
-                    new,
-                    writer_pc,
-                });
-                return;
+        for i in 0..self.ui_breaks.watches.len() {
+            let addr = self.ui_breaks.watches[i].addr;
+            let new = self.bus.bus.peek_word_any(addr);
+            if new == self.ui_breaks.watches[i].last {
+                continue;
             }
+            let old = self.ui_breaks.watches[i].last;
+            self.ui_breaks.watches[i].last = new;
+            // Attribute the change: a DMA engine that flagged a write to
+            // this word wins over the default CPU story.
+            let writer = self.bus.bus.ui_take_mem_writer(addr);
+            let (source, vpos, hpos) = match writer {
+                Some(w) => (w.source, w.vpos, w.hpos),
+                None => (
+                    crate::debugger::WatchSource::Cpu,
+                    self.bus.bus.agnus.vpos.min(u32::from(u16::MAX)) as u16,
+                    self.bus.bus.agnus.hpos.min(u32::from(u16::MAX)) as u16,
+                ),
+            };
+            if let Some(filter) = self.ui_breaks.watches[i].filter {
+                if filter != source {
+                    // Filtered out: the baseline moved on, no stop.
+                    continue;
+                }
+            }
+            self.ui_stop = Some(DebugStop::Watch {
+                addr,
+                old,
+                new,
+                writer_pc,
+                source,
+                vpos,
+                hpos,
+            });
+            return;
         }
     }
 
@@ -1317,6 +1493,13 @@ impl M68kMachine {
                         self.debug_check_spren_clear();
                         self.debug_check_frame_counter();
                         self.debug_check_memw();
+                        if self.ui_pc_history_enabled {
+                            self.ui_pc_history[self.ui_pc_history_next] = dbg_pc_before;
+                            self.ui_pc_history_next =
+                                (self.ui_pc_history_next + 1) % UI_PC_HISTORY_CAP;
+                            self.ui_pc_history_len =
+                                (self.ui_pc_history_len + 1).min(UI_PC_HISTORY_CAP);
+                        }
                         self.debug_check_ipl(dbg_ipl_before, positive_cpu_cycles(cycles));
                         if self.ui_breaks.armed() {
                             self.ui_check_breaks_after_step();
@@ -1953,6 +2136,7 @@ impl CpuBus {
                 self.bus
                     .grant_cpu_bus_access_at(Some(addr), size, CpuBusAccessKind::Write);
                 self.bus.record_cpu_chip_ram_write(off, size, value);
+                self.bus.ui_note_cpu_ram_write(addr, size);
                 write_be(&mut self.bus.mem.chip_ram, off, size, value);
                 self.dbg_note_memw(addr, size);
                 return;
@@ -1968,6 +2152,7 @@ impl CpuBus {
                 // than running at uncontended external-memory speed.
                 self.bus
                     .grant_cpu_bus_access_at(Some(addr), size, CpuBusAccessKind::Write);
+                self.bus.ui_note_cpu_ram_write(addr, size);
                 write_be(&mut self.bus.mem.slow_ram, off, size, value);
                 self.dbg_note_memw(addr, size);
                 return;

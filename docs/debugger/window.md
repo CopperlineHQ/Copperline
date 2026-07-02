@@ -26,8 +26,10 @@ The CPU tab: register file, live disassembly, and the transport controls.
 ## Tabs
 
 **CPU** shows the PC and SR (with decoded supervisor/IPL/CCR flags), the
-D0-D7/A0-A7 register file, and a live 68000 disassembly that follows the
-PC, with the current instruction highlighted. Type a hex address in the
+D0-D7/A0-A7 register file, a `recent` line with the last few retired PCs
+(the console's `HISTORY` command shows the full ring, disassembled), and
+a live 68000 disassembly that follows the PC, with the current
+instruction highlighted. Type a hex address in the
 `$` box and press Enter to *pin* the disassembly elsewhere; empty the box
 and press Enter to follow the PC again.
 
@@ -123,6 +125,16 @@ PageUp/PageDown by whole pages. Four buttons sit above the dump:
   tab to eyeball graphics data directly -- misaligned strides show as
   the familiar diagonal shear.
 
+**IO Map** is a browsable map of the whole custom bank ($DFF000-$DFF1FE):
+every word offset with its hardware name and live value (write-only
+registers show their last-written latch, `----` marks offsets with no
+latch at all). Arrows and the mouse wheel move the selection, PageUp/Down
+change page, and the `$` box jumps to an offset (`96`) or address
+(`DFF096`). The pane below decodes the selected register's bits by name
+-- DMACON's enables, INTENA/INTREQ sources, BPLCON0's mode flags and
+plane count, ADKCON, CLXCON, BEAMCON0, FMODE, and the playfield
+scroll/priority fields.
+
 **Break** manages breakpoints and watchpoints (next section) and shows the
 reason for the last stop.
 
@@ -141,8 +153,14 @@ On the Break tab, type an address into the `$` box and toggle any of:
 - **Break** -- a PC breakpoint. The machine stops *before* the instruction
   at that address executes.
 - **Watch** -- a memory word watchpoint. The machine stops when the word
-  changes, whichever bus master wrote it (CPU, Copper, or blitter); the
-  current value is shown live in the list.
+  changes, whichever bus master wrote it, and the stop names the true
+  writer: CPU stops report the writing instruction's PC, while blitter
+  and disk-DMA writes are flagged at their write sites and report the
+  source with the beam position (`Watch $060000: 0000->BEEF (blitter
+  write, v44 h100)`). The console's `WATCH ADDR CPU|BLITTER|DISK` form
+  additionally filters a watch to one writer -- "stop only when the
+  blitter touches this" -- with other writers just moving the baseline.
+  The current value is shown live in the list.
 - **Reg** -- a chipset-register write watch. `96` and `DFF096` both mean
   DMACON. The machine stops on *every* write, CPU or Copper, and reports
   the writer and beam position.
@@ -278,6 +296,13 @@ The pane has the same transport rhythm as the debugger:
 Opening the pane starts a partial trace immediately; pressing **Frame**
 captures a clean full frame. Closing it restores the run/pause state selected
 inside the pane and disables the tracing hot path.
+
+While the analyzer is open, every blit started in the traced frame is
+recorded (control words, size, channel pointers, and the beam positions
+where it started and finished). The console's `BLITS` command lists them,
+and selecting a slot inside a blit's beam span names it on the
+selected-slot line -- click the brown blitter run that is eating your
+frame and see which blit it is.
 
 Click a slot (or nudge the selection with the cursor keys) and press
 **To slot** to run the machine until the beam reaches exactly that colour

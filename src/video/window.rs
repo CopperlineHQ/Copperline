@@ -2503,7 +2503,15 @@ impl App {
                 // scrollback: one display row per wheel notch, a chunk for
                 // pixel-precise trackpads.
                 if kind == ToolPanelKind::Debugger {
-                    self.debugger_mem_scroll(rows);
+                    if self
+                        .debugger_panel
+                        .as_ref()
+                        .is_some_and(|panel| panel.tab == ui::DebugTab::IoMap)
+                    {
+                        self.debugger_iomap_move(rows);
+                    } else {
+                        self.debugger_mem_scroll(rows);
+                    }
                 } else if kind == ToolPanelKind::Console {
                     if let Some(panel) = self.console_panel.as_mut() {
                         panel.scroll = panel
@@ -3014,6 +3022,12 @@ impl App {
                                 panel.mem_addr = addr & !0xF;
                             }
                         }
+                        // The IO Map takes an offset (96) or address (DFF096).
+                        ui::DebugTab::IoMap => {
+                            if let Some(addr) = panel.entry_addr() {
+                                panel.iomap_sel = (addr as u16) & 0x1FE;
+                            }
+                        }
                         // On the CPU tab, Enter pins the disassembly to
                         // the typed address; an empty box follows the PC again.
                         ui::DebugTab::Cpu => panel.disasm_addr = panel.entry_addr(),
@@ -3061,7 +3075,38 @@ impl App {
                 return true;
             }
         }
+        // IO Map tab: arrows move the register selection (left/right by
+        // a display column), PageUp/Down by a page.
+        if self
+            .debugger_panel
+            .as_ref()
+            .is_some_and(|panel| panel.tab == ui::DebugTab::IoMap)
+        {
+            let delta = match code {
+                KeyCode::ArrowUp => Some(-1i32),
+                KeyCode::ArrowDown => Some(1),
+                KeyCode::ArrowLeft => Some(-26),
+                KeyCode::ArrowRight => Some(26),
+                KeyCode::PageUp => Some(-78),
+                KeyCode::PageDown => Some(78),
+                _ => None,
+            };
+            if let Some(delta) = delta {
+                self.debugger_iomap_move(delta);
+                return true;
+            }
+        }
         false
+    }
+
+    /// Move the IO Map selection by `delta` registers, clamped to the
+    /// custom bank.
+    fn debugger_iomap_move(&mut self, delta: i32) {
+        if let Some(panel) = self.debugger_panel.as_mut() {
+            let idx = i32::from(panel.iomap_sel >> 1) + delta;
+            panel.iomap_sel = (idx.clamp(0, 255) as u16) << 1;
+            self.request_redraw();
+        }
     }
 
     fn ui_handle_frame_analyzer_key(&mut self, code: KeyCode) -> bool {
@@ -3156,6 +3201,7 @@ impl App {
             // neighbourhood; it is usually what you came to look at.
             panel.mem_addr = self.emu.machine.pc() & 0x00FF_FFF0;
             self.debugger_panel = Some(panel);
+            self.emu.machine.ui_set_pc_history_enabled(true);
             // Arm reverse debugging so the < Step / < Run controls work. A
             // conservative interval keeps the per-snapshot serialize off the
             // critical path; captures only accrue while the machine advances
@@ -3191,6 +3237,7 @@ impl App {
             let mut panel = ui::ConsolePanel::default();
             panel.push_output("Copperline debugger console. Type HELP for commands.");
             self.console_panel = Some(panel);
+            self.emu.machine.ui_set_pc_history_enabled(true);
             // Arm reverse debugging so the reverse commands work, exactly
             // like opening the debugger window does.
             if !self.emu.time_travel_enabled() {
@@ -3723,6 +3770,9 @@ impl App {
                 self.analyzer_underlay_frame = None;
                 self.analyzer_underlay_input = None;
             }
+        }
+        if self.debugger_panel.is_none() && self.console_panel.is_none() {
+            self.emu.machine.ui_set_pc_history_enabled(false);
         }
         self.resize_for_active_panel();
         self.request_redraw();
@@ -4367,10 +4417,16 @@ impl App {
         self.sync_live_audio_suspension();
         self.last_debug_stop = None;
         match self.emu.tt_reverse_continue() {
-            Ok(ReverseOutcome::Found(_)) => {
-                self.surface_debug_stop();
+            Ok(ReverseOutcome::Found((_, reason))) => {
+                let message = format!("Reverse: {reason}");
+                info!("debugger stop: {message}");
+                self.last_debug_stop = Some(message.clone());
+                self.show_osd(message);
+                if let Some(panel) = self.debugger_panel.as_mut() {
+                    panel.tab = ui::DebugTab::Break;
+                }
             }
-            Ok(ReverseOutcome::NotFound) => self.show_osd("Reverse run: no earlier breakpoint hit"),
+            Ok(ReverseOutcome::NotFound) => self.show_osd("Reverse run: no earlier stop hit"),
             Ok(ReverseOutcome::BeyondHistory) => {
                 self.show_osd("Reverse run: beyond recorded history")
             }
@@ -4814,6 +4870,20 @@ impl App {
             (None, None)
         };
         let ddf_cck = diw_programmed.then_some((base.ddfstrt & 0x00FE, base.ddfstop & 0x00FE));
+        // Annotate the selected slot with the blit whose beam span
+        // contains it, so clicking a blitter run names the blit.
+        let selected_beam = (selected_vpos as u16, selected_hpos as u16);
+        let selected_blit = trace.blits.iter().enumerate().find_map(|(i, blit)| {
+            let end = blit.end?;
+            (blit.start <= selected_beam && selected_beam <= end).then(|| {
+                format!(
+                    "in blit #{i} ({}x{} D ${:06X})",
+                    blit.width_words,
+                    blit.height,
+                    blit.dpt & 0x00FF_FFFF
+                )
+            })
+        });
         ui::FrameAnalyzerView {
             running: !self.paused,
             status,
@@ -4839,6 +4909,7 @@ impl App {
                 selected_owner_code,
                 owners,
                 markers,
+                selected_blit,
                 diw_v,
                 diw_h_cck,
                 ddf_cck,
@@ -4901,6 +4972,21 @@ impl App {
                     }
                 }
                 lines.push(ui::DbgLine::plain(""));
+                // "How did I get here": the most recent retired PCs
+                // (oldest first; the console's HISTORY command shows the
+                // full ring with disassembly).
+                let history = machine.ui_pc_history();
+                if !history.is_empty() {
+                    let recent: Vec<String> = history
+                        .iter()
+                        .rev()
+                        .take(8)
+                        .rev()
+                        .map(|pc| format!("{pc:06X}"))
+                        .collect();
+                    lines.push(ui::DbgLine::plain(format!("recent {}", recent.join(" "))));
+                    lines.push(ui::DbgLine::plain(""));
+                }
                 if let Some(origin) = panel.disasm_addr {
                     lines.push(ui::DbgLine::plain(format!(
                         "Disassembly pinned at ${origin:06X} (empty box + Enter follows PC)"
@@ -5280,6 +5366,65 @@ impl App {
                     }
                 }
             }
+            ui::DebugTab::IoMap => {
+                const ROWS: usize = 26;
+                const COLS: usize = 3;
+                const PER_PAGE: usize = ROWS * COLS;
+                let sel = usize::from(panel.iomap_sel & 0x1FE) / 2;
+                let page = sel / PER_PAGE;
+                lines.push(ui::DbgLine::plain(format!(
+                    "custom registers $DFF000-$DFF1FE  (page {}/{}; arrows/wheel move, $ box jumps)",
+                    page + 1,
+                    256usize.div_ceil(PER_PAGE)
+                )));
+                lines.push(ui::DbgLine::plain(""));
+                for row in 0..ROWS {
+                    let mut text = String::new();
+                    let mut row_has_sel = false;
+                    for col in 0..COLS {
+                        let idx = page * PER_PAGE + col * ROWS + row;
+                        if idx >= 256 {
+                            continue;
+                        }
+                        let off = (idx * 2) as u16;
+                        let value = bus
+                            .debug_custom_word(off)
+                            .map(|v| format!("{v:04X}"))
+                            .unwrap_or_else(|| "----".to_string());
+                        let cursor = if idx == sel {
+                            row_has_sel = true;
+                            '>'
+                        } else {
+                            ' '
+                        };
+                        text.push_str(&format!(
+                            "{cursor}{off:03X} {:<8} {value}   ",
+                            crate::debugger::custom_reg_name(off)
+                        ));
+                    }
+                    let text = text.trim_end().to_string();
+                    lines.push(if row_has_sel {
+                        ui::DbgLine::hilit(text)
+                    } else {
+                        ui::DbgLine::plain(text)
+                    });
+                }
+                lines.push(ui::DbgLine::plain(""));
+                let off = panel.iomap_sel & 0x1FE;
+                let value = bus.debug_custom_word(off);
+                lines.push(ui::DbgLine::hilit(format!(
+                    "${off:03X} {} = {}",
+                    crate::debugger::custom_reg_name(off),
+                    value
+                        .map(|v| format!("${v:04X}"))
+                        .unwrap_or_else(|| "(no latch)".to_string())
+                )));
+                if let Some(value) = value {
+                    for line in crate::debugger::custom_reg_bit_decode(off, value) {
+                        lines.push(ui::DbgLine::plain(format!("  {line}")));
+                    }
+                }
+            }
             ui::DebugTab::Break => {
                 // Leave room for the toggle buttons drawn at the top of
                 // the content area.
@@ -5331,9 +5476,13 @@ impl App {
                 }
                 for watch in &breaks.watches {
                     lines.push(ui::DbgLine::plain(format!(
-                        "  ${:06X}  now {:04X}",
+                        "  ${:06X}  now {:04X}{}",
                         watch.addr,
-                        bus.peek_word_any(watch.addr)
+                        bus.peek_word_any(watch.addr),
+                        watch
+                            .filter
+                            .map(|f| format!("  [{} only]", f.label()))
+                            .unwrap_or_default()
                     )));
                 }
                 lines.push(ui::DbgLine::plain(""));

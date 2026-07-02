@@ -2111,6 +2111,18 @@ fn debugger_views_reflect_machine_state() {
                 assert_eq!(video.plane_mask, 0xFF);
                 assert_eq!(video.sprite_mask, 0xFF);
             }
+            super::ui::DebugTab::IoMap => {
+                // The register grid names DMACON with a live value and
+                // the selection pane decodes it.
+                assert!(
+                    view.lines.iter().any(|l| l.text.contains("DMACON")),
+                    "IO map missing DMACON"
+                );
+                assert!(view
+                    .lines
+                    .iter()
+                    .any(|l| l.highlight && l.text.starts_with("$096")));
+            }
             super::ui::DebugTab::Break => {
                 assert!(view.lines.iter().any(|l| l.text == "Breakpoints:"));
                 assert!(view.lines.iter().any(|l| l.text == "  (none)"));
@@ -2523,6 +2535,210 @@ fn console_text_insertion_and_multiline_paste() {
     // Control characters never reach the prompt.
     app.console_insert_text("\u{16}\u{7f}");
     assert_eq!(app.console_panel.as_ref().unwrap().input, "m 0");
+}
+
+/// Lay a minimal exec world into chip RAM: ExecBase with a valid
+/// ChkBase, a scheduled task, one ready task, and one library.
+fn plant_exec_world(app: &mut super::App) {
+    let bus = app.emu.bus_mut();
+    bus.mem.overlay = false;
+    let put32 = |ram: &mut [u8], addr: usize, v: u32| {
+        ram[addr..addr + 4].copy_from_slice(&v.to_be_bytes());
+    };
+    let put_str = |ram: &mut [u8], addr: usize, s: &str| {
+        ram[addr..addr + s.len()].copy_from_slice(s.as_bytes());
+        ram[addr + s.len()] = 0;
+    };
+    let ram = &mut bus.mem.chip_ram;
+    let base = 0x1000usize;
+    put32(ram, 4, base as u32);
+    put32(ram, base + 0x26, !(base as u32)); // ChkBase complement
+                                             // ThisTask -> task at $2000 named "boot.task", state run.
+    put32(ram, base + 0x114, 0x2000);
+    put32(ram, 0x2000 + 10, 0x3000);
+    put_str(ram, 0x3000, "boot.task");
+    ram[0x2000 + 9] = 10; // pri
+    ram[0x2000 + 15] = 2; // run
+                          // TaskReady: one task named "helper" (list head at base+0x196).
+    put32(ram, base + 0x196, 0x2100);
+    put32(ram, 0x2100, (base + 0x196 + 4) as u32); // succ -> lh_Tail
+    put32(ram, base + 0x196 + 4, 0);
+    put32(ram, 0x2100 + 10, 0x3100);
+    put_str(ram, 0x3100, "helper");
+    ram[0x2100 + 15] = 3; // ready
+                          // LibList: one library "exec.library" v40.10.
+    put32(ram, base + 0x17A, 0x2200);
+    put32(ram, 0x2200, (base + 0x17A + 4) as u32);
+    put32(ram, base + 0x17A + 4, 0);
+    put32(ram, 0x2200 + 10, 0x3200);
+    put_str(ram, 0x3200, "exec.library");
+    put32(ram, 0x2200 + 20, 0x0028_000A); // v40 r10
+}
+
+#[test]
+fn console_os_introspection_and_task_catch() {
+    let mut app = test_app();
+    app.open_console();
+    plant_exec_world(&mut app);
+
+    let out = console_run(&mut app, "TASKS");
+    assert!(
+        out.iter()
+            .any(|l| l.starts_with('>') && l.contains("boot.task")),
+        "{out:?}"
+    );
+    assert!(
+        out.iter()
+            .any(|l| l.contains("ready") && l.contains("helper")),
+        "{out:?}"
+    );
+    let out = console_run(&mut app, "LIBS");
+    assert!(
+        out.iter()
+            .any(|l| l.contains("v40.10") && l.contains("exec.library")),
+        "{out:?}"
+    );
+    // An empty exec list reads as empty, not garbage.
+    let out = console_run(&mut app, "PORTS");
+    assert!(out.iter().any(|l| l.contains("empty")), "{out:?}");
+
+    // Arm the task catch, then reschedule to a matching task: the stop
+    // fires with the task's name on the next executed instruction.
+    console_run(&mut app, "CATCHTASK HELPER");
+    {
+        let bus = app.emu.bus_mut();
+        let addr = 0x1000 + 0x114;
+        bus.mem.chip_ram[addr..addr + 4].copy_from_slice(&0x2100u32.to_be_bytes());
+    }
+    let out = console_run(&mut app, "S 1");
+    assert!(
+        out.iter().any(|l| l.contains("Task scheduled: helper")),
+        "{out:?}"
+    );
+    // Clearing disarms it.
+    console_run(&mut app, "CATCHTASK");
+    assert!(app.emu.machine.ui_breaks().task_catch.is_none());
+}
+
+#[test]
+fn iomap_tab_navigation_and_jump() {
+    let mut app = test_app();
+    app.open_debugger();
+    if let Some(panel) = app.debugger_panel.as_mut() {
+        panel.tab = super::ui::DebugTab::IoMap;
+    }
+    assert_eq!(app.debugger_panel.as_ref().unwrap().iomap_sel, 0x096);
+    app.debugger_iomap_move(1);
+    assert_eq!(app.debugger_panel.as_ref().unwrap().iomap_sel, 0x098);
+    app.debugger_iomap_move(-300); // clamps at the bank start
+    assert_eq!(app.debugger_panel.as_ref().unwrap().iomap_sel, 0x000);
+
+    // The $ box jumps by offset or full address.
+    if let Some(panel) = app.debugger_panel.as_mut() {
+        panel.entry = "DFF180".to_string();
+        panel.entry_active = true;
+    }
+    assert!(app.ui_handle_tool_key(ToolPanelKind::Debugger, KeyCode::Enter));
+    assert_eq!(app.debugger_panel.as_ref().unwrap().iomap_sel, 0x180);
+
+    let panel = app.debugger_panel.clone().unwrap();
+    let view = app.build_debugger_view(&panel);
+    assert!(view
+        .lines
+        .iter()
+        .any(|l| l.highlight && l.text.starts_with("$180 COLOR00")));
+}
+
+#[test]
+fn console_blits_lists_frame_blit_records() {
+    let mut app = test_app();
+    app.open_console();
+    app.open_frame_analyzer(); // arms the frame trace
+
+    // Run a 2x2 D-only blit with blitter DMA enabled, then finish the
+    // frame so the trace (with its blit record) becomes current.
+    {
+        let bus = app.emu.bus_mut();
+        bus.mem.overlay = false;
+        bus.custom_write(0x096, 2, 0x8240); // DMACON SET DMAEN|BLTEN
+        bus.custom_write(0x040, 2, 0x01F0); // BLTCON0: USED, LF=$F0
+        bus.custom_write(0x042, 2, 0x0000);
+        bus.custom_write(0x044, 2, 0xFFFF);
+        bus.custom_write(0x046, 2, 0xFFFF);
+        bus.custom_write(0x074, 2, 0xBEEF); // BLTADAT
+        bus.custom_write(0x066, 2, 0x0000); // BLTDMOD
+        bus.custom_write(0x054, 4, 0x0006_0000); // BLTDPT
+        bus.custom_write(0x058, 2, 0x0082); // BLTSIZE: 2 rows x 2 words
+    }
+    app.frame_analyzer_step_frame();
+
+    let out = console_run(&mut app, "BLITS");
+    assert!(out[0].contains("blit(s) in frame"), "{out:?}");
+    assert!(
+        out.iter()
+            .any(|l| l.contains("2x2") && l.contains("con0 01F0")),
+        "{out:?}"
+    );
+    assert!(out.iter().any(|l| l.contains("D $060000")), "{out:?}");
+    // The record completed within the frame.
+    assert!(
+        out.iter()
+            .any(|l| l.contains("->") && !l.contains("running")),
+        "{out:?}"
+    );
+
+    // Selecting a slot inside the blit's beam span annotates it.
+    let trace_blit = app
+        .emu
+        .bus()
+        .frame_bus_trace()
+        .and_then(|t| t.blits.first().cloned())
+        .expect("a recorded blit");
+    if let Some(panel) = app.frame_analyzer_panel.as_mut() {
+        panel.selected_vpos = trace_blit.start.0;
+        panel.selected_hpos = trace_blit.start.1;
+    }
+    let panel = app.frame_analyzer_panel.clone().unwrap();
+    let view = app.build_frame_analyzer_view(&panel);
+    let annotated = view.trace.unwrap().selected_blit.expect("blit annotation");
+    assert!(annotated.contains("in blit #0"), "{annotated}");
+}
+
+#[test]
+fn console_history_and_stack_walk() {
+    let mut app = test_app();
+    app.open_console();
+
+    // Stepping with a debug window open records the retired PCs.
+    let pc0 = app.emu.machine.pc();
+    console_run(&mut app, "S 3");
+    let out = console_run(&mut app, "HISTORY 4");
+    assert!(
+        out.iter()
+            .any(|l| l.contains(&format!("{pc0:06X}")) && l.contains("NOP")),
+        "{out:?}"
+    );
+    // The CPU tab mirrors a compact trail.
+    app.open_debugger();
+    let panel = app.debugger_panel.clone().unwrap();
+    let view = app.build_debugger_view(&panel);
+    assert!(
+        view.lines.iter().any(|l| l.text.starts_with("recent ")),
+        "recent-PC line missing"
+    );
+
+    // Stack walk: plant a BSR.S and a stack slot holding its return
+    // address, then point A7 at it.
+    {
+        let bus = app.emu.bus_mut();
+        bus.mem.overlay = false;
+        bus.mem.chip_ram[0x8000..0x8002].copy_from_slice(&0x6104u16.to_be_bytes());
+        bus.mem.chip_ram[0x9000..0x9004].copy_from_slice(&0x0000_8002u32.to_be_bytes());
+    }
+    console_run(&mut app, "SETREG A7 9000");
+    let out = console_run(&mut app, "STACK");
+    assert!(out[0].starts_with("#0 pc $"), "{out:?}");
+    assert!(out.iter().any(|l| l.contains("#1 ret $008002")), "{out:?}");
 }
 
 #[test]

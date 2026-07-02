@@ -71,6 +71,40 @@ pub const UI_ADDR_MASK: u32 = 0x00FF_FFFF;
 pub struct UiWatch {
     pub addr: u32,
     pub last: u16,
+    /// Only stop when the change was made by this writer; None = any.
+    pub filter: Option<WatchSource>,
+}
+
+/// Who wrote a watched memory word: attributed at the write site (the
+/// CPU write path, the blitter's D/line/fill writes, disk read DMA).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WatchSource {
+    Cpu,
+    Blitter,
+    Disk,
+}
+
+impl WatchSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            WatchSource::Cpu => "cpu",
+            WatchSource::Blitter => "blitter",
+            WatchSource::Disk => "disk",
+        }
+    }
+
+    /// Parse a console filter token (case-insensitive).
+    pub fn parse(token: &str) -> Option<Self> {
+        if token.eq_ignore_ascii_case("cpu") {
+            Some(WatchSource::Cpu)
+        } else if token.eq_ignore_ascii_case("blitter") {
+            Some(WatchSource::Blitter)
+        } else if token.eq_ignore_ascii_case("disk") {
+            Some(WatchSource::Disk)
+        } else {
+            None
+        }
+    }
 }
 
 /// Why the interactive debugger stopped the machine.
@@ -84,7 +118,12 @@ pub enum DebugStop {
         addr: u32,
         old: u16,
         new: u16,
+        /// The instruction that was executing when the change was seen
+        /// (the true writer when `source` is Cpu).
         writer_pc: u32,
+        source: WatchSource,
+        vpos: u16,
+        hpos: u16,
     },
     /// A watched custom chipset register was written (by any source: CPU
     /// or Copper), at the given beam position.
@@ -103,6 +142,8 @@ pub enum DebugStop {
     /// The CPU entered a caught exception vector; `pc` is the handler
     /// entry the machine stopped at.
     Exception { vector: u16, pc: u32 },
+    /// Exec scheduled a task matching the armed task catch.
+    Task { name: String, addr: u32 },
 }
 
 /// Human name of a 68000 exception vector, for catchpoint listings and
@@ -136,7 +177,18 @@ impl DebugStop {
                 old,
                 new,
                 writer_pc,
-            } => format!("Watch ${addr:06X}: {old:04X}->{new:04X} (pc ${writer_pc:06X})"),
+                source,
+                vpos,
+                hpos,
+            } => match source {
+                WatchSource::Cpu => {
+                    format!("Watch ${addr:06X}: {old:04X}->{new:04X} (pc ${writer_pc:06X})")
+                }
+                _ => format!(
+                    "Watch ${addr:06X}: {old:04X}->{new:04X} ({} write, v{vpos} h{hpos})",
+                    source.label()
+                ),
+            },
             DebugStop::ChipReg {
                 off,
                 value,
@@ -155,8 +207,148 @@ impl DebugStop {
                 "Caught {} (vector {vector}), handler ${pc:06X}",
                 exception_vector_name(*vector)
             ),
+            DebugStop::Task { name, addr } => {
+                format!("Task scheduled: {name} (task ${addr:06X})")
+            }
         }
     }
+}
+
+/// Decoded bit/field lines for a custom register's value, for the
+/// debugger's IO Map tab. Registers without a decode table return an
+/// empty vec (the raw hex is always shown alongside).
+pub fn custom_reg_bit_decode(off: u16, value: u16) -> Vec<String> {
+    let off = off & 0x1FE;
+    let named_bits: &[(u16, &str)] = match off {
+        0x002 | 0x096 => &[
+            (14, "BBUSY"),
+            (13, "BZERO"),
+            (10, "BLTPRI"),
+            (9, "DMAEN"),
+            (8, "BPLEN"),
+            (7, "COPEN"),
+            (6, "BLTEN"),
+            (5, "SPREN"),
+            (4, "DSKEN"),
+            (3, "AUD3"),
+            (2, "AUD2"),
+            (1, "AUD1"),
+            (0, "AUD0"),
+        ],
+        0x01C | 0x01E | 0x09A | 0x09C => &[
+            (14, "INTEN"),
+            (13, "EXTER"),
+            (12, "DSKSYN"),
+            (11, "RBF"),
+            (10, "AUD3"),
+            (9, "AUD2"),
+            (8, "AUD1"),
+            (7, "AUD0"),
+            (6, "BLIT"),
+            (5, "VERTB"),
+            (4, "COPER"),
+            (3, "PORTS"),
+            (2, "SOFT"),
+            (1, "DSKBLK"),
+            (0, "TBE"),
+        ],
+        0x010 | 0x09E => &[
+            (14, "PRECOMP1"),
+            (13, "PRECOMP0"),
+            (12, "MFMPREC"),
+            (11, "WORDSYNC"),
+            (10, "MSBSYNC"),
+            (9, "FAST"),
+            (7, "USE3PN"),
+            (6, "USE2P3"),
+            (5, "USE1P2"),
+            (4, "USE0P1"),
+            (3, "USE3VN"),
+            (2, "USE2V3"),
+            (1, "USE1V2"),
+            (0, "USE0V1"),
+        ],
+        0x100 => &[
+            (15, "HIRES"),
+            (11, "HAM"),
+            (10, "DPF"),
+            (9, "COLOR"),
+            (8, "GAUD"),
+            (6, "SHRES"),
+            (3, "LPEN"),
+            (2, "LACE"),
+            (1, "ERSY"),
+            (0, "ECSENA"),
+        ],
+        0x104 => &[(6, "PF2PRI"), (10, "KILLEHB")],
+        0x098 => &[
+            (15, "ENSP7"),
+            (14, "ENSP5"),
+            (13, "ENSP3"),
+            (12, "ENSP1"),
+            (11, "ENBP6"),
+            (10, "ENBP5"),
+            (9, "ENBP4"),
+            (8, "ENBP3"),
+            (7, "ENBP2"),
+            (6, "ENBP1"),
+        ],
+        0x1DC => &[
+            (14, "HARDDIS"),
+            (13, "LPENDIS"),
+            (12, "VARVBEN"),
+            (11, "LOLDIS"),
+            (10, "CSCBEN"),
+            (9, "VARVSYEN"),
+            (8, "VARHSYEN"),
+            (7, "VARBEAMEN"),
+            (6, "DUAL"),
+            (5, "PAL"),
+        ],
+        0x1FC => &[
+            (15, "SSCAN2"),
+            (14, "BSCAN2"),
+            (3, "SPAGEM"),
+            (2, "SPR32"),
+            (1, "BPAGEM"),
+            (0, "BPL32"),
+        ],
+        _ => &[],
+    };
+    let mut lines = Vec::new();
+    if !named_bits.is_empty() {
+        let set: Vec<&str> = named_bits
+            .iter()
+            .filter(|(bit, _)| value & (1 << bit) != 0)
+            .map(|(_, name)| *name)
+            .collect();
+        lines.push(if set.is_empty() {
+            "(no named bits set)".to_string()
+        } else {
+            set.join(" ")
+        });
+    }
+    // Multi-bit fields.
+    match off {
+        0x100 => {
+            let bpu = ((value >> 12) & 7) + (((value >> 4) & 1) << 3);
+            lines.push(format!("BPU={bpu}"));
+        }
+        0x102 => lines.push(format!(
+            "PF1H={} PF2H={}",
+            value & 0x000F,
+            (value >> 4) & 0x000F
+        )),
+        0x104 => lines.push(format!(
+            "PF1P={} PF2P={}",
+            value & 0x0007,
+            (value >> 3) & 0x0007
+        )),
+        0x08E | 0x090 => lines.push(format!("v={} h={}", (value >> 8) & 0xFF, value & 0xFF)),
+        0x092 | 0x094 => lines.push(format!("cck ${:02X}", value & 0x00FC)),
+        _ => {}
+    }
+    lines
 }
 
 /// The hardware name of a custom-register word offset into $DFF000
@@ -446,6 +638,9 @@ pub struct InteractiveBreaks {
     /// Caught exception vector numbers: the machine stops when the CPU
     /// enters one of these vectors (trap, fault, or interrupt).
     pub catches: Vec<u16>,
+    /// Stop when exec schedules a task whose name contains this
+    /// (case-insensitive) fragment; None = disabled.
+    pub task_catch: Option<String>,
     armed: bool,
 }
 
@@ -458,7 +653,8 @@ impl InteractiveBreaks {
         self.armed = !(self.breakpoints.is_empty()
             && self.watches.is_empty()
             && self.reg_watches.is_empty()
-            && self.catches.is_empty());
+            && self.catches.is_empty()
+            && self.task_catch.is_none());
     }
 
     /// Whether any breakpoint is set at `pc`, ignoring its condition. Used for
@@ -519,8 +715,9 @@ impl InteractiveBreaks {
     }
 
     /// Add a word watch at `addr` (recording `current` as its baseline),
-    /// or remove it when already set. Returns true when now set.
-    pub fn toggle_watch(&mut self, addr: u32, current: u16) -> bool {
+    /// or remove it when already set. `filter` limits which writer stops
+    /// it (None = any). Returns true when now set.
+    pub fn toggle_watch(&mut self, addr: u32, current: u16, filter: Option<WatchSource>) -> bool {
         let added = match self.watches.iter().position(|w| w.addr == addr) {
             Some(pos) => {
                 self.watches.remove(pos);
@@ -530,6 +727,7 @@ impl InteractiveBreaks {
                 self.watches.push(UiWatch {
                     addr,
                     last: current,
+                    filter,
                 });
                 true
             }
@@ -574,11 +772,19 @@ impl InteractiveBreaks {
         added
     }
 
+    /// Set or clear the scheduled-task catch. Returns the previous value.
+    pub fn set_task_catch(&mut self, target: Option<String>) -> Option<String> {
+        let previous = std::mem::replace(&mut self.task_catch, target);
+        self.rearm();
+        previous
+    }
+
     pub fn clear(&mut self) {
         self.breakpoints.clear();
         self.watches.clear();
         self.reg_watches.clear();
         self.catches.clear();
+        self.task_catch = None;
         self.armed = false;
     }
 }
@@ -953,7 +1159,7 @@ mod tests {
     #[test]
     fn interactive_watches_record_baselines_and_clear() {
         let mut breaks = InteractiveBreaks::default();
-        assert!(breaks.toggle_watch(0x1000, 0xABCD));
+        assert!(breaks.toggle_watch(0x1000, 0xABCD, None));
         assert_eq!(breaks.watches[0].last, 0xABCD);
         // The register watch normalizes a full $DFFxxx address to the
         // word offset.
@@ -974,6 +1180,19 @@ mod tests {
     }
 
     #[test]
+    fn custom_reg_bit_decode_names_set_bits_and_fields() {
+        let lines = custom_reg_bit_decode(0x096, 0x0240);
+        assert_eq!(lines, vec!["DMAEN BLTEN".to_string()]);
+        let lines = custom_reg_bit_decode(0x100, 0x5800);
+        assert_eq!(lines[0], "HAM");
+        assert_eq!(lines[1], "BPU=5");
+        let lines = custom_reg_bit_decode(0x102, 0x0021);
+        assert_eq!(lines, vec!["PF1H=1 PF2H=2".to_string()]);
+        // Unknown registers decode to nothing (hex is always shown).
+        assert!(custom_reg_bit_decode(0x1F0, 0xFFFF).is_empty());
+    }
+
+    #[test]
     fn debug_stop_describes_each_reason() {
         assert_eq!(
             DebugStop::Breakpoint { pc: 0xC033C2 }.describe(),
@@ -985,9 +1204,25 @@ mod tests {
                 old: 0x12,
                 new: 0x13,
                 writer_pc: 0xC03374,
+                source: WatchSource::Cpu,
+                vpos: 44,
+                hpos: 100,
             }
             .describe(),
             "Watch $C09580: 0012->0013 (pc $C03374)"
+        );
+        assert_eq!(
+            DebugStop::Watch {
+                addr: 0xC09580,
+                old: 0x12,
+                new: 0x13,
+                writer_pc: 0xC03374,
+                source: WatchSource::Blitter,
+                vpos: 44,
+                hpos: 100,
+            }
+            .describe(),
+            "Watch $C09580: 0012->0013 (blitter write, v44 h100)"
         );
         assert_eq!(
             DebugStop::ChipReg {

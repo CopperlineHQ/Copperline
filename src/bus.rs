@@ -808,6 +808,14 @@ pub struct Bus {
     /// the Default of all-layers-visible is restored on state load.
     #[serde(skip)]
     ui_layer_masks: UiLayerMasks,
+    /// Watched memory word addresses mirrored from the debugger (also
+    /// forwarded into the blitter and floppy so their write sites can
+    /// flag hits), plus the writers of recent watched-word writes for
+    /// stop attribution. Transient debug state.
+    #[serde(skip)]
+    ui_mem_watch_addrs: Vec<u32>,
+    #[serde(skip)]
+    ui_mem_writers: Vec<UiMemWriter>,
     /// The Copper PC at the last breakpoint check, so arrival at an
     /// address fires once instead of on every eligible colour clock the
     /// PC rests there.
@@ -922,6 +930,15 @@ pub struct BeamTrap {
     pub hpos: Option<u16>,
     /// Remove after the first hit (a run-to-position trap).
     pub once: bool,
+}
+
+/// Who last wrote a watched memory word, recorded at the write site.
+#[derive(Debug, Clone, Copy)]
+pub struct UiMemWriter {
+    pub addr: u32,
+    pub source: crate::debugger::WatchSource,
+    pub vpos: u16,
+    pub hpos: u16,
 }
 
 /// Debugger video-layer isolation masks: bit n set = bitplane n /
@@ -1097,6 +1114,23 @@ impl ChipBusOwner {
     }
 }
 
+/// One blit started during the traced frame (Frame Analyzer / console
+/// BLITS). `end` stays None while the blit is still running (or when it
+/// finishes in a later frame).
+#[derive(Clone, Debug)]
+pub struct FrameBlitRecord {
+    pub bltcon0: u16,
+    pub bltcon1: u16,
+    pub width_words: u32,
+    pub height: u32,
+    pub apt: u32,
+    pub bpt: u32,
+    pub cpt: u32,
+    pub dpt: u32,
+    pub start: (u16, u16),
+    pub end: Option<(u16, u16)>,
+}
+
 /// Per-frame chip-bus ownership trace for the interactive frame analyzer.
 ///
 /// One byte records the owner for one Agnus colour clock at `(vpos, hpos)`.
@@ -1117,8 +1151,13 @@ pub struct FrameBusTrace {
     pub blitter_busy_cck: u64,
     pub blitter_starve_cck: [u64; 9],
     pub partial: bool,
+    /// Blits started this frame (capped; see FRAME_BLIT_RECORD_CAP).
+    pub blits: Vec<FrameBlitRecord>,
     owners: Vec<u8>,
 }
+
+/// Blit records kept per traced frame.
+pub const FRAME_BLIT_RECORD_CAP: usize = 64;
 
 impl Default for FrameBusTrace {
     fn default() -> Self {
@@ -1136,6 +1175,7 @@ impl Default for FrameBusTrace {
             blitter_busy_cck: 0,
             blitter_starve_cck: [0; 9],
             partial: false,
+            blits: Vec::new(),
             owners: Vec::new(),
         }
     }
@@ -1167,6 +1207,7 @@ impl FrameBusTrace {
         self.blitter_busy_cck = 0;
         self.blitter_starve_cck = [0; 9];
         self.partial = partial;
+        self.blits.clear();
         self.owners.resize(self.rows * self.cols, b'.');
         self.owners.fill(b'.');
     }
@@ -1925,6 +1966,8 @@ impl Bus {
             ui_copper_hit: None,
             ui_copper_last_pc: 0,
             ui_layer_masks: UiLayerMasks::default(),
+            ui_mem_watch_addrs: Vec::new(),
+            ui_mem_writers: Vec::new(),
             blitter_slowdown_cpu_misses: 0,
             slice_bus_advanced_cck: 0,
             slice_bus_tick: AgnusTick::default(),
@@ -2027,6 +2070,97 @@ impl Bus {
     /// Take the pending beam-trap hit `(vpos, hpos)`, if any.
     pub fn take_ui_beam_hit(&mut self) -> Option<(u16, u16)> {
         self.ui_beam_hit.take()
+    }
+
+    /// Replace the debugger's watched-word mirror, forwarding it into
+    /// the blitter and floppy write sites. Pending writer records are
+    /// dropped (they described the previous watch set).
+    pub fn set_ui_mem_watches(&mut self, addrs: &[u32]) {
+        self.ui_mem_watch_addrs = addrs.to_vec();
+        self.ui_mem_writers.clear();
+        self.blitter.set_debug_watch_addrs(addrs);
+        self.floppy.set_debug_watch_addrs(addrs);
+    }
+
+    /// Note a CPU write of `size` bytes at `addr` for watch attribution
+    /// (called from the CPU chip/slow RAM write paths when watches are
+    /// armed).
+    pub(crate) fn ui_note_cpu_ram_write(&mut self, addr: u32, size: usize) {
+        if self.ui_mem_watch_addrs.is_empty() {
+            return;
+        }
+        let start = addr & 0x00FF_FFFE;
+        let end = addr.wrapping_add(size.max(1) as u32);
+        for &watch in &self.ui_mem_watch_addrs {
+            if watch.wrapping_add(1) >= start && watch < end {
+                Self::push_ui_mem_writer(
+                    &mut self.ui_mem_writers,
+                    UiMemWriter {
+                        addr: watch,
+                        source: crate::debugger::WatchSource::Cpu,
+                        vpos: self.agnus.vpos.min(u32::from(u16::MAX)) as u16,
+                        hpos: self.agnus.hpos.min(u32::from(u16::MAX)) as u16,
+                    },
+                );
+            }
+        }
+    }
+
+    fn push_ui_mem_writer(writers: &mut Vec<UiMemWriter>, writer: UiMemWriter) {
+        // Latest write per address wins; the list stays tiny.
+        writers.retain(|w| w.addr != writer.addr);
+        if writers.len() >= 8 {
+            writers.remove(0);
+        }
+        writers.push(writer);
+    }
+
+    /// The writer of the most recent write to watched word `addr`, if
+    /// one was recorded since the last take. Drains the blitter/floppy
+    /// latches lazily, so the hot DMA paths never touch the bus record.
+    pub fn ui_take_mem_writer(&mut self, addr: u32) -> Option<UiMemWriter> {
+        let vpos = self.agnus.vpos.min(u32::from(u16::MAX)) as u16;
+        let hpos = self.agnus.hpos.min(u32::from(u16::MAX)) as u16;
+        if let Some((waddr, _)) = self.blitter.take_debug_watched_write() {
+            Self::push_ui_mem_writer(
+                &mut self.ui_mem_writers,
+                UiMemWriter {
+                    addr: waddr & 0x00FF_FFFE,
+                    source: crate::debugger::WatchSource::Blitter,
+                    vpos,
+                    hpos,
+                },
+            );
+        }
+        if let Some((waddr, _)) = self.floppy.take_debug_watched_write() {
+            Self::push_ui_mem_writer(
+                &mut self.ui_mem_writers,
+                UiMemWriter {
+                    addr: waddr & 0x00FF_FFFE,
+                    source: crate::debugger::WatchSource::Disk,
+                    vpos,
+                    hpos,
+                },
+            );
+        }
+        let addr = addr & 0x00FF_FFFE;
+        let found = self.ui_mem_writers.iter().position(|w| w.addr == addr)?;
+        Some(self.ui_mem_writers.remove(found))
+    }
+
+    /// Carry the interactive debug state (beam traps, Copper
+    /// breakpoints, layer-isolation masks) from the pre-restore bus into
+    /// this freshly deserialized one. These fields are transient
+    /// (serde-skipped), so without this a reverse step or state load
+    /// would silently disarm the debugger. Pending unpolled hits stay
+    /// dropped: they describe the abandoned timeline.
+    pub(crate) fn adopt_ui_debug_state(&mut self, previous: &Bus) {
+        self.ui_beam_traps = previous.ui_beam_traps.clone();
+        self.ui_copper_breaks = previous.ui_copper_breaks.clone();
+        self.ui_copper_last_pc = previous.ui_copper_last_pc;
+        self.ui_layer_masks = previous.ui_layer_masks;
+        let watches = previous.ui_mem_watch_addrs.clone();
+        self.set_ui_mem_watches(&watches);
     }
 
     /// The debugger's armed Copper breakpoint addresses.
@@ -3158,6 +3292,20 @@ impl Bus {
     }
 
     fn latch_blitter_completion(&mut self, source: &'static str) {
+        if self.frame_analyzer_enabled {
+            if let Some(record) = self
+                .current_frame_bus_trace
+                .blits
+                .iter_mut()
+                .rev()
+                .find(|record| record.end.is_none())
+            {
+                record.end = Some((
+                    self.agnus.vpos.min(u32::from(u16::MAX)) as u16,
+                    self.agnus.hpos.min(u32::from(u16::MAX)) as u16,
+                ));
+            }
+        }
         let intreq_before = self.paula.intreq;
         self.paula.intreq |= INT_BLIT;
         self.note_irq_source_asserted();
@@ -4096,6 +4244,31 @@ impl Bus {
                 }
             }
         }
+    }
+
+    /// Record a started blit into the analyzer's frame trace (no-op
+    /// while the analyzer is closed).
+    pub(crate) fn record_frame_blit_start(&mut self, height: u32, width_words: u32) {
+        if !self.frame_analyzer_enabled
+            || self.current_frame_bus_trace.blits.len() >= FRAME_BLIT_RECORD_CAP
+        {
+            return;
+        }
+        self.current_frame_bus_trace.blits.push(FrameBlitRecord {
+            bltcon0: self.blitter.bltcon0,
+            bltcon1: self.blitter.bltcon1,
+            width_words,
+            height,
+            apt: self.blitter.bltapt,
+            bpt: self.blitter.bltbpt,
+            cpt: self.blitter.bltcpt,
+            dpt: self.blitter.bltdpt,
+            start: (
+                self.agnus.vpos.min(u32::from(u16::MAX)) as u16,
+                self.agnus.hpos.min(u32::from(u16::MAX)) as u16,
+            ),
+            end: None,
+        });
     }
 
     fn record_blit_accounting(&mut self) {

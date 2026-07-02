@@ -106,11 +106,15 @@ fn parse_hex_pattern(tokens: &[&str]) -> Option<Vec<u8>> {
 const CONSOLE_HELP: &[&str] = &[
     "execution:  run  pause  step/s [N]  over  out  frame/f  line  cstep",
     "            runto ADDR   toslot V [H]   rstep [N]  rframe  rrun",
-    "stops:      break/b ADDR [COND] [IGN N]   watch/w ADDR   rwatch REG",
+    "stops:      break/b ADDR [COND] [IGN N]   watch/w ADDR [CPU|BLITTER|DISK]",
+    "            rwatch REG",
     "            btrap V [H]   cbreak ADDR   catch irq N|trap N|vec N",
-    "            breaks (list)   clearbreaks",
+    "            catchtask [NAME]   breaks (list)   clearbreaks",
     "inspect:    status  regs/r  mem/m ADDR [BYTES]  dis/d [ADDR] [N]",
-    "            copper [pc|ADDR] [N]   custom   find HEX [START]   writer ADDR",
+    "            copper [pc|ADDR] [N]   custom   blits   find HEX [START]",
+    "            writer ADDR",
+    "            history/h [N]   stack/bt",
+    "os:         tasks  libs  devs  resources  ports",
     "modify:     poke ADDR VAL   setreg REG VAL",
     "console:    help  clear  close",
     "Addresses and values are hex; beam positions (V, H) are decimal.",
@@ -306,7 +310,33 @@ impl App {
                 self.console_reverse_op(|app| app.emu.tt_reverse_step(count))
             }
             "RFRAME" => self.console_reverse_op(|app| app.emu.tt_reverse_frame()),
-            "RRUN" | "RC" => self.console_reverse_op(|app| app.emu.tt_reverse_continue()),
+            "RRUN" | "RC" => {
+                use crate::timetravel::ReverseOutcome;
+                self.paused = true;
+                self.paused_before_console = true;
+                self.sync_live_audio_suspension();
+                self.last_debug_stop = None;
+                let mut lines = Vec::new();
+                match self.emu.tt_reverse_continue() {
+                    Ok(ReverseOutcome::Found((_, reason))) => {
+                        self.last_debug_stop = Some(reason.clone());
+                        lines.push(format!("!{reason}"));
+                    }
+                    Ok(ReverseOutcome::NotFound) => {
+                        lines.push("reverse: no earlier stop hit".to_string())
+                    }
+                    Ok(ReverseOutcome::BeyondHistory) => {
+                        lines.push("reverse: beyond recorded history".to_string())
+                    }
+                    Err(e) => {
+                        error!("console reverse run halted: {e:?}");
+                        return ConsoleOutcome::error(format!("reverse failed: {e}"));
+                    }
+                }
+                lines.extend(self.console_status_lines());
+                self.finish_render_for_current_frame();
+                ConsoleOutcome::lines(lines)
+            }
             "BREAK" | "B" => {
                 let spec = args.join(" ");
                 let Some((addr, cond, ignore)) = ui::parse_break_spec(&spec) else {
@@ -321,12 +351,24 @@ impl App {
             }
             "WATCH" | "W" => {
                 let Some(addr) = args.first().and_then(|t| hex32(t)) else {
-                    return ConsoleOutcome::error("usage: WATCH ADDR (hex, word)");
+                    return ConsoleOutcome::error("usage: WATCH ADDR [CPU|BLITTER|DISK]");
                 };
-                let set = self.emu.machine.ui_toggle_watch(addr);
+                let filter = match args.get(1) {
+                    Some(token) => match crate::debugger::WatchSource::parse(token) {
+                        Some(source) => Some(source),
+                        None => {
+                            return ConsoleOutcome::error("watch filter is CPU, BLITTER, or DISK")
+                        }
+                    },
+                    None => None,
+                };
+                let set = self.emu.machine.ui_toggle_watch_filtered(addr, filter);
                 ConsoleOutcome::one(format!(
-                    "watchpoint ${:06X} {}",
+                    "watchpoint ${:06X}{} {}",
                     addr & 0x00FF_FFFE,
+                    filter
+                        .map(|f| format!(" ({} writes only)", f.label()))
+                        .unwrap_or_default(),
                     if set { "set" } else { "removed" }
                 ))
             }
@@ -379,6 +421,28 @@ impl App {
                     if set { "set" } else { "removed" }
                 ))
             }
+            "TASKS" => ConsoleOutcome::lines(self.console_os_tasks()),
+            "LIBS" | "LIBRARIES" => {
+                ConsoleOutcome::lines(self.console_os_list(crate::amigaos::OsList::Libraries))
+            }
+            "DEVS" | "DEVICES" => {
+                ConsoleOutcome::lines(self.console_os_list(crate::amigaos::OsList::Devices))
+            }
+            "RESOURCES" => {
+                ConsoleOutcome::lines(self.console_os_list(crate::amigaos::OsList::Resources))
+            }
+            "PORTS" => ConsoleOutcome::lines(self.console_os_list(crate::amigaos::OsList::Ports)),
+            "CATCHTASK" => {
+                if args.is_empty() {
+                    self.emu.machine.ui_set_task_catch(None);
+                    return ConsoleOutcome::one("task catch cleared");
+                }
+                let target = args.join(" ");
+                self.emu.machine.ui_set_task_catch(Some(target.clone()));
+                ConsoleOutcome::one(format!(
+                    "stopping when a task whose name contains \"{target}\" is scheduled"
+                ))
+            }
             "BREAKS" | "INFO" => ConsoleOutcome::lines(self.console_breaks_lines()),
             "CLEARBREAKS" => {
                 self.emu.machine.ui_breaks_clear();
@@ -386,6 +450,35 @@ impl App {
                 ConsoleOutcome::one("cleared all breakpoints, watchpoints, traps, and catches")
             }
             "REGS" | "R" => ConsoleOutcome::lines(self.console_regs_lines()),
+            "HISTORY" | "H" => {
+                let count = args
+                    .first()
+                    .and_then(|t| t.parse::<usize>().ok())
+                    .unwrap_or(16)
+                    .clamp(1, crate::cpu::UI_PC_HISTORY_CAP);
+                let history = self.emu.machine.ui_pc_history();
+                if history.is_empty() {
+                    return ConsoleOutcome::one(
+                        "no history yet (recorded while a debug window is open)",
+                    );
+                }
+                let cpu_type = self.emu.machine.cpu_type();
+                let bus = self.emu.bus();
+                ConsoleOutcome::lines(
+                    history
+                        .iter()
+                        .rev()
+                        .take(count)
+                        .rev()
+                        .map(|&pc| {
+                            let (text, _) =
+                                crate::disasm::disassemble(|a| bus.peek_word_any(a), pc, cpu_type);
+                            format!("{pc:06X}  {text}")
+                        })
+                        .collect(),
+                )
+            }
+            "STACK" | "BT" => ConsoleOutcome::lines(self.console_stack_lines()),
             "MEM" | "M" => {
                 let Some(addr) = args.first().and_then(|t| hex32(t)) else {
                     return ConsoleOutcome::error("usage: MEM ADDR [BYTES] (hex)");
@@ -464,6 +557,51 @@ impl App {
                 {
                     let cursor = if addr == copper_pc { ">" } else { " " };
                     lines.push(format!("{cursor}{addr:06X}  {text}"));
+                }
+                ConsoleOutcome::lines(lines)
+            }
+            "BLITS" => {
+                let Some(trace) = self.emu.bus().frame_bus_trace() else {
+                    return ConsoleOutcome::one(
+                        "no frame trace: open the Frame Analyzer (its Frame button captures one)",
+                    );
+                };
+                if trace.blits.is_empty() {
+                    return ConsoleOutcome::one(format!(
+                        "no blits started in frame {}",
+                        trace.frame
+                    ));
+                }
+                let mut lines = vec![format!(
+                    "{} blit(s) in frame {}:",
+                    trace.blits.len(),
+                    trace.frame
+                )];
+                for (i, blit) in trace.blits.iter().enumerate() {
+                    let end = match blit.end {
+                        Some((v, h)) => format!("v{v} h{h}"),
+                        None => "(running)".to_string(),
+                    };
+                    let c1 = blit.bltcon1;
+                    lines.push(format!(
+                        "#{i:<2} v{} h{} -> {end}  con0 {:04X} con1 {:04X}  {}x{}{}{}{}",
+                        blit.start.0,
+                        blit.start.1,
+                        blit.bltcon0,
+                        c1,
+                        blit.width_words,
+                        blit.height,
+                        if c1 & 0x0001 != 0 { "  LINE" } else { "" },
+                        if c1 & 0x0008 != 0 { "  FILL" } else { "" },
+                        if c1 & 0x0002 != 0 { "  DESC" } else { "" },
+                    ));
+                    lines.push(format!(
+                        "     A ${:06X}  B ${:06X}  C ${:06X}  D ${:06X}",
+                        blit.apt & 0x00FF_FFFF,
+                        blit.bpt & 0x00FF_FFFF,
+                        blit.cpt & 0x00FF_FFFF,
+                        blit.dpt & 0x00FF_FFFF,
+                    ));
                 }
                 ConsoleOutcome::lines(lines)
             }
@@ -698,6 +836,161 @@ impl App {
         lines
     }
 
+    /// Run `walk` against a validated ExecBase using peeks over the bus,
+    /// or report why the OS structures are not walkable.
+    fn console_with_exec(
+        &self,
+        walk: impl FnOnce(&crate::amigaos::OsMemory, u32) -> Vec<String>,
+    ) -> Vec<String> {
+        let bus = self.emu.bus();
+        let peek8 = |addr: u32| {
+            let word = bus.peek_word_any(addr & !1);
+            if addr & 1 == 0 {
+                (word >> 8) as u8
+            } else {
+                word as u8
+            }
+        };
+        let peek32 = |addr: u32| {
+            (u32::from(bus.peek_word_any(addr)) << 16)
+                | u32::from(bus.peek_word_any(addr.wrapping_add(2)))
+        };
+        let os = crate::amigaos::OsMemory {
+            peek8: &peek8,
+            peek32: &peek32,
+        };
+        match os.exec_base() {
+            Ok(base) => walk(&os, base),
+            Err(reason) => vec![format!("!{reason}")],
+        }
+    }
+
+    /// TASKS: the scheduled task plus the ready and waiting lists.
+    fn console_os_tasks(&self) -> Vec<String> {
+        self.console_with_exec(|os, base| {
+            let mut lines = Vec::new();
+            match os.this_task(base) {
+                Some(task) => lines.push(format!(
+                    "> ${:06X}  pri {:>4}  {:<7} {}",
+                    task.addr, task.pri, "run", task.name
+                )),
+                None => lines.push("!ThisTask is not plausible".to_string()),
+            }
+            for (list, label) in [
+                (crate::amigaos::OsList::TaskReady, "ready"),
+                (crate::amigaos::OsList::TaskWait, "wait"),
+            ] {
+                for node in os.walk(base, list) {
+                    let state = crate::amigaos::task_state_name(node.state);
+                    let state = if state == "?" { label } else { state };
+                    lines.push(format!(
+                        "  ${:06X}  pri {:>4}  {:<7} {}",
+                        node.addr, node.pri, state, node.name
+                    ));
+                }
+            }
+            if lines.len() == 1 {
+                lines.push("  (no other tasks)".to_string());
+            }
+            lines
+        })
+    }
+
+    /// LIBS/DEVS/RESOURCES/PORTS: one line per node.
+    fn console_os_list(&self, list: crate::amigaos::OsList) -> Vec<String> {
+        let library_shaped = matches!(
+            list,
+            crate::amigaos::OsList::Libraries | crate::amigaos::OsList::Devices
+        );
+        self.console_with_exec(|os, base| {
+            let nodes = os.walk(base, list);
+            if nodes.is_empty() {
+                return vec!["(empty list)".to_string()];
+            }
+            nodes
+                .iter()
+                .map(|node| {
+                    if library_shaped {
+                        format!(
+                            "${:06X}  v{}.{:<4} {}",
+                            node.addr, node.version, node.revision, node.name
+                        )
+                    } else {
+                        format!("${:06X}  pri {:>4}  {}", node.addr, node.pri, node.name)
+                    }
+                })
+                .collect()
+        })
+    }
+
+    /// Heuristic 68k call-stack walk: scan up the stack for longwords
+    /// that look like return addresses (even, in the 24-bit space, and
+    /// immediately preceded by a JSR or BSR encoding). Heuristic by
+    /// nature -- data words that happen to follow call opcodes can slip
+    /// in -- but each frame shows its stack slot so it can be judged.
+    fn console_stack_lines(&self) -> Vec<String> {
+        const SLOTS: u32 = 64;
+        const FRAMES: usize = 8;
+        let machine = &self.emu.machine;
+        let bus = self.emu.bus();
+        let peek16 = |addr: u32| bus.peek_word_any(addr);
+        let peek32 =
+            |addr: u32| (u32::from(peek16(addr)) << 16) | u32::from(peek16(addr.wrapping_add(2)));
+        let looks_like_return = |addr: u32| -> bool {
+            if addr == 0 || addr & 1 != 0 || addr >= 0x0100_0000 {
+                return false;
+            }
+            // JSR (An)/-(An)+modes and BSR.B end 2 bytes before the
+            // return address; JSR abs.w/d16/d8-index/PC-rel and BSR.W end
+            // 4 before; JSR abs.l and BSR.L (020+) end 6 before.
+            let w2 = peek16(addr.wrapping_sub(2));
+            if (0x4E90..=0x4E97).contains(&w2)
+                || (w2 & 0xFF00 == 0x6100 && w2 & 0x00FF != 0 && w2 & 0x00FF != 0xFF)
+            {
+                return true;
+            }
+            let w4 = peek16(addr.wrapping_sub(4));
+            if w4 == 0x6100
+                || w4 == 0x4EB8
+                || w4 == 0x4EBA
+                || w4 == 0x4EBB
+                || (0x4EA8..=0x4EB7).contains(&w4)
+            {
+                return true;
+            }
+            let w6 = peek16(addr.wrapping_sub(6));
+            w6 == 0x4EB9 || w6 == 0x61FF
+        };
+        let sp = machine.a(7);
+        let cpu_type = machine.cpu_type();
+        let mut lines = vec![format!(
+            "#0 pc ${:06X}  sp ${:06X}",
+            machine.pc() & 0x00FF_FFFF,
+            sp & 0x00FF_FFFF
+        )];
+        let mut frame = 1usize;
+        for slot in 0..SLOTS {
+            if frame > FRAMES {
+                break;
+            }
+            let slot_addr = sp.wrapping_add(slot * 4);
+            let value = peek32(slot_addr) & 0x00FF_FFFF;
+            if !looks_like_return(value) {
+                continue;
+            }
+            let (text, _) = crate::disasm::disassemble(|a| bus.peek_word_any(a), value, cpu_type);
+            lines.push(format!(
+                "#{frame} ret ${value:06X}  (at sp+{:03X})  {text}",
+                slot * 4
+            ));
+            frame += 1;
+        }
+        if lines.len() == 1 {
+            lines.push("no return-address candidates on the stack".to_string());
+        }
+        lines
+    }
+
     fn console_breaks_lines(&self) -> Vec<String> {
         let breaks = self.emu.machine.ui_breaks();
         let bus = self.emu.bus();
@@ -716,9 +1009,13 @@ impl App {
         }
         for watch in &breaks.watches {
             lines.push(format!(
-                "watch  ${:06X}  now {:04X}",
+                "watch  ${:06X}  now {:04X}{}",
                 watch.addr,
-                bus.peek_word_any(watch.addr)
+                bus.peek_word_any(watch.addr),
+                watch
+                    .filter
+                    .map(|f| format!("  [{} only]", f.label()))
+                    .unwrap_or_default()
             ));
             any = true;
         }
@@ -734,6 +1031,10 @@ impl App {
                 "catch  {} (vector {vector})",
                 crate::debugger::exception_vector_name(*vector)
             ));
+            any = true;
+        }
+        if let Some(target) = &breaks.task_catch {
+            lines.push(format!("ctask  name contains \"{target}\""));
             any = true;
         }
         for trap in bus.ui_beam_traps() {
