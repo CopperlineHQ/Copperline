@@ -9302,3 +9302,180 @@ fn render_input_refill_from_bus_matches_fresh_snapshot() {
         "frame must contain non-uniform pixels for the comparison to mean anything"
     );
 }
+
+#[test]
+fn beam_trap_fires_at_exact_position_and_one_shot_disarms() {
+    let mut bus = empty_bus();
+    // From power-on the beam sits at (0, 0). A one-shot trap two lines
+    // and a few clocks ahead fires only once the beam crosses it.
+    bus.ui_arm_beam_trap_once(2, Some(10));
+    assert!(bus.take_ui_beam_hit().is_none());
+    bus.advance_devices(COLORCLOCKS_PER_LINE * 2 + 9); // beam just short of (2, 10)
+    assert!(bus.take_ui_beam_hit().is_none());
+    bus.advance_devices(1);
+    assert_eq!(bus.take_ui_beam_hit(), Some((2, 10)));
+    // One-shot: disarmed by the hit; a later frame does not re-fire it.
+    assert!(bus.ui_beam_traps().is_empty());
+    let frame_lines = bus.agnus.current_frame_lines();
+    bus.advance_devices(COLORCLOCKS_PER_LINE * (frame_lines + 3));
+    assert!(bus.take_ui_beam_hit().is_none());
+}
+
+#[test]
+fn beam_trap_line_start_persistent_refires_each_frame() {
+    let mut bus = empty_bus();
+    // hpos None = the first colour clock of the line.
+    assert!(bus.ui_toggle_beam_trap(1, None));
+    bus.advance_devices(COLORCLOCKS_PER_LINE);
+    assert_eq!(bus.take_ui_beam_hit(), Some((1, 0)));
+    // Persistent: still armed, and it fires again a frame later.
+    assert_eq!(bus.ui_beam_traps().len(), 1);
+    let frame_lines = bus.agnus.current_frame_lines();
+    bus.advance_devices(COLORCLOCKS_PER_LINE * (frame_lines + 1));
+    assert_eq!(bus.take_ui_beam_hit(), Some((1, 0)));
+    // Toggling the same position removes it.
+    assert!(!bus.ui_toggle_beam_trap(1, None));
+    assert!(bus.ui_beam_traps().is_empty());
+}
+
+#[test]
+fn beam_trap_beyond_scan_does_not_fire_at_frame_wrap() {
+    let mut bus = empty_bus();
+    let frame_lines = bus.agnus.current_frame_lines();
+    // A trap on a line the scan never reaches must not fire spuriously
+    // when the beam order wraps at the end of the frame.
+    assert!(bus.ui_toggle_beam_trap((frame_lines + 10).min(u32::from(u16::MAX)) as u16, None));
+    bus.advance_devices(COLORCLOCKS_PER_LINE * (frame_lines + 5));
+    assert!(bus.take_ui_beam_hit().is_none());
+}
+
+#[test]
+fn beam_trap_hit_survives_beam_only_advance_without_cpu() {
+    // The check lives on the beam advance itself, so a hit lands even
+    // when no CPU instruction retires (the CPU sitting in STOP while
+    // the chipset free-runs).
+    let mut bus = empty_bus();
+    bus.ui_arm_beam_trap_once(0, Some(100));
+    bus.advance_devices(COLORCLOCKS_PER_LINE * 3);
+    assert_eq!(bus.take_ui_beam_hit(), Some((0, 100)));
+}
+
+#[test]
+fn copper_breakpoint_fires_when_the_list_reaches_the_address() {
+    let mut bus = empty_bus();
+    let cop1 = 0x0100usize;
+    // Two MOVEs then end-of-list; break on the second MOVE's address.
+    write_chip_word(&mut bus, cop1, 0x0180);
+    write_chip_word(&mut bus, cop1 + 2, 0x0111);
+    write_chip_word(&mut bus, cop1 + 4, 0x0182);
+    write_chip_word(&mut bus, cop1 + 6, 0x0222);
+    write_chip_word(&mut bus, cop1 + 8, 0xFFFF);
+    write_chip_word(&mut bus, cop1 + 10, 0xFFFE);
+    assert!(bus.ui_toggle_copper_break(cop1 as u32 + 4));
+
+    bus.agnus.dmacon |= DMACON_DMAEN | DMACON_COPEN;
+    bus.agnus.hpos = 0x20;
+    bus.copper.jump(cop1 as u32);
+    // Nothing fires before the Copper completes the first MOVE.
+    assert!(bus.take_ui_copper_hit().is_none());
+    bus.advance_chipset(12);
+    let (pc, _vpos, _hpos) = bus.take_ui_copper_hit().expect("copper breakpoint hit");
+    assert_eq!(pc, cop1 as u32 + 4);
+    // Both MOVEs still executed (the breakpoint does not stall the
+    // chipset itself; the CPU machine is what pauses).
+    assert!(bus.take_ui_copper_hit().is_none());
+}
+
+#[test]
+fn copper_breakpoint_does_not_refire_while_the_pc_rests_there() {
+    let mut bus = empty_bus();
+    let cop1 = 0x0200usize;
+    // A WAIT that parks the Copper, then a MOVE at the breakpointed
+    // address: the PC arrives once and rests during the wait.
+    write_copper_wait_then_move(&mut bus, cop1, 0x8001, 0xFFFE, 0x0180, 0x0FFF);
+    assert!(bus.ui_toggle_copper_break(cop1 as u32 + 4));
+
+    bus.agnus.dmacon |= DMACON_DMAEN | DMACON_COPEN;
+    bus.agnus.hpos = 0x20;
+    bus.copper.jump(cop1 as u32);
+    bus.advance_chipset(12);
+    // The WAIT retired: the PC arrived at the MOVE's address and fired.
+    assert!(bus.take_ui_copper_hit().is_some());
+    // Many more colour clocks of waiting must not re-fire it.
+    bus.advance_chipset(40);
+    assert!(bus.take_ui_copper_hit().is_none());
+}
+
+#[test]
+fn debug_plane_mask_hides_pixels_but_not_collisions() {
+    // A one-plane display with a solid row: masking plane 1 must blank
+    // the playfield pixels while leaving the collision result untouched
+    // (layer isolation is an output-only filter).
+    let mut bus = empty_bus();
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
+    bus.denise.diwstrt = 0x2C81;
+    bus.denise.diwstop = 0x2DC1;
+    bus.denise.ddfstrt = 0x0038;
+    bus.denise.ddfstop = 0x0038;
+    bus.denise.bplcon0 = 0x1000;
+    bus.denise.palette.write_ocs(0, 0x0007);
+    bus.denise.palette.write_ocs(1, 0x0F00);
+    // Odd-plane collisions include plane 1 so the clxdat comparison is
+    // sensitive to the sample index staying unmasked.
+    bus.denise.clxcon = 0x1040;
+    let words_per_row = bitplane_words_per_row(
+        bus.agnus.revision(),
+        bus.denise.bplcon0,
+        bus.agnus.fmode(),
+        bus.denise.ddfstrt,
+        bus.denise.ddfstop,
+        bus.harddis_active(),
+    );
+    bus.current_frame_bitplane_rows[0] = Some(CapturedBitplaneRow {
+        nplanes: 1,
+        words_per_row,
+        planes: [
+            vec![0xFFFF; words_per_row],
+            vec![0; words_per_row],
+            vec![0; words_per_row],
+            vec![0; words_per_row],
+            vec![0; words_per_row],
+            vec![0; words_per_row],
+            Vec::new(),
+            Vec::new(),
+        ],
+    });
+    bus.current_frame_render_base = bus.capture_render_snapshot();
+
+    let full = bitplane::RenderInput::from_bus(&bus).with_debug_masks(0xFF, 0xFF);
+    let masked = bitplane::RenderInput::from_bus(&bus).with_debug_masks(0xFE, 0xFF);
+
+    let mut fb_full = vec![0u32; FB_PIXELS];
+    let mut fb_masked = vec![0u32; FB_PIXELS];
+    let result_full = bitplane::render_from_input(&full, &mut fb_full);
+    let result_masked = bitplane::render_from_input(&masked, &mut fb_masked);
+
+    assert!(
+        fb_full.iter().any(|&px| px != fb_full[0]),
+        "the unmasked frame must show the plane"
+    );
+    assert_ne!(
+        fb_full, fb_masked,
+        "masking the only plane must change the picture"
+    );
+    assert_eq!(
+        result_full.clxdat, result_masked.clxdat,
+        "layer isolation must never change the collision result"
+    );
+    // The plane's colour (COLOR01 = $F00, bright red in framebuffer RGBA)
+    // is present unmasked and fully gone when the plane is hidden.
+    let red = 0xFF00_00FF_u32;
+    assert!(
+        fb_full.contains(&red),
+        "the unmasked frame must contain the plane colour"
+    );
+    assert!(
+        !fb_masked.contains(&red),
+        "a masked plane's colour must not reach the framebuffer"
+    );
+}

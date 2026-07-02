@@ -152,6 +152,12 @@ pub struct CpuCore {
     pub run_mode: u32,
     /// True while processing an exception (for double-fault detection)
     pub exception_processing: bool,
+    /// Vector number of the most recent exception entry (trap, fault, or
+    /// interrupt -- everything routed through `jump_vector`), for the
+    /// host debugger's exception catchpoints. Polled and cleared by the
+    /// host wrapper; transient debug state, never serialized.
+    #[serde(skip)]
+    pub last_exception_vector: Option<u32>,
 
     // ========== MMU State ==========
     /// Has PMMU
@@ -337,6 +343,7 @@ impl CpuCore {
             instr_mode: 0,
             run_mode: 0,
             exception_processing: false,
+            last_exception_vector: None,
             has_pmmu: false,
             pmmu_enabled: false,
             is_pre_68020: true,

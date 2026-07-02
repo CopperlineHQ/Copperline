@@ -36,9 +36,45 @@ Copper state (COP1LC/COP2LC/COPPC), the display window and fetch registers
 (BPLCONx, DIWSTRT/STOP, DDFSTRT/STOP, modulos), the bitplane and sprite
 pointers, and the full palette.
 
-**Copper** disassembles the Copper list from COP1LC -- MOVE/WAIT/SKIP with
-decoded targets and positions -- and highlights the instruction at the
-current Copper fetch address.
+**Copper** is a debugger for the Copper itself. The header shows
+COP1LC/COP2LC, the live Copper PC, and the execution state (running,
+waiting -- with the decoded beam position it waits for -- or stopped). The
+listing disassembles MOVE/WAIT/SKIP around the live PC (following it as
+the Copper executes; a stopped Copper shows the head of the COP1 list),
+with the current instruction highlighted and WAIT/SKIP positions resolved
+to the same decimal `v`/`h` beam coordinates the Chipset tab and Frame
+Analyzer use. Two controls sit above the listing:
+
+- **CBreak +/-** toggles a *Copper breakpoint* at the hex address in the
+  `$` box. The machine stops when the Copper's PC arrives at that address
+  -- before the instruction there executes -- whether it got there by
+  sequential fetch, a COPJMP, a CPU strobe write, or the vertical-blank
+  restart. Breakpointed lines are marked `*`, and the Break tab lists them.
+- **CStep** (`C`) runs until the Copper retires one instruction: a MOVE
+  applied (or discarded by SKIP), or a WAIT/SKIP/COPJMP starting. Stepping
+  onto a WAIT parks the Copper; the next CStep runs through the wait to
+  the following instruction, so you can walk a raster effect
+  instruction by instruction. The machine pauses at the next CPU
+  instruction boundary, so the Copper can occasionally be a fetch further
+  along -- the highlight always shows exactly where it stopped.
+
+**Video** shows the display pipeline visually and hosts *layer
+isolation*. The header decodes BPLCON0 (depth, resolution, HAM/DPF) and
+the display/sprite DMA enables. Two toggle rows hide or show individual
+bitplanes (1-8) and sprites (0-7) in the presented picture -- the video
+analogue of the Audio tab's mutes, for answering "which layer is drawing
+*that*" by elimination. Isolation is an output-only filter: collisions,
+sprite/playfield priority, and everything the program can observe still
+use the true data, so hiding layers can never perturb the emulation (a
+sprite behind a hidden plane therefore stays occluded). Toggles re-render
+the current frame immediately while paused, through the same
+side-effect-free snapshot render the Frame Analyzer underlay uses.
+Each sprite row decodes SPRxPOS/SPRxCTL (vstart-vstop, hstart, attach,
+armed) with the number of DMA lines the sprite fetched this frame --
+zero lines with plausible-looking pointers is the classic
+copper-driven-sprite symptom -- and a thumbnail rendered from those
+captured DMA words. Below, the palette grid shows all 32 entries (or the
+full 256 on AGA) as swatches.
 
 **Audio** decodes Paula's four audio channels. A header line shows DMACON
 (master DMAEN and the per-channel AUDx enable bits) and ADKCON (the audio
@@ -65,7 +101,26 @@ not part of a save state.
 
 **Memory** is a hex/ASCII dump, 256 bytes per page. Type a hex address in
 the `$` box and press Enter to jump there; the `<` and `>` buttons page by
-256 bytes.
+256 bytes, the mouse wheel and cursor keys scroll by 16-byte rows, and
+PageUp/PageDown by whole pages. Four buttons sit above the dump:
+
+- **Find** searches CPU-visible memory for the `$` box's hex byte pattern
+  (`4E75`, or spaced pairs like `C0 FF EE`), starting past the previous
+  hit and wrapping the 24-bit space once. The view jumps to the match.
+- **Save...** writes the `$` box's `ADDR LEN` (hex) region to a file via
+  a save dialog -- the GUI counterpart of `COPPERLINE_DBG_RAMDUMP`.
+- **Writer?** reports the last instruction that wrote the word at the
+  `$` box address: `$C09580: 0012->0034 by pc $C033C2 (frame 1234)`,
+  replayed from the reverse-debug snapshot ring (so it sees every bus
+  master, and costs a short replay). The result also lands on the Break
+  tab until the next stop.
+- **Bits** toggles a 1-bit-per-pixel bitplane view of the same memory:
+  set bits are drawn light, one row per stride. Type a decimal stride in
+  the `$` box when toggling to set the row width (default 40 bytes = a
+  320-pixel plane), then wheel/cursor keys scroll by rows and `<`/`>`
+  page by screenfuls. Point it at a bitplane pointer from the Chipset
+  tab to eyeball graphics data directly -- misaligned strides show as
+  the familiar diagonal shear.
 
 **Break** manages breakpoints and watchpoints (next section) and shows the
 reason for the last stop.
@@ -90,6 +145,21 @@ On the Break tab, type an address into the `$` box and toggle any of:
 - **Reg** -- a chipset-register write watch. `96` and `DFF096` both mean
   DMACON. The machine stops on *every* write, CPU or Copper, and reports
   the writer and beam position.
+- **Beam** -- a beam trap: the machine stops when the Agnus beam reaches a
+  position. Unlike the other boxes it takes *decimal* `VPOS [HPOS]`
+  (matching the `v=`/`h=` coordinates the Chipset tab and Frame Analyzer
+  display); `HPOS` omitted means the start of the line. The check rides
+  the beam advance itself, so it fires at exact colour-clock granularity
+  and even while the CPU sits in `STOP`. A persistent beam trap re-fires
+  every frame, which makes it a raster-line single-step: resume, and the
+  machine stops at the same beam position of the next frame.
+- **Catch** -- an exception catchpoint: the machine stops when the CPU
+  enters the vector, at the handler's entry. The box takes `irq N`
+  (interrupt level 1-7, e.g. `irq 3` for the vertical blank), `trap N`
+  (TRAP #0-15), or `vec N` (any raw vector number: `vec 2` bus error,
+  `vec 4` illegal instruction, `vec 8` privilege violation). Every entry
+  path is seen -- traps, faults, and interrupts alike -- so `irq` catches
+  fire on the exact dispatch, before the handler's first instruction.
 
 **Clear all** removes everything. Breakpoints and watchpoints stay armed
 when the window is closed: a hit pauses the machine, reopens the debugger
@@ -127,15 +197,16 @@ bit `$4000` set, after ten earlier qualifying passes.
 | Step Over | `O` | Run a BSR/JSR/TRAP callee to completion, stopping after the call |
 | Step Out | `U` | Run until the current subroutine returns to its caller |
 | Frame | `F` | Run to the next video frame and re-render the display |
+| Line | `L` | Run to the start of the next scanline (a one-shot beam trap) |
 | Run to `$` | -- | Run until the PC reaches the address in the box |
 | &lt; Frame | -- | Step one video frame *backward* |
 | &lt; Step | -- | Step one instruction *backward* (see [](reverse)) |
 | &lt; Run | -- | Run *backward* to the previous breakpoint hit |
 
-The `R`/`S`/`O`/`U`/`F` keys work whenever the box is unfocused (while it is
-focused they are text input). **Run to $**, **Step Over**, and **Step Out**
-are bounded by an instruction budget so a never-returning call or
-never-reached address cannot wedge the UI; if the budget runs out, the
+The `R`/`S`/`O`/`U`/`F`/`L` keys work whenever the box is unfocused (while it
+is focused they are text input). **Run to $**, **Step Over**, **Step Out**,
+and **Line** are bounded by an instruction budget so a never-returning call
+or never-reached address cannot wedge the UI; if the budget runs out, the
 debugger stays paused. Step Out detects the return by the stack pointer
 rising past its value at entry, so nested calls and interrupt handlers do
 not end it early. If the CPU is sitting in a `STOP`, stepping fast-forwards
@@ -165,12 +236,26 @@ to the debugger window. The analyzer shows the whole captured Agnus beam
 frame, not just the TV-presented display. The trace includes vertical and
 horizontal overscan, blanking, and the visible display window.
 
+```{figure} ../images/ui-preview-frame-analyzer.png
+:alt: The Frame Analyzer with the picture underlay enabled
+:width: 90%
+
+The Frame Analyzer: chip-bus owner heatmap over the picture underlay, the
+selected-scanline strip, and per-owner colour-clock counters.
+```
+
 The main heatmap is indexed by beam position: X is `hpos` colour clocks and Y
 is `vpos` lines. Each cell records the chip-bus owner for that colour clock:
 refresh, bitplane, sprite, disk, audio, Copper, blitter, CPU, or idle. The
 white outline marks the framebuffer display area that Copperline captured for
-presentation. Register-write markers show CPU, Copper, and interrupt-time
-custom-register writes at their beam positions.
+presentation; the orange box is the programmed display window (DIW) and the
+cyan verticals are the bitplane fetch bounds (DDFSTRT/DDFSTOP), decoded from
+the frame-start registers (mid-frame changes appear as write markers).
+Register-write markers show CPU, Copper, and interrupt-time custom-register
+writes at their beam positions -- hover a slot to inspect them: the writes
+within roughly one heatmap pixel of the pointer are decoded (writer,
+register, value, and exact beam position) under the heatmap, and the same
+readout follows the selected slot when the pointer is elsewhere.
 
 Click or drag across the heatmap to select a beam slot. The cursor keys nudge
 the selector one colour clock or line at a time. The lower strip expands that
@@ -185,7 +270,39 @@ The pane has the same transport rhythm as the debugger:
 |---|---|---|
 | Run / Pause | `R` | Resume or pause while continuing to collect frame traces |
 | Frame | `F` | Run exactly one frame and show the completed trace |
+| To slot | `T` | Run until the beam reaches the selected slot |
+| Picture underlay | `U` | Draw the rendered frame beneath the heatmap |
+| Beam scrub | `B` | Show the picture only up to the selected slot |
 
 Opening the pane starts a partial trace immediately; pressing **Frame**
 captures a clean full frame. Closing it restores the run/pause state selected
 inside the pane and disables the tracing hot path.
+
+Click a slot (or nudge the selection with the cursor keys) and press
+**To slot** to run the machine until the beam reaches exactly that colour
+clock -- a one-shot beam trap, reported like any other debugger stop. It
+answers "what is the machine doing when the beam is *here*" directly from
+the picture: select the glitch, run to it, and inspect the CPU/Copper
+state at that moment.
+
+Ticking **Picture underlay** draws the traced frame's rendered picture under
+the heatmap, dimmed so the DMA colours stay readable: the picture shows
+through idle slots and owned slots blend their owner colour over it. That
+correlates bus activity spatially with the picture -- a bitplane fetch block
+sits over the graphics it fetches, a Copper colour split lands on the raster
+line where the picture changes. The underlay is re-rendered from the trace's
+frame in beam coordinates (none of the presentation recentring or TV masking
+is applied), so it lines up with the white display box exactly, and the extra
+render reads a snapshot only -- it never perturbs the emulation.
+
+**Beam scrub** turns the underlay into a beam-time scrubber: only what the
+CRT had drawn by the time the beam reached the selected slot shows at
+normal underlay brightness; everything past it ghosts at low brightness.
+Because Copperline's renderer replays register writes at their recorded
+beam positions, every pixel before the cursor is exactly what the display
+carried at that instant -- drag the selection (or hold a cursor key) and
+you watch the Copper build the frame line by line: palette splits snap in
+at their WAIT lines, sprites appear when their DMA lines pass, screen
+splits land where the pointers were rewritten. Combined with **To slot**,
+"scrub to the artefact, then run the machine to that exact colour clock"
+turns a what-is-the-beam-doing question into two clicks.

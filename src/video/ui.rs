@@ -35,6 +35,8 @@ const PANEL_TEXT_HILIGHT: u32 = rgba(120, 255, 150);
 const PANEL_TEXT_ACCENT: u32 = rgba(255, 184, 80);
 const BUTTON_TEXT: u32 = rgba(220, 222, 214);
 const BUTTON_TEXT_DISABLED: u32 = rgba(120, 120, 112);
+/// DDF fetch-bound verticals on the Frame Analyzer heatmap.
+const DDF_LINE: u32 = rgba(80, 200, 220);
 const ENTRY_BG: u32 = rgba(8, 10, 8);
 const ENTRY_TEXT: u32 = rgba(27, 220, 71);
 const SCRIM: u32 = rgba(0, 0, 0);
@@ -174,15 +176,17 @@ pub enum DebugTab {
     Cpu,
     Chipset,
     Copper,
+    Video,
     Audio,
     Memory,
     Break,
 }
 
-pub const DEBUG_TABS: [DebugTab; 6] = [
+pub const DEBUG_TABS: [DebugTab; 7] = [
     DebugTab::Cpu,
     DebugTab::Chipset,
     DebugTab::Copper,
+    DebugTab::Video,
     DebugTab::Audio,
     DebugTab::Memory,
     DebugTab::Break,
@@ -193,6 +197,7 @@ fn debug_tab_label(tab: DebugTab) -> &'static str {
         DebugTab::Cpu => "CPU",
         DebugTab::Chipset => "Chipset",
         DebugTab::Copper => "Copper",
+        DebugTab::Video => "Video",
         DebugTab::Audio => "Audio",
         DebugTab::Memory => "Memory",
         DebugTab::Break => "Break",
@@ -211,6 +216,14 @@ pub struct DebuggerPanel {
     pub entry: String,
     /// Whether the entry box has keyboard focus.
     pub entry_active: bool,
+    /// Memory tab: where the last Find hit landed, so repeating Find
+    /// continues past it instead of re-finding the same match.
+    pub mem_last_find: Option<u32>,
+    /// Memory tab: render the page as a 1-bpp bitplane instead of hex.
+    pub mem_view_bits: bool,
+    /// Memory tab bitmap mode: row stride in bytes (40 = a standard
+    /// 320-pixel-wide plane).
+    pub mem_bitmap_stride: u32,
 }
 
 impl DebuggerPanel {
@@ -221,6 +234,9 @@ impl DebuggerPanel {
             disasm_addr: None,
             entry: String::new(),
             entry_active: false,
+            mem_last_find: None,
+            mem_view_bits: false,
+            mem_bitmap_stride: 40,
         }
     }
 
@@ -246,6 +262,31 @@ impl DebuggerPanel {
         let reg = parse_reg_name(tokens.next()?)?;
         let value = parse_hex_u32(tokens.next()?)?;
         Some((reg, value))
+    }
+
+    /// Memory-search pattern: the entry's tokens concatenated as hex byte
+    /// pairs ("C0 FFEE" and "C0FFEE" both match the bytes C0 FF EE).
+    pub fn find_pattern(&self) -> Option<Vec<u8>> {
+        let joined: String = self.entry.split_whitespace().collect();
+        if joined.is_empty() || !joined.len().is_multiple_of(2) {
+            return None;
+        }
+        (0..joined.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&joined[i..i + 2], 16).ok())
+            .collect()
+    }
+
+    /// Region spec for Save region: "ADDR LEN", both hex, length bounded
+    /// to the 24-bit bus.
+    pub fn region_spec(&self) -> Option<(u32, u32)> {
+        let mut tokens = self.entry.split_whitespace();
+        let addr = parse_hex_u32(tokens.next()?)?;
+        let len = parse_hex_u32(tokens.next()?)?;
+        if tokens.next().is_some() || len == 0 || len > 0x0100_0000 {
+            return None;
+        }
+        Some((addr & 0x00FF_FFFF, len))
     }
 
     pub fn push_entry_char(&mut self, ch: char) {
@@ -278,6 +319,12 @@ impl Default for DebuggerPanel {
 pub struct FrameAnalyzerPanel {
     pub selected_vpos: u16,
     pub selected_hpos: u16,
+    /// Draw the rendered frame under the DMA heatmap so bus activity can
+    /// be correlated spatially with the picture.
+    pub show_underlay: bool,
+    /// Beam scrub: show the picture only up to the selected slot -- what
+    /// the CRT had drawn when the beam was there. Implies the underlay.
+    pub show_scrub: bool,
 }
 
 impl FrameAnalyzerPanel {
@@ -285,7 +332,14 @@ impl FrameAnalyzerPanel {
         Self {
             selected_vpos: 0x2C,
             selected_hpos: 0x28,
+            show_underlay: false,
+            show_scrub: false,
         }
+    }
+
+    /// Whether the picture underlay is active (directly or via scrub).
+    pub fn underlay_active(&self) -> bool {
+        self.show_underlay || self.show_scrub
     }
 }
 
@@ -368,6 +422,27 @@ pub fn panel_control_at(panel: &Panel, pos: (i32, i32)) -> Option<UiControl> {
                     }
                 }
             }
+            if panel.tab == DebugTab::Copper {
+                for (control, button_rect) in copper_tab_button_rects(rect) {
+                    if button_rect.contains(pos) {
+                        return Some(control);
+                    }
+                }
+            }
+            if panel.tab == DebugTab::Memory {
+                for (control, button_rect) in mem_tab_button_rects(rect) {
+                    if button_rect.contains(pos) {
+                        return Some(control);
+                    }
+                }
+            }
+            if panel.tab == DebugTab::Video {
+                for (control, button_rect) in video_tab_toggle_rects(rect) {
+                    if button_rect.contains(pos) {
+                        return Some(control);
+                    }
+                }
+            }
             if panel.tab == DebugTab::Audio {
                 for (control, button_rect) in audio_tab_button_rects(rect) {
                     if button_rect.contains(pos) {
@@ -384,6 +459,12 @@ pub fn panel_control_at(panel: &Panel, pos: (i32, i32)) -> Option<UiControl> {
                 if button_rect.contains(pos) {
                     return Some(control);
                 }
+            }
+            if analyzer_underlay_rect(rect).contains(pos) {
+                return Some(UiControl::AnalyzerUnderlay);
+            }
+            if analyzer_scrub_rect(rect).contains(pos) {
+                return Some(UiControl::AnalyzerScrub);
             }
         }
         Panel::Launcher(state) => {
@@ -417,6 +498,9 @@ pub enum UiControl {
     DebugStepOut,
     DebugStepFrame,
     DebugRunTo,
+    /// Run to the start of the next scanline (end of the current line),
+    /// stopping at exact beam granularity via a one-shot beam trap.
+    DebugRunLine,
     /// Reverse-debug: step one instruction backward (reconstructed from the
     /// snapshot ring).
     DebugReverseStep,
@@ -437,6 +521,32 @@ pub enum UiControl {
     /// Break tab: toggle a chipset-register write watch at the entry
     /// address (an offset or a full $DFFxxx address).
     DebugRegToggle,
+    /// Break tab: toggle a beam trap at the entry's decimal "VPOS [HPOS]"
+    /// position (halt when the Agnus beam reaches it).
+    DebugBeamToggle,
+    /// Break tab: toggle an exception catchpoint from the entry box
+    /// ("irq N", "trap N", or "vec N").
+    DebugCatchToggle,
+    /// Copper tab: toggle a Copper breakpoint at the entry address (halt
+    /// when the Copper's PC arrives there).
+    DebugCopperBreakToggle,
+    /// Copper tab: run until the Copper retires one instruction.
+    DebugCopperStep,
+    /// Memory tab: find the entry's hex byte pattern, continuing past the
+    /// previous hit.
+    DebugMemFind,
+    /// Memory tab: save the "ADDR LEN" region in the entry box to a file.
+    DebugMemSave,
+    /// Memory tab: report the last instruction that wrote the entry
+    /// address (a reverse-history query; needs the snapshot ring).
+    DebugMemWriter,
+    /// Memory tab: toggle between the hex dump and the 1-bpp bitplane
+    /// view (an entry with a small decimal number sets the row stride).
+    DebugMemBits,
+    /// Video tab: toggle bitplane `n` (0-7) in the presented picture.
+    DebugPlaneToggle(usize),
+    /// Video tab: toggle sprite `n` (0-7) in the presented picture.
+    DebugSpriteToggle(usize),
     /// Break tab: remove all breakpoints and watchpoints.
     DebugBreaksClear,
     /// Audio tab: toggle mute for a channel (0..3 = Paula, 4 = CD audio).
@@ -452,6 +562,15 @@ pub enum UiControl {
         y: u16,
         scanline: bool,
     },
+    /// Frame analyzer: toggle the rendered-frame picture underlay beneath
+    /// the DMA heatmap.
+    AnalyzerUnderlay,
+    /// Frame analyzer: toggle beam scrubbing (the underlay shows only
+    /// what the CRT had drawn up to the selected slot).
+    AnalyzerScrub,
+    /// Frame analyzer: run until the beam reaches the selected slot
+    /// (a one-shot beam trap at the selected vpos/hpos).
+    AnalyzerRunTo,
     /// Configuration screen: pick a machine model.
     LauncherModel(MachineModel),
     /// Configuration screen: switch the category tab.
@@ -594,7 +713,7 @@ fn debug_tab_rect(rect: Rect, index: usize) -> Rect {
     }
 }
 
-fn debug_button_rects(rect: Rect) -> [(UiControl, Rect); 13] {
+fn debug_button_rects(rect: Rect) -> [(UiControl, Rect); 14] {
     let y = rect.y + rect.h - DEBUG_BUTTON_H - 6;
     // Step Over / Step Out share a second transport row just above the main
     // one; the main row is already full edge to edge.
@@ -628,6 +747,8 @@ fn debug_button_rects(rect: Rect) -> [(UiControl, Rect); 13] {
         (UiControl::DebugStepOut, button2(102, 84)),
         // Poke (Memory tab) / Set Reg (CPU tab), on the second row.
         (UiControl::DebugPoke, button2(200, 90)),
+        // Run to the end of the current scanline, on the second row.
+        (UiControl::DebugRunLine, button2(294, 56)),
     ]
 }
 
@@ -641,7 +762,7 @@ fn debug_content_top(rect: Rect) -> usize {
 pub const BREAK_TAB_HEADER_LINES: usize = 3;
 
 /// The Break tab's toggle buttons, drawn at the top of the content area.
-fn break_tab_button_rects(rect: Rect) -> [(UiControl, Rect); 4] {
+fn break_tab_button_rects(rect: Rect) -> [(UiControl, Rect); 6] {
     let y = debug_content_top(rect);
     let button = |i: usize| Rect {
         x: rect.x + 10 + i * 98,
@@ -653,7 +774,113 @@ fn break_tab_button_rects(rect: Rect) -> [(UiControl, Rect); 4] {
         (UiControl::DebugBreakToggle, button(0)),
         (UiControl::DebugWatchToggle, button(1)),
         (UiControl::DebugRegToggle, button(2)),
-        (UiControl::DebugBreaksClear, button(3)),
+        (UiControl::DebugBeamToggle, button(3)),
+        (UiControl::DebugCatchToggle, button(4)),
+        (UiControl::DebugBreaksClear, button(5)),
+    ]
+}
+
+/// Parse the Break tab's entry as an exception catchpoint: "irq N"
+/// (interrupt level 1-7), "trap N" (TRAP #0-15), or "vec N" (a raw
+/// decimal exception vector number).
+pub fn parse_catch_spec(entry: &str) -> Option<u16> {
+    let mut tokens = entry.split_whitespace();
+    let kind = tokens.next()?;
+    let n = tokens.next()?.parse::<u16>().ok()?;
+    if tokens.next().is_some() {
+        return None;
+    }
+    if kind.eq_ignore_ascii_case("irq") {
+        (1..=7).contains(&n).then_some(24 + n)
+    } else if kind.eq_ignore_ascii_case("trap") {
+        (n <= 15).then_some(32 + n)
+    } else if kind.eq_ignore_ascii_case("vec") {
+        (2..=255).contains(&n).then_some(n)
+    } else {
+        None
+    }
+}
+
+/// Content lines the Copper tab's view must leave blank so the buttons
+/// drawn at the top of the content area do not overlap text.
+pub const COPPER_TAB_HEADER_LINES: usize = 3;
+
+/// Content lines the Memory tab's view must leave blank so the buttons
+/// drawn at the top of the content area do not overlap text.
+pub const MEM_TAB_HEADER_LINES: usize = 3;
+
+// Video tab layout: a header line, the plane/sprite layer-toggle rows,
+// eight sprite rows (decode text plus a thumbnail), and the palette grid.
+const VIDEO_TOGGLE_W: usize = 34;
+const VIDEO_TOGGLE_H: usize = 16;
+const VIDEO_TOGGLE_X: usize = 86;
+const VIDEO_SPRITE_ROW_H: usize = 26;
+/// Sprite thumbnails sample the sprite's captured DMA lines down to this
+/// many rows.
+pub const VIDEO_THUMB_MAX_ROWS: usize = 24;
+const VIDEO_THUMB_X: usize = 560;
+const VIDEO_PALETTE_CELL_W: usize = 20;
+const VIDEO_PALETTE_CELL_H: usize = 8;
+
+fn video_toggle_row_y(rect: Rect, row: usize) -> usize {
+    debug_content_top(rect) + 14 + row * (VIDEO_TOGGLE_H + 4)
+}
+
+fn video_sprites_top(rect: Rect) -> usize {
+    video_toggle_row_y(rect, 2) + 6
+}
+
+fn video_palette_top(rect: Rect) -> usize {
+    video_sprites_top(rect) + 8 * VIDEO_SPRITE_ROW_H + 12
+}
+
+/// The Video tab's 16 layer-isolation toggles: bitplanes 1-8 then
+/// sprites 0-7.
+fn video_tab_toggle_rects(rect: Rect) -> [(UiControl, Rect); 16] {
+    let button = |row: usize, i: usize| Rect {
+        x: rect.x + VIDEO_TOGGLE_X + i * (VIDEO_TOGGLE_W + 4),
+        y: video_toggle_row_y(rect, row),
+        w: VIDEO_TOGGLE_W,
+        h: VIDEO_TOGGLE_H,
+    };
+    std::array::from_fn(|k| {
+        if k < 8 {
+            (UiControl::DebugPlaneToggle(k), button(0, k))
+        } else {
+            (UiControl::DebugSpriteToggle(k - 8), button(1, k - 8))
+        }
+    })
+}
+
+/// The Memory tab's buttons, drawn at the top of the content area.
+fn mem_tab_button_rects(rect: Rect) -> [(UiControl, Rect); 4] {
+    let y = debug_content_top(rect);
+    let button = |i: usize| Rect {
+        x: rect.x + 10 + i * 98,
+        y,
+        w: 90,
+        h: DEBUG_BUTTON_H,
+    };
+    [
+        (UiControl::DebugMemFind, button(0)),
+        (UiControl::DebugMemSave, button(1)),
+        (UiControl::DebugMemWriter, button(2)),
+        (UiControl::DebugMemBits, button(3)),
+    ]
+}
+
+/// The Copper tab's buttons, drawn at the top of the content area.
+fn copper_tab_button_rects(rect: Rect) -> [(UiControl, Rect); 2] {
+    let y = debug_content_top(rect);
+    let button = |i: usize| Rect {
+        x: rect.x + 10 + i * 98,
+        y,
+        w: 90,
+        h: DEBUG_BUTTON_H,
+    };
+    [
+        (UiControl::DebugCopperBreakToggle, button(0)),
+        (UiControl::DebugCopperStep, button(1)),
     ]
 }
 
@@ -714,7 +941,7 @@ fn analyzer_scanline_rect(rect: Rect) -> Rect {
     }
 }
 
-fn analyzer_button_rects(rect: Rect) -> [(UiControl, Rect); 2] {
+fn analyzer_button_rects(rect: Rect) -> [(UiControl, Rect); 3] {
     let y = rect.y + rect.h - DEBUG_BUTTON_H - 6;
     [
         (
@@ -735,7 +962,43 @@ fn analyzer_button_rects(rect: Rect) -> [(UiControl, Rect); 2] {
                 h: DEBUG_BUTTON_H,
             },
         ),
+        (
+            UiControl::AnalyzerRunTo,
+            Rect {
+                x: rect.x + 166,
+                y,
+                w: 76,
+                h: DEBUG_BUTTON_H,
+            },
+        ),
     ]
+}
+
+/// Label of the picture-underlay checkbox on the analyzer's button row.
+const ANALYZER_UNDERLAY_LABEL: &str = "Picture underlay";
+/// Label of the beam-scrub checkbox next to it.
+const ANALYZER_SCRUB_LABEL: &str = "Beam scrub";
+
+/// Hit/draw rect of the picture-underlay checkbox: a 12x12 tick box plus
+/// its label, sitting on the button row right of the To slot button.
+fn analyzer_underlay_rect(rect: Rect) -> Rect {
+    Rect {
+        x: rect.x + 258,
+        y: rect.y + rect.h - DEBUG_BUTTON_H - 6,
+        w: 12 + 6 + ANALYZER_UNDERLAY_LABEL.len() * font::GLYPH_W,
+        h: DEBUG_BUTTON_H,
+    }
+}
+
+/// Hit/draw rect of the beam-scrub checkbox, right of the underlay one.
+fn analyzer_scrub_rect(rect: Rect) -> Rect {
+    let underlay = analyzer_underlay_rect(rect);
+    Rect {
+        x: underlay.x + underlay.w + 16,
+        y: underlay.y,
+        w: 12 + 6 + ANALYZER_SCRUB_LABEL.len() * font::GLYPH_W,
+        h: DEBUG_BUTTON_H,
+    }
 }
 
 fn analyzer_pick_control(rect: Rect, pos: (i32, i32)) -> Option<UiControl> {
@@ -805,6 +1068,53 @@ impl DbgLine {
     }
 }
 
+/// The Memory tab's 1-bpp bitplane view: `stride` bytes per row of plane
+/// data starting at `base`, drawn as pixels (set bit = light) so bitmap
+/// graphics in RAM can be eyeballed directly.
+pub struct MemBitmapView {
+    pub base: u32,
+    pub stride: usize,
+    pub rows: usize,
+    /// Row-major plane data, `stride` bytes per row, `rows` rows.
+    pub data: Vec<u8>,
+}
+
+/// Rows of plane data the Memory tab's bitmap view shows (its fixed
+/// pixel budget inside the panel at 2x2 pixels per bit). The debugger
+/// panel is fixed-size (see `panel_dims`), so this is a constant fit.
+pub fn mem_bitmap_rows() -> usize {
+    let panel_h = 520;
+    let top = TITLE_H + 4 + DEBUG_TAB_H + 6 + MEM_TAB_HEADER_LINES * 10 + 14;
+    let bottom = panel_h - 2 * DEBUG_BUTTON_H - 16;
+    bottom.saturating_sub(top) / 2
+}
+
+/// One sprite row of the Video tab: a decoded state line plus a
+/// thumbnail rendered from the frame's captured sprite DMA lines.
+pub struct SpriteRowView {
+    pub text: String,
+    /// Thumbnail pixels, 16 wide by `thumb_rows`, already in framebuffer
+    /// RGBA; 0 marks a transparent sprite pixel.
+    pub thumb: Vec<u32>,
+    pub thumb_rows: usize,
+}
+
+/// The Video tab: bitplane/sprite layer isolation and visual chip state.
+pub struct VideoView {
+    /// BPLCON0/DMACON decode line.
+    pub header: String,
+    /// Bit n set = bitplane n drawn (the debug isolation mask).
+    pub plane_mask: u8,
+    /// Planes active in BPLCON0, to grey out toggles beyond the mode.
+    pub nplanes: usize,
+    /// Bit n set = sprite n drawn.
+    pub sprite_mask: u8,
+    pub sprites: Vec<SpriteRowView>,
+    /// Palette swatches in framebuffer RGBA: 32 entries (OCS/ECS) or the
+    /// full 256 (AGA).
+    pub palette: Vec<u32>,
+}
+
 pub struct DebuggerView {
     /// False while the machine is paused (the debugger's usual state).
     pub running: bool,
@@ -815,6 +1125,10 @@ pub struct DebuggerView {
     pub status: String,
     /// Pre-formatted content lines of the active tab.
     pub lines: Vec<DbgLine>,
+    /// The Memory tab's bitplane view, when its Bits mode is active.
+    pub bitmap: Option<MemBitmapView>,
+    /// The Video tab's layer/palette view. Some only when it is active.
+    pub video: Option<VideoView>,
     /// Structured data for the Audio tab's per-channel mute buttons and
     /// oscilloscopes. Some only when the Audio tab is active; the plain text
     /// is also mirrored into `lines` for headless/text use.
@@ -844,7 +1158,33 @@ pub struct AudioRowView {
 pub struct AnalyzerMarker {
     pub vpos: u16,
     pub hpos: u16,
-    pub label: String,
+    /// Custom-register word offset into $DFF000 of the write.
+    pub offset: u16,
+    pub value: u16,
+    /// Writer: "cpu", "irq" (CPU inside the Copper-triggered interrupt
+    /// window), or "copper".
+    pub source: &'static str,
+}
+
+impl AnalyzerMarker {
+    fn label(&self) -> String {
+        format!(
+            "{} {}=${:04X} v{} h{}",
+            self.source,
+            crate::debugger::custom_reg_name(self.offset & 0x01FE),
+            self.value,
+            self.vpos,
+            self.hpos,
+        )
+    }
+
+    /// Whether this marker sits close enough to beam slot
+    /// (`vpos`, `hpos`) to be reported for it: within a line vertically
+    /// and two colour clocks horizontally, roughly one heatmap pixel.
+    fn near(&self, vpos: usize, hpos: usize) -> bool {
+        (i64::from(self.vpos) - vpos as i64).abs() <= 1
+            && (i64::from(self.hpos) - hpos as i64).abs() <= 2
+    }
 }
 
 pub struct AnalyzerTraceView {
@@ -867,6 +1207,14 @@ pub struct AnalyzerTraceView {
     pub selected_owner_code: u8,
     pub owners: Vec<u8>,
     pub markers: Vec<AnalyzerMarker>,
+    /// Frame-start display window: (v_start, v_stop) beam lines (stop
+    /// already unwrapped past 255 where applicable) and (h_start, h_stop)
+    /// in colour clocks. None when DIW is unprogrammed.
+    pub diw_v: Option<(u16, u16)>,
+    pub diw_h_cck: Option<(u16, u16)>,
+    /// Frame-start bitplane fetch bounds (DDFSTRT, DDFSTOP) in colour
+    /// clocks.
+    pub ddf_cck: Option<(u16, u16)>,
 }
 
 impl AnalyzerTraceView {
@@ -886,17 +1234,31 @@ impl AnalyzerTraceView {
     }
 }
 
+/// Beam-space render of the traced frame for the analyzer's picture
+/// underlay. Row 0 is beam line `visible_start_vpos`; each colour clock
+/// spans four hi-res pixels from `display_hpos_start` (the same footprint
+/// as the heatmap's white display box), so no presentation recentring may
+/// be applied to this buffer.
+pub struct AnalyzerUnderlayView {
+    pub fb: std::rc::Rc<Vec<u32>>,
+    pub rows: usize,
+}
+
 pub struct FrameAnalyzerView {
     pub running: bool,
     pub status: String,
     pub trace: Option<AnalyzerTraceView>,
+    pub underlay: Option<AnalyzerUnderlayView>,
+    /// Beam scrubbing: the underlay shows only what the CRT had drawn up
+    /// to the selected slot; the rest ghosts at low brightness.
+    pub scrub: bool,
 }
 
 pub enum PanelViewData {
     About(AboutView),
     Shortcuts,
     Calibration(CalibrationView),
-    Debugger(DebuggerView),
+    Debugger(Box<DebuggerView>),
     FrameAnalyzer(Box<FrameAnalyzerView>),
 }
 
@@ -1311,9 +1673,53 @@ fn draw_debugger(
                 UiControl::DebugBreakToggle => "Break +/-",
                 UiControl::DebugWatchToggle => "Watch +/-",
                 UiControl::DebugRegToggle => "Reg +/-",
+                UiControl::DebugBeamToggle => "Beam +/-",
+                UiControl::DebugCatchToggle => "Catch +/-",
                 _ => "Clear all",
             };
-            let enabled = control == UiControl::DebugBreaksClear || panel.entry_addr().is_some();
+            let enabled = match control {
+                UiControl::DebugBreaksClear => true,
+                UiControl::DebugBeamToggle => parse_beam_spec(&panel.entry).is_some(),
+                UiControl::DebugCatchToggle => parse_catch_spec(&panel.entry).is_some(),
+                _ => panel.entry_addr().is_some(),
+            };
+            draw_text_button(
+                frame,
+                button_rect,
+                label,
+                enabled,
+                hover == Some(control),
+                scale,
+            );
+        }
+    }
+    // Copper-tab buttons at the top of the content area (the view leaves
+    // COPPER_TAB_HEADER_LINES blank so text starts below them).
+    if panel.tab == DebugTab::Copper {
+        for (control, button_rect) in copper_tab_button_rects(rect) {
+            let (label, enabled) = match control {
+                UiControl::DebugCopperBreakToggle => ("CBreak +/-", panel.entry_addr().is_some()),
+                _ => ("CStep", true),
+            };
+            draw_text_button(
+                frame,
+                button_rect,
+                label,
+                enabled,
+                hover == Some(control),
+                scale,
+            );
+        }
+    }
+    // Memory-tab buttons at the top of the content area.
+    if panel.tab == DebugTab::Memory {
+        for (control, button_rect) in mem_tab_button_rects(rect) {
+            let (label, enabled) = match control {
+                UiControl::DebugMemFind => ("Find", panel.find_pattern().is_some()),
+                UiControl::DebugMemSave => ("Save...", panel.region_spec().is_some()),
+                UiControl::DebugMemWriter => ("Writer?", panel.entry_addr().is_some()),
+                _ => (if panel.mem_view_bits { "Hex" } else { "Bits" }, true),
+            };
             draw_text_button(
                 frame,
                 button_rect,
@@ -1354,6 +1760,18 @@ fn draw_debugger(
             );
         }
     }
+    // The Memory tab's bitplane view, drawn below its caption lines.
+    if panel.tab == DebugTab::Memory {
+        if let Some(bitmap) = &view.bitmap {
+            draw_mem_bitmap(frame, rect, bitmap, scale);
+        }
+    }
+    // The Video tab is drawn as a custom graphical layout.
+    if panel.tab == DebugTab::Video {
+        if let Some(video) = &view.video {
+            draw_video_tab(frame, rect, video, hover, scale);
+        }
+    }
     // Transport buttons and the hex-entry box.
     for (control, button_rect) in debug_button_rects(rect) {
         match control {
@@ -1387,6 +1805,7 @@ fn draw_debugger(
                     UiControl::DebugStepOut => "Step Out",
                     UiControl::DebugStepFrame => "Frame",
                     UiControl::DebugRunTo => "Run to $",
+                    UiControl::DebugRunLine => "Line",
                     UiControl::DebugReverseStep => "< Step",
                     UiControl::DebugReverseFrame => "< Frame",
                     UiControl::DebugReverseRun => "< Run",
@@ -1426,6 +1845,174 @@ fn draw_debugger(
                 );
             }
         }
+    }
+}
+
+/// Draw the Memory tab's 1-bpp plane view: 2x2 pixels per bit, set bits
+/// light, clipped to the panel width (a wide stride simply runs off the
+/// right edge, like a real overwide screen).
+fn draw_mem_bitmap(frame: &mut [u8], rect: Rect, bitmap: &MemBitmapView, scale: usize) {
+    let origin_x = rect.x + 10;
+    let origin_y = rect.y + TITLE_H + 4 + DEBUG_TAB_H + 6 + MEM_TAB_HEADER_LINES * 10 + 14;
+    let max_w = rect.w.saturating_sub(20);
+    let plot = Rect {
+        x: origin_x,
+        y: origin_y,
+        w: (bitmap.stride * 8 * 2).min(max_w),
+        h: bitmap.rows * 2,
+    };
+    fill_rect(frame, scale_rect(plot, scale), rgba(16, 18, 20), scale);
+    let set = rgba(214, 224, 230);
+    for row in 0..bitmap.rows {
+        for byte_col in 0..bitmap.stride {
+            let Some(&byte) = bitmap.data.get(row * bitmap.stride + byte_col) else {
+                continue;
+            };
+            if byte == 0 {
+                continue;
+            }
+            for bit in 0..8 {
+                if byte & (0x80 >> bit) == 0 {
+                    continue;
+                }
+                let x = (byte_col * 8 + bit) * 2;
+                if x + 2 > max_w {
+                    break;
+                }
+                fill_rect(
+                    frame,
+                    scale_rect(
+                        Rect {
+                            x: origin_x + x,
+                            y: origin_y + row * 2,
+                            w: 2,
+                            h: 2,
+                        },
+                        scale,
+                    ),
+                    set,
+                    scale,
+                );
+            }
+        }
+    }
+    draw_outline(frame, plot, BUTTON_EDGE_LIGHT, scale);
+}
+
+/// Draw the Video tab: the BPLCON0/DMACON header, the plane and sprite
+/// layer-isolation toggle rows, eight sprite rows (decode text plus a
+/// thumbnail from the frame's sprite DMA), and the palette grid.
+fn draw_video_tab(
+    frame: &mut [u8],
+    rect: Rect,
+    video: &VideoView,
+    hover: Option<UiControl>,
+    scale: usize,
+) {
+    let content_top = debug_content_top(rect);
+    draw_panel_text(
+        frame,
+        rect.x + 10,
+        content_top,
+        &video.header,
+        PANEL_TEXT_HILIGHT,
+        1,
+        scale,
+    );
+    for (row, label) in ["Planes", "Sprites"].iter().enumerate() {
+        draw_panel_text(
+            frame,
+            rect.x + 10,
+            video_toggle_row_y(rect, row) + (VIDEO_TOGGLE_H - 8) / 2,
+            label,
+            PANEL_TEXT,
+            1,
+            scale,
+        );
+    }
+    for (control, button_rect) in video_tab_toggle_rects(rect) {
+        let (label, shown, exists) = match control {
+            UiControl::DebugPlaneToggle(plane) => (
+                format!("{}", plane + 1),
+                video.plane_mask & (1 << plane) != 0,
+                plane < video.nplanes,
+            ),
+            UiControl::DebugSpriteToggle(sprite) => (
+                format!("{sprite}"),
+                video.sprite_mask & (1 << sprite) != 0,
+                true,
+            ),
+            _ => continue,
+        };
+        // A hidden layer draws with the disabled text style so the
+        // toggle row doubles as the isolation-state display; planes
+        // beyond the current BPLCON0 depth stay clickable (a mid-frame
+        // Copper can raise the depth) but are marked with a dot.
+        let label = if exists { label } else { format!("{label}.") };
+        draw_text_button(
+            frame,
+            button_rect,
+            &label,
+            shown,
+            hover == Some(control),
+            scale,
+        );
+    }
+    let sprites_top = video_sprites_top(rect);
+    for (sprite, row) in video.sprites.iter().enumerate() {
+        let y = sprites_top + sprite * VIDEO_SPRITE_ROW_H;
+        draw_panel_text(frame, rect.x + 10, y + 4, &row.text, PANEL_TEXT, 1, scale);
+        // Thumbnail: 16 sprite pixels wide at 2x, one panel pixel per
+        // sampled DMA line, over a dark backdrop.
+        let thumb = Rect {
+            x: rect.x + VIDEO_THUMB_X,
+            y,
+            w: 16 * 2,
+            h: VIDEO_SPRITE_ROW_H.saturating_sub(2),
+        };
+        fill_rect(frame, scale_rect(thumb, scale), rgba(14, 16, 18), scale);
+        for line in 0..row.thumb_rows.min(thumb.h) {
+            for x in 0..16usize {
+                let pix = row.thumb[line * 16 + x];
+                if pix == 0 {
+                    continue;
+                }
+                fill_rect(
+                    frame,
+                    scale_rect(
+                        Rect {
+                            x: thumb.x + x * 2,
+                            y: thumb.y + line,
+                            w: 2,
+                            h: 1,
+                        },
+                        scale,
+                    ),
+                    pix,
+                    scale,
+                );
+            }
+        }
+        draw_outline(frame, thumb, BUTTON_EDGE_DARK, scale);
+    }
+    let palette_top = video_palette_top(rect);
+    draw_panel_text(
+        frame,
+        rect.x + 10,
+        palette_top,
+        &format!("Palette ({} entries)", video.palette.len()),
+        PANEL_TEXT_DIM,
+        1,
+        scale,
+    );
+    for (idx, &color) in video.palette.iter().enumerate() {
+        let cell = Rect {
+            x: rect.x + 10 + (idx % 32) * VIDEO_PALETTE_CELL_W,
+            y: palette_top + 12 + (idx / 32) * VIDEO_PALETTE_CELL_H,
+            w: VIDEO_PALETTE_CELL_W - 1,
+            h: VIDEO_PALETTE_CELL_H - 1,
+        };
+        fill_rect(frame, scale_rect(cell, scale), color, scale);
     }
 }
 
@@ -1748,13 +2335,74 @@ fn trace_y(rect: Rect, vpos: usize, rows: usize) -> usize {
     rect.y + (vpos.min(rows.saturating_sub(1)) * rect.h / rows.max(1))
 }
 
-fn draw_owner_heatmap(frame: &mut [u8], rect: Rect, trace: &AnalyzerTraceView, scale: usize) {
+/// Halve each colour channel of an RGBA pixel, keeping it opaque. Dims the
+/// picture underlay so the DMA colours drawn over it stay readable.
+fn dim_rgba(pix: u32) -> u32 {
+    ((pix >> 1) & 0x007F_7F7F) | 0xFF00_0000
+}
+
+/// Deep-dim an RGBA pixel to an eighth, keeping it opaque: the ghost of
+/// the not-yet-drawn region while beam scrubbing.
+fn ghost_rgba(pix: u32) -> u32 {
+    ((pix >> 3) & 0x001F_1F1F) | 0xFF00_0000
+}
+
+/// Sample the picture underlay for heatmap pixel (`x`, `vpos`): `x` is the
+/// horizontal heatmap pixel (mapped at hi-res precision, four pixels per
+/// colour clock) and `vpos` the already-resolved beam line.
+fn underlay_sample(
+    underlay: &AnalyzerUnderlayView,
+    trace: &AnalyzerTraceView,
+    rect: Rect,
+    x: usize,
+    vpos: usize,
+) -> Option<u32> {
+    let hires_x = x * trace.cols * 4 / rect.w.max(1);
+    let fb_x = hires_x as i64 - i64::from(trace.display_hpos_start) * 4;
+    let fb_y = vpos as i64 - i64::from(trace.visible_start_vpos);
+    if !(0..FB_WIDTH as i64).contains(&fb_x) || !(0..underlay.rows as i64).contains(&fb_y) {
+        return None;
+    }
+    underlay
+        .fb
+        .get(fb_y as usize * FB_WIDTH + fb_x as usize)
+        .copied()
+}
+
+fn draw_owner_heatmap(
+    frame: &mut [u8],
+    rect: Rect,
+    trace: &AnalyzerTraceView,
+    underlay: Option<&AnalyzerUnderlayView>,
+    scrub: bool,
+    scale: usize,
+) {
     fill_rect(frame, scale_rect(rect, scale), rgba(10, 12, 14), scale);
     for y in 0..rect.h {
         let vpos = y * trace.rows / rect.h.max(1);
         for x in 0..rect.w {
             let hpos = x * trace.cols / rect.w.max(1);
-            let color = owner_color(trace.owner_code_at(vpos, hpos));
+            let code = trace.owner_code_at(vpos, hpos);
+            let mut color = owner_color(code);
+            if let Some(pix) =
+                underlay.and_then(|under| underlay_sample(under, trace, rect, x, vpos))
+            {
+                // Picture shows through idle slots; owned slots blend the
+                // owner colour over the dimmed picture so both read. While
+                // scrubbing, beam positions the CRT has not reached yet
+                // ghost at an eighth brightness.
+                let drawn = !scrub || (vpos, hpos) <= (trace.selected_vpos, trace.selected_hpos);
+                let under_pix = if drawn {
+                    dim_rgba(pix)
+                } else {
+                    ghost_rgba(pix)
+                };
+                color = if code == b'.' {
+                    under_pix
+                } else {
+                    super::blend_rgba(under_pix, color, 176)
+                };
+            }
             fill_rect(
                 frame,
                 scale_rect(
@@ -1796,7 +2444,49 @@ fn draw_owner_heatmap(frame: &mut [u8], rect: Rect, trace: &AnalyzerTraceView, s
         scale,
     );
 
-    for marker in trace.markers.iter().take(80) {
+    // Frame-start DIW box (accent) and DDF fetch-bound verticals (cyan),
+    // spanning the display window's lines. Mid-frame changes to these
+    // registers show up as write markers instead.
+    let diw_rows = trace.diw_v.map(|(v0, v1)| {
+        (
+            trace_y(rect, usize::from(v0).min(trace.rows), trace.rows),
+            trace_y(rect, usize::from(v1).min(trace.rows), trace.rows),
+        )
+    });
+    if let (Some((y0, y1)), Some((h0, h1))) = (diw_rows, trace.diw_h_cck) {
+        let x0 = trace_x(rect, usize::from(h0).min(trace.cols), trace.cols);
+        let x1 = trace_x(rect, usize::from(h1).min(trace.cols), trace.cols);
+        draw_outline_clipped(
+            frame,
+            Rect {
+                x: x0,
+                y: y0,
+                w: x1.saturating_sub(x0).max(1),
+                h: y1.saturating_sub(y0).max(1),
+            },
+            rect,
+            PANEL_TEXT_ACCENT,
+            scale,
+        );
+    }
+    if let (Some((y0, y1)), Some((d0, d1))) = (diw_rows, trace.ddf_cck) {
+        for ddf in [d0, d1] {
+            fill_rect_clipped(
+                frame,
+                Rect {
+                    x: trace_x(rect, usize::from(ddf).min(trace.cols), trace.cols),
+                    y: y0,
+                    w: 1,
+                    h: y1.saturating_sub(y0).max(1),
+                },
+                rect,
+                DDF_LINE,
+                scale,
+            );
+        }
+    }
+
+    for marker in trace.markers.iter() {
         let x = trace_x(rect, marker.hpos as usize, trace.cols);
         let y = trace_y(rect, marker.vpos as usize, trace.rows);
         fill_rect_clipped(
@@ -1982,10 +2672,93 @@ fn draw_owner_counters(
     }
 }
 
+/// The picture-underlay and beam-scrub tick boxes on the analyzer's
+/// button row.
+fn draw_analyzer_checkboxes(
+    frame: &mut [u8],
+    rect: Rect,
+    panel: &FrameAnalyzerPanel,
+    hover: Option<UiControl>,
+    scale: usize,
+) {
+    for (control_rect, label, checked, control) in [
+        (
+            analyzer_underlay_rect(rect),
+            ANALYZER_UNDERLAY_LABEL,
+            panel.show_underlay || panel.show_scrub,
+            UiControl::AnalyzerUnderlay,
+        ),
+        (
+            analyzer_scrub_rect(rect),
+            ANALYZER_SCRUB_LABEL,
+            panel.show_scrub,
+            UiControl::AnalyzerScrub,
+        ),
+    ] {
+        draw_analyzer_checkbox(
+            frame,
+            control_rect,
+            label,
+            checked,
+            hover == Some(control),
+            scale,
+        );
+    }
+}
+
+/// One tick box plus label at `control` on the analyzer's button row.
+fn draw_analyzer_checkbox(
+    frame: &mut [u8],
+    control: Rect,
+    label: &str,
+    checked: bool,
+    hover: bool,
+    scale: usize,
+) {
+    let box_rect = Rect {
+        x: control.x,
+        y: control.y + (control.h - 12) / 2,
+        w: 12,
+        h: 12,
+    };
+    fill_rect(
+        frame,
+        scale_rect(box_rect, scale),
+        if hover { BUTTON_FACE_HOVER } else { ENTRY_BG },
+        scale,
+    );
+    draw_outline(frame, box_rect, BUTTON_EDGE_LIGHT, scale);
+    if checked {
+        fill_rect(
+            frame,
+            scale_rect(
+                Rect {
+                    x: box_rect.x + 3,
+                    y: box_rect.y + 3,
+                    w: 6,
+                    h: 6,
+                },
+                scale,
+            ),
+            PANEL_TEXT_HILIGHT,
+            scale,
+        );
+    }
+    draw_panel_text(
+        frame,
+        box_rect.x + 18,
+        control.y + (control.h - 8) / 2,
+        label,
+        if hover { BUTTON_TEXT } else { PANEL_TEXT },
+        1,
+        scale,
+    );
+}
+
 fn draw_frame_analyzer(
     frame: &mut [u8],
     rect: Rect,
-    _panel: &FrameAnalyzerPanel,
+    panel: &FrameAnalyzerPanel,
     view: &FrameAnalyzerView,
     hover: Option<UiControl>,
     scale: usize,
@@ -2015,7 +2788,8 @@ fn draw_frame_analyzer(
             let label = match control {
                 UiControl::AnalyzerRun if view.running => "Pause",
                 UiControl::AnalyzerRun => "Run",
-                _ => "Frame",
+                UiControl::AnalyzerFrame => "Frame",
+                _ => "To slot",
             };
             draw_text_button(
                 frame,
@@ -2026,6 +2800,7 @@ fn draw_frame_analyzer(
                 scale,
             );
         }
+        draw_analyzer_checkboxes(frame, rect, panel, hover, scale);
         return;
     };
 
@@ -2055,14 +2830,21 @@ fn draw_frame_analyzer(
         frame,
         rect.x + 10,
         rect.y + TITLE_H + 24,
-        "full raster: x=hpos colour clocks, y=vpos beam lines; white box is captured display",
+        "x=hpos colour clocks, y=vpos lines; white=captured display, orange=DIW, cyan=DDF",
         PANEL_TEXT_DIM,
         1,
         scale,
     );
 
     let raster = analyzer_raster_rect(rect);
-    draw_owner_heatmap(frame, raster, trace, scale);
+    draw_owner_heatmap(
+        frame,
+        raster,
+        trace,
+        view.underlay.as_ref(),
+        view.scrub,
+        scale,
+    );
     let counters_x = raster.x + raster.w + 16;
     draw_owner_counters(frame, counters_x, raster.y, trace, scale);
 
@@ -2082,14 +2864,43 @@ fn draw_frame_analyzer(
         1,
         scale,
     );
-    if let Some(marker) = trace.markers.iter().find(|m| {
-        usize::from(m.vpos) == trace.selected_vpos && usize::from(m.hpos) == trace.selected_hpos
-    }) {
+    // Register writes near the point of interest: the hovered heatmap
+    // slot while the pointer is over the raster, the selected slot
+    // otherwise. Nearby means within a heatmap pixel, so markers are
+    // inspectable by pointing at them rather than needing an exact
+    // colour-clock hit.
+    let (probe_vpos, probe_hpos) = match hover {
+        Some(UiControl::AnalyzerPick {
+            x,
+            y,
+            scanline: false,
+        }) => (
+            (usize::from(y) * trace.rows / 1024).min(trace.rows.saturating_sub(1)),
+            (usize::from(x) * trace.cols / 1024).min(trace.cols.saturating_sub(1)),
+        ),
+        _ => (trace.selected_vpos, trace.selected_hpos),
+    };
+    let mut near = trace
+        .markers
+        .iter()
+        .filter(|marker| marker.near(probe_vpos, probe_hpos));
+    let mut marker_text = String::new();
+    for marker in near.by_ref().take(2) {
+        if !marker_text.is_empty() {
+            marker_text.push_str("  |  ");
+        }
+        marker_text.push_str(&marker.label());
+    }
+    let extra = near.count();
+    if extra > 0 {
+        marker_text.push_str(&format!("  (+{extra} more)"));
+    }
+    if !marker_text.is_empty() {
         draw_panel_text(
             frame,
             rect.x + 10,
             raster.y + raster.h + 22,
-            &marker.label,
+            &marker_text,
             PANEL_TEXT_ACCENT,
             1,
             scale,
@@ -2138,12 +2949,15 @@ fn draw_frame_analyzer(
         x += if code == b'.' { 54 } else { 82 };
     }
     y += 18;
-    let marker_text = format!("register markers shown: {}", trace.markers.len().min(80));
+    let marker_count = format!(
+        "register writes marked: {} (hover a slot to inspect)",
+        trace.markers.len()
+    );
     draw_panel_text(
         frame,
         rect.x + 10,
         y,
-        &marker_text,
+        &marker_count,
         PANEL_TEXT_DIM,
         1,
         scale,
@@ -2153,7 +2967,8 @@ fn draw_frame_analyzer(
         let label = match control {
             UiControl::AnalyzerRun if view.running => "Pause",
             UiControl::AnalyzerRun => "Run",
-            _ => "Frame",
+            UiControl::AnalyzerFrame => "Frame",
+            _ => "To slot",
         };
         draw_text_button(
             frame,
@@ -2164,6 +2979,7 @@ fn draw_frame_analyzer(
             scale,
         );
     }
+    draw_analyzer_checkboxes(frame, rect, panel, hover, scale);
 }
 
 // ---------------------------------------------------------------------------
@@ -3199,6 +4015,22 @@ pub fn parse_break_spec(entry: &str) -> Option<(u32, Option<BreakCond>, u32)> {
     Some((addr, cond, ignore))
 }
 
+/// Parse the Break tab's entry as a beam-trap position: decimal
+/// "VPOS" or "VPOS HPOS", matching the beam coordinates the analyzer and
+/// Chipset tab display. `hpos` omitted means the start of the line.
+pub fn parse_beam_spec(entry: &str) -> Option<(u16, Option<u16>)> {
+    let mut tokens = entry.split_whitespace();
+    let vpos = tokens.next()?.parse::<u16>().ok()?;
+    let hpos = match tokens.next() {
+        Some(token) => Some(token.parse::<u16>().ok()?),
+        None => None,
+    };
+    if tokens.next().is_some() {
+        return None;
+    }
+    Some((vpos, hpos))
+}
+
 /// Parse a condition operand: a register name, `M<hex>` for a memory word, or a
 /// bare hex immediate. Register names win over hex (so `D0` is the register,
 /// not `$D0`); write an immediate with a leading zero (`0D0`) to disambiguate.
@@ -3448,6 +4280,120 @@ mod tests {
             ui.control_at((button.x as i32 + 2, button.y as i32 + 2)),
             Some(UiControl::AnalyzerFrame)
         );
+        let underlay = analyzer_underlay_rect(rect);
+        assert_eq!(
+            ui.control_at((underlay.x as i32 + 2, underlay.y as i32 + 2)),
+            Some(UiControl::AnalyzerUnderlay)
+        );
+        // The checkbox must not overlap the transport buttons.
+        for (_, button) in analyzer_button_rects(rect) {
+            assert!(button.x + button.w <= underlay.x || underlay.x + underlay.w <= button.x);
+        }
+    }
+
+    #[test]
+    fn memory_entry_parsers_find_and_region() {
+        let mut panel = DebuggerPanel::new();
+        panel.entry = "C0 FFEE".into();
+        assert_eq!(panel.find_pattern(), Some(vec![0xC0, 0xFF, 0xEE]));
+        panel.entry = "C0FFE".into(); // odd number of hex digits
+        assert_eq!(panel.find_pattern(), None);
+        panel.entry = String::new();
+        assert_eq!(panel.find_pattern(), None);
+
+        panel.entry = "C00000 1000".into();
+        assert_eq!(panel.region_spec(), Some((0xC0_0000, 0x1000)));
+        panel.entry = "C00000".into(); // missing length
+        assert_eq!(panel.region_spec(), None);
+        panel.entry = "C00000 0".into(); // empty region
+        assert_eq!(panel.region_spec(), None);
+    }
+
+    #[test]
+    fn catch_spec_parses_irq_trap_and_vector_forms() {
+        assert_eq!(parse_catch_spec("irq 3"), Some(27));
+        assert_eq!(parse_catch_spec("IRQ 7"), Some(31));
+        assert_eq!(parse_catch_spec("trap 0"), Some(32));
+        assert_eq!(parse_catch_spec("trap 15"), Some(47));
+        assert_eq!(parse_catch_spec("vec 4"), Some(4));
+        assert_eq!(parse_catch_spec("irq 0"), None); // no level-0 interrupt
+        assert_eq!(parse_catch_spec("irq 8"), None);
+        assert_eq!(parse_catch_spec("trap 16"), None);
+        assert_eq!(parse_catch_spec("vec 1"), None); // reset vectors excluded
+        assert_eq!(parse_catch_spec("C033C2"), None); // plain address is not a catch
+        assert_eq!(parse_catch_spec("irq 3 4"), None);
+    }
+
+    #[test]
+    fn analyzer_marker_radius_and_label() {
+        let marker = AnalyzerMarker {
+            vpos: 100,
+            hpos: 50,
+            offset: 0x180,
+            value: 0x0F00,
+            source: "copper",
+        };
+        // Within a line and two colour clocks counts as near.
+        assert!(marker.near(100, 50));
+        assert!(marker.near(101, 52));
+        assert!(marker.near(99, 48));
+        assert!(!marker.near(102, 50));
+        assert!(!marker.near(100, 53));
+        assert_eq!(marker.label(), "copper COLOR00=$0F00 v100 h50");
+    }
+
+    #[test]
+    fn analyzer_underlay_sample_maps_display_box_to_framebuffer() {
+        // A trace shaped like a standard PAL frame: 312 lines of 227 cck,
+        // display box starting at the framebuffer anchor.
+        let trace = AnalyzerTraceView {
+            frame: 1,
+            seconds: 0.0,
+            rows: 312,
+            cols: 227,
+            line_cck: 227,
+            visible_start_vpos: 0x1A,
+            visible_lines: 285,
+            display_hpos_start: 0x30,
+            display_hpos_end: 0x30 + (FB_WIDTH as u32 / 4),
+            owner_cck: [0; 9],
+            blitter_busy_cck: 0,
+            blitter_starve_cck: [0; 9],
+            partial: false,
+            selected_vpos: 0,
+            selected_hpos: 0,
+            selected_owner: "idle",
+            selected_owner_code: b'.',
+            owners: vec![b'.'; 312 * 227],
+            markers: Vec::new(),
+            diw_v: None,
+            diw_h_cck: None,
+            ddf_cck: None,
+        };
+        let mut fb = vec![0u32; FB_WIDTH * 285];
+        fb[0] = 0xFF11_2233; // beam (0x1A, 0x30): framebuffer origin
+        let underlay = AnalyzerUnderlayView {
+            fb: std::rc::Rc::new(fb),
+            rows: 285,
+        };
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            w: 448,
+            h: 246,
+        };
+        // Heatmap pixel exactly at the display box origin lands on fb[0]:
+        // the first x whose hi-res mapping reaches display_hpos_start * 4.
+        let x0 = (0..rect.w)
+            .find(|x| x * trace.cols * 4 / rect.w >= 0x30 * 4)
+            .unwrap();
+        assert_eq!(
+            underlay_sample(&underlay, &trace, rect, x0, 0x1A),
+            Some(0xFF11_2233)
+        );
+        // Left of the display box or above the visible window: no sample.
+        assert_eq!(underlay_sample(&underlay, &trace, rect, 0, 0x1A), None);
+        assert_eq!(underlay_sample(&underlay, &trace, rect, x0, 0), None);
     }
 
     #[test]
@@ -3477,12 +4423,17 @@ mod tests {
         let tab = debug_tab_rect(rect, 3);
         assert_eq!(
             ui.control_at((tab.x as i32 + 2, tab.y as i32 + 2)),
-            Some(UiControl::DebugTab(DebugTab::Audio))
+            Some(UiControl::DebugTab(DebugTab::Video))
         );
         let tab = debug_tab_rect(rect, 4);
         assert_eq!(
             ui.control_at((tab.x as i32 + 2, tab.y as i32 + 2)),
-            Some(UiControl::DebugTab(DebugTab::Memory))
+            Some(UiControl::DebugTab(DebugTab::Audio))
+        );
+        let tab = debug_tab_rect(rect, 6);
+        assert_eq!(
+            ui.control_at((tab.x as i32 + 2, tab.y as i32 + 2)),
+            Some(UiControl::DebugTab(DebugTab::Break))
         );
         let (control, step) = debug_button_rects(rect)[1];
         assert_eq!(control, UiControl::DebugStep);
@@ -3713,11 +4664,16 @@ mod tests {
             markers: vec![AnalyzerMarker {
                 vpos: 0,
                 hpos: 1,
-                label: "copper v=000 h=001 $096=0000".to_string(),
+                offset: 0x096,
+                value: 0x0000,
+                source: "copper",
             }],
+            diw_v: None,
+            diw_h_cck: None,
+            ddf_cck: None,
         };
 
-        draw_owner_heatmap(&mut frame, raster, &trace, scale);
+        draw_owner_heatmap(&mut frame, raster, &trace, None, false, scale);
 
         let pixel = |frame: &[u8], x: usize, y: usize| -> [u8; 4] {
             frame[(y * w + x) * 4..(y * w + x) * 4 + 4]
@@ -3891,13 +4847,15 @@ mod tests {
                 DbgLine::plain(line)
             });
         }
-        let data = PanelViewData::Debugger(DebuggerView {
+        let data = PanelViewData::Debugger(Box::new(DebuggerView {
             running: false,
             reverse_available: true,
             status: "paused frame 1234 24.68s".to_string(),
             lines,
+            bitmap: None,
+            video: None,
             audio: None,
-        });
+        }));
         let mut panel = DebuggerPanel::new();
         panel.entry = "C00000".to_string();
         panel.entry_active = true;
@@ -3934,13 +4892,15 @@ mod tests {
         lines.push(DbgLine::plain("  $C09580  now 0012"));
         lines.push(DbgLine::plain("Register watches (stop on write):"));
         lines.push(DbgLine::plain("  DMACON ($096)"));
-        let data = PanelViewData::Debugger(DebuggerView {
+        let data = PanelViewData::Debugger(Box::new(DebuggerView {
             running: false,
             reverse_available: true,
             status: "paused frame 1234 24.68s".to_string(),
             lines,
+            bitmap: None,
+            video: None,
             audio: None,
-        });
+        }));
         let mut panel = DebuggerPanel::new();
         panel.tab = DebugTab::Break;
         panel.entry = "DFF096".to_string();
@@ -4030,13 +4990,15 @@ mod tests {
             channels,
             cd,
         };
-        let data = PanelViewData::Debugger(DebuggerView {
+        let data = PanelViewData::Debugger(Box::new(DebuggerView {
             running: false,
             reverse_available: true,
             status: "paused frame 1234 24.68s".to_string(),
             lines: Vec::new(),
+            bitmap: None,
+            video: None,
             audio: Some(audio),
-        });
+        }));
         let mut panel = DebuggerPanel::new();
         panel.tab = DebugTab::Audio;
         let ui = UiState {
@@ -4058,6 +5020,182 @@ mod tests {
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "debugger-audio");
+
+        // Video tab: layer-isolation toggles (plane 2 and sprite 5 hidden),
+        // sprite rows with synthetic thumbnails, and an AGA palette grid.
+        let mut frame = vec![0u8; w * h * 4];
+        let sprites = (0..8)
+            .map(|sprite| {
+                let rows = 16 + sprite;
+                let mut thumb = vec![0u32; rows * 16];
+                for row in 0..rows {
+                    for x in 0..16usize {
+                        if (x + row) % 4 == sprite % 4 {
+                            thumb[row * 16 + x] =
+                                rgba(80 + 20 * sprite as u32, 200 - 20 * sprite as u32, 160);
+                        }
+                    }
+                }
+                SpriteRowView {
+                    text: format!(
+                        "SPR{sprite} v44-{} h{} dma lines {rows}",
+                        60 + sprite,
+                        128 + sprite * 16
+                    ),
+                    thumb,
+                    thumb_rows: rows,
+                }
+            })
+            .collect();
+        let palette = (0..256)
+            .map(|idx| {
+                let idx = idx as u32;
+                rgba((idx * 5) & 0xFF, (idx * 3) & 0xFF, 255 - (idx & 0xFF))
+            })
+            .collect();
+        let data = PanelViewData::Debugger(Box::new(DebuggerView {
+            running: false,
+            reverse_available: true,
+            status: "paused frame 1234 24.68s".to_string(),
+            lines: Vec::new(),
+            bitmap: None,
+            video: Some(VideoView {
+                header: "BPLCON0 5200: 5 planes lores  HAM   DMACON: BPLEN on SPREN on".to_string(),
+                plane_mask: 0xFD,
+                nplanes: 5,
+                sprite_mask: 0xDF,
+                sprites,
+                palette,
+            }),
+            audio: None,
+        }));
+        let mut panel = DebuggerPanel::new();
+        panel.tab = DebugTab::Video;
+        let ui = UiState {
+            menu_open: false,
+            panel: Some(Panel::Debugger(panel)),
+        };
+        draw(
+            &mut frame,
+            scale,
+            &ui,
+            Some(UiControl::DebugPlaneToggle(0)),
+            Some(&data),
+            false,
+            WarpSpeed::Max,
+            false,
+            false,
+            JoystickInputMode::Gamepad,
+            PixelAspect::Tv,
+        );
+        assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
+        save(&frame, "debugger-video");
+
+        // Frame analyzer with the picture underlay ticked: a synthetic PAL
+        // frame trace (refresh/bitplane/copper/blitter stripes) over a
+        // gradient picture, to eyeball the beam-grid alignment of the
+        // underlay against the white display box.
+        let mut frame = vec![0u8; w * h * 4];
+        let (rows, cols) = (312usize, 227usize);
+        let mut owners = vec![b'.'; rows * cols];
+        for vpos in 0..rows {
+            for hpos in 0..cols {
+                let owner = if hpos < 4 {
+                    b'R'
+                } else if (60..260).contains(&vpos) && (0x38..0xD0).contains(&hpos) && hpos % 2 == 0
+                {
+                    b'B'
+                } else if hpos == 0x28 && vpos % 8 == 0 {
+                    b'C'
+                } else if (100..140).contains(&vpos) && (0x10..0x28).contains(&hpos) {
+                    b'L'
+                } else if (0x0D..0x11).contains(&hpos) && vpos % 2 == 0 {
+                    b'A'
+                } else {
+                    b'.'
+                };
+                owners[vpos * cols + hpos] = owner;
+            }
+        }
+        let underlay_rows = 285usize;
+        let mut under_fb = vec![0u32; FB_WIDTH * underlay_rows];
+        for (i, pix) in under_fb.iter_mut().enumerate() {
+            let (x, y) = (i % FB_WIDTH, i / FB_WIDTH);
+            // Gradient plus vertical bars so structure is visible through
+            // the dimming.
+            let bar = if (x / 64) % 2 == 0 { 96 } else { 0 };
+            *pix = rgba(
+                (x * 255 / FB_WIDTH) as u32,
+                (y * 255 / underlay_rows) as u32 / 2 + bar,
+                160,
+            );
+        }
+        let trace = AnalyzerTraceView {
+            frame: 1234,
+            seconds: 24.68,
+            rows,
+            cols,
+            line_cck: 227,
+            visible_start_vpos: 0x1A,
+            visible_lines: underlay_rows,
+            display_hpos_start: 0x30,
+            display_hpos_end: 227,
+            owner_cck: [4400, 19000, 0, 0, 1600, 900, 2400, 6200, 36000],
+            blitter_busy_cck: 3000,
+            blitter_starve_cck: [0, 400, 0, 0, 0, 0, 0, 200, 0],
+            partial: false,
+            selected_vpos: 120,
+            selected_hpos: 0x40,
+            selected_owner: "bitplane",
+            selected_owner_code: b'B',
+            owners,
+            markers: vec![AnalyzerMarker {
+                vpos: 0x40,
+                hpos: 0x28,
+                offset: 0x180,
+                value: 0x0F00,
+                source: "copper",
+            }],
+            // A standard PAL display window and fetch bounds, so the
+            // preview shows the DIW box and DDF verticals.
+            diw_v: Some((0x2C, 0x12C)),
+            diw_h_cck: Some((0x81 / 2, 0x1C1 / 2)),
+            ddf_cck: Some((0x38, 0xD0)),
+        };
+        let data = PanelViewData::FrameAnalyzer(Box::new(FrameAnalyzerView {
+            running: false,
+            status: "paused frame 1234 24.68s".to_string(),
+            scrub: true,
+            trace: Some(trace),
+            underlay: Some(AnalyzerUnderlayView {
+                fb: std::rc::Rc::new(under_fb),
+                rows: underlay_rows,
+            }),
+        }));
+        let mut panel = FrameAnalyzerPanel::new();
+        panel.show_underlay = true;
+        panel.show_scrub = true;
+        panel.selected_vpos = 120;
+        panel.selected_hpos = 0x40;
+        let ui = UiState {
+            menu_open: false,
+            panel: Some(Panel::FrameAnalyzer(panel)),
+        };
+        draw(
+            &mut frame,
+            scale,
+            &ui,
+            Some(UiControl::AnalyzerUnderlay),
+            Some(&data),
+            false,
+            WarpSpeed::Max,
+            false,
+            false,
+            JoystickInputMode::Gamepad,
+            PixelAspect::Tv,
+        );
+        assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
+        save(&frame, "frame-analyzer");
 
         // Configuration screen: an A1200 on the Memory tab.
         let mut frame = vec![0u8; w * h * 4];

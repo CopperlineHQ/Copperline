@@ -786,6 +786,33 @@ pub struct Bus {
     ui_reg_watches: Vec<u16>,
     #[serde(skip)]
     ui_reg_hit: Option<UiRegHit>,
+    /// Debugger beam traps and the first pending hit since the debugger
+    /// last polled. Checked where the beam advances (`advance_beam`), so a
+    /// hit lands at exact beam granularity and even while the CPU sits in
+    /// STOP. Transient debug state, never serialized.
+    #[serde(skip)]
+    ui_beam_traps: Vec<BeamTrap>,
+    #[serde(skip)]
+    ui_beam_hit: Option<(u16, u16)>,
+    /// Debugger Copper breakpoints (instruction addresses) and the first
+    /// pending hit since last polled. A hit fires when the live Copper's
+    /// PC first arrives at a breakpointed address -- before the
+    /// instruction there executes -- whether it got there by sequential
+    /// fetch, COPJMP, a CPU strobe write, or the vertical-blank restart.
+    /// Transient debug state, never serialized.
+    #[serde(skip)]
+    ui_copper_breaks: Vec<u32>,
+    #[serde(skip)]
+    ui_copper_hit: Option<(u32, u16, u16)>,
+    /// Debugger video-layer isolation (Video tab). Transient debug state:
+    /// the Default of all-layers-visible is restored on state load.
+    #[serde(skip)]
+    ui_layer_masks: UiLayerMasks,
+    /// The Copper PC at the last breakpoint check, so arrival at an
+    /// address fires once instead of on every eligible colour clock the
+    /// PC rests there.
+    #[serde(skip)]
+    ui_copper_last_pc: u32,
     blitter_slowdown_cpu_misses: u8,
     slice_bus_advanced_cck: u32,
     slice_bus_tick: AgnusTick,
@@ -885,6 +912,36 @@ pub struct UiRegHit {
     pub source: &'static str,
     pub vpos: u16,
     pub hpos: u16,
+}
+
+/// A debugger beam trap: halt when the Agnus beam reaches (or first passes)
+/// a position. `hpos: None` fires at the first colour clock of the line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BeamTrap {
+    pub vpos: u16,
+    pub hpos: Option<u16>,
+    /// Remove after the first hit (a run-to-position trap).
+    pub once: bool,
+}
+
+/// Debugger video-layer isolation masks: bit n set = bitplane n /
+/// sprite n is drawn. Output-only filters applied where pixels resolve
+/// to colours -- collision accumulation, playfield priority, and every
+/// CPU-visible value always use the true data, so hiding a layer can
+/// never perturb the emulation. All layers visible by default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UiLayerMasks {
+    pub planes: u8,
+    pub sprites: u8,
+}
+
+impl Default for UiLayerMasks {
+    fn default() -> Self {
+        Self {
+            planes: 0xFF,
+            sprites: 0xFF,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1862,6 +1919,12 @@ impl Bus {
             last_frame_bus_trace: None,
             ui_reg_watches: Vec::new(),
             ui_reg_hit: None,
+            ui_beam_traps: Vec::new(),
+            ui_beam_hit: None,
+            ui_copper_breaks: Vec::new(),
+            ui_copper_hit: None,
+            ui_copper_last_pc: 0,
+            ui_layer_masks: UiLayerMasks::default(),
             blitter_slowdown_cpu_misses: 0,
             slice_bus_advanced_cck: 0,
             slice_bus_tick: AgnusTick::default(),
@@ -1910,6 +1973,165 @@ impl Bus {
     /// Take the pending custom-register watch hit, if any.
     pub fn take_ui_reg_hit(&mut self) -> Option<UiRegHit> {
         self.ui_reg_hit.take()
+    }
+
+    /// The debugger's armed beam traps.
+    pub fn ui_beam_traps(&self) -> &[BeamTrap] {
+        &self.ui_beam_traps
+    }
+
+    /// Add a persistent beam trap at (`vpos`, `hpos`), or remove it when
+    /// one is already set there. Returns true when the trap is now set.
+    pub fn ui_toggle_beam_trap(&mut self, vpos: u16, hpos: Option<u16>) -> bool {
+        match self
+            .ui_beam_traps
+            .iter()
+            .position(|trap| trap.vpos == vpos && trap.hpos == hpos && !trap.once)
+        {
+            Some(pos) => {
+                self.ui_beam_traps.remove(pos);
+                false
+            }
+            None => {
+                self.ui_beam_traps.push(BeamTrap {
+                    vpos,
+                    hpos,
+                    once: false,
+                });
+                true
+            }
+        }
+    }
+
+    /// Arm a one-shot run-to-position beam trap, replacing any previous
+    /// one-shot (only one run-to target makes sense at a time).
+    pub fn ui_arm_beam_trap_once(&mut self, vpos: u16, hpos: Option<u16>) {
+        self.ui_beam_traps.retain(|trap| !trap.once);
+        self.ui_beam_traps.push(BeamTrap {
+            vpos,
+            hpos,
+            once: true,
+        });
+    }
+
+    /// Drop an armed one-shot run-to trap (a run-to that ended early).
+    pub fn ui_disarm_beam_trap_once(&mut self) {
+        self.ui_beam_traps.retain(|trap| !trap.once);
+    }
+
+    pub fn ui_clear_beam_traps(&mut self) {
+        self.ui_beam_traps.clear();
+        self.ui_beam_hit = None;
+    }
+
+    /// Take the pending beam-trap hit `(vpos, hpos)`, if any.
+    pub fn take_ui_beam_hit(&mut self) -> Option<(u16, u16)> {
+        self.ui_beam_hit.take()
+    }
+
+    /// The debugger's armed Copper breakpoint addresses.
+    pub fn ui_copper_breaks(&self) -> &[u32] {
+        &self.ui_copper_breaks
+    }
+
+    /// Add a Copper breakpoint at a chip-RAM instruction address, or
+    /// remove it when already set. Returns true when now set.
+    pub fn ui_toggle_copper_break(&mut self, addr: u32) -> bool {
+        let addr = addr & 0x00FF_FFFE;
+        match self.ui_copper_breaks.iter().position(|&a| a == addr) {
+            Some(pos) => {
+                self.ui_copper_breaks.remove(pos);
+                false
+            }
+            None => {
+                self.ui_copper_breaks.push(addr);
+                true
+            }
+        }
+    }
+
+    pub fn ui_clear_copper_breaks(&mut self) {
+        self.ui_copper_breaks.clear();
+        self.ui_copper_hit = None;
+    }
+
+    /// Take the pending Copper breakpoint hit `(pc, vpos, hpos)`, if any.
+    pub fn take_ui_copper_hit(&mut self) -> Option<(u32, u16, u16)> {
+        self.ui_copper_hit.take()
+    }
+
+    /// The Copper's completed-instruction count, for copper stepping.
+    pub fn copper_instructions_retired(&self) -> u64 {
+        self.copper.instructions_retired()
+    }
+
+    /// The debugger's video-layer isolation masks (Video tab).
+    pub fn ui_layer_masks(&self) -> UiLayerMasks {
+        self.ui_layer_masks
+    }
+
+    /// Toggle bitplane `plane` in the presented picture. Returns true
+    /// when the plane is now shown.
+    pub fn ui_toggle_layer_plane(&mut self, plane: usize) -> bool {
+        self.ui_layer_masks.planes ^= 1 << (plane & 7);
+        self.ui_layer_masks.planes & (1 << (plane & 7)) != 0
+    }
+
+    /// Toggle sprite `sprite` in the presented picture. Returns true
+    /// when the sprite is now shown.
+    pub fn ui_toggle_layer_sprite(&mut self, sprite: usize) -> bool {
+        self.ui_layer_masks.sprites ^= 1 << (sprite & 7);
+        self.ui_layer_masks.sprites & (1 << (sprite & 7)) != 0
+    }
+
+    /// Fire a Copper breakpoint when the live Copper's PC has newly
+    /// arrived at a breakpointed address. Called from the live copper
+    /// step path (never the blitter-deadline predictor's cloned
+    /// simulation) and after CPU strobe writes, so every way the PC can
+    /// move is observed.
+    pub(super) fn check_ui_copper_breaks(&mut self) {
+        let pc = self.copper.pc();
+        if pc == self.ui_copper_last_pc {
+            return;
+        }
+        self.ui_copper_last_pc = pc;
+        if self.ui_copper_hit.is_none() && self.ui_copper_breaks.contains(&pc) {
+            self.ui_copper_hit = Some((
+                pc,
+                self.agnus.vpos.min(u32::from(u16::MAX)) as u16,
+                self.agnus.hpos.min(u32::from(u16::MAX)) as u16,
+            ));
+        }
+    }
+
+    /// Fire beam traps crossed by the last beam advance from `old`
+    /// (exclusive) to the current position (inclusive), in beam order.
+    /// `old_frame_lines` bounds targets within the frame the advance
+    /// started in, so a trap on a line the scan never reaches does not
+    /// fire spuriously at the frame wrap. Fired one-shot traps are
+    /// removed; persistent traps stay armed and re-fire every frame.
+    pub(super) fn check_ui_beam_traps(
+        &mut self,
+        old: (u32, u32),
+        old_frame_lines: u32,
+        new_frames: u32,
+    ) {
+        let cur = (self.agnus.vpos, self.agnus.hpos);
+        let hit_slot = &mut self.ui_beam_hit;
+        self.ui_beam_traps.retain(|trap| {
+            let target = (u32::from(trap.vpos), u32::from(trap.hpos.unwrap_or(0)));
+            let hit = match new_frames {
+                0 => old < target && target <= cur,
+                1 => (target > old && target.0 < old_frame_lines) || target <= cur,
+                // The advance spanned whole frames: any reachable
+                // position was crossed.
+                _ => target.0 < old_frame_lines || target <= cur,
+            };
+            if hit && hit_slot.is_none() {
+                *hit_slot = Some((trap.vpos, trap.hpos.unwrap_or(0)));
+            }
+            !(hit && trap.once)
+        });
     }
 
     pub fn attach_gayle(&mut self, gayle: Gayle) {

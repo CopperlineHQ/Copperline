@@ -10,7 +10,7 @@ use super::launcher::{LauncherField, LauncherState, MachineSetup, StatusMessage}
 use super::ui::{self, Panel, UiControl, UiState};
 use super::{
     bitplane, font, present_height, FrameGeometry, FB_HEIGHT, FB_PIXELS, FB_WIDTH,
-    HOST_SHORTCUT_MODIFIER_LABEL, MAX_FB_PIXELS,
+    HOST_SHORTCUT_MODIFIER_LABEL, MAX_FB_PIXELS, MAX_VISIBLE_LINES,
 };
 use crate::audio::{AudioSink, CpalSink};
 use crate::bus::{
@@ -493,6 +493,17 @@ pub struct App {
     last_tool_redraw: Instant,
     debugger_panel: Option<ui::DebuggerPanel>,
     frame_analyzer_panel: Option<ui::FrameAnalyzerPanel>,
+    /// Beam-space render of the analyzer trace's frame for the picture
+    /// underlay: unlike `fb`, no presentation recentring or TV masking is
+    /// applied, so its pixels line up with the DMA trace's beam grid.
+    /// Shared with the per-redraw view via Rc to avoid copying the frame.
+    analyzer_underlay_fb: std::rc::Rc<Vec<u32>>,
+    /// Rows valid in `analyzer_underlay_fb` (the traced frame's scan height).
+    analyzer_underlay_rows: usize,
+    /// Emulated frame `analyzer_underlay_fb` was rendered for.
+    analyzer_underlay_frame: Option<u64>,
+    /// Recycled snapshot buffers for the underlay's side-effect-free render.
+    analyzer_underlay_input: Option<bitplane::RenderInput>,
     render_worker: Option<RenderWorker>,
     render_recycle_fb: Vec<u32>,
     /// Spent frame snapshot handed back by the render worker; reused by the
@@ -830,6 +841,10 @@ impl App {
             last_tool_redraw: Instant::now(),
             debugger_panel: None,
             frame_analyzer_panel: None,
+            analyzer_underlay_fb: std::rc::Rc::new(Vec::new()),
+            analyzer_underlay_rows: 0,
+            analyzer_underlay_frame: None,
+            analyzer_underlay_input: None,
             render_worker,
             render_recycle_fb: Vec::new(),
             render_recycle_input: None,
@@ -2444,6 +2459,17 @@ impl App {
                 }
                 self.request_redraw();
             }
+            WindowEvent::MouseWheel { delta, .. } => {
+                // Scroll the Memory tab's hex/bitmap view: one display row
+                // per wheel notch, a chunk for pixel-precise trackpads.
+                if kind == ToolPanelKind::Debugger {
+                    let rows = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => -y as i32,
+                        MouseScrollDelta::PixelDelta(pos) => -(pos.y / 12.0) as i32,
+                    };
+                    self.debugger_mem_scroll(rows);
+                }
+            }
             WindowEvent::RedrawRequested => self.draw_tool_window(kind),
             _ => {}
         }
@@ -2454,6 +2480,9 @@ impl App {
             *self.tool_window_slot(kind) = None;
             return;
         };
+        if kind == ToolPanelKind::FrameAnalyzer {
+            self.ensure_analyzer_underlay();
+        }
         let ui_data = self.build_tool_panel_view_data(kind);
         let hover = self
             .tool_window(kind)
@@ -2555,6 +2584,7 @@ impl App {
                 self.activate_tool_control(ToolPanelKind::Debugger, control)
             }
             UiControl::DebugRunTo => self.activate_tool_control(ToolPanelKind::Debugger, control),
+            UiControl::DebugRunLine => self.activate_tool_control(ToolPanelKind::Debugger, control),
             UiControl::DebugReverseStep => {
                 self.activate_tool_control(ToolPanelKind::Debugger, control)
             }
@@ -2581,6 +2611,30 @@ impl App {
             UiControl::DebugRegToggle => {
                 self.activate_tool_control(ToolPanelKind::Debugger, control)
             }
+            UiControl::DebugBeamToggle => {
+                self.activate_tool_control(ToolPanelKind::Debugger, control)
+            }
+            UiControl::DebugCatchToggle => {
+                self.activate_tool_control(ToolPanelKind::Debugger, control)
+            }
+            UiControl::DebugCopperBreakToggle => {
+                self.activate_tool_control(ToolPanelKind::Debugger, control)
+            }
+            UiControl::DebugCopperStep => {
+                self.activate_tool_control(ToolPanelKind::Debugger, control)
+            }
+            UiControl::DebugMemFind => self.activate_tool_control(ToolPanelKind::Debugger, control),
+            UiControl::DebugMemSave => self.activate_tool_control(ToolPanelKind::Debugger, control),
+            UiControl::DebugMemWriter => {
+                self.activate_tool_control(ToolPanelKind::Debugger, control)
+            }
+            UiControl::DebugMemBits => self.activate_tool_control(ToolPanelKind::Debugger, control),
+            UiControl::DebugPlaneToggle(_) => {
+                self.activate_tool_control(ToolPanelKind::Debugger, control)
+            }
+            UiControl::DebugSpriteToggle(_) => {
+                self.activate_tool_control(ToolPanelKind::Debugger, control)
+            }
             UiControl::DebugBreaksClear => {
                 self.activate_tool_control(ToolPanelKind::Debugger, control)
             }
@@ -2591,6 +2645,15 @@ impl App {
                 self.activate_tool_control(ToolPanelKind::FrameAnalyzer, control)
             }
             UiControl::AnalyzerFrame => {
+                self.activate_tool_control(ToolPanelKind::FrameAnalyzer, control)
+            }
+            UiControl::AnalyzerUnderlay => {
+                self.activate_tool_control(ToolPanelKind::FrameAnalyzer, control)
+            }
+            UiControl::AnalyzerScrub => {
+                self.activate_tool_control(ToolPanelKind::FrameAnalyzer, control)
+            }
+            UiControl::AnalyzerRunTo => {
                 self.activate_tool_control(ToolPanelKind::FrameAnalyzer, control)
             }
             UiControl::AnalyzerPick { x, y, scanline } => {
@@ -2703,6 +2766,7 @@ impl App {
             (ToolPanelKind::Debugger, UiControl::DebugStepOut) => self.debugger_step_out(),
             (ToolPanelKind::Debugger, UiControl::DebugStepFrame) => self.debugger_step_frame(),
             (ToolPanelKind::Debugger, UiControl::DebugRunTo) => self.debugger_run_to(),
+            (ToolPanelKind::Debugger, UiControl::DebugRunLine) => self.debugger_run_to_line_end(),
             (ToolPanelKind::Debugger, UiControl::DebugReverseStep) => self.debugger_reverse_step(),
             (ToolPanelKind::Debugger, UiControl::DebugReverseFrame) => {
                 self.debugger_reverse_frame()
@@ -2726,6 +2790,24 @@ impl App {
             }
             (ToolPanelKind::Debugger, UiControl::DebugRegToggle) => {
                 self.debugger_toggle_reg_watch()
+            }
+            (ToolPanelKind::Debugger, UiControl::DebugBeamToggle) => {
+                self.debugger_toggle_beam_trap()
+            }
+            (ToolPanelKind::Debugger, UiControl::DebugCatchToggle) => self.debugger_toggle_catch(),
+            (ToolPanelKind::Debugger, UiControl::DebugCopperBreakToggle) => {
+                self.debugger_toggle_copper_break()
+            }
+            (ToolPanelKind::Debugger, UiControl::DebugCopperStep) => self.debugger_step_copper(),
+            (ToolPanelKind::Debugger, UiControl::DebugMemFind) => self.debugger_mem_find(),
+            (ToolPanelKind::Debugger, UiControl::DebugMemSave) => self.debugger_mem_save_region(),
+            (ToolPanelKind::Debugger, UiControl::DebugMemWriter) => self.debugger_mem_writer(),
+            (ToolPanelKind::Debugger, UiControl::DebugMemBits) => self.debugger_mem_toggle_bits(),
+            (ToolPanelKind::Debugger, UiControl::DebugPlaneToggle(plane)) => {
+                self.debugger_toggle_plane(plane)
+            }
+            (ToolPanelKind::Debugger, UiControl::DebugSpriteToggle(sprite)) => {
+                self.debugger_toggle_sprite(sprite)
             }
             (ToolPanelKind::Debugger, UiControl::DebugBreaksClear) => {
                 self.emu.machine.ui_breaks_clear();
@@ -2754,6 +2836,15 @@ impl App {
             }
             (ToolPanelKind::FrameAnalyzer, UiControl::AnalyzerPick { x, y, scanline }) => {
                 self.frame_analyzer_select(x, y, scanline)
+            }
+            (ToolPanelKind::FrameAnalyzer, UiControl::AnalyzerUnderlay) => {
+                self.frame_analyzer_toggle_underlay()
+            }
+            (ToolPanelKind::FrameAnalyzer, UiControl::AnalyzerScrub) => {
+                self.frame_analyzer_toggle_scrub()
+            }
+            (ToolPanelKind::FrameAnalyzer, UiControl::AnalyzerRunTo) => {
+                self.frame_analyzer_run_to_slot()
             }
             _ => {}
         }
@@ -2895,12 +2986,32 @@ impl App {
             KeyCode::KeyO => Some(UiControl::DebugStepOver),
             KeyCode::KeyU => Some(UiControl::DebugStepOut),
             KeyCode::KeyF => Some(UiControl::DebugStepFrame),
+            KeyCode::KeyL => Some(UiControl::DebugRunLine),
+            KeyCode::KeyC => Some(UiControl::DebugCopperStep),
             KeyCode::KeyR => Some(UiControl::DebugRun),
             _ => None,
         };
         if let Some(control) = control {
             self.activate_tool_control(ToolPanelKind::Debugger, control);
             return true;
+        }
+        // Memory tab: cursor/page keys scroll the hex or bitmap view.
+        if self
+            .debugger_panel
+            .as_ref()
+            .is_some_and(|panel| panel.tab == ui::DebugTab::Memory)
+        {
+            let rows = match code {
+                KeyCode::ArrowUp => Some(-1),
+                KeyCode::ArrowDown => Some(1),
+                KeyCode::PageUp => Some(-16),
+                KeyCode::PageDown => Some(16),
+                _ => None,
+            };
+            if let Some(rows) = rows {
+                self.debugger_mem_scroll(rows);
+                return true;
+            }
         }
         false
     }
@@ -2912,6 +3023,9 @@ impl App {
         let control = match code {
             KeyCode::KeyF => Some(UiControl::AnalyzerFrame),
             KeyCode::KeyR => Some(UiControl::AnalyzerRun),
+            KeyCode::KeyU => Some(UiControl::AnalyzerUnderlay),
+            KeyCode::KeyB => Some(UiControl::AnalyzerScrub),
+            KeyCode::KeyT => Some(UiControl::AnalyzerRunTo),
             _ => None,
         };
         if let Some(control) = control {
@@ -3088,6 +3202,66 @@ impl App {
     fn frame_analyzer_step_frame(&mut self) {
         self.emu.bus_mut().set_frame_analyzer_enabled(true);
         self.debugger_step_frame();
+    }
+
+    fn frame_analyzer_toggle_underlay(&mut self) {
+        if let Some(panel) = self.frame_analyzer_panel.as_mut() {
+            panel.show_underlay = !panel.show_underlay;
+            // Dropping the underlay also ends a scrub riding on it.
+            if !panel.show_underlay {
+                panel.show_scrub = false;
+            }
+            self.request_redraw();
+        }
+    }
+
+    fn frame_analyzer_toggle_scrub(&mut self) {
+        if let Some(panel) = self.frame_analyzer_panel.as_mut() {
+            panel.show_scrub = !panel.show_scrub;
+            self.request_redraw();
+        }
+    }
+
+    /// Re-render the picture underlay when the analyzer's traced frame has
+    /// changed. The render is a pure function of a `RenderInput` snapshot
+    /// (`render_from_input`), so unlike the `bitplane::render` wrapper it
+    /// never feeds collision bits or timing stats back into the machine:
+    /// inspecting a frame cannot perturb the emulation. The result stays in
+    /// beam coordinates (no presentation post-processing), matching the DMA
+    /// trace's grid.
+    fn ensure_analyzer_underlay(&mut self) {
+        let want = self
+            .frame_analyzer_panel
+            .as_ref()
+            .is_some_and(|panel| panel.underlay_active());
+        if !want {
+            return;
+        }
+        let Some(frame) = self.emu.bus().frame_bus_trace().map(|trace| trace.frame) else {
+            return;
+        };
+        if self.analyzer_underlay_frame == Some(frame) && self.analyzer_underlay_rows != 0 {
+            return;
+        }
+        match &mut self.analyzer_underlay_input {
+            Some(input) => input.refill_from_bus(self.emu.bus()),
+            slot @ None => *slot = Some(bitplane::RenderInput::from_bus(self.emu.bus())),
+        }
+        let input = self
+            .analyzer_underlay_input
+            .as_ref()
+            .expect("underlay render input just filled");
+        let fb = std::rc::Rc::make_mut(&mut self.analyzer_underlay_fb);
+        fb.resize(MAX_FB_PIXELS, 0);
+        fb.fill(0);
+        let _ = bitplane::render_from_input(input, fb.as_mut_slice());
+        self.analyzer_underlay_rows = self
+            .emu
+            .bus()
+            .frame_geometry()
+            .visible_lines
+            .min(MAX_VISIBLE_LINES);
+        self.analyzer_underlay_frame = Some(frame);
     }
 
     fn frame_analyzer_select(&mut self, x: u16, y: u16, scanline: bool) {
@@ -3413,6 +3587,12 @@ impl App {
                 self.analyzer_dragging = false;
                 self.frame_analyzer_panel = None;
                 self.frame_analyzer_tool_window = None;
+                // Release the underlay buffers (frame render + up-to-2MiB
+                // chip RAM snapshot) while the analyzer is closed.
+                self.analyzer_underlay_fb = std::rc::Rc::new(Vec::new());
+                self.analyzer_underlay_rows = 0;
+                self.analyzer_underlay_frame = None;
+                self.analyzer_underlay_input = None;
             }
         }
         self.resize_for_active_panel();
@@ -3838,6 +4018,183 @@ impl App {
         self.finish_render_for_current_frame();
     }
 
+    /// Run to the start of the next scanline (the end of the current one),
+    /// stopping at exact beam granularity via a one-shot beam trap. The
+    /// raster analogue of Step: walk a Copper effect line by line.
+    fn debugger_run_to_line_end(&mut self) {
+        const RUN_TO_LINE_BUDGET: usize = 2_000_000;
+        let (vpos, frame_lines) = {
+            let bus = self.emu.bus();
+            (bus.agnus.vpos, bus.agnus.current_frame_lines())
+        };
+        let target = ((vpos + 1) % frame_lines.max(1)).min(u32::from(u16::MAX)) as u16;
+        self.run_to_beam_target(target, None, RUN_TO_LINE_BUDGET, "Line end");
+    }
+
+    /// Toggle a beam trap from the entry box ("VPOS [HPOS]", decimal).
+    fn debugger_toggle_beam_trap(&mut self) {
+        let spec = self
+            .debugger_panel
+            .as_ref()
+            .and_then(|panel| ui::parse_beam_spec(&panel.entry));
+        let Some((vpos, hpos)) = spec else {
+            self.show_osd("Beam: type \"VPOS [HPOS]\" (decimal) first");
+            return;
+        };
+        let set = self.emu.bus_mut().ui_toggle_beam_trap(vpos, hpos);
+        let mut msg = format!("Beam trap v{vpos}");
+        if let Some(hpos) = hpos {
+            msg.push_str(&format!(" h{hpos}"));
+        }
+        msg.push_str(if set { " set" } else { " removed" });
+        self.show_osd(msg);
+    }
+
+    /// Toggle bitplane `plane` in the presented picture (Video tab).
+    fn debugger_toggle_plane(&mut self, plane: usize) {
+        let shown = self.emu.bus_mut().ui_toggle_layer_plane(plane);
+        self.show_osd(format!(
+            "Bitplane {} {}",
+            plane + 1,
+            if shown { "shown" } else { "hidden" }
+        ));
+        self.rerender_after_debug_view_change();
+    }
+
+    /// Toggle sprite `sprite` in the presented picture (Video tab).
+    fn debugger_toggle_sprite(&mut self, sprite: usize) {
+        let shown = self.emu.bus_mut().ui_toggle_layer_sprite(sprite);
+        self.show_osd(format!(
+            "Sprite {sprite} {}",
+            if shown { "shown" } else { "hidden" }
+        ));
+        self.rerender_after_debug_view_change();
+    }
+
+    /// Re-render and re-present the current frame after a debug-only view
+    /// change (layer isolation). Uses the pure snapshot render, so unlike
+    /// the normal frame path nothing feeds back into the machine: toggling
+    /// a layer while paused cannot perturb the emulation.
+    fn rerender_after_debug_view_change(&mut self) {
+        let visible_start_vpos = self.emu.bus().frame_visible_start_vpos();
+        let h_shift = if self.hcenter {
+            presentation_h_shift_for(&self.emu.bus().frame_render_base(), self.overscan)
+        } else {
+            0
+        };
+        bitplane::render_display_only(self.emu.bus(), &mut self.fb);
+        let geometry = self.emu.bus().frame_geometry();
+        let field_rows = post_process_rendered_field(
+            &mut self.fb,
+            geometry,
+            visible_start_vpos,
+            h_shift,
+            self.overscan,
+        );
+        let base = self.emu.bus().frame_render_base();
+        self.deinterlacer.push_field(
+            &self.fb,
+            field_rows,
+            base.bplcon0 & 0x0004 != 0,
+            base.long_field,
+            !geometry.programmable,
+        );
+        self.refresh_present_from_deinterlacer();
+        self.request_redraw();
+    }
+
+    /// Toggle an exception catchpoint from the entry box ("irq N",
+    /// "trap N", or "vec N").
+    fn debugger_toggle_catch(&mut self) {
+        let spec = self
+            .debugger_panel
+            .as_ref()
+            .and_then(|panel| ui::parse_catch_spec(&panel.entry));
+        let Some(vector) = spec else {
+            self.show_osd("Catch: type \"irq N\", \"trap N\", or \"vec N\" first");
+            return;
+        };
+        let set = self.emu.machine.ui_toggle_catch(vector);
+        self.show_osd(format!(
+            "Catch {} {}",
+            crate::debugger::exception_vector_name(vector),
+            if set { "set" } else { "removed" }
+        ));
+    }
+
+    /// Toggle a Copper breakpoint at the entry address (Copper tab).
+    fn debugger_toggle_copper_break(&mut self) {
+        let Some(addr) = self
+            .debugger_panel
+            .as_ref()
+            .and_then(|panel| panel.entry_addr())
+        else {
+            self.show_osd("CBreak: type a hex Copper-list address first");
+            return;
+        };
+        let set = self.emu.bus_mut().ui_toggle_copper_break(addr);
+        self.show_osd(format!(
+            "Copper breakpoint ${:06X} {}",
+            addr & 0x00FF_FFFE,
+            if set { "set" } else { "removed" }
+        ));
+    }
+
+    /// Run until the Copper retires one instruction (Copper tab CStep).
+    fn debugger_step_copper(&mut self) {
+        const COPPER_STEP_BUDGET: usize = 2_000_000;
+        self.paused = true;
+        self.sync_live_audio_suspension();
+        self.last_debug_stop = None;
+        match self.emu.debug_step_copper(COPPER_STEP_BUDGET) {
+            Ok(true) => {
+                self.surface_debug_stop();
+            }
+            Ok(false) => self.show_osd("Copper did not advance (stopped or DMA off)"),
+            Err(e) => {
+                error!("copper step halted: {e:?}");
+                self.cpu_halted = true;
+                self.sync_live_audio_suspension();
+            }
+        }
+        self.finish_render_for_current_frame();
+    }
+
+    /// Run until the beam reaches the analyzer's selected slot, stopping
+    /// at exact colour-clock granularity via a one-shot beam trap.
+    fn frame_analyzer_run_to_slot(&mut self) {
+        const RUN_TO_SLOT_BUDGET: usize = 2_000_000;
+        let Some((vpos, hpos)) = self
+            .frame_analyzer_panel
+            .as_ref()
+            .map(|panel| (panel.selected_vpos, panel.selected_hpos))
+        else {
+            return;
+        };
+        self.emu.bus_mut().set_frame_analyzer_enabled(true);
+        self.run_to_beam_target(vpos, Some(hpos), RUN_TO_SLOT_BUDGET, "Beam slot");
+    }
+
+    /// Shared run-to-beam-position transport: pause bookkeeping, the
+    /// bounded run, stop reporting, and the display refresh.
+    fn run_to_beam_target(&mut self, vpos: u16, hpos: Option<u16>, budget: usize, what: &str) {
+        self.paused = true;
+        self.sync_live_audio_suspension();
+        self.last_debug_stop = None;
+        match self.emu.debug_run_to_beam(vpos, hpos, budget) {
+            Ok(true) => {
+                self.surface_debug_stop();
+            }
+            Ok(false) => self.show_osd(format!("{what} not reached (budget)")),
+            Err(e) => {
+                error!("debugger run-to-beam halted: {e:?}");
+                self.cpu_halted = true;
+                self.sync_live_audio_suspension();
+            }
+        }
+        self.finish_render_for_current_frame();
+    }
+
     /// Step one instruction backward, reconstructed from the snapshot ring.
     fn debugger_reverse_step(&mut self) {
         use crate::timetravel::ReverseOutcome;
@@ -3982,13 +4339,193 @@ impl App {
     fn debugger_mem_page(&mut self, direction: i32) {
         if let Some(panel) = self.debugger_panel.as_mut() {
             if panel.tab == ui::DebugTab::Memory {
-                let delta = ui::MEM_PAGE_BYTES;
+                // Bits mode pages by one bitmap screenful; hex by one page.
+                let delta = if panel.mem_view_bits {
+                    (panel.mem_bitmap_stride * ui::mem_bitmap_rows() as u32).max(1)
+                } else {
+                    ui::MEM_PAGE_BYTES
+                };
                 panel.mem_addr = if direction < 0 {
                     panel.mem_addr.wrapping_sub(delta)
                 } else {
                     panel.mem_addr.wrapping_add(delta)
-                } & 0x00FF_FFF0;
+                } & 0x00FF_FFFF;
+                if !panel.mem_view_bits {
+                    panel.mem_addr &= !0xF;
+                }
             }
+        }
+    }
+
+    /// Scroll the Memory tab by `rows` display rows (16 bytes each in the
+    /// hex view, one stride in the bitmap view).
+    fn debugger_mem_scroll(&mut self, rows: i32) {
+        if let Some(panel) = self.debugger_panel.as_mut() {
+            if panel.tab == ui::DebugTab::Memory && rows != 0 {
+                let step = if panel.mem_view_bits {
+                    panel.mem_bitmap_stride.max(1)
+                } else {
+                    16
+                };
+                let delta = step.wrapping_mul(rows.unsigned_abs());
+                panel.mem_addr = if rows < 0 {
+                    panel.mem_addr.wrapping_sub(delta)
+                } else {
+                    panel.mem_addr.wrapping_add(delta)
+                } & 0x00FF_FFFF;
+                self.request_redraw();
+            }
+        }
+    }
+
+    /// Find the entry's hex byte pattern in CPU-visible memory, starting
+    /// past the previous hit (or the current page) and wrapping around
+    /// the 24-bit space once.
+    fn debugger_mem_find(&mut self) {
+        let Some(panel) = self.debugger_panel.as_ref() else {
+            return;
+        };
+        let Some(pattern) = panel.find_pattern() else {
+            self.show_osd("Find: type hex byte pairs first (e.g. 4E75)");
+            return;
+        };
+        let start = panel
+            .mem_last_find
+            .map(|addr| addr.wrapping_add(1))
+            .unwrap_or(panel.mem_addr)
+            & 0x00FF_FFFF;
+        const SPACE: u64 = 0x0100_0000;
+        const CHUNK: usize = 4096;
+        let mut offset = 0u64;
+        let mut found = None;
+        while offset < SPACE {
+            let base = ((u64::from(start) + offset) % SPACE) as u32;
+            // Overlap chunks by the pattern length so matches spanning a
+            // chunk boundary are seen.
+            let bytes = self
+                .emu
+                .machine
+                .debug_read_memory(base, CHUNK + pattern.len() - 1);
+            if let Some(hit) = bytes
+                .windows(pattern.len())
+                .position(|window| window == pattern)
+            {
+                found = Some(base.wrapping_add(hit as u32) & 0x00FF_FFFF);
+                break;
+            }
+            offset += CHUNK as u64;
+        }
+        match found {
+            Some(addr) => {
+                if let Some(panel) = self.debugger_panel.as_mut() {
+                    panel.mem_last_find = Some(addr);
+                    panel.mem_addr = addr & !0xF;
+                }
+                self.show_osd(format!("Found at ${addr:06X}"));
+            }
+            None => self.show_osd("Pattern not found"),
+        }
+        self.request_redraw();
+    }
+
+    /// Save the entry's "ADDR LEN" region of CPU-visible memory to a file
+    /// picked in a save dialog (the GUI counterpart of the headless
+    /// COPPERLINE_DBG_RAMDUMP knob).
+    fn debugger_mem_save_region(&mut self) {
+        let Some((addr, len)) = self
+            .debugger_panel
+            .as_ref()
+            .and_then(|panel| panel.region_spec())
+        else {
+            self.show_osd("Save: type \"ADDR LEN\" (hex) first");
+            return;
+        };
+        self.suspend_live_audio_for_host_io();
+        let picked = rfd::FileDialog::new()
+            .set_title("Save memory region")
+            .set_file_name(format!("mem-{addr:06X}-{len:X}.bin"))
+            .save_file();
+        if let Some(path) = picked {
+            let bytes = self.emu.machine.debug_read_memory(addr, len as usize);
+            match std::fs::write(&path, &bytes) {
+                Ok(()) => self.show_osd(format!(
+                    "Saved ${addr:06X}+${len:X} to {}",
+                    display_file_name(&path)
+                )),
+                Err(e) => {
+                    warn!("memory region save failed ({}): {e:#}", path.display());
+                    self.show_osd("Memory save failed (see log)");
+                }
+            }
+        }
+        self.finish_host_io_pause();
+    }
+
+    /// Report the last instruction that wrote the word at the entry
+    /// address, replayed from the reverse-debug snapshot ring (the GUI
+    /// counterpart of GDB's "monitor last-writer").
+    fn debugger_mem_writer(&mut self) {
+        use crate::timetravel::ReverseOutcome;
+        let Some(addr) = self
+            .debugger_panel
+            .as_ref()
+            .and_then(|panel| panel.entry_addr())
+        else {
+            self.show_osd("Writer: type a hex address first");
+            return;
+        };
+        let addr = addr & 0x00FF_FFFE;
+        let before = self.emu.retired_instructions();
+        match self.emu.tt_last_writer(addr, before) {
+            Ok(ReverseOutcome::Found(rec)) => {
+                let message = format!(
+                    "${:06X}: {:04X}->{:04X} by pc ${:06X} (frame {})",
+                    rec.addr,
+                    rec.old,
+                    rec.new,
+                    rec.pc & 0x00FF_FFFF,
+                    rec.frame
+                );
+                info!("last-writer {message}");
+                self.last_debug_stop = Some(format!("Last writer {message}"));
+                self.show_osd(message);
+            }
+            Ok(ReverseOutcome::NotFound) => {
+                self.show_osd(format!("No write to ${addr:06X} in retained history"))
+            }
+            Ok(ReverseOutcome::BeyondHistory) => {
+                self.show_osd(format!("Write to ${addr:06X} predates history"))
+            }
+            Err(e) => {
+                error!("last-writer failed: {e:?}");
+                self.show_osd("Last-writer failed (see log)");
+            }
+        }
+        self.finish_render_for_current_frame();
+        self.request_redraw();
+    }
+
+    /// Toggle the Memory tab between hex and the 1-bpp bitplane view. An
+    /// entry holding a small decimal number sets the bitmap row stride.
+    fn debugger_mem_toggle_bits(&mut self) {
+        if let Some(panel) = self.debugger_panel.as_mut() {
+            if let Some(stride) = panel
+                .entry
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .filter(|stride| (1..=512).contains(stride))
+            {
+                panel.mem_bitmap_stride = stride;
+            }
+            panel.mem_view_bits = !panel.mem_view_bits;
+            let mode = if panel.mem_view_bits {
+                format!("bitmap (stride {} bytes)", panel.mem_bitmap_stride)
+            } else {
+                "hex".to_string()
+            };
+            self.show_osd(format!("Memory view: {mode}"));
+            self.request_redraw();
         }
     }
 
@@ -4050,9 +4587,9 @@ impl App {
             Panel::Calibration(session) => Some(ui::PanelViewData::Calibration(
                 build_calibration_view(session),
             )),
-            Panel::Debugger(panel) => {
-                Some(ui::PanelViewData::Debugger(self.build_debugger_view(panel)))
-            }
+            Panel::Debugger(panel) => Some(ui::PanelViewData::Debugger(Box::new(
+                self.build_debugger_view(panel),
+            ))),
             Panel::FrameAnalyzer(panel) => Some(ui::PanelViewData::FrameAnalyzer(Box::new(
                 self.build_frame_analyzer_view(panel),
             ))),
@@ -4063,10 +4600,9 @@ impl App {
 
     fn build_tool_panel_view_data(&self, kind: ToolPanelKind) -> Option<ui::PanelViewData> {
         match kind {
-            ToolPanelKind::Debugger => self
-                .debugger_panel
-                .as_ref()
-                .map(|panel| ui::PanelViewData::Debugger(self.build_debugger_view(panel))),
+            ToolPanelKind::Debugger => self.debugger_panel.as_ref().map(|panel| {
+                ui::PanelViewData::Debugger(Box::new(self.build_debugger_view(panel)))
+            }),
             ToolPanelKind::FrameAnalyzer => self.frame_analyzer_panel.as_ref().map(|panel| {
                 ui::PanelViewData::FrameAnalyzer(Box::new(self.build_frame_analyzer_view(panel)))
             }),
@@ -4086,8 +4622,16 @@ impl App {
                 running: !self.paused,
                 status,
                 trace: None,
+                underlay: None,
+                scrub: false,
             };
         };
+        let underlay = (panel.underlay_active() && self.analyzer_underlay_rows > 0).then(|| {
+            ui::AnalyzerUnderlayView {
+                fb: std::rc::Rc::clone(&self.analyzer_underlay_fb),
+                rows: self.analyzer_underlay_rows,
+            }
+        });
         let selected_vpos = usize::from(panel.selected_vpos).min(trace.rows.saturating_sub(1));
         let selected_hpos = usize::from(panel.selected_hpos).min(trace.cols.saturating_sub(1));
         let selected_owner_code = trace.owner_code_at(selected_vpos, selected_hpos);
@@ -4098,32 +4642,51 @@ impl App {
                 owners.extend_from_slice(row);
             }
         }
+        // Marker capacity bounds the per-redraw copy, not what is worth
+        // seeing: a Copper writing a palette split on every line stays
+        // well inside it.
+        const MARKER_CAP: usize = 4000;
         let markers = bus
             .frame_render_events()
             .iter()
-            .take(240)
-            .map(|event| {
-                let off = event.offset & 0x01FE;
-                ui::AnalyzerMarker {
-                    vpos: event.vpos.min(u32::from(u16::MAX)) as u16,
-                    hpos: event.hpos.min(u32::from(u16::MAX)) as u16,
-                    label: format!(
-                        "{} v={:03} h={:03} ${off:03X}={:04X}",
-                        match event.source {
-                            BeamWriteSource::Cpu => "cpu",
-                            BeamWriteSource::CpuCopperIrq => "irq",
-                            BeamWriteSource::Copper => "copper",
-                        },
-                        event.vpos,
-                        event.hpos,
-                        event.value,
-                    ),
-                }
+            .take(MARKER_CAP)
+            .map(|event| ui::AnalyzerMarker {
+                vpos: event.vpos.min(u32::from(u16::MAX)) as u16,
+                hpos: event.hpos.min(u32::from(u16::MAX)) as u16,
+                offset: event.offset & 0x01FE,
+                value: event.value,
+                source: match event.source {
+                    BeamWriteSource::Cpu => "cpu",
+                    BeamWriteSource::CpuCopperIrq => "irq",
+                    BeamWriteSource::Copper => "copper",
+                },
             })
             .collect();
+        // Frame-start DIW/DDF overlays, decoded with the display model's
+        // own rules (DiwHigh carries the OCS implicit bits or the ECS
+        // DIWHIGH extension; DIW h units are lores pixels, two per cck).
+        let base = bus.frame_render_base();
+        let diw_programmed = !(base.diwstrt == 0 && base.diwstop == 0);
+        let (diw_v, diw_h_cck) = if diw_programmed {
+            let v0 = base.diwhigh.v_start(base.diwstrt);
+            let mut v1 = base.diwhigh.v_stop(base.diwstop);
+            if v1 <= v0 {
+                // Hardware vstop wrap: a stop at or above the start means
+                // the window runs past the 8-bit rollover.
+                v1 += 0x100;
+            }
+            let h0 = base.diwhigh.h_start(base.diwstrt) / 2;
+            let h1 = base.diwhigh.h_stop(base.diwstop) / 2;
+            (Some((v0, v1)), Some((h0, h1)))
+        } else {
+            (None, None)
+        };
+        let ddf_cck = diw_programmed.then_some((base.ddfstrt & 0x00FE, base.ddfstop & 0x00FE));
         ui::FrameAnalyzerView {
             running: !self.paused,
             status,
+            underlay,
+            scrub: panel.show_scrub,
             trace: Some(ui::AnalyzerTraceView {
                 frame: trace.frame,
                 seconds: trace.seconds,
@@ -4144,6 +4707,9 @@ impl App {
                 selected_owner_code,
                 owners,
                 markers,
+                diw_v,
+                diw_h_cck,
+                ddf_cck,
             }),
         }
     }
@@ -4173,6 +4739,8 @@ impl App {
         }
         let read = |addr: u32| bus.peek_word_any(addr);
         let mut lines: Vec<ui::DbgLine> = Vec::new();
+        let mut bitmap: Option<ui::MemBitmapView> = None;
+        let mut video: Option<ui::VideoView> = None;
         let mut audio: Option<ui::AudioScopeView> = None;
         match panel.tab {
             ui::DebugTab::Cpu => {
@@ -4291,24 +4859,140 @@ impl App {
                     )));
                 }
             }
+            ui::DebugTab::Video => {
+                let base = bus.frame_render_base();
+                let aga = base.agnus_revision == crate::chipset::agnus::AgnusRevision::AgaAlice;
+                let bplcon0 = base.bplcon0;
+                let nplanes =
+                    (((bplcon0 >> 12) & 7) as usize + (((bplcon0 >> 4) & 1) as usize * 8)).min(8);
+                let res = if bplcon0 & 0x0040 != 0 {
+                    "shres"
+                } else if bplcon0 & 0x8000 != 0 {
+                    "hires"
+                } else {
+                    "lores"
+                };
+                let mut modes = String::new();
+                if bplcon0 & 0x0800 != 0 {
+                    modes.push_str("  HAM");
+                }
+                if bplcon0 & 0x0400 != 0 {
+                    modes.push_str("  DPF");
+                }
+                let header = format!(
+                    "BPLCON0 {bplcon0:04X}: {nplanes} planes {res}{modes}   DMACON: BPLEN {} SPREN {}",
+                    if base.dmacon & 0x0100 != 0 { "on" } else { "off" },
+                    if base.dmacon & 0x0020 != 0 { "on" } else { "off" },
+                );
+                let captured = bus.frame_captured_sprite_lines();
+                let sprites = (0..8)
+                    .map(|sprite| {
+                        let pos = base.sprpos[sprite];
+                        let ctl = base.sprctl[sprite];
+                        let vstart = (pos >> 8) | ((ctl & 0x04) << 6);
+                        let vstop = (ctl >> 8) | ((ctl & 0x02) << 7);
+                        let hstart = ((pos & 0xFF) << 1) | (ctl & 0x01);
+                        let attached = ctl & 0x80 != 0;
+                        let mut dma_lines: Vec<&crate::bus::CapturedSpriteLine> = captured
+                            .iter()
+                            .filter(|line| line.sprite == sprite)
+                            .collect();
+                        dma_lines.sort_by_key(|line| line.beam_y);
+                        let text = format!(
+                            "SPR{sprite} v{vstart}-{vstop} h{hstart}{}{}  dma lines {}",
+                            if attached { " att" } else { "" },
+                            if base.spr_armed[sprite] { " armed" } else { "" },
+                            dma_lines.len(),
+                        );
+                        // Thumbnail: sample the DMA lines to the thumb
+                        // height; classic 2-bpp decode against the pair's
+                        // frame-start palette bank (an attached pair or an
+                        // AGA BPLCON4 bank shifts real colours, but shape
+                        // is what the thumbnail is for).
+                        let total = dma_lines.len();
+                        let rows = total.min(ui::VIDEO_THUMB_MAX_ROWS);
+                        let mut thumb = vec![0u32; rows * 16];
+                        for row in 0..rows {
+                            let line = dma_lines[row * total / rows.max(1)];
+                            for x in 0..16usize {
+                                let bit = 15 - x;
+                                let idx =
+                                    ((line.data >> bit) & 1) | ((((line.datb) >> bit) & 1) << 1);
+                                if idx == 0 {
+                                    continue;
+                                }
+                                let entry = 16 + (sprite / 2) * 4 + idx as usize;
+                                let rgb = base.palette.rgb24(entry);
+                                thumb[row * 16 + x] =
+                                    rgba((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
+                            }
+                        }
+                        ui::SpriteRowView {
+                            text,
+                            thumb,
+                            thumb_rows: rows,
+                        }
+                    })
+                    .collect();
+                let palette_entries = if aga { 256 } else { 32 };
+                let palette = (0..palette_entries)
+                    .map(|entry| {
+                        let rgb = base.palette.rgb24(entry);
+                        rgba((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF)
+                    })
+                    .collect();
+                let masks = bus.ui_layer_masks();
+                video = Some(ui::VideoView {
+                    header,
+                    plane_mask: masks.planes,
+                    nplanes,
+                    sprite_mask: masks.sprites,
+                    sprites,
+                    palette,
+                });
+            }
             ui::DebugTab::Copper => {
+                // Leave room for the CBreak/CStep buttons drawn at the top
+                // of the content area.
+                for _ in 0..ui::COPPER_TAB_HEADER_LINES {
+                    lines.push(ui::DbgLine::plain(""));
+                }
                 let agnus = &bus.agnus;
-                let copper_pc = bus.copper.pc();
+                // Anchor the listing on the current instruction's start:
+                // mid-instruction the PC already points at the second word.
+                let anchor = bus
+                    .copper
+                    .pc()
+                    .wrapping_sub(if bus.copper.mid_instruction() { 2 } else { 0 });
+                let state = if bus.copper.is_running() {
+                    "running".to_string()
+                } else if let Some(wait) = bus.copper.waiting() {
+                    let pos = wait.position_bits();
+                    format!("waiting v{} h{}", (pos >> 8) & 0xFF, pos & 0xFE)
+                } else {
+                    "stopped".to_string()
+                };
                 lines.push(ui::DbgLine::plain(format!(
-                    "COP1LC {:06X}   COP2LC {:06X}   COPPC {:06X} ({})",
+                    "COP1LC {:06X}   COP2LC {:06X}   COPPC {:06X} ({state})",
                     agnus.cop1lc,
                     agnus.cop2lc,
-                    copper_pc,
-                    if bus.copper.is_running() {
-                        "running"
-                    } else {
-                        "stopped"
-                    }
+                    bus.copper.pc(),
                 )));
                 lines.push(ui::DbgLine::plain(""));
-                for (addr, text) in crate::disasm::dump_copper_list(read, agnus.cop1lc, 36) {
-                    let line = format!("{addr:06X}  {text}");
-                    lines.push(if addr == copper_pc {
+                // Follow the live Copper around its PC (a stopped Copper
+                // shows the head of the COP1 list instead). Breakpointed
+                // addresses are marked with `*`.
+                let stopped = !bus.copper.is_running() && bus.copper.waiting().is_none();
+                let start = if stopped {
+                    agnus.cop1lc
+                } else {
+                    anchor.saturating_sub(5 * 4)
+                };
+                let cbreaks = bus.ui_copper_breaks();
+                for (addr, text) in crate::disasm::dump_copper_list(read, start, 30) {
+                    let marker = if cbreaks.contains(&addr) { "*" } else { " " };
+                    let line = format!("{marker}{addr:06X}  {text}");
+                    lines.push(if !stopped && addr == anchor {
                         ui::DbgLine::hilit(line)
                     } else {
                         ui::DbgLine::plain(line)
@@ -4427,20 +5111,41 @@ impl App {
                 });
             }
             ui::DebugTab::Memory => {
-                lines.push(ui::DbgLine::plain(
-                    "Click the $ box, type a hex address, Enter to jump; </> to page",
-                ));
-                lines.push(ui::DbgLine::plain(""));
-                let base = panel.mem_addr & 0x00FF_FFF0;
-                for row in 0..16u32 {
-                    let addr = base.wrapping_add(row * 16) & 0x00FF_FFFF;
-                    let mut bytes = [0u8; 16];
-                    for word in 0..8u32 {
-                        let value = bus.peek_word_any(addr.wrapping_add(word * 2));
-                        bytes[word as usize * 2] = (value >> 8) as u8;
-                        bytes[word as usize * 2 + 1] = value as u8;
+                // Leave room for the Find/Save/Writer/Bits buttons drawn at
+                // the top of the content area.
+                for _ in 0..ui::MEM_TAB_HEADER_LINES {
+                    lines.push(ui::DbgLine::plain(""));
+                }
+                if panel.mem_view_bits {
+                    let stride = panel.mem_bitmap_stride.max(1) as usize;
+                    let rows = ui::mem_bitmap_rows();
+                    let base = panel.mem_addr & 0x00FF_FFFF;
+                    lines.push(ui::DbgLine::plain(format!(
+                        "bitplane at ${base:06X}, stride {stride} bytes ({} px), {rows} rows",
+                        stride * 8
+                    )));
+                    bitmap = Some(ui::MemBitmapView {
+                        base,
+                        stride,
+                        rows,
+                        data: machine.debug_read_memory(base, stride * rows),
+                    });
+                } else {
+                    lines.push(ui::DbgLine::plain(
+                        "$ box: jump / \"ADDR VALUE\" poke / \"ADDR LEN\" save / hex bytes find",
+                    ));
+                    lines.push(ui::DbgLine::plain(""));
+                    let base = panel.mem_addr & 0x00FF_FFF0;
+                    for row in 0..16u32 {
+                        let addr = base.wrapping_add(row * 16) & 0x00FF_FFFF;
+                        let mut bytes = [0u8; 16];
+                        for word in 0..8u32 {
+                            let value = bus.peek_word_any(addr.wrapping_add(word * 2));
+                            bytes[word as usize * 2] = (value >> 8) as u8;
+                            bytes[word as usize * 2 + 1] = value as u8;
+                        }
+                        lines.push(ui::DbgLine::plain(ui::hex_dump_row(addr, &bytes)));
                     }
-                    lines.push(ui::DbgLine::plain(ui::hex_dump_row(addr, &bytes)));
                 }
             }
             ui::DebugTab::Break => {
@@ -4464,6 +5169,12 @@ impl App {
                 ));
                 lines.push(ui::DbgLine::plain(
                     "  ops EQ NE LT GT LE GE AND; operand Dn An PC SR Mhex hex",
+                ));
+                lines.push(ui::DbgLine::plain(
+                    "Beam takes decimal \"VPOS [HPOS]\" (stop when the beam gets there).",
+                ));
+                lines.push(ui::DbgLine::plain(
+                    "Catch takes \"irq N\", \"trap N\", or \"vec N\" (stop entering the vector).",
                 ));
                 lines.push(ui::DbgLine::plain(""));
                 let breaks = self.emu.machine.ui_breaks();
@@ -4504,6 +5215,48 @@ impl App {
                         crate::debugger::custom_reg_name(*off)
                     )));
                 }
+                lines.push(ui::DbgLine::plain(""));
+                lines.push(ui::DbgLine::plain(
+                    "Exception catchpoints (stop entering the vector):",
+                ));
+                if breaks.catches.is_empty() {
+                    lines.push(ui::DbgLine::plain("  (none)"));
+                }
+                for vector in &breaks.catches {
+                    lines.push(ui::DbgLine::plain(format!(
+                        "  {} (vector {vector})",
+                        crate::debugger::exception_vector_name(*vector)
+                    )));
+                }
+                lines.push(ui::DbgLine::plain(""));
+                lines.push(ui::DbgLine::plain(
+                    "Copper breakpoints (set on Copper tab):",
+                ));
+                let cbreaks = bus.ui_copper_breaks();
+                if cbreaks.is_empty() {
+                    lines.push(ui::DbgLine::plain("  (none)"));
+                }
+                for addr in cbreaks {
+                    lines.push(ui::DbgLine::plain(format!("  ${addr:06X}")));
+                }
+                lines.push(ui::DbgLine::plain(""));
+                lines.push(ui::DbgLine::plain("Beam traps (stop at beam position):"));
+                let beam_traps = bus.ui_beam_traps();
+                if beam_traps.is_empty() {
+                    lines.push(ui::DbgLine::plain("  (none)"));
+                }
+                for trap in beam_traps {
+                    let mut text = format!("  v{}", trap.vpos);
+                    if let Some(hpos) = trap.hpos {
+                        text.push_str(&format!(" h{hpos}"));
+                    } else {
+                        text.push_str(" (line start)");
+                    }
+                    if trap.once {
+                        text.push_str("  once");
+                    }
+                    lines.push(ui::DbgLine::plain(text));
+                }
             }
         }
         // Keep lines inside the panel; the blitter clips at the texture
@@ -4518,6 +5271,8 @@ impl App {
             reverse_available: self.emu.time_travel_enabled(),
             status,
             lines,
+            bitmap,
+            video,
             audio,
         }
     }

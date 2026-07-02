@@ -1185,6 +1185,53 @@ impl Emulator {
         Ok(false)
     }
 
+    /// Run until the Agnus beam reaches (`vpos`, `hpos`) -- `hpos: None`
+    /// means the first colour clock of that line -- up to
+    /// `max_instructions`. Arms a one-shot beam trap, so the stop lands at
+    /// exact beam granularity (including while the CPU sits in STOP); an
+    /// unrelated breakpoint/watch hit on the way ends the run with that
+    /// stop pending instead. Returns true when a debug stop is pending
+    /// (the beam trap or an earlier hit), false when the budget ran out.
+    pub fn debug_run_to_beam(
+        &mut self,
+        vpos: u16,
+        hpos: Option<u16>,
+        max_instructions: usize,
+    ) -> Result<bool> {
+        self.bus_mut().ui_arm_beam_trap_once(vpos, hpos);
+        for _ in 0..max_instructions {
+            self.debug_step_one_with_idle()?;
+            if self.machine.ui_debug_stop_pending() {
+                return Ok(true);
+            }
+        }
+        // Budget exhausted without reaching the position: disarm the
+        // one-shot so it cannot fire out of nowhere later.
+        self.bus_mut().ui_disarm_beam_trap_once();
+        Ok(false)
+    }
+
+    /// Run until the Copper retires one instruction (a MOVE applied or
+    /// skipped, a WAIT/SKIP/COPJMP started), up to `max_instructions` CPU
+    /// instructions. The machine pauses at the next CPU instruction
+    /// boundary after the Copper advances, so the Copper may already be a
+    /// fetch further along -- its live PC shows exactly where it got to.
+    /// Returns true when the Copper advanced (or an earlier debug stop is
+    /// pending), false when the budget ran out (Copper stopped/DMA off).
+    pub fn debug_step_copper(&mut self, max_instructions: usize) -> Result<bool> {
+        let target = self.bus().copper_instructions_retired().wrapping_add(1);
+        for _ in 0..max_instructions {
+            self.debug_step_one_with_idle()?;
+            if self.bus().copper_instructions_retired() >= target {
+                return Ok(true);
+            }
+            if self.machine.ui_debug_stop_pending() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Step over the instruction at PC. When it is a call that returns to the
     /// following instruction (BSR/JSR/TRAP), run until that return address (or
     /// an earlier breakpoint/watch hit, or the `max_instructions` budget if the
@@ -2265,6 +2312,60 @@ mod tests {
         .unwrap()
     }
 
+    /// Like [`emulator_with_call_program`], but the program executes a
+    /// TRAP #0 whose handler (vector 32, set up in chip RAM) parks at
+    /// $F80030:
+    ///
+    /// ```text
+    /// F80010  NOP
+    /// F80012  TRAP   #0
+    /// F80014  BRA.S  *
+    /// F80030  BRA.S  *          ; trap handler
+    /// ```
+    fn emulator_with_trap_program() -> super::Emulator {
+        let mut rom = vec![0u8; crate::memory::ROM_SIZE];
+        let put = |mem: &mut [u8], off: usize, word: u16| {
+            mem[off..off + 2].copy_from_slice(&word.to_be_bytes());
+        };
+        put(&mut rom, 0x10, 0x4E71); // NOP
+        put(&mut rom, 0x12, 0x4E40); // TRAP #0
+        put(&mut rom, 0x14, 0x60FE); // BRA.S *
+        put(&mut rom, 0x30, 0x60FE); // handler: BRA.S *
+
+        let mut chip_ram = vec![0u8; 512 * 1024];
+        chip_ram[0..4].copy_from_slice(&0x0000_4000u32.to_be_bytes()); // reset SSP
+        chip_ram[4..8].copy_from_slice(&0x00F8_0010u32.to_be_bytes()); // reset PC
+        chip_ram[32 * 4..32 * 4 + 4].copy_from_slice(&0x00F8_0030u32.to_be_bytes()); // TRAP #0
+
+        let bus = crate::bus::Bus::new(
+            crate::memory::Memory {
+                chip_ram,
+                slow_ram: Vec::new(),
+                rom,
+                overlay: false,
+                zorro: crate::zorro::ZorroChain::default(),
+                extended_rom: Vec::new(),
+                extended_rom_base: 0,
+                wcs: Vec::new(),
+                wcs_write_protected: false,
+            },
+            crate::chipset::paula::Paula::new(
+                Box::new(crate::serial::NullSerialSink),
+                Box::new(crate::audio::NullSink),
+            ),
+            crate::floppy::FloppyController::default(),
+        );
+        super::Emulator::new(
+            bus,
+            crate::config::CpuModel::M68000,
+            false,
+            crate::config::PacingBudget::Cycles,
+            2,
+            false,
+        )
+        .unwrap()
+    }
+
     #[test]
     fn step_over_runs_the_callee_and_stops_after_the_call() {
         let mut emu = emulator_with_call_program();
@@ -2312,6 +2413,142 @@ mod tests {
         assert!(stopped, "conditional breakpoint did not fire");
         assert_eq!(emu.machine.pc(), 0x00F8_0020);
         assert!(emu.machine.take_ui_debug_stop().is_some());
+    }
+
+    #[test]
+    fn run_to_beam_stops_at_the_position_with_a_beam_stop() {
+        use crate::debugger::DebugStop;
+        let mut emu = emulator_with_call_program();
+        let start_vpos = emu.bus().agnus.vpos;
+        let target = (start_vpos + 3).min(u32::from(u16::MAX)) as u16;
+        let reached = emu.debug_run_to_beam(target, Some(40), 100_000).unwrap();
+        assert!(reached, "beam target three lines ahead must be reachable");
+        match emu.machine.take_ui_debug_stop() {
+            Some(DebugStop::Beam { vpos, hpos }) => {
+                assert_eq!(vpos, target);
+                assert_eq!(hpos, 40);
+            }
+            other => panic!("expected a beam stop, got {other:?}"),
+        }
+        // The machine stopped at (or just past) the trap position, and the
+        // one-shot trap is gone.
+        let bus = emu.bus();
+        assert!(
+            (bus.agnus.vpos, bus.agnus.hpos) >= (u32::from(target), 40),
+            "beam should be at or past the target, is ({}, {})",
+            bus.agnus.vpos,
+            bus.agnus.hpos
+        );
+        assert!(bus.ui_beam_traps().is_empty());
+    }
+
+    #[test]
+    fn exception_catchpoint_stops_on_trap_entry() {
+        use crate::debugger::DebugStop;
+        let mut emu = emulator_with_trap_program();
+        assert!(emu.machine.ui_toggle_catch(32)); // TRAP #0
+        let mut stopped = false;
+        for _ in 0..64 {
+            emu.debug_step_instructions(1).unwrap();
+            if emu.machine.ui_debug_stop_pending() {
+                stopped = true;
+                break;
+            }
+        }
+        assert!(stopped, "TRAP #0 catchpoint did not fire");
+        match emu.machine.take_ui_debug_stop() {
+            Some(DebugStop::Exception { vector, .. }) => assert_eq!(vector, 32),
+            other => panic!("expected an exception stop, got {other:?}"),
+        }
+        // The machine sits in the trap handler.
+        assert_eq!(emu.machine.pc() & 0x00FF_FFFF, 0x00F8_0030);
+    }
+
+    #[test]
+    fn exception_catchpoint_stops_on_vblank_interrupt() {
+        use crate::debugger::DebugStop;
+        let mut emu = emulator_with_call_program();
+        {
+            let bus = emu.bus_mut();
+            // Vector 27 (autovector level 3) -> a handler parked in ROM.
+            bus.mem.chip_ram[27 * 4..27 * 4 + 4].copy_from_slice(&0x00F8_0014u32.to_be_bytes());
+            // Enable master + VERTB interrupts.
+            assert!(!bus.custom_write(0x09A, 2, 0xC020));
+        }
+        // The reset SR masks all interrupt levels (IPL 7); open the mask so
+        // the level-3 vertical blank can be recognized.
+        assert!(emu.machine.debug_set_register(16, 0x2000));
+        assert!(emu.machine.ui_toggle_catch(27));
+        let mut stopped = false;
+        for _ in 0..200_000 {
+            emu.debug_step_instructions(1).unwrap();
+            if emu.machine.ui_debug_stop_pending() {
+                stopped = true;
+                break;
+            }
+        }
+        assert!(
+            stopped,
+            "VERTB catchpoint did not fire within budget: frames={} pc={:08X} sr={:04X}",
+            emu.bus().emulated_frames(),
+            emu.machine.pc(),
+            emu.machine.sr(),
+        );
+        match emu.machine.take_ui_debug_stop() {
+            Some(DebugStop::Exception { vector, pc }) => {
+                assert_eq!(vector, 27);
+                // Stopped at the handler's entry, before it executes.
+                assert_eq!(pc, 0x00F8_0014);
+            }
+            other => panic!("expected an exception stop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn copper_step_advances_one_instruction_at_a_time() {
+        let mut emu = emulator_with_call_program();
+        // WAIT v2 / MOVE / WAIT v4 / MOVE / end: each step has bounded
+        // work, and the WAITs park the Copper between steps.
+        {
+            let bus = emu.bus_mut();
+            let cop1 = 0x0300usize;
+            let words: [u16; 10] = [
+                0x0201, 0xFFFE, // WAIT v>=2
+                0x0180, 0x0111, // MOVE COLOR00
+                0x0401, 0xFFFE, // WAIT v>=4
+                0x0182, 0x0222, // MOVE COLOR01
+                0xFFFF, 0xFFFE, // end of list
+            ];
+            for (idx, word) in words.iter().enumerate() {
+                bus.mem.chip_ram[cop1 + idx * 2..cop1 + idx * 2 + 2]
+                    .copy_from_slice(&word.to_be_bytes());
+            }
+            bus.agnus.dmacon |= 0x0280; // DMAEN | COPEN
+            bus.copper.jump(cop1 as u32);
+        }
+        let before = emu.bus().copper_instructions_retired();
+        assert!(emu.debug_step_copper(50_000).unwrap());
+        let after_one = emu.bus().copper_instructions_retired();
+        assert!(
+            after_one > before,
+            "copper step must retire at least one instruction"
+        );
+        // Stepping again advances further (the machine pauses at CPU
+        // instruction boundaries, so each step retires one or more).
+        assert!(emu.debug_step_copper(50_000).unwrap());
+        assert!(emu.bus().copper_instructions_retired() > after_one);
+    }
+
+    #[test]
+    fn run_to_beam_budget_exhaustion_disarms_the_one_shot() {
+        let mut emu = emulator_with_call_program();
+        // A tiny budget cannot reach a position a full frame away.
+        let reached = emu.debug_run_to_beam(200, None, 4).unwrap();
+        assert!(!reached);
+        assert!(
+            emu.bus().ui_beam_traps().is_empty(),
+            "an unreached run-to trap must not stay armed"
+        );
     }
 
     #[test]

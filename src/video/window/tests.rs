@@ -2057,7 +2057,11 @@ fn debugger_views_reflect_machine_state() {
             unreachable!()
         };
         let view = app.build_debugger_view(panel);
-        assert!(!view.lines.is_empty());
+        // The Video tab draws a custom layout from its structured view;
+        // every other tab renders text lines.
+        if tab != super::ui::DebugTab::Video {
+            assert!(!view.lines.is_empty());
+        }
         match tab {
             super::ui::DebugTab::Cpu => {
                 assert!(view.lines[0].text.contains(&format!("PC {pc:08X}")));
@@ -2076,7 +2080,9 @@ fn debugger_views_reflect_machine_state() {
                 assert!(view.lines.iter().any(|l| l.text.contains("COLOR00")));
             }
             super::ui::DebugTab::Copper => {
-                assert!(view.lines[0].text.contains("COP1LC"));
+                // The first content lines are blank (the CBreak/CStep
+                // button row); the register header follows.
+                assert!(view.lines.iter().any(|l| l.text.contains("COP1LC")));
             }
             super::ui::DebugTab::Audio => {
                 // Text is mirrored into `lines` for the fallback/invariant.
@@ -2095,6 +2101,15 @@ fn debugger_views_reflect_machine_state() {
             super::ui::DebugTab::Memory => {
                 // The hex dump shows the NOP sled at the PC's ROM page.
                 assert!(view.lines.iter().any(|l| l.text.contains("4E 71")));
+            }
+            super::ui::DebugTab::Video => {
+                let video = view.video.as_ref().expect("video view");
+                assert!(video.header.starts_with("BPLCON0"), "{}", video.header);
+                assert_eq!(video.sprites.len(), 8);
+                // test_app is an OCS machine: the classic 32-entry palette.
+                assert_eq!(video.palette.len(), 32);
+                assert_eq!(video.plane_mask, 0xFF);
+                assert_eq!(video.sprite_mask, 0xFF);
             }
             super::ui::DebugTab::Break => {
                 assert!(view.lines.iter().any(|l| l.text == "Breakpoints:"));
@@ -2394,6 +2409,295 @@ fn frame_analyzer_cursor_keys_move_selected_slot() {
         }
         _ => panic!("frame analyzer panel should be open"),
     }
+}
+
+#[test]
+fn frame_analyzer_underlay_toggles_and_renders() {
+    let mut app = test_app();
+    app.open_frame_analyzer();
+    app.frame_analyzer_step_frame();
+    assert!(app.emu.bus().frame_bus_trace().is_some());
+
+    // Off by default: no underlay is rendered or attached to the view.
+    app.ensure_analyzer_underlay();
+    assert_eq!(app.analyzer_underlay_rows, 0);
+    let panel = app.frame_analyzer_panel.clone().unwrap();
+    assert!(app.build_frame_analyzer_view(&panel).underlay.is_none());
+
+    // The U key ticks the checkbox on.
+    assert!(app.ui_handle_key(KeyCode::KeyU));
+    assert!(app
+        .frame_analyzer_panel
+        .as_ref()
+        .is_some_and(|panel| panel.show_underlay));
+
+    // With the box ticked a beam-space frame render is captured and
+    // handed to the view, sized to the traced frame's scan.
+    app.ensure_analyzer_underlay();
+    assert!(app.analyzer_underlay_rows > 0);
+    let panel = app.frame_analyzer_panel.clone().unwrap();
+    let view = app.build_frame_analyzer_view(&panel);
+    let underlay = view.underlay.expect("underlay attached to view");
+    assert_eq!(underlay.rows, app.analyzer_underlay_rows);
+    assert!(underlay.fb.len() >= FB_WIDTH * underlay.rows);
+
+    // The render must not perturb emulated state: peeking the same frame
+    // twice leaves the underlay cache keyed to the same traced frame.
+    let frame = app.analyzer_underlay_frame;
+    app.ensure_analyzer_underlay();
+    assert_eq!(app.analyzer_underlay_frame, frame);
+
+    // Toggling off via the control drops it from the view again.
+    app.activate_ui_control(UiControl::AnalyzerUnderlay);
+    let panel = app.frame_analyzer_panel.clone().unwrap();
+    assert!(app.build_frame_analyzer_view(&panel).underlay.is_none());
+
+    // Closing the analyzer releases the underlay buffers.
+    app.close_tool_panel(ToolPanelKind::FrameAnalyzer);
+    assert_eq!(app.analyzer_underlay_rows, 0);
+    assert!(app.analyzer_underlay_input.is_none());
+}
+
+#[test]
+fn beam_scrub_rides_the_underlay() {
+    let mut app = test_app();
+    app.open_frame_analyzer();
+    app.frame_analyzer_step_frame();
+
+    // Enabling scrub alone activates the underlay render and flags the
+    // view for the up-to-the-beam crop.
+    app.activate_ui_control(UiControl::AnalyzerScrub);
+    assert!(app
+        .frame_analyzer_panel
+        .as_ref()
+        .is_some_and(|panel| panel.show_scrub && panel.underlay_active()));
+    app.ensure_analyzer_underlay();
+    assert!(app.analyzer_underlay_rows > 0);
+    let panel = app.frame_analyzer_panel.clone().unwrap();
+    let view = app.build_frame_analyzer_view(&panel);
+    assert!(view.scrub);
+    assert!(view.underlay.is_some());
+
+    // Turning the underlay off ends the scrub with it.
+    app.activate_ui_control(UiControl::AnalyzerUnderlay);
+    app.activate_ui_control(UiControl::AnalyzerUnderlay);
+    assert!(app
+        .frame_analyzer_panel
+        .as_ref()
+        .is_some_and(|panel| !panel.show_scrub && !panel.underlay_active()));
+}
+
+#[test]
+fn beam_trap_gui_toggle_line_step_and_run_to_slot() {
+    let mut app = test_app();
+    app.open_debugger();
+
+    // Break tab: a decimal "VPOS HPOS" entry toggles a beam trap.
+    if let Some(panel) = app.debugger_panel.as_mut() {
+        panel.tab = super::ui::DebugTab::Break;
+        panel.entry = "100 40".to_string();
+    }
+    app.activate_ui_control(UiControl::DebugBeamToggle);
+    assert_eq!(
+        app.emu.bus().ui_beam_traps(),
+        &[crate::bus::BeamTrap {
+            vpos: 100,
+            hpos: Some(40),
+            once: false,
+        }]
+    );
+    app.activate_ui_control(UiControl::DebugBeamToggle);
+    assert!(app.emu.bus().ui_beam_traps().is_empty());
+
+    // Line: run to the start of the next scanline. The stop reason
+    // reports the exact beam position of the one-shot trap.
+    let vpos_before = app.emu.bus().agnus.vpos;
+    let frame_lines = app.emu.bus().agnus.current_frame_lines();
+    app.activate_ui_control(UiControl::DebugRunLine);
+    let expected = (vpos_before + 1) % frame_lines;
+    assert_eq!(
+        app.last_debug_stop.as_deref(),
+        Some(format!("Beam trap at v{expected} h0").as_str())
+    );
+    assert!(app.emu.bus().ui_beam_traps().is_empty());
+
+    // Analyzer: To slot runs until the beam reaches the selected slot.
+    app.open_frame_analyzer();
+    let (target_v, target_h) = {
+        let bus = app.emu.bus();
+        ((((bus.agnus.vpos + 2) % frame_lines) as u16), 30u16)
+    };
+    if let Some(panel) = app.frame_analyzer_panel.as_mut() {
+        panel.selected_vpos = target_v;
+        panel.selected_hpos = target_h;
+    }
+    app.activate_ui_control(UiControl::AnalyzerRunTo);
+    assert_eq!(
+        app.last_debug_stop.as_deref(),
+        Some(format!("Beam trap at v{target_v} h{target_h}").as_str())
+    );
+}
+
+#[test]
+fn memory_tab_find_scroll_and_bitmap_toggle() {
+    let mut app = test_app();
+    app.open_debugger();
+    if let Some(panel) = app.debugger_panel.as_mut() {
+        panel.tab = super::ui::DebugTab::Memory;
+        panel.mem_addr = 0;
+    }
+    // Plant a pattern in chip RAM and find it from page zero. The boot
+    // overlay would shadow chip RAM with ROM, so drop it like the
+    // Kickstart boot path does.
+    {
+        let bus = app.emu.bus_mut();
+        bus.mem.overlay = false;
+        bus.mem.chip_ram[0x60000..0x60004].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+    }
+    if let Some(panel) = app.debugger_panel.as_mut() {
+        panel.entry = "DEADBEEF".to_string();
+    }
+    app.activate_ui_control(UiControl::DebugMemFind);
+    {
+        let panel = app.debugger_panel.as_ref().unwrap();
+        assert_eq!(panel.mem_last_find, Some(0x60000));
+        assert_eq!(panel.mem_addr, 0x60000);
+    }
+    // Find again continues past the hit; with a single match the page
+    // wraps back around to the same place.
+    app.activate_ui_control(UiControl::DebugMemFind);
+    assert_eq!(
+        app.debugger_panel.as_ref().unwrap().mem_last_find,
+        Some(0x60000)
+    );
+
+    // Scrolling moves by 16-byte hex rows.
+    app.debugger_mem_scroll(2);
+    assert_eq!(app.debugger_panel.as_ref().unwrap().mem_addr, 0x60020);
+
+    // Bits toggles the bitmap view; a decimal entry sets the stride.
+    if let Some(panel) = app.debugger_panel.as_mut() {
+        panel.entry = "40".to_string();
+    }
+    app.activate_ui_control(UiControl::DebugMemBits);
+    let panel = app.debugger_panel.clone().unwrap();
+    assert!(panel.mem_view_bits);
+    assert_eq!(panel.mem_bitmap_stride, 40);
+    let view = app.build_debugger_view(&panel);
+    let bitmap = view.bitmap.expect("bitmap view in Bits mode");
+    assert_eq!(bitmap.stride, 40);
+    assert_eq!(bitmap.rows, super::ui::mem_bitmap_rows());
+    assert_eq!(bitmap.data.len(), 40 * bitmap.rows);
+
+    // Bitmap-mode scrolling steps by the stride; toggling back restores
+    // the hex view (and its 16-byte scroll step).
+    let before = app.debugger_panel.as_ref().unwrap().mem_addr;
+    app.debugger_mem_scroll(1);
+    assert_eq!(app.debugger_panel.as_ref().unwrap().mem_addr, before + 40);
+    if let Some(panel) = app.debugger_panel.as_mut() {
+        panel.entry.clear();
+    }
+    app.activate_ui_control(UiControl::DebugMemBits);
+    assert!(!app.debugger_panel.as_ref().unwrap().mem_view_bits);
+}
+
+#[test]
+fn video_tab_layer_toggles_flip_bus_masks() {
+    let mut app = test_app();
+    app.open_debugger();
+    if let Some(panel) = app.debugger_panel.as_mut() {
+        panel.tab = super::ui::DebugTab::Video;
+    }
+    assert_eq!(app.emu.bus().ui_layer_masks().planes, 0xFF);
+    app.activate_ui_control(UiControl::DebugPlaneToggle(0));
+    assert_eq!(app.emu.bus().ui_layer_masks().planes, 0xFE);
+    app.activate_ui_control(UiControl::DebugSpriteToggle(3));
+    assert_eq!(app.emu.bus().ui_layer_masks().sprites, 0xF7);
+
+    // The Video view mirrors the masks for the toggle-row display.
+    let panel = app.debugger_panel.clone().unwrap();
+    let view = app.build_debugger_view(&panel);
+    let video = view.video.expect("video view");
+    assert_eq!(video.plane_mask, 0xFE);
+    assert_eq!(video.sprite_mask, 0xF7);
+
+    // Toggling back restores everything-visible.
+    app.activate_ui_control(UiControl::DebugPlaneToggle(0));
+    app.activate_ui_control(UiControl::DebugSpriteToggle(3));
+    assert_eq!(
+        app.emu.bus().ui_layer_masks(),
+        crate::bus::UiLayerMasks::default()
+    );
+}
+
+#[test]
+fn exception_catchpoint_toggle_from_the_break_tab() {
+    let mut app = test_app();
+    app.open_debugger();
+    if let Some(panel) = app.debugger_panel.as_mut() {
+        panel.tab = super::ui::DebugTab::Break;
+        panel.entry = "trap 0".to_string();
+    }
+    app.activate_ui_control(UiControl::DebugCatchToggle);
+    assert_eq!(app.emu.machine.ui_breaks().catches, vec![32]);
+
+    // The Break tab lists it by name.
+    let panel = app.debugger_panel.clone().unwrap();
+    let view = app.build_debugger_view(&panel);
+    assert!(view.lines.iter().any(|l| l.text.contains("TRAP #0")));
+
+    // Toggling again removes it; Clear all also clears catches.
+    app.activate_ui_control(UiControl::DebugCatchToggle);
+    assert!(app.emu.machine.ui_breaks().catches.is_empty());
+    if let Some(panel) = app.debugger_panel.as_mut() {
+        panel.entry = "irq 3".to_string();
+    }
+    app.activate_ui_control(UiControl::DebugCatchToggle);
+    assert_eq!(app.emu.machine.ui_breaks().catches, vec![27]);
+    app.activate_ui_control(UiControl::DebugBreaksClear);
+    assert!(app.emu.machine.ui_breaks().catches.is_empty());
+}
+
+#[test]
+fn copper_breakpoint_toggle_and_copper_step_from_the_gui() {
+    let mut app = test_app();
+    app.open_debugger();
+
+    // Copper tab: the entry address toggles a Copper breakpoint, and the
+    // Break tab lists it.
+    if let Some(panel) = app.debugger_panel.as_mut() {
+        panel.tab = super::ui::DebugTab::Copper;
+        panel.entry = "C01000".to_string();
+    }
+    app.activate_ui_control(UiControl::DebugCopperBreakToggle);
+    assert_eq!(app.emu.bus().ui_copper_breaks(), &[0x00C0_1000]);
+    app.activate_ui_control(UiControl::DebugCopperBreakToggle);
+    assert!(app.emu.bus().ui_copper_breaks().is_empty());
+
+    // CStep with an armed Copper list advances the retired count.
+    {
+        let bus = app.emu.bus_mut();
+        let cop1 = 0x0400usize;
+        let words: [u16; 6] = [0x0180, 0x0111, 0x0182, 0x0222, 0xFFFF, 0xFFFE];
+        for (idx, word) in words.iter().enumerate() {
+            bus.mem.chip_ram[cop1 + idx * 2..cop1 + idx * 2 + 2]
+                .copy_from_slice(&word.to_be_bytes());
+        }
+        bus.agnus.dmacon |= 0x0280; // DMAEN | COPEN
+        bus.copper.jump(cop1 as u32);
+    }
+    let before = app.emu.bus().copper_instructions_retired();
+    app.activate_ui_control(UiControl::DebugCopperStep);
+    assert!(app.emu.bus().copper_instructions_retired() > before);
+
+    // The Copper tab view lists the register header and the live list.
+    let panel = app.debugger_panel.clone().unwrap();
+    let view = app.build_debugger_view(&panel);
+    assert!(view.lines.iter().any(|l| l.text.contains("COP1LC")));
+    assert!(view
+        .lines
+        .iter()
+        .any(|l| l.text.contains("MOVE") || l.text.contains("WAIT") || l.text.contains("SKIP")));
 }
 
 #[test]

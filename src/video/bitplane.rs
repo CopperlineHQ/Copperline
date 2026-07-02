@@ -2775,6 +2775,11 @@ pub struct RenderInput {
     // Scalars only the COPPERLINE_DBG_* side-channels read.
     emulated_seconds: f64,
     emulated_frames: u64,
+    /// Debugger layer-isolation masks (bit n = plane n / sprite n drawn),
+    /// snapshotted with the frame so the render stays a pure function of
+    /// its input. Applied to colour resolution only, never collisions.
+    debug_plane_mask: u8,
+    debug_sprite_mask: u8,
 }
 
 impl RenderInput {
@@ -2802,6 +2807,8 @@ impl RenderInput {
             programmable_horizontal_blank: bus.agnus.programmable_horizontal_blank(),
             emulated_seconds: bus.emulated_seconds(),
             emulated_frames: bus.emulated_frames(),
+            debug_plane_mask: bus.ui_layer_masks().planes,
+            debug_sprite_mask: bus.ui_layer_masks().sprites,
         }
     }
 
@@ -2847,6 +2854,17 @@ impl RenderInput {
         self.programmable_horizontal_blank = bus.agnus.programmable_horizontal_blank();
         self.emulated_seconds = bus.emulated_seconds();
         self.emulated_frames = bus.emulated_frames();
+        self.debug_plane_mask = bus.ui_layer_masks().planes;
+        self.debug_sprite_mask = bus.ui_layer_masks().sprites;
+    }
+
+    /// Override the layer-isolation masks on an existing snapshot (tests
+    /// exercise masking without touching the process-global knobs).
+    #[cfg(test)]
+    pub(crate) fn with_debug_masks(mut self, plane_mask: u8, sprite_mask: u8) -> Self {
+        self.debug_plane_mask = plane_mask;
+        self.debug_sprite_mask = sprite_mask;
+        self
     }
 
     pub fn geometry(&self) -> FrameGeometry {
@@ -2898,8 +2916,46 @@ pub fn render(bus: &mut Bus, fb: &mut [u32]) {
     });
 }
 
+/// Render the just-finished frame without the bus feedback of [`render`]:
+/// the collision bits and timing stats are dropped, so a debug-driven
+/// re-render of the same frame (a layer-isolation toggle while paused)
+/// cannot perturb the machine.
+pub fn render_display_only(bus: &Bus, fb: &mut [u32]) {
+    thread_local! {
+        static RENDER_INPUT_SCRATCH: std::cell::RefCell<Option<RenderInput>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    RENDER_INPUT_SCRATCH.with(|scratch| {
+        let mut scratch = scratch.borrow_mut();
+        match scratch.as_mut() {
+            Some(input) => input.refill_from_bus(bus),
+            None => *scratch = Some(RenderInput::from_bus(bus)),
+        }
+        let input = scratch.as_ref().expect("scratch render input present");
+        let _ = render_from_input(input, fb);
+    });
+}
+
+thread_local! {
+    /// The running render's debug layer masks (plane, sprite), captured
+    /// from the [`RenderInput`] at [`render_from_input`]'s entry so the
+    /// pixel paths need no extra threading and a concurrent render on
+    /// another thread (the worker, a parallel test) sees only its own.
+    static ACTIVE_DEBUG_MASKS: std::cell::Cell<(u8, u8)> =
+        const { std::cell::Cell::new((0xFF, 0xFF)) };
+}
+
+fn active_debug_plane_mask() -> u8 {
+    ACTIVE_DEBUG_MASKS.with(|masks| masks.get().0)
+}
+
+pub(super) fn active_debug_sprite_mask() -> u8 {
+    ACTIVE_DEBUG_MASKS.with(|masks| masks.get().1)
+}
+
 pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
     let render_started = Instant::now();
+    ACTIVE_DEBUG_MASKS.with(|masks| masks.set((input.debug_plane_mask, input.debug_sprite_mask)));
     let mut render_timing = VideoRenderFrameTiming::default();
     let mut state = RenderState::from_snapshot(input.render_base);
     let geometry = input.geometry;
@@ -3862,6 +3918,9 @@ fn render_planned_playfield_line(
                         && pixel_x >= win_x_start
                         && pixel_x < win_x_stop
                 });
+            // Debugger layer isolation masks the colour-resolution index
+            // only; `sample.idx` stays true for collisions and priority.
+            let plane_mask = active_debug_plane_mask();
             if ham_mode {
                 next_ham_native_x =
                     next_ham_native_x.max(ham_history_start_native_x.min(plan.fetched_pixels));
@@ -3869,14 +3928,24 @@ fn render_planned_playfield_line(
                 while next_ham_native_x < preroll_stop {
                     let skipped =
                         plan.sample_prepared(nplanes, &delays, min_fetch_x, next_ham_native_x);
-                    denise_playfield_output(sample_control, palette, skipped.idx, &mut ham_color);
+                    denise_playfield_output(
+                        sample_control,
+                        palette,
+                        skipped.idx & plane_mask,
+                        &mut ham_color,
+                    );
                     next_ham_native_x += 1;
                 }
             }
             if !visible_sample {
                 if ham_mode {
                     let sample = plan.sample_prepared(nplanes, &delays, min_fetch_x, native_x);
-                    denise_playfield_output(sample_control, palette, sample.idx, &mut ham_color);
+                    denise_playfield_output(
+                        sample_control,
+                        palette,
+                        sample.idx & plane_mask,
+                        &mut ham_color,
+                    );
                     next_ham_native_x = next_ham_native_x.max(native_x + 1);
                 } else if !shres {
                     ham_color = background_rgb24;
@@ -3893,7 +3962,12 @@ fn render_planned_playfield_line(
                 let right = plan.sample_prepared(nplanes, &delays, min_fetch_x, native_x + 1);
                 (
                     shres_composite_sample(left, right),
-                    denise_shres_playfield_output(palette, left.idx, right.idx, &mut ham_color),
+                    denise_shres_playfield_output(
+                        palette,
+                        left.idx & plane_mask,
+                        right.idx & plane_mask,
+                        &mut ham_color,
+                    ),
                 )
             } else {
                 let sample = plan.sample_prepared_with_final_fetch_hold(
@@ -3904,8 +3978,12 @@ fn render_planned_playfield_line(
                     hold_final_fetch_sample,
                 );
                 let ham_before = ham_color;
-                let output =
-                    denise_playfield_output(pixel_control, palette, sample.idx, &mut ham_color);
+                let output = denise_playfield_output(
+                    pixel_control,
+                    palette,
+                    sample.idx & plane_mask,
+                    &mut ham_color,
+                );
                 if let Some(spec) = ham_diag {
                     if x >= spec.x_start
                         && x < spec.x_stop
@@ -4289,10 +4367,14 @@ fn draw_manual_bpl_word(
             continue;
         }
         let ham_before = *ham_color;
+        // Debugger layer isolation masks the colour-resolution index only;
+        // `sample.idx` stays true for the collision recording below.
+        let plane_mask = active_debug_plane_mask();
+        let masked_idx = sample.idx & plane_mask;
         let output_idx = if source_control.hold_and_modify() {
             *ham_select
         } else {
-            sample.idx
+            masked_idx
         };
         let source_output = if source_control.shres() {
             let right_sample = shifter
@@ -4300,14 +4382,14 @@ fn draw_manual_bpl_word(
                 .unwrap_or_default();
             denise_shres_playfield_output(
                 source_palette,
-                left_sample.idx,
-                right_sample.idx,
+                left_sample.idx & plane_mask,
+                right_sample.idx & plane_mask,
                 ham_color,
             )
         } else {
             let output =
                 denise_playfield_output(source_control, source_palette, output_idx, ham_color);
-            *ham_select = sample.idx;
+            *ham_select = masked_idx;
             output
         };
         for dx in 0..pixel_repeat {
@@ -4340,7 +4422,7 @@ fn draw_manual_bpl_word(
                 pixel_control,
             );
             if !source_control.shres() {
-                ham_select_pixels[fb_idx] = sample.idx;
+                ham_select_pixels[fb_idx] = masked_idx;
             }
             if let Some(spec) = diag {
                 if x >= spec.x_start
@@ -4374,27 +4456,27 @@ fn draw_manual_bpl_word(
                     let output = denise_aga_playfield_output(
                         source_control,
                         pixel_palette,
-                        sample.idx,
+                        masked_idx,
                         &mut pixel_ham,
                     );
                     (output.color, output.color_latch)
-                } else if sample.idx == 0 {
+                } else if masked_idx == 0 {
                     (
                         rgb12_to_rgb24(color_rgb12(pixel_palette[0])),
                         pixel_palette[0],
                     )
                 } else if source_control.dual_playfield() {
-                    let (_, color_idx) = dual_playfield_pixel(sample.idx, source_control);
+                    let (_, color_idx) = dual_playfield_pixel(masked_idx, source_control);
                     let color_latch = pixel_palette.get(color_idx).copied().unwrap_or(0);
                     (rgb12_to_rgb24(color_rgb12(color_latch)), color_latch)
                 } else {
                     (
                         rgb12_to_rgb24(palette_index_to_rgb12(
                             pixel_palette,
-                            sample.idx,
+                            masked_idx,
                             source_control.extra_half_brite(),
                         )),
-                        pixel_palette[(sample.idx as usize) & 0x1F],
+                        pixel_palette[(masked_idx as usize) & 0x1F],
                     )
                 };
             *ham_color = pixel_color;

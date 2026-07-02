@@ -74,6 +74,7 @@ pub struct UiWatch {
 }
 
 /// Why the interactive debugger stopped the machine.
+#[derive(Debug)]
 pub enum DebugStop {
     /// The next instruction's address matches a breakpoint (it has not
     /// executed yet).
@@ -94,6 +95,35 @@ pub enum DebugStop {
         vpos: u16,
         hpos: u16,
     },
+    /// The Agnus beam crossed a beam trap's position.
+    Beam { vpos: u16, hpos: u16 },
+    /// The Copper's PC arrived at a Copper breakpoint (the instruction
+    /// there has not executed yet).
+    CopperBreak { pc: u32, vpos: u16, hpos: u16 },
+    /// The CPU entered a caught exception vector; `pc` is the handler
+    /// entry the machine stopped at.
+    Exception { vector: u16, pc: u32 },
+}
+
+/// Human name of a 68000 exception vector, for catchpoint listings and
+/// stop reasons.
+pub fn exception_vector_name(vector: u16) -> String {
+    match vector {
+        2 => "Bus error".to_string(),
+        3 => "Address error".to_string(),
+        4 => "Illegal instruction".to_string(),
+        5 => "Zero divide".to_string(),
+        6 => "CHK".to_string(),
+        7 => "TRAPV".to_string(),
+        8 => "Privilege violation".to_string(),
+        9 => "Trace".to_string(),
+        10 => "Line-A".to_string(),
+        11 => "Line-F".to_string(),
+        24 => "Spurious interrupt".to_string(),
+        25..=31 => format!("IRQ level {}", vector - 24),
+        32..=47 => format!("TRAP #{}", vector - 32),
+        _ => format!("vector {vector}"),
+    }
 }
 
 impl DebugStop {
@@ -116,6 +146,14 @@ impl DebugStop {
             } => format!(
                 "{} = {value:04X} ({source} write, v{vpos} h{hpos})",
                 custom_reg_name(*off)
+            ),
+            DebugStop::Beam { vpos, hpos } => format!("Beam trap at v{vpos} h{hpos}"),
+            DebugStop::CopperBreak { pc, vpos, hpos } => {
+                format!("Copper breakpoint at ${pc:06X} (v{vpos} h{hpos})")
+            }
+            DebugStop::Exception { vector, pc } => format!(
+                "Caught {} (vector {vector}), handler ${pc:06X}",
+                exception_vector_name(*vector)
             ),
         }
     }
@@ -405,6 +443,9 @@ pub struct InteractiveBreaks {
     /// sees every writer, CPU and Copper alike), so the offsets are
     /// mirrored into the Bus whenever this list changes.
     pub reg_watches: Vec<u16>,
+    /// Caught exception vector numbers: the machine stops when the CPU
+    /// enters one of these vectors (trap, fault, or interrupt).
+    pub catches: Vec<u16>,
     armed: bool,
 }
 
@@ -416,7 +457,8 @@ impl InteractiveBreaks {
     fn rearm(&mut self) {
         self.armed = !(self.breakpoints.is_empty()
             && self.watches.is_empty()
-            && self.reg_watches.is_empty());
+            && self.reg_watches.is_empty()
+            && self.catches.is_empty());
     }
 
     /// Whether any breakpoint is set at `pc`, ignoring its condition. Used for
@@ -515,10 +557,28 @@ impl InteractiveBreaks {
         added
     }
 
+    /// Add an exception catchpoint for `vector`, or remove it when
+    /// already set. Returns true when now set.
+    pub fn toggle_catch(&mut self, vector: u16) -> bool {
+        let added = match self.catches.iter().position(|&v| v == vector) {
+            Some(pos) => {
+                self.catches.remove(pos);
+                false
+            }
+            None => {
+                self.catches.push(vector);
+                true
+            }
+        };
+        self.rearm();
+        added
+    }
+
     pub fn clear(&mut self) {
         self.breakpoints.clear();
         self.watches.clear();
         self.reg_watches.clear();
+        self.catches.clear();
         self.armed = false;
     }
 }

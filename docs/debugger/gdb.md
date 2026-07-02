@@ -63,6 +63,31 @@ Register names match the debugger window (`DMACON`, `BPLCON0`, `COLOR00`,
 `AUD0VOL`, and so on). Numeric offsets (`96`) and full custom addresses
 (`DFF096`) are also accepted.
 
+## Beam traps
+
+`monitor beam-trap VPOS [HPOS]` (decimal, like `monitor beam`'s output)
+toggles a beam trap: `continue` then stops when the Agnus beam reaches that
+position, at exact colour-clock granularity, even while the CPU sits in
+`STOP`. `HPOS` omitted means the start of the line, and a trap re-fires
+every frame until removed. `monitor clear-beam-traps` removes them all.
+
+```gdb
+(gdb) monitor beam-trap 100
+(gdb) monitor beam-trap 100 40
+(gdb) monitor clear-beam-traps
+```
+
+## Copper breakpoints
+
+`monitor copper-break ADDR` (hex) toggles a Copper breakpoint: `continue`
+stops when the Copper's PC arrives at that list address, before the
+instruction there executes. `monitor clear-copper-breaks` removes them all.
+
+```gdb
+(gdb) monitor copper-break c01000
+(gdb) monitor clear-copper-breaks
+```
+
 ## Copper
 
 The Copper list can be dumped from the live list pointer, the current Copper
