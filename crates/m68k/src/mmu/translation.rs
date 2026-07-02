@@ -3,19 +3,27 @@
 use crate::core::cpu::CpuCore;
 use crate::core::memory::{AddressBus, BusFaultKind};
 
-use super::{MmuFault, MmuFaultKind, MmuResult};
+use super::{MmuFault, MmuFaultCause, MmuFaultKind, MmuResult};
 
 fn buserr(address: u32) -> MmuFault {
     MmuFault {
         kind: MmuFaultKind::BusError,
         address,
+        cause: MmuFaultCause::TableWalkBusError,
     }
 }
 
+/// Access fault with the generic invalid-page cause (030 walker sites,
+/// where the frame does not report the cause).
 fn access_fault(address: u32) -> MmuFault {
+    access_fault_cause(address, MmuFaultCause::PageFault)
+}
+
+fn access_fault_cause(address: u32, cause: MmuFaultCause) -> MmuFault {
     MmuFault {
         kind: MmuFaultKind::AccessLevelViolation,
         address,
+        cause,
     }
 }
 
@@ -23,6 +31,7 @@ fn config_fault(address: u32) -> MmuFault {
     MmuFault {
         kind: MmuFaultKind::ConfigurationError,
         address,
+        cause: MmuFaultCause::PageFault,
     }
 }
 
@@ -75,7 +84,7 @@ pub fn translate<B: AddressBus>(
 
     // The 68040 page table is a fixed three-level format unrelated to the
     // 68030's programmable walk below; dispatch to its own walker.
-    if cpu.is_040() {
+    if cpu.is_040() || cpu.is_060() {
         return translate_040(cpu, bus, logical, write, supervisor, instruction);
     }
 
@@ -247,12 +256,14 @@ fn translate_040<B: AddressBus>(
     supervisor: bool,
     instruction: bool,
 ) -> MmuResult<u32> {
-    // Invalid-descriptor outcome: fault on data, identity-fallback on a fetch.
-    let invalid = |logical: u32| -> MmuResult<u32> {
+    // Invalid-descriptor outcome: fault on data, identity-fallback on a
+    // fetch. The cause records which walk level held the invalid
+    // descriptor (the 68060 FSLW reports it).
+    let invalid = |logical: u32, cause: MmuFaultCause| -> MmuResult<u32> {
         if instruction {
             Ok(logical)
         } else {
-            Err(access_fault(logical))
+            Err(access_fault_cause(logical, cause))
         }
     };
     // Page size: TC bit 14 (P) selects 8 KB, else 4 KB.
@@ -279,7 +290,8 @@ fn translate_040<B: AddressBus>(
     let root_idx = (logical >> 25) & 0x7F;
     let root_desc = read_u32_phys(bus, (root & 0xFFFF_FE00).wrapping_add(root_idx * 4))?;
     if root_desc & 3 < 2 {
-        return invalid(logical); // UDT invalid: data faults, fetch falls back
+        // UDT invalid: data faults, fetch falls back
+        return invalid(logical, MmuFaultCause::PointerA);
     }
 
     // Level 2: pointer table (512-byte aligned), indexed by logical[24:18].
@@ -287,7 +299,8 @@ fn translate_040<B: AddressBus>(
     let ptr_idx = (logical >> 18) & 0x7F;
     let ptr_desc = read_u32_phys(bus, ptr_table.wrapping_add(ptr_idx * 4))?;
     if ptr_desc & 3 < 2 {
-        return invalid(logical); // UDT invalid: data faults, fetch falls back
+        // UDT invalid: data faults, fetch falls back
+        return invalid(logical, MmuFaultCause::PointerB);
     }
 
     // Level 3: page table. With 4 KB pages it has 64 entries (256-byte aligned,
@@ -303,11 +316,20 @@ fn translate_040<B: AddressBus>(
 
     // PDT: 0 invalid, 2 indirect (the descriptor points to the real page
     // descriptor), 1/3 resident.
-    if page_desc & 3 == 2 {
+    let was_indirect = page_desc & 3 == 2;
+    if was_indirect {
         page_desc = read_u32_phys(bus, page_desc & 0xFFFF_FFFC)?;
     }
     if page_desc & 3 == 0 {
-        return invalid(logical); // PDT invalid: data faults, fetch falls back
+        // PDT invalid: data faults, fetch falls back
+        return invalid(
+            logical,
+            if was_indirect {
+                MmuFaultCause::Indirect
+            } else {
+                MmuFaultCause::PageFault
+            },
+        );
     }
 
     // Protection bits: W (write-protect, bit 2) accumulates across the table and
@@ -315,8 +337,14 @@ fn translate_040<B: AddressBus>(
     // A violating access faults (resumable on the 040, vector 2 / format 7).
     let write_protected = (root_desc | ptr_desc | page_desc) & 0x0000_0004 != 0;
     let supervisor_only = page_desc & 0x0000_0080 != 0;
-    if (write && write_protected) || (!supervisor && supervisor_only) {
-        return Err(access_fault(logical));
+    if write && write_protected {
+        return Err(access_fault_cause(logical, MmuFaultCause::WriteProtect));
+    }
+    if !supervisor && supervisor_only {
+        return Err(access_fault_cause(
+            logical,
+            MmuFaultCause::SupervisorProtect,
+        ));
     }
 
     let phys_page = page_desc & !page_mask;

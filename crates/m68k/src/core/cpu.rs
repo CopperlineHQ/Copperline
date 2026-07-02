@@ -228,6 +228,11 @@ pub struct CpuCore {
     /// is not serialized (restored empty) and is flushed on any mapping change.
     #[serde(skip)]
     pub atc: crate::mmu::Atc,
+    /// Cause of the MMU fault currently being delivered (set by
+    /// handle_mmu_fault, consumed while composing the 68060 FSLW); plain
+    /// physical bus errors leave it None. Transient within one exception.
+    #[serde(skip)]
+    pub(crate) pending_fault_cause: Option<crate::mmu::MmuFaultCause>,
 
     // ========== Execution State ==========
     /// Remaining cycles in current timeslice
@@ -427,6 +432,7 @@ impl CpuCore {
             pcr: PCR_060_RESET,
             buscr: 0,
             atc: crate::mmu::Atc::default(),
+            pending_fault_cause: None,
             cycles_remaining: 0,
             initial_cycles: 0,
             emulate_unimplemented_060: false,
@@ -643,7 +649,7 @@ impl CpuCore {
         match bus.try_read_word(addr) {
             Ok(v) => Some(v),
             Err(_) => {
-                self.trigger_bus_error(bus, addr, false, true);
+                self.trigger_bus_error(bus, addr, false, true, 2);
                 None
             }
         }
@@ -1143,6 +1149,7 @@ impl CpuCore {
         address: u32,
         write: bool,
         instruction: bool,
+        size: u32,
     ) {
         if self.faulted() {
             return;
@@ -1160,7 +1167,8 @@ impl CpuCore {
         self.set_sr_noint_nosp(self.sr_save);
         self.dar = self.dar_save;
         self.exception_processing = true;
-        let _ = self.exception_bus_error(bus, address, write, instruction);
+        let cause = self.pending_fault_cause.take();
+        let _ = self.exception_bus_error(bus, address, write, instruction, size, cause);
         self.exception_processing = false;
         self.run_mode = RUN_MODE_BERR_AERR_RESET;
     }
@@ -1186,9 +1194,7 @@ impl CpuCore {
                 ) {
                     Ok(p) => addr = self.address(p),
                     Err(f) => {
-                        self.handle_mmu_fault(
-                            bus, f, /*write=*/ false, /*instruction=*/ false,
-                        );
+                        self.handle_mmu_fault(bus, f, false, false, 1);
                         return 0;
                     }
                 }
@@ -1198,7 +1204,7 @@ impl CpuCore {
             Ok(v) => v,
             Err(f) => {
                 if matches!(f.kind, BusFaultKind::BusError) {
-                    self.trigger_bus_error(bus, addr, false, false);
+                    self.trigger_bus_error(bus, addr, false, false, 1);
                 }
                 0
             }
@@ -1234,9 +1240,7 @@ impl CpuCore {
                 ) {
                     Ok(p) => addr = self.address(p),
                     Err(f) => {
-                        self.handle_mmu_fault(
-                            bus, f, /*write=*/ false, /*instruction=*/ false,
-                        );
+                        self.handle_mmu_fault(bus, f, false, false, 2);
                         return 0;
                     }
                 }
@@ -1246,7 +1250,7 @@ impl CpuCore {
             Ok(v) => v,
             Err(f) => {
                 if matches!(f.kind, BusFaultKind::BusError) {
-                    self.trigger_bus_error(bus, addr, false, false);
+                    self.trigger_bus_error(bus, addr, false, false, 2);
                 }
                 0
             }
@@ -1282,9 +1286,7 @@ impl CpuCore {
                 ) {
                     Ok(p) => addr = self.address(p),
                     Err(f) => {
-                        self.handle_mmu_fault(
-                            bus, f, /*write=*/ false, /*instruction=*/ false,
-                        );
+                        self.handle_mmu_fault(bus, f, false, false, 4);
                         return 0;
                     }
                 }
@@ -1294,7 +1296,7 @@ impl CpuCore {
             Ok(v) => v,
             Err(f) => {
                 if matches!(f.kind, BusFaultKind::BusError) {
-                    self.trigger_bus_error(bus, addr, false, false);
+                    self.trigger_bus_error(bus, addr, false, false, 4);
                 }
                 0
             }
@@ -1322,9 +1324,7 @@ impl CpuCore {
                 ) {
                     Ok(p) => addr = self.address(p),
                     Err(f) => {
-                        self.handle_mmu_fault(
-                            bus, f, /*write=*/ true, /*instruction=*/ false,
-                        );
+                        self.handle_mmu_fault(bus, f, true, false, 1);
                         return;
                     }
                 }
@@ -1333,7 +1333,7 @@ impl CpuCore {
         if let Err(f) = bus.try_write_byte(addr, value)
             && matches!(f.kind, BusFaultKind::BusError)
         {
-            self.trigger_bus_error(bus, addr, true, false);
+            self.trigger_bus_error(bus, addr, true, false, 1);
         }
     }
 
@@ -1366,9 +1366,7 @@ impl CpuCore {
                 ) {
                     Ok(p) => addr = self.address(p),
                     Err(f) => {
-                        self.handle_mmu_fault(
-                            bus, f, /*write=*/ true, /*instruction=*/ false,
-                        );
+                        self.handle_mmu_fault(bus, f, true, false, 2);
                         return;
                     }
                 }
@@ -1377,7 +1375,7 @@ impl CpuCore {
         if let Err(f) = bus.try_write_word(addr, value)
             && matches!(f.kind, BusFaultKind::BusError)
         {
-            self.trigger_bus_error(bus, addr, true, false);
+            self.trigger_bus_error(bus, addr, true, false, 2);
         }
     }
 
@@ -1410,9 +1408,7 @@ impl CpuCore {
                 ) {
                     Ok(p) => addr = self.address(p),
                     Err(f) => {
-                        self.handle_mmu_fault(
-                            bus, f, /*write=*/ true, /*instruction=*/ false,
-                        );
+                        self.handle_mmu_fault(bus, f, true, false, 4);
                         return;
                     }
                 }
@@ -1421,7 +1417,7 @@ impl CpuCore {
         if let Err(f) = bus.try_write_long(addr, value)
             && matches!(f.kind, BusFaultKind::BusError)
         {
-            self.trigger_bus_error(bus, addr, true, false);
+            self.trigger_bus_error(bus, addr, true, false, 4);
         }
     }
 
@@ -1431,6 +1427,7 @@ impl CpuCore {
         fault: crate::mmu::MmuFault,
         write: bool,
         instruction: bool,
+        size: u32,
     ) {
         use crate::core::exceptions::vector;
         use crate::mmu::MmuFaultKind;
@@ -1439,9 +1436,10 @@ impl CpuCore {
         // 1. exception_processing flag in translate() bypasses MMU during exception handling
         // 2. Double-fault detection in take_exception() halts CPU on recursive faults
 
+        self.pending_fault_cause = Some(fault.cause);
         match fault.kind {
             MmuFaultKind::BusError => {
-                self.trigger_bus_error(bus, fault.address, write, instruction)
+                self.trigger_bus_error(bus, fault.address, write, instruction, size)
             }
             MmuFaultKind::ConfigurationError => {
                 let _ = self.take_exception(bus, vector::MMU_CONFIGURATION_ERROR);
@@ -1458,7 +1456,7 @@ impl CpuCore {
                 // can restart it once the handler fixes the mapping (the 040
                 // gets a resumable format-7 frame; the 030 long bus-fault
                 // format-A/B frame is still the minimal fallback).
-                self.trigger_bus_error(bus, fault.address, write, instruction);
+                self.trigger_bus_error(bus, fault.address, write, instruction, size);
             }
         }
     }

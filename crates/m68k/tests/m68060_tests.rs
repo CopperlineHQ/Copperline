@@ -541,3 +541,83 @@ fn fsave_writes_060_frames_and_frestore_null_resets() {
     assert_eq!(cpu.dar[8], 0x600C, "FRESTORE consumes 12 bytes");
     assert_eq!(cpu.fpcr, 0, "NULL frame resets the FPU");
 }
+
+/// Identity-map the 4 KB page containing `logical` through a 68040-style
+/// table (the 68060 shares the walker), optionally write-protected.
+fn build_060_table(bus: &mut TestBus, logical: u32, write_protect: bool) -> u32 {
+    const ROOT: u32 = 0x2000;
+    const PTR: u32 = 0x3000;
+    const PAGE: u32 = 0x4000;
+    let root_idx = (logical >> 25) & 0x7F;
+    let ptr_idx = (logical >> 18) & 0x7F;
+    let page_idx = (logical >> 12) & 0x3F;
+    bus.write_long_at(ROOT + root_idx * 4, PTR | 2);
+    bus.write_long_at(PTR + ptr_idx * 4, PAGE | 2);
+    let mut pd = (logical & 0xFFFF_F000) | 1;
+    if write_protect {
+        pd |= 0x0000_0004;
+    }
+    bus.write_long_at(PAGE + page_idx * 4, pd);
+    ROOT
+}
+
+#[test]
+fn mmu_write_protect_pushes_format_4_with_fslw_on_68060() {
+    let (mut cpu, mut bus) = setup_060();
+    bus.write_long_at(0x08, 0x0400); // vector 2: access error
+    build_060_table(&mut bus, 0x0000, false); // stack/vector page stays writable
+    let root = build_060_table(&mut bus, 0x1000, true);
+    movec_to(&mut cpu, &mut bus, 0x807, root); // SRP
+    movec_to(&mut cpu, &mut bus, 0x003, 0x0000_8000); // TC enable
+
+    // MOVE.L D0,(A0) into the write-protected page.
+    bus.write_word_at(0x0210, 0x2080);
+    cpu.dar[0] = 0xDEAD_BEEF;
+    cpu.dar[8] = 0x1000;
+    cpu.pc = 0x0210;
+    let sp_before = cpu.dar[15];
+    step(&mut cpu, &mut bus);
+
+    assert_eq!(cpu.pc, 0x0400, "write-protect fault vectors through 2");
+    let sp = cpu.dar[15];
+    assert_eq!(sp_before.wrapping_sub(sp), 16, "format $4 frame is 8 words");
+    assert_eq!(bus.read_word(sp.wrapping_add(6)), 0x4008, "format $4, vector 2");
+    assert_eq!(bus.read_long(sp.wrapping_add(2)), 0x0210, "restart PC");
+    assert_eq!(bus.read_long(sp.wrapping_add(8)), 0x1000, "fault address");
+    // FSLW: write, size long, TM = supervisor data (5), WP cause.
+    let fslw = bus.read_long(sp.wrapping_add(0xC));
+    assert_eq!(fslw, 0x0080_0000 | (5 << 16) | 0x80, "FSLW W|TM|WP");
+
+    // RTE from the handler pops the whole frame and restarts the write
+    // (which faults again - the page is still protected - proving the
+    // restart semantics rather than a skip).
+    bus.write_word_at(0x0400, 0x4E73);
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.pc, 0x0210, "RTE format $4 restarts the instruction");
+    assert_eq!(cpu.dar[15], sp_before, "RTE consumed all 8 words");
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.pc, 0x0400, "the restarted write faults again");
+}
+
+#[test]
+fn rte_pops_format_7_frame_on_68040() {
+    let mut cpu = CpuCore::new();
+    cpu.set_cpu_type(CpuType::M68040);
+    let mut bus = TestBus::new();
+    bus.write_long_at(0x00, 0x1000);
+    bus.write_long_at(0x04, 0x0200);
+    cpu.reset(&mut bus);
+    cpu.set_sr(0x2700);
+
+    // Hand-build a format 7 (30-word) access-error frame at 0x0F00.
+    let sp = 0x0F00u32;
+    bus.write_word_at(sp, 0x2700); // SR
+    bus.write_long_at(sp + 2, 0x0555); // PC
+    bus.write_word_at(sp + 6, 0x7008); // format 7, vector 2
+    cpu.dar[15] = sp;
+    bus.write_word_at(0x0200, 0x4E73); // RTE
+    cpu.pc = 0x0200;
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.pc, 0x0555, "RTE must pop the 040 access-error frame");
+    assert_eq!(cpu.dar[15], sp + 60, "30 words consumed");
+}

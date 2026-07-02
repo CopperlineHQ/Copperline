@@ -828,6 +828,29 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                                     cpu.set_sr(sr);
                                     return 20;
                                 }
+                                4 if cpu.is_060() => {
+                                    // 68060 access-error / FP-disabled frame
+                                    // (8 words): discard EA and FSLW.
+                                    let sr = cpu.pull_16(bus);
+                                    cpu.pc = cpu.pull_32(bus);
+                                    let _ = cpu.pull_16(bus); // format word
+                                    cpu.dar[15] = cpu.dar[15].wrapping_add(8);
+                                    cpu.set_sr(sr);
+                                    return 20;
+                                }
+                                7 if cpu.is_040() => {
+                                    // 68040 access-error frame (30 words):
+                                    // discard EA/SSW/writeback state. The
+                                    // faulting instruction was rolled back at
+                                    // frame-build time, so a plain restart is
+                                    // the whole continuation.
+                                    let sr = cpu.pull_16(bus);
+                                    cpu.pc = cpu.pull_32(bus);
+                                    let _ = cpu.pull_16(bus); // format word
+                                    cpu.dar[15] = cpu.dar[15].wrapping_add(52);
+                                    cpu.set_sr(sr);
+                                    return 20;
+                                }
                                 _ => {
                                     return cpu.take_exception(bus, 14); // format error
                                 }

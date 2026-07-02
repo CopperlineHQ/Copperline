@@ -19,10 +19,35 @@ pub enum MmuFaultKind {
     BusError,
 }
 
+/// Why a translation failed, at the granularity the 68060 FSLW reports:
+/// which walk level held the invalid descriptor, or which protection or
+/// bus condition stopped the access. The 030/040 frames do not consume
+/// this detail; the 68060 access-error frame does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MmuFaultCause {
+    /// Invalid descriptor in the root (level A) table.
+    PointerA,
+    /// Invalid descriptor in the pointer (level B) table.
+    PointerB,
+    /// Invalid indirect page descriptor.
+    Indirect,
+    /// Invalid page descriptor.
+    PageFault,
+    /// Write to a write-protected page.
+    WriteProtect,
+    /// User access to a supervisor-only page.
+    SupervisorProtect,
+    /// Physical bus error while walking the tables.
+    TableWalkBusError,
+    /// Physical bus error on the access itself.
+    AccessBusError,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MmuFault {
     pub kind: MmuFaultKind,
     pub address: u32,
+    pub cause: MmuFaultCause,
 }
 
 pub type MmuResult<T> = Result<T, MmuFault>;

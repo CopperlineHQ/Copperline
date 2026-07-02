@@ -44,6 +44,78 @@ pub mod vector {
     pub const MMU_ACCESS_LEVEL_VIOLATION_ERROR: u32 = 58;
 }
 
+/// 68060 fault status long word (FSLW) bits, as consumed by OS fault
+/// handlers (bit names per MC68060UM Table 8-9 / Linux asm/traps.h).
+pub mod fslw {
+    /// Read access.
+    pub const RW_R: u32 = 0x0100_0000;
+    /// Write access.
+    pub const RW_W: u32 = 0x0080_0000;
+    /// Transfer size shift (bits 22-21): 00 long, 01 byte, 10 word.
+    pub const SIZE_SHIFT: u32 = 21;
+    /// Transfer modifier shift (bits 18-16): holds the function code.
+    pub const TM_SHIFT: u32 = 16;
+    /// Instruction (1) or operand (0) access.
+    pub const IO: u32 = 0x0000_8000;
+    /// Invalid descriptor in the root (level A) table.
+    pub const PTA: u32 = 0x0000_1000;
+    /// Invalid descriptor in the pointer (level B) table.
+    pub const PTB: u32 = 0x0000_0800;
+    /// Invalid indirect page descriptor.
+    pub const IL: u32 = 0x0000_0400;
+    /// Page fault (invalid page descriptor).
+    pub const PF: u32 = 0x0000_0200;
+    /// Supervisor protection violation.
+    pub const SP: u32 = 0x0000_0100;
+    /// Write protection violation.
+    pub const WP: u32 = 0x0000_0080;
+    /// Bus error on table search.
+    pub const TWE: u32 = 0x0000_0040;
+    /// Bus error on read.
+    pub const RE: u32 = 0x0000_0020;
+    /// Bus error on write.
+    pub const WE: u32 = 0x0000_0010;
+}
+
+/// Compose the 68060 FSLW for an access error.
+fn fslw_060(
+    write: bool,
+    instruction: bool,
+    size: u32,
+    fc: u16,
+    cause: Option<crate::mmu::MmuFaultCause>,
+) -> u32 {
+    use crate::mmu::MmuFaultCause;
+    let mut w = if write { fslw::RW_W } else { fslw::RW_R };
+    w |= match size {
+        1 => 0b01 << fslw::SIZE_SHIFT,
+        2 => 0b10 << fslw::SIZE_SHIFT,
+        _ => 0, // long
+    };
+    w |= u32::from(fc & 7) << fslw::TM_SHIFT;
+    if instruction {
+        w |= fslw::IO;
+    }
+    w |= match cause {
+        Some(MmuFaultCause::PointerA) => fslw::PTA,
+        Some(MmuFaultCause::PointerB) => fslw::PTB,
+        Some(MmuFaultCause::Indirect) => fslw::IL,
+        Some(MmuFaultCause::PageFault) => fslw::PF,
+        Some(MmuFaultCause::WriteProtect) => fslw::WP,
+        Some(MmuFaultCause::SupervisorProtect) => fslw::SP,
+        Some(MmuFaultCause::TableWalkBusError) => fslw::TWE,
+        // A physical bus error on the access itself.
+        Some(MmuFaultCause::AccessBusError) | None => {
+            if write {
+                fslw::WE
+            } else {
+                fslw::RE
+            }
+        }
+    };
+    w
+}
+
 /// Function code bits for exception stack frames.
 pub mod fc {
     pub const USER_DATA: u16 = 1;
@@ -283,6 +355,8 @@ impl CpuCore {
         address: u32,
         write: bool,
         instruction: bool,
+        size: u32,
+        cause: Option<crate::mmu::MmuFaultCause>,
     ) -> i32 {
         let old_sr = self.get_sr();
         let was_supervisor = (old_sr & 0x2000) != 0;
@@ -332,6 +406,20 @@ impl CpuCore {
                 self.push_32_raw(bus, self.ppc);
                 self.push_16_raw(bus, old_sr);
                 let _ = (status_word, address); // currently unused in this placeholder
+            }
+            _ if self.is_060() => {
+                // 68060 access-error stack frame (format $4, 8 words): the
+                // fault address long at +$08 and the fault status long word
+                // (FSLW) at +$0C. The instruction has been rolled back, so
+                // RTE restarts it (same demand-paging model as the 040).
+                let fslw = fslw_060(write, instruction, size, fc, cause);
+                let fmt_vec = 0x4000 | ((vector::BUS_ERROR as u16) << 2);
+                self.push_32_raw(bus, fslw);
+                self.push_32_raw(bus, address);
+                self.push_16_raw(bus, fmt_vec);
+                self.push_32_raw(bus, self.ppc); // restart PC
+                self.push_16_raw(bus, old_sr);
+                let _ = status_word;
             }
             _ if self.is_040() => {
                 // 68040 access-error stack frame (format 7, 30 words). The

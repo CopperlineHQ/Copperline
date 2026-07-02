@@ -308,9 +308,7 @@ impl CpuCore {
             ) {
                 Ok(p) => addr = self.address(p),
                 Err(f) => {
-                    self.handle_mmu_fault(
-                        bus, f, /*write=*/ false, /*instruction=*/ true,
-                    );
+                    self.handle_mmu_fault(bus, f, false, true, 2);
                     return 0;
                 }
             }
@@ -321,7 +319,7 @@ impl CpuCore {
                 v
             }
             Err(_) => {
-                self.trigger_bus_error(bus, addr, false, true);
+                self.trigger_bus_error(bus, addr, false, true, 2);
                 0
             }
         }
@@ -378,9 +376,7 @@ impl CpuCore {
             ) {
                 Ok(p) => addr = self.address(p),
                 Err(f) => {
-                    self.handle_mmu_fault(
-                        bus, f, /*write=*/ false, /*instruction=*/ true,
-                    );
+                    self.handle_mmu_fault(bus, f, false, true, 4);
                     return 0;
                 }
             }
@@ -391,7 +387,7 @@ impl CpuCore {
                 v
             }
             Err(_) => {
-                self.trigger_bus_error(bus, addr, false, true);
+                self.trigger_bus_error(bus, addr, false, true, 4);
                 0
             }
         }
