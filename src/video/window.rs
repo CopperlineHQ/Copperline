@@ -2459,6 +2459,17 @@ impl App {
                 }
                 self.request_redraw();
             }
+            WindowEvent::MouseWheel { delta, .. } => {
+                // Scroll the Memory tab's hex/bitmap view: one display row
+                // per wheel notch, a chunk for pixel-precise trackpads.
+                if kind == ToolPanelKind::Debugger {
+                    let rows = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => -y as i32,
+                        MouseScrollDelta::PixelDelta(pos) => -(pos.y / 12.0) as i32,
+                    };
+                    self.debugger_mem_scroll(rows);
+                }
+            }
             WindowEvent::RedrawRequested => self.draw_tool_window(kind),
             _ => {}
         }
@@ -2612,6 +2623,12 @@ impl App {
             UiControl::DebugCopperStep => {
                 self.activate_tool_control(ToolPanelKind::Debugger, control)
             }
+            UiControl::DebugMemFind => self.activate_tool_control(ToolPanelKind::Debugger, control),
+            UiControl::DebugMemSave => self.activate_tool_control(ToolPanelKind::Debugger, control),
+            UiControl::DebugMemWriter => {
+                self.activate_tool_control(ToolPanelKind::Debugger, control)
+            }
+            UiControl::DebugMemBits => self.activate_tool_control(ToolPanelKind::Debugger, control),
             UiControl::DebugBreaksClear => {
                 self.activate_tool_control(ToolPanelKind::Debugger, control)
             }
@@ -2773,6 +2790,10 @@ impl App {
                 self.debugger_toggle_copper_break()
             }
             (ToolPanelKind::Debugger, UiControl::DebugCopperStep) => self.debugger_step_copper(),
+            (ToolPanelKind::Debugger, UiControl::DebugMemFind) => self.debugger_mem_find(),
+            (ToolPanelKind::Debugger, UiControl::DebugMemSave) => self.debugger_mem_save_region(),
+            (ToolPanelKind::Debugger, UiControl::DebugMemWriter) => self.debugger_mem_writer(),
+            (ToolPanelKind::Debugger, UiControl::DebugMemBits) => self.debugger_mem_toggle_bits(),
             (ToolPanelKind::Debugger, UiControl::DebugBreaksClear) => {
                 self.emu.machine.ui_breaks_clear();
                 self.last_debug_stop = None;
@@ -2955,6 +2976,24 @@ impl App {
         if let Some(control) = control {
             self.activate_tool_control(ToolPanelKind::Debugger, control);
             return true;
+        }
+        // Memory tab: cursor/page keys scroll the hex or bitmap view.
+        if self
+            .debugger_panel
+            .as_ref()
+            .is_some_and(|panel| panel.tab == ui::DebugTab::Memory)
+        {
+            let rows = match code {
+                KeyCode::ArrowUp => Some(-1),
+                KeyCode::ArrowDown => Some(1),
+                KeyCode::PageUp => Some(-16),
+                KeyCode::PageDown => Some(16),
+                _ => None,
+            };
+            if let Some(rows) = rows {
+                self.debugger_mem_scroll(rows);
+                return true;
+            }
         }
         false
     }
@@ -4217,13 +4256,193 @@ impl App {
     fn debugger_mem_page(&mut self, direction: i32) {
         if let Some(panel) = self.debugger_panel.as_mut() {
             if panel.tab == ui::DebugTab::Memory {
-                let delta = ui::MEM_PAGE_BYTES;
+                // Bits mode pages by one bitmap screenful; hex by one page.
+                let delta = if panel.mem_view_bits {
+                    (panel.mem_bitmap_stride * ui::mem_bitmap_rows() as u32).max(1)
+                } else {
+                    ui::MEM_PAGE_BYTES
+                };
                 panel.mem_addr = if direction < 0 {
                     panel.mem_addr.wrapping_sub(delta)
                 } else {
                     panel.mem_addr.wrapping_add(delta)
-                } & 0x00FF_FFF0;
+                } & 0x00FF_FFFF;
+                if !panel.mem_view_bits {
+                    panel.mem_addr &= !0xF;
+                }
             }
+        }
+    }
+
+    /// Scroll the Memory tab by `rows` display rows (16 bytes each in the
+    /// hex view, one stride in the bitmap view).
+    fn debugger_mem_scroll(&mut self, rows: i32) {
+        if let Some(panel) = self.debugger_panel.as_mut() {
+            if panel.tab == ui::DebugTab::Memory && rows != 0 {
+                let step = if panel.mem_view_bits {
+                    panel.mem_bitmap_stride.max(1)
+                } else {
+                    16
+                };
+                let delta = step.wrapping_mul(rows.unsigned_abs());
+                panel.mem_addr = if rows < 0 {
+                    panel.mem_addr.wrapping_sub(delta)
+                } else {
+                    panel.mem_addr.wrapping_add(delta)
+                } & 0x00FF_FFFF;
+                self.request_redraw();
+            }
+        }
+    }
+
+    /// Find the entry's hex byte pattern in CPU-visible memory, starting
+    /// past the previous hit (or the current page) and wrapping around
+    /// the 24-bit space once.
+    fn debugger_mem_find(&mut self) {
+        let Some(panel) = self.debugger_panel.as_ref() else {
+            return;
+        };
+        let Some(pattern) = panel.find_pattern() else {
+            self.show_osd("Find: type hex byte pairs first (e.g. 4E75)");
+            return;
+        };
+        let start = panel
+            .mem_last_find
+            .map(|addr| addr.wrapping_add(1))
+            .unwrap_or(panel.mem_addr)
+            & 0x00FF_FFFF;
+        const SPACE: u64 = 0x0100_0000;
+        const CHUNK: usize = 4096;
+        let mut offset = 0u64;
+        let mut found = None;
+        while offset < SPACE {
+            let base = ((u64::from(start) + offset) % SPACE) as u32;
+            // Overlap chunks by the pattern length so matches spanning a
+            // chunk boundary are seen.
+            let bytes = self
+                .emu
+                .machine
+                .debug_read_memory(base, CHUNK + pattern.len() - 1);
+            if let Some(hit) = bytes
+                .windows(pattern.len())
+                .position(|window| window == pattern)
+            {
+                found = Some(base.wrapping_add(hit as u32) & 0x00FF_FFFF);
+                break;
+            }
+            offset += CHUNK as u64;
+        }
+        match found {
+            Some(addr) => {
+                if let Some(panel) = self.debugger_panel.as_mut() {
+                    panel.mem_last_find = Some(addr);
+                    panel.mem_addr = addr & !0xF;
+                }
+                self.show_osd(format!("Found at ${addr:06X}"));
+            }
+            None => self.show_osd("Pattern not found"),
+        }
+        self.request_redraw();
+    }
+
+    /// Save the entry's "ADDR LEN" region of CPU-visible memory to a file
+    /// picked in a save dialog (the GUI counterpart of the headless
+    /// COPPERLINE_DBG_RAMDUMP knob).
+    fn debugger_mem_save_region(&mut self) {
+        let Some((addr, len)) = self
+            .debugger_panel
+            .as_ref()
+            .and_then(|panel| panel.region_spec())
+        else {
+            self.show_osd("Save: type \"ADDR LEN\" (hex) first");
+            return;
+        };
+        self.suspend_live_audio_for_host_io();
+        let picked = rfd::FileDialog::new()
+            .set_title("Save memory region")
+            .set_file_name(format!("mem-{addr:06X}-{len:X}.bin"))
+            .save_file();
+        if let Some(path) = picked {
+            let bytes = self.emu.machine.debug_read_memory(addr, len as usize);
+            match std::fs::write(&path, &bytes) {
+                Ok(()) => self.show_osd(format!(
+                    "Saved ${addr:06X}+${len:X} to {}",
+                    display_file_name(&path)
+                )),
+                Err(e) => {
+                    warn!("memory region save failed ({}): {e:#}", path.display());
+                    self.show_osd("Memory save failed (see log)");
+                }
+            }
+        }
+        self.finish_host_io_pause();
+    }
+
+    /// Report the last instruction that wrote the word at the entry
+    /// address, replayed from the reverse-debug snapshot ring (the GUI
+    /// counterpart of GDB's "monitor last-writer").
+    fn debugger_mem_writer(&mut self) {
+        use crate::timetravel::ReverseOutcome;
+        let Some(addr) = self
+            .debugger_panel
+            .as_ref()
+            .and_then(|panel| panel.entry_addr())
+        else {
+            self.show_osd("Writer: type a hex address first");
+            return;
+        };
+        let addr = addr & 0x00FF_FFFE;
+        let before = self.emu.retired_instructions();
+        match self.emu.tt_last_writer(addr, before) {
+            Ok(ReverseOutcome::Found(rec)) => {
+                let message = format!(
+                    "${:06X}: {:04X}->{:04X} by pc ${:06X} (frame {})",
+                    rec.addr,
+                    rec.old,
+                    rec.new,
+                    rec.pc & 0x00FF_FFFF,
+                    rec.frame
+                );
+                info!("last-writer {message}");
+                self.last_debug_stop = Some(format!("Last writer {message}"));
+                self.show_osd(message);
+            }
+            Ok(ReverseOutcome::NotFound) => {
+                self.show_osd(format!("No write to ${addr:06X} in retained history"))
+            }
+            Ok(ReverseOutcome::BeyondHistory) => {
+                self.show_osd(format!("Write to ${addr:06X} predates history"))
+            }
+            Err(e) => {
+                error!("last-writer failed: {e:?}");
+                self.show_osd("Last-writer failed (see log)");
+            }
+        }
+        self.finish_render_for_current_frame();
+        self.request_redraw();
+    }
+
+    /// Toggle the Memory tab between hex and the 1-bpp bitplane view. An
+    /// entry holding a small decimal number sets the bitmap row stride.
+    fn debugger_mem_toggle_bits(&mut self) {
+        if let Some(panel) = self.debugger_panel.as_mut() {
+            if let Some(stride) = panel
+                .entry
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .filter(|stride| (1..=512).contains(stride))
+            {
+                panel.mem_bitmap_stride = stride;
+            }
+            panel.mem_view_bits = !panel.mem_view_bits;
+            let mode = if panel.mem_view_bits {
+                format!("bitmap (stride {} bytes)", panel.mem_bitmap_stride)
+            } else {
+                "hex".to_string()
+            };
+            self.show_osd(format!("Memory view: {mode}"));
+            self.request_redraw();
         }
     }
 
@@ -4436,6 +4655,7 @@ impl App {
         }
         let read = |addr: u32| bus.peek_word_any(addr);
         let mut lines: Vec<ui::DbgLine> = Vec::new();
+        let mut bitmap: Option<ui::MemBitmapView> = None;
         let mut audio: Option<ui::AudioScopeView> = None;
         match panel.tab {
             ui::DebugTab::Cpu => {
@@ -4714,20 +4934,41 @@ impl App {
                 });
             }
             ui::DebugTab::Memory => {
-                lines.push(ui::DbgLine::plain(
-                    "Click the $ box, type a hex address, Enter to jump; </> to page",
-                ));
-                lines.push(ui::DbgLine::plain(""));
-                let base = panel.mem_addr & 0x00FF_FFF0;
-                for row in 0..16u32 {
-                    let addr = base.wrapping_add(row * 16) & 0x00FF_FFFF;
-                    let mut bytes = [0u8; 16];
-                    for word in 0..8u32 {
-                        let value = bus.peek_word_any(addr.wrapping_add(word * 2));
-                        bytes[word as usize * 2] = (value >> 8) as u8;
-                        bytes[word as usize * 2 + 1] = value as u8;
+                // Leave room for the Find/Save/Writer/Bits buttons drawn at
+                // the top of the content area.
+                for _ in 0..ui::MEM_TAB_HEADER_LINES {
+                    lines.push(ui::DbgLine::plain(""));
+                }
+                if panel.mem_view_bits {
+                    let stride = panel.mem_bitmap_stride.max(1) as usize;
+                    let rows = ui::mem_bitmap_rows();
+                    let base = panel.mem_addr & 0x00FF_FFFF;
+                    lines.push(ui::DbgLine::plain(format!(
+                        "bitplane at ${base:06X}, stride {stride} bytes ({} px), {rows} rows",
+                        stride * 8
+                    )));
+                    bitmap = Some(ui::MemBitmapView {
+                        base,
+                        stride,
+                        rows,
+                        data: machine.debug_read_memory(base, stride * rows),
+                    });
+                } else {
+                    lines.push(ui::DbgLine::plain(
+                        "$ box: jump / \"ADDR VALUE\" poke / \"ADDR LEN\" save / hex bytes find",
+                    ));
+                    lines.push(ui::DbgLine::plain(""));
+                    let base = panel.mem_addr & 0x00FF_FFF0;
+                    for row in 0..16u32 {
+                        let addr = base.wrapping_add(row * 16) & 0x00FF_FFFF;
+                        let mut bytes = [0u8; 16];
+                        for word in 0..8u32 {
+                            let value = bus.peek_word_any(addr.wrapping_add(word * 2));
+                            bytes[word as usize * 2] = (value >> 8) as u8;
+                            bytes[word as usize * 2 + 1] = value as u8;
+                        }
+                        lines.push(ui::DbgLine::plain(ui::hex_dump_row(addr, &bytes)));
                     }
-                    lines.push(ui::DbgLine::plain(ui::hex_dump_row(addr, &bytes)));
                 }
             }
             ui::DebugTab::Break => {
@@ -4853,6 +5094,7 @@ impl App {
             reverse_available: self.emu.time_travel_enabled(),
             status,
             lines,
+            bitmap,
             audio,
         }
     }

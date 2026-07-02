@@ -2497,6 +2497,69 @@ fn beam_trap_gui_toggle_line_step_and_run_to_slot() {
 }
 
 #[test]
+fn memory_tab_find_scroll_and_bitmap_toggle() {
+    let mut app = test_app();
+    app.open_debugger();
+    if let Some(panel) = app.debugger_panel.as_mut() {
+        panel.tab = super::ui::DebugTab::Memory;
+        panel.mem_addr = 0;
+    }
+    // Plant a pattern in chip RAM and find it from page zero. The boot
+    // overlay would shadow chip RAM with ROM, so drop it like the
+    // Kickstart boot path does.
+    {
+        let bus = app.emu.bus_mut();
+        bus.mem.overlay = false;
+        bus.mem.chip_ram[0x60000..0x60004].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+    }
+    if let Some(panel) = app.debugger_panel.as_mut() {
+        panel.entry = "DEADBEEF".to_string();
+    }
+    app.activate_ui_control(UiControl::DebugMemFind);
+    {
+        let panel = app.debugger_panel.as_ref().unwrap();
+        assert_eq!(panel.mem_last_find, Some(0x60000));
+        assert_eq!(panel.mem_addr, 0x60000);
+    }
+    // Find again continues past the hit; with a single match the page
+    // wraps back around to the same place.
+    app.activate_ui_control(UiControl::DebugMemFind);
+    assert_eq!(
+        app.debugger_panel.as_ref().unwrap().mem_last_find,
+        Some(0x60000)
+    );
+
+    // Scrolling moves by 16-byte hex rows.
+    app.debugger_mem_scroll(2);
+    assert_eq!(app.debugger_panel.as_ref().unwrap().mem_addr, 0x60020);
+
+    // Bits toggles the bitmap view; a decimal entry sets the stride.
+    if let Some(panel) = app.debugger_panel.as_mut() {
+        panel.entry = "40".to_string();
+    }
+    app.activate_ui_control(UiControl::DebugMemBits);
+    let panel = app.debugger_panel.clone().unwrap();
+    assert!(panel.mem_view_bits);
+    assert_eq!(panel.mem_bitmap_stride, 40);
+    let view = app.build_debugger_view(&panel);
+    let bitmap = view.bitmap.expect("bitmap view in Bits mode");
+    assert_eq!(bitmap.stride, 40);
+    assert_eq!(bitmap.rows, super::ui::mem_bitmap_rows());
+    assert_eq!(bitmap.data.len(), 40 * bitmap.rows);
+
+    // Bitmap-mode scrolling steps by the stride; toggling back restores
+    // the hex view (and its 16-byte scroll step).
+    let before = app.debugger_panel.as_ref().unwrap().mem_addr;
+    app.debugger_mem_scroll(1);
+    assert_eq!(app.debugger_panel.as_ref().unwrap().mem_addr, before + 40);
+    if let Some(panel) = app.debugger_panel.as_mut() {
+        panel.entry.clear();
+    }
+    app.activate_ui_control(UiControl::DebugMemBits);
+    assert!(!app.debugger_panel.as_ref().unwrap().mem_view_bits);
+}
+
+#[test]
 fn exception_catchpoint_toggle_from_the_break_tab() {
     let mut app = test_app();
     app.open_debugger();

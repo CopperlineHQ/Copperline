@@ -213,6 +213,14 @@ pub struct DebuggerPanel {
     pub entry: String,
     /// Whether the entry box has keyboard focus.
     pub entry_active: bool,
+    /// Memory tab: where the last Find hit landed, so repeating Find
+    /// continues past it instead of re-finding the same match.
+    pub mem_last_find: Option<u32>,
+    /// Memory tab: render the page as a 1-bpp bitplane instead of hex.
+    pub mem_view_bits: bool,
+    /// Memory tab bitmap mode: row stride in bytes (40 = a standard
+    /// 320-pixel-wide plane).
+    pub mem_bitmap_stride: u32,
 }
 
 impl DebuggerPanel {
@@ -223,6 +231,9 @@ impl DebuggerPanel {
             disasm_addr: None,
             entry: String::new(),
             entry_active: false,
+            mem_last_find: None,
+            mem_view_bits: false,
+            mem_bitmap_stride: 40,
         }
     }
 
@@ -248,6 +259,31 @@ impl DebuggerPanel {
         let reg = parse_reg_name(tokens.next()?)?;
         let value = parse_hex_u32(tokens.next()?)?;
         Some((reg, value))
+    }
+
+    /// Memory-search pattern: the entry's tokens concatenated as hex byte
+    /// pairs ("C0 FFEE" and "C0FFEE" both match the bytes C0 FF EE).
+    pub fn find_pattern(&self) -> Option<Vec<u8>> {
+        let joined: String = self.entry.split_whitespace().collect();
+        if joined.is_empty() || !joined.len().is_multiple_of(2) {
+            return None;
+        }
+        (0..joined.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&joined[i..i + 2], 16).ok())
+            .collect()
+    }
+
+    /// Region spec for Save region: "ADDR LEN", both hex, length bounded
+    /// to the 24-bit bus.
+    pub fn region_spec(&self) -> Option<(u32, u32)> {
+        let mut tokens = self.entry.split_whitespace();
+        let addr = parse_hex_u32(tokens.next()?)?;
+        let len = parse_hex_u32(tokens.next()?)?;
+        if tokens.next().is_some() || len == 0 || len > 0x0100_0000 {
+            return None;
+        }
+        Some((addr & 0x00FF_FFFF, len))
     }
 
     pub fn push_entry_char(&mut self, ch: char) {
@@ -381,6 +417,13 @@ pub fn panel_control_at(panel: &Panel, pos: (i32, i32)) -> Option<UiControl> {
                     }
                 }
             }
+            if panel.tab == DebugTab::Memory {
+                for (control, button_rect) in mem_tab_button_rects(rect) {
+                    if button_rect.contains(pos) {
+                        return Some(control);
+                    }
+                }
+            }
             if panel.tab == DebugTab::Audio {
                 for (control, button_rect) in audio_tab_button_rects(rect) {
                     if button_rect.contains(pos) {
@@ -467,6 +510,17 @@ pub enum UiControl {
     DebugCopperBreakToggle,
     /// Copper tab: run until the Copper retires one instruction.
     DebugCopperStep,
+    /// Memory tab: find the entry's hex byte pattern, continuing past the
+    /// previous hit.
+    DebugMemFind,
+    /// Memory tab: save the "ADDR LEN" region in the entry box to a file.
+    DebugMemSave,
+    /// Memory tab: report the last instruction that wrote the entry
+    /// address (a reverse-history query; needs the snapshot ring).
+    DebugMemWriter,
+    /// Memory tab: toggle between the hex dump and the 1-bpp bitplane
+    /// view (an entry with a small decimal number sets the row stride).
+    DebugMemBits,
     /// Break tab: remove all breakpoints and watchpoints.
     DebugBreaksClear,
     /// Audio tab: toggle mute for a channel (0..3 = Paula, 4 = CD audio).
@@ -722,6 +776,27 @@ pub fn parse_catch_spec(entry: &str) -> Option<u16> {
 /// drawn at the top of the content area do not overlap text.
 pub const COPPER_TAB_HEADER_LINES: usize = 3;
 
+/// Content lines the Memory tab's view must leave blank so the buttons
+/// drawn at the top of the content area do not overlap text.
+pub const MEM_TAB_HEADER_LINES: usize = 3;
+
+/// The Memory tab's buttons, drawn at the top of the content area.
+fn mem_tab_button_rects(rect: Rect) -> [(UiControl, Rect); 4] {
+    let y = debug_content_top(rect);
+    let button = |i: usize| Rect {
+        x: rect.x + 10 + i * 98,
+        y,
+        w: 90,
+        h: DEBUG_BUTTON_H,
+    };
+    [
+        (UiControl::DebugMemFind, button(0)),
+        (UiControl::DebugMemSave, button(1)),
+        (UiControl::DebugMemWriter, button(2)),
+        (UiControl::DebugMemBits, button(3)),
+    ]
+}
+
 /// The Copper tab's buttons, drawn at the top of the content area.
 fn copper_tab_button_rects(rect: Rect) -> [(UiControl, Rect); 2] {
     let y = debug_content_top(rect);
@@ -908,6 +983,27 @@ impl DbgLine {
     }
 }
 
+/// The Memory tab's 1-bpp bitplane view: `stride` bytes per row of plane
+/// data starting at `base`, drawn as pixels (set bit = light) so bitmap
+/// graphics in RAM can be eyeballed directly.
+pub struct MemBitmapView {
+    pub base: u32,
+    pub stride: usize,
+    pub rows: usize,
+    /// Row-major plane data, `stride` bytes per row, `rows` rows.
+    pub data: Vec<u8>,
+}
+
+/// Rows of plane data the Memory tab's bitmap view shows (its fixed
+/// pixel budget inside the panel at 2x2 pixels per bit). The debugger
+/// panel is fixed-size (see `panel_dims`), so this is a constant fit.
+pub fn mem_bitmap_rows() -> usize {
+    let panel_h = 520;
+    let top = TITLE_H + 4 + DEBUG_TAB_H + 6 + MEM_TAB_HEADER_LINES * 10 + 14;
+    let bottom = panel_h - 2 * DEBUG_BUTTON_H - 16;
+    bottom.saturating_sub(top) / 2
+}
+
 pub struct DebuggerView {
     /// False while the machine is paused (the debugger's usual state).
     pub running: bool,
@@ -918,6 +1014,8 @@ pub struct DebuggerView {
     pub status: String,
     /// Pre-formatted content lines of the active tab.
     pub lines: Vec<DbgLine>,
+    /// The Memory tab's bitplane view, when its Bits mode is active.
+    pub bitmap: Option<MemBitmapView>,
     /// Structured data for the Audio tab's per-channel mute buttons and
     /// oscilloscopes. Some only when the Audio tab is active; the plain text
     /// is also mirrored into `lines` for headless/text use.
@@ -1497,6 +1595,25 @@ fn draw_debugger(
             );
         }
     }
+    // Memory-tab buttons at the top of the content area.
+    if panel.tab == DebugTab::Memory {
+        for (control, button_rect) in mem_tab_button_rects(rect) {
+            let (label, enabled) = match control {
+                UiControl::DebugMemFind => ("Find", panel.find_pattern().is_some()),
+                UiControl::DebugMemSave => ("Save...", panel.region_spec().is_some()),
+                UiControl::DebugMemWriter => ("Writer?", panel.entry_addr().is_some()),
+                _ => (if panel.mem_view_bits { "Hex" } else { "Bits" }, true),
+            };
+            draw_text_button(
+                frame,
+                button_rect,
+                label,
+                enabled,
+                hover == Some(control),
+                scale,
+            );
+        }
+    }
     // The Audio tab is drawn as a custom graphical layout (mute buttons and
     // oscilloscopes); every other tab is a plain list of content lines.
     if panel.tab == DebugTab::Audio {
@@ -1525,6 +1642,12 @@ fn draw_debugger(
                 1,
                 scale,
             );
+        }
+    }
+    // The Memory tab's bitplane view, drawn below its caption lines.
+    if panel.tab == DebugTab::Memory {
+        if let Some(bitmap) = &view.bitmap {
+            draw_mem_bitmap(frame, rect, bitmap, scale);
         }
     }
     // Transport buttons and the hex-entry box.
@@ -1601,6 +1724,57 @@ fn draw_debugger(
             }
         }
     }
+}
+
+/// Draw the Memory tab's 1-bpp plane view: 2x2 pixels per bit, set bits
+/// light, clipped to the panel width (a wide stride simply runs off the
+/// right edge, like a real overwide screen).
+fn draw_mem_bitmap(frame: &mut [u8], rect: Rect, bitmap: &MemBitmapView, scale: usize) {
+    let origin_x = rect.x + 10;
+    let origin_y = rect.y + TITLE_H + 4 + DEBUG_TAB_H + 6 + MEM_TAB_HEADER_LINES * 10 + 14;
+    let max_w = rect.w.saturating_sub(20);
+    let plot = Rect {
+        x: origin_x,
+        y: origin_y,
+        w: (bitmap.stride * 8 * 2).min(max_w),
+        h: bitmap.rows * 2,
+    };
+    fill_rect(frame, scale_rect(plot, scale), rgba(16, 18, 20), scale);
+    let set = rgba(214, 224, 230);
+    for row in 0..bitmap.rows {
+        for byte_col in 0..bitmap.stride {
+            let Some(&byte) = bitmap.data.get(row * bitmap.stride + byte_col) else {
+                continue;
+            };
+            if byte == 0 {
+                continue;
+            }
+            for bit in 0..8 {
+                if byte & (0x80 >> bit) == 0 {
+                    continue;
+                }
+                let x = (byte_col * 8 + bit) * 2;
+                if x + 2 > max_w {
+                    break;
+                }
+                fill_rect(
+                    frame,
+                    scale_rect(
+                        Rect {
+                            x: origin_x + x,
+                            y: origin_y + row * 2,
+                            w: 2,
+                            h: 2,
+                        },
+                        scale,
+                    ),
+                    set,
+                    scale,
+                );
+            }
+        }
+    }
+    draw_outline(frame, plot, BUTTON_EDGE_LIGHT, scale);
 }
 
 /// Draw the Audio tab: a header line, four Paula channel blocks and a CD row,
@@ -3829,6 +4003,24 @@ mod tests {
     }
 
     #[test]
+    fn memory_entry_parsers_find_and_region() {
+        let mut panel = DebuggerPanel::new();
+        panel.entry = "C0 FFEE".into();
+        assert_eq!(panel.find_pattern(), Some(vec![0xC0, 0xFF, 0xEE]));
+        panel.entry = "C0FFE".into(); // odd number of hex digits
+        assert_eq!(panel.find_pattern(), None);
+        panel.entry = String::new();
+        assert_eq!(panel.find_pattern(), None);
+
+        panel.entry = "C00000 1000".into();
+        assert_eq!(panel.region_spec(), Some((0xC0_0000, 0x1000)));
+        panel.entry = "C00000".into(); // missing length
+        assert_eq!(panel.region_spec(), None);
+        panel.entry = "C00000 0".into(); // empty region
+        assert_eq!(panel.region_spec(), None);
+    }
+
+    #[test]
     fn catch_spec_parses_irq_trap_and_vector_forms() {
         assert_eq!(parse_catch_spec("irq 3"), Some(27));
         assert_eq!(parse_catch_spec("IRQ 7"), Some(31));
@@ -4366,6 +4558,7 @@ mod tests {
             reverse_available: true,
             status: "paused frame 1234 24.68s".to_string(),
             lines,
+            bitmap: None,
             audio: None,
         });
         let mut panel = DebuggerPanel::new();
@@ -4409,6 +4602,7 @@ mod tests {
             reverse_available: true,
             status: "paused frame 1234 24.68s".to_string(),
             lines,
+            bitmap: None,
             audio: None,
         });
         let mut panel = DebuggerPanel::new();
@@ -4505,6 +4699,7 @@ mod tests {
             reverse_available: true,
             status: "paused frame 1234 24.68s".to_string(),
             lines: Vec::new(),
+            bitmap: None,
             audio: Some(audio),
         });
         let mut panel = DebuggerPanel::new();

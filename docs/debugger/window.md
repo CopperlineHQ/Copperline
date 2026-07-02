@@ -83,7 +83,26 @@ not part of a save state.
 
 **Memory** is a hex/ASCII dump, 256 bytes per page. Type a hex address in
 the `$` box and press Enter to jump there; the `<` and `>` buttons page by
-256 bytes.
+256 bytes, the mouse wheel and cursor keys scroll by 16-byte rows, and
+PageUp/PageDown by whole pages. Four buttons sit above the dump:
+
+- **Find** searches CPU-visible memory for the `$` box's hex byte pattern
+  (`4E75`, or spaced pairs like `C0 FF EE`), starting past the previous
+  hit and wrapping the 24-bit space once. The view jumps to the match.
+- **Save...** writes the `$` box's `ADDR LEN` (hex) region to a file via
+  a save dialog -- the GUI counterpart of `COPPERLINE_DBG_RAMDUMP`.
+- **Writer?** reports the last instruction that wrote the word at the
+  `$` box address: `$C09580: 0012->0034 by pc $C033C2 (frame 1234)`,
+  replayed from the reverse-debug snapshot ring (so it sees every bus
+  master, and costs a short replay). The result also lands on the Break
+  tab until the next stop.
+- **Bits** toggles a 1-bit-per-pixel bitplane view of the same memory:
+  set bits are drawn light, one row per stride. Type a decimal stride in
+  the `$` box when toggling to set the row width (default 40 bytes = a
+  320-pixel plane), then wheel/cursor keys scroll by rows and `<`/`>`
+  page by screenfuls. Point it at a bitplane pointer from the Chipset
+  tab to eyeball graphics data directly -- misaligned strides show as
+  the familiar diagonal shear.
 
 **Break** manages breakpoints and watchpoints (next section) and shows the
 reason for the last stop.
