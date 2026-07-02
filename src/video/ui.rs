@@ -372,6 +372,13 @@ pub fn panel_control_at(panel: &Panel, pos: (i32, i32)) -> Option<UiControl> {
                     }
                 }
             }
+            if panel.tab == DebugTab::Copper {
+                for (control, button_rect) in copper_tab_button_rects(rect) {
+                    if button_rect.contains(pos) {
+                        return Some(control);
+                    }
+                }
+            }
             if panel.tab == DebugTab::Audio {
                 for (control, button_rect) in audio_tab_button_rects(rect) {
                     if button_rect.contains(pos) {
@@ -450,6 +457,11 @@ pub enum UiControl {
     /// Break tab: toggle a beam trap at the entry's decimal "VPOS [HPOS]"
     /// position (halt when the Agnus beam reaches it).
     DebugBeamToggle,
+    /// Copper tab: toggle a Copper breakpoint at the entry address (halt
+    /// when the Copper's PC arrives there).
+    DebugCopperBreakToggle,
+    /// Copper tab: run until the Copper retires one instruction.
+    DebugCopperStep,
     /// Break tab: remove all breakpoints and watchpoints.
     DebugBreaksClear,
     /// Audio tab: toggle mute for a channel (0..3 = Paula, 4 = CD audio).
@@ -676,6 +688,25 @@ fn break_tab_button_rects(rect: Rect) -> [(UiControl, Rect); 5] {
         (UiControl::DebugRegToggle, button(2)),
         (UiControl::DebugBeamToggle, button(3)),
         (UiControl::DebugBreaksClear, button(4)),
+    ]
+}
+
+/// Content lines the Copper tab's view must leave blank so the buttons
+/// drawn at the top of the content area do not overlap text.
+pub const COPPER_TAB_HEADER_LINES: usize = 3;
+
+/// The Copper tab's buttons, drawn at the top of the content area.
+fn copper_tab_button_rects(rect: Rect) -> [(UiControl, Rect); 2] {
+    let y = debug_content_top(rect);
+    let button = |i: usize| Rect {
+        x: rect.x + 10 + i * 98,
+        y,
+        w: 90,
+        h: DEBUG_BUTTON_H,
+    };
+    [
+        (UiControl::DebugCopperBreakToggle, button(0)),
+        (UiControl::DebugCopperStep, button(1)),
     ]
 }
 
@@ -1374,6 +1405,24 @@ fn draw_debugger(
                 UiControl::DebugBreaksClear => true,
                 UiControl::DebugBeamToggle => parse_beam_spec(&panel.entry).is_some(),
                 _ => panel.entry_addr().is_some(),
+            };
+            draw_text_button(
+                frame,
+                button_rect,
+                label,
+                enabled,
+                hover == Some(control),
+                scale,
+            );
+        }
+    }
+    // Copper-tab buttons at the top of the content area (the view leaves
+    // COPPER_TAB_HEADER_LINES blank so text starts below them).
+    if panel.tab == DebugTab::Copper {
+        for (control, button_rect) in copper_tab_button_rects(rect) {
+            let (label, enabled) = match control {
+                UiControl::DebugCopperBreakToggle => ("CBreak +/-", panel.entry_addr().is_some()),
+                _ => ("CStep", true),
             };
             draw_text_button(
                 frame,

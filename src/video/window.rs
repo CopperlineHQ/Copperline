@@ -2603,6 +2603,12 @@ impl App {
             UiControl::DebugBeamToggle => {
                 self.activate_tool_control(ToolPanelKind::Debugger, control)
             }
+            UiControl::DebugCopperBreakToggle => {
+                self.activate_tool_control(ToolPanelKind::Debugger, control)
+            }
+            UiControl::DebugCopperStep => {
+                self.activate_tool_control(ToolPanelKind::Debugger, control)
+            }
             UiControl::DebugBreaksClear => {
                 self.activate_tool_control(ToolPanelKind::Debugger, control)
             }
@@ -2759,6 +2765,10 @@ impl App {
             (ToolPanelKind::Debugger, UiControl::DebugBeamToggle) => {
                 self.debugger_toggle_beam_trap()
             }
+            (ToolPanelKind::Debugger, UiControl::DebugCopperBreakToggle) => {
+                self.debugger_toggle_copper_break()
+            }
+            (ToolPanelKind::Debugger, UiControl::DebugCopperStep) => self.debugger_step_copper(),
             (ToolPanelKind::Debugger, UiControl::DebugBreaksClear) => {
                 self.emu.machine.ui_breaks_clear();
                 self.last_debug_stop = None;
@@ -2934,6 +2944,7 @@ impl App {
             KeyCode::KeyU => Some(UiControl::DebugStepOut),
             KeyCode::KeyF => Some(UiControl::DebugStepFrame),
             KeyCode::KeyL => Some(UiControl::DebugRunLine),
+            KeyCode::KeyC => Some(UiControl::DebugCopperStep),
             KeyCode::KeyR => Some(UiControl::DebugRun),
             _ => None,
         };
@@ -3966,6 +3977,44 @@ impl App {
         self.show_osd(msg);
     }
 
+    /// Toggle a Copper breakpoint at the entry address (Copper tab).
+    fn debugger_toggle_copper_break(&mut self) {
+        let Some(addr) = self
+            .debugger_panel
+            .as_ref()
+            .and_then(|panel| panel.entry_addr())
+        else {
+            self.show_osd("CBreak: type a hex Copper-list address first");
+            return;
+        };
+        let set = self.emu.bus_mut().ui_toggle_copper_break(addr);
+        self.show_osd(format!(
+            "Copper breakpoint ${:06X} {}",
+            addr & 0x00FF_FFFE,
+            if set { "set" } else { "removed" }
+        ));
+    }
+
+    /// Run until the Copper retires one instruction (Copper tab CStep).
+    fn debugger_step_copper(&mut self) {
+        const COPPER_STEP_BUDGET: usize = 2_000_000;
+        self.paused = true;
+        self.sync_live_audio_suspension();
+        self.last_debug_stop = None;
+        match self.emu.debug_step_copper(COPPER_STEP_BUDGET) {
+            Ok(true) => {
+                self.surface_debug_stop();
+            }
+            Ok(false) => self.show_osd("Copper did not advance (stopped or DMA off)"),
+            Err(e) => {
+                error!("copper step halted: {e:?}");
+                self.cpu_halted = true;
+                self.sync_live_audio_suspension();
+            }
+        }
+        self.finish_render_for_current_frame();
+    }
+
     /// Run until the beam reaches the analyzer's selected slot, stopping
     /// at exact colour-clock granularity via a one-shot beam trap.
     fn frame_analyzer_run_to_slot(&mut self) {
@@ -4463,23 +4512,47 @@ impl App {
                 }
             }
             ui::DebugTab::Copper => {
+                // Leave room for the CBreak/CStep buttons drawn at the top
+                // of the content area.
+                for _ in 0..ui::COPPER_TAB_HEADER_LINES {
+                    lines.push(ui::DbgLine::plain(""));
+                }
                 let agnus = &bus.agnus;
-                let copper_pc = bus.copper.pc();
+                // Anchor the listing on the current instruction's start:
+                // mid-instruction the PC already points at the second word.
+                let anchor = bus
+                    .copper
+                    .pc()
+                    .wrapping_sub(if bus.copper.mid_instruction() { 2 } else { 0 });
+                let state = if bus.copper.is_running() {
+                    "running".to_string()
+                } else if let Some(wait) = bus.copper.waiting() {
+                    let pos = wait.position_bits();
+                    format!("waiting v{} h{}", (pos >> 8) & 0xFF, pos & 0xFE)
+                } else {
+                    "stopped".to_string()
+                };
                 lines.push(ui::DbgLine::plain(format!(
-                    "COP1LC {:06X}   COP2LC {:06X}   COPPC {:06X} ({})",
+                    "COP1LC {:06X}   COP2LC {:06X}   COPPC {:06X} ({state})",
                     agnus.cop1lc,
                     agnus.cop2lc,
-                    copper_pc,
-                    if bus.copper.is_running() {
-                        "running"
-                    } else {
-                        "stopped"
-                    }
+                    bus.copper.pc(),
                 )));
                 lines.push(ui::DbgLine::plain(""));
-                for (addr, text) in crate::disasm::dump_copper_list(read, agnus.cop1lc, 36) {
-                    let line = format!("{addr:06X}  {text}");
-                    lines.push(if addr == copper_pc {
+                // Follow the live Copper around its PC (a stopped Copper
+                // shows the head of the COP1 list instead). Breakpointed
+                // addresses are marked with `*`.
+                let stopped = !bus.copper.is_running() && bus.copper.waiting().is_none();
+                let start = if stopped {
+                    agnus.cop1lc
+                } else {
+                    anchor.saturating_sub(5 * 4)
+                };
+                let cbreaks = bus.ui_copper_breaks();
+                for (addr, text) in crate::disasm::dump_copper_list(read, start, 30) {
+                    let marker = if cbreaks.contains(&addr) { "*" } else { " " };
+                    let line = format!("{marker}{addr:06X}  {text}");
+                    lines.push(if !stopped && addr == anchor {
                         ui::DbgLine::hilit(line)
                     } else {
                         ui::DbgLine::plain(line)
@@ -4677,6 +4750,17 @@ impl App {
                         "  {} (${off:03X})",
                         crate::debugger::custom_reg_name(*off)
                     )));
+                }
+                lines.push(ui::DbgLine::plain(""));
+                lines.push(ui::DbgLine::plain(
+                    "Copper breakpoints (set on Copper tab):",
+                ));
+                let cbreaks = bus.ui_copper_breaks();
+                if cbreaks.is_empty() {
+                    lines.push(ui::DbgLine::plain("  (none)"));
+                }
+                for addr in cbreaks {
+                    lines.push(ui::DbgLine::plain(format!("  ${addr:06X}")));
                 }
                 lines.push(ui::DbgLine::plain(""));
                 lines.push(ui::DbgLine::plain("Beam traps (stop at beam position):"));

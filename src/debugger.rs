@@ -97,6 +97,9 @@ pub enum DebugStop {
     },
     /// The Agnus beam crossed a beam trap's position.
     Beam { vpos: u16, hpos: u16 },
+    /// The Copper's PC arrived at a Copper breakpoint (the instruction
+    /// there has not executed yet).
+    CopperBreak { pc: u32, vpos: u16, hpos: u16 },
 }
 
 impl DebugStop {
@@ -121,6 +124,9 @@ impl DebugStop {
                 custom_reg_name(*off)
             ),
             DebugStop::Beam { vpos, hpos } => format!("Beam trap at v{vpos} h{hpos}"),
+            DebugStop::CopperBreak { pc, vpos, hpos } => {
+                format!("Copper breakpoint at ${pc:06X} (v{vpos} h{hpos})")
+            }
         }
     }
 }

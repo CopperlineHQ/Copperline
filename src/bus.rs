@@ -794,6 +794,21 @@ pub struct Bus {
     ui_beam_traps: Vec<BeamTrap>,
     #[serde(skip)]
     ui_beam_hit: Option<(u16, u16)>,
+    /// Debugger Copper breakpoints (instruction addresses) and the first
+    /// pending hit since last polled. A hit fires when the live Copper's
+    /// PC first arrives at a breakpointed address -- before the
+    /// instruction there executes -- whether it got there by sequential
+    /// fetch, COPJMP, a CPU strobe write, or the vertical-blank restart.
+    /// Transient debug state, never serialized.
+    #[serde(skip)]
+    ui_copper_breaks: Vec<u32>,
+    #[serde(skip)]
+    ui_copper_hit: Option<(u32, u16, u16)>,
+    /// The Copper PC at the last breakpoint check, so arrival at an
+    /// address fires once instead of on every eligible colour clock the
+    /// PC rests there.
+    #[serde(skip)]
+    ui_copper_last_pc: u32,
     blitter_slowdown_cpu_misses: u8,
     slice_bus_advanced_cck: u32,
     slice_bus_tick: AgnusTick,
@@ -1882,6 +1897,9 @@ impl Bus {
             ui_reg_hit: None,
             ui_beam_traps: Vec::new(),
             ui_beam_hit: None,
+            ui_copper_breaks: Vec::new(),
+            ui_copper_hit: None,
+            ui_copper_last_pc: 0,
             blitter_slowdown_cpu_misses: 0,
             slice_bus_advanced_cck: 0,
             slice_bus_tick: AgnusTick::default(),
@@ -1984,6 +2002,62 @@ impl Bus {
     /// Take the pending beam-trap hit `(vpos, hpos)`, if any.
     pub fn take_ui_beam_hit(&mut self) -> Option<(u16, u16)> {
         self.ui_beam_hit.take()
+    }
+
+    /// The debugger's armed Copper breakpoint addresses.
+    pub fn ui_copper_breaks(&self) -> &[u32] {
+        &self.ui_copper_breaks
+    }
+
+    /// Add a Copper breakpoint at a chip-RAM instruction address, or
+    /// remove it when already set. Returns true when now set.
+    pub fn ui_toggle_copper_break(&mut self, addr: u32) -> bool {
+        let addr = addr & 0x00FF_FFFE;
+        match self.ui_copper_breaks.iter().position(|&a| a == addr) {
+            Some(pos) => {
+                self.ui_copper_breaks.remove(pos);
+                false
+            }
+            None => {
+                self.ui_copper_breaks.push(addr);
+                true
+            }
+        }
+    }
+
+    pub fn ui_clear_copper_breaks(&mut self) {
+        self.ui_copper_breaks.clear();
+        self.ui_copper_hit = None;
+    }
+
+    /// Take the pending Copper breakpoint hit `(pc, vpos, hpos)`, if any.
+    pub fn take_ui_copper_hit(&mut self) -> Option<(u32, u16, u16)> {
+        self.ui_copper_hit.take()
+    }
+
+    /// The Copper's completed-instruction count, for copper stepping.
+    pub fn copper_instructions_retired(&self) -> u64 {
+        self.copper.instructions_retired()
+    }
+
+    /// Fire a Copper breakpoint when the live Copper's PC has newly
+    /// arrived at a breakpointed address. Called from the live copper
+    /// step path (never the blitter-deadline predictor's cloned
+    /// simulation) and after CPU strobe writes, so every way the PC can
+    /// move is observed.
+    pub(super) fn check_ui_copper_breaks(&mut self) {
+        let pc = self.copper.pc();
+        if pc == self.ui_copper_last_pc {
+            return;
+        }
+        self.ui_copper_last_pc = pc;
+        if self.ui_copper_hit.is_none() && self.ui_copper_breaks.contains(&pc) {
+            self.ui_copper_hit = Some((
+                pc,
+                self.agnus.vpos.min(u32::from(u16::MAX)) as u16,
+                self.agnus.hpos.min(u32::from(u16::MAX)) as u16,
+            ));
+        }
     }
 
     /// Fire beam traps crossed by the last beam advance from `old`

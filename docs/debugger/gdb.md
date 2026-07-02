@@ -77,6 +77,17 @@ every frame until removed. `monitor clear-beam-traps` removes them all.
 (gdb) monitor clear-beam-traps
 ```
 
+## Copper breakpoints
+
+`monitor copper-break ADDR` (hex) toggles a Copper breakpoint: `continue`
+stops when the Copper's PC arrives at that list address, before the
+instruction there executes. `monitor clear-copper-breaks` removes them all.
+
+```gdb
+(gdb) monitor copper-break c01000
+(gdb) monitor clear-copper-breaks
+```
+
 ## Copper
 
 The Copper list can be dumped from the live list pointer, the current Copper

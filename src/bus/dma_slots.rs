@@ -141,6 +141,9 @@ impl Bus {
             line_cck,
         );
         self.copper = copper;
+        if !self.ui_copper_breaks.is_empty() {
+            self.check_ui_copper_breaks();
+        }
         match action {
             CopperSlotAction::Idle => false,
             CopperSlotAction::BusUsed => true,

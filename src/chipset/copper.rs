@@ -319,6 +319,11 @@ pub struct Copper {
     state: CopperState,
     pending_first: Option<CopperFirstWord>,
     skip_next_move: bool,
+    /// Monotonic count of completed instructions (a MOVE applied or
+    /// skipped, a WAIT/SKIP/COPJMP started). Debugger-only bookkeeping
+    /// for copper single-stepping; transient, never serialized.
+    #[serde(skip)]
+    instructions_retired: u64,
 }
 
 impl Default for Copper {
@@ -334,7 +339,14 @@ impl Copper {
             state: CopperState::Stopped,
             pending_first: None,
             skip_next_move: false,
+            instructions_retired: 0,
         }
+    }
+
+    /// Completed-instruction count (see the field note). Monotonic within
+    /// a session; the debugger only compares differences.
+    pub fn instructions_retired(&self) -> u64 {
+        self.instructions_retired
     }
 
     pub fn frame_start(&mut self, cop1lc: u32) {
@@ -488,6 +500,13 @@ impl Copper {
         self.pc
     }
 
+    /// Whether the first word of an instruction has been fetched but not
+    /// its second (the PC points at the second word). Lets the debugger
+    /// anchor its listing on the current instruction's start address.
+    pub fn mid_instruction(&self) -> bool {
+        self.pending_first.is_some()
+    }
+
     #[cfg(test)]
     fn skip_next_move(&mut self) {
         self.skip_next_move = true;
@@ -509,6 +528,7 @@ impl Copper {
 
         if let Some(first) = self.pending_first.take() {
             let instruction = CopperInstruction::decode(first.word, word);
+            self.instructions_retired = self.instructions_retired.wrapping_add(1);
             if self.skip_next_move {
                 self.skip_next_move = false;
                 if matches!(instruction, CopperInstruction::Move { .. }) {

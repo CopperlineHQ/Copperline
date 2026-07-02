@@ -9359,3 +9359,49 @@ fn beam_trap_hit_survives_beam_only_advance_without_cpu() {
     bus.advance_devices(COLORCLOCKS_PER_LINE * 3);
     assert_eq!(bus.take_ui_beam_hit(), Some((0, 100)));
 }
+
+#[test]
+fn copper_breakpoint_fires_when_the_list_reaches_the_address() {
+    let mut bus = empty_bus();
+    let cop1 = 0x0100usize;
+    // Two MOVEs then end-of-list; break on the second MOVE's address.
+    write_chip_word(&mut bus, cop1, 0x0180);
+    write_chip_word(&mut bus, cop1 + 2, 0x0111);
+    write_chip_word(&mut bus, cop1 + 4, 0x0182);
+    write_chip_word(&mut bus, cop1 + 6, 0x0222);
+    write_chip_word(&mut bus, cop1 + 8, 0xFFFF);
+    write_chip_word(&mut bus, cop1 + 10, 0xFFFE);
+    assert!(bus.ui_toggle_copper_break(cop1 as u32 + 4));
+
+    bus.agnus.dmacon |= DMACON_DMAEN | DMACON_COPEN;
+    bus.agnus.hpos = 0x20;
+    bus.copper.jump(cop1 as u32);
+    // Nothing fires before the Copper completes the first MOVE.
+    assert!(bus.take_ui_copper_hit().is_none());
+    bus.advance_chipset(12);
+    let (pc, _vpos, _hpos) = bus.take_ui_copper_hit().expect("copper breakpoint hit");
+    assert_eq!(pc, cop1 as u32 + 4);
+    // Both MOVEs still executed (the breakpoint does not stall the
+    // chipset itself; the CPU machine is what pauses).
+    assert!(bus.take_ui_copper_hit().is_none());
+}
+
+#[test]
+fn copper_breakpoint_does_not_refire_while_the_pc_rests_there() {
+    let mut bus = empty_bus();
+    let cop1 = 0x0200usize;
+    // A WAIT that parks the Copper, then a MOVE at the breakpointed
+    // address: the PC arrives once and rests during the wait.
+    write_copper_wait_then_move(&mut bus, cop1, 0x8001, 0xFFFE, 0x0180, 0x0FFF);
+    assert!(bus.ui_toggle_copper_break(cop1 as u32 + 4));
+
+    bus.agnus.dmacon |= DMACON_DMAEN | DMACON_COPEN;
+    bus.agnus.hpos = 0x20;
+    bus.copper.jump(cop1 as u32);
+    bus.advance_chipset(12);
+    // The WAIT retired: the PC arrived at the MOVE's address and fired.
+    assert!(bus.take_ui_copper_hit().is_some());
+    // Many more colour clocks of waiting must not re-fire it.
+    bus.advance_chipset(40);
+    assert!(bus.take_ui_copper_hit().is_none());
+}

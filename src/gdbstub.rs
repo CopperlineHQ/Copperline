@@ -80,6 +80,7 @@ enum StopReason {
     Watchpoint(u32),
     RegisterWatch,
     BeamTrap,
+    CopperBreak,
     Reverse,
     Interrupted,
 }
@@ -480,6 +481,9 @@ impl Session {
         if self.emu.bus_mut().take_ui_beam_hit().is_some() {
             return Ok(Some(StopReason::BeamTrap));
         }
+        if self.emu.bus_mut().take_ui_copper_hit().is_some() {
+            return Ok(Some(StopReason::CopperBreak));
+        }
         let pc = self.emu.machine.pc() & UI_ADDR_MASK;
         if self.breakpoints.contains(&pc) {
             return Ok(Some(StopReason::Breakpoint));
@@ -663,6 +667,24 @@ impl Session {
                 self.emu.bus_mut().ui_clear_beam_traps();
                 Ok("cleared beam traps\n".to_string())
             }
+            "copper-break" => {
+                let Some(addr) = parts.next() else {
+                    return Ok(
+                        "usage: monitor copper-break ADDR (hex Copper-list address)\n".to_string(),
+                    );
+                };
+                let addr = parse_hex_u32(addr)?;
+                let set = self.emu.bus_mut().ui_toggle_copper_break(addr);
+                Ok(format!(
+                    "copper breakpoint ${:06X} {}\n",
+                    addr & 0x00FF_FFFE,
+                    if set { "set" } else { "removed" }
+                ))
+            }
+            "clear-copper-breaks" => {
+                self.emu.bus_mut().ui_clear_copper_breaks();
+                Ok("cleared copper breakpoints\n".to_string())
+            }
             "copper" => self.monitor_copper(parts.collect()),
             "last-writer" => {
                 let Some(addr_s) = parts.next() else {
@@ -784,6 +806,7 @@ fn monitor_help() -> String {
      write-reg NAME|OFFSET VALUE\n\
      watch-reg NAME|OFFSET | unwatch-reg NAME|OFFSET | clear-reg-watches\n\
      beam-trap VPOS [HPOS] | clear-beam-traps\n\
+     copper-break ADDR | clear-copper-breaks\n\
      copper [auto|pc|ADDR] [COUNT]\n\
      last-writer ADDR\n"
         .to_string()

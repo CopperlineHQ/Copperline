@@ -2076,7 +2076,9 @@ fn debugger_views_reflect_machine_state() {
                 assert!(view.lines.iter().any(|l| l.text.contains("COLOR00")));
             }
             super::ui::DebugTab::Copper => {
-                assert!(view.lines[0].text.contains("COP1LC"));
+                // The first content lines are blank (the CBreak/CStep
+                // button row); the register header follows.
+                assert!(view.lines.iter().any(|l| l.text.contains("COP1LC")));
             }
             super::ui::DebugTab::Audio => {
                 // Text is mirrored into `lines` for the fallback/invariant.
@@ -2492,6 +2494,48 @@ fn beam_trap_gui_toggle_line_step_and_run_to_slot() {
         app.last_debug_stop.as_deref(),
         Some(format!("Beam trap at v{target_v} h{target_h}").as_str())
     );
+}
+
+#[test]
+fn copper_breakpoint_toggle_and_copper_step_from_the_gui() {
+    let mut app = test_app();
+    app.open_debugger();
+
+    // Copper tab: the entry address toggles a Copper breakpoint, and the
+    // Break tab lists it.
+    if let Some(panel) = app.debugger_panel.as_mut() {
+        panel.tab = super::ui::DebugTab::Copper;
+        panel.entry = "C01000".to_string();
+    }
+    app.activate_ui_control(UiControl::DebugCopperBreakToggle);
+    assert_eq!(app.emu.bus().ui_copper_breaks(), &[0x00C0_1000]);
+    app.activate_ui_control(UiControl::DebugCopperBreakToggle);
+    assert!(app.emu.bus().ui_copper_breaks().is_empty());
+
+    // CStep with an armed Copper list advances the retired count.
+    {
+        let bus = app.emu.bus_mut();
+        let cop1 = 0x0400usize;
+        let words: [u16; 6] = [0x0180, 0x0111, 0x0182, 0x0222, 0xFFFF, 0xFFFE];
+        for (idx, word) in words.iter().enumerate() {
+            bus.mem.chip_ram[cop1 + idx * 2..cop1 + idx * 2 + 2]
+                .copy_from_slice(&word.to_be_bytes());
+        }
+        bus.agnus.dmacon |= 0x0280; // DMAEN | COPEN
+        bus.copper.jump(cop1 as u32);
+    }
+    let before = app.emu.bus().copper_instructions_retired();
+    app.activate_ui_control(UiControl::DebugCopperStep);
+    assert!(app.emu.bus().copper_instructions_retired() > before);
+
+    // The Copper tab view lists the register header and the live list.
+    let panel = app.debugger_panel.clone().unwrap();
+    let view = app.build_debugger_view(&panel);
+    assert!(view.lines.iter().any(|l| l.text.contains("COP1LC")));
+    assert!(view
+        .lines
+        .iter()
+        .any(|l| l.text.contains("MOVE") || l.text.contains("WAIT") || l.text.contains("SKIP")));
 }
 
 #[test]

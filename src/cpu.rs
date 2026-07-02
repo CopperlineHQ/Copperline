@@ -1123,6 +1123,7 @@ impl M68kMachine {
         self.ui_breaks.clear();
         self.bus.bus.set_ui_reg_watches(&[]);
         self.bus.bus.ui_clear_beam_traps();
+        self.bus.bus.ui_clear_copper_breaks();
         self.ui_stop = None;
     }
 
@@ -1160,6 +1161,10 @@ impl M68kMachine {
         }
         if let Some((vpos, hpos)) = self.bus.bus.take_ui_beam_hit() {
             self.ui_stop = Some(crate::debugger::DebugStop::Beam { vpos, hpos });
+            return;
+        }
+        if let Some((pc, vpos, hpos)) = self.bus.bus.take_ui_copper_hit() {
+            self.ui_stop = Some(crate::debugger::DebugStop::CopperBreak { pc, vpos, hpos });
         }
     }
 

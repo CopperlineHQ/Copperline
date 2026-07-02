@@ -36,9 +36,27 @@ Copper state (COP1LC/COP2LC/COPPC), the display window and fetch registers
 (BPLCONx, DIWSTRT/STOP, DDFSTRT/STOP, modulos), the bitplane and sprite
 pointers, and the full palette.
 
-**Copper** disassembles the Copper list from COP1LC -- MOVE/WAIT/SKIP with
-decoded targets and positions -- and highlights the instruction at the
-current Copper fetch address.
+**Copper** is a debugger for the Copper itself. The header shows
+COP1LC/COP2LC, the live Copper PC, and the execution state (running,
+waiting -- with the decoded beam position it waits for -- or stopped). The
+listing disassembles MOVE/WAIT/SKIP around the live PC (following it as
+the Copper executes; a stopped Copper shows the head of the COP1 list),
+with the current instruction highlighted and WAIT/SKIP positions resolved
+to the same decimal `v`/`h` beam coordinates the Chipset tab and Frame
+Analyzer use. Two controls sit above the listing:
+
+- **CBreak +/-** toggles a *Copper breakpoint* at the hex address in the
+  `$` box. The machine stops when the Copper's PC arrives at that address
+  -- before the instruction there executes -- whether it got there by
+  sequential fetch, a COPJMP, a CPU strobe write, or the vertical-blank
+  restart. Breakpointed lines are marked `*`, and the Break tab lists them.
+- **CStep** (`C`) runs until the Copper retires one instruction: a MOVE
+  applied (or discarded by SKIP), or a WAIT/SKIP/COPJMP starting. Stepping
+  onto a WAIT parks the Copper; the next CStep runs through the wait to
+  the following instruction, so you can walk a raster effect
+  instruction by instruction. The machine pauses at the next CPU
+  instruction boundary, so the Copper can occasionally be a fetch further
+  along -- the highlight always shows exactly where it stopped.
 
 **Audio** decodes Paula's four audio channels. A header line shows DMACON
 (master DMAEN and the per-channel AUDx enable bits) and ADKCON (the audio

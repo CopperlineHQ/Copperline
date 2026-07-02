@@ -1211,6 +1211,27 @@ impl Emulator {
         Ok(false)
     }
 
+    /// Run until the Copper retires one instruction (a MOVE applied or
+    /// skipped, a WAIT/SKIP/COPJMP started), up to `max_instructions` CPU
+    /// instructions. The machine pauses at the next CPU instruction
+    /// boundary after the Copper advances, so the Copper may already be a
+    /// fetch further along -- its live PC shows exactly where it got to.
+    /// Returns true when the Copper advanced (or an earlier debug stop is
+    /// pending), false when the budget ran out (Copper stopped/DMA off).
+    pub fn debug_step_copper(&mut self, max_instructions: usize) -> Result<bool> {
+        let target = self.bus().copper_instructions_retired().wrapping_add(1);
+        for _ in 0..max_instructions {
+            self.debug_step_one_with_idle()?;
+            if self.bus().copper_instructions_retired() >= target {
+                return Ok(true);
+            }
+            if self.machine.ui_debug_stop_pending() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Step over the instruction at PC. When it is a call that returns to the
     /// following instruction (BSR/JSR/TRAP), run until that return address (or
     /// an earlier breakpoint/watch hit, or the `max_instructions` budget if the
@@ -2365,6 +2386,41 @@ mod tests {
             bus.agnus.hpos
         );
         assert!(bus.ui_beam_traps().is_empty());
+    }
+
+    #[test]
+    fn copper_step_advances_one_instruction_at_a_time() {
+        let mut emu = emulator_with_call_program();
+        // WAIT v2 / MOVE / WAIT v4 / MOVE / end: each step has bounded
+        // work, and the WAITs park the Copper between steps.
+        {
+            let bus = emu.bus_mut();
+            let cop1 = 0x0300usize;
+            let words: [u16; 10] = [
+                0x0201, 0xFFFE, // WAIT v>=2
+                0x0180, 0x0111, // MOVE COLOR00
+                0x0401, 0xFFFE, // WAIT v>=4
+                0x0182, 0x0222, // MOVE COLOR01
+                0xFFFF, 0xFFFE, // end of list
+            ];
+            for (idx, word) in words.iter().enumerate() {
+                bus.mem.chip_ram[cop1 + idx * 2..cop1 + idx * 2 + 2]
+                    .copy_from_slice(&word.to_be_bytes());
+            }
+            bus.agnus.dmacon |= 0x0280; // DMAEN | COPEN
+            bus.copper.jump(cop1 as u32);
+        }
+        let before = emu.bus().copper_instructions_retired();
+        assert!(emu.debug_step_copper(50_000).unwrap());
+        let after_one = emu.bus().copper_instructions_retired();
+        assert!(
+            after_one > before,
+            "copper step must retire at least one instruction"
+        );
+        // Stepping again advances further (the machine pauses at CPU
+        // instruction boundaries, so each step retires one or more).
+        assert!(emu.debug_step_copper(50_000).unwrap());
+        assert!(emu.bus().copper_instructions_retired() > after_one);
     }
 
     #[test]

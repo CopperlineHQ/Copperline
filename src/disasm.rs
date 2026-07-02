@@ -646,7 +646,9 @@ pub fn disassemble_copper(ir1: u16, ir2: u16) -> String {
     let he = ir2 & 0x00FE;
     let bfd = ir2 & 0x8000 != 0;
     let kind = if ir2 & 1 == 0 { "WAIT" } else { "SKIP" };
-    let mut out = format!("{kind}  vp=${vp:02X},hp=${hp:02X}");
+    // The decimal beam position matches the coordinates the debugger's
+    // Chipset tab, beam traps, and Frame Analyzer display.
+    let mut out = format!("{kind}  vp=${vp:02X},hp=${hp:02X} (v{vp} h{hp})");
     // Show the comparison mask only when it is not the all-ones default, and
     // note blitter-finished-disable for WAIT/SKIP.
     if ve != 0x7F || he != 0xFE {
@@ -779,7 +781,11 @@ mod tests {
         // MOVE #$0000,$DFF180 (COLOR00): reg offset 0x180, IR1 = 0x0180.
         assert_eq!(disassemble_copper(0x0180, 0x0123), "MOVE  #$0123,$DFF180");
         // WAIT for vp=0x2C,hp=0x00, all-ones mask, BFD set (ir2 bit15=1).
-        assert_eq!(disassemble_copper(0x2C01, 0xFFFE), "WAIT  vp=$2C,hp=$00");
+        // The decimal beam position matches the debugger's v/h coordinates.
+        assert_eq!(
+            disassemble_copper(0x2C01, 0xFFFE),
+            "WAIT  vp=$2C,hp=$00 (v44 h0)"
+        );
         // WAIT end of list (vp=0xFF,hp=0xFE), no BFD bit -> [BFD] note.
         let s = disassemble_copper(0xFFFF, 0xFFFE);
         assert!(s.starts_with("WAIT  vp=$FF,hp=$FE"), "{s}");
