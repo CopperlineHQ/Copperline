@@ -2459,6 +2459,35 @@ fn frame_analyzer_underlay_toggles_and_renders() {
 }
 
 #[test]
+fn beam_scrub_rides_the_underlay() {
+    let mut app = test_app();
+    app.open_frame_analyzer();
+    app.frame_analyzer_step_frame();
+
+    // Enabling scrub alone activates the underlay render and flags the
+    // view for the up-to-the-beam crop.
+    app.activate_ui_control(UiControl::AnalyzerScrub);
+    assert!(app
+        .frame_analyzer_panel
+        .as_ref()
+        .is_some_and(|panel| panel.show_scrub && panel.underlay_active()));
+    app.ensure_analyzer_underlay();
+    assert!(app.analyzer_underlay_rows > 0);
+    let panel = app.frame_analyzer_panel.clone().unwrap();
+    let view = app.build_frame_analyzer_view(&panel);
+    assert!(view.scrub);
+    assert!(view.underlay.is_some());
+
+    // Turning the underlay off ends the scrub with it.
+    app.activate_ui_control(UiControl::AnalyzerUnderlay);
+    app.activate_ui_control(UiControl::AnalyzerUnderlay);
+    assert!(app
+        .frame_analyzer_panel
+        .as_ref()
+        .is_some_and(|panel| !panel.show_scrub && !panel.underlay_active()));
+}
+
+#[test]
 fn beam_trap_gui_toggle_line_step_and_run_to_slot() {
     let mut app = test_app();
     app.open_debugger();

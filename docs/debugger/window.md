@@ -272,6 +272,7 @@ The pane has the same transport rhythm as the debugger:
 | Frame | `F` | Run exactly one frame and show the completed trace |
 | To slot | `T` | Run until the beam reaches the selected slot |
 | Picture underlay | `U` | Draw the rendered frame beneath the heatmap |
+| Beam scrub | `B` | Show the picture only up to the selected slot |
 
 Opening the pane starts a partial trace immediately; pressing **Frame**
 captures a clean full frame. Closing it restores the run/pause state selected
@@ -293,3 +294,15 @@ line where the picture changes. The underlay is re-rendered from the trace's
 frame in beam coordinates (none of the presentation recentring or TV masking
 is applied), so it lines up with the white display box exactly, and the extra
 render reads a snapshot only -- it never perturbs the emulation.
+
+**Beam scrub** turns the underlay into a beam-time scrubber: only what the
+CRT had drawn by the time the beam reached the selected slot shows at
+normal underlay brightness; everything past it ghosts at low brightness.
+Because Copperline's renderer replays register writes at their recorded
+beam positions, every pixel before the cursor is exactly what the display
+carried at that instant -- drag the selection (or hold a cursor key) and
+you watch the Copper build the frame line by line: palette splits snap in
+at their WAIT lines, sprites appear when their DMA lines pass, screen
+splits land where the pointers were rewritten. Combined with **To slot**,
+"scrub to the artefact, then run the machine to that exact colour clock"
+turns a what-is-the-beam-doing question into two clicks.

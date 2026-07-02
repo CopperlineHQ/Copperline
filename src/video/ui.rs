@@ -322,6 +322,9 @@ pub struct FrameAnalyzerPanel {
     /// Draw the rendered frame under the DMA heatmap so bus activity can
     /// be correlated spatially with the picture.
     pub show_underlay: bool,
+    /// Beam scrub: show the picture only up to the selected slot -- what
+    /// the CRT had drawn when the beam was there. Implies the underlay.
+    pub show_scrub: bool,
 }
 
 impl FrameAnalyzerPanel {
@@ -330,7 +333,13 @@ impl FrameAnalyzerPanel {
             selected_vpos: 0x2C,
             selected_hpos: 0x28,
             show_underlay: false,
+            show_scrub: false,
         }
+    }
+
+    /// Whether the picture underlay is active (directly or via scrub).
+    pub fn underlay_active(&self) -> bool {
+        self.show_underlay || self.show_scrub
     }
 }
 
@@ -454,6 +463,9 @@ pub fn panel_control_at(panel: &Panel, pos: (i32, i32)) -> Option<UiControl> {
             if analyzer_underlay_rect(rect).contains(pos) {
                 return Some(UiControl::AnalyzerUnderlay);
             }
+            if analyzer_scrub_rect(rect).contains(pos) {
+                return Some(UiControl::AnalyzerScrub);
+            }
         }
         Panel::Launcher(state) => {
             if let Some(control) = launcher_control_at(rect, state, pos) {
@@ -553,6 +565,9 @@ pub enum UiControl {
     /// Frame analyzer: toggle the rendered-frame picture underlay beneath
     /// the DMA heatmap.
     AnalyzerUnderlay,
+    /// Frame analyzer: toggle beam scrubbing (the underlay shows only
+    /// what the CRT had drawn up to the selected slot).
+    AnalyzerScrub,
     /// Frame analyzer: run until the beam reaches the selected slot
     /// (a one-shot beam trap at the selected vpos/hpos).
     AnalyzerRunTo,
@@ -961,6 +976,8 @@ fn analyzer_button_rects(rect: Rect) -> [(UiControl, Rect); 3] {
 
 /// Label of the picture-underlay checkbox on the analyzer's button row.
 const ANALYZER_UNDERLAY_LABEL: &str = "Picture underlay";
+/// Label of the beam-scrub checkbox next to it.
+const ANALYZER_SCRUB_LABEL: &str = "Beam scrub";
 
 /// Hit/draw rect of the picture-underlay checkbox: a 12x12 tick box plus
 /// its label, sitting on the button row right of the To slot button.
@@ -969,6 +986,17 @@ fn analyzer_underlay_rect(rect: Rect) -> Rect {
         x: rect.x + 258,
         y: rect.y + rect.h - DEBUG_BUTTON_H - 6,
         w: 12 + 6 + ANALYZER_UNDERLAY_LABEL.len() * font::GLYPH_W,
+        h: DEBUG_BUTTON_H,
+    }
+}
+
+/// Hit/draw rect of the beam-scrub checkbox, right of the underlay one.
+fn analyzer_scrub_rect(rect: Rect) -> Rect {
+    let underlay = analyzer_underlay_rect(rect);
+    Rect {
+        x: underlay.x + underlay.w + 16,
+        y: underlay.y,
+        w: 12 + 6 + ANALYZER_SCRUB_LABEL.len() * font::GLYPH_W,
         h: DEBUG_BUTTON_H,
     }
 }
@@ -1221,6 +1249,9 @@ pub struct FrameAnalyzerView {
     pub status: String,
     pub trace: Option<AnalyzerTraceView>,
     pub underlay: Option<AnalyzerUnderlayView>,
+    /// Beam scrubbing: the underlay shows only what the CRT had drawn up
+    /// to the selected slot; the rest ghosts at low brightness.
+    pub scrub: bool,
 }
 
 pub enum PanelViewData {
@@ -2310,6 +2341,12 @@ fn dim_rgba(pix: u32) -> u32 {
     ((pix >> 1) & 0x007F_7F7F) | 0xFF00_0000
 }
 
+/// Deep-dim an RGBA pixel to an eighth, keeping it opaque: the ghost of
+/// the not-yet-drawn region while beam scrubbing.
+fn ghost_rgba(pix: u32) -> u32 {
+    ((pix >> 3) & 0x001F_1F1F) | 0xFF00_0000
+}
+
 /// Sample the picture underlay for heatmap pixel (`x`, `vpos`): `x` is the
 /// horizontal heatmap pixel (mapped at hi-res precision, four pixels per
 /// colour clock) and `vpos` the already-resolved beam line.
@@ -2337,6 +2374,7 @@ fn draw_owner_heatmap(
     rect: Rect,
     trace: &AnalyzerTraceView,
     underlay: Option<&AnalyzerUnderlayView>,
+    scrub: bool,
     scale: usize,
 ) {
     fill_rect(frame, scale_rect(rect, scale), rgba(10, 12, 14), scale);
@@ -2350,11 +2388,19 @@ fn draw_owner_heatmap(
                 underlay.and_then(|under| underlay_sample(under, trace, rect, x, vpos))
             {
                 // Picture shows through idle slots; owned slots blend the
-                // owner colour over the dimmed picture so both read.
-                color = if code == b'.' {
+                // owner colour over the dimmed picture so both read. While
+                // scrubbing, beam positions the CRT has not reached yet
+                // ghost at an eighth brightness.
+                let drawn = !scrub || (vpos, hpos) <= (trace.selected_vpos, trace.selected_hpos);
+                let under_pix = if drawn {
                     dim_rgba(pix)
                 } else {
-                    super::blend_rgba(dim_rgba(pix), color, 176)
+                    ghost_rgba(pix)
+                };
+                color = if code == b'.' {
+                    under_pix
+                } else {
+                    super::blend_rgba(under_pix, color, 176)
                 };
             }
             fill_rect(
@@ -2626,9 +2672,49 @@ fn draw_owner_counters(
     }
 }
 
-/// The picture-underlay tick box on the analyzer's button row.
-fn draw_underlay_checkbox(frame: &mut [u8], rect: Rect, checked: bool, hover: bool, scale: usize) {
-    let control = analyzer_underlay_rect(rect);
+/// The picture-underlay and beam-scrub tick boxes on the analyzer's
+/// button row.
+fn draw_analyzer_checkboxes(
+    frame: &mut [u8],
+    rect: Rect,
+    panel: &FrameAnalyzerPanel,
+    hover: Option<UiControl>,
+    scale: usize,
+) {
+    for (control_rect, label, checked, control) in [
+        (
+            analyzer_underlay_rect(rect),
+            ANALYZER_UNDERLAY_LABEL,
+            panel.show_underlay || panel.show_scrub,
+            UiControl::AnalyzerUnderlay,
+        ),
+        (
+            analyzer_scrub_rect(rect),
+            ANALYZER_SCRUB_LABEL,
+            panel.show_scrub,
+            UiControl::AnalyzerScrub,
+        ),
+    ] {
+        draw_analyzer_checkbox(
+            frame,
+            control_rect,
+            label,
+            checked,
+            hover == Some(control),
+            scale,
+        );
+    }
+}
+
+/// One tick box plus label at `control` on the analyzer's button row.
+fn draw_analyzer_checkbox(
+    frame: &mut [u8],
+    control: Rect,
+    label: &str,
+    checked: bool,
+    hover: bool,
+    scale: usize,
+) {
     let box_rect = Rect {
         x: control.x,
         y: control.y + (control.h - 12) / 2,
@@ -2662,7 +2748,7 @@ fn draw_underlay_checkbox(frame: &mut [u8], rect: Rect, checked: bool, hover: bo
         frame,
         box_rect.x + 18,
         control.y + (control.h - 8) / 2,
-        ANALYZER_UNDERLAY_LABEL,
+        label,
         if hover { BUTTON_TEXT } else { PANEL_TEXT },
         1,
         scale,
@@ -2714,13 +2800,7 @@ fn draw_frame_analyzer(
                 scale,
             );
         }
-        draw_underlay_checkbox(
-            frame,
-            rect,
-            panel.show_underlay,
-            hover == Some(UiControl::AnalyzerUnderlay),
-            scale,
-        );
+        draw_analyzer_checkboxes(frame, rect, panel, hover, scale);
         return;
     };
 
@@ -2757,7 +2837,14 @@ fn draw_frame_analyzer(
     );
 
     let raster = analyzer_raster_rect(rect);
-    draw_owner_heatmap(frame, raster, trace, view.underlay.as_ref(), scale);
+    draw_owner_heatmap(
+        frame,
+        raster,
+        trace,
+        view.underlay.as_ref(),
+        view.scrub,
+        scale,
+    );
     let counters_x = raster.x + raster.w + 16;
     draw_owner_counters(frame, counters_x, raster.y, trace, scale);
 
@@ -2892,13 +2979,7 @@ fn draw_frame_analyzer(
             scale,
         );
     }
-    draw_underlay_checkbox(
-        frame,
-        rect,
-        panel.show_underlay,
-        hover == Some(UiControl::AnalyzerUnderlay),
-        scale,
-    );
+    draw_analyzer_checkboxes(frame, rect, panel, hover, scale);
 }
 
 // ---------------------------------------------------------------------------
@@ -4592,7 +4673,7 @@ mod tests {
             ddf_cck: None,
         };
 
-        draw_owner_heatmap(&mut frame, raster, &trace, None, scale);
+        draw_owner_heatmap(&mut frame, raster, &trace, None, false, scale);
 
         let pixel = |frame: &[u8], x: usize, y: usize| -> [u8; 4] {
             frame[(y * w + x) * 4..(y * w + x) * 4 + 4]
@@ -5084,6 +5165,7 @@ mod tests {
         let data = PanelViewData::FrameAnalyzer(Box::new(FrameAnalyzerView {
             running: false,
             status: "paused frame 1234 24.68s".to_string(),
+            scrub: true,
             trace: Some(trace),
             underlay: Some(AnalyzerUnderlayView {
                 fb: std::rc::Rc::new(under_fb),
@@ -5092,6 +5174,7 @@ mod tests {
         }));
         let mut panel = FrameAnalyzerPanel::new();
         panel.show_underlay = true;
+        panel.show_scrub = true;
         panel.selected_vpos = 120;
         panel.selected_hpos = 0x40;
         let ui = UiState {

@@ -2650,6 +2650,9 @@ impl App {
             UiControl::AnalyzerUnderlay => {
                 self.activate_tool_control(ToolPanelKind::FrameAnalyzer, control)
             }
+            UiControl::AnalyzerScrub => {
+                self.activate_tool_control(ToolPanelKind::FrameAnalyzer, control)
+            }
             UiControl::AnalyzerRunTo => {
                 self.activate_tool_control(ToolPanelKind::FrameAnalyzer, control)
             }
@@ -2837,6 +2840,9 @@ impl App {
             (ToolPanelKind::FrameAnalyzer, UiControl::AnalyzerUnderlay) => {
                 self.frame_analyzer_toggle_underlay()
             }
+            (ToolPanelKind::FrameAnalyzer, UiControl::AnalyzerScrub) => {
+                self.frame_analyzer_toggle_scrub()
+            }
             (ToolPanelKind::FrameAnalyzer, UiControl::AnalyzerRunTo) => {
                 self.frame_analyzer_run_to_slot()
             }
@@ -3018,6 +3024,7 @@ impl App {
             KeyCode::KeyF => Some(UiControl::AnalyzerFrame),
             KeyCode::KeyR => Some(UiControl::AnalyzerRun),
             KeyCode::KeyU => Some(UiControl::AnalyzerUnderlay),
+            KeyCode::KeyB => Some(UiControl::AnalyzerScrub),
             KeyCode::KeyT => Some(UiControl::AnalyzerRunTo),
             _ => None,
         };
@@ -3200,6 +3207,17 @@ impl App {
     fn frame_analyzer_toggle_underlay(&mut self) {
         if let Some(panel) = self.frame_analyzer_panel.as_mut() {
             panel.show_underlay = !panel.show_underlay;
+            // Dropping the underlay also ends a scrub riding on it.
+            if !panel.show_underlay {
+                panel.show_scrub = false;
+            }
+            self.request_redraw();
+        }
+    }
+
+    fn frame_analyzer_toggle_scrub(&mut self) {
+        if let Some(panel) = self.frame_analyzer_panel.as_mut() {
+            panel.show_scrub = !panel.show_scrub;
             self.request_redraw();
         }
     }
@@ -3215,7 +3233,7 @@ impl App {
         let want = self
             .frame_analyzer_panel
             .as_ref()
-            .is_some_and(|panel| panel.show_underlay);
+            .is_some_and(|panel| panel.underlay_active());
         if !want {
             return;
         }
@@ -4605,9 +4623,10 @@ impl App {
                 status,
                 trace: None,
                 underlay: None,
+                scrub: false,
             };
         };
-        let underlay = (panel.show_underlay && self.analyzer_underlay_rows > 0).then(|| {
+        let underlay = (panel.underlay_active() && self.analyzer_underlay_rows > 0).then(|| {
             ui::AnalyzerUnderlayView {
                 fb: std::rc::Rc::clone(&self.analyzer_underlay_fb),
                 rows: self.analyzer_underlay_rows,
@@ -4667,6 +4686,7 @@ impl App {
             running: !self.paused,
             status,
             underlay,
+            scrub: panel.show_scrub,
             trace: Some(ui::AnalyzerTraceView {
                 frame: trace.frame,
                 seconds: trace.seconds,
