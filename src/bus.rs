@@ -808,6 +808,14 @@ pub struct Bus {
     /// the Default of all-layers-visible is restored on state load.
     #[serde(skip)]
     ui_layer_masks: UiLayerMasks,
+    /// Watched memory word addresses mirrored from the debugger (also
+    /// forwarded into the blitter and floppy so their write sites can
+    /// flag hits), plus the writers of recent watched-word writes for
+    /// stop attribution. Transient debug state.
+    #[serde(skip)]
+    ui_mem_watch_addrs: Vec<u32>,
+    #[serde(skip)]
+    ui_mem_writers: Vec<UiMemWriter>,
     /// The Copper PC at the last breakpoint check, so arrival at an
     /// address fires once instead of on every eligible colour clock the
     /// PC rests there.
@@ -922,6 +930,15 @@ pub struct BeamTrap {
     pub hpos: Option<u16>,
     /// Remove after the first hit (a run-to-position trap).
     pub once: bool,
+}
+
+/// Who last wrote a watched memory word, recorded at the write site.
+#[derive(Debug, Clone, Copy)]
+pub struct UiMemWriter {
+    pub addr: u32,
+    pub source: crate::debugger::WatchSource,
+    pub vpos: u16,
+    pub hpos: u16,
 }
 
 /// Debugger video-layer isolation masks: bit n set = bitplane n /
@@ -1925,6 +1942,8 @@ impl Bus {
             ui_copper_hit: None,
             ui_copper_last_pc: 0,
             ui_layer_masks: UiLayerMasks::default(),
+            ui_mem_watch_addrs: Vec::new(),
+            ui_mem_writers: Vec::new(),
             blitter_slowdown_cpu_misses: 0,
             slice_bus_advanced_cck: 0,
             slice_bus_tick: AgnusTick::default(),
@@ -2029,6 +2048,82 @@ impl Bus {
         self.ui_beam_hit.take()
     }
 
+    /// Replace the debugger's watched-word mirror, forwarding it into
+    /// the blitter and floppy write sites. Pending writer records are
+    /// dropped (they described the previous watch set).
+    pub fn set_ui_mem_watches(&mut self, addrs: &[u32]) {
+        self.ui_mem_watch_addrs = addrs.to_vec();
+        self.ui_mem_writers.clear();
+        self.blitter.set_debug_watch_addrs(addrs);
+        self.floppy.set_debug_watch_addrs(addrs);
+    }
+
+    /// Note a CPU write of `size` bytes at `addr` for watch attribution
+    /// (called from the CPU chip/slow RAM write paths when watches are
+    /// armed).
+    pub(crate) fn ui_note_cpu_ram_write(&mut self, addr: u32, size: usize) {
+        if self.ui_mem_watch_addrs.is_empty() {
+            return;
+        }
+        let start = addr & 0x00FF_FFFE;
+        let end = addr.wrapping_add(size.max(1) as u32);
+        for &watch in &self.ui_mem_watch_addrs {
+            if watch.wrapping_add(1) >= start && watch < end {
+                Self::push_ui_mem_writer(
+                    &mut self.ui_mem_writers,
+                    UiMemWriter {
+                        addr: watch,
+                        source: crate::debugger::WatchSource::Cpu,
+                        vpos: self.agnus.vpos.min(u32::from(u16::MAX)) as u16,
+                        hpos: self.agnus.hpos.min(u32::from(u16::MAX)) as u16,
+                    },
+                );
+            }
+        }
+    }
+
+    fn push_ui_mem_writer(writers: &mut Vec<UiMemWriter>, writer: UiMemWriter) {
+        // Latest write per address wins; the list stays tiny.
+        writers.retain(|w| w.addr != writer.addr);
+        if writers.len() >= 8 {
+            writers.remove(0);
+        }
+        writers.push(writer);
+    }
+
+    /// The writer of the most recent write to watched word `addr`, if
+    /// one was recorded since the last take. Drains the blitter/floppy
+    /// latches lazily, so the hot DMA paths never touch the bus record.
+    pub fn ui_take_mem_writer(&mut self, addr: u32) -> Option<UiMemWriter> {
+        let vpos = self.agnus.vpos.min(u32::from(u16::MAX)) as u16;
+        let hpos = self.agnus.hpos.min(u32::from(u16::MAX)) as u16;
+        if let Some((waddr, _)) = self.blitter.take_debug_watched_write() {
+            Self::push_ui_mem_writer(
+                &mut self.ui_mem_writers,
+                UiMemWriter {
+                    addr: waddr & 0x00FF_FFFE,
+                    source: crate::debugger::WatchSource::Blitter,
+                    vpos,
+                    hpos,
+                },
+            );
+        }
+        if let Some((waddr, _)) = self.floppy.take_debug_watched_write() {
+            Self::push_ui_mem_writer(
+                &mut self.ui_mem_writers,
+                UiMemWriter {
+                    addr: waddr & 0x00FF_FFFE,
+                    source: crate::debugger::WatchSource::Disk,
+                    vpos,
+                    hpos,
+                },
+            );
+        }
+        let addr = addr & 0x00FF_FFFE;
+        let found = self.ui_mem_writers.iter().position(|w| w.addr == addr)?;
+        Some(self.ui_mem_writers.remove(found))
+    }
+
     /// Carry the interactive debug state (beam traps, Copper
     /// breakpoints, layer-isolation masks) from the pre-restore bus into
     /// this freshly deserialized one. These fields are transient
@@ -2040,6 +2135,8 @@ impl Bus {
         self.ui_copper_breaks = previous.ui_copper_breaks.clone();
         self.ui_copper_last_pc = previous.ui_copper_last_pc;
         self.ui_layer_masks = previous.ui_layer_masks;
+        let watches = previous.ui_mem_watch_addrs.clone();
+        self.set_ui_mem_watches(&watches);
     }
 
     /// The debugger's armed Copper breakpoint addresses.

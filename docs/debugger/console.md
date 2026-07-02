@@ -60,7 +60,7 @@ Stops (each toggles: repeat the command to remove):
 | Command | Effect |
 |---|---|
 | `BREAK ADDR [COND] [IGN N]`, `B` | PC breakpoint, with the Break tab's condition grammar |
-| `WATCH ADDR`, `W` | Memory word watchpoint |
+| `WATCH ADDR [CPU\|BLITTER\|DISK]`, `W` | Memory word watchpoint; the optional filter stops only on that writer |
 | `RWATCH NAME\|OFF` | Custom-register write watch (`RWATCH DMACON`) |
 | `BTRAP V [H]` | Beam trap (decimal position) |
 | `CBREAK ADDR` | Copper breakpoint |

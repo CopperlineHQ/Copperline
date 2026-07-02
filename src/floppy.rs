@@ -141,6 +141,12 @@ fn disk_speed_div() -> Option<(u32, f64)> {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct FloppyController {
+    /// Debugger: watched word addresses and the last disk-DMA write to
+    /// one of them, for watchpoint writer attribution. Transient.
+    #[serde(skip)]
+    debug_watch_addrs: Vec<u32>,
+    #[serde(skip)]
+    debug_watched_write: Option<(u32, u16)>,
     drives: [FloppyDrive; 4],
     prb: u8,
     side: usize,
@@ -189,6 +195,8 @@ impl Default for FloppyController {
             drive.external_id = 0;
         }
         Self {
+            debug_watch_addrs: Vec::new(),
+            debug_watched_write: None,
             drives,
             prb: 0xFF,
             side: 0,
@@ -220,6 +228,16 @@ impl Default for FloppyController {
 }
 
 impl FloppyController {
+    /// Replace the debugger's watched-address mirror (word-aligned).
+    pub fn set_debug_watch_addrs(&mut self, addrs: &[u32]) {
+        self.debug_watch_addrs = addrs.to_vec();
+    }
+
+    /// Take the last disk-DMA write to a watched address, if any.
+    pub fn take_debug_watched_write(&mut self) -> Option<(u32, u16)> {
+        self.debug_watched_write.take()
+    }
+
     pub fn from_config(config: &FloppyConfig) -> Result<Self> {
         let mut ctrl = Self { ..Self::default() };
         for (idx, drive_cfg) in config.drives.iter().enumerate() {
@@ -782,6 +800,11 @@ impl FloppyController {
                             break;
                         }
                         write_chip_word(chip_ram, self.dskpt, word);
+                        if !self.debug_watch_addrs.is_empty()
+                            && self.debug_watch_addrs.contains(&(self.dskpt & 0x00FF_FFFE))
+                        {
+                            self.debug_watched_write = Some((self.dskpt, word));
+                        }
                         self.last_dskdatr = word;
                         self.last_dskbytr_byte = (word & 0x00FF) as u8;
                         self.dskbyte_valid = true;

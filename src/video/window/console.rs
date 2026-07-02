@@ -106,7 +106,8 @@ fn parse_hex_pattern(tokens: &[&str]) -> Option<Vec<u8>> {
 const CONSOLE_HELP: &[&str] = &[
     "execution:  run  pause  step/s [N]  over  out  frame/f  line  cstep",
     "            runto ADDR   toslot V [H]   rstep [N]  rframe  rrun",
-    "stops:      break/b ADDR [COND] [IGN N]   watch/w ADDR   rwatch REG",
+    "stops:      break/b ADDR [COND] [IGN N]   watch/w ADDR [CPU|BLITTER|DISK]",
+    "            rwatch REG",
     "            btrap V [H]   cbreak ADDR   catch irq N|trap N|vec N",
     "            catchtask [NAME]   breaks (list)   clearbreaks",
     "inspect:    status  regs/r  mem/m ADDR [BYTES]  dis/d [ADDR] [N]",
@@ -349,12 +350,24 @@ impl App {
             }
             "WATCH" | "W" => {
                 let Some(addr) = args.first().and_then(|t| hex32(t)) else {
-                    return ConsoleOutcome::error("usage: WATCH ADDR (hex, word)");
+                    return ConsoleOutcome::error("usage: WATCH ADDR [CPU|BLITTER|DISK]");
                 };
-                let set = self.emu.machine.ui_toggle_watch(addr);
+                let filter = match args.get(1) {
+                    Some(token) => match crate::debugger::WatchSource::parse(token) {
+                        Some(source) => Some(source),
+                        None => {
+                            return ConsoleOutcome::error("watch filter is CPU, BLITTER, or DISK")
+                        }
+                    },
+                    None => None,
+                };
+                let set = self.emu.machine.ui_toggle_watch_filtered(addr, filter);
                 ConsoleOutcome::one(format!(
-                    "watchpoint ${:06X} {}",
+                    "watchpoint ${:06X}{} {}",
                     addr & 0x00FF_FFFE,
+                    filter
+                        .map(|f| format!(" ({} writes only)", f.label()))
+                        .unwrap_or_default(),
                     if set { "set" } else { "removed" }
                 ))
             }
@@ -950,9 +963,13 @@ impl App {
         }
         for watch in &breaks.watches {
             lines.push(format!(
-                "watch  ${:06X}  now {:04X}",
+                "watch  ${:06X}  now {:04X}{}",
                 watch.addr,
-                bus.peek_word_any(watch.addr)
+                bus.peek_word_any(watch.addr),
+                watch
+                    .filter
+                    .map(|f| format!("  [{} only]", f.label()))
+                    .unwrap_or_default()
             ));
             any = true;
         }

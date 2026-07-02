@@ -2470,6 +2470,69 @@ mod tests {
     }
 
     #[test]
+    fn watchpoint_attributes_blitter_writes_and_honours_filters() {
+        use crate::debugger::{DebugStop, WatchSource};
+        let mut emu = emulator_with_call_program();
+        emu.bus_mut().mem.overlay = false;
+        assert!(emu.machine.ui_toggle_watch(0x60000));
+
+        // A 1x1 D-only blit (LF = A, ADAT latched) into the watched word,
+        // with blitter DMA enabled.
+        {
+            let bus = emu.bus_mut();
+            bus.custom_write(0x096, 2, 0x8240); // DMACON SET DMAEN|BLTEN
+            bus.custom_write(0x040, 2, 0x01F0); // BLTCON0: USED, LF=$F0 (D=A)
+            bus.custom_write(0x042, 2, 0x0000); // BLTCON1
+            bus.custom_write(0x044, 2, 0xFFFF); // BLTAFWM
+            bus.custom_write(0x046, 2, 0xFFFF); // BLTALWM
+            bus.custom_write(0x074, 2, 0xBEEF); // BLTADAT
+            bus.custom_write(0x054, 4, 0x0006_0000); // BLTDPT
+            bus.custom_write(0x058, 2, 0x0041); // BLTSIZE: 1 row x 1 word
+        }
+        let mut stop = None;
+        for _ in 0..64 {
+            emu.debug_step_instructions(1).unwrap();
+            if let Some(s) = emu.machine.take_ui_debug_stop() {
+                stop = Some(s);
+                break;
+            }
+        }
+        match stop {
+            Some(DebugStop::Watch { source, new, .. }) => {
+                assert_eq!(source, WatchSource::Blitter);
+                assert_eq!(new, 0xBEEF);
+            }
+            other => panic!("expected a blitter-attributed watch stop, got {other:?}"),
+        }
+
+        // A CPU-filtered watch swallows the same blitter write.
+        let mut emu = emulator_with_call_program();
+        emu.bus_mut().mem.overlay = false;
+        assert!(emu
+            .machine
+            .ui_toggle_watch_filtered(0x60000, Some(WatchSource::Cpu)));
+        {
+            let bus = emu.bus_mut();
+            bus.custom_write(0x096, 2, 0x8240);
+            bus.custom_write(0x040, 2, 0x01F0);
+            bus.custom_write(0x042, 2, 0x0000);
+            bus.custom_write(0x044, 2, 0xFFFF);
+            bus.custom_write(0x046, 2, 0xFFFF);
+            bus.custom_write(0x074, 2, 0xBEEF);
+            bus.custom_write(0x054, 4, 0x0006_0000);
+            bus.custom_write(0x058, 2, 0x0041);
+        }
+        for _ in 0..64 {
+            emu.debug_step_instructions(1).unwrap();
+            assert!(
+                emu.machine.take_ui_debug_stop().is_none(),
+                "cpu-filtered watch must swallow a blitter write"
+            );
+        }
+        assert_eq!(emu.bus().peek_word_any(0x60000), 0xBEEF);
+    }
+
+    #[test]
     fn reverse_continue_lands_on_a_watchpoint_hit() {
         use crate::timetravel::ReverseOutcome;
         // NOP, NOP, MOVE.W #$1234,$60000.L, NOPs, BRA.S *.

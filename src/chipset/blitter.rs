@@ -137,6 +137,15 @@ fn shift_combine(prev: u16, cur: u16, n: u32, desc: bool) -> u16 {
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Blitter {
+    /// Watched word addresses mirrored from the debugger, so every
+    /// write site can flag a hit precisely (a single last-write latch
+    /// would lose hits inside multi-word bursts). Transient debug state.
+    #[serde(skip)]
+    pub(crate) debug_watch_addrs: Vec<u32>,
+    /// The last write this blitter made TO A WATCHED ADDRESS, for
+    /// watchpoint writer attribution. Transient.
+    #[serde(skip)]
+    pub(crate) debug_watched_write: Option<(u32, u16)>,
     pub bltcon0: u16,
     pub bltcon1: u16,
     pub bltafwm: u16,
@@ -181,6 +190,12 @@ enum PendingBlit {
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct LineBlitState {
+    /// Debugger: watched addresses (copied at blit start) and the last
+    /// write to one of them. Transient.
+    #[serde(skip)]
+    debug_watch_addrs: Vec<u32>,
+    #[serde(skip)]
+    debug_watched_write: Option<(u32, u16)>,
     phase: LineBlitPhase,
     slots_remaining: u32,
     npixels_remaining: u32,
@@ -207,6 +222,12 @@ struct LineBlitState {
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct NormalBlitState {
+    /// Debugger: watched addresses (copied at blit start) and the last
+    /// write to one of them. Transient.
+    #[serde(skip)]
+    debug_watch_addrs: Vec<u32>,
+    #[serde(skip)]
+    debug_watched_write: Option<(u32, u16)>,
     phase: NormalBlitPhase,
     slots_remaining: u32,
     h_remaining: u32,
@@ -313,6 +334,8 @@ impl Default for Blitter {
 impl Blitter {
     pub fn new() -> Self {
         Self {
+            debug_watch_addrs: Vec::new(),
+            debug_watched_write: None,
             bltcon0: 0,
             bltcon1: 0,
             bltafwm: 0,
@@ -480,6 +503,35 @@ impl Blitter {
         }
     }
 
+    /// Replace the debugger's watched-address mirror (word-aligned),
+    /// propagating into a pending blit's state copy.
+    pub fn set_debug_watch_addrs(&mut self, addrs: &[u32]) {
+        self.debug_watch_addrs = addrs.to_vec();
+        match self.pending.as_mut() {
+            Some(PendingBlit::Normal(state)) => {
+                state.debug_watch_addrs = self.debug_watch_addrs.clone()
+            }
+            Some(PendingBlit::Line(state)) => {
+                state.debug_watch_addrs = self.debug_watch_addrs.clone()
+            }
+            None => {}
+        }
+    }
+
+    /// Take the last write to a watched address, if one happened.
+    pub fn take_debug_watched_write(&mut self) -> Option<(u32, u16)> {
+        if let Some(state) = self.pending.as_mut() {
+            let from_state = match state {
+                PendingBlit::Normal(state) => state.debug_watched_write.take(),
+                PendingBlit::Line(state) => state.debug_watched_write.take(),
+            };
+            if from_state.is_some() {
+                return from_state;
+            }
+        }
+        self.debug_watched_write.take()
+    }
+
     pub fn tick_scheduled_slot(&mut self, ram: &mut [u8]) -> bool {
         if self.pending.is_none() || !self.busy {
             return false;
@@ -487,7 +539,11 @@ impl Blitter {
         let mut pending = self.pending.take().unwrap();
         match &mut pending {
             PendingBlit::Normal(state) => {
-                if state.tick_slot(ram, &mut self.bzero) {
+                let done = state.tick_slot(ram, &mut self.bzero);
+                if let Some(write) = state.debug_watched_write.take() {
+                    self.debug_watched_write = Some(write);
+                }
+                if done {
                     state.write_back(self);
                     self.finish_blit();
                     true
@@ -497,7 +553,11 @@ impl Blitter {
                 }
             }
             PendingBlit::Line(state) => {
-                if state.tick_slot(ram, &mut self.bzero) {
+                let done = state.tick_slot(ram, &mut self.bzero);
+                if let Some(write) = state.debug_watched_write.take() {
+                    self.debug_watched_write = Some(write);
+                }
+                if done {
                     state.write_back(self);
                     self.finish_blit();
                     true
@@ -707,6 +767,11 @@ impl Blitter {
             // loop, so we just flush.
             for (pt, d) in row_dpt.iter().zip(row_d.iter()) {
                 write_word(ram, *pt, *d);
+                if !self.debug_watch_addrs.is_empty()
+                    && self.debug_watch_addrs.contains(&(*pt & 0x00FF_FFFE))
+                {
+                    self.debug_watched_write = Some((*pt, *d));
+                }
             }
 
             // End of row: apply modulos to every enabled pointer.
@@ -822,6 +887,11 @@ impl Blitter {
             }
             if use_c && line_pixel {
                 write_word(ram, dpt, d);
+                if !self.debug_watch_addrs.is_empty()
+                    && self.debug_watch_addrs.contains(&(dpt & 0x00FF_FFFE))
+                {
+                    self.debug_watched_write = Some((dpt, d));
+                }
             }
             dpt = cpt;
             bdat = bdat.rotate_left(1);
@@ -862,6 +932,8 @@ impl LineBlitState {
         let bdat = blitter.line_initial_bdat(bsh);
 
         Self {
+            debug_watch_addrs: blitter.debug_watch_addrs.clone(),
+            debug_watched_write: None,
             phase: LineBlitPhase::StartDelay,
             slots_remaining: line_total_slots(npixels),
             npixels_remaining: npixels,
@@ -1012,6 +1084,11 @@ impl LineBlitState {
         }
         if self.use_c && line_pixel {
             write_word(ram, self.dpt, d);
+            if !self.debug_watch_addrs.is_empty()
+                && self.debug_watch_addrs.contains(&(self.dpt & 0x00FF_FFFE))
+            {
+                self.debug_watched_write = Some((self.dpt, d));
+            }
         }
         self.dpt = self.cpt;
         self.bdat = self.bdat.rotate_left(1);
@@ -1071,6 +1148,8 @@ impl NormalBlitState {
         let snap_b = snap_source(use_b, blitter.bltbpt, mod_sign * blitter.bltbmod as i32);
 
         Self {
+            debug_watch_addrs: blitter.debug_watch_addrs.clone(),
+            debug_watched_write: None,
             phase: NormalBlitPhase::StartDelay,
             slots_remaining: normal_total_slots(h, w, con0, con1),
             h_remaining: h,
@@ -1438,6 +1517,13 @@ impl NormalBlitState {
         }
         if self.write_d {
             write_word(ram, self.d_hold_pt, self.d_hold);
+            if !self.debug_watch_addrs.is_empty()
+                && self
+                    .debug_watch_addrs
+                    .contains(&(self.d_hold_pt & 0x00FF_FFFE))
+            {
+                self.debug_watched_write = Some((self.d_hold_pt, self.d_hold));
+            }
             if self.track_overlay {
                 if let Some(off) = chip_off(self.d_hold_pt, ram.len()) {
                     self.d_overlay.insert(off, self.d_hold);

@@ -1008,6 +1008,8 @@ impl M68kMachine {
         // fire phantom hits on the first step after a restore.
         self.ui_rebaseline_watches();
         self.ui_last_this_task = self.ui_peek_this_task();
+        let addrs: Vec<u32> = self.ui_breaks.watches.iter().map(|w| w.addr).collect();
+        self.bus.bus.set_ui_mem_watches(&addrs);
         Ok(())
     }
 
@@ -1159,9 +1161,23 @@ impl M68kMachine {
     /// Toggle a word watchpoint at `addr` (word-aligned), baselining it on
     /// the current memory contents. Returns true when now set.
     pub fn ui_toggle_watch(&mut self, addr: u32) -> bool {
+        self.ui_toggle_watch_filtered(addr, None)
+    }
+
+    /// Like [`Self::ui_toggle_watch`], stopping only on writes from
+    /// `filter`'s source when set. The watched addresses are mirrored
+    /// into the bus (and its DMA engines) for writer attribution.
+    pub fn ui_toggle_watch_filtered(
+        &mut self,
+        addr: u32,
+        filter: Option<crate::debugger::WatchSource>,
+    ) -> bool {
         let addr = addr & crate::debugger::UI_ADDR_MASK & !1;
         let current = self.bus.bus.peek_word_any(addr);
-        self.ui_breaks.toggle_watch(addr, current)
+        let added = self.ui_breaks.toggle_watch(addr, current, filter);
+        let addrs: Vec<u32> = self.ui_breaks.watches.iter().map(|w| w.addr).collect();
+        self.bus.bus.set_ui_mem_watches(&addrs);
+        added
     }
 
     /// Toggle a custom chipset register write watch (a word offset into
@@ -1266,6 +1282,7 @@ impl M68kMachine {
     pub fn ui_breaks_clear(&mut self) {
         self.ui_breaks.clear();
         self.bus.bus.set_ui_reg_watches(&[]);
+        self.bus.bus.set_ui_mem_watches(&[]);
         self.bus.bus.ui_clear_beam_traps();
         self.bus.bus.ui_clear_copper_breaks();
         self.ui_stop = None;
@@ -1346,19 +1363,41 @@ impl M68kMachine {
             return;
         }
         let writer_pc = self.cpu.ppc & crate::debugger::UI_ADDR_MASK;
-        for watch in &mut self.ui_breaks.watches {
-            let new = self.bus.bus.peek_word_any(watch.addr);
-            if new != watch.last {
-                let old = watch.last;
-                watch.last = new;
-                self.ui_stop = Some(DebugStop::Watch {
-                    addr: watch.addr,
-                    old,
-                    new,
-                    writer_pc,
-                });
-                return;
+        for i in 0..self.ui_breaks.watches.len() {
+            let addr = self.ui_breaks.watches[i].addr;
+            let new = self.bus.bus.peek_word_any(addr);
+            if new == self.ui_breaks.watches[i].last {
+                continue;
             }
+            let old = self.ui_breaks.watches[i].last;
+            self.ui_breaks.watches[i].last = new;
+            // Attribute the change: a DMA engine that flagged a write to
+            // this word wins over the default CPU story.
+            let writer = self.bus.bus.ui_take_mem_writer(addr);
+            let (source, vpos, hpos) = match writer {
+                Some(w) => (w.source, w.vpos, w.hpos),
+                None => (
+                    crate::debugger::WatchSource::Cpu,
+                    self.bus.bus.agnus.vpos.min(u32::from(u16::MAX)) as u16,
+                    self.bus.bus.agnus.hpos.min(u32::from(u16::MAX)) as u16,
+                ),
+            };
+            if let Some(filter) = self.ui_breaks.watches[i].filter {
+                if filter != source {
+                    // Filtered out: the baseline moved on, no stop.
+                    continue;
+                }
+            }
+            self.ui_stop = Some(DebugStop::Watch {
+                addr,
+                old,
+                new,
+                writer_pc,
+                source,
+                vpos,
+                hpos,
+            });
+            return;
         }
     }
 
@@ -2097,6 +2136,7 @@ impl CpuBus {
                 self.bus
                     .grant_cpu_bus_access_at(Some(addr), size, CpuBusAccessKind::Write);
                 self.bus.record_cpu_chip_ram_write(off, size, value);
+                self.bus.ui_note_cpu_ram_write(addr, size);
                 write_be(&mut self.bus.mem.chip_ram, off, size, value);
                 self.dbg_note_memw(addr, size);
                 return;
@@ -2112,6 +2152,7 @@ impl CpuBus {
                 // than running at uncontended external-memory speed.
                 self.bus
                     .grant_cpu_bus_access_at(Some(addr), size, CpuBusAccessKind::Write);
+                self.bus.ui_note_cpu_ram_write(addr, size);
                 write_be(&mut self.bus.mem.slow_ram, off, size, value);
                 self.dbg_note_memw(addr, size);
                 return;

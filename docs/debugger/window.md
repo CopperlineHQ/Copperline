@@ -143,8 +143,14 @@ On the Break tab, type an address into the `$` box and toggle any of:
 - **Break** -- a PC breakpoint. The machine stops *before* the instruction
   at that address executes.
 - **Watch** -- a memory word watchpoint. The machine stops when the word
-  changes, whichever bus master wrote it (CPU, Copper, or blitter); the
-  current value is shown live in the list.
+  changes, whichever bus master wrote it, and the stop names the true
+  writer: CPU stops report the writing instruction's PC, while blitter
+  and disk-DMA writes are flagged at their write sites and report the
+  source with the beam position (`Watch $060000: 0000->BEEF (blitter
+  write, v44 h100)`). The console's `WATCH ADDR CPU|BLITTER|DISK` form
+  additionally filters a watch to one writer -- "stop only when the
+  blitter touches this" -- with other writers just moving the baseline.
+  The current value is shown live in the list.
 - **Reg** -- a chipset-register write watch. `96` and `DFF096` both mean
   DMACON. The machine stops on *every* write, CPU or Copper, and reports
   the writer and beam position.

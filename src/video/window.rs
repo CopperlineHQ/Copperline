@@ -5357,9 +5357,13 @@ impl App {
                 }
                 for watch in &breaks.watches {
                     lines.push(ui::DbgLine::plain(format!(
-                        "  ${:06X}  now {:04X}",
+                        "  ${:06X}  now {:04X}{}",
                         watch.addr,
-                        bus.peek_word_any(watch.addr)
+                        bus.peek_word_any(watch.addr),
+                        watch
+                            .filter
+                            .map(|f| format!("  [{} only]", f.label()))
+                            .unwrap_or_default()
                     )));
                 }
                 lines.push(ui::DbgLine::plain(""));

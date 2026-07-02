@@ -71,6 +71,40 @@ pub const UI_ADDR_MASK: u32 = 0x00FF_FFFF;
 pub struct UiWatch {
     pub addr: u32,
     pub last: u16,
+    /// Only stop when the change was made by this writer; None = any.
+    pub filter: Option<WatchSource>,
+}
+
+/// Who wrote a watched memory word: attributed at the write site (the
+/// CPU write path, the blitter's D/line/fill writes, disk read DMA).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WatchSource {
+    Cpu,
+    Blitter,
+    Disk,
+}
+
+impl WatchSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            WatchSource::Cpu => "cpu",
+            WatchSource::Blitter => "blitter",
+            WatchSource::Disk => "disk",
+        }
+    }
+
+    /// Parse a console filter token (case-insensitive).
+    pub fn parse(token: &str) -> Option<Self> {
+        if token.eq_ignore_ascii_case("cpu") {
+            Some(WatchSource::Cpu)
+        } else if token.eq_ignore_ascii_case("blitter") {
+            Some(WatchSource::Blitter)
+        } else if token.eq_ignore_ascii_case("disk") {
+            Some(WatchSource::Disk)
+        } else {
+            None
+        }
+    }
 }
 
 /// Why the interactive debugger stopped the machine.
@@ -84,7 +118,12 @@ pub enum DebugStop {
         addr: u32,
         old: u16,
         new: u16,
+        /// The instruction that was executing when the change was seen
+        /// (the true writer when `source` is Cpu).
         writer_pc: u32,
+        source: WatchSource,
+        vpos: u16,
+        hpos: u16,
     },
     /// A watched custom chipset register was written (by any source: CPU
     /// or Copper), at the given beam position.
@@ -138,7 +177,18 @@ impl DebugStop {
                 old,
                 new,
                 writer_pc,
-            } => format!("Watch ${addr:06X}: {old:04X}->{new:04X} (pc ${writer_pc:06X})"),
+                source,
+                vpos,
+                hpos,
+            } => match source {
+                WatchSource::Cpu => {
+                    format!("Watch ${addr:06X}: {old:04X}->{new:04X} (pc ${writer_pc:06X})")
+                }
+                _ => format!(
+                    "Watch ${addr:06X}: {old:04X}->{new:04X} ({} write, v{vpos} h{hpos})",
+                    source.label()
+                ),
+            },
             DebugStop::ChipReg {
                 off,
                 value,
@@ -528,8 +578,9 @@ impl InteractiveBreaks {
     }
 
     /// Add a word watch at `addr` (recording `current` as its baseline),
-    /// or remove it when already set. Returns true when now set.
-    pub fn toggle_watch(&mut self, addr: u32, current: u16) -> bool {
+    /// or remove it when already set. `filter` limits which writer stops
+    /// it (None = any). Returns true when now set.
+    pub fn toggle_watch(&mut self, addr: u32, current: u16, filter: Option<WatchSource>) -> bool {
         let added = match self.watches.iter().position(|w| w.addr == addr) {
             Some(pos) => {
                 self.watches.remove(pos);
@@ -539,6 +590,7 @@ impl InteractiveBreaks {
                 self.watches.push(UiWatch {
                     addr,
                     last: current,
+                    filter,
                 });
                 true
             }
@@ -970,7 +1022,7 @@ mod tests {
     #[test]
     fn interactive_watches_record_baselines_and_clear() {
         let mut breaks = InteractiveBreaks::default();
-        assert!(breaks.toggle_watch(0x1000, 0xABCD));
+        assert!(breaks.toggle_watch(0x1000, 0xABCD, None));
         assert_eq!(breaks.watches[0].last, 0xABCD);
         // The register watch normalizes a full $DFFxxx address to the
         // word offset.
@@ -1002,9 +1054,25 @@ mod tests {
                 old: 0x12,
                 new: 0x13,
                 writer_pc: 0xC03374,
+                source: WatchSource::Cpu,
+                vpos: 44,
+                hpos: 100,
             }
             .describe(),
             "Watch $C09580: 0012->0013 (pc $C03374)"
+        );
+        assert_eq!(
+            DebugStop::Watch {
+                addr: 0xC09580,
+                old: 0x12,
+                new: 0x13,
+                writer_pc: 0xC03374,
+                source: WatchSource::Blitter,
+                vpos: 44,
+                hpos: 100,
+            }
+            .describe(),
+            "Watch $C09580: 0012->0013 (blitter write, v44 h100)"
         );
         assert_eq!(
             DebugStop::ChipReg {
