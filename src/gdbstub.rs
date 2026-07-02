@@ -36,7 +36,7 @@ const TARGET_XML: &str = r#"<?xml version="1.0"?>
     <reg name="a3" bitsize="32" regnum="11"/>
     <reg name="a4" bitsize="32" regnum="12"/>
     <reg name="a5" bitsize="32" regnum="13"/>
-    <reg name="a6" bitsize="32" regnum="14"/>
+    <reg name="fp" bitsize="32" regnum="14"/>
     <reg name="sp" bitsize="32" regnum="15" type="data_ptr"/>
     <reg name="ps" bitsize="32" regnum="16"/>
     <reg name="pc" bitsize="32" regnum="17" type="code_ptr"/>
