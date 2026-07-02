@@ -94,8 +94,14 @@ pub fn task_state_name(state: u8) -> &'static str {
     }
 }
 
+/// Heuristic: even and in an address range where exec structures can
+/// live -- chip+Z2 RAM, slow RAM, or Zorro III space (OS 3.2+ SetPatch
+/// moves ExecBase to fast RAM, which may be a Z3 board).
 fn plausible_ptr(addr: u32) -> bool {
-    addr != 0 && addr & 1 == 0 && addr < 0x0100_0000
+    addr & 1 == 0
+        && ((0x100..0x00A0_0000).contains(&addr)          // chip + Z2 fast
+            || (0x00C0_0000..0x00D8_0000).contains(&addr) // slow
+            || (0x1000_0000..0x8000_0000).contains(&addr)) // Zorro III
 }
 
 /// Read-only view of guest memory, built from the debugger's peek
@@ -174,7 +180,10 @@ impl OsMemory<'_> {
     /// placeholder for null/implausible name pointers.
     pub fn node_name(&self, node: u32) -> String {
         let name_ptr = (self.peek32)(node.wrapping_add(LN_NAME));
-        if name_ptr == 0 || name_ptr >= 0x0100_0000 {
+        // Names may live in ROM or at odd addresses, so no plausible_ptr
+        // here; unmapped pointers read as zero bytes and fall through to
+        // the <unnamed> placeholder below.
+        if name_ptr == 0 {
             return "<unnamed>".to_string();
         }
         let mut name = String::new();
@@ -443,6 +452,28 @@ mod tests {
         assert_eq!(segs[0].size, 0xF8);
         assert_eq!(segs[1].start, 0x9004);
         assert_eq!(segs[1].size, 0x38);
+    }
+
+    #[test]
+    fn accepts_execbase_in_z3_space_and_rejects_the_gap() {
+        // OS 3.2+ SetPatch moves ExecBase to fast RAM, e.g. Zorro III space.
+        let base = 0x4000_08C0;
+        let mut mem = FakeMem::new();
+        mem.put32(4, base);
+        mem.put32(base + CHKBASE, !base);
+        let peek8 = |a: u32| mem.peek8(a);
+        let peek32 = |a: u32| mem.peek32(a);
+        assert_eq!(
+            os(&peek8, &peek32).exec_base().expect("ExecBase in Z3 RAM"),
+            base
+        );
+
+        // A pointer in the unmapped gap between Z2 and Z3 is rejected.
+        let mut mem = FakeMem::new();
+        mem.put32(4, 0x0B00_0000);
+        let peek8 = |a: u32| mem.peek8(a);
+        let peek32 = |a: u32| mem.peek32(a);
+        assert!(os(&peek8, &peek32).exec_base().is_err());
     }
 
     #[test]
