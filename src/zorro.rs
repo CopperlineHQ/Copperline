@@ -272,9 +272,19 @@ impl ZorroChain {
 
     /// Return all boards to unconfigured with zeroed RAM (cold power-on).
     pub fn power_on_reset(&mut self) {
+        self.warm_reset();
+        for board in &mut self.boards {
+            board.ram.fill(0);
+        }
+    }
+
+    /// Return all boards to unconfigured, preserving RAM contents. /RST on
+    /// the expansion bus (keyboard reset or the CPU RESET instruction)
+    /// clears each board's autoconfig latch, including shut-up boards, but
+    /// expansion RAM keeps its contents so reset-surviving structures work.
+    pub fn warm_reset(&mut self) {
         for board in &mut self.boards {
             board.state = BoardState::Unconfigured;
-            board.ram.fill(0);
         }
         self.regions.clear();
         self.device_regions.clear();
@@ -996,6 +1006,31 @@ mod tests {
         assert_eq!(chain.region_at(0x0020_0000, 1), None);
         assert_eq!(chain.config_read(AUTOCONFIG_BASE, 1), 0xE0);
         assert_eq!(chain.board_ram(0)[0], 0);
+    }
+
+    #[test]
+    fn warm_reset_unconfigures_and_preserves_ram() {
+        let mut chain = chain_with(vec![
+            BoardSpec::fast_ram(512 * 1024),
+            BoardSpec::fast_ram(512 * 1024),
+        ]);
+        chain.config_write(AUTOCONFIG_BASE + EC_BASEADDRESS_PHYS, 2, 0x2000);
+        let (idx, off) = chain.region_at(0x0020_0000, 1).unwrap();
+        chain.board_ram_mut(idx)[off] = 0xAA;
+        // Shut up the second board; /RST must revive it too.
+        chain.config_write(AUTOCONFIG_BASE + EC_SHUTUP_PHYS, 1, 0);
+
+        chain.warm_reset();
+
+        // Both boards are back in the autoconfig chain, RAM intact.
+        assert_eq!(chain.region_at(0x0020_0000, 1), None);
+        assert_eq!(chain.config_read(AUTOCONFIG_BASE, 1), 0xE0);
+        assert_eq!(chain.board_ram(0)[0], 0xAA);
+        chain.config_write(AUTOCONFIG_BASE + EC_BASEADDRESS_PHYS, 2, 0x2000);
+        assert_eq!(chain.config_read(AUTOCONFIG_BASE, 1), 0xE0);
+        chain.config_write(AUTOCONFIG_BASE + EC_BASEADDRESS_PHYS, 2, 0x2800);
+        assert_eq!(chain.region_at(0x0020_0000, 1), Some((0, 0)));
+        assert_eq!(chain.region_at(0x0028_0000, 1), Some((1, 0)));
     }
 
     #[test]

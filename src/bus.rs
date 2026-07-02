@@ -2355,6 +2355,13 @@ impl Bus {
     pub fn reset_custom_chips_from_cpu_reset(&mut self) {
         self.agnus.reset_copcon();
         self.floppy.reset_external_drives();
+        // RESET asserts /RST on the expansion bus: boards drop back to
+        // unconfigured (Kickstart re-runs autoconfig on the way back up)
+        // and expansion devices see a hardware reset.
+        for dev in &mut self.devices {
+            crate::zorro_device::ZorroDevice::reset(dev);
+        }
+        self.mem.zorro.warm_reset();
     }
 
     fn effective_diwhigh(&self) -> DiwHigh {
@@ -2497,6 +2504,7 @@ impl Bus {
         for dev in &mut self.devices {
             crate::zorro_device::ZorroDevice::reset(dev);
         }
+        self.mem.zorro.warm_reset();
         self.hdd_led_until_cck = 0;
         self.overlay_disable_pending = false;
         // The MCU restarts its power-up flow; physically held keys stay
