@@ -40,6 +40,10 @@ ringbuf = "0.4"
 hound = "3.5"
 rfd = "0.17.2"
 gilrs = "0.11"
+# Host clipboard for the debugger console's paste (text only; the default
+# image-data feature is left off). wayland-data-control covers Wayland
+# hosts; X11 support is built in on Linux.
+arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
 # WASM plugin host for functional Zorro boards (src/wasmboard.rs). Lean feature
 # set: the Cranelift JIT + runtime only -- no WASI, component model, GC, threads,
 # or wat parsing in the shipped binary (kept deterministic; see the determinism

@@ -827,7 +827,7 @@ fn parse_z_packet(packet: &str) -> Result<(u32, usize)> {
     Ok((parse_hex_u32(addr)?, parse_hex_usize(kind)?))
 }
 
-fn parse_custom_reg(input: &str) -> Option<u16> {
+pub(crate) fn parse_custom_reg(input: &str) -> Option<u16> {
     if let Ok(value) = parse_hex_u32(input) {
         return Some(custom_offset_from_value(value));
     }

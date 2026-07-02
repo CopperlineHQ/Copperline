@@ -3,9 +3,10 @@
 Press `Cmd+B` on macOS or `Alt+B` on Linux/Windows (or pick **Debugger**
 from the status-bar menu) to pause the machine and open the debugger
 tool window alongside the emulated display. Closing it restores the pause
-state from before it opened. The debugger and frame analyzer are independent
-tool windows, so both can stay open while you compare CPU/chipset state with
-the captured bus trace.
+state from before it opened. The debugger, frame analyzer, and the
+command-line [console](console) are independent tool windows, so all three
+can stay open while you compare CPU/chipset state with the captured bus
+trace.
 Everything the debugger shows comes from
 side-effect-free peeks -- inspecting memory or registers never disturbs the
 emulated machine -- and stepping drives the same cycle-exact core as normal
