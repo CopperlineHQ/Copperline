@@ -165,6 +165,14 @@ to the debugger window. The analyzer shows the whole captured Agnus beam
 frame, not just the TV-presented display. The trace includes vertical and
 horizontal overscan, blanking, and the visible display window.
 
+```{figure} ../images/ui-preview-frame-analyzer.png
+:alt: The Frame Analyzer with the picture underlay enabled
+:width: 90%
+
+The Frame Analyzer: chip-bus owner heatmap over the picture underlay, the
+selected-scanline strip, and per-owner colour-clock counters.
+```
+
 The main heatmap is indexed by beam position: X is `hpos` colour clocks and Y
 is `vpos` lines. Each cell records the chip-bus owner for that colour clock:
 refresh, bitplane, sprite, disk, audio, Copper, blitter, CPU, or idle. The
@@ -185,7 +193,18 @@ The pane has the same transport rhythm as the debugger:
 |---|---|---|
 | Run / Pause | `R` | Resume or pause while continuing to collect frame traces |
 | Frame | `F` | Run exactly one frame and show the completed trace |
+| Picture underlay | `U` | Draw the rendered frame beneath the heatmap |
 
 Opening the pane starts a partial trace immediately; pressing **Frame**
 captures a clean full frame. Closing it restores the run/pause state selected
 inside the pane and disables the tracing hot path.
+
+Ticking **Picture underlay** draws the traced frame's rendered picture under
+the heatmap, dimmed so the DMA colours stay readable: the picture shows
+through idle slots and owned slots blend their owner colour over it. That
+correlates bus activity spatially with the picture -- a bitplane fetch block
+sits over the graphics it fetches, a Copper colour split lands on the raster
+line where the picture changes. The underlay is re-rendered from the trace's
+frame in beam coordinates (none of the presentation recentring or TV masking
+is applied), so it lines up with the white display box exactly, and the extra
+render reads a snapshot only -- it never perturbs the emulation.

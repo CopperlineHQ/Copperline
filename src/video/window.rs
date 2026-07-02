@@ -10,7 +10,7 @@ use super::launcher::{LauncherField, LauncherState, MachineSetup, StatusMessage}
 use super::ui::{self, Panel, UiControl, UiState};
 use super::{
     bitplane, font, present_height, FrameGeometry, FB_HEIGHT, FB_PIXELS, FB_WIDTH,
-    HOST_SHORTCUT_MODIFIER_LABEL, MAX_FB_PIXELS,
+    HOST_SHORTCUT_MODIFIER_LABEL, MAX_FB_PIXELS, MAX_VISIBLE_LINES,
 };
 use crate::audio::{AudioSink, CpalSink};
 use crate::bus::{
@@ -493,6 +493,17 @@ pub struct App {
     last_tool_redraw: Instant,
     debugger_panel: Option<ui::DebuggerPanel>,
     frame_analyzer_panel: Option<ui::FrameAnalyzerPanel>,
+    /// Beam-space render of the analyzer trace's frame for the picture
+    /// underlay: unlike `fb`, no presentation recentring or TV masking is
+    /// applied, so its pixels line up with the DMA trace's beam grid.
+    /// Shared with the per-redraw view via Rc to avoid copying the frame.
+    analyzer_underlay_fb: std::rc::Rc<Vec<u32>>,
+    /// Rows valid in `analyzer_underlay_fb` (the traced frame's scan height).
+    analyzer_underlay_rows: usize,
+    /// Emulated frame `analyzer_underlay_fb` was rendered for.
+    analyzer_underlay_frame: Option<u64>,
+    /// Recycled snapshot buffers for the underlay's side-effect-free render.
+    analyzer_underlay_input: Option<bitplane::RenderInput>,
     render_worker: Option<RenderWorker>,
     render_recycle_fb: Vec<u32>,
     /// Spent frame snapshot handed back by the render worker; reused by the
@@ -830,6 +841,10 @@ impl App {
             last_tool_redraw: Instant::now(),
             debugger_panel: None,
             frame_analyzer_panel: None,
+            analyzer_underlay_fb: std::rc::Rc::new(Vec::new()),
+            analyzer_underlay_rows: 0,
+            analyzer_underlay_frame: None,
+            analyzer_underlay_input: None,
             render_worker,
             render_recycle_fb: Vec::new(),
             render_recycle_input: None,
@@ -2454,6 +2469,9 @@ impl App {
             *self.tool_window_slot(kind) = None;
             return;
         };
+        if kind == ToolPanelKind::FrameAnalyzer {
+            self.ensure_analyzer_underlay();
+        }
         let ui_data = self.build_tool_panel_view_data(kind);
         let hover = self
             .tool_window(kind)
@@ -2591,6 +2609,9 @@ impl App {
                 self.activate_tool_control(ToolPanelKind::FrameAnalyzer, control)
             }
             UiControl::AnalyzerFrame => {
+                self.activate_tool_control(ToolPanelKind::FrameAnalyzer, control)
+            }
+            UiControl::AnalyzerUnderlay => {
                 self.activate_tool_control(ToolPanelKind::FrameAnalyzer, control)
             }
             UiControl::AnalyzerPick { x, y, scanline } => {
@@ -2755,6 +2776,9 @@ impl App {
             (ToolPanelKind::FrameAnalyzer, UiControl::AnalyzerPick { x, y, scanline }) => {
                 self.frame_analyzer_select(x, y, scanline)
             }
+            (ToolPanelKind::FrameAnalyzer, UiControl::AnalyzerUnderlay) => {
+                self.frame_analyzer_toggle_underlay()
+            }
             _ => {}
         }
         self.request_redraw();
@@ -2912,6 +2936,7 @@ impl App {
         let control = match code {
             KeyCode::KeyF => Some(UiControl::AnalyzerFrame),
             KeyCode::KeyR => Some(UiControl::AnalyzerRun),
+            KeyCode::KeyU => Some(UiControl::AnalyzerUnderlay),
             _ => None,
         };
         if let Some(control) = control {
@@ -3088,6 +3113,55 @@ impl App {
     fn frame_analyzer_step_frame(&mut self) {
         self.emu.bus_mut().set_frame_analyzer_enabled(true);
         self.debugger_step_frame();
+    }
+
+    fn frame_analyzer_toggle_underlay(&mut self) {
+        if let Some(panel) = self.frame_analyzer_panel.as_mut() {
+            panel.show_underlay = !panel.show_underlay;
+            self.request_redraw();
+        }
+    }
+
+    /// Re-render the picture underlay when the analyzer's traced frame has
+    /// changed. The render is a pure function of a `RenderInput` snapshot
+    /// (`render_from_input`), so unlike the `bitplane::render` wrapper it
+    /// never feeds collision bits or timing stats back into the machine:
+    /// inspecting a frame cannot perturb the emulation. The result stays in
+    /// beam coordinates (no presentation post-processing), matching the DMA
+    /// trace's grid.
+    fn ensure_analyzer_underlay(&mut self) {
+        let want = self
+            .frame_analyzer_panel
+            .as_ref()
+            .is_some_and(|panel| panel.show_underlay);
+        if !want {
+            return;
+        }
+        let Some(frame) = self.emu.bus().frame_bus_trace().map(|trace| trace.frame) else {
+            return;
+        };
+        if self.analyzer_underlay_frame == Some(frame) && self.analyzer_underlay_rows != 0 {
+            return;
+        }
+        match &mut self.analyzer_underlay_input {
+            Some(input) => input.refill_from_bus(self.emu.bus()),
+            slot @ None => *slot = Some(bitplane::RenderInput::from_bus(self.emu.bus())),
+        }
+        let input = self
+            .analyzer_underlay_input
+            .as_ref()
+            .expect("underlay render input just filled");
+        let fb = std::rc::Rc::make_mut(&mut self.analyzer_underlay_fb);
+        fb.resize(MAX_FB_PIXELS, 0);
+        fb.fill(0);
+        let _ = bitplane::render_from_input(input, fb.as_mut_slice());
+        self.analyzer_underlay_rows = self
+            .emu
+            .bus()
+            .frame_geometry()
+            .visible_lines
+            .min(MAX_VISIBLE_LINES);
+        self.analyzer_underlay_frame = Some(frame);
     }
 
     fn frame_analyzer_select(&mut self, x: u16, y: u16, scanline: bool) {
@@ -3413,6 +3487,12 @@ impl App {
                 self.analyzer_dragging = false;
                 self.frame_analyzer_panel = None;
                 self.frame_analyzer_tool_window = None;
+                // Release the underlay buffers (frame render + up-to-2MiB
+                // chip RAM snapshot) while the analyzer is closed.
+                self.analyzer_underlay_fb = std::rc::Rc::new(Vec::new());
+                self.analyzer_underlay_rows = 0;
+                self.analyzer_underlay_frame = None;
+                self.analyzer_underlay_input = None;
             }
         }
         self.resize_for_active_panel();
@@ -4086,8 +4166,15 @@ impl App {
                 running: !self.paused,
                 status,
                 trace: None,
+                underlay: None,
             };
         };
+        let underlay = (panel.show_underlay && self.analyzer_underlay_rows > 0).then(|| {
+            ui::AnalyzerUnderlayView {
+                fb: std::rc::Rc::clone(&self.analyzer_underlay_fb),
+                rows: self.analyzer_underlay_rows,
+            }
+        });
         let selected_vpos = usize::from(panel.selected_vpos).min(trace.rows.saturating_sub(1));
         let selected_hpos = usize::from(panel.selected_hpos).min(trace.cols.saturating_sub(1));
         let selected_owner_code = trace.owner_code_at(selected_vpos, selected_hpos);
@@ -4124,6 +4211,7 @@ impl App {
         ui::FrameAnalyzerView {
             running: !self.paused,
             status,
+            underlay,
             trace: Some(ui::AnalyzerTraceView {
                 frame: trace.frame,
                 seconds: trace.seconds,

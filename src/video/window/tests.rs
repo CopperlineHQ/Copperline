@@ -2397,6 +2397,53 @@ fn frame_analyzer_cursor_keys_move_selected_slot() {
 }
 
 #[test]
+fn frame_analyzer_underlay_toggles_and_renders() {
+    let mut app = test_app();
+    app.open_frame_analyzer();
+    app.frame_analyzer_step_frame();
+    assert!(app.emu.bus().frame_bus_trace().is_some());
+
+    // Off by default: no underlay is rendered or attached to the view.
+    app.ensure_analyzer_underlay();
+    assert_eq!(app.analyzer_underlay_rows, 0);
+    let panel = app.frame_analyzer_panel.clone().unwrap();
+    assert!(app.build_frame_analyzer_view(&panel).underlay.is_none());
+
+    // The U key ticks the checkbox on.
+    assert!(app.ui_handle_key(KeyCode::KeyU));
+    assert!(app
+        .frame_analyzer_panel
+        .as_ref()
+        .is_some_and(|panel| panel.show_underlay));
+
+    // With the box ticked a beam-space frame render is captured and
+    // handed to the view, sized to the traced frame's scan.
+    app.ensure_analyzer_underlay();
+    assert!(app.analyzer_underlay_rows > 0);
+    let panel = app.frame_analyzer_panel.clone().unwrap();
+    let view = app.build_frame_analyzer_view(&panel);
+    let underlay = view.underlay.expect("underlay attached to view");
+    assert_eq!(underlay.rows, app.analyzer_underlay_rows);
+    assert!(underlay.fb.len() >= FB_WIDTH * underlay.rows);
+
+    // The render must not perturb emulated state: peeking the same frame
+    // twice leaves the underlay cache keyed to the same traced frame.
+    let frame = app.analyzer_underlay_frame;
+    app.ensure_analyzer_underlay();
+    assert_eq!(app.analyzer_underlay_frame, frame);
+
+    // Toggling off via the control drops it from the view again.
+    app.activate_ui_control(UiControl::AnalyzerUnderlay);
+    let panel = app.frame_analyzer_panel.clone().unwrap();
+    assert!(app.build_frame_analyzer_view(&panel).underlay.is_none());
+
+    // Closing the analyzer releases the underlay buffers.
+    app.close_tool_panel(ToolPanelKind::FrameAnalyzer);
+    assert_eq!(app.analyzer_underlay_rows, 0);
+    assert!(app.analyzer_underlay_input.is_none());
+}
+
+#[test]
 fn debugger_keys_step_and_pin_disassembly() {
     let mut app = test_app();
     app.open_debugger();

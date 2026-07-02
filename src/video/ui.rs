@@ -278,6 +278,9 @@ impl Default for DebuggerPanel {
 pub struct FrameAnalyzerPanel {
     pub selected_vpos: u16,
     pub selected_hpos: u16,
+    /// Draw the rendered frame under the DMA heatmap so bus activity can
+    /// be correlated spatially with the picture.
+    pub show_underlay: bool,
 }
 
 impl FrameAnalyzerPanel {
@@ -285,6 +288,7 @@ impl FrameAnalyzerPanel {
         Self {
             selected_vpos: 0x2C,
             selected_hpos: 0x28,
+            show_underlay: false,
         }
     }
 }
@@ -385,6 +389,9 @@ pub fn panel_control_at(panel: &Panel, pos: (i32, i32)) -> Option<UiControl> {
                     return Some(control);
                 }
             }
+            if analyzer_underlay_rect(rect).contains(pos) {
+                return Some(UiControl::AnalyzerUnderlay);
+            }
         }
         Panel::Launcher(state) => {
             if let Some(control) = launcher_control_at(rect, state, pos) {
@@ -452,6 +459,9 @@ pub enum UiControl {
         y: u16,
         scanline: bool,
     },
+    /// Frame analyzer: toggle the rendered-frame picture underlay beneath
+    /// the DMA heatmap.
+    AnalyzerUnderlay,
     /// Configuration screen: pick a machine model.
     LauncherModel(MachineModel),
     /// Configuration screen: switch the category tab.
@@ -738,6 +748,20 @@ fn analyzer_button_rects(rect: Rect) -> [(UiControl, Rect); 2] {
     ]
 }
 
+/// Label of the picture-underlay checkbox on the analyzer's button row.
+const ANALYZER_UNDERLAY_LABEL: &str = "Picture underlay";
+
+/// Hit/draw rect of the picture-underlay checkbox: a 12x12 tick box plus
+/// its label, sitting on the button row right of the Frame button.
+fn analyzer_underlay_rect(rect: Rect) -> Rect {
+    Rect {
+        x: rect.x + 176,
+        y: rect.y + rect.h - DEBUG_BUTTON_H - 6,
+        w: 12 + 6 + ANALYZER_UNDERLAY_LABEL.len() * font::GLYPH_W,
+        h: DEBUG_BUTTON_H,
+    }
+}
+
 fn analyzer_pick_control(rect: Rect, pos: (i32, i32)) -> Option<UiControl> {
     for (pick_rect, scanline) in [
         (analyzer_raster_rect(rect), false),
@@ -886,10 +910,21 @@ impl AnalyzerTraceView {
     }
 }
 
+/// Beam-space render of the traced frame for the analyzer's picture
+/// underlay. Row 0 is beam line `visible_start_vpos`; each colour clock
+/// spans four hi-res pixels from `display_hpos_start` (the same footprint
+/// as the heatmap's white display box), so no presentation recentring may
+/// be applied to this buffer.
+pub struct AnalyzerUnderlayView {
+    pub fb: std::rc::Rc<Vec<u32>>,
+    pub rows: usize,
+}
+
 pub struct FrameAnalyzerView {
     pub running: bool,
     pub status: String,
     pub trace: Option<AnalyzerTraceView>,
+    pub underlay: Option<AnalyzerUnderlayView>,
 }
 
 pub enum PanelViewData {
@@ -1748,13 +1783,59 @@ fn trace_y(rect: Rect, vpos: usize, rows: usize) -> usize {
     rect.y + (vpos.min(rows.saturating_sub(1)) * rect.h / rows.max(1))
 }
 
-fn draw_owner_heatmap(frame: &mut [u8], rect: Rect, trace: &AnalyzerTraceView, scale: usize) {
+/// Halve each colour channel of an RGBA pixel, keeping it opaque. Dims the
+/// picture underlay so the DMA colours drawn over it stay readable.
+fn dim_rgba(pix: u32) -> u32 {
+    ((pix >> 1) & 0x007F_7F7F) | 0xFF00_0000
+}
+
+/// Sample the picture underlay for heatmap pixel (`x`, `vpos`): `x` is the
+/// horizontal heatmap pixel (mapped at hi-res precision, four pixels per
+/// colour clock) and `vpos` the already-resolved beam line.
+fn underlay_sample(
+    underlay: &AnalyzerUnderlayView,
+    trace: &AnalyzerTraceView,
+    rect: Rect,
+    x: usize,
+    vpos: usize,
+) -> Option<u32> {
+    let hires_x = x * trace.cols * 4 / rect.w.max(1);
+    let fb_x = hires_x as i64 - i64::from(trace.display_hpos_start) * 4;
+    let fb_y = vpos as i64 - i64::from(trace.visible_start_vpos);
+    if !(0..FB_WIDTH as i64).contains(&fb_x) || !(0..underlay.rows as i64).contains(&fb_y) {
+        return None;
+    }
+    underlay
+        .fb
+        .get(fb_y as usize * FB_WIDTH + fb_x as usize)
+        .copied()
+}
+
+fn draw_owner_heatmap(
+    frame: &mut [u8],
+    rect: Rect,
+    trace: &AnalyzerTraceView,
+    underlay: Option<&AnalyzerUnderlayView>,
+    scale: usize,
+) {
     fill_rect(frame, scale_rect(rect, scale), rgba(10, 12, 14), scale);
     for y in 0..rect.h {
         let vpos = y * trace.rows / rect.h.max(1);
         for x in 0..rect.w {
             let hpos = x * trace.cols / rect.w.max(1);
-            let color = owner_color(trace.owner_code_at(vpos, hpos));
+            let code = trace.owner_code_at(vpos, hpos);
+            let mut color = owner_color(code);
+            if let Some(pix) =
+                underlay.and_then(|under| underlay_sample(under, trace, rect, x, vpos))
+            {
+                // Picture shows through idle slots; owned slots blend the
+                // owner colour over the dimmed picture so both read.
+                color = if code == b'.' {
+                    dim_rgba(pix)
+                } else {
+                    super::blend_rgba(dim_rgba(pix), color, 176)
+                };
+            }
             fill_rect(
                 frame,
                 scale_rect(
@@ -1982,10 +2063,53 @@ fn draw_owner_counters(
     }
 }
 
+/// The picture-underlay tick box on the analyzer's button row.
+fn draw_underlay_checkbox(frame: &mut [u8], rect: Rect, checked: bool, hover: bool, scale: usize) {
+    let control = analyzer_underlay_rect(rect);
+    let box_rect = Rect {
+        x: control.x,
+        y: control.y + (control.h - 12) / 2,
+        w: 12,
+        h: 12,
+    };
+    fill_rect(
+        frame,
+        scale_rect(box_rect, scale),
+        if hover { BUTTON_FACE_HOVER } else { ENTRY_BG },
+        scale,
+    );
+    draw_outline(frame, box_rect, BUTTON_EDGE_LIGHT, scale);
+    if checked {
+        fill_rect(
+            frame,
+            scale_rect(
+                Rect {
+                    x: box_rect.x + 3,
+                    y: box_rect.y + 3,
+                    w: 6,
+                    h: 6,
+                },
+                scale,
+            ),
+            PANEL_TEXT_HILIGHT,
+            scale,
+        );
+    }
+    draw_panel_text(
+        frame,
+        box_rect.x + 18,
+        control.y + (control.h - 8) / 2,
+        ANALYZER_UNDERLAY_LABEL,
+        if hover { BUTTON_TEXT } else { PANEL_TEXT },
+        1,
+        scale,
+    );
+}
+
 fn draw_frame_analyzer(
     frame: &mut [u8],
     rect: Rect,
-    _panel: &FrameAnalyzerPanel,
+    panel: &FrameAnalyzerPanel,
     view: &FrameAnalyzerView,
     hover: Option<UiControl>,
     scale: usize,
@@ -2026,6 +2150,13 @@ fn draw_frame_analyzer(
                 scale,
             );
         }
+        draw_underlay_checkbox(
+            frame,
+            rect,
+            panel.show_underlay,
+            hover == Some(UiControl::AnalyzerUnderlay),
+            scale,
+        );
         return;
     };
 
@@ -2062,7 +2193,7 @@ fn draw_frame_analyzer(
     );
 
     let raster = analyzer_raster_rect(rect);
-    draw_owner_heatmap(frame, raster, trace, scale);
+    draw_owner_heatmap(frame, raster, trace, view.underlay.as_ref(), scale);
     let counters_x = raster.x + raster.w + 16;
     draw_owner_counters(frame, counters_x, raster.y, trace, scale);
 
@@ -2164,6 +2295,13 @@ fn draw_frame_analyzer(
             scale,
         );
     }
+    draw_underlay_checkbox(
+        frame,
+        rect,
+        panel.show_underlay,
+        hover == Some(UiControl::AnalyzerUnderlay),
+        scale,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -3448,6 +3586,66 @@ mod tests {
             ui.control_at((button.x as i32 + 2, button.y as i32 + 2)),
             Some(UiControl::AnalyzerFrame)
         );
+        let underlay = analyzer_underlay_rect(rect);
+        assert_eq!(
+            ui.control_at((underlay.x as i32 + 2, underlay.y as i32 + 2)),
+            Some(UiControl::AnalyzerUnderlay)
+        );
+        // The checkbox must not overlap the transport buttons.
+        for (_, button) in analyzer_button_rects(rect) {
+            assert!(button.x + button.w <= underlay.x || underlay.x + underlay.w <= button.x);
+        }
+    }
+
+    #[test]
+    fn analyzer_underlay_sample_maps_display_box_to_framebuffer() {
+        // A trace shaped like a standard PAL frame: 312 lines of 227 cck,
+        // display box starting at the framebuffer anchor.
+        let trace = AnalyzerTraceView {
+            frame: 1,
+            seconds: 0.0,
+            rows: 312,
+            cols: 227,
+            line_cck: 227,
+            visible_start_vpos: 0x1A,
+            visible_lines: 285,
+            display_hpos_start: 0x30,
+            display_hpos_end: 0x30 + (FB_WIDTH as u32 / 4),
+            owner_cck: [0; 9],
+            blitter_busy_cck: 0,
+            blitter_starve_cck: [0; 9],
+            partial: false,
+            selected_vpos: 0,
+            selected_hpos: 0,
+            selected_owner: "idle",
+            selected_owner_code: b'.',
+            owners: vec![b'.'; 312 * 227],
+            markers: Vec::new(),
+        };
+        let mut fb = vec![0u32; FB_WIDTH * 285];
+        fb[0] = 0xFF11_2233; // beam (0x1A, 0x30): framebuffer origin
+        let underlay = AnalyzerUnderlayView {
+            fb: std::rc::Rc::new(fb),
+            rows: 285,
+        };
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            w: 448,
+            h: 246,
+        };
+        // Heatmap pixel exactly at the display box origin lands on fb[0]:
+        // the first x whose hi-res mapping reaches display_hpos_start * 4.
+        let x0 = (0..rect.w)
+            .find(|x| x * trace.cols * 4 / rect.w >= 0x30 * 4)
+            .unwrap();
+        assert_eq!(
+            underlay_sample(&underlay, &trace, rect, x0, 0x1A),
+            Some(0xFF11_2233)
+        );
+        // Left of the display box or above the visible window: no sample.
+        assert_eq!(underlay_sample(&underlay, &trace, rect, 0, 0x1A), None);
+        assert_eq!(underlay_sample(&underlay, &trace, rect, x0, 0), None);
     }
 
     #[test]
@@ -3717,7 +3915,7 @@ mod tests {
             }],
         };
 
-        draw_owner_heatmap(&mut frame, raster, &trace, scale);
+        draw_owner_heatmap(&mut frame, raster, &trace, None, scale);
 
         let pixel = |frame: &[u8], x: usize, y: usize| -> [u8; 4] {
             frame[(y * w + x) * 4..(y * w + x) * 4 + 4]
@@ -4058,6 +4256,103 @@ mod tests {
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "debugger-audio");
+
+        // Frame analyzer with the picture underlay ticked: a synthetic PAL
+        // frame trace (refresh/bitplane/copper/blitter stripes) over a
+        // gradient picture, to eyeball the beam-grid alignment of the
+        // underlay against the white display box.
+        let mut frame = vec![0u8; w * h * 4];
+        let (rows, cols) = (312usize, 227usize);
+        let mut owners = vec![b'.'; rows * cols];
+        for vpos in 0..rows {
+            for hpos in 0..cols {
+                let owner = if hpos < 4 {
+                    b'R'
+                } else if (60..260).contains(&vpos) && (0x38..0xD0).contains(&hpos) && hpos % 2 == 0
+                {
+                    b'B'
+                } else if hpos == 0x28 && vpos % 8 == 0 {
+                    b'C'
+                } else if (100..140).contains(&vpos) && (0x10..0x28).contains(&hpos) {
+                    b'L'
+                } else if (0x0D..0x11).contains(&hpos) && vpos % 2 == 0 {
+                    b'A'
+                } else {
+                    b'.'
+                };
+                owners[vpos * cols + hpos] = owner;
+            }
+        }
+        let underlay_rows = 285usize;
+        let mut under_fb = vec![0u32; FB_WIDTH * underlay_rows];
+        for (i, pix) in under_fb.iter_mut().enumerate() {
+            let (x, y) = (i % FB_WIDTH, i / FB_WIDTH);
+            // Gradient plus vertical bars so structure is visible through
+            // the dimming.
+            let bar = if (x / 64) % 2 == 0 { 96 } else { 0 };
+            *pix = rgba(
+                (x * 255 / FB_WIDTH) as u32,
+                (y * 255 / underlay_rows) as u32 / 2 + bar,
+                160,
+            );
+        }
+        let trace = AnalyzerTraceView {
+            frame: 1234,
+            seconds: 24.68,
+            rows,
+            cols,
+            line_cck: 227,
+            visible_start_vpos: 0x1A,
+            visible_lines: underlay_rows,
+            display_hpos_start: 0x30,
+            display_hpos_end: 227,
+            owner_cck: [4400, 19000, 0, 0, 1600, 900, 2400, 6200, 36000],
+            blitter_busy_cck: 3000,
+            blitter_starve_cck: [0, 400, 0, 0, 0, 0, 0, 200, 0],
+            partial: false,
+            selected_vpos: 120,
+            selected_hpos: 0x40,
+            selected_owner: "bitplane",
+            selected_owner_code: b'B',
+            owners,
+            markers: vec![AnalyzerMarker {
+                vpos: 0x40,
+                hpos: 0x28,
+                label: "copper v=064 h=040 $180=0F00".to_string(),
+            }],
+        };
+        let data = PanelViewData::FrameAnalyzer(Box::new(FrameAnalyzerView {
+            running: false,
+            status: "paused frame 1234 24.68s".to_string(),
+            trace: Some(trace),
+            underlay: Some(AnalyzerUnderlayView {
+                fb: std::rc::Rc::new(under_fb),
+                rows: underlay_rows,
+            }),
+        }));
+        let mut panel = FrameAnalyzerPanel::new();
+        panel.show_underlay = true;
+        panel.selected_vpos = 120;
+        panel.selected_hpos = 0x40;
+        let ui = UiState {
+            menu_open: false,
+            panel: Some(Panel::FrameAnalyzer(panel)),
+        };
+        draw(
+            &mut frame,
+            scale,
+            &ui,
+            Some(UiControl::AnalyzerUnderlay),
+            Some(&data),
+            false,
+            WarpSpeed::Max,
+            false,
+            false,
+            JoystickInputMode::Gamepad,
+            PixelAspect::Tv,
+        );
+        assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
+        save(&frame, "frame-analyzer");
 
         // Configuration screen: an A1200 on the Memory tab.
         let mut frame = vec![0u8; w * h * 4];
