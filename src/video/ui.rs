@@ -424,6 +424,9 @@ pub enum UiControl {
     DebugStepOut,
     DebugStepFrame,
     DebugRunTo,
+    /// Run to the start of the next scanline (end of the current line),
+    /// stopping at exact beam granularity via a one-shot beam trap.
+    DebugRunLine,
     /// Reverse-debug: step one instruction backward (reconstructed from the
     /// snapshot ring).
     DebugReverseStep,
@@ -444,6 +447,9 @@ pub enum UiControl {
     /// Break tab: toggle a chipset-register write watch at the entry
     /// address (an offset or a full $DFFxxx address).
     DebugRegToggle,
+    /// Break tab: toggle a beam trap at the entry's decimal "VPOS [HPOS]"
+    /// position (halt when the Agnus beam reaches it).
+    DebugBeamToggle,
     /// Break tab: remove all breakpoints and watchpoints.
     DebugBreaksClear,
     /// Audio tab: toggle mute for a channel (0..3 = Paula, 4 = CD audio).
@@ -462,6 +468,9 @@ pub enum UiControl {
     /// Frame analyzer: toggle the rendered-frame picture underlay beneath
     /// the DMA heatmap.
     AnalyzerUnderlay,
+    /// Frame analyzer: run until the beam reaches the selected slot
+    /// (a one-shot beam trap at the selected vpos/hpos).
+    AnalyzerRunTo,
     /// Configuration screen: pick a machine model.
     LauncherModel(MachineModel),
     /// Configuration screen: switch the category tab.
@@ -604,7 +613,7 @@ fn debug_tab_rect(rect: Rect, index: usize) -> Rect {
     }
 }
 
-fn debug_button_rects(rect: Rect) -> [(UiControl, Rect); 13] {
+fn debug_button_rects(rect: Rect) -> [(UiControl, Rect); 14] {
     let y = rect.y + rect.h - DEBUG_BUTTON_H - 6;
     // Step Over / Step Out share a second transport row just above the main
     // one; the main row is already full edge to edge.
@@ -638,6 +647,8 @@ fn debug_button_rects(rect: Rect) -> [(UiControl, Rect); 13] {
         (UiControl::DebugStepOut, button2(102, 84)),
         // Poke (Memory tab) / Set Reg (CPU tab), on the second row.
         (UiControl::DebugPoke, button2(200, 90)),
+        // Run to the end of the current scanline, on the second row.
+        (UiControl::DebugRunLine, button2(294, 56)),
     ]
 }
 
@@ -651,7 +662,7 @@ fn debug_content_top(rect: Rect) -> usize {
 pub const BREAK_TAB_HEADER_LINES: usize = 3;
 
 /// The Break tab's toggle buttons, drawn at the top of the content area.
-fn break_tab_button_rects(rect: Rect) -> [(UiControl, Rect); 4] {
+fn break_tab_button_rects(rect: Rect) -> [(UiControl, Rect); 5] {
     let y = debug_content_top(rect);
     let button = |i: usize| Rect {
         x: rect.x + 10 + i * 98,
@@ -663,7 +674,8 @@ fn break_tab_button_rects(rect: Rect) -> [(UiControl, Rect); 4] {
         (UiControl::DebugBreakToggle, button(0)),
         (UiControl::DebugWatchToggle, button(1)),
         (UiControl::DebugRegToggle, button(2)),
-        (UiControl::DebugBreaksClear, button(3)),
+        (UiControl::DebugBeamToggle, button(3)),
+        (UiControl::DebugBreaksClear, button(4)),
     ]
 }
 
@@ -724,7 +736,7 @@ fn analyzer_scanline_rect(rect: Rect) -> Rect {
     }
 }
 
-fn analyzer_button_rects(rect: Rect) -> [(UiControl, Rect); 2] {
+fn analyzer_button_rects(rect: Rect) -> [(UiControl, Rect); 3] {
     let y = rect.y + rect.h - DEBUG_BUTTON_H - 6;
     [
         (
@@ -745,6 +757,15 @@ fn analyzer_button_rects(rect: Rect) -> [(UiControl, Rect); 2] {
                 h: DEBUG_BUTTON_H,
             },
         ),
+        (
+            UiControl::AnalyzerRunTo,
+            Rect {
+                x: rect.x + 166,
+                y,
+                w: 76,
+                h: DEBUG_BUTTON_H,
+            },
+        ),
     ]
 }
 
@@ -752,10 +773,10 @@ fn analyzer_button_rects(rect: Rect) -> [(UiControl, Rect); 2] {
 const ANALYZER_UNDERLAY_LABEL: &str = "Picture underlay";
 
 /// Hit/draw rect of the picture-underlay checkbox: a 12x12 tick box plus
-/// its label, sitting on the button row right of the Frame button.
+/// its label, sitting on the button row right of the To slot button.
 fn analyzer_underlay_rect(rect: Rect) -> Rect {
     Rect {
-        x: rect.x + 176,
+        x: rect.x + 258,
         y: rect.y + rect.h - DEBUG_BUTTON_H - 6,
         w: 12 + 6 + ANALYZER_UNDERLAY_LABEL.len() * font::GLYPH_W,
         h: DEBUG_BUTTON_H,
@@ -1346,9 +1367,14 @@ fn draw_debugger(
                 UiControl::DebugBreakToggle => "Break +/-",
                 UiControl::DebugWatchToggle => "Watch +/-",
                 UiControl::DebugRegToggle => "Reg +/-",
+                UiControl::DebugBeamToggle => "Beam +/-",
                 _ => "Clear all",
             };
-            let enabled = control == UiControl::DebugBreaksClear || panel.entry_addr().is_some();
+            let enabled = match control {
+                UiControl::DebugBreaksClear => true,
+                UiControl::DebugBeamToggle => parse_beam_spec(&panel.entry).is_some(),
+                _ => panel.entry_addr().is_some(),
+            };
             draw_text_button(
                 frame,
                 button_rect,
@@ -1422,6 +1448,7 @@ fn draw_debugger(
                     UiControl::DebugStepOut => "Step Out",
                     UiControl::DebugStepFrame => "Frame",
                     UiControl::DebugRunTo => "Run to $",
+                    UiControl::DebugRunLine => "Line",
                     UiControl::DebugReverseStep => "< Step",
                     UiControl::DebugReverseFrame => "< Frame",
                     UiControl::DebugReverseRun => "< Run",
@@ -2139,7 +2166,8 @@ fn draw_frame_analyzer(
             let label = match control {
                 UiControl::AnalyzerRun if view.running => "Pause",
                 UiControl::AnalyzerRun => "Run",
-                _ => "Frame",
+                UiControl::AnalyzerFrame => "Frame",
+                _ => "To slot",
             };
             draw_text_button(
                 frame,
@@ -2284,7 +2312,8 @@ fn draw_frame_analyzer(
         let label = match control {
             UiControl::AnalyzerRun if view.running => "Pause",
             UiControl::AnalyzerRun => "Run",
-            _ => "Frame",
+            UiControl::AnalyzerFrame => "Frame",
+            _ => "To slot",
         };
         draw_text_button(
             frame,
@@ -3335,6 +3364,22 @@ pub fn parse_break_spec(entry: &str) -> Option<(u32, Option<BreakCond>, u32)> {
         _ => return None,
     };
     Some((addr, cond, ignore))
+}
+
+/// Parse the Break tab's entry as a beam-trap position: decimal
+/// "VPOS" or "VPOS HPOS", matching the beam coordinates the analyzer and
+/// Chipset tab display. `hpos` omitted means the start of the line.
+pub fn parse_beam_spec(entry: &str) -> Option<(u16, Option<u16>)> {
+    let mut tokens = entry.split_whitespace();
+    let vpos = tokens.next()?.parse::<u16>().ok()?;
+    let hpos = match tokens.next() {
+        Some(token) => Some(token.parse::<u16>().ok()?),
+        None => None,
+    };
+    if tokens.next().is_some() {
+        return None;
+    }
+    Some((vpos, hpos))
 }
 
 /// Parse a condition operand: a register name, `M<hex>` for a memory word, or a

@@ -90,6 +90,14 @@ On the Break tab, type an address into the `$` box and toggle any of:
 - **Reg** -- a chipset-register write watch. `96` and `DFF096` both mean
   DMACON. The machine stops on *every* write, CPU or Copper, and reports
   the writer and beam position.
+- **Beam** -- a beam trap: the machine stops when the Agnus beam reaches a
+  position. Unlike the other boxes it takes *decimal* `VPOS [HPOS]`
+  (matching the `v=`/`h=` coordinates the Chipset tab and Frame Analyzer
+  display); `HPOS` omitted means the start of the line. The check rides
+  the beam advance itself, so it fires at exact colour-clock granularity
+  and even while the CPU sits in `STOP`. A persistent beam trap re-fires
+  every frame, which makes it a raster-line single-step: resume, and the
+  machine stops at the same beam position of the next frame.
 
 **Clear all** removes everything. Breakpoints and watchpoints stay armed
 when the window is closed: a hit pauses the machine, reopens the debugger
@@ -127,15 +135,16 @@ bit `$4000` set, after ten earlier qualifying passes.
 | Step Over | `O` | Run a BSR/JSR/TRAP callee to completion, stopping after the call |
 | Step Out | `U` | Run until the current subroutine returns to its caller |
 | Frame | `F` | Run to the next video frame and re-render the display |
+| Line | `L` | Run to the start of the next scanline (a one-shot beam trap) |
 | Run to `$` | -- | Run until the PC reaches the address in the box |
 | &lt; Frame | -- | Step one video frame *backward* |
 | &lt; Step | -- | Step one instruction *backward* (see [](reverse)) |
 | &lt; Run | -- | Run *backward* to the previous breakpoint hit |
 
-The `R`/`S`/`O`/`U`/`F` keys work whenever the box is unfocused (while it is
-focused they are text input). **Run to $**, **Step Over**, and **Step Out**
-are bounded by an instruction budget so a never-returning call or
-never-reached address cannot wedge the UI; if the budget runs out, the
+The `R`/`S`/`O`/`U`/`F`/`L` keys work whenever the box is unfocused (while it
+is focused they are text input). **Run to $**, **Step Over**, **Step Out**,
+and **Line** are bounded by an instruction budget so a never-returning call
+or never-reached address cannot wedge the UI; if the budget runs out, the
 debugger stays paused. Step Out detects the return by the stack pointer
 rising past its value at entry, so nested calls and interrupt handlers do
 not end it early. If the CPU is sitting in a `STOP`, stepping fast-forwards
@@ -193,11 +202,19 @@ The pane has the same transport rhythm as the debugger:
 |---|---|---|
 | Run / Pause | `R` | Resume or pause while continuing to collect frame traces |
 | Frame | `F` | Run exactly one frame and show the completed trace |
+| To slot | `T` | Run until the beam reaches the selected slot |
 | Picture underlay | `U` | Draw the rendered frame beneath the heatmap |
 
 Opening the pane starts a partial trace immediately; pressing **Frame**
 captures a clean full frame. Closing it restores the run/pause state selected
 inside the pane and disables the tracing hot path.
+
+Click a slot (or nudge the selection with the cursor keys) and press
+**To slot** to run the machine until the beam reaches exactly that colour
+clock -- a one-shot beam trap, reported like any other debugger stop. It
+answers "what is the machine doing when the beam is *here*" directly from
+the picture: select the glitch, run to it, and inspect the CPU/Copper
+state at that moment.
 
 Ticking **Picture underlay** draws the traced frame's rendered picture under
 the heatmap, dimmed so the DMA colours stay readable: the picture shows

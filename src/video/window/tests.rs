@@ -2444,6 +2444,57 @@ fn frame_analyzer_underlay_toggles_and_renders() {
 }
 
 #[test]
+fn beam_trap_gui_toggle_line_step_and_run_to_slot() {
+    let mut app = test_app();
+    app.open_debugger();
+
+    // Break tab: a decimal "VPOS HPOS" entry toggles a beam trap.
+    if let Some(panel) = app.debugger_panel.as_mut() {
+        panel.tab = super::ui::DebugTab::Break;
+        panel.entry = "100 40".to_string();
+    }
+    app.activate_ui_control(UiControl::DebugBeamToggle);
+    assert_eq!(
+        app.emu.bus().ui_beam_traps(),
+        &[crate::bus::BeamTrap {
+            vpos: 100,
+            hpos: Some(40),
+            once: false,
+        }]
+    );
+    app.activate_ui_control(UiControl::DebugBeamToggle);
+    assert!(app.emu.bus().ui_beam_traps().is_empty());
+
+    // Line: run to the start of the next scanline. The stop reason
+    // reports the exact beam position of the one-shot trap.
+    let vpos_before = app.emu.bus().agnus.vpos;
+    let frame_lines = app.emu.bus().agnus.current_frame_lines();
+    app.activate_ui_control(UiControl::DebugRunLine);
+    let expected = (vpos_before + 1) % frame_lines;
+    assert_eq!(
+        app.last_debug_stop.as_deref(),
+        Some(format!("Beam trap at v{expected} h0").as_str())
+    );
+    assert!(app.emu.bus().ui_beam_traps().is_empty());
+
+    // Analyzer: To slot runs until the beam reaches the selected slot.
+    app.open_frame_analyzer();
+    let (target_v, target_h) = {
+        let bus = app.emu.bus();
+        ((((bus.agnus.vpos + 2) % frame_lines) as u16), 30u16)
+    };
+    if let Some(panel) = app.frame_analyzer_panel.as_mut() {
+        panel.selected_vpos = target_v;
+        panel.selected_hpos = target_h;
+    }
+    app.activate_ui_control(UiControl::AnalyzerRunTo);
+    assert_eq!(
+        app.last_debug_stop.as_deref(),
+        Some(format!("Beam trap at v{target_v} h{target_h}").as_str())
+    );
+}
+
+#[test]
 fn debugger_keys_step_and_pin_disassembly() {
     let mut app = test_app();
     app.open_debugger();

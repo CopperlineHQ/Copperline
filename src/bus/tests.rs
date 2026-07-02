@@ -9302,3 +9302,60 @@ fn render_input_refill_from_bus_matches_fresh_snapshot() {
         "frame must contain non-uniform pixels for the comparison to mean anything"
     );
 }
+
+#[test]
+fn beam_trap_fires_at_exact_position_and_one_shot_disarms() {
+    let mut bus = empty_bus();
+    // From power-on the beam sits at (0, 0). A one-shot trap two lines
+    // and a few clocks ahead fires only once the beam crosses it.
+    bus.ui_arm_beam_trap_once(2, Some(10));
+    assert!(bus.take_ui_beam_hit().is_none());
+    bus.advance_devices(COLORCLOCKS_PER_LINE * 2 + 9); // beam just short of (2, 10)
+    assert!(bus.take_ui_beam_hit().is_none());
+    bus.advance_devices(1);
+    assert_eq!(bus.take_ui_beam_hit(), Some((2, 10)));
+    // One-shot: disarmed by the hit; a later frame does not re-fire it.
+    assert!(bus.ui_beam_traps().is_empty());
+    let frame_lines = bus.agnus.current_frame_lines();
+    bus.advance_devices(COLORCLOCKS_PER_LINE * (frame_lines + 3));
+    assert!(bus.take_ui_beam_hit().is_none());
+}
+
+#[test]
+fn beam_trap_line_start_persistent_refires_each_frame() {
+    let mut bus = empty_bus();
+    // hpos None = the first colour clock of the line.
+    assert!(bus.ui_toggle_beam_trap(1, None));
+    bus.advance_devices(COLORCLOCKS_PER_LINE);
+    assert_eq!(bus.take_ui_beam_hit(), Some((1, 0)));
+    // Persistent: still armed, and it fires again a frame later.
+    assert_eq!(bus.ui_beam_traps().len(), 1);
+    let frame_lines = bus.agnus.current_frame_lines();
+    bus.advance_devices(COLORCLOCKS_PER_LINE * (frame_lines + 1));
+    assert_eq!(bus.take_ui_beam_hit(), Some((1, 0)));
+    // Toggling the same position removes it.
+    assert!(!bus.ui_toggle_beam_trap(1, None));
+    assert!(bus.ui_beam_traps().is_empty());
+}
+
+#[test]
+fn beam_trap_beyond_scan_does_not_fire_at_frame_wrap() {
+    let mut bus = empty_bus();
+    let frame_lines = bus.agnus.current_frame_lines();
+    // A trap on a line the scan never reaches must not fire spuriously
+    // when the beam order wraps at the end of the frame.
+    assert!(bus.ui_toggle_beam_trap((frame_lines + 10).min(u32::from(u16::MAX)) as u16, None));
+    bus.advance_devices(COLORCLOCKS_PER_LINE * (frame_lines + 5));
+    assert!(bus.take_ui_beam_hit().is_none());
+}
+
+#[test]
+fn beam_trap_hit_survives_beam_only_advance_without_cpu() {
+    // The check lives on the beam advance itself, so a hit lands even
+    // when no CPU instruction retires (the CPU sitting in STOP while
+    // the chipset free-runs).
+    let mut bus = empty_bus();
+    bus.ui_arm_beam_trap_once(0, Some(100));
+    bus.advance_devices(COLORCLOCKS_PER_LINE * 3);
+    assert_eq!(bus.take_ui_beam_hit(), Some((0, 100)));
+}

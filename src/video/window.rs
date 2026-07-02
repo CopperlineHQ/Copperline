@@ -2573,6 +2573,7 @@ impl App {
                 self.activate_tool_control(ToolPanelKind::Debugger, control)
             }
             UiControl::DebugRunTo => self.activate_tool_control(ToolPanelKind::Debugger, control),
+            UiControl::DebugRunLine => self.activate_tool_control(ToolPanelKind::Debugger, control),
             UiControl::DebugReverseStep => {
                 self.activate_tool_control(ToolPanelKind::Debugger, control)
             }
@@ -2599,6 +2600,9 @@ impl App {
             UiControl::DebugRegToggle => {
                 self.activate_tool_control(ToolPanelKind::Debugger, control)
             }
+            UiControl::DebugBeamToggle => {
+                self.activate_tool_control(ToolPanelKind::Debugger, control)
+            }
             UiControl::DebugBreaksClear => {
                 self.activate_tool_control(ToolPanelKind::Debugger, control)
             }
@@ -2612,6 +2616,9 @@ impl App {
                 self.activate_tool_control(ToolPanelKind::FrameAnalyzer, control)
             }
             UiControl::AnalyzerUnderlay => {
+                self.activate_tool_control(ToolPanelKind::FrameAnalyzer, control)
+            }
+            UiControl::AnalyzerRunTo => {
                 self.activate_tool_control(ToolPanelKind::FrameAnalyzer, control)
             }
             UiControl::AnalyzerPick { x, y, scanline } => {
@@ -2724,6 +2731,7 @@ impl App {
             (ToolPanelKind::Debugger, UiControl::DebugStepOut) => self.debugger_step_out(),
             (ToolPanelKind::Debugger, UiControl::DebugStepFrame) => self.debugger_step_frame(),
             (ToolPanelKind::Debugger, UiControl::DebugRunTo) => self.debugger_run_to(),
+            (ToolPanelKind::Debugger, UiControl::DebugRunLine) => self.debugger_run_to_line_end(),
             (ToolPanelKind::Debugger, UiControl::DebugReverseStep) => self.debugger_reverse_step(),
             (ToolPanelKind::Debugger, UiControl::DebugReverseFrame) => {
                 self.debugger_reverse_frame()
@@ -2747,6 +2755,9 @@ impl App {
             }
             (ToolPanelKind::Debugger, UiControl::DebugRegToggle) => {
                 self.debugger_toggle_reg_watch()
+            }
+            (ToolPanelKind::Debugger, UiControl::DebugBeamToggle) => {
+                self.debugger_toggle_beam_trap()
             }
             (ToolPanelKind::Debugger, UiControl::DebugBreaksClear) => {
                 self.emu.machine.ui_breaks_clear();
@@ -2778,6 +2789,9 @@ impl App {
             }
             (ToolPanelKind::FrameAnalyzer, UiControl::AnalyzerUnderlay) => {
                 self.frame_analyzer_toggle_underlay()
+            }
+            (ToolPanelKind::FrameAnalyzer, UiControl::AnalyzerRunTo) => {
+                self.frame_analyzer_run_to_slot()
             }
             _ => {}
         }
@@ -2919,6 +2933,7 @@ impl App {
             KeyCode::KeyO => Some(UiControl::DebugStepOver),
             KeyCode::KeyU => Some(UiControl::DebugStepOut),
             KeyCode::KeyF => Some(UiControl::DebugStepFrame),
+            KeyCode::KeyL => Some(UiControl::DebugRunLine),
             KeyCode::KeyR => Some(UiControl::DebugRun),
             _ => None,
         };
@@ -2937,6 +2952,7 @@ impl App {
             KeyCode::KeyF => Some(UiControl::AnalyzerFrame),
             KeyCode::KeyR => Some(UiControl::AnalyzerRun),
             KeyCode::KeyU => Some(UiControl::AnalyzerUnderlay),
+            KeyCode::KeyT => Some(UiControl::AnalyzerRunTo),
             _ => None,
         };
         if let Some(control) = control {
@@ -3918,6 +3934,73 @@ impl App {
         self.finish_render_for_current_frame();
     }
 
+    /// Run to the start of the next scanline (the end of the current one),
+    /// stopping at exact beam granularity via a one-shot beam trap. The
+    /// raster analogue of Step: walk a Copper effect line by line.
+    fn debugger_run_to_line_end(&mut self) {
+        const RUN_TO_LINE_BUDGET: usize = 2_000_000;
+        let (vpos, frame_lines) = {
+            let bus = self.emu.bus();
+            (bus.agnus.vpos, bus.agnus.current_frame_lines())
+        };
+        let target = ((vpos + 1) % frame_lines.max(1)).min(u32::from(u16::MAX)) as u16;
+        self.run_to_beam_target(target, None, RUN_TO_LINE_BUDGET, "Line end");
+    }
+
+    /// Toggle a beam trap from the entry box ("VPOS [HPOS]", decimal).
+    fn debugger_toggle_beam_trap(&mut self) {
+        let spec = self
+            .debugger_panel
+            .as_ref()
+            .and_then(|panel| ui::parse_beam_spec(&panel.entry));
+        let Some((vpos, hpos)) = spec else {
+            self.show_osd("Beam: type \"VPOS [HPOS]\" (decimal) first");
+            return;
+        };
+        let set = self.emu.bus_mut().ui_toggle_beam_trap(vpos, hpos);
+        let mut msg = format!("Beam trap v{vpos}");
+        if let Some(hpos) = hpos {
+            msg.push_str(&format!(" h{hpos}"));
+        }
+        msg.push_str(if set { " set" } else { " removed" });
+        self.show_osd(msg);
+    }
+
+    /// Run until the beam reaches the analyzer's selected slot, stopping
+    /// at exact colour-clock granularity via a one-shot beam trap.
+    fn frame_analyzer_run_to_slot(&mut self) {
+        const RUN_TO_SLOT_BUDGET: usize = 2_000_000;
+        let Some((vpos, hpos)) = self
+            .frame_analyzer_panel
+            .as_ref()
+            .map(|panel| (panel.selected_vpos, panel.selected_hpos))
+        else {
+            return;
+        };
+        self.emu.bus_mut().set_frame_analyzer_enabled(true);
+        self.run_to_beam_target(vpos, Some(hpos), RUN_TO_SLOT_BUDGET, "Beam slot");
+    }
+
+    /// Shared run-to-beam-position transport: pause bookkeeping, the
+    /// bounded run, stop reporting, and the display refresh.
+    fn run_to_beam_target(&mut self, vpos: u16, hpos: Option<u16>, budget: usize, what: &str) {
+        self.paused = true;
+        self.sync_live_audio_suspension();
+        self.last_debug_stop = None;
+        match self.emu.debug_run_to_beam(vpos, hpos, budget) {
+            Ok(true) => {
+                self.surface_debug_stop();
+            }
+            Ok(false) => self.show_osd(format!("{what} not reached (budget)")),
+            Err(e) => {
+                error!("debugger run-to-beam halted: {e:?}");
+                self.cpu_halted = true;
+                self.sync_live_audio_suspension();
+            }
+        }
+        self.finish_render_for_current_frame();
+    }
+
     /// Step one instruction backward, reconstructed from the snapshot ring.
     fn debugger_reverse_step(&mut self) {
         use crate::timetravel::ReverseOutcome;
@@ -4553,6 +4636,9 @@ impl App {
                 lines.push(ui::DbgLine::plain(
                     "  ops EQ NE LT GT LE GE AND; operand Dn An PC SR Mhex hex",
                 ));
+                lines.push(ui::DbgLine::plain(
+                    "Beam takes decimal \"VPOS [HPOS]\" (stop when the beam gets there).",
+                ));
                 lines.push(ui::DbgLine::plain(""));
                 let breaks = self.emu.machine.ui_breaks();
                 lines.push(ui::DbgLine::plain("Breakpoints:"));
@@ -4591,6 +4677,24 @@ impl App {
                         "  {} (${off:03X})",
                         crate::debugger::custom_reg_name(*off)
                     )));
+                }
+                lines.push(ui::DbgLine::plain(""));
+                lines.push(ui::DbgLine::plain("Beam traps (stop at beam position):"));
+                let beam_traps = bus.ui_beam_traps();
+                if beam_traps.is_empty() {
+                    lines.push(ui::DbgLine::plain("  (none)"));
+                }
+                for trap in beam_traps {
+                    let mut text = format!("  v{}", trap.vpos);
+                    if let Some(hpos) = trap.hpos {
+                        text.push_str(&format!(" h{hpos}"));
+                    } else {
+                        text.push_str(" (line start)");
+                    }
+                    if trap.once {
+                        text.push_str("  once");
+                    }
+                    lines.push(ui::DbgLine::plain(text));
                 }
             }
         }

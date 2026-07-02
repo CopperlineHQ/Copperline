@@ -74,6 +74,7 @@ pub struct UiWatch {
 }
 
 /// Why the interactive debugger stopped the machine.
+#[derive(Debug)]
 pub enum DebugStop {
     /// The next instruction's address matches a breakpoint (it has not
     /// executed yet).
@@ -94,6 +95,8 @@ pub enum DebugStop {
         vpos: u16,
         hpos: u16,
     },
+    /// The Agnus beam crossed a beam trap's position.
+    Beam { vpos: u16, hpos: u16 },
 }
 
 impl DebugStop {
@@ -117,6 +120,7 @@ impl DebugStop {
                 "{} = {value:04X} ({source} write, v{vpos} h{hpos})",
                 custom_reg_name(*off)
             ),
+            DebugStop::Beam { vpos, hpos } => format!("Beam trap at v{vpos} h{hpos}"),
         }
     }
 }

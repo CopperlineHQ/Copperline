@@ -171,6 +171,7 @@ impl Bus {
     pub(super) fn advance_beam(&mut self, cck: u32) -> AgnusTick {
         let old_vpos = self.agnus.vpos;
         let old_hpos = self.agnus.hpos;
+        let old_frame_lines = self.agnus.current_frame_lines();
         let old_emulated_cck = self.emulated_cck;
         self.emulated_cck = self.emulated_cck.saturating_add(cck as u64);
         self.coper_cpu_irq_delay_cck = self.coper_cpu_irq_delay_cck.saturating_sub(cck);
@@ -181,6 +182,9 @@ impl Bus {
             }
         }
         let tick = self.agnus.advance_by_cck(cck);
+        if !self.ui_beam_traps.is_empty() {
+            self.check_ui_beam_traps((old_vpos, old_hpos), old_frame_lines, tick.new_frames);
+        }
         if tick.new_frames == 0 && tick.new_lines == 0 {
             self.capture_sprite_dma_words_if_due(old_vpos, old_hpos, self.agnus.hpos);
             self.capture_bitplane_dma_words_if_due(

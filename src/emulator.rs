@@ -1185,6 +1185,32 @@ impl Emulator {
         Ok(false)
     }
 
+    /// Run until the Agnus beam reaches (`vpos`, `hpos`) -- `hpos: None`
+    /// means the first colour clock of that line -- up to
+    /// `max_instructions`. Arms a one-shot beam trap, so the stop lands at
+    /// exact beam granularity (including while the CPU sits in STOP); an
+    /// unrelated breakpoint/watch hit on the way ends the run with that
+    /// stop pending instead. Returns true when a debug stop is pending
+    /// (the beam trap or an earlier hit), false when the budget ran out.
+    pub fn debug_run_to_beam(
+        &mut self,
+        vpos: u16,
+        hpos: Option<u16>,
+        max_instructions: usize,
+    ) -> Result<bool> {
+        self.bus_mut().ui_arm_beam_trap_once(vpos, hpos);
+        for _ in 0..max_instructions {
+            self.debug_step_one_with_idle()?;
+            if self.machine.ui_debug_stop_pending() {
+                return Ok(true);
+            }
+        }
+        // Budget exhausted without reaching the position: disarm the
+        // one-shot so it cannot fire out of nowhere later.
+        self.bus_mut().ui_disarm_beam_trap_once();
+        Ok(false)
+    }
+
     /// Step over the instruction at PC. When it is a call that returns to the
     /// following instruction (BSR/JSR/TRAP), run until that return address (or
     /// an earlier breakpoint/watch hit, or the `max_instructions` budget if the
@@ -2312,6 +2338,45 @@ mod tests {
         assert!(stopped, "conditional breakpoint did not fire");
         assert_eq!(emu.machine.pc(), 0x00F8_0020);
         assert!(emu.machine.take_ui_debug_stop().is_some());
+    }
+
+    #[test]
+    fn run_to_beam_stops_at_the_position_with_a_beam_stop() {
+        use crate::debugger::DebugStop;
+        let mut emu = emulator_with_call_program();
+        let start_vpos = emu.bus().agnus.vpos;
+        let target = (start_vpos + 3).min(u32::from(u16::MAX)) as u16;
+        let reached = emu.debug_run_to_beam(target, Some(40), 100_000).unwrap();
+        assert!(reached, "beam target three lines ahead must be reachable");
+        match emu.machine.take_ui_debug_stop() {
+            Some(DebugStop::Beam { vpos, hpos }) => {
+                assert_eq!(vpos, target);
+                assert_eq!(hpos, 40);
+            }
+            other => panic!("expected a beam stop, got {other:?}"),
+        }
+        // The machine stopped at (or just past) the trap position, and the
+        // one-shot trap is gone.
+        let bus = emu.bus();
+        assert!(
+            (bus.agnus.vpos, bus.agnus.hpos) >= (u32::from(target), 40),
+            "beam should be at or past the target, is ({}, {})",
+            bus.agnus.vpos,
+            bus.agnus.hpos
+        );
+        assert!(bus.ui_beam_traps().is_empty());
+    }
+
+    #[test]
+    fn run_to_beam_budget_exhaustion_disarms_the_one_shot() {
+        let mut emu = emulator_with_call_program();
+        // A tiny budget cannot reach a position a full frame away.
+        let reached = emu.debug_run_to_beam(200, None, 4).unwrap();
+        assert!(!reached);
+        assert!(
+            emu.bus().ui_beam_traps().is_empty(),
+            "an unreached run-to trap must not stay armed"
+        );
     }
 
     #[test]

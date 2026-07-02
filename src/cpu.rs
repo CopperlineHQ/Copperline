@@ -1122,6 +1122,7 @@ impl M68kMachine {
     pub fn ui_breaks_clear(&mut self) {
         self.ui_breaks.clear();
         self.bus.bus.set_ui_reg_watches(&[]);
+        self.bus.bus.ui_clear_beam_traps();
         self.ui_stop = None;
     }
 
@@ -1140,8 +1141,9 @@ impl M68kMachine {
         self.ui_stop.is_some()
     }
 
-    /// Promote a custom-register watch hit recorded by the bus write
-    /// path into the machine-level stop reason.
+    /// Promote a custom-register watch or beam-trap hit recorded by the
+    /// bus (which sees every writer and every colour clock, including
+    /// while the CPU sits in STOP) into the machine-level stop reason.
     fn ui_promote_reg_hit(&mut self) {
         if self.ui_stop.is_some() {
             return;
@@ -1154,6 +1156,10 @@ impl M68kMachine {
                 vpos: hit.vpos,
                 hpos: hit.hpos,
             });
+            return;
+        }
+        if let Some((vpos, hpos)) = self.bus.bus.take_ui_beam_hit() {
+            self.ui_stop = Some(crate::debugger::DebugStop::Beam { vpos, hpos });
         }
     }
 
