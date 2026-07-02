@@ -72,7 +72,7 @@ impl CpuCore {
             // Auto-take all trap exceptions, extract cycles
             use crate::core::types::InternalStepResult;
             let cycles = match result {
-                InternalStepResult::Ok { cycles } => self.scale_cycles_for_cpu_type(cycles),
+                InternalStepResult::Ok { cycles } => self.finalize_cycles(cycles),
                 InternalStepResult::AlineTrap { .. } => self.take_aline_exception(bus),
                 InternalStepResult::FlineTrap { .. } => self.take_fline_exception(bus),
                 InternalStepResult::TrapInstruction { trap_num } => {
@@ -145,7 +145,7 @@ impl CpuCore {
 
         let res = match result {
             InternalStepResult::Ok { cycles } => StepResult::Ok {
-                cycles: self.scale_cycles_for_cpu_type(cycles),
+                cycles: self.finalize_cycles(cycles),
             },
             InternalStepResult::AlineTrap { opcode } => StepResult::AlineTrap { opcode },
             InternalStepResult::FlineTrap { opcode } => StepResult::FlineTrap { opcode },
@@ -237,7 +237,7 @@ impl CpuCore {
 
         // Handle trap results via callbacks, fallback to exception if not handled
         let cycles = match result {
-            InternalStepResult::Ok { cycles } => self.scale_cycles_for_cpu_type(cycles),
+            InternalStepResult::Ok { cycles } => self.finalize_cycles(cycles),
             InternalStepResult::AlineTrap { opcode } => {
                 if !handler.handle_aline(self, bus, opcode) {
                     self.take_aline_exception(bus)

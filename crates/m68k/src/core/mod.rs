@@ -14,4 +14,5 @@ pub mod memory;
 pub mod registers;
 pub mod status;
 pub mod timing;
+pub mod timing_060;
 pub mod types;
