@@ -304,6 +304,12 @@ enum LineBlitPhase {
     Done,
 }
 
+impl Default for Blitter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Blitter {
     pub fn new() -> Self {
         Self {

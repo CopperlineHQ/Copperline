@@ -4,11 +4,16 @@
 //! in fixed-size instruction slices, advancing the raster after each
 //! slice and raising chipset/CIA/Paula interrupts.
 
-use crate::audio::{audio_profile_enabled, AudioRuntimeStatus};
+use crate::audio::{audio_profile_enabled, AudioRuntimeStatus, AudioSink};
 use crate::bus::Bus;
-use crate::config::{CpuModel, PacingBudget};
+use crate::chipset::paula::Paula;
+use crate::config::{Config, CpuModel, PacingBudget};
 use crate::cpu;
-use anyhow::Result;
+use crate::floppy::FloppyController;
+use crate::memory::Memory;
+use crate::serial::StdoutSink;
+use anyhow::{anyhow, Result};
+use log::{info, warn};
 use std::time::{Duration, Instant};
 
 const INSTRUCTIONS_PER_SLICE: usize = 32_000;
@@ -1591,6 +1596,211 @@ fn realtime_catchup_limit(live_output_lead_seconds: f64) -> Duration {
     } else {
         MAX_REALTIME_CATCHUP
     }
+}
+
+/// Build a fully-configured [`Emulator`] from a validated [`Config`]: the
+/// Zorro autoconfig chain, RAM/ROM (and the A1000 bootstrap special case),
+/// optional SCSI/IDE/CD controllers, floppy drives, Paula (with the supplied
+/// audio sink), and the CPU with its caches and machine descriptor. Shared by
+/// the command-line boot path in `main` and the configuration screen's Run
+/// button, so a machine built either way is identical. `rom_optional` allows
+/// a missing ROM file when a save state will supply the image.
+pub fn build_machine(
+    cfg: &Config,
+    audio: Box<dyn AudioSink>,
+    paced: bool,
+    rom_optional: bool,
+) -> Result<Emulator> {
+    let mut zorro = cfg.build_zorro_chain()?;
+    // Functional Zorro-chain boards. Each board's autoconfig identity goes on
+    // the chain (mapping its window to a device slot) while the device object
+    // is attached to the bus after it is built; the slot index ties them.
+    let mut devices: Vec<crate::zorro_device::BoardDevice> = Vec::new();
+    if cfg.scsi.enabled() {
+        let rom_path = cfg.scsi.rom.as_ref().expect("config validated [scsi] rom");
+        let rom = crate::a2091::A2091::load_rom(rom_path, cfg.scsi.rom_odd.as_deref())?;
+        let mut board = crate::a2091::A2091::new(rom)?;
+        for (unit, drive) in cfg.scsi.units.iter().enumerate() {
+            let Some(drive) = drive else { continue };
+            board.attach_drive(
+                unit,
+                crate::scsi::ScsiDisk::open(&drive.path, unit, drive.volume_name.as_deref())?,
+            );
+            info!("scsi: unit {unit} {}", drive.path.display());
+        }
+        let slot = devices.len();
+        zorro.add_board(crate::zorro::BoardSpec::a2091(slot))?;
+        info!(
+            "scsi: A2091 controller on the Zorro chain (slot {slot}), ROM {}",
+            rom_path.display()
+        );
+        devices.push(crate::zorro_device::BoardDevice::A2091(board));
+    }
+    // WASM plugin boards: assign each a device slot, put its autoconfig
+    // identity on the chain, and instantiate the module.
+    for wb in &cfg.wasm_boards {
+        let slot = devices.len();
+        let mut spec = wb.spec.clone();
+        spec.backing = crate::zorro::BoardBacking::Device(slot);
+        zorro.add_board(spec)?;
+        let board = crate::wasmboard::WasmBoard::from_file(&wb.wasm_path, wb.manifest.clone())?;
+        info!(
+            "zorro: WASM plugin {:?} on the Zorro chain (slot {slot}), module {}",
+            wb.manifest.name,
+            wb.wasm_path.display()
+        );
+        devices.push(crate::zorro_device::BoardDevice::Wasm(board));
+    }
+    // A2065 Ethernet board (in-tree LANCE NIC): networking is non-deterministic.
+    if let Some(net_config) = cfg.a2065_net {
+        let slot = devices.len();
+        zorro.add_board(crate::zorro::BoardSpec::a2065(slot))?;
+        info!(
+            "a2065: Ethernet board on the Zorro chain (slot {slot}), net backend {net_config:?} \
+             -- networking is non-deterministic, replay/save-state reproducibility not guaranteed"
+        );
+        devices.push(crate::zorro_device::BoardDevice::A2065(
+            crate::a2065::A2065::new(net_config),
+        ));
+    }
+    // The A1000 has no Kickstart ROM: cfg.rom_path is its 64 KiB bootstrap
+    // ROM, and a 256 KiB WCS is allocated for it to load Kickstart into from
+    // the Kickstart disk in DF0.
+    let mut mem = if cfg.machine == Some(crate::config::MachineModel::A1000) {
+        Memory::load_a1000(&cfg.rom_path, cfg.chip_ram_bytes, cfg.slow_ram_bytes, zorro)?
+    } else if rom_optional && !cfg.rom_path.is_file() {
+        // A save state restores the full ROM image, so a missing or sentinel
+        // ROM path (the bundled-AROS placeholder, or a Kickstart the user no
+        // longer keeps) is fine: build with a placeholder the state replaces.
+        info!(
+            "--load-state: ROM {} is unavailable; building with a placeholder \
+             ROM that the save state will replace",
+            cfg.rom_path.display()
+        );
+        Memory::placeholder(cfg.chip_ram_bytes, cfg.slow_ram_bytes, zorro)
+    } else {
+        Memory::load(&cfg.rom_path, cfg.chip_ram_bytes, cfg.slow_ram_bytes, zorro)?
+    };
+    if let Some(path) = &cfg.extended_rom_path {
+        if rom_optional && !path.is_file() {
+            // As with the main ROM above, the save state carries the extended
+            // ROM image, so a missing file here is not fatal.
+            info!(
+                "--load-state: extended ROM {} is unavailable; the save state \
+                 will supply it",
+                path.display()
+            );
+        } else {
+            let image = std::fs::read(path)
+                .map_err(|e| anyhow!("reading extended ROM {}: {e}", path.display()))?;
+            mem.attach_extended_rom(image)?;
+            info!(
+                "extended ROM: {} at {:#08X}",
+                path.display(),
+                mem.extended_rom_base
+            );
+        }
+    }
+    let mut cd_image = match &cfg.cd_image_path {
+        Some(path) => {
+            let image = crate::cdrom::CdImage::load(path)?;
+            info!("cd image: {} ({})", path.display(), image.describe());
+            Some(image)
+        }
+        None => None,
+    };
+    let mut floppy = FloppyController::from_config(&cfg.floppy)?;
+    floppy.set_connected_drives(cfg.floppy_connected);
+    let serial = Box::new(StdoutSink::new());
+    let mut paula = Paula::new(serial, audio);
+    paula
+        .drive_sounds_mut()
+        .set_enabled(cfg.audio.floppy_sounds);
+    paula
+        .drive_sounds_mut()
+        .set_volume_percent(cfg.audio.floppy_sounds_volume);
+    let mut bus = Bus::new(mem, paula, floppy);
+    bus.set_video_standard(cfg.video_standard);
+    bus.set_chipset_revisions(cfg.agnus_revision, cfg.denise_revision);
+    bus.set_rtc_present(cfg.rtc_present);
+    if let Some(id) = cfg.gate_array.gayle_id() {
+        let mut gayle = crate::gayle::Gayle::new(id);
+        if let Some(drive) = &cfg.ide.master {
+            gayle.attach_drive(
+                0,
+                crate::gayle::IdeDrive::open(&drive.path, 0, drive.volume_name.as_deref())?,
+            );
+            info!("ide: master {}", drive.path.display());
+        }
+        if let Some(drive) = &cfg.ide.slave {
+            gayle.attach_drive(
+                1,
+                crate::gayle::IdeDrive::open(&drive.path, 1, drive.volume_name.as_deref())?,
+            );
+            info!("ide: slave {}", drive.path.display());
+        }
+        bus.attach_gayle(gayle);
+    }
+    if !devices.is_empty() {
+        bus.attach_devices(devices);
+    }
+    if cfg.cd32_pad {
+        bus.input.cd32_pad_port2 = true;
+        info!("input: CD32 joypad on port 2 (serial button protocol)");
+    }
+    if cfg.akiko {
+        let mut akiko = crate::akiko::Akiko::new();
+        if let Some(path) = &cfg.cd32_nvram_path {
+            info!("akiko: NVRAM persisted to {}", path.display());
+            akiko.set_nvram_path(path.clone());
+        }
+        if let Some(image) = cd_image.take() {
+            akiko.insert_disc(image);
+            info!("akiko: CD controller at $B80000, disc mounted");
+        } else {
+            info!("akiko: CD controller at $B80000, no disc");
+        }
+        bus.attach_akiko(akiko);
+    }
+    if cfg.cdtv_cd {
+        let mut cdtv = crate::cdtv::CdtvController::new();
+        if let Some(image) = cd_image.take() {
+            if cfg.cd_insert_delay_secs > 0.0 {
+                cdtv.insert_disc_after(image, cfg.cd_insert_delay_secs);
+                info!(
+                    "cdtv: DMAC/CD controller attached, disc inserts after {:.1}s",
+                    cfg.cd_insert_delay_secs
+                );
+            } else {
+                cdtv.insert_disc(image);
+                info!("cdtv: DMAC/CD controller attached, disc mounted");
+            }
+        } else {
+            info!("cdtv: DMAC/CD controller attached, no disc");
+        }
+        bus.attach_cdtv(cdtv);
+    }
+    if cd_image.is_some() {
+        warn!("cd image configured but this machine has no CD controller; the disc is not mounted");
+    }
+    if let Some(machine) = cfg.machine {
+        info!(
+            "machine profile: {:?} (gate array {:?}, rtc {})",
+            machine, cfg.gate_array, cfg.rtc_present
+        );
+    }
+    let cpu_clocks_per_cck = crate::config::clocks_per_cck_for_mhz(cfg.cpu_clock_mhz);
+    let mut emu = Emulator::new(
+        bus,
+        cfg.cpu,
+        cfg.fpu,
+        cfg.emulation.pacing_budget,
+        cpu_clocks_per_cck,
+        paced,
+    )?;
+    emu.set_cache_emulation(cfg.cpu_icache, cfg.cpu_dcache);
+    emu.set_machine_descriptor(cfg.descriptor());
+    Ok(emu)
 }
 
 #[cfg(test)]

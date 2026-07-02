@@ -149,6 +149,8 @@ without writing a config file at all -- the machine model, chipset, CPU
 ```
 
 See [](configuration#command-line-overrides) for the full list.
+`copperline --help` lists every flag, and `copperline --version` prints
+the release version.
 
 A Kickstart 1.3 machine with no disk boots to the familiar insert-disk
 screen:

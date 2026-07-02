@@ -44,6 +44,12 @@ pub struct StdoutSink {
     buf: Vec<u8>,
 }
 
+impl Default for StdoutSink {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StdoutSink {
     pub fn new() -> Self {
         Self {

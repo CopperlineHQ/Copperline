@@ -784,7 +784,7 @@ impl Config {
     /// into a [`Config`] to build the machine and also keeps the raw view, so
     /// the configuration screen can reopen showing the running machine's
     /// settings and re-emit them on Save.
-    pub(crate) fn load_raw(path: Option<&Path>, overrides: &ConfigOverrides) -> Result<RawConfig> {
+    pub fn load_raw(path: Option<&Path>, overrides: &ConfigOverrides) -> Result<RawConfig> {
         let mut raw = match path {
             Some(p) => raw_from_path(p)?,
             None => RawConfig::default(),
@@ -954,9 +954,9 @@ impl ConfigOverrides {
 // which is order-independent.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawConfig {
+pub struct RawConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) rom: Option<String>,
+    pub rom: Option<String>,
     /// Extended ROM image (CD32 512K at $E00000, CDTV 256K at $F00000).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) extended_rom: Option<String>,
@@ -1364,6 +1364,11 @@ impl TryFrom<RawConfig> for Config {
             Some(s) => Some(parse_machine_model(s)?),
         };
         let defaults = machine.map_or_else(Config::default, machine_profile_defaults);
+        // Independent validation failures accumulate here so a single pass
+        // reports them all; parse failures whose value later checks depend on
+        // still fail fast. On any accumulated error the fallback values never
+        // reach a running machine.
+        let mut errors: Vec<anyhow::Error> = Vec::new();
         let cpu = match raw.cpu.model.as_deref() {
             None => defaults.cpu,
             Some(s) => parse_cpu(s)?,
@@ -1371,14 +1376,17 @@ impl TryFrom<RawConfig> for Config {
         let fpu = raw.cpu.fpu.unwrap_or_else(|| cpu.default_fpu());
         let cpu_clock_mhz = match raw.cpu.clock_mhz {
             Some(mhz) if mhz.is_finite() && mhz > 0.0 => mhz,
-            Some(_) => bail!("[cpu] clock_mhz must be a positive number"),
+            Some(_) => {
+                errors.push(anyhow!("[cpu] clock_mhz must be a positive number"));
+                cpu.default_clock_mhz()
+            }
             None => cpu.default_clock_mhz(),
         };
         if fpu && cpu == CpuModel::M68000 {
-            bail!(
+            errors.push(anyhow!(
                 "[cpu] fpu = true needs the 68020+ coprocessor interface; \
                  a 68000 cannot drive a 68881/68882"
-            );
+            ));
         }
         // The on-chip caches are silicon: model them by default whenever the
         // CPU has them (AmigaOS turns them on via CACR), so a 020/030 matches
@@ -1390,16 +1398,16 @@ impl TryFrom<RawConfig> for Config {
             .unwrap_or_else(|| cpu.has_instruction_cache());
         let cpu_dcache = raw.cpu.dcache.unwrap_or_else(|| cpu.has_data_cache());
         if cpu_icache && !cpu.has_instruction_cache() {
-            bail!(
+            errors.push(anyhow!(
                 "[cpu] icache = true needs a 68020/68EC020/68030/68040 \
                  (the 68000 has no instruction cache)"
-            );
+            ));
         }
         if cpu_dcache && !cpu.has_data_cache() {
-            bail!(
+            errors.push(anyhow!(
                 "[cpu] dcache = true needs a 68030 or 68040 \
                  (the 68000/68020 have no data cache)"
-            );
+            ));
         }
         if let Some(speed) = raw.emulation.speed.as_deref() {
             log::warn!(
@@ -1486,7 +1494,12 @@ impl TryFrom<RawConfig> for Config {
             floppy_sounds_volume: match raw.audio.floppy_sounds_volume {
                 None => defaults.audio.floppy_sounds_volume,
                 Some(v) if v <= 100 => v as u8,
-                Some(v) => bail!("[audio] floppy_sounds_volume must be 0-100, got {v}"),
+                Some(v) => {
+                    errors.push(anyhow!(
+                        "[audio] floppy_sounds_volume must be 0-100, got {v}"
+                    ));
+                    defaults.audio.floppy_sounds_volume
+                }
             },
         };
         let (floppy, floppy_connected, floppy_playlists) = parse_floppy(raw.floppy)?;
@@ -1501,7 +1514,12 @@ impl TryFrom<RawConfig> for Config {
         let phosphor = match raw.display.phosphor {
             None => defaults.phosphor,
             Some(p) if (0.0..=0.95).contains(&p) => p,
-            Some(p) => bail!("[display] phosphor must be between 0.0 and 0.95, got {p}"),
+            Some(p) => {
+                errors.push(anyhow!(
+                    "[display] phosphor must be between 0.0 and 0.95, got {p}"
+                ));
+                defaults.phosphor
+            }
         };
         let joystick_input_mode = match raw.input.joystick.as_deref() {
             None => defaults.joystick_input_mode,
@@ -1513,7 +1531,9 @@ impl TryFrom<RawConfig> for Config {
             slave: raw.ide.slave.map(drive_image).transpose()?,
         };
         if (ide.master.is_some() || ide.slave.is_some()) && defaults.gate_array == GateArray::None {
-            bail!("[ide] images need a Gayle machine: set [machine] profile = \"A600\" (or A1200)");
+            errors.push(anyhow!(
+                "[ide] images need a Gayle machine: set [machine] profile = \"A600\" (or A1200)"
+            ));
         }
 
         let scsi = ScsiConfig {
@@ -1530,13 +1550,13 @@ impl TryFrom<RawConfig> for Config {
             ],
         };
         if scsi.enabled() && scsi.rom.is_none() {
-            bail!(
+            errors.push(anyhow!(
                 "[scsi] drives need the A2091 boot ROM: set [scsi] rom = \"...\" \
                  (an A590/A2091 6.x ROM image; its scsi.device drives the disks)"
-            );
+            ));
         }
         if scsi.rom_odd.is_some() && scsi.rom.is_none() {
-            bail!("[scsi] rom_odd needs rom (the even EPROM half)");
+            errors.push(anyhow!("[scsi] rom_odd needs rom (the even EPROM half)"));
         }
 
         let a2065_net = match &raw.a2065.net {
@@ -1584,21 +1604,41 @@ impl TryFrom<RawConfig> for Config {
             Some(s) => parse_denise_revision(s)?,
         };
 
-        validate_chip_ram(chip_ram_bytes, chipset, agnus_revision)?;
-        validate_fast_ram(fast_ram_bytes, chip_ram_bytes)?;
-        validate_slow_ram(slow_ram_bytes)?;
-        validate_z3_ram(z3_ram_bytes, cpu)?;
+        errors.extend(validate_chip_ram(chip_ram_bytes, chipset, agnus_revision).err());
+        errors.extend(validate_fast_ram(fast_ram_bytes, chip_ram_bytes).err());
+        errors.extend(validate_slow_ram(slow_ram_bytes).err());
+        errors.extend(validate_z3_ram(z3_ram_bytes, cpu).err());
         let board_specs = zorro_boards
             .iter()
             .chain(wasm_boards.iter().map(|w| &w.spec));
         for board in board_specs {
             if board.version == ZorroVersion::III && !cpu_has_32bit_bus(cpu) {
-                bail!(
+                errors.push(anyhow!(
                     "zorro board {:?} is Zorro III, which needs a 32-bit CPU \
                      (68020/68030/68040); {:?} has a 24-bit address bus",
                     board.name,
                     cpu
-                );
+                ));
+            }
+        }
+        let cd_insert_delay_secs = match raw.cd.insert_delay {
+            Some(secs) if secs.is_finite() && secs >= 0.0 => secs,
+            Some(_) => {
+                errors.push(anyhow!("[cd] insert_delay must be a non-negative number"));
+                0.0
+            }
+            None => 0.0,
+        };
+
+        match errors.len() {
+            0 => {}
+            1 => return Err(errors.remove(0)),
+            _ => {
+                let mut msg = String::from("configuration has multiple errors:");
+                for e in &errors {
+                    msg.push_str(&format!("\n  - {e:#}"));
+                }
+                bail!("{msg}");
             }
         }
 
@@ -1630,11 +1670,7 @@ impl TryFrom<RawConfig> for Config {
                 .map(PathBuf::from)
                 .or(defaults.extended_rom_path),
             cd_image_path: raw.cd.image.map(PathBuf::from),
-            cd_insert_delay_secs: match raw.cd.insert_delay {
-                Some(secs) if secs.is_finite() && secs >= 0.0 => secs,
-                Some(_) => bail!("[cd] insert_delay must be a non-negative number"),
-                None => 0.0,
-            },
+            cd_insert_delay_secs,
             cd32_nvram_path: raw
                 .cd
                 .nvram
@@ -2150,6 +2186,122 @@ fn validate_floppy_image_path(idx: usize, path: &Path) -> Result<()> {
         meta.len(),
         ADF_SIZE
     );
+}
+
+/// Emulated-machine summary lines for the About window.
+pub fn about_machine_lines(cfg: &Config) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(machine) = cfg.machine {
+        lines.push(format!("Machine: {machine:?}"));
+    }
+    lines.push(format!("CPU: {:?} @ {} MHz", cfg.cpu, cfg.cpu_clock_mhz));
+    lines.push(format!(
+        "Chipset: {:?} ({:?}/{:?}, {:?})",
+        cfg.chipset, cfg.agnus_revision, cfg.denise_revision, cfg.video_standard
+    ));
+    let mut ram = format!("RAM: {}K chip", cfg.chip_ram_bytes / 1024);
+    if cfg.slow_ram_bytes > 0 {
+        ram.push_str(&format!(", {}K slow", cfg.slow_ram_bytes / 1024));
+    }
+    if cfg.fast_ram_bytes > 0 {
+        ram.push_str(&format!(", {}K fast", cfg.fast_ram_bytes / 1024));
+    }
+    if cfg.z3_ram_bytes > 0 {
+        ram.push_str(&format!(", {}K Z3", cfg.z3_ram_bytes / 1024));
+    }
+    lines.push(ram);
+    if let Some(name) = cfg.rom_path.file_name() {
+        lines.push(format!("ROM: {}", name.to_string_lossy()));
+    }
+    let drives = cfg
+        .floppy_connected
+        .iter()
+        .filter(|&&connected| connected)
+        .count();
+    lines.push(format!("Floppy drives: {drives}"));
+    lines
+}
+
+/// Resolve the phosphor persistence fraction: the `COPPERLINE_PHOSPHOR`
+/// env var (0.0..=0.95) overrides the `[display] phosphor` config for one
+/// run.
+pub fn resolve_phosphor(from_config: f32) -> f32 {
+    match crate::envcfg::var("COPPERLINE_PHOSPHOR") {
+        Some(v) => match v.trim().parse::<f32>() {
+            Ok(p) if (0.0..=0.95).contains(&p) => p,
+            _ => {
+                log::warn!(
+                    "COPPERLINE_PHOSPHOR must be between 0.0 and 0.95, got {v:?}; using config value"
+                );
+                from_config
+            }
+        },
+        None => from_config,
+    }
+}
+
+/// Resolve the presented overscan mode: the `COPPERLINE_OVERSCAN` env var
+/// (full/tv) overrides the `[display] overscan` config for one run. The
+/// image-regression harness pins "full" so its baselines always carry the
+/// whole overscan field regardless of the config default.
+pub fn resolve_overscan(from_config: Overscan) -> Overscan {
+    match crate::envcfg::var("COPPERLINE_OVERSCAN") {
+        Some(v) => match parse_overscan(&v) {
+            Ok(o) => o,
+            Err(e) => {
+                log::warn!("ignoring COPPERLINE_OVERSCAN: {e}");
+                from_config
+            }
+        },
+        None => from_config,
+    }
+}
+
+/// Resolve the presentation pixel aspect: the `COPPERLINE_PIXEL_ASPECT`
+/// env var (tv/square) overrides the `[display] pixel_aspect` config for
+/// one run, so headless A/B captures can pin a mode without editing the
+/// config.
+pub fn resolve_pixel_aspect(from_config: PixelAspect) -> PixelAspect {
+    match crate::envcfg::var("COPPERLINE_PIXEL_ASPECT") {
+        Some(v) => match parse_pixel_aspect(&v) {
+            Ok(a) => a,
+            Err(e) => {
+                log::warn!("ignoring COPPERLINE_PIXEL_ASPECT: {e}");
+                from_config
+            }
+        },
+        None => from_config,
+    }
+}
+
+/// Substitute the bundled AROS ROM when the user named no ROM. The default
+/// `rom_path` is a sentinel ([`BUNDLED_AROS_ROM`]); any real path from
+/// `rom = "..."` or the CLI argument replaces it before this runs and is left
+/// untouched. When the sentinel survives, locate the bundled AROS main +
+/// extended ROM pair and rewrite the config to point at them, so every
+/// downstream consumer (start-up banner, window title, save states) sees the
+/// real paths. An explicit `extended_rom` still wins over the AROS one.
+pub fn resolve_bundled_rom(cfg: &mut Config) -> Result<()> {
+    if cfg.rom_path != Path::new(BUNDLED_AROS_ROM) {
+        return Ok(());
+    }
+    let aros = crate::romsearch::find_bundled_aros().ok_or_else(|| {
+        anyhow!(
+            "no ROM specified and the bundled AROS ROM was not found. Pass a \
+             Kickstart ROM (as the first argument or rom = \"...\" in a config), \
+             or install the AROS files ({} and {}) next to the binary or under \
+             share/copperline/aros/.",
+            crate::romsearch::AROS_MAIN_FILE,
+            crate::romsearch::AROS_EXT_FILE
+        )
+    })?;
+    log::info!(
+        "no ROM specified; booting bundled AROS ({})",
+        aros.main.display()
+    );
+    cfg.rom_path = aros.main;
+    cfg.extended_rom_path.get_or_insert(aros.extended);
+    Ok(())
 }
 
 #[cfg(test)]
