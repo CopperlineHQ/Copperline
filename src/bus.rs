@@ -804,6 +804,10 @@ pub struct Bus {
     ui_copper_breaks: Vec<u32>,
     #[serde(skip)]
     ui_copper_hit: Option<(u32, u16, u16)>,
+    /// Debugger video-layer isolation (Video tab). Transient debug state:
+    /// the Default of all-layers-visible is restored on state load.
+    #[serde(skip)]
+    ui_layer_masks: UiLayerMasks,
     /// The Copper PC at the last breakpoint check, so arrival at an
     /// address fires once instead of on every eligible colour clock the
     /// PC rests there.
@@ -918,6 +922,26 @@ pub struct BeamTrap {
     pub hpos: Option<u16>,
     /// Remove after the first hit (a run-to-position trap).
     pub once: bool,
+}
+
+/// Debugger video-layer isolation masks: bit n set = bitplane n /
+/// sprite n is drawn. Output-only filters applied where pixels resolve
+/// to colours -- collision accumulation, playfield priority, and every
+/// CPU-visible value always use the true data, so hiding a layer can
+/// never perturb the emulation. All layers visible by default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UiLayerMasks {
+    pub planes: u8,
+    pub sprites: u8,
+}
+
+impl Default for UiLayerMasks {
+    fn default() -> Self {
+        Self {
+            planes: 0xFF,
+            sprites: 0xFF,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1900,6 +1924,7 @@ impl Bus {
             ui_copper_breaks: Vec::new(),
             ui_copper_hit: None,
             ui_copper_last_pc: 0,
+            ui_layer_masks: UiLayerMasks::default(),
             blitter_slowdown_cpu_misses: 0,
             slice_bus_advanced_cck: 0,
             slice_bus_tick: AgnusTick::default(),
@@ -2038,6 +2063,25 @@ impl Bus {
     /// The Copper's completed-instruction count, for copper stepping.
     pub fn copper_instructions_retired(&self) -> u64 {
         self.copper.instructions_retired()
+    }
+
+    /// The debugger's video-layer isolation masks (Video tab).
+    pub fn ui_layer_masks(&self) -> UiLayerMasks {
+        self.ui_layer_masks
+    }
+
+    /// Toggle bitplane `plane` in the presented picture. Returns true
+    /// when the plane is now shown.
+    pub fn ui_toggle_layer_plane(&mut self, plane: usize) -> bool {
+        self.ui_layer_masks.planes ^= 1 << (plane & 7);
+        self.ui_layer_masks.planes & (1 << (plane & 7)) != 0
+    }
+
+    /// Toggle sprite `sprite` in the presented picture. Returns true
+    /// when the sprite is now shown.
+    pub fn ui_toggle_layer_sprite(&mut self, sprite: usize) -> bool {
+        self.ui_layer_masks.sprites ^= 1 << (sprite & 7);
+        self.ui_layer_masks.sprites & (1 << (sprite & 7)) != 0
     }
 
     /// Fire a Copper breakpoint when the live Copper's PC has newly

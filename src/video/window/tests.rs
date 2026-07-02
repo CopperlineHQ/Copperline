@@ -2057,7 +2057,11 @@ fn debugger_views_reflect_machine_state() {
             unreachable!()
         };
         let view = app.build_debugger_view(panel);
-        assert!(!view.lines.is_empty());
+        // The Video tab draws a custom layout from its structured view;
+        // every other tab renders text lines.
+        if tab != super::ui::DebugTab::Video {
+            assert!(!view.lines.is_empty());
+        }
         match tab {
             super::ui::DebugTab::Cpu => {
                 assert!(view.lines[0].text.contains(&format!("PC {pc:08X}")));
@@ -2097,6 +2101,15 @@ fn debugger_views_reflect_machine_state() {
             super::ui::DebugTab::Memory => {
                 // The hex dump shows the NOP sled at the PC's ROM page.
                 assert!(view.lines.iter().any(|l| l.text.contains("4E 71")));
+            }
+            super::ui::DebugTab::Video => {
+                let video = view.video.as_ref().expect("video view");
+                assert!(video.header.starts_with("BPLCON0"), "{}", video.header);
+                assert_eq!(video.sprites.len(), 8);
+                // test_app is an OCS machine: the classic 32-entry palette.
+                assert_eq!(video.palette.len(), 32);
+                assert_eq!(video.plane_mask, 0xFF);
+                assert_eq!(video.sprite_mask, 0xFF);
             }
             super::ui::DebugTab::Break => {
                 assert!(view.lines.iter().any(|l| l.text == "Breakpoints:"));
@@ -2557,6 +2570,35 @@ fn memory_tab_find_scroll_and_bitmap_toggle() {
     }
     app.activate_ui_control(UiControl::DebugMemBits);
     assert!(!app.debugger_panel.as_ref().unwrap().mem_view_bits);
+}
+
+#[test]
+fn video_tab_layer_toggles_flip_bus_masks() {
+    let mut app = test_app();
+    app.open_debugger();
+    if let Some(panel) = app.debugger_panel.as_mut() {
+        panel.tab = super::ui::DebugTab::Video;
+    }
+    assert_eq!(app.emu.bus().ui_layer_masks().planes, 0xFF);
+    app.activate_ui_control(UiControl::DebugPlaneToggle(0));
+    assert_eq!(app.emu.bus().ui_layer_masks().planes, 0xFE);
+    app.activate_ui_control(UiControl::DebugSpriteToggle(3));
+    assert_eq!(app.emu.bus().ui_layer_masks().sprites, 0xF7);
+
+    // The Video view mirrors the masks for the toggle-row display.
+    let panel = app.debugger_panel.clone().unwrap();
+    let view = app.build_debugger_view(&panel);
+    let video = view.video.expect("video view");
+    assert_eq!(video.plane_mask, 0xFE);
+    assert_eq!(video.sprite_mask, 0xF7);
+
+    // Toggling back restores everything-visible.
+    app.activate_ui_control(UiControl::DebugPlaneToggle(0));
+    app.activate_ui_control(UiControl::DebugSpriteToggle(3));
+    assert_eq!(
+        app.emu.bus().ui_layer_masks(),
+        crate::bus::UiLayerMasks::default()
+    );
 }
 
 #[test]

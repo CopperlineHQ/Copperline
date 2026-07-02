@@ -2629,6 +2629,12 @@ impl App {
                 self.activate_tool_control(ToolPanelKind::Debugger, control)
             }
             UiControl::DebugMemBits => self.activate_tool_control(ToolPanelKind::Debugger, control),
+            UiControl::DebugPlaneToggle(_) => {
+                self.activate_tool_control(ToolPanelKind::Debugger, control)
+            }
+            UiControl::DebugSpriteToggle(_) => {
+                self.activate_tool_control(ToolPanelKind::Debugger, control)
+            }
             UiControl::DebugBreaksClear => {
                 self.activate_tool_control(ToolPanelKind::Debugger, control)
             }
@@ -2794,6 +2800,12 @@ impl App {
             (ToolPanelKind::Debugger, UiControl::DebugMemSave) => self.debugger_mem_save_region(),
             (ToolPanelKind::Debugger, UiControl::DebugMemWriter) => self.debugger_mem_writer(),
             (ToolPanelKind::Debugger, UiControl::DebugMemBits) => self.debugger_mem_toggle_bits(),
+            (ToolPanelKind::Debugger, UiControl::DebugPlaneToggle(plane)) => {
+                self.debugger_toggle_plane(plane)
+            }
+            (ToolPanelKind::Debugger, UiControl::DebugSpriteToggle(sprite)) => {
+                self.debugger_toggle_sprite(sprite)
+            }
             (ToolPanelKind::Debugger, UiControl::DebugBreaksClear) => {
                 self.emu.machine.ui_breaks_clear();
                 self.last_debug_stop = None;
@@ -4020,6 +4032,59 @@ impl App {
         self.show_osd(msg);
     }
 
+    /// Toggle bitplane `plane` in the presented picture (Video tab).
+    fn debugger_toggle_plane(&mut self, plane: usize) {
+        let shown = self.emu.bus_mut().ui_toggle_layer_plane(plane);
+        self.show_osd(format!(
+            "Bitplane {} {}",
+            plane + 1,
+            if shown { "shown" } else { "hidden" }
+        ));
+        self.rerender_after_debug_view_change();
+    }
+
+    /// Toggle sprite `sprite` in the presented picture (Video tab).
+    fn debugger_toggle_sprite(&mut self, sprite: usize) {
+        let shown = self.emu.bus_mut().ui_toggle_layer_sprite(sprite);
+        self.show_osd(format!(
+            "Sprite {sprite} {}",
+            if shown { "shown" } else { "hidden" }
+        ));
+        self.rerender_after_debug_view_change();
+    }
+
+    /// Re-render and re-present the current frame after a debug-only view
+    /// change (layer isolation). Uses the pure snapshot render, so unlike
+    /// the normal frame path nothing feeds back into the machine: toggling
+    /// a layer while paused cannot perturb the emulation.
+    fn rerender_after_debug_view_change(&mut self) {
+        let visible_start_vpos = self.emu.bus().frame_visible_start_vpos();
+        let h_shift = if self.hcenter {
+            presentation_h_shift_for(&self.emu.bus().frame_render_base(), self.overscan)
+        } else {
+            0
+        };
+        bitplane::render_display_only(self.emu.bus(), &mut self.fb);
+        let geometry = self.emu.bus().frame_geometry();
+        let field_rows = post_process_rendered_field(
+            &mut self.fb,
+            geometry,
+            visible_start_vpos,
+            h_shift,
+            self.overscan,
+        );
+        let base = self.emu.bus().frame_render_base();
+        self.deinterlacer.push_field(
+            &self.fb,
+            field_rows,
+            base.bplcon0 & 0x0004 != 0,
+            base.long_field,
+            !geometry.programmable,
+        );
+        self.refresh_present_from_deinterlacer();
+        self.request_redraw();
+    }
+
     /// Toggle an exception catchpoint from the entry box ("irq N",
     /// "trap N", or "vec N").
     fn debugger_toggle_catch(&mut self) {
@@ -4504,9 +4569,9 @@ impl App {
             Panel::Calibration(session) => Some(ui::PanelViewData::Calibration(
                 build_calibration_view(session),
             )),
-            Panel::Debugger(panel) => {
-                Some(ui::PanelViewData::Debugger(self.build_debugger_view(panel)))
-            }
+            Panel::Debugger(panel) => Some(ui::PanelViewData::Debugger(Box::new(
+                self.build_debugger_view(panel),
+            ))),
             Panel::FrameAnalyzer(panel) => Some(ui::PanelViewData::FrameAnalyzer(Box::new(
                 self.build_frame_analyzer_view(panel),
             ))),
@@ -4517,10 +4582,9 @@ impl App {
 
     fn build_tool_panel_view_data(&self, kind: ToolPanelKind) -> Option<ui::PanelViewData> {
         match kind {
-            ToolPanelKind::Debugger => self
-                .debugger_panel
-                .as_ref()
-                .map(|panel| ui::PanelViewData::Debugger(self.build_debugger_view(panel))),
+            ToolPanelKind::Debugger => self.debugger_panel.as_ref().map(|panel| {
+                ui::PanelViewData::Debugger(Box::new(self.build_debugger_view(panel)))
+            }),
             ToolPanelKind::FrameAnalyzer => self.frame_analyzer_panel.as_ref().map(|panel| {
                 ui::PanelViewData::FrameAnalyzer(Box::new(self.build_frame_analyzer_view(panel)))
             }),
@@ -4656,6 +4720,7 @@ impl App {
         let read = |addr: u32| bus.peek_word_any(addr);
         let mut lines: Vec<ui::DbgLine> = Vec::new();
         let mut bitmap: Option<ui::MemBitmapView> = None;
+        let mut video: Option<ui::VideoView> = None;
         let mut audio: Option<ui::AudioScopeView> = None;
         match panel.tab {
             ui::DebugTab::Cpu => {
@@ -4773,6 +4838,98 @@ impl App {
                         row.join(" ")
                     )));
                 }
+            }
+            ui::DebugTab::Video => {
+                let base = bus.frame_render_base();
+                let aga = base.agnus_revision == crate::chipset::agnus::AgnusRevision::AgaAlice;
+                let bplcon0 = base.bplcon0;
+                let nplanes =
+                    (((bplcon0 >> 12) & 7) as usize + (((bplcon0 >> 4) & 1) as usize * 8)).min(8);
+                let res = if bplcon0 & 0x0040 != 0 {
+                    "shres"
+                } else if bplcon0 & 0x8000 != 0 {
+                    "hires"
+                } else {
+                    "lores"
+                };
+                let mut modes = String::new();
+                if bplcon0 & 0x0800 != 0 {
+                    modes.push_str("  HAM");
+                }
+                if bplcon0 & 0x0400 != 0 {
+                    modes.push_str("  DPF");
+                }
+                let header = format!(
+                    "BPLCON0 {bplcon0:04X}: {nplanes} planes {res}{modes}   DMACON: BPLEN {} SPREN {}",
+                    if base.dmacon & 0x0100 != 0 { "on" } else { "off" },
+                    if base.dmacon & 0x0020 != 0 { "on" } else { "off" },
+                );
+                let captured = bus.frame_captured_sprite_lines();
+                let sprites = (0..8)
+                    .map(|sprite| {
+                        let pos = base.sprpos[sprite];
+                        let ctl = base.sprctl[sprite];
+                        let vstart = (pos >> 8) | ((ctl & 0x04) << 6);
+                        let vstop = (ctl >> 8) | ((ctl & 0x02) << 7);
+                        let hstart = ((pos & 0xFF) << 1) | (ctl & 0x01);
+                        let attached = ctl & 0x80 != 0;
+                        let mut dma_lines: Vec<&crate::bus::CapturedSpriteLine> = captured
+                            .iter()
+                            .filter(|line| line.sprite == sprite)
+                            .collect();
+                        dma_lines.sort_by_key(|line| line.beam_y);
+                        let text = format!(
+                            "SPR{sprite} v{vstart}-{vstop} h{hstart}{}{}  dma lines {}",
+                            if attached { " att" } else { "" },
+                            if base.spr_armed[sprite] { " armed" } else { "" },
+                            dma_lines.len(),
+                        );
+                        // Thumbnail: sample the DMA lines to the thumb
+                        // height; classic 2-bpp decode against the pair's
+                        // frame-start palette bank (an attached pair or an
+                        // AGA BPLCON4 bank shifts real colours, but shape
+                        // is what the thumbnail is for).
+                        let total = dma_lines.len();
+                        let rows = total.min(ui::VIDEO_THUMB_MAX_ROWS);
+                        let mut thumb = vec![0u32; rows * 16];
+                        for row in 0..rows {
+                            let line = dma_lines[row * total / rows.max(1)];
+                            for x in 0..16usize {
+                                let bit = 15 - x;
+                                let idx =
+                                    ((line.data >> bit) & 1) | ((((line.datb) >> bit) & 1) << 1);
+                                if idx == 0 {
+                                    continue;
+                                }
+                                let entry = 16 + (sprite / 2) * 4 + idx as usize;
+                                let rgb = base.palette.rgb24(entry);
+                                thumb[row * 16 + x] =
+                                    rgba((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
+                            }
+                        }
+                        ui::SpriteRowView {
+                            text,
+                            thumb,
+                            thumb_rows: rows,
+                        }
+                    })
+                    .collect();
+                let palette_entries = if aga { 256 } else { 32 };
+                let palette = (0..palette_entries)
+                    .map(|entry| {
+                        let rgb = base.palette.rgb24(entry);
+                        rgba((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF)
+                    })
+                    .collect();
+                let masks = bus.ui_layer_masks();
+                video = Some(ui::VideoView {
+                    header,
+                    plane_mask: masks.planes,
+                    nplanes,
+                    sprite_mask: masks.sprites,
+                    sprites,
+                    palette,
+                });
             }
             ui::DebugTab::Copper => {
                 // Leave room for the CBreak/CStep buttons drawn at the top
@@ -5095,6 +5252,7 @@ impl App {
             status,
             lines,
             bitmap,
+            video,
             audio,
         }
     }

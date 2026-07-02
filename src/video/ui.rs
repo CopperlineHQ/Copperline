@@ -176,15 +176,17 @@ pub enum DebugTab {
     Cpu,
     Chipset,
     Copper,
+    Video,
     Audio,
     Memory,
     Break,
 }
 
-pub const DEBUG_TABS: [DebugTab; 6] = [
+pub const DEBUG_TABS: [DebugTab; 7] = [
     DebugTab::Cpu,
     DebugTab::Chipset,
     DebugTab::Copper,
+    DebugTab::Video,
     DebugTab::Audio,
     DebugTab::Memory,
     DebugTab::Break,
@@ -195,6 +197,7 @@ fn debug_tab_label(tab: DebugTab) -> &'static str {
         DebugTab::Cpu => "CPU",
         DebugTab::Chipset => "Chipset",
         DebugTab::Copper => "Copper",
+        DebugTab::Video => "Video",
         DebugTab::Audio => "Audio",
         DebugTab::Memory => "Memory",
         DebugTab::Break => "Break",
@@ -424,6 +427,13 @@ pub fn panel_control_at(panel: &Panel, pos: (i32, i32)) -> Option<UiControl> {
                     }
                 }
             }
+            if panel.tab == DebugTab::Video {
+                for (control, button_rect) in video_tab_toggle_rects(rect) {
+                    if button_rect.contains(pos) {
+                        return Some(control);
+                    }
+                }
+            }
             if panel.tab == DebugTab::Audio {
                 for (control, button_rect) in audio_tab_button_rects(rect) {
                     if button_rect.contains(pos) {
@@ -521,6 +531,10 @@ pub enum UiControl {
     /// Memory tab: toggle between the hex dump and the 1-bpp bitplane
     /// view (an entry with a small decimal number sets the row stride).
     DebugMemBits,
+    /// Video tab: toggle bitplane `n` (0-7) in the presented picture.
+    DebugPlaneToggle(usize),
+    /// Video tab: toggle sprite `n` (0-7) in the presented picture.
+    DebugSpriteToggle(usize),
     /// Break tab: remove all breakpoints and watchpoints.
     DebugBreaksClear,
     /// Audio tab: toggle mute for a channel (0..3 = Paula, 4 = CD audio).
@@ -780,6 +794,49 @@ pub const COPPER_TAB_HEADER_LINES: usize = 3;
 /// drawn at the top of the content area do not overlap text.
 pub const MEM_TAB_HEADER_LINES: usize = 3;
 
+// Video tab layout: a header line, the plane/sprite layer-toggle rows,
+// eight sprite rows (decode text plus a thumbnail), and the palette grid.
+const VIDEO_TOGGLE_W: usize = 34;
+const VIDEO_TOGGLE_H: usize = 16;
+const VIDEO_TOGGLE_X: usize = 86;
+const VIDEO_SPRITE_ROW_H: usize = 26;
+/// Sprite thumbnails sample the sprite's captured DMA lines down to this
+/// many rows.
+pub const VIDEO_THUMB_MAX_ROWS: usize = 24;
+const VIDEO_THUMB_X: usize = 560;
+const VIDEO_PALETTE_CELL_W: usize = 20;
+const VIDEO_PALETTE_CELL_H: usize = 8;
+
+fn video_toggle_row_y(rect: Rect, row: usize) -> usize {
+    debug_content_top(rect) + 14 + row * (VIDEO_TOGGLE_H + 4)
+}
+
+fn video_sprites_top(rect: Rect) -> usize {
+    video_toggle_row_y(rect, 2) + 6
+}
+
+fn video_palette_top(rect: Rect) -> usize {
+    video_sprites_top(rect) + 8 * VIDEO_SPRITE_ROW_H + 12
+}
+
+/// The Video tab's 16 layer-isolation toggles: bitplanes 1-8 then
+/// sprites 0-7.
+fn video_tab_toggle_rects(rect: Rect) -> [(UiControl, Rect); 16] {
+    let button = |row: usize, i: usize| Rect {
+        x: rect.x + VIDEO_TOGGLE_X + i * (VIDEO_TOGGLE_W + 4),
+        y: video_toggle_row_y(rect, row),
+        w: VIDEO_TOGGLE_W,
+        h: VIDEO_TOGGLE_H,
+    };
+    std::array::from_fn(|k| {
+        if k < 8 {
+            (UiControl::DebugPlaneToggle(k), button(0, k))
+        } else {
+            (UiControl::DebugSpriteToggle(k - 8), button(1, k - 8))
+        }
+    })
+}
+
 /// The Memory tab's buttons, drawn at the top of the content area.
 fn mem_tab_button_rects(rect: Rect) -> [(UiControl, Rect); 4] {
     let y = debug_content_top(rect);
@@ -1004,6 +1061,32 @@ pub fn mem_bitmap_rows() -> usize {
     bottom.saturating_sub(top) / 2
 }
 
+/// One sprite row of the Video tab: a decoded state line plus a
+/// thumbnail rendered from the frame's captured sprite DMA lines.
+pub struct SpriteRowView {
+    pub text: String,
+    /// Thumbnail pixels, 16 wide by `thumb_rows`, already in framebuffer
+    /// RGBA; 0 marks a transparent sprite pixel.
+    pub thumb: Vec<u32>,
+    pub thumb_rows: usize,
+}
+
+/// The Video tab: bitplane/sprite layer isolation and visual chip state.
+pub struct VideoView {
+    /// BPLCON0/DMACON decode line.
+    pub header: String,
+    /// Bit n set = bitplane n drawn (the debug isolation mask).
+    pub plane_mask: u8,
+    /// Planes active in BPLCON0, to grey out toggles beyond the mode.
+    pub nplanes: usize,
+    /// Bit n set = sprite n drawn.
+    pub sprite_mask: u8,
+    pub sprites: Vec<SpriteRowView>,
+    /// Palette swatches in framebuffer RGBA: 32 entries (OCS/ECS) or the
+    /// full 256 (AGA).
+    pub palette: Vec<u32>,
+}
+
 pub struct DebuggerView {
     /// False while the machine is paused (the debugger's usual state).
     pub running: bool,
@@ -1016,6 +1099,8 @@ pub struct DebuggerView {
     pub lines: Vec<DbgLine>,
     /// The Memory tab's bitplane view, when its Bits mode is active.
     pub bitmap: Option<MemBitmapView>,
+    /// The Video tab's layer/palette view. Some only when it is active.
+    pub video: Option<VideoView>,
     /// Structured data for the Audio tab's per-channel mute buttons and
     /// oscilloscopes. Some only when the Audio tab is active; the plain text
     /// is also mirrored into `lines` for headless/text use.
@@ -1142,7 +1227,7 @@ pub enum PanelViewData {
     About(AboutView),
     Shortcuts,
     Calibration(CalibrationView),
-    Debugger(DebuggerView),
+    Debugger(Box<DebuggerView>),
     FrameAnalyzer(Box<FrameAnalyzerView>),
 }
 
@@ -1650,6 +1735,12 @@ fn draw_debugger(
             draw_mem_bitmap(frame, rect, bitmap, scale);
         }
     }
+    // The Video tab is drawn as a custom graphical layout.
+    if panel.tab == DebugTab::Video {
+        if let Some(video) = &view.video {
+            draw_video_tab(frame, rect, video, hover, scale);
+        }
+    }
     // Transport buttons and the hex-entry box.
     for (control, button_rect) in debug_button_rects(rect) {
         match control {
@@ -1775,6 +1866,123 @@ fn draw_mem_bitmap(frame: &mut [u8], rect: Rect, bitmap: &MemBitmapView, scale: 
         }
     }
     draw_outline(frame, plot, BUTTON_EDGE_LIGHT, scale);
+}
+
+/// Draw the Video tab: the BPLCON0/DMACON header, the plane and sprite
+/// layer-isolation toggle rows, eight sprite rows (decode text plus a
+/// thumbnail from the frame's sprite DMA), and the palette grid.
+fn draw_video_tab(
+    frame: &mut [u8],
+    rect: Rect,
+    video: &VideoView,
+    hover: Option<UiControl>,
+    scale: usize,
+) {
+    let content_top = debug_content_top(rect);
+    draw_panel_text(
+        frame,
+        rect.x + 10,
+        content_top,
+        &video.header,
+        PANEL_TEXT_HILIGHT,
+        1,
+        scale,
+    );
+    for (row, label) in ["Planes", "Sprites"].iter().enumerate() {
+        draw_panel_text(
+            frame,
+            rect.x + 10,
+            video_toggle_row_y(rect, row) + (VIDEO_TOGGLE_H - 8) / 2,
+            label,
+            PANEL_TEXT,
+            1,
+            scale,
+        );
+    }
+    for (control, button_rect) in video_tab_toggle_rects(rect) {
+        let (label, shown, exists) = match control {
+            UiControl::DebugPlaneToggle(plane) => (
+                format!("{}", plane + 1),
+                video.plane_mask & (1 << plane) != 0,
+                plane < video.nplanes,
+            ),
+            UiControl::DebugSpriteToggle(sprite) => (
+                format!("{sprite}"),
+                video.sprite_mask & (1 << sprite) != 0,
+                true,
+            ),
+            _ => continue,
+        };
+        // A hidden layer draws with the disabled text style so the
+        // toggle row doubles as the isolation-state display; planes
+        // beyond the current BPLCON0 depth stay clickable (a mid-frame
+        // Copper can raise the depth) but are marked with a dot.
+        let label = if exists { label } else { format!("{label}.") };
+        draw_text_button(
+            frame,
+            button_rect,
+            &label,
+            shown,
+            hover == Some(control),
+            scale,
+        );
+    }
+    let sprites_top = video_sprites_top(rect);
+    for (sprite, row) in video.sprites.iter().enumerate() {
+        let y = sprites_top + sprite * VIDEO_SPRITE_ROW_H;
+        draw_panel_text(frame, rect.x + 10, y + 4, &row.text, PANEL_TEXT, 1, scale);
+        // Thumbnail: 16 sprite pixels wide at 2x, one panel pixel per
+        // sampled DMA line, over a dark backdrop.
+        let thumb = Rect {
+            x: rect.x + VIDEO_THUMB_X,
+            y,
+            w: 16 * 2,
+            h: VIDEO_SPRITE_ROW_H.saturating_sub(2),
+        };
+        fill_rect(frame, scale_rect(thumb, scale), rgba(14, 16, 18), scale);
+        for line in 0..row.thumb_rows.min(thumb.h) {
+            for x in 0..16usize {
+                let pix = row.thumb[line * 16 + x];
+                if pix == 0 {
+                    continue;
+                }
+                fill_rect(
+                    frame,
+                    scale_rect(
+                        Rect {
+                            x: thumb.x + x * 2,
+                            y: thumb.y + line,
+                            w: 2,
+                            h: 1,
+                        },
+                        scale,
+                    ),
+                    pix,
+                    scale,
+                );
+            }
+        }
+        draw_outline(frame, thumb, BUTTON_EDGE_DARK, scale);
+    }
+    let palette_top = video_palette_top(rect);
+    draw_panel_text(
+        frame,
+        rect.x + 10,
+        palette_top,
+        &format!("Palette ({} entries)", video.palette.len()),
+        PANEL_TEXT_DIM,
+        1,
+        scale,
+    );
+    for (idx, &color) in video.palette.iter().enumerate() {
+        let cell = Rect {
+            x: rect.x + 10 + (idx % 32) * VIDEO_PALETTE_CELL_W,
+            y: palette_top + 12 + (idx / 32) * VIDEO_PALETTE_CELL_H,
+            w: VIDEO_PALETTE_CELL_W - 1,
+            h: VIDEO_PALETTE_CELL_H - 1,
+        };
+        fill_rect(frame, scale_rect(cell, scale), color, scale);
+    }
 }
 
 /// Draw the Audio tab: a header line, four Paula channel blocks and a CD row,
@@ -4134,12 +4342,17 @@ mod tests {
         let tab = debug_tab_rect(rect, 3);
         assert_eq!(
             ui.control_at((tab.x as i32 + 2, tab.y as i32 + 2)),
-            Some(UiControl::DebugTab(DebugTab::Audio))
+            Some(UiControl::DebugTab(DebugTab::Video))
         );
         let tab = debug_tab_rect(rect, 4);
         assert_eq!(
             ui.control_at((tab.x as i32 + 2, tab.y as i32 + 2)),
-            Some(UiControl::DebugTab(DebugTab::Memory))
+            Some(UiControl::DebugTab(DebugTab::Audio))
+        );
+        let tab = debug_tab_rect(rect, 6);
+        assert_eq!(
+            ui.control_at((tab.x as i32 + 2, tab.y as i32 + 2)),
+            Some(UiControl::DebugTab(DebugTab::Break))
         );
         let (control, step) = debug_button_rects(rect)[1];
         assert_eq!(control, UiControl::DebugStep);
@@ -4553,14 +4766,15 @@ mod tests {
                 DbgLine::plain(line)
             });
         }
-        let data = PanelViewData::Debugger(DebuggerView {
+        let data = PanelViewData::Debugger(Box::new(DebuggerView {
             running: false,
             reverse_available: true,
             status: "paused frame 1234 24.68s".to_string(),
             lines,
             bitmap: None,
+            video: None,
             audio: None,
-        });
+        }));
         let mut panel = DebuggerPanel::new();
         panel.entry = "C00000".to_string();
         panel.entry_active = true;
@@ -4597,14 +4811,15 @@ mod tests {
         lines.push(DbgLine::plain("  $C09580  now 0012"));
         lines.push(DbgLine::plain("Register watches (stop on write):"));
         lines.push(DbgLine::plain("  DMACON ($096)"));
-        let data = PanelViewData::Debugger(DebuggerView {
+        let data = PanelViewData::Debugger(Box::new(DebuggerView {
             running: false,
             reverse_available: true,
             status: "paused frame 1234 24.68s".to_string(),
             lines,
             bitmap: None,
+            video: None,
             audio: None,
-        });
+        }));
         let mut panel = DebuggerPanel::new();
         panel.tab = DebugTab::Break;
         panel.entry = "DFF096".to_string();
@@ -4694,14 +4909,15 @@ mod tests {
             channels,
             cd,
         };
-        let data = PanelViewData::Debugger(DebuggerView {
+        let data = PanelViewData::Debugger(Box::new(DebuggerView {
             running: false,
             reverse_available: true,
             status: "paused frame 1234 24.68s".to_string(),
             lines: Vec::new(),
             bitmap: None,
+            video: None,
             audio: Some(audio),
-        });
+        }));
         let mut panel = DebuggerPanel::new();
         panel.tab = DebugTab::Audio;
         let ui = UiState {
@@ -4723,6 +4939,76 @@ mod tests {
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "debugger-audio");
+
+        // Video tab: layer-isolation toggles (plane 2 and sprite 5 hidden),
+        // sprite rows with synthetic thumbnails, and an AGA palette grid.
+        let mut frame = vec![0u8; w * h * 4];
+        let sprites = (0..8)
+            .map(|sprite| {
+                let rows = 16 + sprite;
+                let mut thumb = vec![0u32; rows * 16];
+                for row in 0..rows {
+                    for x in 0..16usize {
+                        if (x + row) % 4 == sprite % 4 {
+                            thumb[row * 16 + x] =
+                                rgba(80 + 20 * sprite as u32, 200 - 20 * sprite as u32, 160);
+                        }
+                    }
+                }
+                SpriteRowView {
+                    text: format!(
+                        "SPR{sprite} v44-{} h{} dma lines {rows}",
+                        60 + sprite,
+                        128 + sprite * 16
+                    ),
+                    thumb,
+                    thumb_rows: rows,
+                }
+            })
+            .collect();
+        let palette = (0..256)
+            .map(|idx| {
+                let idx = idx as u32;
+                rgba((idx * 5) & 0xFF, (idx * 3) & 0xFF, 255 - (idx & 0xFF))
+            })
+            .collect();
+        let data = PanelViewData::Debugger(Box::new(DebuggerView {
+            running: false,
+            reverse_available: true,
+            status: "paused frame 1234 24.68s".to_string(),
+            lines: Vec::new(),
+            bitmap: None,
+            video: Some(VideoView {
+                header: "BPLCON0 5200: 5 planes lores  HAM   DMACON: BPLEN on SPREN on".to_string(),
+                plane_mask: 0xFD,
+                nplanes: 5,
+                sprite_mask: 0xDF,
+                sprites,
+                palette,
+            }),
+            audio: None,
+        }));
+        let mut panel = DebuggerPanel::new();
+        panel.tab = DebugTab::Video;
+        let ui = UiState {
+            menu_open: false,
+            panel: Some(Panel::Debugger(panel)),
+        };
+        draw(
+            &mut frame,
+            scale,
+            &ui,
+            Some(UiControl::DebugPlaneToggle(0)),
+            Some(&data),
+            false,
+            WarpSpeed::Max,
+            false,
+            false,
+            JoystickInputMode::Gamepad,
+            PixelAspect::Tv,
+        );
+        assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
+        save(&frame, "debugger-video");
 
         // Frame analyzer with the picture underlay ticked: a synthetic PAL
         // frame trace (refresh/bitplane/copper/blitter stripes) over a

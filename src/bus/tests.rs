@@ -9405,3 +9405,77 @@ fn copper_breakpoint_does_not_refire_while_the_pc_rests_there() {
     bus.advance_chipset(40);
     assert!(bus.take_ui_copper_hit().is_none());
 }
+
+#[test]
+fn debug_plane_mask_hides_pixels_but_not_collisions() {
+    // A one-plane display with a solid row: masking plane 1 must blank
+    // the playfield pixels while leaving the collision result untouched
+    // (layer isolation is an output-only filter).
+    let mut bus = empty_bus();
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
+    bus.denise.diwstrt = 0x2C81;
+    bus.denise.diwstop = 0x2DC1;
+    bus.denise.ddfstrt = 0x0038;
+    bus.denise.ddfstop = 0x0038;
+    bus.denise.bplcon0 = 0x1000;
+    bus.denise.palette.write_ocs(0, 0x0007);
+    bus.denise.palette.write_ocs(1, 0x0F00);
+    // Odd-plane collisions include plane 1 so the clxdat comparison is
+    // sensitive to the sample index staying unmasked.
+    bus.denise.clxcon = 0x1040;
+    let words_per_row = bitplane_words_per_row(
+        bus.agnus.revision(),
+        bus.denise.bplcon0,
+        bus.agnus.fmode(),
+        bus.denise.ddfstrt,
+        bus.denise.ddfstop,
+        bus.harddis_active(),
+    );
+    bus.current_frame_bitplane_rows[0] = Some(CapturedBitplaneRow {
+        nplanes: 1,
+        words_per_row,
+        planes: [
+            vec![0xFFFF; words_per_row],
+            vec![0; words_per_row],
+            vec![0; words_per_row],
+            vec![0; words_per_row],
+            vec![0; words_per_row],
+            vec![0; words_per_row],
+            Vec::new(),
+            Vec::new(),
+        ],
+    });
+    bus.current_frame_render_base = bus.capture_render_snapshot();
+
+    let full = bitplane::RenderInput::from_bus(&bus).with_debug_masks(0xFF, 0xFF);
+    let masked = bitplane::RenderInput::from_bus(&bus).with_debug_masks(0xFE, 0xFF);
+
+    let mut fb_full = vec![0u32; FB_PIXELS];
+    let mut fb_masked = vec![0u32; FB_PIXELS];
+    let result_full = bitplane::render_from_input(&full, &mut fb_full);
+    let result_masked = bitplane::render_from_input(&masked, &mut fb_masked);
+
+    assert!(
+        fb_full.iter().any(|&px| px != fb_full[0]),
+        "the unmasked frame must show the plane"
+    );
+    assert_ne!(
+        fb_full, fb_masked,
+        "masking the only plane must change the picture"
+    );
+    assert_eq!(
+        result_full.clxdat, result_masked.clxdat,
+        "layer isolation must never change the collision result"
+    );
+    // The plane's colour (COLOR01 = $F00, bright red in framebuffer RGBA)
+    // is present unmasked and fully gone when the plane is hidden.
+    let red = 0xFF00_00FF_u32;
+    assert!(
+        fb_full.contains(&red),
+        "the unmasked frame must contain the plane colour"
+    );
+    assert!(
+        !fb_masked.contains(&red),
+        "a masked plane's colour must not reach the framebuffer"
+    );
+}

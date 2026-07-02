@@ -1033,6 +1033,13 @@ pub(super) fn render_attached_sprite_pair_lines(
             if !sprite_has_priority(even_sprite, playfield_mask[fb_idx], control) {
                 continue;
             }
+            // Debugger layer isolation: an attached pair's pixels use both
+            // channels, so hiding either sprite hides the pair's output.
+            // Collisions above are already accumulated from the true data.
+            let sprite_mask = super::active_debug_sprite_mask();
+            if sprite_mask & (0b11 << even_sprite) != 0b11 << even_sprite {
+                continue;
+            }
             let palette = palette_at_x(base_palettes[y], &palette_segments[y], x_usize);
             let color_idx = sprite_color_entry(control, even_sprite, idx, true);
             let color_latch = palette[color_idx];
@@ -1260,6 +1267,11 @@ pub(super) fn draw_sprite_line(
                     playfield_mask,
                 );
                 if !sprite_has_priority(sprite, playfield_mask[fb_idx], control) {
+                    continue;
+                }
+                // Debugger layer isolation: output only, after the
+                // collision bits above are accumulated from true data.
+                if super::active_debug_sprite_mask() & (1 << sprite) == 0 {
                     continue;
                 }
                 let color_idx = sprite_color_entry(control, sprite, idx, false);

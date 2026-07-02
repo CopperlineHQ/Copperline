@@ -58,6 +58,24 @@ Analyzer use. Two controls sit above the listing:
   instruction boundary, so the Copper can occasionally be a fetch further
   along -- the highlight always shows exactly where it stopped.
 
+**Video** shows the display pipeline visually and hosts *layer
+isolation*. The header decodes BPLCON0 (depth, resolution, HAM/DPF) and
+the display/sprite DMA enables. Two toggle rows hide or show individual
+bitplanes (1-8) and sprites (0-7) in the presented picture -- the video
+analogue of the Audio tab's mutes, for answering "which layer is drawing
+*that*" by elimination. Isolation is an output-only filter: collisions,
+sprite/playfield priority, and everything the program can observe still
+use the true data, so hiding layers can never perturb the emulation (a
+sprite behind a hidden plane therefore stays occluded). Toggles re-render
+the current frame immediately while paused, through the same
+side-effect-free snapshot render the Frame Analyzer underlay uses.
+Each sprite row decodes SPRxPOS/SPRxCTL (vstart-vstop, hstart, attach,
+armed) with the number of DMA lines the sprite fetched this frame --
+zero lines with plausible-looking pointers is the classic
+copper-driven-sprite symptom -- and a thumbnail rendered from those
+captured DMA words. Below, the palette grid shows all 32 entries (or the
+full 256 on AGA) as swatches.
+
 **Audio** decodes Paula's four audio channels. A header line shows DMACON
 (master DMAEN and the per-channel AUDx enable bits) and ADKCON (the audio
 attach bits for volume/period modulation). Each channel then shows its DMA
