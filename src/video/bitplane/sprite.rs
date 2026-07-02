@@ -348,6 +348,7 @@ pub(super) fn manual_sprite_lines_from_events(
         PAL_VISIBLE_LINE0,
         FB_HEIGHT,
         true,
+        true,
     )
 }
 
@@ -357,6 +358,16 @@ pub(super) enum ManualSpriteFlushMode {
     PreserveStartedOutput,
 }
 
+/// `sprite_dma_observed` says whether sprite DMA actually fetched data this
+/// frame. The beam replay only sees CPU/Copper register writes; when DMA also
+/// drives a channel, Agnus writes POS/CTL/DATA through the same Denise
+/// registers without appearing here, so two reconciliation guards approximate
+/// those unseen writes (an early same-line SPRxPOS hands the line to the DMA
+/// capture, and a pre-visible SPRxDATA seeds the latch for later retiming
+/// instead of arming direct output). With sprite DMA idle Denise's own rules
+/// apply unmodified: SPRxDATA arms at any beam position, SPRxCTL disarms, and
+/// SPRxPOS never disarms, so an armed sprite serializes on every line (there
+/// is no vertical comparator in Denise).
 pub(super) fn manual_sprite_lines_from_events_with_visible_line0(
     initial_state: &RenderState,
     events: &[BeamRegisterWrite],
@@ -364,6 +375,7 @@ pub(super) fn manual_sprite_lines_from_events_with_visible_line0(
     visible_line0: i32,
     rows: usize,
     include_latched_sprite_state: bool,
+    sprite_dma_observed: bool,
 ) -> Vec<Vec<SpriteLine>> {
     let mut regs = BeamSpriteState::from_render_state(initial_state, held);
     let visible_end = visible_line0 + rows as i32;
@@ -418,7 +430,8 @@ pub(super) fn manual_sprite_lines_from_events_with_visible_line0(
             ManualSpriteFlushMode::PreserveStartedOutput,
             &mut lines,
         );
-        if !include_latched_sprite_state
+        if sprite_dma_observed
+            && !include_latched_sprite_state
             && held[sprite].is_none()
             && (off - 0x140) & 0x0006 == 0
             && event.hpos < SPRITE_DMA_PAIR_CAPTURE_HPOS[sprite / 2]
@@ -429,7 +442,10 @@ pub(super) fn manual_sprite_lines_from_events_with_visible_line0(
             regs.direct_data_armed[sprite] = false;
         }
         regs.apply_write(off, event.value);
-        if (event.vpos as i32) < visible_line0 && matches!((off - 0x140) & 0x0006, 0x4 | 0x6) {
+        if sprite_dma_observed
+            && (event.vpos as i32) < visible_line0
+            && matches!((off - 0x140) & 0x0006, 0x4 | 0x6)
+        {
             regs.direct_data_armed[sprite] = false;
         }
         next_beam[sprite] = event_beam;

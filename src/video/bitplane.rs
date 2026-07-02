@@ -3068,6 +3068,7 @@ pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
         visible_line0,
         rows,
         false,
+        input.sprite_dma_observed,
     );
     if input.sprite_dma_observed {
         let dma_seeded_lines = manual_sprite_lines_from_captured_dma_reuse(
@@ -3478,10 +3479,22 @@ pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
                 words_per_row,
                 dma_planes.min(nplanes),
             );
+            let fetch_starts_inside_window = {
+                let mut display_control = base_controls[y];
+                for segment in row_control_segments {
+                    if segment.x <= x_start {
+                        display_control = segment.control;
+                    }
+                }
+                let pixel_repeat = display_control.framebuffer_pixel_repeat();
+                display_control.fetch_start_native_x(display_control.diw_h_start(), pixel_repeat)
+                    > 0
+            };
             let carry_words = bitplane_carry_words_for_line(
                 block_start,
                 x_start,
                 dma_output_start_x,
+                fetch_starts_inside_window,
                 previous_playfield_tail_words,
             );
             let line_plan = DenisePlannedPlayfieldLine::new(

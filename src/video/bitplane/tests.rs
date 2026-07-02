@@ -1381,15 +1381,24 @@ fn bplcon1_delay_drops_carry_when_first_bpl1dat_is_late() {
     previous_tail[0] = Some(0x0001);
 
     assert_eq!(
-        bitplane_carry_words_for_line(false, 64, Some(64), previous_tail),
+        bitplane_carry_words_for_line(false, 64, Some(64), false, previous_tail),
         previous_tail
     );
     assert_eq!(
-        bitplane_carry_words_for_line(false, 64, Some(158), previous_tail),
+        bitplane_carry_words_for_line(false, 64, Some(158), false, previous_tail),
         [None; 8]
     );
     assert_eq!(
-        bitplane_carry_words_for_line(true, 64, Some(64), previous_tail),
+        bitplane_carry_words_for_line(true, 64, Some(64), false, previous_tail),
+        [None; 8]
+    );
+    // A late DDFSTRT places the line's first BPL1DAT load inside the open
+    // display window; the serializer taps have run empty by then, so no
+    // previous-line tail is observable. Regression example: Gen-X's rippled
+    // reflection rows (DDFSTRT $40, BPLCON1 scroll) showed stray dashes at
+    // the window's left edge.
+    assert_eq!(
+        bitplane_carry_words_for_line(false, 64, Some(64), true, previous_tail),
         [None; 8]
     );
 }
@@ -2324,6 +2333,7 @@ fn latched_sprite_vstart_equal_vstop_is_empty() {
         PAL_VISIBLE_LINE0,
         FB_HEIGHT,
         true,
+        true,
     );
 
     assert!(manual_sprite_lines[0].is_empty());
@@ -2353,6 +2363,7 @@ fn direct_sprite_data_write_ignores_dma_vertical_window() {
         PAL_VISIBLE_LINE0,
         FB_HEIGHT,
         false,
+        true,
     );
 
     assert!(manual_sprite_lines[0]
@@ -2464,6 +2475,7 @@ fn sprite_dma_capture_suppresses_latched_manual_sprite_spans() {
         PAL_VISIBLE_LINE0,
         FB_HEIGHT,
         false,
+        true,
     );
 
     assert!(manual_sprite_lines[0].is_empty());
@@ -2485,6 +2497,7 @@ fn manual_sprite_replay_does_not_seed_from_frame_start_data_latch() {
         PAL_VISIBLE_LINE0,
         FB_HEIGHT,
         false,
+        true,
     );
 
     assert!(manual_sprite_lines[0].is_empty());
@@ -2525,6 +2538,7 @@ fn pre_dma_position_write_preserves_armed_latch_for_later_position_write() {
         PAL_VISIBLE_LINE0,
         FB_HEIGHT,
         false,
+        true,
     );
 
     assert!(manual_sprite_lines[0].iter().any(|line| {
@@ -2557,6 +2571,7 @@ fn post_dma_position_write_reuses_armed_frame_start_data_latch() {
         PAL_VISIBLE_LINE0,
         FB_HEIGHT,
         false,
+        true,
     );
 
     assert!(manual_sprite_lines[0].iter().any(|line| {
@@ -2584,6 +2599,7 @@ fn offscreen_pre_dma_position_write_preserves_armed_latch_for_same_line_retime()
         PAL_VISIBLE_LINE0,
         FB_HEIGHT,
         false,
+        true,
     );
 
     assert!(manual_sprite_lines[3].iter().any(|line| {
@@ -2609,10 +2625,84 @@ fn pre_visible_data_write_seeds_latch_without_direct_output_guard() {
         PAL_VISIBLE_LINE0,
         FB_HEIGHT,
         false,
+        true,
     );
 
     assert!(manual_sprite_lines[3].iter().any(|line| {
         line.beam_y == 99 && line.hstart == 0x78 && line.data == 0xE92D && line.datb == 0x16FF
+    }));
+}
+
+#[test]
+fn vblank_data_write_arms_manual_sprite_for_all_lines_without_sprite_dma() {
+    // With sprite DMA idle, a vertical-blank arm sequence (SPRxPOS, SPRxCTL,
+    // SPRxDATA, SPRxDATB) must behave like Denise: the CTL write disarms, the
+    // DATA write re-arms, and the armed serializer fires at HSTART on every
+    // line. VSTART == VSTOP is irrelevant without DMA (Denise has no vertical
+    // comparator). Regression example: Gen-X's edge-masking line sprites,
+    // armed once per frame during vblank.
+    let initial_state = blank_state();
+
+    let manual_sprite_lines = manual_sprite_lines_from_events_with_visible_line0(
+        &initial_state,
+        &[
+            cpu_event(0, 34, 0x140, 0x2C7E),
+            cpu_event(0, 38, 0x142, 0x2C00),
+            cpu_event(0, 50, 0x144, 0x0001),
+            cpu_event(0, 54, 0x146, 0xFFFE),
+        ],
+        &[None; 8],
+        PAL_VISIBLE_LINE0,
+        FB_HEIGHT,
+        false,
+        false,
+    );
+
+    let hstart = 0x00FC;
+    for beam_y in [
+        PAL_VISIBLE_LINE0,
+        PAL_VISIBLE_LINE0 + FB_HEIGHT as i32 / 2,
+        PAL_VISIBLE_LINE0 + FB_HEIGHT as i32 - 1,
+    ] {
+        assert!(
+            manual_sprite_lines[0].iter().any(|line| {
+                line.beam_y == beam_y
+                    && line.hstart == hstart
+                    && line.data == 0x0001
+                    && line.datb == 0xFFFE
+            }),
+            "expected armed manual sprite line at beam_y={beam_y}"
+        );
+    }
+}
+
+#[test]
+fn early_position_write_keeps_manual_sprite_armed_without_sprite_dma() {
+    // SPRxPOS never disarms a sprite on Denise; the early same-line POS guard
+    // reconciles unseen DMA writes and must not fire when no sprite DMA ran.
+    let initial_state = blank_state();
+    let beam_y = PAL_VISIBLE_LINE0;
+    let (pos, ctl) = sprite_control_words(beam_y as u16, beam_y as u16, DIW_HSTART_FB0 as u16);
+    let (moved_pos, _) =
+        sprite_control_words(beam_y as u16, beam_y as u16, (DIW_HSTART_FB0 + 32) as u16);
+
+    let manual_sprite_lines = manual_sprite_lines_from_events_with_visible_line0(
+        &initial_state,
+        &[
+            cpu_event(0, 34, 0x140, pos),
+            cpu_event(0, 38, 0x142, ctl),
+            cpu_event(0, 50, 0x144, 0x8000),
+            cpu_event((beam_y + 1) as u32, 8, 0x140, moved_pos),
+        ],
+        &[None; 8],
+        PAL_VISIBLE_LINE0,
+        FB_HEIGHT,
+        false,
+        false,
+    );
+
+    assert!(manual_sprite_lines[0].iter().any(|line| {
+        line.beam_y == beam_y + 1 && line.hstart == DIW_HSTART_FB0 + 32 && line.data == 0x8000
     }));
 }
 
@@ -2639,6 +2729,7 @@ fn manual_sprite_replay_starts_from_beam_timed_data_write() {
         PAL_VISIBLE_LINE0,
         FB_HEIGHT,
         false,
+        true,
     );
 
     assert!(manual_sprite_lines[0]
@@ -2669,6 +2760,7 @@ fn early_line_position_write_does_not_reuse_previous_manual_sprite_data() {
         PAL_VISIBLE_LINE0,
         FB_HEIGHT,
         false,
+        true,
     );
 
     assert!(manual_sprite_lines[0]
@@ -2771,6 +2863,7 @@ fn held_sprite_after_dma_disable_persists_past_descriptor_vstop() {
         PAL_VISIBLE_LINE0,
         FB_HEIGHT,
         true,
+        true,
     );
 
     let line = manual_sprite_lines[0]
@@ -2817,6 +2910,7 @@ fn held_sprite_starts_from_dma_loaded_position_and_control() {
         &held,
         PAL_VISIBLE_LINE0,
         FB_HEIGHT,
+        true,
         true,
     );
 
@@ -4124,6 +4218,7 @@ fn dma_loaded_sprite_data_rearms_on_same_line_position_write() {
         PAL_VISIBLE_LINE0,
         FB_HEIGHT,
         false,
+        true,
     );
 
     assert!(manual_sprite_lines[0].is_empty());

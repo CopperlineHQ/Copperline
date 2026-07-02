@@ -59,7 +59,12 @@ BPLCON1-delayed samples at the left edge of a contiguous bitplane-DMA block
 come from the previous line's shifter tail when current-line DMA is already
 feeding Denise at the display edge. Block-start lines, and lines whose output
 is held until a delayed first BPL1DAT load, blank that scroll-in because no
-current-line shifter data has reached the visible gate yet. AGA's extended
+current-line shifter data has reached the visible gate yet. The same applies
+when a late DDFSTRT places the row's fetch origin inside the open display
+window (`fetch_start_native_x > 0`): the serializer has run far past its
+previous load by the time the window opens, so the taps between window open
+and the first new word shift out empty and show playfield colour 0, never the
+previous line's tail. AGA's extended
 BPLCON1 delays can exceed one 16-bit shifter word; replay does not reuse the
 single cached line-tail word for those wider delays, so the extra leading gap
 stays background until current-line samples reach Lisa.
@@ -116,6 +121,19 @@ can still be repositioned by later SPRxPOS/CTL writes. Merely enabling
 sprite DMA and crossing an empty sprite pair slot is not enough to make
 captured DMA authoritative; the frame must contain actual fetched or held
 sprite data.
+
+Two manual-replay guards exist only to reconcile DMA writes the beam replay
+cannot see (Agnus drives POS/CTL/DATA through the same Denise registers
+without recording beam events): an early same-line SPRxPOS write hands the
+line to the DMA capture, and a pre-visible SPRxDATA/DATB write seeds the
+latch for later retiming instead of arming direct output. Both apply only
+when sprite DMA was observed in the frame. With sprite DMA idle Denise's own
+rules hold unmodified: SPRxDATA arms at any beam position (including
+vertical blank), SPRxCTL disarms, SPRxPOS never disarms, and an armed sprite
+serializes at HSTART on every line because Denise has no vertical
+comparator. A vblank arm sequence with VSTART equal to VSTOP therefore
+displays full-height columns, which is how Gen-X draws the vertical
+edge-masking line sprites of its shutter transitions.
 
 The mapping from beam coordinates to framebuffer x is anchored by
 constants that encode the hardware's fetch-to-display pipeline delays --
