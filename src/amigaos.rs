@@ -197,6 +197,109 @@ impl OsMemory<'_> {
     }
 }
 
+/// One hunk of a loaded DOS segment list.
+pub struct Segment {
+    /// First byte of the hunk's payload (code/data).
+    pub start: u32,
+    /// Payload bytes (the loader's 8-byte size/next header excluded).
+    pub size: u32,
+}
+
+/// Process field offsets (dos/dosextens.h). pr_SegList/pr_CLI are BPTRs.
+const PR_SEGLIST: u32 = 0x80;
+const PR_CLI: u32 = 0xAC;
+/// CommandLineInterface field offsets: cli_Module is the BPTR to the
+/// currently running command's segment list.
+const CLI_MODULE: u32 = 0x3C;
+/// NT_PROCESS in ln_Type.
+const NT_PROCESS: u8 = 13;
+
+impl OsMemory<'_> {
+    /// The segment list of the program running in `task` (a Process):
+    /// the CLI's loaded command when there is one, else the process's
+    /// own creation seglist (entry 3 of the pr_SegList array).
+    pub fn process_seglist(&self, task: u32) -> Option<u32> {
+        if (self.peek8)(task.wrapping_add(LN_TYPE)) != NT_PROCESS {
+            return None;
+        }
+        let cli = (self.peek32)(task.wrapping_add(PR_CLI));
+        if cli != 0 && cli < 0x0040_0000 {
+            let module = (self.peek32)((cli << 2).wrapping_add(CLI_MODULE));
+            if module != 0 {
+                return Some(module);
+            }
+        }
+        let array = (self.peek32)(task.wrapping_add(PR_SEGLIST));
+        if array == 0 || array >= 0x0040_0000 {
+            return None;
+        }
+        let count = (self.peek32)(array << 2);
+        if count < 3 {
+            return None;
+        }
+        let seg = (self.peek32)((array << 2).wrapping_add(3 * 4));
+        (seg != 0).then_some(seg)
+    }
+
+    /// Walk a BPTR segment list into (start, size) hunks. Each segment's
+    /// BPTR addresses a next-pointer longword, preceded by the loader's
+    /// size longword; the payload follows the next pointer.
+    pub fn walk_seglist(&self, mut bptr: u32) -> Vec<Segment> {
+        let mut out = Vec::new();
+        while bptr != 0 && bptr < 0x0040_0000 && out.len() < 64 {
+            let addr = bptr << 2;
+            if !(4..0x0100_0000).contains(&addr) {
+                break;
+            }
+            let size = (self.peek32)(addr.wrapping_sub(4));
+            let next = (self.peek32)(addr);
+            out.push(Segment {
+                start: addr.wrapping_add(4),
+                size: size.saturating_sub(8),
+            });
+            bptr = next;
+        }
+        out
+    }
+
+    /// The currently scheduled process's loaded segments, when it is a
+    /// process with a walkable seglist.
+    pub fn current_process_segments(&self, execbase: u32) -> Vec<Segment> {
+        let task = (self.peek32)(execbase.wrapping_add(THIS_TASK));
+        if !plausible_ptr(task) {
+            return Vec::new();
+        }
+        match self.process_seglist(task) {
+            Some(seglist) => self.walk_seglist(seglist),
+            None => Vec::new(),
+        }
+    }
+}
+
+/// Bus-backed convenience wrapper: the current process's segments, or
+/// why exec is not walkable. Shared by the console SEGMENTS command and
+/// the GDB stub (monitor segments / qOffsets).
+pub fn segments_on_bus(bus: &crate::bus::Bus) -> Result<Vec<Segment>, String> {
+    let peek8 = |addr: u32| {
+        let word = bus.peek_word_any(addr & !1);
+        if addr & 1 == 0 {
+            (word >> 8) as u8
+        } else {
+            word as u8
+        }
+    };
+    let peek32 = |addr: u32| {
+        (u32::from(bus.peek_word_any(addr)) << 16)
+            | u32::from(bus.peek_word_any(addr.wrapping_add(2)))
+    };
+    let os = OsMemory {
+        peek8: &peek8,
+        peek32: &peek32,
+    };
+    let base = os.exec_base()?;
+    Ok(os.current_process_segments(base))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,6 +416,33 @@ mod tests {
 
         // Untouched lists read as empty, not garbage.
         assert!(os.walk(base, OsList::Ports).is_empty());
+    }
+
+    #[test]
+    fn walks_a_cli_process_seglist() {
+        let mut mem = build_exec_world();
+        // Make ThisTask a process with a CLI whose module is a two-hunk
+        // seglist: BPTRs at $8000 and $9000 (headers 8 bytes before the
+        // payload).
+        let this = 0x0002_1000;
+        mem.put8(this + LN_TYPE, NT_PROCESS);
+        let cli_addr = 0x0003_0000u32;
+        mem.put32(this + PR_CLI, cli_addr >> 2);
+        mem.put32(cli_addr + CLI_MODULE, 0x8000 >> 2);
+        mem.put32(0x8000 - 4, 0x100); // hunk size incl header
+        mem.put32(0x8000, 0x9000 >> 2); // next
+        mem.put32(0x9000 - 4, 0x40);
+        mem.put32(0x9000, 0); // end of list
+        let peek8 = |a: u32| mem.peek8(a);
+        let peek32 = |a: u32| mem.peek32(a);
+        let os = os(&peek8, &peek32);
+        let base = os.exec_base().unwrap();
+        let segs = os.current_process_segments(base);
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs[0].start, 0x8004);
+        assert_eq!(segs[0].size, 0xF8);
+        assert_eq!(segs[1].start, 0x9004);
+        assert_eq!(segs[1].size, 0x38);
     }
 
     #[test]

@@ -129,6 +129,31 @@ For byte-identical replay, keep the usual determinism requirements from
 [](reverse): set `COPPERLINE_RTC_FIXED_SECS` when guest RTC reads matter, and
 avoid externally mutating hard-drive/CD images during a debug session.
 
+## Source-Level Debugging of Amiga Programs
+
+Copperline answers GDB's `qOffsets` query with the load addresses of the
+current process's segment list (the hunks `LoadSeg()` scattered through
+RAM): `TextSeg=` is the first hunk and `DataSeg=` the second, when
+present. With an amiga-gcc toolchain (bebbo's `m68k-amigaos-gdb`), that
+means source-level debugging of a program running inside the emulator
+mostly just works:
+
+1. Build with debug info: `m68k-amigaos-gcc -g -O0 prog.c -o prog`.
+2. Start Copperline with `--gdb`, boot Workbench, and start `prog`
+   (easiest from a CLI so the process has a `cli_Module` seglist).
+3. `m68k-amigaos-gdb prog` then `target remote localhost:2345`. GDB asks
+   `qOffsets`, relocates the program's sections to the hunk addresses,
+   and `break main` / `next` / `print` work on source lines.
+
+If the program was not yet running when GDB attached, re-run `qOffsets`
+by reattaching, or relocate manually: `monitor segments` prints every
+hunk address, and `add-symbol-file prog.elf ADDR` (first hunk) loads the
+symbols at the right place. The `SEGMENTS` console command prints the
+same map, pre-formatted with that hint. When no process seglist is
+walkable (ROM code, task rather than process, OS not up yet), the
+`qOffsets` reply is empty and GDB falls back to link-time addresses --
+harmless for ROM-level sessions.
+
 ## Monitor Commands
 
 | Command | Effect |
@@ -146,3 +171,4 @@ avoid externally mutating hard-drive/CD images during a debug session.
 | `clear-reg-watches` | remove all custom-register watches |
 | `copper [auto\|pc\|ADDR] [COUNT]` | disassemble Copper instructions |
 | `last-writer ADDR` | reverse-search the last write to a word |
+| `segments` | the current process's loaded hunks (LoadSeg addresses) |

@@ -114,6 +114,7 @@ garbage):
 | `LIBS` | Opened libraries with versions (`graphics.library v40.10`) |
 | `DEVS` | Devices with versions |
 | `RESOURCES`, `PORTS` | The resource and message-port lists |
+| `SEGMENTS` | The current process's loaded hunks (its CLI command's segment list when there is one), with the `add-symbol-file` line a source-level GDB session needs |
 | `CATCHTASK NAME` | Stop when exec schedules a task whose name contains NAME (case-insensitive); `CATCHTASK` alone clears it |
 | `CATCHALERT` | Break at exec's `Alert()` entry: fires on every guru/alert with D7 holding the code |
 | `GURU [CODE]` | Decode an alert code (default: the current D7): deadend flag, subsystem, cause, CPU-trap alerts |

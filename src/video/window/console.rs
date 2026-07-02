@@ -148,7 +148,7 @@ const CONSOLE_HELP: &[&str] = &[
     "            copper [pc|ADDR] [N]   custom   blits   find HEX [START]",
     "            writer ADDR",
     "            history/h [N]   stack/bt",
-    "os:         tasks  libs  devs  resources  ports   guru [CODE]",
+    "os:         tasks  libs  devs  resources  ports   segments   guru [CODE]",
     "hunt:       hunt start [B|W]  hunt eq/ne/lt/gt VAL  hunt same|diff  hunt list",
     "modify:     poke ADDR VAL   setreg REG VAL   trace start [PATH]|stop",
     "console:    help  clear  close",
@@ -465,6 +465,7 @@ impl App {
                 ConsoleOutcome::lines(self.console_os_list(crate::amigaos::OsList::Resources))
             }
             "PORTS" => ConsoleOutcome::lines(self.console_os_list(crate::amigaos::OsList::Ports)),
+            "SEGMENTS" => ConsoleOutcome::lines(self.console_segments()),
             "CATCHTASK" => {
                 if args.is_empty() {
                     self.emu.machine.ui_set_task_catch(None);
@@ -1124,6 +1125,34 @@ impl App {
             if machine.stopped() { "  STOPPED" } else { "" }
         ));
         lines
+    }
+
+    /// SEGMENTS: the current process's loaded hunks (its CLI command's
+    /// segment list when there is one), plus the add-symbol-file line a
+    /// source-level GDB session needs.
+    fn console_segments(&self) -> Vec<String> {
+        match crate::amigaos::segments_on_bus(self.emu.bus()) {
+            Err(reason) => vec![format!("!{reason}")],
+            Ok(segs) if segs.is_empty() => {
+                vec!["current task has no walkable segment list".to_string()]
+            }
+            Ok(segs) => {
+                let mut lines = Vec::new();
+                for (i, seg) in segs.iter().enumerate() {
+                    lines.push(format!(
+                        "hunk {i}: ${:06X}..${:06X}  ({} bytes)",
+                        seg.start,
+                        seg.start + seg.size,
+                        seg.size
+                    ));
+                }
+                lines.push(format!(
+                    "gdb: add-symbol-file prog.elf 0x{:X}",
+                    segs[0].start
+                ));
+                lines
+            }
+        }
     }
 
     /// Run `walk` against a validated ExecBase using peeks over the bus,

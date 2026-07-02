@@ -2576,6 +2576,42 @@ fn plant_exec_world(app: &mut super::App) {
 }
 
 #[test]
+fn console_segments_walks_the_cli_module() {
+    let mut app = test_app();
+    app.open_console();
+    plant_exec_world(&mut app);
+    // Make ThisTask ($2000) a CLI process: NT_PROCESS, pr_CLI -> $4000
+    // whose cli_Module is a two-hunk seglist at $8000 -> $9000.
+    {
+        let ram = &mut app.emu.bus_mut().mem.chip_ram;
+        let put32 = |ram: &mut [u8], addr: usize, v: u32| {
+            ram[addr..addr + 4].copy_from_slice(&v.to_be_bytes());
+        };
+        ram[0x2000 + 8] = 13; // NT_PROCESS
+        put32(ram, 0x2000 + 0xAC, 0x4000 >> 2);
+        put32(ram, 0x4000 + 0x3C, 0x8000 >> 2);
+        put32(ram, 0x8000 - 4, 0x100);
+        put32(ram, 0x8000, 0x9000 >> 2);
+        put32(ram, 0x9000 - 4, 0x40);
+        put32(ram, 0x9000, 0);
+    }
+    let out = console_run(&mut app, "SEGMENTS");
+    assert!(
+        out.iter().any(|l| l.contains("hunk 0: $008004..$0080FC")),
+        "{out:?}"
+    );
+    assert!(
+        out.iter().any(|l| l.contains("hunk 1: $009004..$00903C")),
+        "{out:?}"
+    );
+    assert!(
+        out.iter()
+            .any(|l| l.contains("add-symbol-file") && l.contains("0x8004")),
+        "{out:?}"
+    );
+}
+
+#[test]
 fn console_os_introspection_and_task_catch() {
     let mut app = test_app();
     app.open_console();
