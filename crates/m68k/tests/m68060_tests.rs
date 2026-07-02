@@ -677,3 +677,49 @@ fn pmove_is_line_f_on_68060() {
     step(&mut cpu, &mut bus);
     assert_eq!(cpu.pc, 0x0340, "PMOVE is an undefined F-line on the 68060");
 }
+
+#[test]
+fn lpstop_loads_sr_and_stops_on_68060() {
+    let (mut cpu, mut bus) = setup_060();
+    bus.write_word_at(0x0200, 0xF800);
+    bus.write_word_at(0x0202, 0x01C0);
+    bus.write_word_at(0x0204, 0x2300); // supervisor, IPL 3
+    step(&mut cpu, &mut bus);
+    assert_ne!(cpu.stopped, 0, "LPSTOP must stop the CPU");
+    assert_eq!(cpu.get_sr() & 0x0700, 0x0300, "SR loaded from the immediate");
+}
+
+#[test]
+fn lpstop_is_privileged_and_line_f_elsewhere() {
+    // User mode: privilege violation.
+    let (mut cpu, mut bus) = setup_060();
+    bus.write_word_at(0x0200, 0xF800);
+    bus.write_word_at(0x0202, 0x01C0);
+    bus.write_word_at(0x0204, 0x0000);
+    cpu.set_sr(0x0000);
+    cpu.pc = 0x0200;
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.pc, 0x0320, "user-mode LPSTOP is a privilege violation");
+
+    // Wrong extension word: undefined F-line.
+    let (mut cpu, mut bus) = setup_060();
+    bus.write_word_at(0x0200, 0xF800);
+    bus.write_word_at(0x0202, 0x1234);
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.pc, 0x0340, "F800 with a wrong extension is Line-F");
+
+    // 68040: no LPSTOP at all.
+    let mut cpu = CpuCore::new();
+    cpu.set_cpu_type(CpuType::M68040);
+    let mut bus = TestBus::new();
+    bus.write_long_at(0x00, 0x1000);
+    bus.write_long_at(0x04, 0x0200);
+    bus.write_long_at(0x2C, 0x0340);
+    cpu.reset(&mut bus);
+    cpu.set_sr(0x2700);
+    bus.write_word_at(0x0200, 0xF800);
+    bus.write_word_at(0x0202, 0x01C0);
+    cpu.pc = 0x0200;
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.pc, 0x0340, "LPSTOP is Line-F on the 68040");
+}

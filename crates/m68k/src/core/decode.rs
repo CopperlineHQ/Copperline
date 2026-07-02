@@ -254,6 +254,23 @@ fn dispatch_group_f<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
         return 4;
     }
 
+    // LPSTOP #imm (68060 only): F800 / 01C0 / SR word. Privileged; loads
+    // SR and stops until an interrupt or reset, like STOP with a low-power
+    // bus broadcast (the bus indication is not modeled). A wrong extension
+    // word is an undefined F-line.
+    if cpu.is_060() && opcode == 0xF800 {
+        if cpu.read_16(bus, cpu.pc) != 0x01C0 {
+            return FLINE_TRAP_SENTINEL;
+        }
+        if !cpu.is_supervisor() {
+            return cpu.exception_privilege(bus);
+        }
+        let _ = cpu.read_imm_16(bus); // consume the 01C0 extension
+        let sr = cpu.read_imm_16(bus);
+        cpu.stop(sr);
+        return 4;
+    }
+
     // PMMU/COP0 opcodes are in the 0xF0xx/0xF1xx range (1111 000? .... ....) and are further
     // subdivided by (opcode>>9)&7. Group 0 carries PMOVE/PFLUSH/PTEST/etc with an extension word.
     if ((opcode >> 9) & 0x7) == 0 {
