@@ -381,14 +381,16 @@ impl ConsolePanel {
     }
 
     pub fn push_input_char(&mut self, ch: char) {
-        if self.input.len() >= 72 {
+        // Any printable ASCII (the interpreter is case-insensitive, so
+        // what you type or paste is what you see).
+        if !(' '..='~').contains(&ch) || self.input.len() >= 72 {
             return;
         }
         // Doubled leading spaces never help a command line.
         if ch == ' ' && (self.input.is_empty() || self.input.ends_with(' ')) {
             return;
         }
-        self.input.push(ch.to_ascii_uppercase());
+        self.input.push(ch);
         self.history_pos = None;
     }
 
@@ -4093,7 +4095,9 @@ pub fn draw(
 // ---------------------------------------------------------------------------
 
 pub fn parse_hex_u32(s: &str) -> Option<u32> {
-    let s = s.trim();
+    // Tolerate the conventional $ prefix (console input allows it; the
+    // debugger displays addresses that way).
+    let s = s.trim().trim_start_matches('$');
     if s.is_empty() {
         return None;
     }

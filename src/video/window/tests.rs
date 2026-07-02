@@ -2501,6 +2501,31 @@ fn console_keyboard_path_types_and_executes() {
 }
 
 #[test]
+fn console_text_insertion_and_multiline_paste() {
+    let mut app = test_app();
+    app.open_console();
+
+    // Typed/pasted text preserves case and punctuation; the interpreter
+    // is case-insensitive.
+    app.console_insert_text("b $c01000");
+    assert_eq!(app.console_panel.as_ref().unwrap().input, "b $c01000");
+    app.console_insert_text("\n");
+    assert!(app.emu.machine.ui_breaks().is_breakpoint(0x00C0_1000));
+    assert!(app.console_panel.as_ref().unwrap().input.is_empty());
+
+    // A multi-line paste runs each complete line and leaves the trailing
+    // fragment in the prompt. Blank lines are ignored.
+    app.console_insert_text("btrap 100 40\n\nsetreg d2 77\nm 0");
+    assert_eq!(app.emu.bus().ui_beam_traps().len(), 1);
+    assert_eq!(app.emu.machine.d(2), 0x77);
+    assert_eq!(app.console_panel.as_ref().unwrap().input, "m 0");
+
+    // Control characters never reach the prompt.
+    app.console_insert_text("\u{16}\u{7f}");
+    assert_eq!(app.console_panel.as_ref().unwrap().input, "m 0");
+}
+
+#[test]
 fn console_inspection_and_stop_commands() {
     let mut app = test_app();
     app.open_console();

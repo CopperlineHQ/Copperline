@@ -15,13 +15,16 @@ A console session: a breakpoint set, hit, and inspected.
 ```
 
 Opening the console pauses the machine (`RUN` resumes it); closing it
-restores the previous run state. The prompt takes letters, digits, and
-spaces; {kbd}`Enter` executes, {kbd}`Backspace` edits, {kbd}`Up` /
-{kbd}`Down` walk the command history, and {kbd}`PageUp` /
-{kbd}`PageDown` or the mouse wheel scroll the output. Commands are
-case-insensitive; addresses and values are hex, beam positions (VPOS,
-HPOS) are decimal, matching the coordinates every other debugger surface
-displays.
+restores the previous run state. The prompt takes any printable text;
+{kbd}`Enter` executes, {kbd}`Backspace` edits, {kbd}`Up` / {kbd}`Down`
+walk the command history, and {kbd}`PageUp` / {kbd}`PageDown` or the
+mouse wheel scroll the output. {kbd}`Cmd+V` (macOS) or {kbd}`Ctrl+V`
+pastes the host clipboard -- a multi-line paste executes each complete
+line in order and leaves the trailing fragment in the prompt, so a
+saved command script can be replayed with one paste. Commands are
+case-insensitive; addresses and values are hex (a leading `$` is fine),
+beam positions (VPOS, HPOS) are decimal, matching the coordinates every
+other debugger surface displays.
 
 The console drives the same machinery as the debugger window and the GDB
 stub, so everything set here shows there and vice versa: a `BREAK` lands

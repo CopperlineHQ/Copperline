@@ -2394,6 +2394,7 @@ impl App {
                         state,
                         physical_key: PhysicalKey::Code(code),
                         repeat,
+                        text,
                         ..
                     },
                 ..
@@ -2405,6 +2406,11 @@ impl App {
                 }
                 if code == KeyCode::KeyQ && host_shortcut_modifier_pressed(self.modifiers) {
                     event_loop.exit();
+                } else if kind == ToolPanelKind::Console
+                    && self.console_handle_text_input(code, text.as_deref())
+                {
+                    // Paste or layout-aware typed text; editing and command
+                    // keys fall through to the keycode handler below.
                 } else if !self.ui_handle_tool_key(kind, code) {
                     self.request_redraw();
                 }
