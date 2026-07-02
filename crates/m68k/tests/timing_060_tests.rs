@@ -170,3 +170,109 @@ fn other_models_keep_their_cycle_counts() {
         );
     }
 }
+
+/// Enable the branch cache (CACR.EBC) via MOVEC.
+fn enable_ebc(cpu: &mut CpuCore, bus: &mut TestBus, extra: u32) {
+    let pc = cpu.pc;
+    bus.write_word_at(0x0100, 0x4E7B); // MOVEC D0,CACR
+    bus.write_word_at(0x0102, 0x0002);
+    cpu.dar[0] = (1 << 23) | extra;
+    cpu.pc = 0x0100;
+    step_cycles(cpu, bus);
+    cpu.pc = pc;
+}
+
+#[test]
+fn branch_cache_folds_the_second_taken_branch() {
+    let (mut cpu, mut bus) = setup(CpuType::M68060);
+    enable_ebc(&mut cpu, &mut bus, 0);
+    // BRA.S looping on itself.
+    bus.write_word_at(0x0200, 0x60FE);
+    assert_eq!(
+        step_cycles(&mut cpu, &mut bus),
+        7,
+        "first taken branch misses and pays the refill"
+    );
+    assert_eq!(
+        step_cycles(&mut cpu, &mut bus),
+        0,
+        "second execution is predicted and folded"
+    );
+    assert_eq!(step_cycles(&mut cpu, &mut bus), 0);
+}
+
+#[test]
+fn branch_cache_cabc_strobe_clears_and_ebc_off_is_static() {
+    let (mut cpu, mut bus) = setup(CpuType::M68060);
+    enable_ebc(&mut cpu, &mut bus, 0);
+    bus.write_word_at(0x0200, 0x60FE); // BRA.S self
+    step_cycles(&mut cpu, &mut bus);
+    assert_eq!(step_cycles(&mut cpu, &mut bus), 0, "folded before the clear");
+
+    enable_ebc(&mut cpu, &mut bus, 1 << 22); // EBC | CABC strobe
+    assert_eq!(
+        step_cycles(&mut cpu, &mut bus),
+        7,
+        "CABC cleared the entry: miss again"
+    );
+
+    // EBC off: static cost every time, no learning.
+    let (mut cpu, mut bus) = setup(CpuType::M68060);
+    bus.write_word_at(0x0200, 0x60FE);
+    assert_eq!(step_cycles(&mut cpu, &mut bus), 7);
+    assert_eq!(step_cycles(&mut cpu, &mut bus), 7, "EBC off never folds");
+}
+
+#[test]
+fn branch_cache_counter_follows_alternating_condition() {
+    let (mut cpu, mut bus) = setup(CpuType::M68060);
+    enable_ebc(&mut cpu, &mut bus, 0);
+    // BEQ.S +2: toggle Z each execution by re-running the same branch.
+    bus.write_word_at(0x0200, 0x6702);
+    // taken (Z set), miss -> mispredict cost, allocates weakly-taken.
+    cpu.set_sr(0x2704);
+    cpu.pc = 0x0200;
+    assert_eq!(step_cycles(&mut cpu, &mut bus), 7, "taken miss");
+    // not taken (Z clear), predicted taken -> mispredict; counter 2->1.
+    cpu.set_sr(0x2700);
+    cpu.pc = 0x0200;
+    assert_eq!(step_cycles(&mut cpu, &mut bus), 7, "hit-wrong");
+    // not taken again, counter 1 predicts not-taken -> 1 cycle.
+    cpu.pc = 0x0200;
+    assert_eq!(step_cycles(&mut cpu, &mut bus), 1, "correct not-taken");
+    // taken, predicted not-taken -> mispredict; counter 0->1... then grows.
+    cpu.set_sr(0x2704);
+    cpu.pc = 0x0200;
+    assert_eq!(step_cycles(&mut cpu, &mut bus), 7);
+}
+
+#[test]
+fn branch_cache_cubc_clears_only_user_entries() {
+    let (mut cpu, mut bus) = setup(CpuType::M68060);
+    enable_ebc(&mut cpu, &mut bus, 0);
+    // Allocate in supervisor mode.
+    bus.write_word_at(0x0200, 0x60FE);
+    step_cycles(&mut cpu, &mut bus);
+    assert_eq!(step_cycles(&mut cpu, &mut bus), 0, "supervisor entry folded");
+    // CUBC must not clear a supervisor entry.
+    enable_ebc(&mut cpu, &mut bus, 1 << 21);
+    assert_eq!(
+        step_cycles(&mut cpu, &mut bus),
+        0,
+        "supervisor entry survives CUBC"
+    );
+}
+
+#[test]
+fn dbcc_loop_folds_with_branch_cache() {
+    let (mut cpu, mut bus) = setup(CpuType::M68060);
+    enable_ebc(&mut cpu, &mut bus, 0);
+    bus.write_word_at(0x0200, 0x51C8); // DBF D0,-2 (self-loop)
+    bus.write_word_at(0x0202, 0xFFFE);
+    cpu.dar[0] = 3;
+    assert_eq!(step_cycles(&mut cpu, &mut bus), 7, "first loop iteration misses");
+    assert_eq!(step_cycles(&mut cpu, &mut bus), 0, "steady-state loop folds");
+    assert_eq!(step_cycles(&mut cpu, &mut bus), 0);
+    // Expiry: predicted taken but falls through -> mispredict.
+    assert_eq!(step_cycles(&mut cpu, &mut bus), 7, "loop exit mispredicts");
+}

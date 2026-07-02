@@ -240,6 +240,10 @@ pub struct CpuCore {
     /// Initial cycles for timeslice
     pub initial_cycles: i32,
 
+    /// 68060 pipeline timing state: the branch cache (and, with pairing,
+    /// the pending pOEP head). Serialized - it changes cycle counts.
+    pub oep060: crate::core::timing_060::Oep060Timing,
+
     /// 68060 escape hatch: execute the instructions the 060 removed from
     /// silicon (MOVEP, CHK2/CMP2, CAS2, misaligned CAS, 64-bit MUL/DIV, and
     /// the unimplemented FPU subset) natively instead of trapping for the
@@ -435,6 +439,7 @@ impl CpuCore {
             pending_fault_cause: None,
             cycles_remaining: 0,
             initial_cycles: 0,
+            oep060: Default::default(),
             emulate_unimplemented_060: false,
             sst_m68000_compat: false,
         };
@@ -580,9 +585,11 @@ impl CpuCore {
         self.cacr = 0;
         self.cacr_pending_ops |= CACR_CI | CACR_CD;
         // 68060 control registers: identification/revision persist, the
-        // writable bits (EDEBUG/DFP/ESS) clear.
+        // writable bits (EDEBUG/DFP/ESS) clear. Reset invalidates the
+        // branch cache along with the other caches.
         self.pcr = PCR_060_RESET;
         self.buscr = 0;
+        self.oep060.branch_cache.clear_all();
         self.prefetch_queue = [0; 2];
         self.prefetch_count = 0;
         self.consume_without_prefetch = false;
@@ -963,18 +970,32 @@ impl CpuCore {
                     // the branch-cache model when it lands; accepted and
                     // discarded until then). Cache invalidation stays with
                     // CINV/CPUSH like the 040.
-                    CpuType::M68060 => (
-                        CACR_060_EDC
-                            | CACR_060_NAD
-                            | CACR_060_ESB
-                            | CACR_060_DPI
-                            | CACR_060_FOC
-                            | CACR_060_EBC
-                            | CACR_060_EIC
-                            | CACR_060_NAI
-                            | CACR_060_FIC,
-                        0,
-                    ),
+                    CpuType::M68060 => {
+                        // The branch-cache clear strobes act immediately and
+                        // never store; disabling EBC also clears the table so
+                        // re-enabling starts cold (software is required to
+                        // clear before re-enabling anyway).
+                        if value & CACR_060_CABC != 0 {
+                            self.oep060.branch_cache.clear_all();
+                        } else if value & CACR_060_CUBC != 0 {
+                            self.oep060.branch_cache.clear_user();
+                        }
+                        if self.cacr & CACR_060_EBC != 0 && value & CACR_060_EBC == 0 {
+                            self.oep060.branch_cache.clear_all();
+                        }
+                        (
+                            CACR_060_EDC
+                                | CACR_060_NAD
+                                | CACR_060_ESB
+                                | CACR_060_DPI
+                                | CACR_060_FOC
+                                | CACR_060_EBC
+                                | CACR_060_EIC
+                                | CACR_060_NAI
+                                | CACR_060_FIC,
+                            0,
+                        )
+                    }
                     // 68040 CACR defines only the two cache-enable bits and
                     // has no clear strobes - invalidation is done with the
                     // CINV/CPUSH instructions (see decode.rs). Reserved bits

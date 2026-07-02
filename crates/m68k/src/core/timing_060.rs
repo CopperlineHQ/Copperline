@@ -97,6 +97,95 @@ pub const CYC_060_DBCC_EXPIRED: i32 = 3;
 /// Floor for non-branch flow changes (JMP/JSR/RTS/RTE...): refill cost.
 pub const CYC_060_FLOW_MIN: i32 = 5;
 
+/// Mispredicted (or unpredicted-taken) branch with the branch cache on.
+pub const CYC_060_MISPREDICT: i32 = 7;
+
+/// The 68060's 256-entry branch cache, modeled as a direct-mapped table of
+/// branch PCs with 2-bit saturating taken counters. A hit that predicts a
+/// taken branch correctly folds it to zero cycles; misses predict not-taken
+/// and allocate on a taken execution. Entries record the privilege mode at
+/// allocation so CACR.CUBC can clear only user entries. The cache changes
+/// cycle counts and cycle counts change chipset interleaving, so it is
+/// serialized with the rest of the CPU.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BranchCache060 {
+    /// Full branch PC per slot (the tag).
+    tags: Vec<u32>,
+    /// Bit 2 = valid, bit 3 = allocated in user mode, bits 1:0 = 2-bit
+    /// saturating taken counter (predict taken when >= 2).
+    state: Vec<u8>,
+}
+
+const BC_VALID: u8 = 1 << 2;
+const BC_USER: u8 = 1 << 3;
+const BC_COUNTER: u8 = 0x03;
+
+impl Default for BranchCache060 {
+    fn default() -> Self {
+        Self {
+            tags: vec![0; 256],
+            state: vec![0; 256],
+        }
+    }
+}
+
+impl BranchCache060 {
+    #[inline]
+    fn slot(pc: u32) -> usize {
+        ((pc >> 1) & 0xFF) as usize
+    }
+
+    pub fn clear_all(&mut self) {
+        self.state.iter_mut().for_each(|s| *s = 0);
+    }
+
+    /// CACR.CUBC: clear only entries allocated in user mode.
+    pub fn clear_user(&mut self) {
+        for s in self.state.iter_mut() {
+            if *s & BC_USER != 0 {
+                *s = 0;
+            }
+        }
+    }
+
+    /// Prediction for the branch at `pc`: Some(taken?) on a hit, None on a
+    /// miss (which predicts not-taken).
+    fn predict(&self, pc: u32) -> Option<bool> {
+        let i = Self::slot(pc);
+        if self.state[i] & BC_VALID != 0 && self.tags[i] == pc {
+            Some(self.state[i] & BC_COUNTER >= 2)
+        } else {
+            None
+        }
+    }
+
+    /// Record an executed branch: allocate on a taken miss (weakly taken),
+    /// step the counter on a hit. Not-taken misses do not allocate.
+    fn update(&mut self, pc: u32, taken: bool, user: bool) {
+        let i = Self::slot(pc);
+        let hit = self.state[i] & BC_VALID != 0 && self.tags[i] == pc;
+        if hit {
+            let mut counter = self.state[i] & BC_COUNTER;
+            counter = if taken {
+                (counter + 1).min(3)
+            } else {
+                counter.saturating_sub(1)
+            };
+            self.state[i] = (self.state[i] & !BC_COUNTER) | counter;
+        } else if taken {
+            self.tags[i] = pc;
+            self.state[i] = BC_VALID | if user { BC_USER } else { 0 } | 2;
+        }
+    }
+}
+
+/// 68060 pipeline timing state carried on the CPU (serialized: it changes
+/// future cycle counts, and cycle counts change chipset interleaving).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Oep060Timing {
+    pub branch_cache: BranchCache060,
+}
+
 /// The 68060 rule of thumb for costs not in the table: a 4-clock 68000
 /// register operation is 1 clock on the 060. Never reuse the 020+ scaling
 /// formula here - its `.max(2)` floor would destroy 1-cycle costs.
@@ -371,21 +460,14 @@ impl CpuCore {
         let flowed = self.change_of_flow;
 
         if info.has(F_BRANCH) {
-            // Static branch costs; the branch-cache model replaces these for
-            // Bcc/BRA/BSR when EBC is enabled.
-            return if info.has(F_DBCC) {
-                // The DBcc handler does not raise change_of_flow; a loop is
-                // visible as a PC that is not the fall-through (ppc + 4).
-                if self.pc != self.ppc.wrapping_add(4) {
-                    CYC_060_DBCC_TAKEN
-                } else {
-                    CYC_060_DBCC_EXPIRED
-                }
-            } else if flowed {
-                CYC_060_BRANCH_TAKEN
+            // The DBcc handler does not raise change_of_flow; a loop is
+            // visible as a PC that is not the fall-through (ppc + 4).
+            let taken = if info.has(F_DBCC) {
+                self.pc != self.ppc.wrapping_add(4)
             } else {
-                CYC_060_BRANCH_NOT_TAKEN
+                flowed
             };
+            return self.branch_cost_060(taken, info.has(F_DBCC));
         }
         if flowed {
             // JMP/JSR/RTS/RTE/RTR and friends: pipeline refill floor.
@@ -400,6 +482,30 @@ impl CpuCore {
             cycles += 1;
         }
         cycles
+    }
+
+    /// Branch cost: static refill numbers with the branch cache disabled;
+    /// with CACR.EBC set, a correctly predicted taken branch folds to zero
+    /// cycles, a correct not-taken costs one, and everything else pays the
+    /// mispredict refill.
+    fn branch_cost_060(&mut self, taken: bool, is_dbcc: bool) -> i32 {
+        if self.cacr & super::cpu::CACR_060_EBC == 0 {
+            return match (is_dbcc, taken) {
+                (true, true) => CYC_060_DBCC_TAKEN,
+                (true, false) => CYC_060_DBCC_EXPIRED,
+                (false, true) => CYC_060_BRANCH_TAKEN,
+                (false, false) => CYC_060_BRANCH_NOT_TAKEN,
+            };
+        }
+        let user = !self.is_supervisor();
+        let predicted_taken = self.oep060.branch_cache.predict(self.ppc).unwrap_or(false);
+        let cost = match (predicted_taken, taken) {
+            (true, true) => 0, // folded out of the stream
+            (false, false) => 1,
+            _ => CYC_060_MISPREDICT,
+        };
+        self.oep060.branch_cache.update(self.ppc, taken, user);
+        cost
     }
 
     /// Model-dispatching wrapper for the three step paths: the 68060 uses its
