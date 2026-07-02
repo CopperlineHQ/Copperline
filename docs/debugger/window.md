@@ -204,8 +204,14 @@ The main heatmap is indexed by beam position: X is `hpos` colour clocks and Y
 is `vpos` lines. Each cell records the chip-bus owner for that colour clock:
 refresh, bitplane, sprite, disk, audio, Copper, blitter, CPU, or idle. The
 white outline marks the framebuffer display area that Copperline captured for
-presentation. Register-write markers show CPU, Copper, and interrupt-time
-custom-register writes at their beam positions.
+presentation; the orange box is the programmed display window (DIW) and the
+cyan verticals are the bitplane fetch bounds (DDFSTRT/DDFSTOP), decoded from
+the frame-start registers (mid-frame changes appear as write markers).
+Register-write markers show CPU, Copper, and interrupt-time custom-register
+writes at their beam positions -- hover a slot to inspect them: the writes
+within roughly one heatmap pixel of the pointer are decoded (writer,
+register, value, and exact beam position) under the heatmap, and the same
+readout follows the selected slot when the pointer is elsewhere.
 
 Click or drag across the heatmap to select a beam slot. The cursor keys nudge
 the selector one colour clock or line at a time. The lower strip expands that

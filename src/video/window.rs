@@ -4317,29 +4317,46 @@ impl App {
                 owners.extend_from_slice(row);
             }
         }
+        // Marker capacity bounds the per-redraw copy, not what is worth
+        // seeing: a Copper writing a palette split on every line stays
+        // well inside it.
+        const MARKER_CAP: usize = 4000;
         let markers = bus
             .frame_render_events()
             .iter()
-            .take(240)
-            .map(|event| {
-                let off = event.offset & 0x01FE;
-                ui::AnalyzerMarker {
-                    vpos: event.vpos.min(u32::from(u16::MAX)) as u16,
-                    hpos: event.hpos.min(u32::from(u16::MAX)) as u16,
-                    label: format!(
-                        "{} v={:03} h={:03} ${off:03X}={:04X}",
-                        match event.source {
-                            BeamWriteSource::Cpu => "cpu",
-                            BeamWriteSource::CpuCopperIrq => "irq",
-                            BeamWriteSource::Copper => "copper",
-                        },
-                        event.vpos,
-                        event.hpos,
-                        event.value,
-                    ),
-                }
+            .take(MARKER_CAP)
+            .map(|event| ui::AnalyzerMarker {
+                vpos: event.vpos.min(u32::from(u16::MAX)) as u16,
+                hpos: event.hpos.min(u32::from(u16::MAX)) as u16,
+                offset: event.offset & 0x01FE,
+                value: event.value,
+                source: match event.source {
+                    BeamWriteSource::Cpu => "cpu",
+                    BeamWriteSource::CpuCopperIrq => "irq",
+                    BeamWriteSource::Copper => "copper",
+                },
             })
             .collect();
+        // Frame-start DIW/DDF overlays, decoded with the display model's
+        // own rules (DiwHigh carries the OCS implicit bits or the ECS
+        // DIWHIGH extension; DIW h units are lores pixels, two per cck).
+        let base = bus.frame_render_base();
+        let diw_programmed = !(base.diwstrt == 0 && base.diwstop == 0);
+        let (diw_v, diw_h_cck) = if diw_programmed {
+            let v0 = base.diwhigh.v_start(base.diwstrt);
+            let mut v1 = base.diwhigh.v_stop(base.diwstop);
+            if v1 <= v0 {
+                // Hardware vstop wrap: a stop at or above the start means
+                // the window runs past the 8-bit rollover.
+                v1 += 0x100;
+            }
+            let h0 = base.diwhigh.h_start(base.diwstrt) / 2;
+            let h1 = base.diwhigh.h_stop(base.diwstop) / 2;
+            (Some((v0, v1)), Some((h0, h1)))
+        } else {
+            (None, None)
+        };
+        let ddf_cck = diw_programmed.then_some((base.ddfstrt & 0x00FE, base.ddfstop & 0x00FE));
         ui::FrameAnalyzerView {
             running: !self.paused,
             status,
@@ -4364,6 +4381,9 @@ impl App {
                 selected_owner_code,
                 owners,
                 markers,
+                diw_v,
+                diw_h_cck,
+                ddf_cck,
             }),
         }
     }

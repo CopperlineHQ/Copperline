@@ -35,6 +35,8 @@ const PANEL_TEXT_HILIGHT: u32 = rgba(120, 255, 150);
 const PANEL_TEXT_ACCENT: u32 = rgba(255, 184, 80);
 const BUTTON_TEXT: u32 = rgba(220, 222, 214);
 const BUTTON_TEXT_DISABLED: u32 = rgba(120, 120, 112);
+/// DDF fetch-bound verticals on the Frame Analyzer heatmap.
+const DDF_LINE: u32 = rgba(80, 200, 220);
 const ENTRY_BG: u32 = rgba(8, 10, 8);
 const ENTRY_TEXT: u32 = rgba(27, 220, 71);
 const SCRIM: u32 = rgba(0, 0, 0);
@@ -920,7 +922,33 @@ pub struct AudioRowView {
 pub struct AnalyzerMarker {
     pub vpos: u16,
     pub hpos: u16,
-    pub label: String,
+    /// Custom-register word offset into $DFF000 of the write.
+    pub offset: u16,
+    pub value: u16,
+    /// Writer: "cpu", "irq" (CPU inside the Copper-triggered interrupt
+    /// window), or "copper".
+    pub source: &'static str,
+}
+
+impl AnalyzerMarker {
+    fn label(&self) -> String {
+        format!(
+            "{} {}=${:04X} v{} h{}",
+            self.source,
+            crate::debugger::custom_reg_name(self.offset & 0x01FE),
+            self.value,
+            self.vpos,
+            self.hpos,
+        )
+    }
+
+    /// Whether this marker sits close enough to beam slot
+    /// (`vpos`, `hpos`) to be reported for it: within a line vertically
+    /// and two colour clocks horizontally, roughly one heatmap pixel.
+    fn near(&self, vpos: usize, hpos: usize) -> bool {
+        (i64::from(self.vpos) - vpos as i64).abs() <= 1
+            && (i64::from(self.hpos) - hpos as i64).abs() <= 2
+    }
 }
 
 pub struct AnalyzerTraceView {
@@ -943,6 +971,14 @@ pub struct AnalyzerTraceView {
     pub selected_owner_code: u8,
     pub owners: Vec<u8>,
     pub markers: Vec<AnalyzerMarker>,
+    /// Frame-start display window: (v_start, v_stop) beam lines (stop
+    /// already unwrapped past 255 where applicable) and (h_start, h_stop)
+    /// in colour clocks. None when DIW is unprogrammed.
+    pub diw_v: Option<(u16, u16)>,
+    pub diw_h_cck: Option<(u16, u16)>,
+    /// Frame-start bitplane fetch bounds (DDFSTRT, DDFSTOP) in colour
+    /// clocks.
+    pub ddf_cck: Option<(u16, u16)>,
 }
 
 impl AnalyzerTraceView {
@@ -1953,7 +1989,49 @@ fn draw_owner_heatmap(
         scale,
     );
 
-    for marker in trace.markers.iter().take(80) {
+    // Frame-start DIW box (accent) and DDF fetch-bound verticals (cyan),
+    // spanning the display window's lines. Mid-frame changes to these
+    // registers show up as write markers instead.
+    let diw_rows = trace.diw_v.map(|(v0, v1)| {
+        (
+            trace_y(rect, usize::from(v0).min(trace.rows), trace.rows),
+            trace_y(rect, usize::from(v1).min(trace.rows), trace.rows),
+        )
+    });
+    if let (Some((y0, y1)), Some((h0, h1))) = (diw_rows, trace.diw_h_cck) {
+        let x0 = trace_x(rect, usize::from(h0).min(trace.cols), trace.cols);
+        let x1 = trace_x(rect, usize::from(h1).min(trace.cols), trace.cols);
+        draw_outline_clipped(
+            frame,
+            Rect {
+                x: x0,
+                y: y0,
+                w: x1.saturating_sub(x0).max(1),
+                h: y1.saturating_sub(y0).max(1),
+            },
+            rect,
+            PANEL_TEXT_ACCENT,
+            scale,
+        );
+    }
+    if let (Some((y0, y1)), Some((d0, d1))) = (diw_rows, trace.ddf_cck) {
+        for ddf in [d0, d1] {
+            fill_rect_clipped(
+                frame,
+                Rect {
+                    x: trace_x(rect, usize::from(ddf).min(trace.cols), trace.cols),
+                    y: y0,
+                    w: 1,
+                    h: y1.saturating_sub(y0).max(1),
+                },
+                rect,
+                DDF_LINE,
+                scale,
+            );
+        }
+    }
+
+    for marker in trace.markers.iter() {
         let x = trace_x(rect, marker.hpos as usize, trace.cols);
         let y = trace_y(rect, marker.vpos as usize, trace.rows);
         fill_rect_clipped(
@@ -2263,7 +2341,7 @@ fn draw_frame_analyzer(
         frame,
         rect.x + 10,
         rect.y + TITLE_H + 24,
-        "full raster: x=hpos colour clocks, y=vpos beam lines; white box is captured display",
+        "x=hpos colour clocks, y=vpos lines; white=captured display, orange=DIW, cyan=DDF",
         PANEL_TEXT_DIM,
         1,
         scale,
@@ -2290,14 +2368,43 @@ fn draw_frame_analyzer(
         1,
         scale,
     );
-    if let Some(marker) = trace.markers.iter().find(|m| {
-        usize::from(m.vpos) == trace.selected_vpos && usize::from(m.hpos) == trace.selected_hpos
-    }) {
+    // Register writes near the point of interest: the hovered heatmap
+    // slot while the pointer is over the raster, the selected slot
+    // otherwise. Nearby means within a heatmap pixel, so markers are
+    // inspectable by pointing at them rather than needing an exact
+    // colour-clock hit.
+    let (probe_vpos, probe_hpos) = match hover {
+        Some(UiControl::AnalyzerPick {
+            x,
+            y,
+            scanline: false,
+        }) => (
+            (usize::from(y) * trace.rows / 1024).min(trace.rows.saturating_sub(1)),
+            (usize::from(x) * trace.cols / 1024).min(trace.cols.saturating_sub(1)),
+        ),
+        _ => (trace.selected_vpos, trace.selected_hpos),
+    };
+    let mut near = trace
+        .markers
+        .iter()
+        .filter(|marker| marker.near(probe_vpos, probe_hpos));
+    let mut marker_text = String::new();
+    for marker in near.by_ref().take(2) {
+        if !marker_text.is_empty() {
+            marker_text.push_str("  |  ");
+        }
+        marker_text.push_str(&marker.label());
+    }
+    let extra = near.count();
+    if extra > 0 {
+        marker_text.push_str(&format!("  (+{extra} more)"));
+    }
+    if !marker_text.is_empty() {
         draw_panel_text(
             frame,
             rect.x + 10,
             raster.y + raster.h + 22,
-            &marker.label,
+            &marker_text,
             PANEL_TEXT_ACCENT,
             1,
             scale,
@@ -2346,12 +2453,15 @@ fn draw_frame_analyzer(
         x += if code == b'.' { 54 } else { 82 };
     }
     y += 18;
-    let marker_text = format!("register markers shown: {}", trace.markers.len().min(80));
+    let marker_count = format!(
+        "register writes marked: {} (hover a slot to inspect)",
+        trace.markers.len()
+    );
     draw_panel_text(
         frame,
         rect.x + 10,
         y,
-        &marker_text,
+        &marker_count,
         PANEL_TEXT_DIM,
         1,
         scale,
@@ -3692,6 +3802,24 @@ mod tests {
     }
 
     #[test]
+    fn analyzer_marker_radius_and_label() {
+        let marker = AnalyzerMarker {
+            vpos: 100,
+            hpos: 50,
+            offset: 0x180,
+            value: 0x0F00,
+            source: "copper",
+        };
+        // Within a line and two colour clocks counts as near.
+        assert!(marker.near(100, 50));
+        assert!(marker.near(101, 52));
+        assert!(marker.near(99, 48));
+        assert!(!marker.near(102, 50));
+        assert!(!marker.near(100, 53));
+        assert_eq!(marker.label(), "copper COLOR00=$0F00 v100 h50");
+    }
+
+    #[test]
     fn analyzer_underlay_sample_maps_display_box_to_framebuffer() {
         // A trace shaped like a standard PAL frame: 312 lines of 227 cck,
         // display box starting at the framebuffer anchor.
@@ -3715,6 +3843,9 @@ mod tests {
             selected_owner_code: b'.',
             owners: vec![b'.'; 312 * 227],
             markers: Vec::new(),
+            diw_v: None,
+            diw_h_cck: None,
+            ddf_cck: None,
         };
         let mut fb = vec![0u32; FB_WIDTH * 285];
         fb[0] = 0xFF11_2233; // beam (0x1A, 0x30): framebuffer origin
@@ -4005,8 +4136,13 @@ mod tests {
             markers: vec![AnalyzerMarker {
                 vpos: 0,
                 hpos: 1,
-                label: "copper v=000 h=001 $096=0000".to_string(),
+                offset: 0x096,
+                value: 0x0000,
+                source: "copper",
             }],
+            diw_v: None,
+            diw_h_cck: None,
+            ddf_cck: None,
         };
 
         draw_owner_heatmap(&mut frame, raster, &trace, None, scale);
@@ -4412,8 +4548,15 @@ mod tests {
             markers: vec![AnalyzerMarker {
                 vpos: 0x40,
                 hpos: 0x28,
-                label: "copper v=064 h=040 $180=0F00".to_string(),
+                offset: 0x180,
+                value: 0x0F00,
+                source: "copper",
             }],
+            // A standard PAL display window and fetch bounds, so the
+            // preview shows the DIW box and DDF verticals.
+            diw_v: Some((0x2C, 0x12C)),
+            diw_h_cck: Some((0x81 / 2, 0x1C1 / 2)),
+            ddf_cck: Some((0x38, 0xD0)),
         };
         let data = PanelViewData::FrameAnalyzer(Box::new(FrameAnalyzerView {
             running: false,
