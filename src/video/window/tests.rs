@@ -2705,6 +2705,49 @@ fn console_blits_lists_frame_blit_records() {
 }
 
 #[test]
+fn double_fault_halt_surfaces_once() {
+    let mut app = test_app();
+    app.open_console();
+    assert!(!app.surface_debug_stop());
+    app.emu.machine.test_force_double_fault();
+    // First poll reports and pauses; repeat polls stay quiet.
+    assert!(app.surface_debug_stop());
+    assert!(app.paused);
+    assert!(app
+        .last_debug_stop
+        .as_deref()
+        .is_some_and(|m| m.contains("double fault")));
+    assert!(app
+        .console_panel
+        .as_ref()
+        .is_some_and(|panel| panel.output.iter().any(|l| l.contains("double fault"))));
+    assert!(!app.surface_debug_stop());
+}
+
+#[test]
+fn console_catchalert_and_guru_decode() {
+    let mut app = test_app();
+    app.open_console();
+    plant_exec_world(&mut app);
+
+    // CATCHALERT toggles a breakpoint at ExecBase - 108 (Alert's LVO).
+    let out = console_run(&mut app, "CATCHALERT");
+    assert!(out[0].contains("exec Alert()"), "{out:?}");
+    let lvo = 0x1000u32 - 108;
+    assert!(app.emu.machine.ui_breaks().is_breakpoint(lvo));
+    let out = console_run(&mut app, "CATCHALERT");
+    assert!(out[0].contains("removed"), "{out:?}");
+    assert!(!app.emu.machine.ui_breaks().is_breakpoint(lvo));
+
+    // GURU decodes an explicit code and defaults to D7.
+    let out = console_run(&mut app, "GURU 81000005");
+    assert!(out[0].contains("DEADEND exec.library"), "{out:?}");
+    console_run(&mut app, "SETREG D7 80000003");
+    let out = console_run(&mut app, "GURU");
+    assert!(out[0].contains("Address error"), "{out:?}");
+}
+
+#[test]
 fn console_history_and_stack_walk() {
     let mut app = test_app();
     app.open_console();

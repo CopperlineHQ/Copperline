@@ -98,7 +98,17 @@ garbage):
 | `DEVS` | Devices with versions |
 | `RESOURCES`, `PORTS` | The resource and message-port lists |
 | `CATCHTASK NAME` | Stop when exec schedules a task whose name contains NAME (case-insensitive); `CATCHTASK` alone clears it |
+| `CATCHALERT` | Break at exec's `Alert()` entry: fires on every guru/alert with D7 holding the code |
+| `GURU [CODE]` | Decode an alert code (default: the current D7): deadend flag, subsystem, cause, CPU-trap alerts |
 
 `CATCHTASK` is the tool for "wake me when my process actually runs": it
 baselines on the currently scheduled task and fires on the next
 reschedule to a matching one, reporting the task's name and address.
+
+`CATCHALERT` plus `GURU` is the crash workflow: arm the catch, and when
+the machine stops in `Alert()`, `GURU` translates D7 into words
+(`DEADEND exec.library, no memory`). A CPU **double fault** -- a bus or
+address error during exception processing, the condition even the OS
+cannot report -- is always surfaced: the machine pauses with a
+"CPU halted: double fault" message on screen, in the console, and on
+the Break tab.

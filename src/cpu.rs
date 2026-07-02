@@ -1132,6 +1132,22 @@ impl M68kMachine {
         }
     }
 
+    /// Whether the CPU halted on a double fault (a bus/address error
+    /// during exception processing) -- the hardware condition behind a
+    /// dead machine that software alerts cannot even report.
+    pub fn cpu_double_faulted(&self) -> bool {
+        self.cpu.is_halted()
+    }
+
+    /// Force the halted state (tests of the surfacing path only; on the
+    /// plain 68000 model the double fault is reachable via MMU-fault
+    /// recursion, which is heavy to stage in a unit test).
+    #[cfg(test)]
+    pub fn test_force_double_fault(&mut self) {
+        self.cpu.stopped = 1;
+        self.cpu.run_mode = 1; // RUN_MODE_BERR_AERR_RESET
+    }
+
     pub fn ui_breaks(&self) -> &crate::debugger::InteractiveBreaks {
         &self.ui_breaks
     }

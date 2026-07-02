@@ -109,12 +109,12 @@ const CONSOLE_HELP: &[&str] = &[
     "stops:      break/b ADDR [COND] [IGN N]   watch/w ADDR [CPU|BLITTER|DISK]",
     "            rwatch REG",
     "            btrap V [H]   cbreak ADDR   catch irq N|trap N|vec N",
-    "            catchtask [NAME]   breaks (list)   clearbreaks",
+    "            catchtask [NAME]   catchalert   breaks (list)   clearbreaks",
     "inspect:    status  regs/r  mem/m ADDR [BYTES]  dis/d [ADDR] [N]",
     "            copper [pc|ADDR] [N]   custom   blits   find HEX [START]",
     "            writer ADDR",
     "            history/h [N]   stack/bt",
-    "os:         tasks  libs  devs  resources  ports",
+    "os:         tasks  libs  devs  resources  ports   guru [CODE]",
     "modify:     poke ADDR VAL   setreg REG VAL",
     "console:    help  clear  close",
     "Addresses and values are hex; beam positions (V, H) are decimal.",
@@ -441,6 +441,42 @@ impl App {
                 self.emu.machine.ui_set_task_catch(Some(target.clone()));
                 ConsoleOutcome::one(format!(
                     "stopping when a task whose name contains \"{target}\" is scheduled"
+                ))
+            }
+            "CATCHALERT" => {
+                let lvo = self.console_with_exec(|_, base| {
+                    // exec's Alert() lives at LVO -108; the jump-table
+                    // entry itself executes, so a PC breakpoint there
+                    // fires on every alert with D7 = the guru code.
+                    vec![format!("{:06X}", base.wrapping_sub(108) & 0x00FF_FFFF)]
+                });
+                let Some(addr) = lvo
+                    .first()
+                    .filter(|line| !line.starts_with('!'))
+                    .and_then(|line| u32::from_str_radix(line, 16).ok())
+                else {
+                    return ConsoleOutcome::lines(lvo);
+                };
+                let set = self.emu.machine.ui_set_breakpoint(addr, None, 0);
+                ConsoleOutcome::one(if set {
+                    format!(
+                        "break at exec Alert() (${addr:06X}); on stop D7 holds the code -- GURU decodes it"
+                    )
+                } else {
+                    format!("alert catch removed (${addr:06X})")
+                })
+            }
+            "GURU" => {
+                let code = match args.first() {
+                    Some(token) => match hex32(token) {
+                        Some(code) => code,
+                        None => return ConsoleOutcome::error("usage: GURU [HEXCODE] (default D7)"),
+                    },
+                    None => self.emu.machine.d(7),
+                };
+                ConsoleOutcome::one(format!(
+                    "{code:08X}: {}",
+                    crate::debugger::guru_decode(code)
                 ))
             }
             "BREAKS" | "INFO" => ConsoleOutcome::lines(self.console_breaks_lines()),
