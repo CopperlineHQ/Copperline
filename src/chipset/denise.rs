@@ -298,6 +298,12 @@ impl BitplaneMode {
     }
 }
 
+impl Default for Denise {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Denise {
     pub fn new() -> Self {
         Self {

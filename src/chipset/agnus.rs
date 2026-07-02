@@ -602,6 +602,12 @@ fn apply_bitplane_modulos(
     }
 }
 
+impl Default for Agnus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Agnus {
     pub fn new() -> Self {
         Self::with_video_standard_and_revision(VideoStandard::Pal, AgnusRevision::Ocs)

@@ -7,65 +7,24 @@
 //!   If no ROM is given (neither argument nor `rom =` in the config), boots
 //!   the bundled AROS open-source Kickstart replacement (see src/romsearch.rs).
 
-mod a2065;
-mod a2091;
-mod akiko;
-mod audio;
-mod bus;
-mod cache;
-mod cdrom;
-mod cdtv;
-mod chipset;
-mod config;
-mod cpu;
-mod debugger;
-mod dirfs;
-mod disasm;
-mod dms;
-mod drive_sounds;
-mod emulator;
-mod envcfg;
-mod floppy;
-mod gamepad;
-mod gayle;
-mod gdbstub;
-mod harddrive;
-mod inputrec;
-mod inputsched;
-mod memory;
-mod net;
-mod priority;
-mod recorder;
-mod romsearch;
-mod rtc;
-mod savestate;
-mod screenshot;
-mod scsi;
-mod serial;
-mod timestamp;
-mod timetravel;
-mod video;
-mod wasmboard;
-mod zorro;
-mod zorro_device;
-
 use anyhow::{anyhow, Result};
+use copperline::{config, debugger, emulator, envcfg, gamepad, gdbstub, priority, video};
 use log::{info, warn};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crate::audio::{AudioSink, CpalSink, NullSink, WavSink};
-use crate::bus::Bus;
-use crate::chipset::paula::{Paula, DMACON_DMAEN, PAULA_CLOCK_HZ};
-use crate::config::{Chipset, Config, ConfigOverrides};
-use crate::emulator::Emulator;
-use crate::floppy::FloppyController;
-use crate::memory::Memory;
-use crate::serial::StdoutSink;
-use crate::video::window::{
+use copperline::audio::{AudioSink, CpalSink, NullSink, WavSink};
+use copperline::bus::Bus;
+use copperline::chipset::paula::{Paula, DMACON_DMAEN, PAULA_CLOCK_HZ};
+use copperline::config::{Chipset, Config, ConfigOverrides};
+use copperline::emulator::Emulator;
+use copperline::floppy::FloppyController;
+use copperline::memory::Memory;
+use copperline::serial::StdoutSink;
+use copperline::video::window::{
     parse_amiga_key, App, DiskInsertSpec, FrameDumpSpec, KeyPressSpec, DEFAULT_KEY_HOLD_MS,
 };
-use crate::video::HOST_SHORTCUT_MODIFIER_LABEL;
+use copperline::video::HOST_SHORTCUT_MODIFIER_LABEL;
 
 #[derive(Debug)]
 pub struct CliArgs {
@@ -138,7 +97,7 @@ pub struct CliArgs {
     pub overrides: ConfigOverrides,
 }
 
-use crate::video::window::{JoyButtonKind, MouseButtonKind};
+use copperline::video::window::{JoyButtonKind, MouseButtonKind};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CliDiskInsert {
@@ -922,9 +881,9 @@ fn main() -> Result<()> {
         // AROS is installed (best effort, so the banner and any post-load reuse
         // see real paths); build_machine substitutes a placeholder for whatever
         // ROM is still unavailable.
-        let _ = resolve_bundled_rom(&mut cfg);
+        let _ = config::resolve_bundled_rom(&mut cfg);
     } else {
-        resolve_bundled_rom(&mut cfg)?;
+        config::resolve_bundled_rom(&mut cfg)?;
     }
     let disk_insert_after = resolve_disk_insert_after(&mut cfg, cli.disk_insert_after)?;
 
@@ -982,7 +941,7 @@ fn main() -> Result<()> {
         || cli.gdb.is_some();
     let paced = !headless_capture;
     info!("emulation timing: deterministic core, paced={paced}");
-    let mut emu = build_machine(&cfg, audio, paced, cli.load_state.is_some())?;
+    let mut emu = emulator::build_machine(&cfg, audio, paced, cli.load_state.is_some())?;
     if let Some(path) = &cli.load_state {
         let outcome = emu.load_state(path)?;
         info!(
@@ -1019,7 +978,7 @@ fn main() -> Result<()> {
             .map(|d| d.write_protected)
             .unwrap_or(true)
     });
-    video::set_pixel_aspect(resolve_pixel_aspect(cfg.pixel_aspect));
+    video::set_pixel_aspect(config::resolve_pixel_aspect(cfg.pixel_aspect));
     let app = App::new(
         emu,
         cfg.emulation.power_on,
@@ -1034,11 +993,11 @@ fn main() -> Result<()> {
         cli.record_input,
         cfg.floppy_playlists.clone(),
         disk_write_protected,
-        resolve_overscan(cfg.overscan),
-        resolve_phosphor(cfg.phosphor),
+        config::resolve_overscan(cfg.overscan),
+        config::resolve_phosphor(cfg.phosphor),
         cfg.emulation.warp_speed,
         cfg.joystick_input_mode,
-        about_machine_lines(&cfg),
+        config::about_machine_lines(&cfg),
         raw_cfg,
     );
 
@@ -1054,217 +1013,13 @@ fn main() -> Result<()> {
     app.run()
 }
 
-/// Build a fully-configured [`Emulator`] from a validated [`Config`]: the
-/// Zorro autoconfig chain, RAM/ROM (and the A1000 bootstrap special case),
-/// optional SCSI/IDE/CD controllers, floppy drives, Paula (with the supplied
-/// audio sink), and the CPU with its caches and machine descriptor. Shared by
-/// the command-line boot path in `main` and the configuration screen's Run
-/// button, so a machine built either way is identical.
-pub(crate) fn build_machine(
-    cfg: &Config,
-    audio: Box<dyn AudioSink>,
-    paced: bool,
-    rom_optional: bool,
-) -> Result<Emulator> {
-    let mut zorro = cfg.build_zorro_chain()?;
-    // Functional Zorro-chain boards. Each board's autoconfig identity goes on
-    // the chain (mapping its window to a device slot) while the device object
-    // is attached to the bus after it is built; the slot index ties them.
-    let mut devices: Vec<crate::zorro_device::BoardDevice> = Vec::new();
-    if cfg.scsi.enabled() {
-        let rom_path = cfg.scsi.rom.as_ref().expect("config validated [scsi] rom");
-        let rom = crate::a2091::A2091::load_rom(rom_path, cfg.scsi.rom_odd.as_deref())?;
-        let mut board = crate::a2091::A2091::new(rom)?;
-        for (unit, drive) in cfg.scsi.units.iter().enumerate() {
-            let Some(drive) = drive else { continue };
-            board.attach_drive(
-                unit,
-                crate::scsi::ScsiDisk::open(&drive.path, unit, drive.volume_name.as_deref())?,
-            );
-            info!("scsi: unit {unit} {}", drive.path.display());
-        }
-        let slot = devices.len();
-        zorro.add_board(crate::zorro::BoardSpec::a2091(slot))?;
-        info!(
-            "scsi: A2091 controller on the Zorro chain (slot {slot}), ROM {}",
-            rom_path.display()
-        );
-        devices.push(crate::zorro_device::BoardDevice::A2091(board));
-    }
-    // WASM plugin boards: assign each a device slot, put its autoconfig
-    // identity on the chain, and instantiate the module.
-    for wb in &cfg.wasm_boards {
-        let slot = devices.len();
-        let mut spec = wb.spec.clone();
-        spec.backing = crate::zorro::BoardBacking::Device(slot);
-        zorro.add_board(spec)?;
-        let board = crate::wasmboard::WasmBoard::from_file(&wb.wasm_path, wb.manifest.clone())?;
-        info!(
-            "zorro: WASM plugin {:?} on the Zorro chain (slot {slot}), module {}",
-            wb.manifest.name,
-            wb.wasm_path.display()
-        );
-        devices.push(crate::zorro_device::BoardDevice::Wasm(board));
-    }
-    // A2065 Ethernet board (in-tree LANCE NIC): networking is non-deterministic.
-    if let Some(net_config) = cfg.a2065_net {
-        let slot = devices.len();
-        zorro.add_board(crate::zorro::BoardSpec::a2065(slot))?;
-        info!(
-            "a2065: Ethernet board on the Zorro chain (slot {slot}), net backend {net_config:?} \
-             -- networking is non-deterministic, replay/save-state reproducibility not guaranteed"
-        );
-        devices.push(crate::zorro_device::BoardDevice::A2065(
-            crate::a2065::A2065::new(net_config),
-        ));
-    }
-    // The A1000 has no Kickstart ROM: cfg.rom_path is its 64 KiB bootstrap
-    // ROM, and a 256 KiB WCS is allocated for it to load Kickstart into from
-    // the Kickstart disk in DF0.
-    let mut mem = if cfg.machine == Some(crate::config::MachineModel::A1000) {
-        Memory::load_a1000(&cfg.rom_path, cfg.chip_ram_bytes, cfg.slow_ram_bytes, zorro)?
-    } else if rom_optional && !cfg.rom_path.is_file() {
-        // A save state restores the full ROM image, so a missing or sentinel
-        // ROM path (the bundled-AROS placeholder, or a Kickstart the user no
-        // longer keeps) is fine: build with a placeholder the state replaces.
-        info!(
-            "--load-state: ROM {} is unavailable; building with a placeholder \
-             ROM that the save state will replace",
-            cfg.rom_path.display()
-        );
-        Memory::placeholder(cfg.chip_ram_bytes, cfg.slow_ram_bytes, zorro)
-    } else {
-        Memory::load(&cfg.rom_path, cfg.chip_ram_bytes, cfg.slow_ram_bytes, zorro)?
-    };
-    if let Some(path) = &cfg.extended_rom_path {
-        if rom_optional && !path.is_file() {
-            // As with the main ROM above, the save state carries the extended
-            // ROM image, so a missing file here is not fatal.
-            info!(
-                "--load-state: extended ROM {} is unavailable; the save state \
-                 will supply it",
-                path.display()
-            );
-        } else {
-            let image = std::fs::read(path)
-                .map_err(|e| anyhow!("reading extended ROM {}: {e}", path.display()))?;
-            mem.attach_extended_rom(image)?;
-            info!(
-                "extended ROM: {} at {:#08X}",
-                path.display(),
-                mem.extended_rom_base
-            );
-        }
-    }
-    let mut cd_image = match &cfg.cd_image_path {
-        Some(path) => {
-            let image = crate::cdrom::CdImage::load(path)?;
-            info!("cd image: {} ({})", path.display(), image.describe());
-            Some(image)
-        }
-        None => None,
-    };
-    let mut floppy = FloppyController::from_config(&cfg.floppy)?;
-    floppy.set_connected_drives(cfg.floppy_connected);
-    let serial = Box::new(StdoutSink::new());
-    let mut paula = Paula::new(serial, audio);
-    paula
-        .drive_sounds_mut()
-        .set_enabled(cfg.audio.floppy_sounds);
-    paula
-        .drive_sounds_mut()
-        .set_volume_percent(cfg.audio.floppy_sounds_volume);
-    let mut bus = Bus::new(mem, paula, floppy);
-    bus.set_video_standard(cfg.video_standard);
-    bus.set_chipset_revisions(cfg.agnus_revision, cfg.denise_revision);
-    bus.set_rtc_present(cfg.rtc_present);
-    if let Some(id) = cfg.gate_array.gayle_id() {
-        let mut gayle = crate::gayle::Gayle::new(id);
-        if let Some(drive) = &cfg.ide.master {
-            gayle.attach_drive(
-                0,
-                crate::gayle::IdeDrive::open(&drive.path, 0, drive.volume_name.as_deref())?,
-            );
-            info!("ide: master {}", drive.path.display());
-        }
-        if let Some(drive) = &cfg.ide.slave {
-            gayle.attach_drive(
-                1,
-                crate::gayle::IdeDrive::open(&drive.path, 1, drive.volume_name.as_deref())?,
-            );
-            info!("ide: slave {}", drive.path.display());
-        }
-        bus.attach_gayle(gayle);
-    }
-    if !devices.is_empty() {
-        bus.attach_devices(devices);
-    }
-    if cfg.cd32_pad {
-        bus.input.cd32_pad_port2 = true;
-        info!("input: CD32 joypad on port 2 (serial button protocol)");
-    }
-    if cfg.akiko {
-        let mut akiko = crate::akiko::Akiko::new();
-        if let Some(path) = &cfg.cd32_nvram_path {
-            info!("akiko: NVRAM persisted to {}", path.display());
-            akiko.set_nvram_path(path.clone());
-        }
-        if let Some(image) = cd_image.take() {
-            akiko.insert_disc(image);
-            info!("akiko: CD controller at $B80000, disc mounted");
-        } else {
-            info!("akiko: CD controller at $B80000, no disc");
-        }
-        bus.attach_akiko(akiko);
-    }
-    if cfg.cdtv_cd {
-        let mut cdtv = crate::cdtv::CdtvController::new();
-        if let Some(image) = cd_image.take() {
-            if cfg.cd_insert_delay_secs > 0.0 {
-                cdtv.insert_disc_after(image, cfg.cd_insert_delay_secs);
-                info!(
-                    "cdtv: DMAC/CD controller attached, disc inserts after {:.1}s",
-                    cfg.cd_insert_delay_secs
-                );
-            } else {
-                cdtv.insert_disc(image);
-                info!("cdtv: DMAC/CD controller attached, disc mounted");
-            }
-        } else {
-            info!("cdtv: DMAC/CD controller attached, no disc");
-        }
-        bus.attach_cdtv(cdtv);
-    }
-    if cd_image.is_some() {
-        warn!("cd image configured but this machine has no CD controller; the disc is not mounted");
-    }
-    if let Some(machine) = cfg.machine {
-        info!(
-            "machine profile: {:?} (gate array {:?}, rtc {})",
-            machine, cfg.gate_array, cfg.rtc_present
-        );
-    }
-    let cpu_clocks_per_cck = crate::config::clocks_per_cck_for_mhz(cfg.cpu_clock_mhz);
-    let mut emu = Emulator::new(
-        bus,
-        cfg.cpu,
-        cfg.fpu,
-        cfg.emulation.pacing_budget,
-        cpu_clocks_per_cck,
-        paced,
-    )?;
-    emu.set_cache_emulation(cfg.cpu_icache, cfg.cpu_dcache);
-    emu.set_machine_descriptor(cfg.descriptor());
-    Ok(emu)
-}
-
 /// Build the minimal placeholder machine that hosts the configuration screen
 /// before a real machine is built. It needs no ROM file (a tiny in-memory ROM
 /// that immediately stops) and a null audio sink so it claims no audio device
 /// while it sits powered off behind the launcher; the user's chosen machine
 /// replaces it when they press Run.
 fn build_placeholder_machine() -> Result<Emulator> {
-    use crate::memory::{ROM_BASE, ROM_SIZE};
+    use copperline::memory::{ROM_BASE, ROM_SIZE};
     let mut rom = vec![0u8; ROM_SIZE];
     // Reset vector: a small stack pointer and a PC just past it; the rest is a
     // STOP-then-NOP sled, so the placeholder CPU does nothing if ever stepped.
@@ -1278,7 +1033,7 @@ fn build_placeholder_machine() -> Result<Emulator> {
         slow_ram: Vec::new(),
         rom,
         overlay: true,
-        zorro: crate::zorro::ZorroChain::default(),
+        zorro: copperline::zorro::ZorroChain::default(),
         extended_rom: Vec::new(),
         extended_rom_base: 0,
         wcs: Vec::new(),
@@ -1291,9 +1046,9 @@ fn build_placeholder_machine() -> Result<Emulator> {
     );
     Emulator::new(
         bus,
-        crate::config::CpuModel::M68000,
+        copperline::config::CpuModel::M68000,
         false,
-        crate::config::PacingBudget::Cycles,
+        copperline::config::PacingBudget::Cycles,
         2,
         true,
     )
@@ -1306,7 +1061,7 @@ fn build_placeholder_machine() -> Result<Emulator> {
 fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
     info!("no machine specified; opening the configuration screen");
     let emu = build_placeholder_machine()?;
-    video::set_pixel_aspect(resolve_pixel_aspect(config::PixelAspect::Tv));
+    video::set_pixel_aspect(config::resolve_pixel_aspect(config::PixelAspect::Tv));
     let mut app = App::new(
         emu,
         false,
@@ -1321,8 +1076,8 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
         None,
         std::array::from_fn(|_| Vec::new()),
         [true; 4],
-        resolve_overscan(config::Overscan::Tv),
-        resolve_phosphor(0.0),
+        config::resolve_overscan(config::Overscan::Tv),
+        config::resolve_phosphor(0.0),
         config::WarpSpeed::default(),
         config::JoystickInputMode::default(),
         vec!["Configure a machine, then press Run.".to_string()],
@@ -1355,40 +1110,6 @@ fn launcher_requested(cli: &CliArgs) -> bool {
         && cli.record_input.is_none()
         && cli.audio_wav.is_none()
         && cli.audio_live
-}
-
-/// Emulated-machine summary lines for the About window.
-pub(crate) fn about_machine_lines(cfg: &Config) -> Vec<String> {
-    let mut lines = Vec::new();
-    if let Some(machine) = cfg.machine {
-        lines.push(format!("Machine: {machine:?}"));
-    }
-    lines.push(format!("CPU: {:?} @ {} MHz", cfg.cpu, cfg.cpu_clock_mhz));
-    lines.push(format!(
-        "Chipset: {:?} ({:?}/{:?}, {:?})",
-        cfg.chipset, cfg.agnus_revision, cfg.denise_revision, cfg.video_standard
-    ));
-    let mut ram = format!("RAM: {}K chip", cfg.chip_ram_bytes / 1024);
-    if cfg.slow_ram_bytes > 0 {
-        ram.push_str(&format!(", {}K slow", cfg.slow_ram_bytes / 1024));
-    }
-    if cfg.fast_ram_bytes > 0 {
-        ram.push_str(&format!(", {}K fast", cfg.fast_ram_bytes / 1024));
-    }
-    if cfg.z3_ram_bytes > 0 {
-        ram.push_str(&format!(", {}K Z3", cfg.z3_ram_bytes / 1024));
-    }
-    lines.push(ram);
-    if let Some(name) = cfg.rom_path.file_name() {
-        lines.push(format!("ROM: {}", name.to_string_lossy()));
-    }
-    let drives = cfg
-        .floppy_connected
-        .iter()
-        .filter(|&&connected| connected)
-        .count();
-    lines.push(format!("Floppy drives: {drives}"));
-    lines
 }
 
 fn run_live_audio_profile(secs: f32) -> Result<()> {
@@ -1473,62 +1194,6 @@ fn read_profile_audio_word(chip_ram: &[u8], address: u32) -> u16 {
     ((chip_ram[off] as u16) << 8) | chip_ram[(off + 1) % chip_ram.len()] as u16
 }
 
-/// Load a config from an explicit path, or from `./copperline.toml` if it
-/// exists, falling back to built-in defaults otherwise.
-/// Resolve the phosphor persistence fraction: the `COPPERLINE_PHOSPHOR`
-/// env var (0.0..=0.95) overrides the `[display] phosphor` config for one
-/// run.
-pub(crate) fn resolve_phosphor(from_config: f32) -> f32 {
-    match crate::envcfg::var("COPPERLINE_PHOSPHOR") {
-        Some(v) => match v.trim().parse::<f32>() {
-            Ok(p) if (0.0..=0.95).contains(&p) => p,
-            _ => {
-                log::warn!(
-                    "COPPERLINE_PHOSPHOR must be between 0.0 and 0.95, got {v:?}; using config value"
-                );
-                from_config
-            }
-        },
-        None => from_config,
-    }
-}
-
-/// Resolve the presented overscan mode: the `COPPERLINE_OVERSCAN` env var
-/// (full/tv) overrides the `[display] overscan` config for one run. The
-/// image-regression harness pins "full" so its baselines always carry the
-/// whole overscan field regardless of the config default.
-pub(crate) fn resolve_overscan(from_config: crate::config::Overscan) -> crate::config::Overscan {
-    match envcfg::var("COPPERLINE_OVERSCAN") {
-        Some(v) => match crate::config::parse_overscan(&v) {
-            Ok(o) => o,
-            Err(e) => {
-                warn!("ignoring COPPERLINE_OVERSCAN: {e}");
-                from_config
-            }
-        },
-        None => from_config,
-    }
-}
-
-/// Resolve the presentation pixel aspect: the `COPPERLINE_PIXEL_ASPECT`
-/// env var (tv/square) overrides the `[display] pixel_aspect` config for
-/// one run, so headless A/B captures can pin a mode without editing the
-/// config.
-pub(crate) fn resolve_pixel_aspect(
-    from_config: crate::config::PixelAspect,
-) -> crate::config::PixelAspect {
-    match envcfg::var("COPPERLINE_PIXEL_ASPECT") {
-        Some(v) => match crate::config::parse_pixel_aspect(&v) {
-            Ok(a) => a,
-            Err(e) => {
-                warn!("ignoring COPPERLINE_PIXEL_ASPECT: {e}");
-                from_config
-            }
-        },
-        None => from_config,
-    }
-}
-
 /// Load the config, returning both the validated [`Config`] used to build the
 /// machine and the raw TOML view it came from. The configuration screen keeps
 /// the raw view so its "Machine Configuration..." menu item can reopen showing
@@ -1552,36 +1217,6 @@ fn load_config(
     let raw = Config::load_raw(path, overrides)?;
     let cfg = Config::try_from(raw.clone())?;
     Ok((cfg, raw))
-}
-
-/// Substitute the bundled AROS ROM when the user named no ROM. The default
-/// `rom_path` is a sentinel ([`config::BUNDLED_AROS_ROM`]); any real path from
-/// `rom = "..."` or the CLI argument replaces it before this runs and is left
-/// untouched. When the sentinel survives, locate the bundled AROS main +
-/// extended ROM pair and rewrite the config to point at them, so every
-/// downstream consumer (start-up banner, window title, save states) sees the
-/// real paths. An explicit `extended_rom` still wins over the AROS one.
-pub(crate) fn resolve_bundled_rom(cfg: &mut Config) -> Result<()> {
-    if cfg.rom_path != Path::new(config::BUNDLED_AROS_ROM) {
-        return Ok(());
-    }
-    let aros = romsearch::find_bundled_aros().ok_or_else(|| {
-        anyhow!(
-            "no ROM specified and the bundled AROS ROM was not found. Pass a \
-             Kickstart ROM (as the first argument or rom = \"...\" in a config), \
-             or install the AROS files ({} and {}) next to the binary or under \
-             share/copperline/aros/.",
-            romsearch::AROS_MAIN_FILE,
-            romsearch::AROS_EXT_FILE
-        )
-    })?;
-    info!(
-        "no ROM specified; booting bundled AROS ({})",
-        aros.main.display()
-    );
-    cfg.rom_path = aros.main;
-    cfg.extended_rom_path.get_or_insert(aros.extended);
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1696,8 +1331,8 @@ mod tests {
     fn recorded_script_round_trips_through_the_parser() -> Result<()> {
         // What the recorder emits must come back as the same scheduled
         // events through --script.
-        let mut rec = crate::inputrec::InputRecorder::new(0.0);
-        let mut input = crate::bus::InputState::default();
+        let mut rec = copperline::inputrec::InputRecorder::new(0.0);
+        let mut input = copperline::bus::InputState::default();
         rec.observe(&input, 1.0);
         rec.record_key(0x45, true, 1.5);
         rec.record_key(0x45, false, 1.75);
@@ -1808,7 +1443,7 @@ mod tests {
         let args = parse(&["--gdb", ":2345"])?;
         assert_eq!(
             args.gdb,
-            Some(crate::gdbstub::Config::new(":2345".to_string()))
+            Some(copperline::gdbstub::Config::new(":2345".to_string()))
         );
         assert!(!args.audio_live);
         validate_gdb_args(&args)?;
@@ -1915,7 +1550,7 @@ mod tests {
     #[test]
     fn deferred_configured_disk_insert_starts_drive_empty() -> Result<()> {
         let mut cfg = Config::default();
-        cfg.floppy.drives[0] = Some(crate::config::FloppyDriveConfig {
+        cfg.floppy.drives[0] = Some(copperline::config::FloppyDriveConfig {
             path: PathBuf::from("demo-disk.adf"),
             write_protected: true,
         });

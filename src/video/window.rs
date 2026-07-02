@@ -5676,7 +5676,7 @@ impl App {
 
     /// Open the machine-configuration screen, seeded from the running (or
     /// last-applied) machine so it reflects the current settings.
-    pub(crate) fn open_launcher(&mut self) {
+    pub fn open_launcher(&mut self) {
         self.ui.menu_open = false;
         self.ui.panel = Some(Panel::Launcher(Box::new(LauncherState::from_raw(
             &self.machine_config,
@@ -5861,7 +5861,7 @@ impl App {
             }
             None => return,
         };
-        if let Err(e) = crate::resolve_bundled_rom(&mut cfg) {
+        if let Err(e) = crate::config::resolve_bundled_rom(&mut cfg) {
             self.set_launcher_status(StatusMessage::err(short_status_error(&e)));
             return;
         }
@@ -5878,7 +5878,7 @@ impl App {
         };
         // The launcher boots a fresh machine, never a save state, so a real
         // ROM is required here.
-        let emu = match crate::build_machine(&cfg, audio, true, false) {
+        let emu = match crate::emulator::build_machine(&cfg, audio, true, false) {
             Ok(emu) => emu,
             Err(e) => {
                 self.set_launcher_status(StatusMessage::err(short_status_error(&e)));
@@ -5907,15 +5907,15 @@ impl App {
                 .unwrap_or(true)
         });
         self.disk_playlist_index = [0; 4];
-        self.overscan = crate::resolve_overscan(cfg.overscan);
-        self.apply_pixel_aspect(crate::resolve_pixel_aspect(cfg.pixel_aspect));
+        self.overscan = crate::config::resolve_overscan(cfg.overscan);
+        self.apply_pixel_aspect(crate::config::resolve_pixel_aspect(cfg.pixel_aspect));
         self.warp_speed = cfg.emulation.warp_speed;
         // Reset the host joystick source to the new machine's configured
         // start-up mode (a previous live Cmd+J toggle does not carry over).
         self.joystick_input_mode = cfg.joystick_input_mode;
         self.keyboard_joy_held = KeyboardJoystickHeld::default();
-        self.about_machine_lines = crate::about_machine_lines(cfg);
-        self.deinterlacer = Deinterlacer::with_phosphor(crate::resolve_phosphor(cfg.phosphor));
+        self.about_machine_lines = crate::config::about_machine_lines(cfg);
+        self.deinterlacer = Deinterlacer::with_phosphor(crate::config::resolve_phosphor(cfg.phosphor));
         self.ui.menu_open = false;
         self.ui.panel = None;
         self.powered_on = true;

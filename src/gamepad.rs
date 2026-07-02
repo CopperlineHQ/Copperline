@@ -257,6 +257,12 @@ pub struct GamepadReader {
     logged_calibrated: Option<String>,
 }
 
+impl Default for GamepadReader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GamepadReader {
     pub fn new() -> Self {
         let raw = match RawGamepads::new() {

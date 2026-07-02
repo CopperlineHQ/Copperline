@@ -2188,6 +2188,122 @@ fn validate_floppy_image_path(idx: usize, path: &Path) -> Result<()> {
     );
 }
 
+/// Emulated-machine summary lines for the About window.
+pub fn about_machine_lines(cfg: &Config) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(machine) = cfg.machine {
+        lines.push(format!("Machine: {machine:?}"));
+    }
+    lines.push(format!("CPU: {:?} @ {} MHz", cfg.cpu, cfg.cpu_clock_mhz));
+    lines.push(format!(
+        "Chipset: {:?} ({:?}/{:?}, {:?})",
+        cfg.chipset, cfg.agnus_revision, cfg.denise_revision, cfg.video_standard
+    ));
+    let mut ram = format!("RAM: {}K chip", cfg.chip_ram_bytes / 1024);
+    if cfg.slow_ram_bytes > 0 {
+        ram.push_str(&format!(", {}K slow", cfg.slow_ram_bytes / 1024));
+    }
+    if cfg.fast_ram_bytes > 0 {
+        ram.push_str(&format!(", {}K fast", cfg.fast_ram_bytes / 1024));
+    }
+    if cfg.z3_ram_bytes > 0 {
+        ram.push_str(&format!(", {}K Z3", cfg.z3_ram_bytes / 1024));
+    }
+    lines.push(ram);
+    if let Some(name) = cfg.rom_path.file_name() {
+        lines.push(format!("ROM: {}", name.to_string_lossy()));
+    }
+    let drives = cfg
+        .floppy_connected
+        .iter()
+        .filter(|&&connected| connected)
+        .count();
+    lines.push(format!("Floppy drives: {drives}"));
+    lines
+}
+
+/// Resolve the phosphor persistence fraction: the `COPPERLINE_PHOSPHOR`
+/// env var (0.0..=0.95) overrides the `[display] phosphor` config for one
+/// run.
+pub fn resolve_phosphor(from_config: f32) -> f32 {
+    match crate::envcfg::var("COPPERLINE_PHOSPHOR") {
+        Some(v) => match v.trim().parse::<f32>() {
+            Ok(p) if (0.0..=0.95).contains(&p) => p,
+            _ => {
+                log::warn!(
+                    "COPPERLINE_PHOSPHOR must be between 0.0 and 0.95, got {v:?}; using config value"
+                );
+                from_config
+            }
+        },
+        None => from_config,
+    }
+}
+
+/// Resolve the presented overscan mode: the `COPPERLINE_OVERSCAN` env var
+/// (full/tv) overrides the `[display] overscan` config for one run. The
+/// image-regression harness pins "full" so its baselines always carry the
+/// whole overscan field regardless of the config default.
+pub fn resolve_overscan(from_config: Overscan) -> Overscan {
+    match crate::envcfg::var("COPPERLINE_OVERSCAN") {
+        Some(v) => match parse_overscan(&v) {
+            Ok(o) => o,
+            Err(e) => {
+                log::warn!("ignoring COPPERLINE_OVERSCAN: {e}");
+                from_config
+            }
+        },
+        None => from_config,
+    }
+}
+
+/// Resolve the presentation pixel aspect: the `COPPERLINE_PIXEL_ASPECT`
+/// env var (tv/square) overrides the `[display] pixel_aspect` config for
+/// one run, so headless A/B captures can pin a mode without editing the
+/// config.
+pub fn resolve_pixel_aspect(from_config: PixelAspect) -> PixelAspect {
+    match crate::envcfg::var("COPPERLINE_PIXEL_ASPECT") {
+        Some(v) => match parse_pixel_aspect(&v) {
+            Ok(a) => a,
+            Err(e) => {
+                log::warn!("ignoring COPPERLINE_PIXEL_ASPECT: {e}");
+                from_config
+            }
+        },
+        None => from_config,
+    }
+}
+
+/// Substitute the bundled AROS ROM when the user named no ROM. The default
+/// `rom_path` is a sentinel ([`BUNDLED_AROS_ROM`]); any real path from
+/// `rom = "..."` or the CLI argument replaces it before this runs and is left
+/// untouched. When the sentinel survives, locate the bundled AROS main +
+/// extended ROM pair and rewrite the config to point at them, so every
+/// downstream consumer (start-up banner, window title, save states) sees the
+/// real paths. An explicit `extended_rom` still wins over the AROS one.
+pub fn resolve_bundled_rom(cfg: &mut Config) -> Result<()> {
+    if cfg.rom_path != Path::new(BUNDLED_AROS_ROM) {
+        return Ok(());
+    }
+    let aros = crate::romsearch::find_bundled_aros().ok_or_else(|| {
+        anyhow!(
+            "no ROM specified and the bundled AROS ROM was not found. Pass a \
+             Kickstart ROM (as the first argument or rom = \"...\" in a config), \
+             or install the AROS files ({} and {}) next to the binary or under \
+             share/copperline/aros/.",
+            crate::romsearch::AROS_MAIN_FILE,
+            crate::romsearch::AROS_EXT_FILE
+        )
+    })?;
+    log::info!(
+        "no ROM specified; booting bundled AROS ({})",
+        aros.main.display()
+    );
+    cfg.rom_path = aros.main;
+    cfg.extended_rom_path.get_or_insert(aros.extended);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
