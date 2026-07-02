@@ -83,3 +83,19 @@ Inspection and modification:
 | `POKE ADDR VAL` | Write a memory word |
 | `SETREG REG VAL` | Set a CPU register (`SETREG D0 1234`) |
 | `HELP`, `CLEAR`, `CLOSE` | Console housekeeping |
+
+AmigaOS introspection (read-only walks of exec's lists, safe at any
+time -- if the OS is not up yet the command says so instead of printing
+garbage):
+
+| Command | Effect |
+|---|---|
+| `TASKS` | The scheduled task (`>`), then the ready and waiting lists, with priority, state, and name |
+| `LIBS` | Opened libraries with versions (`graphics.library v40.10`) |
+| `DEVS` | Devices with versions |
+| `RESOURCES`, `PORTS` | The resource and message-port lists |
+| `CATCHTASK NAME` | Stop when exec schedules a task whose name contains NAME (case-insensitive); `CATCHTASK` alone clears it |
+
+`CATCHTASK` is the tool for "wake me when my process actually runs": it
+baselines on the currently scheduled task and fires on the next
+reschedule to a matching one, reporting the task's name and address.

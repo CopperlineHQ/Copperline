@@ -103,6 +103,8 @@ pub enum DebugStop {
     /// The CPU entered a caught exception vector; `pc` is the handler
     /// entry the machine stopped at.
     Exception { vector: u16, pc: u32 },
+    /// Exec scheduled a task matching the armed task catch.
+    Task { name: String, addr: u32 },
 }
 
 /// Human name of a 68000 exception vector, for catchpoint listings and
@@ -155,6 +157,9 @@ impl DebugStop {
                 "Caught {} (vector {vector}), handler ${pc:06X}",
                 exception_vector_name(*vector)
             ),
+            DebugStop::Task { name, addr } => {
+                format!("Task scheduled: {name} (task ${addr:06X})")
+            }
         }
     }
 }
@@ -446,6 +451,9 @@ pub struct InteractiveBreaks {
     /// Caught exception vector numbers: the machine stops when the CPU
     /// enters one of these vectors (trap, fault, or interrupt).
     pub catches: Vec<u16>,
+    /// Stop when exec schedules a task whose name contains this
+    /// (case-insensitive) fragment; None = disabled.
+    pub task_catch: Option<String>,
     armed: bool,
 }
 
@@ -458,7 +466,8 @@ impl InteractiveBreaks {
         self.armed = !(self.breakpoints.is_empty()
             && self.watches.is_empty()
             && self.reg_watches.is_empty()
-            && self.catches.is_empty());
+            && self.catches.is_empty()
+            && self.task_catch.is_none());
     }
 
     /// Whether any breakpoint is set at `pc`, ignoring its condition. Used for
@@ -574,11 +583,19 @@ impl InteractiveBreaks {
         added
     }
 
+    /// Set or clear the scheduled-task catch. Returns the previous value.
+    pub fn set_task_catch(&mut self, target: Option<String>) -> Option<String> {
+        let previous = std::mem::replace(&mut self.task_catch, target);
+        self.rearm();
+        previous
+    }
+
     pub fn clear(&mut self) {
         self.breakpoints.clear();
         self.watches.clear();
         self.reg_watches.clear();
         self.catches.clear();
+        self.task_catch = None;
         self.armed = false;
     }
 }

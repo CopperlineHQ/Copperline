@@ -78,6 +78,9 @@ pub struct M68kMachine {
     // window polls and surfaces (pause + reopen the debugger).
     ui_breaks: crate::debugger::InteractiveBreaks,
     ui_stop: Option<crate::debugger::DebugStop>,
+    /// ThisTask pointer at the last armed task-catch check, so only a
+    /// reschedule (a change) can fire the catch. Debug-only state.
+    ui_last_this_task: Option<u32>,
     // COPPERLINE_DBG_SPREN: previous DMACON, to detect the instruction that
     // clears the sprite-DMA-enable bit.
     dbg_prev_dmacon: u16,
@@ -236,6 +239,7 @@ impl M68kMachine {
             dbg: crate::debugger::Debugger::from_env(),
             ui_breaks: crate::debugger::InteractiveBreaks::default(),
             ui_stop: None,
+            ui_last_this_task: None,
             dbg_prev_dmacon: 0,
             dbg_prev_fc: 0,
             dbg_fc_count: 0,
@@ -1119,6 +1123,84 @@ impl M68kMachine {
         added
     }
 
+    /// Arm or clear the scheduled-task catch: stop when exec's ThisTask
+    /// changes to a task whose name contains `target` (matched
+    /// case-insensitively). Arming baselines on the currently scheduled
+    /// task so the catch fires on the next reschedule, not instantly.
+    pub fn ui_set_task_catch(&mut self, target: Option<String>) {
+        self.ui_last_this_task = self.ui_peek_this_task();
+        self.ui_breaks
+            .set_task_catch(target.map(|t| t.to_ascii_uppercase()));
+    }
+
+    /// ExecBase->ThisTask via side-effect-free peeks, when plausible.
+    fn ui_peek_this_task(&self) -> Option<u32> {
+        let peek32 = |addr: u32| {
+            (u32::from(self.bus.bus.peek_word_any(addr)) << 16)
+                | u32::from(self.bus.bus.peek_word_any(addr.wrapping_add(2)))
+        };
+        let execbase = peek32(4);
+        if execbase == 0 || execbase & 1 != 0 || execbase >= 0x0100_0000 {
+            return None;
+        }
+        let task = peek32(execbase.wrapping_add(0x114));
+        (task != 0 && task & 1 == 0 && task < 0x0100_0000).then_some(task)
+    }
+
+    /// The name a task node points at, uppercased for matching.
+    fn ui_task_name(&self, task: u32) -> String {
+        let peek32 = |addr: u32| {
+            (u32::from(self.bus.bus.peek_word_any(addr)) << 16)
+                | u32::from(self.bus.bus.peek_word_any(addr.wrapping_add(2)))
+        };
+        let name_ptr = peek32(task.wrapping_add(10));
+        if name_ptr == 0 || name_ptr >= 0x0100_0000 {
+            return String::new();
+        }
+        let mut name = String::new();
+        for i in 0..30u32 {
+            let addr = name_ptr.wrapping_add(i);
+            let word = self.bus.bus.peek_word_any(addr & !1);
+            let byte = if addr & 1 == 0 {
+                (word >> 8) as u8
+            } else {
+                word as u8
+            };
+            if byte == 0 {
+                break;
+            }
+            name.push(if (0x20..0x7F).contains(&byte) {
+                byte as char
+            } else {
+                '.'
+            });
+        }
+        name
+    }
+
+    /// Fire the task catch when exec reschedules to a matching task.
+    fn ui_check_task_catch(&mut self) {
+        if self.ui_breaks.task_catch.is_none() {
+            return;
+        }
+        let Some(task) = self.ui_peek_this_task() else {
+            return;
+        };
+        if self.ui_last_this_task == Some(task) {
+            return;
+        }
+        self.ui_last_this_task = Some(task);
+        let name = self.ui_task_name(task);
+        let matched = self
+            .ui_breaks
+            .task_catch
+            .as_deref()
+            .is_some_and(|target| name.to_ascii_uppercase().contains(target));
+        if matched {
+            self.ui_stop = Some(crate::debugger::DebugStop::Task { name, addr: task });
+        }
+    }
+
     /// Toggle an exception catchpoint (stop when the CPU enters the
     /// vector). Returns true when now set. Arming clears any stale
     /// recorded exception so an old entry cannot fire immediately.
@@ -1202,6 +1284,10 @@ impl M68kMachine {
         }
         if self.ui_breakpoint_stops(pc) {
             self.ui_stop = Some(DebugStop::Breakpoint { pc });
+            return;
+        }
+        self.ui_check_task_catch();
+        if self.ui_stop.is_some() {
             return;
         }
         self.ui_promote_reg_hit();

@@ -2525,6 +2525,89 @@ fn console_text_insertion_and_multiline_paste() {
     assert_eq!(app.console_panel.as_ref().unwrap().input, "m 0");
 }
 
+/// Lay a minimal exec world into chip RAM: ExecBase with a valid
+/// ChkBase, a scheduled task, one ready task, and one library.
+fn plant_exec_world(app: &mut super::App) {
+    let bus = app.emu.bus_mut();
+    bus.mem.overlay = false;
+    let put32 = |ram: &mut [u8], addr: usize, v: u32| {
+        ram[addr..addr + 4].copy_from_slice(&v.to_be_bytes());
+    };
+    let put_str = |ram: &mut [u8], addr: usize, s: &str| {
+        ram[addr..addr + s.len()].copy_from_slice(s.as_bytes());
+        ram[addr + s.len()] = 0;
+    };
+    let ram = &mut bus.mem.chip_ram;
+    let base = 0x1000usize;
+    put32(ram, 4, base as u32);
+    put32(ram, base + 0x26, !(base as u32)); // ChkBase complement
+                                             // ThisTask -> task at $2000 named "boot.task", state run.
+    put32(ram, base + 0x114, 0x2000);
+    put32(ram, 0x2000 + 10, 0x3000);
+    put_str(ram, 0x3000, "boot.task");
+    ram[0x2000 + 9] = 10; // pri
+    ram[0x2000 + 15] = 2; // run
+                          // TaskReady: one task named "helper" (list head at base+0x196).
+    put32(ram, base + 0x196, 0x2100);
+    put32(ram, 0x2100, (base + 0x196 + 4) as u32); // succ -> lh_Tail
+    put32(ram, base + 0x196 + 4, 0);
+    put32(ram, 0x2100 + 10, 0x3100);
+    put_str(ram, 0x3100, "helper");
+    ram[0x2100 + 15] = 3; // ready
+                          // LibList: one library "exec.library" v40.10.
+    put32(ram, base + 0x17A, 0x2200);
+    put32(ram, 0x2200, (base + 0x17A + 4) as u32);
+    put32(ram, base + 0x17A + 4, 0);
+    put32(ram, 0x2200 + 10, 0x3200);
+    put_str(ram, 0x3200, "exec.library");
+    put32(ram, 0x2200 + 20, 0x0028_000A); // v40 r10
+}
+
+#[test]
+fn console_os_introspection_and_task_catch() {
+    let mut app = test_app();
+    app.open_console();
+    plant_exec_world(&mut app);
+
+    let out = console_run(&mut app, "TASKS");
+    assert!(
+        out.iter()
+            .any(|l| l.starts_with('>') && l.contains("boot.task")),
+        "{out:?}"
+    );
+    assert!(
+        out.iter()
+            .any(|l| l.contains("ready") && l.contains("helper")),
+        "{out:?}"
+    );
+    let out = console_run(&mut app, "LIBS");
+    assert!(
+        out.iter()
+            .any(|l| l.contains("v40.10") && l.contains("exec.library")),
+        "{out:?}"
+    );
+    // An empty exec list reads as empty, not garbage.
+    let out = console_run(&mut app, "PORTS");
+    assert!(out.iter().any(|l| l.contains("empty")), "{out:?}");
+
+    // Arm the task catch, then reschedule to a matching task: the stop
+    // fires with the task's name on the next executed instruction.
+    console_run(&mut app, "CATCHTASK HELPER");
+    {
+        let bus = app.emu.bus_mut();
+        let addr = 0x1000 + 0x114;
+        bus.mem.chip_ram[addr..addr + 4].copy_from_slice(&0x2100u32.to_be_bytes());
+    }
+    let out = console_run(&mut app, "S 1");
+    assert!(
+        out.iter().any(|l| l.contains("Task scheduled: helper")),
+        "{out:?}"
+    );
+    // Clearing disarms it.
+    console_run(&mut app, "CATCHTASK");
+    assert!(app.emu.machine.ui_breaks().task_catch.is_none());
+}
+
 #[test]
 fn console_inspection_and_stop_commands() {
     let mut app = test_app();

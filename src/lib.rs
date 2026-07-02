@@ -13,6 +13,7 @@
 pub mod a2065;
 pub mod a2091;
 pub mod akiko;
+pub mod amigaos;
 pub mod audio;
 pub mod bus;
 pub mod cache;

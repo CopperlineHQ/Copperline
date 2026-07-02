@@ -108,9 +108,10 @@ const CONSOLE_HELP: &[&str] = &[
     "            runto ADDR   toslot V [H]   rstep [N]  rframe  rrun",
     "stops:      break/b ADDR [COND] [IGN N]   watch/w ADDR   rwatch REG",
     "            btrap V [H]   cbreak ADDR   catch irq N|trap N|vec N",
-    "            breaks (list)   clearbreaks",
+    "            catchtask [NAME]   breaks (list)   clearbreaks",
     "inspect:    status  regs/r  mem/m ADDR [BYTES]  dis/d [ADDR] [N]",
     "            copper [pc|ADDR] [N]   custom   find HEX [START]   writer ADDR",
+    "os:         tasks  libs  devs  resources  ports",
     "modify:     poke ADDR VAL   setreg REG VAL",
     "console:    help  clear  close",
     "Addresses and values are hex; beam positions (V, H) are decimal.",
@@ -377,6 +378,28 @@ impl App {
                     "catch {} {}",
                     crate::debugger::exception_vector_name(vector),
                     if set { "set" } else { "removed" }
+                ))
+            }
+            "TASKS" => ConsoleOutcome::lines(self.console_os_tasks()),
+            "LIBS" | "LIBRARIES" => {
+                ConsoleOutcome::lines(self.console_os_list(crate::amigaos::OsList::Libraries))
+            }
+            "DEVS" | "DEVICES" => {
+                ConsoleOutcome::lines(self.console_os_list(crate::amigaos::OsList::Devices))
+            }
+            "RESOURCES" => {
+                ConsoleOutcome::lines(self.console_os_list(crate::amigaos::OsList::Resources))
+            }
+            "PORTS" => ConsoleOutcome::lines(self.console_os_list(crate::amigaos::OsList::Ports)),
+            "CATCHTASK" => {
+                if args.is_empty() {
+                    self.emu.machine.ui_set_task_catch(None);
+                    return ConsoleOutcome::one("task catch cleared");
+                }
+                let target = args.join(" ");
+                self.emu.machine.ui_set_task_catch(Some(target.clone()));
+                ConsoleOutcome::one(format!(
+                    "stopping when a task whose name contains \"{target}\" is scheduled"
                 ))
             }
             "BREAKS" | "INFO" => ConsoleOutcome::lines(self.console_breaks_lines()),
@@ -698,6 +721,93 @@ impl App {
         lines
     }
 
+    /// Run `walk` against a validated ExecBase using peeks over the bus,
+    /// or report why the OS structures are not walkable.
+    fn console_with_exec(
+        &self,
+        walk: impl FnOnce(&crate::amigaos::OsMemory, u32) -> Vec<String>,
+    ) -> Vec<String> {
+        let bus = self.emu.bus();
+        let peek8 = |addr: u32| {
+            let word = bus.peek_word_any(addr & !1);
+            if addr & 1 == 0 {
+                (word >> 8) as u8
+            } else {
+                word as u8
+            }
+        };
+        let peek32 = |addr: u32| {
+            (u32::from(bus.peek_word_any(addr)) << 16)
+                | u32::from(bus.peek_word_any(addr.wrapping_add(2)))
+        };
+        let os = crate::amigaos::OsMemory {
+            peek8: &peek8,
+            peek32: &peek32,
+        };
+        match os.exec_base() {
+            Ok(base) => walk(&os, base),
+            Err(reason) => vec![format!("!{reason}")],
+        }
+    }
+
+    /// TASKS: the scheduled task plus the ready and waiting lists.
+    fn console_os_tasks(&self) -> Vec<String> {
+        self.console_with_exec(|os, base| {
+            let mut lines = Vec::new();
+            match os.this_task(base) {
+                Some(task) => lines.push(format!(
+                    "> ${:06X}  pri {:>4}  {:<7} {}",
+                    task.addr, task.pri, "run", task.name
+                )),
+                None => lines.push("!ThisTask is not plausible".to_string()),
+            }
+            for (list, label) in [
+                (crate::amigaos::OsList::TaskReady, "ready"),
+                (crate::amigaos::OsList::TaskWait, "wait"),
+            ] {
+                for node in os.walk(base, list) {
+                    let state = crate::amigaos::task_state_name(node.state);
+                    let state = if state == "?" { label } else { state };
+                    lines.push(format!(
+                        "  ${:06X}  pri {:>4}  {:<7} {}",
+                        node.addr, node.pri, state, node.name
+                    ));
+                }
+            }
+            if lines.len() == 1 {
+                lines.push("  (no other tasks)".to_string());
+            }
+            lines
+        })
+    }
+
+    /// LIBS/DEVS/RESOURCES/PORTS: one line per node.
+    fn console_os_list(&self, list: crate::amigaos::OsList) -> Vec<String> {
+        let library_shaped = matches!(
+            list,
+            crate::amigaos::OsList::Libraries | crate::amigaos::OsList::Devices
+        );
+        self.console_with_exec(|os, base| {
+            let nodes = os.walk(base, list);
+            if nodes.is_empty() {
+                return vec!["(empty list)".to_string()];
+            }
+            nodes
+                .iter()
+                .map(|node| {
+                    if library_shaped {
+                        format!(
+                            "${:06X}  v{}.{:<4} {}",
+                            node.addr, node.version, node.revision, node.name
+                        )
+                    } else {
+                        format!("${:06X}  pri {:>4}  {}", node.addr, node.pri, node.name)
+                    }
+                })
+                .collect()
+        })
+    }
+
     fn console_breaks_lines(&self) -> Vec<String> {
         let breaks = self.emu.machine.ui_breaks();
         let bus = self.emu.bus();
@@ -734,6 +844,10 @@ impl App {
                 "catch  {} (vector {vector})",
                 crate::debugger::exception_vector_name(*vector)
             ));
+            any = true;
+        }
+        if let Some(target) = &breaks.task_catch {
+            lines.push(format!("ctask  name contains \"{target}\""));
             any = true;
         }
         for trap in bus.ui_beam_traps() {
