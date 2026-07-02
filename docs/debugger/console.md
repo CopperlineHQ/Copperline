@@ -85,6 +85,8 @@ Inspection and modification:
 | `STACK`, `BT` | Heuristic call-stack walk: stack longwords that look like return addresses after a JSR/BSR |
 | `POKE ADDR VAL` | Write a memory word |
 | `SETREG REG VAL` | Set a CPU register (`SETREG D0 1234`) |
+| `TRACE START [PATH]` | Start a runtime instruction trace: one disassembled line per retired instruction with its beam position, no env var or restart needed (capped at a million lines) |
+| `TRACE STOP` / `TRACE` | Stop the trace / report its progress |
 | `HELP`, `CLEAR`, `CLOSE` | Console housekeeping |
 
 AmigaOS introspection (read-only walks of exec's lists, safe at any

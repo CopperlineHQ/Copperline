@@ -2705,6 +2705,32 @@ fn console_blits_lists_frame_blit_records() {
 }
 
 #[test]
+fn console_trace_writes_disassembled_lines() {
+    let mut app = test_app();
+    app.open_console();
+    let path = std::env::temp_dir().join(format!(
+        "copperline-console-trace-{}.txt",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+
+    let out = console_run(&mut app, &format!("TRACE START {}", path.display()));
+    assert!(out[0].contains("tracing to"), "{out:?}");
+    console_run(&mut app, "S 4");
+    let out = console_run(&mut app, "TRACE");
+    assert!(out[0].contains("lines so far"), "{out:?}");
+    let out = console_run(&mut app, "TRACE STOP");
+    assert!(out[0].contains("trace stopped: 4 lines"), "{out:?}");
+
+    let text = std::fs::read_to_string(&path).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 4, "{text}");
+    // Disassembled NOP sled with beam annotations.
+    assert!(lines[0].contains("NOP") && lines[0].contains('['), "{text}");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn double_fault_halt_surfaces_once() {
     let mut app = test_app();
     app.open_console();

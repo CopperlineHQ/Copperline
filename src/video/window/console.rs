@@ -115,7 +115,7 @@ const CONSOLE_HELP: &[&str] = &[
     "            writer ADDR",
     "            history/h [N]   stack/bt",
     "os:         tasks  libs  devs  resources  ports   guru [CODE]",
-    "modify:     poke ADDR VAL   setreg REG VAL",
+    "modify:     poke ADDR VAL   setreg REG VAL   trace start [PATH]|stop",
     "console:    help  clear  close",
     "Addresses and values are hex; beam positions (V, H) are decimal.",
     "Cmd/Ctrl+V pastes; a multi-line paste runs each line in order.",
@@ -218,11 +218,9 @@ impl App {
     }
 
     /// Dispatch one command line. Never touches `console_panel`; the
-    /// caller applies the outcome so borrows stay simple.
+    /// caller applies the outcome so borrows stay simple. Arguments keep
+    /// their case (file paths); every parser is case-insensitive.
     fn console_execute(&mut self, line: &str) -> ConsoleOutcome {
-        // Commands and arguments are case-insensitive (hex, register
-        // names, catch grammar); pasted lowercase runs as typed.
-        let line = line.to_ascii_uppercase();
         let tokens: Vec<&str> = line.split_whitespace().collect();
         let Some((&cmd, args)) = tokens.split_first() else {
             return ConsoleOutcome::lines(Vec::new());
@@ -338,7 +336,7 @@ impl App {
                 ConsoleOutcome::lines(lines)
             }
             "BREAK" | "B" => {
-                let spec = args.join(" ");
+                let spec = args.join(" ").to_ascii_uppercase();
                 let Some((addr, cond, ignore)) = ui::parse_break_spec(&spec) else {
                     return ConsoleOutcome::error("usage: BREAK ADDR [LHS OP RHS] [IGN N]");
                 };
@@ -375,7 +373,7 @@ impl App {
             "RWATCH" | "RW" => {
                 let Some(off) = args
                     .first()
-                    .and_then(|t| crate::gdbstub::parse_custom_reg(t))
+                    .and_then(|t| crate::gdbstub::parse_custom_reg(&t.to_ascii_uppercase()))
                 else {
                     return ConsoleOutcome::error("usage: RWATCH NAME|OFFSET (e.g. DMACON or 96)");
                 };
@@ -595,6 +593,53 @@ impl App {
                     lines.push(format!("{cursor}{addr:06X}  {text}"));
                 }
                 ConsoleOutcome::lines(lines)
+            }
+            "TRACE" => {
+                const TRACE_LINE_CAP: u64 = 1_000_000;
+                let sub = args.first().map(|t| t.to_ascii_uppercase());
+                match sub.as_deref() {
+                    Some("START") => {
+                        let path = match args.get(1) {
+                            Some(path) => std::path::PathBuf::from(path),
+                            None => {
+                                let stamp = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_secs())
+                                    .unwrap_or(0);
+                                std::path::PathBuf::from(format!("copperline-trace-{stamp}.txt"))
+                            }
+                        };
+                        match self
+                            .emu
+                            .machine
+                            .ui_trace_start(path.clone(), TRACE_LINE_CAP)
+                        {
+                            Ok(()) => ConsoleOutcome::one(format!(
+                                "tracing to {} (cap {TRACE_LINE_CAP} lines; TRACE STOP ends it)",
+                                path.display()
+                            )),
+                            Err(e) => ConsoleOutcome::error(format!(
+                                "cannot open {}: {e}",
+                                path.display()
+                            )),
+                        }
+                    }
+                    Some("STOP") => match self.emu.machine.ui_trace_stop() {
+                        Some((path, lines)) => ConsoleOutcome::one(format!(
+                            "trace stopped: {lines} lines in {}",
+                            path.display()
+                        )),
+                        None => ConsoleOutcome::one("no trace running"),
+                    },
+                    None => match self.emu.machine.ui_trace_status() {
+                        Some((path, lines)) => ConsoleOutcome::one(format!(
+                            "tracing to {} ({lines} lines so far)",
+                            path.display()
+                        )),
+                        None => ConsoleOutcome::one("no trace running (TRACE START [PATH])"),
+                    },
+                    Some(_) => ConsoleOutcome::error("usage: TRACE [START [PATH] | STOP]"),
+                }
             }
             "BLITS" => {
                 let Some(trace) = self.emu.bus().frame_bus_trace() else {
