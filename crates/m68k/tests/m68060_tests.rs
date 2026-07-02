@@ -621,3 +621,59 @@ fn rte_pops_format_7_frame_on_68040() {
     assert_eq!(cpu.pc, 0x0555, "RTE must pop the 040 access-error frame");
     assert_eq!(cpu.dar[15], sp + 60, "30 words consumed");
 }
+
+#[test]
+fn plpar_translates_and_ptest_is_line_f_on_68060() {
+    let (mut cpu, mut bus) = setup_060();
+    // Identity table for page 0x1000, then remap it to 0x5000 before
+    // enabling translation.
+    let root = build_060_table(&mut bus, 0x1000, false);
+    bus.write_long_at(0x4000 + 1 * 4, 0x5000 | 1); // page descriptor -> 0x5000
+    movec_to(&mut cpu, &mut bus, 0x807, root);
+    movec_to(&mut cpu, &mut bus, 0x003, 0x0000_8000);
+    movec_to(&mut cpu, &mut bus, 0x001, 5); // DFC = supervisor data
+
+    // PLPAR (A0): physical address lands in A0.
+    bus.write_word_at(0x0210, 0xF5C8);
+    cpu.dar[8] = 0x1234;
+    cpu.pc = 0x0210;
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.pc, 0x0212, "PLPAR executes on the 68060");
+    assert_eq!(cpu.dar[8], 0x5234, "A0 holds the translated address");
+
+    // PTEST encodings were dropped from the 68060: Line-F.
+    bus.write_word_at(0x0212, 0xF548); // PTESTW (A0) on an 040
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.pc, 0x0340, "PTEST is an undefined F-line on the 68060");
+}
+
+#[test]
+fn plpar_faults_with_format_4_on_unmapped_page_on_68060() {
+    let (mut cpu, mut bus) = setup_060();
+    bus.write_long_at(0x08, 0x0400); // vector 2
+    build_060_table(&mut bus, 0x0000, false); // keep stack/code mapped
+    let root = build_060_table(&mut bus, 0x1000, false);
+    movec_to(&mut cpu, &mut bus, 0x807, root);
+    movec_to(&mut cpu, &mut bus, 0x003, 0x0000_8000);
+    movec_to(&mut cpu, &mut bus, 0x001, 5);
+
+    // PLPAR (A0) with A0 pointing at an unmapped page.
+    bus.write_word_at(0x0210, 0xF5C8);
+    cpu.dar[8] = 0x0080_0000;
+    cpu.pc = 0x0210;
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.pc, 0x0400, "unmapped PLPAR takes the access error");
+    let sp = cpu.dar[15];
+    assert_eq!(bus.read_word(sp.wrapping_add(6)), 0x4008, "format $4 frame");
+    assert_eq!(cpu.dar[8], 0x0080_0000, "An untouched for restart");
+}
+
+#[test]
+fn pmove_is_line_f_on_68060() {
+    let (mut cpu, mut bus) = setup_060();
+    // 030-form PMOVE TC,<mem> (0xF000 with MMU extension word).
+    bus.write_word_at(0x0200, 0xF010);
+    bus.write_word_at(0x0202, 0x4200);
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.pc, 0x0340, "PMOVE is an undefined F-line on the 68060");
+}

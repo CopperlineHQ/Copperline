@@ -1473,6 +1473,15 @@ impl CpuCore {
         use super::ea::AddressingMode;
         use super::types::Size;
 
+        // The 68060 has no PMOVE (MMU registers are MOVEC-only) and no
+        // 030-form PTEST/PFLUSH in this encoding space: undefined F-line.
+        // Watch item: the 040 arm below NOPs 030-form PTESTs because
+        // 68040.library issues them during setup; extend that pragmatism
+        // here if an OS's 68060 support library turns out to do the same.
+        if self.is_060() {
+            return 0;
+        }
+
         // MMU ops require PMMU-capable CPU (68030/68040).
         if !self.has_pmmu {
             return 0;

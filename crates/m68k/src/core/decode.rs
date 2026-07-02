@@ -198,6 +198,38 @@ fn dispatch_group_f<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
         if !cpu.is_supervisor() {
             return cpu.take_exception(bus, 8); // Privilege violation
         }
+        if cpu.is_060() {
+            // PLPAW (F588+An) / PLPAR (F5C8+An): translate the logical
+            // address in An (address space from DFC) and write the physical
+            // address back to An. These replace PTEST on the 68060.
+            if (opcode & 0xFFF0) == 0xF580 || (opcode & 0xFFF0) == 0xF5C0 {
+                let write = (opcode & 0x0040) == 0; // F588 = PLPAW
+                let an = 8 + (opcode & 7) as usize;
+                let addr = cpu.dar[an];
+                let supervisor = (cpu.dfc & 4) != 0;
+                match crate::mmu::translate_address(cpu, bus, addr, write, supervisor, false) {
+                    Ok(phys) => {
+                        cpu.dar[an] = phys;
+                        return 4;
+                    }
+                    Err(fault) => {
+                        // Access error, format $4: An is untouched (the
+                        // rollback keeps it) so the handler can map the
+                        // page and restart the PLPA.
+                        cpu.handle_mmu_fault(bus, fault, write, false, 4);
+                        return 50;
+                    }
+                }
+            }
+            if (opcode & 0x00C0) == 0 {
+                // PFLUSH/PFLUSHN/PFLUSHA/PFLUSHAN: flush-all pragmatism as
+                // on the 040 (over-flushing only costs re-walks).
+                cpu.atc.flush_all();
+                return 4;
+            }
+            // PTEST was dropped from 68060 silicon: undefined F-line.
+            return FLINE_TRAP_SENTINEL;
+        }
         if cpu.is_040() && (opcode & 0x0040) != 0 {
             // PTEST: walk the page for An and report it in MMUSR. We model the
             // physical-address and resident (R) bits, enough for an OS to tell a
