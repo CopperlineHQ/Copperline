@@ -204,6 +204,11 @@ struct CpuBus {
     /// COPPERLINE_DBG_IRQ cached time window. Interrupt acknowledge can be hot
     /// during IRQ storms, so parse the environment once at construction.
     dbg_irq_window: Option<(f64, f64)>,
+    /// Whether the most recent instruction-stream read hit the icache
+    /// model. The 68060 timing model gates superscalar pairing and branch
+    /// folding on a cached fetch stream. Recomputed on every fetch, never
+    /// carried across a save state.
+    last_fetch_cache_hit: bool,
 }
 
 pub fn build(
@@ -242,6 +247,7 @@ impl M68kMachine {
                 icache: None,
                 dcache: None,
                 dbg_irq_window: debug_irq_window_setting(),
+                last_fetch_cache_hit: false,
             },
             hle: NoOpHleHandler,
             fpu_enabled,
@@ -1951,11 +1957,20 @@ impl CpuBus {
             // miss goes through the normal (billed) path and then fills
             // the line from backing memory.
             if let Some(value) = self.cache_read(addr, size, kind) {
+                if kind == CpuBusAccessKind::Fetch {
+                    self.last_fetch_cache_hit = true;
+                }
                 return value;
             }
             let value = self.read_sized_uncached(addr, size, kind);
             self.cache_fill_after_miss(addr, size, kind);
+            if kind == CpuBusAccessKind::Fetch {
+                self.last_fetch_cache_hit = false;
+            }
             return value;
+        }
+        if kind == CpuBusAccessKind::Fetch {
+            self.last_fetch_cache_hit = false;
         }
         self.read_sized_uncached(addr, size, kind)
     }
@@ -2418,6 +2433,10 @@ impl CpuBus {
 }
 
 impl AddressBus for CpuBus {
+    fn last_fetch_was_cached(&self) -> bool {
+        self.last_fetch_cache_hit
+    }
+
     fn read_byte(&mut self, address: u32) -> u8 {
         self.read_sized(address, 1, CpuBusAccessKind::Read) as u8
     }
@@ -2907,6 +2926,7 @@ mod tests {
             icache: None,
             dcache: None,
             dbg_irq_window: None,
+            last_fetch_cache_hit: false,
         };
 
         assert_eq!(bus.read_long(0), 0x1111_4EF9);
@@ -2930,6 +2950,7 @@ mod tests {
             icache: None,
             dcache: None,
             dbg_irq_window: None,
+            last_fetch_cache_hit: false,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
         // Start on a refresh slot (0x003) so the fetch both waits for and then
@@ -2960,6 +2981,7 @@ mod tests {
             icache: None,
             dcache: None,
             dbg_irq_window: None,
+            last_fetch_cache_hit: false,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
 
@@ -3169,6 +3191,7 @@ mod tests {
             icache: None,
             dcache: Some(Box::new(dcache)),
             dbg_irq_window: None,
+            last_fetch_cache_hit: false,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
         let fast = FAST_RAM_BASE as u32 + 0x40;
@@ -3213,6 +3236,7 @@ mod tests {
             icache: None,
             dcache: None,
             dbg_irq_window: None,
+            last_fetch_cache_hit: false,
         };
         let before = bus.read_long(ROM_BASE as u32);
         bus.write_long(ROM_BASE as u32, 0xDEAD_BEEF);
@@ -3235,6 +3259,7 @@ mod tests {
             icache: None,
             dcache: None,
             dbg_irq_window: None,
+            last_fetch_cache_hit: false,
         };
         let addr = SLOW_RAM_BASE as u32 + 64 * 1024;
         // With nothing yet driven, the bus rests at 0.

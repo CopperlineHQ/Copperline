@@ -276,3 +276,173 @@ fn dbcc_loop_folds_with_branch_cache() {
     // Expiry: predicted taken but falls through -> mispredict.
     assert_eq!(step_cycles(&mut cpu, &mut bus), 7, "loop exit mispredicts");
 }
+
+/// Enable superscalar dispatch (PCR.ESS) via MOVEC.
+fn enable_ess(cpu: &mut CpuCore, bus: &mut TestBus) {
+    let pc = cpu.pc;
+    bus.write_word_at(0x0110, 0x4E7B); // MOVEC D0,PCR
+    bus.write_word_at(0x0112, 0x0808);
+    cpu.dar[0] = 1; // ESS
+    cpu.pc = 0x0110;
+    step_cycles(cpu, bus);
+    cpu.pc = pc;
+    cpu.dar[0] = 0;
+}
+
+#[test]
+fn independent_pair_folds_to_one_cycle_total() {
+    let (mut cpu, mut bus) = setup(CpuType::M68060);
+    enable_ess(&mut cpu, &mut bus);
+    bus.write_word_at(0x0200, 0x7000); // MOVEQ #0,D0
+    bus.write_word_at(0x0202, 0x7201); // MOVEQ #1,D1
+    bus.write_word_at(0x0204, 0x7402); // MOVEQ #2,D2
+    bus.write_word_at(0x0206, 0x7603); // MOVEQ #3,D3
+    assert_eq!(step_cycles(&mut cpu, &mut bus), 1, "head pays the cycle");
+    assert_eq!(step_cycles(&mut cpu, &mut bus), 0, "partner folds");
+    assert_eq!(step_cycles(&mut cpu, &mut bus), 1, "next head");
+    assert_eq!(step_cycles(&mut cpu, &mut bus), 0, "next partner");
+}
+
+#[test]
+fn dependencies_and_classes_block_pairing() {
+    // RAW: the partner reads the head's result.
+    let (mut cpu, mut bus) = setup(CpuType::M68060);
+    enable_ess(&mut cpu, &mut bus);
+    bus.write_word_at(0x0200, 0x7007); // MOVEQ #7,D0
+    bus.write_word_at(0x0202, 0x2200); // MOVE.L D0,D1
+    assert_eq!(step_cycles(&mut cpu, &mut bus), 1);
+    assert_eq!(step_cycles(&mut cpu, &mut bus), 1, "RAW blocks the fold");
+
+    // WAW: both write the same register.
+    let (mut cpu, mut bus) = setup(CpuType::M68060);
+    enable_ess(&mut cpu, &mut bus);
+    bus.write_word_at(0x0200, 0x7007);
+    bus.write_word_at(0x0202, 0x7009); // MOVEQ #9,D0
+    assert_eq!(step_cycles(&mut cpu, &mut bus), 1);
+    assert_eq!(step_cycles(&mut cpu, &mut bus), 1, "WAW blocks the fold");
+
+    // pOEP-only partner never dispatches to the sOEP.
+    let (mut cpu, mut bus) = setup(CpuType::M68060);
+    enable_ess(&mut cpu, &mut bus);
+    bus.write_word_at(0x0200, 0x7007);
+    bus.write_word_at(0x0202, 0xC4C1); // MULU.W D1,D2
+    assert_eq!(step_cycles(&mut cpu, &mut bus), 1);
+    assert_eq!(step_cycles(&mut cpu, &mut bus), 2, "pOEP-only partner");
+
+    // A late CCR consumer cannot pair behind a CCR producer.
+    let (mut cpu, mut bus) = setup(CpuType::M68060);
+    enable_ess(&mut cpu, &mut bus);
+    bus.write_word_at(0x0200, 0x7007); // MOVEQ (defines CCR)
+    bus.write_word_at(0x0202, 0x51C1); // SF D1 (consumes CCR late)
+    assert_eq!(step_cycles(&mut cpu, &mut bus), 1);
+    assert_eq!(step_cycles(&mut cpu, &mut bus), 1, "CCR rule blocks");
+}
+
+#[test]
+fn ess_clear_or_uncached_stream_never_folds() {
+    // ESS clear (reset state): scalar.
+    let (mut cpu, mut bus) = setup(CpuType::M68060);
+    bus.write_word_at(0x0200, 0x7000);
+    bus.write_word_at(0x0202, 0x7201);
+    assert_eq!(step_cycles(&mut cpu, &mut bus), 1);
+    assert_eq!(step_cycles(&mut cpu, &mut bus), 1, "ESS clear runs scalar");
+
+    // A bus whose fetches never hit an icache: scalar too.
+    struct UncachedBus(TestBus);
+    impl AddressBus for UncachedBus {
+        fn read_byte(&mut self, a: u32) -> u8 {
+            self.0.read_byte(a)
+        }
+        fn read_word(&mut self, a: u32) -> u16 {
+            self.0.read_word(a)
+        }
+        fn read_long(&mut self, a: u32) -> u32 {
+            self.0.read_long(a)
+        }
+        fn write_byte(&mut self, a: u32, v: u8) {
+            self.0.write_byte(a, v)
+        }
+        fn write_word(&mut self, a: u32, v: u16) {
+            self.0.write_word(a, v)
+        }
+        fn write_long(&mut self, a: u32, v: u32) {
+            self.0.write_long(a, v)
+        }
+        fn last_fetch_was_cached(&self) -> bool {
+            false
+        }
+    }
+    let (mut cpu, bus) = setup(CpuType::M68060);
+    let mut bus = UncachedBus(bus);
+    // Enable ESS directly (the helper wants a TestBus).
+    cpu.write_control_register(0x808, 1);
+    bus.0.write_word_at(0x0200, 0x7000);
+    bus.0.write_word_at(0x0202, 0x7201);
+    let mut hle = NoOpHleHandler;
+    let c1 = match cpu.step_with_hle_handler(&mut bus, &mut hle) {
+        StepResult::Ok { cycles } => cycles,
+        other => panic!("{other:?}"),
+    };
+    let c2 = match cpu.step_with_hle_handler(&mut bus, &mut hle) {
+        StepResult::Ok { cycles } => cycles,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!((c1, c2), (1, 1), "uncached fetch stream runs scalar");
+}
+
+#[test]
+fn no_fold_across_a_trap_or_taken_branch() {
+    // TRAP between two otherwise-pairable instructions.
+    let (mut cpu, mut bus) = setup(CpuType::M68060);
+    enable_ess(&mut cpu, &mut bus);
+    bus.write_long_at(0x80, 0x0300); // vector 32 (TRAP #0)
+    bus.write_word_at(0x0200, 0x7000); // MOVEQ (opens a window)
+    bus.write_word_at(0x0202, 0x4E40); // TRAP #0
+    bus.write_word_at(0x0300, 0x7201); // MOVEQ at the handler
+    assert_eq!(step_cycles(&mut cpu, &mut bus), 1);
+    step_cycles(&mut cpu, &mut bus); // TRAP
+    assert_eq!(cpu.pc, 0x0300);
+    assert_eq!(
+        step_cycles(&mut cpu, &mut bus),
+        1,
+        "no pairing window survives an exception"
+    );
+
+    // Taken branch between the pair.
+    let (mut cpu, mut bus) = setup(CpuType::M68060);
+    enable_ess(&mut cpu, &mut bus);
+    bus.write_word_at(0x0200, 0x7000); // MOVEQ (opens a window)
+    bus.write_word_at(0x0202, 0x6002); // BRA.S +2
+    bus.write_word_at(0x0206, 0x7201); // MOVEQ at the target
+    assert_eq!(step_cycles(&mut cpu, &mut bus), 1);
+    step_cycles(&mut cpu, &mut bus); // BRA
+    assert_eq!(
+        step_cycles(&mut cpu, &mut bus),
+        1,
+        "no pairing window survives a taken branch"
+    );
+}
+
+#[test]
+fn pairing_state_survives_serialization() {
+    let (mut cpu, mut bus) = setup(CpuType::M68060);
+    enable_ess(&mut cpu, &mut bus);
+    bus.write_word_at(0x0200, 0x7000);
+    bus.write_word_at(0x0202, 0x7201);
+    assert_eq!(step_cycles(&mut cpu, &mut bus), 1, "head opens the window");
+
+    // Round-trip the whole CPU mid-window: the partner must still fold.
+    let blob = serde_json::to_string(&cpu).expect("serialize");
+    let mut restored: CpuCore = serde_json::from_str(&blob).expect("deserialize");
+    assert_eq!(
+        {
+            let mut hle = NoOpHleHandler;
+            match restored.step_with_hle_handler(&mut bus, &mut hle) {
+                StepResult::Ok { cycles } => cycles,
+                other => panic!("{other:?}"),
+            }
+        },
+        0,
+        "restored state folds identically"
+    );
+}
