@@ -344,6 +344,11 @@ fn dispatch_group_0<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
         {
             return illegal_instruction(cpu, bus);
         }
+        // CAS2 was dropped from 68060 silicon; trap before any extension
+        // word is consumed so the 68060SP handler can re-decode it.
+        if cpu.trap_unimpl_int_060() {
+            return cpu.take_exception(bus, super::exceptions::vector::UNIMPLEMENTED_INTEGER);
+        }
         return cpu.exec_cas2(bus, opcode);
     }
     // CAS: 0000 1ss0 11 mmm rrr with extension word (Du/Dc)
@@ -415,6 +420,10 @@ fn dispatch_group_0<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
         if cpu.is_pre_68020 {
             return illegal_instruction(cpu, bus);
         }
+        // CHK2/CMP2 were dropped from 68060 silicon.
+        if cpu.trap_unimpl_int_060() {
+            return cpu.take_exception(bus, super::exceptions::vector::UNIMPLEMENTED_INTEGER);
+        }
         return cpu.exec_cmp2_chk2(bus, opcode);
     }
 
@@ -422,6 +431,11 @@ fn dispatch_group_0<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
     // 0000 ddd 1 s 0 0 1 aaa  with extension word = displacement (d16,An)
     // s: 0=word, 1=long. direction: bit7 (0=mem->reg, 1=reg->mem)
     if (opcode & 0xF138) == 0x0108 {
+        // MOVEP was dropped from 68060 silicon; trap before the displacement
+        // word is consumed and before any register or memory access.
+        if cpu.trap_unimpl_int_060() {
+            return cpu.take_exception(bus, super::exceptions::vector::UNIMPLEMENTED_INTEGER);
+        }
         let dreg = ((opcode >> 9) & 7) as usize;
         let areg = (opcode & 7) as usize;
         let is_long = (opcode & 0x0040) != 0;

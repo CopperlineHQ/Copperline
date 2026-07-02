@@ -252,3 +252,142 @@ fn m_bit_does_not_switch_stacks_on_68060() {
     cpu.set_sr(0x2700);
     assert_eq!(cpu.dar[15], 0x0000_2000);
 }
+
+/// Assert the machine trapped to the unimplemented-integer handler at
+/// $0360 with a format-0 frame whose vector offset is 61*4 and whose
+/// stacked PC is the faulting instruction.
+fn assert_vector_61(cpu: &CpuCore, bus: &mut TestBus, instr_addr: u32) {
+    assert_eq!(cpu.pc, 0x0360, "must vector through 61");
+    let sp = cpu.dar[15];
+    let frame_pc = bus.read_long(sp.wrapping_add(2));
+    let fmt_vec = bus.read_word(sp.wrapping_add(6));
+    assert_eq!(frame_pc, instr_addr, "stacked PC = faulting instruction");
+    assert_eq!(fmt_vec, 61 * 4, "format 0 frame, vector offset 61*4");
+}
+
+#[test]
+fn movep_traps_to_vector_61_on_68060() {
+    let (mut cpu, mut bus) = setup_060();
+    // MOVEP.W D0,(4,A0)
+    bus.write_word_at(0x0200, 0x0188);
+    bus.write_word_at(0x0202, 0x0004);
+    cpu.dar[0] = 0x1234;
+    cpu.dar[8] = 0x4000;
+    let result = step(&mut cpu, &mut bus);
+    assert!(matches!(result, StepResult::Ok { .. }));
+    assert_vector_61(&cpu, &mut bus, 0x0200);
+    assert_eq!(bus.read_word(0x4004), 0, "memory untouched");
+    assert_eq!(cpu.dar[8], 0x4000, "A0 untouched");
+}
+
+#[test]
+fn movep_executes_natively_with_escape_flag() {
+    let (mut cpu, mut bus) = setup_060();
+    cpu.emulate_unimplemented_060 = true;
+    bus.write_word_at(0x0200, 0x0188); // MOVEP.W D0,(4,A0)
+    bus.write_word_at(0x0202, 0x0004);
+    cpu.dar[0] = 0x1234;
+    cpu.dar[8] = 0x4000;
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.pc, 0x0204);
+    assert_eq!(bus.read_byte(0x4004), 0x12);
+    assert_eq!(bus.read_byte(0x4006), 0x34);
+}
+
+#[test]
+fn movep_still_executes_on_68040() {
+    let mut cpu = CpuCore::new();
+    cpu.set_cpu_type(CpuType::M68040);
+    let mut bus = TestBus::new();
+    bus.write_long_at(0x00, 0x1000);
+    bus.write_long_at(0x04, 0x0200);
+    cpu.reset(&mut bus);
+    cpu.set_sr(0x2700);
+    bus.write_word_at(0x0200, 0x0188);
+    bus.write_word_at(0x0202, 0x0004);
+    cpu.dar[0] = 0x1234;
+    cpu.dar[8] = 0x4000;
+    cpu.pc = 0x0200;
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.pc, 0x0204, "MOVEP is native on the 68040");
+    assert_eq!(bus.read_byte(0x4004), 0x12);
+}
+
+#[test]
+fn mull_64bit_traps_but_32bit_executes_on_68060() {
+    // 64-bit form: MULU.L D1,D2:D0 (ext bit 10 set).
+    let (mut cpu, mut bus) = setup_060();
+    bus.write_word_at(0x0200, 0x4C01); // MULx.L D1,...
+    bus.write_word_at(0x0202, 0x0402); // D0 low, wide, D2 high
+    cpu.dar[0] = 7;
+    cpu.dar[1] = 6;
+    step(&mut cpu, &mut bus);
+    assert_vector_61(&cpu, &mut bus, 0x0200);
+    assert_eq!(cpu.dar[0], 7, "registers untouched");
+
+    // 32-bit form: MULU.L D1,D0 stays native.
+    let (mut cpu, mut bus) = setup_060();
+    bus.write_word_at(0x0200, 0x4C01);
+    bus.write_word_at(0x0202, 0x0000);
+    cpu.dar[0] = 7;
+    cpu.dar[1] = 6;
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.pc, 0x0204);
+    assert_eq!(cpu.dar[0], 42, "32-bit MULU.L executes natively");
+}
+
+#[test]
+fn divl_64bit_traps_on_68060() {
+    let (mut cpu, mut bus) = setup_060();
+    // DIVU.L D1,D2:D0 (64/32, ext bit 10 set). Divisor zero on purpose:
+    // the unimplemented trap must win over zero-divide evaluation.
+    bus.write_word_at(0x0200, 0x4C41);
+    bus.write_word_at(0x0202, 0x0402);
+    cpu.dar[1] = 0;
+    step(&mut cpu, &mut bus);
+    assert_vector_61(&cpu, &mut bus, 0x0200);
+}
+
+#[test]
+fn cas2_and_chk2_trap_on_68060() {
+    let (mut cpu, mut bus) = setup_060();
+    // CAS2.W D0:D1,D2:D3,(A0):(A1)
+    bus.write_word_at(0x0200, 0x0CFC);
+    bus.write_word_at(0x0202, 0x8080);
+    bus.write_word_at(0x0204, 0x9081);
+    step(&mut cpu, &mut bus);
+    assert_vector_61(&cpu, &mut bus, 0x0200);
+
+    let (mut cpu, mut bus) = setup_060();
+    // CMP2.W (A0),D0
+    bus.write_word_at(0x0200, 0x02D0);
+    bus.write_word_at(0x0202, 0x0000);
+    cpu.dar[8] = 0x4000;
+    step(&mut cpu, &mut bus);
+    assert_vector_61(&cpu, &mut bus, 0x0200);
+}
+
+#[test]
+fn cas_misaligned_traps_aligned_executes_on_68060() {
+    // Misaligned word CAS: trap with A0 and memory untouched.
+    let (mut cpu, mut bus) = setup_060();
+    bus.write_word_at(0x0200, 0x0CD8); // CAS.W D0,D1,(A0)+
+    bus.write_word_at(0x0202, 0x0040); // Du=D1, Dc=D0
+    cpu.dar[8] = 0x4001;
+    step(&mut cpu, &mut bus);
+    assert_vector_61(&cpu, &mut bus, 0x0200);
+    assert_eq!(cpu.dar[8], 0x4001, "post-increment must not commit");
+
+    // Aligned CAS executes (and post-increments).
+    let (mut cpu, mut bus) = setup_060();
+    bus.write_word_at(0x0200, 0x0CD8);
+    bus.write_word_at(0x0202, 0x0040);
+    bus.write_word_at(0x4000, 0x0005);
+    cpu.dar[8] = 0x4000;
+    cpu.dar[0] = 0x0005; // compare matches
+    cpu.dar[1] = 0x0009; // update value
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.pc, 0x0204);
+    assert_eq!(bus.read_word(0x4000), 0x0009, "aligned CAS swaps");
+    assert_eq!(cpu.dar[8], 0x4002, "post-increment commits");
+}

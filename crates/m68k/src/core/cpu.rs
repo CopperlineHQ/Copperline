@@ -235,6 +235,12 @@ pub struct CpuCore {
     /// Initial cycles for timeslice
     pub initial_cycles: i32,
 
+    /// 68060 escape hatch: execute the instructions the 060 removed from
+    /// silicon (MOVEP, CHK2/CMP2, CAS2, misaligned CAS, 64-bit MUL/DIV, and
+    /// the unimplemented FPU subset) natively instead of trapping for the
+    /// OS-side 68060 software package. False = faithful traps.
+    pub emulate_unimplemented_060: bool,
+
     /// When enabled, use SingleStepTests/MAME-derived semantics for a few edge cases where
     /// Musashi and MAME fixtures intentionally differ (notably BCD "invalid digit" behavior and
     pub sst_m68000_compat: bool,
@@ -423,6 +429,7 @@ impl CpuCore {
             atc: crate::mmu::Atc::default(),
             cycles_remaining: 0,
             initial_cycles: 0,
+            emulate_unimplemented_060: false,
             sst_m68000_compat: false,
         };
         cpu.set_cpu_type(CpuType::M68000);
@@ -1039,6 +1046,13 @@ impl CpuCore {
             self.cpu_type,
             CpuType::M68EC040 | CpuType::M68LC040 | CpuType::M68040
         )
+    }
+
+    /// Whether an instruction the 68060 dropped from silicon must take the
+    /// unimplemented-integer trap (vector 61) rather than execute natively.
+    #[inline]
+    pub(crate) fn trap_unimpl_int_060(&self) -> bool {
+        self.cpu_type == CpuType::M68060 && !self.emulate_unimplemented_060
     }
 
     /// True for the 68060, which shares the 68040's MMU table format and

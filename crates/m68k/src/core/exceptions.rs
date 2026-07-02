@@ -26,6 +26,11 @@ pub mod vector {
     pub const SPURIOUS_INTERRUPT: u32 = 24;
     pub const TRAP_BASE: u32 = 32;
 
+    /// 68060: integer instructions removed from silicon (MOVEP, CHK2/CMP2,
+    /// CAS2, misaligned CAS, 64-bit MUL/DIV) trap here for the OS-side
+    /// 68060 software package to emulate.
+    pub const UNIMPLEMENTED_INTEGER: u32 = 61;
+
     // 68020+ MMU exceptions (vector numbers per 68k docs; used by 68030/68040 PMMU).
     pub const MMU_CONFIGURATION_ERROR: u32 = 56;
     pub const MMU_ILLEGAL_OPERATION_ERROR: u32 = 57;
