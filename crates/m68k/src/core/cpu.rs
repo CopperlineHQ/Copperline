@@ -590,6 +590,18 @@ impl CpuCore {
         self.pcr = PCR_060_RESET;
         self.buscr = 0;
         self.oep060.branch_cache.clear_all();
+        // Reset disables address translation: the TC enable bit and the
+        // TTR enable bits are cleared (030/040/060 alike), so the CPU
+        // comes up fetching physical addresses even if an OS had the MMU
+        // on when the reset hit. Root pointers are left as-is (undefined
+        // at reset); with translation off they are inert until rewritten.
+        self.mmu_tc = 0;
+        self.pmmu_enabled = false;
+        self.itt0 = 0;
+        self.itt1 = 0;
+        self.dtt0 = 0;
+        self.dtt1 = 0;
+        self.atc.flush_all();
         self.prefetch_queue = [0; 2];
         self.prefetch_count = 0;
         self.consume_without_prefetch = false;
