@@ -378,6 +378,7 @@ impl Emulator {
         bus: Bus,
         cpu_model: CpuModel,
         fpu_enabled: bool,
+        cpu_unimplemented: crate::config::UnimplementedPolicy,
         pacing_budget: PacingBudget,
         cpu_clocks_per_cck: u32,
         paced: bool,
@@ -401,7 +402,14 @@ impl Emulator {
         let mut bus = bus;
         // The chipset/CIA/Paula advance in emulated time, not wall-clock.
         bus.set_realtime_devices_enabled(false);
-        let machine = cpu::build(bus, cpu_model, fpu_enabled, cpu_clocks_per_cck, false)?;
+        let machine = cpu::build(
+            bus,
+            cpu_model,
+            fpu_enabled,
+            cpu_clocks_per_cck,
+            cpu_unimplemented,
+            false,
+        )?;
         Ok(Self {
             machine,
             stats: EmuStats::default(),
@@ -1895,6 +1903,7 @@ pub fn build_machine(
         bus,
         cfg.cpu,
         cfg.fpu,
+        cfg.cpu_unimplemented,
         cfg.emulation.pacing_budget,
         cpu_clocks_per_cck,
         paced,
@@ -2302,6 +2311,7 @@ mod tests {
             bus,
             crate::config::CpuModel::M68000,
             false,
+            Default::default(),
             crate::config::PacingBudget::Cycles,
             2,
             false,
@@ -2359,6 +2369,7 @@ mod tests {
             bus,
             crate::config::CpuModel::M68000,
             false,
+            Default::default(),
             crate::config::PacingBudget::Cycles,
             2,
             false,
@@ -2413,6 +2424,7 @@ mod tests {
             bus,
             crate::config::CpuModel::M68000,
             false,
+            Default::default(),
             crate::config::PacingBudget::Cycles,
             2,
             false,
@@ -2574,6 +2586,7 @@ mod tests {
             bus,
             crate::config::CpuModel::M68000,
             false,
+            Default::default(),
             crate::config::PacingBudget::Cycles,
             2,
             false,

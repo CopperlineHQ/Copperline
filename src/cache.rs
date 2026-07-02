@@ -32,6 +32,9 @@
 pub const LINES_020: usize = 64;
 /// Longword entries for the 4 KB 68040 caches.
 pub const LINES_040: usize = 1024;
+/// 68060: 8 KB caches (real silicon is 4-way set-associative; the model
+/// stays pragmatically direct-mapped like the other parts).
+pub const LINES_060: usize = 2048;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LongwordCache {
