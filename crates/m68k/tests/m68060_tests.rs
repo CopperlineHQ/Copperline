@@ -516,30 +516,39 @@ fn pcr_dfp_takes_the_disabled_frame_on_68060() {
 #[test]
 fn fsave_writes_060_frames_and_frestore_null_resets() {
     let (mut cpu, mut bus) = setup_060();
-    // FSAVE -(A0) straight after reset: 12-byte NULL frame.
+    // FSAVE -(A0) straight after reset: one-long NULL frame (the size
+    // AmigaOS's hand-built task contexts rely on).
     bus.write_word_at(0x0200, 0xF320);
     cpu.dar[8] = 0x5000;
     step(&mut cpu, &mut bus);
-    assert_eq!(cpu.dar[8], 0x4FF4, "060 state frame is 12 bytes");
-    assert_eq!(bus.read_long(0x4FF4), 0, "NULL frame after reset");
+    assert_eq!(cpu.dar[8], 0x4FFC, "NULL state frame is one long word");
+    assert_eq!(bus.read_long(0x4FFC), 0, "NULL frame after reset");
 
-    // Touch the FPU, then FSAVE again: IDLE frame (format byte $60).
+    // Touch the FPU, then FSAVE again: 12-byte IDLE frame (format $60).
     bus.write_word_at(0x0202, 0xF200); // FADD.X FP0,FP1
     bus.write_word_at(0x0204, 0x00A2);
     bus.write_word_at(0x0206, 0xF320); // FSAVE -(A0)
     step(&mut cpu, &mut bus);
     step(&mut cpu, &mut bus);
-    assert_eq!(cpu.dar[8], 0x4FE8);
-    assert_eq!(bus.read_long(0x4FE8), 0x0000_6000, "IDLE frame format $60");
+    assert_eq!(cpu.dar[8], 0x4FF0, "IDLE state frame is 12 bytes");
+    assert_eq!(bus.read_long(0x4FF0), 0x0000_6000, "IDLE frame format $60");
 
-    // FRESTORE (A0)+ of a NULL frame resets the FPU.
+    // FRESTORE (A0)+ sizes the frame from the format byte: a NULL frame
+    // consumes one long and resets the FPU.
     cpu.fpcr = 0x1234;
     bus.write_long_at(0x6000, 0);
     bus.write_word_at(0x0208, 0xF358); // FRESTORE (A0)+
     cpu.dar[8] = 0x6000;
     step(&mut cpu, &mut bus);
-    assert_eq!(cpu.dar[8], 0x600C, "FRESTORE consumes 12 bytes");
+    assert_eq!(cpu.dar[8], 0x6004, "NULL FRESTORE consumes one long");
     assert_eq!(cpu.fpcr, 0, "NULL frame resets the FPU");
+
+    // An IDLE frame consumes the full 12 bytes.
+    bus.write_long_at(0x7000, 0x0000_6000);
+    bus.write_word_at(0x020A, 0xF358); // FRESTORE (A0)+
+    cpu.dar[8] = 0x7000;
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.dar[8], 0x700C, "IDLE FRESTORE consumes 12 bytes");
 }
 
 /// Identity-map the 4 KB page containing `logical` through a 68040-style

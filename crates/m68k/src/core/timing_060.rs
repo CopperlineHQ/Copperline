@@ -585,9 +585,15 @@ impl CpuCore {
             } else {
                 flowed
             };
+            // A folded branch needs an instruction to fold onto: only an
+            // open pairing window lets it retire for free. This also
+            // guarantees progress - a bare predicted `bra self` idle loop
+            // still costs a clock per iteration instead of freezing
+            // emulated time.
+            let fold_target_open = self.oep060.pending_head.is_some();
             // A branch ends any open pairing window; the target starts cold.
             self.oep060.pending_head = None;
-            return self.branch_cost_060(taken, info.has(F_DBCC), fetch_cached);
+            return self.branch_cost_060(taken, info.has(F_DBCC), fetch_cached, fold_target_open);
         }
         if flowed {
             // JMP/JSR/RTS/RTE/RTR and friends: pipeline refill floor.
@@ -687,7 +693,13 @@ impl CpuCore {
     /// with CACR.EBC set, a correctly predicted taken branch folds to zero
     /// cycles, a correct not-taken costs one, and everything else pays the
     /// mispredict refill.
-    fn branch_cost_060(&mut self, taken: bool, is_dbcc: bool, fetch_cached: bool) -> i32 {
+    fn branch_cost_060(
+        &mut self,
+        taken: bool,
+        is_dbcc: bool,
+        fetch_cached: bool,
+        fold_target_open: bool,
+    ) -> i32 {
         if self.cacr & super::cpu::CACR_060_EBC == 0 || !fetch_cached {
             return match (is_dbcc, taken) {
                 (true, true) => CYC_060_DBCC_TAKEN,
@@ -699,7 +711,9 @@ impl CpuCore {
         let user = !self.is_supervisor();
         let predicted_taken = self.oep060.branch_cache.predict(self.ppc).unwrap_or(false);
         let cost = match (predicted_taken, taken) {
-            (true, true) => 0, // folded out of the stream
+            // Folded out of the stream when it can ride the previous
+            // instruction's cycle; a lone branch still issues for a clock.
+            (true, true) => i32::from(!fold_target_open),
             (false, false) => 1,
             _ => CYC_060_MISPREDICT,
         };

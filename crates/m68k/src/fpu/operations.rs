@@ -572,54 +572,63 @@ impl CpuCore {
         }
     }
 
-    /// 68060 FSAVE: the floating-point state frame is a fixed three
-    /// longwords. The format byte lives in bits 15:8 of the first long:
-    /// $00 = NULL (FPU untouched since reset), $60 = IDLE. The EXCP frame
-    /// ($E0, carrying pending-exception operands) is not modeled - the
-    /// softfloat FPU completes every operation before retiring.
+    /// 68060 FSAVE: the floating-point state frame carries its format in
+    /// bits 15:8 of the first long word: $00 = NULL (FPU untouched since
+    /// reset), $60 = IDLE. A NULL frame is a single long word - the same
+    /// one-long NULL every part since the 68881 has used, and the size
+    /// AmigaOS's hand-built task contexts rely on - while IDLE occupies
+    /// the full three long words. The EXCP frame ($E0, carrying pending-
+    /// exception operands) is not modeled: the softfloat FPU completes
+    /// every operation before retiring.
     fn exec_fsave_060<B: AddressBus>(&mut self, bus: &mut B, ea_mode: u8, ea_reg: usize) -> i32 {
-        let header: u32 = if self.fpu_just_reset {
-            0x0000_0000
+        let (header, size): (u32, u32) = if self.fpu_just_reset {
+            (0x0000_0000, 4)
         } else {
-            0x0000_6000
+            (0x0000_6000, 12)
         };
         match ea_mode {
             2 | 3 => {
                 // (An) / (An)+
                 let addr = self.a(ea_reg);
                 if ea_mode == 3 {
-                    self.set_a(ea_reg, addr.wrapping_add(12));
+                    self.set_a(ea_reg, addr.wrapping_add(size));
                 }
                 self.write_32(bus, addr, header);
-                self.write_32(bus, addr.wrapping_add(4), 0);
-                self.write_32(bus, addr.wrapping_add(8), 0);
+                for off in (4..size).step_by(4) {
+                    self.write_32(bus, addr.wrapping_add(off), 0);
+                }
                 8
             }
             4 => {
                 // -(An)
-                let addr = self.a(ea_reg).wrapping_sub(12);
+                let addr = self.a(ea_reg).wrapping_sub(size);
                 self.set_a(ea_reg, addr);
                 self.write_32(bus, addr, header);
-                self.write_32(bus, addr.wrapping_add(4), 0);
-                self.write_32(bus, addr.wrapping_add(8), 0);
+                for off in (4..size).step_by(4) {
+                    self.write_32(bus, addr.wrapping_add(off), 0);
+                }
                 8
             }
             _ => 0,
         }
     }
 
-    /// 68060 FRESTORE: consume the fixed 12-byte frame; a NULL format byte
-    /// resets the FPU, anything else restores "some" state (the softfloat
-    /// FPU keeps its live register file - IDLE frames carry none).
+    /// 68060 FRESTORE: size the frame from the format byte - one long word
+    /// for NULL (resetting the FPU), three for anything else. Kickstart's
+    /// exec builds initial task contexts by hand with a one-long NULL frame
+    /// and launches them through FRESTORE (An)+, so a fixed 12-byte read
+    /// would skew the context walk and launch the first task at PC 0.
     fn exec_frestore_060<B: AddressBus>(&mut self, bus: &mut B, ea_mode: u8, ea_reg: usize) -> i32 {
         match ea_mode {
             2 | 3 => {
                 let addr = self.a(ea_reg);
-                if ea_mode == 3 {
-                    self.set_a(ea_reg, addr.wrapping_add(12));
-                }
                 let header = self.read_32(bus, addr);
-                if (header & 0x0000_FF00) == 0 {
+                let null_frame = (header & 0x0000_FF00) == 0;
+                if ea_mode == 3 {
+                    let size = if null_frame { 4 } else { 12 };
+                    self.set_a(ea_reg, addr.wrapping_add(size));
+                }
+                if null_frame {
                     self.do_frestore_null();
                 } else {
                     self.fpu_just_reset = false;
