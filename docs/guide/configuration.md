@@ -37,7 +37,7 @@ range checks as the equivalent TOML fields:
 |---|---|---|
 | `--model NAME` | `[machine] profile` | `A1000`, `A500`, `A500OCS`, `A500Plus`, `A600`, `A1200`, `CDTV`, `CD32` |
 | `--chipset NAME` | `[chipset] revision` | `OCS`, `ECS`, `AGA` |
-| `--cpu MODEL` | `[cpu] model` | `68000`, `68EC020`, `68020`, `68030`, `68040` |
+| `--cpu MODEL` | `[cpu] model` | `68000`, `68EC020`, `68020`, `68030`, `68040`, `68060` |
 | `--cpu-clock MHZ` | `[cpu] clock_mhz` | a number of MHz |
 | `--fpu` / `--no-fpu` | `[cpu] fpu` | fit / omit a 68881/68882 |
 | `--chip SIZE` | `[memory] chip` | `512K`, `1M`, `2M`, ... |
@@ -195,27 +195,46 @@ carried no information.)
 
 ```toml
 [cpu]
-model = "68000"     # 68000, 68EC020, 68020, 68030, 68040
+model = "68000"     # 68000, 68EC020, 68020, 68030, 68040, 68060
 clock_mhz = 14.0    # optional; defaults to the model's stock speed
-# icache = false    # instruction-cache model (on by default: 020/030/040)
-# dcache = false    # data-cache model (on by default: 030/040)
+# icache = false    # instruction-cache model (on by default: 020/030/040/060)
+# dcache = false    # data-cache model (on by default: 030/040/060)
 # fpu = true        # fit a 68881/68882 (68020/68030; needs the coprocessor
 #                   # interface, so not valid on a 68000). The full 68040's
-#                   # on-die FPU is enabled by default.
+#                   # and 68060's on-die FPUs are enabled by default.
+# unimplemented = "trap"  # 68060 only: "trap" (faithful; the OS needs
+#                   # 68060.library) or "native" (execute the removed
+#                   # instructions directly)
 ```
 
 - `model`: the 68EC020 is a 68020 instruction set with a 24-bit external
-  address bus. The 68060 is explicitly unsupported.
+  address bus.
 - `clock_mhz` defaults to the model's stock speed (68000 ~7.09, 020 ~14,
-  030/040 ~25) and is modelled as a whole multiple of the colour clock
+  030/040 ~25, 060 50) and is modelled as a whole multiple of the colour clock
   (3.546895 MHz). Fast RAM and ROM run at the CPU clock; chip and slow RAM
   stay chip-bus bound, so overclocking speeds up only what a real
   accelerator would speed up.
 - `icache`/`dcache` model the on-chip caches and default **on** for the
-  silicon that has them (instruction cache on the 020/68EC020/030/040, data
-  cache on the 030/040), matching real hardware where AmigaOS enables them via
-  CACR. The cache is sized to the CPU: 256 bytes on the 020/030, 4 KB on the
-  040. Set either to `false` to opt out. This is not cosmetic: code that loops
+  silicon that has them (instruction cache on the 020/68EC020/030/040/060,
+  data cache on the 030/040/060), matching real hardware where AmigaOS
+  enables them via CACR. The cache is sized to the CPU: 256 bytes on the
+  020/030, 4 KB on the 040, 8 KB on the 060. Set either to `false` to opt
+  out.
+- `unimplemented` (68060 only) picks what happens on the instructions the
+  68060 dropped from silicon: MOVEP, CHK2/CMP2, CAS2, misaligned CAS,
+  64-bit MUL/DIV, and most of the FPU beyond basic arithmetic
+  (transcendentals, FMOVECR, packed decimal). `"trap"` (the default) is
+  what the chip does - they raise the unimplemented-instruction exceptions
+  and the OS-side `68060.library` emulates them, exactly as on a real
+  CyberStorm or Blizzard board, so software using them needs that library
+  installed. `"native"` executes them directly for systems without it.
+  Kickstart 3.1 itself boots fine under `"trap"`. `fpu = false` on the
+  68060 models the LC/EC060: FP instructions take the FPU-disabled
+  exception (PCR.DFP), which an OS handler can also use to enable and
+  restart. The 68060's superscalar dual-issue and branch cache are
+  modelled and activate when system software enables them (PCR.ESS and
+  CACR.EBC, which `68060.library` does at boot); until then the chip runs
+  scalar, as on real silicon. This is not cosmetic: code that loops
   out of chip RAM otherwise contends with bitplane DMA on every instruction
   fetch and can run at roughly half speed, which is why an AGA demo's music or
   animation may pace correctly only with the cache modelled. The data cache
@@ -242,7 +261,7 @@ plain byte counts, and must be multiples of 4 KiB.
   4M, or 8M.
 - **Slow RAM** ($C00000 "ranger" RAM) is arbitrated on the chip bus through
   Agnus exactly like chip RAM -- it is slow in the authentic way.
-- **Z3 RAM** requires a 68020/68030/68040 (a 24-bit bus cannot reach it);
+- **Z3 RAM** requires a 68020/68030/68040/68060 (a 24-bit bus cannot reach it);
   Kickstart assigns its base address, usually `$40000000`.
 
 Additional expansion boards can be described with `[[zorro]]` metadata

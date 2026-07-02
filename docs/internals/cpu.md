@@ -104,6 +104,78 @@ disabled) re-establishes the model's cache cold and re-derives its enable bits
 from the restored CACR, so the machine keeps the cache its CPU has rather than
 silently running cacheless after a load.
 
+## The 68060
+
+The 68060 is modelled as the full part: on-die FPU and MMU, the 8 KB
+caches (in the same pragmatic direct-mapped host model as the other
+parts), and its own timing engine.
+
+**Instruction set.** The 060 dropped instructions from silicon; on real
+boards the OS-side `68060.library` (Motorola's 68060SP) emulates them
+via the chip's trap interface, and Copperline models exactly that
+contract. The unimplemented integer set (MOVEP, CHK2/CMP2, CAS2,
+misaligned CAS, 64-bit MUL/DIV) raises vector 61 with a format $0 frame
+stacking the faulting instruction, gated before any architectural side
+effect so the handler can re-decode and re-execute. The unimplemented
+FPU set (the transcendentals, FINT/FINTRZ, FGETEXP/FGETMAN,
+FMOD/FREM/FSCALE, FSINCOS, FMOVECR, and the FDBcc/FTRAPcc/FScc
+conditionals) raises the Line-F vector with the six-word format $2
+frame the 68060SP dispatches on - next-instruction PC stacked, the
+calculated operand EA in the frame, FPIAR pointing at the instruction.
+Packed decimal is the unsupported-data-type exception (vector 55),
+dynamic-list FMOVEM and immediate packed operands the unimplemented-EA
+exception (vector 60). `[cpu] unimplemented = "native"` executes the
+whole set directly instead, for systems without the library. LPSTOP is
+implemented as STOP semantics.
+
+**Registers and frames.** PCR (MOVEC $808) carries the identification/
+revision word with EDEBUG/DFP/ESS writable; BUSCR shares MOVEC code
+$008 with the 040's DACR0, dispatched by model. The 060 CACR persists
+the cache/branch-cache/store-buffer enables with CABC/CUBC as
+write-only clear strobes. The part has a single supervisor stack: the
+SR M bit is storable (and interrupts clear it) but never banks A7, and
+MSP/ISP are gone from the MOVEC set. Access errors push the eight-word
+format $4 frame with the fault address and FSLW (composed from the MMU
+walk cause, R/W, size, and transfer modifier), and RTE pops it - along
+with the 040's format 7, which previously format-errored. The FPU state
+frame is one long word for NULL (as every part since the 68881; exec's
+hand-built task contexts depend on it) and three for IDLE. The MMU
+shares the 040's three-level walker and TC[15] enable; PTEST is gone
+(undefined F-line) and PLPAR/PLPAW translate an address into An,
+faulting with the format $4 frame.
+
+**Timing.** `crates/m68k/src/core/timing_060.rs` replaces the 020+
+scaling formula for the 060: every opcode word classifies (a build-once
+64K table over a pure function) into the MC68060UM Chapter 10 dispatch
+classes with a pOEP cycle cost - most ALU/move instructions one clock,
+data-dependent costs derived from the 68000-reference count as
+(raw/4).max(1). Costs are pOEP occupancy at zero-wait: memory latency
+stays billed by the host bus per access, so bus-bound code shows no
+pairing benefit, which matches silicon. Superscalar dual issue is
+modelled retrospectively: an instruction that satisfies the UM Table
+10-1 dispatch test against the previous instruction's open sOEP slot
+(pOEP|sOEP class, simple EA, no RAW/WAW against the head's defs, CCR
+rule, one memory operand per pair, both fetches icache hits, PCR.ESS
+enabled) refunds to zero additional cycles. The 256-entry branch cache
+(CACR.EBC; CABC/CUBC clears) folds correctly predicted taken branches
+onto the preceding instruction's cycle - a lone predicted branch still
+issues for one clock, which both matches the canonical one-clock
+subq/bne loop and guarantees a bare `bra self` idle loop advances
+emulated time. Both structures are serialized: prediction state changes
+cycle counts, and cycle counts change chipset interleaving. timing-test
+rows 28-30 measure the pair/RAW/loop cases end to end (a 50 MHz 060
+runs row 30 at exactly one clock per iteration).
+
+Residuals, all deliberately pessimistic (they under-pair, never
+over-pair): the sOEP EA subset and dual-memory rule are coarser than UM
+Table 10-1; the 96-byte IFU FIFO and AGU change/use stalls are not
+modelled; the store buffer is stored (CACR.ESB) but writes bill at bus
+rate; pairing across a folded branch is not modelled, and a branch
+folds only when a pairing window is open; the FSAVE EXCP frame is not
+generated (the softfloat FPU retires every operation completely); FPSR
+quotient-bit and denormal traps behave as on the other parts rather
+than through the 060's unsupported-data path.
+
 ## 68020+ timing
 
 The 68000/68010 cycle counts are validated against the
@@ -158,7 +230,7 @@ diverge.
 
 ## MMU
 
-The 68030 and 68040 model the on-chip MMU (`has_pmmu`), so software that sets up
+The 68030, 68040, and 68060 model the on-chip MMU (`has_pmmu`), so software that sets up
 and enables address translation runs rather than having its MMU writes ignored.
 The two parts differ enough to need separate walkers: the 68030 uses its
 programmable table walk (CRP/SRP selection, the TC index fields, 4-/8-byte
