@@ -2609,6 +2609,61 @@ fn console_os_introspection_and_task_catch() {
 }
 
 #[test]
+fn console_blits_lists_frame_blit_records() {
+    let mut app = test_app();
+    app.open_console();
+    app.open_frame_analyzer(); // arms the frame trace
+
+    // Run a 2x2 D-only blit with blitter DMA enabled, then finish the
+    // frame so the trace (with its blit record) becomes current.
+    {
+        let bus = app.emu.bus_mut();
+        bus.mem.overlay = false;
+        bus.custom_write(0x096, 2, 0x8240); // DMACON SET DMAEN|BLTEN
+        bus.custom_write(0x040, 2, 0x01F0); // BLTCON0: USED, LF=$F0
+        bus.custom_write(0x042, 2, 0x0000);
+        bus.custom_write(0x044, 2, 0xFFFF);
+        bus.custom_write(0x046, 2, 0xFFFF);
+        bus.custom_write(0x074, 2, 0xBEEF); // BLTADAT
+        bus.custom_write(0x066, 2, 0x0000); // BLTDMOD
+        bus.custom_write(0x054, 4, 0x0006_0000); // BLTDPT
+        bus.custom_write(0x058, 2, 0x0082); // BLTSIZE: 2 rows x 2 words
+    }
+    app.frame_analyzer_step_frame();
+
+    let out = console_run(&mut app, "BLITS");
+    assert!(out[0].contains("blit(s) in frame"), "{out:?}");
+    assert!(
+        out.iter()
+            .any(|l| l.contains("2x2") && l.contains("con0 01F0")),
+        "{out:?}"
+    );
+    assert!(out.iter().any(|l| l.contains("D $060000")), "{out:?}");
+    // The record completed within the frame.
+    assert!(
+        out.iter()
+            .any(|l| l.contains("->") && !l.contains("running")),
+        "{out:?}"
+    );
+
+    // Selecting a slot inside the blit's beam span annotates it.
+    let trace_blit = app
+        .emu
+        .bus()
+        .frame_bus_trace()
+        .and_then(|t| t.blits.first().cloned())
+        .expect("a recorded blit");
+    if let Some(panel) = app.frame_analyzer_panel.as_mut() {
+        panel.selected_vpos = trace_blit.start.0;
+        panel.selected_hpos = trace_blit.start.1;
+    }
+    let panel = app.frame_analyzer_panel.clone().unwrap();
+    let view = app.build_frame_analyzer_view(&panel);
+    let annotated = view.trace.unwrap().selected_blit.expect("blit annotation");
+    assert!(annotated.contains("in blit #0"), "{annotated}");
+}
+
+#[test]
 fn console_history_and_stack_walk() {
     let mut app = test_app();
     app.open_console();

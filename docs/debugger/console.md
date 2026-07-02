@@ -78,6 +78,7 @@ Inspection and modification:
 | `DIS [ADDR] [N]`, `D` | Disassemble (default: at the PC) |
 | `COPPER [PC\|ADDR] [N]` | Copper list around the live Copper PC |
 | `CUSTOM` | Key custom registers |
+| `BLITS` | Blits started in the traced frame (needs the Frame Analyzer open): control words, size, pointers, beam start/end |
 | `FIND HEXBYTES [START]` | Search CPU-visible memory |
 | `WRITER ADDR` | Last instruction that wrote ADDR (reverse history) |
 | `HISTORY [N]`, `H` | The most recent retired PCs, disassembled (recorded while a debug window is open) |

@@ -111,7 +111,8 @@ const CONSOLE_HELP: &[&str] = &[
     "            btrap V [H]   cbreak ADDR   catch irq N|trap N|vec N",
     "            catchtask [NAME]   breaks (list)   clearbreaks",
     "inspect:    status  regs/r  mem/m ADDR [BYTES]  dis/d [ADDR] [N]",
-    "            copper [pc|ADDR] [N]   custom   find HEX [START]   writer ADDR",
+    "            copper [pc|ADDR] [N]   custom   blits   find HEX [START]",
+    "            writer ADDR",
     "            history/h [N]   stack/bt",
     "os:         tasks  libs  devs  resources  ports",
     "modify:     poke ADDR VAL   setreg REG VAL",
@@ -556,6 +557,51 @@ impl App {
                 {
                     let cursor = if addr == copper_pc { ">" } else { " " };
                     lines.push(format!("{cursor}{addr:06X}  {text}"));
+                }
+                ConsoleOutcome::lines(lines)
+            }
+            "BLITS" => {
+                let Some(trace) = self.emu.bus().frame_bus_trace() else {
+                    return ConsoleOutcome::one(
+                        "no frame trace: open the Frame Analyzer (its Frame button captures one)",
+                    );
+                };
+                if trace.blits.is_empty() {
+                    return ConsoleOutcome::one(format!(
+                        "no blits started in frame {}",
+                        trace.frame
+                    ));
+                }
+                let mut lines = vec![format!(
+                    "{} blit(s) in frame {}:",
+                    trace.blits.len(),
+                    trace.frame
+                )];
+                for (i, blit) in trace.blits.iter().enumerate() {
+                    let end = match blit.end {
+                        Some((v, h)) => format!("v{v} h{h}"),
+                        None => "(running)".to_string(),
+                    };
+                    let c1 = blit.bltcon1;
+                    lines.push(format!(
+                        "#{i:<2} v{} h{} -> {end}  con0 {:04X} con1 {:04X}  {}x{}{}{}{}",
+                        blit.start.0,
+                        blit.start.1,
+                        blit.bltcon0,
+                        c1,
+                        blit.width_words,
+                        blit.height,
+                        if c1 & 0x0001 != 0 { "  LINE" } else { "" },
+                        if c1 & 0x0008 != 0 { "  FILL" } else { "" },
+                        if c1 & 0x0002 != 0 { "  DESC" } else { "" },
+                    ));
+                    lines.push(format!(
+                        "     A ${:06X}  B ${:06X}  C ${:06X}  D ${:06X}",
+                        blit.apt & 0x00FF_FFFF,
+                        blit.bpt & 0x00FF_FFFF,
+                        blit.cpt & 0x00FF_FFFF,
+                        blit.dpt & 0x00FF_FFFF,
+                    ));
                 }
                 ConsoleOutcome::lines(lines)
             }

@@ -617,6 +617,15 @@ impl Bus {
                     }
                 }
                 self.trace_blitter_start(val, source);
+                {
+                    // BLTSIZE zero fields mean the maximum (1024 rows / 64 words).
+                    let h = ((val as u32) >> 6) & 0x3FF;
+                    let w = (val as u32) & 0x3F;
+                    self.record_frame_blit_start(
+                        if h == 0 { 1024 } else { h },
+                        if w == 0 { 64 } else { w },
+                    );
+                }
                 self.blitter.start_scheduled(val, &self.mem.chip_ram);
                 self.record_blit_accounting();
                 self.slice_preempted = true;
@@ -649,6 +658,14 @@ impl Bus {
                 self.note_irq_latches_changed();
                 self.trace_blitter_start_ecs(val, source);
                 self.diag_blit_start(u32::from(self.blitter.bltsizv), (val as u32) & 0x07FF);
+                {
+                    let h = u32::from(self.blitter.bltsizv);
+                    let w = (val as u32) & 0x07FF;
+                    self.record_frame_blit_start(
+                        if h == 0 { 0x8000 } else { h },
+                        if w == 0 { 0x800 } else { w },
+                    );
+                }
                 self.blitter.start_scheduled_ecs(val, &self.mem.chip_ram);
                 self.record_blit_accounting();
                 self.slice_preempted = true;

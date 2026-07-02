@@ -1277,6 +1277,9 @@ pub struct AnalyzerTraceView {
     pub selected_owner_code: u8,
     pub owners: Vec<u8>,
     pub markers: Vec<AnalyzerMarker>,
+    /// "in blit #N ..." when the selected slot lies inside a recorded
+    /// blit's beam span.
+    pub selected_blit: Option<String>,
     /// Frame-start display window: (v_start, v_stop) beam lines (stop
     /// already unwrapped past 255 where applicable) and (h_start, h_stop)
     /// in colour clocks. None when DIW is unprogrammed.
@@ -2984,13 +2987,17 @@ fn draw_frame_analyzer(
     let counters_x = raster.x + raster.w + 16;
     draw_owner_counters(frame, counters_x, raster.y, trace, scale);
 
-    let selected = format!(
+    let mut selected = format!(
         "selected v={:03} h={:03}  owner={} ({})",
         trace.selected_vpos,
         trace.selected_hpos,
         trace.selected_owner,
         trace.selected_owner_code as char
     );
+    if let Some(blit) = &trace.selected_blit {
+        selected.push_str("  ");
+        selected.push_str(blit);
+    }
     draw_panel_text(
         frame,
         rect.x + 10,
@@ -4506,6 +4513,7 @@ mod tests {
             selected_owner_code: b'.',
             owners: vec![b'.'; 312 * 227],
             markers: Vec::new(),
+            selected_blit: None,
             diw_v: None,
             diw_h_cck: None,
             ddf_cck: None,
@@ -4808,6 +4816,7 @@ mod tests {
                 value: 0x0000,
                 source: "copper",
             }],
+            selected_blit: None,
             diw_v: None,
             diw_h_cck: None,
             ddf_cck: None,
@@ -5296,6 +5305,7 @@ mod tests {
                 value: 0x0F00,
                 source: "copper",
             }],
+            selected_blit: Some("in blit #2 (20x100 D $060000)".to_string()),
             // A standard PAL display window and fetch bounds, so the
             // preview shows the DIW box and DDF verticals.
             diw_v: Some((0x2C, 0x12C)),

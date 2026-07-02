@@ -1114,6 +1114,23 @@ impl ChipBusOwner {
     }
 }
 
+/// One blit started during the traced frame (Frame Analyzer / console
+/// BLITS). `end` stays None while the blit is still running (or when it
+/// finishes in a later frame).
+#[derive(Clone, Debug)]
+pub struct FrameBlitRecord {
+    pub bltcon0: u16,
+    pub bltcon1: u16,
+    pub width_words: u32,
+    pub height: u32,
+    pub apt: u32,
+    pub bpt: u32,
+    pub cpt: u32,
+    pub dpt: u32,
+    pub start: (u16, u16),
+    pub end: Option<(u16, u16)>,
+}
+
 /// Per-frame chip-bus ownership trace for the interactive frame analyzer.
 ///
 /// One byte records the owner for one Agnus colour clock at `(vpos, hpos)`.
@@ -1134,8 +1151,13 @@ pub struct FrameBusTrace {
     pub blitter_busy_cck: u64,
     pub blitter_starve_cck: [u64; 9],
     pub partial: bool,
+    /// Blits started this frame (capped; see FRAME_BLIT_RECORD_CAP).
+    pub blits: Vec<FrameBlitRecord>,
     owners: Vec<u8>,
 }
+
+/// Blit records kept per traced frame.
+pub const FRAME_BLIT_RECORD_CAP: usize = 64;
 
 impl Default for FrameBusTrace {
     fn default() -> Self {
@@ -1153,6 +1175,7 @@ impl Default for FrameBusTrace {
             blitter_busy_cck: 0,
             blitter_starve_cck: [0; 9],
             partial: false,
+            blits: Vec::new(),
             owners: Vec::new(),
         }
     }
@@ -1184,6 +1207,7 @@ impl FrameBusTrace {
         self.blitter_busy_cck = 0;
         self.blitter_starve_cck = [0; 9];
         self.partial = partial;
+        self.blits.clear();
         self.owners.resize(self.rows * self.cols, b'.');
         self.owners.fill(b'.');
     }
@@ -3268,6 +3292,20 @@ impl Bus {
     }
 
     fn latch_blitter_completion(&mut self, source: &'static str) {
+        if self.frame_analyzer_enabled {
+            if let Some(record) = self
+                .current_frame_bus_trace
+                .blits
+                .iter_mut()
+                .rev()
+                .find(|record| record.end.is_none())
+            {
+                record.end = Some((
+                    self.agnus.vpos.min(u32::from(u16::MAX)) as u16,
+                    self.agnus.hpos.min(u32::from(u16::MAX)) as u16,
+                ));
+            }
+        }
         let intreq_before = self.paula.intreq;
         self.paula.intreq |= INT_BLIT;
         self.note_irq_source_asserted();
@@ -4206,6 +4244,31 @@ impl Bus {
                 }
             }
         }
+    }
+
+    /// Record a started blit into the analyzer's frame trace (no-op
+    /// while the analyzer is closed).
+    pub(crate) fn record_frame_blit_start(&mut self, height: u32, width_words: u32) {
+        if !self.frame_analyzer_enabled
+            || self.current_frame_bus_trace.blits.len() >= FRAME_BLIT_RECORD_CAP
+        {
+            return;
+        }
+        self.current_frame_bus_trace.blits.push(FrameBlitRecord {
+            bltcon0: self.blitter.bltcon0,
+            bltcon1: self.blitter.bltcon1,
+            width_words,
+            height,
+            apt: self.blitter.bltapt,
+            bpt: self.blitter.bltbpt,
+            cpt: self.blitter.bltcpt,
+            dpt: self.blitter.bltdpt,
+            start: (
+                self.agnus.vpos.min(u32::from(u16::MAX)) as u16,
+                self.agnus.hpos.min(u32::from(u16::MAX)) as u16,
+            ),
+            end: None,
+        });
     }
 
     fn record_blit_accounting(&mut self) {

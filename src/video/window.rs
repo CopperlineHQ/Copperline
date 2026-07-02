@@ -4825,6 +4825,20 @@ impl App {
             (None, None)
         };
         let ddf_cck = diw_programmed.then_some((base.ddfstrt & 0x00FE, base.ddfstop & 0x00FE));
+        // Annotate the selected slot with the blit whose beam span
+        // contains it, so clicking a blitter run names the blit.
+        let selected_beam = (selected_vpos as u16, selected_hpos as u16);
+        let selected_blit = trace.blits.iter().enumerate().find_map(|(i, blit)| {
+            let end = blit.end?;
+            (blit.start <= selected_beam && selected_beam <= end).then(|| {
+                format!(
+                    "in blit #{i} ({}x{} D ${:06X})",
+                    blit.width_words,
+                    blit.height,
+                    blit.dpt & 0x00FF_FFFF
+                )
+            })
+        });
         ui::FrameAnalyzerView {
             running: !self.paused,
             status,
@@ -4850,6 +4864,7 @@ impl App {
                 selected_owner_code,
                 owners,
                 markers,
+                selected_blit,
                 diw_v,
                 diw_h_cck,
                 ddf_cck,

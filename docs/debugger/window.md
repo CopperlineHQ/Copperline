@@ -287,6 +287,13 @@ Opening the pane starts a partial trace immediately; pressing **Frame**
 captures a clean full frame. Closing it restores the run/pause state selected
 inside the pane and disables the tracing hot path.
 
+While the analyzer is open, every blit started in the traced frame is
+recorded (control words, size, channel pointers, and the beam positions
+where it started and finished). The console's `BLITS` command lists them,
+and selecting a slot inside a blit's beam span names it on the
+selected-slot line -- click the brown blitter run that is eating your
+frame and see which blit it is.
+
 Click a slot (or nudge the selection with the cursor keys) and press
 **To slot** to run the machine until the beam reaches exactly that colour
 clock -- a one-shot beam trap, reported like any other debugger stop. It
