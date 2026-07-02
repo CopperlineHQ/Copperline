@@ -89,6 +89,21 @@ Inspection and modification:
 | `TRACE STOP` / `TRACE` | Stop the trace / report its progress |
 | `HELP`, `CLEAR`, `CLOSE` | Console housekeeping |
 
+Memory hunting (a trainer-style delta search over all writable RAM --
+chip, slow, and Zorro RAM boards):
+
+| Command | Effect |
+|---|---|
+| `HUNT START [B\|W]` | Snapshot RAM and begin a byte- or word-wide (default) hunt |
+| `HUNT EQ\|NE\|LT\|GT VALUE` | Keep candidates whose *current* value compares to VALUE (hex) |
+| `HUNT SAME` / `HUNT DIFF` | Keep candidates unchanged / changed since the last filter |
+| `HUNT LIST [N]` | Show surviving candidates with live values |
+| `HUNT OFF` | Forget the hunt |
+
+The classic workflow: `HUNT START`, `HUNT EQ 3` while you have three
+lives, lose one, `HUNT EQ 2` -- the survivor is your lives counter,
+ready for `WATCH` (who decrements it?) or `POKE`.
+
 AmigaOS introspection (read-only walks of exec's lists, safe at any
 time -- if the OS is not up yet the command says so instead of printing
 garbage):

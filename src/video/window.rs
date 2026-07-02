@@ -636,6 +636,8 @@ pub struct App {
     /// A CPU double-fault halt has been reported (reset when the CPU
     /// leaves the halted state, e.g. by reset or a state load).
     reported_double_fault: bool,
+    /// The console's running memory hunt (HUNT delta search), if any.
+    hunt: Option<console::HuntState>,
     /// Active video+audio capture (shortcut or the menu's Record Video item),
     /// or None when not recording. Frames and the matching mixer audio are
     /// appended on emulated-frame boundaries, so captures stay in sync
@@ -919,6 +921,7 @@ impl App {
             paused_before_console: false,
             last_debug_stop: None,
             reported_double_fault: false,
+            hunt: None,
             recorder: None,
             record_fb: Vec::new(),
         }

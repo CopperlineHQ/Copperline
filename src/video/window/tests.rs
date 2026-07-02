@@ -2705,6 +2705,44 @@ fn console_blits_lists_frame_blit_records() {
 }
 
 #[test]
+fn console_hunt_narrows_to_the_changed_word() {
+    let mut app = test_app();
+    app.open_console();
+    app.emu.bus_mut().mem.overlay = false;
+
+    // Plant a "lives counter" and snapshot.
+    {
+        let ram = &mut app.emu.bus_mut().mem.chip_ram;
+        ram[0x60000..0x60002].copy_from_slice(&0x0003u16.to_be_bytes());
+    }
+    let out = console_run(&mut app, "HUNT START");
+    assert!(out[0].contains("hunting 16-bit"), "{out:?}");
+
+    // First filter: everything equal to 3 (the counter plus noise).
+    let out = console_run(&mut app, "HUNT EQ 3");
+    assert!(out[0].contains("candidate(s) remain"), "{out:?}");
+
+    // "Lose a life", then narrow to values now equal to 2 -- only the
+    // counter both was 3 and became 2.
+    {
+        let ram = &mut app.emu.bus_mut().mem.chip_ram;
+        ram[0x60000..0x60002].copy_from_slice(&0x0002u16.to_be_bytes());
+    }
+    let out = console_run(&mut app, "HUNT EQ 2");
+    assert!(out[0].starts_with("1 candidate(s) remain"), "{out:?}");
+    let out = console_run(&mut app, "HUNT LIST");
+    assert!(out.iter().any(|l| l.contains("$060000 = 0002")), "{out:?}");
+
+    // SAME keeps it (nothing changed since the last filter); DIFF drops it.
+    let out = console_run(&mut app, "HUNT SAME");
+    assert!(out[0].starts_with("1 candidate"), "{out:?}");
+    let out = console_run(&mut app, "HUNT DIFF");
+    assert!(out[0].starts_with("0 candidate"), "{out:?}");
+    console_run(&mut app, "HUNT OFF");
+    assert!(app.hunt.is_none());
+}
+
+#[test]
 fn console_trace_writes_disassembled_lines() {
     let mut app = test_app();
     app.open_console();

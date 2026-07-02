@@ -320,6 +320,16 @@ impl ZorroChain {
         None
     }
 
+    /// Configured RAM windows as (base, len) pairs, for the debugger's
+    /// memory hunt.
+    pub fn ram_regions(&self) -> Vec<(u32, u32)> {
+        self.regions
+            .iter()
+            .filter(|(_, _, idx)| !self.boards[*idx].ram.is_empty())
+            .map(|(base, len, _)| (*base, *len))
+            .collect()
+    }
+
     pub fn board_ram(&self, idx: usize) -> &[u8] {
         &self.boards[idx].ram
     }

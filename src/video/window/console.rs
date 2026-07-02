@@ -33,6 +33,40 @@ impl ConsoleOutcome {
     }
 }
 
+/// A running memory hunt (trainer-style delta search): the last
+/// snapshot of every scanned region plus the surviving candidates.
+pub(super) struct HuntState {
+    /// Search width in bytes (1 or 2).
+    width: u32,
+    /// (base, bytes) snapshot of each scanned region at the last filter.
+    snapshot: Vec<(u32, Vec<u8>)>,
+    /// Surviving candidate addresses; None before the first filter
+    /// (everything is still a candidate).
+    candidates: Option<Vec<u32>>,
+}
+
+impl HuntState {
+    fn value_in(bytes: &[u8], off: usize, width: u32) -> u32 {
+        if width == 1 {
+            u32::from(bytes[off])
+        } else {
+            (u32::from(bytes[off]) << 8) | u32::from(bytes[off + 1])
+        }
+    }
+
+    fn candidate_count(&self) -> Option<usize> {
+        self.candidates.as_ref().map(|c| c.len())
+    }
+}
+
+/// How a hunt filter compares a candidate's current value.
+enum HuntFilter {
+    Cmp(std::cmp::Ordering, u32),
+    NotEqual(u32),
+    Same,
+    Different,
+}
+
 /// Instruction budgets for the bounded run commands, matching the
 /// debugger window's transport buttons.
 const CONSOLE_STEP_BUDGET: usize = 5_000_000;
@@ -115,6 +149,7 @@ const CONSOLE_HELP: &[&str] = &[
     "            writer ADDR",
     "            history/h [N]   stack/bt",
     "os:         tasks  libs  devs  resources  ports   guru [CODE]",
+    "hunt:       hunt start [B|W]  hunt eq/ne/lt/gt VAL  hunt same|diff  hunt list",
     "modify:     poke ADDR VAL   setreg REG VAL   trace start [PATH]|stop",
     "console:    help  clear  close",
     "Addresses and values are hex; beam positions (V, H) are decimal.",
@@ -594,6 +629,7 @@ impl App {
                 }
                 ConsoleOutcome::lines(lines)
             }
+            "HUNT" => self.console_hunt(args),
             "TRACE" => {
                 const TRACE_LINE_CAP: u64 = 1_000_000;
                 let sub = args.first().map(|t| t.to_ascii_uppercase());
@@ -794,6 +830,179 @@ impl App {
             }
             _ => ConsoleOutcome::error(format!("unknown command {cmd} (try HELP)")),
         }
+    }
+
+    /// The HUNT command family: a trainer-style delta search over
+    /// writable RAM. START snapshots, EQ/NE/LT/GT/SAME/DIFF filter the
+    /// candidates against live memory (then re-snapshot), LIST shows
+    /// survivors, OFF clears.
+    fn console_hunt(&mut self, args: &[&str]) -> ConsoleOutcome {
+        let sub = args.first().map(|t| t.to_ascii_uppercase());
+        match sub.as_deref() {
+            None => match &self.hunt {
+                Some(hunt) => ConsoleOutcome::one(format!(
+                    "hunt active ({}-bit): {}",
+                    hunt.width * 8,
+                    match hunt.candidate_count() {
+                        Some(n) => format!("{n} candidate(s)"),
+                        None => "no filter applied yet".to_string(),
+                    }
+                )),
+                None => ConsoleOutcome::one("no hunt (HUNT START [B|W] begins one)"),
+            },
+            Some("OFF") => {
+                self.hunt = None;
+                ConsoleOutcome::one("hunt cleared")
+            }
+            Some("START") => {
+                let width = match args.get(1).map(|t| t.to_ascii_uppercase()).as_deref() {
+                    Some("B") => 1,
+                    Some("W") | None => 2,
+                    Some(_) => return ConsoleOutcome::error("usage: HUNT START [B|W]"),
+                };
+                let snapshot = self.console_hunt_snapshot();
+                let total: usize = snapshot.iter().map(|(_, bytes)| bytes.len()).sum();
+                self.hunt = Some(HuntState {
+                    width,
+                    snapshot,
+                    candidates: None,
+                });
+                ConsoleOutcome::one(format!(
+                    "hunting {}-bit values across {total} bytes of RAM; filter with \
+                     HUNT EQ/NE/LT/GT VALUE or HUNT SAME/DIFF",
+                    width * 8
+                ))
+            }
+            Some("LIST") => {
+                let Some(hunt) = &self.hunt else {
+                    return ConsoleOutcome::one("no hunt running");
+                };
+                let Some(candidates) = &hunt.candidates else {
+                    return ConsoleOutcome::one("no filter applied yet");
+                };
+                let cap = args
+                    .get(1)
+                    .and_then(|t| t.parse::<usize>().ok())
+                    .unwrap_or(16)
+                    .clamp(1, 64);
+                let width = hunt.width;
+                let mut lines = vec![format!("{} candidate(s):", candidates.len())];
+                for &addr in candidates.iter().take(cap) {
+                    let bytes = self.emu.machine.debug_read_memory(addr, width as usize);
+                    let value = HuntState::value_in(&bytes, 0, width);
+                    lines.push(format!(
+                        "  ${addr:06X} = {value:0w$X}",
+                        w = width as usize * 2
+                    ));
+                }
+                if candidates.len() > cap {
+                    lines.push(format!("  ... {} more", candidates.len() - cap));
+                }
+                ConsoleOutcome::lines(lines)
+            }
+            Some(op @ ("EQ" | "NE" | "LT" | "GT" | "SAME" | "DIFF")) => {
+                let filter = match op {
+                    "EQ" => match args.get(1).and_then(|t| hex32(t)) {
+                        Some(v) => HuntFilter::Cmp(std::cmp::Ordering::Equal, v),
+                        None => return ConsoleOutcome::error("usage: HUNT EQ VALUE (hex)"),
+                    },
+                    "NE" => match args.get(1).and_then(|t| hex32(t)) {
+                        Some(v) => HuntFilter::NotEqual(v),
+                        None => return ConsoleOutcome::error("usage: HUNT NE VALUE (hex)"),
+                    },
+                    "LT" => match args.get(1).and_then(|t| hex32(t)) {
+                        Some(v) => HuntFilter::Cmp(std::cmp::Ordering::Less, v),
+                        None => return ConsoleOutcome::error("usage: HUNT LT VALUE (hex)"),
+                    },
+                    "GT" => match args.get(1).and_then(|t| hex32(t)) {
+                        Some(v) => HuntFilter::Cmp(std::cmp::Ordering::Greater, v),
+                        None => return ConsoleOutcome::error("usage: HUNT GT VALUE (hex)"),
+                    },
+                    "SAME" => HuntFilter::Same,
+                    _ => HuntFilter::Different,
+                };
+                self.console_hunt_filter(filter)
+            }
+            Some(_) => ConsoleOutcome::error(
+                "usage: HUNT [START [B|W] | EQ/NE/LT/GT VALUE | SAME | DIFF | LIST [N] | OFF]",
+            ),
+        }
+    }
+
+    fn console_hunt_snapshot(&self) -> Vec<(u32, Vec<u8>)> {
+        self.emu
+            .bus()
+            .writable_ram_regions()
+            .into_iter()
+            .map(|(base, len)| (base, self.emu.machine.debug_read_memory(base, len as usize)))
+            .collect()
+    }
+
+    fn console_hunt_filter(&mut self, filter: HuntFilter) -> ConsoleOutcome {
+        let Some(mut hunt) = self.hunt.take() else {
+            return ConsoleOutcome::one("no hunt running (HUNT START first)");
+        };
+        let current = self.console_hunt_snapshot();
+        let width = hunt.width;
+        let survives = |old_value: u32, new_value: u32| -> bool {
+            match &filter {
+                HuntFilter::Cmp(ordering, v) => new_value.cmp(v) == *ordering,
+                HuntFilter::NotEqual(v) => new_value != *v,
+                HuntFilter::Same => new_value == old_value,
+                HuntFilter::Different => new_value != old_value,
+            }
+        };
+        let mut next: Vec<u32> = Vec::new();
+        match hunt.candidates.take() {
+            Some(candidates) => {
+                for addr in candidates {
+                    let old_value = Self::hunt_value_at(&hunt.snapshot, addr, width);
+                    let new_value = Self::hunt_value_at(&current, addr, width);
+                    if let (Some(old_value), Some(new_value)) = (old_value, new_value) {
+                        if survives(old_value, new_value) {
+                            next.push(addr);
+                        }
+                    }
+                }
+            }
+            None => {
+                // First filter: scan everything.
+                for ((base, old_bytes), (_, new_bytes)) in hunt.snapshot.iter().zip(current.iter())
+                {
+                    let step = width as usize;
+                    let mut off = 0;
+                    while off + step <= old_bytes.len() {
+                        let old_value = HuntState::value_in(old_bytes, off, width);
+                        let new_value = HuntState::value_in(new_bytes, off, width);
+                        if survives(old_value, new_value) {
+                            next.push(base + off as u32);
+                        }
+                        off += step;
+                    }
+                }
+            }
+        }
+        let count = next.len();
+        hunt.candidates = Some(next);
+        hunt.snapshot = current;
+        self.hunt = Some(hunt);
+        ConsoleOutcome::one(format!(
+            "{count} candidate(s) remain{}",
+            if count > 0 && count <= 16 {
+                "  (HUNT LIST shows them)"
+            } else {
+                ""
+            }
+        ))
+    }
+
+    fn hunt_value_at(snapshot: &[(u32, Vec<u8>)], addr: u32, width: u32) -> Option<u32> {
+        for (base, bytes) in snapshot {
+            if addr >= *base && (addr - base) as usize + width as usize <= bytes.len() {
+                return Some(HuntState::value_in(bytes, (addr - base) as usize, width));
+            }
+        }
+        None
     }
 
     /// Run a bounded forward-execution operation and report where the

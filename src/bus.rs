@@ -4350,6 +4350,27 @@ impl Bus {
         Some(value)
     }
 
+    /// The writable RAM regions a memory hunt should scan: chip RAM,
+    /// slow/ranger RAM, and configured Zorro RAM boards, as
+    /// (base, length) pairs.
+    pub fn writable_ram_regions(&self) -> Vec<(u32, u32)> {
+        let mut regions = Vec::new();
+        if !self.mem.chip_ram.is_empty() {
+            regions.push((
+                crate::memory::CHIP_RAM_BASE as u32,
+                self.mem.chip_ram.len() as u32,
+            ));
+        }
+        if !self.mem.slow_ram.is_empty() {
+            regions.push((
+                crate::memory::SLOW_RAM_BASE as u32,
+                self.mem.slow_ram.len() as u32,
+            ));
+        }
+        regions.extend(self.mem.zorro.ram_regions());
+        regions
+    }
+
     /// Read a 16-bit big-endian word from whichever RAM/ROM region maps
     /// `addr` (chip, fast, slow, or ROM), for the debugger's memory dumps.
     /// Returns 0 for unmapped addresses.
