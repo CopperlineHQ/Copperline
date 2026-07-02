@@ -459,6 +459,9 @@ pub enum UiControl {
     /// Break tab: toggle a beam trap at the entry's decimal "VPOS [HPOS]"
     /// position (halt when the Agnus beam reaches it).
     DebugBeamToggle,
+    /// Break tab: toggle an exception catchpoint from the entry box
+    /// ("irq N", "trap N", or "vec N").
+    DebugCatchToggle,
     /// Copper tab: toggle a Copper breakpoint at the entry address (halt
     /// when the Copper's PC arrives there).
     DebugCopperBreakToggle,
@@ -676,7 +679,7 @@ fn debug_content_top(rect: Rect) -> usize {
 pub const BREAK_TAB_HEADER_LINES: usize = 3;
 
 /// The Break tab's toggle buttons, drawn at the top of the content area.
-fn break_tab_button_rects(rect: Rect) -> [(UiControl, Rect); 5] {
+fn break_tab_button_rects(rect: Rect) -> [(UiControl, Rect); 6] {
     let y = debug_content_top(rect);
     let button = |i: usize| Rect {
         x: rect.x + 10 + i * 98,
@@ -689,8 +692,30 @@ fn break_tab_button_rects(rect: Rect) -> [(UiControl, Rect); 5] {
         (UiControl::DebugWatchToggle, button(1)),
         (UiControl::DebugRegToggle, button(2)),
         (UiControl::DebugBeamToggle, button(3)),
-        (UiControl::DebugBreaksClear, button(4)),
+        (UiControl::DebugCatchToggle, button(4)),
+        (UiControl::DebugBreaksClear, button(5)),
     ]
+}
+
+/// Parse the Break tab's entry as an exception catchpoint: "irq N"
+/// (interrupt level 1-7), "trap N" (TRAP #0-15), or "vec N" (a raw
+/// decimal exception vector number).
+pub fn parse_catch_spec(entry: &str) -> Option<u16> {
+    let mut tokens = entry.split_whitespace();
+    let kind = tokens.next()?;
+    let n = tokens.next()?.parse::<u16>().ok()?;
+    if tokens.next().is_some() {
+        return None;
+    }
+    if kind.eq_ignore_ascii_case("irq") {
+        (1..=7).contains(&n).then_some(24 + n)
+    } else if kind.eq_ignore_ascii_case("trap") {
+        (n <= 15).then_some(32 + n)
+    } else if kind.eq_ignore_ascii_case("vec") {
+        (2..=255).contains(&n).then_some(n)
+    } else {
+        None
+    }
 }
 
 /// Content lines the Copper tab's view must leave blank so the buttons
@@ -1435,11 +1460,13 @@ fn draw_debugger(
                 UiControl::DebugWatchToggle => "Watch +/-",
                 UiControl::DebugRegToggle => "Reg +/-",
                 UiControl::DebugBeamToggle => "Beam +/-",
+                UiControl::DebugCatchToggle => "Catch +/-",
                 _ => "Clear all",
             };
             let enabled = match control {
                 UiControl::DebugBreaksClear => true,
                 UiControl::DebugBeamToggle => parse_beam_spec(&panel.entry).is_some(),
+                UiControl::DebugCatchToggle => parse_catch_spec(&panel.entry).is_some(),
                 _ => panel.entry_addr().is_some(),
             };
             draw_text_button(
@@ -3799,6 +3826,21 @@ mod tests {
         for (_, button) in analyzer_button_rects(rect) {
             assert!(button.x + button.w <= underlay.x || underlay.x + underlay.w <= button.x);
         }
+    }
+
+    #[test]
+    fn catch_spec_parses_irq_trap_and_vector_forms() {
+        assert_eq!(parse_catch_spec("irq 3"), Some(27));
+        assert_eq!(parse_catch_spec("IRQ 7"), Some(31));
+        assert_eq!(parse_catch_spec("trap 0"), Some(32));
+        assert_eq!(parse_catch_spec("trap 15"), Some(47));
+        assert_eq!(parse_catch_spec("vec 4"), Some(4));
+        assert_eq!(parse_catch_spec("irq 0"), None); // no level-0 interrupt
+        assert_eq!(parse_catch_spec("irq 8"), None);
+        assert_eq!(parse_catch_spec("trap 16"), None);
+        assert_eq!(parse_catch_spec("vec 1"), None); // reset vectors excluded
+        assert_eq!(parse_catch_spec("C033C2"), None); // plain address is not a catch
+        assert_eq!(parse_catch_spec("irq 3 4"), None);
     }
 
     #[test]

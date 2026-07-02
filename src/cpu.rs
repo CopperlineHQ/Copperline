@@ -1119,6 +1119,17 @@ impl M68kMachine {
         added
     }
 
+    /// Toggle an exception catchpoint (stop when the CPU enters the
+    /// vector). Returns true when now set. Arming clears any stale
+    /// recorded exception so an old entry cannot fire immediately.
+    pub fn ui_toggle_catch(&mut self, vector: u16) -> bool {
+        let added = self.ui_breaks.toggle_catch(vector);
+        if added {
+            self.cpu.last_exception_vector = None;
+        }
+        added
+    }
+
     pub fn ui_breaks_clear(&mut self) {
         self.ui_breaks.clear();
         self.bus.bus.set_ui_reg_watches(&[]);
@@ -1178,6 +1189,17 @@ impl M68kMachine {
     fn ui_check_breaks_after_step(&mut self) {
         use crate::debugger::DebugStop;
         let pc = self.cpu.pc & crate::debugger::UI_ADDR_MASK;
+        // Exception catchpoints: the core records every exception entry
+        // (trap, fault, or interrupt) as it loads the handler vector;
+        // drain it here so a hit stops at the handler's first
+        // instruction.
+        if let Some(vector) = self.cpu.last_exception_vector.take() {
+            let vector = vector.min(u32::from(u16::MAX)) as u16;
+            if self.ui_breaks.catches.contains(&vector) {
+                self.ui_stop = Some(DebugStop::Exception { vector, pc });
+                return;
+            }
+        }
         if self.ui_breakpoint_stops(pc) {
             self.ui_stop = Some(DebugStop::Breakpoint { pc });
             return;
@@ -1241,10 +1263,19 @@ impl M68kMachine {
             if let Some(irq_cycles) = self.service_pending_irq_cycles() {
                 cpu_cycles = cpu_cycles.saturating_add(positive_cpu_cycles(irq_cycles));
                 cpu_cck = cpu_cck.saturating_add(self.charge_cpu_clocks(irq_cycles));
-                // An interrupt dispatch can land the PC on a breakpoint;
-                // stop before the handler's first instruction executes.
+                // An interrupt dispatch can land the PC on a breakpoint or
+                // a caught vector; stop before the handler's first
+                // instruction executes.
                 if self.ui_breaks.armed() {
                     let pc = self.cpu.pc & crate::debugger::UI_ADDR_MASK;
+                    if let Some(vector) = self.cpu.last_exception_vector.take() {
+                        let vector = vector.min(u32::from(u16::MAX)) as u16;
+                        if self.ui_breaks.catches.contains(&vector) {
+                            self.ui_stop =
+                                Some(crate::debugger::DebugStop::Exception { vector, pc });
+                            break;
+                        }
+                    }
                     if self.ui_breakpoint_stops(pc) {
                         self.ui_stop = Some(crate::debugger::DebugStop::Breakpoint { pc });
                         break;

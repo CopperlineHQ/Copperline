@@ -2312,6 +2312,60 @@ mod tests {
         .unwrap()
     }
 
+    /// Like [`emulator_with_call_program`], but the program executes a
+    /// TRAP #0 whose handler (vector 32, set up in chip RAM) parks at
+    /// $F80030:
+    ///
+    /// ```text
+    /// F80010  NOP
+    /// F80012  TRAP   #0
+    /// F80014  BRA.S  *
+    /// F80030  BRA.S  *          ; trap handler
+    /// ```
+    fn emulator_with_trap_program() -> super::Emulator {
+        let mut rom = vec![0u8; crate::memory::ROM_SIZE];
+        let put = |mem: &mut [u8], off: usize, word: u16| {
+            mem[off..off + 2].copy_from_slice(&word.to_be_bytes());
+        };
+        put(&mut rom, 0x10, 0x4E71); // NOP
+        put(&mut rom, 0x12, 0x4E40); // TRAP #0
+        put(&mut rom, 0x14, 0x60FE); // BRA.S *
+        put(&mut rom, 0x30, 0x60FE); // handler: BRA.S *
+
+        let mut chip_ram = vec![0u8; 512 * 1024];
+        chip_ram[0..4].copy_from_slice(&0x0000_4000u32.to_be_bytes()); // reset SSP
+        chip_ram[4..8].copy_from_slice(&0x00F8_0010u32.to_be_bytes()); // reset PC
+        chip_ram[32 * 4..32 * 4 + 4].copy_from_slice(&0x00F8_0030u32.to_be_bytes()); // TRAP #0
+
+        let bus = crate::bus::Bus::new(
+            crate::memory::Memory {
+                chip_ram,
+                slow_ram: Vec::new(),
+                rom,
+                overlay: false,
+                zorro: crate::zorro::ZorroChain::default(),
+                extended_rom: Vec::new(),
+                extended_rom_base: 0,
+                wcs: Vec::new(),
+                wcs_write_protected: false,
+            },
+            crate::chipset::paula::Paula::new(
+                Box::new(crate::serial::NullSerialSink),
+                Box::new(crate::audio::NullSink),
+            ),
+            crate::floppy::FloppyController::default(),
+        );
+        super::Emulator::new(
+            bus,
+            crate::config::CpuModel::M68000,
+            false,
+            crate::config::PacingBudget::Cycles,
+            2,
+            false,
+        )
+        .unwrap()
+    }
+
     #[test]
     fn step_over_runs_the_callee_and_stops_after_the_call() {
         let mut emu = emulator_with_call_program();
@@ -2386,6 +2440,68 @@ mod tests {
             bus.agnus.hpos
         );
         assert!(bus.ui_beam_traps().is_empty());
+    }
+
+    #[test]
+    fn exception_catchpoint_stops_on_trap_entry() {
+        use crate::debugger::DebugStop;
+        let mut emu = emulator_with_trap_program();
+        assert!(emu.machine.ui_toggle_catch(32)); // TRAP #0
+        let mut stopped = false;
+        for _ in 0..64 {
+            emu.debug_step_instructions(1).unwrap();
+            if emu.machine.ui_debug_stop_pending() {
+                stopped = true;
+                break;
+            }
+        }
+        assert!(stopped, "TRAP #0 catchpoint did not fire");
+        match emu.machine.take_ui_debug_stop() {
+            Some(DebugStop::Exception { vector, .. }) => assert_eq!(vector, 32),
+            other => panic!("expected an exception stop, got {other:?}"),
+        }
+        // The machine sits in the trap handler.
+        assert_eq!(emu.machine.pc() & 0x00FF_FFFF, 0x00F8_0030);
+    }
+
+    #[test]
+    fn exception_catchpoint_stops_on_vblank_interrupt() {
+        use crate::debugger::DebugStop;
+        let mut emu = emulator_with_call_program();
+        {
+            let bus = emu.bus_mut();
+            // Vector 27 (autovector level 3) -> a handler parked in ROM.
+            bus.mem.chip_ram[27 * 4..27 * 4 + 4].copy_from_slice(&0x00F8_0014u32.to_be_bytes());
+            // Enable master + VERTB interrupts.
+            assert!(!bus.custom_write(0x09A, 2, 0xC020));
+        }
+        // The reset SR masks all interrupt levels (IPL 7); open the mask so
+        // the level-3 vertical blank can be recognized.
+        assert!(emu.machine.debug_set_register(16, 0x2000));
+        assert!(emu.machine.ui_toggle_catch(27));
+        let mut stopped = false;
+        for _ in 0..200_000 {
+            emu.debug_step_instructions(1).unwrap();
+            if emu.machine.ui_debug_stop_pending() {
+                stopped = true;
+                break;
+            }
+        }
+        assert!(
+            stopped,
+            "VERTB catchpoint did not fire within budget: frames={} pc={:08X} sr={:04X}",
+            emu.bus().emulated_frames(),
+            emu.machine.pc(),
+            emu.machine.sr(),
+        );
+        match emu.machine.take_ui_debug_stop() {
+            Some(DebugStop::Exception { vector, pc }) => {
+                assert_eq!(vector, 27);
+                // Stopped at the handler's entry, before it executes.
+                assert_eq!(pc, 0x00F8_0014);
+            }
+            other => panic!("expected an exception stop, got {other:?}"),
+        }
     }
 
     #[test]

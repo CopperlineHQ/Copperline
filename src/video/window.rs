@@ -2603,6 +2603,9 @@ impl App {
             UiControl::DebugBeamToggle => {
                 self.activate_tool_control(ToolPanelKind::Debugger, control)
             }
+            UiControl::DebugCatchToggle => {
+                self.activate_tool_control(ToolPanelKind::Debugger, control)
+            }
             UiControl::DebugCopperBreakToggle => {
                 self.activate_tool_control(ToolPanelKind::Debugger, control)
             }
@@ -2765,6 +2768,7 @@ impl App {
             (ToolPanelKind::Debugger, UiControl::DebugBeamToggle) => {
                 self.debugger_toggle_beam_trap()
             }
+            (ToolPanelKind::Debugger, UiControl::DebugCatchToggle) => self.debugger_toggle_catch(),
             (ToolPanelKind::Debugger, UiControl::DebugCopperBreakToggle) => {
                 self.debugger_toggle_copper_break()
             }
@@ -3977,6 +3981,25 @@ impl App {
         self.show_osd(msg);
     }
 
+    /// Toggle an exception catchpoint from the entry box ("irq N",
+    /// "trap N", or "vec N").
+    fn debugger_toggle_catch(&mut self) {
+        let spec = self
+            .debugger_panel
+            .as_ref()
+            .and_then(|panel| ui::parse_catch_spec(&panel.entry));
+        let Some(vector) = spec else {
+            self.show_osd("Catch: type \"irq N\", \"trap N\", or \"vec N\" first");
+            return;
+        };
+        let set = self.emu.machine.ui_toggle_catch(vector);
+        self.show_osd(format!(
+            "Catch {} {}",
+            crate::debugger::exception_vector_name(vector),
+            if set { "set" } else { "removed" }
+        ));
+    }
+
     /// Toggle a Copper breakpoint at the entry address (Copper tab).
     fn debugger_toggle_copper_break(&mut self) {
         let Some(addr) = self
@@ -4732,6 +4755,9 @@ impl App {
                 lines.push(ui::DbgLine::plain(
                     "Beam takes decimal \"VPOS [HPOS]\" (stop when the beam gets there).",
                 ));
+                lines.push(ui::DbgLine::plain(
+                    "Catch takes \"irq N\", \"trap N\", or \"vec N\" (stop entering the vector).",
+                ));
                 lines.push(ui::DbgLine::plain(""));
                 let breaks = self.emu.machine.ui_breaks();
                 lines.push(ui::DbgLine::plain("Breakpoints:"));
@@ -4769,6 +4795,19 @@ impl App {
                     lines.push(ui::DbgLine::plain(format!(
                         "  {} (${off:03X})",
                         crate::debugger::custom_reg_name(*off)
+                    )));
+                }
+                lines.push(ui::DbgLine::plain(""));
+                lines.push(ui::DbgLine::plain(
+                    "Exception catchpoints (stop entering the vector):",
+                ));
+                if breaks.catches.is_empty() {
+                    lines.push(ui::DbgLine::plain("  (none)"));
+                }
+                for vector in &breaks.catches {
+                    lines.push(ui::DbgLine::plain(format!(
+                        "  {} (vector {vector})",
+                        crate::debugger::exception_vector_name(*vector)
                     )));
                 }
                 lines.push(ui::DbgLine::plain(""));

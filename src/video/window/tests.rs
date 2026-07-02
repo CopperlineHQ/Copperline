@@ -2497,6 +2497,34 @@ fn beam_trap_gui_toggle_line_step_and_run_to_slot() {
 }
 
 #[test]
+fn exception_catchpoint_toggle_from_the_break_tab() {
+    let mut app = test_app();
+    app.open_debugger();
+    if let Some(panel) = app.debugger_panel.as_mut() {
+        panel.tab = super::ui::DebugTab::Break;
+        panel.entry = "trap 0".to_string();
+    }
+    app.activate_ui_control(UiControl::DebugCatchToggle);
+    assert_eq!(app.emu.machine.ui_breaks().catches, vec![32]);
+
+    // The Break tab lists it by name.
+    let panel = app.debugger_panel.clone().unwrap();
+    let view = app.build_debugger_view(&panel);
+    assert!(view.lines.iter().any(|l| l.text.contains("TRAP #0")));
+
+    // Toggling again removes it; Clear all also clears catches.
+    app.activate_ui_control(UiControl::DebugCatchToggle);
+    assert!(app.emu.machine.ui_breaks().catches.is_empty());
+    if let Some(panel) = app.debugger_panel.as_mut() {
+        panel.entry = "irq 3".to_string();
+    }
+    app.activate_ui_control(UiControl::DebugCatchToggle);
+    assert_eq!(app.emu.machine.ui_breaks().catches, vec![27]);
+    app.activate_ui_control(UiControl::DebugBreaksClear);
+    assert!(app.emu.machine.ui_breaks().catches.is_empty());
+}
+
+#[test]
 fn copper_breakpoint_toggle_and_copper_step_from_the_gui() {
     let mut app = test_app();
     app.open_debugger();

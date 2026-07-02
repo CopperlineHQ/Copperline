@@ -116,6 +116,13 @@ On the Break tab, type an address into the `$` box and toggle any of:
   and even while the CPU sits in `STOP`. A persistent beam trap re-fires
   every frame, which makes it a raster-line single-step: resume, and the
   machine stops at the same beam position of the next frame.
+- **Catch** -- an exception catchpoint: the machine stops when the CPU
+  enters the vector, at the handler's entry. The box takes `irq N`
+  (interrupt level 1-7, e.g. `irq 3` for the vertical blank), `trap N`
+  (TRAP #0-15), or `vec N` (any raw vector number: `vec 2` bus error,
+  `vec 4` illegal instruction, `vec 8` privilege violation). Every entry
+  path is seen -- traps, faults, and interrupts alike -- so `irq` catches
+  fire on the exact dispatch, before the handler's first instruction.
 
 **Clear all** removes everything. Breakpoints and watchpoints stay armed
 when the window is closed: a hit pauses the machine, reopens the debugger

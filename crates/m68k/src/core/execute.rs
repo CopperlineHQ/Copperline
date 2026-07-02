@@ -344,6 +344,7 @@ impl CpuCore {
 
     /// Jump to an exception vector.
     pub fn jump_vector<B: AddressBus>(&mut self, bus: &mut B, vector: u32) {
+        self.last_exception_vector = Some(vector);
         let addr = (vector << 2).wrapping_add(self.vbr);
         self.pc = self.read_32(bus, addr);
         // Exception entry refills the prefetch queue from the handler
