@@ -214,6 +214,143 @@ impl DebugStop {
     }
 }
 
+/// Decoded bit/field lines for a custom register's value, for the
+/// debugger's IO Map tab. Registers without a decode table return an
+/// empty vec (the raw hex is always shown alongside).
+pub fn custom_reg_bit_decode(off: u16, value: u16) -> Vec<String> {
+    let off = off & 0x1FE;
+    let named_bits: &[(u16, &str)] = match off {
+        0x002 | 0x096 => &[
+            (14, "BBUSY"),
+            (13, "BZERO"),
+            (10, "BLTPRI"),
+            (9, "DMAEN"),
+            (8, "BPLEN"),
+            (7, "COPEN"),
+            (6, "BLTEN"),
+            (5, "SPREN"),
+            (4, "DSKEN"),
+            (3, "AUD3"),
+            (2, "AUD2"),
+            (1, "AUD1"),
+            (0, "AUD0"),
+        ],
+        0x01C | 0x01E | 0x09A | 0x09C => &[
+            (14, "INTEN"),
+            (13, "EXTER"),
+            (12, "DSKSYN"),
+            (11, "RBF"),
+            (10, "AUD3"),
+            (9, "AUD2"),
+            (8, "AUD1"),
+            (7, "AUD0"),
+            (6, "BLIT"),
+            (5, "VERTB"),
+            (4, "COPER"),
+            (3, "PORTS"),
+            (2, "SOFT"),
+            (1, "DSKBLK"),
+            (0, "TBE"),
+        ],
+        0x010 | 0x09E => &[
+            (14, "PRECOMP1"),
+            (13, "PRECOMP0"),
+            (12, "MFMPREC"),
+            (11, "WORDSYNC"),
+            (10, "MSBSYNC"),
+            (9, "FAST"),
+            (7, "USE3PN"),
+            (6, "USE2P3"),
+            (5, "USE1P2"),
+            (4, "USE0P1"),
+            (3, "USE3VN"),
+            (2, "USE2V3"),
+            (1, "USE1V2"),
+            (0, "USE0V1"),
+        ],
+        0x100 => &[
+            (15, "HIRES"),
+            (11, "HAM"),
+            (10, "DPF"),
+            (9, "COLOR"),
+            (8, "GAUD"),
+            (6, "SHRES"),
+            (3, "LPEN"),
+            (2, "LACE"),
+            (1, "ERSY"),
+            (0, "ECSENA"),
+        ],
+        0x104 => &[(6, "PF2PRI"), (10, "KILLEHB")],
+        0x098 => &[
+            (15, "ENSP7"),
+            (14, "ENSP5"),
+            (13, "ENSP3"),
+            (12, "ENSP1"),
+            (11, "ENBP6"),
+            (10, "ENBP5"),
+            (9, "ENBP4"),
+            (8, "ENBP3"),
+            (7, "ENBP2"),
+            (6, "ENBP1"),
+        ],
+        0x1DC => &[
+            (14, "HARDDIS"),
+            (13, "LPENDIS"),
+            (12, "VARVBEN"),
+            (11, "LOLDIS"),
+            (10, "CSCBEN"),
+            (9, "VARVSYEN"),
+            (8, "VARHSYEN"),
+            (7, "VARBEAMEN"),
+            (6, "DUAL"),
+            (5, "PAL"),
+        ],
+        0x1FC => &[
+            (15, "SSCAN2"),
+            (14, "BSCAN2"),
+            (3, "SPAGEM"),
+            (2, "SPR32"),
+            (1, "BPAGEM"),
+            (0, "BPL32"),
+        ],
+        _ => &[],
+    };
+    let mut lines = Vec::new();
+    if !named_bits.is_empty() {
+        let set: Vec<&str> = named_bits
+            .iter()
+            .filter(|(bit, _)| value & (1 << bit) != 0)
+            .map(|(_, name)| *name)
+            .collect();
+        lines.push(if set.is_empty() {
+            "(no named bits set)".to_string()
+        } else {
+            set.join(" ")
+        });
+    }
+    // Multi-bit fields.
+    match off {
+        0x100 => {
+            let bpu = ((value >> 12) & 7) + (((value >> 4) & 1) << 3);
+            lines.push(format!("BPU={bpu}"));
+        }
+        0x102 => lines.push(format!(
+            "PF1H={} PF2H={}",
+            value & 0x000F,
+            (value >> 4) & 0x000F
+        )),
+        0x104 => lines.push(format!(
+            "PF1P={} PF2P={}",
+            value & 0x0007,
+            (value >> 3) & 0x0007
+        )),
+        0x08E | 0x090 => lines.push(format!("v={} h={}", (value >> 8) & 0xFF, value & 0xFF)),
+        0x092 | 0x094 => lines.push(format!("cck ${:02X}", value & 0x00FC)),
+        _ => {}
+    }
+    lines
+}
+
 /// The hardware name of a custom-register word offset into $DFF000
 /// ($000-$1FE), e.g. 0x096 -> "DMACON". Banked registers (audio channels,
 /// bitplane/sprite pointers and data, colors) are derived; offsets without
@@ -1040,6 +1177,19 @@ mod tests {
         assert!(breaks.breakpoints.is_empty());
         assert!(breaks.watches.is_empty());
         assert!(breaks.reg_watches.is_empty());
+    }
+
+    #[test]
+    fn custom_reg_bit_decode_names_set_bits_and_fields() {
+        let lines = custom_reg_bit_decode(0x096, 0x0240);
+        assert_eq!(lines, vec!["DMAEN BLTEN".to_string()]);
+        let lines = custom_reg_bit_decode(0x100, 0x5800);
+        assert_eq!(lines[0], "HAM");
+        assert_eq!(lines[1], "BPU=5");
+        let lines = custom_reg_bit_decode(0x102, 0x0021);
+        assert_eq!(lines, vec!["PF1H=1 PF2H=2".to_string()]);
+        // Unknown registers decode to nothing (hex is always shown).
+        assert!(custom_reg_bit_decode(0x1F0, 0xFFFF).is_empty());
     }
 
     #[test]

@@ -2111,6 +2111,18 @@ fn debugger_views_reflect_machine_state() {
                 assert_eq!(video.plane_mask, 0xFF);
                 assert_eq!(video.sprite_mask, 0xFF);
             }
+            super::ui::DebugTab::IoMap => {
+                // The register grid names DMACON with a live value and
+                // the selection pane decodes it.
+                assert!(
+                    view.lines.iter().any(|l| l.text.contains("DMACON")),
+                    "IO map missing DMACON"
+                );
+                assert!(view
+                    .lines
+                    .iter()
+                    .any(|l| l.highlight && l.text.starts_with("$096")));
+            }
             super::ui::DebugTab::Break => {
                 assert!(view.lines.iter().any(|l| l.text == "Breakpoints:"));
                 assert!(view.lines.iter().any(|l| l.text == "  (none)"));
@@ -2606,6 +2618,35 @@ fn console_os_introspection_and_task_catch() {
     // Clearing disarms it.
     console_run(&mut app, "CATCHTASK");
     assert!(app.emu.machine.ui_breaks().task_catch.is_none());
+}
+
+#[test]
+fn iomap_tab_navigation_and_jump() {
+    let mut app = test_app();
+    app.open_debugger();
+    if let Some(panel) = app.debugger_panel.as_mut() {
+        panel.tab = super::ui::DebugTab::IoMap;
+    }
+    assert_eq!(app.debugger_panel.as_ref().unwrap().iomap_sel, 0x096);
+    app.debugger_iomap_move(1);
+    assert_eq!(app.debugger_panel.as_ref().unwrap().iomap_sel, 0x098);
+    app.debugger_iomap_move(-300); // clamps at the bank start
+    assert_eq!(app.debugger_panel.as_ref().unwrap().iomap_sel, 0x000);
+
+    // The $ box jumps by offset or full address.
+    if let Some(panel) = app.debugger_panel.as_mut() {
+        panel.entry = "DFF180".to_string();
+        panel.entry_active = true;
+    }
+    assert!(app.ui_handle_tool_key(ToolPanelKind::Debugger, KeyCode::Enter));
+    assert_eq!(app.debugger_panel.as_ref().unwrap().iomap_sel, 0x180);
+
+    let panel = app.debugger_panel.clone().unwrap();
+    let view = app.build_debugger_view(&panel);
+    assert!(view
+        .lines
+        .iter()
+        .any(|l| l.highlight && l.text.starts_with("$180 COLOR00")));
 }
 
 #[test]

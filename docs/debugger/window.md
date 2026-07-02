@@ -125,6 +125,16 @@ PageUp/PageDown by whole pages. Four buttons sit above the dump:
   tab to eyeball graphics data directly -- misaligned strides show as
   the familiar diagonal shear.
 
+**IO Map** is a browsable map of the whole custom bank ($DFF000-$DFF1FE):
+every word offset with its hardware name and live value (write-only
+registers show their last-written latch, `----` marks offsets with no
+latch at all). Arrows and the mouse wheel move the selection, PageUp/Down
+change page, and the `$` box jumps to an offset (`96`) or address
+(`DFF096`). The pane below decodes the selected register's bits by name
+-- DMACON's enables, INTENA/INTREQ sources, BPLCON0's mode flags and
+plane count, ADKCON, CLXCON, BEAMCON0, FMODE, and the playfield
+scroll/priority fields.
+
 **Break** manages breakpoints and watchpoints (next section) and shows the
 reason for the last stop.
 

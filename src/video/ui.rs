@@ -182,16 +182,18 @@ pub enum DebugTab {
     Video,
     Audio,
     Memory,
+    IoMap,
     Break,
 }
 
-pub const DEBUG_TABS: [DebugTab; 7] = [
+pub const DEBUG_TABS: [DebugTab; 8] = [
     DebugTab::Cpu,
     DebugTab::Chipset,
     DebugTab::Copper,
     DebugTab::Video,
     DebugTab::Audio,
     DebugTab::Memory,
+    DebugTab::IoMap,
     DebugTab::Break,
 ];
 
@@ -203,6 +205,7 @@ fn debug_tab_label(tab: DebugTab) -> &'static str {
         DebugTab::Video => "Video",
         DebugTab::Audio => "Audio",
         DebugTab::Memory => "Memory",
+        DebugTab::IoMap => "IO Map",
         DebugTab::Break => "Break",
     }
 }
@@ -227,6 +230,8 @@ pub struct DebuggerPanel {
     /// Memory tab bitmap mode: row stride in bytes (40 = a standard
     /// 320-pixel-wide plane).
     pub mem_bitmap_stride: u32,
+    /// IO Map tab: the selected custom-register word offset ($000-$1FE).
+    pub iomap_sel: u16,
 }
 
 impl DebuggerPanel {
@@ -240,6 +245,7 @@ impl DebuggerPanel {
             mem_last_find: None,
             mem_view_bits: false,
             mem_bitmap_stride: 40,
+            iomap_sel: 0x096,
         }
     }
 
@@ -770,7 +776,7 @@ fn cal_button_enabled(control: UiControl, session: &crate::gamepad::CalibrationS
 
 // Debugger chrome: a tab row under the title and a control row at the
 // bottom with the transport buttons and the shared hex-entry box.
-const DEBUG_TAB_W: usize = 90;
+const DEBUG_TAB_W: usize = 80;
 const DEBUG_TAB_H: usize = 18;
 const DEBUG_BUTTON_H: usize = 20;
 
@@ -4581,8 +4587,16 @@ mod tests {
         let tab = debug_tab_rect(rect, 6);
         assert_eq!(
             ui.control_at((tab.x as i32 + 2, tab.y as i32 + 2)),
+            Some(UiControl::DebugTab(DebugTab::IoMap))
+        );
+        let tab = debug_tab_rect(rect, 7);
+        assert_eq!(
+            ui.control_at((tab.x as i32 + 2, tab.y as i32 + 2)),
             Some(UiControl::DebugTab(DebugTab::Break))
         );
+        // All eight tabs fit inside the panel.
+        let last = debug_tab_rect(rect, 7);
+        assert!(last.x + last.w <= rect.x + rect.w);
         let (control, step) = debug_button_rects(rect)[1];
         assert_eq!(control, UiControl::DebugStep);
         assert_eq!(
@@ -5169,6 +5183,65 @@ mod tests {
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "debugger-audio");
+
+        // IO Map tab: the register grid with a selection and decode pane.
+        let mut frame = vec![0u8; w * h * 4];
+        let mut lines: Vec<DbgLine> = Vec::new();
+        lines.push(DbgLine::plain(
+            "custom registers $DFF000-$DFF1FE  (page 2/4; arrows/wheel move, $ box jumps)",
+        ));
+        lines.push(DbgLine::plain(""));
+        for row in 0..26 {
+            let mut text = String::new();
+            for col in 0..3 {
+                let off = 0x0A0 + (col * 26 + row) * 2;
+                let cursor = if off == 0x0100 { '>' } else { ' ' };
+                text.push_str(&format!(
+                    "{cursor}{off:03X} {:<8} {:04X}   ",
+                    crate::debugger::custom_reg_name(off as u16),
+                    0x2200 + off
+                ));
+            }
+            lines.push(if row == 16 {
+                DbgLine::hilit(text.trim_end().to_string())
+            } else {
+                DbgLine::plain(text.trim_end().to_string())
+            });
+        }
+        lines.push(DbgLine::plain(""));
+        lines.push(DbgLine::hilit("$100 BPLCON0 = $5A00".to_string()));
+        lines.push(DbgLine::plain("  HAM COLOR".to_string()));
+        lines.push(DbgLine::plain("  BPU=5".to_string()));
+        let data = PanelViewData::Debugger(Box::new(DebuggerView {
+            running: false,
+            reverse_available: true,
+            status: "paused frame 1234 24.68s".to_string(),
+            lines,
+            bitmap: None,
+            video: None,
+            audio: None,
+        }));
+        let mut panel = DebuggerPanel::new();
+        panel.tab = DebugTab::IoMap;
+        let ui = UiState {
+            menu_open: false,
+            panel: Some(Panel::Debugger(panel)),
+        };
+        draw(
+            &mut frame,
+            scale,
+            &ui,
+            None,
+            Some(&data),
+            false,
+            WarpSpeed::Max,
+            false,
+            false,
+            JoystickInputMode::Gamepad,
+            PixelAspect::Tv,
+        );
+        assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
+        save(&frame, "debugger-iomap");
 
         // Video tab: layer-isolation toggles (plane 2 and sprite 5 hidden),
         // sprite rows with synthetic thumbnails, and an AGA palette grid.
