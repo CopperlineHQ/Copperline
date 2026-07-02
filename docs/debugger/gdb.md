@@ -41,6 +41,14 @@ Use `monitor write-reg` for deliberate custom-chip writes.
 
 ## Custom Chips
 
+The stub is exercised against real clients: `m68k-amigaos-gdb` (the
+bebbo amiga-gcc toolchain) connects, disassembles live ROM, steps,
+breaks, and reverse-steps as expected. A stock multi-arch host `gdb`
+also accepts the target description, but without an executable loaded
+it guesses endianness from the host -- issue `set endian big` before
+`target remote` (or just load your program's ELF with `file`, which the
+Amiga toolchains' gdb does implicitly).
+
 Use GDB's `monitor` command for Amiga-specific state:
 
 ```gdb
