@@ -9,7 +9,8 @@ This chapter is the map; the following chapters zoom into the
 
 ```
 src/
-  main.rs           # arg parse, config load, wire everything
+  main.rs           # thin CLI binary: arg parse, config load, boot
+  lib.rs            # the copperline library crate all of src/ lives in
   config.rs         # TOML config + validation + machine profiles
   envcfg.rs         # cached COPPERLINE_* environment-variable snapshot
   emulator.rs       # frame loop driving CPU, chipset, and host I/O
@@ -18,6 +19,11 @@ src/
   cpu.rs            # m68k core wrapper and CPU-visible bus adapter
   cache.rs          # 68020/030/040 on-chip instruction/data cache model
   bus.rs            # shared RAM, ROM, chipset, CIA, RTC, and I/O state
+  bus/              # size-split impl Bus continuations + the bus test suite
+    custom_regs.rs  #   custom-chip register read/write dispatch
+    dma_slots.rs    #   chip-bus slot arbitration + DMA scheduling
+    collisions.rs   #   live (beam-timed) collision accumulation
+    frame_capture.rs#   per-frame sprite/bitplane DMA + render capture
   memory.rs         # chip/slow RAM, ROM, extended ROM containers
   romsearch.rs      # locate the bundled AROS default boot ROM
   zorro.rs          # Zorro II/III autoconfig chain and boards
@@ -55,8 +61,12 @@ src/
   video/
     beam.rs         # beam-position event index for the renderer
     bitplane.rs     # event replay + planar->RGBA renderer
+    bitplane/       # size-split renderer submodules + its test suite
+                    #   (sprite.rs, fetch.rs, output.rs, diag.rs, tests.rs)
     deinterlace.rs  # motion-adaptive deinterlacer
     window.rs       # winit ApplicationHandler + render worker + main/tool pixels surfaces + status bar
+    window/         # size-split window submodules + its test suite
+                    #   (statusbar.rs, present.rs, host_input.rs, tests.rs)
     ui.rs           # pop-up menu, overlay panels, and debugger/analyzer panel drawing
     font.rs         # 8x8 overlay font
 crates/m68k/        # vendored m68k CPU core
