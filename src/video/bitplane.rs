@@ -2805,6 +2805,50 @@ impl RenderInput {
         }
     }
 
+    /// Re-snapshot the just-finished frame into this bundle, reusing the
+    /// vector allocations left over from a previous frame (the chip-RAM
+    /// copy alone is up to 2 MiB per frame). Field-for-field this must
+    /// mirror [`RenderInput::from_bus`].
+    pub fn refill_from_bus(&mut self, bus: &Bus) {
+        fn copy_into<T: Clone>(dst: &mut Vec<T>, src: &[T]) {
+            dst.clear();
+            dst.extend_from_slice(src);
+        }
+        self.geometry = bus.frame_geometry();
+        self.visible_start_vpos = bus.frame_visible_start_vpos();
+        self.palette_split = bus.frame_palette_split();
+        self.render_base = bus.frame_render_base();
+        copy_into(&mut self.frame_render_events, bus.frame_render_events());
+        self.current_render_base = bus.current_render_base();
+        copy_into(&mut self.current_render_events, bus.current_render_events());
+        copy_into(
+            &mut self.bottom_palette_events,
+            bus.frame_bottom_palette_events(),
+        );
+        self.top_palette_end = bus.frame_top_palette_end();
+        copy_into(&mut self.chip_ram, bus.frame_chip_ram());
+        copy_into(&mut self.chip_ram_writes, bus.frame_chip_ram_writes());
+        copy_into(
+            &mut self.captured_bitplane_rows,
+            bus.frame_captured_bitplane_rows(),
+        );
+        copy_into(
+            &mut self.captured_sprite_lines,
+            bus.frame_captured_sprite_lines(),
+        );
+        self.held_sprites = bus.frame_held_sprites();
+        copy_into(
+            &mut self.sprite_display_enable_x_by_y,
+            bus.frame_sprite_display_enable_x_by_y(),
+        );
+        self.sprite_dma_observed = bus.frame_sprite_dma_observed();
+        self.frame_lines = bus.frame_lines();
+        self.programmable_vertical_blank = bus.agnus.programmable_vertical_blank();
+        self.programmable_horizontal_blank = bus.agnus.programmable_horizontal_blank();
+        self.emulated_seconds = bus.emulated_seconds();
+        self.emulated_frames = bus.emulated_frames();
+    }
+
     pub fn geometry(&self) -> FrameGeometry {
         self.geometry
     }
@@ -2835,10 +2879,23 @@ pub struct RenderResult {
 /// The render itself is a pure function of the owned snapshot
 /// (`render_from_input`); this wrapper owns the remaining bus coupling.
 pub fn render(bus: &mut Bus, fb: &mut [u32]) {
-    let input = RenderInput::from_bus(bus);
-    let result = render_from_input(&input, fb);
-    bus.denise.or_clxdat(result.clxdat);
-    bus.record_video_render_frame(result.timing);
+    // This path re-snapshots the bus every frame; keep one RenderInput per
+    // thread so its buffers are reused instead of reallocated each time.
+    thread_local! {
+        static RENDER_INPUT_SCRATCH: std::cell::RefCell<Option<RenderInput>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    RENDER_INPUT_SCRATCH.with(|scratch| {
+        let mut scratch = scratch.borrow_mut();
+        match scratch.as_mut() {
+            Some(input) => input.refill_from_bus(bus),
+            None => *scratch = Some(RenderInput::from_bus(bus)),
+        }
+        let input = scratch.as_ref().expect("scratch render input present");
+        let result = render_from_input(input, fb);
+        bus.denise.or_clxdat(result.clxdat);
+        bus.record_video_render_frame(result.timing);
+    });
 }
 
 pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {

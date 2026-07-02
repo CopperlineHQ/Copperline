@@ -9234,3 +9234,71 @@ fn custom_register_space_sweep_is_panic_free_and_unused_offsets_inert() {
         );
     }
 }
+
+#[test]
+fn render_input_refill_from_bus_matches_fresh_snapshot() {
+    // Snapshot one frame state into a RenderInput, then mutate the machine
+    // into a visibly different frame and refill the same RenderInput from
+    // it. The recycled snapshot must render pixel-identically to a freshly
+    // allocated one: refill_from_bus only reuses buffers, never state.
+    let mut bus = empty_bus();
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
+    bus.denise.diwstrt = 0x2C81;
+    bus.denise.diwstop = 0x2DC1;
+    bus.denise.ddfstrt = 0x0038;
+    bus.denise.ddfstop = 0x0038;
+    bus.denise.bplcon0 = 0x1000;
+    bus.denise.palette.write_ocs(0, 0x0037);
+    bus.current_frame_render_base = bus.capture_render_snapshot();
+    let mut recycled = bitplane::RenderInput::from_bus(&bus);
+
+    // Second frame: a copper palette event plus a captured bitplane row so
+    // the refill has to replace event lists, captured rows, and chip RAM.
+    bus.denise.palette.write_ocs(1, 0x0F00);
+    bus.current_frame_render_base = bus.capture_render_snapshot();
+    run_copper_moves_at(
+        &mut bus,
+        0x0100,
+        RENDER_VISIBLE_START_VPOS,
+        RENDER_COPPER_WAIT_HPOS_FB0 + 30,
+        &[(0x0182, 0x00F0)],
+    );
+    let words_per_row = bitplane_words_per_row(
+        bus.agnus.revision(),
+        bus.denise.bplcon0,
+        bus.agnus.fmode(),
+        bus.denise.ddfstrt,
+        bus.denise.ddfstop,
+        bus.harddis_active(),
+    );
+    bus.current_frame_bitplane_rows[0] = Some(CapturedBitplaneRow {
+        nplanes: 1,
+        words_per_row,
+        planes: [
+            vec![0xFFFF; words_per_row],
+            vec![0; words_per_row],
+            vec![0; words_per_row],
+            vec![0; words_per_row],
+            vec![0; words_per_row],
+            vec![0; words_per_row],
+            Vec::new(),
+            Vec::new(),
+        ],
+    });
+
+    let fresh = bitplane::RenderInput::from_bus(&bus);
+    recycled.refill_from_bus(&bus);
+
+    let mut fb_fresh = vec![0u32; FB_PIXELS];
+    let mut fb_recycled = vec![0u32; FB_PIXELS];
+    bitplane::render_from_input(&fresh, &mut fb_fresh);
+    bitplane::render_from_input(&recycled, &mut fb_recycled);
+    assert!(
+        fb_fresh == fb_recycled,
+        "recycled RenderInput must render identically to a fresh snapshot"
+    );
+    assert!(
+        fb_fresh.iter().any(|&px| px != fb_fresh[0]),
+        "frame must contain non-uniform pixels for the comparison to mean anything"
+    );
+}

@@ -9,15 +9,18 @@
 use super::*;
 
 pub(super) fn render_job_to_presentation(
-    generation: u64,
-    input: &bitplane::RenderInput,
+    job: RenderJob,
     fb: &mut [u32],
     deinterlacer: &mut Deinterlacer,
-    h_shift: usize,
-    overscan: Overscan,
-    presentation_fb: &mut Vec<u32>,
 ) -> RenderWorkerResult {
-    let render_result = bitplane::render_from_input(input, fb);
+    let RenderJob {
+        generation,
+        input,
+        h_shift,
+        overscan,
+        mut presentation_fb,
+    } = job;
+    let render_result = bitplane::render_from_input(&input, fb);
     let geometry = input.geometry();
     let visible_start_vpos = input.visible_start_vpos();
     let field_rows =
@@ -38,9 +41,10 @@ pub(super) fn render_job_to_presentation(
         generation,
         emulated_frame: input.emulated_frames(),
         timing: render_result.timing,
-        presentation_fb: std::mem::take(presentation_fb),
+        presentation_fb,
         present_rows,
         standard_tv_aperture: uses_standard_pal_tv_aperture(geometry, present_rows, &base),
+        input,
     }
 }
 

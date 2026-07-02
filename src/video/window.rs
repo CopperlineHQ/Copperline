@@ -495,6 +495,10 @@ pub struct App {
     frame_analyzer_panel: Option<ui::FrameAnalyzerPanel>,
     render_worker: Option<RenderWorker>,
     render_recycle_fb: Vec<u32>,
+    /// Spent frame snapshot handed back by the render worker; reused by the
+    /// next `RenderInput::refill_from_bus` to avoid re-allocating its
+    /// buffers (the chip-RAM copy alone is up to 2 MiB) every frame.
+    render_recycle_input: Option<bitplane::RenderInput>,
     cpu_halted: bool,
     /// Host-level power state. When false the emulator does not step;
     /// the machine sits powered off until the status-bar power button
@@ -714,6 +718,8 @@ struct RenderWorkerResult {
     presentation_fb: Vec<u32>,
     present_rows: usize,
     standard_tv_aperture: bool,
+    /// The job's frame snapshot, handed back for buffer reuse.
+    input: bitplane::RenderInput,
 }
 
 struct RenderWorker {
@@ -731,16 +737,8 @@ impl RenderWorker {
             .spawn(move || {
                 let mut fb = vec![0u32; MAX_FB_PIXELS];
                 let mut deinterlacer = Deinterlacer::with_phosphor(phosphor);
-                while let Ok(mut job) = job_rx.recv() {
-                    let result = render_job_to_presentation(
-                        job.generation,
-                        &job.input,
-                        &mut fb,
-                        &mut deinterlacer,
-                        job.h_shift,
-                        job.overscan,
-                        &mut job.presentation_fb,
-                    );
+                while let Ok(job) = job_rx.recv() {
+                    let result = render_job_to_presentation(job, &mut fb, &mut deinterlacer);
                     if result_tx.send(result).is_err() {
                         break;
                     }
@@ -754,7 +752,10 @@ impl RenderWorker {
         }
     }
 
-    fn send(&self, job: RenderJob) -> std::result::Result<(), Vec<u32>> {
+    /// On failure (worker thread gone) the whole job is handed back so the
+    /// caller can recycle its presentation buffer and frame snapshot.
+    #[allow(clippy::result_large_err)]
+    fn send(&self, job: RenderJob) -> std::result::Result<(), RenderJob> {
         match self
             .job_tx
             .as_ref()
@@ -762,7 +763,7 @@ impl RenderWorker {
             .send(job)
         {
             Ok(()) => Ok(()),
-            Err(err) => Err(err.0.presentation_fb),
+            Err(err) => Err(err.0),
         }
     }
 
@@ -831,6 +832,7 @@ impl App {
             frame_analyzer_panel: None,
             render_worker,
             render_recycle_fb: Vec::new(),
+            render_recycle_input: None,
             cpu_halted: false,
             powered_on,
             paused: false,
@@ -5111,6 +5113,9 @@ impl App {
     }
 
     fn apply_threaded_render_result(&mut self, result: RenderWorkerResult) -> bool {
+        // Only one job is in flight at a time, so the returned snapshot is
+        // always the freshest one to recycle.
+        self.render_recycle_input = Some(result.input);
         if result.generation != self.render_generation {
             if self.render_recycle_fb.is_empty() {
                 self.render_recycle_fb = result.presentation_fb;
@@ -5162,7 +5167,13 @@ impl App {
             return rendered;
         }
 
-        let input = bitplane::RenderInput::from_bus(self.emu.bus());
+        let input = match self.render_recycle_input.take() {
+            Some(mut input) => {
+                input.refill_from_bus(self.emu.bus());
+                input
+            }
+            None => bitplane::RenderInput::from_bus(self.emu.bus()),
+        };
         let h_shift = if self.hcenter {
             presentation_h_shift_for(&input.render_base(), self.overscan)
         } else {
@@ -5184,9 +5195,10 @@ impl App {
             Ok(()) => {
                 self.last_submitted_render_frame = Some(emulated_frame);
             }
-            Err(err) => {
+            Err(job) => {
                 warn!("render worker stopped; falling back to synchronous rendering");
-                self.render_recycle_fb = err;
+                self.render_recycle_fb = job.presentation_fb;
+                self.render_recycle_input = Some(job.input);
                 self.render_worker = None;
                 rendered |= self.render_emulated_frame_sync();
             }
