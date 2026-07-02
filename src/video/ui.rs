@@ -77,6 +77,7 @@ pub enum MenuItem {
     Shortcuts,
     Calibration,
     Debugger,
+    Console,
     JoystickInput,
     PixelAspect,
     Warp,
@@ -89,10 +90,11 @@ pub enum MenuItem {
     MachineConfig,
 }
 
-pub const MENU_ITEMS: [MenuItem; 15] = [
+pub const MENU_ITEMS: [MenuItem; 16] = [
     MenuItem::MachineConfig,
     MenuItem::FrameAnalyzer,
     MenuItem::Debugger,
+    MenuItem::Console,
     MenuItem::Calibration,
     MenuItem::JoystickInput,
     MenuItem::PixelAspect,
@@ -122,6 +124,7 @@ fn menu_item_label(
         MenuItem::Shortcuts => "Keyboard Shortcuts...".to_string(),
         MenuItem::Calibration => "Calibrate Gamepad...".to_string(),
         MenuItem::Debugger => "Debugger...".to_string(),
+        MenuItem::Console => "Console...".to_string(),
         MenuItem::JoystickInput => format!("Joystick Input  [{}]", joystick_input_mode.label()),
         MenuItem::PixelAspect => {
             let value = match pixel_aspect {
@@ -349,6 +352,65 @@ impl Default for FrameAnalyzerPanel {
     }
 }
 
+/// Interactive state of the debugger console: a command line with
+/// history over a scrollback of output lines. The console owns
+/// everything it renders, so it needs no per-redraw view data.
+#[derive(Clone, Default)]
+pub struct ConsolePanel {
+    /// The command being typed.
+    pub input: String,
+    /// Scrollback, oldest first, capped at [`CONSOLE_SCROLLBACK_LINES`].
+    pub output: std::collections::VecDeque<String>,
+    /// Lines scrolled back from the tail (0 = pinned to the newest).
+    pub scroll: usize,
+    /// Previously executed commands, oldest first.
+    pub history: Vec<String>,
+    /// Index into `history` while browsing with Up/Down; None = live.
+    pub history_pos: Option<usize>,
+}
+
+/// Scrollback capacity of the console, in lines.
+pub const CONSOLE_SCROLLBACK_LINES: usize = 500;
+
+impl ConsolePanel {
+    pub fn push_output(&mut self, line: impl Into<String>) {
+        if self.output.len() >= CONSOLE_SCROLLBACK_LINES {
+            self.output.pop_front();
+        }
+        self.output.push_back(line.into());
+    }
+
+    pub fn push_input_char(&mut self, ch: char) {
+        if self.input.len() >= 72 {
+            return;
+        }
+        // Doubled leading spaces never help a command line.
+        if ch == ' ' && (self.input.is_empty() || self.input.ends_with(' ')) {
+            return;
+        }
+        self.input.push(ch.to_ascii_uppercase());
+        self.history_pos = None;
+    }
+
+    /// Browse command history: `delta` -1 = older, +1 = newer. Leaving
+    /// the newest entry restores an empty line.
+    pub fn history_step(&mut self, delta: i32) {
+        if self.history.is_empty() {
+            return;
+        }
+        let pos = match (self.history_pos, delta) {
+            (None, d) if d < 0 => Some(self.history.len() - 1),
+            (None, _) => None,
+            (Some(0), d) if d < 0 => Some(0),
+            (Some(p), d) if d < 0 => Some(p - 1),
+            (Some(p), _) if p + 1 < self.history.len() => Some(p + 1),
+            (Some(_), _) => None,
+        };
+        self.history_pos = pos;
+        self.input = pos.map(|p| self.history[p].clone()).unwrap_or_default();
+    }
+}
+
 /// An open overlay sub-window.
 pub enum Panel {
     About,
@@ -356,6 +418,7 @@ pub enum Panel {
     Calibration(crate::gamepad::CalibrationSession),
     Debugger(DebuggerPanel),
     FrameAnalyzer(FrameAnalyzerPanel),
+    Console(ConsolePanel),
     /// The pre-boot machine-configuration screen. Boxed: its state is far
     /// larger than the other variants.
     Launcher(Box<LauncherState>),
@@ -451,6 +514,9 @@ pub fn panel_control_at(panel: &Panel, pos: (i32, i32)) -> Option<UiControl> {
                 }
             }
         }
+        // The console has no controls beyond the shared close button and
+        // the click-swallowing body.
+        Panel::Console(_) => {}
         Panel::FrameAnalyzer(_) => {
             if let Some(control) = analyzer_pick_control(rect, pos) {
                 return Some(control);
@@ -631,10 +697,11 @@ pub enum UiControl {
 fn panel_dims(panel: &Panel) -> (usize, usize) {
     match panel {
         Panel::About => (560, 380),
-        Panel::Shortcuts => (600, 396),
+        Panel::Shortcuts => (600, 418),
         Panel::Calibration(_) => (620, 372),
         Panel::Debugger(_) => (684, 520),
         Panel::FrameAnalyzer(_) => (700, 526),
+        Panel::Console(_) => (700, 460),
         Panel::Launcher(_) => (LAUNCHER_W, LAUNCHER_H),
     }
 }
@@ -646,6 +713,7 @@ fn panel_title(panel: &Panel) -> &'static str {
         Panel::Calibration(_) => "Gamepad Calibration",
         Panel::Debugger(_) => "Debugger",
         Panel::FrameAnalyzer(_) => "Frame Analyzer",
+        Panel::Console(_) => "Console",
         Panel::Launcher(_) => "Machine Configuration",
     }
 }
@@ -1520,7 +1588,7 @@ fn draw_about(frame: &mut [u8], rect: Rect, view: &AboutView, scale: usize) {
     }
 }
 
-const SHORTCUT_ROWS: [(&str, &str, bool); 14] = [
+const SHORTCUT_ROWS: [(&str, &str, bool); 15] = [
     ("Q", "Quit", true),
     ("S", "Save screenshot", true),
     ("R", "Record video on/off", true),
@@ -1530,6 +1598,7 @@ const SHORTCUT_ROWS: [(&str, &str, bool); 14] = [
     ("D", "Swap queued disk", true),
     ("G", "Capture mouse", true),
     ("B", "Debugger", true),
+    ("K", "Console", true),
     ("J", "Joystick input mode", true),
     ("W", "Warp speed on/off", true),
     ("Shift+W", "Warp limit (2x..Max)", true),
@@ -1897,6 +1966,71 @@ fn draw_mem_bitmap(frame: &mut [u8], rect: Rect, bitmap: &MemBitmapView, scale: 
         }
     }
     draw_outline(frame, plot, BUTTON_EDGE_LIGHT, scale);
+}
+
+/// Lines of scrollback visible in the console's output area.
+pub fn console_visible_lines() -> usize {
+    // Fixed panel height (see panel_dims): title bar, then the output
+    // area at 10px pitch, leaving the input line and a margin.
+    let panel_h = 460;
+    (panel_h - TITLE_H - 10 - (CONSOLE_INPUT_H + 12)) / 10
+}
+
+const CONSOLE_INPUT_H: usize = 20;
+
+/// Draw the debugger console: scrollback text over a prompt line.
+fn draw_console(frame: &mut [u8], rect: Rect, panel: &ConsolePanel, scale: usize) {
+    let visible = console_visible_lines();
+    let total = panel.output.len();
+    // scroll counts lines back from the tail.
+    let end = total.saturating_sub(panel.scroll.min(total.saturating_sub(visible)));
+    let start = end.saturating_sub(visible);
+    let mut y = rect.y + TITLE_H + 6;
+    for line in panel.output.iter().skip(start).take(end - start) {
+        let (text, color) = if let Some(cmd) = line.strip_prefix("> ") {
+            (format!("> {cmd}"), PANEL_TEXT_HILIGHT)
+        } else if let Some(rest) = line.strip_prefix('!') {
+            (rest.to_string(), PANEL_TEXT_ACCENT)
+        } else {
+            (line.clone(), PANEL_TEXT)
+        };
+        let mut text = text;
+        text.truncate(84);
+        draw_panel_text(frame, rect.x + 10, y, &text, color, 1, scale);
+        y += 10;
+    }
+    if panel.scroll > 0 {
+        draw_panel_text(
+            frame,
+            rect.x + rect.w - 110,
+            rect.y + TITLE_H + 6,
+            &format!("[-{} lines]", panel.scroll),
+            PANEL_TEXT_DIM,
+            1,
+            scale,
+        );
+    }
+    // Prompt line in an entry-style box at the bottom.
+    let entry = Rect {
+        x: rect.x + 8,
+        y: rect.y + rect.h - CONSOLE_INPUT_H - 6,
+        w: rect.w - 16,
+        h: CONSOLE_INPUT_H,
+    };
+    let scaled = scale_rect(entry, scale);
+    fill_rect(frame, scaled, ENTRY_BG, scale);
+    draw_rect_bevel(frame, scaled, BUTTON_EDGE_DARK, BUTTON_EDGE_LIGHT, scale);
+    let mut prompt = format!("> {}_", panel.input);
+    prompt.truncate(84);
+    draw_panel_text(
+        frame,
+        entry.x + 6,
+        entry.y + (CONSOLE_INPUT_H - 8) / 2,
+        &prompt,
+        ENTRY_TEXT,
+        1,
+        scale,
+    );
 }
 
 /// Draw the Video tab: the BPLCON0/DMACON header, the plane and sprite
@@ -3912,8 +4046,10 @@ pub fn draw_panel_layer(
         (Panel::FrameAnalyzer(panel_state), Some(PanelViewData::FrameAnalyzer(view))) => {
             draw_frame_analyzer(frame, rect, panel_state, view, hover, texture_scale)
         }
-        // The configuration panel is self-contained (its state holds everything
-        // it renders), so it needs no per-frame view-data snapshot.
+        // The console and configuration panels are self-contained (their
+        // state holds everything they render), so they need no per-frame
+        // view-data snapshot.
+        (Panel::Console(panel_state), _) => draw_console(frame, rect, panel_state, texture_scale),
         (Panel::Launcher(state), _) => draw_launcher(frame, rect, state, hover, texture_scale),
         _ => {}
     }
@@ -4194,7 +4330,7 @@ mod tests {
             ui.control_at(pos),
             Some(UiControl::MenuItem(MenuItem::MachineConfig))
         );
-        let joystick = menu_item_rect(4);
+        let joystick = menu_item_rect(5);
         let pos = (joystick.x as i32 + 4, joystick.y as i32 + 4);
         assert_eq!(
             ui.control_at(pos),
@@ -5196,6 +5332,43 @@ mod tests {
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "frame-analyzer");
+
+        // Console: a session transcript over the prompt line.
+        let mut frame = vec![0u8; w * h * 4];
+        let mut console = ConsolePanel::default();
+        console.push_output("Copperline debugger console. Type HELP for commands.");
+        console.push_output("> B C033C2");
+        console.push_output("breakpoint $C033C2 set");
+        console.push_output("> RUN");
+        console.push_output("running (PAUSE stops; breakpoints report here or on stop)");
+        console.push_output("> PAUSE");
+        console.push_output("!Breakpoint at $C033C2");
+        console.push_output(
+            "pc $C033C2  MOVE.W #$4000,$00DFF09A   sr 2300  beam v44 h101  frame 1234",
+        );
+        console.push_output("> D");
+        console.push_output("C033C2  MOVE.W #$4000,$00DFF09A");
+        console.push_output("C033C8  RTS");
+        console.input = "MEM C00000 40".to_string();
+        let ui = UiState {
+            menu_open: false,
+            panel: Some(Panel::Console(console)),
+        };
+        draw(
+            &mut frame,
+            scale,
+            &ui,
+            None,
+            None,
+            false,
+            WarpSpeed::Max,
+            false,
+            false,
+            JoystickInputMode::Gamepad,
+            PixelAspect::Tv,
+        );
+        assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
+        save(&frame, "console");
 
         // Configuration screen: an A1200 on the Memory tab.
         let mut frame = vec![0u8; w * h * 4];

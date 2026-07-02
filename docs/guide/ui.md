@@ -19,6 +19,7 @@ The app shortcut modifier is `Cmd` on macOS and `Alt` on Linux/Windows.
 | `Cmd+D` | `Alt+D` | Swap to the next disk in a drive's configured playlist |
 | `Cmd+G` | `Alt+G` | Capture / release the host mouse (clicking the display also captures) |
 | `Cmd+B` | `Alt+B` | Open the [debugger window](../debugger/window) |
+| `Cmd+K` | `Alt+K` | Open the [debugger console](../debugger/console) |
 | `Cmd+J` | `Alt+J` | Toggle joystick input mode: gamepad / keyboard (also the status-bar icon) |
 | `Cmd+W` | `Alt+W` | Toggle Warp Speed (turbo) on / off |
 | `Cmd+Shift+W` | `Alt+Shift+W` | Cycle the Warp Speed limit: 2x, 4x, 8x, 16x, Max |
@@ -93,8 +94,10 @@ tool window or overlay.
   the captured frame, including overscan and blanking; see
   [](../debugger/window.md#frame-analyzer-pane).
 - **Debugger** (also `Cmd+B` on macOS or `Alt+B` on Linux/Windows):
-  pauses the machine and opens the five-tab debugger in a tool window; see
+  pauses the machine and opens the tabbed debugger in a tool window; see
   [](../debugger/window).
+- **Console...** (also `Cmd+K` / `Alt+K`): a GDB-flavoured debugger
+  command line in its own tool window; see [](../debugger/console).
 - **Calibrate Gamepad...**: the guided calibration flow, described below.
 - **Joystick Input** (also `Cmd+J` / `Alt+J`, or the status-bar icon):
   toggles between gamepad-only and keyboard joystick emulation.

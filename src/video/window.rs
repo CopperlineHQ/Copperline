@@ -488,11 +488,15 @@ pub struct App {
     render: Option<Render>,
     debugger_tool_window: Option<ToolWindow>,
     frame_analyzer_tool_window: Option<ToolWindow>,
+    console_tool_window: Option<ToolWindow>,
     /// When the frame loop last requested a paced tool window repaint
     /// (see TOOL_REDRAW_INTERVAL).
     last_tool_redraw: Instant,
     debugger_panel: Option<ui::DebuggerPanel>,
     frame_analyzer_panel: Option<ui::FrameAnalyzerPanel>,
+    /// The debugger console: a GDB-flavoured command line in its own tool
+    /// window, so it can sit beside the debugger and Frame Analyzer.
+    console_panel: Option<ui::ConsolePanel>,
     /// Beam-space render of the analyzer trace's frame for the picture
     /// underlay: unlike `fb`, no presentation recentring or TV masking is
     /// applied, so its pixels line up with the DMA trace's beam grid.
@@ -623,6 +627,9 @@ pub struct App {
     /// Host pause state before the frame analyzer forced a pause, restored
     /// when the analyzer pane closes unless Run was used inside it.
     paused_before_analyzer: bool,
+    /// Host pause state before the console forced a pause, restored when
+    /// the console closes unless run/pause was used inside it.
+    paused_before_console: bool,
     /// The reason for the last interactive breakpoint/watchpoint stop,
     /// shown on the debugger's Break tab until execution resumes.
     last_debug_stop: Option<String>,
@@ -712,6 +719,7 @@ const TOOL_REDRAW_INTERVAL: std::time::Duration = std::time::Duration::from_mill
 enum ToolPanelKind {
     Debugger,
     FrameAnalyzer,
+    Console,
 }
 
 struct RenderJob {
@@ -838,9 +846,11 @@ impl App {
             render: None,
             debugger_tool_window: None,
             frame_analyzer_tool_window: None,
+            console_tool_window: None,
             last_tool_redraw: Instant::now(),
             debugger_panel: None,
             frame_analyzer_panel: None,
+            console_panel: None,
             analyzer_underlay_fb: std::rc::Rc::new(Vec::new()),
             analyzer_underlay_rows: 0,
             analyzer_underlay_frame: None,
@@ -903,6 +913,7 @@ impl App {
             machine_config,
             paused_before_debugger: false,
             paused_before_analyzer: false,
+            paused_before_console: false,
             last_debug_stop: None,
             recorder: None,
             record_fb: Vec::new(),
@@ -1325,6 +1336,12 @@ impl ApplicationHandler for App {
                         if host_shortcut_modifier_pressed(self.modifiers) =>
                     {
                         self.toggle_debugger();
+                        self.ensure_tool_windows_for_open_panels(event_loop);
+                    }
+                    (KeyCode::KeyK, ElementState::Pressed)
+                        if host_shortcut_modifier_pressed(self.modifiers) =>
+                    {
+                        self.toggle_console();
                         self.ensure_tool_windows_for_open_panels(event_loop);
                     }
                     (KeyCode::KeyJ, ElementState::Pressed)
@@ -2235,6 +2252,7 @@ impl App {
         match kind {
             ToolPanelKind::Debugger => self.debugger_tool_window.as_ref(),
             ToolPanelKind::FrameAnalyzer => self.frame_analyzer_tool_window.as_ref(),
+            ToolPanelKind::Console => self.console_tool_window.as_ref(),
         }
     }
 
@@ -2242,6 +2260,7 @@ impl App {
         match kind {
             ToolPanelKind::Debugger => self.debugger_tool_window.as_mut(),
             ToolPanelKind::FrameAnalyzer => self.frame_analyzer_tool_window.as_mut(),
+            ToolPanelKind::Console => self.console_tool_window.as_mut(),
         }
     }
 
@@ -2249,6 +2268,7 @@ impl App {
         match kind {
             ToolPanelKind::Debugger => &mut self.debugger_tool_window,
             ToolPanelKind::FrameAnalyzer => &mut self.frame_analyzer_tool_window,
+            ToolPanelKind::Console => &mut self.console_tool_window,
         }
     }
 
@@ -2262,6 +2282,10 @@ impl App {
                 .frame_analyzer_panel
                 .as_ref()
                 .map(|panel| Panel::FrameAnalyzer(panel.clone())),
+            ToolPanelKind::Console => self
+                .console_panel
+                .as_ref()
+                .map(|panel| Panel::Console(panel.clone())),
         }
     }
 
@@ -2288,6 +2312,7 @@ impl App {
                 ToolPanelKind::FrameAnalyzer,
                 self.frame_analyzer_tool_window.as_ref(),
             ),
+            (ToolPanelKind::Console, self.console_tool_window.as_ref()),
         ]
         .into_iter()
         .find_map(|(kind, tool)| {
@@ -2297,11 +2322,15 @@ impl App {
     }
 
     fn ui_key_accepts_repeat(&self, kind: Option<ToolPanelKind>, code: KeyCode) -> bool {
-        kind == Some(ToolPanelKind::FrameAnalyzer)
-            && matches!(
+        match kind {
+            Some(ToolPanelKind::FrameAnalyzer) => matches!(
                 code,
                 KeyCode::ArrowLeft | KeyCode::ArrowRight | KeyCode::ArrowUp | KeyCode::ArrowDown
-            )
+            ),
+            // A command line wants held-key repeat for typing and editing.
+            Some(ToolPanelKind::Console) => true,
+            _ => false,
+        }
     }
 
     fn should_drop_repeated_main_key(
@@ -2460,14 +2489,23 @@ impl App {
                 self.request_redraw();
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                // Scroll the Memory tab's hex/bitmap view: one display row
-                // per wheel notch, a chunk for pixel-precise trackpads.
+                let rows = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => -y as i32,
+                    MouseScrollDelta::PixelDelta(pos) => -(pos.y / 12.0) as i32,
+                };
+                // Scroll the Memory tab's hex/bitmap view or the console's
+                // scrollback: one display row per wheel notch, a chunk for
+                // pixel-precise trackpads.
                 if kind == ToolPanelKind::Debugger {
-                    let rows = match delta {
-                        MouseScrollDelta::LineDelta(_, y) => -y as i32,
-                        MouseScrollDelta::PixelDelta(pos) => -(pos.y / 12.0) as i32,
-                    };
                     self.debugger_mem_scroll(rows);
+                } else if kind == ToolPanelKind::Console {
+                    if let Some(panel) = self.console_panel.as_mut() {
+                        panel.scroll = panel
+                            .scroll
+                            .saturating_add_signed(-(rows as isize))
+                            .min(ui::CONSOLE_SCROLLBACK_LINES);
+                        self.request_redraw();
+                    }
                 }
             }
             WindowEvent::RedrawRequested => self.draw_tool_window(kind),
@@ -2549,6 +2587,7 @@ impl App {
                             Some(Panel::Calibration(crate::gamepad::CalibrationSession::new()));
                     }
                     ui::MenuItem::Debugger => self.open_debugger(),
+                    ui::MenuItem::Console => self.open_console(),
                     ui::MenuItem::JoystickInput => self.cycle_joystick_input_mode(),
                     ui::MenuItem::PixelAspect => self.toggle_pixel_aspect(),
                     ui::MenuItem::Warp => self.toggle_warp(),
@@ -2752,7 +2791,9 @@ impl App {
     fn activate_tool_control(&mut self, kind: ToolPanelKind, control: UiControl) {
         match (kind, control) {
             (ToolPanelKind::Debugger, UiControl::PanelClose) => self.close_tool_panel(kind),
-            (ToolPanelKind::FrameAnalyzer, UiControl::PanelClose) => self.close_tool_panel(kind),
+            (ToolPanelKind::FrameAnalyzer, UiControl::PanelClose)
+            | (ToolPanelKind::Console, UiControl::PanelClose) => self.close_tool_panel(kind),
+            (ToolPanelKind::Console, UiControl::PanelBody) => {}
             (ToolPanelKind::Debugger, UiControl::PanelBody)
             | (ToolPanelKind::FrameAnalyzer, UiControl::PanelBody) => {}
             (ToolPanelKind::Debugger, UiControl::DebugTab(tab)) => {
@@ -2940,6 +2981,7 @@ impl App {
         match kind {
             ToolPanelKind::Debugger => self.ui_handle_debugger_key(code),
             ToolPanelKind::FrameAnalyzer => self.ui_handle_frame_analyzer_key(code),
+            ToolPanelKind::Console => self.ui_handle_console_key(code),
         }
     }
 
@@ -3046,6 +3088,42 @@ impl App {
         false
     }
 
+    /// Console keyboard input: printable characters append to the command
+    /// line; editing, history, and scrollback keys do the rest.
+    fn ui_handle_console_key(&mut self, code: KeyCode) -> bool {
+        if self.console_panel.is_none() {
+            return false;
+        }
+        if matches!(code, KeyCode::Enter | KeyCode::NumpadEnter) {
+            self.console_submit();
+            self.request_redraw();
+            return true;
+        }
+        let Some(panel) = self.console_panel.as_mut() else {
+            return false;
+        };
+        if let Some(ch) = entry_char_for_key(code) {
+            panel.push_input_char(ch);
+            self.request_redraw();
+            return true;
+        }
+        match code {
+            KeyCode::Backspace => {
+                panel.input.pop();
+                panel.history_pos = None;
+            }
+            KeyCode::ArrowUp => panel.history_step(-1),
+            KeyCode::ArrowDown => panel.history_step(1),
+            KeyCode::PageUp => {
+                panel.scroll = (panel.scroll + 10).min(ui::CONSOLE_SCROLLBACK_LINES);
+            }
+            KeyCode::PageDown => panel.scroll = panel.scroll.saturating_sub(10),
+            _ => return false,
+        }
+        self.request_redraw();
+        true
+    }
+
     /// Open the debugger window (pausing the machine), or close it again
     /// if it is already open (the host shortcut toggle).
     fn toggle_debugger(&mut self) {
@@ -3085,10 +3163,44 @@ impl App {
         }
     }
 
+    /// Open the console window (pausing the machine), or close it again
+    /// if it is already open (the host shortcut toggle).
+    fn toggle_console(&mut self) {
+        if self.console_panel.is_some() {
+            self.close_tool_panel(ToolPanelKind::Console);
+        } else {
+            self.ui.menu_open = false;
+            self.open_console();
+            self.request_redraw();
+        }
+    }
+
+    fn open_console(&mut self) {
+        if self.console_panel.is_none() {
+            self.set_mouse_captured(false);
+            self.ui.panel = None;
+            self.paused_before_console = self.paused;
+            self.paused = true;
+            self.sync_live_audio_suspension();
+            let mut panel = ui::ConsolePanel::default();
+            panel.push_output("Copperline debugger console. Type HELP for commands.");
+            self.console_panel = Some(panel);
+            // Arm reverse debugging so the reverse commands work, exactly
+            // like opening the debugger window does.
+            if !self.emu.time_travel_enabled() {
+                self.emu.enable_time_travel(
+                    crate::debugger::RR_DEFAULT_BUDGET_MB,
+                    DEBUGGER_REVERSE_INTERVAL_FRAMES,
+                );
+            }
+        }
+    }
+
     fn tool_window_title(kind: ToolPanelKind) -> &'static str {
         match kind {
             ToolPanelKind::Debugger => "Copperline Debugger",
             ToolPanelKind::FrameAnalyzer => "Copperline Frame Analyzer",
+            ToolPanelKind::Console => "Copperline Console",
         }
     }
 
@@ -3096,12 +3208,14 @@ impl App {
         match kind {
             ToolPanelKind::Debugger => self.debugger_panel.is_some(),
             ToolPanelKind::FrameAnalyzer => self.frame_analyzer_panel.is_some(),
+            ToolPanelKind::Console => self.console_panel.is_some(),
         }
     }
 
     fn ensure_tool_windows_for_open_panels(&mut self, event_loop: &ActiveEventLoop) {
         self.ensure_tool_window_for_kind(event_loop, ToolPanelKind::Debugger, true);
         self.ensure_tool_window_for_kind(event_loop, ToolPanelKind::FrameAnalyzer, true);
+        self.ensure_tool_window_for_kind(event_loop, ToolPanelKind::Console, true);
     }
 
     /// Frame-loop variant of ensure_tool_windows_for_open_panels: still
@@ -3114,6 +3228,7 @@ impl App {
         }
         self.ensure_tool_window_for_kind(event_loop, ToolPanelKind::Debugger, due);
         self.ensure_tool_window_for_kind(event_loop, ToolPanelKind::FrameAnalyzer, due);
+        self.ensure_tool_window_for_kind(event_loop, ToolPanelKind::Console, due);
     }
 
     fn ensure_tool_window_for_kind(
@@ -3577,6 +3692,14 @@ impl App {
                 }
                 self.debugger_panel = None;
                 self.debugger_tool_window = None;
+            }
+            ToolPanelKind::Console => {
+                if self.console_panel.is_some() {
+                    self.paused = self.paused_before_console;
+                    self.sync_live_audio_suspension();
+                }
+                self.console_panel = None;
+                self.console_tool_window = None;
             }
             ToolPanelKind::FrameAnalyzer => {
                 if self.frame_analyzer_panel.is_some() {
@@ -4593,7 +4716,8 @@ impl App {
             Panel::FrameAnalyzer(panel) => Some(ui::PanelViewData::FrameAnalyzer(Box::new(
                 self.build_frame_analyzer_view(panel),
             ))),
-            // The configuration panel renders straight from its own state.
+            // The console and configuration panels render from their own state.
+            Panel::Console(_) => None,
             Panel::Launcher(_) => None,
         }
     }
@@ -4606,6 +4730,8 @@ impl App {
             ToolPanelKind::FrameAnalyzer => self.frame_analyzer_panel.as_ref().map(|panel| {
                 ui::PanelViewData::FrameAnalyzer(Box::new(self.build_frame_analyzer_view(panel)))
             }),
+            // The console panel carries everything it renders.
+            ToolPanelKind::Console => None,
         }
     }
 
@@ -6026,6 +6152,7 @@ impl App {
     }
 }
 
+mod console;
 mod host_input;
 mod present;
 mod statusbar;

@@ -2458,6 +2458,144 @@ fn frame_analyzer_underlay_toggles_and_renders() {
     assert!(app.analyzer_underlay_input.is_none());
 }
 
+/// Type a command into the open console and return the lines it printed.
+fn console_run(app: &mut super::App, cmd: &str) -> Vec<String> {
+    if let Some(panel) = app.console_panel.as_mut() {
+        panel.input = cmd.to_string();
+    }
+    let before = app
+        .console_panel
+        .as_ref()
+        .map(|panel| panel.output.len() + 1) // +1 skips the echoed command
+        .unwrap_or(0);
+    app.console_submit();
+    app.console_panel
+        .as_ref()
+        .map(|panel| panel.output.iter().skip(before).cloned().collect())
+        .unwrap_or_default()
+}
+
+#[test]
+fn console_keyboard_path_types_and_executes() {
+    let mut app = test_app();
+    app.open_console();
+    // Type "HELP" through the tool-window key handler and execute it.
+    for code in [KeyCode::KeyH, KeyCode::KeyE, KeyCode::KeyL, KeyCode::KeyP] {
+        assert!(app.ui_handle_tool_key(ToolPanelKind::Console, code));
+    }
+    assert_eq!(app.console_panel.as_ref().unwrap().input, "HELP");
+    // Backspace edits; retype the P.
+    assert!(app.ui_handle_tool_key(ToolPanelKind::Console, KeyCode::Backspace));
+    assert_eq!(app.console_panel.as_ref().unwrap().input, "HEL");
+    assert!(app.ui_handle_tool_key(ToolPanelKind::Console, KeyCode::KeyP));
+    assert!(app.ui_handle_tool_key(ToolPanelKind::Console, KeyCode::Enter));
+    let panel = app.console_panel.as_ref().unwrap();
+    assert!(panel.input.is_empty());
+    assert!(panel.output.iter().any(|l| l.contains("execution:")));
+    // Up recalls the command into the prompt.
+    assert!(app.ui_handle_tool_key(ToolPanelKind::Console, KeyCode::ArrowUp));
+    assert_eq!(app.console_panel.as_ref().unwrap().input, "HELP");
+    // Escape (handled a level up) closes the window.
+    assert!(app.ui_handle_tool_key(ToolPanelKind::Console, KeyCode::Escape));
+    assert!(app.console_panel.is_none());
+}
+
+#[test]
+fn console_inspection_and_stop_commands() {
+    let mut app = test_app();
+    app.open_console();
+    assert!(app.paused, "opening the console pauses the machine");
+
+    let out = console_run(&mut app, "HELP");
+    assert!(out.iter().any(|l| l.contains("execution:")));
+
+    // Stepping advances the PC through the ROM NOP sled.
+    let pc0 = app.emu.machine.pc();
+    let out = console_run(&mut app, "S 2");
+    assert_eq!(app.emu.machine.pc(), pc0 + 4);
+    assert!(out.last().unwrap().contains("pc $"), "{out:?}");
+
+    let out = console_run(&mut app, "R");
+    assert!(out.iter().any(|l| l.starts_with("D0-D7")));
+    let out = console_run(&mut app, "D");
+    assert!(out.iter().any(|l| l.contains("NOP")), "{out:?}");
+    let out = console_run(&mut app, "M 0 20");
+    assert_eq!(out.len(), 2, "{out:?}");
+    let out = console_run(&mut app, "COPPER");
+    assert!(out[0].contains("COP1LC"), "{out:?}");
+
+    // Every stop kind toggles on, lists, and clears.
+    console_run(&mut app, "B C01000");
+    console_run(&mut app, "W C09580");
+    console_run(&mut app, "RWATCH DMACON");
+    console_run(&mut app, "BTRAP 100 40");
+    console_run(&mut app, "CATCH TRAP 0");
+    console_run(&mut app, "CBREAK C02000");
+    let out = console_run(&mut app, "BREAKS");
+    assert!(out.iter().any(|l| l.contains("break  $C01000")), "{out:?}");
+    assert!(out.iter().any(|l| l.contains("watch  $C09580")), "{out:?}");
+    assert!(out.iter().any(|l| l.contains("DMACON")), "{out:?}");
+    assert!(out.iter().any(|l| l.contains("btrap  v100 h40")), "{out:?}");
+    assert!(out.iter().any(|l| l.contains("TRAP #0")), "{out:?}");
+    assert!(out.iter().any(|l| l.contains("cbreak $C02000")), "{out:?}");
+    console_run(&mut app, "CLEARBREAKS");
+    let out = console_run(&mut app, "BREAKS");
+    assert!(out.iter().any(|l| l.contains("no breakpoints")), "{out:?}");
+
+    // Errors come back prefixed for the accent colour.
+    let out = console_run(&mut app, "BOGUS");
+    assert!(out[0].starts_with('!'), "{out:?}");
+}
+
+#[test]
+fn console_modify_search_and_transport_commands() {
+    let mut app = test_app();
+    app.open_console();
+
+    console_run(&mut app, "SETREG D3 CAFE");
+    assert_eq!(app.emu.machine.d(3), 0xCAFE);
+
+    // Drop the boot overlay so chip RAM is CPU-visible, then poke and
+    // find the word back.
+    app.emu.bus_mut().mem.overlay = false;
+    console_run(&mut app, "POKE 60000 BEEF");
+    assert_eq!(app.emu.bus().peek_word_any(0x60000), 0xBEEF);
+    let out = console_run(&mut app, "FIND BEEF 50000");
+    assert!(out[0].contains("found at $060000"), "{out:?}");
+
+    // Run to an exact beam slot; the one-shot trap reports its position.
+    let out = console_run(&mut app, "TOSLOT 50 30");
+    assert!(
+        out.iter().any(|l| l.contains("Beam trap at v50 h30")),
+        "{out:?}"
+    );
+
+    // run/pause flip the host pause state.
+    console_run(&mut app, "RUN");
+    assert!(!app.paused);
+    console_run(&mut app, "PAUSE");
+    assert!(app.paused);
+
+    // History recall, clear, and close.
+    if let Some(panel) = app.console_panel.as_mut() {
+        panel.history_step(-1);
+        assert_eq!(panel.input, "PAUSE");
+        panel.history_step(-1);
+        assert_eq!(panel.input, "RUN");
+        panel.history_step(1);
+        assert_eq!(panel.input, "PAUSE");
+        panel.history_step(1);
+        assert_eq!(panel.input, "");
+    }
+    console_run(&mut app, "CLEAR");
+    assert!(app
+        .console_panel
+        .as_ref()
+        .is_some_and(|panel| panel.output.is_empty()));
+    console_run(&mut app, "CLOSE");
+    assert!(app.console_panel.is_none());
+}
+
 #[test]
 fn beam_scrub_rides_the_underlay() {
     let mut app = test_app();
