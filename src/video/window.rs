@@ -4372,10 +4372,16 @@ impl App {
         self.sync_live_audio_suspension();
         self.last_debug_stop = None;
         match self.emu.tt_reverse_continue() {
-            Ok(ReverseOutcome::Found(_)) => {
-                self.surface_debug_stop();
+            Ok(ReverseOutcome::Found((_, reason))) => {
+                let message = format!("Reverse: {reason}");
+                info!("debugger stop: {message}");
+                self.last_debug_stop = Some(message.clone());
+                self.show_osd(message);
+                if let Some(panel) = self.debugger_panel.as_mut() {
+                    panel.tab = ui::DebugTab::Break;
+                }
             }
-            Ok(ReverseOutcome::NotFound) => self.show_osd("Reverse run: no earlier breakpoint hit"),
+            Ok(ReverseOutcome::NotFound) => self.show_osd("Reverse run: no earlier stop hit"),
             Ok(ReverseOutcome::BeyondHistory) => {
                 self.show_osd("Reverse run: beyond recorded history")
             }

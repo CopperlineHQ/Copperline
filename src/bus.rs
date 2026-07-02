@@ -2029,6 +2029,19 @@ impl Bus {
         self.ui_beam_hit.take()
     }
 
+    /// Carry the interactive debug state (beam traps, Copper
+    /// breakpoints, layer-isolation masks) from the pre-restore bus into
+    /// this freshly deserialized one. These fields are transient
+    /// (serde-skipped), so without this a reverse step or state load
+    /// would silently disarm the debugger. Pending unpolled hits stay
+    /// dropped: they describe the abandoned timeline.
+    pub(crate) fn adopt_ui_debug_state(&mut self, previous: &Bus) {
+        self.ui_beam_traps = previous.ui_beam_traps.clone();
+        self.ui_copper_breaks = previous.ui_copper_breaks.clone();
+        self.ui_copper_last_pc = previous.ui_copper_last_pc;
+        self.ui_layer_masks = previous.ui_layer_masks;
+    }
+
     /// The debugger's armed Copper breakpoint addresses.
     pub fn ui_copper_breaks(&self) -> &[u32] {
         &self.ui_copper_breaks

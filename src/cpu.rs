@@ -971,6 +971,7 @@ impl M68kMachine {
         let mut bus: Bus = deserialize_component(r, "bus")?;
 
         bus.adopt_host_resources(&mut self.bus.bus);
+        bus.adopt_ui_debug_state(&self.bus.bus);
         bus.reset_transient_video_after_state_load();
         // The CPU model travels with the state (cpu_type, timing tables, and
         // address_mask all live in CpuCore); keep the bus adapter's mask copy
@@ -1001,6 +1002,12 @@ impl M68kMachine {
             self.last_cacr = !self.cpu.cacr;
             self.apply_cacr_updates();
         }
+        // Re-baseline the interactive stop conditions on the restored
+        // timeline: watch compare values and the scheduled-task pointer
+        // describe state, so carrying pre-restore baselines over would
+        // fire phantom hits on the first step after a restore.
+        self.ui_rebaseline_watches();
+        self.ui_last_this_task = self.ui_peek_this_task();
         Ok(())
     }
 
@@ -1112,6 +1119,15 @@ impl M68kMachine {
             out.push(self.ui_pc_history[(start + i) % UI_PC_HISTORY_CAP]);
         }
         out
+    }
+
+    /// Reset every word watchpoint's compare value to the live memory
+    /// contents (used after timeline jumps).
+    pub fn ui_rebaseline_watches(&mut self) {
+        for i in 0..self.ui_breaks.watches.len() {
+            let addr = self.ui_breaks.watches[i].addr;
+            self.ui_breaks.watches[i].last = self.bus.bus.peek_word_any(addr);
+        }
     }
 
     pub fn ui_breaks(&self) -> &crate::debugger::InteractiveBreaks {

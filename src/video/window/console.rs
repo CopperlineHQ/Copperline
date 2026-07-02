@@ -308,7 +308,33 @@ impl App {
                 self.console_reverse_op(|app| app.emu.tt_reverse_step(count))
             }
             "RFRAME" => self.console_reverse_op(|app| app.emu.tt_reverse_frame()),
-            "RRUN" | "RC" => self.console_reverse_op(|app| app.emu.tt_reverse_continue()),
+            "RRUN" | "RC" => {
+                use crate::timetravel::ReverseOutcome;
+                self.paused = true;
+                self.paused_before_console = true;
+                self.sync_live_audio_suspension();
+                self.last_debug_stop = None;
+                let mut lines = Vec::new();
+                match self.emu.tt_reverse_continue() {
+                    Ok(ReverseOutcome::Found((_, reason))) => {
+                        self.last_debug_stop = Some(reason.clone());
+                        lines.push(format!("!{reason}"));
+                    }
+                    Ok(ReverseOutcome::NotFound) => {
+                        lines.push("reverse: no earlier stop hit".to_string())
+                    }
+                    Ok(ReverseOutcome::BeyondHistory) => {
+                        lines.push("reverse: beyond recorded history".to_string())
+                    }
+                    Err(e) => {
+                        error!("console reverse run halted: {e:?}");
+                        return ConsoleOutcome::error(format!("reverse failed: {e}"));
+                    }
+                }
+                lines.extend(self.console_status_lines());
+                self.finish_render_for_current_frame();
+                ConsoleOutcome::lines(lines)
+            }
             "BREAK" | "B" => {
                 let spec = args.join(" ");
                 let Some((addr, cond, ignore)) = ui::parse_break_spec(&spec) else {

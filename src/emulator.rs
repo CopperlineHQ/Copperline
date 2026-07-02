@@ -811,9 +811,13 @@ impl Emulator {
     /// history that starts at power-on; `BeyondHistory` means an earlier hit
     /// may exist before the oldest snapshot. (Watch-based reverse-continue is
     /// not yet modelled; breakpoints only.)
-    pub fn tt_reverse_continue(&mut self) -> Result<crate::timetravel::ReverseOutcome<u64>> {
-        // Reverse-continue honours breakpoint addresses only (conditions are
-        // not replayed), so collect the bare addresses.
+    pub fn tt_reverse_continue(
+        &mut self,
+    ) -> Result<crate::timetravel::ReverseOutcome<(u64, String)>> {
+        // The full scan honours every armed stop kind: PC breakpoints
+        // (addresses; conditions are not replayed), watchpoints, register
+        // watches, beam traps, Copper breakpoints, exception catches, and
+        // the task catch.
         let breakpoints: Vec<u32> = self
             .machine
             .ui_breaks()
@@ -821,13 +825,20 @@ impl Emulator {
             .iter()
             .map(|bp| bp.addr)
             .collect();
-        self.tt_reverse_continue_to(&breakpoints)
+        let anything_armed = self.machine.ui_breaks().armed()
+            || !self.bus().ui_beam_traps().is_empty()
+            || !self.bus().ui_copper_breaks().is_empty();
+        if !anything_armed && breakpoints.is_empty() {
+            return Ok(crate::timetravel::ReverseOutcome::NotFound);
+        }
+        self.tt_reverse_continue_impl(&breakpoints, true)
     }
 
     /// Run backward to the previous PC breakpoint in `breakpoints`. This is
     /// the same operation as `tt_reverse_continue`, but takes an explicit
-    /// breakpoint list so remote debugger frontends can keep their protocol
-    /// breakpoints independent from the in-window debugger state.
+    /// breakpoint list (and scans nothing else) so remote debugger frontends
+    /// can keep their protocol breakpoints independent from the in-window
+    /// debugger state.
     pub fn tt_reverse_continue_to(
         &mut self,
         breakpoints: &[u32],
@@ -836,6 +847,19 @@ impl Emulator {
         if breakpoints.is_empty() {
             return Ok(ReverseOutcome::NotFound);
         }
+        Ok(match self.tt_reverse_continue_impl(breakpoints, false)? {
+            ReverseOutcome::Found((pos, _)) => ReverseOutcome::Found(pos),
+            ReverseOutcome::NotFound => ReverseOutcome::NotFound,
+            ReverseOutcome::BeyondHistory => ReverseOutcome::BeyondHistory,
+        })
+    }
+
+    fn tt_reverse_continue_impl(
+        &mut self,
+        breakpoints: &[u32],
+        full: bool,
+    ) -> Result<crate::timetravel::ReverseOutcome<(u64, String)>> {
+        use crate::timetravel::ReverseOutcome;
         let mut interval_end = self.retired_instructions;
         loop {
             let anchor = match self
@@ -850,9 +874,14 @@ impl Emulator {
                 self.tt_ring.as_ref().and_then(|r| r.oldest_pos()) == Some(anchor.0);
             self.restore_blob(&anchor.1, anchor.0)?;
             self.tt_begin_replay_input(anchor.0);
-            if let Some(pos) = self.tt_scan_breakpoint(breakpoints, interval_end)? {
+            if let Some(found) = self.tt_scan_stop(breakpoints, interval_end, full)? {
+                let (pos, reason) = found;
                 self.tt_restore_to(pos)?;
-                return Ok(ReverseOutcome::Found(pos));
+                // The final forward replay to `pos` re-fires checks along
+                // the way; the landing position's story is `reason`, so
+                // drop the stray pending stop.
+                let _ = self.machine.take_ui_debug_stop();
+                return Ok(ReverseOutcome::Found((pos, reason)));
             }
             if anchor_is_oldest {
                 return Ok(if anchor.0 == 0 {
@@ -866,15 +895,29 @@ impl Emulator {
     }
 
     /// Replay the just-restored interval up to `end_pos`, returning the latest
-    /// boundary (strictly before `end_pos`) whose PC is an armed breakpoint --
-    /// the "about to execute a breakpoint" stop the forward run uses.
-    fn tt_scan_breakpoint(&mut self, breakpoints: &[u32], end_pos: u64) -> Result<Option<u64>> {
+    /// boundary (strictly before `end_pos`) where a stop condition held: a PC
+    /// breakpoint ("about to execute", like the forward run), or -- when
+    /// `full` -- any interactive stop the forward machinery reports
+    /// (watchpoints, register watches, beam traps, Copper breakpoints,
+    /// catches). The restore that began this interval re-baselined the
+    /// watch compare values, so hits mean "changed during replay".
+    fn tt_scan_stop(
+        &mut self,
+        breakpoints: &[u32],
+        end_pos: u64,
+        full: bool,
+    ) -> Result<Option<(u64, String)>> {
         const PC_MASK: u32 = 0x00FF_FFFF;
         let is_bp = |pc: u32| breakpoints.contains(&(pc & PC_MASK));
+        // Drain any stop left over from an earlier replay segment.
+        let _ = self.machine.take_ui_debug_stop();
         self.tt_apply_due_input(self.retired_instructions);
-        let mut best = None;
+        let mut best: Option<(u64, String)> = None;
         if self.retired_instructions < end_pos && is_bp(self.machine.pc()) {
-            best = Some(self.retired_instructions);
+            best = Some((
+                self.retired_instructions,
+                format!("Breakpoint at ${:06X}", self.machine.pc() & PC_MASK),
+            ));
         }
         let mut cpu_idle = false;
         let mut guard: u64 = 0;
@@ -882,8 +925,18 @@ impl Emulator {
             let before = self.retired_instructions;
             self.run_one_step(&mut cpu_idle, INSTRUCTIONS_PER_SLICE)?;
             self.tt_apply_due_input(self.retired_instructions);
+            if full {
+                if let Some(stop) = self.machine.take_ui_debug_stop() {
+                    if self.retired_instructions < end_pos {
+                        best = Some((self.retired_instructions, stop.describe()));
+                    }
+                }
+            }
             if self.retired_instructions < end_pos && is_bp(self.machine.pc()) {
-                best = Some(self.retired_instructions);
+                best = Some((
+                    self.retired_instructions,
+                    format!("Breakpoint at ${:06X}", self.machine.pc() & PC_MASK),
+                ));
             }
             if self.retired_instructions == before && !cpu_idle {
                 break;
@@ -893,6 +946,7 @@ impl Emulator {
                 break;
             }
         }
+        let _ = self.machine.take_ui_debug_stop();
         Ok(best)
     }
 
@@ -2413,6 +2467,86 @@ mod tests {
         assert!(stopped, "conditional breakpoint did not fire");
         assert_eq!(emu.machine.pc(), 0x00F8_0020);
         assert!(emu.machine.take_ui_debug_stop().is_some());
+    }
+
+    #[test]
+    fn reverse_continue_lands_on_a_watchpoint_hit() {
+        use crate::timetravel::ReverseOutcome;
+        // NOP, NOP, MOVE.W #$1234,$60000.L, NOPs, BRA.S *.
+        let mut rom = vec![0u8; crate::memory::ROM_SIZE];
+        let put = |mem: &mut [u8], off: usize, word: u16| {
+            mem[off..off + 2].copy_from_slice(&word.to_be_bytes());
+        };
+        put(&mut rom, 0x10, 0x4E71);
+        put(&mut rom, 0x12, 0x4E71);
+        put(&mut rom, 0x14, 0x33FC);
+        put(&mut rom, 0x16, 0x1234);
+        put(&mut rom, 0x18, 0x0006);
+        put(&mut rom, 0x1A, 0x0000);
+        put(&mut rom, 0x1C, 0x4E71);
+        put(&mut rom, 0x1E, 0x4E71);
+        put(&mut rom, 0x20, 0x60FE);
+        let mut chip_ram = vec![0u8; 512 * 1024];
+        chip_ram[0..4].copy_from_slice(&0x0000_4000u32.to_be_bytes());
+        chip_ram[4..8].copy_from_slice(&0x00F8_0010u32.to_be_bytes());
+        let bus = crate::bus::Bus::new(
+            crate::memory::Memory {
+                chip_ram,
+                slow_ram: Vec::new(),
+                rom,
+                overlay: false,
+                zorro: crate::zorro::ZorroChain::default(),
+                extended_rom: Vec::new(),
+                extended_rom_base: 0,
+                wcs: Vec::new(),
+                wcs_write_protected: false,
+            },
+            crate::chipset::paula::Paula::new(
+                Box::new(crate::serial::NullSerialSink),
+                Box::new(crate::audio::NullSink),
+            ),
+            crate::floppy::FloppyController::default(),
+        );
+        let mut emu = super::Emulator::new(
+            bus,
+            crate::config::CpuModel::M68000,
+            false,
+            crate::config::PacingBudget::Cycles,
+            2,
+            false,
+        )
+        .unwrap();
+        emu.enable_time_travel(64, 1);
+        emu.debug_ensure_time_travel_anchor().unwrap();
+        assert!(emu.machine.ui_toggle_watch(0x60000));
+
+        // Run forward well past the write, draining the forward stop.
+        for _ in 0..12 {
+            emu.debug_step_instructions(1).unwrap();
+        }
+        assert_eq!(emu.bus().peek_word_any(0x60000), 0x1234);
+        let _ = emu.machine.take_ui_debug_stop();
+        let here = emu.retired_instructions();
+
+        // Reverse-continue lands just after the watched write, with the
+        // watch hit as the reason.
+        match emu.tt_reverse_continue().unwrap() {
+            ReverseOutcome::Found((pos, reason)) => {
+                assert!(pos < here, "landed at {pos}, started at {here}");
+                assert!(
+                    reason.contains("Watch $060000") && reason.contains("0000->1234"),
+                    "{reason}"
+                );
+                // At the landing boundary the write has just retired.
+                assert_eq!(emu.bus().peek_word_any(0x60000), 0x1234);
+                assert_eq!(emu.machine.pc() & 0x00FF_FFFF, 0x00F8_001C);
+            }
+            other => panic!("expected a watch landing, got {other:?}"),
+        }
+        // Beam traps survive the timeline jump (adopt_ui_debug_state).
+        emu.bus_mut().ui_arm_beam_trap_once(100, None);
+        let _ = emu.tt_reverse_step(1).unwrap();
+        assert_eq!(emu.bus().ui_beam_traps().len(), 1);
     }
 
     #[test]

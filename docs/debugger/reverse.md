@@ -78,12 +78,23 @@ the right of the transport row:
 |---|---|
 | **&lt; Frame** | Step backward to the previous emulated video frame |
 | **&lt; Step** | Step one instruction backward |
-| **&lt; Run** | Run backward to the previous PC breakpoint hit |
+| **&lt; Run** | Run backward to the previous stop of any kind |
 
 The status line shows the current instruction position and how much history
-is retained (`pos N  rev K snaps, M MB`). **&lt; Run** uses the PC
-breakpoints set on the Break tab; watch-based reverse-continue is not yet
-modelled.
+is retained (`pos N  rev K snaps, M MB`). **&lt; Run** (and the console's
+`RRUN`) scans the replay for every armed stop: PC breakpoints (addresses;
+conditions and ignore counts are not re-evaluated), memory watchpoints
+(re-baselined at each snapshot, so a hit means "changed during the
+replayed interval"), register watches, beam traps, Copper breakpoints,
+exception catches, and the task catch. It lands at the most recent hit
+and reports the same stop message the forward run would have shown --
+"run backward to when this register was last written" is `RWATCH` plus
+`RRUN`. The GDB stub's `reverse-continue` keeps its protocol semantics
+(its own breakpoints only).
+
+Interactive debug state (beam traps, Copper breakpoints, layer masks)
+survives timeline jumps: a reverse step never silently disarms the
+debugger.
 
 ## Determinism preconditions
 
