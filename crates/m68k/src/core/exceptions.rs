@@ -426,12 +426,25 @@ impl CpuCore {
                 // caller (trigger_bus_error) has already rolled the instruction
                 // back, so we stack PPC and leave the writeback/continuation
                 // fields clear: RTE then restarts the faulting instruction
-                // (demand-paging / Enforcer fix-and-retry model). The SSW
-                // reports R/W and the function code; the size field is left at
-                // its long default since the restart re-runs the real access.
+                // (demand-paging / Enforcer fix-and-retry model).
                 // Layout (Musashi m68ki_stack_frame_0111), pushed high->low.
+                //
+                // SSW: RW (bit 8), SZ (bits 6:5, 040 encoding: 00 long,
+                // 01 byte, 10 word), TM (bits 2:0) = function code, and ATC
+                // (bit 10) when the fault came out of the MMU table walk
+                // rather than the physical bus. ATC is what an OS-level
+                // page-fault handler (mmu.library, VMM, Enforcer) tests to
+                // tell a translation fault it must service from a real bus
+                // error it must pass on, so a translation fault without it
+                // gurus instead of demand-faulting.
                 let rw = if write { 0 } else { 0x0100 }; // SSW bit 8: 1 = read
-                let ssw = rw | (fc as u16 & 0x7); // TM = function code
+                let atc = if cause.is_some() { 0x0400u16 } else { 0 }; // SSW bit 10
+                let sz = match size {
+                    1 => 0x0020, // byte
+                    2 => 0x0040, // word
+                    _ => 0x0000, // long
+                };
+                let ssw = rw | atc | sz | (fc as u16 & 0x7); // TM = function code
                 let fmt_vec = 0x7000 | ((vector::BUS_ERROR as u16) << 2);
                 // PD2/PD1/PD0 and the three writeback entries are all unused.
                 for _ in 0..3 {

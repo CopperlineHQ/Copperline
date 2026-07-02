@@ -263,8 +263,14 @@ format-7 access-error stack frame at the bus-error vector. The faulting
 instruction is rolled back and its PC stacked, so after the handler fixes the
 mapping an `RTE` restarts it (the demand-paging / memory-protection model). The
 ATC carries the protection bits, so a cached translation cannot bypass the
-check. The frame's writeback/continuation fields are left clear (full-restart
-model); mid-instruction continuation is not modelled.
+check. The frame's SSW reports the read/write direction, the access size, the
+transfer modifier (function code), and -- for faults that came out of the
+table walk rather than the physical bus -- the ATC bit; that bit is how an
+OS-level page-fault handler (mmu.library, VMM, Enforcer) tells a translation
+fault it must service from a real bus error it must pass on, and mmu.library's
+lazily-materialized user tables guru without it (issue #90). The frame's
+writeback/continuation fields are left clear (full-restart model);
+mid-instruction continuation is not modelled.
 
 A *data* access through an invalid/unconfigured descriptor raises an access
 fault -- this is how Enforcer/MuForce catch low-memory and freed-memory hits. An
@@ -279,8 +285,8 @@ resident bit in MMUSR (the cache-mode/used/modified attribute bits are not yet
 filled in). The 68030 also enforces the descriptor write-protect (WP) bit, and
 its faults are routed to the bus-error vector like the 040's, though the 68030
 long bus-fault stack frame (format A/B) is still the minimal fallback rather than
-a fully resumable frame. Remaining: the 040 SSW access size, the indirect/used/
-modified MMUSR bits, and the resumable 030 frame.
+a fully resumable frame. Remaining: the indirect/used/modified MMUSR bits and
+the resumable 030 frame.
 
 ## Interrupts and STOP
 
