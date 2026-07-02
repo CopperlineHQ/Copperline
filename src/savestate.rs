@@ -63,7 +63,11 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      walker share one register set
 //  12: Paula audio channels gained deferred AUDxEN-disable state so a DMA
 //      clear is observed at the current word boundary
-pub const STATE_VERSION: u32 = 12;
+//  13: 68060 support - CpuType::M68060 appended; CpuCore gained pcr, buscr,
+//      emulate_unimplemented_060, and the Oep060Timing pairing/branch-cache
+//      state; MmuFault gained a cause (transient, but part of CpuCore's
+//      serde shape indirectly via new fields)
+pub const STATE_VERSION: u32 = 13;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {
@@ -167,7 +171,7 @@ mod tests {
             Paula::new(Box::new(NullSerialSink), Box::new(NullSink)),
             FloppyController::default(),
         );
-        crate::cpu::build(bus, CpuModel::M68000, false, 2, false).unwrap()
+        crate::cpu::build(bus, CpuModel::M68000, false, 2, Default::default(), false).unwrap()
     }
 
     fn temp_state(name: &str) -> std::path::PathBuf {

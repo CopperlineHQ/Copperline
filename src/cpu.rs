@@ -204,6 +204,11 @@ struct CpuBus {
     /// COPPERLINE_DBG_IRQ cached time window. Interrupt acknowledge can be hot
     /// during IRQ storms, so parse the environment once at construction.
     dbg_irq_window: Option<(f64, f64)>,
+    /// Whether the most recent instruction-stream read hit the icache
+    /// model. The 68060 timing model gates superscalar pairing and branch
+    /// folding on a cached fetch stream. Recomputed on every fetch, never
+    /// carried across a save state.
+    last_fetch_cache_hit: bool,
 }
 
 pub fn build(
@@ -211,9 +216,18 @@ pub fn build(
     cpu_model: CpuModel,
     fpu_enabled: bool,
     cpu_clocks_per_cck: u32,
+    unimplemented: crate::config::UnimplementedPolicy,
     _track_stopped_slice_progress: bool,
 ) -> Result<M68kMachine> {
     let mut machine = M68kMachine::new(bus, cpu_model, fpu_enabled)?;
+    machine.cpu.emulate_unimplemented_060 =
+        unimplemented == crate::config::UnimplementedPolicy::Native;
+    if cpu_model == CpuModel::M68060 && unimplemented == crate::config::UnimplementedPolicy::Trap {
+        log::info!(
+            "68060 unimplemented instructions will trap faithfully: the OS \
+             needs 68060.library (or set [cpu] unimplemented = \"native\")"
+        );
+    }
     machine.cpu_clocks_per_cck = cpu_clocks_per_cck.max(1);
     machine
         .bus
@@ -227,6 +241,12 @@ impl M68kMachine {
         let mut cpu = CpuCore::new();
         cpu.set_cpu_type(cpu_type_for_model(cpu_model));
         cpu.address_mask = address_mask_for_model(cpu_model);
+        if cpu_model == CpuModel::M68060 && !fpu_enabled {
+            // An FPU-less 060 (LC/EC060) presents as PCR.DFP: the core
+            // raises the faithful format $4 disabled frame instead of the
+            // host's generic Line-F shim for discrete 68881/68882 absence.
+            cpu.pcr |= m68k::PCR_DFP;
+        }
 
         let mut machine = Self {
             cpu,
@@ -242,6 +262,7 @@ impl M68kMachine {
                 icache: None,
                 dcache: None,
                 dbg_irq_window: debug_irq_window_setting(),
+                last_fetch_cache_hit: false,
             },
             hle: NoOpHleHandler,
             fpu_enabled,
@@ -1707,12 +1728,14 @@ impl M68kMachine {
         }
         self.last_cacr = cacr;
         let caar = self.cpu.caar;
-        // The 68040 CACR uses different enable bits (IE/DE) and has no freeze
-        // or CACR clear strobes - invalidation arrives through CINV/CPUSH,
-        // which decode.rs surfaces as the CACR_CI/CACR_CD pending ops below.
+        // The 68040/68060 CACR uses different enable bits (IE/DE - the 060's
+        // EIC/EDC sit at the same positions) and has no freeze or CACR clear
+        // strobes - invalidation arrives through CINV/CPUSH, which decode.rs
+        // surfaces as the CACR_CI/CACR_CD pending ops below. The 060's
+        // branch-cache strobes (CABC/CUBC) are consumed inside the core.
         if matches!(
             self.cpu.cpu_type,
-            CpuType::M68EC040 | CpuType::M68LC040 | CpuType::M68040
+            CpuType::M68EC040 | CpuType::M68LC040 | CpuType::M68040 | CpuType::M68060
         ) {
             if let Some(icache) = self.bus.icache.as_deref_mut() {
                 icache.enabled = cacr & CACR_040_IE != 0;
@@ -1796,6 +1819,11 @@ impl M68kMachine {
 
     fn force_fpu_line_f_if_needed(&mut self) -> bool {
         if self.fpu_enabled {
+            return false;
+        }
+        // The 060 models FPU absence in the core via PCR.DFP (set at
+        // construction), with the proper format $4 disabled frame.
+        if self.cpu.is_060() {
             return false;
         }
         let pc = self.cpu.pc;
@@ -1951,11 +1979,20 @@ impl CpuBus {
             // miss goes through the normal (billed) path and then fills
             // the line from backing memory.
             if let Some(value) = self.cache_read(addr, size, kind) {
+                if kind == CpuBusAccessKind::Fetch {
+                    self.last_fetch_cache_hit = true;
+                }
                 return value;
             }
             let value = self.read_sized_uncached(addr, size, kind);
             self.cache_fill_after_miss(addr, size, kind);
+            if kind == CpuBusAccessKind::Fetch {
+                self.last_fetch_cache_hit = false;
+            }
             return value;
+        }
+        if kind == CpuBusAccessKind::Fetch {
+            self.last_fetch_cache_hit = false;
         }
         self.read_sized_uncached(addr, size, kind)
     }
@@ -2418,6 +2455,10 @@ impl CpuBus {
 }
 
 impl AddressBus for CpuBus {
+    fn last_fetch_was_cached(&self) -> bool {
+        self.last_fetch_cache_hit
+    }
+
     fn read_byte(&mut self, address: u32) -> u8 {
         self.read_sized(address, 1, CpuBusAccessKind::Read) as u8
     }
@@ -2526,13 +2567,16 @@ fn cpu_type_for_model(model: CpuModel) -> CpuType {
         // Full 68040: FPU on-die (default_fpu) and the MMU enabled (has_pmmu).
         // The FPU-less LC/EC variants are not modelled (see CpuModel docs).
         CpuModel::M68040 => CpuType::M68040,
+        CpuModel::M68060 => CpuType::M68060,
     }
 }
 
-/// Longword entries in each on-chip cache for this CPU: the 040's caches are
-/// 4 KB (1024 longwords), the 020/030's 256 bytes (64). See `crate::cache`.
+/// Longword entries in each on-chip cache for this CPU: the 060's caches
+/// are 8 KB (2048 longwords), the 040's 4 KB, the 020/030's 256 bytes.
+/// See `crate::cache`.
 fn cache_lines_for_cpu_type(cpu_type: CpuType) -> usize {
     match cpu_type {
+        CpuType::M68060 => crate::cache::LINES_060,
         CpuType::M68EC040 | CpuType::M68LC040 | CpuType::M68040 => crate::cache::LINES_040,
         _ => crate::cache::LINES_020,
     }
@@ -2541,7 +2585,9 @@ fn cache_lines_for_cpu_type(cpu_type: CpuType) -> usize {
 fn address_mask_for_model(model: CpuModel) -> u32 {
     match model {
         CpuModel::M68000 | CpuModel::M68EC020 => ADDRESS_MASK_24BIT,
-        CpuModel::M68020 | CpuModel::M68030 | CpuModel::M68040 => ADDRESS_MASK_32BIT,
+        CpuModel::M68020 | CpuModel::M68030 | CpuModel::M68040 | CpuModel::M68060 => {
+            ADDRESS_MASK_32BIT
+        }
     }
 }
 
@@ -2611,6 +2657,7 @@ mod tests {
                 CpuModel::M68000,
                 false,
                 clocks_per_cck,
+                Default::default(),
                 false,
             )
         };
@@ -2907,6 +2954,7 @@ mod tests {
             icache: None,
             dcache: None,
             dbg_irq_window: None,
+            last_fetch_cache_hit: false,
         };
 
         assert_eq!(bus.read_long(0), 0x1111_4EF9);
@@ -2930,6 +2978,7 @@ mod tests {
             icache: None,
             dcache: None,
             dbg_irq_window: None,
+            last_fetch_cache_hit: false,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
         // Start on a refresh slot (0x003) so the fetch both waits for and then
@@ -2960,6 +3009,7 @@ mod tests {
             icache: None,
             dcache: None,
             dbg_irq_window: None,
+            last_fetch_cache_hit: false,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
 
@@ -3134,6 +3184,7 @@ mod tests {
                 CpuModel::M68EC020,
                 false,
                 4,
+                Default::default(),
                 false,
             )?;
             machine.set_cache_emulation(icache, false);
@@ -3169,6 +3220,7 @@ mod tests {
             icache: None,
             dcache: Some(Box::new(dcache)),
             dbg_irq_window: None,
+            last_fetch_cache_hit: false,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
         let fast = FAST_RAM_BASE as u32 + 0x40;
@@ -3213,6 +3265,7 @@ mod tests {
             icache: None,
             dcache: None,
             dbg_irq_window: None,
+            last_fetch_cache_hit: false,
         };
         let before = bus.read_long(ROM_BASE as u32);
         bus.write_long(ROM_BASE as u32, 0xDEAD_BEEF);
@@ -3235,6 +3288,7 @@ mod tests {
             icache: None,
             dcache: None,
             dbg_irq_window: None,
+            last_fetch_cache_hit: false,
         };
         let addr = SLOW_RAM_BASE as u32 + 64 * 1024;
         // With nothing yet driven, the bus rests at 0.
@@ -3437,7 +3491,14 @@ mod tests {
         let run = |pc: u32, clocks_per_cck: u32| -> Result<u32> {
             let mut bus = test_bus_with_pc(pc);
             write_program(&mut bus, pc, &program);
-            let mut machine = build(bus, CpuModel::M68000, false, clocks_per_cck, false)?;
+            let mut machine = build(
+                bus,
+                CpuModel::M68000,
+                false,
+                clocks_per_cck,
+                Default::default(),
+                false,
+            )?;
             machine.bus_mut().agnus.hpos = 0x21;
             let mut total = 0u32;
             for _ in 0..nops {
@@ -3913,7 +3974,7 @@ mod tests {
                 0x60EE, // bra.s back to 0x1000
             ],
         );
-        let mut machine = build(bus, CpuModel::M68000, false, 2, false)?;
+        let mut machine = build(bus, CpuModel::M68000, false, 2, Default::default(), false)?;
 
         // Get past the first frame wraps so the per-frame capture buffers
         // hold both current- and last-frame contents when the state is taken.
@@ -3998,6 +4059,7 @@ mod tests {
             bus,
             CpuModel::M68000,
             false,
+            Default::default(),
             PacingBudget::Instructions,
             2,
             false,
@@ -4079,6 +4141,7 @@ mod tests {
             bus,
             CpuModel::M68000,
             false,
+            Default::default(),
             PacingBudget::Instructions,
             2,
             false,
@@ -4146,6 +4209,7 @@ mod tests {
                 bus,
                 CpuModel::M68000,
                 false,
+                Default::default(),
                 PacingBudget::Instructions,
                 2,
                 false,

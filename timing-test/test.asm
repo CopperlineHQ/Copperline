@@ -43,6 +43,20 @@
 ;          waits for line $64 then MOVEs SET-COPER into INTREQ; CPU polls with
 ;          interrupts off). The copper-vs-CPU phase the 020 chase-the-beam
 ;          copper-chunky effects depend on. FFFFFFFF if the copper never fired.
+;   row 28 pair x8192       move.w d2,d0 + move.w d3,d1 (independent pair;
+;          on a 68060 with superscalar dispatch enabled the two issue in one
+;          clock - compare against row 4 and row 29)
+;   row 29 RAW pair x8192   move.w d2,d0 + move.w d0,d1 (the dependency
+;          blocks dual issue: row 29 - row 28 exposes the pairing gain)
+;   row 30 dbra x8192       branch-cache row: same body as row 7, but run
+;          after the 68060 enable block (ESS + caches + branch cache), so a
+;          folding branch cache collapses the loop overhead
+;
+; Before row 28 a TRAP #0 supervisor stub probes MOVEC PCR for the 68060
+; identification ($0430) and, if found, enables superscalar dispatch
+; (PCR.ESS) plus the caches and branch cache (CACR EDC|EBC|EIC). On every
+; other CPU the probe faults harmlessly and rows 28-30 run scalar, so the
+; rows stay comparable across the whole family.
 ;
 ; Rows 0/1/9/13 use slow RAM ($C00000); on a machine without it (A1200) they
 ; store a 0 sentinel. All other rows -- including 27 -- run regardless.
@@ -73,7 +87,29 @@ COPLIST equ     $50000          ; scratch copper list for the copper-phase row (
 ; addresses) so the load address does not matter.
 ;----------------------------------------------------- entry (a6=sys at load)
 boot:
-        lea     CUST,a6
+        bra     boot1
+
+; TRAP #0 stub (supervisor): probe for the 68060 and enable its superscalar
+; dispatch, caches, and branch cache. MOVEC is encoded with dc.w so the
+; binary still assembles for -m68000.
+t0sup:  move.l  $10.w,-(sp)     ; save the illegal-instruction vector
+        lea     t0skip(pc),a0
+        move.l  a0,$10.w
+        moveq   #0,d0
+        dc.w    $4e7a,$0808     ; movec pcr,d0 (illegal before the 68060)
+        swap    d0
+        cmp.w   #$0430,d0       ; 68060 identification in PCR[31:16]
+        bne     t0out
+        moveq   #1,d0           ; PCR.ESS: enable superscalar dispatch
+        dc.w    $4e7b,$0808     ; movec d0,pcr
+        move.l  #$80808000,d0   ; CACR: EDC | EBC | EIC
+        dc.w    $4e7b,$0002     ; movec d0,cacr
+t0out:  move.l  (sp)+,$10.w
+        rte
+t0skip: addq.l  #4,2(sp)        ; skip the faulting 4-byte movec, d0 stays 0
+        rte
+
+boot1:  lea     CUST,a6
         move.w  #$7fff,$9a(a6)  ; INTENA: disable all interrupts
         move.w  #$7fff,$9c(a6)  ; INTREQ: clear all pending
         move.w  #$7fff,$96(a6)  ; DMACON: disable all DMA
@@ -685,6 +721,42 @@ boot:
         move.w  #$7fff,$096(a6) ; all DMA off
         move.w  #$7fff,$09c(a6) ; clear pending
 
+        ; 68060 enable block: from user mode, TRAP #0 into a supervisor stub
+        ; that probes MOVEC PCR (illegal before the 060; the recovery handler
+        ; skips the 4-byte instruction and leaves d0 = 0) and, on a 68060,
+        ; sets PCR.ESS and CACR EDC|EBC|EIC so rows 28-30 measure the
+        ; dual-issue machine. Everything is restored afterwards.
+        move.l  $80.w,-(sp)     ; save TRAP #0 vector
+        lea     t0sup(pc),a0
+        move.l  a0,$80.w
+        trap    #0
+        move.l  (sp)+,$80.w     ; restore TRAP #0 vector
+
+        ; row 28: independent pair (move.w d2,d0 + move.w d3,d1)
+        bsr     tstart
+        move.w  #ITERS-1,d6
+.t28    move.w  d2,d0
+        move.w  d3,d1
+        dbra    d6,.t28
+        bsr     tread
+        move.l  d0,(a3)+
+
+        ; row 29: RAW-dependent pair (move.w d2,d0 + move.w d0,d1)
+        bsr     tstart
+        move.w  #ITERS-1,d6
+.t29    move.w  d2,d0
+        move.w  d0,d1
+        dbra    d6,.t29
+        bsr     tread
+        move.l  d0,(a3)+
+
+        ; row 30: dbra-only loop with the 68060 branch cache active
+        bsr     tstart
+        move.w  #ITERS-1,d6
+.t30    dbra    d6,.t30
+        bsr     tread
+        move.l  d0,(a3)+
+
         move.w  #$0ff0,$180(a6) ; phase marker: all tests done (yellow)
 
         ;------------------------------------------------ render + show
@@ -695,7 +767,7 @@ boot:
         ; the serial port to a file, giving a screenshot-free way to compare.
         move.w  #$0170,$032(a6) ; SERPER ~9600 baud
         lea     RESULTS,a2
-        moveq   #28-1,d4
+        moveq   #31-1,d4
 .sl     move.l  (a2)+,d3
         moveq   #8-1,d6
 .sh     rol.l   #4,d3
@@ -890,7 +962,7 @@ render:
 .rr:
         move.l  (a2)+,d3        ; value
         move.w  d4,d0
-        mulu    #360,d0         ; 9 scanlines * 40 bytes per row (27 rows fit)
+        mulu    #320,d0         ; 8 scanlines * 40 bytes per row (31 rows fit)
         lea     SCREEN,a5
         adda.l  d0,a5           ; row top in bitplane
         moveq   #7,d6           ; 8 hex digits
@@ -912,7 +984,7 @@ render:
         addq.w  #1,d2
         dbra    d6,.rd
         addq.w  #1,d4
-        cmp.w   #28,d4
+        cmp.w   #31,d4
         bne     .rr
         rts
 

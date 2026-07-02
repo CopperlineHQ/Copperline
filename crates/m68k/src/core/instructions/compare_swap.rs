@@ -29,7 +29,38 @@ impl CpuCore {
         }
 
         let size = decode_cas_size(opcode);
-        let addr = self.get_ea_address(bus, mode, size);
+        // Resolve the operand address with post-increment/pre-decrement
+        // commits deferred: a misaligned CAS was dropped from 68060 silicon
+        // and must trap with no architectural state changed, so the 68060SP
+        // handler can emulate the whole instruction.
+        let (addr, ea_commit) = match mode {
+            AddressingMode::PostIncrement(reg) => {
+                let addr = self.a(reg as usize);
+                let inc = if reg == 7 && size == Size::Byte {
+                    2 // A7 always stays word-aligned
+                } else {
+                    size.bytes()
+                };
+                (addr, Some((reg as usize, addr.wrapping_add(inc))))
+            }
+            AddressingMode::PreDecrement(reg) => {
+                let dec = if reg == 7 && size == Size::Byte {
+                    2
+                } else {
+                    size.bytes()
+                };
+                let addr = self.a(reg as usize).wrapping_sub(dec);
+                (addr, Some((reg as usize, addr)))
+            }
+            _ => (self.get_ea_address(bus, mode, size), None),
+        };
+        if size != Size::Byte && (addr & 1) != 0 && self.trap_unimpl_060() {
+            return self
+                .take_exception(bus, crate::core::exceptions::vector::UNIMPLEMENTED_INTEGER);
+        }
+        if let Some((reg, value)) = ea_commit {
+            self.set_a(reg, value);
+        }
         let mem = match size {
             Size::Byte => self.read_8(bus, addr) as u32,
             Size::Word => self.read_16(bus, addr) as u32,

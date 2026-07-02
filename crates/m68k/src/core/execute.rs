@@ -66,13 +66,15 @@ impl CpuCore {
                 continue;
             }
 
-            // Dispatch instruction
+            // Dispatch instruction (sampling whether the opcode fetch
+            // hit the icache before dispatch consumes more of the stream).
+            let fetch_cached = bus.last_fetch_was_cached();
             let result = dispatch_instruction(self, bus, self.ir as u16);
 
             // Auto-take all trap exceptions, extract cycles
             use crate::core::types::InternalStepResult;
             let cycles = match result {
-                InternalStepResult::Ok { cycles } => self.scale_cycles_for_cpu_type(cycles),
+                InternalStepResult::Ok { cycles } => self.finalize_cycles(cycles, fetch_cached),
                 InternalStepResult::AlineTrap { .. } => self.take_aline_exception(bus),
                 InternalStepResult::FlineTrap { .. } => self.take_fline_exception(bus),
                 InternalStepResult::TrapInstruction { trap_num } => {
@@ -141,11 +143,12 @@ impl CpuCore {
             return StepResult::Ok { cycles: 0 };
         }
 
+        let fetch_cached = bus.last_fetch_was_cached();
         let result = dispatch_instruction(self, bus, self.ir as u16);
 
         let res = match result {
             InternalStepResult::Ok { cycles } => StepResult::Ok {
-                cycles: self.scale_cycles_for_cpu_type(cycles),
+                cycles: self.finalize_cycles(cycles, fetch_cached),
             },
             InternalStepResult::AlineTrap { opcode } => StepResult::AlineTrap { opcode },
             InternalStepResult::FlineTrap { opcode } => StepResult::FlineTrap { opcode },
@@ -233,15 +236,19 @@ impl CpuCore {
             return StepResult::Ok { cycles: 0 };
         }
 
+        let fetch_cached = bus.last_fetch_was_cached();
         let result = dispatch_instruction(self, bus, self.ir as u16);
 
         // Handle trap results via callbacks, fallback to exception if not handled
         let cycles = match result {
-            InternalStepResult::Ok { cycles } => self.scale_cycles_for_cpu_type(cycles),
+            InternalStepResult::Ok { cycles } => self.finalize_cycles(cycles, fetch_cached),
             InternalStepResult::AlineTrap { opcode } => {
                 if !handler.handle_aline(self, bus, opcode) {
                     self.take_aline_exception(bus)
                 } else {
+                    // On real hardware this is an exception: no pairing
+                    // window survives it.
+                    self.break_060_pipeline();
                     0 // HLE handled, 0 cycles for now
                 }
             }
@@ -249,6 +256,7 @@ impl CpuCore {
                 if !handler.handle_fline(self, bus, opcode) {
                     self.take_fline_exception(bus)
                 } else {
+                    self.break_060_pipeline();
                     0
                 }
             }
@@ -344,6 +352,8 @@ impl CpuCore {
 
     /// Jump to an exception vector.
     pub fn jump_vector<B: AddressBus>(&mut self, bus: &mut B, vector: u32) {
+        // Any exception entry breaks an open 68060 pairing window.
+        self.break_060_pipeline();
         self.last_exception_vector = Some(vector);
         let addr = (vector << 2).wrapping_add(self.vbr);
         self.pc = self.read_32(bus, addr);
@@ -443,6 +453,10 @@ impl CpuCore {
             self.push_16(bus, 0x1000 | (vec_word & 0x0FFF));
             self.push_32(bus, stacked_pc);
             self.push_16(bus, sr2);
+        } else if self.cpu_type == super::types::CpuType::M68060 && self.m_flag != 0 {
+            // The 68060 clears M on interrupt entry but has a single
+            // supervisor stack: no bank switch and no throwaway frame.
+            self.m_flag = 0;
         }
 
         // Jump to vector
@@ -462,6 +476,7 @@ impl CpuCore {
 
     /// Stop the CPU (STOP instruction).
     pub fn stop(&mut self, new_sr: u16) {
+        self.break_060_pipeline();
         self.set_sr(new_sr);
         self.stopped |= STOP_LEVEL_STOP;
     }

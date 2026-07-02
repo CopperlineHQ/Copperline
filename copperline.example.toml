@@ -56,17 +56,18 @@ pacing_budget = "cycles"
 
 [cpu]
 
-# CPU type. One of: 68000, 68EC020, 68020, 68030, 68040.
+# CPU type. One of: 68000, 68EC020, 68020, 68030, 68040, 68060.
 # 68EC020 uses the 68020 instruction set with a 24-bit external address bus.
 model = "68000"
 
-# FPU (68881/68882 coprocessor; on-die on the full 68040). Needs a
-# 68020 or later -- a 68000 cannot drive one. The 68040 enables it by
-# default; on other 020+ CPUs opt in here.
+# FPU (68881/68882 coprocessor; on-die on the full 68040/68060). Needs a
+# 68020 or later -- a 68000 cannot drive one. The 68040 and 68060 enable
+# it by default; on other 020+ CPUs opt in here. fpu = false on the 68060
+# models the FPU-less LC/EC parts (PCR.DFP).
 # fpu = true
 
 # CPU clock in MHz. Defaults to the model's stock speed (68000 ~7.09,
-# 020 ~14, 030/040 ~25). The chipset and pacing model the CPU as a whole
+# 020 ~14, 030/040 ~25, 060 50). The chipset and pacing model the CPU as a whole
 # multiple of the colour clock, so the effective clock is rounded to the
 # nearest multiple. Fast RAM runs at the CPU clock; chip and slow/trapdoor
 # RAM stay chip-bus bound.
@@ -75,13 +76,22 @@ model = "68000"
 # Model the on-chip caches (a hit serves with no chip-bus cycle, as on
 # real silicon, so cached code stops contending with DMA). On by default
 # for the CPUs that have them, since AmigaOS enables them at boot: the
-# instruction cache on the 68020/68EC020/68030/68040 (256 bytes on the
-# 020/030, 4 KB on the 040) and the data cache on the 68030/68040. The
+# instruction cache on the 68020/68EC020/68030/68040/68060 (256 bytes on
+# the 020/030, 4 KB on the 040, 8 KB on the 060) and the data cache on
+# the 68030/68040/68060. The
 # data cache only covers expansion RAM/ROM -- chip and slow RAM are
 # cache-inhibited because DMA writes them, as on real Amigas. Set false
 # to force a CPU to run cacheless (e.g. for the uncalibrated baseline).
 # icache = false
 # dcache = false
+
+# 68060 only: the 68060 dropped MOVEP, CHK2/CMP2, CAS2, misaligned CAS,
+# 64-bit MUL/DIV, and most FPU operations beyond basic arithmetic from
+# silicon. "trap" (default) raises the chip's unimplemented-instruction
+# exceptions for the OS-side 68060.library to emulate, exactly like a
+# real accelerator board; "native" executes them directly for systems
+# without the library.
+# unimplemented = "trap"
 
 
 # Optional machine profile: a validated bundle of chipset revisions, CPU,

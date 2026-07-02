@@ -54,6 +54,42 @@ fn f64_to_int_saturating(value: f64, fpcr: u32, min: i64, max: i64) -> i64 {
     }
 }
 
+/// The FP opmodes the 68060 dropped from silicon, emulated by the 68060SP:
+/// the transcendental set, FINT/FINTRZ, FGETEXP/FGETMAN, FMOD/FREM/FSCALE,
+/// and FSINCOS (FMOVECR is gated separately by encoding). FSGLMUL/FSGLDIV
+/// and every rounded (FS/FD-prefixed) variant remain in hardware. Keep in
+/// sync with fpu_apply_op's table.
+fn fpu_060_traps_opmode(opmode: u16) -> bool {
+    matches!(
+        opmode,
+        0x01 | 0x02
+            | 0x03
+            | 0x06
+            | 0x08
+            | 0x09
+            | 0x0A
+            | 0x0C
+            | 0x0D
+            | 0x0E
+            | 0x0F
+            | 0x10
+            | 0x11
+            | 0x12
+            | 0x14
+            | 0x15
+            | 0x16
+            | 0x19
+            | 0x1C
+            | 0x1D
+            | 0x1E
+            | 0x1F
+            | 0x21
+            | 0x25
+            | 0x26
+            | 0x30..=0x37
+    )
+}
+
 /// Sign-extend a 7-bit FMOVE k-factor to i8.
 fn sign_extend7(v: u16) -> i8 {
     let raw = (v & 0x7F) as i16;
@@ -82,6 +118,12 @@ impl CpuCore {
             return 0;
         }
 
+        // 68060 with the FPU disabled through PCR.DFP (also how an LC/EC060
+        // presents): every FP instruction takes the format $4 disabled frame.
+        if self.is_060() && (self.pcr & crate::core::cpu::PCR_DFP) != 0 {
+            return self.take_fp_disabled_060(bus);
+        }
+
         // IMPORTANT:
         // - PC currently points at the first extension word (w2).
         // - We must NOT consume w2 (or any EA extension) unless we handle the instruction.
@@ -108,11 +150,33 @@ impl CpuCore {
                 let _w2 = self.read_imm_16(bus);
 
                 if src_fmt == 7 {
+                    // FMOVECR was dropped from 68060 silicon.
+                    if self.trap_unimpl_060() {
+                        return self.take_fp_unimp_060(bus, 0);
+                    }
                     // FMOVECR - load constant from ROM. The opmode field is
                     // the ROM index; there is no <ea> source operand.
                     self.fpr[dst] = softfloat::const_rom(opmode as usize);
                     self.fpu_set_cc(self.fpr[dst]);
                     return 4;
+                }
+
+                if self.trap_unimpl_060() && fpu_060_traps_opmode(opmode) {
+                    // Unimplemented FP instruction: resolve the operand EA
+                    // (consuming its extension words - the frame needs the
+                    // next-instruction PC) and take the format $2 trap.
+                    let ea = self.fpu_060_trap_ea(bus, opcode, src_fmt);
+                    return self.take_fp_unimp_060(bus, ea);
+                }
+                if self.trap_unimpl_060() && src_fmt == 3 {
+                    // Packed decimal: unsupported data type in 060 hardware;
+                    // the immediate form is an unimplemented <ea> instead.
+                    let vector = if (opcode & 0x3F) == 0x3C {
+                        crate::core::exceptions::vector::FP_UNIMPLEMENTED_EA
+                    } else {
+                        crate::core::exceptions::vector::FP_UNSUPP_DATA_TYPE
+                    };
+                    return self.take_exception(bus, vector);
                 }
 
                 let Some(src) = self.fpu_read_source(bus, opcode, src_fmt) else {
@@ -124,6 +188,13 @@ impl CpuCore {
                 // FMOVE FP, <ea> - move FP register to memory/integer register
                 let dst_fmt = (w2 >> 10) & 0x7;
                 let src = ((w2 >> 7) & 7) as usize;
+
+                // Packed-decimal output is an unsupported data type in 68060
+                // hardware (both static and dynamic k-factor forms).
+                if self.trap_unimpl_060() && (dst_fmt == 3 || dst_fmt == 7) {
+                    return self
+                        .take_exception(bus, crate::core::exceptions::vector::FP_UNSUPP_DATA_TYPE);
+                }
 
                 // Packed-decimal k-factor: static (fmt 3) in w2 bits 6-0;
                 // dynamic (fmt 7) in bits 6-0 of the Dn named by w2 bits 6-4.
@@ -156,11 +227,20 @@ impl CpuCore {
                 let _ = self.read_imm_16(bus);
 
                 if opmode == 0x17 {
+                    // FMOVECR was dropped from 68060 silicon.
+                    if self.trap_unimpl_060() {
+                        return self.take_fp_unimp_060(bus, 0);
+                    }
                     // FMOVECR - load constant from ROM. In this register-form
                     // encoding the source-register field carries the ROM index.
                     self.fpr[dst] = softfloat::const_rom(src);
                     self.fpu_set_cc(self.fpr[dst]);
                     return 4;
+                }
+                if self.trap_unimpl_060() && fpu_060_traps_opmode(opmode) {
+                    // Register-to-register form of an unimplemented FP
+                    // instruction: no operand EA.
+                    return self.take_fp_unimp_060(bus, 0);
                 }
                 self.fpu_apply_op(opmode, dst, self.fpr[src])
             }
@@ -178,6 +258,13 @@ impl CpuCore {
                 let ea = (opcode & 0x3f) as u8;
                 let ea_mode = (ea >> 3) & 7;
                 let ea_reg = (ea & 7) as usize;
+
+                // A dynamic register list was dropped from 68060 silicon
+                // (unimplemented <ea>).
+                if self.trap_unimpl_060() && (mode_bits & 0x1) != 0 {
+                    return self
+                        .take_exception(bus, crate::core::exceptions::vector::FP_UNIMPLEMENTED_EA);
+                }
 
                 // MODE field (w2 bits 12-11): bit 11 selects a dynamic
                 // register list (named by w2 bits 4-6), bit 12 selects the
@@ -265,6 +352,12 @@ impl CpuCore {
                 let count = (ctrl_sel & 4 != 0) as u32
                     + (ctrl_sel & 2 != 0) as u32
                     + (ctrl_sel & 1 != 0) as u32;
+                // FMOVEM.L #imm to two or three control registers was
+                // dropped from 68060 silicon (unimplemented <ea>).
+                if self.trap_unimpl_060() && count >= 2 && (opcode & 0x3F) == 0x3C {
+                    return self
+                        .take_exception(bus, crate::core::exceptions::vector::FP_UNIMPLEMENTED_EA);
+                }
                 let mut values = [0u32; 3];
                 match self.fpu_ea(bus, ea_mode, ea_reg, 4 * count) {
                     Some(FpuEa::DataReg(r)) if count == 1 => values[0] = self.d(r),
@@ -425,6 +518,11 @@ impl CpuCore {
     ///
     /// Implements a minimal subset: `FSAVE <ea>` and `FRESTORE <ea>` for a NULL/IDLE frame.
     pub fn exec_fpu_op1<B: AddressBus>(&mut self, bus: &mut B, opcode: u16) -> i32 {
+        // FSAVE/FRESTORE also take the disabled trap when PCR.DFP is set.
+        if self.is_060() && (self.pcr & crate::core::cpu::PCR_DFP) != 0 {
+            return self.take_fp_disabled_060(bus);
+        }
+
         let ea_mode = ((opcode >> 3) & 7) as u8;
         let ea_reg = (opcode & 7) as usize;
         let op = ((opcode >> 6) & 3) as u8;
@@ -437,6 +535,9 @@ impl CpuCore {
     }
 
     fn exec_fsave<B: AddressBus>(&mut self, bus: &mut B, ea_mode: u8, ea_reg: usize) -> i32 {
+        if self.is_060() {
+            return self.exec_fsave_060(bus, ea_mode, ea_reg);
+        }
         // Musashi supports only (An)+ and -(An) here for 68040.
         match ea_mode {
             3 => {
@@ -471,7 +572,77 @@ impl CpuCore {
         }
     }
 
+    /// 68060 FSAVE: the floating-point state frame carries its format in
+    /// bits 15:8 of the first long word: $00 = NULL (FPU untouched since
+    /// reset), $60 = IDLE. A NULL frame is a single long word - the same
+    /// one-long NULL every part since the 68881 has used, and the size
+    /// AmigaOS's hand-built task contexts rely on - while IDLE occupies
+    /// the full three long words. The EXCP frame ($E0, carrying pending-
+    /// exception operands) is not modeled: the softfloat FPU completes
+    /// every operation before retiring.
+    fn exec_fsave_060<B: AddressBus>(&mut self, bus: &mut B, ea_mode: u8, ea_reg: usize) -> i32 {
+        let (header, size): (u32, u32) = if self.fpu_just_reset {
+            (0x0000_0000, 4)
+        } else {
+            (0x0000_6000, 12)
+        };
+        match ea_mode {
+            2 | 3 => {
+                // (An) / (An)+
+                let addr = self.a(ea_reg);
+                if ea_mode == 3 {
+                    self.set_a(ea_reg, addr.wrapping_add(size));
+                }
+                self.write_32(bus, addr, header);
+                for off in (4..size).step_by(4) {
+                    self.write_32(bus, addr.wrapping_add(off), 0);
+                }
+                8
+            }
+            4 => {
+                // -(An)
+                let addr = self.a(ea_reg).wrapping_sub(size);
+                self.set_a(ea_reg, addr);
+                self.write_32(bus, addr, header);
+                for off in (4..size).step_by(4) {
+                    self.write_32(bus, addr.wrapping_add(off), 0);
+                }
+                8
+            }
+            _ => 0,
+        }
+    }
+
+    /// 68060 FRESTORE: size the frame from the format byte - one long word
+    /// for NULL (resetting the FPU), three for anything else. Kickstart's
+    /// exec builds initial task contexts by hand with a one-long NULL frame
+    /// and launches them through FRESTORE (An)+, so a fixed 12-byte read
+    /// would skew the context walk and launch the first task at PC 0.
+    fn exec_frestore_060<B: AddressBus>(&mut self, bus: &mut B, ea_mode: u8, ea_reg: usize) -> i32 {
+        match ea_mode {
+            2 | 3 => {
+                let addr = self.a(ea_reg);
+                let header = self.read_32(bus, addr);
+                let null_frame = (header & 0x0000_FF00) == 0;
+                if ea_mode == 3 {
+                    let size = if null_frame { 4 } else { 12 };
+                    self.set_a(ea_reg, addr.wrapping_add(size));
+                }
+                if null_frame {
+                    self.do_frestore_null();
+                } else {
+                    self.fpu_just_reset = false;
+                }
+                8
+            }
+            _ => 0,
+        }
+    }
+
     fn exec_frestore<B: AddressBus>(&mut self, bus: &mut B, ea_mode: u8, ea_reg: usize) -> i32 {
+        if self.is_060() {
+            return self.exec_frestore_060(bus, ea_mode, ea_reg);
+        }
         match ea_mode {
             2 => {
                 // (An)
@@ -843,6 +1014,50 @@ impl CpuCore {
     /// apply the FPU operand width; every other mode -- including the
     /// 68020 indexed and full-extension forms -- goes through the core
     /// resolver. Address-register direct is not a legal FPU operand.
+    /// Resolve the operand address of an FP instruction that traps as
+    /// unimplemented on the 68060: extension words are consumed (the trap
+    /// frame carries the next-instruction PC) and post-increment /
+    /// pre-decrement commit, matching the calculated-EA semantics of the
+    /// format $2 frame. Returns the EA long for the frame (0 when the
+    /// operand is not in memory).
+    fn fpu_060_trap_ea<B: AddressBus>(&mut self, bus: &mut B, opcode: u16, fmt: u16) -> u32 {
+        let ea_mode = ((opcode >> 3) & 7) as u8;
+        let ea_reg = (opcode & 7) as usize;
+        let bytes: u32 = match fmt {
+            4 => 2,      // word
+            6 => 1,      // byte
+            5 => 8,      // double
+            2 | 3 => 12, // extended / packed
+            _ => 4,      // long / single
+        };
+        match self.fpu_ea(bus, ea_mode, ea_reg, bytes) {
+            Some(FpuEa::Memory(addr)) => addr,
+            Some(FpuEa::Immediate) => {
+                // Immediate operands live in the instruction stream; skip
+                // them so the frame PC lands on the next instruction.
+                let skip = bytes.max(2) & !1;
+                self.pc = self.pc.wrapping_add(skip);
+                0
+            }
+            _ => 0,
+        }
+    }
+
+    /// FScc <ea> trap on the 68060: the instruction is emulated by the
+    /// 68060SP. Resolve the byte-sized destination EA for the frame.
+    pub(crate) fn fpu_060_scc_trap<B: AddressBus>(
+        &mut self,
+        bus: &mut B,
+        ea_mode: u8,
+        ea_reg: usize,
+    ) -> i32 {
+        let ea = match self.fpu_ea(bus, ea_mode, ea_reg, 1) {
+            Some(FpuEa::Memory(addr)) => addr,
+            _ => 0,
+        };
+        self.take_fp_unimp_060(bus, ea)
+    }
+
     fn fpu_ea<B: AddressBus>(
         &mut self,
         bus: &mut B,

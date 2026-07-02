@@ -1,0 +1,16 @@
+# 68060 @ 50 MHz on an A1200-class AGA machine: the configuration for the
+# superscalar rows (28-30). The test's TRAP #0 stub enables PCR.ESS and the
+# caches/branch cache itself, so no special knobs are needed here.
+rom = "../Kickstart v3.1 r40.68 (1993)(Commodore)(A1200)[!].rom"
+[machine]
+profile = "A1200"
+[cpu]
+model = "68060"
+[emulation]
+speed = "real"
+[chipset]
+revision = "AGA"
+video = "PAL"
+[floppy.df0]
+path = "timing-test.adf"
+write_protected = true

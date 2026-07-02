@@ -270,7 +270,7 @@ where
             }
             "--cpu" => {
                 overrides.cpu = Some(args.next().ok_or_else(|| {
-                    anyhow!("--cpu requires a model (68000/68EC020/68020/68030/68040)")
+                    anyhow!("--cpu requires a model (68000/68EC020/68020/68030/68040/68060)")
                 })?);
             }
             "--fpu" => {
@@ -584,9 +584,9 @@ fn print_help() {
          -c, --config FILE              load configuration from FILE (default: ./copperline.toml)\n  \
          --model NAME                   machine profile: A500, A500Plus, A600, A1200, CDTV, CD32\n  \
          --chipset NAME                 chipset preset: OCS, ECS, or AGA\n  \
-         --cpu MODEL                    CPU: 68000, 68EC020, 68020, 68030, or 68040\n  \
+         --cpu MODEL                    CPU: 68000, 68EC020, 68020, 68030, 68040, or 68060\n  \
          --cpu-clock MHZ                CPU clock in MHz (default: the model's stock speed)\n  \
-         --fpu / --no-fpu               fit / omit a 68881/68882 (68040 has one on-die)\n  \
+         --fpu / --no-fpu               fit / omit a 68881/68882 (68040/68060 on-die)\n  \
          --chip SIZE                    chip RAM size, e.g. 512K, 1M, 2M\n  \
          --fast SIZE                    Zorro II fast RAM size, e.g. 0, 1M, 4M, 8M\n  \
          --slow SIZE                    trapdoor slow RAM at $C00000, e.g. 0, 512K\n  \
@@ -1053,6 +1053,7 @@ fn build_placeholder_machine() -> Result<Emulator> {
         bus,
         copperline::config::CpuModel::M68000,
         false,
+        Default::default(),
         copperline::config::PacingBudget::Cycles,
         2,
         true,

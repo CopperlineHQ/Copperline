@@ -86,6 +86,23 @@ ticks everywhere.
 | 25 | beam cck while a 64-pixel line blit runs, display off | `BLTCON0=$bb4a BLTCON1=$0003` |
 | 26 | beam cck while the A->D fill (row 24) runs **with a 3-bitplane display + BLTPRI** | beam-vs-blitter race with active display DMA |
 | 27 | VHPOSR when the CPU first sees a COPPER-raised INTREQR.COPER, interrupts off | copper-vs-CPU phase (`vp`<<8 | `hpos`/2); `FFFFFFFF` if it never fired |
+| 28 | independent pair `move.w d2,d0` + `move.w d3,d1` x8192 | 68060 dual-issue: pairs into one clock; compare rows 4 and 29 |
+| 29 | RAW pair `move.w d2,d0` + `move.w d0,d1` x8192 | the dependency blocks dual issue |
+| 30 | `dbra`-only loop x8192, after the 68060 enable block | branch-cache folding: 1 clock/iteration on a 68060 |
+
+### Rows 28-30: 68060 superscalar dispatch and branch cache
+
+Before row 28 a TRAP #0 supervisor stub probes `MOVEC PCR` for the 68060
+identification ($0430) and, when found, enables superscalar dispatch
+(PCR.ESS) plus the caches and branch cache (CACR EDC|EBC|EIC) - what
+`68060.library` does at boot on real boards. On every other CPU the probe
+faults harmlessly and the rows run scalar, so the numbers stay comparable
+across the whole family. On Copperline's 50 MHz 68060, row 30 measures
+exactly one clock per loop iteration (0x76 E-ticks) and rows 28/29 land at
+two clocks per iteration; the model currently lets a predicted branch fold
+only when it can ride the preceding instruction's cycle, so rows 28 and 29
+coincide (the fold moves between the pair and the branch) - real-hardware
+captures welcome to calibrate the split.
 
 ### Row 27: the copper-vs-CPU interrupt phase
 

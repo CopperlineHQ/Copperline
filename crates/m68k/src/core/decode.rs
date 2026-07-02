@@ -141,6 +141,7 @@ fn dispatch_group_f<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 | CpuType::M68EC040
                 | CpuType::M68LC040
                 | CpuType::M68040
+                | CpuType::M68060
         );
         if !supports_move16 {
             return illegal_instruction(cpu, bus);
@@ -166,17 +167,18 @@ fn dispatch_group_f<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             | CpuType::M68EC040
             | CpuType::M68LC040
             | CpuType::M68040
+            | CpuType::M68060
     );
     if is_cache_cpu && (opcode >> 8) & 0xF == 4 {
         // Check for supervisor mode (cache ops are privileged)
         if !cpu.is_supervisor() {
             return cpu.take_exception(bus, 8); // Privilege violation
         }
-        let is_68040 = matches!(
+        let has_cinv_cpush = matches!(
             cpu.cpu_type,
-            CpuType::M68EC040 | CpuType::M68LC040 | CpuType::M68040
+            CpuType::M68EC040 | CpuType::M68LC040 | CpuType::M68040 | CpuType::M68060
         );
-        if is_68040 {
+        if has_cinv_cpush {
             let caches = (opcode >> 6) & 0b11;
             if caches & 0b01 != 0 {
                 cpu.cacr_pending_ops |= super::cpu::CACR_CD; // clear data cache
@@ -195,6 +197,38 @@ fn dispatch_group_f<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
     if is_cache_cpu && (opcode >> 8) & 0xF == 5 {
         if !cpu.is_supervisor() {
             return cpu.take_exception(bus, 8); // Privilege violation
+        }
+        if cpu.is_060() {
+            // PLPAW (F588+An) / PLPAR (F5C8+An): translate the logical
+            // address in An (address space from DFC) and write the physical
+            // address back to An. These replace PTEST on the 68060.
+            if (opcode & 0xFFF0) == 0xF580 || (opcode & 0xFFF0) == 0xF5C0 {
+                let write = (opcode & 0x0040) == 0; // F588 = PLPAW
+                let an = 8 + (opcode & 7) as usize;
+                let addr = cpu.dar[an];
+                let supervisor = (cpu.dfc & 4) != 0;
+                match crate::mmu::translate_address(cpu, bus, addr, write, supervisor, false) {
+                    Ok(phys) => {
+                        cpu.dar[an] = phys;
+                        return 4;
+                    }
+                    Err(fault) => {
+                        // Access error, format $4: An is untouched (the
+                        // rollback keeps it) so the handler can map the
+                        // page and restart the PLPA.
+                        cpu.handle_mmu_fault(bus, fault, write, false, 4);
+                        return 50;
+                    }
+                }
+            }
+            if (opcode & 0x00C0) == 0 {
+                // PFLUSH/PFLUSHN/PFLUSHA/PFLUSHAN: flush-all pragmatism as
+                // on the 040 (over-flushing only costs re-walks).
+                cpu.atc.flush_all();
+                return 4;
+            }
+            // PTEST was dropped from 68060 silicon: undefined F-line.
+            return FLINE_TRAP_SENTINEL;
         }
         if cpu.is_040() && (opcode & 0x0040) != 0 {
             // PTEST: walk the page for An and report it in MMUSR. We model the
@@ -220,6 +254,23 @@ fn dispatch_group_f<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
         return 4;
     }
 
+    // LPSTOP #imm (68060 only): F800 / 01C0 / SR word. Privileged; loads
+    // SR and stops until an interrupt or reset, like STOP with a low-power
+    // bus broadcast (the bus indication is not modeled). A wrong extension
+    // word is an undefined F-line.
+    if cpu.is_060() && opcode == 0xF800 {
+        if cpu.read_16(bus, cpu.pc) != 0x01C0 {
+            return FLINE_TRAP_SENTINEL;
+        }
+        if !cpu.is_supervisor() {
+            return cpu.exception_privilege(bus);
+        }
+        let _ = cpu.read_imm_16(bus); // consume the 01C0 extension
+        let sr = cpu.read_imm_16(bus);
+        cpu.stop(sr);
+        return 4;
+    }
+
     // PMMU/COP0 opcodes are in the 0xF0xx/0xF1xx range (1111 000? .... ....) and are further
     // subdivided by (opcode>>9)&7. Group 0 carries PMOVE/PFLUSH/PTEST/etc with an extension word.
     if ((opcode >> 9) & 0x7) == 0 {
@@ -239,6 +290,11 @@ fn dispatch_group_f<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
         let w2 = cpu.read_imm_16(bus);
         let cond = (w2 & 0x3F) as u8;
         if ea_mode == 1 {
+            // FDBcc was dropped from 68060 silicon (68060SP emulates it).
+            if cpu.trap_unimpl_060() {
+                cpu.pc = cpu.pc.wrapping_add(2); // skip the displacement word
+                return cpu.take_fp_unimp_060(bus, 0);
+            }
             return cpu.exec_fdbcc(bus, ea_reg, cond);
         }
         if ea_mode == 7 && (2..=4).contains(&ea_reg) {
@@ -247,7 +303,16 @@ fn dispatch_group_f<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 3 => 2,
                 _ => 0,
             };
+            // FTRAPcc was dropped from 68060 silicon.
+            if cpu.trap_unimpl_060() {
+                cpu.pc = cpu.pc.wrapping_add(2 * imm_words);
+                return cpu.take_fp_unimp_060(bus, 0);
+            }
             return cpu.exec_ftrapcc(bus, cond, imm_words);
+        }
+        // FScc was dropped from 68060 silicon.
+        if cpu.trap_unimpl_060() {
+            return cpu.fpu_060_scc_trap(bus, ea_mode, ea_reg as usize);
         }
         return cpu.exec_fscc(bus, ea_mode, ea_reg, cond);
     }
@@ -342,6 +407,11 @@ fn dispatch_group_0<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
         {
             return illegal_instruction(cpu, bus);
         }
+        // CAS2 was dropped from 68060 silicon; trap before any extension
+        // word is consumed so the 68060SP handler can re-decode it.
+        if cpu.trap_unimpl_060() {
+            return cpu.take_exception(bus, super::exceptions::vector::UNIMPLEMENTED_INTEGER);
+        }
         return cpu.exec_cas2(bus, opcode);
     }
     // CAS: 0000 1ss0 11 mmm rrr with extension word (Du/Dc)
@@ -413,6 +483,10 @@ fn dispatch_group_0<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
         if cpu.is_pre_68020 {
             return illegal_instruction(cpu, bus);
         }
+        // CHK2/CMP2 were dropped from 68060 silicon.
+        if cpu.trap_unimpl_060() {
+            return cpu.take_exception(bus, super::exceptions::vector::UNIMPLEMENTED_INTEGER);
+        }
         return cpu.exec_cmp2_chk2(bus, opcode);
     }
 
@@ -420,6 +494,11 @@ fn dispatch_group_0<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
     // 0000 ddd 1 s 0 0 1 aaa  with extension word = displacement (d16,An)
     // s: 0=word, 1=long. direction: bit7 (0=mem->reg, 1=reg->mem)
     if (opcode & 0xF138) == 0x0108 {
+        // MOVEP was dropped from 68060 silicon; trap before the displacement
+        // word is consumed and before any register or memory access.
+        if cpu.trap_unimpl_060() {
+            return cpu.take_exception(bus, super::exceptions::vector::UNIMPLEMENTED_INTEGER);
+        }
         let dreg = ((opcode >> 9) & 7) as usize;
         let areg = (opcode & 7) as usize;
         let is_long = (opcode & 0x0040) != 0;
@@ -615,6 +694,26 @@ fn dispatch_group_0<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
 // Group 4: Miscellaneous
 // ============================================================================
 
+/// MOVEC Rc-code legality per CPU model. The 68040 accepts everything its
+/// register table decodes; the 68060 drops CAAR, MMUSR, MSP, and ISP (single
+/// supervisor stack) and gains BUSCR (0x008) and PCR (0x808).
+fn movec_reg_legal(cpu_type: CpuType, ctrl_reg: u16) -> bool {
+    match cpu_type {
+        CpuType::M68010 | CpuType::SCC68070 => {
+            matches!(ctrl_reg, 0x000 | 0x001 | 0x800 | 0x801)
+        }
+        CpuType::M68EC020 | CpuType::M68020 | CpuType::M68EC030 | CpuType::M68030 => matches!(
+            ctrl_reg,
+            0x000 | 0x001 | 0x002 | 0x800 | 0x801 | 0x802 | 0x803 | 0x804
+        ),
+        CpuType::M68060 => matches!(
+            ctrl_reg,
+            0x000..=0x008 | 0x800 | 0x801 | 0x806 | 0x807 | 0x808
+        ),
+        _ => true,
+    }
+}
+
 fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) -> i32 {
     let subop = (opcode >> 8) & 0xF;
     let ea_mode = ((opcode >> 3) & 7) as u8;
@@ -778,6 +877,29 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                                     cpu.set_sr(sr);
                                     return 20;
                                 }
+                                4 if cpu.is_060() => {
+                                    // 68060 access-error / FP-disabled frame
+                                    // (8 words): discard EA and FSLW.
+                                    let sr = cpu.pull_16(bus);
+                                    cpu.pc = cpu.pull_32(bus);
+                                    let _ = cpu.pull_16(bus); // format word
+                                    cpu.dar[15] = cpu.dar[15].wrapping_add(8);
+                                    cpu.set_sr(sr);
+                                    return 20;
+                                }
+                                7 if cpu.is_040() => {
+                                    // 68040 access-error frame (30 words):
+                                    // discard EA/SSW/writeback state. The
+                                    // faulting instruction was rolled back at
+                                    // frame-build time, so a plain restart is
+                                    // the whole continuation.
+                                    let sr = cpu.pull_16(bus);
+                                    cpu.pc = cpu.pull_32(bus);
+                                    let _ = cpu.pull_16(bus); // format word
+                                    cpu.dar[15] = cpu.dar[15].wrapping_add(52);
+                                    cpu.set_sr(sr);
+                                    return 20;
+                                }
                                 _ => {
                                     return cpu.take_exception(bus, 14); // format error
                                 }
@@ -835,25 +957,7 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             let reg_type = (ext >> 15) & 1; // 0=Dn, 1=An
             let reg_num = ((ext >> 12) & 7) as usize;
             let ctrl_reg = ext & 0xFFF;
-            if matches!(cpu.cpu_type, CpuType::M68010 | CpuType::SCC68070)
-                && !matches!(ctrl_reg, 0x000 | 0x001 | 0x800 | 0x801)
-            {
-                return illegal_instruction(cpu, bus);
-            }
-            if matches!(cpu.cpu_type, CpuType::M68EC020 | CpuType::M68020)
-                && !matches!(
-                    ctrl_reg,
-                    0x000 | 0x001 | 0x002 | 0x800 | 0x801 | 0x802 | 0x803 | 0x804
-                )
-            {
-                return illegal_instruction(cpu, bus);
-            }
-            if matches!(cpu.cpu_type, CpuType::M68EC030 | CpuType::M68030)
-                && !matches!(
-                    ctrl_reg,
-                    0x000 | 0x001 | 0x002 | 0x800 | 0x801 | 0x802 | 0x803 | 0x804
-                )
-            {
+            if !movec_reg_legal(cpu.cpu_type, ctrl_reg) {
                 return illegal_instruction(cpu, bus);
             }
             if !cpu.is_supervisor() {
@@ -877,25 +981,7 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             let reg_type = (ext >> 15) & 1; // 0=Dn, 1=An
             let reg_num = ((ext >> 12) & 7) as usize;
             let ctrl_reg = ext & 0xFFF;
-            if matches!(cpu.cpu_type, CpuType::M68010 | CpuType::SCC68070)
-                && !matches!(ctrl_reg, 0x000 | 0x001 | 0x800 | 0x801)
-            {
-                return illegal_instruction(cpu, bus);
-            }
-            if matches!(cpu.cpu_type, CpuType::M68EC020 | CpuType::M68020)
-                && !matches!(
-                    ctrl_reg,
-                    0x000 | 0x001 | 0x002 | 0x800 | 0x801 | 0x802 | 0x803 | 0x804
-                )
-            {
-                return illegal_instruction(cpu, bus);
-            }
-            if matches!(cpu.cpu_type, CpuType::M68EC030 | CpuType::M68030)
-                && !matches!(
-                    ctrl_reg,
-                    0x000 | 0x001 | 0x002 | 0x800 | 0x801 | 0x802 | 0x803 | 0x804
-                )
-            {
+            if !movec_reg_legal(cpu.cpu_type, ctrl_reg) {
                 return illegal_instruction(cpu, bus);
             }
             if !cpu.is_supervisor() {

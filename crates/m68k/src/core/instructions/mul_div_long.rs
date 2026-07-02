@@ -21,6 +21,11 @@ impl CpuCore {
 
         let signed = (ext & 0x0800) != 0;
         let use_64 = (ext & 0x0400) != 0;
+        // The 64/32 form was dropped from 68060 silicon; trap before the
+        // divisor EA is touched (no zero-divide evaluation either).
+        if use_64 && self.trap_unimpl_060() {
+            return self.take_exception(bus, crate::core::exceptions::vector::UNIMPLEMENTED_INTEGER);
+        }
         let dq = ((ext >> 12) & 7) as usize;
         let dr = (ext & 7) as usize;
 
@@ -102,6 +107,12 @@ impl CpuCore {
 
         let signed = (ext & 0x0800) != 0;
         let wide = (ext & 0x0400) != 0;
+        // The 64-bit-result form was dropped from 68060 silicon (the 32-bit
+        // form stays native). The consumed extension word is harmless: the
+        // trap stacks the instruction address and the handler re-decodes.
+        if wide && self.trap_unimpl_060() {
+            return self.take_exception(bus, crate::core::exceptions::vector::UNIMPLEMENTED_INTEGER);
+        }
         let dl = ((ext >> 12) & 7) as usize;
         let dh = (ext & 7) as usize;
 

@@ -410,12 +410,13 @@ const DENISE_CHOICES: [Option<DeniseRevision>; 4] = [
     Some(DeniseRevision::AgaLisa),
 ];
 const VIDEO_CHOICES: [VideoStandard; 2] = [VideoStandard::Pal, VideoStandard::Ntsc];
-const CPUS: [CpuModel; 5] = [
+const CPUS: [CpuModel; 6] = [
     CpuModel::M68000,
     CpuModel::M68EC020,
     CpuModel::M68020,
     CpuModel::M68030,
     CpuModel::M68040,
+    CpuModel::M68060,
 ];
 const CLOCK_PRESETS: [f64; 8] = [7.09, 14.0, 14.18, 25.0, 28.0, 33.0, 40.0, 50.0];
 const CHIP_PRESETS: [usize; 4] = [256 * 1024, 512 * 1024, 1024 * 1024, 2 * 1024 * 1024];
@@ -1403,7 +1404,10 @@ impl LauncherState {
 // --- helpers --------------------------------------------------------------
 
 fn cpu_is_32bit(cpu: CpuModel) -> bool {
-    matches!(cpu, CpuModel::M68020 | CpuModel::M68030 | CpuModel::M68040)
+    matches!(
+        cpu,
+        CpuModel::M68020 | CpuModel::M68030 | CpuModel::M68040 | CpuModel::M68060
+    )
 }
 
 /// Whether `field` appears anywhere with the given row kind. Used to classify a
@@ -1555,6 +1559,7 @@ fn cpu_name(cpu: CpuModel) -> &'static str {
         CpuModel::M68020 => "68020",
         CpuModel::M68030 => "68030",
         CpuModel::M68040 => "68040",
+        CpuModel::M68060 => "68060",
     }
 }
 
@@ -1719,6 +1724,24 @@ mod tests {
         let toml = s.to_toml().unwrap();
         assert!(toml.trim().is_empty(), "expected empty TOML, got:\n{toml}");
         assert!(s.build_config().is_ok());
+    }
+
+    #[test]
+    fn launcher_cycles_to_the_68060_with_50mhz_defaults() {
+        let mut s = MachineSetup::default();
+        for _ in 0..CPUS.len() {
+            if s.cpu == CpuModel::M68060 {
+                break;
+            }
+            s.cycle(LauncherField::Cpu, true);
+        }
+        assert_eq!(s.cpu, CpuModel::M68060, "cycled to the 68060");
+        assert_eq!(s.clock_mhz, 50.0, "50 MHz default");
+        assert!(s.fpu, "on-die FPU defaults on");
+        assert_eq!(s.disabled_reason(LauncherField::Icache), None);
+        assert_eq!(s.disabled_reason(LauncherField::Dcache), None);
+        assert!(s.toggle_value(LauncherField::Icache));
+        assert!(s.toggle_value(LauncherField::Dcache));
     }
 
     #[test]

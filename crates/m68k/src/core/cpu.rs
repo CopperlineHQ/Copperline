@@ -217,16 +217,38 @@ pub struct CpuCore {
     pub dacr1: u32, // Data Access Control 1 (0x009)
     pub iacr0: u32, // Instruction Access Control 0 (0x00A)
     pub iacr1: u32, // Instruction Access Control 1 (0x00B)
+    // 68060-specific control registers
+    /// Processor Configuration Register (MOVEC 0x808): identification and
+    /// revision in the high half (read-only), EDEBUG/DFP/ESS in the low bits.
+    pub pcr: u32,
+    /// Bus Control Register (MOVEC 0x008 on the 060 only; the same code is
+    /// DACR0 on the 68040). Stored, not behaviorally modeled.
+    pub buscr: u32,
     /// Address Translation Cache: a pure cache of recent page-table walks, so it
     /// is not serialized (restored empty) and is flushed on any mapping change.
     #[serde(skip)]
     pub atc: crate::mmu::Atc,
+    /// Cause of the MMU fault currently being delivered (set by
+    /// handle_mmu_fault, consumed while composing the 68060 FSLW); plain
+    /// physical bus errors leave it None. Transient within one exception.
+    #[serde(skip)]
+    pub(crate) pending_fault_cause: Option<crate::mmu::MmuFaultCause>,
 
     // ========== Execution State ==========
     /// Remaining cycles in current timeslice
     pub cycles_remaining: i32,
     /// Initial cycles for timeslice
     pub initial_cycles: i32,
+
+    /// 68060 pipeline timing state: the branch cache (and, with pairing,
+    /// the pending pOEP head). Serialized - it changes cycle counts.
+    pub oep060: crate::core::timing_060::Oep060Timing,
+
+    /// 68060 escape hatch: execute the instructions the 060 removed from
+    /// silicon (MOVEP, CHK2/CMP2, CAS2, misaligned CAS, 64-bit MUL/DIV, and
+    /// the unimplemented FPU subset) natively instead of trapping for the
+    /// OS-side 68060 software package. False = faithful traps.
+    pub emulate_unimplemented_060: bool,
 
     /// When enabled, use SingleStepTests/MAME-derived semantics for a few edge cases where
     /// Musashi and MAME fixtures intentionally differ (notably BCD "invalid digit" behavior and
@@ -267,6 +289,43 @@ pub const CACR_WA: u32 = 1 << 13;
 pub const CACR_040_IE: u32 = 1 << 15;
 /// Enable data cache (68040).
 pub const CACR_040_DE: u32 = 1 << 31;
+
+// CACR bit assignments (68060). The cache enables sit at the 68040
+// positions; the 060 adds branch-cache and store-buffer controls. The
+// branch-cache clears (CABC/CUBC) are write-only strobes.
+/// Enable data cache (68060).
+pub const CACR_060_EDC: u32 = 1 << 31;
+/// No allocate mode, data cache (68060; stored only).
+pub const CACR_060_NAD: u32 = 1 << 30;
+/// Enable store buffer (68060; stored only - the host bills writes at bus rate).
+pub const CACR_060_ESB: u32 = 1 << 29;
+/// Disable CPUSH invalidation, data (68060; stored only).
+pub const CACR_060_DPI: u32 = 1 << 28;
+/// Half-cache operation mode, data (68060; stored only).
+pub const CACR_060_FOC: u32 = 1 << 27;
+/// Enable branch cache (68060).
+pub const CACR_060_EBC: u32 = 1 << 23;
+/// Clear all entries in the branch cache (68060, write-only strobe).
+pub const CACR_060_CABC: u32 = 1 << 22;
+/// Clear all user entries in the branch cache (68060, write-only strobe).
+pub const CACR_060_CUBC: u32 = 1 << 21;
+/// Enable instruction cache (68060).
+pub const CACR_060_EIC: u32 = 1 << 15;
+/// No allocate mode, instruction cache (68060; stored only).
+pub const CACR_060_NAI: u32 = 1 << 14;
+/// Half-cache operation mode, instruction (68060; stored only).
+pub const CACR_060_FIC: u32 = 1 << 13;
+
+// PCR (68060 MOVEC 0x808) bit assignments.
+/// Enable superscalar dispatch.
+pub const PCR_ESS: u32 = 1 << 0;
+/// Disable the on-chip FPU: FP instructions raise Line-F.
+pub const PCR_DFP: u32 = 1 << 1;
+/// Enable debug features (stored only).
+pub const PCR_EDEBUG: u32 = 1 << 7;
+/// Reset value: identification 0x0430 (full MC68060), revision 1, ESS and
+/// DFP clear (superscalar dispatch off until system software enables it).
+pub const PCR_060_RESET: u32 = 0x0430_0100;
 
 impl Default for CpuCore {
     fn default() -> Self {
@@ -374,9 +433,14 @@ impl CpuCore {
             dacr1: 0,
             iacr0: 0,
             iacr1: 0,
+            pcr: PCR_060_RESET,
+            buscr: 0,
             atc: crate::mmu::Atc::default(),
+            pending_fault_cause: None,
             cycles_remaining: 0,
             initial_cycles: 0,
+            oep060: Default::default(),
+            emulate_unimplemented_060: false,
             sst_m68000_compat: false,
         };
         cpu.set_cpu_type(CpuType::M68000);
@@ -439,6 +503,13 @@ impl CpuCore {
                 self.sr_mask = 0xF71F;
                 self.has_pmmu = true;
             }
+            CpuType::M68060 => {
+                self.address_mask = 0xFFFFFFFF;
+                // The 68060 drops T0 (trace on change of flow, SR bit 14) and
+                // keeps the single T bit and the M bit.
+                self.sr_mask = 0xB71F;
+                self.has_pmmu = true;
+            }
             _ => {}
         }
     }
@@ -450,9 +521,17 @@ impl CpuCore {
     // Results: USP=0, ISP=4, MSP=6
 
     /// Get the current stack pointer bank index.
+    ///
+    /// The 68060 implements a single supervisor stack: the SR M bit is
+    /// storable (interrupts still clear it, system software may use it) but
+    /// it never selects a separate master-stack bank.
     #[inline]
     fn sp_index(&self) -> usize {
-        (self.s_flag | ((self.s_flag >> 1) & self.m_flag)) as usize
+        if self.cpu_type == CpuType::M68060 {
+            self.s_flag as usize
+        } else {
+            (self.s_flag | ((self.s_flag >> 1) & self.m_flag)) as usize
+        }
     }
 
     /// Backup current SP to banked storage.
@@ -505,6 +584,12 @@ impl CpuCore {
         // enable/freeze bits drop and the host model must invalidate.
         self.cacr = 0;
         self.cacr_pending_ops |= CACR_CI | CACR_CD;
+        // 68060 control registers: identification/revision persist, the
+        // writable bits (EDEBUG/DFP/ESS) clear. Reset invalidates the
+        // branch cache along with the other caches.
+        self.pcr = PCR_060_RESET;
+        self.buscr = 0;
+        self.oep060.branch_cache.clear_all();
         self.prefetch_queue = [0; 2];
         self.prefetch_count = 0;
         self.consume_without_prefetch = false;
@@ -571,7 +656,7 @@ impl CpuCore {
         match bus.try_read_word(addr) {
             Ok(v) => Some(v),
             Err(_) => {
-                self.trigger_bus_error(bus, addr, false, true);
+                self.trigger_bus_error(bus, addr, false, true, 2);
                 None
             }
         }
@@ -822,6 +907,8 @@ impl CpuCore {
             0x005 => self.itt1,  // Instruction TTR 1 (68040)
             0x006 => self.dtt0,  // Data TTR 0 (68040)
             0x007 => self.dtt1,  // Data TTR 1 (68040)
+            // 0x008 is BUSCR on the 68060 and DACR0 on the 68040.
+            0x008 if self.is_060() => self.buscr,
             0x008 => self.dacr0, // Data Access Control 0 (68040)
             0x009 => self.dacr1, // Data Access Control 1 (68040)
             0x00A => self.iacr0, // Instruction Access Control 0 (68040)
@@ -855,6 +942,7 @@ impl CpuCore {
             0x805 => self.mmu_sr,        // MMU Status Register (68040)
             0x806 => self.mmu_crp_aptr,  // User Root Pointer (68040; URP)
             0x807 => self.mmu_srp_aptr,  // Supervisor Root Pointer (68040)
+            0x808 if self.is_060() => self.pcr, // Processor Configuration (68060)
             _ => 0,                      // Unknown register
         }
     }
@@ -876,6 +964,38 @@ impl CpuCore {
                         CACR_EI | CACR_FI | CACR_IBE | CACR_ED | CACR_FD | CACR_DBE | CACR_WA,
                         CACR_CEI | CACR_CI | CACR_CED | CACR_CD,
                     ),
+                    // The 68060 keeps the cache enables at the 040 positions
+                    // and adds branch-cache / store-buffer controls. CABC and
+                    // CUBC are write-only branch-cache clear strobes (wired to
+                    // the branch-cache model when it lands; accepted and
+                    // discarded until then). Cache invalidation stays with
+                    // CINV/CPUSH like the 040.
+                    CpuType::M68060 => {
+                        // The branch-cache clear strobes act immediately and
+                        // never store; disabling EBC also clears the table so
+                        // re-enabling starts cold (software is required to
+                        // clear before re-enabling anyway).
+                        if value & CACR_060_CABC != 0 {
+                            self.oep060.branch_cache.clear_all();
+                        } else if value & CACR_060_CUBC != 0 {
+                            self.oep060.branch_cache.clear_user();
+                        }
+                        if self.cacr & CACR_060_EBC != 0 && value & CACR_060_EBC == 0 {
+                            self.oep060.branch_cache.clear_all();
+                        }
+                        (
+                            CACR_060_EDC
+                                | CACR_060_NAD
+                                | CACR_060_ESB
+                                | CACR_060_DPI
+                                | CACR_060_FOC
+                                | CACR_060_EBC
+                                | CACR_060_EIC
+                                | CACR_060_NAI
+                                | CACR_060_FIC,
+                            0,
+                        )
+                    }
                     // 68040 CACR defines only the two cache-enable bits and
                     // has no clear strobes - invalidation is done with the
                     // CINV/CPUSH instructions (see decode.rs). Reserved bits
@@ -895,6 +1015,8 @@ impl CpuCore {
             0x005 => self.itt1 = value,    // Instruction TTR 1 (68040)
             0x006 => self.dtt0 = value,    // Data TTR 0 (68040)
             0x007 => self.dtt1 = value,    // Data TTR 1 (68040)
+            // 0x008 is BUSCR on the 68060 and DACR0 on the 68040.
+            0x008 if self.is_060() => self.buscr = value,
             0x008 => self.dacr0 = value,   // Data Access Control 0 (68040)
             0x009 => self.dacr1 = value,   // Data Access Control 1 (68040)
             0x00A => self.iacr0 = value,   // Instruction Access Control 0 (68040)
@@ -928,6 +1050,12 @@ impl CpuCore {
             0x805 => self.mmu_sr = value,        // MMU Status Register (68040)
             0x806 => self.mmu_crp_aptr = value,  // User Root Pointer (68040; URP)
             0x807 => self.mmu_srp_aptr = value,  // Supervisor Root Pointer (68040)
+            0x808 if self.is_060() => {
+                // PCR: identification and revision are read-only; only
+                // EDEBUG, DFP, and ESS are writable.
+                let writable = PCR_EDEBUG | PCR_DFP | PCR_ESS;
+                self.pcr = (self.pcr & !writable) | (value & writable);
+            }
             _ => {}                              // Unknown register - ignore
         }
         // A write to TC, a root pointer, or a TTR can change every translation,
@@ -947,11 +1075,26 @@ impl CpuCore {
         )
     }
 
+    /// Whether an instruction the 68060 dropped from silicon must take its
+    /// unimplemented trap (vector 61 for integer, the FP-unimplemented
+    /// family for FPU ops) rather than execute natively.
+    #[inline]
+    pub(crate) fn trap_unimpl_060(&self) -> bool {
+        self.cpu_type == CpuType::M68060 && !self.emulate_unimplemented_060
+    }
+
+    /// True for the 68060, which shares the 68040's MMU table format and
+    /// TC enable bit but drops PTEST/PMOVE and adds PLPA.
+    #[inline]
+    pub fn is_060(&self) -> bool {
+        self.cpu_type == CpuType::M68060
+    }
+
     /// Whether TC's translation-enable bit is set. The bit position differs by
-    /// part: the 68040 uses TC[15], the 68030 uses TC[31].
+    /// part: the 68040 and 68060 use TC[15], the 68030 uses TC[31].
     #[inline]
     pub fn tc_enable(&self) -> bool {
-        if self.is_040() {
+        if self.is_040() || self.is_060() {
             self.mmu_tc & 0x0000_8000 != 0
         } else {
             self.mmu_tc & 0x8000_0000 != 0
@@ -1027,6 +1170,7 @@ impl CpuCore {
         address: u32,
         write: bool,
         instruction: bool,
+        size: u32,
     ) {
         if self.faulted() {
             return;
@@ -1044,7 +1188,8 @@ impl CpuCore {
         self.set_sr_noint_nosp(self.sr_save);
         self.dar = self.dar_save;
         self.exception_processing = true;
-        let _ = self.exception_bus_error(bus, address, write, instruction);
+        let cause = self.pending_fault_cause.take();
+        let _ = self.exception_bus_error(bus, address, write, instruction, size, cause);
         self.exception_processing = false;
         self.run_mode = RUN_MODE_BERR_AERR_RESET;
     }
@@ -1070,9 +1215,7 @@ impl CpuCore {
                 ) {
                     Ok(p) => addr = self.address(p),
                     Err(f) => {
-                        self.handle_mmu_fault(
-                            bus, f, /*write=*/ false, /*instruction=*/ false,
-                        );
+                        self.handle_mmu_fault(bus, f, false, false, 1);
                         return 0;
                     }
                 }
@@ -1082,7 +1225,7 @@ impl CpuCore {
             Ok(v) => v,
             Err(f) => {
                 if matches!(f.kind, BusFaultKind::BusError) {
-                    self.trigger_bus_error(bus, addr, false, false);
+                    self.trigger_bus_error(bus, addr, false, false, 1);
                 }
                 0
             }
@@ -1118,9 +1261,7 @@ impl CpuCore {
                 ) {
                     Ok(p) => addr = self.address(p),
                     Err(f) => {
-                        self.handle_mmu_fault(
-                            bus, f, /*write=*/ false, /*instruction=*/ false,
-                        );
+                        self.handle_mmu_fault(bus, f, false, false, 2);
                         return 0;
                     }
                 }
@@ -1130,7 +1271,7 @@ impl CpuCore {
             Ok(v) => v,
             Err(f) => {
                 if matches!(f.kind, BusFaultKind::BusError) {
-                    self.trigger_bus_error(bus, addr, false, false);
+                    self.trigger_bus_error(bus, addr, false, false, 2);
                 }
                 0
             }
@@ -1166,9 +1307,7 @@ impl CpuCore {
                 ) {
                     Ok(p) => addr = self.address(p),
                     Err(f) => {
-                        self.handle_mmu_fault(
-                            bus, f, /*write=*/ false, /*instruction=*/ false,
-                        );
+                        self.handle_mmu_fault(bus, f, false, false, 4);
                         return 0;
                     }
                 }
@@ -1178,7 +1317,7 @@ impl CpuCore {
             Ok(v) => v,
             Err(f) => {
                 if matches!(f.kind, BusFaultKind::BusError) {
-                    self.trigger_bus_error(bus, addr, false, false);
+                    self.trigger_bus_error(bus, addr, false, false, 4);
                 }
                 0
             }
@@ -1206,9 +1345,7 @@ impl CpuCore {
                 ) {
                     Ok(p) => addr = self.address(p),
                     Err(f) => {
-                        self.handle_mmu_fault(
-                            bus, f, /*write=*/ true, /*instruction=*/ false,
-                        );
+                        self.handle_mmu_fault(bus, f, true, false, 1);
                         return;
                     }
                 }
@@ -1217,7 +1354,7 @@ impl CpuCore {
         if let Err(f) = bus.try_write_byte(addr, value)
             && matches!(f.kind, BusFaultKind::BusError)
         {
-            self.trigger_bus_error(bus, addr, true, false);
+            self.trigger_bus_error(bus, addr, true, false, 1);
         }
     }
 
@@ -1250,9 +1387,7 @@ impl CpuCore {
                 ) {
                     Ok(p) => addr = self.address(p),
                     Err(f) => {
-                        self.handle_mmu_fault(
-                            bus, f, /*write=*/ true, /*instruction=*/ false,
-                        );
+                        self.handle_mmu_fault(bus, f, true, false, 2);
                         return;
                     }
                 }
@@ -1261,7 +1396,7 @@ impl CpuCore {
         if let Err(f) = bus.try_write_word(addr, value)
             && matches!(f.kind, BusFaultKind::BusError)
         {
-            self.trigger_bus_error(bus, addr, true, false);
+            self.trigger_bus_error(bus, addr, true, false, 2);
         }
     }
 
@@ -1294,9 +1429,7 @@ impl CpuCore {
                 ) {
                     Ok(p) => addr = self.address(p),
                     Err(f) => {
-                        self.handle_mmu_fault(
-                            bus, f, /*write=*/ true, /*instruction=*/ false,
-                        );
+                        self.handle_mmu_fault(bus, f, true, false, 4);
                         return;
                     }
                 }
@@ -1305,7 +1438,7 @@ impl CpuCore {
         if let Err(f) = bus.try_write_long(addr, value)
             && matches!(f.kind, BusFaultKind::BusError)
         {
-            self.trigger_bus_error(bus, addr, true, false);
+            self.trigger_bus_error(bus, addr, true, false, 4);
         }
     }
 
@@ -1315,6 +1448,7 @@ impl CpuCore {
         fault: crate::mmu::MmuFault,
         write: bool,
         instruction: bool,
+        size: u32,
     ) {
         use crate::core::exceptions::vector;
         use crate::mmu::MmuFaultKind;
@@ -1323,9 +1457,10 @@ impl CpuCore {
         // 1. exception_processing flag in translate() bypasses MMU during exception handling
         // 2. Double-fault detection in take_exception() halts CPU on recursive faults
 
+        self.pending_fault_cause = Some(fault.cause);
         match fault.kind {
             MmuFaultKind::BusError => {
-                self.trigger_bus_error(bus, fault.address, write, instruction)
+                self.trigger_bus_error(bus, fault.address, write, instruction, size)
             }
             MmuFaultKind::ConfigurationError => {
                 let _ = self.take_exception(bus, vector::MMU_CONFIGURATION_ERROR);
@@ -1342,7 +1477,7 @@ impl CpuCore {
                 // can restart it once the handler fixes the mapping (the 040
                 // gets a resumable format-7 frame; the 030 long bus-fault
                 // format-A/B frame is still the minimal fallback).
-                self.trigger_bus_error(bus, fault.address, write, instruction);
+                self.trigger_bus_error(bus, fault.address, write, instruction, size);
             }
         }
     }
@@ -1358,6 +1493,15 @@ impl CpuCore {
     pub fn exec_mmu_op0<B: AddressBus>(&mut self, bus: &mut B, opcode: u16) -> i32 {
         use super::ea::AddressingMode;
         use super::types::Size;
+
+        // The 68060 has no PMOVE (MMU registers are MOVEC-only) and no
+        // 030-form PTEST/PFLUSH in this encoding space: undefined F-line.
+        // Watch item: the 040 arm below NOPs 030-form PTESTs because
+        // 68040.library issues them during setup; extend that pragmatism
+        // here if an OS's 68060 support library turns out to do the same.
+        if self.is_060() {
+            return 0;
+        }
 
         // MMU ops require PMMU-capable CPU (68030/68040).
         if !self.has_pmmu {

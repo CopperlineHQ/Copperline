@@ -1631,8 +1631,16 @@ fn test_app_with_audio(audio: Box<dyn AudioSink>) -> super::App {
         Paula::new(Box::new(StdoutSink::new()), audio),
         FloppyController::default(),
     );
-    let emu = Emulator::new(bus, CpuModel::M68000, false, PacingBudget::Cycles, 2, false)
-        .expect("test emulator");
+    let emu = Emulator::new(
+        bus,
+        CpuModel::M68000,
+        false,
+        Default::default(),
+        PacingBudget::Cycles,
+        2,
+        false,
+    )
+    .expect("test emulator");
     super::App::new(
         emu,
         true,

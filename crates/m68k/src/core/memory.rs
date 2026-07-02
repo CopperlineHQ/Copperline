@@ -82,6 +82,14 @@ pub trait AddressBus {
     fn try_read_immediate_long(&mut self, address: u32) -> Result<u32, BusFault> {
         Ok(self.read_immediate_long(address))
     }
+    /// Whether the most recent instruction-stream read was served from the
+    /// CPU's instruction cache. The 68060 timing model gates superscalar
+    /// pairing and branch folding on a cached fetch stream; plain test
+    /// buses default to true (pair freely).
+    fn last_fetch_was_cached(&self) -> bool {
+        true
+    }
+
     fn interrupt_acknowledge(&mut self, _level: u8) -> u32 {
         0xFFFF_FFFF
     }

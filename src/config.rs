@@ -52,6 +52,8 @@ pub struct Config {
     /// the 68030. Only caches expansion RAM and ROM (chip/slow RAM get
     /// cache inhibit, as on real Amigas, because DMA writes them).
     pub cpu_dcache: bool,
+    /// 68060 unimplemented-instruction policy (faithful traps by default).
+    pub cpu_unimplemented: UnimplementedPolicy,
     pub emulation: Emulation,
     pub chip_ram_bytes: usize,
     pub fast_ram_bytes: usize,
@@ -426,6 +428,7 @@ pub enum CpuModel {
     M68020,
     M68030,
     M68040,
+    M68060,
 }
 
 impl CpuModel {
@@ -434,7 +437,7 @@ impl CpuModel {
     /// parts, which Copperline does not model); 68881/68882 boards for the
     /// other CPUs are opt-in via `[cpu] fpu = true`.
     pub fn default_fpu(self) -> bool {
-        self == CpuModel::M68040
+        matches!(self, CpuModel::M68040 | CpuModel::M68060)
     }
 
     /// Default CPU clock in MHz for this model: a stock 68000/68010 runs at
@@ -446,6 +449,7 @@ impl CpuModel {
             CpuModel::M68000 => 7.09,
             CpuModel::M68EC020 | CpuModel::M68020 => 14.0,
             CpuModel::M68030 | CpuModel::M68040 => 25.0,
+            CpuModel::M68060 => 50.0,
         }
     }
 
@@ -458,15 +462,30 @@ impl CpuModel {
     pub fn has_instruction_cache(self) -> bool {
         matches!(
             self,
-            CpuModel::M68EC020 | CpuModel::M68020 | CpuModel::M68030 | CpuModel::M68040
+            CpuModel::M68EC020
+                | CpuModel::M68020
+                | CpuModel::M68030
+                | CpuModel::M68040
+                | CpuModel::M68060
         )
     }
 
     /// Whether this model has the on-chip data cache Copperline models. The
     /// 68030 (256 bytes) and 68040 (4 KB) have one; the 020 has none.
     pub fn has_data_cache(self) -> bool {
-        matches!(self, CpuModel::M68030 | CpuModel::M68040)
+        matches!(self, CpuModel::M68030 | CpuModel::M68040 | CpuModel::M68060)
     }
+}
+
+/// What a 68060 does with the instructions dropped from its silicon:
+/// faithful traps (the OS-side 68060.library emulates them, as on real
+/// accelerator boards) or direct native execution for systems without
+/// the library.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum UnimplementedPolicy {
+    #[default]
+    Trap,
+    Native,
 }
 
 /// PAL Amiga colour clock (CCK), in Hz. The 68000 bus advances one slot per
@@ -724,6 +743,7 @@ impl Default for Config {
             cpu_clock_mhz: CpuModel::M68000.default_clock_mhz(),
             cpu_icache: false,
             cpu_dcache: false,
+            cpu_unimplemented: UnimplementedPolicy::Trap,
             emulation: Emulation {
                 power_on: true,
                 pacing_budget: PacingBudget::Cycles,
@@ -1202,6 +1222,13 @@ pub(crate) struct RawCpu {
     /// Model the on-chip data cache (68030 only; default false).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) dcache: Option<bool>,
+    /// 68060 only: what happens on the instructions the 68060 dropped from
+    /// silicon (MOVEP, CHK2/CMP2, CAS2, misaligned CAS, 64-bit MUL/DIV, the
+    /// unimplemented FPU subset). "trap" (default) is faithful - the OS
+    /// needs 68060.library to emulate them; "native" executes them directly
+    /// for systems without the library.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) unimplemented: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -1397,6 +1424,29 @@ impl TryFrom<RawConfig> for Config {
             .icache
             .unwrap_or_else(|| cpu.has_instruction_cache());
         let cpu_dcache = raw.cpu.dcache.unwrap_or_else(|| cpu.has_data_cache());
+        let cpu_unimplemented = match raw.cpu.unimplemented.as_deref() {
+            None => UnimplementedPolicy::Trap,
+            Some(s) => {
+                let policy = match s.trim().to_ascii_lowercase().as_str() {
+                    "trap" => UnimplementedPolicy::Trap,
+                    "native" => UnimplementedPolicy::Native,
+                    _ => {
+                        errors.push(anyhow!(
+                            "[cpu] unimplemented must be \"trap\" or \"native\", got {:?}",
+                            s
+                        ));
+                        UnimplementedPolicy::Trap
+                    }
+                };
+                if cpu != CpuModel::M68060 {
+                    errors.push(anyhow!(
+                        "[cpu] unimplemented applies only to the 68060 \
+                         (other models implement their full instruction sets)"
+                    ));
+                }
+                policy
+            }
+        };
         if cpu_icache && !cpu.has_instruction_cache() {
             errors.push(anyhow!(
                 "[cpu] icache = true needs a 68020/68EC020/68030/68040 \
@@ -1649,6 +1699,7 @@ impl TryFrom<RawConfig> for Config {
             cpu_clock_mhz,
             cpu_icache,
             cpu_dcache,
+            cpu_unimplemented,
             emulation,
             chip_ram_bytes,
             fast_ram_bytes,
@@ -1756,12 +1807,9 @@ fn parse_cpu(s: &str) -> Result<CpuModel> {
         "68020" | "020" => Ok(CpuModel::M68020),
         "68030" | "030" => Ok(CpuModel::M68030),
         "68040" | "040" => Ok(CpuModel::M68040),
-        "68060" | "060" => Err(anyhow!(
-            "cpu model {:?} is not supported by the m68k backend: expected 68000 / 68EC020 / 68020 / 68030 / 68040",
-            s
-        )),
+        "68060" | "060" => Ok(CpuModel::M68060),
         _ => Err(anyhow!(
-            "unknown cpu model {:?}: expected 68000 / 68EC020 / 68020 / 68030 / 68040",
+            "unknown cpu model {:?}: expected 68000 / 68EC020 / 68020 / 68030 / 68040 / 68060",
             s
         )),
     }
@@ -2046,7 +2094,10 @@ fn validate_fast_ram(fast: usize, chip: usize) -> Result<()> {
 }
 
 fn cpu_has_32bit_bus(cpu: CpuModel) -> bool {
-    matches!(cpu, CpuModel::M68020 | CpuModel::M68030 | CpuModel::M68040)
+    matches!(
+        cpu,
+        CpuModel::M68020 | CpuModel::M68030 | CpuModel::M68040 | CpuModel::M68060
+    )
 }
 
 fn validate_z3_ram(z3: usize, cpu: CpuModel) -> Result<()> {
@@ -2360,6 +2411,7 @@ mod tests {
                 clock_mhz: Some(14.18),
                 icache: Some(true),
                 dcache: None,
+                unimplemented: None,
             },
             memory: RawMemory {
                 chip: Some("2M".to_string()),
@@ -3041,16 +3093,20 @@ mod tests {
     }
 
     #[test]
-    fn cpu_68060_is_rejected() {
-        let err = parse_config(
+    fn cpu_68060_without_fpu_is_an_lc060() -> Result<()> {
+        // fpu = false on the 060 models the LC/EC parts: accepted, and the
+        // core presents it as PCR.DFP (FP instructions take the disabled
+        // trap) rather than a config error.
+        let cfg = parse_config(
             r#"
             [cpu]
             model = "68060"
             fpu = false
             "#,
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("not supported"));
+        )?;
+        assert_eq!(cfg.cpu, CpuModel::M68060);
+        assert!(!cfg.fpu);
+        Ok(())
     }
 
     #[test]
@@ -3473,6 +3529,58 @@ mod tests {
         assert_eq!(clocks_per_cck_for_mhz(25.0), 7);
         // Never zero.
         assert_eq!(clocks_per_cck_for_mhz(0.5), 1);
+    }
+
+    #[test]
+    fn cpu_68060_parses_with_full_defaults() -> Result<()> {
+        let cfg = parse_config(
+            r#"
+            [cpu]
+            model = "68060"
+            "#,
+        )?;
+        assert_eq!(cfg.cpu, CpuModel::M68060);
+        assert_eq!(cfg.cpu_clock_mhz, 50.0, "060 defaults to 50 MHz");
+        assert!(cfg.fpu, "the full 68060 has its FPU on-die");
+        assert!(cfg.cpu_icache && cfg.cpu_dcache, "8 KB caches default on");
+        assert_eq!(cfg.cpu_unimplemented, UnimplementedPolicy::Trap);
+        Ok(())
+    }
+
+    #[test]
+    fn cpu_unimplemented_policy_parses_and_is_68060_only() -> Result<()> {
+        let cfg = parse_config(
+            r#"
+            [cpu]
+            model = "68060"
+            unimplemented = "native"
+            "#,
+        )?;
+        assert_eq!(cfg.cpu_unimplemented, UnimplementedPolicy::Native);
+
+        let err = parse_config(
+            r#"
+            [cpu]
+            model = "68040"
+            unimplemented = "native"
+            "#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("applies only to the 68060"),
+            "{err}"
+        );
+
+        let err = parse_config(
+            r#"
+            [cpu]
+            model = "68060"
+            unimplemented = "sometimes"
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("trap"), "{err}");
+        Ok(())
     }
 
     #[test]
