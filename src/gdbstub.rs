@@ -177,6 +177,7 @@ impl Session {
             _ if packet.starts_with("qXfer:features:read:target.xml:") => {
                 self.read_target_xml(packet)?
             }
+            _ if packet.starts_with("qOffsets") => self.query_offsets(),
             _ if packet.starts_with("qRcmd,") => {
                 let command = String::from_utf8(hex_decode(&packet[6..])?)
                     .context("decoding monitor command")?;
@@ -548,6 +549,45 @@ impl Session {
         Ok(format!("{prefix}{chunk}"))
     }
 
+    /// qOffsets: relocate the debugged executable's sections to where
+    /// LoadSeg put them. TextSeg is the first hunk; a second hunk (the
+    /// usual data hunk of an amiga-gcc build) becomes DataSeg. Empty
+    /// reply (packet unsupported) when no process seglist is walkable,
+    /// so plain ROM-level sessions are unaffected.
+    fn query_offsets(&self) -> String {
+        match crate::amigaos::segments_on_bus(self.emu.bus()) {
+            Ok(segs) if !segs.is_empty() => {
+                let mut reply = format!("TextSeg={:X}", segs[0].start);
+                if let Some(data) = segs.get(1) {
+                    reply.push_str(&format!(";DataSeg={:X}", data.start));
+                }
+                reply
+            }
+            _ => String::new(),
+        }
+    }
+
+    fn monitor_segments(&self) -> String {
+        match crate::amigaos::segments_on_bus(self.emu.bus()) {
+            Err(reason) => format!("{reason}\n"),
+            Ok(segs) if segs.is_empty() => {
+                "current task has no walkable segment list\n".to_string()
+            }
+            Ok(segs) => {
+                let mut out = String::new();
+                for (i, seg) in segs.iter().enumerate() {
+                    out.push_str(&format!(
+                        "hunk {i}: {:06X}..{:06X}  ({} bytes)\n",
+                        seg.start,
+                        seg.start + seg.size,
+                        seg.size
+                    ));
+                }
+                out
+            }
+        }
+    }
+
     fn handle_monitor(&mut self, command: &str) -> Result<String> {
         let mut parts = command.split_whitespace();
         let Some(cmd) = parts.next() else {
@@ -565,6 +605,7 @@ impl Session {
                 self.emu.retired_instructions()
             )),
             "custom" => Ok(self.monitor_custom()),
+            "segments" => Ok(self.monitor_segments()),
             "stepover" => {
                 // Step over a BSR/JSR/TRAP call (single step otherwise),
                 // bounded so a call that never returns cannot hang the server.
@@ -808,7 +849,8 @@ fn monitor_help() -> String {
      beam-trap VPOS [HPOS] | clear-beam-traps\n\
      copper-break ADDR | clear-copper-breaks\n\
      copper [auto|pc|ADDR] [COUNT]\n\
-     last-writer ADDR\n"
+     last-writer ADDR\n\
+     segments\n"
         .to_string()
 }
 

@@ -167,3 +167,7 @@ together:
    colour clock of the suspect frame.
 5. Compare against real hardware with the `timing-test/` disk when the
    question is "is this operation too fast/slow".
+
+For interactive sessions, the same instruction trace is available at
+runtime without environment variables: the [console](console)'s
+`TRACE START [PATH]` / `TRACE STOP`.

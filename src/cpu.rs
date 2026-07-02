@@ -50,6 +50,15 @@ fn sync_cck_enabled_setting() -> bool {
 /// Entries kept in the debugger's recent-PC ring.
 pub const UI_PC_HISTORY_CAP: usize = 64;
 
+/// A runtime instruction trace started from the console: disassembled
+/// lines with beam positions, written through a buffered file.
+struct UiTrace {
+    writer: std::io::BufWriter<std::fs::File>,
+    path: std::path::PathBuf,
+    lines: u64,
+    cap: u64,
+}
+
 pub struct M68kMachine {
     cpu: CpuCore,
     bus: CpuBus,
@@ -90,6 +99,9 @@ pub struct M68kMachine {
     ui_pc_history_next: usize,
     ui_pc_history_len: usize,
     ui_pc_history_enabled: bool,
+    /// Console-started instruction trace (TRACE START/STOP), None when
+    /// off; per-instruction cost only while tracing.
+    ui_trace: Option<UiTrace>,
     // COPPERLINE_DBG_SPREN: previous DMACON, to detect the instruction that
     // clears the sprite-DMA-enable bit.
     dbg_prev_dmacon: u16,
@@ -253,6 +265,7 @@ impl M68kMachine {
             ui_pc_history_next: 0,
             ui_pc_history_len: 0,
             ui_pc_history_enabled: false,
+            ui_trace: None,
             dbg_prev_dmacon: 0,
             dbg_prev_fc: 0,
             dbg_fc_count: 0,
@@ -1132,6 +1145,77 @@ impl M68kMachine {
         }
     }
 
+    /// Start a runtime instruction trace to `path`, replacing any
+    /// running one. `cap` bounds the file (a final marker line notes a
+    /// cap-stop). Costs a disassembly and a buffered write per retired
+    /// instruction while active.
+    pub fn ui_trace_start(&mut self, path: std::path::PathBuf, cap: u64) -> std::io::Result<()> {
+        let file = std::fs::File::create(&path)?;
+        self.ui_trace = Some(UiTrace {
+            writer: std::io::BufWriter::new(file),
+            path,
+            lines: 0,
+            cap: cap.max(1),
+        });
+        Ok(())
+    }
+
+    /// Stop the runtime trace, flushing it. Returns (path, lines).
+    pub fn ui_trace_stop(&mut self) -> Option<(std::path::PathBuf, u64)> {
+        use std::io::Write;
+        let mut trace = self.ui_trace.take()?;
+        let _ = trace.writer.flush();
+        Some((trace.path, trace.lines))
+    }
+
+    /// The running trace's path and line count, if one is active.
+    pub fn ui_trace_status(&self) -> Option<(&std::path::Path, u64)> {
+        self.ui_trace
+            .as_ref()
+            .map(|trace| (trace.path.as_path(), trace.lines))
+    }
+
+    fn ui_trace_record(&mut self, pc: u32) {
+        use std::io::Write;
+        let (text, _) = crate::disasm::disassemble(
+            |addr| self.bus.bus.peek_word_any(addr),
+            pc,
+            self.cpu_type(),
+        );
+        let vpos = self.bus.bus.agnus.vpos;
+        let hpos = self.bus.bus.agnus.hpos;
+        let Some(trace) = self.ui_trace.as_mut() else {
+            return;
+        };
+        let _ = writeln!(trace.writer, "{pc:06X} [{vpos:3},{hpos:3}]  {text}");
+        trace.lines += 1;
+        if trace.lines >= trace.cap {
+            let _ = writeln!(
+                trace.writer,
+                "-- trace stopped at the {} line cap --",
+                trace.cap
+            );
+            let _ = trace.writer.flush();
+            self.ui_trace = None;
+        }
+    }
+
+    /// Whether the CPU halted on a double fault (a bus/address error
+    /// during exception processing) -- the hardware condition behind a
+    /// dead machine that software alerts cannot even report.
+    pub fn cpu_double_faulted(&self) -> bool {
+        self.cpu.is_halted()
+    }
+
+    /// Force the halted state (tests of the surfacing path only; on the
+    /// plain 68000 model the double fault is reachable via MMU-fault
+    /// recursion, which is heavy to stage in a unit test).
+    #[cfg(test)]
+    pub fn test_force_double_fault(&mut self) {
+        self.cpu.stopped = 1;
+        self.cpu.run_mode = 1; // RUN_MODE_BERR_AERR_RESET
+    }
+
     pub fn ui_breaks(&self) -> &crate::debugger::InteractiveBreaks {
         &self.ui_breaks
     }
@@ -1499,6 +1583,9 @@ impl M68kMachine {
                                 (self.ui_pc_history_next + 1) % UI_PC_HISTORY_CAP;
                             self.ui_pc_history_len =
                                 (self.ui_pc_history_len + 1).min(UI_PC_HISTORY_CAP);
+                        }
+                        if self.ui_trace.is_some() {
+                            self.ui_trace_record(dbg_pc_before);
                         }
                         self.debug_check_ipl(dbg_ipl_before, positive_cpu_cycles(cycles));
                         if self.ui_breaks.armed() {

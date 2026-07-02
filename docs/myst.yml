@@ -29,6 +29,7 @@ project:
         - file: debugger/headless.md
         - file: debugger/reverse.md
         - file: debugger/gdb.md
+        - file: debugger/workflows.md
     - title: Internals
       children:
         - file: internals/architecture.md
@@ -55,6 +56,7 @@ project:
         - debugger/headless.md
         - debugger/reverse.md
         - debugger/gdb.md
+        - debugger/workflows.md
         - internals/architecture.md
         - internals/timing.md
         - internals/chipset.md

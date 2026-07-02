@@ -633,6 +633,11 @@ pub struct App {
     /// The reason for the last interactive breakpoint/watchpoint stop,
     /// shown on the debugger's Break tab until execution resumes.
     last_debug_stop: Option<String>,
+    /// A CPU double-fault halt has been reported (reset when the CPU
+    /// leaves the halted state, e.g. by reset or a state load).
+    reported_double_fault: bool,
+    /// The console's running memory hunt (HUNT delta search), if any.
+    hunt: Option<console::HuntState>,
     /// Active video+audio capture (shortcut or the menu's Record Video item),
     /// or None when not recording. Frames and the matching mixer audio are
     /// appended on emulated-frame boundaries, so captures stay in sync
@@ -915,6 +920,8 @@ impl App {
             paused_before_analyzer: false,
             paused_before_console: false,
             last_debug_stop: None,
+            reported_double_fault: false,
+            hunt: None,
             recorder: None,
             record_fb: Vec::new(),
         }
@@ -4437,8 +4444,31 @@ impl App {
 
     /// Surface a pending breakpoint/watchpoint hit: pause the machine,
     /// bring up the debugger window, and report the reason. Returns true
-    /// when a stop was pending.
+    /// when a stop was pending. Also reports (once) a CPU double-fault
+    /// halt -- the guest is dead at that point, so it must not pass
+    /// silently.
     fn surface_debug_stop(&mut self) -> bool {
+        if self.emu.machine.cpu_double_faulted() {
+            if !self.reported_double_fault {
+                self.reported_double_fault = true;
+                let message = format!(
+                    "CPU halted: double fault at pc ${:06X} (bus/address error during exception)",
+                    self.emu.machine.pc() & 0x00FF_FFFF
+                );
+                warn!("{message}");
+                self.last_debug_stop = Some(message.clone());
+                if let Some(panel) = self.console_panel.as_mut() {
+                    panel.push_output(format!("!{message}"));
+                }
+                self.paused = true;
+                self.sync_live_audio_suspension();
+                self.show_osd(message);
+                self.request_redraw();
+                return true;
+            }
+        } else {
+            self.reported_double_fault = false;
+        }
         let Some(stop) = self.emu.machine.take_ui_debug_stop() else {
             return false;
         };

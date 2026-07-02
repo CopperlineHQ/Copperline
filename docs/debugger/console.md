@@ -85,7 +85,24 @@ Inspection and modification:
 | `STACK`, `BT` | Heuristic call-stack walk: stack longwords that look like return addresses after a JSR/BSR |
 | `POKE ADDR VAL` | Write a memory word |
 | `SETREG REG VAL` | Set a CPU register (`SETREG D0 1234`) |
+| `TRACE START [PATH]` | Start a runtime instruction trace: one disassembled line per retired instruction with its beam position, no env var or restart needed (capped at a million lines) |
+| `TRACE STOP` / `TRACE` | Stop the trace / report its progress |
 | `HELP`, `CLEAR`, `CLOSE` | Console housekeeping |
+
+Memory hunting (a trainer-style delta search over all writable RAM --
+chip, slow, and Zorro RAM boards):
+
+| Command | Effect |
+|---|---|
+| `HUNT START [B\|W]` | Snapshot RAM and begin a byte- or word-wide (default) hunt |
+| `HUNT EQ\|NE\|LT\|GT VALUE` | Keep candidates whose *current* value compares to VALUE (hex) |
+| `HUNT SAME` / `HUNT DIFF` | Keep candidates unchanged / changed since the last filter |
+| `HUNT LIST [N]` | Show surviving candidates with live values |
+| `HUNT OFF` | Forget the hunt |
+
+The classic workflow: `HUNT START`, `HUNT EQ 3` while you have three
+lives, lose one, `HUNT EQ 2` -- the survivor is your lives counter,
+ready for `WATCH` (who decrements it?) or `POKE`.
 
 AmigaOS introspection (read-only walks of exec's lists, safe at any
 time -- if the OS is not up yet the command says so instead of printing
@@ -97,8 +114,19 @@ garbage):
 | `LIBS` | Opened libraries with versions (`graphics.library v40.10`) |
 | `DEVS` | Devices with versions |
 | `RESOURCES`, `PORTS` | The resource and message-port lists |
+| `SEGMENTS` | The current process's loaded hunks (its CLI command's segment list when there is one), with the `add-symbol-file` line a source-level GDB session needs |
 | `CATCHTASK NAME` | Stop when exec schedules a task whose name contains NAME (case-insensitive); `CATCHTASK` alone clears it |
+| `CATCHALERT` | Break at exec's `Alert()` entry: fires on every guru/alert with D7 holding the code |
+| `GURU [CODE]` | Decode an alert code (default: the current D7): deadend flag, subsystem, cause, CPU-trap alerts |
 
 `CATCHTASK` is the tool for "wake me when my process actually runs": it
 baselines on the currently scheduled task and fires on the next
 reschedule to a matching one, reporting the task's name and address.
+
+`CATCHALERT` plus `GURU` is the crash workflow: arm the catch, and when
+the machine stops in `Alert()`, `GURU` translates D7 into words
+(`DEADEND exec.library, no memory`). A CPU **double fault** -- a bus or
+address error during exception processing, the condition even the OS
+cannot report -- is always surfaced: the machine pauses with a
+"CPU halted: double fault" message on screen, in the console, and on
+the Break tab.

@@ -351,6 +351,67 @@ pub fn custom_reg_bit_decode(off: u16, value: u16) -> Vec<String> {
     lines
 }
 
+/// Decode an AmigaOS alert ("guru meditation") code: the deadend flag,
+/// the owning subsystem, the general cause, and the CPU-trap alerts
+/// exec raises for processor exceptions.
+pub fn guru_decode(code: u32) -> String {
+    let deadend = code & 0x8000_0000 != 0;
+    // Alerts exec raises for CPU exceptions carry the vector number in
+    // the low word with no subsystem byte.
+    if code & 0x7FFF_0000 == 0 && (2..=0x2F).contains(&(code & 0xFFFF)) {
+        return format!(
+            "{}CPU exception: {}",
+            if deadend { "DEADEND " } else { "" },
+            exception_vector_name((code & 0xFFFF) as u16)
+        );
+    }
+    let subsystem = match (code >> 24) & 0x7F {
+        0x01 => "exec.library",
+        0x02 => "graphics.library",
+        0x03 => "layers.library",
+        0x04 => "intuition.library",
+        0x05 => "mathlibs",
+        0x07 => "dos.library",
+        0x08 => "ramlib",
+        0x09 => "icon.library",
+        0x0A => "expansion.library",
+        0x0B => "diskfont.library",
+        0x10 => "audio.device",
+        0x11 => "console.device",
+        0x12 => "gameport.device",
+        0x13 => "keyboard.device",
+        0x14 => "trackdisk.device",
+        0x15 => "timer.device",
+        0x20 => "cia.resource",
+        0x21 => "disk.resource",
+        0x22 => "misc.resource",
+        0x30 => "bootstrap",
+        0x31 => "workbench",
+        0x32 => "diskcopy",
+        0x33 => "gadtools",
+        _ => "unknown subsystem",
+    };
+    let general = match (code >> 16) & 0xFF {
+        0x01 => ", no memory",
+        0x02 => ", MakeLibrary failed",
+        0x03 => ", OpenLibrary failed",
+        0x04 => ", OpenDevice failed",
+        0x05 => ", OpenResource failed",
+        0x06 => ", I/O error",
+        0x07 => ", no signal",
+        0x08 => ", bad parameter",
+        0x09 => ", CloseLibrary failed",
+        0x0A => ", CloseDevice failed",
+        0x0B => ", process creation failed",
+        _ => "",
+    };
+    format!(
+        "{}{subsystem}{general} (specific ${:04X})",
+        if deadend { "DEADEND " } else { "recoverable " },
+        code & 0xFFFF
+    )
+}
+
 /// The hardware name of a custom-register word offset into $DFF000
 /// ($000-$1FE), e.g. 0x096 -> "DMACON". Banked registers (audio channels,
 /// bitplane/sprite pointers and data, colors) are derived; offsets without
@@ -1177,6 +1238,26 @@ mod tests {
         assert!(breaks.breakpoints.is_empty());
         assert!(breaks.watches.is_empty());
         assert!(breaks.reg_watches.is_empty());
+    }
+
+    #[test]
+    fn guru_decode_names_subsystems_causes_and_cpu_traps() {
+        assert_eq!(
+            guru_decode(0x8000_0003),
+            "DEADEND CPU exception: Address error"
+        );
+        assert_eq!(
+            guru_decode(0x0000_0004),
+            "CPU exception: Illegal instruction"
+        );
+        let text = guru_decode(0x8100_0005);
+        assert!(text.starts_with("DEADEND exec.library"), "{text}");
+        let text = guru_decode(0x0701_0002);
+        assert!(
+            text.contains("dos.library") && text.contains("no memory"),
+            "{text}"
+        );
+        assert!(text.starts_with("recoverable"), "{text}");
     }
 
     #[test]

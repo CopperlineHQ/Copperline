@@ -2576,6 +2576,42 @@ fn plant_exec_world(app: &mut super::App) {
 }
 
 #[test]
+fn console_segments_walks_the_cli_module() {
+    let mut app = test_app();
+    app.open_console();
+    plant_exec_world(&mut app);
+    // Make ThisTask ($2000) a CLI process: NT_PROCESS, pr_CLI -> $4000
+    // whose cli_Module is a two-hunk seglist at $8000 -> $9000.
+    {
+        let ram = &mut app.emu.bus_mut().mem.chip_ram;
+        let put32 = |ram: &mut [u8], addr: usize, v: u32| {
+            ram[addr..addr + 4].copy_from_slice(&v.to_be_bytes());
+        };
+        ram[0x2000 + 8] = 13; // NT_PROCESS
+        put32(ram, 0x2000 + 0xAC, 0x4000 >> 2);
+        put32(ram, 0x4000 + 0x3C, 0x8000 >> 2);
+        put32(ram, 0x8000 - 4, 0x100);
+        put32(ram, 0x8000, 0x9000 >> 2);
+        put32(ram, 0x9000 - 4, 0x40);
+        put32(ram, 0x9000, 0);
+    }
+    let out = console_run(&mut app, "SEGMENTS");
+    assert!(
+        out.iter().any(|l| l.contains("hunk 0: $008004..$0080FC")),
+        "{out:?}"
+    );
+    assert!(
+        out.iter().any(|l| l.contains("hunk 1: $009004..$00903C")),
+        "{out:?}"
+    );
+    assert!(
+        out.iter()
+            .any(|l| l.contains("add-symbol-file") && l.contains("0x8004")),
+        "{out:?}"
+    );
+}
+
+#[test]
 fn console_os_introspection_and_task_catch() {
     let mut app = test_app();
     app.open_console();
@@ -2702,6 +2738,113 @@ fn console_blits_lists_frame_blit_records() {
     let view = app.build_frame_analyzer_view(&panel);
     let annotated = view.trace.unwrap().selected_blit.expect("blit annotation");
     assert!(annotated.contains("in blit #0"), "{annotated}");
+}
+
+#[test]
+fn console_hunt_narrows_to_the_changed_word() {
+    let mut app = test_app();
+    app.open_console();
+    app.emu.bus_mut().mem.overlay = false;
+
+    // Plant a "lives counter" and snapshot.
+    {
+        let ram = &mut app.emu.bus_mut().mem.chip_ram;
+        ram[0x60000..0x60002].copy_from_slice(&0x0003u16.to_be_bytes());
+    }
+    let out = console_run(&mut app, "HUNT START");
+    assert!(out[0].contains("hunting 16-bit"), "{out:?}");
+
+    // First filter: everything equal to 3 (the counter plus noise).
+    let out = console_run(&mut app, "HUNT EQ 3");
+    assert!(out[0].contains("candidate(s) remain"), "{out:?}");
+
+    // "Lose a life", then narrow to values now equal to 2 -- only the
+    // counter both was 3 and became 2.
+    {
+        let ram = &mut app.emu.bus_mut().mem.chip_ram;
+        ram[0x60000..0x60002].copy_from_slice(&0x0002u16.to_be_bytes());
+    }
+    let out = console_run(&mut app, "HUNT EQ 2");
+    assert!(out[0].starts_with("1 candidate(s) remain"), "{out:?}");
+    let out = console_run(&mut app, "HUNT LIST");
+    assert!(out.iter().any(|l| l.contains("$060000 = 0002")), "{out:?}");
+
+    // SAME keeps it (nothing changed since the last filter); DIFF drops it.
+    let out = console_run(&mut app, "HUNT SAME");
+    assert!(out[0].starts_with("1 candidate"), "{out:?}");
+    let out = console_run(&mut app, "HUNT DIFF");
+    assert!(out[0].starts_with("0 candidate"), "{out:?}");
+    console_run(&mut app, "HUNT OFF");
+    assert!(app.hunt.is_none());
+}
+
+#[test]
+fn console_trace_writes_disassembled_lines() {
+    let mut app = test_app();
+    app.open_console();
+    let path = std::env::temp_dir().join(format!(
+        "copperline-console-trace-{}.txt",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+
+    let out = console_run(&mut app, &format!("TRACE START {}", path.display()));
+    assert!(out[0].contains("tracing to"), "{out:?}");
+    console_run(&mut app, "S 4");
+    let out = console_run(&mut app, "TRACE");
+    assert!(out[0].contains("lines so far"), "{out:?}");
+    let out = console_run(&mut app, "TRACE STOP");
+    assert!(out[0].contains("trace stopped: 4 lines"), "{out:?}");
+
+    let text = std::fs::read_to_string(&path).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 4, "{text}");
+    // Disassembled NOP sled with beam annotations.
+    assert!(lines[0].contains("NOP") && lines[0].contains('['), "{text}");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn double_fault_halt_surfaces_once() {
+    let mut app = test_app();
+    app.open_console();
+    assert!(!app.surface_debug_stop());
+    app.emu.machine.test_force_double_fault();
+    // First poll reports and pauses; repeat polls stay quiet.
+    assert!(app.surface_debug_stop());
+    assert!(app.paused);
+    assert!(app
+        .last_debug_stop
+        .as_deref()
+        .is_some_and(|m| m.contains("double fault")));
+    assert!(app
+        .console_panel
+        .as_ref()
+        .is_some_and(|panel| panel.output.iter().any(|l| l.contains("double fault"))));
+    assert!(!app.surface_debug_stop());
+}
+
+#[test]
+fn console_catchalert_and_guru_decode() {
+    let mut app = test_app();
+    app.open_console();
+    plant_exec_world(&mut app);
+
+    // CATCHALERT toggles a breakpoint at ExecBase - 108 (Alert's LVO).
+    let out = console_run(&mut app, "CATCHALERT");
+    assert!(out[0].contains("exec Alert()"), "{out:?}");
+    let lvo = 0x1000u32 - 108;
+    assert!(app.emu.machine.ui_breaks().is_breakpoint(lvo));
+    let out = console_run(&mut app, "CATCHALERT");
+    assert!(out[0].contains("removed"), "{out:?}");
+    assert!(!app.emu.machine.ui_breaks().is_breakpoint(lvo));
+
+    // GURU decodes an explicit code and defaults to D7.
+    let out = console_run(&mut app, "GURU 81000005");
+    assert!(out[0].contains("DEADEND exec.library"), "{out:?}");
+    console_run(&mut app, "SETREG D7 80000003");
+    let out = console_run(&mut app, "GURU");
+    assert!(out[0].contains("Address error"), "{out:?}");
 }
 
 #[test]
