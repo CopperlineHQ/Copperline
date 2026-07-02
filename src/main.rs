@@ -509,8 +509,12 @@ where
                 print_help();
                 std::process::exit(0);
             }
+            "--version" | "-V" => {
+                println!("copperline {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
             other if other.starts_with("--") => {
-                return Err(anyhow!("unknown option {:?}", other));
+                return Err(anyhow!("unknown option {:?} (see --help)", other));
             }
             _ => {
                 if rom_path.is_some() {
@@ -626,7 +630,8 @@ fn print_help() {
          \x20                            combine with COPPERLINE_AUDIO_PROFILE=1 for counters\n  \
          --calibrate-gamepad            interactively bind a USB gamepad to the port-2\n  \
          \x20                            joystick, save the calibration, then exit\n  \
-         -h, --help                     show this help and exit\n\
+         -h, --help                     show this help and exit\n  \
+         -V, --version                  print the version and exit\n\
          \n\
          Window keys:\n  \
          {shortcut}+S save framebuffer to copperline-screenshot-<unix-ts>.png in cwd\n  \
