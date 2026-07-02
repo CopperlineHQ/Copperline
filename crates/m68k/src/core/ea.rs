@@ -276,6 +276,7 @@ impl CpuCore {
                 | CpuType::M68EC040
                 | CpuType::M68LC040
                 | CpuType::M68040
+                | CpuType::M68060
         )
     }
 

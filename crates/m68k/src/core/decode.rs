@@ -141,6 +141,7 @@ fn dispatch_group_f<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 | CpuType::M68EC040
                 | CpuType::M68LC040
                 | CpuType::M68040
+                | CpuType::M68060
         );
         if !supports_move16 {
             return illegal_instruction(cpu, bus);
@@ -166,17 +167,18 @@ fn dispatch_group_f<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             | CpuType::M68EC040
             | CpuType::M68LC040
             | CpuType::M68040
+            | CpuType::M68060
     );
     if is_cache_cpu && (opcode >> 8) & 0xF == 4 {
         // Check for supervisor mode (cache ops are privileged)
         if !cpu.is_supervisor() {
             return cpu.take_exception(bus, 8); // Privilege violation
         }
-        let is_68040 = matches!(
+        let has_cinv_cpush = matches!(
             cpu.cpu_type,
-            CpuType::M68EC040 | CpuType::M68LC040 | CpuType::M68040
+            CpuType::M68EC040 | CpuType::M68LC040 | CpuType::M68040 | CpuType::M68060
         );
-        if is_68040 {
+        if has_cinv_cpush {
             let caches = (opcode >> 6) & 0b11;
             if caches & 0b01 != 0 {
                 cpu.cacr_pending_ops |= super::cpu::CACR_CD; // clear data cache

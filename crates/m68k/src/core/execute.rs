@@ -436,6 +436,7 @@ impl CpuCore {
                 | super::types::CpuType::M68EC040
                 | super::types::CpuType::M68LC040
                 | super::types::CpuType::M68040
+                | super::types::CpuType::M68060
         );
         if is_ec020_plus && self.m_flag != 0 {
             self.set_sm_flag(SFLAG_SET); // clear M => ISP active

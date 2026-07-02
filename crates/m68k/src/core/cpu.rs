@@ -439,6 +439,13 @@ impl CpuCore {
                 self.sr_mask = 0xF71F;
                 self.has_pmmu = true;
             }
+            CpuType::M68060 => {
+                self.address_mask = 0xFFFFFFFF;
+                // The 68060 drops T0 (trace on change of flow, SR bit 14) and
+                // keeps the single T bit and the M bit.
+                self.sr_mask = 0xB71F;
+                self.has_pmmu = true;
+            }
             _ => {}
         }
     }
@@ -947,11 +954,18 @@ impl CpuCore {
         )
     }
 
+    /// True for the 68060, which shares the 68040's MMU table format and
+    /// TC enable bit but drops PTEST/PMOVE and adds PLPA.
+    #[inline]
+    pub fn is_060(&self) -> bool {
+        self.cpu_type == CpuType::M68060
+    }
+
     /// Whether TC's translation-enable bit is set. The bit position differs by
-    /// part: the 68040 uses TC[15], the 68030 uses TC[31].
+    /// part: the 68040 and 68060 use TC[15], the 68030 uses TC[31].
     #[inline]
     pub fn tc_enable(&self) -> bool {
-        if self.is_040() {
+        if self.is_040() || self.is_060() {
             self.mmu_tc & 0x0000_8000 != 0
         } else {
             self.mmu_tc & 0x8000_0000 != 0

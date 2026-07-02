@@ -19,6 +19,7 @@ pub enum CpuType {
     M68LC040 = 8,
     M68040 = 9,
     SCC68070 = 10,
+    M68060 = 11,
 }
 
 /// Trap handler with CPU and bus access for HLE.
