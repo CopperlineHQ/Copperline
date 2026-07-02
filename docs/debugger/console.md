@@ -80,6 +80,8 @@ Inspection and modification:
 | `CUSTOM` | Key custom registers |
 | `FIND HEXBYTES [START]` | Search CPU-visible memory |
 | `WRITER ADDR` | Last instruction that wrote ADDR (reverse history) |
+| `HISTORY [N]`, `H` | The most recent retired PCs, disassembled (recorded while a debug window is open) |
+| `STACK`, `BT` | Heuristic call-stack walk: stack longwords that look like return addresses after a JSR/BSR |
 | `POKE ADDR VAL` | Write a memory word |
 | `SETREG REG VAL` | Set a CPU register (`SETREG D0 1234`) |
 | `HELP`, `CLEAR`, `CLOSE` | Console housekeeping |

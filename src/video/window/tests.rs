@@ -2609,6 +2609,43 @@ fn console_os_introspection_and_task_catch() {
 }
 
 #[test]
+fn console_history_and_stack_walk() {
+    let mut app = test_app();
+    app.open_console();
+
+    // Stepping with a debug window open records the retired PCs.
+    let pc0 = app.emu.machine.pc();
+    console_run(&mut app, "S 3");
+    let out = console_run(&mut app, "HISTORY 4");
+    assert!(
+        out.iter()
+            .any(|l| l.contains(&format!("{pc0:06X}")) && l.contains("NOP")),
+        "{out:?}"
+    );
+    // The CPU tab mirrors a compact trail.
+    app.open_debugger();
+    let panel = app.debugger_panel.clone().unwrap();
+    let view = app.build_debugger_view(&panel);
+    assert!(
+        view.lines.iter().any(|l| l.text.starts_with("recent ")),
+        "recent-PC line missing"
+    );
+
+    // Stack walk: plant a BSR.S and a stack slot holding its return
+    // address, then point A7 at it.
+    {
+        let bus = app.emu.bus_mut();
+        bus.mem.overlay = false;
+        bus.mem.chip_ram[0x8000..0x8002].copy_from_slice(&0x6104u16.to_be_bytes());
+        bus.mem.chip_ram[0x9000..0x9004].copy_from_slice(&0x0000_8002u32.to_be_bytes());
+    }
+    console_run(&mut app, "SETREG A7 9000");
+    let out = console_run(&mut app, "STACK");
+    assert!(out[0].starts_with("#0 pc $"), "{out:?}");
+    assert!(out.iter().any(|l| l.contains("#1 ret $008002")), "{out:?}");
+}
+
+#[test]
 fn console_inspection_and_stop_commands() {
     let mut app = test_app();
     app.open_console();

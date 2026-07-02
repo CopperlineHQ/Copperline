@@ -3156,6 +3156,7 @@ impl App {
             // neighbourhood; it is usually what you came to look at.
             panel.mem_addr = self.emu.machine.pc() & 0x00FF_FFF0;
             self.debugger_panel = Some(panel);
+            self.emu.machine.ui_set_pc_history_enabled(true);
             // Arm reverse debugging so the < Step / < Run controls work. A
             // conservative interval keeps the per-snapshot serialize off the
             // critical path; captures only accrue while the machine advances
@@ -3191,6 +3192,7 @@ impl App {
             let mut panel = ui::ConsolePanel::default();
             panel.push_output("Copperline debugger console. Type HELP for commands.");
             self.console_panel = Some(panel);
+            self.emu.machine.ui_set_pc_history_enabled(true);
             // Arm reverse debugging so the reverse commands work, exactly
             // like opening the debugger window does.
             if !self.emu.time_travel_enabled() {
@@ -3723,6 +3725,9 @@ impl App {
                 self.analyzer_underlay_frame = None;
                 self.analyzer_underlay_input = None;
             }
+        }
+        if self.debugger_panel.is_none() && self.console_panel.is_none() {
+            self.emu.machine.ui_set_pc_history_enabled(false);
         }
         self.resize_for_active_panel();
         self.request_redraw();
@@ -4901,6 +4906,21 @@ impl App {
                     }
                 }
                 lines.push(ui::DbgLine::plain(""));
+                // "How did I get here": the most recent retired PCs
+                // (oldest first; the console's HISTORY command shows the
+                // full ring with disassembly).
+                let history = machine.ui_pc_history();
+                if !history.is_empty() {
+                    let recent: Vec<String> = history
+                        .iter()
+                        .rev()
+                        .take(8)
+                        .rev()
+                        .map(|pc| format!("{pc:06X}"))
+                        .collect();
+                    lines.push(ui::DbgLine::plain(format!("recent {}", recent.join(" "))));
+                    lines.push(ui::DbgLine::plain(""));
+                }
                 if let Some(origin) = panel.disasm_addr {
                     lines.push(ui::DbgLine::plain(format!(
                         "Disassembly pinned at ${origin:06X} (empty box + Enter follows PC)"

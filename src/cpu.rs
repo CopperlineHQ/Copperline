@@ -47,6 +47,9 @@ fn sync_cck_enabled_setting() -> bool {
     }
 }
 
+/// Entries kept in the debugger's recent-PC ring.
+pub const UI_PC_HISTORY_CAP: usize = 64;
+
 pub struct M68kMachine {
     cpu: CpuCore,
     bus: CpuBus,
@@ -81,6 +84,12 @@ pub struct M68kMachine {
     /// ThisTask pointer at the last armed task-catch check, so only a
     /// reschedule (a change) can fire the catch. Debug-only state.
     ui_last_this_task: Option<u32>,
+    /// Recent retired-instruction PCs, a debugger-only ring recorded
+    /// while a debug window is open ("how did I get here").
+    ui_pc_history: [u32; UI_PC_HISTORY_CAP],
+    ui_pc_history_next: usize,
+    ui_pc_history_len: usize,
+    ui_pc_history_enabled: bool,
     // COPPERLINE_DBG_SPREN: previous DMACON, to detect the instruction that
     // clears the sprite-DMA-enable bit.
     dbg_prev_dmacon: u16,
@@ -240,6 +249,10 @@ impl M68kMachine {
             ui_breaks: crate::debugger::InteractiveBreaks::default(),
             ui_stop: None,
             ui_last_this_task: None,
+            ui_pc_history: [0; UI_PC_HISTORY_CAP],
+            ui_pc_history_next: 0,
+            ui_pc_history_len: 0,
+            ui_pc_history_enabled: false,
             dbg_prev_dmacon: 0,
             dbg_prev_fc: 0,
             dbg_fc_count: 0,
@@ -1079,6 +1092,28 @@ impl M68kMachine {
     }
 
     /// The debugger window's breakpoint/watchpoint set (read-only view).
+    /// Enable/disable the recent-PC ring (cleared on enable). Recording
+    /// costs one array write per retired instruction, so it only runs
+    /// while a debug window has it on.
+    pub fn ui_set_pc_history_enabled(&mut self, enabled: bool) {
+        if enabled && !self.ui_pc_history_enabled {
+            self.ui_pc_history_len = 0;
+            self.ui_pc_history_next = 0;
+        }
+        self.ui_pc_history_enabled = enabled;
+    }
+
+    /// The recent-PC ring, oldest first.
+    pub fn ui_pc_history(&self) -> Vec<u32> {
+        let mut out = Vec::with_capacity(self.ui_pc_history_len);
+        let start = (self.ui_pc_history_next + UI_PC_HISTORY_CAP - self.ui_pc_history_len)
+            % UI_PC_HISTORY_CAP;
+        for i in 0..self.ui_pc_history_len {
+            out.push(self.ui_pc_history[(start + i) % UI_PC_HISTORY_CAP]);
+        }
+        out
+    }
+
     pub fn ui_breaks(&self) -> &crate::debugger::InteractiveBreaks {
         &self.ui_breaks
     }
@@ -1403,6 +1438,13 @@ impl M68kMachine {
                         self.debug_check_spren_clear();
                         self.debug_check_frame_counter();
                         self.debug_check_memw();
+                        if self.ui_pc_history_enabled {
+                            self.ui_pc_history[self.ui_pc_history_next] = dbg_pc_before;
+                            self.ui_pc_history_next =
+                                (self.ui_pc_history_next + 1) % UI_PC_HISTORY_CAP;
+                            self.ui_pc_history_len =
+                                (self.ui_pc_history_len + 1).min(UI_PC_HISTORY_CAP);
+                        }
                         self.debug_check_ipl(dbg_ipl_before, positive_cpu_cycles(cycles));
                         if self.ui_breaks.armed() {
                             self.ui_check_breaks_after_step();

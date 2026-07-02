@@ -26,8 +26,10 @@ The CPU tab: register file, live disassembly, and the transport controls.
 ## Tabs
 
 **CPU** shows the PC and SR (with decoded supervisor/IPL/CCR flags), the
-D0-D7/A0-A7 register file, and a live 68000 disassembly that follows the
-PC, with the current instruction highlighted. Type a hex address in the
+D0-D7/A0-A7 register file, a `recent` line with the last few retired PCs
+(the console's `HISTORY` command shows the full ring, disassembled), and
+a live 68000 disassembly that follows the PC, with the current
+instruction highlighted. Type a hex address in the
 `$` box and press Enter to *pin* the disassembly elsewhere; empty the box
 and press Enter to follow the PC again.
 

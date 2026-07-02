@@ -111,6 +111,7 @@ const CONSOLE_HELP: &[&str] = &[
     "            catchtask [NAME]   breaks (list)   clearbreaks",
     "inspect:    status  regs/r  mem/m ADDR [BYTES]  dis/d [ADDR] [N]",
     "            copper [pc|ADDR] [N]   custom   find HEX [START]   writer ADDR",
+    "            history/h [N]   stack/bt",
     "os:         tasks  libs  devs  resources  ports",
     "modify:     poke ADDR VAL   setreg REG VAL",
     "console:    help  clear  close",
@@ -409,6 +410,35 @@ impl App {
                 ConsoleOutcome::one("cleared all breakpoints, watchpoints, traps, and catches")
             }
             "REGS" | "R" => ConsoleOutcome::lines(self.console_regs_lines()),
+            "HISTORY" | "H" => {
+                let count = args
+                    .first()
+                    .and_then(|t| t.parse::<usize>().ok())
+                    .unwrap_or(16)
+                    .clamp(1, crate::cpu::UI_PC_HISTORY_CAP);
+                let history = self.emu.machine.ui_pc_history();
+                if history.is_empty() {
+                    return ConsoleOutcome::one(
+                        "no history yet (recorded while a debug window is open)",
+                    );
+                }
+                let cpu_type = self.emu.machine.cpu_type();
+                let bus = self.emu.bus();
+                ConsoleOutcome::lines(
+                    history
+                        .iter()
+                        .rev()
+                        .take(count)
+                        .rev()
+                        .map(|&pc| {
+                            let (text, _) =
+                                crate::disasm::disassemble(|a| bus.peek_word_any(a), pc, cpu_type);
+                            format!("{pc:06X}  {text}")
+                        })
+                        .collect(),
+                )
+            }
+            "STACK" | "BT" => ConsoleOutcome::lines(self.console_stack_lines()),
             "MEM" | "M" => {
                 let Some(addr) = args.first().and_then(|t| hex32(t)) else {
                     return ConsoleOutcome::error("usage: MEM ADDR [BYTES] (hex)");
@@ -806,6 +836,74 @@ impl App {
                 })
                 .collect()
         })
+    }
+
+    /// Heuristic 68k call-stack walk: scan up the stack for longwords
+    /// that look like return addresses (even, in the 24-bit space, and
+    /// immediately preceded by a JSR or BSR encoding). Heuristic by
+    /// nature -- data words that happen to follow call opcodes can slip
+    /// in -- but each frame shows its stack slot so it can be judged.
+    fn console_stack_lines(&self) -> Vec<String> {
+        const SLOTS: u32 = 64;
+        const FRAMES: usize = 8;
+        let machine = &self.emu.machine;
+        let bus = self.emu.bus();
+        let peek16 = |addr: u32| bus.peek_word_any(addr);
+        let peek32 =
+            |addr: u32| (u32::from(peek16(addr)) << 16) | u32::from(peek16(addr.wrapping_add(2)));
+        let looks_like_return = |addr: u32| -> bool {
+            if addr == 0 || addr & 1 != 0 || addr >= 0x0100_0000 {
+                return false;
+            }
+            // JSR (An)/-(An)+modes and BSR.B end 2 bytes before the
+            // return address; JSR abs.w/d16/d8-index/PC-rel and BSR.W end
+            // 4 before; JSR abs.l and BSR.L (020+) end 6 before.
+            let w2 = peek16(addr.wrapping_sub(2));
+            if (0x4E90..=0x4E97).contains(&w2)
+                || (w2 & 0xFF00 == 0x6100 && w2 & 0x00FF != 0 && w2 & 0x00FF != 0xFF)
+            {
+                return true;
+            }
+            let w4 = peek16(addr.wrapping_sub(4));
+            if w4 == 0x6100
+                || w4 == 0x4EB8
+                || w4 == 0x4EBA
+                || w4 == 0x4EBB
+                || (0x4EA8..=0x4EB7).contains(&w4)
+            {
+                return true;
+            }
+            let w6 = peek16(addr.wrapping_sub(6));
+            w6 == 0x4EB9 || w6 == 0x61FF
+        };
+        let sp = machine.a(7);
+        let cpu_type = machine.cpu_type();
+        let mut lines = vec![format!(
+            "#0 pc ${:06X}  sp ${:06X}",
+            machine.pc() & 0x00FF_FFFF,
+            sp & 0x00FF_FFFF
+        )];
+        let mut frame = 1usize;
+        for slot in 0..SLOTS {
+            if frame > FRAMES {
+                break;
+            }
+            let slot_addr = sp.wrapping_add(slot * 4);
+            let value = peek32(slot_addr) & 0x00FF_FFFF;
+            if !looks_like_return(value) {
+                continue;
+            }
+            let (text, _) = crate::disasm::disassemble(|a| bus.peek_word_any(a), value, cpu_type);
+            lines.push(format!(
+                "#{frame} ret ${value:06X}  (at sp+{:03X})  {text}",
+                slot * 4
+            ));
+            frame += 1;
+        }
+        if lines.len() == 1 {
+            lines.push("no return-address candidates on the stack".to_string());
+        }
+        lines
     }
 
     fn console_breaks_lines(&self) -> Vec<String> {
