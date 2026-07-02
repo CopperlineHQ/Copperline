@@ -617,6 +617,26 @@ fn dispatch_group_0<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
 // Group 4: Miscellaneous
 // ============================================================================
 
+/// MOVEC Rc-code legality per CPU model. The 68040 accepts everything its
+/// register table decodes; the 68060 drops CAAR, MMUSR, MSP, and ISP (single
+/// supervisor stack) and gains BUSCR (0x008) and PCR (0x808).
+fn movec_reg_legal(cpu_type: CpuType, ctrl_reg: u16) -> bool {
+    match cpu_type {
+        CpuType::M68010 | CpuType::SCC68070 => {
+            matches!(ctrl_reg, 0x000 | 0x001 | 0x800 | 0x801)
+        }
+        CpuType::M68EC020 | CpuType::M68020 | CpuType::M68EC030 | CpuType::M68030 => matches!(
+            ctrl_reg,
+            0x000 | 0x001 | 0x002 | 0x800 | 0x801 | 0x802 | 0x803 | 0x804
+        ),
+        CpuType::M68060 => matches!(
+            ctrl_reg,
+            0x000..=0x008 | 0x800 | 0x801 | 0x806 | 0x807 | 0x808
+        ),
+        _ => true,
+    }
+}
+
 fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) -> i32 {
     let subop = (opcode >> 8) & 0xF;
     let ea_mode = ((opcode >> 3) & 7) as u8;
@@ -837,25 +857,7 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             let reg_type = (ext >> 15) & 1; // 0=Dn, 1=An
             let reg_num = ((ext >> 12) & 7) as usize;
             let ctrl_reg = ext & 0xFFF;
-            if matches!(cpu.cpu_type, CpuType::M68010 | CpuType::SCC68070)
-                && !matches!(ctrl_reg, 0x000 | 0x001 | 0x800 | 0x801)
-            {
-                return illegal_instruction(cpu, bus);
-            }
-            if matches!(cpu.cpu_type, CpuType::M68EC020 | CpuType::M68020)
-                && !matches!(
-                    ctrl_reg,
-                    0x000 | 0x001 | 0x002 | 0x800 | 0x801 | 0x802 | 0x803 | 0x804
-                )
-            {
-                return illegal_instruction(cpu, bus);
-            }
-            if matches!(cpu.cpu_type, CpuType::M68EC030 | CpuType::M68030)
-                && !matches!(
-                    ctrl_reg,
-                    0x000 | 0x001 | 0x002 | 0x800 | 0x801 | 0x802 | 0x803 | 0x804
-                )
-            {
+            if !movec_reg_legal(cpu.cpu_type, ctrl_reg) {
                 return illegal_instruction(cpu, bus);
             }
             if !cpu.is_supervisor() {
@@ -879,25 +881,7 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             let reg_type = (ext >> 15) & 1; // 0=Dn, 1=An
             let reg_num = ((ext >> 12) & 7) as usize;
             let ctrl_reg = ext & 0xFFF;
-            if matches!(cpu.cpu_type, CpuType::M68010 | CpuType::SCC68070)
-                && !matches!(ctrl_reg, 0x000 | 0x001 | 0x800 | 0x801)
-            {
-                return illegal_instruction(cpu, bus);
-            }
-            if matches!(cpu.cpu_type, CpuType::M68EC020 | CpuType::M68020)
-                && !matches!(
-                    ctrl_reg,
-                    0x000 | 0x001 | 0x002 | 0x800 | 0x801 | 0x802 | 0x803 | 0x804
-                )
-            {
-                return illegal_instruction(cpu, bus);
-            }
-            if matches!(cpu.cpu_type, CpuType::M68EC030 | CpuType::M68030)
-                && !matches!(
-                    ctrl_reg,
-                    0x000 | 0x001 | 0x002 | 0x800 | 0x801 | 0x802 | 0x803 | 0x804
-                )
-            {
+            if !movec_reg_legal(cpu.cpu_type, ctrl_reg) {
                 return illegal_instruction(cpu, bus);
             }
             if !cpu.is_supervisor() {

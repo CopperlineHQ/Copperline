@@ -217,6 +217,13 @@ pub struct CpuCore {
     pub dacr1: u32, // Data Access Control 1 (0x009)
     pub iacr0: u32, // Instruction Access Control 0 (0x00A)
     pub iacr1: u32, // Instruction Access Control 1 (0x00B)
+    // 68060-specific control registers
+    /// Processor Configuration Register (MOVEC 0x808): identification and
+    /// revision in the high half (read-only), EDEBUG/DFP/ESS in the low bits.
+    pub pcr: u32,
+    /// Bus Control Register (MOVEC 0x008 on the 060 only; the same code is
+    /// DACR0 on the 68040). Stored, not behaviorally modeled.
+    pub buscr: u32,
     /// Address Translation Cache: a pure cache of recent page-table walks, so it
     /// is not serialized (restored empty) and is flushed on any mapping change.
     #[serde(skip)]
@@ -267,6 +274,43 @@ pub const CACR_WA: u32 = 1 << 13;
 pub const CACR_040_IE: u32 = 1 << 15;
 /// Enable data cache (68040).
 pub const CACR_040_DE: u32 = 1 << 31;
+
+// CACR bit assignments (68060). The cache enables sit at the 68040
+// positions; the 060 adds branch-cache and store-buffer controls. The
+// branch-cache clears (CABC/CUBC) are write-only strobes.
+/// Enable data cache (68060).
+pub const CACR_060_EDC: u32 = 1 << 31;
+/// No allocate mode, data cache (68060; stored only).
+pub const CACR_060_NAD: u32 = 1 << 30;
+/// Enable store buffer (68060; stored only - the host bills writes at bus rate).
+pub const CACR_060_ESB: u32 = 1 << 29;
+/// Disable CPUSH invalidation, data (68060; stored only).
+pub const CACR_060_DPI: u32 = 1 << 28;
+/// Half-cache operation mode, data (68060; stored only).
+pub const CACR_060_FOC: u32 = 1 << 27;
+/// Enable branch cache (68060).
+pub const CACR_060_EBC: u32 = 1 << 23;
+/// Clear all entries in the branch cache (68060, write-only strobe).
+pub const CACR_060_CABC: u32 = 1 << 22;
+/// Clear all user entries in the branch cache (68060, write-only strobe).
+pub const CACR_060_CUBC: u32 = 1 << 21;
+/// Enable instruction cache (68060).
+pub const CACR_060_EIC: u32 = 1 << 15;
+/// No allocate mode, instruction cache (68060; stored only).
+pub const CACR_060_NAI: u32 = 1 << 14;
+/// Half-cache operation mode, instruction (68060; stored only).
+pub const CACR_060_FIC: u32 = 1 << 13;
+
+// PCR (68060 MOVEC 0x808) bit assignments.
+/// Enable superscalar dispatch.
+pub const PCR_ESS: u32 = 1 << 0;
+/// Disable the on-chip FPU: FP instructions raise Line-F.
+pub const PCR_DFP: u32 = 1 << 1;
+/// Enable debug features (stored only).
+pub const PCR_EDEBUG: u32 = 1 << 7;
+/// Reset value: identification 0x0430 (full MC68060), revision 1, ESS and
+/// DFP clear (superscalar dispatch off until system software enables it).
+pub const PCR_060_RESET: u32 = 0x0430_0100;
 
 impl Default for CpuCore {
     fn default() -> Self {
@@ -374,6 +418,8 @@ impl CpuCore {
             dacr1: 0,
             iacr0: 0,
             iacr1: 0,
+            pcr: PCR_060_RESET,
+            buscr: 0,
             atc: crate::mmu::Atc::default(),
             cycles_remaining: 0,
             initial_cycles: 0,
@@ -457,9 +503,17 @@ impl CpuCore {
     // Results: USP=0, ISP=4, MSP=6
 
     /// Get the current stack pointer bank index.
+    ///
+    /// The 68060 implements a single supervisor stack: the SR M bit is
+    /// storable (interrupts still clear it, system software may use it) but
+    /// it never selects a separate master-stack bank.
     #[inline]
     fn sp_index(&self) -> usize {
-        (self.s_flag | ((self.s_flag >> 1) & self.m_flag)) as usize
+        if self.cpu_type == CpuType::M68060 {
+            self.s_flag as usize
+        } else {
+            (self.s_flag | ((self.s_flag >> 1) & self.m_flag)) as usize
+        }
     }
 
     /// Backup current SP to banked storage.
@@ -512,6 +566,10 @@ impl CpuCore {
         // enable/freeze bits drop and the host model must invalidate.
         self.cacr = 0;
         self.cacr_pending_ops |= CACR_CI | CACR_CD;
+        // 68060 control registers: identification/revision persist, the
+        // writable bits (EDEBUG/DFP/ESS) clear.
+        self.pcr = PCR_060_RESET;
+        self.buscr = 0;
         self.prefetch_queue = [0; 2];
         self.prefetch_count = 0;
         self.consume_without_prefetch = false;
@@ -829,6 +887,8 @@ impl CpuCore {
             0x005 => self.itt1,  // Instruction TTR 1 (68040)
             0x006 => self.dtt0,  // Data TTR 0 (68040)
             0x007 => self.dtt1,  // Data TTR 1 (68040)
+            // 0x008 is BUSCR on the 68060 and DACR0 on the 68040.
+            0x008 if self.is_060() => self.buscr,
             0x008 => self.dacr0, // Data Access Control 0 (68040)
             0x009 => self.dacr1, // Data Access Control 1 (68040)
             0x00A => self.iacr0, // Instruction Access Control 0 (68040)
@@ -862,6 +922,7 @@ impl CpuCore {
             0x805 => self.mmu_sr,        // MMU Status Register (68040)
             0x806 => self.mmu_crp_aptr,  // User Root Pointer (68040; URP)
             0x807 => self.mmu_srp_aptr,  // Supervisor Root Pointer (68040)
+            0x808 if self.is_060() => self.pcr, // Processor Configuration (68060)
             _ => 0,                      // Unknown register
         }
     }
@@ -883,6 +944,24 @@ impl CpuCore {
                         CACR_EI | CACR_FI | CACR_IBE | CACR_ED | CACR_FD | CACR_DBE | CACR_WA,
                         CACR_CEI | CACR_CI | CACR_CED | CACR_CD,
                     ),
+                    // The 68060 keeps the cache enables at the 040 positions
+                    // and adds branch-cache / store-buffer controls. CABC and
+                    // CUBC are write-only branch-cache clear strobes (wired to
+                    // the branch-cache model when it lands; accepted and
+                    // discarded until then). Cache invalidation stays with
+                    // CINV/CPUSH like the 040.
+                    CpuType::M68060 => (
+                        CACR_060_EDC
+                            | CACR_060_NAD
+                            | CACR_060_ESB
+                            | CACR_060_DPI
+                            | CACR_060_FOC
+                            | CACR_060_EBC
+                            | CACR_060_EIC
+                            | CACR_060_NAI
+                            | CACR_060_FIC,
+                        0,
+                    ),
                     // 68040 CACR defines only the two cache-enable bits and
                     // has no clear strobes - invalidation is done with the
                     // CINV/CPUSH instructions (see decode.rs). Reserved bits
@@ -902,6 +981,8 @@ impl CpuCore {
             0x005 => self.itt1 = value,    // Instruction TTR 1 (68040)
             0x006 => self.dtt0 = value,    // Data TTR 0 (68040)
             0x007 => self.dtt1 = value,    // Data TTR 1 (68040)
+            // 0x008 is BUSCR on the 68060 and DACR0 on the 68040.
+            0x008 if self.is_060() => self.buscr = value,
             0x008 => self.dacr0 = value,   // Data Access Control 0 (68040)
             0x009 => self.dacr1 = value,   // Data Access Control 1 (68040)
             0x00A => self.iacr0 = value,   // Instruction Access Control 0 (68040)
@@ -935,6 +1016,12 @@ impl CpuCore {
             0x805 => self.mmu_sr = value,        // MMU Status Register (68040)
             0x806 => self.mmu_crp_aptr = value,  // User Root Pointer (68040; URP)
             0x807 => self.mmu_srp_aptr = value,  // Supervisor Root Pointer (68040)
+            0x808 if self.is_060() => {
+                // PCR: identification and revision are read-only; only
+                // EDEBUG, DFP, and ESS are writable.
+                let writable = PCR_EDEBUG | PCR_DFP | PCR_ESS;
+                self.pcr = (self.pcr & !writable) | (value & writable);
+            }
             _ => {}                              // Unknown register - ignore
         }
         // A write to TC, a root pointer, or a TTR can change every translation,

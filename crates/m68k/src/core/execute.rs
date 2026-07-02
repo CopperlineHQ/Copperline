@@ -436,7 +436,6 @@ impl CpuCore {
                 | super::types::CpuType::M68EC040
                 | super::types::CpuType::M68LC040
                 | super::types::CpuType::M68040
-                | super::types::CpuType::M68060
         );
         if is_ec020_plus && self.m_flag != 0 {
             self.set_sm_flag(SFLAG_SET); // clear M => ISP active
@@ -444,6 +443,10 @@ impl CpuCore {
             self.push_16(bus, 0x1000 | (vec_word & 0x0FFF));
             self.push_32(bus, stacked_pc);
             self.push_16(bus, sr2);
+        } else if self.cpu_type == super::types::CpuType::M68060 && self.m_flag != 0 {
+            // The 68060 clears M on interrupt entry but has a single
+            // supervisor stack: no bank switch and no throwaway frame.
+            self.m_flag = 0;
         }
 
         // Jump to vector

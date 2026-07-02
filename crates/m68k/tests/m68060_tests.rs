@@ -152,3 +152,103 @@ fn full_extension_word_ea_executes_on_68060() {
     assert_eq!(cpu.pc, 0x0206);
     assert_eq!(cpu.dar[0], 0xCAFE_F00D, "scaled full-format EA must resolve");
 }
+
+/// MOVEC Rc,Dn / Dn,Rc helpers: assemble at 0x0200 and step once.
+fn movec_from(cpu: &mut CpuCore, bus: &mut TestBus, ctrl_reg: u16) -> StepResult {
+    bus.write_word_at(0x0200, 0x4E7A);
+    bus.write_word_at(0x0202, ctrl_reg); // D0
+    cpu.pc = 0x0200;
+    step(cpu, bus)
+}
+
+fn movec_to(cpu: &mut CpuCore, bus: &mut TestBus, ctrl_reg: u16, value: u32) -> StepResult {
+    bus.write_word_at(0x0200, 0x4E7B);
+    bus.write_word_at(0x0202, ctrl_reg); // D0
+    cpu.dar[0] = value;
+    cpu.pc = 0x0200;
+    step(cpu, bus)
+}
+
+#[test]
+fn movec_caar_mmusr_msp_isp_are_illegal_on_68060() {
+    for ctrl_reg in [0x802u16, 0x805, 0x803, 0x804] {
+        let (mut cpu, mut bus) = setup_060();
+        let result = movec_from(&mut cpu, &mut bus, ctrl_reg);
+        assert!(matches!(result, StepResult::Ok { .. }));
+        assert_eq!(
+            cpu.pc, 0x0300,
+            "MOVEC ${ctrl_reg:03X} must be illegal on the 68060"
+        );
+    }
+}
+
+#[test]
+fn movec_pcr_round_trips_with_read_only_identification() {
+    let (mut cpu, mut bus) = setup_060();
+    // Write all-ones: only EDEBUG/DFP/ESS may stick.
+    movec_to(&mut cpu, &mut bus, 0x808, 0xFFFF_FFFF);
+    movec_from(&mut cpu, &mut bus, 0x808);
+    assert_eq!(
+        cpu.dar[0],
+        0x0430_0100 | 0x83,
+        "identification/revision read-only; EDEBUG/DFP/ESS writable"
+    );
+}
+
+#[test]
+fn movec_buscr_does_not_alias_dacr0_on_68060() {
+    let (mut cpu, mut bus) = setup_060();
+    cpu.dacr0 = 0xDEAD_BEEF;
+    movec_to(&mut cpu, &mut bus, 0x008, 0x1234_5678);
+    assert_eq!(cpu.buscr, 0x1234_5678);
+    assert_eq!(cpu.dacr0, 0xDEAD_BEEF, "BUSCR write must not touch DACR0");
+    movec_from(&mut cpu, &mut bus, 0x008);
+    assert_eq!(cpu.dar[0], 0x1234_5678);
+}
+
+#[test]
+fn movec_pcr_is_illegal_on_68040() {
+    let mut cpu = CpuCore::new();
+    cpu.set_cpu_type(CpuType::M68040);
+    let mut bus = TestBus::new();
+    bus.write_long_at(0x00, 0x1000);
+    bus.write_long_at(0x04, 0x0200);
+    bus.write_long_at(0x10, 0x0300);
+    cpu.reset(&mut bus);
+    cpu.set_sr(0x2700);
+    // The 040 register table has no 0x808 decode: reads return 0 rather than
+    // trapping (matching the existing permissive 040 MOVEC model).
+    let result = movec_from(&mut cpu, &mut bus, 0x808);
+    assert!(matches!(result, StepResult::Ok { .. }));
+    assert_eq!(cpu.dar[0], 0, "PCR must not exist on the 68040");
+}
+
+#[test]
+fn cacr_060_persists_enables_and_discards_strobes() {
+    let (mut cpu, mut bus) = setup_060();
+    // EDC | EBC | CABC | EIC: the clear strobe must not store.
+    movec_to(
+        &mut cpu,
+        &mut bus,
+        0x002,
+        (1 << 31) | (1 << 23) | (1 << 22) | (1 << 15),
+    );
+    movec_from(&mut cpu, &mut bus, 0x002);
+    assert_eq!(
+        cpu.dar[0],
+        (1u32 << 31) | (1 << 23) | (1 << 15),
+        "EDC/EBC/EIC persist; CABC reads back 0"
+    );
+}
+
+#[test]
+fn m_bit_does_not_switch_stacks_on_68060() {
+    let (mut cpu, _bus) = setup_060();
+    cpu.dar[15] = 0x0000_2000;
+    // Setting M on an 020/040 would bank A7 to the MSP; the 060 has a
+    // single supervisor stack, so A7 must stay put.
+    cpu.set_sr(0x3700);
+    assert_eq!(cpu.dar[15], 0x0000_2000, "no MSP bank on the 68060");
+    cpu.set_sr(0x2700);
+    assert_eq!(cpu.dar[15], 0x0000_2000);
+}
