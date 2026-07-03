@@ -67,7 +67,11 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      emulate_unimplemented_060, and the Oep060Timing pairing/branch-cache
 //      state; MmuFault gained a cause (transient, but part of CpuCore's
 //      serde shape indirectly via new fields)
-pub const STATE_VERSION: u32 = 13;
+//  14: 68030 resumable bus-fault frames - CpuCore gained mmu_read_override
+//      and mmu_write_suppress (the RTE DF-cleared completion protocol,
+//      pending across one instruction boundary) and pending_fault_wdata
+//      (the frame's data output buffer)
+pub const STATE_VERSION: u32 = 14;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

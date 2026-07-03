@@ -8,6 +8,7 @@ use crate::core::cpu::CpuCore;
 use crate::core::memory::AddressBus;
 
 pub use atc::Atc;
+pub(crate) use translation::ptest_030;
 pub use translation::translate;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
