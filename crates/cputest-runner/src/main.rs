@@ -231,6 +231,7 @@ extern "C" fn run_one_test(_user: *mut c_void, ctx: *const Context, regs: *mut R
     let debug = std::env::var("CPUTEST_DEBUG").is_ok();
     let mut hle = NoOpHleHandler;
     cpu.last_exception_vector = None;
+    regs.cycles = 0;
     let mut exc = 0u32;
     let mut excframe = 0u32;
     for step in 0..MAX_STEPS {
@@ -248,8 +249,24 @@ extern "C" fn run_one_test(_user: *mut c_void, ctx: *const Context, regs: *mut R
                 &cpu.dar[..8]
             );
         }
-        let _ = cpu.step_with_hle_handler(&mut bus, &mut hle);
+        let step_result = cpu.step_with_hle_handler(&mut bus, &mut hle);
+        let step_cycles = match step_result {
+            m68k::StepResult::Ok { cycles } => cycles as u32,
+            _ => 0,
+        };
+        let _ = step;
         if let Some(v) = cpu.last_exception_vector.take() {
+            // The generator's cycle counter stops when the terminating
+            // sentinel exception is recognized, so the final faulting step
+            // is not added to the measured total (CPUTEST_CYCLES). A trace
+            // is the one exception the core bundles with a COMPLETED
+            // instruction's step: count that instruction, not the 34-clock
+            // trace stacking.
+            if v == 9 {
+                regs.cycles = regs
+                    .cycles
+                    .wrapping_add(step_cycles.saturating_sub(34));
+            }
             exc = v;
             excframe = cpu.a(7);
             if debug {
@@ -257,6 +274,7 @@ extern "C" fn run_one_test(_user: *mut c_void, ctx: *const Context, regs: *mut R
             }
             break;
         }
+        regs.cycles = regs.cycles.wrapping_add(step_cycles);
         // If the tested instruction left T1 set (e.g. RTE restoring a traced
         // SR), the trace fires after the NEXT instruction: keep stepping so
         // the sentinel at endpc executes and raises the expected trace (or
@@ -266,6 +284,13 @@ extern "C" fn run_one_test(_user: *mut c_void, ctx: *const Context, regs: *mut R
             && (cpu.pc == regs.endpc
                 || (regs.branchtarget != 0xFFFF_FFFF && cpu.pc == regs.branchtarget))
         {
+            // A taken branch stops on ARRIVAL at the target sentinel; the
+            // generator's cycle counter also includes the target's leading
+            // NOP (the linear path executes its trailing NOP before the
+            // stop, so only this side needs the correction).
+            if cpu.pc != regs.endpc && bus.read_word(cpu.pc) == 0x4E71 {
+                regs.cycles = regs.cycles.wrapping_add(4);
+            }
             break;
         }
     }
