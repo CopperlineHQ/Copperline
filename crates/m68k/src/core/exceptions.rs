@@ -163,41 +163,50 @@ impl CpuCore {
     }
 
     /// Process TRAP #n instruction.
+    ///
+    /// TRAP #n pushes the four-word format $0 frame on every 68010+ model
+    /// (M68020UM table 6-5 lists TRAP #N under format $0; the earlier
+    /// Musashi-derived format $2 frame on the 020/030 was wrong) with the
+    /// next instruction's PC stacked.
     pub fn trap<B: AddressBus>(&mut self, bus: &mut B, trap_num: u8) -> i32 {
         let vector = vector::TRAP_BASE + (trap_num & 0xF) as u32;
+        self.take_exception(bus, vector)
+    }
 
-        // Musashi 68020/68030 uses "format 2" stack frame for TRAP exceptions.
-        // 68040+ uses format 0 (same as simple exceptions).
-        let uses_format_2 = matches!(
-            self.cpu_type,
-            super::types::CpuType::M68EC020
-                | super::types::CpuType::M68020
-                | super::types::CpuType::M68EC030
-                | super::types::CpuType::M68030
-        );
-        if uses_format_2 {
-            let old_sr = self.get_sr();
-            // Match Musashi m68ki_init_exception: enter supervisor, clear trace.
-            self.set_s_flag(SFLAG_SET);
-            self.t1_flag = 0;
-            self.t0_flag = 0;
+    /// Group-2 instruction exceptions: CHK/CHK2, TRAPcc/TRAPV (and FTRAPcc),
+    /// zero divide, and trace. The stacked PC is the next instruction on
+    /// every model; the 68020+ push the six-word format $2 frame whose
+    /// extra long is the address of the instruction that caused the
+    /// exception (M68020UM table 6-5), so a handler can decode or skip it.
+    pub(crate) fn take_group2_exception<B: AddressBus>(&mut self, bus: &mut B, vector: u32) -> i32 {
+        let old_sr = self.get_sr();
 
-            // Stacked PC for TRAP is the next instruction.
-            let stacked_pc = self.pc;
-            let vec_word = (vector as u16) << 2;
+        // Enter supervisor, clear trace.
+        self.set_s_flag(SFLAG_SET);
+        self.t1_flag = 0;
+        self.t0_flag = 0;
 
-            // Musashi m68ki_stack_frame_0010:
-            // push PPC (long), then 0x2000|(vector<<2) (word), then PC (long), then SR (word)
-            self.push_32(bus, self.ppc);
-            self.push_16(bus, 0x2000 | (vec_word & 0x0FFF));
-            self.push_32(bus, stacked_pc);
-            self.push_16(bus, old_sr);
-
-            self.jump_vector(bus, vector);
-            return self.exception_cycles(vector);
+        let next_pc = self.pc;
+        match self.cpu_type {
+            super::types::CpuType::M68000 => {
+                self.push_exception_frame_68000(bus, next_pc, old_sr);
+            }
+            super::types::CpuType::M68010 | super::types::CpuType::SCC68070 => {
+                self.push_16(bus, (vector as u16) << 2);
+                self.push_32(bus, next_pc);
+                self.push_16(bus, old_sr);
+            }
+            _ => {
+                let vec_word = (vector as u16) << 2;
+                self.push_32(bus, self.ppc);
+                self.push_16(bus, 0x2000 | (vec_word & 0x0FFF));
+                self.push_32(bus, next_pc);
+                self.push_16(bus, old_sr);
+            }
         }
 
-        self.take_exception(bus, vector)
+        self.jump_vector(bus, vector);
+        self.exception_cycles(vector)
     }
 
     /// Process CHK exception.
@@ -205,47 +214,12 @@ impl CpuCore {
     /// The caller (exec_chk) reports the comparison's internal clocks before
     /// calling this (8 for trap-on-too-big, 10 for trap-on-negative).
     pub fn exception_chk<B: AddressBus>(&mut self, bus: &mut B) -> i32 {
-        let old_sr = self.get_sr();
-
-        // Enter supervisor, clear trace
-        self.set_s_flag(SFLAG_SET);
-        self.t1_flag = 0;
-        self.t0_flag = 0;
-
-        // Musashi treats CHK as a group-2 exception:
-        // - 68000: 3-word frame (PC, SR)
-        // - 68010: format-0 frame (vector<<2, PC, SR)
-        // - 68020+: format-2 frame (PPC, 0x2000|vector<<2, PC, SR)
-        //
-        // CHK stacks the next PC (self.pc) and includes PPC in the 020+ format-2 frame.
-        match self.cpu_type {
-            super::types::CpuType::M68000 => {
-                let pc = self.pc;
-                self.push_exception_frame_68000(bus, pc, old_sr);
-            }
-            super::types::CpuType::M68010 | super::types::CpuType::SCC68070 => {
-                self.push_16(bus, (vector::CHK as u16) << 2);
-                self.push_32(bus, self.pc);
-                self.push_16(bus, old_sr);
-            }
-            _ => {
-                let vec_word = (vector::CHK as u16) << 2;
-                self.push_32(bus, self.ppc);
-                self.push_16(bus, 0x2000 | (vec_word & 0x0FFF));
-                self.push_32(bus, self.pc);
-                self.push_16(bus, old_sr);
-            }
-        }
-
-        // Jump to vector
-        self.jump_vector(bus, vector::CHK);
-
-        self.exception_cycles(vector::CHK)
+        self.take_group2_exception(bus, vector::CHK)
     }
 
     /// Process zero divide exception.
     pub fn exception_zero_divide<B: AddressBus>(&mut self, bus: &mut B) -> i32 {
-        self.take_exception(bus, vector::ZERO_DIVIDE)
+        self.take_group2_exception(bus, vector::ZERO_DIVIDE)
     }
 
     /// Process privilege violation exception.
@@ -255,7 +229,7 @@ impl CpuCore {
 
     /// Process trace exception.
     pub fn exception_trace<B: AddressBus>(&mut self, bus: &mut B) -> i32 {
-        self.take_exception(bus, vector::TRACE)
+        self.take_group2_exception(bus, vector::TRACE)
     }
 
     /// Process address error exception.
