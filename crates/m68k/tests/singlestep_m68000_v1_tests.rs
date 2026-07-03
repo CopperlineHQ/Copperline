@@ -1,7 +1,10 @@
 //! Integration suite for SingleStepTests `m68000` (68000-only) fixtures.
 //!
-//! Fixtures are not vendored in-repo (they are large). See:
-//! `tests/fixtures/m68000/README.md`
+//! Fixtures are not vendored in-repo (they are large); each per-file test
+//! skips itself when they are absent. Clone
+//! <https://github.com/SingleStepTests/m68000> (MIT) to
+//! `tests/fixtures/m68000`, or point `M68K_SST_FIXTURES` at the clone's
+//! `v1` directory (what CI does). See `tests/fixtures/README.md`.
 
 use std::collections::HashMap;
 use std::fs;
@@ -313,6 +316,9 @@ fn load_test_file(path: &Path) -> Result<Vec<BinTest>, String> {
 }
 
 fn fixture_root_v1() -> PathBuf {
+    if let Ok(root) = std::env::var("M68K_SST_FIXTURES") {
+        return PathBuf::from(root);
+    }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
@@ -321,6 +327,16 @@ fn fixture_root_v1() -> PathBuf {
 }
 
 fn run_one_file(path: &Path) {
+    if !path.exists() {
+        // The fixture set is a separate (large, MIT-licensed) clone; a
+        // checkout without it must still build and pass. CI fetches the
+        // fixtures and runs this suite for real.
+        eprintln!(
+            "skip {}: SingleStepTests fixtures not present (see tests/fixtures/README.md)",
+            path.display()
+        );
+        return;
+    }
     let tests = load_test_file(path).unwrap();
     let mut failures: Vec<String> = Vec::new();
 

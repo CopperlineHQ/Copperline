@@ -46,20 +46,42 @@ jobs:
         # The vendored CPU core (crates/m68k) is a path dependency, not a
         # workspace member, so the root `cargo test` above never reaches its
         # suites -- including the MMU walker, access-fault frame, exception,
-        # and per-model architecture tests. Three suites need gitignored
-        # local fixtures and are excluded: cross_cpu and musashi
-        # include_bytes! fixture binaries (they do not compile on a clean
-        # checkout), and the SingleStepTests suite fails at runtime without
-        # its fetched fixture set. Everything else is asset-free. No
-        # --locked: the crate's own Cargo.lock is deliberately gitignored
-        # (the root lockfile pins it when built as a dependency).
+        # and per-model architecture tests. Two suites are excluded because
+        # they include_bytes! gitignored fixture binaries and do not compile
+        # on a clean checkout (cross_cpu, musashi); the SingleStepTests
+        # suite compiles and skips itself here, and runs for real in the
+        # m68k-singlestep job below. No --locked: the crate's own Cargo.lock
+        # is deliberately gitignored (the root lockfile pins it when built
+        # as a dependency).
         working-directory: crates/m68k
         run: |
           ls tests/*.rs | xargs -n1 basename | sed 's/\.rs$//' \
             | grep -v -e '^cross_cpu_tests$' -e '^musashi_tests$' \
-                      -e '^singlestep_m68000_v1_tests$' \
             | sed 's/^/--test /' \
             | xargs cargo test --release --lib
+
+  m68k-singlestep:
+    name: m68k SingleStepTests (68000 fixtures)
+    # Runs the per-instruction 68000 fixture suite against the real
+    # SingleStepTests data (MIT, generated from MAME's microcoded core):
+    # every opcode's final register/memory state, plus address-error
+    # behavior. The fixture clone is ~1 GB, so it lives in its own job and
+    # does not gate the main build.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Fetch SingleStepTests m68000 fixtures
+        uses: actions/checkout@v4
+        with:
+          repository: SingleStepTests/m68000
+          path: sst-m68000
+      - name: Run fixture suite
+        working-directory: crates/m68k
+        env:
+          M68K_SST_FIXTURES: ${{ github.workspace }}/sst-m68000/v1
+        run: cargo test --release --test singlestep_m68000_v1_tests
 
   docs:
     name: Docs build (HTML + PDF)
