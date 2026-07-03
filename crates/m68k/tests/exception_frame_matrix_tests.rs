@@ -420,3 +420,67 @@ fn frames_round_trip_through_rte() {
         assert_eq!(cpu.pc, CODE + 4, "{cpu_type:?}: resumed after TRAPV");
     }
 }
+
+/// Autovectored interrupts: a pending level above the SR mask is serviced
+/// before the next instruction with a format $0 frame (vector 24+level)
+/// whose stacked PC is the instruction that had not yet executed; the new
+/// SR mask is raised to the serviced level. A level at or below the mask
+/// stays pending, and level 7 (NMI) is serviced even at mask 7.
+#[test]
+fn autovector_interrupt_frames_and_masking() {
+    for cpu_type in ALL_CPUS {
+        // Level 3 against mask 0: serviced, format $0, next-PC semantics.
+        // This core recognizes pending interrupts at the instruction
+        // boundary after execution (the host models recognition latency
+        // separately), so the NOP completes and the frame stacks the PC
+        // after it.
+        let mut bus = TestBus::new(0x10000);
+        let mut cpu = user_mode_cpu(&mut bus, cpu_type, 0);
+        bus.write_word(CODE, 0x4E71); // NOP (runs before recognition)
+        cpu.set_irq(3);
+        assert!(cpu.check_interrupts(), "{cpu_type:?}: level 3 above mask 0");
+        step_once(&mut cpu, &mut bus);
+        check_frame(
+            &cpu,
+            &mut bus,
+            cpu_type,
+            &ExpectedFrame {
+                vector: 24 + 3,
+                stacked_pc: CODE + 2,
+                format_2_instr: None,
+            },
+        );
+        assert_eq!(
+            cpu.get_sr() & 0x0700,
+            0x0300,
+            "{cpu_type:?}: SR mask raised to the serviced level"
+        );
+
+        // Level 3 against mask 7: masked, the NOP executes instead.
+        let mut bus = TestBus::new(0x10000);
+        let mut cpu = user_mode_cpu(&mut bus, cpu_type, 0);
+        cpu.set_sr(0x2700);
+        cpu.pc = CODE;
+        bus.write_word(CODE, 0x4E71);
+        cpu.set_irq(3);
+        assert!(!cpu.check_interrupts(), "{cpu_type:?}: level 3 masked at 7");
+        step_once(&mut cpu, &mut bus);
+        assert_eq!(cpu.pc, CODE + 2, "{cpu_type:?}: masked interrupt waits");
+
+        // Level 7 against mask 7: the NMI is serviced anyway.
+        let mut bus = TestBus::new(0x10000);
+        let mut cpu = user_mode_cpu(&mut bus, cpu_type, 0);
+        cpu.set_sr(0x2700);
+        cpu.set_a(7, SSP);
+        cpu.pc = CODE;
+        bus.write_word(CODE, 0x4E71);
+        cpu.set_irq(7);
+        assert!(cpu.check_interrupts(), "{cpu_type:?}: NMI beats mask 7");
+        step_once(&mut cpu, &mut bus);
+        assert_eq!(
+            cpu.pc & 0xFFFF,
+            HANDLER,
+            "{cpu_type:?}: NMI vectored through the table"
+        );
+    }
+}
