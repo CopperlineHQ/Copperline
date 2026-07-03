@@ -3058,6 +3058,13 @@ impl Bus {
     /// Select the chip-bus cycle length: the 68020+ completes a word access in
     /// 3 CPU clocks where the 68000 takes 4, so its post-grant tail is shorter
     /// (write-posting; faster reads). Derived from the CPU model.
+    /// Whether the CPU runs the shorter 020+ bus cycle (see the field doc);
+    /// also distinguishes the 68000's shared chip data bus from the 020+
+    /// local bus for the floating-bus latch.
+    pub(crate) fn cpu_short_bus_cycle(&self) -> bool {
+        self.cpu_short_bus_cycle
+    }
+
     pub fn set_cpu_short_bus_cycle(&mut self, enabled: bool) {
         self.cpu_short_bus_cycle = enabled;
     }
