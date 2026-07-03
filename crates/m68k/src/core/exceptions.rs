@@ -454,19 +454,30 @@ impl CpuCore {
                 };
                 let ssw = rw | atc | sz | (fc as u16 & 0x7); // TM = function code
                 let fmt_vec = 0x7000 | ((vector::BUS_ERROR as u16) << 2);
-                // PD2/PD1/PD0 and the three writeback entries are all unused.
+                // A faulted write is reported in writeback slot 2 (V bit,
+                // size and TM in WB2S; address and data in WB2A/WB2D). The
+                // handler either completes it manually or clears WB2S.V to
+                // absorb it -- how Enforcer/MuForce discard stores into
+                // protected pages -- and RTE (below) honours the cleared V.
+                // WB1 and WB3 (later/earlier pipeline stages) never carry
+                // anything in this core.
+                let wb2s = if write {
+                    0x0080 | sz | (fc as u16 & 0x7) // V | SZ | TM
+                } else {
+                    0
+                };
                 for _ in 0..3 {
-                    self.push_32_raw(bus, 0); // PD2, PD1, PD0
+                    self.push_32_raw(bus, 0); // PD3, PD2, PD1
                 }
-                self.push_32_raw(bus, 0); // WB1D
+                self.push_32_raw(bus, 0); // WB1D / PD0
                 self.push_32_raw(bus, 0); // WB1A
-                self.push_32_raw(bus, 0); // WB2D
-                self.push_32_raw(bus, 0); // WB2A
+                self.push_32_raw(bus, if write { self.pending_fault_wdata } else { 0 }); // WB2D
+                self.push_32_raw(bus, if write { address } else { 0 }); // WB2A
                 self.push_32_raw(bus, 0); // WB3D
                 self.push_32_raw(bus, 0); // WB3A
                 self.push_32_raw(bus, address); // fault address
-                self.push_16_raw(bus, 0); // WB1S (status: invalid -> no writeback)
-                self.push_16_raw(bus, 0); // WB2S
+                self.push_16_raw(bus, 0); // WB1S
+                self.push_16_raw(bus, wb2s); // WB2S
                 self.push_16_raw(bus, 0); // WB3S
                 self.push_16_raw(bus, ssw); // special status word
                 self.push_32_raw(bus, address); // effective address
