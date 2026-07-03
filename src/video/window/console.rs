@@ -558,7 +558,7 @@ impl App {
                     .and_then(|t| hex32(t))
                     .unwrap_or(0x40)
                     .clamp(1, 0x400) as usize;
-                let base = addr & 0x00FF_FFF0;
+                let base = addr & !0xF;
                 let bytes = self
                     .emu
                     .machine

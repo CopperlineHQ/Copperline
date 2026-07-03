@@ -694,9 +694,13 @@ fn dispatch_group_0<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
 // Group 4: Miscellaneous
 // ============================================================================
 
-/// MOVEC Rc-code legality per CPU model. The 68040 accepts everything its
-/// register table decodes; the 68060 drops CAAR, MMUSR, MSP, and ISP (single
-/// supervisor stack) and gains BUSCR (0x008) and PCR (0x808).
+/// MOVEC Rc-code legality per CPU model. A MOVEC naming a register the
+/// model does not implement raises an illegal-instruction exception on
+/// real silicon; CPU-detection code (e.g. the OS 3.2+ 680x0.library)
+/// relies on that to tell the models apart, probing registers like the
+/// 060-only PCR (0x808) and expecting a trap on anything older. The
+/// 68060 drops CAAR, MMUSR, MSP, and ISP (single supervisor stack) and
+/// gains BUSCR (0x008) and PCR (0x808).
 fn movec_reg_legal(cpu_type: CpuType, ctrl_reg: u16) -> bool {
     match cpu_type {
         CpuType::M68010 | CpuType::SCC68070 => {
@@ -706,11 +710,21 @@ fn movec_reg_legal(cpu_type: CpuType, ctrl_reg: u16) -> bool {
             ctrl_reg,
             0x000 | 0x001 | 0x002 | 0x800 | 0x801 | 0x802 | 0x803 | 0x804
         ),
+        // The EC040 has no MMU: no TC (0x003), MMUSR (0x805), URP (0x806),
+        // or SRP (0x807); its access-control registers reuse the TTR codes
+        // (0x004-0x007). No 040 has the 020/030 CAAR (0x802).
+        CpuType::M68EC040 => matches!(
+            ctrl_reg,
+            0x000 | 0x001 | 0x002 | 0x004..=0x007 | 0x800 | 0x801 | 0x803 | 0x804
+        ),
+        CpuType::M68LC040 | CpuType::M68040 => {
+            matches!(ctrl_reg, 0x000..=0x007 | 0x800 | 0x801 | 0x803..=0x807)
+        }
         CpuType::M68060 => matches!(
             ctrl_reg,
             0x000..=0x008 | 0x800 | 0x801 | 0x806 | 0x807 | 0x808
         ),
-        _ => true,
+        CpuType::M68000 | CpuType::Invalid => false,
     }
 }
 
