@@ -42,6 +42,24 @@ jobs:
         # the asset-free unit suite, which also proves a clean checkout
         # builds and tests without the gitignored vendor fixtures.
         run: cargo test --release --locked
+      - name: m68k core tests
+        # The vendored CPU core (crates/m68k) is a path dependency, not a
+        # workspace member, so the root `cargo test` above never reaches its
+        # suites -- including the MMU walker, access-fault frame, exception,
+        # and per-model architecture tests. Three suites need gitignored
+        # local fixtures and are excluded: cross_cpu and musashi
+        # include_bytes! fixture binaries (they do not compile on a clean
+        # checkout), and the SingleStepTests suite fails at runtime without
+        # its fetched fixture set. Everything else is asset-free. No
+        # --locked: the crate's own Cargo.lock is deliberately gitignored
+        # (the root lockfile pins it when built as a dependency).
+        working-directory: crates/m68k
+        run: |
+          ls tests/*.rs | xargs -n1 basename | sed 's/\.rs$//' \
+            | grep -v -e '^cross_cpu_tests$' -e '^musashi_tests$' \
+                      -e '^singlestep_m68000_v1_tests$' \
+            | sed 's/^/--test /' \
+            | xargs cargo test --release --lib
 
   docs:
     name: Docs build (HTML + PDF)
