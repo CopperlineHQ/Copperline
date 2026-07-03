@@ -17,6 +17,11 @@ display-plan-trace = []
 # Normal builds keep these environment-variable overrides inert so release
 # behavior is hardware-derived and reproducible.
 internal-diagnostics = []
+# Host MIDI bridge for Paula's serial port (`[serial] mode = "midi"`). Off by
+# default: a plain build is unchanged and pulls no MIDI code. On macOS this
+# links CoreMIDI directly (no new crate); other platforms compile a stub until
+# their backend lands. See src/midi/.
+midi = []
 
 [dependencies]
 # Path-only dependency on the in-tree fork (crates/m68k). No version requirement

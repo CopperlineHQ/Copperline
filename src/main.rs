@@ -89,6 +89,8 @@ pub struct CliArgs {
     /// `--calibrate-gamepad`: run the interactive gamepad calibration and
     /// exit, without starting the emulator.
     pub calibrate_gamepad: bool,
+    /// `--list-midi`: print the host MIDI endpoints and exit.
+    pub list_midi: bool,
     /// Command-line machine overrides (`--model`, `--chipset`, `--cpu`,
     /// `--fpu`/`--no-fpu`, `--cpu-clock`, `--chip`, `--fast`, `--slow`,
     /// `--floppy-drives`).
@@ -243,12 +245,16 @@ where
     let mut audio_wav: Option<PathBuf> = None;
     let mut live_audio_profile_secs: Option<f32> = None;
     let mut calibrate_gamepad = false;
+    let mut list_midi = false;
     let mut overrides = ConfigOverrides::default();
     let mut args = args.into_iter();
     while let Some(a) = args.next() {
         match a.as_str() {
             "--calibrate-gamepad" => {
                 calibrate_gamepad = true;
+            }
+            "--list-midi" => {
+                list_midi = true;
             }
             "--config" | "-c" => {
                 let v = args
@@ -315,6 +321,24 @@ where
                 overrides.joystick = Some(
                     args.next()
                         .ok_or_else(|| anyhow!("--joystick requires a mode (gamepad/keyboard)"))?,
+                );
+            }
+            "--serial" => {
+                overrides.serial = Some(
+                    args.next()
+                        .ok_or_else(|| anyhow!("--serial requires a mode (off/stdout/midi)"))?,
+                );
+            }
+            "--midi-out" => {
+                overrides.midi_out = Some(
+                    args.next()
+                        .ok_or_else(|| anyhow!("--midi-out requires a device name"))?,
+                );
+            }
+            "--midi-in" => {
+                overrides.midi_in = Some(
+                    args.next()
+                        .ok_or_else(|| anyhow!("--midi-in requires a device name"))?,
                 );
             }
             "--click-after" => {
@@ -569,12 +593,22 @@ where
         audio_wav,
         live_audio_profile_secs,
         calibrate_gamepad,
+        list_midi,
         overrides,
     })
 }
 
 fn print_help() {
     let shortcut = HOST_SHORTCUT_MODIFIER_LABEL;
+    // The MIDI endpoint options only do anything in a `midi`-feature build, so
+    // list them only there. `--serial` itself is always shown: off/stdout work
+    // in every build, and it names midi as a mode.
+    #[cfg(feature = "midi")]
+    let midi = "--midi-out NAME                host MIDI destination (implies --serial midi)\n  \
+                --midi-in NAME                 host MIDI source (implies --serial midi)\n  \
+                --list-midi                    list host MIDI endpoints and exit\n  ";
+    #[cfg(not(feature = "midi"))]
+    let midi = "";
     eprintln!(
         "copperline - Amiga emulator\n\
          \n\
@@ -628,7 +662,8 @@ fn print_help() {
          \x20                            instead of live output\n  \
          --profile-live-audio SECS      run a no-window Paula-to-cpal profile workload;\n  \
          \x20                            combine with COPPERLINE_AUDIO_PROFILE=1 for counters\n  \
-         --calibrate-gamepad            interactively bind a USB gamepad to the port-2\n  \
+         --serial MODE                  Paula serial port: off, stdout, or midi\n  \
+         {midi}--calibrate-gamepad            interactively bind a USB gamepad to the port-2\n  \
          \x20                            joystick, save the calibration, then exit\n  \
          -h, --help                     show this help and exit\n  \
          -V, --version                  print the version and exit\n\
@@ -840,6 +875,35 @@ fn run_headless_benchmark(mut emu: Emulator, target_secs: f32) -> Result<()> {
     Ok(())
 }
 
+/// Print the host MIDI endpoints for `--list-midi`. This is how a user finds the
+/// names `--midi-out`/`--midi-in` and `[serial]` expect. Without the `midi`
+/// feature it says how to get MIDI support rather than printing nothing.
+#[cfg(feature = "midi")]
+fn list_midi_endpoints() -> Result<()> {
+    let endpoints = copperline::midi::enumerate();
+    println!("MIDI inputs (sources, for --midi-in):");
+    if endpoints.inputs.is_empty() {
+        println!("  (none)");
+    }
+    for e in &endpoints.inputs {
+        println!("  {}", e.name);
+    }
+    println!("MIDI outputs (destinations, for --midi-out):");
+    if endpoints.outputs.is_empty() {
+        println!("  (none)");
+    }
+    for e in &endpoints.outputs {
+        println!("  {}", e.name);
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "midi"))]
+fn list_midi_endpoints() -> Result<()> {
+    println!("This build has no MIDI support; rebuild with --features midi.");
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let mut log_builder =
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
@@ -866,6 +930,9 @@ fn main() -> Result<()> {
     validate_gdb_args(&cli)?;
     if cli.calibrate_gamepad {
         return gamepad::run_calibration();
+    }
+    if cli.list_midi {
+        return list_midi_endpoints();
     }
     let (cfg, mut raw_cfg) = load_config(cli.config_path.as_deref(), &cli.overrides)?;
     if let Some(p) = &cli.rom_path {

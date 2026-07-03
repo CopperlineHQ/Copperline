@@ -24,7 +24,7 @@ use crate::chipset::denise::DeniseRevision;
 use crate::config::{
     format_size, machine_profile_defaults, Chipset, Config, CpuModel, JoystickInputMode,
     MachineModel, Overscan, PacingBudget, PixelAspect, RawConfig, RawDrive, RawFloppyDrive,
-    RawZorroBoard, WarpSpeed,
+    RawZorroBoard, SerialMode, WarpSpeed,
 };
 use crate::zorro::{ConfigOption, ConfigOptionKind, LoadedZorroBoard};
 use anyhow::Result;
@@ -167,12 +167,17 @@ pub enum LauncherTab {
     Floppy,
     Storage,
     Cd,
+    // Only reached in a `midi` build, where it is added to TABS.
+    #[cfg_attr(not(feature = "midi"), allow(dead_code))]
+    Serial,
     Zorro,
     AvEmulation,
 }
 
-/// Tab strip, left to right.
-pub const TABS: [LauncherTab; 9] = [
+/// Tabs shown top to bottom. The Serial tab only holds MIDI settings for now, so
+/// it is present only in a `midi` build; drop the `cfg` if the tab gains other
+/// serial options.
+pub const TABS: &[LauncherTab] = &[
     LauncherTab::System,
     LauncherTab::Cpu,
     LauncherTab::Memory,
@@ -180,6 +185,8 @@ pub const TABS: [LauncherTab; 9] = [
     LauncherTab::Floppy,
     LauncherTab::Storage,
     LauncherTab::Cd,
+    #[cfg(feature = "midi")]
+    LauncherTab::Serial,
     LauncherTab::Zorro,
     LauncherTab::AvEmulation,
 ];
@@ -194,6 +201,7 @@ impl LauncherTab {
             LauncherTab::Floppy => "Floppy",
             LauncherTab::Storage => "Hard Disk",
             LauncherTab::Cd => "CD",
+            LauncherTab::Serial => "Serial",
             LauncherTab::Zorro => "Zorro",
             LauncherTab::AvEmulation => "A/V & Emu",
         }
@@ -253,6 +261,13 @@ pub enum LauncherField {
     CdImage,
     CdInsertDelay,
     Cd32Nvram,
+    // Serial (MIDI). Present only with the `midi` feature.
+    #[cfg(feature = "midi")]
+    SerialMode,
+    #[cfg(feature = "midi")]
+    MidiOut,
+    #[cfg(feature = "midi")]
+    MidiIn,
     // A/V and emulation
     Overscan,
     PixelAspect,
@@ -352,6 +367,12 @@ const CD_ROWS: [Row; 3] = [
     row(F::CdInsertDelay, "Insert delay", Cycle),
     row(F::Cd32Nvram, "CD32 NVRAM", PathRow),
 ];
+#[cfg(feature = "midi")]
+const SERIAL_ROWS: [Row; 3] = [
+    row(F::SerialMode, "Mode", Cycle),
+    row(F::MidiIn, "MIDI input", Cycle),
+    row(F::MidiOut, "MIDI output", Cycle),
+];
 const AV_EMULATION_ROWS: [Row; 10] = [
     row(F::Overscan, "Overscan", Cycle),
     row(F::PixelAspect, "Pixel aspect", Cycle),
@@ -376,8 +397,22 @@ pub fn rows(tab: LauncherTab) -> &'static [Row] {
         LauncherTab::Floppy => &FLOPPY_ROWS,
         LauncherTab::Storage => &STORAGE_ROWS,
         LauncherTab::Cd => &CD_ROWS,
+        LauncherTab::Serial => serial_rows(),
         LauncherTab::Zorro => &[],
         LauncherTab::AvEmulation => &AV_EMULATION_ROWS,
+    }
+}
+
+/// Serial-tab rows. Only the `midi` build has any; without it the tab is absent
+/// from [`TABS`] and this is never reached.
+fn serial_rows() -> &'static [Row] {
+    #[cfg(feature = "midi")]
+    {
+        &SERIAL_ROWS
+    }
+    #[cfg(not(feature = "midi"))]
+    {
+        &[]
     }
 }
 
@@ -455,6 +490,8 @@ const WARPS: [WarpSpeed; 5] = [
 // The stepper flips the two explicit modes, matching the runtime toggle.
 const JOYSTICK_MODES: [JoystickInputMode; 2] =
     [JoystickInputMode::Gamepad, JoystickInputMode::Keyboard];
+#[cfg(feature = "midi")]
+const SERIAL_MODES: [SerialMode; 3] = [SerialMode::Off, SerialMode::Stdout, SerialMode::Midi];
 
 /// A fully-typed, editable mirror of a configurable machine. See the module
 /// docs for how it round-trips through [`RawConfig`].
@@ -506,6 +543,15 @@ pub struct MachineSetup {
     cd_image: Option<PathBuf>,
     cd_insert_delay: f64,
     cd32_nvram: Option<PathBuf>,
+    // Serial port. Carried in every build so a config's `[serial]` block
+    // round-trips; only edited on the Serial tab, which is a `midi` build only.
+    serial_mode: SerialMode,
+    midi_out: Option<String>,
+    midi_in: Option<String>,
+    /// Host endpoints for the device pickers, read once when this setup is
+    /// built so a fresh config screen sees currently-connected devices.
+    #[cfg(feature = "midi")]
+    midi_endpoints: crate::midi::MidiEndpoints,
     // A/V and emulation
     overscan: Overscan,
     pixel_aspect: PixelAspect,
@@ -582,6 +628,13 @@ impl MachineSetup {
             // Use the raw NVRAM path: Config defaults it to "cd32-nvram.bin"
             // on CD32, which we do not want to persist as an explicit setting.
             cd32_nvram: raw.cd.nvram.as_deref().map(PathBuf::from),
+            serial_mode: cfg.serial.mode,
+            midi_out: cfg.serial.midi_out.clone(),
+            midi_in: cfg.serial.midi_in.clone(),
+            // Left empty here so config construction stays side-effect free; the
+            // config screen fills it via refresh_midi_endpoints on open.
+            #[cfg(feature = "midi")]
+            midi_endpoints: crate::midi::MidiEndpoints::default(),
             overscan: cfg.overscan,
             pixel_aspect: cfg.pixel_aspect,
             phosphor: cfg.phosphor,
@@ -613,6 +666,12 @@ impl MachineSetup {
     /// Load a configuration file into the typed model, validating it.
     pub fn load_from(path: &Path) -> Result<Self> {
         Self::from_raw(&crate::config::raw_from_path(path)?)
+    }
+
+    /// Re-read the host MIDI endpoints for the device pickers.
+    #[cfg(feature = "midi")]
+    pub fn refresh_midi_endpoints(&mut self) {
+        self.midi_endpoints = crate::midi::enumerate();
     }
 
     /// The bare-profile config this setup is compared against when emitting
@@ -772,6 +831,11 @@ impl MachineSetup {
         if self.joystick_input_mode != base.joystick_input_mode {
             raw.input.joystick = Some(self.joystick_input_mode.label().to_string());
         }
+        if self.serial_mode != base.serial.mode {
+            raw.serial.mode = Some(self.serial_mode.label().to_string());
+        }
+        raw.serial.midi_out = self.midi_out.clone();
+        raw.serial.midi_in = self.midi_in.clone();
         // Zorro boards: emit the metadata path plus any per-board overrides
         // (typed per the option schema), only when the user changed something.
         raw.zorro = self
@@ -914,6 +978,8 @@ impl MachineSetup {
             F::Df1Image | F::Df1WriteProtect => reason(self.floppy_drives >= 2, "drive off"),
             F::Df2Image | F::Df2WriteProtect => reason(self.floppy_drives >= 3, "drive off"),
             F::Df3Image | F::Df3WriteProtect => reason(self.floppy_drives >= 4, "drive off"),
+            #[cfg(feature = "midi")]
+            F::MidiOut | F::MidiIn => reason(self.serial_mode == SerialMode::Midi, "MIDI off"),
             _ => None,
         }
     }
@@ -1072,6 +1138,16 @@ impl MachineSetup {
                 JoystickInputMode::Keyboard => "Keyboard".to_string(),
                 JoystickInputMode::Gamepad => "Gamepad".to_string(),
             },
+            #[cfg(feature = "midi")]
+            F::SerialMode => match self.serial_mode {
+                SerialMode::Off => "Off".to_string(),
+                SerialMode::Stdout => "Stdout".to_string(),
+                SerialMode::Midi => "MIDI".to_string(),
+            },
+            #[cfg(feature = "midi")]
+            F::MidiOut => self.midi_out.clone().unwrap_or_else(|| "None".to_string()),
+            #[cfg(feature = "midi")]
+            F::MidiIn => self.midi_in.clone().unwrap_or_else(|| "None".to_string()),
             // Path/drive fields: the file name, or a placeholder.
             F::Rom => self.path_label(field, "(bundled AROS)"),
             _ if rows_contains_kind(field, RowKind::Path)
@@ -1150,6 +1226,14 @@ impl MachineSetup {
                 self.joystick_input_mode =
                     cycle_slice(&JOYSTICK_MODES, self.joystick_input_mode, forward)
             }
+            #[cfg(feature = "midi")]
+            F::SerialMode => {
+                self.serial_mode = cycle_slice(&SERIAL_MODES, self.serial_mode, forward)
+            }
+            #[cfg(feature = "midi")]
+            F::MidiOut => cycle_endpoint(&mut self.midi_out, &self.midi_endpoints.outputs, forward),
+            #[cfg(feature = "midi")]
+            F::MidiIn => cycle_endpoint(&mut self.midi_in, &self.midi_endpoints.inputs, forward),
             _ => {}
         }
     }
@@ -1325,6 +1409,12 @@ pub struct LauncherState {
 
 impl LauncherState {
     pub fn new(setup: MachineSetup) -> Self {
+        #[cfg_attr(not(feature = "midi"), allow(unused_mut))]
+        let mut setup = setup;
+        // Read the host MIDI devices once, as the screen opens, so the pickers
+        // show what is connected now.
+        #[cfg(feature = "midi")]
+        setup.refresh_midi_endpoints();
         Self {
             setup,
             tab: LauncherTab::System,
@@ -1408,6 +1498,18 @@ fn cpu_is_32bit(cpu: CpuModel) -> bool {
         cpu,
         CpuModel::M68020 | CpuModel::M68030 | CpuModel::M68040 | CpuModel::M68060
     )
+}
+
+/// Step a MIDI endpoint selection through "None" then the available endpoints,
+/// storing the chosen device's exact name.
+#[cfg(feature = "midi")]
+fn cycle_endpoint(
+    current: &mut Option<String>,
+    endpoints: &[crate::midi::MidiEndpoint],
+    forward: bool,
+) {
+    let names: Vec<String> = endpoints.iter().map(|e| e.name.clone()).collect();
+    *current = crate::midi::next_endpoint(current.as_deref(), &names, forward);
 }
 
 /// Whether `field` appears anywhere with the given row kind. Used to classify a
@@ -1846,6 +1948,36 @@ mod tests {
         assert_eq!(s.z3_ram, 16 * 1024 * 1024);
         let err = s.build_config().unwrap_err().to_string();
         assert!(err.contains("Zorro III"), "{err}");
+    }
+
+    #[cfg(feature = "midi")]
+    #[test]
+    fn serial_midi_settings_round_trip_through_raw() {
+        let mut s = MachineSetup::default();
+        // Default serial mode writes nothing.
+        assert!(s.to_raw().serial.mode.is_none());
+
+        s.cycle(LauncherField::SerialMode, true); // Stdout -> MIDI
+        assert_eq!(s.serial_mode, SerialMode::Midi);
+        // The device rows are live only in MIDI mode.
+        assert_eq!(s.disabled_reason(LauncherField::MidiOut), None);
+        s.midi_out = Some("USB MIDI".to_string());
+
+        let raw = s.to_raw();
+        assert_eq!(raw.serial.mode.as_deref(), Some("midi"));
+        assert_eq!(raw.serial.midi_out.as_deref(), Some("USB MIDI"));
+
+        let back = MachineSetup::from_raw(&raw).unwrap();
+        assert_eq!(back.serial_mode, SerialMode::Midi);
+        assert_eq!(back.midi_out.as_deref(), Some("USB MIDI"));
+    }
+
+    #[cfg(feature = "midi")]
+    #[test]
+    fn midi_device_rows_are_disabled_off_midi_mode() {
+        let s = MachineSetup::default(); // Stdout by default
+        assert!(s.disabled_reason(LauncherField::MidiOut).is_some());
+        assert!(s.disabled_reason(LauncherField::MidiIn).is_some());
     }
 
     #[test]

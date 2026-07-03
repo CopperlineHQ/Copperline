@@ -604,6 +604,9 @@ pub struct App {
     gamepad: crate::gamepad::GamepadReader,
     /// Host source policy for the emulated port-2 joystick/CD32 pad.
     joystick_input_mode: JoystickInputMode,
+    /// Whether the serial port is bridged to MIDI, so the runtime menu offers
+    /// the device items. Fixed for the machine's life.
+    serial_is_midi: bool,
     /// Output frame-skip level for warp/turbo mode: how many emulated frames
     /// are retired per presented frame while warp is engaged. Presentation is
     /// vsync-gated, so this is what decouples warp speed from the host monitor
@@ -841,8 +844,19 @@ impl App {
             info!("threaded render pipeline enabled");
             RenderWorker::new(phosphor)
         });
+        // MIDI needs a &mut to probe the sink; rebind so the parameter is not
+        // needlessly `mut` in a build without the feature.
+        #[cfg(feature = "midi")]
+        let (serial_is_midi, emu) = {
+            let mut emu = emu;
+            let is_midi = emu.bus_mut().midi_serial_mut().is_some();
+            (is_midi, emu)
+        };
+        #[cfg(not(feature = "midi"))]
+        let serial_is_midi = false;
         Self {
             emu,
+            serial_is_midi,
             fb: vec![0u32; MAX_FB_PIXELS],
             deinterlacer: Deinterlacer::with_phosphor(phosphor),
             present_fb: vec![0u32; FB_WIDTH * OUT_HEIGHT],
@@ -982,6 +996,43 @@ impl App {
 
     fn cycle_joystick_input_mode(&mut self) {
         self.set_joystick_input_mode(self.joystick_input_mode.next());
+    }
+
+    /// Current MIDI input/output device names for the runtime menu (empty when
+    /// the serial port is not in MIDI mode).
+    #[cfg(feature = "midi")]
+    fn midi_menu_labels(&mut self) -> (String, String) {
+        match self.emu.bus_mut().midi_serial_mut() {
+            Some(sink) => (sink.input_label(), sink.output_label()),
+            None => (String::new(), String::new()),
+        }
+    }
+
+    #[cfg(not(feature = "midi"))]
+    fn midi_menu_labels(&mut self) -> (String, String) {
+        (String::new(), String::new())
+    }
+
+    #[cfg(feature = "midi")]
+    fn cycle_midi_input(&mut self) {
+        let label = self.emu.bus_mut().midi_serial_mut().map(|sink| {
+            sink.cycle_input(true);
+            sink.input_label()
+        });
+        if let Some(label) = label {
+            self.show_osd(format!("MIDI input: {label}"));
+        }
+    }
+
+    #[cfg(feature = "midi")]
+    fn cycle_midi_output(&mut self) {
+        let label = self.emu.bus_mut().midi_serial_mut().map(|sink| {
+            sink.cycle_output(true);
+            sink.output_label()
+        });
+        if let Some(label) = label {
+            self.show_osd(format!("MIDI output: {label}"));
+        }
     }
 
     fn set_joystick_input_mode(&mut self, mode: JoystickInputMode) {
@@ -1602,6 +1653,7 @@ impl ApplicationHandler for App {
                 let warp_speed = self.warp_speed;
                 let recording = self.recorder.is_some();
                 let input_recording = self.input_recorder.is_some();
+                let (midi_in_label, midi_out_label) = self.midi_menu_labels();
                 let ui_data = self.build_panel_view_data();
                 if let Some(r) = self.render.as_mut() {
                     let frame = r.pixels.frame_mut();
@@ -1628,12 +1680,17 @@ impl ApplicationHandler for App {
                         &self.ui,
                         ui_hover,
                         ui_data.as_ref(),
-                        warp,
-                        warp_speed,
-                        recording,
-                        input_recording,
-                        self.joystick_input_mode,
-                        super::pixel_aspect(),
+                        self.serial_is_midi,
+                        ui::MenuLabels {
+                            warp,
+                            warp_speed,
+                            recording,
+                            input_recording,
+                            joystick_input_mode: self.joystick_input_mode,
+                            pixel_aspect: super::pixel_aspect(),
+                            midi_in: &midi_in_label,
+                            midi_out: &midi_out_label,
+                        },
                     );
                     if let Err(e) = r.pixels.render() {
                         error!("pixels.render: {e}");
@@ -2235,7 +2292,7 @@ impl App {
         if self.ui.panel.is_none() && self.tool_panel_open() && !self.ui.menu_open {
             return None;
         }
-        self.ui.control_at(pos)
+        self.ui.control_at(pos, self.serial_is_midi)
     }
 
     fn main_ui_hover_changed(
@@ -2610,6 +2667,10 @@ impl App {
                     ui::MenuItem::Debugger => self.open_debugger(),
                     ui::MenuItem::Console => self.open_console(),
                     ui::MenuItem::JoystickInput => self.cycle_joystick_input_mode(),
+                    #[cfg(feature = "midi")]
+                    ui::MenuItem::MidiInput => self.cycle_midi_input(),
+                    #[cfg(feature = "midi")]
+                    ui::MenuItem::MidiOutput => self.cycle_midi_output(),
                     ui::MenuItem::PixelAspect => self.toggle_pixel_aspect(),
                     ui::MenuItem::Warp => self.toggle_warp(),
                     ui::MenuItem::WarpLimit => self.cycle_warp_speed(),
@@ -3712,6 +3773,12 @@ impl App {
     /// audio sink, are dropped here.
     fn run_machine(&mut self, emu: Emulator, cfg: &Config, raw: RawConfig) {
         self.emu = emu;
+        // The real machine may bridge serial to MIDI; the config-screen
+        // placeholder never does, so recompute now that the machine is live.
+        #[cfg(feature = "midi")]
+        {
+            self.serial_is_midi = self.emu.bus_mut().midi_serial_mut().is_some();
+        }
         self.machine_config = raw;
         self.disk_playlists = cfg.floppy_playlists.clone();
         self.disk_write_protected = std::array::from_fn(|i| {

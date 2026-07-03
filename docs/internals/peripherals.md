@@ -200,3 +200,47 @@ A `SerialSink` that can *produce* input (none of the built-in sinks do)
 must override `has_pending_input` alongside `read_byte`/`read_word`:
 Paula's per-tick UART step takes an idle fast path that skips the receiver
 entirely while it reports false.
+
+## MIDI serial bridge (`midi/`)
+
+`[serial] mode = "midi"` (or `--midi-out`/`--midi-in`) bridges Paula's
+serial port to host MIDI, behind the optional `midi` cargo feature -- a
+plain build compiles none of it and the mode falls back with a clear
+message. The whole thing hangs off one `SerialSink`, `MidiSerialSink`, so
+the emulator core is unchanged from any other serial target.
+
+The load-bearing detail is that byte timing survives to the wire. Paula
+stamps each transmitted byte with the emulated colour clock it left on
+(`SerialTimeAnchor`); `MidiSerialSink` maps that to a host `Instant` and
+asks the backend to *schedule* the message for that instant rather than
+send it now, so a frame's worth of bytes flushed together still leaves at
+the original spacing. Two host-agnostic pieces sit above the backend: a
+`MidiFramer` reassembles the single-byte serial stream into whole MIDI
+messages (a receiver rejects lone data bytes), tracking running status and
+SysEx and passing interleaved real-time bytes straight through; and Active
+Sensing (`0xFE`) is forwarded by default -- a real Amiga passes it down the
+wire -- and only dropped under `COPPERLINE_MIDI_STRIP_ACTIVE_SENSE=1`.
+Input arrives on a lock-free SPSC ring the receiver drains on its idle
+fast path, so the poll never locks.
+
+The host connection lives behind the `MidiBackend` trait, chosen by
+`cfg(target_os)`: macOS drives CoreMIDI (`coremidi.rs`), Linux the ALSA
+sequencer (`alsa.rs`), and other targets (Windows for now) get `stub.rs`,
+which enumerates nothing and refuses to open. Each backend links its
+platform library directly with no wrapper crate, and each maps the
+scheduled send onto that platform's timed-delivery primitive: a CoreMIDI
+packet timestamp, an ALSA real-time queue event. A new backend implements
+`send`/`set_output`/`set_input`/`current_output`/`current_input` plus free
+`enumerate`/`open`; nothing else changes. The raw FFI is layout-sensitive
+-- CoreMIDI packs its packet list to 4 bytes, and the ALSA `snd_seq_event_t`
+scheduling helpers are header-only inlines whose field writes are
+replicated by hand -- so both mirrors are pinned with compile-time layout
+assertions and want checking against live MIDI, not just review.
+
+Two debug knobs help tell a dead path from a routing one:
+`COPPERLINE_MIDI_DEBUG=1` reports per-second tx/rx byte counts and the
+first bytes sent (no tx while a song plays means the guest is not driving
+serial, i.e. the fault is upstream of the bridge); `=2` decodes every
+message in each direction. `COPPERLINE_MIDI_IMMEDIATE=1` bypasses
+scheduling and sends each message for immediate delivery, to separate a
+timing problem from a connection one.

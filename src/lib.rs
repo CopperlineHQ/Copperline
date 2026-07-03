@@ -37,6 +37,8 @@ pub mod harddrive;
 pub mod inputrec;
 pub mod inputsched;
 pub mod memory;
+#[cfg(feature = "midi")]
+pub mod midi;
 pub mod net;
 pub mod priority;
 pub mod recorder;

@@ -591,6 +591,16 @@ impl Emulator {
             // Saturated below the epoch (extreme target); fall back to now.
             self.stats.started_at = Some(now);
         }
+        // Republish the serial time base: `started_at` is the host instant of
+        // emulated time 0 on the same (audio-lead-adjusted) timeline audio and
+        // video are paced against, so a MIDI sink schedules in sync with them.
+        if let Some(host_epoch) = self.stats.started_at {
+            self.bus_mut()
+                .set_serial_time_anchor(crate::serial::SerialTimeAnchor {
+                    host_epoch,
+                    cck_per_second: f64::from(crate::chipset::paula::PAULA_CLOCK_HZ),
+                });
+        }
     }
 
     // ---- Reverse debugging (time travel) ------------------------------
@@ -1714,6 +1724,27 @@ fn realtime_catchup_limit(live_output_lead_seconds: f64) -> Duration {
 /// the command-line boot path in `main` and the configuration screen's Run
 /// button, so a machine built either way is identical. `rom_optional` allows
 /// a missing ROM file when a save state will supply the image.
+/// Build the serial sink Paula writes SERDAT bytes through, per `[serial]`.
+/// `Off` discards, `Stdout` is the historical terminal output, and `Midi`
+/// bridges to host MIDI endpoints. `Midi` needs a `--features midi` build, so
+/// without it a `midi` config is a clear error rather than a silent no-op.
+fn build_serial_sink(cfg: &Config) -> Result<Box<dyn crate::serial::SerialSink>> {
+    use crate::config::SerialMode;
+    match cfg.serial.mode {
+        SerialMode::Off => Ok(Box::new(crate::serial::NullSerialSink)),
+        SerialMode::Stdout => Ok(Box::new(StdoutSink::new())),
+        #[cfg(feature = "midi")]
+        SerialMode::Midi => Ok(Box::new(crate::midi::MidiSerialSink::open(
+            cfg.serial.midi_out.as_deref(),
+            cfg.serial.midi_in.as_deref(),
+        )?)),
+        #[cfg(not(feature = "midi"))]
+        SerialMode::Midi => Err(anyhow!(
+            "[serial] mode = \"midi\" needs a build with --features midi"
+        )),
+    }
+}
+
 pub fn build_machine(
     cfg: &Config,
     audio: Box<dyn AudioSink>,
@@ -1820,7 +1851,7 @@ pub fn build_machine(
     };
     let mut floppy = FloppyController::from_config(&cfg.floppy)?;
     floppy.set_connected_drives(cfg.floppy_connected);
-    let serial = Box::new(StdoutSink::new());
+    let serial = build_serial_sink(cfg)?;
     let mut paula = Paula::new(serial, audio);
     paula
         .drive_sounds_mut()
