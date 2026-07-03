@@ -3447,6 +3447,41 @@ fn beam_timed_display_window_changes_clip_later_bitplane_rows() {
 }
 
 #[test]
+fn hblank_tail_color_write_paints_following_row_from_left_edge() {
+    // A copper COLOR00 write in the horizontal-blank tail (hpos < 0x12)
+    // belongs to the previous output row's invisible tail; the following
+    // row must show the new colour from its first framebuffer column.
+    let mut bus = empty_bus();
+    bus.denise.diwstrt = 0x2C81;
+    bus.denise.diwstop = 0x2DC1;
+    bus.denise.bplcon0 = 0x0200;
+    bus.denise.palette.write_ocs(0, 0x0000);
+    bus.current_frame_render_base = bus.capture_render_snapshot();
+    bus.current_frame_render_events.push(BeamRegisterWrite {
+        vpos: RENDER_VISIBLE_START_VPOS + 20,
+        hpos: 0x06,
+        offset: 0x180,
+        value: 0x0F00,
+        source: BeamWriteSource::Copper,
+    });
+    bus.current_frame_render_events.push(BeamRegisterWrite {
+        vpos: RENDER_VISIBLE_START_VPOS + 20,
+        hpos: 0xDE,
+        offset: 0x180,
+        value: 0x0333,
+        source: BeamWriteSource::Copper,
+    });
+
+    let mut fb = vec![0; FB_PIXELS];
+    bitplane::render(&mut bus, &mut fb);
+
+    let row = 20 * FB_WIDTH;
+    assert_eq!(fb[row], rgb12_to_rgba8(0x0F00), "x=0");
+    assert_eq!(fb[row + 8], rgb12_to_rgba8(0x0F00), "x=8");
+    assert_eq!(fb[row + 20], rgb12_to_rgba8(0x0F00), "x=20");
+}
+
+#[test]
 fn beam_timed_diwstrt_rewrite_after_window_open_does_not_reclip_line() {
     let mut bus = empty_bus();
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
