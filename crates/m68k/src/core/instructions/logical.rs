@@ -60,6 +60,7 @@ impl CpuCore {
         }
         let imm = self.read_imm_16(bus);
         let sr = self.get_sr() & imm;
+        self.trace_t0_sr_write();
         self.set_sr(sr);
         // Status modification spends 8 internal clocks before discarding and
         // refilling the prefetch queue.
@@ -128,6 +129,7 @@ impl CpuCore {
         }
         let imm = self.read_imm_16(bus);
         let sr = self.get_sr() | imm;
+        self.trace_t0_sr_write();
         self.set_sr(sr);
         // Status modification spends 8 internal clocks before discarding and
         // refilling the prefetch queue.
@@ -194,6 +196,7 @@ impl CpuCore {
         }
         let imm = self.read_imm_16(bus);
         let sr = self.get_sr() ^ imm;
+        self.trace_t0_sr_write();
         self.set_sr(sr);
         // Status modification spends 8 internal clocks before discarding and
         // refilling the prefetch queue.

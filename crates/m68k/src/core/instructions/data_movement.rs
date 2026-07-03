@@ -206,13 +206,30 @@ impl CpuCore {
     /// Execute LINK instruction.
     ///
     /// LINK An, #<displacement>
+    /// The 68040 performs LINK's A7 predecrement before reading the source
+    /// register; the 68000-030 and the 68060 read the source first.
+    fn link_predecrements_first(&self) -> bool {
+        matches!(
+            self.cpu_type,
+            crate::core::types::CpuType::M68EC040
+                | crate::core::types::CpuType::M68LC040
+                | crate::core::types::CpuType::M68040
+        )
+    }
+
     pub fn exec_link<B: AddressBus>(&mut self, bus: &mut B, reg: usize) -> i32 {
         // 68000 bus order: the displacement word is consumed (with its
         // prefetch) BEFORE the An push.
         let disp = self.read_imm_16(bus) as i16 as i32;
 
-        // Push An
-        let an = self.a(reg);
+        // Push An. The 68040 (alone) decrements A7 before reading the
+        // source register, so LINK A7 pushes the decremented value there;
+        // every other generation pushes the original.
+        let an = if self.link_predecrements_first() && reg == 7 {
+            self.a(7).wrapping_sub(4)
+        } else {
+            self.a(reg)
+        };
         self.push_32(bus, an);
 
         // An = SP
@@ -228,8 +245,12 @@ impl CpuCore {
     ///
     /// LINK.L An, #<displacement> (32-bit displacement)
     pub fn exec_link_long<B: AddressBus>(&mut self, bus: &mut B, reg: usize) -> i32 {
-        // Push An
-        let an = self.a(reg);
+        // Push An (68040 A7 ordering quirk as in exec_link)
+        let an = if self.link_predecrements_first() && reg == 7 {
+            self.a(7).wrapping_sub(4)
+        } else {
+            self.a(reg)
+        };
         self.push_32(bus, an);
 
         // An = SP
@@ -278,11 +299,23 @@ impl CpuCore {
         };
 
         if is_predec {
+            // When the base register itself is in the list, the 68020+
+            // store its initial value minus one transfer size; the
+            // 68000/010 store the plain initial value. The register is
+            // only written back once, after the loop.
+            let base_reg = match mode {
+                AddressingMode::PreDecrement(reg) => 8 + reg as usize,
+                _ => unreachable!(),
+            };
+            let base_adjust = if self.is_pre_68020 { 0 } else { size.bytes() };
             // Write in reverse order: A7..A0, D7..D0
             for i in 0..16 {
                 if mask & (1 << i) != 0 {
                     let reg_idx = 15 - i; // Reverse: bit 0 = A7, bit 15 = D0
-                    let value = self.dar[reg_idx];
+                    let mut value = self.dar[reg_idx];
+                    if reg_idx == base_reg {
+                        value = value.wrapping_sub(base_adjust);
+                    }
                     addr = addr.wrapping_sub(size.bytes());
                     match size {
                         Size::Word => self.write_16(bus, addr, value as u16),

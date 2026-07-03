@@ -659,6 +659,32 @@ impl CpuCore {
     }
 
     /// Check for trace exception after instruction execution.
+    /// SR-writing instructions (MOVE to SR, ORI/ANDI/EORI to SR) run the
+    /// pending-trace check against the OLD T0 on the 68020+: writing SR is
+    /// a pipeline-synchronizing event, so a set T0 traces the instruction
+    /// even when the write clears it. Marking the boundary as a change of
+    /// flow lets check_trace() (which reads the pre-instruction SR) see it.
+    pub(crate) fn trace_t0_sr_write(&mut self) {
+        if !self.is_pre_68020 {
+            self.change_of_flow = true;
+        }
+    }
+
+    /// The 68040 additionally runs the T0 check after a small set of
+    /// pipeline-synchronizing instructions that are not flow changes:
+    /// NOP, MOVEC, MOVE to USP, CAS, CAS2, MOVES, TAS, PFLUSH and PTEST
+    /// (WinUAE's trace_t0_68040_only sites).
+    pub(crate) fn trace_t0_68040_sync(&mut self) {
+        if matches!(
+            self.cpu_type,
+            super::types::CpuType::M68EC040
+                | super::types::CpuType::M68LC040
+                | super::types::CpuType::M68040
+        ) {
+            self.change_of_flow = true;
+        }
+    }
+
     pub fn check_trace(&mut self) -> bool {
         // T1 trace: trace after every instruction
         // T0 trace: trace only on change-of-flow (68020+)

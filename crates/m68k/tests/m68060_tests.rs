@@ -199,11 +199,12 @@ fn movec_pcr_round_trips_with_read_only_identification() {
 fn movec_buscr_does_not_alias_dacr0_on_68060() {
     let (mut cpu, mut bus) = setup_060();
     cpu.dacr0 = 0xDEAD_BEEF;
-    movec_to(&mut cpu, &mut bus, 0x008, 0x1234_5678);
-    assert_eq!(cpu.buscr, 0x1234_5678);
+    // Only the two lock bits (31/29) of BUSCR are writable.
+    movec_to(&mut cpu, &mut bus, 0x008, 0xFFFF_FFFF);
+    assert_eq!(cpu.buscr, 0xA000_0000);
     assert_eq!(cpu.dacr0, 0xDEAD_BEEF, "BUSCR write must not touch DACR0");
     movec_from(&mut cpu, &mut bus, 0x008);
-    assert_eq!(cpu.dar[0], 0x1234_5678);
+    assert_eq!(cpu.dar[0], 0xA000_0000);
 }
 
 #[test]

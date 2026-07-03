@@ -24,7 +24,9 @@ impl CpuCore {
             Some(m) => m,
             None => return self.take_exception(bus, 4),
         };
-        if mode.is_register_direct() || matches!(mode, AddressingMode::Immediate) {
+        // Memory alterable only: register direct, PC-relative and immediate
+        // forms do not exist (and must not consume the extension word).
+        if !((2..=6).contains(&ea_mode) || (ea_mode == 7 && ea_reg <= 1)) {
             return self.take_exception(bus, 4);
         }
 
@@ -54,7 +56,8 @@ impl CpuCore {
             }
             _ => (self.get_ea_address(bus, mode, size), None),
         };
-        if size != Size::Byte && (addr & 1) != 0 && self.trap_unimpl_060() {
+        let misalign_mask = if size == Size::Long { 3 } else { 1 };
+        if size != Size::Byte && (addr & misalign_mask) != 0 && self.trap_unimpl_060() {
             return self
                 .take_exception(bus, crate::core::exceptions::vector::UNIMPLEMENTED_INTEGER);
         }
@@ -84,6 +87,7 @@ impl CpuCore {
             self.set_d(dc, write_d_sized(dc_val, mem, size));
         }
 
+        self.trace_t0_68040_sync();
         20
     }
 
@@ -140,11 +144,27 @@ impl CpuCore {
                 }
             }
         } else {
-            // Any mismatch: load both memory operands into compare registers.
-            self.set_d(dc1, write_d_sized(dc1_val, mem1, size));
-            self.set_d(dc2, write_d_sized(dc2_val, mem2, size));
+            // Any mismatch loads both memory operands into the compare
+            // registers. The write order is generation-dependent and decides
+            // which value survives when Dc1 == Dc2: pre-68040 parts write
+            // Dc2 then Dc1, the 68040/060 write Dc1 then Dc2.
+            let is_040_plus = matches!(
+                self.cpu_type,
+                crate::core::types::CpuType::M68EC040
+                    | crate::core::types::CpuType::M68LC040
+                    | crate::core::types::CpuType::M68040
+                    | crate::core::types::CpuType::M68060
+            );
+            if is_040_plus {
+                self.set_d(dc1, write_d_sized(self.d(dc1), mem1, size));
+                self.set_d(dc2, write_d_sized(self.d(dc2), mem2, size));
+            } else {
+                self.set_d(dc2, write_d_sized(self.d(dc2), mem2, size));
+                self.set_d(dc1, write_d_sized(self.d(dc1), mem1, size));
+            }
         }
 
+        self.trace_t0_68040_sync();
         40
     }
 

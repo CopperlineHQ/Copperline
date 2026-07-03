@@ -1,31 +1,30 @@
 .include "entry.s"
-/* Test: M68030 MOVE16 - Burst mode with different alignment */
+/* Test: MOVE16 does not exist on the 68030 (burst mode is a cache
+   feature, not an instruction): it must take a Line-F exception. */
 
 run_test:
     clr.l %d0
-    
-    /* 030 MOVE16 has different alignment rules */
-    lea src_030, %a0
-    lea dst_030, %a1
-    
-    /* Align to 16-byte boundary */
-    move.l %a0, %d1
-    andi.l #0xFFFFFFF0, %d1
-    move.l %d1, %a0
-    
-    move.l %a1, %d1
-    andi.l #0xFFFFFFF0, %d1
-    move.l %d1, %a1
-    
-    /* MOVE16 on 030 */
+
+    /* Install the Line-F handler */
+    lea fline_handler, %a0
+    move.l %a0, 0x2C            | vector 11
+
+    lea after_move16, %a1
+
+    /* MOVE16 (A0)+,(A0)+ encoding */
     .word 0xF620
     .word 0x8000
-    
-    rts
 
-.data
-.align 4
-src_030:
-    .space 32, 0x55
-dst_030:
-    .space 32, 0x00
+    /* Only reached if MOVE16 executed - wrong on a 68030 */
+    bra TEST_FAIL
+
+fline_handler:
+    /* Redirect the stacked PC past the trapping instruction */
+    move.l %a1, 2(%sp)
+    moveq #1, %d0
+    rte
+
+after_move16:
+    cmp.l #1, %d0               | the handler must have run
+    bne TEST_FAIL
+    rts

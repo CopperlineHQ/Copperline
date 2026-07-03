@@ -44,11 +44,31 @@ impl CpuCore {
             None => return 0,
         };
 
+        // For MOVES An,(An)+ / MOVES An,-(An) the stored value depends on
+        // whether the EA register update happens before the source register
+        // is captured. Real hardware (WinUAE cputest model): the 68020-040
+        // store the updated An, and so does the 68010 for byte/word; the
+        // 68010 long form and the 68060 store the original value.
+        let source_before_ea = if is_areg { Some(self.a(reg_idx)) } else { None };
+
         let addr = self.get_ea_address(bus, mode, size);
 
         if direction == 1 {
             // Register to EA (write): the data cycle runs in the DFC space.
-            let value = if is_areg {
+            let ea_updates_register = matches!(
+                mode,
+                AddressingMode::PostIncrement(_) | AddressingMode::PreDecrement(_)
+            );
+            let stores_original = match self.cpu_type {
+                crate::core::types::CpuType::M68060 => true,
+                crate::core::types::CpuType::M68010 | crate::core::types::CpuType::SCC68070 => {
+                    size == Size::Long
+                }
+                _ => false,
+            };
+            let value = if is_areg && ea_updates_register && stores_original {
+                source_before_ea.unwrap()
+            } else if is_areg {
                 self.a(reg_idx)
             } else {
                 self.d(reg_idx)
@@ -89,6 +109,7 @@ impl CpuCore {
         }
 
         // Condition codes are not affected
+        self.trace_t0_68040_sync();
         4
     }
 }

@@ -50,10 +50,16 @@ impl CpuCore {
             } else {
                 self.d(dq) as i32 as i64
             };
-            let q = dividend / divisor;
-            let r = dividend % divisor;
-            let overflow = q < i32::MIN as i64 || q > i32::MAX as i64;
-            (q as i32 as u32, r as i32 as u32, overflow)
+            if dividend == i64::MIN && divisor == -1 {
+                // The one quotient that does not fit i64: hardware flags
+                // overflow (Rust's division would panic on it).
+                (0, 0, true)
+            } else {
+                let q = dividend / divisor;
+                let r = dividend % divisor;
+                let overflow = q < i32::MIN as i64 || q > i32::MAX as i64;
+                (q as i32 as u32, r as i32 as u32, overflow)
+            }
         } else {
             let divisor = divisor_u32 as u64;
             let dividend = if use_64 {
@@ -74,12 +80,10 @@ impl CpuCore {
             return 40;
         }
 
-        // Write results.
+        // Write results: remainder first, then quotient, so the quotient
+        // wins when Dr == Dq (the hardware write order).
+        self.set_d(dr, rem_u32);
         self.set_d(dq, quot_u32);
-        // Remainder is produced if Dr != Dq (DIVUL/DIVSL) or if 64-bit dividend form is used.
-        if use_64 || dr != dq {
-            self.set_d(dr, rem_u32);
-        }
 
         // Flags: Z/N from quotient, V=0, C=0. X unaffected.
         self.not_z_flag = quot_u32;
@@ -92,6 +96,19 @@ impl CpuCore {
         self.c_flag = 0;
 
         40
+    }
+
+    /// Register write order for the 64-bit MUL result: the 68040/060 write
+    /// Dh before Dl, so Dl survives a Dh == Dl collision; the 020/030 write
+    /// in the reverse order.
+    fn mull_high_written_first(&self) -> bool {
+        matches!(
+            self.cpu_type,
+            crate::core::types::CpuType::M68EC040
+                | crate::core::types::CpuType::M68LC040
+                | crate::core::types::CpuType::M68040
+                | crate::core::types::CpuType::M68060
+        )
     }
 
     /// MULU.L / MULS.L family.
@@ -134,11 +151,19 @@ impl CpuCore {
             let hi = (prod >> 32) as i32 as u32;
 
             if wide {
-                self.set_d(dl, lo);
-                self.set_d(dh, hi);
-                // Flags from low part; V/C cleared for wide result.
-                self.not_z_flag = lo;
-                self.n_flag = if (lo & 0x8000_0000) != 0 { 0x80 } else { 0 };
+                // The register write order flips per generation and decides
+                // which half survives when Dh == Dl: 020/030 write Dl then
+                // Dh, the 68040+ write Dh then Dl.
+                if self.mull_high_written_first() {
+                    self.set_d(dh, hi);
+                    self.set_d(dl, lo);
+                } else {
+                    self.set_d(dl, lo);
+                    self.set_d(dh, hi);
+                }
+                // Z/N reflect the full 64-bit product; V/C cleared.
+                self.not_z_flag = lo | hi;
+                self.n_flag = if (hi & 0x8000_0000) != 0 { 0x80 } else { 0 };
                 self.v_flag = 0;
                 self.c_flag = 0;
                 return 40;
@@ -162,10 +187,15 @@ impl CpuCore {
             let hi = (prod >> 32) as u32;
 
             if wide {
-                self.set_d(dl, lo);
-                self.set_d(dh, hi);
-                self.not_z_flag = lo;
-                self.n_flag = if (lo & 0x8000_0000) != 0 { 0x80 } else { 0 };
+                if self.mull_high_written_first() {
+                    self.set_d(dh, hi);
+                    self.set_d(dl, lo);
+                } else {
+                    self.set_d(dl, lo);
+                    self.set_d(dh, hi);
+                }
+                self.not_z_flag = lo | hi;
+                self.n_flag = if (hi & 0x8000_0000) != 0 { 0x80 } else { 0 };
                 self.v_flag = 0;
                 self.c_flag = 0;
                 return 40;

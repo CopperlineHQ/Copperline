@@ -77,10 +77,11 @@ fn test_move16_is_illegal_on_68020() {
     // Vectors: SSP=0x1000, PC=0x0200
     bus.write_long_at(0x00, 0x1000);
     bus.write_long_at(0x04, 0x0200);
-    // Illegal instruction vector (vector 4) -> 0x0300
-    bus.write_long_at(0x10, 0x0300);
+    // Line-F vector (vector 11) -> 0x0300: F-line opcodes that do not
+    // decode on the model take the Line-F trap, not illegal-instruction.
+    bus.write_long_at(0x2C, 0x0300);
 
-    // MOVE16 (0xF620) - 68030/68040 only, should be illegal on 68020
+    // MOVE16 (0xF620) - 68040/68060 only, Line-F on the 68020
     bus.write_word_at(0x0200, 0xF620);
 
     cpu.reset(&mut bus);
@@ -93,6 +94,6 @@ fn test_move16_is_illegal_on_68020() {
     assert!(matches!(result, m68k::StepResult::Ok { .. }));
     assert_eq!(
         cpu.pc, 0x0300,
-        "MOVE16 on 68020 should trap to illegal instruction vector"
+        "MOVE16 on 68020 should take the Line-F trap"
     );
 }

@@ -3702,20 +3702,21 @@ mod tests {
     }
 
     #[test]
-    fn cinv_and_cpush_are_nops_on_68030() -> Result<()> {
-        // CINVA/CPUSHA decode as privileged NOPs (no cache to flush); execution
-        // continues normally.
-        let mut machine = machine_with_program_model(
-            0x0000_0100,
-            &[0xF4D8, 0xF4F8, 0x7007], // CINVA BC ; CPUSHA BC ; MOVEQ #7,D0
-            CpuModel::M68030,
-        )?;
+    fn cinv_takes_line_f_on_68030() -> Result<()> {
+        // CINV/CPUSH are 68040 instructions; the 68030 (whose cache control
+        // is CACR-based) raises Line-F for them (cputest-verified).
+        let mut bus = test_bus_with_pc(0x0000_0100);
+        write_program(&mut bus, 0x0000_0100, &[0xF4D8]); // CINVA BC
+        write_chip_long(&mut bus, 0x0000_002C, 0x0000_0200); // Line-F vector
+        write_program(&mut bus, 0x0000_0200, &[0x7007]); // MOVEQ #7,D0
+        let mut machine = M68kMachine::new(bus, CpuModel::M68030, false)?;
+        machine.bus_mut().agnus.hpos = 0x21;
 
-        let slice = machine.step_slice(3)?;
+        let slice = machine.step_slice(2)?;
 
         assert!(!slice.stopped);
-        assert_eq!(machine.d(0), 7);
-        assert_eq!(machine.pc(), 0x0000_0106);
+        assert_eq!(machine.d(0), 7, "Line-F handler must run");
+        assert_eq!(machine.pc(), 0x0000_0202);
         Ok(())
     }
 

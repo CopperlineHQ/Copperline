@@ -70,7 +70,15 @@ pub(crate) fn dispatch_instruction<B: AddressBus>(
         0x4 => dispatch_group_4(cpu, bus, opcode), // Misc (LEA, TRAP, etc.)
         0x5 => dispatch_group_5(cpu, bus, opcode), // ADDQ/SUBQ/Scc/DBcc
         0x6 => dispatch_group_6(cpu, bus, opcode), // Bcc/BSR
-        0x7 => dispatch_moveq(cpu, opcode),
+        0x7 => {
+            // MOVEQ requires bit 8 clear; the set-bit encodings are illegal
+            // (they belong to no instruction on any 68k model).
+            if opcode & 0x0100 != 0 {
+                illegal_instruction(cpu, bus)
+            } else {
+                dispatch_moveq(cpu, opcode)
+            }
+        }
         0x8 => dispatch_group_8(cpu, bus, opcode), // OR/DIV/SBCD
         0x9 => dispatch_group_9(cpu, bus, opcode), // SUB/SUBX
         0xA => exception_1010(cpu, opcode),
@@ -129,24 +137,60 @@ fn dispatch_group_f<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
         return exception_1111(cpu, opcode);
     }
 
+    // cpSAVE/cpRESTORE (valid EA forms) are privileged at decode: in user
+    // mode they raise privilege violation instead of Line-F. This covers
+    // every coprocessor ID routed over the bus interface - all IDs below
+    // the 040, non-zero IDs on the 040/060 (their cpID-0 MMU ops decode
+    // separately below).
+    if !cpu.is_supervisor() {
+        let cp_mode = (opcode >> 3) & 7;
+        let cp_reg = opcode & 7;
+        let external_id = ((opcode >> 9) & 7) != 0
+            || !matches!(
+                cpu.cpu_type,
+                CpuType::M68EC040 | CpuType::M68LC040 | CpuType::M68040 | CpuType::M68060
+            );
+        let is_cpsave = (opcode & 0xF1C0) == 0xF100
+            && (cp_mode == 2 || (4..=6).contains(&cp_mode) || (cp_mode == 7 && cp_reg <= 1));
+        let is_cprestore = (opcode & 0xF1C0) == 0xF140
+            && (cp_mode == 2
+                || cp_mode == 3
+                || cp_mode == 5
+                || cp_mode == 6
+                || (cp_mode == 7 && cp_reg <= 3));
+        if external_id && (is_cpsave || is_cprestore) {
+            return cpu.exception_privilege(bus);
+        }
+    }
+
+    // A 68020/030 without an attached 68881/68882 routes every cpID-1
+    // operation to Line-F (the 040/060 model FPU absence via EC/LC types
+    // and PCR.DFP instead).
+    if !cpu.fpu_present
+        && ((opcode >> 9) & 7) == 1
+        && !matches!(
+            cpu.cpu_type,
+            CpuType::M68EC040 | CpuType::M68LC040 | CpuType::M68040 | CpuType::M68060
+        )
+    {
+        return exception_1111(cpu, opcode);
+    }
+
     let sub = (opcode >> 8) & 0xF;
 
-    // MOVE16 (68030/68040): 16-byte aligned block transfer
-    // Pattern: 1111 0110 0010 0yyy (0xF620-0xF627) for (Ax)+,(Ay)+
-    if (opcode & 0xFFF8) == 0xF620 {
+    // MOVE16 (68040/68060 only; the 030's burst mode is a cache feature,
+    // not an instruction): 16-byte aligned block transfer.
+    // Patterns: 0xF600/F608/F610/F618 (absolute long forms) and
+    // 0xF620-0xF627 for (Ax)+,(Ay)+.
+    if (opcode & 0xFFE0) == 0xF600 || (opcode & 0xFFF8) == 0xF620 {
         let supports_move16 = matches!(
             cpu.cpu_type,
-            CpuType::M68EC030
-                | CpuType::M68030
-                | CpuType::M68EC040
-                | CpuType::M68LC040
-                | CpuType::M68040
-                | CpuType::M68060
+            CpuType::M68EC040 | CpuType::M68LC040 | CpuType::M68040 | CpuType::M68060
         );
-        if !supports_move16 {
-            return illegal_instruction(cpu, bus);
+        if supports_move16 {
+            return cpu.exec_move16(bus, opcode);
         }
-        return cpu.exec_move16(bus, opcode);
+        // Earlier models fall through to the Line-F handling below.
     }
 
     // 68040 Cache Instructions: CINV and CPUSH (F-line, privileged).
@@ -160,25 +204,25 @@ fn dispatch_group_f<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
     // surfaced to the host via cacr_pending_ops, the same channel the 68030
     // CACR clear strobes use. The 68030 has no CINV/CPUSH (it invalidates
     // through CACR), so these stay NOPs there.
+    // CINV/CPUSH (0xF4xx) and this PFLUSH/PTEST encoding (0xF5xx) exist
+    // only on the 68040/060; the 68030 invalidates through CACR and its
+    // MMU ops live in the 0xF0xx space, so both ranges are undefined
+    // F-lines there.
     let is_cache_cpu = matches!(
         cpu.cpu_type,
-        CpuType::M68EC030
-            | CpuType::M68030
-            | CpuType::M68EC040
-            | CpuType::M68LC040
-            | CpuType::M68040
-            | CpuType::M68060
+        CpuType::M68EC040 | CpuType::M68LC040 | CpuType::M68040 | CpuType::M68060
     );
     if is_cache_cpu && (opcode >> 8) & 0xF == 4 {
+        // Scope field 000 (and CPUSH's unused 100) are undefined encodings:
+        // the instruction does not exist, so Line-F wins over privilege.
+        if matches!((opcode >> 3) & 7, 0 | 4) {
+            return exception_1111(cpu, opcode);
+        }
         // Check for supervisor mode (cache ops are privileged)
         if !cpu.is_supervisor() {
             return cpu.take_exception(bus, 8); // Privilege violation
         }
-        let has_cinv_cpush = matches!(
-            cpu.cpu_type,
-            CpuType::M68EC040 | CpuType::M68LC040 | CpuType::M68040 | CpuType::M68060
-        );
-        if has_cinv_cpush {
+        {
             let caches = (opcode >> 6) & 0b11;
             if caches & 0b01 != 0 {
                 cpu.cacr_pending_ops |= super::cpu::CACR_CD; // clear data cache
@@ -195,6 +239,16 @@ fn dispatch_group_f<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
     //   PTESTR (An): 1111 0101 0110 1rrr; PTESTW (An): 1111 0101 0100 1rrr
     //   (bit 6 set; bit 5 = read).
     if is_cache_cpu && (opcode >> 8) & 0xF == 5 {
+        // Valid encodings: the PFLUSH group (F500-F51F) on both models,
+        // PTESTW/PTESTR (F548/F568) on the 040, PLPAW/PLPAR (F588/F5C8)
+        // on the 060. Everything else is an undefined F-line, which wins
+        // over the privilege check.
+        let valid = (opcode & 0xFFE0) == 0xF500
+            || (!cpu.is_060() && ((opcode & 0xFFF8) == 0xF548 || (opcode & 0xFFF8) == 0xF568))
+            || (cpu.is_060() && ((opcode & 0xFFF8) == 0xF588 || (opcode & 0xFFF8) == 0xF5C8));
+        if !valid {
+            return exception_1111(cpu, opcode);
+        }
         if !cpu.is_supervisor() {
             return cpu.take_exception(bus, 8); // Privilege violation
         }
@@ -251,6 +305,7 @@ fn dispatch_group_f<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                     Err(_) => 0,                                    // not resident
                 };
             cpu.mmu_fc_override = None;
+            cpu.trace_t0_68040_sync();
             return 4;
         }
         // PFLUSH variants flush the ATC. We do not track entries finely enough
@@ -259,6 +314,7 @@ fn dispatch_group_f<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
         // 68030 PFLUSH forms come through exec_mmu_op0 (0xF0xx) and the 030
         // walker does not consult the ATC, so nothing to flush there.
         cpu.atc.flush_all();
+        cpu.trace_t0_68040_sync();
         return 4;
     }
 
@@ -275,6 +331,10 @@ fn dispatch_group_f<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
         }
         let _ = cpu.read_imm_16(bus); // consume the 01C0 extension
         let sr = cpu.read_imm_16(bus);
+        // Like STOP, a new SR with S clear raises privilege violation.
+        if (sr & 0x2000) == 0 {
+            return cpu.exception_privilege(bus);
+        }
         cpu.stop(sr);
         return 4;
     }
@@ -295,6 +355,10 @@ fn dispatch_group_f<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
     if (opcode & 0xFFC0) == 0xF240 {
         let ea_mode = ((opcode >> 3) & 7) as u8;
         let ea_reg = (opcode & 7) as usize;
+        // Mode 111 regs 5-7 are undefined encodings in this block.
+        if ea_mode == 7 && ea_reg > 4 {
+            return exception_1111(cpu, opcode);
+        }
         let w2 = cpu.read_imm_16(bus);
         let cond = (w2 & 0x3F) as u8;
         if ea_mode == 1 {
@@ -342,7 +406,22 @@ fn dispatch_group_f<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
 
     let cycles = match sub {
         0x2 => cpu.exec_fpu_op0(bus, opcode),
-        0x3 => cpu.exec_fpu_op1(bus, opcode),
+        0x3 => {
+            // FSAVE takes predecrement or control alterable EAs, FRESTORE
+            // postincrement or control (incl. PC-relative); anything else
+            // is an undefined F-line encoding.
+            let m = ((opcode >> 3) & 7) as u8;
+            let r = (opcode & 7) as u8;
+            let valid = if (opcode & 0x40) == 0 {
+                m == 2 || (4..=6).contains(&m) || (m == 7 && r <= 1)
+            } else {
+                m == 2 || m == 3 || m == 5 || m == 6 || (m == 7 && r <= 3)
+            };
+            if !valid {
+                return exception_1111(cpu, opcode);
+            }
+            cpu.exec_fpu_op1(bus, opcode)
+        }
         _ => 0,
     };
     if cycles != 0 {
@@ -369,6 +448,16 @@ fn dispatch_move<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16, siz
     let src_mode = ((opcode >> 3) & 7) as u8;
     let dst_reg = ((opcode >> 9) & 7) as u8;
     let dst_mode = ((opcode >> 6) & 7) as u8;
+
+    // A byte-sized MOVE cannot source an address register, and the
+    // destination must be data alterable (no #imm, no PC-relative);
+    // real silicon raises illegal instruction for both.
+    if size == Size::Byte && src_mode == 1 {
+        return illegal_instruction(cpu, bus);
+    }
+    if dst_mode == 7 && dst_reg > 1 {
+        return illegal_instruction(cpu, bus);
+    }
 
     let src = AddressingMode::decode(src_mode, src_reg);
     let dst = AddressingMode::decode(dst_mode, dst_reg);
@@ -405,10 +494,36 @@ fn dispatch_moveq(cpu: &mut CpuCore, opcode: u16) -> i32 {
 // Group 0: Bit manipulation, MOVEP, Immediate
 // ============================================================================
 
+/// Immediate ALU destinations (ORI/ANDI/EORI/SUBI/ADDI, and CMPI on the
+/// 68000/010) must be data alterable: Dn or memory -- not An, not #imm,
+/// not PC-relative. Real silicon raises an illegal-instruction exception
+/// otherwise (cputest's ILLEGAL set probes exactly these encodings).
+/// Control addressing modes (JMP/JSR/LEA/PEA and friends): memory
+/// addresses without a side-effecting or register form -- (An),
+/// (d16,An), (d8,An,Xn), abs.W/L and the PC-relative pair, but not
+/// Dn/An, (An)+/-(An), or #imm.
+fn ea_control(ea_mode: u8, ea_reg: u8) -> bool {
+    match ea_mode {
+        2 | 5 | 6 => true,
+        7 => ea_reg <= 3,
+        _ => false,
+    }
+}
+
+fn ea_data_alterable(ea_mode: u8, ea_reg: u8) -> bool {
+    match ea_mode {
+        0 | 2 | 3 | 4 | 5 | 6 => true,
+        7 => ea_reg <= 1,
+        _ => false,
+    }
+}
+
 fn dispatch_group_0<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) -> i32 {
     // 68020+ CAS / CAS2 (compare-and-swap)
     // CAS2: 0000 1ss0 1111 1100 with two extension words
-    if opcode == 0x0EFC || opcode == 0x0CFC || opcode == 0x0AFC {
+    if opcode == 0x0EFC || opcode == 0x0CFC {
+        // CAS2 exists as word/long only (0x0AFC, the byte pattern, stays
+        // an illegal instruction).
         if cpu.cpu_type == CpuType::M68000
             || cpu.cpu_type == CpuType::M68010
             || cpu.cpu_type == CpuType::SCC68070
@@ -438,6 +553,16 @@ fn dispatch_group_0<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
     // Pattern: 0000 1110 ssmm mrrr (0x0E00-0x0EFF)
     if (opcode & 0xFF00) == 0x0E00 {
         if cpu.cpu_type == CpuType::M68000 {
+            return illegal_instruction(cpu, bus);
+        }
+        // The EA field lives in the opcode word: a non-memory EA or the
+        // invalid size 0b11 is an illegal encoding, and that wins over the
+        // privilege check (unlike MOVEC, whose Rc field sits in the
+        // extension word and is only examined in supervisor mode).
+        let ea_mode = ((opcode >> 3) & 7) as u8;
+        let ea_reg = opcode & 7;
+        let memory_alterable = (2..=6).contains(&ea_mode) || (ea_mode == 7 && ea_reg <= 1);
+        if (opcode >> 6) & 3 == 3 || !memory_alterable {
             return illegal_instruction(cpu, bus);
         }
         return cpu.exec_moves(bus, opcode);
@@ -476,6 +601,10 @@ fn dispatch_group_0<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
         ) {
             return illegal_instruction(cpu, bus);
         }
+        // The module descriptor is addressed by a control mode only.
+        if !ea_control(((opcode >> 3) & 7) as u8, (opcode & 7) as u8) {
+            return illegal_instruction(cpu, bus);
+        }
         // CALLM #<data>, <ea>
         return cpu.exec_callm(bus, opcode);
     }
@@ -489,6 +618,10 @@ fn dispatch_group_0<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
         && ((opcode >> 9) & 3) != 3
     {
         if cpu.is_pre_68020 {
+            return illegal_instruction(cpu, bus);
+        }
+        // The bounds pair is addressed by a control mode only.
+        if !ea_control(((opcode >> 3) & 7) as u8, (opcode & 7) as u8) {
             return illegal_instruction(cpu, bus);
         }
         // CHK2/CMP2 were dropped from 68060 silicon.
@@ -557,6 +690,9 @@ fn dispatch_group_0<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
         0x0 if ea_mode == 7 && ea_reg == 4 && ((opcode >> 6) & 3) == 0 => cpu.exec_ori_ccr(bus),
         0x0 if ea_mode == 7 && ea_reg == 4 && ((opcode >> 6) & 3) == 1 => cpu.exec_ori_sr(bus),
         0x0 => {
+            if !ea_data_alterable(ea_mode, ea_reg) {
+                return illegal_instruction(cpu, bus);
+            }
             if let Some(mode) = AddressingMode::decode(ea_mode, ea_reg) {
                 let size = decode_size_00((opcode >> 6) & 3);
                 let legacy = cpu.exec_ori(bus, size, mode);
@@ -575,6 +711,9 @@ fn dispatch_group_0<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
         0x2 if ea_mode == 7 && ea_reg == 4 && ((opcode >> 6) & 3) == 1 => cpu.exec_andi_sr(bus),
         0x2 => {
             // ANDI
+            if !ea_data_alterable(ea_mode, ea_reg) {
+                return illegal_instruction(cpu, bus);
+            }
             if let Some(mode) = AddressingMode::decode(ea_mode, ea_reg) {
                 let size = decode_size_00((opcode >> 6) & 3);
                 let legacy = cpu.exec_andi(bus, size, mode);
@@ -592,6 +731,9 @@ fn dispatch_group_0<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             let size_bits = (opcode >> 6) & 3;
             if size_bits == 3 {
                 return 4; // Invalid size
+            }
+            if !ea_data_alterable(ea_mode, ea_reg) {
+                return illegal_instruction(cpu, bus);
             }
             let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
             let size = decode_size_00(size_bits);
@@ -618,6 +760,9 @@ fn dispatch_group_0<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 // But strictly speaking, if size=11, it is invalid for ADDI.
                 return 4;
             }
+            if !ea_data_alterable(ea_mode, ea_reg) {
+                return illegal_instruction(cpu, bus);
+            }
 
             let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
             let size = decode_size_00(size_bits);
@@ -639,6 +784,9 @@ fn dispatch_group_0<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
         0xA if ea_mode == 7 && ea_reg == 4 && ((opcode >> 6) & 3) == 0 => cpu.exec_eori_ccr(bus),
         0xA if ea_mode == 7 && ea_reg == 4 && ((opcode >> 6) & 3) == 1 => cpu.exec_eori_sr(bus),
         0xA => {
+            if !ea_data_alterable(ea_mode, ea_reg) {
+                return illegal_instruction(cpu, bus);
+            }
             let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
             let size = decode_size_00((opcode >> 6) & 3);
             let legacy = cpu.exec_eori(bus, size, mode);
@@ -650,6 +798,10 @@ fn dispatch_group_0<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
         }
         0xC => {
             // CMPI
+            let pc_rel_ok = !cpu.is_pre_68020 && ea_mode == 7 && (ea_reg == 2 || ea_reg == 3);
+            if !ea_data_alterable(ea_mode, ea_reg) && !pc_rel_ok {
+                return illegal_instruction(cpu, bus);
+            }
             let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
             let size = decode_size_00((opcode >> 6) & 3);
             let imm = read_immediate(cpu, bus, size);
@@ -667,6 +819,23 @@ fn dispatch_group_0<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
         _ => {
             // Bit operations: BTST, BCHG, BCLR, BSET
             let bit_op = (opcode >> 6) & 3;
+            // BTST's destination is any data addressing mode (PC-relative
+            // included; the dynamic form even takes #imm); the modifying
+            // forms need a data alterable destination. An is illegal for
+            // all of them.
+            let dynamic = opcode & 0x100 != 0;
+            let ea_ok = if bit_op == 0 {
+                match ea_mode {
+                    0 | 2 | 3 | 4 | 5 | 6 => true,
+                    7 => ea_reg <= if dynamic { 4 } else { 3 },
+                    _ => false,
+                }
+            } else {
+                ea_data_alterable(ea_mode, ea_reg)
+            };
+            if !ea_ok {
+                return illegal_instruction(cpu, bus);
+            }
             let mode = AddressingMode::decode(ea_mode, ea_reg);
 
             if let Some(ea) = mode {
@@ -753,13 +922,14 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
     // 68020+ long multiply/divide (MULL/MULS/MULU, DIVL/DIVS/DIVU, and remainder forms).
     // These share opcode space with MOVEM and must be decoded before MOVEM heuristics.
     if (opcode & 0xFFC0) == 0x4C00 {
-        if cpu.is_pre_68020 {
+        // The source is a data addressing mode: An direct is illegal.
+        if cpu.is_pre_68020 || ea_mode == 1 || (ea_mode == 7 && ea_reg > 4) {
             return illegal_instruction(cpu, bus);
         }
         return cpu.exec_mull(bus, opcode);
     }
     if (opcode & 0xFFC0) == 0x4C40 {
-        if cpu.is_pre_68020 {
+        if cpu.is_pre_68020 || ea_mode == 1 || (ea_mode == 7 && ea_reg > 4) {
             return illegal_instruction(cpu, bus);
         }
         return cpu.exec_divl(bus, opcode);
@@ -768,6 +938,14 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
     // MOVE from SR: 0100 0000 11 mmm rrr (0x40C0..0x40FF)
     // Writes SR (word) to <ea>. Does not affect flags.
     if (opcode & 0xFFC0) == 0x40C0 {
+        if !ea_data_alterable(ea_mode, ea_reg) {
+            return illegal_instruction(cpu, bus);
+        }
+        // Privileged on the 68010 and later (MOVE from CCR was added for
+        // user-mode condition-code access); unprivileged on the 68000.
+        if cpu.cpu_type != CpuType::M68000 && !cpu.is_supervisor() {
+            return cpu.exception_privilege(bus);
+        }
         let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
         let sr = cpu.get_sr() as u32;
         // 68000 quirk: like CLR, MOVE from SR reads its destination before
@@ -795,7 +973,7 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
     // 68010+ MOVE from CCR: 0100 0010 11 mmm rrr (0x42C0..0x42FF)
     // Writes CCR (word) to <ea>. Does not affect flags.
     if (opcode & 0xFFC0) == 0x42C0 {
-        if cpu.cpu_type == CpuType::M68000 {
+        if cpu.cpu_type == CpuType::M68000 || !ea_data_alterable(ea_mode, ea_reg) {
             return illegal_instruction(cpu, bus);
         }
         let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
@@ -807,6 +985,10 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
     // CHK (68000: opmode=110 for CHK.W). Note: opmode=111 overlaps with LEA on 68000.
     if opmode == 0b110 {
         let dst_reg = ((opcode >> 9) & 7) as usize;
+        // The bound is a data addressing mode: An direct is illegal.
+        if ea_mode == 1 {
+            return illegal_instruction(cpu, bus);
+        }
         if let Some(mode) = AddressingMode::decode(ea_mode, ea_reg) {
             let size = Size::Word;
             let bound = cpu.read_ea(bus, mode, size);
@@ -814,6 +996,26 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
         } else {
             return illegal_instruction(cpu, bus);
         }
+    }
+    // CHK.L (68020+, opmode=100: the size field is 11=word, 10=long).
+    // Undefined before the 68020; without this arm the encoding used to
+    // fall through into the MOVEM decoder.
+    if opmode == 0b100 {
+        if cpu.is_pre_68020 || ea_mode == 1 {
+            return illegal_instruction(cpu, bus);
+        }
+        let dst_reg = ((opcode >> 9) & 7) as usize;
+        if let Some(mode) = AddressingMode::decode(ea_mode, ea_reg) {
+            let size = Size::Long;
+            let bound = cpu.read_ea(bus, mode, size);
+            return cpu.exec_chk(bus, size, bound, dst_reg);
+        } else {
+            return illegal_instruction(cpu, bus);
+        }
+    }
+    // Opmode 101 in this group is unassigned on every 68k generation.
+    if opmode == 0b101 {
+        return illegal_instruction(cpu, bus);
     }
 
     match opcode {
@@ -829,7 +1031,23 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 cpu.exception_privilege(bus)
             }
         } // RESET
-        0x4E71 => 4, // NOP
+        0x4E71 => {
+            // NOP is one of the 68040's T0 pipeline-sync trace points.
+            cpu.trace_t0_68040_sync();
+            4
+        }
+        // 68060 debug instructions; illegal on every other model (they
+        // fall through to the TAS-space handling below).
+        0x4AC8 if cpu.is_060() => {
+            // HALT: privileged; stops the processor until reset.
+            if cpu.is_supervisor() {
+                cpu.stopped = 1;
+                4
+            } else {
+                cpu.exception_privilege(bus)
+            }
+        }
+        0x4ACC if cpu.is_060() => 4, // PULSE: performance-monitor NOP
         0x4E72 => {
             // STOP
             if cpu.is_supervisor() {
@@ -838,6 +1056,13 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 cpu.consume_without_prefetch = true;
                 let sr = cpu.read_imm_16(bus);
                 cpu.consume_without_prefetch = false;
+                // 68060: a new SR with S clear raises an immediate
+                // privilege violation (stacking the PC past the operand)
+                // instead of stopping; SR is left unchanged.
+                if cpu.is_060() && (sr & 0x2000) == 0 {
+                    cpu.ppc = cpu.pc;
+                    return cpu.exception_privilege(bus);
+                }
                 cpu.stop(sr);
                 4
             } else {
@@ -1051,6 +1276,13 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             if cpu.cpu_type == CpuType::M68000 {
                 return illegal_instruction(cpu, bus);
             }
+            // Privilege is checked before the extension word is examined:
+            // user mode raises privilege violation even for an undefined Rc.
+            // Exception: the 68060 decodes the Rc field first and reports
+            // an undefined register as illegal even in user mode.
+            if !cpu.is_supervisor() && !cpu.is_060() {
+                return cpu.exception_privilege(bus);
+            }
             let ext = bus.read_word(cpu.pc);
             cpu.pc += 2;
             let reg_type = (ext >> 15) & 1; // 0=Dn, 1=An
@@ -1060,7 +1292,10 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 return illegal_instruction(cpu, bus);
             }
             if !cpu.is_supervisor() {
-                return cpu.take_exception(bus, 8); // Privilege violation
+                return cpu.exception_privilege(bus);
+            }
+            if !cpu.is_supervisor() {
+                return cpu.exception_privilege(bus);
             }
             let value = cpu.read_control_register(ctrl_reg);
             if reg_type == 0 {
@@ -1068,12 +1303,20 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             } else {
                 cpu.set_a(reg_num, value);
             }
+            cpu.trace_t0_68040_sync();
             12
         }
         0x4E7B => {
             // MOVEC Rn,Rc - Move to control register (68010+)
             if cpu.cpu_type == CpuType::M68000 {
                 return illegal_instruction(cpu, bus);
+            }
+            // Privilege is checked before the extension word is examined:
+            // user mode raises privilege violation even for an undefined Rc.
+            // Exception: the 68060 decodes the Rc field first and reports
+            // an undefined register as illegal even in user mode.
+            if !cpu.is_supervisor() && !cpu.is_060() {
+                return cpu.exception_privilege(bus);
             }
             let ext = bus.read_word(cpu.pc);
             cpu.pc += 2;
@@ -1084,7 +1327,10 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 return illegal_instruction(cpu, bus);
             }
             if !cpu.is_supervisor() {
-                return cpu.take_exception(bus, 8); // Privilege violation
+                return cpu.exception_privilege(bus);
+            }
+            if !cpu.is_supervisor() {
+                return cpu.exception_privilege(bus);
             }
             let value = if reg_type == 0 {
                 cpu.d(reg_num)
@@ -1092,9 +1338,20 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 cpu.a(reg_num)
             };
             cpu.write_control_register(ctrl_reg, value);
+            cpu.trace_t0_68040_sync();
             12
         }
         _ => {
+            // The group-4 unary read-modify-write ops (NEGX, CLR, NEG, NOT)
+            // all need a data alterable destination; An / #imm /
+            // PC-relative raise illegal instruction on real silicon. The
+            // MOVE-to-CCR/SR forms are matched before their arms below.
+            if matches!(subop, 0x0 | 0x2 | 0x4 | 0x6)
+                && ((opcode >> 6) & 3) != 3
+                && !ea_data_alterable(ea_mode, ea_reg)
+            {
+                return illegal_instruction(cpu, bus);
+            }
             match subop {
                 0x0 => {
                     // NEGX
@@ -1120,6 +1377,10 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 }
                 0x4 if (opcode >> 6) & 3 == 3 => {
                     // MOVE to CCR: 0100 0100 11xx xxxx
+                    // Data addressing only: An direct is illegal.
+                    if ea_mode == 1 || (ea_mode == 7 && ea_reg > 4) {
+                        return illegal_instruction(cpu, bus);
+                    }
                     let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
                     let value = cpu.read_ea(bus, mode, Size::Word) as u8;
                     if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
@@ -1149,6 +1410,11 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 }
                 0x6 if (opcode >> 6) & 3 == 3 => {
                     // MOVE to SR: 0100 0110 11xx xxxx
+                    // Data addressing only: An direct is illegal (checked
+                    // before the privilege test, as on real silicon).
+                    if ea_mode == 1 || (ea_mode == 7 && ea_reg > 4) {
+                        return illegal_instruction(cpu, bus);
+                    }
                     if !cpu.is_supervisor() {
                         return cpu.exception_privilege(bus);
                     }
@@ -1157,6 +1423,7 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                     if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
                         return 50;
                     }
+                    cpu.trace_t0_sr_write();
                     cpu.set_sr(value as u16);
                     // Status modification spends 4 internal clocks before
                     // discarding and refilling the prefetch queue.
@@ -1190,7 +1457,10 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                     BKPT_SENTINEL_BASE + bp_num as i32
                 }
                 0x8 if (opcode >> 6) & 3 == 0 => {
-                    // NBCD: 0100 1000 00 mmm rrr
+                    // NBCD: 0100 1000 00 mmm rrr (data alterable only)
+                    if !ea_data_alterable(ea_mode, ea_reg) {
+                        return illegal_instruction(cpu, bus);
+                    }
                     let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
                     let legacy = cpu.exec_nbcd(bus, mode);
                     if cpu.cpu_type == CpuType::M68000 {
@@ -1224,7 +1494,10 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                     ILLEGAL_SENTINEL
                 }
                 0xA if (opcode >> 6) & 3 == 3 => {
-                    // TAS
+                    // TAS (data alterable only)
+                    if !ea_data_alterable(ea_mode, ea_reg) {
+                        return illegal_instruction(cpu, bus);
+                    }
                     let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
                     let legacy = cpu.exec_tas(bus, mode);
                     if cpu.cpu_type == CpuType::M68000 {
@@ -1239,8 +1512,18 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                     }
                 }
                 0xA => {
-                    // TST
+                    // TST. On the 68000/010 the operand is data alterable
+                    // only; the 68020+ additionally allow An (word/long),
+                    // PC-relative, and immediate operands.
                     let size = decode_size_00((opcode >> 6) & 3);
+                    let ok = if cpu.is_pre_68020 {
+                        ea_data_alterable(ea_mode, ea_reg)
+                    } else {
+                        !((ea_mode == 1 && size == Size::Byte) || (ea_mode == 7 && ea_reg > 4))
+                    };
+                    if !ok {
+                        return illegal_instruction(cpu, bus);
+                    }
                     let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
                     let legacy = cpu.exec_tst(bus, size, mode);
                     if cpu.cpu_type == CpuType::M68000 {
@@ -1267,6 +1550,7 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                     if cpu.is_supervisor() {
                         let reg = (opcode & 7) as usize;
                         cpu.set_usp(cpu.a(reg));
+                        cpu.trace_t0_68040_sync();
                         4
                     } else {
                         cpu.exception_privilege(bus)
@@ -1286,6 +1570,9 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 // JSR/JMP/LEA/PEA must be checked BEFORE MOVEM due to bit pattern overlap
                 _ if (opcode & 0xFFC0) == 0x4E80 => {
                     // JSR: 0100 1110 10 mmm rrr
+                    if !ea_control(ea_mode, ea_reg) {
+                        return illegal_instruction(cpu, bus);
+                    }
                     let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
                     // EA extension words are consumed without prefetching
                     // ahead: the stream is about to be abandoned.
@@ -1317,6 +1604,9 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 }
                 _ if (opcode & 0xFFC0) == 0x4EC0 => {
                     // JMP: 0100 1110 11 mmm rrr
+                    if !ea_control(ea_mode, ea_reg) {
+                        return illegal_instruction(cpu, bus);
+                    }
                     let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
                     cpu.change_of_flow = true;
                     // EA extension words are consumed without prefetching
@@ -1343,10 +1633,11 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 _ if (opcode & 0xF1C0) == 0x41C0 => {
                     // LEA: 0100 rrr 111 mmm rrr
                     let reg = ((opcode >> 9) & 7) as usize;
+                    if !ea_control(ea_mode, ea_reg) {
+                        return illegal_instruction(cpu, bus);
+                    }
                     let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
-                    if mode.is_register_direct() || matches!(mode, AddressingMode::Immediate) {
-                        illegal_instruction(cpu, bus)
-                    } else {
+                    {
                         let legacy = cpu.exec_lea(bus, mode, reg);
                         if cpu.cpu_type == CpuType::M68000 {
                             4 + cpu.control_addr_calc_cycles(mode)
@@ -1357,10 +1648,11 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 }
                 _ if (opcode & 0xFFC0) == 0x4840 => {
                     // PEA: 0100 1000 010 mmm rrr
+                    if !ea_control(ea_mode, ea_reg) {
+                        return illegal_instruction(cpu, bus);
+                    }
                     let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
-                    if mode.is_register_direct() || matches!(mode, AddressingMode::Immediate) {
-                        illegal_instruction(cpu, bus)
-                    } else {
+                    {
                         let legacy = cpu.exec_pea(bus, mode);
                         if cpu.cpu_type == CpuType::M68000 {
                             12 + cpu.control_addr_calc_cycles(mode)
@@ -1371,20 +1663,45 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 }
                 // MOVEM after JSR/JMP checks
                 // Direction bit is 10: 0=register->memory, 1=memory->register
-                _ if (opcode & 0x0400) == 0 && (opcode >> 6) & 3 == 2 && ea_mode >= 2 => {
+                // Register-to-memory takes control alterable modes plus
+                // -(An); memory-to-register control modes plus (An)+
+                // (PC-relative sources included). Everything else is an
+                // illegal instruction on real silicon.
+                _ if subop == 0x8
+                    && (opcode & 0x0400) == 0
+                    && (opcode >> 6) & 3 == 2
+                    && ea_mode >= 2 =>
+                {
                     // MOVEM register to memory (word)
+                    if !(matches!(ea_mode, 2 | 4 | 5 | 6) || (ea_mode == 7 && ea_reg <= 1)) {
+                        return illegal_instruction(cpu, bus);
+                    }
                     let mask = cpu.read_imm_16(bus);
                     let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
                     cpu.exec_movem_to_mem(bus, Size::Word, mode, mask)
                 }
-                _ if (opcode & 0x0400) == 0 && (opcode >> 6) & 3 == 3 && ea_mode >= 2 => {
+                _ if subop == 0x8
+                    && (opcode & 0x0400) == 0
+                    && (opcode >> 6) & 3 == 3
+                    && ea_mode >= 2 =>
+                {
                     // MOVEM register to memory (long)
+                    if !(matches!(ea_mode, 2 | 4 | 5 | 6) || (ea_mode == 7 && ea_reg <= 1)) {
+                        return illegal_instruction(cpu, bus);
+                    }
                     let mask = cpu.read_imm_16(bus);
                     let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
                     cpu.exec_movem_to_mem(bus, Size::Long, mode, mask)
                 }
-                _ if (opcode & 0x0400) != 0 && (opcode >> 10) & 3 == 3 && ea_mode >= 2 => {
+                _ if subop == 0xC
+                    && (opcode & 0x0400) != 0
+                    && (opcode >> 10) & 3 == 3
+                    && ea_mode >= 2 =>
+                {
                     // MOVEM memory to register
+                    if ea_mode == 4 || (ea_mode == 7 && ea_reg > 3) {
+                        return illegal_instruction(cpu, bus);
+                    }
                     let mask = cpu.read_imm_16(bus);
                     let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
                     let size = if (opcode >> 6) & 1 == 0 {
@@ -1508,7 +1825,11 @@ fn dispatch_group_5<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 12
             }
         } else {
-            // Scc
+            // Scc (data alterable only; An and the undefined mode-7
+            // registers raise illegal instruction)
+            if !ea_data_alterable(ea_mode, ea_reg) {
+                return illegal_instruction(cpu, bus);
+            }
             let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
             let value = if cpu.test_condition(condition) {
                 0xFF
@@ -1542,10 +1863,20 @@ fn dispatch_group_5<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             }
         }
     } else {
-        // ADDQ or SUBQ
+        // ADDQ or SUBQ: alterable destinations (An allowed for word/long
+        // only; no #imm or PC-relative).
+        let size = decode_size_00(size_bits);
+        let ea_ok = match ea_mode {
+            0 | 2 | 3 | 4 | 5 | 6 => true,
+            1 => size != Size::Byte,
+            7 => ea_reg <= 1,
+            _ => false,
+        };
+        if !ea_ok {
+            return illegal_instruction(cpu, bus);
+        }
         let data = ((opcode >> 9) & 7) as u32;
         let data = if data == 0 { 8 } else { data };
-        let size = decode_size_00(size_bits);
         let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
 
         let legacy = if opcode & 0x100 == 0 {
@@ -1640,7 +1971,10 @@ fn dispatch_group_8<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
 
     match op_mode {
         0..=2 => {
-            // OR Dn, <ea>
+            // OR <ea>, Dn: data addressing only (An is illegal).
+            if ea_mode == 1 || (ea_mode == 7 && ea_reg > 4) {
+                return illegal_instruction(cpu, bus);
+            }
             let size = decode_size_012(op_mode);
             let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
             let src = cpu.read_ea(bus, mode, size);
@@ -1687,7 +2021,10 @@ fn dispatch_group_8<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                     cpu.exec_unpk_mm(bus, ea_reg as usize, reg, adj)
                 }
             } else {
-                // OR Dn, <ea>
+                // OR Dn, <ea>: memory data alterable destinations only.
+                if ea_mode < 2 || !ea_data_alterable(ea_mode, ea_reg) {
+                    return illegal_instruction(cpu, bus);
+                }
                 let size = decode_size_012(op_mode - 4);
                 let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
                 let ea = cpu.resolve_ea(bus, mode, size);
@@ -1705,12 +2042,18 @@ fn dispatch_group_8<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             }
         }
         3 => {
-            // DIVU <ea>, Dn
+            // DIVU <ea>, Dn: data addressing only.
+            if ea_mode == 1 || (ea_mode == 7 && ea_reg > 4) {
+                return illegal_instruction(cpu, bus);
+            }
             let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
             cpu.exec_divu(bus, mode, reg)
         }
         7 => {
-            // DIVS <ea>, Dn
+            // DIVS <ea>, Dn: data addressing only.
+            if ea_mode == 1 || (ea_mode == 7 && ea_reg > 4) {
+                return illegal_instruction(cpu, bus);
+            }
             let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
             cpu.exec_divs(bus, mode, reg)
         }
@@ -1726,8 +2069,11 @@ fn dispatch_group_9<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
 
     match op_mode {
         0..=2 => {
-            // SUB <ea>, Dn
+            // SUB <ea>, Dn: An source is word/long only.
             let size = decode_size_012(op_mode);
+            if (ea_mode == 1 && size == Size::Byte) || (ea_mode == 7 && ea_reg > 4) {
+                return illegal_instruction(cpu, bus);
+            }
             let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
             let src = cpu.read_ea(bus, mode, size);
             let dst = cpu.d(reg) & size.mask(); // Mask to operation size
@@ -1740,7 +2086,11 @@ fn dispatch_group_9<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             }
         }
         3 | 7 => {
-            // SUBA
+            // SUBA (every addressing mode; only the undefined mode-7
+            // registers are illegal)
+            if ea_mode == 7 && ea_reg > 4 {
+                return illegal_instruction(cpu, bus);
+            }
             let size = if op_mode == 3 { Size::Word } else { Size::Long };
             let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
             let src = cpu.read_ea(bus, mode, size);
@@ -1831,7 +2181,10 @@ fn dispatch_group_9<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                     18
                 }
             } else {
-                // SUB Dn, <ea>
+                // SUB Dn, <ea>: memory data alterable destinations only.
+                if !ea_data_alterable(ea_mode, ea_reg) {
+                    return illegal_instruction(cpu, bus);
+                }
                 let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
                 let src = cpu.d(reg) & size.mask(); // Mask to operation size
                 let ea = cpu.resolve_ea(bus, mode, size);
@@ -1857,8 +2210,11 @@ fn dispatch_group_b<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
 
     match op_mode {
         0..=2 => {
-            // CMP
+            // CMP <ea>, Dn: An source is word/long only.
             let size = decode_size_012(op_mode);
+            if (ea_mode == 1 && size == Size::Byte) || (ea_mode == 7 && ea_reg > 4) {
+                return illegal_instruction(cpu, bus);
+            }
             let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
             let src = cpu.read_ea(bus, mode, size);
             if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
@@ -1872,7 +2228,11 @@ fn dispatch_group_b<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             }
         }
         3 | 7 => {
-            // CMPA
+            // CMPA (every addressing mode; only the undefined mode-7
+            // registers are illegal)
+            if ea_mode == 7 && ea_reg > 4 {
+                return illegal_instruction(cpu, bus);
+            }
             let size = if op_mode == 3 { Size::Word } else { Size::Long };
             let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
             let src = cpu.read_ea(bus, mode, size);
@@ -1915,7 +2275,10 @@ fn dispatch_group_b<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                     legacy
                 }
             } else {
-                // EOR Dn, <ea>
+                // EOR Dn, <ea>: data alterable destinations only.
+                if !ea_data_alterable(ea_mode, ea_reg) {
+                    return illegal_instruction(cpu, bus);
+                }
                 let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
                 let ea = cpu.resolve_ea(bus, mode, size);
                 let dst = cpu.read_resolved_ea(bus, ea, size);
@@ -1947,7 +2310,10 @@ fn dispatch_group_c<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
 
     match op_mode {
         0..=2 => {
-            // AND <ea>, Dn
+            // AND <ea>, Dn: data addressing only (An is illegal).
+            if ea_mode == 1 || (ea_mode == 7 && ea_reg > 4) {
+                return illegal_instruction(cpu, bus);
+            }
             let size = decode_size_012(op_mode);
             let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
             let src = cpu.read_ea(bus, mode, size);
@@ -1977,7 +2343,10 @@ fn dispatch_group_c<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                     // EXG: 0x08=Dx/Dy, 0x09=Ax/Ay, 0x11=Dx/Ay
                     cpu.exec_exg(opcode)
                 } else {
-                    // AND Dn, <ea>
+                    // AND Dn, <ea>: memory data alterable destinations only.
+                    if ea_mode < 2 || !ea_data_alterable(ea_mode, ea_reg) {
+                        return illegal_instruction(cpu, bus);
+                    }
                     let size = decode_size_012(op_mode - 4);
                     let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
                     let ea = cpu.resolve_ea(bus, mode, size);
@@ -1993,12 +2362,18 @@ fn dispatch_group_c<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             }
         }
         3 => {
-            // MULU <ea>, Dn
+            // MULU <ea>, Dn: data addressing only.
+            if ea_mode == 1 || (ea_mode == 7 && ea_reg > 4) {
+                return illegal_instruction(cpu, bus);
+            }
             let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
             cpu.exec_mulu(bus, mode, reg)
         }
         7 => {
-            // MULS <ea>, Dn
+            // MULS <ea>, Dn: data addressing only.
+            if ea_mode == 1 || (ea_mode == 7 && ea_reg > 4) {
+                return illegal_instruction(cpu, bus);
+            }
             let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
             cpu.exec_muls(bus, mode, reg)
         }
@@ -2014,8 +2389,11 @@ fn dispatch_group_d<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
 
     match op_mode {
         0..=2 => {
-            // ADD <ea>, Dn
+            // ADD <ea>, Dn: An source is word/long only.
             let size = decode_size_012(op_mode);
+            if (ea_mode == 1 && size == Size::Byte) || (ea_mode == 7 && ea_reg > 4) {
+                return illegal_instruction(cpu, bus);
+            }
             let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
             let src = cpu.read_ea(bus, mode, size);
             let dst = cpu.d(reg) & size.mask(); // Mask to operation size
@@ -2028,7 +2406,11 @@ fn dispatch_group_d<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             }
         }
         3 | 7 => {
-            // ADDA
+            // ADDA (every addressing mode; only the undefined mode-7
+            // registers are illegal)
+            if ea_mode == 7 && ea_reg > 4 {
+                return illegal_instruction(cpu, bus);
+            }
             let size = if op_mode == 3 { Size::Word } else { Size::Long };
             let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
             let src = cpu.read_ea(bus, mode, size);
@@ -2119,7 +2501,10 @@ fn dispatch_group_d<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                     18
                 }
             } else {
-                // ADD Dn, <ea>
+                // ADD Dn, <ea>: memory data alterable destinations only.
+                if !ea_data_alterable(ea_mode, ea_reg) {
+                    return illegal_instruction(cpu, bus);
+                }
                 let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
                 let src = cpu.d(reg) & size.mask(); // Mask to operation size
                 let ea = cpu.resolve_ea(bus, mode, size);
@@ -2151,11 +2536,26 @@ fn dispatch_group_e<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
         if cpu.is_pre_68020 {
             return illegal_instruction(cpu, bus);
         }
+        // Bitfield EAs are Dn or a control mode; the modifying ops
+        // (BFCHG/BFCLR/BFSET/BFINS) additionally exclude PC-relative.
+        let sel = (opcode >> 8) & 0xF;
+        let is_store = matches!(sel, 0xA | 0xC | 0xE | 0xF);
+        let ea_ok = ea_mode == 0
+            || matches!(ea_mode, 2 | 5 | 6)
+            || (ea_mode == 7 && (ea_reg <= 1 || (!is_store && ea_reg <= 3)));
+        if !ea_ok {
+            return illegal_instruction(cpu, bus);
+        }
         return cpu.exec_bitfield(bus, opcode);
     }
 
     if (opcode >> 6) & 3 == 3 {
-        // Memory shift/rotate (always word size)
+        // Memory shift/rotate (always word size, one bit): memory data
+        // alterable EAs only -- the register forms use the other size
+        // encodings.
+        if ea_mode < 2 || !ea_data_alterable(ea_mode, ea_reg) {
+            return illegal_instruction(cpu, bus);
+        }
         let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
         // Resolve EA once: postinc/predec have side effects and must not be applied twice.
         let ea = cpu.resolve_ea(bus, mode, Size::Word);

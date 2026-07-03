@@ -192,6 +192,25 @@ The [SingleStepTests](https://github.com/SingleStepTests/m68000) project provide
 - Multiply/divide overflow handling
 - Exception frame generation
 
+### WinUAE cputest (68000-68060)
+
+Toni Wilen's WinUAE cputest generator produces exhaustive per-opcode test
+sets (hundreds of state combinations per opcode, hardware-validated over
+years on real 68000-68060 silicon). The `crates/cputest-runner` harness
+drives this core through those sets:
+
+```sh
+crates/cputest-runner/tools/cputest-gen.sh /tmp/cputest-data 68020
+cd crates/cputest-runner
+cargo run --release -- /tmp/cputest-data all 68020
+```
+
+All six CPU models pass their full sweeps (the sole exception is one 68060
+LPSTOP round documented in the runner). This covers documented and
+undocumented behavior alike: illegal-encoding maps per model, privilege
+versus Line-F ordering, BCD invalid-digit results, register write order for
+CAS2/MOVEM/MULL/DIVL collisions, and T0/T1 trace timing.
+
 ### Musashi Reference Implementation
 
 The suite also checks against [Musashi](https://github.com/kstenerud/Musashi), an M68000 emulator used in MAME and other projects:
