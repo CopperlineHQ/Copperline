@@ -1972,6 +1972,33 @@ impl CpuBus {
         size.max(1).div_ceil(2) as u32
     }
 
+    /// Latch the last word the CPU drove onto (or sampled from) the shared
+    /// data bus: undriven (unmapped) reads float to this value. A byte
+    /// cycle drives one lane while the other keeps its previous charge.
+    /// DMA fetches latch through their own paths (dma_slots /
+    /// frame_capture); cache hits perform no bus cycle and do not latch.
+    fn note_cpu_data_bus(&mut self, addr: u32, size: usize, value: u32) {
+        // Only the 68000 shares the 16-bit chip data bus directly with
+        // Agnus, which is the float-to-last-value behavior modeled here
+        // (and what the vAmigaTS uninit tests pin down). The 020+ run on
+        // their own wider local bus with different undriven behavior;
+        // KS3.1-era memory probing misdetects if their reads echo here.
+        if self.bus.cpu_short_bus_cycle() {
+            return;
+        }
+        self.bus.data_bus = if size == 1 {
+            let b = (value & 0xFF) as u16;
+            if addr & 1 == 0 {
+                (self.bus.data_bus & 0x00FF) | (b << 8)
+            } else {
+                (self.bus.data_bus & 0xFF00) | b
+            }
+        } else {
+            // The last word of the transfer stays on the bus.
+            (value & 0xFFFF) as u16
+        };
+    }
+
     fn read_sized(&mut self, address: u32, size: usize, kind: CpuBusAccessKind) -> u32 {
         let addr = self.mask(address);
         if self.icache.is_some() || self.dcache.is_some() {
@@ -1989,12 +2016,15 @@ impl CpuBus {
             if kind == CpuBusAccessKind::Fetch {
                 self.last_fetch_cache_hit = false;
             }
+            self.note_cpu_data_bus(addr, size, value);
             return value;
         }
         if kind == CpuBusAccessKind::Fetch {
             self.last_fetch_cache_hit = false;
         }
-        self.read_sized_uncached(addr, size, kind)
+        let value = self.read_sized_uncached(addr, size, kind);
+        self.note_cpu_data_bus(addr, size, value);
+        value
     }
 
     #[inline]
@@ -2245,6 +2275,7 @@ impl CpuBus {
 
     fn write_sized(&mut self, address: u32, size: usize, value: u32) {
         let addr = self.mask(address);
+        self.note_cpu_data_bus(addr, size, value);
         if let Some(dcache) = self.dcache.as_deref_mut() {
             // Write-through with invalidate-on-hit: the write itself goes
             // to memory below; later reads refill. (The instruction cache
@@ -3291,12 +3322,13 @@ mod tests {
             last_fetch_cache_hit: false,
         };
         let addr = SLOW_RAM_BASE as u32 + 64 * 1024;
-        // With nothing yet driven, the bus rests at 0.
+        // A write into unmapped space still drives the bus: the following
+        // undriven read floats to the last word of the transfer.
         bus.write_long(addr, 0x1234_5678);
-        assert_eq!(bus.read_long(addr), 0);
-        // Once a real access latches a value, undriven reads float to it; a
-        // 68000 byte read takes the high data-bus byte at even addresses and the
-        // low byte at odd.
+        assert_eq!(bus.read_long(addr), 0x5678_5678);
+        // Any latched value is what undriven reads float to; a 68000 byte
+        // read takes the high data-bus byte at even addresses and the low
+        // byte at odd.
         bus.bus.data_bus = 0xA53C;
         assert_eq!(bus.read_byte(addr), 0xA5);
         assert_eq!(bus.read_byte(addr + 1), 0x3C);
