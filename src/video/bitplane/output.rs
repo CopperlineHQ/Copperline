@@ -39,12 +39,14 @@ pub(super) fn fill_background(
     base_controls: &[ControlState],
     control_segments: &[Vec<ControlSegment>],
 ) {
+    let h_window_rows = compute_h_window_rows(base_controls, control_segments, PAL_VISIBLE_LINE0);
     fill_background_with_visible_line0(
         fb,
         base_palettes,
         palette_segments,
         base_controls,
         control_segments,
+        &h_window_rows,
         PAL_VISIBLE_LINE0,
     );
 }
@@ -70,6 +72,7 @@ pub(super) fn fill_background_with_visible_line0(
     palette_segments: &[Vec<PaletteSegment>],
     base_controls: &[ControlState],
     control_segments: &[Vec<ControlSegment>],
+    h_window_rows: &[HWindowRow],
     visible_line0: i32,
 ) {
     for y in 0..base_palettes.len() {
@@ -111,20 +114,21 @@ pub(super) fn fill_background_with_visible_line0(
                 x = run_end;
                 continue;
             }
-            // In the vertical window: border holds outside [x_start, x_stop).
-            let (x_start, x_stop) = control.display_window_x();
+            // In the vertical window: border holds wherever the horizontal
+            // window flip-flop is closed (hardware comparator model; the
+            // open runs already reflect this row's mid-line DIW writes).
+            let open_runs = h_window_rows[y].open_runs();
             let mut sx = x;
             while sx < run_end {
-                let border = sx < x_start || sx >= x_stop;
-                let flip = if sx < x_start {
-                    x_start
-                } else if sx < x_stop {
-                    x_stop
-                } else {
-                    FB_WIDTH
-                };
+                let open = open_runs.iter().any(|&(s, e)| sx >= s && sx < e);
+                let flip = open_runs
+                    .iter()
+                    .flat_map(|&(s, e)| [s, e])
+                    .filter(|&b| b > sx)
+                    .min()
+                    .unwrap_or(FB_WIDTH);
                 let sub_end = flip.min(run_end).max(sx + 1);
-                row[sx..sub_end].fill(background_pixel(&control, color0, border));
+                row[sx..sub_end].fill(background_pixel(&control, color0, !open));
                 sx = sub_end;
             }
             x = run_end;

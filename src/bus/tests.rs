@@ -3447,7 +3447,7 @@ fn beam_timed_display_window_changes_clip_later_bitplane_rows() {
 }
 
 #[test]
-fn beam_timed_display_window_clips_later_bitplane_pixels_on_same_line() {
+fn beam_timed_diwstrt_rewrite_after_window_open_does_not_reclip_line() {
     let mut bus = empty_bus();
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
     bus.denise.diwstrt = 0x2C81;
@@ -3483,8 +3483,11 @@ fn beam_timed_display_window_clips_later_bitplane_pixels_on_same_line() {
     let mut fb = vec![0; FB_PIXELS];
     bitplane::render(&mut bus, &mut fb);
 
+    // The window flip-flop opened at the original HSTART before the
+    // rewrite reached the comparators; a later HSTART only re-matches an
+    // already-open window, so the line shows bitplanes continuously.
     assert_eq!(fb[68], rgb12_to_rgba8(0x0F00));
-    assert_eq!(fb[106], rgb12_to_rgba8(0x0000));
+    assert_eq!(fb[106], rgb12_to_rgba8(0x0F00));
     assert_eq!(fb[108], rgb12_to_rgba8(0x0F00));
 }
 
@@ -3566,9 +3569,14 @@ fn beam_timed_diwstrt_extends_later_bitplane_pixels_left_on_same_line() {
     let mut fb = vec![0; FB_PIXELS];
     bitplane::render(&mut bus, &mut fb);
 
-    assert_eq!(fb[94], rgb12_to_rgba8(0x0000));
-    assert_eq!(fb[96], rgb12_to_rgba8(0x0F00));
+    // The rewrite reaches the comparators before the new HSTART's match
+    // position, so the window opens there (not at the write position) and
+    // shows bitplanes up to the fetched row's end.
+    assert_eq!(fb[64], rgb12_to_rgba8(0x0000));
+    assert_eq!(fb[68], rgb12_to_rgba8(0x0F00));
+    assert_eq!(fb[94], rgb12_to_rgba8(0x0F00));
     assert_eq!(fb[132], rgb12_to_rgba8(0x0F00));
+    assert_eq!(fb[160], rgb12_to_rgba8(0x0000));
 }
 
 #[test]

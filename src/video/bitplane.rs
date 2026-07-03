@@ -368,6 +368,281 @@ fn display_window_unprogrammed(diwstrt: u16, diwstop: u16) -> bool {
     diwstrt == 0 && diwstop == 0
 }
 
+/// Horizontal display-window state for one framebuffer row, from the
+/// hardware comparator model: Denise's window flip-flop opens on an exact
+/// HSTART match of its horizontal counter and closes on an exact HSTOP
+/// match, evaluated per lores position with the register values current
+/// at that position (vAmiga's hardware-verified model). No match means no
+/// change, so degenerate windows never close (or never open) and the
+/// state carries across lines. `open_runs` lists the [start, end) spans
+/// in framebuffer hires x where the window is open on this row.
+#[derive(Clone, Debug, Default)]
+pub(super) struct HWindowRow {
+    open_runs: Vec<(usize, usize)>,
+    /// Framebuffer x of the first HSTART comparator match on this row
+    /// (None when the row's openness is only carried in from a previous
+    /// line). Feeds the playfield painter's shifter-origin anchor.
+    comparator_anchor: Option<usize>,
+}
+
+impl HWindowRow {
+    fn full() -> Self {
+        Self {
+            open_runs: vec![(0, FB_WIDTH)],
+            comparator_anchor: None,
+        }
+    }
+
+    /// Envelope for consumers that only handle a single span (sprite
+    /// windows, scroll bookkeeping): first open edge to last close edge.
+    pub(super) fn span(&self) -> (usize, usize) {
+        match (self.open_runs.first(), self.open_runs.last()) {
+            (Some(&(start, _)), Some(&(_, end))) => (start, end),
+            _ => (0, 0),
+        }
+    }
+
+    pub(super) fn open_runs(&self) -> &[(usize, usize)] {
+        &self.open_runs
+    }
+
+    /// Whether the window flip-flop is open at framebuffer x.
+    fn open_at(&self, x: usize) -> bool {
+        self.open_runs.iter().any(|&(s, e)| x >= s && x < e)
+    }
+
+    /// First open/close boundary right of x (for run chunking).
+    fn next_boundary_after(&self, x: usize) -> usize {
+        self.open_runs
+            .iter()
+            .flat_map(|&(s, e)| [s, e])
+            .filter(|&b| b > x)
+            .min()
+            .unwrap_or(FB_WIDTH)
+    }
+}
+
+/// Denise's horizontal comparator counter starts each line at the hblank
+/// edge (lores position 0x24 = HBLANK_MIN colour clocks), runs 454 lores
+/// positions and wraps 0x1C8 -> 2 near the line end, so positions 2..0x23
+/// are a line's tail, not its head. OCS Denise does not reset the counter
+/// on lines 0-8: it free-runs modulo 0x200 there, which lets otherwise
+/// unreachable comparator values (0x1C8..0x1FF) fire during vertical
+/// blank. Framebuffer hires x maps as x = (counter - DIW_HSTART_FB0) * 2.
+/// (vAmiga's hardware-verified model, Denise::updateBorderBuffer.)
+const H_COUNTER_LINE_ORIGIN: i32 = 0x24;
+const H_COUNTER_TICKS_PER_LINE: i32 = 454;
+const H_COUNTER_WRAP: i32 = 0x1C8;
+const H_COUNTER_WRAP_TARGET: i32 = 2;
+/// Scan tick (lores steps from the line origin) at which the framebuffer
+/// begins.
+const H_COUNTER_FB_START_TICK: i32 = DIW_HSTART_FB0 - H_COUNTER_LINE_ORIGIN;
+/// A DIWSTRT/DIWSTOP write reaches Denise's window comparators one colour
+/// clock after the write cycle (vAmiga applies the Denise-side register
+/// change with a DMA_CYCLES(1) delay).
+const DIW_COMPARATOR_WRITE_DELAY_FB: i32 = 4;
+
+/// Scan tick at which a control segment's DIW values reach the window
+/// comparators. Segment x is in the copper/register coordinate; the
+/// comparators sit with the bitplane controls on the other side of the
+/// fetch -> display pipeline, plus the one-colour-clock write delay.
+fn diw_segment_effect_tick(seg_x: usize) -> i32 {
+    (seg_x as i32 - BITPLANE_CONTROL_PIPELINE_FB as i32 + DIW_COMPARATOR_WRITE_DELAY_FB) / 2
+        + H_COUNTER_FB_START_TICK
+}
+
+/// Run the window flip-flop over one beam line, updating `flop` in place.
+/// When `record` is given, [start, end) open spans clipped to the
+/// framebuffer are appended to it.
+fn scan_h_window_line(
+    flop: &mut bool,
+    beam_line: i32,
+    is_ecs: bool,
+    mut control: ControlState,
+    segs: &[ControlSegment],
+    mut record: Option<&mut HWindowRow>,
+) {
+    let free_run = beam_line < 9 && !is_ecs;
+    let mut counter = if free_run {
+        (H_COUNTER_LINE_ORIGIN + beam_line * 0x1C6) & 0x1FF
+    } else {
+        H_COUNTER_LINE_ORIGIN
+    };
+    let mut hstrt = control.diw_h_start() as i32;
+    let mut hstop = control.diw_h_stop() as i32;
+    let mut seg_idx = 0usize;
+    let mut open_from: Option<usize> = None;
+    for tick in 0..H_COUNTER_TICKS_PER_LINE {
+        while seg_idx < segs.len() && diw_segment_effect_tick(segs[seg_idx].x) <= tick {
+            control = segs[seg_idx].control;
+            hstrt = control.diw_h_start() as i32;
+            hstop = control.diw_h_stop() as i32;
+            seg_idx += 1;
+        }
+        if record.is_some() && tick == H_COUNTER_FB_START_TICK && *flop {
+            open_from = Some(0);
+        }
+        let was_open = *flop;
+        if counter == hstrt {
+            *flop = true;
+        }
+        if counter == hstop {
+            *flop = false;
+        }
+        if *flop != was_open {
+            if let Some(row) = record.as_deref_mut() {
+                let fb_tick = tick - H_COUNTER_FB_START_TICK;
+                if (0..FB_WIDTH as i32 / 2).contains(&fb_tick) {
+                    let x = (fb_tick * 2) as usize;
+                    if *flop {
+                        open_from = Some(x);
+                        if row.comparator_anchor.is_none() {
+                            row.comparator_anchor = Some(x);
+                        }
+                    } else if let Some(start) = open_from.take() {
+                        if x > start {
+                            row.open_runs.push((start, x));
+                        }
+                    }
+                } else if fb_tick >= FB_WIDTH as i32 / 2 && !*flop {
+                    // Closed right of the framebuffer (or in the wrapped
+                    // tail): the visible part of the run reaches the edge.
+                    // A reopening out here only matters as carry into the
+                    // next line.
+                    if let Some(start) = open_from.take() {
+                        row.open_runs.push((start, FB_WIDTH));
+                    }
+                }
+            }
+        }
+        counter = (counter + 1) & 0x1FF;
+        if counter == H_COUNTER_WRAP && !free_run {
+            counter = H_COUNTER_WRAP_TARGET;
+        }
+    }
+    if let Some(row) = record {
+        if let Some(start) = open_from.take() {
+            if FB_WIDTH > start {
+                row.open_runs.push((start, FB_WIDTH));
+            }
+        }
+    }
+}
+
+fn compute_h_window_rows(
+    base_controls: &[ControlState],
+    control_segments: &[Vec<ControlSegment>],
+    visible_line0: i32,
+) -> Vec<HWindowRow> {
+    let rows = base_controls.len();
+    let mut out = vec![HWindowRow::default(); rows];
+    if rows == 0 {
+        return out;
+    }
+    let is_ecs = base_controls[0].agnus_revision.is_ecs();
+    // Vertical sync leaves the flip-flop set (vAmiga vsyncHandler). The
+    // pre-visible lines then run with the frame-start values: register
+    // writes before the visible window are already folded into row 0's
+    // base control.
+    let mut flop = true;
+    for beam_line in 0..visible_line0.max(0) {
+        scan_h_window_line(&mut flop, beam_line, is_ecs, base_controls[0], &[], None);
+    }
+    for y in 0..rows {
+        let beam_line = visible_line0 + y as i32;
+        let mut row = HWindowRow::default();
+        scan_h_window_line(
+            &mut flop,
+            beam_line,
+            is_ecs,
+            base_controls[y],
+            &control_segments[y],
+            Some(&mut row),
+        );
+        // Software that never programs DIW keeps the pragmatic whole-
+        // framebuffer window (matching display_window_x).
+        if display_window_unprogrammed(base_controls[y].diwstrt, base_controls[y].diwstop)
+            && control_segments[y].is_empty()
+        {
+            out[y] = HWindowRow::full();
+        } else {
+            out[y] = row;
+        }
+    }
+    out
+}
+
+/// Repaint the horizontal window's closed intervals with border pixels
+/// after compositing (see the call site). Only rows inside the vertical
+/// window need it: rows outside are already all border.
+#[allow(clippy::too_many_arguments)]
+fn enforce_h_window_closed_intervals(
+    fb: &mut [u32],
+    base_palettes: &[Palette],
+    palette_segments: &[Vec<PaletteSegment>],
+    base_controls: &[ControlState],
+    control_segments: &[Vec<ControlSegment>],
+    h_window_rows: &[HWindowRow],
+    visible_line0: i32,
+    rows: usize,
+) {
+    for y in 0..rows {
+        let open_runs = h_window_rows[y].open_runs();
+        if open_runs.len() == 1 && open_runs[0] == (0, FB_WIDTH) {
+            continue;
+        }
+        let row = &mut fb[y * FB_WIDTH..(y + 1) * FB_WIDTH];
+        let mut x = 0usize;
+        while x < FB_WIDTH {
+            let next_open = open_runs
+                .iter()
+                .map(|&(s, _)| s)
+                .filter(|&s| s > x)
+                .min()
+                .unwrap_or(FB_WIDTH);
+            if open_runs.iter().any(|&(s, e)| x >= s && x < e) {
+                // Inside an open run: skip to its end.
+                let end = open_runs
+                    .iter()
+                    .find(|&&(s, e)| x >= s && x < e)
+                    .map(|&(_, e)| e)
+                    .unwrap_or(FB_WIDTH);
+                x = end;
+                continue;
+            }
+            let closed_end = next_open.min(FB_WIDTH);
+            // Repaint [x, closed_end) as border, walking the control and
+            // palette segments for the correct border colour, and skipping
+            // border-sprite segments.
+            let mut sx = x;
+            while sx < closed_end {
+                let control = control_at_x(base_controls[y], &control_segments[y], sx);
+                let next_ctl = control_segments[y]
+                    .iter()
+                    .map(|seg| seg.x)
+                    .filter(|&b| b > sx)
+                    .min()
+                    .unwrap_or(FB_WIDTH)
+                    .min(closed_end);
+                if !control.display_window_contains_line(y, visible_line0) {
+                    // Row is outside the vertical window here: already border.
+                    sx = next_ctl;
+                    continue;
+                }
+                if control.border_sprite_enabled() {
+                    sx = next_ctl;
+                    continue;
+                }
+                let palette = palette_at_x(base_palettes[y], &palette_segments[y], sx);
+                let pixel = background_pixel(&control, palette[0], true);
+                row[sx..next_ctl].fill(pixel);
+                sx = next_ctl;
+            }
+            x = closed_end;
+        }
+    }
+}
+
 impl ControlState {
     fn from_render_state(state: &RenderState) -> Self {
         Self {
@@ -1859,6 +2134,17 @@ fn apply_render_events_and_collect_display_plan_events_with_visible_line0(
                 loct,
                 color_register_value(event.value),
             );
+            // A colour write in the horizontal-blank tail attributes to the
+            // previous output row, behind an event of the same beam line
+            // that already seeded the next row's base palette (line
+            // attribution is not monotonic across write kinds). Patch the
+            // written entry into that base so the change still reaches the
+            // row it precedes.
+            if color_wraps_to_previous_line && next_base_line > line + 1 {
+                if let Some(base) = base_palettes.get_mut(line + 1) {
+                    base.write_entry(usize::from(entry), loct, color_register_value(event.value));
+                }
+            }
             if let Some(events_by_line) = display_line_events.as_deref_mut() {
                 if line < events_by_line.len() {
                     events_by_line[line].push(DisplayLinePlanEvent::PaletteChange {
@@ -2146,41 +2432,8 @@ fn line_has_valid_ddf_window(
             .any(|segment| segment.control.has_valid_ddf_window())
 }
 
-fn line_display_window_bounds(
-    base_control: ControlState,
-    control_segments: &[ControlSegment],
-    line: usize,
-    visible_line0: i32,
-) -> Option<(usize, usize)> {
-    let mut bounds = None;
-    let mut control = base_control;
-    let mut run_start = 0usize;
-    for segment in control_segments {
-        let run_stop = segment.x.min(FB_WIDTH);
-        merge_display_window_run_bounds(
-            &mut bounds,
-            control,
-            line,
-            visible_line0,
-            run_start,
-            run_stop,
-        );
-        control = segment.control;
-        run_start = run_stop;
-    }
-    merge_display_window_run_bounds(
-        &mut bounds,
-        control,
-        line,
-        visible_line0,
-        run_start,
-        FB_WIDTH,
-    );
-    bounds.filter(|(x_start, x_stop)| x_start < x_stop)
-}
-
-fn merge_display_window_run_bounds(
-    bounds: &mut Option<(usize, usize)>,
+fn merge_display_window_anchor(
+    anchor: &mut Option<usize>,
     control: ControlState,
     line: usize,
     visible_line0: i32,
@@ -2190,30 +2443,76 @@ fn merge_display_window_run_bounds(
     if run_start >= run_stop || !control.display_window_contains_line(line, visible_line0) {
         return;
     }
-    let (window_x_start, window_x_stop) = control.display_window_x();
+    let (window_x_start, _) = control.display_window_x();
     if window_x_start >= run_start && window_x_start <= run_stop {
-        // The horizontal DIW start comparator has fired while this control was
-        // active, so it establishes the shifter origin even if a same-line
-        // write clips all visible pixels before the next control run.
-        match bounds {
-            Some((bounds_start, _)) => {
-                *bounds_start = (*bounds_start).min(window_x_start);
-            }
-            None => *bounds = Some((window_x_start, window_x_start)),
-        }
+        // The horizontal DIW start comparator fired while this control was
+        // active, so it establishes the shifter origin: the playfield
+        // painter's fetch-alignment math pairs plan.x_start with the
+        // control's DIWSTRT-derived offsets.
+        *anchor = Some(anchor.map_or(window_x_start, |a| a.min(window_x_start)));
     }
-    let x_start = window_x_start.max(run_start);
-    let x_stop = window_x_stop.min(run_stop);
-    if x_start >= x_stop {
-        return;
+}
+
+fn line_display_window_bounds(
+    base_control: ControlState,
+    control_segments: &[ControlSegment],
+    line: usize,
+    visible_line0: i32,
+    h_row: &HWindowRow,
+) -> Option<(usize, usize)> {
+    // Horizontal reach from the comparator flip-flop model: a window that
+    // never closes reaches the framebuffer edge; one that opened on an
+    // earlier line starts at 0. Interior closed gaps are handled by the
+    // per-pixel window gate and the closed-interval border mask.
+    let (env_start, env_stop) = h_row.span();
+    if env_start >= env_stop {
+        return None;
     }
-    match bounds {
-        Some((bounds_start, bounds_stop)) => {
-            *bounds_start = (*bounds_start).min(x_start);
-            *bounds_stop = (*bounds_stop).max(x_stop);
-        }
-        None => *bounds = Some((x_start, x_stop)),
+    // Vertical window: open if any control active on the line has it open.
+    let vertical_open = std::iter::once(&base_control)
+        .chain(control_segments.iter().map(|seg| &seg.control))
+        .any(|control| control.display_window_contains_line(line, visible_line0));
+    if !vertical_open {
+        return None;
     }
+    // The paint start is the shifter-origin anchor of the control whose
+    // DIWSTRT comparator fired, not the flip-flop's first open pixel: a
+    // mid-line DIWSTRT rewrite moves where the window opens without moving
+    // the fetched picture.
+    let mut anchor = None;
+    let mut control = base_control;
+    let mut run_start = 0usize;
+    for segment in control_segments {
+        let run_stop = segment.x.min(FB_WIDTH);
+        merge_display_window_anchor(
+            &mut anchor,
+            control,
+            line,
+            visible_line0,
+            run_start,
+            run_stop,
+        );
+        control = segment.control;
+        run_start = run_stop;
+    }
+    merge_display_window_anchor(
+        &mut anchor,
+        control,
+        line,
+        visible_line0,
+        run_start,
+        FB_WIDTH,
+    );
+    // A carried-open row whose comparator never fired inside the frame
+    // keeps the base control's DIWSTRT anchor so the picture stays at its
+    // fetch-derived position.
+    let x_start = match (h_row.comparator_anchor, anchor) {
+        (Some(a), Some(b)) => a.min(b),
+        (Some(a), None) => a,
+        (None, Some(b)) => b,
+        (None, None) => base_control.display_window_x().0,
+    };
+    (x_start < env_stop).then_some((x_start, env_stop))
 }
 
 fn line_max_display_planes(
@@ -3154,12 +3453,14 @@ pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
     let mut dma_output_start_x_by_line = vec![None; rows];
 
     let background_started = Instant::now();
+    let h_window_rows = compute_h_window_rows(&base_controls, &control_segments, visible_line0);
     fill_background_with_visible_line0(
         fb,
         &base_palettes,
         &palette_segments,
         &base_controls,
         &control_segments,
+        &h_window_rows,
         visible_line0,
     );
     render_timing.background_nanos = background_started.elapsed().as_nanos();
@@ -3271,6 +3572,7 @@ pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
                 row_control_segments,
                 y,
                 visible_line0,
+                &h_window_rows[y],
             ) else {
                 continue;
             };
@@ -3523,6 +3825,7 @@ pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
                 base_controls[y].bplcon1,
                 block_start,
                 bpl_output_start_x,
+                &h_window_rows[y],
                 visible_line0,
                 input.emulated_seconds,
                 input.emulated_frames,
@@ -3664,6 +3967,23 @@ pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
             .finish_register_and_sprite_only_lines(captured_sprite_lines, visible_line0);
         display_frame_plan.log_summary();
     }
+    // Final authority for the horizontal window: repaint composited
+    // content in the flip-flop's closed intervals with the border pixel.
+    // The span-based clip paths above only handle a single open span per
+    // row; a mid-line close/reopen (or a window that never closes and
+    // carries into the next line) produces multiple runs that only this
+    // comparator-model mask captures. BRDSPRT (ECS/AGA border sprites)
+    // segments keep their composited pixels.
+    enforce_h_window_closed_intervals(
+        fb,
+        &base_palettes,
+        &palette_segments,
+        &base_controls,
+        &control_segments,
+        &h_window_rows,
+        visible_line0,
+        rows,
+    );
     apply_programmable_blanking(
         input.programmable_vertical_blank,
         input.programmable_horizontal_blank,
@@ -3780,6 +4100,7 @@ fn render_planned_playfield_line(
     base_scroll_bplcon1: u16,
     suppress_prefetch_scroll_fill: bool,
     bpl_output_start_x: usize,
+    h_row: &HWindowRow,
     visible_line0: i32,
     emulated_seconds: f64,
     emulated_frames: u64,
@@ -3853,6 +4174,11 @@ fn render_planned_playfield_line(
         if segment_idx < palette_segments.len() {
             run_stop = run_stop.min(palette_segments[segment_idx].x);
         }
+        // The horizontal window flip-flop state is constant between its
+        // boundaries; fold them into the chunking so `window_open` can be
+        // hoisted out of the pixel loop.
+        let window_open = h_row.open_at(x);
+        run_stop = run_stop.min(h_row.next_boundary_after(x));
 
         let pixel_repeat = pixel_control.framebuffer_pixel_repeat();
         let native_per_pixel = pixel_control.native_samples_per_framebuffer_pixel();
@@ -3875,7 +4201,6 @@ fn render_planned_playfield_line(
             0
         };
         let shres = pixel_control.shres();
-        let (win_x_start, win_x_stop) = pixel_control.display_window_x();
         let line_visible = pixel_control.display_window_contains_line(plan.y, visible_line0);
         let background_rgb24 = rgb12_to_rgb24(color_rgb12(palette[0]));
         let nplanes = sample_control.nplanes().min(plan.plane_words.len());
@@ -3924,12 +4249,10 @@ fn render_planned_playfield_line(
             };
             let native_x = relative_native_x + native_x_offset;
             let visible_sample = line_visible
+                && window_open
                 && (0..pixel_repeat).any(|dx| {
                     let pixel_x = x + dx;
-                    pixel_x < plan.x_stop
-                        && pixel_x >= bpl_output_start_x
-                        && pixel_x >= win_x_start
-                        && pixel_x < win_x_stop
+                    pixel_x < plan.x_stop && pixel_x >= bpl_output_start_x
                 });
             // Debugger layer isolation masks the colour-resolution index
             // only; `sample.idx` stays true for collisions and priority.
@@ -4021,8 +4344,8 @@ fn render_planned_playfield_line(
                             pixel_control.diwstop,
                             pixel_control.ddfstrt,
                             pixel_control.ddfstop,
-                            win_x_start,
-                            win_x_stop,
+                            plan.x_start,
+                            plan.x_stop,
                         );
                     }
                 }
@@ -4041,7 +4364,7 @@ fn render_planned_playfield_line(
             *clxdat |= collision.clxdat_bits();
             for dx in 0..pixel_repeat {
                 let pixel_x = x + dx;
-                if pixel_x >= plan.x_stop || pixel_x < win_x_start || pixel_x >= win_x_stop {
+                if pixel_x >= plan.x_stop || !window_open {
                     continue;
                 }
                 let fb_idx = plan.y * FB_WIDTH + pixel_x;
