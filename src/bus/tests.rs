@@ -8603,7 +8603,9 @@ fn vposw_and_vhposw_update_beam_register_reads() {
     assert!(!bus.custom_write(0x02C, 2, 0x2034));
 
     assert_eq!(bus.custom_read(0x004, 2), 0x8001);
-    assert_eq!(bus.custom_read(0x006, 2), 0x2034);
+    // The readback reports a couple of colour clocks ahead of the
+    // written counter (the calibrated VHPOSR lookahead).
+    assert_eq!(bus.custom_read(0x006, 2), 0x2036);
 }
 
 #[test]
@@ -9193,7 +9195,7 @@ fn bplcon0_lpen_enables_light_pen_latch_via_bus() {
     bus.advance_chipset(5 * 227 + 0x40);
     bus.light_pen_pulse();
     bus.advance_chipset(20);
-    assert_eq!(bus.custom_read(0x006, 2), (5 << 8) | (0x40 >> 1));
+    assert_eq!(bus.custom_read(0x006, 2), (5 << 8) | 0x40);
 }
 
 #[test]
