@@ -1,0 +1,19 @@
+; MMU test startup: markers between each stage
+FailAt 100
+echo "M1-BOOT"
+C:SetPatch QUIET
+echo "M2-SETPATCH"
+Assign >NIL: LIBS: DF1:Libs ADD
+DF1:MuScan >NIL:
+echo "M3-MUSCAN"
+run >NIL: DF1:MuForce FILE=RAM:hits.txt
+C:Wait 2
+echo "M4-MUFORCE"
+DF1:lawbreaker
+echo "M5-LAWBREAKER-SURVIVED"
+C:Wait 2
+DF1:MuForce QUIT
+C:Wait 1
+C:Type RAM:hits.txt
+echo "ALL STAGES PASSED"
+Wait 600

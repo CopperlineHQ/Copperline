@@ -1032,7 +1032,7 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
         0x4E76 => {
             // TRAPV
             if cpu.flag_v() {
-                cpu.take_exception(bus, 7)
+                cpu.take_group2_exception(bus, 7)
             } else {
                 4
             }
@@ -1429,6 +1429,7 @@ fn dispatch_group_5<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 | CpuType::M68EC040
                 | CpuType::M68LC040
                 | CpuType::M68040
+                | CpuType::M68060
         );
         if is_020_plus && ea_mode == 7 && (ea_reg == 2 || ea_reg == 3 || ea_reg == 4) {
             let condition = ((opcode >> 8) & 0xF) as u8;
@@ -1446,7 +1447,7 @@ fn dispatch_group_5<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             }
 
             if cpu.test_condition(condition) {
-                return cpu.take_exception(bus, 7);
+                return cpu.take_group2_exception(bus, 7);
             } else {
                 // If not trapping, TRAPcc is effectively a NOP (aside from operand fetch).
                 return 4;

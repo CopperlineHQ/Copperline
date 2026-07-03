@@ -803,3 +803,105 @@ fn diagrom_menu_preserves_left_margin_text_columns() -> Result<(), Box<dyn std::
     );
     Ok(())
 }
+
+// ---------------------------------------------------------------------------------------------
+// MMU library boot harness (issue #90 regression): KS3.1 A1200 with
+// THOR's MMULib on a data floppy. The boot floppy's startup-sequence runs
+// SetPatch, MuScan (mmu.library builds and enables its translation tree),
+// MuForce with a lawbreaker program (three protected-memory hits serviced
+// through the resumable fault frames), then types the hit log and prints
+// ALL STAGES PASSED. See tests/mmu-disks/ for how the two ADFs are built.
+//
+// A successful run fills the console with MuScan's memory map and three
+// MuForce hit dumps (tens of thousands of black text pixels, half of them
+// in the bottom half of the screen); every known failure mode -- the
+// pre-#93 ramlib guru, the pre-#94 030 fault loop, the pre-#95 MuForce
+// hang -- leaves the bottom half nearly empty (~2k black pixels).
+// ---------------------------------------------------------------------------------------------
+
+const MMU_BOOT_ASSETS: &[&str] = &[
+    "Kickstart v3.1 r40.68 (1993)(Commodore)(A1200)[!].rom",
+    "mmu-test.adf",
+    "mmu-libs.adf",
+];
+
+fn mmu_boot_config(cpu_model: &str) -> String {
+    format!(
+        r#"
+rom = "Kickstart v3.1 r40.68 (1993)(Commodore)(A1200)[!].rom"
+
+[machine]
+profile = "A1200"
+
+[cpu]
+model = "{cpu_model}"
+
+[memory]
+fast = "2M"
+z3 = "32M"
+
+[floppy]
+drives = 2
+
+[floppy.df0]
+path = "mmu-test.adf"
+
+[floppy.df1]
+path = "mmu-libs.adf"
+"#
+    )
+}
+
+fn assert_mmu_boot_passes(cpu_model: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let cfg_path = write_temp_config(
+        &format!("mmu-boot-{cpu_model}"),
+        &mmu_boot_config(cpu_model),
+    )?;
+    let cfg_arg = cfg_path.to_string_lossy().into_owned();
+    let img = run_screenshot(
+        &format!("mmu-boot-{cpu_model}"),
+        "95.0",
+        &["--config", cfg_arg.as_str()],
+    )?;
+    let _ = std::fs::remove_file(cfg_path);
+
+    let label = format!("MMU boot harness ({cpu_model})");
+    // Workbench console grey dominates a healthy screen.
+    assert_color_count(&img, [170, 170, 170, 255], 100_000, &label);
+    // MuScan's map plus the MuForce hit dumps fill the console with text;
+    // the guru / hang failure shapes leave the bottom half nearly empty.
+    let black = [0, 0, 0, 255];
+    let bottom = img.count_color_in(0, img.height / 2, img.width, img.height, black);
+    assert!(
+        bottom > 8_000,
+        "{label}: expected the MuForce hit dumps in the bottom half \
+         (>8000 black text pixels), got {bottom} -- the boot gurued, \
+         hung, or never reached the markers"
+    );
+    let total = img.count_color(black);
+    assert!(
+        total > 20_000,
+        "{label}: expected a console full of text, got {total} black pixels"
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "runs the emulator and requires local KS3.1 + MMU test disk assets"]
+fn mmu_library_boot_and_muforce_hits_68040() -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = lock_emulator_tests();
+    if !have_required_files(MMU_BOOT_ASSETS) {
+        return Ok(());
+    }
+    assert_mmu_boot_passes("68040")
+}
+
+#[test]
+#[ignore = "runs the emulator and requires local KS3.1 + MMU test disk assets"]
+fn mmu_library_boot_and_muforce_hits_68030() -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = lock_emulator_tests();
+    if !have_required_files(MMU_BOOT_ASSETS) {
+        return Ok(());
+    }
+    assert_mmu_boot_passes("68030")
+}

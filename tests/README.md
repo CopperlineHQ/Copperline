@@ -42,6 +42,7 @@ baselines to maintain.
 | `ocs_bpu7_ham_captures_*` (incl. live-audio variant) | `kickstart205.rom`, `DESiRE-InsideTheMachine.adf` |
 | `dblpal_boot_presents_full_programmable_scan` | `KICK31.ROM`, `wb31-dblpal.adf` |
 | `diagrom_menu_preserves_left_margin_text_columns` | `diagrom.rom` |
+| `mmu_library_boot_and_muforce_hits_*` | `Kickstart v3.1 r40.68 (1993)(Commodore)(A1200)[!].rom`, `mmu-test.adf`, `mmu-libs.adf` |
 
 ## Obtaining the assets legally
 
@@ -53,6 +54,14 @@ baselines to maintain.
   [diagrom.com](https://www.diagrom.com/).
 - **Inside The Machine** (`DESiRE-InsideTheMachine.adf`): a scene demo by
   DESiRE, available from [pouet.net](https://www.pouet.net/) / Aminet.
+- **MMU test disks** (`mmu-test.adf`, `mmu-libs.adf`): built locally by
+  `tests/mmu-disks/make-disks.sh` from any Workbench 3.1 boot disk plus
+  Thomas Richter's MMULib (fetched from Aminet by the script). The
+  committed `tests/mmu-disks/lawbreaker` binary is built from the adjacent
+  `lawbreaker.c` with `m68k-amigaos-gcc -noixemul -O`. These disks drive
+  the issue #90 regression: mmu.library building and enabling real
+  translation trees on the 030/040, lazy faults through the resumable
+  bus-fault frames, and MuForce hit reporting.
 
 The `*.U12` / `*.U13`-style files in the repo root are split EPROM dumps for
 expansion-board ROMs (e.g. the A2091 SCSI boot ROM) used by other ignored

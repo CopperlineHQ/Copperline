@@ -509,7 +509,7 @@ impl CpuCore {
         }
         if self.fpu_condition(condition) {
             // FTRAPcc takes the TRAPcc/TRAPV exception vector (7).
-            return self.take_exception(bus, 7);
+            return self.take_group2_exception(bus, 7);
         }
         4
     }
