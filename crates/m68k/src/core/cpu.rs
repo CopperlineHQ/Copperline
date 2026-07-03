@@ -601,6 +601,9 @@ impl CpuCore {
         self.itt1 = 0;
         self.dtt0 = 0;
         self.dtt1 = 0;
+        // The 030's PMOVE-form TT0/TT1 (stored apart from the 040 TTRs).
+        self.mmu_tt0 = 0;
+        self.mmu_tt1 = 0;
         self.atc.flush_all();
         self.prefetch_queue = [0; 2];
         self.prefetch_count = 0;
