@@ -22,6 +22,7 @@
 # Vendored m68k crate: ignore build output and the large SingleStepTests /
 # Musashi fixture submodules (fetched separately, never committed).
 /crates/m68k/target
+/crates/cputest-runner/target
 /crates/m68k/Cargo.lock
 /crates/m68k/tests/fixtures/m68000
 /crates/m68k/tests/fixtures/Musashi
