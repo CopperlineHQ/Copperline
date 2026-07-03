@@ -856,7 +856,7 @@ fn dispatch_group_0<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                     _ => return illegal_instruction(cpu, bus),
                 };
                 if cpu.cpu_type == CpuType::M68000 {
-                    cpu.bitop_cycles(ea, bit_op, opcode & 0x100 == 0)
+                    cpu.bitop_cycles(ea, bit_op, opcode & 0x100 == 0, bit_num)
                 } else {
                     legacy
                 }
@@ -992,7 +992,14 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
         if let Some(mode) = AddressingMode::decode(ea_mode, ea_reg) {
             let size = Size::Word;
             let bound = cpu.read_ea(bus, mode, size);
-            return cpu.exec_chk(bus, size, bound, dst_reg);
+            let cycles = cpu.exec_chk(bus, size, bound, dst_reg);
+            // MC68000: the bound fetch pays the source EA cost on top of
+            // the base (whether or not the check traps).
+            return if cpu.cpu_type == CpuType::M68000 {
+                cycles + cpu.ea_source_cycles(mode, size)
+            } else {
+                cycles
+            };
         } else {
             return illegal_instruction(cpu, bus);
         }

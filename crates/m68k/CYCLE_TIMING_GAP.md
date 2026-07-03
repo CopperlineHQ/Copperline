@@ -299,3 +299,18 @@ the old reconciliation).
   (candidates: interrupt entry/IACK modelling, E-clock CIA access cost,
   per-PC access profiling needed). Closing it is the most likely path to
   eliminating the residual stale repeats.
+
+## WinUAE cputest cycle validation (2026-07-03)
+
+`crates/cputest-runner` now validates cycle counts against the cputest
+data's CT_CYCLES records (`CPUTEST_CYCLES=1`; 68000/010 sets carry them).
+Status after the fixes in this round (dynamic bit-op upper-half penalty,
+BTST Dn,#imm, CHK source-EA cost, DIVS divisor-sign adjustment):
+
+- **68000: cycle-exact across the full sweep** except JSR/JMP `(An)` with
+  an odd address (the address-error path books 4 clocks differently -
+  same exception-3 accounting class as the SST residuals above).
+- **68010: not calibrated.** The sweep flags most instruction classes
+  (the 010 has different EA/ALU costs, loop mode, and a faster MOVE from
+  SR); the cputest data is the reference to do this against when 010
+  timing matters.

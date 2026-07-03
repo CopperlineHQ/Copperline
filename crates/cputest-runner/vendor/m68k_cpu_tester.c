@@ -1475,6 +1475,22 @@ static uae_u8* validate_test(uae_u8* p, int ignore_errors, int ignore_sr) {
             int size;
             p = restore_value(p, &val, &size);
             last_registers.cycles = val;
+            /* Local patch: opt-in cycle-count validation (CPUTEST_CYCLES=1).
+             * The callback reports its measured count in test_regs.cycles;
+             * the data records the generator's cycle-exact count (68000/010
+             * sets only, CPU-clock units). */
+            /* test_regs.cycles == 0 means the callback measured nothing
+             * for this record (round seed / skipped round): no instruction
+             * costs zero cycles, so skip rather than false-positive. */
+            if (getenv("CPUTEST_CYCLES") && test_regs.cycles != 0 && test_regs.cycles != last_registers.cycles) {
+                addinfo();
+                if (dooutput) {
+                    sprintf(outbp, "Cycles: expected %u but got %u\n",
+                            last_registers.cycles, test_regs.cycles);
+                    outbp += strlen(outbp);
+                }
+                errors++;
+            }
         } else {
             end_test();
             printf("Unknown test data %02x mode %d\n", v, mode);

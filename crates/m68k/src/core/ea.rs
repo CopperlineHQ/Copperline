@@ -640,11 +640,27 @@ impl CpuCore {
     /// plus the source EA. The static (immediate bit-number) form adds 4 for the
     /// extension-word fetch.
     #[inline]
-    pub(crate) fn bitop_cycles(&self, mode: AddressingMode, bit_op: u16, is_static: bool) -> i32 {
+    pub(crate) fn bitop_cycles(
+        &self,
+        mode: AddressingMode,
+        bit_op: u16,
+        is_static: bool,
+        bit_num: u32,
+    ) -> i32 {
         let static_add = if is_static { 4 } else { 0 };
         if matches!(mode, AddressingMode::DataDirect(_)) {
             let base = if bit_op == 2 { 8 } else { 6 };
-            base + static_add
+            // The modifying ops pay 2 extra clocks when the bit number
+            // addresses the upper long word half (BTST does not).
+            let high_bit = if bit_op != 0 && (bit_num & 31) > 15 {
+                2
+            } else {
+                0
+            };
+            base + static_add + high_bit
+        } else if matches!(mode, AddressingMode::Immediate) {
+            // BTST Dn,#imm (the only bit op with an immediate destination)
+            10
         } else {
             let base = if bit_op == 0 { 4 } else { 8 };
             base + static_add + self.ea_source_cycles(mode, Size::Byte)
