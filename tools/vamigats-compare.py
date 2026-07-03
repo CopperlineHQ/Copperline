@@ -53,9 +53,20 @@ def read_png_rgb(path):
     return bytes(out), w, h, ch
 
 # Copperline expands 4-bit channels with x17 (0xF -> 255); vAmiga v4.4
-# with x16 (0xF -> 240, with occasional +-1 from its texture path), and
-# its cutout sits 16 pixels right of Copperline's framebuffer origin.
-X_SHIFT = 16
+# with x16 (0xF -> 240, with occasional +-1 from its texture path).
+#
+# Horizontal anchor: vAmiga's regression cutout starts at colour clock
+# 0x31 (RegressionTester X1 = 4 * 0x31), the same beam position as
+# Copperline's framebuffer origin, so aligned frames need no x shift.
+# Verified against mid-line copper COLOR00 write steps (identical raw x
+# in both dumps) and aperiodic bitmap/text content. The previous value
+# of 16 was an artifact: the zero-diff cases were blank screens (shift-
+# invariant), striped test patterns alias modulo their period, and
+# Copperline's line-start colour writes surface 16 px late (a separate
+# divergence this shift used to hide). Note: DDFSTRT $30 lores pictures
+# currently sit 2 px right of vAmiga's - a real placement divergence
+# under investigation; score those cases with --xshift 2 to isolate it.
+X_SHIFT = 0
 # Copperline's framebuffer row 0 sits two beam lines above vAmiga's
 # cutout start (VBLANK_MAX + 1).
 Y_SHIFT = 2
@@ -89,8 +100,17 @@ def compare(case_png, case_raw, tol):
     return diff / total, None
 
 def main():
-    root = sys.argv[1]
-    tol = int(sys.argv[2]) if len(sys.argv) > 2 else 0
+    global X_SHIFT
+    args = [a for a in sys.argv[1:]]
+    for i, a in enumerate(list(args)):
+        if a.startswith('--xshift'):
+            X_SHIFT = int(a.split('=')[1]) if '=' in a else int(args[i + 1])
+            args.remove(a)
+            if '=' not in a:
+                args.remove(str(X_SHIFT))
+            break
+    root = args[0]
+    tol = int(args[1]) if len(args) > 1 else 0
     results = []
     for dirpath, _dirs, files in os.walk(root):
         for f in files:

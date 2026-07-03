@@ -134,6 +134,7 @@ fn run_case(
     fs::write(&cfg_path, copperline_config(kick13, &case.adf_path))?;
 
     let output = Command::new(emulator)
+        .env("COPPERLINE_HCENTER", "0")
         .current_dir(repo_root())
         .env("RUST_LOG", "copperline=warn")
         .arg("--noaudio")
@@ -250,6 +251,13 @@ fn run_vamiga_reference(
 fn copperline_config(kick13: &Path, adf: &Path) -> String {
     format!(
         r#"rom = {}
+
+[display]
+# Full overscan without recentring: the comparator aligns raw beam
+# coordinates, so the TV bezel mask and the content recentring shift
+# must both stay out of the dump (COPPERLINE_HCENTER=0 is set on the
+# spawned process for the same reason).
+overscan = "full"
 
 [emulation]
 speed = "turbo"
