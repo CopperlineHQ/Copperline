@@ -563,30 +563,22 @@ test_fixture!(
 // =============================================================================
 // M68030 Tests on M68040
 // =============================================================================
-// M68030-specific features should work on 040
-
-test_fixture!(
-    m68030_cache_on_68040,
-    CpuType::M68040,
-    "fixtures/extra/m68030/bin/cache_030.bin"
-);
-test_fixture!(
-    m68030_move16_on_68040,
-    CpuType::M68040,
-    "fixtures/extra/m68030/bin/move16_030.bin"
-);
+// (The former cache_030/move16_030 cross tests were dropped: both fixtures
+// now assert 68030-specific behavior - the 030 CACR bit layout and the
+// Line-F traps for the 68040's CINV/MOVE16 - which does not carry to the
+// 040.)
 
 // =============================================================================
 // Summary
 // =============================================================================
-// Total cross-CPU tests: 25
+// Total cross-CPU tests: 23
 // - M68000 on M68010: 2 tests (ADD.b, MOVE.b) - SingleStepTests format
 //   (Note: ADD/MOVE on 68020+ excluded due to microarchitectural differences)
 // - M68000 Bcc on all CPUs: 4 tests - SingleStepTests format
 //   (Branch instructions are consistent across all 68k variants)
 // - M68010 on 020/030/040: 9 tests (3 fixtures × 3 CPUs) - Musashi format
 // - M68020 on 030/040: 8 tests (4 fixtures × 2 CPUs) - Musashi format
-// - M68030 on 040: 2 tests (2 fixtures × 1 CPU) - Musashi format
+// - M68030 on 040: none (the 030 fixtures assert 030-specific traps)
 //
 // These tests verify backward compatibility - features from older CPUs
 // must work correctly on newer CPUs. Failures indicate regression bugs.

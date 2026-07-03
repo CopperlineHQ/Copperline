@@ -25,15 +25,10 @@ run_test:
     
     /* After RTE: Now in USER mode with USP as stack */
     /* The TRAP handler already verified supervisor mode */
-    /* Just verify we're back in user mode then pass */
-    move.w %sr, %d1
-    btst #13, %d1           | Check S bit
-    bne TEST_FAIL           | Should be in user mode
-    
-    /* Return to main - but we're in user mode now! */
-    /* The return address is on SSP, not USP. */
-    /* We need to switch back to supervisor to RTS. */
-    /* Use TRAP #1 to get back to supervisor and return. */
+    /* MOVE from SR is privileged on the 68010+, so the user-mode check
+       is done by the TRAP #1 handler on the stacked SR. */
+    /* The return address is on SSP, not USP: use TRAP #1 to get back
+       to supervisor mode and return. */
     trap #1
     
     /* Shouldn't reach here - trap #1 handler does the return */
@@ -50,7 +45,10 @@ trap_handler:
 
 /* Handler for TRAP #1 - return to caller in supervisor mode */
 trap_handler_1:
-    /* We're now in supervisor mode with SSP */
-    /* Just return to caller (main) */
+    /* Stacked SR is the caller's SR: S bit must be clear (user mode) */
+    move.w (%sp), %d1
+    btst #13, %d1
+    bne TEST_FAIL
+    /* Return to caller (main) */
     addq.l #8, %sp          | Pop the exception frame (format 0: 8 bytes)
     rts

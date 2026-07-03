@@ -29,12 +29,13 @@ run_test:
 next_block:
     nop
     
-    /* Disable Trace */
+    /* Disable Trace. Writing SR with T0 set traces the write itself
+       (the pending-trace check uses the pre-instruction T0), so this
+       adds one more trace exception. */
     move.w #0x2700, %sr
     
-    /* Check count */
-    /* Should be EXACTLY 1 */
-    cmp.l #1, %d6
+    /* Check count: the taken branch plus the SR write */
+    cmp.l #2, %d6
     bne TEST_FAIL
     
     move.l %d7, TRACE_VEC
