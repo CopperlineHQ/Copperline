@@ -62,6 +62,15 @@ fn divs_cycles(dividend: i32, divisor: i16) -> i32 {
         return (mcycles + 2) * 2;
     }
     mcycles += 55;
+    // A non-negative divisor saves one cycle for a non-negative dividend
+    // and costs one for a negative dividend (WinUAE getDivs68kCycles).
+    if divisor >= 0 {
+        if dividend >= 0 {
+            mcycles -= 1;
+        } else {
+            mcycles += 1;
+        }
+    }
     // Each leading 0 in the absolute quotient costs one extra cycle.
     let aquotient = adividend / adivisor;
     let mut q = (aquotient & 0xFFFF) as u16;
