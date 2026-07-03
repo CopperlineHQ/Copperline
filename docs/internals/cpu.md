@@ -275,8 +275,14 @@ transfer modifier (function code), and -- for faults that came out of the
 table walk rather than the physical bus -- the ATC bit; that bit is how an
 OS-level page-fault handler (mmu.library, VMM, Enforcer) tells a translation
 fault it must service from a real bus error it must pass on, and mmu.library's
-lazily-materialized user tables guru without it (issue #90). The frame's
-writeback/continuation fields are left clear (full-restart model);
+lazily-materialized user tables guru without it (issue #90). A faulted write
+is reported in writeback slot 2 (WB2S valid bit, size and transfer modifier,
+address and data in WB2A/WB2D): a handler that clears WB2S.V has absorbed
+the store -- how Enforcer/MuForce discard writes into protected pages -- and
+RTE honours that by discarding the restarted instruction's matching write. A
+handler that completes the writeback manually but leaves V set gets the
+restart's store instead (a double store to plain memory, the restart-model
+gap). The other writeback slots and continuation fields stay clear;
 mid-instruction continuation is not modelled.
 
 A *data* access through an invalid/unconfigured descriptor raises an access

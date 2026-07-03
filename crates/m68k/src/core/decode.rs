@@ -910,11 +910,31 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                                     return 20;
                                 }
                                 7 if cpu.is_040() => {
-                                    // 68040 access-error frame (30 words):
-                                    // discard EA/SSW/writeback state. The
-                                    // faulting instruction was rolled back at
-                                    // frame-build time, so a plain restart is
-                                    // the whole continuation.
+                                    // 68040 access-error frame (30 words).
+                                    // The faulting instruction was rolled
+                                    // back at frame-build time, so a plain
+                                    // restart is the whole continuation --
+                                    // except the writeback protocol: a
+                                    // faulted write was pushed in slot 2,
+                                    // and a handler that cleared WB2S.V
+                                    // absorbed it (Enforcer/MuForce hits on
+                                    // protected pages), so the restarted
+                                    // instruction's matching write is
+                                    // discarded. A handler that completes
+                                    // the writeback manually but leaves V
+                                    // set gets the restart's write instead
+                                    // (double store to plain memory, the
+                                    // documented restart-model gap).
+                                    let sp = cpu.a(7);
+                                    let ssw = cpu.read_16(bus, sp.wrapping_add(0x0C));
+                                    let write_fault = ssw & 0x0100 == 0 && ssw & 0x0400 != 0;
+                                    if write_fault {
+                                        let wb2s = cpu.read_16(bus, sp.wrapping_add(0x10));
+                                        if wb2s & 0x0080 == 0 {
+                                            let wb2a = cpu.read_32(bus, sp.wrapping_add(0x20));
+                                            cpu.mmu_write_suppress = Some(wb2a);
+                                        }
+                                    }
                                     let sr = cpu.pull_16(bus);
                                     cpu.pc = cpu.pull_32(bus);
                                     let _ = cpu.pull_16(bus); // format word

@@ -12,7 +12,7 @@
 use m68k::core::cpu::CpuCore;
 use m68k::core::memory::{AddressBus, BusFault, BusFaultKind};
 use m68k::core::types::CpuType;
-use m68k::StepResult;
+use m68k::{NoOpHleHandler, StepResult};
 
 /// Simple test bus that stores memory in a vector.
 struct TestBus {
@@ -121,15 +121,19 @@ const PAGE_TABLE: u32 = 0x8400;
 const FAULT_PAGE: u32 = 0x5000;
 
 /// A 68040 in user mode with translation enabled through a three-level user
-/// table. Every entry is invalid except the FAULT_PAGE page-table slot,
-/// which holds `page_desc`. Code/stack pages walk into invalid descriptors
-/// and use the instruction-fetch identity fallback; the exception frame
-/// itself is pushed with translation bypassed (exception_processing), so
-/// only explicit data accesses exercise the walker.
+/// table. The stack/vector page, the code page, and the table page are
+/// identity-mapped (so fault handlers can run with translation on); the
+/// FAULT_PAGE page-table slot holds `page_desc`; everything else is
+/// invalid. Instruction fetches through invalid descriptors use the
+/// identity fallback, and the exception frame itself is pushed with
+/// translation bypassed (exception_processing).
 fn user_mode_040_with_table(bus: &mut TestBus, page_desc: u32) -> CpuCore {
     // Root and pointer table entries: UDT resident (bits 1:0 >= 2).
     bus.write_long(ROOT_TABLE, PTR_TABLE | 2);
     bus.write_long(PTR_TABLE, PAGE_TABLE | 2);
+    bus.write_long(PAGE_TABLE, 0x0000_0001); // page 0: vectors, code
+    bus.write_long(PAGE_TABLE + 4, 0x0000_1001); // page 1: stacks
+    bus.write_long(PAGE_TABLE + 8 * 4, 0x0000_8001); // page 8: the tables
     bus.write_long(PAGE_TABLE + (FAULT_PAGE >> 12) * 4, page_desc);
 
     // Vector 2 (bus error) -> HANDLER, which is a bare RTE.
@@ -160,12 +164,27 @@ const F_PC: u32 = 0x02;
 const F_FMT: u32 = 0x06;
 const F_EA: u32 = 0x08;
 const F_SSW: u32 = 0x0C;
+const F_WB2S: u32 = 0x10;
 const F_FA: u32 = 0x14;
+const F_WB2A: u32 = 0x20;
+const F_WB2D: u32 = 0x24;
 
 fn frame_base(cpu: &CpuCore) -> u32 {
     let sp = cpu.a(7);
     assert_eq!(sp, SSP - FRAME_LEN, "format $7 frame is 30 words");
     sp
+}
+
+fn step_n(cpu: &mut CpuCore, bus: &mut TestBus, n: usize) {
+    let mut hle = NoOpHleHandler;
+    for _ in 0..n {
+        let r = cpu.step_with_hle_handler(bus, &mut hle);
+        assert!(
+            matches!(r, StepResult::Ok { .. }),
+            "unexpected step result {r:?} at pc={:#010X}",
+            cpu.pc
+        );
+    }
 }
 
 /// A user-mode data read through an invalid page descriptor pushes a format
@@ -196,6 +215,86 @@ fn translation_fault_frame_reports_atc_read_long() {
     assert_eq!(bus.read_long(f + F_EA), FAULT_PAGE, "effective address");
     assert_eq!(bus.read_long(f + F_PC), CODE, "restart PC");
     assert_eq!(bus.read_word(f + F_SR) & 0x2000, 0, "stacked SR is user");
+    assert_eq!(
+        bus.read_word(f + F_WB2S),
+        0,
+        "no writeback for a read fault"
+    );
+}
+
+/// A faulted write is reported in writeback slot 2: WB2S carries the valid
+/// bit, size, and transfer modifier, with the address and data in
+/// WB2A/WB2D. This is the frame contract Enforcer/MuForce use to report a
+/// hit's data and absorb the store.
+#[test]
+fn write_fault_frame_carries_writeback_2() {
+    let mut bus = TestBus::new(0x10000);
+    let mut cpu = user_mode_040_with_table(&mut bus, 0);
+
+    cpu.set_d(0, 0x1234_5678);
+    bus.write_word(CODE, 0x2080); // MOVE.L D0,(A0)
+
+    let _ = cpu.step(&mut bus);
+    let f = frame_base(&cpu);
+    assert_eq!(bus.read_word(f + F_SSW), 0x0401, "SSW = ATC | write | long");
+    assert_eq!(
+        bus.read_word(f + F_WB2S),
+        0x0081,
+        "WB2S = V | SZ=long | TM=user data"
+    );
+    assert_eq!(bus.read_long(f + F_WB2A), FAULT_PAGE, "writeback address");
+    assert_eq!(bus.read_long(f + F_WB2D), 0x1234_5678, "writeback data");
+}
+
+/// A handler that clears WB2S.V has absorbed the faulted write (an
+/// Enforcer/MuForce hit on a protected page): the restarted instruction
+/// continues past the store without re-faulting, and the page stays
+/// invalid.
+#[test]
+fn rte_with_wb2s_cleared_absorbs_the_faulted_write() {
+    let mut bus = TestBus::new(0x10000);
+    let mut cpu = user_mode_040_with_table(&mut bus, 0);
+
+    cpu.set_d(0, 0x1234_5678);
+    bus.write_word(CODE, 0x2080); // MOVE.L D0,(A0)
+    bus.write_word(CODE + 2, 0x4E71); // NOP
+
+    // Handler: CLR.B ($11,A7) (WB2S low byte, V included); RTE.
+    bus.write_word(HANDLER, 0x422F);
+    bus.write_word(HANDLER + 2, (F_WB2S + 1) as u16);
+    bus.write_word(HANDLER + 4, 0x4E73);
+
+    // Fault + handler (2) + suppressed rerun + NOP.
+    step_n(&mut cpu, &mut bus, 5);
+    assert!(!cpu.is_supervisor(), "no re-fault loop");
+    assert_eq!(cpu.pc & 0xFFFF, (CODE + 4) & 0xFFFF, "past the NOP");
+}
+
+/// A handler that fixes the mapping and leaves WB2S.V set gets the plain
+/// restart: the re-executed store lands through the new translation.
+#[test]
+fn rte_with_wb2s_valid_restarts_the_write() {
+    let mut bus = TestBus::new(0x10000);
+    let mut cpu = user_mode_040_with_table(&mut bus, 0);
+
+    cpu.set_d(0, 0x1234_5678);
+    bus.write_word(CODE, 0x2080); // MOVE.L D0,(A0)
+    bus.write_word(CODE + 2, 0x4E71); // NOP
+
+    // Handler: materialize the page (FAULT_PAGE -> physical 0x6000), RTE.
+    // MOVE.L #$00006001,(page table slot).L
+    bus.write_word(HANDLER, 0x23FC);
+    bus.write_long(HANDLER + 2, 0x0000_6001);
+    bus.write_long(HANDLER + 6, PAGE_TABLE + (FAULT_PAGE >> 12) * 4);
+    bus.write_word(HANDLER + 10, 0x4E73);
+
+    step_n(&mut cpu, &mut bus, 5);
+    assert!(!cpu.is_supervisor());
+    assert_eq!(
+        bus.read_long(0x6000),
+        0x1234_5678,
+        "restarted write landed via the new mapping"
+    );
 }
 
 /// SSW size field follows the 68040 encoding: byte=01, word=10, long=00
