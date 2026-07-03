@@ -448,3 +448,96 @@ fn ptest_reports_write_protect_on_read_walks() {
         "MMUSR = W | N=2 for a resident write-protected page"
     );
 }
+
+/// MOVES moves every operand size in both directions through the SFC/DFC
+/// address spaces, with address-register destinations sign-extending like
+/// MOVEA. The FC-table setup from the FCL test doubles as the address-space
+/// discriminator: user-data space is remapped, supervisor spaces identity.
+#[test]
+fn moves_sizes_directions_and_sign_extension() {
+    let mut bus = TestBus::new(0x10000);
+
+    bus.write_long(ROOT_TABLE + 5 * 4, 0x0000_0059); // supervisor data: identity
+    bus.write_long(ROOT_TABLE + 6 * 4, 0x0000_0059); // supervisor program: identity
+    bus.write_long(ROOT_TABLE + 4, 0x0000_4059); // user data: +0x4000
+
+    bus.write_long(0x6000, 0x8899_AABB); // user-data view of 0x2000
+
+    let mut cpu = CpuCore::new();
+    cpu.set_cpu_type(CpuType::M68030);
+    cpu.mmu_crp_limit = 0x8000_0002;
+    cpu.mmu_crp_aptr = ROOT_TABLE;
+    cpu.mmu_tc = 0x81F0_9800; // E=1, FCL=1, PS=32K, TIA=9, TIB=8
+    cpu.pmmu_enabled = true;
+    cpu.sfc = 1;
+    cpu.dfc = 1;
+
+    cpu.set_sr(0x2700);
+    cpu.set_a(7, SSP);
+    cpu.set_a(0, 0x2000);
+    cpu.set_d(3, 0x1122_3344);
+    cpu.pc = CODE;
+
+    let mut p = CODE;
+    // MOVES.B (A0),D1 ; MOVES.W (A0),D2 ; MOVES.L (A0),A1 (sign-extends)
+    for (op, ext) in [(0x0E10u16, 0x1000u16), (0x0E50, 0x2000), (0x0E90, 0x9000)] {
+        bus.write_word(p, op);
+        bus.write_word(p + 2, ext);
+        p += 4;
+    }
+    // MOVES.L D3,(A0): write into the user-data space (lands at 0x6000).
+    bus.write_word(p, 0x0E90);
+    bus.write_word(p + 2, 0x3800);
+    p += 4;
+    // MOVES.W (A0),A2: word read sign-extended into an address register.
+    bus.write_word(p, 0x0E50);
+    bus.write_word(p + 2, 0xA000);
+
+    step_n(&mut cpu, &mut bus, 3);
+    assert_eq!(cpu.d(1) & 0xFF, 0x88, "byte read via SFC space");
+    assert_eq!(cpu.d(2) & 0xFFFF, 0x8899, "word read via SFC space");
+    assert_eq!(cpu.a(1), 0x8899_AABB, "long read into An");
+
+    step_n(&mut cpu, &mut bus, 1);
+    assert_eq!(
+        bus.read_long(0x6000),
+        0x1122_3344,
+        "long write lands in the DFC space, not the identity view"
+    );
+    assert_eq!(bus.read_long(0x2000), 0, "identity view untouched");
+
+    step_n(&mut cpu, &mut bus, 1);
+    assert_eq!(
+        cpu.a(2),
+        0x0000_1122,
+        "word read into An sign-extends the new memory value"
+    );
+}
+
+/// MOVES in user mode is a privilege violation regardless of direction.
+#[test]
+fn moves_is_privileged() {
+    let mut bus = TestBus::new(0x10000);
+    bus.write_long(8 * 4, HANDLER); // privilege violation vector
+    bus.write_word(HANDLER, 0x4E71);
+
+    let mut cpu = CpuCore::new();
+    cpu.set_cpu_type(CpuType::M68030);
+    cpu.set_sr(0x2700);
+    cpu.set_a(7, SSP);
+    cpu.set_sr(0x0000);
+    cpu.set_a(7, USP);
+    cpu.set_a(0, 0x2000);
+    cpu.pc = CODE;
+    bus.write_word(CODE, 0x0E10); // MOVES.B (A0),D1
+    bus.write_word(CODE + 2, 0x1000);
+
+    step_n(&mut cpu, &mut bus, 1);
+    assert!(cpu.is_supervisor(), "privilege violation taken");
+    assert_eq!(cpu.pc & 0xFFFF, HANDLER);
+    assert_eq!(
+        bus.read_long(cpu.a(7) + 2),
+        CODE,
+        "faulting instruction's PC stacked"
+    );
+}
