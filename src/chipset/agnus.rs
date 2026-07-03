@@ -7,6 +7,14 @@
 pub const PAL_LINES: u32 = 313;
 pub const NTSC_LINES: u32 = 263;
 pub const COLORCLOCKS_PER_LINE: u32 = 227;
+
+/// How far ahead of the internal beam counter a VHPOSR read reports, in
+/// colour clocks. vAmiga models the same pipeline as +5 at its peek
+/// point; our CPU read lands after the chip-bus grant has advanced the
+/// beam, so the residual offset is smaller. Calibrated against the
+/// vAmigaTS Agnus/Registers/VPOS visualizations (cycle-exact register
+/// readouts) where 2 scores best.
+const VHPOSR_LOOKAHEAD_CCK: u32 = 2;
 pub const NTSC_LONG_COLORCLOCKS_PER_LINE: u32 = 228;
 pub const DMACON_BPLEN: u16 = 1 << 8;
 pub const DMACON_DMAEN: u16 = 1 << 9;
@@ -1017,17 +1025,38 @@ impl Agnus {
             | v8
     }
 
-    /// Read VHPOSR: top byte = V[7:0], bottom byte = H[8:1]. With the light
-    /// pen enabled and a position latched, both halves come from the
-    /// LPENV/LPENH latches. With ERSY set and no genlock, the frozen beam
-    /// counters are read back instead of the live beam.
+    /// Read VHPOSR: top byte = V[7:0], bottom byte = the horizontal beam
+    /// position in colour clocks. The live readback runs a few colour
+    /// clocks ahead of the internal counter (the position is pipelined
+    /// onto the bus), and for the first two reported positions of a line
+    /// the vertical byte still holds the previous line's number
+    /// (vAmiga's hardware-verified model). With the light pen enabled
+    /// and a position latched, both halves come from the LPENV/LPENH
+    /// latches. With ERSY set and no genlock, the frozen beam counters
+    /// are read back instead of the live beam.
     pub fn read_vhposr(&self) -> u16 {
         let (v, h) = match (self.lpen_latch_active(), self.ersy_freeze) {
             (Some((v, h)), _) => (v, h),
             (None, Some(freeze)) => (freeze.vpos, freeze.hpos),
-            (None, None) => (self.read_visible_vpos(), self.hpos),
+            (None, None) => {
+                let line_cck = self.current_line_cck();
+                let mut h = self.hpos + VHPOSR_LOOKAHEAD_CCK;
+                let mut v = self.vpos;
+                if h >= line_cck {
+                    h -= line_cck;
+                    // The first two positions of a line still report the
+                    // previous line number.
+                    if h > 1 {
+                        v += 1;
+                        if v >= self.current_frame_lines() {
+                            v = 0;
+                        }
+                    }
+                }
+                (v, h)
+            }
         };
-        (((v & 0xFF) as u16) << 8) | (((h >> 1) & 0xFF) as u16)
+        (((v & 0xFF) as u16) << 8) | ((h & 0xFF) as u16)
     }
 
     /// Mirror BPLCON0.ERSY (bit 1). Setting it with no genlock attached
@@ -1260,7 +1289,9 @@ impl Agnus {
         self.vpos_read_delay = None;
         let high = self.vpos & !0xFF;
         self.vpos = (high | u32::from((val >> 8) & 0xFF)).min(self.current_frame_lines() - 1);
-        self.hpos = (u32::from(val & 0xFF) << 1).min(self.current_line_cck() - 1);
+        // The low byte is the horizontal counter value in colour clocks,
+        // matching the VHPOSR readback units.
+        self.hpos = u32::from(val & 0xFF).min(self.current_line_cck() - 1);
     }
 
     fn read_visible_vpos(&self) -> u32 {
@@ -1337,7 +1368,7 @@ mod tests {
         assert_eq!(agnus.read_vhposr(), frozen);
 
         agnus.set_ersy(false);
-        assert_eq!(agnus.read_vhposr(), (0x90 << 8) | (0x10 >> 1));
+        assert_eq!(agnus.read_vhposr(), (0x90 << 8) | (0x10 + 2));
     }
 
     #[test]
@@ -1388,23 +1419,26 @@ mod tests {
     }
 
     #[test]
-    fn vpos_register_reads_increment_after_hpos_two() {
+    fn vhposr_reads_run_ahead_with_old_line_number_at_wrap() {
         let mut agnus = Agnus::new();
         agnus.vpos = 0x20;
-        agnus.hpos = COLORCLOCKS_PER_LINE - 1;
+        agnus.hpos = COLORCLOCKS_PER_LINE - 2;
 
+        // The readback runs ahead of the counter, so the last positions
+        // of a line already report the next line's start; the first two
+        // reported positions keep the old line number (the
+        // hardware-verified vAmiga model, offset recalibrated to this
+        // bus's read point).
+        assert_eq!(agnus.read_vhposr(), 0x2000); // lookahead wraps to 0
+        agnus.advance_by_cck(1);
+        assert_eq!(agnus.read_vhposr(), 0x2001); // reported h = 1, old v
         agnus.advance_by_cck(1);
         assert_eq!(agnus.vpos, 0x21);
         assert_eq!(agnus.hpos, 0);
-        assert_eq!(agnus.read_vhposr(), 0x2000);
+        assert_eq!(agnus.read_vhposr(), 0x2102); // reported h = 2, new v
 
-        agnus.advance_by_cck(1);
-        assert_eq!(agnus.hpos, 1);
-        assert_eq!(agnus.read_vhposr(), 0x2000);
-
-        agnus.advance_by_cck(1);
-        assert_eq!(agnus.hpos, 2);
-        assert_eq!(agnus.read_vhposr(), 0x2101);
+        agnus.advance_by_cck(3);
+        assert_eq!(agnus.read_vhposr(), 0x2105);
     }
 
     #[test]
@@ -1434,10 +1468,10 @@ mod tests {
         assert_eq!(agnus.hpos, 0);
         assert!(agnus.lol);
         assert_eq!(agnus.current_line_cck(), NTSC_LONG_COLORCLOCKS_PER_LINE);
-        assert_eq!(agnus.read_vhposr(), 0x0000);
+        assert_eq!(agnus.read_vhposr(), 0x0102);
 
         agnus.advance_by_cck(2);
-        assert_eq!(agnus.read_vhposr(), 0x0101);
+        assert_eq!(agnus.read_vhposr(), 0x0104);
     }
 
     #[test]
@@ -2134,13 +2168,13 @@ mod tests {
 
         // The latch freezes the read while the beam moves on.
         agnus.advance_by_cck(50);
-        assert_eq!(agnus.read_vhposr(), (100 << 8) | (0x40 >> 1));
+        assert_eq!(agnus.read_vhposr(), (100 << 8) | 0x40);
         assert_eq!(agnus.read_vposr() & 0x0001, 0);
 
         // A second pulse in the same field is ignored.
         agnus.advance_by_cck(COLORCLOCKS_PER_LINE);
         agnus.trigger_light_pen();
-        assert_eq!(agnus.read_vhposr(), (100 << 8) | (0x40 >> 1));
+        assert_eq!(agnus.read_vhposr(), (100 << 8) | 0x40);
 
         // Disabling LPEN returns the live counters.
         agnus.set_lpen(false);
@@ -2155,13 +2189,13 @@ mod tests {
         // end-of-field position (last line, end of line).
         agnus.advance_by_cck(PAL_LINES * COLORCLOCKS_PER_LINE + 10);
         let expect_v = ((PAL_LINES - 1) & 0xFF) as u16;
-        let expect_h = ((COLORCLOCKS_PER_LINE - 1) >> 1) as u16;
+        let expect_h = (COLORCLOCKS_PER_LINE - 1) as u16 & 0xFF;
         assert_eq!(agnus.read_vhposr(), (expect_v << 8) | expect_h);
 
         // The new field re-arms the latch: a pulse overwrites it.
         agnus.advance_by_cck(5 * COLORCLOCKS_PER_LINE - 10 + 0x20);
         agnus.trigger_light_pen();
-        assert_eq!(agnus.read_vhposr(), (5 << 8) | (0x20 >> 1));
+        assert_eq!(agnus.read_vhposr(), (5 << 8) | 0x20);
     }
 
     #[test]
@@ -2173,9 +2207,9 @@ mod tests {
         agnus.advance_by_cck(10 * COLORCLOCKS_PER_LINE + 0x30);
         agnus.trigger_light_pen();
         // No latch: reads stay live.
-        assert_eq!(agnus.read_vhposr(), (10 << 8) | (0x30 >> 1));
+        assert_eq!(agnus.read_vhposr(), (10 << 8) | (0x30 + 2));
         agnus.advance_by_cck(2);
-        assert_eq!(agnus.read_vhposr(), (10 << 8) | (0x32 >> 1));
+        assert_eq!(agnus.read_vhposr(), (10 << 8) | (0x32 + 2));
     }
 
     #[test]
