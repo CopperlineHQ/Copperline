@@ -248,6 +248,9 @@ fn ptest_040_reports_resident_and_physical_in_mmusr() {
     cpu.set_sr(0x2700);
     cpu.write_control_register(0x807, root);
     cpu.write_control_register(0x003, 0x0000_8000);
+    // PTEST probes the address space named by DFC: supervisor data here
+    // (the table is on SRP).
+    cpu.write_control_register(0x001, 5);
 
     let mut hle = m68k::NoOpHleHandler;
 

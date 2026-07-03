@@ -233,19 +233,26 @@ diverge.
 The 68030, 68040, and 68060 model the on-chip MMU (`has_pmmu`), so software that sets up
 and enables address translation runs rather than having its MMU writes ignored.
 The two parts differ enough to need separate walkers: the 68030 uses its
-programmable table walk (CRP/SRP selection, the TC index fields, 4-/8-byte
-descriptor modes, early-termination descriptors), while the 68040 has a
-fixed-format three-level walk (root -> pointer -> page, 4 KB or 8 KB pages,
-URP/SRP split by supervisor) keyed off its own TC layout. Both share the
-transparent translation registers (TTRs: the 030's TT0/1, the 040's ITT0/1 +
-DTT0/1), which short-circuit the walk for a matching address range.
+programmable table walk (CRP/SRP selection, the optional function-code lookup
+level (TC FCL), the TC index fields TIA-TID, 4-/8-byte descriptor modes,
+early-termination descriptors, indirect descriptors when the configured
+levels are exhausted, and the long-format supervisor-only bit), while the
+68040 has a fixed-format three-level walk (root -> pointer -> page, 4 KB or
+8 KB pages, URP/SRP split by supervisor) keyed off its own TC layout. Both
+share the transparent translation registers (TTRs: the 030's TT0/1, the
+040's ITT0/1 + DTT0/1), which short-circuit the walk for a matching address
+range. Accesses carry their function code into the walk: `MOVES` translates
+in the SFC/DFC space (mmu.library's 030 MMU-detection probe remaps the
+user-data space and reads it back with `MOVES` from supervisor mode), and
+`PTEST`/`PLPA` probe the DFC space.
 
 One register set (`mmu_*` in `CpuCore`) is canonical for both paths, so the 030
 `PMOVE` writes, the 040 `MOVEC` writes, and the walker can never desync (the 040
 root pointers overload the CRP/SRP address slots, dispatched by `cpu_type`). The
 enable bit differs by part -- TC[31] on the 030, TC[15] on the 040 -- via
-`tc_enable()`. `PMOVE`/`MOVEC` load the registers and `PTEST`/`PLOAD`/`PFLUSH`
-are accepted as no-ops rather than trapping.
+`tc_enable()`. `PMOVE`/`MOVEC` load the registers (including the 030 MMUSR
+via `PMOVE PSR`); `PLOAD`/`PFLUSH` are accepted as no-ops on the 030 walk
+(which has no ATC to flush).
 
 A 68040 table walk costs three descriptor fetches, far too much to pay on every
 access, so the 040 walker is fronted by an address-translation cache
@@ -282,11 +289,26 @@ re-translate (and a fault while delivering a fault is a clean double-fault halt)
 
 `PTEST` (68040) walks the addressed page and reports the physical address and
 resident bit in MMUSR (the cache-mode/used/modified attribute bits are not yet
-filled in). The 68030 also enforces the descriptor write-protect (WP) bit, and
-its faults are routed to the bus-error vector like the 040's, though the 68030
-long bus-fault stack frame (format A/B) is still the minimal fallback rather than
-a fully resumable frame. Remaining: the indirect/used/modified MMUSR bits and
-the resumable 030 frame.
+filled in). The 68030 `PTEST` performs a real level-limited walk in the
+extension word's function-code space and composes the 16-bit MMUSR (B, S, W
+-- reported for read tests too -- I, T, and the level count N); with the A
+bit it hands back the physical address of the last descriptor examined,
+which is how mmu.library's fault handler locates the shared descriptor slot
+to materialize.
+
+68030 faults push the long bus-cycle fault frame (format $B, 46 words):
+SSW (DF/RW/SIZ/FC for data faults, FB|RB with the stage B address for
+instruction faults), the data-cycle fault address, and -- for write faults
+-- the write's value in the data output buffer. `RTE` supports both
+continuation protocols on top of the rollback/restart core: a handler that
+fixed the mapping RTEs with DF set and the instruction restarts; a handler
+that *completed* the data cycle itself clears DF, supplying a faulted
+read's result in the data input buffer (mmu.library emulates lazily-zeroed
+pages this way) or absorbing a faulted write, honoured as a one-shot
+substitution on the re-executed instruction's matching access. Remaining:
+the used/modified/limit MMUSR bits and descriptor write-back, CRP limit
+checks, and the DT=1 page-descriptor root; the 030 walk has no ATC, so
+every access re-walks the tables.
 
 ## Interrupts and STOP
 

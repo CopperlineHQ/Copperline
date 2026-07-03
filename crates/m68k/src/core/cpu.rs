@@ -233,6 +233,30 @@ pub struct CpuCore {
     /// physical bus errors leave it None. Transient within one exception.
     #[serde(skip)]
     pub(crate) pending_fault_cause: Option<crate::mmu::MmuFaultCause>,
+    /// Function code forced for the current data access: MOVES reads and
+    /// writes carry SFC/DFC instead of the CPU-state-derived code, and the
+    /// MMU translates in that address space (the 68030 FCL table level and
+    /// TTR matching see the alternate code; on the 040 it selects URP vs
+    /// SRP). None for ordinary accesses; transient within one instruction.
+    #[serde(skip)]
+    pub(crate) mmu_fc_override: Option<u8>,
+    /// One-shot faulted-read completion, from an RTE of a 68030 bus-fault
+    /// frame whose handler cleared the SSW DF bit and supplied the result
+    /// in the data input buffer: (logical address, value). Real silicon
+    /// continues the instruction using that value instead of rerunning the
+    /// data cycle (mmu.library emulates lazily-zeroed pages this way); this
+    /// restart-model core re-executes the instruction and substitutes the
+    /// value on its matching data read.
+    pub(crate) mmu_read_override: Option<(u32, u32)>,
+    /// One-shot suppressed data write: the DF-cleared write-fault analogue
+    /// of `mmu_read_override` -- the re-executed instruction's write to
+    /// this logical address is discarded (the handler already completed or
+    /// absorbed it).
+    pub(crate) mmu_write_suppress: Option<u32>,
+    /// Data value of the most recent data write, captured so a write fault
+    /// can stack it in the 030 frame's data output buffer (the handler
+    /// completes the write from there).
+    pub(crate) pending_fault_wdata: u32,
 
     // ========== Execution State ==========
     /// Remaining cycles in current timeslice
@@ -437,6 +461,10 @@ impl CpuCore {
             buscr: 0,
             atc: crate::mmu::Atc::default(),
             pending_fault_cause: None,
+            mmu_fc_override: None,
+            mmu_read_override: None,
+            mmu_write_suppress: None,
+            pending_fault_wdata: 0,
             cycles_remaining: 0,
             initial_cycles: 0,
             oep060: Default::default(),
@@ -1218,6 +1246,14 @@ impl CpuCore {
         // Part E.2: report internal clocks elapsed before this bus access.
         self.flush_sync(bus);
         let mut addr = self.address(addr);
+        if let Some((a, v)) = self.mmu_read_override {
+            if a == addr {
+                // RTE'd 030 bus-fault frame with DF cleared: the handler
+                // supplied this read's result in the data input buffer.
+                self.mmu_read_override = None;
+                return v as u8;
+            }
+        }
         {
             if self.has_pmmu && self.pmmu_enabled {
                 match crate::mmu::translate_address(
@@ -1263,6 +1299,14 @@ impl CpuCore {
         {
             self.trigger_address_error(bus, addr, false, false);
             return 0;
+        }
+        if let Some((a, v)) = self.mmu_read_override {
+            if a == addr {
+                // RTE'd 030 bus-fault frame with DF cleared: the handler
+                // supplied this read's result in the data input buffer.
+                self.mmu_read_override = None;
+                return v as u16;
+            }
         }
         {
             if self.has_pmmu && self.pmmu_enabled {
@@ -1310,6 +1354,14 @@ impl CpuCore {
             self.trigger_address_error(bus, addr, false, false);
             return 0;
         }
+        if let Some((a, v)) = self.mmu_read_override {
+            if a == addr {
+                // RTE'd 030 bus-fault frame with DF cleared: the handler
+                // supplied this read's result in the data input buffer.
+                self.mmu_read_override = None;
+                return v;
+            }
+        }
         {
             if self.has_pmmu && self.pmmu_enabled {
                 match crate::mmu::translate_address(
@@ -1348,6 +1400,13 @@ impl CpuCore {
         // Part E.2: report internal clocks elapsed before this bus access.
         self.flush_sync(bus);
         let mut addr = self.address(addr);
+        if self.mmu_write_suppress == Some(addr) {
+            // RTE'd 030 bus-fault frame with DF cleared on a write fault:
+            // the handler completed or absorbed this write.
+            self.mmu_write_suppress = None;
+            return;
+        }
+        self.pending_fault_wdata = value as u32;
         {
             if self.has_pmmu && self.pmmu_enabled {
                 match crate::mmu::translate_address(
@@ -1390,6 +1449,12 @@ impl CpuCore {
             self.trigger_address_error(bus, addr, true, false);
             return;
         }
+        if self.mmu_write_suppress == Some(addr) {
+            // See write_8: DF-cleared write fault, already completed.
+            self.mmu_write_suppress = None;
+            return;
+        }
+        self.pending_fault_wdata = value as u32;
         {
             if self.has_pmmu && self.pmmu_enabled {
                 match crate::mmu::translate_address(
@@ -1432,6 +1497,12 @@ impl CpuCore {
             self.trigger_address_error(bus, addr, true, false);
             return;
         }
+        if self.mmu_write_suppress == Some(addr) {
+            // See write_8: DF-cleared write fault, already completed.
+            self.mmu_write_suppress = None;
+            return;
+        }
+        self.pending_fault_wdata = value;
         {
             if self.has_pmmu && self.pmmu_enabled {
                 match crate::mmu::translate_address(
@@ -1540,25 +1611,59 @@ impl CpuCore {
                 | super::types::CpuType::M68040
         );
         if is_ptest && is_040 {
-            // PTEST on 68040 - treat as NOP
+            // 030-form PTEST on the 68040 - treat as NOP (68040.library
+            // issues these during setup; the 040 form is 0xF548).
             return 4;
         }
-        // PLOAD / PFLUSH / PFLUSHA / PTEST (68030 forms): recognized but not yet
-        // fully modelled. Treat them as NOPs rather than returning 0, which the
-        // decoder would turn into a LINE-1111 trap -- AROS and the 68040.library
-        // issue these during MMU setup, so trapping crashes the boot. PTEST
-        // reports "no fault" via a benign MMUSR; an ATC to flush (PFLUSH/PLOAD)
-        // and precise MMUSR bits (PTEST) come with later phases.
+        if is_ptest {
+            // 68030 PTEST: walk the tables for the EA in the address space
+            // named by the extension word's fc field, at most `level`
+            // descriptors deep, and report the outcome in MMUSR. With the
+            // A bit set, the physical address of the last descriptor
+            // examined lands in An -- mmu.library's lazy fault handler
+            // finds the shared descriptor slot to materialize by stepping
+            // PTEST through the levels exactly this way.
+            let level = ((modes >> 10) & 7) as u32;
+            let read = (modes & 0x0200) != 0;
+            let a_bit = (modes & 0x0100) != 0;
+            let an = ((modes >> 5) & 7) as usize;
+            let fcf = (modes & 0x1F) as u32;
+            let fc = if fcf & 0x10 != 0 {
+                fcf & 7 // immediate
+            } else if fcf & 0x08 != 0 {
+                self.d((fcf & 7) as usize) & 7 // Dn
+            } else if fcf == 1 {
+                self.dfc & 7
+            } else {
+                self.sfc & 7 // 00000 = SFC (00001 = DFC above)
+            };
+            let ea_mode = ((opcode >> 3) & 0x7) as u8;
+            let ea_reg = (opcode & 0x7) as u8;
+            let Some(am) = AddressingMode::decode(ea_mode, ea_reg) else {
+                return 0;
+            };
+            let super::ea::EaResult::Memory(addr) = self.resolve_ea(bus, am, Size::Long) else {
+                return 0;
+            };
+            let (sr, desc_addr) = crate::mmu::ptest_030(self, bus, addr, fc, !read, level);
+            self.mmu_sr = sr as u32;
+            if a_bit && level != 0 {
+                self.set_a(an, desc_addr);
+            }
+            return 8;
+        }
+        // PLOAD / PFLUSH / PFLUSHA (68030 forms): recognized but not yet
+        // fully modelled. Treat them as NOPs rather than returning 0, which
+        // the decoder would turn into a LINE-1111 trap -- AROS and the
+        // 68040.library issue these during MMU setup, so trapping crashes
+        // the boot. There is no ATC on the 030 walk, so a flush has nothing
+        // to drop.
         if (modes & 0xFDE0) == 0x2000   // PLOAD
             || (modes & 0xE200) == 0x2000
             || modes == 0xA000          // PFLUSHA
             || modes == 0x2800
             || (modes & 0xFFF8) == 0x2C00 // PFLUSH
-            || is_ptest
         {
-            if is_ptest {
-                self.mmu_sr = 0;
-            }
             return 8;
         }
 
@@ -1621,6 +1726,12 @@ impl CpuCore {
                     self.write_resolved_ea(bus, ea, Size::Long, self.mmu_tt1);
                     4
                 }
+                0x18 => {
+                    // MMUSR / PSR (16): how a fault handler reads the PTEST
+                    // result (PMOVE PSR,<ea>).
+                    self.write_resolved_ea(bus, ea, Size::Word, self.mmu_sr & 0xFFFF);
+                    4
+                }
                 _ => 0,
             }
         } else {
@@ -1661,6 +1772,12 @@ impl CpuCore {
                     // TT1 (32)
                     let v = self.read_resolved_ea(bus, ea, Size::Long);
                     self.mmu_tt1 = v;
+                    4
+                }
+                0x18 => {
+                    // MMUSR / PSR (16)
+                    let v = self.read_resolved_ea(bus, ea, Size::Word);
+                    self.mmu_sr = v & 0xFFFF;
                     4
                 }
                 _ => 0,

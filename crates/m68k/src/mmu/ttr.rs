@@ -113,6 +113,10 @@ pub fn check_transparent_translation(
 /// - 6: Supervisor Program (instruction)
 /// - 7: CPU Space (interrupt acknowledge, etc.)
 fn compute_function_code(cpu: &CpuCore, instruction: bool) -> u8 {
+    // A MOVES data access carries SFC/DFC instead of the CPU-state code.
+    if let Some(fc) = cpu.mmu_fc_override {
+        return fc;
+    }
     let is_supervisor = cpu.is_supervisor();
     match (is_supervisor, instruction) {
         (false, false) => 1, // User Data

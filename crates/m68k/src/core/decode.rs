@@ -207,7 +207,11 @@ fn dispatch_group_f<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 let an = 8 + (opcode & 7) as usize;
                 let addr = cpu.dar[an];
                 let supervisor = (cpu.dfc & 4) != 0;
-                match crate::mmu::translate_address(cpu, bus, addr, write, supervisor, false) {
+                cpu.mmu_fc_override = Some((cpu.dfc & 7) as u8);
+                let translated =
+                    crate::mmu::translate_address(cpu, bus, addr, write, supervisor, false);
+                cpu.mmu_fc_override = None;
+                match translated {
                     Ok(phys) => {
                         cpu.dar[an] = phys;
                         return 4;
@@ -234,15 +238,19 @@ fn dispatch_group_f<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             // PTEST: walk the page for An and report it in MMUSR. We model the
             // physical-address and resident (R) bits, enough for an OS to tell a
             // mapped page from an invalid one; the cache-mode / used / modified
-            // attribute bits are not yet filled in.
+            // attribute bits are not yet filled in. The address space under
+            // test comes from DFC (how an OS PTESTs user mappings from
+            // supervisor mode), carried by the same override MOVES uses.
             let read = (opcode & 0x0020) != 0;
             let addr = cpu.dar[8 + (opcode & 7) as usize];
-            let supervisor = cpu.is_supervisor();
+            let fc = (cpu.dfc & 7) as u8;
+            cpu.mmu_fc_override = Some(fc);
             cpu.mmu_sr =
-                match crate::mmu::translate_address(cpu, bus, addr, !read, supervisor, false) {
+                match crate::mmu::translate_address(cpu, bus, addr, !read, (fc & 4) != 0, false) {
                     Ok(phys) => (phys & 0xFFFF_F000) | 0x0000_0001, // R = resident
                     Err(_) => 0,                                    // not resident
                 };
+            cpu.mmu_fc_override = None;
             return 4;
         }
         // PFLUSH variants flush the ATC. We do not track entries finely enough
@@ -911,6 +919,63 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                                     cpu.pc = cpu.pull_32(bus);
                                     let _ = cpu.pull_16(bus); // format word
                                     cpu.dar[15] = cpu.dar[15].wrapping_add(52);
+                                    cpu.set_sr(sr);
+                                    return 20;
+                                }
+                                0xA | 0xB
+                                    if matches!(
+                                        cpu.cpu_type,
+                                        CpuType::M68EC020
+                                            | CpuType::M68020
+                                            | CpuType::M68EC030
+                                            | CpuType::M68030
+                                    ) =>
+                                {
+                                    // 68020/68030 bus-cycle fault frames:
+                                    // short format $A (16 words) and long
+                                    // format $B (46 words). Real silicon
+                                    // reloads pipeline state from the frame
+                                    // and continues the instruction; this
+                                    // core stacked the rolled-back
+                                    // instruction's PC at frame-build time,
+                                    // so discarding the dump and resuming at
+                                    // the stacked PC restarts it.
+                                    //
+                                    // A handler that CLEARS the SSW DF bit
+                                    // has completed the data cycle itself:
+                                    // for a read it supplies the result in
+                                    // the data input buffer (+$2C) -- how
+                                    // mmu.library emulates lazily-zeroed
+                                    // pages -- and for a write the data is
+                                    // considered absorbed. The restart
+                                    // honours that with a one-shot
+                                    // substitution on the re-executed
+                                    // instruction's matching access.
+                                    if format == 0xB {
+                                        let sp = cpu.a(7);
+                                        let ssw = cpu.read_16(bus, sp.wrapping_add(0x0A));
+                                        let df_cleared = ssw & 0x0100 == 0;
+                                        // No stage-rerun bits (FC/FB/RC/RB)
+                                        // = this frame described a data
+                                        // fault (DF was set when pushed).
+                                        let was_data = ssw & 0xF000 == 0;
+                                        if df_cleared && was_data {
+                                            let fa = cpu.read_32(bus, sp.wrapping_add(0x10));
+                                            if ssw & 0x0040 != 0 {
+                                                // RW=1: faulted read
+                                                let dib =
+                                                    cpu.read_32(bus, sp.wrapping_add(0x2C));
+                                                cpu.mmu_read_override = Some((fa, dib));
+                                            } else {
+                                                cpu.mmu_write_suppress = Some(fa);
+                                            }
+                                        }
+                                    }
+                                    let sr = cpu.pull_16(bus);
+                                    cpu.pc = cpu.pull_32(bus);
+                                    let _ = cpu.pull_16(bus); // format word
+                                    let dump = if format == 0xA { 24 } else { 84 };
+                                    cpu.dar[15] = cpu.dar[15].wrapping_add(dump);
                                     cpu.set_sr(sr);
                                     return 20;
                                 }

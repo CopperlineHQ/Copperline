@@ -366,17 +366,25 @@ impl CpuCore {
         self.t1_flag = 0;
         self.t0_flag = 0;
 
-        // Build function code / status word
-        let fc = if was_supervisor {
-            if instruction {
-                fc::SUPERVISOR_PROGRAM
-            } else {
-                fc::SUPERVISOR_DATA
+        // Build function code / status word. A MOVES data fault carries the
+        // SFC/DFC space it faulted in, not the CPU-state code: the handler
+        // reads the fc back out of the frame's SSW to PTEST the faulted
+        // space (mmu.library does exactly this).
+        let fc = match self.mmu_fc_override {
+            Some(ofc) => ofc as u16,
+            None => {
+                if was_supervisor {
+                    if instruction {
+                        fc::SUPERVISOR_PROGRAM
+                    } else {
+                        fc::SUPERVISOR_DATA
+                    }
+                } else if instruction {
+                    fc::USER_PROGRAM
+                } else {
+                    fc::USER_DATA
+                }
             }
-        } else if instruction {
-            fc::USER_PROGRAM
-        } else {
-            fc::USER_DATA
         };
         let status_word = fc | if write { 0 } else { 0x10 } | if instruction { 0 } else { 0x08 };
 
@@ -467,12 +475,73 @@ impl CpuCore {
                 self.push_16_raw(bus, old_sr);
             }
             _ => {
-                // TODO: 68020/68030 bus-error stack frames (format A / long
-                // format B) are not yet implemented. Minimal fallback.
-                self.push_16_raw(bus, (vector::BUS_ERROR as u16) << 2);
-                self.push_32_raw(bus, self.ppc);
-                self.push_16_raw(bus, old_sr);
-                let _ = (status_word, address);
+                // 68020/68030 long bus-cycle fault frame (format $B, 46
+                // words, M68030UM 8.2). Real silicon dumps pipeline state
+                // here and RTE *continues* the faulted instruction, with the
+                // handler able to rerun or complete the data cycle through
+                // the DF bit and the data input/output buffers. This core
+                // rolls the faulting instruction back instead and stacks its
+                // PC, so RTE restarts it from scratch: the pipeline dump and
+                // writeback buffers are left zero, and a handler that
+                // clears DF to suppress the rerun is not honoured (the
+                // restart re-issues the access; harmless for memory, the
+                // documented gap for side-effecting hardware registers).
+                //
+                // The special status word at +$0A is what a page-fault
+                // handler (mmu.library, VMM, Enforcer) actually parses:
+                // DF (bit 8) marks a faulted data cycle with its address in
+                // the long at +$10, RW (bit 6) the direction, SIZ (bits 5:4,
+                // 01 byte / 10 word / 00 long) the width, and FC2:0 the
+                // address space. An instruction-fetch fault instead reports
+                // a stage-B rerun (FB|RB, bits 14/12) with the fetch address
+                // in the stage B address long at +$24, the shape real
+                // handlers use to demand-page code.
+                let data_fault = !instruction;
+                let mut ssw: u16 = fc as u16 & 0x7;
+                if data_fault {
+                    ssw |= 0x0100; // DF: rerun data cycle
+                    if !write {
+                        ssw |= 0x0040; // RW: read
+                    }
+                    ssw |= match size {
+                        1 => 0x0010, // SIZ 01: byte
+                        2 => 0x0020, // SIZ 10: word
+                        _ => 0x0000, // SIZ 00: long
+                    };
+                } else {
+                    ssw |= 0x4000 | 0x1000; // FB|RB: rerun instruction stage B
+                }
+                let fmt_vec = 0xB000 | ((vector::BUS_ERROR as u16) << 2);
+                // Pushed high address -> low: internal words +$38..$5A (18
+                // words), version word +$36, internal +$30..$34 (3 words),
+                // data input buffer +$2C, internal +$28/$2A, stage B address
+                // +$24, internal +$1C..$22 (4 words), data output buffer
+                // +$18, internal +$14/$16, data fault address +$10, stage B
+                // and C pipe words +$0E/$0C, SSW +$0A, internal +$08.
+                for _ in 0..9 {
+                    self.push_32_raw(bus, 0); // +$38..$5A
+                }
+                self.push_16_raw(bus, 0); // +$36 version/internal
+                for _ in 0..3 {
+                    self.push_16_raw(bus, 0); // +$30..$34
+                }
+                self.push_32_raw(bus, 0); // +$2C data input buffer
+                self.push_32_raw(bus, 0); // +$28/$2A internal
+                self.push_32_raw(bus, if data_fault { 0 } else { address }); // +$24 stage B address
+                self.push_32_raw(bus, 0); // +$20/$22 internal
+                self.push_32_raw(bus, 0); // +$1C/$1E internal
+                // +$18 data output buffer: the value of a faulted write, so
+                // a handler can complete the write itself (clear DF).
+                self.push_32_raw(bus, if write { self.pending_fault_wdata } else { 0 });
+                self.push_32_raw(bus, 0); // +$14/$16 internal
+                self.push_32_raw(bus, if data_fault { address } else { 0 }); // +$10 data fault address
+                self.push_16_raw(bus, 0); // +$0E pipe stage B
+                self.push_16_raw(bus, 0); // +$0C pipe stage C
+                self.push_16_raw(bus, ssw); // +$0A special status word
+                self.push_16_raw(bus, 0); // +$08 internal
+                self.push_16_raw(bus, fmt_vec); // +$06 format/vector
+                self.push_32_raw(bus, self.ppc); // +$02 restart PC
+                self.push_16_raw(bus, old_sr); // +$00 SR
             }
         }
 
