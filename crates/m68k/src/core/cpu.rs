@@ -168,6 +168,11 @@ pub struct CpuCore {
     pub is_pre_68020: bool,
     /// FPU just reset
     pub fpu_just_reset: bool,
+    /// Whether a floating-point coprocessor is attached (68020/030 with an
+    /// external 68881/68882). When false, cpID-1 F-line operations raise
+    /// Line-F. The 040/060 model FPU absence separately (EC/LC types and
+    /// PCR.DFP), so this stays true for them.
+    pub fpu_present: bool,
     /// Reset cycles counter
     pub reset_cycles: u32,
 
@@ -470,6 +475,7 @@ impl CpuCore {
             oep060: Default::default(),
             emulate_unimplemented_060: false,
             sst_m68000_compat: false,
+            fpu_present: true,
         };
         cpu.set_cpu_type(CpuType::M68000);
         cpu
@@ -1051,15 +1057,29 @@ impl CpuCore {
             0x003 => {
                 // Translation Control (68040). MOVEC must update pmmu_enabled
                 // (the 040 enable bit is TC[15], unlike the 030's TC[31]).
-                self.mmu_tc = value;
+                // The 68040 register only implements E and P: everything else
+                // reads back as zero (the 060 adds more control bits).
+                self.mmu_tc = if self.is_040() {
+                    value & 0xC000
+                } else if self.is_060() {
+                    value & 0xFFFE
+                } else {
+                    value
+                };
                 self.pmmu_enabled = self.tc_enable();
             }
-            0x004 => self.itt0 = value,    // Instruction TTR 0 (68040)
-            0x005 => self.itt1 = value,    // Instruction TTR 1 (68040)
-            0x006 => self.dtt0 = value,    // Data TTR 0 (68040)
-            0x007 => self.dtt1 = value,    // Data TTR 1 (68040)
+            // The 040/060 TTRs implement base, mask, E, S, U, CM and W;
+            // the rest reads back as zero.
+            0x004 => self.itt0 = value & 0xFFFF_E364, // Instruction TTR 0
+            0x005 => self.itt1 = value & 0xFFFF_E364, // Instruction TTR 1
+            0x006 => self.dtt0 = value & 0xFFFF_E364, // Data TTR 0
+            0x007 => self.dtt1 = value & 0xFFFF_E364, // Data TTR 1
             // 0x008 is BUSCR on the 68060 and DACR0 on the 68040.
-            0x008 if self.is_060() => self.buscr = value,
+            0x008 if self.is_060() => {
+                // BUSCR: only the two lock bits are writable; they read
+                // back in bits 31/29 (WinUAE hardware model).
+                self.buscr = (self.buscr & 0x5000_0000) | (value & 0xA000_0000);
+            }
             0x008 => self.dacr0 = value,   // Data Access Control 0 (68040)
             0x009 => self.dacr1 = value,   // Data Access Control 1 (68040)
             0x00A => self.iacr0 = value,   // Instruction Access Control 0 (68040)
@@ -1593,7 +1613,13 @@ impl CpuCore {
         if !self.has_pmmu {
             return 0;
         }
+        // The 68040 has none of these 030-form encodings: real silicon
+        // raises Line-F even in user mode (the supervisor-mode PTEST/PFLUSH
+        // pragmatism below exists only for 68040.library's setup probes).
         if !self.is_supervisor() {
+            if self.is_040() {
+                return 0;
+            }
             return self.exception_privilege(bus);
         }
 

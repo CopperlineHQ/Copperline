@@ -114,6 +114,7 @@ impl CpuCore {
         let result = value | 0x80;
         self.write_resolved_ea(bus, ea, Size::Byte, result);
 
+        self.trace_t0_68040_sync();
         4
     }
 }

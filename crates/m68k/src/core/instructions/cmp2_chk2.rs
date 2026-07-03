@@ -74,40 +74,47 @@ impl CpuCore {
             self.d(rn as usize)
         };
 
-        // Determine out-of-range.
-        let (out_of_range, below_lower) = match size {
-            Size::Byte => {
-                // Match Musashi fixture expectations: treat as unsigned byte compare.
-                let v = (raw & 0xFF) as u8;
-                let lo = (lower_u & 0xFF) as u8;
-                let hi = (upper_u & 0xFF) as u8;
-                let below = v < lo;
-                let above = v > hi;
-                (below || above, below)
-            }
-            Size::Word => {
-                let v = (raw as i16) as i32;
-                let lo = (lower_u as u16 as i16) as i32;
-                let hi = (upper_u as u16 as i16) as i32;
-                let below = v < lo;
-                let above = v > hi;
-                (below || above, below)
-            }
-            Size::Long => {
-                let v = raw as i32;
-                let lo = lower_u as i32;
-                let hi = upper_u as i32;
-                let below = v < lo;
-                let above = v > hi;
-                (below || above, below)
-            }
+        // Hardware model (WinUAE gencpu i_CHK2): everything is compared as
+        // signed 32-bit values. The bounds are sign-extended for byte/word;
+        // a data register operand is sign-extended too, but an address
+        // register operand always compares its full 32-bit value.
+        let (lower, upper, reg_val) = match size {
+            Size::Byte => (
+                lower_u as u8 as i8 as i32,
+                upper_u as u8 as i8 as i32,
+                if rn < 8 {
+                    raw as u8 as i8 as i32
+                } else {
+                    raw as i32
+                },
+            ),
+            Size::Word => (
+                lower_u as u16 as i16 as i32,
+                upper_u as u16 as i16 as i32,
+                if rn < 8 {
+                    raw as u16 as i16 as i32
+                } else {
+                    raw as i32
+                },
+            ),
+            Size::Long => (lower_u as i32, upper_u as i32, raw as i32),
         };
 
-        // Flags: C=1 when out-of-range, else C=0. Z=1 when in-range.
+        // Z is set when the operand equals either bound. C is set when the
+        // operand is outside the bounds; reversed bounds (lower > upper)
+        // select the wrapped range.
+        let on_bound = reg_val == lower || reg_val == upper;
+        let out_of_range = !on_bound
+            && if lower <= upper {
+                reg_val < lower || reg_val > upper
+            } else {
+                reg_val > upper && reg_val < lower
+            };
+
         self.c_flag = if out_of_range { CFLAG_SET } else { 0 };
         self.v_flag = 0;
-        self.not_z_flag = if out_of_range { 1 } else { 0 };
-        self.n_flag = if below_lower { 0x80 } else { 0 };
+        self.not_z_flag = if on_bound { 0 } else { 1 };
+        self.n_flag = 0;
         // X unaffected
 
         if is_chk2 && out_of_range {
