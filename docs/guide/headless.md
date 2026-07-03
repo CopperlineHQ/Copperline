@@ -194,3 +194,27 @@ Optional variables: `COPPERLINE_VAMIGATS_LIMIT=N` (cap test count),
 `COPPERLINE_VAMIGATS_VAMIGA=/path/to/vAmiga` plus
 `COPPERLINE_VAMIGATS_VAMIGA_SETUP=NAME` (render vAmiga references via its
 RetroShell regression path).
+
+The reference renderer is vAmiga's headless build (tested against v4.4):
+
+```sh
+git clone https://github.com/dirkwhoffmann/vAmiga
+cmake -S vAmiga/Core -B vAmiga/Core/build -DCMAKE_BUILD_TYPE=Release
+cmake --build vAmiga/Core/build -j8   # produces VAHeadless
+```
+
+For pixel comparison run Copperline with `COPPERLINE_SHOT_RAW=1` so the
+screenshot is the native 716-wide framebuffer (the same cutout vAmiga's
+regression dump uses), then rank the divergences with the offline
+comparator, which normalises the two emulators' palette expansions and
+capture offsets:
+
+```sh
+COPPERLINE_SHOT_RAW=1 COPPERLINE_VAMIGATS_DIR=/path/to/vAmigaTS COPPERLINE_VAMIGATS_OUT=/path/to/out COPPERLINE_VAMIGATS_VAMIGA=/path/to/VAHeadless cargo test --release --test vamiga_ts -- --ignored --nocapture
+
+tools/vamigats-compare.py /path/to/out | less   # worst cases first
+```
+
+A full 1929-case sweep with references takes about an hour; screenshot
+timing is frame-aligned in neither emulator, so tests with animating
+output show phase noise - rank first, then eyeball pairs.
