@@ -189,7 +189,12 @@ impl Bus {
             self.check_ui_beam_traps((old_vpos, old_hpos), old_frame_lines, tick.new_frames);
         }
         if tick.new_frames == 0 && tick.new_lines == 0 {
-            self.capture_sprite_dma_words_if_due(old_vpos, old_hpos, self.agnus.hpos);
+            self.capture_sprite_dma_words_if_due(
+                old_vpos,
+                old_hpos,
+                self.agnus.hpos,
+                old_emulated_cck,
+            );
             self.capture_bitplane_dma_words_if_due(
                 old_vpos,
                 old_hpos,
@@ -572,36 +577,26 @@ impl Bus {
 
     pub(super) fn sprite_slot_active_at(&self, hpos: u32) -> bool {
         // Real OCS sprite DMA fetches only on lines where a sprite is actually
-        // active (within its vstart..vstop), not on every line. The reserved
-        // slots map to sprite pairs by `SPRITE_DMA_PAIR_CAPTURE_HPOS`
-        // (0x18->sprites 0/1, 0x20->2/3, 0x28->4/5, 0x30->6/7), so reserve a
-        // pair's slot only when one of its sprites is fetching data this line --
-        // gating on the same `data_dma_active` the renderer uses, so the bus
-        // model and the captured image agree. Parked/off-screen sprites free
-        // their slot for the CPU/blitter; previously they were reserved
-        // unconditionally whenever SPREN was on (~2504 cck/frame of phantom DMA
-        // stolen from the blitter).
+        // active (within its vstart..vstop), not on every line. Sprite N owns
+        // the two odd slots $15+4N and $17+4N (the hardware slot chart /
+        // vAmiga's DAS table), so reserve them only when that sprite is
+        // fetching data this line -- gating on the same `data_dma_active` the
+        // renderer uses, so the bus model and the captured image agree.
+        // Parked/off-screen sprites free their slots for the CPU/blitter.
         if self.agnus.dmacon & DMACON_SPREN == 0 {
             return false;
         }
         // Sprite DMA slots sit on ODD color clocks (same parity as refresh/
         // disk/audio -- the HRM chart's fixed-DMA band), so they never block
-        // the Copper's even-clock fetches. Each active sprite pair reserves
-        // the two odd slots of its 8-cck band (0x19/0x1B, 0x21/0x23, ...).
-        if !(0x019..=0x037).contains(&hpos) || hpos & 1 == 0 {
+        // the Copper's even-clock fetches.
+        if !(0x015..=0x033).contains(&hpos) || hpos & 1 == 0 {
             return false;
         }
-        let rel = hpos - 0x019;
-        if rel % 8 >= 4 {
+        let sprite = ((hpos - 0x015) / 4) as usize;
+        if sprite >= 8 {
             return false;
         }
-        let pair = (rel / 8) as usize;
-        if pair >= 4 {
-            return false;
-        }
-        let first = pair * 2;
-        self.display_dma_sprite_state[first].data_dma_active
-            || self.display_dma_sprite_state[first + 1].data_dma_active
+        self.display_dma_sprite_state[sprite].data_dma_active
     }
 
     pub(super) fn record_bitplane_dmacon_write(&mut self, previous: u16) {

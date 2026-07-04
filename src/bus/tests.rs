@@ -18,7 +18,7 @@ use super::{
     DENISE_HPOS_LAG_CCK, DMACON_AUD_MASK, DMACON_BLTEN, DMACON_BLTPRI, DMACON_BPLEN, DMACON_SPREN,
     PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS, RENDER_COPPER_WAIT_HPOS_FB0, RENDER_DIW_HSTART_FB0,
     RENDER_MIN_OVERSCAN_START_VPOS, RENDER_VISIBLE_LINES, RENDER_VISIBLE_START_VPOS,
-    SPRITE_DMA_PAIR_CAPTURE_HPOS,
+    SPRITE_DMA_SLOT1_HPOS,
 };
 use crate::audio::AudioSink;
 use crate::chipset::agnus::{
@@ -4716,7 +4716,7 @@ fn sprite_dma_capture_samples_line_words_at_beam_time() {
 
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN;
     bus.agnus.vpos = 0x2C;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.denise.sprpt[0] = sprite_ptr as u32;
     bus.display_dma_sprpt[0] = sprite_ptr as u32;
 
@@ -4767,7 +4767,7 @@ fn inactive_sprite_pointer_write_before_pair_slot_seeds_next_descriptor_fetch() 
     bus.agnus.vpos = 0x2C;
     bus.agnus.hpos = 0;
     bus.capture_current_frame_display_start();
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(2);
 
     let lines = bus.frame_captured_sprite_lines();
@@ -4816,7 +4816,7 @@ fn vertical_blank_sprite_pointer_write_reloads_descriptor_in_offscreen_replay() 
 
     bus.agnus.vpos = RENDER_VISIBLE_START_VPOS;
     bus.capture_current_frame_display_start();
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(2);
 
     let lines = bus.frame_captured_sprite_lines();
@@ -4844,14 +4844,14 @@ fn post_vertical_blank_sprite_pointer_write_retargets_pending_descriptor() {
     bus.sprite_dma_frame_start_ptr[0] = descriptor_ptr as u32;
     bus.current_frame_render_events.push(BeamRegisterWrite {
         vpos: PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS + 11,
-        hpos: SPRITE_DMA_PAIR_CAPTURE_HPOS[0],
+        hpos: SPRITE_DMA_SLOT1_HPOS[0],
         offset: 0x120,
         value: (data_ptr >> 16) as u16,
         source: BeamWriteSource::Copper,
     });
     bus.current_frame_render_events.push(BeamRegisterWrite {
         vpos: PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS + 11,
-        hpos: SPRITE_DMA_PAIR_CAPTURE_HPOS[0] + 2,
+        hpos: SPRITE_DMA_SLOT1_HPOS[0] + 2,
         offset: 0x122,
         value: data_ptr as u16,
         source: BeamWriteSource::Copper,
@@ -4859,7 +4859,7 @@ fn post_vertical_blank_sprite_pointer_write_retargets_pending_descriptor() {
 
     bus.agnus.vpos = RENDER_VISIBLE_START_VPOS;
     bus.capture_current_frame_display_start();
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(2);
 
     let lines = bus.frame_captured_sprite_lines();
@@ -4889,10 +4889,10 @@ fn manual_sprite_control_write_fetches_data_from_sprpt() {
     assert!(!bus.write_custom_word_from(0x142, ctl, BeamWriteSource::Copper));
 
     bus.agnus.vpos = 0x2C;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(2);
     bus.agnus.vpos = 0x2D;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(2);
 
     let lines = bus.frame_captured_sprite_lines();
@@ -4931,15 +4931,15 @@ fn pending_register_control_sprite_pointer_write_retargets_data_stream() {
     assert!(!bus.write_custom_word_from(0x142, ctl, BeamWriteSource::Copper));
 
     bus.agnus.vpos = 0x24;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0];
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0];
     let _ = bus.write_custom_word_from(0x120, (new_data_ptr >> 16) as u16, BeamWriteSource::Copper);
     let _ = bus.write_custom_word_from(0x122, new_data_ptr as u16, BeamWriteSource::Copper);
 
     bus.agnus.vpos = 0x40;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(2);
     bus.agnus.vpos = 0x41;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(2);
 
     let lines = bus.frame_captured_sprite_lines();
@@ -4972,22 +4972,22 @@ fn pending_descriptor_sprite_pointer_write_retargets_data_stream() {
     bus.display_dma_sprpt[0] = old_ptr as u32;
 
     bus.agnus.vpos = 0x2C;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(2);
     let pending = bus.display_dma_sprite_state[0];
     assert_eq!(pending.control.map(|control| control.vstart), Some(0x60));
     assert!(!pending.data_dma_active);
 
     bus.agnus.vpos = 0x30;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0];
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0];
     let _ = bus.write_custom_word_from(0x120, (new_data_ptr >> 16) as u16, BeamWriteSource::Copper);
     let _ = bus.write_custom_word_from(0x122, new_data_ptr as u16, BeamWriteSource::Copper);
 
     bus.agnus.vpos = 0x60;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(2);
     bus.agnus.vpos = 0x61;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(2);
 
     let lines = bus.frame_captured_sprite_lines();
@@ -5031,12 +5031,12 @@ fn armed_pointer_reload_before_vstart_fetches_descriptor_words() {
     };
 
     bus.agnus.vpos = 0x24;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0];
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0];
     let _ = bus.write_custom_word_from(0x120, (sprite_ptr >> 16) as u16, BeamWriteSource::Copper);
     let _ = bus.write_custom_word_from(0x122, sprite_ptr as u16, BeamWriteSource::Copper);
 
     bus.agnus.vpos = 0x40;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(2);
 
     let lines = bus.frame_captured_sprite_lines();
@@ -5056,7 +5056,7 @@ fn after_slot_armed_sprite_pointer_write_seeds_dma_data_stream() {
 
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN;
     bus.agnus.vpos = 0x40;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0];
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0];
     bus.denise.sprpos[0] = pos;
     bus.denise.sprctl[0] = ctl;
     bus.denise.spr_armed[0] = true;
@@ -5064,7 +5064,7 @@ fn after_slot_armed_sprite_pointer_write_seeds_dma_data_stream() {
     let _ = bus.write_custom_word_from(0x120, (data_ptr >> 16) as u16, BeamWriteSource::Copper);
     let _ = bus.write_custom_word_from(0x122, data_ptr as u16, BeamWriteSource::Copper);
     bus.agnus.vpos = 0x41;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(2);
 
     let lines = bus.frame_captured_sprite_lines();
@@ -5093,15 +5093,15 @@ fn active_sprite_control_rewrite_preserves_descriptor_data_origin() {
     bus.display_dma_sprpt[0] = sprite_ptr as u32;
 
     bus.agnus.vpos = 0x2C;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(2);
 
     bus.agnus.vpos = 0x2D;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 8;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 8;
     assert!(!bus.write_custom_word_from(0x140, moved_pos, BeamWriteSource::Copper));
     assert!(!bus.write_custom_word_from(0x142, moved_ctl, BeamWriteSource::Copper));
 
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(2);
 
     let lines = bus.frame_captured_sprite_lines();
@@ -5140,7 +5140,7 @@ fn sprite_pointer_write_after_pair_slot_seeds_next_descriptor_fetch() {
     bus.denise.sprpt[2] = old_ptr as u32;
     bus.display_dma_sprpt[2] = old_ptr as u32;
 
-    let slot = SPRITE_DMA_PAIR_CAPTURE_HPOS[1];
+    let slot = SPRITE_DMA_SLOT1_HPOS[2];
     bus.agnus.vpos = 0;
     bus.agnus.hpos = slot - 1;
     bus.advance_chipset(2);
@@ -5180,7 +5180,7 @@ fn sprite_dma_inverted_vstop_runs_to_frame_bottom() {
 
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN;
     bus.agnus.vpos = 0x2C;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.denise.sprpt[0] = sprite_ptr as u32;
     bus.display_dma_sprpt[0] = sprite_ptr as u32;
 
@@ -5217,7 +5217,7 @@ fn fmode_wide_sprite_dma_captures_extension_words() {
 
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN;
     bus.agnus.vpos = 0x2C;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.denise.sprpt[0] = sprite_ptr as u32;
     bus.display_dma_sprpt[0] = sprite_ptr as u32;
 
@@ -5264,7 +5264,7 @@ fn fmode_sscan2_sprite_dma_doubles_each_data_line() {
 
     for vpos in 0x2C..=0x32u32 {
         bus.agnus.vpos = vpos;
-        bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+        bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
         bus.advance_chipset(2);
     }
 
@@ -5442,7 +5442,7 @@ fn sprite_dma_capture_preserves_sprite_started_before_visible_area() {
     bus.sprite_dma_frame_start_ptr[0] = sprite_ptr as u32;
 
     bus.capture_current_frame_display_start();
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(2);
 
     let lines = bus.frame_captured_sprite_lines();
@@ -5486,7 +5486,7 @@ fn pending_sprite_control_rewrite_preserves_descriptor_data_origin() {
     assert!(!bus.write_custom_word_from(0x142, moved_ctl, BeamWriteSource::Copper));
 
     bus.agnus.vpos = vstart as u32;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(2);
 
     let lines = bus.frame_captured_sprite_lines();
@@ -5518,7 +5518,7 @@ fn active_sprite_pos_write_retimes_hstart_without_clearing_dma_stream() {
     bus.denise.sprpt[0] = sprite_ptr as u32;
     bus.display_dma_sprpt[0] = sprite_ptr as u32;
     bus.agnus.vpos = 0x2C;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(2);
 
     // Rewriting SPRxPOS while DMA is already enabled changes the horizontal
@@ -5528,11 +5528,11 @@ fn active_sprite_pos_write_retimes_hstart_without_clearing_dma_stream() {
     bus.agnus.vpos = 0x2D;
     bus.agnus.hpos = 0;
     assert!(!bus.write_custom_word_from(0x140, moved_pos, BeamWriteSource::Copper));
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(2);
 
     bus.agnus.vpos = 0x2E;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(2);
 
     let words: Vec<(i32, i32, u16, u16)> = bus
@@ -5630,7 +5630,7 @@ fn sprite_dma_capture_treats_zero_pointer_as_chip_address() {
 
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN;
     bus.agnus.vpos = 0x2C;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.denise.sprpt[0] = 0;
     bus.denise.sprpt[1] = 0x20;
     bus.display_dma_sprpt[0] = 0;
@@ -5821,7 +5821,7 @@ fn sprite_dma_zero_height_descriptor_terminates_stream() {
 
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN;
     bus.agnus.vpos = 0x2C;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.denise.sprpt[0] = sprite_ptr as u32;
     bus.display_dma_sprpt[0] = sprite_ptr as u32;
 
@@ -5845,7 +5845,7 @@ fn sprite_dma_capture_wraps_control_words_at_chip_ram_end() {
 
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN;
     bus.agnus.vpos = 0x2C;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.denise.sprpt[0] = sprite_ptr as u32;
     bus.display_dma_sprpt[0] = sprite_ptr as u32;
 
@@ -5876,7 +5876,7 @@ fn sprite_dma_zero_height_descriptor_terminates_after_chip_address_wrap() {
 
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN;
     bus.agnus.vpos = 0x2C;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.denise.sprpt[0] = sprite_ptr as u32;
     bus.display_dma_sprpt[0] = sprite_ptr as u32;
     bus.denise.sprpt[1] = 0x0200;
@@ -5904,7 +5904,7 @@ fn sprite_dma_capture_latches_control_words_until_stop() {
 
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN;
     bus.agnus.vpos = 0x2C;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.denise.sprpt[0] = sprite_ptr as u32;
     bus.display_dma_sprpt[0] = sprite_ptr as u32;
 
@@ -5914,7 +5914,7 @@ fn sprite_dma_capture_latches_control_words_until_stop() {
     write_chip_word(&mut bus, sprite_ptr, rewritten_pos);
     write_chip_word(&mut bus, sprite_ptr + 2, rewritten_ctl);
     bus.agnus.vpos = 0x2D;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(2);
 
     let lines = bus.frame_captured_sprite_lines();
@@ -5946,7 +5946,7 @@ fn sprite_dma_capture_samples_later_pairs_at_their_fetch_slot() {
 
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN;
     bus.agnus.vpos = 0x2C;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.denise.sprpt[0] = sprite0_ptr as u32;
     bus.denise.sprpt[6] = sprite6_ptr as u32;
     bus.display_dma_sprpt[0] = sprite0_ptr as u32;
@@ -5955,7 +5955,7 @@ fn sprite_dma_capture_samples_later_pairs_at_their_fetch_slot() {
     bus.advance_chipset(2);
     write_chip_word(&mut bus, sprite0_ptr + 4, 0xAAAA);
     write_chip_word(&mut bus, sprite6_ptr + 4, 0xBBBB);
-    let remaining = SPRITE_DMA_PAIR_CAPTURE_HPOS[3] + 1 - bus.agnus.hpos;
+    let remaining = SPRITE_DMA_SLOT1_HPOS[6] + 1 - bus.agnus.hpos;
     bus.advance_chipset(remaining);
 
     let lines = bus.frame_captured_sprite_lines();
@@ -5987,7 +5987,7 @@ fn sprite_pointer_write_at_pair_slot_seeds_next_line_descriptor_fetch() {
     bus.display_dma_sprpt[0] = old_ptr as u32;
 
     bus.agnus.vpos = 0x24;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(1);
     let _ = bus.write_custom_word_from(0x120, (new_ptr >> 16) as u16, BeamWriteSource::Copper);
     let _ = bus.write_custom_word_from(0x122, new_ptr as u16, BeamWriteSource::Copper);
@@ -5999,7 +5999,7 @@ fn sprite_pointer_write_at_pair_slot_seeds_next_line_descriptor_fetch() {
     );
 
     bus.agnus.vpos = 0x40;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(2);
 
     let lines = bus.frame_captured_sprite_lines();
@@ -6014,7 +6014,7 @@ fn empty_sprite_dma_slot_does_not_mark_frame_dma_observed() {
     let mut bus = empty_bus();
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN;
     bus.agnus.vpos = RENDER_VISIBLE_START_VPOS;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
 
     bus.advance_chipset(2);
 
@@ -6044,7 +6044,7 @@ fn sprite_dma_capture_blocks_sprite_seven_when_ddfstrt_uses_early_fetch_slot() {
 
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN | DMACON_SPREN;
     bus.agnus.vpos = 0x2C;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[3] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[6] - 1;
     bus.denise.bplcon0 = 0x1000;
     bus.denise.ddfstrt = 0x0028;
     bus.denise.ddfstop = 0x0038;
@@ -6053,7 +6053,7 @@ fn sprite_dma_capture_blocks_sprite_seven_when_ddfstrt_uses_early_fetch_slot() {
     bus.display_dma_sprpt[6] = sprite6_ptr as u32;
     bus.display_dma_sprpt[7] = sprite7_ptr as u32;
 
-    bus.advance_chipset(2);
+    bus.advance_chipset(SPRITE_DMA_SLOT1_HPOS[7] + 1 - bus.agnus.hpos);
 
     let lines = bus.frame_captured_sprite_lines();
     assert!(lines.iter().any(|line| line.sprite == 6));
@@ -6079,7 +6079,7 @@ fn sprite_dma_capture_keeps_sprite_seven_when_ddfstrt_matches_sprite_slot() {
 
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN | DMACON_SPREN;
     bus.agnus.vpos = 0x2C;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[3] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[6] - 1;
     bus.denise.bplcon0 = 0x3000;
     bus.denise.ddfstrt = 0x0030;
     bus.denise.ddfstop = 0x0038;
@@ -6088,7 +6088,7 @@ fn sprite_dma_capture_keeps_sprite_seven_when_ddfstrt_matches_sprite_slot() {
     bus.display_dma_sprpt[6] = sprite6_ptr as u32;
     bus.display_dma_sprpt[7] = sprite7_ptr as u32;
 
-    bus.advance_chipset(2);
+    bus.advance_chipset(SPRITE_DMA_SLOT1_HPOS[7] + 1 - bus.agnus.hpos);
 
     let lines = bus.frame_captured_sprite_lines();
     assert!(lines.iter().any(|line| line.sprite == 6));
@@ -6111,17 +6111,17 @@ fn sprite_dma_capture_repeats_last_fetched_line_after_dma_disable_until_vstop() 
 
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN;
     bus.agnus.vpos = 0x2C;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.denise.sprpt[0] = sprite_ptr as u32;
     bus.display_dma_sprpt[0] = sprite_ptr as u32;
 
     bus.advance_chipset(2);
     bus.agnus.dmacon = DMACON_DMAEN;
     bus.agnus.vpos = 0x2D;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(2);
     bus.agnus.vpos = 0x2E;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(2);
 
     let lines = bus.frame_captured_sprite_lines();
@@ -6156,13 +6156,13 @@ fn sprite_dma_capture_does_not_start_descriptor_at_or_before_current_vpos() {
 
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN;
     bus.agnus.vpos = 0x2C;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.denise.sprpt[0] = sprite_ptr as u32;
     bus.display_dma_sprite_state[0].next_ptr = Some(sprite_ptr as u32);
 
     bus.advance_chipset(2);
     bus.agnus.vpos = 0x2D;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(2);
 
     assert!(bus
@@ -6188,16 +6188,16 @@ fn sprite_dma_reuse_skips_descriptor_with_vstart_before_current_vpos() {
 
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN;
     bus.agnus.vpos = 0x2B;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.denise.sprpt[0] = sprite_ptr as u32;
     bus.display_dma_sprpt[0] = sprite_ptr as u32;
 
     bus.advance_chipset(2);
     bus.agnus.vpos = 0x2C;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(2);
     bus.agnus.vpos = 0x2D;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(2);
 
     let lines = bus.frame_captured_sprite_lines();
@@ -6237,7 +6237,7 @@ fn sprite_dma_chained_descriptor_with_same_vstart_arms_after_control_fetch_line(
 
     for vpos in 0x2C..=0x31u32 {
         bus.agnus.vpos = vpos;
-        bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+        bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
         bus.advance_chipset(2);
     }
 
@@ -6275,7 +6275,7 @@ fn visible_sprite_pixels_accumulate_live_sprite_sprite_clxdat() {
 
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN;
     bus.agnus.vpos = 0x2C;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.denise.sprpt[0] = sprite0_ptr as u32;
     bus.denise.sprpt[2] = sprite2_ptr as u32;
     bus.display_dma_sprpt[0] = sprite0_ptr as u32;
@@ -6285,7 +6285,7 @@ fn visible_sprite_pixels_accumulate_live_sprite_sprite_clxdat() {
     bus.advance_chipset(1);
     assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
 
-    let remaining = SPRITE_DMA_PAIR_CAPTURE_HPOS[1] + 1 - bus.agnus.hpos;
+    let remaining = SPRITE_DMA_SLOT1_HPOS[1] + 1 - bus.agnus.hpos;
     bus.advance_chipset(remaining);
     assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
 
@@ -6658,7 +6658,7 @@ fn bplcon3_spres_hires_narrows_live_sprite_sprite_clxdat() {
 
         bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN;
         bus.agnus.vpos = 0x2C;
-        bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+        bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
         bus.denise.bplcon0 = 0x8000;
         bus.denise.bplcon3 = bplcon3;
         bus.denise.sprpt[0] = sprite0_ptr as u32;
@@ -6698,7 +6698,7 @@ fn same_line_clxcon_odd_sprite_enable_does_not_retime_earlier_live_sprite_sprite
 
         bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN;
         bus.agnus.vpos = 0x2C;
-        bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+        bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
         bus.denise.clxcon = initial_clxcon;
         bus.denise.sprpt[1] = sprite1_ptr as u32;
         bus.denise.sprpt[2] = sprite2_ptr as u32;
@@ -6707,7 +6707,7 @@ fn same_line_clxcon_odd_sprite_enable_does_not_retime_earlier_live_sprite_sprite
         bus.current_frame_sprite_display_enable_x_by_y[0] = Some(0);
         bus.current_frame_render_base = bus.capture_render_snapshot();
 
-        let after_pair_capture = SPRITE_DMA_PAIR_CAPTURE_HPOS[1] + 1 - bus.agnus.hpos;
+        let after_pair_capture = SPRITE_DMA_SLOT1_HPOS[1] + 1 - bus.agnus.hpos;
         bus.advance_chipset(after_pair_capture);
 
         if let Some(enable_hpos) = enable_hpos {
@@ -7389,7 +7389,7 @@ fn captured_sprite_and_bitplane_rows_accumulate_live_sprite_playfield_clxdat() {
 
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN | DMACON_BPLEN;
     bus.agnus.vpos = 0x2C;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.denise.diwstrt = 0x2C81;
     bus.denise.diwstop = 0x2DC1;
     bus.denise.ddfstrt = 0x0038;
@@ -7425,7 +7425,7 @@ fn explicit_bpl1dat_output_accumulates_live_sprite_playfield_clxdat() {
 
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN;
     bus.agnus.vpos = 0x2C;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.denise.diwstrt = 0x2C83;
     bus.denise.diwstop = 0x2DC1;
     bus.denise.bplcon0 = 0x1000;
@@ -7483,7 +7483,7 @@ fn same_line_bplcon1_scroll_increase_latches_later_live_sprite_playfield_clxdat(
 
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN | DMACON_BPLEN;
     bus.agnus.vpos = 0x2C;
-    bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.denise.diwstrt = 0x2C83;
     bus.denise.diwstop = 0x2DC1;
     bus.denise.ddfstrt = 0x0038;
@@ -7524,7 +7524,7 @@ fn same_line_clxcon_odd_sprite_enable_does_not_retime_earlier_live_sprite_playfi
 
         bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN | DMACON_BPLEN;
         bus.agnus.vpos = 0x2C;
-        bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+        bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
         bus.denise.diwstrt = 0x2C83;
         bus.denise.diwstop = 0x2DC1;
         bus.denise.ddfstrt = 0x0038;
@@ -7575,7 +7575,7 @@ fn bplcon3_spres_hires_narrows_live_sprite_playfield_clxdat() {
         bus.set_agnus_revision(AgnusRevision::Ecs8372Rev4);
         bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN | DMACON_BPLEN;
         bus.agnus.vpos = 0x2C;
-        bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+        bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
         bus.denise.diwstrt = 0x2C81;
         bus.denise.diwstop = 0x2DC1;
         bus.denise.ddfstrt = 0x0038;
@@ -7621,7 +7621,7 @@ fn same_line_bplcon3_spres_write_does_not_retime_earlier_live_sprite_playfield_c
         bus.set_agnus_revision(AgnusRevision::Ecs8372Rev4);
         bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN | DMACON_BPLEN;
         bus.agnus.vpos = 0x2C;
-        bus.agnus.hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[0] - 1;
+        bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
         bus.denise.diwstrt = 0x2C81;
         bus.denise.diwstop = 0x2DC1;
         bus.denise.ddfstrt = 0x0038;
@@ -8261,16 +8261,21 @@ fn fixed_agnus_dma_slot_bands_drive_owner_selection() {
 
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN;
     // A sprite's slot is reserved only while that sprite is actually
-    // fetching (data_dma_active); a parked sprite frees it. Sprite slots
-    // sit on odd color clocks (0x019/0x01B for pair 0).
-    bus.agnus.hpos = 0x019;
+    // fetching (data_dma_active); a parked sprite frees it. Sprite N owns
+    // the odd color clocks $15+4N and $17+4N (hardware slot chart).
+    bus.agnus.hpos = 0x015;
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Idle);
     bus.display_dma_sprite_state[0].data_dma_active = true;
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Sprite);
-    // The even color clock inside the band stays free for the Copper/CPU.
-    bus.agnus.hpos = 0x018;
+    bus.agnus.hpos = 0x017;
+    assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Sprite);
+    // The even color clock inside the band stays free for the Copper/CPU,
+    // and another sprite's slot stays free while that sprite is parked.
+    bus.agnus.hpos = 0x016;
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Idle);
-    bus.agnus.hpos = 0x037;
+    bus.agnus.hpos = 0x019;
+    assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Idle);
+    bus.agnus.hpos = 0x035;
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Idle);
     bus.display_dma_sprite_state[0].data_dma_active = false;
 
