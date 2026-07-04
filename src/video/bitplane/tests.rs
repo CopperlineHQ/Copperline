@@ -7,6 +7,50 @@
 use super::*;
 use crate::bus::{BeamRegisterWrite, BeamWriteSource};
 
+/// Single-span window row matching the control's display_window_x, for
+/// direct render_planned_playfield_line tests.
+fn h_row_for(control: ControlState) -> HWindowRow {
+    HWindowRow {
+        open_runs: vec![control.display_window_x()],
+        comparator_anchor: Some(control.display_window_x().0),
+    }
+}
+
+#[test]
+fn h_window_flop_carries_open_past_line_with_unreachable_hstart() {
+    // Standard window rows, then a late-line DIWSTOP rewrite to $2C00
+    // before the standard stop matched: the flip-flop stays open across
+    // the line boundary. The following row (hstart $00 unreachable,
+    // hstop $100) is open from the left framebuffer edge until $100.
+    let standard = ControlState {
+        diwstrt: 0x2C81,
+        diwstop: 0x2CC1,
+        agnus_revision: AgnusRevision::Ocs,
+        ..ControlState::default()
+    };
+    let degenerate = ControlState {
+        diwstrt: 0x2C00,
+        diwstop: 0x2C00,
+        ..standard
+    };
+    let base_controls = [standard, standard, degenerate];
+    let mut control_segments = vec![Vec::new(); 3];
+    // Late write on row 1 (copper-x 644 = cck $C9), before the standard
+    // stop's comparator position.
+    control_segments[1].push(ControlSegment {
+        x: 644,
+        control: degenerate,
+    });
+    let rows = compute_h_window_rows(&base_controls, &control_segments, PAL_VISIBLE_LINE0);
+    // Row 0: standard window.
+    assert_eq!(rows[0].open_runs(), &[(64, 704)]);
+    // Row 1: opens at the standard hstart; the rewritten stop never
+    // matches before the line ends, so the run reaches the edge.
+    assert_eq!(rows[1].open_runs(), &[(64, FB_WIDTH)]);
+    // Row 2: carried open, closes at hstop $100.
+    assert_eq!(rows[2].open_runs(), &[(0, 318)]);
+}
+
 #[test]
 fn programmable_blanking_blanks_vbstrt_vbstop_rows_under_varvben() {
     use crate::chipset::agnus::{
@@ -723,8 +767,13 @@ fn line_start_diw_write_replaces_previous_horizontal_display_bounds() {
         control: narrowed,
     }];
 
+    let h_rows = compute_h_window_rows(
+        &[base],
+        std::slice::from_ref(&segments.to_vec()),
+        PAL_VISIBLE_LINE0,
+    );
     assert_eq!(
-        line_display_window_bounds(base, &segments, 0, PAL_VISIBLE_LINE0),
+        line_display_window_bounds(base, &segments, 0, PAL_VISIBLE_LINE0, &h_rows[0]),
         Some(narrowed.display_window_x())
     );
 }
@@ -909,7 +958,11 @@ fn beam_timed_bplcon3_brdrblnk_latches_until_ecsena_enables_effect() {
         bplcon0: 0,
         bplcon3: 0,
         diwstrt: ((PAL_VISIBLE_LINE0 as u16) << 8) | (DIW_HSTART_FB0 as u16 + 80),
-        diwstop: (((PAL_VISIBLE_LINE0 + 1) as u16) << 8) | (DIW_HSTART_FB0 as u16 + 120),
+        // OCS DIWSTOP carries an implied H8, so the stop byte must map
+        // inside the comparator's reach (H <= 0x1C7) for the window to
+        // close; 0x99 -> 0x199 closes mid-line, leaving a left border for
+        // the BRDRBLNK assertions below.
+        diwstop: (((PAL_VISIBLE_LINE0 + 1) as u16) << 8) | 0x0099,
         ..blank_state()
     };
     state.palette.write_ocs(0, 0x0F00);
@@ -1220,6 +1273,7 @@ fn late_lowres_ddf_stop_hold_keeps_left_origin_unadvanced() {
         control.bplcon1,
         false,
         0,
+        &h_row_for(control),
         PAL_VISIBLE_LINE0,
         0.0,
         0,
@@ -4926,6 +4980,7 @@ fn planned_ham_dma_uses_current_bitplane_sample_at_fetch_edge() {
         control.bplcon1,
         false,
         0,
+        &h_row_for(control),
         PAL_VISIBLE_LINE0,
         0.0,
         0,
@@ -4970,6 +5025,7 @@ fn planned_ham_dma_advances_hold_through_edge_fetch_phase() {
         control.bplcon1,
         false,
         0,
+        &h_row_for(control),
         PAL_VISIBLE_LINE0,
         0.0,
         0,
@@ -5015,6 +5071,7 @@ fn planned_ham_dma_ignores_extra_early_ddf_history_before_diw() {
         control.bplcon1,
         false,
         0,
+        &h_row_for(control),
         PAL_VISIBLE_LINE0,
         0.0,
         0,
@@ -5063,6 +5120,7 @@ fn bplcon1_write_at_diw_right_edge_does_not_retap_current_ham_line() {
         control.bplcon1,
         false,
         0,
+        &h_row_for(control),
         PAL_VISIBLE_LINE0,
         0.0,
         0,
@@ -5101,6 +5159,7 @@ fn bplcon2_color_key_uses_color_register_transparency_bit() {
         control.bplcon1,
         false,
         0,
+        &h_row_for(control),
         PAL_VISIBLE_LINE0,
         0.0,
         0,
@@ -5139,6 +5198,7 @@ fn bplcon2_bitplane_key_uses_selected_bitplane_sample() {
         control.bplcon1,
         false,
         0,
+        &h_row_for(control),
         PAL_VISIBLE_LINE0,
         0.0,
         0,
@@ -5177,6 +5237,7 @@ fn bplcon3_zdclken_disables_internal_genlock_keys() {
         control.bplcon1,
         false,
         0,
+        &h_row_for(control),
         PAL_VISIBLE_LINE0,
         0.0,
         0,
@@ -5211,6 +5272,7 @@ fn planned_playfield_line_feeds_clxdat_from_rendered_dual_playfield_sample() {
         control.bplcon1,
         false,
         0,
+        &h_row_for(control),
         PAL_VISIBLE_LINE0,
         0.0,
         0,
