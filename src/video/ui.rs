@@ -108,13 +108,13 @@ pub fn menu_items(midi_active: bool) -> Vec<MenuItem> {
         MenuItem::Console,
         MenuItem::Calibration,
         MenuItem::JoystickInput,
-        MenuItem::PixelAspect,
     ]);
     #[cfg(feature = "midi")]
     if midi_active {
         items.push(MenuItem::MidiInput);
         items.push(MenuItem::MidiOutput);
     }
+    items.push(MenuItem::PixelAspect);
     items.extend([
         MenuItem::Warp,
         MenuItem::WarpLimit,
