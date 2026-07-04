@@ -3274,7 +3274,7 @@ impl App {
             let mut panel = ui::DebuggerPanel::new();
             // Start the memory view at the current program counter's
             // neighbourhood; it is usually what you came to look at.
-            panel.mem_addr = self.emu.machine.pc() & 0x00FF_FFF0;
+            panel.mem_addr = self.emu.machine.pc() & self.emu.machine.ui_addr_mask() & !0xF;
             self.debugger_panel = Some(panel);
             self.emu.machine.ui_set_pc_history_enabled(true);
             // Arm reverse debugging so the < Step / < Run controls work. A
@@ -4527,7 +4527,7 @@ impl App {
                 self.reported_double_fault = true;
                 let message = format!(
                     "CPU halted: double fault at pc ${:06X} (bus/address error during exception)",
-                    self.emu.machine.pc() & 0x00FF_FFFF
+                    self.emu.machine.pc() & self.emu.machine.ui_addr_mask()
                 );
                 warn!("{message}");
                 self.last_debug_stop = Some(message.clone());
@@ -4572,7 +4572,7 @@ impl App {
         let set = self.emu.machine.ui_set_breakpoint(addr, cond, ignore);
         let mut msg = format!(
             "Breakpoint ${:06X} {}",
-            addr & 0x00FF_FFFF,
+            addr & self.emu.machine.ui_addr_mask(),
             if set { "set" } else { "removed" }
         );
         if set {
@@ -4591,7 +4591,7 @@ impl App {
         let Some(addr) = self.debugger_entry_addr("Watch") else {
             return;
         };
-        let addr = addr & 0x00FF_FFFE;
+        let addr = addr & self.emu.machine.ui_addr_mask() & !1;
         let set = self.emu.machine.ui_toggle_watch(addr);
         self.show_osd(format!(
             "Watchpoint ${addr:06X} {}",
@@ -4638,7 +4638,7 @@ impl App {
                     panel.mem_addr.wrapping_sub(delta)
                 } else {
                     panel.mem_addr.wrapping_add(delta)
-                } & 0x00FF_FFFF;
+                } & self.emu.machine.ui_addr_mask();
                 if !panel.mem_view_bits {
                     panel.mem_addr &= !0xF;
                 }
@@ -4661,7 +4661,7 @@ impl App {
                     panel.mem_addr.wrapping_sub(delta)
                 } else {
                     panel.mem_addr.wrapping_add(delta)
-                } & 0x00FF_FFFF;
+                } & self.emu.machine.ui_addr_mask();
                 self.request_redraw();
             }
         }
@@ -4682,7 +4682,7 @@ impl App {
             .mem_last_find
             .map(|addr| addr.wrapping_add(1))
             .unwrap_or(panel.mem_addr)
-            & 0x00FF_FFFF;
+            & self.emu.machine.ui_addr_mask();
         const SPACE: u64 = 0x0100_0000;
         const CHUNK: usize = 4096;
         let mut offset = 0u64;
@@ -4763,7 +4763,7 @@ impl App {
             self.show_osd("Writer: type a hex address first");
             return;
         };
-        let addr = addr & 0x00FF_FFFE;
+        let addr = addr & self.emu.machine.ui_addr_mask() & !1;
         let before = self.emu.retired_instructions();
         match self.emu.tt_last_writer(addr, before) {
             Ok(ReverseOutcome::Found(rec)) => {
@@ -4772,7 +4772,7 @@ impl App {
                     rec.addr,
                     rec.old,
                     rec.new,
-                    rec.pc & 0x00FF_FFFF,
+                    rec.pc & self.emu.machine.ui_addr_mask(),
                     rec.frame
                 );
                 info!("last-writer {message}");
@@ -5441,7 +5441,7 @@ impl App {
                 if panel.mem_view_bits {
                     let stride = panel.mem_bitmap_stride.max(1) as usize;
                     let rows = ui::mem_bitmap_rows();
-                    let base = panel.mem_addr & 0x00FF_FFFF;
+                    let base = panel.mem_addr & machine.ui_addr_mask();
                     lines.push(ui::DbgLine::plain(format!(
                         "bitplane at ${base:06X}, stride {stride} bytes ({} px), {rows} rows",
                         stride * 8
@@ -5457,9 +5457,9 @@ impl App {
                         "$ box: jump / \"ADDR VALUE\" poke / \"ADDR LEN\" save / hex bytes find",
                     ));
                     lines.push(ui::DbgLine::plain(""));
-                    let base = panel.mem_addr & 0x00FF_FFF0;
+                    let base = panel.mem_addr & machine.ui_addr_mask() & !0xF;
                     for row in 0..16u32 {
-                        let addr = base.wrapping_add(row * 16) & 0x00FF_FFFF;
+                        let addr = base.wrapping_add(row * 16) & machine.ui_addr_mask();
                         let mut bytes = [0u8; 16];
                         for word in 0..8u32 {
                             let value = bus.peek_word_any(addr.wrapping_add(word * 2));

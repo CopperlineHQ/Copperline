@@ -61,8 +61,9 @@ pub struct Watch {
     pub len: u32,
 }
 
-/// The 68000 address-bus width the interactive debugger compares PCs and
-/// watch addresses through (A0-A23).
+/// The 68000/EC020 address-bus mask (A0-A23). Debugger surfaces compare
+/// and display through the machine's model mask (`ui_addr_mask()`); this
+/// constant remains for tests and 24-bit callers.
 pub const UI_ADDR_MASK: u32 = 0x00FF_FFFF;
 
 /// An interactive memory watchpoint: a 16-bit word and the value it held
@@ -687,8 +688,11 @@ pub struct Breakpoint {
 /// The debugger window's breakpoint/watchpoint set. Owned by the CPU
 /// machine so it stays armed while the window is closed; `armed` is the
 /// single per-instruction gate the hot loop checks.
-#[derive(Default)]
 pub struct InteractiveBreaks {
+    /// Address-bus mask breakpoint/watch addresses and PCs are compared
+    /// through: A0-A23 on 24-bit models, full 32 bits on 020+ (set from
+    /// the CPU model at machine construction).
+    pub addr_mask: u32,
     pub breakpoints: Vec<Breakpoint>,
     pub watches: Vec<UiWatch>,
     /// Watched custom-register word offsets into $DFF000 ($000-$1FE).
@@ -706,6 +710,20 @@ pub struct InteractiveBreaks {
 }
 
 impl InteractiveBreaks {
+    /// An empty break set comparing addresses through `addr_mask` (the
+    /// owning machine's address-bus mask; see `address_mask_for_model`).
+    pub fn new(addr_mask: u32) -> Self {
+        Self {
+            addr_mask,
+            breakpoints: Vec::new(),
+            watches: Vec::new(),
+            reg_watches: Vec::new(),
+            catches: Vec::new(),
+            task_catch: None,
+            armed: false,
+        }
+    }
+
     pub fn armed(&self) -> bool {
         self.armed
     }
@@ -721,7 +739,7 @@ impl InteractiveBreaks {
     /// Whether any breakpoint is set at `pc`, ignoring its condition. Used for
     /// display (marking the address) and the reverse-debug scan.
     pub fn is_breakpoint(&self, pc: u32) -> bool {
-        let pc = pc & UI_ADDR_MASK;
+        let pc = pc & self.addr_mask;
         self.breakpoints.iter().any(|bp| bp.addr == pc)
     }
 
@@ -734,7 +752,7 @@ impl InteractiveBreaks {
         cond: Option<BreakCond>,
         ignore: u32,
     ) -> bool {
-        let addr = addr & UI_ADDR_MASK;
+        let addr = addr & self.addr_mask;
         let added = match self.breakpoints.iter().position(|bp| bp.addr == addr) {
             Some(pos) => {
                 self.breakpoints.remove(pos);
@@ -759,7 +777,7 @@ impl InteractiveBreaks {
     /// ignore count has been exhausted -- each qualifying hit before that is
     /// counted and skipped.
     pub fn breakpoint_stops(&mut self, pc: u32, ctx: &dyn BreakContext) -> bool {
-        let pc = pc & UI_ADDR_MASK;
+        let pc = pc & self.addr_mask;
         let Some(bp) = self.breakpoints.iter_mut().find(|bp| bp.addr == pc) else {
             return false;
         };
@@ -1118,7 +1136,7 @@ mod tests {
 
     #[test]
     fn interactive_breakpoints_toggle_mask_and_arm() {
-        let mut breaks = InteractiveBreaks::default();
+        let mut breaks = InteractiveBreaks::new(UI_ADDR_MASK);
         assert!(!breaks.armed());
 
         // Adding masks the address to the 68000 bus width.
@@ -1130,6 +1148,16 @@ mod tests {
         assert!(!breaks.toggle_breakpoint_full(0x00C0_33C2, None, 0));
         assert!(!breaks.armed());
         assert!(!breaks.is_breakpoint(0x00C0_33C2));
+    }
+
+    #[test]
+    fn full_mask_keeps_z3_breakpoints_distinct_from_chip_aliases() {
+        // On a 32-bit CPU a Zorro III breakpoint must not fire at the
+        // chip-RAM address it would alias through a 24-bit mask.
+        let mut breaks = InteractiveBreaks::new(0xFFFF_FFFF);
+        assert!(breaks.toggle_breakpoint_full(0x4000_1000, None, 0));
+        assert!(breaks.is_breakpoint(0x4000_1000));
+        assert!(!breaks.is_breakpoint(0x0000_1000));
     }
 
     /// Fixed register/memory snapshot for exercising condition evaluation.
@@ -1162,7 +1190,7 @@ mod tests {
 
     #[test]
     fn conditional_breakpoint_stops_only_when_condition_holds() {
-        let mut breaks = InteractiveBreaks::default();
+        let mut breaks = InteractiveBreaks::new(UI_ADDR_MASK);
         breaks.toggle_breakpoint_full(
             0x1000,
             Some(BreakCond {
@@ -1186,7 +1214,7 @@ mod tests {
 
     #[test]
     fn ignore_count_skips_the_first_qualifying_hits() {
-        let mut breaks = InteractiveBreaks::default();
+        let mut breaks = InteractiveBreaks::new(UI_ADDR_MASK);
         // Stop on the 4th qualifying hit (ignore the first 3).
         breaks.toggle_breakpoint_full(0x1000, None, 3);
         let ctx = FakeCtx::default();
@@ -1200,7 +1228,7 @@ mod tests {
 
     #[test]
     fn bit_test_condition_uses_memory_word() {
-        let mut breaks = InteractiveBreaks::default();
+        let mut breaks = InteractiveBreaks::new(UI_ADDR_MASK);
         breaks.toggle_breakpoint_full(
             0x40,
             Some(BreakCond {
@@ -1219,7 +1247,7 @@ mod tests {
 
     #[test]
     fn interactive_watches_record_baselines_and_clear() {
-        let mut breaks = InteractiveBreaks::default();
+        let mut breaks = InteractiveBreaks::new(UI_ADDR_MASK);
         assert!(breaks.toggle_watch(0x1000, 0xABCD, None));
         assert_eq!(breaks.watches[0].last, 0xABCD);
         // The register watch normalizes a full $DFFxxx address to the

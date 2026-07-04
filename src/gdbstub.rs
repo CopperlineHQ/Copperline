@@ -7,7 +7,7 @@
 //! memory-mapped devices; Amiga custom-chip state is exposed through `monitor`
 //! commands so inspection remains side-effect-free.
 
-use crate::debugger::{custom_reg_name, UI_ADDR_MASK};
+use crate::debugger::custom_reg_name;
 use crate::emulator::Emulator;
 use crate::timetravel::ReverseOutcome;
 use anyhow::{anyhow, bail, Context, Result};
@@ -391,7 +391,7 @@ impl Session {
 
     fn add_breakpoint(&mut self, packet: &str) -> Result<String> {
         let (addr, _) = parse_z_packet(packet)?;
-        let addr = addr & UI_ADDR_MASK;
+        let addr = addr & self.emu.machine.ui_addr_mask();
         if !self.breakpoints.contains(&addr) {
             self.breakpoints.push(addr);
         }
@@ -400,7 +400,7 @@ impl Session {
 
     fn remove_breakpoint(&mut self, packet: &str) -> Result<String> {
         let (addr, _) = parse_z_packet(packet)?;
-        let addr = addr & UI_ADDR_MASK;
+        let addr = addr & self.emu.machine.ui_addr_mask();
         self.breakpoints.retain(|&candidate| candidate != addr);
         Ok("OK".to_string())
     }
@@ -485,7 +485,7 @@ impl Session {
         if self.emu.bus_mut().take_ui_copper_hit().is_some() {
             return Ok(Some(StopReason::CopperBreak));
         }
-        let pc = self.emu.machine.pc() & UI_ADDR_MASK;
+        let pc = self.emu.machine.pc() & self.emu.machine.ui_addr_mask();
         if self.breakpoints.contains(&pc) {
             return Ok(Some(StopReason::Breakpoint));
         }
