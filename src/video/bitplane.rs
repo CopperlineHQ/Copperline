@@ -1200,22 +1200,17 @@ impl ControlState {
         // and lost its right edge off the framebuffer.
         let clamped_window_native =
             ((DIW_HSTART_FB0 - diw_h_start as i32).max(0) * 2) / pixel_repeat as i32;
+        // Lo-res FMODE=0 placement is linear in DDFSTRT: moving DDFSTRT one
+        // 8-cck fetch period earlier moves the picture exactly 16 lo-res
+        // pixels left. Real hardware confirms this (vAmigaTS
+        // Agnus/DIW/OLDDIW/diw1 A500 photos: the DDF-$30 stripe grid sits
+        // exactly 16 lo-res pixels left of the standard $38 grid, and the
+        // window-edge staircase steps pair on that grid). An earlier
+        // "-1 sample" phase correction here compensated for the display
+        // window edge sitting one lo-res pixel too far right, which made a
+        // standard DIW overrun the fetched row at the right edge on
+        // early-DDF screens; the picture phase itself was never non-linear.
         let mut origin_shift = display_native_shift - ddf_native_shift + clamped_window_native;
-        let ddf_start = effective_ddf_start_hpos(
-            self.agnus_revision,
-            self.hires() || self.shres(),
-            self.ddfstrt,
-        );
-        if !self.hires() && !self.shres() && self.fetch_quantum() == 1 {
-            let ddf = i32::from(ddf_start);
-            if ddf < standard_ddf && origin_shift > 0 {
-                // Single-word lo-res fetches that start before the standard $38
-                // slot expose whole 16-pixel groups. The standard one-sample
-                // lo-res phase bias must not push a standard-width DIW one sample
-                // past that completed early-DDF row at the right edge.
-                origin_shift -= 1;
-            }
-        }
         // A hi-res/SHRES FMODE=0 screen that starts DDFSTRT earlier than the
         // standard $3C slot pre-fetches whole word(s) before the display window
         // opens. On real hardware those words are shifted into the left border

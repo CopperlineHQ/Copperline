@@ -1133,9 +1133,38 @@ fn native_x_offset_accounts_for_diw_and_ddf_alignment() {
         lores_early_fetch_standard_window.words_per_row(false, 0),
         21
     );
+    // Linear DDFSTRT placement: $30 fetches one 8-cck period (16 lo-res
+    // pixels) earlier than the standard $38, on top of the standard
+    // one-sample lo-res phase bias. Hardware-verified via the vAmigaTS
+    // Agnus/DIW/OLDDIW/diw1 A500 photos (OCS and ECS).
     assert_eq!(
         lores_early_fetch_standard_window.native_x_offset(false, 2),
-        16
+        17
+    );
+}
+
+#[test]
+fn lores_early_ddf_picture_sits_linearly_left_of_standard_ddf() {
+    // A lo-res FMODE=0 picture fetched at DDFSTRT $30 sits exactly 16 lo-res
+    // pixels (one 8-cck fetch period) left of the same picture fetched at
+    // $38; the DDF->position mapping is linear. Real hardware confirms
+    // (vAmigaTS Agnus/DIW/OLDDIW/diw1 photos: DDF-$30 stripe grid exactly
+    // one fetch period left of the standard grid).
+    let standard = RenderState {
+        bplcon0: 0,
+        diwstrt: ((PAL_VISIBLE_LINE0 as u16) << 8) | STANDARD_DIW_HSTART as u16,
+        ddfstrt: 0x0038,
+        ddfstop: 0x00D0,
+        ..blank_state()
+    };
+    let early = RenderState {
+        ddfstrt: 0x0030,
+        ..standard
+    };
+    assert_eq!(
+        early.native_x_offset(false, 2) - standard.native_x_offset(false, 2),
+        16,
+        "DDFSTRT $30 must sit exactly 16 lo-res px left of $38"
     );
 }
 
@@ -5041,8 +5070,8 @@ fn planned_ham_dma_advances_hold_through_edge_fetch_phase() {
 fn planned_ham_dma_ignores_extra_early_ddf_history_before_diw() {
     let mut row_words = vec![vec![0; 2]; 6];
     row_words[0][0] |= 0x8000; // native x 0: direct palette entry 1
-    row_words[4][0] |= 0x0001; // native x 15: HAM blue := 0
-    row_words[4][1] |= 0x8000; // native x 16: HAM blue := 0
+    row_words[4][1] |= 0x8000; // native x 16: HAM blue := 0 (hidden, pre-DIW)
+    row_words[4][1] |= 0x4000; // native x 17: HAM blue := 0 (first visible)
     let line_plan = DenisePlannedPlayfieldLine::new(0, 64, 66, &row_words, 32);
     let mut control = visible_lowres_control(0x6800);
     control.diwstrt = ((PAL_VISIBLE_LINE0 as u16) << 8) | STANDARD_DIW_HSTART as u16;
@@ -5077,7 +5106,10 @@ fn planned_ham_dma_ignores_extra_early_ddf_history_before_diw() {
         0,
     );
 
-    assert_eq!(control.native_x_offset(control.diw_h_start(), 2), 16);
+    // 17 = one 8-cck fetch period (16 lo-res px) before the standard $38
+    // origin plus the standard one-sample phase bias: DDFSTRT placement is
+    // linear (hardware-verified, vAmigaTS Agnus/DIW/OLDDIW/diw1 photos).
+    assert_eq!(control.native_x_offset(control.diw_h_start(), 2), 17);
     assert_eq!(fb[64], rgb12_to_rgba8(0x0000));
     assert_eq!(fb[65], rgb12_to_rgba8(0x0000));
     assert_eq!(&playfield_mask[64..66], &[0x02, 0x02]);

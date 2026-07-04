@@ -36,13 +36,13 @@ visible output one native sample into the fetched stream, so replay
 pre-advances that hidden sample before painting the DIW edge. Extra fetch
 groups from an earlier DDFSTRT are not decoded into the HAM hold colour before
 DIW opens; they are fetched by Agnus, but the first visible HAM history is
-bounded to the display-phase samples. Single-word lo-res fetches that start
-before the standard `$38` DDF slot expose complete 16-pixel groups; the
-standard one-sample phase bias is trimmed when it would push a standard-width
-DIW past the completed early-DDF row at the right edge.
-Late single-word lo-res DDF keeps the standard DIW `$81` one-sample phase;
-the renderer must not subtract an extra sample just to align the clipped
-start to a fetch-unit boundary.
+bounded to the display-phase samples. Single-word lo-res fetch placement is linear in DDFSTRT: each 8-cck fetch
+period before the standard `$38` slot moves the picture exactly 16 lo-res
+pixels left, keeping the standard one-sample phase bias (hardware-verified
+against the vAmigaTS `Agnus/DIW/OLDDIW/diw1` A500 photos, OCS and ECS).
+Early and late single-word lo-res DDF both keep the standard DIW `$81`
+one-sample phase; the renderer must not add or subtract a sample just to
+align the picture to a fetch-unit boundary.
 When DDFSTRT is late enough that DIW opens before DMA has delivered the
 first BPL1DAT word for the row, playfield output remains border-colour until
 that plane-0 fetch reaches Denise instead of sampling stale shifter contents.
