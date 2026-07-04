@@ -42,13 +42,13 @@ fn h_window_flop_carries_open_past_line_with_unreachable_hstart() {
         control: degenerate,
     });
     let rows = compute_h_window_rows(&base_controls, &control_segments, PAL_VISIBLE_LINE0);
-    // Row 0: standard window.
-    assert_eq!(rows[0].open_runs(), &[(64, 704)]);
+    // Row 0: standard window (edge at 2H-196, hardware-verified).
+    assert_eq!(rows[0].open_runs(), &[(62, 702)]);
     // Row 1: opens at the standard hstart; the rewritten stop never
     // matches before the line ends, so the run reaches the edge.
-    assert_eq!(rows[1].open_runs(), &[(64, FB_WIDTH)]);
+    assert_eq!(rows[1].open_runs(), &[(62, FB_WIDTH)]);
     // Row 2: carried open, closes at hstop $100.
-    assert_eq!(rows[2].open_runs(), &[(0, 318)]);
+    assert_eq!(rows[2].open_runs(), &[(0, 316)]);
 }
 
 #[test]
@@ -204,9 +204,9 @@ fn sprite_color_entry_follows_bplcon4_on_aga() {
 
 #[test]
 fn present_h_shift_centres_standard_window() {
-    // Stock PAL DIW ($2C81/$2CC1 -> H 0x81/0x1C1). 64px left border vs
-    // 12px right border; recentre by half the difference = 26px.
-    assert_eq!(present_h_shift(0x81, 0x1C1), 26);
+    // Stock PAL DIW ($2C81/$2CC1 -> H 0x81/0x1C1). 62px left border vs
+    // 14px right border; recentre by half the difference = 24px.
+    assert_eq!(present_h_shift(0x81, 0x1C1), 24);
 }
 
 #[test]
@@ -279,9 +279,9 @@ fn early_ddf_hires_origin_snaps_to_word_boundary() {
     assert_eq!(standard.native_x_offset(standard.diw_h_start(), repeat), 0);
 
     // Kickstart 2.05 insert-disk screen: hi-res but DDFSTRT=$40 (late), so
-    // there is no pre-fetch word. The late fetch starts 24 pixels into
-    // its narrower DIW after the standard hi-res $81/$3C phase is aligned
-    // to the display-window edge.
+    // there is no pre-fetch word. The late fetch keeps its beam-anchored
+    // position (absolute picture x is unchanged by the DIW comparator fix;
+    // the offset shrinks by the 2 hi-res px the window edge moved left).
     let ks_boot = ControlState {
         diwstrt: 0x2C95,
         diwstop: 0x2CAD,
@@ -289,7 +289,7 @@ fn early_ddf_hires_origin_snaps_to_word_boundary() {
         ddfstop: 0x00D0,
         ..xsysinfo
     };
-    assert_eq!(ks_boot.native_x_offset(ks_boot.diw_h_start(), repeat), 24);
+    assert_eq!(ks_boot.native_x_offset(ks_boot.diw_h_start(), repeat), 22);
 }
 
 fn ocs_snapshot(diwstrt: u16, diwstop: u16, ddfstrt: u16, ddfstop: u16) -> RenderRegisterSnapshot {
@@ -311,15 +311,15 @@ fn present_h_shift_for_centres_wide_diw_around_standard_fetch() {
     // (DIWSTRT $5702 -> H $02, DIWSTOP $FFFF -> H $1FF) around a standard
     // 320-px lo-res picture (DDF $38..$D0). The open window only reveals
     // COLOR0 border the TV crops, so the picture must still recentre by the
-    // stock 26px instead of sitting right-of-centre.
+    // stock 24px instead of sitting right-of-centre.
     assert_eq!(
         present_h_shift_for(&ocs_snapshot(0x5702, 0xFFFF, 0x0038, 0x00D0)),
-        26
+        24
     );
     // A genuinely centred stock display is unchanged.
     assert_eq!(
         present_h_shift_for(&ocs_snapshot(0x2C81, 0x2CC1, 0x0038, 0x00D0)),
-        26
+        24
     );
 }
 
@@ -644,7 +644,7 @@ fn display_window_uses_stop_as_exclusive_right_edge() {
         ..blank_state()
     };
 
-    assert_eq!(state.display_window_x(), (104, 664));
+    assert_eq!(state.display_window_x(), (102, 662));
 }
 
 #[test]
@@ -796,14 +796,18 @@ fn denise_horizontal_delay_aligns_copper_beam_and_display_fetch_domains() {
         ..blank_state()
     };
     let display_left = state.display_window_x().0;
-    let copper_hpos = COPPER_WAIT_HPOS_FB0 + (display_left / 4) as i32;
+    // The standard window edge sits at 62 (2H-196, hardware-verified) with
+    // the first fetched lo-res sample flush at the edge; the copper/register
+    // domain position of the same beam time maps one lo-res pixel later
+    // (the Agnus-fetch -> Denise-display pipeline).
+    let copper_hpos = COPPER_WAIT_HPOS_FB0 + ((display_left + 2) / 4) as i32;
 
-    assert_eq!(display_left, 64);
+    assert_eq!(display_left, 62);
     assert_eq!(
         beam_to_framebuffer_pos(PAL_VISIBLE_LINE0 as u32, copper_hpos as u32),
-        (0, display_left)
+        (0, display_left + 2)
     );
-    assert_eq!(state.native_x_offset(false, 2), 1);
+    assert_eq!(state.native_x_offset(false, 2), 0);
     assert_eq!(state.fetch_start_native_x(false, 2), 0);
 }
 
@@ -1029,7 +1033,7 @@ fn native_x_offset_accounts_for_diw_and_ddf_alignment() {
         ddfstrt: 0x0040,
         ..blank_state()
     };
-    assert_eq!(kickstart_hires.native_x_offset(true, 1), 24);
+    assert_eq!(kickstart_hires.native_x_offset(true, 1), 22);
 
     // Wide FMODE fetches quantize the displayed shifter origin to the gulp
     // grid: AGA system screens program DDFSTRT $38 or $3C interchangeably
@@ -1062,7 +1066,10 @@ fn native_x_offset_accounts_for_diw_and_ddf_alignment() {
     // FS-UAE. DDFSTRT $38 and $3C are still equivalent because both align
     // to the same wide-FMODE gulp.
     assert_eq!(wb_hires_overscan_fetch.native_x_offset(true, 1), 0);
-    assert_eq!(wb_hires_overscan_fetch.fetch_start_native_x(true, 1), 0);
+    // The hi-res picture keeps its beam-anchored position (x = 64); the
+    // hardware window edge (62) now opens one lo-res pixel earlier, so the
+    // picture starts 2 hi-res px into the window.
+    assert_eq!(wb_hires_overscan_fetch.fetch_start_native_x(true, 1), 2);
 
     // The placement gulp grid runs on absolute colour-clock multiples of
     // the fetch period. Lores FMODE=1 has a 16-cck gulp: DDFSTRT $30 is
@@ -1099,10 +1106,12 @@ fn native_x_offset_accounts_for_diw_and_ddf_alignment() {
         ddfstrt: 0x003C,
         ..blank_state()
     };
-    assert_eq!(diagrom_hires.display_window_x().0, 64);
+    assert_eq!(diagrom_hires.display_window_x().0, 62);
     assert_eq!(diagrom_hires.clipped_display_pixels_before_frame(), 0);
     assert_eq!(diagrom_hires.native_x_offset(true, 1), 0);
-    assert_eq!(diagrom_hires.fetch_start_native_x(true, 1), 0);
+    // Standard hi-res keeps its beam-anchored position (x = 64), 2 hi-res
+    // px inside the hardware window edge (62).
+    assert_eq!(diagrom_hires.fetch_start_native_x(true, 1), 2);
 
     let lores_extra_fetch_word = RenderState {
         bplcon0: 0,
@@ -1134,12 +1143,13 @@ fn native_x_offset_accounts_for_diw_and_ddf_alignment() {
         21
     );
     // Linear DDFSTRT placement: $30 fetches one 8-cck period (16 lo-res
-    // pixels) earlier than the standard $38, on top of the standard
-    // one-sample lo-res phase bias. Hardware-verified via the vAmigaTS
-    // Agnus/DIW/OLDDIW/diw1 A500 photos (OCS and ECS).
+    // pixels) earlier than the standard $38. With the hardware window edge
+    // (2H-196) the standard $81 window is flush with the $38 bitmap, so
+    // the $30 offset is exactly the 16 extra samples. Hardware-verified via
+    // the vAmigaTS Agnus/DIW/OLDDIW/diw1 A500 photos (OCS and ECS).
     assert_eq!(
         lores_early_fetch_standard_window.native_x_offset(false, 2),
-        17
+        16
     );
 }
 
@@ -1176,8 +1186,10 @@ fn ddfstrt_positions_first_lowres_bitplane_word_relative_to_diwstrt() {
         ddfstrt: 0x0038,
         ..blank_state()
     };
+    // The standard $81/$38 lo-res picture is flush with the hardware
+    // window edge (both at framebuffer x = 62): no hidden sample, no inset.
     assert_eq!(standard_lowres.fetch_start_native_x(false, 2), 0);
-    assert_eq!(standard_lowres.native_x_offset(false, 2), 1);
+    assert_eq!(standard_lowres.native_x_offset(false, 2), 0);
 
     let late_window_aligned_fetch = RenderState {
         bplcon0: 0,
@@ -1186,7 +1198,7 @@ fn ddfstrt_positions_first_lowres_bitplane_word_relative_to_diwstrt() {
         ..blank_state()
     };
     assert_eq!(late_window_aligned_fetch.fetch_start_native_x(false, 2), 0);
-    assert_eq!(late_window_aligned_fetch.native_x_offset(false, 2), 1);
+    assert_eq!(late_window_aligned_fetch.native_x_offset(false, 2), 0);
 
     let inset_fetch = RenderState {
         bplcon0: 0,
@@ -1194,7 +1206,7 @@ fn ddfstrt_positions_first_lowres_bitplane_word_relative_to_diwstrt() {
         ddfstrt: 0x0050,
         ..blank_state()
     };
-    assert_eq!(inset_fetch.fetch_start_native_x(false, 2), 14);
+    assert_eq!(inset_fetch.fetch_start_native_x(false, 2), 15);
     assert_eq!(inset_fetch.native_x_offset(false, 2), 0);
 
     let late_fetch_standard_window = RenderState {
@@ -1205,7 +1217,7 @@ fn ddfstrt_positions_first_lowres_bitplane_word_relative_to_diwstrt() {
     };
     assert_eq!(
         late_fetch_standard_window.fetch_start_native_x(false, 2),
-        31
+        32
     );
     assert_eq!(late_fetch_standard_window.native_x_offset(false, 2), 0);
 }
@@ -1227,9 +1239,9 @@ fn late_lowres_ddf_reaches_diwstop_with_undelayed_planes_active() {
         ddfstop: 0x00D0,
         ..ControlState::default()
     };
-    assert_eq!(control.display_window_x(), (96, 704));
+    assert_eq!(control.display_window_x(), (94, 702));
     assert_eq!(control.words_per_row(0), 17);
-    assert_eq!(control.fetch_start_native_x(control.diw_h_start(), 2), 31);
+    assert_eq!(control.fetch_start_native_x(control.diw_h_start(), 2), 32);
     assert_eq!(control.native_x_offset(control.diw_h_start(), 2), 0);
     assert!(control.holds_final_lowres_fetch_sample_at_diwstop());
 
@@ -1237,13 +1249,16 @@ fn late_lowres_ddf_reaches_diwstop_with_undelayed_planes_active() {
     let output_native_x =
         (last_visible_x - control.display_window_x().0) / control.framebuffer_pixel_repeat();
     let native_x = output_native_x - control.fetch_start_native_x(control.diw_h_start(), 2);
-    assert_eq!(native_x, 272);
+    // With the hardware window edge (2H-196) the final visible sample is
+    // the last fetched one (271), not one past the row; the DDFSTOP hold
+    // keeps it available either way.
+    assert_eq!(native_x, 271);
 
     let plane1 = vec![0; 17];
     let mut plane2 = vec![0; 17];
     plane2[16] = 0x0001;
     let planes = vec![plane1, plane2];
-    let plan = DenisePlannedPlayfieldLine::new(0, 96, 704, &planes, 17 * 16);
+    let plan = DenisePlannedPlayfieldLine::new(0, 94, 702, &planes, 17 * 16);
     let delays = std::array::from_fn(|plane| control.scroll_for_plane(plane));
     let sample = plan.sample_prepared_with_final_fetch_hold(
         control.nplanes(),
@@ -1272,14 +1287,14 @@ fn late_lowres_ddf_stop_hold_keeps_left_origin_unadvanced() {
         ddfstop: 0x00D0,
         ..ControlState::default()
     };
-    assert_eq!(control.display_window_x(), (96, 704));
-    assert_eq!(control.fetch_start_native_x(control.diw_h_start(), 2), 31);
+    assert_eq!(control.display_window_x(), (94, 702));
+    assert_eq!(control.fetch_start_native_x(control.diw_h_start(), 2), 32);
     assert!(control.holds_final_lowres_fetch_sample_at_diwstop());
 
     let mut plane = vec![0; 17];
     plane[0] = 0x8000;
     let planes = vec![plane];
-    let plan = DenisePlannedPlayfieldLine::new(0, 96, 704, &planes, 17 * 16);
+    let plan = DenisePlannedPlayfieldLine::new(0, 94, 702, &planes, 17 * 16);
     let mut palette = Palette::new();
     palette.write_ocs(1, 0x00F0);
     let mut fb = vec![0; FB_PIXELS];
@@ -5028,10 +5043,13 @@ fn planned_ham_dma_advances_hold_through_edge_fetch_phase() {
     row_words[0][0] |= 0x8000; // native x 0: direct palette entry 1
     row_words[1][0] |= 0x4000; // native x 1: HAM blue := 2
     row_words[4][0] |= 0x4000;
+    // DIWSTRT one lores px right of standard ($82): the window opens one
+    // sample into the fetched stream, so sample 0 is the hidden edge sample
+    // whose HAM hold advance this test pins.
     let line_plan = DenisePlannedPlayfieldLine::new(0, 64, 66, &row_words, 2);
     let mut control = visible_lowres_control(0x6800);
-    control.diwstrt = ((PAL_VISIBLE_LINE0 as u16) << 8) | STANDARD_DIW_HSTART as u16;
-    control.diwstop = (((PAL_VISIBLE_LINE0 + 1) as u16) << 8) | (STANDARD_DIW_HSTART as u16 + 1);
+    control.diwstrt = ((PAL_VISIBLE_LINE0 as u16) << 8) | (STANDARD_DIW_HSTART as u16 + 1);
+    control.diwstop = (((PAL_VISIBLE_LINE0 + 1) as u16) << 8) | (STANDARD_DIW_HSTART as u16 + 2);
     let mut palette = Palette::new();
     palette.write_ocs(1, 0x0123);
     let mut fb = vec![0; FB_PIXELS];
@@ -5070,9 +5088,9 @@ fn planned_ham_dma_advances_hold_through_edge_fetch_phase() {
 fn planned_ham_dma_ignores_extra_early_ddf_history_before_diw() {
     let mut row_words = vec![vec![0; 2]; 6];
     row_words[0][0] |= 0x8000; // native x 0: direct palette entry 1
-    row_words[4][1] |= 0x8000; // native x 16: HAM blue := 0 (hidden, pre-DIW)
-    row_words[4][1] |= 0x4000; // native x 17: HAM blue := 0 (first visible)
-    let line_plan = DenisePlannedPlayfieldLine::new(0, 64, 66, &row_words, 32);
+    row_words[4][0] |= 0x0001; // native x 15: HAM blue := 0 (hidden, pre-DIW)
+    row_words[4][1] |= 0x8000; // native x 16: HAM blue := 0 (first visible)
+    let line_plan = DenisePlannedPlayfieldLine::new(0, 62, 64, &row_words, 32);
     let mut control = visible_lowres_control(0x6800);
     control.diwstrt = ((PAL_VISIBLE_LINE0 as u16) << 8) | STANDARD_DIW_HSTART as u16;
     control.diwstop = (((PAL_VISIBLE_LINE0 + 1) as u16) << 8) | (STANDARD_DIW_HSTART as u16 + 1);
@@ -5106,20 +5124,20 @@ fn planned_ham_dma_ignores_extra_early_ddf_history_before_diw() {
         0,
     );
 
-    // 17 = one 8-cck fetch period (16 lo-res px) before the standard $38
-    // origin plus the standard one-sample phase bias: DDFSTRT placement is
-    // linear (hardware-verified, vAmigaTS Agnus/DIW/OLDDIW/diw1 photos).
-    assert_eq!(control.native_x_offset(control.diw_h_start(), 2), 17);
-    assert_eq!(fb[64], rgb12_to_rgba8(0x0000));
-    assert_eq!(fb[65], rgb12_to_rgba8(0x0000));
-    assert_eq!(&playfield_mask[64..66], &[0x02, 0x02]);
+    // 16 = one 8-cck fetch period before the standard $38 origin: DDFSTRT
+    // placement is linear and the hardware window edge (2H-196) is flush
+    // with the standard-DDF picture (vAmigaTS Agnus/DIW/OLDDIW/diw1 photos).
+    assert_eq!(control.native_x_offset(control.diw_h_start(), 2), 16);
+    assert_eq!(fb[62], rgb12_to_rgba8(0x0000));
+    assert_eq!(fb[63], rgb12_to_rgba8(0x0000));
+    assert_eq!(&playfield_mask[62..64], &[0x02, 0x02]);
 }
 
 #[test]
 fn bplcon1_write_at_diw_right_edge_does_not_retap_current_ham_line() {
     let mut row_words = vec![vec![0; 1]; 6];
     row_words[0][0] |= 0x4000; // native x 1: direct palette entry 1
-    let line_plan = DenisePlannedPlayfieldLine::new(0, 64, 96, &row_words, 16);
+    let line_plan = DenisePlannedPlayfieldLine::new(0, 62, 94, &row_words, 16);
     let mut control = visible_lowres_control(0x6800);
     control.diwstrt = ((PAL_VISIBLE_LINE0 as u16) << 8) | STANDARD_DIW_HSTART as u16;
     control.diwstop = (((PAL_VISIBLE_LINE0 + 1) as u16) << 8) | (STANDARD_DIW_HSTART as u16 + 16);
@@ -5158,7 +5176,7 @@ fn bplcon1_write_at_diw_right_edge_does_not_retap_current_ham_line() {
         0,
     );
 
-    assert_eq!(control.display_window_x(), (64, 96));
+    assert_eq!(control.display_window_x(), (62, 94));
     assert_eq!(fb[64], rgb12_to_rgba8(0x0123));
     assert_eq!(fb[65], rgb12_to_rgba8(0x0123));
 }

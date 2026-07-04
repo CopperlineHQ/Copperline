@@ -35,12 +35,14 @@ use std::time::Instant;
 // Denise/Agnus scheduler.
 #[cfg_attr(not(test), allow(dead_code))]
 const PAL_VISIBLE_LINE0: i32 = 0x2C;
-// Framebuffer x=0 anchor. Held 8 colour clocks (16 lo-res pixels) left of the
-// standard display start so the framebuffer captures the deep-left overscan a
-// real Denise can display, matching vAmiga's 716-wide regression cutout. The
-// matching shift of COPPER_WAIT_HPOS_FB0 (below) keeps the bitplane/register
-// pipeline delta (BITPLANE_CONTROL_PIPELINE_FB) invariant.
-const DIW_HSTART_FB0: i32 = 0x61;
+// Framebuffer x=0 anchor. Held deep left of the standard display start so the
+// framebuffer captures the deep-left overscan a real Denise can display,
+// matching vAmiga's 716-wide regression cutout. The value pins the DIW
+// comparator mapping: a DIWSTRT hstart H opens the window at framebuffer
+// x = (H - this) * 2, and real hardware puts the standard $81 edge at x = 62
+// (2H - 196; measured on the sblit0_A500_ECS.jpeg partial swatch columns,
+// which show the bitmap's first lo-res pixel fully visible at the edge).
+const DIW_HSTART_FB0: i32 = 0x62;
 const STANDARD_DIW_HSTART: i32 = 0x81;
 // Standard DIWSTRT $81 is the visible window edge. The first standard
 // bitplane sample at DDFSTRT $38 is already one lowres native sample into the
@@ -49,12 +51,15 @@ const STANDARD_DIW_HSTART: i32 = 0x81;
 // The lo-res fetch/display phase sits 3 colour clocks later than the hi-res
 // phase: a hi-res fetch slot delivers its word to Denise's shifter on a
 // different beam edge than a lo-res slot, so the reference the renderer uses to
-// place the first fetched pixel differs by resolution. Lo-res references $80;
-// hi-res references $81 so a standard $81/$3C display starts its 640 fetched
-// pixels at the display-window edge instead of clipping the right edge.
+// place the first fetched pixel differs by resolution. The references position
+// bitplane sample 0 at framebuffer x = (reference - DIW_HSTART_FB0) * 2, so
+// they moved +1 in lockstep with the DIW_HSTART_FB0 comparator fix to keep the
+// hardware-calibrated bitmap positions (lo-res sample 0 at x = 62, hi-res
+// standard $81/$3C flush at x = 64). The standard $81 window edge now sits at
+// x = 62 too, exposing the lo-res bitmap's first sample as on real hardware.
 // See `fetch_reference` below.
-const DIW_HSTART_FETCH_REFERENCE_LORES: i32 = 0x80;
-const DIW_HSTART_FETCH_REFERENCE_HIRES: i32 = 0x81;
+const DIW_HSTART_FETCH_REFERENCE_LORES: i32 = 0x81;
+const DIW_HSTART_FETCH_REFERENCE_HIRES: i32 = 0x82;
 // Register/copper-write x=0 anchor, in colour clocks. Moved left by 8 colour
 // clocks in lockstep with DIW_HSTART_FB0 (16 lo-res pixels) so register writes
 // and bitplane pixels still register against each other after widening.

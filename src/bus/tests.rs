@@ -3399,7 +3399,9 @@ fn captured_bitplane_rows_render_after_later_dmacon_clears_bplen() {
     let mut fb = vec![0; FB_PIXELS];
     bitplane::render(&mut bus, &mut fb);
 
-    assert_eq!(fb[STANDARD_VISIBLE_X0], rgb12_to_rgba8(0x0F00));
+    // Content columns sit 2 fb px right of the hardware window edge
+    // (bitmap positions are beam-anchored; STANDARD_VISIBLE_X0 moved to 62).
+    assert_eq!(fb[STANDARD_VISIBLE_X0 + 2], rgb12_to_rgba8(0x0F00));
 }
 
 #[test]
@@ -3442,8 +3444,13 @@ fn beam_timed_display_window_changes_clip_later_bitplane_rows() {
     let mut fb = vec![0; FB_PIXELS];
     bitplane::render(&mut bus, &mut fb);
 
-    assert_eq!(fb[STANDARD_VISIBLE_X0], rgb12_to_rgba8(0x0F00));
-    assert_eq!(fb[FB_WIDTH + STANDARD_VISIBLE_X0], rgb12_to_rgba8(0x0000));
+    // Content columns sit 2 fb px right of the hardware window edge
+    // (bitmap positions are beam-anchored; STANDARD_VISIBLE_X0 moved to 62).
+    assert_eq!(fb[STANDARD_VISIBLE_X0 + 2], rgb12_to_rgba8(0x0F00));
+    assert_eq!(
+        fb[FB_WIDTH + STANDARD_VISIBLE_X0 + 2],
+        rgb12_to_rgba8(0x0000)
+    );
 }
 
 #[test]
@@ -3563,8 +3570,10 @@ fn beam_timed_diwstrt_clips_hidden_bitplane_pixels_without_rebasing_fetch_origin
     let mut fb = vec![0; FB_PIXELS];
     bitplane::render(&mut bus, &mut fb);
 
-    assert_eq!(fb[STANDARD_VISIBLE_X0 + 4], rgb12_to_rgba8(0x0000));
-    assert_eq!(fb[STANDARD_VISIBLE_X0 + 6], rgb12_to_rgba8(0x0F00));
+    // Content columns sit 2 fb px right of the hardware window edge
+    // (bitmap positions are beam-anchored; STANDARD_VISIBLE_X0 moved to 62).
+    assert_eq!(fb[STANDARD_VISIBLE_X0 + 6], rgb12_to_rgba8(0x0000));
+    assert_eq!(fb[STANDARD_VISIBLE_X0 + 8], rgb12_to_rgba8(0x0F00));
 }
 
 #[test]
@@ -3767,8 +3776,13 @@ fn beam_timed_bitplane_pointer_changes_later_fallback_fetch_rows() {
     let mut fb = vec![0; FB_PIXELS];
     bitplane::render(&mut bus, &mut fb);
 
-    assert_eq!(fb[STANDARD_VISIBLE_X0], rgb12_to_rgba8(0x0F00));
-    assert_eq!(fb[FB_WIDTH + STANDARD_VISIBLE_X0], rgb12_to_rgba8(0x0000));
+    // Content columns sit 2 fb px right of the hardware window edge
+    // (bitmap positions are beam-anchored; STANDARD_VISIBLE_X0 moved to 62).
+    assert_eq!(fb[STANDARD_VISIBLE_X0 + 2], rgb12_to_rgba8(0x0F00));
+    assert_eq!(
+        fb[FB_WIDTH + STANDARD_VISIBLE_X0 + 2],
+        rgb12_to_rgba8(0x0000)
+    );
 }
 
 #[test]
@@ -3800,7 +3814,9 @@ fn beam_timed_bitplane_pointer_changes_later_fallback_fetch_words() {
     let mut fb = vec![0; FB_PIXELS];
     bitplane::render(&mut bus, &mut fb);
 
-    let x_start = STANDARD_VISIBLE_X0 + 64;
+    let x_start = STANDARD_VISIBLE_X0 + 66;
+    // Content columns sit 2 fb px right of the hardware window edge
+    // (bitmap positions are beam-anchored; STANDARD_VISIBLE_X0 moved to 62).
     assert_eq!(fb[x_start], rgb12_to_rgba8(0x0F00));
     assert_eq!(fb[x_start + 32], rgb12_to_rgba8(0x0000));
 }
@@ -4376,9 +4392,11 @@ fn beam_timed_bplcon0_hires_narrows_later_bitplane_pixels() {
     let mut fb = vec![0; FB_PIXELS];
     bitplane::render(&mut bus, &mut fb);
 
-    assert_eq!(fb[STANDARD_VISIBLE_X0 + 32], rgb12_to_rgba8(0x0000));
-    assert_eq!(fb[STANDARD_VISIBLE_X0 + 34], rgb12_to_rgba8(0x0F00));
-    assert_eq!(fb[STANDARD_VISIBLE_X0 + 35], rgb12_to_rgba8(0x0000));
+    // Content columns sit 2 fb px right of the hardware window edge
+    // (bitmap positions are beam-anchored; STANDARD_VISIBLE_X0 moved to 62).
+    assert_eq!(fb[STANDARD_VISIBLE_X0 + 34], rgb12_to_rgba8(0x0000));
+    assert_eq!(fb[STANDARD_VISIBLE_X0 + 36], rgb12_to_rgba8(0x0F00));
+    assert_eq!(fb[STANDARD_VISIBLE_X0 + 37], rgb12_to_rgba8(0x0000));
 }
 
 #[test]
@@ -4419,9 +4437,11 @@ fn beam_timed_bplcon0_lowres_widens_later_bitplane_pixels() {
     let mut fb = vec![0; FB_PIXELS];
     bitplane::render(&mut bus, &mut fb);
 
-    assert_eq!(fb[STANDARD_VISIBLE_X0 + 30], rgb12_to_rgba8(0x0000));
-    assert_eq!(fb[STANDARD_VISIBLE_X0 + 32], rgb12_to_rgba8(0x0F00));
-    assert_eq!(fb[STANDARD_VISIBLE_X0 + 33], rgb12_to_rgba8(0x0F00));
+    // Content columns sit 2 fb px right of the hardware window edge
+    // (bitmap positions are beam-anchored; STANDARD_VISIBLE_X0 moved to 62).
+    assert_eq!(fb[STANDARD_VISIBLE_X0 + 32], rgb12_to_rgba8(0x0000));
+    assert_eq!(fb[STANDARD_VISIBLE_X0 + 34], rgb12_to_rgba8(0x0F00));
+    assert_eq!(fb[STANDARD_VISIBLE_X0 + 35], rgb12_to_rgba8(0x0F00));
 }
 
 #[test]
@@ -6348,7 +6368,10 @@ fn attached_manual_sprite_data_writes_accumulate_live_sprite_sprite_clxdat() {
 #[test]
 fn attached_manual_sprite_odd_data_writes_accumulate_later_live_sprite_sprite_clxdat() {
     let mut bus = empty_bus();
-    let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0083);
+    // hstart +1 vs the pre-fix value: sprite comparator positions share
+    // Denise's counter and moved with the corrected window-edge anchor
+    // (2H-196); the beam-anchored playfield sample did not.
+    let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0084);
     bus.agnus.vpos = 0x2C;
     bus.agnus.hpos = 0x38;
     bus.denise.diwstrt = 0x2C83;
@@ -6474,7 +6497,10 @@ fn manual_sprite_position_write_on_compare_boundary_preserves_live_source() {
 #[test]
 fn manual_sprite_data_writes_accumulate_live_sprite_playfield_clxdat() {
     let mut bus = empty_bus();
-    let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0081);
+    // hstart +1 vs the pre-fix value: sprite comparator positions share
+    // Denise's counter and moved with the corrected window-edge anchor
+    // (2H-196); the beam-anchored playfield sample did not.
+    let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0082);
     bus.agnus.vpos = 0x2C;
     bus.agnus.hpos = 0x38;
     bus.denise.diwstrt = 0x2C81;
@@ -6810,11 +6836,13 @@ fn shifted_horizontal_diw_offsets_live_playfield_clxdat_fetch_origin() {
 #[test]
 fn denise_horizontal_delay_aligns_sprite_playfield_collision_domain() {
     let display_x = live_display_window_x(0x2C81, 0x2DC1, DiwHigh::ocs_implicit()).0;
-    let copper_hpos = RENDER_COPPER_WAIT_HPOS_FB0 + (display_x as u32 / 4);
+    // The hardware window edge (62) is off the 4-px copper/register grid;
+    // the nearest register-domain position maps one lo-res pixel later.
+    let copper_hpos = RENDER_COPPER_WAIT_HPOS_FB0 + ((display_x as u32 + 2) / 4);
     assert_eq!(display_x, STANDARD_VISIBLE_X0 as i32);
     assert_eq!(
         framebuffer_x_for_live_collision_hpos(copper_hpos),
-        display_x
+        display_x + 2
     );
 
     let row = CapturedBitplaneRow {
@@ -7286,7 +7314,10 @@ fn same_line_bplcon0_dual_playfield_enable_does_not_retime_earlier_live_clxdat()
 fn captured_sprite_and_bitplane_rows_accumulate_live_sprite_playfield_clxdat() {
     let mut bus = empty_bus();
     let sprite_ptr = 0x0300usize;
-    let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0081);
+    // hstart +1 vs the pre-fix value: sprite comparator positions share
+    // Denise's counter and moved with the corrected window-edge anchor
+    // (2H-196); the beam-anchored playfield sample did not.
+    let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0082);
     write_chip_word(&mut bus, sprite_ptr, pos);
     write_chip_word(&mut bus, sprite_ptr + 2, ctl);
     write_chip_word(&mut bus, sprite_ptr + 4, 0x8000);
@@ -7377,7 +7408,10 @@ fn manual_sprite_and_bpl1dat_writes_accumulate_live_sprite_playfield_clxdat() {
 fn same_line_bplcon1_scroll_increase_latches_later_live_sprite_playfield_clxdat() {
     let mut bus = empty_bus();
     let sprite_ptr = 0x0300usize;
-    let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0093);
+    // hstart +1 vs the pre-fix value: sprite comparator positions share
+    // Denise's counter and moved with the corrected window-edge anchor
+    // (2H-196); the beam-anchored playfield sample did not.
+    let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0094);
     write_chip_word(&mut bus, sprite_ptr, pos);
     write_chip_word(&mut bus, sprite_ptr + 2, ctl);
     write_chip_word(&mut bus, sprite_ptr + 4, 0x8000);
@@ -7467,7 +7501,8 @@ fn bplcon3_spres_hires_narrows_live_sprite_playfield_clxdat() {
     let clxdat_after_bitplane_row_capture = |bplcon3| {
         let mut bus = empty_bus();
         let sprite_ptr = 0x0300usize;
-        let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0081);
+        // hstart +1 vs the pre-fix value: see the sibling clxdat tests.
+        let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0082);
         write_chip_word(&mut bus, sprite_ptr, pos);
         write_chip_word(&mut bus, sprite_ptr + 2, ctl);
         write_chip_word(&mut bus, sprite_ptr + 4, 0x8000);
@@ -7512,7 +7547,8 @@ fn same_line_bplcon3_spres_write_does_not_retime_earlier_live_sprite_playfield_c
     let clxdat_after_bitplane_row_capture = |spres_hpos: Option<u32>| {
         let mut bus = empty_bus();
         let sprite_ptr = 0x0300usize;
-        let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0081);
+        // hstart +1 vs the pre-fix value: see the sibling clxdat tests.
+        let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0082);
         write_chip_word(&mut bus, sprite_ptr, pos);
         write_chip_word(&mut bus, sprite_ptr + 2, ctl);
         write_chip_word(&mut bus, sprite_ptr + 4, 0x8000);

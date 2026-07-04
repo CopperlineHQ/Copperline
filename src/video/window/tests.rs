@@ -1513,14 +1513,16 @@ fn tv_overscan_mask_tracks_the_centering_shift() {
     let marker = rgba(0x12, 0x34, 0x56);
     let mut fb = vec![marker; FB_PIXELS];
 
-    // A standard display shifted left 16px for centring: the bezel
-    // moves with it, so the window's left edge is not clipped.
+    // A standard display shifted left 8px for centring: the bezel
+    // moves with it, so the window's left edge is not clipped. (The shift
+    // must stay below the source-left bound, 14px with the hardware
+    // window edge at 62, for the unmasked strip to remain in-frame.)
     let std_top = standard_window_top_row(STANDARD_PAL_VISIBLE_START_VPOS);
-    mask_present_frame_to_tv(&mut fb, 16, std_top);
+    mask_present_frame_to_tv(&mut fb, 8, std_top);
 
     let (source_left, source_right) = tv_source_h_bounds();
-    let left = source_left - 16;
-    let right = source_right - 16;
+    let left = source_left - 8;
+    let right = source_right - 8;
     let mid_row = std_top + 100;
     assert_eq!(fb[mid_row * FB_WIDTH + left - 1], rgba(0, 0, 0));
     assert_eq!(fb[mid_row * FB_WIDTH + left], marker);
