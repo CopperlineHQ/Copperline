@@ -966,7 +966,10 @@ impl Bus {
                 self.agnus.set_ersy(val & 0x0002 != 0);
                 if self.denise.bplcon0 != previous {
                     self.record_bitplane_bplcon0_write(previous);
-                    self.ddf_seq_record_bplcon0_write(self.denise.bplcon0, previous, 3);
+                    // Agnus's sequencer copy of BPLCON0 updates four colour
+                    // clocks after the write slot (vAmiga DMA_CYCLES(4);
+                    // Denise's own interpretation switches earlier).
+                    self.ddf_seq_record_bplcon0_write(self.denise.bplcon0, previous, 4);
                 }
                 false
             }
