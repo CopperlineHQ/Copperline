@@ -1752,7 +1752,10 @@ fn shres_limits_bitplane_depth_and_disables_ham() {
     };
 
     assert_eq!(state.nplanes(), 2);
-    assert_eq!(state.dma_planes(), 2);
+    // Agnus's SHRES fetch-unit table schedules at most 2 plane streams;
+    // an overprogrammed BPU (here 6) fetches nothing at all (the same
+    // hardware rule as hi-res BPU>4, invplanes1 photo).
+    assert_eq!(state.dma_planes(), 0);
     assert!(!state.hold_and_modify());
 }
 
