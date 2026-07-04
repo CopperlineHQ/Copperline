@@ -14,12 +14,13 @@ It covers OCS, ECS, and AGA (independent Agnus/Denise revisions,
 programmable blanking, machine profiles from the A500 to the A1200,
 CDTV, and CD32, with Gayle IDE, A2091 SCSI, and the AGA display path: 8 bitplanes,
 256-entry palette, HAM8, FMODE wide fetch; remaining gaps are recorded in
-the internals docs). The timing model is taken seriously: the
-chip bus is arbitrated per colour clock, the Copper and blitter are
-scheduled per DMA slot with hardware bus sequences, and 68000
-interrupt-recognition latency is modelled. The source is organized so the
-hardware model can be read and extended without chasing title-specific
-patches.
+the internals docs). Cycle-driven means the whole machine advances on one
+colour-clock timeline: the chip bus is arbitrated per colour clock, the
+Copper and blitter are scheduled per DMA slot with the hardware bus
+sequences, and 68000 interrupt-recognition latency is modelled. 68000 cycle
+counts are validated against the TomHarte SingleStepTests, and chip-bus
+timing against a test disk cross-checked on real hardware
+(`timing-test/`).
 
 ## Background
 
@@ -50,10 +51,10 @@ against real hardware.
   (via the pure-Rust `gilrs`, no SDL2), 4-channel Paula audio, floppy
   (ADF / ADZ / ZIP / DMS, read-only SCP), Gayle IDE, A2091 SCSI, and CDTV/CD32
   CD.
-- **Tooling**: an in-window debugger, an interactive chip-bus frame
-  analyzer, remote GDB support, deterministic save states, input
-  recording/replay, and headless screenshot/frame-dump capture -- the
-  deterministic core makes every replay byte-identical.
+- **Tooling**: an in-window debugger that can step backwards, an
+  interactive chip-bus frame analyzer, remote GDB support, deterministic
+  save states, input recording/replay, and headless screenshot/frame-dump
+  capture -- the deterministic core makes every replay byte-identical.
 
 ## Requirements
 
