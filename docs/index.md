@@ -11,14 +11,14 @@ abstract: |
 # Copperline
 
 Copperline is a cycle-driven Commodore Amiga emulator (OCS, ECS, and AGA)
-written in Rust. It models the hardware -- the 68000-family CPU, Agnus,
-Denise, Paula, the CIAs, the floppy subsystem, and the chip bus that ties
-them together -- rather than patching around individual software titles. The
-chip bus is arbitrated per colour clock, the Copper and blitter are scheduled
+written in Rust. Cycle-driven means the whole machine -- the 68000-family
+CPU, Agnus, Denise, Paula, the CIAs, the floppy subsystem, and the chip bus
+that ties them together -- advances on one colour-clock timeline: the chip
+bus is arbitrated per colour clock, the Copper and blitter are scheduled
 per DMA slot with the hardware bus sequences, and 68000
-interrupt-recognition latency is modelled. That timing discipline is what
-lets it run the current cycle-sensitive OCS and AGA regression set, as well
-as Kickstart, Workbench, games, and CDTV/CD32 titles.
+interrupt-recognition latency is modelled. That timing model is what lets
+it run the current cycle-sensitive OCS and AGA regression set, as well as
+Kickstart, Workbench, games, and CDTV/CD32 titles.
 
 The project home is [copperline.dev](https://copperline.dev/); the source
 lives on [GitHub](https://github.com/LinuxJedi/Copperline).
@@ -59,5 +59,6 @@ Two rules shape every change in Copperline:
    chip behaviour; software titles appear only as regression examples.
 2. **Determinism.** The emulated core is deterministic and independent of
    the host: a headless unthrottled run and a real-time windowed run produce
-   the same emulated result when given the same inputs and media. Headless
-   captures are reproducible by construction.
+   the same emulated result when given the same inputs and media. That is
+   what makes headless captures reproducible, and it is also what lets the
+   debugger step backwards.
