@@ -1166,26 +1166,31 @@ impl ControlState {
         };
         // The displayed picture position is quantized to the fetch-period
         // grid (one FMODE gulp per plane). The DMA sequencer itself starts at
-        // the revision-masked DDFSTRT comparator value, but the shifter
-        // consumes data in whole 1/2/4-word gulps, so a DDFSTRT moved within
-        // one gulp changes how much tail data is fetched without necessarily
-        // moving the visible picture. With
-        // FMODE=0 the gulp equals the DDF granularity and nothing changes
-        // (boot-screen insert-disk art is drawn for the continuous placement:
-        // its negative modulos overlap rows so the hand/disk's right edge
-        // lives in the next row's first bytes - the calibrated FMODE=0 anchors
-        // must stay). With wide FMODE fetches system software programs DDFSTRT
-        // $38 or $3C interchangeably (same 16-cck gulp slot, BPLCON1=0), and
-        // its interleaved-bitmap modulos expect exactly the visible row width
-        // in the window - without the placement quantization, the fetch overrun
-        // displayed inside the window's right edge as the next plane's row
-        // start. The placement grid anchor is the colour-clock origin, not the
-        // hard DDF start $18.
+        // the revision-masked DDFSTRT comparator value, but Denise's shifter
+        // reloads on its own fixed grid, so data fetched off-grid waits for
+        // the NEXT reload slot: FMODE=0 placement rounds UP to the gulp grid.
+        // Hardware-verified on the arosddf1 A500 ECS photo: the DDFSTRT $3C
+        // lo-res picture sits at the $40 reload slot relative to the
+        // copper-anchored ruler dashes (both ruler ends agree), one full
+        // 8-cck unit right of a floor-aligned placement. On-grid starts
+        // ($30/$38 lo-res, $3C hi-res - every previously calibrated case,
+        // including the boot-screen insert-disk art) are unchanged by
+        // rounding direction. With wide FMODE fetches system software
+        // programs DDFSTRT $38 or $3C interchangeably (same 16-cck gulp
+        // slot, BPLCON1=0), and its interleaved-bitmap modulos expect
+        // exactly the visible row width in the window; the wide grids keep
+        // their calibrated floor alignment. The placement grid anchor is the
+        // colour-clock origin, not the hard DDF start $18.
         let align = |hpos: i32| -> i32 {
             let gulp = self.fetch_period() as i32;
+            let aligned = if self.fetch_quantum() == 1 {
+                hpos.div_euclid(gulp) * gulp + if hpos.rem_euclid(gulp) != 0 { gulp } else { 0 }
+            } else {
+                hpos.div_euclid(gulp) * gulp
+            };
             // Clamped to the DDF hard start: placement before the first usable
             // fetch position is not visible.
-            (hpos.div_euclid(gulp) * gulp).max(BITPLANE_DDF_HARD_START as i32)
+            aligned.max(BITPLANE_DDF_HARD_START as i32)
         };
         let ddf_native_shift = (align(effective_ddf_start_hpos(
             self.agnus_revision,

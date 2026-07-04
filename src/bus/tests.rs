@@ -4487,11 +4487,13 @@ fn beam_timed_bplcon0_lowres_widens_later_bitplane_pixels() {
     let mut fb = vec![0; FB_PIXELS];
     bitplane::render(&mut bus, &mut fb);
 
-    // Content columns sit 2 fb px right of the hardware window edge
-    // (bitmap positions are beam-anchored; STANDARD_VISIBLE_X0 moved to 62).
-    assert_eq!(fb[STANDARD_VISIBLE_X0 + 32], rgb12_to_rgba8(0x0000));
-    assert_eq!(fb[STANDARD_VISIBLE_X0 + 34], rgb12_to_rgba8(0x0F00));
-    assert_eq!(fb[STANDARD_VISIBLE_X0 + 35], rgb12_to_rgba8(0x0F00));
+    // The lo-res reinterpretation places the picture on the lo-res shifter
+    // reload grid: DDFSTRT $3C rounds UP to the $40 slot (hardware-verified
+    // on the arosddf1 ECS photo), so the widened word-1 bit sits one 8-cck
+    // unit right of a floor-aligned placement.
+    assert_eq!(fb[STANDARD_VISIBLE_X0 + 64], rgb12_to_rgba8(0x0000));
+    assert_eq!(fb[STANDARD_VISIBLE_X0 + 66], rgb12_to_rgba8(0x0F00));
+    assert_eq!(fb[STANDARD_VISIBLE_X0 + 67], rgb12_to_rgba8(0x0F00));
 }
 
 #[test]
