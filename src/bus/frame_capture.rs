@@ -320,7 +320,7 @@ impl Bus {
         vpos >= self.current_frame_visible_start_vpos
             && beam_y >= vstart
             && beam_y < vstop
-            && hpos >= SPRITE_DMA_PAIR_CAPTURE_HPOS[sprite / 2]
+            && hpos >= SPRITE_DMA_SLOT1_HPOS[sprite]
     }
 
     pub(super) fn latch_display_sprite_register_data_stream_at(
@@ -334,7 +334,7 @@ impl Bus {
         if beam_y >= frame_lines {
             return;
         }
-        let fetch_slot = SPRITE_DMA_PAIR_CAPTURE_HPOS[sprite / 2];
+        let fetch_slot = SPRITE_DMA_SLOT1_HPOS[sprite];
         let stream_start = if hpos >= fetch_slot {
             beam_y.saturating_add(1)
         } else {
@@ -470,9 +470,8 @@ impl Bus {
         let in_window = beam_y >= control.vstart && beam_y < control.vstop;
         let sprite_dma_enabled =
             dmacon & (DMACON_DMAEN | DMACON_SPREN) == (DMACON_DMAEN | DMACON_SPREN);
-        let reaches_current_fetch_slot = beam_y == control.vstart
-            && hpos <= SPRITE_DMA_PAIR_CAPTURE_HPOS[sprite / 2]
-            && sprite_dma_enabled;
+        let reaches_current_fetch_slot =
+            beam_y == control.vstart && hpos <= SPRITE_DMA_SLOT1_HPOS[sprite] && sprite_dma_enabled;
         let keep_held_line =
             !sprite_dma_enabled && in_window && state.data_dma_active && state.last_line.is_some();
         let keep_active_dma_line =
@@ -545,7 +544,7 @@ impl Bus {
         } else {
             (beam_y - control.vstart) as u32
         };
-        if beam_y >= control.vstart && hpos > SPRITE_DMA_PAIR_CAPTURE_HPOS[sprite / 2] {
+        if beam_y >= control.vstart && hpos > SPRITE_DMA_SLOT1_HPOS[sprite] {
             line = line.saturating_add(1);
         }
         let line = if sprite_scan_doubled(self.agnus.fmode()) {
@@ -748,7 +747,7 @@ impl Bus {
             .collect();
         let mut idx = 0;
         for vpos in 0..display_start {
-            for (pair, &capture_hpos) in SPRITE_DMA_PAIR_CAPTURE_HPOS.iter().enumerate() {
+            for (sprite, &capture_hpos) in SPRITE_DMA_SLOT1_HPOS.iter().enumerate() {
                 while idx < writes.len()
                     && (writes[idx].0 < vpos
                         || (writes[idx].0 == vpos && writes[idx].1 < capture_hpos))
@@ -770,7 +769,7 @@ impl Bus {
                 if self.sprite_dma_inhibited_by_vertical_blank_at(vpos) {
                     continue;
                 }
-                for sprite in pair * 2..pair * 2 + 2 {
+                {
                     if sprite_dma_disabled_by_bitplane_ddf(
                         sprite,
                         self.agnus.revision(),
@@ -840,26 +839,21 @@ impl Bus {
         vpos: u32,
         old_hpos: u32,
         new_hpos: u32,
+        old_emulated_cck: u64,
     ) {
-        // No sprite DMA pair slot lies in [old_hpos, new_hpos): nothing below
-        // can run (the per-pair loop checks the same window), so skip the
+        // No sprite DMA slot lies in [old_hpos, new_hpos): nothing below can
+        // run (the per-sprite loop checks the same window), so skip the
         // sprite-state scan on the vast majority of beam advances.
-        if old_hpos > SPRITE_DMA_PAIR_CAPTURE_HPOS[3] || new_hpos <= SPRITE_DMA_PAIR_CAPTURE_HPOS[0]
-        {
+        if old_hpos > SPRITE_DMA_SLOT1_HPOS[7] || new_hpos <= SPRITE_DMA_SLOT1_HPOS[0] {
             return;
         }
         if self.sprite_dma_inhibited_by_vertical_blank_at(vpos) {
             return;
         }
-        let sprite_dma_enabled =
-            self.agnus.dmacon & (DMACON_DMAEN | DMACON_SPREN) == (DMACON_DMAEN | DMACON_SPREN);
         let sprite_vertical_bar_active = self
             .display_dma_sprite_state
             .iter()
             .any(|state| state.data_dma_active && state.last_line.is_some());
-        if !sprite_dma_enabled && !sprite_vertical_bar_active {
-            return;
-        }
         let Some(fb_y) = visible_framebuffer_y(
             vpos,
             self.current_frame_visible_start_vpos,
@@ -875,15 +869,27 @@ impl Bus {
         let mut fetched_lines = 0usize;
         let bitplane_bplcon0 = self.effective_bitplane_bplcon0();
         let bitplane_dmacon = self.effective_bitplane_dmacon();
-        for (pair, &capture_hpos) in SPRITE_DMA_PAIR_CAPTURE_HPOS.iter().enumerate() {
+        for (sprite, &capture_hpos) in SPRITE_DMA_SLOT1_HPOS.iter().enumerate() {
             if old_hpos > capture_hpos || new_hpos <= capture_hpos {
+                continue;
+            }
+            // SPREN is sampled by each sprite's own DMA slot (the sprena/
+            // sprdis vAmigaTS sweeps step DMACON writes in two-colour-clock
+            // increments around individual slots), honouring the DMACON
+            // write commit delay.
+            let slot_cck =
+                old_emulated_cck.saturating_add(u64::from(capture_hpos.saturating_sub(old_hpos)));
+            let sprite_dma_enabled = self.effective_bitplane_dmacon_at(slot_cck)
+                & (DMACON_DMAEN | DMACON_SPREN)
+                == (DMACON_DMAEN | DMACON_SPREN);
+            if !sprite_dma_enabled && !sprite_vertical_bar_active {
                 continue;
             }
             if sprite_dma_enabled {
                 pair_slots += 1;
             }
             let mut captured_line = false;
-            for sprite in pair * 2..pair * 2 + 2 {
+            {
                 if sprite_dma_disabled_by_bitplane_ddf(
                     sprite,
                     self.agnus.revision(),

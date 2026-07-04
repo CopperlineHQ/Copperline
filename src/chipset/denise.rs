@@ -274,14 +274,29 @@ impl BitplaneMode {
             };
         }
         let display_planes = if shres { code.min(2) } else { code.min(6) };
-        let dma_planes = if code == 7 && !hires && !shres {
-            // OCS lowres BPU=7 is an overprogrammed fetch mode: Denise can
-            // still decode six BPLDAT latches, but Agnus only schedules the
-            // first four bitplane DMA streams. Higher planes display their
-            // current BPLDAT latch values until software updates them.
+        // Agnus's fetch-unit table schedules at most 4 plane streams in
+        // hi-res and 2 in SHRES; overprogrammed counts fetch NOTHING there
+        // (hardware-verified: the invplanes1 A500 photo shows no fetch for
+        // hi-res BPU=7). Lo-res BPU=7 is the overprogrammed 4-plane fetch:
+        // Denise still decodes six BPLDAT latches, but only the first four
+        // streams are fed by DMA; higher planes display their current
+        // latch values until software updates them.
+        let dma_planes = if shres {
+            if code <= 2 {
+                code
+            } else {
+                0
+            }
+        } else if hires {
+            if code <= 4 {
+                code
+            } else {
+                0
+            }
+        } else if code == 7 {
             4
         } else {
-            display_planes
+            code
         };
         Self {
             display_planes,

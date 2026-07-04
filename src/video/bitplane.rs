@@ -3679,6 +3679,16 @@ pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
             if captured_row.is_none() && !control.bitplane_dma_enabled() {
                 continue;
             }
+            // Denise's playfield output arms on BPL1DAT loads. A mode whose
+            // fetch table carries no plane streams at all (overprogrammed
+            // hi-res/SHRES BPU) never loads BPL1DAT, so nothing displays -
+            // the non-DMA planes' latches are not painted on their own
+            // (hardware-verified: the invplanes1 A500 photo shows black for
+            // hi-res BPU=7 despite armed BPL5DAT/BPL6DAT latches). Manual
+            // BPL1DAT writes still display through the manual-BPL replay.
+            if captured_row.is_none() && dma_planes == 0 {
+                continue;
+            }
             for (plane, words) in row_words.iter_mut().enumerate() {
                 words.clear();
                 if plane < nplanes {

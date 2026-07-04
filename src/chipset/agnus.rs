@@ -536,15 +536,27 @@ pub fn bitplane_dma_planes(bplcon0: u16, aga: bool) -> usize {
         // OCS lowres BPU=7 overfetch quirk does not apply.
         return if bplcon0 & 0x0010 != 0 { 8 } else { code };
     }
-    let display_planes = if bitplane_shres(bplcon0) {
-        code.min(2)
-    } else {
-        code.min(6)
-    };
-    if code == 7 && !bitplane_hires(bplcon0) && !bitplane_shres(bplcon0) {
+    // OCS/ECS fetch-unit table (hardware-verified: the invplanes1 A500
+    // photo shows no fetch at all for hi-res BPU>4): lo-res BPU=7 is the
+    // overprogrammed 4-plane fetch, hi-res schedules at most 4 plane
+    // streams (BPU 5-7 fetch nothing), SHRES at most 2 (BPU 3-7 fetch
+    // nothing).
+    if bitplane_shres(bplcon0) {
+        if code <= 2 {
+            code
+        } else {
+            0
+        }
+    } else if bitplane_hires(bplcon0) {
+        if code <= 4 {
+            code
+        } else {
+            0
+        }
+    } else if code == 7 {
         4
     } else {
-        display_planes
+        code
     }
 }
 

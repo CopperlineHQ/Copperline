@@ -262,7 +262,10 @@ const CLXDAT_SPRITE_PLAYFIELD_MASK: u16 = 0x01FE;
 const CLXDAT_SPRITE_SPRITE_MASK: u16 = 0x7E00;
 const BITPLANE_DDF_HARD_START: u16 = 0x0018;
 const BITPLANE_DDF_HARD_STOP: u16 = 0x00D8;
-const SPRITE_DMA_PAIR_CAPTURE_HPOS: [u32; 4] = [0x018, 0x020, 0x028, 0x030];
+/// First DMA slot colour clock of each sprite channel (the POS/DATA word;
+/// the CTL/DATB word follows two clocks later). Hardware slot chart (and
+/// vAmiga's DAS table): sprite N fetches at $15+4N / $17+4N.
+const SPRITE_DMA_SLOT1_HPOS: [u32; 8] = [0x15, 0x19, 0x1D, 0x21, 0x25, 0x29, 0x2D, 0x31];
 const NANOS_PER_SECOND: u128 = 1_000_000_000;
 const VIDEO_FETCH_TIMING_SAMPLE_RATE: u128 = 128;
 const VIDEO_COLLISION_TIMING_SAMPLE_RATE: u128 = 16;
