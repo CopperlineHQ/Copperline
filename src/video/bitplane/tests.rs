@@ -5448,6 +5448,47 @@ fn denise_playfield_output_selects_ehb_ham_and_dual_playfield_colors() {
     );
 }
 
+#[test]
+fn ham_dual_playfield_runs_the_resolved_index_through_ham() {
+    // The invalid HAM + dual-playfield combination (both BPLCON0 bits set --
+    // no real software does this) resolves the dual-playfield colour index
+    // and then runs it through the HAM logic: the HAM control code comes from
+    // the raw plane 5/6 bits while the value nibble is the resolved index.
+    // Matches vAmiga (translateDPF writes the resolved index, colorizeHAM
+    // takes the control from the raw bitplane bits); exact on vAmigaTS
+    // Denise/BPLCON0/modes4.
+    let mut palette = Palette::new();
+    palette.write_ocs(9, 0x0456);
+    let control = ControlState {
+        bplcon0: 0x6C00, // BPU6 + HAM + dual playfield
+        bplcon3: BPLCON3_PF2OF_DEFAULT,
+        ..ControlState::default()
+    };
+    assert!(control.hold_and_modify() && control.dual_playfield());
+
+    // Planes 5 and 6 clear -> HAM "set": plane 2 resolves to PF2 index 1 at
+    // the default PF2 palette offset 8 (entry 9), shown directly, exactly as
+    // the plain dual-playfield path would.
+    let mut ham_color = rgb12_to_rgb24(0x0ABC);
+    assert_eq!(
+        denise_playfield_output(control, palette, 0x02, &mut ham_color),
+        DenisePlayfieldOutput {
+            color: rgb12_to_rgb24(0x0456),
+            color_latch: 0x0456,
+            pf_mask: 2,
+        }
+    );
+
+    // Plane 5 set supplies the HAM "modify blue" control code; the value
+    // nibble is the resolved PF1 index (planes 1/3/5 -> plane 5 only -> 4),
+    // so only the blue nibble of the held colour changes.
+    let mut ham_color = rgb12_to_rgb24(0x0ABC);
+    assert_eq!(
+        denise_playfield_output(control, palette, 0x12, &mut ham_color).color,
+        rgb12_to_rgb24(0x0AB4),
+    );
+}
+
 /// Plan 3.3: the Lisa resolution path. BPLAM XORs the pixel index,
 /// HAM8 modifies six bits per component, EHB halves in 8-bit space,
 /// and palette lookups read the full 24-bit banked store.

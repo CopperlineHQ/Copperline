@@ -229,6 +229,26 @@ pub(super) fn denise_playfield_output(
     }
 
     if control.hold_and_modify() {
+        if control.dual_playfield() {
+            // Invalid HAM + dual-playfield combination. Denise resolves the
+            // dual-playfield colour index and then runs it through the HAM
+            // logic: the HAM control code still comes from the raw plane-5/6
+            // bits, but the value nibble (and the "set" palette index) is the
+            // dual-playfield-resolved index, not the raw plane bits (vAmiga
+            // translateDPF writes mBuffer with the resolved index, then
+            // colorizeHAM takes the control from dBuffer bits 4-5). No real
+            // software sets both bits; regression coverage is vAmigaTS
+            // Denise/BPLCON0/modes4 and invprio3.
+            let (pf_mask, color_idx) = dual_playfield_pixel(idx, control);
+            let ham_code = ((idx >> 4) & 0x03) << 4 | ((color_idx as u8) & 0x0F);
+            let previous = rgb24_to_rgb12_hi(*ham_color);
+            *ham_color = rgb12_to_rgb24(ham6_rgb12(palette, ham_code, previous));
+            return DenisePlayfieldOutput {
+                color: *ham_color,
+                color_latch: palette.get(color_idx).copied().unwrap_or(0),
+                pf_mask,
+            };
+        }
         let previous = rgb24_to_rgb12_hi(*ham_color);
         *ham_color = rgb12_to_rgb24(ham6_rgb12(palette, idx, previous));
         return DenisePlayfieldOutput {
