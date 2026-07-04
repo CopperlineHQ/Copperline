@@ -374,6 +374,16 @@ impl crate::zorro_device::ZorroDevice for A2091 {
         Self::write(self, off, size, value, host.memory_mut())
     }
 
+    fn peek_word(&self, off: u32) -> Option<u16> {
+        // Only the boot ROM half of the window is side-effect-free; the
+        // DMAC/SBIC registers below ROM_OFFSET stay opaque to peeks.
+        let off = (off & !1) as usize;
+        (off >= ROM_OFFSET as usize).then(|| {
+            let mask = self.rom.len() - 1;
+            (u16::from(self.rom[off & mask]) << 8) | u16::from(self.rom[(off + 1) & mask])
+        })
+    }
+
     fn tick(&mut self, cck: u32, host: &mut crate::zorro_device::DeviceHost) {
         Self::tick(self, cck, host.memory_mut())
     }
@@ -491,6 +501,21 @@ mod tests {
             }
         }
         panic!("no INT2");
+    }
+
+    #[test]
+    fn peek_serves_rom_and_leaves_registers_opaque() {
+        use crate::zorro_device::ZorroDevice;
+        let rom = fake_rom();
+        let board = A2091::new(rom.clone()).unwrap();
+        // ROM half of the window (>= ROM_OFFSET): debugger peeks read the
+        // same bytes a CPU read would (scsi.device names live here).
+        let off = ROM_OFFSET + 0xA9;
+        let want =
+            (u16::from(rom[(off & !1) as usize]) << 8) | u16::from(rom[(off as usize & !1) + 1]);
+        assert_eq!(ZorroDevice::peek_word(&board, off), Some(want));
+        // Register half: opaque to side-effect-free peeks.
+        assert_eq!(ZorroDevice::peek_word(&board, 0x40), None);
     }
 
     #[test]

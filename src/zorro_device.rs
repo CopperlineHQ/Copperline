@@ -203,6 +203,14 @@ pub trait ZorroDevice {
     /// Write `size` bytes of `value` at window offset `off`.
     fn write(&mut self, off: u32, size: usize, value: u32, host: &mut DeviceHost);
 
+    /// Side-effect-free debugger peek of the word at window offset `off`:
+    /// what a read would return where that is knowable without disturbing
+    /// device state (e.g. boot ROM), None elsewhere (live registers).
+    fn peek_word(&self, off: u32) -> Option<u16> {
+        let _ = off;
+        None
+    }
+
     /// Advance the device by `cck` colour clocks.
     fn tick(&mut self, cck: u32, host: &mut DeviceHost);
 
@@ -272,6 +280,14 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::A2091(d) => ZorroDevice::write(d, off, size, value, host),
             BoardDevice::A2065(d) => ZorroDevice::write(d, off, size, value, host),
             BoardDevice::Wasm(d) => ZorroDevice::write(d, off, size, value, host),
+        }
+    }
+
+    fn peek_word(&self, off: u32) -> Option<u16> {
+        match self {
+            BoardDevice::A2091(d) => ZorroDevice::peek_word(d, off),
+            BoardDevice::A2065(d) => ZorroDevice::peek_word(d, off),
+            BoardDevice::Wasm(d) => ZorroDevice::peek_word(d, off),
         }
     }
 
