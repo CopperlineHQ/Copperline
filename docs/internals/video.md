@@ -31,17 +31,20 @@ pipeline carries 24-bit colour end to end; OCS/ECS paths keep their exact
 under playfield priority, and CLXDAT collisions are accumulated.
 For DMA-fetched HAM playfields, the display window gates framebuffer output
 and collision recording, but the low-res Denise phase can still seed the HAM
-component history just before DIW: standard `$38` DDF timing starts the first
-visible output one native sample into the fetched stream, so replay
-pre-advances that hidden sample before painting the DIW edge. Extra fetch
+component history just before DIW: when the window opens to the right of the
+fetch origin (a late DIWSTRT, or an early DDFSTRT), replay pre-advances the
+hidden samples before painting the DIW edge. The standard `$81` window edge
+is flush with the standard `$38` picture (both at framebuffer x 62,
+hardware-verified on the sblit0 A500 photo), so a stock screen hides no
+samples. Extra fetch
 groups from an earlier DDFSTRT are not decoded into the HAM hold colour before
 DIW opens; they are fetched by Agnus, but the first visible HAM history is
 bounded to the display-phase samples. Single-word lo-res fetch placement is linear in DDFSTRT: each 8-cck fetch
 period before the standard `$38` slot moves the picture exactly 16 lo-res
-pixels left, keeping the standard one-sample phase bias (hardware-verified
+pixels left (hardware-verified
 against the vAmigaTS `Agnus/DIW/OLDDIW/diw1` A500 photos, OCS and ECS).
-Early and late single-word lo-res DDF both keep the standard DIW `$81`
-one-sample phase; the renderer must not add or subtract a sample just to
+Early and late single-word lo-res DDF keep the picture beam-anchored;
+the renderer must not add or subtract a sample just to
 align the picture to a fetch-unit boundary.
 When DDFSTRT is late enough that DIW opens before DMA has delivered the
 first BPL1DAT word for the row, playfield output remains border-colour until
@@ -139,9 +142,11 @@ The mapping from beam coordinates to framebuffer x is anchored by
 constants that encode the hardware's fetch-to-display pipeline delays --
 register writes, palette writes, and bitplane data each land at their own
 documented offset, and the bitplane fetch reference differs between lo-res
-and hi-res. A standard hi-res `$81` DIW with `$3C` DDF starts its 640 fetched
-pixels at the display-window edge; there is no four-pixel leading border
-inside the window. Wide-FMODE DMA fetches start from the revision-masked
+and hi-res. The display-window comparator maps a DIWSTRT hstart H to
+framebuffer x = 2H - 196 (hardware-verified against the sblit0 A500 photo).
+A standard lo-res `$81`/`$38` picture is flush with that edge; a standard
+hi-res `$81`/`$3C` picture starts its 640 fetched pixels one lo-res pixel
+inside the window (matching vAmiga), with no wider leading border. Wide-FMODE DMA fetches start from the revision-masked
 DDFSTRT comparator value and complete whole units, but the displayed shifter
 origin is still quantized by the FMODE fetch gulp; the renderer keeps those
 two effects separate. Denise's output line starts at the horizontal blanking

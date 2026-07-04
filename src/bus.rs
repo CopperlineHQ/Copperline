@@ -228,20 +228,24 @@ const PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS: u32 = 0x19;
 const NTSC_SPRITE_DMA_FIRST_ACTIVE_VPOS: u32 = 0x14;
 const RENDER_VISIBLE_LINES: usize = FB_HEIGHT;
 const RENDER_FRAMEBUFFER_WIDTH: i32 = FB_WIDTH as i32;
-// Capture-side twin of `bitplane::DIW_HSTART_FB0`; held 8 colour clocks (16
-// lo-res pixels) left of the standard display start so the captured window
-// matches vAmiga's 716-wide cutout and includes the deep-left overscan.
-const RENDER_DIW_HSTART_FB0: i32 = 0x61;
+// Capture-side twin of `bitplane::DIW_HSTART_FB0`; held deep left of the
+// standard display start so the captured window matches vAmiga's 716-wide
+// cutout and includes the deep-left overscan. Like the renderer twin, this
+// puts the hardware-verified standard $81 window edge (and the sprite
+// comparator positions, which share Denise's counter) at framebuffer x = 62.
+const RENDER_DIW_HSTART_FB0: i32 = 0x62;
 // Standard DIWSTRT $81 is the visible window edge. The first standard
 // bitplane sample at DDFSTRT $38 is already one lowres native sample into the
 // fetched word, so the fetch/output phase is referenced one color clock earlier.
 //
 // Capture-side twins of `bitplane::DIW_HSTART_FETCH_REFERENCE_*`. The hi-res
 // fetch/display phase sits 3 colour clocks earlier than lo-res, so the
-// reference differs by resolution (lo-res $80, hi-res $83). See the bitplane
-// constant docs for the vAmiga-verified rationale.
-const RENDER_DIW_HSTART_FETCH_REFERENCE_LORES: i32 = 0x80;
-const RENDER_DIW_HSTART_FETCH_REFERENCE_HIRES: i32 = 0x83;
+// reference differs by resolution (lo-res $81, hi-res $84). Moved +1 in
+// lockstep with RENDER_DIW_HSTART_FB0 so captured bitmap positions stay at
+// their hardware-calibrated framebuffer columns. See the bitplane constant
+// docs for the vAmiga-verified rationale.
+const RENDER_DIW_HSTART_FETCH_REFERENCE_LORES: i32 = 0x81;
+const RENDER_DIW_HSTART_FETCH_REFERENCE_HIRES: i32 = 0x84;
 // Capture-side twin of `bitplane::COPPER_WAIT_HPOS_FB0`; moved left by 8 colour
 // clocks in lockstep with RENDER_DIW_HSTART_FB0.
 const RENDER_COPPER_WAIT_HPOS_FB0: u32 = 0x28;
