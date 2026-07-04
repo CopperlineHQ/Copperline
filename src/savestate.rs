@@ -76,7 +76,9 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      replaces the value-range DDF window for FMODE=0 fetches
 //  16: CapturedBitplaneRow gained fetch_origin_cck (the sequencer run origin
 //      for rows whose fetch diverges from the register-derived window)
-pub const STATE_VERSION: u32 = 16;
+//  17: DisplaySpriteDmaState gained the two-slot sprite fetch fields
+//      (data_words_fetched pointer progression, pending_data)
+pub const STATE_VERSION: u32 = 17;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

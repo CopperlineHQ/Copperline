@@ -47,6 +47,17 @@ Alice adds the FMODE wide-fetch latch, which scales the bitplane and
 sprite fetch quanta (FMODE=0 stays byte-identical to the OCS/ECS slot
 timing).
 
+A sprite line's two DMA slots ($15+4N and $17+4N) are evaluated at their
+own colour clocks: the first slot runs the line's descriptor/arming logic
+and samples the DATA word(s) at that slot's beam time, the second samples
+DATB at its own beam time and assembles the display line, so chip RAM
+rewritten between the two slots is seen by DATB but not DATA. DMACON's
+SPREN is sampled by each slot individually, so a mid-line edge fetches
+exactly one word of the pair; the skipped word's slot leaves SPRxPT one
+fetch behind and the data stream shifts accordingly, while the display
+line reuses the stale latch on that side (a missed DATA slot never arms
+the sprite).
+
 Sprite DMA retains its latched POS/CTL descriptor independently from the
 SPRxPT registers while a sprite data stream is active or waiting for VSTART.
 Standard PAL/NTSC hard vertical blank inhibits sprite DMA at the top of the
