@@ -350,6 +350,7 @@ impl Bus {
                     );
                 }
                 self.denise.diwstrt = val;
+                self.ddf_seq_invalidate_line();
                 self.ocs_same_line_diw_start_blocked_vpos = None;
                 // ECS DIWHIGH only supplies the window MSBs when it is written
                 // *after* DIWSTRT/DIWSTOP (HRM p.306). A later DIWSTRT/DIWSTOP
@@ -382,6 +383,7 @@ impl Bus {
                     );
                 }
                 self.denise.diwstop = val;
+                self.ddf_seq_invalidate_line();
                 self.denise.diwhigh_written = false;
                 if self.ocs_same_line_diw_start_blocked_vpos == Some(self.agnus.vpos)
                     && !display_window_contains_vpos(
@@ -415,8 +417,14 @@ impl Bus {
                         val
                     );
                 }
+                let previous = self.denise.ddfstrt;
                 self.denise.ddfstrt = val;
                 self.record_ddfstrt_write_match_miss(val);
+                self.ddf_seq_record_ddf_write(
+                    super::ddf_line::DdfSeqWriteKind::Ddfstrt(val),
+                    previous,
+                    4,
+                );
                 false
             }
             0x094 => {
@@ -429,7 +437,13 @@ impl Bus {
                         val
                     );
                 }
+                let previous = self.denise.ddfstop;
                 self.denise.ddfstop = val;
+                self.ddf_seq_record_ddf_write(
+                    super::ddf_line::DdfSeqWriteKind::Ddfstop(val),
+                    previous,
+                    4,
+                );
                 false
             }
             0x080 => {
@@ -487,6 +501,19 @@ impl Bus {
                 }
                 if self.agnus.dmacon != previous {
                     self.record_bitplane_dmacon_write(previous);
+                    let en = DMACON_DMAEN | DMACON_BPLEN;
+                    let was = previous & en == en;
+                    let is = self.agnus.dmacon & en == en;
+                    if was != is {
+                        self.ddf_seq_record_write(
+                            if is {
+                                super::ddf_line::DdfSeqWriteKind::BmapenSet
+                            } else {
+                                super::ddf_line::DdfSeqWriteKind::BmapenClr
+                            },
+                            2,
+                        );
+                    }
                 }
                 false
             }
@@ -798,6 +825,7 @@ impl Bus {
             0x1DC => {
                 if self.blitter_ecs_registers_enabled() {
                     self.agnus.write_beamcon0(val);
+                    self.ddf_seq_invalidate_line();
                     self.refresh_paula_audio_min_period();
                     if val & BEAMCON0_DUAL != 0 && !self.uhres_dual_warned {
                         log::warn!(
@@ -938,6 +966,7 @@ impl Bus {
                 self.agnus.set_ersy(val & 0x0002 != 0);
                 if self.denise.bplcon0 != previous {
                     self.record_bitplane_bplcon0_write(previous);
+                    self.ddf_seq_record_bplcon0_write(self.denise.bplcon0, previous, 3);
                 }
                 false
             }
@@ -1099,6 +1128,7 @@ impl Bus {
                 if self.denise_ecs_registers() {
                     self.denise.diwhigh = val;
                     self.denise.diwhigh_written = true;
+                    self.ddf_seq_invalidate_line();
                 }
                 false
             }

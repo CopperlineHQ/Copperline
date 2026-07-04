@@ -205,7 +205,7 @@ impl AudioSink for CollectAudio {
     fn flush(&mut self) {}
 }
 
-fn empty_bus() -> Bus {
+pub(super) fn empty_bus() -> Bus {
     empty_bus_with_chip_ram(512 * 1024)
 }
 
@@ -2714,10 +2714,11 @@ fn bitplane_dma_capture_clips_ddfstart_to_hard_fetch_window() {
 
     bus.advance_chipset(10);
 
-    let row = bus.frame_captured_bitplane_rows()[0].as_ref().unwrap();
-    assert_eq!(row.words_per_row, 1);
-    assert_eq!(row.planes[0], vec![0x1111]);
-    assert_eq!(bus.display_dma_bplpt[0], 0x0102);
+    // Flop model: the DDFSTRT comparator at $10 fires while the hardware
+    // start window (SHW, $18) is still down, so OCS never starts a run;
+    // the old value-window model clamped the start to $18 and fetched.
+    assert!(bus.frame_captured_bitplane_rows()[0].is_none());
+    assert_eq!(bus.display_dma_bplpt[0], 0x0100);
 }
 
 #[test]
@@ -2785,7 +2786,7 @@ fn wide_fmode_dma_capture_packs_lores_slots_in_fetch_units() {
 }
 
 #[test]
-fn ecs_bitplane_dma_capture_stops_equal_ddf_window_after_one_fetch_cycle() {
+fn ecs_bitplane_dma_capture_extends_equal_ddf_window_to_hard_stop() {
     let mut bus = empty_bus();
     bus.set_agnus_revision(AgnusRevision::Ecs8372Rev4);
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
@@ -2803,10 +2804,15 @@ fn ecs_bitplane_dma_capture_stops_equal_ddf_window_after_one_fetch_cycle() {
 
     bus.advance_chipset(0x00E0 - 0x003E);
 
+    // Flop model: the merged equal DDFSTRT/DDFSTOP strobe starts the run
+    // with no stop pending on ECS too (the stop flop only latches while a
+    // run is up), so the fetch extends to the hardware-stop drain:
+    // 21 units at $38..$DF.
     let row = bus.frame_captured_bitplane_rows()[0].as_ref().unwrap();
-    assert_eq!(row.words_per_row, 1);
-    assert_eq!(row.planes[0], vec![0xCAFE]);
-    assert_eq!(bus.display_dma_bplpt[0], 0x0102);
+    assert_eq!(row.words_per_row, 21);
+    assert_eq!(row.planes[0][0], 0xCAFE);
+    assert_eq!(row.planes[0][1], 0xBEEF);
+    assert_eq!(bus.display_dma_bplpt[0], 0x0100 + 21 * 2);
 }
 
 #[test]
@@ -2829,10 +2835,12 @@ fn bitplane_dmacon_enable_reaches_fetcher_after_two_cck() {
     assert!(!bus.write_custom_word_from(0x096, 0x8000 | DMACON_BPLEN, BeamWriteSource::Cpu));
     bus.advance_chipset(0x0048 - 0x003E);
 
-    let row = bus.frame_captured_bitplane_rows()[0].as_ref().unwrap();
-    assert_eq!(row.words_per_row, 2);
-    assert_eq!(row.planes[0], vec![0x0000, 0x1111]);
-    assert_eq!(bus.display_dma_bplpt[0], 0x0102);
+    // The enable reaches the sequencer two colour clocks after the write,
+    // at $40 - the same strobe as the DDFSTOP match, which clears the
+    // latched BPHSTART before the BMAPEN logic evaluates: no run starts
+    // (flop model; the earlier $3F slot stayed idle either way).
+    assert!(bus.frame_captured_bitplane_rows()[0].is_none());
+    assert_eq!(bus.display_dma_bplpt[0], 0x0100);
 }
 
 #[test]
@@ -2855,9 +2863,12 @@ fn bitplane_dmacon_clear_reaches_fetcher_after_two_cck() {
     assert!(!bus.write_custom_word_from(0x096, DMACON_BPLEN, BeamWriteSource::Cpu));
     bus.advance_chipset(0x0048 - 0x003E);
 
+    // The clear reaches the sequencer two colour clocks after the write
+    // ($40) and drops BPRUN immediately: the DDFSTOP drain unit does not
+    // run, so only the $3F fetch of the first unit happened.
     let row = bus.frame_captured_bitplane_rows()[0].as_ref().unwrap();
-    assert_eq!(row.words_per_row, 2);
-    assert_eq!(row.planes[0], vec![0x1111, 0x0000]);
+    assert_eq!(row.words_per_row, 1);
+    assert_eq!(row.planes[0], vec![0x1111]);
     assert_eq!(bus.display_dma_bplpt[0], 0x0102);
 }
 
@@ -2907,9 +2918,12 @@ fn bitplane_bplcon0_clear_reaches_fetcher_after_three_cck() {
     assert!(!bus.write_custom_word_from(0x100, 0x0000, BeamWriteSource::Cpu));
     bus.advance_chipset(0x0048 - 0x003D);
 
+    // The BPLCON0 clear reaches the sequencer three colour clocks after the
+    // write ($40): the DDFSTOP drain unit still runs, but with zero planes
+    // it carries no fetch slots, so only the $3F fetch happened.
     let row = bus.frame_captured_bitplane_rows()[0].as_ref().unwrap();
-    assert_eq!(row.words_per_row, 2);
-    assert_eq!(row.planes[0], vec![0x1111, 0x0000]);
+    assert_eq!(row.words_per_row, 1);
+    assert_eq!(row.planes[0], vec![0x1111]);
     assert_eq!(bus.display_dma_bplpt[0], 0x0102);
 }
 
@@ -2988,13 +3002,18 @@ fn bitplane_ddfstrt_write_before_match_starts_current_line() {
     write_chip_word(&mut bus, 0x0100, 0x1111);
     write_chip_word(&mut bus, 0x0102, 0x2222);
 
-    assert!(!bus.write_custom_word_from(0x092, 0x0038, BeamWriteSource::Cpu));
-    bus.advance_chipset(0x0048 - 0x0037);
+    // A DDFSTRT write commits to the comparator four colour clocks after
+    // the write slot (vAmiga's DMA_CYCLES(4) model): written at $37 it is
+    // live from $3B, so a match position of $44 still fires this line. The
+    // run then misses the already-passed $40 stop and extends to the
+    // hardware-stop drain.
+    assert!(!bus.write_custom_word_from(0x092, 0x0044, BeamWriteSource::Cpu));
+    bus.advance_chipset(0x004C - 0x0037);
 
     let row = bus.frame_captured_bitplane_rows()[0].as_ref().unwrap();
-    assert_eq!(row.words_per_row, 2);
-    assert_eq!(row.planes[0], vec![0x1111, 0x2222]);
-    assert_eq!(bus.display_dma_bplpt[0], 0x0104);
+    assert_eq!(row.words_per_row, 19);
+    assert_eq!(row.planes[0][0], 0x1111);
+    assert_eq!(bus.display_dma_bplpt[0], 0x0102);
 }
 
 #[test]
@@ -3020,7 +3039,10 @@ fn bitplane_dma_capture_scans_fetch_window_independent_of_owner_hint() {
     assert_eq!(cck, 1);
     assert_eq!(tick.new_lines, 0);
     let row = bus.frame_captured_bitplane_rows()[0].as_ref().unwrap();
-    assert_eq!(row.planes[0], vec![0xCAFE]);
+    // Equal DDFSTRT/DDFSTOP plans to the hardware-stop drain (21 units);
+    // the $3F fetch executed despite the Idle owner hint.
+    assert_eq!(row.words_per_row, 21);
+    assert_eq!(row.planes[0][0], 0xCAFE);
     assert_eq!(bus.display_dma_bplpt[0], 0x0102);
 }
 
@@ -3050,7 +3072,10 @@ fn bitplane_dma_capture_maps_early_vertical_overscan_to_first_framebuffer_row() 
         RENDER_MIN_OVERSCAN_START_VPOS
     );
     let row = bus.frame_captured_bitplane_rows()[0].as_ref().unwrap();
-    assert_eq!(row.planes[0], vec![0xCAFE]);
+    // Equal DDFSTRT/DDFSTOP plans to the hardware-stop drain; one unit has
+    // fetched so far.
+    assert_eq!(row.words_per_row, 21);
+    assert_eq!(row.planes[0][0], 0xCAFE);
     assert_eq!(bus.display_dma_bplpt[0], 0x0102);
 }
 
@@ -3316,7 +3341,11 @@ fn bitplane_dma_capture_keeps_pal_overscan_bottom_rows() {
     let row = bus.frame_captured_bitplane_rows()[last_overscan_line]
         .as_ref()
         .unwrap();
-    assert_eq!(row.planes[0], vec![0xFACE]);
+    // Equal DDFSTRT/DDFSTOP: the merged strobe starts the run without a
+    // pending stop, so the plan extends to the hardware-stop drain (21
+    // units); only the first unit's fetch has executed at this point.
+    assert_eq!(row.words_per_row, 21);
+    assert_eq!(row.planes[0][0], 0xFACE);
     assert_eq!(bus.display_dma_bplpt[0], 0x0102);
 }
 
@@ -3340,14 +3369,18 @@ fn bitplane_dma_capture_preserves_words_when_ddfstop_extends_same_line() {
     bus.write_custom_word_from(0x094, 0x0040, BeamWriteSource::Cpu);
     bus.advance_chipset(8);
 
+    // The equal start/stop strobe already started a run with no stop
+    // pending, so the plan runs to the hardware-stop drain; the new $40
+    // stop commits at $44, after $40 has passed, and never matches.
     let row = bus.frame_captured_bitplane_rows()[0].as_ref().unwrap();
-    assert_eq!(row.words_per_row, 2);
-    assert_eq!(row.planes[0], vec![0x1111, 0x2222]);
+    assert_eq!(row.words_per_row, 21);
+    assert_eq!(row.planes[0][0], 0x1111);
+    assert_eq!(row.planes[0][1], 0x2222);
     assert_eq!(bus.display_dma_bplpt[0], 0x0104);
 }
 
 #[test]
-fn bitplane_dma_capture_leaves_unfetched_words_zero_when_ddfstop_shrinks_same_line() {
+fn bitplane_ddfstop_shrink_write_commits_too_late_to_cancel_the_match() {
     let mut bus = empty_bus();
     bus.set_agnus_revision(AgnusRevision::Ecs8372Rev4);
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
@@ -3364,13 +3397,16 @@ fn bitplane_dma_capture_leaves_unfetched_words_zero_when_ddfstop_shrinks_same_li
     write_chip_word(&mut bus, 0x0102, 0x2222);
 
     bus.advance_chipset(2);
+    // Written at $40, the new stop commits at $44 - after the old $40
+    // value already matched, so the stop request stands and the drain
+    // unit fetches the second word regardless of the rewrite.
     bus.write_custom_word_from(0x094, 0x0038, BeamWriteSource::Cpu);
     bus.advance_chipset(8);
 
     let row = bus.frame_captured_bitplane_rows()[0].as_ref().unwrap();
     assert_eq!(row.words_per_row, 2);
-    assert_eq!(row.planes[0], vec![0x1111, 0x0000]);
-    assert_eq!(bus.display_dma_bplpt[0], 0x0102);
+    assert_eq!(row.planes[0], vec![0x1111, 0x2222]);
+    assert_eq!(bus.display_dma_bplpt[0], 0x0104);
 }
 
 #[test]
@@ -8269,10 +8305,12 @@ fn bitplane_dma_ownership_clips_ddfstart_to_hard_fetch_window() {
     bus.denise.ddfstop = 0x0018;
     bus.agnus.vpos = 0x40; // inside the default vertical display window
 
+    // Flop model: the DDFSTRT comparator at $10 fires while the hardware
+    // start window (SHW, $18) is still down; OCS starts no run at all.
     bus.agnus.hpos = 0x017;
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Idle);
     bus.agnus.hpos = 0x01F;
-    assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Bitplane);
+    assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Idle);
     bus.agnus.hpos = 0x020;
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Idle);
 }
@@ -8307,6 +8345,9 @@ fn bitplane_dma_ownership_matches_revision_for_equal_ddf_window() {
     assert_eq!(ocs.scheduled_dma_owner(false), ChipBusOwner::Bitplane);
     ocs.agnus.hpos = 0x0E0;
     assert_eq!(ocs.scheduled_dma_owner(false), ChipBusOwner::Idle);
+    // Flop model: ECS behaves like OCS here - the merged equal-value
+    // strobe starts a run with no stop pending, which only the
+    // hardware-stop drain ends.
 
     let mut ecs = empty_bus();
     ecs.set_agnus_revision(AgnusRevision::Ecs8372Rev4);
@@ -8317,6 +8358,10 @@ fn bitplane_dma_ownership_matches_revision_for_equal_ddf_window() {
     ecs.agnus.vpos = 0x40; // inside the default vertical display window
 
     ecs.agnus.hpos = 0x047;
+    assert_eq!(ecs.scheduled_dma_owner(false), ChipBusOwner::Bitplane);
+    ecs.agnus.hpos = 0x0DF;
+    assert_eq!(ecs.scheduled_dma_owner(false), ChipBusOwner::Bitplane);
+    ecs.agnus.hpos = 0x0E0;
     assert_eq!(ecs.scheduled_dma_owner(false), ChipBusOwner::Idle);
 }
 
@@ -8329,11 +8374,17 @@ fn hires_bitplane_dma_ownership_uses_four_cck_fetch_cadence() {
     bus.denise.ddfstop = 0x0040;
     bus.agnus.vpos = 0x40; // inside the default vertical display window
 
+    // Flop model (vAmiga fetch tables): a hires unit carries H4 H2 H3 H1
+    // twice over its 8 colour clocks, so a single-plane display only
+    // reserves the H1 slots at unit offsets 3 and 7; the other clocks are
+    // free for the copper/CPU.
     bus.agnus.hpos = 0x038;
-    assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Bitplane);
-    bus.agnus.hpos = 0x03A;
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Idle);
+    bus.agnus.hpos = 0x03B;
+    assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Bitplane);
     bus.agnus.hpos = 0x03C;
+    assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Idle);
+    bus.agnus.hpos = 0x03F;
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Bitplane);
 }
 

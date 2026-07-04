@@ -28,19 +28,30 @@ order (`fixed_dma_owner_at`, `src/bus.rs`):
 7. **Blitter** -- any remaining slots its schedule claims.
 8. **CPU** -- whatever is left.
 
-The arbiter consults the owner several times per colour clock, so the
-bitplane decision (step 5) memoizes its line-invariant part: the effective
-DDF window, FMODE fetch cadence, and per-plane fetch-order mask live in a
-`BitplaneSlotPlan` keyed on exactly the register inputs that feed them
-(`BitplaneSlotKey`, `src/bus.rs`) and are recomputed only when a register
-write or a write-delay expiry changes the key. The vpos-dependent gates
-(vertical display window, DDFSTRT write miss) are still evaluated live, so
-the memoization cannot change behaviour. Once a line reaches DDFSTRT, the
-arbiter keeps the fetch sequence anchored there but evaluates BPLCON0 at
-each fetch block's first cycle. A later BPLCON0 plane-count increase does
-not claim slots for earlier blocks or advance newly enabled plane pointers
-for those words, but it can claim the matching slots and start advancing
-those pointers on later blocks of the same row.
+For FMODE=0 fetches (OCS/ECS, and AGA with a 1-word fetch quantum) the
+bitplane decision (step 5) is driven by the Agnus DDF sequencer flop model
+(`src/chipset/ddf_sequencer.rs`, walked per line by `src/bus/ddf_line.rs`):
+DDFSTRT and DDFSTOP are comparator EDGES that set/clear flip-flops, not a
+value range. A stop request drains through one final fetch unit (which
+applies the modulos per plane), the hardwired window ($18/$D8, HARDDIS
+relaxes the stop to $E0) gates starts and forces stops, and the flop state
+carries across line boundaries. Missed comparators therefore produce the
+hardware's "old stop" behaviours: a rewritten-too-late DDFSTOP lets the run
+continue to the hardware-stop drain, a DDFSTRT match past $D8 starts a run
+that wraps through horizontal blanking into the next line, and an
+early-blanked DDFSTRT ($10 with SHW still down) never starts on OCS. The
+per-line fetch table is rebuilt when DDFSTRT/DDFSTOP/BPLCON0/DMACON/DIW
+writes land (DDF writes commit to the comparators four colour clocks after
+the write slot; an old DDFSTOP still fires on its commit clock, an old
+DDFSTRT does not - vAmiga's sequencer semantics, hardware-verified in
+aggregate by the vAmigaTS Agnus/DDF/DDF/oldhwstop1-4 A500 photos). A
+mid-row BPLCON0 change switches the fetch-unit slot layout from its commit
+clock; word addressing is unit-based, so late-enabled planes keep their
+word positions and earlier words stay zero.
+Wide-FMODE (quantum > 1) fetches keep the memoized value-window plan: the
+effective DDF window, fetch cadence, and per-plane fetch-order mask live in
+a `BitplaneSlotPlan` keyed on the register inputs (`BitplaneSlotKey`,
+`src/bus.rs`).
 Wide-FMODE lo-res slots are packed into the first eight CCKs of each
 16/32-CCK fetch unit; the rest of the unit remains available to later
 arbitration priorities.

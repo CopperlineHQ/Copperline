@@ -71,7 +71,10 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      and mmu_write_suppress (the RTE DF-cleared completion protocol,
 //      pending across one instruction boundary) and pending_fault_wdata
 //      (the frame's data output buffer)
-pub const STATE_VERSION: u32 = 14;
+//  15: Bus gained the bitplane DDF sequencer flop state (ddf_seq_line_initial,
+//      ddf_seq_line_start_regs, ddf_seq_writes) - the per-line flop walk that
+//      replaces the value-range DDF window for FMODE=0 fetches
+pub const STATE_VERSION: u32 = 15;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

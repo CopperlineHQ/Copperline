@@ -884,6 +884,20 @@ pub struct Bus {
     /// on each hit while keeping the `&self` owner-selection call graph intact.
     #[serde(skip)]
     bitplane_slot_plan_cache: BitplaneSlotPlanCache,
+    /// Bitplane DDF sequencer flop state at the start of the current line
+    /// (see src/bus/ddf_line.rs); carried across lines by the flop walk.
+    ddf_seq_line_initial: std::cell::Cell<crate::chipset::ddf_sequencer::DdfState>,
+    /// DDFSTRT/DDFSTOP values as of the start of the current line (mid-line
+    /// rewrites replay through `ddf_seq_writes`).
+    ddf_seq_line_start_regs: std::cell::Cell<(u16, u16)>,
+    /// (bmapen, bplcon0) as of the start of the current line; used only when
+    /// mid-line DMACON/BPLCON0 writes are in the log.
+    ddf_seq_line_start_ctl: std::cell::Cell<(bool, u16)>,
+    /// Register writes that reached the sequencer during the current line.
+    ddf_seq_writes: std::cell::RefCell<Vec<ddf_line::DdfSeqWrite>>,
+    /// The current line's walked fetch table (rebuilt on demand).
+    #[serde(skip)]
+    ddf_seq_line: std::cell::RefCell<Option<ddf_line::DdfSeqLine>>,
     bus_accounting: BusAccounting,
     /// Latches once BEAMCON0.DUAL (A2024/UHRES) is first seen set, so the
     /// "not emulated" warning is logged a single time, not per write.
@@ -1993,6 +2007,11 @@ impl Bus {
             bitplane_bplcon0_delay: None,
             bitplane_ddfstart_miss: None,
             bitplane_slot_plan_cache: BitplaneSlotPlanCache::new(),
+            ddf_seq_line_initial: std::cell::Cell::new(Default::default()),
+            ddf_seq_line_start_regs: std::cell::Cell::new((0, 0)),
+            ddf_seq_line_start_ctl: std::cell::Cell::new((false, 0)),
+            ddf_seq_writes: std::cell::RefCell::new(Vec::new()),
+            ddf_seq_line: std::cell::RefCell::new(None),
             bus_accounting: BusAccounting::from_env(),
             uhres_dual_warned: false,
             dbg_ext_cck_x100: external_access_cck_x100_setting(),
@@ -6809,6 +6828,7 @@ fn palette_event_sequences_equivalent(a: &[BeamRegisterWrite], b: &[BeamRegister
 
 mod collisions;
 mod custom_regs;
+mod ddf_line;
 mod dma_slots;
 mod frame_capture;
 
