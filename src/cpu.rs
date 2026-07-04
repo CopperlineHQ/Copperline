@@ -279,7 +279,7 @@ impl M68kMachine {
             dbg_crash_on: crate::envcfg::flag("COPPERLINE_DIAG_CRASH"),
             dbg_crash_dumped: false,
             dbg: crate::debugger::Debugger::from_env(),
-            ui_breaks: crate::debugger::InteractiveBreaks::default(),
+            ui_breaks: crate::debugger::InteractiveBreaks::new(address_mask_for_model(cpu_model)),
             ui_stop: None,
             ui_last_this_task: None,
             ui_pc_history: [0; UI_PC_HISTORY_CAP],
@@ -1241,6 +1241,13 @@ impl M68kMachine {
         &self.ui_breaks
     }
 
+    /// The CPU model's address-bus mask, for debugger surfaces that
+    /// normalize or display CPU addresses (A0-A23 on 24-bit models,
+    /// full 32 bits on 020+).
+    pub fn ui_addr_mask(&self) -> u32 {
+        self.cpu.address_mask
+    }
+
     /// Toggle a PC breakpoint carrying an optional condition and ignore count.
     /// Returns true when the breakpoint is now set.
     pub fn ui_set_breakpoint(
@@ -1277,7 +1284,7 @@ impl M68kMachine {
         addr: u32,
         filter: Option<crate::debugger::WatchSource>,
     ) -> bool {
-        let addr = addr & crate::debugger::UI_ADDR_MASK & !1;
+        let addr = addr & self.cpu.address_mask & !1;
         let current = self.bus.bus.peek_word_any(addr);
         let added = self.ui_breaks.toggle_watch(addr, current, filter);
         let addrs: Vec<u32> = self.ui_breaks.watches.iter().map(|w| w.addr).collect();
@@ -1443,7 +1450,7 @@ impl M68kMachine {
     /// is the instruction that just retired.
     fn ui_check_breaks_after_step(&mut self) {
         use crate::debugger::DebugStop;
-        let pc = self.cpu.pc & crate::debugger::UI_ADDR_MASK;
+        let pc = self.cpu.pc & self.cpu.address_mask;
         // Exception catchpoints: the core records every exception entry
         // (trap, fault, or interrupt) as it loads the handler vector;
         // drain it here so a hit stops at the handler's first
@@ -1467,7 +1474,7 @@ impl M68kMachine {
         if self.ui_stop.is_some() {
             return;
         }
-        let writer_pc = self.cpu.ppc & crate::debugger::UI_ADDR_MASK;
+        let writer_pc = self.cpu.ppc & self.cpu.address_mask;
         for i in 0..self.ui_breaks.watches.len() {
             let addr = self.ui_breaks.watches[i].addr;
             let new = self.bus.bus.peek_word_any(addr);
@@ -1548,7 +1555,7 @@ impl M68kMachine {
                 // a caught vector; stop before the handler's first
                 // instruction executes.
                 if self.ui_breaks.armed() {
-                    let pc = self.cpu.pc & crate::debugger::UI_ADDR_MASK;
+                    let pc = self.cpu.pc & self.cpu.address_mask;
                     if let Some(vector) = self.cpu.last_exception_vector.take() {
                         let vector = vector.min(u32::from(u16::MAX)) as u16;
                         if self.ui_breaks.catches.contains(&vector) {

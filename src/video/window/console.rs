@@ -378,7 +378,7 @@ impl App {
                 let set = self.emu.machine.ui_set_breakpoint(addr, cond, ignore);
                 ConsoleOutcome::one(format!(
                     "breakpoint ${:06X} {}",
-                    addr & 0x00FF_FFFF,
+                    addr & self.emu.machine.ui_addr_mask(),
                     if set { "set" } else { "removed" }
                 ))
             }
@@ -398,7 +398,7 @@ impl App {
                 let set = self.emu.machine.ui_toggle_watch_filtered(addr, filter);
                 ConsoleOutcome::one(format!(
                     "watchpoint ${:06X}{} {}",
-                    addr & 0x00FF_FFFE,
+                    addr & self.emu.machine.ui_addr_mask() & !1,
                     filter
                         .map(|f| format!(" ({} writes only)", f.label()))
                         .unwrap_or_default(),
@@ -482,7 +482,10 @@ impl App {
                     // exec's Alert() lives at LVO -108; the jump-table
                     // entry itself executes, so a PC breakpoint there
                     // fires on every alert with D7 = the guru code.
-                    vec![format!("{:06X}", base.wrapping_sub(108) & 0x00FF_FFFF)]
+                    vec![format!(
+                        "{:06X}",
+                        base.wrapping_sub(108) & self.emu.machine.ui_addr_mask()
+                    )]
                 });
                 let Some(addr) = lvo
                     .first()
@@ -805,7 +808,7 @@ impl App {
                 let Some(addr) = args.first().and_then(|t| hex32(t)) else {
                     return ConsoleOutcome::error("usage: WRITER ADDR (hex, word)");
                 };
-                let addr = addr & 0x00FF_FFFE;
+                let addr = addr & self.emu.machine.ui_addr_mask() & !1;
                 let before = self.emu.retired_instructions();
                 let outcome = match self.emu.tt_last_writer(addr, before) {
                     Ok(crate::timetravel::ReverseOutcome::Found(rec)) => {
@@ -814,7 +817,7 @@ impl App {
                             rec.addr,
                             rec.old,
                             rec.new,
-                            rec.pc & 0x00FF_FFFF,
+                            rec.pc & self.emu.machine.ui_addr_mask(),
                             rec.frame
                         ))
                     }
@@ -1284,8 +1287,8 @@ impl App {
         let cpu_type = machine.cpu_type();
         let mut lines = vec![format!(
             "#0 pc ${:06X}  sp ${:06X}",
-            machine.pc() & 0x00FF_FFFF,
-            sp & 0x00FF_FFFF
+            machine.pc() & machine.ui_addr_mask(),
+            sp & machine.ui_addr_mask()
         )];
         let mut frame = 1usize;
         for slot in 0..SLOTS {
@@ -1293,7 +1296,7 @@ impl App {
                 break;
             }
             let slot_addr = sp.wrapping_add(slot * 4);
-            let value = peek32(slot_addr) & 0x00FF_FFFF;
+            let value = peek32(slot_addr) & machine.ui_addr_mask();
             if !looks_like_return(value) {
                 continue;
             }
