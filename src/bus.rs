@@ -307,7 +307,7 @@ pub struct HeldSpriteLine {
     pub vstop: i32,
 }
 
-#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 struct DisplaySpriteDmaState {
     control: Option<DisplaySpriteControl>,
     #[serde(skip, default = "unset_sprite_control_loaded_vpos")]
@@ -316,10 +316,46 @@ struct DisplaySpriteDmaState {
     terminated: bool,
     data_dma_active: bool,
     last_line: Option<DisplaySpriteLineData>,
+    /// Words the hardware pointer lags behind the line-derived stream
+    /// position: slots skipped by mid-line SPREN edges never fetch, so
+    /// every later fetch of the stream reads that many words earlier.
+    data_word_skew: u32,
+    /// DATA word(s) fetched by the sprite's first DMA slot, sampled at that
+    /// slot's beam time, awaiting the second slot to assemble the line.
+    /// None when the first slot was skipped (or fetched nothing).
+    pending_data: Option<(u16, [u16; 3])>,
+    /// Line the first slot's evaluation ran for (entry logic + DATA fetch),
+    /// so the second slot completes rather than re-runs it.
+    #[serde(skip, default = "unset_sprite_control_loaded_vpos")]
+    pending_line_vpos: i32,
+    /// Line the per-line entry logic (vstop comparator, descriptor chain)
+    /// already ran for, keeping it idempotent across the two slots.
+    #[serde(skip, default = "unset_sprite_control_loaded_vpos")]
+    entry_line_vpos: i32,
 }
 
 fn unset_sprite_control_loaded_vpos() -> i32 {
     i32::MIN
+}
+
+impl Default for DisplaySpriteDmaState {
+    fn default() -> Self {
+        // The line-marker fields must start unset, not at line 0: a derived
+        // zero default would make a fresh state claim its per-line work
+        // already ran when the beam is on line 0.
+        Self {
+            control: None,
+            control_loaded_vpos: unset_sprite_control_loaded_vpos(),
+            next_ptr: None,
+            terminated: false,
+            data_dma_active: false,
+            last_line: None,
+            data_word_skew: 0,
+            pending_data: None,
+            pending_line_vpos: unset_sprite_control_loaded_vpos(),
+            entry_line_vpos: unset_sprite_control_loaded_vpos(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

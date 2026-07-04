@@ -8,6 +8,23 @@
 
 use super::*;
 
+/// Which of a sprite pair's two DMA slots a `sprite_line_eval` call models.
+#[derive(Clone, Copy)]
+enum SpriteSlotPhase {
+    /// Both words in one call: the pre-display replay path, and the second
+    /// slot's fallback when the first slot did not run (its SPREN sample
+    /// was low or the stream was re-seeded between the slots).
+    Pair {
+        slot1_enabled: bool,
+        slot2_enabled: bool,
+    },
+    /// First hardware slot ($15+4N): entry logic plus the DATA fetch,
+    /// sampled at this slot's beam time.
+    Slot1,
+    /// Second hardware slot ($17+4N): DATB fetch and line assembly.
+    Slot2 { slot2_enabled: bool },
+}
+
 impl Bus {
     pub(super) fn begin_new_beam_frame(&mut self) {
         self.diag_log_frame_start();
@@ -371,6 +388,10 @@ impl Bus {
             terminated: false,
             data_dma_active: false,
             last_line: None,
+            data_word_skew: 0,
+            pending_data: None,
+            pending_line_vpos: i32::MIN,
+            entry_line_vpos: i32::MIN,
         };
     }
 
@@ -507,6 +528,10 @@ impl Bus {
         state.control_loaded_vpos = beam_y;
         state.next_ptr = Some(control.next_ptr);
         state.terminated = false;
+        state.data_word_skew = 0;
+        state.pending_data = None;
+        state.pending_line_vpos = unset_sprite_control_loaded_vpos();
+        state.entry_line_vpos = unset_sprite_control_loaded_vpos();
         state.data_dma_active =
             in_window && (reaches_current_fetch_slot || keep_held_line || keep_active_dma_line);
         if !keep_held_line && !keep_active_dma_line {
@@ -575,6 +600,10 @@ impl Bus {
         state.control = Some(control);
         state.next_ptr = Some(control.next_ptr);
         state.terminated = false;
+        state.data_word_skew = 0;
+        state.pending_data = None;
+        state.pending_line_vpos = unset_sprite_control_loaded_vpos();
+        state.entry_line_vpos = unset_sprite_control_loaded_vpos();
         state.data_dma_active = beam_y >= control.vstart && beam_y < control.vstop;
         state.last_line = None;
         self.display_dma_sprite_state[sprite] = state;
@@ -844,7 +873,7 @@ impl Bus {
         // No sprite DMA slot lies in [old_hpos, new_hpos): nothing below can
         // run (the per-sprite loop checks the same window), so skip the
         // sprite-state scan on the vast majority of beam advances.
-        if old_hpos > SPRITE_DMA_SLOT1_HPOS[7] || new_hpos <= SPRITE_DMA_SLOT1_HPOS[0] {
+        if old_hpos > SPRITE_DMA_SLOT1_HPOS[7] + 2 || new_hpos <= SPRITE_DMA_SLOT1_HPOS[0] {
             return;
         }
         if self.sprite_dma_inhibited_by_vertical_blank_at(vpos) {
@@ -869,41 +898,74 @@ impl Bus {
         let mut fetched_lines = 0usize;
         let bitplane_bplcon0 = self.effective_bitplane_bplcon0();
         let bitplane_dmacon = self.effective_bitplane_dmacon();
-        for (sprite, &capture_hpos) in SPRITE_DMA_SLOT1_HPOS.iter().enumerate() {
-            if old_hpos > capture_hpos || new_hpos <= capture_hpos {
+        for (sprite, &slot1_hpos) in SPRITE_DMA_SLOT1_HPOS.iter().enumerate() {
+            // Each sprite line uses two hardware DMA slots: $15+4N fetches
+            // POS or DATA, $17+4N fetches CTL or DATB. Both crossings are
+            // evaluated at their own beam time, so a mid-line DMACON edge
+            // between the two slots fetches exactly one of the pair, and
+            // memory rewritten between them is sampled per slot.
+            let slot2_hpos = slot1_hpos + 2;
+            if old_hpos > slot2_hpos || new_hpos <= slot1_hpos {
                 continue;
             }
-            // SPREN is sampled by each sprite's own DMA slot (the sprena/
+            // SPREN is sampled by each DMA slot individually (the sprena/
             // sprdis vAmigaTS sweeps step DMACON writes in two-colour-clock
             // increments around individual slots), honouring the DMACON
             // write commit delay.
-            let slot_cck =
-                old_emulated_cck.saturating_add(u64::from(capture_hpos.saturating_sub(old_hpos)));
-            let sprite_dma_enabled = self.effective_bitplane_dmacon_at(slot_cck)
-                & (DMACON_DMAEN | DMACON_SPREN)
-                == (DMACON_DMAEN | DMACON_SPREN);
-            if !sprite_dma_enabled && !sprite_vertical_bar_active {
+            let slot_cck = |hpos: u32| {
+                old_emulated_cck.saturating_add(u64::from(hpos.saturating_sub(old_hpos)))
+            };
+            let spren_at = |dmacon: u16| {
+                dmacon & (DMACON_DMAEN | DMACON_SPREN) == (DMACON_DMAEN | DMACON_SPREN)
+            };
+            let ddf_blocked = sprite_dma_disabled_by_bitplane_ddf(
+                sprite,
+                self.agnus.revision(),
+                bitplane_bplcon0,
+                self.agnus.fmode(),
+                bitplane_dmacon,
+                self.denise.ddfstrt,
+                self.denise.ddfstop,
+                self.harddis_active(),
+            );
+            if ddf_blocked {
                 continue;
             }
-            if sprite_dma_enabled {
+            if (old_hpos..new_hpos).contains(&slot1_hpos) {
+                let slot1_enabled =
+                    spren_at(self.effective_bitplane_dmacon_at(slot_cck(slot1_hpos)));
+                if slot1_enabled {
+                    self.sprite_slot1_fetch(sprite, vpos);
+                }
+            }
+            if !(old_hpos..new_hpos).contains(&slot2_hpos) {
+                continue;
+            }
+            let slot2_enabled = spren_at(self.effective_bitplane_dmacon_at(slot_cck(slot2_hpos)));
+            let slot1_ran = self.display_dma_sprite_state[sprite].entry_line_vpos == vpos as i32;
+            if !slot1_ran && !slot2_enabled && !sprite_vertical_bar_active {
+                continue;
+            }
+            if slot1_ran || slot2_enabled {
                 pair_slots += 1;
             }
             let mut captured_line = false;
             {
-                if sprite_dma_disabled_by_bitplane_ddf(
-                    sprite,
-                    self.agnus.revision(),
-                    bitplane_bplcon0,
-                    self.agnus.fmode(),
-                    bitplane_dmacon,
-                    self.denise.ddfstrt,
-                    self.denise.ddfstop,
-                    self.harddis_active(),
-                ) {
-                    continue;
-                }
-                let line = if sprite_dma_enabled {
-                    self.captured_sprite_line_at(sprite, vpos)
+                let line = if slot1_ran {
+                    self.sprite_line_eval(sprite, vpos, SpriteSlotPhase::Slot2 { slot2_enabled })
+                } else if slot2_enabled {
+                    // The first slot did not run (SPREN low there, or the
+                    // stream was re-seeded between the slots): the entry
+                    // logic runs here, with the DATA side counted as a
+                    // skipped slot.
+                    self.sprite_line_eval(
+                        sprite,
+                        vpos,
+                        SpriteSlotPhase::Pair {
+                            slot1_enabled: false,
+                            slot2_enabled: true,
+                        },
+                    )
                 } else {
                     self.captured_sprite_vertical_bar_line_at(sprite, vpos)
                 };
@@ -974,13 +1036,54 @@ impl Bus {
         sprite: usize,
         vpos: u32,
     ) -> Option<CapturedSpriteLine> {
+        self.sprite_line_eval(
+            sprite,
+            vpos,
+            SpriteSlotPhase::Pair {
+                slot1_enabled: true,
+                slot2_enabled: true,
+            },
+        )
+    }
+
+    /// First hardware sprite slot ($15+4N): runs the line's entry logic
+    /// (vstop comparator, descriptor chain, arming) and samples the DATA
+    /// word(s) at this slot's beam time into pending state. The line itself
+    /// is assembled and emitted by the second slot's call.
+    pub(super) fn sprite_slot1_fetch(&mut self, sprite: usize, vpos: u32) {
+        let _ = self.sprite_line_eval(sprite, vpos, SpriteSlotPhase::Slot1);
+    }
+
+    /// One scanline of a sprite's DMA: the first slot ($15+4N) fetches POS
+    /// or DATA, the second ($17+4N) CTL or DATB. A mid-line SPREN edge can
+    /// enable one slot and not the other; a skipped slot leaves the word
+    /// counter behind (the stream shifts) and the display line assembles
+    /// from the stale latch on that side. A DATA fetch arms the sprite;
+    /// DATB alone does not.
+    fn sprite_line_eval(
+        &mut self,
+        sprite: usize,
+        vpos: u32,
+        phase: SpriteSlotPhase,
+    ) -> Option<CapturedSpriteLine> {
         let ram_len = self.mem.chip_ram.len();
         if ram_len == 0 {
             return None;
         }
         let ram_mask = self.chip_dma_mask;
         let beam_y = vpos as i32;
+        if let SpriteSlotPhase::Slot2 { slot2_enabled } = phase {
+            return self.sprite_slot2_complete(sprite, beam_y, ram_mask, slot2_enabled);
+        }
         let mut state = self.display_dma_sprite_state[sprite];
+        if matches!(phase, SpriteSlotPhase::Slot1) {
+            // Mark the entry logic as run for this line so the second
+            // slot's call completes it instead of re-running descriptor
+            // work, and drop any pending words a broken-off line left.
+            state.entry_line_vpos = beam_y;
+            state.pending_data = None;
+            state.pending_line_vpos = unset_sprite_control_loaded_vpos();
+        }
         let mut descriptor_can_match_current_vstart =
             state.control.is_some() || state.next_ptr.is_none();
         let mut descriptor_loaded_after_stop_this_line = false;
@@ -1002,7 +1105,12 @@ impl Bus {
 
             if let Some(control) = state.control {
                 if beam_y >= control.vstop {
-                    state.next_ptr = Some(control.next_ptr);
+                    // The next descriptor is fetched from the pointer's
+                    // actual position: slots skipped by SPREN edges leave
+                    // it short of the precomputed stream end.
+                    state.next_ptr = Some(
+                        control.next_ptr.wrapping_sub(state.data_word_skew * 2) & ram_mask & !1,
+                    );
                     state.control = None;
                     state.data_dma_active = false;
                     state.last_line = None;
@@ -1025,34 +1133,108 @@ impl Bus {
                     let quantum = sprite_fetch_quantum(self.agnus.fmode());
                     // SSCAN2 fetches sprite data only on every second display
                     // line; the in-between line redisplays the same data.
+                    if sprite_scan_doubled(self.agnus.fmode())
+                        && (beam_y - control.effective_data_vstart()) & 1 == 1
+                    {
+                        let line_data = state.last_line;
+                        self.display_dma_sprite_state[sprite] = state;
+                        if matches!(phase, SpriteSlotPhase::Slot1) {
+                            // The repeat line is emitted by the second
+                            // slot's call.
+                            return None;
+                        }
+                        return line_data.map(|line_data| CapturedSpriteLine {
+                            sprite,
+                            hstart: line_data.hstart,
+                            hsub_70ns: line_data.hsub_70ns,
+                            beam_y,
+                            data: line_data.data,
+                            datb: line_data.datb,
+                            data_ext: line_data.data_ext,
+                            datb_ext: line_data.datb_ext,
+                            width_words: line_data.width_words,
+                            attached: line_data.attached,
+                        });
+                    }
+                    // The stream address follows the hardware pointer: the
+                    // line-derived position minus the words that skipped
+                    // slots never fetched.
                     let mut line = (beam_y - control.effective_data_vstart()) as u32;
                     if sprite_scan_doubled(self.agnus.fmode()) {
                         line /= 2;
                     }
-                    let line_bytes = 4 * quantum;
-                    let data_ptr = control
+                    let line_base = control
                         .data_base
-                        .wrapping_add(line.saturating_mul(line_bytes))
-                        & ram_mask
-                        & !1;
-                    let datb_ptr = data_ptr.wrapping_add(2 * quantum);
-                    let mut data_ext = [0u16; 3];
-                    let mut datb_ext = [0u16; 3];
-                    for w in 1..quantum as usize {
-                        data_ext[w - 1] = read_chip_word_wrapping(
-                            &self.mem.chip_ram,
-                            data_ptr.wrapping_add(2 * w as u32),
-                        );
-                        datb_ext[w - 1] = read_chip_word_wrapping(
-                            &self.mem.chip_ram,
-                            datb_ptr.wrapping_add(2 * w as u32),
-                        );
+                        .wrapping_add(line.saturating_mul(4 * quantum));
+                    let fetch_words = |state: &DisplaySpriteDmaState, word_off: u32| {
+                        let ptr = line_base
+                            .wrapping_add(word_off * 2)
+                            .wrapping_sub(state.data_word_skew * 2)
+                            & ram_mask
+                            & !1;
+                        let mut words = [0u16; 4];
+                        for (w, word) in words.iter_mut().enumerate().take(quantum as usize) {
+                            *word = read_chip_word_wrapping(
+                                &self.mem.chip_ram,
+                                ptr.wrapping_add(2 * w as u32),
+                            );
+                        }
+                        words
+                    };
+                    let (slot1_enabled, slot2_enabled) = match phase {
+                        SpriteSlotPhase::Pair {
+                            slot1_enabled,
+                            slot2_enabled,
+                        } => (slot1_enabled, slot2_enabled),
+                        SpriteSlotPhase::Slot1 => {
+                            // DATA is sampled at this slot's beam time; the
+                            // second slot's call assembles the line.
+                            let d = fetch_words(&state, 0);
+                            state.pending_data = Some((d[0], [d[1], d[2], d[3]]));
+                            state.pending_line_vpos = beam_y;
+                            self.display_dma_sprite_state[sprite] = state;
+                            return None;
+                        }
+                        SpriteSlotPhase::Slot2 { .. } => {
+                            unreachable!("second-slot calls complete before the entry loop")
+                        }
+                    };
+                    let data = slot1_enabled.then(|| fetch_words(&state, 0));
+                    if !slot1_enabled {
+                        state.data_word_skew += quantum;
                     }
+                    let datb = slot2_enabled.then(|| fetch_words(&state, quantum));
+                    if !slot2_enabled {
+                        state.data_word_skew += quantum;
+                    }
+                    let stale = state.last_line;
+                    let assembled = match (data, datb) {
+                        (Some(d), Some(b)) => {
+                            Some(((d[0], [d[1], d[2], d[3]]), (b[0], [b[1], b[2], b[3]])))
+                        }
+                        // DATB missed its slot: the sprite displays the new
+                        // DATA with the stale DATB latch.
+                        (Some(d), None) => Some((
+                            (d[0], [d[1], d[2], d[3]]),
+                            stale.map_or((0, [0; 3]), |l| (l.datb, l.datb_ext)),
+                        )),
+                        // DATA missed its slot: DATB alone does not arm the
+                        // sprite; an already-armed sprite keeps displaying
+                        // with the stale DATA.
+                        (None, Some(b)) => {
+                            stale.map(|l| ((l.data, l.data_ext), (b[0], [b[1], b[2], b[3]])))
+                        }
+                        (None, None) => stale.map(|l| ((l.data, l.data_ext), (l.datb, l.datb_ext))),
+                    };
+                    let Some(((data, data_ext), (datb, datb_ext))) = assembled else {
+                        self.display_dma_sprite_state[sprite] = state;
+                        return None;
+                    };
                     let line_data = DisplaySpriteLineData {
                         hstart: control.hstart,
                         hsub_70ns: control.hsub_70ns,
-                        data: read_chip_word_wrapping(&self.mem.chip_ram, data_ptr),
-                        datb: read_chip_word_wrapping(&self.mem.chip_ram, datb_ptr),
+                        data,
+                        datb,
                         data_ext,
                         datb_ext,
                         width_words: quantum as u8,
@@ -1190,6 +1372,7 @@ impl Bus {
 
             state.control = Some(control);
             state.control_loaded_vpos = beam_y;
+            state.data_word_skew = 0;
             state.data_dma_active = false;
             state.last_line = None;
             if beam_y < control.vstart {
@@ -1212,6 +1395,122 @@ impl Bus {
         }
     }
 
+    /// Second hardware sprite slot ($17+4N) after the first slot's call ran
+    /// the line entry: fetches DATB at this slot's beam time, assembles the
+    /// display line with the pending DATA words (or the stale latches), and
+    /// emits it.
+    fn sprite_slot2_complete(
+        &mut self,
+        sprite: usize,
+        beam_y: i32,
+        ram_mask: u32,
+        slot2_enabled: bool,
+    ) -> Option<CapturedSpriteLine> {
+        let mut state = self.display_dma_sprite_state[sprite];
+        let pending = if state.pending_line_vpos == beam_y {
+            state.pending_data.take()
+        } else {
+            None
+        };
+        state.pending_data = None;
+        let Some(control) = state.control else {
+            self.display_dma_sprite_state[sprite] = state;
+            return None;
+        };
+        if state.terminated || !state.data_dma_active {
+            self.display_dma_sprite_state[sprite] = state;
+            return None;
+        }
+        let quantum = sprite_fetch_quantum(self.agnus.fmode());
+        // SSCAN2 in-between lines redisplay the previous fetch.
+        if sprite_scan_doubled(self.agnus.fmode())
+            && (beam_y - control.effective_data_vstart()) & 1 == 1
+        {
+            let line_data = state.last_line;
+            self.display_dma_sprite_state[sprite] = state;
+            return line_data.map(|line_data| CapturedSpriteLine {
+                sprite,
+                hstart: line_data.hstart,
+                hsub_70ns: line_data.hsub_70ns,
+                beam_y,
+                data: line_data.data,
+                datb: line_data.datb,
+                data_ext: line_data.data_ext,
+                datb_ext: line_data.datb_ext,
+                width_words: line_data.width_words,
+                attached: line_data.attached,
+            });
+        }
+        if pending.is_none() && state.pending_line_vpos != beam_y {
+            // The first slot ran the entry logic but no data fetch belongs
+            // to this line (e.g. a stop/start descriptor handover deferred
+            // the stream to the next line).
+            self.display_dma_sprite_state[sprite] = state;
+            return None;
+        }
+        let mut line = (beam_y - control.effective_data_vstart()) as u32;
+        if sprite_scan_doubled(self.agnus.fmode()) {
+            line /= 2;
+        }
+        let line_base = control
+            .data_base
+            .wrapping_add(line.saturating_mul(4 * quantum));
+        let datb = if slot2_enabled {
+            let ptr = line_base
+                .wrapping_add(quantum * 2)
+                .wrapping_sub(state.data_word_skew * 2)
+                & ram_mask
+                & !1;
+            let mut words = [0u16; 4];
+            for (w, word) in words.iter_mut().enumerate().take(quantum as usize) {
+                *word = read_chip_word_wrapping(&self.mem.chip_ram, ptr.wrapping_add(2 * w as u32));
+            }
+            Some((words[0], [words[1], words[2], words[3]]))
+        } else {
+            state.data_word_skew += quantum;
+            None
+        };
+        let stale = state.last_line;
+        let assembled = match (pending, datb) {
+            (Some(d), Some(b)) => Some((d, b)),
+            // DATB missed its slot: the sprite displays the new DATA with
+            // the stale DATB latch.
+            (Some(d), None) => Some((d, stale.map_or((0, [0; 3]), |l| (l.datb, l.datb_ext)))),
+            // DATA missed its slot: DATB alone does not arm the sprite; an
+            // already-armed sprite keeps displaying with the stale DATA.
+            (None, Some(b)) => stale.map(|l| ((l.data, l.data_ext), b)),
+            (None, None) => stale.map(|l| ((l.data, l.data_ext), (l.datb, l.datb_ext))),
+        };
+        let Some(((data, data_ext), (datb, datb_ext))) = assembled else {
+            self.display_dma_sprite_state[sprite] = state;
+            return None;
+        };
+        let line_data = DisplaySpriteLineData {
+            hstart: control.hstart,
+            hsub_70ns: control.hsub_70ns,
+            data,
+            datb,
+            data_ext,
+            datb_ext,
+            width_words: quantum as u8,
+            attached: control.attached,
+        };
+        state.last_line = Some(line_data);
+        self.display_dma_sprite_state[sprite] = state;
+        Some(CapturedSpriteLine {
+            sprite,
+            hstart: line_data.hstart,
+            hsub_70ns: line_data.hsub_70ns,
+            beam_y,
+            data: line_data.data,
+            datb: line_data.datb,
+            data_ext: line_data.data_ext,
+            datb_ext: line_data.datb_ext,
+            width_words: line_data.width_words,
+            attached: line_data.attached,
+        })
+    }
+
     pub(super) fn captured_sprite_vertical_bar_line_at(
         &mut self,
         sprite: usize,
@@ -1227,7 +1526,9 @@ impl Bus {
         let mut state = self.display_dma_sprite_state[sprite];
         let control = state.control?;
         if beam_y >= control.vstop {
-            state.next_ptr = Some(control.next_ptr);
+            state.next_ptr = Some(
+                control.next_ptr.wrapping_sub(state.data_word_skew * 2) & self.chip_dma_mask & !1,
+            );
             state.control = None;
             state.data_dma_active = false;
             state.last_line = None;
