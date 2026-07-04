@@ -180,16 +180,13 @@ The full reference -- every key, machine profiles, Zorro boards, CD/HDD
 images, validation rules, and audio options -- is in the
 [configuration guide](docs/guide/configuration.md).
 
-## MIDI (optional)
+## MIDI
 
 Copperline can bridge Paula's serial port to the host's MIDI system, so an
 Amiga sequencer or tracker plays real synths -- or is itself played from a
-host MIDI keyboard -- over the emulated serial line. It is an opt-in build
-feature; a default build compiles no MIDI code and is unchanged.
-
-```sh
-cargo build --release --features midi
-```
+host MIDI keyboard -- over the emulated serial line. It is built in by default;
+`cargo build --no-default-features` compiles it out, and such a build pulls no
+MIDI code and links no MIDI framework.
 
 The backend is selected at compile time and talks to each platform's native
 API directly, with no wrapper crate: **CoreMIDI** on macOS, the **ALSA

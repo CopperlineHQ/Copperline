@@ -1653,7 +1653,14 @@ impl ApplicationHandler for App {
                 let warp_speed = self.warp_speed;
                 let recording = self.recorder.is_some();
                 let input_recording = self.input_recorder.is_some();
-                let (midi_in_label, midi_out_label) = self.midi_menu_labels();
+                // Only the open runtime menu shows the device labels, and
+                // querying them allocates and touches the bus; skip that work on
+                // every other frame.
+                let (midi_in_label, midi_out_label) = if self.ui.menu_open {
+                    self.midi_menu_labels()
+                } else {
+                    (String::new(), String::new())
+                };
                 let ui_data = self.build_panel_view_data();
                 if let Some(r) = self.render.as_mut() {
                     let frame = r.pixels.frame_mut();

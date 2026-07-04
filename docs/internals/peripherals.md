@@ -225,17 +225,19 @@ fast path, so the poll never locks.
 
 The host connection lives behind the `MidiBackend` trait, chosen by
 `cfg(target_os)`: macOS drives CoreMIDI (`coremidi.rs`), Linux the ALSA
-sequencer (`alsa.rs`), and other targets (Windows for now) get `stub.rs`,
-which enumerates nothing and refuses to open. Each backend links its
+sequencer (`alsa.rs`), and Windows WinMM (`winmm.rs`); any other target gets
+`stub.rs`, which enumerates nothing and refuses to open. Each backend links its
 platform library directly with no wrapper crate, and each maps the
 scheduled send onto that platform's timed-delivery primitive: a CoreMIDI
-packet timestamp, an ALSA real-time queue event. A new backend implements
-`send`/`set_output`/`set_input`/`current_output`/`current_input` plus free
-`enumerate`/`open`; nothing else changes. The raw FFI is layout-sensitive
--- CoreMIDI packs its packet list to 4 bytes, and the ALSA `snd_seq_event_t`
-scheduling helpers are header-only inlines whose field writes are
-replicated by hand -- so both mirrors are pinned with compile-time layout
-assertions and want checking against live MIDI, not just review.
+packet timestamp, an ALSA real-time queue event, or -- since WinMM carries no
+timestamp -- a scheduler thread that fires each message when it comes due. A
+new backend implements `send`/`set_output`/`set_input`/`current_output`/`current_input`
+plus free `enumerate`/`open`; nothing else changes. The raw FFI is
+layout-sensitive -- CoreMIDI packs its packet list to 4 bytes, the ALSA
+`snd_seq_event_t` scheduling helpers are header-only inlines whose field writes
+are replicated by hand, and WinMM's `MIDIHDR` is packed -- so the mirrors are
+pinned with compile-time layout assertions and want checking against live MIDI,
+not just review.
 
 Two debug knobs help tell a dead path from a routing one:
 `COPPERLINE_MIDI_DEBUG=1` reports per-second tx/rx byte counts and the

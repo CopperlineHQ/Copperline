@@ -12,15 +12,17 @@ categories = ["emulators"]
 publish = false
 
 [features]
+default = ["midi"]
 display-plan-trace = []
 # Local investigation switches that deliberately alter timing or rendering.
 # Normal builds keep these environment-variable overrides inert so release
 # behavior is hardware-derived and reproducible.
 internal-diagnostics = []
-# Host MIDI bridge for Paula's serial port (`[serial] mode = "midi"`). Off by
-# default: a plain build is unchanged and pulls no MIDI code. On macOS this
-# links CoreMIDI directly (no new crate); other platforms compile a stub until
-# their backend lands. See src/midi/.
+# Host MIDI bridge for Paula's serial port (`[serial] mode = "midi"`). Built in
+# by default; `--no-default-features` compiles it out, and a MIDI-free build
+# pulls no MIDI code and links no MIDI framework. Native backends per platform:
+# CoreMIDI (macOS), the ALSA sequencer (Linux), WinMM (Windows); other targets
+# get a stub. See src/midi/.
 midi = []
 
 [dependencies]

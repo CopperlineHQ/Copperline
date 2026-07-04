@@ -98,7 +98,10 @@ pub enum MenuItem {
 /// serial port is in MIDI mode, so the list is built per open rather than fixed.
 pub fn menu_items(midi_active: bool) -> Vec<MenuItem> {
     let _ = midi_active;
-    let mut items = vec![
+    // 7 leading + up to 2 MIDI + 9 trailing items, sized so appending never
+    // reallocates.
+    let mut items = Vec::with_capacity(18);
+    items.extend([
         MenuItem::MachineConfig,
         MenuItem::FrameAnalyzer,
         MenuItem::Debugger,
@@ -106,7 +109,7 @@ pub fn menu_items(midi_active: bool) -> Vec<MenuItem> {
         MenuItem::Calibration,
         MenuItem::JoystickInput,
         MenuItem::PixelAspect,
-    ];
+    ]);
     #[cfg(feature = "midi")]
     if midi_active {
         items.push(MenuItem::MidiInput);
