@@ -200,6 +200,10 @@ impl Bus {
         if tick.new_lines != 0 || tick.new_frames != 0 {
             self.bitplane_ddfstart_miss = None;
             self.ocs_same_line_diw_start_blocked_vpos = None;
+            // Carry the DDF sequencer flops into the new line. Quanta are at
+            // most a few colour clocks, so exactly one line boundary can be
+            // crossed per advance.
+            self.ddf_seq_on_line_rollover(old_vpos);
         }
         let display_start = self.display_start_vpos_for_current_control();
         if tick.new_frames == 0 && old_vpos < display_start && self.agnus.vpos >= display_start {
@@ -674,6 +678,14 @@ impl Bus {
     }
 
     pub(super) fn bitplane_slot_active_at(&self, vpos: u32, hpos: u32) -> bool {
+        if self.ddf_seq_active() {
+            // FMODE=0: the walked DDF sequencer table owns the decision
+            // (vertical window, comparator flops, stop drains, carried runs).
+            let _ = vpos;
+            let table = self.ddf_seq_line_table();
+            return (hpos as usize) < super::ddf_line::DDF_SEQ_MAX_LINE_CCKS
+                && table.plane_at[hpos as usize] != 0;
+        }
         // Bitplane DMA only runs inside the vertical display window (set at
         // DIWSTRT.V, cleared at DIWSTOP.V), so the top-border and vertical-
         // blank lines are free for the blitter/CPU. Rejecting this before the

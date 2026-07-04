@@ -10,20 +10,20 @@ specification of the modelled behaviour.
 Agnus owns the beam: `vpos`/`hpos` counters advanced per colour clock, PAL
 (313 lines, 227 CCK/line) and NTSC (263 lines with long/short line
 alternation) geometry, the long-field flag for interlace, and VPOSR/VHPOSR.
-It also owns DMACON and the display-fetch machinery: the bitplane fetch
-plan for the current line is computed from DDFSTRT/DDFSTOP, the plane
-count, resolution, and FMODE, producing the per-slot fetch pattern the
-[arbitration model](timing) consumes. The fetch sequencer is anchored by
-the DDFSTRT comparator, then each fetch block/unit uses the BPLCON0 value
-visible at that block's first cycle. A mid-row BPLCON0 plane-count change
-therefore cannot retroactively fetch earlier words, but it can add or
-remove planes for later blocks in the same row. The sequence completes
-whole fetch units: the DDF register value is first masked to the Agnus
+It also owns DMACON and the display-fetch machinery: for FMODE=0 fetches
+the per-line fetch table comes from the DDF sequencer flop model
+(`src/chipset/ddf_sequencer.rs`; see the [arbitration model](timing) for
+the flop semantics - comparator edges, stop drain through a final
+modulo-applying unit, cross-line run carry, OCS/ECS rule differences).
+Each fetch unit uses the BPLCON0 value the sequencer sees at that point,
+so a mid-row plane-count change cannot retroactively fetch earlier words,
+but it can add or remove planes for later units in the same row; word
+addressing stays unit-based. The DDF register value is masked to the Agnus
 revision's comparator precision (OCS keeps 4-CCK precision; ECS/AGA keep
-2-CCK precision), then a DDFSTOP landing mid-unit extends the fetch through
-the unit starting at-or-after it (`agnus::bitplane_fetch_blocks`; the CDTV
-trademark screen's hi-res $64/$A8 window fetches 20 words per row, not the
-truncated 18). In lo-res OCS, bit 2 of DDFSTRT and DDFSTOP remains visible
+2-CCK precision), and a DDFSTOP landing mid-unit extends the fetch through
+the unit starting at-or-after it plus the drain unit (the CDTV trademark
+screen's hi-res $64/$A8 window fetches 20 words per row, not the truncated
+18). In lo-res OCS, bit 2 of DDFSTRT and DDFSTOP remains visible
 to the 8-CCK fetch-unit count: $34/$D4 fetches 21 words, $28/$D4 fetches
 23, and $4A/$B6 fetches 15. Wide-FMODE units (16/32 CCK) use the same rule
 rather than moving DDFSTRT down to an absolute grid. In

@@ -6288,6 +6288,7 @@ fn manual_bpl1dat_snapshots_dma_updated_bpldat_latches() {
     captured_rows[0] = Some(CapturedBitplaneRow {
         nplanes: 3,
         words_per_row: 1,
+        fetch_origin_cck: None,
         planes,
     });
     let events = [beam_event(PAL_VISIBLE_LINE0 as u32, hpos, 0x0110, 0x0000)];

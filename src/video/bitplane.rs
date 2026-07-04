@@ -1166,26 +1166,31 @@ impl ControlState {
         };
         // The displayed picture position is quantized to the fetch-period
         // grid (one FMODE gulp per plane). The DMA sequencer itself starts at
-        // the revision-masked DDFSTRT comparator value, but the shifter
-        // consumes data in whole 1/2/4-word gulps, so a DDFSTRT moved within
-        // one gulp changes how much tail data is fetched without necessarily
-        // moving the visible picture. With
-        // FMODE=0 the gulp equals the DDF granularity and nothing changes
-        // (boot-screen insert-disk art is drawn for the continuous placement:
-        // its negative modulos overlap rows so the hand/disk's right edge
-        // lives in the next row's first bytes - the calibrated FMODE=0 anchors
-        // must stay). With wide FMODE fetches system software programs DDFSTRT
-        // $38 or $3C interchangeably (same 16-cck gulp slot, BPLCON1=0), and
-        // its interleaved-bitmap modulos expect exactly the visible row width
-        // in the window - without the placement quantization, the fetch overrun
-        // displayed inside the window's right edge as the next plane's row
-        // start. The placement grid anchor is the colour-clock origin, not the
-        // hard DDF start $18.
+        // the revision-masked DDFSTRT comparator value, but Denise's shifter
+        // reloads on its own fixed grid, so data fetched off-grid waits for
+        // the NEXT reload slot: FMODE=0 placement rounds UP to the gulp grid.
+        // Hardware-verified on the arosddf1 A500 ECS photo: the DDFSTRT $3C
+        // lo-res picture sits at the $40 reload slot relative to the
+        // copper-anchored ruler dashes (both ruler ends agree), one full
+        // 8-cck unit right of a floor-aligned placement. On-grid starts
+        // ($30/$38 lo-res, $3C hi-res - every previously calibrated case,
+        // including the boot-screen insert-disk art) are unchanged by
+        // rounding direction. With wide FMODE fetches system software
+        // programs DDFSTRT $38 or $3C interchangeably (same 16-cck gulp
+        // slot, BPLCON1=0), and its interleaved-bitmap modulos expect
+        // exactly the visible row width in the window; the wide grids keep
+        // their calibrated floor alignment. The placement grid anchor is the
+        // colour-clock origin, not the hard DDF start $18.
         let align = |hpos: i32| -> i32 {
             let gulp = self.fetch_period() as i32;
+            let aligned = if self.fetch_quantum() == 1 {
+                hpos.div_euclid(gulp) * gulp + if hpos.rem_euclid(gulp) != 0 { gulp } else { 0 }
+            } else {
+                hpos.div_euclid(gulp) * gulp
+            };
             // Clamped to the DDF hard start: placement before the first usable
             // fetch position is not visible.
-            (hpos.div_euclid(gulp) * gulp).max(BITPLANE_DDF_HARD_START as i32)
+            aligned.max(BITPLANE_DDF_HARD_START as i32)
         };
         let ddf_native_shift = (align(effective_ddf_start_hpos(
             self.agnus_revision,
@@ -2406,6 +2411,41 @@ fn line_control_at_x(
     control
 }
 
+/// Rewrite a row's DDFSTRT/DDFSTOP so the register-derived fetch geometry
+/// matches the captured sequencer run (origin colour clock + word count).
+/// FMODE=0 only; runs that wrap through horizontal blanking (origin before
+/// the hardware start window) keep the register view.
+fn apply_captured_fetch_geometry(control: &mut ControlState, origin: u16, words: usize) {
+    if control.fetch_quantum() != 1 || words == 0 {
+        return;
+    }
+    if origin < BITPLANE_DDF_HARD_START {
+        return;
+    }
+    let words_per_unit = (8 / control.fetch_cck_per_word() as usize).max(1);
+    let units = words.div_ceil(words_per_unit);
+    let synth_stop = origin + ((units.saturating_sub(1)) as u16) * 8;
+    if control.ddfstrt == origin && control.ddfstop == synth_stop {
+        return;
+    }
+    let native_w = native_frame_width_for_control(*control);
+    let current_start = effective_ddf_start_hpos(
+        control.agnus_revision,
+        control.hires() || control.shres(),
+        control.ddfstrt,
+    );
+    let current_words = if control.has_valid_ddf_window() {
+        control.words_per_row(native_w)
+    } else {
+        0
+    };
+    if current_start == origin && current_words == words {
+        return;
+    }
+    control.ddfstrt = origin;
+    control.ddfstop = synth_stop;
+}
+
 fn line_words_per_row(base_control: ControlState, control_segments: &[ControlSegment]) -> usize {
     let base_native_w = native_frame_width_for_control(base_control);
     let mut words = if base_control.has_valid_ddf_window() {
@@ -3431,6 +3471,19 @@ pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
     let frame_ram = input.chip_ram.as_slice();
     let mut ram = TimedChipRam::new(frame_ram, input.chip_ram_writes.as_slice());
     let captured_bitplane_rows = input.captured_bitplane_rows.as_slice();
+    // Rows whose DMA capture recorded a fetch run diverging from the
+    // register-derived DDF window (the sequencer's missed-stop drains and
+    // late starts) carry the run origin and true word count. Synthesize the
+    // row's DDFSTRT/DDFSTOP from them so every register-derived fetch and
+    // paint derivation (word plans, words-per-row, picture origin) agrees
+    // with what the DMA actually did.
+    for (y, control) in base_controls.iter_mut().enumerate() {
+        if let Some(row) = captured_bitplane_rows.get(y).and_then(Option::as_ref) {
+            if let Some(origin) = row.fetch_origin_cck {
+                apply_captured_fetch_geometry(control, origin, row.words_per_row);
+            }
+        }
+    }
     let has_captured_bitplane_rows = captured_bitplane_rows.iter().any(Option::is_some);
     let captured_sprite_lines = input.captured_sprite_lines.as_slice();
     let sprite_display_enable_x_by_y = input.sprite_display_enable_x_by_y.as_slice();

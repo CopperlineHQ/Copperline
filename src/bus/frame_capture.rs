@@ -1265,6 +1265,10 @@ impl Bus {
         if self.ocs_same_line_diw_start_blocked_vpos == Some(vpos) {
             return;
         }
+        if self.ddf_seq_active() {
+            self.capture_bitplane_dma_words_fsm(vpos, old_hpos, new_hpos, old_emulated_cck);
+            return;
+        }
         let display_bplcon0 = self.effective_bitplane_bplcon0_at(old_emulated_cck);
         let mode = BitplaneMode::from_bplcon0(display_bplcon0, self.aga_enabled());
         let display_planes = mode.display_planes();
@@ -1544,6 +1548,7 @@ impl Bus {
                 nplanes: display_planes,
                 words_per_row,
                 planes: std::array::from_fn(|_| vec![0; words_per_row]),
+                fetch_origin_cck: None,
             };
             for plane in dma_planes..display_planes {
                 row.planes[plane].fill(self.denise.bpldat[plane]);
