@@ -375,13 +375,22 @@ pub(super) fn dual_playfield_pixel(idx: u8, control: ControlState) -> (u8, usize
         pf2 |= (idx >> 4) & 0x08;
     }
     let pf2_offset = control.pf2_palette_offset();
-    match (pf1, pf2) {
-        (0, 0) => (0, 0),
-        (pf, 0) => (1, pf as usize),
-        (0, pf) => (2, pf2_offset + pf as usize),
-        (_, pf2) if control.pf2_priority() => (2, pf2_offset + pf2 as usize),
-        (pf1, _) => (1, pf1 as usize),
+    let (winner, pf_mask, color_idx) = match (pf1, pf2) {
+        (0, 0) => return (0, 0),
+        (pf, 0) => (1u8, 1u8, pf as usize),
+        (0, pf) => (2, 2, pf2_offset + pf as usize),
+        (_, pf2) if control.pf2_priority() => (2, 2, pf2_offset + pf2 as usize),
+        (pf1, _) => (1, 1, pf1 as usize),
+    };
+    // A playfield whose BPLCON2 priority code is programmed out of range
+    // (> 4) is drawn transparent: the winning field's pixels collapse to the
+    // background rather than showing the field behind it (vAmiga zPF returns
+    // 0 for codes 5-7, which masks that field's index to 0). Real software
+    // only uses codes 0-4, so valid dual-playfield content is unaffected.
+    if control.playfield_priority_code(winner) > 4 {
+        return (0, 0);
     }
+    (pf_mask, color_idx)
 }
 
 pub(super) fn half_brite_rgb12(color: u16) -> u16 {

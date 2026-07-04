@@ -4461,6 +4461,32 @@ fn dual_playfield_uses_separate_palette_banks_and_priority() {
 }
 
 #[test]
+fn dual_playfield_out_of_range_priority_draws_the_field_transparent() {
+    // A dual playfield whose BPLCON2 priority code is programmed out of range
+    // (5-7) is drawn transparent: the winning field's pixels collapse to the
+    // background instead of revealing the field behind it (vAmiga zPF returns
+    // 0 for codes 5-7). vAmigaTS Denise/BPLCON0/invprio. Valid codes (0-4)
+    // are unaffected, so real dual-playfield content is unchanged.
+    let invalid_pf2 = ControlState {
+        bplcon0: 0x6400, // 4 planes, dual playfield
+        bplcon2: 0x0038, // PF2 priority code 7 (invalid), PF1 code 0
+        bplcon3: BPLCON3_PF2OF_DEFAULT,
+        ..ControlState::default()
+    };
+    // A PF2-only pixel is transparent (the winning field's priority is out of
+    // range); a PF1-only pixel still resolves (PF1 code 0 is valid).
+    assert_eq!(dual_playfield_pixel(0b0000_0010, invalid_pf2), (0, 0));
+    assert_eq!(dual_playfield_pixel(0b0000_0001, invalid_pf2), (1, 1));
+
+    // With a valid PF2 priority the same PF2 pixel resolves normally.
+    let valid = ControlState {
+        bplcon2: 0x0004, // PF2 code 0, PF1 code 4 (both valid)
+        ..invalid_pf2
+    };
+    assert_eq!(dual_playfield_pixel(0b0000_0010, valid), (2, 9));
+}
+
+#[test]
 fn aga_dual_playfield_decodes_bitplane7_into_pf1_fourth_bit() {
     // AGA Lisa dual playfield gives each field four bits: bitplane 7
     // becomes PF1's high bit (palette entries 8..15) and bitplane 8
