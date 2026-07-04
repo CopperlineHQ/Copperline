@@ -149,6 +149,10 @@ pub struct Config {
     /// `Alt+J`, and the menu's Joystick Input item flip it live without
     /// affecting this start-up value.
     pub joystick_input_mode: JoystickInputMode,
+    /// Host wiring for Paula's serial port (`[serial]` / `--serial`).
+    /// Defaults to [`SerialMode::Stdout`], preserving the historical
+    /// terminal-diagnostics behaviour.
+    pub serial: SerialConfig,
 }
 
 /// How much of the overscan field the window presents. The
@@ -220,6 +224,45 @@ impl JoystickInputMode {
             Self::Keyboard => "keyboard",
         }
     }
+}
+
+/// Where Paula's serial port is wired on the host (`[serial] mode` /
+/// `--serial`). The Amiga serial port is also the MIDI port, so the MIDI
+/// backend is one of these modes rather than a separate device.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SerialMode {
+    /// Serial output is discarded and there is no serial input.
+    Off,
+    /// Serial output is written to the host terminal. The historical
+    /// default (DiagROM and other tools print diagnostics here), kept as
+    /// the default so an unconfigured machine behaves exactly as before.
+    #[default]
+    Stdout,
+    /// Serial in/out is bridged to host MIDI endpoints. Requires a build
+    /// with the `midi` feature; without it, resolving this mode is an error.
+    Midi,
+}
+
+impl SerialMode {
+    /// Config-string label (round-trips through [`parse_serial_mode`]).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Stdout => "stdout",
+            Self::Midi => "midi",
+        }
+    }
+}
+
+/// Resolved `[serial]` settings. `midi_out`/`midi_in` name the host MIDI
+/// endpoints (substring match) and are only consulted when `mode` is
+/// [`SerialMode::Midi`]; they are carried through in the other modes so the
+/// configuration screen round-trips them unchanged.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SerialConfig {
+    pub mode: SerialMode,
+    pub midi_out: Option<String>,
+    pub midi_in: Option<String>,
 }
 
 /// A configured hard-drive image: the host path plus an optional volume-name
@@ -789,6 +832,7 @@ impl Default for Config {
             pixel_aspect: PixelAspect::Tv,
             phosphor: 0.0,
             joystick_input_mode: JoystickInputMode::Gamepad,
+            serial: SerialConfig::default(),
         }
     }
 }
@@ -908,6 +952,13 @@ pub struct ConfigOverrides {
     /// ("auto" still accepted as a compatibility alias). Validated by the same
     /// parser as `[input] joystick`.
     pub joystick: Option<String>,
+    /// Serial port wiring (`--serial`): "off", "stdout", or "midi". Same
+    /// parser as `[serial] mode`.
+    pub serial: Option<String>,
+    /// Host MIDI output endpoint (`--midi-out`), implying `--serial midi`.
+    pub midi_out: Option<String>,
+    /// Host MIDI input endpoint (`--midi-in`), implying `--serial midi`.
+    pub midi_in: Option<String>,
 }
 
 impl ConfigOverrides {
@@ -923,6 +974,9 @@ impl ConfigOverrides {
             && self.slow.is_none()
             && self.floppy_drives.is_none()
             && self.joystick.is_none()
+            && self.serial.is_none()
+            && self.midi_out.is_none()
+            && self.midi_in.is_none()
     }
 
     /// Inject the set overrides into the raw config, replacing the values
@@ -957,6 +1011,20 @@ impl ConfigOverrides {
         }
         if let Some(joystick) = &self.joystick {
             raw.input.joystick = Some(joystick.clone());
+        }
+        if let Some(mode) = &self.serial {
+            raw.serial.mode = Some(mode.clone());
+        }
+        if let Some(out) = &self.midi_out {
+            raw.serial.midi_out = Some(out.clone());
+        }
+        if let Some(input) = &self.midi_in {
+            raw.serial.midi_in = Some(input.clone());
+        }
+        // Naming a MIDI endpoint on the command line selects MIDI mode unless
+        // `--serial` said otherwise.
+        if self.serial.is_none() && (self.midi_out.is_some() || self.midi_in.is_some()) {
+            raw.serial.mode = Some(SerialMode::Midi.label().to_string());
         }
     }
 }
@@ -1010,6 +1078,8 @@ pub struct RawConfig {
     pub(crate) display: RawDisplay,
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) input: RawInput,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub(crate) serial: RawSerial,
     /// `[[zorro]]` board entries, configured in file order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) zorro: Vec<RawZorroBoard>,
@@ -1050,6 +1120,21 @@ pub(crate) struct RawInput {
     /// "gamepad".)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) joystick: Option<String>,
+}
+
+/// `[serial]` host wiring for Paula's serial (a.k.a. MIDI) port.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawSerial {
+    /// "stdout" (default), "off", or "midi".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) mode: Option<String>,
+    /// Host MIDI output endpoint name (substring match); MIDI mode only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) midi_out: Option<String>,
+    /// Host MIDI input endpoint name (substring match); MIDI mode only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) midi_in: Option<String>,
 }
 
 /// A drive image entry in `[ide]`/`[scsi]`. Accepts either a bare path string
@@ -1575,6 +1660,14 @@ impl TryFrom<RawConfig> for Config {
             None => defaults.joystick_input_mode,
             Some(s) => parse_joystick_input_mode(s)?,
         };
+        let serial = SerialConfig {
+            mode: match raw.serial.mode.as_deref() {
+                None => defaults.serial.mode,
+                Some(s) => parse_serial_mode(s)?,
+            },
+            midi_out: raw.serial.midi_out.clone(),
+            midi_in: raw.serial.midi_in.clone(),
+        };
 
         let ide = IdeConfig {
             master: raw.ide.master.map(drive_image).transpose()?,
@@ -1740,6 +1833,7 @@ impl TryFrom<RawConfig> for Config {
             pixel_aspect,
             phosphor,
             joystick_input_mode,
+            serial,
         })
     }
 }
@@ -1769,6 +1863,18 @@ pub(crate) fn parse_joystick_input_mode(s: &str) -> Result<JoystickInputMode> {
         "keyboard" | "kbd" | "key" => Ok(JoystickInputMode::Keyboard),
         _ => Err(anyhow!(
             "unknown [input] joystick {:?}: expected \"gamepad\" or \"keyboard\"",
+            s
+        )),
+    }
+}
+
+pub(crate) fn parse_serial_mode(s: &str) -> Result<SerialMode> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "off" | "none" => Ok(SerialMode::Off),
+        "stdout" | "terminal" => Ok(SerialMode::Stdout),
+        "midi" => Ok(SerialMode::Midi),
+        _ => Err(anyhow!(
+            "unknown [serial] mode {:?}: expected \"off\", \"stdout\", or \"midi\"",
             s
         )),
     }
@@ -3846,6 +3952,51 @@ mod tests {
         };
         let err = load_overrides(&overrides).unwrap_err();
         assert!(err.to_string().contains("between 1 and 4"), "{err:#}");
+        Ok(())
+    }
+
+    #[test]
+    fn serial_defaults_to_stdout() -> Result<()> {
+        // An unconfigured machine keeps the historical terminal output.
+        let cfg = parse_config("")?;
+        assert_eq!(cfg.serial.mode, SerialMode::Stdout);
+        assert_eq!(Config::default().serial.mode, SerialMode::Stdout);
+        Ok(())
+    }
+
+    #[test]
+    fn serial_section_selects_mode_and_midi_endpoints() -> Result<()> {
+        let cfg = parse_config(
+            "[serial]\nmode = \"midi\"\nmidi_out = \"USB MIDI\"\nmidi_in = \"USB MIDI\"\n",
+        )?;
+        assert_eq!(cfg.serial.mode, SerialMode::Midi);
+        assert_eq!(cfg.serial.midi_out.as_deref(), Some("USB MIDI"));
+        assert_eq!(cfg.serial.midi_in.as_deref(), Some("USB MIDI"));
+
+        let err = parse_config("[serial]\nmode = \"rs232\"\n").unwrap_err();
+        assert!(err.to_string().contains("unknown [serial] mode"), "{err:#}");
+        Ok(())
+    }
+
+    #[test]
+    fn cli_midi_endpoint_implies_midi_mode() -> Result<()> {
+        // Naming an endpoint is enough to switch the serial port to MIDI.
+        let overrides = ConfigOverrides {
+            midi_out: Some("Deluge".to_string()),
+            ..Default::default()
+        };
+        let cfg = load_overrides(&overrides)?;
+        assert_eq!(cfg.serial.mode, SerialMode::Midi);
+        assert_eq!(cfg.serial.midi_out.as_deref(), Some("Deluge"));
+
+        // An explicit --serial still wins over the implication.
+        let overrides = ConfigOverrides {
+            serial: Some("stdout".to_string()),
+            midi_in: Some("Deluge".to_string()),
+            ..Default::default()
+        };
+        let cfg = load_overrides(&overrides)?;
+        assert_eq!(cfg.serial.mode, SerialMode::Stdout);
         Ok(())
     }
 

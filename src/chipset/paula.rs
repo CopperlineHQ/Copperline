@@ -747,6 +747,11 @@ impl Paula {
         self.led_filter_enabled = enabled;
     }
 
+    /// Publish the emulated-to-host time mapping to the serial sink.
+    pub fn set_serial_time_anchor(&mut self, anchor: crate::serial::SerialTimeAnchor) {
+        self.serial.set_time_anchor(anchor);
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn led_filter_enabled(&self) -> bool {
         self.led_filter_enabled
@@ -990,7 +995,10 @@ impl Paula {
         Some(POT_COUNTER_CCK.saturating_sub(self.pot_acc_cck).max(1))
     }
 
-    pub fn tick_serial(&mut self, cck: u32) -> u16 {
+    /// Advance the serial port by `cck` color clocks. `end_cck` is the power-on
+    /// color-clock count at the end of this span; a byte that finishes mid-span
+    /// is stamped with its emit time from it for a timing-sensitive sink.
+    pub fn tick_serial(&mut self, cck: u32, end_cck: u64) -> u16 {
         // Idle fast path: nothing shifting, nothing queued in either
         // direction. Equivalent to the full path, which would only advance
         // the RX synchronizer (the pin level cannot change while idle).
@@ -1002,10 +1010,10 @@ impl Paula {
             self.advance_serial_rx_synchronizer(cck);
             return 0;
         }
-        self.tick_serial_tx(cck) | self.tick_serial_rx(cck)
+        self.tick_serial_tx(cck, end_cck) | self.tick_serial_rx(cck)
     }
 
-    fn tick_serial_tx(&mut self, cck: u32) -> u16 {
+    fn tick_serial_tx(&mut self, cck: u32, end_cck: u64) -> u16 {
         let mut irq = 0;
         let mut remaining = cck;
         while remaining > 0 {
@@ -1022,8 +1030,13 @@ impl Paula {
                 shift.bit_index += 1;
                 if shift.bit_index >= shift.total_bits {
                     if !shift.break_seen && !self.uart_break_active() {
-                        self.serial
-                            .write_word(Self::serial_tx_data_word(&shift), shift.long);
+                        // Stop bit done: this many clocks are left of the span.
+                        let at_cck = end_cck.saturating_sub(u64::from(remaining));
+                        self.serial.write_word(
+                            Self::serial_tx_data_word(&shift),
+                            shift.long,
+                            at_cck,
+                        );
                     }
                     self.serial_tx_pin_high = true;
                     irq |= self.load_serial_shift_if_idle();
@@ -1876,7 +1889,7 @@ mod tests {
     struct NoopSerial;
 
     impl SerialSink for NoopSerial {
-        fn write_byte(&mut self, _b: u8) {}
+        fn write_byte(&mut self, _b: u8, _at_cck: u64) {}
         fn flush(&mut self) {}
     }
 
@@ -1886,7 +1899,7 @@ mod tests {
     }
 
     impl SerialSink for CollectSerial {
-        fn write_byte(&mut self, b: u8) {
+        fn write_byte(&mut self, b: u8, _at_cck: u64) {
             self.written.lock().unwrap().push(b);
         }
 
@@ -1912,11 +1925,11 @@ mod tests {
     }
 
     impl SerialSink for CollectSerialWords {
-        fn write_byte(&mut self, b: u8) {
+        fn write_byte(&mut self, b: u8, _at_cck: u64) {
             self.written.lock().unwrap().push((u16::from(b), false));
         }
 
-        fn write_word(&mut self, word: u16, long: bool) {
+        fn write_word(&mut self, word: u16, long: bool, _at_cck: u64) {
             self.written.lock().unwrap().push((word, long));
         }
 
@@ -1931,6 +1944,24 @@ mod tests {
 
         fn has_pending_input(&self) -> bool {
             !self.read.lock().unwrap().is_empty()
+        }
+
+        fn flush(&mut self) {}
+    }
+
+    /// Records each transmitted word alongside the emit-time color clock the
+    /// UART stamped it with, so the emit-time plumbing can be asserted.
+    struct TimedSerial {
+        events: Arc<Mutex<Vec<(u16, u64)>>>,
+    }
+
+    impl SerialSink for TimedSerial {
+        fn write_byte(&mut self, b: u8, at_cck: u64) {
+            self.events.lock().unwrap().push((u16::from(b), at_cck));
+        }
+
+        fn write_word(&mut self, word: u16, _long: bool, at_cck: u64) {
+            self.events.lock().unwrap().push((word, at_cck));
         }
 
         fn flush(&mut self) {}
@@ -2872,16 +2903,45 @@ mod tests {
         assert_eq!(paula.read_serdatr() & (1 << 12), 0);
         assert!(written.lock().unwrap().is_empty());
 
-        assert_eq!(paula.tick_serial(1), 0);
+        assert_eq!(paula.tick_serial(1, 0), 0);
         assert!(paula.serial_txd_pin_high());
-        assert_eq!(paula.tick_serial(8), 0);
+        assert_eq!(paula.tick_serial(8, 0), 0);
         assert_eq!(paula.next_serial_event_cck(), Some(1));
         assert!(paula.serial_txd_pin_high());
         assert!(written.lock().unwrap().is_empty());
-        assert_eq!(paula.tick_serial(1), 0);
+        assert_eq!(paula.tick_serial(1, 0), 0);
         assert_eq!(paula.next_serial_event_cck(), None);
         assert_eq!(&*written.lock().unwrap(), &[0x41]);
         assert_ne!(paula.read_serdatr() & (1 << 12), 0);
+    }
+
+    #[test]
+    fn serial_tx_stamps_byte_with_emit_color_clock() {
+        // Transmit one byte in a single span and read back the emit-time stamp.
+        // Two spans ending 5000 clocks apart must stamp the byte 5000 clocks
+        // apart, without hard-coding the framing length.
+        fn transmit(end_cck: u64) -> (u16, u64) {
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let mut paula = Paula::new(
+                Box::new(TimedSerial {
+                    events: Arc::clone(&events),
+                }),
+                Box::new(NullAudio),
+            );
+            assert_eq!(paula.write_serdat(0x0141), INT_TBE);
+            // A span longer than the framing completes the byte in one call.
+            paula.tick_serial(100, end_cck);
+            let ev = events.lock().unwrap();
+            assert_eq!(ev.len(), 1, "exactly one byte should be emitted");
+            ev[0]
+        }
+
+        let (word0, at0) = transmit(1000);
+        let (word_b, at_b) = transmit(6000);
+        assert_eq!(word0, 0x41);
+        assert_eq!(word_b, 0x41);
+        assert!(at0 > 0, "emit time should be before the span end");
+        assert_eq!(at_b, at0 + 5000, "the span end offsets the emit time");
     }
 
     #[test]
@@ -2889,14 +2949,14 @@ mod tests {
         let (mut paula, written, _) = paula_with_collect_serial_words();
 
         assert_eq!(paula.write_serdat(0x0141), INT_TBE);
-        assert_eq!(paula.tick_serial(10), 0);
+        assert_eq!(paula.tick_serial(10, 0), 0);
         assert_eq!(&*written.lock().unwrap(), &[(0x0041, false)]);
 
         paula.serper = SERPER_LONG;
         assert_eq!(paula.write_serdat(0x0342), INT_TBE);
-        assert_eq!(paula.tick_serial(10), 0);
+        assert_eq!(paula.tick_serial(10, 0), 0);
         assert_eq!(&*written.lock().unwrap(), &[(0x0041, false)]);
-        assert_eq!(paula.tick_serial(1), 0);
+        assert_eq!(paula.tick_serial(1, 0), 0);
         assert_eq!(
             &*written.lock().unwrap(),
             &[(0x0041, false), (0x0142, true)]
@@ -2909,9 +2969,9 @@ mod tests {
         paula.serper = SERPER_LONG;
 
         assert_eq!(paula.write_serdat(0x0341), INT_TBE);
-        assert_eq!(paula.tick_serial(10), 0);
+        assert_eq!(paula.tick_serial(10, 0), 0);
         assert!(written.lock().unwrap().is_empty());
-        assert_eq!(paula.tick_serial(1), 0);
+        assert_eq!(paula.tick_serial(1, 0), 0);
         assert_eq!(&*written.lock().unwrap(), &[0x41]);
     }
 
@@ -2921,12 +2981,12 @@ mod tests {
 
         assert_eq!(paula.write_serdat(0x01FF), INT_TBE);
         assert!(!paula.serial_txd_pin_high());
-        assert_eq!(paula.tick_serial(1), 0);
+        assert_eq!(paula.tick_serial(1, 0), 0);
         assert!(paula.serial_txd_pin_high());
 
         paula.write_adkcon(0x8000 | ADKCON_UARTBRK);
         assert!(!paula.serial_txd_pin_high());
-        assert_eq!(paula.tick_serial(9), 0);
+        assert_eq!(paula.tick_serial(9, 0), 0);
         assert!(written.lock().unwrap().is_empty());
 
         paula.write_adkcon(ADKCON_UARTBRK);
@@ -2938,8 +2998,8 @@ mod tests {
         let (mut paula, _, read) = paula_with_collect_serial();
         read.lock().unwrap().extend_from_slice(&[0x55, 0x66]);
 
-        assert_eq!(paula.tick_serial(9) & INT_RBF, 0);
-        let irq = paula.tick_serial(1);
+        assert_eq!(paula.tick_serial(9, 0) & INT_RBF, 0);
+        let irq = paula.tick_serial(1, 0);
         assert_eq!(irq & INT_RBF, INT_RBF);
         paula.latch_interrupt_sources(irq);
         let serdatr = paula.read_serdatr();
@@ -2948,7 +3008,7 @@ mod tests {
         assert_eq!(serdatr & 0x00FF, 0x55);
         assert_eq!(serdatr & 0x0300, 0x0300);
 
-        assert_eq!(paula.tick_serial(10) & INT_RBF, 0);
+        assert_eq!(paula.tick_serial(10, 0) & INT_RBF, 0);
         assert_ne!(paula.read_serdatr() & (1 << 15), 0);
 
         paula.write_intreq(INT_RBF);
@@ -2961,8 +3021,8 @@ mod tests {
         paula.serper = SERPER_LONG;
         read.lock().unwrap().push(0x0155);
 
-        assert_eq!(paula.tick_serial(10) & INT_RBF, 0);
-        let irq = paula.tick_serial(1);
+        assert_eq!(paula.tick_serial(10, 0) & INT_RBF, 0);
+        let irq = paula.tick_serial(1, 0);
         assert_eq!(irq & INT_RBF, INT_RBF);
         paula.latch_interrupt_sources(irq);
         let serdatr = paula.read_serdatr();
@@ -2976,18 +3036,18 @@ mod tests {
         paula.serper = 3;
         read.lock().unwrap().push(0x01);
 
-        assert_eq!(paula.tick_serial(0), 0);
+        assert_eq!(paula.tick_serial(0, 0), 0);
         assert_ne!(paula.read_serdatr() & (1 << 11), 0);
-        assert_eq!(paula.tick_serial(1), 0);
+        assert_eq!(paula.tick_serial(1, 0), 0);
         assert_ne!(paula.read_serdatr() & (1 << 11), 0);
-        assert_eq!(paula.tick_serial(1), 0);
+        assert_eq!(paula.tick_serial(1, 0), 0);
         assert_eq!(paula.read_serdatr() & (1 << 11), 0);
 
-        assert_eq!(paula.tick_serial(2), 0);
+        assert_eq!(paula.tick_serial(2, 0), 0);
         assert_eq!(paula.read_serdatr() & (1 << 11), 0);
-        assert_eq!(paula.tick_serial(1), 0);
+        assert_eq!(paula.tick_serial(1, 0), 0);
         assert_eq!(paula.read_serdatr() & (1 << 11), 0);
-        assert_eq!(paula.tick_serial(1), 0);
+        assert_eq!(paula.tick_serial(1, 0), 0);
         assert_ne!(paula.read_serdatr() & (1 << 11), 0);
     }
 

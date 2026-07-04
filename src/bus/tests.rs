@@ -180,7 +180,7 @@ fn render_color_write_x(hpos: u32) -> usize {
 struct NoopSerial;
 
 impl SerialSink for NoopSerial {
-    fn write_byte(&mut self, _b: u8) {}
+    fn write_byte(&mut self, _b: u8, _at_cck: u64) {}
     fn flush(&mut self) {}
 }
 

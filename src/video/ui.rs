@@ -79,6 +79,10 @@ pub enum MenuItem {
     Debugger,
     Console,
     JoystickInput,
+    #[cfg(feature = "midi")]
+    MidiInput,
+    #[cfg(feature = "midi")]
+    MidiOutput,
     PixelAspect,
     Warp,
     WarpLimit,
@@ -90,34 +94,58 @@ pub enum MenuItem {
     MachineConfig,
 }
 
-pub const MENU_ITEMS: [MenuItem; 16] = [
-    MenuItem::MachineConfig,
-    MenuItem::FrameAnalyzer,
-    MenuItem::Debugger,
-    MenuItem::Console,
-    MenuItem::Calibration,
-    MenuItem::JoystickInput,
-    MenuItem::PixelAspect,
-    MenuItem::Warp,
-    MenuItem::WarpLimit,
-    MenuItem::Record,
-    MenuItem::RecordInput,
-    MenuItem::SaveState,
-    MenuItem::LoadState,
-    MenuItem::LoadRom,
-    MenuItem::Shortcuts,
-    MenuItem::About,
-];
+/// The menu items, top to bottom. The MIDI device items appear only when the
+/// serial port is in MIDI mode, so the list is built per open rather than fixed.
+pub fn menu_items(midi_active: bool) -> Vec<MenuItem> {
+    let _ = midi_active;
+    // 7 leading + up to 2 MIDI + 9 trailing items, sized so appending never
+    // reallocates.
+    let mut items = Vec::with_capacity(18);
+    items.extend([
+        MenuItem::MachineConfig,
+        MenuItem::FrameAnalyzer,
+        MenuItem::Debugger,
+        MenuItem::Console,
+        MenuItem::Calibration,
+        MenuItem::JoystickInput,
+    ]);
+    #[cfg(feature = "midi")]
+    if midi_active {
+        items.push(MenuItem::MidiInput);
+        items.push(MenuItem::MidiOutput);
+    }
+    items.push(MenuItem::PixelAspect);
+    items.extend([
+        MenuItem::Warp,
+        MenuItem::WarpLimit,
+        MenuItem::Record,
+        MenuItem::RecordInput,
+        MenuItem::SaveState,
+        MenuItem::LoadState,
+        MenuItem::LoadRom,
+        MenuItem::Shortcuts,
+        MenuItem::About,
+    ]);
+    items
+}
 
-fn menu_item_label(
-    item: MenuItem,
-    warp: bool,
-    warp_speed: WarpSpeed,
-    recording: bool,
-    input_recording: bool,
-    joystick_input_mode: JoystickInputMode,
-    pixel_aspect: PixelAspect,
-) -> String {
+/// Bundled state a menu label may show, so the label helper takes one argument.
+#[derive(Clone, Copy)]
+pub struct MenuLabels<'a> {
+    pub warp: bool,
+    pub warp_speed: WarpSpeed,
+    pub recording: bool,
+    pub input_recording: bool,
+    pub joystick_input_mode: JoystickInputMode,
+    pub pixel_aspect: PixelAspect,
+    /// Current MIDI input/output device names (empty when not applicable).
+    #[cfg_attr(not(feature = "midi"), allow(dead_code))]
+    pub midi_in: &'a str,
+    #[cfg_attr(not(feature = "midi"), allow(dead_code))]
+    pub midi_out: &'a str,
+}
+
+fn menu_item_label(item: MenuItem, s: MenuLabels) -> String {
     match item {
         MenuItem::FrameAnalyzer => "Frame Analyzer...".to_string(),
         MenuItem::About => "About...".to_string(),
@@ -125,22 +153,31 @@ fn menu_item_label(
         MenuItem::Calibration => "Calibrate Gamepad...".to_string(),
         MenuItem::Debugger => "Debugger...".to_string(),
         MenuItem::Console => "Console...".to_string(),
-        MenuItem::JoystickInput => format!("Joystick Input  [{}]", joystick_input_mode.label()),
+        MenuItem::JoystickInput => format!("Joystick Input  [{}]", s.joystick_input_mode.label()),
         MenuItem::PixelAspect => {
-            let value = match pixel_aspect {
+            let value = match s.pixel_aspect {
                 PixelAspect::Tv => "tv",
                 PixelAspect::Square => "square",
             };
             format!("Pixel Aspect {:>8}", format!("[{value}]"))
         }
-        MenuItem::Warp if warp => "Warp Speed      [on]".to_string(),
+        #[cfg(feature = "midi")]
+        MenuItem::MidiInput => format!("MIDI In  [{}]", clip_menu_value(s.midi_in)),
+        #[cfg(feature = "midi")]
+        MenuItem::MidiOutput => format!("MIDI Out [{}]", clip_menu_value(s.midi_out)),
+        MenuItem::Warp if s.warp => "Warp Speed      [on]".to_string(),
         MenuItem::Warp => "Warp Speed     [off]".to_string(),
         // Right-pad so the closing bracket stays put as the value width
         // changes (2x/8x vs 16x/Max), aligning with the Warp Speed row above.
-        MenuItem::WarpLimit => format!("Warp Limit     {:>5}", format!("[{}]", warp_speed.label())),
-        MenuItem::Record if recording => "Stop Video Recording".to_string(),
+        MenuItem::WarpLimit => {
+            format!(
+                "Warp Limit     {:>5}",
+                format!("[{}]", s.warp_speed.label())
+            )
+        }
+        MenuItem::Record if s.recording => "Stop Video Recording".to_string(),
         MenuItem::Record => "Record Video".to_string(),
-        MenuItem::RecordInput if input_recording => "Stop Input Recording".to_string(),
+        MenuItem::RecordInput if s.input_recording => "Stop Input Recording".to_string(),
         MenuItem::RecordInput => "Record Input".to_string(),
         MenuItem::SaveState => "Save State".to_string(),
         MenuItem::LoadState => "Load State...".to_string(),
@@ -149,8 +186,19 @@ fn menu_item_label(
     }
 }
 
-fn menu_rect() -> Rect {
-    let h = MENU_ITEMS.len() * MENU_ITEM_H + 2 * MENU_PAD;
+/// Clip a device name so the "MIDI In  [name]" label stays within the popup.
+#[cfg(feature = "midi")]
+fn clip_menu_value(name: &str) -> String {
+    const MAX: usize = MENU_MAX_LABEL_CHARS - 11; // "MIDI Out [" plus "]"
+    if name.chars().count() <= MAX {
+        return name.to_string();
+    }
+    let kept: String = name.chars().take(MAX.saturating_sub(1)).collect();
+    format!("{kept}~")
+}
+
+fn menu_rect(item_count: usize) -> Rect {
+    let h = item_count * MENU_ITEM_H + 2 * MENU_PAD;
     let right = MENU_BUTTON_X + MENU_BUTTON_W;
     Rect {
         x: right.saturating_sub(MENU_W),
@@ -160,8 +208,8 @@ fn menu_rect() -> Rect {
     }
 }
 
-fn menu_item_rect(index: usize) -> Rect {
-    let menu = menu_rect();
+fn menu_item_rect(index: usize, item_count: usize) -> Rect {
+    let menu = menu_rect(item_count);
     Rect {
         x: menu.x + 1,
         y: menu.y + MENU_PAD + index * MENU_ITEM_H,
@@ -445,16 +493,20 @@ impl UiState {
         self.menu_open || self.panel.is_some()
     }
 
-    /// The UI control under `pos`, if any. `PanelBody` swallows clicks on
-    /// a panel's background so they never reach the emulated display.
-    pub fn control_at(&self, pos: (i32, i32)) -> Option<UiControl> {
+    /// The UI control under `pos`, if any. `midi_active` selects the same menu
+    /// item list the draw uses. `PanelBody` swallows clicks on a panel's
+    /// background so they never reach the emulated display.
+    pub fn control_at(&self, pos: (i32, i32), midi_active: bool) -> Option<UiControl> {
         if self.menu_open {
-            for (index, item) in MENU_ITEMS.iter().enumerate() {
-                if menu_item_rect(index).contains(pos) {
+            let items = menu_items(midi_active);
+            for (index, item) in items.iter().enumerate() {
+                if menu_item_rect(index, items.len()).contains(pos) {
                     return Some(UiControl::MenuItem(*item));
                 }
             }
-            return menu_rect().contains(pos).then_some(UiControl::PanelBody);
+            return menu_rect(items.len())
+                .contains(pos)
+                .then_some(UiControl::PanelBody);
         }
         self.panel
             .as_ref()
@@ -1481,20 +1533,17 @@ fn draw_panel_chrome(frame: &mut [u8], panel: &Panel, hover: Option<UiControl>, 
 fn draw_menu(
     frame: &mut [u8],
     hover: Option<UiControl>,
-    warp: bool,
-    warp_speed: WarpSpeed,
-    recording: bool,
-    input_recording: bool,
-    joystick_input_mode: JoystickInputMode,
-    pixel_aspect: PixelAspect,
+    midi_active: bool,
+    labels: MenuLabels,
     scale: usize,
 ) {
-    let rect = menu_rect();
+    let items = menu_items(midi_active);
+    let rect = menu_rect(items.len());
     let scaled = scale_rect(rect, scale);
     fill_rect(frame, scaled, MENU_BG, scale);
     draw_rect_bevel(frame, scaled, MENU_EDGE, MENU_EDGE, scale);
-    for (index, item) in MENU_ITEMS.iter().enumerate() {
-        let item_rect = menu_item_rect(index);
+    for (index, item) in items.iter().enumerate() {
+        let item_rect = menu_item_rect(index, items.len());
         let hovered = hover == Some(UiControl::MenuItem(*item));
         let (bg, fg) = if hovered {
             (MENU_HILIGHT_BG, MENU_HILIGHT_TEXT)
@@ -1508,15 +1557,7 @@ fn draw_menu(
             frame,
             item_rect.x + MENU_TEXT_INSET,
             item_rect.y + (MENU_ITEM_H - 16) / 2,
-            &menu_item_label(
-                *item,
-                warp,
-                warp_speed,
-                recording,
-                input_recording,
-                joystick_input_mode,
-                pixel_aspect,
-            ),
+            &menu_item_label(*item, labels),
             fg,
             MENU_TEXT_PX,
             scale,
@@ -3642,7 +3683,9 @@ fn draw_launcher_row(
                     }),
                 scale,
             );
-            let text = setup.value_label(r.field);
+            // Clip a long value (e.g. a wordy MIDI device name) to the box so
+            // it cannot spill over the ">" stepper.
+            let text = truncate_to_width(&setup.value_label(r.field), value.w);
             let tw = text.chars().count() * font::GLYPH_W;
             let tx = value.x + value.w.saturating_sub(tw) / 2;
             draw_panel_text(frame, tx, value.y + 6, &text, PANEL_TEXT_HILIGHT, 1, scale);
@@ -4078,28 +4121,14 @@ pub fn draw(
     ui: &UiState,
     hover: Option<UiControl>,
     data: Option<&PanelViewData>,
-    warp: bool,
-    warp_speed: WarpSpeed,
-    recording: bool,
-    input_recording: bool,
-    joystick_input_mode: JoystickInputMode,
-    pixel_aspect: PixelAspect,
+    midi_active: bool,
+    labels: MenuLabels,
 ) {
     if let Some(panel) = &ui.panel {
         draw_panel_layer(frame, texture_scale, panel, hover, data);
     }
     if ui.menu_open {
-        draw_menu(
-            frame,
-            hover,
-            warp,
-            warp_speed,
-            recording,
-            input_recording,
-            joystick_input_mode,
-            pixel_aspect,
-            texture_scale,
-        );
+        draw_menu(frame, hover, midi_active, labels, texture_scale);
     }
 }
 
@@ -4333,7 +4362,8 @@ mod tests {
 
     #[test]
     fn menu_sits_above_the_status_bar_and_hit_tests_items() {
-        let rect = menu_rect();
+        let n = menu_items(false).len();
+        let rect = menu_rect(n);
         assert!(rect.y + rect.h <= present_height());
         assert!(rect.x + rect.w <= FB_WIDTH);
 
@@ -4341,50 +4371,56 @@ mod tests {
             menu_open: true,
             panel: None,
         };
-        let first = menu_item_rect(0);
+        let first = menu_item_rect(0, n);
         let pos = (first.x as i32 + 4, first.y as i32 + 4);
         assert_eq!(
-            ui.control_at(pos),
+            ui.control_at(pos, false),
             Some(UiControl::MenuItem(MenuItem::MachineConfig))
         );
-        let joystick = menu_item_rect(5);
+        let joystick = menu_item_rect(5, n);
         let pos = (joystick.x as i32 + 4, joystick.y as i32 + 4);
         assert_eq!(
-            ui.control_at(pos),
+            ui.control_at(pos, false),
             Some(UiControl::MenuItem(MenuItem::JoystickInput))
         );
         // Outside the menu: nothing (the click closes the menu).
-        assert_eq!(ui.control_at((0, 0)), None);
+        assert_eq!(ui.control_at((0, 0), false), None);
     }
 
     #[test]
     fn every_menu_label_fits_inside_the_popup() {
         // The label is drawn at `item_rect.x + MENU_TEXT_INSET`; its glyphs
-        // must end before the popup's right edge or the trailing "..." clips.
-        let menu = menu_rect();
+        // must end before the popup's right edge or the trailing "~" clips.
+        let items = menu_items(true);
+        let menu = menu_rect(items.len());
         let limit = menu.x + menu.w;
         let modes = [JoystickInputMode::Gamepad, JoystickInputMode::Keyboard];
         let speeds = [WarpSpeed::X2, WarpSpeed::X8, WarpSpeed::X16, WarpSpeed::Max];
+        // A deliberately over-long device name exercises the clip path.
+        let long = "Extremely Long USB MIDI Interface Name 9000";
         let aspects = [PixelAspect::Tv, PixelAspect::Square];
-        for item in MENU_ITEMS {
+        for &item in &items {
             for warp in [false, true] {
                 for recording in [false, true] {
                     for input_recording in [false, true] {
                         for &mode in &modes {
                             for &speed in &speeds {
                                 for &aspect in &aspects {
-                                    let label = menu_item_label(
-                                        item,
+                                    let labels = MenuLabels {
                                         warp,
-                                        speed,
+                                        warp_speed: speed,
                                         recording,
                                         input_recording,
-                                        mode,
-                                        aspect,
-                                    );
+                                        joystick_input_mode: mode,
+                                        pixel_aspect: aspect,
+                                        midi_in: long,
+                                        midi_out: long,
+                                    };
+                                    let label = menu_item_label(item, labels);
                                     let text_w =
                                         label.chars().count() * font::GLYPH_W * MENU_TEXT_PX;
-                                    let right = menu_item_rect(0).x + MENU_TEXT_INSET + text_w;
+                                    let right =
+                                        menu_item_rect(0, items.len()).x + MENU_TEXT_INSET + text_w;
                                     assert!(
                                         right <= limit,
                                         "label {label:?} ({text_w}px) overflows the menu by {}px",
@@ -4408,7 +4444,10 @@ mod tests {
         let rect = panel_rect(ui.panel.as_ref().unwrap());
         let raster = analyzer_raster_rect(rect);
         assert_eq!(
-            ui.control_at((raster.x as i32 + raster.w as i32 / 2, raster.y as i32 + 2)),
+            ui.control_at(
+                (raster.x as i32 + raster.w as i32 / 2, raster.y as i32 + 2),
+                false
+            ),
             Some(UiControl::AnalyzerPick {
                 x: 511,
                 y: 8,
@@ -4417,10 +4456,13 @@ mod tests {
         );
         let scanline = analyzer_scanline_rect(rect);
         assert_eq!(
-            ui.control_at((
-                scanline.x as i32 + scanline.w as i32 / 2,
-                scanline.y as i32 + 2
-            )),
+            ui.control_at(
+                (
+                    scanline.x as i32 + scanline.w as i32 / 2,
+                    scanline.y as i32 + 2
+                ),
+                false
+            ),
             Some(UiControl::AnalyzerPick {
                 x: 511,
                 y: 60,
@@ -4430,12 +4472,12 @@ mod tests {
         let (control, button) = analyzer_button_rects(rect)[1];
         assert_eq!(control, UiControl::AnalyzerFrame);
         assert_eq!(
-            ui.control_at((button.x as i32 + 2, button.y as i32 + 2)),
+            ui.control_at((button.x as i32 + 2, button.y as i32 + 2), false),
             Some(UiControl::AnalyzerFrame)
         );
         let underlay = analyzer_underlay_rect(rect);
         assert_eq!(
-            ui.control_at((underlay.x as i32 + 2, underlay.y as i32 + 2)),
+            ui.control_at((underlay.x as i32 + 2, underlay.y as i32 + 2), false),
             Some(UiControl::AnalyzerUnderlay)
         );
         // The checkbox must not overlap the transport buttons.
@@ -4559,12 +4601,12 @@ mod tests {
         let rect = panel_rect(ui.panel.as_ref().unwrap());
         let close = close_button_rect(rect);
         let pos = (close.x as i32 + 2, close.y as i32 + 2);
-        assert_eq!(ui.control_at(pos), Some(UiControl::PanelClose));
+        assert_eq!(ui.control_at(pos, false), Some(UiControl::PanelClose));
         // Panel body swallows clicks.
         let body = (rect.x as i32 + 5, (rect.y + TITLE_H + 5) as i32);
-        assert_eq!(ui.control_at(body), Some(UiControl::PanelBody));
+        assert_eq!(ui.control_at(body, false), Some(UiControl::PanelBody));
         // Outside the panel: nothing.
-        assert_eq!(ui.control_at((0, 0)), None);
+        assert_eq!(ui.control_at((0, 0), false), None);
     }
 
     #[test]
@@ -4576,22 +4618,22 @@ mod tests {
         let rect = panel_rect(ui.panel.as_ref().unwrap());
         let tab = debug_tab_rect(rect, 3);
         assert_eq!(
-            ui.control_at((tab.x as i32 + 2, tab.y as i32 + 2)),
+            ui.control_at((tab.x as i32 + 2, tab.y as i32 + 2), false),
             Some(UiControl::DebugTab(DebugTab::Video))
         );
         let tab = debug_tab_rect(rect, 4);
         assert_eq!(
-            ui.control_at((tab.x as i32 + 2, tab.y as i32 + 2)),
+            ui.control_at((tab.x as i32 + 2, tab.y as i32 + 2), false),
             Some(UiControl::DebugTab(DebugTab::Audio))
         );
         let tab = debug_tab_rect(rect, 6);
         assert_eq!(
-            ui.control_at((tab.x as i32 + 2, tab.y as i32 + 2)),
+            ui.control_at((tab.x as i32 + 2, tab.y as i32 + 2), false),
             Some(UiControl::DebugTab(DebugTab::IoMap))
         );
         let tab = debug_tab_rect(rect, 7);
         assert_eq!(
-            ui.control_at((tab.x as i32 + 2, tab.y as i32 + 2)),
+            ui.control_at((tab.x as i32 + 2, tab.y as i32 + 2), false),
             Some(UiControl::DebugTab(DebugTab::Break))
         );
         // All eight tabs fit inside the panel.
@@ -4600,7 +4642,7 @@ mod tests {
         let (control, step) = debug_button_rects(rect)[1];
         assert_eq!(control, UiControl::DebugStep);
         assert_eq!(
-            ui.control_at((step.x as i32 + 2, step.y as i32 + 2)),
+            ui.control_at((step.x as i32 + 2, step.y as i32 + 2), false),
             Some(UiControl::DebugStep)
         );
 
@@ -4614,9 +4656,12 @@ mod tests {
         let (control, toggle) = break_tab_button_rects(rect)[0];
         assert_eq!(control, UiControl::DebugBreakToggle);
         let pos = (toggle.x as i32 + 2, toggle.y as i32 + 2);
-        assert_eq!(ui_break.control_at(pos), Some(UiControl::DebugBreakToggle));
+        assert_eq!(
+            ui_break.control_at(pos, false),
+            Some(UiControl::DebugBreakToggle)
+        );
         // On another tab the same position is just panel body.
-        assert_eq!(ui.control_at(pos), Some(UiControl::PanelBody));
+        assert_eq!(ui.control_at(pos, false), Some(UiControl::PanelBody));
 
         // Audio-tab mute buttons hit-test only while the Audio tab is active.
         let mut panel = DebuggerPanel::new();
@@ -4628,17 +4673,20 @@ mod tests {
         let (control, mute0) = audio_tab_button_rects(rect)[0];
         assert_eq!(control, UiControl::DebugAudioMute(0));
         let pos = (mute0.x as i32 + 2, mute0.y as i32 + 2);
-        assert_eq!(ui_audio.control_at(pos), Some(UiControl::DebugAudioMute(0)));
+        assert_eq!(
+            ui_audio.control_at(pos, false),
+            Some(UiControl::DebugAudioMute(0))
+        );
         // The CD mute is the fifth (index 4) button.
         let (cd_control, cd_mute) = audio_tab_button_rects(rect)[4];
         assert_eq!(cd_control, UiControl::DebugAudioMute(4));
         let cd_pos = (cd_mute.x as i32 + 2, cd_mute.y as i32 + 2);
         assert_eq!(
-            ui_audio.control_at(cd_pos),
+            ui_audio.control_at(cd_pos, false),
             Some(UiControl::DebugAudioMute(4))
         );
         // On another tab that position does not resolve to a mute.
-        assert_eq!(ui.control_at(pos), Some(UiControl::PanelBody));
+        assert_eq!(ui.control_at(pos, false), Some(UiControl::PanelBody));
 
         let mut panel = DebuggerPanel::new();
         for ch in ['c', '0', '0', '3', 'C'] {
@@ -4892,14 +4940,19 @@ mod tests {
             &ui,
             None,
             None,
-            true,
-            WarpSpeed::Max,
             false,
-            false,
-            JoystickInputMode::Gamepad,
-            PixelAspect::Tv,
+            MenuLabels {
+                warp: true,
+                warp_speed: WarpSpeed::Max,
+                recording: false,
+                input_recording: false,
+                joystick_input_mode: JoystickInputMode::Gamepad,
+                pixel_aspect: PixelAspect::Tv,
+                midi_in: "",
+                midi_out: "",
+            },
         );
-        let menu = menu_rect();
+        let menu = menu_rect(menu_items(false).len());
         let probe = ((menu.y + MENU_PAD + 2) * w + menu.x + 4) * 4;
         assert_eq!(&frame[probe..probe + 4], &MENU_BG.to_le_bytes());
         save(&frame, "menu");
@@ -4926,11 +4979,16 @@ mod tests {
             None,
             Some(&data),
             false,
-            WarpSpeed::Max,
-            false,
-            false,
-            JoystickInputMode::Gamepad,
-            PixelAspect::Tv,
+            MenuLabels {
+                warp: false,
+                warp_speed: WarpSpeed::Max,
+                recording: false,
+                input_recording: false,
+                joystick_input_mode: JoystickInputMode::Gamepad,
+                pixel_aspect: PixelAspect::Tv,
+                midi_in: "",
+                midi_out: "",
+            },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "about");
@@ -4947,11 +5005,16 @@ mod tests {
             None,
             Some(&PanelViewData::Shortcuts),
             false,
-            WarpSpeed::Max,
-            false,
-            false,
-            JoystickInputMode::Gamepad,
-            PixelAspect::Tv,
+            MenuLabels {
+                warp: false,
+                warp_speed: WarpSpeed::Max,
+                recording: false,
+                input_recording: false,
+                joystick_input_mode: JoystickInputMode::Gamepad,
+                pixel_aspect: PixelAspect::Tv,
+                midi_in: "",
+                midi_out: "",
+            },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "shortcuts");
@@ -4985,11 +5048,16 @@ mod tests {
             Some(UiControl::CalCancel),
             Some(&data),
             false,
-            WarpSpeed::Max,
-            false,
-            false,
-            JoystickInputMode::Gamepad,
-            PixelAspect::Tv,
+            MenuLabels {
+                warp: false,
+                warp_speed: WarpSpeed::Max,
+                recording: false,
+                input_recording: false,
+                joystick_input_mode: JoystickInputMode::Gamepad,
+                pixel_aspect: PixelAspect::Tv,
+                midi_in: "",
+                midi_out: "",
+            },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "calibration");
@@ -5033,11 +5101,16 @@ mod tests {
             Some(UiControl::DebugStep),
             Some(&data),
             false,
-            WarpSpeed::Max,
-            false,
-            false,
-            JoystickInputMode::Gamepad,
-            PixelAspect::Tv,
+            MenuLabels {
+                warp: false,
+                warp_speed: WarpSpeed::Max,
+                recording: false,
+                input_recording: false,
+                joystick_input_mode: JoystickInputMode::Gamepad,
+                pixel_aspect: PixelAspect::Tv,
+                midi_in: "",
+                midi_out: "",
+            },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "debugger");
@@ -5078,11 +5151,16 @@ mod tests {
             Some(UiControl::DebugRegToggle),
             Some(&data),
             false,
-            WarpSpeed::Max,
-            false,
-            false,
-            JoystickInputMode::Gamepad,
-            PixelAspect::Tv,
+            MenuLabels {
+                warp: false,
+                warp_speed: WarpSpeed::Max,
+                recording: false,
+                input_recording: false,
+                joystick_input_mode: JoystickInputMode::Gamepad,
+                pixel_aspect: PixelAspect::Tv,
+                midi_in: "",
+                midi_out: "",
+            },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "debugger-break");
@@ -5175,11 +5253,16 @@ mod tests {
             Some(UiControl::DebugAudioMute(0)),
             Some(&data),
             false,
-            WarpSpeed::Max,
-            false,
-            false,
-            JoystickInputMode::Gamepad,
-            PixelAspect::Tv,
+            MenuLabels {
+                warp: false,
+                warp_speed: WarpSpeed::Max,
+                recording: false,
+                input_recording: false,
+                joystick_input_mode: JoystickInputMode::Gamepad,
+                pixel_aspect: PixelAspect::Tv,
+                midi_in: "",
+                midi_out: "",
+            },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "debugger-audio");
@@ -5234,11 +5317,16 @@ mod tests {
             None,
             Some(&data),
             false,
-            WarpSpeed::Max,
-            false,
-            false,
-            JoystickInputMode::Gamepad,
-            PixelAspect::Tv,
+            MenuLabels {
+                warp: false,
+                warp_speed: WarpSpeed::Max,
+                recording: false,
+                input_recording: false,
+                joystick_input_mode: JoystickInputMode::Gamepad,
+                pixel_aspect: PixelAspect::Tv,
+                midi_in: "",
+                midi_out: "",
+            },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "debugger-iomap");
@@ -5304,11 +5392,16 @@ mod tests {
             Some(UiControl::DebugPlaneToggle(0)),
             Some(&data),
             false,
-            WarpSpeed::Max,
-            false,
-            false,
-            JoystickInputMode::Gamepad,
-            PixelAspect::Tv,
+            MenuLabels {
+                warp: false,
+                warp_speed: WarpSpeed::Max,
+                recording: false,
+                input_recording: false,
+                joystick_input_mode: JoystickInputMode::Gamepad,
+                pixel_aspect: PixelAspect::Tv,
+                midi_in: "",
+                midi_out: "",
+            },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "debugger-video");
@@ -5411,11 +5504,16 @@ mod tests {
             Some(UiControl::AnalyzerUnderlay),
             Some(&data),
             false,
-            WarpSpeed::Max,
-            false,
-            false,
-            JoystickInputMode::Gamepad,
-            PixelAspect::Tv,
+            MenuLabels {
+                warp: false,
+                warp_speed: WarpSpeed::Max,
+                recording: false,
+                input_recording: false,
+                joystick_input_mode: JoystickInputMode::Gamepad,
+                pixel_aspect: PixelAspect::Tv,
+                midi_in: "",
+                midi_out: "",
+            },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "frame-analyzer");
@@ -5448,11 +5546,16 @@ mod tests {
             None,
             None,
             false,
-            WarpSpeed::Max,
-            false,
-            false,
-            JoystickInputMode::Gamepad,
-            PixelAspect::Tv,
+            MenuLabels {
+                warp: false,
+                warp_speed: WarpSpeed::Max,
+                recording: false,
+                input_recording: false,
+                joystick_input_mode: JoystickInputMode::Gamepad,
+                pixel_aspect: PixelAspect::Tv,
+                midi_in: "",
+                midi_out: "",
+            },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "console");
@@ -5476,11 +5579,16 @@ mod tests {
             Some(UiControl::LauncherRun),
             None,
             false,
-            WarpSpeed::Max,
-            false,
-            false,
-            JoystickInputMode::Gamepad,
-            PixelAspect::Tv,
+            MenuLabels {
+                warp: false,
+                warp_speed: WarpSpeed::Max,
+                recording: false,
+                input_recording: false,
+                joystick_input_mode: JoystickInputMode::Gamepad,
+                pixel_aspect: PixelAspect::Tv,
+                midi_in: "",
+                midi_out: "",
+            },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "launcher");
@@ -5544,11 +5652,16 @@ mod tests {
             None,
             None,
             false,
-            WarpSpeed::Max,
-            false,
-            false,
-            JoystickInputMode::Gamepad,
-            PixelAspect::Tv,
+            MenuLabels {
+                warp: false,
+                warp_speed: WarpSpeed::Max,
+                recording: false,
+                input_recording: false,
+                joystick_input_mode: JoystickInputMode::Gamepad,
+                pixel_aspect: PixelAspect::Tv,
+                midi_in: "",
+                midi_out: "",
+            },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "launcher-zorro");
@@ -5579,11 +5692,16 @@ mod tests {
             None,
             None,
             false,
-            WarpSpeed::Max,
-            false,
-            false,
-            JoystickInputMode::Gamepad,
-            PixelAspect::Tv,
+            MenuLabels {
+                warp: false,
+                warp_speed: WarpSpeed::Max,
+                recording: false,
+                input_recording: false,
+                joystick_input_mode: JoystickInputMode::Gamepad,
+                pixel_aspect: PixelAspect::Tv,
+                midi_in: "",
+                midi_out: "",
+            },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "launcher-storage");

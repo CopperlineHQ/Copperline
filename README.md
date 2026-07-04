@@ -180,6 +180,43 @@ The full reference -- every key, machine profiles, Zorro boards, CD/HDD
 images, validation rules, and audio options -- is in the
 [configuration guide](docs/guide/configuration.md).
 
+## MIDI
+
+Copperline can bridge Paula's serial port to the host's MIDI system, so an
+Amiga sequencer or tracker plays real synths -- or is itself played from a
+host MIDI keyboard -- over the emulated serial line. It is built in by default;
+`cargo build --no-default-features` compiles it out, and such a build pulls no
+MIDI code and links no MIDI framework.
+
+The backend is selected at compile time and talks to each platform's native
+API directly, with no wrapper crate: **CoreMIDI** on macOS, the **ALSA
+sequencer** on Linux, and **WinMM** on Windows. Outgoing bytes are scheduled
+so each one is delivered at the host instant it left the emulated wire,
+keeping the guest's MIDI timing intact rather than collapsing it to whenever a
+frame's worth of bytes is flushed.
+
+List the host endpoints, then select them by name (a case-insensitive
+substring is enough); `--midi-out`/`--midi-in` imply `--serial midi`:
+
+```sh
+./target/release/copperline --list-midi
+./target/release/copperline --midi-out "FluidSynth" --midi-in "Keystation"
+```
+
+Devices can also be chosen in the launcher's **Serial** tab, swapped live from
+the in-window **MIDI In / MIDI Out** menu, or set in the config file:
+
+```toml
+[serial]
+mode = "midi"            # off, stdout, or midi
+midi_out = "FluidSynth"  # host destination; substring match
+midi_in = "Keystation"   # host source
+```
+
+The ALSA development headers the Linux backend links against are already a
+build requirement (see Requirements); macOS and Windows need nothing beyond
+the OS.
+
 ## Documentation
 
 User and developer documentation -- getting started, the UI and shortcuts,
@@ -217,7 +254,7 @@ release needs resolved first. Release steps for every channel are in
 | ROM | Kickstart at $F80000 (512 KiB); optional extended ROM for CD32 ($E00000) and CDTV ($F00000). |
 | Battery RTC | Read-only MSM6242-compatible register view at $DC0000; guest writes affect only emulated latch/control state. |
 | CIA-A / CIA-B | I/O ports, /OVL, timers, TOD, keyboard SDR/ICR, disk control/status lines, and CIA-B FLAG disk index pulses. |
-| Paula serial | SERDAT -> stdout through a one-word transmit buffer and timed shift register; SERDATR reports TBE/TSRE/RBF. |
+| Paula serial | SERDAT through a one-word transmit buffer and timed shift register, out to stdout or -- with the optional `midi` feature -- bridged to host MIDI in/out; SERDATR reports TBE/TSRE/RBF, and serial receive is fed from the selected MIDI input. |
 | Paula audio | 4-channel DMA/sample playback, stereo mix, LED filter. |
 | Paula DMACON / INTENA / INTREQ | IRQ bits are stored and delivered through manual M68K autovectors with modelled 68000 interrupt-recognition latency; audio and disk DMA raise completion IRQs. |
 | Floppy / ADF / DMS / SCP | DF0-DF3 standard DD ADF read/write, read-only ADZ/DMS, UAE extended ADF, initial read-only SCP flux import, track-timed disk DMA, CIA drive lines, index FLAG, DSKLEN/DSKBYTR/DSKSYNC/DSKDAT, per-drive multi-disk playlists with a swap key. |

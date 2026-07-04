@@ -2718,6 +2718,20 @@ impl Bus {
         self.emulated_cck
     }
 
+    /// Publish the emulated-to-host time mapping to the serial sink so a
+    /// timing-sensitive backend (MIDI) can schedule output. See
+    /// [`crate::serial::SerialTimeAnchor`].
+    pub fn set_serial_time_anchor(&mut self, anchor: crate::serial::SerialTimeAnchor) {
+        self.paula.set_serial_time_anchor(anchor);
+    }
+
+    /// The live MIDI sink, when the serial port is in MIDI mode, for switching
+    /// devices from the runtime menu.
+    #[cfg(feature = "midi")]
+    pub fn midi_serial_mut(&mut self) -> Option<&mut crate::midi::MidiSerialSink> {
+        self.paula.serial.as_midi()
+    }
+
     pub fn live_audio_output_lead_seconds(&self) -> f64 {
         self.paula.live_audio_output_lead_seconds()
     }
@@ -3663,7 +3677,10 @@ impl Bus {
             self.slice_preempted = true;
         }
 
-        self.paula.intreq |= self.paula.tick_serial(cck);
+        // emulated_cck already covers this span, so it is the color clock at
+        // the span's end. Paula uses it to stamp any serial byte that finishes
+        // here; passing it avoids arithmetic on the common (no byte) path.
+        self.paula.intreq |= self.paula.tick_serial(cck, self.emulated_cck);
         self.paula.tick_pots(cck);
         let dmacon = self.agnus.dmacon;
         self.flush_audio();

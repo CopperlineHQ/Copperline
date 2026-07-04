@@ -262,6 +262,22 @@ floppy_sounds_volume = 100
 # joystick = "auto"
 
 
+# Serial port wiring. The Amiga serial port doubles as the MIDI port.
+# [serial]
+#
+# mode selects where Paula's serial in/out is connected:
+#   "stdout"  (default) serial output prints to the host terminal, matching
+#             the historical behaviour (DiagROM and similar tools log here).
+#   "off"     serial output is discarded and there is no serial input.
+#   "midi"    serial in/out is bridged to host MIDI endpoints. Needs a build
+#             with the `midi` feature; midi_out/midi_in name the endpoints
+#             (substring match, e.g. a USB interface or a virtual port).
+# --serial MODE overrides this per run; --midi-out/--midi-in NAME imply "midi".
+# mode = "stdout"
+# midi_out = "USB MIDI Interface"
+# midi_in = "USB MIDI Interface"
+
+
 # Optional floppy drives. DF0 is always connected; set [floppy] drives
 # to wire empty external mechanisms as well (1-4 total drives). Missing
 # [floppy.dfN] tables mean no disk in that drive. Supported images:
