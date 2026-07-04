@@ -49,6 +49,32 @@ impl Stream<'_> {
     }
 }
 
+/// MOVEC control-register name for the extension word's Rc field, across
+/// all models (010 through 060); unknown codes print as $NNN.
+fn control_reg_name(code: u16) -> String {
+    match code {
+        0x000 => "SFC".into(),
+        0x001 => "DFC".into(),
+        0x002 => "CACR".into(),
+        0x003 => "TC".into(),
+        0x004 => "ITT0".into(),
+        0x005 => "ITT1".into(),
+        0x006 => "DTT0".into(),
+        0x007 => "DTT1".into(),
+        0x008 => "BUSCR".into(),
+        0x800 => "USP".into(),
+        0x801 => "VBR".into(),
+        0x802 => "CAAR".into(),
+        0x803 => "MSP".into(),
+        0x804 => "ISP".into(),
+        0x805 => "MMUSR".into(),
+        0x806 => "URP".into(),
+        0x807 => "SRP".into(),
+        0x808 => "PCR".into(),
+        other => format!("${other:03X}"),
+    }
+}
+
 fn size_suffix(size: u8) -> &'static str {
     match size {
         0 => ".B",
@@ -339,6 +365,20 @@ fn decode_4(op: u16, s: &mut Stream) -> Option<String> {
         0x4E76 => return Some("TRAPV".into()),
         0x4E77 => return Some("RTR".into()),
         0x4AFC => return Some("ILLEGAL".into()),
+        0x4E7A | 0x4E7B => {
+            let ext = s.next_word();
+            let rn = if ext & 0x8000 != 0 {
+                AN[((ext >> 12) & 7) as usize]
+            } else {
+                DN[((ext >> 12) & 7) as usize]
+            };
+            let rc = control_reg_name(ext & 0xFFF);
+            return Some(if op == 0x4E7A {
+                format!("MOVEC {rc},{rn}")
+            } else {
+                format!("MOVEC {rn},{rc}")
+            });
+        }
         _ => {}
     }
     match op & 0xFFF8 {
@@ -701,6 +741,17 @@ mod tests {
         assert_eq!(dis(&[0x4E75], 0).0, "RTS");
         assert_eq!(dis(&[0x4E73], 0).0, "RTE");
         assert_eq!(dis(&[0x4E77], 0).0, "RTR");
+    }
+
+    #[test]
+    fn movec_names_registers_both_directions() {
+        // MOVEC A0,VBR - the 680x0.library probe-handler idiom.
+        assert_eq!(dis(&[0x4E7B, 0x8801], 0), ("MOVEC A0,VBR".into(), 4));
+        // MOVEC PCR,D0 - the 060 probe an 040 must trap on.
+        assert_eq!(dis(&[0x4E7A, 0x0808], 0).0, "MOVEC PCR,D0");
+        assert_eq!(dis(&[0x4E7B, 0x1002], 0).0, "MOVEC D1,CACR");
+        // Unknown control codes print raw.
+        assert_eq!(dis(&[0x4E7A, 0x0123], 0).0, "MOVEC $123,D0");
     }
 
     #[test]
