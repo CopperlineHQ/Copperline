@@ -4443,6 +4443,15 @@ impl Bus {
             let ram = self.mem.zorro.board_ram(board);
             return ((ram[off] as u16) << 8) | ram[off + 1] as u16;
         }
+        // Device-board windows: serve what the device can answer without
+        // side effects (e.g. the A2091 boot ROM, where scsi.device task
+        // and node names live), 0 for live registers.
+        if let Some((crate::zorro::BoardBacking::Device(dev), off)) =
+            self.mem.zorro.device_region_at(addr, 2)
+        {
+            return crate::zorro_device::ZorroDevice::peek_word(&self.devices[dev], off)
+                .unwrap_or(0);
+        }
         let a = addr as usize;
         let regions: [(usize, &[u8]); 4] = [
             (CHIP_RAM_BASE as usize, &self.mem.chip_ram),
