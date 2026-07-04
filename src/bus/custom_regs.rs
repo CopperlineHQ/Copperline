@@ -1093,9 +1093,6 @@ impl Bus {
                         );
                     }
                     self.display_dma_sprpt[idx] = self.denise.sprpt[idx];
-                    if off & 2 != 0 {
-                        self.apply_display_sprite_pointer_low_write(idx);
-                    }
                 }
                 false
             }

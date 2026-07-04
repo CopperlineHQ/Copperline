@@ -11,11 +11,11 @@ use super::{
     live_manual_sprite_collision_sources, live_sprite_playfield_collision_bits_in_range,
     live_sprite_sprite_collision_bits, visible_start_vpos_for_diw, BeamChipRamWrite,
     BeamRegisterWrite, BeamWriteSource, Bus, CapturedBitplaneRow, CapturedSpriteLine, ChipBusOwner,
-    CpuBusAccessKind, DeviceClock, DisplaySpriteControl, DisplaySpriteDmaState,
-    DisplaySpriteLineData, FrameBusTrace, LiveCollisionControl, LiveCollisionLineReplay,
-    LiveSpriteCollisionSource, RenderRegisterSnapshot, BLITTER_SLOWDOWN_CPU_MISS_LIMIT,
-    BLTCON1_DOFF, BPLCON0_ECSENA, BPLCON3_BRDSPRT, BPLCON3_SPRES_HIRES, COPPER_BUS_LOCKOUT_HPOS,
-    DENISE_HPOS_LAG_CCK, DMACON_AUD_MASK, DMACON_BLTEN, DMACON_BLTPRI, DMACON_BPLEN, DMACON_SPREN,
+    CpuBusAccessKind, DeviceClock, DisplaySpriteDmaState, DisplaySpriteLineData, FrameBusTrace,
+    LiveCollisionControl, LiveCollisionLineReplay, LiveSpriteCollisionSource,
+    RenderRegisterSnapshot, BLITTER_SLOWDOWN_CPU_MISS_LIMIT, BLTCON1_DOFF, BPLCON0_ECSENA,
+    BPLCON3_BRDSPRT, BPLCON3_SPRES_HIRES, COPPER_BUS_LOCKOUT_HPOS, DENISE_HPOS_LAG_CCK,
+    DMACON_AUD_MASK, DMACON_BLTEN, DMACON_BLTPRI, DMACON_BPLEN, DMACON_SPREN,
     PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS, RENDER_COPPER_WAIT_HPOS_FB0, RENDER_DIW_HSTART_FB0,
     RENDER_MIN_OVERSCAN_START_VPOS, RENDER_VISIBLE_LINES, RENDER_VISIBLE_START_VPOS,
     SPRITE_DMA_SLOT1_HPOS,
@@ -409,6 +409,16 @@ fn sprite_control_words(vstart: u16, vstop: u16, hstart: u16) -> (u16, u16) {
         | ((vstop & 0x0100) >> 7)
         | (hstart & 0x0001);
     (pos, ctl)
+}
+
+/// Cross the vertical-blank reset line (PAL $19) over the whole sprite slot
+/// band: the reset forces every channel's vstop to that line, so its slots
+/// fetch the POS/CTL control words from SPRxPT the way hardware loads them
+/// at the start of each field.
+fn sprite_fetch_control_words_at_reset_line(bus: &mut Bus) {
+    for sprite in 0..8 {
+        let _ = bus.captured_sprite_line_at(sprite, 0x19);
+    }
 }
 
 #[test]
@@ -4720,6 +4730,10 @@ fn sprite_dma_capture_samples_line_words_at_beam_time() {
     bus.denise.sprpt[0] = sprite_ptr as u32;
     bus.display_dma_sprpt[0] = sprite_ptr as u32;
 
+    // Control words load at the vertical-blank reset line.
+    sprite_fetch_control_words_at_reset_line(&mut bus);
+    bus.agnus.vpos = 0x2C;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(1);
     write_chip_word(&mut bus, sprite_ptr + 4, 0xAAAA);
     write_chip_word(&mut bus, sprite_ptr + 6, 0xBBBB);
@@ -4760,10 +4774,13 @@ fn inactive_sprite_pointer_write_before_pair_slot_seeds_next_descriptor_fetch() 
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN;
     bus.denise.sprpt[0] = old_ptr as u32;
     bus.display_dma_sprpt[0] = old_ptr as u32;
+    bus.sprite_dma_frame_start_ptr[0] = old_ptr as u32;
     bus.current_frame_render_base.dmacon = DMACON_DMAEN | DMACON_SPREN;
     bus.current_frame_render_base.sprpt[0] = old_ptr as u32;
 
-    bus.agnus.vpos = 0x24;
+    // The reload must land before the vertical-blank reset line: that
+    // line's slots consume SPRxPT for the field's control-word fetch.
+    bus.agnus.vpos = 0x10;
     bus.agnus.hpos = 0;
     let _ = bus.write_custom_word_from(0x120, (new_ptr >> 16) as u16, BeamWriteSource::Copper);
     let _ = bus.write_custom_word_from(0x122, new_ptr as u16, BeamWriteSource::Copper);
@@ -4975,12 +4992,10 @@ fn pending_descriptor_sprite_pointer_write_retargets_data_stream() {
     bus.denise.sprpt[0] = old_ptr as u32;
     bus.display_dma_sprpt[0] = old_ptr as u32;
 
-    bus.agnus.vpos = 0x2C;
-    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
-    bus.advance_chipset(4);
+    sprite_fetch_control_words_at_reset_line(&mut bus);
     let pending = bus.display_dma_sprite_state[0];
-    assert_eq!(pending.control.map(|control| control.vstart), Some(0x60));
-    assert!(!pending.data_dma_active);
+    assert_eq!(pending.vstrt, 0x60);
+    assert!(!pending.dma_enabled);
 
     bus.agnus.vpos = 0x30;
     bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0];
@@ -5016,28 +5031,15 @@ fn armed_pointer_reload_before_vstart_fetches_descriptor_words() {
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN;
     bus.denise.diwstrt = (0x2C << 8) | 0x0081;
     bus.denise.diwstop = (0x80 << 8) | 0x00C1;
-    bus.denise.sprpos[0] = pos;
-    bus.denise.sprctl[0] = ctl;
-    bus.denise.spr_armed[0] = true;
-    bus.display_dma_sprite_state[0] = DisplaySpriteDmaState {
-        control: Some(DisplaySpriteControl {
-            vstart: 0x40,
-            vstop: 0x42,
-            hstart: 0x0101,
-            hsub_70ns: false,
-            data_vstart: 0x40,
-            data_base: 0x0100,
-            next_ptr: 0x0108,
-            attached: false,
-        }),
-        control_loaded_vpos: super::unset_sprite_control_loaded_vpos(),
-        ..DisplaySpriteDmaState::default()
-    };
 
-    bus.agnus.vpos = 0x24;
+    // Reload SPRxPT during the vertical blank; the reset-line control-word
+    // fetch consumes it.
+    bus.agnus.vpos = 0x10;
     bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0];
     let _ = bus.write_custom_word_from(0x120, (sprite_ptr >> 16) as u16, BeamWriteSource::Copper);
     let _ = bus.write_custom_word_from(0x122, sprite_ptr as u16, BeamWriteSource::Copper);
+
+    sprite_fetch_control_words_at_reset_line(&mut bus);
 
     bus.agnus.vpos = 0x40;
     bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
@@ -5061,8 +5063,8 @@ fn after_slot_armed_sprite_pointer_write_seeds_dma_data_stream() {
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN;
     bus.agnus.vpos = 0x40;
     bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0];
-    bus.denise.sprpos[0] = pos;
-    bus.denise.sprctl[0] = ctl;
+    let _ = bus.write_custom_word_from(0x140, pos, BeamWriteSource::Cpu);
+    let _ = bus.write_custom_word_from(0x142, ctl, BeamWriteSource::Cpu);
     bus.denise.spr_armed[0] = true;
 
     let _ = bus.write_custom_word_from(0x120, (data_ptr >> 16) as u16, BeamWriteSource::Copper);
@@ -5096,6 +5098,10 @@ fn active_sprite_control_rewrite_preserves_descriptor_data_origin() {
     bus.denise.sprpt[0] = sprite_ptr as u32;
     bus.display_dma_sprpt[0] = sprite_ptr as u32;
 
+    bus.agnus.vpos = 0x2C;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
+    // Control words load at the vertical-blank reset line.
+    sprite_fetch_control_words_at_reset_line(&mut bus);
     bus.agnus.vpos = 0x2C;
     bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(4);
@@ -5151,6 +5157,9 @@ fn sprite_pointer_write_after_pair_slot_seeds_next_descriptor_fetch() {
     let _ = bus.write_custom_word_from(0x128, (new_ptr >> 16) as u16, BeamWriteSource::Copper);
     let _ = bus.write_custom_word_from(0x12A, new_ptr as u16, BeamWriteSource::Copper);
 
+    // The reset-line control fetch consumes the rewritten pointer.
+    sprite_fetch_control_words_at_reset_line(&mut bus);
+
     bus.agnus.vpos = 0x2C;
     bus.agnus.hpos = slot - 1;
     bus.advance_chipset(4);
@@ -5173,7 +5182,13 @@ fn sprite_pointer_write_after_pair_slot_seeds_next_descriptor_fetch() {
 /// Previously vstop<vstart killed sprites that deliberately reuse the same
 /// fetched strip across the remaining field.
 #[test]
-fn sprite_dma_inverted_vstop_runs_to_frame_bottom() {
+fn sprite_dma_inverted_vstop_refetches_control_words_on_vstop_line() {
+    // An inverted vertical pair (vstop < vstart) does not disable or clamp
+    // the sprite: the vstop comparator simply fires first, and that line's
+    // DMA slots consume the following words as the next POS/CTL control
+    // pair (vAmiga semantics). Software that shows full-height strips this
+    // way keeps rewriting SPRxPOS/SPRxCTL per line, which the register
+    // pokes model directly.
     let mut bus = empty_bus();
     let sprite_ptr = 0x0100usize;
     let (pos, ctl) = sprite_control_words(0x2C, 0x20, 0x0083); // vstop < vstart
@@ -5183,19 +5198,30 @@ fn sprite_dma_inverted_vstop_runs_to_frame_bottom() {
     write_chip_word(&mut bus, sprite_ptr + 6, 0xBBBB);
 
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN;
-    bus.agnus.vpos = 0x2C;
-    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.denise.sprpt[0] = sprite_ptr as u32;
     bus.display_dma_sprpt[0] = sprite_ptr as u32;
 
-    bus.advance_chipset(4);
+    // Control words load at the vertical-blank reset line.
+    sprite_fetch_control_words_at_reset_line(&mut bus);
+    let loaded = bus.display_dma_sprite_state[0];
+    assert_eq!(loaded.vstrt, 0x2C);
+    assert_eq!(loaded.vstop, 0x20);
 
-    let lines = bus.frame_captured_sprite_lines();
-    assert!(bus.frame_sprite_dma_observed());
-    assert_eq!(lines.len(), 1, "inverted-window sprite must still display");
-    assert_eq!(lines[0].beam_y, 0x2C);
-    assert_eq!(lines[0].data, 0xAAAA);
-    assert_eq!(lines[0].datb, 0xBBBB);
+    // The vstop line's slots (an off-screen line here, so driven the way
+    // the pre-display replay does) fetch the data words as the next
+    // POS/CTL.
+    let emitted = bus.captured_sprite_line_at(0, 0x20);
+    assert!(emitted.is_none(), "the control-fetch line displays nothing");
+
+    let state = bus.display_dma_sprite_state[0];
+    assert_eq!(state.pos, 0xAAAA);
+    assert_eq!(state.ctl, 0xBBBB);
+    assert_eq!(
+        bus.display_dma_sprpt[0],
+        sprite_ptr as u32 + 8,
+        "the control refetch advances SPRxPT past the consumed words"
+    );
+    assert!(bus.frame_captured_sprite_lines().is_empty());
 }
 
 /// Plan 3.4: FMODE SPR32/SPAGEM widen the sprite fetch. The descriptor
@@ -5225,6 +5251,10 @@ fn fmode_wide_sprite_dma_captures_extension_words() {
     bus.denise.sprpt[0] = sprite_ptr as u32;
     bus.display_dma_sprpt[0] = sprite_ptr as u32;
 
+    // Control words load at the vertical-blank reset line.
+    sprite_fetch_control_words_at_reset_line(&mut bus);
+    bus.agnus.vpos = 0x2C;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(4);
 
     let lines = bus.frame_captured_sprite_lines();
@@ -5266,6 +5296,8 @@ fn fmode_sscan2_sprite_dma_doubles_each_data_line() {
     bus.denise.sprpt[0] = sprite_ptr as u32;
     bus.display_dma_sprpt[0] = sprite_ptr as u32;
 
+    // Control words load at the vertical-blank reset line.
+    sprite_fetch_control_words_at_reset_line(&mut bus);
     for vpos in 0x2C..=0x32u32 {
         bus.agnus.vpos = vpos;
         bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
@@ -5523,6 +5555,10 @@ fn active_sprite_pos_write_retimes_hstart_without_clearing_dma_stream() {
     bus.display_dma_sprpt[0] = sprite_ptr as u32;
     bus.agnus.vpos = 0x2C;
     bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
+    // Control words load at the vertical-blank reset line.
+    sprite_fetch_control_words_at_reset_line(&mut bus);
+    bus.agnus.vpos = 0x2C;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(4);
 
     // Rewriting SPRxPOS while DMA is already enabled changes the horizontal
@@ -5566,52 +5602,23 @@ fn finished_sprite_channel_carries_dma_frontier_across_frame_boundary() {
     // SPRxPT), and from the written pointer for a channel still mid-field.
     let mut bus = empty_bus();
 
-    // Channel 0 finished the field: its control comparator is cleared and the
-    // DMA frontier sits at the terminating descriptor. denise.sprpt still
+    // Channel 0 finished the field: SPRxPT advanced through its fetches and
+    // sits at the DMA frontier past the consumed list. denise.sprpt still
     // holds the now-overwritten descriptor address the Copper wrote earlier.
     let frontier0 = 0x0005_F3E4u32;
     bus.denise.sprpt[0] = 0x0005_F0BC;
-    bus.display_dma_sprite_state[0] = DisplaySpriteDmaState {
-        control: None,
-        control_loaded_vpos: super::unset_sprite_control_loaded_vpos(),
-        next_ptr: Some(frontier0),
-        terminated: true,
-        data_dma_active: false,
-        last_line: None,
-        data_word_skew: 0,
-        pending_data: None,
-        pending_line_vpos: i32::MIN,
-        entry_line_vpos: i32::MIN,
-    };
+    bus.display_dma_sprpt[0] = frontier0;
 
-    // Channel 1 is still mid-descriptor at frame end: keep the written
-    // pointer so an active reused sprite is not skipped past its data.
-    let written1 = 0x0006_0000u32;
-    bus.denise.sprpt[1] = written1;
-    bus.display_dma_sprite_state[1] = DisplaySpriteDmaState {
-        control: Some(DisplaySpriteControl {
-            vstart: 0x20,
-            vstop: 0x40,
-            hstart: 0x80,
-            hsub_70ns: false,
-            data_vstart: 0x20,
-            data_base: 0x0100,
-            next_ptr: 0x0200,
-            attached: false,
-        }),
-        control_loaded_vpos: 0x20,
-        next_ptr: Some(0x0200),
-        terminated: false,
-        data_dma_active: true,
-        last_line: None,
-        data_word_skew: 0,
-        pending_data: None,
-        pending_line_vpos: i32::MIN,
-        entry_line_vpos: i32::MIN,
-    };
+    // Channel 1 is mid-stream at frame end: its live pointer sits at the
+    // next data word.
+    let mid_stream1 = 0x0006_0104u32;
+    bus.denise.sprpt[1] = 0x0006_0000;
+    bus.display_dma_sprpt[1] = mid_stream1;
 
-    // Channel 2 was never set up this field: fall back to the written pointer.
+    // Channel 2 never fetched this field: the live pointer still equals the
+    // written value.
     bus.denise.sprpt[2] = 0x0007_0000;
+    bus.display_dma_sprpt[2] = 0x0007_0000;
 
     bus.begin_new_beam_frame();
 
@@ -5620,12 +5627,12 @@ fn finished_sprite_channel_carries_dma_frontier_across_frame_boundary() {
         "finished channel must carry the DMA frontier, not the stale written pointer"
     );
     assert_eq!(
-        bus.sprite_dma_frame_start_ptr[1], written1,
-        "channel still mid-descriptor keeps the written SPRxPT"
+        bus.sprite_dma_frame_start_ptr[1], mid_stream1,
+        "mid-stream channel carries its live pointer"
     );
     assert_eq!(
         bus.sprite_dma_frame_start_ptr[2], 0x0007_0000,
-        "channel with no descriptor falls back to the written SPRxPT"
+        "channel that never fetched keeps the written SPRxPT"
     );
 }
 
@@ -5648,6 +5655,10 @@ fn sprite_dma_capture_treats_zero_pointer_as_chip_address() {
     bus.display_dma_sprpt[0] = 0;
     bus.display_dma_sprpt[1] = 0x20;
 
+    // Control words load at the vertical-blank reset line.
+    sprite_fetch_control_words_at_reset_line(&mut bus);
+    bus.agnus.vpos = 0x2C;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(4);
 
     let lines = bus.frame_captured_sprite_lines();
@@ -5694,20 +5705,9 @@ fn state_load_resets_transient_video_latches() {
         attached: false,
     });
     bus.display_dma_sprite_state[0] = DisplaySpriteDmaState {
-        control: Some(DisplaySpriteControl {
-            vstart: 0x20,
-            vstop: 0x40,
-            hstart: 0x80,
-            hsub_70ns: false,
-            data_vstart: 0x20,
-            data_base: 0x0100,
-            next_ptr: 0x0200,
-            attached: false,
-        }),
-        control_loaded_vpos: 0x20,
-        next_ptr: Some(0x0200),
-        terminated: false,
-        data_dma_active: true,
+        vstrt: 0x20,
+        vstop: 0x40,
+        dma_enabled: true,
         last_line: Some(DisplaySpriteLineData {
             hstart: 0x80,
             hsub_70ns: false,
@@ -5718,12 +5718,8 @@ fn state_load_resets_transient_video_latches() {
             width_words: 1,
             attached: false,
         }),
-        data_word_skew: 0,
-        pending_data: None,
-        pending_line_vpos: i32::MIN,
-        entry_line_vpos: i32::MIN,
+        ..DisplaySpriteDmaState::default()
     };
-    bus.display_dma_sprite_state[3].terminated = true;
 
     bus.reset_transient_video_after_state_load();
 
@@ -5738,13 +5734,13 @@ fn state_load_resets_transient_video_latches() {
     assert!(bus.last_frame_bitplane_rows.iter().all(Option::is_none));
     assert!(bus.current_frame_sprite_lines.is_empty());
     assert!(bus.last_frame_sprite_lines.is_empty());
-    for state in bus.display_dma_sprite_state {
-        assert!(state.control.is_none());
-        assert!(state.next_ptr.is_none());
-        assert!(!state.terminated);
-        assert!(!state.data_dma_active);
-        assert!(state.last_line.is_none());
-    }
+    // The sprite DMA state is chip state (register copies, DMA flip-flops,
+    // display latches): a state load restores it rather than clearing it.
+    let restored = bus.display_dma_sprite_state[0];
+    assert_eq!(restored.vstrt, 0x20);
+    assert_eq!(restored.vstop, 0x40);
+    assert!(restored.dma_enabled);
+    assert!(restored.last_line.is_some());
 }
 
 #[test]
@@ -5865,6 +5861,10 @@ fn sprite_dma_capture_wraps_control_words_at_chip_ram_end() {
     bus.denise.sprpt[0] = sprite_ptr as u32;
     bus.display_dma_sprpt[0] = sprite_ptr as u32;
 
+    // Control words load at the vertical-blank reset line.
+    sprite_fetch_control_words_at_reset_line(&mut bus);
+    bus.agnus.vpos = 0x2C;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(4);
 
     let lines = bus.frame_captured_sprite_lines();
@@ -5924,6 +5924,10 @@ fn sprite_dma_capture_latches_control_words_until_stop() {
     bus.denise.sprpt[0] = sprite_ptr as u32;
     bus.display_dma_sprpt[0] = sprite_ptr as u32;
 
+    // Control words load at the vertical-blank reset line.
+    sprite_fetch_control_words_at_reset_line(&mut bus);
+    bus.agnus.vpos = 0x2C;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(4);
 
     let (rewritten_pos, rewritten_ctl) = sprite_control_words(0x2D, 0x2E, 0x0091);
@@ -5968,6 +5972,10 @@ fn sprite_dma_capture_samples_later_pairs_at_their_fetch_slot() {
     bus.display_dma_sprpt[0] = sprite0_ptr as u32;
     bus.display_dma_sprpt[6] = sprite6_ptr as u32;
 
+    // Control words load at the vertical-blank reset line.
+    sprite_fetch_control_words_at_reset_line(&mut bus);
+    bus.agnus.vpos = 0x2C;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(2);
     write_chip_word(&mut bus, sprite0_ptr + 4, 0xAAAA);
     write_chip_word(&mut bus, sprite6_ptr + 4, 0xBBBB);
@@ -6002,17 +6010,18 @@ fn sprite_pointer_write_at_pair_slot_seeds_next_line_descriptor_fetch() {
     bus.denise.sprpt[0] = old_ptr as u32;
     bus.display_dma_sprpt[0] = old_ptr as u32;
 
-    bus.agnus.vpos = 0x24;
+    bus.agnus.vpos = 0x10;
     bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(1);
     let _ = bus.write_custom_word_from(0x120, (new_ptr >> 16) as u16, BeamWriteSource::Copper);
     let _ = bus.write_custom_word_from(0x122, new_ptr as u16, BeamWriteSource::Copper);
-
-    let state = bus.display_dma_sprite_state[0];
-    assert!(
-        state.control.is_none(),
-        "same-slot pointer write should discard the descriptor fetched before the write"
+    assert_eq!(
+        bus.display_dma_sprpt[0], new_ptr as u32,
+        "the pointer write must seed the next control-word fetch"
     );
+
+    // The vertical-blank reset line fetches POS/CTL from the new pointer.
+    sprite_fetch_control_words_at_reset_line(&mut bus);
 
     bus.agnus.vpos = 0x40;
     bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
@@ -6069,6 +6078,10 @@ fn sprite_dma_capture_blocks_sprite_seven_when_ddfstrt_uses_early_fetch_slot() {
     bus.display_dma_sprpt[6] = sprite6_ptr as u32;
     bus.display_dma_sprpt[7] = sprite7_ptr as u32;
 
+    // Control words load at the vertical-blank reset line.
+    sprite_fetch_control_words_at_reset_line(&mut bus);
+    bus.agnus.vpos = 0x2C;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[6] - 1;
     bus.advance_chipset(SPRITE_DMA_SLOT1_HPOS[7] + 1 - bus.agnus.hpos);
 
     let lines = bus.frame_captured_sprite_lines();
@@ -6104,6 +6117,10 @@ fn sprite_dma_capture_keeps_sprite_seven_when_ddfstrt_matches_sprite_slot() {
     bus.display_dma_sprpt[6] = sprite6_ptr as u32;
     bus.display_dma_sprpt[7] = sprite7_ptr as u32;
 
+    // Control words load at the vertical-blank reset line.
+    sprite_fetch_control_words_at_reset_line(&mut bus);
+    bus.agnus.vpos = 0x2C;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[6] - 1;
     bus.advance_chipset(SPRITE_DMA_SLOT1_HPOS[7] + 3 - bus.agnus.hpos);
 
     let lines = bus.frame_captured_sprite_lines();
@@ -6131,6 +6148,10 @@ fn sprite_dma_capture_repeats_last_fetched_line_after_dma_disable_until_vstop() 
     bus.denise.sprpt[0] = sprite_ptr as u32;
     bus.display_dma_sprpt[0] = sprite_ptr as u32;
 
+    // Control words load at the vertical-blank reset line.
+    sprite_fetch_control_words_at_reset_line(&mut bus);
+    bus.agnus.vpos = 0x2C;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(4);
     bus.agnus.dmacon = DMACON_DMAEN;
     bus.agnus.vpos = 0x2D;
@@ -6174,7 +6195,7 @@ fn sprite_dma_capture_does_not_start_descriptor_at_or_before_current_vpos() {
     bus.agnus.vpos = 0x2C;
     bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.denise.sprpt[0] = sprite_ptr as u32;
-    bus.display_dma_sprite_state[0].next_ptr = Some(sprite_ptr as u32);
+    bus.display_dma_sprpt[0] = sprite_ptr as u32;
 
     bus.advance_chipset(4);
     bus.agnus.vpos = 0x2D;
@@ -6208,6 +6229,10 @@ fn sprite_dma_reuse_skips_descriptor_with_vstart_before_current_vpos() {
     bus.denise.sprpt[0] = sprite_ptr as u32;
     bus.display_dma_sprpt[0] = sprite_ptr as u32;
 
+    // Control words load at the vertical-blank reset line.
+    sprite_fetch_control_words_at_reset_line(&mut bus);
+    bus.agnus.vpos = 0x2B;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(4);
     bus.agnus.vpos = 0x2C;
     bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
@@ -6251,6 +6276,8 @@ fn sprite_dma_chained_descriptor_with_same_vstart_arms_after_control_fetch_line(
     bus.denise.sprpt[0] = sprite_ptr as u32;
     bus.display_dma_sprpt[0] = sprite_ptr as u32;
 
+    // Control words load at the vertical-blank reset line.
+    sprite_fetch_control_words_at_reset_line(&mut bus);
     for vpos in 0x2C..=0x31u32 {
         bus.agnus.vpos = vpos;
         bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
@@ -6298,6 +6325,10 @@ fn visible_sprite_pixels_accumulate_live_sprite_sprite_clxdat() {
     bus.display_dma_sprpt[2] = sprite2_ptr as u32;
     bus.current_frame_sprite_display_enable_x_by_y[0] = Some(0);
 
+    // Control words load at the vertical-blank reset line.
+    sprite_fetch_control_words_at_reset_line(&mut bus);
+    bus.agnus.vpos = 0x2C;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(1);
     assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
 
@@ -6684,6 +6715,10 @@ fn bplcon3_spres_hires_narrows_live_sprite_sprite_clxdat() {
         bus.current_frame_sprite_display_enable_x_by_y[0] = Some(0);
 
         let remaining = 0x3A - bus.agnus.hpos;
+        // Control words load at the vertical-blank reset line.
+        sprite_fetch_control_words_at_reset_line(&mut bus);
+        bus.agnus.vpos = 0x2C;
+        bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
         bus.advance_chipset(remaining);
 
         bus.custom_read(0x00E, 2)
@@ -6724,6 +6759,10 @@ fn same_line_clxcon_odd_sprite_enable_does_not_retime_earlier_live_sprite_sprite
         bus.current_frame_render_base = bus.capture_render_snapshot();
 
         let after_pair_capture = SPRITE_DMA_SLOT1_HPOS[1] + 1 - bus.agnus.hpos;
+        // Control words load at the vertical-blank reset line.
+        sprite_fetch_control_words_at_reset_line(&mut bus);
+        bus.agnus.vpos = 0x2C;
+        bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
         bus.advance_chipset(after_pair_capture);
 
         if let Some(enable_hpos) = enable_hpos {
@@ -7418,6 +7457,10 @@ fn captured_sprite_and_bitplane_rows_accumulate_live_sprite_playfield_clxdat() {
     bus.current_frame_sprite_display_enable_x_by_y[0] = Some(0);
     write_chip_word(&mut bus, 0x0100, 0x4000);
 
+    // Control words load at the vertical-blank reset line.
+    sprite_fetch_control_words_at_reset_line(&mut bus);
+    bus.agnus.vpos = 0x2C;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(1);
     assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
     let remaining = 0x40 - bus.agnus.hpos;
@@ -7449,6 +7492,10 @@ fn explicit_bpl1dat_output_accumulates_live_sprite_playfield_clxdat() {
     bus.display_dma_sprpt[0] = sprite_ptr as u32;
     bus.current_frame_render_base = bus.capture_render_snapshot();
 
+    // Control words load at the vertical-blank reset line.
+    sprite_fetch_control_words_at_reset_line(&mut bus);
+    bus.agnus.vpos = 0x2C;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(2);
     assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
 
@@ -7514,6 +7561,10 @@ fn same_line_bplcon1_scroll_increase_latches_later_live_sprite_playfield_clxdat(
     write_chip_word(&mut bus, 0x0100, 0x0001);
 
     let before_scroll_write = 0x40 - bus.agnus.hpos;
+    // Control words load at the vertical-blank reset line.
+    sprite_fetch_control_words_at_reset_line(&mut bus);
+    bus.agnus.vpos = 0x2C;
+    bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
     bus.advance_chipset(before_scroll_write);
     assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
 
@@ -7556,6 +7607,10 @@ fn same_line_clxcon_odd_sprite_enable_does_not_retime_earlier_live_sprite_playfi
         write_chip_word(&mut bus, 0x0100, 0x8000);
         write_chip_word(&mut bus, 0x0102, 0);
 
+        // Control words load at the vertical-blank reset line.
+        sprite_fetch_control_words_at_reset_line(&mut bus);
+        bus.agnus.vpos = 0x2C;
+        bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
         bus.advance_chipset(1);
         assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
 
@@ -7606,6 +7661,10 @@ fn bplcon3_spres_hires_narrows_live_sprite_playfield_clxdat() {
         write_chip_word(&mut bus, 0x0100, 0x0004);
         write_chip_word(&mut bus, 0x0102, 0);
 
+        // Control words load at the vertical-blank reset line.
+        sprite_fetch_control_words_at_reset_line(&mut bus);
+        bus.agnus.vpos = 0x2C;
+        bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
         bus.advance_chipset(1);
         let remaining = 0x40 - bus.agnus.hpos;
         bus.advance_chipset(remaining);
@@ -7653,6 +7712,10 @@ fn same_line_bplcon3_spres_write_does_not_retime_earlier_live_sprite_playfield_c
         write_chip_word(&mut bus, 0x0100, 0x0004);
         write_chip_word(&mut bus, 0x0102, 0);
 
+        // Control words load at the vertical-blank reset line.
+        sprite_fetch_control_words_at_reset_line(&mut bus);
+        bus.agnus.vpos = 0x2C;
+        bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
         bus.advance_chipset(1);
         if let Some(spres_hpos) = spres_hpos {
             let before_spres = spres_hpos - bus.agnus.hpos;
@@ -8277,11 +8340,14 @@ fn fixed_agnus_dma_slot_bands_drive_owner_selection() {
 
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN;
     // A sprite's slot is reserved only while that sprite is actually
-    // fetching (data_dma_active); a parked sprite frees it. Sprite N owns
-    // the odd color clocks $15+4N and $17+4N (hardware slot chart).
+    // fetching (its DMA flip-flop is set, or the line is its vstop line
+    // fetching POS/CTL); a parked sprite frees it. Sprite N owns the odd
+    // color clocks $15+4N and $17+4N (hardware slot chart).
+    bus.agnus.vpos = 0x2C;
+    bus.display_dma_sprite_state[0].vstop = 0x60;
     bus.agnus.hpos = 0x015;
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Idle);
-    bus.display_dma_sprite_state[0].data_dma_active = true;
+    bus.display_dma_sprite_state[0].dma_enabled = true;
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Sprite);
     bus.agnus.hpos = 0x017;
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Sprite);
@@ -8293,7 +8359,8 @@ fn fixed_agnus_dma_slot_bands_drive_owner_selection() {
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Idle);
     bus.agnus.hpos = 0x035;
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Idle);
-    bus.display_dma_sprite_state[0].data_dma_active = false;
+    bus.display_dma_sprite_state[0].dma_enabled = false;
+    bus.agnus.vpos = 0;
 
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
     bus.denise.bplcon0 = 0x1000;

@@ -307,34 +307,52 @@ pub struct HeldSpriteLine {
     pub vstop: i32,
 }
 
+/// Agnus's per-channel sprite DMA state, modelled at the register level the
+/// way the chip works: POS/CTL control words are fetched on the channel's
+/// vstop line through its two DMA slots, the vertical comparators run off
+/// these register copies at each line start (and immediately on CPU/Copper
+/// pokes), the DMA flip-flop is cleared on the vstop line even when SPREN
+/// is off, and SPRxPT advances only on words actually fetched.
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 struct DisplaySpriteDmaState {
-    control: Option<DisplaySpriteControl>,
-    #[serde(skip, default = "unset_sprite_control_loaded_vpos")]
-    control_loaded_vpos: i32,
-    next_ptr: Option<u32>,
-    terminated: bool,
-    data_dma_active: bool,
+    /// Channel copies of the SPRxPOS/SPRxCTL register words (from DMA
+    /// control-word fetches or CPU/Copper writes); the horizontal position
+    /// and attach decode for emitted lines comes from these.
+    pos: u16,
+    ctl: u16,
+    /// Vertical comparator values. Mostly derived from pos/ctl, but held
+    /// separately because the vertical-blank reset writes vstop without
+    /// touching the CTL word.
+    vstrt: i32,
+    vstop: i32,
+    /// The per-sprite DMA flip-flop: set when the line counter passes
+    /// vstrt, cleared when it passes vstop (even with SPREN off) and in
+    /// the frame's last line.
+    dma_enabled: bool,
+    /// Line whose start-of-line comparator update has already run (the
+    /// update is applied lazily, catching up over skipped lines).
+    #[serde(default = "unset_sprite_line_marker")]
+    comparator_vpos: i32,
+    /// Display latches from the last assembled line: a skipped slot reuses
+    /// the stale side, and with DMA off an armed channel keeps displaying
+    /// this line until a CTL fetch or poke disarms it.
     last_line: Option<DisplaySpriteLineData>,
-    /// Words the hardware pointer lags behind the line-derived stream
-    /// position: slots skipped by mid-line SPREN edges never fetch, so
-    /// every later fetch of the stream reads that many words earlier.
-    data_word_skew: u32,
+    /// Display line of the last DATA fetch: with SSCAN2 the hardware
+    /// fetches on every other line and redisplays in between.
+    last_data_fetch_vpos: i32,
     /// DATA word(s) fetched by the sprite's first DMA slot, sampled at that
     /// slot's beam time, awaiting the second slot to assemble the line.
-    /// None when the first slot was skipped (or fetched nothing).
     pending_data: Option<(u16, [u16; 3])>,
-    /// Line the first slot's evaluation ran for (entry logic + DATA fetch),
-    /// so the second slot completes rather than re-runs it.
-    #[serde(skip, default = "unset_sprite_control_loaded_vpos")]
+    /// Line the first slot's DATA fetch ran for.
+    #[serde(default = "unset_sprite_line_marker")]
     pending_line_vpos: i32,
-    /// Line the per-line entry logic (vstop comparator, descriptor chain)
-    /// already ran for, keeping it idempotent across the two slots.
-    #[serde(skip, default = "unset_sprite_control_loaded_vpos")]
+    /// Line the first slot's evaluation ran for, so the second slot
+    /// completes the line rather than re-running the entry logic.
+    #[serde(default = "unset_sprite_line_marker")]
     entry_line_vpos: i32,
 }
 
-fn unset_sprite_control_loaded_vpos() -> i32 {
+fn unset_sprite_line_marker() -> i32 {
     i32::MIN
 }
 
@@ -344,16 +362,46 @@ impl Default for DisplaySpriteDmaState {
         // zero default would make a fresh state claim its per-line work
         // already ran when the beam is on line 0.
         Self {
-            control: None,
-            control_loaded_vpos: unset_sprite_control_loaded_vpos(),
-            next_ptr: None,
-            terminated: false,
-            data_dma_active: false,
+            pos: 0,
+            ctl: 0,
+            vstrt: 0,
+            vstop: 0,
+            dma_enabled: false,
+            comparator_vpos: unset_sprite_line_marker(),
             last_line: None,
-            data_word_skew: 0,
+            last_data_fetch_vpos: unset_sprite_line_marker(),
             pending_data: None,
-            pending_line_vpos: unset_sprite_control_loaded_vpos(),
-            entry_line_vpos: unset_sprite_control_loaded_vpos(),
+            pending_line_vpos: unset_sprite_line_marker(),
+            entry_line_vpos: unset_sprite_line_marker(),
+        }
+    }
+}
+
+impl DisplaySpriteDmaState {
+    /// A POS word (fetch or poke) replaces the vertical start's low bits,
+    /// keeping the CTL-supplied high bit.
+    fn poke_pos(&mut self, value: u16) {
+        self.pos = value;
+        self.vstrt = (self.vstrt & 0x100) | i32::from(value >> 8);
+    }
+
+    /// A CTL word (fetch or poke) supplies vstart's high bit and the whole
+    /// vstop, and disarms the channel's display latches.
+    fn poke_ctl(&mut self, value: u16) {
+        self.ctl = value;
+        self.vstrt = (self.vstrt & 0x0FF) | (i32::from(value & 0x0004) << 6);
+        self.vstop = (i32::from(value & 0x0002) << 7) | i32::from(value >> 8);
+        self.last_line = None;
+    }
+
+    /// The comparators also fire immediately when a poke lands on the
+    /// matching line (vstop wins over vstrt when both match).
+    fn reevaluate_comparators_at(&mut self, beam_y: i32) {
+        if self.vstrt == beam_y {
+            self.dma_enabled = true;
+        }
+        if self.vstop == beam_y {
+            self.dma_enabled = false;
         }
     }
 }
@@ -503,43 +551,6 @@ impl Default for BitplaneSlotPlanCache {
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
-struct DisplaySpriteControl {
-    vstart: i32,
-    vstop: i32,
-    hstart: i32,
-    hsub_70ns: bool,
-    #[serde(skip, default = "unset_sprite_data_vstart")]
-    data_vstart: i32,
-    data_base: u32,
-    next_ptr: u32,
-    attached: bool,
-}
-
-fn unset_sprite_data_vstart() -> i32 {
-    i32::MIN
-}
-
-fn register_sprite_data_vstart() -> i32 {
-    i32::MIN + 1
-}
-
-impl DisplaySpriteControl {
-    fn effective_data_vstart(self) -> i32 {
-        if self.data_vstart == unset_sprite_data_vstart()
-            || self.data_vstart == register_sprite_data_vstart()
-        {
-            self.vstart
-        } else {
-            self.data_vstart
-        }
-    }
-
-    fn data_origin_is_register_stream(self) -> bool {
-        self.data_vstart == register_sprite_data_vstart()
-    }
-}
-
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 struct DisplaySpriteLineData {
     hstart: i32,
     hsub_70ns: bool,
@@ -664,6 +675,10 @@ pub struct Bus {
     pub input: InputState,
 
     pub poll_stats: PollStats,
+    /// Host performance telemetry (call/probe/nanosecond counters), not
+    /// machine state: call chunking legitimately differs across a
+    /// save-state load, so it is excluded from the serialized layout.
+    #[serde(skip)]
     video_pipeline_stats: VideoPipelineStats,
 
     /// Set by MMIO writes that should end the current CPU slice after
@@ -908,14 +923,15 @@ pub struct Bus {
     /// frame boundary instead of re-seeding from `denise.sprpt` (the stale last
     /// write), so a sprite descriptor buffer that software rewrites every field
     /// is not re-armed from its previous, now-overwritten address before the
-    /// Copper reloads SPRxPT. Transient render state, rebuilt each frame (and
-    /// re-derived after a state load), so it is excluded from the serialized
-    /// layout.
-    #[serde(skip)]
+    /// Copper reloads SPRxPT. Captured at each frame start from the live
+    /// (fetch-advanced) pointers, and serialized: the live pointers move on
+    /// between the frame start and a mid-frame state save, so it cannot be
+    /// re-derived at load time.
+    #[serde(default)]
     sprite_dma_frame_start_ptr: [u32; 8],
-    // Derived from sprite DMA descriptor/control fetches. Kept in the bincode
-    // layout for compatibility, then reset after a state load so stale decoded
-    // latches are rebuilt from the restored pointer context.
+    // The register-level sprite DMA state (comparator copies, DMA
+    // flip-flops, display latches). Chip state: serialized and restored
+    // exactly by save states.
     display_dma_sprite_state: [DisplaySpriteDmaState; 8],
     display_dma_clipped_rows_advanced: bool,
     bitplane_dmacon_delay: Option<BitplaneDmaconDelay>,
@@ -2541,7 +2557,6 @@ impl Bus {
         self.last_frame_sprite_display_enable_x_by_y = empty_sprite_display_enable_x_by_y();
         self.current_frame_sprite_dma_observed = false;
         self.last_frame_sprite_dma_observed = false;
-        self.display_dma_sprite_state = [DisplaySpriteDmaState::default(); 8];
         self.current_frame_bus_trace.clear();
         self.last_frame_bus_trace = None;
     }
@@ -2614,6 +2629,7 @@ impl Bus {
         self.last_frame_beam_bottom_palette = Palette::new();
         self.last_frame_beam_bottom_palette_valid = false;
         self.reset_frame_capture_buffers();
+        self.display_dma_sprite_state = [DisplaySpriteDmaState::default(); 8];
         self.current_frame_display_snapshot_taken = false;
         self.ocs_same_line_diw_start_blocked_vpos = None;
         self.current_frame_render_blocked = false;
@@ -2763,7 +2779,6 @@ impl Bus {
         self.ocs_same_line_diw_start_blocked_vpos = None;
         self.reset_frame_capture_buffers();
         self.current_frame_render_blocked = self.agnus.vpos != 0 || self.agnus.hpos != 0;
-        self.sprite_dma_frame_start_ptr = self.display_dma_sprpt;
     }
 
     pub fn emulated_seconds(&self) -> f64 {
@@ -4813,12 +4828,11 @@ impl Bus {
                 let mut s = String::new();
                 for i in 0..8 {
                     let st = &self.display_dma_sprite_state[i];
-                    let act = st.data_dma_active as u8;
-                    let term = st.terminated as u8;
-                    let (cvs, cve) = st.control.map(|c| (c.vstart, c.vstop)).unwrap_or((-1, -1));
+                    let ena = st.dma_enabled as u8;
+                    let armed = st.last_line.is_some() as u8;
                     s.push_str(&format!(
-                        " s{i}[act={act} term={term} ctl_vs={cvs} ctl_ve={cve} nxt={:?}]",
-                        st.next_ptr
+                        " s{i}[ena={ena} armed={armed} vstrt={} vstop={} ptr={:06X}]",
+                        st.vstrt, st.vstop, self.display_dma_sprpt[i]
                     ));
                 }
                 log::info!(

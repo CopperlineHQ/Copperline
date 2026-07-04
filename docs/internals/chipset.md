@@ -47,59 +47,47 @@ Alice adds the FMODE wide-fetch latch, which scales the bitplane and
 sprite fetch quanta (FMODE=0 stays byte-identical to the OCS/ECS slot
 timing).
 
+Sprite DMA is modelled at the register level, the way the chips work:
+there is no separate "descriptor" concept. Each channel keeps Agnus-side
+copies of its SPRxPOS/SPRxCTL words and the vertical comparator values
+derived from them, updated identically by DMA fetches and by CPU/Copper
+pokes (POS supplies the vertical start's low bits, CTL the high bit, the
+whole vertical stop, and disarms the display latches). At each line start
+the comparators run: passing vstart sets the channel's DMA flip-flop,
+passing vstop clears it -- even when SPREN is off, which is what leaves a
+sprite dead until the next field when software disables DMA across its
+vstop line. Writes landing on the matching line re-evaluate immediately.
+
 A sprite line's two DMA slots ($15+4N and $17+4N) are evaluated at their
-own colour clocks: the first slot runs the line's descriptor/arming logic
-and samples the DATA word(s) at that slot's beam time, the second samples
-DATB at its own beam time and assembles the display line, so chip RAM
-rewritten between the two slots is seen by DATB but not DATA. DMACON's
-SPREN is sampled by each slot individually, so a mid-line edge fetches
-exactly one word of the pair; the skipped word's slot leaves SPRxPT one
-fetch behind and the data stream shifts accordingly, while the display
-line reuses the stale latch on that side (a missed DATA slot never arms
-the sprite).
+own colour clocks. On the channel's vstop line the slots fetch the next
+control words (POS in the first slot, CTL in the second); on other lines
+an enabled channel fetches DATA and DATB, so chip RAM rewritten between
+the two slots is seen by DATB but not DATA. The vertical-blank reset
+(PAL line $19, NTSC line $14 -- sprite DMA is inhibited above it) forces
+every channel's vstop to that line, which is how each field's first
+control-word fetch happens; software reloads SPRxPT each vblank to point
+it at the sprite list. An "inverted" pair (vstop before vstart, or a
+$0000/$0000 terminator) simply parks the comparators on values the beam
+has passed or never shows: the terminator decodes to vstart=vstop=0 and
+the channel stays silent until the next field's reset.
 
-Sprite DMA retains its latched POS/CTL descriptor independently from the
-SPRxPT registers while a sprite data stream is active or waiting for VSTART.
-Standard PAL/NTSC hard vertical blank inhibits sprite DMA at the top of the
-field, so descriptor fetches are not replayed until PAL line $19 or NTSC line
-$14.
-If software rewrites SPRxPT on a later beam line while that descriptor is
-still pending, the retained POS/CTL stays latched and the new SPRxPT value
-retargets the descriptor's post-control data stream. A same-line rewrite
-after the descriptor fetch is treated as a descriptor restart for the next
-sprite DMA slot; otherwise freshly loaded descriptor words would be mistaken
-for sprite data.
-Software can also write SPRxPOS/SPRxCTL directly and let sprite DMA fetch
-data from the current SPRxPT stream; in that case SPRxPT names the first
-data word pair, not a memory descriptor. A save-state load clears
-Copperline's transient Agnus descriptor latch, so this register-stream case
-is reconstructed from Denise's retained armed state, SPRxPOS/SPRxCTL, and
-an after-slot SPRxPT low-word write in the rendered display area. If a DMA
-descriptor has already been retained and is still waiting for VSTART, later
-SPRxPOS/SPRxCTL writes
-update the live comparators but keep the descriptor's post-control data
-origin. The frame-start replay path mirrors this by replaying off-screen
-DMACON and SPRxPT writes in beam order before rendering the visible field.
-Enabled sprite slots that fetch no sprite data are not treated as observed
-sprite DMA; otherwise empty DMA slots would suppress valid register/manual
-sprite replay for that frame.
+DMACON's SPREN is sampled by each DMA slot individually, so a mid-line
+edge fetches exactly one word of the pair. SPRxPT advances only on words
+actually fetched: a skipped slot leaves the pointer behind and the stream
+shifts accordingly. The display line assembles from the fetched words
+plus the stale latch on a skipped side; a missed DATA slot never arms the
+sprite, and an armed channel with DMA off keeps redisplaying its latches
+at the current POS/CTL decode until a CTL fetch or poke disarms it (the
+vAmigaTS sprena/sprdis families' vertical bars).
 
-SPRxPT advances through sprite DMA and is not snapped back to the last value
-the Copper/CPU wrote at the top of the next field. A channel that has read its
-terminating descriptor leaves SPRxPT parked at the DMA frontier past the
-consumed list, so the next field's replay is seeded from that frontier rather
-than the stale descriptor address. Programs must reload SPRxPT every field
-(normally from the Copper) to keep a sprite displayed; this is what prevents a
-reused sprite descriptor buffer that software overwrites between fields from
-being re-armed from its previous, now-overwritten address before the Copper's
-reload lands. A channel still mid-descriptor at field end keeps the written
-pointer so an active reused sprite is not skipped past its data.
-
-Sprite descriptors whose decoded VSTART equals VSTOP idle the current
-sprite stream until software rearms it or the next field fetches again;
-the following words are not scanned as another descriptor. This is distinct
-from an inverted VSTOP smaller than VSTART, where the stop comparator has
-already passed and DMA continues to the bottom of the field.
+Because SPRxPT only moves on fetches, a channel that consumed its list
+leaves the pointer parked at the DMA frontier past it, and the next
+field's replay seeds from that frontier rather than from the stale
+last-written value; programs must reload SPRxPT every field (normally
+from the Copper) to keep a sprite displayed. The frame-start replay path
+replays off-screen DMACON, SPRxPT and SPRxPOS/CTL writes in beam order
+before rendering the visible field. The whole per-channel register state
+is chip state: save states serialize and restore it directly.
 
 A modelling note that catches people out: OCS lo-res with BPU=7 is an
 overprogrammed mode. Denise still decodes six BPLDAT latches, but Agnus
