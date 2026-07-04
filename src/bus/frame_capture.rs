@@ -8,23 +8,6 @@
 
 use super::*;
 
-/// Which of a sprite pair's two DMA slots a `sprite_line_eval` call models.
-#[derive(Clone, Copy)]
-enum SpriteSlotPhase {
-    /// Both words in one call: the pre-display replay path, and the second
-    /// slot's fallback when the first slot did not run (its SPREN sample
-    /// was low or the stream was re-seeded between the slots).
-    Pair {
-        slot1_enabled: bool,
-        slot2_enabled: bool,
-    },
-    /// First hardware slot ($15+4N): entry logic plus the DATA fetch,
-    /// sampled at this slot's beam time.
-    Slot1,
-    /// Second hardware slot ($17+4N): DATB fetch and line assembly.
-    Slot2 { slot2_enabled: bool },
-}
-
 impl Bus {
     pub(super) fn begin_new_beam_frame(&mut self) {
         self.diag_log_frame_start();
@@ -137,26 +120,18 @@ impl Bus {
         self.current_frame_visible_start_vpos = RENDER_MIN_OVERSCAN_START_VPOS;
         self.current_frame_render_base = self.capture_render_snapshot();
         // Carry each sprite channel's DMA pointer across the frame boundary the
-        // way real Agnus does. A channel that finished the field (read its
-        // terminating descriptor, so `control` is cleared) leaves SPRxPT parked
-        // past the consumed list at its DMA frontier; it does NOT snap back to
-        // the last value the Copper/CPU wrote into `denise.sprpt`. Seed the next
-        // frame's replay from that frontier so a reused descriptor buffer that
-        // software rewrites every field is not re-armed from its previous,
-        // now-overwritten address before the Copper reloads SPRxPT. Channels
-        // still mid-descriptor at frame end keep the written pointer.
-        for sprite in 0..8 {
-            let state = &self.display_dma_sprite_state[sprite];
-            self.sprite_dma_frame_start_ptr[sprite] = match (state.control, state.next_ptr) {
-                (None, Some(frontier)) => frontier,
-                _ => self.denise.sprpt[sprite],
-            };
-        }
+        // way real Agnus does: SPRxPT advances only on fetched words, so the
+        // live pointer already sits at the channel's DMA frontier. It does NOT
+        // snap back to the last value the Copper/CPU wrote into `denise.sprpt`,
+        // so a reused control-word buffer that software rewrites every field is
+        // not re-read from its previous, now-overwritten address before the
+        // Copper reloads SPRxPT.
+        self.sprite_dma_frame_start_ptr = self.display_dma_sprpt;
         self.current_frame_collision_may_have_dual_playfield =
             self.current_frame_render_base.bplcon0 & 0x0400 != 0;
         self.display_dma_bplpt = self.denise.bplpt;
         self.display_dma_sprpt = self.denise.sprpt;
-        self.display_dma_sprite_state = [DisplaySpriteDmaState::default(); 8];
+        self.reset_display_sprite_dma_states();
         self.display_dma_clipped_rows_advanced = false;
         self.lazy_collision_vpos = self.current_frame_visible_start_vpos;
         self.lazy_collision_hpos = RENDER_COPPER_WAIT_HPOS_FB0;
@@ -203,11 +178,29 @@ impl Bus {
         }
     }
 
+    /// Reset the per-frame transients of every sprite channel's DMA state.
+    /// The POS/CTL register copies and the vertical comparator values are
+    /// chip registers and carry across the field; the DMA flip-flop is
+    /// cleared in the frame's last line, and the display latches restart
+    /// with the field's replay.
+    pub(super) fn reset_display_sprite_dma_states(&mut self) {
+        for state in &mut self.display_dma_sprite_state {
+            *state = DisplaySpriteDmaState {
+                pos: state.pos,
+                ctl: state.ctl,
+                vstrt: state.vstrt,
+                vstop: state.vstop,
+                ..DisplaySpriteDmaState::default()
+            };
+        }
+    }
+
     /// After the offscreen sprite-DMA replay, snapshot any sprite that has
     /// fetched data but whose DMA is now disabled (SPREN cleared): it is being
     /// "held" and will be repainted by Copper SPRxPOS repositioning across the
     /// visible window. The renderer's manual-sprite path consumes these (it can
-    /// clip each repositioned segment); the bus bar path is suppressed for them.
+    /// clip each repositioned segment); the bus stale-latch path is suppressed
+    /// for them.
     pub(super) fn capture_held_sprites_for_visible_window(&mut self) {
         self.current_frame_held_sprites = [None; 8];
         if self.agnus.dmacon & (DMACON_DMAEN | DMACON_SPREN) == (DMACON_DMAEN | DMACON_SPREN) {
@@ -216,14 +209,13 @@ impl Bus {
         }
         for sprite in 0..8 {
             let state = self.display_dma_sprite_state[sprite];
-            if !state.data_dma_active {
-                continue;
-            }
             let Some(line_data) = state.last_line else {
                 continue;
             };
-            let Some(control) = state.control else {
-                continue;
+            let vstop = if state.vstop <= state.vstrt {
+                self.agnus.current_frame_lines() as i32
+            } else {
+                state.vstop
             };
             self.current_frame_held_sprites[sprite] = Some(HeldSpriteLine {
                 line: CapturedSpriteLine {
@@ -238,163 +230,18 @@ impl Bus {
                     width_words: line_data.width_words,
                     attached: line_data.attached,
                 },
-                vstart: control.vstart,
-                vstop: control.vstop,
+                vstart: state.vstrt,
+                vstop,
             });
         }
     }
 
-    pub(super) fn apply_display_sprite_pointer_low_write(&mut self, sprite: usize) {
-        self.apply_display_sprite_pointer_low_write_at(sprite, self.agnus.vpos, self.agnus.hpos);
-    }
-
-    pub(super) fn apply_display_sprite_pointer_low_write_at(
-        &mut self,
-        sprite: usize,
-        vpos: u32,
-        hpos: u32,
-    ) {
-        self.apply_display_sprite_pointer_low_write_at_with_dmacon(
-            sprite,
-            vpos,
-            hpos,
-            self.agnus.dmacon,
-        );
-    }
-
-    pub(super) fn apply_display_sprite_pointer_low_write_at_with_dmacon(
-        &mut self,
-        sprite: usize,
-        vpos: u32,
-        hpos: u32,
-        dmacon: u16,
-    ) {
-        if sprite >= 8 {
-            return;
-        }
-        let state = self.display_dma_sprite_state[sprite];
-        if let Some(control) = state.control {
-            let pending_descriptor_not_loaded = state.control_loaded_vpos >= vpos as i32
-                || (state.control_loaded_vpos == unset_sprite_control_loaded_vpos()
-                    && (vpos as i32) < control.vstart);
-            if !state.data_dma_active
-                && !control.data_origin_is_register_stream()
-                // The descriptor must have loaded earlier in this field before
-                // SPRxPT can retarget its data stream. Equal/later loads or an
-                // unknown save-state value before VSTART restart POS/CTL.
-                && pending_descriptor_not_loaded
-            {
-                self.display_dma_sprite_state[sprite] = DisplaySpriteDmaState::default();
-                return;
-            }
-        } else if self
-            .armed_sprite_pointer_write_can_seed_register_data_stream(sprite, vpos, hpos, dmacon)
-        {
-            self.latch_display_sprite_register_data_stream_at(sprite, vpos, hpos);
-            return;
-        }
-        self.retarget_display_sprite_dma_pointer_at(sprite, vpos, hpos);
-    }
-
-    pub(super) fn armed_sprite_pointer_write_can_seed_register_data_stream(
-        &self,
-        sprite: usize,
-        vpos: u32,
-        hpos: u32,
-        dmacon: u16,
-    ) -> bool {
-        if !self.denise.spr_armed[sprite]
-            || dmacon & (DMACON_DMAEN | DMACON_SPREN) != (DMACON_DMAEN | DMACON_SPREN)
-        {
-            return false;
-        }
-
-        // The transient Agnus descriptor latch is not always available to this
-        // replay path (notably after save-state load), but Denise may still
-        // expose an armed sprite word plus retained POS/CTL comparators. Only
-        // use that as a data-stream fallback once the beam is in the rendered
-        // display area and the channel's descriptor fetch slot for this line
-        // has already passed. Frame-start/top-border SPRxPT reloads are normal
-        // descriptor setup and must not resurrect stale armed register data.
-        if !display_window_contains_vpos(
-            self.denise.diwstrt,
-            self.denise.diwstop,
-            self.effective_diwhigh(),
-            vpos,
-        ) {
-            return false;
-        }
-
-        let beam_y = vpos as i32;
-        let vstart =
-            sprite_vstart_from_words(self.denise.sprpos[sprite], self.denise.sprctl[sprite]);
-        let raw_vstop = sprite_vstop_from_ctl(self.denise.sprctl[sprite]);
-        let vstop = if raw_vstop < vstart {
-            self.agnus.current_frame_lines() as i32
-        } else {
-            raw_vstop
-        };
-        vpos >= self.current_frame_visible_start_vpos
-            && beam_y >= vstart
-            && beam_y < vstop
-            && hpos >= SPRITE_DMA_SLOT1_HPOS[sprite]
-    }
-
-    pub(super) fn latch_display_sprite_register_data_stream_at(
-        &mut self,
-        sprite: usize,
-        vpos: u32,
-        hpos: u32,
-    ) {
-        let frame_lines = self.agnus.current_frame_lines() as i32;
-        let beam_y = vpos as i32;
-        if beam_y >= frame_lines {
-            return;
-        }
-        let fetch_slot = SPRITE_DMA_SLOT1_HPOS[sprite];
-        let stream_start = if hpos >= fetch_slot {
-            beam_y.saturating_add(1)
-        } else {
-            beam_y
-        };
-        if stream_start >= frame_lines {
-            return;
-        }
-
-        let quantum = sprite_fetch_quantum(self.agnus.fmode());
-        let line_bytes = 4 * quantum;
-        let data_lines = (frame_lines - stream_start).max(0) as u32;
-        let data_base = self.display_dma_sprpt[sprite] & self.chip_dma_mask & !1;
-        let control = DisplaySpriteControl {
-            vstart: stream_start,
-            vstop: frame_lines,
-            hstart: sprite_hstart_from_words(
-                self.denise.sprpos[sprite],
-                self.denise.sprctl[sprite],
-            ),
-            hsub_70ns: bitplane_shres(self.denise.bplcon0)
-                && sprite_hsub_70ns_from_ctl(self.denise.sprctl[sprite]),
-            data_vstart: register_sprite_data_vstart(),
-            data_base,
-            next_ptr: data_base.wrapping_add(data_lines.saturating_mul(line_bytes))
-                & self.chip_dma_mask
-                & !1,
-            attached: self.denise.sprctl[sprite] & 0x0080 != 0,
-        };
-        self.display_dma_sprite_state[sprite] = DisplaySpriteDmaState {
-            control: Some(control),
-            control_loaded_vpos: stream_start,
-            next_ptr: Some(control.next_ptr),
-            terminated: false,
-            data_dma_active: false,
-            last_line: None,
-            data_word_skew: 0,
-            pending_data: None,
-            pending_line_vpos: i32::MIN,
-            entry_line_vpos: i32::MIN,
-        };
-    }
-
+    /// A CPU/Copper write to SPRxPOS or SPRxCTL pokes Agnus's channel
+    /// register copies the same way a DMA control-word fetch does: POS
+    /// retimes the horizontal/vertical-start bits without touching the data
+    /// stream, CTL sets both vertical comparators and disarms the display
+    /// latches, and the comparators fire immediately when the write lands
+    /// on a matching line.
     pub(super) fn latch_display_sprite_dma_control_from_registers(
         &mut self,
         sprite: usize,
@@ -403,226 +250,37 @@ impl Bus {
         if sprite >= 8 {
             return;
         }
-        self.latch_display_sprite_dma_control_from_words_at(
+        self.poke_display_sprite_control_at(
             sprite,
-            self.denise.sprpos[sprite],
-            self.denise.sprctl[sprite],
-            self.agnus.vpos,
-            self.agnus.hpos,
-            self.agnus.dmacon,
+            match write {
+                SpriteControlRegisterWrite::Pos => self.denise.sprpos[sprite],
+                SpriteControlRegisterWrite::Ctl => self.denise.sprctl[sprite],
+            },
             write,
+            self.agnus.vpos,
         );
     }
 
-    pub(super) fn latch_display_sprite_dma_control_from_words_at(
+    pub(super) fn poke_display_sprite_control_at(
         &mut self,
         sprite: usize,
-        pos: u16,
-        ctl: u16,
-        vpos: u32,
-        hpos: u32,
-        dmacon: u16,
+        value: u16,
         write: SpriteControlRegisterWrite,
-    ) {
-        if sprite >= 8 {
-            return;
-        }
-
-        let mut state = self.display_dma_sprite_state[sprite];
-        let previous_control = state.control;
-        let beam_y = vpos as i32;
-
-        if matches!(write, SpriteControlRegisterWrite::Pos)
-            && state.data_dma_active
-            && previous_control
-                .map(|previous| beam_y < previous.vstop)
-                .unwrap_or(false)
-        {
-            if let Some(mut control) = previous_control {
-                // SPRxPOS retimes the horizontal comparator, but it does not
-                // re-fetch POS/CTL or cancel an already-enabled sprite DMA
-                // stream. Keep the DMA descriptor's stop/data origin latched;
-                // the HSTART low bit still comes from the previously latched
-                // CTL word.
-                control.hstart = (((pos & 0x00FF) << 1) as i32) | (control.hstart & 1);
-                state.control = Some(control);
-                state.next_ptr = Some(control.next_ptr);
-                state.terminated = false;
-                state.data_dma_active = true;
-                self.display_dma_sprite_state[sprite] = state;
-                return;
-            }
-        }
-
-        let vstart = sprite_vstart_from_words(pos, ctl);
-        let raw_vstop = sprite_vstop_from_ctl(ctl);
-        let vstop = if raw_vstop < vstart {
-            self.agnus.current_frame_lines() as i32
-        } else {
-            raw_vstop
-        };
-        let height = vstop - vstart;
-        if height <= 0 {
-            self.display_dma_sprite_state[sprite] = DisplaySpriteDmaState::default();
-            return;
-        }
-
-        let quantum = sprite_fetch_quantum(self.agnus.fmode());
-        let line_bytes = 4 * quantum;
-        let data_lines = if sprite_scan_doubled(self.agnus.fmode()) {
-            (height as u32).div_ceil(2)
-        } else {
-            height as u32
-        };
-        let data_base = self.display_dma_sprpt[sprite] & self.chip_dma_mask & !1;
-        let mut control = DisplaySpriteControl {
-            vstart,
-            vstop,
-            hstart: sprite_hstart_from_words(pos, ctl),
-            hsub_70ns: bitplane_shres(self.denise.bplcon0) && sprite_hsub_70ns_from_ctl(ctl),
-            data_vstart: register_sprite_data_vstart(),
-            data_base,
-            next_ptr: data_base.wrapping_add(data_lines.saturating_mul(line_bytes))
-                & self.chip_dma_mask
-                & !1,
-            attached: ctl & 0x0080 != 0,
-        };
-
-        let in_window = beam_y >= control.vstart && beam_y < control.vstop;
-        let sprite_dma_enabled =
-            dmacon & (DMACON_DMAEN | DMACON_SPREN) == (DMACON_DMAEN | DMACON_SPREN);
-        let reaches_current_fetch_slot =
-            beam_y == control.vstart && hpos <= SPRITE_DMA_SLOT1_HPOS[sprite] && sprite_dma_enabled;
-        let keep_held_line =
-            !sprite_dma_enabled && in_window && state.data_dma_active && state.last_line.is_some();
-        let keep_active_dma_line =
-            sprite_dma_enabled && in_window && state.data_dma_active && state.last_line.is_some();
-        let keep_pending_dma_origin = sprite_dma_enabled
-            && !state.data_dma_active
-            && state.last_line.is_none()
-            && previous_control
-                .map(|previous| beam_y < previous.vstop)
-                .unwrap_or(false);
-
-        if keep_held_line || keep_active_dma_line {
-            if let Some(previous_control) = previous_control {
-                control.data_vstart = previous_control.effective_data_vstart();
-                control.data_base = previous_control.data_base;
-                control.next_ptr = previous_control.next_ptr;
-            }
-        } else if keep_pending_dma_origin {
-            if let Some(previous_control) = previous_control {
-                // A pending descriptor has already consumed POS/CTL; direct
-                // control writes retime the comparators, not the data stream.
-                control.data_vstart = previous_control.data_vstart;
-                control.data_base = previous_control.data_base;
-                control.next_ptr = control
-                    .data_base
-                    .wrapping_add(data_lines.saturating_mul(line_bytes))
-                    & self.chip_dma_mask
-                    & !1;
-            }
-        }
-
-        state.control = Some(control);
-        state.control_loaded_vpos = beam_y;
-        state.next_ptr = Some(control.next_ptr);
-        state.terminated = false;
-        state.data_word_skew = 0;
-        state.pending_data = None;
-        state.pending_line_vpos = unset_sprite_control_loaded_vpos();
-        state.entry_line_vpos = unset_sprite_control_loaded_vpos();
-        state.data_dma_active =
-            in_window && (reaches_current_fetch_slot || keep_held_line || keep_active_dma_line);
-        if !keep_held_line && !keep_active_dma_line {
-            state.last_line = None;
-        }
-        self.display_dma_sprite_state[sprite] = state;
-    }
-
-    pub(super) fn retarget_display_sprite_dma_pointer_at(
-        &mut self,
-        sprite: usize,
         vpos: u32,
-        hpos: u32,
     ) {
         if sprite >= 8 {
             return;
         }
-
-        let mut state = self.display_dma_sprite_state[sprite];
-        let Some(mut control) = state.control else {
-            self.display_dma_sprite_state[sprite] = DisplaySpriteDmaState::default();
-            return;
-        };
-
         let beam_y = vpos as i32;
-        if beam_y >= control.vstop {
-            self.display_dma_sprite_state[sprite] = DisplaySpriteDmaState::default();
-            return;
+        let state = &mut self.display_dma_sprite_state[sprite];
+        match write {
+            SpriteControlRegisterWrite::Pos => state.poke_pos(value),
+            SpriteControlRegisterWrite::Ctl => state.poke_ctl(value),
         }
-
-        let quantum = sprite_fetch_quantum(self.agnus.fmode());
-        let line_bytes = 4 * quantum;
-        let mut line = if beam_y <= control.vstart {
-            0
-        } else {
-            (beam_y - control.vstart) as u32
-        };
-        if beam_y >= control.vstart && hpos > SPRITE_DMA_SLOT1_HPOS[sprite] {
-            line = line.saturating_add(1);
-        }
-        let line = if sprite_scan_doubled(self.agnus.fmode()) {
-            line.div_ceil(2)
-        } else {
-            line
-        };
-
-        let ptr = self.display_dma_sprpt[sprite] & self.chip_dma_mask & !1;
-        control.data_base =
-            ptr.wrapping_sub(line.saturating_mul(line_bytes)) & self.chip_dma_mask & !1;
-        control.data_vstart = if control.data_origin_is_register_stream() {
-            register_sprite_data_vstart()
-        } else {
-            control.vstart
-        };
-        let height = (control.vstop - control.vstart).max(0) as u32;
-        let data_lines = if sprite_scan_doubled(self.agnus.fmode()) {
-            height.div_ceil(2)
-        } else {
-            height
-        };
-        control.next_ptr = control
-            .data_base
-            .wrapping_add(data_lines.saturating_mul(line_bytes))
-            & self.chip_dma_mask
-            & !1;
-        state.control = Some(control);
-        state.next_ptr = Some(control.next_ptr);
-        state.terminated = false;
-        state.data_word_skew = 0;
-        state.pending_data = None;
-        state.pending_line_vpos = unset_sprite_control_loaded_vpos();
-        state.entry_line_vpos = unset_sprite_control_loaded_vpos();
-        state.data_dma_active = beam_y >= control.vstart && beam_y < control.vstop;
-        state.last_line = None;
-        self.display_dma_sprite_state[sprite] = state;
-
-        if diag_sprcap().is_some() {
-            log::info!(
-                "sprptr f={} v={} h={} s{} ptr={:06X} vstart={} vstop={} hstart={} line={} data_base={:06X} next={:06X}",
-                self.emulated_frames,
-                vpos,
-                hpos,
-                sprite,
-                ptr,
-                control.vstart,
-                control.vstop,
-                control.hstart,
-                line,
-                control.data_base,
-                control.next_ptr
-            );
+        // TODO: near the end of a line the hardware comparator already sees
+        // the next line's counter (vAmiga applies pos.v+1 from cck $E1).
+        if !self.sprite_dma_inhibited_by_vertical_blank_at(vpos) {
+            self.display_dma_sprite_state[sprite].reevaluate_comparators_at(beam_y);
         }
     }
 
@@ -746,14 +404,15 @@ impl Bus {
         // sprite lines along the way. Crucially, SPREN can be toggled within the
         // frame -- software may enable sprite DMA only briefly off-screen to load
         // reused sprites, then clear it before the visible window and reposition
-        // the held sprites per line. Replay this frame's DMACON and SPRxPT writes
-        // across the span and run the sprite fetch only on lines where SPREN was
-        // actually enabled, rather than sampling registers at the display start.
+        // the held sprites per line. Replay this frame's DMACON, SPRxPT and
+        // SPRxPOS/CTL writes across the span and run the sprite slots only on
+        // lines where SPREN was actually enabled, rather than sampling registers
+        // at the display start.
         let base = self.current_frame_render_base;
         // Seed from the previous field's carried SPRxPT frontier rather than the
         // last Copper/CPU write captured in `base.sprpt`. See
-        // `sprite_dma_frame_start_ptr` for why finished channels must not snap
-        // back to their stale descriptor address.
+        // `sprite_dma_frame_start_ptr` for why channels must not snap back to
+        // their stale control-word address.
         self.current_frame_sprite_lines
             .retain(|line| line.beam_y >= display_start as i32);
         for lines in &mut self.current_frame_sprite_lines_by_y {
@@ -763,43 +422,51 @@ impl Bus {
         self.current_frame_sprite_display_enable_x_by_y = empty_sprite_display_enable_x_by_y();
         self.current_frame_sprite_dma_observed = !self.current_frame_sprite_lines.is_empty();
         self.display_dma_sprpt = self.sprite_dma_frame_start_ptr;
-        self.display_dma_sprite_state = [DisplaySpriteDmaState::default(); 8];
+        self.reset_display_sprite_dma_states();
         let mut dmacon = base.dmacon;
         let writes: Vec<(u32, u32, u16, u16)> = self
             .current_render_events()
             .iter()
             .filter(|w| {
                 let off = w.offset & 0x01FE;
-                w.vpos < display_start && (off == 0x096 || (0x120..=0x13F).contains(&off))
+                w.vpos < display_start
+                    && (off == 0x096
+                        || (0x120..=0x13F).contains(&off)
+                        || (0x140..=0x17F).contains(&off))
             })
             .map(|w| (w.vpos, w.hpos, w.offset & 0x01FE, w.value))
             .collect();
         let mut idx = 0;
         for vpos in 0..display_start {
-            for (sprite, &capture_hpos) in SPRITE_DMA_SLOT1_HPOS.iter().enumerate() {
-                while idx < writes.len()
-                    && (writes[idx].0 < vpos
-                        || (writes[idx].0 == vpos && writes[idx].1 < capture_hpos))
-                {
-                    let (event_vpos, event_hpos, offset, value) = writes[idx];
-                    self.apply_sprite_dma_replay_write(
-                        offset,
-                        value,
-                        event_vpos,
-                        event_hpos,
-                        &mut dmacon,
-                    );
-                    idx += 1;
-                }
+            for (sprite, &slot1_hpos) in SPRITE_DMA_SLOT1_HPOS.iter().enumerate() {
+                for slot_hpos in [slot1_hpos, slot1_hpos + 2] {
+                    while idx < writes.len()
+                        && (writes[idx].0 < vpos
+                            || (writes[idx].0 == vpos && writes[idx].1 < slot_hpos))
+                    {
+                        let (event_vpos, event_hpos, offset, value) = writes[idx];
+                        self.apply_sprite_dma_replay_write(
+                            offset,
+                            value,
+                            event_vpos,
+                            event_hpos,
+                            &mut dmacon,
+                        );
+                        idx += 1;
+                    }
 
-                if dmacon & (DMACON_DMAEN | DMACON_SPREN) != (DMACON_DMAEN | DMACON_SPREN) {
-                    continue;
-                }
-                if self.sprite_dma_inhibited_by_vertical_blank_at(vpos) {
-                    continue;
-                }
-                {
-                    if sprite_dma_disabled_by_bitplane_ddf(
+                    // The start-of-line comparator update runs on every line,
+                    // even where the vertical blank or DDF conflicts inhibit
+                    // the DMA slots themselves.
+                    if slot_hpos == slot1_hpos {
+                        self.sprite_comparators_catch_up(sprite, vpos, dmacon);
+                    }
+                    if self.sprite_dma_inhibited_by_vertical_blank_at(vpos) {
+                        continue;
+                    }
+                    let spren =
+                        dmacon & (DMACON_DMAEN | DMACON_SPREN) == (DMACON_DMAEN | DMACON_SPREN);
+                    let ddf_blocked = sprite_dma_disabled_by_bitplane_ddf(
                         sprite,
                         self.agnus.revision(),
                         self.effective_bitplane_bplcon0(),
@@ -808,10 +475,15 @@ impl Bus {
                         self.denise.ddfstrt,
                         self.denise.ddfstop,
                         self.harddis_active(),
-                    ) {
-                        continue;
+                    );
+                    if slot_hpos == slot1_hpos {
+                        self.sprite_slot1(sprite, vpos, spren, ddf_blocked);
+                    } else {
+                        // Off-screen lines evolve the channel state only;
+                        // the visible field's capture starts at the display
+                        // start.
+                        let _ = self.sprite_slot2(sprite, vpos, spren, ddf_blocked);
                     }
-                    let _ = self.captured_sprite_line_at(sprite, vpos);
                 }
             }
             while idx < writes.len() && writes[idx].0 == vpos {
@@ -833,7 +505,7 @@ impl Bus {
         offset: u16,
         value: u16,
         vpos: u32,
-        hpos: u32,
+        _hpos: u32,
         dmacon: &mut u16,
     ) {
         if offset == 0x096 {
@@ -841,6 +513,26 @@ impl Bus {
                 *dmacon |= value & 0x7FFF;
             } else {
                 *dmacon &= !value;
+            }
+            return;
+        }
+
+        if (0x140..=0x17F).contains(&offset) {
+            let idx = ((offset - 0x140) / 8) as usize;
+            match (offset - 0x140) & 0x0006 {
+                0x0 => self.poke_display_sprite_control_at(
+                    idx,
+                    value,
+                    SpriteControlRegisterWrite::Pos,
+                    vpos,
+                ),
+                0x2 => self.poke_display_sprite_control_at(
+                    idx,
+                    value,
+                    SpriteControlRegisterWrite::Ctl,
+                    vpos,
+                ),
+                _ => {}
             }
             return;
         }
@@ -855,7 +547,6 @@ impl Bus {
         } else {
             let cur = self.display_dma_sprpt[idx];
             self.display_dma_sprpt[idx] = (cur & 0x00FF_0000) | (value as u32 & 0xFFFE);
-            self.apply_display_sprite_pointer_low_write_at_with_dmacon(idx, vpos, hpos, *dmacon);
         }
     }
 
@@ -876,13 +567,7 @@ impl Bus {
         if old_hpos > SPRITE_DMA_SLOT1_HPOS[7] + 2 || new_hpos <= SPRITE_DMA_SLOT1_HPOS[0] {
             return;
         }
-        if self.sprite_dma_inhibited_by_vertical_blank_at(vpos) {
-            return;
-        }
-        let sprite_vertical_bar_active = self
-            .display_dma_sprite_state
-            .iter()
-            .any(|state| state.data_dma_active && state.last_line.is_some());
+        let vblank_inhibited = self.sprite_dma_inhibited_by_vertical_blank_at(vpos);
         let Some(fb_y) = visible_framebuffer_y(
             vpos,
             self.current_frame_visible_start_vpos,
@@ -928,57 +613,40 @@ impl Bus {
                 self.denise.ddfstop,
                 self.harddis_active(),
             );
-            if ddf_blocked {
-                continue;
-            }
             if (old_hpos..new_hpos).contains(&slot1_hpos) {
-                let slot1_enabled =
-                    spren_at(self.effective_bitplane_dmacon_at(slot_cck(slot1_hpos)));
-                if slot1_enabled {
-                    self.sprite_slot1_fetch(sprite, vpos);
+                let dmacon_now = self.effective_bitplane_dmacon_at(slot_cck(slot1_hpos));
+                // The start-of-line comparator update runs on every line,
+                // even where vertical blank inhibits the DMA slots.
+                self.sprite_comparators_catch_up(sprite, vpos, dmacon_now);
+                if !vblank_inhibited {
+                    self.sprite_slot1(sprite, vpos, spren_at(dmacon_now), ddf_blocked);
                 }
             }
             if !(old_hpos..new_hpos).contains(&slot2_hpos) {
                 continue;
             }
-            let slot2_enabled = spren_at(self.effective_bitplane_dmacon_at(slot_cck(slot2_hpos)));
-            let slot1_ran = self.display_dma_sprite_state[sprite].entry_line_vpos == vpos as i32;
-            if !slot1_ran && !slot2_enabled && !sprite_vertical_bar_active {
+            let dmacon_now = self.effective_bitplane_dmacon_at(slot_cck(slot2_hpos));
+            self.sprite_comparators_catch_up(sprite, vpos, dmacon_now);
+            if vblank_inhibited {
                 continue;
             }
-            if slot1_ran || slot2_enabled {
+            let slot2_enabled = spren_at(dmacon_now);
+            if slot2_enabled || self.display_dma_sprite_state[sprite].entry_line_vpos == vpos as i32
+            {
                 pair_slots += 1;
             }
             let mut captured_line = false;
             {
-                let line = if slot1_ran {
-                    self.sprite_line_eval(sprite, vpos, SpriteSlotPhase::Slot2 { slot2_enabled })
-                } else if slot2_enabled {
-                    // The first slot did not run (SPREN low there, or the
-                    // stream was re-seeded between the slots): the entry
-                    // logic runs here, with the DATA side counted as a
-                    // skipped slot.
-                    self.sprite_line_eval(
-                        sprite,
-                        vpos,
-                        SpriteSlotPhase::Pair {
-                            slot1_enabled: false,
-                            slot2_enabled: true,
-                        },
-                    )
-                } else {
-                    self.captured_sprite_vertical_bar_line_at(sprite, vpos)
-                };
+                let line = self.sprite_slot2(sprite, vpos, slot2_enabled, ddf_blocked);
                 if let Some(line) = line {
                     // COPPERLINE_DIAG_SPRCAP=BEAMY|all: log captured sprite
                     // lines on that beam line (frame, channel, position, words,
-                    // and the chip-RAM descriptor/data addresses they fetched).
+                    // and the chip-RAM data addresses they fetched).
                     if let Some(want) = diag_sprcap() {
                         if diag_sprcap_matches(want, line.beam_y) {
                             let st = &self.display_dma_sprite_state[sprite];
-                            let ctl = st.control;
                             log::info!(
-                                "sprcap f={} s{} y={} hstart={} hsub={} att={} w={} A={:04X} {:04X?} B={:04X} {:04X?} ctl=({},{},{},{:06X}) data_base={:06X} next={:06X?}",
+                                "sprcap f={} s{} y={} hstart={} hsub={} att={} w={} A={:04X} {:04X?} B={:04X} {:04X?} vstrt={} vstop={} ena={} ptr={:06X}",
                                 self.emulated_frames,
                                 line.sprite,
                                 line.beam_y,
@@ -990,12 +658,10 @@ impl Bus {
                                 line.data_ext,
                                 line.datb,
                                 line.datb_ext,
-                                ctl.map(|c| c.vstart).unwrap_or(-1),
-                                ctl.map(|c| c.vstop).unwrap_or(-1),
-                                ctl.map(|c| c.effective_data_vstart()).unwrap_or(-1),
-                                ctl.map(|c| c.next_ptr).unwrap_or(0),
-                                st.control.map(|c| c.data_base).unwrap_or(0),
-                                st.next_ptr
+                                st.vstrt,
+                                st.vstop,
+                                u8::from(st.dma_enabled),
+                                self.display_dma_sprpt[sprite],
                             );
                         }
                     }
@@ -1031,381 +697,144 @@ impl Bus {
         }
     }
 
+    /// Run one full sprite line (both slots, DMA on) at a line the beam is
+    /// not sweeping: the tests' stand-in for the pre-display replay.
+    #[cfg(test)]
     pub(super) fn captured_sprite_line_at(
         &mut self,
         sprite: usize,
         vpos: u32,
     ) -> Option<CapturedSpriteLine> {
-        self.sprite_line_eval(
-            sprite,
-            vpos,
-            SpriteSlotPhase::Pair {
-                slot1_enabled: true,
-                slot2_enabled: true,
-            },
-        )
+        self.sprite_comparators_catch_up(sprite, vpos, self.agnus.dmacon);
+        if self.sprite_dma_inhibited_by_vertical_blank_at(vpos) {
+            return None;
+        }
+        self.sprite_slot1(sprite, vpos, true, false);
+        self.sprite_slot2(sprite, vpos, true, false)
     }
 
-    /// First hardware sprite slot ($15+4N): runs the line's entry logic
-    /// (vstop comparator, descriptor chain, arming) and samples the DATA
-    /// word(s) at this slot's beam time into pending state. The line itself
-    /// is assembled and emitted by the second slot's call.
-    pub(super) fn sprite_slot1_fetch(&mut self, sprite: usize, vpos: u32) {
-        let _ = self.sprite_line_eval(sprite, vpos, SpriteSlotPhase::Slot1);
+    /// Lazily run the start-of-line comparator update for every line since
+    /// the last evaluated one (vAmiga updateSpriteDMA): the vertical-blank
+    /// reset forces vstop to the first post-blank line -- which is what
+    /// schedules each field's first POS/CTL control-word fetch -- the DMA
+    /// flip-flop clears in the frame's last line, and outside the blank the
+    /// vstrt/vstop comparators set/clear it (clear winning on a tie).
+    pub(super) fn sprite_comparators_catch_up(&mut self, sprite: usize, vpos: u32, dmacon: u16) {
+        let beam_y = vpos as i32;
+        let mut state = self.display_dma_sprite_state[sprite];
+        if state.comparator_vpos >= beam_y {
+            return;
+        }
+        let reset_line = sprite_dma_first_active_vpos(self.agnus.video_standard()) as i32;
+        let last_line = self.agnus.current_frame_lines() as i32 - 1;
+        // TODO: SPREN is sampled once for the whole caught-up span; only the
+        // vertical-blank reset line consumes it, and the live/replay paths
+        // call this every line, so the approximation only matters when a
+        // DMACON edge lands inside a multi-line catch-up across the blank.
+        let spren = dmacon & (DMACON_DMAEN | DMACON_SPREN) == (DMACON_DMAEN | DMACON_SPREN);
+        for v in (state.comparator_vpos.max(-1) + 1)..=beam_y {
+            if v == reset_line && spren {
+                state.vstop = v;
+                continue;
+            }
+            if v == last_line {
+                state.dma_enabled = false;
+                continue;
+            }
+            if v > reset_line {
+                if v == state.vstrt {
+                    state.dma_enabled = true;
+                }
+                if v == state.vstop {
+                    state.dma_enabled = false;
+                }
+            }
+        }
+        state.comparator_vpos = beam_y;
+        self.display_dma_sprite_state[sprite] = state;
     }
 
-    /// One scanline of a sprite's DMA: the first slot ($15+4N) fetches POS
-    /// or DATA, the second ($17+4N) CTL or DATB. A mid-line SPREN edge can
-    /// enable one slot and not the other; a skipped slot leaves the word
-    /// counter behind (the stream shifts) and the display line assembles
-    /// from the stale latch on that side. A DATA fetch arms the sprite;
-    /// DATB alone does not.
-    fn sprite_line_eval(
+    /// Fetch one sprite DMA word group (1/2/4 words by FMODE) from the
+    /// channel's live pointer, advancing SPRxPT the way the chip does:
+    /// only words actually fetched move the pointer.
+    fn fetch_sprite_words(&mut self, sprite: usize) -> Option<[u16; 4]> {
+        if self.mem.chip_ram.is_empty() {
+            return None;
+        }
+        let quantum = sprite_fetch_quantum(self.agnus.fmode());
+        let ptr = self.display_dma_sprpt[sprite] & self.chip_dma_mask & !1;
+        let mut words = [0u16; 4];
+        for (w, word) in words.iter_mut().enumerate().take(quantum as usize) {
+            *word = read_chip_word_wrapping(&self.mem.chip_ram, ptr.wrapping_add(2 * w as u32));
+        }
+        self.display_dma_sprpt[sprite] = ptr.wrapping_add(2 * quantum) & self.chip_dma_mask & !1;
+        Some(words)
+    }
+
+    /// With SSCAN2 the hardware fetches sprite data on every other display
+    /// line and redisplays the previous fetch in between.
+    fn sprite_scan_repeat_line(&self, state: &DisplaySpriteDmaState, beam_y: i32) -> bool {
+        sprite_scan_doubled(self.agnus.fmode())
+            && state.last_data_fetch_vpos != unset_sprite_line_marker()
+            && beam_y == state.last_data_fetch_vpos + 1
+    }
+
+    /// First hardware sprite slot ($15+4N). On the channel's vstop line the
+    /// DMA flip-flop is cleared -- even when SPREN is off, which is what
+    /// leaves a sprite dead until the next field when software disables DMA
+    /// across its vstop line -- and, when the slot is enabled, the next
+    /// control word's POS part is fetched. On other lines an enabled
+    /// channel fetches the line's DATA word(s), sampled at this slot's beam
+    /// time; the second slot assembles and emits the line.
+    pub(super) fn sprite_slot1(
         &mut self,
         sprite: usize,
         vpos: u32,
-        phase: SpriteSlotPhase,
-    ) -> Option<CapturedSpriteLine> {
-        let ram_len = self.mem.chip_ram.len();
-        if ram_len == 0 {
-            return None;
-        }
-        let ram_mask = self.chip_dma_mask;
+        spren: bool,
+        ddf_blocked: bool,
+    ) {
         let beam_y = vpos as i32;
-        if let SpriteSlotPhase::Slot2 { slot2_enabled } = phase {
-            return self.sprite_slot2_complete(sprite, beam_y, ram_mask, slot2_enabled);
-        }
         let mut state = self.display_dma_sprite_state[sprite];
-        if matches!(phase, SpriteSlotPhase::Slot1) {
-            // Mark the entry logic as run for this line so the second
-            // slot's call completes it instead of re-running descriptor
-            // work, and drop any pending words a broken-off line left.
-            state.entry_line_vpos = beam_y;
-            state.pending_data = None;
-            state.pending_line_vpos = unset_sprite_control_loaded_vpos();
-        }
-        let mut descriptor_can_match_current_vstart =
-            state.control.is_some() || state.next_ptr.is_none();
-        let mut descriptor_loaded_after_stop_this_line = false;
-
-        // Loop-detection scratch for the descriptor chain below. A plain
-        // Vec with a linear `contains` check is used instead of a HashSet:
-        // chains are almost always 1-2 descriptors long in practice (this
-        // runs per active sprite per DMA-pair capture point per scanline),
-        // so a linear scan avoids both the heap allocation pattern and the
-        // hashing overhead a HashSet would pay for such a tiny set, while
-        // keeping the exact same "any previously-visited pointer" cycle
-        // check (not just a fixed lookback window).
-        let mut visited_descriptor_ptrs: Vec<u32> = Vec::new();
-        loop {
-            if state.terminated {
-                self.display_dma_sprite_state[sprite] = state;
-                return None;
-            }
-
-            if let Some(control) = state.control {
-                if beam_y >= control.vstop {
-                    // The next descriptor is fetched from the pointer's
-                    // actual position: slots skipped by SPREN edges leave
-                    // it short of the precomputed stream end.
-                    state.next_ptr = Some(
-                        control.next_ptr.wrapping_sub(state.data_word_skew * 2) & ram_mask & !1,
-                    );
-                    state.control = None;
-                    state.data_dma_active = false;
-                    state.last_line = None;
-                    descriptor_can_match_current_vstart = false;
-                    descriptor_loaded_after_stop_this_line = true;
-                } else if !state.data_dma_active {
-                    if beam_y == control.vstart {
-                        state.data_dma_active = true;
-                    } else {
-                        self.display_dma_sprite_state[sprite] = state;
-                        return None;
-                    }
-                }
-
-                if let Some(control) = state.control {
-                    if !state.data_dma_active {
-                        self.display_dma_sprite_state[sprite] = state;
-                        return None;
-                    }
-                    let quantum = sprite_fetch_quantum(self.agnus.fmode());
-                    // SSCAN2 fetches sprite data only on every second display
-                    // line; the in-between line redisplays the same data.
-                    if sprite_scan_doubled(self.agnus.fmode())
-                        && (beam_y - control.effective_data_vstart()) & 1 == 1
-                    {
-                        let line_data = state.last_line;
-                        self.display_dma_sprite_state[sprite] = state;
-                        if matches!(phase, SpriteSlotPhase::Slot1) {
-                            // The repeat line is emitted by the second
-                            // slot's call.
-                            return None;
-                        }
-                        return line_data.map(|line_data| CapturedSpriteLine {
-                            sprite,
-                            hstart: line_data.hstart,
-                            hsub_70ns: line_data.hsub_70ns,
-                            beam_y,
-                            data: line_data.data,
-                            datb: line_data.datb,
-                            data_ext: line_data.data_ext,
-                            datb_ext: line_data.datb_ext,
-                            width_words: line_data.width_words,
-                            attached: line_data.attached,
-                        });
-                    }
-                    // The stream address follows the hardware pointer: the
-                    // line-derived position minus the words that skipped
-                    // slots never fetched.
-                    let mut line = (beam_y - control.effective_data_vstart()) as u32;
-                    if sprite_scan_doubled(self.agnus.fmode()) {
-                        line /= 2;
-                    }
-                    let line_base = control
-                        .data_base
-                        .wrapping_add(line.saturating_mul(4 * quantum));
-                    let fetch_words = |state: &DisplaySpriteDmaState, word_off: u32| {
-                        let ptr = line_base
-                            .wrapping_add(word_off * 2)
-                            .wrapping_sub(state.data_word_skew * 2)
-                            & ram_mask
-                            & !1;
-                        let mut words = [0u16; 4];
-                        for (w, word) in words.iter_mut().enumerate().take(quantum as usize) {
-                            *word = read_chip_word_wrapping(
-                                &self.mem.chip_ram,
-                                ptr.wrapping_add(2 * w as u32),
-                            );
-                        }
-                        words
-                    };
-                    let (slot1_enabled, slot2_enabled) = match phase {
-                        SpriteSlotPhase::Pair {
-                            slot1_enabled,
-                            slot2_enabled,
-                        } => (slot1_enabled, slot2_enabled),
-                        SpriteSlotPhase::Slot1 => {
-                            // DATA is sampled at this slot's beam time; the
-                            // second slot's call assembles the line.
-                            let d = fetch_words(&state, 0);
-                            state.pending_data = Some((d[0], [d[1], d[2], d[3]]));
-                            state.pending_line_vpos = beam_y;
-                            self.display_dma_sprite_state[sprite] = state;
-                            return None;
-                        }
-                        SpriteSlotPhase::Slot2 { .. } => {
-                            unreachable!("second-slot calls complete before the entry loop")
-                        }
-                    };
-                    let data = slot1_enabled.then(|| fetch_words(&state, 0));
-                    if !slot1_enabled {
-                        state.data_word_skew += quantum;
-                    }
-                    let datb = slot2_enabled.then(|| fetch_words(&state, quantum));
-                    if !slot2_enabled {
-                        state.data_word_skew += quantum;
-                    }
-                    let stale = state.last_line;
-                    let assembled = match (data, datb) {
-                        (Some(d), Some(b)) => {
-                            Some(((d[0], [d[1], d[2], d[3]]), (b[0], [b[1], b[2], b[3]])))
-                        }
-                        // DATB missed its slot: the sprite displays the new
-                        // DATA with the stale DATB latch.
-                        (Some(d), None) => Some((
-                            (d[0], [d[1], d[2], d[3]]),
-                            stale.map_or((0, [0; 3]), |l| (l.datb, l.datb_ext)),
-                        )),
-                        // DATA missed its slot: DATB alone does not arm the
-                        // sprite; an already-armed sprite keeps displaying
-                        // with the stale DATA.
-                        (None, Some(b)) => {
-                            stale.map(|l| ((l.data, l.data_ext), (b[0], [b[1], b[2], b[3]])))
-                        }
-                        (None, None) => stale.map(|l| ((l.data, l.data_ext), (l.datb, l.datb_ext))),
-                    };
-                    let Some(((data, data_ext), (datb, datb_ext))) = assembled else {
-                        self.display_dma_sprite_state[sprite] = state;
-                        return None;
-                    };
-                    let line_data = DisplaySpriteLineData {
-                        hstart: control.hstart,
-                        hsub_70ns: control.hsub_70ns,
-                        data,
-                        datb,
-                        data_ext,
-                        datb_ext,
-                        width_words: quantum as u8,
-                        attached: control.attached,
-                    };
-                    state.last_line = Some(line_data);
-                    self.display_dma_sprite_state[sprite] = state;
-                    return Some(CapturedSpriteLine {
-                        sprite,
-                        hstart: line_data.hstart,
-                        hsub_70ns: line_data.hsub_70ns,
-                        beam_y,
-                        data: line_data.data,
-                        datb: line_data.datb,
-                        data_ext: line_data.data_ext,
-                        datb_ext: line_data.datb_ext,
-                        width_words: line_data.width_words,
-                        attached: line_data.attached,
-                    });
+        state.entry_line_vpos = beam_y;
+        state.pending_data = None;
+        state.pending_line_vpos = unset_sprite_line_marker();
+        if beam_y == state.vstop {
+            state.dma_enabled = false;
+            if spren && !ddf_blocked {
+                if let Some(words) = self.fetch_sprite_words(sprite) {
+                    state.poke_pos(words[0]);
+                    state.reevaluate_comparators_at(beam_y);
                 }
             }
-
-            let descriptor_ptr =
-                state.next_ptr.unwrap_or(self.display_dma_sprpt[sprite]) & ram_mask & !1;
-            if visited_descriptor_ptrs.contains(&descriptor_ptr) {
-                state.terminated = true;
-                state.data_dma_active = false;
-                state.last_line = None;
-                self.display_dma_sprite_state[sprite] = state;
-                return None;
-            }
-            visited_descriptor_ptrs.push(descriptor_ptr);
-
-            // AGA wide fetches also widen the control-word slots: POS is the
-            // first word of the first fetch, CTL the first word of the second.
-            let quantum = sprite_fetch_quantum(self.agnus.fmode());
-            let mut ptr = descriptor_ptr;
-            let pos = read_chip_word_wrapping(&self.mem.chip_ram, ptr);
-            let ctl = read_chip_word_wrapping(&self.mem.chip_ram, ptr.wrapping_add(2 * quantum));
-            ptr = ptr.wrapping_add(4 * quantum) & ram_mask & !1;
-            if pos == 0 && ctl == 0 {
-                state.terminated = true;
-                state.data_dma_active = false;
-                state.last_line = None;
-                self.display_dma_sprite_state[sprite] = state;
-                return None;
-            }
-
-            let vstart = sprite_vstart_from_words(pos, ctl);
-            let raw_vstop = sprite_vstop_from_ctl(ctl);
-            // An inverted vertical pair (vstop < vstart) does not disable the
-            // sprite. Agnus arms it at vstart; its vstop comparator already
-            // passed for this field, so it does not fire again until the field
-            // wraps, and the sprite keeps fetching data to the bottom of the
-            // frame. Clamp the effective vstop to the frame bottom -- the
-            // per-field VBLANK reset re-fetches this descriptor, which covers
-            // the 0..vstop wrap tail on the next field. Treating vstop<vstart
-            // as "off" drops full-height strips that are intentionally reused
-            // and repositioned every line by SPRxPOS writes.
-            let vstop = if raw_vstop < vstart {
-                self.agnus.current_frame_lines() as i32
-            } else {
-                raw_vstop
-            };
-            let height = vstop - vstart;
-            if height <= 0 {
-                // Equal start/stop descriptors idle the sprite stream for
-                // this field. Do not scan onward into the following words:
-                // they are often bitmap data for a later rearmed sprite.
-                state.terminated = true;
-                state.control = None;
-                state.data_dma_active = false;
-                state.last_line = None;
-                self.display_dma_sprite_state[sprite] = state;
-                return None;
-            }
-
-            // With SSCAN2 each fetched data line covers two display lines,
-            // so the descriptor consumes only ceil(height/2) data lines.
-            let data_lines = if sprite_scan_doubled(self.agnus.fmode()) {
-                (height as u32).div_ceil(2)
-            } else {
-                height as u32
-            };
-            let mut control = DisplaySpriteControl {
-                vstart,
-                vstop,
-                hstart: sprite_hstart_from_words(pos, ctl),
-                hsub_70ns: bitplane_shres(self.denise.bplcon0) && sprite_hsub_70ns_from_ctl(ctl),
-                data_vstart: vstart,
-                data_base: ptr,
-                next_ptr: ptr.wrapping_add(data_lines.saturating_mul(4 * quantum)) & ram_mask & !1,
-                attached: ctl & 0x0080 != 0,
-            };
-            let defer_start_until_next_line =
-                descriptor_loaded_after_stop_this_line && beam_y == control.vstart;
-            if defer_start_until_next_line {
-                control.data_vstart = beam_y + 1;
-                let remaining_height = (control.vstop - control.data_vstart).max(0) as u32;
-                let remaining_data_lines = if sprite_scan_doubled(self.agnus.fmode()) {
-                    remaining_height.div_ceil(2)
-                } else {
-                    remaining_height
-                };
-                control.next_ptr = control
-                    .data_base
-                    .wrapping_add(remaining_data_lines.saturating_mul(4 * quantum))
-                    & ram_mask
-                    & !1;
-            }
-            if let Some(want) = diag_sprcap() {
-                if diag_sprcap_matches(want, beam_y) {
-                    log::info!(
-                        "sprdesc f={} s{} y={} ptr={:06X} pos={:04X} ctl={:04X} vstart={} vstop={} raw_vstop={} hstart={} att={} data_base={:06X} data_vstart={} next={:06X} can_match={} start_now={} defer_start={}",
-                        self.emulated_frames,
-                        sprite,
-                        beam_y,
-                        descriptor_ptr,
-                        pos,
-                        ctl,
-                        control.vstart,
-                        control.vstop,
-                        raw_vstop,
-                        control.hstart,
-                        u8::from(control.attached),
-                        control.data_base,
-                        control.data_vstart,
-                        control.next_ptr,
-                        u8::from(descriptor_can_match_current_vstart),
-                        u8::from(beam_y == control.vstart && descriptor_can_match_current_vstart),
-                        u8::from(defer_start_until_next_line),
-                    );
-                }
-            }
-
-            state.control = Some(control);
-            state.control_loaded_vpos = beam_y;
-            state.data_word_skew = 0;
-            state.data_dma_active = false;
-            state.last_line = None;
-            if beam_y < control.vstart {
-                self.display_dma_sprite_state[sprite] = state;
-                return None;
-            }
-            if defer_start_until_next_line {
-                state.data_dma_active = true;
-                self.display_dma_sprite_state[sprite] = state;
-                return None;
-            }
-            if beam_y == control.vstart && descriptor_can_match_current_vstart {
-                state.data_dma_active = true;
-                continue;
-            }
-            if beam_y < control.vstop {
-                self.display_dma_sprite_state[sprite] = state;
-                return None;
+        } else if state.dma_enabled
+            && spren
+            && !ddf_blocked
+            && !self.sprite_scan_repeat_line(&state, beam_y)
+        {
+            if let Some(words) = self.fetch_sprite_words(sprite) {
+                state.pending_data = Some((words[0], [words[1], words[2], words[3]]));
+                state.pending_line_vpos = beam_y;
+                state.last_data_fetch_vpos = beam_y;
             }
         }
+        self.display_dma_sprite_state[sprite] = state;
     }
 
-    /// Second hardware sprite slot ($17+4N) after the first slot's call ran
-    /// the line entry: fetches DATB at this slot's beam time, assembles the
-    /// display line with the pending DATA words (or the stale latches), and
-    /// emits it.
-    fn sprite_slot2_complete(
+    /// Second hardware sprite slot ($17+4N): on the channel's vstop line it
+    /// fetches the control word's CTL part (loading the next vertical
+    /// comparators and disarming the display latches); on other lines it
+    /// fetches DATB at its own beam time and assembles/emits the display
+    /// line. A skipped slot reuses the stale latch on that side, a missed
+    /// DATA slot never arms the sprite, and an armed channel with DMA off
+    /// keeps displaying its latches until a CTL fetch or poke disarms it.
+    pub(super) fn sprite_slot2(
         &mut self,
         sprite: usize,
-        beam_y: i32,
-        ram_mask: u32,
-        slot2_enabled: bool,
+        vpos: u32,
+        spren: bool,
+        ddf_blocked: bool,
     ) -> Option<CapturedSpriteLine> {
+        let beam_y = vpos as i32;
         let mut state = self.display_dma_sprite_state[sprite];
         let pending = if state.pending_line_vpos == beam_y {
             state.pending_data.take()
@@ -1413,87 +842,65 @@ impl Bus {
             None
         };
         state.pending_data = None;
-        let Some(control) = state.control else {
-            self.display_dma_sprite_state[sprite] = state;
-            return None;
-        };
-        if state.terminated || !state.data_dma_active {
-            self.display_dma_sprite_state[sprite] = state;
-            return None;
-        }
-        let quantum = sprite_fetch_quantum(self.agnus.fmode());
-        // SSCAN2 in-between lines redisplay the previous fetch.
-        if sprite_scan_doubled(self.agnus.fmode())
-            && (beam_y - control.effective_data_vstart()) & 1 == 1
-        {
-            let line_data = state.last_line;
-            self.display_dma_sprite_state[sprite] = state;
-            return line_data.map(|line_data| CapturedSpriteLine {
-                sprite,
-                hstart: line_data.hstart,
-                hsub_70ns: line_data.hsub_70ns,
-                beam_y,
-                data: line_data.data,
-                datb: line_data.datb,
-                data_ext: line_data.data_ext,
-                datb_ext: line_data.datb_ext,
-                width_words: line_data.width_words,
-                attached: line_data.attached,
-            });
-        }
-        if pending.is_none() && state.pending_line_vpos != beam_y {
-            // The first slot ran the entry logic but no data fetch belongs
-            // to this line (e.g. a stop/start descriptor handover deferred
-            // the stream to the next line).
-            self.display_dma_sprite_state[sprite] = state;
-            return None;
-        }
-        let mut line = (beam_y - control.effective_data_vstart()) as u32;
-        if sprite_scan_doubled(self.agnus.fmode()) {
-            line /= 2;
-        }
-        let line_base = control
-            .data_base
-            .wrapping_add(line.saturating_mul(4 * quantum));
-        let datb = if slot2_enabled {
-            let ptr = line_base
-                .wrapping_add(quantum * 2)
-                .wrapping_sub(state.data_word_skew * 2)
-                & ram_mask
-                & !1;
-            let mut words = [0u16; 4];
-            for (w, word) in words.iter_mut().enumerate().take(quantum as usize) {
-                *word = read_chip_word_wrapping(&self.mem.chip_ram, ptr.wrapping_add(2 * w as u32));
+        if beam_y == state.vstop {
+            state.dma_enabled = false;
+            if spren && !ddf_blocked {
+                if let Some(words) = self.fetch_sprite_words(sprite) {
+                    state.poke_ctl(words[0]);
+                    state.reevaluate_comparators_at(beam_y);
+                }
             }
-            Some((words[0], [words[1], words[2], words[3]]))
-        } else {
-            state.data_word_skew += quantum;
-            None
-        };
+            self.display_dma_sprite_state[sprite] = state;
+            return None;
+        }
+        let mut datb_fetched = None;
+        if state.dma_enabled
+            && spren
+            && !ddf_blocked
+            && !self.sprite_scan_repeat_line(&state, beam_y)
+        {
+            if let Some(words) = self.fetch_sprite_words(sprite) {
+                datb_fetched = Some((words[0], [words[1], words[2], words[3]]));
+            }
+        }
+        // Sprites captured as "held" at the visible start are repainted by
+        // the renderer's manual-sprite path (which clips each
+        // Copper-repositioned segment), so do not also emit stale-latch
+        // redisplay lines for them here.
+        if pending.is_none()
+            && datb_fetched.is_none()
+            && self.current_frame_held_sprites[sprite].is_some()
+        {
+            self.display_dma_sprite_state[sprite] = state;
+            return None;
+        }
         let stale = state.last_line;
-        let assembled = match (pending, datb) {
-            (Some(d), Some(b)) => Some((d, b)),
+        let assembled = match (pending, datb_fetched) {
+            (Some(data), Some(datb)) => Some((data, datb)),
             // DATB missed its slot: the sprite displays the new DATA with
             // the stale DATB latch.
-            (Some(d), None) => Some((d, stale.map_or((0, [0; 3]), |l| (l.datb, l.datb_ext)))),
+            (Some(data), None) => Some((data, stale.map_or((0, [0; 3]), |l| (l.datb, l.datb_ext)))),
             // DATA missed its slot: DATB alone does not arm the sprite; an
             // already-armed sprite keeps displaying with the stale DATA.
-            (None, Some(b)) => stale.map(|l| ((l.data, l.data_ext), b)),
+            (None, Some(datb)) => stale.map(|l| ((l.data, l.data_ext), datb)),
+            // No fetch at all (DMA off or an SSCAN2 repeat line): an armed
+            // channel redisplays its latches at the current POS/CTL decode.
             (None, None) => stale.map(|l| ((l.data, l.data_ext), (l.datb, l.datb_ext))),
         };
         let Some(((data, data_ext), (datb, datb_ext))) = assembled else {
             self.display_dma_sprite_state[sprite] = state;
             return None;
         };
+        let quantum = sprite_fetch_quantum(self.agnus.fmode());
         let line_data = DisplaySpriteLineData {
-            hstart: control.hstart,
-            hsub_70ns: control.hsub_70ns,
+            hstart: sprite_hstart_from_words(state.pos, state.ctl),
+            hsub_70ns: bitplane_shres(self.denise.bplcon0) && sprite_hsub_70ns_from_ctl(state.ctl),
             data,
             datb,
             data_ext,
             datb_ext,
             width_words: quantum as u8,
-            attached: control.attached,
+            attached: state.ctl & 0x0080 != 0,
         };
         state.last_line = Some(line_data);
         self.display_dma_sprite_state[sprite] = state;
@@ -1501,57 +908,6 @@ impl Bus {
             sprite,
             hstart: line_data.hstart,
             hsub_70ns: line_data.hsub_70ns,
-            beam_y,
-            data: line_data.data,
-            datb: line_data.datb,
-            data_ext: line_data.data_ext,
-            datb_ext: line_data.datb_ext,
-            width_words: line_data.width_words,
-            attached: line_data.attached,
-        })
-    }
-
-    pub(super) fn captured_sprite_vertical_bar_line_at(
-        &mut self,
-        sprite: usize,
-        vpos: u32,
-    ) -> Option<CapturedSpriteLine> {
-        // Sprites captured as "held" at the visible start are repainted by the
-        // renderer's manual-sprite path (which clips each Copper-repositioned
-        // segment), so do not also emit a full-width bar for them here.
-        if self.current_frame_held_sprites[sprite].is_some() {
-            return None;
-        }
-        let beam_y = vpos as i32;
-        let mut state = self.display_dma_sprite_state[sprite];
-        let control = state.control?;
-        if beam_y >= control.vstop {
-            state.next_ptr = Some(
-                control.next_ptr.wrapping_sub(state.data_word_skew * 2) & self.chip_dma_mask & !1,
-            );
-            state.control = None;
-            state.data_dma_active = false;
-            state.last_line = None;
-            self.display_dma_sprite_state[sprite] = state;
-            return None;
-        }
-        if beam_y < control.vstart || !state.data_dma_active {
-            self.display_dma_sprite_state[sprite] = state;
-            return None;
-        }
-        let line_data = state.last_line?;
-        self.display_dma_sprite_state[sprite] = state;
-        // Position the held strip at the sprite's *current* SPRxPOS/CTL, not
-        // the fetch-time hstart: with sprite DMA off the Copper (or CPU) can
-        // reposition a reused sprite by rewriting SPRxPOS, so the held data
-        // must follow it. For a sprite left where the DMA fetched it this is
-        // the same value.
-        let pos = self.denise.sprpos[sprite];
-        let ctl = self.denise.sprctl[sprite];
-        Some(CapturedSpriteLine {
-            sprite,
-            hstart: sprite_hstart_from_words(pos, ctl),
-            hsub_70ns: bitplane_shres(self.denise.bplcon0) && sprite_hsub_70ns_from_ctl(ctl),
             beam_y,
             data: line_data.data,
             datb: line_data.datb,

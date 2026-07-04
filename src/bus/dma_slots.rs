@@ -586,6 +586,9 @@ impl Bus {
         if self.agnus.dmacon & DMACON_SPREN == 0 {
             return false;
         }
+        if self.sprite_dma_inhibited_by_vertical_blank_at(self.agnus.vpos) {
+            return false;
+        }
         // Sprite DMA slots sit on ODD color clocks (same parity as refresh/
         // disk/audio -- the HRM chart's fixed-DMA band), so they never block
         // the Copper's even-clock fetches.
@@ -596,7 +599,10 @@ impl Bus {
         if sprite >= 8 {
             return false;
         }
-        self.display_dma_sprite_state[sprite].data_dma_active
+        // A channel uses its slots when it is fetching data this line, or on
+        // its vstop line where the slots fetch the next POS/CTL control word.
+        let state = &self.display_dma_sprite_state[sprite];
+        state.dma_enabled || self.agnus.vpos as i32 == state.vstop
     }
 
     pub(super) fn record_bitplane_dmacon_write(&mut self, previous: u16) {
