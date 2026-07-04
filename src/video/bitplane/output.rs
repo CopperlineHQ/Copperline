@@ -270,6 +270,19 @@ pub(super) fn denise_playfield_output(
         };
     }
 
+    // A single playfield whose BPLCON2 PF2 priority code is programmed out of
+    // range (5-7) eliminates the four low bitplanes wherever the fifth
+    // bitplane is set, keeping only bitplanes 5-6, and forces the pixel to
+    // background sprite priority (vAmiga translateSPF; the quirk does not
+    // happen in HAM mode, already returned above). Real software only uses
+    // codes 0-4, so valid single-playfield content is unaffected.
+    let invalid_pf2_priority = control.playfield_priority_code(2) > 4;
+    let (idx, pf_mask) = if invalid_pf2_priority {
+        let idx = if idx & 0x10 != 0 { idx & 0x30 } else { idx };
+        (idx, 0)
+    } else {
+        (idx, u8::from(idx != 0) * 2)
+    };
     let color_latch = palette[(idx as usize) & 0x1F];
     let color = rgb12_to_rgb24(palette_index_to_rgb12(
         palette,
@@ -280,7 +293,7 @@ pub(super) fn denise_playfield_output(
     DenisePlayfieldOutput {
         color,
         color_latch,
-        pf_mask: u8::from(idx != 0) * 2,
+        pf_mask,
     }
 }
 

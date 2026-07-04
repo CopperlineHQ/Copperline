@@ -4487,6 +4487,40 @@ fn dual_playfield_out_of_range_priority_draws_the_field_transparent() {
 }
 
 #[test]
+fn single_playfield_out_of_range_priority_eliminates_low_bitplanes() {
+    // A single playfield with an out-of-range BPLCON2 PF2 priority code keeps
+    // only bitplanes 5-6 wherever bitplane 5 is set (eliminating the four low
+    // planes) and forces background sprite priority (vAmiga translateSPF).
+    // Valid codes leave the pixel untouched.
+    let mut palette = Palette::new();
+    palette.write_ocs(0x10, 0x0F00);
+    palette.write_ocs(0x13, 0x000F);
+
+    let invalid = ControlState {
+        bplcon0: 0x5000, // 5 planes, single playfield (no HAM/dual/EHB)
+        bplcon2: 0x0038, // PF2 priority code 7 (invalid)
+        ..ControlState::default()
+    };
+    let valid = ControlState {
+        bplcon2: 0x0004, // PF1 code 4, PF2 code 0 (both valid)
+        ..invalid
+    };
+
+    // Planes 1,2,5 set: the invalid priority eliminates planes 1-2, leaving
+    // the plane-5-only index, so the pixel matches a valid render of 0x10.
+    let mut h = 0u32;
+    let invalid_13 = denise_playfield_output(invalid, palette, 0x13, &mut h);
+    let mut h = 0u32;
+    let valid_10 = denise_playfield_output(valid, palette, 0x10, &mut h);
+    let mut h = 0u32;
+    let valid_13 = denise_playfield_output(valid, palette, 0x13, &mut h);
+    assert_eq!(invalid_13.color, valid_10.color);
+    assert_ne!(invalid_13.color, valid_13.color);
+    assert_eq!(invalid_13.pf_mask, 0);
+    assert_eq!(valid_13.pf_mask, 2);
+}
+
+#[test]
 fn aga_dual_playfield_decodes_bitplane7_into_pf1_fourth_bit() {
     // AGA Lisa dual playfield gives each field four bits: bitplane 7
     // becomes PF1's high bit (palette entries 8..15) and bitplane 8
