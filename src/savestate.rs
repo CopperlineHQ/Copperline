@@ -74,7 +74,9 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //  15: Bus gained the bitplane DDF sequencer flop state (ddf_seq_line_initial,
 //      ddf_seq_line_start_regs, ddf_seq_writes) - the per-line flop walk that
 //      replaces the value-range DDF window for FMODE=0 fetches
-pub const STATE_VERSION: u32 = 15;
+//  16: CapturedBitplaneRow gained fetch_origin_cck (the sequencer run origin
+//      for rows whose fetch diverges from the register-derived window)
+pub const STATE_VERSION: u32 = 16;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

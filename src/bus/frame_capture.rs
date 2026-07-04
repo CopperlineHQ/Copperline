@@ -1548,6 +1548,7 @@ impl Bus {
                 nplanes: display_planes,
                 words_per_row,
                 planes: std::array::from_fn(|_| vec![0; words_per_row]),
+                fetch_origin_cck: None,
             };
             for plane in dma_planes..display_planes {
                 row.planes[plane].fill(self.denise.bpldat[plane]);

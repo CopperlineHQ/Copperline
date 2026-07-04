@@ -295,6 +295,7 @@ fn captured_row(
     CapturedBitplaneRow {
         nplanes,
         words_per_row,
+        fetch_origin_cck: None,
         planes,
     }
 }
@@ -2014,6 +2015,7 @@ fn copper_move_palette_write_affects_pixels_after_second_dma_slot() {
     bus.current_frame_bitplane_rows[0] = Some(CapturedBitplaneRow {
         nplanes: 1,
         words_per_row,
+        fetch_origin_cck: None,
         planes: [
             vec![0xFFFF; words_per_row],
             vec![0; words_per_row],
@@ -3457,6 +3459,7 @@ fn beam_timed_display_window_changes_clip_later_bitplane_rows() {
         bus.current_frame_bitplane_rows[y] = Some(CapturedBitplaneRow {
             nplanes: 1,
             words_per_row: 3,
+            fetch_origin_cck: None,
             planes: [
                 vec![0x4000, 0, 0],
                 vec![0; 3],
@@ -3539,6 +3542,7 @@ fn beam_timed_diwstrt_rewrite_after_window_open_does_not_reclip_line() {
     bus.current_frame_bitplane_rows[0] = Some(CapturedBitplaneRow {
         nplanes: 1,
         words_per_row: 3,
+        fetch_origin_cck: None,
         planes: [
             vec![0xFFFF, 0xFFFF, 0xFFFF],
             vec![0; 3],
@@ -3584,6 +3588,7 @@ fn beam_timed_diwstrt_clips_hidden_bitplane_pixels_without_rebasing_fetch_origin
     bus.current_frame_bitplane_rows[0] = Some(CapturedBitplaneRow {
         nplanes: 1,
         words_per_row: 3,
+        fetch_origin_cck: None,
         planes: [
             vec![0x0400, 0, 0],
             vec![0; 3],
@@ -3627,6 +3632,7 @@ fn beam_timed_diwstrt_extends_later_bitplane_pixels_left_on_same_line() {
     bus.current_frame_bitplane_rows[0] = Some(CapturedBitplaneRow {
         nplanes: 1,
         words_per_row: 3,
+        fetch_origin_cck: None,
         planes: [
             vec![0xFFFF, 0xFFFF, 0xFFFF],
             vec![0; 3],
@@ -3674,6 +3680,7 @@ fn beam_timed_diwstrt_can_enable_current_bitplane_line() {
     bus.current_frame_bitplane_rows[0] = Some(CapturedBitplaneRow {
         nplanes: 1,
         words_per_row: 3,
+        fetch_origin_cck: None,
         planes: [
             vec![0xFFFF, 0xFFFF, 0xFFFF],
             vec![0; 3],
@@ -3715,6 +3722,7 @@ fn beam_timed_diwstop_can_enable_current_bitplane_line() {
     bus.current_frame_bitplane_rows[0] = Some(CapturedBitplaneRow {
         nplanes: 1,
         words_per_row: 3,
+        fetch_origin_cck: None,
         planes: [
             vec![0xFFFF, 0xFFFF, 0xFFFF],
             vec![0; 3],
@@ -3759,6 +3767,7 @@ fn beam_timed_diwstop_extends_later_bitplane_pixels_on_same_line() {
     bus.current_frame_bitplane_rows[0] = Some(CapturedBitplaneRow {
         nplanes: 1,
         words_per_row: 3,
+        fetch_origin_cck: None,
         planes: [
             vec![0xFFFF, 0xFFFF, 0xFFFF],
             vec![0; 3],
@@ -3929,6 +3938,7 @@ fn bpl1dat_write_triggers_output_while_bitplane_dma_enabled() {
     bus.current_frame_bitplane_rows[0] = Some(CapturedBitplaneRow {
         nplanes: 1,
         words_per_row: 2,
+        fetch_origin_cck: None,
         planes: [
             vec![0, 0],
             vec![0, 0],
@@ -4167,6 +4177,7 @@ fn same_line_ham_enable_does_not_retime_earlier_playfield_color() {
     bus.current_frame_bitplane_rows[0] = Some(CapturedBitplaneRow {
         nplanes: 6,
         words_per_row: 1,
+        fetch_origin_cck: None,
         planes: [
             vec![0xC000],
             vec![0x0000],
@@ -4365,6 +4376,7 @@ fn same_line_bplcon2_killehb_changes_later_extra_half_brite_pixels() {
     bus.current_frame_bitplane_rows[0] = Some(CapturedBitplaneRow {
         nplanes: 6,
         words_per_row: 1,
+        fetch_origin_cck: None,
         planes: [
             vec![0xFFFF],
             vec![0],
@@ -4406,6 +4418,7 @@ fn beam_timed_bplcon0_hires_narrows_later_bitplane_pixels() {
     bus.current_frame_bitplane_rows[0] = Some(CapturedBitplaneRow {
         nplanes: 1,
         words_per_row: 4,
+        fetch_origin_cck: None,
         planes: [
             vec![0x0000, 0x0000, 0x2000, 0x0000],
             vec![0; 4],
@@ -4451,6 +4464,7 @@ fn beam_timed_bplcon0_lowres_widens_later_bitplane_pixels() {
     bus.current_frame_bitplane_rows[0] = Some(CapturedBitplaneRow {
         nplanes: 1,
         words_per_row: 2,
+        fetch_origin_cck: None,
         planes: [
             vec![0x0000, 0x4000],
             vec![0; 2],
@@ -4497,6 +4511,7 @@ fn same_line_bplcon2_priority_change_reveals_later_sprite_pixels() {
     bus.current_frame_bitplane_rows[0] = Some(CapturedBitplaneRow {
         nplanes: 1,
         words_per_row: 1,
+        fetch_origin_cck: None,
         planes: [
             vec![0xFFFF],
             vec![0],
@@ -4593,6 +4608,7 @@ fn same_line_bplcon3_pf2of_changes_later_dual_playfield_pixels() {
     bus.current_frame_bitplane_rows[0] = Some(CapturedBitplaneRow {
         nplanes: 2,
         words_per_row: 1,
+        fetch_origin_cck: None,
         planes: [
             vec![0],
             vec![0xFFFF],
@@ -5648,6 +5664,7 @@ fn state_load_resets_transient_video_latches() {
     bus.last_frame_bitplane_rows[0] = Some(CapturedBitplaneRow {
         nplanes: 1,
         words_per_row: 1,
+        fetch_origin_cck: None,
         planes: std::array::from_fn(|_| vec![0xFFFF]),
     });
     bus.current_frame_sprite_lines.push(CapturedSpriteLine {
@@ -5730,6 +5747,7 @@ fn state_load_after_display_start_suppresses_partial_render_frame() {
     bus.current_frame_bitplane_rows[0] = Some(CapturedBitplaneRow {
         nplanes: 1,
         words_per_row: 1,
+        fetch_origin_cck: None,
         planes: std::array::from_fn(|_| vec![0xFFFF]),
     });
     bus.current_frame_sprite_lines.push(CapturedSpriteLine {
@@ -5758,6 +5776,7 @@ fn state_load_after_display_start_suppresses_partial_render_frame() {
     bus.current_frame_bitplane_rows[0] = Some(CapturedBitplaneRow {
         nplanes: 1,
         words_per_row: 1,
+        fetch_origin_cck: None,
         planes: std::array::from_fn(|_| vec![0xAAAA]),
     });
     bus.current_frame_sprite_lines.push(CapturedSpriteLine {
@@ -6551,6 +6570,7 @@ fn manual_sprite_data_writes_accumulate_live_sprite_playfield_clxdat() {
     bus.current_frame_bitplane_rows[0] = Some(CapturedBitplaneRow {
         nplanes: 1,
         words_per_row: 1,
+        fetch_origin_cck: None,
         planes: [
             vec![0x4000],
             vec![0],
@@ -6591,6 +6611,7 @@ fn attached_manual_sprite_data_writes_accumulate_live_sprite_playfield_clxdat() 
     bus.current_frame_bitplane_rows[0] = Some(CapturedBitplaneRow {
         nplanes: 1,
         words_per_row: 1,
+        fetch_origin_cck: None,
         planes: [
             vec![0x8000],
             vec![0],
@@ -6830,6 +6851,7 @@ fn shifted_horizontal_diw_offsets_live_playfield_clxdat_fetch_origin() {
     let row = CapturedBitplaneRow {
         nplanes: 2,
         words_per_row: 2,
+        fetch_origin_cck: None,
         planes: [
             vec![0, 0x1000],
             vec![0, 0x1000],
@@ -6884,6 +6906,7 @@ fn denise_horizontal_delay_aligns_sprite_playfield_collision_domain() {
     let row = CapturedBitplaneRow {
         nplanes: 1,
         words_per_row: 1,
+        fetch_origin_cck: None,
         planes: [
             vec![0x8000],
             vec![0],
@@ -7085,6 +7108,7 @@ fn live_sprite_playfield_clxdat_skips_already_latched_bits() {
     let row = CapturedBitplaneRow {
         nplanes: 1,
         words_per_row: 1,
+        fetch_origin_cck: None,
         planes: [
             vec![0x8000],
             vec![0],
@@ -9406,6 +9430,7 @@ fn render_input_refill_from_bus_matches_fresh_snapshot() {
     bus.current_frame_bitplane_rows[0] = Some(CapturedBitplaneRow {
         nplanes: 1,
         words_per_row,
+        fetch_origin_cck: None,
         planes: [
             vec![0xFFFF; words_per_row],
             vec![0; words_per_row],
@@ -9566,6 +9591,7 @@ fn debug_plane_mask_hides_pixels_but_not_collisions() {
     bus.current_frame_bitplane_rows[0] = Some(CapturedBitplaneRow {
         nplanes: 1,
         words_per_row,
+        fetch_origin_cck: None,
         planes: [
             vec![0xFFFF; words_per_row],
             vec![0; words_per_row],

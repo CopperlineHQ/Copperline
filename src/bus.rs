@@ -272,6 +272,11 @@ pub struct CapturedBitplaneRow {
     pub nplanes: usize,
     pub words_per_row: usize,
     pub planes: [Vec<u16>; 8],
+    /// Colour clock of the row's first fetch-unit boundary when the DDF
+    /// sequencer's run diverges from the register-derived window (missed
+    /// stops draining to the hardware stop, late starts). None when the
+    /// register-derived geometry already matches (and for wide-FMODE rows).
+    pub fetch_origin_cck: Option<u16>,
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]

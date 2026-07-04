@@ -49,6 +49,9 @@ pub(super) struct DdfSeqLine {
     pub word_idx_at: [u16; DDF_SEQ_MAX_LINE_CCKS],
     /// First fetch colour clock of the line, if any.
     pub first_fetch_cck: Option<u16>,
+    /// The run's first fetch-unit boundary (first fetch minus its unit
+    /// offset): the position that anchors word 0 on the display.
+    pub run_origin_cck: Option<u16>,
     /// Sequencer state after the line's walk (becomes the next line's
     /// initial state).
     pub end_state: DdfState,
@@ -238,6 +241,7 @@ impl Bus {
             words_per_plane: [0; 8],
             word_idx_at: [0; DDF_SEQ_MAX_LINE_CCKS],
             first_fetch_cck: None,
+            run_origin_cck: None,
             end_state: state,
         };
         let shres = crate::chipset::agnus::bitplane_shres(state.bplcon0);
@@ -264,6 +268,7 @@ impl Bus {
                 line.words_per_plane[plane].max(line.word_idx_at[idx] + 1);
             if line.first_fetch_cck.is_none() {
                 line.first_fetch_cck = Some(f.cck);
+                line.run_origin_cck = Some(f.cck.saturating_sub(u16::from(f.counter)));
             }
         }
         line
@@ -405,10 +410,16 @@ impl Bus {
             // must not skew the visible rows' pointer progression).
             return;
         };
-        let (plane_at, modulo_at, word_idx_at, words_per_row) = {
+        let (plane_at, modulo_at, word_idx_at, words_per_row, run_origin) = {
             let table = self.ddf_seq_line_table();
             let wpr = table.words_per_plane.iter().copied().max().unwrap_or(0) as usize;
-            (table.plane_at, table.modulo_at, table.word_idx_at, wpr)
+            (
+                table.plane_at,
+                table.modulo_at,
+                table.word_idx_at,
+                wpr,
+                table.run_origin_cck,
+            )
         };
         if words_per_row == 0 {
             return;
@@ -454,6 +465,9 @@ impl Bus {
             slots += 1;
         }
         if slots != 0 {
+            if let Some(row) = self.current_frame_bitplane_rows[fb_y].as_mut() {
+                row.fetch_origin_cck = run_origin;
+            }
             self.record_bitplane_fetch_timing(slots, rows_started, 0, None);
         }
     }
