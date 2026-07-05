@@ -4913,22 +4913,22 @@ fn sprite_dma_reuse_stops_at_null_control_block() {
 
 #[test]
 fn collision_pixel_honors_clxcon_match_bits() {
-    let collision = collision_pixel(0b000011, 2, 0x00C3, 0, false);
+    let collision = collision_pixel(0b000011, 0x00C3, 0, false);
     assert!(collision.pf1_match);
     assert!(collision.pf2_match);
 
-    let mismatch = collision_pixel(0b000010, 2, 0x00C3, 0, false);
+    let mismatch = collision_pixel(0b000010, 0x00C3, 0, false);
     assert!(!mismatch.pf1_match);
     assert!(mismatch.pf2_match);
 }
 
 #[test]
 fn collision_pixel_single_playfield_odd_match_requires_even_match() {
-    let single = collision_pixel(0b000001, 2, 0x0083, 0, false);
+    let single = collision_pixel(0b000001, 0x0083, 0, false);
     assert!(!single.pf1_match);
     assert!(!single.pf2_match);
 
-    let dual = collision_pixel(0b000001, 2, 0x0083, 0, true);
+    let dual = collision_pixel(0b000001, 0x0083, 0, true);
     assert!(dual.pf1_match);
     assert!(!dual.pf2_match);
 }
@@ -4938,29 +4938,48 @@ fn collision_pixel_single_playfield_odd_match_requires_even_match() {
 #[test]
 fn collision_pixel_planes_7_and_8_use_clxcon2() {
     // Plane 7 (bit 6) enabled, must be set: pixel with bit 6 matches.
-    let hit = collision_pixel(0b0100_0000, 8, 0, 0x0041, false);
+    let hit = collision_pixel(0b0100_0000, 0, 0x0041, false);
     assert!(hit.pf1_match);
-    let miss = collision_pixel(0, 8, 0, 0x0041, false);
+    let miss = collision_pixel(0, 0, 0x0041, false);
     assert!(!miss.pf1_match);
 
     // Plane 8 (bit 7) enabled, must be clear: a set bit 7 mismatches.
-    let even_hit = collision_pixel(0, 8, 0, 0x0080, false);
+    let even_hit = collision_pixel(0, 0, 0x0080, false);
     assert!(even_hit.pf2_match);
-    let even_miss = collision_pixel(0b1000_0000, 8, 0, 0x0080, false);
+    let even_miss = collision_pixel(0b1000_0000, 0, 0x0080, false);
     assert!(!even_miss.pf2_match);
 
     // With CLXCON2 clear, planes 7-8 never gate the match (and the
     // sprite-enable bits of CLXCON are not misread for them).
-    let ignore = collision_pixel(0b1100_0000, 8, 0xF000, 0, false);
+    let ignore = collision_pixel(0b1100_0000, 0xF000, 0, false);
     assert!(ignore.pf1_match && ignore.pf2_match);
 }
 
 #[test]
 fn collision_pixel_disabled_planes_match_continuously() {
-    let collision = collision_pixel(0, 6, 0, 0, false);
+    let collision = collision_pixel(0, 0, 0, false);
     assert!(collision.pf1_match);
     assert!(collision.pf2_match);
     assert_eq!(collision.clxdat_bits(), 1);
+}
+
+#[test]
+fn collision_match_gates_on_enabled_planes_beyond_the_bpu_count() {
+    // A one-bitplane playfield pixel (only bitplane 1 set) with CLXCON
+    // enabling all six planes at match value 1 must NOT match: the absent
+    // planes 2-6 read 0, and every ENABLED plane participates in the compare
+    // regardless of the current BPU count (vAmiga checkS2PCollisions:
+    // `(dBuffer & enbp) == (mvbp & enbp)`). Copperline previously only checked
+    // planes up to the fetched count and so spuriously matched.
+    let all_planes_match_one = collision_pixel(0b000001, 0x0FFF, 0, false);
+    assert!(!all_planes_match_one.pf1_match);
+    assert!(!all_planes_match_one.pf2_match);
+
+    // Setting the absent planes' match value to 0 (CLXCON 0x0FC1) lets the
+    // zero-read absent planes match, so the one-plane pixel collides.
+    let only_plane1_match = collision_pixel(0b000001, 0x0FC1, 0, false);
+    assert!(only_plane1_match.pf1_match);
+    assert!(only_plane1_match.pf2_match);
 }
 
 #[test]

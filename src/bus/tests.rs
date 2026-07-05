@@ -6612,6 +6612,10 @@ fn manual_sprite_data_writes_accumulate_live_sprite_playfield_clxdat() {
     bus.denise.ddfstrt = 0x0038;
     bus.denise.ddfstop = 0x0038;
     bus.denise.bplcon0 = 0x1000;
+    // One-bitplane playfield: match only bitplane 1 so the absent planes 2-6
+    // still match (CLXCON_RESET's all-six-planes=1 never matches one plane ->
+    // no collision on hardware).
+    bus.denise.clxcon = 0x0FC1;
     bus.denise.sprpos[0] = pos;
     bus.denise.sprctl[0] = ctl;
     bus.current_frame_sprite_display_enable_x_by_y[0] = Some(0);
@@ -7450,6 +7454,10 @@ fn captured_sprite_and_bitplane_rows_accumulate_live_sprite_playfield_clxdat() {
     bus.denise.ddfstrt = 0x0038;
     bus.denise.ddfstop = 0x0038;
     bus.denise.bplcon0 = 0x1000;
+    // One-bitplane playfield: match only bitplane 1 so the absent (zero)
+    // planes 2-6 still match. The default CLXCON_RESET wants all six planes
+    // = 1, which one plane cannot satisfy -> no collision on hardware.
+    bus.denise.clxcon = 0x0FC1;
     bus.denise.sprpt[0] = sprite_ptr as u32;
     bus.display_dma_sprpt[0] = sprite_ptr as u32;
     bus.denise.bplpt[0] = 0x0100;
@@ -7488,6 +7496,11 @@ fn explicit_bpl1dat_output_accumulates_live_sprite_playfield_clxdat() {
     bus.denise.diwstrt = 0x2C83;
     bus.denise.diwstop = 0x2DC1;
     bus.denise.bplcon0 = 0x1000;
+    // One-bitplane playfield: enable all plane-collision inputs but only match
+    // bitplane 1 (MVBP1), so the absent planes 2-6 (which read 0) still match.
+    // The default CLXCON_RESET (0x0FFF) demands all six planes = 1, which a
+    // one-plane playfield can never satisfy -> no collision on real hardware.
+    bus.denise.clxcon = 0x0FC1;
     bus.denise.sprpt[0] = sprite_ptr as u32;
     bus.display_dma_sprpt[0] = sprite_ptr as u32;
     bus.current_frame_render_base = bus.capture_render_snapshot();
@@ -7517,6 +7530,9 @@ fn manual_sprite_and_bpl1dat_writes_accumulate_live_sprite_playfield_clxdat() {
     bus.denise.diwstrt = 0x2C83;
     bus.denise.diwstop = 0x2DC1;
     bus.denise.bplcon0 = 0x1000;
+    // One-bitplane playfield: match only bitplane 1 (absent planes 2-6 read 0
+    // and still match); CLXCON_RESET's all-six-planes=1 never matches.
+    bus.denise.clxcon = 0x0FC1;
     bus.denise.sprpos[0] = pos;
     bus.denise.sprctl[0] = ctl;
     bus.current_frame_render_base = bus.capture_render_snapshot();
@@ -7553,6 +7569,9 @@ fn same_line_bplcon1_scroll_increase_latches_later_live_sprite_playfield_clxdat(
     bus.denise.ddfstop = 0x0038;
     bus.denise.bplcon0 = 0x1000;
     bus.denise.bplcon1 = 0;
+    // One-bitplane playfield: match only bitplane 1 (absent planes 2-6 read 0
+    // and still match); CLXCON_RESET's all-six-planes=1 never matches.
+    bus.denise.clxcon = 0x0FC1;
     bus.denise.sprpt[0] = sprite_ptr as u32;
     bus.display_dma_sprpt[0] = sprite_ptr as u32;
     bus.denise.bplpt[0] = 0x0100;
@@ -7654,6 +7673,9 @@ fn bplcon3_spres_hires_narrows_live_sprite_playfield_clxdat() {
         // ECSENA/ENBPLCN3 set so the live SPRES write below latches.
         bus.denise.bplcon0 = 0x9000 | BPLCON0_ECSENA;
         bus.denise.bplcon3 = bplcon3;
+        // One-bitplane playfield: match only bitplane 1 so the absent planes
+        // 2-6 still match (CLXCON_RESET's all-six=1 never matches one plane).
+        bus.denise.clxcon = 0x0FC1;
         bus.denise.sprpt[0] = sprite_ptr as u32;
         bus.display_dma_sprpt[0] = sprite_ptr as u32;
         bus.denise.bplpt[0] = 0x0100;
@@ -7704,6 +7726,9 @@ fn same_line_bplcon3_spres_write_does_not_retime_earlier_live_sprite_playfield_c
         // ECSENA/ENBPLCN3 set so the live SPRES write below latches.
         bus.denise.bplcon0 = 0x9000 | BPLCON0_ECSENA;
         bus.denise.bplcon3 = 0;
+        // One-bitplane playfield: match only bitplane 1 so the absent planes
+        // 2-6 still match (CLXCON_RESET's all-six=1 never matches one plane).
+        bus.denise.clxcon = 0x0FC1;
         bus.denise.sprpt[0] = sprite_ptr as u32;
         bus.display_dma_sprpt[0] = sprite_ptr as u32;
         bus.denise.bplpt[0] = 0x0100;

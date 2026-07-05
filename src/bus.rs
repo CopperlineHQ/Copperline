@@ -6530,7 +6530,7 @@ fn live_manual_bpl_word_collision_bits(
         }
         if word_active {
             let collision =
-                live_playfield_collision_pixel(idx, nplanes, source_control.clxcon, dual_playfield);
+                live_playfield_collision_pixel(idx, source_control.clxcon, dual_playfield);
             for dx in 0..pixel_repeat {
                 let x = x_cursor + dx;
                 if x < x_start || x >= x_stop {
@@ -6690,7 +6690,6 @@ fn live_bitplane_collision_pixel_at(
     }
     Some(live_playfield_collision_pixel(
         idx,
-        nplanes,
         clxcon,
         bplcon0 & 0x0400 != 0,
     ))
@@ -6698,12 +6697,11 @@ fn live_bitplane_collision_pixel_at(
 
 fn live_playfield_collision_pixel(
     idx: u8,
-    nplanes: usize,
     clxcon: u16,
     dual_playfield: bool,
 ) -> LivePlayfieldCollisionPixel {
-    let even_match = live_clxcon_planes_match(idx, nplanes, clxcon, 1);
-    let odd_match_raw = live_clxcon_planes_match(idx, nplanes, clxcon, 0);
+    let even_match = live_clxcon_planes_match(idx, clxcon, 1);
+    let odd_match_raw = live_clxcon_planes_match(idx, clxcon, 0);
     let odd_match = odd_match_raw && (dual_playfield || even_match);
     LivePlayfieldCollisionPixel {
         pf1: dual_playfield && idx & 0b010101 != 0,
@@ -6717,9 +6715,15 @@ fn live_playfield_collision_pixel(
     }
 }
 
-fn live_clxcon_planes_match(idx: u8, nplanes: usize, clxcon: u16, first_plane: usize) -> bool {
+fn live_clxcon_planes_match(idx: u8, clxcon: u16, first_plane: usize) -> bool {
     let mut matches = true;
-    for plane in (first_plane..nplanes.min(6)).step_by(2) {
+    // Every CLXCON-enabled plane participates in the match, not just the planes
+    // the display currently fetches: a plane enabled beyond the BPU count reads
+    // as 0 and still gates the collision (vAmiga checkS2PCollisions compares
+    // `(dBuffer & enbp) == (mvbp & enbp)` over all six planes). Regression:
+    // Denise/Sprites/collision/sprcoll* set CLXCON match bits for absent planes
+    // over a low-plane-count playfield.
+    for plane in (first_plane..6).step_by(2) {
         if clxcon & (1 << (6 + plane)) == 0 {
             continue;
         }
