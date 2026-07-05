@@ -81,6 +81,13 @@ const REG_DNAD: usize = 0x28;
 const REG_DBC: usize = 0x25;
 /// DSP: writing its low byte starts the SCRIPTS processor.
 const REG_DSP: usize = 0x2C;
+/// DSPS: the operand of the last INT instruction.
+const REG_DSPS: usize = 0x30;
+/// TEMP: the SCRIPTS return-address register.
+const REG_TEMP: usize = 0x1C;
+/// DSTAT causes the SCRIPTS engine raises.
+const DSTAT_SIR: u8 = 0x04;
+const DSTAT_IID: u8 = 0x01;
 /// DMA FIFO depth per byte lane.
 const DMA_FIFO_DEPTH: usize = 16;
 /// SCNTL1: bit 2 asserts even (instead of odd) generated parity.
@@ -114,8 +121,6 @@ pub struct A4091 {
     /// The SCSI FIFO: 8 entries, 8 data bits plus parity. SODL pushes it
     /// (with CTEST4.SFWR), CTEST3 pops it, SSTAT2 counts it.
     scsi_fifo: Vec<u16>,
-    /// One-shot warning latch for the unimplemented SCRIPTS processor.
-    scripts_warned: bool,
 }
 
 /// 53C710 register-file reset values at their big-endian byte addresses:
@@ -148,7 +153,6 @@ impl A4091 {
             regs: reset_regs(),
             dma_fifo: Default::default(),
             scsi_fifo: Vec::new(),
-            scripts_warned: false,
         })
     }
 
@@ -235,6 +239,60 @@ impl A4091 {
             self.regs[REG_DBC + 2] = dbc as u8;
         }
         self.regs[REG_CTEST5] = v & !(CTEST5_ADCK | CTEST5_BBCK);
+    }
+
+    /// Map a chip-native (little-endian) register number to its big-endian
+    /// byte address in `regs`. SCRIPTS register operands use the native
+    /// numbering; the 68k byte lanes are swapped within each longword.
+    fn le_to_be(le: usize) -> usize {
+        (le & !3) | (3 - (le & 3))
+    }
+
+    /// Run the SCRIPTS processor from DSP until it interrupts. Enough of
+    /// the instruction set for the boot ROM's self-tests: register-write
+    /// (MOVE immediate to register), RETURN, and INT; anything else stops
+    /// with an illegal-instruction interrupt, as the real chip does for
+    /// garbage fetches. Block moves and the full transfer-control set come
+    /// with the SCSI phase engine.
+    fn run_scripts(&mut self, host: &mut crate::zorro_device::DeviceHost) {
+        for _ in 0..64 {
+            let dsp = self.reg32(REG_DSP);
+            let mut insn = [0u8; 8];
+            host.dma_read(dsp, &mut insn);
+            self.set_reg32(REG_DSP, dsp.wrapping_add(8));
+            let dcmd = insn[0];
+            match dcmd >> 6 {
+                // Register read-modify-write; only the "move immediate to
+                // register" form (0x78) is implemented.
+                0b01 if dcmd == 0x78 => {
+                    let reg = Self::le_to_be((insn[1] & 0x3F) as usize);
+                    self.regs[reg] = insn[2];
+                }
+                // Transfer control: RETURN and INT.
+                0b10 => match (dcmd >> 3) & 7 {
+                    2 => {
+                        let temp = self.reg32(REG_TEMP);
+                        self.set_reg32(REG_DSP, temp);
+                    }
+                    3 => {
+                        let dsps = u32::from_be_bytes(insn[4..8].try_into().unwrap());
+                        self.set_reg32(REG_DSPS, dsps);
+                        self.regs[REG_DSTAT] |= DSTAT_SIR;
+                        return;
+                    }
+                    _ => {
+                        self.regs[REG_DSTAT] |= DSTAT_IID;
+                        return;
+                    }
+                },
+                _ => {
+                    self.regs[REG_DSTAT] |= DSTAT_IID;
+                    return;
+                }
+            }
+        }
+        // Runaway script (e.g. a RETURN loop): stop as illegal.
+        self.regs[REG_DSTAT] |= DSTAT_IID;
     }
 
     /// One byte of the nibble-wide ROM as seen in the window at `off`.
@@ -324,7 +382,7 @@ impl crate::zorro_device::ZorroDevice for A4091 {
         off: u32,
         size: usize,
         value: u32,
-        _host: &mut crate::zorro_device::DeviceHost,
+        host: &mut crate::zorro_device::DeviceHost,
     ) {
         for i in 0..size {
             let o = off.wrapping_add(i as u32);
@@ -368,14 +426,9 @@ impl crate::zorro_device::ZorroDevice for A4091 {
             if r == REG_CTEST5 {
                 self.ctest5_strobes();
             }
-            if (REG_DSP..REG_DSP + 4).contains(&r) && !self.scripts_warned {
-                self.scripts_warned = true;
-                log::warn!(
-                    "a4091: DSP write ({:#04X} <- {:#04X}): SCRIPTS processor \
-                     not implemented yet",
-                    r,
-                    self.regs[r]
-                );
+            // Writing DSP's low byte starts the SCRIPTS processor.
+            if r == REG_DSP + 3 {
+                self.run_scripts(host);
             }
         }
     }
@@ -399,7 +452,6 @@ impl crate::zorro_device::ZorroDevice for A4091 {
 
     fn reset(&mut self) {
         self.chip_reset();
-        self.scripts_warned = false;
     }
 
     fn kind(&self) -> &'static str {
@@ -603,6 +655,40 @@ mod tests {
         b.write(io(REG_ISTAT), 1, 0x80, &mut host);
         assert!(!ZorroDevice::int2_line(&b));
         assert_eq!(b.read(io(REG_ISTAT), 1, &mut host) & 1, 1);
+    }
+
+    #[test]
+    fn scripts_write_register_then_interrupt() {
+        // The ncr7xx bus access test's probe script: MOVE $A5 to DWT
+        // (register $3A chip-native = $39 as the 68k sees it), then
+        // INT $00000012.
+        let mut b = board_with_rom(test_rom_64k());
+        let mut mem = test_memory();
+        mem.chip_ram[0x1000..0x1010].copy_from_slice(&[
+            0x78, 0x3A, 0xA5, 0x00, 0x00, 0x00, 0x00, 0x00, // MOVE $A5 to DWT
+            0x98, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, // INT $12
+        ]);
+        let mut host = DeviceHost::new(&mut mem);
+        let io = |r: usize| IO_OFFSET + r as u32;
+        b.write(io(REG_DIEN), 1, 0x04, &mut host); // enable SIR
+        b.write(io(REG_DSP), 4, 0x1000, &mut host);
+        assert_eq!(b.read(io(0x39), 1, &mut host), 0xA5); // DWT written
+        assert!(ZorroDevice::int2_line(&b));
+        assert_eq!(b.read(io(REG_DSPS), 4, &mut host), 0x12);
+        assert_eq!(b.read(io(REG_DSTAT), 1, &mut host) & 0x04, 0x04); // SIR
+        assert!(!ZorroDevice::int2_line(&b));
+    }
+
+    #[test]
+    fn scripts_garbage_fetch_raises_illegal_instruction() {
+        // Fetching from unmapped space yields $FF bytes; the engine must
+        // stop with DSTAT.IID like the real chip on a garbage opcode.
+        let mut b = board_with_rom(test_rom_64k());
+        let mut mem = test_memory();
+        let mut host = DeviceHost::new(&mut mem);
+        let io = |r: usize| IO_OFFSET + r as u32;
+        b.write(io(REG_DSP), 4, 0x0F00_0000, &mut host);
+        assert_eq!(b.read(io(REG_DSTAT), 1, &mut host) & 0x01, 0x01); // IID
     }
 
     #[test]
