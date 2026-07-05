@@ -72,6 +72,7 @@ fn reset_regs() -> Vec<u8> {
     r[0x07] = 0x80; // SCID
     r[0x0F] = 0x80; // DSTAT: DFE
     r[0x15] = 0x01; // CTEST2: DACK
+    r[0x16] = 0xF0; // CTEST1: FMT, all DMA FIFO byte lanes empty
     r[0x24] = 0x40; // DCMD
     r
 }
