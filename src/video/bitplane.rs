@@ -4291,7 +4291,6 @@ fn render_planned_playfield_line(
             collision_table = std::array::from_fn(|idx| {
                 collision_pixel(
                     idx as u8,
-                    nplanes,
                     pixel_control.clxcon,
                     pixel_control.clxcon2,
                     collision_dual,
@@ -4481,15 +4480,9 @@ impl CollisionPixel {
     }
 }
 
-fn collision_pixel(
-    idx: u8,
-    nplanes: usize,
-    clxcon: u16,
-    clxcon2: u16,
-    dual_playfield: bool,
-) -> CollisionPixel {
-    let even_match = clxcon_planes_match(idx, nplanes, clxcon, clxcon2, 1);
-    let odd_match_raw = clxcon_planes_match(idx, nplanes, clxcon, clxcon2, 0);
+fn collision_pixel(idx: u8, clxcon: u16, clxcon2: u16, dual_playfield: bool) -> CollisionPixel {
+    let even_match = clxcon_planes_match(idx, clxcon, clxcon2, 1);
+    let odd_match_raw = clxcon_planes_match(idx, clxcon, clxcon2, 0);
     let odd_match = odd_match_raw && (dual_playfield || even_match);
     CollisionPixel {
         pf1: dual_playfield && idx & 0b010101 != 0,
@@ -4503,15 +4496,15 @@ fn collision_pixel(
     }
 }
 
-fn clxcon_planes_match(
-    idx: u8,
-    nplanes: usize,
-    clxcon: u16,
-    clxcon2: u16,
-    first_plane: usize,
-) -> bool {
+fn clxcon_planes_match(idx: u8, clxcon: u16, clxcon2: u16, first_plane: usize) -> bool {
     let mut matches = true;
-    for plane in (first_plane..nplanes.min(8)).step_by(2) {
+    // Every CLXCON/CLXCON2-enabled plane participates in the match, not just
+    // the planes the display currently fetches: a plane enabled beyond the BPU
+    // count reads as 0 and still gates the match (vAmiga checkS2PCollisions
+    // compares `(dBuffer & enbp) == (mvbp & enbp)` over all six/eight planes).
+    // Regression: Denise/Sprites/collision/sprcoll* set CLXCON with match bits
+    // for absent planes over a low-plane-count playfield.
+    for plane in (first_plane..8).step_by(2) {
         // Planes 1-6 take their enable/match bits from CLXCON; the AGA
         // planes 7-8 from CLXCON2 (ENBP7/ENBP8 in bits 6-7, MVBP7/MVBP8 in
         // bits 0-1).
@@ -4542,7 +4535,6 @@ fn record_generated_playfield_collision_pixel(
 ) {
     let collision = collision_pixel(
         sample.idx,
-        sample.nplanes,
         control.clxcon,
         control.clxcon2,
         control.dual_playfield(),
