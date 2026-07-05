@@ -40,6 +40,14 @@ const DIP_OFFSET: u32 = 0x008C_0003;
 /// 53C710 register-file byte offsets as the 68k sees them (the chip is
 /// wired big-endian on the A4091, so these are the driver's REG_ addresses).
 const REG_CTEST8: usize = 0x21;
+/// CTEST5 carries the ADCK/BBCK self-clearing test strobes.
+const REG_CTEST5: usize = 0x1A;
+const CTEST5_ADCK: u8 = 0x80;
+const CTEST5_BBCK: u8 = 0x40;
+/// DNAD: 32-bit DMA next address; ADCK increments it by the bus width.
+const REG_DNAD: usize = 0x28;
+/// DBC: 24-bit DMA byte counter (below DCMD at $24); BBCK decrements it.
+const REG_DBC: usize = 0x25;
 /// DSP: writing its low byte starts the SCRIPTS processor.
 const REG_DSP: usize = 0x2C;
 
@@ -90,6 +98,34 @@ impl A4091 {
     pub fn load_rom(path: &Path) -> Result<Vec<u8>> {
         std::fs::read(path)
             .map_err(|e| anyhow::anyhow!("reading A4091 ROM {}: {e}", path.display()))
+    }
+
+    fn reg32(&self, r: usize) -> u32 {
+        u32::from_be_bytes(self.regs[r..r + 4].try_into().unwrap())
+    }
+
+    fn set_reg32(&mut self, r: usize, v: u32) {
+        self.regs[r..r + 4].copy_from_slice(&v.to_be_bytes());
+    }
+
+    /// CTEST5 ADCK/BBCK test strobes: increment DNAD / decrement DBC by the
+    /// bus width, then self-clear.
+    fn ctest5_strobes(&mut self) {
+        let v = self.regs[REG_CTEST5];
+        if v & CTEST5_ADCK != 0 {
+            let dnad = self.reg32(REG_DNAD).wrapping_add(4);
+            self.set_reg32(REG_DNAD, dnad);
+        }
+        if v & CTEST5_BBCK != 0 {
+            let dbc = (u32::from(self.regs[REG_DBC]) << 16)
+                | (u32::from(self.regs[REG_DBC + 1]) << 8)
+                | u32::from(self.regs[REG_DBC + 2]);
+            let dbc = dbc.wrapping_sub(4) & 0x00FF_FFFF;
+            self.regs[REG_DBC] = (dbc >> 16) as u8;
+            self.regs[REG_DBC + 1] = (dbc >> 8) as u8;
+            self.regs[REG_DBC + 2] = dbc as u8;
+        }
+        self.regs[REG_CTEST5] = v & !(CTEST5_ADCK | CTEST5_BBCK);
     }
 
     /// One byte of the nibble-wide ROM as seen in the window at `off`.
@@ -144,6 +180,9 @@ impl crate::zorro_device::ZorroDevice for A4091 {
             }
             let r = (o as usize) & 0x3F;
             self.regs[r] = (value >> (8 * (size - 1 - i))) as u8;
+            if r == REG_CTEST5 {
+                self.ctest5_strobes();
+            }
             if (REG_DSP..REG_DSP + 4).contains(&r) && !self.scripts_warned {
                 self.scripts_warned = true;
                 log::warn!(
@@ -250,6 +289,24 @@ mod tests {
         b.write(IO_OFFSET + 0x40 + 0x1C, 4, 0xE1CF_874B, &mut host);
         assert_eq!(b.read(IO_OFFSET + 0x34, 4, &mut host), 0xF0E7_C3A5);
         assert_eq!(b.read(IO_OFFSET + 0x1C, 4, &mut host), 0xE1CF_874B);
+    }
+
+    #[test]
+    fn ctest5_adck_and_bbck_strobe_the_counters_and_self_clear() {
+        // The ncr7xx tool's register test: DBC=0x10 via a 32-bit DCMD write,
+        // DNAD=0, then ADCK bumps DNAD to 4 (DBC untouched) and BBCK drops
+        // DBC to 0xC; both bits read back clear.
+        let mut b = board_with_rom(test_rom_64k());
+        let mut mem = test_memory();
+        let mut host = DeviceHost::new(&mut mem);
+        b.write(IO_OFFSET + 0x24, 4, 0x0000_0010, &mut host);
+        b.write(IO_OFFSET + 0x28, 4, 0, &mut host);
+        b.write(IO_OFFSET + 0x1A, 1, 0x80, &mut host);
+        assert_eq!(b.read(IO_OFFSET + 0x28, 4, &mut host), 4);
+        assert_eq!(b.read(IO_OFFSET + 0x24, 4, &mut host), 0x10);
+        b.write(IO_OFFSET + 0x1A, 1, 0x40, &mut host);
+        assert_eq!(b.read(IO_OFFSET + 0x24, 4, &mut host), 0xC);
+        assert_eq!(b.read(IO_OFFSET + 0x1A, 1, &mut host) & 0xC0, 0);
     }
 
     #[test]
