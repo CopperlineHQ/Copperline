@@ -1791,6 +1791,28 @@ pub fn build_machine(
         );
         devices.push(crate::zorro_device::BoardDevice::A2091(board));
     }
+    if cfg.a4091.enabled() {
+        let rom_path = cfg
+            .a4091
+            .rom
+            .as_ref()
+            .expect("config validated [a4091] rom");
+        let rom = crate::a4091::A4091::load_rom(rom_path)?;
+        let board = crate::a4091::A4091::new(rom)?;
+        if cfg.a4091.units.iter().any(Option::is_some) {
+            log::warn!(
+                "a4091: the 53C710 SCSI core is not implemented yet; \
+                 [a4091] drive images are ignored"
+            );
+        }
+        let slot = devices.len();
+        zorro.add_board(crate::zorro::BoardSpec::a4091(slot))?;
+        info!(
+            "a4091: SCSI controller on the Zorro chain (slot {slot}), ROM {}",
+            rom_path.display()
+        );
+        devices.push(crate::zorro_device::BoardDevice::A4091(board));
+    }
     // WASM plugin boards: assign each a device slot, put its autoconfig
     // identity on the chain, and instantiate the module.
     for wb in &cfg.wasm_boards {
