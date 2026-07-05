@@ -9152,6 +9152,9 @@ const CPU_READABLE_CUSTOM_REGS: &[(u16, &str)] = &[
     (0x01A, "DSKBYTR"),
     (0x01C, "INTENAR"),
     (0x01E, "INTREQR"),
+    // DENISEID: ECS drives 0xFFFC; OCS floats the undriven bus high to 0xFFFF.
+    // Either way it reads a fixed non-zero value, so it is a readable register.
+    (0x07C, "DENISEID"),
 ];
 
 fn is_readable_custom_off(off: u16) -> bool {
@@ -9319,8 +9322,9 @@ fn ecs_scan_registers_latch_only_on_ecs_agnus() {
 #[test]
 fn deniseid_reads_ecs_denise_id_on_ecs_only() {
     // ECS Denise (8373) drives DENISEID = 0xFFFC; the low byte 0xFC is how
-    // software detects ECS. OCS Denise has no such register and reads the
-    // undriven-bus fallback (0).
+    // software detects ECS. OCS Denise has no such register, so $07C reads the
+    // undriven custom bus, which floats high to 0xFFFF (low byte 0xFF != 0xFC,
+    // so software correctly detects OCS).
     let mut ecs = empty_bus();
     ecs.set_agnus_revision(AgnusRevision::Ecs8372Rev4);
     let id = ecs.custom_read(0x07C, 2) as u16;
@@ -9328,7 +9332,13 @@ fn deniseid_reads_ecs_denise_id_on_ecs_only() {
     assert_eq!(id & 0x00FF, 0x00FC, "ECS detection low byte");
 
     let mut ocs = empty_bus();
-    assert_eq!(ocs.custom_read(0x07C, 2), 0, "OCS Denise has no DENISEID");
+    let ocs_id = ocs.custom_read(0x07C, 2) as u16;
+    assert_eq!(ocs_id, 0xFFFF, "OCS Denise $07C floats high");
+    assert_ne!(
+        ocs_id & 0x00FF,
+        0x00FC,
+        "OCS low byte is not the ECS marker"
+    );
 }
 
 /// Plan 1.3: the chip revisions are independent. Late A500s shipped an
@@ -9337,7 +9347,11 @@ fn deniseid_reads_ecs_denise_id_on_ecs_only() {
 fn chip_revisions_split_deniseid_from_vposr_id() {
     let mut mixed = empty_bus();
     mixed.set_chipset_revisions(AgnusRevision::Ecs8372Rev4, DeniseRevision::Ocs);
-    assert_eq!(mixed.custom_read(0x07C, 2), 0, "OCS Denise stays silent");
+    assert_eq!(
+        mixed.custom_read(0x07C, 2),
+        0xFFFF,
+        "OCS Denise $07C floats high"
+    );
     assert_eq!(
         mixed.custom_read(0x004, 2) & 0x7F00,
         0x2000,
