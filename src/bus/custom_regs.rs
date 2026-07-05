@@ -78,11 +78,12 @@ impl Bus {
             }
             // DENISEID: ECS Denise (8373) drives 0xFFFC; software detects ECS
             // via the low byte (0xFC). OCS Denise (8362) has no such register,
-            // so it falls through to the undriven-bus fallback below.
+            // so $07C reads the undriven custom bus, which floats high to
+            // 0xFFFF (low byte 0xFF != 0xFC, so software correctly detects OCS).
             // HHPOSR (ECS Agnus): UHRES dual-mode H counter readback. The
             // counter is not emulated, so this reads the HHPOSW latch.
             0x1DA if self.agnus.revision().is_ecs() => self.agnus.hhpos(),
-            0x07C if self.denise_revision.id().is_some() => self.denise_revision.id().unwrap_or(0),
+            0x07C => self.denise_revision.id().unwrap_or(0xFFFF),
             _ => {
                 // Real write-only custom registers leave the CPU reading an
                 // undriven custom bus. Copperline does not model the previous
