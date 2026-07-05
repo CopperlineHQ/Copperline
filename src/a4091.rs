@@ -71,6 +71,21 @@ const REG_DBC: usize = 0x25;
 const REG_DSP: usize = 0x2C;
 /// DMA FIFO depth per byte lane.
 const DMA_FIFO_DEPTH: usize = 16;
+/// SCNTL1: bit 2 asserts even (instead of odd) generated parity.
+const REG_SCNTL1: usize = 0x02;
+const SCNTL1_AESP: u8 = 0x04;
+/// SODL: writes push the SCSI FIFO when CTEST4.SFWR routes them there.
+const REG_SODL: usize = 0x05;
+/// SSTAT2: SCSI FIFO fill count in the high nibble.
+const REG_SSTAT2: usize = 0x0C;
+/// CTEST3: reads pop the SCSI FIFO.
+const REG_CTEST3: usize = 0x14;
+/// CTEST4 bit 3: route SODL writes to the SCSI FIFO.
+const CTEST4_SFWR: u8 = 0x08;
+/// CTEST2 bit 4: parity bit of the last SCSI FIFO pop.
+const CTEST2_SFP: u8 = 0x10;
+/// SCSI FIFO depth.
+const SCSI_FIFO_DEPTH: usize = 8;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct A4091 {
@@ -84,6 +99,9 @@ pub struct A4091 {
     /// parity bit per entry. CTEST6 pushes/pops the lane selected by
     /// CTEST4; CTEST1 and DSTAT.DFE report the fill state.
     dma_fifo: [Vec<u16>; 4],
+    /// The SCSI FIFO: 8 entries, 8 data bits plus parity. SODL pushes it
+    /// (with CTEST4.SFWR), CTEST3 pops it, SSTAT2 counts it.
+    scsi_fifo: Vec<u16>,
     /// One-shot warning latch for the unimplemented SCRIPTS processor.
     scripts_warned: bool,
 }
@@ -117,8 +135,23 @@ impl A4091 {
             dip: 0xFF,
             regs: reset_regs(),
             dma_fifo: Default::default(),
+            scsi_fifo: Vec::new(),
             scripts_warned: false,
         })
+    }
+
+    /// The parity bit the chip generates for a pushed SCSI FIFO byte: odd
+    /// parity normally, even when SCNTL1.AESP is set. (SCNTL0.EPG gates
+    /// generation on the real chip; without it parity would come from the
+    /// bus, which has no meaning here, so the generated bit is used
+    /// regardless.)
+    fn scsi_parity(&self, b: u8) -> u16 {
+        let even = u16::from(b.count_ones() as u8 & 1);
+        if self.regs[REG_SCNTL1] & SCNTL1_AESP != 0 {
+            even
+        } else {
+            even ^ 1
+        }
     }
 
     /// The DMA FIFO lane CTEST6 currently addresses, when CTEST4.FBL2
@@ -148,6 +181,7 @@ impl A4091 {
         for fifo in &mut self.dma_fifo {
             fifo.clear();
         }
+        self.scsi_fifo.clear();
     }
 
     pub fn load_rom(path: &Path) -> Result<Vec<u8>> {
@@ -216,6 +250,16 @@ impl crate::zorro_device::ZorroDevice for A4091 {
                         let dfe = self.dma_fifo.iter().all(Vec::is_empty);
                         (self.regs[REG_DSTAT] & !DSTAT_DFE) | if dfe { DSTAT_DFE } else { 0 }
                     }
+                    REG_SSTAT2 => {
+                        ((self.scsi_fifo.len() as u8) << 4) | (self.regs[REG_SSTAT2] & 0x0F)
+                    }
+                    // CTEST3 pops the SCSI FIFO; parity lands in CTEST2.SFP.
+                    REG_CTEST3 if !self.scsi_fifo.is_empty() => {
+                        let entry = self.scsi_fifo.remove(0);
+                        self.regs[REG_CTEST2] = (self.regs[REG_CTEST2] & !CTEST2_SFP)
+                            | if entry & 0x100 != 0 { CTEST2_SFP } else { 0 };
+                        entry as u8
+                    }
                     // CTEST6 pops the addressed DMA FIFO lane; the entry's
                     // parity bit lands in CTEST2.DFP.
                     REG_CTEST6 => match self.fifo_lane() {
@@ -251,6 +295,14 @@ impl crate::zorro_device::ZorroDevice for A4091 {
             }
             let r = (o as usize) & 0x3F;
             let b = (value >> (8 * (size - 1 - i))) as u8;
+            // SODL with SFWR set pushes the SCSI FIFO as well as storing.
+            if r == REG_SODL
+                && self.regs[REG_CTEST4] & CTEST4_SFWR != 0
+                && self.scsi_fifo.len() < SCSI_FIFO_DEPTH
+            {
+                let parity = self.scsi_parity(b);
+                self.scsi_fifo.push((parity << 8) | u16::from(b));
+            }
             // CTEST6 with the FIFO addressed pushes instead of storing.
             if r == REG_CTEST6 {
                 if let Some(lane) = self.fifo_lane() {
@@ -434,6 +486,39 @@ mod tests {
         }
         assert_eq!(b.read(io(REG_CTEST1), 1, &mut host), 0xF0);
         assert_ne!(b.read(io(REG_DSTAT), 1, &mut host) & 0x80, 0);
+    }
+
+    #[test]
+    fn scsi_fifo_pushes_via_sodl_pops_via_ctest3_with_generated_parity() {
+        // The ncr7xx SCSI FIFO test: SFWR routes SODL pushes to the FIFO,
+        // parity generated odd (or even under SCNTL1.AESP), count in
+        // SSTAT2's high nibble, pops through CTEST3 with parity in
+        // CTEST2.SFP.
+        let mut b = board_with_rom(test_rom_64k());
+        let mut mem = test_memory();
+        let mut host = DeviceHost::new(&mut mem);
+        let io = |r: usize| IO_OFFSET + r as u32;
+
+        assert_eq!(b.read(io(REG_SSTAT2), 1, &mut host), 0x00);
+        b.write(io(0x1B), 1, 0x08, &mut host); // CTEST4.SFWR
+        let data = [0x00u8, 0x01, 0xFF, 0x5A, 0x81, 0x7E, 0x33, 0xC4];
+        for (i, &d) in data.iter().enumerate() {
+            // Alternate even/odd generation via SCNTL1.AESP.
+            b.write(io(REG_SCNTL1), 1, ((i as u32) & 1) << 2, &mut host);
+            assert_eq!(b.read(io(REG_SSTAT2), 1, &mut host) >> 4, i as u32);
+            b.write(io(REG_SODL), 1, u32::from(d), &mut host);
+        }
+        assert_eq!(b.read(io(REG_SSTAT2), 1, &mut host), 0x80);
+
+        for (i, &d) in data.iter().enumerate() {
+            let v = b.read(io(REG_CTEST3), 1, &mut host);
+            assert_eq!(v, u32::from(d), "byte {i}");
+            let sfp = (b.read(io(REG_CTEST2), 1, &mut host) >> 4) & 1;
+            let even = u32::from(d.count_ones() & 1);
+            let expect = if i & 1 == 1 { even } else { even ^ 1 };
+            assert_eq!(sfp, expect, "parity byte {i}");
+            assert_eq!(b.read(io(REG_SSTAT2), 1, &mut host) >> 4, (7 - i) as u32);
+        }
     }
 
     #[test]
