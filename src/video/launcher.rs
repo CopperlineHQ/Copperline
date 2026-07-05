@@ -22,9 +22,9 @@
 use crate::chipset::agnus::{AgnusRevision, VideoStandard};
 use crate::chipset::denise::DeniseRevision;
 use crate::config::{
-    format_size, machine_profile_defaults, Chipset, Config, CpuModel, JoystickInputMode,
-    MachineModel, Overscan, PacingBudget, PixelAspect, RawConfig, RawDrive, RawFloppyDrive,
-    RawZorroBoard, SerialMode, WarpSpeed,
+    format_size, machine_profile_defaults, ChannelMode, Chipset, Config, CpuModel,
+    JoystickInputMode, MachineModel, Overscan, PacingBudget, PixelAspect, RawConfig, RawDrive,
+    RawFloppyDrive, RawZorroBoard, SerialMode, WarpSpeed,
 };
 use crate::zorro::{ConfigOption, ConfigOptionKind, LoadedZorroBoard};
 use anyhow::Result;
@@ -269,6 +269,9 @@ pub enum LauncherField {
     #[cfg(feature = "midi")]
     MidiIn,
     // A/V and emulation
+    AudioDevice,
+    AudioChannelMode,
+    AudioStereoSeparation,
     Overscan,
     PixelAspect,
     Phosphor,
@@ -373,7 +376,10 @@ const SERIAL_ROWS: [Row; 3] = [
     row(F::MidiIn, "MIDI input", Cycle),
     row(F::MidiOut, "MIDI output", Cycle),
 ];
-const AV_EMULATION_ROWS: [Row; 10] = [
+const AV_EMULATION_ROWS: [Row; 13] = [
+    row(F::AudioDevice, "Audio output", Cycle),
+    row(F::AudioChannelMode, "Channel mode", Cycle),
+    row(F::AudioStereoSeparation, "Stereo separation", Cycle),
     row(F::Overscan, "Overscan", Cycle),
     row(F::PixelAspect, "Pixel aspect", Cycle),
     row(F::Phosphor, "Phosphor", Cycle),
@@ -493,6 +499,11 @@ const JOYSTICK_MODES: [JoystickInputMode; 2] =
 #[cfg(feature = "midi")]
 const SERIAL_MODES: [SerialMode; 3] = [SerialMode::Off, SerialMode::Stdout, SerialMode::Midi];
 
+/// Stereo-separation presets the picker steps through (percent), ascending so
+/// the right arrow steps up (wrapping 100 -> 0) and the left arrow steps down.
+/// The config/CLI accept any 0-100; an off-grid value snaps to the nearest here.
+const STEREO_SEPARATION_STEPS: [usize; 11] = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
+
 /// A fully-typed, editable mirror of a configurable machine. See the module
 /// docs for how it round-trips through [`RawConfig`].
 #[derive(Debug, Clone)]
@@ -553,6 +564,16 @@ pub struct MachineSetup {
     #[cfg(feature = "midi")]
     midi_endpoints: crate::midi::MidiEndpoints,
     // A/V and emulation
+    /// Host audio output selection: system default, a named device, or Disabled
+    /// (no sound). Carried in every build so `[audio]` round-trips.
+    audio_output: crate::audio::AudioOutput,
+    /// Output device names for the picker: filled when the screen opens and
+    /// re-read each time the field is cycled, so a reconnected device appears.
+    audio_devices: Vec<String>,
+    /// Stereo (hardware panning) or mono (L/R averaged).
+    audio_channel_mode: ChannelMode,
+    /// Stereo width, 0-100 (100 = full hardware panning).
+    audio_stereo_separation: u8,
     overscan: Overscan,
     pixel_aspect: PixelAspect,
     phosphor: f32,
@@ -635,6 +656,14 @@ impl MachineSetup {
             // config screen fills it via refresh_midi_endpoints on open.
             #[cfg(feature = "midi")]
             midi_endpoints: crate::midi::MidiEndpoints::default(),
+            audio_output: crate::audio::AudioOutput::from_config(
+                cfg.audio.output_enabled,
+                cfg.audio.output_device.as_deref(),
+            ),
+            // Filled by refresh_audio_devices on open, like the MIDI endpoints.
+            audio_devices: Vec::new(),
+            audio_channel_mode: cfg.audio.channel_mode,
+            audio_stereo_separation: cfg.audio.stereo_separation,
             overscan: cfg.overscan,
             pixel_aspect: cfg.pixel_aspect,
             phosphor: cfg.phosphor,
@@ -672,6 +701,21 @@ impl MachineSetup {
     #[cfg(feature = "midi")]
     pub fn refresh_midi_endpoints(&mut self) {
         self.midi_endpoints = crate::midi::enumerate();
+    }
+
+    /// Re-read the host audio output devices for the "Audio output" picker.
+    pub fn refresh_audio_devices(&mut self) {
+        self.audio_devices = crate::audio::picker_output_devices();
+    }
+
+    /// Re-read every host device list (MIDI endpoints + audio outputs) for the
+    /// pickers. Call after (re)building the setup -- e.g. loading a config or
+    /// resetting to defaults -- so the pickers show what is connected now
+    /// instead of an empty list that can only land on "Default"/"None".
+    pub fn refresh_host_devices(&mut self) {
+        #[cfg(feature = "midi")]
+        self.refresh_midi_endpoints();
+        self.refresh_audio_devices();
     }
 
     /// The bare-profile config this setup is compared against when emitting
@@ -836,6 +880,17 @@ impl MachineSetup {
         }
         raw.serial.midi_out = self.midi_out.clone();
         raw.serial.midi_in = self.midi_in.clone();
+        // The Audio output picker is one of default / a named device / Disabled.
+        // A named device sets output_device; Disabled sets output_enabled=false
+        // (the resolved default is true, so it is omitted otherwise).
+        raw.audio.output_device = self.audio_output.device().map(str::to_string);
+        raw.audio.output_enabled = (!self.audio_output.is_enabled()).then_some(false);
+        // Emit only the non-default mode; Stereo is the resolved default, so
+        // omitting it keeps a default machine's TOML minimal.
+        raw.audio.channel_mode = (self.audio_channel_mode != ChannelMode::Stereo)
+            .then(|| self.audio_channel_mode.label().to_string());
+        raw.audio.stereo_separation = (self.audio_stereo_separation != 100)
+            .then_some(u16::from(self.audio_stereo_separation));
         // Zorro boards: emit the metadata path plus any per-board overrides
         // (typed per the option schema), only when the user changed something.
         raw.zorro = self
@@ -980,6 +1035,16 @@ impl MachineSetup {
             F::Df3Image | F::Df3WriteProtect => reason(self.floppy_drives >= 4, "drive off"),
             #[cfg(feature = "midi")]
             F::MidiOut | F::MidiIn => reason(self.serial_mode == SerialMode::Midi, "MIDI off"),
+            // Channel mode and separation shape the output, so they do nothing
+            // once audio is disabled; separation also does nothing in mono.
+            F::AudioChannelMode => reason(self.audio_output.is_enabled(), "off"),
+            F::AudioStereoSeparation => {
+                if !self.audio_output.is_enabled() {
+                    Some("off")
+                } else {
+                    reason(self.audio_channel_mode != ChannelMode::Mono, "mono")
+                }
+            }
             _ => None,
         }
     }
@@ -1148,6 +1213,12 @@ impl MachineSetup {
             F::MidiOut => self.midi_out.clone().unwrap_or_else(|| "None".to_string()),
             #[cfg(feature = "midi")]
             F::MidiIn => self.midi_in.clone().unwrap_or_else(|| "None".to_string()),
+            F::AudioDevice => self.audio_output.label().to_string(),
+            F::AudioChannelMode => match self.audio_channel_mode {
+                ChannelMode::Stereo => "Stereo".to_string(),
+                ChannelMode::Mono => "Mono".to_string(),
+            },
+            F::AudioStereoSeparation => format!("{}%", self.audio_stereo_separation),
             // Path/drive fields: the file name, or a placeholder.
             F::Rom => self.path_label(field, "(bundled AROS)"),
             _ if rows_contains_kind(field, RowKind::Path)
@@ -1234,6 +1305,25 @@ impl MachineSetup {
             F::MidiOut => cycle_endpoint(&mut self.midi_out, &self.midi_endpoints.outputs, forward),
             #[cfg(feature = "midi")]
             F::MidiIn => cycle_endpoint(&mut self.midi_in, &self.midi_endpoints.inputs, forward),
+            F::AudioDevice => {
+                // Re-read on each step so a device connected since the screen
+                // opened appears; on-demand only, so no background polling.
+                self.refresh_audio_devices();
+                self.audio_output = self.audio_output.cycle(&self.audio_devices, forward);
+            }
+            F::AudioChannelMode => {
+                self.audio_channel_mode = match self.audio_channel_mode {
+                    ChannelMode::Stereo => ChannelMode::Mono,
+                    ChannelMode::Mono => ChannelMode::Stereo,
+                }
+            }
+            F::AudioStereoSeparation => {
+                self.audio_stereo_separation = cycle_nearest(
+                    &STEREO_SEPARATION_STEPS,
+                    usize::from(self.audio_stereo_separation),
+                    forward,
+                ) as u8
+            }
             _ => {}
         }
     }
@@ -1409,12 +1499,10 @@ pub struct LauncherState {
 
 impl LauncherState {
     pub fn new(setup: MachineSetup) -> Self {
-        #[cfg_attr(not(feature = "midi"), allow(unused_mut))]
         let mut setup = setup;
-        // Read the host MIDI devices once, as the screen opens, so the pickers
-        // show what is connected now.
-        #[cfg(feature = "midi")]
-        setup.refresh_midi_endpoints();
+        // Read the host devices as the screen opens so the pickers show what is
+        // connected now.
+        setup.refresh_host_devices();
         Self {
             setup,
             tab: LauncherTab::System,
@@ -1970,6 +2058,82 @@ mod tests {
         let back = MachineSetup::from_raw(&raw).unwrap();
         assert_eq!(back.serial_mode, SerialMode::Midi);
         assert_eq!(back.midi_out.as_deref(), Some("USB MIDI"));
+    }
+
+    #[test]
+    fn stereo_separation_cycles_up_on_right_and_greys_out_in_mono() {
+        let mut s = MachineSetup::default();
+        assert_eq!(s.audio_stereo_separation, 100);
+        assert_eq!(
+            s.disabled_reason(LauncherField::AudioStereoSeparation),
+            None
+        );
+
+        // Right arrow (forward) steps up in 10s, wrapping 100 -> 0 -> 10.
+        s.cycle(LauncherField::AudioStereoSeparation, true);
+        assert_eq!(s.audio_stereo_separation, 0);
+        s.cycle(LauncherField::AudioStereoSeparation, true);
+        assert_eq!(s.audio_stereo_separation, 10);
+
+        // Left arrow (backward) from 100 steps down to 90.
+        let mut s = MachineSetup::default();
+        s.cycle(LauncherField::AudioStereoSeparation, false);
+        assert_eq!(s.audio_stereo_separation, 90);
+
+        // Once the output is mono, separation is greyed out.
+        s.cycle(LauncherField::AudioChannelMode, true);
+        assert_eq!(s.audio_channel_mode, ChannelMode::Mono);
+        assert_eq!(
+            s.disabled_reason(LauncherField::AudioStereoSeparation),
+            Some("mono")
+        );
+    }
+
+    #[test]
+    fn disabled_audio_greys_out_channel_mode_and_separation() {
+        use crate::audio::AudioOutput;
+        let mut s = MachineSetup::default();
+        // Enabled: channel mode is active, separation active in stereo.
+        assert_eq!(s.disabled_reason(LauncherField::AudioChannelMode), None);
+        assert_eq!(
+            s.disabled_reason(LauncherField::AudioStereoSeparation),
+            None
+        );
+
+        // Disabled audio greys both shaping controls.
+        s.audio_output = AudioOutput::Disabled;
+        assert_eq!(
+            s.disabled_reason(LauncherField::AudioChannelMode),
+            Some("off")
+        );
+        assert_eq!(
+            s.disabled_reason(LauncherField::AudioStereoSeparation),
+            Some("off")
+        );
+    }
+
+    #[test]
+    fn audio_output_disabled_round_trips_through_raw_config() {
+        use crate::audio::AudioOutput;
+        let mut s = MachineSetup::default();
+        // Default is the resolved default, so it emits nothing.
+        assert_eq!(s.value_label(LauncherField::AudioDevice), "Default");
+        let raw = s.to_raw();
+        assert_eq!(raw.audio.output_enabled, None);
+        assert_eq!(raw.audio.output_device, None);
+
+        // "Disabled" persists as output_enabled = false, no device.
+        s.audio_output = AudioOutput::Disabled;
+        assert_eq!(s.value_label(LauncherField::AudioDevice), "Disabled");
+        let raw = s.to_raw();
+        assert_eq!(raw.audio.output_enabled, Some(false));
+        assert_eq!(raw.audio.output_device, None);
+
+        // A named device persists as output_device, with output_enabled omitted.
+        s.audio_output = AudioOutput::Device("BlackHole".to_string());
+        let raw = s.to_raw();
+        assert_eq!(raw.audio.output_device.as_deref(), Some("BlackHole"));
+        assert_eq!(raw.audio.output_enabled, None);
     }
 
     #[cfg(feature = "midi")]

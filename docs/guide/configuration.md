@@ -344,11 +344,32 @@ synchronous render path for comparison.
 [audio]
 floppy_sounds = true        # synthesized drive sounds (not sampled)
 floppy_sounds_volume = 100  # 0-100, relative to Paula's output
+# output_device = "..."     # host output device (substring); omit = system default
+# output_enabled = true     # false = no sound (GUI "Disabled"); --audio/--noaudio still win
+channel_mode = "stereo"     # "stereo" (default) or "mono"
+stereo_separation = 100     # 0-100; 100 = hardware panning, 0 = mono
 ```
 
 The drive sounds are generated from scratch: motor hum with spin-up/down,
 head-step clicks for seeks and the empty-drive poll, and faint read/write
 hiss during disk DMA.
+
+`output_device` picks the host output by a case-insensitive substring of the
+names `--list-audio-devices` prints (`--audio-device` overrides it); an omitted
+or unmatched name uses the system default. `channel_mode = "mono"` averages the
+left and right output into both channels, and `stereo_separation` narrows the
+Amiga's hardware left/right panning between full (100) and mono (0) -- so it is
+ignored when `channel_mode` is mono. `output_enabled = false` runs with no sound
+at all (the launcher and runtime-menu "Disabled" option); the `--audio` and
+`--noaudio` CLI flags still override it. These are host-output settings that do
+not change the emulated audio and are not stored in save states. The equivalent
+CLI flags are `--audio-device`, `--audio-channel-mode`, `--audio-stereo-separation`
+and `--list-audio-devices`.
+
+On Linux with PipeWire/PulseAudio, individual sinks are not ALSA devices, so
+only the `default`/`pipewire` route is offered; pick the output in the desktop
+sound settings (or route Copperline in `pavucontrol`) and it follows. macOS and
+Windows select each device directly.
 
 ## `[input]`
 

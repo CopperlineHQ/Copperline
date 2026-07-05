@@ -181,6 +181,23 @@ The full reference -- every key, machine profiles, Zorro boards, CD/HDD
 images, validation rules, and audio options -- is in the
 [configuration guide](docs/guide/configuration.md).
 
+## Audio output
+
+Real-time audio goes through [cpal](https://crates.io/crates/cpal), so the
+same code drives CoreAudio, WASAPI and ALSA. By default it uses the system
+default output; `--list-audio-devices` prints the alternatives and
+`--audio-device NAME` (or `[audio] output_device`) selects one by
+case-insensitive substring, falling back to the default if it disappears. The
+device is also selectable in the configuration screen and switchable live from
+the in-window menu, which additionally offers "Disabled" to turn sound off
+entirely (equivalent to `--noaudio`).
+
+Two host-side shaping options leave the emulated audio untouched:
+`--audio-channel-mode mono` averages the left/right output into both channels,
+and `--audio-stereo-separation 0-100` narrows the Amiga's hardware left/right
+panning (100 = full, 0 = mono). Both are also `[audio]` keys and configuration-
+screen fields.
+
 ## MIDI
 
 Copperline can bridge Paula's serial port to the host's MIDI system, so an
