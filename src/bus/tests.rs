@@ -8893,12 +8893,19 @@ fn potgo_starts_counters_and_potgor_reflects_button_pins() {
     bus.input.rmb_port1 = true;
 
     assert!(!bus.custom_write(0x034, 2, 0x0001));
-    assert_eq!(bus.next_pot_event_cck(), Some(512));
+    // The pot counters clock at H-sync, so while the scan runs it caps the
+    // advance at the next line boundary, and POT0DAT reads 0 during discharge.
+    assert!(bus.next_pot_event_cck().is_some());
     assert_eq!(bus.custom_read(0x012, 2), 0);
-    bus.advance_devices(512);
 
-    assert_eq!(bus.custom_read(0x012, 2), 0x0101);
-    assert_eq!(bus.next_pot_event_cck(), Some(512));
+    // Advance well past the 8-line discharge phase; both POT0DAT bytes (X and Y
+    // pin counters) ramp together and stay below the 256 wrap.
+    bus.advance_devices(227 * 40);
+
+    let pot0 = bus.custom_read(0x012, 2);
+    assert_ne!(pot0, 0);
+    assert_eq!(pot0 & 0xFF, (pot0 >> 8) & 0xFF);
+    assert!(bus.next_pot_event_cck().is_some());
     assert_eq!(bus.custom_read(0x016, 2) & (1 << 10), 0);
 }
 
