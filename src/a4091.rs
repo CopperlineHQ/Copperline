@@ -288,6 +288,9 @@ impl A4091 {
             host.dma_read(dsp, &mut insn);
             self.set_reg32(REG_DSP, dsp.wrapping_add(8));
             let dcmd = insn[0];
+            if crate::envcfg::flag("COPPERLINE_DIAG_A4091") {
+                log::info!("a4091 scripts: fetch {dsp:#010X}: {insn:02X?}");
+            }
             match dcmd >> 6 {
                 // Register read-modify-write; only the "move immediate to
                 // register" form (0x78) is implemented.
@@ -321,9 +324,17 @@ impl A4091 {
                     let count = u32::from_be_bytes(insn[0..4].try_into().unwrap()) & 0x00FF_FFFF;
                     let src = u32::from_be_bytes(insn[4..8].try_into().unwrap());
                     let dst = u32::from_be_bytes(dst);
+                    let diag = crate::envcfg::flag("COPPERLINE_DIAG_A4091");
                     for i in 0..count {
                         let b = self.dma_byte(host, src.wrapping_add(i));
                         self.dma_write_byte(host, dst.wrapping_add(i), b);
+                        if diag && i < 8 {
+                            log::info!(
+                                "a4091 scripts: move [{:#010X}] {b:02X} -> [{:#010X}]",
+                                src.wrapping_add(i),
+                                dst.wrapping_add(i)
+                            );
+                        }
                     }
                     // The byte counter runs down to zero.
                     self.regs[REG_DBC] = 0;
