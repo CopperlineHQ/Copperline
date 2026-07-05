@@ -1754,6 +1754,9 @@ fn build_serial_sink(cfg: &Config) -> Result<Box<dyn crate::serial::SerialSink>>
         SerialMode::Midi => Err(anyhow!(
             "[serial] mode = \"midi\" needs a build with --features midi"
         )),
+        SerialMode::Tcp => Ok(Box::new(crate::serial::TcpSerialSink::listen(
+            cfg.serial.listen.as_deref().unwrap_or("127.0.0.1:1234"),
+        )?)),
     }
 }
 
