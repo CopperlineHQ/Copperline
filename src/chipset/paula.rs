@@ -54,7 +54,6 @@ const ADKCON_AUDIO_MOD_EVENT_MASK: u16 = 0x0077;
 /// gating ANDs this with the per-channel AUDxEN bits 0..3.
 pub const DMACON_DMAEN: u16 = 1 << 9;
 const LED_FILTER_CUTOFF_HZ: f32 = 4_000.0;
-const POT_COUNTER_CCK: u32 = 512;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum ChanState {
@@ -506,7 +505,6 @@ pub struct Paula {
     serial_tx_pin_high: bool,
     pot_counters: [u8; 4],
     pot_running: bool,
-    pot_acc_cck: u32,
 
     // DMACON value as seen last tick; used to edge-detect AUDxEN
     // transitions so we can raise the AUDxx IRQ on the rising edge.
@@ -581,7 +579,6 @@ impl Paula {
             serial_tx_pin_high: true,
             pot_counters: [0; 4],
             pot_running: false,
-            pot_acc_cck: 0,
             last_dmacon: 0,
             host_sample_acc: 0,
             led_filter_enabled: true,
@@ -734,7 +731,6 @@ impl Paula {
         self.serial_tx_pin_high = true;
         self.pot_counters = [0; 4];
         self.pot_running = false;
-        self.pot_acc_cck = 0;
         self.last_dmacon = 0;
         self.host_sample_acc = 0;
         self.led_filter_enabled = true;
@@ -903,8 +899,11 @@ impl Paula {
         if val & 0x0001 != 0 {
             self.pot_counters = [0; 4];
             self.pot_running = true;
-            self.pot_acc_cck = 0;
         }
+    }
+
+    pub fn pot_running(&self) -> bool {
+        self.pot_running
     }
 
     pub fn read_potdat(&self, port: usize) -> u16 {
@@ -952,47 +951,38 @@ impl Paula {
         potgo & (1 << dat_bit) != 0 && potgo & (1 << out_bit) != 0
     }
 
-    pub fn tick_pots(&mut self, cck: u32) {
+    /// Advance the pot capacitor scan by one horizontal line. Denise clocks the
+    /// POTxDAT counters at H-sync, so this is called once per scanline (from the
+    /// bus's new-line loop, the same clock as CIA-B's TOD), not on a
+    /// free-running colour-clock divider -- that keeps the counter phase-aligned
+    /// with the beam, which the read-once and the free-running pot tests need.
+    pub fn tick_pot_hsync(&mut self) {
         if !self.pot_running {
             return;
         }
         let potgo = self.potgo;
-        self.pot_acc_cck = self.pot_acc_cck.saturating_add(cck);
-        while self.pot_acc_cck >= POT_COUNTER_CCK {
-            self.pot_acc_cck -= POT_COUNTER_CCK;
-            for (i, counter) in self.pot_counters.iter_mut().enumerate() {
-                // A pin driven HIGH as an output charges its capacitor through
-                // the low-impedance driver, so the comparator trips on the
-                // first line and the counter never advances past its
-                // START-reset value of 0. Only floating or driven-low pins
-                // charge slowly through the external pot and count up. Games
-                // drive every pin high via POTGO=$FFFF to read POTxDAT back as
-                // ~0 (the Bitmap Brothers input code keys a "no second button"
-                // test on that, so a spuriously counting POT0DAT corrupts it).
-                if !Self::pot_pin_driven_high(potgo, i) {
-                    *counter = counter.saturating_add(1);
-                }
-            }
-            // Counting is finished once every pin has either saturated or is
-            // held at its reset value by a high output drive: nothing more can
-            // change until the next START.
-            if self
-                .pot_counters
-                .iter()
-                .enumerate()
-                .all(|(i, &counter)| counter == u8::MAX || Self::pot_pin_driven_high(potgo, i))
-            {
-                self.pot_running = false;
-                break;
-            }
-        }
-    }
 
-    pub fn next_pot_event_cck(&self) -> Option<u32> {
-        if !self.pot_running {
-            return None;
+        // Each line advances every pin that charges through the external pot
+        // (floating or driven low). A pin driven HIGH as an output charges
+        // through its own low-impedance driver, trips the comparator
+        // immediately, and stays at the START-reset value of 0. Games drive
+        // every pin high via POTGO=$FFFF to read POTxDAT back as ~0 (the Bitmap
+        // Brothers input code keys a "no second button" test on that, so a
+        // spuriously counting POT0DAT corrupts it). The 8-bit counter wraps at
+        // 256, so a floating pin keeps cycling for as long as the scan runs
+        // rather than saturating.
+        let mut any_counting = false;
+        for (i, counter) in self.pot_counters.iter_mut().enumerate() {
+            if !Self::pot_pin_driven_high(potgo, i) {
+                *counter = counter.wrapping_add(1);
+                any_counting = true;
+            }
         }
-        Some(POT_COUNTER_CCK.saturating_sub(self.pot_acc_cck).max(1))
+        // With every pin driven high nothing can ever change again: stop the
+        // scan until the next START.
+        if !any_counting {
+            self.pot_running = false;
+        }
     }
 
     /// Advance the serial port by `cck` color clocks. `end_cck` is the power-on
@@ -3351,22 +3341,27 @@ mod tests {
     }
 
     #[test]
-    fn pot_event_deadline_tracks_counter_increment() {
+    fn pot_hsync_counter_ramps_once_per_line() {
         let (mut paula, _) = paula_with_collect_sink();
 
-        assert_eq!(paula.next_pot_event_cck(), None);
+        assert!(!paula.pot_running());
         paula.write_potgo(0x0001);
-        assert_eq!(paula.next_pot_event_cck(), Some(POT_COUNTER_CCK));
-        paula.tick_pots(POT_COUNTER_CCK - 1);
-        assert_eq!(paula.next_pot_event_cck(), Some(1));
-        paula.tick_pots(1);
-        assert_eq!(paula.read_potdat(0), 0x0101);
-        assert_eq!(paula.next_pot_event_cck(), Some(POT_COUNTER_CCK));
+        assert!(paula.pot_running());
+        assert_eq!(paula.read_potdat(0), 0x0000);
 
+        // Each H-sync advances both bytes of POT0DAT (the X and Y pin counters)
+        // by one.
+        for _ in 0..5 {
+            paula.tick_pot_hsync();
+        }
+        assert_eq!(paula.read_potdat(0), 0x0505);
+
+        // A floating pin wraps at 256 rather than saturating, so the scan keeps
+        // running indefinitely.
         paula.pot_counters = [u8::MAX; 4];
-        paula.pot_acc_cck = POT_COUNTER_CCK - 1;
-        paula.tick_pots(1);
-        assert_eq!(paula.next_pot_event_cck(), None);
+        paula.tick_pot_hsync();
+        assert_eq!(paula.read_potdat(0), 0x0000);
+        assert!(paula.pot_running());
     }
 
     #[test]
@@ -3377,23 +3372,27 @@ mod tests {
         // on this to read POTxDAT back as ~0 after POTGO=$FFFF (the Bitmap
         // Brothers input code keys a "no second button" test on POT0DAT, and a
         // spuriously counting pin sets a phantom button that breaks controls).
-        let charge = POT_COUNTER_CCK * 0x20;
+        let charge_lines = 0x20;
 
         // Drive every pin high: both POTxDAT words read back as zero.
         let (mut paula, _) = paula_with_collect_sink();
         paula.write_potgo(0xFFFF);
-        paula.tick_pots(charge);
+        for _ in 0..charge_lines {
+            paula.tick_pot_hsync();
+        }
         assert_eq!(paula.read_potdat(0), 0x0000);
         assert_eq!(paula.read_potdat(1), 0x0000);
         // ...and the scan terminates rather than ticking forever.
-        assert_eq!(paula.next_pot_event_cck(), None);
+        assert!(!paula.pot_running());
 
         // Per-pin: driving only the port-0 pins high (DATLX/OUTLX/DATLY/OUTLY =
         // bits 8..11) holds POT0DAT at zero while the floating port-1 pins still
         // charge up, proving the gate is per counter and not global.
         let (mut paula, _) = paula_with_collect_sink();
         paula.write_potgo(0x0F00 | 0x0001);
-        paula.tick_pots(charge);
+        for _ in 0..charge_lines {
+            paula.tick_pot_hsync();
+        }
         assert_eq!(paula.read_potdat(0), 0x0000);
         assert_ne!(paula.read_potdat(1), 0x0000);
     }

@@ -3469,7 +3469,14 @@ impl Bus {
     }
 
     pub fn next_pot_event_cck(&self) -> Option<u32> {
-        self.paula.next_pot_event_cck()
+        // The pot counters step at H-sync, so while a scan is running cap the
+        // advance at the next line boundary (the same deadline CIA-B TOD uses)
+        // so a CPU read of POTxDAT lands on the up-to-date value. When no scan
+        // is running the pots impose no deadline.
+        if !self.paula.pot_running() {
+            return None;
+        }
+        self.agnus.cck_until_line_ticks(1)
     }
 
     pub fn next_audio_irq_cck(&self) -> Option<u32> {
@@ -3720,6 +3727,9 @@ impl Bus {
             }
         }
         for _ in 0..agnus_tick.new_lines {
+            // Denise clocks the POTxDAT counters at H-sync, the same per-line
+            // clock as CIA-B's TOD, so advance the pot scan once per new line.
+            self.paula.tick_pot_hsync();
             if self.cia_b.tick_tod() {
                 self.paula.intreq |= INT_EXTER;
                 if dbg_cia {
@@ -3759,7 +3769,6 @@ impl Bus {
         // the span's end. Paula uses it to stamp any serial byte that finishes
         // here; passing it avoids arithmetic on the common (no byte) path.
         self.paula.intreq |= self.paula.tick_serial(cck, self.emulated_cck);
-        self.paula.tick_pots(cck);
         let dmacon = self.agnus.dmacon;
         self.flush_audio();
         // The floppy mechanism is quiescent for almost all of normal running
