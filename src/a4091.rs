@@ -40,9 +40,21 @@ const DIP_OFFSET: u32 = 0x008C_0003;
 /// 53C710 register-file byte offsets as the 68k sees them (the chip is
 /// wired big-endian on the A4091, so these are the driver's REG_ addresses).
 const REG_CTEST8: usize = 0x21;
-/// ISTAT: bit 6 is the software-reset strobe.
+/// ISTAT: bit 7 abort strobe, bit 6 software reset; bits 1/0 are the
+/// computed SIP/DIP interrupt-pending flags.
 const REG_ISTAT: usize = 0x22;
+const ISTAT_ABRT: u8 = 0x80;
 const ISTAT_RST: u8 = 0x40;
+const ISTAT_SIP: u8 = 0x02;
+const ISTAT_DIP: u8 = 0x01;
+/// DIEN: enable mask for DSTAT interrupt causes.
+const REG_DIEN: usize = 0x3A;
+/// DSTAT bit 4: aborted.
+const DSTAT_ABRT: u8 = 0x10;
+/// SIEN: enable mask for SSTAT0 interrupt causes.
+const REG_SIEN: usize = 0x00;
+/// SSTAT0: SCSI interrupt causes (read-clear).
+const REG_SSTAT0: usize = 0x0E;
 /// DSTAT: bit 7 (DFE) tracks "all DMA FIFO lanes empty".
 const REG_DSTAT: usize = 0x0F;
 const DSTAT_DFE: u8 = 0x80;
@@ -174,6 +186,14 @@ impl A4091 {
         v
     }
 
+    /// Whether the chip's interrupt output is asserted: any enabled DMA
+    /// cause (DSTAT masked by DIEN) or SCSI cause (SSTAT0 masked by SIEN).
+    /// DSTAT.DFE is status, not a cause, and never contributes.
+    fn irq_line(&self) -> bool {
+        (self.regs[REG_DSTAT] & self.regs[REG_DIEN] & !DSTAT_DFE) != 0
+            || (self.regs[REG_SSTAT0] & self.regs[REG_SIEN]) != 0
+    }
+
     /// Software reset (power-on, /RST, or the ISTAT RST strobe): registers
     /// to documented reset values, FIFOs drained. ROM and switches keep.
     fn chip_reset(&mut self) {
@@ -246,9 +266,27 @@ impl crate::zorro_device::ZorroDevice for A4091 {
                     // (clear FIFOs) strobe bit always reads back 0.
                     REG_CTEST8 => (self.regs[REG_CTEST8] | 0x20) & !0x04,
                     REG_CTEST1 => self.ctest1(),
+                    // DSTAT: cause bits clear on read; DFE is live status.
                     REG_DSTAT => {
                         let dfe = self.dma_fifo.iter().all(Vec::is_empty);
-                        (self.regs[REG_DSTAT] & !DSTAT_DFE) | if dfe { DSTAT_DFE } else { 0 }
+                        let v =
+                            (self.regs[REG_DSTAT] & !DSTAT_DFE) | if dfe { DSTAT_DFE } else { 0 };
+                        self.regs[REG_DSTAT] = 0;
+                        v
+                    }
+                    // SSTAT0: cause bits clear on read.
+                    REG_SSTAT0 => {
+                        let v = self.regs[REG_SSTAT0];
+                        self.regs[REG_SSTAT0] = 0;
+                        v
+                    }
+                    // ISTAT: stored strobe bits plus computed DIP/SIP.
+                    REG_ISTAT => {
+                        let dip = self.regs[REG_DSTAT] & !DSTAT_DFE != 0;
+                        let sip = self.regs[REG_SSTAT0] != 0;
+                        (self.regs[REG_ISTAT] & 0xF0)
+                            | if sip { ISTAT_SIP } else { 0 }
+                            | if dip { ISTAT_DIP } else { 0 }
                     }
                     REG_SSTAT2 => {
                         ((self.scsi_fifo.len() as u8) << 4) | (self.regs[REG_SSTAT2] & 0x0F)
@@ -313,13 +351,22 @@ impl crate::zorro_device::ZorroDevice for A4091 {
                     continue;
                 }
             }
+            if r == REG_ISTAT {
+                // DIP/SIP (low nibble) are computed status, not writable.
+                self.regs[REG_ISTAT] = b & 0xF0;
+                if b & ISTAT_RST != 0 {
+                    self.chip_reset();
+                    self.regs[REG_ISTAT] = ISTAT_RST;
+                }
+                // Abort: latch the DSTAT cause; DIEN gates only the line.
+                if b & ISTAT_ABRT != 0 {
+                    self.regs[REG_DSTAT] |= DSTAT_ABRT;
+                }
+                continue;
+            }
             self.regs[r] = b;
             if r == REG_CTEST5 {
                 self.ctest5_strobes();
-            }
-            if r == REG_ISTAT && b & ISTAT_RST != 0 {
-                self.chip_reset();
-                self.regs[REG_ISTAT] = ISTAT_RST;
             }
             if (REG_DSP..REG_DSP + 4).contains(&r) && !self.scripts_warned {
                 self.scripts_warned = true;
@@ -345,6 +392,10 @@ impl crate::zorro_device::ZorroDevice for A4091 {
     }
 
     fn tick(&mut self, _cck: u32, _host: &mut crate::zorro_device::DeviceHost) {}
+
+    fn int2_line(&self) -> bool {
+        self.irq_line()
+    }
 
     fn reset(&mut self) {
         self.chip_reset();
@@ -519,6 +570,39 @@ mod tests {
             assert_eq!(sfp, expect, "parity byte {i}");
             assert_eq!(b.read(io(REG_SSTAT2), 1, &mut host) >> 4, (7 - i) as u32);
         }
+    }
+
+    #[test]
+    fn istat_abort_latches_dstat_and_raises_int2_until_dstat_read() {
+        // The ncr7xx bus access test, stage 1: DIEN.ABRT + ISTAT.ABRT must
+        // pull INT2 with ISTAT showing DIP|ABRT; the ISR's DSTAT read
+        // returns ABRT|DFE and drops the line.
+        let mut b = board_with_rom(test_rom_64k());
+        let mut mem = test_memory();
+        let mut host = DeviceHost::new(&mut mem);
+        let io = |r: usize| IO_OFFSET + r as u32;
+
+        b.write(io(REG_DIEN), 1, 0x10, &mut host);
+        assert!(!ZorroDevice::int2_line(&b));
+        b.write(io(REG_ISTAT), 1, 0x80, &mut host);
+        assert!(ZorroDevice::int2_line(&b));
+        assert_eq!(b.read(io(REG_ISTAT), 1, &mut host), 0x81); // ABRT|DIP
+        assert_eq!(b.read(io(REG_DSTAT), 1, &mut host), 0x90); // DFE|ABRT
+        assert!(!ZorroDevice::int2_line(&b));
+        assert_eq!(b.read(io(REG_ISTAT), 1, &mut host), 0x80); // DIP gone
+        b.write(io(REG_ISTAT), 1, 0, &mut host);
+        assert_eq!(b.read(io(REG_ISTAT), 1, &mut host), 0x00);
+    }
+
+    #[test]
+    fn disabled_abort_still_sets_dip_but_not_the_line() {
+        let mut b = board_with_rom(test_rom_64k());
+        let mut mem = test_memory();
+        let mut host = DeviceHost::new(&mut mem);
+        let io = |r: usize| IO_OFFSET + r as u32;
+        b.write(io(REG_ISTAT), 1, 0x80, &mut host);
+        assert!(!ZorroDevice::int2_line(&b));
+        assert_eq!(b.read(io(REG_ISTAT), 1, &mut host) & 1, 1);
     }
 
     #[test]
