@@ -40,6 +40,25 @@ const DIP_OFFSET: u32 = 0x008C_0003;
 /// 53C710 register-file byte offsets as the 68k sees them (the chip is
 /// wired big-endian on the A4091, so these are the driver's REG_ addresses).
 const REG_CTEST8: usize = 0x21;
+/// ISTAT: bit 6 is the software-reset strobe.
+const REG_ISTAT: usize = 0x22;
+const ISTAT_RST: u8 = 0x40;
+/// DSTAT: bit 7 (DFE) tracks "all DMA FIFO lanes empty".
+const REG_DSTAT: usize = 0x0F;
+const DSTAT_DFE: u8 = 0x80;
+/// CTEST1: FMT lane-empty flags in the high nibble, FFL lane-full in the low.
+const REG_CTEST1: usize = 0x16;
+/// CTEST2: bit 3 carries the parity bit of the last DMA FIFO pop.
+const REG_CTEST2: usize = 0x15;
+const CTEST2_DFP: u8 = 0x08;
+/// CTEST4: FBL2 (bit 2) routes CTEST6 to the DMA FIFO lane in bits 1:0.
+const REG_CTEST4: usize = 0x1B;
+const CTEST4_FBL2: u8 = 0x04;
+/// CTEST6: the DMA FIFO data window (with FBL2 set).
+const REG_CTEST6: usize = 0x19;
+/// CTEST7: bit 3 supplies the parity bit pushed with a DMA FIFO write.
+const REG_CTEST7: usize = 0x18;
+const CTEST7_DFP: u8 = 0x08;
 /// CTEST5 carries the ADCK/BBCK self-clearing test strobes.
 const REG_CTEST5: usize = 0x1A;
 const CTEST5_ADCK: u8 = 0x80;
@@ -50,6 +69,8 @@ const REG_DNAD: usize = 0x28;
 const REG_DBC: usize = 0x25;
 /// DSP: writing its low byte starts the SCRIPTS processor.
 const REG_DSP: usize = 0x2C;
+/// DMA FIFO depth per byte lane.
+const DMA_FIFO_DEPTH: usize = 16;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct A4091 {
@@ -59,6 +80,10 @@ pub struct A4091 {
     /// The 53C710 register file, indexed by CPU-visible (big-endian) byte
     /// address. Plain storage until the SCRIPTS core lands.
     regs: Vec<u8>,
+    /// The DMA FIFO: four byte lanes, 16 entries deep, 8 data bits plus a
+    /// parity bit per entry. CTEST6 pushes/pops the lane selected by
+    /// CTEST4; CTEST1 and DSTAT.DFE report the fill state.
+    dma_fifo: [Vec<u16>; 4],
     /// One-shot warning latch for the unimplemented SCRIPTS processor.
     scripts_warned: bool,
 }
@@ -70,9 +95,8 @@ fn reset_regs() -> Vec<u8> {
     let mut r = vec![0u8; 0x40];
     r[0x03] = 0xC0; // SCNTL0
     r[0x07] = 0x80; // SCID
-    r[0x0F] = 0x80; // DSTAT: DFE
+                    // DSTAT.DFE and CTEST1 are computed from the DMA FIFO state on read.
     r[0x15] = 0x01; // CTEST2: DACK
-    r[0x16] = 0xF0; // CTEST1: FMT, all DMA FIFO byte lanes empty
     r[0x24] = 0x40; // DCMD
     r
 }
@@ -92,8 +116,38 @@ impl A4091 {
             rom,
             dip: 0xFF,
             regs: reset_regs(),
+            dma_fifo: Default::default(),
             scripts_warned: false,
         })
+    }
+
+    /// The DMA FIFO lane CTEST6 currently addresses, when CTEST4.FBL2
+    /// routes it to the FIFO at all.
+    fn fifo_lane(&self) -> Option<usize> {
+        (self.regs[REG_CTEST4] & CTEST4_FBL2 != 0).then_some((self.regs[REG_CTEST4] & 3) as usize)
+    }
+
+    /// CTEST1 computed from the FIFO: FMT empty flags high, FFL full low.
+    fn ctest1(&self) -> u8 {
+        let mut v = 0u8;
+        for (lane, fifo) in self.dma_fifo.iter().enumerate() {
+            if fifo.is_empty() {
+                v |= 0x10 << lane;
+            }
+            if fifo.len() >= DMA_FIFO_DEPTH {
+                v |= 1 << lane;
+            }
+        }
+        v
+    }
+
+    /// Software reset (power-on, /RST, or the ISTAT RST strobe): registers
+    /// to documented reset values, FIFOs drained. ROM and switches keep.
+    fn chip_reset(&mut self) {
+        self.regs = reset_regs();
+        for fifo in &mut self.dma_fifo {
+            fifo.clear();
+        }
     }
 
     pub fn load_rom(path: &Path) -> Result<Vec<u8>> {
@@ -157,6 +211,22 @@ impl crate::zorro_device::ZorroDevice for A4091 {
                     // CTEST8: chip revision 2 in the high nibble; the CLF
                     // (clear FIFOs) strobe bit always reads back 0.
                     REG_CTEST8 => (self.regs[REG_CTEST8] | 0x20) & !0x04,
+                    REG_CTEST1 => self.ctest1(),
+                    REG_DSTAT => {
+                        let dfe = self.dma_fifo.iter().all(Vec::is_empty);
+                        (self.regs[REG_DSTAT] & !DSTAT_DFE) | if dfe { DSTAT_DFE } else { 0 }
+                    }
+                    // CTEST6 pops the addressed DMA FIFO lane; the entry's
+                    // parity bit lands in CTEST2.DFP.
+                    REG_CTEST6 => match self.fifo_lane() {
+                        Some(lane) if !self.dma_fifo[lane].is_empty() => {
+                            let entry = self.dma_fifo[lane].remove(0);
+                            self.regs[REG_CTEST2] = (self.regs[REG_CTEST2] & !CTEST2_DFP)
+                                | if entry & 0x100 != 0 { CTEST2_DFP } else { 0 };
+                            entry as u8
+                        }
+                        _ => self.regs[REG_CTEST6],
+                    },
                     r => self.regs[r],
                 }
             } else {
@@ -180,9 +250,24 @@ impl crate::zorro_device::ZorroDevice for A4091 {
                 continue;
             }
             let r = (o as usize) & 0x3F;
-            self.regs[r] = (value >> (8 * (size - 1 - i))) as u8;
+            let b = (value >> (8 * (size - 1 - i))) as u8;
+            // CTEST6 with the FIFO addressed pushes instead of storing.
+            if r == REG_CTEST6 {
+                if let Some(lane) = self.fifo_lane() {
+                    if self.dma_fifo[lane].len() < DMA_FIFO_DEPTH {
+                        let parity = u16::from(self.regs[REG_CTEST7] & CTEST7_DFP != 0);
+                        self.dma_fifo[lane].push((parity << 8) | u16::from(b));
+                    }
+                    continue;
+                }
+            }
+            self.regs[r] = b;
             if r == REG_CTEST5 {
                 self.ctest5_strobes();
+            }
+            if r == REG_ISTAT && b & ISTAT_RST != 0 {
+                self.chip_reset();
+                self.regs[REG_ISTAT] = ISTAT_RST;
             }
             if (REG_DSP..REG_DSP + 4).contains(&r) && !self.scripts_warned {
                 self.scripts_warned = true;
@@ -210,7 +295,7 @@ impl crate::zorro_device::ZorroDevice for A4091 {
     fn tick(&mut self, _cck: u32, _host: &mut crate::zorro_device::DeviceHost) {}
 
     fn reset(&mut self) {
-        self.regs = reset_regs();
+        self.chip_reset();
         self.scripts_warned = false;
     }
 
@@ -308,6 +393,47 @@ mod tests {
         b.write(IO_OFFSET + 0x1A, 1, 0x40, &mut host);
         assert_eq!(b.read(IO_OFFSET + 0x24, 4, &mut host), 0xC);
         assert_eq!(b.read(IO_OFFSET + 0x1A, 1, &mut host) & 0xC0, 0);
+    }
+
+    #[test]
+    fn dma_fifo_pushes_pops_with_parity_and_tracks_status() {
+        // The ncr7xx DMA FIFO test: fill all four lanes through CTEST6
+        // (parity from CTEST7.3), watching CTEST1/DSTAT.DFE, then drain
+        // verifying data, parity in CTEST2.3, and status flags.
+        let mut b = board_with_rom(test_rom_64k());
+        let mut mem = test_memory();
+        let mut host = DeviceHost::new(&mut mem);
+        let io = |r: usize| IO_OFFSET + r as u32;
+
+        // ISTAT.RST software reset leaves the FIFO empty.
+        b.write(io(REG_ISTAT), 1, 0x40, &mut host);
+        b.write(io(REG_ISTAT), 1, 0, &mut host);
+        assert_eq!(b.read(io(REG_CTEST1), 1, &mut host), 0xF0);
+        assert_ne!(b.read(io(REG_DSTAT), 1, &mut host) & 0x80, 0);
+
+        for lane in 0..4u32 {
+            b.write(io(REG_CTEST4), 1, 0x04 | lane, &mut host);
+            for byte in 0..16u32 {
+                let parity = (lane + byte) & 1;
+                b.write(io(REG_CTEST7), 1, parity << 3, &mut host);
+                b.write(io(REG_CTEST6), 1, (0xA0 + byte) ^ lane, &mut host);
+            }
+        }
+        // All lanes full, FIFO not empty.
+        assert_eq!(b.read(io(REG_CTEST1), 1, &mut host), 0x0F);
+        assert_eq!(b.read(io(REG_DSTAT), 1, &mut host) & 0x80, 0);
+
+        for lane in 0..4u32 {
+            b.write(io(REG_CTEST4), 1, 0x04 | lane, &mut host);
+            for byte in 0..16u32 {
+                let v = b.read(io(REG_CTEST6), 1, &mut host);
+                assert_eq!(v, (0xA0 + byte) ^ lane, "lane {lane} byte {byte}");
+                let parity = (b.read(io(REG_CTEST2), 1, &mut host) >> 3) & 1;
+                assert_eq!(parity, (lane + byte) & 1, "parity lane {lane} byte {byte}");
+            }
+        }
+        assert_eq!(b.read(io(REG_CTEST1), 1, &mut host), 0xF0);
+        assert_ne!(b.read(io(REG_DSTAT), 1, &mut host) & 0x80, 0);
     }
 
     #[test]
