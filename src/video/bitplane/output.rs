@@ -229,6 +229,26 @@ pub(super) fn denise_playfield_output(
     }
 
     if control.hold_and_modify() {
+        if control.dual_playfield() {
+            // Invalid HAM + dual-playfield combination. Denise resolves the
+            // dual-playfield colour index and then runs it through the HAM
+            // logic: the HAM control code still comes from the raw plane-5/6
+            // bits, but the value nibble (and the "set" palette index) is the
+            // dual-playfield-resolved index, not the raw plane bits (vAmiga
+            // translateDPF writes mBuffer with the resolved index, then
+            // colorizeHAM takes the control from dBuffer bits 4-5). No real
+            // software sets both bits; regression coverage is vAmigaTS
+            // Denise/BPLCON0/modes4 and invprio3.
+            let (pf_mask, color_idx) = dual_playfield_pixel(idx, control);
+            let ham_code = ((idx >> 4) & 0x03) << 4 | ((color_idx as u8) & 0x0F);
+            let previous = rgb24_to_rgb12_hi(*ham_color);
+            *ham_color = rgb12_to_rgb24(ham6_rgb12(palette, ham_code, previous));
+            return DenisePlayfieldOutput {
+                color: *ham_color,
+                color_latch: palette.get(color_idx).copied().unwrap_or(0),
+                pf_mask,
+            };
+        }
         let previous = rgb24_to_rgb12_hi(*ham_color);
         *ham_color = rgb12_to_rgb24(ham6_rgb12(palette, idx, previous));
         return DenisePlayfieldOutput {
@@ -250,6 +270,19 @@ pub(super) fn denise_playfield_output(
         };
     }
 
+    // A single playfield whose BPLCON2 PF2 priority code is programmed out of
+    // range (5-7) eliminates the four low bitplanes wherever the fifth
+    // bitplane is set, keeping only bitplanes 5-6, and forces the pixel to
+    // background sprite priority (vAmiga translateSPF; the quirk does not
+    // happen in HAM mode, already returned above). Real software only uses
+    // codes 0-4, so valid single-playfield content is unaffected.
+    let invalid_pf2_priority = control.playfield_priority_code(2) > 4;
+    let (idx, pf_mask) = if invalid_pf2_priority {
+        let idx = if idx & 0x10 != 0 { idx & 0x30 } else { idx };
+        (idx, 0)
+    } else {
+        (idx, u8::from(idx != 0) * 2)
+    };
     let color_latch = palette[(idx as usize) & 0x1F];
     let color = rgb12_to_rgb24(palette_index_to_rgb12(
         palette,
@@ -260,7 +293,7 @@ pub(super) fn denise_playfield_output(
     DenisePlayfieldOutput {
         color,
         color_latch,
-        pf_mask: u8::from(idx != 0) * 2,
+        pf_mask,
     }
 }
 
@@ -355,13 +388,22 @@ pub(super) fn dual_playfield_pixel(idx: u8, control: ControlState) -> (u8, usize
         pf2 |= (idx >> 4) & 0x08;
     }
     let pf2_offset = control.pf2_palette_offset();
-    match (pf1, pf2) {
-        (0, 0) => (0, 0),
-        (pf, 0) => (1, pf as usize),
-        (0, pf) => (2, pf2_offset + pf as usize),
-        (_, pf2) if control.pf2_priority() => (2, pf2_offset + pf2 as usize),
-        (pf1, _) => (1, pf1 as usize),
+    let (winner, pf_mask, color_idx) = match (pf1, pf2) {
+        (0, 0) => return (0, 0),
+        (pf, 0) => (1u8, 1u8, pf as usize),
+        (0, pf) => (2, 2, pf2_offset + pf as usize),
+        (_, pf2) if control.pf2_priority() => (2, 2, pf2_offset + pf2 as usize),
+        (pf1, _) => (1, 1, pf1 as usize),
+    };
+    // A playfield whose BPLCON2 priority code is programmed out of range
+    // (> 4) is drawn transparent: the winning field's pixels collapse to the
+    // background rather than showing the field behind it (vAmiga zPF returns
+    // 0 for codes 5-7, which masks that field's index to 0). Real software
+    // only uses codes 0-4, so valid dual-playfield content is unaffected.
+    if control.playfield_priority_code(winner) > 4 {
+        return (0, 0);
     }
+    (pf_mask, color_idx)
 }
 
 pub(super) fn half_brite_rgb12(color: u16) -> u16 {

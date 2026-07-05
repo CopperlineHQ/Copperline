@@ -4461,6 +4461,66 @@ fn dual_playfield_uses_separate_palette_banks_and_priority() {
 }
 
 #[test]
+fn dual_playfield_out_of_range_priority_draws_the_field_transparent() {
+    // A dual playfield whose BPLCON2 priority code is programmed out of range
+    // (5-7) is drawn transparent: the winning field's pixels collapse to the
+    // background instead of revealing the field behind it (vAmiga zPF returns
+    // 0 for codes 5-7). vAmigaTS Denise/BPLCON0/invprio. Valid codes (0-4)
+    // are unaffected, so real dual-playfield content is unchanged.
+    let invalid_pf2 = ControlState {
+        bplcon0: 0x6400, // 4 planes, dual playfield
+        bplcon2: 0x0038, // PF2 priority code 7 (invalid), PF1 code 0
+        bplcon3: BPLCON3_PF2OF_DEFAULT,
+        ..ControlState::default()
+    };
+    // A PF2-only pixel is transparent (the winning field's priority is out of
+    // range); a PF1-only pixel still resolves (PF1 code 0 is valid).
+    assert_eq!(dual_playfield_pixel(0b0000_0010, invalid_pf2), (0, 0));
+    assert_eq!(dual_playfield_pixel(0b0000_0001, invalid_pf2), (1, 1));
+
+    // With a valid PF2 priority the same PF2 pixel resolves normally.
+    let valid = ControlState {
+        bplcon2: 0x0004, // PF2 code 0, PF1 code 4 (both valid)
+        ..invalid_pf2
+    };
+    assert_eq!(dual_playfield_pixel(0b0000_0010, valid), (2, 9));
+}
+
+#[test]
+fn single_playfield_out_of_range_priority_eliminates_low_bitplanes() {
+    // A single playfield with an out-of-range BPLCON2 PF2 priority code keeps
+    // only bitplanes 5-6 wherever bitplane 5 is set (eliminating the four low
+    // planes) and forces background sprite priority (vAmiga translateSPF).
+    // Valid codes leave the pixel untouched.
+    let mut palette = Palette::new();
+    palette.write_ocs(0x10, 0x0F00);
+    palette.write_ocs(0x13, 0x000F);
+
+    let invalid = ControlState {
+        bplcon0: 0x5000, // 5 planes, single playfield (no HAM/dual/EHB)
+        bplcon2: 0x0038, // PF2 priority code 7 (invalid)
+        ..ControlState::default()
+    };
+    let valid = ControlState {
+        bplcon2: 0x0004, // PF1 code 4, PF2 code 0 (both valid)
+        ..invalid
+    };
+
+    // Planes 1,2,5 set: the invalid priority eliminates planes 1-2, leaving
+    // the plane-5-only index, so the pixel matches a valid render of 0x10.
+    let mut h = 0u32;
+    let invalid_13 = denise_playfield_output(invalid, palette, 0x13, &mut h);
+    let mut h = 0u32;
+    let valid_10 = denise_playfield_output(valid, palette, 0x10, &mut h);
+    let mut h = 0u32;
+    let valid_13 = denise_playfield_output(valid, palette, 0x13, &mut h);
+    assert_eq!(invalid_13.color, valid_10.color);
+    assert_ne!(invalid_13.color, valid_13.color);
+    assert_eq!(invalid_13.pf_mask, 0);
+    assert_eq!(valid_13.pf_mask, 2);
+}
+
+#[test]
 fn aga_dual_playfield_decodes_bitplane7_into_pf1_fourth_bit() {
     // AGA Lisa dual playfield gives each field four bits: bitplane 7
     // becomes PF1's high bit (palette entries 8..15) and bitplane 8
@@ -5445,6 +5505,47 @@ fn denise_playfield_output_selects_ehb_ham_and_dual_playfield_colors() {
             color_latch: 0x0456,
             pf_mask: 2,
         }
+    );
+}
+
+#[test]
+fn ham_dual_playfield_runs_the_resolved_index_through_ham() {
+    // The invalid HAM + dual-playfield combination (both BPLCON0 bits set --
+    // no real software does this) resolves the dual-playfield colour index
+    // and then runs it through the HAM logic: the HAM control code comes from
+    // the raw plane 5/6 bits while the value nibble is the resolved index.
+    // Matches vAmiga (translateDPF writes the resolved index, colorizeHAM
+    // takes the control from the raw bitplane bits); exact on vAmigaTS
+    // Denise/BPLCON0/modes4.
+    let mut palette = Palette::new();
+    palette.write_ocs(9, 0x0456);
+    let control = ControlState {
+        bplcon0: 0x6C00, // BPU6 + HAM + dual playfield
+        bplcon3: BPLCON3_PF2OF_DEFAULT,
+        ..ControlState::default()
+    };
+    assert!(control.hold_and_modify() && control.dual_playfield());
+
+    // Planes 5 and 6 clear -> HAM "set": plane 2 resolves to PF2 index 1 at
+    // the default PF2 palette offset 8 (entry 9), shown directly, exactly as
+    // the plain dual-playfield path would.
+    let mut ham_color = rgb12_to_rgb24(0x0ABC);
+    assert_eq!(
+        denise_playfield_output(control, palette, 0x02, &mut ham_color),
+        DenisePlayfieldOutput {
+            color: rgb12_to_rgb24(0x0456),
+            color_latch: 0x0456,
+            pf_mask: 2,
+        }
+    );
+
+    // Plane 5 set supplies the HAM "modify blue" control code; the value
+    // nibble is the resolved PF1 index (planes 1/3/5 -> plane 5 only -> 4),
+    // so only the blue nibble of the held colour changes.
+    let mut ham_color = rgb12_to_rgb24(0x0ABC);
+    assert_eq!(
+        denise_playfield_output(control, palette, 0x12, &mut ham_color).color,
+        rgb12_to_rgb24(0x0AB4),
     );
 }
 
