@@ -248,12 +248,39 @@ impl A4091 {
         (le & !3) | (3 - (le & 3))
     }
 
+    /// One byte as the SCRIPTS DMA engine sees the bus: RAM through the
+    /// host decode, the board's own window (register file / ROM / DIP)
+    /// directly -- the self-test DMAs the chip's own SCRATCH and TEMP.
+    /// Register bytes are accessed as plain storage, without read side
+    /// effects; the self-tests only move SCRATCH/TEMP this way.
+    fn dma_byte(&self, host: &crate::zorro_device::DeviceHost, addr: u32) -> u8 {
+        match host.own_window_offset(addr) {
+            Some(off) if (IO_OFFSET..IO_END).contains(&off) => self.regs[(off as usize) & 0x3F],
+            Some(off) if off < IO_OFFSET => self.rom_byte(off),
+            Some(off) if off == DIP_OFFSET => self.dip,
+            Some(_) => 0xFF,
+            None => host.dma_read_byte(addr).unwrap_or(0xFF),
+        }
+    }
+
+    fn dma_write_byte(&mut self, host: &mut crate::zorro_device::DeviceHost, addr: u32, b: u8) {
+        match host.own_window_offset(addr) {
+            Some(off) if (IO_OFFSET..IO_END).contains(&off) => {
+                self.regs[(off as usize) & 0x3F] = b;
+            }
+            Some(_) => {} // ROM and switches are not writable
+            None => {
+                host.dma_write(addr, &[b]);
+            }
+        }
+    }
+
     /// Run the SCRIPTS processor from DSP until it interrupts. Enough of
     /// the instruction set for the boot ROM's self-tests: register-write
-    /// (MOVE immediate to register), RETURN, and INT; anything else stops
-    /// with an illegal-instruction interrupt, as the real chip does for
-    /// garbage fetches. Block moves and the full transfer-control set come
-    /// with the SCSI phase engine.
+    /// (MOVE immediate to register), Memory Move, RETURN, and INT; anything
+    /// else stops with an illegal-instruction interrupt, as the real chip
+    /// does for garbage fetches. Block moves and the full transfer-control
+    /// set come with the SCSI phase engine.
     fn run_scripts(&mut self, host: &mut crate::zorro_device::DeviceHost) {
         for _ in 0..64 {
             let dsp = self.reg32(REG_DSP);
@@ -285,6 +312,24 @@ impl A4091 {
                         return;
                     }
                 },
+                // Memory Move: 24-bit byte count, then source and
+                // destination addresses in a third fetched longword.
+                0b11 if dcmd & 0x38 == 0 => {
+                    let mut dst = [0u8; 4];
+                    host.dma_read(dsp.wrapping_add(8), &mut dst);
+                    self.set_reg32(REG_DSP, dsp.wrapping_add(12));
+                    let count = u32::from_be_bytes(insn[0..4].try_into().unwrap()) & 0x00FF_FFFF;
+                    let src = u32::from_be_bytes(insn[4..8].try_into().unwrap());
+                    let dst = u32::from_be_bytes(dst);
+                    for i in 0..count {
+                        let b = self.dma_byte(host, src.wrapping_add(i));
+                        self.dma_write_byte(host, dst.wrapping_add(i), b);
+                    }
+                    // The byte counter runs down to zero.
+                    self.regs[REG_DBC] = 0;
+                    self.regs[REG_DBC + 1] = 0;
+                    self.regs[REG_DBC + 2] = 0;
+                }
                 _ => {
                     self.regs[REG_DSTAT] |= DSTAT_IID;
                     return;
@@ -689,6 +734,48 @@ mod tests {
         let io = |r: usize| IO_OFFSET + r as u32;
         b.write(io(REG_DSP), 4, 0x0F00_0000, &mut host);
         assert_eq!(b.read(io(REG_DSTAT), 1, &mut host) & 0x01, 0x01); // IID
+    }
+
+    #[test]
+    fn scripts_memory_move_copies_own_scratch_to_temp() {
+        // ncr7xx DMA test 1: Memory Move of the chip's own SCRATCH to TEMP
+        // through the configured board window, then INT.
+        let mut b = board_with_rom(test_rom_64k());
+        let mut mem = test_memory();
+        mem.zorro
+            .add_board_configured_at(crate::zorro::BoardSpec::a4091(0), 0x4200_0000)
+            .unwrap();
+        mem.chip_ram[0x1000..0x1014].copy_from_slice(&[
+            0xC0, 0x00, 0x00, 0x04, // Memory Move, 4 bytes
+            0x42, 0x80, 0x00, 0x34, // src: SCRATCH via the board window
+            0x42, 0x80, 0x00, 0x1C, // dst: TEMP via the board window
+            0x98, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // INT
+        ]);
+        let mut host = DeviceHost::for_slot(&mut mem, 0);
+        let io = |r: usize| IO_OFFSET + r as u32;
+        b.write(io(0x34), 4, 0xCAE5_92F7, &mut host); // SCRATCH
+        b.write(io(REG_TEMP), 4, !0xCAE5_92F7, &mut host);
+        b.write(io(REG_DSP), 4, 0x1000, &mut host);
+        assert_eq!(b.read(io(REG_TEMP), 4, &mut host), 0xCAE5_92F7);
+        assert_eq!(b.read(io(REG_DSTAT), 1, &mut host) & 0x04, 0x04); // SIR
+    }
+
+    #[test]
+    fn scripts_memory_move_ram_to_ram() {
+        let mut b = board_with_rom(test_rom_64k());
+        let mut mem = test_memory();
+        mem.chip_ram[0x2000..0x2008].copy_from_slice(b"COPPRLNE");
+        mem.chip_ram[0x1000..0x1014].copy_from_slice(&[
+            0xC0, 0x00, 0x00, 0x08, // Memory Move, 8 bytes
+            0x00, 0x00, 0x20, 0x00, // src
+            0x00, 0x00, 0x30, 0x00, // dst
+            0x98, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // INT
+        ]);
+        let mut host = DeviceHost::for_slot(&mut mem, 0);
+        let io = |r: usize| IO_OFFSET + r as u32;
+        b.write(io(REG_DSP), 4, 0x1000, &mut host);
+        assert_eq!(b.read(io(REG_DSTAT), 1, &mut host) & 0x04, 0x04);
+        assert_eq!(&host.memory_mut().chip_ram[0x3000..0x3008], b"COPPRLNE");
     }
 
     #[test]

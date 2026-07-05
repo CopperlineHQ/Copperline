@@ -3700,8 +3700,8 @@ impl Bus {
                 paula,
                 ..
             } = self;
-            for dev in devices.iter_mut() {
-                let mut host = crate::zorro_device::DeviceHost::new(&mut *mem);
+            for (slot, dev) in devices.iter_mut().enumerate() {
+                let mut host = crate::zorro_device::DeviceHost::for_slot(&mut *mem, slot);
                 crate::zorro_device::ZorroDevice::tick(dev, cck, &mut host);
                 if crate::zorro_device::ZorroDevice::int2_line(dev) {
                     paula.intreq |= INT_PORTS;

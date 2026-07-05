@@ -110,6 +110,10 @@ pub struct DeviceHost<'a> {
     mem: &'a mut Memory,
     /// Paula's CD-audio ring, available only on a host built for the CDTV tick.
     cd_audio: Option<&'a mut CdAudioRing>,
+    /// The device slot this host was built for, so a bus-mastering board
+    /// can recognize DMA addresses inside its own configured window (the
+    /// A4091 self-test DMAs its own registers) without re-entering itself.
+    self_slot: Option<usize>,
 }
 
 impl<'a> DeviceHost<'a> {
@@ -117,6 +121,27 @@ impl<'a> DeviceHost<'a> {
         Self {
             mem,
             cd_audio: None,
+            self_slot: None,
+        }
+    }
+
+    /// A host view that knows which device slot it serves. See `self_slot`.
+    pub fn for_slot(mem: &'a mut Memory, slot: usize) -> Self {
+        Self {
+            mem,
+            cd_audio: None,
+            self_slot: Some(slot),
+        }
+    }
+
+    /// The window offset when `addr` falls inside the calling device's own
+    /// configured board window, `None` otherwise (or when the host was not
+    /// built with a slot).
+    pub fn own_window_offset(&self, addr: u32) -> Option<u32> {
+        let slot = self.self_slot?;
+        match self.mem.zorro.device_region_at(addr, 1) {
+            Some((crate::zorro::BoardBacking::Device(s), off)) if s == slot => Some(off),
+            _ => None,
         }
     }
 
@@ -126,6 +151,7 @@ impl<'a> DeviceHost<'a> {
         Self {
             mem,
             cd_audio: Some(cd_audio),
+            self_slot: None,
         }
     }
 
