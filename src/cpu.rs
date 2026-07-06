@@ -143,6 +143,7 @@ pub struct M68kMachine {
     dbg_sched_capturing: bool,
     dbg_sched_bhist: std::collections::HashMap<u32, u64>,
     dbg_sched_bhist_dumped: bool,
+    dbg_sched_loop_dumped: bool,
     // Cached per-instruction diagnostic gates (read from the environment once at
     // construction). These run on every instruction, so they must not do a live
     // std::env lookup -- that lock+scan, millions of times a second, drops the
@@ -313,6 +314,7 @@ impl M68kMachine {
             dbg_sched_capturing: false,
             dbg_sched_bhist: std::collections::HashMap::new(),
             dbg_sched_bhist_dumped: false,
+            dbg_sched_loop_dumped: false,
             dbg_fc_addr: crate::envcfg::var("COPPERLINE_DBG_FC")
                 .and_then(|s| u32::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok()),
             dbg_ipl_on: crate::envcfg::flag("COPPERLINE_DIAG_IPL"),
@@ -799,7 +801,34 @@ impl M68kMachine {
             );
             return;
         }
+        // Log every exception/interrupt entry while the window is active:
+        // vector, beam position, and the PC the handler will return to.
+        if let Some(vector) = self.cpu.last_exception_vector.take() {
+            log::info!(
+                "sched vec={} secs={secs:.5} v={} h={} return_pc={:#010X}",
+                vector,
+                self.bus.bus.agnus.vpos,
+                self.bus.bus.agnus.hpos,
+                (u32::from(self.bus.bus.peek_word_any(self.cpu.a(7).wrapping_add(2))) << 16)
+                    | u32::from(self.bus.bus.peek_word_any(self.cpu.a(7).wrapping_add(4))),
+            );
+        }
         if pc == LOOP_TOP {
+            if !self.dbg_sched_loop_dumped {
+                self.dbg_sched_loop_dumped = true;
+                let mut words = String::new();
+                for i in 0..56u32 {
+                    let a = LOOP_TOP.wrapping_add(i * 2);
+                    words.push_str(&format!(" {:04X}", self.bus.bus.peek_word_any(a)));
+                }
+                log::info!("sched loop-code {LOOP_TOP:#010X}..:{words}");
+                let mut words = String::new();
+                for i in 0..72u32 {
+                    let a = 0x00C0_3580u32.wrapping_add(i * 2);
+                    words.push_str(&format!(" {:04X}", self.bus.bus.peek_word_any(a)));
+                }
+                log::info!("sched vertb-code 0x00C03580..:{words}");
+            }
             self.dbg_sched_top_vpos = vpos;
             self.dbg_sched_top_frame = frame;
             self.dbg_sched_top_counter = counter;
