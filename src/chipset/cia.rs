@@ -42,6 +42,20 @@ pub struct Cia {
     ///   bit 0 TA, 1 TB, 2 ALRM, 3 SP, 4 FLG, 7 IR
     /// Reading ICR returns this and then clears all bits (including IR).
     icr_data: u8,
+    /// The external /IRQ pin. Timer underflows drive it in the SAME
+    /// E-cycle as the underflow; TOD/FLAG/serial latches and ICR mask
+    /// writes lag one E-cycle (the 6526-family interrupt delay, vAmiga
+    /// CIASetInt1 vs CIASetInt0). `irq_pin_delay_eticks` counts down
+    /// the remaining lag of a pending delayed assert.
+    #[serde(default)]
+    irq_pin: bool,
+    #[serde(default)]
+    irq_pin_delay_eticks: u8,
+    /// An ICR read is in flight in the current E-cycle: a timer
+    /// underflow racing it asserts the pin one E-cycle late instead of
+    /// in the same cycle (vAmiga CIAReadIcr0 gating triggerTimerIrq).
+    #[serde(default)]
+    icr_read_race: bool,
     /// ICR mask: which sources are allowed to raise IR.
     icr_mask: u8,
     /// Serial Data Register. The Amiga keyboard wires its data line
@@ -145,6 +159,9 @@ impl Cia {
             tb_oneshot: false,
             tb_input_mode: TimerBInputMode::Phi2,
             icr_data: 0,
+            irq_pin: false,
+            irq_pin_delay_eticks: 0,
+            icr_read_race: false,
             icr_mask: 0,
             sdr: 0,
             sdr_out: None,
@@ -216,8 +233,10 @@ impl Cia {
     }
 
     /// Advance the 24-bit TOD counter by one tick. CIA-A is ticked
-    /// once per VSYNC, CIA-B once per HSYNC. Returns true if the
-    /// CIA's IR line just asserted (alarm match with mask enabled).
+    /// once per VSYNC, CIA-B once per HSYNC. An alarm match latches
+    /// ICR.ALRM; the /IRQ pin follows one E-cycle later from the
+    /// `tick` drain, so this returns false (kept for signature parity
+    /// with the pin-edge sources the bus forwards to INTREQ).
     pub fn tick_tod(&mut self) -> bool {
         if self.tod_stopped {
             return false;
@@ -255,7 +274,9 @@ impl Cia {
     }
 
     /// Alarm comparator: latch ICR.ALRM on the transition into equality
-    /// (see `tod_matching`). Returns true if the CIA IR line just asserted.
+    /// (see `tod_matching`). The alarm is a delayed source: the /IRQ pin
+    /// follows one E-cycle later, surfacing from the `tick` drain, so
+    /// this always returns false (no immediate pin edge).
     fn tod_check_alarm(&mut self) -> bool {
         let equal = self.tod_count == self.tod_alarm;
         let fired = !self.tod_matching && equal;
@@ -263,13 +284,7 @@ impl Cia {
         if !fired {
             return false;
         }
-        self.icr_data |= ICR_ALRM;
-        if self.icr_mask & ICR_ALRM == 0 {
-            return false;
-        }
-        let was_ir = self.icr_data & ICR_IR != 0;
-        self.icr_data |= ICR_IR;
-        !was_ir
+        self.latch_interrupts(ICR_ALRM)
     }
 
     /// Anchor the TOD counter to the current raster line. The emulator
@@ -285,8 +300,8 @@ impl Cia {
     }
 
     /// Snap an anchored TOD counter to the exact frame-boundary value.
-    /// Returns true if this frame-boundary update asserted the CIA IR
-    /// line via a TOD alarm.
+    /// An alarm match latches ICR.ALRM; the pin edge follows an E-cycle
+    /// later from the `tick` drain (see `tick_tod`).
     pub fn sync_tod_to_frame(&mut self, lines_per_frame: u32) -> bool {
         if self.tod_stopped {
             return false;
@@ -380,9 +395,15 @@ impl Cia {
             REG_SDR => self.sdr,
             REG_ICR => {
                 // Reading ICR returns the latched events and the IR
-                // bit, then clears every bit (and lowers the line).
+                // bit, then clears every bit (and lowers the line,
+                // cancelling a pin assert still in its E-cycle lag).
                 let v = self.icr_data;
                 self.icr_data = 0;
+                self.irq_pin = false;
+                self.irq_pin_delay_eticks = 0;
+                // A timer underflow in this same E-cycle loses the race
+                // and asserts the pin one E-cycle late.
+                self.icr_read_race = true;
                 v
             }
             _ => self.regs[reg],
@@ -604,8 +625,10 @@ impl Cia {
     }
 
     /// Advance both timers by `ticks` (CIA PHI2 cycles = CPU/10).
-    /// Returns true if any timer underflowed AND its source bit is
-    /// enabled in the mask - i.e. the CIA's IRQ line just asserted.
+    /// Returns true if the external /IRQ pin asserted during this span,
+    /// either from a masked-in timer underflow (same E-cycle) or from a
+    /// delayed source (TOD/FLAG/serial/mask write) whose one-E-cycle
+    /// lag drains here.
     pub fn tick(&mut self, ticks: u32) -> bool {
         // Zero E-clock ticks advance nothing: timer A needs ticks > 0, the
         // SDR shifter and timer B only move on timer-A underflows (or CNT,
@@ -615,20 +638,23 @@ impl Cia {
         if ticks == 0 {
             return false;
         }
-        let mut fired_mask: u8 = 0;
+        // Delayed asserts armed earlier (by FLAG, SDR, TOD, or mask
+        // writes) surface here on the E-clock grid.
+        let mut pin_edge = self.drain_irq_pin_delay(ticks);
+        let mut timer_mask: u8 = 0;
         let mut ta_underflows = 0;
         if self.ta_running && !self.ta_counts_cnt && ticks > 0 {
             ta_underflows = advance(&mut self.ta_count, self.ta_latch, ticks);
-            fired_mask |= u8::from(ta_underflows != 0) * ICR_TA;
-            if fired_mask & ICR_TA != 0 && self.ta_oneshot {
+            timer_mask |= u8::from(ta_underflows != 0) * ICR_TA;
+            if timer_mask & ICR_TA != 0 && self.ta_oneshot {
                 self.ta_running = false;
                 self.regs[REG_CRA] &= !0x01;
             }
-            if fired_mask & ICR_TA != 0 {
+            if timer_mask & ICR_TA != 0 {
                 self.update_timer_a_pb_output();
             }
         }
-        fired_mask |= self.tick_sdr_output(ta_underflows);
+        let sp_mask = self.tick_sdr_output(ta_underflows);
         let tb_ticks = match self.tb_input_mode {
             TimerBInputMode::Phi2 => ticks,
             TimerBInputMode::Cnt => 0,
@@ -643,16 +669,25 @@ impl Cia {
         };
         if self.tb_running && tb_ticks > 0 {
             let tb_underflows = advance(&mut self.tb_count, self.tb_latch, tb_ticks);
-            fired_mask |= u8::from(tb_underflows != 0) * ICR_TB;
-            if fired_mask & ICR_TB != 0 && self.tb_oneshot {
+            timer_mask |= u8::from(tb_underflows != 0) * ICR_TB;
+            if timer_mask & ICR_TB != 0 && self.tb_oneshot {
                 self.tb_running = false;
                 self.regs[REG_CRB] &= !0x01;
             }
-            if fired_mask & ICR_TB != 0 {
+            if timer_mask & ICR_TB != 0 {
                 self.update_timer_b_pb_output();
             }
         }
-        self.latch_interrupts(fired_mask)
+        // Timer underflows drive the pin in the same E-cycle; serial
+        // completion is a delayed source.
+        pin_edge |= self.latch_timer_interrupts(timer_mask);
+        let _ = self.latch_interrupts(sp_mask);
+        // A delayed arm from this call's final E-cycle asserts the pin
+        // at the NEXT E-cycle, so it does not fold into this call's edge.
+        pin_edge |= self.drain_irq_pin_delay(ticks.saturating_sub(1));
+        // Any ICR-read race window ends with the E-cycle covered here.
+        self.icr_read_race = false;
+        pin_edge
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -681,10 +716,11 @@ impl Cia {
     // keyboard MCU's KCLK line (CIA-A) and the PA1-to-CNT parallel-port
     // board tie (CIA-B) through cnt_rising_edge.
     fn pulse_cnt(&mut self) -> bool {
-        let mut fired_mask = 0;
+        let mut timer_mask = 0;
+        let mut sp_mask = 0;
         if self.ta_running && self.ta_counts_cnt {
             let ta_underflows = advance(&mut self.ta_count, self.ta_latch, 1);
-            fired_mask |= u8::from(ta_underflows != 0) * ICR_TA;
+            timer_mask |= u8::from(ta_underflows != 0) * ICR_TA;
             if ta_underflows != 0 && self.ta_oneshot {
                 self.ta_running = false;
                 self.regs[REG_CRA] &= !0x01;
@@ -692,7 +728,7 @@ impl Cia {
             if ta_underflows != 0 {
                 self.update_timer_a_pb_output();
             }
-            fired_mask |= self.tick_sdr_output(ta_underflows);
+            sp_mask |= self.tick_sdr_output(ta_underflows);
             if self.tb_running
                 && matches!(
                     self.tb_input_mode,
@@ -702,7 +738,7 @@ impl Cia {
                 && ta_underflows != 0
             {
                 let tb_underflows = advance(&mut self.tb_count, self.tb_latch, ta_underflows);
-                fired_mask |= u8::from(tb_underflows != 0) * ICR_TB;
+                timer_mask |= u8::from(tb_underflows != 0) * ICR_TB;
                 if tb_underflows != 0 {
                     self.update_timer_b_pb_output();
                 }
@@ -710,7 +746,7 @@ impl Cia {
         }
         if self.tb_running && self.tb_input_mode == TimerBInputMode::Cnt {
             let tb_underflows = advance(&mut self.tb_count, self.tb_latch, 1);
-            fired_mask |= u8::from(tb_underflows != 0) * ICR_TB;
+            timer_mask |= u8::from(tb_underflows != 0) * ICR_TB;
             if tb_underflows != 0 && self.tb_oneshot {
                 self.tb_running = false;
                 self.regs[REG_CRB] &= !0x01;
@@ -719,7 +755,9 @@ impl Cia {
                 self.update_timer_b_pb_output();
             }
         }
-        self.latch_interrupts(fired_mask)
+        let edge = self.latch_timer_interrupts(timer_mask);
+        let _ = self.latch_interrupts(sp_mask);
+        edge
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -750,6 +788,11 @@ impl Cia {
         ICR_SP
     }
 
+    /// Latch delayed interrupt sources (TOD alarm, FLAG, serial): the
+    /// external pin follows one E-cycle later (vAmiga CIASetInt0), so
+    /// no immediate edge is ever returned; it surfaces from the `tick`
+    /// drain. The constant false keeps the signature parallel with
+    /// `latch_timer_interrupts` for callers that forward the edge.
     fn latch_interrupts(&mut self, fired_mask: u8) -> bool {
         if fired_mask == 0 {
             return false;
@@ -759,20 +802,89 @@ impl Cia {
         if enabled != 0 {
             let was_set = self.icr_data & ICR_IR != 0;
             self.icr_data |= ICR_IR;
-            return !was_set;
+            if !was_set {
+                self.arm_irq_pin();
+            }
+        }
+        false
+    }
+
+    /// Latch timer-underflow sources: the underflow drives the pin in
+    /// the SAME E-cycle (vAmiga CIASetInt1) and the edge is returned to
+    /// the caller now -- unless the underflow races an ICR read in this
+    /// E-cycle, which pushes the assert one E-cycle out like a delayed
+    /// source (vAmiga CIAReadIcr0 gating triggerTimerIrq).
+    fn latch_timer_interrupts(&mut self, fired_mask: u8) -> bool {
+        if fired_mask == 0 {
+            return false;
+        }
+        self.icr_data |= fired_mask;
+        if fired_mask & self.icr_mask == 0 {
+            return false;
+        }
+        self.icr_data |= ICR_IR;
+        if self.icr_read_race {
+            self.arm_irq_pin();
+            return false;
+        }
+        if self.irq_pin {
+            return false;
+        }
+        self.irq_pin = true;
+        self.irq_pin_delay_eticks = 0;
+        true
+    }
+
+    /// The internal interrupt condition just asserted: the external pin
+    /// follows one E-clock cycle later (drained in `drain_irq_pin_delay`).
+    fn arm_irq_pin(&mut self) {
+        if !self.irq_pin && self.irq_pin_delay_eticks == 0 {
+            self.irq_pin_delay_eticks = 1;
+        }
+    }
+
+    /// Advance the pin-lag countdown by `eticks`. Returns true when the
+    /// pin asserts during this span (the bus latches INTREQ on that edge).
+    fn drain_irq_pin_delay(&mut self, eticks: u32) -> bool {
+        if self.irq_pin_delay_eticks == 0 || eticks == 0 {
+            return false;
+        }
+        if eticks as u64 >= u64::from(self.irq_pin_delay_eticks) {
+            self.irq_pin_delay_eticks = 0;
+            // The condition may have been acknowledged inside the lag
+            // window; the pin only rises if it still holds.
+            if self.icr_data & ICR_IR != 0 {
+                self.irq_pin = true;
+                return true;
+            }
+        } else {
+            self.irq_pin_delay_eticks -= eticks as u8;
         }
         false
     }
 
     pub fn irq_line_asserted(&self) -> bool {
-        self.icr_data & ICR_IR != 0
+        self.irq_pin
+    }
+
+    /// Test-harness stand-in for the E-clock passing: settle a pending
+    /// pin assert whose lag the caller's own timekeeping already covers
+    /// (the bus drains through `tick`; timers are not advanced here).
+    #[cfg(test)]
+    pub fn settle_irq_pin(&mut self) -> bool {
+        self.drain_irq_pin_delay(u32::from(u8::MAX))
     }
 
     fn update_irq_line(&mut self) {
         if self.icr_data & self.icr_mask & 0x1F != 0 {
-            self.icr_data |= ICR_IR;
+            if self.icr_data & ICR_IR == 0 {
+                self.icr_data |= ICR_IR;
+                self.arm_irq_pin();
+            }
         } else {
             self.icr_data &= !ICR_IR;
+            self.irq_pin = false;
+            self.irq_pin_delay_eticks = 0;
         }
     }
 
@@ -971,8 +1083,10 @@ mod tests {
             .into_iter()
             .enumerate()
         {
-            let irq = cia.cnt_rising_edge(bit);
+            let _ = cia.cnt_rising_edge(bit);
             cia.cnt_falling_edge();
+            // The pin lags the internal latch by one E-cycle.
+            let irq = cia.settle_irq_pin();
             assert_eq!(irq, i == 7, "IRQ only on the 8th bit (bit {i})");
         }
         assert_eq!(cia.read(REG_SDR), 0xA5);
@@ -993,8 +1107,9 @@ mod tests {
         // interrupt exactly on the 8th.
         cia.write(REG_CRA, 0);
         for i in 0..8 {
-            let fired = cia.cnt_rising_edge(i % 2 == 0);
+            let _ = cia.cnt_rising_edge(i % 2 == 0);
             cia.cnt_falling_edge();
+            let fired = cia.settle_irq_pin();
             assert_eq!(fired, i == 7, "SP must latch exactly on edge 8 (edge {i})");
         }
         assert_eq!(cia.read(REG_SDR), 0xAA);
@@ -1022,7 +1137,7 @@ mod tests {
         cia.write(REG_PRA, 0xFF);
         assert_eq!(cia.ta_count, 0);
         cia.write(REG_PRA, 0x00);
-        cia.write(REG_PRA, 0xFF); // underflow edge
+        cia.write(REG_PRA, 0xFF); // underflow edge asserts the pin same-cycle
         assert!(
             cia.irq_line_asserted(),
             "underflow must assert the IRQ line"
@@ -1052,6 +1167,7 @@ mod tests {
         let mut edges = 0;
         let fired = loop {
             edges += 1;
+            // A timer underflow asserts the pin on the same edge.
             let fired = cia.cnt_rising_edge(true);
             cia.cnt_falling_edge();
             if fired || edges > 16 {
@@ -1184,8 +1300,13 @@ mod tests {
         cia.write(REG_TODLO, 0x20);
         let _ = cia.read(REG_ICR);
 
-        assert!(cia.tick_tod());
+        assert!(!cia.tick_tod(), "the pin lags the alarm latch");
         assert_eq!(cia.tod_count, 0x000021);
+        assert!(!cia.irq_line_asserted());
+        assert!(
+            cia.settle_irq_pin(),
+            "the alarm reaches the pin an E-cycle later"
+        );
         assert_eq!(cia.read(REG_ICR) & (ICR_ALRM | ICR_IR), ICR_ALRM | ICR_IR);
     }
 
@@ -1223,6 +1344,54 @@ mod tests {
     }
 
     #[test]
+    fn timer_underflow_asserts_pin_in_same_e_cycle() {
+        // vAmiga CIASetInt1: a timer underflow pulls the pin down in the
+        // E-cycle of the underflow itself, with no one-cycle lag.
+        let mut cia = Cia::new(Which::A);
+        cia.write(REG_ICR, 0x80 | ICR_TA);
+        cia.write(REG_TALO, 3);
+        cia.write(REG_TAHI, 0);
+        cia.write(REG_CRA, 0x01);
+
+        assert!(!cia.tick(3));
+        assert!(!cia.irq_line_asserted());
+        assert!(cia.tick(1), "underflow must assert the pin same-cycle");
+        assert!(cia.irq_line_asserted());
+    }
+
+    #[test]
+    fn icr_read_race_delays_timer_pin_by_one_e_cycle() {
+        // vAmiga CIAReadIcr0: a timer underflow in the same E-cycle as
+        // an ICR read asserts the pin one E-cycle late.
+        let mut cia = Cia::new(Which::A);
+        cia.write(REG_ICR, 0x80 | ICR_TA);
+        cia.write(REG_TALO, 3);
+        cia.write(REG_TAHI, 0);
+        cia.write(REG_CRA, 0x01);
+
+        assert!(!cia.tick(3));
+        let _ = cia.read(REG_ICR); // the read the underflow races
+        assert!(!cia.tick(1), "racing underflow must not assert same-cycle");
+        assert!(!cia.irq_line_asserted());
+        assert!(cia.tick(1), "the assert lands one E-cycle later");
+        assert!(cia.irq_line_asserted());
+    }
+
+    #[test]
+    fn probe_pin_drain_after_sdr_arm() {
+        let mut cia = Cia::new(Which::A);
+        cia.write(REG_ICR, 0x88); // enable SP
+                                  // SPMODE=0 input; shift 8 bits in via CNT.
+        for _ in 0..8 {
+            let _ = cia.cnt_rising_edge(true);
+            cia.cnt_falling_edge();
+        }
+        assert!(!cia.irq_line_asserted(), "pin must lag the ICR condition");
+        assert!(cia.tick(1), "one E-cycle later the pin asserts");
+        assert!(cia.irq_line_asserted());
+    }
+
+    #[test]
     fn flag_input_latches_icr_and_respects_mask() {
         let mut cia = Cia::new(Which::B);
 
@@ -1233,7 +1402,11 @@ mod tests {
 
         cia.write(REG_ICR, 0x80 | ICR_FLG);
         cia.release_flag();
-        assert!(cia.assert_flag());
+        let _ = cia.assert_flag();
+        assert!(
+            cia.settle_irq_pin(),
+            "FLAG edge reaches the pin an E-cycle later"
+        );
         assert_eq!(cia.read(REG_ICR), ICR_IR | ICR_FLG);
     }
 
@@ -1250,6 +1423,8 @@ mod tests {
 
         cia.write(REG_ICR, 0x80 | ICR_TA);
 
+        assert!(!cia.irq_line_asserted(), "the pin lags the mask write");
+        assert!(cia.settle_irq_pin());
         assert!(cia.irq_line_asserted());
         assert_eq!(cia.read(REG_ICR), ICR_IR | ICR_TA);
     }

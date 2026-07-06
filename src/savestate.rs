@@ -84,7 +84,9 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      buffer/auddat holding registers, percnt, request latches)
 //  23: FloppyDrive gained the step-pulse timestamps (last_step_cck and the
 //      per-direction stamps for the mechanism's 40 us pulse floor)
-pub const STATE_VERSION: u32 = 23;
+//  24: Cia gained the delayed /IRQ pin state (irq_pin,
+//      irq_pin_delay_eticks - the 8520 one-E-cycle interrupt delay)
+pub const STATE_VERSION: u32 = 24;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {
