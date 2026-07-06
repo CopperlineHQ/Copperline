@@ -144,6 +144,18 @@ pub struct M68kMachine {
     dbg_sched_bhist: std::collections::HashMap<u32, u64>,
     dbg_sched_bhist_dumped: bool,
     dbg_sched_loop_dumped: bool,
+    // Level-6 (vec 30, CIA-B EXTER) handler-duration probe: entry state,
+    // per-PC cck billing across runs, and the one-shot cost-table dump.
+    // return_pc == 0 means no handler is being tracked.
+    dbg_sched_vec30_return_pc: u32,
+    dbg_sched_vec30_entry_cck: u64,
+    dbg_sched_vec30_entry_vpos: u32,
+    dbg_sched_vec30_entry_hpos: u32,
+    dbg_sched_vec30_prev_pc: u32,
+    dbg_sched_vec30_prev_cck: u64,
+    dbg_sched_vec30_cost: std::collections::HashMap<u32, (u64, u64)>,
+    dbg_sched_vec30_runs: u32,
+    dbg_sched_vec30_cost_dumped: bool,
     // Cached per-instruction diagnostic gates (read from the environment once at
     // construction). These run on every instruction, so they must not do a live
     // std::env lookup -- that lock+scan, millions of times a second, drops the
@@ -315,6 +327,15 @@ impl M68kMachine {
             dbg_sched_bhist: std::collections::HashMap::new(),
             dbg_sched_bhist_dumped: false,
             dbg_sched_loop_dumped: false,
+            dbg_sched_vec30_return_pc: 0,
+            dbg_sched_vec30_entry_cck: 0,
+            dbg_sched_vec30_entry_vpos: 0,
+            dbg_sched_vec30_entry_hpos: 0,
+            dbg_sched_vec30_prev_pc: 0,
+            dbg_sched_vec30_prev_cck: 0,
+            dbg_sched_vec30_cost: std::collections::HashMap::new(),
+            dbg_sched_vec30_runs: 0,
+            dbg_sched_vec30_cost_dumped: false,
             dbg_fc_addr: crate::envcfg::var("COPPERLINE_DBG_FC")
                 .and_then(|s| u32::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok()),
             dbg_ipl_on: crate::envcfg::flag("COPPERLINE_DIAG_IPL"),
@@ -745,15 +766,23 @@ impl M68kMachine {
         // the loader's resume PC -- logging it reveals the loader's main loop /
         // yield point, which sizes each decrunch slice.
         const SWITCH_B_RTE: u32 = 0x00C0_3702;
+        // 30 = level 6 autovector: the CIA-B EXTER kernel tick whose handler
+        // duration this probe measures (entry at the handler's first
+        // instruction, exit when the pushed return PC is reached).
+        const VEC_LEVEL6: u32 = 30;
         let is_bp = pc == LOOP_TOP
             || pc == NUDGE
             || pc == COUNTER_INC
             || pc == RENDER_DONE
             || pc == SOFTINT_RET
             || pc == SWITCH_B_RTE;
-        // Fast path: when not actively capturing the task-B span, only the five
-        // breakpoint PCs matter.
-        if !self.dbg_sched_capturing && !is_bp {
+        // Exception entries surface here at the handler's first instruction
+        // (the dispatch already pushed [SR][return PC] at a7).
+        let vec_entry = self.cpu.last_exception_vector.take();
+        let in_vec30 = self.dbg_sched_vec30_return_pc != 0;
+        // Fast path: when not capturing the task-B span nor timing a level-6
+        // handler, only the five breakpoint PCs and exception entries matter.
+        if !self.dbg_sched_capturing && !is_bp && vec_entry.is_none() && !in_vec30 {
             return;
         }
         let secs = self.bus.bus.emulated_seconds();
@@ -765,6 +794,68 @@ impl M68kMachine {
             .unwrap_or(f64::INFINITY);
         if secs < after || secs >= until {
             return;
+        }
+        if let Some(vector) = vec_entry {
+            let sp = self.cpu.a(7);
+            let return_pc = (u32::from(self.bus.bus.peek_word_any(sp.wrapping_add(2))) << 16)
+                | u32::from(self.bus.bus.peek_word_any(sp.wrapping_add(4)));
+            log::info!(
+                "sched vec={} secs={secs:.5} v={} h={} return_pc={return_pc:#010X}",
+                vector,
+                self.bus.bus.agnus.vpos,
+                self.bus.bus.agnus.hpos,
+            );
+            if vector == VEC_LEVEL6 {
+                self.dbg_sched_vec30_return_pc = return_pc;
+                self.dbg_sched_vec30_entry_cck = self.bus.bus.emulated_cck();
+                self.dbg_sched_vec30_entry_vpos = self.bus.bus.agnus.vpos;
+                self.dbg_sched_vec30_entry_hpos = self.bus.bus.agnus.hpos;
+                self.dbg_sched_vec30_prev_pc = pc;
+                self.dbg_sched_vec30_prev_cck = self.dbg_sched_vec30_entry_cck;
+            }
+        } else if in_vec30 {
+            // Bill the instruction that just retired (prev_pc) with the cck
+            // the bus advanced since it started; slice-boundary chipset
+            // catch-up rides on whichever instruction spans it.
+            let now_cck = self.bus.bus.emulated_cck();
+            let cost = self
+                .dbg_sched_vec30_cost
+                .entry(self.dbg_sched_vec30_prev_pc)
+                .or_insert((0, 0));
+            cost.0 += 1;
+            cost.1 += now_cck.saturating_sub(self.dbg_sched_vec30_prev_cck);
+            if pc == self.dbg_sched_vec30_return_pc {
+                self.dbg_sched_vec30_return_pc = 0;
+                self.dbg_sched_vec30_runs += 1;
+                log::info!(
+                    "sched vec30-dur secs={secs:.5} cck={} entry(v={} h={}) exit(v={} h={})",
+                    now_cck.saturating_sub(self.dbg_sched_vec30_entry_cck),
+                    self.dbg_sched_vec30_entry_vpos,
+                    self.dbg_sched_vec30_entry_hpos,
+                    self.bus.bus.agnus.vpos,
+                    self.bus.bus.agnus.hpos,
+                );
+                if self.dbg_sched_vec30_runs == 40 && !self.dbg_sched_vec30_cost_dumped {
+                    self.dbg_sched_vec30_cost_dumped = true;
+                    let mut rows: Vec<(u32, u64, u64)> = self
+                        .dbg_sched_vec30_cost
+                        .iter()
+                        .map(|(&p, &(n, cck))| (p, n, cck))
+                        .collect();
+                    rows.sort_by_key(|r| r.0);
+                    log::info!("sched vec30-cost over {} runs:", self.dbg_sched_vec30_runs);
+                    for (p, n, cck) in rows {
+                        log::info!(
+                            "sched vec30-cost PC={p:#010X} op={:04X} n={n} avg_cck={:.2}",
+                            self.bus.bus.peek_word_any(p),
+                            cck as f64 / n as f64,
+                        );
+                    }
+                }
+            } else {
+                self.dbg_sched_vec30_prev_pc = pc;
+                self.dbg_sched_vec30_prev_cck = now_cck;
+            }
         }
         // While inside the render-done -> task-B-return span, histogram every PC
         // so we can see what task B (and the interrupt handlers that fire in the
@@ -800,18 +891,6 @@ impl M68kMachine {
                 self.cpu.a(2),
             );
             return;
-        }
-        // Log every exception/interrupt entry while the window is active:
-        // vector, beam position, and the PC the handler will return to.
-        if let Some(vector) = self.cpu.last_exception_vector.take() {
-            log::info!(
-                "sched vec={} secs={secs:.5} v={} h={} return_pc={:#010X}",
-                vector,
-                self.bus.bus.agnus.vpos,
-                self.bus.bus.agnus.hpos,
-                (u32::from(self.bus.bus.peek_word_any(self.cpu.a(7).wrapping_add(2))) << 16)
-                    | u32::from(self.bus.bus.peek_word_any(self.cpu.a(7).wrapping_add(4))),
-            );
         }
         if pc == LOOP_TOP {
             if !self.dbg_sched_loop_dumped {
