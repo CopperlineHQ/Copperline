@@ -134,15 +134,12 @@ impl CpuCore {
             // Billed total on the 68010: extension-word prefetch + the EA
             // extension fetches + the internal clocks above + the data
             // cycle + the final prefetch.
-            let ea_ext: u32 = match mode {
-                AddressingMode::Displacement(_)
-                | AddressingMode::Index(_)
-                | AddressingMode::AbsoluteShort => 4,
-                AddressingMode::AbsoluteLong => 8,
-                _ => 0,
-            };
-            let access: u32 = if size == Size::Long { 8 } else { 4 };
-            (4 + ea_ext + moves_sync + access + 4) as i32
+            // ea_calc_cycles also counts the 2 internal clocks the -(An)
+            // and d8(An,Xn) address calculations bill inside resolve_ea
+            // (Moira computeEA SYNC(2)), putting the -(An) byte/word total
+            // at 20 and d8(An,Xn) at 24.
+            let access: i32 = if size == Size::Long { 8 } else { 4 };
+            4 + self.ea_calc_cycles(mode) + moves_sync as i32 + access + 4
         } else {
             4
         }
