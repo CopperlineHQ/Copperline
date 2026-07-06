@@ -83,6 +83,25 @@ makes tight copy/clear loops measurably faster on a real 68010.
 `crates/m68k/tests/loop_mode_timing_tests.rs` pins engagement, the
 68000's non-engagement, and the no-fetch iteration cost.
 
+The 68010's own cycle costs where they differ from the 68000 are
+calibrated against the vAmigaTS `CPU/Timing`/`CPU/Timing2` measurements
+(cross-checked with Moira's cycle-exact 68010 path, which matches
+A500+68010 photos): MOVES spends per-EA-mode internal clocks between the
+address calculation and the SFC/DFC data cycle, MOVE from CCR is
+4 clocks to a register and prefetches before its memory write, a
+format-0 RTE is 24 clocks (the format word is read once, not re-read),
+and an interrupt dispatch is 46 clocks (12 internal before the four-word
+format-0 frame) against the 68000's 44. STOP semantics shared with the
+68000: the SR operand is loaded VERBATIM (a single-stepped STOP observes
+S and T exactly as written; the SST m68000 fixtures pin this), and an
+S-clear SR stops only momentarily -- at the next instruction boundary the
+stopped state's supervisor check raises a privilege violation stacking
+the STOP itself, so the handler's RTE re-executes it; a pending trace
+(T set in the SR the instruction started with) has priority and recovers
+from the stop, while a T bit loaded *by* STOP does not fire while
+stopped. `crates/m68k/tests/stop_and_68010_timing_tests.rs` pins all of
+these.
+
 ## Caches
 
 The on-chip caches are silicon, so they are modelled by default on the parts
