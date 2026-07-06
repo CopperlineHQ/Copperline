@@ -521,6 +521,30 @@ impl Cia {
             _ => {}
         }
 
+        if self.which == Which::B && matches!(reg, REG_PRA | REG_DDRA) {
+            // A500 board tie: CIA-B PA0 is wired to this CIA's own SP pin
+            // and PA1 to its own CNT pin (the parallel port's SEL/POUT
+            // lines, pulled up when not driven). Driving PA1 as an output
+            // therefore clocks the CNT-mode timers, and PA0 supplies the
+            // SP level the serial input shifter samples on that edge.
+            let (old_pra, old_ddra) = if reg == REG_PRA {
+                (prev, self.regs[REG_DDRA])
+            } else {
+                (self.regs[REG_PRA], prev)
+            };
+            let pin = |pra: u8, ddra: u8, bit: u8| -> bool { ddra & bit == 0 || pra & bit != 0 };
+            let old_pa1 = pin(old_pra, old_ddra, 0x02);
+            let new_pa1 = pin(self.regs[REG_PRA], self.regs[REG_DDRA], 0x02);
+            if !old_pa1 && new_pa1 {
+                let new_pa0 = pin(self.regs[REG_PRA], self.regs[REG_DDRA], 0x01);
+                // Latches any timer/serial interrupt; the bus re-samples
+                // irq_line_asserted after every CIA write.
+                let _ = self.cnt_rising_edge(new_pa0);
+            } else if old_pa1 && !new_pa1 {
+                self.cnt_falling_edge();
+            }
+        }
+
         let mut effect = CiaSideEffect::default();
         if self.which == Which::A && matches!(reg, REG_PRA | REG_DDRA) {
             let now_no_overlay = self.cia_a_no_overlay_line();
@@ -614,7 +638,8 @@ impl Cia {
     }
 
     // Models a CNT pin edge (CRA/CRB INMODE counting CNT). Driven by the
-    // keyboard MCU's KCLK line through cnt_rising_edge.
+    // keyboard MCU's KCLK line (CIA-A) and the PA1-to-CNT parallel-port
+    // board tie (CIA-B) through cnt_rising_edge.
     fn pulse_cnt(&mut self) -> bool {
         let mut fired_mask = 0;
         if self.ta_running && self.ta_counts_cnt {
@@ -933,6 +958,47 @@ mod tests {
             assert_eq!(fired, i == 7, "SP must latch exactly on edge 8 (edge {i})");
         }
         assert_eq!(cia.read(REG_SDR), 0xAA);
+    }
+
+    #[test]
+    fn cia_b_pra_output_toggles_clock_its_own_cnt_pin() {
+        // A500 board tie: CIA-B PA1 (driven as an output) is wired back to
+        // the same CIA's CNT pin, so software can clock a CNT-mode timer by
+        // toggling PRA - the vAmigaTS CIA/cnt tests' mechanism.
+        let mut cia = Cia::new(Which::B);
+        cia.write(REG_ICR, 0x80 | ICR_TA); // unmask timer A
+        cia.write(REG_DDRA, 0xFF); // PA outputs; PRA=0 drives PA1 low
+        cia.write(REG_TALO, 3);
+        cia.write(REG_TAHI, 0);
+        cia.write(REG_CRA, 0x21); // START | INMODE = CNT edges
+
+        for _ in 0..2 {
+            cia.write(REG_PRA, 0xFF); // rising edge on PA1 -> CNT
+            cia.write(REG_PRA, 0x00); // falling edge
+        }
+        assert_eq!(cia.ta_count, 1, "two PA1 rises must count twice");
+        assert!(!cia.irq_line_asserted());
+
+        cia.write(REG_PRA, 0xFF);
+        assert_eq!(cia.ta_count, 0);
+        cia.write(REG_PRA, 0x00);
+        cia.write(REG_PRA, 0xFF); // underflow edge
+        assert!(
+            cia.irq_line_asserted(),
+            "underflow must assert the IRQ line"
+        );
+
+        // PA1 as an INPUT floats high: further PRA writes are no edges.
+        cia.write(REG_ICR, ICR_TA); // mask + ack
+        let _ = cia.read(REG_ICR);
+        cia.write(REG_DDRA, 0x00);
+        let count = cia.ta_count;
+        cia.write(REG_PRA, 0xFF);
+        cia.write(REG_PRA, 0x00);
+        assert_eq!(
+            cia.ta_count, count,
+            "input-mode PRA writes must not clock CNT"
+        );
     }
 
     #[test]
