@@ -90,11 +90,33 @@ const DSTAT_SIR: u8 = 0x04;
 const DSTAT_IID: u8 = 0x01;
 /// DMA FIFO depth per byte lane.
 const DMA_FIFO_DEPTH: usize = 16;
-/// SCNTL1: bit 2 asserts even (instead of odd) generated parity.
+/// SCNTL0: bit 0 target mode, bit 2 enable parity generation.
+const REG_SCNTL0: usize = 0x03;
+const SCNTL0_TRG: u8 = 0x01;
+const SCNTL0_EPG: u8 = 0x04;
+/// SCNTL1: bit 2 asserts even (instead of odd) generated parity; bit 3
+/// asserts a SCSI bus reset; bit 6 asserts the data bus, driving SODL/SOCL
+/// onto the (looped-back) SCSI lines.
 const REG_SCNTL1: usize = 0x02;
 const SCNTL1_AESP: u8 = 0x04;
+const SCNTL1_RST: u8 = 0x08;
+const SCNTL1_ADB: u8 = 0x40;
+/// SOCL: SCSI output control latch, driven onto the control lines with ADB.
+const REG_SOCL: usize = 0x04;
 /// SODL: writes push the SCSI FIFO when CTEST4.SFWR routes them there.
 const REG_SODL: usize = 0x05;
+/// SBCL: SCSI bus control lines (input); mirrors SOCL in loopback.
+const REG_SBCL: usize = 0x08;
+/// SBDL: SCSI bus data lines (input); mirrors SODL in loopback.
+const REG_SBDL: usize = 0x09;
+/// SSTAT1: bit 0 the generated data parity, bit 1 SCSI bus reset asserted.
+const REG_SSTAT1: usize = 0x0D;
+const SSTAT1_PAR: u8 = 0x01;
+const SSTAT1_RST: u8 = 0x02;
+/// CTEST4 bit 4: SCSI loopback -- the output latches feed the input registers.
+const CTEST4_SLBE: u8 = 0x10;
+/// SBCL/SOCL bit 3 (ACK) and bit 6 (REQ): assert only in target mode.
+const SBCL_TARGET_ONLY: u8 = 0x48;
 /// SSTAT2: SCSI FIFO fill count in the high nibble.
 const REG_SSTAT2: usize = 0x0C;
 /// CTEST3: reads pop the SCSI FIFO.
@@ -168,6 +190,14 @@ impl A4091 {
         } else {
             even ^ 1
         }
+    }
+
+    /// In loopback (CTEST4.SLBE) with the data bus asserted (SCNTL1.ADB),
+    /// the SODL/SOCL output latches feed straight back into the SBDL/SBCL
+    /// input registers -- there is no real bus. The SCSI pin self-test walks
+    /// patterns through this path.
+    fn loopback(&self) -> bool {
+        self.regs[REG_CTEST4] & CTEST4_SLBE != 0 && self.regs[REG_SCNTL1] & SCNTL1_ADB != 0
     }
 
     /// The DMA FIFO lane CTEST6 currently addresses, when CTEST4.FBL2
@@ -404,6 +434,44 @@ impl crate::zorro_device::ZorroDevice for A4091 {
                     }
                     REG_SSTAT2 => {
                         ((self.scsi_fifo.len() as u8) << 4) | (self.regs[REG_SSTAT2] & 0x0F)
+                    }
+                    // SBDL mirrors the driven data latch in loopback; the
+                    // idle bus reads all-deasserted (0).
+                    REG_SBDL => {
+                        if self.loopback() {
+                            self.regs[REG_SODL]
+                        } else {
+                            0
+                        }
+                    }
+                    // SBCL mirrors the driven control latch in loopback;
+                    // ACK/REQ (bits 3/6) assert only in target mode.
+                    REG_SBCL => {
+                        if self.loopback() {
+                            let c = self.regs[REG_SOCL];
+                            if self.regs[REG_SCNTL0] & SCNTL0_TRG != 0 {
+                                c
+                            } else {
+                                c & !SBCL_TARGET_ONLY
+                            }
+                        } else {
+                            0
+                        }
+                    }
+                    // SSTAT1: RST reflects the SCNTL1.RST bus-reset request;
+                    // PAR is the generated parity of the driven data.
+                    REG_SSTAT1 => {
+                        let mut v = self.regs[REG_SSTAT1] & !(SSTAT1_RST | SSTAT1_PAR);
+                        if self.regs[REG_SCNTL1] & SCNTL1_RST != 0 {
+                            v |= SSTAT1_RST;
+                        }
+                        if self.loopback()
+                            && self.regs[REG_SCNTL0] & SCNTL0_EPG != 0
+                            && self.scsi_parity(self.regs[REG_SODL]) & 1 != 0
+                        {
+                            v |= SSTAT1_PAR;
+                        }
+                        v
                     }
                     // CTEST3 pops the SCSI FIFO; parity lands in CTEST2.SFP.
                     REG_CTEST3 if !self.scsi_fifo.is_empty() => {
@@ -678,6 +746,72 @@ mod tests {
             assert_eq!(sfp, expect, "parity byte {i}");
             assert_eq!(b.read(io(REG_SSTAT2), 1, &mut host) >> 4, (7 - i) as u32);
         }
+    }
+
+    #[test]
+    fn scsi_pin_loopback_mirrors_sodl_socl_and_bus_reset() {
+        // The ncr7xx SCSI pin test: in loopback (CTEST4.SLBE) with the data
+        // bus asserted (SCNTL1.ADB), SODL mirrors onto SBDL and SOCL onto
+        // SBCL, with the generated parity in SSTAT1.PAR; a SCNTL1.RST request
+        // shows up in SSTAT1.RST.
+        let mut b = board_with_rom(test_rom_64k());
+        let mut mem = test_memory();
+        let mut host = DeviceHost::new(&mut mem);
+        let io = |r: usize| IO_OFFSET + r as u32;
+
+        // Idle bus: data and control lines read deasserted, no parity/reset.
+        assert_eq!(b.read(io(REG_SBDL), 1, &mut host), 0);
+        assert_eq!(b.read(io(REG_SBCL), 1, &mut host), 0);
+        assert_eq!(b.read(io(REG_SSTAT1), 1, &mut host), 0);
+
+        // A bus-reset request reflects into SSTAT1.RST, then clears.
+        b.write(io(REG_SCNTL1), 1, u32::from(SCNTL1_RST), &mut host);
+        assert_ne!(
+            b.read(io(REG_SSTAT1), 1, &mut host) & u32::from(SSTAT1_RST),
+            0
+        );
+        b.write(io(REG_SCNTL1), 1, 0, &mut host);
+        assert_eq!(
+            b.read(io(REG_SSTAT1), 1, &mut host) & u32::from(SSTAT1_RST),
+            0
+        );
+
+        // Enter loopback with parity generation: SLBE + EPG + ADB.
+        b.write(io(REG_CTEST4), 1, u32::from(CTEST4_SLBE), &mut host);
+        b.write(io(REG_SCNTL0), 1, u32::from(SCNTL0_EPG), &mut host);
+        b.write(io(REG_SCNTL1), 1, u32::from(SCNTL1_ADB), &mut host);
+
+        // Data walk: SODL -> SBDL, odd generated parity, no control asserted.
+        for d in [0x00u8, 0x01, 0x80, 0x5A, 0xFF] {
+            b.write(io(REG_SODL), 1, u32::from(d), &mut host);
+            assert_eq!(b.read(io(REG_SBDL), 1, &mut host), u32::from(d));
+            assert_eq!(b.read(io(REG_SBCL), 1, &mut host), 0);
+            let par = b.read(io(REG_SSTAT1), 1, &mut host) & u32::from(SSTAT1_PAR);
+            let expect = u32::from((d.count_ones() & 1) == 0); // odd parity
+            assert_eq!(par, expect, "parity for {d:#04x}");
+        }
+
+        // Control walk: SOCL -> SBCL, no stray data on the bus.
+        b.write(io(REG_SODL), 1, 0, &mut host);
+        for c in [0x01u8, 0x02, 0x04, 0x10, 0x20, 0x80] {
+            b.write(io(REG_SOCL), 1, u32::from(c), &mut host);
+            assert_eq!(
+                b.read(io(REG_SBCL), 1, &mut host),
+                u32::from(c),
+                "ctrl {c:#04x}"
+            );
+            assert_eq!(b.read(io(REG_SBDL), 1, &mut host), 0);
+        }
+        // ACK (bit 3) stays deasserted until target mode (SCNTL0.TRG).
+        b.write(io(REG_SOCL), 1, 0x08, &mut host);
+        assert_eq!(b.read(io(REG_SBCL), 1, &mut host), 0);
+        b.write(
+            io(REG_SCNTL0),
+            1,
+            u32::from(SCNTL0_EPG | SCNTL0_TRG),
+            &mut host,
+        );
+        assert_eq!(b.read(io(REG_SBCL), 1, &mut host), 0x08);
     }
 
     #[test]
