@@ -5041,6 +5041,8 @@ fn chip_dma_addr_mask(chip_ram_len: usize) -> u32 {
     (bytes - 1) as u32
 }
 
+pub(crate) const COPPER_FRAME_START_HPOS: u32 = 6;
+
 fn copper_frame_start_vpos(_video_standard: VideoStandard) -> u32 {
     // The Copper is restarted (COP1LC reloaded into the Copper PC) at the very
     // top of every frame and runs through the vertical-blank lines, not just
