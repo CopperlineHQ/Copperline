@@ -4291,25 +4291,19 @@ impl Bus {
         let off = (addr & 0xFFF) as u16;
         match size {
             1 => {
+                // A 68000 byte write drives the byte onto BOTH halves of
+                // the data bus, and the custom chips have no byte lanes:
+                // they latch the full 16-bit word regardless of which
+                // strobe (/UDS or /LDS) the CPU asserted. `move.b
+                // v,COLOR00+1` therefore lands $vvvv in the register, not
+                // an addressed-lane merge (vAmigaTS CIA/oldcnt cnt1/cnt3/
+                // cnt5 ramps show the mirrored high byte on hardware;
+                // vAmiga's CPU poke8 to custom space doubles the byte the
+                // same way).
                 let b = (val & 0xFF) as u16;
-                let word_off = off & 0xFFE;
-                let word = if custom_byte_write_mirrors_to_word(word_off) {
-                    (b << 8) | b
-                } else if let Some(cur) = self.custom_byte_write_latch(word_off) {
-                    if off & 1 == 0 {
-                        (cur & 0x00FF) | (b << 8)
-                    } else {
-                        (cur & 0xFF00) | b
-                    }
-                } else {
-                    // Some write-only command/strobe registers do not
-                    // have a meaningful word latch in this model. Keep
-                    // the old mirrored-byte behavior for those rare
-                    // byte writes rather than inventing state.
-                    (b << 8) | b
-                };
+                let word = (b << 8) | b;
                 trace!("custom W8  off={:03X} val={:02X}", off, b);
-                self.write_custom_word_from(word_off, word, BeamWriteSource::Cpu)
+                self.write_custom_word_from(off & 0xFFE, word, BeamWriteSource::Cpu)
             }
             4 => {
                 // MOVE.L to $DFFxxx writes two consecutive register
@@ -4497,7 +4491,7 @@ impl Bus {
             0x09C => self.cpu_visible_intreq(),
             0x09E => self.paula.adkcon,
             audio @ 0x0A0..=0x0DF => self.paula.peek_audio_reg_latch(audio - 0x0A0)?,
-            other => self.custom_byte_write_latch(other)?,
+            other => self.custom_reg_latch(other)?,
         };
         Some(value)
     }
@@ -4883,10 +4877,6 @@ impl Bus {
             }
         }
     }
-}
-
-fn custom_byte_write_mirrors_to_word(off: u16) -> bool {
-    matches!(off & 0xFFE, 0x02E)
 }
 
 fn bus_slots_for_cpu_access(size: usize) -> u32 {

@@ -871,17 +871,26 @@ fn dma_modulo_registers_are_word_aligned() {
 }
 
 #[test]
-fn custom_byte_write_updates_only_addressed_lane_for_stateful_registers() {
+fn custom_byte_write_drives_the_byte_onto_both_bus_halves() {
+    // A 68000 byte write drives the byte on BOTH halves of the data bus,
+    // and the custom chips latch the full 16-bit word (no byte lanes):
+    // either byte address of a register receives $vvvv, never a merge
+    // with the previously latched word. The vAmigaTS CIA/oldcnt
+    // cnt1/cnt3/cnt5 ramps (move.b TALO,COLOR00+1 showing the mirrored
+    // high nibble in red) photograph this on hardware.
     let mut bus = empty_bus();
 
-    let _ = bus.custom_write(0xDFF074, 1, 0x80);
-    assert_eq!(bus.blitter.bltadat, 0x8000);
+    let _ = bus.custom_write(0xDFF074, 1, 0x80); // BLTADAT even byte
+    assert_eq!(bus.blitter.bltadat, 0x8080);
 
-    let _ = bus.custom_write(0xDFF075, 1, 0x00);
-    assert_eq!(bus.blitter.bltadat, 0x8000);
+    let _ = bus.custom_write(0xDFF075, 1, 0x01); // BLTADAT odd byte
+    assert_eq!(bus.blitter.bltadat, 0x0101);
 
-    let _ = bus.custom_write(0xDFF075, 1, 0x01);
-    assert_eq!(bus.blitter.bltadat, 0x8001);
+    // COLOR00: `move.b v,COLOR00+1` latches $vvvv, so the red nibble
+    // mirrors the blue one ($AE -> RGB $EAE; bit 15 is the stored
+    // transparency/genlock bit from the mirrored byte's bit 7).
+    let _ = bus.custom_write(0xDFF181, 1, 0xAE);
+    assert_eq!(bus.denise.palette[0], 0x8EAE);
 
     // COPCON's one-bit Agnus control latch sees the mirrored byte value,
     // so a 68000 byte bit operation such as `bset #1,COPCON` enables CDANG.
@@ -890,11 +899,10 @@ fn custom_byte_write_updates_only_addressed_lane_for_stateful_registers() {
     let _ = bus.custom_write(0xDFF02E, 1, 0x00);
     assert_eq!(bus.agnus.copcon, 0x0000);
 
-    // Audio registers do NOT use the addressed-lane latch: a real
-    // 68000 drives a byte write onto both data-bus halves and Paula
-    // latches the full word, so `move.b #v,AUDxPER/VOL` mirrors the
-    // byte into both lanes. (Magic Pockets sets its echo voice volume
-    // with a byte write to AUDxVOL and relies on this.)
+    // Paula latches the mirrored word too, so `move.b #v,AUDxPER/VOL`
+    // lands the value in the low byte exactly as `move.w` would. (Magic
+    // Pockets sets its echo voice volume with a byte write to AUDxVOL
+    // and relies on this.)
     let _ = bus.custom_write(0xDFF0A6, 1, 0x12);
     assert_eq!(bus.paula.peek_audio_reg_latch(0x06), Some(0x1212));
 
@@ -9272,7 +9280,7 @@ fn custom_register_read_map_matches_dispatch() {
     }
 }
 
-/// ECS-only registers whose byte-write latch (and dispatch) appears
+/// ECS-only registers whose debugger latch view (and dispatch) appears
 /// only on ECS Agnus/Denise. The bus gates these on the configured
 /// revision; this list is the single place that fact is asserted.
 const ECS_ONLY_LATCHED_REGS: &[(u16, &str)] = &[
@@ -9296,22 +9304,22 @@ const ECS_ONLY_LATCHED_REGS: &[(u16, &str)] = &[
 
 #[test]
 fn custom_register_ecs_latches_follow_agnus_revision() {
-    // OCS: the ECS-only latches must report "unmodeled" so byte writes
-    // do not invent state for registers the chipset does not have.
+    // OCS: the ECS-only latches must report "unmodeled" so the debugger
+    // does not invent state for registers the chipset does not have.
     let ocs = empty_bus();
     for &(off, name) in ECS_ONLY_LATCHED_REGS {
         assert!(
-            ocs.custom_byte_write_latch(off).is_none(),
+            ocs.custom_reg_latch(off).is_none(),
             "{name} ({off:#05X}) must not latch on OCS"
         );
     }
 
-    // ECS: the same registers gain a byte-write latch.
+    // ECS: the same registers gain a debugger latch view.
     let mut ecs = empty_bus();
     ecs.set_agnus_revision(AgnusRevision::Ecs8372Rev4);
     for &(off, name) in ECS_ONLY_LATCHED_REGS {
         assert!(
-            ecs.custom_byte_write_latch(off).is_some(),
+            ecs.custom_reg_latch(off).is_some(),
             "{name} ({off:#05X}) must latch on ECS"
         );
     }
@@ -9321,17 +9329,17 @@ fn custom_register_ecs_latches_follow_agnus_revision() {
     // caught regardless of revision.
     for bus in [&ocs, &ecs] {
         // COPCON, BLTCON0, BPLCON0, BPL1PTH, BPL1DAT, SPR0PTH, SPR0POS,
-        // COLOR00 -- a spread across the byte-latched register groups.
+        // COLOR00 -- a spread across the latched register groups.
         for off in [0x02E, 0x040, 0x100, 0x0E0, 0x110, 0x120, 0x140, 0x180] {
             assert!(
-                bus.custom_byte_write_latch(off).is_some(),
+                bus.custom_reg_latch(off).is_some(),
                 "always-latched register {off:#05X}"
             );
         }
-        // DMACONR (read-only), COPJMP1 and DMACON (strobes): no byte latch.
+        // DMACONR (read-only), COPJMP1 and DMACON (strobes): no latch.
         for off in [0x002, 0x088, 0x096] {
             assert!(
-                bus.custom_byte_write_latch(off).is_none(),
+                bus.custom_reg_latch(off).is_none(),
                 "read-only/strobe register {off:#05X} must not latch"
             );
         }
@@ -9582,7 +9590,7 @@ fn custom_register_space_sweep_is_panic_free_and_unused_offsets_inert() {
     // gaining a read arm or a stored latch.
     let mut bus = empty_bus();
     for off in [0x1F0u16, 0x1F2, 0x1F4, 0x1F6, 0x1F8, 0x1FA, 0x1FC, 0x1FE] {
-        assert!(bus.custom_byte_write_latch(off).is_none());
+        assert!(bus.custom_reg_latch(off).is_none());
         bus.custom_write(u64::from(off), 2, 0xFFFF);
         assert_eq!(
             bus.custom_read(u64::from(off), 2),
