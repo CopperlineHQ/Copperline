@@ -1093,6 +1093,15 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                     cpu.ppc = cpu.pc;
                     return cpu.exception_privilege(bus);
                 }
+                // 68000-040: the SR is loaded VERBATIM -- a single-stepped
+                // STOP observes the immediate with S and T exactly as
+                // written (SST m68000 fixtures pin this). An S-clear SR
+                // stops only momentarily: the stopped state's supervisor
+                // check raises the privilege violation at the NEXT
+                // instruction boundary (`stopped_supervisor_check`). A
+                // pending trace (T set in the SR the instruction started
+                // with) has priority via the caller's end-of-step trace
+                // check, which recovers from the stop.
                 cpu.stop(sr);
                 4
             } else {

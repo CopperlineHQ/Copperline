@@ -41,10 +41,16 @@ impl CpuCore {
         // Check for pending interrupts
         self.check_and_service_interrupts(bus);
 
-        // If stopped, consume no cycles
+        // If stopped, run the stopped-state supervisor check (a STOP that
+        // loaded an S-clear SR wakes into a privilege violation here);
+        // otherwise consume no cycles.
         if self.stopped != 0 {
-            self.cycles_remaining = 0;
-            return self.initial_cycles;
+            if let Some(cycles) = self.stopped_supervisor_check(bus) {
+                self.cycles_remaining -= cycles;
+            } else {
+                self.cycles_remaining = 0;
+                return self.initial_cycles;
+            }
         }
 
         // Main execution loop
@@ -130,6 +136,9 @@ impl CpuCore {
         use crate::core::types::{InternalStepResult, StepResult};
 
         if self.stopped != 0 {
+            if let Some(cycles) = self.stopped_supervisor_check(bus) {
+                return StepResult::Ok { cycles };
+            }
             return StepResult::Stopped;
         }
 
@@ -223,6 +232,9 @@ impl CpuCore {
         use crate::core::types::{InternalStepResult, StepResult};
 
         if self.stopped != 0 {
+            if let Some(cycles) = self.stopped_supervisor_check(bus) {
+                return StepResult::Ok { cycles };
+            }
             return StepResult::Stopped;
         }
 
@@ -515,6 +527,24 @@ impl CpuCore {
         } else {
             44
         };
+    }
+
+    /// Stopped-state supervisor check, run at every instruction boundary
+    /// while stopped: STOP loads its SR operand verbatim (a single-stepped
+    /// STOP observes S and T exactly as written), and a loaded S-clear SR
+    /// wakes the CPU here with a privilege violation -- 4 internal clocks,
+    /// then the exception, stacking the STOP instruction itself so the
+    /// handler's RTE re-executes it. Returns the cycles consumed when the
+    /// wake fired; None leaves the CPU stopped (including a HALT).
+    fn stopped_supervisor_check<B: AddressBus>(&mut self, bus: &mut B) -> Option<i32> {
+        if self.stopped != STOP_LEVEL_STOP || self.s_flag != 0 {
+            return None;
+        }
+        self.stopped = 0;
+        self.internal_cycles(4);
+        // PC sits past the STOP opcode and its SR operand word.
+        self.ppc = self.pc.wrapping_sub(4);
+        Some(4 + self.exception_privilege(bus))
     }
 
     /// Halt the CPU.
