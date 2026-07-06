@@ -25,9 +25,26 @@ impl CpuCore {
         // Write to destination. The 68000 sequences its final prefetch
         // differently per destination mode:
         // - predecrement: prefetch BEFORE the write (the write is last)
-        // - absolute long: the address low word is consumed without its np;
-        //   both remaining prefetches happen AFTER the write (Class 2)
+        // - absolute long WITH A MEMORY SOURCE: the address low word is
+        //   consumed without its np; both remaining prefetches happen AFTER
+        //   the write (Class 2). With a register or immediate source the
+        //   68000 uses the normal Class 1 order instead (pasti 68kPrefetch:
+        //   "if the source operand is a data or address register, or
+        //   immediate, then the behavior is the same as other MOVE
+        //   variants") - the order matters beyond timing, because the
+        //   interrupt-decision IPL sample rides the final access: a Class 1
+        //   MOVE #x,INTREQ polls right after its own write (too early to
+        //   see the interrupt it just raised), while the misapplied Class 2
+        //   tail let bus contention push the poll past the IPL pipe and the
+        //   instruction recognized its own interrupt one boundary early
+        //   (eon's scene-player yield raise).
         // - everything else: write, then the final prefetch (Class 1)
+        let class2_abs_long = !matches!(
+            src_mode,
+            AddressingMode::DataDirect(_)
+                | AddressingMode::AddressDirect(_)
+                | AddressingMode::Immediate
+        );
         if self.cpu_type == CpuType::M68000 {
             match dst_mode {
                 AddressingMode::PreDecrement(_) => {
@@ -54,7 +71,7 @@ impl CpuCore {
                         }
                     }
                 }
-                AddressingMode::AbsoluteLong => {
+                AddressingMode::AbsoluteLong if class2_abs_long => {
                     // Consume the address high word normally, the low word
                     // without its accompanying prefetch.
                     let hi = self.read_imm_16(bus) as u32;
