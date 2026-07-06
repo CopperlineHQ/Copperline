@@ -481,8 +481,14 @@ impl Bus {
             }
             0x096 => {
                 let previous = self.effective_bitplane_dmacon();
+                let old_dmacon = self.agnus.dmacon;
                 let copen_before = self.agnus.dmacon & crate::chipset::copper::DMACON_COPEN != 0;
                 self.agnus.write_dmacon(val);
+                // Audio channel on/off edges drive the Paula state machine
+                // at the write itself (pending audio time was flushed by
+                // is_audio_timing_custom_write before dispatch).
+                self.paula
+                    .apply_audio_dmacon_edges(old_dmacon, self.agnus.dmacon);
                 if !copen_before && self.agnus.dmacon & crate::chipset::copper::DMACON_COPEN != 0 {
                     // COPEN switched on mid-field: the Copper counts as
                     // active this field, so COPxLC writes stop retargeting
@@ -832,7 +838,6 @@ impl Bus {
             0x1C0 => {
                 if self.blitter_ecs_registers_enabled() {
                     self.agnus.write_htotal(val);
-                    self.refresh_paula_audio_min_period();
                 }
                 false
             }
@@ -840,7 +845,6 @@ impl Bus {
                 if self.blitter_ecs_registers_enabled() {
                     self.agnus.write_beamcon0(val);
                     self.ddf_seq_invalidate_line();
-                    self.refresh_paula_audio_min_period();
                     if val & BEAMCON0_DUAL != 0 && !self.uhres_dual_warned {
                         log::warn!(
                             "BEAMCON0 DUAL set: A2024/Productivity (UHRES dual-monitor) display is not emulated"
@@ -948,7 +952,8 @@ impl Bus {
                         );
                     }
                 }
-                self.paula.write_audio_reg(off - 0x0A0, val);
+                self.paula
+                    .write_audio_reg(off - 0x0A0, val, self.agnus.dmacon);
                 false
             }
             0x100 => {

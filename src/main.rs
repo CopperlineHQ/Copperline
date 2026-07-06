@@ -1283,18 +1283,20 @@ fn run_live_audio_profile(secs: f32) -> Result<()> {
     chip_ram[2] = 0x20;
     chip_ram[3] = 0xE0;
 
-    paula.write_audio_reg(0x00, 0);
-    paula.write_audio_reg(0x02, 0);
-    paula.write_audio_reg(0x04, 1);
-    paula.write_audio_reg(0x06, 400);
-    paula.write_audio_reg(0x08, 64);
-    paula.write_audio_reg(0x10, 0);
-    paula.write_audio_reg(0x12, 2);
-    paula.write_audio_reg(0x14, 1);
-    paula.write_audio_reg(0x16, 512);
-    paula.write_audio_reg(0x18, 48);
+    paula.write_audio_reg(0x00, 0, 0);
+    paula.write_audio_reg(0x02, 0, 0);
+    paula.write_audio_reg(0x04, 1, 0);
+    paula.write_audio_reg(0x06, 400, 0);
+    paula.write_audio_reg(0x08, 64, 0);
+    paula.write_audio_reg(0x10, 0, 0);
+    paula.write_audio_reg(0x12, 2, 0);
+    paula.write_audio_reg(0x14, 1, 0);
+    paula.write_audio_reg(0x16, 512, 0);
+    paula.write_audio_reg(0x18, 48, 0);
 
     let dmacon = DMACON_DMAEN | 0x0003;
+    paula.apply_audio_dmacon_edges(0, dmacon);
+    let mut line_cck = 0u32;
     let quantum = Duration::from_millis(5);
     let quantum_cck = (PAULA_CLOCK_HZ as f64 * quantum.as_secs_f64())
         .round()
@@ -1305,7 +1307,8 @@ fn run_live_audio_profile(secs: f32) -> Result<()> {
 
     while Instant::now() < deadline {
         let chunk_started = Instant::now();
-        let _ = advance_paula_profile_audio(&mut paula, quantum_cck, dmacon, &chip_ram);
+        let _ =
+            advance_paula_profile_audio(&mut paula, quantum_cck, dmacon, &chip_ram, &mut line_cck);
         chunks = chunks.saturating_add(1);
         if let Some(wait) = quantum.checked_sub(chunk_started.elapsed()) {
             std::thread::sleep(wait);
@@ -1320,22 +1323,35 @@ fn run_live_audio_profile(secs: f32) -> Result<()> {
     Ok(())
 }
 
-fn advance_paula_profile_audio(paula: &mut Paula, cck: u32, dmacon: u16, chip_ram: &[u8]) -> u16 {
+fn advance_paula_profile_audio(
+    paula: &mut Paula,
+    cck: u32,
+    dmacon: u16,
+    chip_ram: &[u8],
+    line_cck: &mut u32,
+) -> u16 {
+    // Drive the state machine the way the bus does: service each channel's
+    // fixed DMA slot, advance time, and transfer requests at line ends.
     let mut irq = 0;
     for _ in 0..cck {
-        irq |= paula.advance_audio(0, dmacon);
-        for channel in 0..4 {
-            while let Some(request) = paula.audio_dma_request(channel) {
+        let slot = match *line_cck {
+            0x00F => Some(0),
+            0x011 => Some(1),
+            0x013 => Some(2),
+            0x015 => Some(3),
+            _ => None,
+        };
+        if let Some(channel) = slot {
+            if let Some(request) = paula.audio_dma_request(channel) {
                 let word = read_profile_audio_word(chip_ram, request.address);
-                irq |= paula.grant_audio_dma(channel, word);
+                irq |= paula.grant_audio_dma(channel, word, dmacon);
             }
         }
         irq |= paula.advance_audio(1, dmacon);
-        for channel in 0..4 {
-            while let Some(request) = paula.audio_dma_request(channel) {
-                let word = read_profile_audio_word(chip_ram, request.address);
-                irq |= paula.grant_audio_dma(channel, word);
-            }
+        *line_cck += 1;
+        if *line_cck >= 227 {
+            *line_cck = 0;
+            paula.transfer_audio_dma_requests();
         }
     }
     irq

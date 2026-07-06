@@ -80,7 +80,9 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      (data_words_fetched pointer progression, pending_data)
 //  21: CpuCore gained the 68010 loop-mode state (loop_mode,
 //      loop_body_word, loop_dbcc_word)
-pub const STATE_VERSION: u32 = 21;
+//  22: Paula AudChannel replaced by the HRM state-machine shape (state,
+//      buffer/auddat holding registers, percnt, request latches)
+pub const STATE_VERSION: u32 = 22;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

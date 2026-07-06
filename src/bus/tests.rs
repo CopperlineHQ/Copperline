@@ -15,10 +15,9 @@ use super::{
     LiveCollisionControl, LiveCollisionLineReplay, LiveSpriteCollisionSource,
     RenderRegisterSnapshot, BLITTER_SLOWDOWN_CPU_MISS_LIMIT, BLTCON1_DOFF, BPLCON0_ECSENA,
     BPLCON3_BRDSPRT, BPLCON3_SPRES_HIRES, COPPER_BUS_LOCKOUT_HPOS, DENISE_HPOS_LAG_CCK,
-    DMACON_AUD_MASK, DMACON_BLTEN, DMACON_BLTPRI, DMACON_BPLEN, DMACON_SPREN,
-    PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS, RENDER_COPPER_WAIT_HPOS_FB0, RENDER_DIW_HSTART_FB0,
-    RENDER_MIN_OVERSCAN_START_VPOS, RENDER_VISIBLE_LINES, RENDER_VISIBLE_START_VPOS,
-    SPRITE_DMA_SLOT1_HPOS,
+    DMACON_BLTEN, DMACON_BLTPRI, DMACON_BPLEN, DMACON_SPREN, PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS,
+    RENDER_COPPER_WAIT_HPOS_FB0, RENDER_DIW_HSTART_FB0, RENDER_MIN_OVERSCAN_START_VPOS,
+    RENDER_VISIBLE_LINES, RENDER_VISIBLE_START_VPOS, SPRITE_DMA_SLOT1_HPOS,
 };
 use crate::audio::AudioSink;
 use crate::chipset::agnus::{
@@ -33,7 +32,7 @@ use crate::chipset::copper::{CopperWait, DMACON_COPEN};
 use crate::chipset::denise::{rgb12_to_rgba8, DeniseRevision, DiwHigh, COLOR_TRANSPARENCY_BIT};
 use crate::chipset::paula::{
     Paula, DMACON_DMAEN, INT_AUD0, INT_BLIT, INT_COPER, INT_EXTER, INT_MASTER, INT_PORTS,
-    INT_VERTB, NTSC_AUDIO_MIN_PERIOD_CCK, PAL_AUDIO_MIN_PERIOD_CCK, PAULA_CLOCK_HZ,
+    INT_VERTB, PAULA_CLOCK_HZ,
 };
 use crate::floppy::{FloppyController, ADF_SIZE};
 use crate::memory::Memory;
@@ -626,14 +625,15 @@ fn audio_time_flushes_before_audio_register_write() {
     bus.mem.chip_ram[1] = 0x7F;
     bus.mem.chip_ram[2] = 0x7F;
     bus.mem.chip_ram[3] = 0x7F;
-    bus.paula.write_audio_reg(0x00, 0);
-    bus.paula.write_audio_reg(0x02, 0);
-    bus.paula.write_audio_reg(0x04, 2);
-    bus.paula.write_audio_reg(0x06, 80);
-    bus.paula.write_audio_reg(0x08, 64);
-    bus.agnus.write_dmacon(0x8000 | DMACON_DMAEN | 0x0001);
+    bus.paula.write_audio_reg(0x00, 0, 0);
+    bus.paula.write_audio_reg(0x02, 0, 0);
+    bus.paula.write_audio_reg(0x04, 2, 0);
+    bus.paula.write_audio_reg(0x06, 80, 0);
+    bus.paula.write_audio_reg(0x08, 64, 0);
+    assert!(!bus.custom_write(0xDFF096, 2, (0x8000 | DMACON_DMAEN | 0x0001) as u64));
 
-    bus.advance_chipset(400);
+    // Two scanlines for the two start-up fetches, then some output time.
+    bus.advance_chipset(800);
     frames.borrow_mut().clear();
 
     let _ = bus.custom_write(0xDFF0A8, 2, 0);
@@ -647,23 +647,15 @@ fn audio_time_flushes_before_audio_register_write() {
 #[test]
 fn audio_irq_deadline_accounts_for_pending_audio_time() {
     let mut bus = empty_bus();
-    bus.paula.set_audio_min_period_cck(1);
-    bus.mem.chip_ram[0] = 0x11;
-    bus.mem.chip_ram[1] = 0x22;
-    bus.mem.chip_ram[2] = 0x33;
-    bus.mem.chip_ram[3] = 0x44;
-    bus.paula.write_audio_reg(0x00, 0);
-    bus.paula.write_audio_reg(0x02, 0);
-    bus.paula.write_audio_reg(0x04, 2);
-    bus.paula.write_audio_reg(0x06, 10);
-    bus.paula.write_audio_reg(0x08, 64);
-    bus.agnus.write_dmacon(0x8000 | DMACON_DMAEN | 0x0001);
+    // IRQ-mode output: a CPU AUDxDAT write starts direct playback, and every
+    // word start raises the channel interrupt, so the deadline is the period
+    // counter's word boundary (percnt + one period from the high byte).
+    bus.paula.write_audio_reg(0x06, 10, 0);
+    bus.paula.write_audio_reg(0x0A, 0x1122, 0);
+    assert_eq!(bus.next_audio_irq_cck(), Some(20));
 
-    let _ = bus.paula.tick_audio(1, bus.agnus.dmacon, &bus.mem.chip_ram);
-    assert_eq!(bus.next_audio_irq_cck(), Some(29));
-
-    bus.audio_pending_cck = 28;
-    assert_eq!(bus.next_audio_irq_cck(), Some(1));
+    bus.audio_pending_cck = 15;
+    assert_eq!(bus.next_audio_irq_cck(), Some(5));
 }
 
 #[test]
@@ -676,9 +668,11 @@ fn enabled_audio_dma_reserves_only_actively_fetching_channel_slots() {
     bus.agnus.hpos = 0x00F;
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Idle);
 
-    // Arming the channel (DMA-enable edge) raises a pending request, so now
-    // its slot (0x00F) reserves.
-    let _ = bus.paula.advance_audio(0, bus.agnus.dmacon);
+    // The DMA-enable edge posts the state machine's request; the line-end
+    // transfer latches it into Agnus, and only then does the slot reserve.
+    bus.paula.apply_audio_dmacon_edges(0, bus.agnus.dmacon);
+    assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Idle);
+    bus.paula.transfer_audio_dma_requests();
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Audio);
 
     // The even gap after it (0x010) is not an audio cycle, and the other
@@ -693,12 +687,19 @@ fn enabled_audio_dma_reserves_only_actively_fetching_channel_slots() {
         );
     }
 
-    // Channels 1 and 3 enabled and armed: only their slots (0x011, 0x015)
-    // reserve while their requests are pending.
+    // Servicing channel 0's start-up fetch posts the next request (the
+    // state machine runs its two-fetch start-up); switching DMACON to
+    // channels 1 and 3 then leaves that already-posted request latched --
+    // the audio slot is NOT gated by the DMACON bits -- alongside the new
+    // channels' first requests.
+    let dmacon = bus.agnus.dmacon;
+    let _ = bus.paula.grant_audio_dma(0, 0, dmacon);
     bus.agnus.dmacon = DMACON_DMAEN | 0x000A;
-    let _ = bus.paula.advance_audio(0, bus.agnus.dmacon);
+    bus.paula
+        .apply_audio_dmacon_edges(DMACON_DMAEN | 0x0001, bus.agnus.dmacon);
+    bus.paula.transfer_audio_dma_requests();
     for (hpos, owner) in [
-        (0x00F, ChipBusOwner::Idle),
+        (0x00F, ChipBusOwner::Audio),
         (0x011, ChipBusOwner::Audio),
         (0x013, ChipBusOwner::Idle),
         (0x015, ChipBusOwner::Audio),
@@ -706,56 +707,19 @@ fn enabled_audio_dma_reserves_only_actively_fetching_channel_slots() {
         bus.agnus.hpos = hpos;
         assert_eq!(bus.scheduled_dma_owner(false), owner, "hpos {hpos:#05X}");
     }
+    // Once the outstanding fetch is serviced (with the channel bit off it
+    // goes nowhere: the machine idles in state 101), channel 0's slot
+    // frees for the CPU/blitter.
+    let dmacon = bus.agnus.dmacon;
+    let _ = bus.paula.grant_audio_dma(0, 0, dmacon);
+    bus.paula.transfer_audio_dma_requests();
+    bus.agnus.hpos = 0x00F;
+    assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Idle);
 
     // No channels enabled: nothing reserved.
     bus.agnus.dmacon = DMACON_DMAEN;
     bus.agnus.hpos = 0x00F;
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Idle);
-}
-
-#[test]
-fn video_standard_selects_paula_audio_dma_period_floor() {
-    let mut bus = empty_bus();
-    assert_eq!(bus.paula.audio_min_period_cck(), PAL_AUDIO_MIN_PERIOD_CCK);
-
-    bus.set_video_standard(VideoStandard::Ntsc);
-    assert_eq!(bus.paula.audio_min_period_cck(), NTSC_AUDIO_MIN_PERIOD_CCK);
-    bus.reset_for_keyboard_reset();
-    assert_eq!(bus.paula.audio_min_period_cck(), NTSC_AUDIO_MIN_PERIOD_CCK);
-
-    bus.set_video_standard(VideoStandard::Pal);
-    assert_eq!(bus.paula.audio_min_period_cck(), PAL_AUDIO_MIN_PERIOD_CCK);
-}
-
-#[test]
-fn ecs_htotal_varbeamen_scales_paula_audio_dma_period_floor() {
-    // Keep the PAL bit set alongside VARBEAMEN so the machine stays PAL
-    // while enabling the programmable beam (the PAL bit is authoritative
-    // on ECS; VARBEAMEN alone would select NTSC totals).
-    let beamcon0_pal_varbeam = (BEAMCON0_PAL | BEAMCON0_VARBEAMEN) as u64;
-    let mut bus = empty_bus();
-    assert!(!bus.custom_write(0xDFF1C0, 2, 113));
-    assert!(!bus.custom_write(0xDFF1DC, 2, beamcon0_pal_varbeam));
-    assert_eq!(bus.agnus.current_line_cck(), COLORCLOCKS_PER_LINE);
-    assert_eq!(bus.paula.audio_min_period_cck(), PAL_AUDIO_MIN_PERIOD_CCK);
-
-    bus.set_agnus_revision(AgnusRevision::Ecs8372Rev4);
-    assert!(!bus.custom_write(0xDFF1C0, 2, 113));
-    assert_eq!(bus.paula.audio_min_period_cck(), PAL_AUDIO_MIN_PERIOD_CCK);
-
-    assert!(!bus.custom_write(0xDFF1DC, 2, beamcon0_pal_varbeam));
-    assert_eq!(bus.agnus.current_line_cck(), 114);
-    assert_eq!(bus.paula.audio_min_period_cck(), 62);
-
-    assert!(!bus.custom_write(0xDFF1C0, 2, (COLORCLOCKS_PER_LINE - 1) as u64));
-    assert_eq!(bus.agnus.current_line_cck(), COLORCLOCKS_PER_LINE);
-    assert_eq!(bus.paula.audio_min_period_cck(), PAL_AUDIO_MIN_PERIOD_CCK);
-
-    assert!(!bus.custom_write(0xDFF1C0, 2, 113));
-    assert_eq!(bus.paula.audio_min_period_cck(), 62);
-    bus.set_agnus_revision(AgnusRevision::Ocs);
-    assert_eq!(bus.agnus.current_line_cck(), COLORCLOCKS_PER_LINE);
-    assert_eq!(bus.paula.audio_min_period_cck(), PAL_AUDIO_MIN_PERIOD_CCK);
 }
 
 #[test]
@@ -798,7 +762,7 @@ fn harddis_widens_bitplane_arbitration_window() {
 }
 
 #[test]
-fn audio_dma_enable_sets_intreq_on_next_paula_tick() {
+fn audio_dma_enable_raises_intreq_when_first_startup_word_arrives() {
     let mut bus = empty_bus();
     bus.mem.chip_ram[0] = 0x12;
     bus.mem.chip_ram[1] = 0x34;
@@ -809,10 +773,13 @@ fn audio_dma_enable_sets_intreq_on_next_paula_tick() {
     let _ = bus.custom_write(0xDFF0A6, 2, 8);
     let _ = bus.custom_write(0xDFF0A8, 2, 64);
 
+    // The DMA-enable edge itself only posts the first fetch request; the
+    // channel interrupt fires when that word arrives (line end transfers
+    // the request, the next line's fixed slot services it).
     assert!(!bus.custom_write(0xDFF096, 2, (0x8000 | DMACON_DMAEN | 0x0001) as u64));
     assert_eq!(bus.paula.intreq & INT_AUD0, 0);
 
-    bus.advance_devices(1);
+    bus.advance_chipset(2 * 227);
     assert_eq!(bus.paula.intreq & INT_AUD0, INT_AUD0);
 
     assert!(!bus.custom_write(0xDFF09C, 2, INT_AUD0 as u64));
@@ -820,30 +787,38 @@ fn audio_dma_enable_sets_intreq_on_next_paula_tick() {
 }
 
 #[test]
-fn audio_dma_slot_fetches_first_word_and_starts_playback() {
+fn audio_dma_startup_fetches_stale_pointer_word_then_block_start() {
     let mut bus = empty_bus();
     bus.mem.chip_ram[0x04] = 0x12;
     bus.mem.chip_ram[0x05] = 0x34;
     bus.mem.chip_ram[0x06] = 0x56;
     bus.mem.chip_ram[0x07] = 0x78;
-    bus.paula.set_audio_min_period_cck(1);
-    bus.paula.write_audio_reg(0x00, 0);
-    bus.paula.write_audio_reg(0x02, 4);
-    bus.paula.write_audio_reg(0x04, 2);
-    bus.paula.write_audio_reg(0x06, 8);
-    // A stale playback pointer is overwritten by the AUDxLC reload on
-    // the DMA-enable edge.
+    bus.paula.write_audio_reg(0x00, 0, 0);
+    bus.paula.write_audio_reg(0x02, 4, 0);
+    bus.paula.write_audio_reg(0x04, 2, 0);
+    bus.paula.write_audio_reg(0x06, 8, 0);
+    // The DMA pointer is stale from previous playback; the enable edge
+    // does not reload it.
     bus.paula.set_audio_dma_ptr_for_test(0, 0x20);
     bus.agnus.dmacon = DMACON_DMAEN | 0x0001;
+    bus.paula.apply_audio_dmacon_edges(0, bus.agnus.dmacon);
+    bus.paula.transfer_audio_dma_requests();
     bus.agnus.hpos = 0x00F;
-
-    let _ = bus.paula.advance_audio(0, bus.agnus.dmacon);
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Audio);
 
-    // A single audio slot fetches word 0 from AUDxLC and starts
-    // playback -- no separate pointer-reload slot.
+    // First slot: the start-up fetch reads the STALE pointer (its word is
+    // never played), raises the channel interrupt, and resets the pointer
+    // to AUDxLC for the real first word.
     bus.advance_chipset(1);
     assert_eq!(bus.last_chip_bus_owner(), ChipBusOwner::Audio);
+    assert_eq!(bus.paula.intreq & INT_AUD0, INT_AUD0);
+    assert_eq!(bus.paula.audio_current_sample_for_test(0), Some(0));
+    assert_eq!(bus.paula.audio_dma_ptr_for_test(0), Some(4));
+
+    // Second slot (next line): the word at AUDxLC starts playback.
+    bus.paula.transfer_audio_dma_requests();
+    bus.agnus.hpos = 0x00F;
+    bus.advance_chipset(1);
     assert_eq!(bus.paula.audio_current_sample_for_test(0), Some(0x12));
     assert_eq!(bus.paula.audio_dma_ptr_for_test(0), Some(6));
 }
@@ -8429,12 +8404,24 @@ fn fixed_agnus_dma_slot_bands_drive_owner_selection() {
     bus.agnus.hpos = 0x008;
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Idle);
 
-    bus.agnus.dmacon = DMACON_DMAEN | DMACON_AUD_MASK;
-    let _ = bus.paula.advance_audio(0, bus.agnus.dmacon);
+    bus.agnus.dmacon = DMACON_DMAEN | 0x0001;
+    bus.paula.apply_audio_dmacon_edges(0, bus.agnus.dmacon);
+    bus.paula.transfer_audio_dma_requests();
     bus.agnus.hpos = 0x00F;
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Audio);
     bus.agnus.hpos = 0x016;
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Idle);
+    // Drain the channel's start-up request chain so the latched-request
+    // slot reservation (independent of DMACON) does not leak into the
+    // sprite checks below: service the two start-up fetches, then let the
+    // machine idle with the channel bit off.
+    let dmacon = bus.agnus.dmacon;
+    let _ = bus.paula.grant_audio_dma(0, 0, dmacon);
+    bus.agnus.dmacon = DMACON_DMAEN;
+    bus.paula.apply_audio_dmacon_edges(dmacon, bus.agnus.dmacon);
+    bus.paula.transfer_audio_dma_requests();
+    let _ = bus.paula.grant_audio_dma(0, 0, bus.agnus.dmacon);
+    bus.paula.transfer_audio_dma_requests();
 
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN;
     // A sprite's slot is reserved only while that sprite is actually

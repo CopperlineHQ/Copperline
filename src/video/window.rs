@@ -5441,7 +5441,7 @@ impl App {
                         },
                     );
                     // Highlight a channel that is actively streaming samples.
-                    text.push(if a.state == "Running" {
+                    text.push(if a.playing {
                         ui::DbgLine::hilit(head)
                     } else {
                         ui::DbgLine::plain(head)
@@ -5451,24 +5451,18 @@ impl App {
                         a.lc, a.len, a.per, a.vol
                     )));
                     text.push(ui::DbgLine::plain(format!(
-                        "  PTR {:06X}  words {:04X}  acc {:04X}  ph{}  out {}",
-                        a.ptr, a.words_left, a.period_acc, a.phase, a.current
+                        "  PTR {:06X}  cnt {:04X}  percnt {:05X}  vol {:02X}  out {}",
+                        a.ptr, a.audlen, a.percnt, a.audvol, a.current
                     )));
                     let mut pending: Vec<&str> = Vec::new();
-                    if a.dma_disable_pending {
-                        pending.push("dma-disable");
+                    if a.intreq2 {
+                        pending.push("intreq2");
                     }
-                    if a.restart_pending {
-                        pending.push("restart");
-                    }
-                    if a.manual_pending {
-                        pending.push("manual");
-                    }
-                    if a.dma_request {
+                    if a.sm_request {
                         pending.push("dma-req");
                     }
-                    if a.next_word_ready {
-                        pending.push("next-word");
+                    if a.agnus_request {
+                        pending.push("dma-req-latched");
                     }
                     if !pending.is_empty() {
                         text.push(ui::DbgLine::plain(format!(
