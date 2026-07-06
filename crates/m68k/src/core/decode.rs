@@ -1114,12 +1114,16 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                         }
                         let sr = cpu.pull_16(bus);
                         cpu.pc = cpu.pull_32(bus);
-                        let _ = cpu.pull_16(bus); // vector offset word
+                        // The format/vector word was already read by the
+                        // format probe above; the 68010 does not re-read
+                        // it (Moira execRte: fmt, SR, PC = four reads,
+                        // then SP += 8). Discard it from the stack.
+                        cpu.dar[15] = cpu.dar[15].wrapping_add(2);
                         cpu.set_sr(sr);
                         // The 68010 shares the 68000's two-word prefetch
                         // queue: a return refills it from the new PC.
                         cpu.full_prefetch(bus);
-                        20
+                        24
                     }
                     _ => {
                         // 68020+ RTE loop (Musashi m68k_in.c)
