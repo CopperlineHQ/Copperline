@@ -819,6 +819,14 @@ impl Cia {
         self.irq_pin
     }
 
+    /// Test-harness stand-in for the E-clock passing: settle a pending
+    /// pin assert whose lag the caller's own timekeeping already covers
+    /// (the bus drains through `tick`; timers are not advanced here).
+    #[cfg(test)]
+    pub fn settle_irq_pin(&mut self) -> bool {
+        self.drain_irq_pin_delay(u32::from(u8::MAX))
+    }
+
     fn update_irq_line(&mut self) {
         if self.icr_data & self.icr_mask & 0x1F != 0 {
             if self.icr_data & ICR_IR == 0 {
@@ -1027,8 +1035,10 @@ mod tests {
             .into_iter()
             .enumerate()
         {
-            let irq = cia.cnt_rising_edge(bit);
+            let _ = cia.cnt_rising_edge(bit);
             cia.cnt_falling_edge();
+            // The pin lags the internal latch by one E-cycle.
+            let irq = cia.settle_irq_pin();
             assert_eq!(irq, i == 7, "IRQ only on the 8th bit (bit {i})");
         }
         assert_eq!(cia.read(REG_SDR), 0xA5);
@@ -1049,8 +1059,9 @@ mod tests {
         // interrupt exactly on the 8th.
         cia.write(REG_CRA, 0);
         for i in 0..8 {
-            let fired = cia.cnt_rising_edge(i % 2 == 0);
+            let _ = cia.cnt_rising_edge(i % 2 == 0);
             cia.cnt_falling_edge();
+            let fired = cia.settle_irq_pin();
             assert_eq!(fired, i == 7, "SP must latch exactly on edge 8 (edge {i})");
         }
         assert_eq!(cia.read(REG_SDR), 0xAA);
@@ -1079,6 +1090,7 @@ mod tests {
         assert_eq!(cia.ta_count, 0);
         cia.write(REG_PRA, 0x00);
         cia.write(REG_PRA, 0xFF); // underflow edge
+        let _ = cia.settle_irq_pin();
         assert!(
             cia.irq_line_asserted(),
             "underflow must assert the IRQ line"
@@ -1108,8 +1120,9 @@ mod tests {
         let mut edges = 0;
         let fired = loop {
             edges += 1;
-            let fired = cia.cnt_rising_edge(true);
+            let _ = cia.cnt_rising_edge(true);
             cia.cnt_falling_edge();
+            let fired = cia.settle_irq_pin();
             if fired || edges > 16 {
                 break fired;
             }
@@ -1279,6 +1292,21 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn probe_pin_drain_after_sdr_arm() {
+        let mut cia = Cia::new(Which::A);
+        cia.write(REG_ICR, 0x88); // enable SP
+                                  // SPMODE=0 input; shift 8 bits in via CNT.
+        for _ in 0..8 {
+            let _ = cia.cnt_rising_edge(true);
+            cia.cnt_falling_edge();
+        }
+        assert!(!cia.irq_line_asserted(), "pin must lag the ICR condition");
+        assert!(cia.tick(1), "one E-cycle later the pin asserts");
+        assert!(cia.irq_line_asserted());
+    }
+
+    #[test]
     fn flag_input_latches_icr_and_respects_mask() {
         let mut cia = Cia::new(Which::B);
 
@@ -1289,7 +1317,11 @@ mod tests {
 
         cia.write(REG_ICR, 0x80 | ICR_FLG);
         cia.release_flag();
-        assert!(cia.assert_flag());
+        let _ = cia.assert_flag();
+        assert!(
+            cia.settle_irq_pin(),
+            "FLAG edge reaches the pin an E-cycle later"
+        );
         assert_eq!(cia.read(REG_ICR), ICR_IR | ICR_FLG);
     }
 
@@ -1306,6 +1338,8 @@ mod tests {
 
         cia.write(REG_ICR, 0x80 | ICR_TA);
 
+        assert!(!cia.irq_line_asserted(), "the pin lags the mask write");
+        assert!(cia.settle_irq_pin());
         assert!(cia.irq_line_asserted());
         assert_eq!(cia.read(REG_ICR), ICR_IR | ICR_TA);
     }

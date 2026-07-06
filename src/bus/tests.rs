@@ -556,6 +556,9 @@ fn cia_b_mask_enable_propagates_latched_timer_interrupt_to_paula() {
 
     let _ = bus.cia_b_write(addr(REG_ICR), 1, 0x80 | 0x01);
 
+    // The pin (and so INTREQ) follows the mask write one E-cycle later.
+    assert_eq!(bus.paula.intreq & INT_EXTER, 0);
+    bus.advance_devices(8);
     assert_ne!(bus.paula.intreq & INT_EXTER, 0);
 }
 
@@ -9111,8 +9114,10 @@ fn keyboard_bit_stream_delivers_encoded_transition_to_sdr() {
     // Half a byte: no SP interrupt yet.
     bus.advance_devices(KEYBOARD_BYTE_CCK / 2);
     assert_eq!(bus.paula.intreq & INT_PORTS, 0);
-    // The full byte arrives bit by bit over KCLK/KDAT.
+    // The full byte arrives bit by bit over KCLK/KDAT; the CIA pin edge
+    // follows one E-cycle behind the final shift.
     bus.advance_devices(2 * KEYBOARD_BYTE_CCK);
+    bus.advance_devices(8);
     assert_ne!(bus.paula.intreq & INT_PORTS, 0);
     assert_eq!(bus.cia_a.read(crate::chipset::cia::REG_SDR), 0xFD);
 }

@@ -814,7 +814,7 @@ mod tests {
     fn handshake(mcu: &mut KeyboardMcu, cia: &mut Cia, cck: u32) {
         cia.write(REG_CRA, CRA_SPMODE);
         mcu.amiga_kdat_edge(true);
-        mcu.tick(cck, cia);
+        (mcu.tick(cck, cia) | cia.settle_irq_pin());
         cia.write(REG_CRA, 0);
         mcu.amiga_kdat_edge(false);
     }
@@ -823,13 +823,13 @@ mod tests {
     /// power-up stream, leaving it Idle. Returns the decoded stream.
     fn complete_power_up(mcu: &mut KeyboardMcu, cia: &mut Cia) -> Vec<u8> {
         let mut stream = Vec::new();
-        mcu.tick(SELF_TEST_CCK as u32, cia);
+        (mcu.tick(SELF_TEST_CCK as u32, cia) | cia.settle_irq_pin());
         // Sync bit, then its handshake.
-        mcu.tick(BIT_CCK, cia);
+        (mcu.tick(BIT_CCK, cia) | cia.settle_irq_pin());
         handshake(mcu, cia, HANDSHAKE_MIN_CCK as u32);
         // Stream bytes until $FE has been sent and handshaked.
         for _ in 0..32 {
-            if mcu.tick(2 * BYTE_CCK, cia) {
+            if (mcu.tick(2 * BYTE_CCK, cia) | cia.settle_irq_pin()) {
                 let byte = decode(cia.read(REG_SDR));
                 stream.push(byte);
                 cia.read(REG_ICR);
@@ -840,7 +840,7 @@ mod tests {
             }
         }
         // Drain the inter-byte gap left by the final handshake.
-        mcu.tick(2 * BYTE_CCK, cia);
+        (mcu.tick(2 * BYTE_CCK, cia) | cia.settle_irq_pin());
         stream
     }
 
@@ -888,15 +888,17 @@ mod tests {
     fn power_up_stream_marches_on_without_handshakes() {
         let mut cia = unmasked_cia();
         let mut mcu = KeyboardMcu::new();
-        mcu.tick(SELF_TEST_CCK as u32, &mut cia);
-        mcu.tick(BIT_CCK, &mut cia);
+        (mcu.tick(SELF_TEST_CCK as u32, &mut cia) | cia.settle_irq_pin());
+        (mcu.tick(BIT_CCK, &mut cia) | cia.settle_irq_pin());
         handshake(&mut mcu, &mut cia, HANDSHAKE_MIN_CCK as u32);
         // $FD transmits; nobody handshakes it. After the 143 ms window
         // the stream continues regardless (firmware ignores the result).
-        assert!(mcu.tick(2 * BYTE_CCK, &mut cia));
+        assert!((mcu.tick(2 * BYTE_CCK, &mut cia) | cia.settle_irq_pin()));
         assert_eq!(decode(cia.read(REG_SDR)), STATUS_INIT_START);
         cia.read(REG_ICR);
-        assert!(mcu.tick(RESYNC_TIMEOUT_CCK as u32 + 2 * BYTE_CCK, &mut cia));
+        assert!(
+            (mcu.tick(RESYNC_TIMEOUT_CCK as u32 + 2 * BYTE_CCK, &mut cia) | cia.settle_irq_pin())
+        );
         assert_eq!(decode(cia.read(REG_SDR)), STATUS_INIT_END);
     }
 
@@ -909,11 +911,11 @@ mod tests {
         // 7 full bit times: no SP interrupt yet.
         let mut irq = false;
         for _ in 0..7 {
-            irq |= mcu.tick(BIT_CCK, &mut cia);
+            irq |= (mcu.tick(BIT_CCK, &mut cia) | cia.settle_irq_pin());
         }
         assert!(!irq, "SP fired before the 8th bit");
         // The 8th bit completes the byte.
-        assert!(mcu.tick(BIT_CCK, &mut cia));
+        assert!((mcu.tick(BIT_CCK, &mut cia) | cia.settle_irq_pin()));
         assert_eq!(cia.read(REG_SDR), 0xFD);
     }
 
@@ -922,7 +924,7 @@ mod tests {
         let mut cia = unmasked_cia();
         let mut mcu = idle_mcu(&mut cia);
         mcu.key_transition(0x35, false);
-        assert!(mcu.tick(2 * BYTE_CCK, &mut cia));
+        assert!((mcu.tick(2 * BYTE_CCK, &mut cia) | cia.settle_irq_pin()));
         assert_eq!(cia.read(REG_SDR), encode_keyboard_byte(0x35, false));
     }
 
@@ -939,7 +941,7 @@ mod tests {
         let mut mcu = idle_mcu(&mut cia);
         mcu.key_transition(0x01, true);
         mcu.key_transition(0x02, true);
-        assert!(mcu.tick(2 * BYTE_CCK, &mut cia));
+        assert!((mcu.tick(2 * BYTE_CCK, &mut cia) | cia.settle_irq_pin()));
         assert_eq!(cia.read(REG_SDR), 0xFD);
         // Software acknowledges the byte (clears ICR / the IR line).
         cia.read(REG_ICR);
@@ -947,13 +949,13 @@ mod tests {
         // A zero-width CRA double-write (no emulated time between the SPMODE
         // set and clear) is not a timed pulse and is ignored: no second byte.
         handshake(&mut mcu, &mut cia, 0);
-        assert!(!mcu.tick(2 * BYTE_CCK, &mut cia));
+        assert!(!(mcu.tick(2 * BYTE_CCK, &mut cia) | cia.settle_irq_pin()));
         assert_eq!(cia.read(REG_SDR), 0xFD);
 
         // A ~13.5 us pulse (Pinball Dreams) is accepted; the second byte
         // follows immediately.
         handshake(&mut mcu, &mut cia, us_to_cck(14) as u32);
-        assert!(mcu.tick(2 * BYTE_CCK, &mut cia));
+        assert!((mcu.tick(2 * BYTE_CCK, &mut cia) | cia.settle_irq_pin()));
         assert_eq!(cia.read(REG_SDR), 0xFB);
     }
 
@@ -968,9 +970,12 @@ mod tests {
         // recovers through the resync path (covered separately). The pulse
         // spans more than a bit cell so it reliably straddles a KCLK
         // sampling edge.
-        mcu.tick(3 * BIT_CCK, &mut cia);
+        (mcu.tick(3 * BIT_CCK, &mut cia) | cia.settle_irq_pin());
         handshake(&mut mcu, &mut cia, 2 * BIT_CCK);
-        assert!(!mcu.tick(8 * BIT_CCK, &mut cia), "byte must not complete");
+        assert!(
+            !(mcu.tick(8 * BIT_CCK, &mut cia) | cia.settle_irq_pin()),
+            "byte must not complete"
+        );
         assert_ne!(cia.read(REG_SDR), 0xFD);
         // The MCU is now waiting for a handshake that will not come;
         // its next deadline is the resync timeout.
@@ -982,16 +987,16 @@ mod tests {
         let mut cia = unmasked_cia();
         let mut mcu = idle_mcu(&mut cia);
         mcu.key_transition(0x01, true);
-        assert!(mcu.tick(2 * BYTE_CCK, &mut cia));
+        assert!((mcu.tick(2 * BYTE_CCK, &mut cia) | cia.settle_irq_pin()));
         assert_eq!(cia.read(REG_SDR), 0xFD);
 
         // 143 ms with no handshake: the keyboard clocks a single sync
         // bit (one bit time) and waits again.
-        mcu.tick(RESYNC_TIMEOUT_CCK as u32, &mut cia);
-        mcu.tick(BIT_CCK, &mut cia);
+        (mcu.tick(RESYNC_TIMEOUT_CCK as u32, &mut cia) | cia.settle_irq_pin());
+        (mcu.tick(BIT_CCK, &mut cia) | cia.settle_irq_pin());
         // Two more timeout rounds keep clocking lone bits, not bytes.
-        mcu.tick(RESYNC_TIMEOUT_CCK as u32, &mut cia);
-        mcu.tick(BIT_CCK, &mut cia);
+        (mcu.tick(RESYNC_TIMEOUT_CCK as u32, &mut cia) | cia.settle_irq_pin());
+        (mcu.tick(BIT_CCK, &mut cia) | cia.settle_irq_pin());
 
         // The sync bits shifted into the CIA garble SDR; software acks
         // whatever arrived, as keyboard.device does.
@@ -999,12 +1004,12 @@ mod tests {
 
         // Handshake one sync bit: $F9 arrives...
         handshake(&mut mcu, &mut cia, HANDSHAKE_MIN_CCK as u32);
-        mcu.tick(2 * BYTE_CCK, &mut cia);
+        (mcu.tick(2 * BYTE_CCK, &mut cia) | cia.settle_irq_pin());
         assert_eq!(decode(cia.read(REG_SDR)), STATUS_LAST_CODE_BAD);
         cia.read(REG_ICR);
         // ...and after its handshake, the lost key is retransmitted.
         handshake(&mut mcu, &mut cia, HANDSHAKE_MIN_CCK as u32);
-        assert!(mcu.tick(2 * BYTE_CCK, &mut cia));
+        assert!((mcu.tick(2 * BYTE_CCK, &mut cia) | cia.settle_irq_pin()));
         assert_eq!(cia.read(REG_SDR), 0xFD);
     }
 
@@ -1018,22 +1023,22 @@ mod tests {
 
         // First $78, handshaked (any buffered chord presses are
         // discarded when the chord lands).
-        assert!(mcu.tick(2 * BYTE_CCK, &mut cia));
+        assert!((mcu.tick(2 * BYTE_CCK, &mut cia) | cia.settle_irq_pin()));
         assert_eq!(decode(cia.read(REG_SDR)), STATUS_RESET_WARNING);
         cia.read(REG_ICR);
         handshake(&mut mcu, &mut cia, HANDSHAKE_MIN_CCK as u32);
 
         // Second $78, acknowledged.
-        assert!(mcu.tick(2 * BYTE_CCK, &mut cia));
+        assert!((mcu.tick(2 * BYTE_CCK, &mut cia) | cia.settle_irq_pin()));
         assert_eq!(decode(cia.read(REG_SDR)), STATUS_RESET_WARNING);
         cia.read(REG_ICR);
         handshake(&mut mcu, &mut cia, HANDSHAKE_MIN_CCK as u32);
 
         // KCLK is now held low; the reset fires after 500 ms.
         assert!(!mcu.take_system_reset_request());
-        mcu.tick(KCLK_RESET_HOLD_CCK as u32 / 2, &mut cia);
+        (mcu.tick(KCLK_RESET_HOLD_CCK as u32 / 2, &mut cia) | cia.settle_irq_pin());
         assert!(!mcu.take_system_reset_request());
-        mcu.tick(KCLK_RESET_HOLD_CCK as u32, &mut cia);
+        (mcu.tick(KCLK_RESET_HOLD_CCK as u32, &mut cia) | cia.settle_irq_pin());
         assert!(mcu.take_system_reset_request());
         // The MCU restarts its own power-up flow (already inside it,
         // since the tick's leftover budget ran into the self-test).
@@ -1050,10 +1055,10 @@ mod tests {
 
         // $78 transmits but nobody handshakes: after the wait the
         // keyboard resets the machine anyway.
-        mcu.tick(2 * BYTE_CCK, &mut cia);
-        mcu.tick(RESYNC_TIMEOUT_CCK as u32, &mut cia);
+        (mcu.tick(2 * BYTE_CCK, &mut cia) | cia.settle_irq_pin());
+        (mcu.tick(RESYNC_TIMEOUT_CCK as u32, &mut cia) | cia.settle_irq_pin());
         assert!(!mcu.take_system_reset_request());
-        mcu.tick(KCLK_RESET_HOLD_CCK as u32 + 1, &mut cia);
+        (mcu.tick(KCLK_RESET_HOLD_CCK as u32 + 1, &mut cia) | cia.settle_irq_pin());
         assert!(mcu.take_system_reset_request());
     }
 
@@ -1062,7 +1067,7 @@ mod tests {
         let mut cia = unmasked_cia();
         let mut mcu = idle_mcu(&mut cia);
         mcu.key_transition(0x40, true); // space held across the reset
-        mcu.tick(2 * BYTE_CCK, &mut cia); // its press transmits
+        (mcu.tick(2 * BYTE_CCK, &mut cia) | cia.settle_irq_pin()); // its press transmits
         cia.read(REG_ICR);
 
         mcu.begin_power_up();
@@ -1084,18 +1089,18 @@ mod tests {
         // Idle with a buffered byte: act now.
         assert_eq!(mcu.next_event_cck(), Some(1));
         // Mid-bit: the next KCLK edge.
-        mcu.tick(10, &mut cia);
+        (mcu.tick(10, &mut cia) | cia.settle_irq_pin());
         let edge = mcu.next_event_cck().expect("bit-edge deadline");
         assert!(edge > 0 && edge as u64 <= BIT_PHASE_CCK, "edge {edge}");
         // Awaiting handshake: the resync timeout keeps a deadline alive.
-        mcu.tick(2 * BYTE_CCK, &mut cia);
+        (mcu.tick(2 * BYTE_CCK, &mut cia) | cia.settle_irq_pin());
         let deadline = mcu.next_event_cck().expect("timeout deadline");
         assert!(deadline as u64 <= RESYNC_TIMEOUT_CCK);
         // Through the resync timeout: the lone sync bit clocks out and
         // the MCU parks waiting for its handshake -- a deadline exists
         // in both of those states too (residual budget from the earlier
         // ticks decides which one we land in).
-        mcu.tick(RESYNC_TIMEOUT_CCK as u32, &mut cia);
+        (mcu.tick(RESYNC_TIMEOUT_CCK as u32, &mut cia) | cia.settle_irq_pin());
         let next = mcu.next_event_cck().expect("resync deadline");
         assert!(next > 0 && next as u64 <= RESYNC_TIMEOUT_CCK, "next {next}");
     }
@@ -1105,7 +1110,7 @@ mod tests {
     fn drain_stream(mcu: &mut KeyboardMcu, cia: &mut Cia) -> Vec<u8> {
         let mut stream = Vec::new();
         for _ in 0..32 {
-            if !mcu.tick(2 * BYTE_CCK, cia) {
+            if !(mcu.tick(2 * BYTE_CCK, cia) | cia.settle_irq_pin()) {
                 break;
             }
             stream.push(decode(cia.read(REG_SDR)));
@@ -1215,21 +1220,24 @@ mod tests {
         mcu.key_transition(0x02, true);
 
         // Stop 40 cck short of the byte's final edge.
-        mcu.tick(2 * BYTE_CCK - 40, &mut cia);
+        (mcu.tick(2 * BYTE_CCK - 40, &mut cia) | cia.settle_irq_pin());
         // The Amiga drives KDAT low now, mid-final-bit...
         cia.write(REG_CRA, CRA_SPMODE);
         mcu.amiga_kdat_edge(true);
         // ...the byte completes 40 cck later, and the pulse is released
         // 280 cck after that: 320 cck total, >= the 301 cck minimum,
         // even though only 280 fell inside AwaitHandshake.
-        mcu.tick(40, &mut cia);
-        mcu.tick(280, &mut cia);
+        (mcu.tick(40, &mut cia) | cia.settle_irq_pin());
+        (mcu.tick(280, &mut cia) | cia.settle_irq_pin());
         cia.write(REG_CRA, 0);
         mcu.amiga_kdat_edge(false);
 
         cia.read(REG_SDR);
         cia.read(REG_ICR);
-        assert!(mcu.tick(2 * BYTE_CCK, &mut cia), "second byte must follow");
+        assert!(
+            (mcu.tick(2 * BYTE_CCK, &mut cia) | cia.settle_irq_pin()),
+            "second byte must follow"
+        );
         assert_eq!(cia.read(REG_SDR), 0xFB);
     }
 }
