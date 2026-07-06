@@ -3801,6 +3801,17 @@ impl Bus {
             self.floppy.set_adkcon(self.paula.adkcon);
             if self.floppy.tick(cck, dmacon, &mut self.mem.chip_ram) {
                 self.paula.intreq |= INT_DSKBLK;
+                // Companion to COPPERLINE_DBG_DSKLEN: the wall-time DSKBLK
+                // raise, closing each arm -> completion interval.
+                if crate::envcfg::flag("COPPERLINE_DBG_DSKLEN") {
+                    log::info!(
+                        "dskblk f={} secs={:.4} v={} h={}",
+                        self.emulated_frames,
+                        self.emulated_seconds(),
+                        self.agnus.vpos,
+                        self.agnus.hpos,
+                    );
+                }
             }
             if self.floppy.take_sync_irq() {
                 self.paula.intreq |= INT_DSKSYNC;
