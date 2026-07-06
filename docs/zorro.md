@@ -126,7 +126,7 @@ manifest capabilities; importing one that was not granted fails to load):
 
 Interrupt lines are level-sensitive and polled, exactly like the in-tree
 boards: a plugin holds `int2`/`int6` non-zero while the line is asserted, and
-the bus applies the 68000 interrupt-recognition latency automatically -- the
+the bus applies the interrupt-delivery pipeline automatically -- the
 plugin never pulses INTREQ.
 
 Plugins can be written in any language that targets `wasm32` (Rust, C, Zig,

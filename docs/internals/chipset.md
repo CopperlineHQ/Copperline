@@ -112,7 +112,7 @@ scoped. ECS adds BLTSIZV/BLTSIZH for larger blits.
 ## Paula (`paula.rs`)
 
 Paula owns the interrupt system (INTENA/INTREQ, delivered through the
-modelled 68000 recognition latency), serial, and audio:
+modelled IPL-pin pipe and 68000 boundary sampling), serial, and audio:
 
 - **Audio**: four DMA channels, each with location/length/period/volume,
   a period accumulator clocked at CCK rate, and the hardware's one-word

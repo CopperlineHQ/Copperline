@@ -319,7 +319,7 @@ every access re-walks the tables.
 ## Interrupts and STOP
 
 Paula's INTENA/INTREQ levels are delivered as M68K autovectors through the
-modelled recognition latency described in [](timing). When the CPU
+modelled IPL pipe and boundary sampling described in [](timing). When the CPU
 executes `STOP`, the frame loop fast-forwards device time to the next
 event that can raise an interrupt instead of spinning -- behaviour the
 debugger's Step control inherits.

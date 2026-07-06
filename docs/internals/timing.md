@@ -253,8 +253,12 @@ the same slot-eligibility primitive the live engine uses.
 ### Per-slot FSM
 
 Scheduled normal blits use explicit phases matching the hardware
-controller: a one-slot BBUSY start delay, an INIT slot, source slots
-A/B/C/D, and E/F flush slots for the delayed D holding register. The
+controller: three internal startup slots (the BLTSIZE register-commit
+cycle plus the two bus-arbitration startup cycles real Agnus spends
+before the micro-program begins, verified with a BLTSIZE-to-blitter-IRQ
+beam probe against vAmiga), a one-slot BBUSY start delay, an INIT slot,
+source slots A/B/C/D, and E/F flush slots for the delayed D holding
+register. The
 source cadence follows the enabled-channel speed table: A is always
 visited, B only when enabled, C when enabled (USEC) *or* in fill mode (an
 idle C slot, no bus access), and D when D is enabled or no C next-word
@@ -372,25 +376,36 @@ Hardware](https://www.theflatnet.de/pub/cbm/amiga/AmigaDevDocs/hard_6.html).
 
 ## Interrupt-recognition latency
 
-A 68000 does not enter an exception the moment INTREQ rises; recognition
-plus the exception sequence takes roughly 60-100 CCK on real hardware.
-Copperline models this with a configurable latency on newly-raised
-interrupt levels (`DEFAULT_IRQ_LATENCY_CCK = 65`, `src/bus.rs`;
-`COPPERLINE_IRQ_LATENCY_CCK` overrides, `0` disables).
-The delay is attached to asynchronous Paula/CIA/blitter/Copper source
-assertions. A CPU write that merely changes INTENA/INTREQ masking or
-acknowledges a latch normally only updates the delayed-bit bookkeeping. PORTS
-is level-fed by CIA-A/Gayle-style INT2 sources and remains immediately visible
-when software unmasks an already-latched level; other newly exposed latched
-sources are treated as freshly-present CPU IPL inputs and still pass through
-recognition latency.
+A 68000 does not enter an exception the moment INTREQ rises. Two hardware
+mechanisms sit between the two events, and Copperline models both:
 
-This matters more than it sounds: a beam-bounded interrupt handler that
-arrives 50 CCK early steals that time from the main loop every frame. The
-canonical regression was a scene player running at half speed because
-too-early vertical-blank IRQs truncated the depacker's per-frame slice; the
-latency model fixed it, confirmed against real hardware with the timing-test
-disk.
+1. **The Paula IPL pipe.** A change to the enabled-pending interrupt set
+   reaches the CPU's IPL pins only after a few chip clocks of pipelining
+   inside Paula (`DEFAULT_IRQ_LATENCY_CCK = 5`, `src/bus.rs`;
+   `COPPERLINE_IRQ_LATENCY_CCK` overrides, `0` disables both mechanisms).
+   The delay is attached to asynchronous Paula/CIA/blitter/Copper source
+   assertions. A CPU write that merely changes INTENA/INTREQ masking or
+   acknowledges a latch normally only updates the delayed-bit bookkeeping.
+   PORTS is level-fed by CIA-A/Gayle-style INT2 sources and remains
+   immediately visible when software unmasks an already-latched level; other
+   newly exposed latched sources are treated as freshly-present CPU IPL
+   inputs and still pass through the pipe. INTREQR reads are never delayed:
+   the pipe sits between the level encoder and the pins, not on the register.
+2. **Boundary sampling.** The CPU latches its IPL pins during bus cycles,
+   and the take-interrupt decision at an instruction boundary uses the level
+   latched at the *previous* instruction's last bus access
+   (`CpuBus::sample_ipl`, `src/cpu.rs`). A level that rises during an
+   instruction's trailing internal cycles is therefore recognised one
+   instruction later, exactly as on silicon.
+
+Together these reproduce the raise-to-handler-entry positions measured
+against vAmiga (and the vAmigaTS real-A500 photos) across VERTB and
+copper-poked INTREQ sources under a range of foreground loops; the residual
+is 0..+7 CCK of per-instruction IPL poll-point detail the vendored core does
+not model. An earlier revision used a blanket 65 CCK "recognition latency"
+calibrated against timing-test row 19 with a mis-decoded VHPOSR (the low
+byte is the CCK position, not CCK/2); that delivered every interrupt ~50 CCK
+late and dominated the vAmigaTS cputim/irqtim divergence.
 
 ## Real-time pacing
 
