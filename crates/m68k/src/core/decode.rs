@@ -984,8 +984,25 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
         }
         let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
         let ccr = cpu.get_ccr() as u32;
-        cpu.write_ea(bus, mode, Size::Word, ccr);
-        return if mode.is_register_direct() { 6 } else { 8 };
+        if mode.is_register_direct() {
+            // 68010: register destination costs only the final prefetch.
+            cpu.write_ea(bus, mode, Size::Word, ccr);
+            return 4;
+        }
+        // 68010 memory destination: internal clocks, EA calculation, the
+        // final prefetch, THEN the write (measured hardware order; vAmigaTS
+        // CPU/Timing2/MOVECCR, Moira execMoveCcrEa).
+        let ea_internal: i32 = match mode {
+            AddressingMode::AddressIndirect(_) => 2,
+            AddressingMode::PostIncrement(_) => 4,
+            AddressingMode::PreDecrement(_) => 2,
+            _ => 0,
+        };
+        cpu.internal_cycles(ea_internal as u32);
+        let ea = cpu.resolve_ea(bus, mode, Size::Word);
+        // write_resolved_ea tops the prefetch queue up before the write.
+        cpu.write_resolved_ea(bus, ea, Size::Word, ccr);
+        return 8 + ea_internal + cpu.ea_calc_cycles(mode);
     }
 
     // CHK (68000: opmode=110 for CHK.W). Note: opmode=111 overlaps with LEA on 68000.

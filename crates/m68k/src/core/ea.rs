@@ -429,6 +429,22 @@ impl CpuCore {
 /// the difference is only that `dest` omits nothing here because the access is
 /// a write rather than a read of the same width.
 impl CpuCore {
+    /// Cycles `resolve_ea` itself spends on the prefetch-modeled CPUs
+    /// (68000/68010): the extension-word fetches plus the internal clocks
+    /// the address calculation bills. No operand access is included.
+    #[inline]
+    pub(crate) fn ea_calc_cycles(&self, mode: AddressingMode) -> i32 {
+        use AddressingMode::*;
+        match mode {
+            DataDirect(_) | AddressDirect(_) | AddressIndirect(_) | PostIncrement(_) => 0,
+            PreDecrement(_) => 2,
+            Displacement(_) | AbsoluteShort | PcDisplacement => 4,
+            Index(_) | PcIndex => 6,
+            AbsoluteLong => 8,
+            Immediate => 4,
+        }
+    }
+
     /// Source-operand EA fetch time (address calc + one read), byte/word(long).
     #[inline]
     pub(crate) fn ea_source_cycles(&self, mode: AddressingMode, size: Size) -> i32 {
