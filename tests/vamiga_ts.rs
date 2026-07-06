@@ -146,9 +146,17 @@ fn run_case(
     if let Some(parent) = cfg_path.parent() {
         fs::create_dir_all(parent)?;
     }
+    // Run against a scratch copy of the ADF, mounted writable: vAmiga's
+    // regression flow copies the disk to /tmp and inserts it unprotected,
+    // and several Drive/step and Drive/read cases visualize the CIA-A
+    // /WPRO line, so a write-protected mount diverges from the reference
+    // (and from the shipped real-hardware photos).
+    let mut disk_path = out_root.join(&case.rel_path);
+    disk_path.set_extension("df0.adf");
+    fs::copy(&case.adf_path, &disk_path)?;
     fs::write(
         &cfg_path,
-        copperline_config(kick13, &case.adf_path, &case.setup, &case.cpu),
+        copperline_config(kick13, &disk_path, &case.setup, &case.cpu),
     )?;
 
     let output = Command::new(emulator)
@@ -310,7 +318,7 @@ video = "PAL"
 
 [floppy.df0]
 path = {}
-write_protected = true
+write_protected = false
 "#,
         toml_string(&kick13.to_string_lossy()),
         toml_string(&adf.to_string_lossy())
