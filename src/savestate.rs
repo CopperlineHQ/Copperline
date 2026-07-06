@@ -82,7 +82,9 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      loop_body_word, loop_dbcc_word)
 //  22: Paula AudChannel replaced by the HRM state-machine shape (state,
 //      buffer/auddat holding registers, percnt, request latches)
-pub const STATE_VERSION: u32 = 22;
+//  23: FloppyDrive gained the step-pulse timestamps (last_step_cck and the
+//      per-direction stamps for the mechanism's 40 us pulse floor)
+pub const STATE_VERSION: u32 = 23;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {
