@@ -155,6 +155,14 @@ impl Bus {
                 }
                 true
             }
+            CopperSlotAction::SkippedMove { register } => {
+                // The SKIP suppresses the write, not the illegal-register
+                // decode: a forbidden MOVE stops the Copper even when skipped.
+                if !self.copper_can_write_custom(register) {
+                    self.copper.stop();
+                }
+                true
+            }
         }
     }
 
