@@ -2178,11 +2178,11 @@ impl CpuBus {
         }
 
         if range_contains(CIA_A_BASE, CIA_A_SIZE, addr) {
-            self.bus.cpu_slow_external_access(Self::access_words(size));
+            self.bus.cpu_cia_access(Self::access_words(size));
             return self.bus.cia_a_read(u64::from(addr - CIA_A_BASE), size) as u32;
         }
         if range_contains(CIA_B_BASE, CIA_B_SIZE, addr) {
-            self.bus.cpu_slow_external_access(Self::access_words(size));
+            self.bus.cpu_cia_access(Self::access_words(size));
             return self.bus.cia_b_read(u64::from(addr - CIA_B_BASE), size) as u32;
         }
         if self.bus.cdtv.is_some() && range_contains(CDTV_BATTRAM_BASE, CDTV_BATTRAM_SIZE, addr) {
@@ -2366,7 +2366,7 @@ impl CpuBus {
         }
 
         if range_contains(CIA_A_BASE, CIA_A_SIZE, addr) {
-            self.bus.cpu_slow_external_access(Self::access_words(size));
+            self.bus.cpu_cia_access(Self::access_words(size));
             let effect = self
                 .bus
                 .cia_a_write(u64::from(addr - CIA_A_BASE), size, u64::from(value));
@@ -2380,7 +2380,7 @@ impl CpuBus {
             return;
         }
         if range_contains(CIA_B_BASE, CIA_B_SIZE, addr) {
-            self.bus.cpu_slow_external_access(Self::access_words(size));
+            self.bus.cpu_cia_access(Self::access_words(size));
             let effect = self
                 .bus
                 .cia_b_write(u64::from(addr - CIA_B_BASE), size, u64::from(value));
@@ -3555,13 +3555,20 @@ mod tests {
             ("fast RAM word data read", FAST_RAM_BASE as u32 + 0x0200),
             ("slow RAM word data read", SLOW_RAM_BASE as u32 + 0x0200),
             ("ROM word data read", ROM_BASE as u32 + 0x0200),
-            ("CIA word data read", CIA_A_BASE),
         ] {
             let hi = ((address >> 16) & 0xFFFF) as u16;
             let lo = (address & 0xFFFF) as u16;
             let slice = run_rom_instruction(&[0x3039, hi, lo])?;
             assert_single_instruction_timing(label, slice, 8, 12);
         }
+        // A CIA access is a 6800-style VPA cycle: the data transfer waits
+        // for the E clock (Bus::cpu_cia_access), adding a phase-dependent
+        // 3..7 cck on top of the plain external cost. The phase here is
+        // fixed by the test's deterministic start time.
+        let hi = ((CIA_A_BASE >> 16) & 0xFFFF) as u16;
+        let lo = (CIA_A_BASE & 0xFFFF) as u16;
+        let slice = run_rom_instruction(&[0x3039, hi, lo])?;
+        assert_single_instruction_timing("CIA word data read", slice, 8, 15);
         Ok(())
     }
 

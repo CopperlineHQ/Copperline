@@ -3240,6 +3240,29 @@ impl Bus {
     /// RTC, autoconfig, undecoded space). These stay on the slow motherboard
     /// bus no matter how fast the CPU is clocked, so bill the stock 68000
     /// figure of 2 cck per word regardless of the configured CPU speed.
+    /// A CPU access to a CIA ($BFxxxx). These are 6800-style VPA cycles: the
+    /// 68000 synchronizes to the E clock (CPU/10, six clocks low, four high)
+    /// before the data transfer, so the access costs 6..15 CPU cycles
+    /// depending on the E phase it starts in, not a plain bus cycle. The
+    /// delay table is vAmiga's Agnus::syncWithEClock at Copperline's colour
+    /// clock resolution (one cck = two CPU clocks; the CIA PHI2 divider
+    /// remainder is the live E phase). Software loops that poll or toggle a
+    /// CIA lock to the E clock through this - the vAmigaTS CIA/cnt ramps
+    /// count it directly.
+    pub fn cpu_cia_access(&mut self, words: u32) {
+        if !self.cpu_bus_arbitration_enabled || words == 0 {
+            return;
+        }
+        self.flush_timed_devices();
+        const E_SYNC_DELAY_CCK: [u32; 5] = [6, 5, 4, 3, 7];
+        let phase = (self.device_clock.cia_tick_remainder_cck as usize).min(4);
+        let delay = E_SYNC_DELAY_CCK[phase];
+        let cck = delay + words * 2;
+        let tick = self.advance_chipset(cck);
+        self.record_slice_bus_advance(cck, tick);
+        self.flush_timed_devices();
+    }
+
     pub fn cpu_slow_external_access(&mut self, words: u32) {
         if !self.cpu_bus_arbitration_enabled || words == 0 {
             return;
