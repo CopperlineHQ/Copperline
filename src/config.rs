@@ -241,6 +241,10 @@ pub enum SerialMode {
     /// Serial in/out is bridged to host MIDI endpoints. Requires a build
     /// with the `midi` feature; without it, resolving this mode is an error.
     Midi,
+    /// Serial in/out is bridged to a host TCP port, like UAE's `TCP:`
+    /// serial device. With an `AUX:` shell on the Amiga side, a connected
+    /// client gets a remote AmigaDOS console.
+    Tcp,
 }
 
 impl SerialMode {
@@ -250,6 +254,7 @@ impl SerialMode {
             Self::Off => "off",
             Self::Stdout => "stdout",
             Self::Midi => "midi",
+            Self::Tcp => "tcp",
         }
     }
 }
@@ -263,6 +268,9 @@ pub struct SerialConfig {
     pub mode: SerialMode,
     pub midi_out: Option<String>,
     pub midi_in: Option<String>,
+    /// TCP listen address for [`SerialMode::Tcp`]; `None` means the
+    /// default `127.0.0.1:1234` (the port UAE's `TCP:` serial uses).
+    pub listen: Option<String>,
 }
 
 /// A configured hard-drive image: the host path plus an optional volume-name
@@ -1208,6 +1216,9 @@ pub(crate) struct RawSerial {
     /// Host MIDI input endpoint name (substring match); MIDI mode only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) midi_in: Option<String>,
+    /// TCP listen address; tcp mode only. Defaults to 127.0.0.1:1234.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) listen: Option<String>,
 }
 
 /// A drive image entry in `[ide]`/`[scsi]`. Accepts either a bare path string
@@ -1775,6 +1786,7 @@ impl TryFrom<RawConfig> for Config {
             },
             midi_out: raw.serial.midi_out.clone(),
             midi_in: raw.serial.midi_in.clone(),
+            listen: raw.serial.listen.clone(),
         };
 
         let ide = IdeConfig {
@@ -1981,8 +1993,9 @@ pub(crate) fn parse_serial_mode(s: &str) -> Result<SerialMode> {
         "off" | "none" => Ok(SerialMode::Off),
         "stdout" | "terminal" => Ok(SerialMode::Stdout),
         "midi" => Ok(SerialMode::Midi),
+        "tcp" => Ok(SerialMode::Tcp),
         _ => Err(anyhow!(
-            "unknown [serial] mode {:?}: expected \"off\", \"stdout\", or \"midi\"",
+            "unknown [serial] mode {:?}: expected \"off\", \"stdout\", \"midi\", or \"tcp\"",
             s
         )),
     }

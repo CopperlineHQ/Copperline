@@ -498,7 +498,12 @@ const WARPS: [WarpSpeed; 5] = [
 const JOYSTICK_MODES: [JoystickInputMode; 2] =
     [JoystickInputMode::Gamepad, JoystickInputMode::Keyboard];
 #[cfg(feature = "midi")]
-const SERIAL_MODES: [SerialMode; 3] = [SerialMode::Off, SerialMode::Stdout, SerialMode::Midi];
+const SERIAL_MODES: [SerialMode; 4] = [
+    SerialMode::Off,
+    SerialMode::Stdout,
+    SerialMode::Midi,
+    SerialMode::Tcp,
+];
 
 /// Stereo-separation presets the picker steps through (percent), ascending so
 /// the right arrow steps up (wrapping 100 -> 0) and the left arrow steps down.
@@ -560,6 +565,9 @@ pub struct MachineSetup {
     serial_mode: SerialMode,
     midi_out: Option<String>,
     midi_in: Option<String>,
+    /// TCP listen address for `mode = "tcp"`; carried so the override
+    /// round-trips through a launcher save even though no tab edits it.
+    serial_listen: Option<String>,
     /// Host endpoints for the device pickers, read once when this setup is
     /// built so a fresh config screen sees currently-connected devices.
     #[cfg(feature = "midi")]
@@ -653,6 +661,7 @@ impl MachineSetup {
             serial_mode: cfg.serial.mode,
             midi_out: cfg.serial.midi_out.clone(),
             midi_in: cfg.serial.midi_in.clone(),
+            serial_listen: cfg.serial.listen.clone(),
             // Left empty here so config construction stays side-effect free; the
             // config screen fills it via refresh_midi_endpoints on open.
             #[cfg(feature = "midi")]
@@ -881,6 +890,7 @@ impl MachineSetup {
         }
         raw.serial.midi_out = self.midi_out.clone();
         raw.serial.midi_in = self.midi_in.clone();
+        raw.serial.listen = self.serial_listen.clone();
         // The Audio output picker is one of default / a named device / Disabled.
         // A named device sets output_device; Disabled sets output_enabled=false
         // (the resolved default is true, so it is omitted otherwise).
@@ -1209,6 +1219,7 @@ impl MachineSetup {
                 SerialMode::Off => "Off".to_string(),
                 SerialMode::Stdout => "Stdout".to_string(),
                 SerialMode::Midi => "MIDI".to_string(),
+                SerialMode::Tcp => "TCP".to_string(),
             },
             #[cfg(feature = "midi")]
             F::MidiOut => self.midi_out.clone().unwrap_or_else(|| "None".to_string()),
@@ -2005,6 +2016,19 @@ mod tests {
         assert_eq!(raw.chipset.agnus.as_deref(), Some("OCS"));
         let back = MachineSetup::from_raw(&raw).unwrap();
         assert_eq!(back.agnus, Some(AgnusRevision::Ocs));
+    }
+
+    #[test]
+    fn serial_tcp_listen_round_trips_through_raw() {
+        // A launcher save must not drop the [serial] listen override, which
+        // no tab edits (regression: it was absent from MachineSetup/to_raw).
+        let mut raw = RawConfig::default();
+        raw.serial.mode = Some("tcp".into());
+        raw.serial.listen = Some("0.0.0.0:2323".into());
+        let setup = MachineSetup::from_raw(&raw).unwrap();
+        assert_eq!(setup.serial_listen.as_deref(), Some("0.0.0.0:2323"));
+        let back = setup.to_raw();
+        assert_eq!(back.serial.listen.as_deref(), Some("0.0.0.0:2323"));
     }
 
     #[test]
