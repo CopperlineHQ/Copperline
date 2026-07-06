@@ -1401,6 +1401,34 @@ fn copper_lc_write_retargets_dormant_copper_pc() {
 }
 
 #[test]
+fn copper_skipped_forbidden_move_still_stops_the_copper() {
+    // A satisfied SKIP suppresses the following MOVE's write, but the MOVE
+    // still passes through the illegal-register decode: a forbidden target
+    // stops the Copper exactly as it would unskipped (real-Agnus behaviour,
+    // photographed by vAmigaTS Copper/Skip/copskip4).
+    let mut bus = empty_bus();
+    let cop1 = 0x0100usize;
+    write_chip_word(&mut bus, cop1, 0x0001); // SKIP: beam already past 0,0
+    write_chip_word(&mut bus, cop1 + 2, 0xFFFF);
+    write_chip_word(&mut bus, cop1 + 4, 0x003E); // forbidden MOVE (no CDANG)
+    write_chip_word(&mut bus, cop1 + 6, 0x0000);
+    write_chip_word(&mut bus, cop1 + 8, 0x0180); // never reached
+    write_chip_word(&mut bus, cop1 + 10, 0x0F00);
+
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_COPEN;
+    bus.agnus.vpos = 0x50;
+    bus.agnus.hpos = 0x20;
+    bus.copper.jump(cop1 as u32);
+    bus.advance_chipset(16);
+
+    assert!(
+        !bus.copper.is_running(),
+        "the skipped forbidden MOVE must halt"
+    );
+    assert_eq!(bus.denise.palette[0], 0, "the write after it must not run");
+}
+
+#[test]
 fn copper_dma_enable_gates_current_pc_until_copjmp_strobe() {
     let mut bus = empty_bus();
     let cop1 = 0x0100usize;

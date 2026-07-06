@@ -305,9 +305,13 @@ pub enum CopperSlotAction {
     /// blitter/CPU.
     Idle,
     /// The Copper used the bus this color clock but produced no register write
-    /// the caller must apply (a first-word fetch, a skipped MOVE, an applied
-    /// COPJMP/WAIT/SKIP).
+    /// the caller must apply (a first-word fetch, an applied COPJMP/WAIT/SKIP).
     BusUsed,
+    /// The Copper fetched a MOVE that an active SKIP suppresses. The write is
+    /// omitted, but the register still passes through the illegal-address
+    /// decode: a MOVE the Copper may not perform stops it even when skipped
+    /// (real-Agnus behaviour, vAmigaTS Copper/Skip/copskip4).
+    SkippedMove { register: u16 },
     /// The Copper used the bus and decoded a `MOVE`; the caller applies the
     /// custom-register write (subject to COPCON) or stops the Copper.
     Move { register: u16, value: u16 },
@@ -605,9 +609,10 @@ impl Copper {
                 }
                 match self.fetch_decode(chip_ram) {
                     CopperFetch::Idle => CopperSlotAction::Idle,
-                    CopperFetch::FirstWord { .. } | CopperFetch::SkippedMove { .. } => {
-                        CopperSlotAction::BusUsed
-                    }
+                    CopperFetch::FirstWord { .. } => CopperSlotAction::BusUsed,
+                    CopperFetch::SkippedMove { first, .. } => CopperSlotAction::SkippedMove {
+                        register: first & 0x01FE,
+                    },
                     CopperFetch::Instruction { instruction, .. } => {
                         match instruction {
                             CopperInstruction::Move {
