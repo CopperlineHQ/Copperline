@@ -976,20 +976,33 @@ impl Bus {
         next_chip_bus_quantum_at(self.agnus.hpos, self.agnus.current_line_cck())
     }
 
+    /// Horizontal position on the restart line where the vertical-blank
+    /// COP1LC strobe wakes the Copper. Calibrated against the vAmigaTS
+    /// Copper/Skip/copstrt1+copstrt2 real-A500 captures, which bracket the
+    /// first instruction's comparator decision to beam $0B..$0C: the Copper
+    /// does not start fetching at the very first color clock of the line.
     pub(super) fn cck_until_pending_copper_frame_start(&self) -> Option<u32> {
         self.pending_copper_frame_start?;
         let target_vpos = copper_frame_start_vpos(self.agnus.video_standard());
-        if self.agnus.vpos >= target_vpos {
+        if self.agnus.vpos > target_vpos {
             return Some(0);
         }
-        self.agnus.cck_until_line_start(target_vpos)
+        if self.agnus.vpos == target_vpos {
+            return Some(COPPER_FRAME_START_HPOS.saturating_sub(self.agnus.hpos));
+        }
+        self.agnus
+            .cck_until_line_start(target_vpos)
+            .map(|cck| cck.saturating_add(COPPER_FRAME_START_HPOS))
     }
 
     pub(super) fn start_pending_copper_frame_if_due(&mut self) {
         let Some(cop1lc) = self.pending_copper_frame_start else {
             return;
         };
-        if self.agnus.vpos < copper_frame_start_vpos(self.agnus.video_standard()) {
+        let target_vpos = copper_frame_start_vpos(self.agnus.video_standard());
+        if self.agnus.vpos < target_vpos
+            || (self.agnus.vpos == target_vpos && self.agnus.hpos < COPPER_FRAME_START_HPOS)
+        {
             return;
         }
         self.pending_copper_frame_start = None;

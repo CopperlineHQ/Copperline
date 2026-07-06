@@ -1459,14 +1459,14 @@ fn automatic_copper_restart_uses_live_cop1lc_at_frame_boundary() {
     // The Copper restarts at the top of the frame (vpos 0), not at the end
     // of vblank, so the live COP1LC (cop2) is picked up immediately as the
     // beam wraps -- no delay until the end of vblank.
-    bus.advance_chipset(1);
+    bus.advance_chipset(7);
     assert_eq!(bus.pending_copper_frame_start, None);
     assert_eq!(bus.denise.palette[0], 0);
 
     // From hpos 0 the Copper waits out the refresh band (0x00-0x08) and its
     // idle-half color clock at hpos 0x09, then its single MOVE fetches on
     // the next two even (access-parity) color clocks: write at hpos 0x0C.
-    bus.advance_chipset(13);
+    bus.advance_chipset(7);
     assert_eq!(bus.denise.palette[0], 0x0666);
 }
 
@@ -2245,14 +2245,14 @@ fn forbidden_copper_move_recovers_at_start_of_frame_from_cop1lc() {
 
     bus.agnus.vpos = crate::chipset::agnus::PAL_LINES - 1;
     bus.agnus.hpos = COLORCLOCKS_PER_LINE - 1;
-    bus.advance_chipset(1);
+    bus.advance_chipset(7);
     // Restart is immediate at the top of the frame, recovering from the
     // forbidden MOVE via the live COP1LC.
     assert_eq!(bus.pending_copper_frame_start, None);
     // From hpos 0 the Copper waits out the refresh band and its idle-half
     // color clock, then its MOVE fetches on the next two even (access-parity)
     // color clocks: write at hpos 0x0C.
-    bus.advance_chipset(13);
+    bus.advance_chipset(7);
 
     assert_eq!(bus.denise.palette[0], 0x0666);
 }
@@ -2496,12 +2496,12 @@ fn copper_programmed_cop1lc_sets_automatic_frame_restart() {
 
     bus.agnus.vpos = crate::chipset::agnus::PAL_LINES - 1;
     bus.agnus.hpos = COLORCLOCKS_PER_LINE - 1;
-    bus.advance_chipset(1);
+    bus.advance_chipset(7);
 
     // Restart is immediate at the top of the frame, picking up the
     // copper-programmed COP1LC straight away.
     assert_eq!(bus.pending_copper_frame_start, None);
-    bus.advance_chipset(16);
+    bus.advance_chipset(10);
     assert_eq!(bus.denise.palette[0], 0x0789);
 }
 
@@ -2538,7 +2538,7 @@ fn automatic_vblank_reload_restarts_cop1_after_copjmp2_branch() {
 
     bus.agnus.vpos = crate::chipset::agnus::PAL_LINES - 1;
     bus.agnus.hpos = COLORCLOCKS_PER_LINE - 1;
-    bus.advance_chipset(1);
+    bus.advance_chipset(7);
 
     // Restart is immediate at the top of the frame (vpos 0), not delayed to
     // the end of vblank: the live COP1LC reload happens as the beam wraps.
@@ -2547,14 +2547,15 @@ fn automatic_vblank_reload_restarts_cop1_after_copjmp2_branch() {
 
     let event_count = bus.current_render_events().len();
 
-    // From hpos 0 the restarted Copper's MOVE fetches on the first two free
-    // access-parity color clocks. With the hardware refresh model (slots
-    // 0x004/6/8/A) those are hpos 0x00 and 0x02, so the write lands at 0x02.
-    bus.advance_chipset(3);
+    // The vertical-blank strobe wakes the Copper at COPPER_FRAME_START_HPOS
+    // (calibrated against the copstrt1/copstrt2 real-A500 captures), so the
+    // restarted MOVE fetches on the first free access-parity color clocks
+    // from there and the write lands at hpos 0x08.
+    bus.advance_chipset(6);
     assert_eq!(bus.denise.palette[0], 0x0111);
     let event = &bus.current_render_events()[event_count];
     assert_eq!(event.vpos, 0);
-    assert_eq!(event.hpos, 0x02);
+    assert_eq!(event.hpos, 0x08);
     assert_eq!(event.source, super::BeamWriteSource::Copper);
 }
 
