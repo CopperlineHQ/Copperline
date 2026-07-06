@@ -3565,8 +3565,8 @@ mod tests {
         // for the E clock (Bus::cpu_cia_access), adding a phase-dependent
         // 3..7 cck on top of the plain external cost. The phase here is
         // fixed by the test's deterministic start time.
-        let hi = ((CIA_A_BASE as u32 >> 16) & 0xFFFF) as u16;
-        let lo = (CIA_A_BASE as u32 & 0xFFFF) as u16;
+        let hi = ((CIA_A_BASE >> 16) & 0xFFFF) as u16;
+        let lo = (CIA_A_BASE & 0xFFFF) as u16;
         let slice = run_rom_instruction(&[0x3039, hi, lo])?;
         assert_single_instruction_timing("CIA word data read", slice, 8, 15);
         Ok(())
