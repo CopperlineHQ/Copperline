@@ -59,6 +59,16 @@ impl Bus {
             None if eligible => self.free_chip_bus_slot_owner(),
             None => self.scheduled_dma_owner_after_fixed(false, fixed_dma_owner),
         };
+        if diag_blt_slots() && self.blitter.busy {
+            eprintln!(
+                "BLTP {} {} {} OWNER {owner:?} pending={} needs_bus={}",
+                self.emulated_frames,
+                self.agnus.vpos,
+                self.agnus.hpos,
+                self.blitter.current_slot_label(),
+                self.blitter.current_slot_needs_bus()
+            );
+        }
         self.last_chip_bus_owner = owner;
         if self.bus_accounting.enabled {
             self.bus_accounting
@@ -99,21 +109,53 @@ impl Bus {
         if !matches!(owner, ChipBusOwner::Copper) {
             self.process_chip_bus_owner(owner);
         }
-        // A busy blitter's idle pipeline cycles leave the chip bus free, but
-        // they still advance on Agnus slots that are available to the
-        // CPU/blitter/Copper arbitration domain. Fixed DMA slots stall even an
-        // idle blitter phase; otherwise display DMA would not slow area fills.
+        // A busy blitter's non-bus pipeline cycles leave the chip bus free,
+        // but they still elapse in real time, per their arbitration class
+        // (see BlitSlotClass):
+        //
+        // - Internal cycles (register commit, micro-program begin, terminal
+        //   flush/D-less BLTDONE) advance on EVERY colour clock, even under
+        //   fixed DMA (vAmiga NOTHING cycles have no bus check).
+        // - Bus-free micro-cycles (the D pipeline bubble, fill's extra idle
+        //   cycle, the BLT_STRT startup cycles, line Bresenham cycles)
+        //   advance only on colour clocks the blitter could have won: they
+        //   stall while the Copper or fixed DMA owns the clock (this is
+        //   what makes display DMA slow area fills) and on the clock a
+        //   starved CPU is granted (the BLS line blocks busIsFree).
         if !matches!(owner, ChipBusOwner::Blitter)
-            && matches!(
-                owner,
-                ChipBusOwner::Idle | ChipBusOwner::Cpu | ChipBusOwner::Copper
-            )
             && self.blitter.busy
             && self.blitter_dma_enabled()
-            && !self.blitter.current_slot_needs_bus()
-            && self.blitter.tick_scheduled_slot(&mut self.mem.chip_ram)
         {
-            self.latch_blitter_completion("idle_pipeline");
+            let ticks = match self.blitter.current_slot_class() {
+                crate::chipset::blitter::BlitSlotClass::Bus => false,
+                crate::chipset::blitter::BlitSlotClass::Internal => true,
+                crate::chipset::blitter::BlitSlotClass::BusFree => match owner {
+                    ChipBusOwner::Idle => true,
+                    ChipBusOwner::Cpu => {
+                        // A starvation grant is the cck where BLS denies the
+                        // blitter; an ordinary CPU access on a free clock
+                        // does not stall the bus-free cycle.
+                        !(matches!(forced_owner, Some(ChipBusOwner::Cpu))
+                            && self.blitter_yields_to_waiting_cpu())
+                    }
+                    _ => false,
+                },
+            };
+            if ticks {
+                if diag_blt_slots() {
+                    eprintln!(
+                        "BLTP {} {} {} TICK {} bus=0 owner={owner:?}",
+                        self.emulated_frames,
+                        self.agnus.vpos,
+                        self.agnus.hpos,
+                        self.blitter.current_slot_label()
+                    );
+                }
+                if self.blitter.tick_scheduled_slot(&mut self.mem.chip_ram) {
+                    self.latch_blitter_completion("idle_pipeline");
+                }
+                self.note_blitter_slot_ticked();
+            }
         }
         let tick = self.advance_beam(cck);
         self.audio_pending_cck = self.audio_pending_cck.saturating_add(cck);
@@ -195,6 +237,15 @@ impl Bus {
         let old_emulated_cck = self.emulated_cck;
         self.emulated_cck = self.emulated_cck.saturating_add(cck as u64);
         self.coper_cpu_irq_delay_cck = self.coper_cpu_irq_delay_cck.saturating_sub(cck);
+        if let Some(delay) = self.blit_irq_delay_cck {
+            let delay = delay.saturating_sub(cck);
+            if delay == 0 {
+                self.blit_irq_delay_cck = None;
+                self.raise_blit_irq("scheduled");
+            } else {
+                self.blit_irq_delay_cck = Some(delay);
+            }
+        }
         if self.irq_latency_cck != 0 {
             self.irq_latency_cck = self.irq_latency_cck.saturating_sub(cck);
             if self.irq_latency_cck == 0 {
@@ -245,9 +296,19 @@ impl Bus {
             // via step_copper_eligible_slot (its cadence needs per-color-clock
             // gap accounting), so it never reaches here.
             ChipBusOwner::Blitter => {
+                if diag_blt_slots() {
+                    eprintln!(
+                        "BLTP {} {} {} TICK {} bus=1",
+                        self.emulated_frames,
+                        self.agnus.vpos,
+                        self.agnus.hpos,
+                        self.blitter.current_slot_label()
+                    );
+                }
                 if self.blitter.tick_scheduled_slot(&mut self.mem.chip_ram) {
                     self.latch_blitter_completion("bus_slot");
                 }
+                self.note_blitter_slot_ticked();
             }
             ChipBusOwner::Audio => self.step_audio_dma_slot(),
             ChipBusOwner::Copper
@@ -392,11 +453,12 @@ impl Bus {
     }
 
     /// Predict the color clocks until the pending blit completes by walking its
-    /// remaining slot access pattern against the beam. Access slots (mask bit
-    /// set) consume the next color clock the blitter can win (not fixed DMA,
-    /// not Copper); idle pipeline slots consume exactly one color clock
-    /// unconditionally, matching the live arbitration where they never claim
-    /// the bus and can never be stalled.
+    /// remaining slot access pattern against the beam. Eligible-consuming slots
+    /// (mask bit set: bus accesses AND bus-free micro-cycles) consume the next
+    /// color clock the blitter can win (not fixed DMA, not Copper); internal
+    /// cycles (mask bit clear) consume exactly one color clock unconditionally,
+    /// matching the live arbitration where they elapse regardless of bus
+    /// ownership.
     pub(super) fn cck_until_blitter_completes(
         &self,
         access_mask: u64,
@@ -479,11 +541,12 @@ impl Bus {
 
             let slot_needs_bus = access_mask & (1u64 << slot_idx) != 0;
             let slot_consumed = if slot_needs_bus {
+                // Bus accesses and bus-free micro-cycles both need a colour
+                // clock the blitter could have won.
                 slot_grantable && !copper_blocks
             } else {
-                // Idle pipeline cycle: bus-free, but still stalled by fixed DMA
-                // slots just like the live path.
-                slot_grantable
+                // Internal cycle: elapses unconditionally.
+                true
             };
             if slot_consumed {
                 slot_idx += 1;

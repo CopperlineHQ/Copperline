@@ -12,9 +12,12 @@ impl Bus {
         match off & 0xFFE {
             0x002 => {
                 // DMACONR. Bit 14 = BBUSY (blitter busy), bit 13 = BZERO
-                // (last blit's D was all zero).
+                // (last blit's D was all zero). BBUSY is the early-dropping
+                // flag: it clears with the sequencer's final body cycle,
+                // before the terminal D flush/BLTDONE cycles finish the blit
+                // (see Blitter::bbusy).
                 let mut r = self.agnus.dmacon & 0x07FF;
-                if self.blitter.busy {
+                if self.blitter.bbusy {
                     r |= 1 << 14;
                 }
                 if self.blitter.bzero {
@@ -622,6 +625,7 @@ impl Bus {
                 // via INTENA rather than relying on INTREQ acks while the blitter
                 // is idle.
                 self.paula.intreq &= !crate::chipset::paula::INT_BLIT;
+                self.blit_irq_delay_cck = None;
                 self.note_irq_latches_changed();
                 // A blit over the exception-vector area is useful crash context:
                 // flag it so the CPU wrapper can dump the instruction history.
@@ -674,6 +678,17 @@ impl Bus {
                     );
                 }
                 self.blitter.start_scheduled(val, &self.mem.chip_ram);
+                if diag_blt_slots() {
+                    eprintln!(
+                        "BLTP {} {} {} START con0={:04x} con1={:04x} size={:04x}",
+                        self.emulated_frames,
+                        self.agnus.vpos,
+                        self.agnus.hpos,
+                        self.blitter.bltcon0,
+                        self.blitter.bltcon1,
+                        val
+                    );
+                }
                 self.record_blit_accounting();
                 self.slice_preempted = true;
                 false
@@ -702,6 +717,7 @@ impl Bus {
                 // Same as BLTSIZE: starting a new blit consumes a stale pending
                 // blitter-done interrupt request.
                 self.paula.intreq &= !crate::chipset::paula::INT_BLIT;
+                self.blit_irq_delay_cck = None;
                 self.note_irq_latches_changed();
                 self.trace_blitter_start_ecs(val, source);
                 self.diag_blit_start(u32::from(self.blitter.bltsizv), (val as u32) & 0x07FF);

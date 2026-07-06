@@ -252,29 +252,47 @@ the same slot-eligibility primitive the live engine uses.
 
 ### Per-slot FSM
 
-Scheduled normal blits use explicit phases matching the hardware
-controller: three internal startup slots (the BLTSIZE register-commit
-cycle plus the two bus-arbitration startup cycles real Agnus spends
-before the micro-program begins, verified with a BLTSIZE-to-blitter-IRQ
-beam probe against vAmiga), a one-slot BBUSY start delay, an INIT slot,
-source slots A/B/C/D, and E/F flush slots for the delayed D holding
-register. The
-source cadence follows the enabled-channel speed table: A is always
-visited, B only when enabled, C when enabled (USEC) *or* in fill mode (an
-idle C slot, no bus access), and D when D is enabled or no C next-word
-state exists. D output is delayed through the hold register: after source
-fetches, the first D phase is the HRM "-" bubble and does not claim the
-chip bus because no destination word is queued yet. The first destination
-word is written on the next D slot and the final word in the F flush slot.
+Scheduled blits use explicit phases matching the hardware controller,
+cross-checked cycle-for-cycle against vAmiga's slot-accurate blitter with
+a two-sided slot-trace probe (`COPPERLINE_DIAG_BLT_SLOTS` in Copperline,
+`VAMIGA_BLT_PROBE` hooks in a local vAmiga build):
+
+- **Startup**: two internal extra slots (the BLTSIZE register-commit
+  cycle plus the BLT_STRT arbitration cycles real Agnus spends before the
+  micro-program begins) followed by the StartDelay/Init slots, so the
+  first body cycle runs at poke+4, matching vAmiga's BLT_STRT1/BLT_STRT2
+  timeline. The startup applies to normal and line blits alike.
+- **Body**: the source cadence follows the enabled-channel speed table: A
+  is always visited, B and C only when enabled, and D when D is enabled
+  or no C next-word state exists. D output is delayed through the hold
+  register: the first D phase of every program is the HRM "-" bubble and
+  does not claim the chip bus -- including D-only clears, which write
+  "-- D0 -- D1 | -- D2" on hardware. The first destination word is
+  written on the next D slot and the final word in the F flush slot.
+- **Termination**: every program ends with two terminal micro-cycles (the
+  internal D-hold flush and the BLTDONE cycle -- the final D write for
+  USED programs, internal otherwise). DMACONR's BBUSY drops with the
+  sequencer's final body cycle, BEFORE those terminal cycles: polling
+  loops see BBUSY clear two cycles before the last D word lands.
+  INTREQ.BLIT rises one colour clock after the BLTDONE cycle's FIRST
+  attempt (vAmiga `scheduleIrqRel(BLIT, 1)` runs before the bus
+  allocation check), so a bus-blocked final D write raises the interrupt
+  before the word lands; the Copper's blitter-finished gate opens when
+  the BLTDONE cycle completes.
+
 Normal-mode A/B barrel-shifter carry is cleared at the first word of a new
 BLTSIZE, then carries from the last source word of one row into the first
 source word of the next inside that blit; masks, modulos, and fill carry
 still observe row boundaries. Line blits use L1-L4 phases (L2 latches the C
-source word, L3 propagates, L4 stores); line-mode B data loads pass through
-the current B shifter at write time, and at completion the hardware-visible
-ASH, BSH, SIGN, and low-word BLTAPT accumulator state is written back. Tests:
+source word, L3 propagates, L4 stores) between the same startup and
+terminal cycles; a suppressed line store (USEC clear, or SING past a row's
+first dot) leaves its D slot bus-idle like vAmiga's lockD. Line-mode B data
+loads pass through the current B shifter at write time, and at completion
+the hardware-visible ASH, BSH, SIGN, and low-word BLTAPT accumulator state
+is written back. Tests:
 `scheduled_normal_mode_bbusy_start_delay_precedes_first_source_slot`,
 `blit_pipeline_identifies_idle_cycles_per_hrm_diagrams`,
+`scheduled_normal_clear_writes_progressively`,
 `scheduled_line_mode_latches_c_source_before_store_phase`,
 `scheduled_shift_carry_crosses_normal_mode_row_boundary`,
 `scheduled_a_shift_zero_fills_first_word_of_new_blit`.
@@ -294,7 +312,7 @@ classification of writes while BBUSY is set:
 | `BLTAFWM`, `BLTALWM` | Deferred | First/last-word masks captured by the scheduled state at BLTSIZE. |
 | `BLT[ABCD]PTH/PTL` | Deferred | Pointer writes do not retarget the already-scheduled transfer. |
 | `BLT[ABCD]MOD` | Deferred | Modulos captured at BLTSIZE. |
-| `BLTBDAT` | Immediate, old-register latch | The first B write after completion zeros the B old register; later writes shift through the latched B data. |
+| `BLTBDAT` | Immediate, write-time shifter | The write runs the B barrel shifter with the BSH/DESC current at write time (unlike BLTADAT/BLTCDAT); USEB-off blits consume that latched hold word. The first B write after completion zeros the B old register; later writes shift through the latched B data. |
 | `BLTSIZE` | Deferred restart | A second start strobe drains the current blit first, then starts the replacement from the post-completion pointer state. |
 | `DMACON.DMAEN/BLTEN` | Immediate | Gate blitter bus grants immediately; clearing leaves BBUSY set and preserves the pending blit until re-enabled. |
 | `DMACON.BLTPRI` | Immediate | Bus arbitration observes the priority bit directly. |
@@ -303,6 +321,27 @@ No covered mid-operation write is modelled as ignored; less common writes
 are treated as deferred by draining first. Tests:
 `busy_bltcon0_write_disables_remaining_d_output_without_draining_blit`,
 `busy_bltsize_write_finishes_current_blit_then_starts_replacement`.
+
+### Micro-cycle stall classes
+
+Non-bus blitter cycles come in two hardware classes, mirrored from
+vAmiga's micro-instructions and encoded as `BlitSlotClass`:
+
+- **Bus-free** cycles (vAmiga BUSIDLE: the D pipeline bubble, area
+  fill's extra idle cycle, the BLT_STRT startup cycles, a line blit's
+  internal Bresenham cycles) advance only on colour clocks the blitter
+  could have won: they stall while the Copper or fixed DMA owns the
+  clock, and on the clock a starved CPU is granted (the BLS line blocks
+  `busIsFree`). They never allocate the bus, so the CPU can use the same
+  colour clock on an uncontended access.
+- **Internal** cycles (vAmiga NOTHING: the BLTSIZE register commit, the
+  micro-program begin cycle, the terminal D-hold flush and a D-less
+  BLTDONE) elapse on every colour clock regardless of bus ownership.
+
+Verified cycle-for-cycle against the vAmiga slot traces: a Copper-poked
+blit on a 6-plane display line stalls its BLT_STRT cycles through the
+display fetches and lands its first A fetch on the same colour clock in
+both emulators.
 
 (cpu-contention)=
 ### CPU contention
@@ -331,19 +370,20 @@ Tests: `blithog_clear_busy_blitter_yields_to_cpu_only_after_starvation`,
 Area fill is applied only when BLTCON1.DESC is set (the HRM requires
 descending mode because the fill carry propagates in descending bit order
 across each row); IFE/EFE in ascending mode is treated as ordinary minterm
-output. Fill consumes the C-channel slot even when USEC is clear, but as an
-**idle cycle** (no bus access) -- the "-" in the HRM "A - D" fill cadence.
+output. With USEC clear, fill adds one extra **idle cycle** (no bus
+access) per word, placed AFTER the D slot -- the trailing "-" in vAmiga's
+fill micro-programs for USE masks 1/5/9/D ("A0 -- -- A1 D0 -- A2 D1 --").
 So an A->D area fill costs **3 CCK/word** vs 2 for an A->D copy. The fill
 carry datapath (`apply_fill` in `finish_source_word`) is not what adds the
-cycle -- the C-channel slot in the controller sequence is. Cross-emulator
+cycle -- the FillIdle slot in the controller sequence is. Cross-emulator
 validated: FS-UAE and vAmiga both time the `bltcon0=0x09F0` A->D fill at 3
-CCK/word (timing-test rows 23/24/26). Implemented as `c_phase = use_c ||
-fill` with `current_slot_needs_bus` false for the fill C slot; the idle fill
-phase advances on CPU/Copper/idle arbitration slots but not through fixed
-DMA (bitplane/sprite/disk/audio/refresh) slots. (An earlier
-experiment dropped this to 2 CCK/word to improve one capture, but that made
-the blitter faster than hardware and broke a separate blitter-heavy
-regression.) Test:
+CCK/word (timing-test rows 23/24/26). USEC-carrying fills reuse their real
+C cycle and D-less fills match their copy timing (vAmiga's fill programs
+change only masks 1/5/9/D). The idle fill phase advances on
+CPU/Copper/idle arbitration slots but not through fixed DMA
+(bitplane/sprite/disk/audio/refresh) slots. (An earlier experiment dropped
+the extra cycle to improve one capture, but that made the blitter faster
+than hardware and broke a separate blitter-heavy regression.) Test:
 `descending_area_fill_costs_one_extra_idle_cycle_per_word`.
 
 ### ECS registers
@@ -364,8 +404,10 @@ Cross-emulator timing-test comparisons (corroborated in
 separately:
 
 - **Line blits run slow**: a 64-pixel line measures ~317 beam-CCK in
-  Copperline vs 262 on the FS-UAE reference (and 258 predicted by
-  `line_total_slots`), roughly 21% too slow.
+  Copperline vs 262 on the FS-UAE reference (which now equals the 262
+  slots `line_total_slots` predicts with the startup and terminal
+  cycles), roughly 21% too slow -- the gap is stall behaviour of the
+  internal L1/L3 cycles under display DMA, not the slot count.
 
 The previous row-26 display-DMA contention residual is closed: with fixed DMA
 stalling idle fill phases, Copperline measures ~25074 CCK for the 3-plane
