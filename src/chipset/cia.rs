@@ -1292,7 +1292,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn probe_pin_drain_after_sdr_arm() {
         let mut cia = Cia::new(Which::A);
         cia.write(REG_ICR, 0x88); // enable SP
