@@ -20,7 +20,7 @@ use crate::chipset::denise::{
 use crate::chipset::keyboard::KeyboardMcu;
 use crate::chipset::paula::{
     Paula, PotPins, DMACON_DMAEN, INT_BLIT, INT_COPER, INT_DSKBLK, INT_DSKSYNC, INT_EXTER,
-    INT_PORTS, INT_VERTB, NTSC_AUDIO_MIN_PERIOD_CCK, PAL_AUDIO_MIN_PERIOD_CCK, PAULA_CLOCK_HZ,
+    INT_PORTS, INT_VERTB, PAULA_CLOCK_HZ,
 };
 use crate::floppy::FloppyController;
 use crate::gayle::Gayle;
@@ -224,8 +224,6 @@ fn diag_sprcap_matches(want: &str, beam_y: i32) -> bool {
     want == "all" || want.parse::<i32>().ok() == Some(beam_y)
 }
 const CPU_COPPER_BOTTOM_PALETTE_MIN_VPOS: u32 = 0xC0;
-#[cfg(test)]
-const DMACON_AUD_MASK: u16 = 0x000F;
 const DMACON_DSKEN: u16 = 1 << 4;
 const DMACON_SPREN: u16 = 1 << 5;
 const DMACON_BLTEN: u16 = 1 << 6;
@@ -1888,28 +1886,6 @@ impl PollStats {
     }
 }
 
-fn audio_min_period_for_video_standard(video_standard: VideoStandard) -> u16 {
-    match video_standard {
-        VideoStandard::Pal => PAL_AUDIO_MIN_PERIOD_CCK,
-        VideoStandard::Ntsc => NTSC_AUDIO_MIN_PERIOD_CCK,
-    }
-}
-
-fn audio_min_period_for_agnus(agnus: &Agnus) -> u16 {
-    let base = u32::from(audio_min_period_for_video_standard(agnus.video_standard()));
-    let Some(line_cck) = agnus.programmable_line_cck() else {
-        return base as u16;
-    };
-    let nominal_line_cck = match agnus.video_standard() {
-        VideoStandard::Pal => COLORCLOCKS_PER_LINE,
-        VideoStandard::Ntsc => NTSC_LONG_COLORCLOCKS_PER_LINE,
-    };
-    let scaled = base
-        .saturating_mul(line_cck.max(1))
-        .div_ceil(nominal_line_cck);
-    scaled.clamp(1, u32::from(u16::MAX)) as u16
-}
-
 fn fixed_standard_frame_lines(video_standard: VideoStandard, lace: bool, long_field: bool) -> u32 {
     let long_lines = match video_standard {
         VideoStandard::Pal => PAL_LINES,
@@ -2411,7 +2387,6 @@ impl Bus {
             self.last_frame_geometry.lace,
             self.frame_render_base().long_field,
         );
-        self.refresh_paula_audio_min_period();
     }
 
     /// Preset entry point: an OCS Agnus pairs with an OCS Denise, an ECS
@@ -2429,7 +2404,6 @@ impl Bus {
 
     pub fn set_chipset_revisions(&mut self, agnus: AgnusRevision, denise: DeniseRevision) {
         self.agnus.set_revision(agnus);
-        self.refresh_paula_audio_min_period();
         self.denise_revision = denise;
         if !denise.is_ecs() {
             self.denise.diwhigh = 0;
@@ -2499,11 +2473,6 @@ impl Bus {
         for ptr in &mut self.display_dma_sprpt {
             *ptr &= ptr_mask;
         }
-    }
-
-    fn refresh_paula_audio_min_period(&mut self) {
-        self.paula
-            .set_audio_min_period_cck(audio_min_period_for_agnus(&self.agnus));
     }
 
     fn blitter_ecs_registers_enabled(&self) -> bool {
@@ -2593,7 +2562,6 @@ impl Bus {
         self.cia_b = Cia::new(Which::B);
         self.paula.reset_registers();
         self.agnus = Agnus::with_video_standard_and_revision(video_standard, agnus_revision);
-        self.refresh_paula_audio_min_period();
         self.copper = Copper::new();
         self.denise = Denise::new();
         self.blitter = Blitter::new();
@@ -6945,7 +6913,10 @@ fn is_live_collision_sprite_custom_write(off: u16) -> bool {
 }
 
 fn is_audio_timing_custom_write(off: u16) -> bool {
-    matches!(off, 0x096 | 0x09E | 0x0A0..=0x0DF | 0x1C0 | 0x1DC)
+    // DMACON, INTREQ (audio-interrupt acks gate the state machine's
+    // AUDxIP tests), ADKCON, the audio registers, and the beam-rate
+    // registers the mixer clock derives from.
+    matches!(off, 0x096 | 0x09C | 0x09E | 0x0A0..=0x0DF | 0x1C0 | 0x1DC)
 }
 
 fn palette_event_sequences_equivalent(a: &[BeamRegisterWrite], b: &[BeamRegisterWrite]) -> bool {

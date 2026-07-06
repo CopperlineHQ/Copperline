@@ -117,6 +117,15 @@ impl Bus {
         }
         let tick = self.advance_beam(cck);
         self.audio_pending_cck = self.audio_pending_cck.saturating_add(cck);
+        if tick.new_lines > 0 {
+            // Line end: sample the audio state machines' DMA requests into
+            // the Agnus-side latches (real Paula transfers them once per
+            // line; the fixed slots service them on the following line).
+            self.flush_audio();
+            for _ in 0..tick.new_lines {
+                self.paula.transfer_audio_dma_requests();
+            }
+        }
         (cck, tick)
     }
 
@@ -261,7 +270,7 @@ impl Bus {
         };
         let word = self.read_chip_word_for_audio_dma(request.address);
         self.data_bus = word;
-        let irq = self.paula.grant_audio_dma(channel, word);
+        let irq = self.paula.grant_audio_dma(channel, word, self.agnus.dmacon);
         self.paula.latch_interrupt_sources(irq);
     }
 
@@ -359,6 +368,12 @@ impl Bus {
         if Self::refresh_slot_active_at(hpos) {
             return Some(ChipBusOwner::Refresh);
         }
+        // Audio requests latched in Agnus are serviced even while the
+        // DMACON bits -- the master enable included -- are off (the DAS
+        // slot table keeps the audio slots in every DMACON variant).
+        if self.audio_slot_active_at(hpos) {
+            return Some(ChipBusOwner::Audio);
+        }
         if self.agnus.dmacon & DMACON_DMAEN == 0 {
             return self
                 .bitplane_slot_active_at(vpos, hpos)
@@ -366,9 +381,6 @@ impl Bus {
         }
         if self.disk_slot_active_at(hpos) {
             return Some(ChipBusOwner::Disk);
-        }
-        if self.audio_slot_active_at(hpos) {
-            return Some(ChipBusOwner::Audio);
         }
         if self.sprite_slot_active_at(hpos) {
             return Some(ChipBusOwner::Sprite);
@@ -535,24 +547,15 @@ impl Bus {
 
     pub(super) fn audio_slot_active_at(&self, hpos: u32) -> bool {
         // Each of the four audio channels has one fixed DMA slot (hpos 0x00F,
-        // 0x011, 0x013, 0x015). On real Paula a channel only *uses* that slot
-        // (stalling the CPU/blitter) on the line where its period counter
-        // actually requests a word -- roughly once per 2*AUDxPER cck, which at
-        // music periods is well under once per line. Reserve the slot only when
-        // the channel has a pending DMA request, the same `dma_request` flag that
-        // gates the actual fetch in `step_audio_dma_slot`; the flag is current
-        // here because `flush_audio_before_audio_dma_slot` advances Paula to this
-        // hpos before owner selection. Previously the slot was reserved every
-        // line for every enabled channel (~1252 cck/frame), a ~3-4x
-        // over-reservation that stole slots from the blitter on idle audio lines.
-        if self.agnus.dmacon & DMACON_DMAEN == 0 {
-            return false;
-        }
+        // 0x011, 0x013, 0x015). The slot is used only on lines where a DMA
+        // request was latched into Agnus at the previous line end -- roughly
+        // once per 2*AUDxPER cck at music periods, well under once per line.
+        // The DMACON audio bits do NOT gate the slot: a request posted while
+        // DMA was on is still serviced after software turns the channel off
+        // (that latched-request service is what lets a brief DMACON pulse
+        // kick a channel into IRQ-mode free-run, vAmigaTS pertimer1).
         match Self::audio_dma_channel_at(hpos) {
-            Some(channel) => {
-                self.agnus.dmacon & (1 << channel) != 0
-                    && self.paula.audio_dma_request(channel).is_some()
-            }
+            Some(channel) => self.paula.audio_dma_request(channel).is_some(),
             None => false,
         }
     }

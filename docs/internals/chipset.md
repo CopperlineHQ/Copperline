@@ -114,16 +114,26 @@ scoped. ECS adds BLTSIZV/BLTSIZH for larger blits.
 Paula owns the interrupt system (INTENA/INTREQ, delivered through the
 modelled IPL-pin pipe and 68000 boundary sampling), serial, and audio:
 
-- **Audio**: four DMA channels, each with location/length/period/volume,
-  a period accumulator clocked at CCK rate, and the hardware's one-word
-  fetch-ahead (audible with short periods). Channel interrupts fire on
-  buffer completion; LEN=0 plays a full 65536-word block, as on hardware.
-  Clearing AUDxEN while a DMA word is being output is deferred until the
-  current word boundary, so a clear/set pair shorter than the remaining
-  word time is missed by the audio state machine and playback continues
-  instead of restarting from AUDxLC.
-  Output is mixed in emulated time to stereo with the LED filter, then
-  resampled at the host boundary.
+- **Audio**: four channels running the HRM per-channel state machine
+  (states 000/001/101/010/011): AUDxDAT arrivals, the period counter,
+  and DMACON edges drive the transitions, whether the data comes from
+  the channel's DMA slot or a CPU write (Paula cannot tell them apart,
+  so a CPU AUDxDAT poke during DMA playback counts against the length
+  counter like a fetch). DMA start-up performs two fetches -- the first
+  from the stale pointer, discarded, raising the channel interrupt and
+  resetting the pointer to AUDxLC -- before output begins; the length
+  rollover reloads pointer/length at the final-word fetch and interrupts
+  at the following word start. State-machine DMA requests transfer to
+  Agnus at each line end and the fixed audio slots service them on the
+  next line regardless of the DMACON bits (a request posted by a brief
+  AUDxEN pulse is still fetched after the channel is switched off, which
+  kicks the channel into free-running IRQ-mode output at the AUDxPER
+  cadence -- the software "period timer" idiom, vAmigaTS pertimer1).
+  ADKCON attach modes feed the fetched words to the next channel's
+  volume latch at word starts and period latch mid-word. LEN=0 plays a
+  full 65536-word block, as on hardware. Output is mixed in emulated
+  time to stereo with the LED filter, then resampled at the host
+  boundary.
 - **Serial**: SERDAT through a one-word transmit buffer and a timed shift
   register to stdout; SERDATR reports TBE/TSRE/RBF. DiagROM's diagnostic
   stream arrives this way.

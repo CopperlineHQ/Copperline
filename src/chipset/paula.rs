@@ -34,10 +34,11 @@ pub const INT_SOFT: u16 = 1 << 2;
 pub const INT_COPER: u16 = 1 << 4;
 pub const INT_BLIT: u16 = 1 << 6;
 
-/// Per-channel audio interrupt bits in INTENA/INTREQ. Raised on the
-/// DMA-enable edge (so the CPU can prime the *next* buffer's LC/LEN
-/// before the current one has even played) and again every time a
-/// buffer completes and auto-restarts from the latched LC/LEN.
+/// Per-channel audio interrupt bits in INTENA/INTREQ. In DMA mode the
+/// interrupt fires when the first start-up word arrives (so the CPU can
+/// prime the *next* buffer's LC/LEN before this one has even played) and
+/// again at the word start after each length-counter rollover; in IRQ
+/// (CPU-driven) mode it fires as each AUDxDAT word is taken for output.
 pub const INT_AUD0: u16 = 1 << 7;
 pub const INT_AUD1: u16 = 1 << 8;
 pub const INT_AUD2: u16 = 1 << 9;
@@ -48,43 +49,30 @@ const INT_AUDX: [u16; 4] = [INT_AUD0, INT_AUD1, INT_AUD2, INT_AUD3];
 const INTREQ_MASK: u16 = 0x7FFF;
 const SERPER_LONG: u16 = 1 << 15;
 const ADKCON_UARTBRK: u16 = 1 << 11;
-const ADKCON_AUDIO_MOD_EVENT_MASK: u16 = 0x0077;
 
 /// DMACON.DMAEN master enable. Stored on agnus.dmacon; Paula audio
 /// gating ANDs this with the per-channel AUDxEN bits 0..3.
 pub const DMACON_DMAEN: u16 = 1 << 9;
 const LED_FILTER_CUTOFF_HZ: f32 = 4_000.0;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-enum ChanState {
-    /// DMA disabled. Output is silent (current = 0).
-    Off,
-    /// CPU-driven AUDxDAT playback with DMA disabled. The loaded word
-    /// emits high byte then low byte at AUDxPER cadence and then waits
-    /// for another CPU write.
-    Manual,
-    /// A direct AUDxDAT word has completed. Paula keeps the last output
-    /// sample stable until software writes another word or DMA starts.
-    ManualHold,
-    /// DMA just enabled. On the next tick we fetch the first word,
-    /// and the previous transition has already raised the channel's
-    /// AUDxx interrupt (so software can pre-stage the next buffer).
-    StartPending,
-    /// Steady-state playback. Period accumulator counts color clocks
-    /// until the next byte is emitted.
-    Running,
-}
+/// HRM audio state-machine states (Paula's three per-channel state bits).
+/// 000 idle; 001/101 the two DMA start-up fetches; 010/011 outputting the
+/// buffer's high/low byte while the period counter runs.
+const AUD_IDLE: u8 = 0b000;
+const AUD_DMA_FIRST: u8 = 0b001;
+const AUD_DMA_SECOND: u8 = 0b101;
+const AUD_OUT_HI: u8 = 0b010;
+const AUD_OUT_LO: u8 = 0b011;
 
-impl ChanState {
-    /// Short label for the debugger's audio tab.
-    fn name(self) -> &'static str {
-        match self {
-            ChanState::Off => "Off",
-            ChanState::Manual => "Manual",
-            ChanState::ManualHold => "ManualHold",
-            ChanState::StartPending => "StartPending",
-            ChanState::Running => "Running",
-        }
+/// Short label for the debugger's audio tab.
+fn aud_state_name(state: u8) -> &'static str {
+    match state {
+        AUD_IDLE => "000 idle",
+        AUD_DMA_FIRST => "001 start",
+        AUD_DMA_SECOND => "101 start",
+        AUD_OUT_HI => "010 out-hi",
+        AUD_OUT_LO => "011 out-lo",
+        _ => "invalid",
     }
 }
 
@@ -98,33 +86,33 @@ pub struct AudioDmaRequest {
 /// serialized state here, so exposing it costs nothing at runtime.
 #[derive(Debug, Clone, Copy)]
 pub struct AudioChannelDebug {
-    /// State-machine state (Off/Manual/ManualHold/StartPending/Running).
+    /// State-machine state (the HRM state number plus a mnemonic).
     pub state: &'static str,
+    /// True while the channel is outputting samples (states 010/011).
+    pub playing: bool,
     // CPU-visible latches.
     pub lc: u32,
     pub len: u16,
     pub per: u16,
     pub vol: u8,
-    // Live buffer position.
+    // Live state machine.
     pub ptr: u32,
-    pub words_left: u32,
-    // Output engine.
-    pub period_acc: u32,
-    pub phase: u8,
+    pub audlen: u16,
+    pub audvol: u8,
+    pub percnt: u32,
     pub current: i8,
-    /// AUDxEN was cleared mid-word and the disable is deferred to the next
-    /// word boundary (issue-74 behaviour).
-    pub dma_disable_pending: bool,
-    /// Length counter underflowed; the AUDxLC/AUDxLEN loop reload is deferred.
-    pub restart_pending: bool,
-    /// A CPU AUDxDAT write is waiting to play (manual mode).
-    pub manual_pending: bool,
-    /// A DMA fetch is pending to Agnus.
-    pub dma_request: bool,
-    /// The one-word fetch-ahead register holds a prefetched word.
-    pub next_word_ready: bool,
+    /// The next word-start transition raises the buffer-rollover interrupt.
+    pub intreq2: bool,
+    /// AUDxDR posted, waiting for the line-end transfer to Agnus.
+    pub sm_request: bool,
+    /// Request latched in Agnus, serviced at the channel's fixed DMA slot.
+    pub agnus_request: bool,
 }
 
+/// One Paula audio channel: the CPU-visible register latches plus the live
+/// HRM state machine. The FSM follows the HRM appendix (and vAmiga's
+/// StateMachine.cpp reading of it): AUDxDAT arrivals, the period counter,
+/// and DMACON edges drive the transitions; everything else falls out.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct AudChannel {
     // CPU-visible latches (set via MMIO writes).
@@ -132,45 +120,35 @@ struct AudChannel {
     len: u16,
     per: u16,
     vol: u8,
-
-    // Live playback state.
-    ptr: u32,
-    words_left: u32,
-    word_hi: i8,
-    word_lo: i8,
-    phase: u8, // 0 = next emit is word_hi, 1 = next emit is word_lo
-    period_acc: u32,
-    dma_fetch_cooldown_cck: u32,
-    current: i8,
-    state: ChanState,
+    /// Last AUDxDAT value written (CPU peek/debugger only).
     dat_latch: u16,
-    manual_pending: bool,
-    dma_request: bool,
-    /// AUDxEN was cleared while the DMA state machine was outputting a
-    /// word. Paula only samples that clear at the next word boundary; if
-    /// software sets AUDxEN again before then, playback continues without
-    /// a fresh start.
-    dma_disable_pending: bool,
-    /// Set when the length counter underflowed and the channel raised its
-    /// interrupt, but the AUDxLC/AUDxLEN reload for the next buffer has
-    /// not been applied yet. Real Paula leaves a one-word gap between the
-    /// interrupt and the pointer reload, which is what lets a one-shot
-    /// sample's IRQ handler rewrite AUDxLC/AUDxLEN to a silence loop
-    /// before Paula latches it. The reload is applied when the channel
-    /// arms its next DMA fetch (see `arm_next_buffer_fetch`), reading
-    /// whatever AUDxLC/AUDxLEN the handler has by then written.
-    restart_pending: bool,
-    /// One-word fetch-ahead holding register. Audio DMA reads the next
-    /// sample word into here during the current word's playback (one
-    /// word ahead), so the word is ready the moment the active word is
-    /// exhausted. Real Paula does the same: each channel's fixed
-    /// per-line DMA slot fills an internal buffer one word ahead of the
-    /// output shifter. Without it, a single-word buffer cannot be
-    /// refilled in time at short periods (a word at period 124..=171
-    /// lasts fewer color clocks than the gap to the channel's next slot
-    /// once it has been consumed), so samples repeat and the pitch
-    /// drops.
-    next_word: Option<u16>,
+
+    // Live HRM state machine.
+    state: u8,
+    /// Live DMA pointer (Agnus AUDxPT). AUDxDSR resets it to `lc`.
+    ptr: u32,
+    /// Live length counter; reloaded from `len` at DMA start and rollover.
+    audlen: u16,
+    /// Live volume; reloaded from `vol` at each output word start.
+    audvol: u8,
+    /// AUDxDAT holding register: the state machine's input word.
+    auddat: u16,
+    /// Output buffer word whose bytes feed the DAC.
+    buffer: u16,
+    /// Color clocks until the period counter expires (states 010/011).
+    percnt: u32,
+    /// AUDxDR: DMA request posted by the state machine, transferred to
+    /// Agnus at the end of the current scanline.
+    sm_dr: bool,
+    /// Request latched in Agnus; the channel's fixed DMA slot services it
+    /// on the next line regardless of the DMACON audio bits.
+    agnus_dr: bool,
+    /// The length counter rolled over; the next word-start transition
+    /// raises the channel interrupt.
+    intreq2: bool,
+    /// DAC input byte. Held between transitions (Paula holds the DC level;
+    /// stopping a channel does not recentre the output).
+    current: i8,
 }
 
 impl AudChannel {
@@ -180,182 +158,23 @@ impl AudChannel {
             len: 0,
             per: 0,
             vol: 0,
-            ptr: 0,
-            words_left: 0,
-            word_hi: 0,
-            word_lo: 0,
-            phase: 0,
-            period_acc: 0,
-            dma_fetch_cooldown_cck: 0,
-            current: 0,
-            state: ChanState::Off,
             dat_latch: 0,
-            manual_pending: false,
-            dma_request: false,
-            dma_disable_pending: false,
-            restart_pending: false,
-            next_word: None,
+            state: AUD_IDLE,
+            ptr: 0,
+            audlen: 0,
+            audvol: 0,
+            auddat: 0,
+            buffer: 0,
+            percnt: 0,
+            sm_dr: false,
+            agnus_dr: false,
+            intreq2: false,
+            current: 0,
         }
     }
 
-    fn audio_len_words(len: u16) -> u32 {
-        // AUDxLEN = 0 means "65536 words" on real hardware. We treat
-        // 0 as 65536 to match.
-        if len == 0 {
-            0x1_0000
-        } else {
-            len as u32
-        }
-    }
-
-    /// Latch the location/length registers into the live playback
-    /// pointer and length counter. Run on the DMA-enable edge and again
-    /// whenever the length counter underflows (loop restart). Reading
-    /// `lc`/`len` here -- not at some earlier capture -- matches Paula:
-    /// the pointer reload at underflow uses whatever AUDxLC/AUDxLEN the
-    /// CPU has written by then, which is how the documented "set the
-    /// next buffer in the audio interrupt handler" double-buffering
-    /// works.
-    fn reload_buffer(&mut self, ptr_mask: u32) {
-        self.ptr = self.lc & ptr_mask;
-        self.words_left = Self::audio_len_words(self.len);
-    }
-
-    fn reset_dma_start_timing(&mut self) {
-        self.phase = 0;
-        self.period_acc = 0;
-        self.dma_fetch_cooldown_cck = 0;
-        self.next_word = None;
-        self.dma_disable_pending = false;
-        self.restart_pending = false;
-    }
-
-    fn request_dma(&mut self) {
-        self.dma_request = true;
-    }
-
-    fn clear_dma_request(&mut self) {
-        self.dma_request = false;
-    }
-
-    /// Move the prefetched word from the fetch-ahead holding register
-    /// into the active sample buffer. Returns false when the holding
-    /// register is empty (DMA could not keep up), in which case the
-    /// active word is left in place and its samples repeat.
-    fn promote_next_word(&mut self) -> bool {
-        match self.next_word.take() {
-            Some(word) => {
-                self.word_hi = (word >> 8) as u8 as i8;
-                self.word_lo = word as u8 as i8;
-                true
-            }
-            None => false,
-        }
-    }
-
-    fn latch_manual_word(&mut self) {
-        self.word_hi = (self.dat_latch >> 8) as u8 as i8;
-        self.word_lo = self.dat_latch as u8 as i8;
-        self.current = self.word_hi;
-        self.phase = 1;
-        self.period_acc = 0;
-        self.state = ChanState::Manual;
-        self.manual_pending = false;
-        self.dma_disable_pending = false;
-        self.next_word = None;
-        self.clear_dma_request();
-    }
-
-    fn finish_deferred_dma_disable(&mut self) {
-        self.state = ChanState::Off;
-        self.current = 0;
-        self.next_word = None;
-        self.restart_pending = false;
-        self.dma_disable_pending = false;
-        self.clear_dma_request();
-    }
-
-    /// Accept a DMA word into the fetch-ahead holding register and
-    /// advance the playback pointer/length counter. Returns true when
-    /// this read made the length counter underflow (the buffer's last
-    /// word was just fetched), which raises the channel interrupt and
-    /// reloads the pointer for the next loop.
-    fn accept_dma_word(&mut self, word: u16, ptr_mask: u32) -> bool {
-        let _ = ptr_mask;
-        self.next_word = Some(word);
-        self.ptr = self.ptr.wrapping_add(2) & ptr_mask;
-        if self.words_left > 0 {
-            self.words_left -= 1;
-        }
-        if self.words_left == 0 {
-            // Length underflow: raise the channel interrupt now, but defer
-            // the AUDxLC/AUDxLEN reload to the next buffer fetch. Real
-            // Paula has a one-word gap here, which is the window a one-shot
-            // sample's interrupt handler uses to point AUDxLC/AUDxLEN at a
-            // silence loop before Paula latches it. Reloading immediately
-            // (with the still-current AUDxLC) replays the whole sample --
-            // an audible echo on effect/voice channels.
-            self.restart_pending = true;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Arm the next audio DMA fetch. If the previous buffer just
-    /// underflowed, apply the deferred AUDxLC/AUDxLEN reload first, reading
-    /// whatever the channel's interrupt handler has written by now.
-    fn arm_next_buffer_fetch(&mut self, ptr_mask: u32) {
-        if self.restart_pending {
-            self.reload_buffer(ptr_mask);
-            self.restart_pending = false;
-        }
-        self.request_dma();
-    }
-
-    fn next_irq_cck(&self) -> Option<u32> {
-        let period = u32::from(self.per);
-        if period == 0 {
-            return None;
-        }
-        // The channel interrupt fires when the length counter underflows
-        // as the buffer's last word is *fetched* into the holding
-        // register -- one full word (two sample periods) before that word
-        // would finish playing. Predict the playout position of the last
-        // sample, then pull the deadline back by that one-word fetch-ahead
-        // lead so callers bounding work near the IRQ stop in time.
-        let periods = match self.state {
-            ChanState::Off => return None,
-            ChanState::ManualHold => return None,
-            ChanState::Manual => return None,
-            ChanState::StartPending => {
-                let words_after_initial_fetch = self.words_left.saturating_sub(1);
-                1u32.saturating_add(words_after_initial_fetch.saturating_mul(2))
-                    .saturating_sub(2)
-            }
-            ChanState::Running => {
-                // After a length underflow the AUDxLC/AUDxLEN reload is
-                // deferred to the next fetch, so `words_left` is momentarily
-                // zero; the buffer about to be (re)loaded holds AUDxLEN
-                // words, so predict against that instead.
-                let words_left = if self.restart_pending {
-                    Self::audio_len_words(self.len)
-                } else {
-                    self.words_left
-                };
-                let word_periods = words_left.saturating_mul(2);
-                let playout = if self.phase == 1 {
-                    1u32.saturating_add(word_periods)
-                } else {
-                    2u32.saturating_add(word_periods)
-                };
-                playout.saturating_sub(2)
-            }
-        };
-        let first_period = period.saturating_sub(self.period_acc).max(1);
-        let deadline =
-            first_period.saturating_add(periods.saturating_sub(1).saturating_mul(period));
-        Some(deadline.max(self.dma_fetch_cooldown_cck).max(1))
+    fn outputting(&self) -> bool {
+        matches!(self.state, AUD_OUT_HI | AUD_OUT_LO)
     }
 }
 
@@ -401,13 +220,6 @@ pub struct PotPins {
     pub left_y_released: bool,
     pub right_x_released: bool,
     pub right_y_released: bool,
-}
-
-#[derive(Clone, Copy)]
-struct AudioModEvent {
-    source: usize,
-    word: u16,
-    word_start: bool,
 }
 
 /// CD audio stream from the CD controller to the host mixer. CD-DA is
@@ -495,11 +307,6 @@ pub struct Paula {
     pub potgo: u16,
 
     chans: [AudChannel; 4],
-    // Scratch buffer for `advance_audio_channels_inner`'s modulation events,
-    // reused across calls instead of allocating fresh each time modulation
-    // fires: not logical machine state, so it is not part of the save state.
-    #[serde(skip)]
-    mod_events_scratch: Vec<AudioModEvent>,
     serial_tx_buffer: Option<u16>,
     serial_tx_shift: Option<SerialTxShift>,
     serial_rx_shift: Option<SerialRxShift>,
@@ -512,9 +319,14 @@ pub struct Paula {
     pot_counters: [u8; 4],
     pot_running: bool,
 
-    // DMACON value as seen last tick; used to edge-detect AUDxEN
-    // transitions so we can raise the AUDxx IRQ on the rising edge.
-    last_dmacon: u16,
+    // Test-harness scanline bookkeeping for `tick_audio` (the bus drives
+    // the real slot walk and line-end request transfer itself).
+    #[cfg(test)]
+    #[serde(skip)]
+    test_last_dmacon: u16,
+    #[cfg(test)]
+    #[serde(skip)]
+    test_line_cck: u32,
 
     // Mixer host-sample accumulator in units of
     // color-clocks * MIX_SAMPLE_RATE. One output frame is due each
@@ -541,8 +353,6 @@ pub struct Paula {
     // beside the machine, not part of Paula's filtered audio path.
     drive_sounds: DriveSounds,
     dma_addr_mask: u32,
-    audio_mod_next_period: [bool; 4],
-    audio_min_period_cck: u16,
     // Optional host-side recording tap: when Some, every mixed stereo
     // frame is also appended here (before the master output volume, so
     // recordings stay full scale regardless of the volume slider) for
@@ -582,7 +392,6 @@ impl Paula {
                 AudChannel::new(),
                 AudChannel::new(),
             ],
-            mod_events_scratch: Vec::new(),
             serial_tx_buffer: None,
             serial_tx_shift: None,
             serial_rx_shift: None,
@@ -594,7 +403,10 @@ impl Paula {
             serial_tx_pin_high: true,
             pot_counters: [0; 4],
             pot_running: false,
-            last_dmacon: 0,
+            #[cfg(test)]
+            test_last_dmacon: 0,
+            #[cfg(test)]
+            test_line_cck: 0,
             host_sample_acc: 0,
             led_filter_enabled: true,
             led_filter: StereoLedFilter::new(),
@@ -604,8 +416,6 @@ impl Paula {
             cd_audio: CdAudioRing::default(),
             drive_sounds: DriveSounds::new(),
             dma_addr_mask: 0x001F_FFFF,
-            audio_mod_next_period: [false; 4],
-            audio_min_period_cck: PAL_AUDIO_MIN_PERIOD_CCK,
             capture: None,
             channel_muted: [false; 4],
             cd_muted: false,
@@ -676,15 +486,6 @@ impl Paula {
         }
     }
 
-    pub fn set_audio_min_period_cck(&mut self, period: u16) {
-        self.audio_min_period_cck = period.max(1);
-    }
-
-    #[cfg(test)]
-    pub fn audio_min_period_cck(&self) -> u16 {
-        self.audio_min_period_cck
-    }
-
     #[cfg(test)]
     pub fn set_audio_dma_ptr_for_test(&mut self, ch_idx: usize, ptr: u32) {
         let ptr = ptr & self.dma_ptr_mask();
@@ -707,21 +508,20 @@ impl Paula {
     pub fn audio_channel_debug(&self, ch_idx: usize) -> Option<AudioChannelDebug> {
         let ch = self.chans.get(ch_idx)?;
         Some(AudioChannelDebug {
-            state: ch.state.name(),
+            state: aud_state_name(ch.state),
+            playing: ch.outputting(),
             lc: ch.lc,
             len: ch.len,
             per: ch.per,
             vol: ch.vol,
             ptr: ch.ptr,
-            words_left: ch.words_left,
-            period_acc: ch.period_acc,
-            phase: ch.phase,
+            audlen: ch.audlen,
+            audvol: ch.audvol,
+            percnt: ch.percnt,
             current: ch.current,
-            dma_disable_pending: ch.dma_disable_pending,
-            restart_pending: ch.restart_pending,
-            manual_pending: ch.manual_pending,
-            dma_request: ch.dma_request,
-            next_word_ready: ch.next_word.is_some(),
+            intreq2: ch.intreq2,
+            sm_request: ch.sm_dr,
+            agnus_request: ch.agnus_dr,
         })
     }
 
@@ -748,12 +548,9 @@ impl Paula {
         self.serial_tx_pin_high = true;
         self.pot_counters = [0; 4];
         self.pot_running = false;
-        self.last_dmacon = 0;
         self.host_sample_acc = 0;
         self.led_filter_enabled = true;
         self.led_filter = StereoLedFilter::new();
-        self.audio_mod_next_period = [false; 4];
-        self.audio_min_period_cck = PAL_AUDIO_MIN_PERIOD_CCK;
     }
 
     pub fn set_led_filter_enabled(&mut self, enabled: bool) {
@@ -903,18 +700,11 @@ impl Paula {
 
     /// ADKCON: audio modulation control and disk/serial mode bits.
     pub fn write_adkcon(&mut self, val: u16) {
-        let before = self.adkcon;
         let bits = val & 0x7FFF;
         if val & 0x8000 != 0 {
             self.adkcon |= bits;
         } else {
             self.adkcon &= !bits;
-        }
-        for source in 0..self.audio_mod_next_period.len() {
-            let mask = (1 << source) | (1 << (source + 4));
-            if before & mask != mask && self.adkcon & mask == mask {
-                self.audio_mod_next_period[source] = false;
-            }
         }
     }
 
@@ -922,14 +712,6 @@ impl Paula {
         let volume_attach = 1u16 << ch_idx;
         let period_attach = 1u16 << (ch_idx + 4);
         self.adkcon & (volume_attach | period_attach) != 0
-    }
-
-    fn channel_drives_audio_modulation(&self, ch_idx: usize) -> bool {
-        ch_idx < 3 && self.channel_attached_as_modulator(ch_idx)
-    }
-
-    fn audio_modulation_events_enabled(&self) -> bool {
-        self.adkcon & ADKCON_AUDIO_MOD_EVENT_MASK != 0
     }
 
     pub fn write_potgo(&mut self, val: u16) {
@@ -1146,17 +928,39 @@ impl Paula {
     }
 
     pub fn next_audio_irq_cck(&self, dmacon: u16) -> Option<u32> {
-        if dmacon & DMACON_DMAEN == 0 {
-            return None;
-        }
+        // Only the period counter raises interrupts asynchronously (word
+        // and half-word boundaries in states 010/011); DMA-arrival and
+        // CPU-write interrupts are raised synchronously at the slot or
+        // MMIO write. Bound the caller's step only when the upcoming
+        // boundary can actually interrupt: IRQ-mode output interrupts at
+        // every word start, DMA mode only around a length rollover
+        // (intreq2 pending, or the final word is in flight) or in
+        // attach-period mode (010 -> 011 raises in IRQ mode / rollover).
         self.chans
             .iter()
             .enumerate()
-            .filter_map(|(idx, ch)| {
-                if dmacon & (1u16 << idx) == 0 {
+            .filter_map(|(ch_idx, ch)| {
+                if !ch.outputting() {
                     return None;
                 }
-                ch.next_irq_cck()
+                let on = Self::aud_on(dmacon, ch_idx);
+                let may_irq = !on || ch.intreq2 || ch.audlen <= 1 || self.aud_ap(ch_idx);
+                if !may_irq {
+                    return None;
+                }
+                // The 010 -> 011 boundary raises only in attach-period
+                // mode; otherwise the earliest interrupting edge is the
+                // following word start, one period later.
+                let extra = if ch.state == AUD_OUT_HI && !self.aud_ap(ch_idx) {
+                    if ch.per == 0 {
+                        0x1_0000
+                    } else {
+                        u32::from(ch.per)
+                    }
+                } else {
+                    0
+                };
+                Some(ch.percnt.saturating_add(extra).max(1))
             })
             .min()
     }
@@ -1272,7 +1076,7 @@ impl Paula {
     /// $DFF0A0..$DFF0DF audio block (i.e. addr - $DFF0A0). Each
     /// channel occupies 16 bytes; the per-channel layout is:
     /// `+0 LCH +2 LCL +4 LEN +6 PER +8 VOL +A DAT`.
-    pub fn write_audio_reg(&mut self, reg_off: u16, val: u16) {
+    pub fn write_audio_reg(&mut self, reg_off: u16, val: u16, dmacon: u16) {
         let ch_idx = (reg_off / 0x10) as usize;
         if ch_idx >= 4 {
             return;
@@ -1295,16 +1099,15 @@ impl Paula {
                 ch.per = val;
             }
             0x8 => {
-                // AUDxVOL bits 0..6, max 64.
+                // AUDxVOL bits 0..6, max 64. Latch only; the live volume
+                // reloads at the next output word start (volcntrld).
                 ch.vol = paula_volume_from_word(val);
             }
             0xA => {
-                // AUDxDAT: CPU-driven sample data. The next audio tick
-                // starts or restarts manual playback if DMA is disabled.
-                // Keep this separate from the live DMA word buffer so
-                // CPU writes cannot corrupt an active DMA stream.
-                ch.dat_latch = val;
-                ch.manual_pending = true;
+                // AUDxDAT: drives the state machine directly, exactly like
+                // a DMA word arriving (the DMA slot writes this register).
+                let irq = self.aud_poke_dat(ch_idx, val, dmacon);
+                self.latch_interrupt_sources(irq);
             }
             _ => {}
         }
@@ -1343,23 +1146,10 @@ impl Paula {
     /// lets Agnus own the documented channel slots.
     pub fn advance_audio(&mut self, cck: u32, dmacon: u16) -> u16 {
         let mut irq_bits = 0;
-        let master = dmacon & DMACON_DMAEN != 0;
-        let ptr_mask = self.dma_ptr_mask();
-
-        // The edge-detection scan below only acts on a DMACON change or a
-        // pending CPU AUDxDAT write (manual_pending); with neither, every
-        // branch is a no-op (enable edges impossible, manual latching idle,
-        // disabled channels already parked Off by the previous scan). This
-        // runs per chip-bus quantum, so skip the 4-channel walk when idle.
-        if dmacon != self.last_dmacon || self.chans.iter().any(|ch| ch.manual_pending) {
-            self.scan_audio_dma_edges(dmacon, master, ptr_mask, &mut irq_bits);
-        }
-        self.last_dmacon = dmacon;
-
         let mut remaining = cck;
         while remaining > 0 {
             let step = remaining.min(self.cck_until_next_output_frame());
-            irq_bits |= self.advance_audio_channels(step);
+            irq_bits |= self.advance_audio_channels(step, dmacon);
             self.host_sample_acc += step as u64 * MIX_SAMPLE_RATE as u64;
             remaining -= step;
 
@@ -1372,95 +1162,299 @@ impl Paula {
         irq_bits
     }
 
-    /// Per-channel DMA-enable edge detection and state machine; see the
-    /// idle skip in `advance_audio` for when this may be elided.
-    fn scan_audio_dma_edges(
-        &mut self,
-        dmacon: u16,
-        master: bool,
-        ptr_mask: u32,
-        irq_bits: &mut u16,
-    ) {
-        for ch_idx in 0..4 {
-            let enabled = master && (dmacon & (1 << ch_idx)) != 0;
-            let prev_enabled =
-                (self.last_dmacon & DMACON_DMAEN != 0) && (self.last_dmacon & (1 << ch_idx)) != 0;
-            let ch = &mut self.chans[ch_idx];
-            if enabled && !prev_enabled {
-                if ch.dma_disable_pending {
-                    // AUDxEN was cleared but Paula had not yet reached a
-                    // word boundary where the DMA-off state is sampled.
-                    // Re-enabling before that boundary is invisible to the
-                    // audio state machine, so keep the active shifter,
-                    // counters, and pending fetches intact.
-                    ch.dma_disable_pending = false;
-                } else {
-                    // DMA-enable rising edge: latch a fresh buffer from
-                    // AUDxLC/AUDxLEN and raise the per-channel IRQ. Real
-                    // Paula uses this to let the CPU prime the *next*
-                    // buffer. The first word is fetched into the holding
-                    // register and promoted to start playback.
-                    ch.reload_buffer(ptr_mask);
-                    ch.reset_dma_start_timing();
-                    ch.state = ChanState::StartPending;
-                    ch.request_dma();
-                    *irq_bits |= INT_AUDX[ch_idx];
+    // ---- HRM state-machine terms (the appendix's signal names) ----
+
+    /// AUDxON: the channel runs in DMA mode (DMACON master + channel bit).
+    fn aud_on(dmacon: u16, ch: usize) -> bool {
+        dmacon & DMACON_DMAEN != 0 && dmacon & (1 << ch) != 0
+    }
+
+    /// AUDxIP: the channel's interrupt is pending.
+    fn aud_ip(&self, ch: usize) -> bool {
+        self.intreq & INT_AUDX[ch] != 0
+    }
+
+    /// AUDxAV: attach-volume (this channel's words modulate ch+1's volume).
+    fn aud_av(&self, ch: usize) -> bool {
+        self.adkcon & (1 << ch) != 0
+    }
+
+    /// AUDxAP: attach-period (this channel's words modulate ch+1's period).
+    fn aud_ap(&self, ch: usize) -> bool {
+        self.adkcon & (1 << (ch + 4)) != 0
+    }
+
+    /// napnav: normal DMA/interrupt requests happen at word starts (true
+    /// unless the channel is attach-period without attach-volume).
+    fn aud_napnav(&self, ch: usize) -> bool {
+        !self.aud_ap(ch) || self.aud_av(ch)
+    }
+
+    /// percntrld: reload the period counter (period 0 counts 65536).
+    fn aud_percntrld(&mut self, ch: usize) {
+        let per = self.chans[ch].per;
+        self.chans[ch].percnt = if per == 0 { 0x1_0000 } else { u32::from(per) };
+    }
+
+    fn aud_volcntrld(&mut self, ch: usize) {
+        self.chans[ch].audvol = self.chans[ch].vol;
+    }
+
+    fn aud_lencntrld(&mut self, ch: usize) {
+        self.chans[ch].audlen = self.chans[ch].len;
+    }
+
+    fn aud_lencount(&mut self, ch: usize) {
+        self.chans[ch].audlen = self.chans[ch].audlen.wrapping_sub(1);
+    }
+
+    /// lenfin: the length counter is on its final word.
+    fn aud_lenfin(&self, ch: usize) -> bool {
+        self.chans[ch].audlen == 1
+    }
+
+    /// AUDxDSR: reset the DMA pointer to the block start (AUDxLC).
+    fn aud_dsr(&mut self, ch: usize) {
+        self.chans[ch].ptr = self.chans[ch].lc & self.dma_ptr_mask();
+    }
+
+    /// pbufld1: load the output buffer from the AUDxDAT holding register.
+    /// In attach-volume mode the word drives the next channel's volume
+    /// latch instead and the buffer keeps its old value.
+    fn aud_pbufld1(&mut self, ch: usize) {
+        let dat = self.chans[ch].auddat;
+        if !self.aud_av(ch) {
+            self.chans[ch].buffer = dat;
+        } else if ch < 3 {
+            self.chans[ch + 1].vol = paula_volume_from_word(dat);
+        }
+    }
+
+    /// pbufld2: in attach-period mode the word drives the next channel's
+    /// period latch (taken on the 010 -> 011 transition).
+    fn aud_pbufld2(&mut self, ch: usize) {
+        let dat = self.chans[ch].auddat;
+        if ch < 3 {
+            self.chans[ch + 1].per = dat;
+        }
+    }
+
+    /// penhi/penlo: gate the buffer's high/low byte into the DAC.
+    fn aud_penhi(&mut self, ch: usize) {
+        self.chans[ch].current = (self.chans[ch].buffer >> 8) as u8 as i8;
+    }
+
+    fn aud_penlo(&mut self, ch: usize) {
+        self.chans[ch].current = self.chans[ch].buffer as u8 as i8;
+    }
+
+    // ---- HRM state transitions. Each returns the INTREQ bits it raises;
+    // callers latch them (they are also latched here so AUDxIP tests
+    // later in the same advance span see them). ----
+
+    /// 000 -> 001 (DMA mode): DMA switched on; request the first word.
+    fn aud_move_000_001(&mut self, ch: usize) -> u16 {
+        self.aud_lencntrld(ch);
+        self.chans[ch].sm_dr = true;
+        self.chans[ch].state = AUD_DMA_FIRST;
+        0
+    }
+
+    /// 000 -> 010 (IRQ mode): a CPU AUDxDAT write starts direct output.
+    fn aud_move_000_010(&mut self, ch: usize) -> u16 {
+        self.aud_volcntrld(ch);
+        self.aud_percntrld(ch);
+        self.aud_pbufld1(ch);
+        self.chans[ch].state = AUD_OUT_HI;
+        self.aud_penhi(ch);
+        self.latch_interrupt_sources(INT_AUDX[ch]);
+        INT_AUDX[ch]
+    }
+
+    /// 001 -> 101 (DMA mode): the first start-up word arrived. Raise the
+    /// channel interrupt, request the next word, and point the DMA
+    /// pointer at the block start (this first fetch used the stale
+    /// pointer; its word is never played).
+    fn aud_move_001_101(&mut self, ch: usize) -> u16 {
+        self.chans[ch].sm_dr = true;
+        self.aud_dsr(ch);
+        if !self.aud_lenfin(ch) {
+            self.aud_lencount(ch);
+        }
+        self.chans[ch].state = AUD_DMA_SECOND;
+        self.latch_interrupt_sources(INT_AUDX[ch]);
+        INT_AUDX[ch]
+    }
+
+    /// 101 -> 010 (DMA mode): the second word arrived; output begins.
+    fn aud_move_101_010(&mut self, ch: usize) -> u16 {
+        self.aud_percntrld(ch);
+        self.aud_volcntrld(ch);
+        self.aud_pbufld1(ch);
+        if self.aud_napnav(ch) {
+            self.chans[ch].sm_dr = true;
+        }
+        self.chans[ch].state = AUD_OUT_HI;
+        self.aud_penhi(ch);
+        0
+    }
+
+    /// 010 -> 011: period expired on the high byte; output the low byte.
+    fn aud_move_010_011(&mut self, ch: usize, dmacon: u16) -> u16 {
+        self.aud_percntrld(ch);
+        let mut irq = 0;
+        if self.aud_ap(ch) {
+            self.aud_pbufld2(ch);
+            if Self::aud_on(dmacon, ch) {
+                self.chans[ch].sm_dr = true;
+                if self.chans[ch].intreq2 {
+                    irq |= INT_AUDX[ch];
+                    self.chans[ch].intreq2 = false;
                 }
-                ch.manual_pending = false;
-            } else if enabled {
-                // CPU AUDxDAT writes made while DMA owns the channel
-                // update the CPU-visible data latch but must not arm a
-                // stale manual restart or replace the DMA sample word.
-                ch.dma_disable_pending = false;
-                ch.manual_pending = false;
-            } else if !enabled {
-                if matches!(ch.state, ChanState::Running) {
-                    if ch.per == 0 {
-                        ch.finish_deferred_dma_disable();
-                    } else {
-                        ch.dma_disable_pending = true;
-                    }
-                    ch.manual_pending = false;
-                } else if ch.manual_pending {
-                    if self.intreq & INT_AUDX[ch_idx] == 0 {
-                        ch.latch_manual_word();
-                    } else {
-                        ch.manual_pending = false;
-                    }
-                } else if !matches!(ch.state, ChanState::Manual | ChanState::ManualHold) {
-                    ch.state = ChanState::Off;
-                    ch.current = 0;
-                    ch.next_word = None;
-                    ch.dma_disable_pending = false;
-                    ch.restart_pending = false;
-                    ch.clear_dma_request();
+            } else {
+                irq |= INT_AUDX[ch];
+            }
+        }
+        self.chans[ch].state = AUD_OUT_LO;
+        self.aud_penlo(ch);
+        self.latch_interrupt_sources(irq);
+        irq
+    }
+
+    /// 011 -> 010: period expired on the low byte; start the next word.
+    fn aud_move_011_010(&mut self, ch: usize, dmacon: u16) -> u16 {
+        self.aud_percntrld(ch);
+        self.aud_pbufld1(ch);
+        self.aud_volcntrld(ch);
+        let mut irq = 0;
+        if self.aud_napnav(ch) {
+            if Self::aud_on(dmacon, ch) {
+                self.chans[ch].sm_dr = true;
+                if self.chans[ch].intreq2 {
+                    irq |= INT_AUDX[ch];
+                    self.chans[ch].intreq2 = false;
                 }
+            } else {
+                // IRQ mode: every word start raises the interrupt; the
+                // 011 exit already required it to be acknowledged.
+                irq |= INT_AUDX[ch];
+            }
+        }
+        self.chans[ch].state = AUD_OUT_HI;
+        self.aud_penhi(ch);
+        self.latch_interrupt_sources(irq);
+        irq
+    }
+
+    /// Any active state -> 000 (DMA switched off, or IRQ-mode output ended
+    /// unacknowledged). The DAC holds the last byte; a posted DMA request
+    /// stays posted (Agnus services it even with the channel bit off,
+    /// which is what lets a brief on/off DMACON pulse kick a channel into
+    /// free-running IRQ-mode output).
+    fn aud_move_to_idle(&mut self, ch: usize) {
+        self.chans[ch].state = AUD_IDLE;
+        self.chans[ch].intreq2 = false;
+    }
+
+    /// AUDxDAT arrival: the state machine's main input, driven by both
+    /// CPU/Copper writes and the channel's DMA slot.
+    fn aud_poke_dat(&mut self, ch: usize, value: u16, dmacon: u16) -> u16 {
+        self.chans[ch].auddat = value;
+        self.chans[ch].dat_latch = value;
+        if Self::aud_on(dmacon, ch) {
+            match self.chans[ch].state {
+                AUD_IDLE => self.aud_move_000_001(ch),
+                AUD_DMA_FIRST => self.aud_move_001_101(ch),
+                AUD_DMA_SECOND => self.aud_move_101_010(ch),
+                AUD_OUT_HI | AUD_OUT_LO => {
+                    // Steady-state fetch: count the word; on the final one
+                    // reload the length/pointer and arm the rollover
+                    // interrupt for the next word-start transition.
+                    if !self.aud_lenfin(ch) {
+                        self.aud_lencount(ch);
+                    } else {
+                        self.aud_lencntrld(ch);
+                        self.aud_dsr(ch);
+                        self.chans[ch].intreq2 = true;
+                    }
+                    0
+                }
+                _ => 0,
+            }
+        } else if self.chans[ch].state == AUD_IDLE && !self.aud_ip(ch) {
+            self.aud_move_000_010(ch)
+        } else {
+            0
+        }
+    }
+
+    /// Apply DMACON audio-channel edges. The caller flushes pending audio
+    /// time first so the edge lands at the write's emulated moment.
+    pub fn apply_audio_dmacon_edges(&mut self, old_dmacon: u16, new_dmacon: u16) {
+        for ch in 0..4 {
+            let was = Self::aud_on(old_dmacon, ch);
+            let is = Self::aud_on(new_dmacon, ch);
+            if was == is {
+                continue;
+            }
+            if is {
+                if self.chans[ch].state == AUD_IDLE {
+                    self.aud_move_000_001(ch);
+                }
+            } else {
+                match self.chans[ch].state {
+                    AUD_DMA_FIRST | AUD_DMA_SECOND => self.aud_move_to_idle(ch),
+                    AUD_OUT_HI | AUD_OUT_LO => self.aud_move_to_idle(ch),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// Transfer state-machine DMA requests to the Agnus-side latches.
+    /// Runs once per scanline at the line end, mirroring real Paula
+    /// (requests are sampled into Agnus during the line-start refresh
+    /// slots and serviced at the channel's fixed slot on that line).
+    pub fn transfer_audio_dma_requests(&mut self) {
+        for ch in &mut self.chans {
+            if ch.sm_dr {
+                ch.sm_dr = false;
+                ch.agnus_dr = true;
             }
         }
     }
 
     #[cfg(test)]
     pub fn tick_audio(&mut self, cck: u32, dmacon: u16, chip_ram: &[u8]) -> u16 {
+        // Drive the FSM the way the bus does: per scanline, service each
+        // channel's fixed DMA slot from the line-latched requests, advance
+        // emulated time, and transfer fresh requests at the line end. The
+        // DMACON edge is applied synchronously up front like the MMIO path.
         let mut irq_bits = 0;
-        for _ in 0..cck {
-            irq_bits |= self.advance_audio(0, dmacon);
-            irq_bits |= self.grant_test_audio_dma(chip_ram);
-            irq_bits |= self.advance_audio(1, dmacon);
-            irq_bits |= self.grant_test_audio_dma(chip_ram);
+        if dmacon != self.test_last_dmacon {
+            let old = self.test_last_dmacon;
+            self.test_last_dmacon = dmacon;
+            self.apply_audio_dmacon_edges(old, dmacon);
         }
-        irq_bits
-    }
-
-    #[cfg(test)]
-    fn grant_test_audio_dma(&mut self, chip_ram: &[u8]) -> u16 {
-        let mut irq_bits = 0;
-        for ch_idx in 0..self.chans.len() {
-            let mut grants = 0;
-            while let Some(request) = self.audio_dma_request(ch_idx) {
-                let word = read_chip_word_for_audio_test(chip_ram, request.address);
-                irq_bits |= self.grant_audio_dma(ch_idx, word);
-                grants += 1;
-                debug_assert!(grants <= 2);
+        for _ in 0..cck {
+            let slot = match self.test_line_cck {
+                0x00F => Some(0),
+                0x011 => Some(1),
+                0x013 => Some(2),
+                0x015 => Some(3),
+                _ => None,
+            };
+            if let Some(ch_idx) = slot {
+                if let Some(request) = self.audio_dma_request(ch_idx) {
+                    let word = read_chip_word_for_audio_test(chip_ram, request.address);
+                    irq_bits |= self.grant_audio_dma(ch_idx, word, dmacon);
+                }
+            }
+            irq_bits |= self.advance_audio(1, dmacon);
+            self.test_line_cck += 1;
+            if self.test_line_cck >= 227 {
+                self.test_line_cck = 0;
+                self.transfer_audio_dma_requests();
             }
         }
         irq_bits
@@ -1471,9 +1465,11 @@ impl Paula {
         needed.div_ceil(MIX_SAMPLE_RATE as u64).max(1) as u32
     }
 
+    /// The chip-RAM address the channel's next DMA slot will fetch, when a
+    /// request is latched in Agnus.
     pub fn audio_dma_request(&self, ch_idx: usize) -> Option<AudioDmaRequest> {
         let ch = self.chans.get(ch_idx)?;
-        if !ch.dma_request {
+        if !ch.agnus_dr {
             return None;
         }
         Some(AudioDmaRequest {
@@ -1481,215 +1477,62 @@ impl Paula {
         })
     }
 
-    pub fn grant_audio_dma(&mut self, ch_idx: usize, word: u16) -> u16 {
+    /// Service the channel's DMA slot: consume the Agnus request latch,
+    /// advance the pointer, and feed the fetched word to the state
+    /// machine. The slot runs regardless of the DMACON audio bits; only
+    /// the request latch gates it.
+    pub fn grant_audio_dma(&mut self, ch_idx: usize, word: u16, dmacon: u16) -> u16 {
         let ptr_mask = self.dma_ptr_mask();
-        let min_period = u32::from(self.audio_min_period_cck);
-        let source_modulates = self.channel_drives_audio_modulation(ch_idx);
         let Some(ch) = self.chans.get_mut(ch_idx) else {
             return 0;
         };
-        if !ch.dma_request {
+        if !ch.agnus_dr {
             return 0;
         }
-
-        // Read the word into the fetch-ahead holding register and step
-        // the pointer/length counter. This is the channel's per-line
-        // DMA slot doing its read one word ahead of the output shifter.
-        ch.clear_dma_request();
-        let buffer_wrapped = ch.accept_dma_word(word, ptr_mask);
-        ch.dma_fetch_cooldown_cck = min_period;
-        let mut irq_bits = 0;
-        if buffer_wrapped {
-            irq_bits |= INT_AUDX[ch_idx];
-        }
-
-        // The very first fetch after a DMA-enable starts playback right
-        // away: promote the held word into the active buffer so the
-        // output shifter has data, and arm the prefetch of the next
-        // word for the holding register.
-        if ch.state == ChanState::StartPending {
-            ch.promote_next_word();
-            ch.current = ch.word_hi;
-            ch.phase = 1;
-            ch.period_acc = 0;
-            ch.state = ChanState::Running;
-            if source_modulates {
-                let loaded_word = ((ch.word_hi as u8 as u16) << 8) | ch.word_lo as u8 as u16;
-                self.apply_audio_modulation(&[AudioModEvent {
-                    source: ch_idx,
-                    word: loaded_word,
-                    word_start: true,
-                }]);
-            }
-        }
-        irq_bits
+        ch.agnus_dr = false;
+        ch.ptr = ch.ptr.wrapping_add(2) & ptr_mask;
+        let irq = self.aud_poke_dat(ch_idx, word, dmacon);
+        self.latch_interrupt_sources(irq);
+        irq
     }
 
-    fn advance_audio_channels(&mut self, cck: u32) -> u16 {
-        if self.audio_modulation_events_enabled() {
-            self.advance_audio_channels_inner::<true>(cck)
-        } else {
-            self.advance_audio_channels_inner::<false>(cck)
-        }
-    }
-
-    fn advance_audio_channels_inner<const MODULATE: bool>(&mut self, cck: u32) -> u16 {
+    /// Advance the per-channel period counters, running the state machine
+    /// at each expiry (states 010/011 are the only ones with the counter
+    /// live). Returns the INTREQ bits raised (already latched).
+    fn advance_audio_channels(&mut self, cck: u32, dmacon: u16) -> u16 {
         let mut irq_bits = 0;
-        // Reuse the scratch buffer instead of allocating a fresh Vec (and
-        // freeing it again) on every call that has modulation enabled.
-        if MODULATE {
-            self.mod_events_scratch.clear();
-        }
-        let ptr_mask = self.dma_ptr_mask();
         for ch_idx in 0..4 {
-            let source_modulates = MODULATE && self.channel_drives_audio_modulation(ch_idx);
-            let ch = &mut self.chans[ch_idx];
-            if matches!(ch.state, ChanState::Off | ChanState::ManualHold) {
+            if !self.chans[ch_idx].outputting() {
                 continue;
             }
-            if ch.state == ChanState::Manual {
-                if ch.per == 0 {
-                    continue;
+            let mut remaining = cck;
+            while remaining > 0 {
+                let ch = &mut self.chans[ch_idx];
+                if !ch.outputting() {
+                    break;
                 }
-                ch.period_acc += cck;
-                while ch.period_acc >= ch.per as u32 {
-                    ch.period_acc -= ch.per as u32;
-                    if ch.phase == 0 {
-                        ch.current = ch.word_hi;
-                        ch.phase = 1;
-                    } else {
-                        ch.current = ch.word_lo;
-                        ch.phase = 0;
-                        irq_bits |= INT_AUDX[ch_idx];
-                        ch.state = ChanState::ManualHold;
-                        break;
-                    }
+                if ch.percnt > remaining {
+                    ch.percnt -= remaining;
+                    break;
                 }
-                continue;
-            }
-            if ch.state == ChanState::StartPending {
-                if !ch.dma_request {
-                    ch.request_dma();
-                }
-                continue;
-            }
-            if ch.state == ChanState::Running {
-                // AUDxPER=0 is outside the documented range. Keep the
-                // current sample stable rather than letting the period
-                // accumulator underflow.
-                if ch.per == 0 {
-                    continue;
-                }
-                let period = ch.per as u32;
-                let mut channel_remaining = cck;
-                while channel_remaining > 0 {
-                    let until_period = period.saturating_sub(ch.period_acc).max(1);
-                    let until_dma_ready = ch.dma_fetch_cooldown_cck.max(1);
-                    let step = if ch.dma_fetch_cooldown_cck == 0 {
-                        channel_remaining.min(until_period)
-                    } else {
-                        channel_remaining.min(until_period.min(until_dma_ready))
-                    };
-                    ch.period_acc += step;
-                    ch.dma_fetch_cooldown_cck = ch.dma_fetch_cooldown_cck.saturating_sub(step);
-                    channel_remaining -= step;
-                    // Keep the fetch-ahead holding register topped up. As
-                    // soon as it is empty and the per-line fetch budget has
-                    // recovered, ask Agnus for the next word so it arrives
-                    // before the active word is exhausted.
-                    if !ch.dma_disable_pending
-                        && ch.next_word.is_none()
-                        && ch.dma_fetch_cooldown_cck == 0
-                        && !ch.dma_request
-                    {
-                        ch.arm_next_buffer_fetch(ptr_mask);
-                    }
-                    if ch.period_acc < period {
-                        continue;
-                    }
-                    ch.period_acc -= period;
-                    if ch.dma_disable_pending && ch.phase == 0 {
-                        ch.finish_deferred_dma_disable();
-                        break;
-                    }
-                    // Emit the next byte and advance phase.
-                    if ch.phase == 0 {
-                        ch.current = ch.word_hi;
-                        if source_modulates {
-                            self.mod_events_scratch.push(AudioModEvent {
-                                source: ch_idx,
-                                word: ((ch.word_hi as u8 as u16) << 8) | ch.word_lo as u8 as u16,
-                                word_start: true,
-                            });
-                        }
-                        ch.phase = 1;
-                    } else {
-                        ch.current = ch.word_lo;
-                        if source_modulates {
-                            self.mod_events_scratch.push(AudioModEvent {
-                                source: ch_idx,
-                                word: ((ch.word_hi as u8 as u16) << 8) | ch.word_lo as u8 as u16,
-                                word_start: false,
-                            });
-                        }
-                        ch.phase = 0;
-                        // Whole 16-bit word consumed: promote the word the
-                        // DMA slot fetched ahead into the holding register.
-                        // If it has not arrived yet (DMA could not keep up,
-                        // e.g. AUDxPER below the per-line fetch budget) the
-                        // active word's two samples simply repeat.
-                        ch.promote_next_word();
-                        if !ch.dma_disable_pending
-                            && ch.next_word.is_none()
-                            && ch.dma_fetch_cooldown_cck == 0
-                            && !ch.dma_request
-                        {
-                            ch.arm_next_buffer_fetch(ptr_mask);
+                remaining -= ch.percnt;
+                ch.percnt = 0;
+                irq_bits |= match ch.state {
+                    AUD_OUT_HI => self.aud_move_010_011(ch_idx, dmacon),
+                    _ => {
+                        if Self::aud_on(dmacon, ch_idx) || !self.aud_ip(ch_idx) {
+                            self.aud_move_011_010(ch_idx, dmacon)
+                        } else {
+                            // IRQ-mode output with the interrupt still
+                            // pending: the channel parks.
+                            self.aud_move_to_idle(ch_idx);
+                            0
                         }
                     }
-                }
+                };
             }
-        }
-        if MODULATE && !self.mod_events_scratch.is_empty() {
-            // Move the buffer out so `apply_audio_modulation` (which needs
-            // &mut self to update the modulated channels) isn't aliased
-            // against an immutable borrow of it, then move it back so its
-            // allocation survives for the next call.
-            let events = std::mem::take(&mut self.mod_events_scratch);
-            self.apply_audio_modulation(&events);
-            self.mod_events_scratch = events;
         }
         irq_bits
-    }
-
-    fn apply_audio_modulation(&mut self, events: &[AudioModEvent]) {
-        for event in events {
-            let target = event.source + 1;
-            if target >= self.chans.len() {
-                continue;
-            }
-            let volume_attach = self.adkcon & (1 << event.source) != 0;
-            let period_attach = self.adkcon & (1 << (event.source + 4)) != 0;
-            if volume_attach && period_attach {
-                if !event.word_start {
-                    continue;
-                }
-                if self.audio_mod_next_period[event.source] {
-                    self.chans[target].per = event.word.max(1);
-                } else {
-                    self.chans[target].vol = paula_volume_from_word(event.word);
-                }
-                self.audio_mod_next_period[event.source] =
-                    !self.audio_mod_next_period[event.source];
-                continue;
-            }
-            if volume_attach {
-                self.chans[target].vol = paula_volume_from_word(event.word);
-            }
-            if period_attach {
-                self.chans[target].per = event.word.max(1);
-            }
-        }
     }
 
     fn push_mixed_frame(&mut self) {
@@ -1712,8 +1555,8 @@ impl Paula {
         // for the debugger oscilloscopes. This is pre-mute so a muted
         // channel's trace still shows its activity (drawn greyed).
         for i in 0..4 {
-            let level =
-                ((self.chans[i].current as i32 * self.chans[i].vol as i32) / 64).clamp(-128, 127);
+            let level = ((self.chans[i].current as i32 * self.chans[i].audvol as i32) / 64)
+                .clamp(-128, 127);
             scope_push(&mut self.channel_scope[i], level as i8);
         }
         let l_raw = self.channel_mixed_sample(0) + self.channel_mixed_sample(3);
@@ -1772,7 +1615,7 @@ impl Paula {
             0
         } else {
             let ch = &self.chans[ch_idx];
-            (ch.current as i32) * (ch.vol as i32)
+            (ch.current as i32) * (ch.audvol as i32)
         }
     }
 }
@@ -2080,11 +1923,11 @@ mod tests {
         ram[0] = 0x7F;
         ram[1] = 0x81;
 
-        paula.write_audio_reg(0x00, 0);
-        paula.write_audio_reg(0x02, 0);
-        paula.write_audio_reg(0x04, 1);
-        paula.write_audio_reg(0x06, 80);
-        paula.write_audio_reg(0x08, 64);
+        paula.write_audio_reg(0x00, 0, 0);
+        paula.write_audio_reg(0x02, 0, 0);
+        paula.write_audio_reg(0x04, 1, 0);
+        paula.write_audio_reg(0x06, 80, 0);
+        paula.write_audio_reg(0x08, 64, 0);
 
         // Tap disabled: nothing accumulates.
         paula.tick_audio(400, DMACON_DMAEN | 0x0001, &ram);
@@ -2121,13 +1964,13 @@ mod tests {
         ram[2] = 0x7F;
         ram[3] = 0x81;
 
-        paula.write_audio_reg(0x00, 0);
-        paula.write_audio_reg(0x02, 0);
-        paula.write_audio_reg(0x04, 2);
-        paula.write_audio_reg(0x06, 80);
-        paula.write_audio_reg(0x08, 64);
+        paula.write_audio_reg(0x00, 0, 0);
+        paula.write_audio_reg(0x02, 0, 0);
+        paula.write_audio_reg(0x04, 2, 0);
+        paula.write_audio_reg(0x06, 80, 0);
+        paula.write_audio_reg(0x08, 64, 0);
 
-        paula.tick_audio(400, DMACON_DMAEN | 0x0001, &ram);
+        paula.tick_audio(1600, DMACON_DMAEN | 0x0001, &ram);
 
         let frames = frames.borrow();
         assert!(
@@ -2146,9 +1989,8 @@ mod tests {
     }
 
     #[test]
-    fn audio_irq_deadline_tracks_dma_buffer_reload() {
+    fn audio_irq_deadline_tracks_dma_buffer_rollover() {
         let (mut paula, _) = paula_with_collect_sink();
-        paula.set_audio_min_period_cck(1);
         let mut ram = vec![0u8; 64];
         ram[0] = 0x11;
         ram[1] = 0x22;
@@ -2156,19 +1998,30 @@ mod tests {
         ram[3] = 0x44;
         let dmacon = DMACON_DMAEN | 0x0001;
 
-        paula.write_audio_reg(0x00, 0);
-        paula.write_audio_reg(0x02, 0);
-        paula.write_audio_reg(0x04, 2);
-        paula.write_audio_reg(0x06, 10);
-        paula.write_audio_reg(0x08, 64);
+        paula.write_audio_reg(0x00, 0, 0);
+        paula.write_audio_reg(0x02, 0, 0);
+        paula.write_audio_reg(0x04, 2, 0);
+        paula.write_audio_reg(0x06, 10, 0);
+        paula.write_audio_reg(0x08, 64, 0);
 
+        // Idle: no asynchronous interrupt is possible.
         assert_eq!(paula.next_audio_irq_cck(dmacon), None);
-        assert_eq!(paula.tick_audio(1, dmacon, &ram) & INT_AUD0, INT_AUD0);
-        assert_eq!(paula.next_audio_irq_cck(dmacon), Some(29));
 
-        assert_eq!(paula.tick_audio(28, dmacon, &ram) & INT_AUD0, 0);
-        assert_eq!(paula.next_audio_irq_cck(dmacon), Some(1));
-        assert_eq!(paula.tick_audio(1, dmacon, &ram) & INT_AUD0, INT_AUD0);
+        // The two start-up fetches raise the start interrupt (slot-timed,
+        // no deadline needed) and leave the final word in flight
+        // (audlen 1), so the period counter's boundaries now carry the
+        // rollover interrupt and the deadline engages.
+        let irq = paula.tick_audio(2 * 227 + 20, dmacon, &ram);
+        assert_eq!(irq & INT_AUD0, INT_AUD0);
+        assert!(paula.chans[0].outputting());
+        assert_eq!(paula.chans[0].audlen, 1);
+        let deadline = paula.next_audio_irq_cck(dmacon).expect("deadline");
+        assert!(deadline <= 2 * 10, "deadline within one word: {deadline}");
+
+        // The rollover interrupt arrives at a word-start boundary.
+        assert!(!paula.write_intreq(INT_AUD0));
+        let irq = paula.tick_audio(2 * 227 + 40, dmacon, &ram);
+        assert_eq!(irq & INT_AUD0, INT_AUD0);
     }
 
     #[test]
@@ -2176,43 +2029,50 @@ mod tests {
         let (mut paula, _) = paula_with_collect_sink();
         let ram = vec![0u8; 64];
 
-        paula.write_audio_reg(0x06, 4);
-        paula.write_audio_reg(0x08, 64);
-        paula.write_audio_reg(0x0A, 0x4080);
-
-        assert_eq!(paula.tick_audio(1, 0, &ram) & INT_AUD0, 0);
+        paula.write_audio_reg(0x06, 4, 0);
+        paula.write_audio_reg(0x08, 64, 0);
+        // The write starts IRQ-mode output immediately: the interrupt is
+        // raised as the word is taken and the high byte hits the DAC.
+        paula.write_audio_reg(0x0A, 0x4080, 0);
+        assert_eq!(paula.intreq & INT_AUD0, INT_AUD0);
         assert_eq!(paula.chans[0].current, 0x40);
-        assert_eq!(paula.chans[0].phase, 1);
+        assert_eq!(paula.chans[0].state, AUD_OUT_HI);
 
-        assert_eq!(paula.tick_audio(2, 0, &ram) & INT_AUD0, 0);
-        assert_eq!(paula.chans[0].current, 0x40);
+        // One period later the low byte plays.
+        paula.tick_audio(4, 0, &ram);
+        assert_eq!(paula.chans[0].current, 0x80u8 as i8);
+        assert_eq!(paula.chans[0].state, AUD_OUT_LO);
 
-        assert_eq!(paula.tick_audio(1, 0, &ram) & INT_AUD0, INT_AUD0);
-        assert_eq!(paula.chans[0].current, -128);
-        assert_eq!(paula.chans[0].state, ChanState::ManualHold);
-        assert_eq!(paula.tick_audio(16, 0, &ram) & INT_AUD0, 0);
-        assert_eq!(paula.chans[0].current, -128);
+        // The interrupt was never acknowledged, so the word's end parks
+        // the channel; the DAC holds the last level.
+        paula.tick_audio(4, 0, &ram);
+        assert_eq!(paula.chans[0].state, AUD_IDLE);
+        assert_eq!(paula.chans[0].current, 0x80u8 as i8);
+        paula.tick_audio(16, 0, &ram);
+        assert_eq!(paula.chans[0].current, 0x80u8 as i8);
     }
 
     #[test]
-    fn cpu_auddat_write_restarts_manual_period_countdown() {
+    fn cpu_auddat_acknowledged_stream_plays_seamlessly() {
         let (mut paula, _) = paula_with_collect_sink();
         let ram = vec![0u8; 64];
 
-        paula.write_audio_reg(0x06, 8);
-        paula.write_audio_reg(0x0A, 0x1020);
-        assert_eq!(paula.tick_audio(3, 0, &ram) & INT_AUD0, 0);
+        paula.write_audio_reg(0x06, 8, 0);
+        paula.write_audio_reg(0x0A, 0x1020, 0);
         assert_eq!(paula.chans[0].current, 0x10);
-        assert_eq!(paula.chans[0].period_acc, 3);
-
-        paula.write_audio_reg(0x0A, 0x3040);
-        assert_eq!(paula.tick_audio(1, 0, &ram) & INT_AUD0, 0);
+        // Acknowledge and supply the next word before this one ends: the
+        // channel keeps cycling, loading the fresh word at the boundary.
+        assert!(!paula.write_intreq(INT_AUD0));
+        paula.write_audio_reg(0x0A, 0x3040, 0);
+        paula.tick_audio(8, 0, &ram);
+        assert_eq!(paula.chans[0].current, 0x20);
+        assert_eq!(paula.chans[0].state, AUD_OUT_LO);
+        // Word boundary: the new word starts and re-raises the interrupt.
+        paula.tick_audio(8, 0, &ram);
         assert_eq!(paula.chans[0].current, 0x30);
-        assert_eq!(paula.chans[0].period_acc, 1);
-
-        assert_eq!(paula.tick_audio(6, 0, &ram) & INT_AUD0, 0);
-        assert_eq!(paula.chans[0].current, 0x30);
-        assert_eq!(paula.tick_audio(1, 0, &ram) & INT_AUD0, INT_AUD0);
+        assert_eq!(paula.intreq & INT_AUD0, INT_AUD0);
+        assert!(!paula.write_intreq(INT_AUD0));
+        paula.tick_audio(8, 0, &ram);
         assert_eq!(paula.chans[0].current, 0x40);
     }
 
@@ -2221,73 +2081,64 @@ mod tests {
         let (mut paula, _) = paula_with_collect_sink();
         let ram = vec![0u8; 64];
 
-        paula.write_audio_reg(0x06, 4);
-        paula.write_audio_reg(0x0A, 0x1020);
-        let irq = paula.tick_audio(4, 0, &ram);
-        assert_eq!(irq & INT_AUD0, INT_AUD0);
-        paula.latch_interrupt_sources(irq);
-        assert_eq!(paula.chans[0].state, ChanState::ManualHold);
+        paula.write_audio_reg(0x06, 4, 0);
+        paula.write_audio_reg(0x0A, 0x1020, 0);
+        assert_eq!(paula.intreq & INT_AUD0, INT_AUD0);
+        // Let the word play out unacknowledged: the channel parks.
+        paula.tick_audio(8, 0, &ram);
+        assert_eq!(paula.chans[0].state, AUD_IDLE);
         assert_eq!(paula.chans[0].current, 0x20);
 
-        paula.write_audio_reg(0x0A, 0x3040);
-        assert_eq!(paula.tick_audio(1, 0, &ram) & INT_AUD0, 0);
-        assert_eq!(paula.chans[0].state, ChanState::ManualHold);
+        // With the interrupt still pending, a new AUDxDAT write does not
+        // start output.
+        paula.write_audio_reg(0x0A, 0x3040, 0);
+        assert_eq!(paula.chans[0].state, AUD_IDLE);
         assert_eq!(paula.chans[0].current, 0x20);
 
+        // Acknowledged, the next write starts a fresh word.
         assert!(!paula.write_intreq(INT_AUD0));
-        paula.write_audio_reg(0x0A, 0x3040);
-        assert_eq!(paula.tick_audio(1, 0, &ram) & INT_AUD0, 0);
-        assert_eq!(paula.chans[0].state, ChanState::Manual);
+        paula.write_audio_reg(0x0A, 0x3040, 0);
+        assert_eq!(paula.chans[0].state, AUD_OUT_HI);
         assert_eq!(paula.chans[0].current, 0x30);
     }
 
     #[test]
-    fn audio_dma_length_one_reloads_latched_location_and_length_at_sample_end() {
+    fn audio_dma_length_one_loops_and_honors_repointed_location() {
         let (mut paula, _) = paula_with_collect_sink();
-        paula.set_audio_min_period_cck(1);
-        let mut ram = vec![0u8; 64];
-        ram[0] = 0x11;
-        ram[1] = 0x22;
-        ram[4] = 0x33;
-        ram[5] = 0x44;
-        ram[6] = 0x55;
-        ram[7] = 0x66;
         let dmacon = DMACON_DMAEN | 0x0001;
 
-        paula.write_audio_reg(0x00, 0);
-        paula.write_audio_reg(0x02, 0);
-        paula.write_audio_reg(0x04, 1);
-        paula.write_audio_reg(0x06, 4);
-        paula.write_audio_reg(0x08, 64);
+        paula.write_audio_reg(0x00, 0, 0);
+        paula.write_audio_reg(0x02, 0, 0);
+        paula.write_audio_reg(0x04, 1, 0);
+        paula.write_audio_reg(0x06, 4, 0);
+        paula.write_audio_reg(0x08, 64, 0);
 
-        // A one-word buffer wraps its length counter on every fetch and
-        // keeps looping at the latched AUDxLC (0), playing its word
-        // audibly. The pointer/length reload is deferred one fetch, so the
-        // counter reads 0 with a restart pending between fetches.
-        assert_eq!(paula.tick_audio(1, dmacon, &ram) & INT_AUD0, INT_AUD0);
+        // Start-up: dummy fetch (stale pointer) raises the start IRQ and
+        // resets the pointer to AUDxLC.
+        paula.apply_audio_dmacon_edges(0, dmacon);
+        paula.transfer_audio_dma_requests();
+        assert_eq!(
+            paula.grant_audio_dma(0, 0xDEAD, dmacon) & INT_AUD0,
+            INT_AUD0
+        );
+        // Second start-up fetch: the one-word block's word plays.
+        paula.transfer_audio_dma_requests();
+        assert_eq!(paula.audio_dma_request(0).unwrap().address, 0);
+        assert_eq!(paula.grant_audio_dma(0, 0x1122, dmacon), 0);
         assert_eq!(paula.chans[0].current, 0x11);
-        assert_eq!(paula.chans[0].words_left, 0);
-        assert!(paula.chans[0].restart_pending);
 
-        // The audio interrupt handler repoints the channel at a longer
-        // buffer.
-        paula.write_audio_reg(0x02, 4);
-        paula.write_audio_reg(0x04, 2);
-
-        assert_eq!(paula.tick_audio(2, dmacon, &ram) & INT_AUD0, 0);
-        assert_eq!(paula.chans[0].current, 0x11);
-        // A subsequent wrapping fetch reloads the pointer/length from the
-        // freshly latched AUDxLC=4/AUDxLEN=2, and the new buffer's word
-        // eventually reaches the output shifter
-        // (the fetch-ahead pipeline carries already-fetched words, so it
-        // arrives a couple of words later).
-        let mut guard = 0;
-        while paula.chans[0].word_hi != 0x33 {
-            paula.tick_audio(1, dmacon, &ram);
-            guard += 1;
-            assert!(guard <= 24, "new buffer word should play after reload");
-        }
-        assert_eq!(paula.chans[0].word_lo, 0x44);
+        // The interrupt handler repoints the channel at a new block; the
+        // next steady-state fetch is the final word (audlen 1), so its
+        // arrival reloads pointer/length from the fresh latches.
+        paula.write_audio_reg(0x02, 8, dmacon);
+        paula.write_audio_reg(0x04, 2, dmacon);
+        assert_eq!(paula.chans[0].audlen, 1);
+        paula.transfer_audio_dma_requests();
+        assert_eq!(paula.audio_dma_request(0).unwrap().address, 2);
+        assert_eq!(paula.grant_audio_dma(0, 0x3344, dmacon), 0);
+        assert!(paula.chans[0].intreq2);
+        assert_eq!(paula.chans[0].audlen, 2);
+        assert_eq!(paula.chans[0].ptr, 8);
     }
 
     #[test]
@@ -2303,201 +2154,217 @@ mod tests {
             ram[1] = 0x81;
             let dmacon = DMACON_DMAEN | 0x0001;
 
-            paula.write_audio_reg(0x00, 0);
-            paula.write_audio_reg(0x02, 0);
-            paula.write_audio_reg(0x04, len);
-            paula.write_audio_reg(0x06, 4);
-            paula.write_audio_reg(0x08, 64);
+            paula.write_audio_reg(0x00, 0, 0);
+            paula.write_audio_reg(0x02, 0, 0);
+            paula.write_audio_reg(0x04, len, 0);
+            paula.write_audio_reg(0x06, 4, 0);
+            paula.write_audio_reg(0x08, 64, 0);
 
-            assert_eq!(paula.tick_audio(1, dmacon, &ram) & INT_AUD0, INT_AUD0);
-            assert_eq!(paula.chans[0].word_hi, 0x7F);
-            assert_eq!(paula.chans[0].word_lo, 0x81u8 as i8);
-            assert_eq!(paula.chans[0].current, 0x7F);
-            if len == 0 {
-                assert_eq!(paula.chans[0].words_left, 0xFFFF);
-                assert!(!paula.chans[0].restart_pending);
-            } else {
-                assert_eq!(paula.chans[0].words_left, 0);
-                assert!(paula.chans[0].restart_pending);
-            }
-
-            // One period later the low byte plays -- still audible data,
-            // not a muted zero.
-            assert_eq!(paula.tick_audio(3, dmacon, &ram) & INT_AUD0, 0);
-            assert_eq!(paula.chans[0].current, 0x81u8 as i8);
+            // Two scanlines of start-up fetches, then output runs.
+            let irq = paula.tick_audio(2 * 227 + 20, dmacon, &ram);
+            assert_eq!(irq & INT_AUD0, INT_AUD0);
+            assert!(paula.chans[0].outputting());
+            assert_eq!(paula.chans[0].buffer, 0x7F81);
+            let seen: Vec<i8> = (0..8)
+                .map(|_| {
+                    paula.tick_audio(4, dmacon, &ram);
+                    paula.chans[0].current
+                })
+                .collect();
+            assert!(seen.contains(&0x7F), "high byte should play: {seen:?}");
+            assert!(
+                seen.contains(&(0x81u8 as i8)),
+                "low byte should play: {seen:?}"
+            );
         }
     }
 
     #[test]
-    fn audio_dma_start_fetches_first_word_from_latched_location() {
+    fn dmacon_pulse_kicks_channel_into_irq_mode_free_run() {
+        // vAmigaTS Paula/Audio/simple/pertimer1: software pulses AUD0's
+        // DMACON bit on and immediately off (no AUDxDAT write, no audio
+        // data intended). The enable edge posts a DMA request; the request
+        // latch is NOT gated by DMACON, so Agnus still services it. The
+        // arriving word then hits an idle channel in IRQ mode and starts
+        // free-running output that raises the channel interrupt every
+        // word, at the AUDxPER cadence -- a CPU-visible periodic timer.
         let (mut paula, _) = paula_with_collect_sink();
-        paula.set_audio_min_period_cck(1);
+        let ram = vec![0u8; 64];
         let dmacon = DMACON_DMAEN | 0x0001;
 
-        // A stale playback pointer must be ignored: the DMA-enable edge
-        // reloads it from AUDxLC.
+        paula.write_audio_reg(0x06, 100, 0);
+        paula.apply_audio_dmacon_edges(0, dmacon);
+        paula.apply_audio_dmacon_edges(dmacon, 0);
+        assert_eq!(paula.chans[0].state, AUD_IDLE);
+        assert!(
+            paula.chans[0].sm_dr,
+            "the posted request survives the off edge"
+        );
+
+        // Line end: the request reaches Agnus; the slot fetches with the
+        // channel bit off and the word starts IRQ-mode output.
+        paula.transfer_audio_dma_requests();
+        assert!(paula.audio_dma_request(0).is_some());
+        assert_eq!(paula.grant_audio_dma(0, 0x1234, 0) & INT_AUD0, INT_AUD0);
+        assert_eq!(paula.chans[0].state, AUD_OUT_HI);
+
+        // Acknowledged each time, the channel keeps interrupting once per
+        // word (2 * AUDxPER clocks).
+        for _ in 0..3 {
+            assert!(!paula.write_intreq(INT_AUD0));
+            let irq = paula.tick_audio(2 * 100, 0, &ram);
+            assert_eq!(irq & INT_AUD0, INT_AUD0);
+        }
+
+        // Left unacknowledged, the output parks at the word end.
+        let _ = paula.tick_audio(2 * 100, 0, &ram);
+        assert_eq!(paula.chans[0].state, AUD_IDLE);
+    }
+
+    #[test]
+    fn audio_dma_startup_fetches_stale_pointer_then_block_start() {
+        let (mut paula, _) = paula_with_collect_sink();
+        let dmacon = DMACON_DMAEN | 0x0001;
+
+        // The enable edge does NOT reload the pointer: the first start-up
+        // fetch reads wherever it last stopped, and its word is discarded.
         paula.chans[0].ptr = 0x20;
-        paula.write_audio_reg(0x00, 0);
-        paula.write_audio_reg(0x02, 4);
-        paula.write_audio_reg(0x04, 2);
-        paula.write_audio_reg(0x06, 8);
+        paula.write_audio_reg(0x00, 0, 0);
+        paula.write_audio_reg(0x02, 4, 0);
+        paula.write_audio_reg(0x04, 2, 0);
+        paula.write_audio_reg(0x06, 8, 0);
 
-        assert_eq!(paula.advance_audio(0, dmacon) & INT_AUD0, INT_AUD0);
-        // Pointer reloaded from AUDxLC; the first request reads word 0.
-        let request = paula.audio_dma_request(0).unwrap();
-        assert_eq!(request.address, 4);
+        paula.apply_audio_dmacon_edges(0, dmacon);
+        assert_eq!(paula.chans[0].state, AUD_DMA_FIRST);
+        assert_eq!(paula.chans[0].audlen, 2);
+        // The request reaches Agnus at the line end.
+        assert!(paula.audio_dma_request(0).is_none());
+        paula.transfer_audio_dma_requests();
+        assert_eq!(paula.audio_dma_request(0).unwrap().address, 0x20);
+
+        // First word arrives: start IRQ, pointer reset to AUDxLC, length
+        // counted, next request posted. Nothing plays yet.
+        assert_eq!(
+            paula.grant_audio_dma(0, 0xDEAD, dmacon) & INT_AUD0,
+            INT_AUD0
+        );
+        assert_eq!(paula.chans[0].state, AUD_DMA_SECOND);
         assert_eq!(paula.chans[0].ptr, 4);
-
-        // The single first grant fetches word 0 and starts playback in
-        // one slot (no separate pointer-reload grant). The pointer and
-        // length counter step to the next word.
-        assert_eq!(paula.grant_audio_dma(0, 0x5566) & INT_AUD0, 0);
-        assert_eq!(paula.chans[0].state, ChanState::Running);
-        assert_eq!(paula.chans[0].current, 0x55);
-        assert_eq!(paula.chans[0].ptr, 6);
-        assert_eq!(paula.chans[0].words_left, 1);
-    }
-
-    #[test]
-    fn audio_dma_buffer_end_defers_pointer_reload_until_next_fetch() {
-        let (mut paula, _) = paula_with_collect_sink();
-        paula.set_audio_min_period_cck(1);
-        let dmacon = DMACON_DMAEN | 0x0001;
-
-        // Two-word buffer at AUDxLC=0.
-        paula.write_audio_reg(0x00, 0);
-        paula.write_audio_reg(0x02, 0);
-        paula.write_audio_reg(0x04, 2);
-        paula.write_audio_reg(0x06, 4);
-
-        // DMA-enable edge fetches word 0 and starts playback.
-        assert_eq!(paula.advance_audio(0, dmacon) & INT_AUD0, INT_AUD0);
-        assert_eq!(paula.grant_audio_dma(0, 0x1020) & INT_AUD0, 0);
-        assert_eq!(paula.chans[0].ptr, 2);
-        assert_eq!(paula.chans[0].words_left, 1);
-
-        // Playing word 0 arms the fetch of word 1 (the buffer's last
-        // word) into the holding register.
-        paula.advance_audio(1, dmacon);
-        let request = paula.audio_dma_request(0).unwrap();
-        assert_eq!(request.address, 2);
-
-        // Fetching the last word wraps the length counter and raises the
-        // channel interrupt, but the AUDxLC/AUDxLEN reload is DEFERRED to
-        // the next buffer fetch (real Paula's one-word gap between the
-        // interrupt and the pointer reload). The pointer just steps past
-        // the buffer for now; no reload has happened yet.
-        assert_eq!(paula.grant_audio_dma(0, 0x3040) & INT_AUD0, INT_AUD0);
-        assert_eq!(paula.chans[0].ptr, 4);
-        assert_eq!(paula.chans[0].words_left, 0);
-
-        // The interrupt handler repoints the channel *after* the wrapping
-        // fetch -- exactly what a one-shot sample does to point AUDxLC at a
-        // silence loop. Because the reload was deferred, this is the value
-        // the next buffer latches.
-        paula.write_audio_reg(0x02, 8);
-
-        // Advance until the channel arms its next buffer fetch; the
-        // deferred reload then points at the handler's AUDxLC=8 with the
-        // length counter refilled from AUDxLEN.
-        let mut guard = 0;
-        let next = loop {
-            paula.advance_audio(1, dmacon);
-            if let Some(req) = paula.audio_dma_request(0) {
-                break req;
-            }
-            guard += 1;
-            assert!(guard <= 24, "channel should arm the next buffer fetch");
-        };
-        assert_eq!(next.address, 8);
-        assert_eq!(paula.chans[0].words_left, 2);
-    }
-
-    #[test]
-    fn audio_dma_enable_mid_manual_period_restarts_from_location_registers() {
-        let (mut paula, _) = paula_with_collect_sink();
-        let mut ram = vec![0u8; 64];
-        ram[0] = 0x51;
-        ram[1] = 0x62;
-        let dmacon = DMACON_DMAEN | 0x0001;
-
-        paula.write_audio_reg(0x06, 8);
-        paula.write_audio_reg(0x0A, 0x1020);
-        assert_eq!(paula.tick_audio(3, 0, &ram) & INT_AUD0, 0);
-        assert_eq!(paula.chans[0].current, 0x10);
-        assert_eq!(paula.chans[0].period_acc, 3);
-
-        paula.write_audio_reg(0x00, 0);
-        paula.write_audio_reg(0x02, 0);
-        paula.write_audio_reg(0x04, 2);
-        assert_eq!(paula.tick_audio(1, dmacon, &ram) & INT_AUD0, INT_AUD0);
-        assert_eq!(paula.chans[0].current, 0x51);
-        assert_eq!(paula.chans[0].state, ChanState::Running);
-        assert_eq!(paula.chans[0].phase, 1);
-        assert_eq!(paula.chans[0].period_acc, 1);
-    }
-
-    #[test]
-    fn audio_dma_disable_reenabled_before_word_boundary_continues_stream() {
-        let (mut paula, _) = paula_with_collect_sink();
-        let mut ram = vec![0u8; 64];
-        ram[0] = 0x12;
-        ram[1] = 0x34;
-        let dmacon = DMACON_DMAEN | 0x0001;
-
-        paula.write_audio_reg(0x00, 0);
-        paula.write_audio_reg(0x02, 0);
-        paula.write_audio_reg(0x04, 2);
-        paula.write_audio_reg(0x06, 8);
-        assert_eq!(paula.tick_audio(1, dmacon, &ram) & INT_AUD0, INT_AUD0);
-        assert_eq!(paula.tick_audio(3, dmacon, &ram) & INT_AUD0, 0);
-        assert_eq!(paula.chans[0].current, 0x12);
-        assert_eq!(paula.chans[0].period_acc, 4);
-
-        // Paula does not sample AUDxEN while it is still outputting the
-        // current DMA word. If software sets the bit again before the word
-        // boundary, the clear is missed: no fresh start IRQ is raised and
-        // the period countdown continues.
-        assert_eq!(paula.tick_audio(1, 0, &ram) & INT_AUD0, 0);
-        assert_eq!(paula.chans[0].state, ChanState::Running);
-        assert_eq!(paula.chans[0].current, 0x12);
-        assert_eq!(paula.chans[0].period_acc, 5);
-        assert!(paula.chans[0].dma_disable_pending);
-
-        assert_eq!(paula.tick_audio(1, dmacon, &ram) & INT_AUD0, 0);
-        assert_eq!(paula.chans[0].state, ChanState::Running);
-        assert_eq!(paula.chans[0].current, 0x12);
-        assert_eq!(paula.chans[0].period_acc, 6);
-        assert!(!paula.chans[0].dma_disable_pending);
-
-        assert_eq!(paula.tick_audio(2, dmacon, &ram) & INT_AUD0, 0);
-        assert_eq!(paula.chans[0].current, 0x34);
-    }
-
-    #[test]
-    fn audio_dma_disable_takes_effect_at_current_word_boundary() {
-        let (mut paula, _) = paula_with_collect_sink();
-        let mut ram = vec![0u8; 64];
-        ram[0] = 0x12;
-        ram[1] = 0x34;
-        let dmacon = DMACON_DMAEN | 0x0001;
-
-        paula.write_audio_reg(0x00, 0);
-        paula.write_audio_reg(0x02, 0);
-        paula.write_audio_reg(0x04, 2);
-        paula.write_audio_reg(0x06, 8);
-        assert_eq!(paula.tick_audio(1, dmacon, &ram) & INT_AUD0, INT_AUD0);
-        assert_eq!(paula.tick_audio(3, dmacon, &ram) & INT_AUD0, 0);
-        assert_eq!(paula.chans[0].period_acc, 4);
-
-        assert_eq!(paula.tick_audio(12, 0, &ram) & INT_AUD0, 0);
-        assert_eq!(paula.chans[0].state, ChanState::Off);
+        assert_eq!(paula.chans[0].audlen, 1);
         assert_eq!(paula.chans[0].current, 0);
 
-        assert_eq!(paula.tick_audio(1, dmacon, &ram) & INT_AUD0, INT_AUD0);
-        assert_eq!(paula.chans[0].state, ChanState::Running);
-        assert_eq!(paula.chans[0].current, 0x12);
-        assert_eq!(paula.chans[0].period_acc, 1);
+        // Second word (from AUDxLC) starts output.
+        paula.transfer_audio_dma_requests();
+        assert_eq!(paula.audio_dma_request(0).unwrap().address, 4);
+        assert_eq!(paula.grant_audio_dma(0, 0x5566, dmacon), 0);
+        assert_eq!(paula.chans[0].state, AUD_OUT_HI);
+        assert_eq!(paula.chans[0].current, 0x55);
+        assert_eq!(paula.chans[0].ptr, 6);
+    }
+
+    #[test]
+    fn audio_dma_rollover_reloads_at_final_fetch_and_interrupts_at_word_start() {
+        let (mut paula, _) = paula_with_collect_sink();
+        let mut ram = vec![0u8; 64];
+        ram[0] = 0x10;
+        ram[1] = 0x20;
+        ram[2] = 0x30;
+        ram[3] = 0x40;
+        let dmacon = DMACON_DMAEN | 0x0001;
+
+        // Two-word block; get output running via the test bench.
+        paula.write_audio_reg(0x00, 0, 0);
+        paula.write_audio_reg(0x02, 0, 0);
+        paula.write_audio_reg(0x04, 2, 0);
+        paula.write_audio_reg(0x06, 200, 0);
+        paula.write_audio_reg(0x08, 64, 0);
+        let irq = paula.tick_audio(2 * 227 + 20, dmacon, &ram);
+        assert_eq!(irq & INT_AUD0, INT_AUD0);
+        assert!(!paula.write_intreq(INT_AUD0));
+        assert!(paula.chans[0].outputting());
+        assert_eq!(paula.chans[0].audlen, 1);
+
+        // The next fetch is the block's final word: its arrival reloads
+        // the length counter and pointer from the latches and arms the
+        // rollover interrupt, which fires at the following word start
+        // (while the final word is still playing).
+        let mut waited = 0;
+        while !paula.chans[0].intreq2 {
+            assert_eq!(paula.tick_audio(227, dmacon, &ram) & INT_AUD0, 0);
+            waited += 1;
+            assert!(waited <= 4, "final-word fetch should arrive");
+        }
+        assert_eq!(paula.chans[0].audlen, 2);
+        assert_eq!(paula.chans[0].ptr, 0);
+        let irq = paula.tick_audio(2 * 200, dmacon, &ram);
+        assert_eq!(irq & INT_AUD0, INT_AUD0);
+        assert!(!paula.chans[0].intreq2);
+    }
+
+    #[test]
+    fn audio_dma_enable_during_manual_output_takes_over_at_word_start() {
+        let (mut paula, _) = paula_with_collect_sink();
+        let ram = vec![0u8; 64];
+        let dmacon = DMACON_DMAEN | 0x0001;
+
+        // Manual output running (acknowledged so the loop continues).
+        paula.write_audio_reg(0x06, 8, 0);
+        paula.write_audio_reg(0x0A, 0x1020, 0);
+        assert!(!paula.write_intreq(INT_AUD0));
+        paula.tick_audio(3, 0, &ram);
+        assert_eq!(paula.chans[0].current, 0x10);
+
+        // Enabling DMA mid-output does not restart the state machine (the
+        // 000 -> 001 edge only fires from idle); instead the next word
+        // start posts a DMA request and playback continues seamlessly.
+        paula.write_audio_reg(0x00, 0, dmacon);
+        paula.write_audio_reg(0x02, 0, dmacon);
+        paula.write_audio_reg(0x04, 2, dmacon);
+        paula.apply_audio_dmacon_edges(0, dmacon);
+        assert!(paula.chans[0].outputting());
+        assert!(!paula.chans[0].sm_dr);
+
+        // The running word finishes on its own cadence...
+        paula.tick_audio(5, dmacon, &ram);
+        assert_eq!(paula.chans[0].current, 0x20);
+        assert!(!paula.chans[0].sm_dr);
+        // ...and the next word start posts the first DMA request (no
+        // fresh start-up, no interrupt).
+        assert_eq!(paula.tick_audio(8, dmacon, &ram) & INT_AUD0, 0);
+        assert!(paula.chans[0].sm_dr, "word start should post a DMA request");
+    }
+
+    #[test]
+    fn audio_dma_disable_stops_output_and_reenable_restarts() {
+        let (mut paula, _) = paula_with_collect_sink();
+        let mut ram = vec![0u8; 64];
+        ram[0] = 0x12;
+        ram[1] = 0x34;
+        let dmacon = DMACON_DMAEN | 0x0001;
+
+        paula.write_audio_reg(0x00, 0, 0);
+        paula.write_audio_reg(0x02, 0, 0);
+        paula.write_audio_reg(0x04, 2, 0);
+        paula.write_audio_reg(0x06, 8, 0);
+        let irq = paula.tick_audio(2 * 227 + 20, dmacon, &ram);
+        assert_eq!(irq & INT_AUD0, INT_AUD0);
+        assert!(!paula.write_intreq(INT_AUD0));
+        assert!(paula.chans[0].outputting());
+
+        // Clearing AUDxEN idles the state machine at the write; the DAC
+        // holds the last byte (Paula does not recentre the output).
+        let held = paula.chans[0].current;
+        paula.tick_audio(1, 0, &ram);
+        assert_eq!(paula.chans[0].state, AUD_IDLE);
+        assert_eq!(paula.chans[0].current, held);
+        paula.tick_audio(32, 0, &ram);
+        assert_eq!(paula.chans[0].current, held);
+
+        // Re-enabling runs the full start-up again (fresh length latch,
+        // start interrupt on the first fetch).
+        let irq = paula.tick_audio(2 * 227 + 20, dmacon, &ram);
+        assert_eq!(irq & INT_AUD0, INT_AUD0);
+        assert!(paula.chans[0].outputting());
     }
 
     #[test]
@@ -2508,27 +2375,26 @@ mod tests {
         ram[1] = 0x34;
         let dmacon = DMACON_DMAEN | 0x0001;
 
-        paula.write_audio_reg(0x00, 0);
-        paula.write_audio_reg(0x02, 0);
-        paula.write_audio_reg(0x04, 2);
-        paula.write_audio_reg(0x06, 8);
-        paula.write_audio_reg(0x08, 40);
-        paula.tick_audio(1, dmacon, &ram);
-        paula.tick_audio(3, dmacon, &ram);
+        paula.write_audio_reg(0x00, 0, 0);
+        paula.write_audio_reg(0x02, 0, 0);
+        paula.write_audio_reg(0x04, 2, 0);
+        paula.write_audio_reg(0x06, 8, 0);
+        paula.write_audio_reg(0x08, 40, 0);
+        paula.tick_audio(2 * 227 + 20, dmacon, &ram);
 
         let dbg = paula.audio_channel_debug(0).expect("channel 0 snapshot");
-        assert_eq!(dbg.state, "Running");
+        assert!(dbg.playing);
+        assert!(dbg.state.starts_with("01"), "output state: {}", dbg.state);
         assert_eq!(dbg.per, 8);
         assert_eq!(dbg.vol, 40);
-        assert_eq!(dbg.current, 0x12);
-        assert_eq!(dbg.period_acc, 4);
-        assert!(!dbg.dma_disable_pending);
+        assert_eq!(dbg.audvol, 40);
+        assert!(dbg.percnt <= 8);
 
-        // Clearing AUDxEN mid-word defers the disable; the snapshot exposes it.
+        // Idling the channel shows in the snapshot; the DAC level holds.
         paula.tick_audio(1, 0, &ram);
         let dbg = paula.audio_channel_debug(0).expect("channel 0 snapshot");
-        assert_eq!(dbg.state, "Running");
-        assert!(dbg.dma_disable_pending);
+        assert!(!dbg.playing);
+        assert_eq!(dbg.state, "000 idle");
 
         assert!(paula.audio_channel_debug(4).is_none());
     }
@@ -2536,17 +2402,9 @@ mod tests {
     #[test]
     fn audio_channel_mute_silences_mix_but_keeps_state() {
         let (mut paula, _) = paula_with_collect_sink();
-        let mut ram = vec![0u8; 64];
-        ram[0] = 0x40;
-        ram[1] = 0x40;
-        let dmacon = DMACON_DMAEN | 0x0001;
-        paula.write_audio_reg(0x00, 0);
-        paula.write_audio_reg(0x02, 0);
-        paula.write_audio_reg(0x04, 2);
-        paula.write_audio_reg(0x06, 8);
-        paula.write_audio_reg(0x08, 40);
-        paula.tick_audio(1, dmacon, &ram);
-        paula.tick_audio(3, dmacon, &ram);
+        paula.write_audio_reg(0x06, 8, 0);
+        paula.write_audio_reg(0x08, 40, 0);
+        paula.write_audio_reg(0x0A, 0x4040, 0);
 
         // The channel contributes to the stereo mix.
         assert_ne!(paula.channel_mixed_sample(0), 0);
@@ -2577,11 +2435,11 @@ mod tests {
             *byte = 0x40;
         }
         let dmacon = DMACON_DMAEN | 0x0001;
-        paula.write_audio_reg(0x00, 0);
-        paula.write_audio_reg(0x02, 0);
-        paula.write_audio_reg(0x04, 2);
-        paula.write_audio_reg(0x06, 80);
-        paula.write_audio_reg(0x08, 64);
+        paula.write_audio_reg(0x00, 0, 0);
+        paula.write_audio_reg(0x02, 0, 0);
+        paula.write_audio_reg(0x04, 2, 0);
+        paula.write_audio_reg(0x06, 80, 0);
+        paula.write_audio_reg(0x08, 64, 0);
 
         paula.tick_audio(4000, dmacon, &ram);
         let scope = paula.audio_scope_samples(0);
@@ -2642,7 +2500,12 @@ mod tests {
     }
 
     #[test]
-    fn audio_subminimum_period_reuses_dma_buffer_until_fetch_budget_recovers() {
+    fn audio_subminimum_period_replays_buffer_between_line_fetches() {
+        // A channel gets one DMA slot per scanline. At periods far below
+        // the sustainable floor the word is consumed long before the next
+        // fetch arrives, so the output buffer reloads the same holding
+        // register word and the samples repeat -- no starvation, no
+        // spurious interrupts.
         let (mut paula, _) = paula_with_collect_sink();
         let mut ram = vec![0u8; 64];
         ram[0] = 0x10;
@@ -2651,194 +2514,118 @@ mod tests {
         ram[3] = 0x40;
         let dmacon = DMACON_DMAEN | 0x0001;
 
-        paula.write_audio_reg(0x00, 0);
-        paula.write_audio_reg(0x02, 0);
-        paula.write_audio_reg(0x04, 2);
-        paula.write_audio_reg(0x06, 2);
+        paula.write_audio_reg(0x00, 0, 0);
+        paula.write_audio_reg(0x02, 0, 0);
+        paula.write_audio_reg(0x04, 8, 0);
+        paula.write_audio_reg(0x06, 2, 0);
+        paula.write_audio_reg(0x08, 64, 0);
 
-        assert_eq!(paula.tick_audio(1, dmacon, &ram) & INT_AUD0, INT_AUD0);
-        assert_eq!(paula.chans[0].current, 0x10);
-        assert_eq!(paula.chans[0].word_hi, 0x10);
-        assert_eq!(paula.chans[0].ptr, 2);
-        assert_eq!(paula.chans[0].words_left, 1);
+        let irq = paula.tick_audio(2 * 227 + 20, dmacon, &ram);
+        assert_eq!(irq & INT_AUD0, INT_AUD0);
+        assert!(paula.chans[0].outputting());
 
-        for _ in 0..60 {
-            assert_eq!(paula.tick_audio(2, dmacon, &ram) & INT_AUD0, 0);
-            assert_eq!(paula.chans[0].word_hi, 0x10);
-            assert_eq!(paula.chans[0].ptr, 2);
-            assert_eq!(paula.chans[0].words_left, 1);
+        // Between fetches the same word keeps replaying.
+        let word = paula.chans[0].buffer;
+        for _ in 0..20 {
+            paula.tick_audio(2, dmacon, &ram);
+            assert_eq!(paula.chans[0].buffer, word);
         }
-
-        // Once the per-line fetch budget recovers, the next word is
-        // fetched. That fetch wraps the two-word length counter and
-        // raises the channel interrupt, so do not require it to stay
-        // clear here.
-        let mut cck_until_second_word = 0;
-        while paula.chans[0].word_hi != 0x30 {
-            cck_until_second_word += 1;
-            paula.tick_audio(1, dmacon, &ram);
-            assert!(cck_until_second_word <= 16);
-        }
-        assert!(cck_until_second_word >= 4);
-        assert_eq!(paula.chans[0].word_lo, 0x40);
     }
 
     #[test]
-    fn audio_period_zero_holds_current_sample_without_irq_underflow() {
+    fn audio_period_zero_counts_a_full_wrap_without_irq_storm() {
         let (mut paula, _) = paula_with_collect_sink();
-        let mut ram = vec![0u8; 64];
-        ram[0] = 0x55;
-        ram[1] = 0x66;
-        let dmacon = DMACON_DMAEN | 0x0001;
+        let ram = vec![0u8; 64];
 
-        paula.write_audio_reg(0x00, 0);
-        paula.write_audio_reg(0x02, 0);
-        paula.write_audio_reg(0x04, 2);
-        paula.write_audio_reg(0x06, 0);
+        // AUDxPER=0 counts 65536 clocks per boundary (the counter wraps),
+        // so the sample holds for a very long time without interrupting.
+        paula.write_audio_reg(0x06, 0, 0);
+        paula.write_audio_reg(0x0A, 0x5566, 0);
+        assert_eq!(paula.chans[0].current, 0x55);
+        assert!(!paula.write_intreq(INT_AUD0));
 
-        assert_eq!(paula.tick_audio(1, dmacon, &ram) & INT_AUD0, INT_AUD0);
+        assert_eq!(paula.tick_audio(4000, 0, &ram) & INT_AUD0, 0);
         assert_eq!(paula.chans[0].current, 0x55);
-        assert_eq!(paula.tick_audio(64, dmacon, &ram) & INT_AUD0, 0);
-        assert_eq!(paula.chans[0].current, 0x55);
-        assert_eq!(paula.chans[0].phase, 1);
+        assert_eq!(paula.chans[0].state, AUD_OUT_HI);
     }
 
     #[test]
-    fn audio_period_write_uses_existing_countdown_phase() {
+    fn audio_period_write_latches_without_disturbing_live_countdown() {
         let (mut paula, _) = paula_with_collect_sink();
-        paula.set_audio_min_period_cck(1);
-        let mut ram = vec![0u8; 64];
-        ram[0] = 0x12;
-        ram[1] = 0x34;
-        let dmacon = DMACON_DMAEN | 0x0001;
+        let ram = vec![0u8; 64];
 
-        paula.write_audio_reg(0x00, 0);
-        paula.write_audio_reg(0x02, 0);
-        paula.write_audio_reg(0x04, 2);
-        paula.write_audio_reg(0x06, 10);
+        paula.write_audio_reg(0x06, 10, 0);
+        paula.write_audio_reg(0x0A, 0x1234, 0);
+        assert!(!paula.write_intreq(INT_AUD0));
+        paula.tick_audio(5, 0, &ram);
+        assert_eq!(paula.chans[0].percnt, 5);
 
-        assert_eq!(paula.tick_audio(1, dmacon, &ram) & INT_AUD0, INT_AUD0);
-        assert_eq!(paula.tick_audio(4, dmacon, &ram) & INT_AUD0, 0);
-        assert_eq!(paula.chans[0].period_acc, 5);
-
-        paula.write_audio_reg(0x06, 7);
-        assert_eq!(paula.tick_audio(1, dmacon, &ram) & INT_AUD0, 0);
-        assert_eq!(paula.chans[0].current, 0x12);
-        assert_eq!(paula.tick_audio(1, dmacon, &ram) & INT_AUD0, 0);
+        // A mid-count AUDxPER write only updates the latch; the running
+        // boundary completes on the old cadence and the next one reloads
+        // the new period.
+        paula.write_audio_reg(0x06, 7, 0);
+        assert_eq!(paula.chans[0].percnt, 5);
+        paula.tick_audio(5, 0, &ram);
         assert_eq!(paula.chans[0].current, 0x34);
+        assert_eq!(paula.chans[0].percnt, 7);
     }
 
     #[test]
-    fn audio_irq_asserts_on_final_low_byte_boundary() {
+    fn cpu_auddat_write_during_dma_feeds_the_state_machine_like_a_fetch() {
+        // AUDxDAT is the state machine's input register: Paula cannot tell
+        // a CPU write from the DMA slot's write, so a CPU poke during DMA
+        // playback counts against the length counter exactly like a fetch.
         let (mut paula, _) = paula_with_collect_sink();
-        paula.set_audio_min_period_cck(1);
-        let mut ram = vec![0u8; 64];
-        ram[0] = 0x10;
-        ram[1] = 0x20;
-        ram[2] = 0x30;
-        ram[3] = 0x40;
-        let dmacon = DMACON_DMAEN | 0x0001;
-
-        paula.write_audio_reg(0x00, 0);
-        paula.write_audio_reg(0x02, 0);
-        paula.write_audio_reg(0x04, 2);
-        paula.write_audio_reg(0x06, 4);
-
-        assert_eq!(paula.tick_audio(1, dmacon, &ram) & INT_AUD0, INT_AUD0);
-        assert_eq!(paula.chans[0].current, 0x10);
-        assert_eq!(paula.tick_audio(3, dmacon, &ram) & INT_AUD0, 0);
-        assert_eq!(paula.chans[0].current, 0x20);
-        assert_eq!(paula.chans[0].word_hi, 0x30);
-
-        assert_eq!(paula.tick_audio(4, dmacon, &ram) & INT_AUD0, 0);
-        assert_eq!(paula.chans[0].current, 0x30);
-        assert_eq!(paula.tick_audio(3, dmacon, &ram) & INT_AUD0, 0);
-        assert_eq!(paula.chans[0].current, 0x30);
-        assert_eq!(paula.tick_audio(1, dmacon, &ram) & INT_AUD0, INT_AUD0);
-        assert_eq!(paula.chans[0].current, 0x40);
-    }
-
-    #[test]
-    fn cpu_auddat_write_during_dma_does_not_replace_dma_sample_word() {
-        let (mut paula, _) = paula_with_collect_sink();
-        paula.set_audio_min_period_cck(1);
         let mut ram = vec![0u8; 64];
         ram[0] = 0x11;
         ram[1] = 0x22;
-        ram[2] = 0x33;
-        ram[3] = 0x44;
         let dmacon = DMACON_DMAEN | 0x0001;
 
-        paula.write_audio_reg(0x00, 0);
-        paula.write_audio_reg(0x02, 0);
-        paula.write_audio_reg(0x04, 2);
-        paula.write_audio_reg(0x06, 4);
+        paula.write_audio_reg(0x00, 0, 0);
+        paula.write_audio_reg(0x02, 0, 0);
+        paula.write_audio_reg(0x04, 8, 0);
+        paula.write_audio_reg(0x06, 100, 0);
+        paula.write_audio_reg(0x08, 64, 0);
+        let irq = paula.tick_audio(2 * 227 + 20, dmacon, &ram);
+        assert_eq!(irq & INT_AUD0, INT_AUD0);
+        assert!(paula.chans[0].outputting());
+        let len_before = paula.chans[0].audlen;
 
-        assert_eq!(paula.tick_audio(1, dmacon, &ram) & INT_AUD0, INT_AUD0);
-        assert_eq!(paula.chans[0].current, 0x11);
-        paula.write_audio_reg(0x0A, 0x7F7E);
+        paula.write_audio_reg(0x0A, 0x7F7E, dmacon);
+        assert_eq!(paula.chans[0].audlen, len_before.wrapping_sub(1));
         assert_eq!(paula.peek_audio_reg_latch(0x0A), Some(0x7F7E));
-
-        assert_eq!(paula.tick_audio(3, dmacon, &ram) & INT_AUD0, 0);
-        assert_eq!(paula.chans[0].current, 0x22);
-        assert_eq!(paula.chans[0].word_hi, 0x33);
-        assert_eq!(paula.chans[0].word_lo, 0x44);
-        // The two-word buffer has wrapped and the pointer reloaded, with
-        // one word already fetched ahead into the holding register.
-        assert_eq!(paula.chans[0].ptr, 2);
-        assert_eq!(paula.chans[0].words_left, 1);
+        // The poked word becomes the next output word at the word start.
+        let mut waited = 0;
+        while paula.chans[0].buffer != 0x7F7E {
+            paula.tick_audio(100, dmacon, &ram);
+            waited += 1;
+            assert!(waited <= 4, "poked word should reach the buffer");
+        }
     }
 
     #[test]
-    fn cpu_auddat_latch_during_dma_does_not_survive_as_manual_restart() {
+    fn auddat_latch_does_not_restart_output_after_dma_disable() {
         let (mut paula, _) = paula_with_collect_sink();
         let mut ram = vec![0u8; 64];
         ram[0] = 0x12;
         ram[1] = 0x34;
         let dmacon = DMACON_DMAEN | 0x0001;
 
-        paula.write_audio_reg(0x00, 0);
-        paula.write_audio_reg(0x02, 0);
-        paula.write_audio_reg(0x04, 1);
-        paula.write_audio_reg(0x06, 8);
+        paula.write_audio_reg(0x00, 0, 0);
+        paula.write_audio_reg(0x02, 0, 0);
+        paula.write_audio_reg(0x04, 1, 0);
+        paula.write_audio_reg(0x06, 8, 0);
+        let irq = paula.tick_audio(2 * 227 + 20, dmacon, &ram);
+        assert_eq!(irq & INT_AUD0, INT_AUD0);
 
-        assert_eq!(paula.tick_audio(1, dmacon, &ram) & INT_AUD0, INT_AUD0);
-        paula.write_audio_reg(0x0A, 0x5566);
-        assert_eq!(paula.tick_audio(1, dmacon, &ram) & INT_AUD0, 0);
-        assert!(!paula.chans[0].manual_pending);
-
-        assert_eq!(paula.tick_audio(14, 0, &ram) & INT_AUD0, 0);
-        assert_eq!(paula.chans[0].state, ChanState::Off);
-        assert_eq!(paula.chans[0].current, 0);
-    }
-
-    #[test]
-    fn dma_buffer_reload_ignores_cpu_auddat_latch() {
-        let (mut paula, _) = paula_with_collect_sink();
-        paula.set_audio_min_period_cck(1);
-        let mut ram = vec![0u8; 64];
-        ram[0] = 0x10;
-        ram[1] = 0x20;
-        ram[4] = 0x30;
-        ram[5] = 0x40;
-        let dmacon = DMACON_DMAEN | 0x0001;
-
-        paula.write_audio_reg(0x00, 0);
-        paula.write_audio_reg(0x02, 0);
-        paula.write_audio_reg(0x04, 1);
-        paula.write_audio_reg(0x06, 4);
-        assert_eq!(paula.tick_audio(1, dmacon, &ram) & INT_AUD0, INT_AUD0);
-
-        paula.write_audio_reg(0x02, 4);
-        paula.write_audio_reg(0x0A, 0x7F7F);
-        assert_eq!(paula.tick_audio(3, dmacon, &ram) & INT_AUD0, INT_AUD0);
-        assert_eq!(paula.chans[0].current, 0x20);
-        // The active word comes from audio DMA (0x1020 here, the word in
-        // flight through the fetch-ahead pipeline), never the ignored CPU
-        // AUDxDAT latch (0x7F7F).
-        assert_eq!(paula.chans[0].word_hi, 0x10);
-        assert_eq!(paula.chans[0].word_lo, 0x20);
-        assert_eq!(paula.peek_audio_reg_latch(0x0A), Some(0x7F7F));
+        // Disable: the channel idles; the stale AUDxDAT holding register
+        // must not spontaneously start IRQ-mode output.
+        paula.tick_audio(14, 0, &ram);
+        assert_eq!(paula.chans[0].state, AUD_IDLE);
+        let held = paula.chans[0].current;
+        paula.tick_audio(64, 0, &ram);
+        assert_eq!(paula.chans[0].state, AUD_IDLE);
+        assert_eq!(paula.chans[0].current, held);
     }
 
     #[test]
@@ -2857,12 +2644,12 @@ mod tests {
             ram[2] = 0x40;
             ram[3] = 0xC0;
 
-            paula.write_audio_reg(0x00, 0);
-            paula.write_audio_reg(0x02, 0);
-            paula.write_audio_reg(0x04, 2);
-            paula.write_audio_reg(0x06, 400);
-            paula.write_audio_reg(0x08, 64);
-            let _ = paula.tick_audio(1_000, DMACON_DMAEN | 0x0001, &ram);
+            paula.write_audio_reg(0x00, 0, 0);
+            paula.write_audio_reg(0x02, 0, 0);
+            paula.write_audio_reg(0x04, 2, 0);
+            paula.write_audio_reg(0x06, 400, 0);
+            paula.write_audio_reg(0x08, 64, 0);
+            let _ = paula.tick_audio(4_000, DMACON_DMAEN | 0x0001, &ram);
         }
 
         let mut reader = hound::WavReader::open(&path).expect("open wav");
@@ -2874,21 +2661,16 @@ mod tests {
 
         let samples = reader
             .samples::<f32>()
-            .take(24)
             .collect::<Result<Vec<_>, _>>()
             .expect("read wav samples");
-        assert_eq!(samples.len(), 24);
-        let frames = samples
-            .chunks_exact(2)
-            .map(|frame| (frame[0], frame[1]))
-            .collect::<Vec<_>>();
-        let expected_left = [
-            0.5, 0.5, 0.5, 0.5, -0.5, -0.5, -0.5, -0.5, -0.5, 0.5, 0.5, 0.5,
-        ];
-        for ((left, right), expected_left) in frames.iter().copied().zip(expected_left) {
-            assert!((left - expected_left).abs() < f32::EPSILON);
-            assert_eq!(right, 0.0);
-        }
+        let lefts: Vec<f32> = samples.chunks_exact(2).map(|frame| frame[0]).collect();
+        let rights: Vec<f32> = samples.chunks_exact(2).map(|frame| frame[1]).collect();
+        // Silent lead-in while the start-up fetches run, then the sample
+        // alternates +-0.5 at the period cadence. Left channel only.
+        assert_eq!(lefts[0], 0.0);
+        assert!(lefts.iter().any(|&l| (l - 0.5).abs() < f32::EPSILON));
+        assert!(lefts.iter().any(|&l| (l + 0.5).abs() < f32::EPSILON));
+        assert!(rights.iter().all(|&r| r == 0.0));
 
         let _ = std::fs::remove_file(&path);
     }
@@ -2908,7 +2690,7 @@ mod tests {
 
             for ch_idx in 0..4 {
                 paula.chans[ch_idx].current = 64;
-                paula.chans[ch_idx].vol = 64;
+                paula.chans[ch_idx].audvol = 64;
                 paula.push_mixed_frame();
                 paula.chans[ch_idx].current = 0;
             }
@@ -3095,33 +2877,32 @@ mod tests {
     }
 
     #[test]
-    fn adkcon_audio_modulation_alternates_volume_then_period_when_both_attached() {
+    fn adkcon_both_attach_applies_period_mid_word_and_volume_at_word_start() {
+        // With AUDxAP and AUDxAV both set the channel consumes its words
+        // as modulation data: the 010 -> 011 transition writes the period
+        // latch (pbufld2) and the word start writes the volume latch
+        // (pbufld1); no alternation flag is involved.
         let (mut paula, _) = paula_with_collect_sink();
-        let mut ram = vec![0u8; 64];
-        ram[0] = 0x12;
-        ram[1] = 0x34;
+        let ram = vec![0u8; 64];
+        let dmacon = DMACON_DMAEN | 0x0001;
 
-        paula.chans[0].state = ChanState::Running;
-        paula.chans[0].per = 1;
-        paula.chans[0].word_hi = 0;
-        paula.chans[0].word_lo = 63;
-        paula.chans[0].phase = 0;
-        paula.chans[0].ptr = 0;
-        paula.chans[0].words_left = 1;
+        paula.chans[0].state = AUD_OUT_HI;
+        paula.chans[0].per = 2;
+        paula.chans[0].percnt = 1;
+        paula.chans[0].audlen = 8;
+        paula.chans[0].auddat = 0x0030;
         paula.chans[1].vol = 1;
         paula.chans[1].per = 100;
-        paula.last_dmacon = DMACON_DMAEN | 0x0001;
         paula.write_adkcon(0x8000 | 0x0011);
 
-        paula.tick_audio(1, DMACON_DMAEN | 0x0001, &ram);
+        paula.tick_audio(1, dmacon, &ram);
+        assert_eq!(paula.chans[0].state, AUD_OUT_LO);
+        assert_eq!(paula.chans[1].per, 0x30);
+        assert_eq!(paula.chans[1].vol, 1);
 
-        assert_eq!(paula.chans[1].vol, 63);
-        assert_eq!(paula.chans[1].per, 100);
-
-        paula.tick_audio(2, DMACON_DMAEN | 0x0001, &ram);
-
-        assert_eq!(paula.chans[1].vol, 63);
-        assert_eq!(paula.chans[1].per, 0x1234);
+        paula.tick_audio(2, dmacon, &ram);
+        assert_eq!(paula.chans[0].state, AUD_OUT_HI);
+        assert_eq!(paula.chans[1].vol, 0x30);
     }
 
     #[test]
@@ -3130,27 +2911,26 @@ mod tests {
         let ram = vec![0u8; 64];
         let dmacon = DMACON_DMAEN | 0x0001;
 
-        paula.chans[0].state = ChanState::Running;
+        paula.chans[0].state = AUD_OUT_LO;
         paula.chans[0].per = 4;
-        paula.chans[0].word_hi = 0x12;
-        paula.chans[0].word_lo = 0x34;
-        paula.chans[0].phase = 0;
-        // Several words still to fetch, so the fetch-ahead prefetch does
-        // not wrap the length counter (which would raise AUDx) during
-        // this short modulation window.
-        paula.chans[0].words_left = 8;
+        paula.chans[0].percnt = 4;
+        paula.chans[0].audlen = 8;
+        paula.chans[0].auddat = 0x0034;
         paula.chans[1].vol = 1;
-        paula.last_dmacon = dmacon;
 
-        assert_eq!(paula.tick_audio(3, dmacon, &ram) & INT_AUD0, 0);
+        // Attach off: the word start feeds the channel's own buffer.
+        assert_eq!(paula.tick_audio(4, dmacon, &ram) & INT_AUD0, 0);
         assert_eq!(paula.chans[1].vol, 1);
 
+        // Attach on: the next word start drives channel 1's volume latch.
         paula.write_adkcon(0x8000 | 0x0001);
-        assert_eq!(paula.tick_audio(1, dmacon, &ram) & INT_AUD0, 0);
+        assert_eq!(paula.tick_audio(8, dmacon, &ram) & INT_AUD0, 0);
         assert_eq!(paula.chans[1].vol, 0x34);
 
+        // Attach off again: the latch keeps its value.
         paula.write_adkcon(0x0001);
-        assert_eq!(paula.tick_audio(4, dmacon, &ram) & INT_AUD0, 0);
+        paula.chans[0].auddat = 0x0011;
+        assert_eq!(paula.tick_audio(8, dmacon, &ram) & INT_AUD0, 0);
         assert_eq!(paula.chans[1].vol, 0x34);
     }
 
@@ -3160,108 +2940,83 @@ mod tests {
         let ram = vec![0u8; 64];
         let dmacon = DMACON_DMAEN | 0x0001;
 
-        paula.chans[0].state = ChanState::Running;
+        paula.chans[0].state = AUD_OUT_LO;
         paula.chans[0].per = 4;
-        paula.chans[0].word_hi = 0xFFu8 as i8;
-        paula.chans[0].word_lo = 0x3F;
-        paula.chans[0].phase = 0;
-        // Several words still to fetch, so the fetch-ahead prefetch does
-        // not wrap the length counter during this short window.
-        paula.chans[0].words_left = 8;
+        paula.chans[0].percnt = 4;
+        paula.chans[0].audlen = 8;
+        paula.chans[0].auddat = 0xFF3F;
         paula.chans[1].vol = 1;
-        paula.last_dmacon = dmacon;
         paula.write_adkcon(0x8000 | 0x0001);
 
         assert_eq!(paula.tick_audio(4, dmacon, &ram) & INT_AUD0, 0);
         assert_eq!(paula.chans[1].vol, 0x3F);
 
-        paula.chans[0].word_hi = 0x80u8 as i8;
-        paula.chans[0].word_lo = 0x7F;
-        paula.chans[0].phase = 0;
-        assert_eq!(paula.tick_audio(4, dmacon, &ram) & INT_AUD0, 0);
+        // Values above 64 in the low seven bits clamp to full volume.
+        paula.chans[0].auddat = 0x807F;
+        assert_eq!(paula.tick_audio(8, dmacon, &ram) & INT_AUD0, 0);
         assert_eq!(paula.chans[1].vol, 64);
     }
 
     #[test]
-    fn adkcon_period_modulation_clamps_zero_and_keeps_tiny_periods() {
+    fn adkcon_period_modulation_writes_target_period_latch() {
         let (mut paula, _) = paula_with_collect_sink();
         let ram = vec![0u8; 64];
         let dmacon = DMACON_DMAEN | 0x0004;
 
-        paula.chans[2].state = ChanState::Running;
-        paula.chans[2].per = 1;
-        paula.chans[2].word_hi = 0x00;
-        paula.chans[2].word_lo = 0x00;
-        paula.chans[2].phase = 0;
-        // Several words still to fetch, so the fetch-ahead prefetch does
-        // not wrap the length counter during this short window.
-        paula.chans[2].words_left = 8;
+        paula.chans[2].state = AUD_OUT_HI;
+        paula.chans[2].per = 4;
+        paula.chans[2].percnt = 4;
+        paula.chans[2].audlen = 8;
+        paula.chans[2].auddat = 0x0002;
         paula.chans[3].per = 100;
-        paula.last_dmacon = dmacon;
         paula.write_adkcon(0x8000 | 0x0040);
 
-        assert_eq!(paula.tick_audio(1, dmacon, &ram) & INT_AUD2, 0);
-        assert_eq!(paula.chans[3].per, 1);
-
-        paula.chans[2].word_hi = 0x00;
-        paula.chans[2].word_lo = 0x02;
-        paula.chans[2].phase = 0;
-        assert_eq!(paula.tick_audio(1, dmacon, &ram) & INT_AUD2, 0);
+        // The 010 -> 011 transition writes channel 3's period latch, tiny
+        // values included (Paula does not clamp the latch itself).
+        assert_eq!(paula.tick_audio(4, dmacon, &ram) & INT_AUD2, 0);
         assert_eq!(paula.chans[3].per, 2);
     }
 
     #[test]
-    fn adkcon_modulation_preserves_source_and_target_irq_cadence() {
+    fn adkcon_attach_period_moves_requests_and_irq_to_mid_word() {
+        // In attach-period mode (napnav false) the word-start transition
+        // posts no DMA request and no interrupt; both move to the
+        // 010 -> 011 transition.
         let (mut paula, _) = paula_with_collect_sink();
-        paula.set_audio_min_period_cck(1);
-        let mut ram = vec![0u8; 64];
-        ram[0] = 0x20;
-        ram[1] = 0x10;
-        ram[2] = 0x44;
-        ram[3] = 0x55;
-        ram[8] = 0x30;
-        ram[9] = 0x40;
-        let dmacon = DMACON_DMAEN | 0x0003;
+        let ram = vec![0u8; 64];
+        let dmacon = DMACON_DMAEN | 0x0001;
 
-        paula.write_audio_reg(0x00, 0);
-        paula.write_audio_reg(0x02, 0);
-        paula.write_audio_reg(0x04, 1);
-        paula.write_audio_reg(0x06, 4);
-        paula.write_audio_reg(0x10, 0);
-        paula.write_audio_reg(0x12, 8);
-        paula.write_audio_reg(0x14, 1);
-        paula.write_audio_reg(0x16, 6);
-        paula.write_audio_reg(0x18, 1);
-        paula.write_adkcon(0x8000 | 0x0001);
+        paula.chans[0].state = AUD_OUT_LO;
+        paula.chans[0].per = 4;
+        paula.chans[0].percnt = 4;
+        paula.chans[0].audlen = 8;
+        paula.chans[0].auddat = 0x0050;
+        paula.write_adkcon(0x8000 | 0x0010);
 
-        assert_eq!(
-            paula.tick_audio(1, dmacon, &ram) & (INT_AUD0 | INT_AUD1),
-            INT_AUD0 | INT_AUD1
-        );
-        assert_eq!(paula.chans[1].vol, 0x10);
+        // Word start: no request, no interrupt.
+        assert_eq!(paula.tick_audio(4, dmacon, &ram) & INT_AUD0, 0);
+        assert_eq!(paula.chans[0].state, AUD_OUT_HI);
+        assert!(!paula.chans[0].sm_dr);
 
-        assert_eq!(
-            paula.tick_audio(3, dmacon, &ram) & (INT_AUD0 | INT_AUD1),
-            INT_AUD0
-        );
-        assert_eq!(paula.chans[1].vol, 0x10);
-
-        assert_eq!(
-            paula.tick_audio(2, dmacon, &ram) & (INT_AUD0 | INT_AUD1),
-            INT_AUD1
-        );
+        // Mid-word: the period latch write, the DMA request, and (with
+        // intreq2 armed) the rollover interrupt all happen here.
+        paula.chans[0].intreq2 = true;
+        let irq = paula.tick_audio(4, dmacon, &ram);
+        assert_eq!(irq & INT_AUD0, INT_AUD0);
+        assert_eq!(paula.chans[0].state, AUD_OUT_LO);
+        assert!(paula.chans[0].sm_dr);
+        assert_eq!(paula.chans[1].per, 0x50);
+        assert!(!paula.chans[0].intreq2);
     }
 
     #[test]
     fn adkcon_attached_source_channel_is_not_mixed_to_dac() {
         let (mut paula, frames) = paula_with_collect_sink();
         paula.set_led_filter_enabled(false);
-        paula.chans[0].state = ChanState::ManualHold;
         paula.chans[0].current = 127;
-        paula.chans[0].vol = 64;
-        paula.chans[1].state = ChanState::ManualHold;
+        paula.chans[0].audvol = 64;
         paula.chans[1].current = 127;
-        paula.chans[1].vol = 64;
+        paula.chans[1].audvol = 64;
 
         paula.write_adkcon(0x8000 | 0x0001);
         paula.advance_audio(PAULA_CLOCK_HZ.div_ceil(MIX_SAMPLE_RATE), 0);
@@ -3277,7 +3032,7 @@ mod tests {
         fn alternating_average(filter_enabled: bool) -> f32 {
             let (mut paula, frames) = paula_with_collect_sink();
             paula.set_led_filter_enabled(filter_enabled);
-            paula.chans[0].vol = 64;
+            paula.chans[0].audvol = 64;
             for i in 0..256 {
                 paula.chans[0].current = if i & 1 == 0 { 127 } else { -127 };
                 paula.push_mixed_frame();
@@ -3345,7 +3100,7 @@ mod tests {
                 let wav = WavSink::new(&path).expect("create wav sink");
                 let mut paula = Paula::new(Box::new(NoopSerial), Box::new(wav));
                 paula.set_led_filter_enabled(filter_enabled);
-                paula.chans[0].vol = 64;
+                paula.chans[0].audvol = 64;
                 for i in 0..256 {
                     paula.chans[0].current = if i & 1 == 0 { 127 } else { -127 };
                     paula.push_mixed_frame();
@@ -3382,13 +3137,13 @@ mod tests {
         paula.set_led_filter_enabled(false);
         paula.set_output_volume_percent(50);
         paula.chans[0].current = 64;
-        paula.chans[0].vol = 64;
+        paula.chans[0].audvol = 64;
 
         paula.push_mixed_frame();
 
         let frames = frames.borrow();
         assert_eq!(paula.output_volume_percent(), 50);
-        assert_eq!(paula.chans[0].vol, 64);
+        assert_eq!(paula.chans[0].audvol, 64);
         assert!((frames[0].0 - 0.25).abs() < f32::EPSILON);
         assert_eq!(frames[0].1, 0.0);
     }
@@ -3401,7 +3156,7 @@ mod tests {
         // Drive only a left channel (0); the right side stays silent, so stereo
         // output would be (0.5, 0.0) and mono is the average, 0.25, in both.
         paula.chans[0].current = 64;
-        paula.chans[0].vol = 64;
+        paula.chans[0].audvol = 64;
 
         paula.push_mixed_frame();
 
@@ -3418,7 +3173,7 @@ mod tests {
             paula.set_led_filter_enabled(false);
             paula.set_stereo_separation(sep);
             paula.chans[0].current = 64;
-            paula.chans[0].vol = 64;
+            paula.chans[0].audvol = 64;
             paula.push_mixed_frame();
             let frame = frames.borrow()[0];
             frame
