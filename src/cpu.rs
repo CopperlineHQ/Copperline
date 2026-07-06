@@ -956,12 +956,26 @@ impl M68kMachine {
             }
             return;
         }
-        // pc == NUDGE: report the iteration span and its render / task-B split.
+        // pc == NUDGE: report the iteration span and its render / task-B split,
+        // plus the pacing-gate state: the live frame counter, d2 (the target
+        // the wait loop compares against), and the scene descriptor's step.
         let frame_delta = frame.wrapping_sub(self.dbg_sched_top_frame);
         let counter_delta = counter.wrapping_sub(self.dbg_sched_top_counter);
+        let peek_long = |bus: &crate::bus::Bus, addr: u32| -> u32 {
+            (u32::from(bus.peek_word_any(addr)) << 16)
+                | u32::from(bus.peek_word_any(addr.wrapping_add(2)))
+        };
+        let counter_live = peek_long(&self.bus.bus, 0x00C0_9580);
+        let descriptor = peek_long(&self.bus.bus, 0x00C0_9578);
+        let step = if descriptor != 0 {
+            peek_long(&self.bus.bus, descriptor)
+        } else {
+            0
+        };
         log::info!(
             "sched iter secs={secs:.5} top(f={} v={}) render(f={} v={}) b8(f={} v={}) \
-             nudge(f={} v={}) frame_delta={} counter_delta={} crossed_vblank={} d2={:#X}",
+             nudge(f={} v={}) frame_delta={} counter_delta={} crossed_vblank={} d2={:#X} \
+             counter={counter_live:#X} step={step} desc={descriptor:#010X}",
             self.dbg_sched_top_frame,
             self.dbg_sched_top_vpos,
             self.dbg_sched_render_frame,
