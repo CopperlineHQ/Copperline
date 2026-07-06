@@ -42,6 +42,14 @@ pub struct Cia {
     ///   bit 0 TA, 1 TB, 2 ALRM, 3 SP, 4 FLG, 7 IR
     /// Reading ICR returns this and then clears all bits (including IR).
     icr_data: u8,
+    /// The external /IRQ pin, which lags the internal interrupt condition
+    /// by one E-clock cycle (the 6526-family one-cycle interrupt delay:
+    /// the ICR IR bit sets at the triggering E-cycle, the pin asserts on
+    /// the next). `irq_pin_delay_eticks` counts down the remaining lag.
+    #[serde(default)]
+    irq_pin: bool,
+    #[serde(default)]
+    irq_pin_delay_eticks: u8,
     /// ICR mask: which sources are allowed to raise IR.
     icr_mask: u8,
     /// Serial Data Register. The Amiga keyboard wires its data line
@@ -145,6 +153,8 @@ impl Cia {
             tb_oneshot: false,
             tb_input_mode: TimerBInputMode::Phi2,
             icr_data: 0,
+            irq_pin: false,
+            irq_pin_delay_eticks: 0,
             icr_mask: 0,
             sdr: 0,
             sdr_out: None,
@@ -380,9 +390,12 @@ impl Cia {
             REG_SDR => self.sdr,
             REG_ICR => {
                 // Reading ICR returns the latched events and the IR
-                // bit, then clears every bit (and lowers the line).
+                // bit, then clears every bit (and lowers the line,
+                // cancelling a pin assert still in its E-cycle lag).
                 let v = self.icr_data;
                 self.icr_data = 0;
+                self.irq_pin = false;
+                self.irq_pin_delay_eticks = 0;
                 v
             }
             _ => self.regs[reg],
@@ -615,6 +628,10 @@ impl Cia {
         if ticks == 0 {
             return false;
         }
+        // The external pin lags the internal condition by one E-cycle:
+        // edges armed earlier (by timers, CNT, FLAG, SDR, TOD, or mask
+        // writes) surface here on the E-clock grid.
+        let mut pin_edge = self.drain_irq_pin_delay(ticks);
         let mut fired_mask: u8 = 0;
         let mut ta_underflows = 0;
         if self.ta_running && !self.ta_counts_cnt && ticks > 0 {
@@ -652,7 +669,11 @@ impl Cia {
                 self.update_timer_b_pb_output();
             }
         }
-        self.latch_interrupts(fired_mask)
+        let _ = self.latch_interrupts(fired_mask);
+        // A latch from this call's final E-cycle asserts the pin at the
+        // NEXT E-cycle, so it does not fold into this call's edge.
+        pin_edge |= self.drain_irq_pin_delay(ticks.saturating_sub(1));
+        pin_edge
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -759,20 +780,55 @@ impl Cia {
         if enabled != 0 {
             let was_set = self.icr_data & ICR_IR != 0;
             self.icr_data |= ICR_IR;
-            return !was_set;
+            if !was_set {
+                self.arm_irq_pin();
+            }
+        }
+        false
+    }
+
+    /// The internal interrupt condition just asserted: the external pin
+    /// follows one E-clock cycle later (drained in `drain_irq_pin_delay`).
+    fn arm_irq_pin(&mut self) {
+        if !self.irq_pin && self.irq_pin_delay_eticks == 0 {
+            self.irq_pin_delay_eticks = 1;
+        }
+    }
+
+    /// Advance the pin-lag countdown by `eticks`. Returns true when the
+    /// pin asserts during this span (the bus latches INTREQ on that edge).
+    fn drain_irq_pin_delay(&mut self, eticks: u32) -> bool {
+        if self.irq_pin_delay_eticks == 0 || eticks == 0 {
+            return false;
+        }
+        if eticks as u64 >= u64::from(self.irq_pin_delay_eticks) {
+            self.irq_pin_delay_eticks = 0;
+            // The condition may have been acknowledged inside the lag
+            // window; the pin only rises if it still holds.
+            if self.icr_data & ICR_IR != 0 {
+                self.irq_pin = true;
+                return true;
+            }
+        } else {
+            self.irq_pin_delay_eticks -= eticks as u8;
         }
         false
     }
 
     pub fn irq_line_asserted(&self) -> bool {
-        self.icr_data & ICR_IR != 0
+        self.irq_pin
     }
 
     fn update_irq_line(&mut self) {
         if self.icr_data & self.icr_mask & 0x1F != 0 {
-            self.icr_data |= ICR_IR;
+            if self.icr_data & ICR_IR == 0 {
+                self.icr_data |= ICR_IR;
+                self.arm_irq_pin();
+            }
         } else {
             self.icr_data &= !ICR_IR;
+            self.irq_pin = false;
+            self.irq_pin_delay_eticks = 0;
         }
     }
 
