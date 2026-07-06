@@ -1091,13 +1091,28 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                         // Musashi m68k_in.c: format word at (SP+6) >> 12
                         let sp = cpu.a(7);
                         let format = cpu.read_16(bus, sp.wrapping_add(6)) >> 12;
-                        if format != 0 {
-                            return cpu.take_exception(bus, 14); // format error
+                        match format {
+                            0 => {}
+                            8 => {
+                                // 68010 bus/address-error frame (29 words):
+                                // restore SR/PC and discard the fault info.
+                                let sr = cpu.pull_16(bus);
+                                cpu.pc = cpu.pull_32(bus);
+                                let _ = cpu.pull_16(bus); // format/vector word
+                                cpu.dar[15] = cpu.dar[15].wrapping_add(2 * 25);
+                                cpu.set_sr(sr);
+                                cpu.full_prefetch(bus);
+                                return 20;
+                            }
+                            _ => return cpu.take_exception(bus, 14), // format error
                         }
                         let sr = cpu.pull_16(bus);
                         cpu.pc = cpu.pull_32(bus);
                         let _ = cpu.pull_16(bus); // vector offset word
                         cpu.set_sr(sr);
+                        // The 68010 shares the 68000's two-word prefetch
+                        // queue: a return refills it from the new PC.
+                        cpu.full_prefetch(bus);
                         20
                     }
                     _ => {
@@ -1251,6 +1266,8 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 let disp = cpu.read_imm_16(bus) as i16 as i32;
                 cpu.pc = cpu.pull_32(bus);
                 cpu.dar[15] = (cpu.dar[15] as i32).wrapping_add(disp) as u32;
+                // Refill the 68010's prefetch queue from the return address.
+                cpu.full_prefetch(bus);
                 20
             }
         }
@@ -1290,8 +1307,7 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             if !cpu.is_supervisor() && !cpu.is_060() {
                 return cpu.exception_privilege(bus);
             }
-            let ext = bus.read_word(cpu.pc);
-            cpu.pc += 2;
+            let ext = cpu.read_imm_16(bus);
             let reg_type = (ext >> 15) & 1; // 0=Dn, 1=An
             let reg_num = ((ext >> 12) & 7) as usize;
             let ctrl_reg = ext & 0xFFF;
@@ -1325,8 +1341,7 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             if !cpu.is_supervisor() && !cpu.is_060() {
                 return cpu.exception_privilege(bus);
             }
-            let ext = bus.read_word(cpu.pc);
-            cpu.pc += 2;
+            let ext = cpu.read_imm_16(bus);
             let reg_type = (ext >> 15) & 1; // 0=Dn, 1=An
             let reg_num = ((ext >> 12) & 7) as usize;
             let ctrl_reg = ext & 0xFFF;
@@ -1725,6 +1740,62 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
 }
 
 // ============================================================================
+
+/// 68010 loop mode: whether `opcode` is a loopable one-word instruction (the
+/// 68010 UM loop-mode set, mirrored from Moira's loop-handler registrations).
+/// Loopable memory EAs are (An), (An)+ and -(An).
+fn loopable_68010(op: u16) -> bool {
+    let mode = (op >> 3) & 7;
+    let loop_ea = (2..=4).contains(&mode);
+    let opmode = (op >> 6) & 7;
+    match op >> 12 {
+        // MOVE: source Dn/An/(An)/(An)+/-(An), destination (An)/(An)+/-(An).
+        0x1 | 0x2 | 0x3 => {
+            let dst_mode = opmode; // MOVE encodes the destination mode here
+            mode <= 4 && (2..=4).contains(&dst_mode)
+        }
+        // CLR/NEG/NEGX/NOT/TST (all sizes) and NBCD with a memory EA.
+        0x4 => {
+            let hi = (op >> 8) & 0xF;
+            let size = (op >> 6) & 3;
+            loop_ea
+                && ((matches!(hi, 0x0 | 0x2 | 0x4 | 0x6) && size != 3)
+                    || (hi == 0x8 && size == 0)
+                    || (hi == 0xA && size != 3))
+        }
+        // OR/SUB/CMP/EOR/AND/ADD register<->memory forms, the address forms
+        // (ADDA/SUBA/CMPA), and the -(An)/(An)+ pair forms (ABCD/SBCD,
+        // ADDX/SUBX, CMPM).
+        0x8 | 0x9 | 0xB | 0xC | 0xD => {
+            let family = op >> 12;
+            // ABCD/SBCD -(Ax),-(Ay)
+            if (family == 0xC || family == 0x8) && op & 0x01F8 == 0x0108 {
+                return true;
+            }
+            // ADDX/SUBX -(Ax),-(Ay)
+            if (family == 0x9 || family == 0xD) && op & 0x0138 == 0x0108 && opmode & 3 != 3 {
+                return true;
+            }
+            // CMPM (Ay)+,(Ax)+
+            if family == 0xB && op & 0x0138 == 0x0108 && opmode & 3 != 3 {
+                return true;
+            }
+            match opmode {
+                // <ea>,Dn (and CMP)
+                0..=2 => loop_ea,
+                // ADDA/SUBA/CMPA word/long
+                3 | 7 => loop_ea && family != 0x8 && family != 0xC,
+                // Dn,<ea> (OR/SUB/EOR/AND/ADD to memory)
+                4..=6 => loop_ea,
+                _ => false,
+            }
+        }
+        // Memory shifts/rotates (word, by one): ASd/LSd/ROXd/ROd <ea>.
+        0xE => opmode == 3 && loop_ea && (op >> 9) & 7 <= 3,
+        _ => false,
+    }
+}
+
 // Group 5: ADDQ/SUBQ/Scc/DBcc
 // ============================================================================
 
@@ -1782,6 +1853,35 @@ fn dispatch_group_5<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
         let condition = ((opcode >> 8) & 0xF) as u8;
         if ea_mode == 1 {
             // DBcc
+            // 68010 loop mode: a looping DBcc re-evaluates from the held
+            // prefetch pair without any instruction fetches. The taken
+            // iteration costs 6 internal clocks (Moira's execDbcc loop arm);
+            // exits refill the queue from the fall-through path.
+            if cpu.loop_mode {
+                let condition = ((opcode >> 8) & 0xF) as u8;
+                if cpu.test_condition(condition) {
+                    cpu.loop_mode = false;
+                    cpu.pc = cpu.pc.wrapping_add(2);
+                    cpu.full_prefetch(bus);
+                    return 12;
+                }
+                let dn = ea_reg as usize;
+                let counter = cpu.d(dn) as u16;
+                let new_counter = counter.wrapping_sub(1);
+                cpu.set_d(dn, (cpu.d(dn) & 0xFFFF_0000) | u32::from(new_counter));
+                if new_counter != 0xFFFF {
+                    // Re-enter the body: PC back over the displacement and
+                    // the body word; reseed the held pair.
+                    cpu.pc = cpu.pc.wrapping_sub(4);
+                    cpu.prefetch_queue = [cpu.loop_body_word, cpu.loop_dbcc_word];
+                    cpu.prefetch_count = 2;
+                    return 6;
+                }
+                cpu.loop_mode = false;
+                cpu.pc = cpu.pc.wrapping_add(2);
+                cpu.full_prefetch(bus);
+                return 16;
+            }
             let counter = cpu.d(ea_reg as usize) as u16;
             // The 68000 evaluates the condition and counter before consuming
             // the displacement: on branching paths (cc false) the consume does
@@ -1811,6 +1911,19 @@ fn dispatch_group_5<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 if new_counter != 0xFFFF {
                     cpu.pc = target;
                     cpu.full_prefetch(bus);
+                    // 68010 loop mode entry: a -4 displacement targeting a
+                    // loopable one-word instruction holds the freshly
+                    // prefetched body/DBcc pair and re-executes it without
+                    // further instruction fetches.
+                    if cpu.cpu_type == CpuType::M68010
+                        && disp == -4
+                        && cpu.prefetch_count == 2
+                        && loopable_68010(cpu.prefetch_queue[0])
+                    {
+                        cpu.loop_mode = true;
+                        cpu.loop_body_word = cpu.prefetch_queue[0];
+                        cpu.loop_dbcc_word = opcode;
+                    }
                     // 68000 DBcc taken = 10. On 020+ a taken branch refills the
                     // pipeline; the flat scale alone lands the chip-RAM dbra
                     // loop at 7 clocks/iter where the cycle-exact A1200/FS-UAE
