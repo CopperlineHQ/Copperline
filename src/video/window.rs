@@ -1480,6 +1480,18 @@ impl ApplicationHandler for App {
                     {
                         self.toggle_warp()
                     }
+                    (KeyCode::KeyA, ElementState::Pressed)
+                        if host_shortcut_modifier_pressed(self.modifiers)
+                            && self.modifiers.shift_key() =>
+                    {
+                        // Cycle the live audio output (Default -> devices ->
+                        // Disabled), same as the menu's Audio Out item. Ignored
+                        // while a menu/panel is open, so it acts only on the
+                        // running machine, not the config-screen placeholder.
+                        if !self.modal_ui_active() {
+                            self.cycle_audio_output()
+                        }
+                    }
                     (other, state) => {
                         let pressed = state == ElementState::Pressed;
                         if pressed && self.ui_handle_key(other) {

@@ -21,6 +21,7 @@ The app shortcut modifier is `Cmd` on macOS and `Alt` on Linux/Windows.
 | `Cmd+B` | `Alt+B` | Open the [debugger window](../debugger/window) |
 | `Cmd+K` | `Alt+K` | Open the [debugger console](../debugger/console) |
 | `Cmd+J` | `Alt+J` | Toggle joystick input mode: gamepad / keyboard (also the status-bar icon) |
+| `Cmd+Shift+A` | `Alt+Shift+A` | Cycle the audio output: Default, each host device, then Disabled (also the menu's Audio Out item) |
 | `Cmd+W` | `Alt+W` | Toggle Warp Speed (turbo) on / off |
 | `Cmd+Shift+W` | `Alt+Shift+W` | Cycle the Warp Speed limit: 2x, 4x, 8x, 16x, Max |
 | `Esc` | `Esc` | Close an open menu, tool window, or overlay panel; otherwise passed through to the Amiga |

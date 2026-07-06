@@ -189,8 +189,8 @@ default output; `--list-audio-devices` prints the alternatives and
 `--audio-device NAME` (or `[audio] output_device`) selects one by
 case-insensitive substring, falling back to the default if it disappears. The
 device is also selectable in the configuration screen and switchable live from
-the in-window menu, which additionally offers "Disabled" to turn sound off
-entirely (equivalent to `--noaudio`).
+the in-window menu (or `Cmd+Shift+A` / `Alt+Shift+A`), which additionally offers
+"Disabled" to turn sound off entirely (equivalent to `--noaudio`).
 
 Two host-side shaping options leave the emulated audio untouched:
 `--audio-channel-mode mono` averages the left/right output into both channels,
