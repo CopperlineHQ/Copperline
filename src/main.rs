@@ -78,6 +78,10 @@ pub struct CliArgs {
     /// Real-time stereo audio output through cpal. Enabled by default;
     /// `--noaudio` disables it, and `--audio-wav` selects WAV output.
     pub audio_live: bool,
+    /// Whether `--audio` was passed explicitly. When set, live audio is forced
+    /// on regardless of `[audio] output_enabled`; otherwise that config key (the
+    /// GUI "Disabled" option) can turn default-on audio off.
+    pub audio_live_forced: bool,
     /// `--audio-wav PATH`: dump the mixed stereo output to a WAV file
     /// (32-bit float, 44100 Hz). No live output. Useful for headless
     /// verification of the audio path.
@@ -91,6 +95,8 @@ pub struct CliArgs {
     pub calibrate_gamepad: bool,
     /// `--list-midi`: print the host MIDI endpoints and exit.
     pub list_midi: bool,
+    /// `--list-audio-devices`: print the host audio output devices and exit.
+    pub list_audio_devices: bool,
     /// Command-line machine overrides (`--model`, `--chipset`, `--cpu`,
     /// `--fpu`/`--no-fpu`, `--cpu-clock`, `--chip`, `--fast`, `--slow`,
     /// `--floppy-drives`).
@@ -246,6 +252,7 @@ where
     let mut live_audio_profile_secs: Option<f32> = None;
     let mut calibrate_gamepad = false;
     let mut list_midi = false;
+    let mut list_audio_devices = false;
     let mut overrides = ConfigOverrides::default();
     let mut args = args.into_iter();
     while let Some(a) = args.next() {
@@ -255,6 +262,9 @@ where
             }
             "--list-midi" => {
                 list_midi = true;
+            }
+            "--list-audio-devices" => {
+                list_audio_devices = true;
             }
             "--config" | "-c" => {
                 let v = args
@@ -340,6 +350,27 @@ where
                     args.next()
                         .ok_or_else(|| anyhow!("--midi-in requires a device name"))?,
                 );
+            }
+            "--audio-device" => {
+                overrides.audio_device = Some(
+                    args.next()
+                        .ok_or_else(|| anyhow!("--audio-device requires a device name"))?,
+                );
+            }
+            "--audio-channel-mode" => {
+                overrides.audio_channel_mode = Some(
+                    args.next()
+                        .ok_or_else(|| anyhow!("--audio-channel-mode requires stereo or mono"))?,
+                );
+            }
+            "--audio-stereo-separation" => {
+                let v = args.next().ok_or_else(|| {
+                    anyhow!("--audio-stereo-separation requires a percent (0-100)")
+                })?;
+                overrides.audio_stereo_separation =
+                    Some(v.parse::<u16>().map_err(|_| {
+                        anyhow!("--audio-stereo-separation must be a number 0-100")
+                    })?);
             }
             "--click-after" => {
                 const USAGE: &str = "--click-after requires SECS BUTTON DURATION_MS";
@@ -590,10 +621,12 @@ where
         record_input,
         disk_insert_after,
         audio_live,
+        audio_live_forced: explicit_audio_live,
         audio_wav,
         live_audio_profile_secs,
         calibrate_gamepad,
         list_midi,
+        list_audio_devices,
         overrides,
     })
 }
@@ -658,6 +691,10 @@ fn print_help() {
          \x20                            its configured disk image after SECS seconds\n  \
          --audio                        enable real-time stereo audio output via cpal (default)\n  \
          --noaudio                      disable real-time audio output\n  \
+         --audio-device NAME            host audio output device (substring match)\n  \
+         --audio-channel-mode MODE      output channels: stereo (default) or mono\n  \
+         --audio-stereo-separation PCT  stereo width 0-100 (100 default, 0 = mono)\n  \
+         --list-audio-devices           list host audio output devices and exit\n  \
          --audio-wav PATH               dump mixed stereo audio to a 32-bit float WAV file\n  \
          \x20                            instead of live output\n  \
          --profile-live-audio SECS      run a no-window Paula-to-cpal profile workload;\n  \
@@ -875,6 +912,28 @@ fn run_headless_benchmark(mut emu: Emulator, target_secs: f32) -> Result<()> {
     Ok(())
 }
 
+/// Whether to open a live audio sink. `[audio] output_enabled = false` (the GUI
+/// "Disabled" option) silences default-on audio, but an explicit `--audio`
+/// (`forced_on`) overrides it. `--noaudio` (which clears `audio_live`) and
+/// `--audio-wav` still win; those are handled by the caller.
+fn live_audio_enabled(audio_live: bool, forced_on: bool, config_enabled: bool) -> bool {
+    audio_live && (forced_on || config_enabled)
+}
+
+/// Print the host audio output devices for `--list-audio-devices`. These are the
+/// names `--audio-device` and `[audio] output_device` match against.
+fn print_audio_output_devices() -> Result<()> {
+    println!("Audio output devices (for --audio-device / [audio] output_device):");
+    let devices = copperline::audio::list_output_devices();
+    if devices.is_empty() {
+        println!("  (none found)");
+    }
+    for name in devices {
+        println!("  {name}");
+    }
+    Ok(())
+}
+
 /// Print the host MIDI endpoints for `--list-midi`. This is how a user finds the
 /// names `--midi-out`/`--midi-in` and `[serial]` expect. Without the `midi`
 /// feature it says how to get MIDI support rather than printing nothing.
@@ -933,6 +992,9 @@ fn main() -> Result<()> {
     }
     if cli.list_midi {
         return list_midi_endpoints();
+    }
+    if cli.list_audio_devices {
+        return print_audio_output_devices();
     }
     let (cfg, mut raw_cfg) = load_config(cli.config_path.as_deref(), &cli.overrides)?;
     if let Some(p) = &cli.rom_path {
@@ -997,11 +1059,25 @@ fn main() -> Result<()> {
     if realtime_priority {
         info!("priority: realtime-like thread scheduling requested (best effort)");
     }
+    // `[audio] output_enabled = false` (the GUI "Disabled" option) silences
+    // default-on audio, but an explicit `--audio` still forces it on and
+    // `--noaudio`/`--audio-wav` still win. CLI flags are unchanged.
+    let live_audio = live_audio_enabled(
+        cli.audio_live,
+        cli.audio_live_forced,
+        cfg.audio.output_enabled,
+    );
     let audio: Box<dyn AudioSink> = if let Some(ref wav_path) = cli.audio_wav {
         Box::new(WavSink::new(wav_path)?)
-    } else if cli.audio_live {
-        Box::new(CpalSink::new(realtime_priority)?)
+    } else if live_audio {
+        Box::new(CpalSink::new(
+            realtime_priority,
+            cfg.audio.output_device.as_deref(),
+        )?)
     } else {
+        // Log the silent path so `--noaudio` (or an output_enabled=false config)
+        // is visible alongside the "cpal sink ready" line the live path prints.
+        info!("audio: disabled (null sink); no sound");
         Box::new(NullSink)
     };
     // Headless capture runs (screenshot / frame dump) advance the
@@ -1071,6 +1147,7 @@ fn main() -> Result<()> {
         cfg.joystick_input_mode,
         config::about_machine_lines(&cfg),
         raw_cfg,
+        live_audio,
     );
 
     // Elevate the thread that is about to run the event loop and the pacer.
@@ -1135,6 +1212,9 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
     info!("no machine specified; opening the configuration screen");
     let emu = build_placeholder_machine()?;
     video::set_pixel_aspect(config::resolve_pixel_aspect(config::PixelAspect::Tv));
+    // The placeholder is always silent; seed the session's audio from the config
+    // intent so a state loaded over the launcher gets the configured output.
+    let audio_output_enabled = raw_cfg.audio_output_enabled();
     let mut app = App::new(
         emu,
         false,
@@ -1155,6 +1235,7 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
         config::JoystickInputMode::default(),
         vec!["Configure a machine, then press Run.".to_string()],
         raw_cfg,
+        audio_output_enabled,
     );
     app.open_launcher();
     app.run()
@@ -1190,8 +1271,9 @@ fn run_live_audio_profile(secs: f32) -> Result<()> {
         "audio profile mode: running Paula DMA to cpal for {:.3}s without window rendering",
         secs
     );
-    // This diagnostic mode loads no config, so the realtime knob is env-only.
-    let audio = Box::new(CpalSink::new(priority::requested(false))?);
+    // This diagnostic mode loads no config, so the realtime knob is env-only
+    // and it always uses the default output device.
+    let audio = Box::new(CpalSink::new(priority::requested(false), None)?);
     let mut paula = Paula::new(Box::new(StdoutSink::new()), audio);
     paula.set_led_filter_enabled(true);
 
@@ -1442,6 +1524,26 @@ mod tests {
         assert!(!args.audio_live);
         assert!(args.audio_wav.is_none());
         Ok(())
+    }
+
+    #[test]
+    fn explicit_audio_marks_forced() -> Result<()> {
+        assert!(!parse(&[])?.audio_live_forced);
+        assert!(parse(&["--audio"])?.audio_live_forced);
+        assert!(!parse(&["--noaudio"])?.audio_live_forced);
+        Ok(())
+    }
+
+    #[test]
+    fn config_disable_silences_default_audio_but_not_explicit_audio() {
+        // No CLI audio flag: the config's output_enabled decides.
+        assert!(live_audio_enabled(true, false, true));
+        assert!(!live_audio_enabled(true, false, false));
+        // Explicit --audio forces sound on even if the config disabled it.
+        assert!(live_audio_enabled(true, true, false));
+        // --noaudio (clears audio_live) always wins.
+        assert!(!live_audio_enabled(false, false, true));
+        assert!(!live_audio_enabled(false, true, true));
     }
 
     #[test]

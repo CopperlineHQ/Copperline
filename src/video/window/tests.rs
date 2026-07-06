@@ -1663,6 +1663,7 @@ fn test_app_with_audio(audio: Box<dyn AudioSink>) -> super::App {
         crate::config::JoystickInputMode::Gamepad,
         vec!["Machine: test".to_string()],
         crate::config::RawConfig::default(),
+        true,
     )
 }
 

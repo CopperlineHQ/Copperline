@@ -607,6 +607,17 @@ pub struct App {
     /// Whether the serial port is bridged to MIDI, so the runtime menu offers
     /// the device items. Fixed for the machine's life.
     serial_is_midi: bool,
+    /// Host audio output selection for machines started from this session:
+    /// system default, a named device (from `[audio] output_device` /
+    /// `--audio-device`), or Disabled (no sound, GUI-only). A session-level
+    /// setting: the config-screen launcher rebuilds the machine config from its
+    /// own fields, so this is held here rather than read back from that config.
+    audio_output: crate::audio::AudioOutput,
+    /// The session's `[emulation] realtime_priority` request (config value, before
+    /// the env override). Re-fed to `priority::requested` whenever the audio sink
+    /// is rebuilt live (device switch, disconnect recovery, post-load install) so
+    /// the new stream/callback thread keeps the same scheduling as the first sink.
+    realtime_priority: bool,
     /// Output frame-skip level for warp/turbo mode: how many emulated frames
     /// are retired per presented frame while warp is engaged. Presentation is
     /// vsync-gated, so this is what decouples warp speed from the host monitor
@@ -833,6 +844,10 @@ impl App {
         joystick_input_mode: JoystickInputMode,
         about_machine_lines: Vec<String>,
         machine_config: RawConfig,
+        // Effective live-audio state for this machine: for a real machine the
+        // caller's --audio/--noaudio-resolved value; for the config-screen
+        // placeholder the config intent (so a state loaded over it gets sound).
+        audio_output_enabled: bool,
     ) -> Self {
         // Headless capture runs drive themselves off emulated time, so a
         // powered-off start would simply hang. Force power on for those.
@@ -854,9 +869,23 @@ impl App {
         };
         #[cfg(not(feature = "midi"))]
         let serial_is_midi = false;
+        // `audio_output_enabled` is the effective state the caller resolved
+        // (--audio/--noaudio applied over output_enabled for a real machine, or
+        // the config intent for the silent config-screen placeholder), so the
+        // menu label matches what is actually running. from_config treats a
+        // blank device name as the default.
+        let audio_output = crate::audio::AudioOutput::from_config(
+            audio_output_enabled,
+            machine_config.audio.output_device.as_deref(),
+        );
+        // Config's realtime-priority request, re-fed to priority::requested when
+        // the audio sink is rebuilt live so those streams keep the same setting.
+        let realtime_priority = machine_config.emulation.realtime_priority.unwrap_or(false);
         Self {
             emu,
             serial_is_midi,
+            audio_output,
+            realtime_priority,
             fb: vec![0u32; MAX_FB_PIXELS],
             deinterlacer: Deinterlacer::with_phosphor(phosphor),
             present_fb: vec![0u32; FB_WIDTH * OUT_HEIGHT],
@@ -1033,6 +1062,28 @@ impl App {
         if let Some(label) = label {
             self.show_osd(format!("MIDI output: {label}"));
         }
+    }
+
+    /// Step the live audio output through "Default", the host devices, then
+    /// "Disabled", rebuilding the sink so the change takes effect at once.
+    /// "Disabled" swaps in a null sink -- live audio off, exactly like
+    /// `--noaudio`. Freshly re-reads the device list so a just-connected device
+    /// appears.
+    fn cycle_audio_output(&mut self) {
+        let devices = crate::audio::picker_output_devices();
+        self.audio_output = self.audio_output.cycle(&devices, true);
+        let realtime = crate::priority::requested(self.realtime_priority);
+        match crate::audio::open_output_sink(realtime, &self.audio_output) {
+            Ok(sink) => {
+                self.emu.bus_mut().paula.audio = sink;
+                self.sync_live_audio_suspension();
+            }
+            Err(e) => {
+                warn!("audio: could not open the selected device; keeping silence: {e:#}");
+                self.emu.bus_mut().paula.audio = Box::new(crate::audio::NullSink);
+            }
+        }
+        self.show_osd(format!("Audio output: {}", self.audio_output.label()));
     }
 
     fn set_joystick_input_mode(&mut self, mode: JoystickInputMode) {
@@ -1697,6 +1748,7 @@ impl ApplicationHandler for App {
                             pixel_aspect: super::pixel_aspect(),
                             midi_in: &midi_in_label,
                             midi_out: &midi_out_label,
+                            audio_output: self.audio_output.label(),
                         },
                     );
                     if let Err(e) = r.pixels.render() {
@@ -1784,6 +1836,9 @@ impl ApplicationHandler for App {
         // when Agnus has crossed into a new frame; the expensive renderer
         // reconstructs a completed hardware frame, not an instruction slice.
         if running {
+            // If the live output device vanished (unplugged), reopen on the
+            // current default so sound continues.
+            self.recover_audio_if_device_lost();
             // Presentation is vsync-gated, so emulating exactly one frame per
             // presented frame would cap warp at the host monitor refresh rate
             // (about 1.2x for 50 Hz PAL on a 60 Hz display). In warp, retire
@@ -2679,6 +2734,7 @@ impl App {
                     #[cfg(feature = "midi")]
                     ui::MenuItem::MidiOutput => self.cycle_midi_output(),
                     ui::MenuItem::PixelAspect => self.toggle_pixel_aspect(),
+                    ui::MenuItem::AudioOutput => self.cycle_audio_output(),
                     ui::MenuItem::Warp => self.toggle_warp(),
                     ui::MenuItem::WarpLimit => self.cycle_warp_speed(),
                     ui::MenuItem::Record => self.toggle_recording(),
@@ -2865,6 +2921,7 @@ impl App {
                     let model = state.setup.model();
                     state.setup = MachineSetup::default();
                     state.setup.select_model(model);
+                    state.setup.refresh_host_devices();
                     state.status = Some(StatusMessage::ok("Reset to defaults"));
                 }
             }
@@ -3672,6 +3729,9 @@ impl App {
                 Ok(setup) => {
                     if let Some(state) = self.launcher_state_mut() {
                         state.setup = setup;
+                        // Re-read host device lists so the loaded setup's pickers
+                        // are populated, not stuck on "Default"/"None".
+                        state.setup.refresh_host_devices();
                         state.status = Some(StatusMessage::ok(format!(
                             "Loaded {}",
                             display_file_name(&path)
@@ -3747,17 +3807,27 @@ impl App {
             self.set_launcher_status(StatusMessage::err(short_status_error(&e)));
             return;
         }
-        let realtime = crate::priority::requested(cfg.emulation.realtime_priority);
-        let audio: Box<dyn AudioSink> = match CpalSink::new(realtime) {
-            Ok(sink) => Box::new(sink),
-            Err(e) => {
-                self.set_launcher_status(StatusMessage::err(format!(
-                    "Audio init failed: {}",
-                    short_status_error(&e)
-                )));
-                return;
-            }
-        };
+        // Remember the session's realtime request so later live sink rebuilds
+        // (device switch, disconnect recovery) reuse it.
+        self.realtime_priority = cfg.emulation.realtime_priority;
+        let realtime = crate::priority::requested(self.realtime_priority);
+        // The launcher's Audio output picker drives the session selection
+        // (default device, a named device, or Disabled).
+        self.audio_output = crate::audio::AudioOutput::from_config(
+            cfg.audio.output_enabled,
+            cfg.audio.output_device.as_deref(),
+        );
+        let audio: Box<dyn AudioSink> =
+            match crate::audio::open_output_sink(realtime, &self.audio_output) {
+                Ok(sink) => sink,
+                Err(e) => {
+                    self.set_launcher_status(StatusMessage::err(format!(
+                        "Audio init failed: {}",
+                        short_status_error(&e)
+                    )));
+                    return;
+                }
+            };
         // The launcher boots a fresh machine, never a save state, so a real
         // ROM is required here.
         let emu = match crate::emulator::build_machine(&cfg, audio, true, false) {
@@ -5845,15 +5915,49 @@ impl App {
     /// load -- gets real sound. On audio-init failure the state stays loaded and
     /// the machine simply runs without sound, exactly as a failed Run does.
     fn install_live_audio_after_placeholder_load(&mut self) {
-        match CpalSink::new(crate::priority::requested(false)) {
+        match crate::audio::open_output_sink(
+            crate::priority::requested(self.realtime_priority),
+            &self.audio_output,
+        ) {
             Ok(sink) => {
-                self.emu.bus_mut().paula.audio = Box::new(sink);
+                self.emu.bus_mut().paula.audio = sink;
                 // Apply the current suspension state to the freshly installed
                 // stream (it should be live now: powered on and not paused).
                 self.sync_live_audio_suspension();
             }
             Err(e) => {
                 warn!("audio init after state load failed; continuing without sound: {e:#}");
+            }
+        }
+    }
+
+    /// If the live output device was lost mid-run (unplugged, or the system
+    /// default switched away), rebuild the sink on the current default output and
+    /// reset the session's selected device to Default (so the runtime menu shows
+    /// it) so sound continues. The cpal error callback only flags the loss; the
+    /// stream is rebuilt here on the main thread, where creating a (macOS
+    /// `!Send`) cpal stream is allowed. Falls back to a silent sink if no device
+    /// can be opened, so this never spins retrying a dead machine.
+    fn recover_audio_if_device_lost(&mut self) {
+        if !self.emu.bus().paula.audio.device_lost() {
+            return;
+        }
+        warn!("audio: output device lost; falling back to the default output device");
+        // The named device is gone, so the session is back on the default; reset
+        // the selection so the runtime menu reflects "Default" too. (A disabled
+        // sink never reports a lost device, so we can only get here from a device.)
+        self.audio_output = crate::audio::AudioOutput::Default;
+        // Reopen on the system default, not the previously named device, which
+        // is the one that went away.
+        match CpalSink::new(crate::priority::requested(self.realtime_priority), None) {
+            Ok(sink) => {
+                self.emu.bus_mut().paula.audio = Box::new(sink);
+                self.sync_live_audio_suspension();
+                self.show_osd("Audio device lost! Switched to Default".to_string());
+            }
+            Err(e) => {
+                warn!("audio: no fallback output device; continuing without sound: {e:#}");
+                self.emu.bus_mut().paula.audio = Box::new(crate::audio::NullSink);
             }
         }
     }

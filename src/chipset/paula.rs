@@ -474,6 +474,12 @@ fn null_audio_sink() -> Box<dyn AudioSink> {
     Box::new(crate::audio::NullSink)
 }
 
+/// serde default for the skipped `stereo_separation` field: full width, so a
+/// restored state that never stored it plays at hardware panning, not mono.
+fn default_stereo_separation() -> f32 {
+    1.0
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Paula {
     pub serper: u16,
@@ -518,6 +524,15 @@ pub struct Paula {
     led_filter_enabled: bool,
     led_filter: StereoLedFilter,
     output_volume: f32,
+    // Host output preference: average L/R into both channels. Not part of the
+    // emulated machine state, so it is skipped in save states and re-applied
+    // from config (carried over across a state load, see Emulator::load_state).
+    #[serde(skip)]
+    mono_output: bool,
+    // Stereo width, 0.0 (mono) to 1.0 (full hardware panning, the default).
+    // Host preference; skipped and carried across state loads like mono_output.
+    #[serde(skip, default = "default_stereo_separation")]
+    stereo_separation: f32,
     // CD audio samples streamed by the CD controller (CD32 Akiko), mixed
     // into the host output at the shared 44.1 kHz mixer rate.
     cd_audio: CdAudioRing,
@@ -584,6 +599,8 @@ impl Paula {
             led_filter_enabled: true,
             led_filter: StereoLedFilter::new(),
             output_volume: 1.0,
+            mono_output: false,
+            stereo_separation: 1.0,
             cd_audio: CdAudioRing::default(),
             drive_sounds: DriveSounds::new(),
             dma_addr_mask: 0x001F_FFFF,
@@ -755,6 +772,27 @@ impl Paula {
 
     pub fn set_output_volume_percent(&mut self, percent: u8) {
         self.output_volume = f32::from(percent.min(100)) / 100.0;
+    }
+
+    /// Average the stereo output into both channels (mono) instead of the
+    /// hardware's hard left/right panning. Host preference; does not affect the
+    /// emulated audio state.
+    pub fn set_mono_output(&mut self, mono: bool) {
+        self.mono_output = mono;
+    }
+
+    pub fn mono_output(&self) -> bool {
+        self.mono_output
+    }
+
+    /// Stereo width, `0.0` (mono) to `1.0` (full hardware panning). Values are
+    /// clamped to that range. Host preference; does not affect emulated state.
+    pub fn set_stereo_separation(&mut self, separation: f32) {
+        self.stereo_separation = separation.clamp(0.0, 1.0);
+    }
+
+    pub fn stereo_separation(&self) -> f32 {
+        self.stereo_separation
     }
 
     pub fn drive_sounds_mut(&mut self) -> &mut DriveSounds {
@@ -1710,8 +1748,23 @@ impl Paula {
         if let Some(capture) = &mut self.capture {
             capture.push((left, right));
         }
-        self.audio
-            .push(left * self.output_volume, right * self.output_volume);
+        let (mut out_left, mut out_right) = (left * self.output_volume, right * self.output_volume);
+        // Stereo width via mid/side: `sep` 1.0 leaves the hardware panning
+        // untouched (out == in, the default), 0.0 collapses to mono. Mono mode
+        // is just a forced 0. Skipped entirely at full width so the default path
+        // is unchanged.
+        let sep = if self.mono_output {
+            0.0
+        } else {
+            self.stereo_separation
+        };
+        if sep < 1.0 {
+            let mid = (out_left + out_right) * 0.5;
+            let side = (out_left - out_right) * 0.5 * sep;
+            out_left = mid + side;
+            out_right = mid - side;
+        }
+        self.audio.push(out_left, out_right);
     }
 
     fn channel_mixed_sample(&self, ch_idx: usize) -> i32 {
@@ -3338,6 +3391,49 @@ mod tests {
         assert_eq!(paula.chans[0].vol, 64);
         assert!((frames[0].0 - 0.25).abs() < f32::EPSILON);
         assert_eq!(frames[0].1, 0.0);
+    }
+
+    #[test]
+    fn mono_output_averages_left_and_right_into_both_channels() {
+        let (mut paula, frames) = paula_with_collect_sink();
+        paula.set_led_filter_enabled(false);
+        paula.set_mono_output(true);
+        // Drive only a left channel (0); the right side stays silent, so stereo
+        // output would be (0.5, 0.0) and mono is the average, 0.25, in both.
+        paula.chans[0].current = 64;
+        paula.chans[0].vol = 64;
+
+        paula.push_mixed_frame();
+
+        let frames = frames.borrow();
+        assert_eq!(frames[0].0, frames[0].1, "mono means identical channels");
+        assert!((frames[0].0 - 0.25).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn stereo_separation_narrows_from_hardware_panning_toward_mono() {
+        // Drive left channel only: hardware panning gives (0.5, 0.0).
+        let out = |sep: f32| {
+            let (mut paula, frames) = paula_with_collect_sink();
+            paula.set_led_filter_enabled(false);
+            paula.set_stereo_separation(sep);
+            paula.chans[0].current = 64;
+            paula.chans[0].vol = 64;
+            paula.push_mixed_frame();
+            let frame = frames.borrow()[0];
+            frame
+        };
+        // 100%: untouched.
+        let full = out(1.0);
+        assert!((full.0 - 0.5).abs() < f32::EPSILON && full.1 == 0.0);
+        // 0%: mono (both = the 0.25 average).
+        let mono = out(0.0);
+        assert_eq!(mono.0, mono.1);
+        assert!((mono.0 - 0.25).abs() < f32::EPSILON);
+        // 50%: mid 0.25 +/- side (0.25 * 0.5) -> (0.375, 0.125).
+        let half = out(0.5);
+        assert!((half.0 - 0.375).abs() < f32::EPSILON);
+        assert!((half.1 - 0.125).abs() < f32::EPSILON);
     }
 
     #[test]

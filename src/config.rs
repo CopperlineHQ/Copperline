@@ -426,7 +426,38 @@ impl WarpSpeed {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How Paula's stereo output is presented to the host. The Amiga hardware pans
+/// channels 0/3 hard left and 1/2 hard right; `Mono` averages them into both
+/// output channels for listeners who dislike that hard separation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChannelMode {
+    #[default]
+    Stereo,
+    Mono,
+}
+
+impl ChannelMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            ChannelMode::Stereo => "stereo",
+            ChannelMode::Mono => "mono",
+        }
+    }
+
+    pub fn is_mono(self) -> bool {
+        matches!(self, ChannelMode::Mono)
+    }
+}
+
+pub(crate) fn parse_channel_mode(s: &str) -> Result<ChannelMode> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "stereo" => Ok(ChannelMode::Stereo),
+        "mono" => Ok(ChannelMode::Mono),
+        other => bail!("unknown [audio] channel_mode {other:?}; expected \"stereo\" or \"mono\""),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioConfig {
     /// Synthesized floppy-drive sound effects: motor hum, head-step
     /// clicks for seeks (and the empty-drive change-line poll), and a
@@ -434,6 +465,18 @@ pub struct AudioConfig {
     pub floppy_sounds: bool,
     /// Drive sound level, 0-100, relative to Paula's output.
     pub floppy_sounds_volume: u8,
+    /// Host audio output device, matched by case-insensitive substring against
+    /// the names cpal enumerates. `None` uses the system default output.
+    pub output_device: Option<String>,
+    /// Whether live audio output is produced at all. `false` runs with a null
+    /// sink (no sound), the GUI's "Disabled" picker option; it is separate from
+    /// the `--noaudio`/`--audio` CLI flags, which still override it.
+    pub output_enabled: bool,
+    /// Stereo (hardware panning) or mono (L/R averaged into both channels).
+    pub channel_mode: ChannelMode,
+    /// Stereo width, 0-100. 100 keeps the hardware left/right panning (default),
+    /// 0 collapses to mono; values between narrow the separation.
+    pub stereo_separation: u8,
 }
 
 impl Default for AudioConfig {
@@ -441,6 +484,10 @@ impl Default for AudioConfig {
         Self {
             floppy_sounds: true,
             floppy_sounds_volume: 100,
+            output_device: None,
+            output_enabled: true,
+            channel_mode: ChannelMode::Stereo,
+            stereo_separation: 100,
         }
     }
 }
@@ -959,6 +1006,12 @@ pub struct ConfigOverrides {
     pub midi_out: Option<String>,
     /// Host MIDI input endpoint (`--midi-in`), implying `--serial midi`.
     pub midi_in: Option<String>,
+    /// Host audio output device (`--audio-device`), substring match.
+    pub audio_device: Option<String>,
+    /// Output channel mode (`--audio-channel-mode`): "stereo" or "mono".
+    pub audio_channel_mode: Option<String>,
+    /// Stereo separation percent (`--audio-stereo-separation`), 0-100.
+    pub audio_stereo_separation: Option<u16>,
 }
 
 impl ConfigOverrides {
@@ -977,6 +1030,9 @@ impl ConfigOverrides {
             && self.serial.is_none()
             && self.midi_out.is_none()
             && self.midi_in.is_none()
+            && self.audio_device.is_none()
+            && self.audio_channel_mode.is_none()
+            && self.audio_stereo_separation.is_none()
     }
 
     /// Inject the set overrides into the raw config, replacing the values
@@ -1025,6 +1081,15 @@ impl ConfigOverrides {
         // `--serial` said otherwise.
         if self.serial.is_none() && (self.midi_out.is_some() || self.midi_in.is_some()) {
             raw.serial.mode = Some(SerialMode::Midi.label().to_string());
+        }
+        if let Some(dev) = &self.audio_device {
+            raw.audio.output_device = Some(dev.clone());
+        }
+        if let Some(mode) = &self.audio_channel_mode {
+            raw.audio.channel_mode = Some(mode.clone());
+        }
+        if let Some(sep) = self.audio_stereo_separation {
+            raw.audio.stereo_separation = Some(sep);
         }
     }
 }
@@ -1092,6 +1157,13 @@ impl RawConfig {
     /// hand-written example configs.
     pub(crate) fn to_toml_string(&self) -> Result<String> {
         toml::to_string_pretty(self).context("serializing configuration to TOML")
+    }
+
+    /// The configured live-audio state (`[audio] output_enabled`), defaulting to
+    /// on when unset -- matching [`AudioConfig`]'s default. Lets the binary seed
+    /// the config-screen session audio without reaching into private raw fields.
+    pub fn audio_output_enabled(&self) -> bool {
+        self.audio.output_enabled.unwrap_or(true)
     }
 }
 
@@ -1405,6 +1477,14 @@ pub(crate) struct RawAudio {
     pub(crate) floppy_sounds: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) floppy_sounds_volume: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) output_device: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) output_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) channel_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) stereo_separation: Option<u16>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -1634,6 +1714,33 @@ impl TryFrom<RawConfig> for Config {
                         "[audio] floppy_sounds_volume must be 0-100, got {v}"
                     ));
                     defaults.audio.floppy_sounds_volume
+                }
+            },
+            output_device: raw
+                .audio
+                .output_device
+                .clone()
+                .filter(|name| !name.trim().is_empty()),
+            output_enabled: raw
+                .audio
+                .output_enabled
+                .unwrap_or(defaults.audio.output_enabled),
+            channel_mode: match raw.audio.channel_mode.as_deref() {
+                None => defaults.audio.channel_mode,
+                Some(s) => match parse_channel_mode(s) {
+                    Ok(mode) => mode,
+                    Err(e) => {
+                        errors.push(e);
+                        defaults.audio.channel_mode
+                    }
+                },
+            },
+            stereo_separation: match raw.audio.stereo_separation {
+                None => defaults.audio.stereo_separation,
+                Some(v) if v <= 100 => v as u8,
+                Some(v) => {
+                    errors.push(anyhow!("[audio] stereo_separation must be 0-100, got {v}"));
+                    defaults.audio.stereo_separation
                 }
             },
         };
@@ -3975,6 +4082,115 @@ mod tests {
 
         let err = parse_config("[serial]\nmode = \"rs232\"\n").unwrap_err();
         assert!(err.to_string().contains("unknown [serial] mode"), "{err:#}");
+        Ok(())
+    }
+
+    #[test]
+    fn audio_section_selects_output_device() -> Result<()> {
+        let cfg = parse_config("[audio]\noutput_device = \"External Speakers\"\n")?;
+        assert_eq!(
+            cfg.audio.output_device.as_deref(),
+            Some("External Speakers")
+        );
+
+        // A blank name means "use the system default".
+        let cfg = parse_config("[audio]\noutput_device = \"  \"\n")?;
+        assert_eq!(cfg.audio.output_device, None);
+
+        // Omitting it entirely is the default.
+        assert_eq!(parse_config("")?.audio.output_device, None);
+        // A pre-existing [audio] block that never mentions output_device still
+        // parses and leaves it None (system default) -- older configs are safe.
+        let cfg = parse_config("[audio]\nfloppy_sounds = true\nfloppy_sounds_volume = 80\n")?;
+        assert_eq!(cfg.audio.output_device, None);
+        Ok(())
+    }
+
+    #[test]
+    fn audio_output_enabled_defaults_true_and_parses() -> Result<()> {
+        // Default and older configs (no key) stay enabled.
+        assert!(parse_config("")?.audio.output_enabled);
+        assert!(
+            parse_config("[audio]\noutput_device = \"Speakers\"\n")?
+                .audio
+                .output_enabled
+        );
+        // The GUI "Disabled" option persists as output_enabled = false.
+        assert!(
+            !parse_config("[audio]\noutput_enabled = false\n")?
+                .audio
+                .output_enabled
+        );
+        assert!(
+            parse_config("[audio]\noutput_enabled = true\n")?
+                .audio
+                .output_enabled
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cli_audio_device_overrides_config() -> Result<()> {
+        let overrides = ConfigOverrides {
+            audio_device: Some("BlackHole".to_string()),
+            ..Default::default()
+        };
+        let cfg = load_overrides(&overrides)?;
+        assert_eq!(cfg.audio.output_device.as_deref(), Some("BlackHole"));
+        Ok(())
+    }
+
+    #[test]
+    fn audio_channel_mode_defaults_to_stereo_and_parses() -> Result<()> {
+        assert_eq!(parse_config("")?.audio.channel_mode, ChannelMode::Stereo);
+        assert_eq!(
+            parse_config("[audio]\nchannel_mode = \"mono\"\n")?
+                .audio
+                .channel_mode,
+            ChannelMode::Mono
+        );
+        assert_eq!(
+            parse_config("[audio]\nchannel_mode = \"STEREO\"\n")?
+                .audio
+                .channel_mode,
+            ChannelMode::Stereo
+        );
+        assert!(parse_config("[audio]\nchannel_mode = \"quad\"\n").is_err());
+
+        // CLI override.
+        let overrides = ConfigOverrides {
+            audio_channel_mode: Some("mono".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            load_overrides(&overrides)?.audio.channel_mode,
+            ChannelMode::Mono
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn audio_stereo_separation_defaults_to_100_and_validates() -> Result<()> {
+        assert_eq!(parse_config("")?.audio.stereo_separation, 100);
+        assert_eq!(
+            parse_config("[audio]\nstereo_separation = 0\n")?
+                .audio
+                .stereo_separation,
+            0
+        );
+        assert_eq!(
+            parse_config("[audio]\nstereo_separation = 60\n")?
+                .audio
+                .stereo_separation,
+            60
+        );
+        assert!(parse_config("[audio]\nstereo_separation = 150\n").is_err());
+
+        let overrides = ConfigOverrides {
+            audio_stereo_separation: Some(20),
+            ..Default::default()
+        };
+        assert_eq!(load_overrides(&overrides)?.audio.stereo_separation, 20);
         Ok(())
     }
 

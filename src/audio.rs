@@ -76,6 +76,12 @@ pub trait AudioSink {
     fn is_null_sink(&self) -> bool {
         false
     }
+    /// True once the live output device has gone away (e.g. unplugged) and the
+    /// stream can no longer play. The host polls this to rebuild the sink on the
+    /// current default device. Sinks without a host device never report it.
+    fn device_lost(&self) -> bool {
+        false
+    }
 }
 
 pub fn audio_profile_enabled() -> bool {
@@ -118,6 +124,9 @@ pub struct CpalSink {
     underruns: Arc<AtomicU64>,
     total_underruns: Arc<AtomicU64>,
     live_output_suspended: Arc<AtomicBool>,
+    // Set by the stream error callback when the output device disappears
+    // (unplugged); polled by the host so it can rebuild on the default device.
+    device_lost: Arc<AtomicBool>,
     profile_callbacks: Arc<AtomicU64>,
     profile_callback_frames: Arc<AtomicU64>,
     profile_callback_device_cck: Arc<AtomicU64>,
@@ -129,16 +138,261 @@ pub struct CpalSink {
     prebuffer_frames: usize,
 }
 
+// libasound's `snd_lib_error_handler_t` is variadic (`..., const char *fmt,
+// ...`). A handler that ignores the trailing varargs is safe to install under
+// the C calling convention (the caller cleans the stack), so it is declared
+// without them.
+#[cfg(target_os = "linux")]
+type AlsaErrorHandler = extern "C" fn(
+    *const std::ffi::c_char,
+    std::ffi::c_int,
+    *const std::ffi::c_char,
+    std::ffi::c_int,
+    *const std::ffi::c_char,
+);
+
+#[cfg(target_os = "linux")]
+#[link(name = "asound")]
+extern "C" {
+    fn snd_lib_error_set_handler(handler: Option<AlsaErrorHandler>) -> std::ffi::c_int;
+}
+
+#[cfg(target_os = "linux")]
+extern "C" fn alsa_ignore_error(
+    _file: *const std::ffi::c_char,
+    _line: std::ffi::c_int,
+    _function: *const std::ffi::c_char,
+    _err: std::ffi::c_int,
+    _fmt: *const std::ffi::c_char,
+) {
+}
+
+/// Silence libasound's stderr chatter (the `ALSA lib pcm_...` lines) that it
+/// prints while cpal probes devices for enumeration. Those are informational
+/// plugin messages, not failures we can act on -- cpal still reports real
+/// errors through its `Result` API, so nothing user-facing is hidden. Installs
+/// a no-op error handler once, process-wide, keeping `--list-audio-devices` and
+/// the picker readable. No-op off Linux, where the handler does not exist.
+#[cfg(target_os = "linux")]
+fn quiet_alsa_probe_logging() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| unsafe {
+        snd_lib_error_set_handler(Some(alsa_ignore_error));
+    });
+}
+
+#[cfg(not(target_os = "linux"))]
+fn quiet_alsa_probe_logging() {}
+
+/// Whether an ALSA device name is a low-level *plugin* handle rather than a
+/// device a user would pick: the channel-layout plugins (`front`, `surround51`,
+/// ...), the software mix/snoop plugins (`dmix`, `dsnoop`), and the raw/wrapped
+/// per-card hardware handles (`hw`, `plughw`, `sysdefault`) -- ALSA advertises
+/// all of these for every card, so one physical output shows up many times over.
+/// The clean routes (`default`, `pipewire`, `pulse`, `jack`) and any
+/// friendly-named devices pass through. This keys off ALSA's fixed plugin-type
+/// vocabulary (the token before the first `:`), identical on every distro, not
+/// off any card or device name -- and hidden handles are still selectable by
+/// name in the config/CLI, since only the displayed list is filtered. A no-op on
+/// macOS/Windows, whose device names never take this form.
+fn is_alsa_plugin_variant(name: &str) -> bool {
+    let plugin = name.split(':').next().unwrap_or(name);
+    matches!(
+        plugin,
+        "front"
+            | "rear"
+            | "center_lfe"
+            | "side"
+            | "surround21"
+            | "surround40"
+            | "surround41"
+            | "surround50"
+            | "surround51"
+            | "surround71"
+            | "dmix"
+            | "dsnoop"
+            | "hw"
+            | "plughw"
+            | "sysdefault"
+    )
+}
+
+/// A GUI audio-output selection: the system default, a specific named device, or
+/// disabled -- a [`NullSink`], i.e. no sound, the same effect as `--noaudio`. The
+/// launcher picker and runtime menu cycle Default -> devices -> Disabled. This is
+/// a GUI-only concept; the CLI keeps its separate `--audio-device`/`--noaudio`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum AudioOutput {
+    /// The host's system default output device.
+    #[default]
+    Default,
+    /// A specific device, matched by name against the enumerated outputs.
+    Device(String),
+    /// No audio output at all (null sink).
+    Disabled,
+}
+
+impl AudioOutput {
+    /// Build the selection from config: disabled when output is off, otherwise
+    /// the named device, or the default when none is set. A blank/whitespace-only
+    /// name is treated as the default, matching how config resolution handles it.
+    pub fn from_config(enabled: bool, device: Option<&str>) -> Self {
+        let device = device.filter(|name| !name.trim().is_empty());
+        match (enabled, device) {
+            (false, _) => AudioOutput::Disabled,
+            (true, Some(name)) => AudioOutput::Device(name.to_string()),
+            (true, None) => AudioOutput::Default,
+        }
+    }
+
+    /// The named device, if one is selected (`None` for Default and Disabled).
+    pub fn device(&self) -> Option<&str> {
+        match self {
+            AudioOutput::Device(name) => Some(name),
+            _ => None,
+        }
+    }
+
+    /// Whether live audio output is produced (false only for Disabled).
+    pub fn is_enabled(&self) -> bool {
+        !matches!(self, AudioOutput::Disabled)
+    }
+
+    /// Picker label: "Default", the device name, or "Disabled".
+    pub fn label(&self) -> &str {
+        match self {
+            AudioOutput::Default => "Default",
+            AudioOutput::Device(name) => name,
+            AudioOutput::Disabled => "Disabled",
+        }
+    }
+
+    /// Step to the next selection, cycling Default -> device0 -> ... -> deviceN
+    /// -> Disabled and back. With no devices this is just Default <-> Disabled.
+    pub fn cycle(&self, devices: &[String], forward: bool) -> Self {
+        // Positions: 0 = Default, 1..=len = devices, len + 1 = Disabled.
+        let len = devices.len();
+        let here = match self {
+            AudioOutput::Default => 0,
+            AudioOutput::Device(name) => {
+                devices.iter().position(|n| n == name).map_or(0, |i| i + 1)
+            }
+            AudioOutput::Disabled => len + 1,
+        };
+        let count = len + 2;
+        let next = if forward {
+            (here + 1) % count
+        } else {
+            (here + count - 1) % count
+        };
+        if next == 0 {
+            AudioOutput::Default
+        } else if next <= len {
+            AudioOutput::Device(devices[next - 1].clone())
+        } else {
+            AudioOutput::Disabled
+        }
+    }
+}
+
+/// Open the audio sink for a picker selection: a [`NullSink`] when disabled,
+/// otherwise a [`CpalSink`] on the chosen (or default) device. Device-open
+/// errors propagate so callers can report them; Disabled never fails.
+pub fn open_output_sink(
+    realtime_priority: bool,
+    output: &AudioOutput,
+) -> Result<Box<dyn AudioSink>> {
+    Ok(match output {
+        AudioOutput::Disabled => {
+            // Mirror CpalSink's "sink ready" log so the CLI shows the change too.
+            log::info!("audio: disabled (null sink); no sound");
+            Box::new(NullSink)
+        }
+        _ => Box::new(CpalSink::new(realtime_priority, output.device())?),
+    })
+}
+
+/// Names of the host's audio output devices, for `--list-audio-devices` and as
+/// the base for the GUI picker, with ALSA's low-level plugin handles filtered
+/// out (see [`is_alsa_plugin_variant`]). ALSA's "default" is kept here so the
+/// CLI can name it; the GUI drops it separately (see [`picker_output_devices`]).
+/// Empty if the host cannot enumerate. Selection by name still matches the full
+/// set, so a hidden entry can be named explicitly.
+///
+/// On Linux, cpal enumerates via ALSA, and PipeWire/PulseAudio expose only their
+/// `default`/`pipewire` bridge there, not one ALSA device per sink -- so a
+/// specific sink cannot be named, only the system default (routed in the desktop
+/// mixer). Naming individual sinks would need cpal's `jack` backend against
+/// pipewire-jack, which adds a libjack build dependency; not worth it for a niche
+/// control when macOS/Windows enumerate every device directly.
+pub fn list_output_devices() -> Vec<String> {
+    quiet_alsa_probe_logging();
+    cpal::default_host()
+        .output_devices()
+        .map(|devs| {
+            devs.filter_map(|d| d.name().ok())
+                .filter(|name| !is_alsa_plugin_variant(name))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether `name` is redundant with the GUI picker's own "Default" entry: it is
+/// ALSA's `default` pseudo-device *and* that is what the system default resolves
+/// to, so selecting it and selecting "Default" (the `None` option) do the same
+/// thing. `default_name` is the host's default output device name. When the
+/// default is some other device, `default` is a distinct choice and kept.
+fn is_redundant_default(name: &str, default_name: Option<&str>) -> bool {
+    name.eq_ignore_ascii_case("default")
+        && default_name.is_some_and(|d| d.eq_ignore_ascii_case("default"))
+}
+
+/// Output-device names for the GUI picker (launcher field + runtime menu). Same
+/// as [`list_output_devices`], but drops ALSA's "default" when it is the system
+/// default, since the picker already offers a synthetic "Default" (the `None`
+/// selection) for that. Still selectable by name in the config/CLI.
+pub fn picker_output_devices() -> Vec<String> {
+    let host = cpal::default_host();
+    let default_name = host.default_output_device().and_then(|d| d.name().ok());
+    list_output_devices()
+        .into_iter()
+        .filter(|name| !is_redundant_default(name, default_name.as_deref()))
+        .collect()
+}
+
+/// The output device to open: the first whose name contains `want`
+/// (case-insensitive), otherwise the system default. A named-but-missing
+/// device warns and falls back to the default rather than leaving the machine
+/// silent.
+fn select_output_device(host: &cpal::Host, want: Option<&str>) -> Result<cpal::Device> {
+    if let Some(name) = want {
+        let needle = name.to_lowercase();
+        let matched = host.output_devices().ok().and_then(|mut devs| {
+            devs.find(|d| {
+                d.name()
+                    .map(|n| n.to_lowercase().contains(&needle))
+                    .unwrap_or(false)
+            })
+        });
+        match matched {
+            Some(device) => return Ok(device),
+            None => log::warn!("audio: no output device matches {name:?}; using the default"),
+        }
+    }
+    host.default_output_device()
+        .ok_or_else(|| anyhow!("no default audio output device"))
+}
+
 impl CpalSink {
     /// Build the live cpal output sink. When `realtime_priority` is set, the
     /// audio callback thread promotes itself on its first invocation (see
     /// [`crate::priority`]); the flag is resolved by the caller from config and
     /// the `COPPERLINE_REALTIME_PRIORITY` env var.
-    pub fn new(realtime_priority: bool) -> Result<Self> {
+    pub fn new(realtime_priority: bool, output_device: Option<&str>) -> Result<Self> {
+        quiet_alsa_probe_logging();
         let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .ok_or_else(|| anyhow!("no default audio output device"))?;
+        let device = select_output_device(&host, output_device)?;
         let supported = device
             .default_output_config()
             .map_err(|e| anyhow!("query default output config: {e}"))?;
@@ -176,6 +430,8 @@ impl CpalSink {
         let underruns_for_cb = Arc::clone(&underruns);
         let total_underruns = Arc::new(AtomicU64::new(0));
         let total_underruns_for_cb = Arc::clone(&total_underruns);
+        let device_lost = Arc::new(AtomicBool::new(false));
+        let device_lost_for_cb = Arc::clone(&device_lost);
         let live_output_suspended = Arc::new(AtomicBool::new(false));
         let live_output_suspended_for_cb = Arc::clone(&live_output_suspended);
         let profile_enabled = audio_profile_enabled();
@@ -246,7 +502,15 @@ impl CpalSink {
                         }
                     }
                 },
-                |err| log::warn!("cpal stream error: {err}"),
+                move |err| {
+                    log::warn!("cpal stream error: {err}");
+                    // A vanished device (unplugged, or the default switched away)
+                    // cannot recover on its own; flag it so the host reopens on
+                    // the current default output.
+                    if matches!(err, cpal::StreamError::DeviceNotAvailable) {
+                        device_lost_for_cb.store(true, Ordering::Relaxed);
+                    }
+                },
                 None,
             )
             .map_err(|e| anyhow!("build_output_stream: {e}"))?;
@@ -263,6 +527,7 @@ impl CpalSink {
         Ok(Self {
             producer,
             _stream: stream,
+            device_lost,
             playback_started,
             clear_buffer,
             drop_old_frames,
@@ -501,6 +766,10 @@ impl AudioSink for CpalSink {
             ),
         }
     }
+
+    fn device_lost(&self) -> bool {
+        self.device_lost.load(Ordering::Relaxed)
+    }
 }
 
 impl CpalSink {
@@ -605,12 +874,110 @@ fn callback_device_cck(output_frames: usize, output_sample_rate: u32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        callback_device_cck, live_output_prebuffering, sample_is_audible,
-        stale_live_audio_frames_to_skip, CpalResampler,
+        callback_device_cck, is_alsa_plugin_variant, is_redundant_default,
+        live_output_prebuffering, open_output_sink, sample_is_audible,
+        stale_live_audio_frames_to_skip, AudioOutput, CpalResampler,
     };
     use ringbuf::traits::{Producer, Split};
     use ringbuf::HeapRb;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    #[test]
+    fn alsa_plugin_variants_filtered_but_real_devices_kept() {
+        // The low-level ALSA handles ALSA emits for every card: routing/mixing
+        // plugins and the raw/wrapped/sysdefault per-card hardware handles.
+        for noise in [
+            "front:CARD=Intel,DEV=0",
+            "surround51:CARD=Intel,DEV=0",
+            "dmix:CARD=Intel,DEV=0",
+            "dsnoop:CARD=Intel,DEV=0",
+            "hw:CARD=Intel,DEV=0",
+            "plughw:CARD=Intel,DEV=0",
+            "sysdefault:CARD=Intel",
+        ] {
+            assert!(is_alsa_plugin_variant(noise), "should hide {noise}");
+        }
+        // Clean routes and non-ALSA (macOS/Windows) names pass through. Note
+        // "default" is not a plugin variant; the GUI drops it separately, only
+        // when it is the system default (see is_redundant_default).
+        for keep in [
+            "default",
+            "pipewire",
+            "pulse",
+            "jack",
+            "MacBook Air Speakers",
+            "BlackHole 2ch",
+        ] {
+            assert!(!is_alsa_plugin_variant(keep), "should keep {keep}");
+        }
+    }
+
+    #[test]
+    fn default_is_only_redundant_when_it_is_the_system_default() {
+        // "default" is the system default -> redundant with the picker's Default
+        // (case-insensitive).
+        assert!(is_redundant_default("default", Some("default")));
+        assert!(is_redundant_default("Default", Some("DEFAULT")));
+        // "default" exists but the system default is a different device -> keep.
+        assert!(!is_redundant_default("default", Some("pipewire")));
+        assert!(!is_redundant_default("default", None));
+        // A normal device is never treated as the redundant default.
+        assert!(!is_redundant_default("pipewire", Some("default")));
+        assert!(!is_redundant_default(
+            "MacBook Air Speakers",
+            Some("default")
+        ));
+    }
+
+    #[test]
+    fn audio_output_cycles_default_devices_then_disabled() {
+        let devices = vec!["BlackHole".to_string(), "Speakers".to_string()];
+        // Forward: Default -> dev0 -> dev1 -> Disabled -> back to Default.
+        let a = AudioOutput::Default;
+        let b = a.cycle(&devices, true);
+        assert_eq!(b, AudioOutput::Device("BlackHole".to_string()));
+        let c = b.cycle(&devices, true);
+        assert_eq!(c, AudioOutput::Device("Speakers".to_string()));
+        let d = c.cycle(&devices, true);
+        assert_eq!(d, AudioOutput::Disabled);
+        assert_eq!(d.cycle(&devices, true), AudioOutput::Default);
+        // Backward from Default lands on Disabled (the last slot).
+        assert_eq!(a.cycle(&devices, false), AudioOutput::Disabled);
+        // With no devices it is just Default <-> Disabled.
+        assert_eq!(AudioOutput::Default.cycle(&[], true), AudioOutput::Disabled);
+        assert_eq!(AudioOutput::Disabled.cycle(&[], true), AudioOutput::Default);
+    }
+
+    #[test]
+    fn audio_output_maps_to_and_from_config() {
+        assert_eq!(AudioOutput::from_config(true, None), AudioOutput::Default);
+        assert_eq!(
+            AudioOutput::from_config(true, Some("BlackHole")),
+            AudioOutput::Device("BlackHole".to_string())
+        );
+        // Disabled regardless of any device name.
+        assert_eq!(
+            AudioOutput::from_config(false, Some("BlackHole")),
+            AudioOutput::Disabled
+        );
+        // A blank/whitespace-only device name falls back to the default.
+        assert_eq!(
+            AudioOutput::from_config(true, Some("  ")),
+            AudioOutput::Default
+        );
+        assert_eq!(AudioOutput::Default.device(), None);
+        assert_eq!(AudioOutput::Disabled.device(), None);
+        assert!(AudioOutput::Default.is_enabled());
+        assert!(!AudioOutput::Disabled.is_enabled());
+        assert_eq!(AudioOutput::Disabled.label(), "Disabled");
+    }
+
+    #[test]
+    fn open_output_sink_is_silent_when_disabled() {
+        // Disabled never touches the host device and never errors.
+        let sink = open_output_sink(false, &AudioOutput::Disabled).unwrap();
+        assert!(!sink.device_lost());
+    }
 
     #[test]
     fn live_audio_backlog_uses_hysteresis_before_dropping_stale_frames() {

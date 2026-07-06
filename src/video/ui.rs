@@ -84,6 +84,7 @@ pub enum MenuItem {
     #[cfg(feature = "midi")]
     MidiOutput,
     PixelAspect,
+    AudioOutput,
     Warp,
     WarpLimit,
     Record,
@@ -98,14 +99,15 @@ pub enum MenuItem {
 /// serial port is in MIDI mode, so the list is built per open rather than fixed.
 pub fn menu_items(midi_active: bool) -> Vec<MenuItem> {
     let _ = midi_active;
-    // 7 leading + up to 2 MIDI + 9 trailing items, sized so appending never
+    // 7 leading + up to 2 MIDI + 10 trailing items, sized so appending never
     // reallocates.
-    let mut items = Vec::with_capacity(18);
+    let mut items = Vec::with_capacity(19);
     items.extend([
         MenuItem::MachineConfig,
         MenuItem::FrameAnalyzer,
         MenuItem::Debugger,
         MenuItem::Console,
+        MenuItem::AudioOutput,
         MenuItem::Calibration,
         MenuItem::JoystickInput,
     ]);
@@ -143,6 +145,9 @@ pub struct MenuLabels<'a> {
     pub midi_in: &'a str,
     #[cfg_attr(not(feature = "midi"), allow(dead_code))]
     pub midi_out: &'a str,
+    /// Current audio output label: "Default", a device name, or "Disabled"
+    /// (empty is treated as "Default").
+    pub audio_output: &'a str,
 }
 
 fn menu_item_label(item: MenuItem, s: MenuLabels) -> String {
@@ -165,6 +170,14 @@ fn menu_item_label(item: MenuItem, s: MenuLabels) -> String {
         MenuItem::MidiInput => format!("MIDI In  [{}]", clip_menu_value(s.midi_in)),
         #[cfg(feature = "midi")]
         MenuItem::MidiOutput => format!("MIDI Out [{}]", clip_menu_value(s.midi_out)),
+        MenuItem::AudioOutput => {
+            let name = if s.audio_output.is_empty() {
+                "Default"
+            } else {
+                s.audio_output
+            };
+            format!("Audio Out [{}]", clip_menu_value(name))
+        }
         MenuItem::Warp if s.warp => "Warp Speed      [on]".to_string(),
         MenuItem::Warp => "Warp Speed     [off]".to_string(),
         // Right-pad so the closing bracket stays put as the value width
@@ -186,10 +199,10 @@ fn menu_item_label(item: MenuItem, s: MenuLabels) -> String {
     }
 }
 
-/// Clip a device name so the "MIDI In  [name]" label stays within the popup.
-#[cfg(feature = "midi")]
+/// Clip a device name so a "MIDI Out [name]" / "Audio Out [name]" label stays
+/// within the popup.
 fn clip_menu_value(name: &str) -> String {
-    const MAX: usize = MENU_MAX_LABEL_CHARS - 11; // "MIDI Out [" plus "]"
+    const MAX: usize = MENU_MAX_LABEL_CHARS - 12; // widest prefix "Audio Out [" plus "]"
     if name.chars().count() <= MAX {
         return name.to_string();
     }
@@ -3644,16 +3657,25 @@ fn draw_launcher_row(
         scale,
     );
     // Greyed: explain why instead of drawing controls (e.g. "needs 32-bit CPU").
+    // The audio shaping rows are the exception -- channel mode and separation are
+    // merely inapplicable (audio disabled, or separation in mono), so the greyed
+    // label alone says enough and column 2 is left blank.
+    let blank_when_greyed = matches!(
+        r.field,
+        LauncherField::AudioChannelMode | LauncherField::AudioStereoSeparation
+    );
     if let Some(reason) = reason {
-        draw_panel_text(
-            frame,
-            launcher_control_x(rect),
-            row_y + 8,
-            reason,
-            PANEL_TEXT_DIM,
-            1,
-            scale,
-        );
+        if !blank_when_greyed {
+            draw_panel_text(
+                frame,
+                launcher_control_x(rect),
+                row_y + 8,
+                reason,
+                PANEL_TEXT_DIM,
+                1,
+                scale,
+            );
+        }
         return;
     }
     match r.kind {
@@ -4377,7 +4399,9 @@ mod tests {
             ui.control_at(pos, false),
             Some(UiControl::MenuItem(MenuItem::MachineConfig))
         );
-        let joystick = menu_item_rect(5, n);
+        // Leading block is MachineConfig, FrameAnalyzer, Debugger, Console,
+        // AudioOutput, Calibration, so Joystick Input sits at index 6.
+        let joystick = menu_item_rect(6, n);
         let pos = (joystick.x as i32 + 4, joystick.y as i32 + 4);
         assert_eq!(
             ui.control_at(pos, false),
@@ -4415,6 +4439,7 @@ mod tests {
                                         pixel_aspect: aspect,
                                         midi_in: long,
                                         midi_out: long,
+                                        audio_output: long,
                                     };
                                     let label = menu_item_label(item, labels);
                                     let text_w =
@@ -4950,6 +4975,7 @@ mod tests {
                 pixel_aspect: PixelAspect::Tv,
                 midi_in: "",
                 midi_out: "",
+                audio_output: "",
             },
         );
         let menu = menu_rect(menu_items(false).len());
@@ -4988,6 +5014,7 @@ mod tests {
                 pixel_aspect: PixelAspect::Tv,
                 midi_in: "",
                 midi_out: "",
+                audio_output: "",
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -5014,6 +5041,7 @@ mod tests {
                 pixel_aspect: PixelAspect::Tv,
                 midi_in: "",
                 midi_out: "",
+                audio_output: "",
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -5057,6 +5085,7 @@ mod tests {
                 pixel_aspect: PixelAspect::Tv,
                 midi_in: "",
                 midi_out: "",
+                audio_output: "",
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -5110,6 +5139,7 @@ mod tests {
                 pixel_aspect: PixelAspect::Tv,
                 midi_in: "",
                 midi_out: "",
+                audio_output: "",
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -5160,6 +5190,7 @@ mod tests {
                 pixel_aspect: PixelAspect::Tv,
                 midi_in: "",
                 midi_out: "",
+                audio_output: "",
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -5262,6 +5293,7 @@ mod tests {
                 pixel_aspect: PixelAspect::Tv,
                 midi_in: "",
                 midi_out: "",
+                audio_output: "",
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -5326,6 +5358,7 @@ mod tests {
                 pixel_aspect: PixelAspect::Tv,
                 midi_in: "",
                 midi_out: "",
+                audio_output: "",
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -5401,6 +5434,7 @@ mod tests {
                 pixel_aspect: PixelAspect::Tv,
                 midi_in: "",
                 midi_out: "",
+                audio_output: "",
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -5513,6 +5547,7 @@ mod tests {
                 pixel_aspect: PixelAspect::Tv,
                 midi_in: "",
                 midi_out: "",
+                audio_output: "",
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -5555,6 +5590,7 @@ mod tests {
                 pixel_aspect: PixelAspect::Tv,
                 midi_in: "",
                 midi_out: "",
+                audio_output: "",
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -5588,6 +5624,7 @@ mod tests {
                 pixel_aspect: PixelAspect::Tv,
                 midi_in: "",
                 midi_out: "",
+                audio_output: "",
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -5661,6 +5698,7 @@ mod tests {
                 pixel_aspect: PixelAspect::Tv,
                 midi_in: "",
                 midi_out: "",
+                audio_output: "",
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -5701,6 +5739,7 @@ mod tests {
                 pixel_aspect: PixelAspect::Tv,
                 midi_in: "",
                 midi_out: "",
+                audio_output: "",
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));

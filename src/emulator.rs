@@ -534,7 +534,13 @@ impl Emulator {
     /// timeline, so the real-time pacing anchor is re-baselined to "now"; on
     /// failure the running machine is untouched.
     pub fn load_state(&mut self, path: &std::path::Path) -> Result<StateLoadOutcome> {
+        // Channel mode and stereo separation are host preferences, not part of
+        // the saved machine, so carry the current choices across the load.
+        let mono = self.bus_mut().paula.mono_output();
+        let separation = self.bus_mut().paula.stereo_separation();
         let loaded = crate::savestate::load(&mut self.machine, path)?;
+        self.bus_mut().paula.set_mono_output(mono);
+        self.bus_mut().paula.set_stereo_separation(separation);
         let reconfigured = loaded != self.descriptor;
         if reconfigured {
             let diffs = self.descriptor.differences(&loaded).join(", ");
@@ -681,8 +687,14 @@ impl Emulator {
     /// coordinate to `pos`. The pacing anchor is re-baselined like a normal
     /// save-state load.
     fn restore_blob(&mut self, blob: &[u8], pos: u64) -> Result<()> {
+        // Preserve host-side channel mode + separation across the restore (see
+        // load_state).
+        let mono = self.bus_mut().paula.mono_output();
+        let separation = self.bus_mut().paula.stereo_separation();
         let mut cursor = std::io::Cursor::new(blob);
         self.machine.apply_state(&mut cursor)?;
+        self.bus_mut().paula.set_mono_output(mono);
+        self.bus_mut().paula.set_stereo_separation(separation);
         self.retired_instructions = pos;
         self.reset_live_audio_after_timeline_jump();
         self.reanchor_realtime_clock();
@@ -1859,6 +1871,11 @@ pub fn build_machine(
     paula
         .drive_sounds_mut()
         .set_volume_percent(cfg.audio.floppy_sounds_volume);
+    paula.set_mono_output(cfg.audio.channel_mode.is_mono());
+    paula.set_stereo_separation(f32::from(cfg.audio.stereo_separation) / 100.0);
+    if cfg.audio.channel_mode.is_mono() && cfg.audio.stereo_separation != 100 {
+        log::warn!("[audio] stereo_separation is ignored while channel_mode is mono");
+    }
     let mut bus = Bus::new(mem, paula, floppy);
     bus.set_video_standard(cfg.video_standard);
     bus.set_chipset_revisions(cfg.agnus_revision, cfg.denise_revision);
