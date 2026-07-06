@@ -994,6 +994,42 @@ impl Bus {
         }
         self.pending_copper_frame_start = None;
         self.copper.frame_start(cop1lc);
+        // The vertical-blank strobe selects COP1LC and records whether the
+        // Copper is live this field; a dormant Copper (DMA off here) has its
+        // PC retargeted by later COPxLC writes (copper_lc_written).
+        self.copper_current_list = 1;
+        self.copper_active_in_frame = self.copper_dma_enabled();
+    }
+
+    /// A COPxLC location register was rewritten. While the Copper has not
+    /// been active in the current field, a write to the location register it
+    /// was last strobed from retargets its program counter directly (real
+    /// Agnus behaviour, photographed by the vAmigaTS Copper/lc family);
+    /// otherwise the write only loads the latch for the next strobe. A
+    /// rewrite in the wrap-to-strobe window refreshes the pending strobe's
+    /// address so the restart uses the live COP1LC value.
+    pub(super) fn copper_lc_written(&mut self, list: u8) {
+        let lc = if list == 1 {
+            self.agnus.cop1lc
+        } else {
+            self.agnus.cop2lc
+        };
+        if self.pending_copper_frame_start.is_some() {
+            if list == 1 {
+                self.pending_copper_frame_start = Some(lc);
+            }
+            return;
+        }
+        // A dormant Copper necessarily has its DMA off: any COPEN edge sets
+        // copper_active_in_frame. The explicit DMA check keeps directly
+        // constructed test states (DMACON preset without a register write)
+        // on the latch-only path a live Copper uses.
+        if !self.copper_active_in_frame
+            && !self.copper_dma_enabled()
+            && self.copper_current_list == list
+        {
+            self.copper.jump(lc);
+        }
     }
 
     pub(super) fn record_slice_bus_advance(&mut self, cck: u32, tick: AgnusTick) {
