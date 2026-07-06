@@ -1364,6 +1364,43 @@ fn copper_dma_enable_gates_instruction_execution() {
 }
 
 #[test]
+fn copper_lc_write_retargets_dormant_copper_pc() {
+    // Real Agnus: while the Copper has NOT been active in the current field
+    // (Copper DMA off at the vertical-blank strobe and no COPEN edge since),
+    // writing its current list's location register moves the Copper PC
+    // directly instead of only loading the latch. The vAmigaTS
+    // Agnus/Copper/lc tests photograph exactly this: a VERTB handler that
+    // rewrites COP1LC and then enables Copper DMA runs the NEW list.
+    let mut bus = empty_bus();
+    let cop1 = 0x0100usize;
+    let redirected = 0x0200usize;
+    write_chip_word(&mut bus, cop1, 0x0180);
+    write_chip_word(&mut bus, cop1 + 2, 0x0111);
+    write_chip_word(&mut bus, cop1 + 4, 0xFFFF);
+    write_chip_word(&mut bus, cop1 + 6, 0xFFFE);
+    write_chip_word(&mut bus, redirected, 0x0180);
+    write_chip_word(&mut bus, redirected + 2, 0x0999);
+    write_chip_word(&mut bus, redirected + 4, 0xFFFF);
+    write_chip_word(&mut bus, redirected + 6, 0xFFFE);
+
+    bus.agnus.dmacon = DMACON_DMAEN; // Copper DMA off: the Copper is dormant
+    bus.agnus.hpos = 0x20;
+    assert!(!bus.custom_write(0x080, 2, 0x0000));
+    assert!(!bus.custom_write(0x082, 2, cop1 as u64));
+    assert!(!bus.custom_write(0x088, 2, 0xFFFF)); // strobe: list 1, PC = cop1
+
+    // Dormant retarget: the rewrite moves the PC, no strobe needed.
+    assert!(!bus.custom_write(0x082, 2, redirected as u64));
+
+    assert!(!bus.custom_write(0x096, 2, (0x8000 | DMACON_COPEN) as u64));
+    bus.advance_chipset(4);
+    assert_eq!(
+        bus.denise.palette[0], 0x0999,
+        "the redirected list must run without a COPJMP strobe"
+    );
+}
+
+#[test]
 fn copper_dma_enable_gates_current_pc_until_copjmp_strobe() {
     let mut bus = empty_bus();
     let cop1 = 0x0100usize;
@@ -1379,6 +1416,11 @@ fn copper_dma_enable_gates_current_pc_until_copjmp_strobe() {
 
     bus.agnus.dmacon = DMACON_DMAEN;
     bus.copper.jump(stale as u32);
+    // The park at `stale` implies the Copper ran this field: COPxLC writes
+    // must only load the latch. (A DORMANT Copper - not active since the
+    // vertical blank - has its PC retargeted by the write instead; see
+    // copper_lc_written and the Copper/lc tests.)
+    bus.copper_active_in_frame = true;
     bus.agnus.hpos = 0x20;
     assert!(!bus.custom_write(0x080, 2, 0x0000));
     assert!(!bus.custom_write(0x082, 2, cop1 as u64));

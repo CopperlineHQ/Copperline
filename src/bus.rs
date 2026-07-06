@@ -707,6 +707,18 @@ pub struct Bus {
     /// collapse into one pending VERTB bit.
     pub pending_vbi: u32,
     pending_copper_frame_start: Option<u32>,
+    /// Whether the Copper has been active at any point in the current field:
+    /// true from the vertical-blank COP1LC strobe if Copper DMA was enabled
+    /// there, or from any COPEN 0->1 write since. While false (a dormant
+    /// Copper), a COPxLC write for the Copper's current list retargets the
+    /// Copper PC directly instead of only loading the location latch --
+    /// hardware behaviour the vAmigaTS Agnus/Copper/lc family photographs
+    /// (vAmiga models it as activeInThisFrame in pokeCOPxLC).
+    copper_active_in_frame: bool,
+    /// Which location register the Copper PC was last strobed from (1 or 2):
+    /// the vertical-blank restart selects COP1LC, COPJMPx selects its list.
+    /// The dormant-retarget rule above only applies to the matching list.
+    copper_current_list: u8,
 
     /// Paula interrupt bits that were pending when the current
     /// autovector was delivered. CPU INTREQ clears use this to tell
@@ -1964,6 +1976,8 @@ impl Bus {
             diag_lowmem_blit: false,
             pending_vbi: 0,
             pending_copper_frame_start: None,
+            copper_active_in_frame: false,
+            copper_current_list: 1,
             delivered_irq_pending: 0,
             pending_copper_irq_beam: None,
             delivered_copper_irq_beam: None,
@@ -2609,6 +2623,8 @@ impl Bus {
         self.slice_preempted = false;
         self.pending_vbi = 0;
         self.pending_copper_frame_start = None;
+        self.copper_active_in_frame = false;
+        self.copper_current_list = 1;
         self.delivered_irq_pending = 0;
         self.pending_copper_irq_beam = None;
         self.delivered_copper_irq_beam = None;

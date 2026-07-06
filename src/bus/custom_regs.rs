@@ -449,33 +449,46 @@ impl Bus {
             }
             0x080 => {
                 self.agnus.set_cop1lc_high(val);
+                self.copper_lc_written(1);
                 false
             }
             0x082 => {
                 self.agnus.set_cop1lc_low(val);
+                self.copper_lc_written(1);
                 false
             }
             0x084 => {
                 self.agnus.set_cop2lc_high(val);
+                self.copper_lc_written(2);
                 false
             }
             0x086 => {
                 self.agnus.set_cop2lc_low(val);
+                self.copper_lc_written(2);
                 false
             }
             0x088 => {
                 self.pending_copper_frame_start = None;
+                self.copper_current_list = 1;
                 self.copper.jump(self.agnus.cop1lc);
                 false
             }
             0x08A => {
                 self.pending_copper_frame_start = None;
+                self.copper_current_list = 2;
                 self.copper.jump(self.agnus.cop2lc);
                 false
             }
             0x096 => {
                 let previous = self.effective_bitplane_dmacon();
+                let copen_before = self.agnus.dmacon & crate::chipset::copper::DMACON_COPEN != 0;
                 self.agnus.write_dmacon(val);
+                if !copen_before && self.agnus.dmacon & crate::chipset::copper::DMACON_COPEN != 0 {
+                    // COPEN switched on mid-field: the Copper counts as
+                    // active this field, so COPxLC writes stop retargeting
+                    // its PC (see copper_lc_written).
+                    self.copper_active_in_frame = true;
+                }
                 if crate::envcfg::flag("COPPERLINE_DIAG_AUDIO_NOTES")
                     && (val & 0x000F != 0 || self.agnus.dmacon & 0x000F != previous & 0x000F)
                 {
