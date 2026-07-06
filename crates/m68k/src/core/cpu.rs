@@ -707,6 +707,22 @@ impl CpuCore {
         }
     }
 
+    /// Mark the instruction's IPL poll point (the 68000/68010 sample their
+    /// IPL pins at ONE microcode-determined point per instruction; Moira's
+    /// POLL flag). Called right after the bus access that carries the
+    /// poll, for instructions where that access is NOT the last one --
+    /// e.g. read-modify-write instructions poll during the final prefetch
+    /// and then perform their writeback. The host keeps that access's
+    /// sample for the boundary interrupt decision and ignores later
+    /// accesses. Applies to the prefetch-queue CPUs; call sites where the
+    /// 68010 microcode polls elsewhere gate on the CPU type explicitly.
+    #[inline]
+    pub(crate) fn ipl_poll_point<B: AddressBus>(&mut self, bus: &mut B) {
+        if self.prefetch_enabled() {
+            bus.ipl_hold_sample();
+        }
+    }
+
     /// Mark the prefetch queue as stale (after an externally forced PC
     /// change). The next instruction-stream read fetches directly and the
     /// next instruction-end top-up restores the queue.
@@ -832,7 +848,8 @@ impl CpuCore {
 
     /// 68000 long writeback for the -(Ax),-(Ay) extended-arithmetic forms
     /// (ADDX.L/SUBX.L memory-to-memory): write the low word, perform the
-    /// final prefetch, then write the high word.
+    /// final prefetch, then write the high word. The IPL poll rides the
+    /// low-word write (Moira writeM<Word, POLL> on the first write).
     pub fn write_long_mm_interleaved_68000<B: AddressBus>(
         &mut self,
         bus: &mut B,
@@ -840,6 +857,7 @@ impl CpuCore {
         value: u32,
     ) {
         self.write_16(bus, addr.wrapping_add(2), (value & 0xFFFF) as u16);
+        self.ipl_poll_point(bus);
         self.top_up_prefetch(bus);
         self.write_16(bus, addr, (value >> 16) as u16);
     }

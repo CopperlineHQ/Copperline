@@ -354,6 +354,10 @@ impl CpuCore {
     pub fn jump_vector<B: AddressBus>(&mut self, bus: &mut B, vector: u32) {
         // Any exception entry breaks an open 68060 pairing window.
         self.break_060_pipeline();
+        // An earlier poll-point hold must not survive into the handler:
+        // the refill below is a fresh IPL poll point (Moira jumpToVector
+        // polls during the final refill read).
+        bus.ipl_release_sample();
         // Any vectored dispatch ends 68010 loop mode; the refill below
         // restores normal instruction fetching.
         self.loop_mode = false;

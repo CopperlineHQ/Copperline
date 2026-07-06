@@ -39,12 +39,13 @@ impl CpuCore {
         //   instruction recognized its own interrupt one boundary early
         //   (eon's scene-player yield raise).
         // - everything else: write, then the final prefetch (Class 1)
-        let class2_abs_long = !matches!(
+        let memory_source = !matches!(
             src_mode,
             AddressingMode::DataDirect(_)
                 | AddressingMode::AddressDirect(_)
                 | AddressingMode::Immediate
         );
+        let class2_abs_long = memory_source;
         if self.cpu_type == CpuType::M68000 {
             match dst_mode {
                 AddressingMode::PreDecrement(_) => {
@@ -54,6 +55,10 @@ impl CpuCore {
                     // final prefetch); cancel resolve_ea's charge.
                     self.pending_sync_clocks = self.pending_sync_clocks.saturating_sub(2);
                     self.top_up_prefetch(bus);
+                    // MOVE to -(An) behaves like an RMW instruction (pasti
+                    // class 0): the IPL poll rides this prefetch and the
+                    // trailing write does not re-latch it.
+                    self.ipl_poll_point(bus);
                     if let EaResult::Memory(addr) = ea {
                         match size {
                             Size::Byte => self.write_8(bus, addr, value as u8),
@@ -70,6 +75,35 @@ impl CpuCore {
                             }
                         }
                     }
+                }
+                AddressingMode::PostIncrement(_) => {
+                    // MOVE to (An)+ polls IPL during the destination write
+                    // itself, for every source and size (Moira execMove3
+                    // writeOp<POLL>); the final prefetch that follows does
+                    // not re-latch. Long destinations write high word then
+                    // low word with the poll riding the low word, so the
+                    // write is split explicitly.
+                    let ea = self.resolve_ea(bus, dst_mode, size);
+                    if let EaResult::Memory(addr) = ea {
+                        self.write_move_dest_68000(bus, addr, size, value);
+                    }
+                    self.ipl_poll_point(bus);
+                }
+                AddressingMode::AddressIndirect(_)
+                | AddressingMode::Displacement(_)
+                | AddressingMode::Index(_)
+                    if size == Size::Long && !memory_source =>
+                {
+                    // MOVE.L with a register or immediate source to (An),
+                    // d16(An) or d8(An,Xn) polls IPL during the write's low
+                    // word (Moira execMove2/5/6 writeOp<POLL> on the long
+                    // branch); with a memory source or smaller sizes the
+                    // poll rides the final prefetch instead (the default).
+                    let ea = self.resolve_ea(bus, dst_mode, size);
+                    if let EaResult::Memory(addr) = ea {
+                        self.write_move_dest_68000(bus, addr, size, value);
+                    }
+                    self.ipl_poll_point(bus);
                 }
                 AddressingMode::AbsoluteLong if class2_abs_long => {
                     // Consume the address high word normally, the low word
@@ -114,6 +148,28 @@ impl CpuCore {
                 c += if size == Size::Long { 11 } else { 7 };
             }
             c
+        }
+    }
+
+    /// MOVE destination write on the 68000, split into its word bus cycles:
+    /// high word first, then low word (long destinations). Splitting keeps
+    /// the host's per-access IPL samples, so a poll point placed right
+    /// after this write pins the sample taken at the FINAL word's start
+    /// (Moira's writeOp<POLL> polls before the low word of a long write).
+    fn write_move_dest_68000<B: AddressBus>(
+        &mut self,
+        bus: &mut B,
+        addr: u32,
+        size: Size,
+        value: u32,
+    ) {
+        match size {
+            Size::Byte => self.write_8(bus, addr, value as u8),
+            Size::Word => self.write_16(bus, addr, value as u16),
+            Size::Long => {
+                self.write_16(bus, addr, (value >> 16) as u16);
+                self.write_16(bus, addr.wrapping_add(2), value as u16);
+            }
         }
     }
 
@@ -181,10 +237,25 @@ impl CpuCore {
         ) {
             self.internal_cycles(2);
         }
-        // 68000 bus order: PEA performs its final prefetch BEFORE pushing the
-        // address (the pushes are the instruction's last bus accesses).
-        self.top_up_prefetch(bus);
-        self.push_32(bus, ea);
+        if self.cpu_type == CpuType::M68000
+            && matches!(
+                src_mode,
+                AddressingMode::AbsoluteShort | AddressingMode::AbsoluteLong
+            )
+        {
+            // 68000 absolute-mode PEA pushes FIRST and prefetches last
+            // (Moira execPea abs branch: push, then prefetch<POLL>); the
+            // IPL poll rides that final prefetch, the default sample.
+            self.push_32(bus, ea);
+            self.top_up_prefetch(bus);
+        } else {
+            // Other modes: the final prefetch precedes the push and
+            // carries the IPL poll (Moira: POLL_IPL/prefetch<POLL>, then
+            // push); the push does not re-latch the boundary sample.
+            self.top_up_prefetch(bus);
+            self.ipl_poll_point(bus);
+            self.push_32(bus, ea);
+        }
         12
     }
 
@@ -248,6 +319,10 @@ impl CpuCore {
             self.a(reg)
         };
         self.push_32(bus, an);
+        // LINK's IPL poll point sits right before the An push (Moira:
+        // POLL_IPL then push), i.e. the sample taken at the push's first
+        // word; the final prefetch does not re-latch it.
+        self.ipl_poll_point(bus);
 
         // An = SP
         self.set_a(reg, self.dar[15]);
@@ -288,7 +363,20 @@ impl CpuCore {
         self.dar[15] = self.a(reg);
 
         // Pop An
-        let value = self.pull_32(bus);
+        let value = if self.prefetch_enabled() {
+            // The 68000/68010 poll IPL before the LOW word of the stack
+            // read (Moira readOp<.., Long, POLL>), so the read is split
+            // into its two word cycles and the sample taken at the second
+            // word's start is held through the final prefetch.
+            let sp = self.dar[15];
+            let hi = self.read_16(bus, sp) as u32;
+            let lo = self.read_16(bus, sp.wrapping_add(2)) as u32;
+            self.ipl_poll_point(bus);
+            self.dar[15] = sp.wrapping_add(4);
+            (hi << 16) | lo
+        } else {
+            self.pull_32(bus)
+        };
         self.set_a(reg, value);
 
         12
@@ -545,12 +633,43 @@ impl CpuCore {
     /// perform their final prefetch BEFORE the writeback (unlike MOVE, whose
     /// write precedes the final prefetch), so the memory arm tops the
     /// prefetch queue up first.
+    ///
+    /// The interrupt-decision IPL sample rides the WRITEBACK here (ADDI/
+    /// SUBI and MOVE from SR poll during their write; Moira writeOp POLL).
+    /// Most RMW instructions instead poll during the preceding prefetch --
+    /// those use `write_resolved_ea_np_poll`.
     pub fn write_resolved_ea<B: AddressBus>(
         &mut self,
         bus: &mut B,
         ea: EaResult,
         size: Size,
         value: u32,
+    ) {
+        self.write_resolved_ea_impl(bus, ea, size, value, false);
+    }
+
+    /// RMW writeback whose IPL poll point is the final prefetch BEFORE the
+    /// write (the 68000 logic/shift/bit/CLR/NEG/NOT/ADDQ/Scc class: Moira
+    /// prefetch<POLL> then writeOp). The writeback accesses do not re-latch
+    /// the boundary sample, so an interrupt that rises while the write is
+    /// arbitrating is not taken until one instruction later.
+    pub fn write_resolved_ea_np_poll<B: AddressBus>(
+        &mut self,
+        bus: &mut B,
+        ea: EaResult,
+        size: Size,
+        value: u32,
+    ) {
+        self.write_resolved_ea_impl(bus, ea, size, value, true);
+    }
+
+    fn write_resolved_ea_impl<B: AddressBus>(
+        &mut self,
+        bus: &mut B,
+        ea: EaResult,
+        size: Size,
+        value: u32,
+        np_poll: bool,
     ) {
         match ea {
             EaResult::DataReg(reg) => {
@@ -564,6 +683,9 @@ impl CpuCore {
             EaResult::AddrReg(reg) => self.dar[8 + reg as usize] = value,
             EaResult::Memory(addr) => {
                 self.top_up_prefetch(bus);
+                if np_poll {
+                    self.ipl_poll_point(bus);
+                }
                 match size {
                     Size::Byte => self.write_8(bus, addr, value as u8),
                     Size::Word => self.write_16(bus, addr, value as u16),

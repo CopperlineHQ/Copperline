@@ -41,6 +41,9 @@ impl CpuCore {
 
         let src = self.read_8(bus, src_addr) as u32;
         let dst = self.read_8(bus, dst_addr) as u32;
+        // ABCD -(Ay),-(Ax) polls IPL at the start of the destination read
+        // (the microcode poll sits between the two operand reads).
+        self.ipl_poll_point(bus);
         let result = self.bcd_add(src, dst);
 
         // 68000: the final prefetch precedes the destination writeback.
@@ -82,6 +85,9 @@ impl CpuCore {
 
         let src = self.read_8(bus, src_addr) as u32;
         let dst = self.read_8(bus, dst_addr) as u32;
+        // SBCD -(Ay),-(Ax) polls IPL at the start of the destination read
+        // (the microcode poll sits between the two operand reads).
+        self.ipl_poll_point(bus);
         let result = self.bcd_sub(src, dst);
 
         // 68000: the final prefetch precedes the destination writeback.
@@ -100,7 +106,7 @@ impl CpuCore {
         if self.sst_m68000_compat {
             // SingleStepTests/MAME fixtures treat NBCD as a BCD subtraction helper.
             let res = self.bcd_sub_sst(dst, 0);
-            self.write_resolved_ea(bus, ea, Size::Byte, res);
+            self.write_resolved_ea_np_poll(bus, ea, Size::Byte, res);
             return if is_reg { 6 } else { 8 };
         }
         // Hardware model (WinUAE gencpu i_NBCD, cross-checked against real
@@ -129,7 +135,8 @@ impl CpuCore {
 
         let res8 = (newv & 0xFF) as u32;
         self.bcd_set_nvz(res8, (tmp_newv & 0x80) != 0 && (newv & 0x80) == 0);
-        self.write_resolved_ea(bus, ea, Size::Byte, res8);
+        // NBCD polls IPL during the pre-writeback prefetch.
+        self.write_resolved_ea_np_poll(bus, ea, Size::Byte, res8);
 
         if is_reg { 6 } else { 8 }
     }

@@ -231,6 +231,13 @@ struct CpuBus {
     /// instruction later. Transient: re-sampled on every access, never
     /// serialized (a loaded state re-samples within one instruction).
     sampled_irq_level: u8,
+    /// Set by the core's `ipl_hold_sample` poll-point marker: the current
+    /// `sampled_irq_level` is the instruction's microcode poll value and
+    /// later accesses in the same instruction must not re-latch it (e.g.
+    /// RMW instructions poll during the final prefetch, BEFORE their
+    /// writeback). Cleared when the boundary decision consumes the sample.
+    /// Transient like `sampled_irq_level`; never serialized.
+    ipl_sample_held: bool,
 }
 
 pub fn build(
@@ -286,6 +293,7 @@ impl M68kMachine {
                 dbg_irq_window: debug_irq_window_setting(),
                 last_fetch_cache_hit: false,
                 sampled_irq_level: 0,
+                ipl_sample_held: false,
             },
             hle: NoOpHleHandler,
             fpu_enabled,
@@ -1682,6 +1690,9 @@ impl M68kMachine {
         if self.bus.bus.irq_latency_setting != 0 && !self.cpu.is_stopped() {
             level = level.min(self.bus.sampled_irq_level);
         }
+        // The boundary decision consumed the sample: release any poll-point
+        // hold so the next instruction's accesses latch normally.
+        self.bus.ipl_sample_held = false;
         self.cpu.set_irq(level);
     }
 
@@ -2658,6 +2669,12 @@ impl CpuBus {
     /// POLL_IPL). `refresh_irq_line` consumes this latch.
     #[inline]
     fn sample_ipl(&mut self) {
+        // A poll-point hold (AddressBus::ipl_hold_sample) pins the sample
+        // taken at the instruction's microcode poll access; accesses after
+        // the poll point (e.g. an RMW writeback) do not re-latch.
+        if self.ipl_sample_held {
+            return;
+        }
         self.sampled_irq_level = if self.bus.paula.intena & INT_MASTER != 0 {
             pending_ipl(self.bus.paula.intena & self.bus.cpu_visible_intreq())
         } else {
@@ -2715,6 +2732,18 @@ impl AddressBus for CpuBus {
         // Cycle-exact core (Part E.2): internal (non-bus) CPU clocks elapse
         // with the chip bus free for DMA, timed devices ticking along.
         self.bus.sync_cpu_internal_clocks(cpu_clocks);
+    }
+
+    fn ipl_hold_sample(&mut self) {
+        // Core-marked IPL poll point: keep the sample latched by the access
+        // that just completed until the boundary decision consumes it.
+        self.ipl_sample_held = true;
+    }
+
+    fn ipl_release_sample(&mut self) {
+        // Exception dispatch: the handler-entry refill is a fresh poll
+        // point, so drop any hold from the faulted instruction.
+        self.ipl_sample_held = false;
     }
 
     fn interrupt_acknowledge(&mut self, level: u8) -> u32 {
@@ -3177,6 +3206,7 @@ mod tests {
             dbg_irq_window: None,
             last_fetch_cache_hit: false,
             sampled_irq_level: 0,
+            ipl_sample_held: false,
         };
 
         assert_eq!(bus.read_long(0), 0x1111_4EF9);
@@ -3202,6 +3232,7 @@ mod tests {
             dbg_irq_window: None,
             last_fetch_cache_hit: false,
             sampled_irq_level: 0,
+            ipl_sample_held: false,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
         // Start on a refresh slot (0x003) so the fetch both waits for and then
@@ -3234,6 +3265,7 @@ mod tests {
             dbg_irq_window: None,
             last_fetch_cache_hit: false,
             sampled_irq_level: 0,
+            ipl_sample_held: false,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
 
@@ -3446,6 +3478,7 @@ mod tests {
             dbg_irq_window: None,
             last_fetch_cache_hit: false,
             sampled_irq_level: 0,
+            ipl_sample_held: false,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
         let fast = FAST_RAM_BASE as u32 + 0x40;
@@ -3492,6 +3525,7 @@ mod tests {
             dbg_irq_window: None,
             last_fetch_cache_hit: false,
             sampled_irq_level: 0,
+            ipl_sample_held: false,
         };
         let before = bus.read_long(ROM_BASE as u32);
         bus.write_long(ROM_BASE as u32, 0xDEAD_BEEF);
@@ -3516,6 +3550,7 @@ mod tests {
             dbg_irq_window: None,
             last_fetch_cache_hit: false,
             sampled_irq_level: 0,
+            ipl_sample_held: false,
         };
         let addr = SLOW_RAM_BASE as u32 + 64 * 1024;
         // A write into unmapped space still drives the bus: the following
@@ -3663,12 +3698,16 @@ mod tests {
         // + 1 bus-free tail = limit + 2 cck.
         let rom_prefetch_cck = 5 * 2;
         let per_chip_access = u32::from(crate::bus::BLITTER_SLOWDOWN_CPU_MISS_LIMIT) + 2;
+        // TAS spends 2 internal CPU clocks (1 cck) between the operand read
+        // and the writeback half of its indivisible read-modify-write cycle
+        // (yacht: np nrb n nw; Moira execTasEa SYNC(2)).
+        let rmw_internal_cck = 1;
         assert_eq!(slice.instructions, 1);
         assert_eq!(machine.bus().mem.chip_ram[0x0400], 0x92);
         assert_eq!(
             slice.bus_advanced_cck,
-            rom_prefetch_cck + 2 * per_chip_access,
-            "TAS bus time = ROM prefetch (external, 2 cck/word) plus the two contended chip-RAM byte accesses (limit + 2 cck each under a busy BLITHOG-clear blitter)"
+            rom_prefetch_cck + 2 * per_chip_access + rmw_internal_cck,
+            "TAS bus time = ROM prefetch (external, 2 cck/word) plus the two contended chip-RAM byte accesses (limit + 2 cck each under a busy BLITHOG-clear blitter) plus the 1 cck read-to-write internal gap"
         );
         assert!(machine.bus().blitter.busy);
         // The blitter held the bus through the CPU's starvation waits rather than

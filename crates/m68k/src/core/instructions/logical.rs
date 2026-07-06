@@ -37,7 +37,8 @@ impl CpuCore {
         let ea = self.resolve_ea(bus, mode, size);
         let dst = self.read_resolved_ea(bus, ea, size);
         let (result, _) = self.exec_and::<B>(bus, size, imm, dst);
-        self.write_resolved_ea(bus, ea, size, result);
+        // ANDI/ORI/EORI to memory poll IPL during the pre-writeback prefetch.
+        self.write_resolved_ea_np_poll(bus, ea, size, result);
         if size == Size::Long { 16 } else { 8 }
     }
 
@@ -101,7 +102,7 @@ impl CpuCore {
             return 50;
         }
         let result = (imm | dst) & size.mask();
-        self.write_resolved_ea(bus, ea, size, result);
+        self.write_resolved_ea_np_poll(bus, ea, size, result);
         if self.run_mode == RUN_MODE_BERR_AERR_RESET {
             // Address/bus error while writing the operand: exception has been taken.
             return 50;
@@ -169,7 +170,7 @@ impl CpuCore {
             return 50;
         }
         let result = (imm ^ dst) & size.mask();
-        self.write_resolved_ea(bus, ea, size, result);
+        self.write_resolved_ea_np_poll(bus, ea, size, result);
         if self.run_mode == RUN_MODE_BERR_AERR_RESET {
             return 50;
         }

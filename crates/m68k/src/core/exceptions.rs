@@ -229,6 +229,9 @@ impl CpuCore {
 
     /// Process trace exception.
     pub fn exception_trace<B: AddressBus>(&mut self, bus: &mut B) -> i32 {
+        // 4 internal clocks precede the trace frame's first stack write
+        // (Moira execException TRACE: SYNC(4)).
+        self.internal_cycles(4);
         self.take_group2_exception(bus, vector::TRACE)
     }
 

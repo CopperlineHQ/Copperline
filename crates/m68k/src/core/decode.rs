@@ -661,6 +661,9 @@ fn dispatch_group_0<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 let b1 = cpu.read_8(bus, addr.wrapping_add(2)) as u32;
                 let b2 = cpu.read_8(bus, addr.wrapping_add(4)) as u32;
                 let b3 = cpu.read_8(bus, addr.wrapping_add(6)) as u32;
+                // MOVEP memory-to-register polls IPL at the start of the
+                // final byte read (the poll precedes the last read).
+                cpu.ipl_poll_point(bus);
                 let v = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
                 cpu.set_d(dreg, v);
             }
@@ -671,6 +674,9 @@ fn dispatch_group_0<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
         } else {
             let hi = cpu.read_8(bus, addr) as u32;
             let lo = cpu.read_8(bus, addr.wrapping_add(2)) as u32;
+            // MOVEP memory-to-register polls IPL at the start of the final
+            // byte read (the poll precedes the last read).
+            cpu.ipl_poll_point(bus);
             let v = (hi << 8) | lo;
             cpu.set_d(dreg, (cpu.d(dreg) & 0xFFFF0000) | v);
         }
@@ -1281,6 +1287,13 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
         0x4E76 => {
             // TRAPV
             if cpu.flag_v() {
+                if cpu.cpu_type == CpuType::M68000 {
+                    // The taken 68000 TRAPV performs one program-space
+                    // dummy read (the would-be prefetch of the next word)
+                    // before the exception frame (Moira execTrapv).
+                    let addr = cpu.pc.wrapping_add(2);
+                    let _ = cpu.read_16(bus, addr);
+                }
                 cpu.take_group2_exception(bus, 7)
             } else {
                 4
@@ -1968,7 +1981,8 @@ fn dispatch_group_5<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                     return 50;
                 }
             }
-            cpu.write_resolved_ea(bus, ea, Size::Byte, value);
+            // Scc to memory polls IPL during the pre-writeback prefetch.
+            cpu.write_resolved_ea_np_poll(bus, ea, Size::Byte, value);
             if cpu.cpu_type == CpuType::M68000 {
                 if mode.is_register_direct() {
                     // Data register: 4 if condition false, 6 if true.
@@ -2153,7 +2167,8 @@ fn dispatch_group_8<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                     return 50;
                 }
                 let (result, _) = cpu.exec_or(bus, size, cpu.d(reg), dst);
-                cpu.write_resolved_ea(bus, ea, size, result);
+                // OR Dn,<ea> polls IPL during the pre-writeback prefetch.
+                cpu.write_resolved_ea_np_poll(bus, ea, size, result);
                 if cpu.cpu_type == CpuType::M68000 {
                     cpu.alu_dn_ea_cycles(mode, size)
                 } else {
@@ -2272,6 +2287,13 @@ fn dispatch_group_9<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
                     return 50;
                 }
+                // ADDX/SUBX -(Ay),-(Ax) byte/word poll IPL at the start of
+                // the destination read (the microcode poll sits between the
+                // two operand reads); the long form polls at the low-word
+                // writeback inside the interleaved write helper.
+                if size != Size::Long {
+                    cpu.ipl_poll_point(bus);
+                }
 
                 // If the store faults (misaligned word/long), the instruction should not update
                 // flags; pre-check alignment to avoid mutating flags before the fault.
@@ -2310,7 +2332,8 @@ fn dispatch_group_9<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 let ea = cpu.resolve_ea(bus, mode, size);
                 let dst = cpu.read_resolved_ea(bus, ea, size);
                 let (result, _) = cpu.exec_sub(bus, size, src, dst);
-                cpu.write_resolved_ea(bus, ea, size, result);
+                // SUB Dn,<ea> polls IPL during the pre-writeback prefetch.
+                cpu.write_resolved_ea_np_poll(bus, ea, size, result);
                 if cpu.cpu_type == CpuType::M68000 {
                     cpu.alu_dn_ea_cycles(mode, size)
                 } else {
@@ -2383,6 +2406,13 @@ fn dispatch_group_b<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
                     return 50;
                 }
+                // The 68000 polls IPL at the start of the destination read
+                // (the microcode poll sits between the two operand reads);
+                // the 68010 polls after both reads, at the final prefetch
+                // (the default last-access sample).
+                if cpu.cpu_type == CpuType::M68000 {
+                    cpu.ipl_poll_point(bus);
+                }
                 let legacy = cpu.exec_cmp(size, src_val, dst_val);
                 if cpu.cpu_type == CpuType::M68000 {
                     // CMPM (An)+,(Am)+: 12 byte/word, 20 long.
@@ -2406,7 +2436,8 @@ fn dispatch_group_b<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                     return 50;
                 }
                 let result = (cpu.d(reg) ^ dst) & size.mask();
-                cpu.write_resolved_ea(bus, ea, size, result);
+                // EOR Dn,<ea> polls IPL during the pre-writeback prefetch.
+                cpu.write_resolved_ea_np_poll(bus, ea, size, result);
                 if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
                     return 50;
                 }
@@ -2472,7 +2503,8 @@ fn dispatch_group_c<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                     let ea = cpu.resolve_ea(bus, mode, size);
                     let dst = cpu.read_resolved_ea(bus, ea, size);
                     let (result, _) = cpu.exec_and(bus, size, cpu.d(reg), dst);
-                    cpu.write_resolved_ea(bus, ea, size, result);
+                    // AND Dn,<ea> polls IPL during the pre-writeback prefetch.
+                    cpu.write_resolved_ea_np_poll(bus, ea, size, result);
                     if cpu.cpu_type == CpuType::M68000 {
                         cpu.alu_dn_ea_cycles(mode, size)
                     } else {
@@ -2592,6 +2624,13 @@ fn dispatch_group_d<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
                     return 50;
                 }
+                // ADDX/SUBX -(Ay),-(Ax) byte/word poll IPL at the start of
+                // the destination read (the microcode poll sits between the
+                // two operand reads); the long form polls at the low-word
+                // writeback inside the interleaved write helper.
+                if size != Size::Long {
+                    cpu.ipl_poll_point(bus);
+                }
 
                 // If the store faults (misaligned word/long), the instruction should not update
                 // flags; pre-check alignment to avoid mutating flags before the fault.
@@ -2630,7 +2669,8 @@ fn dispatch_group_d<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 let ea = cpu.resolve_ea(bus, mode, size);
                 let dst = cpu.read_resolved_ea(bus, ea, size);
                 let (result, _) = cpu.exec_add(bus, size, src, dst);
-                cpu.write_resolved_ea(bus, ea, size, result);
+                // ADD Dn,<ea> polls IPL during the pre-writeback prefetch.
+                cpu.write_resolved_ea_np_poll(bus, ea, size, result);
                 if cpu.cpu_type == CpuType::M68000 {
                     cpu.alu_dn_ea_cycles(mode, size)
                 } else {
@@ -2698,7 +2738,8 @@ fn dispatch_group_e<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             (3, 1) => cpu.exec_rol(Size::Word, 1, value),
             _ => return illegal_instruction(cpu, bus),
         };
-        cpu.write_resolved_ea(bus, ea, Size::Word, result);
+        // Memory shifts poll IPL during the pre-writeback prefetch.
+        cpu.write_resolved_ea_np_poll(bus, ea, Size::Word, result);
         // MC68000 memory shift/rotate (always 1 bit, word): 8 + EA.
         if cpu.cpu_type == CpuType::M68000 {
             8 + cpu.ea_source_cycles(mode, Size::Word)
