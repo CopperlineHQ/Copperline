@@ -57,11 +57,14 @@ const DISK_STATUS_SETTLE_CCK: u32 = PAULA_CLOCK_HZ / 1_000;
 const INDEX_PULSE_CCK: u32 = PAULA_CLOCK_HZ / 250;
 const INDEX_FLAG_SYNC_CCK: u32 = 1;
 // HRM lists 3 ms step spacing and 18 ms direction-reversal spacing as drive
-// programming requirements, but the CIA exposes only the STEP edge. Copperline
-// moves the emulated head (and the /TRK0 sensor) on each edge immediately so
-// recalibration -- which polls /TRK0 between fast step pulses -- never stalls
-// (see cia_a_status_bits). What real hardware adds on top is a read-after-seek
-// data-settle: while the head is physically traversing, the cells under it are
+// programming requirements. The mechanism itself is faster but not instant:
+// pulses spaced closer than ~40 us do not move the head at all (the stepper
+// cannot accept them; vAmigaTS Drive/step3/step4 pin this against real-drive
+// photos), and a direction reversal needs the same gap after the last step
+// in the opposite direction. Pulses at or above that floor move the head
+// (and the /TRK0 sensor) immediately, so recalibration -- which polls /TRK0
+// between fast-but-legal step pulses -- never stalls (see cia_a_status_bits).
+// What real hardware adds on top is a read-after-seek data-settle: while the head is physically traversing, the cells under it are
 // not the destination track's data, so a trackloader that reads immediately
 // after seeking (rather than waiting trackdisk's 15 ms) catches garbage until
 // the head arrives, costing it up to a rotation of latency. We model that by
@@ -70,6 +73,15 @@ const INDEX_FLAG_SYNC_CCK: u32 = 1;
 // post-seek read resumes at a rotated position. Position sense (/TRK0) and
 // motor/RDY are unaffected, so seeking and recalibration stay instant.
 const SEEK_STEP_SETTLE_CCK: u32 = PAULA_CLOCK_HZ / 1_000 * 3; // ~3 ms per step
+                                                              // Minimum spacing between step pulses the mechanism accepts (~40 us; the
+                                                              // A1010 stepper cannot follow faster pulse trains), and the extra gap
+                                                              // required after a step in the opposite direction. 140 cck = 39.5 us,
+                                                              // calibrated so vAmigaTS Drive/step2 (whose CIA-paced pulse loop lands on
+                                                              // 140 cck spacing under the E-clock-synced access timing) steps on every
+                                                              // pulse while step3's one-iteration-shorter loop (135 cck, with occasional
+                                                              // E-phase stretches to 140) only moves the head part of the time -- the
+                                                              // distinction the two tests exist to probe.
+const MIN_STEP_PULSE_CCK: u64 = 140;
 const SEEK_REVERSAL_SETTLE_CCK: u32 = PAULA_CLOCK_HZ / 1_000 * 18; // ~18 ms on reversal
                                                                    // 300 RPM.
 const ROTATION_HZ: u32 = 5;
@@ -1310,6 +1322,11 @@ struct FloppyDrive {
     seek_settle_cck: u32,
     // Direction of the last step, to charge the longer reversal settle.
     last_step_inward: Option<bool>,
+    // Timestamps (elapsed_cck) of the last accepted step pulse, and the last
+    // accepted pulse in each direction, for the mechanism's pulse floor.
+    last_step_cck: Option<u64>,
+    last_step_inward_cck: Option<u64>,
+    last_step_outward_cck: Option<u64>,
     external_id: u32,
     external_id_bit: u8,
     external_id_mode: bool,
@@ -1338,6 +1355,9 @@ impl Default for FloppyDrive {
             status_settle_cck: 0,
             seek_settle_cck: 0,
             last_step_inward: None,
+            last_step_cck: None,
+            last_step_inward_cck: None,
+            last_step_outward_cck: None,
             external_id: STANDARD_EXTERNAL_DRIVE_ID,
             external_id_bit: 0,
             external_id_mode: false,
@@ -1450,15 +1470,46 @@ impl FloppyDrive {
     }
 
     fn step(&mut self, inward: bool) {
+        // The change latch clears on the step PULSE itself (an electrical
+        // edge), whether or not the mechanism accepts it.
+        if self.image.is_some() {
+            self.set_disk_change(false);
+        }
+        // The stepper ignores pulses spaced closer than the mechanism can
+        // move (~40 us), and a reversal needs the same gap after the last
+        // step the other way. A too-fast burst leaves the head where it is.
+        let now = self.elapsed_cck;
+        let since = |stamp: Option<u64>| stamp.map_or(u64::MAX, |t| now.saturating_sub(t));
+        if crate::envcfg::flag("COPPERLINE_DIAG_STEP") {
+            log::info!(
+                "step pulse: dir={} delta={} cck",
+                if inward { "in" } else { "out" },
+                since(self.last_step_cck)
+            );
+        }
+        if since(self.last_step_cck) < MIN_STEP_PULSE_CCK {
+            return;
+        }
+        let opposite = if inward {
+            self.last_step_outward_cck
+        } else {
+            self.last_step_inward_cck
+        };
+        if since(opposite) < MIN_STEP_PULSE_CCK {
+            return;
+        }
+        self.last_step_cck = Some(now);
+        if inward {
+            self.last_step_inward_cck = Some(now);
+        } else {
+            self.last_step_outward_cck = Some(now);
+        }
         let previous = self.cylinder;
         self.cylinder = if inward {
             self.cylinder.saturating_add(1).min((CYLINDERS - 1) as u8)
         } else {
             self.cylinder.saturating_sub(1)
         };
-        if self.image.is_some() {
-            self.set_disk_change(false);
-        }
         if self.cylinder != previous {
             self.cached_track = None;
             // The head is now traversing: hold off read-data recovery for the
@@ -3963,6 +4014,13 @@ mod tests {
         assert_eq!(ctrl.selected_track(), None);
     }
 
+    /// Advance a selected drive past the mechanism's step-pulse floor so
+    /// the next STEP edge is accepted (pulses are otherwise back-to-back in
+    /// emulated time, which the stepper ignores like real hardware does).
+    fn wait_step_floor(ctrl: &mut FloppyController) {
+        ctrl.tick(MIN_STEP_PULSE_CCK as u32, 0, &mut []);
+    }
+
     #[test]
     fn step_pulses_move_head_on_each_falling_edge() {
         let mut ctrl = FloppyController::default();
@@ -3974,6 +4032,30 @@ mod tests {
         assert_eq!(ctrl.selected_track(), Some(2));
 
         ctrl.write_prb(inward_high);
+        wait_step_floor(&mut ctrl);
+        ctrl.write_prb(inward_high & !CIAB_DSKSTEP);
+        assert_eq!(ctrl.selected_track(), Some(4));
+    }
+
+    #[test]
+    fn step_pulses_faster_than_the_mechanism_do_not_move_the_head() {
+        let mut ctrl = FloppyController::default();
+        let lower_head = !CIAB_DSKMOTOR & !CIAB_DSKSEL0;
+        let inward_high = lower_head & !CIAB_DSKDIREC;
+        ctrl.write_prb(inward_high);
+
+        ctrl.write_prb(inward_high & !CIAB_DSKSTEP);
+        assert_eq!(ctrl.selected_track(), Some(2));
+
+        // A second pulse inside the ~40 us floor is ignored (vAmigaTS
+        // Drive/step3: a too-fast burst leaves the head in place).
+        ctrl.write_prb(inward_high);
+        ctrl.write_prb(inward_high & !CIAB_DSKSTEP);
+        assert_eq!(ctrl.selected_track(), Some(2));
+
+        // After the floor elapses the next pulse steps again.
+        ctrl.write_prb(inward_high);
+        wait_step_floor(&mut ctrl);
         ctrl.write_prb(inward_high & !CIAB_DSKSTEP);
         assert_eq!(ctrl.selected_track(), Some(4));
     }
@@ -3990,6 +4072,7 @@ mod tests {
         assert_eq!(ctrl.selected_track(), Some(2));
 
         ctrl.write_prb(outward_high);
+        wait_step_floor(&mut ctrl);
         ctrl.write_prb(outward_high & !CIAB_DSKSTEP);
         assert_eq!(ctrl.selected_track(), Some(0));
     }
@@ -4025,6 +4108,7 @@ mod tests {
 
         // Stepping back out to cylinder 0 re-asserts /TRK0 immediately.
         ctrl.write_prb(outward_high);
+        wait_step_floor(&mut ctrl);
         ctrl.write_prb(outward_high & !CIAB_DSKSTEP);
         assert_eq!(ctrl.selected_track(), Some(0));
         assert_eq!(ctrl.cia_a_status_bits() & CIAA_DSKTRACK0, 0);
@@ -4047,13 +4131,16 @@ mod tests {
         // Seek inward 3 cylinders.
         for _ in 0..3 {
             ctrl.write_prb(inward_high);
+            wait_step_floor(&mut ctrl);
             ctrl.write_prb(inward_high & !CIAB_DSKSTEP);
         }
         assert_eq!(ctrl.selected_track(), Some(6));
         assert_ne!(ctrl.cia_a_status_bits() & CIAA_DSKTRACK0, 0);
 
-        // Rapid outward recalibrate; check /TRK0 after each step with no tick.
+        // Fast outward recalibrate (legal pulse spacing, no settle wait);
+        // /TRK0 is checked right at each step with no extra delay.
         ctrl.write_prb(outward_high);
+        wait_step_floor(&mut ctrl);
         let mut asserted_at = None;
         for step in 1..=8 {
             ctrl.write_prb(outward_high & !CIAB_DSKSTEP);
@@ -4062,6 +4149,7 @@ mod tests {
                 asserted_at = Some(step);
                 break;
             }
+            wait_step_floor(&mut ctrl);
         }
         assert_eq!(asserted_at, Some(3));
         assert_eq!(ctrl.selected_track(), Some(0));
@@ -4081,6 +4169,7 @@ mod tests {
         assert_eq!(ctrl.selected_track(), Some(3));
 
         ctrl.write_prb(outward_high & !CIAB_DSKSIDE);
+        wait_step_floor(&mut ctrl);
         ctrl.write_prb((outward_high & !CIAB_DSKSIDE) & !CIAB_DSKSTEP);
         assert_eq!(ctrl.selected_track(), Some(1));
         ctrl.write_prb(outward_high);
