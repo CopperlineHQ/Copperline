@@ -73,6 +73,12 @@ pub struct Cia {
     tod_latched: bool,
     tod_stopped: bool,
     tod_write_alarm: bool,
+    /// Alarm comparator edge detector: the ALRM interrupt fires only on the
+    /// TRANSITION into counter==alarm, whether that transition comes from a
+    /// counter increment or from software rewriting either register (real
+    /// 8520 behaviour; vAmiga models the same flag as TOD::matching). True
+    /// at power-on: counter and alarm both reset to zero already matching.
+    tod_matching: bool,
     tod_frame_anchor: Option<TodFrameAnchor>,
 }
 
@@ -168,6 +174,7 @@ impl Cia {
             tod_latched: false,
             tod_stopped: false,
             tod_write_alarm: false,
+            tod_matching: true,
             tod_frame_anchor: None,
         }
     }
@@ -215,8 +222,45 @@ impl Cia {
         if self.tod_stopped {
             return false;
         }
-        self.tod_count = (self.tod_count + 1) & 0x00FF_FFFF;
-        if self.tod_count != self.tod_alarm {
+        // The 8520 TOD counter increments nibble-serially: the carry ripples
+        // lo.lo -> lo.hi -> mid.lo -> mid.hi -> hi.lo -> hi.hi. After the
+        // mid.lo stage the intermediate value is briefly visible to the
+        // alarm comparator (the A500 "TOD bug"; vAmiga models the same
+        // mid-ripple checkIrq), so a carry that reaches mid.lo can fire the
+        // alarm on a value the settled counter never shows.
+        fn inc_nibble(byte: &mut u32, shift: u32) -> bool {
+            let nibble = (*byte >> shift) & 0xF;
+            if nibble < 0xF {
+                *byte += 1 << shift;
+                false
+            } else {
+                *byte &= !(0xF << shift);
+                true
+            }
+        }
+        let mut count = self.tod_count;
+        let mut fired = false;
+        let rippled_to_mid =
+            inc_nibble(&mut count, 0) && inc_nibble(&mut count, 4) && inc_nibble(&mut count, 8);
+        if rippled_to_mid {
+            self.tod_count = count;
+            fired |= self.tod_check_alarm();
+            if inc_nibble(&mut count, 12) && inc_nibble(&mut count, 16) {
+                inc_nibble(&mut count, 20);
+            }
+        }
+        self.tod_count = count;
+        fired |= self.tod_check_alarm();
+        fired
+    }
+
+    /// Alarm comparator: latch ICR.ALRM on the transition into equality
+    /// (see `tod_matching`). Returns true if the CIA IR line just asserted.
+    fn tod_check_alarm(&mut self) -> bool {
+        let equal = self.tod_count == self.tod_alarm;
+        let fired = !self.tod_matching && equal;
+        self.tod_matching = equal;
+        if !fired {
             return false;
         }
         self.icr_data |= ICR_ALRM;
@@ -263,16 +307,7 @@ impl Cia {
         );
         self.tod_count = anchor.count_at_write.wrapping_add(elapsed) & 0x00FF_FFFF;
 
-        if self.tod_count != self.tod_alarm {
-            return false;
-        }
-        self.icr_data |= ICR_ALRM;
-        if self.icr_mask & ICR_ALRM == 0 {
-            return false;
-        }
-        let was_ir = self.icr_data & ICR_IR != 0;
-        self.icr_data |= ICR_IR;
-        !was_ir
+        self.tod_check_alarm()
     }
 
     pub fn tod_writes_alarm(&self) -> bool {
@@ -466,6 +501,9 @@ impl Cia {
                     // TODHI write stopped it.
                     self.tod_stopped = false;
                 }
+                // A write that lands counter==alarm fires the comparator
+                // just like an increment would (edge-detected).
+                let _ = self.tod_check_alarm();
             }
             REG_TODMID => {
                 if self.tod_write_alarm {
@@ -473,6 +511,7 @@ impl Cia {
                 } else {
                     self.tod_count = (self.tod_count & 0xFF00FF) | ((val as u32) << 8);
                 }
+                let _ = self.tod_check_alarm();
             }
             REG_TODHI => {
                 if self.tod_write_alarm {
@@ -483,6 +522,7 @@ impl Cia {
                     // is written.
                     self.tod_stopped = true;
                 }
+                let _ = self.tod_check_alarm();
             }
             REG_CRA => {
                 let prev_run = self.ta_running;
@@ -1087,27 +1127,42 @@ mod tests {
     }
 
     #[test]
-    fn tod_alarm_only_matches_on_a_count_edge_not_on_write() {
-        // The alarm comparison is evaluated only when the counter ticks,
-        // never when the alarm register is written. Writing the alarm equal
-        // to the live counter must not assert ALRM until the next matching
-        // tick (cia_timerd.v count_del gating).
+    fn tod_alarm_write_that_matches_the_counter_fires_the_comparator() {
+        // The 8520 alarm comparator is evaluated on counter/alarm WRITES as
+        // well as on counter ticks, edge-detected: arming the alarm at the
+        // live count raises ALRM immediately, re-writing the same value does
+        // not re-fire, and the power-on state (counter and alarm both zero)
+        // counts as already matching so the boot ROM's alarm-HI-only write
+        // stays silent. (vAmiga TOD::checkIrq; vAmigaTS CIA/TOD tod1/tod3.)
         let mut cia = Cia::new(Which::A);
         cia.write(REG_ICR, 0x80 | ICR_ALRM);
-        cia.tod_count = 0x000010;
 
-        // Arm the alarm at the current count via the CRB alarm-write mux.
+        // Power-on: counter == alarm == 0. Writing an alarm byte that keeps
+        // them equal must not fire (9 Fingers boot relies on this).
+        cia.write(REG_CRB, 0x80);
+        cia.write(REG_TODHI, 0x00);
+        assert_eq!(cia.read(REG_ICR) & (ICR_ALRM | ICR_IR), 0);
+
+        // Move the counter off the alarm value.
+        cia.write(REG_CRB, 0x00);
+        cia.write(REG_TODHI, 0x00);
+        cia.write(REG_TODMID, 0x00);
+        cia.write(REG_TODLO, 0x10);
+        assert_eq!(cia.read(REG_ICR) & (ICR_ALRM | ICR_IR), 0);
+
+        // Arming the alarm at the live count fires on the write.
         cia.write(REG_CRB, 0x80);
         cia.write(REG_TODHI, 0x00);
         cia.write(REG_TODMID, 0x00);
         cia.write(REG_TODLO, 0x10);
         assert_eq!(cia.tod_alarm, 0x000010);
-        // No tick has happened since the write: no match, no interrupt.
+        assert_eq!(cia.read(REG_ICR) & (ICR_ALRM | ICR_IR), ICR_ALRM | ICR_IR);
+
+        // Still matching: re-writing the same alarm byte does not re-fire.
+        cia.write(REG_TODLO, 0x10);
         assert_eq!(cia.read(REG_ICR) & (ICR_ALRM | ICR_IR), 0);
 
-        // A tick advances the counter to 0x11, which no longer equals the
-        // armed 0x10, so still no match: the equal-on-write moment was never
-        // sampled.
+        // The tick away from the alarm un-matches without firing.
         assert!(!cia.tick_tod());
         assert_eq!(cia.tod_count, 0x000011);
         assert_eq!(cia.read(REG_ICR) & ICR_ALRM, 0);
@@ -1117,8 +1172,17 @@ mod tests {
     fn tod_alarm_fires_on_the_tick_that_reaches_it() {
         let mut cia = Cia::new(Which::A);
         cia.write(REG_ICR, 0x80 | ICR_ALRM);
-        cia.tod_count = 0x000020;
-        cia.tod_alarm = 0x000021;
+        // Alarm 0x21, counter 0x20, both through the register interface so
+        // the comparator's matching edge state tracks them.
+        cia.write(REG_CRB, 0x80);
+        cia.write(REG_TODHI, 0x00);
+        cia.write(REG_TODMID, 0x00);
+        cia.write(REG_TODLO, 0x21);
+        cia.write(REG_CRB, 0x00);
+        cia.write(REG_TODHI, 0x00);
+        cia.write(REG_TODMID, 0x00);
+        cia.write(REG_TODLO, 0x20);
+        let _ = cia.read(REG_ICR);
 
         assert!(cia.tick_tod());
         assert_eq!(cia.tod_count, 0x000021);
