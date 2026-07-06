@@ -770,7 +770,7 @@ pub enum UiControl {
 fn panel_dims(panel: &Panel) -> (usize, usize) {
     match panel {
         Panel::About => (560, 380),
-        Panel::Shortcuts => (600, 418),
+        Panel::Shortcuts => (600, 440),
         Panel::Calibration(_) => (620, 372),
         Panel::Debugger(_) => (684, 520),
         Panel::FrameAnalyzer(_) => (700, 526),
@@ -1653,7 +1653,7 @@ fn draw_about(frame: &mut [u8], rect: Rect, view: &AboutView, scale: usize) {
     }
 }
 
-const SHORTCUT_ROWS: [(&str, &str, bool); 15] = [
+const SHORTCUT_ROWS: [(&str, &str, bool); 16] = [
     ("Q", "Quit", true),
     ("S", "Save screenshot", true),
     ("R", "Record video on/off", true),
@@ -1665,6 +1665,7 @@ const SHORTCUT_ROWS: [(&str, &str, bool); 15] = [
     ("B", "Debugger", true),
     ("K", "Console", true),
     ("J", "Joystick input mode", true),
+    ("Shift+A", "Cycle audio output", true),
     ("W", "Warp speed on/off", true),
     ("Shift+W", "Warp limit (2x..Max)", true),
     ("Esc", "Close menu/window", false),
