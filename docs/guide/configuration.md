@@ -37,7 +37,7 @@ range checks as the equivalent TOML fields:
 |---|---|---|
 | `--model NAME` | `[machine] profile` | `A1000`, `A500`, `A500OCS`, `A500Plus`, `A600`, `A1200`, `CDTV`, `CD32` |
 | `--chipset NAME` | `[chipset] revision` | `OCS`, `ECS`, `AGA` |
-| `--cpu MODEL` | `[cpu] model` | `68000`, `68EC020`, `68020`, `68030`, `68040`, `68060` |
+| `--cpu MODEL` | `[cpu] model` | `68000`, `68010`, `68EC020`, `68020`, `68030`, `68040`, `68060` |
 | `--cpu-clock MHZ` | `[cpu] clock_mhz` | a number of MHz |
 | `--fpu` / `--no-fpu` | `[cpu] fpu` | fit / omit a 68881/68882 |
 | `--chip SIZE` | `[memory] chip` | `512K`, `1M`, `2M`, ... |
@@ -195,7 +195,7 @@ carried no information.)
 
 ```toml
 [cpu]
-model = "68000"     # 68000, 68EC020, 68020, 68030, 68040, 68060
+model = "68000"     # 68000, 68010, 68EC020, 68020, 68030, 68040, 68060
 clock_mhz = 14.0    # optional; defaults to the model's stock speed
 # icache = false    # instruction-cache model (on by default: 020/030/040/060)
 # dcache = false    # data-cache model (on by default: 030/040/060)
@@ -207,9 +207,10 @@ clock_mhz = 14.0    # optional; defaults to the model's stock speed
 #                   # instructions directly)
 ```
 
-- `model`: the 68EC020 is a 68020 instruction set with a 24-bit external
-  address bus.
-- `clock_mhz` defaults to the model's stock speed (68000 ~7.09, 020 ~14,
+- `model`: the 68010 models the vector base register, the format-stacking
+  exception model, and DBcc loop mode; the 68EC020 is a 68020 instruction
+  set with a 24-bit external address bus.
+- `clock_mhz` defaults to the model's stock speed (68000/68010 ~7.09, 020 ~14,
   030/040 ~25, 060 50) and is modelled as a whole multiple of the colour clock
   (3.546895 MHz). Fast RAM and ROM run at the CPU clock; chip and slow RAM
   stay chip-bus bound, so overclocking speeds up only what a real

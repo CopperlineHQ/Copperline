@@ -78,7 +78,9 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      for rows whose fetch diverges from the register-derived window)
 //  17: DisplaySpriteDmaState gained the two-slot sprite fetch fields
 //      (data_words_fetched pointer progression, pending_data)
-pub const STATE_VERSION: u32 = 20;
+//  21: CpuCore gained the 68010 loop-mode state (loop_mode,
+//      loop_body_word, loop_dbcc_word)
+pub const STATE_VERSION: u32 = 21;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

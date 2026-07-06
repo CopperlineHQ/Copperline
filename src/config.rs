@@ -514,6 +514,7 @@ pub struct FloppyDriveConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CpuModel {
     M68000,
+    M68010,
     M68EC020,
     M68020,
     M68030,
@@ -536,7 +537,7 @@ impl CpuModel {
     /// Fast RAM runs at the CPU clock; chip/slow RAM stays chip-bus bound.
     pub fn default_clock_mhz(self) -> f64 {
         match self {
-            CpuModel::M68000 => 7.09,
+            CpuModel::M68000 | CpuModel::M68010 => 7.09,
             CpuModel::M68EC020 | CpuModel::M68020 => 14.0,
             CpuModel::M68030 | CpuModel::M68040 => 25.0,
             CpuModel::M68060 => 50.0,
@@ -1574,10 +1575,10 @@ impl TryFrom<RawConfig> for Config {
             }
             None => cpu.default_clock_mhz(),
         };
-        if fpu && cpu == CpuModel::M68000 {
+        if fpu && matches!(cpu, CpuModel::M68000 | CpuModel::M68010) {
             errors.push(anyhow!(
                 "[cpu] fpu = true needs the 68020+ coprocessor interface; \
-                 a 68000 cannot drive a 68881/68882"
+                 a 68000/68010 cannot drive a 68881/68882"
             ));
         }
         // The on-chip caches are silicon: model them by default whenever the
@@ -2016,13 +2017,14 @@ fn parse_cpu(s: &str) -> Result<CpuModel> {
     let norm = s.trim().to_ascii_lowercase().replace(['m', '_', '-'], "");
     match norm.as_str() {
         "68000" | "000" => Ok(CpuModel::M68000),
+        "68010" | "010" => Ok(CpuModel::M68010),
         "68ec020" | "ec020" => Ok(CpuModel::M68EC020),
         "68020" | "020" => Ok(CpuModel::M68020),
         "68030" | "030" => Ok(CpuModel::M68030),
         "68040" | "040" => Ok(CpuModel::M68040),
         "68060" | "060" => Ok(CpuModel::M68060),
         _ => Err(anyhow!(
-            "unknown cpu model {:?}: expected 68000 / 68EC020 / 68020 / 68030 / 68040 / 68060",
+            "unknown cpu model {:?}: expected 68000 / 68010 / 68EC020 / 68020 / 68030 / 68040 / 68060",
             s
         )),
     }

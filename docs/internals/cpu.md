@@ -15,9 +15,10 @@ colour clocks:
   clock (`cpu_external_access`), scaled by `cpu_clocks_per_cck` with
   sub-CCK carry so accelerated clocks bill fractional costs exactly.
 - Addresses are masked to the model's bus width: 24-bit for
-  68000/68EC020, 32-bit for 68020/030/040.
+  68000/68010/68EC020, 32-bit for 68020/030/040/060.
 
-Selectable models: 68000, 68EC020, 68020, 68030, 68040. `[cpu] fpu`
+Selectable models: 68000, 68010, 68EC020, 68020, 68030, 68040, 68060.
+`[cpu] fpu`
 fits a 68881/68882 to any 020/030 (and is on by default for the 68040,
 whose FPU is on-die): the vendored core executes the 6888x instruction
 set in true 80-bit extended precision via a pure-Rust software floating-
@@ -57,12 +58,30 @@ stale pre-write word (real MC68000 Class 1 SMC behaviour), while a taken
 branch flushes and refills the stream from the target. The queue lives in
 the backend core rather than a Copperline-side bus cache, because correct
 flushing depends on the CPU's own control flow, exceptions, and
-interrupts. It is gated to the 68000 (`prefetch_enabled`); 68010+ fetch
-directly at PC through the bus adapter. Chip-RAM probes pin both cases:
+interrupts. It is gated to the 68000 and 68010 (`prefetch_enabled`);
+68020+ fetch directly at PC through the bus adapter (their real pipelines
+hide behind the instruction cache model instead). Chip-RAM probes pin both
+cases:
 `cpu_prefetch_probe_documents_self_modified_next_opcode_behavior` (stale
 fall-through) and
 `cpu_prefetch_probe_branch_refetches_self_modified_chip_ram_target`
 (branch refetch).
+
+## 68010
+
+The 68010 shares the 68000's bus interface and two-word prefetch queue but
+adds the vector base register, the format-stacking exception model
+(format 0 four-word frames, format 8 bus/address-error frames, RTD), and
+DBcc loop mode: a DBcc that branches -4 back to a loopable one-word
+instruction holds the body/DBcc pair in the prefetch queue and re-executes
+it with no instruction fetches until the condition turns true, the counter
+expires, or an exception intervenes (`loop_mode` in
+`crates/m68k/src/core/cpu.rs`; the loopable set and the DBcc entry/exit
+arms live in `core/decode.rs`). A looping DBcc iteration costs 6 internal
+clocks and touches the bus only for the body's operands, which is what
+makes tight copy/clear loops measurably faster on a real 68010.
+`crates/m68k/tests/loop_mode_timing_tests.rs` pins engagement, the
+68000's non-engagement, and the no-fetch iteration cost.
 
 ## Caches
 

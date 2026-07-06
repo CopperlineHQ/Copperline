@@ -451,8 +451,9 @@ const DENISE_CHOICES: [Option<DeniseRevision>; 4] = [
     Some(DeniseRevision::AgaLisa),
 ];
 const VIDEO_CHOICES: [VideoStandard; 2] = [VideoStandard::Pal, VideoStandard::Ntsc];
-const CPUS: [CpuModel; 6] = [
+const CPUS: [CpuModel; 7] = [
     CpuModel::M68000,
+    CpuModel::M68010,
     CpuModel::M68EC020,
     CpuModel::M68020,
     CpuModel::M68030,
@@ -1745,6 +1746,7 @@ fn chipset_name(chipset: Chipset) -> &'static str {
 fn cpu_name(cpu: CpuModel) -> &'static str {
     match cpu {
         CpuModel::M68000 => "68000",
+        CpuModel::M68010 => "68010",
         CpuModel::M68EC020 => "68EC020",
         CpuModel::M68020 => "68020",
         CpuModel::M68030 => "68030",
