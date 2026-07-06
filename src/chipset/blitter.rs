@@ -229,6 +229,16 @@ struct NormalBlitState {
     #[serde(skip)]
     debug_watched_write: Option<(u32, u16)>,
     phase: NormalBlitPhase,
+    /// Extra internal start slots before Init. Real Agnus takes the BLTSIZE
+    /// write through a one-cycle register commit and then two bus-arbitration
+    /// startup cycles (vAmiga BLT_STRT1/BLT_STRT2) plus a cycle to begin the
+    /// micro-program, so the first channel slot runs ~4 cck after the poke;
+    /// StartDelay alone modelled only one. Verified against a
+    /// BLTSIZE-to-blitter-IRQ beam probe cross-checked with vAmiga.
+    /// TODO: STRT1/STRT2 on real hardware need free odd bus slots, so heavy
+    /// contention stretches the startup; these extras are plain internal
+    /// cycles.
+    start_extra: u32,
     slots_remaining: u32,
     h_remaining: u32,
     w: u32,
@@ -1151,6 +1161,7 @@ impl NormalBlitState {
             debug_watch_addrs: blitter.debug_watch_addrs.clone(),
             debug_watched_write: None,
             phase: NormalBlitPhase::StartDelay,
+            start_extra: NORMAL_START_EXTRA_SLOTS,
             slots_remaining: normal_total_slots(h, w, con0, con1),
             h_remaining: h,
             w,
@@ -1256,6 +1267,7 @@ impl NormalBlitState {
         let mut mask = 0u64;
 
         let mut phase = self.phase;
+        let mut start_extra = self.start_extra;
         let mut pipeline_full = self.pipeline_full;
         let mut word_idx = self.word_idx;
         let mut h_remaining = self.h_remaining;
@@ -1277,7 +1289,13 @@ impl NormalBlitState {
             }
 
             match phase {
-                NormalBlitPhase::StartDelay => phase = NormalBlitPhase::Init,
+                NormalBlitPhase::StartDelay => {
+                    if start_extra > 0 {
+                        start_extra -= 1;
+                    } else {
+                        phase = NormalBlitPhase::Init;
+                    }
+                }
                 NormalBlitPhase::Init => phase = NormalBlitPhase::A,
                 NormalBlitPhase::A => {
                     phase = if self.use_b {
@@ -1354,7 +1372,13 @@ impl NormalBlitState {
 
     fn process_phase(&mut self, ram: &mut [u8], bzero: &mut bool) {
         match self.phase {
-            NormalBlitPhase::StartDelay => self.phase = NormalBlitPhase::Init,
+            NormalBlitPhase::StartDelay => {
+                if self.start_extra > 0 {
+                    self.start_extra -= 1;
+                } else {
+                    self.phase = NormalBlitPhase::Init;
+                }
+            }
             NormalBlitPhase::Init => self.phase = NormalBlitPhase::A,
             NormalBlitPhase::A => {
                 self.begin_word();
@@ -1635,13 +1659,20 @@ fn normal_source_slots_per_word(con0: u16, con1: u16) -> u32 {
     1 + u32::from(use_b) + u32::from(c_phase) + u32::from(d_phase)
 }
 
+/// Extra internal slots between the BLTSIZE write and the Init slot: the
+/// register-commit cycle plus the two BLT_STRT startup cycles and the
+/// micro-program begin cycle real Agnus takes (see NormalBlitState).
+const NORMAL_START_EXTRA_SLOTS: u32 = 3;
+
 fn normal_total_slots(h: u32, w: u32, con0: u16, con1: u16) -> u32 {
     let words = h.saturating_mul(w);
     if words == 0 {
-        return 1;
+        return 1 + NORMAL_START_EXTRA_SLOTS;
     }
     let use_d = con0 & BLTCON0_USE_D != 0;
-    2 + words.saturating_mul(normal_source_slots_per_word(con0, con1)) + if use_d { 2 } else { 0 }
+    2 + NORMAL_START_EXTRA_SLOTS
+        + words.saturating_mul(normal_source_slots_per_word(con0, con1))
+        + if use_d { 2 } else { 0 }
 }
 
 fn line_total_slots(npixels: u32) -> u32 {
@@ -2205,8 +2236,12 @@ mod tests {
         b.start_scheduled(bltsize, &ram);
 
         assert!(b.busy);
-        assert_eq!(b.scheduled_slots_remaining(), Some(8));
+        assert_eq!(b.scheduled_slots_remaining(), Some(11));
         assert_eq!(&ram[0x20..0x24], &[0xAA, 0xAA, 0xAA, 0xAA]);
+        // Walk the three startup extras (BLTSIZE commit + BLT_STRT cycles).
+        for _ in 0..3 {
+            assert!(!b.tick_scheduled_slot(&mut ram));
+        }
         assert!(!b.tick_scheduled_slot(&mut ram));
         assert_eq!(b.scheduled_slots_remaining(), Some(7));
         assert!(b.busy);
@@ -2250,9 +2285,10 @@ mod tests {
             pattern
         }
 
-        // D-only clear, 1 row x 2 words: StartDelay, Init, [A D] x2, E, F.
-        // Only the D write slots and the final F flush access the bus; the A
-        // slots are idle because A DMA is disabled (HRM: "- D0" per word).
+        // D-only clear, 1 row x 2 words: startup extras + StartDelay, Init,
+        // [A D] x2, E, F. Only the D write slots and the final F flush access
+        // the bus; the A slots are idle because A DMA is disabled (HRM:
+        // "- D0" per word).
         let mut ram = vec![0xAAu8; 256];
         let mut b = Blitter::new();
         b.bltcon0 = BLTCON0_USE_D; // minterm $00 clears
@@ -2260,7 +2296,7 @@ mod tests {
         b.start_scheduled((1u16 << 6) | 2, &ram);
         assert_eq!(
             needs_bus_walk(&mut b, &mut ram),
-            [false, false, false, true, false, true, false, true]
+            [false, false, false, false, false, false, true, false, true, false, true]
         );
 
         // A->D copy, 1 row x 2 words: the first D phase is the delayed-D
@@ -2276,7 +2312,7 @@ mod tests {
         b.start_scheduled((1u16 << 6) | 2, &ram);
         assert_eq!(
             needs_bus_walk(&mut b, &mut ram),
-            [false, false, true, false, true, true, false, true]
+            [false, false, false, false, false, true, false, true, true, false, true]
         );
 
         // ABCD cookie-cut, 1 row x 2 words: A/B/C fetch first, then the
@@ -2293,7 +2329,10 @@ mod tests {
         b.start_scheduled((1u16 << 6) | 2, &ram);
         assert_eq!(
             needs_bus_walk(&mut b, &mut ram),
-            [false, false, true, true, true, false, true, true, true, true, false, true]
+            [
+                false, false, false, false, false, true, true, true, false, true, true, true, true,
+                false, true
+            ]
         );
 
         // Line blit, 2 pixels: StartDelay, Init, then [L1 L2 L3 L4] per pixel.
@@ -2331,6 +2370,9 @@ mod tests {
         b.bltdpt = 0x20;
         b.start_scheduled((1u16 << 6) | 1, &ram);
 
+        for _ in 0..3 {
+            assert!(!b.tick_scheduled_slot(&mut ram)); // startup extras
+        }
         assert!(!b.tick_scheduled_slot(&mut ram)); // BBUSY start delay.
         assert!(!b.tick_scheduled_slot(&mut ram)); // INIT.
         assert!(!b.tick_scheduled_slot(&mut ram)); // A slot is idle when A DMA is disabled.
@@ -2357,12 +2399,12 @@ mod tests {
         b.bltdpt = 0x20;
         b.start_scheduled((1u16 << 6) | 1, &ram);
 
-        assert_eq!(b.scheduled_slots_remaining(), Some(6));
+        assert_eq!(b.scheduled_slots_remaining(), Some(9));
         assert!(!b.tick_scheduled_slot(&mut ram));
 
         assert_eq!(b.bltapt, 0x10);
         assert_eq!(read_word(&ram, 0x20), 0);
-        assert_eq!(b.scheduled_slots_remaining(), Some(5));
+        assert_eq!(b.scheduled_slots_remaining(), Some(8));
     }
 
     #[test]
@@ -2377,7 +2419,10 @@ mod tests {
         b.bltdpt = 0x20;
         b.start_scheduled((1u16 << 6) | 1, &ram);
 
-        assert_eq!(b.scheduled_slots_remaining(), Some(4));
+        assert_eq!(b.scheduled_slots_remaining(), Some(7));
+        for _ in 0..3 {
+            assert!(!b.tick_scheduled_slot(&mut ram)); // startup extras
+        }
         assert!(!b.tick_scheduled_slot(&mut ram)); // BBUSY start delay.
         assert!(!b.tick_scheduled_slot(&mut ram)); // INIT.
         assert!(!b.tick_scheduled_slot(&mut ram)); // A state, empty when A is disabled.
@@ -2592,11 +2637,12 @@ mod tests {
         let fill_total = fill.scheduled_slots_remaining();
         let (fill_total_walked, fill_bus) = walk_bus(&mut fill, &mut ram);
 
-        // Copy: 2 (start delay + init) + 2 words * 2 cyc/word + 2 (D flush) = 8.
-        assert_eq!(copy_total, 8);
-        // Fill: the same, but 3 cyc/word -> 2 + 2*3 + 2 = 10 (two extra slots).
-        assert_eq!(fill_total, Some(10));
-        assert_eq!(fill_total_walked, 10);
+        // Copy: 3 (startup extras) + 2 (start delay + init) + 2 words *
+        // 2 cyc/word + 2 (D flush) = 11.
+        assert_eq!(copy_total, 11);
+        // Fill: the same, but 3 cyc/word -> 5 + 2*3 + 2 = 13 (two extra slots).
+        assert_eq!(fill_total, Some(13));
+        assert_eq!(fill_total_walked, 13);
         // The extra fill slots are IDLE: the fill performs the same number of
         // bus accesses as the copy (the A reads and D writes), just spread over
         // two more idle cycles.

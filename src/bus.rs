@@ -114,16 +114,28 @@ fn external_access_cck_x100_setting() -> u32 {
     }
 }
 
-/// 68000/Amiga interrupt-recognition latency in color clocks (DEFAULT ON).
-/// Real hardware takes ~96-100 cck from an interrupt request to the handler's
-/// first instruction; Copperline's bare model took ~48 (finish-instruction + the
-/// 44-cycle exception only), i.e. it delivered interrupts ~50 cck too early.
-/// The timing-test rows 19 (handler entry) and 22 (raise position), run on
-/// FS-UAE and vAmiga, localised the gap to recognition latency (the raise
-/// position matches; only the raise->entry time differed). Default 65 cck makes
-/// row 19 match real HW (~hpos 116 vs vAmiga 114 / FS-UAE 122). Set
-/// COPPERLINE_IRQ_LATENCY_CCK to override (0 disables = the old behaviour).
-const DEFAULT_IRQ_LATENCY_CCK: u32 = 65;
+/// Paula INTREQ/INTENA -> CPU IPL-pin propagation delay in color clocks
+/// (DEFAULT ON). A change to the enabled-pending interrupt set does not reach
+/// the 68000's IPL pins combinationally: Paula pipelines the encoded level to
+/// the pins over a few chip clocks (vAmiga models the same pipe as iplPipe,
+/// with the pin taking the new value ~4 DMA cycles after the level change).
+/// Together with the IPL sampling model in cpu.rs (the interrupt decision at
+/// an instruction boundary uses the level sampled at the PREVIOUS instruction's
+/// last bus access, as on the real 68000), this reproduces the raise-to-entry
+/// latency measured against vAmiga and the vAmigaTS real-hardware photos.
+///
+/// History: this was 65 for a while, calibrated against timing-test row 19
+/// with a mis-decoded VHPOSR (the low byte is the cck position, not cck/2);
+/// that made every IRQ delivery ~50 cck late and dominated the vAmigaTS
+/// cputim/irqtim/inttim divergence. Set COPPERLINE_IRQ_LATENCY_CCK to override
+/// (0 disables the pipe AND the boundary-sampling delay = raw model).
+///
+/// 5 = the ~4-cycle pin pipe plus the one-cck register-change commit a poked
+/// INTREQ takes before the level encoder sees it (folded into one constant;
+/// an IRQ-latency probe against vAmiga across seven source/loop geometries
+/// lands within 0..+7 cck, the residual being per-instruction IPL poll-point
+/// detail the vendored core does not model).
+const DEFAULT_IRQ_LATENCY_CCK: u32 = 5;
 
 /// Read the COPPERLINE_IRQ_LATENCY_CCK setting once, at bus construction (stored in
 /// `irq_latency_setting`). Unset uses DEFAULT_IRQ_LATENCY_CCK; 0 disables.
@@ -705,21 +717,20 @@ pub struct Bus {
     pub(crate) delivered_copper_irq_beam: Option<(u32, u32)>,
     coper_cpu_irq_delay_cck: u32,
 
-    /// General 68000 interrupt-recognition latency (COPPERLINE_IRQ_LATENCY_CCK).
-    /// Real HW takes ~96-100 cck from a VERTB request to the handler's first
-    /// instruction; Copperline's bare model takes ~48 (finish-instruction + the
-    /// 44-cycle exception only). The timing-test rows 19 (handler entry) and 22
-    /// (raise position) localised the ~50 cck gap to interrupt RECOGNITION
-    /// latency, not the raise position. When the setting is non-zero, a newly
+    /// Paula INTREQ -> CPU IPL-pin propagation pipe (COPPERLINE_IRQ_LATENCY_CCK,
+    /// see DEFAULT_IRQ_LATENCY_CCK). When the setting is non-zero, a newly
     /// raised maskable interrupt is held invisible to the CPU for that many cck
     /// (`irq_latency_mask` = the delayed bits, `irq_latency_cck` = countdown,
     /// `irq_latency_last_pending` = previous pending set for rising-edge detect).
+    /// INTREQR reads are NOT delayed (the pipe sits between the level encoder
+    /// and the pins, not on the register).
     irq_latency_cck: u32,
     irq_latency_mask: u16,
     irq_latency_last_pending: u16,
-    /// Configured recognition latency in cck (from COPPERLINE_IRQ_LATENCY_CCK or the
-    /// default); 0 disables the model. A field (not a global) so tests can set
-    /// it per-instance -- mechanism tests run with 0 to deliver IRQs immediately.
+    /// Configured IPL-pipe length in cck (from COPPERLINE_IRQ_LATENCY_CCK or the
+    /// default); 0 disables the pipe and the cpu.rs boundary-sampling delay. A
+    /// field (not a global) so tests can set it per-instance -- mechanism tests
+    /// run with 0 to deliver IRQs immediately.
     pub(crate) irq_latency_setting: u32,
 
     /// Palette snapshots written by CPU interrupt handlers. The top

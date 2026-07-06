@@ -209,6 +209,14 @@ struct CpuBus {
     /// folding on a cached fetch stream. Recomputed on every fetch, never
     /// carried across a save state.
     last_fetch_cache_hit: bool,
+    /// IPL level as sampled at the CPU's most recent bus access. The real
+    /// 68000 latches its IPL pins during bus cycles, and the take-interrupt
+    /// decision at an instruction boundary uses the value latched during the
+    /// PREVIOUS instruction's last bus access -- a level that rises during an
+    /// instruction's trailing internal cycles is not seen until one
+    /// instruction later. Transient: re-sampled on every access, never
+    /// serialized (a loaded state re-samples within one instruction).
+    sampled_irq_level: u8,
 }
 
 pub fn build(
@@ -263,6 +271,7 @@ impl M68kMachine {
                 dcache: None,
                 dbg_irq_window: debug_irq_window_setting(),
                 last_fetch_cache_hit: false,
+                sampled_irq_level: 0,
             },
             hle: NoOpHleHandler,
             fpu_enabled,
@@ -1525,7 +1534,18 @@ impl M68kMachine {
         // recognized at the correct boundary even within a multi-instruction
         // core slice.
         self.bus.bus.flush_timed_devices();
-        let level = self.pending_irq_level();
+        let mut level = self.pending_irq_level();
+        // The boundary decision uses the IPL level latched at the previous
+        // instruction's last bus access (CpuBus::sample_ipl), not the live
+        // level: on real silicon a level that rose after that sample is taken
+        // one instruction later. A STOPped CPU keeps sampling its pins, so it
+        // wakes on the live level. min() so a level that dropped since the
+        // sample (e.g. the instruction's own INTREQ clear) is never delivered
+        // stale. COPPERLINE_IRQ_LATENCY_CCK=0 disables this together with the
+        // IPL pipe (the raw immediate model, used by mechanism tests).
+        if self.bus.bus.irq_latency_setting != 0 && !self.cpu.is_stopped() {
+            level = level.min(self.bus.sampled_irq_level);
+        }
         self.cpu.set_irq(level);
     }
 
@@ -2492,40 +2512,66 @@ impl CpuBus {
     }
 }
 
+impl CpuBus {
+    /// Latch the IPL level presented to the CPU by (the end of) a bus access.
+    /// The real 68000 samples its IPL pins during bus cycles, and the
+    /// take-interrupt decision at an instruction boundary uses the value
+    /// latched during the previous instruction's last bus access -- a level
+    /// that rises during an instruction's trailing internal cycles is not
+    /// seen until one instruction later (Moira models the same points as
+    /// POLL_IPL). `refresh_irq_line` consumes this latch.
+    #[inline]
+    fn sample_ipl(&mut self) {
+        self.sampled_irq_level = if self.bus.paula.intena & INT_MASTER != 0 {
+            pending_ipl(self.bus.paula.intena & self.bus.cpu_visible_intreq())
+        } else {
+            0
+        };
+    }
+}
+
 impl AddressBus for CpuBus {
     fn last_fetch_was_cached(&self) -> bool {
         self.last_fetch_cache_hit
     }
 
     fn read_byte(&mut self, address: u32) -> u8 {
+        self.sample_ipl();
         self.read_sized(address, 1, CpuBusAccessKind::Read) as u8
     }
 
     fn read_word(&mut self, address: u32) -> u16 {
+        self.sample_ipl();
         self.read_sized(address, 2, CpuBusAccessKind::Read) as u16
     }
 
     fn read_long(&mut self, address: u32) -> u32 {
+        self.sample_ipl();
         self.read_sized(address, 4, CpuBusAccessKind::Read)
     }
 
     fn write_byte(&mut self, address: u32, value: u8) {
+        self.sample_ipl();
         self.write_sized(address, 1, u32::from(value));
     }
 
     fn write_word(&mut self, address: u32, value: u16) {
+        self.sample_ipl();
         self.write_sized(address, 2, u32::from(value));
     }
 
     fn write_long(&mut self, address: u32, value: u32) {
+        self.sample_ipl();
         self.write_sized(address, 4, value);
     }
 
     fn read_immediate_word(&mut self, address: u32) -> u16 {
+        self.sample_ipl();
         self.read_sized(address, 2, CpuBusAccessKind::Fetch) as u16
     }
 
     fn read_immediate_long(&mut self, address: u32) -> u32 {
+        self.sample_ipl();
         self.read_sized(address, 4, CpuBusAccessKind::Fetch)
     }
 
@@ -2993,6 +3039,7 @@ mod tests {
             dcache: None,
             dbg_irq_window: None,
             last_fetch_cache_hit: false,
+            sampled_irq_level: 0,
         };
 
         assert_eq!(bus.read_long(0), 0x1111_4EF9);
@@ -3017,6 +3064,7 @@ mod tests {
             dcache: None,
             dbg_irq_window: None,
             last_fetch_cache_hit: false,
+            sampled_irq_level: 0,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
         // Start on a refresh slot (0x003) so the fetch both waits for and then
@@ -3048,6 +3096,7 @@ mod tests {
             dcache: None,
             dbg_irq_window: None,
             last_fetch_cache_hit: false,
+            sampled_irq_level: 0,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
 
@@ -3259,6 +3308,7 @@ mod tests {
             dcache: Some(Box::new(dcache)),
             dbg_irq_window: None,
             last_fetch_cache_hit: false,
+            sampled_irq_level: 0,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
         let fast = FAST_RAM_BASE as u32 + 0x40;
@@ -3304,6 +3354,7 @@ mod tests {
             dcache: None,
             dbg_irq_window: None,
             last_fetch_cache_hit: false,
+            sampled_irq_level: 0,
         };
         let before = bus.read_long(ROM_BASE as u32);
         bus.write_long(ROM_BASE as u32, 0xDEAD_BEEF);
@@ -3327,6 +3378,7 @@ mod tests {
             dcache: None,
             dbg_irq_window: None,
             last_fetch_cache_hit: false,
+            sampled_irq_level: 0,
         };
         let addr = SLOW_RAM_BASE as u32 + 64 * 1024;
         // A write into unmapped space still drives the bus: the following
@@ -3849,6 +3901,55 @@ mod tests {
         assert_eq!(machine.d(0), 0x11);
         assert_eq!(machine.pc(), 0x0000_0106);
         assert_eq!(machine.bus().delivered_irq_pending, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn irq_recognition_uses_previous_instruction_ipl_sample() -> Result<()> {
+        // The 68000 latches its IPL pins during bus cycles: a level that
+        // rises AFTER an instruction's last bus access is not seen at the
+        // next instruction boundary -- it is recognized one instruction
+        // later, once a bus access has sampled the new level.
+        let mut bus = test_bus_with_pc(0x0000_0100);
+        write_program(
+            &mut bus,
+            0x0000_0100,
+            &[
+                0x46FC, 0x2000, // MOVE #$2000,SR opens the IPL mask
+                0x4E71, 0x4E71, 0x4E71, 0x4E71, 0x4E71, 0x4E71, // NOP run
+            ],
+        );
+        write_program(&mut bus, 0x0000_0200, &[0x7007]); // handler: MOVEQ #7,D0
+        set_autovector(&mut bus, 3, 0x0000_0200);
+        bus.paula.intena = INT_MASTER | INT_VERTB;
+        // Non-zero setting = the IPL pipe (armed when the device tick sees
+        // the poked level below) plus the boundary-sampling delay.
+        bus.irq_latency_setting = 5;
+
+        let mut machine = M68kMachine::new(bus, CpuModel::M68000, false)?;
+        machine.bus_mut().agnus.hpos = 0x21;
+
+        machine.step_slice(1)?; // MOVE to SR; samples see no pending level
+        machine.bus_mut().paula.intreq = INT_VERTB; // level 3 rises post-sample
+
+        machine.step_slice(1)?; // boundary sample is stale: must not be taken
+        assert_eq!(
+            machine.d(0),
+            0,
+            "IRQ must not be taken before the pipe expires and a bus access \
+             samples the new level"
+        );
+        assert_eq!(machine.pc(), 0x0000_0106);
+
+        // The 5-cck pipe expires within the next couple of 2-cck NOPs; the
+        // first bus access after that samples the level and the following
+        // boundary takes the interrupt.
+        machine.step_slice(5)?;
+        assert_eq!(
+            machine.d(0),
+            7,
+            "handler must run once pipe + sample elapse"
+        );
         Ok(())
     }
 

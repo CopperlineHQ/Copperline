@@ -116,8 +116,9 @@ authoritative list. The most useful ones:
 
 Timing-model knobs that pair well with the debugger:
 
-- `COPPERLINE_IRQ_LATENCY_CCK=N` -- override the modelled 68000
-  interrupt-recognition latency (default 65 colour clocks; `0` disables).
+- `COPPERLINE_IRQ_LATENCY_CCK=N` -- override the modelled Paula INTREQ-to-
+  IPL-pin pipe (default 5 colour clocks; `0` also disables the 68000
+  boundary-sampling delay, delivering interrupts immediately).
 - `COPPERLINE_DBG_AFTER=SECS` / `COPPERLINE_DBG_UNTIL=SECS` -- bound
   debugger and renderer diagnostics to an emulated-time window. Renderer
   diagnostics parse these bounds once when their diagnostic option is first

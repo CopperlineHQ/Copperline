@@ -15,8 +15,8 @@ written in Rust. Cycle-driven means the whole machine -- the 68000-family
 CPU, Agnus, Denise, Paula, the CIAs, the floppy subsystem, and the chip bus
 that ties them together -- advances on one colour-clock timeline: the chip
 bus is arbitrated per colour clock, the Copper and blitter are scheduled
-per DMA slot with the hardware bus sequences, and 68000
-interrupt-recognition latency is modelled. That timing model is what lets
+per DMA slot with the hardware bus sequences, and the Paula IPL pipe plus
+68000 interrupt sampling are modelled. That timing model is what lets
 it run the current cycle-sensitive OCS and AGA regression set, as well as
 Kickstart, Workbench, games, and CDTV/CD32 titles.
 

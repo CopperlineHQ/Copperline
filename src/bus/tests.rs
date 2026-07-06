@@ -374,7 +374,7 @@ fn bus_with_pending_two_word_a_to_d_blit() -> Bus {
 
     assert!(!bus.custom_write(0x058, 2, ((1 << 6) | 2) as u64));
     assert!(bus.blitter.busy);
-    assert_eq!(bus.next_blitter_completion_cck(), Some(8));
+    assert_eq!(bus.next_blitter_completion_cck(), Some(11));
     bus
 }
 
@@ -1569,8 +1569,8 @@ fn copper_wait_with_bfd_caps_to_blitter_completion_after_position_match() {
     bus.blitter.bltcon0 = 0x0100;
     bus.blitter.start_scheduled((1 << 6) | 1, &bus.mem.chip_ram);
 
-    assert_eq!(bus.next_blitter_completion_cck(), Some(6));
-    assert_eq!(bus.next_copper_wakeup_cck(), Some(6));
+    assert_eq!(bus.next_blitter_completion_cck(), Some(9));
+    assert_eq!(bus.next_copper_wakeup_cck(), Some(9));
 }
 
 #[test]
@@ -1589,9 +1589,9 @@ fn copper_wait_with_bfd_clear_resumes_after_busy_blitter_finishes() {
 
     bus.blitter.bltcon0 = 0x0100;
     bus.blitter.start_scheduled((1 << 6) | 1, &bus.mem.chip_ram);
-    assert_eq!(bus.next_copper_wakeup_cck(), Some(6));
+    assert_eq!(bus.next_copper_wakeup_cck(), Some(9));
 
-    bus.advance_chipset(5);
+    bus.advance_chipset(8);
     assert!(bus.copper.waiting().is_some());
     assert_eq!(bus.denise.palette[0], 0);
 
@@ -1603,10 +1603,11 @@ fn copper_wait_with_bfd_clear_resumes_after_busy_blitter_finishes() {
     assert_eq!(bus.denise.palette[0], 0);
 
     // Once the blitter frees the bus, the Copper spends a dummy wake-up
-    // cycle, then its MOVE fetch writes at hpos 0x2C.
-    bus.advance_chipset(4);
+    // cycle, then its MOVE fetches land on the even copper slots and the
+    // write appears at hpos 0x30.
+    bus.advance_chipset(8);
     assert_eq!(bus.denise.palette[0], 0x0555);
-    assert_eq!(bus.current_render_events()[0].hpos, 0x2C);
+    assert_eq!(bus.current_render_events()[0].hpos, 0x30);
 }
 
 #[test]
@@ -1877,7 +1878,7 @@ fn blitter_completion_deadline_skips_fixed_dma_slots() {
     bus.denise.ddfstrt = 0x0038;
     bus.denise.ddfstop = 0x00D0;
     bus.agnus.vpos = 0x40; // inside the default vertical display window
-    bus.agnus.hpos = 0x03D;
+    bus.agnus.hpos = 0x03A;
     bus.blitter.bltcon0 = 0x09F0; // A -> D copy: every A/D slot is a bus access
     bus.blitter.bltafwm = 0xFFFF;
     bus.blitter.bltalwm = 0xFFFF;
@@ -1886,16 +1887,17 @@ fn blitter_completion_deadline_skips_fixed_dma_slots() {
     write_chip_word(&mut bus, 0x10, 0x1234);
     bus.blitter.start_scheduled((1 << 6) | 1, &bus.mem.chip_ram);
 
-    assert_eq!(bus.blitter.scheduled_slots_remaining(), Some(6));
-    // Two internal lead-in cycles elapse at 0x3D/0x3E regardless of DMA,
-    // then the A fetch must skip the plane-1 bitplane fetch slot at 0x3F
-    // (granted at 0x40), D writes at 0x41, the internal E cycle passes at
-    // 0x42, and the final F write lands at 0x43: 7 color clocks in all.
-    assert_eq!(bus.next_blitter_completion_cck(), Some(7));
+    assert_eq!(bus.blitter.scheduled_slots_remaining(), Some(9));
+    // Five internal lead-in cycles elapse at 0x3A-0x3E regardless of DMA
+    // (the BLTSIZE commit + startup extras plus StartDelay/Init), then the
+    // A fetch must skip the plane-1 bitplane fetch slot at 0x3F (granted at
+    // 0x40), D writes at 0x41, the internal E cycle passes at 0x42, and the
+    // final F write lands at 0x43: 10 color clocks in all.
+    assert_eq!(bus.next_blitter_completion_cck(), Some(10));
 
     // After the internal lead-in the blit's A access is pending and the
     // bitplane fetch owns its fixed slot.
-    bus.advance_chipset(2);
+    bus.advance_chipset(5);
     assert!(bus.blitter.busy);
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Bitplane);
 
@@ -1929,17 +1931,17 @@ fn blitter_completion_deadline_accounts_for_copper_dma_slots() {
     write_chip_word(&mut bus, 0x10, 0x1234);
     bus.blitter.start_scheduled((1 << 6) | 1, &bus.mem.chip_ram);
 
-    assert_eq!(bus.blitter.scheduled_slots_remaining(), Some(6));
+    assert_eq!(bus.blitter.scheduled_slots_remaining(), Some(9));
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Copper);
-    // Two internal lead-in cycles pass under the Copper's fetches at
-    // 0x20/0x21, then the A and D accesses take the Copper's idle halves
-    // (0x23, 0x25), the internal E cycle passes at 0x26, and the final F
-    // write lands at 0x27: 8 color clocks in all.
-    assert_eq!(bus.next_blitter_completion_cck(), Some(8));
+    // Five internal lead-in cycles pass under the Copper's fetches at
+    // 0x20-0x24, then the A and D accesses take the Copper's idle halves
+    // (0x25, 0x27), the internal E cycle passes at 0x28, and the final F
+    // write lands at 0x29: 10 color clocks in all.
+    assert_eq!(bus.next_blitter_completion_cck(), Some(10));
 
     bus.advance_chipset(6);
     assert!(bus.blitter.busy);
-    assert_eq!(bus.next_blitter_completion_cck(), Some(2));
+    assert_eq!(bus.next_blitter_completion_cck(), Some(4));
 
     bus.advance_chipset(4);
     assert!(!bus.blitter.busy);
@@ -7773,12 +7775,12 @@ fn bltsize_starts_dma_and_preempts_cpu_slice_without_irq_preempt() {
     assert!(bus.slice_preempted);
     assert_eq!(bus.paula.intreq & INT_BLIT, 0);
     assert!(bus.blitter.busy);
-    assert_eq!(bus.next_blitter_completion_cck(), Some(6));
+    assert_eq!(bus.next_blitter_completion_cck(), Some(9));
     bus.advance_chipset(1);
     assert_eq!(bus.paula.intreq & INT_BLIT, 0);
     assert!(bus.blitter.busy);
-    assert_eq!(bus.next_blitter_completion_cck(), Some(5));
-    bus.advance_chipset(5);
+    assert_eq!(bus.next_blitter_completion_cck(), Some(8));
+    bus.advance_chipset(8);
     assert_ne!(bus.paula.intreq & INT_BLIT, 0);
     assert!(!bus.blitter.busy);
     assert_eq!(bus.next_blitter_completion_cck(), None);
@@ -7878,7 +7880,7 @@ fn busy_bltcon1_line_bit_write_updates_register_without_reinterpreting_pipeline_
     assert_eq!(bus.blitter.bltcon1, 0x0001);
     assert_eq!(bus.paula.intreq & INT_BLIT, 0);
 
-    bus.advance_chipset(8);
+    bus.advance_chipset(11);
     assert!(!bus.blitter.busy);
     assert_eq!(&bus.mem.chip_ram[0x20..0x24], &[0x11, 0x11, 0x22, 0x22]);
     assert_ne!(bus.paula.intreq & INT_BLIT, 0);
@@ -7909,9 +7911,9 @@ fn busy_bltsize_write_finishes_current_blit_then_starts_replacement() {
     // interrupt request: INTREQ.BLIT means "the last started blit has
     // finished", and the replacement has not finished yet.
     assert_eq!(bus.paula.intreq & INT_BLIT, 0);
-    assert_eq!(bus.next_blitter_completion_cck(), Some(6));
+    assert_eq!(bus.next_blitter_completion_cck(), Some(9));
 
-    bus.advance_chipset(6);
+    bus.advance_chipset(9);
     assert!(!bus.blitter.busy);
     assert_eq!(&bus.mem.chip_ram[0x24..0x26], &[0x33, 0x33]);
     // The replacement blit's completion raises the request.
@@ -7935,8 +7937,8 @@ fn busy_blitter_dmacon_clear_gates_dma_without_finishing_pending_blit() {
     assert_eq!(&bus.mem.chip_ram[0x20..0x24], &[0, 0, 0, 0]);
 
     assert!(!bus.custom_write(0x096, 2, (0x8000 | DMACON_BLTEN) as u64));
-    assert_eq!(bus.next_blitter_completion_cck(), Some(8));
-    bus.advance_chipset(8);
+    assert_eq!(bus.next_blitter_completion_cck(), Some(11));
+    bus.advance_chipset(11);
 
     assert!(!bus.blitter.busy);
     assert_eq!(&bus.mem.chip_ram[0x20..0x24], &[0x11, 0x11, 0x22, 0x22]);
@@ -7977,9 +7979,9 @@ fn blithog_clear_busy_blitter_yields_to_cpu_only_after_starvation() {
     write_chip_word(&mut bus, 0x34, 0x7777);
     write_chip_word(&mut bus, 0x36, 0x8888);
     bus.blitter.start_scheduled((1 << 6) | 4, &bus.mem.chip_ram);
-    // Walk the blit past its two internal lead-in cycles (those are
+    // Walk the blit past its five internal lead-in cycles (those are
     // CPU-available) so its pending slot is an A-channel bus access.
-    bus.advance_chipset(2);
+    bus.advance_chipset(5);
     let initial_slots = bus.blitter.scheduled_slots_remaining();
     bus.set_cpu_bus_arbitration_enabled(true);
     bus.begin_cpu_slice();
@@ -7998,7 +8000,7 @@ fn blithog_clear_busy_blitter_yields_to_cpu_only_after_starvation() {
     assert_eq!(bus.paula.intreq & INT_BLIT, 0);
     assert_eq!(
         bus.agnus.hpos,
-        0x22 + u32::from(BLITTER_SLOWDOWN_CPU_MISS_LIMIT) + 2
+        0x25 + u32::from(BLITTER_SLOWDOWN_CPU_MISS_LIMIT) + 2
     );
     // The granted slot was the CPU's; the trailing bus-free tail cck is
     // reclaimed by the still-busy blitter, so it is the last chip-bus owner.
@@ -8012,9 +8014,9 @@ fn blithog_clear_bls_count_yields_blitter_priority_slot_to_cpu() {
     bus.agnus.hpos = 0x22;
     bus.blitter.bltcon0 = 0x09F0;
     bus.blitter.start_scheduled((1 << 6) | 1, &bus.mem.chip_ram);
-    // Walk the blit past its two internal lead-in cycles (those are
+    // Walk the blit past its five internal lead-in cycles (those are
     // CPU-available) so its pending slot is an A-channel bus access.
-    bus.advance_chipset(2);
+    bus.advance_chipset(5);
 
     assert_eq!(bus.scheduled_dma_owner(true), ChipBusOwner::Blitter);
 
@@ -8070,7 +8072,7 @@ fn ecs_bltcon1_doff_suppresses_destination_writes_but_advances_pointer() {
     assert!(!bus.custom_write(0x042, 2, BLTCON1_DOFF as u64));
     assert!(!bus.custom_write(0x058, 2, ((1 << 6) | 1) as u64));
 
-    bus.advance_chipset(2);
+    bus.advance_chipset(5);
     assert!(bus.blitter.busy);
     assert_eq!(&bus.mem.chip_ram[0x20..0x22], &[0xAA, 0xAA]);
     assert_eq!(bus.blitter.bltdpt, 0x20);
@@ -8540,9 +8542,9 @@ fn bltpri_stalls_cpu_chip_access_through_blitter_access_cycles() {
     bus.mem.chip_ram[0x10] = 0x12;
     bus.mem.chip_ram[0x11] = 0x34;
     bus.blitter.start_scheduled((1 << 6) | 1, &bus.mem.chip_ram);
-    // Walk the blit past its two internal lead-in cycles so its pending
+    // Walk the blit past its five internal lead-in cycles so its pending
     // slot is the A-channel access.
-    bus.advance_chipset(2);
+    bus.advance_chipset(5);
     bus.set_cpu_bus_arbitration_enabled(true);
 
     bus.grant_cpu_bus_access(2, CpuBusAccessKind::Read);
@@ -8592,9 +8594,9 @@ fn blithog_set_blocks_cpu_slowdown_back_pressure_until_blitter_finishes() {
     write_chip_word(&mut bus, 0x34, 0x7777);
     write_chip_word(&mut bus, 0x36, 0x8888);
     bus.blitter.start_scheduled((1 << 6) | 4, &bus.mem.chip_ram);
-    // Walk the blit past its two internal lead-in cycles so its pending
+    // Walk the blit past its five internal lead-in cycles so its pending
     // slot is the first A-channel access.
-    bus.advance_chipset(2);
+    bus.advance_chipset(5);
     bus.set_cpu_bus_arbitration_enabled(true);
 
     bus.grant_cpu_bus_access(2, CpuBusAccessKind::Read);
