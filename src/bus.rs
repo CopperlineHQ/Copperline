@@ -3643,7 +3643,18 @@ impl Bus {
         if let Some(cck) = self.cck_until_pending_copper_frame_start() {
             return Some(cck);
         }
-        let wait = self.copper.waiting()?;
+        let Some(wait) = self.copper.waiting() else {
+            // A running Copper (or one in a WAIT/SKIP tail) fetches an
+            // instruction word every other colour clock, and its next MOVE
+            // can raise INTREQ: bound the stopped-CPU fast-forward to a
+            // couple of colour clocks so a wake-up interrupt written by the
+            // instruction stream is recognized on time. A halted Copper
+            // (illegal register write) fetches nothing until restarted.
+            if self.copper.is_stopped() {
+                return None;
+            }
+            return Some(2);
+        };
         let position_cck = self.cck_until_copper_wait_position(wait)?;
         if position_cck == 0 && wait.blitter_wait_enabled() && self.blitter.busy {
             return self.next_blitter_completion_cck();

@@ -1659,10 +1659,18 @@ fn real_slice_accounting(
     if run.cpu_stopped {
         // A stopped CPU performs no bus activity; the idle period is paced by
         // the requested fast-forward span and advanced post-hoc by step_real.
-        let device_cck = run.actual_cpu_cck.max(cck_for_instructions(
-            requested_instructions,
-            cpu_cycles_per_instruction,
-        ));
+        // A pure idle single step (no instruction retired) advances one
+        // colour clock: a STOPped 68000 samples its IPL pins every bus-cycle
+        // period, so the wake-up quantum near a device event is 2 CPU clocks,
+        // not a whole instruction's worth of time.
+        let device_cck = if run.actual_instructions == 0 && requested_instructions == 1 {
+            run.actual_cpu_cck.max(1)
+        } else {
+            run.actual_cpu_cck.max(cck_for_instructions(
+                requested_instructions,
+                cpu_cycles_per_instruction,
+            ))
+        };
         return RealSliceAccounting {
             budget_debit: requested_instructions.max(run.actual_instructions).max(1),
             device_cck,
