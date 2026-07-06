@@ -1798,12 +1798,14 @@ pub fn build_machine(
             .as_ref()
             .expect("config validated [a4091] rom");
         let rom = crate::a4091::A4091::load_rom(rom_path)?;
-        let board = crate::a4091::A4091::new(rom)?;
-        if cfg.a4091.units.iter().any(Option::is_some) {
-            log::warn!(
-                "a4091: the 53C710 SCSI core is not implemented yet; \
-                 [a4091] drive images are ignored"
+        let mut board = crate::a4091::A4091::new(rom)?;
+        for (unit, drive) in cfg.a4091.units.iter().enumerate() {
+            let Some(drive) = drive else { continue };
+            board.attach_drive(
+                unit,
+                crate::scsi::ScsiDisk::open(&drive.path, unit, drive.volume_name.as_deref())?,
             );
+            info!("a4091: unit {unit} {}", drive.path.display());
         }
         let slot = devices.len();
         zorro.add_board(crate::zorro::BoardSpec::a4091(slot))?;

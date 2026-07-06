@@ -27,7 +27,9 @@
 //! the same nibbles are also baked into the first `$60` bytes of the real
 //! EPROM, which is how the physical board presents them.
 
+use crate::scsi::{ScsiDisk, ScsiExec};
 use anyhow::{bail, Result};
+use std::collections::VecDeque;
 use std::path::Path;
 
 /// The 53C710 register window within the board space.
@@ -128,6 +130,70 @@ const CTEST2_SFP: u8 = 0x10;
 /// SCSI FIFO depth.
 const SCSI_FIFO_DEPTH: usize = 8;
 
+/// SDID: SCSI Destination ID the SELECT resolved to.
+const REG_SDID: usize = 0x01;
+/// SFBR: SCSI First Byte Received -- the last byte the SCRIPTS moved, which
+/// the transfer-control data compares (JUMP IF 0xNN) test against.
+const REG_SFBR: usize = 0x0B;
+/// DSA: the 32-bit Data Structure Address that table-indirect operands (the
+/// block-move tables and the SELECT target) are relative to.
+const REG_DSA: usize = 0x10;
+/// SSTAT0 SCSI-interrupt causes the phase engine raises.
+const SSTAT0_STO: u8 = 0x20; // (re)selection timeout -- no such target
+/// Byte counts of the SCRIPTS data structure entries live in the low 24 bits.
+const DBC_MASK: u32 = 0x00FF_FFFF;
+
+/// SCSI bus information-transfer phases, encoded as the MSG/C_D/I_O signal
+/// triple the 53C710 phase compares match against.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Phase {
+    DataOut,
+    DataIn,
+    Command,
+    Status,
+    MsgOut,
+    MsgIn,
+}
+
+impl Phase {
+    fn bits(self) -> u8 {
+        match self {
+            Phase::DataOut => 0,
+            Phase::DataIn => 1,
+            Phase::Command => 2,
+            Phase::Status => 3,
+            Phase::MsgOut => 6,
+            Phase::MsgIn => 7,
+        }
+    }
+}
+
+/// A live SCSI connection (nexus) driven by the SCRIPTS phase engine. The
+/// target sequences MSG_OUT (accept IDENTIFY) -> COMMAND (accept the CDB) ->
+/// DATA_IN/OUT -> STATUS -> MSG_IN (command complete) -> disconnect; each
+/// block move transfers one phase's worth and advances the state.
+struct Connection {
+    target: usize,
+    lun: u8,
+    phase: Phase,
+    /// Bytes the target still owes the initiator in the current in-phase
+    /// (DATA_IN / STATUS / MSG_IN).
+    out: VecDeque<u8>,
+    /// The command block collected during COMMAND phase.
+    cdb: Vec<u8>,
+    /// DATA_OUT sink: bytes collected and the count still expected.
+    data_out: Vec<u8>,
+    data_out_needed: usize,
+    /// Ending status byte, delivered in STATUS phase.
+    status: u8,
+    /// After the current MSG_IN drains, the phase to resume in (COMMAND after
+    /// a rejected sync message; MSG_IN keeps disconnect_ready for completion).
+    after_msg_in: Phase,
+    /// The command-complete message has been delivered; WAIT DISCONNECT frees
+    /// the bus.
+    disconnect_ready: bool,
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct A4091 {
     rom: Vec<u8>,
@@ -143,6 +209,14 @@ pub struct A4091 {
     /// The SCSI FIFO: 8 entries, 8 data bits plus parity. SODL pushes it
     /// (with CTEST4.SFWR), CTEST3 pops it, SSTAT2 counts it.
     scsi_fifo: Vec<u16>,
+    /// SCSI-2 disk targets on the bus, indexed by SCSI ID (0-6; 7 is the
+    /// host adapter). Kept across resets; part of save state.
+    #[serde(default)]
+    targets: [Option<ScsiDisk>; 7],
+    /// The live nexus while a SCRIPTS command is in flight. Rebuilt as the
+    /// driver reissues commands, so it is not persisted.
+    #[serde(skip)]
+    conn: Option<Connection>,
 }
 
 /// 53C710 register-file reset values at their big-endian byte addresses:
@@ -175,7 +249,22 @@ impl A4091 {
             regs: reset_regs(),
             dma_fifo: Default::default(),
             scsi_fifo: Vec::new(),
+            targets: Default::default(),
+            conn: None,
         })
+    }
+
+    /// Attach a disk target at the given SCSI ID (0-6).
+    pub fn attach_drive(&mut self, id: usize, disk: ScsiDisk) {
+        if id < self.targets.len() {
+            self.targets[id] = Some(disk);
+        }
+    }
+
+    /// Whether a target answers at the given SCSI ID.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn target_present(&self, id: usize) -> bool {
+        self.targets.get(id).is_some_and(Option::is_some)
     }
 
     /// The parity bit the chip generates for a pushed SCSI FIFO byte: odd
@@ -236,6 +325,7 @@ impl A4091 {
             fifo.clear();
         }
         self.scsi_fifo.clear();
+        self.conn = None;
     }
 
     pub fn load_rom(path: &Path) -> Result<Vec<u8>> {
@@ -305,46 +395,323 @@ impl A4091 {
         }
     }
 
-    /// Run the SCRIPTS processor from DSP until it interrupts. Enough of
-    /// the instruction set for the boot ROM's self-tests: register-write
-    /// (MOVE immediate to register), Memory Move, RETURN, and INT; anything
-    /// else stops with an illegal-instruction interrupt, as the real chip
-    /// does for garbage fetches. Block moves and the full transfer-control
-    /// set come with the SCSI phase engine.
+    /// A big-endian longword read from Amiga RAM (a SCRIPTS table entry).
+    fn dma_read32(&self, host: &mut crate::zorro_device::DeviceHost, addr: u32) -> u32 {
+        let mut b = [0u8; 4];
+        host.dma_read(addr, &mut b);
+        u32::from_be_bytes(b)
+    }
+
+    /// The SCSI phase the connected target is presenting, for the SCRIPTS
+    /// phase compares. `0xFF` when the bus is free (matches no phase).
+    fn phase_bits(&self) -> u8 {
+        self.conn.as_ref().map_or(0xFF, |c| c.phase.bits())
+    }
+
+    /// Begin a SELECT: resolve the target from the `ds_Device` table entry at
+    /// DSA+offset (a one-hot ID bitmask in bits 16-23). A present target opens
+    /// a nexus in MSG_OUT (to accept the IDENTIFY); an empty ID raises a
+    /// selection timeout, as the driver expects when probing for devices.
+    fn scsi_select(&mut self, host: &mut crate::zorro_device::DeviceHost, offset: u32) {
+        let dsa = self.reg32(REG_DSA);
+        let entry = self.dma_read32(host, dsa.wrapping_add(offset));
+        let id_bits = (entry >> 16) & 0xFF;
+        let target = id_bits.trailing_zeros() as usize;
+        if id_bits == 0 || !self.target_present(target) {
+            self.regs[REG_SSTAT0] |= SSTAT0_STO;
+            self.conn = None;
+            return;
+        }
+        self.regs[REG_SDID] = target as u8;
+        self.conn = Some(Connection {
+            target,
+            lun: 0,
+            phase: Phase::MsgOut,
+            out: VecDeque::new(),
+            cdb: Vec::new(),
+            data_out: Vec::new(),
+            data_out_needed: 0,
+            status: 0,
+            after_msg_in: Phase::Command,
+            disconnect_ready: false,
+        });
+    }
+
+    /// Table-indirect block move for the current phase: transfer up to the
+    /// entry's byte count between the target and the initiator buffer at
+    /// DSA+offset, advancing the target's phase as each phase drains.
+    fn run_block_move(&mut self, host: &mut crate::zorro_device::DeviceHost, offset: u32) {
+        let dsa = self.reg32(REG_DSA);
+        let count = (self.dma_read32(host, dsa.wrapping_add(offset)) & DBC_MASK) as usize;
+        let addr = self.dma_read32(host, dsa.wrapping_add(offset).wrapping_add(4));
+        let Some(phase) = self.conn.as_ref().map(|c| c.phase) else {
+            return;
+        };
+        match phase {
+            // Initiator -> target directions.
+            Phase::MsgOut => {
+                let mut msg = vec![0u8; count];
+                host.dma_read(addr, &mut msg);
+                if let Some(&b) = msg.last() {
+                    self.regs[REG_SFBR] = b;
+                }
+                self.scsi_msg_out(&msg);
+            }
+            Phase::Command => {
+                let mut cdb = vec![0u8; count];
+                host.dma_read(addr, &mut cdb);
+                if let Some(&b) = cdb.last() {
+                    self.regs[REG_SFBR] = b;
+                }
+                self.scsi_command(&cdb);
+            }
+            Phase::DataOut => {
+                let mut buf = vec![0u8; count];
+                host.dma_read(addr, &mut buf);
+                if let Some(&b) = buf.last() {
+                    self.regs[REG_SFBR] = b;
+                }
+                if let Some(c) = self.conn.as_mut() {
+                    c.data_out.extend_from_slice(&buf);
+                }
+                let done = self
+                    .conn
+                    .as_ref()
+                    .is_some_and(|c| c.data_out.len() >= c.data_out_needed);
+                if done {
+                    self.scsi_data_out_done();
+                }
+            }
+            // Target -> initiator directions.
+            Phase::DataIn | Phase::Status | Phase::MsgIn => {
+                let bytes: Vec<u8> = {
+                    let c = self.conn.as_mut().unwrap();
+                    let n = count.min(c.out.len());
+                    c.out.drain(..n).collect()
+                };
+                if let Some(&b) = bytes.last() {
+                    self.regs[REG_SFBR] = b;
+                }
+                host.dma_write(addr, &bytes);
+                if self.conn.as_ref().is_some_and(|c| c.out.is_empty()) {
+                    self.advance_in_phase();
+                }
+            }
+        }
+    }
+
+    /// Consume the MSG_OUT bytes (IDENTIFY plus any negotiation message). A
+    /// following extended message (a sync/wide request we do not support) is
+    /// answered with MESSAGE REJECT; otherwise proceed to COMMAND.
+    fn scsi_msg_out(&mut self, msg: &[u8]) {
+        let Some(conn) = self.conn.as_mut() else {
+            return;
+        };
+        if let Some(&id) = msg.first() {
+            if id & 0x80 != 0 {
+                conn.lun = id & 0x07;
+            }
+        }
+        if msg.len() > 1 && msg.get(1) == Some(&0x01) {
+            conn.out = VecDeque::from(vec![0x07]); // MESSAGE REJECT
+            conn.after_msg_in = Phase::Command;
+            conn.phase = Phase::MsgIn;
+        } else {
+            conn.phase = Phase::Command;
+        }
+    }
+
+    /// Run the collected CDB against the target and set up the data phase.
+    fn scsi_command(&mut self, cdb: &[u8]) {
+        let Some((target, lun)) = self.conn.as_ref().map(|c| (c.target, c.lun)) else {
+            return;
+        };
+        if let Some(c) = self.conn.as_mut() {
+            c.cdb = cdb.to_vec();
+        }
+        let (exec, status) = match self.targets[target].as_mut() {
+            Some(disk) => disk.execute(cdb, lun),
+            None => (ScsiExec::NoData, 0x02),
+        };
+        let Some(conn) = self.conn.as_mut() else {
+            return;
+        };
+        conn.status = status;
+        match exec {
+            ScsiExec::DataIn(data) if !data.is_empty() => {
+                conn.out = VecDeque::from(data);
+                conn.phase = Phase::DataIn;
+            }
+            ScsiExec::DataOut(n) => {
+                conn.data_out_needed = n;
+                conn.data_out.clear();
+                conn.phase = Phase::DataOut;
+            }
+            // No data, or an empty data-in: straight to status.
+            _ => {
+                conn.out = VecDeque::from(vec![status]);
+                conn.phase = Phase::Status;
+            }
+        }
+    }
+
+    /// The DATA_OUT payload is complete: hand it to the target and move to
+    /// status.
+    fn scsi_data_out_done(&mut self) {
+        let Some((target, cdb, data)) = self
+            .conn
+            .as_ref()
+            .map(|c| (c.target, c.cdb.clone(), c.data_out.clone()))
+        else {
+            return;
+        };
+        let status = match self.targets[target].as_mut() {
+            Some(disk) => disk.complete_out(&cdb, &data),
+            None => 0x02,
+        };
+        if let Some(conn) = self.conn.as_mut() {
+            conn.status = status;
+            conn.out = VecDeque::from(vec![status]);
+            conn.phase = Phase::Status;
+        }
+    }
+
+    /// A target->initiator phase drained: advance to the next. DATA_IN is
+    /// followed by STATUS, STATUS by the command-complete MSG_IN, and the
+    /// MESSAGE REJECT MSG_IN resumes COMMAND.
+    fn advance_in_phase(&mut self) {
+        let Some(conn) = self.conn.as_mut() else {
+            return;
+        };
+        match conn.phase {
+            Phase::DataIn => {
+                conn.out = VecDeque::from(vec![conn.status]);
+                conn.phase = Phase::Status;
+            }
+            Phase::Status => {
+                conn.out = VecDeque::from(vec![0x00]); // command complete
+                conn.phase = Phase::MsgIn;
+                conn.disconnect_ready = true;
+            }
+            Phase::MsgIn if !conn.disconnect_ready => {
+                conn.phase = conn.after_msg_in;
+            }
+            // A completed command's MSG_IN stays until WAIT DISCONNECT.
+            _ => {}
+        }
+    }
+
+    /// Evaluate a transfer-control condition (phase and/or data compare
+    /// against SFBR), returning whether the branch is taken.
+    fn branch_taken(&self, insn: &[u8; 8]) -> bool {
+        let dcmd = insn[0];
+        let flags = insn[1];
+        let want_true = flags & 0x08 != 0;
+        let mut cond = true;
+        if flags & 0x02 != 0 {
+            cond &= self.phase_bits() == (dcmd & 7);
+        }
+        if flags & 0x04 != 0 {
+            let mask = insn[2];
+            let data = insn[3];
+            cond &= (self.regs[REG_SFBR] & !mask) == (data & !mask);
+        }
+        cond == want_true
+    }
+
+    /// Run the SCRIPTS processor from DSP until it interrupts, disconnects, or
+    /// hits an instruction it does not implement. Covers the driver's I/O
+    /// script: SELECT, table-indirect block moves through the SCSI phases,
+    /// conditional JUMP/CALL/RETURN/INT, the SET/CLEAR handshake ops, and
+    /// WAIT DISCONNECT, plus the self-test's register writes and Memory Move.
     fn run_scripts(&mut self, host: &mut crate::zorro_device::DeviceHost) {
-        for _ in 0..64 {
+        let diag = crate::envcfg::flag("COPPERLINE_DIAG_A4091");
+        for _ in 0..4096 {
             let dsp = self.reg32(REG_DSP);
             let mut insn = [0u8; 8];
             host.dma_read(dsp, &mut insn);
             self.set_reg32(REG_DSP, dsp.wrapping_add(8));
             let dcmd = insn[0];
-            if crate::envcfg::flag("COPPERLINE_DIAG_A4091") {
-                log::info!("a4091 scripts: fetch {dsp:#010X}: {insn:02X?}");
+            if diag {
+                log::info!(
+                    "a4091 scripts: fetch {dsp:#010X}: {insn:02X?} phase={:02X}",
+                    self.phase_bits()
+                );
             }
             match dcmd >> 6 {
-                // Register read-modify-write; only the "move immediate to
-                // register" form (0x78) is implemented.
-                0b01 if dcmd == 0x78 => {
-                    let reg = Self::le_to_be((insn[1] & 0x3F) as usize);
-                    self.regs[reg] = insn[2];
+                // Block move: table-indirect transfer in the current phase.
+                0b00 => {
+                    let offset = u32::from_be_bytes(insn[4..8].try_into().unwrap());
+                    self.run_block_move(host, offset);
                 }
-                // Transfer control: RETURN and INT.
-                0b10 => match (dcmd >> 3) & 7 {
-                    2 => {
-                        let temp = self.reg32(REG_TEMP);
-                        self.set_reg32(REG_DSP, temp);
+                // I/O instructions.
+                0b01 => match (dcmd >> 3) & 7 {
+                    // SELECT: target from the table entry at DSA+offset.
+                    0 => {
+                        let offset = u32::from_be_bytes(insn[0..4].try_into().unwrap()) & DBC_MASK;
+                        self.scsi_select(host, offset);
+                        if self.conn.is_none() {
+                            return; // selection timeout: let the ISR handle it
+                        }
                     }
-                    3 => {
-                        let dsps = u32::from_be_bytes(insn[4..8].try_into().unwrap());
-                        self.set_reg32(REG_DSPS, dsps);
-                        self.regs[REG_DSTAT] |= DSTAT_SIR;
-                        return;
+                    // WAIT DISCONNECT: free the bus after the target completes.
+                    1 => {
+                        if self.conn.as_ref().is_some_and(|c| c.disconnect_ready) {
+                            self.conn = None;
+                        }
                     }
+                    // SET / CLEAR ATN/ACK: handshake, no byte-level model.
+                    3 | 4 => {}
+                    // MOVE immediate to register (self-test path).
+                    7 if dcmd == 0x78 => {
+                        let reg = Self::le_to_be((insn[1] & 0x3F) as usize);
+                        self.regs[reg] = insn[2];
+                    }
+                    // WAIT RESELECT and register-to-register moves live only on
+                    // the reconnect path, which the synchronous model never
+                    // reaches.
                     _ => {
                         self.regs[REG_DSTAT] |= DSTAT_IID;
                         return;
                     }
                 },
+                // Transfer control: JUMP / CALL / RETURN / INT, conditional.
+                0b10 => {
+                    let taken = self.branch_taken(&insn);
+                    let op = (dcmd >> 3) & 7;
+                    if op == 3 {
+                        // INT: interrupt the host with the operand in DSPS.
+                        if taken {
+                            let dsps = u32::from_be_bytes(insn[4..8].try_into().unwrap());
+                            self.set_reg32(REG_DSPS, dsps);
+                            self.regs[REG_DSTAT] |= DSTAT_SIR;
+                            return;
+                        }
+                    } else if taken {
+                        let operand = u32::from_be_bytes(insn[4..8].try_into().unwrap());
+                        let target = if insn[1] & 0x80 != 0 {
+                            dsp.wrapping_add(8).wrapping_add(operand) // relative
+                        } else {
+                            operand
+                        };
+                        match op {
+                            0 => self.set_reg32(REG_DSP, target), // JUMP
+                            1 => {
+                                // CALL: stack the return address in TEMP.
+                                self.set_reg32(REG_TEMP, dsp.wrapping_add(8));
+                                self.set_reg32(REG_DSP, target);
+                            }
+                            2 => {
+                                let temp = self.reg32(REG_TEMP); // RETURN
+                                self.set_reg32(REG_DSP, temp);
+                            }
+                            _ => {
+                                self.regs[REG_DSTAT] |= DSTAT_IID;
+                                return;
+                            }
+                        }
+                    }
+                }
                 // Memory Move: 24-bit byte count, then source and
                 // destination addresses in a third fetched longword.
                 0b11 if dcmd & 0x38 == 0 => {
@@ -354,7 +721,6 @@ impl A4091 {
                     let count = u32::from_be_bytes(insn[0..4].try_into().unwrap()) & 0x00FF_FFFF;
                     let src = u32::from_be_bytes(insn[4..8].try_into().unwrap());
                     let dst = u32::from_be_bytes(dst);
-                    let diag = crate::envcfg::flag("COPPERLINE_DIAG_A4091");
                     for i in 0..count {
                         let b = self.dma_byte(host, src.wrapping_add(i));
                         self.dma_write_byte(host, dst.wrapping_add(i), b);
@@ -377,7 +743,7 @@ impl A4091 {
                 }
             }
         }
-        // Runaway script (e.g. a RETURN loop): stop as illegal.
+        // Runaway script: stop as illegal.
         self.regs[REG_DSTAT] |= DSTAT_IID;
     }
 
@@ -741,7 +1107,7 @@ mod tests {
             let v = b.read(io(REG_CTEST3), 1, &mut host);
             assert_eq!(v, u32::from(d), "byte {i}");
             let sfp = (b.read(io(REG_CTEST2), 1, &mut host) >> 4) & 1;
-            let even = u32::from(d.count_ones() & 1);
+            let even = d.count_ones() & 1;
             let expect = if i & 1 == 1 { even } else { even ^ 1 };
             assert_eq!(sfp, expect, "parity byte {i}");
             assert_eq!(b.read(io(REG_SSTAT2), 1, &mut host) >> 4, (7 - i) as u32);
