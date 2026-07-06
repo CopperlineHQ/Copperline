@@ -354,6 +354,9 @@ impl CpuCore {
     pub fn jump_vector<B: AddressBus>(&mut self, bus: &mut B, vector: u32) {
         // Any exception entry breaks an open 68060 pairing window.
         self.break_060_pipeline();
+        // Any vectored dispatch ends 68010 loop mode; the refill below
+        // restores normal instruction fetching.
+        self.loop_mode = false;
         self.last_exception_vector = Some(vector);
         let addr = (vector << 2).wrapping_add(self.vbr);
         self.pc = self.read_32(bus, addr);

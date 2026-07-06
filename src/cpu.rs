@@ -2645,6 +2645,7 @@ impl crate::debugger::BreakContext for MachineBreakContext<'_> {
 fn cpu_type_for_model(model: CpuModel) -> CpuType {
     match model {
         CpuModel::M68000 => CpuType::M68000,
+        CpuModel::M68010 => CpuType::M68010,
         CpuModel::M68EC020 => CpuType::M68EC020,
         CpuModel::M68020 => CpuType::M68020,
         CpuModel::M68030 => CpuType::M68030,
@@ -2668,7 +2669,7 @@ fn cache_lines_for_cpu_type(cpu_type: CpuType) -> usize {
 
 fn address_mask_for_model(model: CpuModel) -> u32 {
     match model {
-        CpuModel::M68000 | CpuModel::M68EC020 => ADDRESS_MASK_24BIT,
+        CpuModel::M68000 | CpuModel::M68010 | CpuModel::M68EC020 => ADDRESS_MASK_24BIT,
         CpuModel::M68020 | CpuModel::M68030 | CpuModel::M68040 | CpuModel::M68060 => {
             ADDRESS_MASK_32BIT
         }

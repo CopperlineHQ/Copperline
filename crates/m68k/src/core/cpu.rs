@@ -112,6 +112,21 @@ pub struct CpuCore {
     /// Change-of-flow flag for T0 trace (set by BRA, JMP, JSR, RTS, etc.)
     pub change_of_flow: bool,
 
+    // ========== 68010 loop mode ==========
+    /// A DBcc that branches -4 to a loopable one-word instruction holds the
+    /// pair in the prefetch queue and re-executes without instruction
+    /// fetches (68010 loop mode). While set, the queue is reseeded from the
+    /// held words each iteration and the end-of-instruction top-up is
+    /// suppressed; any exception or interrupt (jump_vector) drops the mode.
+    #[serde(default)]
+    pub loop_mode: bool,
+    /// The looped one-word body instruction (queue word 0 at entry).
+    #[serde(default)]
+    pub loop_body_word: u16,
+    /// The looping DBcc opcode (queue word 1 at entry).
+    #[serde(default)]
+    pub loop_dbcc_word: u16,
+
     // ========== Prefetch (Part E.1, 68000 only) ==========
     /// The 68000's two-word instruction prefetch queue (IRD/IRC model).
     ///
@@ -421,6 +436,9 @@ impl CpuCore {
             int_level: 0,
             stopped: 0,
             change_of_flow: false,
+            loop_mode: false,
+            loop_body_word: 0,
+            loop_dbcc_word: 0,
             prefetch_queue: [0; 2],
             prefetch_count: 0,
             consume_without_prefetch: false,
@@ -659,11 +677,12 @@ impl CpuCore {
     // ========== Prefetch queue (Part E.1, 68000 only) ==========
 
     /// Whether the two-word prefetch queue models instruction fetching.
-    /// Only the 68000 path is prefetch-modeled; other CPU types keep the
-    /// direct fetch-at-PC behavior.
+    /// The 68000 and 68010 share the two-word IRD/IRC queue (the 68010 adds
+    /// loop mode on top of it); later CPU types keep the direct fetch-at-PC
+    /// behavior with their cache models layered above.
     #[inline]
     pub fn prefetch_enabled(&self) -> bool {
-        self.cpu_type == CpuType::M68000
+        matches!(self.cpu_type, CpuType::M68000 | CpuType::M68010)
     }
 
     // ========== Precise per-access timing (Part E.2, 68000 only) ==========
@@ -762,6 +781,9 @@ impl CpuCore {
     /// micro-operation). The fetch address is the first instruction-stream
     /// word the queue does not yet hold.
     pub fn top_up_prefetch_one<B: AddressBus>(&mut self, bus: &mut B) {
+        if self.loop_mode {
+            return;
+        }
         if !self.prefetch_enabled() || self.pc & 1 != 0 || self.prefetch_count >= 2 {
             return;
         }
@@ -782,6 +804,9 @@ impl CpuCore {
     /// already filled the queue), on a stopped CPU (STOP performs no
     /// further bus activity), and on non-prefetch CPU types.
     pub fn top_up_prefetch<B: AddressBus>(&mut self, bus: &mut B) {
+        if self.loop_mode {
+            return;
+        }
         if !self.prefetch_enabled() || self.pc & 1 != 0 || self.stopped != 0 {
             return;
         }

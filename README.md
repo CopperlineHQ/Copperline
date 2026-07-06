@@ -45,7 +45,7 @@ against real hardware.
   AROS ROM out of the box, as well as Kickstart 1.3 / 2.05 / 3.1 and DiagROM
   v2.0, and runs the current timing-sensitive OCS and AGA regression set at
   real speed.
-- **Configurable CPU** (68000 / 68EC020 / 68020 / 68030 / 68040) and clock,
+- **Configurable CPU** (68000 / 68010 / 68EC020 / 68020 / 68030 / 68040 / 68060) and clock,
   with an optional 68881/68882 FPU (default-on for the 68040).
 - **Peripherals**: a bit-timed keyboard (6500/1 MCU), mouse, USB gamepad
   (via the pure-Rust `gilrs`, no SDL2), 4-channel Paula audio, floppy
@@ -157,7 +157,7 @@ optional and missing fields use documented defaults.
 rom = "kickstart205.rom"
 
 [cpu]
-model = "68000"       # 68000, 68EC020, 68020, 68030, 68040
+model = "68000"       # 68000, 68010, 68EC020, 68020, 68030, 68040, 68060
 # fpu = true          # fit a 68881/68882 (default-on for the 68040)
 # clock_mhz = 14.0    # defaults to the model's stock speed
 
