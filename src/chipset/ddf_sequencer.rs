@@ -610,6 +610,65 @@ mod tests {
     }
 
     #[test]
+    fn ocs_start_below_hard_window_runs_on_alternating_lines_from_its_raw_grid() {
+        // DDFSTRT below the hardwired start ($10 < $18): the comparator
+        // fires while SHW is still down, so a fresh line starts no run. SHW
+        // set at $18 survives the line end on OCS (only a completed fetch
+        // run clears it), so the NEXT line's $10 match arms a run anchored
+        // at the raw $10 grid; the missed DDFSTOP leaves it to the RHW
+        // drain ($D8 unit). The run then alternates: line with run clears
+        // SHW, line without re-arms it. Hardware-verified by the vAmigaTS
+        // Agnus/DDF oldhwstop3/4 A500 photos (via the vAmiga sequencer).
+        let mut state = ready_state(lores4());
+        // Preceding line with a standard window: its completed run leaves
+        // SHW cleared.
+        let _ = walk_static(false, 0x60, 0xA0, &mut state);
+        assert!(!state.shw);
+
+        let first = walk_static(false, 0x10, 0x10, &mut state);
+        assert!(first.is_empty(), "fresh line: SHW still down at $10");
+        assert!(state.shw, "SHW armed at $18 survives the line end");
+
+        let second = walk_static(false, 0x10, 0x10, &mut state);
+        assert_eq!(
+            second.first().map(|f| f.cck),
+            Some(0x11),
+            "run anchors at the raw $10 unit, not the hard start"
+        );
+        assert_eq!(second.last().map(|f| f.cck), Some(0xDF), "RHW drain");
+        assert_eq!(words_for_plane(&second, 0), 26);
+        assert!(!state.shw, "the completed run clears SHW again");
+
+        let third = walk_static(false, 0x10, 0x10, &mut state);
+        assert!(third.is_empty(), "alternating lines stay empty");
+
+        // A reachable DDFSTOP still ends the armed run at its position.
+        let stopped = walk_static(false, 0x10, 0xA0, &mut state);
+        assert_eq!(stopped.first().map(|f| f.cck), Some(0x11));
+        assert_eq!(stopped.last().map(|f| f.cck), Some(0xA7));
+        assert_eq!(words_for_plane(&stopped, 0), 19);
+    }
+
+    #[test]
+    fn ecs_start_below_hard_window_latches_and_runs_every_line_from_shw() {
+        // Same registers on ECS: BPHSTART is a latch, so the $10 match arms
+        // it every line and the run starts at the hard window ($18) on
+        // every line (SHW is cleared at each line end on ECS).
+        let mut state = ready_state(lores4());
+        let _ = walk_static(true, 0x60, 0xA0, &mut state);
+
+        for line in 0..3 {
+            let fetches = walk_static(true, 0x10, 0xA0, &mut state);
+            assert_eq!(
+                fetches.first().map(|f| f.cck),
+                Some(0x19),
+                "line {line}: run starts at the hard window start"
+            );
+            assert_eq!(fetches.last().map(|f| f.cck), Some(0xA7), "line {line}");
+        }
+    }
+
+    #[test]
     fn mid_line_stop_rewrite_before_match_moves_the_stop() {
         // A DDFSTOP rewrite landing before the old value matches replaces
         // the stop position: the walk uses the merged signal list.

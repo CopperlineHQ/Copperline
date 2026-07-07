@@ -50,7 +50,11 @@ pub(super) struct DdfSeqLine {
     /// First fetch colour clock of the line, if any.
     pub first_fetch_cck: Option<u16>,
     /// The run's first fetch-unit boundary (first fetch minus its unit
-    /// offset): the position that anchors word 0 on the display.
+    /// offset): the position that anchors word 0 on the display. `None`
+    /// when the line began inside a run carried across the line wrap: the
+    /// continuation tail is not a comparator-anchored origin (its unit
+    /// counter carries over mid-word), so the renderer keeps the register
+    /// view for such lines.
     pub run_origin_cck: Option<u16>,
     /// Sequencer state after the line's walk (becomes the next line's
     /// initial state).
@@ -227,6 +231,10 @@ impl Bus {
         let (_, hard_stop) = crate::chipset::agnus::ddf_hard_bounds(self.harddis_active());
         let signals =
             seq::line_signals_with_hard_stop(0xFFFF, 0xFFFF, hard_stop, line_ccks, &extra);
+        // A line that begins with BPRUN already up continues a run carried
+        // across the line wrap; its first fetches are a mid-unit tail, not
+        // a comparator-anchored run origin.
+        let run_carried_in = state.bprun;
         let fetches = seq::walk_line(
             self.aga_enabled(),
             self.ddf_seq_ecs_rules(),
@@ -268,7 +276,9 @@ impl Bus {
                 line.words_per_plane[plane].max(line.word_idx_at[idx] + 1);
             if line.first_fetch_cck.is_none() {
                 line.first_fetch_cck = Some(f.cck);
-                line.run_origin_cck = Some(f.cck.saturating_sub(u16::from(f.counter)));
+                if !run_carried_in {
+                    line.run_origin_cck = Some(f.cck.saturating_sub(u16::from(f.counter)));
+                }
             }
         }
         line
@@ -568,6 +578,63 @@ mod tests {
         bus.agnus.vpos = 0x10; // above DIWSTRT.V
         bus.ddf_seq_on_line_rollover(0x0F);
 
+        let table = bus.ddf_seq_line_table();
+        assert_eq!(table.first_fetch_cck, None);
+    }
+
+    #[test]
+    fn run_carried_across_the_line_wrap_reports_no_origin() {
+        let mut bus = empty_bus();
+        bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
+        bus.denise.diwstrt = 0x2C81;
+        bus.denise.diwstop = 0x2CC1;
+        // A start past the hardware stop arms a run the missed RHW cannot
+        // stop: it wraps through horizontal blanking into the next line.
+        bus.denise.ddfstrt = 0x00E0;
+        bus.denise.ddfstop = 0x00FF;
+        bus.denise.bplcon0 = 0x4200;
+        // Roll over from a line above the vertical window so the armed
+        // line starts from a clean (not carried) state.
+        bus.agnus.vpos = 0x2C;
+        bus.ddf_seq_on_line_rollover(0x2B);
+        {
+            let table = bus.ddf_seq_line_table();
+            assert_eq!(table.run_origin_cck, Some(0xE0));
+            assert!(table.end_state.bprun, "run carries across the wrap");
+        }
+        bus.agnus.vpos = 0x2D;
+        bus.ddf_seq_on_line_rollover(0x2C);
+        let table = bus.ddf_seq_line_table();
+        // The wrapped line fetches from its start, but the tail is not a
+        // comparator-anchored origin: the renderer keeps the register view.
+        assert!(table.first_fetch_cck.is_some());
+        assert_eq!(table.run_origin_cck, None);
+    }
+
+    #[test]
+    fn start_below_hard_window_reports_its_raw_origin_on_the_armed_line() {
+        let mut bus = empty_bus();
+        bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
+        bus.denise.diwstrt = 0x2C81;
+        bus.denise.diwstop = 0x2CC1;
+        bus.denise.ddfstrt = 0x0010;
+        bus.denise.ddfstop = 0x0010;
+        bus.denise.bplcon0 = 0x4200;
+        // The rolled-over line (above the vertical window) fires the $10
+        // comparator with SHW still down, so nothing fetches; SHW armed at
+        // $18 survives into this line.
+        bus.agnus.vpos = 0x2C;
+        bus.ddf_seq_on_line_rollover(0x2B);
+        {
+            // The surviving SHW latch arms the run at the raw $10 grid and
+            // the missed stop drains through the hardware stop.
+            let table = bus.ddf_seq_line_table();
+            assert_eq!(table.run_origin_cck, Some(0x10));
+            assert_eq!(table.words_per_plane[0], 26);
+        }
+        bus.agnus.vpos = 0x2D;
+        bus.ddf_seq_on_line_rollover(0x2C);
+        // The completed run cleared SHW: the next line starts nothing.
         let table = bus.ddf_seq_line_table();
         assert_eq!(table.first_fetch_cck, None);
     }

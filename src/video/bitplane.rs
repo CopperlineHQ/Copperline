@@ -1183,14 +1183,18 @@ impl ControlState {
         // colour-clock origin, not the hard DDF start $18.
         let align = |hpos: i32| -> i32 {
             let gulp = self.fetch_period() as i32;
-            let aligned = if self.fetch_quantum() == 1 {
+            if self.fetch_quantum() == 1 {
+                // FMODE=0 placement rounds UP to the gulp grid and stays
+                // linear below the hardwired start window: a run armed from
+                // a DDFSTRT below $18 (surviving SHW latch) places its
+                // picture at the raw grid position, left of the standard
+                // slots (vAmigaTS Agnus/DDF oldhwstop3/4 A500 photos).
                 hpos.div_euclid(gulp) * gulp + if hpos.rem_euclid(gulp) != 0 { gulp } else { 0 }
             } else {
-                hpos.div_euclid(gulp) * gulp
-            };
-            // Clamped to the DDF hard start: placement before the first usable
-            // fetch position is not visible.
-            aligned.max(BITPLANE_DDF_HARD_START as i32)
+                // Wide-FMODE gulps clamp to the DDF hard start: placement
+                // before the first usable fetch position is not visible.
+                (hpos.div_euclid(gulp) * gulp).max(BITPLANE_DDF_HARD_START as i32)
+            }
         };
         let ddf_native_shift = (align(effective_ddf_start_hpos(
             self.agnus_revision,
@@ -2413,13 +2417,22 @@ fn line_control_at_x(
 
 /// Rewrite a row's DDFSTRT/DDFSTOP so the register-derived fetch geometry
 /// matches the captured sequencer run (origin colour clock + word count).
-/// FMODE=0 only; runs that wrap through horizontal blanking (origin before
-/// the hardware start window) keep the register view.
+/// FMODE=0 only. A run origin below the hardware start window ($18) is kept
+/// as-is: a DDFSTRT comparator match below $18 starts the run at its raw
+/// position when the sequencer's SHW latch survived from the previous line,
+/// and the fetched picture sits linearly left of the standard grid
+/// (hardware-verified by the vAmigaTS Agnus/DDF oldhwstop3/4 A500 photos).
 fn apply_captured_fetch_geometry(control: &mut ControlState, origin: u16, words: usize) {
     if control.fetch_quantum() != 1 || words == 0 {
         return;
     }
-    if origin < BITPLANE_DDF_HARD_START {
+    // DDFSTRT 0 doubles as the "no window programmed" sentinel throughout
+    // the register-derived paths, so a run genuinely armed at colour clock
+    // 0 (DDFSTRT=$00 with a surviving SHW latch) cannot be expressed as a
+    // synthesized window; keep the register view. TODO: replace the zero
+    // sentinel with an explicit window-valid flag so origin-0 runs can be
+    // placed exactly.
+    if origin == 0 {
         return;
     }
     let words_per_unit = (8 / control.fetch_cck_per_word() as usize).max(1);
@@ -3477,10 +3490,20 @@ pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
     // row's DDFSTRT/DDFSTOP from them so every register-derived fetch and
     // paint derivation (word plans, words-per-row, picture origin) agrees
     // with what the DMA actually did.
-    for (y, control) in base_controls.iter_mut().enumerate() {
+    for y in 0..base_controls.len() {
         if let Some(row) = captured_bitplane_rows.get(y).and_then(Option::as_ref) {
             if let Some(origin) = row.fetch_origin_cck {
-                apply_captured_fetch_geometry(control, origin, row.words_per_row);
+                apply_captured_fetch_geometry(&mut base_controls[y], origin, row.words_per_row);
+                // The row's control segments (mid-row register writes) must
+                // agree as well: the sequencer already folded those writes
+                // into the captured run, and a segment still carrying the
+                // raw DDFSTRT/DDFSTOP values would re-derive a different
+                // word count or picture origin for the same row (the
+                // oldhwstop band-entry rows, where the copper rewrite lands
+                // at the start of the next line's segment list).
+                for segment in &mut control_segments[y] {
+                    apply_captured_fetch_geometry(&mut segment.control, origin, row.words_per_row);
+                }
             }
         }
     }
@@ -3646,7 +3669,18 @@ pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
             if !line_has_valid_ddf_window(control, row_control_segments) {
                 continue;
             }
-            let words_per_row = line_words_per_row(base_controls[y], row_control_segments);
+            // A captured sequencer run with a comparator-anchored origin is
+            // the authority for the row's word count: mid-row DDF rewrites
+            // logged as control segments describe windows the sequencer
+            // never ran (the oldhwstop band-entry rows), and the register-
+            // derived maximum would otherwise disagree with the captured
+            // planes and push the row onto the fallback re-fetch path.
+            let words_per_row = captured_bitplane_rows
+                .get(y)
+                .and_then(Option::as_ref)
+                .filter(|row| row.fetch_origin_cck.is_some() && row.words_per_row != 0)
+                .map(|row| row.words_per_row)
+                .unwrap_or_else(|| line_words_per_row(base_controls[y], row_control_segments));
             let beam_y = visible_line0 as u32 + y as u32;
             replay_bitplane_pointer_events_through_beam(
                 render_events,
@@ -3677,6 +3711,25 @@ pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
                             .all(|plane| plane.len() >= words_per_row)
                 });
             if captured_row.is_none() && !control.bitplane_dma_enabled() {
+                continue;
+            }
+            // A DDFSTRT comparator below the hardwired start window ($18)
+            // only arms a run when the sequencer's SHW latch survived from
+            // the previous line (OCS clears it when a fetch run completes,
+            // so such runs happen on alternating lines at most). The DMA
+            // capture records which lines actually ran; a line without a
+            // captured fetch fetched nothing, so the register-derived
+            // window must not synthesize a picture for it (vAmigaTS
+            // Agnus/DDF oldhwstop3/4: the black no-run lines between the
+            // early-origin runs).
+            if captured_row.is_none()
+                && control.fetch_quantum() == 1
+                && (1..BITPLANE_DDF_HARD_START).contains(&effective_ddf_start_hpos_raw(
+                    control.agnus_revision,
+                    control.hires() || control.shres(),
+                    control.ddfstrt,
+                ))
+            {
                 continue;
             }
             // Denise's playfield output arms on BPL1DAT loads. A mode whose
@@ -4906,11 +4959,12 @@ fn effective_ddf_stop_hpos(revision: AgnusRevision, hires: bool, raw: u16) -> u1
 
 fn effective_ddf_start_hpos(revision: AgnusRevision, hires: bool, raw: u16) -> u16 {
     let start = effective_ddf_start_hpos_raw(revision, hires, raw);
-    if start == 0 {
-        0
-    } else {
-        start.clamp(BITPLANE_DDF_HARD_START, BITPLANE_DDF_HARD_STOP)
-    }
+    // A DDFSTRT below the hardwired start window ($18) is NOT clamped: the
+    // comparator match position anchors the fetch grid at its raw value
+    // whenever the sequencer arms a run at all (the SHW latch can survive
+    // from the previous line), so word counts and picture placement stay
+    // linear in the raw register (vAmigaTS Agnus/DDF oldhwstop3/4 photos).
+    start.min(BITPLANE_DDF_HARD_STOP)
 }
 
 fn effective_ddf_window(
@@ -4920,7 +4974,9 @@ fn effective_ddf_window(
     ddfstop: u16,
     harddis: bool,
 ) -> Option<(u16, u16)> {
-    let (hard_start, hard_stop) = ddf_hard_bounds(harddis);
+    // The start is not floored to the hardwired window: a DDFSTRT below $18
+    // keeps its raw fetch-grid position (see `effective_ddf_start_hpos`).
+    let (_, hard_stop) = ddf_hard_bounds(harddis);
     let start = effective_ddf_start_hpos_raw(revision, hires, ddfstrt);
     let mut stop = effective_ddf_stop_hpos(revision, hires, ddfstop);
     if start == 0 || start > hard_stop {
@@ -4929,7 +4985,6 @@ fn effective_ddf_window(
     if matches!(revision, AgnusRevision::Ocs) && stop == start {
         stop = hard_stop;
     }
-    let start = start.max(hard_start);
     let stop = stop.min(hard_stop);
     (stop >= start).then_some((start, stop))
 }

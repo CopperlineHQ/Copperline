@@ -1636,12 +1636,16 @@ fn ddf_overscan_fetches_still_advance_bitplane_pointers() {
     assert_eq!(state.words_per_row(true, 640), 42);
     assert_eq!(state.words_per_row(false, 320), 21);
 
-    let hard_clipped = RenderState {
+    // A DDFSTRT below the hardwired start keeps its raw fetch-grid anchor
+    // (an armed run really starts at $10; vAmigaTS oldhwstop3/4), so the
+    // word count stays linear in the raw value; only the stop is clipped
+    // to the hardware stop window.
+    let early_start = RenderState {
         ddfstrt: 0x0010,
         ddfstop: 0x00E0,
         ..blank_state()
     };
-    assert_eq!(hard_clipped.words_per_row(false, 320), 25);
+    assert_eq!(early_start.words_per_row(false, 320), 26);
 
     let ocs_equal = RenderState {
         ddfstrt: 0x0038,
@@ -6794,4 +6798,29 @@ fn unchanged_control_writes_do_not_create_render_segments() {
     assert_eq!(control_segments[line].len(), 1);
     assert_eq!(control_segments[line][0].x, 32);
     assert_eq!(control_segments[line][0].control.bplcon1, 0x0022);
+}
+
+#[test]
+fn fetch_origin_below_hard_start_stays_linear_in_ddfstrt() {
+    // A run armed from a DDFSTRT below the hardwired start window ($18)
+    // anchors its fetch grid at the raw comparator position (vAmigaTS
+    // Agnus/DDF oldhwstop3/4 A500 photos: the DDFSTRT=$10 rows sit exactly
+    // ($38-$10)*2 lo-res pixels left of the standard picture, with the
+    // early words running through the left border). The placement shift
+    // must stay linear below $18 instead of clamping to the hard start.
+    let mk = |strt: u16| RenderState {
+        ddfstrt: strt,
+        ddfstop: 0x00D0,
+        diwstrt: 0x2C81,
+        diwstop: 0x2CC1,
+        ..blank_state()
+    };
+    assert_eq!(mk(0x38).fetch_origin_native_shift(false, 2), 0);
+    // Early-DDF placement is linear (diw1-calibrated) ...
+    assert_eq!(mk(0x30).fetch_origin_native_shift(false, 2), 16);
+    // ... and keeps the same line below the hard start: 5 words of the
+    // $10-anchored row lie left of the standard window edge.
+    assert_eq!(mk(0x10).fetch_origin_native_shift(false, 2), 80);
+    assert_eq!(mk(0x10).native_x_offset(false, 2), 80);
+    assert_eq!(mk(0x10).fetch_start_native_x(false, 2), 0);
 }

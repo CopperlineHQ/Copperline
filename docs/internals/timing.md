@@ -39,7 +39,15 @@ carries across line boundaries. Missed comparators therefore produce the
 hardware's "old stop" behaviours: a rewritten-too-late DDFSTOP lets the run
 continue to the hardware-stop drain, a DDFSTRT match past $D8 starts a run
 that wraps through horizontal blanking into the next line, and an
-early-blanked DDFSTRT ($10 with SHW still down) never starts on OCS. The
+early-blanked DDFSTRT ($10 with SHW still down) never starts on OCS on a
+fresh line. Because OCS only clears SHW when a fetch run completes, the
+latch survives a run-less line: the next line's below-$18 DDFSTRT match
+then does arm a run, anchored at its raw comparator position, so such
+lines fetch on alternating rasters with the picture sitting linearly left
+of the standard grid (its early words run through the left border). The
+renderer honours this through the captured run geometry: a below-$18 run
+origin keeps its raw fetch grid, and a line without a captured fetch
+paints nothing (vAmigaTS Agnus/DDF/DDF/oldhwstop3/4 A500 photos). The
 per-line fetch table is rebuilt when DDFSTRT/DDFSTOP/BPLCON0/DMACON/DIW
 writes land (DDF writes commit to the comparators four colour clocks after
 the write slot; an old DDFSTOP still fires on its commit clock, an old
