@@ -65,13 +65,15 @@ const DIW_HSTART_FETCH_REFERENCE_HIRES: i32 = 0x82;
 // and bitplane pixels still register against each other after widening.
 //
 // This anchor is the beam-position -> framebuffer-x mapping of the write
-// domain and is calibrated by CPU-driven evidence (live collision family,
-// manual sprite/BPL1DAT output), so it did NOT move when the Copper WAIT
-// comparator lookahead moved copper write landings 4 colour clocks earlier
-// on the bus: a write at a given beam position produces pixels at the same
-// place regardless of who performed it. Copper-vs-fetch races compare both
-// sides through this same anchor, so they follow the corrected bus landings
-// automatically.
+// domain. It maps events recorded at their Denise-effective position (the
+// carrying chip-bus slot plus DENISE_WRITE_EFFECT_DELAY_CCK, source
+// independent -- see `Bus::record_render_write`), so it did NOT move when
+// the Copper WAIT comparator lookahead moved copper write landings 4 colour
+// clocks earlier on the bus, nor when CPU-sourced events switched from the
+// post-bus-cycle beam position to the same slot-referenced delay: a write
+// carried by a given bus slot produces pixels at the same place regardless
+// of who performed it. Copper-vs-fetch races compare both sides through
+// this same anchor, so they follow the corrected bus landings automatically.
 const COPPER_WAIT_HPOS_FB0: i32 = 0x28;
 /// COLORxx writes feed Denise's final colour-selection/output path. Denise
 /// applies copper/CPU colour-register changes in the palette/output phase,

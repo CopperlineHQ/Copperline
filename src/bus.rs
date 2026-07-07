@@ -278,8 +278,13 @@ const RENDER_COPPER_WAIT_HPOS_FB0: u32 = 0x28;
 // Agnus DMA scheduling runs four color clocks ahead of Denise's pixel counter.
 const DENISE_HPOS_LAG_CCK: u32 = 4;
 // Denise applies a register write to its pixel pipeline about four colour
-// clocks after the chip-bus cycle (see `record_render_write`).
+// clocks after the chip-bus slot that carried it, regardless of whether the
+// Copper or the CPU drove the bus (see `record_render_write`).
 const DENISE_WRITE_EFFECT_DELAY_CCK: u32 = 4;
+// Agnus applies its two-cycle register class (DMACON, BPLxPT, BPLxMOD,
+// SPRxPT; vAmiga `DMA_CYCLES(2)` in `recordRegisterChange`) two colour
+// clocks after the chip-bus slot that carried the write.
+const AGNUS_WRITE_EFFECT_DELAY_CCK: u32 = 2;
 const BPLCON0_ECSENA: u16 = 1 << 0;
 const BPLCON0_SHRES: u16 = 1 << 6;
 const BPLCON3_BRDSPRT: u16 = 1 << 1;
@@ -871,6 +876,17 @@ pub struct Bus {
     /// here so the fractional cck are not lost.
     #[serde(skip)]
     cpu_bus_tail_carry: u32,
+    /// Chip-bus slot of the most recently granted CPU access to custom
+    /// register space. A CPU register write is applied to chip state once
+    /// its whole bus cycle has been billed (the beam sits past the granted
+    /// slot by then), but its Denise/Agnus-effective position is referenced
+    /// from the slot that carried the write: `record_render_write` places
+    /// CPU-sourced render events at slot + `DENISE_WRITE_EFFECT_DELAY_CCK`,
+    /// the same write-to-effect pipeline the Copper's slot-exact writes
+    /// take. Also feeds the `COPPERLINE_DIAG_CPU_WRITES` landing trace.
+    /// Transient bus-cycle state, rebuilt every access; not serialized.
+    #[serde(skip)]
+    cpu_custom_access_slot: Option<(u32, u32)>,
     dbg_bpl_cck: Vec<u32>,
     dbg_slotmap: Vec<Vec<u8>>,
     dbg_slotmap_on: bool,
@@ -2053,6 +2069,7 @@ impl Bus {
             ext_clock_carry_x100: 0,
             cpu_short_bus_cycle: false,
             cpu_bus_tail_carry: 0,
+            cpu_custom_access_slot: None,
             cpu_granted_chip_slots: 0,
             cpu_missed_chip_slots: 0,
             dbg_bpl_cck: vec![0; 340],
@@ -3380,6 +3397,14 @@ impl Bus {
                 self.note_cpu_missed_chip_bus_cycle();
                 self.record_slice_bus_advance(cck, tick);
                 self.flush_audio_before_audio_dma_slot();
+            }
+            if matches!(kind, CpuBusAccessKind::Custom) {
+                // Remember the slot that carries a custom-register access:
+                // a register write's Denise/Agnus-effective position is
+                // referenced from this slot (see `record_render_write`),
+                // not from the beam position after the bus cycle's tail.
+                // A long-word access stores its second (low-word) slot.
+                self.cpu_custom_access_slot = Some((self.agnus.vpos, self.agnus.hpos));
             }
             let (cck, tick) = self.advance_one_chip_bus_quantum(Some(ChipBusOwner::Cpu));
             self.note_cpu_granted_chip_bus_cycle();

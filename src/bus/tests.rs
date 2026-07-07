@@ -2731,9 +2731,13 @@ fn cpu_copper_irq_render_event_uses_actual_write_beam() {
     bus.agnus.hpos = 0x40;
     assert!(!bus.custom_write(0x180, 2, 0x0222));
 
+    // The render event records at the write's chip-bus slot plus the
+    // Denise write-effect delay (source-independent, see
+    // record_render_write); the beam-retargeted bottom-palette twin keeps
+    // the delivered-IRQ beam verbatim.
     let render_event = bus.frame_render_events().last().unwrap();
     assert_eq!(render_event.vpos, 0xFA);
-    assert_eq!(render_event.hpos, 0x40);
+    assert_eq!(render_event.hpos, 0x44);
     assert_eq!(bus.pending_beam_bottom_palette_events[0].vpos, 0xD4);
     assert_eq!(bus.pending_beam_bottom_palette_events[0].hpos, 0x16);
 }
@@ -6494,7 +6498,10 @@ fn manual_sprite_data_writes_accumulate_live_sprite_sprite_clxdat() {
     let mut bus = empty_bus();
     let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0083);
     bus.agnus.vpos = 0x2C;
-    bus.agnus.hpos = 0x38;
+    // The staged beam position is the write's chip-bus slot; the collision
+    // event records at slot + DENISE_WRITE_EFFECT_DELAY_CCK ($38), and the
+    // advance below runs the beam past it.
+    bus.agnus.hpos = 0x34;
     bus.denise.diwstrt = 0x2C83;
     bus.denise.diwstop = 0x2DC1;
     bus.denise.sprpos[0] = pos;
@@ -6506,7 +6513,7 @@ fn manual_sprite_data_writes_accumulate_live_sprite_sprite_clxdat() {
 
     bus.write_custom_word_from(0x144, 0x8000, BeamWriteSource::Cpu);
     bus.write_custom_word_from(0x154, 0x8000, BeamWriteSource::Cpu);
-    bus.advance_chipset(2);
+    bus.advance_chipset(6);
 
     assert_eq!(bus.custom_read(0x00E, 2), 0x8200);
     assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
@@ -6517,7 +6524,8 @@ fn frame_end_completes_unread_live_sprite_sprite_clxdat() {
     let mut bus = empty_bus();
     let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0083);
     bus.agnus.vpos = 0x2C;
-    bus.agnus.hpos = 0x38;
+    // Slot $34: the write events record at $38 (slot + write-effect delay).
+    bus.agnus.hpos = 0x34;
     bus.denise.diwstrt = 0x2C83;
     bus.denise.diwstop = 0x2DC1;
     bus.denise.sprpos[0] = pos;
@@ -6540,7 +6548,8 @@ fn attached_manual_sprite_data_writes_accumulate_live_sprite_sprite_clxdat() {
     let mut bus = empty_bus();
     let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0083);
     bus.agnus.vpos = 0x2C;
-    bus.agnus.hpos = 0x38;
+    // Slot $34: the write events record at $38 (slot + write-effect delay).
+    bus.agnus.hpos = 0x34;
     bus.denise.diwstrt = 0x2C83;
     bus.denise.diwstop = 0x2DC1;
     bus.denise.sprpos[0] = pos;
@@ -6556,7 +6565,7 @@ fn attached_manual_sprite_data_writes_accumulate_live_sprite_sprite_clxdat() {
     bus.write_custom_word_from(0x144, 0x0000, BeamWriteSource::Cpu);
     bus.write_custom_word_from(0x14C, 0x8000, BeamWriteSource::Cpu);
     bus.write_custom_word_from(0x154, 0x8000, BeamWriteSource::Cpu);
-    bus.advance_chipset(2);
+    bus.advance_chipset(6);
 
     assert_eq!(bus.custom_read(0x00E, 2), 0x8200);
     assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
@@ -6565,12 +6574,14 @@ fn attached_manual_sprite_data_writes_accumulate_live_sprite_sprite_clxdat() {
 #[test]
 fn attached_manual_sprite_odd_data_writes_accumulate_later_live_sprite_sprite_clxdat() {
     let mut bus = empty_bus();
-    // hstart +1 vs the pre-fix value: sprite comparator positions share
-    // Denise's counter and moved with the corrected window-edge anchor
-    // (2H-196); the beam-anchored playfield sample did not.
-    let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0084);
+    // The sprites sit at hstart $8C so the overlap pixels land exactly at
+    // the second odd-DATA write's effective position (slot $3A plus the
+    // write-effect delay = event $3E, write-domain x 88): pixels before it
+    // replay the first odd word, pixels from it replay the rewrite.
+    let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x008C);
     bus.agnus.vpos = 0x2C;
-    bus.agnus.hpos = 0x38;
+    // Slot $34: the write events record at $38 (slot + write-effect delay).
+    bus.agnus.hpos = 0x34;
     bus.denise.diwstrt = 0x2C83;
     bus.denise.diwstop = 0x2DC1;
     bus.denise.sprpos[0] = pos;
@@ -6586,11 +6597,11 @@ fn attached_manual_sprite_odd_data_writes_accumulate_later_live_sprite_sprite_cl
     bus.write_custom_word_from(0x144, 0x0000, BeamWriteSource::Cpu);
     bus.write_custom_word_from(0x14C, 0x8000, BeamWriteSource::Cpu);
     bus.write_custom_word_from(0x154, 0x2000, BeamWriteSource::Cpu);
-    bus.advance_chipset(2);
+    bus.advance_chipset(6);
     assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
 
     bus.write_custom_word_from(0x14C, 0x2000, BeamWriteSource::Cpu);
-    bus.advance_chipset(1);
+    bus.advance_chipset(9);
 
     assert_eq!(bus.custom_read(0x00E, 2), 0x8200);
     assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
@@ -6699,7 +6710,8 @@ fn manual_sprite_data_writes_accumulate_live_sprite_playfield_clxdat() {
     // (2H-196); the beam-anchored playfield sample did not.
     let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0082);
     bus.agnus.vpos = 0x2C;
-    bus.agnus.hpos = 0x38;
+    // Slot $34: the write event records at $38 (slot + write-effect delay).
+    bus.agnus.hpos = 0x34;
     bus.denise.diwstrt = 0x2C81;
     bus.denise.diwstop = 0x2DC1;
     bus.denise.ddfstrt = 0x0038;
@@ -6730,7 +6742,7 @@ fn manual_sprite_data_writes_accumulate_live_sprite_playfield_clxdat() {
     });
 
     bus.write_custom_word_from(0x144, 0x8000, BeamWriteSource::Cpu);
-    bus.advance_chipset(2);
+    bus.advance_chipset(6);
 
     assert_eq!(bus.custom_read(0x00E, 2), 0x8022);
     assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
@@ -6741,7 +6753,8 @@ fn attached_manual_sprite_data_writes_accumulate_live_sprite_playfield_clxdat() 
     let mut bus = empty_bus();
     let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0083);
     bus.agnus.vpos = 0x2C;
-    bus.agnus.hpos = 0x38;
+    // Slot $34: the write events record at $38 (slot + write-effect delay).
+    bus.agnus.hpos = 0x34;
     bus.denise.diwstrt = 0x2C83;
     bus.denise.diwstop = 0x2DC1;
     bus.denise.ddfstrt = 0x0038;
@@ -6772,7 +6785,7 @@ fn attached_manual_sprite_data_writes_accumulate_live_sprite_playfield_clxdat() 
 
     bus.write_custom_word_from(0x144, 0x0000, BeamWriteSource::Cpu);
     bus.write_custom_word_from(0x14C, 0x8000, BeamWriteSource::Cpu);
-    bus.advance_chipset(2);
+    bus.advance_chipset(6);
 
     assert_eq!(bus.custom_read(0x00E, 2), 0x8022);
     assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
@@ -6873,9 +6886,13 @@ fn same_line_clxcon_odd_sprite_enable_does_not_retime_earlier_live_sprite_sprite
         bus.custom_read(0x00E, 2)
     };
 
+    // The CLXCON events record at the write slot + the write-effect delay:
+    // slot $34 -> event $38 (before the sprite pixels), slot $36 -> event
+    // $3A (after them) -- the same recorded boundary the pre-delay test
+    // staged directly at $38/$3A.
     assert_eq!(clxdat_after_visible_sprite_pixels(1 << 12, None), 0x8200);
-    assert_eq!(clxdat_after_visible_sprite_pixels(0, Some(0x38)), 0x8200);
-    assert_eq!(clxdat_after_visible_sprite_pixels(0, Some(0x3A)), 0x8000);
+    assert_eq!(clxdat_after_visible_sprite_pixels(0, Some(0x34)), 0x8200);
+    assert_eq!(clxdat_after_visible_sprite_pixels(0, Some(0x36)), 0x8000);
 }
 
 #[test]
@@ -7483,8 +7500,10 @@ fn bpldat_writes_update_latched_planes_for_live_playfield_clxdat() {
         bus.custom_read(0x00E, 2)
     };
 
+    // Slot $3A: the BPLxDAT event records at $3E (slot + write-effect
+    // delay), the boundary the pre-delay test staged directly.
     assert_eq!(clxdat_after_row_capture(None), 0x8000);
-    assert_eq!(clxdat_after_row_capture(Some(0x3E)), 0x8001);
+    assert_eq!(clxdat_after_row_capture(Some(0x3A)), 0x8001);
 }
 
 #[test]
@@ -7605,10 +7624,12 @@ fn explicit_bpl1dat_output_accumulates_live_sprite_playfield_clxdat() {
     bus.advance_chipset(2);
     assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
 
-    let before_bpl1dat = 0x38 - bus.agnus.hpos;
+    // Slot $34: the BPL1DAT event records at $38 (slot + write-effect
+    // delay), the same boundary the pre-delay test staged directly.
+    let before_bpl1dat = 0x34 - bus.agnus.hpos;
     bus.advance_chipset(before_bpl1dat);
     bus.write_custom_word_from(0x110, 0x8000, BeamWriteSource::Cpu);
-    bus.advance_chipset(2);
+    bus.advance_chipset(6);
 
     assert_eq!(bus.custom_read(0x00E, 2), 0x8020);
     assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
@@ -7619,7 +7640,8 @@ fn manual_sprite_and_bpl1dat_writes_accumulate_live_sprite_playfield_clxdat() {
     let mut bus = empty_bus();
     let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0083);
     bus.agnus.vpos = 0x2C;
-    bus.agnus.hpos = 0x38;
+    // Slot $34: the write events record at $38 (slot + write-effect delay).
+    bus.agnus.hpos = 0x34;
     bus.denise.diwstrt = 0x2C83;
     bus.denise.diwstop = 0x2DC1;
     bus.denise.bplcon0 = 0x1000;
@@ -7632,7 +7654,7 @@ fn manual_sprite_and_bpl1dat_writes_accumulate_live_sprite_playfield_clxdat() {
 
     bus.write_custom_word_from(0x144, 0x8000, BeamWriteSource::Cpu);
     bus.write_custom_word_from(0x110, 0x8000, BeamWriteSource::Cpu);
-    bus.advance_chipset(2);
+    bus.advance_chipset(6);
 
     assert_eq!(bus.custom_read(0x00E, 2), 0x8020);
     assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
@@ -7672,7 +7694,9 @@ fn same_line_bplcon1_scroll_increase_latches_later_live_sprite_playfield_clxdat(
     bus.current_frame_render_base = bus.capture_render_snapshot();
     write_chip_word(&mut bus, 0x0100, 0x0001);
 
-    let before_scroll_write = 0x40 - bus.agnus.hpos;
+    // Slot $3C: the BPLCON1 event records at $40 (slot + write-effect
+    // delay), the same boundary the pre-delay test staged directly.
+    let before_scroll_write = 0x3C - bus.agnus.hpos;
     // Control words load at the vertical-blank reset line.
     sprite_fetch_control_words_at_reset_line(&mut bus);
     bus.agnus.vpos = 0x2C;
@@ -7846,9 +7870,13 @@ fn same_line_bplcon3_spres_write_does_not_retime_earlier_live_sprite_playfield_c
         bus.custom_read(0x00E, 2)
     };
 
+    // The BPLCON3 events record at the write slot + the write-effect delay:
+    // slot $34 -> event $38 (retimes the sprite before its pixels), slot
+    // $36 -> event $3A (too late) -- the same recorded boundary the
+    // pre-delay test staged directly at $38/$3A.
     assert_eq!(clxdat_after_bitplane_row_capture(None), 0x8022);
-    assert_eq!(clxdat_after_bitplane_row_capture(Some(0x38)), 0x8020);
-    assert_eq!(clxdat_after_bitplane_row_capture(Some(0x3A)), 0x8022);
+    assert_eq!(clxdat_after_bitplane_row_capture(Some(0x34)), 0x8020);
+    assert_eq!(clxdat_after_bitplane_row_capture(Some(0x36)), 0x8022);
 }
 
 #[test]

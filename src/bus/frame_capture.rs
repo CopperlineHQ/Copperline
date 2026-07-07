@@ -1301,29 +1301,69 @@ impl Bus {
     }
 
     pub(super) fn record_render_write(&mut self, offset: u16, value: u16, source: BeamWriteSource) {
-        let (mut vpos, mut hpos) = (self.agnus.vpos, self.agnus.hpos);
-        // Denise applies a register write to its pixel pipeline about four
-        // colour clocks after the chip-bus cycle (vAmiga models this as a
-        // one-DMA-cycle register-change delay plus pixel-domain application
-        // offsets inside Denise). The render-side anchors
-        // (COLOR_WRITE_HPOS_FB0, COPPER_WAIT_HPOS_FB0, the sprite write
-        // pipeline) are photo-calibrated against events recorded at that
-        // effective position. CPU-sourced writes already carry the offset in
-        // their landing (the known CPU write-landing class), so only
-        // Copper-sourced writes -- whose bus landings are cycle-exact against
-        // vAmiga since the WAIT comparator lookahead fix -- record the delay
-        // explicitly.
-        // TODO: model the CPU write landing exactly and make this effect
-        // delay source-independent.
-        if matches!(source, BeamWriteSource::Copper) {
-            hpos += DENISE_WRITE_EFFECT_DELAY_CCK;
-            let line_cck = self.agnus.current_line_cck();
-            if hpos >= line_cck {
-                hpos -= line_cck;
-                vpos += 1;
-                if vpos >= self.agnus.current_frame_lines() {
-                    vpos = 0;
-                }
+        // Register writes take effect a fixed number of colour clocks after
+        // the chip-bus slot that carried them, and the delay is a property
+        // of the register pipeline, not of the writer:
+        //
+        // - Denise-boundary registers apply to the pixel pipeline about
+        //   four colour clocks after the slot (DENISE_WRITE_EFFECT_DELAY_
+        //   CCK; vAmiga models this as a register-change delay plus
+        //   pixel-domain application offsets inside Denise). Verified
+        //   two-sided against vAmiga's VAMIGA_CPU_PROBE landing trace:
+        //   landing-matched dense CPU COLOR00 lines rendered exactly two
+        //   colour clocks left of vAmiga until the CPU side carried the
+        //   same slot-referenced delay the Copper side already had.
+        // - Agnus's two-cycle register class (DMACON, BPLxPT, BPLxMOD,
+        //   SPRxPT) applies two colour clocks after the slot (AGNUS_WRITE_
+        //   EFFECT_DELAY_CCK; vAmiga `recordRegisterChange(DMA_CYCLES(2))`).
+        //   The bitplane/sprite DMA-gating replay is calibrated against
+        //   events recorded at that position (vAmigaTS DMACON bplon bars
+        //   sit 8 px right of vAmiga when these events carry the Denise
+        //   delay instead).
+        //
+        // The render-side anchors (COLOR_WRITE_HPOS_FB0, COPPER_WAIT_HPOS_
+        // FB0, the sprite write pipeline) are photo-calibrated against
+        // events recorded at the Denise-effective position. A Copper MOVE
+        // executes at its bus slot (the current beam position); a CPU write
+        // is applied once its whole bus cycle has been billed, past its
+        // granted slot, so the slot is taken from `cpu_custom_access_slot`
+        // (a direct call without a granted slot treats the current beam
+        // position as the slot).
+        //
+        // Copper-sourced events currently record the Denise delay for the
+        // Agnus two-cycle class as well: the DMA-gating replay of copper
+        // writes was calibrated with that offset when the copper landings
+        // became bus-exact. TODO: model the Agnus boundary for copper
+        // writes too and recalibrate the copper-driven DMA-gating replay.
+        let agnus_two_cycle = matches!(
+            offset & 0x01FE,
+            0x096 | 0x0E0..=0x0FE | 0x108 | 0x10A | 0x120..=0x13E
+        );
+        let (mut vpos, mut hpos, delay) = match source {
+            BeamWriteSource::Copper => (
+                self.agnus.vpos,
+                self.agnus.hpos,
+                DENISE_WRITE_EFFECT_DELAY_CCK,
+            ),
+            BeamWriteSource::Cpu | BeamWriteSource::CpuCopperIrq => {
+                let (v, h) = self
+                    .cpu_custom_access_slot
+                    .unwrap_or((self.agnus.vpos, self.agnus.hpos));
+                let delay = if agnus_two_cycle {
+                    AGNUS_WRITE_EFFECT_DELAY_CCK
+                } else {
+                    DENISE_WRITE_EFFECT_DELAY_CCK
+                };
+                (v, h, delay)
+            }
+        };
+        hpos += delay;
+        let line_cck = self.agnus.current_line_cck();
+        if hpos >= line_cck {
+            hpos -= line_cck;
+            vpos += 1;
+            if vpos >= self.agnus.current_frame_lines() {
+                vpos = 0;
             }
         }
         let event = BeamRegisterWrite {
