@@ -61,6 +61,11 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.10.0" date="2026-07-07">
+      <description>
+        <p>68060 CPU support, expanded 68030/68040 MMU and cache behaviour, debugger console and frame-analysis upgrades, A4091 SCSI board emulation, MIDI and TCP serial host bridges, selectable audio devices, zipped floppy images, and broad Copper, Agnus, Denise, Paula, CIA, blitter, floppy, display, and 68000-family timing fixes.</p>
+      </description>
+    </release>
     <release version="0.9.0" date="2026-06-29">
       <description>
         <p>Explicit joystick input mode controls, hard-disk volume-name overrides, no-ROM save-state loading, CIA timer one-shot and floppy motor timing fixes, Amiga input-line fixes, early display-fetch origin alignment, local-time RTC reporting, relocated m68k fork packaging, and 68881/68882 FPU accuracy improvements.</p>
