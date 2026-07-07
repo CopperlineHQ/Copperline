@@ -63,7 +63,8 @@ impl CpuCore {
         let ea = self.resolve_ea(bus, mode, size);
         let dst = self.read_resolved_ea(bus, ea, size);
         let (result, _) = self.exec_add::<B>(bus, size, data, dst);
-        self.write_resolved_ea(bus, ea, size, result);
+        // ADDQ to memory polls IPL during the pre-writeback prefetch.
+        self.write_resolved_ea_np_poll(bus, ea, size, result);
         4
     }
 
@@ -143,7 +144,8 @@ impl CpuCore {
         let ea = self.resolve_ea(bus, mode, size);
         let dst = self.read_resolved_ea(bus, ea, size);
         let (result, _) = self.exec_sub::<B>(bus, size, data, dst);
-        self.write_resolved_ea(bus, ea, size, result);
+        // SUBQ to memory polls IPL during the pre-writeback prefetch.
+        self.write_resolved_ea_np_poll(bus, ea, size, result);
         4
     }
 
@@ -218,7 +220,8 @@ impl CpuCore {
                 return 50;
             }
         }
-        self.write_resolved_ea(bus, ea, size, 0);
+        // CLR polls IPL during the pre-writeback prefetch.
+        self.write_resolved_ea_np_poll(bus, ea, size, 0);
         if self.run_mode == RUN_MODE_BERR_AERR_RESET {
             return 50;
         }
@@ -243,7 +246,8 @@ impl CpuCore {
         }
         let result = 0u32.wrapping_sub(src);
 
-        self.write_resolved_ea(bus, ea, size, result & size.mask());
+        // NEG polls IPL during the pre-writeback prefetch.
+        self.write_resolved_ea_np_poll(bus, ea, size, result & size.mask());
         if self.run_mode == RUN_MODE_BERR_AERR_RESET {
             return 50;
         }
@@ -264,7 +268,8 @@ impl CpuCore {
             return 50;
         }
         let result = self.exec_subx(size, src, 0);
-        self.write_resolved_ea(bus, ea, size, result);
+        // NEGX polls IPL during the pre-writeback prefetch.
+        self.write_resolved_ea_np_poll(bus, ea, size, result);
         if self.run_mode == RUN_MODE_BERR_AERR_RESET {
             return 50;
         }
@@ -285,7 +290,8 @@ impl CpuCore {
         }
         let result = !src & size.mask();
 
-        self.write_resolved_ea(bus, ea, size, result);
+        // NOT polls IPL during the pre-writeback prefetch.
+        self.write_resolved_ea_np_poll(bus, ea, size, result);
         if self.run_mode == RUN_MODE_BERR_AERR_RESET {
             return 50;
         }

@@ -229,6 +229,14 @@ impl CpuCore {
 
     /// Process trace exception.
     pub fn exception_trace<B: AddressBus>(&mut self, bus: &mut B) -> i32 {
+        // A pending trace recovers the CPU from the STOP state: STOP executed
+        // with the trace bit set in the incoming SR takes the trace exception
+        // instead of remaining stopped (the trace has priority over both the
+        // stopped state and its supervisor check).
+        self.stopped &= !super::execute::STOP_LEVEL_STOP;
+        // 4 internal clocks precede the trace frame's first stack write
+        // (Moira execException TRACE: SYNC(4)).
+        self.internal_cycles(4);
         self.take_group2_exception(bus, vector::TRACE)
     }
 

@@ -53,6 +53,26 @@ impl CpuCore {
 
         let addr = self.get_ea_address(bus, mode, size);
 
+        // The 68010 spends mode-dependent internal clocks between the EA
+        // calculation and the data cycle (Moira execMoves: SYNC 6 for (An)
+        // and d8(An,Xn), 8 for (An)+, 6 for -(An), 4 for d16(An) and
+        // absolute modes), then performs the access and the final prefetch
+        // (which carries the IPL poll, the default last-access sample).
+        // The core previously billed none of this, running MOVES ~6-8
+        // clocks fast and shifting every later bus access early.
+        let moves_sync: u32 = match mode {
+            AddressingMode::AddressIndirect(_) | AddressingMode::PreDecrement(_) => 6,
+            AddressingMode::PostIncrement(_) => 8,
+            AddressingMode::Index(_) => 6,
+            AddressingMode::Displacement(_)
+            | AddressingMode::AbsoluteShort
+            | AddressingMode::AbsoluteLong => 4,
+            _ => 0,
+        };
+        if self.prefetch_enabled() {
+            self.internal_cycles(moves_sync);
+        }
+
         if direction == 1 {
             // Register to EA (write): the data cycle runs in the DFC space.
             let ea_updates_register = matches!(
@@ -110,6 +130,18 @@ impl CpuCore {
 
         // Condition codes are not affected
         self.trace_t0_68040_sync();
-        4
+        if self.prefetch_enabled() {
+            // Billed total on the 68010: extension-word prefetch + the EA
+            // extension fetches + the internal clocks above + the data
+            // cycle + the final prefetch.
+            // ea_calc_cycles also counts the 2 internal clocks the -(An)
+            // and d8(An,Xn) address calculations bill inside resolve_ea
+            // (Moira computeEA SYNC(2)), putting the -(An) byte/word total
+            // at 20 and d8(An,Xn) at 24.
+            let access: i32 = if size == Size::Long { 8 } else { 4 };
+            4 + self.ea_calc_cycles(mode) + moves_sync as i32 + access + 4
+        } else {
+            4
+        }
     }
 }

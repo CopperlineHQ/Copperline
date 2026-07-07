@@ -173,22 +173,33 @@ impl CpuCore {
         }
         let dst = self.d(dst_reg);
 
+        let m68000 = self.cpu_type == CpuType::M68000;
         if src == 0 {
-            // Division by zero - trigger trap
+            // Division by zero: 8 internal clocks precede the exception's
+            // first stack write (Moira: SYNC(8) then the zero-divide
+            // exception).
+            if m68000 {
+                self.internal_cycles(8);
+            }
             return self.exception_zero_divide(bus);
         }
 
-        let m68000 = self.cpu_type == CpuType::M68000;
         let div_clocks = if m68000 { divu_cycles(dst, src as u16) } else { 140 };
         let cycles = if m68000 {
             div_clocks + self.ea_source_cycles(mode, Size::Word)
         } else {
             140
         };
-        // The division algorithm's internal clocks precede the final
-        // prefetch (the instruction's last bus access).
-        if m68000 && div_clocks > 4 {
-            self.internal_cycles((div_clocks - 4) as u32);
+        // The final prefetch precedes the division algorithm's internal
+        // clocks (Moira: prefetch<POLL> then SYNC): the np is the
+        // instruction's last bus access and carries the IPL poll, so an
+        // interrupt rising during the division is taken one instruction
+        // later.
+        if m68000 {
+            self.top_up_prefetch(bus);
+            if div_clocks > 4 {
+                self.internal_cycles((div_clocks - 4) as u32);
+            }
         }
 
         let quotient = dst / src;
@@ -233,22 +244,33 @@ impl CpuCore {
         }
         let dst = self.d(dst_reg) as i32;
 
+        let m68000 = self.cpu_type == CpuType::M68000;
         if src == 0 {
-            // Division by zero - trigger trap
+            // Division by zero: 8 internal clocks precede the exception's
+            // first stack write (Moira: SYNC(8) then the zero-divide
+            // exception).
+            if m68000 {
+                self.internal_cycles(8);
+            }
             return self.exception_zero_divide(bus);
         }
 
-        let m68000 = self.cpu_type == CpuType::M68000;
         let div_clocks = if m68000 { divs_cycles(dst, src as i16) } else { 158 };
         let cycles = if m68000 {
             div_clocks + self.ea_source_cycles(mode, Size::Word)
         } else {
             158
         };
-        // The division algorithm's internal clocks precede the final
-        // prefetch (the instruction's last bus access).
-        if m68000 && div_clocks > 4 {
-            self.internal_cycles((div_clocks - 4) as u32);
+        // The final prefetch precedes the division algorithm's internal
+        // clocks (Moira: prefetch<POLL> then SYNC): the np is the
+        // instruction's last bus access and carries the IPL poll, so an
+        // interrupt rising during the division is taken one instruction
+        // later.
+        if m68000 {
+            self.top_up_prefetch(bus);
+            if div_clocks > 4 {
+                self.internal_cycles((div_clocks - 4) as u32);
+            }
         }
 
         // Special case: 0x80000000 / -1 = 0x80000000 (would overflow)

@@ -41,10 +41,16 @@ impl CpuCore {
         // Check for pending interrupts
         self.check_and_service_interrupts(bus);
 
-        // If stopped, consume no cycles
+        // If stopped, run the stopped-state supervisor check (a STOP that
+        // loaded an S-clear SR wakes into a privilege violation here);
+        // otherwise consume no cycles.
         if self.stopped != 0 {
-            self.cycles_remaining = 0;
-            return self.initial_cycles;
+            if let Some(cycles) = self.stopped_supervisor_check(bus) {
+                self.cycles_remaining -= cycles;
+            } else {
+                self.cycles_remaining = 0;
+                return self.initial_cycles;
+            }
         }
 
         // Main execution loop
@@ -130,6 +136,9 @@ impl CpuCore {
         use crate::core::types::{InternalStepResult, StepResult};
 
         if self.stopped != 0 {
+            if let Some(cycles) = self.stopped_supervisor_check(bus) {
+                return StepResult::Ok { cycles };
+            }
             return StepResult::Stopped;
         }
 
@@ -223,6 +232,9 @@ impl CpuCore {
         use crate::core::types::{InternalStepResult, StepResult};
 
         if self.stopped != 0 {
+            if let Some(cycles) = self.stopped_supervisor_check(bus) {
+                return StepResult::Ok { cycles };
+            }
             return StepResult::Stopped;
         }
 
@@ -354,6 +366,10 @@ impl CpuCore {
     pub fn jump_vector<B: AddressBus>(&mut self, bus: &mut B, vector: u32) {
         // Any exception entry breaks an open 68060 pairing window.
         self.break_060_pipeline();
+        // An earlier poll-point hold must not survive into the handler:
+        // the refill below is a fresh IPL poll point (Moira jumpToVector
+        // polls during the final refill read).
+        bus.ipl_release_sample();
         // Any vectored dispatch ends 68010 loop mode; the refill below
         // restores normal instruction fetching.
         self.loop_mode = false;
@@ -403,17 +419,19 @@ impl CpuCore {
         }
     }
 
-    /// Service an interrupt.
-    fn service_interrupt<B: AddressBus>(&mut self, bus: &mut B, level: u8) {
-        // Get vector from interrupt acknowledge
-        let vector = bus.interrupt_acknowledge(level);
-        let vector = if vector == 0xFFFFFFFF {
+    /// Map an interrupt-acknowledge response to a vector number.
+    #[inline]
+    fn iack_vector(response: u32, level: u8) -> u32 {
+        if response == 0xFFFFFFFF {
             // Autovector
             24 + level as u32
         } else {
-            vector & 0xFF
-        };
+            response & 0xFF
+        }
+    }
 
+    /// Service an interrupt.
+    fn service_interrupt<B: AddressBus>(&mut self, bus: &mut B, level: u8) {
         // Match Musashi `m68ki_exception_interrupt`:
         // - save old SR
         // - clear trace, enter supervisor (but do not modify M)
@@ -426,13 +444,45 @@ impl CpuCore {
         self.int_mask = ((level as u32) & 7) << 8;
 
         let stacked_pc = self.pc;
-        let vec_word = (vector as u16) << 2;
+        let vector;
 
         if self.cpu_type == super::types::CpuType::M68000 {
-            // 68000: 3-word frame, hardware bus order (PC low, SR, PC high).
-            self.push_exception_frame_68000(bus, stacked_pc, old_sr);
+            // 68000 interrupt microcode (per Moira execInterrupt, same
+            // sequence as yacht): 6 idle clocks, PC-low write, the 4-clock
+            // interrupt-acknowledge bus cycle that latches the vector
+            // number, 4 more internal clocks, then the SR and PC-high
+            // writes. The idle periods are billed in place so every frame
+            // write and the IACK land at their hardware bus-time offsets
+            // (previously the frame writes ran back to back and all idle
+            // time was paid after the handler prefetch, letting the
+            // handler's first instruction start ~14 clocks early).
+            self.internal_cycles(6);
+            let sp = self.dar[15].wrapping_sub(6);
+            self.dar[15] = sp;
+            self.write_16(bus, sp.wrapping_add(4), (stacked_pc & 0xFFFF) as u16);
+            self.internal_cycles(4);
+            self.flush_sync(bus);
+            vector = Self::iack_vector(bus.interrupt_acknowledge(level), level);
+            self.internal_cycles(4);
+            self.write_16(bus, sp, old_sr);
+            self.write_16(bus, sp.wrapping_add(2), (stacked_pc >> 16) as u16);
+        } else if self.cpu_type == super::types::CpuType::M68010 {
+            // 68010 interrupt microcode (Moira execInterrupt): 12 idle
+            // clocks with the IACK at their end, then the format-0 frame
+            // in hardware bus order PC low, SR, PC high, vector word.
+            self.internal_cycles(12);
+            self.flush_sync(bus);
+            vector = Self::iack_vector(bus.interrupt_acknowledge(level), level);
+            let sp = self.dar[15].wrapping_sub(8);
+            self.dar[15] = sp;
+            self.write_16(bus, sp.wrapping_add(4), (stacked_pc & 0xFFFF) as u16);
+            self.write_16(bus, sp, old_sr);
+            self.write_16(bus, sp.wrapping_add(2), (stacked_pc >> 16) as u16);
+            self.write_16(bus, sp.wrapping_add(6), (vector as u16) << 2);
         } else {
-            // 68010+: format 0 frame: (vector<<2), PC, SR (vector word ends up at +6)
+            vector = Self::iack_vector(bus.interrupt_acknowledge(level), level);
+            let vec_word = (vector as u16) << 2;
+            // 68020+: format 0 frame: (vector<<2), PC, SR (vector word ends up at +6)
             self.push_16(bus, vec_word);
             self.push_32(bus, stacked_pc);
             self.push_16(bus, old_sr);
@@ -453,7 +503,7 @@ impl CpuCore {
         if is_ec020_plus && self.m_flag != 0 {
             self.set_sm_flag(SFLAG_SET); // clear M => ISP active
             let sr2 = old_sr | 0x2000;
-            self.push_16(bus, 0x1000 | (vec_word & 0x0FFF));
+            self.push_16(bus, 0x1000 | (((vector as u16) << 2) & 0x0FFF));
             self.push_32(bus, stacked_pc);
             self.push_16(bus, sr2);
         } else if self.cpu_type == super::types::CpuType::M68060 && self.m_flag != 0 {
@@ -468,8 +518,33 @@ impl CpuCore {
         // Clear stopped state
         self.stopped = 0;
 
-        // Use exception cycles
-        self.cycles_remaining -= 44; // Approximate interrupt cycles
+        // Use exception cycles: 44 clocks on the 68000, 46 on the 68010
+        // (12 leading internal clocks + the four-word frame), matching the
+        // internal + bus clocks billed above so the accounting equals the
+        // bus time actually consumed.
+        self.cycles_remaining -= if self.cpu_type == super::types::CpuType::M68010 {
+            46
+        } else {
+            44
+        };
+    }
+
+    /// Stopped-state supervisor check, run at every instruction boundary
+    /// while stopped: STOP loads its SR operand verbatim (a single-stepped
+    /// STOP observes S and T exactly as written), and a loaded S-clear SR
+    /// wakes the CPU here with a privilege violation -- 4 internal clocks,
+    /// then the exception, stacking the STOP instruction itself so the
+    /// handler's RTE re-executes it. Returns the cycles consumed when the
+    /// wake fired; None leaves the CPU stopped (including a HALT).
+    fn stopped_supervisor_check<B: AddressBus>(&mut self, bus: &mut B) -> Option<i32> {
+        if self.stopped != STOP_LEVEL_STOP || self.s_flag != 0 {
+            return None;
+        }
+        self.stopped = 0;
+        self.internal_cycles(4);
+        // PC sits past the STOP opcode and its SR operand word.
+        self.ppc = self.pc.wrapping_sub(4);
+        Some(4 + self.exception_privilege(bus))
     }
 
     /// Halt the CPU.

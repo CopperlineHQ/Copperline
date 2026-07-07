@@ -408,6 +408,12 @@ impl Copper {
         }
     }
 
+    /// Whether the Copper has halted (illegal register write): it fetches
+    /// nothing further until a COPJMP strobe or vertical blank restarts it.
+    pub fn is_stopped(&self) -> bool {
+        matches!(self.state, CopperState::Stopped)
+    }
+
     pub fn advance_wait_free_cycle(
         &mut self,
         vpos: u32,

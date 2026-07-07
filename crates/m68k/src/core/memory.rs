@@ -93,5 +93,26 @@ pub trait AddressBus {
     fn interrupt_acknowledge(&mut self, _level: u8) -> u32 {
         0xFFFF_FFFF
     }
+
+    /// IPL poll-point marker. The 68000/68010 sample their IPL pins at ONE
+    /// microcode-determined point per instruction, and the take-interrupt
+    /// decision at the next instruction boundary consumes that sample. A
+    /// timing-accurate host latches the IPL level at the start of every bus
+    /// access and, by default, lets the instruction's LAST access provide
+    /// the boundary sample. For instructions whose poll point is NOT the
+    /// last access (e.g. read-modify-write instructions poll during the
+    /// final prefetch that precedes the writeback), the core calls this
+    /// right after the polling access: the host must keep that access's
+    /// sample and ignore later accesses until the boundary decision
+    /// consumes it. Functional-only buses can ignore it.
+    fn ipl_hold_sample(&mut self) {}
+
+    /// Release an `ipl_hold_sample` poll-point hold before the instruction
+    /// boundary consumes it. Called on exception dispatch: the vector jump's
+    /// handler-entry prefetch is a fresh poll point on real silicon (Moira
+    /// jumpToVector polls during the final refill read), so a hold placed
+    /// earlier in the faulted instruction must not survive into the handler.
+    fn ipl_release_sample(&mut self) {}
+
     fn reset_devices(&mut self) {}
 }
