@@ -203,6 +203,7 @@ pub struct FloppyController {
 impl Default for FloppyController {
     fn default() -> Self {
         let mut drives: [FloppyDrive; 4] = std::array::from_fn(|_| FloppyDrive::default());
+        drives[0].assert_no_media_change();
         for drive in drives.iter_mut().skip(1) {
             drive.external_id = 0;
         }
@@ -1454,6 +1455,9 @@ impl FloppyDrive {
         self.external_id_bit = 0;
         self.external_id_hold_deactivate = false;
         self.write_protected_sense = true;
+        if self.image.is_none() && self.external_id != 0 {
+            self.assert_no_media_change();
+        }
         self.status_settle_cck = DISK_STATUS_SETTLE_CCK;
     }
 
@@ -1570,6 +1574,11 @@ impl FloppyDrive {
             self.write_protected_target = write_protected;
             self.status_settle_cck = DISK_STATUS_SETTLE_CCK;
         }
+    }
+
+    fn assert_no_media_change(&mut self) {
+        self.disk_change = true;
+        self.disk_change_sense = true;
     }
 
     /// Advance disk rotation by `cck` cycles, returning whether an index
@@ -3841,6 +3850,52 @@ mod tests {
         let _ = fs::remove_file(first);
         let _ = fs::remove_file(second);
         Ok(())
+    }
+
+    #[test]
+    fn empty_internal_drive_keeps_disk_change_asserted_until_media_steps() -> Result<()> {
+        let media = temp_adf()?;
+        let mut ctrl = FloppyController::default();
+        let selected = !CIAB_DSKSEL0;
+        let inward_high = selected & !CIAB_DSKDIREC;
+
+        ctrl.write_prb(inward_high);
+        let status = ctrl.cia_a_status_bits();
+        assert_eq!(status & CIAA_DSKCHANGE, 0);
+        assert_ne!(status & CIAA_DSKRDY, 0);
+
+        ctrl.write_prb(inward_high & !CIAB_DSKSTEP);
+        ctrl.tick(DISK_STATUS_SETTLE_CCK, 0, &mut []);
+        assert_eq!(ctrl.cia_a_status_bits() & CIAA_DSKCHANGE, 0);
+
+        ctrl.insert_disk_image(0, media.clone(), true)?;
+        assert_eq!(ctrl.cia_a_status_bits() & CIAA_DSKCHANGE, 0);
+
+        ctrl.write_prb(inward_high);
+        wait_step_floor(&mut ctrl);
+        ctrl.write_prb(inward_high & !CIAB_DSKSTEP);
+        ctrl.tick(DISK_STATUS_SETTLE_CCK, 0, &mut []);
+        assert_ne!(ctrl.cia_a_status_bits() & CIAA_DSKCHANGE, 0);
+
+        let _ = fs::remove_file(media);
+        Ok(())
+    }
+
+    #[test]
+    fn connected_empty_external_drive_keeps_disk_change_asserted_through_step_poll() {
+        let mut ctrl = FloppyController::default();
+        ctrl.set_connected_drives([true, true, false, false]);
+
+        let selected = drive_select_prb(1, false);
+        let inward_high = selected & !CIAB_DSKDIREC;
+        ctrl.write_prb(inward_high);
+        let status = ctrl.cia_a_status_bits();
+        assert_eq!(status & CIAA_DSKCHANGE, 0);
+        assert_ne!(status & CIAA_DSKRDY, 0);
+
+        ctrl.write_prb(inward_high & !CIAB_DSKSTEP);
+        ctrl.tick(DISK_STATUS_SETTLE_CCK, 0, &mut []);
+        assert_eq!(ctrl.cia_a_status_bits() & CIAA_DSKCHANGE, 0);
     }
 
     #[test]
