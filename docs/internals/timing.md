@@ -190,14 +190,32 @@ check is applied by `Copper::step_eligible_slot`, the single primitive
 shared by the live bus path and the blitter-deadline predictor's cloned
 simulation, so prediction and execution cannot drift apart.
 
-Denise applies a register write to its pixel pipeline about four colour
-clocks after the chip-bus cycle (vAmiga: a one-DMA-cycle register-change
-delay plus pixel-domain application offsets). Render events are recorded
-at that Denise-effective position: CPU-sourced writes already carry the
-offset in their landing (the known CPU write-landing class), so only
-Copper-sourced writes -- whose bus landings are cycle-exact against
-vAmiga -- record the `DENISE_WRITE_EFFECT_DELAY_CCK` explicitly
-(`Bus::record_render_write`).
+Register writes take effect a fixed number of colour clocks after the
+chip-bus slot that carried them, and the delay is a property of the
+register pipeline, not of the bus master. Denise-boundary registers apply
+to the pixel pipeline about four colour clocks after the slot
+(`DENISE_WRITE_EFFECT_DELAY_CCK`; vAmiga: a register-change delay plus
+pixel-domain application offsets). Agnus's two-cycle register class
+(DMACON, BPLxPT, BPLxMOD, SPRxPT; vAmiga `recordRegisterChange(DMA_CYCLES(2))`)
+applies two colour clocks after the slot (`AGNUS_WRITE_EFFECT_DELAY_CCK`);
+the bitplane/sprite DMA-gating replay is calibrated against events
+recorded at that position. Render events are recorded at the effective
+position for *every* writer: a Copper MOVE executes at its bus slot, so
+its event records at the current beam position plus the delay; a CPU
+write is applied once its whole bus cycle has been billed (the beam sits
+past the granted slot by then), so its event is referenced from the
+granted slot itself (`Bus::cpu_custom_access_slot`) plus the same delay
+(`Bus::record_render_write`). Copper-sourced events currently record the
+Denise delay for the Agnus two-cycle class as well -- the copper-driven
+DMA-gating replay was calibrated with that offset when the copper
+landings became bus-exact (a documented TODO). The Denise delay was
+verified two-sided with the `COPPERLINE_DIAG_CPU_WRITES` /
+`VAMIGA_CPU_PROBE` landing traces on the vAmigaTS DMACON sprena dense CPU
+`COLOR00` stream: with landings matched line-for-line, the rendered rows
+sat exactly two colour clocks left of vAmiga until the CPU side carried
+the same slot-referenced delay; the Agnus delay is pinned by the DMACON
+bplon bitplane-gating bars, which sit 8 px right of vAmiga when those
+events carry the Denise delay instead.
 
 For the low-res renderer, a same-line `COLORxx` event recorded at `hpos`
 starts affecting pixels at `(hpos - $35) * 4` (`COLOR_WRITE_HPOS_FB0` in
