@@ -248,15 +248,6 @@ const BLTCON1_DOFF: u16 = 1 << 7;
 const COPPER_BUS_LOCKOUT_HPOS_SHORT_LINE: u32 = 0x00E0;
 const COPPER_BUS_LOCKOUT_HPOS_LONG_LINE: u32 = 0x00E1;
 const COPER_CPU_IRQ_DELAY_CCK: u32 = 2;
-// Copper-raised interrupts pass through the same CPU recognition pipeline as
-// every other source, but the pipeline's latency constant is calibrated
-// against CPU-write landings, which still carry the +4 colour-clock
-// bus-landing bias (the CPU write-landing class). Copper INTREQ/INTENA
-// writes land bus-true since the WAIT comparator lookahead fix, so sources
-// they newly raise take the calibrated latency plus the same offset.
-// TODO: model the CPU write landing exactly and drop this together with the
-// render-side twin in `record_render_write`.
-const COPPER_IRQ_EXTRA_LATENCY_CCK: u32 = 4;
 const RENDER_VISIBLE_START_VPOS: u32 = 0x2C;
 const RENDER_MIN_OVERSCAN_START_VPOS: u32 = 0x1C;
 const PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS: u32 = 0x19;
@@ -3632,21 +3623,6 @@ impl Bus {
 
     fn note_irq_source_asserted(&mut self) {
         self.arm_irq_recognition_latency();
-    }
-
-    /// `note_irq_latches_changed` for an INTREQ/INTENA write performed by the
-    /// Copper: newly exposed sources take the calibrated recognition latency
-    /// plus `COPPER_IRQ_EXTRA_LATENCY_CCK` (see that constant).
-    fn note_irq_latches_changed_from_copper(&mut self) {
-        let pending = self.current_enabled_irq_sources();
-        let newly = pending & !self.irq_latency_last_pending;
-        let delayed = newly & !INT_PORTS;
-        if delayed != 0 && self.irq_latency_setting != 0 {
-            self.irq_latency_mask |= delayed;
-            self.irq_latency_cck = self.irq_latency_setting + COPPER_IRQ_EXTRA_LATENCY_CCK;
-        }
-        self.irq_latency_mask &= pending;
-        self.irq_latency_last_pending = pending;
     }
 
     pub fn next_frame_event_cck(&self) -> u32 {
