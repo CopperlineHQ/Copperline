@@ -279,9 +279,11 @@ fn early_ddf_hires_origin_snaps_to_word_boundary() {
     assert_eq!(standard.native_x_offset(standard.diw_h_start(), repeat), 0);
 
     // Kickstart 2.05 insert-disk screen: hi-res but DDFSTRT=$40 (late), so
-    // there is no pre-fetch word. The late fetch keeps its beam-anchored
-    // position (absolute picture x is unchanged by the DIW comparator fix;
-    // the offset shrinks by the 2 hi-res px the window edge moved left).
+    // there is no pre-fetch word; the fetch origin sits inside the window and
+    // the left border shows the pre-window samples. With the hi-res fetch
+    // reference sharing the lo-res 0x81 anchor (both flush at the 2H-196 window
+    // edge), the window's first visible sample is 24 hi-res samples into the
+    // fetched row. The Agnus/DDF vAmigaTS references improve, none regress.
     let ks_boot = ControlState {
         diwstrt: 0x2C95,
         diwstop: 0x2CAD,
@@ -289,7 +291,7 @@ fn early_ddf_hires_origin_snaps_to_word_boundary() {
         ddfstop: 0x00D0,
         ..xsysinfo
     };
-    assert_eq!(ks_boot.native_x_offset(ks_boot.diw_h_start(), repeat), 22);
+    assert_eq!(ks_boot.native_x_offset(ks_boot.diw_h_start(), repeat), 24);
 }
 
 fn ocs_snapshot(diwstrt: u16, diwstop: u16, ddfstrt: u16, ddfstop: u16) -> RenderRegisterSnapshot {
@@ -1077,15 +1079,17 @@ fn native_x_offset_accounts_for_diw_and_ddf_alignment() {
 
     // FMODE=0: the fetch gulp equals the DDF granularity, so the picture
     // follows DDFSTRT continuously. KS 2.05's insert-disk screen (DDF
-    // $40, DIW $95) keeps the same late-DDF relation after the standard
-    // $81/$3C hi-res phase is aligned to the display-window edge.
+    // $40, DIW $95) is a late-DDF hi-res picture whose left border shows the
+    // samples fetched before the window opens: with the hi-res reference flush
+    // at the 2H-196 window edge the first visible sample is 24 hi-res samples
+    // into the row (Agnus/DDF vAmigaTS references improve, none regress).
     let kickstart_hires = RenderState {
         bplcon0: 0x8000,
         diwstrt: 0x6395,
         ddfstrt: 0x0040,
         ..blank_state()
     };
-    assert_eq!(kickstart_hires.native_x_offset(true, 1), 22);
+    assert_eq!(kickstart_hires.native_x_offset(true, 1), 24);
 
     // Wide FMODE fetches quantize the displayed shifter origin to the gulp
     // grid: AGA system screens program DDFSTRT $38 or $3C interchangeably
@@ -1118,10 +1122,10 @@ fn native_x_offset_accounts_for_diw_and_ddf_alignment() {
     // FS-UAE. DDFSTRT $38 and $3C are still equivalent because both align
     // to the same wide-FMODE gulp.
     assert_eq!(wb_hires_overscan_fetch.native_x_offset(true, 1), 0);
-    // The hi-res picture keeps its beam-anchored position (x = 64); the
-    // hardware window edge (62) now opens one lo-res pixel earlier, so the
-    // picture starts 2 hi-res px into the window.
-    assert_eq!(wb_hires_overscan_fetch.fetch_start_native_x(true, 1), 2);
+    // The hi-res picture sits flush against the 2H-196 window edge (x = 62),
+    // same as lo-res: its first fetched sample is the window's first visible
+    // pixel, so no samples are consumed in the border before it opens.
+    assert_eq!(wb_hires_overscan_fetch.fetch_start_native_x(true, 1), 0);
 
     // The placement gulp grid runs on absolute colour-clock multiples of
     // the fetch period. Lores FMODE=1 has a 16-cck gulp: DDFSTRT $30 is
@@ -1161,9 +1165,13 @@ fn native_x_offset_accounts_for_diw_and_ddf_alignment() {
     assert_eq!(diagrom_hires.display_window_x().0, 62);
     assert_eq!(diagrom_hires.clipped_display_pixels_before_frame(), 0);
     assert_eq!(diagrom_hires.native_x_offset(true, 1), 0);
-    // Standard hi-res keeps its beam-anchored position (x = 64), 2 hi-res
-    // px inside the hardware window edge (62).
-    assert_eq!(diagrom_hires.fetch_start_native_x(true, 1), 2);
+    // Standard hi-res ($81/$3C) sits flush against the 2H-196 window edge
+    // (x = 62): its first fetched sample is the window's first visible pixel,
+    // so a full 40-word row fills the 640-sample window to both edges. When
+    // hi-res used a +1 (0x82) reference it started 2 hi-res px inside the
+    // window and clipped its rightmost fetched pixel -- the AmigaDOS window's
+    // right border vanished on KS1.3 (the "binary" demo, r.adf).
+    assert_eq!(diagrom_hires.fetch_start_native_x(true, 1), 0);
 
     let lores_extra_fetch_word = RenderState {
         bplcon0: 0,
