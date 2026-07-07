@@ -89,6 +89,7 @@ ticks everywhere.
 | 28 | independent pair `move.w d2,d0` + `move.w d3,d1` x8192 | 68060 dual-issue: pairs into one clock; compare rows 4 and 29 |
 | 29 | RAW pair `move.w d2,d0` + `move.w d0,d1` x8192 | the dependency blocks dual issue |
 | 30 | `dbra`-only loop x8192, after the 68060 enable block | branch-cache folding: 1 clock/iteration on a 68060 |
+| 31 | beam cck while a 64-iteration DIVU loop runs **with a 6-bitplane display active** | DIV-during-active-display: a DIV's prefetch contends with plane DMA, and its internal clocks must advance the beam at the boundary, not leak into the next instruction |
 
 ### Rows 28-30: 68060 superscalar dispatch and branch cache
 
@@ -138,8 +139,27 @@ rows 23-26 = 9944 / 15308 / 383 / 16842 cck, timing the row-24 A->D fill at
 display fetch an unfinished buffer. The fill cadence was corrected on 2026-06-09;
 Copperline now reads ~9922 / 18339 / 317 / 25074 against the current FS-UAE
 reference 9908 / 18357 / 262 / 25208, matching rows 23-24 and the row-26
-display-DMA contention. Known residual tracked by these rows: row 25 (line
-blit) is ~21% slow (317 vs 262).
+display-DMA contention.
+
+Row 31 found (and now guards) a second real bug (2026-07-07). On the plain 68000
+Copperline matches vAmiga on every other row -- including the CPU-vs-6-bitplane
+contention (row 11) and the line blit (row 25); the apparent "row 25 ~21% slow"
+seen against the FS-UAE reference is a **68EC020 instruction-cache** artifact (the
+020 caches the loop so its prefetches never contend) and does not reproduce on the
+68000. But DIV-during-active-display (row 31) read 8722 cck where vAmiga reads
+4790: the 68000 DIV reorder that puts the final prefetch before the division's
+internal clocks left those internal clocks *deferred* past the instruction
+boundary (billed at the next instruction's first bus access), which mistimed the
+CPU-vs-bitplane-DMA contention and roughly doubled the beam cost of a DIV run
+mid-fetch. Flushing the internal clocks at the DIV boundary (Moira runs `SYNC`
+immediately after `prefetch<POLL>`) fixed it: row 31 8722 -> 4820 vs vAmiga 4790,
+with rows 23-26 and the CPU/blitter rows unchanged. This was TEK Rampage's Ellis
+scene going saturated (EHB half-bright dropped) and its Mirror scene crashing --
+the DIV-heavy per-frame math patches the copper list while the 6-plane screen
+fetches, so the doubled DIV cost let the CPU fall behind the beam.
+(`getbeam` also had a latent bug -- it left the upper word of `d2` dirty across
+the `add.l d2,d0`, so a caller with a non-zero high word in `d2` corrupted the
+reading; harmless for rows 23-26, fixed for row 31.)
 
 ### Rows 19-21: the cooperative-scheduler interrupt chain
 
