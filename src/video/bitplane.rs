@@ -637,26 +637,33 @@ fn enforce_h_window_closed_intervals(
             let mut sx = x;
             while sx < closed_end {
                 let control = control_at_x(base_controls[y], &control_segments[y], sx);
-                let next_ctl = control_segments[y]
+                // The border colour follows COLOR00 per pixel, so a run ends at
+                // the next control OR palette (colour) segment -- not just the
+                // next control change. Splitting on control alone painted a
+                // whole control-run with COLOR00 sampled at its start, dropping
+                // any mid-run colour write (a copper COLOR00 change inside the
+                // left border, as in copper-chunky banners).
+                let next_bound = control_segments[y]
                     .iter()
                     .map(|seg| seg.x)
+                    .chain(palette_segments[y].iter().map(|seg| seg.x))
                     .filter(|&b| b > sx)
                     .min()
                     .unwrap_or(FB_WIDTH)
                     .min(closed_end);
                 if !control.display_window_contains_line(y, visible_line0) {
                     // Row is outside the vertical window here: already border.
-                    sx = next_ctl;
+                    sx = next_bound;
                     continue;
                 }
                 if control.border_sprite_enabled() {
-                    sx = next_ctl;
+                    sx = next_bound;
                     continue;
                 }
                 let palette = palette_at_x(base_palettes[y], &palette_segments[y], sx);
                 let pixel = background_pixel(&control, palette[0], true);
-                row[sx..next_ctl].fill(pixel);
-                sx = next_ctl;
+                row[sx..next_bound].fill(pixel);
+                sx = next_bound;
             }
             x = closed_end;
         }

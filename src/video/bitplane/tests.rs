@@ -1014,6 +1014,58 @@ fn beam_timed_bplcon3_brdrblnk_latches_until_ecsena_enables_effect() {
 }
 
 #[test]
+fn closed_interval_repaint_follows_copper_color00_writes() {
+    // Copper-chunky banners (e.g. the "binary" logo's red bar) paint colour
+    // bars by rewriting COLOR00 across the horizontal border, where the DIW
+    // flip-flop has closed the display window. The closed-interval border
+    // repaint must sample COLOR00 per colour-write, not once per control run:
+    // sampling once painted the whole left border with the frame-start COLOR00
+    // and dropped the copper's mid-border colour change, clipping the bar's
+    // left edge back to the first control boundary.
+    let control = visible_lowres_control(0);
+    let mut palette = Palette::from_ocs([0; 32]);
+    palette.write_ocs(0, 0x0123); // dark frame-start COLOR00
+    let base_palettes = [palette];
+    // Copper writes COLOR00 = red partway across the closed left border.
+    let palette_segments = vec![vec![PaletteSegment {
+        x: 40,
+        entry: 0,
+        loct: false,
+        value: 0x0C00,
+    }]];
+    let base_controls = [control];
+    let control_segments = vec![Vec::new()];
+    // Flip-flop closed over [0, 100); open to the right of it.
+    let h_window_rows = vec![HWindowRow {
+        open_runs: vec![(100, FB_WIDTH)],
+        comparator_anchor: Some(100),
+    }];
+    let mut fb = vec![0u32; FB_WIDTH];
+
+    enforce_h_window_closed_intervals(
+        &mut fb,
+        &base_palettes,
+        &palette_segments,
+        &base_controls,
+        &control_segments,
+        &h_window_rows,
+        PAL_VISIBLE_LINE0,
+        1,
+    );
+
+    let dark = background_pixel(&control, 0x0123, true);
+    let red = background_pixel(&control, 0x0C00, true);
+    // Border left of the copper write keeps the frame-start colour...
+    assert_eq!(fb[20], dark);
+    assert_eq!(fb[38], dark);
+    // ...and follows the red COLOR00 write for the rest of the closed border.
+    assert_eq!(fb[40], red);
+    assert_eq!(fb[98], red);
+    // The open interval to its right is left untouched by the repaint.
+    assert_eq!(fb[100], 0);
+}
+
+#[test]
 fn native_x_offset_accounts_for_diw_and_ddf_alignment() {
     let standard_hires = RenderState {
         bplcon0: 0x8000,
