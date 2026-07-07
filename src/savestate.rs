@@ -88,7 +88,10 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      irq_pin_delay_eticks - the 8520 one-E-cycle interrupt delay)
 //  25: Blitter gained the early-dropping DMACONR BBUSY flag (bbusy) and
 //      Bus the one-cck INTREQ.BLIT raise delay (blit_irq_delay_cck)
-pub const STATE_VERSION: u32 = 25;
+//  26: Copper gained the deferred SKIP decision (skip_eval - the condition
+//      sampled at the next instruction's first-word fetch) and the COPJMP
+//      strobe tail state (CopperState::Jumping, COP_JMP1/COP_JMP2)
+pub const STATE_VERSION: u32 = 26;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

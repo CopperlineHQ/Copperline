@@ -5951,9 +5951,11 @@ fn color00_overscan_write_does_not_backfill_row_start() {
         &mut manual_bpl_segments,
     );
 
-    assert_eq!(palette_segments[0][0].x, 60);
+    let x_on = color_write_framebuffer_x(68);
+    let x_off = color_write_framebuffer_x(76);
+    assert_eq!(palette_segments[0][0].x, x_on);
     assert_eq!(palette_segments[0][0].value, 0x087A);
-    assert_eq!(palette_segments[0][1].x, 92);
+    assert_eq!(palette_segments[0][1].x, x_off);
     assert_eq!(palette_segments[0][1].value, 0x0000);
     assert_eq!(base_palettes[0][0], 0x0000);
 
@@ -5967,10 +5969,10 @@ fn color00_overscan_write_does_not_backfill_row_start() {
     );
 
     assert_eq!(fb[0], rgb12_to_rgba8(0x0000));
-    assert_eq!(fb[59], rgb12_to_rgba8(0x0000));
-    assert_eq!(fb[60], rgb12_to_rgba8(0x087A));
-    assert_eq!(fb[91], rgb12_to_rgba8(0x087A));
-    assert_eq!(fb[92], rgb12_to_rgba8(0x0000));
+    assert_eq!(fb[x_on - 1], rgb12_to_rgba8(0x0000));
+    assert_eq!(fb[x_on], rgb12_to_rgba8(0x087A));
+    assert_eq!(fb[x_off - 1], rgb12_to_rgba8(0x087A));
+    assert_eq!(fb[x_off], rgb12_to_rgba8(0x0000));
 }
 
 #[test]

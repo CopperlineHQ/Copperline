@@ -93,6 +93,7 @@ authoritative list. The most useful ones:
 | `COPPERLINE_DIAG_PCSAMPLE` | Top-50 executed-PC histogram every 50 frames |
 | `COPPERLINE_DIAG_PCHIST` | Full PC history (with `COPPERLINE_DIAG_PCHIST_START=SECS`) |
 | `COPPERLINE_DIAG_COPLEN` | Copper list length (optionally at a given emulated time) |
+| `COPPERLINE_DIAG_COP_WRITES` | Every Copper MOVE's landing colour clock (beam position, register, value), for cross-emulator write-landing comparison against vAmiga's `VAMIGA_COP_PROBE` trace |
 | `COPPERLINE_DIAG_DISPLAY` | Display-register change log |
 | `COPPERLINE_DIAG_CAPROW` | `=all`, `=V`, or `=START:END`: per-line bitplane capture state at DDF start, including DMACON, current and DDF-anchor BPLCON0, FMODE/DIW/DDF, effective fetch window, unit/period/quantum, words/row, modulos, and all BPLxPTs -- separates wrong-pointer from wrong-decode display bugs |
 | `COPPERLINE_DIAG_PALETTE_ROW` | `=all`, `=V`, or `=START:END`: log beam-timed COLOR writes for selected beam lines, including source, framebuffer x, palette entry, LOCT, value, and BPLCON3; the setting is cached after first use |

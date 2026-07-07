@@ -7,6 +7,16 @@
 
 use super::*;
 
+/// One-shot env flag for the Copper write-landing trace
+/// (`COPPERLINE_DIAG_COP_WRITES=1`): logs every Copper MOVE's landing color
+/// clock (beam position, register, value) to stderr for cross-emulator
+/// comparison against vAmiga's `VAMIGA_COP_PROBE` trace.
+fn diag_cop_writes_on() -> bool {
+    use std::sync::OnceLock;
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| crate::envcfg::flag("COPPERLINE_DIAG_COP_WRITES"))
+}
+
 impl Bus {
     pub(super) fn advance_one_chip_bus_quantum(
         &mut self,
@@ -199,6 +209,12 @@ impl Bus {
             CopperSlotAction::Idle => false,
             CopperSlotAction::BusUsed => true,
             CopperSlotAction::Move { register, value } => {
+                if diag_cop_writes_on() {
+                    eprintln!(
+                        "COPPROBE MOVE   v={:03x} h={:02x} reg={:03x} val={:04x}",
+                        vpos, hpos, register, value
+                    );
+                }
                 if self.copper_can_write_custom(register) {
                     let _ = self.write_custom_word_from(register, value, BeamWriteSource::Copper);
                 } else {
@@ -503,7 +519,7 @@ impl Bus {
                 if quantum >= CHIP_BUS_SLOT_CCK
                     && pending_copper_frame_start.is_none()
                     && self.copper_dma_enabled()
-                    && hpos != COPPER_BUS_LOCKOUT_HPOS
+                    && !self.copper_bus_lockout_active_at(hpos)
                 {
                     let _ = copper.step_eligible_slot(
                         &self.mem.chip_ram,
@@ -521,7 +537,7 @@ impl Bus {
                 true
             } else if !self.copper_dma_enabled() {
                 false
-            } else if hpos == COPPER_BUS_LOCKOUT_HPOS {
+            } else if self.copper_bus_lockout_active_at(hpos) {
                 copper.is_running()
             } else {
                 !matches!(
@@ -967,14 +983,22 @@ impl Bus {
     }
 
     pub(super) fn copper_bus_lockout_active_at(&self, hpos: u32) -> bool {
-        hpos == COPPER_BUS_LOCKOUT_HPOS
+        hpos == self.copper_bus_lockout_hpos()
+    }
+
+    pub(super) fn copper_bus_lockout_hpos(&self) -> u32 {
+        if self.agnus.lol {
+            COPPER_BUS_LOCKOUT_HPOS_LONG_LINE
+        } else {
+            COPPER_BUS_LOCKOUT_HPOS_SHORT_LINE
+        }
     }
 
     pub(super) fn cck_until_copper_wait_position(&self, wait: CopperWait) -> Option<u32> {
         if wait.is_end_of_list() {
             return None;
         }
-        if wait.is_satisfied(self.agnus.vpos, self.agnus.hpos) {
+        if wait.comparator_is_satisfied(self.agnus.vpos, self.agnus.hpos) {
             return Some(0);
         }
 
@@ -996,7 +1020,7 @@ impl Bus {
                     vpos = 0;
                 }
             }
-            if wait.is_satisfied(vpos, hpos) {
+            if wait.comparator_is_satisfied(vpos, hpos) {
                 return Some(delta);
             }
         }
@@ -1004,7 +1028,12 @@ impl Bus {
     }
 
     pub(super) fn cck_until_full_mask_copper_wait(&self, wait: CopperWait) -> Option<u32> {
+        // The comparator's horizontal input runs two color clocks ahead of
+        // the beam, so a sleeping full-mask wait releases two color clocks
+        // before its masked horizontal target (see
+        // `CopperWait::comparator_is_satisfied`).
         let target_h = (wait.position_bits() & 0x00FE) as u32;
+        let release_h = target_h.saturating_sub(2);
         let frame_lines = self.agnus.current_frame_lines();
 
         for line_delta in 0..=frame_lines {
@@ -1017,16 +1046,16 @@ impl Bus {
             let target_line_cck = self.line_cck_after_lines(line_delta);
 
             if line_delta == 0 {
-                if target_h < target_line_cck
-                    && self.agnus.hpos <= target_h
-                    && wait.is_satisfied(vpos, target_h)
+                if release_h < target_line_cck
+                    && self.agnus.hpos <= release_h
+                    && wait.comparator_is_satisfied(vpos, release_h)
                 {
-                    return Some(target_h - self.agnus.hpos);
+                    return Some(release_h - self.agnus.hpos);
                 }
-            } else if wait.is_satisfied(vpos, 0) {
+            } else if wait.comparator_is_satisfied(vpos, 0) {
                 return Some(line_start_delta);
-            } else if target_h < target_line_cck && wait.is_satisfied(vpos, target_h) {
-                return Some(line_start_delta + target_h);
+            } else if release_h < target_line_cck && wait.comparator_is_satisfied(vpos, release_h) {
+                return Some(line_start_delta + release_h);
             }
         }
 
