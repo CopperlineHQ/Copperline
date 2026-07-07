@@ -1043,6 +1043,14 @@ pub enum BeamWriteSource {
     Copper,
 }
 
+/// One-shot env flag for the CPU write-landing trace
+/// (`COPPERLINE_DIAG_CPU_WRITES=1`); see [`Bus::diag_cpu_write`].
+fn diag_cpu_writes_on() -> bool {
+    use std::sync::OnceLock;
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| crate::envcfg::flag("COPPERLINE_DIAG_CPU_WRITES"))
+}
+
 fn beam_write_source_name(source: BeamWriteSource) -> &'static str {
     match source {
         BeamWriteSource::Cpu => "cpu",
@@ -4374,6 +4382,26 @@ impl Bus {
         }
     }
 
+    /// One-shot env flag for the CPU write-landing trace
+    /// (`COPPERLINE_DIAG_CPU_WRITES=1`): logs every CPU custom-register
+    /// write's granted chip-bus slot (and the beam position the write's
+    /// effect applies at) to stderr, for cross-emulator comparison against
+    /// vAmiga's `VAMIGA_CPU_PROBE` trace.
+    fn diag_cpu_write(&self, off: u16, word: u16) {
+        let (v, h) = self
+            .cpu_custom_access_slot
+            .unwrap_or((self.agnus.vpos, self.agnus.hpos));
+        eprintln!(
+            "CPUPROBE POKE v={:03x} h={:02x} reg={:03x} val={:04x} ev={:03x} eh={:02x}",
+            v,
+            h,
+            off & 0x1FE,
+            word,
+            self.agnus.vpos,
+            self.agnus.hpos
+        );
+    }
+
     /// Returns true if the write set a new INTREQ bit and the caller
     /// should preempt the slice so the freshly-asserted IRQ can be
     /// delivered before agnus has a chance to OR in VERTB.
@@ -4399,6 +4427,9 @@ impl Bus {
                 let b = (val & 0xFF) as u16;
                 let word = (b << 8) | b;
                 trace!("custom W8  off={:03X} val={:02X}", off, b);
+                if diag_cpu_writes_on() {
+                    self.diag_cpu_write(off & 0xFFE, word);
+                }
                 self.write_custom_word_from(off & 0xFFE, word, BeamWriteSource::Cpu)
             }
             4 => {
@@ -4409,6 +4440,10 @@ impl Bus {
                 let hi = ((val >> 16) & 0xFFFF) as u16;
                 let lo = (val & 0xFFFF) as u16;
                 trace!("custom W32 off={:03X} val={:08X}", off, val);
+                if diag_cpu_writes_on() {
+                    self.diag_cpu_write(off, hi);
+                    self.diag_cpu_write(off.wrapping_add(2), lo);
+                }
                 let p1 = self.write_custom_word_from(off, hi, BeamWriteSource::Cpu);
                 let p2 = self.write_custom_word_from(off.wrapping_add(2), lo, BeamWriteSource::Cpu);
                 p1 || p2
@@ -4416,6 +4451,9 @@ impl Bus {
             _ => {
                 let word = (val & 0xFFFF) as u16;
                 trace!("custom W16 off={:03X} val={:04X}", off, word);
+                if diag_cpu_writes_on() {
+                    self.diag_cpu_write(off, word);
+                }
                 self.write_custom_word_from(off, word, BeamWriteSource::Cpu)
             }
         }
