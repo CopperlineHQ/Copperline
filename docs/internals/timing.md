@@ -162,12 +162,24 @@ clocks and idles on the odd ones (`Copper::hpos_is_access_cycle`). So:
   the alternate clocks free for the blitter/CPU. Modelling the Copper as
   owning every clock while running would starve a chip-bus-bound CPU
   during dense Copper effects such as horizontal colour gradients.
-- WAIT and SKIP span **six** colour clocks, spending a dummy-plus-compare
+- WAIT and SKIP span **eight** colour clocks, spending a two-Copper-cycle
   tail after their two word fetches (the Minimig
-  FETCH1/FETCH2/WAITSKIP1/WAITSKIP2 sequence).
+  FETCH1/FETCH2/WAITSKIP1/WAITSKIP2 sequence; vAmiga COP_WAIT1/COP_WAIT2
+  at fetch2+2 and fetch2+4): an immediately-true WAIT or a SKIP resumes
+  fetching at fetch2+6.
 - The custom-register side effect occurs on the second word fetch, i.e.
   the third of the four colour clocks: three back-to-back MOVEs starting
   at beam `hpos` write at `hpos + 2`, `hpos + 6`, and `hpos + 10`.
+- The WAIT comparator's horizontal input runs **two colour clocks ahead**
+  of the beam (`CopperWait::comparator_is_satisfied`), wrapping through 0
+  over the last three clocks of a line. A sleeping WAIT therefore wakes at
+  target-2 -- the match colour clock is the bus-free wake-up cycle -- and
+  the next instruction's first fetch lands exactly on the masked target,
+  its write two clocks later. Cross-verified against vAmiga with the
+  two-sided landing probes (`COPPERLINE_DIAG_COP_WRITES` /
+  `VAMIGA_COP_PROBE`): a `WAIT $4721` + `MOVE SPR0CTL` lands the write at
+  hpos $22 in both emulators (vAmigaTS spritedma/interfere2, matching the
+  real-A500 photo).
 
 Anchoring the cadence to the beam rather than to a carried-over flip-flop
 is what makes a back-to-back colour MOVE list land its writes at the
@@ -178,7 +190,16 @@ check is applied by `Copper::step_eligible_slot`, the single primitive
 shared by the live bus path and the blitter-deadline predictor's cloned
 simulation, so prediction and execution cannot drift apart.
 
-For the low-res renderer, a same-line `COLORxx` write at beam `hpos`
+Denise applies a register write to its pixel pipeline about four colour
+clocks after the chip-bus cycle (vAmiga: a one-DMA-cycle register-change
+delay plus pixel-domain application offsets). Render events are recorded
+at that Denise-effective position: CPU-sourced writes already carry the
+offset in their landing (the known CPU write-landing class), so only
+Copper-sourced writes -- whose bus landings are cycle-exact against
+vAmiga -- record the `DENISE_WRITE_EFFECT_DELAY_CCK` explicitly
+(`Bus::record_render_write`).
+
+For the low-res renderer, a same-line `COLORxx` event recorded at `hpos`
 starts affecting pixels at `(hpos - $35) * 4` (`COLOR_WRITE_HPOS_FB0` in
 `src/video/bitplane.rs`); beam-timed placement is anchored at
 `COPPER_WAIT_HPOS_FB0` ($28), and bitplane-control writes add the
@@ -234,7 +255,12 @@ wait for the blitter to go idle.
   gets DMA slots to fetch it.
 - A Copper MOVE can update COP1LC/COP2LC; a later COPJMP strobe branches
   through the *current* value. A Copper MOVE to COPJMP1/COPJMP2 spends its
-  second word fetch on the strobe.
+  second word fetch on the strobe, then two more bus-free Copper cycles
+  (vAmiga COP_JMP1/COP_JMP2); the program counter reloads on the second of
+  those, so the first fetch from the new list lands three Copper cycles
+  after the strobe (verified against the vAmiga copper trace: a COPJMP2
+  MOVE at hpos $04 fetches the target list's first MOVE at $0A, its write
+  landing at $0C).
 - The automatic frame reload latches the current COP1LC at end of frame
   and restarts the Copper at the top of the next frame (vpos 0) through
   the vertical-blank lines -- it branches through a Copper-programmed

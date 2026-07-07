@@ -14,10 +14,10 @@ use super::{
     CpuBusAccessKind, DeviceClock, DisplaySpriteDmaState, DisplaySpriteLineData, FrameBusTrace,
     LiveCollisionControl, LiveCollisionLineReplay, LiveSpriteCollisionSource,
     RenderRegisterSnapshot, BLITTER_SLOWDOWN_CPU_MISS_LIMIT, BLTCON1_DOFF, BPLCON0_ECSENA,
-    BPLCON3_BRDSPRT, BPLCON3_SPRES_HIRES, COPPER_BUS_LOCKOUT_HPOS, DENISE_HPOS_LAG_CCK,
-    DMACON_BLTEN, DMACON_BLTPRI, DMACON_BPLEN, DMACON_SPREN, PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS,
-    RENDER_COPPER_WAIT_HPOS_FB0, RENDER_DIW_HSTART_FB0, RENDER_MIN_OVERSCAN_START_VPOS,
-    RENDER_VISIBLE_LINES, RENDER_VISIBLE_START_VPOS, SPRITE_DMA_SLOT1_HPOS,
+    BPLCON3_BRDSPRT, BPLCON3_SPRES_HIRES, DENISE_HPOS_LAG_CCK, DMACON_BLTEN, DMACON_BLTPRI,
+    DMACON_BPLEN, DMACON_SPREN, PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS, RENDER_COPPER_WAIT_HPOS_FB0,
+    RENDER_DIW_HSTART_FB0, RENDER_MIN_OVERSCAN_START_VPOS, RENDER_VISIBLE_LINES,
+    RENDER_VISIBLE_START_VPOS, SPRITE_DMA_SLOT1_HPOS,
 };
 use crate::audio::AudioSink;
 use crate::chipset::agnus::{
@@ -1221,11 +1221,11 @@ fn copper_interrupt_wait_fires_coper_at_programmed_line() {
     bus.advance_chipset(target_cck);
     assert_eq!(bus.paula.intreq & INT_COPER, 0);
 
-    // The Copper wakes on its tail check at the target position (hpos 0x20),
-    // spends a dummy wake-up cycle, then fetches its INTREQ MOVE on the
-    // next two even (access-parity) color clocks (0x24, 0x26) before the
-    // write lands.
-    bus.advance_chipset(6);
+    // The comparator's horizontal input runs two color clocks ahead of the
+    // beam, so the wait wakes on the bus-free color clock $1E, the first
+    // fetch of the INTREQ MOVE lands on the $20 target, and the write lands
+    // with the second fetch at $22 (the vAmiga/interfere-photo landing).
+    bus.advance_chipset(2);
     assert_eq!(bus.paula.intreq & INT_COPER, 0);
 
     bus.advance_chipset(1);
@@ -1474,14 +1474,14 @@ fn automatic_copper_restart_uses_live_cop1lc_at_frame_boundary() {
     // The Copper restarts at the top of the frame (vpos 0), not at the end
     // of vblank, so the live COP1LC (cop2) is picked up immediately as the
     // beam wraps -- no delay until the end of vblank.
-    bus.advance_chipset(7);
+    bus.advance_chipset(5);
     assert_eq!(bus.pending_copper_frame_start, None);
     assert_eq!(bus.denise.palette[0], 0);
 
-    // From hpos 0 the Copper waits out the refresh band (0x00-0x08) and its
-    // idle-half color clock at hpos 0x09, then its single MOVE fetches on
-    // the next two even (access-parity) color clocks: write at hpos 0x0C.
-    bus.advance_chipset(7);
+    // The restarted Copper's first instruction-word fetch lands on the hpos
+    // 0x02 access cycle (COPPER_FRAME_START_HPOS, vAmiga-trace calibrated),
+    // so the single MOVE's write lands at hpos 0x04.
+    bus.advance_chipset(2);
     assert_eq!(bus.denise.palette[0], 0x0666);
 }
 
@@ -1493,7 +1493,9 @@ fn next_copper_wakeup_cck_tracks_wait_beam_position() {
     bus.agnus.hpos = 0x10;
     bus.copper.wait(CopperWait::new(0x5021, 0xFFFE));
 
-    assert_eq!(bus.next_copper_wakeup_cck(), Some(0x10));
+    // The comparator's horizontal input runs two color clocks ahead of the
+    // beam, so the wakeup lands at $1E, two before the masked $20 target.
+    assert_eq!(bus.next_copper_wakeup_cck(), Some(0x0E));
 
     bus.agnus.hpos = 0x20;
     assert_eq!(bus.next_copper_wakeup_cck(), Some(0));
@@ -1659,14 +1661,15 @@ fn copper_wait_with_bfd_clear_resumes_after_busy_blitter_finishes() {
     bus.advance_chipset(2);
     assert_eq!(bus.denise.palette[0], 0);
 
-    // Once the blitter frees the bus, the Copper spends a dummy wake-up
-    // cycle, then its MOVE fetches land on the even copper slots and the
-    // write appears at hpos 0x2E (the engine finishes one colour clock
-    // earlier now that the startup models the hardware's poke+4 first
-    // body cycle).
+    // Once the blitter frees the bus (the engine finishes one colour clock
+    // earlier now that its startup models the hardware's poke+4 first body
+    // cycle), the color clock where the released comparator is evaluated is
+    // itself the bus-free wake-up cycle; the MOVE fetches land on the next
+    // even copper slots and the write lands at hpos 0x2E (recorded at its
+    // Denise-effective position, 0x32).
     bus.advance_chipset(8);
     assert_eq!(bus.denise.palette[0], 0x0555);
-    assert_eq!(bus.current_render_events()[0].hpos, 0x2E);
+    assert_eq!(bus.current_render_events()[0].hpos, 0x32);
 }
 
 #[test]
@@ -1689,12 +1692,14 @@ fn copper_wait_with_bfd_set_ignores_busy_blitter_after_position_match() {
     bus.advance_chipset(2);
     assert_eq!(bus.denise.palette[0], 0);
 
-    // BFD set: the Copper ignores the busy blitter and resumes; it wakes on
-    // its tail check at hpos 0x21, spends a dummy wake-up cycle, and the
-    // MOVE write lands at hpos 0x26.
-    bus.advance_chipset(4);
+    // BFD set: the Copper ignores the busy blitter. The WAIT pays its
+    // WAIT1/WAIT2 tail through hpos 0x22, the already-true comparator is
+    // seen at 0x23, the wake-up spends the 0x24 access cycle, and the MOVE
+    // write lands at hpos 0x28 (fetch2+6 fetch, +2 write; recorded at its
+    // Denise-effective position, 0x2C).
+    bus.advance_chipset(6);
     assert_eq!(bus.denise.palette[0], 0x0666);
-    assert_eq!(bus.current_render_events()[0].hpos, 0x26);
+    assert_eq!(bus.current_render_events()[0].hpos, 0x2C);
     assert!(bus.blitter.busy);
 }
 
@@ -1708,15 +1713,15 @@ fn copper_wait_immediate_match_uses_free_cycle_before_next_fetch() {
     bus.agnus.hpos = 0x20;
     bus.copper.jump(cop1 as u32);
 
-    // WAIT fetch parks the Copper already past the target; it wakes on its
-    // tail check at hpos 0x23, spends a dummy wake-up cycle, then the MOVE
-    // write lands at hpos 0x28.
+    // WAIT fetch parks the Copper already past the target; it pays the
+    // WAIT1/WAIT2 tail through hpos 0x24, sees the true comparator at 0x25,
+    // wakes on the 0x26 access cycle, and the MOVE write lands at hpos 0x2A.
     bus.advance_chipset(6);
     assert_eq!(bus.denise.palette[0], 0);
 
-    bus.advance_chipset(3);
+    bus.advance_chipset(5);
     assert_eq!(bus.denise.palette[0], 0x0777);
-    assert_eq!(bus.current_render_events()[0].hpos, 0x28);
+    assert_eq!(bus.current_render_events()[0].hpos, 0x2E);
 }
 
 #[test]
@@ -1736,11 +1741,11 @@ fn copper_wait_wakeup_yields_free_cycle_after_late_match() {
 
     bus.advance_chipset(3);
     assert_eq!(bus.denise.palette[0], 0x0888);
-    assert_eq!(bus.current_render_events()[0].hpos, 0x2A);
+    assert_eq!(bus.current_render_events()[0].hpos, 0x2E);
 }
 
 #[test]
-fn copper_e1_bus_lockout_defers_transfer_until_e2() {
+fn copper_line_end_bus_lockout_defers_transfer_past_the_wrap() {
     let mut bus = empty_bus();
     let cop1 = 0x0100usize;
     let start_vpos = 0x40;
@@ -1751,20 +1756,19 @@ fn copper_e1_bus_lockout_defers_transfer_until_e2() {
 
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_COPEN;
     bus.agnus.vpos = start_vpos;
-    bus.agnus.hpos = COPPER_BUS_LOCKOUT_HPOS;
+    bus.agnus.hpos = bus.copper_bus_lockout_hpos();
     bus.copper.jump(cop1 as u32);
 
-    // E1 is odd, i.e. the Copper's idle half under beam-parity locking, and
-    // it is also the end-of-line bus lockout, so the first-word fetch cannot
-    // happen here; the slot is free.
+    // $E0 on a PAL short line is the Copper's end-of-line bus lockout: the
+    // slot is claimed (nobody else can use it, vAmiga's BLOCKED marker) but
+    // no instruction word is fetched.
     bus.advance_chipset(1);
-    assert_eq!(bus.last_chip_bus_owner(), ChipBusOwner::Idle);
     assert_eq!(bus.copper.pc(), cop1 as u32);
     assert_eq!(bus.denise.palette[0], 0);
 
-    // The first-word fetch lands on the next access-parity color clock, E2,
-    // and the beam wraps to the next line.
-    bus.advance_chipset(1);
+    // $E1 is odd (the Copper's idle half), and $E2 is the next access-parity
+    // color clock: the first-word fetch lands there and the beam wraps.
+    bus.advance_chipset(2);
     assert_eq!(bus.copper.pc(), cop1 as u32 + 2);
     assert_eq!(bus.agnus.vpos, start_vpos + 1);
     assert_eq!(bus.agnus.hpos, 0);
@@ -1772,11 +1776,12 @@ fn copper_e1_bus_lockout_defers_transfer_until_e2() {
 
     // With the hardware refresh model (4 slots at 0x004/6/8/A), hpos 0x00
     // is a free access-parity color clock, so the Copper fetches the second
-    // word there immediately after the line wrap and its write lands at 0x00.
+    // word there immediately after the line wrap and its write lands at 0x00
+    // (recorded at its Denise-effective position, 0x04).
     bus.advance_chipset(1);
     assert_eq!(bus.denise.palette[0], 0x0999);
     assert_eq!(bus.current_render_events()[0].vpos, start_vpos + 1);
-    assert_eq!(bus.current_render_events()[0].hpos, 0x00);
+    assert_eq!(bus.current_render_events()[0].hpos, 0x04);
 }
 
 #[test]
@@ -1797,10 +1802,11 @@ fn copper_skip_does_not_skip_wait_instruction() {
     bus.agnus.hpos = 0x20;
     bus.copper.jump(cop1 as u32);
     // The SKIP runs the full hardware sequence: a 4-color-clock fetch plus
-    // its two bus-free tail cycles (WAITSKIP1/WAITSKIP2), then the WAIT
-    // spends its own 4-color-clock fetch, so the Copper reaches and parks on
-    // the WAIT after 9 color clocks.
-    bus.advance_chipset(9);
+    // its bus-free WAITSKIP1/WAITSKIP2 tail on the two following access
+    // cycles (next fetch at fetch2+6), then the WAIT spends its own
+    // 4-color-clock fetch, so the Copper reaches and parks on the WAIT
+    // after 11 color clocks.
+    bus.advance_chipset(11);
 
     assert!(bus.copper.waiting().is_some());
     assert_eq!(bus.denise.palette[0], 0);
@@ -1829,10 +1835,10 @@ fn copper_skip_over_move_consumes_move_fetch_slots_before_next_instruction() {
     assert_eq!(bus.denise.palette[0], 0);
     assert_eq!(bus.denise.palette[1], 0);
 
-    // The SKIP's two tail cycles elapse, the skipped MOVE still spends its
-    // 4-color-clock fetch, then the second MOVE spends its own before
-    // writing palette[1] at hpos 0x2C.
-    bus.advance_chipset(9);
+    // The SKIP's tail runs through the compare cycle at fetch2+4, the
+    // skipped MOVE still spends its 4-color-clock fetch, then the second
+    // MOVE spends its own before writing palette[1] at hpos 0x2E.
+    bus.advance_chipset(11);
 
     assert_eq!(bus.denise.palette[0], 0);
     assert_eq!(bus.denise.palette[1], 0x0222);
@@ -1906,6 +1912,11 @@ fn copper_wait_wakeup_keeps_vp7_loop_switch_on_scanline_boundary() {
         })
         .map(|event| event.hpos)
         .collect();
+    // Each blast starts fetching at h=$32 (the WAIT's comparator lookahead
+    // wakes it at $30), so the first BPLCON1 write lands at $34 and the
+    // 42nd at $D8 -- the same positions on every line. The recorded render
+    // events sit four colour clocks later, at the writes' Denise-effective
+    // positions ($38..$DC).
     assert_eq!(line_128_hpos.first(), Some(&0x38));
     assert_eq!(line_128_hpos.last(), Some(&0xDC));
 }
@@ -2035,22 +2046,25 @@ fn copper_move_writes_visible_registers_on_second_dma_slot() {
             .map(|event| (event.offset, event.value, event.hpos, event.source))
             .collect::<Vec<_>>(),
         vec![
+            // Writes land at +2/+6/+10 on the second-word fetches; the
+            // recorded render events sit at the writes' Denise-effective
+            // positions (+4).
             (
                 0x0182,
                 0x00F0,
-                RENDER_COPPER_WAIT_HPOS_FB0 + 2,
+                RENDER_COPPER_WAIT_HPOS_FB0 + 6,
                 BeamWriteSource::Copper
             ),
             (
                 0x0092,
                 0x0040,
-                RENDER_COPPER_WAIT_HPOS_FB0 + 6,
+                RENDER_COPPER_WAIT_HPOS_FB0 + 10,
                 BeamWriteSource::Copper
             ),
             (
                 0x0100,
                 0x1200,
-                RENDER_COPPER_WAIT_HPOS_FB0 + 10,
+                RENDER_COPPER_WAIT_HPOS_FB0 + 14,
                 BeamWriteSource::Copper
             ),
         ]
@@ -2082,8 +2096,9 @@ fn copper_move_palette_write_affects_pixels_after_second_dma_slot() {
 
     let event_hpos = bus.current_render_events()[0].hpos;
     // MOVE write lands on its second-word fetch, two color clocks into the
-    // 4-color-clock cadence from the start hpos (+30).
-    assert_eq!(event_hpos, RENDER_COPPER_WAIT_HPOS_FB0 + 32);
+    // 4-color-clock cadence from the start hpos (+30); the recorded event
+    // sits at its Denise-effective position (+4).
+    assert_eq!(event_hpos, RENDER_COPPER_WAIT_HPOS_FB0 + 36);
     let words_per_row = bitplane_words_per_row(
         bus.agnus.revision(),
         bus.denise.bplcon0,
@@ -2349,11 +2364,11 @@ fn cpu_copjmp1_strobe_waits_for_target_instruction_dma_slots() {
     assert!(bus.current_render_events().is_empty());
 
     // First-word fetch at 0x20, idle half at 0x21, second-word fetch+write
-    // at 0x22.
+    // at 0x22 (recorded at its Denise-effective position, 0x26).
     bus.advance_chipset(2);
     assert_eq!(bus.denise.palette[0], 0x0123);
     let event = &bus.current_render_events()[0];
-    assert_eq!(event.hpos, 0x22);
+    assert_eq!(event.hpos, 0x26);
     assert_eq!(event.source, super::BeamWriteSource::Copper);
 }
 
@@ -2378,9 +2393,10 @@ fn copper_move_to_copjmp2_loads_second_list() {
     assert!(!bus.custom_write(0x084, 2, 0x0000));
     assert!(!bus.custom_write(0x086, 2, cop2 as u64));
     assert!(!bus.custom_write(0x088, 2, 0xFFFF));
-    // COPJMP2 MOVE fetch (4 cck) then the cop2 MOVE fetch (4 cck): write at
-    // hpos 0x26.
-    bus.advance_chipset(7);
+    // COPJMP2 MOVE fetch (4 cck), the strobe's two tail cycles
+    // (COP_JMP1/COP_JMP2, reloading the program counter), then the cop2
+    // MOVE fetch: write at hpos 0x2A.
+    bus.advance_chipset(11);
 
     assert_eq!(bus.denise.palette[0], 0x0456);
     assert_eq!(
@@ -2419,12 +2435,14 @@ fn copper_copjmp2_strobe_waits_for_target_instruction_dma_slots() {
     assert_eq!(bus.denise.palette[0], 0);
     assert!(bus.current_render_events().is_empty());
 
-    // COPJMP2 strobe completes at 0x22; then idle half, the cop2 MOVE fetch
-    // (4 cck), writing at hpos 0x26.
-    bus.advance_chipset(4);
+    // COPJMP2 strobe completes at 0x22, spends its two tail cycles
+    // (COP_JMP1 0x24, COP_JMP2 0x26 reloading the program counter), then
+    // the cop2 MOVE fetch writes at hpos 0x2A (recorded at its
+    // Denise-effective position, 0x2E).
+    bus.advance_chipset(8);
     assert_eq!(bus.denise.palette[0], 0x0456);
     let event = &bus.current_render_events()[0];
-    assert_eq!(event.hpos, 0x26);
+    assert_eq!(event.hpos, 0x2E);
     assert_eq!(event.source, super::BeamWriteSource::Copper);
 }
 
@@ -2456,9 +2474,10 @@ fn copper_can_program_cop2lc_before_copjmp2_loop_branch() {
     assert!(!bus.custom_write(0x084, 2, 0x0000));
     assert!(!bus.custom_write(0x086, 2, stale_cop2 as u64));
     assert!(!bus.custom_write(0x088, 2, 0xFFFF));
-    // Three programming MOVEs plus the jumped-to MOVE, each a 4-color-clock
-    // fetch: the final write lands at hpos 0x2E.
-    bus.advance_chipset(15);
+    // Three programming MOVEs, the strobe's two tail cycles
+    // (COP_JMP1/COP_JMP2), then the jumped-to MOVE: the final write lands
+    // at hpos 0x32.
+    bus.advance_chipset(19);
 
     assert_eq!(bus.agnus.cop2lc, programmed_cop2 as u32);
     assert_eq!(bus.denise.palette[0], 0x0789);
@@ -2487,9 +2506,10 @@ fn copper_can_program_cop1lc_before_copjmp1_loop_branch() {
     assert!(!bus.custom_write(0x080, 2, 0x0000));
     assert!(!bus.custom_write(0x082, 2, cop1 as u64));
     assert!(!bus.custom_write(0x088, 2, 0xFFFF));
-    // Two programming MOVEs and the COPJMP1 MOVE, then the jumped-to MOVE,
-    // each a 4-color-clock fetch: the final write lands at hpos 0x2E.
-    bus.advance_chipset(15);
+    // Two programming MOVEs and the COPJMP1 MOVE, the strobe's two tail
+    // cycles (COP_JMP1/COP_JMP2), then the jumped-to MOVE: the final write
+    // lands at hpos 0x32.
+    bus.advance_chipset(19);
 
     assert_eq!(bus.agnus.cop1lc, programmed_cop1 as u32);
     assert_eq!(bus.denise.palette[0], 0x0789);
@@ -2554,17 +2574,19 @@ fn automatic_vblank_reload_restarts_cop1_after_copjmp2_branch() {
     assert!(!bus.custom_write(0x084, 2, 0x0000));
     assert!(!bus.custom_write(0x086, 2, cop2 as u64));
     assert!(!bus.custom_write(0x088, 2, 0xFFFF));
-    // MOVE 0x0111 writes at 0x22; the COPJMP2 MOVE then the cop2 MOVE follow
-    // at the 4-color-clock cadence, writing 0x0222 at hpos 0x2A.
-    bus.advance_chipset(11);
+    // MOVE 0x0111 writes at 0x22; the COPJMP2 MOVE, its two strobe tail
+    // cycles (COP_JMP1/COP_JMP2), then the cop2 MOVE follow, writing 0x0222
+    // at hpos 0x2E. Recorded render events sit at the writes'
+    // Denise-effective positions (+4).
+    bus.advance_chipset(15);
 
     assert_eq!(bus.denise.palette[0], 0x0222);
-    assert_eq!(bus.current_render_events()[0].hpos, 0x22);
-    assert_eq!(bus.current_render_events()[1].hpos, 0x2A);
+    assert_eq!(bus.current_render_events()[0].hpos, 0x26);
+    assert_eq!(bus.current_render_events()[1].hpos, 0x32);
 
     bus.agnus.vpos = crate::chipset::agnus::PAL_LINES - 1;
     bus.agnus.hpos = COLORCLOCKS_PER_LINE - 1;
-    bus.advance_chipset(7);
+    bus.advance_chipset(5);
 
     // Restart is immediate at the top of the frame (vpos 0), not delayed to
     // the end of vblank: the live COP1LC reload happens as the beam wraps.
@@ -2574,9 +2596,9 @@ fn automatic_vblank_reload_restarts_cop1_after_copjmp2_branch() {
     let event_count = bus.current_render_events().len();
 
     // The vertical-blank strobe wakes the Copper at COPPER_FRAME_START_HPOS
-    // (calibrated against the copstrt1/copstrt2 real-A500 captures), so the
-    // restarted MOVE fetches on the first free access-parity color clocks
-    // from there and the write lands at hpos 0x08.
+    // (vAmiga-trace calibrated), so the restarted MOVE fetches on the first
+    // free access-parity color clocks from there and the write lands at
+    // hpos 0x04 (recorded at its Denise-effective position, 0x08).
     bus.advance_chipset(6);
     assert_eq!(bus.denise.palette[0], 0x0111);
     let event = &bus.current_render_events()[event_count];

@@ -63,6 +63,15 @@ const DIW_HSTART_FETCH_REFERENCE_HIRES: i32 = 0x82;
 // Register/copper-write x=0 anchor, in colour clocks. Moved left by 8 colour
 // clocks in lockstep with DIW_HSTART_FB0 (16 lo-res pixels) so register writes
 // and bitplane pixels still register against each other after widening.
+//
+// This anchor is the beam-position -> framebuffer-x mapping of the write
+// domain and is calibrated by CPU-driven evidence (live collision family,
+// manual sprite/BPL1DAT output), so it did NOT move when the Copper WAIT
+// comparator lookahead moved copper write landings 4 colour clocks earlier
+// on the bus: a write at a given beam position produces pixels at the same
+// place regardless of who performed it. Copper-vs-fetch races compare both
+// sides through this same anchor, so they follow the corrected bus landings
+// automatically.
 const COPPER_WAIT_HPOS_FB0: i32 = 0x28;
 /// COLORxx writes feed Denise's final colour-selection/output path. Denise
 /// applies copper/CPU colour-register changes in the palette/output phase,
@@ -81,7 +90,11 @@ const COPPER_WAIT_HPOS_FB0: i32 = 0x28;
 /// STOP before retuning this. If a scene's colours or copper-driven picture
 /// look horizontally shifted, the cause is usually bitplane fetch/DDF
 /// alignment, sprite arming, or a missed write-domain delay, not this final
-/// colour-output anchor.
+/// colour-output anchor. The anchor maps events recorded at their
+/// Denise-effective position (bus landing plus the write-effect delay, see
+/// `Bus::record_render_write`), so it did not move when the Copper WAIT
+/// comparator lookahead fix moved copper bus landings four colour clocks
+/// earlier.
 const COLOR_WRITE_HPOS_FB0: i32 = 0x35;
 /// Denise's texture/output line starts at the hblank-start counter value. Beam
 /// positions before this are the wrapped tail of the previous output line, so

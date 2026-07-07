@@ -1301,7 +1301,31 @@ impl Bus {
     }
 
     pub(super) fn record_render_write(&mut self, offset: u16, value: u16, source: BeamWriteSource) {
-        let (vpos, hpos) = (self.agnus.vpos, self.agnus.hpos);
+        let (mut vpos, mut hpos) = (self.agnus.vpos, self.agnus.hpos);
+        // Denise applies a register write to its pixel pipeline about four
+        // colour clocks after the chip-bus cycle (vAmiga models this as a
+        // one-DMA-cycle register-change delay plus pixel-domain application
+        // offsets inside Denise). The render-side anchors
+        // (COLOR_WRITE_HPOS_FB0, COPPER_WAIT_HPOS_FB0, the sprite write
+        // pipeline) are photo-calibrated against events recorded at that
+        // effective position. CPU-sourced writes already carry the offset in
+        // their landing (the known CPU write-landing class), so only
+        // Copper-sourced writes -- whose bus landings are cycle-exact against
+        // vAmiga since the WAIT comparator lookahead fix -- record the delay
+        // explicitly.
+        // TODO: model the CPU write landing exactly and make this effect
+        // delay source-independent.
+        if matches!(source, BeamWriteSource::Copper) {
+            hpos += DENISE_WRITE_EFFECT_DELAY_CCK;
+            let line_cck = self.agnus.current_line_cck();
+            if hpos >= line_cck {
+                hpos -= line_cck;
+                vpos += 1;
+                if vpos >= self.agnus.current_frame_lines() {
+                    vpos = 0;
+                }
+            }
+        }
         let event = BeamRegisterWrite {
             vpos,
             hpos,

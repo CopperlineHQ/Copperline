@@ -240,8 +240,23 @@ const DMACON_BLTEN: u16 = 1 << 6;
 const DMACON_BPLEN: u16 = 1 << 8;
 const DMACON_BLTPRI: u16 = 1 << 10;
 const BLTCON1_DOFF: u16 = 1 << 7;
-const COPPER_BUS_LOCKOUT_HPOS: u32 = 0x00E1;
+// The Copper cannot take (or hold) a bus slot on the last-but-two color
+// clock of the line: $E0 on short lines, $E1 on NTSC long lines (vAmiga
+// busIsFree<COPPER>, keyed on the long-line flag). A fetch chain that hits
+// the lockout resumes past the line wrap, which is what a line-end SKIP's
+// deferred decision and the cycleE0 vAmigaTS case observe.
+const COPPER_BUS_LOCKOUT_HPOS_SHORT_LINE: u32 = 0x00E0;
+const COPPER_BUS_LOCKOUT_HPOS_LONG_LINE: u32 = 0x00E1;
 const COPER_CPU_IRQ_DELAY_CCK: u32 = 2;
+// Copper-raised interrupts pass through the same CPU recognition pipeline as
+// every other source, but the pipeline's latency constant is calibrated
+// against CPU-write landings, which still carry the +4 colour-clock
+// bus-landing bias (the CPU write-landing class). Copper INTREQ/INTENA
+// writes land bus-true since the WAIT comparator lookahead fix, so sources
+// they newly raise take the calibrated latency plus the same offset.
+// TODO: model the CPU write landing exactly and drop this together with the
+// render-side twin in `record_render_write`.
+const COPPER_IRQ_EXTRA_LATENCY_CCK: u32 = 4;
 const RENDER_VISIBLE_START_VPOS: u32 = 0x2C;
 const RENDER_MIN_OVERSCAN_START_VPOS: u32 = 0x1C;
 const PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS: u32 = 0x19;
@@ -271,6 +286,9 @@ const RENDER_DIW_HSTART_FETCH_REFERENCE_HIRES: i32 = 0x84;
 const RENDER_COPPER_WAIT_HPOS_FB0: u32 = 0x28;
 // Agnus DMA scheduling runs four color clocks ahead of Denise's pixel counter.
 const DENISE_HPOS_LAG_CCK: u32 = 4;
+// Denise applies a register write to its pixel pipeline about four colour
+// clocks after the chip-bus cycle (see `record_render_write`).
+const DENISE_WRITE_EFFECT_DELAY_CCK: u32 = 4;
 const BPLCON0_ECSENA: u16 = 1 << 0;
 const BPLCON0_SHRES: u16 = 1 << 6;
 const BPLCON3_BRDSPRT: u16 = 1 << 1;
@@ -3616,6 +3634,21 @@ impl Bus {
         self.arm_irq_recognition_latency();
     }
 
+    /// `note_irq_latches_changed` for an INTREQ/INTENA write performed by the
+    /// Copper: newly exposed sources take the calibrated recognition latency
+    /// plus `COPPER_IRQ_EXTRA_LATENCY_CCK` (see that constant).
+    fn note_irq_latches_changed_from_copper(&mut self) {
+        let pending = self.current_enabled_irq_sources();
+        let newly = pending & !self.irq_latency_last_pending;
+        let delayed = newly & !INT_PORTS;
+        if delayed != 0 && self.irq_latency_setting != 0 {
+            self.irq_latency_mask |= delayed;
+            self.irq_latency_cck = self.irq_latency_setting + COPPER_IRQ_EXTRA_LATENCY_CCK;
+        }
+        self.irq_latency_mask &= pending;
+        self.irq_latency_last_pending = pending;
+    }
+
     pub fn next_frame_event_cck(&self) -> u32 {
         self.agnus.cck_until_next_frame().max(1)
     }
@@ -5095,7 +5128,14 @@ fn chip_dma_addr_mask(chip_ram_len: usize) -> u32 {
     (bytes - 1) as u32
 }
 
-pub(crate) const COPPER_FRAME_START_HPOS: u32 = 6;
+// The vertical-blank COP1LC strobe wakes the Copper early on the restart
+// line: its first instruction-word fetch lands on the hpos $02 access cycle
+// and a leading MOVE's write on $04, matching the vAmiga copper trace
+// (jumpbpu image-list upload; first MOVE write at v=0 h=$04). The value was
+// 6 while copper WAIT releases ran four colour clocks late; it moved in
+// lockstep with the WAIT comparator lookahead fix so un-waited frame-start
+// streams keep their calibrated screen positions.
+pub(crate) const COPPER_FRAME_START_HPOS: u32 = 2;
 
 fn copper_frame_start_vpos(_video_standard: VideoStandard) -> u32 {
     // The Copper is restarted (COP1LC reloaded into the Copper PC) at the very

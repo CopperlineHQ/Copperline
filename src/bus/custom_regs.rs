@@ -787,7 +787,11 @@ impl Bus {
                     );
                 }
                 self.paula.write_intena(val);
-                self.note_irq_latches_changed();
+                if matches!(source, BeamWriteSource::Copper) {
+                    self.note_irq_latches_changed_from_copper();
+                } else {
+                    self.note_irq_latches_changed();
+                }
                 false
             }
             0x09C => {
@@ -824,8 +828,8 @@ impl Bus {
                     self.pending_copper_irq_beam = Some((self.agnus.vpos, self.agnus.hpos));
                     self.coper_cpu_irq_delay_cck = COPER_CPU_IRQ_DELAY_CCK;
                 }
-                if copper_asserted && asserted {
-                    self.note_irq_source_asserted();
+                if matches!(source, BeamWriteSource::Copper) {
+                    self.note_irq_latches_changed_from_copper();
                 } else {
                     self.note_irq_latches_changed();
                 }
