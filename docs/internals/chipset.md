@@ -129,6 +129,15 @@ modelled IPL-pin pipe and 68000 boundary sampling), serial, and audio:
   AUDxEN pulse is still fetched after the channel is switched off, which
   kicks the channel into free-running IRQ-mode output at the AUDxPER
   cadence -- the software "period timer" idiom, vAmigaTS pertimer1).
+  Clearing AUDxEN while the channel is outputting is not sampled at the
+  DMACON write: Paula only re-evaluates AUDxON at the word-start boundary
+  (the 011 period event, which idles the channel when AUDxON is low and
+  the channel interrupt is pending). A clear followed by a re-enable
+  before that boundary is therefore missed entirely and playback
+  continues from the live pointer rather than restarting from AUDxLC
+  (the 2c1.adf regression, issue #74; vAmiga idles immediately on the
+  clear and gets this case wrong). Only the DMA start-up states 001/101,
+  which have not begun output, idle at the write.
   ADKCON attach modes feed the fetched words to the next channel's
   volume latch at word starts and period latch mid-word. LEN=0 plays a
   full 65536-word block, as on hardware. Output is mixed in emulated

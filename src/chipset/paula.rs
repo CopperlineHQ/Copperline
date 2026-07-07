@@ -1402,9 +1402,20 @@ impl Paula {
                     self.aud_move_000_001(ch);
                 }
             } else {
+                // AUDxON falling edge. In the DMA start-up states (001/101)
+                // the channel has not begun output, so idle it now; a DMA
+                // request already posted survives and can still free-run the
+                // channel (the "brief DMACON pulse" idiom). While the channel
+                // is OUTPUTTING (010/011) the clear is NOT sampled here: real
+                // Paula only re-evaluates AUDxON at the word-start boundary,
+                // which the 011 period event already models (it idles on
+                // AUDxON low AND AUDxIP set). Idling at the write instant
+                // would let a clear/set pair shorter than the remaining word
+                // restart the sample from AUDxLC instead of being missed --
+                // the issue #74 regression (2c1.adf). vAmiga's synchronous
+                // disableDMA() idles immediately here and gets this wrong too.
                 match self.chans[ch].state {
                     AUD_DMA_FIRST | AUD_DMA_SECOND => self.aud_move_to_idle(ch),
-                    AUD_OUT_HI | AUD_OUT_LO => self.aud_move_to_idle(ch),
                     _ => {}
                 }
             }
@@ -2335,7 +2346,63 @@ mod tests {
     }
 
     #[test]
-    fn audio_dma_disable_stops_output_and_reenable_restarts() {
+    fn audio_dma_disable_reenabled_before_word_boundary_is_missed() {
+        // Issue #74 (2c1.adf): Paula samples the AUDxEN clear only at the
+        // word-start boundary (the 011 period event), never at the DMACON
+        // write. A clear followed by a re-enable before the current DMA
+        // word finishes is therefore invisible to the audio state machine:
+        // no fresh start-up runs, the pointer/length are not reloaded from
+        // AUDxLC/AUDxLEN, no start interrupt is raised, and playback simply
+        // continues -- so the sample plays on (and loops) instead of
+        // cleanly restarting. vAmiga idles immediately on the clear and
+        // gets this case wrong.
+        let (mut paula, _) = paula_with_collect_sink();
+        let mut ram = vec![0u8; 64];
+        ram[0] = 0x12;
+        ram[1] = 0x34;
+        ram[2] = 0x56;
+        ram[3] = 0x78;
+        let dmacon = DMACON_DMAEN | 0x0001;
+
+        paula.write_audio_reg(0x00, 0, 0);
+        paula.write_audio_reg(0x02, 0, 0);
+        // A long buffer and a long period so the off/on pulse fits well
+        // inside a single DMA word (no rollover in the window).
+        paula.write_audio_reg(0x04, 4, 0);
+        paula.write_audio_reg(0x06, 100, 0);
+        let irq = paula.tick_audio(2 * 227 + 20, dmacon, &ram);
+        assert_eq!(irq & INT_AUD0, INT_AUD0);
+        assert!(!paula.write_intreq(INT_AUD0));
+        assert!(paula.chans[0].outputting());
+        let ptr_before = paula.chans[0].ptr;
+        let audlen_before = paula.chans[0].audlen;
+
+        // Clear AUDxEN: the channel keeps outputting the live word.
+        assert_eq!(paula.tick_audio(1, 0, &ram) & INT_AUD0, 0);
+        assert!(
+            paula.chans[0].outputting(),
+            "the clear is deferred, not sampled at the write"
+        );
+        // Re-enable before the word boundary: the clear is missed.
+        assert_eq!(paula.tick_audio(1, dmacon, &ram) & INT_AUD0, 0);
+        assert!(
+            paula.chans[0].outputting(),
+            "re-enable before the boundary continues the stream"
+        );
+        assert_eq!(
+            paula.chans[0].ptr, ptr_before,
+            "no restart: the DMA pointer is not reloaded from AUDxLC"
+        );
+        assert_eq!(paula.chans[0].audlen, audlen_before);
+
+        // Playback continues in DMA mode across the following word boundary
+        // with no fresh start interrupt.
+        assert_eq!(paula.tick_audio(2 * 100, dmacon, &ram) & INT_AUD0, 0);
+        assert!(paula.chans[0].outputting());
+    }
+
+    #[test]
+    fn audio_dma_disable_left_off_idles_at_word_boundary_then_reenable_restarts() {
         let (mut paula, _) = paula_with_collect_sink();
         let mut ram = vec![0u8; 64];
         ram[0] = 0x12;
@@ -2351,17 +2418,30 @@ mod tests {
         assert!(!paula.write_intreq(INT_AUD0));
         assert!(paula.chans[0].outputting());
 
-        // Clearing AUDxEN idles the state machine at the write; the DAC
-        // holds the last byte (Paula does not recentre the output).
-        let held = paula.chans[0].current;
-        paula.tick_audio(1, 0, &ram);
+        // Clearing AUDxEN and leaving it off: the clear is deferred, so one
+        // cck after the write the channel is still outputting the live word.
+        assert_eq!(paula.tick_audio(1, 0, &ram) & INT_AUD0, 0);
+        assert!(
+            paula.chans[0].outputting(),
+            "the clear is not sampled at the write"
+        );
+
+        // It idles at the word boundary where the (re-raised) channel
+        // interrupt is left pending -- AUDxON low AND AUDxIP set.
+        let mut waited = 1;
+        while paula.chans[0].outputting() {
+            paula.tick_audio(1, 0, &ram);
+            waited += 1;
+            assert!(waited <= 64, "held clear must idle at a word boundary");
+        }
         assert_eq!(paula.chans[0].state, AUD_IDLE);
-        assert_eq!(paula.chans[0].current, held);
+        // The DAC holds the last byte (Paula does not recentre the output).
+        let held = paula.chans[0].current;
         paula.tick_audio(32, 0, &ram);
         assert_eq!(paula.chans[0].current, held);
 
-        // Re-enabling runs the full start-up again (fresh length latch,
-        // start interrupt on the first fetch).
+        // Re-enabling from idle runs the full start-up again (fresh length
+        // latch, start interrupt on the first fetch).
         let irq = paula.tick_audio(2 * 227 + 20, dmacon, &ram);
         assert_eq!(irq & INT_AUD0, INT_AUD0);
         assert!(paula.chans[0].outputting());
@@ -2391,7 +2471,14 @@ mod tests {
         assert!(dbg.percnt <= 8);
 
         // Idling the channel shows in the snapshot; the DAC level holds.
-        paula.tick_audio(1, 0, &ram);
+        // Clearing AUDxEN is deferred to the word boundary, so tick past it
+        // (the pending channel interrupt makes it idle there).
+        let mut waited = 0;
+        while paula.chans[0].outputting() {
+            paula.tick_audio(1, 0, &ram);
+            waited += 1;
+            assert!(waited <= 64, "cleared channel must idle at a boundary");
+        }
         let dbg = paula.audio_channel_debug(0).expect("channel 0 snapshot");
         assert!(!dbg.playing);
         assert_eq!(dbg.state, "000 idle");
