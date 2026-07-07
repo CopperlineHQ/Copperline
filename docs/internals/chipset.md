@@ -210,6 +210,10 @@ armed between disk-word boundaries; WORDSYNC is the explicit mode that
 realigns framing to a matched sync word before transfer. Supported image
 formats: ADF (read/write), gzip ADZ, single file ZIP, DMS (decompressed by
  `dms.rs`), UAE extended ADF, and read-only SCP flux images.
+Connected mechanisms with no media keep the active-low disk-change line
+asserted; a step pulse only clears that latch once media is actually
+present, so guest software sees a no-disk condition rather than unreadable
+track data.
 
 Standard ADF and AmigaDOS tracks are synthesized as one PAL-sized
 revolution: 11 sectors occupy 5984 MFM words, and the generated revolution
