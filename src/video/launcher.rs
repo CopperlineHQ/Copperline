@@ -498,11 +498,12 @@ const WARPS: [WarpSpeed; 5] = [
 const JOYSTICK_MODES: [JoystickInputMode; 2] =
     [JoystickInputMode::Gamepad, JoystickInputMode::Keyboard];
 #[cfg(feature = "midi")]
-const SERIAL_MODES: [SerialMode; 4] = [
+const SERIAL_MODES: [SerialMode; 5] = [
     SerialMode::Off,
     SerialMode::Stdout,
     SerialMode::Midi,
     SerialMode::Tcp,
+    SerialMode::Pty,
 ];
 
 /// Stereo-separation presets the picker steps through (percent), ascending so
@@ -1220,6 +1221,7 @@ impl MachineSetup {
                 SerialMode::Stdout => "Stdout".to_string(),
                 SerialMode::Midi => "MIDI".to_string(),
                 SerialMode::Tcp => "TCP".to_string(),
+                SerialMode::Pty => "PTY".to_string(),
             },
             #[cfg(feature = "midi")]
             F::MidiOut => self.midi_out.clone().unwrap_or_else(|| "None".to_string()),

@@ -334,10 +334,9 @@ where
                 );
             }
             "--serial" => {
-                overrides.serial = Some(
-                    args.next()
-                        .ok_or_else(|| anyhow!("--serial requires a mode (off/stdout/midi)"))?,
-                );
+                overrides.serial = Some(args.next().ok_or_else(|| {
+                    anyhow!("--serial requires a mode (off/stdout/midi/tcp/pty)")
+                })?);
             }
             "--midi-out" => {
                 overrides.midi_out = Some(
@@ -699,7 +698,7 @@ fn print_help() {
          \x20                            instead of live output\n  \
          --profile-live-audio SECS      run a no-window Paula-to-cpal profile workload;\n  \
          \x20                            combine with COPPERLINE_AUDIO_PROFILE=1 for counters\n  \
-         --serial MODE                  Paula serial port: off, stdout, or midi\n  \
+         --serial MODE                  Paula serial port: off, stdout, midi, tcp, or pty\n  \
          {midi}--calibrate-gamepad            interactively bind a USB gamepad to the port-2\n  \
          \x20                            joystick, save the calibration, then exit\n  \
          -h, --help                     show this help and exit\n  \
