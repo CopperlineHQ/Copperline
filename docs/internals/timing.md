@@ -341,13 +341,26 @@ a two-sided slot-trace probe (`COPPERLINE_DIAG_BLT_SLOTS` in Copperline,
 Normal-mode A/B barrel-shifter carry is cleared at the first word of a new
 BLTSIZE, then carries from the last source word of one row into the first
 source word of the next inside that blit; masks, modulos, and fill carry
-still observe row boundaries. Line blits use L1-L4 phases (L2 latches the C
-source word, L3 propagates, L4 stores) between the same startup and
-terminal cycles; a suppressed line store (USEC clear, or SING past a row's
-first dot) leaves its D slot bus-idle like vAmiga's lockD. Line-mode B data
-loads pass through the current B shifter at write time, and at completion
-the hardware-visible ASH, BSH, SIGN, and low-word BLTAPT accumulator state
-is written back. Tests:
+still observe row boundaries. Line blits follow vAmiga's four line
+micro-programs, indexed by the USEB/USEC pair: with USEB clear each pixel
+is four cycles (L1-L4: L2 fetches C when USEC is set, L3 propagates, L4
+stores), and with USEB set each pixel is six (an LB cycle fetches B --
+adding only BLTBMOD to BLTBPT -- and a bare LBus cycle allocates the bus
+without a transfer). With USEC set the line D cycle allocates the bus
+even when SING suppresses the store (unlike copy mode, where a locked D
+slot is bus-idle); with USEC clear no line cycle touches the bus, and the
+terminal BLTDONE cycle of a USEB program is itself a bus-idle cycle.
+A SING-suppressed dot only locks the store: the A shifter, minterm and
+BZERO update still run on the full inputs. The Bresenham error
+accumulator (BLTAPT's low word) advances only while USEA is enabled, the
+line texture register is BLTBDAT rotated by the LIVE BSH each pixel (no
+write-time latch, unlike the USEB-off copy hold word), and C DMA fetches
+load the BLTCDAT register itself, so a later USEC-off blit consumes the
+last fetched C word. At completion the hardware-visible ASH, BSH, SIGN,
+and low-word BLTAPT accumulator state is written back. Verified
+cycle-for-cycle against the vAmiga line traces (bususage1l/5l/15l): both
+emulators run the pixel micro-cycles, bus grants and stalls on the same
+colour clocks relative to the BLTSIZE poke. Tests:
 `scheduled_normal_mode_bbusy_start_delay_precedes_first_source_slot`,
 `blit_pipeline_identifies_idle_cycles_per_hrm_diagrams`,
 `scheduled_normal_clear_writes_progressively`,
