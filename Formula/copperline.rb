@@ -19,8 +19,8 @@
 class Copperline < Formula
   desc "Cycle-driven Amiga emulator (OCS/ECS/AGA) written in Rust"
   homepage "https://copperline.dev/"
-  url "https://github.com/LinuxJedi/Copperline/archive/refs/tags/v0.9.0.tar.gz"
-  sha256 "833cb54ff35f7483c6c0894a4e071d512a54ad3a1cf602ba3a179d078bd09a99"
+  url "https://github.com/LinuxJedi/Copperline/archive/refs/tags/v0.10.0.tar.gz"
+  sha256 "ae1c437ee9baa305309af4c66bd99a3f54f4fa104f88a8cfd0b166b7bbf39373"
   license "GPL-3.0-or-later"
   head "https://github.com/LinuxJedi/Copperline.git", branch: "main"
 
