@@ -197,8 +197,6 @@ pub struct Blitter {
     /// (vAmigaTS Agnus/Blitter/undocumented1: BLTBDAT written under
     /// BSH=4, then blitted after resetting BLTCON1 to 0).
     b_hold_latch: u16,
-    line_bdat: u16,
-    line_bdat_valid: bool,
 
     /// Set to true during `execute()`; cleared on exit. We snapshot it
     /// for DMACONR even though normally the CPU only observes the
@@ -252,11 +250,14 @@ struct LineBlitState {
     con0: u16,
     con1: u16,
     lf: u8,
+    use_a: bool,
+    use_b: bool,
     use_c: bool,
     sing: bool,
     bplmod: i32,
     amod_step: u16,
     bmod_step: u16,
+    bpt: u32,
     cpt: u32,
     dpt: u32,
     ash_now: i32,
@@ -378,19 +379,40 @@ enum NormalBlitPhase {
     Done,
 }
 
+/// Line-blit pipeline cycles, mirroring vAmiga's four line micro-programs
+/// (SlowBlitter lineBlitInstr, indexed by the USEB/USEC pair):
+///
+/// - USEB off: 4 cycles per pixel `[L1, L2, L3, L4]`
+///   (`BUSIDLE|HOLD_A`, `FETCH_C|HOLD_B` or `BUSIDLE|HOLD_B`,
+///   `BUSIDLE|HOLD_D`, `WRITE_D|REPEAT` or `BUSIDLE|REPEAT`).
+/// - USEB on: 6 cycles per pixel `[L1, LB, L2, L3, LBus, L4]`
+///   (`BUSIDLE|HOLD_A`, `FETCH_B`, `FETCH_C|HOLD_B` or `BUSIDLE|HOLD_B`,
+///   `BUSIDLE|HOLD_D`, `BUS`, `WRITE_D|REPEAT` or `BUSIDLE|REPEAT`).
+///
+/// With USEC set, the `WRITE_D` cycle allocates the bus even when SING
+/// suppresses the store (line mode's WRITE_D is unconditionally a bus
+/// cycle, unlike copy mode where a locked D turns it into BUSIDLE).
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 enum LineBlitPhase {
     StartDelay,
     Init,
     L1,
+    /// B-channel fetch cycle (USEB lines only): reads BLTBPT and adds
+    /// BLTBMOD (line mode never adds the word step to BLTBPT).
+    LB,
     L2,
     L3,
+    /// Bus-allocating no-op cycle (vAmiga's bare `BUS` micro-instruction,
+    /// USEB lines only): takes a chip-bus slot without a transfer.
+    LBus,
     L4,
     /// First terminal micro-cycle after the last pixel (vAmiga's NOTHING
     /// instruction): internal, BBUSY already clear.
     Tail,
-    /// BLTDONE micro-cycle: internal; INTREQ.BLIT rises one colour clock
-    /// after it (handled by the bus-side raise delay).
+    /// BLTDONE micro-cycle: internal for USEB-off programs; USEB programs
+    /// end with `BUSIDLE|BLTDONE`, which waits for a free bus. INTREQ.BLIT
+    /// rises one colour clock after its first attempt (handled by the
+    /// bus-side raise delay).
     TailDone,
     Done,
 }
@@ -425,8 +447,6 @@ impl Blitter {
             bltbold: 0,
             bltbold_init: true,
             b_hold_latch: 0,
-            line_bdat: 0,
-            line_bdat_valid: false,
             busy: false,
             bbusy: false,
             bzero: true,
@@ -496,9 +516,6 @@ impl Blitter {
     }
 
     pub fn write_bltcon1(&mut self, val: u16) {
-        if val & BLTCON1_LINE == 0 {
-            self.line_bdat_valid = false;
-        }
         self.bltcon1 = val;
     }
 
@@ -519,10 +536,6 @@ impl Blitter {
         // hardware datapath, not the mode decode.
         let desc = self.bltcon1 & BLTCON1_DESC != 0;
         self.b_hold_latch = shift_combine(self.bltbold, val, bsh, desc);
-        if self.bltcon1 & BLTCON1_LINE != 0 {
-            self.line_bdat = self.bltbdat.rotate_right(bsh);
-            self.line_bdat_valid = true;
-        }
     }
 
     pub fn write_bltcdat(&mut self, val: u16) {
@@ -793,8 +806,10 @@ impl Blitter {
                 }
                 LineBlitPhase::Init => "LINIT",
                 LineBlitPhase::L1 => "L1",
+                LineBlitPhase::LB => "LB",
                 LineBlitPhase::L2 => "L2",
                 LineBlitPhase::L3 => "L3",
+                LineBlitPhase::LBus => "LBUS",
                 LineBlitPhase::L4 => "L4",
                 LineBlitPhase::Tail => "LTAIL",
                 LineBlitPhase::TailDone => "LEND",
@@ -925,6 +940,8 @@ impl Blitter {
                 let c = if use_c {
                     let v = read_word(ram, cpt);
                     cpt = cpt.wrapping_add(step as u32);
+                    // C DMA fetches load the BLTCDAT register itself.
+                    self.bltcdat = v;
                     v
                 } else {
                     self.bltcdat
@@ -1017,6 +1034,8 @@ impl Blitter {
         let con0 = self.bltcon0;
         let lf = (con0 & 0xFF) as u8;
         let ash = ((con0 >> 12) & 0x0F) as u32;
+        let use_a = con0 & BLTCON0_USE_A != 0;
+        let use_b = con0 & BLTCON0_USE_B != 0;
         let use_c = con0 & BLTCON0_USE_C != 0;
 
         let con1 = self.bltcon1;
@@ -1026,6 +1045,7 @@ impl Blitter {
         let bplmod = self.bltcmod as i32; // bytes per bitplane row
         let amod_step = self.bltamod as u16; // added when minor IS stepped
         let bmod_step = self.bltbmod as u16; // added when minor NOT stepped
+        let mut bpt = self.bltbpt;
 
         // We track X position purely through ASH (the within-word bit
         // position of the line pixel) and BLTCPT (the byte address of
@@ -1045,16 +1065,23 @@ impl Blitter {
         let a_word = self.bltadat & self.bltafwm;
 
         for _ in 0..npixels {
+            if use_b {
+                // Line-mode FETCH_B: read BLTBPT, add only BLTBMOD.
+                let fetched = read_word(ram, bpt);
+                bpt = bpt.wrapping_add(bmod_step as i16 as i32 as u32);
+                bdat = fetched.rotate_right(bsh as u32);
+            }
+            // A SING-suppressed dot only locks the store: the A shifter, the
+            // minterm and the BZERO update still run on the full inputs.
             let line_pixel = !sing || !one_dot;
-            let a_shifted = if line_pixel {
-                a_word >> (ash_now as u32)
-            } else {
-                0
-            };
+            let a_shifted = a_word >> (ash_now as u32);
             one_dot = true;
             let b_shifted = if bdat & 1 != 0 { 0xFFFF } else { 0 };
             let c = if use_c {
-                read_word(ram, cpt)
+                let v = read_word(ram, cpt);
+                // C DMA fetches load the BLTCDAT register itself.
+                self.bltcdat = v;
+                v
             } else {
                 self.bltcdat
             };
@@ -1062,9 +1089,15 @@ impl Blitter {
 
             if !sign {
                 ash_now = line_step_sometimes(con1, ash_now, bplmod, &mut cpt, &mut one_dot);
-                acc = acc.wrapping_add(amod_step);
-            } else {
-                acc = acc.wrapping_add(bmod_step);
+            }
+            // The error accumulator only advances with USEA set (vAmiga
+            // doLine); without it the SIGN state freezes.
+            if use_a {
+                if !sign {
+                    acc = acc.wrapping_add(amod_step);
+                } else {
+                    acc = acc.wrapping_add(bmod_step);
+                }
             }
             ash_now = line_step_always(con1, ash_now, bplmod, &mut cpt, &mut one_dot);
             sign = (acc as i16) < 0;
@@ -1097,17 +1130,18 @@ impl Blitter {
         self.bltcon1 = con1;
         self.bltcon0 = (self.bltcon0 & 0x0FFF) | ((ash_now as u16 & 0x000F) << 12);
         let ptr_mask = self.dma_ptr_mask();
+        self.bltbpt = bpt & ptr_mask;
         self.bltcpt = cpt & ptr_mask;
         self.bltdpt = dpt & ptr_mask;
         self.bltapt = ((self.bltapt & CHIP_DMA_HIGH_MASK) | acc as u32) & ptr_mask;
     }
 
+    /// The line texture register at blit start: BLTBDAT barrel-rotated by
+    /// the LIVE BSH. Line mode re-runs the B shifter every pixel with the
+    /// current BSH (vAmiga HOLD_B), so no write-time latch applies here
+    /// (unlike the USEB-off copy-blit hold word, b_hold_latch).
     fn line_initial_bdat(&self, bsh: u16) -> u16 {
-        if self.line_bdat_valid {
-            self.line_bdat
-        } else {
-            self.bltbdat.rotate_right(bsh as u32)
-        }
+        self.bltbdat.rotate_right(bsh as u32)
     }
 }
 
@@ -1123,16 +1157,19 @@ impl LineBlitState {
             debug_watched_write: None,
             phase: LineBlitPhase::StartDelay,
             start_extra: NORMAL_START_EXTRA_SLOTS,
-            slots_remaining: line_total_slots(npixels),
+            slots_remaining: line_total_slots(npixels, con0 & BLTCON0_USE_B != 0),
             npixels_remaining: npixels,
             con0,
             con1,
             lf: (con0 & 0xFF) as u8,
+            use_a: con0 & BLTCON0_USE_A != 0,
+            use_b: con0 & BLTCON0_USE_B != 0,
             use_c: con0 & BLTCON0_USE_C != 0,
             sing: con1 & BLTCON1_SING != 0,
             bplmod: blitter.bltcmod as i32,
             amod_step: blitter.bltamod as u16,
             bmod_step: blitter.bltbmod as u16,
+            bpt: blitter.bltbpt,
             cpt: blitter.bltcpt,
             dpt: blitter.bltdpt,
             ash_now: ((con0 >> 12) & 0x0F) as i32,
@@ -1157,15 +1194,17 @@ impl LineBlitState {
     }
 
     /// Whether the phase the next tick_slot will process is a chip-bus access.
-    /// Per pixel the line engine reads C (L2) and writes D (L4); L1/L3 are
-    /// internal Bresenham cycles that leave the bus free. A suppressed D
-    /// write (USEC clear, or SING past the row's first dot) leaves its slot
-    /// idle too: the hardware D cycle only runs when the pixel is stored
-    /// (vAmiga lockD turns WRITE_D into a bus-idle cycle).
+    /// Per pixel the line engine reads C (L2) and writes D (L4); USEB lines
+    /// additionally read B (LB) and burn one bare bus-allocation cycle
+    /// (LBus). L1/L3 are internal Bresenham cycles that leave the bus free.
+    /// With USEC clear no program cycle touches the bus; with USEC set the
+    /// D cycle allocates the bus even when SING suppresses the store (line
+    /// mode's WRITE_D is unconditionally a bus cycle in vAmiga's execLine,
+    /// unlike copy mode where lockD turns it into BUSIDLE).
     fn current_slot_needs_bus(&self) -> bool {
         match self.phase {
-            LineBlitPhase::L2 => self.use_c,
-            LineBlitPhase::L4 => self.use_c && (!self.sing || !self.one_dot),
+            LineBlitPhase::L2 | LineBlitPhase::L4 => self.use_c,
+            LineBlitPhase::LB | LineBlitPhase::LBus => true,
             LineBlitPhase::StartDelay
             | LineBlitPhase::Init
             | LineBlitPhase::L1
@@ -1178,9 +1217,10 @@ impl LineBlitState {
 
     /// Arbitration class of the pending pipeline cycle (see BlitSlotClass
     /// and NormalBlitState::current_slot_class for the startup ladder).
-    /// The internal Bresenham cycles L1/L3 and a suppressed store are
-    /// bus-free micro-cycles (vAmiga BUSIDLE); the two terminal cycles are
-    /// internal (NOTHING + BLTDONE).
+    /// The internal Bresenham cycles L1/L3 are bus-free micro-cycles
+    /// (vAmiga BUSIDLE). The terminal pair is NOTHING + BLTDONE: internal
+    /// for USEB-off programs, while USEB programs end with
+    /// `BUSIDLE|BLTDONE`, which needs a free bus to retire.
     fn current_slot_class(&self) -> BlitSlotClass {
         match self.phase {
             LineBlitPhase::StartDelay => {
@@ -1190,10 +1230,16 @@ impl LineBlitState {
                     BlitSlotClass::BusFree
                 }
             }
-            LineBlitPhase::Init | LineBlitPhase::Tail | LineBlitPhase::TailDone => {
-                BlitSlotClass::Internal
+            LineBlitPhase::Init | LineBlitPhase::Tail => BlitSlotClass::Internal,
+            LineBlitPhase::TailDone => {
+                if self.use_b {
+                    BlitSlotClass::BusFree
+                } else {
+                    BlitSlotClass::Internal
+                }
             }
             LineBlitPhase::L1 | LineBlitPhase::L3 => BlitSlotClass::BusFree,
+            LineBlitPhase::LB | LineBlitPhase::LBus => BlitSlotClass::Bus,
             LineBlitPhase::L2 | LineBlitPhase::L4 => {
                 if self.current_slot_needs_bus() {
                     BlitSlotClass::Bus
@@ -1231,19 +1277,19 @@ impl LineBlitState {
             LineBlitPhase::Init => &[false],
             _ => &[],
         };
-        let tail_free = matches!(
-            self.phase,
-            LineBlitPhase::Tail | LineBlitPhase::TailDone | LineBlitPhase::Done
-        );
+        // The last two slots are the NOTHING + BLTDONE tail: NOTHING is
+        // internal; the BLTDONE cycle is internal for USEB-off programs and
+        // a bus-free (eligible-consuming) BUSIDLE cycle for USEB programs.
         let tail_start = self.slots_remaining.saturating_sub(2);
+        let done_slot = self.slots_remaining.saturating_sub(1);
         let mut mask = 0u64;
         for k in 0..count {
-            let needs = if tail_free || k >= tail_start {
-                false
+            let needs = if k >= tail_start {
+                self.use_b && k == done_slot
             } else if (k as usize) < lead.len() {
                 lead[k as usize]
             } else {
-                // Body cycles: every L1-L4 cycle consumes an eligible clock.
+                // Body cycles: every pixel cycle consumes an eligible clock.
                 true
             };
             if needs {
@@ -1274,7 +1320,22 @@ impl LineBlitState {
                 }
             }
             LineBlitPhase::Init => self.phase = LineBlitPhase::L1,
-            LineBlitPhase::L1 => self.phase = LineBlitPhase::L2,
+            LineBlitPhase::L1 => {
+                self.phase = if self.use_b {
+                    LineBlitPhase::LB
+                } else {
+                    LineBlitPhase::L2
+                };
+            }
+            LineBlitPhase::LB => {
+                // FETCH_B: line mode reads BLTBPT and adds only BLTBMOD (no
+                // word step). The B shifter output (bit BSH of the fetched
+                // word) replaces the write-time BLTBDAT latch for this pixel.
+                let fetched = read_word(ram, self.bpt);
+                self.bpt = self.bpt.wrapping_add(self.bmod_step as i16 as i32 as u32);
+                self.bdat = fetched.rotate_right(self.bsh as u32);
+                self.phase = LineBlitPhase::L2;
+            }
             LineBlitPhase::L2 => {
                 self.cur_c = if self.use_c {
                     read_word(ram, self.cpt)
@@ -1283,7 +1344,14 @@ impl LineBlitState {
                 };
                 self.phase = LineBlitPhase::L3;
             }
-            LineBlitPhase::L3 => self.phase = LineBlitPhase::L4,
+            LineBlitPhase::L3 => {
+                self.phase = if self.use_b {
+                    LineBlitPhase::LBus
+                } else {
+                    LineBlitPhase::L4
+                };
+            }
+            LineBlitPhase::LBus => self.phase = LineBlitPhase::L4,
             LineBlitPhase::L4 => {
                 self.process_latched_pixel(ram, bzero);
                 self.phase = if self.npixels_remaining == 0 {
@@ -1299,12 +1367,11 @@ impl LineBlitState {
     }
 
     fn process_latched_pixel(&mut self, ram: &mut [u8], bzero: &mut bool) {
+        // A SING-suppressed dot only locks the store: the A shifter, the
+        // minterm and the BZERO update still run on the full inputs
+        // (vAmiga HOLD_A/HOLD_D are unconditional; lockD gates WRITE_D).
         let line_pixel = !self.sing || !self.one_dot;
-        let a_shifted = if line_pixel {
-            self.a_word >> (self.ash_now as u32)
-        } else {
-            0
-        };
+        let a_shifted = self.a_word >> (self.ash_now as u32);
         self.one_dot = true;
         let b_shifted = if self.bdat & 1 != 0 { 0xFFFF } else { 0 };
         let d = minterm(self.lf, a_shifted, b_shifted, self.cur_c);
@@ -1317,9 +1384,16 @@ impl LineBlitState {
                 &mut self.cpt,
                 &mut self.one_dot,
             );
-            self.acc = self.acc.wrapping_add(self.amod_step);
-        } else {
-            self.acc = self.acc.wrapping_add(self.bmod_step);
+        }
+        // The Bresenham error accumulator (BLTAPT's low word) only advances
+        // when the A channel is enabled; with USEA clear the SIGN state
+        // freezes on the initial accumulator value (vAmiga doLine).
+        if self.use_a {
+            if !self.sign {
+                self.acc = self.acc.wrapping_add(self.amod_step);
+            } else {
+                self.acc = self.acc.wrapping_add(self.bmod_step);
+            }
         }
         self.ash_now = line_step_always(
             self.con1,
@@ -1356,9 +1430,16 @@ impl LineBlitState {
         blitter.bltcon1 = con1;
         blitter.bltcon0 = (self.con0 & 0x0FFF) | ((self.ash_now as u16 & 0x000F) << 12);
         let ptr_mask = blitter.dma_ptr_mask();
+        blitter.bltbpt = self.bpt & ptr_mask;
         blitter.bltcpt = self.cpt & ptr_mask;
         blitter.bltdpt = self.dpt & ptr_mask;
         blitter.bltapt = ((blitter.bltapt & CHIP_DMA_HIGH_MASK) | self.acc as u32) & ptr_mask;
+        // C DMA fetches load the BLTCDAT register itself: a later USEC-off
+        // blit consumes the last fetched C word (vAmiga chold; vAmigaTS
+        // Agnus/Blitter/line/zero1 blits 7-12).
+        if self.use_c {
+            blitter.bltcdat = self.cur_c;
+        }
     }
 }
 
@@ -1913,6 +1994,12 @@ impl NormalBlitState {
         blitter.bltbpt = self.bpt & ptr_mask;
         blitter.bltcpt = self.cpt & ptr_mask;
         blitter.bltdpt = self.dpt & ptr_mask;
+        // C DMA fetches load the BLTCDAT register itself: a later USEC-off
+        // blit consumes the last fetched C word (vAmiga chold; vAmigaTS
+        // Agnus/Blitter/line/zero1 blits 7-12).
+        if self.use_c {
+            blitter.bltcdat = self.cur_c;
+        }
     }
 }
 
@@ -1995,11 +2082,12 @@ fn normal_total_slots(h: u32, w: u32, con0: u16, con1: u16) -> u32 {
         + 2
 }
 
-fn line_total_slots(npixels: u32) -> u32 {
-    // Startup extras + StartDelay/Init lead-in, four cycles per pixel, and
-    // the two terminal micro-cycles (NOTHING + BLTDONE, vAmiga's line
-    // program tail).
-    2 + NORMAL_START_EXTRA_SLOTS + npixels.saturating_mul(4) + 2
+fn line_total_slots(npixels: u32, use_b: bool) -> u32 {
+    // Startup extras + StartDelay/Init lead-in, four cycles per pixel (six
+    // with USEB: the B fetch and the bare bus cycle), and the two terminal
+    // micro-cycles (NOTHING + BLTDONE, vAmiga's line program tail).
+    let per_pixel = if use_b { 6 } else { 4 };
+    2 + NORMAL_START_EXTRA_SLOTS + npixels.saturating_mul(per_pixel) + 2
 }
 
 fn line_step_sometimes(
@@ -3130,7 +3218,13 @@ mod tests {
     }
 
     #[test]
-    fn line_mode_bltbdat_load_uses_bsh_at_write_time() {
+    fn line_mode_b_shifter_uses_live_bsh_not_write_time_bsh() {
+        // Line mode re-runs the B barrel shifter every pixel with the LIVE
+        // BSH (vAmiga HOLD_B recomputes ror(BLTBDAT, BSH) per pixel); a BSH
+        // poked after BLTBDAT takes effect (vAmigaTS Agnus/Blitter/line/
+        // zero1 writes BLTBDAT before BLTCON1). This differs from the
+        // USEB-off copy-blit hold word, which IS latched at write time
+        // (undocumented1, b_hold_latch).
         let mut ram = vec![0u8; 64];
         let mut b = Blitter::new();
         b.bltcon0 = BLTCON0_USE_C | 0x00CC; // Minterm B.
@@ -3142,30 +3236,25 @@ mod tests {
 
         b.execute((1u16 << 6) | 2, &mut ram);
 
-        assert_eq!(read_word(&ram, 0), 0xFFFF);
-    }
+        // Texture bit = bit BSH (1) of BLTBDAT ($0001) = 0: no dot.
+        assert_eq!(read_word(&ram, 0), 0x0000);
 
-    #[test]
-    fn normal_mode_bltbdat_write_does_not_load_line_texture_shifter() {
-        let mut ram = vec![0u8; 64];
-        let mut b = Blitter::new();
-        b.bltcon0 = BLTCON0_USE_C | 0x00CC; // Minterm B.
-        b.write_bltcon1(0);
-        b.write_bltbdat(0x0001);
+        // Bit BSH (1) of $0002 = 1: the dot is drawn.
+        b.write_bltbdat(0x0002);
         b.write_bltcon1(BLTCON1_LINE | (1 << 12));
         b.bltcpt = 0;
         b.bltdpt = 0;
-
         b.execute((1u16 << 6) | 2, &mut ram);
-
-        assert_eq!(read_word(&ram, 0), 0x0000);
+        assert_eq!(read_word(&ram, 0), 0xFFFF);
     }
 
     #[test]
     fn line_mode_writes_back_shift_sign_and_accumulator_registers() {
         let mut ram = vec![0u8; 128];
         let mut b = Blitter::new();
-        b.bltcon0 = (14 << 12) | BLTCON0_USE_C | 0x00AA; // Minterm C.
+        // USEA enabled: the Bresenham error accumulator only advances with
+        // the A channel on (without it the SIGN state freezes).
+        b.bltcon0 = (14 << 12) | BLTCON0_USE_A | BLTCON0_USE_C | 0x00AA; // Minterm C.
         b.bltcon1 = (2 << 12) | BLTCON1_LINE | BLTCON1_SUD;
         b.bltcpt = 0;
         b.bltdpt = 0;

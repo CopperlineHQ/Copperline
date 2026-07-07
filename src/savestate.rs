@@ -91,7 +91,10 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //  26: Copper gained the deferred SKIP decision (skip_eval - the condition
 //      sampled at the next instruction's first-word fetch) and the COPJMP
 //      strobe tail state (CopperState::Jumping, COP_JMP1/COP_JMP2)
-pub const STATE_VERSION: u32 = 26;
+//  27: LineBlitState gained the USEB line-program state (use_a/use_b flags,
+//      the live B pointer bpt) and LineBlitPhase the two extra USEB pixel
+//      cycles (LB fetch, LBus bare bus cycle)
+pub const STATE_VERSION: u32 = 27;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {
