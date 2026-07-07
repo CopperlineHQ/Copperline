@@ -190,6 +190,26 @@ impl BoardSpec {
         }
     }
 
+    /// The A4091 SCSI-2 controller board: Commodore (manufacturer 514),
+    /// product 84, a 16M Zorro III window with the DiagArea vector at $0200
+    /// in the nibble-wide boot ROM. The same identity is baked into the
+    /// first bytes of the physical EPROM; here the chain supplies it, as it
+    /// does for every board. `slot` is the index of the matching `A4091`
+    /// device in `Bus::devices`.
+    pub fn a4091(slot: usize) -> Self {
+        Self {
+            name: "A4091 SCSI".into(),
+            version: ZorroVersion::III,
+            manufacturer: 514,
+            product: 84,
+            serial: 0,
+            size_bytes: 0x0100_0000,
+            backing: BoardBacking::Device(slot),
+            memlist: false,
+            diag_vec: Some(0x0200),
+        }
+    }
+
     fn validate(&self) -> Result<()> {
         match self.version {
             ZorroVersion::II => {

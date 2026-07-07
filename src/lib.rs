@@ -12,6 +12,7 @@
 
 pub mod a2065;
 pub mod a2091;
+pub mod a4091;
 pub mod akiko;
 pub mod amigaos;
 pub mod audio;

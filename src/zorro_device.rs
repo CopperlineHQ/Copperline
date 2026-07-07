@@ -110,6 +110,10 @@ pub struct DeviceHost<'a> {
     mem: &'a mut Memory,
     /// Paula's CD-audio ring, available only on a host built for the CDTV tick.
     cd_audio: Option<&'a mut CdAudioRing>,
+    /// The device slot this host was built for, so a bus-mastering board
+    /// can recognize DMA addresses inside its own configured window (the
+    /// A4091 self-test DMAs its own registers) without re-entering itself.
+    self_slot: Option<usize>,
 }
 
 impl<'a> DeviceHost<'a> {
@@ -117,6 +121,27 @@ impl<'a> DeviceHost<'a> {
         Self {
             mem,
             cd_audio: None,
+            self_slot: None,
+        }
+    }
+
+    /// A host view that knows which device slot it serves. See `self_slot`.
+    pub fn for_slot(mem: &'a mut Memory, slot: usize) -> Self {
+        Self {
+            mem,
+            cd_audio: None,
+            self_slot: Some(slot),
+        }
+    }
+
+    /// The window offset when `addr` falls inside the calling device's own
+    /// configured board window, `None` otherwise (or when the host was not
+    /// built with a slot).
+    pub fn own_window_offset(&self, addr: u32) -> Option<u32> {
+        let slot = self.self_slot?;
+        match self.mem.zorro.device_region_at(addr, 1) {
+            Some((crate::zorro::BoardBacking::Device(s), off)) if s == slot => Some(off),
+            _ => None,
         }
     }
 
@@ -126,6 +151,7 @@ impl<'a> DeviceHost<'a> {
         Self {
             mem,
             cd_audio: Some(cd_audio),
+            self_slot: None,
         }
     }
 
@@ -262,6 +288,7 @@ pub trait ZorroDevice {
 #[derive(serde::Serialize, serde::Deserialize)]
 pub enum BoardDevice {
     A2091(crate::a2091::A2091),
+    A4091(crate::a4091::A4091),
     A2065(crate::a2065::A2065),
     Wasm(crate::wasmboard::WasmBoard),
 }
@@ -270,6 +297,7 @@ impl ZorroDevice for BoardDevice {
     fn read(&mut self, off: u32, size: usize, host: &mut DeviceHost) -> u32 {
         match self {
             BoardDevice::A2091(d) => ZorroDevice::read(d, off, size, host),
+            BoardDevice::A4091(d) => ZorroDevice::read(d, off, size, host),
             BoardDevice::A2065(d) => ZorroDevice::read(d, off, size, host),
             BoardDevice::Wasm(d) => ZorroDevice::read(d, off, size, host),
         }
@@ -278,6 +306,7 @@ impl ZorroDevice for BoardDevice {
     fn write(&mut self, off: u32, size: usize, value: u32, host: &mut DeviceHost) {
         match self {
             BoardDevice::A2091(d) => ZorroDevice::write(d, off, size, value, host),
+            BoardDevice::A4091(d) => ZorroDevice::write(d, off, size, value, host),
             BoardDevice::A2065(d) => ZorroDevice::write(d, off, size, value, host),
             BoardDevice::Wasm(d) => ZorroDevice::write(d, off, size, value, host),
         }
@@ -286,6 +315,7 @@ impl ZorroDevice for BoardDevice {
     fn peek_word(&self, off: u32) -> Option<u16> {
         match self {
             BoardDevice::A2091(d) => ZorroDevice::peek_word(d, off),
+            BoardDevice::A4091(d) => ZorroDevice::peek_word(d, off),
             BoardDevice::A2065(d) => ZorroDevice::peek_word(d, off),
             BoardDevice::Wasm(d) => ZorroDevice::peek_word(d, off),
         }
@@ -294,6 +324,7 @@ impl ZorroDevice for BoardDevice {
     fn tick(&mut self, cck: u32, host: &mut DeviceHost) {
         match self {
             BoardDevice::A2091(d) => ZorroDevice::tick(d, cck, host),
+            BoardDevice::A4091(d) => ZorroDevice::tick(d, cck, host),
             BoardDevice::A2065(d) => ZorroDevice::tick(d, cck, host),
             BoardDevice::Wasm(d) => ZorroDevice::tick(d, cck, host),
         }
@@ -302,6 +333,7 @@ impl ZorroDevice for BoardDevice {
     fn int2_line(&self) -> bool {
         match self {
             BoardDevice::A2091(d) => ZorroDevice::int2_line(d),
+            BoardDevice::A4091(d) => ZorroDevice::int2_line(d),
             BoardDevice::A2065(d) => ZorroDevice::int2_line(d),
             BoardDevice::Wasm(d) => ZorroDevice::int2_line(d),
         }
@@ -310,6 +342,7 @@ impl ZorroDevice for BoardDevice {
     fn int6_line(&self) -> bool {
         match self {
             BoardDevice::A2091(d) => ZorroDevice::int6_line(d),
+            BoardDevice::A4091(d) => ZorroDevice::int6_line(d),
             BoardDevice::A2065(d) => ZorroDevice::int6_line(d),
             BoardDevice::Wasm(d) => ZorroDevice::int6_line(d),
         }
@@ -318,6 +351,7 @@ impl ZorroDevice for BoardDevice {
     fn is_idle(&self) -> bool {
         match self {
             BoardDevice::A2091(d) => ZorroDevice::is_idle(d),
+            BoardDevice::A4091(d) => ZorroDevice::is_idle(d),
             BoardDevice::A2065(d) => ZorroDevice::is_idle(d),
             BoardDevice::Wasm(d) => ZorroDevice::is_idle(d),
         }
@@ -326,6 +360,7 @@ impl ZorroDevice for BoardDevice {
     fn next_event_cck(&self) -> Option<u32> {
         match self {
             BoardDevice::A2091(d) => ZorroDevice::next_event_cck(d),
+            BoardDevice::A4091(d) => ZorroDevice::next_event_cck(d),
             BoardDevice::A2065(d) => ZorroDevice::next_event_cck(d),
             BoardDevice::Wasm(d) => ZorroDevice::next_event_cck(d),
         }
@@ -334,6 +369,7 @@ impl ZorroDevice for BoardDevice {
     fn take_activity(&mut self) -> bool {
         match self {
             BoardDevice::A2091(d) => ZorroDevice::take_activity(d),
+            BoardDevice::A4091(d) => ZorroDevice::take_activity(d),
             BoardDevice::A2065(d) => ZorroDevice::take_activity(d),
             BoardDevice::Wasm(d) => ZorroDevice::take_activity(d),
         }
@@ -342,6 +378,7 @@ impl ZorroDevice for BoardDevice {
     fn reset(&mut self) {
         match self {
             BoardDevice::A2091(d) => ZorroDevice::reset(d),
+            BoardDevice::A4091(d) => ZorroDevice::reset(d),
             BoardDevice::A2065(d) => ZorroDevice::reset(d),
             BoardDevice::Wasm(d) => ZorroDevice::reset(d),
         }
@@ -350,6 +387,7 @@ impl ZorroDevice for BoardDevice {
     fn kind(&self) -> &'static str {
         match self {
             BoardDevice::A2091(d) => ZorroDevice::kind(d),
+            BoardDevice::A4091(d) => ZorroDevice::kind(d),
             BoardDevice::A2065(d) => ZorroDevice::kind(d),
             BoardDevice::Wasm(d) => ZorroDevice::kind(d),
         }

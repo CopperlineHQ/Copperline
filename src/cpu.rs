@@ -2367,7 +2367,7 @@ impl CpuBus {
             let (value, activity) = {
                 let mem = &mut self.bus.mem;
                 let dev = &mut self.bus.devices[slot];
-                let mut host = crate::zorro_device::DeviceHost::new(mem);
+                let mut host = crate::zorro_device::DeviceHost::for_slot(mem, slot);
                 let v = crate::zorro_device::ZorroDevice::read(dev, off, size, &mut host);
                 (v, crate::zorro_device::ZorroDevice::take_activity(dev))
             };
@@ -2570,7 +2570,7 @@ impl CpuBus {
             let activity = {
                 let mem = &mut self.bus.mem;
                 let dev = &mut self.bus.devices[slot];
-                let mut host = crate::zorro_device::DeviceHost::new(mem);
+                let mut host = crate::zorro_device::DeviceHost::for_slot(mem, slot);
                 crate::zorro_device::ZorroDevice::write(dev, off, size, value, &mut host);
                 crate::zorro_device::ZorroDevice::take_activity(dev)
             };
