@@ -245,6 +245,10 @@ pub enum SerialMode {
     /// serial device. With an `AUX:` shell on the Amiga side, a connected
     /// client gets a remote AmigaDOS console.
     Tcp,
+    /// Serial in/out is bridged to a host pseudo-terminal. The emulator
+    /// allocates a pty and logs the slave path (`/dev/pts/N`); a terminal
+    /// program (`minicom`, `screen`, `cu`) attaches to it. Unix hosts only.
+    Pty,
 }
 
 impl SerialMode {
@@ -255,6 +259,7 @@ impl SerialMode {
             Self::Stdout => "stdout",
             Self::Midi => "midi",
             Self::Tcp => "tcp",
+            Self::Pty => "pty",
         }
     }
 }
@@ -1994,8 +1999,9 @@ pub(crate) fn parse_serial_mode(s: &str) -> Result<SerialMode> {
         "stdout" | "terminal" => Ok(SerialMode::Stdout),
         "midi" => Ok(SerialMode::Midi),
         "tcp" => Ok(SerialMode::Tcp),
+        "pty" => Ok(SerialMode::Pty),
         _ => Err(anyhow!(
-            "unknown [serial] mode {:?}: expected \"off\", \"stdout\", \"midi\", or \"tcp\"",
+            "unknown [serial] mode {:?}: expected \"off\", \"stdout\", \"midi\", \"tcp\", or \"pty\"",
             s
         )),
     }

@@ -189,6 +189,162 @@ impl SerialSink for TcpSerialSink {
     fn flush(&mut self) {}
 }
 
+/// Bidirectional pseudo-terminal bridge. Allocates a pty pair, prints the
+/// slave device path, and wires Paula's serial port to it -- so a host
+/// terminal (`minicom -D <path>`, `screen <path>`, `cu -l <path>`) talks to
+/// the Amiga serial port directly, with no network in the loop. With an
+/// `AUX:` shell on the Amiga side, that terminal is a local AmigaDOS console.
+///
+/// The sink holds its own slave fd open for its whole lifetime. That keeps
+/// the pty alive across terminal programs attaching and detaching, and stops
+/// the master read from returning `EIO` (the "no slave attached" error a naive
+/// blocking reader would hot-spin on) while nothing is attached. A background
+/// thread owns the read half, pushing bytes into a channel, so Paula's idle
+/// fast path polls a counter, never a syscall -- exactly like [`TcpSerialSink`].
+#[cfg(unix)]
+pub struct PtySerialSink {
+    /// Master fd; the Amiga's output is written here and reaches the terminal.
+    master: std::fs::File,
+    rx: std::sync::mpsc::Receiver<u8>,
+    /// Bytes staged in `rx`; signed for the same reason as
+    /// [`TcpSerialSink::buffered`] (a read racing ahead of the reader thread's
+    /// `fetch_add` dips to a transient -1 rather than wrapping huge).
+    buffered: std::sync::Arc<std::sync::atomic::AtomicIsize>,
+    /// The `/dev/pts/N` slave path terminal programs connect to.
+    slave_path: String,
+    /// Held open for the sink's lifetime; see the type docs.
+    _slave_keepalive: std::fs::File,
+}
+
+#[cfg(unix)]
+impl PtySerialSink {
+    pub fn open() -> anyhow::Result<Self> {
+        use std::os::fd::AsRawFd;
+        let last_err = || std::io::Error::last_os_error();
+        // SAFETY: posix_openpt with a valid flag set. The fd it returns is
+        // wrapped in a File immediately below so it is closed on any early
+        // return from this function.
+        let master_fd = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
+        if master_fd < 0 {
+            return Err(anyhow::anyhow!(
+                "[serial] pty: posix_openpt: {}",
+                last_err()
+            ));
+        }
+        // SAFETY: master_fd is a fresh owned fd from posix_openpt.
+        let master = unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(master_fd) };
+        // SAFETY: master_fd is a valid pty master for both of these calls.
+        if unsafe { libc::grantpt(master_fd) } != 0 {
+            return Err(anyhow::anyhow!("[serial] pty: grantpt: {}", last_err()));
+        }
+        if unsafe { libc::unlockpt(master_fd) } != 0 {
+            return Err(anyhow::anyhow!("[serial] pty: unlockpt: {}", last_err()));
+        }
+        // ptsname's static-buffer non-reentrancy is fine here: open() runs
+        // single-threaded before the reader thread is spawned, and the path is
+        // copied out immediately.
+        // SAFETY: master_fd is a valid pty master; the returned pointer is
+        // owned by libc and only read (before any further libc call).
+        let name_ptr = unsafe { libc::ptsname(master_fd) };
+        if name_ptr.is_null() {
+            return Err(anyhow::anyhow!("[serial] pty: ptsname: {}", last_err()));
+        }
+        // SAFETY: name_ptr is a valid NUL-terminated C string from ptsname.
+        let slave_path = unsafe { std::ffi::CStr::from_ptr(name_ptr) }
+            .to_string_lossy()
+            .into_owned();
+
+        // Hold the slave open for our lifetime (keepalive) and put the shared
+        // line discipline in raw mode so it neither echoes nor rewrites CR/LF:
+        // the Amiga wants the bytes verbatim.
+        let slave = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&slave_path)?;
+        // SAFETY: slave.as_raw_fd() is a valid tty fd; termios is fully
+        // initialised by tcgetattr before use and only read by cfmakeraw.
+        unsafe {
+            let mut termios: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(slave.as_raw_fd(), &mut termios) == 0 {
+                libc::cfmakeraw(&mut termios);
+                let _ = libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &termios);
+            }
+        }
+
+        log::info!(
+            "serial: pty at {slave_path} (connect with e.g. \"minicom -D {slave_path}\", \
+             \"screen {slave_path}\" or \"cu -l {slave_path}\")"
+        );
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let buffered = std::sync::Arc::new(std::sync::atomic::AtomicIsize::new(0));
+        let reader_buffered = std::sync::Arc::clone(&buffered);
+        let mut reader = master.try_clone()?;
+        std::thread::Builder::new()
+            .name("serial-pty".into())
+            .spawn(move || {
+                use std::io::Read;
+                let mut buf = [0u8; 512];
+                loop {
+                    match reader.read(&mut buf) {
+                        Ok(0) => return,
+                        Ok(n) => {
+                            for &b in &buf[..n] {
+                                if tx.send(b).is_err() {
+                                    return;
+                                }
+                                reader_buffered.fetch_add(1, std::sync::atomic::Ordering::Release);
+                            }
+                        }
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                        // Anything else is teardown (the sink dropped, closing
+                        // the last slave -> EIO): let the thread exit instead
+                        // of spinning.
+                        Err(_) => return,
+                    }
+                }
+            })?;
+
+        Ok(Self {
+            master,
+            rx,
+            buffered,
+            slave_path,
+            _slave_keepalive: slave,
+        })
+    }
+
+    /// The `/dev/pts/N` path terminal programs attach to.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn slave_path(&self) -> &str {
+        &self.slave_path
+    }
+}
+
+#[cfg(unix)]
+impl SerialSink for PtySerialSink {
+    fn write_byte(&mut self, b: u8, _at_cck: u64) {
+        let _ = self.master.write_all(&[b]);
+    }
+
+    fn read_byte(&mut self) -> Option<u8> {
+        let b = self.rx.try_recv().ok();
+        if b.is_some() {
+            self.buffered
+                .fetch_sub(1, std::sync::atomic::Ordering::Release);
+        }
+        b
+    }
+
+    fn has_pending_input(&self) -> bool {
+        self.buffered.load(std::sync::atomic::Ordering::Acquire) > 0
+    }
+
+    fn flush(&mut self) {
+        let _ = self.master.flush();
+    }
+}
+
 /// Inert sink: discards output and never produces input. Placeholder used
 /// where a `Box<dyn SerialSink>` must exist before the host wires the real
 /// one (serde-skipped fields during save-state deserialization).
@@ -270,6 +426,40 @@ mod tests {
             .set_read_timeout(Some(std::time::Duration::from_secs(5)))
             .unwrap();
         client.read_exact(&mut got).unwrap();
+        assert_eq!(&got, b"x");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pty_sink_round_trips_input_and_output() {
+        let mut sink = PtySerialSink::open().unwrap();
+        let mut term = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(sink.slave_path())
+            .unwrap();
+
+        // Input: bytes the terminal writes reach the sink.
+        term.write_all(b"ab").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !sink.has_pending_input() {
+            assert!(std::time::Instant::now() < deadline, "input never arrived");
+            std::thread::yield_now();
+        }
+        assert_eq!(sink.read_byte(), Some(b'a'));
+        while !sink.has_pending_input() {
+            assert!(std::time::Instant::now() < deadline, "second byte lost");
+            std::thread::yield_now();
+        }
+        assert_eq!(sink.read_byte(), Some(b'b'));
+        assert!(!sink.has_pending_input());
+
+        // Output: bytes written to the sink arrive at the terminal. Raw mode
+        // (VMIN=1) makes the read block until the byte lands.
+        sink.write_byte(b'x', 0);
+        sink.flush();
+        let mut got = [0u8; 1];
+        term.read_exact(&mut got).unwrap();
         assert_eq!(&got, b"x");
     }
 }
