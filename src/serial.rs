@@ -265,9 +265,21 @@ impl PtySerialSink {
         // initialised by tcgetattr before use and only read by cfmakeraw.
         unsafe {
             let mut termios: libc::termios = std::mem::zeroed();
-            if libc::tcgetattr(slave.as_raw_fd(), &mut termios) == 0 {
+            if libc::tcgetattr(slave.as_raw_fd(), &mut termios) != 0 {
+                log::warn!(
+                    "serial: pty: tcgetattr failed ({}); the terminal may echo \
+                     or rewrite CR/LF",
+                    io::Error::last_os_error()
+                );
+            } else {
                 libc::cfmakeraw(&mut termios);
-                let _ = libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &termios);
+                if libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &termios) != 0 {
+                    log::warn!(
+                        "serial: pty: tcsetattr(raw) failed ({}); the terminal \
+                         may echo or rewrite CR/LF",
+                        io::Error::last_os_error()
+                    );
+                }
             }
         }
 
@@ -454,10 +466,24 @@ mod tests {
         assert_eq!(sink.read_byte(), Some(b'b'));
         assert!(!sink.has_pending_input());
 
-        // Output: bytes written to the sink arrive at the terminal. Raw mode
-        // (VMIN=1) makes the read block until the byte lands.
+        // Output: bytes written to the sink arrive at the terminal. Poll with a
+        // deadline first, so a delivery (or raw-mode) regression fails the test
+        // instead of wedging CI on a blocking tty read.
+        use std::os::fd::AsRawFd;
         sink.write_byte(b'x', 0);
         sink.flush();
+        let mut pfd = libc::pollfd {
+            fd: term.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: polling a single valid fd, owned by `term`, for 5000 ms.
+        let n = unsafe { libc::poll(&mut pfd, 1, 5000) };
+        assert!(
+            n == 1 && pfd.revents & libc::POLLIN != 0,
+            "output byte never arrived (poll returned {n}, revents {})",
+            pfd.revents
+        );
         let mut got = [0u8; 1];
         term.read_exact(&mut got).unwrap();
         assert_eq!(&got, b"x");
