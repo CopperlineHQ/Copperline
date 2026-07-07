@@ -112,14 +112,11 @@ pub struct Config {
     /// Gayle IDE drive images (raw flat HDF, RDB inside), opened
     /// read/write. Only valid on machines with a Gayle gate array.
     pub ide: IdeConfig,
-    /// A2091 SCSI controller (`[scsi]`): boot ROM image plus up to seven
-    /// drive images on SCSI IDs 0-6. Works on any machine model (the board
-    /// autoconfigs on the Zorro chain and carries its own scsi.device).
+    /// SCSI controller (`[scsi]`): the `controller` selects an A2091 (Zorro II)
+    /// or A4091 (Zorro III), plus a boot ROM image and up to seven drive images
+    /// on SCSI IDs 0-6. The board autoconfigs on the Zorro chain and carries its
+    /// own scsi.device.
     pub scsi: ScsiConfig,
-    /// A4091 SCSI-2 controller (`[a4091]`): boot ROM image plus up to seven
-    /// drive images on SCSI IDs 0-6. A Zorro III board; the 53C710 core is
-    /// not implemented yet, so drives are parsed but not driven.
-    pub a4091: A4091Config,
     /// A2065 Ethernet board (`[a2065]`): when set, an A2065 NIC autoconfigs on
     /// the Zorro chain using the named host network backend. Networking is
     /// non-deterministic, so a fitted A2065 breaks byte-identical replay.
@@ -294,34 +291,34 @@ pub struct IdeConfig {
     pub slave: Option<DriveImage>,
 }
 
+/// Which SCSI host adapter the `[scsi]` section fits. Both are Zorro
+/// autoconfig boards carrying their own boot ROM and scsi.device.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ScsiController {
+    /// Commodore A2091/A590: Zorro II, WD33C93. The default.
+    #[default]
+    A2091,
+    /// Commodore A4091: Zorro III, NCR 53C710.
+    A4091,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScsiConfig {
-    /// A2091/A590 boot ROM image (merged, or the even half when
-    /// `rom_odd` gives the other EPROM).
+    /// Which host adapter the section fits (`controller`). Only meaningful
+    /// when `enabled()`.
+    pub controller: ScsiController,
+    /// Boot ROM image. For the A2091's split even/odd EPROM dumps, `rom` is
+    /// the even half and `rom_odd` the other; the A4091 has a single ROM.
     pub rom: Option<PathBuf>,
-    /// Odd-byte EPROM half for split dumps.
+    /// Odd-byte EPROM half for split A2091 dumps.
     pub rom_odd: Option<PathBuf>,
     /// Drive images by SCSI ID (0-6; ID 7 is the controller).
     pub units: [Option<DriveImage>; 7],
 }
 
 impl ScsiConfig {
-    /// Whether a `[scsi]` section asked for the board at all.
-    pub fn enabled(&self) -> bool {
-        self.rom.is_some() || self.units.iter().any(Option::is_some)
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct A4091Config {
-    /// A4091 boot ROM image (a raw 32K or 64K byte-wide EPROM dump).
-    pub rom: Option<PathBuf>,
-    /// Drive images by SCSI ID (0-6; ID 7 is the controller).
-    pub units: [Option<DriveImage>; 7],
-}
-
-impl A4091Config {
-    /// Whether an `[a4091]` section asked for the board at all.
+    /// Whether a `[scsi]` section asked for a board at all (a bare
+    /// `controller` with no ROM or drives fits nothing).
     pub fn enabled(&self) -> bool {
         self.rom.is_some() || self.units.iter().any(Option::is_some)
     }
@@ -899,7 +896,6 @@ impl Default for Config {
             audio: AudioConfig::default(),
             ide: IdeConfig::default(),
             scsi: ScsiConfig::default(),
-            a4091: A4091Config::default(),
             a2065_net: None,
             floppy: FloppyConfig::default(),
             floppy_connected: [true, false, false, false],
@@ -1165,8 +1161,6 @@ pub struct RawConfig {
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) scsi: RawScsi,
     #[serde(default, skip_serializing_if = "is_default")]
-    pub(crate) a4091: RawA4091,
-    #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) a2065: RawA2065,
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) floppy: RawFloppy,
@@ -1347,35 +1341,15 @@ pub(crate) struct RawIde {
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawScsi {
-    /// A2091/A590 boot ROM image. For split even/odd EPROM dumps, `rom`
-    /// is the even half and `rom_odd` the odd half.
+    /// Host adapter to fit: "a2091" (Zorro II, default) or "a4091" (Zorro III).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) controller: Option<String>,
+    /// Boot ROM image. For split even/odd A2091 EPROM dumps, `rom` is the
+    /// even half and `rom_odd` the odd half.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) rom: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) rom_odd: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) unit0: Option<RawDrive>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) unit1: Option<RawDrive>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) unit2: Option<RawDrive>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) unit3: Option<RawDrive>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) unit4: Option<RawDrive>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) unit5: Option<RawDrive>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) unit6: Option<RawDrive>,
-}
-
-/// `[a4091]` SCSI-2 controller: boot ROM image plus drive images by SCSI ID.
-#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawA4091 {
-    /// A4091 boot ROM image (raw 32K or 64K byte-wide EPROM dump).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) rom: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) unit0: Option<RawDrive>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1844,7 +1818,22 @@ impl TryFrom<RawConfig> for Config {
             ));
         }
 
+        let scsi_controller = match raw.scsi.controller.as_deref() {
+            None => ScsiController::A2091,
+            Some(raw_ctrl) => match raw_ctrl.trim().to_ascii_lowercase().as_str() {
+                "a2091" => ScsiController::A2091,
+                "a4091" => ScsiController::A4091,
+                _ => {
+                    errors.push(anyhow!(
+                        "[scsi] controller = {raw_ctrl:?} is not known \
+                         (expected \"a2091\" or \"a4091\")"
+                    ));
+                    ScsiController::A2091
+                }
+            },
+        };
         let scsi = ScsiConfig {
+            controller: scsi_controller,
             rom: raw.scsi.rom.map(PathBuf::from),
             rom_odd: raw.scsi.rom_odd.map(PathBuf::from),
             units: [
@@ -1858,32 +1847,23 @@ impl TryFrom<RawConfig> for Config {
             ],
         };
         if scsi.enabled() && scsi.rom.is_none() {
+            let hint = match scsi.controller {
+                ScsiController::A2091 => {
+                    "an A590/A2091 6.x ROM image; its scsi.device drives the disks"
+                }
+                ScsiController::A4091 => "a raw A4091 EPROM image, e.g. the open-source a4091.rom",
+            };
             errors.push(anyhow!(
-                "[scsi] drives need the A2091 boot ROM: set [scsi] rom = \"...\" \
-                 (an A590/A2091 6.x ROM image; its scsi.device drives the disks)"
+                "[scsi] drives need the boot ROM: set [scsi] rom = \"...\" ({hint})"
+            ));
+        }
+        if scsi.rom_odd.is_some() && scsi.controller != ScsiController::A2091 {
+            errors.push(anyhow!(
+                "[scsi] rom_odd is an A2091 split-EPROM option; the A4091 has a single rom"
             ));
         }
         if scsi.rom_odd.is_some() && scsi.rom.is_none() {
             errors.push(anyhow!("[scsi] rom_odd needs rom (the even EPROM half)"));
-        }
-
-        let a4091 = A4091Config {
-            rom: raw.a4091.rom.map(PathBuf::from),
-            units: [
-                raw.a4091.unit0.map(drive_image).transpose()?,
-                raw.a4091.unit1.map(drive_image).transpose()?,
-                raw.a4091.unit2.map(drive_image).transpose()?,
-                raw.a4091.unit3.map(drive_image).transpose()?,
-                raw.a4091.unit4.map(drive_image).transpose()?,
-                raw.a4091.unit5.map(drive_image).transpose()?,
-                raw.a4091.unit6.map(drive_image).transpose()?,
-            ],
-        };
-        if a4091.enabled() && a4091.rom.is_none() {
-            errors.push(anyhow!(
-                "[a4091] drives need the boot ROM: set [a4091] rom = \"...\" \
-                 (a raw A4091 EPROM image, e.g. the open-source a4091.rom)"
-            ));
         }
 
         let a2065_net = match &raw.a2065.net {
@@ -2009,7 +1989,6 @@ impl TryFrom<RawConfig> for Config {
             audio,
             ide,
             scsi,
-            a4091,
             a2065_net,
             floppy,
             floppy_connected,
