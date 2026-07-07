@@ -7,6 +7,16 @@
 
 use super::*;
 
+/// One-shot env flag for the Copper write-landing trace
+/// (`COPPERLINE_DIAG_COP_WRITES=1`): logs every Copper MOVE's landing color
+/// clock (beam position, register, value) to stderr for cross-emulator
+/// comparison against vAmiga's `VAMIGA_COP_PROBE` trace.
+fn diag_cop_writes_on() -> bool {
+    use std::sync::OnceLock;
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| crate::envcfg::flag("COPPERLINE_DIAG_COP_WRITES"))
+}
+
 impl Bus {
     pub(super) fn advance_one_chip_bus_quantum(
         &mut self,
@@ -199,6 +209,12 @@ impl Bus {
             CopperSlotAction::Idle => false,
             CopperSlotAction::BusUsed => true,
             CopperSlotAction::Move { register, value } => {
+                if diag_cop_writes_on() {
+                    eprintln!(
+                        "COPPROBE MOVE   v={:03x} h={:02x} reg={:03x} val={:04x}",
+                        vpos, hpos, register, value
+                    );
+                }
                 if self.copper_can_write_custom(register) {
                     let _ = self.write_custom_word_from(register, value, BeamWriteSource::Copper);
                 } else {
