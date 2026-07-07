@@ -85,6 +85,16 @@ fn no_bus_arb() -> bool {
     false
 }
 
+/// Cached COPPERLINE_DIAG_BLT_SLOTS gate (read once). Enables the blitter
+/// slot-trace probe: one stderr line per blitter pipeline cycle with its
+/// beam position, for cross-emulator slot-sequence comparison against the
+/// vAmiga VAMIGA_BLT_PROBE hooks. Logging only; never alters timing.
+pub(crate) fn diag_blt_slots() -> bool {
+    use std::sync::OnceLock;
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| crate::envcfg::flag("COPPERLINE_DIAG_BLT_SLOTS"))
+}
+
 /// One-shot latch for the COPPERLINE_DIAG_COPLEN coplist dump (it used to clear its
 /// own env var to log once; with cached env that no longer works).
 static COPLEN_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -906,6 +916,12 @@ pub struct Bus {
     #[serde(skip)]
     ui_copper_last_pc: u32,
     blitter_slowdown_cpu_misses: u8,
+    /// Pending INTREQ.BLIT raise, in colour clocks. Real Agnus raises the
+    /// blitter interrupt one clock after the sequencer's BLTDONE cycle
+    /// (vAmiga scheduleIrqRel(BLIT, 1) at the terminal micro-cycle), so a
+    /// scheduled completion arms this one-cck countdown instead of setting
+    /// INTREQ in the final slot itself. Forced drains raise immediately.
+    blit_irq_delay_cck: Option<u32>,
     slice_bus_advanced_cck: u32,
     slice_bus_tick: AgnusTick,
     // Deferred timed-device clock. Ticking CIA/serial/pots/audio/floppy/Akiko
@@ -2048,6 +2064,7 @@ impl Bus {
             ui_mem_watch_addrs: Vec::new(),
             ui_mem_writers: Vec::new(),
             blitter_slowdown_cpu_misses: 0,
+            blit_irq_delay_cck: None,
             slice_bus_advanced_cck: 0,
             slice_bus_tick: AgnusTick::default(),
             pending_device_cck: 0,
@@ -3435,6 +3452,40 @@ impl Bus {
                 ));
             }
         }
+        if diag_blt_slots() {
+            eprintln!(
+                "BLTP {} {} {} END source={source}",
+                self.emulated_frames, self.agnus.vpos, self.agnus.hpos
+            );
+        }
+        if source == "forced" {
+            // Drained synchronously (mid-blit register write): the whole
+            // hardware timeline has already been collapsed, so raise now
+            // and drop any raise already armed by the terminal cycle.
+            self.blit_irq_delay_cck = None;
+            self.raise_blit_irq(source);
+        }
+        // Scheduled completions do not raise here: INTREQ.BLIT is armed
+        // when the sequencer ENTERS its terminal BLTDONE cycle (see
+        // note_blitter_slot_ticked), one colour clock after that cycle's
+        // first attempt -- which real Agnus asserts even while a contended
+        // final D write is still blocked (vAmiga scheduleIrqRel(BLIT, 1)
+        // runs before the bus allocation check).
+    }
+
+    /// Post-tick bookkeeping shared by the blitter's bus-slot and
+    /// idle-cycle tick sites: arm the INTREQ.BLIT raise when the sequencer
+    /// just entered its terminal BLTDONE cycle. Armed with 2 because the
+    /// arming tick's own advance_beam decrements it once in the same
+    /// colour clock; the raise then lands at the end of the terminal
+    /// cycle's first attempt.
+    pub(crate) fn note_blitter_slot_ticked(&mut self) {
+        if self.blitter.take_irq_arm() {
+            self.blit_irq_delay_cck = Some(2);
+        }
+    }
+
+    fn raise_blit_irq(&mut self, source: &'static str) {
         let intreq_before = self.paula.intreq;
         self.paula.intreq |= INT_BLIT;
         self.note_irq_source_asserted();

@@ -86,7 +86,9 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      per-direction stamps for the mechanism's 40 us pulse floor)
 //  24: Cia gained the delayed /IRQ pin state (irq_pin,
 //      irq_pin_delay_eticks - the 8520 one-E-cycle interrupt delay)
-pub const STATE_VERSION: u32 = 24;
+//  25: Blitter gained the early-dropping DMACONR BBUSY flag (bbusy) and
+//      Bus the one-cck INTREQ.BLIT raise delay (blit_irq_delay_cck)
+pub const STATE_VERSION: u32 = 25;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {
