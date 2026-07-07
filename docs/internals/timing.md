@@ -235,10 +235,16 @@ wait for the blitter to go idle.
   `TODO.md` (`t=165s`/`t=180s` frame dumps).
 
 Copper writes to "dangerous" registers are gated by COPCON's CDANG bit.
-COPCON is a one-bit Agnus control latch; byte writes use the mirrored 68000
-byte value, so a byte bit operation such as `bset #1,COPCON` sets CDANG.
 References: HRM [Coprocessor
 Hardware](https://www.theflatnet.de/pub/cbm/amiga/AmigaDevDocs/hard_2.html).
+
+A 68000 byte write drives the byte onto both halves of the data bus, and
+the custom chips latch the full 16-bit word (they have no byte lanes), so
+`move.b v,COLOR00+1` lands `$vvvv` in the register and a byte bit
+operation such as `bset #1,COPCON` sets CDANG. The vAmigaTS `CIA/oldcnt`
+cnt1/cnt3/cnt5 ramps (which paint `move.b TALO,COLOR00+1` mid-count)
+photograph the mirrored high byte on real hardware. Test:
+`custom_byte_write_drives_the_byte_onto_both_bus_halves`.
 
 ## The blitter
 

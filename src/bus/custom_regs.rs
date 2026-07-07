@@ -88,8 +88,8 @@ impl Bus {
                 // Real write-only custom registers leave the CPU reading an
                 // undriven custom bus. Copperline does not model the previous
                 // bus owner yet, so write-only and unmapped custom reads use
-                // deterministic zero. Byte writes still consult private
-                // latches through `custom_byte_write_latch`.
+                // deterministic zero. The debugger still inspects the
+                // internal latches through `custom_reg_latch`.
                 0
             }
         }
@@ -104,7 +104,12 @@ impl Bus {
         }
     }
 
-    pub(super) fn custom_byte_write_latch(&self, off: u16) -> Option<u16> {
+    /// Side-effect-free view of a custom register's internal latch, for
+    /// the debugger's `debug_custom_word`. Registers without a modelled
+    /// stored word (read-only counters, strobes, unused offsets) report
+    /// None. This is NOT a bus path: CPU byte writes mirror the byte to
+    /// both data-bus halves and never merge with these latches.
+    pub(super) fn custom_reg_latch(&self, off: u16) -> Option<u16> {
         match off & 0xFFE {
             0x02E => Some(self.agnus.copcon),
             0x032 => Some(self.paula.serper),
@@ -131,16 +136,9 @@ impl Bus {
             0x070 => Some(self.blitter.bltcdat),
             0x072 => Some(self.blitter.bltbdat),
             0x074 => Some(self.blitter.bltadat),
-            // Audio registers (AUDxLC/LEN/PER/VOL/DAT) deliberately fall
-            // through to the mirrored-byte path below. On a real 68000 a
-            // byte write drives the value onto both data-bus halves, and
-            // Paula latches the full 16-bit word, so `move.b #v,AUDxVOL`
-            // (an even address) lands the value in the volume bits 0..6
-            // exactly as `move.w` would. Some music players use this to
-            // set a channel's volume via the "set volume" effect (e.g.
-            // Magic Pockets' title tune drops its echo voice to a low
-            // volume this way); merging with the latched low byte would
-            // leave the volume at its previous full value.
+            // Audio registers (AUDxLC/LEN/PER/VOL/DAT) are not listed
+            // here: `debug_custom_word` reads their write latches through
+            // `peek_audio_reg_latch` before falling through to this map.
             0x08E => Some(self.denise.diwstrt),
             0x090 => Some(self.denise.diwstop),
             0x1E4 => self.denise_ecs_registers().then_some(self.denise.diwhigh),
