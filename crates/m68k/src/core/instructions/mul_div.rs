@@ -199,6 +199,14 @@ impl CpuCore {
             self.top_up_prefetch(bus);
             if div_clocks > 4 {
                 self.internal_cycles((div_clocks - 4) as u32);
+                // Advance the beam for the division's internal clocks now, before
+                // the instruction boundary (Moira's SYNC runs immediately after
+                // prefetch<POLL>). Deferring them past the boundary -- to the next
+                // instruction's first bus access -- mistimes CPU-vs-bitplane-DMA
+                // contention during an active display, doubling the beam cost of a
+                // DIV run mid-fetch (timing-test row 31 8722 -> 4820 cck vs vAmiga
+                // 4790; TEK Rampage's Ellis scene depends on it).
+                self.flush_sync(bus);
             }
         }
 
@@ -270,6 +278,14 @@ impl CpuCore {
             self.top_up_prefetch(bus);
             if div_clocks > 4 {
                 self.internal_cycles((div_clocks - 4) as u32);
+                // Advance the beam for the division's internal clocks now, before
+                // the instruction boundary (Moira's SYNC runs immediately after
+                // prefetch<POLL>). Deferring them past the boundary -- to the next
+                // instruction's first bus access -- mistimes CPU-vs-bitplane-DMA
+                // contention during an active display, doubling the beam cost of a
+                // DIV run mid-fetch (timing-test row 31 8722 -> 4820 cck vs vAmiga
+                // 4790; TEK Rampage's Ellis scene depends on it).
+                self.flush_sync(bus);
             }
         }
 

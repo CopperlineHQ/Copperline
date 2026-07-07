@@ -51,6 +51,14 @@
 ;   row 30 dbra x8192       branch-cache row: same body as row 7, but run
 ;          after the 68060 enable block (ESS + caches + branch cache), so a
 ;          folding branch cache collapses the loop overhead
+;   row 31 BEAM cck advanced while a 64-iteration DIVU loop runs during a
+;          6-bitplane lores display -- DIV-during-active-display, the one phase
+;          the other rows miss. A DIV's final prefetch is a chip-bus access
+;          whose beam position (and thus contention) matters; if the division's
+;          internal clocks are deferred past the instruction boundary they
+;          mistime that contention and double the beam cost. (TEK Rampage's
+;          Ellis scene is exactly this: DIV-heavy per-frame math patching the
+;          copper list while the 6-plane screen fetches.)
 ;
 ; Before row 28 a TRAP #0 supervisor stub probes MOVEC PCR for the 68060
 ; identification ($0430) and, if found, enables superscalar dispatch
@@ -757,6 +765,51 @@ boot1:  lea     CUST,a6
         bsr     tread
         move.l  d0,(a3)+
 
+        ; row 31: BEAM cck advanced while a fixed 256-iteration DIVU loop runs
+        ; during a 6-bitplane lores (EHB) display -- the rampage Ellis condition
+        ; (DIV-heavy per-frame math whose final prefetch is a chip-bus access
+        ; that contends with 6-plane bitplane DMA). The 25bd80b prefetch reorder
+        ; moved that prefetch's beam position; this row is the only one that
+        ; exercises DIV-during-active-display, the phase the other rows miss.
+        move.w  #$6000,$100(a6) ; BPLCON0: 6 bitplanes, lores
+        move.w  #$0038,$092(a6) ; DDFSTRT
+        move.w  #$00d0,$094(a6) ; DDFSTOP
+        move.w  #$2c81,$08e(a6) ; DIWSTRT
+        move.w  #$2cc1,$090(a6) ; DIWSTOP
+        move.w  #$0000,$108(a6) ; BPL1MOD
+        move.w  #$0000,$10a(a6) ; BPL2MOD
+        move.l  #$10000,d0      ; point all 6 planes at a scratch buffer
+        move.w  d0,$0e2(a6)
+        move.w  d0,$0e6(a6)
+        move.w  d0,$0ea(a6)
+        move.w  d0,$0ee(a6)
+        move.w  d0,$0f2(a6)
+        move.w  d0,$0f6(a6)
+        swap    d0
+        move.w  d0,$0e0(a6)
+        move.w  d0,$0e4(a6)
+        move.w  d0,$0e8(a6)
+        move.w  d0,$0ec(a6)
+        move.w  d0,$0f0(a6)
+        move.w  d0,$0f4(a6)
+        move.w  #$8300,$096(a6) ; DMACON: DMAEN | BPLEN (6-plane fetch active)
+        bsr     syncframe
+.c31w   bsr     getvpos
+        cmp.w   #60,d0
+        blo     .c31w           ; start a few lines into the active display
+        bsr     getbeam
+        move.l  d0,d7
+        move.l  #$12345678,d2   ; fixed dividend (quotient fits 16 bits, no ovf)
+        move.w  #$789a,d3       ; fixed divisor (non-zero)
+        move.w  #64-1,d5
+.c31    move.l  d2,d0
+        divu.w  d3,d0
+        dbra    d5,.c31
+        bsr     getbeam
+        sub.l   d7,d0
+        move.l  d0,(a3)+        ; row 31
+        move.w  #$7fff,$096(a6) ; all DMA off again
+
         move.w  #$0ff0,$180(a6) ; phase marker: all tests done (yellow)
 
         ;------------------------------------------------ render + show
@@ -767,7 +820,7 @@ boot1:  lea     CUST,a6
         ; the serial port to a file, giving a screenshot-free way to compare.
         move.w  #$0170,$032(a6) ; SERPER ~9600 baud
         lea     RESULTS,a2
-        moveq   #31-1,d4
+        moveq   #32-1,d4
 .sl     move.l  (a2)+,d3
         moveq   #8-1,d6
 .sh     rol.l   #4,d3
@@ -905,6 +958,7 @@ getbeam:
         and.w   #1,d0           ; V8
         lsl.w   #8,d0           ; -> bit 8
         move.w  $006(a6),d1     ; VHPOSR
+        moveq   #0,d2           ; clear d2 upper (caller may leave it dirty)
         move.w  d1,d2
         lsr.w   #8,d1           ; V7..V0
         or.w    d1,d0           ; full vpos (d0.w)
