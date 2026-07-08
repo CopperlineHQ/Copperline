@@ -94,6 +94,9 @@ mutates the CCR before that delay on the 68000.
 microcode on the bus: each long transfer writes the low word at `An-2`
 before the high word at `An-4`, leaving memory big-endian while matching
 the observed access order.
+For `Bcc`/`BRA`/`BSR`, the branch-long `$FF` displacement-byte sentinel is
+gated to 68020 and later; on the 68000/010 the same byte remains the signed
+8-bit displacement `-1`, so no extension word is consumed.
 
 ## 68010
 

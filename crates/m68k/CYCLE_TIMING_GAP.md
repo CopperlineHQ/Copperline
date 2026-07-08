@@ -222,6 +222,19 @@ Current `access_sequence_gap_report` tail:
 Sequence mismatches are now 6 / 256,894 cases (0.0% rounded): count 6,
 direction/address/data 0.
 
+### E.1 iteration 5 (2026-07-09): 6 -> 0 sequence mismatches
+
+Fixed in this round:
+
+- **Bcc byte displacement `$FF` on pre-68020 CPUs**: the 68000/010 treat the
+  displacement byte as signed `-1`; only 68020+ decode `$FF` as the branch-long
+  extension sentinel. This avoids consuming a nonexistent long displacement in
+  the six not-taken `Bcc` edge cases.
+
+`access_sequence_gap_report` now matches the MAME/SST transaction stream
+exactly across all measured m68000 fixtures: 0 / 256,894 sequence mismatches
+(count/direction/address/data all 0).
+
 # Part E.2: sync() per-access timing
 
 ## Infrastructure (landed 2026-06-03)

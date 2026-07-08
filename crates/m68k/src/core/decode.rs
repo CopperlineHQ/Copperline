@@ -2198,9 +2198,11 @@ fn dispatch_group_6<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
     // 2 on taken paths ("n np np"), 4 on not-taken ("nn np ...").
     cpu.internal_cycles(if taken { 2 } else { 4 });
     cpu.consume_without_prefetch = taken;
+    // 68020+ adds the Bcc.L encoding with a displacement byte of $FF.
+    // Earlier cores keep treating $FF as the signed 8-bit displacement -1.
     let disp: i32 = if displacement == 0 {
         cpu.read_imm_16(bus) as i16 as i32
-    } else if displacement == 0xFF {
+    } else if displacement == 0xFF && !cpu.is_pre_68020 {
         cpu.read_imm_32(bus) as i32
     } else {
         displacement as i8 as i32
@@ -3172,6 +3174,24 @@ mod tests {
         cpu.prefetch_queue = [0x4e71, 0];
         cpu.prefetch_count = 1;
         cpu
+    }
+
+    #[test]
+    fn m68000_bcc_ff_displacement_is_short_minus_one() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.not_z_flag = 0;
+
+        let cycles = dispatch_group_6(&mut cpu, &mut bus, 0x66ff);
+
+        assert_eq!(cycles, 8);
+        assert_eq!(cpu.pc, 0x2000);
+        assert_eq!(cpu.prefetch_count, 1);
+        assert_eq!(bus.events, Vec::<Event>::new());
+
+        cpu.top_up_prefetch(&mut bus);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(bus.events, vec![Event::Sync(4), Event::ReadWord(0x2002)]);
     }
 
     #[test]
