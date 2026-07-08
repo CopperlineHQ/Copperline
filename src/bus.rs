@@ -3590,7 +3590,7 @@ impl Bus {
 
     fn note_cpu_missed_chip_bus_cycle(&mut self) {
         self.cpu_missed_chip_slots = self.cpu_missed_chip_slots.wrapping_add(1);
-        if self.blitter_slowdown_counter_enabled() {
+        if self.blitter_slowdown_counter_enabled() && self.blitter.current_slot_counts_for_bls() {
             self.blitter_slowdown_cpu_misses = self
                 .blitter_slowdown_cpu_misses
                 .saturating_add(1)

@@ -8150,6 +8150,55 @@ fn blithog_clear_bls_count_yields_blitter_priority_slot_to_cpu() {
 }
 
 #[test]
+fn normal_blitter_idle_slots_do_not_feed_bls_back_pressure() {
+    let mut bus = empty_bus();
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BLTEN;
+    bus.blitter.bltcon0 = 0x0100; // D-only clear.
+    bus.blitter.bltdpt = 0x20;
+    bus.blitter.start_scheduled((1 << 6) | 2, &bus.mem.chip_ram);
+
+    // Walk to the first normal-mode A phase. It is a disabled-channel idle
+    // slot, so a CPU miss caused by refresh/fixed DMA must not make the nice
+    // blitter yield earlier.
+    for _ in 0..4 {
+        assert!(!bus.blitter.tick_scheduled_slot(&mut bus.mem.chip_ram));
+    }
+    bus.note_cpu_missed_chip_bus_cycle();
+    assert_eq!(bus.blitter_slowdown_cpu_misses, 0);
+
+    // The first D phase is also the empty destination pipeline bubble.
+    assert!(!bus.blitter.tick_scheduled_slot(&mut bus.mem.chip_ram)); // A0.
+    bus.note_cpu_missed_chip_bus_cycle();
+    assert_eq!(bus.blitter_slowdown_cpu_misses, 0);
+
+    // Once a real destination write is pending, misses do feed BLS pressure.
+    assert!(!bus.blitter.tick_scheduled_slot(&mut bus.mem.chip_ram)); // D0 bubble.
+    assert!(!bus.blitter.tick_scheduled_slot(&mut bus.mem.chip_ram)); // A1.
+    bus.note_cpu_missed_chip_bus_cycle();
+    assert_eq!(bus.blitter_slowdown_cpu_misses, 1);
+}
+
+#[test]
+fn fill_idle_slots_feed_bls_back_pressure() {
+    let mut bus = empty_bus();
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BLTEN;
+    bus.blitter.bltcon0 = 0x09F0; // A -> D.
+    bus.blitter.bltcon1 = 0x0012; // DESC + exclusive fill.
+    bus.blitter.bltafwm = 0xFFFF;
+    bus.blitter.bltalwm = 0xFFFF;
+    bus.blitter.bltapt = 0x10;
+    bus.blitter.bltdpt = 0x20;
+    bus.blitter.start_scheduled((1 << 6) | 1, &bus.mem.chip_ram);
+
+    for _ in 0..6 {
+        assert!(!bus.blitter.tick_scheduled_slot(&mut bus.mem.chip_ram));
+    }
+    bus.blitter_slowdown_cpu_misses = 0;
+    bus.note_cpu_missed_chip_bus_cycle();
+    assert_eq!(bus.blitter_slowdown_cpu_misses, 1);
+}
+
+#[test]
 fn bltcon0l_updates_only_minterm_byte() {
     let mut bus = empty_bus();
     bus.set_agnus_revision(AgnusRevision::Ecs8372Rev4);

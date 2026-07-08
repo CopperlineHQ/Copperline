@@ -420,14 +420,18 @@ both emulators.
 With BLTPRI clear, Copperline models the Agnus blitter-slowdown counter
 (the Minimig RTL `bls_cnt`). A busy "nice" blitter still holds the chip bus
 on its access cycles -- the CPU gets no regular alternate slot. Each colour
-clock the waiting CPU misses increments the counter; after
-`BLITTER_SLOWDOWN_CPU_MISS_LIMIT` (3) consecutive misses the blitter yields
-one slot, matching the HRM "one bus cycle in four" rule and vAmiga's ~2:1
-blitter:CPU split on a blitter-heavy 3D-scene regression. Idle blit pipeline cycles
-(slots that do not need the bus) never claim the bus and stay
-CPU-available even with BLTPRI set, but fixed DMA slots still stall those
-idle phases. The counter resets when the CPU gets the bus, when BLTPRI is
-set, or when blitter DMA cannot run.
+clock the waiting CPU misses still increments the diagnostic miss count, but
+the BLS pressure counter only advances when the pending blitter micro-cycle
+is a real pressure source: a bus access, fill's explicit idle cycle, or
+line-mode BUSIDLE. Ordinary normal-mode "-" cycles from disabled channels or
+the empty D pipeline bubble stall through fixed DMA but do not make the
+blitter yield earlier. After `BLITTER_SLOWDOWN_CPU_MISS_LIMIT` (3)
+consecutive pressure misses the blitter yields one slot, matching the HRM
+"one bus cycle in four" rule while also matching UAE's `blitter_nasty`
+distinction between normal idle cycles and fill/line BUSIDLE. Idle blit
+pipeline cycles never claim the bus and stay CPU-available even with BLTPRI
+set. The counter resets when the CPU gets the bus, when BLTPRI is set, or
+when blitter DMA cannot run.
 
 A 68000 `TAS` read-modify-write is unsafe on chip RAM (the HRM warns
 against it); the `m68k` backend exposes it as a byte read then a byte
@@ -471,18 +475,25 @@ Tests: `ecs_bltsizv_bltsizh_start_extended_blit`,
 ### Known residuals
 
 Cross-emulator timing-test comparisons (corroborated in
-`timing-test/README.md`) leave one open blitter gap that is tracked
-separately:
+`timing-test/README.md`) now put the D-only clear and the active-display
+fill/copper phase within a few colour clocks of the FS-UAE/real reference
+after the BLS pressure-counter distinction above:
 
-- **Line blits run slow**: a 64-pixel line measures ~317 beam-CCK in
-  Copperline vs 262 on the FS-UAE reference (which now equals the 262
-  slots `line_total_slots` predicts with the startup and terminal
-  cycles), roughly 21% too slow -- the gap is stall behaviour of the
-  internal L1/L3 cycles under display DMA, not the slot count.
+- **D-only clear**: row 23 measures `0x2712` vs the reference `0x2714`.
+- **A->D fill under 3-plane display**: row 26 measures `0x6203` vs the
+  reference `0x61FF`.
+- **Copper-vs-CPU phase**: row 27 measures `0x6425` vs the reference
+  `0x6426`.
+- **Line blits still run slow**: a 64-pixel line measures `0x0160`
+  beam-CCK in Copperline vs the old FS-UAE reference of 262 CCK (which
+  equals the slots `line_total_slots` predicts with the startup and
+  terminal cycles). The remaining gap is stall behaviour of the internal
+  L1/L3 cycles, not the slot count.
 
-The previous row-26 display-DMA contention residual is closed: with fixed DMA
-stalling idle fill phases, Copperline measures ~25074 CCK for the 3-plane
-display fill vs 25208 on the FS-UAE reference.
+The previous row-23 D-only clear residual was caused by feeding BLS pressure
+from normal-mode disabled-channel idle phases blocked by fixed DMA. Those
+phases still stall as micro-cycles, but they no longer make the nice blitter
+yield earlier to the CPU.
 
 References: HRM [Blitter
 Hardware](https://www.theflatnet.de/pub/cbm/amiga/AmigaDevDocs/hard_6.html).

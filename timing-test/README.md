@@ -136,10 +136,11 @@ These rows found (and now guard) a real bug: Copperline originally reported
 rows 23-26 = 9944 / 15308 / 383 / 16842 cck, timing the row-24 A->D fill at
 ~2 cck/word where FS-UAE (10004 / 18364 / 344 / 25095) and vAmiga
 (10070 / 18350 / 346 / 25097) agree on ~3 cck/word -- the too-fast fill let the
-display fetch an unfinished buffer. The fill cadence was corrected on 2026-06-09;
-Copperline now reads ~9922 / 18339 / 317 / 25074 against the current FS-UAE
-reference 9908 / 18357 / 262 / 25208, matching rows 23-24 and the row-26
-display-DMA contention.
+display fetch an unfinished buffer. The fill cadence was corrected on 2026-06-09.
+Later fixed-DMA and BLS-pressure fixes retimed the same rows again: Copperline
+now reads `10002 / 18362 / 352 / 25091` (`0x2712 / 0x47BA / 0x0160 /
+0x6203`). Rows 23, 24 and 26 are now within a few colour clocks of the
+FS-UAE/real references; row 25 remains a separate line-mode stall residual.
 
 Row 31 found (and now guards) a second real bug (2026-07-07). On the plain 68000
 Copperline matches vAmiga on every other row -- including the CPU-vs-6-bitplane
@@ -152,11 +153,12 @@ internal clocks left those internal clocks *deferred* past the instruction
 boundary (billed at the next instruction's first bus access), which mistimed the
 CPU-vs-bitplane-DMA contention and roughly doubled the beam cost of a DIV run
 mid-fetch. Flushing the internal clocks at the DIV boundary (Moira runs `SYNC`
-immediately after `prefetch<POLL>`) fixed it: row 31 8722 -> 4820 vs vAmiga 4790,
-with rows 23-26 and the CPU/blitter rows unchanged. This was TEK Rampage's Ellis
-scene going saturated (EHB half-bright dropped) and its Mirror scene crashing --
-the DIV-heavy per-frame math patches the copper list while the 6-plane screen
-fetches, so the doubled DIV cost let the CPU fall behind the beam.
+immediately after `prefetch<POLL>`) fixed it: row 31 8722 -> 4820. The later
+BLS-pressure fix moved the row to 4786, close to vAmiga's 4790 reference. This
+was TEK Rampage's Ellis scene going saturated (EHB half-bright dropped) and its
+Mirror scene crashing -- the DIV-heavy per-frame math patches the copper list
+while the 6-plane screen fetches, so the doubled DIV cost let the CPU fall behind
+the beam.
 (`getbeam` also had a latent bug -- it left the upper word of `d2` dirty across
 the `add.l d2,d0`, so a caller with a non-zero high word in `d2` corrupted the
 reading; harmless for rows 23-26, fixed for row 31.)

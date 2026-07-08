@@ -754,6 +754,22 @@ impl Blitter {
         }
     }
 
+    /// Whether a CPU miss during the pending pipeline cycle should feed the
+    /// nice-blitter back-pressure counter. Normal-mode disabled-channel idle
+    /// slots are free bus slots in UAE's cycle-exact model and do not increase
+    /// `blitter_nasty`; fill's extra idle cycle and line-mode BUSIDLE cycles
+    /// still apply pressure when blocked.
+    pub fn current_slot_counts_for_bls(&self) -> bool {
+        if !self.busy {
+            return false;
+        }
+        match self.pending.as_ref() {
+            Some(PendingBlit::Normal(state)) => state.current_slot_counts_for_bls(),
+            Some(PendingBlit::Line(state)) => state.current_slot_counts_for_bls(),
+            None => false,
+        }
+    }
+
     /// Access pattern of the next scheduled pipeline slots, as a bitmask: bit k
     /// set means slot k (k=0 is the slot the next tick processes) consumes a
     /// blitter-eligible colour clock (a bus access or a bus-free micro-cycle,
@@ -1251,6 +1267,13 @@ impl LineBlitState {
         }
     }
 
+    fn current_slot_counts_for_bls(&self) -> bool {
+        match self.current_slot_class() {
+            BlitSlotClass::Bus | BlitSlotClass::BusFree => true,
+            BlitSlotClass::Internal => false,
+        }
+    }
+
     /// Access pattern of the next `limit` scheduled slots (bit k = slot k
     /// consumes a blitter-eligible colour clock: a bus access or a bus-free
     /// micro-cycle; clear = internal): the startup ladder (register commit
@@ -1603,6 +1626,23 @@ impl NormalBlitState {
                     BlitSlotClass::Internal
                 }
             }
+        }
+    }
+
+    fn current_slot_counts_for_bls(&self) -> bool {
+        match self.phase {
+            NormalBlitPhase::A
+            | NormalBlitPhase::B
+            | NormalBlitPhase::C
+            | NormalBlitPhase::D
+            | NormalBlitPhase::F => self.current_slot_needs_bus(),
+            // UAE/WinUAE treat fill's explicit idle cycle as blitter pressure
+            // when it is blocked, unlike ordinary disabled-channel "-" slots.
+            NormalBlitPhase::FillIdle => true,
+            NormalBlitPhase::StartDelay
+            | NormalBlitPhase::Init
+            | NormalBlitPhase::E
+            | NormalBlitPhase::Done => false,
         }
     }
 
@@ -2774,6 +2814,66 @@ mod tests {
                 false, false, false, false, false, true, false, true, false, true, false, true,
                 false, false
             ]
+        );
+    }
+
+    #[test]
+    fn blit_pipeline_classifies_bls_pressure_per_microprogram() {
+        fn bls_walk(b: &mut Blitter, ram: &mut [u8]) -> Vec<bool> {
+            let mut pattern = Vec::new();
+            loop {
+                pattern.push(b.current_slot_counts_for_bls());
+                if b.tick_scheduled_slot(ram) {
+                    break;
+                }
+            }
+            pattern
+        }
+
+        // D-only normal blit: ordinary "-" phases do not apply nice-blitter
+        // back pressure. Only real D bus requests count.
+        let mut ram = vec![0xAAu8; 256];
+        let mut b = Blitter::new();
+        b.bltcon0 = BLTCON0_USE_D;
+        b.bltdpt = 0x20;
+        b.start_scheduled((1u16 << 6) | 2, &ram);
+        assert_eq!(
+            bls_walk(&mut b, &mut ram),
+            [false, false, false, false, false, false, false, true, false, true]
+        );
+
+        // Fill mode's explicit idle cycle is sequencer pressure even though it
+        // does not transfer a word.
+        let mut ram = vec![0u8; 256];
+        let mut b = Blitter::new();
+        b.bltcon0 = BLTCON0_USE_A | BLTCON0_USE_D | 0x00F0;
+        b.bltcon1 = BLTCON1_DESC | BLTCON1_IFE;
+        b.bltafwm = 0xFFFF;
+        b.bltalwm = 0xFFFF;
+        b.bltapt = 0x10;
+        b.bltdpt = 0x20;
+        b.start_scheduled((1u16 << 6) | 1, &ram);
+        assert_eq!(
+            bls_walk(&mut b, &mut ram),
+            [false, false, false, false, true, false, true, false, true]
+        );
+
+        // Line-mode BUSIDLE phases also apply BLS pressure when blocked.
+        let mut ram = vec![0u8; 256];
+        let mut b = Blitter::new();
+        b.bltcon0 = BLTCON0_USE_A | BLTCON0_USE_C | BLTCON0_USE_D | 0x004A;
+        b.bltcon1 = BLTCON1_LINE;
+        b.bltafwm = 0xFFFF;
+        b.bltalwm = 0xFFFF;
+        b.bltadat = 0x8000;
+        b.bltcpt = 0x20;
+        b.bltdpt = 0x20;
+        b.bltcmod = 4;
+        b.bltdmod = 4;
+        b.start_scheduled((1u16 << 6) | 2, &ram);
+        assert_eq!(
+            bls_walk(&mut b, &mut ram),
+            [false, true, true, false, true, true, true, true, false, false]
         );
     }
 
