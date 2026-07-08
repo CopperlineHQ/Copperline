@@ -87,7 +87,7 @@ authoritative list. The most useful ones:
 
 | Variable | What it logs / does |
 |---|---|
-| `COPPERLINE_DIAG_SLOTMAP` | Per-colour-clock chip-bus owner map for a frame (`R`efresh, `B`itplane, `S`prite, `D`isk, `A`udio, `C`opper, b`L`itter, c`P`u, `.` idle); `COPPERLINE_DIAG_SLOTMAP_AT=SECS` picks the frame |
+| `COPPERLINE_DIAG_SLOTMAP` | Per-colour-clock chip-bus owner map for a frame (`R`efresh, `B`itplane, `S`prite, `D`isk, `A`udio, `C`opper, b`L`itter, c`P`u, `.` idle); `COPPERLINE_DIAG_SLOTMAP_AT=SECS` picks the frame and `COPPERLINE_DIAG_SLOTMAP_RANGE=START:END` picks printed beam rows |
 | `COPPERLINE_DIAG_BLT_SLOTS` | Blitter slot trace: one stderr line per blitter pipeline cycle (`BLTP frame vpos hpos TICK phase bus=0/1`), plus per-cck owner lines while a blit is in flight and `START`/`END` markers. Formatted for side-by-side diffing against a vAmiga build instrumented with the matching `VAMIGA_BLT_PROBE` hooks |
 | `COPPERLINE_DIAG_IPL` | CPU cycles spent per interrupt level |
 | `COPPERLINE_DIAG_PCSAMPLE` | Top-50 executed-PC histogram every 50 frames |
@@ -170,7 +170,8 @@ together:
 3. Narrow in time with `COPPERLINE_DBG_AFTER`/`UNTIL`, watch the
    interesting word with `COPPERLINE_DBG_WATCH`.
 4. Check the bus: `COPPERLINE_DIAG_SLOTMAP_AT` to see who owned every
-   colour clock of the suspect frame.
+   colour clock of the suspect frame, with `COPPERLINE_DIAG_SLOTMAP_RANGE`
+   when only specific beam rows matter.
 5. Compare against real hardware with the `timing-test/` disk when the
    question is "is this operation too fast/slow".
 

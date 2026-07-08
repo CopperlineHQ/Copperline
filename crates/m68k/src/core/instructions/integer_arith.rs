@@ -2,13 +2,35 @@
 //!
 //! ADD, ADDA, ADDQ, ADDX, SUB, SUBA, SUBQ, SUBX, CMP, CMPA, NEG, NEGX, CLR, EXT
 
-use crate::core::cpu::{CFLAG_SET, CpuCore, VFLAG_SET};
+use crate::core::cpu::{CpuCore, CFLAG_SET, VFLAG_SET};
 use crate::core::ea::AddressingMode;
 use crate::core::execute::RUN_MODE_BERR_AERR_RESET;
 use crate::core::memory::AddressBus;
-use crate::core::types::Size;
+use crate::core::types::{CpuType, Size};
 
 impl CpuCore {
+    fn write_data_reg_sized(&mut self, reg: usize, size: Size, value: u32) {
+        match size {
+            Size::Byte => self.dar[reg] = (self.dar[reg] & 0xFFFF_FF00) | (value & 0xFF),
+            Size::Word => self.dar[reg] = (self.dar[reg] & 0xFFFF_0000) | (value & 0xFFFF),
+            Size::Long => self.dar[reg] = value,
+        }
+    }
+
+    fn finish_m68000_register_quickop<B: AddressBus>(&mut self, bus: &mut B, internal_clocks: u32) {
+        if self.cpu_type != CpuType::M68000 {
+            return;
+        }
+
+        // 68000 ADDQ/SUBQ to Dn/An performs the final prefetch, samples IPL
+        // on that prefetch, then completes the register update after any
+        // trailing internal clocks.
+        self.top_up_prefetch(bus);
+        self.ipl_poll_point(bus);
+        self.internal_cycles(internal_clocks);
+        self.flush_sync(bus);
+    }
+
     /// Execute ADD instruction.
     ///
     /// ADD <ea>, Dn  or  ADD Dn, <ea>
@@ -55,8 +77,30 @@ impl CpuCore {
         // For address register, no flags affected
         if let AddressingMode::AddressDirect(reg) = mode {
             let reg = reg as usize;
-            self.set_a(reg, self.a(reg).wrapping_add(data));
+            let result = self.a(reg).wrapping_add(data);
+            if self.cpu_type == CpuType::M68000 {
+                self.finish_m68000_register_quickop(bus, 4);
+                self.set_a(reg, result);
+                return 8;
+            }
+            self.set_a(reg, result);
             return 4;
+        }
+
+        if let AddressingMode::DataDirect(reg) = mode {
+            let reg = reg as usize;
+            let dst = self.d(reg);
+            let (result, _) = self.exec_add::<B>(bus, size, data, dst);
+            if self.cpu_type == CpuType::M68000 {
+                let internal_clocks = if size == Size::Long { 4 } else { 0 };
+                self.finish_m68000_register_quickop(bus, internal_clocks);
+            }
+            self.write_data_reg_sized(reg, size, result);
+            return if self.cpu_type == CpuType::M68000 && size == Size::Long {
+                8
+            } else {
+                4
+            };
         }
 
         // Resolve EA once: postinc/predec have side effects and must not be applied twice.
@@ -136,8 +180,30 @@ impl CpuCore {
         // For address register, no flags affected
         if let AddressingMode::AddressDirect(reg) = mode {
             let reg = reg as usize;
-            self.set_a(reg, self.a(reg).wrapping_sub(data));
+            let result = self.a(reg).wrapping_sub(data);
+            if self.cpu_type == CpuType::M68000 {
+                self.finish_m68000_register_quickop(bus, 4);
+                self.set_a(reg, result);
+                return 8;
+            }
+            self.set_a(reg, result);
             return 4;
+        }
+
+        if let AddressingMode::DataDirect(reg) = mode {
+            let reg = reg as usize;
+            let dst = self.d(reg);
+            let (result, _) = self.exec_sub::<B>(bus, size, data, dst);
+            if self.cpu_type == CpuType::M68000 {
+                let internal_clocks = if size == Size::Long { 4 } else { 0 };
+                self.finish_m68000_register_quickop(bus, internal_clocks);
+            }
+            self.write_data_reg_sized(reg, size, result);
+            return if self.cpu_type == CpuType::M68000 && size == Size::Long {
+                8
+            } else {
+                4
+            };
         }
 
         // Resolve EA once: postinc/predec have side effects and must not be applied twice.
@@ -525,5 +591,113 @@ impl CpuCore {
         // before the final prefetch.
         self.internal_cycles(6);
         10
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::ea::AddressingMode;
+    use crate::core::memory::AddressBus;
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum Event {
+        ReadWord(u32),
+        Sync(u32),
+        IplHold,
+    }
+
+    #[derive(Default)]
+    struct TraceBus {
+        events: Vec<Event>,
+    }
+
+    impl AddressBus for TraceBus {
+        fn read_byte(&mut self, _address: u32) -> u8 {
+            0
+        }
+
+        fn read_word(&mut self, address: u32) -> u16 {
+            self.events.push(Event::ReadWord(address));
+            0x4e71
+        }
+
+        fn read_long(&mut self, _address: u32) -> u32 {
+            0
+        }
+
+        fn write_byte(&mut self, _address: u32, _value: u8) {}
+
+        fn write_word(&mut self, _address: u32, _value: u16) {}
+
+        fn write_long(&mut self, _address: u32, _value: u32) {}
+
+        fn sync(&mut self, cpu_clocks: u32) {
+            self.events.push(Event::Sync(cpu_clocks));
+        }
+
+        fn ipl_hold_sample(&mut self) {
+            self.events.push(Event::IplHold);
+        }
+    }
+
+    fn cpu_with_one_prefetch_word() -> CpuCore {
+        let mut cpu = CpuCore::new();
+        cpu.set_cpu_type(CpuType::M68000);
+        cpu.pc = 0x2000;
+        cpu.prefetch_queue = [0x4e71, 0];
+        cpu.prefetch_count = 1;
+        cpu
+    }
+
+    #[test]
+    fn m68000_subq_long_data_register_prefetches_before_internal_sync() {
+        let mut cpu = cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[1] = 0x0001_0000;
+
+        let cycles = cpu.exec_subq(&mut bus, Size::Long, 1, AddressingMode::DataDirect(1));
+
+        assert_eq!(cycles, 8);
+        assert_eq!(cpu.dar[1], 0x0000_FFFF);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(4)]
+        );
+    }
+
+    #[test]
+    fn m68000_addq_word_data_register_polls_on_final_prefetch() {
+        let mut cpu = cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[2] = 0x1234_00FF;
+
+        let cycles = cpu.exec_addq(&mut bus, Size::Word, 1, AddressingMode::DataDirect(2));
+
+        assert_eq!(cycles, 4);
+        assert_eq!(cpu.dar[2], 0x1234_0100);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(bus.events, vec![Event::ReadWord(0x2002), Event::IplHold]);
+    }
+
+    #[test]
+    fn m68000_addq_address_register_syncs_before_write() {
+        let mut cpu = cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[8 + 3] = 0x0000_1000;
+
+        let cycles = cpu.exec_addq(&mut bus, Size::Long, 8, AddressingMode::AddressDirect(3));
+
+        assert_eq!(cycles, 8);
+        assert_eq!(cpu.dar[8 + 3], 0x0000_1008);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(4)]
+        );
     }
 }

@@ -5047,11 +5047,23 @@ impl Bus {
             };
             if trigger {
                 self.dbg_slotmap_dumped = true;
+                let (range_start, range_end) = crate::envcfg::var("COPPERLINE_DIAG_SLOTMAP_RANGE")
+                    .and_then(|raw| {
+                        let (start, end) = raw.split_once(':')?;
+                        Some((
+                            start.trim().parse::<usize>().ok()?,
+                            end.trim().parse::<usize>().ok()?,
+                        ))
+                    })
+                    .filter(|&(start, end)| start <= end && end < self.dbg_slotmap.len())
+                    .unwrap_or((138, 198));
                 log::info!(
-                    "slotmap frame={} band v138..198 (hpos 0..=0xE2); codes R/B/S/D/A/C/L/P/.",
-                    self.emulated_frames
+                    "slotmap frame={} band v{}..{} (hpos 0..=0xE2); codes R/B/S/D/A/C/L/P/.",
+                    self.emulated_frames,
+                    range_start,
+                    range_end
                 );
-                for v in 138..=198usize {
+                for v in range_start..=range_end {
                     let row = &self.dbg_slotmap[v];
                     let line: String = row[..227.min(row.len())]
                         .iter()
