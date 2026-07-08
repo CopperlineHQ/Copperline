@@ -241,9 +241,7 @@ struct LineBlitState {
     #[serde(skip)]
     debug_watched_write: Option<(u32, u16)>,
     phase: LineBlitPhase,
-    /// Extra internal start slots before Init; see NORMAL_START_EXTRA_SLOTS
-    /// (the BLT_STRT1/2 startup applies to line blits identically: the
-    /// first body cycle runs at poke+4).
+    /// Extra internal start slots before Init; see LINE_START_EXTRA_SLOTS.
     start_extra: u32,
     slots_remaining: u32,
     npixels_remaining: u32,
@@ -1172,7 +1170,7 @@ impl LineBlitState {
             debug_watch_addrs: blitter.debug_watch_addrs.clone(),
             debug_watched_write: None,
             phase: LineBlitPhase::StartDelay,
-            start_extra: NORMAL_START_EXTRA_SLOTS,
+            start_extra: LINE_START_EXTRA_SLOTS,
             slots_remaining: line_total_slots(npixels, con0 & BLTCON0_USE_B != 0),
             npixels_remaining: npixels,
             con0,
@@ -1240,7 +1238,7 @@ impl LineBlitState {
     fn current_slot_class(&self) -> BlitSlotClass {
         match self.phase {
             LineBlitPhase::StartDelay => {
-                if self.start_extra >= NORMAL_START_EXTRA_SLOTS {
+                if self.start_extra >= LINE_START_EXTRA_SLOTS {
                     BlitSlotClass::Internal
                 } else {
                     BlitSlotClass::BusFree
@@ -1276,23 +1274,19 @@ impl LineBlitState {
 
     /// Access pattern of the next `limit` scheduled slots (bit k = slot k
     /// consumes a blitter-eligible colour clock: a bus access or a bus-free
-    /// micro-cycle; clear = internal): the startup ladder (register commit
-    /// internal, BLT_STRT cycles bus-free, Init internal), the [L1, L2, L3,
-    /// L4] cadence per pixel (all eligible-consuming), then the two internal
-    /// terminal cycles.
+    /// micro-cycle; clear = internal): the line startup ladder (register
+    /// commit internal, the final BLT_STRT cycle bus-free, Init internal),
+    /// the [L1, L2, L3, L4] cadence per pixel (all eligible-consuming),
+    /// then the two internal terminal cycles.
     fn slot_access_pattern(&self, limit: u32) -> (u64, u32) {
         let count = self.slots_remaining.min(limit).min(64);
         // Eligibility of the lead-in cycles still pending, oldest first:
-        // pending extras beyond the first are BLT_STRT cycles (eligible);
-        // the very first extra is the internal register commit; the
-        // StartDelay->Init transition cycle is the second BLT_STRT; Init is
-        // internal.
+        // pending extra is the internal register commit; the StartDelay->Init
+        // transition cycle is the final BLT_STRT cycle; Init is internal.
         let lead: &[bool] = match self.phase {
             LineBlitPhase::StartDelay => {
-                if self.start_extra >= NORMAL_START_EXTRA_SLOTS {
-                    &[false, true, true, false]
-                } else if self.start_extra == 1 {
-                    &[true, true, false]
+                if self.start_extra >= LINE_START_EXTRA_SLOTS {
+                    &[false, true, false]
                 } else {
                     &[true, false]
                 }
@@ -2106,6 +2100,13 @@ fn normal_source_slots_per_word(con0: u16, con1: u16) -> u32 {
 /// fixed-DMA ownership stretches the startup; these extras are plain
 /// internal cycles.
 const NORMAL_START_EXTRA_SLOTS: u32 = 2;
+// Line mode enters the first BUSIDLE/HOLD_A line micro-instruction one
+// colour clock earlier than the normal-mode A/B/C/D pipeline. UAE models
+// this by starting the line cycle counter at -BLITTER_STARTUP_CYCLES and
+// then immediately walking the line diagram; it does not add the extra
+// normal-mode pipeline-init slot on top. This keeps timing-test row 25 at
+// the vAmiga/FS-UAE source-derived line cadence without moving normal blits.
+const LINE_START_EXTRA_SLOTS: u32 = NORMAL_START_EXTRA_SLOTS - 1;
 
 fn normal_total_slots(h: u32, w: u32, con0: u16, con1: u16) -> u32 {
     let words = h.saturating_mul(w);
@@ -2123,11 +2124,12 @@ fn normal_total_slots(h: u32, w: u32, con0: u16, con1: u16) -> u32 {
 }
 
 fn line_total_slots(npixels: u32, use_b: bool) -> u32 {
-    // Startup extras + StartDelay/Init lead-in, four cycles per pixel (six
-    // with USEB: the B fetch and the bare bus cycle), and the two terminal
-    // micro-cycles (NOTHING + BLTDONE, vAmiga's line program tail).
+    // Line startup is one slot shorter than normal-mode startup; then
+    // StartDelay/Init lead into four cycles per pixel (six with USEB: the B
+    // fetch and the bare bus cycle), and the two terminal micro-cycles
+    // (NOTHING + BLTDONE, vAmiga's line program tail).
     let per_pixel = if use_b { 6 } else { 4 };
-    2 + NORMAL_START_EXTRA_SLOTS + npixels.saturating_mul(per_pixel) + 2
+    2 + LINE_START_EXTRA_SLOTS + npixels.saturating_mul(per_pixel) + 2
 }
 
 fn line_step_sometimes(
@@ -2792,10 +2794,10 @@ mod tests {
             ]
         );
 
-        // Line blit, 2 pixels: startup extras + StartDelay, Init, then
+        // Line blit, 2 pixels: shorter line startup + Init, then
         // [L1 L2 L3 L4] per pixel and the two internal terminal cycles.
         // Only L2 (C read) and L4 (D write) access the bus; L1/L3 are
-        // internal Bresenham cycles.
+        // bus-free Bresenham cycles.
         let mut ram = vec![0u8; 256];
         let mut b = Blitter::new();
         b.bltcon0 = BLTCON0_USE_A | BLTCON0_USE_C | BLTCON0_USE_D | 0x004A;
@@ -2811,8 +2813,8 @@ mod tests {
         assert_eq!(
             needs_bus_walk(&mut b, &mut ram),
             [
-                false, false, false, false, false, true, false, true, false, true, false, true,
-                false, false
+                false, false, false, false, true, false, true, false, true, false, true, false,
+                false
             ]
         );
     }
@@ -2873,7 +2875,7 @@ mod tests {
         b.start_scheduled((1u16 << 6) | 2, &ram);
         assert_eq!(
             bls_walk(&mut b, &mut ram),
-            [false, true, true, false, true, true, true, true, false, false]
+            [false, true, false, true, true, true, true, false, false]
         );
     }
 
@@ -3002,11 +3004,9 @@ mod tests {
         b.bltdpt = 0;
         b.start_scheduled((1u16 << 6) | 2, &ram);
 
-        assert_eq!(b.scheduled_slots_remaining(), Some(10));
-        for _ in 0..2 {
-            assert!(!b.tick_scheduled_slot(&mut ram)); // startup extras
-        }
-        assert!(!b.tick_scheduled_slot(&mut ram)); // BBUSY start delay.
+        assert_eq!(b.scheduled_slots_remaining(), Some(9));
+        assert!(!b.tick_scheduled_slot(&mut ram)); // startup register commit.
+        assert!(!b.tick_scheduled_slot(&mut ram)); // final BLT_STRT cycle.
         assert!(!b.tick_scheduled_slot(&mut ram)); // INIT.
         assert!(!b.tick_scheduled_slot(&mut ram)); // L1 accumulator state.
         assert!(!b.tick_scheduled_slot(&mut ram)); // L2 fetches C.

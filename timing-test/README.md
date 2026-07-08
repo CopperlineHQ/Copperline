@@ -137,10 +137,11 @@ rows 23-26 = 9944 / 15308 / 383 / 16842 cck, timing the row-24 A->D fill at
 ~2 cck/word where FS-UAE (10004 / 18364 / 344 / 25095) and vAmiga
 (10070 / 18350 / 346 / 25097) agree on ~3 cck/word -- the too-fast fill let the
 display fetch an unfinished buffer. The fill cadence was corrected on 2026-06-09.
-Later fixed-DMA and BLS-pressure fixes retimed the same rows again: Copperline
-now reads `10002 / 18362 / 352 / 25091` (`0x2712 / 0x47BA / 0x0160 /
-0x6203`). Rows 23, 24 and 26 are now within a few colour clocks of the
-FS-UAE/real references; row 25 remains a separate line-mode stall residual.
+Later fixed-DMA, BLS-pressure, VHPOSR, and line-startup fixes retimed the same
+rows again: Copperline now reads `10002 / 18362 / 346 / 25091`
+(`0x2712 / 0x47BA / 0x015A / 0x6203`). Rows 23, 24 and 26 are now within a
+few colour clocks of the FS-UAE/real references; row 25 matches the vAmiga
+line-mode reference and is within a couple of colour clocks of FS-UAE.
 
 Row 31 found (and now guards) a second real bug (2026-07-07). On the plain 68000
 Copperline matches vAmiga on every other row -- including the CPU-vs-6-bitplane

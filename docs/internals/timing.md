@@ -482,13 +482,14 @@ after the BLS pressure-counter distinction above:
 - **D-only clear**: row 23 measures `0x2712` vs the reference `0x2714`.
 - **A->D fill under 3-plane display**: row 26 measures `0x6203` vs the
   reference `0x61FF`.
-- **Copper-vs-CPU phase**: row 27 measures `0x6425` vs the reference
+- **Copper-vs-CPU phase**: row 27 measures `0x6426` vs the reference
   `0x6426`.
-- **Line blits still run slow**: a 64-pixel line measures `0x0160`
-  beam-CCK in Copperline vs the old FS-UAE reference of 262 CCK (which
-  equals the slots `line_total_slots` predicts with the startup and
-  terminal cycles). The remaining gap is stall behaviour of the internal
-  L1/L3 cycles, not the slot count.
+- **Line blits**: a 64-pixel line now measures `0x015A`, matching the
+  vAmiga reference and leaving the calibrated normal/fill rows unchanged.
+  The line program enters its first BUSIDLE/HOLD_A micro-instruction one
+  colour clock earlier than the normal A/B/C/D pipeline setup; a two-slot
+  reduction overshoots row 25 and shifts row 26, so the remaining FS-UAE
+  row-25 difference is not another startup slot.
 
 The previous row-23 D-only clear residual was caused by feeding BLS pressure
 from normal-mode disabled-channel idle phases blocked by fixed DMA. Those
