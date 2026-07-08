@@ -308,15 +308,6 @@ impl PaletteRowDiag {
     }
 }
 
-fn parse_diag_u32(raw: &str) -> Option<u32> {
-    let raw = raw.trim();
-    if let Some(hex) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
-        u32::from_str_radix(hex, 16).ok()
-    } else {
-        raw.parse::<u32>().ok()
-    }
-}
-
 /// Cached COPPERLINE_DIAG_PALETTE_ROW setting (read once). Accepted forms:
 /// presence/`all` logs every COLOR write, `V` logs one beam line, and
 /// `START:END` logs an inclusive beam-line range.
@@ -332,14 +323,14 @@ fn palette_row_diag() -> Option<PaletteRowDiag> {
             });
         }
         if let Some((first, last)) = raw.split_once(':') {
-            let first_vpos = parse_diag_u32(first).unwrap_or(0);
-            let last_vpos = parse_diag_u32(last).unwrap_or(u32::MAX);
+            let first_vpos = crate::envcfg::parse_u32(first).unwrap_or(0);
+            let last_vpos = crate::envcfg::parse_u32(last).unwrap_or(u32::MAX);
             return Some(PaletteRowDiag {
                 first_vpos: first_vpos.min(last_vpos),
                 last_vpos: first_vpos.max(last_vpos),
             });
         }
-        parse_diag_u32(raw).map(|vpos| PaletteRowDiag {
+        crate::envcfg::parse_u32(raw).map(|vpos| PaletteRowDiag {
             first_vpos: vpos,
             last_vpos: vpos,
         })

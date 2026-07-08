@@ -180,15 +180,6 @@ impl CaprowDiag {
     }
 }
 
-fn parse_diag_u32(raw: &str) -> Option<u32> {
-    let raw = raw.trim();
-    if let Some(hex) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
-        u32::from_str_radix(hex, 16).ok()
-    } else {
-        raw.parse::<u32>().ok()
-    }
-}
-
 /// Cached COPPERLINE_DIAG_CAPROW setting (read once). Accepted forms:
 /// presence/`all` logs every captured row, `V` logs one beam line, and
 /// `START:END` logs an inclusive beam-line range. Checked on every bitplane
@@ -206,14 +197,14 @@ fn diag_caprow() -> Option<CaprowDiag> {
             });
         }
         if let Some((first, last)) = raw.split_once(':') {
-            let first_vpos = parse_diag_u32(first).unwrap_or(0);
-            let last_vpos = parse_diag_u32(last).unwrap_or(u32::MAX);
+            let first_vpos = crate::envcfg::parse_u32(first).unwrap_or(0);
+            let last_vpos = crate::envcfg::parse_u32(last).unwrap_or(u32::MAX);
             return Some(CaprowDiag {
                 first_vpos: first_vpos.min(last_vpos),
                 last_vpos: first_vpos.max(last_vpos),
             });
         }
-        parse_diag_u32(raw).map(|vpos| CaprowDiag {
+        crate::envcfg::parse_u32(raw).map(|vpos| CaprowDiag {
             first_vpos: vpos,
             last_vpos: vpos,
         })
@@ -1096,11 +1087,11 @@ fn diag_cpu_bus_addr_ranges() -> &'static [(u32, u32)] {
                     return None;
                 }
                 if let Some((lo, hi)) = part.split_once(':') {
-                    let lo = parse_diag_u32(lo)?;
-                    let hi = parse_diag_u32(hi)?;
+                    let lo = crate::envcfg::parse_u32(lo)?;
+                    let hi = crate::envcfg::parse_u32(hi)?;
                     return Some((lo.min(hi), lo.max(hi)));
                 }
-                let addr = parse_diag_u32(part)?;
+                let addr = crate::envcfg::parse_u32(part)?;
                 Some((addr, addr))
             })
             .collect()

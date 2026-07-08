@@ -47,6 +47,40 @@ fn sync_cck_enabled_setting() -> bool {
     }
 }
 
+fn diag_cpu_sync_on() -> bool {
+    use std::sync::OnceLock;
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| crate::envcfg::flag("COPPERLINE_DIAG_CPU_SYNC"))
+}
+
+fn diag_cpu_sync_pc_ranges() -> &'static [(u32, u32)] {
+    use std::sync::OnceLock;
+    static V: OnceLock<Vec<(u32, u32)>> = OnceLock::new();
+    V.get_or_init(|| {
+        let Some(spec) = crate::envcfg::var("COPPERLINE_DIAG_CPU_SYNC_PC") else {
+            return Vec::new();
+        };
+        spec.split(',')
+            .filter_map(|part| {
+                let part = part.trim();
+                if let Some((lo, hi)) = part.split_once(':') {
+                    let lo = crate::envcfg::parse_u32(lo)?;
+                    let hi = crate::envcfg::parse_u32(hi)?;
+                    Some((lo.min(hi), lo.max(hi)))
+                } else {
+                    let pc = crate::envcfg::parse_u32(part)?;
+                    Some((pc, pc))
+                }
+            })
+            .collect()
+    })
+}
+
+fn diag_cpu_sync_pc_matches(pc: u32) -> bool {
+    let ranges = diag_cpu_sync_pc_ranges();
+    ranges.is_empty() || ranges.iter().any(|(lo, hi)| (*lo..=*hi).contains(&pc))
+}
+
 /// Entries kept in the debugger's recent-PC ring.
 pub const UI_PC_HISTORY_CAP: usize = 64;
 
@@ -238,6 +272,9 @@ struct CpuBus {
     /// writeback). Cleared when the boundary decision consumes the sample.
     /// Transient like `sampled_irq_level`; never serialized.
     ipl_sample_held: bool,
+    /// Start PC of the instruction currently inside the core, used only by
+    /// `COPPERLINE_DIAG_CPU_SYNC` to filter internal-cycle trace lines.
+    diag_current_pc: u32,
 }
 
 pub fn build(
@@ -294,6 +331,7 @@ impl M68kMachine {
                 last_fetch_cache_hit: false,
                 sampled_irq_level: 0,
                 ipl_sample_held: false,
+                diag_current_pc: 0,
             },
             hle: NoOpHleHandler,
             fpu_enabled,
@@ -1758,6 +1796,7 @@ impl M68kMachine {
                 } else {
                     None
                 };
+                self.bus.diag_current_pc = dbg_pc_before;
                 match self.cpu.step_with_hle_handler(&mut self.bus, &mut self.hle) {
                     StepResult::Ok { cycles } => {
                         if self.bus.icache.is_some() || self.bus.dcache.is_some() {
@@ -1815,6 +1854,17 @@ impl M68kMachine {
                     .bus
                     .slice_bus_advanced_cck()
                     .saturating_sub(bus_before);
+                if diag_cpu_sync_on() && diag_cpu_sync_pc_matches(self.cpu.pc) {
+                    eprintln!(
+                        "CPUSYNC boundary pc={:08x} cpu_cck={} bus_cck={} rem_cck={} v={:03x} h={:02x}",
+                        self.cpu.pc,
+                        cpu_cck_iter,
+                        bus_iter,
+                        cpu_cck_iter.saturating_sub(bus_iter),
+                        self.bus.bus.agnus.vpos,
+                        self.bus.bus.agnus.hpos,
+                    );
+                }
                 self.bus
                     .bus
                     .advance_cpu_internal_cycles(cpu_cck_iter.saturating_sub(bus_iter));
@@ -2731,6 +2781,12 @@ impl AddressBus for CpuBus {
     fn sync(&mut self, cpu_clocks: u32) {
         // Cycle-exact core (Part E.2): internal (non-bus) CPU clocks elapse
         // with the chip bus free for DMA, timed devices ticking along.
+        if diag_cpu_sync_on() && diag_cpu_sync_pc_matches(self.diag_current_pc) {
+            eprintln!(
+                "CPUSYNC preaccess pc={:08x} clocks={} v={:03x} h={:02x}",
+                self.diag_current_pc, cpu_clocks, self.bus.agnus.vpos, self.bus.agnus.hpos,
+            );
+        }
         self.bus.sync_cpu_internal_clocks(cpu_clocks);
     }
 
@@ -3207,6 +3263,7 @@ mod tests {
             last_fetch_cache_hit: false,
             sampled_irq_level: 0,
             ipl_sample_held: false,
+            diag_current_pc: 0,
         };
 
         assert_eq!(bus.read_long(0), 0x1111_4EF9);
@@ -3233,6 +3290,7 @@ mod tests {
             last_fetch_cache_hit: false,
             sampled_irq_level: 0,
             ipl_sample_held: false,
+            diag_current_pc: 0,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
         // Start on a refresh slot (0x003) so the fetch both waits for and then
@@ -3266,6 +3324,7 @@ mod tests {
             last_fetch_cache_hit: false,
             sampled_irq_level: 0,
             ipl_sample_held: false,
+            diag_current_pc: 0,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
 
@@ -3479,6 +3538,7 @@ mod tests {
             last_fetch_cache_hit: false,
             sampled_irq_level: 0,
             ipl_sample_held: false,
+            diag_current_pc: 0,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
         let fast = FAST_RAM_BASE as u32 + 0x40;
@@ -3526,6 +3586,7 @@ mod tests {
             last_fetch_cache_hit: false,
             sampled_irq_level: 0,
             ipl_sample_held: false,
+            diag_current_pc: 0,
         };
         let before = bus.read_long(ROM_BASE as u32);
         bus.write_long(ROM_BASE as u32, 0xDEAD_BEEF);
@@ -3551,6 +3612,7 @@ mod tests {
             last_fetch_cache_hit: false,
             sampled_irq_level: 0,
             ipl_sample_held: false,
+            diag_current_pc: 0,
         };
         let addr = SLOW_RAM_BASE as u32 + 64 * 1024;
         // A write into unmapped space still drives the bus: the following
