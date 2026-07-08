@@ -1482,36 +1482,30 @@ fn bplcon1_delay_blanks_left_edge_without_shifting_row() {
 }
 
 #[test]
-fn bplcon1_delay_uses_previous_line_shifter_tail_when_contiguous() {
+fn bplcon1_delay_starts_scanline_from_empty_shifter() {
     let control = ControlState {
         bplcon0: 0x1000,
         bplcon1: 3,
         ..ControlState::default()
     };
     let plane_words = [vec![0x8000]];
-    let no_carry = DenisePlannedPlayfieldLine::new(0, 0, 32, &plane_words, 16);
+    let line = DenisePlannedPlayfieldLine::new(0, 0, 32, &plane_words, 16);
 
     assert_eq!(
-        no_carry.sample(control, 0),
+        line.sample(control, 0),
         DeniseBitplaneSample {
             idx: 0,
             nplanes: 1,
             active: true,
         }
     );
-
-    let mut carry_words = [None; 8];
-    carry_words[0] = Some(0x0004);
-    let with_carry =
-        DenisePlannedPlayfieldLine::new(0, 0, 32, &plane_words, 16).with_carry_words(carry_words);
-
-    assert_eq!(with_carry.sample(control, 0).idx, 1);
-    assert_eq!(with_carry.sample(control, 1).idx, 0);
-    assert_eq!(with_carry.sample(control, 3).idx, 1);
+    assert_eq!(line.sample(control, 1).idx, 0);
+    assert_eq!(line.sample(control, 2).idx, 0);
+    assert_eq!(line.sample(control, 3).idx, 1);
 }
 
 #[test]
-fn aga_extended_bplcon1_delay_does_not_reuse_single_word_line_tail() {
+fn aga_extended_bplcon1_delay_blanks_until_current_line_sample() {
     let control = ControlState {
         agnus_revision: AgnusRevision::AgaAlice,
         bplcon0: BPLCON0_ECSENA | 0x1000,
@@ -1522,10 +1516,7 @@ fn aga_extended_bplcon1_delay_does_not_reuse_single_word_line_tail() {
     assert_eq!(control.scroll_for_plane(0), 32);
 
     let plane_words = [vec![0x8000, 0x0000, 0x0000]];
-    let mut carry_words = [None; 8];
-    carry_words[0] = Some(0xFFFF);
-    let line =
-        DenisePlannedPlayfieldLine::new(0, 0, 64, &plane_words, 48).with_carry_words(carry_words);
+    let line = DenisePlannedPlayfieldLine::new(0, 0, 64, &plane_words, 48);
 
     assert_eq!(line.sample(control, 15).idx, 0);
     assert_eq!(line.sample(control, 16).idx, 0);
@@ -1534,31 +1525,19 @@ fn aga_extended_bplcon1_delay_does_not_reuse_single_word_line_tail() {
 }
 
 #[test]
-fn bplcon1_delay_drops_carry_when_first_bpl1dat_is_late() {
-    let mut previous_tail = [None; 8];
-    previous_tail[0] = Some(0x0001);
+fn bplcon1_delay_drops_prefetch_samples_at_block_start() {
+    let control = ControlState {
+        bplcon0: 0x1000,
+        bplcon1: 3,
+        ..ControlState::default()
+    };
+    let plane_words = [vec![0xE000]];
+    let line = DenisePlannedPlayfieldLine::new(0, 0, 32, &plane_words, 16);
+    let delays = std::array::from_fn(|plane| control.scroll_for_plane(plane));
 
-    assert_eq!(
-        bitplane_carry_words_for_line(false, 64, Some(64), false, previous_tail),
-        previous_tail
-    );
-    assert_eq!(
-        bitplane_carry_words_for_line(false, 64, Some(158), false, previous_tail),
-        [None; 8]
-    );
-    assert_eq!(
-        bitplane_carry_words_for_line(true, 64, Some(64), false, previous_tail),
-        [None; 8]
-    );
-    // A late DDFSTRT places the line's first BPL1DAT load inside the open
-    // display window; the serializer taps have run empty by then, so no
-    // previous-line tail is observable. Regression example: Gen-X's rippled
-    // reflection rows (DDFSTRT $40, BPLCON1 scroll) showed stray dashes at
-    // the window's left edge.
-    assert_eq!(
-        bitplane_carry_words_for_line(false, 64, Some(64), true, previous_tail),
-        [None; 8]
-    );
+    assert_eq!(line.sample_prepared(1, &delays, 0, 3).idx, 1);
+    assert_eq!(line.sample_prepared(1, &delays, 2, 3).idx, 0);
+    assert_eq!(line.sample_prepared(1, &delays, 2, 5).idx, 1);
 }
 
 #[test]
@@ -3136,7 +3115,10 @@ fn copper_sprite_position_write_repositions_four_cck_later_than_cpu() {
     let cpu_x = sprite_position_write_framebuffer_x_from(event_hpos, false);
     let copper_x = sprite_position_write_framebuffer_x_from(event_hpos, true);
     assert_eq!(copper_x, cpu_x + 16);
-    assert_eq!(copper_x, sprite_position_write_framebuffer_x(event_hpos + 4));
+    assert_eq!(
+        copper_x,
+        sprite_position_write_framebuffer_x(event_hpos + 4)
+    );
 
     // The same offset carries into the event-driven reposition interval: a
     // copper reposition abuts 16 framebuffer units right of the CPU one.
@@ -3151,8 +3133,10 @@ fn copper_sprite_position_write_repositions_four_cck_later_than_cpu() {
     initial_state.sprdata[0] = 0xFFFF;
     initial_state.spr_armed[0] = true;
 
-    let cpu_lines =
-        manual_sprite_lines_from_events(&initial_state, &[cpu_event(beam_y as u32, 96, 0x140, new_pos)]);
+    let cpu_lines = manual_sprite_lines_from_events(
+        &initial_state,
+        &[cpu_event(beam_y as u32, 96, 0x140, new_pos)],
+    );
     let copper_lines = manual_sprite_lines_from_events(
         &initial_state,
         &[beam_event(beam_y as u32, 96, 0x140, new_pos)],

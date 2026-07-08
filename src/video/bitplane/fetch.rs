@@ -344,30 +344,6 @@ pub(super) fn manual_bpl_dma_clip_x(
     clip_x
 }
 
-pub(super) fn bitplane_carry_words_for_line(
-    block_start: bool,
-    display_start_x: usize,
-    dma_output_start_x: Option<usize>,
-    fetch_starts_inside_window: bool,
-    previous_playfield_tail_words: [Option<u16>; 8],
-) -> [Option<u16>; 8] {
-    // A carried shifter tail is only observable when the serializer reloads
-    // at the moment the display window opens, so the BPLCON1 taps still
-    // address the previous load. When the line's first BPL1DAT arrives after
-    // the window is already open (late DDFSTRT places the fetch origin inside
-    // the window), the serializer has long run past its last load and the
-    // taps shift out empty: the gap between window open and the first new
-    // word shows playfield colour 0, not the previous line's tail.
-    if block_start
-        || fetch_starts_inside_window
-        || dma_output_start_x.is_some_and(|start| start > display_start_x)
-    {
-        [None; 8]
-    } else {
-        previous_playfield_tail_words
-    }
-}
-
 #[cfg(test)]
 pub(super) fn line_fetch_hpos_for_word(
     base_control: ControlState,

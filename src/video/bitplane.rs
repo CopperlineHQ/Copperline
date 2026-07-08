@@ -1307,7 +1307,6 @@ struct DenisePlannedPlayfieldLine<'a> {
     x_stop: usize,
     plane_words: &'a [Vec<u16>],
     fetched_pixels: usize,
-    carry_words: [Option<u16>; 8],
 }
 
 impl<'a> DenisePlannedPlayfieldLine<'a> {
@@ -1324,13 +1323,7 @@ impl<'a> DenisePlannedPlayfieldLine<'a> {
             x_stop,
             plane_words,
             fetched_pixels,
-            carry_words: [None; 8],
         }
-    }
-
-    fn with_carry_words(mut self, carry_words: [Option<u16>; 8]) -> Self {
-        self.carry_words = carry_words;
-        self
     }
 
     #[cfg(test)]
@@ -1379,15 +1372,6 @@ impl<'a> DenisePlannedPlayfieldLine<'a> {
             let delay = delays[plane];
             if native_x < delay {
                 active = true;
-                if delay <= 16 {
-                    let carry_offset = delay - native_x;
-                    if let Some(word) = self.carry_words.get(plane).copied().flatten() {
-                        let bit = carry_offset - 1;
-                        if word & (1 << bit) != 0 {
-                            idx |= 1 << plane;
-                        }
-                    }
-                }
                 continue;
             }
             let fetch_x = native_x - delay;
@@ -3667,10 +3651,9 @@ pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
             }
         }
         // Tracks the last line that actually drew bitplanes, so a line whose
-        // predecessor was border (no carried-over shifter data) can suppress
-        // the BPLCON1 scroll pulling its leading pre-fetch words into view.
+        // predecessor was border can suppress BPLCON1 scroll pulling leading
+        // same-line pre-fetch samples into view.
         let mut last_playfield_line: Option<usize> = None;
-        let mut previous_playfield_tail_words: [Option<u16>; 8] = [None; 8];
         for y in 0..rows {
             let row_control_segments = &control_segments[y];
             let Some((x_start, x_stop)) = line_display_window_bounds(
@@ -3927,32 +3910,13 @@ pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
                 words_per_row,
                 dma_planes.min(nplanes),
             );
-            let fetch_starts_inside_window = {
-                let mut display_control = base_controls[y];
-                for segment in row_control_segments {
-                    if segment.x <= x_start {
-                        display_control = segment.control;
-                    }
-                }
-                let pixel_repeat = display_control.framebuffer_pixel_repeat();
-                display_control.fetch_start_native_x(display_control.diw_h_start(), pixel_repeat)
-                    > 0
-            };
-            let carry_words = bitplane_carry_words_for_line(
-                block_start,
-                x_start,
-                dma_output_start_x,
-                fetch_starts_inside_window,
-                previous_playfield_tail_words,
-            );
             let line_plan = DenisePlannedPlayfieldLine::new(
                 y,
                 x_start,
                 x_stop,
                 &row_words[..nplanes],
                 fetched_pixels,
-            )
-            .with_carry_words(carry_words);
+            );
             let bpl_output_start_x = dma_output_start_x.unwrap_or(0);
             dma_output_start_x_by_line[y] = dma_output_start_x;
             last_playfield_line = Some(y);
@@ -3980,11 +3944,6 @@ pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
                 let m = control.modulo_for_plane(p, beam_y as i32);
                 ptrs[p] = ((ptrs[p] as i64).wrapping_add(m as i64) as u32) & ram_mask;
             }
-            previous_playfield_tail_words = std::array::from_fn(|plane| {
-                (plane < nplanes)
-                    .then(|| row_words[plane].last().copied())
-                    .flatten()
-            });
         }
         if let (Some(planes), Some(index)) = (export_planes.as_ref(), export_index.as_ref()) {
             let frame = input.emulated_frames;
@@ -4332,15 +4291,12 @@ fn render_planned_playfield_line(
         let pixel_fetch_start_native_x =
             pixel_control.fetch_start_native_x(pixel_diw_h_start, pixel_repeat);
         let native_x_offset = pixel_control.native_x_offset(pixel_diw_h_start, pixel_repeat);
-        // BPLCON1 scroll fills the window's left edge from the bitplane
-        // shifter. On a line whose predecessor also fetched bitplanes the
-        // shifter still holds that line's tail, so the scroll-in is real
-        // content. At the first line of a bitplane-DMA block (the previous
-        // line was border) the shifter has no carried-over data, so the scroll
-        // must not pull the leading pre-fetch words (already clocked into the
-        // left border by the time the window opens) back into view. Suppress
-        // those by treating fetch positions before `native_x_offset` as
-        // background only on a block-start line.
+        // BPLCON1 scroll fills the window's left edge from Denise's current
+        // scanline shifter state. At the first line of a bitplane-DMA block,
+        // no earlier playfield stream was active before the window opened, so
+        // do not pull leading pre-fetch samples into view. Contiguous rows may
+        // still expose same-line samples that were fetched before DIW opened,
+        // but never a previous scanline's tail.
         let min_fetch_x = if suppress_prefetch_scroll_fill {
             native_x_offset
         } else {
