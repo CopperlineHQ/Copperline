@@ -114,6 +114,9 @@ Model implemented (all gated to CpuType::M68000):
 - **RMW writeback** (`write_resolved_ea` memory arm): tops the queue up
   BEFORE the write -- RMW instructions prefetch before their writeback,
   unlike MOVE.
+- **Immediate register ALU/CMPI**: data-register destinations also pull the
+  final prefetch before the `Dn` write or compare flags; long register forms
+  then run their trailing internal clocks.
 - **Flow changes** (`full_prefetch` / `prefetch_first`+`prefetch_second`):
   Bcc/BRA/DBcc taken, JMP, RTS/RTE/RTR refill from the target; JSR/BSR
   interleave (first prefetch, push, second prefetch). Their

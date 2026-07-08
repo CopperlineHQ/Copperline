@@ -745,10 +745,26 @@ fn dispatch_group_0<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             let size = decode_size_00(size_bits);
             // SUBI manual implementation (mirroring ADDI)
             let imm = read_immediate(cpu, bus, size);
-            let ea = cpu.resolve_ea(bus, mode, size);
-            let dst = cpu.read_resolved_ea(bus, ea, size);
-            let (result, _) = cpu.exec_sub(bus, size, imm, dst);
-            cpu.write_resolved_ea(bus, ea, size, result);
+            if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
+                return 50;
+            }
+            if cpu.cpu_type == CpuType::M68000
+                && let AddressingMode::DataDirect(reg) = mode
+            {
+                let dst = cpu.d(reg as usize) & size.mask();
+                let (result, _) = cpu.exec_sub(bus, size, imm, dst);
+                cpu.finish_m68000_immediate_data_register_write(
+                    bus,
+                    reg as usize,
+                    size,
+                    result,
+                );
+            } else {
+                let ea = cpu.resolve_ea(bus, mode, size);
+                let dst = cpu.read_resolved_ea(bus, ea, size);
+                let (result, _) = cpu.exec_sub(bus, size, imm, dst);
+                cpu.write_resolved_ea(bus, ea, size, result);
+            }
             if cpu.cpu_type == CpuType::M68000 {
                 cpu.immediate_alu_cycles(mode, size)
             } else if size == Size::Long {
@@ -774,11 +790,25 @@ fn dispatch_group_0<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             let size = decode_size_00(size_bits);
             // ADDI manual implementation
             let imm = read_immediate(cpu, bus, size);
+            if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
+                return 50;
+            }
 
             let ea = cpu.resolve_ea(bus, mode, size);
             let dst = cpu.read_resolved_ea(bus, ea, size);
             let (result, _cycles) = cpu.exec_add(bus, size, imm, dst);
-            cpu.write_resolved_ea(bus, ea, size, result);
+            if cpu.cpu_type == CpuType::M68000
+                && let AddressingMode::DataDirect(reg) = mode
+            {
+                cpu.finish_m68000_immediate_data_register_write(
+                    bus,
+                    reg as usize,
+                    size,
+                    result,
+                );
+            } else {
+                cpu.write_resolved_ea(bus, ea, size, result);
+            }
             if cpu.cpu_type == CpuType::M68000 {
                 cpu.immediate_alu_cycles(mode, size)
             } else {
@@ -811,9 +841,23 @@ fn dispatch_group_0<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
             let size = decode_size_00((opcode >> 6) & 3);
             let imm = read_immediate(cpu, bus, size);
+            if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
+                return 50;
+            }
             let dst = cpu.read_ea(bus, mode, size);
             if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
                 return 50;
+            }
+            if cpu.cpu_type == CpuType::M68000 {
+                cpu.top_up_prefetch(bus);
+                cpu.ipl_poll_point(bus);
+                if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
+                    return 50;
+                }
+                if mode.is_register_direct() && size == Size::Long {
+                    cpu.internal_cycles(2);
+                    cpu.flush_sync(bus);
+                }
             }
             let legacy = cpu.exec_cmp(size, imm, dst);
             if cpu.cpu_type == CpuType::M68000 {
@@ -2874,6 +2918,7 @@ fn exception_1111(_cpu: &mut CpuCore, _opcode: u16) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
 
     #[derive(Debug, PartialEq, Eq)]
     enum Event {
@@ -2885,6 +2930,16 @@ mod tests {
     #[derive(Default)]
     struct TraceBus {
         events: Vec<Event>,
+        read_words: VecDeque<u16>,
+    }
+
+    impl TraceBus {
+        fn with_read_words(words: impl IntoIterator<Item = u16>) -> Self {
+            Self {
+                events: Vec::new(),
+                read_words: words.into_iter().collect(),
+            }
+        }
     }
 
     impl AddressBus for TraceBus {
@@ -2894,7 +2949,7 @@ mod tests {
 
         fn read_word(&mut self, address: u32) -> u16 {
             self.events.push(Event::ReadWord(address));
-            0x4e71
+            self.read_words.pop_front().unwrap_or(0x4e71)
         }
 
         fn read_long(&mut self, _address: u32) -> u32 {
@@ -2958,5 +3013,57 @@ mod tests {
         assert_eq!(cpu.prefetch_count, 2);
         assert_eq!(cpu.pending_sync_clocks, 0);
         assert_eq!(bus.events, vec![Event::ReadWord(0x2002), Event::IplHold]);
+    }
+
+    #[test]
+    fn m68000_addi_long_data_register_prefetches_before_write() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::with_read_words([0x0001, 0x4e71, 0x4e71]);
+        cpu.prefetch_queue = [0x0000, 0];
+        cpu.dar[0] = 0x0000_0001;
+
+        // ADDI.L #1,D0
+        let cycles = dispatch_group_0(&mut cpu, &mut bus, 0x0680);
+
+        assert_eq!(cycles, 16);
+        assert_eq!(cpu.d(0), 0x0000_0002);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![
+                Event::ReadWord(0x2002),
+                Event::ReadWord(0x2004),
+                Event::ReadWord(0x2006),
+                Event::IplHold,
+                Event::Sync(4)
+            ]
+        );
+    }
+
+    #[test]
+    fn m68000_cmpi_long_data_register_prefetches_before_compare_sync() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::with_read_words([0x0001, 0x4e71, 0x4e71]);
+        cpu.prefetch_queue = [0x0000, 0];
+        cpu.dar[0] = 0x0000_0001;
+
+        // CMPI.L #1,D0
+        let cycles = dispatch_group_0(&mut cpu, &mut bus, 0x0c80);
+
+        assert_eq!(cycles, 14);
+        assert_eq!(cpu.not_z_flag, 0);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![
+                Event::ReadWord(0x2002),
+                Event::ReadWord(0x2004),
+                Event::ReadWord(0x2006),
+                Event::IplHold,
+                Event::Sync(2)
+            ]
+        );
     }
 }

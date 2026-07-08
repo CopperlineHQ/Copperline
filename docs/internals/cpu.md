@@ -67,6 +67,12 @@ fall-through) and
 `cpu_prefetch_probe_branch_refetches_self_modified_chip_ram_target`
 (branch refetch).
 
+Instruction handlers can move the final prefetch earlier than the generic
+end-of-instruction top-up when 68000 microcode does so. That matters for
+register-only forms too: immediate ALU and CMPI to `Dn` perform the final
+prefetch before the data-register write or compare flags, and long register
+forms spend their trailing internal clocks after that prefetch.
+
 ## 68010
 
 The 68010 shares the 68000's bus interface and two-word prefetch queue but
