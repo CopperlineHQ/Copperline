@@ -642,11 +642,18 @@ impl CpuCore {
         self.v_flag = 0;
         self.c_flag = 0;
 
-        if val < 0 || val > limit {
-            // The failed comparison plus exception decision precede the
-            // first stack write: 8 internal clocks for trap-on-too-big,
-            // 10 for trap-on-negative (the upper-bound check runs first).
-            self.internal_cycles(if val < 0 { 10 } else { 8 });
+        if val > limit {
+            // The 68000 performs the upper-bound comparison first. This
+            // includes negative Dn values that are still greater than a
+            // negative bound, and uses the shorter CHK exception path.
+            self.internal_cycles(8);
+            return self.exception_chk(bus) - 2;
+        }
+
+        if val < 0 {
+            // Only values that pass the upper-bound comparison reach the
+            // lower-bound check, which adds two more clocks before the frame.
+            self.internal_cycles(10);
             return self.exception_chk(bus);
         }
 
@@ -666,6 +673,7 @@ mod tests {
     #[derive(Debug, PartialEq, Eq)]
     enum Event {
         ReadWord(u32),
+        WriteWord(u32, u16),
         Sync(u32),
         IplHold,
     }
@@ -691,7 +699,9 @@ mod tests {
 
         fn write_byte(&mut self, _address: u32, _value: u8) {}
 
-        fn write_word(&mut self, _address: u32, _value: u16) {}
+        fn write_word(&mut self, address: u32, value: u16) {
+            self.events.push(Event::WriteWord(address, value));
+        }
 
         fn write_long(&mut self, _address: u32, _value: u32) {}
 
@@ -795,5 +805,66 @@ mod tests {
         assert_eq!(cpu.prefetch_count, 2);
         assert_eq!(cpu.pending_sync_clocks, 0);
         assert_eq!(bus.events, vec![Event::ReadWord(0x2002), Event::IplHold]);
+    }
+
+    fn cpu_for_chk_exception() -> CpuCore {
+        let mut cpu = CpuCore::new();
+        cpu.set_cpu_type(CpuType::M68000);
+        cpu.dar[15] = 0x1000;
+        cpu.pc = 0x2004;
+        cpu.ppc = 0x2000;
+        cpu
+    }
+
+    #[test]
+    fn m68000_chk_upper_bound_trap_uses_short_exception_path() {
+        let mut cpu = cpu_for_chk_exception();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 5;
+
+        let cycles = cpu.exec_chk(&mut bus, Size::Word, 3, 0);
+
+        assert_eq!(cycles, 38);
+        assert_eq!(
+            &bus.events[..4],
+            &[
+                Event::Sync(8),
+                Event::WriteWord(0x0FFE, 0x2004),
+                Event::WriteWord(0x0FFA, cpu.get_sr()),
+                Event::WriteWord(0x0FFC, 0x0000),
+            ]
+        );
+    }
+
+    #[test]
+    fn m68000_chk_negative_after_upper_bound_uses_long_exception_path() {
+        let mut cpu = cpu_for_chk_exception();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0xFFFF_FFFF;
+
+        let cycles = cpu.exec_chk(&mut bus, Size::Word, 3, 0);
+
+        assert_eq!(cycles, 40);
+        assert_eq!(
+            &bus.events[..4],
+            &[
+                Event::Sync(10),
+                Event::WriteWord(0x0FFE, 0x2004),
+                Event::WriteWord(0x0FFA, cpu.get_sr()),
+                Event::WriteWord(0x0FFC, 0x0000),
+            ]
+        );
+    }
+
+    #[test]
+    fn m68000_chk_negative_can_trap_on_upper_bound_first() {
+        let mut cpu = cpu_for_chk_exception();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0xFFFF_FF00; // -256
+
+        let cycles = cpu.exec_chk(&mut bus, Size::Word, 0x8000, 0); // -32768
+
+        assert_eq!(cycles, 38);
+        assert_eq!(bus.events.first(), Some(&Event::Sync(8)));
     }
 }

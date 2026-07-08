@@ -97,6 +97,9 @@ the observed access order.
 For `Bcc`/`BRA`/`BSR`, the branch-long `$FF` displacement-byte sentinel is
 gated to 68020 and later; on the 68000/010 the same byte remains the signed
 8-bit displacement `-1`, so no extension word is consumed.
+`CHK.W` on the 68000 tests the upper bound before the lower bound; upper-bound
+traps take the shorter pre-frame comparison path, while lower-bound traps spend
+two more clocks before stacking the group-2 exception frame.
 
 ## 68010
 

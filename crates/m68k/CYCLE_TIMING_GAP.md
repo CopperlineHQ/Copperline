@@ -50,8 +50,8 @@ model tighten the secondary gap.
 Cycle mismatch across 261,894 cases: 48.3% -> 0.9%. Sum CPU/fixture cycle
 ratio: 0.834 -> 0.999. All common/demo-relevant instructions match exactly.
 Remaining: DIVS normal-path +/-2 in ~23% of cases (data-dependent loop, avg ~0
-so no pacing bias), CHK trap-path timing, and a small static-register bit-op
-edge. DIVU/MULU/MULS exact.
+so no pacing bias), a small CHK lower-bound trap-path subset, and a small
+static-register bit-op edge. DIVU/MULU/MULS exact.
 
 # Part E: prefetch + per-access bus timing (cycle-exact frontier)
 
@@ -306,6 +306,28 @@ bounded by the Part D cycle-TOTAL residuals in those classes (DIVS
 data-dependent loop +/-2, CHK trap-path totals) -- placement cannot be more
 exact than the totals it distributes. Improving those needs divs_cycles /
 CHK-trap total formula fixes (Part D follow-up), not placement changes.
+
+## E.2 CHK trap-path refinement (2026-07-09)
+
+The 68000 CHK microcode tests the upper bound before the lower bound. When
+`Dn > bound` traps, the exception frame starts after the 6-clock comparison
+phase plus 2 more clocks; only values that pass that comparison and then fail
+`Dn < 0` take the 6+4-clock path. Copperline now orders those trap tests that
+way and returns the SST/MAME shorter upper-bound trap total, including the
+negative-Dn/negative-bound cases where the upper comparison is decisive.
+
+This narrows the CHK cycle-total residual from 924 to 199 cases and improves
+the CHK access-timing exact count from 1135 to 1324 cases. The remaining CHK
+cases are all a two-clock lower-bound trap subset where the SST transaction log
+places the frame at the shorter offset despite the ordinary signed comparison
+falling through to the lower-bound check. Moira/vAmiga's readable CHK sequence
+does not expose a defensible predicate for that subset, so it remains a
+documented residual rather than a speculative fixture-shaped branch.
+
+Current tail after this refinement:
+
+- `cycle_gap_report`: CHK 199 / 1523 cycle mismatches, all +2 clocks.
+- `access_timing_gap_report`: DIVU, DIVS, and the 199 CHK lower-bound cases.
 
 # Part E.3: Copperline integration + system validation (2026-06-03)
 
