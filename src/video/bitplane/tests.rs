@@ -3127,6 +3127,54 @@ fn manual_sprite_position_write_before_hstart_uses_sprite_compare_domain() {
 }
 
 #[test]
+fn copper_sprite_position_write_repositions_four_cck_later_than_cpu() {
+    // The Copper WAIT-comparator lookahead model advances the Copper's
+    // bus-cycle bookkeeping four colour clocks so register VALUE landings
+    // match the vAmiga trace. The horizontal sprite comparator reload is a
+    // fixed Denise pipeline measured from the real bus write, so a
+    // copper-driven sprite multiplexer's reposition interval must carry that
+    // lookahead back out and land four colour clocks (16 framebuffer units)
+    // to the right of where a CPU write at the same recorded hpos would.
+    // Regression example: the Desire "Hamazing" HAM sprite-multiplexer wipes,
+    // whose per-line SPRxPOS repositions otherwise fall into the wrong
+    // interval and leave horizontal streaks trailing the reveal.
+    let event_hpos = 96;
+    let cpu_x = sprite_position_write_framebuffer_x_from(event_hpos, false);
+    let copper_x = sprite_position_write_framebuffer_x_from(event_hpos, true);
+    assert_eq!(copper_x, cpu_x + 16);
+    assert_eq!(copper_x, sprite_position_write_framebuffer_x(event_hpos + 4));
+
+    // The same offset carries into the event-driven reposition interval: a
+    // copper reposition abuts 16 framebuffer units right of the CPU one.
+    let mut initial_state = blank_state();
+    let beam_y = PAL_VISIBLE_LINE0;
+    let old_hstart = 200;
+    let new_hstart = 260;
+    let (old_pos, old_ctl) = sprite_control_words(beam_y as u16, beam_y as u16 + 1, old_hstart);
+    let (new_pos, _) = sprite_control_words(beam_y as u16, beam_y as u16 + 1, new_hstart);
+    initial_state.sprpos[0] = old_pos;
+    initial_state.sprctl[0] = old_ctl;
+    initial_state.sprdata[0] = 0xFFFF;
+    initial_state.spr_armed[0] = true;
+
+    let cpu_lines =
+        manual_sprite_lines_from_events(&initial_state, &[cpu_event(beam_y as u32, 96, 0x140, new_pos)]);
+    let copper_lines = manual_sprite_lines_from_events(
+        &initial_state,
+        &[beam_event(beam_y as u32, 96, 0x140, new_pos)],
+    );
+    let cpu_new = cpu_lines[0]
+        .iter()
+        .find(|line| line.hstart == new_hstart as i32)
+        .expect("cpu new-position interval");
+    let copper_new = copper_lines[0]
+        .iter()
+        .find(|line| line.hstart == new_hstart as i32)
+        .expect("copper new-position interval");
+    assert_eq!(copper_new.x_start, cpu_new.x_start + 16);
+}
+
+#[test]
 fn manual_sprite_position_writes_use_denise_compare_lag() {
     let mut initial_state = blank_state();
     let beam_y = PAL_VISIBLE_LINE0;

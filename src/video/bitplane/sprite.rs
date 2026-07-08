@@ -421,6 +421,7 @@ pub(super) fn manual_sprite_lines_from_events_with_visible_line0(
             event.hpos,
             visible_line0,
             rows,
+            matches!(event.source, BeamWriteSource::Copper),
         );
         flush_manual_sprite_lines(
             sprite,
@@ -521,6 +522,7 @@ pub(super) fn manual_sprite_lines_from_captured_dma_reuse(
                 event.hpos,
                 visible_line0,
                 rows,
+                matches!(event.source, BeamWriteSource::Copper),
             );
 
             match (off - 0x140) & 0x0006 {
@@ -590,6 +592,7 @@ pub(super) fn manual_sprite_event_beam_for_sprite_write(
     hpos: u32,
     visible_line0: i32,
     rows: usize,
+    copper: bool,
 ) -> (i32, usize) {
     match (off - 0x140) & 0x0006 {
         // SPRxPOS re-arms the sprite horizontal comparator. When the
@@ -597,11 +600,11 @@ pub(super) fn manual_sprite_event_beam_for_sprite_write(
         // still begin at HSTART; clipping in the later colour-output register
         // domain delays attached pairs whose even/odd position writes are
         // staggered by the Copper.
-        0x0 => manual_sprite_position_event_beam(vpos, hpos, visible_line0, rows),
+        0x0 => manual_sprite_position_event_beam(vpos, hpos, visible_line0, rows, copper),
         // SPRxDATA/SPRxDATB update the latches copied by Denise's horizontal
         // sprite comparator. If the write reaches that path before the
         // comparator fires, the new data belongs to the current scanline.
-        0x4 | 0x6 => manual_sprite_data_event_beam(vpos, hpos, visible_line0, rows),
+        0x4 | 0x6 => manual_sprite_data_event_beam(vpos, hpos, visible_line0, rows, copper),
         _ => manual_sprite_event_beam(vpos, hpos, visible_line0, rows),
     }
 }
@@ -629,6 +632,7 @@ pub(super) fn manual_sprite_position_event_beam(
     hpos: u32,
     visible_line0: i32,
     rows: usize,
+    copper: bool,
 ) -> (i32, usize) {
     let visible_end = visible_line0 + rows as i32;
     let vpos = vpos as i32;
@@ -638,7 +642,7 @@ pub(super) fn manual_sprite_position_event_beam(
     if vpos >= visible_end {
         return (visible_end, 0);
     }
-    let x = sprite_position_write_framebuffer_x(hpos);
+    let x = sprite_position_write_framebuffer_x_from(hpos, copper);
     (vpos, x)
 }
 
@@ -647,6 +651,7 @@ pub(super) fn manual_sprite_data_event_beam(
     hpos: u32,
     visible_line0: i32,
     rows: usize,
+    copper: bool,
 ) -> (i32, usize) {
     let visible_end = visible_line0 + rows as i32;
     let vpos = vpos as i32;
@@ -656,17 +661,39 @@ pub(super) fn manual_sprite_data_event_beam(
     if vpos >= visible_end {
         return (visible_end, 0);
     }
-    let x = sprite_data_write_framebuffer_x(hpos);
+    let x = sprite_data_write_framebuffer_x_from(hpos, copper);
     (vpos, x)
 }
 
-pub(super) fn sprite_position_write_framebuffer_x(hpos: u32) -> usize {
-    let hpos = hpos.saturating_sub(SPRITE_REGISTER_WRITE_PIPELINE_CCK);
+/// Reposition pipeline for the writer: the Copper's bus landings carry the
+/// WAIT-comparator lookahead, so copper-sourced sprite writes use the shorter
+/// [`COPPER_SPRITE_REGISTER_WRITE_PIPELINE_CCK`] to reposition where the demo
+/// author (and vAmiga) place them; CPU writes keep the calibrated pipeline.
+fn sprite_register_write_pipeline_cck(copper: bool) -> u32 {
+    if copper {
+        COPPER_SPRITE_REGISTER_WRITE_PIPELINE_CCK
+    } else {
+        SPRITE_REGISTER_WRITE_PIPELINE_CCK
+    }
+}
+
+pub(super) fn sprite_position_write_framebuffer_x_from(hpos: u32, copper: bool) -> usize {
+    let hpos = hpos.saturating_sub(sprite_register_write_pipeline_cck(copper));
     ((hpos as i32 * 2 - DIW_HSTART_FB0) * 2).clamp(0, FB_WIDTH as i32) as usize
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) fn sprite_position_write_framebuffer_x(hpos: u32) -> usize {
+    sprite_position_write_framebuffer_x_from(hpos, false)
+}
+
+pub(super) fn sprite_data_write_framebuffer_x_from(hpos: u32, copper: bool) -> usize {
+    sprite_position_write_framebuffer_x_from(hpos, copper)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn sprite_data_write_framebuffer_x(hpos: u32) -> usize {
-    sprite_position_write_framebuffer_x(hpos)
+    sprite_position_write_framebuffer_x_from(hpos, false)
 }
 
 pub(super) fn flush_manual_sprite_lines(

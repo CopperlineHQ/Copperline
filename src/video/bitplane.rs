@@ -119,6 +119,18 @@ const SPRITE_PALETTE_CONTROL_HPOS_FB0: i32 = 0x36;
 /// programmed HSTARTs, and data writes that beat the comparator load the same
 /// scanline.
 const SPRITE_REGISTER_WRITE_PIPELINE_CCK: u32 = 7;
+/// Copper-sourced sprite register writes use a shorter reposition pipeline.
+/// The Copper WAIT-comparator lookahead model advanced the Copper's bus-cycle
+/// bookkeeping four colour clocks so register VALUE landings match the vAmiga
+/// copper trace (SPR0CTL behind a WAIT lands at hpos $22, the vAmigaTS
+/// spritedma/interfere photo position). The horizontal sprite comparator
+/// reload is a fixed Denise pipeline measured from the real bus write, and a
+/// copper-driven sprite multiplexer's reposition intervals must land where the
+/// demo author (and vAmiga) place them, so the reposition domain carries that
+/// four-clock lookahead back out. Without it every per-line SPRxPOS reposition
+/// lands four colour clocks early, so the sprite copies fall into the wrong
+/// interval and leave horizontal streaks trailing the reveal.
+const COPPER_SPRITE_REGISTER_WRITE_PIPELINE_CCK: u32 = SPRITE_REGISTER_WRITE_PIPELINE_CCK - 4;
 /// Framebuffer-x offset between the copper/register coordinate
 /// ([`COPPER_WAIT_HPOS_FB0`], used to place beam-timed register writes) and the
 /// bitplane/DIW coordinate ([`DIW_HSTART_FB0`], used to place fetched bitplane
