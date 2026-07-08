@@ -1999,6 +1999,20 @@ fn dispatch_group_5<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             } else {
                 0x00
             };
+            if cpu.cpu_type == CpuType::M68000 && mode.is_register_direct() {
+                // Moira/68000: Scc Dn performs the final prefetch before the
+                // byte writeback. A true condition then has two trailing
+                // internal clocks before the register update.
+                cpu.top_up_prefetch(bus);
+                cpu.ipl_poll_point(bus);
+                if value != 0 {
+                    cpu.internal_cycles(2);
+                    cpu.flush_sync(bus);
+                }
+                let reg = ea_reg as usize;
+                cpu.set_d(reg, (cpu.d(reg) & 0xFFFF_FF00) | value);
+                return if value != 0 { 6 } else { 4 };
+            }
             // 68000 quirk: like CLR, Scc on a memory destination reads the
             // operand before writing.
             let ea = cpu.resolve_ea(bus, mode, Size::Byte);
@@ -2855,4 +2869,94 @@ fn exception_1010(_cpu: &mut CpuCore, _opcode: u16) -> i32 {
 fn exception_1111(_cpu: &mut CpuCore, _opcode: u16) -> i32 {
     // Return sentinel to signal F-line interception
     super::decode::FLINE_TRAP_SENTINEL
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum Event {
+        ReadWord(u32),
+        Sync(u32),
+        IplHold,
+    }
+
+    #[derive(Default)]
+    struct TraceBus {
+        events: Vec<Event>,
+    }
+
+    impl AddressBus for TraceBus {
+        fn read_byte(&mut self, _address: u32) -> u8 {
+            0
+        }
+
+        fn read_word(&mut self, address: u32) -> u16 {
+            self.events.push(Event::ReadWord(address));
+            0x4e71
+        }
+
+        fn read_long(&mut self, _address: u32) -> u32 {
+            0
+        }
+
+        fn write_byte(&mut self, _address: u32, _value: u8) {}
+
+        fn write_word(&mut self, _address: u32, _value: u16) {}
+
+        fn write_long(&mut self, _address: u32, _value: u32) {}
+
+        fn sync(&mut self, cpu_clocks: u32) {
+            self.events.push(Event::Sync(cpu_clocks));
+        }
+
+        fn ipl_hold_sample(&mut self) {
+            self.events.push(Event::IplHold);
+        }
+    }
+
+    fn m68000_cpu_with_one_prefetch_word() -> CpuCore {
+        let mut cpu = CpuCore::new();
+        cpu.set_cpu_type(CpuType::M68000);
+        cpu.pc = 0x2000;
+        cpu.prefetch_queue = [0x4e71, 0];
+        cpu.prefetch_count = 1;
+        cpu
+    }
+
+    #[test]
+    fn m68000_scc_true_data_register_prefetches_before_internal_sync() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0x1234_5600;
+
+        // ST D0
+        let cycles = dispatch_group_5(&mut cpu, &mut bus, 0x50c0);
+
+        assert_eq!(cycles, 6);
+        assert_eq!(cpu.dar[0], 0x1234_56ff);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(2)]
+        );
+    }
+
+    #[test]
+    fn m68000_scc_false_data_register_polls_on_final_prefetch() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0x1234_56ff;
+
+        // SF D0
+        let cycles = dispatch_group_5(&mut cpu, &mut bus, 0x51c0);
+
+        assert_eq!(cycles, 4);
+        assert_eq!(cpu.dar[0], 0x1234_5600);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(bus.events, vec![Event::ReadWord(0x2002), Event::IplHold]);
+    }
 }
