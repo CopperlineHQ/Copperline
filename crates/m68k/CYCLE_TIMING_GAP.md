@@ -133,6 +133,8 @@ Model implemented (68000-gated unless a bullet explicitly names the shared
   flushes its 2-clock tail, and only then stores the SR word into `Dn`.
 - **MOVEA `<ea>,An`**: the address-register destination update follows the
   final prefetch/IPL poll, matching the 68000/68010 MOVEA microcode order.
+- **MOVE USP register forms**: privileged `MOVE An,USP` and `MOVE USP,An`
+  perform the final prefetch/IPL poll before updating USP or `An`.
 - **Flow changes** (`full_prefetch` / `prefetch_first`+`prefetch_second`):
   Bcc/BRA/DBcc taken, JMP, RTS/RTE/RTR refill from the target; JSR/BSR
   interleave (first prefetch, push, second prefetch). Their

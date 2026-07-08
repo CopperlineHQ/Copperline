@@ -1668,9 +1668,20 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                     // MOVE to USP: 0100 1110 0110 0rrr
                     if cpu.is_supervisor() {
                         let reg = (opcode & 7) as usize;
+                        if cpu.cpu_type == CpuType::M68010 {
+                            cpu.internal_cycles(2);
+                        }
+                        if cpu.prefetch_enabled() {
+                            cpu.top_up_prefetch(bus);
+                            cpu.ipl_poll_point(bus);
+                        }
                         cpu.set_usp(cpu.a(reg));
                         cpu.trace_t0_68040_sync();
-                        4
+                        if cpu.cpu_type == CpuType::M68010 {
+                            6
+                        } else {
+                            4
+                        }
                     } else {
                         cpu.exception_privilege(bus)
                     }
@@ -1680,8 +1691,19 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                     if cpu.is_supervisor() {
                         let reg = (opcode & 7) as usize;
                         let usp = cpu.get_usp();
+                        if cpu.cpu_type == CpuType::M68010 {
+                            cpu.internal_cycles(2);
+                        }
+                        if cpu.prefetch_enabled() {
+                            cpu.top_up_prefetch(bus);
+                            cpu.ipl_poll_point(bus);
+                        }
                         cpu.set_a(reg, usp);
-                        4
+                        if cpu.cpu_type == CpuType::M68010 {
+                            6
+                        } else {
+                            4
+                        }
                     } else {
                         cpu.exception_privilege(bus)
                     }
@@ -3309,5 +3331,39 @@ mod tests {
             bus.events,
             vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(2)]
         );
+    }
+
+    #[test]
+    fn m68000_move_an_to_usp_updates_after_final_prefetch() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[8] = 0x1234_5678;
+        cpu.sp[0] = 0xaaaa_bbbb;
+
+        // MOVE A0,USP
+        let cycles = dispatch_group_4(&mut cpu, &mut bus, 0x4e60);
+
+        assert_eq!(cycles, 4);
+        assert_eq!(cpu.get_usp(), 0x1234_5678);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(bus.events, vec![Event::ReadWord(0x2002), Event::IplHold]);
+    }
+
+    #[test]
+    fn m68000_move_usp_to_an_updates_after_final_prefetch() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.sp[0] = 0x1234_5678;
+        cpu.dar[8] = 0xaaaa_bbbb;
+
+        // MOVE USP,A0
+        let cycles = dispatch_group_4(&mut cpu, &mut bus, 0x4e68);
+
+        assert_eq!(cycles, 4);
+        assert_eq!(cpu.a(0), 0x1234_5678);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(bus.events, vec![Event::ReadWord(0x2002), Event::IplHold]);
     }
 }
