@@ -77,7 +77,9 @@ forms spend their trailing internal clocks after that prefetch. Plain
 forms write `Dn` before the final prefetch, then spend their 2- or 4-clock
 long-ALU tail after it depending on whether the source operand came from memory.
 `ADDA/SUBA` and `CMPA` likewise place their address-arithmetic tail clocks after
-the final prefetch.
+the final prefetch. `EOR Dn,Dm` follows the memory-destination EOR ordering:
+flags are computed first, then the final prefetch/tail runs before the `Dm`
+writeback.
 
 ## 68010
 

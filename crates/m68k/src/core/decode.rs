@@ -2539,22 +2539,46 @@ fn dispatch_group_b<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                     return illegal_instruction(cpu, bus);
                 }
                 let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
-                let ea = cpu.resolve_ea(bus, mode, size);
-                let dst = cpu.read_resolved_ea(bus, ea, size);
-                if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
-                    return 50;
-                }
-                let result = (cpu.d(reg) ^ dst) & size.mask();
-                // EOR Dn,<ea> polls IPL during the pre-writeback prefetch.
-                cpu.write_resolved_ea_np_poll(bus, ea, size, result);
-                if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
-                    return 50;
-                }
-                cpu.set_logic_flags(result, size);
-                if cpu.cpu_type == CpuType::M68000 {
+                if cpu.cpu_type == CpuType::M68000
+                    && let AddressingMode::DataDirect(dst_reg) = mode
+                {
+                    let dst_reg = dst_reg as usize;
+                    let result = (cpu.d(reg) ^ (cpu.d(dst_reg) & size.mask())) & size.mask();
+                    cpu.set_logic_flags(result, size);
+                    let internal_clocks = if size == Size::Long { 4 } else { 0 };
+                    if !finish_m68000_tail_after_final_prefetch(cpu, bus, internal_clocks) {
+                        return 50;
+                    }
+                    match size {
+                        Size::Byte => {
+                            cpu.dar[dst_reg] =
+                                (cpu.dar[dst_reg] & 0xffff_ff00) | (result & 0xff);
+                        }
+                        Size::Word => {
+                            cpu.dar[dst_reg] =
+                                (cpu.dar[dst_reg] & 0xffff_0000) | (result & 0xffff);
+                        }
+                        Size::Long => cpu.dar[dst_reg] = result,
+                    }
                     cpu.eor_cycles(mode, size)
                 } else {
-                    8
+                    let ea = cpu.resolve_ea(bus, mode, size);
+                    let dst = cpu.read_resolved_ea(bus, ea, size);
+                    if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
+                        return 50;
+                    }
+                    let result = (cpu.d(reg) ^ dst) & size.mask();
+                    // EOR Dn,<ea> polls IPL during the pre-writeback prefetch.
+                    cpu.write_resolved_ea_np_poll(bus, ea, size, result);
+                    if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
+                        return 50;
+                    }
+                    cpu.set_logic_flags(result, size);
+                    if cpu.cpu_type == CpuType::M68000 {
+                        cpu.eor_cycles(mode, size)
+                    } else {
+                        8
+                    }
                 }
             }
         }
@@ -3234,6 +3258,26 @@ mod tests {
         assert_eq!(
             bus.events,
             vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(2)]
+        );
+    }
+
+    #[test]
+    fn m68000_eor_long_data_register_writes_after_final_prefetch() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0xff00_ff00;
+        cpu.dar[1] = 0x0f0f_0f0f;
+
+        // EOR.L D1,D0
+        let cycles = dispatch_group_b(&mut cpu, &mut bus, 0xb380);
+
+        assert_eq!(cycles, 8);
+        assert_eq!(cpu.d(0), 0xf00f_f00f);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(4)]
         );
     }
 }
