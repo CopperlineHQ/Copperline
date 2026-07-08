@@ -205,6 +205,23 @@ Access-count mismatches are now 0.5% (ratio 1.000); cycle totals unchanged
 (0.9% / 0.999). These remaining cases do not block Part E.2 (sync timing);
 they can be cleaned up alongside it.
 
+### E.1 iteration 4 (2026-07-09): 371 -> 6 sequence mismatches
+
+Fixed in this round:
+
+- **MOVEM.L register-to-memory predecrement**: each 68000 long register
+  transfer now emits the descending word bus cycles directly: low word at
+  `An-2`, then high word at `An-4`. The memory image remains big-endian, but
+  the access order matches the MAME/SST 68000 transaction log and clears all
+  157 `MOVEM.l` address-order mismatches.
+
+Current `access_sequence_gap_report` tail:
+
+- **Bcc (6; count)**: edge cases.
+
+Sequence mismatches are now 6 / 256,894 cases (0.0% rounded): count 6,
+direction/address/data 0.
+
 # Part E.2: sync() per-access timing
 
 ## Infrastructure (landed 2026-06-03)

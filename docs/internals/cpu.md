@@ -90,6 +90,10 @@ instruction-specific side-effect timing: `MOVE <ea>,CCR/SR` and
 `ORI/ANDI/EORI #imm,SR` spend their internal status-write delay before the
 architectural CCR/SR mutation and post-write refill, while immediate-to-CCR
 mutates the CCR before that delay on the 68000.
+`MOVEM.L <regs>,-(An)` also exposes the 68000's word-step predecrement
+microcode on the bus: each long transfer writes the low word at `An-2`
+before the high word at `An-4`, leaving memory big-endian while matching
+the observed access order.
 
 ## 68010
 

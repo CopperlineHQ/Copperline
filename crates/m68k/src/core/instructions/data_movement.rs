@@ -431,10 +431,21 @@ impl CpuCore {
                     if reg_idx == base_reg {
                         value = value.wrapping_sub(base_adjust);
                     }
-                    addr = addr.wrapping_sub(size.bytes());
                     match size {
-                        Size::Word => self.write_16(bus, addr, value as u16),
-                        Size::Long => self.write_32(bus, addr, value),
+                        Size::Word => {
+                            addr = addr.wrapping_sub(2);
+                            self.write_16(bus, addr, value as u16);
+                        }
+                        Size::Long if self.cpu_type == CpuType::M68000 => {
+                            addr = addr.wrapping_sub(2);
+                            self.write_16(bus, addr, (value & 0xFFFF) as u16);
+                            addr = addr.wrapping_sub(2);
+                            self.write_16(bus, addr, (value >> 16) as u16);
+                        }
+                        Size::Long => {
+                            addr = addr.wrapping_sub(4);
+                            self.write_32(bus, addr, value);
+                        }
                         _ => {}
                     }
                     count += 1;
@@ -747,6 +758,7 @@ mod tests {
     #[derive(Debug, PartialEq, Eq)]
     enum Event {
         ReadWord(u32),
+        WriteWord(u32, u16),
         Sync(u32),
         IplHold,
     }
@@ -772,9 +784,14 @@ mod tests {
 
         fn write_byte(&mut self, _address: u32, _value: u8) {}
 
-        fn write_word(&mut self, _address: u32, _value: u16) {}
+        fn write_word(&mut self, address: u32, value: u16) {
+            self.events.push(Event::WriteWord(address, value));
+        }
 
-        fn write_long(&mut self, _address: u32, _value: u32) {}
+        fn write_long(&mut self, address: u32, value: u32) {
+            self.write_word(address, (value >> 16) as u16);
+            self.write_word(address.wrapping_add(2), value as u16);
+        }
 
         fn sync(&mut self, cpu_clocks: u32) {
             self.events.push(Event::Sync(cpu_clocks));
@@ -839,6 +856,28 @@ mod tests {
         assert_eq!(
             bus.events,
             vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(2)]
+        );
+    }
+
+    #[test]
+    fn m68000_movem_long_predecrement_writes_low_word_before_high_word() {
+        let mut cpu = CpuCore::new();
+        cpu.set_cpu_type(CpuType::M68000);
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0x1122_3344;
+        cpu.dar[10] = 0x1000;
+
+        let cycles =
+            cpu.exec_movem_to_mem(&mut bus, Size::Long, AddressingMode::PreDecrement(2), 0x8000);
+
+        assert_eq!(cycles, 16);
+        assert_eq!(cpu.dar[10], 0x0FFC);
+        assert_eq!(
+            bus.events,
+            vec![
+                Event::WriteWord(0x0FFE, 0x3344),
+                Event::WriteWord(0x0FFC, 0x1122),
+            ]
         );
     }
 }
