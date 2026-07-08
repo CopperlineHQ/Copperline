@@ -1766,22 +1766,28 @@ fn copper_line_end_bus_lockout_defers_transfer_past_the_wrap() {
     assert_eq!(bus.copper.pc(), cop1 as u32);
     assert_eq!(bus.denise.palette[0], 0);
 
-    // $E1 is odd (the Copper's idle half), and $E2 is the next access-parity
-    // color clock: the first-word fetch lands there and the beam wraps.
+    // $E1 is the Copper's idle half and $E2 is the line-end refresh slot, so
+    // the Copper stays parked on the first word until the beam wraps.
     bus.advance_chipset(2);
-    assert_eq!(bus.copper.pc(), cop1 as u32 + 2);
+    assert_eq!(bus.copper.pc(), cop1 as u32);
     assert_eq!(bus.agnus.vpos, start_vpos + 1);
     assert_eq!(bus.agnus.hpos, 0);
     assert_eq!(bus.denise.palette[0], 0);
 
     // With refresh confined to odd slots plus line-end, hpos 0x00 is a free
-    // access-parity color clock, so the Copper fetches the second word there
-    // immediately after the line wrap and its write lands at 0x00 (recorded
-    // at its Denise-effective position, 0x04).
+    // access-parity color clock, so the Copper fetches the first word
+    // immediately after the line wrap.
     bus.advance_chipset(1);
+    assert_eq!(bus.copper.pc(), cop1 as u32 + 2);
+    assert_eq!(bus.denise.palette[0], 0);
+
+    // Hpos 0x01 is refresh; the next free access-parity clock is 0x02, where
+    // the Copper fetches the second word and the MOVE write lands (recorded at
+    // its Denise-effective position, 0x06).
+    bus.advance_chipset(2);
     assert_eq!(bus.denise.palette[0], 0x0999);
     assert_eq!(bus.current_render_events()[0].vpos, start_vpos + 1);
-    assert_eq!(bus.current_render_events()[0].hpos, 0x04);
+    assert_eq!(bus.current_render_events()[0].hpos, 0x06);
 }
 
 #[test]
