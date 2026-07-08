@@ -76,6 +76,8 @@ forms spend their trailing internal clocks after that prefetch. Plain
 2-clock long-compare tail after that prefetch. Long `ADD/SUB/AND/OR <ea>,Dn`
 forms write `Dn` before the final prefetch, then spend their 2- or 4-clock
 long-ALU tail after it depending on whether the source operand came from memory.
+`ADDA/SUBA` and `CMPA` likewise place their address-arithmetic tail clocks after
+the final prefetch.
 
 ## 68010
 

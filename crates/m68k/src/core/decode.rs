@@ -2325,6 +2325,9 @@ fn dispatch_group_9<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             let src = cpu.read_ea(bus, mode, size);
             let legacy = cpu.exec_suba(bus, size, src, reg);
             if cpu.cpu_type == CpuType::M68000 {
+                if !finish_m68000_adda_suba_tail(cpu, bus, mode, size) {
+                    return 50;
+                }
                 cpu.adda_suba_cycles(mode, size)
             } else {
                 legacy
@@ -2487,6 +2490,9 @@ fn dispatch_group_b<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             }
             let legacy = cpu.exec_cmpa(size, src, reg);
             if cpu.cpu_type == CpuType::M68000 {
+                if !finish_m68000_tail_after_final_prefetch(cpu, bus, 2) {
+                    return 50;
+                }
                 cpu.cmpa_cycles(mode, size)
             } else {
                 legacy
@@ -2677,6 +2683,9 @@ fn dispatch_group_d<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             let src = cpu.read_ea(bus, mode, size);
             let legacy = cpu.exec_adda(bus, size, src, reg);
             if cpu.cpu_type == CpuType::M68000 {
+                if !finish_m68000_adda_suba_tail(cpu, bus, mode, size) {
+                    return 50;
+                }
                 cpu.adda_suba_cycles(mode, size)
             } else {
                 legacy
@@ -2926,13 +2935,32 @@ fn finish_m68000_alu_ea_dn_long_tail<B: AddressBus>(
         return true;
     }
 
+    let clocks = if CpuCore::ea_is_memory(mode) { 2 } else { 4 };
+    finish_m68000_tail_after_final_prefetch(cpu, bus, clocks)
+}
+
+fn finish_m68000_adda_suba_tail<B: AddressBus>(
+    cpu: &mut CpuCore,
+    bus: &mut B,
+    mode: AddressingMode,
+    size: Size,
+) -> bool {
+    let extra = size == Size::Word || !CpuCore::ea_is_memory(mode);
+    finish_m68000_tail_after_final_prefetch(cpu, bus, if extra { 4 } else { 2 })
+}
+
+fn finish_m68000_tail_after_final_prefetch<B: AddressBus>(
+    cpu: &mut CpuCore,
+    bus: &mut B,
+    internal_clocks: u32,
+) -> bool {
     cpu.top_up_prefetch(bus);
     cpu.ipl_poll_point(bus);
     if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
         return false;
     }
 
-    cpu.internal_cycles(if CpuCore::ea_is_memory(mode) { 2 } else { 4 });
+    cpu.internal_cycles(internal_clocks);
     cpu.flush_sync(bus);
     true
 }
@@ -3166,6 +3194,46 @@ mod tests {
         assert_eq!(
             bus.events,
             vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(4)]
+        );
+    }
+
+    #[test]
+    fn m68000_adda_word_register_source_flushes_tail_after_final_prefetch() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[1] = 0x0000_0002;
+        cpu.dar[8] = 0x0000_1000;
+
+        // ADDA.W D1,A0
+        let cycles = dispatch_group_d(&mut cpu, &mut bus, 0xd0c1);
+
+        assert_eq!(cycles, 8);
+        assert_eq!(cpu.a(0), 0x0000_1002);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(4)]
+        );
+    }
+
+    #[test]
+    fn m68000_cmpa_long_flushes_tail_after_final_prefetch() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[1] = 0x0000_1000;
+        cpu.dar[8] = 0x0000_1000;
+
+        // CMPA.L D1,A0
+        let cycles = dispatch_group_b(&mut cpu, &mut bus, 0xb1c1);
+
+        assert_eq!(cycles, 6);
+        assert_eq!(cpu.not_z_flag, 0);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(2)]
         );
     }
 }

@@ -123,6 +123,8 @@ Model implemented (all gated to CpuType::M68000):
 - **Long `ADD/SUB/AND/OR <ea>,Dn`**: `Dn` is written before the final prefetch;
   the long ALU tail is then flushed after that prefetch (2 clocks for memory
   sources, 4 clocks for register/immediate sources).
+- **ADDA/SUBA/CMPA `<ea>,An`**: address-register arithmetic and compare forms
+  also poll IPL on the final prefetch and flush their 68000 tail clocks after it.
 - **Flow changes** (`full_prefetch` / `prefetch_first`+`prefetch_second`):
   Bcc/BRA/DBcc taken, JMP, RTS/RTE/RTR refill from the target; JSR/BSR
   interleave (first prefetch, push, second prefetch). Their
