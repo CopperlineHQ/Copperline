@@ -2171,7 +2171,7 @@ fn dispatch_group_8<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             // Check for SBCD first (pattern: 1000 xxx1 0000 0yyy for Dn or 1000 xxx1 0000 1yyy for -(An))
             if op_mode == 4 && ea_mode == 0 {
                 // SBCD Dy, Dx (register to register)
-                cpu.exec_sbcd_rr(ea_reg as usize, reg)
+                cpu.exec_sbcd_rr(bus, ea_reg as usize, reg)
             } else if op_mode == 4 && ea_mode == 1 {
                 // SBCD -(Ay), -(Ax) (memory to memory)
                 cpu.exec_sbcd_mm(bus, ea_reg as usize, reg)
@@ -2526,7 +2526,7 @@ fn dispatch_group_c<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 // ABCD
                 if ea_mode == 0 {
                     // ABCD Dy, Dx (register to register)
-                    cpu.exec_abcd_rr(ea_reg as usize, reg)
+                    cpu.exec_abcd_rr(bus, ea_reg as usize, reg)
                 } else {
                     // ABCD -(Ay), -(Ax) (memory to memory)
                     cpu.exec_abcd_mm(bus, ea_reg as usize, reg)

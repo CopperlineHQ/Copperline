@@ -8,15 +8,28 @@ use crate::core::memory::AddressBus;
 use crate::core::types::{CpuType, Size};
 
 impl CpuCore {
+    fn finish_bcd_register_write<B: AddressBus>(&mut self, bus: &mut B, reg: usize, value: u32) {
+        self.top_up_prefetch(bus);
+        self.ipl_poll_point(bus);
+        self.internal_cycles(2);
+        self.flush_sync(bus);
+        self.set_d(reg, (self.d(reg) & 0xFFFF_FF00) | (value & 0xFF));
+    }
+
     /// Execute ABCD register-to-register.
     ///
     /// ABCD Dy, Dx
-    pub fn exec_abcd_rr(&mut self, src_reg: usize, dst_reg: usize) -> i32 {
+    pub fn exec_abcd_rr<B: AddressBus>(
+        &mut self,
+        bus: &mut B,
+        src_reg: usize,
+        dst_reg: usize,
+    ) -> i32 {
         let src = self.d(src_reg) & 0xFF;
         let dst = self.d(dst_reg) & 0xFF;
         let result = self.bcd_add(src, dst);
 
-        self.set_d(dst_reg, (self.d(dst_reg) & 0xFFFFFF00) | result);
+        self.finish_bcd_register_write(bus, dst_reg, result);
         6
     }
 
@@ -55,12 +68,17 @@ impl CpuCore {
     /// Execute SBCD register-to-register.
     ///
     /// SBCD Dy, Dx
-    pub fn exec_sbcd_rr(&mut self, src_reg: usize, dst_reg: usize) -> i32 {
+    pub fn exec_sbcd_rr<B: AddressBus>(
+        &mut self,
+        bus: &mut B,
+        src_reg: usize,
+        dst_reg: usize,
+    ) -> i32 {
         let src = self.d(src_reg) & 0xFF;
         let dst = self.d(dst_reg) & 0xFF;
         let result = self.bcd_sub(src, dst);
 
-        self.set_d(dst_reg, (self.d(dst_reg) & 0xFFFFFF00) | result);
+        self.finish_bcd_register_write(bus, dst_reg, result);
         6
     }
 
@@ -435,6 +453,44 @@ mod tests {
         cpu.prefetch_queue = [0x4e71, 0];
         cpu.prefetch_count = 1;
         cpu
+    }
+
+    #[test]
+    fn m68000_abcd_data_register_prefetches_before_internal_sync() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0x0000_0012;
+        cpu.dar[1] = 0x1234_5634;
+
+        let cycles = cpu.exec_abcd_rr(&mut bus, 0, 1);
+
+        assert_eq!(cycles, 6);
+        assert_eq!(cpu.dar[1], 0x1234_5646);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(2)]
+        );
+    }
+
+    #[test]
+    fn m68000_sbcd_data_register_prefetches_before_internal_sync() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0x0000_0012;
+        cpu.dar[1] = 0x1234_5645;
+
+        let cycles = cpu.exec_sbcd_rr(&mut bus, 0, 1);
+
+        assert_eq!(cycles, 6);
+        assert_eq!(cpu.dar[1], 0x1234_5633);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(2)]
+        );
     }
 
     #[test]
