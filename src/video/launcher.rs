@@ -24,7 +24,7 @@ use crate::chipset::denise::DeniseRevision;
 use crate::config::{
     format_size, machine_profile_defaults, ChannelMode, Chipset, Config, CpuModel,
     JoystickInputMode, MachineModel, Overscan, PacingBudget, PixelAspect, RawConfig, RawDrive,
-    RawFloppyDrive, RawZorroBoard, SerialMode, WarpSpeed,
+    RawFloppyDrive, RawZorroBoard, ScsiController, SerialMode, WarpSpeed,
 };
 use crate::zorro::{ConfigOption, ConfigOptionKind, LoadedZorroBoard};
 use anyhow::Result;
@@ -248,6 +248,7 @@ pub enum LauncherField {
     // Hard disk
     IdeMaster,
     IdeSlave,
+    ScsiController,
     ScsiRom,
     ScsiRomOdd,
     ScsiUnit0,
@@ -352,9 +353,10 @@ const FLOPPY_ROWS: [Row; 9] = [
     row(F::Df3Image, "DF3 image", PathRow),
     row(F::Df3WriteProtect, "DF3 write-protect", Toggle),
 ];
-const STORAGE_ROWS: [Row; 11] = [
+const STORAGE_ROWS: [Row; 12] = [
     row(F::IdeMaster, "IDE master", Drive),
     row(F::IdeSlave, "IDE slave", Drive),
+    row(F::ScsiController, "SCSI controller", Cycle),
     row(F::ScsiRom, "SCSI boot ROM", PathRow),
     row(F::ScsiRomOdd, "SCSI ROM (odd)", PathRow),
     row(F::ScsiUnit0, "SCSI unit 0", Drive),
@@ -497,6 +499,13 @@ const WARPS: [WarpSpeed; 5] = [
 // The stepper flips the two explicit modes, matching the runtime toggle.
 const JOYSTICK_MODES: [JoystickInputMode; 2] =
     [JoystickInputMode::Gamepad, JoystickInputMode::Keyboard];
+// `None` = no SCSI board fitted; the two boards are mutually exclusive here even
+// though the engine could run both, so a config round-trips through this picker.
+const SCSI_CONTROLLERS: [Option<ScsiController>; 3] = [
+    None,
+    Some(ScsiController::A2091),
+    Some(ScsiController::A4091),
+];
 #[cfg(feature = "midi")]
 const SERIAL_MODES: [SerialMode; 5] = [
     SerialMode::Off,
@@ -553,6 +562,9 @@ pub struct MachineSetup {
     ide_master_name: Option<String>,
     ide_slave: Option<PathBuf>,
     ide_slave_name: Option<String>,
+    /// Which SCSI host adapter is fitted, or `None` for no board. Shares the
+    /// `scsi_*` ROM/unit block below (the drives are portable between boards).
+    scsi_controller: Option<ScsiController>,
     scsi_rom: Option<PathBuf>,
     scsi_rom_odd: Option<PathBuf>,
     scsi_units: [Option<PathBuf>; 7],
@@ -646,6 +658,7 @@ impl MachineSetup {
             ide_master_name: cfg.ide.master.as_ref().and_then(|d| d.volume_name.clone()),
             ide_slave: cfg.ide.slave.as_ref().map(|d| d.path.clone()),
             ide_slave_name: cfg.ide.slave.as_ref().and_then(|d| d.volume_name.clone()),
+            scsi_controller: cfg.scsi.enabled().then_some(cfg.scsi.controller),
             scsi_rom: cfg.scsi.rom.clone(),
             scsi_rom_odd: cfg.scsi.rom_odd.clone(),
             scsi_units: std::array::from_fn(|i| cfg.scsi.units[i].as_ref().map(|d| d.path.clone())),
@@ -819,36 +832,48 @@ impl MachineSetup {
         // Hard disk
         raw.ide.master = drive_raw(self.ide_master.as_deref(), self.ide_master_name.as_deref());
         raw.ide.slave = drive_raw(self.ide_slave.as_deref(), self.ide_slave_name.as_deref());
-        raw.scsi.rom = self.scsi_rom.as_deref().map(path_string);
-        raw.scsi.rom_odd = self.scsi_rom_odd.as_deref().map(path_string);
-        raw.scsi.unit0 = drive_raw(
-            self.scsi_units[0].as_deref(),
-            self.scsi_unit_names[0].as_deref(),
-        );
-        raw.scsi.unit1 = drive_raw(
-            self.scsi_units[1].as_deref(),
-            self.scsi_unit_names[1].as_deref(),
-        );
-        raw.scsi.unit2 = drive_raw(
-            self.scsi_units[2].as_deref(),
-            self.scsi_unit_names[2].as_deref(),
-        );
-        raw.scsi.unit3 = drive_raw(
-            self.scsi_units[3].as_deref(),
-            self.scsi_unit_names[3].as_deref(),
-        );
-        raw.scsi.unit4 = drive_raw(
-            self.scsi_units[4].as_deref(),
-            self.scsi_unit_names[4].as_deref(),
-        );
-        raw.scsi.unit5 = drive_raw(
-            self.scsi_units[5].as_deref(),
-            self.scsi_unit_names[5].as_deref(),
-        );
-        raw.scsi.unit6 = drive_raw(
-            self.scsi_units[6].as_deref(),
-            self.scsi_unit_names[6].as_deref(),
-        );
+        // Only emit `[scsi]` when a controller is fitted, so an unset board
+        // leaves the section absent rather than writing dangling ROM/units.
+        if let Some(controller) = self.scsi_controller {
+            // "a2091" is the default, so omit it; name only "a4091".
+            raw.scsi.controller = match controller {
+                ScsiController::A2091 => None,
+                ScsiController::A4091 => Some("a4091".to_string()),
+            };
+            raw.scsi.rom = self.scsi_rom.as_deref().map(path_string);
+            // rom_odd is an A2091 split-EPROM option; the A4091 has one ROM.
+            raw.scsi.rom_odd = (controller == ScsiController::A2091)
+                .then(|| self.scsi_rom_odd.as_deref().map(path_string))
+                .flatten();
+            raw.scsi.unit0 = drive_raw(
+                self.scsi_units[0].as_deref(),
+                self.scsi_unit_names[0].as_deref(),
+            );
+            raw.scsi.unit1 = drive_raw(
+                self.scsi_units[1].as_deref(),
+                self.scsi_unit_names[1].as_deref(),
+            );
+            raw.scsi.unit2 = drive_raw(
+                self.scsi_units[2].as_deref(),
+                self.scsi_unit_names[2].as_deref(),
+            );
+            raw.scsi.unit3 = drive_raw(
+                self.scsi_units[3].as_deref(),
+                self.scsi_unit_names[3].as_deref(),
+            );
+            raw.scsi.unit4 = drive_raw(
+                self.scsi_units[4].as_deref(),
+                self.scsi_unit_names[4].as_deref(),
+            );
+            raw.scsi.unit5 = drive_raw(
+                self.scsi_units[5].as_deref(),
+                self.scsi_unit_names[5].as_deref(),
+            );
+            raw.scsi.unit6 = drive_raw(
+                self.scsi_units[6].as_deref(),
+                self.scsi_unit_names[6].as_deref(),
+            );
+        }
         // CD
         raw.cd.image = self.cd_image.as_deref().map(path_string);
         if self.cd_insert_delay != 0.0 {
@@ -1039,6 +1064,20 @@ impl MachineSetup {
             F::Dcache => reason(self.cpu.has_data_cache(), "needs 68030/040"),
             F::Z3Ram => reason(cpu_is_32bit(self.cpu), "needs 32-bit CPU"),
             F::IdeMaster | F::IdeSlave => reason(self.has_gayle(), "needs A600/A1200"),
+            // The ROM and drives belong to the fitted controller; greyed with
+            // none. rom_odd is an A2091 split-EPROM option only.
+            F::ScsiRom
+            | F::ScsiUnit0
+            | F::ScsiUnit1
+            | F::ScsiUnit2
+            | F::ScsiUnit3
+            | F::ScsiUnit4
+            | F::ScsiUnit5
+            | F::ScsiUnit6 => reason(self.scsi_controller.is_some(), "no controller"),
+            F::ScsiRomOdd => reason(
+                self.scsi_controller == Some(ScsiController::A2091),
+                "A2091 only",
+            ),
             F::CdImage | F::CdInsertDelay => reason(self.has_cd(), "needs CDTV/CD32"),
             F::Cd32Nvram => reason(self.model == Some(MachineModel::Cd32), "CD32 only"),
             F::Df0Image | F::Df0WriteProtect => reason(self.floppy_drives >= 1, "drive off"),
@@ -1215,6 +1254,11 @@ impl MachineSetup {
                 JoystickInputMode::Keyboard => "Keyboard".to_string(),
                 JoystickInputMode::Gamepad => "Gamepad".to_string(),
             },
+            F::ScsiController => match self.scsi_controller {
+                None => "None".to_string(),
+                Some(ScsiController::A2091) => "A2091 (Z2)".to_string(),
+                Some(ScsiController::A4091) => "A4091 (Z3)".to_string(),
+            },
             #[cfg(feature = "midi")]
             F::SerialMode => match self.serial_mode {
                 SerialMode::Off => "Off".to_string(),
@@ -1310,6 +1354,9 @@ impl MachineSetup {
             F::Joystick => {
                 self.joystick_input_mode =
                     cycle_slice(&JOYSTICK_MODES, self.joystick_input_mode, forward)
+            }
+            F::ScsiController => {
+                self.scsi_controller = cycle_slice(&SCSI_CONTROLLERS, self.scsi_controller, forward)
             }
             #[cfg(feature = "midi")]
             F::SerialMode => {

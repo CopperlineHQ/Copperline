@@ -1786,48 +1786,57 @@ pub fn build_machine(
     // is attached to the bus after it is built; the slot index ties them.
     let mut devices: Vec<crate::zorro_device::BoardDevice> = Vec::new();
     if cfg.scsi.enabled() {
+        use crate::config::ScsiController;
         let rom_path = cfg.scsi.rom.as_ref().expect("config validated [scsi] rom");
-        let rom = crate::a2091::A2091::load_rom(rom_path, cfg.scsi.rom_odd.as_deref())?;
-        let mut board = crate::a2091::A2091::new(rom)?;
-        for (unit, drive) in cfg.scsi.units.iter().enumerate() {
-            let Some(drive) = drive else { continue };
-            board.attach_drive(
-                unit,
-                crate::scsi::ScsiDisk::open(&drive.path, unit, drive.volume_name.as_deref())?,
-            );
-            info!("scsi: unit {unit} {}", drive.path.display());
-        }
         let slot = devices.len();
-        zorro.add_board(crate::zorro::BoardSpec::a2091(slot))?;
-        info!(
-            "scsi: A2091 controller on the Zorro chain (slot {slot}), ROM {}",
-            rom_path.display()
-        );
-        devices.push(crate::zorro_device::BoardDevice::A2091(board));
-    }
-    if cfg.a4091.enabled() {
-        let rom_path = cfg
-            .a4091
-            .rom
-            .as_ref()
-            .expect("config validated [a4091] rom");
-        let rom = crate::a4091::A4091::load_rom(rom_path)?;
-        let mut board = crate::a4091::A4091::new(rom)?;
-        for (unit, drive) in cfg.a4091.units.iter().enumerate() {
-            let Some(drive) = drive else { continue };
-            board.attach_drive(
-                unit,
-                crate::scsi::ScsiDisk::open(&drive.path, unit, drive.volume_name.as_deref())?,
-            );
-            info!("a4091: unit {unit} {}", drive.path.display());
-        }
-        let slot = devices.len();
-        zorro.add_board(crate::zorro::BoardSpec::a4091(slot))?;
-        info!(
-            "a4091: SCSI controller on the Zorro chain (slot {slot}), ROM {}",
-            rom_path.display()
-        );
-        devices.push(crate::zorro_device::BoardDevice::A4091(board));
+        // The controller picks the board; the drive plumbing is identical.
+        let device = match cfg.scsi.controller {
+            ScsiController::A2091 => {
+                let rom = crate::a2091::A2091::load_rom(rom_path, cfg.scsi.rom_odd.as_deref())?;
+                let mut board = crate::a2091::A2091::new(rom)?;
+                for (unit, drive) in cfg.scsi.units.iter().enumerate() {
+                    let Some(drive) = drive else { continue };
+                    board.attach_drive(
+                        unit,
+                        crate::scsi::ScsiDisk::open(
+                            &drive.path,
+                            unit,
+                            drive.volume_name.as_deref(),
+                        )?,
+                    );
+                    info!("scsi: unit {unit} {}", drive.path.display());
+                }
+                zorro.add_board(crate::zorro::BoardSpec::a2091(slot))?;
+                info!(
+                    "scsi: A2091 controller on the Zorro chain (slot {slot}), ROM {}",
+                    rom_path.display()
+                );
+                crate::zorro_device::BoardDevice::A2091(board)
+            }
+            ScsiController::A4091 => {
+                let rom = crate::a4091::A4091::load_rom(rom_path)?;
+                let mut board = crate::a4091::A4091::new(rom)?;
+                for (unit, drive) in cfg.scsi.units.iter().enumerate() {
+                    let Some(drive) = drive else { continue };
+                    board.attach_drive(
+                        unit,
+                        crate::scsi::ScsiDisk::open(
+                            &drive.path,
+                            unit,
+                            drive.volume_name.as_deref(),
+                        )?,
+                    );
+                    info!("scsi: unit {unit} {}", drive.path.display());
+                }
+                zorro.add_board(crate::zorro::BoardSpec::a4091(slot))?;
+                info!(
+                    "scsi: A4091 controller on the Zorro chain (slot {slot}), ROM {}",
+                    rom_path.display()
+                );
+                crate::zorro_device::BoardDevice::A4091(board)
+            }
+        };
+        devices.push(device);
     }
     // WASM plugin boards: assign each a device slot, put its autoconfig
     // identity on the chain, and instantiate the module.
