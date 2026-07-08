@@ -668,7 +668,7 @@ fn enabled_audio_dma_reserves_only_actively_fetching_channel_slots() {
     // reserved (a fixed audio slot is free for the CPU/blitter on lines the
     // channel does not fetch).
     bus.agnus.dmacon = DMACON_DMAEN | 0x0001;
-    bus.agnus.hpos = 0x00F;
+    bus.agnus.hpos = 0x00D;
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Idle);
 
     // The DMA-enable edge posts the state machine's request; the line-end
@@ -678,10 +678,10 @@ fn enabled_audio_dma_reserves_only_actively_fetching_channel_slots() {
     bus.paula.transfer_audio_dma_requests();
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Audio);
 
-    // The even gap after it (0x010) is not an audio cycle, and the other
-    // channels' slots (0x011/0x013/0x015) are free -- those channels are
+    // The even gap after it (0x00E) is not an audio cycle, and the other
+    // channels' slots (0x00F/0x011/0x013) are free -- those channels are
     // disabled -- so the CPU/blitter may use all of these.
-    for hpos in [0x010, 0x011, 0x013, 0x015, 0x016] {
+    for hpos in [0x00E, 0x00F, 0x011, 0x013, 0x015] {
         bus.agnus.hpos = hpos;
         assert_eq!(
             bus.scheduled_dma_owner(false),
@@ -702,10 +702,10 @@ fn enabled_audio_dma_reserves_only_actively_fetching_channel_slots() {
         .apply_audio_dmacon_edges(DMACON_DMAEN | 0x0001, bus.agnus.dmacon);
     bus.paula.transfer_audio_dma_requests();
     for (hpos, owner) in [
+        (0x00D, ChipBusOwner::Audio),
         (0x00F, ChipBusOwner::Audio),
-        (0x011, ChipBusOwner::Audio),
-        (0x013, ChipBusOwner::Idle),
-        (0x015, ChipBusOwner::Audio),
+        (0x011, ChipBusOwner::Idle),
+        (0x013, ChipBusOwner::Audio),
     ] {
         bus.agnus.hpos = hpos;
         assert_eq!(bus.scheduled_dma_owner(false), owner, "hpos {hpos:#05X}");
@@ -716,12 +716,12 @@ fn enabled_audio_dma_reserves_only_actively_fetching_channel_slots() {
     let dmacon = bus.agnus.dmacon;
     let _ = bus.paula.grant_audio_dma(0, 0, dmacon);
     bus.paula.transfer_audio_dma_requests();
-    bus.agnus.hpos = 0x00F;
+    bus.agnus.hpos = 0x00D;
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Idle);
 
     // No channels enabled: nothing reserved.
     bus.agnus.dmacon = DMACON_DMAEN;
-    bus.agnus.hpos = 0x00F;
+    bus.agnus.hpos = 0x00D;
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Idle);
 }
 
@@ -806,7 +806,7 @@ fn audio_dma_startup_fetches_stale_pointer_word_then_block_start() {
     bus.agnus.dmacon = DMACON_DMAEN | 0x0001;
     bus.paula.apply_audio_dmacon_edges(0, bus.agnus.dmacon);
     bus.paula.transfer_audio_dma_requests();
-    bus.agnus.hpos = 0x00F;
+    bus.agnus.hpos = 0x00D;
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Audio);
 
     // First slot: the start-up fetch reads the STALE pointer (its word is
@@ -820,7 +820,7 @@ fn audio_dma_startup_fetches_stale_pointer_word_then_block_start() {
 
     // Second slot (next line): the word at AUDxLC starts playback.
     bus.paula.transfer_audio_dma_requests();
-    bus.agnus.hpos = 0x00F;
+    bus.agnus.hpos = 0x00D;
     bus.advance_chipset(1);
     assert_eq!(bus.paula.audio_current_sample_for_test(0), Some(0x12));
     assert_eq!(bus.paula.audio_dma_ptr_for_test(0), Some(6));
@@ -1774,10 +1774,10 @@ fn copper_line_end_bus_lockout_defers_transfer_past_the_wrap() {
     assert_eq!(bus.agnus.hpos, 0);
     assert_eq!(bus.denise.palette[0], 0);
 
-    // With the hardware refresh model (4 slots at 0x004/6/8/A), hpos 0x00
-    // is a free access-parity color clock, so the Copper fetches the second
-    // word there immediately after the line wrap and its write lands at 0x00
-    // (recorded at its Denise-effective position, 0x04).
+    // With refresh confined to odd slots plus line-end, hpos 0x00 is a free
+    // access-parity color clock, so the Copper fetches the second word there
+    // immediately after the line wrap and its write lands at 0x00 (recorded
+    // at its Denise-effective position, 0x04).
     bus.advance_chipset(1);
     assert_eq!(bus.denise.palette[0], 0x0999);
     assert_eq!(bus.current_render_events()[0].vpos, start_vpos + 1);
@@ -2290,9 +2290,9 @@ fn forbidden_copper_move_recovers_at_start_of_frame_from_cop1lc() {
     // Restart is immediate at the top of the frame, recovering from the
     // forbidden MOVE via the live COP1LC.
     assert_eq!(bus.pending_copper_frame_start, None);
-    // From hpos 0 the Copper waits out the refresh band and its idle-half
-    // color clock, then its MOVE fetches on the next two even (access-parity)
-    // color clocks: write at hpos 0x0C.
+    // From hpos 0 the restarted Copper spends its initial idle half, then its
+    // MOVE fetches on the next two even (access-parity) color clocks: write
+    // at hpos 0x0C.
     bus.advance_chipset(7);
 
     assert_eq!(bus.denise.palette[0], 0x0666);
@@ -8254,8 +8254,8 @@ fn ecs_bltsizv_bltsizh_start_extended_blit() {
 fn cpu_chip_access_waits_through_refresh_slots() {
     let mut bus = empty_bus();
     bus.set_cpu_bus_arbitration_enabled(true);
-    // Start on a refresh slot (hardware model: refresh occupies the odd
-    // color clocks 0x001/0x003/0x005/0x007). The CPU misses that slot and
+    // Start on a refresh slot (hardware model: refresh occupies 0x001,
+    // 0x003, 0x005, and one line-end slot). The CPU misses that slot and
     // is granted the following free color clock.
     bus.agnus.hpos = 0x003;
 
@@ -8473,16 +8473,34 @@ fn blitter_completion_prediction_matches_actual_with_running_copper() {
 fn fixed_agnus_dma_slot_bands_drive_owner_selection() {
     let mut bus = empty_bus();
 
+    for hpos in [0x001, 0x003, 0x005, 0x0E2, 0x0E3] {
+        assert!(
+            Bus::refresh_slot_active_at(hpos),
+            "hpos {hpos:#05X} should be a refresh slot"
+        );
+    }
+    for hpos in [0x000, 0x007, 0x0E1, 0x0E4] {
+        assert!(
+            !Bus::refresh_slot_active_at(hpos),
+            "hpos {hpos:#05X} should not be a refresh slot"
+        );
+    }
+    assert_eq!(Bus::audio_dma_channel_at(0x00D), Some(0));
+    assert_eq!(Bus::audio_dma_channel_at(0x00F), Some(1));
+    assert_eq!(Bus::audio_dma_channel_at(0x011), Some(2));
+    assert_eq!(Bus::audio_dma_channel_at(0x013), Some(3));
+    assert_eq!(Bus::audio_dma_channel_at(0x015), None);
+
     bus.agnus.dmacon = DMACON_DMAEN;
-    bus.agnus.hpos = 0x007;
+    bus.agnus.hpos = 0x005;
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Refresh);
-    bus.agnus.hpos = 0x008;
+    bus.agnus.hpos = 0x007;
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Idle);
 
     bus.agnus.dmacon = DMACON_DMAEN | 0x0001;
     bus.paula.apply_audio_dmacon_edges(0, bus.agnus.dmacon);
     bus.paula.transfer_audio_dma_requests();
-    bus.agnus.hpos = 0x00F;
+    bus.agnus.hpos = 0x00D;
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Audio);
     bus.agnus.hpos = 0x016;
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Idle);

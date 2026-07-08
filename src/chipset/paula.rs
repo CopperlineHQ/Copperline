@@ -1449,10 +1449,10 @@ impl Paula {
         }
         for _ in 0..cck {
             let slot = match self.test_line_cck {
-                0x00F => Some(0),
-                0x011 => Some(1),
-                0x013 => Some(2),
-                0x015 => Some(3),
+                0x00D => Some(0),
+                0x00F => Some(1),
+                0x011 => Some(2),
+                0x013 => Some(3),
                 _ => None,
             };
             if let Some(ch_idx) = slot {

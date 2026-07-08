@@ -13,14 +13,14 @@ the inline suites (`src/chipset/copper.rs`, `blitter.rs`, `src/bus.rs`).
 Every colour clock of every scanline has an owner, decided in priority
 order (`fixed_dma_owner_at`, `src/bus.rs`):
 
-1. **Memory refresh** -- four fixed odd slots early in the line. Refresh
-   only ever uses odd slots, which is why it never collides with the
-   Copper's even-slot cadence.
-2. **Disk DMA** -- three fixed slots, when DSKEN is set and a transfer is
+1. **Memory refresh** -- fixed odd slots 1/3/5 plus the line-end refresh
+   slot (E2, or E3 on NTSC long lines). Refresh only ever uses odd slots,
+   which is why it never collides with the Copper's even-slot cadence.
+2. **Disk DMA** -- fixed slots 7/9/B, when DSKEN is set and a transfer is
    live.
-3. **Audio DMA** -- one slot per Paula channel, claimed only when that
-   channel actually has a fetch pending.
-4. **Sprite DMA** -- the fixed per-sprite slot pairs.
+3. **Audio DMA** -- one fixed slot per Paula channel (D/F/11/13), claimed
+   only when that channel actually has a fetch pending.
+4. **Sprite DMA** -- the fixed per-sprite slot pairs starting at 15/17.
 5. **Bitplane DMA** -- the fetch pattern determined by DDFSTRT/DDFSTOP and
    the plane count; at high plane counts this is what starves everyone
    else, exactly as on hardware.
