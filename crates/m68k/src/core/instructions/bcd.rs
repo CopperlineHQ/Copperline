@@ -3,7 +3,7 @@
 //! ABCD, SBCD, NBCD
 
 use crate::core::cpu::{CFLAG_SET, CpuCore, NFLAG_SET, XFLAG_SET};
-use crate::core::ea::AddressingMode;
+use crate::core::ea::{AddressingMode, EaResult};
 use crate::core::memory::AddressBus;
 use crate::core::types::{CpuType, Size};
 
@@ -135,6 +135,17 @@ impl CpuCore {
 
         let res8 = (newv & 0xFF) as u32;
         self.bcd_set_nvz(res8, (tmp_newv & 0x80) != 0 && (newv & 0x80) == 0);
+        if self.cpu_type == CpuType::M68000 {
+            if let EaResult::DataReg(reg) = ea {
+                let reg = reg as usize;
+                self.top_up_prefetch(bus);
+                self.ipl_poll_point(bus);
+                self.internal_cycles(2);
+                self.flush_sync(bus);
+                self.set_d(reg, (self.d(reg) & 0xFFFF_FF00) | res8);
+                return 6;
+            }
+        }
         // NBCD polls IPL during the pre-writeback prefetch.
         self.write_resolved_ea_np_poll(bus, ea, Size::Byte, res8);
 
@@ -369,5 +380,78 @@ impl CpuCore {
         self.set_a(dst_reg, dst_addr);
         self.write_16(bus, dst_addr, result);
         13
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum Event {
+        ReadWord(u32),
+        Sync(u32),
+        IplHold,
+    }
+
+    #[derive(Default)]
+    struct TraceBus {
+        events: Vec<Event>,
+    }
+
+    impl AddressBus for TraceBus {
+        fn read_byte(&mut self, _address: u32) -> u8 {
+            0
+        }
+
+        fn read_word(&mut self, address: u32) -> u16 {
+            self.events.push(Event::ReadWord(address));
+            0x4e71
+        }
+
+        fn read_long(&mut self, _address: u32) -> u32 {
+            0
+        }
+
+        fn write_byte(&mut self, _address: u32, _value: u8) {}
+
+        fn write_word(&mut self, _address: u32, _value: u16) {}
+
+        fn write_long(&mut self, _address: u32, _value: u32) {}
+
+        fn sync(&mut self, cpu_clocks: u32) {
+            self.events.push(Event::Sync(cpu_clocks));
+        }
+
+        fn ipl_hold_sample(&mut self) {
+            self.events.push(Event::IplHold);
+        }
+    }
+
+    fn m68000_cpu_with_one_prefetch_word() -> CpuCore {
+        let mut cpu = CpuCore::new();
+        cpu.set_cpu_type(CpuType::M68000);
+        cpu.pc = 0x2000;
+        cpu.prefetch_queue = [0x4e71, 0];
+        cpu.prefetch_count = 1;
+        cpu
+    }
+
+    #[test]
+    fn m68000_nbcd_data_register_prefetches_before_internal_sync() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0x1234_5601;
+
+        let cycles = cpu.exec_nbcd(&mut bus, AddressingMode::DataDirect(0));
+
+        assert_eq!(cycles, 6);
+        assert_eq!(cpu.dar[0], 0x1234_5699);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(2)]
+        );
     }
 }

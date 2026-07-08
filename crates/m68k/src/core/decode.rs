@@ -1513,7 +1513,7 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 }
                 0x8 if (opcode >> 6) & 3 == 1 && ea_mode == 0 => {
                     // SWAP
-                    cpu.exec_swap(ea_reg as usize)
+                    cpu.exec_swap(bus, ea_reg as usize)
                 }
                 0x8 if (opcode >> 6) & 3 == 1 && ea_mode == 1 => {
                     // BKPT #n (68010+): 0100 1000 0100 1nnn (0x4848..0x484F)

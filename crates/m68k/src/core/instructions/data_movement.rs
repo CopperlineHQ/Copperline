@@ -538,9 +538,11 @@ impl CpuCore {
     /// Execute SWAP instruction.
     ///
     /// SWAP Dn
-    pub fn exec_swap(&mut self, reg: usize) -> i32 {
+    pub fn exec_swap<B: AddressBus>(&mut self, bus: &mut B, reg: usize) -> i32 {
         let value = self.d(reg);
         let result = value.rotate_right(16);
+        self.top_up_prefetch(bus);
+        self.ipl_poll_point(bus);
         self.set_d(reg, result);
 
         self.set_logic_flags(result, Size::Long);
@@ -725,5 +727,69 @@ impl CpuCore {
         self.not_z_flag = value & size.mask();
         self.v_flag = 0;
         self.c_flag = 0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum Event {
+        ReadWord(u32),
+        IplHold,
+    }
+
+    #[derive(Default)]
+    struct TraceBus {
+        events: Vec<Event>,
+    }
+
+    impl AddressBus for TraceBus {
+        fn read_byte(&mut self, _address: u32) -> u8 {
+            0
+        }
+
+        fn read_word(&mut self, address: u32) -> u16 {
+            self.events.push(Event::ReadWord(address));
+            0x4e71
+        }
+
+        fn read_long(&mut self, _address: u32) -> u32 {
+            0
+        }
+
+        fn write_byte(&mut self, _address: u32, _value: u8) {}
+
+        fn write_word(&mut self, _address: u32, _value: u16) {}
+
+        fn write_long(&mut self, _address: u32, _value: u32) {}
+
+        fn ipl_hold_sample(&mut self) {
+            self.events.push(Event::IplHold);
+        }
+    }
+
+    fn m68000_cpu_with_one_prefetch_word() -> CpuCore {
+        let mut cpu = CpuCore::new();
+        cpu.set_cpu_type(CpuType::M68000);
+        cpu.pc = 0x2000;
+        cpu.prefetch_queue = [0x4e71, 0];
+        cpu.prefetch_count = 1;
+        cpu
+    }
+
+    #[test]
+    fn m68000_swap_prefetches_before_register_update() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0x1234_ABCD;
+
+        let cycles = cpu.exec_swap(&mut bus, 0);
+
+        assert_eq!(cycles, 4);
+        assert_eq!(cpu.dar[0], 0xABCD_1234);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(bus.events, vec![Event::ReadWord(0x2002), Event::IplHold]);
     }
 }

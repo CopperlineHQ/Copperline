@@ -17,6 +17,26 @@ impl CpuCore {
         }
     }
 
+    fn finish_m68000_register_unary_rmw<B: AddressBus>(
+        &mut self,
+        bus: &mut B,
+        reg: usize,
+        size: Size,
+        value: u32,
+    ) -> i32 {
+        // 68000 CLR/NEG/NEGX/NOT to Dn performs the final prefetch, samples
+        // IPL on that prefetch, then writes the register. Long forms have two
+        // trailing internal clocks before the register update.
+        self.top_up_prefetch(bus);
+        self.ipl_poll_point(bus);
+        if size == Size::Long {
+            self.internal_cycles(2);
+            self.flush_sync(bus);
+        }
+        self.write_data_reg_sized(reg, size, value);
+        if size == Size::Long { 6 } else { 4 }
+    }
+
     fn finish_m68000_register_quickop<B: AddressBus>(&mut self, bus: &mut B, internal_clocks: u32) {
         if self.cpu_type != CpuType::M68000 {
             return;
@@ -274,6 +294,17 @@ impl CpuCore {
         size: Size,
         mode: AddressingMode,
     ) -> i32 {
+        if self.cpu_type == CpuType::M68000 {
+            if let AddressingMode::DataDirect(reg) = mode {
+                let cycles = self.finish_m68000_register_unary_rmw(bus, reg as usize, size, 0);
+                self.n_flag = 0;
+                self.not_z_flag = 0;
+                self.v_flag = 0;
+                self.c_flag = 0;
+                return cycles;
+            }
+        }
+
         let ea = self.resolve_ea(bus, mode, size);
         if self.run_mode == RUN_MODE_BERR_AERR_RESET {
             return 50;
@@ -305,6 +336,18 @@ impl CpuCore {
         size: Size,
         mode: AddressingMode,
     ) -> i32 {
+        if self.cpu_type == CpuType::M68000 {
+            if let AddressingMode::DataDirect(reg) = mode {
+                let reg = reg as usize;
+                let src = self.d(reg) & size.mask();
+                let result = 0u32.wrapping_sub(src);
+                let cycles =
+                    self.finish_m68000_register_unary_rmw(bus, reg, size, result & size.mask());
+                self.set_sub_flags(src, 0, result, size);
+                return cycles;
+            }
+        }
+
         let ea = self.resolve_ea(bus, mode, size);
         let src = self.read_resolved_ea(bus, ea, size);
         if self.run_mode == RUN_MODE_BERR_AERR_RESET {
@@ -328,6 +371,15 @@ impl CpuCore {
         size: Size,
         mode: AddressingMode,
     ) -> i32 {
+        if self.cpu_type == CpuType::M68000 {
+            if let AddressingMode::DataDirect(reg) = mode {
+                let reg = reg as usize;
+                let src = self.d(reg) & size.mask();
+                let result = self.exec_subx(size, src, 0);
+                return self.finish_m68000_register_unary_rmw(bus, reg, size, result);
+            }
+        }
+
         let ea = self.resolve_ea(bus, mode, size);
         let src = self.read_resolved_ea(bus, ea, size);
         if self.run_mode == RUN_MODE_BERR_AERR_RESET {
@@ -349,6 +401,17 @@ impl CpuCore {
         size: Size,
         mode: AddressingMode,
     ) -> i32 {
+        if self.cpu_type == CpuType::M68000 {
+            if let AddressingMode::DataDirect(reg) = mode {
+                let reg = reg as usize;
+                let src = self.d(reg) & size.mask();
+                let result = !src & size.mask();
+                let cycles = self.finish_m68000_register_unary_rmw(bus, reg, size, result);
+                self.set_logic_flags(result, size);
+                return cycles;
+            }
+        }
+
         let ea = self.resolve_ea(bus, mode, size);
         let src = self.read_resolved_ea(bus, ea, size);
         if self.run_mode == RUN_MODE_BERR_AERR_RESET {
@@ -699,5 +762,38 @@ mod tests {
             bus.events,
             vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(4)]
         );
+    }
+
+    #[test]
+    fn m68000_neg_long_data_register_prefetches_before_internal_sync() {
+        let mut cpu = cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0x0000_0001;
+
+        let cycles = cpu.exec_neg(&mut bus, Size::Long, AddressingMode::DataDirect(0));
+
+        assert_eq!(cycles, 6);
+        assert_eq!(cpu.dar[0], 0xFFFF_FFFF);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(2)]
+        );
+    }
+
+    #[test]
+    fn m68000_clr_byte_data_register_polls_on_final_prefetch() {
+        let mut cpu = cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0x1234_56FF;
+
+        let cycles = cpu.exec_clr(&mut bus, Size::Byte, AddressingMode::DataDirect(0));
+
+        assert_eq!(cycles, 4);
+        assert_eq!(cpu.dar[0], 0x1234_5600);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(bus.events, vec![Event::ReadWord(0x2002), Event::IplHold]);
     }
 }
