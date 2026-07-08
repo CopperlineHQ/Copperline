@@ -44,22 +44,27 @@ const PAL_VISIBLE_LINE0: i32 = 0x2C;
 // which show the bitmap's first lo-res pixel fully visible at the edge).
 const DIW_HSTART_FB0: i32 = 0x62;
 const STANDARD_DIW_HSTART: i32 = 0x81;
-// Standard DIWSTRT $81 is the visible window edge. The first standard
-// bitplane sample at DDFSTRT $38 is already one lowres native sample into the
-// fetched word, so the fetch/output phase is referenced one color clock earlier.
+// Standard DIWSTRT $81 is the visible window edge. Both a standard lo-res
+// ($38 DDF) and standard hi-res ($3C DDF) picture start their first fetched
+// sample flush at that edge: the references position bitplane sample 0 at
+// framebuffer x = (reference - DIW_HSTART_FB0) * 2, and DIW_HSTART_FB0 (0x62)
+// with reference 0x81 puts sample 0 at x = 62, exactly where the 2H-196
+// comparator opens the window. A standard 20-word lo-res / 40-word hi-res row
+// then fills the window's 320 lo-res / 640 hi-res samples flush to both edges,
+// matching vAmiga (verified on the vAmigaTS Denise/Registers/BPLCON0/modes
+// A500 references, which reach 0.000% only when the hi-res picture sits flush).
 //
-// The lo-res fetch/display phase sits 3 colour clocks later than the hi-res
-// phase: a hi-res fetch slot delivers its word to Denise's shifter on a
-// different beam edge than a lo-res slot, so the reference the renderer uses to
-// place the first fetched pixel differs by resolution. The references position
-// bitplane sample 0 at framebuffer x = (reference - DIW_HSTART_FB0) * 2, so
-// they moved +1 in lockstep with the DIW_HSTART_FB0 comparator fix to keep the
-// hardware-calibrated bitmap positions (lo-res sample 0 at x = 62, hi-res
-// standard $81/$3C flush at x = 64). The standard $81 window edge now sits at
-// x = 62 too, exposing the lo-res bitmap's first sample as on real hardware.
+// Hi-res briefly used reference 0x82: that kept the picture "beam-anchored" at
+// x = 64 after the comparator moved to x = 62 (2H-196), which left the picture
+// two hi-res pixels inside the window and clipped its rightmost fetched pixel
+// against the window's closing edge -- e.g. the AmigaDOS window's right border
+// on KS1.3 (the "binary" demo, r.adf) vanished. Because hi-res has one
+// framebuffer pixel per sample (lo-res has two), the +1 reference bump that
+// kept lo-res flush over-shifted hi-res by two, so hi-res needs the same 0x81
+// reference as lo-res to stay flush at the window edge.
 // See `fetch_reference` below.
 const DIW_HSTART_FETCH_REFERENCE_LORES: i32 = 0x81;
-const DIW_HSTART_FETCH_REFERENCE_HIRES: i32 = 0x82;
+const DIW_HSTART_FETCH_REFERENCE_HIRES: i32 = 0x81;
 // Register/copper-write x=0 anchor, in colour clocks. Moved left by 8 colour
 // clocks in lockstep with DIW_HSTART_FB0 (16 lo-res pixels) so register writes
 // and bitplane pixels still register against each other after widening.
@@ -637,26 +642,33 @@ fn enforce_h_window_closed_intervals(
             let mut sx = x;
             while sx < closed_end {
                 let control = control_at_x(base_controls[y], &control_segments[y], sx);
-                let next_ctl = control_segments[y]
+                // The border colour follows COLOR00 per pixel, so a run ends at
+                // the next control OR palette (colour) segment -- not just the
+                // next control change. Splitting on control alone painted a
+                // whole control-run with COLOR00 sampled at its start, dropping
+                // any mid-run colour write (a copper COLOR00 change inside the
+                // left border, as in copper-chunky banners).
+                let next_bound = control_segments[y]
                     .iter()
                     .map(|seg| seg.x)
+                    .chain(palette_segments[y].iter().map(|seg| seg.x))
                     .filter(|&b| b > sx)
                     .min()
                     .unwrap_or(FB_WIDTH)
                     .min(closed_end);
                 if !control.display_window_contains_line(y, visible_line0) {
                     // Row is outside the vertical window here: already border.
-                    sx = next_ctl;
+                    sx = next_bound;
                     continue;
                 }
                 if control.border_sprite_enabled() {
-                    sx = next_ctl;
+                    sx = next_bound;
                     continue;
                 }
                 let palette = palette_at_x(base_palettes[y], &palette_segments[y], sx);
                 let pixel = background_pixel(&control, palette[0], true);
-                row[sx..next_ctl].fill(pixel);
-                sx = next_ctl;
+                row[sx..next_bound].fill(pixel);
+                sx = next_bound;
             }
             x = closed_end;
         }

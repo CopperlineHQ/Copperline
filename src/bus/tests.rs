@@ -4548,11 +4548,13 @@ fn beam_timed_bplcon0_hires_narrows_later_bitplane_pixels() {
     let mut fb = vec![0; FB_PIXELS];
     bitplane::render(&mut bus, &mut fb);
 
-    // Content columns sit 2 fb px right of the hardware window edge
-    // (bitmap positions are beam-anchored; STANDARD_VISIBLE_X0 moved to 62).
-    assert_eq!(fb[STANDARD_VISIBLE_X0 + 34], rgb12_to_rgba8(0x0000));
-    assert_eq!(fb[STANDARD_VISIBLE_X0 + 36], rgb12_to_rgba8(0x0F00));
-    assert_eq!(fb[STANDARD_VISIBLE_X0 + 37], rgb12_to_rgba8(0x0000));
+    // Content columns sit flush against the hardware window edge
+    // (STANDARD_VISIBLE_X0 = 62): standard hi-res places its first fetched
+    // sample at the window edge, so the set bit lands two fb px left of the
+    // old beam-anchored placement.
+    assert_eq!(fb[STANDARD_VISIBLE_X0 + 32], rgb12_to_rgba8(0x0000));
+    assert_eq!(fb[STANDARD_VISIBLE_X0 + 34], rgb12_to_rgba8(0x0F00));
+    assert_eq!(fb[STANDARD_VISIBLE_X0 + 35], rgb12_to_rgba8(0x0000));
 }
 
 #[test]
