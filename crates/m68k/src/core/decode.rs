@@ -1008,6 +1008,20 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             cpu.dar[reg] = (cpu.dar[reg] & 0xffff_0000) | (sr & 0xffff);
             return 6;
         }
+        if matches!(cpu.cpu_type, CpuType::M68010 | CpuType::SCC68070)
+            && let AddressingMode::DataDirect(reg) = mode
+        {
+            if cpu.prefetch_enabled() {
+                cpu.top_up_prefetch(bus);
+                cpu.ipl_poll_point(bus);
+                if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
+                    return 50;
+                }
+            }
+            let reg = reg as usize;
+            cpu.dar[reg] = (cpu.dar[reg] & 0xffff_0000) | (sr & 0xffff);
+            return 4;
+        }
         // 68000 quirk: like CLR, MOVE from SR reads its destination before
         // writing (removed on the 68010+).
         let ea = cpu.resolve_ea(bus, mode, Size::Word);
@@ -1038,9 +1052,18 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
         }
         let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
         let ccr = cpu.get_ccr() as u32;
-        if mode.is_register_direct() {
-            // 68010: register destination costs only the final prefetch.
-            cpu.write_ea(bus, mode, Size::Word, ccr);
+        if let AddressingMode::DataDirect(reg) = mode {
+            // 68010: register destination costs only the final prefetch,
+            // and Moira orders that prefetch before the Dn write.
+            if cpu.prefetch_enabled() {
+                cpu.top_up_prefetch(bus);
+                cpu.ipl_poll_point(bus);
+                if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
+                    return 50;
+                }
+            }
+            let reg = reg as usize;
+            cpu.dar[reg] = (cpu.dar[reg] & 0xffff_0000) | ccr;
             return 4;
         }
         // 68010 memory destination: internal clocks, EA calculation, the
@@ -3142,6 +3165,15 @@ mod tests {
         cpu
     }
 
+    fn m68010_cpu_with_one_prefetch_word() -> CpuCore {
+        let mut cpu = CpuCore::new();
+        cpu.set_cpu_type(CpuType::M68010);
+        cpu.pc = 0x2000;
+        cpu.prefetch_queue = [0x4e71, 0];
+        cpu.prefetch_count = 1;
+        cpu
+    }
+
     #[test]
     fn m68000_scc_true_data_register_prefetches_before_internal_sync() {
         let mut cpu = m68000_cpu_with_one_prefetch_word();
@@ -3407,6 +3439,40 @@ mod tests {
             bus.events,
             vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(2)]
         );
+    }
+
+    #[test]
+    fn m68010_move_sr_data_register_writes_after_final_prefetch() {
+        let mut cpu = m68010_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.set_sr(0x270f);
+        cpu.dar[0] = 0xaaaa_0000;
+
+        // MOVE SR,D0
+        let cycles = dispatch_group_4(&mut cpu, &mut bus, 0x40c0);
+
+        assert_eq!(cycles, 4);
+        assert_eq!(cpu.d(0), 0xaaaa_270f);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(bus.events, vec![Event::ReadWord(0x2002), Event::IplHold]);
+    }
+
+    #[test]
+    fn m68010_move_ccr_data_register_writes_after_final_prefetch() {
+        let mut cpu = m68010_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.set_ccr(0x0f);
+        cpu.dar[0] = 0xaaaa_0000;
+
+        // MOVE CCR,D0
+        let cycles = dispatch_group_4(&mut cpu, &mut bus, 0x42c0);
+
+        assert_eq!(cycles, 4);
+        assert_eq!(cpu.d(0), 0xaaaa_000f);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(bus.events, vec![Event::ReadWord(0x2002), Event::IplHold]);
     }
 
     #[test]

@@ -111,8 +111,10 @@ The 68010's own cycle costs where they differ from the 68000 are
 calibrated against the vAmigaTS `CPU/Timing`/`CPU/Timing2` measurements
 (cross-checked with Moira's cycle-exact 68010 path, which matches
 A500+68010 photos): MOVES spends per-EA-mode internal clocks between the
-address calculation and the SFC/DFC data cycle, MOVE from CCR is
-4 clocks to a register and prefetches before its memory write, a
+address calculation and the SFC/DFC data cycle, MOVE from CCR and
+privileged MOVE from SR both cost 4 clocks to a register and perform their
+final prefetch before updating `Dn`, MOVE from CCR to memory prefetches
+before its write, a
 format-0 RTE is 24 clocks (the format word is read once, not re-read),
 and an interrupt dispatch is 46 clocks (12 internal before the four-word
 format-0 frame) against the 68000's 44. STOP semantics shared with the
