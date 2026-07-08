@@ -887,6 +887,12 @@ pub struct Bus {
     /// Transient bus-cycle state, rebuilt every access; not serialized.
     #[serde(skip)]
     cpu_custom_access_slot: Option<(u32, u32)>,
+    /// Beam position where the CPU requested the most recent custom-register
+    /// access, before waiting for fixed DMA, the Copper, or the blitter to
+    /// release a chip-bus slot. This feeds the CPU read/write landing traces.
+    /// Transient bus-cycle state, rebuilt every access; not serialized.
+    #[serde(skip)]
+    cpu_custom_request_slot: Option<(u32, u32)>,
     dbg_bpl_cck: Vec<u32>,
     dbg_slotmap: Vec<Vec<u8>>,
     dbg_slotmap_on: bool,
@@ -1049,6 +1055,80 @@ fn diag_cpu_writes_on() -> bool {
     use std::sync::OnceLock;
     static V: OnceLock<bool> = OnceLock::new();
     *V.get_or_init(|| crate::envcfg::flag("COPPERLINE_DIAG_CPU_WRITES"))
+}
+
+/// One-shot env flag for the CPU read-landing trace
+/// (`COPPERLINE_DIAG_CPU_READS=1`); see [`Bus::diag_cpu_read`].
+fn diag_cpu_reads_on() -> bool {
+    use std::sync::OnceLock;
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| crate::envcfg::flag("COPPERLINE_DIAG_CPU_READS"))
+}
+
+/// One-shot env flag for the CPU chip-bus access trace
+/// (`COPPERLINE_DIAG_CPU_BUS=1`); see [`Bus::diag_cpu_bus_access`].
+fn diag_cpu_bus_on() -> bool {
+    use std::sync::OnceLock;
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| crate::envcfg::flag("COPPERLINE_DIAG_CPU_BUS"))
+}
+
+fn cpu_bus_access_kind_name(kind: CpuBusAccessKind) -> &'static str {
+    match kind {
+        CpuBusAccessKind::Fetch => "fetch",
+        CpuBusAccessKind::Read => "read",
+        CpuBusAccessKind::Write => "write",
+        CpuBusAccessKind::Custom => "custom",
+    }
+}
+
+fn diag_cpu_bus_addr_ranges() -> &'static [(u32, u32)] {
+    use std::sync::OnceLock;
+    static V: OnceLock<Vec<(u32, u32)>> = OnceLock::new();
+    V.get_or_init(|| {
+        let Some(spec) = crate::envcfg::var("COPPERLINE_DIAG_CPU_BUS_ADDR") else {
+            return Vec::new();
+        };
+        spec.split(',')
+            .filter_map(|part| {
+                let part = part.trim();
+                if part.is_empty() {
+                    return None;
+                }
+                if let Some((lo, hi)) = part.split_once(':') {
+                    let lo = parse_diag_u32(lo)?;
+                    let hi = parse_diag_u32(hi)?;
+                    return Some((lo.min(hi), lo.max(hi)));
+                }
+                let addr = parse_diag_u32(part)?;
+                Some((addr, addr))
+            })
+            .collect()
+    })
+    .as_slice()
+}
+
+fn diag_cpu_bus_addr_matches(addr: Option<u32>, size: usize) -> bool {
+    let ranges = diag_cpu_bus_addr_ranges();
+    if ranges.is_empty() {
+        return true;
+    }
+    let Some(addr) = addr else {
+        return false;
+    };
+    let last = addr.saturating_add(size.max(1) as u32 - 1);
+    ranges.iter().any(|&(lo, hi)| addr <= hi && last >= lo)
+}
+
+fn custom_register_cpu_addr(addr: u64) -> u32 {
+    const CUSTOM_BASE: u32 = 0x00DF_F000;
+    const CUSTOM_SIZE: u32 = 0x0000_1000;
+    let addr = addr as u32;
+    if addr < CUSTOM_SIZE {
+        CUSTOM_BASE + addr
+    } else {
+        addr
+    }
 }
 
 fn beam_write_source_name(source: BeamWriteSource) -> &'static str {
@@ -2078,6 +2158,7 @@ impl Bus {
             cpu_short_bus_cycle: false,
             cpu_bus_tail_carry: 0,
             cpu_custom_access_slot: None,
+            cpu_custom_request_slot: None,
             cpu_granted_chip_slots: 0,
             cpu_missed_chip_slots: 0,
             dbg_bpl_cck: vec![0; 340],
@@ -3398,21 +3479,29 @@ impl Bus {
         } else {
             bus_slots_for_cpu_access(size)
         };
-        for _ in 0..slots {
+        let trace_cpu_bus = diag_cpu_bus_on() && diag_cpu_bus_addr_matches(addr, size);
+        for slot in 0..slots {
             self.flush_audio_before_audio_dma_slot();
+            let request_slot = (self.agnus.vpos, self.agnus.hpos);
+            if matches!(kind, CpuBusAccessKind::Custom) {
+                self.cpu_custom_request_slot = Some(request_slot);
+            }
+            let mut wait_cck = 0;
             while !self.cpu_can_use_current_slot() {
                 let (cck, tick) = self.advance_one_chip_bus_quantum(None);
+                wait_cck += cck;
                 self.note_cpu_missed_chip_bus_cycle();
                 self.record_slice_bus_advance(cck, tick);
                 self.flush_audio_before_audio_dma_slot();
             }
+            let grant_slot = (self.agnus.vpos, self.agnus.hpos);
             if matches!(kind, CpuBusAccessKind::Custom) {
                 // Remember the slot that carries a custom-register access:
                 // a register write's Denise/Agnus-effective position is
                 // referenced from this slot (see `record_render_write`),
                 // not from the beam position after the bus cycle's tail.
                 // A long-word access stores its second (low-word) slot.
-                self.cpu_custom_access_slot = Some((self.agnus.vpos, self.agnus.hpos));
+                self.cpu_custom_access_slot = Some(grant_slot);
             }
             let (cck, tick) = self.advance_one_chip_bus_quantum(Some(ChipBusOwner::Cpu));
             self.note_cpu_granted_chip_bus_cycle();
@@ -3436,9 +3525,70 @@ impl Bus {
                 let (cck, tick) = self.advance_one_chip_bus_quantum(None);
                 self.record_slice_bus_advance(cck, tick);
             }
+            if trace_cpu_bus {
+                self.diag_cpu_bus_access(
+                    kind,
+                    addr,
+                    size,
+                    slot + 1,
+                    slots,
+                    request_slot,
+                    grant_slot,
+                    wait_cck,
+                );
+            }
         }
         if self.cpu_short_bus_cycle && !wide_bus && matches!(kind, CpuBusAccessKind::Read) {
             self.bill_020_read_data_wait();
+        }
+    }
+
+    /// CPU chip-bus access trace (`COPPERLINE_DIAG_CPU_BUS=1`): logs each
+    /// requested CPU chip-bus slot, the slot granted by Agnus arbitration, and
+    /// the beam position after the bus cycle tail has elapsed.
+    fn diag_cpu_bus_access(
+        &self,
+        kind: CpuBusAccessKind,
+        addr: Option<u32>,
+        size: usize,
+        slot: u32,
+        slots: u32,
+        request_slot: (u32, u32),
+        grant_slot: (u32, u32),
+        wait_cck: u32,
+    ) {
+        let (rv, rh) = request_slot;
+        let (v, h) = grant_slot;
+        match addr {
+            Some(addr) => eprintln!(
+                "CPUBUS kind={} addr={:08x} size={} slot={}/{} rv={:03x} rh={:02x} v={:03x} h={:02x} wait={} ev={:03x} eh={:02x}",
+                cpu_bus_access_kind_name(kind),
+                addr,
+                size,
+                slot,
+                slots,
+                rv,
+                rh,
+                v,
+                h,
+                wait_cck,
+                self.agnus.vpos,
+                self.agnus.hpos
+            ),
+            None => eprintln!(
+                "CPUBUS kind={} addr=-------- size={} slot={}/{} rv={:03x} rh={:02x} v={:03x} h={:02x} wait={} ev={:03x} eh={:02x}",
+                cpu_bus_access_kind_name(kind),
+                size,
+                slot,
+                slots,
+                rv,
+                rh,
+                v,
+                h,
+                wait_cck,
+                self.agnus.vpos,
+                self.agnus.hpos
+            ),
         }
     }
 
@@ -4344,7 +4494,11 @@ impl Bus {
     // -----------------------------------------------------------------
 
     pub fn custom_read(&mut self, addr: u64, size: usize) -> u64 {
-        self.grant_cpu_bus_access(size, CpuBusAccessKind::Custom);
+        self.grant_cpu_bus_access_at(
+            Some(custom_register_cpu_addr(addr)),
+            size,
+            CpuBusAccessKind::Custom,
+        );
         if self.cpu_short_bus_cycle && !self.aga_enabled() {
             self.bill_020_read_data_wait();
         }
@@ -4358,6 +4512,9 @@ impl Bus {
             1 => {
                 let val = self.read_custom_word(off & 0xFFE);
                 trace!("custom R8  off={:03X} val_word={:04X}", off, val);
+                if diag_cpu_reads_on() {
+                    self.diag_cpu_read(off & 0xFFE, size, val as u64);
+                }
                 if addr & 1 == 0 {
                     (val >> 8) as u64
                 } else {
@@ -4372,14 +4529,46 @@ impl Bus {
                 let lo = self.read_custom_word(off.wrapping_add(2));
                 let v = ((hi as u64) << 16) | (lo as u64);
                 trace!("custom R32 off={:03X} val={:08X}", off, v);
+                if diag_cpu_reads_on() {
+                    self.diag_cpu_read(off, size, hi as u64);
+                    self.diag_cpu_read(off.wrapping_add(2), size, lo as u64);
+                }
                 v
             }
             _ => {
                 let val = self.read_custom_word(off);
                 trace!("custom R16 off={:03X} val={:04X}", off, val);
+                if diag_cpu_reads_on() {
+                    self.diag_cpu_read(off, size, val as u64);
+                }
                 val as u64
             }
         }
+    }
+
+    /// CPU custom-register read trace
+    /// (`COPPERLINE_DIAG_CPU_READS=1`): logs every CPU custom-register read's
+    /// granted chip-bus slot and the beam position after timed devices were
+    /// flushed for the value being returned.
+    fn diag_cpu_read(&self, off: u16, size: usize, value: u64) {
+        let (rv, rh) = self
+            .cpu_custom_request_slot
+            .unwrap_or((self.agnus.vpos, self.agnus.hpos));
+        let (v, h) = self
+            .cpu_custom_access_slot
+            .unwrap_or((self.agnus.vpos, self.agnus.hpos));
+        eprintln!(
+            "CPUPROBE PEEK rv={:03x} rh={:02x} v={:03x} h={:02x} reg={:03x} size={} val={:04x} ev={:03x} eh={:02x}",
+            rv,
+            rh,
+            v,
+            h,
+            off & 0x1FE,
+            size,
+            value,
+            self.agnus.vpos,
+            self.agnus.hpos
+        );
     }
 
     /// One-shot env flag for the CPU write-landing trace
@@ -4388,11 +4577,16 @@ impl Bus {
     /// effect applies at) to stderr, for cross-emulator comparison against
     /// vAmiga's `VAMIGA_CPU_PROBE` trace.
     fn diag_cpu_write(&self, off: u16, word: u16) {
+        let (rv, rh) = self
+            .cpu_custom_request_slot
+            .unwrap_or((self.agnus.vpos, self.agnus.hpos));
         let (v, h) = self
             .cpu_custom_access_slot
             .unwrap_or((self.agnus.vpos, self.agnus.hpos));
         eprintln!(
-            "CPUPROBE POKE v={:03x} h={:02x} reg={:03x} val={:04x} ev={:03x} eh={:02x}",
+            "CPUPROBE POKE rv={:03x} rh={:02x} v={:03x} h={:02x} reg={:03x} val={:04x} ev={:03x} eh={:02x}",
+            rv,
+            rh,
             v,
             h,
             off & 0x1FE,
@@ -4406,7 +4600,11 @@ impl Bus {
     /// should preempt the slice so the freshly-asserted IRQ can be
     /// delivered before agnus has a chance to OR in VERTB.
     pub fn custom_write(&mut self, addr: u64, size: usize, val: u64) -> bool {
-        self.grant_cpu_bus_access(size, CpuBusAccessKind::Custom);
+        self.grant_cpu_bus_access_at(
+            Some(custom_register_cpu_addr(addr)),
+            size,
+            CpuBusAccessKind::Custom,
+        );
         // Apply deferred device clocks before the write lands: registers such as
         // INTREQ/INTENA/ADKCON/DSKLEN/AUDxxx/SERDAT change timed-device state, so
         // the device must first be advanced to this color clock (e.g. so a
