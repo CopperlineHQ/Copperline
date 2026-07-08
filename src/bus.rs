@@ -230,6 +230,9 @@ const DMACON_SPREN: u16 = 1 << 5;
 const DMACON_BLTEN: u16 = 1 << 6;
 const DMACON_BPLEN: u16 = 1 << 8;
 const DMACON_BLTPRI: u16 = 1 << 10;
+const BLTCON0_USE_C: u16 = 1 << 9;
+const BLTCON0_USE_D: u16 = 1 << 8;
+const BLTCON1_LINE: u16 = 1 << 0;
 const BLTCON1_DOFF: u16 = 1 << 7;
 // The Copper cannot take (or hold) a bus slot on the last-but-two color
 // clock of the line: $E0 on short lines, $E1 on NTSC long lines (vAmiga
@@ -2904,6 +2907,12 @@ impl Bus {
         self.current_frame_render_blocked = self.agnus.vpos != 0 || self.agnus.hpos != 0;
     }
 
+    pub(crate) fn reset_transient_diagnostics_after_state_load(&mut self) {
+        // The code-path ring that consumes this alarm is debugger-local state,
+        // so a serialized pending alarm has no useful history after a restore.
+        self.diag_lowmem_blit = false;
+    }
+
     pub fn emulated_seconds(&self) -> f64 {
         self.emulated_cck as f64 / PAULA_CLOCK_HZ as f64
     }
@@ -4652,6 +4661,21 @@ impl Bus {
                 }
                 self.write_custom_word_from(off, word, BeamWriteSource::Cpu)
             }
+        }
+    }
+
+    fn blitter_start_may_write_lowmem(&self) -> bool {
+        if self.blitter.bltdpt >= 0x1000 {
+            return false;
+        }
+        let con0 = self.blitter.bltcon0;
+        let con1 = self.blitter.bltcon1;
+        if con1 & BLTCON1_LINE != 0 {
+            // In line mode the store is gated by channel C, and the first
+            // pixel is written through BLTDPT before the D pointer follows C.
+            con0 & BLTCON0_USE_C != 0
+        } else {
+            con0 & BLTCON0_USE_D != 0 && con1 & BLTCON1_DOFF == 0
         }
     }
 

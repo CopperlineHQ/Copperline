@@ -113,7 +113,7 @@ authoritative list. The most useful ones:
 | `COPPERLINE_TRACE_BLITTER` | Path to a JSONL trace of blitter starts, forced finishes, DMACONR polls, and completion IRQ latches; start records include minterm/control registers, DMA/display context, FMODE, and all eight bitplane pointers |
 | `COPPERLINE_DIAG_DISK` | Disk DMA state changes (DSKLEN writes) |
 | `COPPERLINE_DIAG_AUDIO_NOTES` | Paula channel note on/off events |
-| `COPPERLINE_DIAG_CRASH` | CPU exception/halt conditions |
+| `COPPERLINE_DIAG_CRASH` | CPU empty-RAM execution and low-memory blitter write context |
 | `COPPERLINE_DIAG_GAYLE` / `COPPERLINE_DIAG_CDTV` | Gayle IDE / CDTV controller traffic |
 | `COPPERLINE_DIAG_A2091` | A2091 SCSI board register traffic (DMAC + WD33C93 accesses; the trace that brings up boot-ROM issues) |
 | `COPPERLINE_DIAG_CURSOR` | On every mouse-button press, log the raw host cursor position, the window's scale factor and inner size, the texture supersample factor, the `window_pos_to_pixel` result, and which region (status bar / display / none) the click resolved to; for diagnosing mouse capture on DPI scale changes or mixed-scale monitors |

@@ -13,11 +13,12 @@ use super::{
     BeamRegisterWrite, BeamWriteSource, Bus, CapturedBitplaneRow, CapturedSpriteLine, ChipBusOwner,
     CpuBusAccessKind, DeviceClock, DisplaySpriteDmaState, DisplaySpriteLineData, FrameBusTrace,
     LiveCollisionControl, LiveCollisionLineReplay, LiveSpriteCollisionSource,
-    RenderRegisterSnapshot, BLITTER_SLOWDOWN_CPU_MISS_LIMIT, BLTCON1_DOFF, BPLCON0_ECSENA,
-    BPLCON3_BRDSPRT, BPLCON3_SPRES_HIRES, DENISE_HPOS_LAG_CCK, DMACON_BLTEN, DMACON_BLTPRI,
-    DMACON_BPLEN, DMACON_SPREN, PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS, RENDER_COPPER_WAIT_HPOS_FB0,
-    RENDER_DIW_HSTART_FB0, RENDER_MIN_OVERSCAN_START_VPOS, RENDER_VISIBLE_LINES,
-    RENDER_VISIBLE_START_VPOS, SPRITE_DMA_SLOT1_HPOS,
+    RenderRegisterSnapshot, BLITTER_SLOWDOWN_CPU_MISS_LIMIT, BLTCON0_USE_C, BLTCON0_USE_D,
+    BLTCON1_DOFF, BLTCON1_LINE, BPLCON0_ECSENA, BPLCON3_BRDSPRT, BPLCON3_SPRES_HIRES,
+    DENISE_HPOS_LAG_CCK, DMACON_BLTEN, DMACON_BLTPRI, DMACON_BPLEN, DMACON_SPREN,
+    PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS, RENDER_COPPER_WAIT_HPOS_FB0, RENDER_DIW_HSTART_FB0,
+    RENDER_MIN_OVERSCAN_START_VPOS, RENDER_VISIBLE_LINES, RENDER_VISIBLE_START_VPOS,
+    SPRITE_DMA_SLOT1_HPOS,
 };
 use crate::audio::AudioSink;
 use crate::chipset::agnus::{
@@ -7911,6 +7912,52 @@ fn bltsize_starts_dma_and_preempts_cpu_slice_without_irq_preempt() {
     assert_ne!(bus.paula.intreq & INT_BLIT, 0);
     assert!(!bus.blitter.busy);
     assert_eq!(bus.next_blitter_completion_cck(), None);
+}
+
+#[test]
+fn lowmem_blit_diagnostic_uses_mode_specific_write_gate() {
+    let mut bus = empty_bus();
+    bus.blitter.bltdpt = 0x0FFE;
+
+    bus.blitter.bltcon0 = BLTCON0_USE_D;
+    bus.blitter.bltcon1 = 0;
+    assert!(
+        bus.blitter_start_may_write_lowmem(),
+        "normal mode writes through channel D"
+    );
+
+    bus.blitter.bltcon1 = BLTCON1_DOFF;
+    assert!(
+        !bus.blitter_start_may_write_lowmem(),
+        "normal mode DOFF suppresses the D-channel store"
+    );
+
+    bus.blitter.bltcon0 = BLTCON0_USE_C;
+    bus.blitter.bltcon1 = BLTCON1_LINE;
+    assert!(
+        bus.blitter_start_may_write_lowmem(),
+        "line mode stores are gated by channel C"
+    );
+
+    bus.blitter.bltcon0 = BLTCON0_USE_D;
+    assert!(
+        !bus.blitter_start_may_write_lowmem(),
+        "line mode does not use channel D enable as the store gate"
+    );
+
+    bus.blitter.bltcon0 = BLTCON0_USE_C;
+    bus.blitter.bltdpt = 0x1000;
+    assert!(
+        !bus.blitter_start_may_write_lowmem(),
+        "the diagnostic only trips for the exception-vector area"
+    );
+
+    bus.diag_lowmem_blit = true;
+    bus.reset_transient_diagnostics_after_state_load();
+    assert!(
+        !bus.diag_lowmem_blit,
+        "a restored save state must not replay stale diagnostic alarms"
+    );
 }
 
 #[test]

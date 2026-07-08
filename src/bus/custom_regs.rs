@@ -627,7 +627,7 @@ impl Bus {
                 self.note_irq_latches_changed();
                 // A blit over the exception-vector area is useful crash context:
                 // flag it so the CPU wrapper can dump the instruction history.
-                if self.blitter.bltcon0 & 0x0100 != 0 && self.blitter.bltdpt < 0x1000 {
+                if self.blitter_start_may_write_lowmem() {
                     self.diag_lowmem_blit = true;
                 }
                 self.diag_blit_start(((val as u32) >> 6) & 0x3FF, (val as u32) & 0x3F);
@@ -717,6 +717,9 @@ impl Bus {
                 self.paula.intreq &= !crate::chipset::paula::INT_BLIT;
                 self.blit_irq_delay_cck = None;
                 self.note_irq_latches_changed();
+                if self.blitter_start_may_write_lowmem() {
+                    self.diag_lowmem_blit = true;
+                }
                 self.trace_blitter_start_ecs(val, source);
                 self.diag_blit_start(u32::from(self.blitter.bltsizv), (val as u32) & 0x07FF);
                 {

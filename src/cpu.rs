@@ -428,25 +428,24 @@ impl M68kMachine {
         }
     }
 
-    // COPPERLINE_DIAG_CRASH: keep a short history of (pc, opcode, A7) and, the first
-    // time the CPU executes a sustained run of zero opcodes from chip RAM (real
-    // empty memory -- a single 0x0000 opcode is a valid ORI.B #imm,D0), dump the
-    // history, the stack and the registers. Catches "demo jumped into empty
-    // memory" crashes with the path that led there.
+    // COPPERLINE_DIAG_CRASH: keep a short history of (pc, opcode, A7) and dump
+    // it when the CPU executes a sustained run of zero opcodes from chip RAM
+    // (real empty memory -- a single 0x0000 opcode is a valid ORI.B #imm,D0) or
+    // when a blit is armed to write low memory. Catches "demo jumped into empty
+    // memory" and exception-vector corruption crashes with the path that led
+    // there.
     fn dbg_record_crash_path(&mut self) {
         if self.dbg_crash_dumped {
             return;
         }
         let pc = self.cpu.pc;
-        let opcode = if (pc as usize) < self.bus.bus.mem.chip_ram.len() {
-            self.bus.bus.peek_chip_word(pc as usize)
-        } else {
-            0xFFFF
-        };
+        let opcode = self.bus.bus.peek_word_any(pc);
         // Require a run of zero words at and after the PC: 8 consecutive zero
         // words cannot be real code (ORI.B #0,D0 spam), only empty memory.
-        let in_empty_memory =
-            opcode == 0 && (1..8).all(|k| self.bus.bus.peek_chip_word(pc as usize + k * 2) == 0);
+        let pc_in_chip_ram = (pc as usize) < self.bus.bus.mem.chip_ram.len();
+        let in_empty_memory = pc_in_chip_ram
+            && opcode == 0
+            && (1..8).all(|k| self.bus.bus.peek_chip_word(pc as usize + k * 2) == 0);
         let came_from_code = self
             .dbg_crash_ring
             .back()
@@ -461,8 +460,13 @@ impl M68kMachine {
         if lowmem_blit || (in_empty_memory && came_from_code) {
             self.dbg_crash_dumped = true;
             let secs = self.bus.bus.emulated_seconds();
+            let reason = if lowmem_blit {
+                "low-memory blitter destination"
+            } else {
+                "zero-opcode chip RAM"
+            };
             log::warn!(
-                "CRASH: CPU entered zero-opcode memory at PC={:#010X} t={:.4}s SR={:#06X}",
+                "CRASH: {reason} at PC={:#010X} t={:.4}s SR={:#06X}",
                 pc,
                 secs,
                 self.cpu.get_sr(),
@@ -474,6 +478,21 @@ impl M68kMachine {
                 self.bus.bus.agnus.dmacon,
                 self.bus.bus.blitter.busy,
             );
+            if lowmem_blit {
+                let b = &self.bus.bus.blitter;
+                let line = b.bltcon1 & 0x0001 != 0;
+                let writes = if line { "C-gated line" } else { "D-channel" };
+                log::warn!(
+                    "  blit {writes} con0={:#06X} con1={:#06X} apt={:#08X} bpt={:#08X} cpt={:#08X} dpt={:#08X} dmod={}",
+                    b.bltcon0,
+                    b.bltcon1,
+                    b.bltapt,
+                    b.bltbpt,
+                    b.bltcpt,
+                    b.bltdpt,
+                    b.bltdmod,
+                );
+            }
             for reg in 0..8 {
                 log::warn!(
                     "  D{reg}={:#010X} A{reg}={:#010X}",
@@ -481,10 +500,13 @@ impl M68kMachine {
                     self.cpu.a(reg)
                 );
             }
-            let sp = self.cpu.a(7) as usize;
+            let sp = self.cpu.a(7);
             let mut stack = String::new();
             for k in 0..24 {
-                stack.push_str(&format!("{:04X} ", self.bus.bus.peek_chip_word(sp + k * 2)));
+                stack.push_str(&format!(
+                    "{:04X} ",
+                    self.bus.bus.peek_word_any(sp.wrapping_add(k * 2))
+                ));
             }
             log::warn!("  stack @A7={sp:#010X}: {stack}");
             // Hexdump the code around the crash site and around the most recent
@@ -503,7 +525,7 @@ impl M68kMachine {
                 for k in 0..32 {
                     row.push_str(&format!(
                         "{:04X} ",
-                        self.bus.bus.peek_chip_word(base as usize + k * 2)
+                        self.bus.bus.peek_word_any(base.wrapping_add(k * 2))
                     ));
                 }
                 log::warn!("  mem {base:#010X}: {row}");
@@ -1198,6 +1220,7 @@ impl M68kMachine {
         bus.adopt_host_resources(&mut self.bus.bus);
         bus.adopt_ui_debug_state(&self.bus.bus);
         bus.reset_transient_video_after_state_load();
+        bus.reset_transient_diagnostics_after_state_load();
         // The CPU model travels with the state (cpu_type, timing tables, and
         // address_mask all live in CpuCore); keep the bus adapter's mask copy
         // in step so external decode agrees with the restored core.
