@@ -2453,6 +2453,15 @@ fn dispatch_group_b<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             }
             let legacy = cpu.exec_cmp(size, src, cpu.d(reg));
             if cpu.cpu_type == CpuType::M68000 {
+                if size == Size::Long {
+                    cpu.top_up_prefetch(bus);
+                    cpu.ipl_poll_point(bus);
+                    if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
+                        return 50;
+                    }
+                    cpu.internal_cycles(2);
+                    cpu.flush_sync(bus);
+                }
                 cpu.cmp_ea_dn_cycles(mode, size)
             } else {
                 legacy
@@ -3064,6 +3073,26 @@ mod tests {
                 Event::IplHold,
                 Event::Sync(2)
             ]
+        );
+    }
+
+    #[test]
+    fn m68000_cmp_long_data_register_flushes_tail_after_final_prefetch() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0x0000_0001;
+        cpu.dar[1] = 0x0000_0001;
+
+        // CMP.L D1,D0
+        let cycles = dispatch_group_b(&mut cpu, &mut bus, 0xb081);
+
+        assert_eq!(cycles, 6);
+        assert_eq!(cpu.not_z_flag, 0);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(2)]
         );
     }
 }

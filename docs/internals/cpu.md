@@ -71,7 +71,9 @@ Instruction handlers can move the final prefetch earlier than the generic
 end-of-instruction top-up when 68000 microcode does so. That matters for
 register-only forms too: immediate ALU and CMPI to `Dn` perform the final
 prefetch before the data-register write or compare flags, and long register
-forms spend their trailing internal clocks after that prefetch.
+forms spend their trailing internal clocks after that prefetch. Plain
+`CMP.L <ea>,Dn` computes its flags before the final prefetch, then spends its
+2-clock long-compare tail after that prefetch.
 
 ## 68010
 

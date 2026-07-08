@@ -117,6 +117,9 @@ Model implemented (all gated to CpuType::M68000):
 - **Immediate register ALU/CMPI**: data-register destinations also pull the
   final prefetch before the `Dn` write or compare flags; long register forms
   then run their trailing internal clocks.
+- **CMP.L `<ea>,Dn`**: the compare flags are computed before the final
+  prefetch; the 68000 then polls IPL on that prefetch and flushes the 2-clock
+  long-compare tail after it.
 - **Flow changes** (`full_prefetch` / `prefetch_first`+`prefetch_second`):
   Bcc/BRA/DBcc taken, JMP, RTS/RTE/RTR refill from the target; JSR/BSR
   interleave (first prefetch, push, second prefetch). Their
