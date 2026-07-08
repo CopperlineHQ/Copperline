@@ -155,7 +155,9 @@ boundary (billed at the next instruction's first bus access), which mistimed the
 CPU-vs-bitplane-DMA contention and roughly doubled the beam cost of a DIV run
 mid-fetch. Flushing the internal clocks at the DIV boundary (Moira runs `SYNC`
 immediately after `prefetch<POLL>`) fixed it: row 31 8722 -> 4820. The later
-BLS-pressure fix moved the row to 4786, close to vAmiga's 4790 reference. This
+BLS-pressure fix moved the row to 4786, and placing MULU/MULS internal clocks
+after their final prefetch moved the helper-internal multiply timing to 4794,
+close to vAmiga's 4790 reference. This
 was TEK Rampage's Ellis scene going saturated (EHB half-bright dropped) and its
 Mirror scene crashing -- the DIV-heavy per-frame math patches the copper list
 while the 6-plane screen fetches, so the doubled DIV cost let the CPU fall behind
