@@ -143,8 +143,10 @@ Model implemented (68000-gated unless a bullet explicitly names the shared
   interleave (first prefetch, push, second prefetch). Their
   displacement/address words are consumed in `consume_without_prefetch`
   microcode mode (no np ahead of a stream about to be discarded).
-- **Status ops** (ORI/ANDI/EORI to CCR/SR, MOVE to CCR/SR): refill after the
-  status write. **STOP**: consumes its operand without prefetch, no top-up.
+- **Status ops**: `MOVE <ea>,CCR/SR` and `ORI/ANDI/EORI #imm,SR` run their
+  internal status-write delay before mutating CCR/SR, then refill; 68000
+  immediate-to-CCR mutates CCR before its internal delay. **STOP**: consumes
+  its operand without prefetch, no top-up.
 - **CLR**: reads its destination before writing (68000 quirk).
 - `EaResult::Immediate` now carries the VALUE (consumed via the queue), not
   an address re-read later as data.

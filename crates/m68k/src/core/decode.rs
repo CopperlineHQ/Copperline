@@ -1505,10 +1505,14 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                     if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
                         return 50;
                     }
+                    // MOVE to CCR/SR spends its status-write internal clocks
+                    // before the architectural status register changes, then
+                    // discards and refills the prefetch queue.
+                    if cpu.prefetch_enabled() {
+                        cpu.internal_cycles(4);
+                        cpu.flush_sync(bus);
+                    }
                     cpu.set_ccr(value);
-                    // Status modification spends 4 internal clocks before
-                    // discarding and refilling the prefetch queue.
-                    cpu.internal_cycles(4);
                     cpu.full_prefetch(bus);
                     if cpu.cpu_type == CpuType::M68000 {
                         12 + cpu.ea_source_cycles(mode, Size::Word)
@@ -1542,11 +1546,15 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                     if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
                         return 50;
                     }
+                    // MOVE to CCR/SR spends its status-write internal clocks
+                    // before the architectural status register changes, then
+                    // discards and refills the prefetch queue.
+                    if cpu.prefetch_enabled() {
+                        cpu.internal_cycles(4);
+                        cpu.flush_sync(bus);
+                    }
                     cpu.trace_t0_sr_write();
                     cpu.set_sr(value as u16);
-                    // Status modification spends 4 internal clocks before
-                    // discarding and refilling the prefetch queue.
-                    cpu.internal_cycles(4);
                     cpu.full_prefetch(bus);
                     if cpu.cpu_type == CpuType::M68000 {
                         12 + cpu.ea_source_cycles(mode, Size::Word)
@@ -3398,6 +3406,52 @@ mod tests {
         assert_eq!(
             bus.events,
             vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(2)]
+        );
+    }
+
+    #[test]
+    fn m68000_move_data_register_to_ccr_syncs_before_refill() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0x0000_000f;
+
+        // MOVE D0,CCR
+        let cycles = dispatch_group_4(&mut cpu, &mut bus, 0x44c0);
+
+        assert_eq!(cycles, 12);
+        assert_eq!(cpu.get_ccr(), 0x0f);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![
+                Event::Sync(4),
+                Event::ReadWord(0x2000),
+                Event::ReadWord(0x2002)
+            ]
+        );
+    }
+
+    #[test]
+    fn m68000_move_data_register_to_sr_syncs_before_refill() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0x0000_200f;
+
+        // MOVE D0,SR
+        let cycles = dispatch_group_4(&mut cpu, &mut bus, 0x46c0);
+
+        assert_eq!(cycles, 12);
+        assert_eq!(cpu.get_sr(), 0x200f);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![
+                Event::Sync(4),
+                Event::ReadWord(0x2000),
+                Event::ReadWord(0x2002)
+            ]
         );
     }
 

@@ -9,6 +9,22 @@ use crate::core::memory::AddressBus;
 use crate::core::types::{CpuType, Size};
 
 impl CpuCore {
+    fn finish_immediate_sr_write<B: AddressBus>(&mut self, bus: &mut B, sr: u16) {
+        if self.cpu_type == CpuType::M68000 {
+            // On the 68000 the SR mutation happens after the status-op
+            // internal delay, before the post-write refill.
+            self.internal_cycles(8);
+            self.flush_sync(bus);
+            self.trace_t0_sr_write();
+            self.set_sr(sr);
+        } else {
+            self.trace_t0_sr_write();
+            self.set_sr(sr);
+            self.internal_cycles(8);
+        }
+        self.full_prefetch(bus);
+    }
+
     pub(crate) fn finish_m68000_immediate_data_register_write<B: AddressBus>(
         &mut self,
         bus: &mut B,
@@ -98,12 +114,9 @@ impl CpuCore {
         }
         let imm = self.read_imm_16(bus);
         let sr = self.get_sr() & imm;
-        self.trace_t0_sr_write();
-        self.set_sr(sr);
         // Status modification spends 8 internal clocks before discarding and
         // refilling the prefetch queue.
-        self.internal_cycles(8);
-        self.full_prefetch(bus);
+        self.finish_immediate_sr_write(bus, sr);
         20
     }
 
@@ -178,12 +191,9 @@ impl CpuCore {
         }
         let imm = self.read_imm_16(bus);
         let sr = self.get_sr() | imm;
-        self.trace_t0_sr_write();
-        self.set_sr(sr);
         // Status modification spends 8 internal clocks before discarding and
         // refilling the prefetch queue.
-        self.internal_cycles(8);
-        self.full_prefetch(bus);
+        self.finish_immediate_sr_write(bus, sr);
         20
     }
 
@@ -256,12 +266,9 @@ impl CpuCore {
         }
         let imm = self.read_imm_16(bus);
         let sr = self.get_sr() ^ imm;
-        self.trace_t0_sr_write();
-        self.set_sr(sr);
         // Status modification spends 8 internal clocks before discarding and
         // refilling the prefetch queue.
-        self.internal_cycles(8);
-        self.full_prefetch(bus);
+        self.finish_immediate_sr_write(bus, sr);
         20
     }
 }
@@ -340,6 +347,29 @@ mod tests {
                 Event::ReadWord(0x2006),
                 Event::IplHold,
                 Event::Sync(4)
+            ]
+        );
+    }
+
+    #[test]
+    fn m68000_andi_sr_syncs_before_refill() {
+        let mut cpu = m68000_cpu_with_one_immediate_word();
+        let mut bus = TraceBus::default();
+        cpu.set_sr(0x270f);
+
+        let cycles = cpu.exec_andi_sr(&mut bus);
+
+        assert_eq!(cycles, 20);
+        assert_eq!(cpu.get_sr(), 0x270f);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![
+                Event::ReadWord(0x2002),
+                Event::Sync(8),
+                Event::ReadWord(0x2002),
+                Event::ReadWord(0x2004)
             ]
         );
     }

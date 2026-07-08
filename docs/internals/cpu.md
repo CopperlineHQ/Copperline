@@ -85,7 +85,11 @@ also waits until after the final prefetch and 2-clock tail before storing the SR
 word into `Dn`. `MOVEA <ea>,An` has no flags or tail clocks, but still delays
 the `An` update until after the final prefetch and IPL sample. The privileged
 `MOVE An,USP` and `MOVE USP,An` forms use the same
-prefetch-before-register-update point.
+prefetch-before-register-update point. Status-register writes also have
+instruction-specific side-effect timing: `MOVE <ea>,CCR/SR` and
+`ORI/ANDI/EORI #imm,SR` spend their internal status-write delay before the
+architectural CCR/SR mutation and post-write refill, while immediate-to-CCR
+mutates the CCR before that delay on the 68000.
 
 ## 68010
 
