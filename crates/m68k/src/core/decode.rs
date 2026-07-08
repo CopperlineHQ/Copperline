@@ -2206,6 +2206,9 @@ fn dispatch_group_8<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             let (result, _) = cpu.exec_or(bus, size, src, cpu.d(reg));
             cpu.set_d(reg, (cpu.d(reg) & !size.mask()) | result);
             if cpu.cpu_type == CpuType::M68000 {
+                if !finish_m68000_alu_ea_dn_long_tail(cpu, bus, mode, size) {
+                    return 50;
+                }
                 cpu.alu_ea_dn_cycles(mode, size)
             } else {
                 4
@@ -2303,6 +2306,9 @@ fn dispatch_group_9<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             let (result, _) = cpu.exec_sub(bus, size, src, dst);
             cpu.set_d(reg, (cpu.d(reg) & !size.mask()) | result);
             if cpu.cpu_type == CpuType::M68000 {
+                if !finish_m68000_alu_ea_dn_long_tail(cpu, bus, mode, size) {
+                    return 50;
+                }
                 cpu.alu_ea_dn_cycles(mode, size)
             } else {
                 4
@@ -2568,6 +2574,9 @@ fn dispatch_group_c<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             let (result, _) = cpu.exec_and(bus, size, src, cpu.d(reg));
             cpu.set_d(reg, (cpu.d(reg) & !size.mask()) | result);
             if cpu.cpu_type == CpuType::M68000 {
+                if !finish_m68000_alu_ea_dn_long_tail(cpu, bus, mode, size) {
+                    return 50;
+                }
                 cpu.alu_ea_dn_cycles(mode, size)
             } else {
                 4
@@ -2649,6 +2658,9 @@ fn dispatch_group_d<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             let (result, _) = cpu.exec_add(bus, size, src, dst);
             cpu.set_d(reg, (cpu.d(reg) & !size.mask()) | result);
             if cpu.cpu_type == CpuType::M68000 {
+                if !finish_m68000_alu_ea_dn_long_tail(cpu, bus, mode, size) {
+                    return 50;
+                }
                 cpu.alu_ea_dn_cycles(mode, size)
             } else {
                 4
@@ -2904,6 +2916,27 @@ fn read_immediate<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, size: Size) -> 
     }
 }
 
+fn finish_m68000_alu_ea_dn_long_tail<B: AddressBus>(
+    cpu: &mut CpuCore,
+    bus: &mut B,
+    mode: AddressingMode,
+    size: Size,
+) -> bool {
+    if cpu.cpu_type != CpuType::M68000 || size != Size::Long {
+        return true;
+    }
+
+    cpu.top_up_prefetch(bus);
+    cpu.ipl_poll_point(bus);
+    if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
+        return false;
+    }
+
+    cpu.internal_cycles(if CpuCore::ea_is_memory(mode) { 2 } else { 4 });
+    cpu.flush_sync(bus);
+    true
+}
+
 /// Return sentinel for illegal instruction interception.
 /// This function is called for undefined opcodes that don't match any pattern.
 fn illegal_instruction<B: AddressBus>(_cpu: &mut CpuCore, _bus: &mut B) -> i32 {
@@ -3093,6 +3126,46 @@ mod tests {
         assert_eq!(
             bus.events,
             vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(2)]
+        );
+    }
+
+    #[test]
+    fn m68000_sub_long_data_register_flushes_tail_after_final_prefetch() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0x0000_0003;
+        cpu.dar[1] = 0x0000_0001;
+
+        // SUB.L D1,D0
+        let cycles = dispatch_group_9(&mut cpu, &mut bus, 0x9081);
+
+        assert_eq!(cycles, 8);
+        assert_eq!(cpu.d(0), 0x0000_0002);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(4)]
+        );
+    }
+
+    #[test]
+    fn m68000_and_long_data_register_flushes_tail_after_final_prefetch() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0xff00_ff00;
+        cpu.dar[1] = 0x0f0f_0f0f;
+
+        // AND.L D1,D0
+        let cycles = dispatch_group_c(&mut cpu, &mut bus, 0xc081);
+
+        assert_eq!(cycles, 8);
+        assert_eq!(cpu.d(0), 0x0f00_0f00);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(4)]
         );
     }
 }

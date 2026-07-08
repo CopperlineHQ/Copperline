@@ -73,7 +73,9 @@ register-only forms too: immediate ALU and CMPI to `Dn` perform the final
 prefetch before the data-register write or compare flags, and long register
 forms spend their trailing internal clocks after that prefetch. Plain
 `CMP.L <ea>,Dn` computes its flags before the final prefetch, then spends its
-2-clock long-compare tail after that prefetch.
+2-clock long-compare tail after that prefetch. Long `ADD/SUB/AND/OR <ea>,Dn`
+forms write `Dn` before the final prefetch, then spend their 2- or 4-clock
+long-ALU tail after it depending on whether the source operand came from memory.
 
 ## 68010
 
