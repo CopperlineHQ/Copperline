@@ -832,6 +832,11 @@ pub(super) fn render_sprites_with_manual_lines_and_writes(
     manual_sprite_lines: Option<&[Vec<SpriteLine>]>,
     visible_line0: i32,
 ) -> u16 {
+    #[cfg(feature = "internal-diagnostics")]
+    if crate::envcfg::flag("COPPERLINE_EXP_NO_SPRITE_RENDER") {
+        return 0;
+    }
+
     if ram.is_empty() && !sprite_dma_observed {
         return 0;
     }
