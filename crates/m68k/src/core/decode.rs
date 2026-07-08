@@ -2373,6 +2373,11 @@ fn dispatch_group_9<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 let src = cpu.d(ea_reg as usize) & size.mask();
                 let dst = cpu.d(reg) & size.mask();
                 let result = cpu.exec_subx(size, src, dst);
+                if cpu.cpu_type == CpuType::M68000 {
+                    if !finish_m68000_addx_subx_register_tail(cpu, bus, size) {
+                        return 50;
+                    }
+                }
                 cpu.set_d(reg, (cpu.d(reg) & !size.mask()) | result);
                 if cpu.cpu_type == CpuType::M68000 && size == Size::Long {
                     8
@@ -2755,6 +2760,11 @@ fn dispatch_group_d<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 let src = cpu.d(ea_reg as usize) & size.mask();
                 let dst = cpu.d(reg) & size.mask();
                 let result = cpu.exec_addx(size, src, dst);
+                if cpu.cpu_type == CpuType::M68000 {
+                    if !finish_m68000_addx_subx_register_tail(cpu, bus, size) {
+                        return 50;
+                    }
+                }
                 cpu.set_d(reg, (cpu.d(reg) & !size.mask()) | result);
                 if cpu.cpu_type == CpuType::M68000 && size == Size::Long {
                     8
@@ -3021,6 +3031,24 @@ fn finish_m68000_tail_after_final_prefetch<B: AddressBus>(
     true
 }
 
+fn finish_m68000_addx_subx_register_tail<B: AddressBus>(
+    cpu: &mut CpuCore,
+    bus: &mut B,
+    size: Size,
+) -> bool {
+    cpu.top_up_prefetch(bus);
+    cpu.ipl_poll_point(bus);
+    if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
+        return false;
+    }
+
+    if size == Size::Long {
+        cpu.internal_cycles(4);
+        cpu.flush_sync(bus);
+    }
+    true
+}
+
 /// Return sentinel for illegal instruction interception.
 /// This function is called for undefined opcodes that don't match any pattern.
 fn illegal_instruction<B: AddressBus>(_cpu: &mut CpuCore, _bus: &mut B) -> i32 {
@@ -3234,6 +3262,26 @@ mod tests {
     }
 
     #[test]
+    fn m68000_subx_long_data_register_flushes_tail_after_final_prefetch() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0x0000_0003;
+        cpu.dar[1] = 0x0000_0001;
+
+        // SUBX.L D1,D0
+        let cycles = dispatch_group_9(&mut cpu, &mut bus, 0x9181);
+
+        assert_eq!(cycles, 8);
+        assert_eq!(cpu.d(0), 0x0000_0002);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(4)]
+        );
+    }
+
+    #[test]
     fn m68000_and_long_data_register_flushes_tail_after_final_prefetch() {
         let mut cpu = m68000_cpu_with_one_prefetch_word();
         let mut bus = TraceBus::default();
@@ -3265,6 +3313,26 @@ mod tests {
 
         assert_eq!(cycles, 8);
         assert_eq!(cpu.a(0), 0x0000_1002);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(4)]
+        );
+    }
+
+    #[test]
+    fn m68000_addx_long_data_register_flushes_tail_after_final_prefetch() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0x0000_0001;
+        cpu.dar[1] = 0x0000_0002;
+
+        // ADDX.L D1,D0
+        let cycles = dispatch_group_d(&mut cpu, &mut bus, 0xd181);
+
+        assert_eq!(cycles, 8);
+        assert_eq!(cpu.d(0), 0x0000_0003);
         assert_eq!(cpu.prefetch_count, 2);
         assert_eq!(cpu.pending_sync_clocks, 0);
         assert_eq!(

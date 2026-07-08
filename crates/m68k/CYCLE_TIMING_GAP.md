@@ -129,6 +129,9 @@ Model implemented (68000-gated unless a bullet explicitly names the shared
 - **EOR `Dn,Dm`**: the data-register destination uses the EOR pre-writeback
   final prefetch; flags are set before the prefetch and `Dm` is written after
   the prefetch/tail.
+- **ADDX/SUBX `Dm,Dn`**: register destinations poll IPL on the final prefetch
+  before the `Dn` writeback; long forms flush their 4-clock tail before the
+  register update.
 - **MOVE SR,Dn**: the 68000 register form polls IPL on the final prefetch,
   flushes its 2-clock tail, and only then stores the SR word into `Dn`.
 - **MOVEA `<ea>,An`**: the address-register destination update follows the
