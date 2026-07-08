@@ -213,6 +213,15 @@ impl BeamSpriteState {
         }
     }
 
+    fn disarm_nonheld_latched_output(&mut self) {
+        for sprite in 0..8 {
+            if self.held[sprite].is_none() {
+                self.spr_armed[sprite] = false;
+                self.direct_data_armed[sprite] = false;
+            }
+        }
+    }
+
     pub(super) fn apply_write(&mut self, off: u16, val: u16) {
         if off == 0x1FC {
             if self.aga {
@@ -361,13 +370,12 @@ pub(super) enum ManualSpriteFlushMode {
 /// `sprite_dma_observed` says whether sprite DMA actually fetched data this
 /// frame. The beam replay only sees CPU/Copper register writes; when DMA also
 /// drives a channel, Agnus writes POS/CTL/DATA through the same Denise
-/// registers without appearing here, so two reconciliation guards approximate
-/// those unseen writes (an early same-line SPRxPOS hands the line to the DMA
-/// capture, and a pre-visible SPRxDATA seeds the latch for later retiming
-/// instead of arming direct output). With sprite DMA idle Denise's own rules
-/// apply unmodified: SPRxDATA arms at any beam position, SPRxCTL disarms, and
-/// SPRxPOS never disarms, so an armed sprite serializes on every line (there
-/// is no vertical comparator in Denise).
+/// registers without appearing here. The replay therefore starts non-held
+/// channels disarmed and lets captured DMA lines own DMA-loaded data, while
+/// actual beam-timed SPRxDATA writes still seed the latch for later retiming.
+/// With sprite DMA idle Denise's own rules apply unmodified: SPRxDATA arms at
+/// any beam position, SPRxCTL disarms, and SPRxPOS never disarms, so an armed
+/// sprite serializes on every line (there is no vertical comparator in Denise).
 pub(super) fn manual_sprite_lines_from_events_with_visible_line0(
     initial_state: &RenderState,
     events: &[BeamRegisterWrite],
@@ -378,6 +386,9 @@ pub(super) fn manual_sprite_lines_from_events_with_visible_line0(
     sprite_dma_observed: bool,
 ) -> Vec<Vec<SpriteLine>> {
     let mut regs = BeamSpriteState::from_render_state(initial_state, held);
+    if sprite_dma_observed && !include_latched_sprite_state {
+        regs.disarm_nonheld_latched_output();
+    }
     let visible_end = visible_line0 + rows as i32;
     let mut next_beam: [(i32, usize); 8] = std::array::from_fn(|sprite| {
         if include_latched_sprite_state || held[sprite].is_some() {

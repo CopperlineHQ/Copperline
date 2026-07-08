@@ -3442,7 +3442,7 @@ pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
     // Seed replay spans from beam-timed SPRx writes or DMA-established held
     // sprites. SPRxDATA latches remain armed across the frame boundary, but
     // they do not emit by themselves when captured DMA is the primary source;
-    // a later SPRxPOS write can still reuse that latch after the DMA slot.
+    // a later SPRxPOS write on a DMA-loaded line reuses the captured line data.
     let mut manual_sprite_lines = manual_sprite_lines_from_events_with_visible_line0(
         &state,
         render_events,

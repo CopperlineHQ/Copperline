@@ -2669,7 +2669,7 @@ fn manual_sprite_replay_does_not_seed_from_frame_start_data_latch() {
 }
 
 #[test]
-fn pre_dma_position_write_preserves_armed_latch_for_later_position_write() {
+fn pre_dma_position_write_does_not_preserve_frame_start_latch_when_dma_observed() {
     let mut initial_state = blank_state();
     let beam_y = PAL_VISIBLE_LINE0;
     let (old_pos, ctl) =
@@ -2706,13 +2706,11 @@ fn pre_dma_position_write_preserves_armed_latch_for_later_position_write() {
         true,
     );
 
-    assert!(manual_sprite_lines[0].iter().any(|line| {
-        line.beam_y == beam_y && line.hstart == i32::from(post_dma_hstart) && line.data == 0x8000
-    }));
+    assert!(manual_sprite_lines[0].is_empty());
 }
 
 #[test]
-fn post_dma_position_write_reuses_armed_frame_start_data_latch() {
+fn post_dma_position_write_does_not_reuse_frame_start_latch_when_dma_observed() {
     let mut initial_state = blank_state();
     let beam_y = PAL_VISIBLE_LINE0;
     let (old_pos, ctl) =
@@ -2739,13 +2737,11 @@ fn post_dma_position_write_reuses_armed_frame_start_data_latch() {
         true,
     );
 
-    assert!(manual_sprite_lines[0].iter().any(|line| {
-        line.beam_y == beam_y && line.hstart == i32::from(reused_hstart) && line.data == 0x8000
-    }));
+    assert!(manual_sprite_lines[0].is_empty());
 }
 
 #[test]
-fn offscreen_pre_dma_position_write_preserves_armed_latch_for_same_line_retime() {
+fn same_line_position_retime_does_not_reuse_frame_start_latch_when_dma_observed() {
     let mut initial_state = blank_state();
     let beam_y = 99;
     initial_state.sprpos[3] = 0x5020;
@@ -2767,9 +2763,7 @@ fn offscreen_pre_dma_position_write_preserves_armed_latch_for_same_line_retime()
         true,
     );
 
-    assert!(manual_sprite_lines[3].iter().any(|line| {
-        line.beam_y == beam_y && line.hstart == 0x78 && line.data == 0xE92D && line.datb == 0x16FF
-    }));
+    assert!(manual_sprite_lines[3].is_empty());
 }
 
 #[test]
@@ -4394,6 +4388,9 @@ fn dma_loaded_sprite_data_rearms_on_same_line_position_write() {
     let mut state = blank_state();
     state.dmacon = DMACON_DMAEN | DMACON_SPREN;
     state.palette.write_ocs(17, 0x0F00);
+    state.palette.write_ocs(18, 0x00F0);
+    state.sprdatb[0] = 0x8000;
+    state.spr_armed[0] = true;
     let ram = vec![0; 64];
     let base_palettes = [state.palette; FB_HEIGHT];
     let palette_segments = vec![Vec::new(); FB_HEIGHT];
@@ -4446,6 +4443,7 @@ fn dma_loaded_sprite_data_rearms_on_same_line_position_write() {
     assert!(dma_seeded_lines[0].iter().any(|line| {
         line.beam_y == beam_y && line.hstart == i32::from(reused_hstart) && line.data == 0x8000
     }));
+    assert!(dma_seeded_lines[0].iter().all(|line| line.datb == 0));
     merge_dma_seeded_manual_sprite_lines(&mut manual_sprite_lines, dma_seeded_lines);
 
     render_sprites_with_manual_lines(
@@ -4473,6 +4471,7 @@ fn dma_loaded_sprite_data_rearms_on_same_line_position_write() {
     let reused_x =
         sprite_base_framebuffer_x(i32::from(reused_hstart), false, base_controls[0], &[]);
     assert_eq!(fb[reused_x as usize], rgb12_to_rgba8(0x0F00));
+    assert_ne!(fb[reused_x as usize], rgb12_to_rgba8(0x00F0));
 }
 
 #[test]
