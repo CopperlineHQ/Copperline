@@ -79,7 +79,8 @@ long-ALU tail after it depending on whether the source operand came from memory.
 `ADDA/SUBA` and `CMPA` likewise place their address-arithmetic tail clocks after
 the final prefetch. `EOR Dn,Dm` follows the memory-destination EOR ordering:
 flags are computed first, then the final prefetch/tail runs before the `Dm`
-writeback.
+writeback. `MOVE SR,Dn` also waits until after the final prefetch and 2-clock
+tail before storing the SR word into `Dn`.
 
 ## 68010
 

@@ -128,6 +128,8 @@ Model implemented (all gated to CpuType::M68000):
 - **EOR `Dn,Dm`**: the data-register destination uses the EOR pre-writeback
   final prefetch; flags are set before the prefetch and `Dm` is written after
   the prefetch/tail.
+- **MOVE SR,Dn**: the 68000 register form polls IPL on the final prefetch,
+  flushes its 2-clock tail, and only then stores the SR word into `Dn`.
 - **Flow changes** (`full_prefetch` / `prefetch_first`+`prefetch_second`):
   Bcc/BRA/DBcc taken, JMP, RTS/RTE/RTR refill from the target; JSR/BSR
   interleave (first prefetch, push, second prefetch). Their

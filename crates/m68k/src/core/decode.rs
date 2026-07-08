@@ -998,6 +998,16 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
         }
         let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
         let sr = cpu.get_sr() as u32;
+        if cpu.cpu_type == CpuType::M68000
+            && let AddressingMode::DataDirect(reg) = mode
+        {
+            if !finish_m68000_tail_after_final_prefetch(cpu, bus, 2) {
+                return 50;
+            }
+            let reg = reg as usize;
+            cpu.dar[reg] = (cpu.dar[reg] & 0xffff_0000) | (sr & 0xffff);
+            return 6;
+        }
         // 68000 quirk: like CLR, MOVE from SR reads its destination before
         // writing (removed on the 68010+).
         let ea = cpu.resolve_ea(bus, mode, Size::Word);
@@ -3278,6 +3288,26 @@ mod tests {
         assert_eq!(
             bus.events,
             vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(4)]
+        );
+    }
+
+    #[test]
+    fn m68000_move_sr_data_register_writes_after_final_prefetch() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.set_sr(0x270f);
+        cpu.dar[0] = 0xaaaa_0000;
+
+        // MOVE SR,D0
+        let cycles = dispatch_group_4(&mut cpu, &mut bus, 0x40c0);
+
+        assert_eq!(cycles, 6);
+        assert_eq!(cpu.d(0), 0xaaaa_270f);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(2)]
         );
     }
 }
