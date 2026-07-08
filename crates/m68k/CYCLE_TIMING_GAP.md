@@ -98,7 +98,8 @@ the Part E.2 scoreboard once the prefetch model lands.
 
 ## E.1 progress (2026-06-03): 100% -> 18.1% sequence mismatch
 
-Model implemented (all gated to CpuType::M68000):
+Model implemented (68000-gated unless a bullet explicitly names the shared
+68010 prefetch-queue behaviour):
 
 - `prefetch_queue: [u16; 2]` + `prefetch_count` on CpuCore; the queue holds
   the words at pc/pc+2. Fixture harness preloads it from the fixtures'
@@ -130,6 +131,8 @@ Model implemented (all gated to CpuType::M68000):
   the prefetch/tail.
 - **MOVE SR,Dn**: the 68000 register form polls IPL on the final prefetch,
   flushes its 2-clock tail, and only then stores the SR word into `Dn`.
+- **MOVEA `<ea>,An`**: the address-register destination update follows the
+  final prefetch/IPL poll, matching the 68000/68010 MOVEA microcode order.
 - **Flow changes** (`full_prefetch` / `prefetch_first`+`prefetch_second`):
   Bcc/BRA/DBcc taken, JMP, RTS/RTE/RTR refill from the target; JSR/BSR
   interleave (first prefetch, push, second prefetch). Their

@@ -80,7 +80,9 @@ long-ALU tail after it depending on whether the source operand came from memory.
 the final prefetch. `EOR Dn,Dm` follows the memory-destination EOR ordering:
 flags are computed first, then the final prefetch/tail runs before the `Dm`
 writeback. `MOVE SR,Dn` also waits until after the final prefetch and 2-clock
-tail before storing the SR word into `Dn`.
+tail before storing the SR word into `Dn`. `MOVEA <ea>,An` has no flags or tail
+clocks, but still delays the `An` update until after the final prefetch and IPL
+sample.
 
 ## 68010
 

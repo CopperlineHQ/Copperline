@@ -192,6 +192,12 @@ impl CpuCore {
             value
         };
 
+        // 68000/68010 MOVEA sequences the final prefetch before the address
+        // register update (Moira execMovea: prefetch<POLL>, then writeA).
+        if self.prefetch_enabled() {
+            self.top_up_prefetch(bus);
+            self.ipl_poll_point(bus);
+        }
         self.set_a(dst_reg, value);
         // MC68000: MOVEA base 4 + source-fetch EA (destination An is free).
         if self.cpu_type == CpuType::M68000 {
@@ -798,6 +804,20 @@ mod tests {
 
         assert_eq!(cycles, 4);
         assert_eq!(cpu.dar[0], 0xABCD_1234);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(bus.events, vec![Event::ReadWord(0x2002), Event::IplHold]);
+    }
+
+    #[test]
+    fn m68000_movea_prefetches_before_address_register_update() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0xffff_8000;
+
+        let cycles = cpu.exec_movea(&mut bus, Size::Word, AddressingMode::DataDirect(0), 1);
+
+        assert_eq!(cycles, 4);
+        assert_eq!(cpu.dar[9], 0xffff_8000);
         assert_eq!(cpu.prefetch_count, 2);
         assert_eq!(bus.events, vec![Event::ReadWord(0x2002), Event::IplHold]);
     }
