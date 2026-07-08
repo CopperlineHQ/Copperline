@@ -9078,9 +9078,9 @@ fn vposw_and_vhposw_update_beam_register_reads() {
     assert!(!bus.custom_write(0x02C, 2, 0x2034));
 
     assert_eq!(bus.custom_read(0x004, 2), 0x8001);
-    // The readback reports a couple of colour clocks ahead of the
-    // written counter (the calibrated VHPOSR lookahead).
-    assert_eq!(bus.custom_read(0x006, 2), 0x2036);
+    // The readback reports a few colour clocks ahead of the written counter
+    // (the calibrated VHPOSR lookahead).
+    assert_eq!(bus.custom_read(0x006, 2), 0x2037);
 }
 
 #[test]

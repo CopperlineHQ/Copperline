@@ -531,6 +531,19 @@ calibrated against timing-test row 19 with a mis-decoded VHPOSR (the low
 byte is the CCK position, not CCK/2); that delivered every interrupt ~50 CCK
 late and dominated the vAmigaTS cputim/irqtim divergence.
 
+## Beam-register readback
+
+Live VHPOSR reads expose a pipelined beam position, not the exact internal
+counter. Copperline reports the horizontal byte three colour clocks ahead of
+the internal Agnus counter at the CPU-visible register-read point, while the
+first two reported positions of a new line still carry the previous vertical
+line number. vAmiga models the same hardware quirk as a five-cycle lead at its
+peek point; Copperline's smaller residual lead accounts for the chip-bus grant
+already advancing the beam before `read_vhposr` samples it. The low byte is raw
+colour clocks, not half clocks. This is visible in timing-test rows 19/20/22/27
+and in line-wrap polling loops that read VHPOSR immediately after INTREQR bits
+become visible.
+
 ## Real-time pacing
 
 Pacing never changes emulated behaviour -- it only decides how much
