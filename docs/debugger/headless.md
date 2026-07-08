@@ -95,7 +95,7 @@ authoritative list. The most useful ones:
 | `COPPERLINE_DIAG_COPLEN` | Copper list length (optionally at a given emulated time) |
 | `COPPERLINE_DIAG_COP_WRITES` | Every Copper MOVE's landing colour clock (beam position, register, value), for cross-emulator write-landing comparison against vAmiga's `VAMIGA_COP_PROBE` trace |
 | `COPPERLINE_DIAG_CPU_BUS` | CPU chip-bus access request/grant/end slots for fetch, chip/slow RAM, and custom space; optional `COPPERLINE_DIAG_CPU_BUS_ADDR=start:end[,start:end...]` filters by CPU-visible addresses including custom registers such as `0xdff01e` |
-| `COPPERLINE_DIAG_CPU_READS` | Every CPU custom-register read's granted chip-bus slot and returned value, plus the post-flush beam position; the read-side companion to `COPPERLINE_DIAG_CPU_WRITES` for poll-loop timing investigations |
+| `COPPERLINE_DIAG_CPU_READS` | CPU custom-register reads' granted chip-bus slot and returned value, plus the post-flush beam position; honors the same optional `COPPERLINE_DIAG_CPU_BUS_ADDR` filter as the bus trace |
 | `COPPERLINE_DIAG_CPU_SYNC` | CPU-internal cycle trace at pre-access sync points and instruction-boundary catch-up; optional `COPPERLINE_DIAG_CPU_SYNC_PC=pc[,start:end...]` filters by instruction PC |
 | `COPPERLINE_DIAG_CPU_WRITES` | Every CPU custom-register write's granted chip-bus slot and effect beam position (register, value), the CPU-side companion of `COPPERLINE_DIAG_COP_WRITES` for comparison against vAmiga's `VAMIGA_CPU_PROBE` trace |
 | `COPPERLINE_DIAG_DISPLAY` | Display-register change log |

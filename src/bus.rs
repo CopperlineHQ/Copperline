@@ -1056,6 +1056,11 @@ fn diag_cpu_reads_on() -> bool {
     *V.get_or_init(|| crate::envcfg::flag("COPPERLINE_DIAG_CPU_READS"))
 }
 
+fn diag_cpu_read_matches(off: u16, size: usize) -> bool {
+    diag_cpu_reads_on()
+        && diag_cpu_bus_addr_matches(Some(custom_register_cpu_addr(u64::from(off))), size)
+}
+
 /// One-shot env flag for the CPU chip-bus access trace
 /// (`COPPERLINE_DIAG_CPU_BUS=1`); see [`Bus::diag_cpu_bus_access`].
 fn diag_cpu_bus_on() -> bool {
@@ -4503,7 +4508,7 @@ impl Bus {
             1 => {
                 let val = self.read_custom_word(off & 0xFFE);
                 trace!("custom R8  off={:03X} val_word={:04X}", off, val);
-                if diag_cpu_reads_on() {
+                if diag_cpu_read_matches(off & 0xFFE, size) {
                     self.diag_cpu_read(off & 0xFFE, size, val as u64);
                 }
                 if addr & 1 == 0 {
@@ -4520,8 +4525,10 @@ impl Bus {
                 let lo = self.read_custom_word(off.wrapping_add(2));
                 let v = ((hi as u64) << 16) | (lo as u64);
                 trace!("custom R32 off={:03X} val={:08X}", off, v);
-                if diag_cpu_reads_on() {
+                if diag_cpu_read_matches(off, size) {
                     self.diag_cpu_read(off, size, hi as u64);
+                }
+                if diag_cpu_read_matches(off.wrapping_add(2), size) {
                     self.diag_cpu_read(off.wrapping_add(2), size, lo as u64);
                 }
                 v
@@ -4529,7 +4536,7 @@ impl Bus {
             _ => {
                 let val = self.read_custom_word(off);
                 trace!("custom R16 off={:03X} val={:04X}", off, val);
-                if diag_cpu_reads_on() {
+                if diag_cpu_read_matches(off, size) {
                     self.diag_cpu_read(off, size, val as u64);
                 }
                 val as u64
