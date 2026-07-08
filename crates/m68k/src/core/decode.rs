@@ -2536,7 +2536,7 @@ fn dispatch_group_c<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 let mode_field = (opcode >> 3) & 0x1F;
                 if mode_field == 0x08 || mode_field == 0x09 || mode_field == 0x11 {
                     // EXG: 0x08=Dx/Dy, 0x09=Ax/Ay, 0x11=Dx/Ay
-                    cpu.exec_exg(opcode)
+                    cpu.exec_exg(bus, opcode)
                 } else {
                     // AND Dn, <ea>: memory data alterable destinations only.
                     if ea_mode < 2 || !ea_data_alterable(ea_mode, ea_reg) {

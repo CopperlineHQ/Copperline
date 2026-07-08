@@ -262,7 +262,7 @@ impl CpuCore {
     /// Execute EXG instruction.
     ///
     /// EXG Rx, Ry
-    pub fn exec_exg(&mut self, opcode: u16) -> i32 {
+    pub fn exec_exg<B: AddressBus>(&mut self, bus: &mut B, opcode: u16) -> i32 {
         let rx = ((opcode >> 9) & 7) as usize;
         let ry = (opcode & 7) as usize;
         let mode = (opcode >> 3) & 0x1F;
@@ -288,6 +288,10 @@ impl CpuCore {
             }
             _ => {}
         }
+        self.top_up_prefetch(bus);
+        self.ipl_poll_point(bus);
+        self.internal_cycles(2);
+        self.flush_sync(bus);
         6
     }
 
@@ -737,6 +741,7 @@ mod tests {
     #[derive(Debug, PartialEq, Eq)]
     enum Event {
         ReadWord(u32),
+        Sync(u32),
         IplHold,
     }
 
@@ -765,6 +770,10 @@ mod tests {
 
         fn write_long(&mut self, _address: u32, _value: u32) {}
 
+        fn sync(&mut self, cpu_clocks: u32) {
+            self.events.push(Event::Sync(cpu_clocks));
+        }
+
         fn ipl_hold_sample(&mut self) {
             self.events.push(Event::IplHold);
         }
@@ -791,5 +800,25 @@ mod tests {
         assert_eq!(cpu.dar[0], 0xABCD_1234);
         assert_eq!(cpu.prefetch_count, 2);
         assert_eq!(bus.events, vec![Event::ReadWord(0x2002), Event::IplHold]);
+    }
+
+    #[test]
+    fn m68000_exg_prefetches_before_internal_sync() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0x1111_2222;
+        cpu.dar[1] = 0x3333_4444;
+
+        let cycles = cpu.exec_exg(&mut bus, 0xC141);
+
+        assert_eq!(cycles, 6);
+        assert_eq!(cpu.dar[0], 0x3333_4444);
+        assert_eq!(cpu.dar[1], 0x1111_2222);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(2)]
+        );
     }
 }
