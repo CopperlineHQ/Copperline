@@ -164,10 +164,10 @@ const F_PC: u32 = 0x02;
 const F_FMT: u32 = 0x06;
 const F_EA: u32 = 0x08;
 const F_SSW: u32 = 0x0C;
-const F_WB2S: u32 = 0x10;
+const F_WB3S: u32 = 0x0E;
 const F_FA: u32 = 0x14;
-const F_WB2A: u32 = 0x20;
-const F_WB2D: u32 = 0x24;
+const F_WB3A: u32 = 0x18;
+const F_WB3D: u32 = 0x1C;
 
 fn frame_base(cpu: &CpuCore) -> u32 {
     let sp = cpu.a(7);
@@ -216,18 +216,19 @@ fn translation_fault_frame_reports_atc_read_long() {
     assert_eq!(bus.read_long(f + F_PC), CODE, "restart PC");
     assert_eq!(bus.read_word(f + F_SR) & 0x2000, 0, "stacked SR is user");
     assert_eq!(
-        bus.read_word(f + F_WB2S),
+        bus.read_word(f + F_WB3S),
         0,
         "no writeback for a read fault"
     );
 }
 
-/// A faulted write is reported in writeback slot 2: WB2S carries the valid
+/// A faulted write is reported in writeback slot 3: WB3S carries the valid
 /// bit, size, and transfer modifier, with the address and data in
-/// WB2A/WB2D. This is the frame contract Enforcer/MuForce use to report a
-/// hit's data and absorb the store.
+/// WB3A/WB3D (matching real 68040 silicon and the WinUAE reference; WB2 is
+/// reserved for MOVE16). This is the frame contract Enforcer/MuForce use to
+/// report a hit's data and MuGuardianAngel uses to complete the store.
 #[test]
-fn write_fault_frame_carries_writeback_2() {
+fn write_fault_frame_carries_writeback_3() {
     let mut bus = TestBus::new(0x10000);
     let mut cpu = user_mode_040_with_table(&mut bus, 0);
 
@@ -238,20 +239,20 @@ fn write_fault_frame_carries_writeback_2() {
     let f = frame_base(&cpu);
     assert_eq!(bus.read_word(f + F_SSW), 0x0401, "SSW = ATC | write | long");
     assert_eq!(
-        bus.read_word(f + F_WB2S),
+        bus.read_word(f + F_WB3S),
         0x0081,
-        "WB2S = V | SZ=long | TM=user data"
+        "WB3S = V | SZ=long | TM=user data"
     );
-    assert_eq!(bus.read_long(f + F_WB2A), FAULT_PAGE, "writeback address");
-    assert_eq!(bus.read_long(f + F_WB2D), 0x1234_5678, "writeback data");
+    assert_eq!(bus.read_long(f + F_WB3A), FAULT_PAGE, "writeback address");
+    assert_eq!(bus.read_long(f + F_WB3D), 0x1234_5678, "writeback data");
 }
 
-/// A handler that clears WB2S.V has absorbed the faulted write (an
+/// A handler that clears WB3S.V has absorbed the faulted write (an
 /// Enforcer/MuForce hit on a protected page): the restarted instruction
 /// continues past the store without re-faulting, and the page stays
 /// invalid.
 #[test]
-fn rte_with_wb2s_cleared_absorbs_the_faulted_write() {
+fn rte_with_wb3s_cleared_absorbs_the_faulted_write() {
     let mut bus = TestBus::new(0x10000);
     let mut cpu = user_mode_040_with_table(&mut bus, 0);
 
@@ -259,9 +260,9 @@ fn rte_with_wb2s_cleared_absorbs_the_faulted_write() {
     bus.write_word(CODE, 0x2080); // MOVE.L D0,(A0)
     bus.write_word(CODE + 2, 0x4E71); // NOP
 
-    // Handler: CLR.B ($11,A7) (WB2S low byte, V included); RTE.
+    // Handler: CLR.B ($0F,A7) (WB3S low byte, V included); RTE.
     bus.write_word(HANDLER, 0x422F);
-    bus.write_word(HANDLER + 2, (F_WB2S + 1) as u16);
+    bus.write_word(HANDLER + 2, (F_WB3S + 1) as u16);
     bus.write_word(HANDLER + 4, 0x4E73);
 
     // Fault + handler (2) + suppressed rerun + NOP.
@@ -270,10 +271,10 @@ fn rte_with_wb2s_cleared_absorbs_the_faulted_write() {
     assert_eq!(cpu.pc & 0xFFFF, (CODE + 4) & 0xFFFF, "past the NOP");
 }
 
-/// A handler that fixes the mapping and leaves WB2S.V set gets the plain
+/// A handler that fixes the mapping and leaves WB3S.V set gets the plain
 /// restart: the re-executed store lands through the new translation.
 #[test]
-fn rte_with_wb2s_valid_restarts_the_write() {
+fn rte_with_wb3s_valid_restarts_the_write() {
     let mut bus = TestBus::new(0x10000);
     let mut cpu = user_mode_040_with_table(&mut bus, 0);
 
