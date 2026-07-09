@@ -1762,12 +1762,12 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                     });
                     cpu.change_of_flow = true;
                     let return_pc = cpu.pc;
-                    cpu.pc = addr;
-                    // 68000 JSR bus order: first prefetch from the target,
-                    // then the return-address push, then the second prefetch.
-                    cpu.prefetch_first(bus);
+                    // MC68000 JSR saves the return address before refilling
+                    // the instruction queue from the target, matching BSR's
+                    // control-flow bus order.
                     cpu.push_32(bus, return_pc);
-                    cpu.prefetch_second(bus);
+                    cpu.pc = addr;
+                    cpu.full_prefetch(bus);
                     if cpu.cpu_type == CpuType::M68000 {
                         16 + cpu.jump_addr_calc_cycles(mode)
                     } else {
@@ -2081,11 +2081,12 @@ fn dispatch_group_5<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                     // scale_cycles_for_cpu_type) for the post-020 parts.
                     if cpu.is_pre_68020 { 10 } else { 12 }
                 } else {
-                    // Counter expired: the 68000 has already begun the branch;
-                    // it reads one word at the target (discarded) before
-                    // refilling the queue from the fall-through path.
-                    if target & 1 == 0 {
-                        let masked = cpu.address(target);
+                    // Counter expired: the 68000 performs a discarded
+                    // program read at the fall-through word, then refills
+                    // the queue from that same fall-through PC.
+                    if cpu.pc & 1 == 0 {
+                        cpu.flush_sync(bus);
+                        let masked = cpu.address(cpu.pc);
                         let _ = bus.read_word(masked);
                     }
                     cpu.full_prefetch(bus);
@@ -2224,8 +2225,7 @@ fn dispatch_group_6<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             let return_pc = cpu.pc;
             cpu.pc = (base_pc as i32).wrapping_add(disp) as u32;
             // 68000 BSR bus order: the return-address push happens first,
-            // then the two-word refill from the branch target (unlike JSR,
-            // which interleaves the push between the two target prefetches).
+            // then the two-word refill from the branch target.
             cpu.push_32(bus, return_pc);
             cpu.full_prefetch(bus);
             18
@@ -3110,6 +3110,7 @@ mod tests {
     #[derive(Debug, PartialEq, Eq)]
     enum Event {
         ReadWord(u32),
+        WriteWord(u32, u16),
         Sync(u32),
         IplHold,
     }
@@ -3145,9 +3146,14 @@ mod tests {
 
         fn write_byte(&mut self, _address: u32, _value: u8) {}
 
-        fn write_word(&mut self, _address: u32, _value: u16) {}
+        fn write_word(&mut self, address: u32, value: u16) {
+            self.events.push(Event::WriteWord(address, value));
+        }
 
-        fn write_long(&mut self, _address: u32, _value: u32) {}
+        fn write_long(&mut self, address: u32, value: u32) {
+            self.write_word(address, (value >> 16) as u16);
+            self.write_word(address.wrapping_add(2), value as u16);
+        }
 
         fn sync(&mut self, cpu_clocks: u32) {
             self.events.push(Event::Sync(cpu_clocks));
@@ -3210,6 +3216,55 @@ mod tests {
         assert_eq!(
             bus.events,
             vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(2)]
+        );
+    }
+
+    #[test]
+    fn m68000_dbcc_expired_discards_fallthrough_word_before_refill() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.prefetch_queue[0] = 0xfffc;
+        cpu.dar[0] = 0;
+
+        // DBF D0,-4 with an expired counter.
+        let cycles = dispatch_group_5(&mut cpu, &mut bus, 0x51c8);
+
+        assert_eq!(cycles, 14);
+        assert_eq!(cpu.pc, 0x2002);
+        assert_eq!(cpu.dar[0] & 0xffff, 0xffff);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(
+            bus.events,
+            vec![
+                Event::Sync(2),
+                Event::ReadWord(0x2002),
+                Event::ReadWord(0x2002),
+                Event::ReadWord(0x2004),
+            ]
+        );
+    }
+
+    #[test]
+    fn m68000_jsr_pushes_return_address_before_target_prefetch() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[8] = 0x4000;
+        cpu.dar[15] = 0x3000;
+
+        let cycles = dispatch_group_4(&mut cpu, &mut bus, 0x4e90);
+
+        assert_eq!(cycles, 16);
+        assert_eq!(cpu.pc, 0x4000);
+        assert_eq!(cpu.dar[15], 0x2ffc);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(
+            bus.events,
+            vec![
+                Event::WriteWord(0x2ffc, 0x0000),
+                Event::WriteWord(0x2ffe, 0x2000),
+                Event::ReadWord(0x4000),
+                Event::ReadWord(0x4002),
+            ]
         );
     }
 

@@ -521,6 +521,10 @@ impl CpuCore {
                 self.set_a(reg as usize, addr);
             }
         } else {
+            if self.cpu_type == CpuType::M68000 && size == Size::Long {
+                let _ = self.read_16(bus, addr);
+            }
+
             // Normal order: D0..D7, A0..A7
             for i in 0..16 {
                 if mask & (1 << i) != 0 {
@@ -539,9 +543,9 @@ impl CpuCore {
                 self.set_a(reg as usize, addr);
             }
 
-            // 68000 quirk: MOVEM memory-to-register always performs one extra
-            // word read past the last transferred register (value discarded).
-            if self.cpu_type == CpuType::M68000 {
+            // 68000 MOVEM memory-to-register has one discarded word read:
+            // before long transfers, after word transfers.
+            if self.cpu_type == CpuType::M68000 && size == Size::Word {
                 let _ = self.read_16(bus, addr);
             }
         }
@@ -778,8 +782,9 @@ mod tests {
             0x4e71
         }
 
-        fn read_long(&mut self, _address: u32) -> u32 {
-            0
+        fn read_long(&mut self, address: u32) -> u32 {
+            (u32::from(self.read_word(address)) << 16)
+                | u32::from(self.read_word(address.wrapping_add(2)))
         }
 
         fn write_byte(&mut self, _address: u32, _value: u8) {}
@@ -877,6 +882,48 @@ mod tests {
             vec![
                 Event::WriteWord(0x0FFE, 0x3344),
                 Event::WriteWord(0x0FFC, 0x1122),
+            ]
+        );
+    }
+
+    #[test]
+    fn m68000_movem_long_memory_to_register_dummies_before_first_transfer() {
+        let mut cpu = CpuCore::new();
+        cpu.set_cpu_type(CpuType::M68000);
+        let mut bus = TraceBus::default();
+        cpu.dar[10] = 0x1000;
+
+        let cycles =
+            cpu.exec_movem_to_reg(&mut bus, Size::Long, AddressingMode::AddressIndirect(2), 0x0001);
+
+        assert_eq!(cycles, 20);
+        assert_eq!(
+            bus.events,
+            vec![
+                Event::ReadWord(0x1000),
+                Event::ReadWord(0x1000),
+                Event::ReadWord(0x1002),
+            ]
+        );
+    }
+
+    #[test]
+    fn m68000_movem_word_memory_to_register_dummies_after_last_transfer() {
+        let mut cpu = CpuCore::new();
+        cpu.set_cpu_type(CpuType::M68000);
+        let mut bus = TraceBus::default();
+        cpu.dar[10] = 0x1000;
+
+        let cycles =
+            cpu.exec_movem_to_reg(&mut bus, Size::Word, AddressingMode::AddressIndirect(2), 0x0003);
+
+        assert_eq!(cycles, 20);
+        assert_eq!(
+            bus.events,
+            vec![
+                Event::ReadWord(0x1000),
+                Event::ReadWord(0x1002),
+                Event::ReadWord(0x1004),
             ]
         );
     }
