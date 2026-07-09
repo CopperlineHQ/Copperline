@@ -55,6 +55,16 @@ cannot change at runtime (see [](../internals/architecture)).
   single routine (e.g. a depacker loop) and, by excluding interrupt handlers,
   yields a contiguous deterministic stream that lines up across emulators.
 
+`COPPERLINE_DBG_CATCH=SPEC[,SPEC...]`
+: Exception catchpoints. `SPEC` can be a decimal vector number, `vec N`,
+  `irq N`, or `trap N`; for example, `COPPERLINE_DBG_CATCH="3,4,irq 3"`
+  reports address errors, illegal instructions, and VERTB interrupt entries.
+
+`COPPERLINE_DBG_CATCHALERT=1`
+: Resolve `ExecBase` once AmigaOS is valid and report when execution reaches
+  exec.library `Alert()`. Each hit includes the D7 alert code decoded with the
+  same Guru table used by the interactive debugger.
+
 `COPPERLINE_DBG_RAMDUMP=ADDR:LEN:FILE`
 : One-shot memory dump the first time the debugger activates: LEN bytes
   from hex address ADDR are written to FILE, read through the CPU's own

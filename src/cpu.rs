@@ -552,6 +552,8 @@ impl M68kMachine {
         }
         self.maybe_dump_copper(secs);
         self.maybe_dump_ram(secs);
+        self.maybe_arm_headless_alert_break(secs);
+        self.debug_check_headless_exception(secs);
         let pc = self.cpu.pc;
 
         if let Some((trace_full, lo, hi)) = self
@@ -618,7 +620,14 @@ impl M68kMachine {
             }
         }
 
-        if self.dbg.as_ref().is_some_and(|d| d.is_breakpoint(pc)) {
+        if self.dbg.as_ref().is_some_and(|d| d.alert_break == Some(pc)) {
+            let code = self.cpu.d(7);
+            let decoded = crate::debugger::guru_decode(code);
+            self.debug_report(
+                &format!("ALERT pc={pc:#010X} code={code:#010X} {decoded}"),
+                secs,
+            );
+        } else if self.dbg.as_ref().is_some_and(|d| d.is_breakpoint(pc)) {
             self.debug_report(&format!("BREAK pc={pc:#010X}"), secs);
         }
 
@@ -641,6 +650,61 @@ impl M68kMachine {
                 .map(|addr| (addr, self.bus.bus.peek_word_any(addr)))
                 .collect(),
         )
+    }
+
+    fn debug_check_headless_exception(&mut self, secs: f64) {
+        let Some(vector) = self.cpu.last_exception_vector else {
+            return;
+        };
+        let Ok(vector) = u16::try_from(vector) else {
+            return;
+        };
+        if !self.dbg.as_ref().is_some_and(|d| d.catches_vector(vector)) {
+            return;
+        }
+        self.cpu.last_exception_vector = None;
+        let name = crate::debugger::exception_vector_name(vector);
+        self.debug_report(&format!("CATCH {name} vector={vector}"), secs);
+    }
+
+    fn maybe_arm_headless_alert_break(&mut self, secs: f64) {
+        if !self
+            .dbg
+            .as_ref()
+            .is_some_and(|d| d.catch_alert && d.alert_break.is_none())
+        {
+            return;
+        }
+        let bus = &self.bus.bus;
+        let peek8 = |addr: u32| {
+            let word = bus.peek_word_any(addr & !1);
+            if addr & 1 == 0 {
+                (word >> 8) as u8
+            } else {
+                word as u8
+            }
+        };
+        let peek32 = |addr: u32| {
+            (u32::from(bus.peek_word_any(addr)) << 16)
+                | u32::from(bus.peek_word_any(addr.wrapping_add(2)))
+        };
+        let os = crate::amigaos::OsMemory {
+            peek8: &peek8,
+            peek32: &peek32,
+        };
+        let Ok(execbase) = os.exec_base() else {
+            return;
+        };
+        // exec.library Alert() is at LVO -108. The jump-table entry itself
+        // executes with D7 holding the alert code, so a PC break there reports
+        // the same information as the interactive CATCHALERT command.
+        let pc = execbase.wrapping_sub(108) & self.cpu.address_mask;
+        if let Some(dbg) = self.dbg.as_mut() {
+            dbg.alert_break = Some(pc);
+        }
+        log::info!(
+            "dbg catchalert armed: execbase={execbase:#010X} alert_pc={pc:#010X} t={secs:.5}"
+        );
     }
 
     /// COPPERLINE_DBG_COPPER: disassemble the active Copper list once, the first
