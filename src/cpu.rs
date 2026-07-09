@@ -664,7 +664,41 @@ impl M68kMachine {
         }
         self.cpu.last_exception_vector = None;
         let name = crate::debugger::exception_vector_name(vector);
-        self.debug_report(&format!("CATCH {name} vector={vector}"), secs);
+        let frame = self.debug_exception_frame_summary(vector);
+        self.debug_report(&format!("CATCH {name} vector={vector} {frame}"), secs);
+    }
+
+    fn debug_exception_frame_summary(&self, vector: u16) -> String {
+        let sp = self.cpu.a(7);
+        let word = |off: u32| self.bus.bus.peek_word_any(sp.wrapping_add(off));
+        let stacked_sr = word(0);
+        let stacked_pc = (u32::from(word(2)) << 16) | u32::from(word(4));
+        let opcode = self.bus.bus.peek_word_any(stacked_pc);
+        let mut stack = String::new();
+        for k in 0..8 {
+            stack.push_str(&format!(" {:04X}", word(k * 2)));
+        }
+
+        if matches!(vector, 2 | 3) && self.cpu.cpu_type == CpuType::M68000 {
+            let access = (u32::from(word(6)) << 16) | u32::from(word(8));
+            return format!(
+                "frame_sr={stacked_sr:#06X} frame_pc={stacked_pc:#010X} \
+                 frame_op={opcode:04X} access={access:#010X} stack@a7={sp:#010X}:{stack}"
+            );
+        }
+
+        if self.cpu.cpu_type == CpuType::M68000 {
+            return format!(
+                "frame_sr={stacked_sr:#06X} frame_pc={stacked_pc:#010X} \
+                 frame_op={opcode:04X} stack@a7={sp:#010X}:{stack}"
+            );
+        }
+
+        let format_vector = word(6);
+        format!(
+            "frame_sr={stacked_sr:#06X} frame_pc={stacked_pc:#010X} \
+             frame_op={opcode:04X} fmtvec={format_vector:#06X} stack@a7={sp:#010X}:{stack}"
+        )
     }
 
     fn maybe_arm_headless_alert_break(&mut self, secs: f64) {
@@ -3074,7 +3108,7 @@ mod tests {
     }
 
     use crate::audio::NullSink;
-    use crate::chipset::cia::{REG_CRA, REG_ICR, REG_TAHI, REG_TALO};
+    use crate::chipset::cia::{REG_CRA, REG_DDRA, REG_ICR, REG_PRA, REG_TAHI, REG_TALO};
     use crate::chipset::copper::DMACON_COPEN;
     use crate::chipset::paula::Paula;
     use crate::chipset::paula::{DMACON_DMAEN, INT_COPER, INT_MASTER, INT_PORTS, INT_VERTB};
@@ -4364,25 +4398,42 @@ mod tests {
     }
 
     #[test]
-    fn cpu_reset_instruction_clears_agnus_copper_danger_bit() -> Result<()> {
-        let mut bus = test_bus_with_pc(0x0000_0100);
+    fn cpu_reset_instruction_resets_external_devices_without_resetting_cpu() -> Result<()> {
+        let pc = 0x0000_0100;
+        let mut bus = test_bus_with_pc(pc);
         write_program(
             &mut bus,
-            0x0000_0100,
+            pc,
             &[
                 0x4E70, // RESET
-                0x4E71, // NOP, proves the CPU itself was not reset.
+                0x4E71, // NOP prefetched before RESET restores the overlay.
             ],
         );
-        bus.agnus.write_copcon(0x0002);
 
         let mut machine = M68kMachine::new(bus, CpuModel::M68000, false)?;
+        {
+            let bus = machine.bus_mut();
+            bus.mem.chip_ram[4..8].copy_from_slice(&0x00C0_0276u32.to_be_bytes());
+            bus.mem.chip_ram[0x1234] = 0xAA;
+            bus.mem.overlay = false;
+            bus.overlay_disable_pending = true;
+            let _ = bus.cia_a.write(REG_DDRA, 0x03);
+            let _ = bus.cia_a.write(REG_PRA, 0x00);
+            bus.agnus.write_copcon(0x0002);
+        }
         assert_ne!(machine.bus().agnus.copcon, 0);
+        let start_cck = machine.bus().emulated_cck();
         let slice = machine.step_slice(1)?;
 
         assert_eq!(slice.instructions, 1);
         assert_eq!(machine.bus().agnus.copcon, 0);
-        assert_eq!(machine.pc(), 0x0000_0102);
+        assert!(machine.bus().mem.overlay);
+        assert!(!machine.bus().overlay_disable_pending);
+        assert_eq!(machine.bus().cia_a.peek_register(REG_DDRA), 0);
+        assert_eq!(machine.bus().cia_a.peek_register(REG_PRA), 0xC1);
+        assert_eq!(machine.bus().mem.chip_ram[0x1234], 0xAA);
+        assert!(machine.bus().emulated_cck() > start_cck);
+        assert_eq!(machine.pc(), pc + 2);
         Ok(())
     }
 

@@ -2567,15 +2567,15 @@ impl Bus {
     }
 
     pub fn reset_custom_chips_from_cpu_reset(&mut self) {
-        self.agnus.reset_copcon();
-        self.floppy.reset_external_drives();
-        // RESET asserts /RST on the expansion bus: boards drop back to
-        // unconfigured (Kickstart re-runs autoconfig on the way back up)
-        // and expansion devices see a hardware reset.
-        for dev in &mut self.devices {
-            crate::zorro_device::ZorroDevice::reset(dev);
-        }
-        self.mem.zorro.warm_reset();
+        // The CPU RESET instruction asserts the external reset line without
+        // resetting the CPU core or clearing RAM. Reuse the warm device reset
+        // so CIAs, custom chips, expansion boards, and /OVL all return to
+        // reset state, then restore the emulator's monotonic time coordinate.
+        let emulated_cck = self.emulated_cck;
+        let emulated_frames = self.emulated_frames;
+        self.reset_for_keyboard_reset();
+        self.emulated_cck = emulated_cck;
+        self.emulated_frames = emulated_frames;
     }
 
     fn effective_diwhigh(&self) -> DiwHigh {
