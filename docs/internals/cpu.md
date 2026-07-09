@@ -126,7 +126,8 @@ A500+68010 photos): MOVES spends per-EA-mode internal clocks between the
 address calculation and the SFC/DFC data cycle, MOVE from CCR and
 privileged MOVE from SR both cost 4 clocks to a register and perform their
 final prefetch before updating `Dn`, MOVE from CCR to memory prefetches
-before its write, a
+before its write, long register shifts/rotates use the same base-8 cycle
+total as the 68000 rather than the later barrel-shifter timing, a
 format-0 RTE is 24 clocks (the format word is read once, not re-read),
 and an interrupt dispatch is 46 clocks (12 internal before the four-word
 format-0 frame) against the 68000's 44. STOP semantics shared with the
