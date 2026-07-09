@@ -282,6 +282,7 @@ const AGNUS_WRITE_EFFECT_DELAY_CCK: u32 = 2;
 const BPLCON0_ECSENA: u16 = 1 << 0;
 const BPLCON0_SHRES: u16 = 1 << 6;
 const BPLCON3_BRDSPRT: u16 = 1 << 1;
+const BPLCON3_BRDRBLNK: u16 = 1 << 5;
 const BPLCON3_SPRES_MASK: u16 = 0x00C0;
 const BPLCON3_SPRES_LORES: u16 = 0x0040;
 const BPLCON3_SPRES_HIRES: u16 = 0x0080;
@@ -6364,7 +6365,7 @@ fn live_sprite_visible_x_range_for_control(
     if x_start >= x_stop {
         return None;
     }
-    if control.bplcon0 & BPLCON0_ECSENA != 0 && control.bplcon3 & BPLCON3_BRDSPRT != 0 {
+    if live_border_sprite_enabled(control) {
         return Some((x_start, x_stop));
     }
     let display_enable_x = display_enable_x?;
@@ -6391,7 +6392,7 @@ fn live_sprite_pixel_inside_display_window(
     framebuffer_x: i32,
     display_enable_x: Option<i32>,
 ) -> bool {
-    if control.bplcon0 & BPLCON0_ECSENA != 0 && control.bplcon3 & BPLCON3_BRDSPRT != 0 {
+    if live_border_sprite_enabled(control) {
         return true;
     }
     if beam_y < 0 {
@@ -6409,6 +6410,12 @@ fn live_sprite_pixel_inside_display_window(
         control.diwhigh,
         framebuffer_x,
     )
+}
+
+fn live_border_sprite_enabled(control: LiveCollisionControl) -> bool {
+    control.bplcon0 & BPLCON0_ECSENA != 0
+        && control.bplcon3 & BPLCON3_BRDSPRT != 0
+        && control.bplcon3 & BPLCON3_BRDRBLNK == 0
 }
 
 fn sprite_sprite_clx_bit(a: usize, b: usize) -> u16 {

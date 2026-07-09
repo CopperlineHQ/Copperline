@@ -52,6 +52,9 @@ that plane-0 fetch reaches Denise instead of sampling stale shifter contents.
 That gate is placed in the bitplane/DIW coordinate domain, not the normal
 Copper/register-write output domain, because it follows the fetch slot that
 loads BPL1DAT.
+Horizontal DIW clipping applies to sprites unless AGA border sprites are
+enabled by BPLCON3.BRDSPRT; if BPLCON3.BRDRBLNK is asserted, the border-sprite
+bypass is suppressed along with the blanked border.
 Once that first DMA word is visible, the renderer samples the enabled
 bitplanes from the complete latched word; it does not expose the first word
 plane-by-plane according to each plane's individual DMA slot.

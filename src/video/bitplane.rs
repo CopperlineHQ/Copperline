@@ -745,7 +745,7 @@ impl ControlState {
     }
 
     fn border_sprite_enabled(&self) -> bool {
-        self.ecsena() && self.bplcon3 & BPLCON3_BRDSPRT != 0
+        self.ecsena() && self.bplcon3 & BPLCON3_BRDSPRT != 0 && self.bplcon3 & BPLCON3_BRDRBLNK == 0
     }
 
     fn zd_clock_enabled(&self) -> bool {

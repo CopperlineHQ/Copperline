@@ -4058,6 +4058,62 @@ fn brdsprt_bypasses_first_bpl1dat_display_enable_gate() {
 }
 
 #[test]
+fn brdrblnk_suppresses_brdsprt_display_enable_bypass() {
+    let mut state = RenderState {
+        bplcon0: BPLCON0_ECSENA,
+        bplcon3: BPLCON3_BRDSPRT | BPLCON3_BRDRBLNK,
+        ..blank_state()
+    };
+    state.palette.write_ocs(17, 0x0F00);
+    let ram = vec![0; 64];
+    let base_palettes = [state.palette; FB_HEIGHT];
+    let palette_segments = vec![Vec::new(); FB_HEIGHT];
+    let base_controls = [ControlState::from_render_state(&state); FB_HEIGHT];
+    let control_segments = vec![Vec::new(); FB_HEIGHT];
+    let playfield_mask = vec![0u8; FB_PIXELS];
+    let mut collision_pixels = vec![CollisionPixel::default(); FB_PIXELS];
+    let captured = [CapturedSpriteLine {
+        sprite: 0,
+        hstart: DIW_HSTART_FB0,
+        hsub_70ns: false,
+        beam_y: PAL_VISIBLE_LINE0,
+        data: 0x8000,
+        datb: 0,
+        attached: false,
+        data_ext: [0; 3],
+        datb_ext: [0; 3],
+        width_words: 1,
+    }];
+    let display_enable_x = [None; FB_HEIGHT];
+    let mut fb = vec![rgb12_to_rgba8(0); FB_PIXELS];
+
+    render_sprites_with_manual_lines_and_writes(
+        &state,
+        &ram,
+        &mut fb,
+        SpriteClip {
+            x_start: 0,
+            x_stop: FB_WIDTH,
+            y_start: 0,
+            y_stop: FB_HEIGHT,
+        },
+        &base_palettes,
+        &palette_segments,
+        &base_controls,
+        &control_segments,
+        &display_enable_x,
+        &playfield_mask,
+        &mut collision_pixels,
+        &captured,
+        true,
+        None,
+        PAL_VISIBLE_LINE0,
+    );
+
+    assert_eq!(fb[0], rgb12_to_rgba8(0));
+}
+
+#[test]
 fn bplcon3_brdsprt_allows_sprites_in_border_when_ecsena_set() {
     let mut state = RenderState {
         dmacon: DMACON_DMAEN | DMACON_SPREN,

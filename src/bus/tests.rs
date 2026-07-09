@@ -14,11 +14,11 @@ use super::{
     CpuBusAccessKind, DeviceClock, DisplaySpriteDmaState, DisplaySpriteLineData, FrameBusTrace,
     LiveCollisionControl, LiveCollisionLineReplay, LiveSpriteCollisionSource,
     RenderRegisterSnapshot, BLITTER_SLOWDOWN_CPU_MISS_LIMIT, BLTCON0_USE_C, BLTCON0_USE_D,
-    BLTCON1_DOFF, BLTCON1_LINE, BPLCON0_ECSENA, BPLCON3_BRDSPRT, BPLCON3_SPRES_HIRES,
-    DENISE_HPOS_LAG_CCK, DMACON_BLTEN, DMACON_BLTPRI, DMACON_BPLEN, DMACON_SPREN,
-    PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS, RENDER_COPPER_WAIT_HPOS_FB0, RENDER_DIW_HSTART_FB0,
-    RENDER_MIN_OVERSCAN_START_VPOS, RENDER_VISIBLE_LINES, RENDER_VISIBLE_START_VPOS,
-    SPRITE_DMA_SLOT1_HPOS,
+    BLTCON1_DOFF, BLTCON1_LINE, BPLCON0_ECSENA, BPLCON3_BRDRBLNK, BPLCON3_BRDSPRT,
+    BPLCON3_SPRES_HIRES, DENISE_HPOS_LAG_CCK, DMACON_BLTEN, DMACON_BLTPRI, DMACON_BPLEN,
+    DMACON_SPREN, PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS, RENDER_COPPER_WAIT_HPOS_FB0,
+    RENDER_DIW_HSTART_FB0, RENDER_MIN_OVERSCAN_START_VPOS, RENDER_VISIBLE_LINES,
+    RENDER_VISIBLE_START_VPOS, SPRITE_DMA_SLOT1_HPOS,
 };
 use crate::audio::AudioSink;
 use crate::chipset::agnus::{
@@ -7413,6 +7413,55 @@ fn brdsprt_bypasses_bpl1dat_display_enable_for_live_sprite_clxdat() {
             0,
         ) & (1 << 9),
         1 << 9
+    );
+}
+
+#[test]
+fn brdrblnk_suppresses_brdsprt_live_sprite_clxdat_bypass() {
+    let control = LiveCollisionControl::from_current(
+        AgnusRevision::Ocs,
+        BPLCON0_ECSENA | 0x1000,
+        0,
+        BPLCON3_BRDSPRT | BPLCON3_BRDRBLNK,
+        0,
+        ((RENDER_VISIBLE_START_VPOS as u16) << 8) | RENDER_DIW_HSTART_FB0 as u16,
+        ((RENDER_VISIBLE_START_VPOS as u16 + 1) << 8) | 0x00C1,
+        DiwHigh::ocs_implicit(),
+        0x0038,
+        [0; 8],
+    );
+    let replay = LiveCollisionLineReplay {
+        line_start: control,
+        segments: Vec::new(),
+    };
+    let sources = [
+        LiveSpriteCollisionSource {
+            group: 0,
+            hstart: RENDER_DIW_HSTART_FB0,
+            hsub_70ns: false,
+            words: [0x8000, 0, 0, 0],
+            requires_odd_enable: false,
+        },
+        LiveSpriteCollisionSource {
+            group: 1,
+            hstart: RENDER_DIW_HSTART_FB0,
+            hsub_70ns: false,
+            words: [0x8000, 0, 0, 0],
+            requires_odd_enable: false,
+        },
+    ];
+
+    assert_eq!(
+        live_sprite_sprite_collision_bits(
+            &sources,
+            &replay,
+            RENDER_VISIBLE_START_VPOS as i32,
+            0,
+            2,
+            None,
+            0,
+        ) & (1 << 9),
+        0
     );
 }
 
