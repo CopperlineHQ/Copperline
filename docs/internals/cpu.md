@@ -44,7 +44,7 @@ trap to a software FPSP. FMOD/FREM compute the exact remainder and the FPSR
 quotient byte. This covers Kickstart's
 detection and per-task FPU context switching. The
 68000's per-instruction cycle counts in the vendored core have been
-corrected against the SingleStepTests corpus to ~1% aggregate accuracy
+corrected to exact totals across the SingleStepTests 68000 cycle corpus
 (see `crates/m68k/CYCLE_TIMING_GAP.md`), which is what makes
 cycle-budgeted pacing trustworthy.
 
@@ -98,8 +98,10 @@ For `Bcc`/`BRA`/`BSR`, the branch-long `$FF` displacement-byte sentinel is
 gated to 68020 and later; on the 68000/010 the same byte remains the signed
 8-bit displacement `-1`, so no extension word is consumed.
 `CHK.W` on the 68000 tests the upper bound before the lower bound; upper-bound
-traps take the shorter pre-frame comparison path, while lower-bound traps spend
-two more clocks before stacking the group-2 exception frame.
+traps take the shorter pre-frame comparison path. A negative `Dn` that reaches
+the lower-bound test also takes that shorter path when the preceding signed
+upper-bound subtraction overflowed; ordinary lower-bound traps spend two more
+clocks before stacking the group-2 exception frame.
 
 ## 68010
 

@@ -49,9 +49,11 @@ model tighten the secondary gap.
 
 Cycle mismatch across 261,894 cases: 48.3% -> 0.9%. Sum CPU/fixture cycle
 ratio: 0.834 -> 0.999. All common/demo-relevant instructions match exactly.
-Remaining: DIVS normal-path +/-2 in ~23% of cases (data-dependent loop, avg ~0
-so no pacing bias), a small CHK lower-bound trap-path subset, and a small
-static-register bit-op edge. DIVU/MULU/MULS exact.
+Remaining at that stage: DIVS normal-path +/-2 in ~23% of cases
+(data-dependent loop, avg ~0 so no pacing bias), a small CHK lower-bound
+trap-path subset, and a small static-register bit-op edge. Later Part E work
+closed these residuals; the current cycle-total report is exact across the
+full corpus.
 
 # Part E: prefetch + per-access bus timing (cycle-exact frontier)
 
@@ -291,43 +293,38 @@ Internal-cycle placements landed (all validated against fixture offsets):
 - **Memory-to-memory forms**: ABCD/SBCD/ADDX/SUBX 2 leading clocks (override
   of the per-EA charges for the double-predecrement forms).
 - **Exception entry**: 4 leading clocks (take_exception) + 2 between the two
-  handler-refill prefetches (jump_vector). CHK: 6 internal on pass, 8/10 on
-  trap (too-big/negative). Status ops (to CCR/SR): 8 internal before the
-  refill; MOVE to SR/CCR: 4.
+  handler-refill prefetches (jump_vector). CHK: 6 internal on pass, 8 on an
+  upper-bound trap or lower-bound trap whose preceding upper comparison
+  overflowed, and 10 on ordinary lower-bound traps. Status ops (to CCR/SR):
+  8 internal before the refill; MOVE to SR/CCR: 4.
 - **Control flow EAs**: JMP/JSR +2 (d16/abs.w/PC-rel) or +4 (indexed) before
   the target refill; LEA/PEA indexed +2 after the extension fetch.
 - **RESET instruction**: 128 internal clocks (the reset pulse).
 - **DIVU/DIVS**: the data-dependent division clocks (divX_cycles - 4) before
   the final prefetch.
 
-Final: 99.6% of accesses (99.7% of cases) at fixture-exact offsets.
-The remaining 0.4% (CHK 388 cases, DIVS 353 cases, all avg-2-clock) is
-bounded by the Part D cycle-TOTAL residuals in those classes (DIVS
-data-dependent loop +/-2, CHK trap-path totals) -- placement cannot be more
-exact than the totals it distributes. Improving those needs divs_cycles /
-CHK-trap total formula fixes (Part D follow-up), not placement changes.
+Final before the CHK follow-up: 99.6% of accesses (99.7% of cases) at
+fixture-exact offsets. The remaining 0.4% (CHK 388 cases, DIVS 353 cases,
+all avg-2-clock) was bounded by the Part D cycle-total residuals in those
+classes -- placement could not be more exact than the totals it distributed.
 
 ## E.2 CHK trap-path refinement (2026-07-09)
 
 The 68000 CHK microcode tests the upper bound before the lower bound. When
 `Dn > bound` traps, the exception frame starts after the 6-clock comparison
-phase plus 2 more clocks; only values that pass that comparison and then fail
-`Dn < 0` take the 6+4-clock path. Copperline now orders those trap tests that
-way and returns the SST/MAME shorter upper-bound trap total, including the
-negative-Dn/negative-bound cases where the upper comparison is decisive.
-
-This narrows the CHK cycle-total residual from 924 to 199 cases and improves
-the CHK access-timing exact count from 1135 to 1324 cases. The remaining CHK
-cases are all a two-clock lower-bound trap subset where the SST transaction log
-places the frame at the shorter offset despite the ordinary signed comparison
-falling through to the lower-bound check. Moira/vAmiga's readable CHK sequence
-does not expose a defensible predicate for that subset, so it remains a
-documented residual rather than a speculative fixture-shaped branch.
+phase plus 2 more clocks. Negative values that pass the architectural upper
+test usually take the 6+4-clock lower-bound path, but the SST/MAME transaction
+log shows a hardware-derived split: if the preceding signed upper-bound
+subtraction (`Dn - bound`) overflowed, the lower-bound trap uses the same
+short pre-frame path as an upper-bound trap. That predicate exactly accounts
+for the former 199-case residual.
 
 Current tail after this refinement:
 
-- `cycle_gap_report`: CHK 199 / 1523 cycle mismatches, all +2 clocks.
-- `access_timing_gap_report`: DIVU, DIVS, and the 199 CHK lower-bound cases.
+- `cycle_gap_report`: 0 mismatches across 261,894 cases.
+- `access_timing_gap_report`: CHK exact; remaining timing-offset tail is
+  DIVU/DIVS, whose final prefetch ordering intentionally follows Moira/vAmiga
+  and the Copperline timing-test disk.
 
 # Part E.3: Copperline integration + system validation (2026-06-03)
 

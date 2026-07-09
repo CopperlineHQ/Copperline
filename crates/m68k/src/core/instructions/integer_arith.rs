@@ -652,7 +652,18 @@ impl CpuCore {
 
         if val < 0 {
             // Only values that pass the upper-bound comparison reach the
-            // lower-bound check, which adds two more clocks before the frame.
+            // lower-bound check. On the 68000 that first signed subtraction
+            // still leaves a timing trace: if `Dn - bound` overflowed, the
+            // exception frame starts on the same short path as an upper-bound
+            // trap even though the architectural trap condition is `Dn < 0`.
+            if self.cpu_type == CpuType::M68000
+                && size == Size::Word
+                && (val as i16).checked_sub(limit as i16).is_none()
+            {
+                self.internal_cycles(8);
+                return self.exception_chk(bus) - 2;
+            }
+
             self.internal_cycles(10);
             return self.exception_chk(bus);
         }
@@ -849,6 +860,26 @@ mod tests {
             &bus.events[..4],
             &[
                 Event::Sync(10),
+                Event::WriteWord(0x0FFE, 0x2004),
+                Event::WriteWord(0x0FFA, cpu.get_sr()),
+                Event::WriteWord(0x0FFC, 0x0000),
+            ]
+        );
+    }
+
+    #[test]
+    fn m68000_chk_negative_upper_compare_overflow_uses_short_exception_path() {
+        let mut cpu = cpu_for_chk_exception();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0xFFFF_A167; // -24217
+
+        let cycles = cpu.exec_chk(&mut bus, Size::Word, 0x5836, 0); // 22582
+
+        assert_eq!(cycles, 38);
+        assert_eq!(
+            &bus.events[..4],
+            &[
+                Event::Sync(8),
                 Event::WriteWord(0x0FFE, 0x2004),
                 Event::WriteWord(0x0FFA, cpu.get_sr()),
                 Event::WriteWord(0x0FFC, 0x0000),
