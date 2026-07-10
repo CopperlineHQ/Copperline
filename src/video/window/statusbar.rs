@@ -529,7 +529,7 @@ pub(super) fn draw_fdd_track_counter(frame: &mut [u8], track: Option<u8>, textur
         texture_scale,
     );
 
-    let digits = track.map_or([b'-', b'-', b'-'], |track| {
+    let digits = track.map_or(*b"---", |track| {
         [
             b'0' + track / 100,
             b'0' + (track / 10) % 10,
