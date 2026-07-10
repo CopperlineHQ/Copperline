@@ -247,3 +247,34 @@ regions are 2 cck/word, so on real hardware rows 7, 13 and 14 are identical. If 
 emulator times code differently depending on whether it runs from slow or chip
 RAM, rows 13 and 14 diverge -- which matters for any program (like a demo) that
 runs from slow/trapdoor RAM.
+
+## CI golden renders (`timing-test/golden/`)
+
+`tests/probe_golden.rs` runs the timing test and the stable display probes
+in CI on every push: each probe's committed `.bin` is wrapped into a
+bootable ADF, booted on the bundled AROS ROM (the probes take over the
+machine, so the settled frame is ROM-independent -- verified byte-identical
+to a Kickstart 1.3 boot), captured as a raw screenshot at a fixed emulated
+time, and compared pixel-for-pixel against the reference render committed
+under `golden/`. The emulator core is deterministic, so any pixel change is
+a real behaviour change.
+
+Covered: `timing-test` (all 32 timing rows as rendered hex), `ddfprobe`
+(DDF placement sweep), `ddfprobe-diw1` (DIW edge), `ddfprobe-toggle`
+(per-line BPLCON0 toggling), `ddfprobe-cc`/`-cc3`/`-cc4` (raced
+copper-chunky COLOR00 trains vs bitplane fetch), and `ddfprobe-sprbar`/
+`-sprbar2` (manual/DMA sprite serializer positions -- the gen-x masking-bar
+regression). Excluded by design: `ddfprobe-cc5`/`-cc6` sit on deliberate
+race boundaries and would flip on any unrelated timing change, and
+`ddfprobe-cc7` replays a chip-RAM dump of a running demo that is not
+committed.
+
+When a hardware-model fix intentionally moves calibrated output, re-bless
+and review the render diff as part of the change:
+
+```sh
+COPPERLINE_BLESS_GOLDEN=1 cargo test --release --test probe_golden
+```
+
+On a mismatch, CI uploads the actual renders and diff masks
+(`target/probe-golden/`) as workflow artifacts.
