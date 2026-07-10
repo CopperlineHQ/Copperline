@@ -356,7 +356,12 @@ struct NormalBlitState {
     snap_a_idx: usize,
     snap_b_idx: usize,
     track_overlay: bool,
-    d_overlay: std::collections::HashMap<usize, u16>,
+    /// BTreeMap, not HashMap: this is serialized machine state, and HashMap's
+    /// per-instance random iteration order makes two saves of the same
+    /// machine byte-different (and a resumed machine's saves byte-different
+    /// from the live one's). The ordered map serializes deterministically;
+    /// the bincode wire shape (length + entries) is the same for both.
+    d_overlay: std::collections::BTreeMap<usize, u16>,
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
@@ -1548,7 +1553,7 @@ impl NormalBlitState {
             // Only self-overlap-capable blits (D plus a snapshotted source
             // channel) need the overlay; D-only or C-only blits skip it.
             track_overlay: use_d && (use_a || use_b),
-            d_overlay: std::collections::HashMap::new(),
+            d_overlay: std::collections::BTreeMap::new(),
         }
     }
 
