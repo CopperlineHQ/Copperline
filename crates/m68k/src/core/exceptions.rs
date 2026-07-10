@@ -436,14 +436,17 @@ impl CpuCore {
                 };
                 let ssw = rw | atc | sz | (fc as u16 & 0x7); // TM = function code
                 let fmt_vec = 0x7000 | ((vector::BUS_ERROR as u16) << 2);
-                // A faulted write is reported in writeback slot 2 (V bit,
-                // size and TM in WB2S; address and data in WB2A/WB2D). The
-                // handler either completes it manually or clears WB2S.V to
-                // absorb it -- how Enforcer/MuForce discard stores into
-                // protected pages -- and RTE (below) honours the cleared V.
-                // WB1 and WB3 (later/earlier pipeline stages) never carry
-                // anything in this core.
-                let wb2s = if write {
+                // A normal faulted write is reported in writeback slot 3 (V
+                // bit, size and TM in WB3S; address and data in WB3A/WB3D),
+                // matching real 68040 silicon and the WinUAE/Amiberry MMU
+                // reference (cpummu.cpp sets regs.wb3_status/wb3_data on a
+                // write fault and clears wb2 -- WB2 is reserved for MOVE16
+                // cacheline writes). MuGuardianAngel completes an allowed
+                // write by storing WB3D to WB3A, and Enforcer/MuForce discard
+                // a protected store by clearing WB3S.V; RTE (below) honours
+                // the cleared V. Putting the store in WB2 instead makes MuGA
+                // read a zero WB3D and clobber the target with 0.
+                let wb3s = if write {
                     0x0080 | sz | (fc as u16 & 0x7) // V | SZ | TM
                 } else {
                     0
@@ -453,14 +456,14 @@ impl CpuCore {
                 }
                 self.push_32_raw(bus, 0); // WB1D / PD0
                 self.push_32_raw(bus, 0); // WB1A
-                self.push_32_raw(bus, if write { self.pending_fault_wdata } else { 0 }); // WB2D
-                self.push_32_raw(bus, if write { address } else { 0 }); // WB2A
-                self.push_32_raw(bus, 0); // WB3D
-                self.push_32_raw(bus, 0); // WB3A
+                self.push_32_raw(bus, 0); // WB2D
+                self.push_32_raw(bus, 0); // WB2A
+                self.push_32_raw(bus, if write { self.pending_fault_wdata } else { 0 }); // WB3D
+                self.push_32_raw(bus, if write { address } else { 0 }); // WB3A
                 self.push_32_raw(bus, address); // fault address
                 self.push_16_raw(bus, 0); // WB1S
-                self.push_16_raw(bus, wb2s); // WB2S
-                self.push_16_raw(bus, 0); // WB3S
+                self.push_16_raw(bus, 0); // WB2S
+                self.push_16_raw(bus, wb3s); // WB3S
                 self.push_16_raw(bus, ssw); // special status word
                 self.push_32_raw(bus, address); // effective address
                 self.push_16_raw(bus, fmt_vec); // format 7 / vector offset
