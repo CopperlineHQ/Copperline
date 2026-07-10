@@ -210,6 +210,214 @@ mod tests {
         ))
     }
 
+    /// Machine whose ROM bootstrap copies a busy workload into chip RAM and
+    /// runs it there: a main loop that waits for blitter idle, programs a
+    /// 32x16-word A->D copy blit and starts it, and counts iterations at
+    /// $180; a Copper list with colour MOVEs and two WAITs; and a VERTB
+    /// interrupt handler counting fields at $184. Together they keep the
+    /// blitter pipeline, Copper comparator, interrupt latency pipe, and
+    /// CPU chip-bus arbitration all active at any snapshot point.
+    fn blitting_workload_machine() -> M68kMachine {
+        // Chip-RAM image, assembled for base $2000.
+        // $2000 handler: move.w #$0020,$9C(a5); addq.l #1,$184.w; rte
+        let handler: [u16; 7] = [0x3B7C, 0x0020, 0x009C, 0x52B8, 0x0184, 0x4E73, 0x4E71];
+        // $2010 entry:
+        let entry: [u16; 42] = [
+            0x4BF9, 0x00DF, 0xF000, // lea $DFF000,a5
+            0x21FC, 0x0000, 0x2000, 0x006C, // move.l #$2000,$6C.w (level-3 autovector)
+            0x41F8, 0x1000, // lea $1000.w,a0 (copper list)
+            0x20FC, 0x0180, 0x0F00, // move.l #$01800F00,(a0)+  COLOR00 red
+            0x20FC, 0x8107, 0xFFFE, // move.l #$8107FFFE,(a0)+  WAIT v=$81
+            0x20FC, 0x0180, 0x000F, // move.l #$0180000F,(a0)+  COLOR00 blue
+            0x20FC, 0xC107, 0xFFFE, // move.l #$C107FFFE,(a0)+  WAIT v=$C1
+            0x20FC, 0x0180, 0x00F0, // move.l #$018000F0,(a0)+  COLOR00 green
+            0x20FC, 0xFFFF, 0xFFFE, // move.l #$FFFFFFFE,(a0)+  end of list
+            0x2B7C, 0x0000, 0x1000, 0x0080, // move.l #$1000,COP1LC
+            0x3B7C, 0x0000, 0x0088, // move.w #0,COPJMP1
+            0x3B7C, 0xC020, 0x009A, // move.w #$C020,INTENA (master+VERTB)
+            0x3B7C, 0x82C0, 0x0096, // move.w #$82C0,DMACON (DMAEN|COPEN|BLTEN)
+            0x46FC, 0x2000, // move.w #$2000,sr (supervisor, IPL 0)
+        ];
+        // $2064 loop:
+        let mainloop: [u16; 37] = [
+            0x302D, 0x0002, // wait_idle: move.w DMACONR(a5),d0
+            0x0240, 0x4000, // andi.w #$4000,d0 (BBUSY)
+            0x66F6, // bne.s wait_idle
+            0x3B7C, 0x09F0, 0x0040, // move.w #$09F0,BLTCON0 (A->D copy)
+            0x3B7C, 0x0000, 0x0042, // move.w #0,BLTCON1
+            0x3B7C, 0xFFFF, 0x0044, // move.w #$FFFF,BLTAFWM
+            0x3B7C, 0xFFFF, 0x0046, // move.w #$FFFF,BLTALWM
+            0x2B7C, 0x0000, 0x8000, 0x0050, // move.l #$8000,BLTAPT
+            0x2B7C, 0x0004, 0x0000, 0x0054, // move.l #$40000,BLTDPT
+            0x3B7C, 0x0000, 0x0064, // move.w #0,BLTAMOD
+            0x3B7C, 0x0000, 0x0066, // move.w #0,BLTDMOD
+            0x3B7C, 0x0810, 0x0058, // move.w #$0810,BLTSIZE (32 rows x 16 words)
+            0x52B8, 0x0180, // addq.l #1,$180.w (loop counter)
+            0x60B6, // bra.s wait_idle
+        ];
+
+        // Everything lives in chip RAM: with the boot overlay off, the CPU
+        // reads its reset vectors from address 0 there, so the program is
+        // placed directly and no ROM bootstrap is involved.
+        let mut chip_ram = vec![0u8; 512 * 1024];
+        chip_ram[0..4].copy_from_slice(&0x0000_4000u32.to_be_bytes()); // reset SP
+        chip_ram[4..8].copy_from_slice(&0x0000_2010u32.to_be_bytes()); // reset PC
+        let mut poke = |base: usize, words: &[u16]| {
+            for (i, w) in words.iter().enumerate() {
+                chip_ram[base + 2 * i..base + 2 * i + 2].copy_from_slice(&w.to_be_bytes());
+            }
+        };
+        poke(0x2000, &handler);
+        poke(0x2010, &entry);
+        poke(0x2064, &mainloop);
+        // Blit source pattern at $8000 so the A->D copies move real data.
+        for (i, byte) in chip_ram[0x8000..0x8400].iter_mut().enumerate() {
+            *byte = (i as u8).wrapping_mul(37).wrapping_add(11);
+        }
+        let bus = Bus::new(
+            Memory {
+                chip_ram,
+                slow_ram: Vec::new(),
+                rom: vec![0u8; ROM_SIZE],
+                overlay: false,
+                zorro: ZorroChain::default(),
+                extended_rom: Vec::new(),
+                extended_rom_base: 0,
+                wcs: Vec::new(),
+                wcs_write_protected: false,
+            },
+            Paula::new(Box::new(NullSerialSink), Box::new(NullSink)),
+            FloppyController::default(),
+        );
+        crate::cpu::build(bus, CpuModel::M68000, false, 2, Default::default(), false).unwrap()
+    }
+
+    fn state_blob(machine: &M68kMachine) -> Vec<u8> {
+        let mut blob = Vec::new();
+        machine.write_state(&mut blob).unwrap();
+        blob
+    }
+
+    /// A state saved while the machine is mid-workload (blitter busy, Copper
+    /// waiting, interrupts flowing) must resume into a byte-identical
+    /// timeline: continue the live machine and a restored copy by the same
+    /// instruction count and compare the FULL serialized state of both.
+    /// Guards the save/restore completeness of the scheduled-blitter
+    /// micro-programs, the Copper WAIT/SKIP state, and the IRQ latency pipe
+    /// (the "resumed demo freezes" class of bug).
+    #[test]
+    fn resumed_state_continues_byte_identically_under_active_workload() {
+        let mut machine = blitting_workload_machine();
+
+        // Run past boot into the steady blit loop, then to a frame boundary
+        // (production saves happen there), then onto a colour clock where a
+        // blit is actually in flight. `step_slice(n)` is a budget that ends
+        // early on MMIO preempts (every BLTSIZE write), so loop on the
+        // retired-instruction count like the production frame loop does.
+        let mut retired = 0usize;
+        while retired < 4000 {
+            retired += machine.step_slice(4000 - retired).unwrap().instructions;
+        }
+        assert!(
+            machine.bus().mem.chip_ram[0x180..0x184] != [0, 0, 0, 0],
+            "workload loop counter must be advancing (program mis-assembled?): \
+             pc={:06X} vertb_count={:02X?} cck={}",
+            machine.pc(),
+            &machine.bus().mem.chip_ram[0x184..0x188],
+            machine.bus().emulated_cck(),
+        );
+        let start_frames = machine.bus().emulated_frames();
+        while machine.bus().emulated_frames() == start_frames {
+            machine.step_slice(16).unwrap();
+        }
+        while !machine.bus().blitter.busy {
+            machine.step_slice(1).unwrap();
+        }
+
+        let saved = state_blob(&machine);
+        let counter_at_save = machine.bus().mem.chip_ram[0x180..0x184].to_vec();
+        let frames_at_save = machine.bus().emulated_frames();
+
+        // Continue both timelines by the same instruction count, far enough
+        // to cross at least two frame wraps: the state loader deliberately
+        // clears the (serialized) mid-frame render-capture buffers
+        // (`reset_transient_video_after_state_load`), and the wrap is where
+        // both timelines rebuild them identically. Everything the chips and
+        // CPU compute must match from the very first instruction; the wraps
+        // only launder the render-capture bookkeeping.
+        let continue_instructions = 40_000usize;
+        let run = |m: &mut M68kMachine| {
+            let mut retired = 0usize;
+            while retired < continue_instructions {
+                retired += m
+                    .step_slice(continue_instructions - retired)
+                    .unwrap()
+                    .instructions;
+            }
+        };
+
+        run(&mut machine);
+        assert!(
+            machine.bus().mem.chip_ram[0x180..0x184] != counter_at_save[..],
+            "live workload stalled after the save point"
+        );
+        assert!(
+            machine.bus().emulated_frames() >= frames_at_save + 2,
+            "continuation must cross two frame wraps to launder capture state"
+        );
+        let live_after = state_blob(&machine);
+
+        // Restore the snapshot into a fresh machine and continue identically.
+        let mut restored = blitting_workload_machine();
+        restored
+            .apply_state(&mut std::io::Cursor::new(&saved))
+            .unwrap();
+        run(&mut restored);
+        let restored_after = state_blob(&restored);
+
+        // The restored timeline advanced past the save point...
+        assert!(
+            restored.bus().mem.chip_ram[0x180..0x184] != counter_at_save[..],
+            "restored machine stopped executing the workload (the resume-freeze class)"
+        );
+        // ...and matches the live one exactly, in every serialized component.
+        if live_after != restored_after {
+            let first_diff = live_after
+                .iter()
+                .zip(restored_after.iter())
+                .position(|(a, b)| a != b);
+            let ram_diff = machine
+                .bus()
+                .mem
+                .chip_ram
+                .iter()
+                .zip(restored.bus().mem.chip_ram.iter())
+                .position(|(a, b)| a != b);
+            panic!(
+                "resumed timeline diverged from the live one: blob lengths {}/{}, \
+                 first differing byte at {:?}; chip RAM first diff at {:X?}; \
+                 live cck={} v={} h={} pc={:06X} counter={:02X?} vertb={:02X?}; \
+                 restored cck={} v={} h={} pc={:06X} counter={:02X?} vertb={:02X?}",
+                live_after.len(),
+                restored_after.len(),
+                first_diff,
+                ram_diff,
+                machine.bus().emulated_cck(),
+                machine.bus().agnus.vpos,
+                machine.bus().agnus.hpos,
+                machine.pc(),
+                &machine.bus().mem.chip_ram[0x180..0x184],
+                &machine.bus().mem.chip_ram[0x184..0x188],
+                restored.bus().emulated_cck(),
+                restored.bus().agnus.vpos,
+                restored.bus().agnus.hpos,
+                restored.pc(),
+                &restored.bus().mem.chip_ram[0x180..0x184],
+                &restored.bus().mem.chip_ram[0x184..0x188],
+            );
+        }
+    }
+
     #[test]
     fn rejects_files_without_the_state_magic() {
         let path = temp_state("magic");
