@@ -18,7 +18,7 @@ use super::{
     BPLCON3_SPRES_HIRES, DENISE_HPOS_LAG_CCK, DMACON_BLTEN, DMACON_BLTPRI, DMACON_BPLEN,
     DMACON_SPREN, PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS, RENDER_COPPER_WAIT_HPOS_FB0,
     RENDER_DIW_HSTART_FB0, RENDER_MIN_OVERSCAN_START_VPOS, RENDER_VISIBLE_LINES,
-    RENDER_VISIBLE_START_VPOS, SPRITE_DMA_SLOT1_HPOS,
+    RENDER_VISIBLE_START_VPOS, SPRITE_DMA_SLOT1_HPOS, SPRITE_OUTPUT_DELAY_LORES,
 };
 use crate::audio::AudioSink;
 use crate::chipset::agnus::{
@@ -402,6 +402,8 @@ fn write_chip_word_wrapping(bus: &mut Bus, off: usize, val: u16) {
     bus.mem.chip_ram[(off + 1) % len] = bytes[1];
 }
 
+/// POS/CTL words with `hstart` in the REGISTER domain (what the DMA
+/// descriptor tests place in chip RAM and read back from captures).
 fn sprite_control_words(vstart: u16, vstop: u16, hstart: u16) -> (u16, u16) {
     let pos = ((vstart & 0x00FF) << 8) | ((hstart >> 1) & 0x00FF);
     let ctl = ((vstop & 0x00FF) << 8)
@@ -409,6 +411,15 @@ fn sprite_control_words(vstart: u16, vstop: u16, hstart: u16) -> (u16, u16) {
         | ((vstop & 0x0100) >> 7)
         | (hstart & 0x0001);
     (pos, ctl)
+}
+
+/// POS/CTL words for a sprite whose FIRST OUTPUT PIXEL sits at lo-res
+/// position `hstart`: the register value is one lo-res position lower
+/// because Denise's serializer emits one lo-res pixel after the
+/// comparator match (`SPRITE_OUTPUT_DELAY_LORES`). The collision tests
+/// are written against output positions.
+fn sprite_control_words_for_output(vstart: u16, vstop: u16, hstart: u16) -> (u16, u16) {
+    sprite_control_words(vstart, vstop, hstart - SPRITE_OUTPUT_DELAY_LORES as u16)
 }
 
 /// Cross the vertical-blank reset line (PAL $19) over the whole sprite slot
@@ -4645,7 +4656,7 @@ fn same_line_bplcon2_priority_change_reveals_later_sprite_pixels() {
     bus.current_frame_sprite_display_enable_x_by_y[0] = Some(0);
     bus.current_frame_sprite_lines.push(CapturedSpriteLine {
         sprite: 0,
-        hstart: RENDER_DIW_HSTART_FB0 + 34,
+        hstart: RENDER_DIW_HSTART_FB0 + 34 - SPRITE_OUTPUT_DELAY_LORES,
         hsub_70ns: false,
         beam_y: RENDER_VISIBLE_START_VPOS as i32,
         data: 0xFFFF,
@@ -4683,7 +4694,7 @@ fn same_line_bplcon3_spres_narrows_later_sprite_pixels() {
     bus.current_frame_sprite_dma_observed = true;
     bus.current_frame_sprite_lines.push(CapturedSpriteLine {
         sprite: 0,
-        hstart: RENDER_DIW_HSTART_FB0 + 34,
+        hstart: RENDER_DIW_HSTART_FB0 + 34 - SPRITE_OUTPUT_DELAY_LORES,
         hsub_70ns: false,
         beam_y: RENDER_VISIBLE_START_VPOS as i32,
         data: 0x0100,
@@ -6717,7 +6728,7 @@ fn manual_sprite_data_writes_accumulate_live_sprite_playfield_clxdat() {
     // hstart +1 vs the pre-fix value: sprite comparator positions share
     // Denise's counter and moved with the corrected window-edge anchor
     // (2H-196); the beam-anchored playfield sample did not.
-    let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0082);
+    let (pos, ctl) = sprite_control_words_for_output(0x2C, 0x2D, 0x0082);
     bus.agnus.vpos = 0x2C;
     // Slot $34: the write event records at $38 (slot + write-effect delay).
     bus.agnus.hpos = 0x34;
@@ -6760,7 +6771,7 @@ fn manual_sprite_data_writes_accumulate_live_sprite_playfield_clxdat() {
 #[test]
 fn attached_manual_sprite_data_writes_accumulate_live_sprite_playfield_clxdat() {
     let mut bus = empty_bus();
-    let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0083);
+    let (pos, ctl) = sprite_control_words_for_output(0x2C, 0x2D, 0x0083);
     bus.agnus.vpos = 0x2C;
     // Slot $34: the write events record at $38 (slot + write-effect delay).
     bus.agnus.hpos = 0x34;
@@ -6804,8 +6815,8 @@ fn attached_manual_sprite_data_writes_accumulate_live_sprite_playfield_clxdat() 
 fn bplcon3_spres_hires_narrows_live_sprite_sprite_clxdat() {
     let clxdat_after_visible_sprite_pixels = |bplcon3| {
         let mut bus = empty_bus();
-        let (pos0, ctl0) = sprite_control_words(0x2C, 0x2D, 0x0083);
-        let (pos2, ctl2) = sprite_control_words(0x2C, 0x2D, 0x0084);
+        let (pos0, ctl0) = sprite_control_words_for_output(0x2C, 0x2D, 0x0083);
+        let (pos2, ctl2) = sprite_control_words_for_output(0x2C, 0x2D, 0x0084);
         let sprite0_ptr = 0x0100usize;
         let sprite2_ptr = 0x0200usize;
 
@@ -6854,7 +6865,7 @@ fn bplcon3_spres_hires_narrows_live_sprite_sprite_clxdat() {
 fn same_line_clxcon_odd_sprite_enable_does_not_retime_earlier_live_sprite_sprite_clxdat() {
     let clxdat_after_visible_sprite_pixels = |initial_clxcon, enable_hpos: Option<u32>| {
         let mut bus = empty_bus();
-        let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0083);
+        let (pos, ctl) = sprite_control_words_for_output(0x2C, 0x2D, 0x0083);
         let sprite1_ptr = 0x0100usize;
         let sprite2_ptr = 0x0200usize;
         for ptr in [sprite1_ptr, sprite2_ptr] {
@@ -7116,7 +7127,7 @@ fn denise_horizontal_delay_aligns_sprite_playfield_collision_domain() {
     };
     let source = LiveSpriteCollisionSource {
         group: 0,
-        hstart: 0x81,
+        hstart: 0x81 - SPRITE_OUTPUT_DELAY_LORES,
         hsub_70ns: false,
         words: [0x8000, 0, 0, 0],
         requires_odd_enable: false,
@@ -7173,14 +7184,14 @@ fn sprite_sprite_clxdat_waits_for_bpl1dat_display_enable() {
     let sources = [
         LiveSpriteCollisionSource {
             group: 0,
-            hstart: RENDER_DIW_HSTART_FB0,
+            hstart: RENDER_DIW_HSTART_FB0 - SPRITE_OUTPUT_DELAY_LORES,
             hsub_70ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
         },
         LiveSpriteCollisionSource {
             group: 1,
-            hstart: RENDER_DIW_HSTART_FB0,
+            hstart: RENDER_DIW_HSTART_FB0 - SPRITE_OUTPUT_DELAY_LORES,
             hsub_70ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
@@ -7246,21 +7257,21 @@ fn live_sprite_sprite_clxdat_skips_already_latched_bits() {
     let sources = [
         LiveSpriteCollisionSource {
             group: 0,
-            hstart: RENDER_DIW_HSTART_FB0,
+            hstart: RENDER_DIW_HSTART_FB0 - SPRITE_OUTPUT_DELAY_LORES,
             hsub_70ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
         },
         LiveSpriteCollisionSource {
             group: 1,
-            hstart: RENDER_DIW_HSTART_FB0,
+            hstart: RENDER_DIW_HSTART_FB0 - SPRITE_OUTPUT_DELAY_LORES,
             hsub_70ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
         },
         LiveSpriteCollisionSource {
             group: 2,
-            hstart: RENDER_DIW_HSTART_FB0,
+            hstart: RENDER_DIW_HSTART_FB0 - SPRITE_OUTPUT_DELAY_LORES,
             hsub_70ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
@@ -7318,7 +7329,7 @@ fn live_sprite_playfield_clxdat_skips_already_latched_bits() {
     };
     let source = LiveSpriteCollisionSource {
         group: 0,
-        hstart: 0x81,
+        hstart: 0x81 - SPRITE_OUTPUT_DELAY_LORES,
         hsub_70ns: false,
         words: [0x8000, 0, 0, 0],
         requires_odd_enable: false,
@@ -7388,14 +7399,14 @@ fn brdsprt_bypasses_bpl1dat_display_enable_for_live_sprite_clxdat() {
     let sources = [
         LiveSpriteCollisionSource {
             group: 0,
-            hstart: RENDER_DIW_HSTART_FB0,
+            hstart: RENDER_DIW_HSTART_FB0 - SPRITE_OUTPUT_DELAY_LORES,
             hsub_70ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
         },
         LiveSpriteCollisionSource {
             group: 1,
-            hstart: RENDER_DIW_HSTART_FB0,
+            hstart: RENDER_DIW_HSTART_FB0 - SPRITE_OUTPUT_DELAY_LORES,
             hsub_70ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
@@ -7437,14 +7448,14 @@ fn brdrblnk_suppresses_brdsprt_live_sprite_clxdat_bypass() {
     let sources = [
         LiveSpriteCollisionSource {
             group: 0,
-            hstart: RENDER_DIW_HSTART_FB0,
+            hstart: RENDER_DIW_HSTART_FB0 - SPRITE_OUTPUT_DELAY_LORES,
             hsub_70ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
         },
         LiveSpriteCollisionSource {
             group: 1,
-            hstart: RENDER_DIW_HSTART_FB0,
+            hstart: RENDER_DIW_HSTART_FB0 - SPRITE_OUTPUT_DELAY_LORES,
             hsub_70ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
@@ -7486,14 +7497,14 @@ fn manual_bpl1dat_display_enable_allows_live_sprite_clxdat_on_vertically_closed_
     let sources = [
         LiveSpriteCollisionSource {
             group: 0,
-            hstart: RENDER_DIW_HSTART_FB0,
+            hstart: RENDER_DIW_HSTART_FB0 - SPRITE_OUTPUT_DELAY_LORES,
             hsub_70ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
         },
         LiveSpriteCollisionSource {
             group: 1,
-            hstart: RENDER_DIW_HSTART_FB0,
+            hstart: RENDER_DIW_HSTART_FB0 - SPRITE_OUTPUT_DELAY_LORES,
             hsub_70ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
@@ -7608,7 +7619,7 @@ fn captured_sprite_and_bitplane_rows_accumulate_live_sprite_playfield_clxdat() {
     // hstart +1 vs the pre-fix value: sprite comparator positions share
     // Denise's counter and moved with the corrected window-edge anchor
     // (2H-196); the beam-anchored playfield sample did not.
-    let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0082);
+    let (pos, ctl) = sprite_control_words_for_output(0x2C, 0x2D, 0x0082);
     write_chip_word(&mut bus, sprite_ptr, pos);
     write_chip_word(&mut bus, sprite_ptr + 2, ctl);
     write_chip_word(&mut bus, sprite_ptr + 4, 0x8000);
@@ -7652,7 +7663,7 @@ fn captured_sprite_and_bitplane_rows_accumulate_live_sprite_playfield_clxdat() {
 fn explicit_bpl1dat_output_accumulates_live_sprite_playfield_clxdat() {
     let mut bus = empty_bus();
     let sprite_ptr = 0x0300usize;
-    let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0083);
+    let (pos, ctl) = sprite_control_words_for_output(0x2C, 0x2D, 0x0083);
     write_chip_word(&mut bus, sprite_ptr, pos);
     write_chip_word(&mut bus, sprite_ptr + 2, ctl);
     write_chip_word(&mut bus, sprite_ptr + 4, 0x8000);
@@ -7696,7 +7707,7 @@ fn explicit_bpl1dat_output_accumulates_live_sprite_playfield_clxdat() {
 #[test]
 fn manual_sprite_and_bpl1dat_writes_accumulate_live_sprite_playfield_clxdat() {
     let mut bus = empty_bus();
-    let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0083);
+    let (pos, ctl) = sprite_control_words_for_output(0x2C, 0x2D, 0x0083);
     bus.agnus.vpos = 0x2C;
     // Slot $34: the write events record at $38 (slot + write-effect delay).
     bus.agnus.hpos = 0x34;
@@ -7725,7 +7736,7 @@ fn same_line_bplcon1_scroll_increase_latches_later_live_sprite_playfield_clxdat(
     // hstart +1 vs the pre-fix value: sprite comparator positions share
     // Denise's counter and moved with the corrected window-edge anchor
     // (2H-196); the beam-anchored playfield sample did not.
-    let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0094);
+    let (pos, ctl) = sprite_control_words_for_output(0x2C, 0x2D, 0x0094);
     write_chip_word(&mut bus, sprite_ptr, pos);
     write_chip_word(&mut bus, sprite_ptr + 2, ctl);
     write_chip_word(&mut bus, sprite_ptr + 4, 0x8000);
@@ -7775,7 +7786,7 @@ fn same_line_clxcon_odd_sprite_enable_does_not_retime_earlier_live_sprite_playfi
     let clxdat_after_row_capture = |initial_clxcon, enable_hpos: Option<u32>| {
         let mut bus = empty_bus();
         let sprite_ptr = 0x0300usize;
-        let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0083);
+        let (pos, ctl) = sprite_control_words_for_output(0x2C, 0x2D, 0x0083);
         write_chip_word(&mut bus, sprite_ptr, pos);
         write_chip_word(&mut bus, sprite_ptr + 2, ctl);
         write_chip_word(&mut bus, sprite_ptr + 4, 0x8000);
@@ -7829,7 +7840,7 @@ fn bplcon3_spres_hires_narrows_live_sprite_playfield_clxdat() {
         let mut bus = empty_bus();
         let sprite_ptr = 0x0300usize;
         // hstart +1 vs the pre-fix value: see the sibling clxdat tests.
-        let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0082);
+        let (pos, ctl) = sprite_control_words_for_output(0x2C, 0x2D, 0x0082);
         write_chip_word(&mut bus, sprite_ptr, pos);
         write_chip_word(&mut bus, sprite_ptr + 2, ctl);
         write_chip_word(&mut bus, sprite_ptr + 4, 0x8000);
@@ -7882,7 +7893,7 @@ fn same_line_bplcon3_spres_write_does_not_retime_earlier_live_sprite_playfield_c
         let mut bus = empty_bus();
         let sprite_ptr = 0x0300usize;
         // hstart +1 vs the pre-fix value: see the sibling clxdat tests.
-        let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0082);
+        let (pos, ctl) = sprite_control_words_for_output(0x2C, 0x2D, 0x0082);
         write_chip_word(&mut bus, sprite_ptr, pos);
         write_chip_word(&mut bus, sprite_ptr + 2, ctl);
         write_chip_word(&mut bus, sprite_ptr + 4, 0x8000);

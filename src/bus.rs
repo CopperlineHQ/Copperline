@@ -254,6 +254,17 @@ const RENDER_FRAMEBUFFER_WIDTH: i32 = FB_WIDTH as i32;
 // puts the hardware-verified standard $81 window edge (and the sprite
 // comparator positions, which share Denise's counter) at framebuffer x = 62.
 const RENDER_DIW_HSTART_FB0: i32 = 0x62;
+/// Denise's sprite serializer emits its first pixel one lo-res pixel after
+/// the horizontal comparator matches the SPRxPOS/CTL position: a sprite
+/// programmed at the same numeric position as a display-window edge starts
+/// one lo-res pixel to its right (vAmiga models this inside `sprhppos`).
+/// Measured with timing-test/ddfprobe-sprbar.adf against a 16-px ruler:
+/// FS-UAE and vAmiga both place the bar's left edge 2 framebuffer pixels
+/// left of the ruler line it straddles; without this delay Copperline
+/// placed it 4. Applies identically to DMA-loaded and manually armed
+/// sprites (both probes) and to the collision comparators, which sample
+/// the same serializer.
+pub(crate) const SPRITE_OUTPUT_DELAY_LORES: i32 = 1;
 // Standard DIWSTRT $81 is the visible window edge. The first standard
 // bitplane sample at DDFSTRT $38 is already one lowres native sample into the
 // fetched word, so the fetch/output phase is referenced one color clock earlier.
@@ -6014,7 +6025,9 @@ fn live_manual_sprite_preserved_source_stop(
     if !(0x140..=0x17F).contains(&off) || (off - 0x140) & 0x0006 != 0 {
         return event_x;
     }
-    let base_x = (sprite_hstart_from_words(sprpos, sprctl) - RENDER_DIW_HSTART_FB0) * 2
+    let base_x = (sprite_hstart_from_words(sprpos, sprctl) + SPRITE_OUTPUT_DELAY_LORES
+        - RENDER_DIW_HSTART_FB0)
+        * 2
         + i32::from(shres && sprite_hsub_70ns_from_ctl(sprctl));
     if event_x >= base_x {
         query_x_stop
@@ -6099,7 +6112,8 @@ fn live_sprite_source_has_pixels(source: &LiveSpriteCollisionSource) -> bool {
 }
 
 fn live_sprite_source_framebuffer_bounds(source: &LiveSpriteCollisionSource) -> (i32, i32) {
-    let x_start = (source.hstart - RENDER_DIW_HSTART_FB0) * 2 + i32::from(source.hsub_70ns);
+    let x_start = (source.hstart + SPRITE_OUTPUT_DELAY_LORES - RENDER_DIW_HSTART_FB0) * 2
+        + i32::from(source.hsub_70ns);
     (x_start, x_start + 32)
 }
 
@@ -6306,7 +6320,8 @@ fn live_sprite_source_pixel_presence_with_control(
     control: LiveCollisionControl,
     x: i32,
 ) -> LiveSpritePixelPresence {
-    let sprite_base_x = (source.hstart - RENDER_DIW_HSTART_FB0) * 2 + i32::from(source.hsub_70ns);
+    let sprite_base_x = (source.hstart + SPRITE_OUTPUT_DELAY_LORES - RENDER_DIW_HSTART_FB0) * 2
+        + i32::from(source.hsub_70ns);
     let sprite_pixel_repeat = sprite_pixel_repeat_for_control(control.bplcon0, control.bplcon3);
     let offset = x - sprite_base_x;
     if offset < 0 {
