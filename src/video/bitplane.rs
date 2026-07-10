@@ -3424,16 +3424,21 @@ pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
     );
     let event_started = Instant::now();
     // Seed replay spans from beam-timed SPRx writes or DMA-established held
-    // sprites. SPRxDATA latches remain armed across the frame boundary, but
-    // they do not emit by themselves when captured DMA is the primary source;
-    // a later SPRxPOS write on a DMA-loaded line reuses the captured line data.
+    // sprites. SPRxDATA latches remain armed across the frame boundary; when
+    // captured DMA is the primary source they do not emit by themselves (a
+    // later SPRxPOS write on a DMA-loaded line reuses the captured line data),
+    // but with sprite DMA idle Denise's own rules apply unmodified: an armed
+    // sprite keeps serializing on every line of every following frame until a
+    // SPRxCTL write disarms it. Software that arms a sprite once and then
+    // leaves it alone for a whole scene (a static masking bar) relies on the
+    // latch emitting in frames with no sprite register writes at all.
     let mut manual_sprite_lines = manual_sprite_lines_from_events_with_visible_line0(
         &state,
         render_events,
         &input.held_sprites,
         visible_line0,
         rows,
-        false,
+        !input.sprite_dma_observed,
         input.sprite_dma_observed,
     );
     if input.sprite_dma_observed {

@@ -2461,6 +2461,67 @@ fn manual_sprite_data_writes_affect_only_later_beam_lines() {
 }
 
 #[test]
+fn armed_sprite_latch_keeps_serializing_in_frames_without_sprite_writes() {
+    // Denise has no vertical comparator: a sprite armed by a SPRxDATA write
+    // stays armed across frame boundaries and serializes at its POS/CTL
+    // position on every line until SPRxCTL disarms it. A frame with NO
+    // sprite register writes at all must therefore still emit the latched
+    // output while sprite DMA is idle (the live render path passes
+    // include_latched_sprite_state = !sprite_dma_observed). Software arms a
+    // masking bar once at scene init and leaves it alone for the whole
+    // scene; a DATA-armed vertical bar covering a raced copper-chunky
+    // column edge is the gen-x mosaic regression example.
+    // The bar's POS/CTL span the display vertically, like the demo's
+    // (vstart $28, vstop $130); the latched replay still consults that
+    // window, so a full-scene bar needs a full-coverage window.
+    let mut initial_state = blank_state();
+    let (pos, ctl) = sprite_control_words(
+        PAL_VISIBLE_LINE0 as u16,
+        PAL_VISIBLE_LINE0 as u16 + FB_HEIGHT as u16,
+        DIW_HSTART_FB0 as u16 + 40,
+    );
+    initial_state.sprpos[7] = pos;
+    initial_state.sprctl[7] = ctl;
+    initial_state.sprdata[7] = 0xF000;
+    initial_state.sprdatb[7] = 0xF000;
+    initial_state.spr_armed[7] = true;
+
+    // Sprite DMA idle: the latch emits on every line of the window even
+    // though this frame carries no sprite register writes.
+    let manual_sprite_lines = manual_sprite_lines_from_events_with_visible_line0(
+        &initial_state,
+        &[],
+        &[None; 8],
+        PAL_VISIBLE_LINE0,
+        FB_HEIGHT,
+        true,
+        false,
+    );
+    let line_count = manual_sprite_lines[7]
+        .iter()
+        .filter(|line| line.data == 0xF000 && line.datb == 0xF000)
+        .count();
+    assert!(
+        line_count >= FB_HEIGHT / 2,
+        "an armed sprite latch must serialize on every line of a frame \
+         without sprite writes (got {line_count} lines)"
+    );
+
+    // With sprite DMA observed this frame, captured DMA lines own the
+    // channel's output and the carried latch stays silent.
+    let manual_sprite_lines = manual_sprite_lines_from_events_with_visible_line0(
+        &initial_state,
+        &[],
+        &[None; 8],
+        PAL_VISIBLE_LINE0,
+        FB_HEIGHT,
+        false,
+        true,
+    );
+    assert!(manual_sprite_lines[7].is_empty());
+}
+
+#[test]
 fn latched_sprite_vstart_equal_vstop_is_empty() {
     let mut initial_state = blank_state();
     let beam_y = PAL_VISIBLE_LINE0;
