@@ -10,7 +10,7 @@ use crate::memory::{
 };
 use anyhow::{anyhow, Result};
 use log::{debug, trace};
-use m68k::{AddressBus, CpuCore, CpuType, NoOpHleHandler, StepResult};
+use m68k::{AddressBus, CpuCore, CpuType, StepResult};
 
 pub const CIA_A_BASE: u32 = 0x00BF_E000;
 pub const CIA_A_SIZE: u32 = 0x0000_1000;
@@ -96,7 +96,7 @@ struct UiTrace {
 pub struct M68kMachine {
     cpu: CpuCore,
     bus: CpuBus,
-    hle: NoOpHleHandler,
+    hle: crate::filesys::FilesysHle,
     fpu_enabled: bool,
     /// Last CACR value pushed into the cache models, so the per-instruction
     /// sync is a single compare when nothing changed.
@@ -333,7 +333,7 @@ impl M68kMachine {
                 ipl_sample_held: false,
                 diag_current_pc: 0,
             },
-            hle: NoOpHleHandler,
+            hle: crate::filesys::FilesysHle::default(),
             fpu_enabled,
             last_cacr: 0,
             dbg_ipl_main_cyc: 0,
@@ -1273,6 +1273,12 @@ impl M68kMachine {
             Ok(()) => log::info!("  screenshot: {path}"),
             Err(e) => log::warn!("  screenshot failed ({path}): {e:#}"),
         }
+    }
+
+    /// Configure the host directories served by the filesys trap gateway
+    /// (`[[filesys.mount]]`).
+    pub fn set_filesys_mounts(&mut self, mounts: Vec<crate::filesys::MountSpec>) {
+        self.hle.set_mounts(mounts);
     }
 
     pub fn bus(&self) -> &Bus {

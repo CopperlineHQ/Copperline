@@ -60,6 +60,8 @@ pub const COPPERLINE_MANUFACTURER_ID: u16 = 0x1448;
 const PRODUCT_COPPERLINE_ID: u8 = 0x02;
 const PRODUCT_FAST_RAM: u8 = 0x03;
 const PRODUCT_Z3_RAM: u8 = 0x04;
+/// The services board (host filesystem and, later, other guest services).
+const PRODUCT_SERVICES: u8 = 0x05;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 // "II"/"III" are the bus generations' proper names (roman numerals), not
@@ -210,6 +212,30 @@ impl BoardSpec {
         }
     }
 
+    /// The Copperline services board: a 64K Zorro II window through which the
+    /// emulator offers host-backed services to the guest -- currently the
+    /// host filesystem (`HOSTFS0:`...), with room for more (RTG, mouse,
+    /// clipboard) later. The window carries the guest-side handler, the mount
+    /// table, and a DiagArea (`diag_vec` points at
+    /// [`crate::filesys::DIAG_OFFSET`]) whose DiagPoint mounts the configured
+    /// host directories at expansion init; its packet pump then forwards
+    /// every DosPacket to the emulator through a reserved A-line trap. See
+    /// `guest/services/` and [`crate::filesys`]. RAM-backed and pre-seeded by
+    /// [`crate::filesys::board_image`].
+    pub fn copperline_services() -> Self {
+        Self {
+            name: "Copperline services".into(),
+            version: ZorroVersion::II,
+            manufacturer: COPPERLINE_MANUFACTURER_ID,
+            product: PRODUCT_SERVICES,
+            serial: 0,
+            size_bytes: 0x1_0000,
+            backing: BoardBacking::Ram,
+            memlist: false,
+            diag_vec: Some(crate::filesys::DIAG_OFFSET),
+        }
+    }
+
     fn validate(&self) -> Result<()> {
         match self.version {
             ZorroVersion::II => {
@@ -271,6 +297,36 @@ impl ZorroChain {
             BoardBacking::Ram => vec![0u8; spec.size_bytes],
             BoardBacking::Device(_) => Vec::new(),
         };
+        self.boards.push(Board {
+            spec,
+            state: BoardState::Unconfigured,
+            ram,
+        });
+        Ok(())
+    }
+
+    /// Add a RAM-backed board with its window pre-seeded from `rom` (copied at
+    /// offset 0, the remainder left zero). Used for the filesys rtarea,
+    /// whose handler ROM must be present in the window from power-on. The
+    /// board is still writable RAM, as the real rtarea is.
+    pub fn add_board_with_rom(&mut self, spec: BoardSpec, rom: &[u8]) -> Result<()> {
+        spec.validate()?;
+        if !matches!(spec.backing, BoardBacking::Ram) {
+            bail!(
+                "board {:?}: add_board_with_rom requires RAM backing",
+                spec.name
+            );
+        }
+        if rom.len() > spec.size_bytes {
+            bail!(
+                "board {:?}: ROM image {} bytes exceeds the {}-byte window",
+                spec.name,
+                rom.len(),
+                spec.size_bytes
+            );
+        }
+        let mut ram = vec![0u8; spec.size_bytes];
+        ram[..rom.len()].copy_from_slice(rom);
         self.boards.push(Board {
             spec,
             state: BoardState::Unconfigured,

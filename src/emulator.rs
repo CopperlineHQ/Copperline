@@ -2008,6 +2008,7 @@ pub fn build_machine(
     )?;
     emu.set_cache_emulation(cfg.cpu_icache, cfg.cpu_dcache);
     emu.set_machine_descriptor(cfg.descriptor());
+    emu.machine.set_filesys_mounts(cfg.filesys.clone());
     Ok(emu)
 }
 

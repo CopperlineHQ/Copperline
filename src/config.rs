@@ -74,6 +74,10 @@ pub struct Config {
     /// identify.library can detect the emulator. Defaults to true; set
     /// `identify = false` for a chain with no emulator-identifying board.
     pub identify_board: bool,
+    /// `[[filesys]]` host directories exported to the guest as
+    /// AmigaDOS devices `HOSTFS0:`, `HOSTFS1:`, ... (experimental). Empty:
+    /// no services board on the autoconfig chain.
+    pub filesys: Vec<crate::filesys::MountSpec>,
     pub chipset: Chipset,
     /// Concrete chip revisions derived from the `[chipset] revision` preset,
     /// installed chip RAM, and the optional `agnus`/`denise` overrides.
@@ -877,6 +881,7 @@ impl Default for Config {
             zorro_boards: Vec::new(),
             wasm_boards: Vec::new(),
             identify_board: true,
+            filesys: Vec::new(),
             // The no-[machine] default models the most common and most-
             // targeted Amiga: the A500 Rev 6A (the ECS "Fatter" 8372A Agnus
             // with the original OCS 8362 Denise). Selecting `[chipset]
@@ -981,6 +986,27 @@ impl Config {
         }
         if self.identify_board {
             chain.add_board(BoardSpec::copperline_id())?;
+        }
+        // Copperline services board (experimental, `[[filesys]]`):
+        // carries the guest handler, the mount table, and the DiagArea that
+        // mounts the configured host directories at expansion init. See
+        // crate::filesys.
+        if !self.filesys.is_empty() {
+            if self.filesys.len() > crate::filesys::MOUNT_MAX_COUNT {
+                anyhow::bail!(
+                    "[[filesys]]: at most {} mounts supported",
+                    crate::filesys::MOUNT_MAX_COUNT
+                );
+            }
+            for m in &self.filesys {
+                if !m.path.is_dir() {
+                    anyhow::bail!("[[filesys]] path {} is not a directory", m.path.display());
+                }
+            }
+            chain.add_board_with_rom(
+                BoardSpec::copperline_services(),
+                &crate::filesys::board_image(&self.filesys),
+            )?;
         }
         Ok(chain)
     }
@@ -1175,6 +1201,9 @@ pub struct RawConfig {
     pub(crate) input: RawInput,
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) serial: RawSerial,
+    /// `[[filesys]]` host-directory mount entries, in file order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) filesys: Vec<RawFilesysMount>,
     /// `[[zorro]]` board entries, configured in file order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) zorro: Vec<RawZorroBoard>,
@@ -1210,6 +1239,18 @@ pub(crate) struct RawDisplay {
     /// CRT phosphor persistence fraction, 0.0 (off, default) to 0.95.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) phosphor: Option<f32>,
+}
+
+/// One `[[filesys]]` entry (experimental): a host directory exported to the
+/// guest as the AmigaDOS device `HOSTFS<n>:` (n = position in the config).
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawFilesysMount {
+    /// Host directory to export.
+    pub(crate) path: String,
+    /// AmigaDOS volume name; defaults to the directory's name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) volume: Option<String>,
 }
 
 /// `[input]` host-input preferences. Currently just the initial joystick input
@@ -1970,6 +2011,19 @@ impl TryFrom<RawConfig> for Config {
             zorro_boards,
             wasm_boards,
             identify_board: raw.identify.unwrap_or(defaults.identify_board),
+            filesys: raw
+                .filesys
+                .iter()
+                .map(|m| crate::filesys::MountSpec {
+                    path: std::path::PathBuf::from(&m.path),
+                    volume: m.volume.clone().unwrap_or_else(|| {
+                        std::path::Path::new(&m.path)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| "HostFS".into())
+                    }),
+                })
+                .collect(),
             chipset,
             agnus_revision,
             denise_revision,

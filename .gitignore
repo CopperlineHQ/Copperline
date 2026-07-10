@@ -36,6 +36,7 @@
 # and ships with the build, so it is committed despite the *.bin rule.
 !/assets/aros/aros-amiga-m68k-rom.bin
 !/assets/aros/aros-amiga-m68k-ext.bin
+!/assets/services/services_rom.bin
 
 # Local run artifacts (screenshots, recordings, save states, input scripts).
 copperline-screenshot-*.png
@@ -55,3 +56,9 @@ copperline-video-*.avi
 # macOS disk image build artifact (packaging/macos/build-dmg.sh); the .app
 # bundle stages under /target, already ignored above.
 /*.dmg
+
+# Guest-code build intermediates (the committed artifact is the .bin blob).
+/guest/services/handler.*
+
+# Local clangd configs (machine-specific include paths).
+.clangd
