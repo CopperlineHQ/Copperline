@@ -471,34 +471,36 @@ impl CpuCore {
     /// Set flags for ADD operation.
     /// Musashi uses: CFLAG_8(res) = res (bit 8), CFLAG_16(res) = res>>8 (bit 16)
     /// For 32-bit: CFLAG_ADD_32(S, D, R) = ((S & D) | (~R & (S | D))) >> 23
+    ///
+    /// Operands are masked to `size` here, like `set_sub_flags`, so callers
+    /// may pass full register values: with unmasked operands the byte/word
+    /// carry (a raw bit above the operation width) and the V comparison
+    /// would see the register's upper bits.
     pub fn set_add_flags(&mut self, src: u32, dst: u32, result: u32, size: Size) {
         let msb = size.msb_mask();
         let mask = size.mask();
+        let s = src & mask;
+        let d = dst & mask;
+        let r = result & mask;
 
         // N flag: set if MSB of result is set
-        self.n_flag = if result & msb != 0 { 0x80 } else { 0 };
+        self.n_flag = if r & msb != 0 { 0x80 } else { 0 };
 
         // Z flag: set if result (masked) is zero
-        self.not_z_flag = result & mask;
+        self.not_z_flag = r;
 
         // V flag: overflow if both operands have same sign and result has different sign
         // Musashi: VFLAG_ADD = (src ^ result) & (dst ^ result)
-        let v = (src ^ result) & (dst ^ result) & msb;
+        let v = (s ^ r) & (d ^ r) & msb;
         self.v_flag = if v != 0 { 0x80 } else { 0 };
 
-        // C flag: carry out of the MSB
-        // For 32-bit, we need special handling since we can't get bit 32
-        // Musashi: CFLAG_ADD_32 = ((S & D) | (~R & (S | D))) >> 23
+        // C flag: carry out of the MSB. Byte/word recompute the sum of the
+        // masked operands (the masked result no longer carries the bit);
+        // 32-bit uses Musashi's formula since bit 32 is unreachable.
         let carry = match size {
-            Size::Byte => result & 0x100 != 0,
-            Size::Word => result & 0x10000 != 0,
-            Size::Long => {
-                // Can't get bit 32, use Musashi's formula
-                let s = src;
-                let d = dst;
-                let r = result;
-                ((s & d) | (!r & (s | d))) & 0x80000000 != 0
-            }
+            Size::Byte => (s + d) & 0x100 != 0,
+            Size::Word => (s + d) & 0x10000 != 0,
+            Size::Long => ((s & d) | (!r & (s | d))) & 0x80000000 != 0,
         };
         self.c_flag = if carry { CFLAG_SET } else { 0 };
         self.x_flag = self.c_flag;
