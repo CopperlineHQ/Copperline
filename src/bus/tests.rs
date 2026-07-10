@@ -13,11 +13,12 @@ use super::{
     BeamRegisterWrite, BeamWriteSource, Bus, CapturedBitplaneRow, CapturedSpriteLine, ChipBusOwner,
     CpuBusAccessKind, DeviceClock, DisplaySpriteDmaState, DisplaySpriteLineData, FrameBusTrace,
     LiveCollisionControl, LiveCollisionLineReplay, LiveSpriteCollisionSource,
-    RenderRegisterSnapshot, BLITTER_SLOWDOWN_CPU_MISS_LIMIT, BLTCON1_DOFF, BPLCON0_ECSENA,
-    BPLCON3_BRDSPRT, BPLCON3_SPRES_HIRES, DENISE_HPOS_LAG_CCK, DMACON_BLTEN, DMACON_BLTPRI,
-    DMACON_BPLEN, DMACON_SPREN, PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS, RENDER_COPPER_WAIT_HPOS_FB0,
+    RenderRegisterSnapshot, BLITTER_SLOWDOWN_CPU_MISS_LIMIT, BLTCON0_USE_C, BLTCON0_USE_D,
+    BLTCON1_DOFF, BLTCON1_LINE, BPLCON0_ECSENA, BPLCON3_BRDRBLNK, BPLCON3_BRDSPRT,
+    BPLCON3_SPRES_HIRES, DENISE_HPOS_LAG_CCK, DMACON_BLTEN, DMACON_BLTPRI, DMACON_BPLEN,
+    DMACON_SPREN, PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS, RENDER_COPPER_WAIT_HPOS_FB0,
     RENDER_DIW_HSTART_FB0, RENDER_MIN_OVERSCAN_START_VPOS, RENDER_VISIBLE_LINES,
-    RENDER_VISIBLE_START_VPOS, SPRITE_DMA_SLOT1_HPOS,
+    RENDER_VISIBLE_START_VPOS, SPRITE_DMA_SLOT1_HPOS, SPRITE_OUTPUT_DELAY_LORES,
 };
 use crate::audio::AudioSink;
 use crate::chipset::agnus::{
@@ -401,6 +402,8 @@ fn write_chip_word_wrapping(bus: &mut Bus, off: usize, val: u16) {
     bus.mem.chip_ram[(off + 1) % len] = bytes[1];
 }
 
+/// POS/CTL words with `hstart` in the REGISTER domain (what the DMA
+/// descriptor tests place in chip RAM and read back from captures).
 fn sprite_control_words(vstart: u16, vstop: u16, hstart: u16) -> (u16, u16) {
     let pos = ((vstart & 0x00FF) << 8) | ((hstart >> 1) & 0x00FF);
     let ctl = ((vstop & 0x00FF) << 8)
@@ -408,6 +411,15 @@ fn sprite_control_words(vstart: u16, vstop: u16, hstart: u16) -> (u16, u16) {
         | ((vstop & 0x0100) >> 7)
         | (hstart & 0x0001);
     (pos, ctl)
+}
+
+/// POS/CTL words for a sprite whose FIRST OUTPUT PIXEL sits at lo-res
+/// position `hstart`: the register value is one lo-res position lower
+/// because Denise's serializer emits one lo-res pixel after the
+/// comparator match (`SPRITE_OUTPUT_DELAY_LORES`). The collision tests
+/// are written against output positions.
+fn sprite_control_words_for_output(vstart: u16, vstop: u16, hstart: u16) -> (u16, u16) {
+    sprite_control_words(vstart, vstop, hstart - SPRITE_OUTPUT_DELAY_LORES as u16)
 }
 
 /// Cross the vertical-blank reset line (PAL $19) over the whole sprite slot
@@ -668,7 +680,7 @@ fn enabled_audio_dma_reserves_only_actively_fetching_channel_slots() {
     // reserved (a fixed audio slot is free for the CPU/blitter on lines the
     // channel does not fetch).
     bus.agnus.dmacon = DMACON_DMAEN | 0x0001;
-    bus.agnus.hpos = 0x00F;
+    bus.agnus.hpos = 0x00D;
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Idle);
 
     // The DMA-enable edge posts the state machine's request; the line-end
@@ -678,10 +690,10 @@ fn enabled_audio_dma_reserves_only_actively_fetching_channel_slots() {
     bus.paula.transfer_audio_dma_requests();
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Audio);
 
-    // The even gap after it (0x010) is not an audio cycle, and the other
-    // channels' slots (0x011/0x013/0x015) are free -- those channels are
+    // The even gap after it (0x00E) is not an audio cycle, and the other
+    // channels' slots (0x00F/0x011/0x013) are free -- those channels are
     // disabled -- so the CPU/blitter may use all of these.
-    for hpos in [0x010, 0x011, 0x013, 0x015, 0x016] {
+    for hpos in [0x00E, 0x00F, 0x011, 0x013, 0x015] {
         bus.agnus.hpos = hpos;
         assert_eq!(
             bus.scheduled_dma_owner(false),
@@ -702,10 +714,10 @@ fn enabled_audio_dma_reserves_only_actively_fetching_channel_slots() {
         .apply_audio_dmacon_edges(DMACON_DMAEN | 0x0001, bus.agnus.dmacon);
     bus.paula.transfer_audio_dma_requests();
     for (hpos, owner) in [
+        (0x00D, ChipBusOwner::Audio),
         (0x00F, ChipBusOwner::Audio),
-        (0x011, ChipBusOwner::Audio),
-        (0x013, ChipBusOwner::Idle),
-        (0x015, ChipBusOwner::Audio),
+        (0x011, ChipBusOwner::Idle),
+        (0x013, ChipBusOwner::Audio),
     ] {
         bus.agnus.hpos = hpos;
         assert_eq!(bus.scheduled_dma_owner(false), owner, "hpos {hpos:#05X}");
@@ -716,12 +728,12 @@ fn enabled_audio_dma_reserves_only_actively_fetching_channel_slots() {
     let dmacon = bus.agnus.dmacon;
     let _ = bus.paula.grant_audio_dma(0, 0, dmacon);
     bus.paula.transfer_audio_dma_requests();
-    bus.agnus.hpos = 0x00F;
+    bus.agnus.hpos = 0x00D;
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Idle);
 
     // No channels enabled: nothing reserved.
     bus.agnus.dmacon = DMACON_DMAEN;
-    bus.agnus.hpos = 0x00F;
+    bus.agnus.hpos = 0x00D;
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Idle);
 }
 
@@ -806,7 +818,7 @@ fn audio_dma_startup_fetches_stale_pointer_word_then_block_start() {
     bus.agnus.dmacon = DMACON_DMAEN | 0x0001;
     bus.paula.apply_audio_dmacon_edges(0, bus.agnus.dmacon);
     bus.paula.transfer_audio_dma_requests();
-    bus.agnus.hpos = 0x00F;
+    bus.agnus.hpos = 0x00D;
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Audio);
 
     // First slot: the start-up fetch reads the STALE pointer (its word is
@@ -820,7 +832,7 @@ fn audio_dma_startup_fetches_stale_pointer_word_then_block_start() {
 
     // Second slot (next line): the word at AUDxLC starts playback.
     bus.paula.transfer_audio_dma_requests();
-    bus.agnus.hpos = 0x00F;
+    bus.agnus.hpos = 0x00D;
     bus.advance_chipset(1);
     assert_eq!(bus.paula.audio_current_sample_for_test(0), Some(0x12));
     assert_eq!(bus.paula.audio_dma_ptr_for_test(0), Some(6));
@@ -1766,22 +1778,28 @@ fn copper_line_end_bus_lockout_defers_transfer_past_the_wrap() {
     assert_eq!(bus.copper.pc(), cop1 as u32);
     assert_eq!(bus.denise.palette[0], 0);
 
-    // $E1 is odd (the Copper's idle half), and $E2 is the next access-parity
-    // color clock: the first-word fetch lands there and the beam wraps.
+    // $E1 is the Copper's idle half and $E2 is the line-end refresh slot, so
+    // the Copper stays parked on the first word until the beam wraps.
     bus.advance_chipset(2);
-    assert_eq!(bus.copper.pc(), cop1 as u32 + 2);
+    assert_eq!(bus.copper.pc(), cop1 as u32);
     assert_eq!(bus.agnus.vpos, start_vpos + 1);
     assert_eq!(bus.agnus.hpos, 0);
     assert_eq!(bus.denise.palette[0], 0);
 
-    // With the hardware refresh model (4 slots at 0x004/6/8/A), hpos 0x00
-    // is a free access-parity color clock, so the Copper fetches the second
-    // word there immediately after the line wrap and its write lands at 0x00
-    // (recorded at its Denise-effective position, 0x04).
+    // With refresh confined to odd slots plus line-end, hpos 0x00 is a free
+    // access-parity color clock, so the Copper fetches the first word
+    // immediately after the line wrap.
     bus.advance_chipset(1);
+    assert_eq!(bus.copper.pc(), cop1 as u32 + 2);
+    assert_eq!(bus.denise.palette[0], 0);
+
+    // Hpos 0x01 is refresh; the next free access-parity clock is 0x02, where
+    // the Copper fetches the second word and the MOVE write lands (recorded at
+    // its Denise-effective position, 0x06).
+    bus.advance_chipset(2);
     assert_eq!(bus.denise.palette[0], 0x0999);
     assert_eq!(bus.current_render_events()[0].vpos, start_vpos + 1);
-    assert_eq!(bus.current_render_events()[0].hpos, 0x04);
+    assert_eq!(bus.current_render_events()[0].hpos, 0x06);
 }
 
 #[test]
@@ -2290,9 +2308,9 @@ fn forbidden_copper_move_recovers_at_start_of_frame_from_cop1lc() {
     // Restart is immediate at the top of the frame, recovering from the
     // forbidden MOVE via the live COP1LC.
     assert_eq!(bus.pending_copper_frame_start, None);
-    // From hpos 0 the Copper waits out the refresh band and its idle-half
-    // color clock, then its MOVE fetches on the next two even (access-parity)
-    // color clocks: write at hpos 0x0C.
+    // From hpos 0 the restarted Copper spends its initial idle half, then its
+    // MOVE fetches on the next two even (access-parity) color clocks: write
+    // at hpos 0x0C.
     bus.advance_chipset(7);
 
     assert_eq!(bus.denise.palette[0], 0x0666);
@@ -4638,7 +4656,7 @@ fn same_line_bplcon2_priority_change_reveals_later_sprite_pixels() {
     bus.current_frame_sprite_display_enable_x_by_y[0] = Some(0);
     bus.current_frame_sprite_lines.push(CapturedSpriteLine {
         sprite: 0,
-        hstart: RENDER_DIW_HSTART_FB0 + 34,
+        hstart: RENDER_DIW_HSTART_FB0 + 34 - SPRITE_OUTPUT_DELAY_LORES,
         hsub_70ns: false,
         beam_y: RENDER_VISIBLE_START_VPOS as i32,
         data: 0xFFFF,
@@ -4676,7 +4694,7 @@ fn same_line_bplcon3_spres_narrows_later_sprite_pixels() {
     bus.current_frame_sprite_dma_observed = true;
     bus.current_frame_sprite_lines.push(CapturedSpriteLine {
         sprite: 0,
-        hstart: RENDER_DIW_HSTART_FB0 + 34,
+        hstart: RENDER_DIW_HSTART_FB0 + 34 - SPRITE_OUTPUT_DELAY_LORES,
         hsub_70ns: false,
         beam_y: RENDER_VISIBLE_START_VPOS as i32,
         data: 0x0100,
@@ -6710,7 +6728,7 @@ fn manual_sprite_data_writes_accumulate_live_sprite_playfield_clxdat() {
     // hstart +1 vs the pre-fix value: sprite comparator positions share
     // Denise's counter and moved with the corrected window-edge anchor
     // (2H-196); the beam-anchored playfield sample did not.
-    let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0082);
+    let (pos, ctl) = sprite_control_words_for_output(0x2C, 0x2D, 0x0082);
     bus.agnus.vpos = 0x2C;
     // Slot $34: the write event records at $38 (slot + write-effect delay).
     bus.agnus.hpos = 0x34;
@@ -6753,7 +6771,7 @@ fn manual_sprite_data_writes_accumulate_live_sprite_playfield_clxdat() {
 #[test]
 fn attached_manual_sprite_data_writes_accumulate_live_sprite_playfield_clxdat() {
     let mut bus = empty_bus();
-    let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0083);
+    let (pos, ctl) = sprite_control_words_for_output(0x2C, 0x2D, 0x0083);
     bus.agnus.vpos = 0x2C;
     // Slot $34: the write events record at $38 (slot + write-effect delay).
     bus.agnus.hpos = 0x34;
@@ -6797,8 +6815,8 @@ fn attached_manual_sprite_data_writes_accumulate_live_sprite_playfield_clxdat() 
 fn bplcon3_spres_hires_narrows_live_sprite_sprite_clxdat() {
     let clxdat_after_visible_sprite_pixels = |bplcon3| {
         let mut bus = empty_bus();
-        let (pos0, ctl0) = sprite_control_words(0x2C, 0x2D, 0x0083);
-        let (pos2, ctl2) = sprite_control_words(0x2C, 0x2D, 0x0084);
+        let (pos0, ctl0) = sprite_control_words_for_output(0x2C, 0x2D, 0x0083);
+        let (pos2, ctl2) = sprite_control_words_for_output(0x2C, 0x2D, 0x0084);
         let sprite0_ptr = 0x0100usize;
         let sprite2_ptr = 0x0200usize;
 
@@ -6847,7 +6865,7 @@ fn bplcon3_spres_hires_narrows_live_sprite_sprite_clxdat() {
 fn same_line_clxcon_odd_sprite_enable_does_not_retime_earlier_live_sprite_sprite_clxdat() {
     let clxdat_after_visible_sprite_pixels = |initial_clxcon, enable_hpos: Option<u32>| {
         let mut bus = empty_bus();
-        let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0083);
+        let (pos, ctl) = sprite_control_words_for_output(0x2C, 0x2D, 0x0083);
         let sprite1_ptr = 0x0100usize;
         let sprite2_ptr = 0x0200usize;
         for ptr in [sprite1_ptr, sprite2_ptr] {
@@ -7109,7 +7127,7 @@ fn denise_horizontal_delay_aligns_sprite_playfield_collision_domain() {
     };
     let source = LiveSpriteCollisionSource {
         group: 0,
-        hstart: 0x81,
+        hstart: 0x81 - SPRITE_OUTPUT_DELAY_LORES,
         hsub_70ns: false,
         words: [0x8000, 0, 0, 0],
         requires_odd_enable: false,
@@ -7166,14 +7184,14 @@ fn sprite_sprite_clxdat_waits_for_bpl1dat_display_enable() {
     let sources = [
         LiveSpriteCollisionSource {
             group: 0,
-            hstart: RENDER_DIW_HSTART_FB0,
+            hstart: RENDER_DIW_HSTART_FB0 - SPRITE_OUTPUT_DELAY_LORES,
             hsub_70ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
         },
         LiveSpriteCollisionSource {
             group: 1,
-            hstart: RENDER_DIW_HSTART_FB0,
+            hstart: RENDER_DIW_HSTART_FB0 - SPRITE_OUTPUT_DELAY_LORES,
             hsub_70ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
@@ -7239,21 +7257,21 @@ fn live_sprite_sprite_clxdat_skips_already_latched_bits() {
     let sources = [
         LiveSpriteCollisionSource {
             group: 0,
-            hstart: RENDER_DIW_HSTART_FB0,
+            hstart: RENDER_DIW_HSTART_FB0 - SPRITE_OUTPUT_DELAY_LORES,
             hsub_70ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
         },
         LiveSpriteCollisionSource {
             group: 1,
-            hstart: RENDER_DIW_HSTART_FB0,
+            hstart: RENDER_DIW_HSTART_FB0 - SPRITE_OUTPUT_DELAY_LORES,
             hsub_70ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
         },
         LiveSpriteCollisionSource {
             group: 2,
-            hstart: RENDER_DIW_HSTART_FB0,
+            hstart: RENDER_DIW_HSTART_FB0 - SPRITE_OUTPUT_DELAY_LORES,
             hsub_70ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
@@ -7311,7 +7329,7 @@ fn live_sprite_playfield_clxdat_skips_already_latched_bits() {
     };
     let source = LiveSpriteCollisionSource {
         group: 0,
-        hstart: 0x81,
+        hstart: 0x81 - SPRITE_OUTPUT_DELAY_LORES,
         hsub_70ns: false,
         words: [0x8000, 0, 0, 0],
         requires_odd_enable: false,
@@ -7381,14 +7399,14 @@ fn brdsprt_bypasses_bpl1dat_display_enable_for_live_sprite_clxdat() {
     let sources = [
         LiveSpriteCollisionSource {
             group: 0,
-            hstart: RENDER_DIW_HSTART_FB0,
+            hstart: RENDER_DIW_HSTART_FB0 - SPRITE_OUTPUT_DELAY_LORES,
             hsub_70ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
         },
         LiveSpriteCollisionSource {
             group: 1,
-            hstart: RENDER_DIW_HSTART_FB0,
+            hstart: RENDER_DIW_HSTART_FB0 - SPRITE_OUTPUT_DELAY_LORES,
             hsub_70ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
@@ -7406,6 +7424,55 @@ fn brdsprt_bypasses_bpl1dat_display_enable_for_live_sprite_clxdat() {
             0,
         ) & (1 << 9),
         1 << 9
+    );
+}
+
+#[test]
+fn brdrblnk_suppresses_brdsprt_live_sprite_clxdat_bypass() {
+    let control = LiveCollisionControl::from_current(
+        AgnusRevision::Ocs,
+        BPLCON0_ECSENA | 0x1000,
+        0,
+        BPLCON3_BRDSPRT | BPLCON3_BRDRBLNK,
+        0,
+        ((RENDER_VISIBLE_START_VPOS as u16) << 8) | RENDER_DIW_HSTART_FB0 as u16,
+        ((RENDER_VISIBLE_START_VPOS as u16 + 1) << 8) | 0x00C1,
+        DiwHigh::ocs_implicit(),
+        0x0038,
+        [0; 8],
+    );
+    let replay = LiveCollisionLineReplay {
+        line_start: control,
+        segments: Vec::new(),
+    };
+    let sources = [
+        LiveSpriteCollisionSource {
+            group: 0,
+            hstart: RENDER_DIW_HSTART_FB0 - SPRITE_OUTPUT_DELAY_LORES,
+            hsub_70ns: false,
+            words: [0x8000, 0, 0, 0],
+            requires_odd_enable: false,
+        },
+        LiveSpriteCollisionSource {
+            group: 1,
+            hstart: RENDER_DIW_HSTART_FB0 - SPRITE_OUTPUT_DELAY_LORES,
+            hsub_70ns: false,
+            words: [0x8000, 0, 0, 0],
+            requires_odd_enable: false,
+        },
+    ];
+
+    assert_eq!(
+        live_sprite_sprite_collision_bits(
+            &sources,
+            &replay,
+            RENDER_VISIBLE_START_VPOS as i32,
+            0,
+            2,
+            None,
+            0,
+        ) & (1 << 9),
+        0
     );
 }
 
@@ -7430,14 +7497,14 @@ fn manual_bpl1dat_display_enable_allows_live_sprite_clxdat_on_vertically_closed_
     let sources = [
         LiveSpriteCollisionSource {
             group: 0,
-            hstart: RENDER_DIW_HSTART_FB0,
+            hstart: RENDER_DIW_HSTART_FB0 - SPRITE_OUTPUT_DELAY_LORES,
             hsub_70ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
         },
         LiveSpriteCollisionSource {
             group: 1,
-            hstart: RENDER_DIW_HSTART_FB0,
+            hstart: RENDER_DIW_HSTART_FB0 - SPRITE_OUTPUT_DELAY_LORES,
             hsub_70ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
@@ -7552,7 +7619,7 @@ fn captured_sprite_and_bitplane_rows_accumulate_live_sprite_playfield_clxdat() {
     // hstart +1 vs the pre-fix value: sprite comparator positions share
     // Denise's counter and moved with the corrected window-edge anchor
     // (2H-196); the beam-anchored playfield sample did not.
-    let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0082);
+    let (pos, ctl) = sprite_control_words_for_output(0x2C, 0x2D, 0x0082);
     write_chip_word(&mut bus, sprite_ptr, pos);
     write_chip_word(&mut bus, sprite_ptr + 2, ctl);
     write_chip_word(&mut bus, sprite_ptr + 4, 0x8000);
@@ -7596,7 +7663,7 @@ fn captured_sprite_and_bitplane_rows_accumulate_live_sprite_playfield_clxdat() {
 fn explicit_bpl1dat_output_accumulates_live_sprite_playfield_clxdat() {
     let mut bus = empty_bus();
     let sprite_ptr = 0x0300usize;
-    let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0083);
+    let (pos, ctl) = sprite_control_words_for_output(0x2C, 0x2D, 0x0083);
     write_chip_word(&mut bus, sprite_ptr, pos);
     write_chip_word(&mut bus, sprite_ptr + 2, ctl);
     write_chip_word(&mut bus, sprite_ptr + 4, 0x8000);
@@ -7640,7 +7707,7 @@ fn explicit_bpl1dat_output_accumulates_live_sprite_playfield_clxdat() {
 #[test]
 fn manual_sprite_and_bpl1dat_writes_accumulate_live_sprite_playfield_clxdat() {
     let mut bus = empty_bus();
-    let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0083);
+    let (pos, ctl) = sprite_control_words_for_output(0x2C, 0x2D, 0x0083);
     bus.agnus.vpos = 0x2C;
     // Slot $34: the write events record at $38 (slot + write-effect delay).
     bus.agnus.hpos = 0x34;
@@ -7669,7 +7736,7 @@ fn same_line_bplcon1_scroll_increase_latches_later_live_sprite_playfield_clxdat(
     // hstart +1 vs the pre-fix value: sprite comparator positions share
     // Denise's counter and moved with the corrected window-edge anchor
     // (2H-196); the beam-anchored playfield sample did not.
-    let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0094);
+    let (pos, ctl) = sprite_control_words_for_output(0x2C, 0x2D, 0x0094);
     write_chip_word(&mut bus, sprite_ptr, pos);
     write_chip_word(&mut bus, sprite_ptr + 2, ctl);
     write_chip_word(&mut bus, sprite_ptr + 4, 0x8000);
@@ -7719,7 +7786,7 @@ fn same_line_clxcon_odd_sprite_enable_does_not_retime_earlier_live_sprite_playfi
     let clxdat_after_row_capture = |initial_clxcon, enable_hpos: Option<u32>| {
         let mut bus = empty_bus();
         let sprite_ptr = 0x0300usize;
-        let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0083);
+        let (pos, ctl) = sprite_control_words_for_output(0x2C, 0x2D, 0x0083);
         write_chip_word(&mut bus, sprite_ptr, pos);
         write_chip_word(&mut bus, sprite_ptr + 2, ctl);
         write_chip_word(&mut bus, sprite_ptr + 4, 0x8000);
@@ -7773,7 +7840,7 @@ fn bplcon3_spres_hires_narrows_live_sprite_playfield_clxdat() {
         let mut bus = empty_bus();
         let sprite_ptr = 0x0300usize;
         // hstart +1 vs the pre-fix value: see the sibling clxdat tests.
-        let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0082);
+        let (pos, ctl) = sprite_control_words_for_output(0x2C, 0x2D, 0x0082);
         write_chip_word(&mut bus, sprite_ptr, pos);
         write_chip_word(&mut bus, sprite_ptr + 2, ctl);
         write_chip_word(&mut bus, sprite_ptr + 4, 0x8000);
@@ -7826,7 +7893,7 @@ fn same_line_bplcon3_spres_write_does_not_retime_earlier_live_sprite_playfield_c
         let mut bus = empty_bus();
         let sprite_ptr = 0x0300usize;
         // hstart +1 vs the pre-fix value: see the sibling clxdat tests.
-        let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0082);
+        let (pos, ctl) = sprite_control_words_for_output(0x2C, 0x2D, 0x0082);
         write_chip_word(&mut bus, sprite_ptr, pos);
         write_chip_word(&mut bus, sprite_ptr + 2, ctl);
         write_chip_word(&mut bus, sprite_ptr + 4, 0x8000);
@@ -7905,6 +7972,52 @@ fn bltsize_starts_dma_and_preempts_cpu_slice_without_irq_preempt() {
     assert_ne!(bus.paula.intreq & INT_BLIT, 0);
     assert!(!bus.blitter.busy);
     assert_eq!(bus.next_blitter_completion_cck(), None);
+}
+
+#[test]
+fn lowmem_blit_diagnostic_uses_mode_specific_write_gate() {
+    let mut bus = empty_bus();
+    bus.blitter.bltdpt = 0x0FFE;
+
+    bus.blitter.bltcon0 = BLTCON0_USE_D;
+    bus.blitter.bltcon1 = 0;
+    assert!(
+        bus.blitter_start_may_write_lowmem(),
+        "normal mode writes through channel D"
+    );
+
+    bus.blitter.bltcon1 = BLTCON1_DOFF;
+    assert!(
+        !bus.blitter_start_may_write_lowmem(),
+        "normal mode DOFF suppresses the D-channel store"
+    );
+
+    bus.blitter.bltcon0 = BLTCON0_USE_C;
+    bus.blitter.bltcon1 = BLTCON1_LINE;
+    assert!(
+        bus.blitter_start_may_write_lowmem(),
+        "line mode stores are gated by channel C"
+    );
+
+    bus.blitter.bltcon0 = BLTCON0_USE_D;
+    assert!(
+        !bus.blitter_start_may_write_lowmem(),
+        "line mode does not use channel D enable as the store gate"
+    );
+
+    bus.blitter.bltcon0 = BLTCON0_USE_C;
+    bus.blitter.bltdpt = 0x1000;
+    assert!(
+        !bus.blitter_start_may_write_lowmem(),
+        "the diagnostic only trips for the exception-vector area"
+    );
+
+    bus.diag_lowmem_blit = true;
+    bus.reset_transient_diagnostics_after_state_load();
+    assert!(
+        !bus.diag_lowmem_blit,
+        "a restored save state must not replay stale diagnostic alarms"
+    );
 }
 
 #[test]
@@ -8150,6 +8263,55 @@ fn blithog_clear_bls_count_yields_blitter_priority_slot_to_cpu() {
 }
 
 #[test]
+fn normal_blitter_idle_slots_do_not_feed_bls_back_pressure() {
+    let mut bus = empty_bus();
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BLTEN;
+    bus.blitter.bltcon0 = 0x0100; // D-only clear.
+    bus.blitter.bltdpt = 0x20;
+    bus.blitter.start_scheduled((1 << 6) | 2, &bus.mem.chip_ram);
+
+    // Walk to the first normal-mode A phase. It is a disabled-channel idle
+    // slot, so a CPU miss caused by refresh/fixed DMA must not make the nice
+    // blitter yield earlier.
+    for _ in 0..4 {
+        assert!(!bus.blitter.tick_scheduled_slot(&mut bus.mem.chip_ram));
+    }
+    bus.note_cpu_missed_chip_bus_cycle();
+    assert_eq!(bus.blitter_slowdown_cpu_misses, 0);
+
+    // The first D phase is also the empty destination pipeline bubble.
+    assert!(!bus.blitter.tick_scheduled_slot(&mut bus.mem.chip_ram)); // A0.
+    bus.note_cpu_missed_chip_bus_cycle();
+    assert_eq!(bus.blitter_slowdown_cpu_misses, 0);
+
+    // Once a real destination write is pending, misses do feed BLS pressure.
+    assert!(!bus.blitter.tick_scheduled_slot(&mut bus.mem.chip_ram)); // D0 bubble.
+    assert!(!bus.blitter.tick_scheduled_slot(&mut bus.mem.chip_ram)); // A1.
+    bus.note_cpu_missed_chip_bus_cycle();
+    assert_eq!(bus.blitter_slowdown_cpu_misses, 1);
+}
+
+#[test]
+fn fill_idle_slots_feed_bls_back_pressure() {
+    let mut bus = empty_bus();
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BLTEN;
+    bus.blitter.bltcon0 = 0x09F0; // A -> D.
+    bus.blitter.bltcon1 = 0x0012; // DESC + exclusive fill.
+    bus.blitter.bltafwm = 0xFFFF;
+    bus.blitter.bltalwm = 0xFFFF;
+    bus.blitter.bltapt = 0x10;
+    bus.blitter.bltdpt = 0x20;
+    bus.blitter.start_scheduled((1 << 6) | 1, &bus.mem.chip_ram);
+
+    for _ in 0..6 {
+        assert!(!bus.blitter.tick_scheduled_slot(&mut bus.mem.chip_ram));
+    }
+    bus.blitter_slowdown_cpu_misses = 0;
+    bus.note_cpu_missed_chip_bus_cycle();
+    assert_eq!(bus.blitter_slowdown_cpu_misses, 1);
+}
+
+#[test]
 fn bltcon0l_updates_only_minterm_byte() {
     let mut bus = empty_bus();
     bus.set_agnus_revision(AgnusRevision::Ecs8372Rev4);
@@ -8254,8 +8416,8 @@ fn ecs_bltsizv_bltsizh_start_extended_blit() {
 fn cpu_chip_access_waits_through_refresh_slots() {
     let mut bus = empty_bus();
     bus.set_cpu_bus_arbitration_enabled(true);
-    // Start on a refresh slot (hardware model: refresh occupies the odd
-    // color clocks 0x001/0x003/0x005/0x007). The CPU misses that slot and
+    // Start on a refresh slot (hardware model: refresh occupies 0x001,
+    // 0x003, 0x005, and one line-end slot). The CPU misses that slot and
     // is granted the following free color clock.
     bus.agnus.hpos = 0x003;
 
@@ -8473,16 +8635,34 @@ fn blitter_completion_prediction_matches_actual_with_running_copper() {
 fn fixed_agnus_dma_slot_bands_drive_owner_selection() {
     let mut bus = empty_bus();
 
+    for hpos in [0x001, 0x003, 0x005, 0x0E2, 0x0E3] {
+        assert!(
+            Bus::refresh_slot_active_at(hpos),
+            "hpos {hpos:#05X} should be a refresh slot"
+        );
+    }
+    for hpos in [0x000, 0x007, 0x0E1, 0x0E4] {
+        assert!(
+            !Bus::refresh_slot_active_at(hpos),
+            "hpos {hpos:#05X} should not be a refresh slot"
+        );
+    }
+    assert_eq!(Bus::audio_dma_channel_at(0x00D), Some(0));
+    assert_eq!(Bus::audio_dma_channel_at(0x00F), Some(1));
+    assert_eq!(Bus::audio_dma_channel_at(0x011), Some(2));
+    assert_eq!(Bus::audio_dma_channel_at(0x013), Some(3));
+    assert_eq!(Bus::audio_dma_channel_at(0x015), None);
+
     bus.agnus.dmacon = DMACON_DMAEN;
-    bus.agnus.hpos = 0x007;
+    bus.agnus.hpos = 0x005;
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Refresh);
-    bus.agnus.hpos = 0x008;
+    bus.agnus.hpos = 0x007;
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Idle);
 
     bus.agnus.dmacon = DMACON_DMAEN | 0x0001;
     bus.paula.apply_audio_dmacon_edges(0, bus.agnus.dmacon);
     bus.paula.transfer_audio_dma_requests();
-    bus.agnus.hpos = 0x00F;
+    bus.agnus.hpos = 0x00D;
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Audio);
     bus.agnus.hpos = 0x016;
     assert_eq!(bus.scheduled_dma_owner(false), ChipBusOwner::Idle);
@@ -9011,9 +9191,9 @@ fn vposw_and_vhposw_update_beam_register_reads() {
     assert!(!bus.custom_write(0x02C, 2, 0x2034));
 
     assert_eq!(bus.custom_read(0x004, 2), 0x8001);
-    // The readback reports a couple of colour clocks ahead of the
-    // written counter (the calibrated VHPOSR lookahead).
-    assert_eq!(bus.custom_read(0x006, 2), 0x2036);
+    // The readback reports a few colour clocks ahead of the written counter
+    // (the calibrated VHPOSR lookahead).
+    assert_eq!(bus.custom_read(0x006, 2), 0x2037);
 }
 
 #[test]

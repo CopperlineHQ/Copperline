@@ -44,7 +44,7 @@ trap to a software FPSP. FMOD/FREM compute the exact remainder and the FPSR
 quotient byte. This covers Kickstart's
 detection and per-task FPU context switching. The
 68000's per-instruction cycle counts in the vendored core have been
-corrected against the SingleStepTests corpus to ~1% aggregate accuracy
+corrected to exact totals across the SingleStepTests 68000 cycle corpus
 (see `crates/m68k/CYCLE_TIMING_GAP.md`), which is what makes
 cycle-budgeted pacing trustworthy.
 
@@ -67,6 +67,42 @@ fall-through) and
 `cpu_prefetch_probe_branch_refetches_self_modified_chip_ram_target`
 (branch refetch).
 
+Instruction handlers can move the final prefetch earlier than the generic
+end-of-instruction top-up when 68000 microcode does so. That matters for
+register-only forms too: immediate ALU and CMPI to `Dn` perform the final
+prefetch before the data-register write or compare flags, and long register
+forms spend their trailing internal clocks after that prefetch. Plain
+`CMP.L <ea>,Dn` computes its flags before the final prefetch, then spends its
+2-clock long-compare tail after that prefetch. Long `ADD/SUB/AND/OR <ea>,Dn`
+forms write `Dn` before the final prefetch, then spend their 2- or 4-clock
+long-ALU tail after it depending on whether the source operand came from memory.
+`ADDA/SUBA` and `CMPA` likewise place their address-arithmetic tail clocks after
+the final prefetch. `EOR Dn,Dm` follows the memory-destination EOR ordering:
+flags are computed first, then the final prefetch/tail runs before the `Dm`
+writeback. Register `ADDX/SUBX Dm,Dn` also poll IPL on the final prefetch before
+writing `Dn`, with long forms flushing their 4-clock tail first. `MOVE SR,Dn`
+also waits until after the final prefetch and 2-clock tail before storing the SR
+word into `Dn`. `MOVEA <ea>,An` has no flags or tail clocks, but still delays
+the `An` update until after the final prefetch and IPL sample. The privileged
+`MOVE An,USP` and `MOVE USP,An` forms use the same
+prefetch-before-register-update point. Status-register writes also have
+instruction-specific side-effect timing: `MOVE <ea>,CCR/SR` and
+`ORI/ANDI/EORI #imm,SR` spend their internal status-write delay before the
+architectural CCR/SR mutation and post-write refill, while immediate-to-CCR
+mutates the CCR before that delay on the 68000.
+`MOVEM.L <regs>,-(An)` also exposes the 68000's word-step predecrement
+microcode on the bus: each long transfer writes the low word at `An-2`
+before the high word at `An-4`, leaving memory big-endian while matching
+the observed access order.
+For `Bcc`/`BRA`/`BSR`, the branch-long `$FF` displacement-byte sentinel is
+gated to 68020 and later; on the 68000/010 the same byte remains the signed
+8-bit displacement `-1`, so no extension word is consumed.
+`CHK.W` on the 68000 tests the upper bound before the lower bound; upper-bound
+traps take the shorter pre-frame comparison path. A negative `Dn` that reaches
+the lower-bound test also takes that shorter path when the preceding signed
+upper-bound subtraction overflowed; ordinary lower-bound traps spend two more
+clocks before stacking the group-2 exception frame.
+
 ## 68010
 
 The 68010 shares the 68000's bus interface and two-word prefetch queue but
@@ -87,8 +123,11 @@ The 68010's own cycle costs where they differ from the 68000 are
 calibrated against the vAmigaTS `CPU/Timing`/`CPU/Timing2` measurements
 (cross-checked with Moira's cycle-exact 68010 path, which matches
 A500+68010 photos): MOVES spends per-EA-mode internal clocks between the
-address calculation and the SFC/DFC data cycle, MOVE from CCR is
-4 clocks to a register and prefetches before its memory write, a
+address calculation and the SFC/DFC data cycle, MOVE from CCR and
+privileged MOVE from SR both cost 4 clocks to a register and perform their
+final prefetch before updating `Dn`, MOVE from CCR to memory prefetches
+before its write, long register shifts/rotates use the same base-8 cycle
+total as the 68000 rather than the later barrel-shifter timing, a
 format-0 RTE is 24 clocks (the format word is read once, not re-read),
 and an interrupt dispatch is 46 clocks (12 internal before the four-word
 format-0 frame) against the 68000's 44. STOP semantics shared with the

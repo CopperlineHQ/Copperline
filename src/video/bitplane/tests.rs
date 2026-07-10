@@ -524,13 +524,31 @@ fn current_cpu_copper_irq_palette_replay_requires_same_primary_bitplane_buffer()
     assert!(!primary_bitplane_buffer_carries_forward(0, &[], 0, &[],));
 }
 
+/// POS/CTL words for a sprite whose FIRST OUTPUT PIXEL sits at lo-res
+/// position `hstart` (framebuffer x = (hstart - DIW_HSTART_FB0) * 2). The
+/// register value is one lo-res position lower: Denise's serializer emits
+/// its first pixel one lo-res pixel after the comparator match
+/// (`crate::bus::SPRITE_OUTPUT_DELAY_LORES`), and these tests are written
+/// against output positions.
 fn sprite_control_words(vstart: u16, vstop: u16, hstart: u16) -> (u16, u16) {
+    let hstart = hstart - crate::bus::SPRITE_OUTPUT_DELAY_LORES as u16;
     let pos = ((vstart & 0x00FF) << 8) | ((hstart >> 1) & 0x00FF);
     let ctl = ((vstop & 0x00FF) << 8)
         | ((vstart & 0x0100) >> 6)
         | ((vstop & 0x0100) >> 7)
         | (hstart & 0x0001);
     (pos, ctl)
+}
+
+/// Register-decoded hstart whose first OUTPUT pixel lands at framebuffer
+/// x = 0 (see `sprite_control_words`: output = register + serializer delay).
+const SPRITE_HSTART_FB0: i32 = DIW_HSTART_FB0 - crate::bus::SPRITE_OUTPUT_DELAY_LORES;
+
+/// Register-decoded hstart produced by `sprite_control_words(.., h)`:
+/// the helper takes OUTPUT positions, while `SpriteLine::hstart` carries
+/// the register domain (one lo-res position lower).
+fn reg_hstart(output_hstart: i32) -> i32 {
+    output_hstart - crate::bus::SPRITE_OUTPUT_DELAY_LORES
 }
 
 fn blank_state() -> RenderState {
@@ -1482,36 +1500,30 @@ fn bplcon1_delay_blanks_left_edge_without_shifting_row() {
 }
 
 #[test]
-fn bplcon1_delay_uses_previous_line_shifter_tail_when_contiguous() {
+fn bplcon1_delay_starts_scanline_from_empty_shifter() {
     let control = ControlState {
         bplcon0: 0x1000,
         bplcon1: 3,
         ..ControlState::default()
     };
     let plane_words = [vec![0x8000]];
-    let no_carry = DenisePlannedPlayfieldLine::new(0, 0, 32, &plane_words, 16);
+    let line = DenisePlannedPlayfieldLine::new(0, 0, 32, &plane_words, 16);
 
     assert_eq!(
-        no_carry.sample(control, 0),
+        line.sample(control, 0),
         DeniseBitplaneSample {
             idx: 0,
             nplanes: 1,
             active: true,
         }
     );
-
-    let mut carry_words = [None; 8];
-    carry_words[0] = Some(0x0004);
-    let with_carry =
-        DenisePlannedPlayfieldLine::new(0, 0, 32, &plane_words, 16).with_carry_words(carry_words);
-
-    assert_eq!(with_carry.sample(control, 0).idx, 1);
-    assert_eq!(with_carry.sample(control, 1).idx, 0);
-    assert_eq!(with_carry.sample(control, 3).idx, 1);
+    assert_eq!(line.sample(control, 1).idx, 0);
+    assert_eq!(line.sample(control, 2).idx, 0);
+    assert_eq!(line.sample(control, 3).idx, 1);
 }
 
 #[test]
-fn aga_extended_bplcon1_delay_does_not_reuse_single_word_line_tail() {
+fn aga_extended_bplcon1_delay_blanks_until_current_line_sample() {
     let control = ControlState {
         agnus_revision: AgnusRevision::AgaAlice,
         bplcon0: BPLCON0_ECSENA | 0x1000,
@@ -1522,10 +1534,7 @@ fn aga_extended_bplcon1_delay_does_not_reuse_single_word_line_tail() {
     assert_eq!(control.scroll_for_plane(0), 32);
 
     let plane_words = [vec![0x8000, 0x0000, 0x0000]];
-    let mut carry_words = [None; 8];
-    carry_words[0] = Some(0xFFFF);
-    let line =
-        DenisePlannedPlayfieldLine::new(0, 0, 64, &plane_words, 48).with_carry_words(carry_words);
+    let line = DenisePlannedPlayfieldLine::new(0, 0, 64, &plane_words, 48);
 
     assert_eq!(line.sample(control, 15).idx, 0);
     assert_eq!(line.sample(control, 16).idx, 0);
@@ -1534,31 +1543,19 @@ fn aga_extended_bplcon1_delay_does_not_reuse_single_word_line_tail() {
 }
 
 #[test]
-fn bplcon1_delay_drops_carry_when_first_bpl1dat_is_late() {
-    let mut previous_tail = [None; 8];
-    previous_tail[0] = Some(0x0001);
+fn bplcon1_delay_drops_prefetch_samples_at_block_start() {
+    let control = ControlState {
+        bplcon0: 0x1000,
+        bplcon1: 3,
+        ..ControlState::default()
+    };
+    let plane_words = [vec![0xE000]];
+    let line = DenisePlannedPlayfieldLine::new(0, 0, 32, &plane_words, 16);
+    let delays = std::array::from_fn(|plane| control.scroll_for_plane(plane));
 
-    assert_eq!(
-        bitplane_carry_words_for_line(false, 64, Some(64), false, previous_tail),
-        previous_tail
-    );
-    assert_eq!(
-        bitplane_carry_words_for_line(false, 64, Some(158), false, previous_tail),
-        [None; 8]
-    );
-    assert_eq!(
-        bitplane_carry_words_for_line(true, 64, Some(64), false, previous_tail),
-        [None; 8]
-    );
-    // A late DDFSTRT places the line's first BPL1DAT load inside the open
-    // display window; the serializer taps have run empty by then, so no
-    // previous-line tail is observable. Regression example: Gen-X's rippled
-    // reflection rows (DDFSTRT $40, BPLCON1 scroll) showed stray dashes at
-    // the window's left edge.
-    assert_eq!(
-        bitplane_carry_words_for_line(false, 64, Some(64), true, previous_tail),
-        [None; 8]
-    );
+    assert_eq!(line.sample_prepared(1, &delays, 0, 3).idx, 1);
+    assert_eq!(line.sample_prepared(1, &delays, 2, 3).idx, 0);
+    assert_eq!(line.sample_prepared(1, &delays, 2, 5).idx, 1);
 }
 
 #[test]
@@ -2029,7 +2026,7 @@ fn captured_sprite_dma_blocks_sprite_seven_when_ddfstrt_uses_early_fetch_slot() 
     let mut fb = vec![rgb12_to_rgba8(0); FB_PIXELS];
     let captured = [CapturedSpriteLine {
         sprite: 7,
-        hstart: DIW_HSTART_FB0,
+        hstart: SPRITE_HSTART_FB0,
         hsub_70ns: false,
         beam_y: PAL_VISIBLE_LINE0,
         data: 0x8000,
@@ -2108,7 +2105,7 @@ fn bplcon3_spres_default_uses_ecs_sprite_width_for_hires_playfield() {
     let mut fb = vec![rgb12_to_rgba8(0); FB_PIXELS];
     let captured = [CapturedSpriteLine {
         sprite: 0,
-        hstart: DIW_HSTART_FB0,
+        hstart: SPRITE_HSTART_FB0,
         hsub_70ns: false,
         beam_y: PAL_VISIBLE_LINE0,
         data: 0x8000,
@@ -2163,7 +2160,7 @@ fn bplcon3_spres_default_upgrades_to_70ns_when_shres_is_set() {
     let mut fb = vec![rgb12_to_rgba8(0); FB_PIXELS];
     let captured = [CapturedSpriteLine {
         sprite: 0,
-        hstart: DIW_HSTART_FB0,
+        hstart: SPRITE_HSTART_FB0,
         hsub_70ns: false,
         beam_y: PAL_VISIBLE_LINE0,
         data: 0x8000,
@@ -2264,7 +2261,7 @@ fn bplcon3_spres_hires_draws_one_framebuffer_pixel_per_sprite_bit() {
     let mut fb = vec![rgb12_to_rgba8(0); FB_PIXELS];
     let captured = [CapturedSpriteLine {
         sprite: 0,
-        hstart: DIW_HSTART_FB0,
+        hstart: SPRITE_HSTART_FB0,
         hsub_70ns: false,
         beam_y: PAL_VISIBLE_LINE0,
         data: 0x8000,
@@ -2319,7 +2316,7 @@ fn bplcon3_spres_hires_applies_to_attached_sprite_pairs() {
     let captured = [
         CapturedSpriteLine {
             sprite: 0,
-            hstart: DIW_HSTART_FB0,
+            hstart: SPRITE_HSTART_FB0,
             hsub_70ns: false,
             beam_y: PAL_VISIBLE_LINE0,
             data: 0x8000,
@@ -2331,7 +2328,7 @@ fn bplcon3_spres_hires_applies_to_attached_sprite_pairs() {
         },
         CapturedSpriteLine {
             sprite: 1,
-            hstart: DIW_HSTART_FB0,
+            hstart: SPRITE_HSTART_FB0,
             hsub_70ns: false,
             beam_y: PAL_VISIBLE_LINE0,
             data: 0x8000,
@@ -2479,6 +2476,67 @@ fn manual_sprite_data_writes_affect_only_later_beam_lines() {
 
     assert_eq!(fb[0], rgb12_to_rgba8(0));
     assert_eq!(fb[4 * FB_WIDTH], rgb12_to_rgba8(0x0F00));
+}
+
+#[test]
+fn armed_sprite_latch_keeps_serializing_in_frames_without_sprite_writes() {
+    // Denise has no vertical comparator: a sprite armed by a SPRxDATA write
+    // stays armed across frame boundaries and serializes at its POS/CTL
+    // position on every line until SPRxCTL disarms it. A frame with NO
+    // sprite register writes at all must therefore still emit the latched
+    // output while sprite DMA is idle (the live render path passes
+    // include_latched_sprite_state = !sprite_dma_observed). Software arms a
+    // masking bar once at scene init and leaves it alone for the whole
+    // scene; a DATA-armed vertical bar covering a raced copper-chunky
+    // column edge is the gen-x mosaic regression example.
+    // The bar's POS/CTL span the display vertically, like the demo's
+    // (vstart $28, vstop $130); the latched replay still consults that
+    // window, so a full-scene bar needs a full-coverage window.
+    let mut initial_state = blank_state();
+    let (pos, ctl) = sprite_control_words(
+        PAL_VISIBLE_LINE0 as u16,
+        PAL_VISIBLE_LINE0 as u16 + FB_HEIGHT as u16,
+        DIW_HSTART_FB0 as u16 + 40,
+    );
+    initial_state.sprpos[7] = pos;
+    initial_state.sprctl[7] = ctl;
+    initial_state.sprdata[7] = 0xF000;
+    initial_state.sprdatb[7] = 0xF000;
+    initial_state.spr_armed[7] = true;
+
+    // Sprite DMA idle: the latch emits on every line of the window even
+    // though this frame carries no sprite register writes.
+    let manual_sprite_lines = manual_sprite_lines_from_events_with_visible_line0(
+        &initial_state,
+        &[],
+        &[None; 8],
+        PAL_VISIBLE_LINE0,
+        FB_HEIGHT,
+        true,
+        false,
+    );
+    let line_count = manual_sprite_lines[7]
+        .iter()
+        .filter(|line| line.data == 0xF000 && line.datb == 0xF000)
+        .count();
+    assert!(
+        line_count >= FB_HEIGHT / 2,
+        "an armed sprite latch must serialize on every line of a frame \
+         without sprite writes (got {line_count} lines)"
+    );
+
+    // With sprite DMA observed this frame, captured DMA lines own the
+    // channel's output and the carried latch stays silent.
+    let manual_sprite_lines = manual_sprite_lines_from_events_with_visible_line0(
+        &initial_state,
+        &[],
+        &[None; 8],
+        PAL_VISIBLE_LINE0,
+        FB_HEIGHT,
+        false,
+        true,
+    );
+    assert!(manual_sprite_lines[7].is_empty());
 }
 
 #[test]
@@ -2669,7 +2727,7 @@ fn manual_sprite_replay_does_not_seed_from_frame_start_data_latch() {
 }
 
 #[test]
-fn pre_dma_position_write_preserves_armed_latch_for_later_position_write() {
+fn pre_dma_position_write_does_not_preserve_frame_start_latch_when_dma_observed() {
     let mut initial_state = blank_state();
     let beam_y = PAL_VISIBLE_LINE0;
     let (old_pos, ctl) =
@@ -2706,13 +2764,11 @@ fn pre_dma_position_write_preserves_armed_latch_for_later_position_write() {
         true,
     );
 
-    assert!(manual_sprite_lines[0].iter().any(|line| {
-        line.beam_y == beam_y && line.hstart == i32::from(post_dma_hstart) && line.data == 0x8000
-    }));
+    assert!(manual_sprite_lines[0].is_empty());
 }
 
 #[test]
-fn post_dma_position_write_reuses_armed_frame_start_data_latch() {
+fn post_dma_position_write_does_not_reuse_frame_start_latch_when_dma_observed() {
     let mut initial_state = blank_state();
     let beam_y = PAL_VISIBLE_LINE0;
     let (old_pos, ctl) =
@@ -2739,13 +2795,11 @@ fn post_dma_position_write_reuses_armed_frame_start_data_latch() {
         true,
     );
 
-    assert!(manual_sprite_lines[0].iter().any(|line| {
-        line.beam_y == beam_y && line.hstart == i32::from(reused_hstart) && line.data == 0x8000
-    }));
+    assert!(manual_sprite_lines[0].is_empty());
 }
 
 #[test]
-fn offscreen_pre_dma_position_write_preserves_armed_latch_for_same_line_retime() {
+fn same_line_position_retime_does_not_reuse_frame_start_latch_when_dma_observed() {
     let mut initial_state = blank_state();
     let beam_y = 99;
     initial_state.sprpos[3] = 0x5020;
@@ -2767,9 +2821,7 @@ fn offscreen_pre_dma_position_write_preserves_armed_latch_for_same_line_retime()
         true,
     );
 
-    assert!(manual_sprite_lines[3].iter().any(|line| {
-        line.beam_y == beam_y && line.hstart == 0x78 && line.data == 0xE92D && line.datb == 0x16FF
-    }));
+    assert!(manual_sprite_lines[3].is_empty());
 }
 
 #[test]
@@ -2867,7 +2919,9 @@ fn early_position_write_keeps_manual_sprite_armed_without_sprite_dma() {
     );
 
     assert!(manual_sprite_lines[0].iter().any(|line| {
-        line.beam_y == beam_y + 1 && line.hstart == DIW_HSTART_FB0 + 32 && line.data == 0x8000
+        line.beam_y == beam_y + 1
+            && line.hstart == reg_hstart(DIW_HSTART_FB0 + 32)
+            && line.data == 0x8000
     }));
 }
 
@@ -2941,7 +2995,7 @@ fn dma_seeded_sprite_reuse_keeps_later_register_data_on_same_line() {
     let beam_y = PAL_VISIBLE_LINE0;
     let mut manual_lines = vec![Vec::new(); 8];
     manual_lines[0].push(SpriteLine {
-        hstart: DIW_HSTART_FB0 + 96,
+        hstart: SPRITE_HSTART_FB0 + 96,
         hsub_70ns: false,
         beam_y,
         data: 0xFFFF,
@@ -2956,7 +3010,7 @@ fn dma_seeded_sprite_reuse_keeps_later_register_data_on_same_line() {
 
     let mut dma_seeded = vec![Vec::new(); 8];
     dma_seeded[0].push(SpriteLine {
-        hstart: DIW_HSTART_FB0 + 96,
+        hstart: SPRITE_HSTART_FB0 + 96,
         hsub_70ns: false,
         beam_y,
         data: 0x8000,
@@ -3002,7 +3056,7 @@ fn held_sprite_after_dma_disable_persists_past_descriptor_vstop() {
     held[0] = Some(HeldSpriteLine {
         line: CapturedSpriteLine {
             sprite: 0,
-            hstart: DIW_HSTART_FB0,
+            hstart: SPRITE_HSTART_FB0,
             hsub_70ns: false,
             beam_y: held_vstart,
             data: 0x8000,
@@ -3035,14 +3089,14 @@ fn held_sprite_after_dma_disable_persists_past_descriptor_vstop() {
         .iter()
         .find(|line| line.beam_y == held_vstart)
         .expect("held sprite remains visible in its DMA vertical window");
-    assert_eq!(line.hstart, live_hstart);
+    assert_eq!(line.hstart, reg_hstart(live_hstart));
     assert_eq!(line.x_start, 0);
     assert!(manual_sprite_lines[0]
         .iter()
-        .any(|line| line.beam_y == held_vstop && line.hstart == live_hstart));
+        .any(|line| line.beam_y == held_vstop && line.hstart == reg_hstart(live_hstart)));
     assert!(manual_sprite_lines[0]
         .iter()
-        .any(|line| line.beam_y > held_vstop && line.hstart == live_hstart));
+        .any(|line| line.beam_y > held_vstop && line.hstart == reg_hstart(live_hstart)));
 }
 
 #[test]
@@ -3112,11 +3166,11 @@ fn manual_sprite_position_write_before_hstart_uses_sprite_compare_domain() {
 
     let old_line = manual_sprite_lines[2]
         .iter()
-        .find(|line| line.beam_y == beam_y && line.hstart == old_hstart as i32)
+        .find(|line| line.beam_y == beam_y && line.hstart == reg_hstart(old_hstart as i32))
         .expect("old position interval");
     let new_line = manual_sprite_lines[2]
         .iter()
-        .find(|line| line.beam_y == beam_y && line.hstart == new_hstart as i32)
+        .find(|line| line.beam_y == beam_y && line.hstart == reg_hstart(new_hstart as i32))
         .expect("new position interval");
     let sprite_position_x = sprite_position_write_framebuffer_x(event_hpos);
     let colour_output_x = ((event_hpos as i32 - COPPER_WAIT_HPOS_FB0) * 4) as usize;
@@ -3124,6 +3178,59 @@ fn manual_sprite_position_write_before_hstart_uses_sprite_compare_domain() {
     assert_eq!(old_line.x_stop, sprite_position_x);
     assert_eq!(new_line.x_start, sprite_position_x);
     assert_ne!(new_line.x_start, colour_output_x);
+}
+
+#[test]
+fn copper_sprite_position_write_repositions_four_cck_later_than_cpu() {
+    // The Copper WAIT-comparator lookahead model advances the Copper's
+    // bus-cycle bookkeeping four colour clocks so register VALUE landings
+    // match the vAmiga trace. The horizontal sprite comparator reload is a
+    // fixed Denise pipeline measured from the real bus write, so a
+    // copper-driven sprite multiplexer's reposition interval must carry that
+    // lookahead back out and land four colour clocks (16 framebuffer units)
+    // to the right of where a CPU write at the same recorded hpos would.
+    // Regression example: the Desire "Hamazing" HAM sprite-multiplexer wipes,
+    // whose per-line SPRxPOS repositions otherwise fall into the wrong
+    // interval and leave horizontal streaks trailing the reveal.
+    let event_hpos = 96;
+    let cpu_x = sprite_position_write_framebuffer_x_from(event_hpos, false);
+    let copper_x = sprite_position_write_framebuffer_x_from(event_hpos, true);
+    assert_eq!(copper_x, cpu_x + 16);
+    assert_eq!(
+        copper_x,
+        sprite_position_write_framebuffer_x(event_hpos + 4)
+    );
+
+    // The same offset carries into the event-driven reposition interval: a
+    // copper reposition abuts 16 framebuffer units right of the CPU one.
+    let mut initial_state = blank_state();
+    let beam_y = PAL_VISIBLE_LINE0;
+    let old_hstart = 200;
+    let new_hstart = 260;
+    let (old_pos, old_ctl) = sprite_control_words(beam_y as u16, beam_y as u16 + 1, old_hstart);
+    let (new_pos, _) = sprite_control_words(beam_y as u16, beam_y as u16 + 1, new_hstart);
+    initial_state.sprpos[0] = old_pos;
+    initial_state.sprctl[0] = old_ctl;
+    initial_state.sprdata[0] = 0xFFFF;
+    initial_state.spr_armed[0] = true;
+
+    let cpu_lines = manual_sprite_lines_from_events(
+        &initial_state,
+        &[cpu_event(beam_y as u32, 96, 0x140, new_pos)],
+    );
+    let copper_lines = manual_sprite_lines_from_events(
+        &initial_state,
+        &[beam_event(beam_y as u32, 96, 0x140, new_pos)],
+    );
+    let cpu_new = cpu_lines[0]
+        .iter()
+        .find(|line| line.hstart == reg_hstart(new_hstart as i32))
+        .expect("cpu new-position interval");
+    let copper_new = copper_lines[0]
+        .iter()
+        .find(|line| line.hstart == reg_hstart(new_hstart as i32))
+        .expect("copper new-position interval");
+    assert_eq!(copper_new.x_start, cpu_new.x_start + 16);
 }
 
 #[test]
@@ -3153,11 +3260,11 @@ fn manual_sprite_position_writes_use_denise_compare_lag() {
 
     let first_line = manual_sprite_lines[0]
         .iter()
-        .find(|line| line.beam_y == beam_y && line.hstart == first_hstart as i32)
+        .find(|line| line.beam_y == beam_y && line.hstart == reg_hstart(first_hstart as i32))
         .expect("first position interval");
     let second_line = manual_sprite_lines[0]
         .iter()
-        .find(|line| line.beam_y == beam_y && line.hstart == second_hstart as i32)
+        .find(|line| line.beam_y == beam_y && line.hstart == reg_hstart(second_hstart as i32))
         .expect("second position interval");
     let first_base_x = ((first_hstart as i32 - DIW_HSTART_FB0) * 2) as usize;
     let second_base_x = ((second_hstart as i32 - DIW_HSTART_FB0) * 2) as usize;
@@ -3209,11 +3316,11 @@ fn manual_sprite_position_write_does_not_truncate_started_word() {
 
     let first_line = manual_sprite_lines[0]
         .iter()
-        .find(|line| line.beam_y == beam_y && line.hstart == first_hstart as i32)
+        .find(|line| line.beam_y == beam_y && line.hstart == reg_hstart(first_hstart as i32))
         .expect("first position interval");
     let second_line = manual_sprite_lines[0]
         .iter()
-        .find(|line| line.beam_y == beam_y && line.hstart == second_hstart as i32)
+        .find(|line| line.beam_y == beam_y && line.hstart == reg_hstart(second_hstart as i32))
         .expect("second position interval");
     let first_base_x = (first_hstart as i32 - DIW_HSTART_FB0) * 2;
     let second_base_x = (second_hstart as i32 - DIW_HSTART_FB0) * 2;
@@ -3264,7 +3371,7 @@ fn manual_sprite_position_write_on_compare_boundary_preserves_started_word() {
 
     let first_line = manual_sprite_lines[0]
         .iter()
-        .find(|line| line.beam_y == beam_y && line.hstart == first_hstart as i32)
+        .find(|line| line.beam_y == beam_y && line.hstart == reg_hstart(first_hstart as i32))
         .expect("first position interval");
     let base_control = ControlState::from_render_state(&initial_state);
     let first_base_x = (first_hstart as i32 - DIW_HSTART_FB0) * 2;
@@ -3850,7 +3957,7 @@ fn sprites_wait_for_first_bpl1dat_display_enable_on_scanline() {
     let mut collision_pixels = vec![CollisionPixel::default(); FB_PIXELS];
     let captured = [CapturedSpriteLine {
         sprite: 0,
-        hstart: DIW_HSTART_FB0,
+        hstart: SPRITE_HSTART_FB0,
         hsub_70ns: false,
         beam_y: PAL_VISIBLE_LINE0,
         data: 0xFFFF,
@@ -3910,7 +4017,7 @@ fn manual_bpl1dat_display_enable_allows_sprites_on_vertically_closed_diw_line() 
     let mut collision_pixels = vec![CollisionPixel::default(); FB_PIXELS];
     let captured = [CapturedSpriteLine {
         sprite: 0,
-        hstart: DIW_HSTART_FB0,
+        hstart: SPRITE_HSTART_FB0,
         hsub_70ns: false,
         beam_y: PAL_VISIBLE_LINE0,
         data: 0x8000,
@@ -3992,7 +4099,7 @@ fn brdsprt_bypasses_first_bpl1dat_display_enable_gate() {
     let mut collision_pixels = vec![CollisionPixel::default(); FB_PIXELS];
     let captured = [CapturedSpriteLine {
         sprite: 0,
-        hstart: DIW_HSTART_FB0,
+        hstart: SPRITE_HSTART_FB0,
         hsub_70ns: false,
         beam_y: PAL_VISIBLE_LINE0,
         data: 0x8000,
@@ -4032,6 +4139,62 @@ fn brdsprt_bypasses_first_bpl1dat_display_enable_gate() {
 }
 
 #[test]
+fn brdrblnk_suppresses_brdsprt_display_enable_bypass() {
+    let mut state = RenderState {
+        bplcon0: BPLCON0_ECSENA,
+        bplcon3: BPLCON3_BRDSPRT | BPLCON3_BRDRBLNK,
+        ..blank_state()
+    };
+    state.palette.write_ocs(17, 0x0F00);
+    let ram = vec![0; 64];
+    let base_palettes = [state.palette; FB_HEIGHT];
+    let palette_segments = vec![Vec::new(); FB_HEIGHT];
+    let base_controls = [ControlState::from_render_state(&state); FB_HEIGHT];
+    let control_segments = vec![Vec::new(); FB_HEIGHT];
+    let playfield_mask = vec![0u8; FB_PIXELS];
+    let mut collision_pixels = vec![CollisionPixel::default(); FB_PIXELS];
+    let captured = [CapturedSpriteLine {
+        sprite: 0,
+        hstart: SPRITE_HSTART_FB0,
+        hsub_70ns: false,
+        beam_y: PAL_VISIBLE_LINE0,
+        data: 0x8000,
+        datb: 0,
+        attached: false,
+        data_ext: [0; 3],
+        datb_ext: [0; 3],
+        width_words: 1,
+    }];
+    let display_enable_x = [None; FB_HEIGHT];
+    let mut fb = vec![rgb12_to_rgba8(0); FB_PIXELS];
+
+    render_sprites_with_manual_lines_and_writes(
+        &state,
+        &ram,
+        &mut fb,
+        SpriteClip {
+            x_start: 0,
+            x_stop: FB_WIDTH,
+            y_start: 0,
+            y_stop: FB_HEIGHT,
+        },
+        &base_palettes,
+        &palette_segments,
+        &base_controls,
+        &control_segments,
+        &display_enable_x,
+        &playfield_mask,
+        &mut collision_pixels,
+        &captured,
+        true,
+        None,
+        PAL_VISIBLE_LINE0,
+    );
+
+    assert_eq!(fb[0], rgb12_to_rgba8(0));
+}
+
+#[test]
 fn bplcon3_brdsprt_allows_sprites_in_border_when_ecsena_set() {
     let mut state = RenderState {
         dmacon: DMACON_DMAEN | DMACON_SPREN,
@@ -4052,7 +4215,7 @@ fn bplcon3_brdsprt_allows_sprites_in_border_when_ecsena_set() {
     let mut fb = vec![rgb12_to_rgba8(0); FB_PIXELS];
     let captured = [CapturedSpriteLine {
         sprite: 0,
-        hstart: DIW_HSTART_FB0,
+        hstart: SPRITE_HSTART_FB0,
         hsub_70ns: false,
         beam_y: PAL_VISIBLE_LINE0,
         data: 0x8000,
@@ -4109,7 +4272,7 @@ fn bplcon3_brdsprt_requires_ecsena_for_border_sprites() {
     let mut fb = vec![rgb12_to_rgba8(0); FB_PIXELS];
     let captured = [CapturedSpriteLine {
         sprite: 0,
-        hstart: DIW_HSTART_FB0,
+        hstart: SPRITE_HSTART_FB0,
         hsub_70ns: false,
         beam_y: PAL_VISIBLE_LINE0,
         data: 0x8000,
@@ -4192,7 +4355,7 @@ fn beam_timed_bplcon3_brdsprt_latches_until_ecsena_enables_effect() {
     let mut fb = vec![rgb12_to_rgba8(0); FB_PIXELS];
     let captured = [CapturedSpriteLine {
         sprite: 0,
-        hstart: DIW_HSTART_FB0 + 8,
+        hstart: SPRITE_HSTART_FB0 + 8,
         hsub_70ns: false,
         beam_y: PAL_VISIBLE_LINE0,
         data: 0xFFFF,
@@ -4252,7 +4415,7 @@ fn sprites_use_beam_timed_display_window_control() {
     let mut fb = vec![rgb12_to_rgba8(0); FB_PIXELS];
     let captured = [CapturedSpriteLine {
         sprite: 0,
-        hstart: DIW_HSTART_FB0,
+        hstart: SPRITE_HSTART_FB0,
         hsub_70ns: false,
         beam_y: PAL_VISIBLE_LINE0,
         data: 0xC000,
@@ -4305,7 +4468,7 @@ fn captured_sprite_dma_lines_render_without_reparsing_frame_ram() {
     let mut fb = vec![rgb12_to_rgba8(0); FB_PIXELS];
     let captured = [CapturedSpriteLine {
         sprite: 0,
-        hstart: DIW_HSTART_FB0,
+        hstart: SPRITE_HSTART_FB0,
         hsub_70ns: false,
         beam_y: PAL_VISIBLE_LINE0,
         data: 0x8000,
@@ -4346,6 +4509,9 @@ fn dma_loaded_sprite_data_rearms_on_same_line_position_write() {
     let mut state = blank_state();
     state.dmacon = DMACON_DMAEN | DMACON_SPREN;
     state.palette.write_ocs(17, 0x0F00);
+    state.palette.write_ocs(18, 0x00F0);
+    state.sprdatb[0] = 0x8000;
+    state.spr_armed[0] = true;
     let ram = vec![0; 64];
     let base_palettes = [state.palette; FB_HEIGHT];
     let palette_segments = vec![Vec::new(); FB_HEIGHT];
@@ -4356,7 +4522,10 @@ fn dma_loaded_sprite_data_rearms_on_same_line_position_write() {
     let mut fb = vec![rgb12_to_rgba8(0); FB_PIXELS];
     let beam_y = PAL_VISIBLE_LINE0;
     let initial_hstart = DIW_HSTART_FB0 as u16;
-    let reused_hstart = initial_hstart + 64;
+    // Odd output position: with only SPRxPOS rewritten, H0 stays in the old
+    // CTL word, so the register value must be even to survive a POS-only
+    // reposition intact.
+    let reused_hstart = initial_hstart + 65;
     let (reused_pos, _) = sprite_control_words(beam_y as u16, beam_y as u16 + 1, reused_hstart);
     let captured = [CapturedSpriteLine {
         sprite: 0,
@@ -4396,8 +4565,11 @@ fn dma_loaded_sprite_data_rearms_on_same_line_position_write() {
         FB_HEIGHT,
     );
     assert!(dma_seeded_lines[0].iter().any(|line| {
-        line.beam_y == beam_y && line.hstart == i32::from(reused_hstart) && line.data == 0x8000
+        line.beam_y == beam_y
+            && line.hstart == reg_hstart(i32::from(reused_hstart))
+            && line.data == 0x8000
     }));
+    assert!(dma_seeded_lines[0].iter().all(|line| line.datb == 0));
     merge_dma_seeded_manual_sprite_lines(&mut manual_sprite_lines, dma_seeded_lines);
 
     render_sprites_with_manual_lines(
@@ -4422,9 +4594,14 @@ fn dma_loaded_sprite_data_rearms_on_same_line_position_write() {
         Some(&manual_sprite_lines),
     );
 
-    let reused_x =
-        sprite_base_framebuffer_x(i32::from(reused_hstart), false, base_controls[0], &[]);
+    let reused_x = sprite_base_framebuffer_x(
+        reg_hstart(i32::from(reused_hstart)),
+        false,
+        base_controls[0],
+        &[],
+    );
     assert_eq!(fb[reused_x as usize], rgb12_to_rgba8(0x0F00));
+    assert_ne!(fb[reused_x as usize], rgb12_to_rgba8(0x00F0));
 }
 
 #[test]
@@ -4449,7 +4626,7 @@ fn sprite_register_data_write_after_compare_preserves_dma_latch_on_same_beam_lin
     let mut fb = vec![rgb12_to_rgba8(0); FB_PIXELS];
     let captured = [CapturedSpriteLine {
         sprite: 0,
-        hstart: DIW_HSTART_FB0,
+        hstart: SPRITE_HSTART_FB0,
         hsub_70ns: false,
         beam_y: PAL_VISIBLE_LINE0,
         data: 0xFFFF,
@@ -6765,7 +6942,7 @@ fn sprite_collisions_use_beam_timed_clxcon_control() {
     let mut fb = vec![rgb12_to_rgba8(0); FB_PIXELS];
     let captured = [CapturedSpriteLine {
         sprite: 1,
-        hstart: DIW_HSTART_FB0,
+        hstart: SPRITE_HSTART_FB0,
         hsub_70ns: false,
         beam_y: PAL_VISIBLE_LINE0,
         data: 0x8000,

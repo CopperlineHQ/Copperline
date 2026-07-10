@@ -119,6 +119,18 @@ const SPRITE_PALETTE_CONTROL_HPOS_FB0: i32 = 0x36;
 /// programmed HSTARTs, and data writes that beat the comparator load the same
 /// scanline.
 const SPRITE_REGISTER_WRITE_PIPELINE_CCK: u32 = 7;
+/// Copper-sourced sprite register writes use a shorter reposition pipeline.
+/// The Copper WAIT-comparator lookahead model advanced the Copper's bus-cycle
+/// bookkeeping four colour clocks so register VALUE landings match the vAmiga
+/// copper trace (SPR0CTL behind a WAIT lands at hpos $22, the vAmigaTS
+/// spritedma/interfere photo position). The horizontal sprite comparator
+/// reload is a fixed Denise pipeline measured from the real bus write, and a
+/// copper-driven sprite multiplexer's reposition intervals must land where the
+/// demo author (and vAmiga) place them, so the reposition domain carries that
+/// four-clock lookahead back out. Without it every per-line SPRxPOS reposition
+/// lands four colour clocks early, so the sprite copies fall into the wrong
+/// interval and leave horizontal streaks trailing the reveal.
+const COPPER_SPRITE_REGISTER_WRITE_PIPELINE_CCK: u32 = SPRITE_REGISTER_WRITE_PIPELINE_CCK - 4;
 /// Framebuffer-x offset between the copper/register coordinate
 /// ([`COPPER_WAIT_HPOS_FB0`], used to place beam-timed register writes) and the
 /// bitplane/DIW coordinate ([`DIW_HSTART_FB0`], used to place fetched bitplane
@@ -296,15 +308,6 @@ impl PaletteRowDiag {
     }
 }
 
-fn parse_diag_u32(raw: &str) -> Option<u32> {
-    let raw = raw.trim();
-    if let Some(hex) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
-        u32::from_str_radix(hex, 16).ok()
-    } else {
-        raw.parse::<u32>().ok()
-    }
-}
-
 /// Cached COPPERLINE_DIAG_PALETTE_ROW setting (read once). Accepted forms:
 /// presence/`all` logs every COLOR write, `V` logs one beam line, and
 /// `START:END` logs an inclusive beam-line range.
@@ -320,14 +323,14 @@ fn palette_row_diag() -> Option<PaletteRowDiag> {
             });
         }
         if let Some((first, last)) = raw.split_once(':') {
-            let first_vpos = parse_diag_u32(first).unwrap_or(0);
-            let last_vpos = parse_diag_u32(last).unwrap_or(u32::MAX);
+            let first_vpos = crate::envcfg::parse_u32(first).unwrap_or(0);
+            let last_vpos = crate::envcfg::parse_u32(last).unwrap_or(u32::MAX);
             return Some(PaletteRowDiag {
                 first_vpos: first_vpos.min(last_vpos),
                 last_vpos: first_vpos.max(last_vpos),
             });
         }
-        parse_diag_u32(raw).map(|vpos| PaletteRowDiag {
+        crate::envcfg::parse_u32(raw).map(|vpos| PaletteRowDiag {
             first_vpos: vpos,
             last_vpos: vpos,
         })
@@ -742,7 +745,7 @@ impl ControlState {
     }
 
     fn border_sprite_enabled(&self) -> bool {
-        self.ecsena() && self.bplcon3 & BPLCON3_BRDSPRT != 0
+        self.ecsena() && self.bplcon3 & BPLCON3_BRDSPRT != 0 && self.bplcon3 & BPLCON3_BRDRBLNK == 0
     }
 
     fn zd_clock_enabled(&self) -> bool {
@@ -1304,7 +1307,6 @@ struct DenisePlannedPlayfieldLine<'a> {
     x_stop: usize,
     plane_words: &'a [Vec<u16>],
     fetched_pixels: usize,
-    carry_words: [Option<u16>; 8],
 }
 
 impl<'a> DenisePlannedPlayfieldLine<'a> {
@@ -1321,13 +1323,7 @@ impl<'a> DenisePlannedPlayfieldLine<'a> {
             x_stop,
             plane_words,
             fetched_pixels,
-            carry_words: [None; 8],
         }
-    }
-
-    fn with_carry_words(mut self, carry_words: [Option<u16>; 8]) -> Self {
-        self.carry_words = carry_words;
-        self
     }
 
     #[cfg(test)]
@@ -1376,15 +1372,6 @@ impl<'a> DenisePlannedPlayfieldLine<'a> {
             let delay = delays[plane];
             if native_x < delay {
                 active = true;
-                if delay <= 16 {
-                    let carry_offset = delay - native_x;
-                    if let Some(word) = self.carry_words.get(plane).copied().flatten() {
-                        let bit = carry_offset - 1;
-                        if word & (1 << bit) != 0 {
-                            idx |= 1 << plane;
-                        }
-                    }
-                }
                 continue;
             }
             let fetch_x = native_x - delay;
@@ -3437,16 +3424,21 @@ pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
     );
     let event_started = Instant::now();
     // Seed replay spans from beam-timed SPRx writes or DMA-established held
-    // sprites. SPRxDATA latches remain armed across the frame boundary, but
-    // they do not emit by themselves when captured DMA is the primary source;
-    // a later SPRxPOS write can still reuse that latch after the DMA slot.
+    // sprites. SPRxDATA latches remain armed across the frame boundary; when
+    // captured DMA is the primary source they do not emit by themselves (a
+    // later SPRxPOS write on a DMA-loaded line reuses the captured line data),
+    // but with sprite DMA idle Denise's own rules apply unmodified: an armed
+    // sprite keeps serializing on every line of every following frame until a
+    // SPRxCTL write disarms it. Software that arms a sprite once and then
+    // leaves it alone for a whole scene (a static masking bar) relies on the
+    // latch emitting in frames with no sprite register writes at all.
     let mut manual_sprite_lines = manual_sprite_lines_from_events_with_visible_line0(
         &state,
         render_events,
         &input.held_sprites,
         visible_line0,
         rows,
-        false,
+        !input.sprite_dma_observed,
         input.sprite_dma_observed,
     );
     if input.sprite_dma_observed {
@@ -3664,10 +3656,9 @@ pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
             }
         }
         // Tracks the last line that actually drew bitplanes, so a line whose
-        // predecessor was border (no carried-over shifter data) can suppress
-        // the BPLCON1 scroll pulling its leading pre-fetch words into view.
+        // predecessor was border can suppress BPLCON1 scroll pulling leading
+        // same-line pre-fetch samples into view.
         let mut last_playfield_line: Option<usize> = None;
-        let mut previous_playfield_tail_words: [Option<u16>; 8] = [None; 8];
         for y in 0..rows {
             let row_control_segments = &control_segments[y];
             let Some((x_start, x_stop)) = line_display_window_bounds(
@@ -3924,32 +3915,13 @@ pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
                 words_per_row,
                 dma_planes.min(nplanes),
             );
-            let fetch_starts_inside_window = {
-                let mut display_control = base_controls[y];
-                for segment in row_control_segments {
-                    if segment.x <= x_start {
-                        display_control = segment.control;
-                    }
-                }
-                let pixel_repeat = display_control.framebuffer_pixel_repeat();
-                display_control.fetch_start_native_x(display_control.diw_h_start(), pixel_repeat)
-                    > 0
-            };
-            let carry_words = bitplane_carry_words_for_line(
-                block_start,
-                x_start,
-                dma_output_start_x,
-                fetch_starts_inside_window,
-                previous_playfield_tail_words,
-            );
             let line_plan = DenisePlannedPlayfieldLine::new(
                 y,
                 x_start,
                 x_stop,
                 &row_words[..nplanes],
                 fetched_pixels,
-            )
-            .with_carry_words(carry_words);
+            );
             let bpl_output_start_x = dma_output_start_x.unwrap_or(0);
             dma_output_start_x_by_line[y] = dma_output_start_x;
             last_playfield_line = Some(y);
@@ -3977,11 +3949,6 @@ pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
                 let m = control.modulo_for_plane(p, beam_y as i32);
                 ptrs[p] = ((ptrs[p] as i64).wrapping_add(m as i64) as u32) & ram_mask;
             }
-            previous_playfield_tail_words = std::array::from_fn(|plane| {
-                (plane < nplanes)
-                    .then(|| row_words[plane].last().copied())
-                    .flatten()
-            });
         }
         if let (Some(planes), Some(index)) = (export_planes.as_ref(), export_index.as_ref()) {
             let frame = input.emulated_frames;
@@ -4329,15 +4296,12 @@ fn render_planned_playfield_line(
         let pixel_fetch_start_native_x =
             pixel_control.fetch_start_native_x(pixel_diw_h_start, pixel_repeat);
         let native_x_offset = pixel_control.native_x_offset(pixel_diw_h_start, pixel_repeat);
-        // BPLCON1 scroll fills the window's left edge from the bitplane
-        // shifter. On a line whose predecessor also fetched bitplanes the
-        // shifter still holds that line's tail, so the scroll-in is real
-        // content. At the first line of a bitplane-DMA block (the previous
-        // line was border) the shifter has no carried-over data, so the scroll
-        // must not pull the leading pre-fetch words (already clocked into the
-        // left border by the time the window opens) back into view. Suppress
-        // those by treating fetch positions before `native_x_offset` as
-        // background only on a block-start line.
+        // BPLCON1 scroll fills the window's left edge from Denise's current
+        // scanline shifter state. At the first line of a bitplane-DMA block,
+        // no earlier playfield stream was active before the window opened, so
+        // do not pull leading pre-fetch samples into view. Contiguous rows may
+        // still expose same-line samples that were fetched before DIW opened,
+        // but never a previous scanline's tail.
         let min_fetch_x = if suppress_prefetch_scroll_fill {
             native_x_offset
         } else {

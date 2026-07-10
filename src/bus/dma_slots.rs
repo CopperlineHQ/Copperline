@@ -590,21 +590,22 @@ impl Bus {
 
     pub(super) fn refresh_slot_active_at(hpos: u32) -> bool {
         // The OCS Agnus does 4 memory-refresh cycles per line, on ODD color
-        // clocks (WinUAE: REFRESH_FIRST_HPOS=3, slots every other cck; HRM DMA
-        // time-slot chart: refresh/disk/audio/sprite all sit on the alternate
-        // slots). The parity matters: the Copper's bus fetches use the EVEN
-        // color clocks (WinUAE COPPER_CYCLE_POLARITY), so on real hardware
-        // refresh NEVER blocks a Copper fetch. Putting refresh on even slots
-        // (a misreading of MiniMig's 2x-hpos numbering) delayed Copper MOVE
-        // streams at the start of every line by ~8 cck, which broke demos that
-        // rely on a post-WAIT register burst completing before DDFSTRT; if a
-        // BPLCON0 plane-count switch lands after the line's fetches begin, the
-        // planes are misaligned.
+        // clocks in the fixed-DMA row (HRM DMA time-slot chart:
+        // refresh/disk/audio/sprite all sit on the alternate slots). The
+        // parity matters: the Copper's bus fetches use the EVEN color clocks
+        // (WinUAE COPPER_CYCLE_POLARITY), so on real hardware refresh NEVER
+        // blocks a Copper fetch. Putting refresh on even slots (a misreading
+        // of MiniMig's 2x-hpos numbering) delayed Copper MOVE streams at the
+        // start of every line by ~8 cck, which broke demos that rely on a
+        // post-WAIT register burst completing before DDFSTRT; if a BPLCON0
+        // plane-count switch lands after the line's fetches begin, the planes
+        // are misaligned.
         //
-        // Positions 1/3/5/7 sit just before Copperline's disk slots (9/B/D) and
-        // audio slots (F/11/13/15), mirroring the HRM chart's contiguous
-        // odd-slot fixed-DMA band.
-        matches!(hpos, 0x001 | 0x003 | 0x005 | 0x007)
+        // Positions 1/3/5 plus the line-end slot mirror the Agnus DAS table:
+        // refresh takes the first event and marks 1/3/5 plus EOL (vAmiga:
+        // E2 on normal lines, E3 on NTSC long lines). The following odd slots
+        // are disk (7/9/B), audio (D/F/11/13), then sprites (15...33).
+        matches!(hpos, 0x001 | 0x003 | 0x005 | 0x0E2 | 0x0E3)
     }
 
     pub(super) fn disk_slot_active_at(&self, hpos: u32) -> bool {
@@ -621,12 +622,12 @@ impl Bus {
         }
         self.agnus.dmacon & DMACON_DSKEN != 0
             && self.floppy.dma_active(self.agnus.dmacon)
-            && matches!(hpos, 0x009 | 0x00B | 0x00D)
+            && matches!(hpos, 0x007 | 0x009 | 0x00B)
     }
 
     pub(super) fn audio_slot_active_at(&self, hpos: u32) -> bool {
-        // Each of the four audio channels has one fixed DMA slot (hpos 0x00F,
-        // 0x011, 0x013, 0x015). The slot is used only on lines where a DMA
+        // Each of the four audio channels has one fixed DMA slot (hpos 0x00D,
+        // 0x00F, 0x011, 0x013). The slot is used only on lines where a DMA
         // request was latched into Agnus at the previous line end -- roughly
         // once per 2*AUDxPER cck at music periods, well under once per line.
         // The DMACON audio bits do NOT gate the slot: a request posted while
@@ -641,10 +642,10 @@ impl Bus {
 
     pub(super) fn audio_dma_channel_at(hpos: u32) -> Option<usize> {
         match hpos {
-            0x00F => Some(0),
-            0x011 => Some(1),
-            0x013 => Some(2),
-            0x015 => Some(3),
+            0x00D => Some(0),
+            0x00F => Some(1),
+            0x011 => Some(2),
+            0x013 => Some(3),
             _ => None,
         }
     }

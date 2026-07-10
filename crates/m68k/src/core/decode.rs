@@ -745,10 +745,26 @@ fn dispatch_group_0<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             let size = decode_size_00(size_bits);
             // SUBI manual implementation (mirroring ADDI)
             let imm = read_immediate(cpu, bus, size);
-            let ea = cpu.resolve_ea(bus, mode, size);
-            let dst = cpu.read_resolved_ea(bus, ea, size);
-            let (result, _) = cpu.exec_sub(bus, size, imm, dst);
-            cpu.write_resolved_ea(bus, ea, size, result);
+            if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
+                return 50;
+            }
+            if cpu.cpu_type == CpuType::M68000
+                && let AddressingMode::DataDirect(reg) = mode
+            {
+                let dst = cpu.d(reg as usize) & size.mask();
+                let (result, _) = cpu.exec_sub(bus, size, imm, dst);
+                cpu.finish_m68000_immediate_data_register_write(
+                    bus,
+                    reg as usize,
+                    size,
+                    result,
+                );
+            } else {
+                let ea = cpu.resolve_ea(bus, mode, size);
+                let dst = cpu.read_resolved_ea(bus, ea, size);
+                let (result, _) = cpu.exec_sub(bus, size, imm, dst);
+                cpu.write_resolved_ea(bus, ea, size, result);
+            }
             if cpu.cpu_type == CpuType::M68000 {
                 cpu.immediate_alu_cycles(mode, size)
             } else if size == Size::Long {
@@ -774,11 +790,25 @@ fn dispatch_group_0<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             let size = decode_size_00(size_bits);
             // ADDI manual implementation
             let imm = read_immediate(cpu, bus, size);
+            if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
+                return 50;
+            }
 
             let ea = cpu.resolve_ea(bus, mode, size);
             let dst = cpu.read_resolved_ea(bus, ea, size);
             let (result, _cycles) = cpu.exec_add(bus, size, imm, dst);
-            cpu.write_resolved_ea(bus, ea, size, result);
+            if cpu.cpu_type == CpuType::M68000
+                && let AddressingMode::DataDirect(reg) = mode
+            {
+                cpu.finish_m68000_immediate_data_register_write(
+                    bus,
+                    reg as usize,
+                    size,
+                    result,
+                );
+            } else {
+                cpu.write_resolved_ea(bus, ea, size, result);
+            }
             if cpu.cpu_type == CpuType::M68000 {
                 cpu.immediate_alu_cycles(mode, size)
             } else {
@@ -811,9 +841,23 @@ fn dispatch_group_0<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
             let size = decode_size_00((opcode >> 6) & 3);
             let imm = read_immediate(cpu, bus, size);
+            if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
+                return 50;
+            }
             let dst = cpu.read_ea(bus, mode, size);
             if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
                 return 50;
+            }
+            if cpu.cpu_type == CpuType::M68000 {
+                cpu.top_up_prefetch(bus);
+                cpu.ipl_poll_point(bus);
+                if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
+                    return 50;
+                }
+                if mode.is_register_direct() && size == Size::Long {
+                    cpu.internal_cycles(2);
+                    cpu.flush_sync(bus);
+                }
             }
             let legacy = cpu.exec_cmp(size, imm, dst);
             if cpu.cpu_type == CpuType::M68000 {
@@ -954,6 +998,30 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
         }
         let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
         let sr = cpu.get_sr() as u32;
+        if cpu.cpu_type == CpuType::M68000
+            && let AddressingMode::DataDirect(reg) = mode
+        {
+            if !finish_m68000_tail_after_final_prefetch(cpu, bus, 2) {
+                return 50;
+            }
+            let reg = reg as usize;
+            cpu.dar[reg] = (cpu.dar[reg] & 0xffff_0000) | (sr & 0xffff);
+            return 6;
+        }
+        if matches!(cpu.cpu_type, CpuType::M68010 | CpuType::SCC68070)
+            && let AddressingMode::DataDirect(reg) = mode
+        {
+            if cpu.prefetch_enabled() {
+                cpu.top_up_prefetch(bus);
+                cpu.ipl_poll_point(bus);
+                if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
+                    return 50;
+                }
+            }
+            let reg = reg as usize;
+            cpu.dar[reg] = (cpu.dar[reg] & 0xffff_0000) | (sr & 0xffff);
+            return 4;
+        }
         // 68000 quirk: like CLR, MOVE from SR reads its destination before
         // writing (removed on the 68010+).
         let ea = cpu.resolve_ea(bus, mode, Size::Word);
@@ -984,9 +1052,18 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
         }
         let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
         let ccr = cpu.get_ccr() as u32;
-        if mode.is_register_direct() {
-            // 68010: register destination costs only the final prefetch.
-            cpu.write_ea(bus, mode, Size::Word, ccr);
+        if let AddressingMode::DataDirect(reg) = mode {
+            // 68010: register destination costs only the final prefetch,
+            // and Moira orders that prefetch before the Dn write.
+            if cpu.prefetch_enabled() {
+                cpu.top_up_prefetch(bus);
+                cpu.ipl_poll_point(bus);
+                if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
+                    return 50;
+                }
+            }
+            let reg = reg as usize;
+            cpu.dar[reg] = (cpu.dar[reg] & 0xffff_0000) | ccr;
             return 4;
         }
         // 68010 memory destination: internal clocks, EA calculation, the
@@ -1447,10 +1524,14 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                     if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
                         return 50;
                     }
+                    // MOVE to CCR/SR spends its status-write internal clocks
+                    // before the architectural status register changes, then
+                    // discards and refills the prefetch queue.
+                    if cpu.prefetch_enabled() {
+                        cpu.internal_cycles(4);
+                        cpu.flush_sync(bus);
+                    }
                     cpu.set_ccr(value);
-                    // Status modification spends 4 internal clocks before
-                    // discarding and refilling the prefetch queue.
-                    cpu.internal_cycles(4);
                     cpu.full_prefetch(bus);
                     if cpu.cpu_type == CpuType::M68000 {
                         12 + cpu.ea_source_cycles(mode, Size::Word)
@@ -1484,11 +1565,15 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                     if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
                         return 50;
                     }
+                    // MOVE to CCR/SR spends its status-write internal clocks
+                    // before the architectural status register changes, then
+                    // discards and refills the prefetch queue.
+                    if cpu.prefetch_enabled() {
+                        cpu.internal_cycles(4);
+                        cpu.flush_sync(bus);
+                    }
                     cpu.trace_t0_sr_write();
                     cpu.set_sr(value as u16);
-                    // Status modification spends 4 internal clocks before
-                    // discarding and refilling the prefetch queue.
-                    cpu.internal_cycles(4);
                     cpu.full_prefetch(bus);
                     if cpu.cpu_type == CpuType::M68000 {
                         12 + cpu.ea_source_cycles(mode, Size::Word)
@@ -1509,7 +1594,7 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 }
                 0x8 if (opcode >> 6) & 3 == 1 && ea_mode == 0 => {
                     // SWAP
-                    cpu.exec_swap(ea_reg as usize)
+                    cpu.exec_swap(bus, ea_reg as usize)
                 }
                 0x8 if (opcode >> 6) & 3 == 1 && ea_mode == 1 => {
                     // BKPT #n (68010+): 0100 1000 0100 1nnn (0x4848..0x484F)
@@ -1610,9 +1695,20 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                     // MOVE to USP: 0100 1110 0110 0rrr
                     if cpu.is_supervisor() {
                         let reg = (opcode & 7) as usize;
+                        if cpu.cpu_type == CpuType::M68010 {
+                            cpu.internal_cycles(2);
+                        }
+                        if cpu.prefetch_enabled() {
+                            cpu.top_up_prefetch(bus);
+                            cpu.ipl_poll_point(bus);
+                        }
                         cpu.set_usp(cpu.a(reg));
                         cpu.trace_t0_68040_sync();
-                        4
+                        if cpu.cpu_type == CpuType::M68010 {
+                            6
+                        } else {
+                            4
+                        }
                     } else {
                         cpu.exception_privilege(bus)
                     }
@@ -1622,8 +1718,19 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                     if cpu.is_supervisor() {
                         let reg = (opcode & 7) as usize;
                         let usp = cpu.get_usp();
+                        if cpu.cpu_type == CpuType::M68010 {
+                            cpu.internal_cycles(2);
+                        }
+                        if cpu.prefetch_enabled() {
+                            cpu.top_up_prefetch(bus);
+                            cpu.ipl_poll_point(bus);
+                        }
                         cpu.set_a(reg, usp);
-                        4
+                        if cpu.cpu_type == CpuType::M68010 {
+                            6
+                        } else {
+                            4
+                        }
                     } else {
                         cpu.exception_privilege(bus)
                     }
@@ -1651,12 +1758,12 @@ fn dispatch_group_4<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                     });
                     cpu.change_of_flow = true;
                     let return_pc = cpu.pc;
-                    cpu.pc = addr;
-                    // 68000 JSR bus order: first prefetch from the target,
-                    // then the return-address push, then the second prefetch.
-                    cpu.prefetch_first(bus);
+                    // MC68000 JSR saves the return address before refilling
+                    // the instruction queue from the target, matching BSR's
+                    // control-flow bus order.
                     cpu.push_32(bus, return_pc);
-                    cpu.prefetch_second(bus);
+                    cpu.pc = addr;
+                    cpu.full_prefetch(bus);
                     if cpu.cpu_type == CpuType::M68000 {
                         16 + cpu.jump_addr_calc_cycles(mode)
                     } else {
@@ -1970,11 +2077,12 @@ fn dispatch_group_5<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                     // scale_cycles_for_cpu_type) for the post-020 parts.
                     if cpu.is_pre_68020 { 10 } else { 12 }
                 } else {
-                    // Counter expired: the 68000 has already begun the branch;
-                    // it reads one word at the target (discarded) before
-                    // refilling the queue from the fall-through path.
-                    if target & 1 == 0 {
-                        let masked = cpu.address(target);
+                    // Counter expired: the 68000 performs a discarded
+                    // program read at the fall-through word, then refills
+                    // the queue from that same fall-through PC.
+                    if cpu.pc & 1 == 0 {
+                        cpu.flush_sync(bus);
+                        let masked = cpu.address(cpu.pc);
                         let _ = bus.read_word(masked);
                     }
                     cpu.full_prefetch(bus);
@@ -1995,6 +2103,20 @@ fn dispatch_group_5<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             } else {
                 0x00
             };
+            if cpu.cpu_type == CpuType::M68000 && mode.is_register_direct() {
+                // Moira/68000: Scc Dn performs the final prefetch before the
+                // byte writeback. A true condition then has two trailing
+                // internal clocks before the register update.
+                cpu.top_up_prefetch(bus);
+                cpu.ipl_poll_point(bus);
+                if value != 0 {
+                    cpu.internal_cycles(2);
+                    cpu.flush_sync(bus);
+                }
+                let reg = ea_reg as usize;
+                cpu.set_d(reg, (cpu.d(reg) & 0xFFFF_FF00) | value);
+                return if value != 0 { 6 } else { 4 };
+            }
             // 68000 quirk: like CLR, Scc on a memory destination reads the
             // operand before writing.
             let ea = cpu.resolve_ea(bus, mode, Size::Byte);
@@ -2073,9 +2195,11 @@ fn dispatch_group_6<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
     // 2 on taken paths ("n np np"), 4 on not-taken ("nn np ...").
     cpu.internal_cycles(if taken { 2 } else { 4 });
     cpu.consume_without_prefetch = taken;
+    // 68020+ adds the Bcc.L encoding with a displacement byte of $FF.
+    // Earlier cores keep treating $FF as the signed 8-bit displacement -1.
     let disp: i32 = if displacement == 0 {
         cpu.read_imm_16(bus) as i16 as i32
-    } else if displacement == 0xFF {
+    } else if displacement == 0xFF && !cpu.is_pre_68020 {
         cpu.read_imm_32(bus) as i32
     } else {
         displacement as i8 as i32
@@ -2097,8 +2221,7 @@ fn dispatch_group_6<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             let return_pc = cpu.pc;
             cpu.pc = (base_pc as i32).wrapping_add(disp) as u32;
             // 68000 BSR bus order: the return-address push happens first,
-            // then the two-word refill from the branch target (unlike JSR,
-            // which interleaves the push between the two target prefetches).
+            // then the two-word refill from the branch target.
             cpu.push_32(bus, return_pc);
             cpu.full_prefetch(bus);
             18
@@ -2144,6 +2267,9 @@ fn dispatch_group_8<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             let (result, _) = cpu.exec_or(bus, size, src, cpu.d(reg));
             cpu.set_d(reg, (cpu.d(reg) & !size.mask()) | result);
             if cpu.cpu_type == CpuType::M68000 {
+                if !finish_m68000_alu_ea_dn_long_tail(cpu, bus, mode, size) {
+                    return 50;
+                }
                 cpu.alu_ea_dn_cycles(mode, size)
             } else {
                 4
@@ -2153,7 +2279,7 @@ fn dispatch_group_8<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             // Check for SBCD first (pattern: 1000 xxx1 0000 0yyy for Dn or 1000 xxx1 0000 1yyy for -(An))
             if op_mode == 4 && ea_mode == 0 {
                 // SBCD Dy, Dx (register to register)
-                cpu.exec_sbcd_rr(ea_reg as usize, reg)
+                cpu.exec_sbcd_rr(bus, ea_reg as usize, reg)
             } else if op_mode == 4 && ea_mode == 1 {
                 // SBCD -(Ay), -(Ax) (memory to memory)
                 cpu.exec_sbcd_mm(bus, ea_reg as usize, reg)
@@ -2241,6 +2367,9 @@ fn dispatch_group_9<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             let (result, _) = cpu.exec_sub(bus, size, src, dst);
             cpu.set_d(reg, (cpu.d(reg) & !size.mask()) | result);
             if cpu.cpu_type == CpuType::M68000 {
+                if !finish_m68000_alu_ea_dn_long_tail(cpu, bus, mode, size) {
+                    return 50;
+                }
                 cpu.alu_ea_dn_cycles(mode, size)
             } else {
                 4
@@ -2257,6 +2386,9 @@ fn dispatch_group_9<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             let src = cpu.read_ea(bus, mode, size);
             let legacy = cpu.exec_suba(bus, size, src, reg);
             if cpu.cpu_type == CpuType::M68000 {
+                if !finish_m68000_adda_suba_tail(cpu, bus, mode, size) {
+                    return 50;
+                }
                 cpu.adda_suba_cycles(mode, size)
             } else {
                 legacy
@@ -2270,6 +2402,11 @@ fn dispatch_group_9<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 let src = cpu.d(ea_reg as usize) & size.mask();
                 let dst = cpu.d(reg) & size.mask();
                 let result = cpu.exec_subx(size, src, dst);
+                if cpu.cpu_type == CpuType::M68000 {
+                    if !finish_m68000_addx_subx_register_tail(cpu, bus, size) {
+                        return 50;
+                    }
+                }
                 cpu.set_d(reg, (cpu.d(reg) & !size.mask()) | result);
                 if cpu.cpu_type == CpuType::M68000 && size == Size::Long {
                     8
@@ -2391,6 +2528,15 @@ fn dispatch_group_b<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             }
             let legacy = cpu.exec_cmp(size, src, cpu.d(reg));
             if cpu.cpu_type == CpuType::M68000 {
+                if size == Size::Long {
+                    cpu.top_up_prefetch(bus);
+                    cpu.ipl_poll_point(bus);
+                    if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
+                        return 50;
+                    }
+                    cpu.internal_cycles(2);
+                    cpu.flush_sync(bus);
+                }
                 cpu.cmp_ea_dn_cycles(mode, size)
             } else {
                 legacy
@@ -2410,6 +2556,9 @@ fn dispatch_group_b<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             }
             let legacy = cpu.exec_cmpa(size, src, reg);
             if cpu.cpu_type == CpuType::M68000 {
+                if !finish_m68000_tail_after_final_prefetch(cpu, bus, 2) {
+                    return 50;
+                }
                 cpu.cmpa_cycles(mode, size)
             } else {
                 legacy
@@ -2456,22 +2605,46 @@ fn dispatch_group_b<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                     return illegal_instruction(cpu, bus);
                 }
                 let mode = AddressingMode::decode(ea_mode, ea_reg).unwrap();
-                let ea = cpu.resolve_ea(bus, mode, size);
-                let dst = cpu.read_resolved_ea(bus, ea, size);
-                if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
-                    return 50;
-                }
-                let result = (cpu.d(reg) ^ dst) & size.mask();
-                // EOR Dn,<ea> polls IPL during the pre-writeback prefetch.
-                cpu.write_resolved_ea_np_poll(bus, ea, size, result);
-                if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
-                    return 50;
-                }
-                cpu.set_logic_flags(result, size);
-                if cpu.cpu_type == CpuType::M68000 {
+                if cpu.cpu_type == CpuType::M68000
+                    && let AddressingMode::DataDirect(dst_reg) = mode
+                {
+                    let dst_reg = dst_reg as usize;
+                    let result = (cpu.d(reg) ^ (cpu.d(dst_reg) & size.mask())) & size.mask();
+                    cpu.set_logic_flags(result, size);
+                    let internal_clocks = if size == Size::Long { 4 } else { 0 };
+                    if !finish_m68000_tail_after_final_prefetch(cpu, bus, internal_clocks) {
+                        return 50;
+                    }
+                    match size {
+                        Size::Byte => {
+                            cpu.dar[dst_reg] =
+                                (cpu.dar[dst_reg] & 0xffff_ff00) | (result & 0xff);
+                        }
+                        Size::Word => {
+                            cpu.dar[dst_reg] =
+                                (cpu.dar[dst_reg] & 0xffff_0000) | (result & 0xffff);
+                        }
+                        Size::Long => cpu.dar[dst_reg] = result,
+                    }
                     cpu.eor_cycles(mode, size)
                 } else {
-                    8
+                    let ea = cpu.resolve_ea(bus, mode, size);
+                    let dst = cpu.read_resolved_ea(bus, ea, size);
+                    if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
+                        return 50;
+                    }
+                    let result = (cpu.d(reg) ^ dst) & size.mask();
+                    // EOR Dn,<ea> polls IPL during the pre-writeback prefetch.
+                    cpu.write_resolved_ea_np_poll(bus, ea, size, result);
+                    if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
+                        return 50;
+                    }
+                    cpu.set_logic_flags(result, size);
+                    if cpu.cpu_type == CpuType::M68000 {
+                        cpu.eor_cycles(mode, size)
+                    } else {
+                        8
+                    }
                 }
             }
         }
@@ -2497,6 +2670,9 @@ fn dispatch_group_c<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             let (result, _) = cpu.exec_and(bus, size, src, cpu.d(reg));
             cpu.set_d(reg, (cpu.d(reg) & !size.mask()) | result);
             if cpu.cpu_type == CpuType::M68000 {
+                if !finish_m68000_alu_ea_dn_long_tail(cpu, bus, mode, size) {
+                    return 50;
+                }
                 cpu.alu_ea_dn_cycles(mode, size)
             } else {
                 4
@@ -2508,7 +2684,7 @@ fn dispatch_group_c<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 // ABCD
                 if ea_mode == 0 {
                     // ABCD Dy, Dx (register to register)
-                    cpu.exec_abcd_rr(ea_reg as usize, reg)
+                    cpu.exec_abcd_rr(bus, ea_reg as usize, reg)
                 } else {
                     // ABCD -(Ay), -(Ax) (memory to memory)
                     cpu.exec_abcd_mm(bus, ea_reg as usize, reg)
@@ -2518,7 +2694,7 @@ fn dispatch_group_c<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 let mode_field = (opcode >> 3) & 0x1F;
                 if mode_field == 0x08 || mode_field == 0x09 || mode_field == 0x11 {
                     // EXG: 0x08=Dx/Dy, 0x09=Ax/Ay, 0x11=Dx/Ay
-                    cpu.exec_exg(opcode)
+                    cpu.exec_exg(bus, opcode)
                 } else {
                     // AND Dn, <ea>: memory data alterable destinations only.
                     if ea_mode < 2 || !ea_data_alterable(ea_mode, ea_reg) {
@@ -2578,6 +2754,9 @@ fn dispatch_group_d<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             let (result, _) = cpu.exec_add(bus, size, src, dst);
             cpu.set_d(reg, (cpu.d(reg) & !size.mask()) | result);
             if cpu.cpu_type == CpuType::M68000 {
+                if !finish_m68000_alu_ea_dn_long_tail(cpu, bus, mode, size) {
+                    return 50;
+                }
                 cpu.alu_ea_dn_cycles(mode, size)
             } else {
                 4
@@ -2594,6 +2773,9 @@ fn dispatch_group_d<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
             let src = cpu.read_ea(bus, mode, size);
             let legacy = cpu.exec_adda(bus, size, src, reg);
             if cpu.cpu_type == CpuType::M68000 {
+                if !finish_m68000_adda_suba_tail(cpu, bus, mode, size) {
+                    return 50;
+                }
                 cpu.adda_suba_cycles(mode, size)
             } else {
                 legacy
@@ -2607,6 +2789,11 @@ fn dispatch_group_d<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
                 let src = cpu.d(ea_reg as usize) & size.mask();
                 let dst = cpu.d(reg) & size.mask();
                 let result = cpu.exec_addx(size, src, dst);
+                if cpu.cpu_type == CpuType::M68000 {
+                    if !finish_m68000_addx_subx_register_tail(cpu, bus, size) {
+                        return 50;
+                    }
+                }
                 cpu.set_d(reg, (cpu.d(reg) & !size.mask()) | result);
                 if cpu.cpu_type == CpuType::M68000 && size == Size::Long {
                     8
@@ -2833,6 +3020,64 @@ fn read_immediate<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, size: Size) -> 
     }
 }
 
+fn finish_m68000_alu_ea_dn_long_tail<B: AddressBus>(
+    cpu: &mut CpuCore,
+    bus: &mut B,
+    mode: AddressingMode,
+    size: Size,
+) -> bool {
+    if cpu.cpu_type != CpuType::M68000 || size != Size::Long {
+        return true;
+    }
+
+    let clocks = if CpuCore::ea_is_memory(mode) { 2 } else { 4 };
+    finish_m68000_tail_after_final_prefetch(cpu, bus, clocks)
+}
+
+fn finish_m68000_adda_suba_tail<B: AddressBus>(
+    cpu: &mut CpuCore,
+    bus: &mut B,
+    mode: AddressingMode,
+    size: Size,
+) -> bool {
+    let extra = size == Size::Word || !CpuCore::ea_is_memory(mode);
+    finish_m68000_tail_after_final_prefetch(cpu, bus, if extra { 4 } else { 2 })
+}
+
+fn finish_m68000_tail_after_final_prefetch<B: AddressBus>(
+    cpu: &mut CpuCore,
+    bus: &mut B,
+    internal_clocks: u32,
+) -> bool {
+    cpu.top_up_prefetch(bus);
+    cpu.ipl_poll_point(bus);
+    if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
+        return false;
+    }
+
+    cpu.internal_cycles(internal_clocks);
+    cpu.flush_sync(bus);
+    true
+}
+
+fn finish_m68000_addx_subx_register_tail<B: AddressBus>(
+    cpu: &mut CpuCore,
+    bus: &mut B,
+    size: Size,
+) -> bool {
+    cpu.top_up_prefetch(bus);
+    cpu.ipl_poll_point(bus);
+    if cpu.run_mode == RUN_MODE_BERR_AERR_RESET {
+        return false;
+    }
+
+    if size == Size::Long {
+        cpu.internal_cycles(4);
+        cpu.flush_sync(bus);
+    }
+    true
+}
+
 /// Return sentinel for illegal instruction interception.
 /// This function is called for undefined opcodes that don't match any pattern.
 fn illegal_instruction<B: AddressBus>(_cpu: &mut CpuCore, _bus: &mut B) -> i32 {
@@ -2851,4 +3096,533 @@ fn exception_1010(_cpu: &mut CpuCore, _opcode: u16) -> i32 {
 fn exception_1111(_cpu: &mut CpuCore, _opcode: u16) -> i32 {
     // Return sentinel to signal F-line interception
     super::decode::FLINE_TRAP_SENTINEL
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum Event {
+        ReadWord(u32),
+        WriteWord(u32, u16),
+        Sync(u32),
+        IplHold,
+    }
+
+    #[derive(Default)]
+    struct TraceBus {
+        events: Vec<Event>,
+        read_words: VecDeque<u16>,
+    }
+
+    impl TraceBus {
+        fn with_read_words(words: impl IntoIterator<Item = u16>) -> Self {
+            Self {
+                events: Vec::new(),
+                read_words: words.into_iter().collect(),
+            }
+        }
+    }
+
+    impl AddressBus for TraceBus {
+        fn read_byte(&mut self, _address: u32) -> u8 {
+            0
+        }
+
+        fn read_word(&mut self, address: u32) -> u16 {
+            self.events.push(Event::ReadWord(address));
+            self.read_words.pop_front().unwrap_or(0x4e71)
+        }
+
+        fn read_long(&mut self, _address: u32) -> u32 {
+            0
+        }
+
+        fn write_byte(&mut self, _address: u32, _value: u8) {}
+
+        fn write_word(&mut self, address: u32, value: u16) {
+            self.events.push(Event::WriteWord(address, value));
+        }
+
+        fn write_long(&mut self, address: u32, value: u32) {
+            self.write_word(address, (value >> 16) as u16);
+            self.write_word(address.wrapping_add(2), value as u16);
+        }
+
+        fn sync(&mut self, cpu_clocks: u32) {
+            self.events.push(Event::Sync(cpu_clocks));
+        }
+
+        fn ipl_hold_sample(&mut self) {
+            self.events.push(Event::IplHold);
+        }
+    }
+
+    fn m68000_cpu_with_one_prefetch_word() -> CpuCore {
+        let mut cpu = CpuCore::new();
+        cpu.set_cpu_type(CpuType::M68000);
+        cpu.pc = 0x2000;
+        cpu.prefetch_queue = [0x4e71, 0];
+        cpu.prefetch_count = 1;
+        cpu
+    }
+
+    fn m68010_cpu_with_one_prefetch_word() -> CpuCore {
+        let mut cpu = CpuCore::new();
+        cpu.set_cpu_type(CpuType::M68010);
+        cpu.pc = 0x2000;
+        cpu.prefetch_queue = [0x4e71, 0];
+        cpu.prefetch_count = 1;
+        cpu
+    }
+
+    #[test]
+    fn m68000_bcc_ff_displacement_is_short_minus_one() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.not_z_flag = 0;
+
+        let cycles = dispatch_group_6(&mut cpu, &mut bus, 0x66ff);
+
+        assert_eq!(cycles, 8);
+        assert_eq!(cpu.pc, 0x2000);
+        assert_eq!(cpu.prefetch_count, 1);
+        assert_eq!(bus.events, Vec::<Event>::new());
+
+        cpu.top_up_prefetch(&mut bus);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(bus.events, vec![Event::Sync(4), Event::ReadWord(0x2002)]);
+    }
+
+    #[test]
+    fn m68000_scc_true_data_register_prefetches_before_internal_sync() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0x1234_5600;
+
+        // ST D0
+        let cycles = dispatch_group_5(&mut cpu, &mut bus, 0x50c0);
+
+        assert_eq!(cycles, 6);
+        assert_eq!(cpu.dar[0], 0x1234_56ff);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(2)]
+        );
+    }
+
+    #[test]
+    fn m68000_dbcc_expired_discards_fallthrough_word_before_refill() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.prefetch_queue[0] = 0xfffc;
+        cpu.dar[0] = 0;
+
+        // DBF D0,-4 with an expired counter.
+        let cycles = dispatch_group_5(&mut cpu, &mut bus, 0x51c8);
+
+        assert_eq!(cycles, 14);
+        assert_eq!(cpu.pc, 0x2002);
+        assert_eq!(cpu.dar[0] & 0xffff, 0xffff);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(
+            bus.events,
+            vec![
+                Event::Sync(2),
+                Event::ReadWord(0x2002),
+                Event::ReadWord(0x2002),
+                Event::ReadWord(0x2004),
+            ]
+        );
+    }
+
+    #[test]
+    fn m68000_jsr_pushes_return_address_before_target_prefetch() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[8] = 0x4000;
+        cpu.dar[15] = 0x3000;
+
+        let cycles = dispatch_group_4(&mut cpu, &mut bus, 0x4e90);
+
+        assert_eq!(cycles, 16);
+        assert_eq!(cpu.pc, 0x4000);
+        assert_eq!(cpu.dar[15], 0x2ffc);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(
+            bus.events,
+            vec![
+                Event::WriteWord(0x2ffc, 0x0000),
+                Event::WriteWord(0x2ffe, 0x2000),
+                Event::ReadWord(0x4000),
+                Event::ReadWord(0x4002),
+            ]
+        );
+    }
+
+    #[test]
+    fn m68000_scc_false_data_register_polls_on_final_prefetch() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0x1234_56ff;
+
+        // SF D0
+        let cycles = dispatch_group_5(&mut cpu, &mut bus, 0x51c0);
+
+        assert_eq!(cycles, 4);
+        assert_eq!(cpu.dar[0], 0x1234_5600);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(bus.events, vec![Event::ReadWord(0x2002), Event::IplHold]);
+    }
+
+    #[test]
+    fn m68000_addi_long_data_register_prefetches_before_write() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::with_read_words([0x0001, 0x4e71, 0x4e71]);
+        cpu.prefetch_queue = [0x0000, 0];
+        cpu.dar[0] = 0x0000_0001;
+
+        // ADDI.L #1,D0
+        let cycles = dispatch_group_0(&mut cpu, &mut bus, 0x0680);
+
+        assert_eq!(cycles, 16);
+        assert_eq!(cpu.d(0), 0x0000_0002);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![
+                Event::ReadWord(0x2002),
+                Event::ReadWord(0x2004),
+                Event::ReadWord(0x2006),
+                Event::IplHold,
+                Event::Sync(4)
+            ]
+        );
+    }
+
+    #[test]
+    fn m68000_cmpi_long_data_register_prefetches_before_compare_sync() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::with_read_words([0x0001, 0x4e71, 0x4e71]);
+        cpu.prefetch_queue = [0x0000, 0];
+        cpu.dar[0] = 0x0000_0001;
+
+        // CMPI.L #1,D0
+        let cycles = dispatch_group_0(&mut cpu, &mut bus, 0x0c80);
+
+        assert_eq!(cycles, 14);
+        assert_eq!(cpu.not_z_flag, 0);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![
+                Event::ReadWord(0x2002),
+                Event::ReadWord(0x2004),
+                Event::ReadWord(0x2006),
+                Event::IplHold,
+                Event::Sync(2)
+            ]
+        );
+    }
+
+    #[test]
+    fn m68000_cmp_long_data_register_flushes_tail_after_final_prefetch() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0x0000_0001;
+        cpu.dar[1] = 0x0000_0001;
+
+        // CMP.L D1,D0
+        let cycles = dispatch_group_b(&mut cpu, &mut bus, 0xb081);
+
+        assert_eq!(cycles, 6);
+        assert_eq!(cpu.not_z_flag, 0);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(2)]
+        );
+    }
+
+    #[test]
+    fn m68000_sub_long_data_register_flushes_tail_after_final_prefetch() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0x0000_0003;
+        cpu.dar[1] = 0x0000_0001;
+
+        // SUB.L D1,D0
+        let cycles = dispatch_group_9(&mut cpu, &mut bus, 0x9081);
+
+        assert_eq!(cycles, 8);
+        assert_eq!(cpu.d(0), 0x0000_0002);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(4)]
+        );
+    }
+
+    #[test]
+    fn m68000_subx_long_data_register_flushes_tail_after_final_prefetch() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0x0000_0003;
+        cpu.dar[1] = 0x0000_0001;
+
+        // SUBX.L D1,D0
+        let cycles = dispatch_group_9(&mut cpu, &mut bus, 0x9181);
+
+        assert_eq!(cycles, 8);
+        assert_eq!(cpu.d(0), 0x0000_0002);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(4)]
+        );
+    }
+
+    #[test]
+    fn m68000_and_long_data_register_flushes_tail_after_final_prefetch() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0xff00_ff00;
+        cpu.dar[1] = 0x0f0f_0f0f;
+
+        // AND.L D1,D0
+        let cycles = dispatch_group_c(&mut cpu, &mut bus, 0xc081);
+
+        assert_eq!(cycles, 8);
+        assert_eq!(cpu.d(0), 0x0f00_0f00);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(4)]
+        );
+    }
+
+    #[test]
+    fn m68000_adda_word_register_source_flushes_tail_after_final_prefetch() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[1] = 0x0000_0002;
+        cpu.dar[8] = 0x0000_1000;
+
+        // ADDA.W D1,A0
+        let cycles = dispatch_group_d(&mut cpu, &mut bus, 0xd0c1);
+
+        assert_eq!(cycles, 8);
+        assert_eq!(cpu.a(0), 0x0000_1002);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(4)]
+        );
+    }
+
+    #[test]
+    fn m68000_addx_long_data_register_flushes_tail_after_final_prefetch() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0x0000_0001;
+        cpu.dar[1] = 0x0000_0002;
+
+        // ADDX.L D1,D0
+        let cycles = dispatch_group_d(&mut cpu, &mut bus, 0xd181);
+
+        assert_eq!(cycles, 8);
+        assert_eq!(cpu.d(0), 0x0000_0003);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(4)]
+        );
+    }
+
+    #[test]
+    fn m68000_cmpa_long_flushes_tail_after_final_prefetch() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[1] = 0x0000_1000;
+        cpu.dar[8] = 0x0000_1000;
+
+        // CMPA.L D1,A0
+        let cycles = dispatch_group_b(&mut cpu, &mut bus, 0xb1c1);
+
+        assert_eq!(cycles, 6);
+        assert_eq!(cpu.not_z_flag, 0);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(2)]
+        );
+    }
+
+    #[test]
+    fn m68000_eor_long_data_register_writes_after_final_prefetch() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0xff00_ff00;
+        cpu.dar[1] = 0x0f0f_0f0f;
+
+        // EOR.L D1,D0
+        let cycles = dispatch_group_b(&mut cpu, &mut bus, 0xb380);
+
+        assert_eq!(cycles, 8);
+        assert_eq!(cpu.d(0), 0xf00f_f00f);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(4)]
+        );
+    }
+
+    #[test]
+    fn m68000_move_sr_data_register_writes_after_final_prefetch() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.set_sr(0x270f);
+        cpu.dar[0] = 0xaaaa_0000;
+
+        // MOVE SR,D0
+        let cycles = dispatch_group_4(&mut cpu, &mut bus, 0x40c0);
+
+        assert_eq!(cycles, 6);
+        assert_eq!(cpu.d(0), 0xaaaa_270f);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(2)]
+        );
+    }
+
+    #[test]
+    fn m68010_move_sr_data_register_writes_after_final_prefetch() {
+        let mut cpu = m68010_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.set_sr(0x270f);
+        cpu.dar[0] = 0xaaaa_0000;
+
+        // MOVE SR,D0
+        let cycles = dispatch_group_4(&mut cpu, &mut bus, 0x40c0);
+
+        assert_eq!(cycles, 4);
+        assert_eq!(cpu.d(0), 0xaaaa_270f);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(bus.events, vec![Event::ReadWord(0x2002), Event::IplHold]);
+    }
+
+    #[test]
+    fn m68010_move_ccr_data_register_writes_after_final_prefetch() {
+        let mut cpu = m68010_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.set_ccr(0x0f);
+        cpu.dar[0] = 0xaaaa_0000;
+
+        // MOVE CCR,D0
+        let cycles = dispatch_group_4(&mut cpu, &mut bus, 0x42c0);
+
+        assert_eq!(cycles, 4);
+        assert_eq!(cpu.d(0), 0xaaaa_000f);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(bus.events, vec![Event::ReadWord(0x2002), Event::IplHold]);
+    }
+
+    #[test]
+    fn m68000_move_data_register_to_ccr_syncs_before_refill() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0x0000_000f;
+
+        // MOVE D0,CCR
+        let cycles = dispatch_group_4(&mut cpu, &mut bus, 0x44c0);
+
+        assert_eq!(cycles, 12);
+        assert_eq!(cpu.get_ccr(), 0x0f);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![
+                Event::Sync(4),
+                Event::ReadWord(0x2000),
+                Event::ReadWord(0x2002)
+            ]
+        );
+    }
+
+    #[test]
+    fn m68000_move_data_register_to_sr_syncs_before_refill() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0x0000_200f;
+
+        // MOVE D0,SR
+        let cycles = dispatch_group_4(&mut cpu, &mut bus, 0x46c0);
+
+        assert_eq!(cycles, 12);
+        assert_eq!(cpu.get_sr(), 0x200f);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![
+                Event::Sync(4),
+                Event::ReadWord(0x2000),
+                Event::ReadWord(0x2002)
+            ]
+        );
+    }
+
+    #[test]
+    fn m68000_move_an_to_usp_updates_after_final_prefetch() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[8] = 0x1234_5678;
+        cpu.sp[0] = 0xaaaa_bbbb;
+
+        // MOVE A0,USP
+        let cycles = dispatch_group_4(&mut cpu, &mut bus, 0x4e60);
+
+        assert_eq!(cycles, 4);
+        assert_eq!(cpu.get_usp(), 0x1234_5678);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(bus.events, vec![Event::ReadWord(0x2002), Event::IplHold]);
+    }
+
+    #[test]
+    fn m68000_move_usp_to_an_updates_after_final_prefetch() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.sp[0] = 0x1234_5678;
+        cpu.dar[8] = 0xaaaa_bbbb;
+
+        // MOVE USP,A0
+        let cycles = dispatch_group_4(&mut cpu, &mut bus, 0x4e68);
+
+        assert_eq!(cycles, 4);
+        assert_eq!(cpu.a(0), 0x1234_5678);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(bus.events, vec![Event::ReadWord(0x2002), Event::IplHold]);
+    }
 }

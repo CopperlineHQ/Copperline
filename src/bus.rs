@@ -180,15 +180,6 @@ impl CaprowDiag {
     }
 }
 
-fn parse_diag_u32(raw: &str) -> Option<u32> {
-    let raw = raw.trim();
-    if let Some(hex) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
-        u32::from_str_radix(hex, 16).ok()
-    } else {
-        raw.parse::<u32>().ok()
-    }
-}
-
 /// Cached COPPERLINE_DIAG_CAPROW setting (read once). Accepted forms:
 /// presence/`all` logs every captured row, `V` logs one beam line, and
 /// `START:END` logs an inclusive beam-line range. Checked on every bitplane
@@ -206,14 +197,14 @@ fn diag_caprow() -> Option<CaprowDiag> {
             });
         }
         if let Some((first, last)) = raw.split_once(':') {
-            let first_vpos = parse_diag_u32(first).unwrap_or(0);
-            let last_vpos = parse_diag_u32(last).unwrap_or(u32::MAX);
+            let first_vpos = crate::envcfg::parse_u32(first).unwrap_or(0);
+            let last_vpos = crate::envcfg::parse_u32(last).unwrap_or(u32::MAX);
             return Some(CaprowDiag {
                 first_vpos: first_vpos.min(last_vpos),
                 last_vpos: first_vpos.max(last_vpos),
             });
         }
-        parse_diag_u32(raw).map(|vpos| CaprowDiag {
+        crate::envcfg::parse_u32(raw).map(|vpos| CaprowDiag {
             first_vpos: vpos,
             last_vpos: vpos,
         })
@@ -239,6 +230,9 @@ const DMACON_SPREN: u16 = 1 << 5;
 const DMACON_BLTEN: u16 = 1 << 6;
 const DMACON_BPLEN: u16 = 1 << 8;
 const DMACON_BLTPRI: u16 = 1 << 10;
+const BLTCON0_USE_C: u16 = 1 << 9;
+const BLTCON0_USE_D: u16 = 1 << 8;
+const BLTCON1_LINE: u16 = 1 << 0;
 const BLTCON1_DOFF: u16 = 1 << 7;
 // The Copper cannot take (or hold) a bus slot on the last-but-two color
 // clock of the line: $E0 on short lines, $E1 on NTSC long lines (vAmiga
@@ -260,6 +254,17 @@ const RENDER_FRAMEBUFFER_WIDTH: i32 = FB_WIDTH as i32;
 // puts the hardware-verified standard $81 window edge (and the sprite
 // comparator positions, which share Denise's counter) at framebuffer x = 62.
 const RENDER_DIW_HSTART_FB0: i32 = 0x62;
+/// Denise's sprite serializer emits its first pixel one lo-res pixel after
+/// the horizontal comparator matches the SPRxPOS/CTL position: a sprite
+/// programmed at the same numeric position as a display-window edge starts
+/// one lo-res pixel to its right (vAmiga models this inside `sprhppos`).
+/// Measured with timing-test/ddfprobe-sprbar.adf against a 16-px ruler:
+/// FS-UAE and vAmiga both place the bar's left edge 2 framebuffer pixels
+/// left of the ruler line it straddles; without this delay Copperline
+/// placed it 4. Applies identically to DMA-loaded and manually armed
+/// sprites (both probes) and to the collision comparators, which sample
+/// the same serializer.
+pub(crate) const SPRITE_OUTPUT_DELAY_LORES: i32 = 1;
 // Standard DIWSTRT $81 is the visible window edge. The first standard
 // bitplane sample at DDFSTRT $38 is already one lowres native sample into the
 // fetched word, so the fetch/output phase is referenced one color clock earlier.
@@ -288,6 +293,7 @@ const AGNUS_WRITE_EFFECT_DELAY_CCK: u32 = 2;
 const BPLCON0_ECSENA: u16 = 1 << 0;
 const BPLCON0_SHRES: u16 = 1 << 6;
 const BPLCON3_BRDSPRT: u16 = 1 << 1;
+const BPLCON3_BRDRBLNK: u16 = 1 << 5;
 const BPLCON3_SPRES_MASK: u16 = 0x00C0;
 const BPLCON3_SPRES_LORES: u16 = 0x0040;
 const BPLCON3_SPRES_HIRES: u16 = 0x0080;
@@ -887,6 +893,12 @@ pub struct Bus {
     /// Transient bus-cycle state, rebuilt every access; not serialized.
     #[serde(skip)]
     cpu_custom_access_slot: Option<(u32, u32)>,
+    /// Beam position where the CPU requested the most recent custom-register
+    /// access, before waiting for fixed DMA, the Copper, or the blitter to
+    /// release a chip-bus slot. This feeds the CPU read/write landing traces.
+    /// Transient bus-cycle state, rebuilt every access; not serialized.
+    #[serde(skip)]
+    cpu_custom_request_slot: Option<(u32, u32)>,
     dbg_bpl_cck: Vec<u32>,
     dbg_slotmap: Vec<Vec<u8>>,
     dbg_slotmap_on: bool,
@@ -1049,6 +1061,85 @@ fn diag_cpu_writes_on() -> bool {
     use std::sync::OnceLock;
     static V: OnceLock<bool> = OnceLock::new();
     *V.get_or_init(|| crate::envcfg::flag("COPPERLINE_DIAG_CPU_WRITES"))
+}
+
+/// One-shot env flag for the CPU read-landing trace
+/// (`COPPERLINE_DIAG_CPU_READS=1`); see [`Bus::diag_cpu_read`].
+fn diag_cpu_reads_on() -> bool {
+    use std::sync::OnceLock;
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| crate::envcfg::flag("COPPERLINE_DIAG_CPU_READS"))
+}
+
+fn diag_cpu_read_matches(off: u16, size: usize) -> bool {
+    diag_cpu_reads_on()
+        && diag_cpu_bus_addr_matches(Some(custom_register_cpu_addr(u64::from(off))), size)
+}
+
+/// One-shot env flag for the CPU chip-bus access trace
+/// (`COPPERLINE_DIAG_CPU_BUS=1`); see [`Bus::diag_cpu_bus_access`].
+fn diag_cpu_bus_on() -> bool {
+    use std::sync::OnceLock;
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| crate::envcfg::flag("COPPERLINE_DIAG_CPU_BUS"))
+}
+
+fn cpu_bus_access_kind_name(kind: CpuBusAccessKind) -> &'static str {
+    match kind {
+        CpuBusAccessKind::Fetch => "fetch",
+        CpuBusAccessKind::Read => "read",
+        CpuBusAccessKind::Write => "write",
+        CpuBusAccessKind::Custom => "custom",
+    }
+}
+
+fn diag_cpu_bus_addr_ranges() -> &'static [(u32, u32)] {
+    use std::sync::OnceLock;
+    static V: OnceLock<Vec<(u32, u32)>> = OnceLock::new();
+    V.get_or_init(|| {
+        let Some(spec) = crate::envcfg::var("COPPERLINE_DIAG_CPU_BUS_ADDR") else {
+            return Vec::new();
+        };
+        spec.split(',')
+            .filter_map(|part| {
+                let part = part.trim();
+                if part.is_empty() {
+                    return None;
+                }
+                if let Some((lo, hi)) = part.split_once(':') {
+                    let lo = crate::envcfg::parse_u32(lo)?;
+                    let hi = crate::envcfg::parse_u32(hi)?;
+                    return Some((lo.min(hi), lo.max(hi)));
+                }
+                let addr = crate::envcfg::parse_u32(part)?;
+                Some((addr, addr))
+            })
+            .collect()
+    })
+    .as_slice()
+}
+
+fn diag_cpu_bus_addr_matches(addr: Option<u32>, size: usize) -> bool {
+    let ranges = diag_cpu_bus_addr_ranges();
+    if ranges.is_empty() {
+        return true;
+    }
+    let Some(addr) = addr else {
+        return false;
+    };
+    let last = addr.saturating_add(size.max(1) as u32 - 1);
+    ranges.iter().any(|&(lo, hi)| addr <= hi && last >= lo)
+}
+
+fn custom_register_cpu_addr(addr: u64) -> u32 {
+    const CUSTOM_BASE: u32 = 0x00DF_F000;
+    const CUSTOM_SIZE: u32 = 0x0000_1000;
+    let addr = addr as u32;
+    if addr < CUSTOM_SIZE {
+        CUSTOM_BASE + addr
+    } else {
+        addr
+    }
 }
 
 fn beam_write_source_name(source: BeamWriteSource) -> &'static str {
@@ -2078,6 +2169,7 @@ impl Bus {
             cpu_short_bus_cycle: false,
             cpu_bus_tail_carry: 0,
             cpu_custom_access_slot: None,
+            cpu_custom_request_slot: None,
             cpu_granted_chip_slots: 0,
             cpu_missed_chip_slots: 0,
             dbg_bpl_cck: vec![0; 340],
@@ -2486,15 +2578,15 @@ impl Bus {
     }
 
     pub fn reset_custom_chips_from_cpu_reset(&mut self) {
-        self.agnus.reset_copcon();
-        self.floppy.reset_external_drives();
-        // RESET asserts /RST on the expansion bus: boards drop back to
-        // unconfigured (Kickstart re-runs autoconfig on the way back up)
-        // and expansion devices see a hardware reset.
-        for dev in &mut self.devices {
-            crate::zorro_device::ZorroDevice::reset(dev);
-        }
-        self.mem.zorro.warm_reset();
+        // The CPU RESET instruction asserts the external reset line without
+        // resetting the CPU core or clearing RAM. Reuse the warm device reset
+        // so CIAs, custom chips, expansion boards, and /OVL all return to
+        // reset state, then restore the emulator's monotonic time coordinate.
+        let emulated_cck = self.emulated_cck;
+        let emulated_frames = self.emulated_frames;
+        self.reset_for_keyboard_reset();
+        self.emulated_cck = emulated_cck;
+        self.emulated_frames = emulated_frames;
     }
 
     fn effective_diwhigh(&self) -> DiwHigh {
@@ -2825,6 +2917,12 @@ impl Bus {
         self.ocs_same_line_diw_start_blocked_vpos = None;
         self.reset_frame_capture_buffers();
         self.current_frame_render_blocked = self.agnus.vpos != 0 || self.agnus.hpos != 0;
+    }
+
+    pub(crate) fn reset_transient_diagnostics_after_state_load(&mut self) {
+        // The code-path ring that consumes this alarm is debugger-local state,
+        // so a serialized pending alarm has no useful history after a restore.
+        self.diag_lowmem_blit = false;
     }
 
     pub fn emulated_seconds(&self) -> f64 {
@@ -3398,21 +3496,29 @@ impl Bus {
         } else {
             bus_slots_for_cpu_access(size)
         };
-        for _ in 0..slots {
+        let trace_cpu_bus = diag_cpu_bus_on() && diag_cpu_bus_addr_matches(addr, size);
+        for slot in 0..slots {
             self.flush_audio_before_audio_dma_slot();
+            let request_slot = (self.agnus.vpos, self.agnus.hpos);
+            if matches!(kind, CpuBusAccessKind::Custom) {
+                self.cpu_custom_request_slot = Some(request_slot);
+            }
+            let mut wait_cck = 0;
             while !self.cpu_can_use_current_slot() {
                 let (cck, tick) = self.advance_one_chip_bus_quantum(None);
+                wait_cck += cck;
                 self.note_cpu_missed_chip_bus_cycle();
                 self.record_slice_bus_advance(cck, tick);
                 self.flush_audio_before_audio_dma_slot();
             }
+            let grant_slot = (self.agnus.vpos, self.agnus.hpos);
             if matches!(kind, CpuBusAccessKind::Custom) {
                 // Remember the slot that carries a custom-register access:
                 // a register write's Denise/Agnus-effective position is
                 // referenced from this slot (see `record_render_write`),
                 // not from the beam position after the bus cycle's tail.
                 // A long-word access stores its second (low-word) slot.
-                self.cpu_custom_access_slot = Some((self.agnus.vpos, self.agnus.hpos));
+                self.cpu_custom_access_slot = Some(grant_slot);
             }
             let (cck, tick) = self.advance_one_chip_bus_quantum(Some(ChipBusOwner::Cpu));
             self.note_cpu_granted_chip_bus_cycle();
@@ -3436,9 +3542,70 @@ impl Bus {
                 let (cck, tick) = self.advance_one_chip_bus_quantum(None);
                 self.record_slice_bus_advance(cck, tick);
             }
+            if trace_cpu_bus {
+                self.diag_cpu_bus_access(
+                    kind,
+                    addr,
+                    size,
+                    slot + 1,
+                    slots,
+                    request_slot,
+                    grant_slot,
+                    wait_cck,
+                );
+            }
         }
         if self.cpu_short_bus_cycle && !wide_bus && matches!(kind, CpuBusAccessKind::Read) {
             self.bill_020_read_data_wait();
+        }
+    }
+
+    /// CPU chip-bus access trace (`COPPERLINE_DIAG_CPU_BUS=1`): logs each
+    /// requested CPU chip-bus slot, the slot granted by Agnus arbitration, and
+    /// the beam position after the bus cycle tail has elapsed.
+    fn diag_cpu_bus_access(
+        &self,
+        kind: CpuBusAccessKind,
+        addr: Option<u32>,
+        size: usize,
+        slot: u32,
+        slots: u32,
+        request_slot: (u32, u32),
+        grant_slot: (u32, u32),
+        wait_cck: u32,
+    ) {
+        let (rv, rh) = request_slot;
+        let (v, h) = grant_slot;
+        match addr {
+            Some(addr) => eprintln!(
+                "CPUBUS kind={} addr={:08x} size={} slot={}/{} rv={:03x} rh={:02x} v={:03x} h={:02x} wait={} ev={:03x} eh={:02x}",
+                cpu_bus_access_kind_name(kind),
+                addr,
+                size,
+                slot,
+                slots,
+                rv,
+                rh,
+                v,
+                h,
+                wait_cck,
+                self.agnus.vpos,
+                self.agnus.hpos
+            ),
+            None => eprintln!(
+                "CPUBUS kind={} addr=-------- size={} slot={}/{} rv={:03x} rh={:02x} v={:03x} h={:02x} wait={} ev={:03x} eh={:02x}",
+                cpu_bus_access_kind_name(kind),
+                size,
+                slot,
+                slots,
+                rv,
+                rh,
+                v,
+                h,
+                wait_cck,
+                self.agnus.vpos,
+                self.agnus.hpos
+            ),
         }
     }
 
@@ -3449,7 +3616,7 @@ impl Bus {
 
     fn note_cpu_missed_chip_bus_cycle(&mut self) {
         self.cpu_missed_chip_slots = self.cpu_missed_chip_slots.wrapping_add(1);
-        if self.blitter_slowdown_counter_enabled() {
+        if self.blitter_slowdown_counter_enabled() && self.blitter.current_slot_counts_for_bls() {
             self.blitter_slowdown_cpu_misses = self
                 .blitter_slowdown_cpu_misses
                 .saturating_add(1)
@@ -4344,7 +4511,11 @@ impl Bus {
     // -----------------------------------------------------------------
 
     pub fn custom_read(&mut self, addr: u64, size: usize) -> u64 {
-        self.grant_cpu_bus_access(size, CpuBusAccessKind::Custom);
+        self.grant_cpu_bus_access_at(
+            Some(custom_register_cpu_addr(addr)),
+            size,
+            CpuBusAccessKind::Custom,
+        );
         if self.cpu_short_bus_cycle && !self.aga_enabled() {
             self.bill_020_read_data_wait();
         }
@@ -4358,6 +4529,9 @@ impl Bus {
             1 => {
                 let val = self.read_custom_word(off & 0xFFE);
                 trace!("custom R8  off={:03X} val_word={:04X}", off, val);
+                if diag_cpu_read_matches(off & 0xFFE, size) {
+                    self.diag_cpu_read(off & 0xFFE, size, val as u64);
+                }
                 if addr & 1 == 0 {
                     (val >> 8) as u64
                 } else {
@@ -4372,14 +4546,48 @@ impl Bus {
                 let lo = self.read_custom_word(off.wrapping_add(2));
                 let v = ((hi as u64) << 16) | (lo as u64);
                 trace!("custom R32 off={:03X} val={:08X}", off, v);
+                if diag_cpu_read_matches(off, size) {
+                    self.diag_cpu_read(off, size, hi as u64);
+                }
+                if diag_cpu_read_matches(off.wrapping_add(2), size) {
+                    self.diag_cpu_read(off.wrapping_add(2), size, lo as u64);
+                }
                 v
             }
             _ => {
                 let val = self.read_custom_word(off);
                 trace!("custom R16 off={:03X} val={:04X}", off, val);
+                if diag_cpu_read_matches(off, size) {
+                    self.diag_cpu_read(off, size, val as u64);
+                }
                 val as u64
             }
         }
+    }
+
+    /// CPU custom-register read trace
+    /// (`COPPERLINE_DIAG_CPU_READS=1`): logs every CPU custom-register read's
+    /// granted chip-bus slot and the beam position after timed devices were
+    /// flushed for the value being returned.
+    fn diag_cpu_read(&self, off: u16, size: usize, value: u64) {
+        let (rv, rh) = self
+            .cpu_custom_request_slot
+            .unwrap_or((self.agnus.vpos, self.agnus.hpos));
+        let (v, h) = self
+            .cpu_custom_access_slot
+            .unwrap_or((self.agnus.vpos, self.agnus.hpos));
+        eprintln!(
+            "CPUPROBE PEEK rv={:03x} rh={:02x} v={:03x} h={:02x} reg={:03x} size={} val={:04x} ev={:03x} eh={:02x}",
+            rv,
+            rh,
+            v,
+            h,
+            off & 0x1FE,
+            size,
+            value,
+            self.agnus.vpos,
+            self.agnus.hpos
+        );
     }
 
     /// One-shot env flag for the CPU write-landing trace
@@ -4388,11 +4596,16 @@ impl Bus {
     /// effect applies at) to stderr, for cross-emulator comparison against
     /// vAmiga's `VAMIGA_CPU_PROBE` trace.
     fn diag_cpu_write(&self, off: u16, word: u16) {
+        let (rv, rh) = self
+            .cpu_custom_request_slot
+            .unwrap_or((self.agnus.vpos, self.agnus.hpos));
         let (v, h) = self
             .cpu_custom_access_slot
             .unwrap_or((self.agnus.vpos, self.agnus.hpos));
         eprintln!(
-            "CPUPROBE POKE v={:03x} h={:02x} reg={:03x} val={:04x} ev={:03x} eh={:02x}",
+            "CPUPROBE POKE rv={:03x} rh={:02x} v={:03x} h={:02x} reg={:03x} val={:04x} ev={:03x} eh={:02x}",
+            rv,
+            rh,
             v,
             h,
             off & 0x1FE,
@@ -4406,7 +4619,11 @@ impl Bus {
     /// should preempt the slice so the freshly-asserted IRQ can be
     /// delivered before agnus has a chance to OR in VERTB.
     pub fn custom_write(&mut self, addr: u64, size: usize, val: u64) -> bool {
-        self.grant_cpu_bus_access(size, CpuBusAccessKind::Custom);
+        self.grant_cpu_bus_access_at(
+            Some(custom_register_cpu_addr(addr)),
+            size,
+            CpuBusAccessKind::Custom,
+        );
         // Apply deferred device clocks before the write lands: registers such as
         // INTREQ/INTENA/ADKCON/DSKLEN/AUDxxx/SERDAT change timed-device state, so
         // the device must first be advanced to this color clock (e.g. so a
@@ -4456,6 +4673,21 @@ impl Bus {
                 }
                 self.write_custom_word_from(off, word, BeamWriteSource::Cpu)
             }
+        }
+    }
+
+    fn blitter_start_may_write_lowmem(&self) -> bool {
+        if self.blitter.bltdpt >= 0x1000 {
+            return false;
+        }
+        let con0 = self.blitter.bltcon0;
+        let con1 = self.blitter.bltcon1;
+        if con1 & BLTCON1_LINE != 0 {
+            // In line mode the store is gated by channel C, and the first
+            // pixel is written through BLTDPT before the D pointer follows C.
+            con0 & BLTCON0_USE_C != 0
+        } else {
+            con0 & BLTCON0_USE_D != 0 && con1 & BLTCON1_DOFF == 0
         }
     }
 
@@ -4849,11 +5081,23 @@ impl Bus {
             };
             if trigger {
                 self.dbg_slotmap_dumped = true;
+                let (range_start, range_end) = crate::envcfg::var("COPPERLINE_DIAG_SLOTMAP_RANGE")
+                    .and_then(|raw| {
+                        let (start, end) = raw.split_once(':')?;
+                        Some((
+                            start.trim().parse::<usize>().ok()?,
+                            end.trim().parse::<usize>().ok()?,
+                        ))
+                    })
+                    .filter(|&(start, end)| start <= end && end < self.dbg_slotmap.len())
+                    .unwrap_or((138, 198));
                 log::info!(
-                    "slotmap frame={} band v138..198 (hpos 0..=0xE2); codes R/B/S/D/A/C/L/P/.",
-                    self.emulated_frames
+                    "slotmap frame={} band v{}..{} (hpos 0..=0xE2); codes R/B/S/D/A/C/L/P/.",
+                    self.emulated_frames,
+                    range_start,
+                    range_end
                 );
-                for v in 138..=198usize {
+                for v in range_start..=range_end {
                     let row = &self.dbg_slotmap[v];
                     let line: String = row[..227.min(row.len())]
                         .iter()
@@ -5781,7 +6025,9 @@ fn live_manual_sprite_preserved_source_stop(
     if !(0x140..=0x17F).contains(&off) || (off - 0x140) & 0x0006 != 0 {
         return event_x;
     }
-    let base_x = (sprite_hstart_from_words(sprpos, sprctl) - RENDER_DIW_HSTART_FB0) * 2
+    let base_x = (sprite_hstart_from_words(sprpos, sprctl) + SPRITE_OUTPUT_DELAY_LORES
+        - RENDER_DIW_HSTART_FB0)
+        * 2
         + i32::from(shres && sprite_hsub_70ns_from_ctl(sprctl));
     if event_x >= base_x {
         query_x_stop
@@ -5866,7 +6112,8 @@ fn live_sprite_source_has_pixels(source: &LiveSpriteCollisionSource) -> bool {
 }
 
 fn live_sprite_source_framebuffer_bounds(source: &LiveSpriteCollisionSource) -> (i32, i32) {
-    let x_start = (source.hstart - RENDER_DIW_HSTART_FB0) * 2 + i32::from(source.hsub_70ns);
+    let x_start = (source.hstart + SPRITE_OUTPUT_DELAY_LORES - RENDER_DIW_HSTART_FB0) * 2
+        + i32::from(source.hsub_70ns);
     (x_start, x_start + 32)
 }
 
@@ -6073,7 +6320,8 @@ fn live_sprite_source_pixel_presence_with_control(
     control: LiveCollisionControl,
     x: i32,
 ) -> LiveSpritePixelPresence {
-    let sprite_base_x = (source.hstart - RENDER_DIW_HSTART_FB0) * 2 + i32::from(source.hsub_70ns);
+    let sprite_base_x = (source.hstart + SPRITE_OUTPUT_DELAY_LORES - RENDER_DIW_HSTART_FB0) * 2
+        + i32::from(source.hsub_70ns);
     let sprite_pixel_repeat = sprite_pixel_repeat_for_control(control.bplcon0, control.bplcon3);
     let offset = x - sprite_base_x;
     if offset < 0 {
@@ -6132,7 +6380,7 @@ fn live_sprite_visible_x_range_for_control(
     if x_start >= x_stop {
         return None;
     }
-    if control.bplcon0 & BPLCON0_ECSENA != 0 && control.bplcon3 & BPLCON3_BRDSPRT != 0 {
+    if live_border_sprite_enabled(control) {
         return Some((x_start, x_stop));
     }
     let display_enable_x = display_enable_x?;
@@ -6159,7 +6407,7 @@ fn live_sprite_pixel_inside_display_window(
     framebuffer_x: i32,
     display_enable_x: Option<i32>,
 ) -> bool {
-    if control.bplcon0 & BPLCON0_ECSENA != 0 && control.bplcon3 & BPLCON3_BRDSPRT != 0 {
+    if live_border_sprite_enabled(control) {
         return true;
     }
     if beam_y < 0 {
@@ -6177,6 +6425,12 @@ fn live_sprite_pixel_inside_display_window(
         control.diwhigh,
         framebuffer_x,
     )
+}
+
+fn live_border_sprite_enabled(control: LiveCollisionControl) -> bool {
+    control.bplcon0 & BPLCON0_ECSENA != 0
+        && control.bplcon3 & BPLCON3_BRDSPRT != 0
+        && control.bplcon3 & BPLCON3_BRDRBLNK == 0
 }
 
 fn sprite_sprite_clx_bit(a: usize, b: usize) -> u16 {

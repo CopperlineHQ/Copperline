@@ -76,3 +76,37 @@ pub fn var(name: &str) -> Option<String> {
         .get(OsStr::new(name))
         .and_then(|v| v.to_str().map(str::to_owned))
 }
+
+/// Parse a diagnostic integer value, accepting decimal or `0x`-prefixed hex.
+pub fn parse_u32(raw: &str) -> Option<u32> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if let Some(hex) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
+        u32::from_str_radix(hex, 16).ok()
+    } else {
+        raw.parse::<u32>().ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_u32;
+
+    #[test]
+    fn parse_u32_accepts_decimal_and_prefixed_hex() {
+        assert_eq!(parse_u32("42"), Some(42));
+        assert_eq!(parse_u32("0x2a"), Some(42));
+        assert_eq!(parse_u32("0X2A"), Some(42));
+        assert_eq!(parse_u32(" 0x2a "), Some(42));
+    }
+
+    #[test]
+    fn parse_u32_rejects_empty_and_invalid_values() {
+        assert_eq!(parse_u32(""), None);
+        assert_eq!(parse_u32("   "), None);
+        assert_eq!(parse_u32("2a"), None);
+        assert_eq!(parse_u32("0x"), None);
+    }
+}

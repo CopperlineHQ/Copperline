@@ -55,6 +55,16 @@ cannot change at runtime (see [](../internals/architecture)).
   single routine (e.g. a depacker loop) and, by excluding interrupt handlers,
   yields a contiguous deterministic stream that lines up across emulators.
 
+`COPPERLINE_DBG_CATCH=SPEC[,SPEC...]`
+: Exception catchpoints. `SPEC` can be a decimal vector number, `vec N`,
+  `irq N`, or `trap N`; for example, `COPPERLINE_DBG_CATCH="3,4,irq 3"`
+  reports address errors, illegal instructions, and VERTB interrupt entries.
+
+`COPPERLINE_DBG_CATCHALERT=1`
+: Resolve `ExecBase` once AmigaOS is valid and report when execution reaches
+  exec.library `Alert()`. Each hit includes the D7 alert code decoded with the
+  same Guru table used by the interactive debugger.
+
 `COPPERLINE_DBG_RAMDUMP=ADDR:LEN:FILE`
 : One-shot memory dump the first time the debugger activates: LEN bytes
   from hex address ADDR are written to FILE, read through the CPU's own
@@ -87,13 +97,16 @@ authoritative list. The most useful ones:
 
 | Variable | What it logs / does |
 |---|---|
-| `COPPERLINE_DIAG_SLOTMAP` | Per-colour-clock chip-bus owner map for a frame (`R`efresh, `B`itplane, `S`prite, `D`isk, `A`udio, `C`opper, b`L`itter, c`P`u, `.` idle); `COPPERLINE_DIAG_SLOTMAP_AT=SECS` picks the frame |
+| `COPPERLINE_DIAG_SLOTMAP` | Per-colour-clock chip-bus owner map for a frame (`R`efresh, `B`itplane, `S`prite, `D`isk, `A`udio, `C`opper, b`L`itter, c`P`u, `.` idle); `COPPERLINE_DIAG_SLOTMAP_AT=SECS` picks the frame and `COPPERLINE_DIAG_SLOTMAP_RANGE=START:END` picks printed beam rows |
 | `COPPERLINE_DIAG_BLT_SLOTS` | Blitter slot trace: one stderr line per blitter pipeline cycle (`BLTP frame vpos hpos TICK phase bus=0/1`), plus per-cck owner lines while a blit is in flight and `START`/`END` markers. Formatted for side-by-side diffing against a vAmiga build instrumented with the matching `VAMIGA_BLT_PROBE` hooks |
 | `COPPERLINE_DIAG_IPL` | CPU cycles spent per interrupt level |
 | `COPPERLINE_DIAG_PCSAMPLE` | Top-50 executed-PC histogram every 50 frames |
 | `COPPERLINE_DIAG_PCHIST` | Full PC history (with `COPPERLINE_DIAG_PCHIST_START=SECS`) |
 | `COPPERLINE_DIAG_COPLEN` | Copper list length (optionally at a given emulated time) |
 | `COPPERLINE_DIAG_COP_WRITES` | Every Copper MOVE's landing colour clock (beam position, register, value), for cross-emulator write-landing comparison against vAmiga's `VAMIGA_COP_PROBE` trace |
+| `COPPERLINE_DIAG_CPU_BUS` | CPU chip-bus access request/grant/end slots for fetch, chip/slow RAM, and custom space; optional `COPPERLINE_DIAG_CPU_BUS_ADDR=start:end[,start:end...]` filters by CPU-visible addresses including custom registers such as `0xdff01e` |
+| `COPPERLINE_DIAG_CPU_READS` | CPU custom-register reads' granted chip-bus slot and returned value, plus the post-flush beam position; honors the same optional `COPPERLINE_DIAG_CPU_BUS_ADDR` filter as the bus trace |
+| `COPPERLINE_DIAG_CPU_SYNC` | CPU-internal cycle trace at pre-access sync points and instruction-boundary catch-up; optional `COPPERLINE_DIAG_CPU_SYNC_PC=pc[,start:end...]` filters by instruction PC |
 | `COPPERLINE_DIAG_CPU_WRITES` | Every CPU custom-register write's granted chip-bus slot and effect beam position (register, value), the CPU-side companion of `COPPERLINE_DIAG_COP_WRITES` for comparison against vAmiga's `VAMIGA_CPU_PROBE` trace |
 | `COPPERLINE_DIAG_DISPLAY` | Display-register change log |
 | `COPPERLINE_DIAG_CAPROW` | `=all`, `=V`, or `=START:END`: per-line bitplane capture state at DDF start, including DMACON, current and DDF-anchor BPLCON0, FMODE/DIW/DDF, effective fetch window, unit/period/quantum, words/row, modulos, and all BPLxPTs -- separates wrong-pointer from wrong-decode display bugs |
@@ -103,13 +116,14 @@ authoritative list. The most useful ones:
 | `COPPERLINE_DIAG_FRAME_PIXELS` | `=BEAMY,X0,X1[,STEP]`: sample final framebuffer pixels after playfield, manual BPLDAT replay, sprites, and final blanking so post-decode overwrites can be isolated; cached after first use |
 | `COPPERLINE_DIAG_SPRITES` | Sprite DMA fetch/render log |
 | `COPPERLINE_DIAG_SPRCAP` | `=BEAMY` or `=all`: log every captured sprite DMA line (frame, channel, hstart, attach, FMODE width, data words) on one beam line or all of them; also logs SPRxPT writes and active stream retargets |
-| `COPPERLINE_DIAG_MANUAL_SPRITES` | `=BEAMY` or `=all`: log manually replayed sprite intervals, sprite register writes, BPLCON3/BPLCON4/FMODE/COLOR timing, sprite pointer alignment, and held wide-sprite words |
+| `COPPERLINE_DIAG_MANUAL_SPRITES` | `=BEAMY` or `=all`: log manually replayed sprite intervals, sprite register writes with CPU/Copper source, BPLCON3/BPLCON4/FMODE/COLOR timing, sprite pointer alignment, and held wide-sprite words |
 | `COPPERLINE_DIAG_SPRITE_PIXELS` | `=BEAMY[,STEP]`: sample non-transparent sprite pixels on one beam line, including sprite or attached-pair index, palette entry, sprite RGB, final framebuffer RGB, playfield mask, priority/display gates, DIW, BPLCON2, BPLCON3, and BPLCON4; STEP defaults to 32 framebuffer pixels |
+| `COPPERLINE_EXP_NO_SPRITE_RENDER` | With `--features internal-diagnostics`, skip sprite rendering in full-frame output while leaving playfield/manual-BPL rendering active; useful for isolating sprite-owned pixels in screenshots |
 | `COPPERLINE_DIAG_BLITREGS` | `=START:END` (emulated seconds): log the full blitter register set at every blit start (classic BLTSIZE and ECS BLTSIZH); pairs with `COPPERLINE_DUMP_BLITMEM` snapshots for offline blit verification |
 | `COPPERLINE_TRACE_BLITTER` | Path to a JSONL trace of blitter starts, forced finishes, DMACONR polls, and completion IRQ latches; start records include minterm/control registers, DMA/display context, FMODE, and all eight bitplane pointers |
 | `COPPERLINE_DIAG_DISK` | Disk DMA state changes (DSKLEN writes) |
 | `COPPERLINE_DIAG_AUDIO_NOTES` | Paula channel note on/off events |
-| `COPPERLINE_DIAG_CRASH` | CPU exception/halt conditions |
+| `COPPERLINE_DIAG_CRASH` | CPU empty-RAM execution and low-memory blitter write context |
 | `COPPERLINE_DIAG_GAYLE` / `COPPERLINE_DIAG_CDTV` | Gayle IDE / CDTV controller traffic |
 | `COPPERLINE_DIAG_A2091` | A2091 SCSI board register traffic (DMAC + WD33C93 accesses; the trace that brings up boot-ROM issues) |
 | `COPPERLINE_DIAG_CURSOR` | On every mouse-button press, log the raw host cursor position, the window's scale factor and inner size, the texture supersample factor, the `window_pos_to_pixel` result, and which region (status bar / display / none) the click resolved to; for diagnosing mouse capture on DPI scale changes or mixed-scale monitors |
@@ -168,7 +182,8 @@ together:
 3. Narrow in time with `COPPERLINE_DBG_AFTER`/`UNTIL`, watch the
    interesting word with `COPPERLINE_DBG_WATCH`.
 4. Check the bus: `COPPERLINE_DIAG_SLOTMAP_AT` to see who owned every
-   colour clock of the suspect frame.
+   colour clock of the suspect frame, with `COPPERLINE_DIAG_SLOTMAP_RANGE`
+   when only specific beam rows matter.
 5. Compare against real hardware with the `timing-test/` disk when the
    question is "is this operation too fast/slow".
 

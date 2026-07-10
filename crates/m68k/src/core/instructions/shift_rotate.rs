@@ -9,7 +9,8 @@ impl CpuCore {
     /// MC68000 register shift/rotate timing: a base cost plus 2 cycles per
     /// shift step. The long-operand base is 8 (vs 6 for byte/word); the core
     /// previously used 6 for all sizes, under-billing every long shift/rotate
-    /// by 2. Gated to the 68000 -- other CPU types keep their existing value.
+    /// by 2 on pre-68020 CPUs. Later CPU types keep their existing barrel-shifter
+    /// value.
     #[inline]
     fn shift_reg_cycles(&self, size: Size, count: u32) -> i32 {
         // 68020+ shifts go through the barrel shifter: cost is independent
@@ -18,11 +19,7 @@ impl CpuCore {
         if !matches!(self.cpu_type, CpuType::M68000 | CpuType::M68010) {
             return 6;
         }
-        let base = if self.cpu_type == CpuType::M68000 && size == Size::Long {
-            8
-        } else {
-            6
-        };
+        let base = if size == Size::Long { 8 } else { 6 };
         base + 2 * count as i32
     }
 
@@ -311,5 +308,31 @@ impl CpuCore {
         let msb = size.msb_mask();
         self.n_flag = if value & msb != 0 { 0x80 } else { 0 };
         self.not_z_flag = value & size.mask();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::types::CpuType;
+
+    #[test]
+    fn m68010_long_register_shift_uses_pre_68020_timing() {
+        let mut cpu = CpuCore::new();
+        cpu.set_cpu_type(CpuType::M68010);
+
+        let (_, cycles) = cpu.exec_lsl(Size::Long, 8, 0x0000_0001);
+
+        assert_eq!(cycles, 24);
+    }
+
+    #[test]
+    fn m68020_register_shift_uses_barrel_shifter_timing() {
+        let mut cpu = CpuCore::new();
+        cpu.set_cpu_type(CpuType::M68020);
+
+        let (_, cycles) = cpu.exec_lsl(Size::Long, 8, 0x0000_0001);
+
+        assert_eq!(cycles, 6);
     }
 }

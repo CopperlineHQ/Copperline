@@ -25,6 +25,10 @@
 //! COPPERLINE_DBG_TRACE_LO/HI = only trace instructions with LO <= pc <= HI, to
 //!                      isolate one routine (e.g. a depacker loop) from the rest
 //!                      of the system     e.g. LO="DE488" HI="DE578"
+//! COPPERLINE_DBG_CATCH = comma-separated exception catches. Entries are
+//!                      decimal vector numbers, or "irq N", "trap N", "vec N"
+//!                      e.g. "3,4,irq 3,trap 0"
+//! COPPERLINE_DBG_CATCHALERT = set to break at exec Alert() once ExecBase is valid
 //! COPPERLINE_DBG_AFTER   = emulated seconds before which the debugger is inert
 //! COPPERLINE_DBG_UNTIL   = emulated seconds after which the debugger is inert
 //! COPPERLINE_DBG_MAXHITS = stop reporting after this many hits (default 200)
@@ -901,6 +905,14 @@ pub struct Debugger {
     /// noise of the rest of the system. `lo`=0/`hi`=u32::MAX means no filter.
     pub trace_lo: u32,
     pub trace_hi: u32,
+    /// COPPERLINE_DBG_CATCH: exception vector numbers to report when the CPU
+    /// enters them. Decimal by default; `irq N` and `trap N` are accepted.
+    pub catches: Vec<u16>,
+    /// COPPERLINE_DBG_CATCHALERT: once ExecBase is valid, derive the exec
+    /// Alert() jump-table entry and report when execution reaches it.
+    pub catch_alert: bool,
+    /// Resolved Alert() jump-table PC. None until ExecBase becomes valid.
+    pub alert_break: Option<u32>,
     pub after_secs: f64,
     pub until_secs: f64,
     pub max_hits: u64,
@@ -928,11 +940,15 @@ impl Debugger {
         let trace = trace_full || crate::envcfg::flag("COPPERLINE_DBG_TRACE");
         let trace_lo = parse_hex_var("COPPERLINE_DBG_TRACE_LO").unwrap_or(0);
         let trace_hi = parse_hex_var("COPPERLINE_DBG_TRACE_HI").unwrap_or(u32::MAX);
+        let catches = parse_exception_catches("COPPERLINE_DBG_CATCH");
+        let catch_alert = crate::envcfg::flag("COPPERLINE_DBG_CATCHALERT");
         let copper_dump = parse_copper_dump("COPPERLINE_DBG_COPPER");
         let ram_dump = parse_ram_dump("COPPERLINE_DBG_RAMDUMP");
         if breakpoints.is_empty()
             && watches.is_empty()
             && !trace
+            && catches.is_empty()
+            && !catch_alert
             && copper_dump.is_none()
             && ram_dump.is_none()
         {
@@ -950,6 +966,9 @@ impl Debugger {
             trace_full,
             trace_lo,
             trace_hi,
+            catches,
+            catch_alert,
+            alert_break: None,
             after_secs: parse_f64("COPPERLINE_DBG_AFTER").unwrap_or(0.0),
             until_secs: parse_f64("COPPERLINE_DBG_UNTIL").unwrap_or(f64::INFINITY),
             max_hits: parse_u64("COPPERLINE_DBG_MAXHITS").unwrap_or(200),
@@ -963,11 +982,13 @@ impl Debugger {
             ram_dumped: false,
         };
         log::info!(
-            "debugger armed: breaks={:?} watches={} dumps={} trace={} window=[{},{}) max_hits={}",
+            "debugger armed: breaks={:?} catches={:?} catch_alert={} watches={} dumps={} trace={} window=[{},{}) max_hits={}",
             dbg.breakpoints
                 .iter()
                 .map(|pc| format!("{pc:#X}"))
                 .collect::<Vec<_>>(),
+            dbg.catches,
+            dbg.catch_alert,
             dbg.watches.len(),
             dbg.dumps.len(),
             dbg.trace,
@@ -985,7 +1006,11 @@ impl Debugger {
     }
 
     pub fn is_breakpoint(&self, pc: u32) -> bool {
-        self.breakpoints.contains(&pc)
+        self.breakpoints.contains(&pc) || self.alert_break == Some(pc)
+    }
+
+    pub fn catches_vector(&self, vector: u16) -> bool {
+        self.catches.contains(&vector)
     }
 
     /// The next screenshot path, advancing the sequence counter.
@@ -1023,6 +1048,52 @@ fn parse_addr_list(var: &str) -> Vec<u32> {
 
 fn parse_hex_var(var: &str) -> Option<u32> {
     crate::envcfg::var(var).and_then(|v| parse_hex(v.trim()))
+}
+
+fn parse_exception_catches(var: &str) -> Vec<u16> {
+    crate::envcfg::var(var)
+        .map(|v| v.split(',').filter_map(parse_exception_catch).collect())
+        .unwrap_or_default()
+}
+
+fn parse_exception_catch(item: &str) -> Option<u16> {
+    let item = item.trim();
+    if item.is_empty() {
+        return None;
+    }
+    let lower = item.to_ascii_lowercase();
+    let (kind, rest) = lower
+        .split_once(char::is_whitespace)
+        .map(|(kind, rest)| (kind, rest.trim()))
+        .unwrap_or_else(|| {
+            let split = lower
+                .find(|c: char| c.is_ascii_digit())
+                .unwrap_or(lower.len());
+            lower.split_at(split)
+        });
+    match kind {
+        "irq" => parse_u16_auto(rest)
+            .map(|level| 24 + level)
+            .filter(|v| (25..=31).contains(v)),
+        "trap" => parse_u16_auto(rest)
+            .map(|trap| 32 + trap)
+            .filter(|v| (32..=47).contains(v)),
+        "vec" | "vector" => parse_u16_auto(rest),
+        "" => parse_u16_auto(rest),
+        _ => parse_u16_auto(item),
+    }
+}
+
+fn parse_u16_auto(s: &str) -> Option<u16> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u16::from_str_radix(hex, 16).ok()
+    } else {
+        s.parse::<u16>().ok()
+    }
 }
 
 fn parse_watch_list(var: &str) -> Vec<Watch> {
@@ -1286,6 +1357,22 @@ mod tests {
             "{text}"
         );
         assert!(text.starts_with("recoverable"), "{text}");
+    }
+
+    #[test]
+    fn headless_exception_catch_parser_accepts_vector_irq_and_trap_forms() {
+        assert_eq!(parse_exception_catch("3"), Some(3));
+        assert_eq!(parse_exception_catch("0x0b"), Some(11));
+        assert_eq!(parse_exception_catch("vec 4"), Some(4));
+        assert_eq!(parse_exception_catch("vector 10"), Some(10));
+        assert_eq!(parse_exception_catch("irq 3"), Some(27));
+        assert_eq!(parse_exception_catch("irq3"), Some(27));
+        assert_eq!(parse_exception_catch("trap 0"), Some(32));
+        assert_eq!(parse_exception_catch("trap15"), Some(47));
+        assert_eq!(parse_exception_catch("irq 0"), None);
+        assert_eq!(parse_exception_catch("irq 8"), None);
+        assert_eq!(parse_exception_catch("trap 16"), None);
+        assert_eq!(parse_exception_catch("not-a-vector"), None);
     }
 
     #[test]

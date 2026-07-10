@@ -51,7 +51,7 @@ up the same way.
 ## What each row measures
 
 Most values are the elapsed CIA E-clock ticks for the test (8192 iterations
-for the fixed-count rows); rows 19, 20 and 22 are raw VHPOSR beam positions
+for the fixed-count rows); rows 19, 20, 22 and 27 are raw VHPOSR beam positions
 and rows 23-26 are beam color-clock counts. A faithful emulator models a
 fixed CPU-cycle / E-clock ratio, so identical CPU work should give identical
 ticks everywhere.
@@ -85,7 +85,7 @@ ticks everywhere.
 | 24 | beam cck while an A->D fill blit (272x22 DESC) runs, display off | `BLTCON0=$09F0 BLTCON1=$0012` |
 | 25 | beam cck while a 64-pixel line blit runs, display off | `BLTCON0=$bb4a BLTCON1=$0003` |
 | 26 | beam cck while the A->D fill (row 24) runs **with a 3-bitplane display + BLTPRI** | beam-vs-blitter race with active display DMA |
-| 27 | VHPOSR when the CPU first sees a COPPER-raised INTREQR.COPER, interrupts off | copper-vs-CPU phase (`vp`<<8 | `hpos`/2); `FFFFFFFF` if it never fired |
+| 27 | VHPOSR when the CPU first sees a COPPER-raised INTREQR.COPER, interrupts off | copper-vs-CPU phase (`vp`<<8 | `hpos`); `FFFFFFFF` if it never fired |
 | 28 | independent pair `move.w d2,d0` + `move.w d3,d1` x8192 | 68060 dual-issue: pairs into one clock; compare rows 4 and 29 |
 | 29 | RAW pair `move.w d2,d0` + `move.w d0,d1` x8192 | the dependency blocks dual issue |
 | 30 | `dbra`-only loop x8192, after the 68060 enable block | branch-cache folding: 1 clock/iteration on a 68060 |
@@ -110,7 +110,7 @@ captures welcome to calibrate the split.
 A copper list waits for line `$64`, MOVEs SET-COPER into INTREQ, then sleeps; the
 CPU (interrupts off) busy-polls INTREQR for the COPER bit and records the beam
 the moment it reads set. Decode it like rows 19/20 (high byte = vpos, low byte =
-hpos/2). This is the mechanism SANITY Roots II's copper-chunky "cherries" screen
+hpos in raw colour clocks). This is the mechanism SANITY Roots II's copper-chunky "cherries" screen
 (and similar 020 effects) runs on: a copper-raised interrupt the per-frame work
 spins on, then chases the beam to update the colour list before the copper reads
 it. The value is the copper WAIT-release + MOVE + INTREQR-visibility delay +
@@ -136,10 +136,12 @@ These rows found (and now guard) a real bug: Copperline originally reported
 rows 23-26 = 9944 / 15308 / 383 / 16842 cck, timing the row-24 A->D fill at
 ~2 cck/word where FS-UAE (10004 / 18364 / 344 / 25095) and vAmiga
 (10070 / 18350 / 346 / 25097) agree on ~3 cck/word -- the too-fast fill let the
-display fetch an unfinished buffer. The fill cadence was corrected on 2026-06-09;
-Copperline now reads ~9922 / 18339 / 317 / 25074 against the current FS-UAE
-reference 9908 / 18357 / 262 / 25208, matching rows 23-24 and the row-26
-display-DMA contention.
+display fetch an unfinished buffer. The fill cadence was corrected on 2026-06-09.
+Later fixed-DMA, BLS-pressure, VHPOSR, and line-startup fixes retimed the same
+rows again: Copperline now reads `10002 / 18362 / 346 / 25091`
+(`0x2712 / 0x47BA / 0x015A / 0x6203`). Rows 23, 24 and 26 are now within a
+few colour clocks of the FS-UAE/real references; row 25 matches the vAmiga
+line-mode reference and is within a couple of colour clocks of FS-UAE.
 
 Row 31 found (and now guards) a second real bug (2026-07-07). On the plain 68000
 Copperline matches vAmiga on every other row -- including the CPU-vs-6-bitplane
@@ -152,11 +154,14 @@ internal clocks left those internal clocks *deferred* past the instruction
 boundary (billed at the next instruction's first bus access), which mistimed the
 CPU-vs-bitplane-DMA contention and roughly doubled the beam cost of a DIV run
 mid-fetch. Flushing the internal clocks at the DIV boundary (Moira runs `SYNC`
-immediately after `prefetch<POLL>`) fixed it: row 31 8722 -> 4820 vs vAmiga 4790,
-with rows 23-26 and the CPU/blitter rows unchanged. This was TEK Rampage's Ellis
-scene going saturated (EHB half-bright dropped) and its Mirror scene crashing --
-the DIV-heavy per-frame math patches the copper list while the 6-plane screen
-fetches, so the doubled DIV cost let the CPU fall behind the beam.
+immediately after `prefetch<POLL>`) fixed it: row 31 8722 -> 4820. The later
+BLS-pressure fix moved the row to 4786, and placing MULU/MULS internal clocks
+after their final prefetch moved the helper-internal multiply timing to 4794,
+close to vAmiga's 4790 reference. This
+was TEK Rampage's Ellis scene going saturated (EHB half-bright dropped) and its
+Mirror scene crashing -- the DIV-heavy per-frame math patches the copper list
+while the 6-plane screen fetches, so the doubled DIV cost let the CPU fall behind
+the beam.
 (`getbeam` also had a latent bug -- it left the upper word of `d2` dirty across
 the `add.l d2,d0`, so a caller with a non-zero high word in `d2` corrupted the
 reading; harmless for rows 23-26, fixed for row 31.)
@@ -191,7 +196,7 @@ Rows 19/20 measure handler *entry* = the VERTB raise position **plus** the 68000
 exception-entry latency. **Row 22 isolates the raise alone**: with interrupts
 disabled it clears VERTB, then polls `INTREQR` in a tight loop and records the
 beam (VHPOSR) the moment bit 5 reads set -- no exception in the path. Decode it
-like rows 19/20 (high byte = vpos, low byte = hpos/2).
+like rows 19/20 (high byte = vpos, low byte = hpos in raw colour clocks).
 
 This disambiguates *where* a row-19 difference comes from:
 - If **row 22 differs across emulators the same way row 19 does**, the VERTB
@@ -199,25 +204,20 @@ This disambiguates *where* a row-19 difference comes from:
 - If **row 22 matches but row 19 does not**, the raise is the same and the
   difference is **68000 interrupt latency** instead (a CPU-core matter).
 
-**Outcome (2026-06-09):** row 22 matches across all three emulators
-(Copperline `0x0008`, vAmiga `0x0007`, FS-UAE `0x000D` -- all vpos 0, a few cck
-into the line), so the VERTB **raise** position is the same everywhere. The
-row-19 entry difference was therefore **68000 interrupt-recognition latency**,
-which Copperline was missing and now models (65 cck by default; override or
-disable with `COPPERLINE_IRQ_LATENCY_CCK`). One test bug was also fixed along
-the way: an earlier revision of this row read VHPOSR in the line-start
-vpos-read-delay window at the frame wrap and reported a bogus ~`0x3870`
-(vpos 56) on Copperline; the test now samples the beam only after the VERTB bit
-reads set, which avoids that window.
+**Current outcome (2026-07-08):** Copperline row 22 reads `0x0020`, within two
+colour clocks of the FS-UAE/real-A500 reference `0x0022` after the fixed-DMA,
+BLS-pressure and VHPOSR readback-lead fixes. The remaining difference is now a
+small CPU-poll or frame-start VERTB phase residual, not the older large
+interrupt-recognition-latency error. An earlier revision of this row also read
+VHPOSR in the line-start vpos-read-delay window at the frame wrap and reported a
+bogus ~`0x3870` (vpos 56) on Copperline; the test now samples the beam only after
+the VERTB bit reads set, which avoids that window.
 
 **Decoding rows 19/20:** the value is a raw VHPOSR word -- the **high byte is the
-vpos (raster line)** and the **low byte is hpos/2** (so hpos = low byte x 2; one
-unit ~= 2 color clocks). With the interrupt-recognition-latency model in place,
-Copperline reports row 19 = `0x003A` (line 0, hpos ~116), matching vAmiga
-(`0x0039`) and FS-UAE (`0x003D`). Row 20 reads ~`0x0154` on Copperline vs
-`0x0143`/`0x0147` on the references -- a known ~25 cck residual: the model
-restarts the full latency for the SOFT interrupt raised mid-handler, where real
-hardware overlaps it with the VERTB handler. Compare the raw words across
+vpos (raster line)** and the **low byte is hpos in colour clocks**. With the
+current interrupt-recognition and VHPOSR readback models, Copperline reports
+row 19 = `0x003D` and row 20 = `0x0147`, matching the FS-UAE reference and
+landing a few colour clocks after vAmiga. Compare the raw words across
 emulators: a higher row 19/20 means that emulator advances the beam further
 across the interrupt + task-switch path -- enough extra latency can push a
 per-frame loop top late and trip its frame skip.
@@ -247,3 +247,34 @@ regions are 2 cck/word, so on real hardware rows 7, 13 and 14 are identical. If 
 emulator times code differently depending on whether it runs from slow or chip
 RAM, rows 13 and 14 diverge -- which matters for any program (like a demo) that
 runs from slow/trapdoor RAM.
+
+## CI golden renders (`timing-test/golden/`)
+
+`tests/probe_golden.rs` runs the timing test and the stable display probes
+in CI on every push: each probe's committed `.bin` is wrapped into a
+bootable ADF, booted on the bundled AROS ROM (the probes take over the
+machine, so the settled frame is ROM-independent -- verified byte-identical
+to a Kickstart 1.3 boot), captured as a raw screenshot at a fixed emulated
+time, and compared pixel-for-pixel against the reference render committed
+under `golden/`. The emulator core is deterministic, so any pixel change is
+a real behaviour change.
+
+Covered: `timing-test` (all 32 timing rows as rendered hex), `ddfprobe`
+(DDF placement sweep), `ddfprobe-diw1` (DIW edge), `ddfprobe-toggle`
+(per-line BPLCON0 toggling), `ddfprobe-cc`/`-cc3`/`-cc4` (raced
+copper-chunky COLOR00 trains vs bitplane fetch), and `ddfprobe-sprbar`/
+`-sprbar2` (manual/DMA sprite serializer positions -- the gen-x masking-bar
+regression). Excluded by design: `ddfprobe-cc5`/`-cc6` sit on deliberate
+race boundaries and would flip on any unrelated timing change, and
+`ddfprobe-cc7` replays a chip-RAM dump of a running demo that is not
+committed.
+
+When a hardware-model fix intentionally moves calibrated output, re-bless
+and review the render diff as part of the change:
+
+```sh
+COPPERLINE_BLESS_GOLDEN=1 cargo test --release --test probe_golden
+```
+
+On a mismatch, CI uploads the actual renders and diff masks
+(`target/probe-golden/`) as workflow artifacts.

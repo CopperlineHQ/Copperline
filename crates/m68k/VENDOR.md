@@ -32,7 +32,7 @@ no source `use m68k::...` changed). Two reasons, both from issue #57:
   and bus `transactions` (upstream parsed but discarded them) and add
   `cycle_gap_report` (an `#[ignore]`d measurement of the cycle / bus-access gap).
 - `src/core/instructions/shift_rotate.rs`: long register shift/rotate base is 8
-  (was 6), gated to the 68000.
+  (was 6), gated to the 68000/68010 prefetch-queue CPUs.
 - Part D (cycle counts): per-instruction-class cycle-total fixes across
   `decode.rs` / `instructions/*.rs`, gated to the 68000 (48.3% -> 0.9%
   mismatch, totals ratio 0.999).
@@ -97,7 +97,7 @@ actively regress the Part D/E cycle-exact MC68000 timing:
   relies on for `MOVE.L (An)+,(Am)+`. Not merged.
 - `Optimize register shift traces` (61bf70c): semantics-preserving closed-form
   rewrite of the ASR/ROL/ROR loops, but keeps the upstream base-6 cycle cost
-  (this fork uses base 8 for long register shifts, gated to the 68000) and also
+  (this fork uses base 8 for long register shifts on the 68000/68010) and also
   edits `op_cache.rs`/`trace_jit.rs`. No correctness fix; not merged.
 - The rest (`Fast-path extension control-flow steps` db11812 and its same-day
   revert 030b279, `Avoid duplicate simple-op decode fallback` f46c9e7, the two

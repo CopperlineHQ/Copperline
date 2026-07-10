@@ -2,13 +2,55 @@
 //!
 //! ADD, ADDA, ADDQ, ADDX, SUB, SUBA, SUBQ, SUBX, CMP, CMPA, NEG, NEGX, CLR, EXT
 
-use crate::core::cpu::{CFLAG_SET, CpuCore, VFLAG_SET};
+use crate::core::cpu::{CpuCore, CFLAG_SET, VFLAG_SET};
 use crate::core::ea::AddressingMode;
 use crate::core::execute::RUN_MODE_BERR_AERR_RESET;
 use crate::core::memory::AddressBus;
-use crate::core::types::Size;
+use crate::core::types::{CpuType, Size};
 
 impl CpuCore {
+    fn write_data_reg_sized(&mut self, reg: usize, size: Size, value: u32) {
+        match size {
+            Size::Byte => self.dar[reg] = (self.dar[reg] & 0xFFFF_FF00) | (value & 0xFF),
+            Size::Word => self.dar[reg] = (self.dar[reg] & 0xFFFF_0000) | (value & 0xFFFF),
+            Size::Long => self.dar[reg] = value,
+        }
+    }
+
+    fn finish_m68000_register_unary_rmw<B: AddressBus>(
+        &mut self,
+        bus: &mut B,
+        reg: usize,
+        size: Size,
+        value: u32,
+    ) -> i32 {
+        // 68000 CLR/NEG/NEGX/NOT to Dn performs the final prefetch, samples
+        // IPL on that prefetch, then writes the register. Long forms have two
+        // trailing internal clocks before the register update.
+        self.top_up_prefetch(bus);
+        self.ipl_poll_point(bus);
+        if size == Size::Long {
+            self.internal_cycles(2);
+            self.flush_sync(bus);
+        }
+        self.write_data_reg_sized(reg, size, value);
+        if size == Size::Long { 6 } else { 4 }
+    }
+
+    fn finish_m68000_register_quickop<B: AddressBus>(&mut self, bus: &mut B, internal_clocks: u32) {
+        if self.cpu_type != CpuType::M68000 {
+            return;
+        }
+
+        // 68000 ADDQ/SUBQ to Dn/An performs the final prefetch, samples IPL
+        // on that prefetch, then completes the register update after any
+        // trailing internal clocks.
+        self.top_up_prefetch(bus);
+        self.ipl_poll_point(bus);
+        self.internal_cycles(internal_clocks);
+        self.flush_sync(bus);
+    }
+
     /// Execute ADD instruction.
     ///
     /// ADD <ea>, Dn  or  ADD Dn, <ea>
@@ -55,8 +97,30 @@ impl CpuCore {
         // For address register, no flags affected
         if let AddressingMode::AddressDirect(reg) = mode {
             let reg = reg as usize;
-            self.set_a(reg, self.a(reg).wrapping_add(data));
+            let result = self.a(reg).wrapping_add(data);
+            if self.cpu_type == CpuType::M68000 {
+                self.finish_m68000_register_quickop(bus, 4);
+                self.set_a(reg, result);
+                return 8;
+            }
+            self.set_a(reg, result);
             return 4;
+        }
+
+        if let AddressingMode::DataDirect(reg) = mode {
+            let reg = reg as usize;
+            let dst = self.d(reg);
+            let (result, _) = self.exec_add::<B>(bus, size, data, dst);
+            if self.cpu_type == CpuType::M68000 {
+                let internal_clocks = if size == Size::Long { 4 } else { 0 };
+                self.finish_m68000_register_quickop(bus, internal_clocks);
+            }
+            self.write_data_reg_sized(reg, size, result);
+            return if self.cpu_type == CpuType::M68000 && size == Size::Long {
+                8
+            } else {
+                4
+            };
         }
 
         // Resolve EA once: postinc/predec have side effects and must not be applied twice.
@@ -136,8 +200,30 @@ impl CpuCore {
         // For address register, no flags affected
         if let AddressingMode::AddressDirect(reg) = mode {
             let reg = reg as usize;
-            self.set_a(reg, self.a(reg).wrapping_sub(data));
+            let result = self.a(reg).wrapping_sub(data);
+            if self.cpu_type == CpuType::M68000 {
+                self.finish_m68000_register_quickop(bus, 4);
+                self.set_a(reg, result);
+                return 8;
+            }
+            self.set_a(reg, result);
             return 4;
+        }
+
+        if let AddressingMode::DataDirect(reg) = mode {
+            let reg = reg as usize;
+            let dst = self.d(reg);
+            let (result, _) = self.exec_sub::<B>(bus, size, data, dst);
+            if self.cpu_type == CpuType::M68000 {
+                let internal_clocks = if size == Size::Long { 4 } else { 0 };
+                self.finish_m68000_register_quickop(bus, internal_clocks);
+            }
+            self.write_data_reg_sized(reg, size, result);
+            return if self.cpu_type == CpuType::M68000 && size == Size::Long {
+                8
+            } else {
+                4
+            };
         }
 
         // Resolve EA once: postinc/predec have side effects and must not be applied twice.
@@ -208,6 +294,17 @@ impl CpuCore {
         size: Size,
         mode: AddressingMode,
     ) -> i32 {
+        if self.cpu_type == CpuType::M68000 {
+            if let AddressingMode::DataDirect(reg) = mode {
+                let cycles = self.finish_m68000_register_unary_rmw(bus, reg as usize, size, 0);
+                self.n_flag = 0;
+                self.not_z_flag = 0;
+                self.v_flag = 0;
+                self.c_flag = 0;
+                return cycles;
+            }
+        }
+
         let ea = self.resolve_ea(bus, mode, size);
         if self.run_mode == RUN_MODE_BERR_AERR_RESET {
             return 50;
@@ -239,6 +336,18 @@ impl CpuCore {
         size: Size,
         mode: AddressingMode,
     ) -> i32 {
+        if self.cpu_type == CpuType::M68000 {
+            if let AddressingMode::DataDirect(reg) = mode {
+                let reg = reg as usize;
+                let src = self.d(reg) & size.mask();
+                let result = 0u32.wrapping_sub(src);
+                let cycles =
+                    self.finish_m68000_register_unary_rmw(bus, reg, size, result & size.mask());
+                self.set_sub_flags(src, 0, result, size);
+                return cycles;
+            }
+        }
+
         let ea = self.resolve_ea(bus, mode, size);
         let src = self.read_resolved_ea(bus, ea, size);
         if self.run_mode == RUN_MODE_BERR_AERR_RESET {
@@ -262,6 +371,15 @@ impl CpuCore {
         size: Size,
         mode: AddressingMode,
     ) -> i32 {
+        if self.cpu_type == CpuType::M68000 {
+            if let AddressingMode::DataDirect(reg) = mode {
+                let reg = reg as usize;
+                let src = self.d(reg) & size.mask();
+                let result = self.exec_subx(size, src, 0);
+                return self.finish_m68000_register_unary_rmw(bus, reg, size, result);
+            }
+        }
+
         let ea = self.resolve_ea(bus, mode, size);
         let src = self.read_resolved_ea(bus, ea, size);
         if self.run_mode == RUN_MODE_BERR_AERR_RESET {
@@ -283,6 +401,17 @@ impl CpuCore {
         size: Size,
         mode: AddressingMode,
     ) -> i32 {
+        if self.cpu_type == CpuType::M68000 {
+            if let AddressingMode::DataDirect(reg) = mode {
+                let reg = reg as usize;
+                let src = self.d(reg) & size.mask();
+                let result = !src & size.mask();
+                let cycles = self.finish_m68000_register_unary_rmw(bus, reg, size, result);
+                self.set_logic_flags(result, size);
+                return cycles;
+            }
+        }
+
         let ea = self.resolve_ea(bus, mode, size);
         let src = self.read_resolved_ea(bus, ea, size);
         if self.run_mode == RUN_MODE_BERR_AERR_RESET {
@@ -342,34 +471,36 @@ impl CpuCore {
     /// Set flags for ADD operation.
     /// Musashi uses: CFLAG_8(res) = res (bit 8), CFLAG_16(res) = res>>8 (bit 16)
     /// For 32-bit: CFLAG_ADD_32(S, D, R) = ((S & D) | (~R & (S | D))) >> 23
+    ///
+    /// Operands are masked to `size` here, like `set_sub_flags`, so callers
+    /// may pass full register values: with unmasked operands the byte/word
+    /// carry (a raw bit above the operation width) and the V comparison
+    /// would see the register's upper bits.
     pub fn set_add_flags(&mut self, src: u32, dst: u32, result: u32, size: Size) {
         let msb = size.msb_mask();
         let mask = size.mask();
+        let s = src & mask;
+        let d = dst & mask;
+        let r = result & mask;
 
         // N flag: set if MSB of result is set
-        self.n_flag = if result & msb != 0 { 0x80 } else { 0 };
+        self.n_flag = if r & msb != 0 { 0x80 } else { 0 };
 
         // Z flag: set if result (masked) is zero
-        self.not_z_flag = result & mask;
+        self.not_z_flag = r;
 
         // V flag: overflow if both operands have same sign and result has different sign
         // Musashi: VFLAG_ADD = (src ^ result) & (dst ^ result)
-        let v = (src ^ result) & (dst ^ result) & msb;
+        let v = (s ^ r) & (d ^ r) & msb;
         self.v_flag = if v != 0 { 0x80 } else { 0 };
 
-        // C flag: carry out of the MSB
-        // For 32-bit, we need special handling since we can't get bit 32
-        // Musashi: CFLAG_ADD_32 = ((S & D) | (~R & (S | D))) >> 23
+        // C flag: carry out of the MSB. Byte/word recompute the sum of the
+        // masked operands (the masked result no longer carries the bit);
+        // 32-bit uses Musashi's formula since bit 32 is unreachable.
         let carry = match size {
-            Size::Byte => result & 0x100 != 0,
-            Size::Word => result & 0x10000 != 0,
-            Size::Long => {
-                // Can't get bit 32, use Musashi's formula
-                let s = src;
-                let d = dst;
-                let r = result;
-                ((s & d) | (!r & (s | d))) & 0x80000000 != 0
-            }
+            Size::Byte => (s + d) & 0x100 != 0,
+            Size::Word => (s + d) & 0x10000 != 0,
+            Size::Long => ((s & d) | (!r & (s | d))) & 0x80000000 != 0,
         };
         self.c_flag = if carry { CFLAG_SET } else { 0 };
         self.x_flag = self.c_flag;
@@ -513,11 +644,29 @@ impl CpuCore {
         self.v_flag = 0;
         self.c_flag = 0;
 
-        if val < 0 || val > limit {
-            // The failed comparison plus exception decision precede the
-            // first stack write: 8 internal clocks for trap-on-too-big,
-            // 10 for trap-on-negative (the upper-bound check runs first).
-            self.internal_cycles(if val < 0 { 10 } else { 8 });
+        if val > limit {
+            // The 68000 performs the upper-bound comparison first. This
+            // includes negative Dn values that are still greater than a
+            // negative bound, and uses the shorter CHK exception path.
+            self.internal_cycles(8);
+            return self.exception_chk(bus) - 2;
+        }
+
+        if val < 0 {
+            // Only values that pass the upper-bound comparison reach the
+            // lower-bound check. On the 68000 that first signed subtraction
+            // still leaves a timing trace: if `Dn - bound` overflowed, the
+            // exception frame starts on the same short path as an upper-bound
+            // trap even though the architectural trap condition is `Dn < 0`.
+            if self.cpu_type == CpuType::M68000
+                && size == Size::Word
+                && (val as i16).checked_sub(limit as i16).is_none()
+            {
+                self.internal_cycles(8);
+                return self.exception_chk(bus) - 2;
+            }
+
+            self.internal_cycles(10);
             return self.exception_chk(bus);
         }
 
@@ -525,5 +674,230 @@ impl CpuCore {
         // before the final prefetch.
         self.internal_cycles(6);
         10
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::ea::AddressingMode;
+    use crate::core::memory::AddressBus;
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum Event {
+        ReadWord(u32),
+        WriteWord(u32, u16),
+        Sync(u32),
+        IplHold,
+    }
+
+    #[derive(Default)]
+    struct TraceBus {
+        events: Vec<Event>,
+    }
+
+    impl AddressBus for TraceBus {
+        fn read_byte(&mut self, _address: u32) -> u8 {
+            0
+        }
+
+        fn read_word(&mut self, address: u32) -> u16 {
+            self.events.push(Event::ReadWord(address));
+            0x4e71
+        }
+
+        fn read_long(&mut self, _address: u32) -> u32 {
+            0
+        }
+
+        fn write_byte(&mut self, _address: u32, _value: u8) {}
+
+        fn write_word(&mut self, address: u32, value: u16) {
+            self.events.push(Event::WriteWord(address, value));
+        }
+
+        fn write_long(&mut self, _address: u32, _value: u32) {}
+
+        fn sync(&mut self, cpu_clocks: u32) {
+            self.events.push(Event::Sync(cpu_clocks));
+        }
+
+        fn ipl_hold_sample(&mut self) {
+            self.events.push(Event::IplHold);
+        }
+    }
+
+    fn cpu_with_one_prefetch_word() -> CpuCore {
+        let mut cpu = CpuCore::new();
+        cpu.set_cpu_type(CpuType::M68000);
+        cpu.pc = 0x2000;
+        cpu.prefetch_queue = [0x4e71, 0];
+        cpu.prefetch_count = 1;
+        cpu
+    }
+
+    #[test]
+    fn m68000_subq_long_data_register_prefetches_before_internal_sync() {
+        let mut cpu = cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[1] = 0x0001_0000;
+
+        let cycles = cpu.exec_subq(&mut bus, Size::Long, 1, AddressingMode::DataDirect(1));
+
+        assert_eq!(cycles, 8);
+        assert_eq!(cpu.dar[1], 0x0000_FFFF);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(4)]
+        );
+    }
+
+    #[test]
+    fn m68000_addq_word_data_register_polls_on_final_prefetch() {
+        let mut cpu = cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[2] = 0x1234_00FF;
+
+        let cycles = cpu.exec_addq(&mut bus, Size::Word, 1, AddressingMode::DataDirect(2));
+
+        assert_eq!(cycles, 4);
+        assert_eq!(cpu.dar[2], 0x1234_0100);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(bus.events, vec![Event::ReadWord(0x2002), Event::IplHold]);
+    }
+
+    #[test]
+    fn m68000_addq_address_register_syncs_before_write() {
+        let mut cpu = cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[8 + 3] = 0x0000_1000;
+
+        let cycles = cpu.exec_addq(&mut bus, Size::Long, 8, AddressingMode::AddressDirect(3));
+
+        assert_eq!(cycles, 8);
+        assert_eq!(cpu.dar[8 + 3], 0x0000_1008);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(4)]
+        );
+    }
+
+    #[test]
+    fn m68000_neg_long_data_register_prefetches_before_internal_sync() {
+        let mut cpu = cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0x0000_0001;
+
+        let cycles = cpu.exec_neg(&mut bus, Size::Long, AddressingMode::DataDirect(0));
+
+        assert_eq!(cycles, 6);
+        assert_eq!(cpu.dar[0], 0xFFFF_FFFF);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(2)]
+        );
+    }
+
+    #[test]
+    fn m68000_clr_byte_data_register_polls_on_final_prefetch() {
+        let mut cpu = cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0x1234_56FF;
+
+        let cycles = cpu.exec_clr(&mut bus, Size::Byte, AddressingMode::DataDirect(0));
+
+        assert_eq!(cycles, 4);
+        assert_eq!(cpu.dar[0], 0x1234_5600);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(bus.events, vec![Event::ReadWord(0x2002), Event::IplHold]);
+    }
+
+    fn cpu_for_chk_exception() -> CpuCore {
+        let mut cpu = CpuCore::new();
+        cpu.set_cpu_type(CpuType::M68000);
+        cpu.dar[15] = 0x1000;
+        cpu.pc = 0x2004;
+        cpu.ppc = 0x2000;
+        cpu
+    }
+
+    #[test]
+    fn m68000_chk_upper_bound_trap_uses_short_exception_path() {
+        let mut cpu = cpu_for_chk_exception();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 5;
+
+        let cycles = cpu.exec_chk(&mut bus, Size::Word, 3, 0);
+
+        assert_eq!(cycles, 38);
+        assert_eq!(
+            &bus.events[..4],
+            &[
+                Event::Sync(8),
+                Event::WriteWord(0x0FFE, 0x2004),
+                Event::WriteWord(0x0FFA, cpu.get_sr()),
+                Event::WriteWord(0x0FFC, 0x0000),
+            ]
+        );
+    }
+
+    #[test]
+    fn m68000_chk_negative_after_upper_bound_uses_long_exception_path() {
+        let mut cpu = cpu_for_chk_exception();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0xFFFF_FFFF;
+
+        let cycles = cpu.exec_chk(&mut bus, Size::Word, 3, 0);
+
+        assert_eq!(cycles, 40);
+        assert_eq!(
+            &bus.events[..4],
+            &[
+                Event::Sync(10),
+                Event::WriteWord(0x0FFE, 0x2004),
+                Event::WriteWord(0x0FFA, cpu.get_sr()),
+                Event::WriteWord(0x0FFC, 0x0000),
+            ]
+        );
+    }
+
+    #[test]
+    fn m68000_chk_negative_upper_compare_overflow_uses_short_exception_path() {
+        let mut cpu = cpu_for_chk_exception();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0xFFFF_A167; // -24217
+
+        let cycles = cpu.exec_chk(&mut bus, Size::Word, 0x5836, 0); // 22582
+
+        assert_eq!(cycles, 38);
+        assert_eq!(
+            &bus.events[..4],
+            &[
+                Event::Sync(8),
+                Event::WriteWord(0x0FFE, 0x2004),
+                Event::WriteWord(0x0FFA, cpu.get_sr()),
+                Event::WriteWord(0x0FFC, 0x0000),
+            ]
+        );
+    }
+
+    #[test]
+    fn m68000_chk_negative_can_trap_on_upper_bound_first() {
+        let mut cpu = cpu_for_chk_exception();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0xFFFF_FF00; // -256
+
+        let cycles = cpu.exec_chk(&mut bus, Size::Word, 0x8000, 0); // -32768
+
+        assert_eq!(cycles, 38);
+        assert_eq!(bus.events.first(), Some(&Event::Sync(8)));
     }
 }

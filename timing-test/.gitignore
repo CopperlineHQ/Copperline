@@ -1,1 +1,14 @@
-test.bin
+# Assembled outputs are gitignored by the root *.bin rule; the probes the
+# CI golden suite boots (tests/probe_golden.rs) are whitelisted so a clean
+# checkout runs without vasm. cc5/cc6 stay local (race-boundary
+# demonstrators, not in the golden set) and cc7 must never be committed
+# (it embeds a chip-RAM dump of a running demo).
+!test.bin
+!ddfprobe.bin
+!ddfprobe-diw1.bin
+!ddfprobe-toggle.bin
+!ddfprobe-cc.bin
+!ddfprobe-cc3.bin
+!ddfprobe-cc4.bin
+!ddfprobe-sprbar.bin
+!ddfprobe-sprbar2.bin

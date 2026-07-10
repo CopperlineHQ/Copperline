@@ -490,7 +490,7 @@ boot1:  lea     CUST,a6
         ; that mimic loading the other task's stack pointer) but returns to the
         ; same context, so its CYCLE COST matches a real switch without needing a
         ; second task. The handlers each record the live beam position (VHPOSR:
-        ; high byte = vpos, low byte = hpos/2) so we can see, in raster terms,
+        ; high byte = vpos, low byte = raw hpos) so we can see, in raster terms,
         ; where the chain starts and ends.
         lea     vchain_handler(pc),a0
         move.l  a0,$6c.w        ; level-3 autovector (VERTB)
@@ -697,7 +697,7 @@ boot1:  lea     CUST,a6
         ; row 27: COPPER vs CPU interrupt phase. A copper list waits for line
         ; $64 then MOVEs SET-COPER into INTREQ; the CPU (interrupts off) busy-
         ; polls INTREQR for the COPER bit and records the beam (VHPOSR, high byte
-        ; vpos / low byte hpos/2). This is the SANITY Roots II copper-chunky
+        ; vpos / low byte raw hpos). This is the SANITY Roots II copper-chunky
         ; mechanism -- a copper-raised interrupt the per-frame work spins on -- so
         ; the raise+catch beam position is exactly what decides whether that
         ; effect renders or scrambles. A difference across emulators is a
@@ -948,11 +948,11 @@ getvpos:
         or.w    d1,d0           ; full vpos
         rts
 
-;------------------------------------------------ linear beam position in cck
-; Returns d0.l = vpos*227 + hpos, a monotonically increasing color-clock count
-; within a frame (one PAL line = 227 cck; VHPOSR low byte is hpos/2). Used by the
-; blitter-vs-beam rows to measure how far the beam advances while a fixed blit
-; runs -- the direct "does the blitter keep ahead of the display beam" figure.
+;------------------------------------------------ legacy beam-position metric
+; Rows 23-26 keep the original cross-emulator metric:
+; d0.l = vpos*227 + (VHPOSR low hpos byte * 2). Rows 19/20/22/27 store raw
+; VHPOSR words instead. Keep this helper stable unless all row 23-26 references
+; are regenerated together.
 getbeam:
         move.w  $004(a6),d0     ; VPOSR
         and.w   #1,d0           ; V8
@@ -962,8 +962,8 @@ getbeam:
         move.w  d1,d2
         lsr.w   #8,d1           ; V7..V0
         or.w    d1,d0           ; full vpos (d0.w)
-        and.w   #$ff,d2         ; hpos/2
-        add.w   d2,d2           ; hpos
+        and.w   #$ff,d2         ; raw hpos byte
+        add.w   d2,d2           ; legacy doubled-hpos metric
         mulu    #227,d0         ; vpos * cck-per-line (d0.l)
         add.l   d2,d0           ; + hpos
         rts

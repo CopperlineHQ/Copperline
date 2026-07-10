@@ -36,12 +36,27 @@ jobs:
         run: cargo clippy --all-targets --all-features --locked -- -D warnings
       - name: Build (release)
         run: cargo build --release --locked
-      - name: Unit tests
-        # The integration tests under tests/ are #[ignore]d and need local
-        # ROM/disk assets, so they are intentionally not run here; this is
-        # the asset-free unit suite, which also proves a clean checkout
-        # builds and tests without the gitignored vendor fixtures.
+      - name: Unit tests and probe golden renders
+        # The asset-gated integration tests under tests/ are #[ignore]d
+        # (they need local Kickstart ROM/disk assets) and are intentionally
+        # not run here. tests/probe_golden.rs is the exception: it is fully
+        # self-contained (committed probe binaries booted on the bundled
+        # AROS ROM) and compares each probe's deterministic render
+        # pixel-for-pixel against the references in timing-test/golden/ --
+        # the hardware-behaviour regression net (DDF/DIW placement, raced
+        # copper-chunky COLOR00 trains, sprite serializer positions, and
+        # the 32 CPU/chip-bus timing rows). See timing-test/README.md
+        # "CI golden renders" for the re-bless workflow.
         run: cargo test --release --locked
+      - name: Upload probe render diffs
+        # On a golden mismatch the test writes the actual renders and diff
+        # masks; surface them so the regression is reviewable from the run.
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-golden-diffs
+          path: target/probe-golden/
+          if-no-files-found: ignore
       - name: m68k core tests
         # The vendored CPU core (crates/m68k) is a path dependency, not a
         # workspace member, so the root `cargo test` above never reaches its

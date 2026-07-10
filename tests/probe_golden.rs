@@ -1,0 +1,276 @@
+//! Golden-render regression tests for the timing-test probe suite.
+//!
+//! Each probe is a self-contained bootblock program (timing-test/*.asm,
+//! committed alongside its assembled .bin) that takes over the machine and
+//! draws a display exercising one calibrated hardware behaviour. The test
+//! assembles each probe into a bootable ADF in a temp directory, boots it on
+//! the bundled AROS ROM (no Kickstart needed -- the probes own the machine
+//! once loaded, so the settled frame is ROM-independent), captures a raw
+//! screenshot at a fixed emulated time, and compares it pixel-for-pixel
+//! against the committed reference under `timing-test/golden/`.
+//!
+//! The emulator core is deterministic, so any pixel difference is a real
+//! behaviour change. When a change is intentional (a hardware-model fix that
+//! moves calibrated output), re-bless the goldens and review the diff in the
+//! commit:
+//!
+//! ```sh
+//! COPPERLINE_BLESS_GOLDEN=1 cargo test --release --test probe_golden
+//! ```
+//!
+//! On mismatch the actual render and a diff mask are written under
+//! `target/probe-golden/` (uploaded as artifacts by CI).
+//!
+//! The suite runs release-only: `cargo test` in the debug profile skips it
+//! (a debug-build emulator is far too slow for the ~40s emulated boots).
+//!
+//! Probes excluded by design: ddfprobe-cc5/-cc6 sit on deliberate race
+//! boundaries (they demonstrate launch-phase bistability and free-running
+//! precession, so any unrelated timing change flips them), and ddfprobe-cc7
+//! replays a chip-RAM dump of a running demo that is not committed.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+const ADF_SIZE: usize = 901_120; // 80 tracks * 2 sides * 11 sectors * 512
+const BOOTBLOCK_SIZE: usize = 1024;
+
+/// (probe name, main-program binary, emulated seconds before the shot).
+/// The AROS bootstrap hands control to the bootblock at ~32s emulated;
+/// every display probe is settled and static by 40s (verified 40 == 44),
+/// and the timing test has printed all its measurement rows by 55s
+/// (verified 55 == 65).
+const PROBES: &[(&str, &str, f64)] = &[
+    ("timing-test", "test.bin", 55.0),
+    ("ddfprobe", "ddfprobe.bin", 40.0),
+    ("ddfprobe-diw1", "ddfprobe-diw1.bin", 40.0),
+    ("ddfprobe-toggle", "ddfprobe-toggle.bin", 40.0),
+    ("ddfprobe-cc", "ddfprobe-cc.bin", 40.0),
+    ("ddfprobe-cc3", "ddfprobe-cc3.bin", 40.0),
+    ("ddfprobe-cc4", "ddfprobe-cc4.bin", 40.0),
+    ("ddfprobe-sprbar", "ddfprobe-sprbar.bin", 40.0),
+    ("ddfprobe-sprbar2", "ddfprobe-sprbar2.bin", 40.0),
+];
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+/// Standard Amiga boot-block checksum: the end-around-carry sum of every
+/// longword (with the checksum field zeroed) one's-complemented, so the
+/// block sums to $FFFFFFFF. Mirrors timing-test/make_adf.py.
+fn boot_checksum(block: &[u8]) -> u32 {
+    let mut total: u64 = 0;
+    for i in (0..BOOTBLOCK_SIZE).step_by(4) {
+        if i == 4 {
+            continue;
+        }
+        let word = u32::from_be_bytes(block[i..i + 4].try_into().unwrap());
+        total += u64::from(word);
+        total = (total & 0xFFFF_FFFF) + (total >> 32);
+    }
+    !(total as u32)
+}
+
+/// Wrap the committed boot block and a probe's main program into a bootable
+/// ADF image (sector 0-1: boot block, sector 2+: the program the boot block
+/// loads to chip RAM and jumps to).
+fn build_adf(boot: &[u8], program: &[u8]) -> Vec<u8> {
+    assert!(boot.len() <= BOOTBLOCK_SIZE, "boot block too large");
+    assert!(
+        BOOTBLOCK_SIZE + program.len() <= ADF_SIZE,
+        "program does not fit on the disk"
+    );
+    let mut block = vec![0u8; BOOTBLOCK_SIZE];
+    block[..boot.len()].copy_from_slice(boot);
+    let checksum = boot_checksum(&block);
+    block[4..8].copy_from_slice(&checksum.to_be_bytes());
+
+    let mut image = vec![0u8; ADF_SIZE];
+    image[..BOOTBLOCK_SIZE].copy_from_slice(&block);
+    image[BOOTBLOCK_SIZE..BOOTBLOCK_SIZE + program.len()].copy_from_slice(program);
+    image
+}
+
+fn probe_config(adf: &Path) -> String {
+    format!(
+        "rom = \"<bundled-aros>\"\n\
+         [display]\n\
+         overscan = \"full\"\n\
+         [cpu]\n\
+         model = \"68000\"\n\
+         [memory]\n\
+         chip = \"512K\"\n\
+         slow = \"512K\"\n\
+         [chipset]\n\
+         revision = \"OCS\"\n\
+         video = \"PAL\"\n\
+         [floppy.df0]\n\
+         path = \"{}\"\n\
+         write_protected = true\n",
+        adf.display()
+    )
+}
+
+struct Rgba {
+    width: u32,
+    height: u32,
+    data: Vec<u8>,
+}
+
+fn load_png(path: &Path) -> Result<Rgba, Box<dyn std::error::Error>> {
+    let decoder = png::Decoder::new(fs::File::open(path)?);
+    let mut reader = decoder.read_info()?;
+    let mut buf = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf)?;
+    assert_eq!(info.color_type, png::ColorType::Rgba, "{}", path.display());
+    assert_eq!(info.bit_depth, png::BitDepth::Eight, "{}", path.display());
+    buf.truncate(info.buffer_size());
+    Ok(Rgba {
+        width: info.width,
+        height: info.height,
+        data: buf,
+    })
+}
+
+fn write_png(path: &Path, width: u32, height: u32, rgba: &[u8]) {
+    let file = fs::File::create(path).expect("create diff png");
+    let mut encoder = png::Encoder::new(file, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().expect("png header");
+    writer.write_image_data(rgba).expect("png data");
+}
+
+/// Render `name` and return the path of the captured screenshot.
+fn capture_probe(name: &str, program: &str, seconds: f64, work: &Path) -> PathBuf {
+    let root = repo_root();
+    let boot = fs::read(root.join("timing-test/boot.bin")).expect("timing-test/boot.bin");
+    let main = fs::read(root.join("timing-test").join(program))
+        .unwrap_or_else(|e| panic!("timing-test/{program}: {e}"));
+    let adf_path = work.join(format!("{name}.adf"));
+    fs::write(&adf_path, build_adf(&boot, &main)).expect("write adf");
+    let cfg_path = work.join(format!("{name}.toml"));
+    fs::write(&cfg_path, probe_config(&adf_path)).expect("write config");
+    let shot_path = work.join(format!("{name}.png"));
+
+    let output = Command::new(env!("CARGO_BIN_EXE_copperline"))
+        .current_dir(&root)
+        // The raw (unblended, line-doubled) framebuffer with recentring off:
+        // the calibrated forensic capture mode, byte-stable run to run.
+        .env("COPPERLINE_HCENTER", "0")
+        .env("COPPERLINE_SHOT_RAW", "1")
+        .env("COPPERLINE_AROS_DIR", root.join("assets/aros"))
+        .env("RUST_LOG", "copperline=warn")
+        .arg("--noaudio")
+        .arg("--config")
+        .arg(&cfg_path)
+        .arg("--screenshot-after")
+        .arg(format!("{seconds}"))
+        .arg(&shot_path)
+        .output()
+        .expect("run emulator");
+    assert!(
+        output.status.success(),
+        "{name}: emulator exited with {}\nstderr tail:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .rev()
+            .take(12)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    assert!(shot_path.exists(), "{name}: no screenshot was written");
+    shot_path
+}
+
+#[test]
+fn probe_renders_match_committed_goldens() {
+    if cfg!(debug_assertions) {
+        eprintln!("skipping probe goldens; run with --release (a debug emulator is too slow)");
+        return;
+    }
+
+    let root = repo_root();
+    let golden_dir = root.join("timing-test/golden");
+    let bless = std::env::var_os("COPPERLINE_BLESS_GOLDEN").is_some();
+    let work = std::env::temp_dir().join(format!("copperline-probe-golden-{}", std::process::id()));
+    fs::create_dir_all(&work).expect("create work dir");
+    let diff_dir = root.join("target/probe-golden");
+
+    let mut failures = Vec::new();
+    for &(name, program, seconds) in PROBES {
+        let shot_path = capture_probe(name, program, seconds, &work);
+        let golden_path = golden_dir.join(format!("{name}.png"));
+
+        if bless {
+            fs::create_dir_all(&golden_dir).expect("create golden dir");
+            fs::copy(&shot_path, &golden_path).expect("bless golden");
+            eprintln!("blessed {}", golden_path.display());
+            continue;
+        }
+
+        if !golden_path.exists() {
+            failures.push(format!(
+                "{name}: missing golden {} (generate with COPPERLINE_BLESS_GOLDEN=1)",
+                golden_path.display()
+            ));
+            continue;
+        }
+        let golden = load_png(&golden_path).expect("load golden");
+        let actual = load_png(&shot_path).expect("load capture");
+        if (golden.width, golden.height) != (actual.width, actual.height) {
+            failures.push(format!(
+                "{name}: geometry changed {}x{} -> {}x{}",
+                golden.width, golden.height, actual.width, actual.height
+            ));
+            continue;
+        }
+        let differing = golden
+            .data
+            .chunks_exact(4)
+            .zip(actual.data.chunks_exact(4))
+            .filter(|(a, b)| a != b)
+            .count();
+        if differing > 0 {
+            fs::create_dir_all(&diff_dir).expect("create diff dir");
+            let actual_out = diff_dir.join(format!("{name}-actual.png"));
+            fs::copy(&shot_path, &actual_out).expect("copy actual");
+            // Diff mask: white where pixels differ, black elsewhere.
+            let mask: Vec<u8> = golden
+                .data
+                .chunks_exact(4)
+                .zip(actual.data.chunks_exact(4))
+                .flat_map(|(a, b)| {
+                    if a == b {
+                        [0, 0, 0, 255]
+                    } else {
+                        [255, 255, 255, 255]
+                    }
+                })
+                .collect();
+            write_png(
+                &diff_dir.join(format!("{name}-diff.png")),
+                golden.width,
+                golden.height,
+                &mask,
+            );
+            failures.push(format!(
+                "{name}: {differing} of {} pixels differ from timing-test/golden/{name}.png \
+                 (actual + diff mask in target/probe-golden/)",
+                (golden.width * golden.height)
+            ));
+        }
+    }
+
+    let _ = fs::remove_dir_all(&work);
+    assert!(
+        failures.is_empty(),
+        "probe golden mismatches:\n  {}\n\nIf the change is an intentional hardware-model \
+         fix, re-bless with COPPERLINE_BLESS_GOLDEN=1 cargo test --release --test \
+         probe_golden and review the render diff in the commit.",
+        failures.join("\n  ")
+    );
+}

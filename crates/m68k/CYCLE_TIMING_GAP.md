@@ -49,9 +49,11 @@ model tighten the secondary gap.
 
 Cycle mismatch across 261,894 cases: 48.3% -> 0.9%. Sum CPU/fixture cycle
 ratio: 0.834 -> 0.999. All common/demo-relevant instructions match exactly.
-Remaining: DIVS normal-path +/-2 in ~23% of cases (data-dependent loop, avg ~0
-so no pacing bias), CHK trap-path timing, and a small static-register bit-op
-edge. DIVU/MULU/MULS exact.
+Remaining at that stage: DIVS normal-path +/-2 in ~23% of cases
+(data-dependent loop, avg ~0 so no pacing bias), a small CHK lower-bound
+trap-path subset, and a small static-register bit-op edge. Later Part E work
+closed these residuals; the current cycle-total report is exact across the
+full corpus.
 
 # Part E: prefetch + per-access bus timing (cycle-exact frontier)
 
@@ -98,7 +100,8 @@ the Part E.2 scoreboard once the prefetch model lands.
 
 ## E.1 progress (2026-06-03): 100% -> 18.1% sequence mismatch
 
-Model implemented (all gated to CpuType::M68000):
+Model implemented (68000-gated unless a bullet explicitly names the shared
+68010 prefetch-queue behaviour):
 
 - `prefetch_queue: [u16; 2]` + `prefetch_count` on CpuCore; the queue holds
   the words at pc/pc+2. Fixture harness preloads it from the fixtures'
@@ -114,13 +117,38 @@ Model implemented (all gated to CpuType::M68000):
 - **RMW writeback** (`write_resolved_ea` memory arm): tops the queue up
   BEFORE the write -- RMW instructions prefetch before their writeback,
   unlike MOVE.
+- **Immediate register ALU/CMPI**: data-register destinations also pull the
+  final prefetch before the `Dn` write or compare flags; long register forms
+  then run their trailing internal clocks.
+- **CMP.L `<ea>,Dn`**: the compare flags are computed before the final
+  prefetch; the 68000 then polls IPL on that prefetch and flushes the 2-clock
+  long-compare tail after it.
+- **Long `ADD/SUB/AND/OR <ea>,Dn`**: `Dn` is written before the final prefetch;
+  the long ALU tail is then flushed after that prefetch (2 clocks for memory
+  sources, 4 clocks for register/immediate sources).
+- **ADDA/SUBA/CMPA `<ea>,An`**: address-register arithmetic and compare forms
+  also poll IPL on the final prefetch and flush their 68000 tail clocks after it.
+- **EOR `Dn,Dm`**: the data-register destination uses the EOR pre-writeback
+  final prefetch; flags are set before the prefetch and `Dm` is written after
+  the prefetch/tail.
+- **ADDX/SUBX `Dm,Dn`**: register destinations poll IPL on the final prefetch
+  before the `Dn` writeback; long forms flush their 4-clock tail before the
+  register update.
+- **MOVE SR,Dn**: the 68000 register form polls IPL on the final prefetch,
+  flushes its 2-clock tail, and only then stores the SR word into `Dn`.
+- **MOVEA `<ea>,An`**: the address-register destination update follows the
+  final prefetch/IPL poll, matching the 68000/68010 MOVEA microcode order.
+- **MOVE USP register forms**: privileged `MOVE An,USP` and `MOVE USP,An`
+  perform the final prefetch/IPL poll before updating USP or `An`.
 - **Flow changes** (`full_prefetch` / `prefetch_first`+`prefetch_second`):
   Bcc/BRA/DBcc taken, JMP, RTS/RTE/RTR refill from the target; JSR/BSR
   interleave (first prefetch, push, second prefetch). Their
   displacement/address words are consumed in `consume_without_prefetch`
   microcode mode (no np ahead of a stream about to be discarded).
-- **Status ops** (ORI/ANDI/EORI to CCR/SR, MOVE to CCR/SR): refill after the
-  status write. **STOP**: consumes its operand without prefetch, no top-up.
+- **Status ops**: `MOVE <ea>,CCR/SR` and `ORI/ANDI/EORI #imm,SR` run their
+  internal status-write delay before mutating CCR/SR, then refill; 68000
+  immediate-to-CCR mutates CCR before its internal delay. **STOP**: consumes
+  its operand without prefetch, no top-up.
 - **CLR**: reads its destination before writing (68000 quirk).
 - `EaResult::Immediate` now carries the VALUE (consumed via the queue), not
   an address re-read later as data.
@@ -179,6 +207,36 @@ Access-count mismatches are now 0.5% (ratio 1.000); cycle totals unchanged
 (0.9% / 0.999). These remaining cases do not block Part E.2 (sync timing);
 they can be cleaned up alongside it.
 
+### E.1 iteration 4 (2026-07-09): 371 -> 6 sequence mismatches
+
+Fixed in this round:
+
+- **MOVEM.L register-to-memory predecrement**: each 68000 long register
+  transfer now emits the descending word bus cycles directly: low word at
+  `An-2`, then high word at `An-4`. The memory image remains big-endian, but
+  the access order matches the MAME/SST 68000 transaction log and clears all
+  157 `MOVEM.l` address-order mismatches.
+
+Current `access_sequence_gap_report` tail:
+
+- **Bcc (6; count)**: edge cases.
+
+Sequence mismatches are now 6 / 256,894 cases (0.0% rounded): count 6,
+direction/address/data 0.
+
+### E.1 iteration 5 (2026-07-09): 6 -> 0 sequence mismatches
+
+Fixed in this round:
+
+- **Bcc byte displacement `$FF` on pre-68020 CPUs**: the 68000/010 treat the
+  displacement byte as signed `-1`; only 68020+ decode `$FF` as the branch-long
+  extension sentinel. This avoids consuming a nonexistent long displacement in
+  the six not-taken `Bcc` edge cases.
+
+`access_sequence_gap_report` now matches the MAME/SST transaction stream
+exactly across all measured m68000 fixtures: 0 / 256,894 sequence mismatches
+(count/direction/address/data all 0).
+
 # Part E.2: sync() per-access timing
 
 ## Infrastructure (landed 2026-06-03)
@@ -235,21 +293,38 @@ Internal-cycle placements landed (all validated against fixture offsets):
 - **Memory-to-memory forms**: ABCD/SBCD/ADDX/SUBX 2 leading clocks (override
   of the per-EA charges for the double-predecrement forms).
 - **Exception entry**: 4 leading clocks (take_exception) + 2 between the two
-  handler-refill prefetches (jump_vector). CHK: 6 internal on pass, 8/10 on
-  trap (too-big/negative). Status ops (to CCR/SR): 8 internal before the
-  refill; MOVE to SR/CCR: 4.
+  handler-refill prefetches (jump_vector). CHK: 6 internal on pass, 8 on an
+  upper-bound trap or lower-bound trap whose preceding upper comparison
+  overflowed, and 10 on ordinary lower-bound traps. Status ops (to CCR/SR):
+  8 internal before the refill; MOVE to SR/CCR: 4.
 - **Control flow EAs**: JMP/JSR +2 (d16/abs.w/PC-rel) or +4 (indexed) before
   the target refill; LEA/PEA indexed +2 after the extension fetch.
 - **RESET instruction**: 128 internal clocks (the reset pulse).
 - **DIVU/DIVS**: the data-dependent division clocks (divX_cycles - 4) before
   the final prefetch.
 
-Final: 99.6% of accesses (99.7% of cases) at fixture-exact offsets.
-The remaining 0.4% (CHK 388 cases, DIVS 353 cases, all avg-2-clock) is
-bounded by the Part D cycle-TOTAL residuals in those classes (DIVS
-data-dependent loop +/-2, CHK trap-path totals) -- placement cannot be more
-exact than the totals it distributes. Improving those needs divs_cycles /
-CHK-trap total formula fixes (Part D follow-up), not placement changes.
+Final before the CHK follow-up: 99.6% of accesses (99.7% of cases) at
+fixture-exact offsets. The remaining 0.4% (CHK 388 cases, DIVS 353 cases,
+all avg-2-clock) was bounded by the Part D cycle-total residuals in those
+classes -- placement could not be more exact than the totals it distributed.
+
+## E.2 CHK trap-path refinement (2026-07-09)
+
+The 68000 CHK microcode tests the upper bound before the lower bound. When
+`Dn > bound` traps, the exception frame starts after the 6-clock comparison
+phase plus 2 more clocks. Negative values that pass the architectural upper
+test usually take the 6+4-clock lower-bound path, but the SST/MAME transaction
+log shows a hardware-derived split: if the preceding signed upper-bound
+subtraction (`Dn - bound`) overflowed, the lower-bound trap uses the same
+short pre-frame path as an upper-bound trap. That predicate exactly accounts
+for the former 199-case residual.
+
+Current tail after this refinement:
+
+- `cycle_gap_report`: 0 mismatches across 261,894 cases.
+- `access_timing_gap_report`: CHK exact; remaining timing-offset tail is
+  DIVU/DIVS, whose final prefetch ordering intentionally follows Moira/vAmiga
+  and the Copperline timing-test disk.
 
 # Part E.3: Copperline integration + system validation (2026-06-03)
 

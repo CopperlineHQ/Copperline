@@ -52,25 +52,24 @@ that plane-0 fetch reaches Denise instead of sampling stale shifter contents.
 That gate is placed in the bitplane/DIW coordinate domain, not the normal
 Copper/register-write output domain, because it follows the fetch slot that
 loads BPL1DAT.
+Horizontal DIW clipping applies to sprites unless AGA border sprites are
+enabled by BPLCON3.BRDSPRT; if BPLCON3.BRDRBLNK is asserted, the border-sprite
+bypass is suppressed along with the blanked border.
 Once that first DMA word is visible, the renderer samples the enabled
 bitplanes from the complete latched word; it does not expose the first word
 plane-by-plane according to each plane's individual DMA slot.
 If a manual BPL1DAT write starts a word before a later DMA BPL1DAT load
 point, replay stops the manual word where that DMA word replaces Denise's
 shifter.
-BPLCON1-delayed samples at the left edge of a contiguous bitplane-DMA block
-come from the previous line's shifter tail when current-line DMA is already
-feeding Denise at the display edge. Block-start lines, and lines whose output
-is held until a delayed first BPL1DAT load, blank that scroll-in because no
-current-line shifter data has reached the visible gate yet. The same applies
-when a late DDFSTRT places the row's fetch origin inside the open display
-window (`fetch_start_native_x > 0`): the serializer has run far past its
-previous load by the time the window opens, so the taps between window open
-and the first new word shift out empty and show playfield colour 0, never the
-previous line's tail. AGA's extended
-BPLCON1 delays can exceed one 16-bit shifter word; replay does not reuse the
-single cached line-tail word for those wider delays, so the extra leading gap
-stays background until current-line samples reach Lisa.
+BPLCON1-delayed samples at the left edge of a scanline do not reuse the
+previous line's final bitplane word. Before the current line's shifter has a
+sample for a delayed tap, replay marks playfield output active but returns
+colour index 0. Block-start lines also suppress samples fetched before DIW
+opened, because no earlier playfield stream was active before the visible gate.
+Contiguous rows may expose same-line samples that were fetched before DIW
+opened, but the scroll-in never comes from a previous scanline's tail. AGA's
+extended BPLCON1 delays can exceed one 16-bit shifter word; the extra leading
+gap also stays background until current-line samples reach Lisa.
 A BPLCON1 write whose normal register position is already at or beyond DIW's
 right edge is not pulled left into the current line's bitplane-scroll domain;
 it updates following lines without retapping the visible HAM tail of the

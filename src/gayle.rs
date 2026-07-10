@@ -1083,7 +1083,7 @@ mod tests {
         let lba = u32::from(words[60]) | (u32::from(words[61]) << 16);
         assert_eq!(lba, 16 * 32 * 4);
         // ATA string convention: first char of each pair in bits 15-8.
-        assert_eq!(words[27], u16::from_be_bytes([b'C', b'O']));
+        assert_eq!(words[27], u16::from_be_bytes(*b"CO"));
         // Transfer complete: DRQ clears.
         assert_eq!(g.read(IDE_STATUS, 1) as u8, ST_DRDY | ST_DSC);
         std::fs::remove_file(path).ok();

@@ -17,6 +17,16 @@ fn muls_transitions(src: u16) -> u32 {
     ((s ^ (s >> 1)) & 0xFFFF).count_ones()
 }
 
+#[inline]
+fn mulu_internal_clocks(src: u16) -> u32 {
+    34 + 2 * src.count_ones()
+}
+
+#[inline]
+fn muls_internal_clocks(src: u16) -> u32 {
+    34 + 2 * muls_transitions(src)
+}
+
 /// MC68000 DIVU.W compute cycles (excluding the EA fetch). `divisor` must be
 /// non-zero. Early overflow (high word of the dividend >= divisor) terminates
 /// fast; otherwise the data-dependent restoring-division loop is simulated.
@@ -84,6 +94,14 @@ fn divs_cycles(dividend: i32, divisor: i16) -> i32 {
 }
 
 impl CpuCore {
+    fn finish_m68000_mul<B: AddressBus>(&mut self, bus: &mut B, internal_clocks: u32) {
+        // 68000 MULU/MULS perform the final prefetch before the multiplier's
+        // internal clocks, then write Dn after that sync interval.
+        self.top_up_prefetch(bus);
+        self.internal_cycles(internal_clocks);
+        self.flush_sync(bus);
+    }
+
     /// Execute MULU (unsigned 16x16 -> 32 multiply).
     ///
     /// MULU <ea>, Dn
@@ -101,6 +119,9 @@ impl CpuCore {
         let dst = self.d(dst_reg) & 0xFFFF;
         let result = src * dst;
 
+        if self.cpu_type == CpuType::M68000 {
+            self.finish_m68000_mul(bus, mulu_internal_clocks(src as u16));
+        }
         self.set_d(dst_reg, result);
 
         // Set flags
@@ -138,6 +159,9 @@ impl CpuCore {
         let dst = self.d(dst_reg) as i16 as i32;
         let result = (src * dst) as u32;
 
+        if self.cpu_type == CpuType::M68000 {
+            self.finish_m68000_mul(bus, muls_internal_clocks(src as u16));
+        }
         self.set_d(dst_reg, result);
 
         // Set flags
@@ -325,5 +349,87 @@ impl CpuCore {
         self.c_flag = 0;
 
         cycles
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum Event {
+        ReadWord(u32),
+        Sync(u32),
+    }
+
+    #[derive(Default)]
+    struct TraceBus {
+        events: Vec<Event>,
+    }
+
+    impl AddressBus for TraceBus {
+        fn read_byte(&mut self, _address: u32) -> u8 {
+            0
+        }
+
+        fn read_word(&mut self, address: u32) -> u16 {
+            self.events.push(Event::ReadWord(address));
+            0x4e71
+        }
+
+        fn read_long(&mut self, _address: u32) -> u32 {
+            0
+        }
+
+        fn write_byte(&mut self, _address: u32, _value: u8) {}
+
+        fn write_word(&mut self, _address: u32, _value: u16) {}
+
+        fn write_long(&mut self, _address: u32, _value: u32) {}
+
+        fn sync(&mut self, cpu_clocks: u32) {
+            self.events.push(Event::Sync(cpu_clocks));
+        }
+    }
+
+    fn m68000_cpu_with_one_prefetch_word() -> CpuCore {
+        let mut cpu = CpuCore::new();
+        cpu.set_cpu_type(CpuType::M68000);
+        cpu.pc = 0x2000;
+        cpu.prefetch_queue = [0x4e71, 0];
+        cpu.prefetch_count = 1;
+        cpu
+    }
+
+    #[test]
+    fn m68000_mulu_data_register_prefetches_before_multiplier_sync() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0x0000_0003;
+        cpu.dar[1] = 0x0000_0004;
+
+        let cycles = cpu.exec_mulu(&mut bus, AddressingMode::DataDirect(0), 1);
+
+        assert_eq!(cycles, 42);
+        assert_eq!(cpu.dar[1], 0x0000_000C);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(bus.events, vec![Event::ReadWord(0x2002), Event::Sync(38)]);
+    }
+
+    #[test]
+    fn m68000_muls_data_register_prefetches_before_multiplier_sync() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0x0000_FFFF;
+        cpu.dar[1] = 0x0000_0002;
+
+        let cycles = cpu.exec_muls(&mut bus, AddressingMode::DataDirect(0), 1);
+
+        assert_eq!(cycles, 40);
+        assert_eq!(cpu.dar[1], 0xFFFF_FFFE);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(bus.events, vec![Event::ReadWord(0x2002), Event::Sync(36)]);
     }
 }

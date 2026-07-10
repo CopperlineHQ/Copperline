@@ -192,6 +192,12 @@ impl CpuCore {
             value
         };
 
+        // 68000/68010 MOVEA sequences the final prefetch before the address
+        // register update (Moira execMovea: prefetch<POLL>, then writeA).
+        if self.prefetch_enabled() {
+            self.top_up_prefetch(bus);
+            self.ipl_poll_point(bus);
+        }
         self.set_a(dst_reg, value);
         // MC68000: MOVEA base 4 + source-fetch EA (destination An is free).
         if self.cpu_type == CpuType::M68000 {
@@ -262,7 +268,7 @@ impl CpuCore {
     /// Execute EXG instruction.
     ///
     /// EXG Rx, Ry
-    pub fn exec_exg(&mut self, opcode: u16) -> i32 {
+    pub fn exec_exg<B: AddressBus>(&mut self, bus: &mut B, opcode: u16) -> i32 {
         let rx = ((opcode >> 9) & 7) as usize;
         let ry = (opcode & 7) as usize;
         let mode = (opcode >> 3) & 0x1F;
@@ -288,6 +294,10 @@ impl CpuCore {
             }
             _ => {}
         }
+        self.top_up_prefetch(bus);
+        self.ipl_poll_point(bus);
+        self.internal_cycles(2);
+        self.flush_sync(bus);
         6
     }
 
@@ -421,10 +431,21 @@ impl CpuCore {
                     if reg_idx == base_reg {
                         value = value.wrapping_sub(base_adjust);
                     }
-                    addr = addr.wrapping_sub(size.bytes());
                     match size {
-                        Size::Word => self.write_16(bus, addr, value as u16),
-                        Size::Long => self.write_32(bus, addr, value),
+                        Size::Word => {
+                            addr = addr.wrapping_sub(2);
+                            self.write_16(bus, addr, value as u16);
+                        }
+                        Size::Long if self.cpu_type == CpuType::M68000 => {
+                            addr = addr.wrapping_sub(2);
+                            self.write_16(bus, addr, (value & 0xFFFF) as u16);
+                            addr = addr.wrapping_sub(2);
+                            self.write_16(bus, addr, (value >> 16) as u16);
+                        }
+                        Size::Long => {
+                            addr = addr.wrapping_sub(4);
+                            self.write_32(bus, addr, value);
+                        }
                         _ => {}
                     }
                     count += 1;
@@ -500,6 +521,10 @@ impl CpuCore {
                 self.set_a(reg as usize, addr);
             }
         } else {
+            if self.cpu_type == CpuType::M68000 && size == Size::Long {
+                let _ = self.read_16(bus, addr);
+            }
+
             // Normal order: D0..D7, A0..A7
             for i in 0..16 {
                 if mask & (1 << i) != 0 {
@@ -518,9 +543,9 @@ impl CpuCore {
                 self.set_a(reg as usize, addr);
             }
 
-            // 68000 quirk: MOVEM memory-to-register always performs one extra
-            // word read past the last transferred register (value discarded).
-            if self.cpu_type == CpuType::M68000 {
+            // 68000 MOVEM memory-to-register has one discarded word read:
+            // before long transfers, after word transfers.
+            if self.cpu_type == CpuType::M68000 && size == Size::Word {
                 let _ = self.read_16(bus, addr);
             }
         }
@@ -538,9 +563,11 @@ impl CpuCore {
     /// Execute SWAP instruction.
     ///
     /// SWAP Dn
-    pub fn exec_swap(&mut self, reg: usize) -> i32 {
+    pub fn exec_swap<B: AddressBus>(&mut self, bus: &mut B, reg: usize) -> i32 {
         let value = self.d(reg);
         let result = value.rotate_right(16);
+        self.top_up_prefetch(bus);
+        self.ipl_poll_point(bus);
         self.set_d(reg, result);
 
         self.set_logic_flags(result, Size::Long);
@@ -725,5 +752,179 @@ impl CpuCore {
         self.not_z_flag = value & size.mask();
         self.v_flag = 0;
         self.c_flag = 0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum Event {
+        ReadWord(u32),
+        WriteWord(u32, u16),
+        Sync(u32),
+        IplHold,
+    }
+
+    #[derive(Default)]
+    struct TraceBus {
+        events: Vec<Event>,
+    }
+
+    impl AddressBus for TraceBus {
+        fn read_byte(&mut self, _address: u32) -> u8 {
+            0
+        }
+
+        fn read_word(&mut self, address: u32) -> u16 {
+            self.events.push(Event::ReadWord(address));
+            0x4e71
+        }
+
+        fn read_long(&mut self, address: u32) -> u32 {
+            (u32::from(self.read_word(address)) << 16)
+                | u32::from(self.read_word(address.wrapping_add(2)))
+        }
+
+        fn write_byte(&mut self, _address: u32, _value: u8) {}
+
+        fn write_word(&mut self, address: u32, value: u16) {
+            self.events.push(Event::WriteWord(address, value));
+        }
+
+        fn write_long(&mut self, address: u32, value: u32) {
+            self.write_word(address, (value >> 16) as u16);
+            self.write_word(address.wrapping_add(2), value as u16);
+        }
+
+        fn sync(&mut self, cpu_clocks: u32) {
+            self.events.push(Event::Sync(cpu_clocks));
+        }
+
+        fn ipl_hold_sample(&mut self) {
+            self.events.push(Event::IplHold);
+        }
+    }
+
+    fn m68000_cpu_with_one_prefetch_word() -> CpuCore {
+        let mut cpu = CpuCore::new();
+        cpu.set_cpu_type(CpuType::M68000);
+        cpu.pc = 0x2000;
+        cpu.prefetch_queue = [0x4e71, 0];
+        cpu.prefetch_count = 1;
+        cpu
+    }
+
+    #[test]
+    fn m68000_swap_prefetches_before_register_update() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0x1234_ABCD;
+
+        let cycles = cpu.exec_swap(&mut bus, 0);
+
+        assert_eq!(cycles, 4);
+        assert_eq!(cpu.dar[0], 0xABCD_1234);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(bus.events, vec![Event::ReadWord(0x2002), Event::IplHold]);
+    }
+
+    #[test]
+    fn m68000_movea_prefetches_before_address_register_update() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0xffff_8000;
+
+        let cycles = cpu.exec_movea(&mut bus, Size::Word, AddressingMode::DataDirect(0), 1);
+
+        assert_eq!(cycles, 4);
+        assert_eq!(cpu.dar[9], 0xffff_8000);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(bus.events, vec![Event::ReadWord(0x2002), Event::IplHold]);
+    }
+
+    #[test]
+    fn m68000_exg_prefetches_before_internal_sync() {
+        let mut cpu = m68000_cpu_with_one_prefetch_word();
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0x1111_2222;
+        cpu.dar[1] = 0x3333_4444;
+
+        let cycles = cpu.exec_exg(&mut bus, 0xC141);
+
+        assert_eq!(cycles, 6);
+        assert_eq!(cpu.dar[0], 0x3333_4444);
+        assert_eq!(cpu.dar[1], 0x1111_2222);
+        assert_eq!(cpu.prefetch_count, 2);
+        assert_eq!(cpu.pending_sync_clocks, 0);
+        assert_eq!(
+            bus.events,
+            vec![Event::ReadWord(0x2002), Event::IplHold, Event::Sync(2)]
+        );
+    }
+
+    #[test]
+    fn m68000_movem_long_predecrement_writes_low_word_before_high_word() {
+        let mut cpu = CpuCore::new();
+        cpu.set_cpu_type(CpuType::M68000);
+        let mut bus = TraceBus::default();
+        cpu.dar[0] = 0x1122_3344;
+        cpu.dar[10] = 0x1000;
+
+        let cycles =
+            cpu.exec_movem_to_mem(&mut bus, Size::Long, AddressingMode::PreDecrement(2), 0x8000);
+
+        assert_eq!(cycles, 16);
+        assert_eq!(cpu.dar[10], 0x0FFC);
+        assert_eq!(
+            bus.events,
+            vec![
+                Event::WriteWord(0x0FFE, 0x3344),
+                Event::WriteWord(0x0FFC, 0x1122),
+            ]
+        );
+    }
+
+    #[test]
+    fn m68000_movem_long_memory_to_register_dummies_before_first_transfer() {
+        let mut cpu = CpuCore::new();
+        cpu.set_cpu_type(CpuType::M68000);
+        let mut bus = TraceBus::default();
+        cpu.dar[10] = 0x1000;
+
+        let cycles =
+            cpu.exec_movem_to_reg(&mut bus, Size::Long, AddressingMode::AddressIndirect(2), 0x0001);
+
+        assert_eq!(cycles, 20);
+        assert_eq!(
+            bus.events,
+            vec![
+                Event::ReadWord(0x1000),
+                Event::ReadWord(0x1000),
+                Event::ReadWord(0x1002),
+            ]
+        );
+    }
+
+    #[test]
+    fn m68000_movem_word_memory_to_register_dummies_after_last_transfer() {
+        let mut cpu = CpuCore::new();
+        cpu.set_cpu_type(CpuType::M68000);
+        let mut bus = TraceBus::default();
+        cpu.dar[10] = 0x1000;
+
+        let cycles =
+            cpu.exec_movem_to_reg(&mut bus, Size::Word, AddressingMode::AddressIndirect(2), 0x0003);
+
+        assert_eq!(cycles, 20);
+        assert_eq!(
+            bus.events,
+            vec![
+                Event::ReadWord(0x1000),
+                Event::ReadWord(0x1002),
+                Event::ReadWord(0x1004),
+            ]
+        );
     }
 }

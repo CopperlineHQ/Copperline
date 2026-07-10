@@ -213,6 +213,15 @@ impl BeamSpriteState {
         }
     }
 
+    fn disarm_nonheld_latched_output(&mut self) {
+        for sprite in 0..8 {
+            if self.held[sprite].is_none() {
+                self.spr_armed[sprite] = false;
+                self.direct_data_armed[sprite] = false;
+            }
+        }
+    }
+
     pub(super) fn apply_write(&mut self, off: u16, val: u16) {
         if off == 0x1FC {
             if self.aga {
@@ -361,13 +370,12 @@ pub(super) enum ManualSpriteFlushMode {
 /// `sprite_dma_observed` says whether sprite DMA actually fetched data this
 /// frame. The beam replay only sees CPU/Copper register writes; when DMA also
 /// drives a channel, Agnus writes POS/CTL/DATA through the same Denise
-/// registers without appearing here, so two reconciliation guards approximate
-/// those unseen writes (an early same-line SPRxPOS hands the line to the DMA
-/// capture, and a pre-visible SPRxDATA seeds the latch for later retiming
-/// instead of arming direct output). With sprite DMA idle Denise's own rules
-/// apply unmodified: SPRxDATA arms at any beam position, SPRxCTL disarms, and
-/// SPRxPOS never disarms, so an armed sprite serializes on every line (there
-/// is no vertical comparator in Denise).
+/// registers without appearing here. The replay therefore starts non-held
+/// channels disarmed and lets captured DMA lines own DMA-loaded data, while
+/// actual beam-timed SPRxDATA writes still seed the latch for later retiming.
+/// With sprite DMA idle Denise's own rules apply unmodified: SPRxDATA arms at
+/// any beam position, SPRxCTL disarms, and SPRxPOS never disarms, so an armed
+/// sprite serializes on every line (there is no vertical comparator in Denise).
 pub(super) fn manual_sprite_lines_from_events_with_visible_line0(
     initial_state: &RenderState,
     events: &[BeamRegisterWrite],
@@ -378,6 +386,9 @@ pub(super) fn manual_sprite_lines_from_events_with_visible_line0(
     sprite_dma_observed: bool,
 ) -> Vec<Vec<SpriteLine>> {
     let mut regs = BeamSpriteState::from_render_state(initial_state, held);
+    if sprite_dma_observed && !include_latched_sprite_state {
+        regs.disarm_nonheld_latched_output();
+    }
     let visible_end = visible_line0 + rows as i32;
     let mut next_beam: [(i32, usize); 8] = std::array::from_fn(|sprite| {
         if include_latched_sprite_state || held[sprite].is_some() {
@@ -421,6 +432,7 @@ pub(super) fn manual_sprite_lines_from_events_with_visible_line0(
             event.hpos,
             visible_line0,
             rows,
+            matches!(event.source, BeamWriteSource::Copper),
         );
         flush_manual_sprite_lines(
             sprite,
@@ -521,6 +533,7 @@ pub(super) fn manual_sprite_lines_from_captured_dma_reuse(
                 event.hpos,
                 visible_line0,
                 rows,
+                matches!(event.source, BeamWriteSource::Copper),
             );
 
             match (off - 0x140) & 0x0006 {
@@ -590,6 +603,7 @@ pub(super) fn manual_sprite_event_beam_for_sprite_write(
     hpos: u32,
     visible_line0: i32,
     rows: usize,
+    copper: bool,
 ) -> (i32, usize) {
     match (off - 0x140) & 0x0006 {
         // SPRxPOS re-arms the sprite horizontal comparator. When the
@@ -597,11 +611,11 @@ pub(super) fn manual_sprite_event_beam_for_sprite_write(
         // still begin at HSTART; clipping in the later colour-output register
         // domain delays attached pairs whose even/odd position writes are
         // staggered by the Copper.
-        0x0 => manual_sprite_position_event_beam(vpos, hpos, visible_line0, rows),
+        0x0 => manual_sprite_position_event_beam(vpos, hpos, visible_line0, rows, copper),
         // SPRxDATA/SPRxDATB update the latches copied by Denise's horizontal
         // sprite comparator. If the write reaches that path before the
         // comparator fires, the new data belongs to the current scanline.
-        0x4 | 0x6 => manual_sprite_data_event_beam(vpos, hpos, visible_line0, rows),
+        0x4 | 0x6 => manual_sprite_data_event_beam(vpos, hpos, visible_line0, rows, copper),
         _ => manual_sprite_event_beam(vpos, hpos, visible_line0, rows),
     }
 }
@@ -629,6 +643,7 @@ pub(super) fn manual_sprite_position_event_beam(
     hpos: u32,
     visible_line0: i32,
     rows: usize,
+    copper: bool,
 ) -> (i32, usize) {
     let visible_end = visible_line0 + rows as i32;
     let vpos = vpos as i32;
@@ -638,7 +653,7 @@ pub(super) fn manual_sprite_position_event_beam(
     if vpos >= visible_end {
         return (visible_end, 0);
     }
-    let x = sprite_position_write_framebuffer_x(hpos);
+    let x = sprite_position_write_framebuffer_x_from(hpos, copper);
     (vpos, x)
 }
 
@@ -647,6 +662,7 @@ pub(super) fn manual_sprite_data_event_beam(
     hpos: u32,
     visible_line0: i32,
     rows: usize,
+    copper: bool,
 ) -> (i32, usize) {
     let visible_end = visible_line0 + rows as i32;
     let vpos = vpos as i32;
@@ -656,17 +672,39 @@ pub(super) fn manual_sprite_data_event_beam(
     if vpos >= visible_end {
         return (visible_end, 0);
     }
-    let x = sprite_data_write_framebuffer_x(hpos);
+    let x = sprite_data_write_framebuffer_x_from(hpos, copper);
     (vpos, x)
 }
 
-pub(super) fn sprite_position_write_framebuffer_x(hpos: u32) -> usize {
-    let hpos = hpos.saturating_sub(SPRITE_REGISTER_WRITE_PIPELINE_CCK);
+/// Reposition pipeline for the writer: the Copper's bus landings carry the
+/// WAIT-comparator lookahead, so copper-sourced sprite writes use the shorter
+/// [`COPPER_SPRITE_REGISTER_WRITE_PIPELINE_CCK`] to reposition where the demo
+/// author (and vAmiga) place them; CPU writes keep the calibrated pipeline.
+fn sprite_register_write_pipeline_cck(copper: bool) -> u32 {
+    if copper {
+        COPPER_SPRITE_REGISTER_WRITE_PIPELINE_CCK
+    } else {
+        SPRITE_REGISTER_WRITE_PIPELINE_CCK
+    }
+}
+
+pub(super) fn sprite_position_write_framebuffer_x_from(hpos: u32, copper: bool) -> usize {
+    let hpos = hpos.saturating_sub(sprite_register_write_pipeline_cck(copper));
     ((hpos as i32 * 2 - DIW_HSTART_FB0) * 2).clamp(0, FB_WIDTH as i32) as usize
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) fn sprite_position_write_framebuffer_x(hpos: u32) -> usize {
+    sprite_position_write_framebuffer_x_from(hpos, false)
+}
+
+pub(super) fn sprite_data_write_framebuffer_x_from(hpos: u32, copper: bool) -> usize {
+    sprite_position_write_framebuffer_x_from(hpos, copper)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn sprite_data_write_framebuffer_x(hpos: u32) -> usize {
-    sprite_position_write_framebuffer_x(hpos)
+    sprite_position_write_framebuffer_x_from(hpos, false)
 }
 
 pub(super) fn flush_manual_sprite_lines(
@@ -794,6 +832,11 @@ pub(super) fn render_sprites_with_manual_lines_and_writes(
     manual_sprite_lines: Option<&[Vec<SpriteLine>]>,
     visible_line0: i32,
 ) -> u16 {
+    #[cfg(feature = "internal-diagnostics")]
+    if crate::envcfg::flag("COPPERLINE_EXP_NO_SPRITE_RENDER") {
+        return 0;
+    }
+
     if ram.is_empty() && !sprite_dma_observed {
         return 0;
     }
@@ -1372,14 +1415,18 @@ pub(super) fn sprite_base_framebuffer_x(
     base_control: ControlState,
     control_segments: &[ControlSegment],
 ) -> i32 {
-    let base_x = (hstart - DIW_HSTART_FB0) * 2;
+    // The serializer's first pixel appears one lo-res pixel after the
+    // horizontal comparator match (crate::bus::SPRITE_OUTPUT_DELAY_LORES,
+    // ruler-probed against FS-UAE and vAmiga).
+    let base_x = (hstart + crate::bus::SPRITE_OUTPUT_DELAY_LORES - DIW_HSTART_FB0) * 2;
     let sample_x = base_x.clamp(0, FB_WIDTH.saturating_sub(1) as i32) as usize;
     let control = control_at_x(base_control, control_segments, sample_x);
     base_x + i32::from(hsub_70ns && control.shres())
 }
 
 pub(super) fn sprite_nominal_base_framebuffer_x(pos: u16, ctl: u16) -> i32 {
-    (sprite_hstart(pos, ctl) - DIW_HSTART_FB0) * 2 + i32::from(sprite_hsub_70ns(ctl))
+    (sprite_hstart(pos, ctl) + crate::bus::SPRITE_OUTPUT_DELAY_LORES - DIW_HSTART_FB0) * 2
+        + i32::from(sprite_hsub_70ns(ctl))
 }
 
 pub(super) fn sprite_display_enable_x_for_y(

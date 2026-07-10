@@ -13,8 +13,8 @@ pub const COLORCLOCKS_PER_LINE: u32 = 227;
 /// point; our CPU read lands after the chip-bus grant has advanced the
 /// beam, so the residual offset is smaller. Calibrated against the
 /// vAmigaTS Agnus/Registers/VPOS visualizations (cycle-exact register
-/// readouts) where 2 scores best.
-const VHPOSR_LOOKAHEAD_CCK: u32 = 2;
+/// readouts) and the timing-test raw-beam probes.
+const VHPOSR_LOOKAHEAD_CCK: u32 = 3;
 pub const NTSC_LONG_COLORCLOCKS_PER_LINE: u32 = 228;
 pub const DMACON_BPLEN: u16 = 1 << 8;
 pub const DMACON_DMAEN: u16 = 1 << 9;
@@ -1334,7 +1334,7 @@ mod tests {
         sprite_dma_disabled_by_bitplane_ddf, Agnus, AgnusRevision, BitplaneDmaFetchConfig,
         BitplaneDmaFetchSlot, VideoStandard, BEAMCON0_LOLDIS, BEAMCON0_LPENDIS, BEAMCON0_PAL,
         BEAMCON0_VARBEAMEN, BEAMCON0_VARVBEN, COLORCLOCKS_PER_LINE, DMACON_BPLEN, DMACON_DMAEN,
-        NTSC_LINES, NTSC_LONG_COLORCLOCKS_PER_LINE, PAL_LINES,
+        NTSC_LINES, NTSC_LONG_COLORCLOCKS_PER_LINE, PAL_LINES, VHPOSR_LOOKAHEAD_CCK,
     };
 
     #[test]
@@ -1380,7 +1380,10 @@ mod tests {
         assert_eq!(agnus.read_vhposr(), frozen);
 
         agnus.set_ersy(false);
-        assert_eq!(agnus.read_vhposr(), (0x90 << 8) | (0x10 + 2));
+        assert_eq!(
+            agnus.read_vhposr(),
+            (0x90 << 8) | (0x10 + VHPOSR_LOOKAHEAD_CCK as u16)
+        );
     }
 
     #[test]
@@ -1434,7 +1437,7 @@ mod tests {
     fn vhposr_reads_run_ahead_with_old_line_number_at_wrap() {
         let mut agnus = Agnus::new();
         agnus.vpos = 0x20;
-        agnus.hpos = COLORCLOCKS_PER_LINE - 2;
+        agnus.hpos = COLORCLOCKS_PER_LINE - VHPOSR_LOOKAHEAD_CCK;
 
         // The readback runs ahead of the counter, so the last positions
         // of a line already report the next line's start; the first two
@@ -1445,12 +1448,14 @@ mod tests {
         agnus.advance_by_cck(1);
         assert_eq!(agnus.read_vhposr(), 0x2001); // reported h = 1, old v
         agnus.advance_by_cck(1);
+        assert_eq!(agnus.read_vhposr(), 0x2102); // reported h = 2, new v
+        agnus.advance_by_cck(1);
         assert_eq!(agnus.vpos, 0x21);
         assert_eq!(agnus.hpos, 0);
-        assert_eq!(agnus.read_vhposr(), 0x2102); // reported h = 2, new v
+        assert_eq!(agnus.read_vhposr(), 0x2103);
 
         agnus.advance_by_cck(3);
-        assert_eq!(agnus.read_vhposr(), 0x2105);
+        assert_eq!(agnus.read_vhposr(), 0x2106);
     }
 
     #[test]
@@ -1480,10 +1485,10 @@ mod tests {
         assert_eq!(agnus.hpos, 0);
         assert!(agnus.lol);
         assert_eq!(agnus.current_line_cck(), NTSC_LONG_COLORCLOCKS_PER_LINE);
-        assert_eq!(agnus.read_vhposr(), 0x0102);
+        assert_eq!(agnus.read_vhposr(), 0x0103);
 
         agnus.advance_by_cck(2);
-        assert_eq!(agnus.read_vhposr(), 0x0104);
+        assert_eq!(agnus.read_vhposr(), 0x0105);
     }
 
     #[test]
@@ -2219,9 +2224,15 @@ mod tests {
         agnus.advance_by_cck(10 * COLORCLOCKS_PER_LINE + 0x30);
         agnus.trigger_light_pen();
         // No latch: reads stay live.
-        assert_eq!(agnus.read_vhposr(), (10 << 8) | (0x30 + 2));
+        assert_eq!(
+            agnus.read_vhposr(),
+            (10 << 8) | (0x30 + VHPOSR_LOOKAHEAD_CCK as u16)
+        );
         agnus.advance_by_cck(2);
-        assert_eq!(agnus.read_vhposr(), (10 << 8) | (0x32 + 2));
+        assert_eq!(
+            agnus.read_vhposr(),
+            (10 << 8) | (0x32 + VHPOSR_LOOKAHEAD_CCK as u16)
+        );
     }
 
     #[test]

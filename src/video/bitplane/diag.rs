@@ -305,16 +305,17 @@ pub(super) fn maybe_log_manual_sprite_intervals(
         let off = event.offset & 0x01FE;
         let beam_x = beam_to_framebuffer_x_unclamped(event.hpos);
         let color_x = color_write_framebuffer_x(event.hpos);
+        let source = manual_sprite_source_name(event.source);
         match off {
             0x096 => log::info!(
-                "manual-sprite event y={} h={} beam_x={} DMACON={:#06X}",
+                "manual-sprite event source={source} y={} h={} beam_x={} DMACON={:#06X}",
                 event.vpos,
                 event.hpos,
                 beam_x,
                 event.value
             ),
             0x106 => log::info!(
-                "manual-sprite event y={} h={} beam_x={} color_x={} BPLCON3={:#06X}",
+                "manual-sprite event source={source} y={} h={} beam_x={} color_x={} BPLCON3={:#06X}",
                 event.vpos,
                 event.hpos,
                 beam_x,
@@ -322,7 +323,7 @@ pub(super) fn maybe_log_manual_sprite_intervals(
                 event.value
             ),
             0x10C => log::info!(
-                "manual-sprite event y={} h={} beam_x={} color_x={} BPLCON4={:#06X}",
+                "manual-sprite event source={source} y={} h={} beam_x={} color_x={} BPLCON4={:#06X}",
                 event.vpos,
                 event.hpos,
                 beam_x,
@@ -330,14 +331,14 @@ pub(super) fn maybe_log_manual_sprite_intervals(
                 event.value
             ),
             0x1FC => log::info!(
-                "manual-sprite event y={} h={} beam_x={} FMODE={:#06X}",
+                "manual-sprite event source={source} y={} h={} beam_x={} FMODE={:#06X}",
                 event.vpos,
                 event.hpos,
                 beam_x,
                 event.value
             ),
             0x180..=0x1BE => log::info!(
-                "manual-sprite event y={} h={} color_x={} COLOR{}={:#06X}",
+                "manual-sprite event source={source} y={} h={} color_x={} COLOR{}={:#06X}",
                 event.vpos,
                 event.hpos,
                 color_x,
@@ -347,7 +348,7 @@ pub(super) fn maybe_log_manual_sprite_intervals(
             0x140..=0x17E => {
                 let sprite = ((off - 0x140) / 8) as usize;
                 log::info!(
-                    "manual-sprite event y={} h={} beam_x={} s{} reg={:#05X} val={:#06X}",
+                    "manual-sprite event source={source} y={} h={} beam_x={} s{} reg={:#05X} val={:#06X}",
                     event.vpos,
                     event.hpos,
                     beam_x,
@@ -381,6 +382,14 @@ pub(super) fn maybe_log_manual_sprite_intervals(
                 line.datb_ext
             );
         }
+    }
+}
+
+fn manual_sprite_source_name(source: BeamWriteSource) -> &'static str {
+    match source {
+        BeamWriteSource::Cpu => "cpu",
+        BeamWriteSource::CpuCopperIrq => "cpu_copper_irq",
+        BeamWriteSource::Copper => "copper",
     }
 }
 

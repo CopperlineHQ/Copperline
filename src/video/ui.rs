@@ -3126,7 +3126,7 @@ fn draw_frame_analyzer(
     let mut y = scanline.y + scanline.h + 14;
     draw_panel_text(frame, rect.x + 10, y, "Legend", PANEL_TEXT_DIM, 1, scale);
     let mut x = rect.x + 66;
-    for code in [b'R', b'B', b'S', b'D', b'A', b'C', b'L', b'P', b'.'] {
+    for code in *b"RBSDACLP." {
         fill_rect(
             frame,
             scale_rect(

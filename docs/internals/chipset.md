@@ -206,6 +206,11 @@ keyboard-controller pacing delay), and the fire-button lines. CIA-B
 carries the floppy control lines (motor, select, side, step) and the FLAG
 input pulsed by the disk index.
 
+The 68000 `RESET` instruction asserts the external reset line without
+resetting the CPU core or clearing RAM. Copperline resets the CIA port
+state on that line, so CIA-A releases `/OVL` and the boot ROM overlay is
+visible again before Kickstart reads the reset vectors.
+
 ## Floppy (`floppy.rs`)
 
 The floppy subsystem is track-timed: a drive has a rotational position,

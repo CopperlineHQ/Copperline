@@ -47,6 +47,40 @@ fn sync_cck_enabled_setting() -> bool {
     }
 }
 
+fn diag_cpu_sync_on() -> bool {
+    use std::sync::OnceLock;
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| crate::envcfg::flag("COPPERLINE_DIAG_CPU_SYNC"))
+}
+
+fn diag_cpu_sync_pc_ranges() -> &'static [(u32, u32)] {
+    use std::sync::OnceLock;
+    static V: OnceLock<Vec<(u32, u32)>> = OnceLock::new();
+    V.get_or_init(|| {
+        let Some(spec) = crate::envcfg::var("COPPERLINE_DIAG_CPU_SYNC_PC") else {
+            return Vec::new();
+        };
+        spec.split(',')
+            .filter_map(|part| {
+                let part = part.trim();
+                if let Some((lo, hi)) = part.split_once(':') {
+                    let lo = crate::envcfg::parse_u32(lo)?;
+                    let hi = crate::envcfg::parse_u32(hi)?;
+                    Some((lo.min(hi), lo.max(hi)))
+                } else {
+                    let pc = crate::envcfg::parse_u32(part)?;
+                    Some((pc, pc))
+                }
+            })
+            .collect()
+    })
+}
+
+fn diag_cpu_sync_pc_matches(pc: u32) -> bool {
+    let ranges = diag_cpu_sync_pc_ranges();
+    ranges.is_empty() || ranges.iter().any(|(lo, hi)| (*lo..=*hi).contains(&pc))
+}
+
 /// Entries kept in the debugger's recent-PC ring.
 pub const UI_PC_HISTORY_CAP: usize = 64;
 
@@ -238,6 +272,9 @@ struct CpuBus {
     /// writeback). Cleared when the boundary decision consumes the sample.
     /// Transient like `sampled_irq_level`; never serialized.
     ipl_sample_held: bool,
+    /// Start PC of the instruction currently inside the core, used only by
+    /// `COPPERLINE_DIAG_CPU_SYNC` to filter internal-cycle trace lines.
+    diag_current_pc: u32,
 }
 
 pub fn build(
@@ -294,6 +331,7 @@ impl M68kMachine {
                 last_fetch_cache_hit: false,
                 sampled_irq_level: 0,
                 ipl_sample_held: false,
+                diag_current_pc: 0,
             },
             hle: NoOpHleHandler,
             fpu_enabled,
@@ -390,25 +428,24 @@ impl M68kMachine {
         }
     }
 
-    // COPPERLINE_DIAG_CRASH: keep a short history of (pc, opcode, A7) and, the first
-    // time the CPU executes a sustained run of zero opcodes from chip RAM (real
-    // empty memory -- a single 0x0000 opcode is a valid ORI.B #imm,D0), dump the
-    // history, the stack and the registers. Catches "demo jumped into empty
-    // memory" crashes with the path that led there.
+    // COPPERLINE_DIAG_CRASH: keep a short history of (pc, opcode, A7) and dump
+    // it when the CPU executes a sustained run of zero opcodes from chip RAM
+    // (real empty memory -- a single 0x0000 opcode is a valid ORI.B #imm,D0) or
+    // when a blit is armed to write low memory. Catches "demo jumped into empty
+    // memory" and exception-vector corruption crashes with the path that led
+    // there.
     fn dbg_record_crash_path(&mut self) {
         if self.dbg_crash_dumped {
             return;
         }
         let pc = self.cpu.pc;
-        let opcode = if (pc as usize) < self.bus.bus.mem.chip_ram.len() {
-            self.bus.bus.peek_chip_word(pc as usize)
-        } else {
-            0xFFFF
-        };
+        let opcode = self.bus.bus.peek_word_any(pc);
         // Require a run of zero words at and after the PC: 8 consecutive zero
         // words cannot be real code (ORI.B #0,D0 spam), only empty memory.
-        let in_empty_memory =
-            opcode == 0 && (1..8).all(|k| self.bus.bus.peek_chip_word(pc as usize + k * 2) == 0);
+        let pc_in_chip_ram = (pc as usize) < self.bus.bus.mem.chip_ram.len();
+        let in_empty_memory = pc_in_chip_ram
+            && opcode == 0
+            && (1..8).all(|k| self.bus.bus.peek_chip_word(pc as usize + k * 2) == 0);
         let came_from_code = self
             .dbg_crash_ring
             .back()
@@ -423,8 +460,13 @@ impl M68kMachine {
         if lowmem_blit || (in_empty_memory && came_from_code) {
             self.dbg_crash_dumped = true;
             let secs = self.bus.bus.emulated_seconds();
+            let reason = if lowmem_blit {
+                "low-memory blitter destination"
+            } else {
+                "zero-opcode chip RAM"
+            };
             log::warn!(
-                "CRASH: CPU entered zero-opcode memory at PC={:#010X} t={:.4}s SR={:#06X}",
+                "CRASH: {reason} at PC={:#010X} t={:.4}s SR={:#06X}",
                 pc,
                 secs,
                 self.cpu.get_sr(),
@@ -436,6 +478,21 @@ impl M68kMachine {
                 self.bus.bus.agnus.dmacon,
                 self.bus.bus.blitter.busy,
             );
+            if lowmem_blit {
+                let b = &self.bus.bus.blitter;
+                let line = b.bltcon1 & 0x0001 != 0;
+                let writes = if line { "C-gated line" } else { "D-channel" };
+                log::warn!(
+                    "  blit {writes} con0={:#06X} con1={:#06X} apt={:#08X} bpt={:#08X} cpt={:#08X} dpt={:#08X} dmod={}",
+                    b.bltcon0,
+                    b.bltcon1,
+                    b.bltapt,
+                    b.bltbpt,
+                    b.bltcpt,
+                    b.bltdpt,
+                    b.bltdmod,
+                );
+            }
             for reg in 0..8 {
                 log::warn!(
                     "  D{reg}={:#010X} A{reg}={:#010X}",
@@ -443,10 +500,13 @@ impl M68kMachine {
                     self.cpu.a(reg)
                 );
             }
-            let sp = self.cpu.a(7) as usize;
+            let sp = self.cpu.a(7);
             let mut stack = String::new();
             for k in 0..24 {
-                stack.push_str(&format!("{:04X} ", self.bus.bus.peek_chip_word(sp + k * 2)));
+                stack.push_str(&format!(
+                    "{:04X} ",
+                    self.bus.bus.peek_word_any(sp.wrapping_add(k * 2))
+                ));
             }
             log::warn!("  stack @A7={sp:#010X}: {stack}");
             // Hexdump the code around the crash site and around the most recent
@@ -465,7 +525,7 @@ impl M68kMachine {
                 for k in 0..32 {
                     row.push_str(&format!(
                         "{:04X} ",
-                        self.bus.bus.peek_chip_word(base as usize + k * 2)
+                        self.bus.bus.peek_word_any(base.wrapping_add(k * 2))
                     ));
                 }
                 log::warn!("  mem {base:#010X}: {row}");
@@ -492,6 +552,8 @@ impl M68kMachine {
         }
         self.maybe_dump_copper(secs);
         self.maybe_dump_ram(secs);
+        self.maybe_arm_headless_alert_break(secs);
+        self.debug_check_headless_exception(secs);
         let pc = self.cpu.pc;
 
         if let Some((trace_full, lo, hi)) = self
@@ -558,7 +620,14 @@ impl M68kMachine {
             }
         }
 
-        if self.dbg.as_ref().is_some_and(|d| d.is_breakpoint(pc)) {
+        if self.dbg.as_ref().is_some_and(|d| d.alert_break == Some(pc)) {
+            let code = self.cpu.d(7);
+            let decoded = crate::debugger::guru_decode(code);
+            self.debug_report(
+                &format!("ALERT pc={pc:#010X} code={code:#010X} {decoded}"),
+                secs,
+            );
+        } else if self.dbg.as_ref().is_some_and(|d| d.is_breakpoint(pc)) {
             self.debug_report(&format!("BREAK pc={pc:#010X}"), secs);
         }
 
@@ -581,6 +650,95 @@ impl M68kMachine {
                 .map(|addr| (addr, self.bus.bus.peek_word_any(addr)))
                 .collect(),
         )
+    }
+
+    fn debug_check_headless_exception(&mut self, secs: f64) {
+        let Some(vector) = self.cpu.last_exception_vector else {
+            return;
+        };
+        let Ok(vector) = u16::try_from(vector) else {
+            return;
+        };
+        if !self.dbg.as_ref().is_some_and(|d| d.catches_vector(vector)) {
+            return;
+        }
+        self.cpu.last_exception_vector = None;
+        let name = crate::debugger::exception_vector_name(vector);
+        let frame = self.debug_exception_frame_summary(vector);
+        self.debug_report(&format!("CATCH {name} vector={vector} {frame}"), secs);
+    }
+
+    fn debug_exception_frame_summary(&self, vector: u16) -> String {
+        let sp = self.cpu.a(7);
+        let word = |off: u32| self.bus.bus.peek_word_any(sp.wrapping_add(off));
+        let stacked_sr = word(0);
+        let stacked_pc = (u32::from(word(2)) << 16) | u32::from(word(4));
+        let opcode = self.bus.bus.peek_word_any(stacked_pc);
+        let mut stack = String::new();
+        for k in 0..8 {
+            stack.push_str(&format!(" {:04X}", word(k * 2)));
+        }
+
+        if matches!(vector, 2 | 3) && self.cpu.cpu_type == CpuType::M68000 {
+            let access = (u32::from(word(6)) << 16) | u32::from(word(8));
+            return format!(
+                "frame_sr={stacked_sr:#06X} frame_pc={stacked_pc:#010X} \
+                 frame_op={opcode:04X} access={access:#010X} stack@a7={sp:#010X}:{stack}"
+            );
+        }
+
+        if self.cpu.cpu_type == CpuType::M68000 {
+            return format!(
+                "frame_sr={stacked_sr:#06X} frame_pc={stacked_pc:#010X} \
+                 frame_op={opcode:04X} stack@a7={sp:#010X}:{stack}"
+            );
+        }
+
+        let format_vector = word(6);
+        format!(
+            "frame_sr={stacked_sr:#06X} frame_pc={stacked_pc:#010X} \
+             frame_op={opcode:04X} fmtvec={format_vector:#06X} stack@a7={sp:#010X}:{stack}"
+        )
+    }
+
+    fn maybe_arm_headless_alert_break(&mut self, secs: f64) {
+        if !self
+            .dbg
+            .as_ref()
+            .is_some_and(|d| d.catch_alert && d.alert_break.is_none())
+        {
+            return;
+        }
+        let bus = &self.bus.bus;
+        let peek8 = |addr: u32| {
+            let word = bus.peek_word_any(addr & !1);
+            if addr & 1 == 0 {
+                (word >> 8) as u8
+            } else {
+                word as u8
+            }
+        };
+        let peek32 = |addr: u32| {
+            (u32::from(bus.peek_word_any(addr)) << 16)
+                | u32::from(bus.peek_word_any(addr.wrapping_add(2)))
+        };
+        let os = crate::amigaos::OsMemory {
+            peek8: &peek8,
+            peek32: &peek32,
+        };
+        let Ok(execbase) = os.exec_base() else {
+            return;
+        };
+        // exec.library Alert() is at LVO -108. The jump-table entry itself
+        // executes with D7 holding the alert code, so a PC break there reports
+        // the same information as the interactive CATCHALERT command.
+        let pc = execbase.wrapping_sub(108) & self.cpu.address_mask;
+        if let Some(dbg) = self.dbg.as_mut() {
+            dbg.alert_break = Some(pc);
+        }
+        log::info!(
+            "dbg catchalert armed: execbase={execbase:#010X} alert_pc={pc:#010X} t={secs:.5}"
+        );
     }
 
     /// COPPERLINE_DBG_COPPER: disassemble the active Copper list once, the first
@@ -1160,6 +1318,7 @@ impl M68kMachine {
         bus.adopt_host_resources(&mut self.bus.bus);
         bus.adopt_ui_debug_state(&self.bus.bus);
         bus.reset_transient_video_after_state_load();
+        bus.reset_transient_diagnostics_after_state_load();
         // The CPU model travels with the state (cpu_type, timing tables, and
         // address_mask all live in CpuCore); keep the bus adapter's mask copy
         // in step so external decode agrees with the restored core.
@@ -1758,6 +1917,7 @@ impl M68kMachine {
                 } else {
                     None
                 };
+                self.bus.diag_current_pc = dbg_pc_before;
                 match self.cpu.step_with_hle_handler(&mut self.bus, &mut self.hle) {
                     StepResult::Ok { cycles } => {
                         if self.bus.icache.is_some() || self.bus.dcache.is_some() {
@@ -1815,6 +1975,17 @@ impl M68kMachine {
                     .bus
                     .slice_bus_advanced_cck()
                     .saturating_sub(bus_before);
+                if diag_cpu_sync_on() && diag_cpu_sync_pc_matches(self.cpu.pc) {
+                    eprintln!(
+                        "CPUSYNC boundary pc={:08x} cpu_cck={} bus_cck={} rem_cck={} v={:03x} h={:02x}",
+                        self.cpu.pc,
+                        cpu_cck_iter,
+                        bus_iter,
+                        cpu_cck_iter.saturating_sub(bus_iter),
+                        self.bus.bus.agnus.vpos,
+                        self.bus.bus.agnus.hpos,
+                    );
+                }
                 self.bus
                     .bus
                     .advance_cpu_internal_cycles(cpu_cck_iter.saturating_sub(bus_iter));
@@ -2731,6 +2902,12 @@ impl AddressBus for CpuBus {
     fn sync(&mut self, cpu_clocks: u32) {
         // Cycle-exact core (Part E.2): internal (non-bus) CPU clocks elapse
         // with the chip bus free for DMA, timed devices ticking along.
+        if diag_cpu_sync_on() && diag_cpu_sync_pc_matches(self.diag_current_pc) {
+            eprintln!(
+                "CPUSYNC preaccess pc={:08x} clocks={} v={:03x} h={:02x}",
+                self.diag_current_pc, cpu_clocks, self.bus.agnus.vpos, self.bus.agnus.hpos,
+            );
+        }
         self.bus.sync_cpu_internal_clocks(cpu_clocks);
     }
 
@@ -2931,7 +3108,7 @@ mod tests {
     }
 
     use crate::audio::NullSink;
-    use crate::chipset::cia::{REG_CRA, REG_ICR, REG_TAHI, REG_TALO};
+    use crate::chipset::cia::{REG_CRA, REG_DDRA, REG_ICR, REG_PRA, REG_TAHI, REG_TALO};
     use crate::chipset::copper::DMACON_COPEN;
     use crate::chipset::paula::Paula;
     use crate::chipset::paula::{DMACON_DMAEN, INT_COPER, INT_MASTER, INT_PORTS, INT_VERTB};
@@ -3207,6 +3384,7 @@ mod tests {
             last_fetch_cache_hit: false,
             sampled_irq_level: 0,
             ipl_sample_held: false,
+            diag_current_pc: 0,
         };
 
         assert_eq!(bus.read_long(0), 0x1111_4EF9);
@@ -3233,6 +3411,7 @@ mod tests {
             last_fetch_cache_hit: false,
             sampled_irq_level: 0,
             ipl_sample_held: false,
+            diag_current_pc: 0,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
         // Start on a refresh slot (0x003) so the fetch both waits for and then
@@ -3266,6 +3445,7 @@ mod tests {
             last_fetch_cache_hit: false,
             sampled_irq_level: 0,
             ipl_sample_held: false,
+            diag_current_pc: 0,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
 
@@ -3479,6 +3659,7 @@ mod tests {
             last_fetch_cache_hit: false,
             sampled_irq_level: 0,
             ipl_sample_held: false,
+            diag_current_pc: 0,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
         let fast = FAST_RAM_BASE as u32 + 0x40;
@@ -3526,6 +3707,7 @@ mod tests {
             last_fetch_cache_hit: false,
             sampled_irq_level: 0,
             ipl_sample_held: false,
+            diag_current_pc: 0,
         };
         let before = bus.read_long(ROM_BASE as u32);
         bus.write_long(ROM_BASE as u32, 0xDEAD_BEEF);
@@ -3551,6 +3733,7 @@ mod tests {
             last_fetch_cache_hit: false,
             sampled_irq_level: 0,
             ipl_sample_held: false,
+            diag_current_pc: 0,
         };
         let addr = SLOW_RAM_BASE as u32 + 64 * 1024;
         // A write into unmapped space still drives the bus: the following
@@ -4215,25 +4398,42 @@ mod tests {
     }
 
     #[test]
-    fn cpu_reset_instruction_clears_agnus_copper_danger_bit() -> Result<()> {
-        let mut bus = test_bus_with_pc(0x0000_0100);
+    fn cpu_reset_instruction_resets_external_devices_without_resetting_cpu() -> Result<()> {
+        let pc = 0x0000_0100;
+        let mut bus = test_bus_with_pc(pc);
         write_program(
             &mut bus,
-            0x0000_0100,
+            pc,
             &[
                 0x4E70, // RESET
-                0x4E71, // NOP, proves the CPU itself was not reset.
+                0x4E71, // NOP prefetched before RESET restores the overlay.
             ],
         );
-        bus.agnus.write_copcon(0x0002);
 
         let mut machine = M68kMachine::new(bus, CpuModel::M68000, false)?;
+        {
+            let bus = machine.bus_mut();
+            bus.mem.chip_ram[4..8].copy_from_slice(&0x00C0_0276u32.to_be_bytes());
+            bus.mem.chip_ram[0x1234] = 0xAA;
+            bus.mem.overlay = false;
+            bus.overlay_disable_pending = true;
+            let _ = bus.cia_a.write(REG_DDRA, 0x03);
+            let _ = bus.cia_a.write(REG_PRA, 0x00);
+            bus.agnus.write_copcon(0x0002);
+        }
         assert_ne!(machine.bus().agnus.copcon, 0);
+        let start_cck = machine.bus().emulated_cck();
         let slice = machine.step_slice(1)?;
 
         assert_eq!(slice.instructions, 1);
         assert_eq!(machine.bus().agnus.copcon, 0);
-        assert_eq!(machine.pc(), 0x0000_0102);
+        assert!(machine.bus().mem.overlay);
+        assert!(!machine.bus().overlay_disable_pending);
+        assert_eq!(machine.bus().cia_a.peek_register(REG_DDRA), 0);
+        assert_eq!(machine.bus().cia_a.peek_register(REG_PRA), 0xC1);
+        assert_eq!(machine.bus().mem.chip_ram[0x1234], 0xAA);
+        assert!(machine.bus().emulated_cck() > start_cck);
+        assert_eq!(machine.pc(), pc + 2);
         Ok(())
     }
 

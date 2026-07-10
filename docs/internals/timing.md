@@ -13,14 +13,14 @@ the inline suites (`src/chipset/copper.rs`, `blitter.rs`, `src/bus.rs`).
 Every colour clock of every scanline has an owner, decided in priority
 order (`fixed_dma_owner_at`, `src/bus.rs`):
 
-1. **Memory refresh** -- four fixed odd slots early in the line. Refresh
-   only ever uses odd slots, which is why it never collides with the
-   Copper's even-slot cadence.
-2. **Disk DMA** -- three fixed slots, when DSKEN is set and a transfer is
+1. **Memory refresh** -- fixed odd slots 1/3/5 plus the line-end refresh
+   slot (E2, or E3 on NTSC long lines). Refresh only ever uses odd slots,
+   which is why it never collides with the Copper's even-slot cadence.
+2. **Disk DMA** -- fixed slots 7/9/B, when DSKEN is set and a transfer is
    live.
-3. **Audio DMA** -- one slot per Paula channel, claimed only when that
-   channel actually has a fetch pending.
-4. **Sprite DMA** -- the fixed per-sprite slot pairs.
+3. **Audio DMA** -- one fixed slot per Paula channel (D/F/11/13), claimed
+   only when that channel actually has a fetch pending.
+4. **Sprite DMA** -- the fixed per-sprite slot pairs starting at 15/17.
 5. **Bitplane DMA** -- the fetch pattern determined by DDFSTRT/DDFSTOP and
    the plane count; at high plane counts this is what starves everyone
    else, exactly as on hardware.
@@ -420,14 +420,18 @@ both emulators.
 With BLTPRI clear, Copperline models the Agnus blitter-slowdown counter
 (the Minimig RTL `bls_cnt`). A busy "nice" blitter still holds the chip bus
 on its access cycles -- the CPU gets no regular alternate slot. Each colour
-clock the waiting CPU misses increments the counter; after
-`BLITTER_SLOWDOWN_CPU_MISS_LIMIT` (3) consecutive misses the blitter yields
-one slot, matching the HRM "one bus cycle in four" rule and vAmiga's ~2:1
-blitter:CPU split on a blitter-heavy 3D-scene regression. Idle blit pipeline cycles
-(slots that do not need the bus) never claim the bus and stay
-CPU-available even with BLTPRI set, but fixed DMA slots still stall those
-idle phases. The counter resets when the CPU gets the bus, when BLTPRI is
-set, or when blitter DMA cannot run.
+clock the waiting CPU misses still increments the diagnostic miss count, but
+the BLS pressure counter only advances when the pending blitter micro-cycle
+is a real pressure source: a bus access, fill's explicit idle cycle, or
+line-mode BUSIDLE. Ordinary normal-mode "-" cycles from disabled channels or
+the empty D pipeline bubble stall through fixed DMA but do not make the
+blitter yield earlier. After `BLITTER_SLOWDOWN_CPU_MISS_LIMIT` (3)
+consecutive pressure misses the blitter yields one slot, matching the HRM
+"one bus cycle in four" rule while also matching UAE's `blitter_nasty`
+distinction between normal idle cycles and fill/line BUSIDLE. Idle blit
+pipeline cycles never claim the bus and stay CPU-available even with BLTPRI
+set. The counter resets when the CPU gets the bus, when BLTPRI is set, or
+when blitter DMA cannot run.
 
 A 68000 `TAS` read-modify-write is unsafe on chip RAM (the HRM warns
 against it); the `m68k` backend exposes it as a byte read then a byte
@@ -471,18 +475,26 @@ Tests: `ecs_bltsizv_bltsizh_start_extended_blit`,
 ### Known residuals
 
 Cross-emulator timing-test comparisons (corroborated in
-`timing-test/README.md`) leave one open blitter gap that is tracked
-separately:
+`timing-test/README.md`) now put the D-only clear and the active-display
+fill/copper phase within a few colour clocks of the FS-UAE/real reference
+after the BLS pressure-counter distinction above:
 
-- **Line blits run slow**: a 64-pixel line measures ~317 beam-CCK in
-  Copperline vs 262 on the FS-UAE reference (which now equals the 262
-  slots `line_total_slots` predicts with the startup and terminal
-  cycles), roughly 21% too slow -- the gap is stall behaviour of the
-  internal L1/L3 cycles under display DMA, not the slot count.
+- **D-only clear**: row 23 measures `0x2712` vs the reference `0x2714`.
+- **A->D fill under 3-plane display**: row 26 measures `0x6203` vs the
+  reference `0x61FF`.
+- **Copper-vs-CPU phase**: row 27 measures `0x6426` vs the reference
+  `0x6426`.
+- **Line blits**: a 64-pixel line now measures `0x015A`, matching the
+  vAmiga reference and leaving the calibrated normal/fill rows unchanged.
+  The line program enters its first BUSIDLE/HOLD_A micro-instruction one
+  colour clock earlier than the normal A/B/C/D pipeline setup; a two-slot
+  reduction overshoots row 25 and shifts row 26, so the remaining FS-UAE
+  row-25 difference is not another startup slot.
 
-The previous row-26 display-DMA contention residual is closed: with fixed DMA
-stalling idle fill phases, Copperline measures ~25074 CCK for the 3-plane
-display fill vs 25208 on the FS-UAE reference.
+The previous row-23 D-only clear residual was caused by feeding BLS pressure
+from normal-mode disabled-channel idle phases blocked by fixed DMA. Those
+phases still stall as micro-cycles, but they no longer make the nice blitter
+yield earlier to the CPU.
 
 References: HRM [Blitter
 Hardware](https://www.theflatnet.de/pub/cbm/amiga/AmigaDevDocs/hard_6.html).
@@ -520,6 +532,19 @@ calibrated against timing-test row 19 with a mis-decoded VHPOSR (the low
 byte is the CCK position, not CCK/2); that delivered every interrupt ~50 CCK
 late and dominated the vAmigaTS cputim/irqtim divergence.
 
+## Beam-register readback
+
+Live VHPOSR reads expose a pipelined beam position, not the exact internal
+counter. Copperline reports the horizontal byte three colour clocks ahead of
+the internal Agnus counter at the CPU-visible register-read point, while the
+first two reported positions of a new line still carry the previous vertical
+line number. vAmiga models the same hardware quirk as a five-cycle lead at its
+peek point; Copperline's smaller residual lead accounts for the chip-bus grant
+already advancing the beam before `read_vhposr` samples it. The low byte is raw
+colour clocks, not half clocks. This is visible in timing-test rows 19/20/22/27
+and in line-wrap polling loops that read VHPOSR immediately after INTREQR bits
+become visible.
+
 ## Real-time pacing
 
 Pacing never changes emulated behaviour -- it only decides how much
@@ -532,8 +557,9 @@ debits a per-frame instruction budget one of two ways, selected by
   through every CPU cycle as it executes -- internal cycles, bus-cycle
   tails, chip-bus grants and contention waits -- so the slice's elapsed bus
   CCK is the true hardware cost (`real_slice_accounting` in
-  `src/emulator.rs`). Because the vendored core's 68000 cycle counts are
-  accurate to ~1% (SingleStepTests, `crates/m68k/CYCLE_TIMING_GAP.md`),
+  `src/emulator.rs`). Because the vendored core's 68000 cycle totals are
+  exact across the SingleStepTests corpus
+  (`crates/m68k/CYCLE_TIMING_GAP.md`),
   this matches a stock PAL 68000.
 - `instructions`: a flat cycles-per-instruction quota
   (`COPPERLINE_REAL_CPU_CPI`, default 4.0), debited by retired
