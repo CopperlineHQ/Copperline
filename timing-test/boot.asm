@@ -6,7 +6,7 @@
 ; This keeps the main program off the 1024-byte boot-block size limit.
 
 MAIN    equ     $30000          ; load address for the main program (chip RAM)
-SECTORS equ     16              ; sectors to load (8 KB; main is ~1.5 KB)
+SECTORS equ     96              ; sectors to load (48 KB; cc7 embeds a 45 KB blob)
 
 CMD_READ  equ   2
 IO_COMMAND equ  $1c             ; IOStdReq.io_Command  (word)
