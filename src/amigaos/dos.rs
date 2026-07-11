@@ -110,6 +110,42 @@ pub struct VolumeNode {
     pub name: Long, // BSTR
 }
 
+/// `struct FileSysStartupMsg` (dos/filehandler.h). The boot menu (Early
+/// Startup) dereferences dn_Startup as a BPTR to this and displays
+/// fssm_Device, so even a virtual handler wants a well-formed one.
+#[derive(IntoBytes, Immutable)]
+#[repr(C)]
+pub struct FileSysStartupMsg {
+    pub unit: Long,
+    pub device: Long,  // BSTR: exec device name (display-only for us)
+    pub environ: Long, // BPTR to a DosEnvec
+    pub flags: Long,
+}
+
+/// `struct DosEnvec` (dos/filehandler.h), the fixed 17-long geometry table
+/// (de_TableSize = 16, counting entries after itself through de_DosType).
+#[derive(IntoBytes, Immutable)]
+#[repr(C)]
+pub struct DosEnvec {
+    pub table_size: Long,
+    pub size_block: Long, // in longwords
+    pub sec_org: Long,
+    pub surfaces: Long,
+    pub sectors_per_block: Long,
+    pub blocks_per_track: Long,
+    pub reserved: Long,
+    pub pre_alloc: Long,
+    pub interleave: Long,
+    pub low_cyl: Long,
+    pub high_cyl: Long,
+    pub num_buffers: Long,
+    pub buf_mem_type: Long,
+    pub max_transfer: Long,
+    pub mask: Long,
+    pub boot_pri: Long,
+    pub dos_type: Long,
+}
+
 /// `struct FileInfoBlock` (dos/dos.h), through fib_Comment. The file name
 /// and comment are BCPL strings embedded in the block.
 #[derive(IntoBytes, Immutable)]
@@ -178,6 +214,8 @@ mod tests {
         assert_eq!(std::mem::size_of::<FileLock>(), 20);
         assert_eq!(std::mem::size_of::<VolumeNode>(), 44);
         assert_eq!(std::mem::size_of::<FileInfoBlock>(), 224);
+        assert_eq!(std::mem::size_of::<FileSysStartupMsg>(), 16);
+        assert_eq!(std::mem::size_of::<DosEnvec>(), 68);
         // Spot-check a serialized field: id_DiskType at offset 24, BE.
         let mut info: InfoData = unsafe { std::mem::zeroed() };
         info.disk_type = long(0x444F_5301);

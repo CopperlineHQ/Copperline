@@ -126,7 +126,10 @@ void mount_boards(UBYTE *board, struct Library *_expbase, struct ConfigDev *cd)
         dn->dn_Type = DLT_DEVICE;
         dn->dn_StackSize = HANDLER_STACK;
         dn->dn_Priority = 10;
-        dn->dn_Startup = i; // mount table index; read back at ACTION_STARTUP
+        // The emulator prepared one FileSysStartupMsg per unit at expansion
+        // init; the boot menu displays it, and the emulator reads the unit
+        // back from fssm_Unit at ACTION_STARTUP.
+        dn->dn_Startup = MKBADDR(board + FSSM_OFFSET + i * FSSM_SLOT_SIZE);
         dn->dn_SegList = MKBADDR(board + 4);
         dn->dn_GlobalVec = -1; // C handler: no BCPL global vector
         dn->dn_Name = MKBADDR(bname);

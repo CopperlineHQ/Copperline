@@ -33,6 +33,11 @@
 #define MOUNT_MAX_COUNT    16
 #define VOLUMES_OFFSET     0x7000
 #define VOLUME_SLOT_SIZE   128
+// Per-unit FileSysStartupMsg, written by the emulator at expansion init;
+// dn_Startup points here so the Early Startup boot menu can display the
+// device name, unit, and dostype instead of dereferencing garbage.
+#define FSSM_OFFSET        0x7800
+#define FSSM_SLOT_SIZE     16
 
 // A-line opcodes reserved for host traps (see FilesysHle in src/filesys.rs).
 #define TRAP_DIAG_ENTRY    0xA400 // DiagPoint entered (logged by the host)

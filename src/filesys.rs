@@ -42,6 +42,14 @@ pub const DIAG_OFFSET: u16 = ROM_OFFSET as u16 + 0x40;
 /// AddDosEntry'd by the guest handler (TRAP_RES_ADDVOLUME).
 const VOLUMES_OFFSET: u32 = 0x7000;
 const VOLUME_SLOT_SIZE: u32 = 128;
+/// Per-unit FileSysStartupMsg (dn_Startup points here), written by the host
+/// at expansion init so the Early Startup boot menu displays a device name,
+/// unit, and dostype instead of dereferencing garbage. The shared display
+/// device name (BSTR) and DosEnvec follow the 16 slots.
+const FSSM_OFFSET: u32 = 0x7800;
+const FSSM_SLOT_SIZE: u32 = 16;
+const FSSM_DEVNAME_OFFSET: u32 = 0x7900;
+const FSSM_ENVEC_OFFSET: u32 = 0x7940;
 /// Host-managed pool for guest-visible objects (FileLocks), through the end
 /// of the 64K window. The guest never touches it.
 const POOL_OFFSET: u32 = 0x8000;
@@ -129,8 +137,8 @@ pub struct FilesysHle {
     /// Board base address, captured from A0 at the DiagPoint trap.
     board_base: Option<u32>,
     /// Handler MsgPort address -> mount unit, learned from startup packets.
-    /// TODO(codewiz): clear all per-boot state (ports, locks, files, pool)
-    /// on guest reset -- it goes stale across a warm reboot.
+    /// All per-boot state is cleared at the TRAP_DIAG_ENTRY of the next
+    /// boot (expansion init runs exactly once per boot).
     ports: HashMap<u32, usize>,
     /// Mount unit -> guest address of its volume DosList node.
     volumes: HashMap<usize, u32>,
@@ -303,6 +311,48 @@ impl FilesysHle {
         names
     }
 
+    /// Write one FileSysStartupMsg per mount into the board window, plus the
+    /// shared display device name and DosEnvec they reference. dn_Startup
+    /// points at these so the Early Startup boot menu shows "CLFS hostfs-N"
+    /// instead of dereferencing garbage, and ACTION_STARTUP reads the unit
+    /// back from fssm_Unit.
+    fn write_startup_msgs(&self, bus: &mut dyn AddressBus, base: u32) {
+        let envec = DosEnvec {
+            table_size: long(16),  // entries after this one, through dos_type
+            size_block: long(128), // longwords = 512-byte blocks
+            sec_org: long(0),
+            surfaces: long(1),
+            sectors_per_block: long(1),
+            blocks_per_track: long(1),
+            reserved: long(2),
+            pre_alloc: long(0),
+            interleave: long(0),
+            low_cyl: long(0),
+            high_cyl: long(0),
+            num_buffers: long(1),
+            buf_mem_type: long(1), // MEMF_PUBLIC
+            max_transfer: long(0x7FFF_FFFF),
+            mask: long(0xFFFF_FFFE),
+            boot_pri: long(-128i32 as u32), // matches the AddBootNode priority
+            dos_type: long(ID_CLFS_DISK),
+        };
+        write_bytes(bus, base + FSSM_ENVEC_OFFSET, envec.as_bytes());
+        write_bytes(bus, base + FSSM_DEVNAME_OFFSET, &bcpl::<32>(b"hostfs"));
+        for unit in 0..self.mounts.len() as u32 {
+            let fssm = FileSysStartupMsg {
+                unit: long(unit),
+                device: long((base + FSSM_DEVNAME_OFFSET) >> 2),
+                environ: long((base + FSSM_ENVEC_OFFSET) >> 2),
+                flags: long(0),
+            };
+            write_bytes(
+                bus,
+                base + FSSM_OFFSET + unit * FSSM_SLOT_SIZE,
+                fssm.as_bytes(),
+            );
+        }
+    }
+
     /// Build the volume DosList node for `unit` in the board window; the
     /// guest handler AddDosEntry's it (only guest code may take the DosList
     /// semaphore). Returns the node's guest address.
@@ -346,7 +396,10 @@ impl FilesysHle {
         // starts the handler process (its dp_Type is not meaningful).
         if !self.ports.contains_key(&port) {
             let dn = arg(bus, 3) << 2; // dp_Arg3: BPTR DeviceNode
-            let unit = bus.read_long(dn + DEVICENODE_STARTUP) as usize;
+                                       // dn_Startup is a BPTR to the unit's FileSysStartupMsg (written
+                                       // by write_startup_msgs); fssm_Unit is its first field.
+            let fssm = bus.read_long(dn + DEVICENODE_STARTUP) << 2;
+            let unit = bus.read_long(fssm) as usize;
             if unit >= self.mounts.len() {
                 log::warn!("filesys: startup packet for unknown unit {unit}");
                 return (DOSFALSE, ERROR_OBJECT_NOT_FOUND);
@@ -601,7 +654,20 @@ impl HleHandler for FilesysHle {
         // dar[0..8] = D0-D7, dar[8..16] = A0-A7.
         match opcode {
             TRAP_DIAG_ENTRY => {
+                // Expansion init runs exactly once per boot: (re)capture the
+                // board base and drop every per-boot structure -- after a
+                // warm reboot the old ports, locks, and open files are
+                // stale, and exec tends to reallocate the new handler ports
+                // at the same addresses, which would misroute the startup
+                // packets of the new boot.
                 self.board_base = Some(cpu.dar[8]);
+                self.ports.clear();
+                self.volumes.clear();
+                self.locks.clear();
+                self.files.clear();
+                self.free_slots.clear();
+                self.pool_next = 0;
+                self.write_startup_msgs(bus, cpu.dar[8]);
                 log::info!(
                     "filesys: expansion init at board {:#010X}, {} mount(s)",
                     cpu.dar[8],
