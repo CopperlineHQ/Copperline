@@ -1258,10 +1258,45 @@ fn tv_window_copy_centres_reference_aperture_in_live_texture() {
         right_marker.to_le_bytes()
     );
     assert_eq!(pixel(&frame, 0, 0, scale), left_edge.to_le_bytes());
+    let dst_fb_right = TV_PAL_LIVE_PAD_X + (FB_WIDTH - 1 - TV_PAL_PRESENT_SOURCE_X);
     assert_eq!(
-        pixel(&frame, FB_WIDTH - 1, 0, scale),
+        pixel(&frame, dst_fb_right, 0, scale),
         right_edge.to_le_bytes()
     );
+}
+
+#[test]
+fn tv_window_copy_black_pads_aperture_past_framebuffer() {
+    use crate::video::deinterlace::{OUT_HEIGHT, OUT_PIXELS};
+    // The aperture reaches a few columns past the framebuffer's right edge.
+    // A display fetching into the deepest right overscan fills the
+    // framebuffer's last column; the uncaptured aperture columns are bezel
+    // and must stay black instead of replicating that edge column into
+    // horizontal streaks (Gen-X logo slide-in).
+    let black = rgba(0, 0, 0).to_le_bytes();
+    for scale in 1..=3 {
+        let mut src = vec![0u32; OUT_PIXELS];
+        let row_y = TV_PAL_PRESENT_SOURCE_Y;
+        let edge = 0xDDEE_FF00u32;
+        src[row_y * FB_WIDTH + FB_WIDTH - 1] = edge;
+
+        let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+        copy_window_present_frame(&src, OUT_HEIGHT, &mut frame, scale, Overscan::Tv, true);
+
+        let dst_fb_right = TV_PAL_LIVE_PAD_X + (FB_WIDTH - 1 - TV_PAL_PRESENT_SOURCE_X);
+        assert_eq!(
+            pixel(&frame, dst_fb_right * scale, 0, scale),
+            edge.to_le_bytes(),
+            "scale {scale}: framebuffer edge column should stay visible"
+        );
+        for x in (dst_fb_right + 1) * scale..FB_WIDTH * scale {
+            assert_eq!(
+                pixel(&frame, x, 0, scale),
+                black,
+                "scale {scale}: aperture past the framebuffer must be black at {x}"
+            );
+        }
+    }
 }
 
 #[test]

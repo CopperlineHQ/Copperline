@@ -457,7 +457,12 @@ pub(super) fn copy_tv_aperture_to_window(
     let dst_stride = texture_width(texture_scale) * 4;
     let present_rows = present_height();
     let out_rows = present_rows * texture_scale;
-    let black = rgba(0, 0, 0).to_le_bytes();
+    // The aperture reaches a few columns past the framebuffer's right edge;
+    // that uncaptured margin is bezel and must stay black rather than
+    // replicate the edge column (which carries picture when a display
+    // fetches into the deepest overscan).
+    let black_px = rgba(0, 0, 0);
+    let black = black_px.to_le_bytes();
     for y in 0..out_rows {
         let Some(crop_y) = tv_aperture_source_row(y, present_rows, texture_scale) else {
             let dst = &mut frame[y * dst_stride..(y + 1) * dst_stride];
@@ -476,8 +481,13 @@ pub(super) fn copy_tv_aperture_to_window(
                     let crop_x = x
                         .saturating_sub(TV_PAL_LIVE_PAD_X)
                         .min(TV_PAL_PRESENT_WIDTH - 1);
-                    let src_x = (TV_PAL_PRESENT_SOURCE_X + crop_x).min(FB_WIDTH - 1);
-                    dst[x * 4..x * 4 + 4].copy_from_slice(&row[src_x].to_le_bytes());
+                    let src_x = TV_PAL_PRESENT_SOURCE_X + crop_x;
+                    let pixel = if src_x < FB_WIDTH {
+                        row[src_x]
+                    } else {
+                        black_px
+                    };
+                    dst[x * 4..x * 4 + 4].copy_from_slice(&pixel.to_le_bytes());
                 }
             }
             2 => {
@@ -485,8 +495,12 @@ pub(super) fn copy_tv_aperture_to_window(
                     let crop_x = x
                         .saturating_sub(TV_PAL_LIVE_PAD_X)
                         .min(TV_PAL_PRESENT_WIDTH - 1);
-                    let src_x = (TV_PAL_PRESENT_SOURCE_X + crop_x).min(FB_WIDTH - 1);
-                    let pixel = row[src_x];
+                    let src_x = TV_PAL_PRESENT_SOURCE_X + crop_x;
+                    let pixel = if src_x < FB_WIDTH {
+                        row[src_x]
+                    } else {
+                        black_px
+                    };
                     let pair = pixel as u64 | ((pixel as u64) << 32);
                     unsafe {
                         (frame.as_mut_ptr().add(dst_off + x * 8) as *mut u64).write_unaligned(pair);
@@ -500,8 +514,13 @@ pub(super) fn copy_tv_aperture_to_window(
                     let crop_x = out_x
                         .saturating_sub(TV_PAL_LIVE_PAD_X)
                         .min(TV_PAL_PRESENT_WIDTH - 1);
-                    let src_x = (TV_PAL_PRESENT_SOURCE_X + crop_x).min(FB_WIDTH - 1);
-                    dst[x * 4..x * 4 + 4].copy_from_slice(&row[src_x].to_le_bytes());
+                    let src_x = TV_PAL_PRESENT_SOURCE_X + crop_x;
+                    let pixel = if src_x < FB_WIDTH {
+                        row[src_x]
+                    } else {
+                        black_px
+                    };
+                    dst[x * 4..x * 4 + 4].copy_from_slice(&pixel.to_le_bytes());
                 }
             }
         }
@@ -799,7 +818,7 @@ pub(super) fn save_present_frame(
     }
 
     if overscan == Overscan::Tv && standard_tv_aperture {
-        return screenshot::save_cropped_clamped(
+        return screenshot::save_cropped_black_padded(
             path,
             present_fb,
             FB_WIDTH,
