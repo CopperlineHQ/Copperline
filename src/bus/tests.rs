@@ -13,8 +13,8 @@ use super::{
     BeamRegisterWrite, BeamWriteSource, Bus, CapturedBitplaneRow, CapturedSpriteLine, ChipBusOwner,
     CpuBusAccessKind, DeviceClock, DisplaySpriteDmaState, DisplaySpriteLineData, FrameBusTrace,
     LiveCollisionControl, LiveCollisionLineReplay, LiveSpriteCollisionSource,
-    RenderRegisterSnapshot, BLITTER_SLOWDOWN_CPU_MISS_LIMIT, BLTCON0_USE_C, BLTCON0_USE_D,
-    BLTCON1_DOFF, BLTCON1_LINE, BPLCON0_ECSENA, BPLCON3_BRDRBLNK, BPLCON3_BRDSPRT,
+    RenderRegisterSnapshot, BLITTER_SLOWDOWN_CPU_MISS_LIMIT, BLTCON0_USE_A, BLTCON0_USE_C,
+    BLTCON0_USE_D, BLTCON1_DOFF, BLTCON1_LINE, BPLCON0_ECSENA, BPLCON3_BRDRBLNK, BPLCON3_BRDSPRT,
     BPLCON3_SPRES_HIRES, DENISE_HPOS_LAG_CCK, DMACON_BLTEN, DMACON_BLTPRI, DMACON_BPLEN,
     DMACON_SPREN, PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS, RENDER_COPPER_WAIT_HPOS_FB0,
     RENDER_DIW_HSTART_FB0, RENDER_MIN_OVERSCAN_START_VPOS, RENDER_VISIBLE_LINES,
@@ -8900,17 +8900,19 @@ fn bltpri_stalls_cpu_chip_access_through_blitter_access_cycles() {
 
     bus.grant_cpu_bus_access(2, CpuBusAccessKind::Read);
 
-    // With BLTPRI set BBUSY holds the BLS line asserted for the entire
-    // blit, so the CPU is denied even the idle D-bubble cycle after the A
-    // fetch (the bubble is bus-free, but BLS fences the CPU, not the bus).
-    // The CPU waits through the A fetch, the D bubble, the D write, and
-    // the terminal cycles, then spends its granted slot plus the bus-free
-    // tail: 6 color clocks. Software depends on this fence: MFM-decode
-    // trackloaders (e.g. Jim Power's) restore the word below a decode
-    // blit's destination right after BLTSIZE, relying on that CPU write
-    // landing only after the blit's first D write.
+    // With BLTPRI set, BLS fences the CPU through the D pipeline's warm-up:
+    // the idle first-D bubble after the A fetch is bus-free, but the
+    // sequencer's bus request is still asserted (its first fetches are
+    // queued back-to-back), so the CPU is denied it. The first cycle the
+    // CPU wins is the internal E flush, where BBUSY has already dropped;
+    // its granted slot and bus-free tail ride E/F while the blitter's
+    // terminal F cycle writes the queued word: 4 color clocks in all.
+    // Software depends on the closed bubble: MFM-decode trackloaders
+    // (e.g. Jim Power's) restore the word below a decode blit's destination
+    // right after BLTSIZE, relying on the startup and first-D holes staying
+    // shut so the restore's prefetches queue behind the blit instead.
     let (cck, _) = bus.take_slice_bus_advance();
-    assert_eq!(cck, 6);
+    assert_eq!(cck, 4);
     assert!(!bus.blitter.busy);
     assert_eq!(&bus.mem.chip_ram[0x20..0x22], &[0x12, 0x34]);
     assert_ne!(bus.paula.intreq & INT_BLIT, 0);
@@ -8950,15 +8952,73 @@ fn blithog_set_blocks_cpu_slowdown_back_pressure_until_blitter_finishes() {
 
     bus.grant_cpu_bus_access(2, CpuBusAccessKind::Read);
 
-    // With BLTPRI set the CPU gets no starvation yield and BLS stays
-    // asserted until BBUSY drops: it waits through all twelve A/B/C
-    // accesses of the four words and the terminal E/F cycles, then spends
-    // its granted slot plus the bus-free tail cck, costing 16 color
-    // clocks.
+    // With BLTPRI set the CPU gets no starvation yield: it waits through
+    // all twelve A/B/C accesses of the four words (a source-only blit has
+    // no bus-free micro-cycles to release the request line), then spends
+    // its granted slot plus the bus-free tail cck, costing 14 color
+    // clocks. The terminal (internal) E/F cycles ride the CPU's
+    // granted/tail clocks -- BBUSY has already dropped -- so the engine
+    // finishes within the same span and the interrupt is asserted off the
+    // terminal cycle.
     let (cck, _) = bus.take_slice_bus_advance();
-    assert_eq!(cck, 16);
+    assert_eq!(cck, 14);
     assert!(!bus.blitter.busy);
     assert_ne!(bus.paula.intreq & INT_BLIT, 0);
+}
+
+#[test]
+fn bltpri_line_blit_bresenham_cycles_stay_cpu_available_after_warmup() {
+    let mut bus = empty_bus();
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BLTEN | DMACON_BLTPRI;
+    bus.agnus.hpos = 0x20;
+    // Canonical 4-pixel line draw: USEA|USEC|USED, octant 0. The per-pixel
+    // cadence is [L1 -, L2 C-fetch, L3 -, L4 D-write]: two bus accesses and
+    // two bus-free Bresenham cycles.
+    bus.blitter.bltcon0 = BLTCON0_USE_A | BLTCON0_USE_C | BLTCON0_USE_D | 0x00CA;
+    bus.blitter.bltcon1 = BLTCON1_LINE;
+    bus.blitter.bltafwm = 0xFFFF;
+    bus.blitter.bltalwm = 0xFFFF;
+    bus.blitter.bltapt = 0;
+    bus.blitter.bltcpt = 0x1000;
+    bus.blitter.bltdpt = 0x1000;
+    bus.blitter.start_scheduled((4 << 6) | 2, &bus.mem.chip_ram);
+
+    // The startup ladder holds the BLS fence: with BLTPRI set the CPU is
+    // denied the register-commit/BLT_STRT/Init cycles even though they do
+    // not access the bus.
+    let mut warmup_cycles = 0;
+    while bus.blitter.bltpri_warmup_fences_cpu() {
+        assert_eq!(
+            bus.scheduled_dma_owner(true),
+            ChipBusOwner::Blitter,
+            "warm-up cycle must fence the CPU under BLTPRI"
+        );
+        bus.advance_chipset(1);
+        warmup_cycles += 1;
+        assert!(warmup_cycles < 8, "line warm-up should end with the ladder");
+    }
+
+    // Body: line mode's internal Bresenham cycles (L1/L3) release the bus
+    // request, so the CPU may use them even under BLTPRI -- line-heavy demo
+    // main loops (Rampage's vector parts) rely on that CPU time. Bus cycles
+    // (C fetch, D write) still deny the CPU.
+    let mut cpu_available = 0;
+    let mut guard = 0;
+    while bus.blitter.busy {
+        let owner = bus.scheduled_dma_owner(true);
+        if bus.blitter.current_slot_needs_bus() {
+            assert_eq!(owner, ChipBusOwner::Blitter);
+        } else if owner == ChipBusOwner::Idle {
+            cpu_available += 1;
+        }
+        bus.advance_chipset(1);
+        guard += 1;
+        assert!(guard < 64, "4-pixel line must finish within 64 cck");
+    }
+    assert!(
+        cpu_available >= 8,
+        "expected at least 2 CPU-available cycles per pixel, got {cpu_available}"
+    );
 }
 
 #[test]

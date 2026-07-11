@@ -143,15 +143,23 @@ rows again: Copperline now reads `10002 / 18362 / 346 / 25091`
 few colour clocks of the FS-UAE/real references; row 25 matches the vAmiga
 line-mode reference and is within a couple of colour clocks of FS-UAE.
 
-The 2026-07-11 BLTPRI fence fix (with BLTPRI set, BLS locks the CPU off the
-chip bus for the whole blit, bus-free micro-cycles included) moved row 26 to
-25161 (`0x6249`, +66 vs the FS-UAE 25095 / vAmiga 25097 references, from -22
-before). The old proximity was a cancellation: the polling CPU used to sneak
-DMACONR reads into the blit's idle bubbles and observed completion early,
-masking blit-under-display-contention drift that is now visible. The fence
-itself is hardware-proven (MFM-decode trackloaders rely on it -- see
-docs/internals/timing.md); the residual row-26 drift is a separate
-display-contention question.
+The 2026-07-11 BLTPRI fence went through two iterations. A whole-blit BLS
+fence (CPU locked off the chip bus until BLTDONE, bus-free micro-cycles
+included) fixed MFM-decode trackloaders (Jim Power) but overshot: it moved
+the row-26 golden from 25073 to 25161 (+66 vs the FS-UAE 25095 / vAmiga
+25097 references) and starved line-heavy demo main loops of their
+Bresenham-cycle CPU time (Rampage's vector parts dropped frames and the
+music slowed). The fence was then narrowed to the blit's warm-up window --
+the startup ladder plus, for D-writing blits, the first word's cycles
+including the empty first-D bubble -- which is all the trackloader ordering
+needs; post-warm-up bus-free cycles are CPU-available again even under
+BLTPRI, matching FS-UAE/vAmiga per-slot arbitration. The row-26 golden now
+reads 25089 (`0x6201`, within 8 cck of both references; the polling CPU no
+longer sneaks reads into the warm-up holes, which is where the old -22
+early-observation cancellation came from). Row 27 shifts by a few cck with
+each of these changes -- its poll-catch phase rides on where row 26's blit
+completes -- and stays within one poll-loop iteration. See
+docs/internals/timing.md "CPU vs blitter" for the model.
 
 Row 31 found (and now guards) a second real bug (2026-07-07). On the plain 68000
 Copperline matches vAmiga on every other row -- including the CPU-vs-6-bitplane

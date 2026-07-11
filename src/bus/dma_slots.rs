@@ -425,16 +425,26 @@ impl Bus {
             return ChipBusOwner::Copper;
         }
         if self.blitter.busy && self.blitter_dma_enabled() {
-            // With BLTPRI set, BBUSY holds the BLS line asserted for the whole
-            // blit, so the CPU is denied every chip-bus cycle until BLTDONE --
-            // including the pipeline's bus-free micro-cycles below. Regression
+            // With BLTPRI set, BLS fences the CPU (not the Copper or fixed
+            // DMA) during the blit's warm-up: the startup ladder and, for
+            // D-writing blits, the first word's cycles including the empty
+            // first-D bubble, while the sequencer's bus request is held
+            // asserted by the queued back-to-back first fetches. Regression
             // example: the Jim Power trackloader saves the word below a
             // descending MFM-decode blit's destination, writes BLTSIZE, and
-            // restores the word two instructions later, relying on the nasty
-            // lockout to hold that CPU write until after the blit's final
-            // D write; letting it into the first-D bubble corrupts the last
-            // word of every decoded sector.
-            if for_cpu && self.agnus.dmacon & DMACON_BLTPRI != 0 {
+            // restores the word two instructions later; the fence keeps the
+            // restore's prefetches out of the startup holes so the CPU write
+            // lands only after the blit completes. Once the pipeline is
+            // primed the request line drops on genuine bus-free micro-cycles
+            // (line-mode Bresenham, fill idle, disabled-channel gaps) and
+            // the CPU uses them even under BLTPRI -- line-heavy demo loops
+            // (Rampage's vector parts) rely on that CPU time, and FS-UAE and
+            // vAmiga agree (timing-test row 26: 25095/25097; a whole-blit
+            // fence overshoots to 25161).
+            if for_cpu
+                && self.agnus.dmacon & DMACON_BLTPRI != 0
+                && self.blitter.bltpri_warmup_fences_cpu()
+            {
                 return ChipBusOwner::Blitter;
             }
             // Idle blit pipeline cycles (the "-" slots in the HRM cycle diagrams,

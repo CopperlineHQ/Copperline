@@ -92,12 +92,17 @@ save state).
 ### CPU vs blitter
 
 DMACON's BLTPRI ("blitter nasty") is modelled as on hardware: with BLTPRI
-set, BBUSY holds the BLS line asserted for the whole blit, so the CPU is
-denied every chip-bus cycle until BLTDONE -- including the pipeline's
-bus-free micro-cycles (the Copper and fixed DMA still use them). Without
-it, the blitter yields a slot after the CPU has missed three consecutive
-slots, matching the Minimig RTL. The counter and the back-pressure rule
-are detailed under [](#cpu-contention) below.
+set the blitter wins every slot it requests, and the request line stays
+asserted through the blit's warm-up -- the startup ladder and, for
+D-writing blits, the first word's cycles including the empty first-D
+bubble -- so the CPU is fenced out of those holes too (the Copper and
+fixed DMA still use them). Once the pipeline is primed, genuinely bus-free
+micro-cycles (line-mode Bresenham cycles, fill's idle cycle,
+disabled-channel gaps) release the request and stay CPU-available even
+under BLTPRI, matching FS-UAE/vAmiga per-slot arbitration. Without
+BLTPRI, the blitter yields a slot after the CPU has missed three
+consecutive slots, matching the Minimig RTL. The counter and the
+back-pressure rule are detailed under [](#cpu-contention) below.
 
 ### Sprite DMA control rewrites
 
@@ -445,16 +450,21 @@ blitter yield earlier. After `BLITTER_SLOWDOWN_CPU_MISS_LIMIT` (3)
 consecutive pressure misses the blitter yields one slot, matching the HRM
 "one bus cycle in four" rule while also matching UAE's `blitter_nasty`
 distinction between normal idle cycles and fill/line BUSIDLE. Idle blit
-pipeline cycles never claim the bus and stay CPU-available while BLTPRI is
-clear; with BLTPRI set the asserted BLS line fences the CPU out of them
-too, for the entire blit. Software depends on that fence: MFM-decode
-trackloaders (e.g. Jim Power's) save the word below a decode blit's
-destination, write BLTSIZE, and restore it two instructions later, relying
-on the restore write being held past the blit's first D write -- granting
-the CPU the first-D bubble let the blitter overwrite the restored word and
-corrupted the last data word of every decoded sector. The counter resets
-when the CPU gets the bus, when BLTPRI is set, or when blitter DMA cannot
-run.
+pipeline cycles never claim the bus and stay CPU-available -- with one
+exception: with BLTPRI set, the blit's warm-up holes (the startup ladder
+and, for D-writing blits, the first word's cycles including the empty
+first-D bubble) fence the CPU, because the sequencer's bus request is held
+asserted by its queued back-to-back first fetches. Software depends on the
+warm-up fence: MFM-decode trackloaders (e.g. Jim Power's) save the word
+below a decode blit's destination, write BLTSIZE, and restore it two
+instructions later; granting the CPU the startup and first-D holes let the
+restore (and its prefetches) land mid-blit and the blitter overwrite the
+restored word, corrupting the last data word of every decoded sector. Once
+the pipeline is primed, bus-free micro-cycles are CPU-available even under
+BLTPRI -- line-heavy demo main loops (Rampage's vector parts) depend on
+that CPU time, and a whole-blit fence overshoots the FS-UAE/vAmiga
+references on timing-test row 26 by ~+70 cck. The counter resets when the
+CPU gets the bus, when BLTPRI is set, or when blitter DMA cannot run.
 
 A 68000 `TAS` read-modify-write is unsafe on chip RAM (the HRM warns
 against it); the `m68k` backend exposes it as a byte read then a byte
