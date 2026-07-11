@@ -35,7 +35,9 @@
 #define VOLUME_SLOT_SIZE   128
 // Per-unit FileSysStartupMsg, written by the emulator at expansion init;
 // dn_Startup points here so the Early Startup boot menu can display the
-// device name, unit, and dostype instead of dereferencing garbage.
+// device name, unit, and dostype instead of dereferencing garbage. Each
+// FSSM references a per-unit DosEnvec whose de_BootPri carries the
+// configured AddBootNode priority.
 #define FSSM_OFFSET        0x7800
 #define FSSM_SLOT_SIZE     16
 

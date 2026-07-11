@@ -49,7 +49,9 @@ const VOLUME_SLOT_SIZE: u32 = 128;
 const FSSM_OFFSET: u32 = 0x7800;
 const FSSM_SLOT_SIZE: u32 = 16;
 const FSSM_DEVNAME_OFFSET: u32 = 0x7900;
+/// Per-unit DosEnvec slots (each mount has its own de_BootPri).
 const FSSM_ENVEC_OFFSET: u32 = 0x7940;
+const ENVEC_SLOT_SIZE: u32 = 68; // sizeof(DosEnvec)
 /// Host-managed pool for guest-visible objects (FileLocks), through the end
 /// of the 64K window. The guest never touches it.
 const POOL_OFFSET: u32 = 0x8000;
@@ -81,6 +83,9 @@ const ID_CLFS_DISK: u32 = 0x434C_4653;
 pub struct MountSpec {
     pub path: PathBuf,
     pub volume: String,
+    /// AddBootNode priority: -128 = mounted but never a boot candidate
+    /// (the default); higher beats other boot devices in strap's ranking.
+    pub boot_pri: i8,
 }
 
 /// DOS device name of mount `unit` (`HOSTFS0`, `HOSTFS1`, ...).
@@ -143,7 +148,8 @@ pub struct FilesysHle {
     /// Mount unit -> guest address of its volume DosList node.
     volumes: HashMap<usize, u32>,
     /// Open files by fh_Arg1 cookie (host-side only, no guest structure).
-    files: HashMap<u32, std::fs::File>,
+    /// The LockRec remembers what the handle refers to, for EXAMINE_FH.
+    files: HashMap<u32, (std::fs::File, LockRec)>,
     next_file_key: u32,
     /// Guest FileLock address -> what it locks.
     locks: HashMap<u32, LockRec>,
@@ -192,8 +198,9 @@ impl FilesysHle {
     }
 
     /// Resolve a DOS path (BPTR lock + name) to a lock record. AmigaDOS path
-    /// semantics: an optional `device:` prefix restarts at the root, `/`
-    /// goes to the parent, and names are case-insensitive.
+    /// semantics: an optional `prefix:` is stripped (the supplied lock is
+    /// already the base it named), `/` goes to the parent, and names are
+    /// case-insensitive.
     fn resolve(&self, unit: usize, lock_bptr: u32, name: &[u8]) -> Option<LockRec> {
         let (unit, mut rel) = if lock_bptr != 0 {
             let rec = self.locks.get(&(lock_bptr << 2))?;
@@ -204,10 +211,15 @@ impl FilesysHle {
 
         let mut rest = name;
         if let Some(colon) = name.iter().position(|&b| b == b':') {
-            // "DEVICE:" or "Volume:" prefix: absolute from the root. The
-            // packet reached this handler, so the prefix already named it.
-            rest = &name[colon + 1..];
-            rel = PathBuf::new();
+            if !name[..colon].contains(&b'/') {
+                // "Volume:" or "Assign:" prefix: DOS routes the packet by
+                // the prefix but passes the user's string through unmodified,
+                // and the supplied lock is already the right base -- for an
+                // assign like LIBS: it IS the target directory. Strip the
+                // prefix and stay at the lock (matches UAE's get_aino;
+                // restarting at the root instead broke "LIBS:foo" opens).
+                rest = &name[colon + 1..];
+            }
         }
         if rest.is_empty() {
             // Bare "DEVICE:" or an empty name: the base itself. (split()
@@ -312,37 +324,40 @@ impl FilesysHle {
     }
 
     /// Write one FileSysStartupMsg per mount into the board window, plus the
-    /// shared display device name and DosEnvec they reference. dn_Startup
-    /// points at these so the Early Startup boot menu shows "CLFS hostfs-N"
-    /// instead of dereferencing garbage, and ACTION_STARTUP reads the unit
-    /// back from fssm_Unit.
+    /// shared display device name and the per-unit DosEnvecs they reference.
+    /// dn_Startup points at these so the Early Startup boot menu shows
+    /// "CLFS hostfs-N" instead of dereferencing garbage, ACTION_STARTUP reads
+    /// the unit back from fssm_Unit, and the guest handler passes de_BootPri
+    /// to AddBootNode.
     fn write_startup_msgs(&self, bus: &mut dyn AddressBus, base: u32) {
-        let envec = DosEnvec {
-            table_size: long(16),  // entries after this one, through dos_type
-            size_block: long(128), // longwords = 512-byte blocks
-            sec_org: long(0),
-            surfaces: long(1),
-            sectors_per_block: long(1),
-            blocks_per_track: long(1),
-            reserved: long(2),
-            pre_alloc: long(0),
-            interleave: long(0),
-            low_cyl: long(0),
-            high_cyl: long(0),
-            num_buffers: long(1),
-            buf_mem_type: long(1), // MEMF_PUBLIC
-            max_transfer: long(0x7FFF_FFFF),
-            mask: long(0xFFFF_FFFE),
-            boot_pri: long(-128i32 as u32), // matches the AddBootNode priority
-            dos_type: long(ID_CLFS_DISK),
-        };
-        write_bytes(bus, base + FSSM_ENVEC_OFFSET, envec.as_bytes());
         write_bytes(bus, base + FSSM_DEVNAME_OFFSET, &bcpl::<32>(b"hostfs"));
-        for unit in 0..self.mounts.len() as u32 {
+        for (unit, mount) in self.mounts.iter().enumerate() {
+            let unit = unit as u32;
+            let envec = DosEnvec {
+                table_size: long(16),  // entries after this one, through dos_type
+                size_block: long(128), // longwords = 512-byte blocks
+                sec_org: long(0),
+                surfaces: long(1),
+                sectors_per_block: long(1),
+                blocks_per_track: long(1),
+                reserved: long(2),
+                pre_alloc: long(0),
+                interleave: long(0),
+                low_cyl: long(0),
+                high_cyl: long(0),
+                num_buffers: long(1),
+                buf_mem_type: long(1), // MEMF_PUBLIC
+                max_transfer: long(0x7FFF_FFFF),
+                mask: long(0xFFFF_FFFE),
+                boot_pri: long(mount.boot_pri as i32 as u32),
+                dos_type: long(ID_CLFS_DISK),
+            };
+            let envec_at = base + FSSM_ENVEC_OFFSET + unit * ENVEC_SLOT_SIZE;
+            write_bytes(bus, envec_at, envec.as_bytes());
             let fssm = FileSysStartupMsg {
                 unit: long(unit),
                 device: long((base + FSSM_DEVNAME_OFFSET) >> 2),
-                environ: long((base + FSSM_ENVEC_OFFSET) >> 2),
+                environ: long(envec_at >> 2),
                 flags: long(0),
             };
             write_bytes(
@@ -567,6 +582,12 @@ impl FilesysHle {
                 let fh = arg(bus, 1) << 2;
                 let name_bptr = arg(bus, 3);
                 let name = read_bstr(bus, name_bptr);
+                log::debug!(
+                    "filesys: {}: open \"{}\" (lock {:#X})",
+                    device_name(unit),
+                    String::from_utf8_lossy(&name),
+                    arg(bus, 2)
+                );
                 let Some(rec) = self.resolve(unit, arg(bus, 2), &name) else {
                     return (DOSFALSE, ERROR_OBJECT_NOT_FOUND);
                 };
@@ -578,12 +599,95 @@ impl FilesysHle {
                     Ok(f) => {
                         self.next_file_key += 1;
                         let key = self.next_file_key;
-                        self.files.insert(key, f);
+                        self.files.insert(key, (f, rec));
                         bus.write_long(fh + FILEHANDLE_ARG1, key);
                         (DOSTRUE, 0)
                     }
                     Err(_) => (DOSFALSE, ERROR_OBJECT_NOT_FOUND),
                 }
+            }
+            ACTION_SAME_LOCK => {
+                // SameLock(): Arg1/Arg2 = locks (0 = the root). DOSTRUE if
+                // they reference the same object.
+                let rec_of = |hle: &Self, bptr: u32| -> Option<LockRec> {
+                    if bptr == 0 {
+                        Some(LockRec {
+                            unit,
+                            rel: PathBuf::new(),
+                        })
+                    } else {
+                        hle.locks.get(&(bptr << 2)).cloned()
+                    }
+                };
+                let (Some(a), Some(b)) = (rec_of(self, arg(bus, 1)), rec_of(self, arg(bus, 2)))
+                else {
+                    return (DOSFALSE, ERROR_INVALID_LOCK);
+                };
+                if a.unit == b.unit && a.rel == b.rel {
+                    (DOSTRUE, 0)
+                } else {
+                    (DOSFALSE, 0)
+                }
+            }
+            ACTION_FH_FROM_LOCK => {
+                // OpenFromLock(): Arg1 = BPTR FileHandle, Arg2 = lock. On
+                // success the handle absorbs the lock (the caller must not
+                // free it); on failure the lock stays valid.
+                let fh = arg(bus, 1) << 2;
+                let lock_addr = arg(bus, 2) << 2;
+                let Some(rec) = self.locks.get(&lock_addr).cloned() else {
+                    return (DOSFALSE, ERROR_INVALID_LOCK);
+                };
+                let path = self.lock_path(&rec);
+                if path.is_dir() {
+                    return (DOSFALSE, ERROR_OBJECT_WRONG_TYPE);
+                }
+                match std::fs::File::open(&path) {
+                    Ok(f) => {
+                        self.next_file_key += 1;
+                        let key = self.next_file_key;
+                        self.files.insert(key, (f, rec));
+                        bus.write_long(fh + FILEHANDLE_ARG1, key);
+                        self.locks.remove(&lock_addr);
+                        self.free_slots.push(lock_addr);
+                        (DOSTRUE, 0)
+                    }
+                    Err(_) => (DOSFALSE, ERROR_OBJECT_NOT_FOUND),
+                }
+            }
+            ACTION_PARENT_FH => {
+                // ParentOfFH(): Arg1 = fh_Arg1 cookie; result is a shared
+                // lock on the directory containing the open file.
+                let rec = match self.files.get(&arg(bus, 1)) {
+                    Some((_, rec)) => rec.clone(),
+                    None => return (DOSFALSE, ERROR_INVALID_LOCK),
+                };
+                let mut rel = rec.rel;
+                rel.pop();
+                let parent = LockRec {
+                    unit: rec.unit,
+                    rel,
+                };
+                match self.alloc_lock(bus, port, ACCESS_READ, parent) {
+                    Some(addr) => (addr >> 2, 0),
+                    None => (DOSFALSE, ERROR_OBJECT_NOT_FOUND),
+                }
+            }
+            ACTION_EXAMINE_FH => {
+                // ExamineFH(): Arg1 = fh_Arg1 cookie, Arg2 = BPTR FIB.
+                let rec = match self.files.get(&arg(bus, 1)) {
+                    Some((_, rec)) => rec.clone(),
+                    None => return (DOSFALSE, ERROR_INVALID_LOCK),
+                };
+                let fib = arg(bus, 2) << 2;
+                match self.fill_fib(bus, fib, &rec, 0) {
+                    Ok(()) => (DOSTRUE, 0),
+                    Err(e) => (DOSFALSE, e),
+                }
+            }
+            ACTION_FLUSH => {
+                // Nothing buffered on the host side; success by definition.
+                (DOSTRUE, 0)
             }
             ACTION_READ => {
                 // Arg1 = fh_Arg1 cookie, Arg2 = buffer APTR, Arg3 = length.
@@ -592,7 +696,7 @@ impl FilesysHle {
                 let key = arg(bus, 1);
                 let buf = arg(bus, 2);
                 let len = arg(bus, 3) as usize;
-                let Some(f) = self.files.get_mut(&key) else {
+                let Some((f, _)) = self.files.get_mut(&key) else {
                     return (DOSTRUE, ERROR_INVALID_LOCK); // res1 = -1
                 };
                 let mut data = vec![0u8; len];
@@ -613,7 +717,7 @@ impl FilesysHle {
                 let key = arg(bus, 1);
                 let pos = arg(bus, 2) as i64;
                 let mode = arg(bus, 3) as i32;
-                let Some(f) = self.files.get_mut(&key) else {
+                let Some((f, _)) = self.files.get_mut(&key) else {
                     return (DOSTRUE, ERROR_INVALID_LOCK); // res1 = -1
                 };
                 let (old, end) = match (f.stream_position(), f.metadata()) {
@@ -849,6 +953,7 @@ mod tests {
         vec![MountSpec {
             path: "/nonexistent".into(),
             volume: "Test".into(),
+            boot_pri: -128,
         }]
     }
 
@@ -902,6 +1007,40 @@ mod tests {
         assert_eq!(&img[d + da_name..d + da_name + 11], b"Copperline\0");
         // The trap opcode must be A-line (group 0xA) to reach handle_aline.
         assert_eq!(TRAP_BASE >> 12, 0xA);
+        // The per-unit DosEnvec array must not run into the lock pool.
+        assert!(FSSM_ENVEC_OFFSET + MOUNT_MAX_COUNT as u32 * ENVEC_SLOT_SIZE <= POOL_OFFSET);
+        assert_eq!(ENVEC_SLOT_SIZE as usize, std::mem::size_of::<DosEnvec>());
+    }
+
+    #[test]
+    fn resolve_strips_the_prefix_and_keeps_the_lock_base() {
+        let root = std::env::temp_dir().join(format!("clfs-resolve-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("Libs")).unwrap();
+        std::fs::write(root.join("Libs/68040.library"), b"x").unwrap();
+
+        let mut hle = FilesysHle::default();
+        hle.set_mounts(vec![MountSpec {
+            path: root.clone(),
+            volume: "Test".into(),
+            boot_pri: -128,
+        }]);
+        // A lock on Libs, as DOS supplies with opens through the LIBS:
+        // assign. The name still carries the user's "LIBS:" prefix; it
+        // must be stripped without resetting to the root.
+        hle.locks.insert(
+            0x1000,
+            LockRec {
+                unit: 0,
+                rel: "Libs".into(),
+            },
+        );
+        let rec = hle.resolve(0, 0x1000 >> 2, b"LIBS:68040.library").unwrap();
+        assert_eq!(rec.rel, PathBuf::from("Libs/68040.library"));
+        // A volume prefix with no lock starts at the root as before.
+        let rec = hle.resolve(0, 0, b"Test:Libs/68040.library").unwrap();
+        assert_eq!(rec.rel, PathBuf::from("Libs/68040.library"));
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

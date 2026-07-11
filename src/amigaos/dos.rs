@@ -21,12 +21,17 @@ pub const ACTION_EXAMINE_OBJECT: i32 = 23;
 pub const ACTION_EXAMINE_NEXT: i32 = 24;
 pub const ACTION_DISK_INFO: i32 = 25;
 pub const ACTION_INFO: i32 = 26;
+pub const ACTION_FLUSH: i32 = 27;
 pub const ACTION_PARENT: i32 = 29;
+pub const ACTION_SAME_LOCK: i32 = 40;
 pub const ACTION_READ: i32 = 82; // 'R'
 pub const ACTION_FINDINPUT: i32 = 1005; // Open(..., MODE_OLDFILE)
 pub const ACTION_END: i32 = 1007; // Close()
 pub const ACTION_SEEK: i32 = 1008;
+pub const ACTION_FH_FROM_LOCK: i32 = 1026; // OpenFromLock()
 pub const ACTION_IS_FILESYSTEM: i32 = 1027;
+pub const ACTION_PARENT_FH: i32 = 1031; // ParentOfFH()
+pub const ACTION_EXAMINE_FH: i32 = 1034; // ExamineFH()
 
 // dos/dos.h.
 pub const DOSTRUE: u32 = 0xFFFF_FFFF;

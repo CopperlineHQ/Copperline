@@ -17,8 +17,8 @@ _entry_table:
 	| the diag copy with the documented DiagPoint registers still live:
 	| A0 = board base, A3 = ConfigDev, A5 = ExpansionBase. Trap to the
 	| host (which captures the board base), mount the configured volumes,
-	| and return D0 = 0 so Kickstart frees the diag copy -- nothing
-	| references it afterwards.
+	| and return D0 != 0 so Kickstart keeps the diag copy: strap calls
+	| da_BootPoint from it if one of our mounts wins the boot vote.
 _diag_entry:
 	.short	0xA400		| TRAP_DIAG_ENTRY
 	move.l	a3,-(sp)	| ConfigDev
@@ -26,7 +26,7 @@ _diag_entry:
 	move.l	a0,-(sp)	| board base
 	bsr.w	_mount_boards	| mount_boards(board, ExpansionBase, ConfigDev)
 	lea	12(sp),sp
-	moveq	#0,d0
+	moveq	#1,d0
 	rts
 
 	| struct DiagArea (libraries/configregs.h), at the fixed ROM offset
@@ -50,9 +50,24 @@ _diag_point:
 	jsr	(_diag_entry-_entry_table+8)(a0) | +8 = ROM_OFFSET
 	rts
 _boot_point:
-	| Never usefully called (see da_Config note), but must exist.
-	moveq	#0,d0
+	| Called by strap (with A6 = ExecBase) when one of our BootNodes has
+	| the highest boot priority. The standard autoboot boot code, same as
+	| real autoboot ROMs: fire up dos.library, whose init then mounts the
+	| highest-priority BootNode -- ours -- as SYS:. Returns (boot failed,
+	| strap tries the next candidate) only if dos.library is missing.
+	lea	_dos_name(pc),a1
+	jsr	-96(a6)		| FindResident("dos.library")
+	tst.l	d0
+	beq.s	1f
+	move.l	d0,a0
+	move.l	22(a0),d0	| rt_Init
+	beq.s	1f
+	move.l	d0,a0
+	jsr	(a0)		| boots DOS; does not return on success
+1:	moveq	#0,d0
 	rts
+_dos_name:
+	.asciz	"dos.library"
 _diag_name:
 	.asciz	"Copperline"
 	.balign	2

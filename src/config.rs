@@ -1251,6 +1251,10 @@ pub(crate) struct RawFilesysMount {
     /// AmigaDOS volume name; defaults to the directory's name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) volume: Option<String>,
+    /// Boot priority (-128..=127); defaults to -128, which mounts the
+    /// volume but never offers it as a boot candidate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) bootpri: Option<i8>,
 }
 
 /// `[input]` host-input preferences. Currently just the initial joystick input
@@ -2022,6 +2026,7 @@ impl TryFrom<RawConfig> for Config {
                             .map(|n| n.to_string_lossy().into_owned())
                             .unwrap_or_else(|| "HostFS".into())
                     }),
+                    boot_pri: m.bootpri.unwrap_or(-128),
                 })
                 .collect(),
             chipset,

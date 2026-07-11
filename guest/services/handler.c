@@ -126,17 +126,21 @@ void mount_boards(UBYTE *board, struct Library *_expbase, struct ConfigDev *cd)
         dn->dn_Type = DLT_DEVICE;
         dn->dn_StackSize = HANDLER_STACK;
         dn->dn_Priority = 10;
-        // The emulator prepared one FileSysStartupMsg per unit at expansion
-        // init; the boot menu displays it, and the emulator reads the unit
-        // back from fssm_Unit at ACTION_STARTUP.
+        // The emulator prepared one FileSysStartupMsg (with a per-unit
+        // DosEnvec) per mount at expansion init; the boot menu displays it,
+        // and the emulator reads the unit back from fssm_Unit at
+        // ACTION_STARTUP.
         dn->dn_Startup = MKBADDR(board + FSSM_OFFSET + i * FSSM_SLOT_SIZE);
         dn->dn_SegList = MKBADDR(board + 4);
         dn->dn_GlobalVec = -1; // C handler: no BCPL global vector
         dn->dn_Name = MKBADDR(bname);
 
-        // Priority -128: mounted at DOS init but never a boot candidate.
+        // Boot priority comes from the config via de_BootPri; the default
+        // -128 mounts at DOS init but is never a boot candidate.
         // ADNF_STARTPROC: start the handler process at mount time rather
         // than on first reference, so problems surface at boot.
-        AddBootNode(-128, ADNF_STARTPROC, dn, cd);
+        struct FileSysStartupMsg *fssm = BADDR(dn->dn_Startup);
+        struct DosEnvec *env = BADDR(fssm->fssm_Environ);
+        AddBootNode((BYTE)env->de_BootPri, ADNF_STARTPROC, dn, cd);
     }
 }
