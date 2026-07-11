@@ -1014,9 +1014,30 @@ impl FloppyController {
         }
 
         let Some(idx) = self.selected_drive() else {
+            if crate::envcfg::flag("COPPERLINE_DIAG_DISK") {
+                log::info!("disk-dma refused: no drive selected (prb={:02X})", self.prb);
+            }
             return self.no_drive_completion();
         };
-        if !self.drives[idx].ready() {
+        // Paula's disk state machine does not sense drive readiness: DSKLEN
+        // arming enters the transfer state regardless, and data starts
+        // flowing once the mechanism delivers stable cells. A drive that is
+        // still spinning up must therefore arm normally instead of faking an
+        // instant, dataless completion -- trackloaders (Gods, Shadow of the
+        // Beast disk 2) issue the read within the spin-up window and poll the
+        // buffer for arriving data, dead-spinning if it never fills.
+        // TODO: media-less and motor-off drives should also arm and idle
+        // (real Paula would wait for sync forever); they keep the instant
+        // completion until the software relying on it is characterized.
+        if self.drives[idx].image.is_none() || !self.drives[idx].motor_on {
+            if crate::envcfg::flag("COPPERLINE_DIAG_DISK") {
+                log::info!(
+                    "disk-dma refused: df{idx} image={} motor_on={} motor_cck={}",
+                    self.drives[idx].image.is_some(),
+                    self.drives[idx].motor_on,
+                    self.drives[idx].motor_cck,
+                );
+            }
             return self.no_drive_completion();
         }
 
@@ -4923,7 +4944,9 @@ mod tests {
         };
         let mut ctrl = FloppyController::from_config(&cfg)?;
 
-        ctrl.write_prb(!CIAB_DSKMOTOR & !CIAB_DSKSEL0);
+        // Selected drive with media but the motor line off: the armed DSKLEN
+        // still takes the instant-completion path and DMAON stays clear.
+        ctrl.write_prb(!CIAB_DSKSEL0);
 
         let len = DSKLEN_DMAEN | 1;
         let dmacon = DMACON_DMAEN | DMACON_DISK;
@@ -4936,7 +4959,7 @@ mod tests {
     }
 
     #[test]
-    fn read_dma_before_motor_ready_does_not_start() -> Result<()> {
+    fn read_dma_started_during_motor_spinup_arms_and_transfers() -> Result<()> {
         let raw_words = [0x1234, 0x5678];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
@@ -4953,21 +4976,24 @@ mod tests {
         let mut ctrl = FloppyController::from_config(&cfg)?;
         let mut chip_ram = vec![0u8; 4];
 
+        // Motor just latched on: the drive is spinning up (/RDY still high),
+        // but Paula's DSKLEN arming does not sense readiness, so the
+        // double-write enters the read state and the transfer proceeds.
         ctrl.write_prb(!CIAB_DSKMOTOR & !CIAB_DSKSEL0);
+        assert_ne!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
         ctrl.set_dskpt_low(0);
         let len = DSKLEN_DMAEN | 1;
         assert!(!ctrl.write_dsklen(len, 0));
-        assert!(ctrl.write_dsklen(len, 0));
+        assert!(!ctrl.write_dsklen(len, 0));
         let dmacon = DMACON_DMAEN | DMACON_DISK;
 
-        assert_eq!(ctrl.read_dskbytr(dmacon, 0) & DMAON, 0);
-        assert_eq!(ctrl.next_completion_cck(dmacon), None);
-        assert!(!ctrl.tick(
+        assert_ne!(ctrl.read_dskbytr(dmacon, 0) & DMAON, 0);
+        assert!(ctrl.tick(
             FloppyController::word_cck_for_track_words(raw_words.len()),
             dmacon,
             &mut chip_ram
         ));
-        assert_eq!(read_chip_word(&chip_ram, 0), 0);
+        assert_eq!(read_chip_word(&chip_ram, 0), raw_words[0]);
 
         let _ = fs::remove_file(path);
         Ok(())
