@@ -2923,6 +2923,12 @@ impl Bus {
         // The code-path ring that consumes this alarm is debugger-local state,
         // so a serialized pending alarm has no useful history after a restore.
         self.diag_lowmem_blit = false;
+        // Diagnostics are start-up settings, not machine state: re-derive the
+        // env-gated flags so a loaded state honours the current environment
+        // rather than the one the state was saved under.
+        self.dbg_slotmap_on = crate::envcfg::flag("COPPERLINE_DIAG_SLOTMAP");
+        self.dbg_slotmap_dumped = false;
+        self.bus_accounting = BusAccounting::from_env();
     }
 
     pub fn emulated_seconds(&self) -> f64 {

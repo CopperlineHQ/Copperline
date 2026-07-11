@@ -143,6 +143,16 @@ rows again: Copperline now reads `10002 / 18362 / 346 / 25091`
 few colour clocks of the FS-UAE/real references; row 25 matches the vAmiga
 line-mode reference and is within a couple of colour clocks of FS-UAE.
 
+The 2026-07-11 BLTPRI fence fix (with BLTPRI set, BLS locks the CPU off the
+chip bus for the whole blit, bus-free micro-cycles included) moved row 26 to
+25161 (`0x6249`, +66 vs the FS-UAE 25095 / vAmiga 25097 references, from -22
+before). The old proximity was a cancellation: the polling CPU used to sneak
+DMACONR reads into the blit's idle bubbles and observed completion early,
+masking blit-under-display-contention drift that is now visible. The fence
+itself is hardware-proven (MFM-decode trackloaders rely on it -- see
+docs/internals/timing.md); the residual row-26 drift is a separate
+display-contention question.
+
 Row 31 found (and now guards) a second real bug (2026-07-07). On the plain 68000
 Copperline matches vAmiga on every other row -- including the CPU-vs-6-bitplane
 contention (row 11) and the line blit (row 25); the apparent "row 25 ~21% slow"

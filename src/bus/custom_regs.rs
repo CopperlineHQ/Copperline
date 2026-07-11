@@ -678,13 +678,14 @@ impl Bus {
                 self.blitter.start_scheduled(val, &self.mem.chip_ram);
                 if diag_blt_slots() {
                     eprintln!(
-                        "BLTP {} {} {} START con0={:04x} con1={:04x} size={:04x}",
+                        "BLTP {} {} {} START con0={:04x} con1={:04x} size={:04x} dmacon={:04x}",
                         self.emulated_frames,
                         self.agnus.vpos,
                         self.agnus.hpos,
                         self.blitter.bltcon0,
                         self.blitter.bltcon1,
-                        val
+                        val,
+                        self.agnus.dmacon
                     );
                 }
                 self.record_blit_accounting();
