@@ -82,11 +82,12 @@ pub fn save_scaled_y(
     save(path, &scaled, width, out_height)
 }
 
-/// Save a rectangular viewport from `fb`, clamping source coordinates at the
-/// source edges. The clamp lets a presentation aperture extend slightly beyond
-/// the emulated capture buffer while preserving the captured border colour at
-/// the edge.
-pub fn save_cropped_clamped(
+/// Save a rectangular viewport from `fb`, rendering viewport pixels that fall
+/// outside the source as opaque black. A presentation aperture may extend
+/// slightly beyond the emulated capture buffer; the uncaptured margin is
+/// bezel, not picture, so replicating edge pixels there would fabricate
+/// content whenever the display fetches into the deepest overscan.
+pub fn save_cropped_black_padded(
     path: &Path,
     fb: &[u32],
     src_width: usize,
@@ -96,11 +97,11 @@ pub fn save_cropped_clamped(
     width: usize,
     height: usize,
 ) -> Result<()> {
-    let cropped = crop_clamped(fb, src_width, src_height, x, y, width, height)?;
+    let cropped = crop_black_padded(fb, src_width, src_height, x, y, width, height)?;
     save(path, &cropped, width as u32, height as u32)
 }
 
-fn crop_clamped(
+fn crop_black_padded(
     fb: &[u32],
     src_width: usize,
     src_height: usize,
@@ -123,14 +124,17 @@ fn crop_clamped(
         anyhow::bail!("invalid crop dimensions");
     }
 
-    let mut cropped = vec![0; width * height];
+    // Opaque black in the fb's R,G,B,A memory order.
+    const BLACK: u32 = 0xFF00_0000;
+    let mut cropped = vec![BLACK; width * height];
+    let copy_w = width.min(src_width.saturating_sub(x));
     for dst_y in 0..height {
-        let src_y = (y + dst_y).min(src_height - 1);
-        let dst = &mut cropped[dst_y * width..(dst_y + 1) * width];
-        for (dst_x, pixel) in dst.iter_mut().enumerate() {
-            let src_x = (x + dst_x).min(src_width - 1);
-            *pixel = fb[src_y * src_width + src_x];
+        let src_y = y + dst_y;
+        if src_y >= src_height {
+            break;
         }
+        let src_row = &fb[src_y * src_width..src_y * src_width + x + copy_w];
+        cropped[dst_y * width..dst_y * width + copy_w].copy_from_slice(&src_row[x..]);
     }
     Ok(cropped)
 }
@@ -215,12 +219,16 @@ mod tests {
     }
 
     #[test]
-    fn cropped_clamped_view_extends_edge_pixels() -> Result<()> {
+    fn cropped_view_black_pads_outside_source() -> Result<()> {
         let fb = vec![1, 2, 3, 4, 5, 6];
+        const BLACK: u32 = 0xFF00_0000;
 
-        let cropped = crop_clamped(&fb, 3, 2, 1, 0, 4, 2)?;
+        let cropped = crop_black_padded(&fb, 3, 2, 1, 0, 4, 3)?;
 
-        assert_eq!(cropped, vec![2, 3, 3, 3, 5, 6, 6, 6]);
+        assert_eq!(
+            cropped,
+            vec![2, 3, BLACK, BLACK, 5, 6, BLACK, BLACK, BLACK, BLACK, BLACK, BLACK]
+        );
         Ok(())
     }
 }
