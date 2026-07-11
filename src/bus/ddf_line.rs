@@ -43,6 +43,10 @@ pub(super) struct DdfSeqLine {
     pub modulo_at: [bool; DDF_SEQ_MAX_LINE_CCKS],
     /// Words each plane fetches over the whole line.
     pub words_per_plane: [u16; 8],
+    /// Highest per-plane word count (the capture row width).
+    pub words_per_row: u16,
+    /// DMA plane count implied by the table (highest plane with a slot).
+    pub dma_planes: u8,
     /// The fetching plane's word ordinal at each slot colour clock (holes
     /// keep their position when DMA enables mid-line: the ordinal counts
     /// table slots, and unfetched earlier slots stay zero words).
@@ -247,6 +251,8 @@ impl Bus {
             plane_at: [0; DDF_SEQ_MAX_LINE_CCKS],
             modulo_at: [false; DDF_SEQ_MAX_LINE_CCKS],
             words_per_plane: [0; 8],
+            words_per_row: 0,
+            dma_planes: 0,
             word_idx_at: [0; DDF_SEQ_MAX_LINE_CCKS],
             first_fetch_cck: None,
             run_origin_cck: None,
@@ -281,6 +287,8 @@ impl Bus {
                 }
             }
         }
+        line.words_per_row = line.words_per_plane.iter().copied().max().unwrap_or(0);
+        line.dma_planes = line.plane_at.iter().copied().max().unwrap_or(0);
         line
     }
 
@@ -420,14 +428,21 @@ impl Bus {
             // must not skew the visible rows' pointer progression).
             return;
         };
-        let (plane_at, modulo_at, word_idx_at, words_per_row, run_origin) = {
+        // This runs on every chip-bus quantum (a single colour clock), so the
+        // table stays behind its borrow: copying the ~1KB slot arrays out per
+        // quantum was a measured hot spot, dominated by blank lines that then
+        // fetched nothing. The line-constant aggregates are precomputed at
+        // build time; a mid-loop re-borrow rebuilds from unchanged inputs, so
+        // it yields the same table.
+        let end = new_hpos.min(DDF_SEQ_MAX_LINE_CCKS as u32);
+        let (words_per_row, dma_planes, run_origin) = {
             let table = self.ddf_seq_line_table();
-            let wpr = table.words_per_plane.iter().copied().max().unwrap_or(0) as usize;
+            if !(old_hpos..end).any(|hpos| table.plane_at[hpos as usize] != 0) {
+                return;
+            }
             (
-                table.plane_at,
-                table.modulo_at,
-                table.word_idx_at,
-                wpr,
+                usize::from(table.words_per_row),
+                usize::from(table.dma_planes),
                 table.run_origin_cck,
             )
         };
@@ -435,23 +450,27 @@ impl Bus {
             return;
         }
         let addr_mask = self.chip_dma_mask;
-        let end = new_hpos.min(DDF_SEQ_MAX_LINE_CCKS as u32);
         let mut slots = 0usize;
         let mut rows_started = 0usize;
         for hpos in old_hpos..end {
-            let slot = plane_at[hpos as usize];
-            if slot == 0 {
-                continue;
-            }
-            let plane = usize::from(slot - 1);
+            let (plane, word_idx, apply_modulo) = {
+                let table = self.ddf_seq_line_table();
+                let slot = table.plane_at[hpos as usize];
+                if slot == 0 {
+                    continue;
+                }
+                (
+                    usize::from(slot - 1),
+                    usize::from(table.word_idx_at[hpos as usize]),
+                    table.modulo_at[hpos as usize],
+                )
+            };
             if plane == 0 {
                 self.record_sprite_display_enable_for_bitplane_dma(vpos);
             }
-            let word_idx = usize::from(word_idx_at[hpos as usize]);
             let addr = self.display_dma_bplpt[plane] & addr_mask;
             let fetched = read_chip_word_wrapping(&self.mem.chip_ram, addr);
             self.data_bus = fetched;
-            let dma_planes = plane_count_from_table(&plane_at);
             if self.capture_bitplane_fetch_word(
                 fb_y,
                 display_planes,
@@ -466,7 +485,7 @@ impl Bus {
             self.denise.write_bpldat(plane, fetched);
             self.display_dma_bplpt[plane] =
                 self.display_dma_bplpt[plane].wrapping_add(2) & addr_mask;
-            if modulo_at[hpos as usize] {
+            if apply_modulo {
                 let modulo = self.display_dma_modulo_for_plane(plane, vpos);
                 self.display_dma_bplpt[plane] =
                     ((self.display_dma_bplpt[plane] as i64).wrapping_add(modulo as i64) as u32)
@@ -513,11 +532,6 @@ impl Bus {
         self.ddf_seq_writes.borrow_mut().clear();
         self.ddf_seq_invalidate_line();
     }
-}
-
-/// DMA plane count implied by the walked table (highest plane with a slot).
-fn plane_count_from_table(plane_at: &[u8; DDF_SEQ_MAX_LINE_CCKS]) -> usize {
-    plane_at.iter().copied().max().unwrap_or(0) as usize
 }
 
 #[cfg(test)]

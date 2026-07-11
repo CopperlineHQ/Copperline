@@ -164,11 +164,22 @@ impl Palette {
     /// renderer's palette diffs.
     pub fn write_entry(&mut self, entry: usize, loct: bool, value: u16) {
         let entry = entry & (PALETTE_ENTRIES - 1);
-        if loct {
-            self.lo[entry] = value & COLOR_RGB_MASK;
-        } else {
-            self.hi[entry] = value & COLOR_REGISTER_MASK;
-            self.lo[entry] = value & COLOR_RGB_MASK;
+        let mut view = PaletteEntry {
+            hi: self.hi[entry],
+            lo: self.lo[entry],
+        };
+        view.write(loct, value);
+        self.hi[entry] = view.hi;
+        self.lo[entry] = view.lo;
+    }
+
+    /// One entry's nibble planes, for callers that sample a single colour
+    /// without materializing a whole palette.
+    pub fn entry(&self, entry: usize) -> PaletteEntry {
+        let entry = entry & (PALETTE_ENTRIES - 1);
+        PaletteEntry {
+            hi: self.hi[entry],
+            lo: self.lo[entry],
         }
     }
 
@@ -204,9 +215,39 @@ impl Palette {
     /// low nibble planes.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn rgb24(&self, entry: usize) -> u32 {
-        let entry = entry & (PALETTE_ENTRIES - 1);
-        let hi = u32::from(self.hi[entry]);
-        let lo = u32::from(self.lo[entry]);
+        self.entry(entry).rgb24()
+    }
+}
+
+/// One [`Palette`] entry's nibble planes, sampled and written with the same
+/// semantics as the full palette. Lets per-pixel colour resolution work on
+/// four bytes instead of copying the 1KB palette.
+#[derive(Clone, Copy)]
+pub struct PaletteEntry {
+    hi: u16,
+    lo: u16,
+}
+
+impl PaletteEntry {
+    /// The OCS-layout high word: what indexing the full palette reads.
+    pub fn latch(self) -> u16 {
+        self.hi
+    }
+
+    /// Same masking as [`Palette::write_entry`], applied to this entry.
+    pub fn write(&mut self, loct: bool, value: u16) {
+        if loct {
+            self.lo = value & COLOR_RGB_MASK;
+        } else {
+            self.hi = value & COLOR_REGISTER_MASK;
+            self.lo = value & COLOR_RGB_MASK;
+        }
+    }
+
+    /// Same composition as [`Palette::rgb24`], for this entry.
+    pub fn rgb24(self) -> u32 {
+        let hi = u32::from(self.hi);
+        let lo = u32::from(self.lo);
         let t = (hi & u32::from(COLOR_TRANSPARENCY_BIT)) << 16;
         let r = ((hi >> 8) & 0xF) << 20 | ((lo >> 8) & 0xF) << 16;
         let g = ((hi >> 4) & 0xF) << 12 | ((lo >> 4) & 0xF) << 8;
