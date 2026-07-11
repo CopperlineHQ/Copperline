@@ -891,8 +891,11 @@ fn run_headless_benchmark(mut emu: Emulator, target_secs: f32) -> Result<()> {
 
     let start_frames = emu.bus().emulated_frames();
     let started = Instant::now();
+    let mut frame_times: Vec<f64> = Vec::new();
     while emu.bus().emulated_seconds() < target_secs {
+        let frame_started = Instant::now();
         emu.step_frame()?;
+        frame_times.push(frame_started.elapsed().as_secs_f64() * 1_000.0);
     }
     let elapsed = started.elapsed().as_secs_f64();
     let frames = emu.bus().emulated_frames().saturating_sub(start_frames);
@@ -905,10 +908,60 @@ fn run_headless_benchmark(mut emu: Emulator, target_secs: f32) -> Result<()> {
         frames,
         frames as f64 / elapsed.max(f64::EPSILON)
     );
+    report_benchmark_frame_times(start_frames, &frame_times);
     emu.report_stats();
     // Evaluate an untargeted reverse watchpoint at the benchmark's end.
     emu.tt_finalize_reverse_watch()?;
     Ok(())
+}
+
+/// A frame slower than this stalls the audio ring on a PAL host (50 Hz = 20 ms
+/// per frame, minus headroom for the window render path).
+const BENCH_FRAME_BUDGET_MS: f64 = 20.0;
+
+/// Summarize the per-frame wall times of a `--benchmark-until` run: the
+/// distribution, and every frame that individually blew the audio budget.
+/// Averages hide these spikes, and a single late frame is an audible underrun.
+fn report_benchmark_frame_times(start_frame: u64, frame_times: &[f64]) {
+    if frame_times.is_empty() {
+        return;
+    }
+    let mut sorted: Vec<f64> = frame_times.to_vec();
+    sorted.sort_by(|a, b| a.total_cmp(b));
+    let pct = |p: f64| sorted[((sorted.len() - 1) as f64 * p) as usize];
+    info!(
+        "benchmark frame times: p50={:.2}ms p90={:.2}ms p99={:.2}ms max={:.2}ms",
+        pct(0.50),
+        pct(0.90),
+        pct(0.99),
+        sorted[sorted.len() - 1]
+    );
+    let over: Vec<(usize, f64)> = frame_times
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|&(_, ms)| ms > BENCH_FRAME_BUDGET_MS)
+        .collect();
+    if over.is_empty() {
+        info!(
+            "benchmark frame times: all {} frames within the {:.0}ms budget",
+            frame_times.len(),
+            BENCH_FRAME_BUDGET_MS
+        );
+        return;
+    }
+    info!(
+        "benchmark frame times: {} of {} frames over the {:.0}ms budget:",
+        over.len(),
+        frame_times.len(),
+        BENCH_FRAME_BUDGET_MS
+    );
+    for (idx, ms) in over.iter().take(50) {
+        info!("  frame {} ({:.2}ms)", start_frame + *idx as u64, ms);
+    }
+    if over.len() > 50 {
+        info!("  ... and {} more", over.len() - 50);
+    }
 }
 
 /// Whether to open a live audio sink. `[audio] output_enabled = false` (the GUI
