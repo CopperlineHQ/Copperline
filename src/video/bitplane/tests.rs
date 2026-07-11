@@ -1337,7 +1337,7 @@ fn late_lowres_ddf_reaches_diwstop_with_undelayed_planes_active() {
     plane2[16] = 0x0001;
     let planes = vec![plane1, plane2];
     let plan = DenisePlannedPlayfieldLine::new(0, 94, 702, &planes, 17 * 16);
-    let delays = std::array::from_fn(|plane| control.scroll_for_plane(plane));
+    let delays = std::array::from_fn(|plane| control.sample_delay_for_plane(plane));
     let sample = plan.sample_prepared_with_final_fetch_hold(
         control.nplanes(),
         &delays,
@@ -1551,7 +1551,7 @@ fn bplcon1_delay_drops_prefetch_samples_at_block_start() {
     };
     let plane_words = [vec![0xE000]];
     let line = DenisePlannedPlayfieldLine::new(0, 0, 32, &plane_words, 16);
-    let delays = std::array::from_fn(|plane| control.scroll_for_plane(plane));
+    let delays = std::array::from_fn(|plane| control.sample_delay_for_plane(plane));
 
     assert_eq!(line.sample_prepared(1, &delays, 0, 3).idx, 1);
     assert_eq!(line.sample_prepared(1, &delays, 2, 3).idx, 0);
@@ -4821,6 +4821,56 @@ fn bplcon1_exposes_separate_playfield_scroll_nibbles() {
     assert_eq!(control.pf2_scroll(), 10);
     assert_eq!(control.scroll_for_plane(0), 3);
     assert_eq!(control.scroll_for_plane(1), 10);
+}
+
+#[test]
+fn covered_scroll_catches_floor_reload_slot_for_off_grid_ddfstrt() {
+    // Lo-res FMODE=0 fetch with DDFSTRT $66: 6 cck past the 8-cck reload
+    // grid, i.e. the data is 12 native px late for its own slot. With
+    // scroll 0 it waits for the next slot (round-up placement, no advance);
+    // a BPLCON1 delay that covers the lateness (S >= 12) catches the floor
+    // slot one full gulp (16 native px) earlier. vAmiga-verified with the
+    // ddfprobe-phase/-phase2 probes; regression example: Rampage's dot-cube
+    // pan (DDFSTRT $66->$68 against a scroll wrap $FF->$00) jumps 16 px
+    // without the advance.
+    // ECS Agnus: the DDFSTRT comparator has 2-cck resolution, so $66 keeps
+    // its phase-6 position (OCS masks to 4-cck, making the lateness 8 px).
+    let control = |bplcon1: u16| ControlState {
+        agnus_revision: AgnusRevision::Ecs8372Rev4,
+        bplcon0: 0x2200, // 2 planes, lo-res
+        ddfstrt: 0x0066,
+        ddfstop: 0x00C8,
+        bplcon1,
+        ..ControlState::default()
+    };
+
+    // Scroll 0: no advance, delays are the plain scroll values.
+    assert_eq!(control(0x0000).row_reload_advance(), 0);
+    assert_eq!(control(0x0000).sample_delay_for_plane(0), 0);
+    // Scroll 15 on both playfields covers the 12 px lateness.
+    assert_eq!(control(0x00FF).row_reload_advance(), 16);
+    assert_eq!(control(0x00FF).sample_delay_for_plane(0), 15);
+    assert_eq!(control(0x00FF).sample_delay_for_plane(1), 15);
+    // Scroll 11 does not cover 12 px: round-up placement stands.
+    assert_eq!(control(0x00BB).row_reload_advance(), 0);
+    assert_eq!(control(0x00BB).sample_delay_for_plane(0), 11);
+    // Split scrolls: PF2 (odd planes) covered, PF1 not. The row origin
+    // extends by PF2's advance; PF1 planes rebase one gulp later so their
+    // placement is unchanged.
+    assert_eq!(control(0x00F0).row_reload_advance(), 16);
+    assert_eq!(control(0x00F0).sample_delay_for_plane(0), 16);
+    assert_eq!(control(0x00F0).sample_delay_for_plane(1), 15);
+    // On-grid DDFSTRT never advances, whatever the scroll.
+    let on_grid = ControlState {
+        agnus_revision: AgnusRevision::Ecs8372Rev4,
+        bplcon0: 0x2200,
+        ddfstrt: 0x0068,
+        ddfstop: 0x00C8,
+        bplcon1: 0x00FF,
+        ..ControlState::default()
+    };
+    assert_eq!(on_grid.row_reload_advance(), 0);
+    assert_eq!(on_grid.sample_delay_for_plane(0), 15);
 }
 
 #[test]

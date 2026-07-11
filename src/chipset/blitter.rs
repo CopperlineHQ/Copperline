@@ -743,6 +743,32 @@ impl Blitter {
         }
     }
 
+    /// Whether the pending pipeline cycle falls inside the blit's warm-up
+    /// window, during which BLTPRI's BLS assertion fences the CPU off the
+    /// chip bus even though the cycle itself is bus-free. From the BLTSIZE
+    /// poke until the D pipeline is primed (the first D slot has passed) the
+    /// sequencer's bus request stays asserted: its first fetches are queued
+    /// back-to-back, so the startup ladder and the first-word bubble never
+    /// release the request line. MFM-decode trackloaders (e.g. Jim Power's)
+    /// depend on this: they restore a saved word below a decode blit's
+    /// destination right after writing BLTSIZE, relying on the nasty lockout
+    /// to keep that CPU write (and the instruction prefetches before it) out
+    /// of the startup and first-D holes. Once the pipeline is primed the
+    /// request drops on genuine bus-free micro-cycles -- disabled-channel
+    /// gaps, fill's idle cycle, line-mode Bresenham cycles -- and the CPU
+    /// may use them even under BLTPRI, which line-drawing main loops rely
+    /// on for CPU time (2 of the 4 line cycles per pixel are bus-free).
+    pub fn bltpri_warmup_fences_cpu(&self) -> bool {
+        if !self.busy {
+            return false;
+        }
+        match self.pending.as_ref() {
+            Some(PendingBlit::Normal(state)) => state.bltpri_warmup_fences_cpu(),
+            Some(PendingBlit::Line(state)) => state.bltpri_warmup_fences_cpu(),
+            None => false,
+        }
+    }
+
     /// Arbitration class of the pipeline cycle the next `tick_scheduled_slot`
     /// will process (see BlitSlotClass). `Internal` when no blit is pending
     /// so callers need no extra guard.
@@ -1277,6 +1303,15 @@ impl LineBlitState {
         }
     }
 
+    /// Line-mode warm-up window for the BLTPRI CPU fence (see
+    /// `Blitter::bltpri_warmup_fences_cpu`): only the startup ladder. Line
+    /// mode has no D pipeline bubble -- the first D write is a real access --
+    /// so once the per-pixel cadence starts, the bus-free Bresenham cycles
+    /// (L1/L3) release the request line and stay CPU-available.
+    fn bltpri_warmup_fences_cpu(&self) -> bool {
+        matches!(self.phase, LineBlitPhase::StartDelay | LineBlitPhase::Init)
+    }
+
     /// Access pattern of the next `limit` scheduled slots (bit k = slot k
     /// consumes a blitter-eligible colour clock: a bus access or a bus-free
     /// micro-cycle; clear = internal): the line startup ladder (register
@@ -1642,6 +1677,25 @@ impl NormalBlitState {
             | NormalBlitPhase::Init
             | NormalBlitPhase::E
             | NormalBlitPhase::Done => false,
+        }
+    }
+
+    /// Warm-up window for the BLTPRI CPU fence (see
+    /// `Blitter::bltpri_warmup_fences_cpu`): the startup ladder plus, for
+    /// D-writing blits, the body cycles until the first D slot has primed
+    /// the hold register. That covers the first-word pipeline bubble; from
+    /// the second word on, bus-free micro-cycles release the request line.
+    /// The terminal E/F cycles are past the fence: BBUSY has already
+    /// dropped at the last body cycle.
+    fn bltpri_warmup_fences_cpu(&self) -> bool {
+        match self.phase {
+            NormalBlitPhase::StartDelay | NormalBlitPhase::Init => true,
+            NormalBlitPhase::A
+            | NormalBlitPhase::B
+            | NormalBlitPhase::C
+            | NormalBlitPhase::D
+            | NormalBlitPhase::FillIdle => self.use_d && !self.pipeline_full,
+            NormalBlitPhase::E | NormalBlitPhase::F | NormalBlitPhase::Done => false,
         }
     }
 

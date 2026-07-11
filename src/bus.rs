@@ -230,6 +230,8 @@ const DMACON_SPREN: u16 = 1 << 5;
 const DMACON_BLTEN: u16 = 1 << 6;
 const DMACON_BPLEN: u16 = 1 << 8;
 const DMACON_BLTPRI: u16 = 1 << 10;
+#[cfg(test)]
+const BLTCON0_USE_A: u16 = 1 << 11;
 const BLTCON0_USE_C: u16 = 1 << 9;
 const BLTCON0_USE_D: u16 = 1 << 8;
 const BLTCON1_LINE: u16 = 1 << 0;

@@ -1028,6 +1028,73 @@ impl ControlState {
         }
     }
 
+    /// One-gulp reload advance (in native px) for a playfield whose BPLCON1
+    /// scroll covers the fetch's off-grid phase.
+    ///
+    /// The row's placement (`fetch_origin_native_shift`) quantizes an
+    /// FMODE=0 fetch that starts off the shifter reload grid UP to the next
+    /// grid slot: the data arrives too late for its own slot and waits. But
+    /// the playfield's BPLCON1 delay taps the shifter S pixels late, so when
+    /// the scroll covers the phase lateness (lateness <= S) the data DOES
+    /// catch its own (floor) slot and the picture sits one full gulp left of
+    /// the rounded-up origin. vAmiga-verified with the ddfprobe-phase/-phase2
+    /// probes (lo-res, marker per (DDFSTRT, BPLCON1) band): DDFSTRT $66 with
+    /// scroll 15 sits exactly 1 lo-res px left of $68 with scroll 0, while
+    /// $66 with scroll 0 sits at the $68 slot, and on-grid starts never move
+    /// with scroll beyond the scroll itself. Regression example: Rampage's
+    /// dot-cube part pans by walking DDFSTRT $66->$68 against a BPLCON1 wrap
+    /// $FF->$00; without the covered-phase advance the pan jumps 16 px a few
+    /// times a second. Scroll 0 (every previously calibrated case) is
+    /// unchanged: the advance only triggers when scroll covers the phase.
+    fn reload_advance_for_scroll(&self, scroll: usize) -> i32 {
+        if self.fetch_quantum() != 1 {
+            return 0;
+        }
+        let gulp = self.fetch_period() as i32;
+        let start = effective_ddf_start_hpos(
+            self.agnus_revision,
+            self.hires() || self.shres(),
+            self.ddfstrt,
+        ) as i32;
+        let phase = start.rem_euclid(gulp);
+        if phase == 0 {
+            return 0;
+        }
+        let native_per_cck = if self.shres() {
+            8
+        } else if self.hires() {
+            4
+        } else {
+            2
+        };
+        let lateness = phase * native_per_cck;
+        if lateness <= scroll as i32 {
+            gulp * native_per_cck
+        } else {
+            0
+        }
+    }
+
+    /// The row's reload advance: the largest advance over the playfields the
+    /// plane count uses. `fetch_origin_native_shift` extends the fetch span
+    /// this far left; `sample_delay_for_plane` rebases each plane against it.
+    fn row_reload_advance(&self) -> i32 {
+        let mut advance = self.reload_advance_for_scroll(self.pf1_scroll());
+        if self.nplanes() >= 2 {
+            advance = advance.max(self.reload_advance_for_scroll(self.pf2_scroll()));
+        }
+        advance
+    }
+
+    /// Per-plane sample delay against the advance-extended row origin: the
+    /// BPLCON1 scroll, plus the row advance not consumed by this plane's own
+    /// reload advance. A plane that catches the floor reload slot keeps
+    /// `scroll`; a plane that waits for the next slot is one gulp later.
+    fn sample_delay_for_plane(&self, plane: usize) -> i32 {
+        let scroll = self.scroll_for_plane(plane);
+        scroll as i32 + self.row_reload_advance() - self.reload_advance_for_scroll(scroll)
+    }
+
     fn playfield_priority_code(&self, playfield: u8) -> u8 {
         if playfield == 1 {
             (self.bplcon2 & 0x0007) as u8
@@ -1275,7 +1342,13 @@ impl ControlState {
         if (self.hires() || self.shres()) && self.fetch_quantum() == 1 && ddf_native_shift < 0 {
             origin_shift = origin_shift.max(-ddf_native_shift);
         }
-        origin_shift
+        // A playfield whose BPLCON1 scroll covers an off-grid fetch phase
+        // catches the floor reload slot instead of the rounded-up one (see
+        // `reload_advance_for_scroll`): extend the fetch span left by the
+        // row's advance so those planes' earlier samples exist in the plan;
+        // `sample_delay_for_plane` rebases every plane against this origin,
+        // leaving uncovered planes (and every scroll-0 row) in place.
+        origin_shift + self.row_reload_advance()
     }
 }
 
@@ -1329,7 +1402,7 @@ impl<'a> DenisePlannedPlayfieldLine<'a> {
     #[cfg(test)]
     fn sample(&self, control: ControlState, native_x: usize) -> DeniseBitplaneSample {
         let nplanes = control.nplanes().min(self.plane_words.len());
-        let delays = std::array::from_fn(|plane| control.scroll_for_plane(plane));
+        let delays = std::array::from_fn(|plane| control.sample_delay_for_plane(plane));
         self.sample_prepared(nplanes, &delays, 0, native_x)
     }
 
@@ -1351,7 +1424,7 @@ impl<'a> DenisePlannedPlayfieldLine<'a> {
     fn sample_prepared(
         &self,
         nplanes: usize,
-        delays: &[usize; 8],
+        delays: &[i32; 8],
         min_fetch_x: usize,
         native_x: usize,
     ) -> DeniseBitplaneSample {
@@ -1361,7 +1434,7 @@ impl<'a> DenisePlannedPlayfieldLine<'a> {
     fn sample_prepared_with_final_fetch_hold(
         &self,
         nplanes: usize,
-        delays: &[usize; 8],
+        delays: &[i32; 8],
         min_fetch_x: usize,
         native_x: usize,
         hold_final_fetch_sample: bool,
@@ -1369,12 +1442,15 @@ impl<'a> DenisePlannedPlayfieldLine<'a> {
         let mut idx = 0u8;
         let mut active = false;
         for (plane, words) in self.plane_words.iter().enumerate().take(nplanes) {
+            // A negative delay is the covered-phase reload advance (see
+            // `sample_delay_for_plane`): the plane's data caught the floor
+            // reload slot, one gulp left of the row's rounded-up origin.
             let delay = delays[plane];
-            if native_x < delay {
+            if (native_x as i32) < delay {
                 active = true;
                 continue;
             }
-            let fetch_x = native_x - delay;
+            let fetch_x = (native_x as i32 - delay) as usize;
             if fetch_x < min_fetch_x {
                 active = true;
                 continue;
@@ -4311,7 +4387,7 @@ fn render_planned_playfield_line(
         let line_visible = pixel_control.display_window_contains_line(plan.y, visible_line0);
         let background_rgb24 = rgb12_to_rgb24(color_rgb12(palette[0]));
         let nplanes = sample_control.nplanes().min(plan.plane_words.len());
-        let delays = std::array::from_fn(|plane| sample_control.scroll_for_plane(plane));
+        let delays = std::array::from_fn(|plane| sample_control.sample_delay_for_plane(plane));
         let hold_final_fetch_sample = pixel_control.holds_final_lowres_fetch_sample_at_diwstop();
         let ham_mode = sample_control.hold_and_modify();
         let ham_history_start_native_x = if ham_mode {
