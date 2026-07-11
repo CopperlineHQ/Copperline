@@ -10012,6 +10012,87 @@ fn render_input_refill_from_bus_matches_fresh_snapshot() {
 }
 
 #[test]
+fn line_without_captured_fetch_paints_no_playfield() {
+    // Agnus arms a line's fetch run at the DDFSTRT comparator match; a
+    // BPLCON0 raised mid-line only after that point starts no run until the
+    // next line. The DMA capture records which lines ran, so a line with no
+    // captured fetch fetched nothing and the renderer must not synthesize a
+    // picture for it from the register-derived window (regression: the
+    // Rampage bottom-scroller band entry painted a phantom, word-skewed
+    // copy of the first bitmap row one line above the real first fetch row).
+    let mut bus = empty_bus();
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
+    bus.denise.diwstrt = 0x2C81;
+    bus.denise.diwstop = 0x2FC1;
+    bus.denise.ddfstrt = 0x0038;
+    bus.denise.ddfstop = 0x00D0;
+    bus.denise.bplcon0 = 0x1000;
+    bus.denise.palette.write_ocs(1, 0x0FFF);
+    bus.denise.bplpt[0] = 0x0100;
+    let words_per_row = bitplane_words_per_row(
+        bus.agnus.revision(),
+        bus.denise.bplcon0,
+        bus.agnus.fmode(),
+        bus.denise.ddfstrt,
+        bus.denise.ddfstop,
+        bus.harddis_active(),
+    );
+    // Non-zero bitmap behind the pointer so a synthesized re-fetch of the
+    // uncaptured line would visibly paint.
+    for word in 0..words_per_row {
+        write_chip_word(&mut bus, 0x0100 + word * 2, 0xFFFF);
+    }
+    bus.current_frame_render_base = bus.capture_render_snapshot();
+    let captured_row = || {
+        Some(CapturedBitplaneRow {
+            nplanes: 1,
+            words_per_row,
+            fetch_origin_cck: None,
+            planes: std::array::from_fn(|plane| {
+                if plane == 0 {
+                    vec![0xFFFF; words_per_row]
+                } else {
+                    vec![0; words_per_row]
+                }
+            }),
+        })
+    };
+
+    let lit_rows = |fb: &[u32]| -> Vec<usize> {
+        let background = fb[0];
+        (0..FB_HEIGHT)
+            .filter(|row| {
+                fb[row * FB_WIDTH..(row + 1) * FB_WIDTH]
+                    .iter()
+                    .any(|&px| px != background)
+            })
+            .collect()
+    };
+
+    // Only line 1 recorded a fetch: line 0's sequencer never ran.
+    bus.current_frame_bitplane_rows[1] = captured_row();
+    let mut fb_skipped = vec![0u32; FB_PIXELS];
+    bitplane::render_from_input(&bitplane::RenderInput::from_bus(&bus), &mut fb_skipped);
+
+    // Both lines recorded fetches: shows where line 0's picture would sit.
+    bus.current_frame_bitplane_rows[0] = captured_row();
+    let mut fb_both = vec![0u32; FB_PIXELS];
+    bitplane::render_from_input(&bitplane::RenderInput::from_bus(&bus), &mut fb_both);
+
+    let skipped = lit_rows(&fb_skipped);
+    let both = lit_rows(&fb_both);
+    assert!(!skipped.is_empty(), "the captured line must paint");
+    assert!(
+        both.first() < skipped.first(),
+        "the two-capture render must start a line above ({both:?} vs {skipped:?})"
+    );
+    assert!(
+        skipped.iter().all(|row| both.contains(row)),
+        "the uncaptured line must not add pixels of its own"
+    );
+}
+
+#[test]
 fn beam_trap_fires_at_exact_position_and_one_shot_disarms() {
     let mut bus = empty_bus();
     // From power-on the beam sits at (0, 0). A one-shot trap two lines
