@@ -43,10 +43,14 @@ jobs:
         # self-contained (committed probe binaries booted on the bundled
         # AROS ROM) and compares each probe's deterministic render
         # pixel-for-pixel against the references in timing-test/golden/ --
-        # the hardware-behaviour regression net (DDF/DIW placement, raced
-        # copper-chunky COLOR00 trains, sprite serializer positions, and
-        # the 32 CPU/chip-bus timing rows). See timing-test/README.md
-        # "CI golden renders" for the re-bless workflow.
+        # the hardware-behaviour regression net (DDF/DIW placement and
+        # DDFSTRT-phase/scroll maps, raced copper-chunky COLOR00 trains,
+        # sprite serializer/DMA-FSM positions, BLTPRI CPU pacing bars,
+        # byte-write register mirroring, the CLXDAT collision matrix, and
+        # the 32 CPU/chip-bus timing rows). Each probe is its own #[test],
+        # so the boots run in parallel on the runner's cores. See
+        # timing-test/README.md "CI golden renders" for the re-bless
+        # workflow.
         run: cargo test --release --locked
       - name: Upload probe render diffs
         # On a golden mismatch the test writes the actual renders and diff

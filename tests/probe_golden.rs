@@ -36,24 +36,46 @@ use std::process::Command;
 const ADF_SIZE: usize = 901_120; // 80 tracks * 2 sides * 11 sectors * 512
 const BOOTBLOCK_SIZE: usize = 1024;
 
-/// (probe name, main-program binary, emulated seconds before the shot).
+/// The machine a probe boots on. Every probe runs the stock A500 shape
+/// (68000, 512K chip + 512K slow, PAL); the chipset revision varies where a
+/// probe's reference measurements were taken on ECS (the DDFSTRT comparator
+/// has 2-cck resolution on ECS vs 4-cck on OCS, so phase probes differ).
+#[derive(Clone, Copy)]
+enum Machine {
+    Ocs,
+    Ecs,
+}
+
+/// One golden-render probe: name, main-program binary, emulated seconds
+/// before the shot, and the machine it boots on.
 /// The AROS bootstrap hands control to the bootblock at ~32s emulated;
 /// every display probe is settled and static by 40s (verified 40 == 44),
 /// and the timing test has printed all its measurement rows by 55s
 /// (verified 55 == 65).
-const PROBES: &[(&str, &str, f64)] = &[
-    ("timing-test", "test.bin", 55.0),
-    ("ddfprobe", "ddfprobe.bin", 40.0),
-    ("ddfprobe-diw1", "ddfprobe-diw1.bin", 40.0),
-    ("ddfprobe-toggle", "ddfprobe-toggle.bin", 40.0),
-    ("ddfprobe-cc", "ddfprobe-cc.bin", 40.0),
-    ("ddfprobe-cc3", "ddfprobe-cc3.bin", 40.0),
-    ("ddfprobe-cc4", "ddfprobe-cc4.bin", 40.0),
-    ("ddfprobe-sprbar", "ddfprobe-sprbar.bin", 40.0),
-    ("ddfprobe-sprbar2", "ddfprobe-sprbar2.bin", 40.0),
-    ("ddfprobe-sotb", "ddfprobe-sotb.bin", 40.0),
-    ("ddfprobe-sotb2", "ddfprobe-sotb2.bin", 40.0),
-];
+struct Probe {
+    name: &'static str,
+    program: &'static str,
+    seconds: f64,
+    machine: Machine,
+}
+
+const fn probe(name: &'static str, program: &'static str, seconds: f64) -> Probe {
+    Probe {
+        name,
+        program,
+        seconds,
+        machine: Machine::Ocs,
+    }
+}
+
+const fn probe_ecs(name: &'static str, program: &'static str, seconds: f64) -> Probe {
+    Probe {
+        name,
+        program,
+        seconds,
+        machine: Machine::Ecs,
+    }
+}
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -95,7 +117,11 @@ fn build_adf(boot: &[u8], program: &[u8]) -> Vec<u8> {
     image
 }
 
-fn probe_config(adf: &Path) -> String {
+fn probe_config(adf: &Path, machine: Machine) -> String {
+    let chipset = match machine {
+        Machine::Ocs => "revision = \"OCS\"\n",
+        Machine::Ecs => "revision = \"ECS\"\nagnus = \"8372A\"\ndenise = \"OCS\"\n",
+    };
     format!(
         "rom = \"<bundled-aros>\"\n\
          [display]\n\
@@ -106,7 +132,7 @@ fn probe_config(adf: &Path) -> String {
          chip = \"512K\"\n\
          slow = \"512K\"\n\
          [chipset]\n\
-         revision = \"OCS\"\n\
+         {chipset}\
          video = \"PAL\"\n\
          [floppy.df0]\n\
          path = \"{}\"\n\
@@ -145,8 +171,11 @@ fn write_png(path: &Path, width: u32, height: u32, rgba: &[u8]) {
     writer.write_image_data(rgba).expect("png data");
 }
 
-/// Render `name` and return the path of the captured screenshot.
-fn capture_probe(name: &str, program: &str, seconds: f64, work: &Path) -> PathBuf {
+/// Render a probe and return the path of the captured screenshot.
+fn capture_probe(p: &Probe, work: &Path) -> PathBuf {
+    let name = p.name;
+    let program = p.program;
+    let seconds = p.seconds;
     let root = repo_root();
     let boot = fs::read(root.join("timing-test/boot.bin")).expect("timing-test/boot.bin");
     let main = fs::read(root.join("timing-test").join(program))
@@ -154,7 +183,7 @@ fn capture_probe(name: &str, program: &str, seconds: f64, work: &Path) -> PathBu
     let adf_path = work.join(format!("{name}.adf"));
     fs::write(&adf_path, build_adf(&boot, &main)).expect("write adf");
     let cfg_path = work.join(format!("{name}.toml"));
-    fs::write(&cfg_path, probe_config(&adf_path)).expect("write config");
+    fs::write(&cfg_path, probe_config(&adf_path, p.machine)).expect("write config");
     let shot_path = work.join(format!("{name}.png"));
 
     let output = Command::new(env!("CARGO_BIN_EXE_copperline"))
@@ -188,91 +217,140 @@ fn capture_probe(name: &str, program: &str, seconds: f64, work: &Path) -> PathBu
     shot_path
 }
 
-#[test]
-fn probe_renders_match_committed_goldens() {
+/// Capture one probe and compare it against its committed golden (or bless
+/// it when `COPPERLINE_BLESS_GOLDEN` is set). Each probe is its own `#[test]`
+/// (see the macro below), so the libtest harness runs the emulator boots in
+/// parallel on the available cores.
+fn run_probe(p: &Probe) {
     if cfg!(debug_assertions) {
         eprintln!("skipping probe goldens; run with --release (a debug emulator is too slow)");
         return;
     }
 
+    let name = p.name;
     let root = repo_root();
     let golden_dir = root.join("timing-test/golden");
     let bless = std::env::var_os("COPPERLINE_BLESS_GOLDEN").is_some();
-    let work = std::env::temp_dir().join(format!("copperline-probe-golden-{}", std::process::id()));
+    let work = std::env::temp_dir().join(format!(
+        "copperline-probe-golden-{}-{name}",
+        std::process::id()
+    ));
     fs::create_dir_all(&work).expect("create work dir");
     let diff_dir = root.join("target/probe-golden");
 
-    let mut failures = Vec::new();
-    for &(name, program, seconds) in PROBES {
-        let shot_path = capture_probe(name, program, seconds, &work);
-        let golden_path = golden_dir.join(format!("{name}.png"));
+    let shot_path = capture_probe(p, &work);
+    let golden_path = golden_dir.join(format!("{name}.png"));
 
-        if bless {
-            fs::create_dir_all(&golden_dir).expect("create golden dir");
-            fs::copy(&shot_path, &golden_path).expect("bless golden");
-            eprintln!("blessed {}", golden_path.display());
-            continue;
-        }
+    if bless {
+        fs::create_dir_all(&golden_dir).expect("create golden dir");
+        fs::copy(&shot_path, &golden_path).expect("bless golden");
+        eprintln!("blessed {}", golden_path.display());
+        let _ = fs::remove_dir_all(&work);
+        return;
+    }
 
-        if !golden_path.exists() {
-            failures.push(format!(
-                "{name}: missing golden {} (generate with COPPERLINE_BLESS_GOLDEN=1)",
-                golden_path.display()
-            ));
-            continue;
-        }
+    let mut failure = None;
+    if !golden_path.exists() {
+        failure = Some(format!(
+            "{name}: missing golden {} (generate with COPPERLINE_BLESS_GOLDEN=1)",
+            golden_path.display()
+        ));
+    } else {
         let golden = load_png(&golden_path).expect("load golden");
         let actual = load_png(&shot_path).expect("load capture");
         if (golden.width, golden.height) != (actual.width, actual.height) {
-            failures.push(format!(
+            failure = Some(format!(
                 "{name}: geometry changed {}x{} -> {}x{}",
                 golden.width, golden.height, actual.width, actual.height
             ));
-            continue;
-        }
-        let differing = golden
-            .data
-            .chunks_exact(4)
-            .zip(actual.data.chunks_exact(4))
-            .filter(|(a, b)| a != b)
-            .count();
-        if differing > 0 {
-            fs::create_dir_all(&diff_dir).expect("create diff dir");
-            let actual_out = diff_dir.join(format!("{name}-actual.png"));
-            fs::copy(&shot_path, &actual_out).expect("copy actual");
-            // Diff mask: white where pixels differ, black elsewhere.
-            let mask: Vec<u8> = golden
+        } else {
+            let differing = golden
                 .data
                 .chunks_exact(4)
                 .zip(actual.data.chunks_exact(4))
-                .flat_map(|(a, b)| {
-                    if a == b {
-                        [0, 0, 0, 255]
-                    } else {
-                        [255, 255, 255, 255]
-                    }
-                })
-                .collect();
-            write_png(
-                &diff_dir.join(format!("{name}-diff.png")),
-                golden.width,
-                golden.height,
-                &mask,
-            );
-            failures.push(format!(
-                "{name}: {differing} of {} pixels differ from timing-test/golden/{name}.png \
-                 (actual + diff mask in target/probe-golden/)",
-                (golden.width * golden.height)
-            ));
+                .filter(|(a, b)| a != b)
+                .count();
+            if differing > 0 {
+                fs::create_dir_all(&diff_dir).expect("create diff dir");
+                let actual_out = diff_dir.join(format!("{name}-actual.png"));
+                fs::copy(&shot_path, &actual_out).expect("copy actual");
+                // Diff mask: white where pixels differ, black elsewhere.
+                let mask: Vec<u8> = golden
+                    .data
+                    .chunks_exact(4)
+                    .zip(actual.data.chunks_exact(4))
+                    .flat_map(|(a, b)| {
+                        if a == b {
+                            [0, 0, 0, 255]
+                        } else {
+                            [255, 255, 255, 255]
+                        }
+                    })
+                    .collect();
+                write_png(
+                    &diff_dir.join(format!("{name}-diff.png")),
+                    golden.width,
+                    golden.height,
+                    &mask,
+                );
+                failure = Some(format!(
+                    "{name}: {differing} of {} pixels differ from timing-test/golden/{name}.png \
+                     (actual + diff mask in target/probe-golden/)",
+                    (golden.width * golden.height)
+                ));
+            }
         }
     }
 
     let _ = fs::remove_dir_all(&work);
     assert!(
-        failures.is_empty(),
-        "probe golden mismatches:\n  {}\n\nIf the change is an intentional hardware-model \
+        failure.is_none(),
+        "probe golden mismatch:\n  {}\n\nIf the change is an intentional hardware-model \
          fix, re-bless with COPPERLINE_BLESS_GOLDEN=1 cargo test --release --test \
          probe_golden and review the render diff in the commit.",
-        failures.join("\n  ")
+        failure.unwrap()
     );
+}
+
+/// One `#[test]` per probe so the harness parallelises the emulator boots
+/// (the shared work is per-probe; there is no cross-probe state).
+macro_rules! probe_tests {
+    ($($test_name:ident => $p:expr;)*) => {
+        $(
+            #[test]
+            fn $test_name() {
+                run_probe(&$p);
+            }
+        )*
+    };
+}
+
+probe_tests! {
+    golden_timing_test => probe("timing-test", "test.bin", 55.0);
+    golden_ddfprobe => probe("ddfprobe", "ddfprobe.bin", 40.0);
+    golden_ddfprobe_diw1 => probe("ddfprobe-diw1", "ddfprobe-diw1.bin", 40.0);
+    golden_ddfprobe_toggle => probe("ddfprobe-toggle", "ddfprobe-toggle.bin", 40.0);
+    golden_ddfprobe_cc => probe("ddfprobe-cc", "ddfprobe-cc.bin", 40.0);
+    golden_ddfprobe_cc3 => probe("ddfprobe-cc3", "ddfprobe-cc3.bin", 40.0);
+    golden_ddfprobe_cc4 => probe("ddfprobe-cc4", "ddfprobe-cc4.bin", 40.0);
+    golden_ddfprobe_sprbar => probe("ddfprobe-sprbar", "ddfprobe-sprbar.bin", 40.0);
+    golden_ddfprobe_sprbar2 => probe("ddfprobe-sprbar2", "ddfprobe-sprbar2.bin", 40.0);
+    golden_ddfprobe_sotb => probe("ddfprobe-sotb", "ddfprobe-sotb.bin", 40.0);
+    golden_ddfprobe_sotb2 => probe("ddfprobe-sotb2", "ddfprobe-sotb2.bin", 40.0);
+    // DDFSTRT sub-unit phase / BPLCON1 scroll placement maps, ECS-verified
+    // against vAmiga (the Rampage dot-cube pan regression class).
+    golden_ddfprobe_phase => probe_ecs("ddfprobe-phase", "ddfprobe-phase.bin", 40.0);
+    golden_ddfprobe_phase2 => probe_ecs("ddfprobe-phase2", "ddfprobe-phase2.bin", 40.0);
+    // CPU pacing bars under BLTPRI copy/fill/line blits (the Rampage
+    // "present" flicker / BLS fence regression class).
+    golden_bltprobe_pace => probe("bltprobe-pace", "bltprobe-pace.bin", 40.0);
+    // DMA sprite vertical reuse + attached pair placement (the sprite
+    // register-FSM regression class).
+    golden_ddfprobe_sprmulti => probe("ddfprobe-sprmulti", "ddfprobe-sprmulti.bin", 40.0);
+    // CPU byte writes to a custom register latch the mirrored word (the
+    // COLOR00 byte-write regression class).
+    golden_regprobe_bytemirror => probe("regprobe-bytemirror", "regprobe-bytemirror.bin", 40.0);
+    // CLXDAT collision matrix bits rendered as cells (the collision
+    // matching/enable regression class).
+    golden_clxprobe => probe("clxprobe", "clxprobe.bin", 40.0);
 }

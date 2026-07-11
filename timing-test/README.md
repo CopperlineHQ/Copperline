@@ -277,14 +277,29 @@ time, and compared pixel-for-pixel against the reference render committed
 under `golden/`. The emulator core is deterministic, so any pixel change is
 a real behaviour change.
 
+Each probe is its own `#[test]`, so the harness runs the emulator boots in
+parallel on the available cores (the full suite of 17 takes ~20 s on an
+8-core host vs ~85 s sequentially).
+
 Covered: `timing-test` (all 32 timing rows as rendered hex), `ddfprobe`
 (DDF placement sweep), `ddfprobe-diw1` (DIW edge), `ddfprobe-toggle`
 (per-line BPLCON0 toggling), `ddfprobe-cc`/`-cc3`/`-cc4` (raced
 copper-chunky COLOR00 trains vs bitplane fetch), `ddfprobe-sprbar`/
 `-sprbar2` (manual/DMA sprite serializer positions -- the gen-x masking-bar
-regression), and `ddfprobe-sotb`/`-sotb2` (post-WAIT COLOR00 landing against
+regression), `ddfprobe-sotb`/`-sotb2` (post-WAIT COLOR00 landing against
 the DIW border transition, quiet bus vs 6-plane lores fetch starvation --
-the Shadow of the Beast title band). Excluded by design: `ddfprobe-cc5`/`-cc6` sit on deliberate
+the Shadow of the Beast title band), `ddfprobe-phase`/`-phase2` (DDFSTRT
+sub-unit phase and BPLCON1-scroll placement maps on the ECS 8372A, the
+Rampage dot-cube pan regression; vAmiga-verified band by band),
+`bltprobe-pace` (CPU pacing bars under BLTPRI copy/fill/line blits and a
+nice-mode line blit -- the BLS-fence and blitter slot-cadence regression
+class; the whole-blit fence collapsed the fill/line bars),
+`ddfprobe-sprmulti` (DMA sprite vertical reuse and an attached 15-colour
+pair -- the sprite register-FSM class), `regprobe-bytemirror` (CPU byte
+writes latch the mirrored word into COLOR00 -- both byte lanes must render
+the same magenta), and `clxprobe` (the CLXDAT collision matrix rendered as
+bit cells for two CLXCON programs, including a plane enabled beyond the
+BPU count). Excluded by design: `ddfprobe-cc5`/`-cc6` sit on deliberate
 race boundaries and would flip on any unrelated timing change, and
 `ddfprobe-cc7` replays a chip-RAM dump of a running demo that is not
 committed.
