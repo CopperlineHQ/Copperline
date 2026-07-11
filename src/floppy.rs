@@ -425,13 +425,17 @@ impl FloppyController {
                 // that drives the step pulse, so sampling `prev` would step
                 // the wrong way on the first move after a direction change.
                 let inward = val & CIAB_DSKDIREC == 0;
-                self.drives[idx].step(inward);
+                let stepper_fired = self.drives[idx].step(inward);
                 self.handle_active_dma_track_change(idx);
-                // Every step pulse moves the head mechanism audibly,
-                // including trackdisk's no-disk change-line polling
-                // (the classic empty-drive click) and bump-stops at
-                // the ends of travel.
-                self.sound_steps = self.sound_steps.saturating_add(1);
+                // Only pulses that reach the stepper are audible.
+                // Trackdisk's no-disk change-line polling makes the
+                // classic empty-drive click, but the drive gates
+                // outward pulses with the /TRK0 sensor at cylinder 0
+                // (a silent poll, which NoClick patches rely on), and
+                // pulses faster than the mechanism move nothing.
+                if stepper_fired {
+                    self.sound_steps = self.sound_steps.saturating_add(1);
+                }
             }
 
             if was_selected != selected {
@@ -1473,7 +1477,10 @@ impl FloppyDrive {
         // trackloaders (e.g. Magic Pockets) issue between sector reads.
     }
 
-    fn step(&mut self, inward: bool) {
+    /// Applies a STEP pulse. Returns true when the pulse reached the
+    /// stepper motor (the head moved, or banged the inner end stop),
+    /// false when the mechanism swallowed it silently.
+    fn step(&mut self, inward: bool) -> bool {
         // The change latch clears on the step PULSE itself (an electrical
         // edge), whether or not the mechanism accepts it.
         if self.image.is_some() {
@@ -1492,7 +1499,7 @@ impl FloppyDrive {
             );
         }
         if since(self.last_step_cck) < MIN_STEP_PULSE_CCK {
-            return;
+            return false;
         }
         let opposite = if inward {
             self.last_step_outward_cck
@@ -1500,7 +1507,7 @@ impl FloppyDrive {
             self.last_step_inward_cck
         };
         if since(opposite) < MIN_STEP_PULSE_CCK {
-            return;
+            return false;
         }
         self.last_step_cck = Some(now);
         if inward {
@@ -1531,6 +1538,12 @@ impl FloppyDrive {
             debug!("floppy step: cylinder={}", self.cylinder);
         }
         self.last_step_inward = Some(inward);
+        // 3.5" drives gate outward step pulses with the /TRK0 sensor:
+        // at cylinder 0 the stepper never fires, so the head neither
+        // moves nor makes a sound. There is no matching inner sensor,
+        // so an inward pulse at the clamp still fires the stepper and
+        // bangs the end stop.
+        inward || previous != 0
     }
 
     /// True when the platter is stopped and no settle/seek countdown is
@@ -4130,6 +4143,82 @@ mod tests {
         wait_step_floor(&mut ctrl);
         ctrl.write_prb(outward_high & !CIAB_DSKSTEP);
         assert_eq!(ctrl.selected_track(), Some(0));
+    }
+
+    #[test]
+    fn outward_step_at_track_zero_is_gated_silent_by_trk0_sensor() {
+        // Trackdisk NoClick patches poll the change line by pulsing STEP
+        // outward with the head parked at cylinder 0. The /TRK0 sensor
+        // gates the pulse before the stepper, so the head neither moves
+        // nor clicks (issue #161).
+        let mut ctrl = FloppyController::default();
+        let selected = !CIAB_DSKMOTOR & !CIAB_DSKSEL0;
+        let inward_high = selected & !CIAB_DSKDIREC;
+        let outward_high = selected | CIAB_DSKDIREC;
+
+        ctrl.write_prb(outward_high);
+        ctrl.write_prb(outward_high & !CIAB_DSKSTEP);
+        assert_eq!(ctrl.selected_track(), Some(0));
+        assert_eq!(ctrl.take_sound_steps(), 0);
+
+        // A pulse that does move the head is audible.
+        ctrl.write_prb(inward_high);
+        wait_step_floor(&mut ctrl);
+        ctrl.write_prb(inward_high & !CIAB_DSKSTEP);
+        assert_eq!(ctrl.selected_track(), Some(2));
+        assert_eq!(ctrl.take_sound_steps(), 1);
+
+        // Back at cylinder 0, an outward poll goes quiet again.
+        ctrl.write_prb(outward_high);
+        wait_step_floor(&mut ctrl);
+        ctrl.write_prb(outward_high & !CIAB_DSKSTEP);
+        assert_eq!(ctrl.selected_track(), Some(0));
+        assert_eq!(ctrl.take_sound_steps(), 1);
+        ctrl.write_prb(outward_high);
+        wait_step_floor(&mut ctrl);
+        ctrl.write_prb(outward_high & !CIAB_DSKSTEP);
+        assert_eq!(ctrl.selected_track(), Some(0));
+        assert_eq!(ctrl.take_sound_steps(), 0);
+    }
+
+    #[test]
+    fn inward_step_at_inner_clamp_still_clicks() {
+        // There is no inner-limit sensor: an inward pulse with the head
+        // at the last cylinder still fires the stepper and bangs the end
+        // stop audibly, even though the head cannot move further.
+        let mut ctrl = FloppyController::default();
+        let selected = !CIAB_DSKMOTOR & !CIAB_DSKSEL0;
+        let inward_high = selected & !CIAB_DSKDIREC;
+        ctrl.write_prb(inward_high);
+        for _ in 0..CYLINDERS + 2 {
+            ctrl.write_prb(inward_high & !CIAB_DSKSTEP);
+            ctrl.write_prb(inward_high);
+            wait_step_floor(&mut ctrl);
+        }
+        assert_eq!(ctrl.selected_track(), Some((CYLINDERS as u8 - 1) * 2));
+        ctrl.take_sound_steps();
+
+        ctrl.write_prb(inward_high & !CIAB_DSKSTEP);
+        assert_eq!(ctrl.selected_track(), Some((CYLINDERS as u8 - 1) * 2));
+        assert_eq!(ctrl.take_sound_steps(), 1);
+    }
+
+    #[test]
+    fn step_pulse_swallowed_by_the_mechanism_is_silent() {
+        // A second pulse inside the ~40 us mechanism floor does not move
+        // the head (vAmigaTS Drive/step3) and produces no click either.
+        let mut ctrl = FloppyController::default();
+        let selected = !CIAB_DSKMOTOR & !CIAB_DSKSEL0;
+        let inward_high = selected & !CIAB_DSKDIREC;
+        ctrl.write_prb(inward_high);
+
+        ctrl.write_prb(inward_high & !CIAB_DSKSTEP);
+        assert_eq!(ctrl.take_sound_steps(), 1);
+
+        ctrl.write_prb(inward_high);
+        ctrl.write_prb(inward_high & !CIAB_DSKSTEP);
+        assert_eq!(ctrl.selected_track(), Some(2));
+        assert_eq!(ctrl.take_sound_steps(), 0);
     }
 
     #[test]
