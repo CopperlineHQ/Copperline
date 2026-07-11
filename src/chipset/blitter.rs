@@ -1686,8 +1686,15 @@ impl NormalBlitState {
     /// the hold register. That covers the first-word pipeline bubble; from
     /// the second word on, bus-free micro-cycles release the request line.
     /// The terminal E/F cycles are past the fence: BBUSY has already
-    /// dropped at the last body cycle.
+    /// dropped at the last body cycle. A blit with NO channels enabled
+    /// never asserts a bus request at all, so it fences nothing: BLS
+    /// follows the request line, and interrupt-driven null-blit chains
+    /// (BLTSIZE with BLTCON0 USE=0 restarted every scanline, vAmigaTS
+    /// Agnus/Blitter/bltint) must run with the CPU at full speed.
     fn bltpri_warmup_fences_cpu(&self) -> bool {
+        if !self.use_a && !self.use_b && !self.use_c && !self.use_d {
+            return false;
+        }
         match self.phase {
             NormalBlitPhase::StartDelay | NormalBlitPhase::Init => true,
             NormalBlitPhase::A
