@@ -42,6 +42,8 @@ const DIP_OFFSET: u32 = 0x008C_0003;
 /// 53C710 register-file byte offsets as the 68k sees them (the chip is
 /// wired big-endian on the A4091, so these are the driver's REG_ addresses).
 const REG_CTEST8: usize = 0x21;
+/// CTEST8.CLF: clear the DMA and SCSI FIFOs; self-clearing strobe.
+const CTEST8_CLF: u8 = 0x04;
 /// ISTAT: bit 7 abort strobe, bit 6 software reset; bits 1/0 are the
 /// computed SIP/DIP interrupt-pending flags.
 const REG_ISTAT: usize = 0x22;
@@ -916,6 +918,14 @@ impl crate::zorro_device::ZorroDevice for A4091 {
             if r == REG_CTEST5 {
                 self.ctest5_strobes();
             }
+            // CTEST8.CLF drains both FIFOs; the bit does not latch.
+            if r == REG_CTEST8 && b & CTEST8_CLF != 0 {
+                for fifo in &mut self.dma_fifo {
+                    fifo.clear();
+                }
+                self.scsi_fifo.clear();
+                self.regs[REG_CTEST8] = b & !CTEST8_CLF;
+            }
             // Writing DSP's low byte starts the SCRIPTS processor.
             if r == REG_DSP + 3 {
                 self.run_scripts(host);
@@ -1112,6 +1122,36 @@ mod tests {
             assert_eq!(sfp, expect, "parity byte {i}");
             assert_eq!(b.read(io(REG_SSTAT2), 1, &mut host) >> 4, (7 - i) as u32);
         }
+    }
+
+    #[test]
+    fn ctest8_clf_drains_both_fifos() {
+        // CTEST8.CLF clears the DMA FIFO (all four lanes) and the SCSI FIFO
+        // in one strobe, and the bit itself does not latch.
+        let mut b = board_with_rom(test_rom_64k());
+        let mut mem = test_memory();
+        let mut host = DeviceHost::new(&mut mem);
+        let io = |r: usize| IO_OFFSET + r as u32;
+
+        // Push a byte into every DMA lane.
+        for lane in 0..4u32 {
+            b.write(io(REG_CTEST4), 1, 0x04 | lane, &mut host);
+            b.write(io(REG_CTEST6), 1, 0xA0 + lane, &mut host);
+        }
+        // Push a byte into the SCSI FIFO.
+        b.write(io(REG_CTEST4), 1, 0x08, &mut host); // SFWR
+        b.write(io(REG_SODL), 1, 0x5A, &mut host);
+        assert_eq!(b.read(io(REG_CTEST1), 1, &mut host), 0x00); // no lane empty
+        assert_ne!(b.read(io(REG_SSTAT2), 1, &mut host) >> 4, 0);
+
+        // CLF strobe drains everything and reads back clear.
+        b.write(io(REG_CTEST8), 1, u32::from(CTEST8_CLF), &mut host);
+        assert_eq!(b.read(io(REG_CTEST1), 1, &mut host), 0xF0); // all lanes empty
+        assert_eq!(b.read(io(REG_SSTAT2), 1, &mut host) >> 4, 0);
+        assert_eq!(
+            b.read(io(REG_CTEST8), 1, &mut host) & u32::from(CTEST8_CLF),
+            0
+        );
     }
 
     #[test]
