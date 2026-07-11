@@ -297,9 +297,15 @@ class; the whole-blit fence collapsed the fill/line bars),
 `ddfprobe-sprmulti` (DMA sprite vertical reuse and an attached 15-colour
 pair -- the sprite register-FSM class), `regprobe-bytemirror` (CPU byte
 writes latch the mirrored word into COLOR00 -- both byte lanes must render
-the same magenta), and `clxprobe` (the CLXDAT collision matrix rendered as
+the same magenta), `clxprobe` (the CLXDAT collision matrix rendered as
 bit cells for two CLXCON programs, including a plane enabled beyond the
-BPU count). Excluded by design: `ddfprobe-cc5`/`-cc6` sit on deliberate
+BPU count), and `audprobe-en` (the AUD0 interrupt cadence as a
+one-row-per-line strip across a scripted AUDxEN enable / same-word
+disable-re-enable punch / disable / cold-restart sequence -- the issue #74
+deferred AUDxEN-disable class, which the Paula HRM rework regressed once;
+the punch's gap-and-phase signature and the seamless handoff from DMA
+cycle interrupts to the free-running IRQ-mode tick are both pinned).
+Excluded by design: `ddfprobe-cc5`/`-cc6` sit on deliberate
 race boundaries and would flip on any unrelated timing change, and
 `ddfprobe-cc7` replays a chip-RAM dump of a running demo that is not
 committed.
