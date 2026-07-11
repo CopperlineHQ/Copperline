@@ -478,6 +478,7 @@ impl Copper {
         hpos: u32,
         blitter_busy: bool,
         line_cck: u32,
+        copper_cycle_free: bool,
     ) {
         let CopperState::Waiting { wait, phase } = self.state else {
             return;
@@ -485,7 +486,15 @@ impl Copper {
 
         match phase {
             CopperWaitPhase::Wakeup => {
-                if Self::hpos_is_access_cycle(hpos) {
+                // The dummy wake-up is a real Copper cycle: it occupies an
+                // access-parity color clock that fixed DMA does not own
+                // (vAmiga's COP_REQ_DMA reschedules until the bus is free).
+                // Under a 6-plane lores fetch, where bitplanes own six of
+                // every eight color clocks, this is what pushes the woken
+                // instruction's fetches one free slot later -- Shadow of the
+                // Beast's title band tucks its COLOR00 toggles against the
+                // display window edges only because of that extra slot.
+                if copper_cycle_free && Self::hpos_is_access_cycle(hpos) {
                     self.state = CopperState::Running;
                 }
             }
@@ -514,13 +523,14 @@ impl Copper {
                 if released {
                     // The color clock where the comparator goes true is the
                     // wake-up cycle itself (no DMA request); the next access
-                    // cycle already fetches. A match evaluated on an access
-                    // cycle therefore resumes Running directly, so the fetch
-                    // lands one Copper cycle (2 ccks) after the match --
+                    // cycle already fetches. A match evaluated on a free
+                    // access cycle therefore resumes Running directly, so the
+                    // fetch lands one Copper cycle (2 ccks) after the match --
                     // vAmiga's COP_WAKEUP -> COP_FETCH spacing. A match on an
-                    // off-parity color clock spends the following access cycle
-                    // as the wake-up cycle instead.
-                    self.state = if Self::hpos_is_access_cycle(hpos) {
+                    // off-parity color clock, or on one owned by fixed DMA
+                    // (see the Wakeup phase above), spends the next free
+                    // access cycle as the wake-up cycle instead.
+                    self.state = if copper_cycle_free && Self::hpos_is_access_cycle(hpos) {
                         CopperState::Running
                     } else {
                         CopperState::Waiting {
@@ -660,6 +670,9 @@ impl Copper {
     /// `cop1lc`/`cop2lc` resolve COPJMP strobes; `allow_fetch` is false when a
     /// forced owner (a granted CPU access) already holds this color clock, so
     /// the Copper only consumes its idle half here, never a fetch.
+    /// `copper_cycle_free` is false when fixed DMA (bitplane/sprite/disk/
+    /// audio/refresh) owns this color clock: the comparator still runs, but
+    /// the post-WAIT wake-up cycle cannot be spent there.
     pub fn step_eligible_slot(
         &mut self,
         chip_ram: &[u8],
@@ -670,6 +683,7 @@ impl Copper {
         cop2lc: u32,
         allow_fetch: bool,
         line_cck: u32,
+        copper_cycle_free: bool,
     ) -> CopperSlotAction {
         match self.state {
             CopperState::Stopped => CopperSlotAction::Idle,
@@ -678,8 +692,9 @@ impl Copper {
                 // color clock checking the comparator. After a match, real
                 // Agnus spends a dummy wake-up Copper cycle with no DMA request
                 // before fetching the next instruction, so the blitter/CPU keep
-                // that cycle too.
-                self.advance_wait_free_cycle(vpos, hpos, blitter_busy, line_cck);
+                // that cycle too -- but the wake-up itself must land on a
+                // color clock that fixed DMA leaves free.
+                self.advance_wait_free_cycle(vpos, hpos, blitter_busy, line_cck, copper_cycle_free);
                 CopperSlotAction::Idle
             }
             CopperState::Skipping { .. } => {
@@ -919,7 +934,7 @@ mod tests {
         copper.start_wait_instruction(wait);
         // Line-end positions: comparator blocked even though h >= 0x32.
         for hpos in (COLORCLOCKS_PER_LINE - 4)..COLORCLOCKS_PER_LINE {
-            copper.advance_wait_free_cycle(136, hpos, false, COLORCLOCKS_PER_LINE);
+            copper.advance_wait_free_cycle(136, hpos, false, COLORCLOCKS_PER_LINE, true);
             assert!(
                 !copper.is_running(),
                 "wait must not release at line-end hpos {hpos}"
@@ -927,14 +942,14 @@ mod tests {
         }
         // Next line, before the horizontal target: still waiting (the
         // comparator input runs two color clocks ahead of the beam).
-        copper.advance_wait_free_cycle(137, 0x10, false, COLORCLOCKS_PER_LINE);
+        copper.advance_wait_free_cycle(137, 0x10, false, COLORCLOCKS_PER_LINE, true);
         assert!(!copper.is_running());
-        copper.advance_wait_free_cycle(137, 0x2E, false, COLORCLOCKS_PER_LINE);
+        copper.advance_wait_free_cycle(137, 0x2E, false, COLORCLOCKS_PER_LINE, true);
         assert!(!copper.is_running());
         // Two color clocks before the target the comparator matches; the
         // match color clock is the bus-free wake-up cycle and the Copper
         // resumes so its first fetch lands exactly on the $32 target.
-        copper.advance_wait_free_cycle(137, 0x30, false, COLORCLOCKS_PER_LINE);
+        copper.advance_wait_free_cycle(137, 0x30, false, COLORCLOCKS_PER_LINE, true);
         assert!(copper.is_running());
 
         // An already-true wait still pays the WAIT1/WAIT2 tail after its
@@ -945,13 +960,13 @@ mod tests {
         let mut copper = Copper::new();
         copper.start_wait_instruction(wait);
         for hpos in [0x81, 0x82, 0x83] {
-            copper.advance_wait_free_cycle(136, hpos, false, COLORCLOCKS_PER_LINE);
+            copper.advance_wait_free_cycle(136, hpos, false, COLORCLOCKS_PER_LINE, true);
             assert!(
                 !copper.is_running(),
                 "still in the instruction tail or wakeup at hpos {hpos}"
             );
         }
-        copper.advance_wait_free_cycle(136, 0x84, false, COLORCLOCKS_PER_LINE);
+        copper.advance_wait_free_cycle(136, 0x84, false, COLORCLOCKS_PER_LINE, true);
         assert!(copper.is_running());
     }
 
@@ -970,9 +985,9 @@ mod tests {
         // on the $E0 target itself.
         let mut copper = Copper::new();
         copper.wait(wait);
-        copper.advance_wait_free_cycle(200, 0xDC, false, COLORCLOCKS_PER_LINE);
+        copper.advance_wait_free_cycle(200, 0xDC, false, COLORCLOCKS_PER_LINE, true);
         assert!(!copper.is_running());
-        copper.advance_wait_free_cycle(200, 0xDE, false, COLORCLOCKS_PER_LINE);
+        copper.advance_wait_free_cycle(200, 0xDE, false, COLORCLOCKS_PER_LINE, true);
         assert!(
             copper.is_running(),
             "wait whose target is in the blackout must release at that target"
@@ -990,14 +1005,14 @@ mod tests {
         let mut copper = Copper::new();
 
         copper.wait(wait);
-        copper.advance_wait_free_cycle(0, 0x34, false, COLORCLOCKS_PER_LINE);
+        copper.advance_wait_free_cycle(0, 0x34, false, COLORCLOCKS_PER_LINE, true);
         assert!(copper.is_running());
 
         let mut copper = Copper::new();
         copper.wait(wait);
-        copper.advance_wait_free_cycle(0, 0x35, false, COLORCLOCKS_PER_LINE);
+        copper.advance_wait_free_cycle(0, 0x35, false, COLORCLOCKS_PER_LINE, true);
         assert!(!copper.is_running());
-        copper.advance_wait_free_cycle(0, 0x36, false, COLORCLOCKS_PER_LINE);
+        copper.advance_wait_free_cycle(0, 0x36, false, COLORCLOCKS_PER_LINE, true);
         assert!(copper.is_running());
     }
 

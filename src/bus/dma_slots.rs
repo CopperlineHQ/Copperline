@@ -48,7 +48,8 @@ impl Bus {
         };
         let copper_runs = cck >= CHIP_BUS_SLOT_CCK && self.copper_comparator_runs_at(hpos);
         let eligible = copper_runs && fixed_dma_owner.is_none();
-        let copper_took_bus = eligible && self.step_copper_eligible_slot(forced_owner.is_none());
+        let copper_took_bus =
+            eligible && self.step_copper_eligible_slot(forced_owner.is_none(), true);
         if !eligible && copper_runs {
             // A fixed DMA owner (bitplane/sprite/disk/audio/refresh) holds
             // this color clock, but the Copper's WAIT/SKIP comparator is
@@ -59,8 +60,10 @@ impl Bus {
             // line-end blackout covers the following ccks and an 8-bit
             // vertical target like WAIT vp=$FF goes false again after the
             // line-255 rollover. With allow_fetch=false a Running Copper
-            // cannot fetch here, so the slot is never taken from its owner.
-            let _ = self.step_copper_eligible_slot(false);
+            // cannot fetch here, so the slot is never taken from its owner;
+            // copper_cycle_free=false also keeps the post-WAIT wake-up off
+            // this owned color clock.
+            let _ = self.step_copper_eligible_slot(false, false);
         }
 
         let owner = match forced_owner {
@@ -183,7 +186,13 @@ impl Bus {
 
     /// Step the Copper through one eligible color clock and apply any register
     /// write it produced. Returns whether the Copper used the bus this cycle.
-    pub(super) fn step_copper_eligible_slot(&mut self, allow_fetch: bool) -> bool {
+    /// `copper_cycle_free` mirrors `Copper::step_eligible_slot`: false when
+    /// fixed DMA owns this color clock (comparator-only advance).
+    pub(super) fn step_copper_eligible_slot(
+        &mut self,
+        allow_fetch: bool,
+        copper_cycle_free: bool,
+    ) -> bool {
         let cop1lc = self.agnus.cop1lc;
         let cop2lc = self.agnus.cop2lc;
         let vpos = self.agnus.vpos;
@@ -200,6 +209,7 @@ impl Bus {
             cop2lc,
             allow_fetch,
             line_cck,
+            copper_cycle_free,
         );
         self.copper = copper;
         if !self.ui_copper_breaks.is_empty() {
@@ -542,6 +552,7 @@ impl Bus {
                         self.agnus.cop2lc,
                         false,
                         line_cck,
+                        false,
                     );
                 }
                 false
@@ -562,6 +573,7 @@ impl Bus {
                         self.agnus.cop2lc,
                         true,
                         line_cck,
+                        true,
                     ),
                     CopperSlotAction::Idle
                 )

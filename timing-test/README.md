@@ -272,9 +272,11 @@ a real behaviour change.
 Covered: `timing-test` (all 32 timing rows as rendered hex), `ddfprobe`
 (DDF placement sweep), `ddfprobe-diw1` (DIW edge), `ddfprobe-toggle`
 (per-line BPLCON0 toggling), `ddfprobe-cc`/`-cc3`/`-cc4` (raced
-copper-chunky COLOR00 trains vs bitplane fetch), and `ddfprobe-sprbar`/
+copper-chunky COLOR00 trains vs bitplane fetch), `ddfprobe-sprbar`/
 `-sprbar2` (manual/DMA sprite serializer positions -- the gen-x masking-bar
-regression). Excluded by design: `ddfprobe-cc5`/`-cc6` sit on deliberate
+regression), and `ddfprobe-sotb`/`-sotb2` (post-WAIT COLOR00 landing against
+the DIW border transition, quiet bus vs 6-plane lores fetch starvation --
+the Shadow of the Beast title band). Excluded by design: `ddfprobe-cc5`/`-cc6` sit on deliberate
 race boundaries and would flip on any unrelated timing change, and
 `ddfprobe-cc7` replays a chip-RAM dump of a running demo that is not
 committed.
