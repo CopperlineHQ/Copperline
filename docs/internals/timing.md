@@ -182,6 +182,20 @@ clocks and idles on the odd ones (`Copper::hpos_is_access_cycle`). So:
   `VAMIGA_COP_PROBE`): a `WAIT $4721` + `MOVE SPR0CTL` lands the write at
   hpos $22 in both emulators (vAmigaTS spritedma/interfere2, matching the
   real-A500 photo).
+- The wake-up itself is a real Copper cycle: it must land on an
+  access-parity colour clock that fixed DMA (bitplane/sprite/disk/audio/
+  refresh) leaves free (vAmiga's `COP_REQ_DMA` reschedules until the bus
+  is free). On a quiet bus this is invisible -- the match clock doubles as
+  the wake-up. Inside a 5/6-plane lores or hires fetch window, where
+  bitplanes own even colour clocks too, the wake-up is pushed to the next
+  free slot and the woken MOVE's fetches slip one free slot further (a
+  6-plane lores group leaves only offsets 0 and 4 free, so the write
+  lands a full slot later than the quiet-bus spacing). Shadow of the
+  Beast's title relies on this: its per-line `WAIT (v,$40)` /
+  `MOVE COLOR00` toggles tuck against the display window edge at colour
+  clock $48 only because the wake-up consumes the free slot at $40
+  (`ddfprobe-sotb`/`-sotb2` pin the quiet-bus and starved landings against
+  vAmiga; `copper_wait_wakeup_spends_a_free_slot_under_lores6_fetch`).
 
 Anchoring the cadence to the beam rather than to a carried-over flip-flop
 is what makes a back-to-back colour MOVE list land its writes at the

@@ -1618,6 +1618,44 @@ fn copper_wait_comparator_runs_under_fixed_bitplane_dma() {
 }
 
 #[test]
+fn copper_wait_wakeup_spends_a_free_slot_under_lores6_fetch() {
+    // A sleeping WAIT whose comparator matches inside a 6-plane lores fetch
+    // window. The lores plane slots sit at group offsets {1,2,3,5,6,7}, so
+    // with DDFSTRT=$38 the only copper-usable color clocks around a WAIT
+    // (v,$40) are hpos $40, $44, $48, ... The post-WAIT wake-up is a real
+    // Copper cycle and must spend the first FREE access-parity color clock
+    // (vAmiga's COP_REQ_DMA reschedules until the bus is free): wake-up at
+    // $40, first fetch $44, second fetch + write $48. Without the free-slot
+    // gate the wake-up collapses into the (plane-owned) release color clock
+    // and the write lands one free slot early, at $44. Shadow of the Beast's
+    // title band tucks per-line COLOR00 toggles against its display window
+    // edge (DIWSTRT.H=$90, color clock $48) with exactly this list shape.
+    let mut bus = empty_bus();
+    let cop1 = 0x0100usize;
+    write_copper_wait_then_move(&mut bus, cop1, 0x6441, 0xFFFE, 0x0180, 0x0123);
+
+    assert!(!bus.custom_write(0x08E, 2, 0x2C90)); // DIWSTRT (SotB title)
+    assert!(!bus.custom_write(0x090, 2, 0xF4B0)); // DIWSTOP
+    assert!(!bus.custom_write(0x092, 2, 0x0038)); // DDFSTRT
+    assert!(!bus.custom_write(0x094, 2, 0x00D0)); // DDFSTOP
+    assert!(!bus.custom_write(0x100, 2, 0x6600)); // BPLCON0 6 planes, dual pf
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_COPEN | DMACON_BPLEN;
+    bus.agnus.vpos = 0x64;
+    bus.agnus.hpos = 0x20;
+    bus.copper.jump(cop1 as u32);
+
+    let mut landed_hpos = None;
+    for _ in 0..COLORCLOCKS_PER_LINE {
+        bus.advance_chipset(1);
+        if bus.denise.palette[0] == 0x0123 {
+            landed_hpos = Some(bus.agnus.hpos);
+            break;
+        }
+    }
+    assert_eq!(landed_hpos, Some(0x49));
+}
+
+#[test]
 fn next_copper_wakeup_cck_accounts_for_ntsc_long_lines() {
     let mut bus = empty_bus();
     bus.set_video_standard(VideoStandard::Ntsc);

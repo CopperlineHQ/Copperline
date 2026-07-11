@@ -51,6 +51,8 @@ const PROBES: &[(&str, &str, f64)] = &[
     ("ddfprobe-cc4", "ddfprobe-cc4.bin", 40.0),
     ("ddfprobe-sprbar", "ddfprobe-sprbar.bin", 40.0),
     ("ddfprobe-sprbar2", "ddfprobe-sprbar2.bin", 40.0),
+    ("ddfprobe-sotb", "ddfprobe-sotb.bin", 40.0),
+    ("ddfprobe-sotb2", "ddfprobe-sotb2.bin", 40.0),
 ];
 
 fn repo_root() -> PathBuf {
