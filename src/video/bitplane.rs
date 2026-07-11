@@ -3807,6 +3807,25 @@ pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
             if captured_row.is_none() && !control.bitplane_dma_enabled() {
                 continue;
             }
+            // The DMA capture is the authority for whether the bitplane
+            // sequencer ran on a line. A line with no captured fetch at all
+            // fetched nothing - e.g. BPLCON0 raised mid-line only after the
+            // line's DDFSTRT comparator had already passed (the Rampage
+            // bottom-scroller band entry), where Agnus starts no run until
+            // the next line. Synthesizing a picture from the register-derived
+            // window would paint a phantom row that hardware never fetched.
+            // (A captured row that merely disagrees with the register-derived
+            // geometry still takes the re-fetch path below; frames rendered
+            // without any capture - COPPERLINE_RENDER_LIVE_CHIP_RAM - keep
+            // the synthesized path.)
+            if has_captured_bitplane_rows
+                && captured_bitplane_rows
+                    .get(y)
+                    .and_then(Option::as_ref)
+                    .is_none()
+            {
+                continue;
+            }
             // A DDFSTRT comparator below the hardwired start window ($18)
             // only arms a run when the sequencer's SHW latch survived from
             // the previous line (OCS clears it when a fetch run completes,
