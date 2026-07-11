@@ -49,6 +49,10 @@ pub const ID_VALIDATED: u32 = 82;
 pub const ST_ROOT: i32 = 1;
 pub const ST_USERDIR: i32 = 2;
 pub const ST_FILE: i32 = -3;
+// fib_Protection bits (dos/dos.h FIBF_*). The rwed group is inverted:
+// a SET bit means the operation is DENIED.
+pub const FIBF_DELETE: u32 = 1 << 0;
+pub const FIBF_WRITE: u32 = 1 << 2;
 
 // The isolated fields poked in DOS structures the guest owns.
 /// `dn_Task` in `struct DeviceNode` (dos/dosextens.h).
@@ -145,8 +149,11 @@ pub fn read_bstr(bus: &mut dyn AddressBus, bptr: u32) -> Vec<u8> {
     (0..len).map(|i| bus.read_byte(addr + 1 + i)).collect()
 }
 
-/// Host mtime -> AmigaDOS DateStamp (days/minutes/ticks since 1978-01-01).
-pub fn amiga_datestamp(time: Option<std::time::SystemTime>) -> (u32, u32, u32) {
+/// An AmigaDOS DateStamp: days/minutes/ticks since 1978-01-01.
+pub type DateStamp = (u32, u32, u32);
+
+/// Host mtime -> AmigaDOS DateStamp.
+pub fn amiga_datestamp(time: Option<std::time::SystemTime>) -> DateStamp {
     /// Seconds between the Unix epoch and the AmigaDOS epoch.
     const AMIGA_EPOCH_OFFSET: u64 = 252_460_800;
     let secs = time

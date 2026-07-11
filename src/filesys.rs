@@ -129,6 +129,8 @@ pub struct FilesysHle {
     /// Board base address, captured from A0 at the DiagPoint trap.
     board_base: Option<u32>,
     /// Handler MsgPort address -> mount unit, learned from startup packets.
+    /// TODO(codewiz): clear all per-boot state (ports, locks, files, pool)
+    /// on guest reset -- it goes stale across a warm reboot.
     ports: HashMap<u32, usize>,
     /// Mount unit -> guest address of its volume DosList node.
     volumes: HashMap<usize, u32>,
@@ -252,30 +254,50 @@ impl FilesysHle {
             ST_USERDIR
         };
 
-        let (days, mins, ticks) = amiga_datestamp(meta.modified().ok());
+        // Protection, datestamp, and comment come from the UAE `.uaem`
+        // sidecar when one exists (written by UAE-family emulators for the
+        // attributes a host filesystem cannot hold: script/pure/archive,
+        // comments, exact datestamps). Otherwise fall back to what the host
+        // can express: read-only denies `w`; `e` stays allowed (mapping
+        // Unix x to it would stop most copied binaries from running) --
+        // both matching the UAE fsdb.
+        let uaem = read_uaem(&path);
+        let protection = match &uaem {
+            Some(u) => u.protection,
+            None if meta.permissions().readonly() => FIBF_WRITE,
+            None => 0,
+        };
+        let (days, mins, ticks) = uaem
+            .as_ref()
+            .and_then(|u| u.date)
+            .unwrap_or_else(|| amiga_datestamp(meta.modified().ok()));
+        let comment = uaem.map(|u| u.comment).unwrap_or_default();
         let fib_data = FileInfoBlock {
             disk_key: long(disk_key),
             dir_entry_type: long(entry_type as u32),
             file_name: bcpl::<108>(name.as_bytes()),
-            protection: long(0), // rwed
+            protection: long(protection),
             entry_type: long(entry_type as u32),
             size: long(meta.len().min(u32::MAX as u64) as u32),
             num_blocks: long(meta.len().div_ceil(512).min(u32::MAX as u64) as u32),
             date: [long(days), long(mins), long(ticks)],
-            comment: [0; 80], // empty BCPL string
+            comment: bcpl::<80>(&comment),
         };
         write_bytes(bus, fib, fib_data.as_bytes());
         Ok(())
     }
 
-    /// Sorted directory listing used by EXAMINE_NEXT. Recomputed per call:
-    /// simple and correct for interactive use; cache if it ever shows up.
+    /// Sorted directory listing used by EXAMINE_NEXT, hiding the `.uaem`
+    /// metadata sidecars (their contents surface as the companion file's
+    /// attributes instead). Recomputed per call: simple and correct for
+    /// interactive use; cache if it ever shows up.
     fn dir_listing(&self, rec: &LockRec) -> Vec<std::ffi::OsString> {
         let mut names: Vec<_> = std::fs::read_dir(self.lock_path(rec))
             .into_iter()
             .flatten()
             .flatten()
             .map(|e| e.file_name())
+            .filter(|n| !n.as_encoded_bytes().ends_with(b".uaem"))
             .collect();
         names.sort();
         names
@@ -477,6 +499,8 @@ impl FilesysHle {
                 // Arg2 = lock, Arg3 = BSTR name, Arg4 = mask. The host
                 // filesystem has nowhere faithful to keep Amiga protection
                 // bits; accept and ignore (like a FAT filesystem would).
+                // TODO(codewiz): persist to the .uaem sidecar once write
+                // support lands, so protection round-trips.
                 let name_bptr = arg(bus, 3);
                 let name = read_bstr(bus, name_bptr);
                 match self.resolve(unit, arg(bus, 2), &name) {
@@ -619,6 +643,86 @@ impl HleHandler for FilesysHle {
     }
 }
 
+/// Metadata from a UAE `.uaem` sidecar file: the attributes a host
+/// filesystem cannot hold (script/pure/archive bits, file comment, exact
+/// datestamp), written by UAE-family emulators next to the real file.
+struct UaemInfo {
+    /// fib_Protection value (deny-style rwed like the FIB wants).
+    protection: u32,
+    /// DateStamp, when the sidecar's timestamp parses.
+    date: Option<DateStamp>,
+    comment: Vec<u8>,
+}
+
+/// Read and parse the `.uaem` sidecar of `path`, if any.
+fn read_uaem(path: &Path) -> Option<UaemInfo> {
+    let mut side = path.as_os_str().to_owned();
+    side.push(".uaem");
+    parse_uaem(&std::fs::read(Path::new(&side)).ok()?)
+}
+
+/// Parse a `.uaem` sidecar: one line, eight flag letters ("hsparwed", a
+/// letter means the bit is on), a "YYYY-MM-DD HH:MM:SS.CC" timestamp, and
+/// an optional comment. Same grammar as the UAE fsdb, including the
+/// `^ 0xF` flip of the rwed group into the FIB's deny convention.
+fn parse_uaem(data: &[u8]) -> Option<UaemInfo> {
+    let data = data.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(data); // BOM
+    let flags = data.get(..8)?;
+    let mut mode = 0u32;
+    for (i, (&c, &l)) in flags.iter().zip(b"hsparwed").enumerate() {
+        if c == l {
+            mode |= 1 << (7 - i);
+        }
+    }
+    let mut rest = &data[8..];
+    while let Some(r) = rest.strip_prefix(b" ") {
+        rest = r;
+    }
+    let (date, after) = match parse_uaem_date(rest) {
+        Some((d, a)) => (Some(d), a),
+        None => (None, rest),
+    };
+    let comment = after
+        .strip_prefix(b" ")
+        .and_then(|c| c.split(|&b| b == b'\n' || b == b'\r').next())
+        .unwrap_or_default()
+        .to_vec();
+    Some(UaemInfo {
+        protection: mode ^ 0xF,
+        date,
+        comment,
+    })
+}
+
+/// Parse "YYYY-MM-DD HH:MM:SS.CC" into a DateStamp, returning the rest.
+/// Converted directly from the civil date (no timezone round trip): the
+/// sidecar records the guest's original DateStamp rendered as text.
+fn parse_uaem_date(s: &[u8]) -> Option<(DateStamp, &[u8])> {
+    let t = std::str::from_utf8(s.get(..22)?).ok()?;
+    let b = t.as_bytes();
+    if !(b[4] == b'-' && b[7] == b'-' && b[10] == b' ' && b[13] == b':') {
+        return None;
+    }
+    let num = |r: std::ops::Range<usize>| t[r].parse::<i64>().ok();
+    let days = days_from_civil(num(0..4)?, num(5..7)?, num(8..10)?) - days_from_civil(1978, 1, 1);
+    let mins = num(11..13)? * 60 + num(14..16)?;
+    let ticks = num(17..19)? * 50 + num(20..22)? / 2;
+    if days < 0 {
+        return None; // before the AmigaDOS epoch
+    }
+    Some(((days as u32, mins as u32, ticks as u32), &s[22..]))
+}
+
+/// Days since 1970-01-01 of a civil date (Howard Hinnant's algorithm).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719_468
+}
+
 /// Case-insensitive component match: prefer the exact host name, else scan
 /// the directory for a case-insensitive match (AmigaDOS names are
 /// case-insensitive but case-preserving).
@@ -732,6 +836,31 @@ mod tests {
         assert_eq!(&img[d + da_name..d + da_name + 11], b"Copperline\0");
         // The trap opcode must be A-line (group 0xA) to reach handle_aline.
         assert_eq!(TRAP_BASE >> 12, 0xA);
+    }
+
+    #[test]
+    fn uaem_sidecar_parses_flags_date_and_comment() {
+        // A real line written by Amiberry for S/Shell-Startup: script bit
+        // set, execute denied (rwed stored as "allowed" letters, flipped
+        // into the FIB's deny convention by ^ 0xF).
+        let info = parse_uaem(b"-s--rw-d 2026-07-10 16:16:51.32").unwrap();
+        assert_eq!(info.protection, 0x42); // FIBF_SCRIPT | FIBF_EXECUTE
+                                           // 2026-07-10 is 17722 days after 1978-01-01.
+        assert_eq!(info.date, Some((17722, 16 * 60 + 16, 51 * 50 + 32 / 2)));
+        assert!(info.comment.is_empty());
+
+        let info = parse_uaem(b"----rwed 1985-07-23 12:00:00.00 hello world\n").unwrap();
+        assert_eq!(info.protection, 0);
+        assert_eq!(info.comment, b"hello world");
+
+        // Pure (resident-able) tool: p bit, all of rwed allowed.
+        let info = parse_uaem(b"--p-rwed 1992-05-01 00:00:00.00").unwrap();
+        assert_eq!(info.protection, 0x20); // FIBF_PURE
+
+        // Flags but no parsable date: attributes still apply.
+        let info = parse_uaem(b"---arwed").unwrap();
+        assert_eq!(info.protection, 0x10); // FIBF_ARCHIVE
+        assert_eq!(info.date, None);
     }
 
     #[test]
