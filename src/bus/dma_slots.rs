@@ -415,6 +415,18 @@ impl Bus {
             return ChipBusOwner::Copper;
         }
         if self.blitter.busy && self.blitter_dma_enabled() {
+            // With BLTPRI set, BBUSY holds the BLS line asserted for the whole
+            // blit, so the CPU is denied every chip-bus cycle until BLTDONE --
+            // including the pipeline's bus-free micro-cycles below. Regression
+            // example: the Jim Power trackloader saves the word below a
+            // descending MFM-decode blit's destination, writes BLTSIZE, and
+            // restores the word two instructions later, relying on the nasty
+            // lockout to hold that CPU write until after the blit's final
+            // D write; letting it into the first-D bubble corrupts the last
+            // word of every decoded sector.
+            if for_cpu && self.agnus.dmacon & DMACON_BLTPRI != 0 {
+                return ChipBusOwner::Blitter;
+            }
             // Idle blit pipeline cycles (the "-" slots in the HRM cycle diagrams,
             // e.g. the first empty D phase after source fetches or a line blit's
             // internal Bresenham cycles) never claim the bus: per the HRM they

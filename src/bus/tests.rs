@@ -8862,20 +8862,17 @@ fn bltpri_stalls_cpu_chip_access_through_blitter_access_cycles() {
 
     bus.grant_cpu_bus_access(2, CpuBusAccessKind::Read);
 
-    // With BLTPRI set there is no starvation yield, but the empty D phase
-    // after A is an idle pipeline bubble and remains CPU-available. With
-    // the bus-free tail cck added after the granted slot the access costs
-    // 3 color clocks (A wait + D bubble + tail through E).
+    // With BLTPRI set BBUSY holds the BLS line asserted for the entire
+    // blit, so the CPU is denied even the idle D-bubble cycle after the A
+    // fetch (the bubble is bus-free, but BLS fences the CPU, not the bus).
+    // The CPU waits through the A fetch, the D bubble, the D write, and
+    // the terminal cycles, then spends its granted slot plus the bus-free
+    // tail: 6 color clocks. Software depends on this fence: MFM-decode
+    // trackloaders (e.g. Jim Power's) restore the word below a decode
+    // blit's destination right after BLTSIZE, relying on that CPU write
+    // landing only after the blit's first D write.
     let (cck, _) = bus.take_slice_bus_advance();
-    assert_eq!(cck, 3);
-    assert!(bus.blitter.busy);
-    assert_eq!(bus.paula.intreq & INT_BLIT, 0);
-    assert_eq!(&bus.mem.chip_ram[0x20..0x22], &[0x00, 0x00]);
-
-    // The final F slot is still owned by the blitter and writes the queued
-    // word once the CPU's bus cycle is over; the interrupt is asserted off
-    // that terminal cycle's first attempt.
-    bus.advance_chipset(1);
+    assert_eq!(cck, 6);
     assert!(!bus.blitter.busy);
     assert_eq!(&bus.mem.chip_ram[0x20..0x22], &[0x12, 0x34]);
     assert_ne!(bus.paula.intreq & INT_BLIT, 0);
@@ -8915,14 +8912,13 @@ fn blithog_set_blocks_cpu_slowdown_back_pressure_until_blitter_finishes() {
 
     bus.grant_cpu_bus_access(2, CpuBusAccessKind::Read);
 
-    // With BLTPRI set the CPU gets no starvation yield: it waits through
-    // all twelve A/B/C accesses of the four words, then spends its granted
-    // slot plus the bus-free tail cck, costing 14 color clocks. The
-    // terminal (internal) E/F cycles ride the CPU's granted/tail clocks,
-    // so the engine finishes within the same span and the interrupt is
-    // asserted off the terminal cycle.
+    // With BLTPRI set the CPU gets no starvation yield and BLS stays
+    // asserted until BBUSY drops: it waits through all twelve A/B/C
+    // accesses of the four words and the terminal E/F cycles, then spends
+    // its granted slot plus the bus-free tail cck, costing 16 color
+    // clocks.
     let (cck, _) = bus.take_slice_bus_advance();
-    assert_eq!(cck, 14);
+    assert_eq!(cck, 16);
     assert!(!bus.blitter.busy);
     assert_ne!(bus.paula.intreq & INT_BLIT, 0);
 }
