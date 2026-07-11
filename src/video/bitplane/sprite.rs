@@ -862,11 +862,13 @@ pub(super) fn render_sprites_with_manual_lines_and_writes(
         let odd_sprite = even_sprite + 1;
         let even_lines = &sprite_lines[even_sprite];
         let odd_lines = &sprite_lines[odd_sprite];
+        let attached_beams = pair_attached_beams(even_lines, odd_lines);
 
         clxdat |= render_attached_sprite_pair_lines(
             even_sprite,
             even_lines,
             odd_lines,
+            &attached_beams,
             fb,
             clip,
             base_palettes,
@@ -883,6 +885,7 @@ pub(super) fn render_sprites_with_manual_lines_and_writes(
             even_sprite,
             even_lines,
             odd_lines,
+            &attached_beams,
             fb,
             clip,
             base_palettes,
@@ -899,10 +902,27 @@ pub(super) fn render_sprites_with_manual_lines_and_writes(
     clxdat
 }
 
+/// The sorted, deduplicated beam lines on which this sprite pair has an
+/// attached line. Computed once per pair: the per-line attach test is a
+/// binary search here instead of a rescan of every line of the pair
+/// (quadratic on sprite-multiplexing games, a measured render hot spot).
+pub(super) fn pair_attached_beams(even_lines: &[SpriteLine], odd_lines: &[SpriteLine]) -> Vec<i32> {
+    let mut beams: Vec<i32> = even_lines
+        .iter()
+        .chain(odd_lines.iter())
+        .filter(|line| line.attached)
+        .map(|line| line.beam_y)
+        .collect();
+    beams.sort_unstable();
+    beams.dedup();
+    beams
+}
+
 pub(super) fn render_unattached_sprite_pair_lines(
     even_sprite: usize,
     even_lines: &[SpriteLine],
     odd_lines: &[SpriteLine],
+    attached_beams: &[i32],
     fb: &mut [u32],
     clip: SpriteClip,
     base_palettes: &[Palette],
@@ -920,7 +940,7 @@ pub(super) fn render_unattached_sprite_pair_lines(
     clxdat |= render_collected_sprite_lines(
         odd_sprite,
         odd_lines,
-        |line| !sprite_pair_attach_active_for_beam(even_lines, odd_lines, line.beam_y),
+        |line| attached_beams.binary_search(&line.beam_y).is_err(),
         fb,
         clip,
         base_palettes,
@@ -934,7 +954,7 @@ pub(super) fn render_unattached_sprite_pair_lines(
         visible_line0,
     );
     for even in even_lines {
-        if sprite_pair_attach_active_for_beam(even_lines, odd_lines, even.beam_y) {
+        if attached_beams.binary_search(&even.beam_y).is_ok() {
             continue;
         }
         clxdat |= draw_sprite_line(
@@ -1003,6 +1023,7 @@ pub(super) fn render_attached_sprite_pair_lines(
     even_sprite: usize,
     even_lines: &[SpriteLine],
     odd_lines: &[SpriteLine],
+    attached_beams: &[i32],
     fb: &mut [u32],
     clip: SpriteClip,
     base_palettes: &[Palette],
@@ -1016,16 +1037,7 @@ pub(super) fn render_attached_sprite_pair_lines(
     visible_line0: i32,
 ) -> u16 {
     let mut clxdat = 0u16;
-    let mut beams: Vec<i32> = even_lines
-        .iter()
-        .chain(odd_lines.iter())
-        .filter(|line| line.attached)
-        .map(|line| line.beam_y)
-        .collect();
-    beams.sort_unstable();
-    beams.dedup();
-
-    for beam_y in beams {
+    for &beam_y in attached_beams {
         let y = beam_y - visible_line0;
         if y < 0 || y >= base_controls.len() as i32 {
             continue;
@@ -1099,12 +1111,13 @@ pub(super) fn render_attached_sprite_pair_lines(
             if sprite_mask & (0b11 << even_sprite) != 0b11 << even_sprite {
                 continue;
             }
-            let palette = palette_at_x(base_palettes[y], &palette_segments[y], x_usize);
             let color_idx = sprite_color_entry(control, even_sprite, idx, true);
-            let color_latch = palette[color_idx];
+            let entry =
+                palette_entry_at_x(&base_palettes[y], &palette_segments[y], x_usize, color_idx);
+            let color_latch = entry.latch();
             let transparent = control.genlock_transparent(color_latch, None, false);
             let color = if control.aga() {
-                palette.rgb24(color_idx) & 0x00FF_FFFF
+                entry.rgb24() & 0x00FF_FFFF
             } else {
                 rgb12_to_rgb24(color_rgb12(color_latch))
             };
@@ -1334,11 +1347,12 @@ pub(super) fn draw_sprite_line(
                     continue;
                 }
                 let color_idx = sprite_color_entry(control, sprite, idx, false);
-                let palette = palette_at_x(base_palettes[y], &palette_segments[y], x);
-                let color_latch = palette[color_idx];
+                let entry =
+                    palette_entry_at_x(&base_palettes[y], &palette_segments[y], x, color_idx);
+                let color_latch = entry.latch();
                 let transparent = control.genlock_transparent(color_latch, None, false);
                 let color = if control.aga() {
-                    palette.rgb24(color_idx) & 0x00FF_FFFF
+                    entry.rgb24() & 0x00FF_FFFF
                 } else {
                     rgb12_to_rgb24(color_rgb12(color_latch))
                 };

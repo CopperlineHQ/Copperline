@@ -17,6 +17,29 @@ pub(super) fn palette_at_x(mut palette: Palette, segments: &[PaletteSegment], x:
     palette
 }
 
+/// One palette entry at horizontal position `x`: the base palette's entry
+/// with the row's segment writes to that entry up to `x` applied. The sprite
+/// pixel loops resolve exactly one colour per pixel, so sampling that entry
+/// alone avoids copying the whole 1KB palette per pixel (a measured render
+/// hot spot on sprite-multiplexing games).
+pub(super) fn palette_entry_at_x(
+    palette: &Palette,
+    segments: &[PaletteSegment],
+    x: usize,
+    entry: usize,
+) -> crate::chipset::denise::PaletteEntry {
+    let mut out = palette.entry(entry);
+    for seg in segments {
+        if seg.x > x {
+            break;
+        }
+        if usize::from(seg.entry) == entry & (crate::chipset::denise::PALETTE_ENTRIES - 1) {
+            out.write(seg.loct, seg.value);
+        }
+    }
+    out
+}
+
 pub(super) fn control_at_x(
     mut control: ControlState,
     segments: &[ControlSegment],
