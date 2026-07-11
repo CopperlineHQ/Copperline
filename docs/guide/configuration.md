@@ -353,7 +353,10 @@ stereo_separation = 100     # 0-100; 100 = hardware panning, 0 = mono
 
 The drive sounds are generated from scratch: motor hum with spin-up/down,
 head-step clicks for seeks and the empty-drive poll, and faint read/write
-hiss during disk DMA.
+hiss during disk DMA. Only step pulses that actually fire the stepper are
+audible: like a real 3.5" mechanism, an outward pulse with the head at
+track 0 is gated by the /TRK0 sensor, so NoClick-style patches silence
+the empty-drive poll just as they do on real hardware.
 
 `output_device` picks the host output by a case-insensitive substring of the
 names `--list-audio-devices` prints (`--audio-device` overrides it); an omitted
