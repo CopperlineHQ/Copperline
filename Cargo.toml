@@ -61,6 +61,7 @@ wasmtime = { version = "=27.0.0", default-features = false, features = ["craneli
 # time-zone filename stamps) and, on macOS, the pthread QoS class used for the
 # optional realtime-priority feature (see src/priority.rs).
 libc = "0.2"
+zerocopy = { version = "0.8", features = ["derive"] }
 
 # macOS dock icon: winit's with_window_icon is a no-op on macOS, so the dock
 # icon must be set at runtime via NSApplication. These objc2 versions match the

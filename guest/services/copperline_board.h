@@ -8,13 +8,14 @@
 //   0x0000  u32: fake seglist length (longwords), for tools that look at it
 //   0x0004  u32: 0 (seglist next pointer); dn_SegList = MKBADDR(board + 4)
 //   0x0008  handler code (services_rom.bin). Entry table:
-//             +0  process entry (DOS RunHandler starts the handler here)
-//             +4  mount entry (called by the DiagArea shim at expansion init
-//                 with C args on the stack: board, ExpansionBase, ConfigDev)
+//             +0     process entry (DOS RunHandler starts the handler here)
+//             +4     expansion-init entry (jsr-ed by the DiagArea stub
+//                    with the DiagPoint registers; mounts the volumes)
+//             +0x40  struct DiagArea (er_InitDiagVec points here; the
+//                    DiagPoint stub reaches the ROM via jsr 12(a0))
 //   0x3800  mount table, written by the emulator:
 //             u16 count, then count fixed-size entries of the DOS device name
 //             as a NUL-terminated string ("HOSTFS0", ...)
-//   0x4000  DiagArea (hand-built by the emulator, see src/filesys.rs)
 //   0x7000  per-unit volume DosList nodes, built by the emulator at startup
 //           and AddDosEntry'd by the handler (TRAP_RES_ADDVOLUME)
 //   0x8000  emulator-managed guest object pool (FileLocks etc.); the handler

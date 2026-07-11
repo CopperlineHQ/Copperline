@@ -4,7 +4,7 @@
 //! The guest side is a tiny handler (see `guest/services/`) mapped into the
 //! Copperline services board together with a mount table and a hand-built
 //! DiagArea. At expansion init the DiagArea's DiagPoint calls the handler's
-//! mount entry with the documented DiagPoint context; the handler builds one
+//! expansion-init entry with the DiagPoint context; the handler builds one
 //! DeviceNode per mount table entry and `AddBootNode`s it, so DOS mounts the
 //! devices at boot and starts the handler process on first reference.
 //! The handler forwards every DosPacket to [`FilesysHle`] through a reserved
@@ -20,6 +20,8 @@ use std::path::{Path, PathBuf};
 
 use m68k::{AddressBus, CpuCore, HleHandler};
 
+use crate::amigaos::dos::*;
+
 /// The guest-side handler ROM (see `guest/services/README.md`).
 pub const FILESYS_HANDLER: &[u8] = include_bytes!("../assets/services/services_rom.bin");
 
@@ -32,8 +34,10 @@ pub const ROM_OFFSET: usize = 0x0008;
 pub const MOUNTS_OFFSET: usize = 0x3800;
 pub const MOUNT_ENTRY_SIZE: usize = 32;
 pub const MOUNT_MAX_COUNT: usize = 16;
-/// The DiagArea (`BoardSpec::copperline_services` points er_InitDiagVec here).
-pub const DIAG_OFFSET: u16 = 0x4000;
+/// The DiagArea (`BoardSpec::copperline_services` points er_InitDiagVec
+/// here): embedded in the handler ROM at +0x40, like real autoboot boards
+/// carry theirs in the device ROM (see `_diag_area` in entry.s).
+pub const DIAG_OFFSET: u16 = ROM_OFFSET as u16 + 0x40;
 /// Per-unit volume DosList nodes, built by the host at handler startup and
 /// AddDosEntry'd by the guest handler (TRAP_RES_ADDVOLUME).
 const VOLUMES_OFFSET: u32 = 0x7000;
@@ -58,30 +62,10 @@ const TRAP_DIAG_ENTRY: u16 = 0xA400;
 /// DosPacket from the handler: D1 = packet APTR, A1 = handler MsgPort.
 const TRAP_PACKET: u16 = 0xA402;
 
-// AmigaDOS packet types (dos/dosextens.h).
-const ACTION_LOCATE_OBJECT: i32 = 8;
-const ACTION_FREE_LOCK: i32 = 15;
-const ACTION_EXAMINE_OBJECT: i32 = 23;
-const ACTION_EXAMINE_NEXT: i32 = 24;
-const ACTION_DISK_INFO: i32 = 25;
-const ACTION_INFO: i32 = 26;
-const ACTION_IS_FILESYSTEM: i32 = 1027;
-
-// dos/dos.h.
-const DOSTRUE: u32 = 0xFFFF_FFFF;
-const DOSFALSE: u32 = 0;
-const ERROR_OBJECT_NOT_FOUND: u32 = 205;
-const ERROR_ACTION_NOT_KNOWN: u32 = 209;
-const ERROR_NO_MORE_ENTRIES: u32 = 232;
 /// 'CLFS' -- our own id_DiskType, honest about not being an FFS at all.
 /// (The UAE filesys reports 'DOS\1' here instead; if some tool turns out to
 /// insist on a DOS\x dostype, reconsider.)
 const ID_CLFS_DISK: u32 = 0x434C_4653;
-const ID_VALIDATED: u32 = 82; // id_DiskState: validated, read/write
-                              // fib_DirEntryType values (dos/dosextens.h ST_*).
-const ST_ROOT: i32 = 1;
-const ST_USERDIR: i32 = 2;
-const ST_FILE: i32 = -3;
 
 /// One `[[filesys]]` entry: a host directory exported as an AmigaDOS
 /// device `HOSTFS<n>:` with the given volume name.
@@ -96,8 +80,8 @@ pub fn device_name(unit: usize) -> String {
     format!("HOSTFS{unit}")
 }
 
-/// Build the 64K board window: fake seglist header + handler ROM, the mount
-/// table, and the DiagArea whose DiagPoint calls the handler's mount entry.
+/// Build the 64K board window: fake seglist header, the handler ROM (which
+/// embeds the DiagArea), and the mount table.
 pub fn board_image(mounts: &[MountSpec]) -> Vec<u8> {
     assert!(ROM_OFFSET + FILESYS_HANDLER.len() <= MOUNTS_OFFSET);
     assert!(mounts.len() <= MOUNT_MAX_COUNT);
@@ -119,41 +103,6 @@ pub fn board_image(mounts: &[MountSpec]) -> Vec<u8> {
         img[at..at + name.len()].copy_from_slice(name.as_bytes());
     }
 
-    // struct DiagArea (libraries/configregs.h). Hard-won Kickstart 3.x
-    // gotchas: da_Config needs a DAC_BOOTTIME bit or the area is abandoned
-    // after one read, and DAC_CONFIGTIME requires a non-zero da_BootPoint.
-    let d = DIAG_OFFSET as usize;
-    img[d] = 0x90; // da_Config = DAC_WORDWIDE | DAC_CONFIGTIME
-    img[d + 1] = 0x00; // da_Flags
-    img[d + 2..d + 4].copy_from_slice(&0x0040u16.to_be_bytes()); // da_Size
-    img[d + 4..d + 6].copy_from_slice(&0x0010u16.to_be_bytes()); // da_DiagPoint
-    img[d + 6..d + 8].copy_from_slice(&0x0024u16.to_be_bytes()); // da_BootPoint
-    img[d + 8..d + 10].copy_from_slice(&0x0030u16.to_be_bytes()); // da_Name
-
-    // DiagPoint routine at +0x10, run from the RAM copy with the documented
-    // context (A0 = board base, A3 = ConfigDev, A5 = ExpansionBase). It traps
-    // to the host (which captures the board base), calls the handler's mount
-    // entry as a C function -- mount_boards(board, ExpansionBase, ConfigDev),
-    // args pushed right to left -- and returns D0 = 0 so Kickstart frees the
-    // copy: nothing references it afterwards.
-    #[rustfmt::skip]
-    let diag_point: [u8; 20] = [
-        (TRAP_DIAG_ENTRY >> 8) as u8, TRAP_DIAG_ENTRY as u8,
-        0x2F, 0x0B,             // move.l a3,-(sp)   ConfigDev
-        0x2F, 0x0D,             // move.l a5,-(sp)   ExpansionBase
-        0x2F, 0x08,             // move.l a0,-(sp)   board base
-        0x4E, 0xA8, 0x00, 0x0C, // jsr 12(a0)        handler mount entry
-        0x4F, 0xEF, 0x00, 0x0C, // lea 12(sp),sp
-        0x70, 0x00,             // moveq #0,d0       free the diag copy
-        0x4E, 0x75,             // rts
-    ];
-    img[d + 0x10..d + 0x10 + diag_point.len()].copy_from_slice(&diag_point);
-    // da_BootPoint must be non-zero (see above) but is never usefully
-    // called: point it at a harmless "return 0".
-    img[d + 0x24..d + 0x28].copy_from_slice(&[0x70, 0x00, 0x4E, 0x75]); // moveq #0,d0 ; rts
-    let name = b"Copperline\0";
-    img[d + 0x30..d + 0x30 + name.len()].copy_from_slice(name);
-
     img
 }
 
@@ -167,9 +116,13 @@ struct LockRec {
 }
 
 /// Host side of the filesys trap gateway: implements the AmigaDOS packet
-/// ACTION_* semantics against the host directories in `mounts`. Installed as
-/// the CPU's HLE handler; it reacts only to the reserved [`TRAP_BASE`] range,
-/// so leaving it installed with no mounts configured changes nothing.
+/// ACTION_* semantics against the host directories in `mounts`.
+///
+/// "Hle" is the m68k crate's HleHandler trait: High-Level Emulation, the
+/// hook that intercepts reserved opcodes on the host side instead of letting
+/// the guest take the exception. Installed as the CPU's HLE handler; it
+/// reacts only to the reserved [`TRAP_BASE`] range, so leaving it installed
+/// with no mounts configured changes nothing.
 #[derive(Default)]
 pub struct FilesysHle {
     mounts: Vec<MountSpec>,
@@ -179,6 +132,9 @@ pub struct FilesysHle {
     ports: HashMap<u32, usize>,
     /// Mount unit -> guest address of its volume DosList node.
     volumes: HashMap<usize, u32>,
+    /// Open files by fh_Arg1 cookie (host-side only, no guest structure).
+    files: HashMap<u32, std::fs::File>,
+    next_file_key: u32,
     /// Guest FileLock address -> what it locks.
     locks: HashMap<u32, LockRec>,
     /// Free slots in the board-window lock pool (guest addresses).
@@ -213,12 +169,14 @@ impl FilesysHle {
                 base + next
             })
         })?;
-        let volume = self.volumes.get(&rec.unit).copied().unwrap_or(0);
-        bus.write_long(addr, 0); // fl_Link
-        bus.write_long(addr + 4, addr); // fl_Key: unique, opaque to DOS
-        bus.write_long(addr + 8, access); // fl_Access
-        bus.write_long(addr + 12, port); // fl_Task: the handler port
-        bus.write_long(addr + 16, volume >> 2); // fl_Volume (BPTR)
+        let lock = FileLock {
+            link: long(0),
+            key: long(addr),
+            access: long(access),
+            task: long(port),
+            volume: long(self.volumes.get(&rec.unit).copied().unwrap_or(0) >> 2),
+        };
+        write_bytes(bus, addr, lock.as_bytes());
         self.locks.insert(addr, rec);
         Some(addr)
     }
@@ -246,7 +204,14 @@ impl FilesysHle {
             // below would yield one empty component = "parent", wrong.)
             return Some(LockRec { unit, rel });
         }
-        for comp in rest.split(|&b| b == b'/') {
+        // A single trailing '/' does not mean parent: "Sub/" is Sub itself
+        // (the "directory part" convention; verified against FFS, where
+        // "Prefs/" lists Prefs but "Prefs//" lists its parent).
+        let mut comps: Vec<&[u8]> = rest.split(|&b| b == b'/').collect();
+        if comps.last() == Some(&&b""[..]) {
+            comps.pop();
+        }
+        for comp in comps {
             if comp.is_empty() {
                 // Leading or doubled '/': up to the parent.
                 if !rel.pop() {
@@ -287,27 +252,19 @@ impl FilesysHle {
             ST_USERDIR
         };
 
-        bus.write_long(fib, disk_key); // fib_DiskKey: enumeration cursor
-        bus.write_long(fib + 4, entry_type as u32); // fib_DirEntryType
-                                                    // fib_FileName: BCPL-style, length byte + chars (max 107).
-        let bytes: Vec<u8> = name.bytes().take(107).collect();
-        bus.write_byte(fib + 8, bytes.len() as u8);
-        for (i, &b) in bytes.iter().enumerate() {
-            bus.write_byte(fib + 9 + i as u32, b);
-        }
-        bus.write_byte(fib + 9 + bytes.len() as u32, 0);
-        bus.write_long(fib + 116, 0); // fib_Protection: rwed
-        bus.write_long(fib + 120, entry_type as u32); // fib_EntryType
-        bus.write_long(fib + 124, meta.len().min(u32::MAX as u64) as u32); // fib_Size
-        bus.write_long(
-            fib + 128,
-            meta.len().div_ceil(512).min(u32::MAX as u64) as u32, // fib_NumBlocks
-        );
         let (days, mins, ticks) = amiga_datestamp(meta.modified().ok());
-        bus.write_long(fib + 132, days); // fib_Date
-        bus.write_long(fib + 136, mins);
-        bus.write_long(fib + 140, ticks);
-        bus.write_byte(fib + 144, 0); // fib_Comment: empty
+        let fib_data = FileInfoBlock {
+            disk_key: long(disk_key),
+            dir_entry_type: long(entry_type as u32),
+            file_name: bcpl::<108>(name.as_bytes()),
+            protection: long(0), // rwed
+            entry_type: long(entry_type as u32),
+            size: long(meta.len().min(u32::MAX as u64) as u32),
+            num_blocks: long(meta.len().div_ceil(512).min(u32::MAX as u64) as u32),
+            date: [long(days), long(mins), long(ticks)],
+            comment: [0; 80], // empty BCPL string
+        };
+        write_bytes(bus, fib, fib_data.as_bytes());
         Ok(())
     }
 
@@ -330,24 +287,22 @@ impl FilesysHle {
     fn build_volume_node(&mut self, bus: &mut dyn AddressBus, unit: usize, port: u32) -> u32 {
         let base = self.board_base.expect("startup packet before DiagPoint");
         let vol = base + VOLUMES_OFFSET + unit as u32 * VOLUME_SLOT_SIZE;
+        let fixed = std::mem::size_of::<VolumeNode>() as u32;
         let (days, mins, ticks) = amiga_datestamp(Some(std::time::SystemTime::now()));
-        bus.write_long(vol, 0); // dol_Next
-        bus.write_long(vol + 4, 2); // dol_Type = DLT_VOLUME
-        bus.write_long(vol + 8, port); // dol_Task: the handler port
-        bus.write_long(vol + 12, 0); // dol_Lock
-        bus.write_long(vol + 16, days); // dol_VolumeDate
-        bus.write_long(vol + 20, mins);
-        bus.write_long(vol + 24, ticks);
-        bus.write_long(vol + 28, 0); // dol_LockList
-        bus.write_long(vol + 32, ID_CLFS_DISK); // dol_DiskType
-        bus.write_long(vol + 36, 0); // dol_unused
-        bus.write_long(vol + 40, (vol + 44) >> 2); // dol_Name (BSTR)
+        let node = VolumeNode {
+            next: long(0),
+            r#type: long(2), // DLT_VOLUME
+            task: long(port),
+            lock: long(0),
+            volume_date: [long(days), long(mins), long(ticks)],
+            lock_list: long(0),
+            disk_type: long(ID_CLFS_DISK),
+            unused: long(0),
+            name: long((vol + fixed) >> 2), // BSTR right after the struct
+        };
+        write_bytes(bus, vol, node.as_bytes());
         let name: Vec<u8> = self.mounts[unit].volume.bytes().take(30).collect();
-        bus.write_byte(vol + 44, name.len() as u8);
-        for (i, &b) in name.iter().enumerate() {
-            bus.write_byte(vol + 45 + i as u32, b);
-        }
-        bus.write_byte(vol + 45 + name.len() as u32, 0);
+        write_bytes(bus, vol + fixed, &bcpl::<32>(&name));
         self.volumes.insert(unit, vol);
         vol
     }
@@ -369,12 +324,12 @@ impl FilesysHle {
         // starts the handler process (its dp_Type is not meaningful).
         if !self.ports.contains_key(&port) {
             let dn = arg(bus, 3) << 2; // dp_Arg3: BPTR DeviceNode
-            let unit = bus.read_long(dn + 28) as usize; // dn_Startup: mount index
+            let unit = bus.read_long(dn + DEVICENODE_STARTUP) as usize;
             if unit >= self.mounts.len() {
                 log::warn!("filesys: startup packet for unknown unit {unit}");
                 return (DOSFALSE, ERROR_OBJECT_NOT_FOUND);
             }
-            bus.write_long(dn + 8, port); // dn_Task = handler port
+            bus.write_long(dn + DEVICENODE_TASK, port);
             self.ports.insert(port, unit);
             *add_volume = Some(self.build_volume_node(bus, unit, port));
             log::info!(
@@ -400,16 +355,18 @@ impl FilesysHle {
                     host_fs_usage(&self.mounts[unit].path).unwrap_or((1 << 30, 1 << 29));
                 let (blocksize, numblocks, inuse) = scale_blocks(total, avail);
                 let locks_open = self.locks.values().any(|l| l.unit == unit);
-                bus.write_long(id, 0); // id_NumSoftErrors
-                bus.write_long(id + 4, unit as u32); // id_UnitNumber
-                bus.write_long(id + 8, ID_VALIDATED); // id_DiskState
-                bus.write_long(id + 12, numblocks); // id_NumBlocks
-                bus.write_long(id + 16, inuse); // id_NumBlocksUsed
-                bus.write_long(id + 20, blocksize); // id_BytesPerBlock
-                bus.write_long(id + 24, ID_CLFS_DISK); // id_DiskType
-                let volume = self.volumes.get(&unit).copied().unwrap_or(0);
-                bus.write_long(id + 28, volume >> 2); // id_VolumeNode (BPTR)
-                bus.write_long(id + 32, if locks_open { DOSTRUE } else { 0 }); // id_InUse
+                let info = InfoData {
+                    num_soft_errors: long(0),
+                    unit_number: long(unit as u32),
+                    disk_state: long(ID_VALIDATED),
+                    num_blocks: long(numblocks),
+                    num_blocks_used: long(inuse),
+                    bytes_per_block: long(blocksize),
+                    disk_type: long(ID_CLFS_DISK),
+                    volume_node: long(self.volumes.get(&unit).copied().unwrap_or(0) >> 2),
+                    in_use: long(if locks_open { DOSTRUE } else { 0 }),
+                };
+                write_bytes(bus, id, info.as_bytes());
                 log::debug!(
                     "filesys: {}: InfoData at {id:#010X}: blocks={numblocks} \
                      used={inuse} bs={blocksize} (host total={total} avail={avail})",
@@ -420,6 +377,12 @@ impl FilesysHle {
             ACTION_LOCATE_OBJECT => {
                 let name_bptr = arg(bus, 2);
                 let name = read_bstr(bus, name_bptr);
+                log::debug!(
+                    "filesys: {}: locate \"{}\" (lock {:#X})",
+                    device_name(unit),
+                    String::from_utf8_lossy(&name),
+                    arg(bus, 1)
+                );
                 let Some(rec) = self.resolve(unit, arg(bus, 1), &name) else {
                     return (DOSFALSE, ERROR_OBJECT_NOT_FOUND);
                 };
@@ -469,6 +432,134 @@ impl FilesysHle {
                     Ok(()) => (DOSTRUE, 0),
                     Err(e) => (DOSFALSE, e),
                 }
+            }
+            ACTION_COPY_DIR => {
+                // DupLock(): Arg1 = lock (0 = the root); result is a new
+                // shared lock on the same object.
+                let bptr = arg(bus, 1);
+                let rec = if bptr == 0 {
+                    LockRec {
+                        unit,
+                        rel: PathBuf::new(),
+                    }
+                } else {
+                    match self.locks.get(&(bptr << 2)) {
+                        Some(r) => r.clone(),
+                        None => return (DOSFALSE, ERROR_INVALID_LOCK),
+                    }
+                };
+                match self.alloc_lock(bus, port, ACCESS_READ, rec) {
+                    Some(addr) => (addr >> 2, 0),
+                    None => (DOSFALSE, ERROR_OBJECT_NOT_FOUND),
+                }
+            }
+            ACTION_PARENT => {
+                // Arg1 = lock; result is a shared lock on its parent, or 0
+                // with no error for the root.
+                let Some(rec) = self.locks.get(&(arg(bus, 1) << 2)).cloned() else {
+                    return (DOSFALSE, ERROR_INVALID_LOCK);
+                };
+                if rec.rel.as_os_str().is_empty() {
+                    return (DOSFALSE, 0); // the root has no parent
+                }
+                let mut rel = rec.rel;
+                rel.pop();
+                let parent = LockRec {
+                    unit: rec.unit,
+                    rel,
+                };
+                match self.alloc_lock(bus, port, ACCESS_READ, parent) {
+                    Some(addr) => (addr >> 2, 0),
+                    None => (DOSFALSE, ERROR_OBJECT_NOT_FOUND),
+                }
+            }
+            ACTION_SET_PROTECT => {
+                // Arg2 = lock, Arg3 = BSTR name, Arg4 = mask. The host
+                // filesystem has nowhere faithful to keep Amiga protection
+                // bits; accept and ignore (like a FAT filesystem would).
+                let name_bptr = arg(bus, 3);
+                let name = read_bstr(bus, name_bptr);
+                match self.resolve(unit, arg(bus, 2), &name) {
+                    Some(rec) if self.lock_path(&rec).exists() => (DOSTRUE, 0),
+                    _ => (DOSFALSE, ERROR_OBJECT_NOT_FOUND),
+                }
+            }
+            ACTION_FINDINPUT => {
+                // Open(MODE_OLDFILE): Arg1 = BPTR FileHandle, Arg2 = lock,
+                // Arg3 = BSTR name. On success fh_Arg1 carries our cookie.
+                let fh = arg(bus, 1) << 2;
+                let name_bptr = arg(bus, 3);
+                let name = read_bstr(bus, name_bptr);
+                let Some(rec) = self.resolve(unit, arg(bus, 2), &name) else {
+                    return (DOSFALSE, ERROR_OBJECT_NOT_FOUND);
+                };
+                let path = self.lock_path(&rec);
+                if path.is_dir() {
+                    return (DOSFALSE, ERROR_OBJECT_WRONG_TYPE);
+                }
+                match std::fs::File::open(&path) {
+                    Ok(f) => {
+                        self.next_file_key += 1;
+                        let key = self.next_file_key;
+                        self.files.insert(key, f);
+                        bus.write_long(fh + FILEHANDLE_ARG1, key);
+                        (DOSTRUE, 0)
+                    }
+                    Err(_) => (DOSFALSE, ERROR_OBJECT_NOT_FOUND),
+                }
+            }
+            ACTION_READ => {
+                // Arg1 = fh_Arg1 cookie, Arg2 = buffer APTR, Arg3 = length.
+                // Res1 = bytes read (0 = EOF), or -1 with Res2 = error.
+                use std::io::Read;
+                let key = arg(bus, 1);
+                let buf = arg(bus, 2);
+                let len = arg(bus, 3) as usize;
+                let Some(f) = self.files.get_mut(&key) else {
+                    return (DOSTRUE, ERROR_INVALID_LOCK); // res1 = -1
+                };
+                let mut data = vec![0u8; len];
+                match f.read(&mut data) {
+                    Ok(n) => {
+                        for (i, &b) in data[..n].iter().enumerate() {
+                            bus.write_byte(buf + i as u32, b);
+                        }
+                        (n as u32, 0)
+                    }
+                    Err(_) => (DOSTRUE, ERROR_SEEK_ERROR), // res1 = -1
+                }
+            }
+            ACTION_SEEK => {
+                // Arg1 = fh_Arg1, Arg2 = position, Arg3 = OFFSET_* mode.
+                // Res1 = previous position, or -1 with Res2 = error.
+                use std::io::{Seek, SeekFrom};
+                let key = arg(bus, 1);
+                let pos = arg(bus, 2) as i64;
+                let mode = arg(bus, 3) as i32;
+                let Some(f) = self.files.get_mut(&key) else {
+                    return (DOSTRUE, ERROR_INVALID_LOCK); // res1 = -1
+                };
+                let (old, end) = match (f.stream_position(), f.metadata()) {
+                    (Ok(o), Ok(m)) => (o, m.len() as i64),
+                    _ => return (DOSTRUE, ERROR_SEEK_ERROR),
+                };
+                let target = match mode {
+                    OFFSET_BEGINNING => pos,
+                    OFFSET_CURRENT => old as i64 + pos,
+                    OFFSET_END => end + pos,
+                    _ => -1,
+                };
+                if target < 0 || target > end {
+                    return (DOSTRUE, ERROR_SEEK_ERROR); // res1 = -1
+                }
+                match f.seek(SeekFrom::Start(target as u64)) {
+                    Ok(_) => (old as u32, 0),
+                    Err(_) => (DOSTRUE, ERROR_SEEK_ERROR),
+                }
+            }
+            ACTION_END => {
+                self.files.remove(&arg(bus, 1));
+                (DOSTRUE, 0)
             }
             _ => {
                 log::debug!("filesys: {}: unhandled action {dp_type}", device_name(unit));
@@ -542,22 +633,6 @@ fn match_component(dir: &Path, comp: &str) -> Option<std::ffi::OsString> {
         .find(|n| n.to_string_lossy().eq_ignore_ascii_case(comp))
 }
 
-/// Host mtime -> AmigaDOS DateStamp (days/minutes/ticks since 1978-01-01).
-fn amiga_datestamp(time: Option<std::time::SystemTime>) -> (u32, u32, u32) {
-    /// Seconds between the Unix epoch and the AmigaDOS epoch.
-    const AMIGA_EPOCH_OFFSET: u64 = 252_460_800;
-    let secs = time
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-        .saturating_sub(AMIGA_EPOCH_OFFSET);
-    (
-        (secs / 86_400) as u32,
-        (secs % 86_400 / 60) as u32,
-        (secs % 60) as u32 * 50,
-    )
-}
-
 /// Total and available bytes of the host filesystem containing `path`.
 #[cfg(unix)]
 fn host_fs_usage(path: &Path) -> Option<(u64, u64)> {
@@ -596,13 +671,6 @@ fn scale_blocks(total: u64, avail: u64) -> (u32, u32, u32) {
     )
 }
 
-/// Read a BSTR (BPTR to length-prefixed string) from guest memory.
-fn read_bstr(bus: &mut dyn AddressBus, bptr: u32) -> Vec<u8> {
-    let addr = bptr << 2;
-    let len = bus.read_byte(addr) as u32;
-    (0..len).map(|i| bus.read_byte(addr + 1 + i)).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -624,35 +692,44 @@ mod tests {
             &img[ROM_OFFSET..ROM_OFFSET + FILESYS_HANDLER.len()],
             FILESYS_HANDLER
         );
-        // The handler ROM's entry table: two bra.w instructions (process entry at
-        // +0, mount entry at +4 -- the DiagArea jsr's board+12).
+        // The handler ROM's entry table: process entry (bra.w) at +0, the
+        // expansion-init entry at +4 starting with the TRAP_DIAG_ENTRY
+        // opcode (see guest/services/entry.s).
         assert_eq!(img[ROM_OFFSET], 0x60);
         assert_eq!(img[ROM_OFFSET + 1], 0x00);
-        assert_eq!(img[ROM_OFFSET + 4], 0x60);
-        assert_eq!(img[ROM_OFFSET + 5], 0x00);
+        assert_eq!(
+            u16::from_be_bytes([img[ROM_OFFSET + 4], img[ROM_OFFSET + 5]]),
+            TRAP_DIAG_ENTRY
+        );
 
         // Mount table.
         let m = MOUNTS_OFFSET;
         assert_eq!(u16::from_be_bytes([img[m], img[m + 1]]), 1);
         assert_eq!(&img[m + 2..m + 9], b"HOSTFS0");
 
-        // DiagArea header (libraries/configregs.h layout).
+        // DiagArea header, embedded in the ROM at DIAG_OFFSET (see
+        // `_diag_area` in guest/services/entry.s).
         let d = DIAG_OFFSET as usize;
         assert_eq!(img[d], 0x90); // DAC_WORDWIDE | DAC_CONFIGTIME
-        assert_eq!(u16::from_be_bytes([img[d + 2], img[d + 3]]), 0x0040); // da_Size
-        assert_eq!(u16::from_be_bytes([img[d + 4], img[d + 5]]), 0x0010); // da_DiagPoint
-                                                                          // DAC_CONFIGTIME requires a non-zero da_BootPoint (Kickstart 3.x
-                                                                          // rejects the whole DiagArea otherwise).
-        assert_ne!(u16::from_be_bytes([img[d + 6], img[d + 7]]), 0);
-
-        // DiagPoint code: the trap opcode first, and the jsr into the handler's
-        // mount entry at board+12 (= ROM_OFFSET + 4).
+        let da_size = u16::from_be_bytes([img[d + 2], img[d + 3]]) as usize;
+        let da_diag = u16::from_be_bytes([img[d + 4], img[d + 5]]) as usize;
+        let da_boot = u16::from_be_bytes([img[d + 6], img[d + 7]]) as usize;
+        let da_name = u16::from_be_bytes([img[d + 8], img[d + 9]]) as usize;
+        // DAC_CONFIGTIME requires a non-zero da_BootPoint (Kickstart 3.x
+        // rejects the whole DiagArea otherwise), and everything referenced
+        // must lie inside the copied da_Size bytes.
+        assert!(da_diag != 0 && da_diag < da_size);
+        assert!(da_boot != 0 && da_boot < da_size);
+        assert!(da_name != 0 && da_name < da_size);
+        assert!(d + da_size <= ROM_OFFSET + FILESYS_HANDLER.len());
+        // The DiagPoint stub reaches the ROM's expansion-init entry through
+        // the board base: jsr 12(a0) (12 = ROM_OFFSET + 4), then rts.
         assert_eq!(
-            u16::from_be_bytes([img[d + 0x10], img[d + 0x11]]),
-            TRAP_DIAG_ENTRY
+            &img[d + da_diag..d + da_diag + 6],
+            &[0x4E, 0xA8, 0x00, 0x0C, 0x4E, 0x75]
         );
-        assert_eq!(&img[d + 0x18..d + 0x1C], &[0x4E, 0xA8, 0x00, 0x0C]);
         assert_eq!((ROM_OFFSET + 4) as u16, 0x000C);
+        assert_eq!(&img[d + da_name..d + da_name + 11], b"Copperline\0");
         // The trap opcode must be A-line (group 0xA) to reach handle_aline.
         assert_eq!(TRAP_BASE >> 12, 0xA);
     }
@@ -682,12 +759,5 @@ mod tests {
     fn host_fs_usage_of_root_is_sane() {
         let (total, avail) = host_fs_usage(Path::new("/")).expect("statvfs /");
         assert!(total > 0 && avail <= total);
-    }
-
-    #[test]
-    fn datestamp_of_known_moment() {
-        // 1978-01-01 00:01:30 UTC = day 0, minute 1, 1500 ticks.
-        let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(252_460_800 + 90);
-        assert_eq!(amiga_datestamp(Some(t)), (0, 1, 30 * 50));
     }
 }
