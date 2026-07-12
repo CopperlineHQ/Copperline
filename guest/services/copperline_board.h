@@ -51,5 +51,9 @@
 #define TRAP_RES_ADDVOLUME 2 // reply, then AddDosEntry the volume DosList
                              // node the host built (returned in A0): only
                              // guest code may take the DosList semaphore
+#define TRAP_RES_DIE       3 // ACTION_DIE accepted: reply, RemDosEntry the
+                             // volume node (in A0), and exit the process
+                             // (dn_Task is already cleared, so the next
+                             // reference restarts the handler)
 
 #endif // COPPERLINE_BOARD_H

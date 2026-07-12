@@ -62,6 +62,7 @@ const LOCK_SLOT_SIZE: u32 = 24;
 // trap_packet return values (D0); see guest/services/copperline_board.h.
 const TRAP_RES_REPLY: u32 = 0;
 const TRAP_RES_ADDVOLUME: u32 = 2;
+const TRAP_RES_DIE: u32 = 3;
 
 /// Base of the reserved A-line opcode range for filesys host traps. A-line
 /// (LINE 1010, exception vector 10) is unused by AmigaOS, so these never
@@ -119,6 +120,16 @@ pub fn board_image(mounts: &[MountSpec]) -> Vec<u8> {
     img
 }
 
+/// DosList surgery the guest handler performs after replying a packet
+/// (only guest code may take the DosList semaphore); maps to a TRAP_RES_*
+/// code with the node address in A0.
+enum GuestOp {
+    /// AddDosEntry the volume node the host built.
+    AddVolume(u32),
+    /// ACTION_DIE: RemDosEntry the volume node, then exit the process.
+    Die(u32),
+}
+
 /// A handed-out FileLock: which mount it belongs to and the path relative to
 /// the mount root (empty = the root itself). Keyed by the guest address of
 /// the FileLock structure in the board-window pool.
@@ -147,6 +158,9 @@ pub struct FilesysHle {
     ports: HashMap<u32, usize>,
     /// Mount unit -> guest address of its volume DosList node.
     volumes: HashMap<usize, u32>,
+    /// Mount unit -> guest address of its DeviceNode (from the startup
+    /// packet), for clearing dn_Task at ACTION_DIE.
+    device_nodes: HashMap<usize, u32>,
     /// Open files by fh_Arg1 cookie (host-side only, no guest structure).
     /// The LockRec remembers what the handle refers to, for EXAMINE_FH.
     files: HashMap<u32, (std::fs::File, LockRec)>,
@@ -394,15 +408,15 @@ impl FilesysHle {
         vol
     }
 
-    /// Handle one DosPacket; returns (dp_Res1, dp_Res2). When the packet
-    /// creates a volume node the guest must AddDosEntry, its address is
-    /// stored in `add_volume`.
+    /// Handle one DosPacket; returns (dp_Res1, dp_Res2). Some packets also
+    /// need DosList surgery only the guest may perform (the semaphore);
+    /// `guest_op` tells the handler what to do after replying.
     fn handle_packet(
         &mut self,
         bus: &mut dyn AddressBus,
         port: u32,
         pkt: u32,
-        add_volume: &mut Option<u32>,
+        guest_op: &mut Option<GuestOp>,
     ) -> (u32, u32) {
         let dp_type = bus.read_long(pkt + 8) as i32;
         let arg = |bus: &mut dyn AddressBus, n: u32| bus.read_long(pkt + 20 + 4 * (n - 1));
@@ -421,7 +435,8 @@ impl FilesysHle {
             }
             bus.write_long(dn + DEVICENODE_TASK, port);
             self.ports.insert(port, unit);
-            *add_volume = Some(self.build_volume_node(bus, unit, port));
+            self.device_nodes.insert(unit, dn);
+            *guest_op = Some(GuestOp::AddVolume(self.build_volume_node(bus, unit, port)));
             log::info!(
                 "filesys: {}: handler started ({}: -> {})",
                 device_name(unit),
@@ -743,6 +758,26 @@ impl FilesysHle {
                 self.files.remove(&arg(bus, 1));
                 (DOSTRUE, 0)
             }
+            ACTION_DIE => {
+                // Shut the handler down (dismount tools send this; stock
+                // Assign DISMOUNT only unlinks the DeviceNode). Refuse
+                // while anything is held open, like a real handler.
+                let in_use = self.locks.values().any(|l| l.unit == unit)
+                    || self.files.values().any(|(_, r)| r.unit == unit);
+                if in_use {
+                    return (DOSFALSE, ERROR_OBJECT_IN_USE);
+                }
+                // Clear dn_Task so the next reference to the device simply
+                // restarts the handler (and re-adds the volume).
+                if let Some(dn) = self.device_nodes.remove(&unit) {
+                    bus.write_long(dn + DEVICENODE_TASK, 0);
+                }
+                self.ports.remove(&port);
+                let vol = self.volumes.remove(&unit).unwrap_or(0);
+                *guest_op = Some(GuestOp::Die(vol));
+                log::info!("filesys: {}: ACTION_DIE, handler exits", device_name(unit));
+                (DOSTRUE, 0)
+            }
             // Write-family actions: mounts are read-only for now, so the
             // proper refusal is "write protected", not "unknown packet".
             // Write() and SetFileSize() signal failure with Res1 = -1.
@@ -776,6 +811,7 @@ impl HleHandler for FilesysHle {
                 self.board_base = Some(cpu.dar[8]);
                 self.ports.clear();
                 self.volumes.clear();
+                self.device_nodes.clear();
                 self.locks.clear();
                 self.files.clear();
                 self.free_slots.clear();
@@ -792,8 +828,8 @@ impl HleHandler for FilesysHle {
                 let pkt = cpu.dar[1]; // D1
                 let port = cpu.dar[9]; // A1
                 let dp_type = bus.read_long(pkt + 8) as i32;
-                let mut add_volume = None;
-                let (res1, res2) = self.handle_packet(bus, port, pkt, &mut add_volume);
+                let mut guest_op = None;
+                let (res1, res2) = self.handle_packet(bus, port, pkt, &mut guest_op);
                 log::debug!(
                     "filesys: packet type {dp_type} at {pkt:#010X} -> \
                      res1={res1:#X} res2={res2}"
@@ -801,11 +837,15 @@ impl HleHandler for FilesysHle {
                 bus.write_long(pkt + 12, res1); // dp_Res1
                 bus.write_long(pkt + 16, res2); // dp_Res2
                                                 // D0 tells the handler what to do next (reply the packet,
-                                                // and for ADDVOLUME also AddDosEntry the node passed in A0).
-                cpu.dar[0] = match add_volume {
-                    Some(vol) => {
+                                                // then Add/RemDosEntry the node passed in A0).
+                cpu.dar[0] = match guest_op {
+                    Some(GuestOp::AddVolume(vol)) => {
                         cpu.dar[8] = vol; // A0
                         TRAP_RES_ADDVOLUME
+                    }
+                    Some(GuestOp::Die(vol)) => {
+                        cpu.dar[8] = vol; // A0
+                        TRAP_RES_DIE
                     }
                     None => TRAP_RES_REPLY,
                 };

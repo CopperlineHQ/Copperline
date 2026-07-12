@@ -95,6 +95,20 @@ void handler_main(void)
             // the DosList semaphore.
             if (res == TRAP_RES_ADDVOLUME && _dosbase != NULL)
                 AddDosEntry(vol);
+            else if (res == TRAP_RES_DIE) {
+                // ACTION_DIE: the emulator already cleared dn_Task and
+                // dropped this unit's state. Take the volume off the
+                // DosList (AddDosEntry locks internally, RemDosEntry
+                // does not) and end the process.
+                if (vol != NULL && _dosbase != NULL) {
+                    LockDosList(LDF_VOLUMES | LDF_WRITE);
+                    RemDosEntry(vol);
+                    UnLockDosList(LDF_VOLUMES | LDF_WRITE);
+                }
+                if (_dosbase != NULL)
+                    CloseLibrary(_dosbase);
+                return;
+            }
         }
     }
 }

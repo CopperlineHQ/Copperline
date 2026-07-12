@@ -13,6 +13,7 @@ use zerocopy::Immutable;
 pub use zerocopy::IntoBytes;
 
 // Packet types (dos/dosextens.h ACTION_*).
+pub const ACTION_DIE: i32 = 5;
 pub const ACTION_LOCATE_OBJECT: i32 = 8;
 pub const ACTION_RENAME_DISK: i32 = 9;
 pub const ACTION_FREE_LOCK: i32 = 15;
@@ -46,6 +47,7 @@ pub const ACTION_EXAMINE_FH: i32 = 1034; // ExamineFH()
 // dos/dos.h.
 pub const DOSTRUE: u32 = 0xFFFF_FFFF;
 pub const DOSFALSE: u32 = 0;
+pub const ERROR_OBJECT_IN_USE: u32 = 202;
 pub const ERROR_OBJECT_NOT_FOUND: u32 = 205;
 pub const ERROR_ACTION_NOT_KNOWN: u32 = 209;
 pub const ERROR_INVALID_LOCK: u32 = 211;
