@@ -147,23 +147,51 @@ struct LockRec {
 /// the guest take the exception. Installed as the CPU's HLE handler; it
 /// reacts only to the reserved [`TRAP_BASE`] range, so leaving it installed
 /// with no mounts configured changes nothing.
-#[derive(Default)]
-pub struct FilesysHle {
-    mounts: Vec<MountSpec>,
-    /// Board base address, captured from A0 at the DiagPoint trap.
-    board_base: Option<u32>,
-    /// Mount unit -> guest address of its volume DosList node.
-    volumes: HashMap<usize, u32>,
-    /// Mount unit -> guest address of its DeviceNode (from the startup
-    /// packet), for clearing dn_Task at ACTION_DIE.
-    device_nodes: HashMap<usize, u32>,
+/// Per-mount state: the immutable [`MountSpec`] from config plus everything
+/// the handler learns or hands out at run time. `FilesysHle` owns one of
+/// these per unit, indexed by unit number, so all per-unit state lives in one
+/// place instead of in parallel maps keyed by unit.
+struct FilesysUnit {
+    mount: MountSpec,
+    /// Handler MsgPort, captured from the startup packet; stamped into the
+    /// dn_Task/dol_Task/fl_Task fields DOS uses to reach the handler.
+    port: Option<u32>,
+    /// Guest address of the DeviceNode (from the startup packet); also the
+    /// "handler started" marker, cleared at ACTION_DIE.
+    device_node: Option<u32>,
+    /// Guest address of the volume DosList node the host built.
+    volume: Option<u32>,
     /// Open files by fh_Arg1 cookie (host-side only, no guest structure).
     /// The LockRec remembers what the handle refers to, for EXAMINE_FH.
     files: HashMap<u32, (std::fs::File, LockRec)>,
-    next_file_key: u32,
     /// Guest FileLock address -> what it locks.
     locks: HashMap<u32, LockRec>,
-    /// Free slots in the board-window lock pool (guest addresses).
+}
+
+impl FilesysUnit {
+    fn new(mount: MountSpec) -> Self {
+        Self {
+            mount,
+            port: None,
+            device_node: None,
+            volume: None,
+            files: HashMap::new(),
+            locks: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct FilesysHle {
+    /// Per-mount state, indexed by unit number (built from the config mounts
+    /// in `set_mounts`).
+    units: Vec<FilesysUnit>,
+    /// Board base address, captured from A0 at the DiagPoint trap.
+    board_base: Option<u32>,
+    /// Cookie counter for open files; unique across all units.
+    next_file_key: u32,
+    /// Free slots in the board-window lock pool (guest addresses). The pool is
+    /// one board-wide region, so slots are shared across units.
     free_slots: Vec<u32>,
     /// Bump allocator behind `free_slots`, board-relative.
     pool_next: u32,
@@ -171,23 +199,19 @@ pub struct FilesysHle {
 
 impl FilesysHle {
     pub fn set_mounts(&mut self, mounts: Vec<MountSpec>) {
-        self.mounts = mounts;
+        self.units = mounts.into_iter().map(FilesysUnit::new).collect();
     }
 
     /// Host path a lock refers to.
     fn lock_path(&self, rec: &LockRec) -> PathBuf {
-        self.mounts[rec.unit].path.join(&rec.rel)
+        self.units[rec.unit].mount.path.join(&rec.rel)
     }
 
-    /// Allocate a FileLock in the board-window pool and register it.
-    fn alloc_lock(
-        &mut self,
-        bus: &mut dyn AddressBus,
-        port: u32,
-        access: u32,
-        rec: LockRec,
-    ) -> Option<u32> {
+    /// Allocate a FileLock in the board-window pool and register it. The
+    /// handler port and volume node come from the lock's own unit.
+    fn alloc_lock(&mut self, bus: &mut dyn AddressBus, access: u32, rec: LockRec) -> Option<u32> {
         let base = self.board_base?;
+        let unit = rec.unit;
         let addr = self.free_slots.pop().or_else(|| {
             let next = POOL_OFFSET + self.pool_next;
             (next + LOCK_SLOT_SIZE <= POOL_END).then(|| {
@@ -195,15 +219,16 @@ impl FilesysHle {
                 base + next
             })
         })?;
+        let u = &self.units[unit];
         let lock = FileLock {
             link: long(0),
             key: long(addr),
             access: long(access),
-            task: long(port),
-            volume: long(self.volumes.get(&rec.unit).copied().unwrap_or(0) >> 2),
+            task: long(u.port.unwrap_or(0)),
+            volume: long(u.volume.unwrap_or(0) >> 2),
         };
         write_bytes(bus, addr, lock.as_bytes());
-        self.locks.insert(addr, rec);
+        self.units[unit].locks.insert(addr, rec);
         Some(addr)
     }
 
@@ -212,11 +237,11 @@ impl FilesysHle {
     /// already the base it named), `/` goes to the parent, and names are
     /// case-insensitive.
     fn resolve(&self, unit: usize, lock_bptr: u32, name: &[u8]) -> Option<LockRec> {
-        let (unit, mut rel) = if lock_bptr != 0 {
-            let rec = self.locks.get(&(lock_bptr << 2))?;
-            (rec.unit, rec.rel.clone())
+        // A lock handed to this unit's handler always belongs to this unit.
+        let mut rel = if lock_bptr != 0 {
+            self.units.get(unit)?.locks.get(&(lock_bptr << 2))?.rel.clone()
         } else {
-            (unit, PathBuf::new())
+            PathBuf::new()
         };
 
         let mut rest = name;
@@ -252,7 +277,7 @@ impl FilesysHle {
                 continue;
             }
             let comp = String::from_utf8_lossy(comp).into_owned();
-            let dir = self.mounts.get(unit)?.path.join(&rel);
+            let dir = self.units.get(unit)?.mount.path.join(&rel);
             rel.push(match_component(&dir, &comp)?);
         }
         Some(LockRec { unit, rel })
@@ -269,7 +294,7 @@ impl FilesysHle {
         let path = self.lock_path(rec);
         let meta = std::fs::metadata(&path).map_err(|_| ERROR_OBJECT_NOT_FOUND)?;
         let name: String = if rec.rel.as_os_str().is_empty() {
-            self.mounts[rec.unit].volume.clone()
+            self.units[rec.unit].mount.volume.clone()
         } else {
             rec.rel
                 .file_name()
@@ -341,7 +366,8 @@ impl FilesysHle {
     /// to AddBootNode.
     fn write_startup_msgs(&self, bus: &mut dyn AddressBus, base: u32) {
         write_bytes(bus, base + FSSM_DEVNAME_OFFSET, &bcpl::<32>(b"hostfs"));
-        for (unit, mount) in self.mounts.iter().enumerate() {
+        for (unit, u) in self.units.iter().enumerate() {
+            let mount = &u.mount;
             let unit = unit as u32;
             let envec = DosEnvec {
                 table_size: long(16),  // entries after this one, through dos_type
@@ -381,7 +407,7 @@ impl FilesysHle {
     /// Build the volume DosList node for `unit` in the board window; the
     /// guest handler AddDosEntry's it (only guest code may take the DosList
     /// semaphore). Returns the node's guest address.
-    fn build_volume_node(&mut self, bus: &mut dyn AddressBus, unit: usize, port: u32) -> u32 {
+    fn build_volume_node(&mut self, bus: &mut dyn AddressBus, unit: usize) -> u32 {
         let base = self.board_base.expect("startup packet before DiagPoint");
         let vol = base + VOLUMES_OFFSET + unit as u32 * VOLUME_SLOT_SIZE;
         let fixed = std::mem::size_of::<VolumeNode>() as u32;
@@ -389,7 +415,7 @@ impl FilesysHle {
         let node = VolumeNode {
             next: long(0),
             r#type: long(2), // DLT_VOLUME
-            task: long(port),
+            task: long(self.units[unit].port.unwrap_or(0)),
             lock: long(0),
             volume_date: [long(days), long(mins), long(ticks)],
             lock_list: long(0),
@@ -398,9 +424,9 @@ impl FilesysHle {
             name: long((vol + fixed) >> 2), // BSTR right after the struct
         };
         write_bytes(bus, vol, node.as_bytes());
-        let name: Vec<u8> = self.mounts[unit].volume.bytes().take(30).collect();
+        let name: Vec<u8> = self.units[unit].mount.volume.bytes().take(30).collect();
         write_bytes(bus, vol + fixed, &bcpl::<32>(&name));
-        self.volumes.insert(unit, vol);
+        self.units[unit].volume = Some(vol);
         vol
     }
 
@@ -408,9 +434,10 @@ impl FilesysHle {
     /// need DosList surgery only the guest may perform (the semaphore);
     /// `guest_op` tells the handler what to do after replying.
     ///
-    /// `unit` routes the packet to its mount; `port` is the handler's MsgPort,
-    /// no longer a routing key but still stamped into the dn_Task/dol_Task/
-    /// fl_Task fields DOS uses to reach the handler.
+    /// `unit` routes the packet to its mount. `port` is the handler's MsgPort;
+    /// it is captured into the unit at the startup packet and stamped from
+    /// there into the dn_Task/dol_Task/fl_Task fields DOS uses to reach the
+    /// handler -- no longer a routing key.
     fn handle_packet(
         &mut self,
         bus: &mut dyn AddressBus,
@@ -422,7 +449,7 @@ impl FilesysHle {
         let dp_type = bus.read_long(pkt + 8) as i32;
         let arg = |bus: &mut dyn AddressBus, n: u32| bus.read_long(pkt + 20 + 4 * (n - 1));
 
-        if unit >= self.mounts.len() {
+        if unit >= self.units.len() {
             log::warn!("filesys: packet for unknown unit {unit}");
             return (DOSFALSE, ERROR_OBJECT_NOT_FOUND);
         }
@@ -430,18 +457,21 @@ impl FilesysHle {
         // The first packet for a unit is the startup packet (ACTION_STARTUP,
         // synonymous with ACTION_NIL == 0): the handler passes its unit in on
         // every packet, so the first one we see for a unit is the one DOS sent
-        // to start its process. dp_Arg3 is the DeviceNode; wire dn_Task to the
-        // handler's MsgPort and hand the guest the volume node to AddDosEntry.
-        if let std::collections::hash_map::Entry::Vacant(slot) = self.device_nodes.entry(unit) {
+        // to start its process. dp_Arg3 is the DeviceNode; capture the handler
+        // MsgPort, wire dn_Task to it, and hand the guest the volume node to
+        // AddDosEntry.
+        if self.units[unit].device_node.is_none() {
             let dn = arg(bus, 3) << 2; // dp_Arg3: BPTR DeviceNode
             bus.write_long(dn + DEVICENODE_TASK, port);
-            slot.insert(dn);
-            *guest_op = Some(GuestOp::AddVolume(self.build_volume_node(bus, unit, port)));
+            self.units[unit].device_node = Some(dn);
+            self.units[unit].port = Some(port);
+            let vol = self.build_volume_node(bus, unit);
+            *guest_op = Some(GuestOp::AddVolume(vol));
             log::info!(
                 "filesys: {}: handler started ({}: -> {})",
                 device_name(unit),
-                self.mounts[unit].volume,
-                self.mounts[unit].path.display()
+                self.units[unit].mount.volume,
+                self.units[unit].mount.path.display()
             );
             return (DOSTRUE, 0);
         }
@@ -456,9 +486,9 @@ impl FilesysHle {
                 // host filesystem holding the mount (statvfs), scaled so the
                 // block counts survive AmigaDOS's 32-bit arithmetic.
                 let (total, avail) =
-                    host_fs_usage(&self.mounts[unit].path).unwrap_or((1 << 30, 1 << 29));
+                    host_fs_usage(&self.units[unit].mount.path).unwrap_or((1 << 30, 1 << 29));
                 let (blocksize, numblocks, inuse) = scale_blocks(total, avail);
-                let locks_open = self.locks.values().any(|l| l.unit == unit);
+                let locks_open = !self.units[unit].locks.is_empty();
                 let info = InfoData {
                     num_soft_errors: long(0),
                     unit_number: long(unit as u32),
@@ -468,7 +498,7 @@ impl FilesysHle {
                     num_blocks_used: long(inuse),
                     bytes_per_block: long(blocksize),
                     disk_type: long(ID_CLFS_DISK),
-                    volume_node: long(self.volumes.get(&unit).copied().unwrap_or(0) >> 2),
+                    volume_node: long(self.units[unit].volume.unwrap_or(0) >> 2),
                     in_use: long(if locks_open { DOSTRUE } else { 0 }),
                 };
                 write_bytes(bus, id, info.as_bytes());
@@ -495,20 +525,20 @@ impl FilesysHle {
                     return (DOSFALSE, ERROR_OBJECT_NOT_FOUND);
                 }
                 let access = arg(bus, 3);
-                match self.alloc_lock(bus, port, access, rec) {
+                match self.alloc_lock(bus, access, rec) {
                     Some(addr) => (addr >> 2, 0),
                     None => (DOSFALSE, ERROR_OBJECT_NOT_FOUND),
                 }
             }
             ACTION_FREE_LOCK => {
                 let addr = arg(bus, 1) << 2;
-                if addr != 0 && self.locks.remove(&addr).is_some() {
+                if addr != 0 && self.units[unit].locks.remove(&addr).is_some() {
                     self.free_slots.push(addr);
                 }
                 (DOSTRUE, 0)
             }
             ACTION_EXAMINE_OBJECT => {
-                let Some(rec) = self.locks.get(&(arg(bus, 1) << 2)).cloned() else {
+                let Some(rec) = self.units[unit].locks.get(&(arg(bus, 1) << 2)).cloned() else {
                     return (DOSFALSE, ERROR_OBJECT_NOT_FOUND);
                 };
                 let fib = arg(bus, 2) << 2;
@@ -518,7 +548,7 @@ impl FilesysHle {
                 }
             }
             ACTION_EXAMINE_NEXT => {
-                let Some(rec) = self.locks.get(&(arg(bus, 1) << 2)).cloned() else {
+                let Some(rec) = self.units[unit].locks.get(&(arg(bus, 1) << 2)).cloned() else {
                     return (DOSFALSE, ERROR_NO_MORE_ENTRIES);
                 };
                 let fib = arg(bus, 2) << 2;
@@ -548,12 +578,12 @@ impl FilesysHle {
                         rel: PathBuf::new(),
                     }
                 } else {
-                    match self.locks.get(&(bptr << 2)) {
+                    match self.units[unit].locks.get(&(bptr << 2)) {
                         Some(r) => r.clone(),
                         None => return (DOSFALSE, ERROR_INVALID_LOCK),
                     }
                 };
-                match self.alloc_lock(bus, port, ACCESS_READ, rec) {
+                match self.alloc_lock(bus, ACCESS_READ, rec) {
                     Some(addr) => (addr >> 2, 0),
                     None => (DOSFALSE, ERROR_OBJECT_NOT_FOUND),
                 }
@@ -561,7 +591,7 @@ impl FilesysHle {
             ACTION_PARENT => {
                 // Arg1 = lock; result is a shared lock on its parent, or 0
                 // with no error for the root.
-                let Some(rec) = self.locks.get(&(arg(bus, 1) << 2)).cloned() else {
+                let Some(rec) = self.units[unit].locks.get(&(arg(bus, 1) << 2)).cloned() else {
                     return (DOSFALSE, ERROR_INVALID_LOCK);
                 };
                 if rec.rel.as_os_str().is_empty() {
@@ -573,7 +603,7 @@ impl FilesysHle {
                     unit: rec.unit,
                     rel,
                 };
-                match self.alloc_lock(bus, port, ACCESS_READ, parent) {
+                match self.alloc_lock(bus, ACCESS_READ, parent) {
                     Some(addr) => (addr >> 2, 0),
                     None => (DOSFALSE, ERROR_OBJECT_NOT_FOUND),
                 }
@@ -614,7 +644,7 @@ impl FilesysHle {
                     Ok(f) => {
                         self.next_file_key += 1;
                         let key = self.next_file_key;
-                        self.files.insert(key, (f, rec));
+                        self.units[unit].files.insert(key, (f, rec));
                         bus.write_long(fh + FILEHANDLE_ARG1, key);
                         (DOSTRUE, 0)
                     }
@@ -631,7 +661,7 @@ impl FilesysHle {
                             rel: PathBuf::new(),
                         })
                     } else {
-                        hle.locks.get(&(bptr << 2)).cloned()
+                        hle.units[unit].locks.get(&(bptr << 2)).cloned()
                     }
                 };
                 let (Some(a), Some(b)) = (rec_of(self, arg(bus, 1)), rec_of(self, arg(bus, 2)))
@@ -650,7 +680,7 @@ impl FilesysHle {
                 // free it); on failure the lock stays valid.
                 let fh = arg(bus, 1) << 2;
                 let lock_addr = arg(bus, 2) << 2;
-                let Some(rec) = self.locks.get(&lock_addr).cloned() else {
+                let Some(rec) = self.units[unit].locks.get(&lock_addr).cloned() else {
                     return (DOSFALSE, ERROR_INVALID_LOCK);
                 };
                 let path = self.lock_path(&rec);
@@ -661,9 +691,9 @@ impl FilesysHle {
                     Ok(f) => {
                         self.next_file_key += 1;
                         let key = self.next_file_key;
-                        self.files.insert(key, (f, rec));
+                        self.units[unit].files.insert(key, (f, rec));
                         bus.write_long(fh + FILEHANDLE_ARG1, key);
-                        self.locks.remove(&lock_addr);
+                        self.units[unit].locks.remove(&lock_addr);
                         self.free_slots.push(lock_addr);
                         (DOSTRUE, 0)
                     }
@@ -673,7 +703,7 @@ impl FilesysHle {
             ACTION_PARENT_FH => {
                 // ParentOfFH(): Arg1 = fh_Arg1 cookie; result is a shared
                 // lock on the directory containing the open file.
-                let rec = match self.files.get(&arg(bus, 1)) {
+                let rec = match self.units[unit].files.get(&arg(bus, 1)) {
                     Some((_, rec)) => rec.clone(),
                     None => return (DOSFALSE, ERROR_INVALID_LOCK),
                 };
@@ -683,14 +713,14 @@ impl FilesysHle {
                     unit: rec.unit,
                     rel,
                 };
-                match self.alloc_lock(bus, port, ACCESS_READ, parent) {
+                match self.alloc_lock(bus, ACCESS_READ, parent) {
                     Some(addr) => (addr >> 2, 0),
                     None => (DOSFALSE, ERROR_OBJECT_NOT_FOUND),
                 }
             }
             ACTION_EXAMINE_FH => {
                 // ExamineFH(): Arg1 = fh_Arg1 cookie, Arg2 = BPTR FIB.
-                let rec = match self.files.get(&arg(bus, 1)) {
+                let rec = match self.units[unit].files.get(&arg(bus, 1)) {
                     Some((_, rec)) => rec.clone(),
                     None => return (DOSFALSE, ERROR_INVALID_LOCK),
                 };
@@ -711,7 +741,7 @@ impl FilesysHle {
                 let key = arg(bus, 1);
                 let buf = arg(bus, 2);
                 let len = arg(bus, 3) as usize;
-                let Some((f, _)) = self.files.get_mut(&key) else {
+                let Some((f, _)) = self.units[unit].files.get_mut(&key) else {
                     return (DOSTRUE, ERROR_INVALID_LOCK); // res1 = -1
                 };
                 // Transfer in bounded chunks: the length is guest-supplied, so
@@ -744,7 +774,7 @@ impl FilesysHle {
                 let key = arg(bus, 1);
                 let pos = arg(bus, 2) as i64;
                 let mode = arg(bus, 3) as i32;
-                let Some((f, _)) = self.files.get_mut(&key) else {
+                let Some((f, _)) = self.units[unit].files.get_mut(&key) else {
                     return (DOSTRUE, ERROR_INVALID_LOCK); // res1 = -1
                 };
                 let (old, end) = match (f.stream_position(), f.metadata()) {
@@ -766,24 +796,25 @@ impl FilesysHle {
                 }
             }
             ACTION_END => {
-                self.files.remove(&arg(bus, 1));
+                self.units[unit].files.remove(&arg(bus, 1));
                 (DOSTRUE, 0)
             }
             ACTION_DIE => {
                 // Shut the handler down (dismount tools send this; stock
                 // Assign DISMOUNT only unlinks the DeviceNode). Refuse
                 // while anything is held open, like a real handler.
-                let in_use = self.locks.values().any(|l| l.unit == unit)
-                    || self.files.values().any(|(_, r)| r.unit == unit);
-                if in_use {
+                let u = &self.units[unit];
+                if !u.locks.is_empty() || !u.files.is_empty() {
                     return (DOSFALSE, ERROR_OBJECT_IN_USE);
                 }
                 // Clear dn_Task so the next reference to the device simply
-                // restarts the handler (and re-adds the volume).
-                if let Some(dn) = self.device_nodes.remove(&unit) {
+                // restarts the handler (and re-adds the volume). Dropping
+                // device_node/port marks the unit un-started again.
+                if let Some(dn) = self.units[unit].device_node.take() {
                     bus.write_long(dn + DEVICENODE_TASK, 0);
                 }
-                let vol = self.volumes.remove(&unit).unwrap_or(0);
+                self.units[unit].port = None;
+                let vol = self.units[unit].volume.take().unwrap_or(0);
                 *guest_op = Some(GuestOp::Die(vol));
                 log::info!("filesys: {}: ACTION_DIE, handler exits", device_name(unit));
                 (DOSTRUE, 0)
@@ -821,17 +852,18 @@ impl HleHandler for FilesysHle {
                 // keeping only the configured mounts, so a newly added
                 // per-boot field can never be left un-reset (this is how
                 // next_file_key came to be missed).
-                let mounts = std::mem::take(&mut self.mounts);
-                *self = FilesysHle {
-                    mounts,
-                    board_base: Some(cpu.dar[8]),
-                    ..Self::default()
-                };
+                let mounts: Vec<MountSpec> = std::mem::take(&mut self.units)
+                    .into_iter()
+                    .map(|u| u.mount)
+                    .collect();
+                *self = FilesysHle::default();
+                self.set_mounts(mounts);
+                self.board_base = Some(cpu.dar[8]);
                 self.write_startup_msgs(bus, cpu.dar[8]);
                 log::info!(
                     "filesys: expansion init at board {:#010X}, {} mount(s)",
                     cpu.dar[8],
-                    self.mounts.len()
+                    self.units.len()
                 );
                 true
             }
@@ -1099,7 +1131,7 @@ mod tests {
         // A lock on Libs, as DOS supplies with opens through the LIBS:
         // assign. The name still carries the user's "LIBS:" prefix; it
         // must be stripped without resetting to the root.
-        hle.locks.insert(
+        hle.units[0].locks.insert(
             0x1000,
             LockRec {
                 unit: 0,
