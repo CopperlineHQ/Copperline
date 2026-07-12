@@ -715,16 +715,28 @@ impl FilesysHle {
                 let Some((f, _)) = self.files.get_mut(&key) else {
                     return (DOSTRUE, ERROR_INVALID_LOCK); // res1 = -1
                 };
-                let mut data = vec![0u8; len];
-                match f.read(&mut data) {
-                    Ok(n) => {
-                        for (i, &b) in data[..n].iter().enumerate() {
-                            bus.write_byte(buf + i as u32, b);
+                // Transfer in bounded chunks: the length is guest-supplied, so
+                // allocating it up front would let a bogus multi-GB read force
+                // an unbounded host allocation (OOM/DoS). DOS reads a regular
+                // file fully, so loop until len bytes or EOF -- same result,
+                // capped memory.
+                const READ_CHUNK: usize = 64 * 1024;
+                let mut chunk = vec![0u8; len.min(READ_CHUNK)];
+                let mut done = 0usize;
+                while done < len {
+                    let want = (len - done).min(READ_CHUNK);
+                    match f.read(&mut chunk[..want]) {
+                        Ok(0) => break, // EOF
+                        Ok(n) => {
+                            for (i, &b) in chunk[..n].iter().enumerate() {
+                                bus.write_byte(buf + (done + i) as u32, b);
+                            }
+                            done += n;
                         }
-                        (n as u32, 0)
+                        Err(_) => return (DOSTRUE, ERROR_SEEK_ERROR), // res1 = -1
                     }
-                    Err(_) => (DOSTRUE, ERROR_SEEK_ERROR), // res1 = -1
                 }
+                (done as u32, 0)
             }
             ACTION_SEEK => {
                 // Arg1 = fh_Arg1, Arg2 = position, Arg3 = OFFSET_* mode.
