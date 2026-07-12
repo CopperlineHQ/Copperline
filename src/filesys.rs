@@ -819,15 +819,16 @@ impl HleHandler for FilesysHle {
                 // warm reboot the old ports, locks, and open files are
                 // stale, and exec tends to reallocate the new handler ports
                 // at the same addresses, which would misroute the startup
-                // packets of the new boot.
-                self.board_base = Some(cpu.dar[8]);
-                self.ports.clear();
-                self.volumes.clear();
-                self.device_nodes.clear();
-                self.locks.clear();
-                self.files.clear();
-                self.free_slots.clear();
-                self.pool_next = 0;
+                // packets of the new boot. Rebuild from a fresh default,
+                // keeping only the configured mounts, so a newly added
+                // per-boot field can never be left un-reset (this is how
+                // next_file_key came to be missed).
+                let mounts = std::mem::take(&mut self.mounts);
+                *self = FilesysHle {
+                    mounts,
+                    board_base: Some(cpu.dar[8]),
+                    ..Self::default()
+                };
                 self.write_startup_msgs(bus, cpu.dar[8]);
                 log::info!(
                     "filesys: expansion init at board {:#010X}, {} mount(s)",
