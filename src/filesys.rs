@@ -33,7 +33,9 @@ pub const ROM_OFFSET: usize = 0x0008;
 /// Mount table: u16 count, then fixed-size NUL-terminated device names.
 pub const MOUNTS_OFFSET: usize = 0x3800;
 pub const MOUNT_ENTRY_SIZE: usize = 32;
-pub const MOUNT_MAX_COUNT: usize = 16;
+/// Maximum host mounts (units), and the divisor for each unit's fixed
+/// board-window lock-pool slice.
+pub const MOUNT_MAX_COUNT: usize = 8;
 /// The DiagArea (`BoardSpec::copperline_services` points er_InitDiagVec
 /// here): embedded in the handler ROM at +0x40, like real autoboot boards
 /// carry theirs in the device ROM (see `_diag_area` in entry.s).

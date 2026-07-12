@@ -130,10 +130,9 @@ void handler_main(void)
 void mount_boards(UBYTE *board, struct Library *_expbase, struct ConfigDev *cd)
 {
     struct ExecBase *_sysbase = sysbase();
+    // The host writes count into the mount table and bounds it (board_image).
     UWORD count = *(UWORD *)(board + MOUNTS_OFFSET);
 
-    if (count > MOUNT_MAX_COUNT)
-        count = MOUNT_MAX_COUNT;
     for (UWORD i = 0; i < count; i++) {
         const UBYTE *name =
             board + MOUNTS_OFFSET + 2 + (ULONG)i * MOUNT_ENTRY_SIZE;

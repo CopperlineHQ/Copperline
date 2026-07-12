@@ -30,7 +30,6 @@
 #define ROM_OFFSET         0x0008
 #define MOUNTS_OFFSET      0x3800
 #define MOUNT_ENTRY_SIZE   32
-#define MOUNT_MAX_COUNT    16
 #define VOLUMES_OFFSET     0x7000
 #define VOLUME_SLOT_SIZE   128
 // Per-unit FileSysStartupMsg, written by the emulator at expansion init;
