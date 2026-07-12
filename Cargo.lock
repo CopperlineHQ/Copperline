@@ -499,6 +499,7 @@ dependencies = [
  "wasmtime",
  "wat",
  "winit",
+ "zerocopy",
 ]
 
 [[package]]

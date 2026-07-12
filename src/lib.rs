@@ -30,6 +30,7 @@ pub mod dms;
 pub mod drive_sounds;
 pub mod emulator;
 pub mod envcfg;
+pub mod filesys;
 pub mod floppy;
 pub mod gamepad;
 pub mod gayle;

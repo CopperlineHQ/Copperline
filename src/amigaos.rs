@@ -7,6 +7,8 @@
 //! 1.x through 3.x and AROS, so no version sniffing is needed -- only
 //! pointer plausibility checks, since the OS may simply not be up yet.
 
+pub mod dos;
+
 /// ExecBase field offsets (execbase.h).
 const EXECBASE_PTR: u32 = 4;
 const CHKBASE: u32 = 0x26;
