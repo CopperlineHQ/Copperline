@@ -448,7 +448,8 @@ impl FilesysHle {
                 let info = InfoData {
                     num_soft_errors: long(0),
                     unit_number: long(unit as u32),
-                    disk_state: long(ID_VALIDATED),
+                    // Read-only for now: shows as "Read Only" in C:Info.
+                    disk_state: long(ID_WRITE_PROTECTED),
                     num_blocks: long(numblocks),
                     num_blocks_used: long(inuse),
                     bytes_per_block: long(blocksize),
@@ -742,6 +743,18 @@ impl FilesysHle {
                 self.files.remove(&arg(bus, 1));
                 (DOSTRUE, 0)
             }
+            // Write-family actions: mounts are read-only for now, so the
+            // proper refusal is "write protected", not "unknown packet".
+            // Write() and SetFileSize() signal failure with Res1 = -1.
+            ACTION_WRITE | ACTION_SET_FILE_SIZE => (DOSTRUE, ERROR_DISK_WRITE_PROTECTED),
+            ACTION_FINDOUTPUT
+            | ACTION_FINDUPDATE
+            | ACTION_CREATE_DIR
+            | ACTION_DELETE_OBJECT
+            | ACTION_RENAME_OBJECT
+            | ACTION_SET_COMMENT
+            | ACTION_SET_DATE
+            | ACTION_RENAME_DISK => (DOSFALSE, ERROR_DISK_WRITE_PROTECTED),
             _ => {
                 log::debug!("filesys: {}: unhandled action {dp_type}", device_name(unit));
                 (DOSFALSE, ERROR_ACTION_NOT_KNOWN)

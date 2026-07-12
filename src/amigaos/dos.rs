@@ -14,20 +14,30 @@ pub use zerocopy::IntoBytes;
 
 // Packet types (dos/dosextens.h ACTION_*).
 pub const ACTION_LOCATE_OBJECT: i32 = 8;
+pub const ACTION_RENAME_DISK: i32 = 9;
 pub const ACTION_FREE_LOCK: i32 = 15;
+pub const ACTION_DELETE_OBJECT: i32 = 16;
+pub const ACTION_RENAME_OBJECT: i32 = 17;
 pub const ACTION_COPY_DIR: i32 = 19; // DupLock()
 pub const ACTION_SET_PROTECT: i32 = 21;
+pub const ACTION_CREATE_DIR: i32 = 22;
 pub const ACTION_EXAMINE_OBJECT: i32 = 23;
 pub const ACTION_EXAMINE_NEXT: i32 = 24;
 pub const ACTION_DISK_INFO: i32 = 25;
 pub const ACTION_INFO: i32 = 26;
 pub const ACTION_FLUSH: i32 = 27;
+pub const ACTION_SET_COMMENT: i32 = 28;
 pub const ACTION_PARENT: i32 = 29;
+pub const ACTION_SET_DATE: i32 = 34;
 pub const ACTION_SAME_LOCK: i32 = 40;
 pub const ACTION_READ: i32 = 82; // 'R'
+pub const ACTION_WRITE: i32 = 87; // 'W'
+pub const ACTION_FINDUPDATE: i32 = 1004; // Open(..., MODE_READWRITE)
 pub const ACTION_FINDINPUT: i32 = 1005; // Open(..., MODE_OLDFILE)
+pub const ACTION_FINDOUTPUT: i32 = 1006; // Open(..., MODE_NEWFILE)
 pub const ACTION_END: i32 = 1007; // Close()
 pub const ACTION_SEEK: i32 = 1008;
+pub const ACTION_SET_FILE_SIZE: i32 = 1022;
 pub const ACTION_FH_FROM_LOCK: i32 = 1026; // OpenFromLock()
 pub const ACTION_IS_FILESYSTEM: i32 = 1027;
 pub const ACTION_PARENT_FH: i32 = 1031; // ParentOfFH()
@@ -40,6 +50,7 @@ pub const ERROR_OBJECT_NOT_FOUND: u32 = 205;
 pub const ERROR_ACTION_NOT_KNOWN: u32 = 209;
 pub const ERROR_INVALID_LOCK: u32 = 211;
 pub const ERROR_OBJECT_WRONG_TYPE: u32 = 212;
+pub const ERROR_DISK_WRITE_PROTECTED: u32 = 214;
 pub const ERROR_SEEK_ERROR: u32 = 219;
 pub const ERROR_NO_MORE_ENTRIES: u32 = 232;
 /// ACTION_SEEK Arg3 modes (dos/dos.h OFFSET_*).
@@ -48,6 +59,8 @@ pub const OFFSET_CURRENT: i32 = 0;
 pub const OFFSET_END: i32 = 1;
 /// fl_Access shared ("read") lock (dos/dos.h ACCESS_READ = -2).
 pub const ACCESS_READ: u32 = 0xFFFF_FFFE;
+/// id_DiskState: write-protected (hardware or software).
+pub const ID_WRITE_PROTECTED: u32 = 80;
 /// id_DiskState: validated, read/write.
 pub const ID_VALIDATED: u32 = 82;
 // fib_DirEntryType values (dos/dosextens.h ST_*).
