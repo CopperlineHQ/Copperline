@@ -747,14 +747,10 @@ impl FilesysHle {
             // proper refusal is "write protected", not "unknown packet".
             // Write() and SetFileSize() signal failure with Res1 = -1.
             ACTION_WRITE | ACTION_SET_FILE_SIZE => (DOSTRUE, ERROR_DISK_WRITE_PROTECTED),
-            ACTION_FINDOUTPUT
-            | ACTION_FINDUPDATE
-            | ACTION_CREATE_DIR
-            | ACTION_DELETE_OBJECT
-            | ACTION_RENAME_OBJECT
-            | ACTION_SET_COMMENT
-            | ACTION_SET_DATE
-            | ACTION_RENAME_DISK => (DOSFALSE, ERROR_DISK_WRITE_PROTECTED),
+            ACTION_FINDOUTPUT | ACTION_FINDUPDATE | ACTION_CREATE_DIR | ACTION_DELETE_OBJECT
+            | ACTION_RENAME_OBJECT | ACTION_SET_COMMENT | ACTION_SET_DATE | ACTION_RENAME_DISK => {
+                (DOSFALSE, ERROR_DISK_WRITE_PROTECTED)
+            }
             _ => {
                 log::debug!("filesys: {}: unhandled action {dp_type}", device_name(unit));
                 (DOSFALSE, ERROR_ACTION_NOT_KNOWN)
