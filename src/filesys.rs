@@ -866,11 +866,15 @@ impl HleHandler for FilesysHle {
                 true
             }
             _ => {
-                log::warn!(
-                    "filesys: unexpected trap opcode {opcode:#06X} at PC={:#010X}",
+                // Not one of our two traps (0xA400/0xA402): hand the opcode
+                // back so the CPU takes the real A-line exception, as on
+                // hardware. Any other 0xA4xx is the guest's own trap, not
+                // ours to swallow.
+                log::trace!(
+                    "filesys: passing through A-line {opcode:#06X} at PC={:#010X}",
                     cpu.pc
                 );
-                true
+                false
             }
         }
     }
