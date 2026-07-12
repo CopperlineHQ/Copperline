@@ -897,6 +897,11 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 /// the directory for a case-insensitive match (AmigaDOS names are
 /// case-insensitive but case-preserving).
 fn match_component(dir: &Path, comp: &str) -> Option<std::ffi::OsString> {
+    // "." and ".." are not directory shortcuts in AmigaDOS ("/" is the
+    // parent), but the host would honor them and ".." escapes the mount.
+    if comp == "." || comp == ".." {
+        return None;
+    }
     if dir.join(comp).exists() {
         return Some(comp.into());
     }
@@ -1039,6 +1044,13 @@ mod tests {
         // A volume prefix with no lock starts at the root as before.
         let rec = hle.resolve(0, 0, b"Test:Libs/68040.library").unwrap();
         assert_eq!(rec.rel, PathBuf::from("Libs/68040.library"));
+
+        // Host dot-dirs must not act as path components: ".." would
+        // escape the mount root ("." and ".." are legal-ish AmigaDOS
+        // names with no special meaning; "/" is the parent).
+        assert!(hle.resolve(0, 0, b"..").is_none());
+        assert!(hle.resolve(0, 0, b"Libs/../../etc").is_none());
+        assert!(hle.resolve(0, 0, b"Libs/.").is_none());
 
         std::fs::remove_dir_all(&root).unwrap();
     }
