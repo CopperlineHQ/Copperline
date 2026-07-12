@@ -24,7 +24,7 @@ use crate::chipset::denise::DeniseRevision;
 use crate::config::{
     format_size, machine_profile_defaults, ChannelMode, Chipset, Config, CpuModel,
     JoystickInputMode, MachineModel, Overscan, PacingBudget, PixelAspect, RawConfig, RawDrive,
-    RawFloppyDrive, RawZorroBoard, ScsiController, SerialMode, WarpSpeed,
+    RawFilesysMount, RawFloppyDrive, RawZorroBoard, ScsiController, SerialMode, WarpSpeed,
 };
 use crate::zorro::{ConfigOption, ConfigOptionKind, LoadedZorroBoard};
 use anyhow::Result;
@@ -166,6 +166,7 @@ pub enum LauncherTab {
     Rom,
     Floppy,
     Storage,
+    HostFs,
     Cd,
     // Only reached in a `midi` build, where it is added to TABS.
     #[cfg_attr(not(feature = "midi"), allow(dead_code))]
@@ -184,6 +185,7 @@ pub const TABS: &[LauncherTab] = &[
     LauncherTab::Rom,
     LauncherTab::Floppy,
     LauncherTab::Storage,
+    LauncherTab::HostFs,
     LauncherTab::Cd,
     #[cfg(feature = "midi")]
     LauncherTab::Serial,
@@ -200,6 +202,7 @@ impl LauncherTab {
             LauncherTab::Rom => "ROM",
             LauncherTab::Floppy => "Floppy",
             LauncherTab::Storage => "Hard Disk",
+            LauncherTab::HostFs => "Host Mounts",
             LauncherTab::Cd => "CD",
             LauncherTab::Serial => "Serial",
             LauncherTab::Zorro => "Zorro",
@@ -258,6 +261,15 @@ pub enum LauncherField {
     ScsiUnit4,
     ScsiUnit5,
     ScsiUnit6,
+    // Host FS mounts (the GUI edits the first FILESYS_GUI_SLOTS entries)
+    Filesys0Dir,
+    Filesys0Boot,
+    Filesys1Dir,
+    Filesys1Boot,
+    Filesys2Dir,
+    Filesys2Boot,
+    Filesys3Dir,
+    Filesys3Boot,
     // CD
     CdImage,
     CdInsertDelay,
@@ -309,6 +321,34 @@ pub struct Row {
 
 const fn row(field: LauncherField, label: &'static str, kind: RowKind) -> Row {
     Row { field, label, kind }
+}
+
+/// How many `[[filesys]]` mounts the launcher edits (the config file
+/// accepts more; extras round-trip untouched).
+pub const FILESYS_GUI_SLOTS: usize = 4;
+
+/// The Host FS mount slot a launcher field addresses, or `None` for other
+/// fields: (mount index, whether the field is the boot-priority row).
+fn filesys_slot(field: LauncherField) -> Option<(usize, bool)> {
+    Some(match field {
+        LauncherField::Filesys0Dir => (0, false),
+        LauncherField::Filesys0Boot => (0, true),
+        LauncherField::Filesys1Dir => (1, false),
+        LauncherField::Filesys1Boot => (1, true),
+        LauncherField::Filesys2Dir => (2, false),
+        LauncherField::Filesys2Boot => (2, true),
+        LauncherField::Filesys3Dir => (3, false),
+        LauncherField::Filesys3Boot => (3, true),
+        _ => return None,
+    })
+}
+
+impl LauncherField {
+    /// Whether this field is a Host FS mount's directory (folder picker),
+    /// as opposed to a boot-priority stepper or any other field.
+    pub fn is_filesys_dir_field(self) -> bool {
+        matches!(filesys_slot(self), Some((_, false)))
+    }
 }
 
 use LauncherField as F;
@@ -367,6 +407,16 @@ const STORAGE_ROWS: [Row; 12] = [
     row(F::ScsiUnit5, "SCSI unit 5", Drive),
     row(F::ScsiUnit6, "SCSI unit 6", Drive),
 ];
+const HOSTFS_ROWS: [Row; 8] = [
+    row(F::Filesys0Dir, "HOSTFS0", Drive),
+    row(F::Filesys0Boot, "  Boot priority", Cycle),
+    row(F::Filesys1Dir, "HOSTFS1", Drive),
+    row(F::Filesys1Boot, "  Boot priority", Cycle),
+    row(F::Filesys2Dir, "HOSTFS2", Drive),
+    row(F::Filesys2Boot, "  Boot priority", Cycle),
+    row(F::Filesys3Dir, "HOSTFS3", Drive),
+    row(F::Filesys3Boot, "  Boot priority", Cycle),
+];
 const CD_ROWS: [Row; 3] = [
     row(F::CdImage, "CD image", PathRow),
     row(F::CdInsertDelay, "Insert delay", Cycle),
@@ -404,6 +454,7 @@ pub fn rows(tab: LauncherTab) -> &'static [Row] {
         LauncherTab::Rom => &ROM_ROWS,
         LauncherTab::Floppy => &FLOPPY_ROWS,
         LauncherTab::Storage => &STORAGE_ROWS,
+        LauncherTab::HostFs => &HOSTFS_ROWS,
         LauncherTab::Cd => &CD_ROWS,
         LauncherTab::Serial => serial_rows(),
         LauncherTab::Zorro => &[],
@@ -569,6 +620,14 @@ pub struct MachineSetup {
     scsi_rom_odd: Option<PathBuf>,
     scsi_units: [Option<PathBuf>; 7],
     scsi_unit_names: [Option<String>; 7],
+    // Host FS mounts. The GUI edits the first FILESYS_GUI_SLOTS entries
+    // (directory + optional volume name + boot priority, -128 = never boot);
+    // any further hand-written [[filesys]] entries are carried in
+    // `filesys_extra` and re-emitted verbatim so a save never drops them.
+    filesys_dirs: [Option<PathBuf>; FILESYS_GUI_SLOTS],
+    filesys_names: [Option<String>; FILESYS_GUI_SLOTS],
+    filesys_bootpri: [i8; FILESYS_GUI_SLOTS],
+    filesys_extra: Vec<RawFilesysMount>,
     // CD
     cd_image: Option<PathBuf>,
     cd_insert_delay: f64,
@@ -667,6 +726,21 @@ impl MachineSetup {
                     .as_ref()
                     .and_then(|d| d.volume_name.clone())
             }),
+            filesys_dirs: std::array::from_fn(|i| {
+                raw.filesys.get(i).map(|m| PathBuf::from(&m.path))
+            }),
+            filesys_names: std::array::from_fn(|i| {
+                raw.filesys.get(i).and_then(|m| m.volume.clone())
+            }),
+            filesys_bootpri: std::array::from_fn(|i| {
+                raw.filesys.get(i).and_then(|m| m.bootpri).unwrap_or(-128)
+            }),
+            filesys_extra: raw
+                .filesys
+                .iter()
+                .skip(FILESYS_GUI_SLOTS)
+                .cloned()
+                .collect(),
             cd_image: cfg.cd_image_path.clone(),
             cd_insert_delay: cfg.cd_insert_delay_secs,
             // Use the raw NVRAM path: Config defaults it to "cd32-nvram.bin"
@@ -874,6 +948,22 @@ impl MachineSetup {
                 self.scsi_unit_names[6].as_deref(),
             );
         }
+        // Host FS mounts: the edited slots (empty ones drop out), then any
+        // hand-written extras beyond what the GUI shows.
+        raw.filesys = (0..FILESYS_GUI_SLOTS)
+            .filter_map(|i| {
+                self.filesys_dirs[i].as_ref().map(|p| RawFilesysMount {
+                    path: path_string(p),
+                    volume: self.filesys_names[i]
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string),
+                    bootpri: (self.filesys_bootpri[i] != -128).then_some(self.filesys_bootpri[i]),
+                })
+            })
+            .chain(self.filesys_extra.iter().cloned())
+            .collect();
         // CD
         raw.cd.image = self.cd_image.as_deref().map(path_string);
         if self.cd_insert_delay != 0.0 {
@@ -1084,6 +1174,11 @@ impl MachineSetup {
             F::Df1Image | F::Df1WriteProtect => reason(self.floppy_drives >= 2, "drive off"),
             F::Df2Image | F::Df2WriteProtect => reason(self.floppy_drives >= 3, "drive off"),
             F::Df3Image | F::Df3WriteProtect => reason(self.floppy_drives >= 4, "drive off"),
+            // A boot priority is meaningless without a directory to boot.
+            F::Filesys0Boot | F::Filesys1Boot | F::Filesys2Boot | F::Filesys3Boot => {
+                let (slot, _) = filesys_slot(field).expect("boot field");
+                reason(self.filesys_dirs[slot].is_some(), "no directory")
+            }
             #[cfg(feature = "midi")]
             F::MidiOut | F::MidiIn => reason(self.serial_mode == SerialMode::Midi, "MIDI off"),
             // Channel mode and separation shape the output, so they do nothing
@@ -1139,6 +1234,10 @@ impl MachineSetup {
             F::ScsiUnit4 => self.scsi_units[4].as_deref(),
             F::ScsiUnit5 => self.scsi_units[5].as_deref(),
             F::ScsiUnit6 => self.scsi_units[6].as_deref(),
+            F::Filesys0Dir => self.filesys_dirs[0].as_deref(),
+            F::Filesys1Dir => self.filesys_dirs[1].as_deref(),
+            F::Filesys2Dir => self.filesys_dirs[2].as_deref(),
+            F::Filesys3Dir => self.filesys_dirs[3].as_deref(),
             F::CdImage => self.cd_image.as_deref(),
             F::Cd32Nvram => self.cd32_nvram.as_deref(),
             _ => None,
@@ -1159,6 +1258,10 @@ impl MachineSetup {
                 | F::ScsiUnit4
                 | F::ScsiUnit5
                 | F::ScsiUnit6
+                | F::Filesys0Dir
+                | F::Filesys1Dir
+                | F::Filesys2Dir
+                | F::Filesys3Dir
         )
     }
 
@@ -1174,6 +1277,10 @@ impl MachineSetup {
             F::ScsiUnit4 => &self.scsi_unit_names[4],
             F::ScsiUnit5 => &self.scsi_unit_names[5],
             F::ScsiUnit6 => &self.scsi_unit_names[6],
+            F::Filesys0Dir => &self.filesys_names[0],
+            F::Filesys1Dir => &self.filesys_names[1],
+            F::Filesys2Dir => &self.filesys_names[2],
+            F::Filesys3Dir => &self.filesys_names[3],
             _ => return None,
         };
         name.as_deref()
@@ -1196,6 +1303,10 @@ impl MachineSetup {
             F::ScsiUnit4 => &mut self.scsi_unit_names[4],
             F::ScsiUnit5 => &mut self.scsi_unit_names[5],
             F::ScsiUnit6 => &mut self.scsi_unit_names[6],
+            F::Filesys0Dir => &mut self.filesys_names[0],
+            F::Filesys1Dir => &mut self.filesys_names[1],
+            F::Filesys2Dir => &mut self.filesys_names[2],
+            F::Filesys3Dir => &mut self.filesys_names[3],
             _ => return,
         };
         *slot = value;
@@ -1277,6 +1388,13 @@ impl MachineSetup {
                 ChannelMode::Mono => "Mono".to_string(),
             },
             F::AudioStereoSeparation => format!("{}%", self.audio_stereo_separation),
+            F::Filesys0Boot | F::Filesys1Boot | F::Filesys2Boot | F::Filesys3Boot => {
+                let (slot, _) = filesys_slot(field).expect("boot field");
+                match self.filesys_bootpri[slot] {
+                    -128 => "Never".to_string(),
+                    pri => pri.to_string(),
+                }
+            }
             // Path/drive fields: the file name, or a placeholder.
             F::Rom => self.path_label(field, "(bundled AROS)"),
             _ if rows_contains_kind(field, RowKind::Path)
@@ -1385,7 +1503,11 @@ impl MachineSetup {
                     forward,
                 ) as u8
             }
-            _ => {}
+            _ => {
+                if let Some((slot, true)) = filesys_slot(field) {
+                    self.filesys_bootpri[slot] = cycle_bootpri(self.filesys_bootpri[slot], forward);
+                }
+            }
         }
     }
 
@@ -1431,7 +1553,11 @@ impl MachineSetup {
             F::ScsiUnit6 => self.scsi_units[6] = Some(path),
             F::CdImage => self.cd_image = Some(path),
             F::Cd32Nvram => self.cd32_nvram = Some(path),
-            _ => {}
+            _ => {
+                if let Some((slot, false)) = filesys_slot(field) {
+                    self.filesys_dirs[slot] = Some(path);
+                }
+            }
         }
     }
 
@@ -1463,7 +1589,14 @@ impl MachineSetup {
             F::ScsiUnit6 => self.scsi_units[6] = None,
             F::CdImage => self.cd_image = None,
             F::Cd32Nvram => self.cd32_nvram = None,
-            _ => {}
+            _ => {
+                if let Some((slot, false)) = filesys_slot(field) {
+                    self.filesys_dirs[slot] = None;
+                    // Boot priority on a mount with no directory is
+                    // meaningless; reset it so a cleared slot emits nothing.
+                    self.filesys_bootpri[slot] = -128;
+                }
+            }
         }
         // A drive's volume name is meaningless once its image is gone.
         if Self::is_drive_field(field) {
@@ -1684,6 +1817,33 @@ fn drive_raw(path: Option<&Path>, name: Option<&str>) -> Option<RawDrive> {
             .filter(|s| !s.is_empty())
             .map(str::to_string),
     })
+}
+
+/// Boot priorities offered on the Host FS boot-pri stepper. -128 is the
+/// "never boot" sentinel; the rest bracket the usual device priorities
+/// (hard-disk partitions boot at 0, DF0: at 5).
+const BOOTPRI_STEPS: [i8; 8] = [-128, -10, -5, 0, 5, 6, 10, 20];
+
+fn cycle_bootpri(current: i8, forward: bool) -> i8 {
+    let idx = BOOTPRI_STEPS
+        .iter()
+        .position(|&p| p == current)
+        .unwrap_or_else(|| {
+            // An off-list value (hand-edited config): snap to the nearest.
+            BOOTPRI_STEPS
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, &p)| (i32::from(p) - i32::from(current)).abs())
+                .map(|(i, _)| i)
+                .unwrap_or(0)
+        });
+    let n = BOOTPRI_STEPS.len();
+    let next = if forward {
+        (idx + 1) % n
+    } else {
+        (idx + n - 1) % n
+    };
+    BOOTPRI_STEPS[next]
 }
 
 fn cycle_slice<T: Copy + PartialEq>(items: &[T], current: T, forward: bool) -> T {

@@ -2367,7 +2367,7 @@ fn modal_panel_swallows_amiga_key_presses() {
     app.ui.panel = Some(Panel::About);
 
     // Escape closes the panel.
-    assert!(app.ui_handle_key(KeyCode::Escape));
+    assert!(app.ui_handle_key(KeyCode::Escape, None));
     assert!(app.ui.panel.is_none());
 
     // Hex entry: digits accumulate, Enter commits to the memory view.
@@ -2382,9 +2382,9 @@ fn modal_panel_swallows_amiga_key_presses() {
         KeyCode::Digit0,
         KeyCode::Digit1,
     ] {
-        assert!(app.ui_handle_key(key));
+        assert!(app.ui_handle_key(key, None));
     }
-    assert!(app.ui_handle_key(KeyCode::Enter));
+    assert!(app.ui_handle_key(KeyCode::Enter, None));
     match app.debugger_panel.as_ref() {
         Some(panel) => {
             assert_eq!(panel.entry, "C001");
@@ -2409,8 +2409,8 @@ fn frame_analyzer_cursor_keys_move_selected_slot() {
         _ => panic!("frame analyzer panel should be open"),
     };
 
-    assert!(app.ui_handle_key(KeyCode::ArrowRight));
-    assert!(app.ui_handle_key(KeyCode::ArrowDown));
+    assert!(app.ui_handle_key(KeyCode::ArrowRight, None));
+    assert!(app.ui_handle_key(KeyCode::ArrowDown, None));
     match app.frame_analyzer_panel.as_ref() {
         Some(panel) => {
             assert_eq!(panel.selected_hpos, start_hpos + 1);
@@ -2419,8 +2419,8 @@ fn frame_analyzer_cursor_keys_move_selected_slot() {
         _ => panic!("frame analyzer panel should be open"),
     }
 
-    assert!(app.ui_handle_key(KeyCode::ArrowLeft));
-    assert!(app.ui_handle_key(KeyCode::ArrowUp));
+    assert!(app.ui_handle_key(KeyCode::ArrowLeft, None));
+    assert!(app.ui_handle_key(KeyCode::ArrowUp, None));
     match app.frame_analyzer_panel.as_ref() {
         Some(panel) => {
             assert_eq!(panel.selected_hpos, start_hpos);
@@ -2433,8 +2433,8 @@ fn frame_analyzer_cursor_keys_move_selected_slot() {
         panel.selected_hpos = 0;
         panel.selected_vpos = 0;
     }
-    assert!(app.ui_handle_key(KeyCode::ArrowLeft));
-    assert!(app.ui_handle_key(KeyCode::ArrowUp));
+    assert!(app.ui_handle_key(KeyCode::ArrowLeft, None));
+    assert!(app.ui_handle_key(KeyCode::ArrowUp, None));
     match app.frame_analyzer_panel.as_ref() {
         Some(panel) => {
             assert_eq!(panel.selected_hpos, 0);
@@ -2458,8 +2458,8 @@ fn frame_analyzer_cursor_keys_move_selected_slot() {
         panel.selected_hpos = max_hpos;
         panel.selected_vpos = max_vpos;
     }
-    assert!(app.ui_handle_key(KeyCode::ArrowRight));
-    assert!(app.ui_handle_key(KeyCode::ArrowDown));
+    assert!(app.ui_handle_key(KeyCode::ArrowRight, None));
+    assert!(app.ui_handle_key(KeyCode::ArrowDown, None));
     match app.frame_analyzer_panel.as_ref() {
         Some(panel) => {
             assert_eq!(panel.selected_hpos, max_hpos);
@@ -2483,7 +2483,7 @@ fn frame_analyzer_underlay_toggles_and_renders() {
     assert!(app.build_frame_analyzer_view(&panel).underlay.is_none());
 
     // The U key ticks the checkbox on.
-    assert!(app.ui_handle_key(KeyCode::KeyU));
+    assert!(app.ui_handle_key(KeyCode::KeyU, None));
     assert!(app
         .frame_analyzer_panel
         .as_ref()
@@ -3336,14 +3336,14 @@ fn debugger_keys_step_and_pin_disassembly() {
 
     // S steps one instruction while the entry box is unfocused.
     let pc_before = app.emu.machine.pc();
-    assert!(app.ui_handle_key(KeyCode::KeyS));
+    assert!(app.ui_handle_key(KeyCode::KeyS, None));
     assert_eq!(app.emu.machine.pc(), pc_before.wrapping_add(2));
 
     // R toggles run; the explicit choice survives closing the panel.
     assert!(app.paused);
-    assert!(app.ui_handle_key(KeyCode::KeyR));
+    assert!(app.ui_handle_key(KeyCode::KeyR, None));
     assert!(!app.paused);
-    assert!(app.ui_handle_key(KeyCode::KeyR));
+    assert!(app.ui_handle_key(KeyCode::KeyR, None));
     assert!(app.paused);
 
     // On the CPU tab, Enter pins the disassembly origin to the typed
@@ -3352,7 +3352,7 @@ fn debugger_keys_step_and_pin_disassembly() {
         panel.entry_active = true;
         panel.entry = "FC0010".to_string();
     }
-    assert!(app.ui_handle_key(KeyCode::Enter));
+    assert!(app.ui_handle_key(KeyCode::Enter, None));
     match app.debugger_panel.as_ref() {
         Some(panel) => {
             assert_eq!(panel.disasm_addr, Some(0xFC0010));
@@ -3366,7 +3366,7 @@ fn debugger_keys_step_and_pin_disassembly() {
         panel.entry_active = true;
         panel.entry.clear();
     }
-    assert!(app.ui_handle_key(KeyCode::Enter));
+    assert!(app.ui_handle_key(KeyCode::Enter, None));
     match app.debugger_panel.as_ref() {
         Some(panel) => assert_eq!(panel.disasm_addr, None),
         _ => panic!("debugger panel should be open"),
@@ -3379,7 +3379,7 @@ fn debugger_keys_step_and_pin_disassembly() {
         panel.entry.clear();
     }
     let pc_before = app.emu.machine.pc();
-    assert!(app.ui_handle_key(KeyCode::KeyS));
+    assert!(app.ui_handle_key(KeyCode::KeyS, None));
     assert_eq!(app.emu.machine.pc(), pc_before);
     assert_eq!(
         app.debugger_panel.as_ref().map(|p| p.entry.as_str()),
