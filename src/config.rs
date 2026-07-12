@@ -1002,6 +1002,24 @@ impl Config {
                 if !m.path.is_dir() {
                     anyhow::bail!("[[filesys]] path {} is not a directory", m.path.display());
                 }
+                // The volume name becomes an AmigaDOS volume label (a DosList
+                // BSTR): 1-30 bytes, and no ':' '/' or NUL.
+                let vol = &m.volume;
+                if vol.is_empty() {
+                    anyhow::bail!("[[filesys]] volume name must not be empty");
+                }
+                if vol.len() > 30 {
+                    anyhow::bail!(
+                        "[[filesys]] volume name {vol:?} is too long ({} bytes; max 30)",
+                        vol.len()
+                    );
+                }
+                if vol.contains([':', '/', '\0']) {
+                    anyhow::bail!(
+                        "[[filesys]] volume name {vol:?} contains an invalid \
+                         character (no ':' '/' or NUL)"
+                    );
+                }
             }
             chain.add_board_with_rom(
                 BoardSpec::copperline_services(),
@@ -2725,6 +2743,28 @@ mod tests {
                 bytes,
                 "round-trip {bytes}"
             );
+        }
+    }
+
+    #[test]
+    fn filesys_volume_name_is_validated() {
+        use crate::filesys::MountSpec;
+        let with_volume = |volume: &str| Config {
+            filesys: vec![MountSpec {
+                path: std::path::PathBuf::from("."),
+                volume: volume.to_string(),
+                boot_pri: -128,
+            }],
+            ..Config::default()
+        };
+        // A sane label mounts (the services board is added).
+        assert!(with_volume("Work").build_zorro_chain().is_ok());
+        // The three failure modes each report their own error.
+        let err = |v: &str| format!("{:#}", with_volume(v).build_zorro_chain().unwrap_err());
+        assert!(err("").contains("must not be empty"));
+        assert!(err("this-volume-name-is-far-too-long-to-fit").contains("too long"));
+        for bad in ["a:b", "a/b", "a\0b"] {
+            assert!(err(bad).contains("invalid character"), "volume {bad:?}");
         }
     }
 
