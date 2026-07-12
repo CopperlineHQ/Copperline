@@ -61,6 +61,11 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.11.0" date="2026-07-12">
+      <description>
+        <p>Host directories mounted as bootable HOSTFS volumes, unified A2091/A4091 SCSI controller selection, a serial PTY bridge, a broad 68000 microcode bus-ordering pass, blitter BLTPRI bus fencing, Copper wake-up and sprite serializer timing fixes, floppy motor spin-up DMA arming, display aperture and phantom-line rendering fixes, frame-time performance work, and a golden-render timing-probe regression suite.</p>
+      </description>
+    </release>
     <release version="0.10.0" date="2026-07-07">
       <description>
         <p>68060 CPU support, expanded 68030/68040 MMU and cache behaviour, debugger console and frame-analysis upgrades, A4091 SCSI board emulation, MIDI and TCP serial host bridges, selectable audio devices, zipped floppy images, and broad Copper, Agnus, Denise, Paula, CIA, blitter, floppy, display, and 68000-family timing fixes.</p>
