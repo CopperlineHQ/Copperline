@@ -41,7 +41,9 @@
 
 #include "copperline_board.h"
 
-#define HANDLER_STACK 8192
+// The pump itself needs well under 200 bytes; 2K leaves headroom for the
+// OS calls and a future printf().
+#define HANDLER_STACK 2048
 
 // AbsExecBase. A plain *(struct ExecBase **)4 works too (a constant address
 // needs no relocation) but trips GCC's array-bounds warning, which treats any
