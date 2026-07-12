@@ -830,9 +830,11 @@ impl HleHandler for FilesysHle {
                 let dp_type = bus.read_long(pkt + 8) as i32;
                 let mut guest_op = None;
                 let (res1, res2) = self.handle_packet(bus, port, pkt, &mut guest_op);
+                let unit = self.ports.get(&port).copied();
                 log::debug!(
-                    "filesys: packet type {dp_type} at {pkt:#010X} -> \
-                     res1={res1:#X} res2={res2}"
+                    "filesys: {}: packet type {dp_type} at {pkt:#010X} -> \
+                     res1={res1:#X} res2={res2}",
+                    unit.map_or("?".into(), device_name),
                 );
                 bus.write_long(pkt + 12, res1); // dp_Res1
                 bus.write_long(pkt + 16, res2); // dp_Res2
