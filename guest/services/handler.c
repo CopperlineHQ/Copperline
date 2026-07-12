@@ -58,16 +58,19 @@ static struct ExecBase *sysbase(void)
 
 // Hand the packet to the emulator, which fills dp_Res1/dp_Res2. Returns a
 // TRAP_RES_* code; for TRAP_RES_ADDVOLUME the host also returns the volume
-// DosList node it built in *vol (via A0).
+// DosList node it built in *vol (via A0). The mount unit (D2) tells the host
+// which mount this packet is for, so it routes by unit rather than by the
+// handler's MsgPort address.
 static ULONG trap_packet(struct DosPacket *pkt, struct MsgPort *port,
-                         struct DosList **vol)
+                         LONG unit, struct DosList **vol)
 {
     register ULONG res __asm("d0");
     register struct DosList *_vol __asm("a0");
     register struct DosPacket *_pkt __asm("d1") = pkt;
+    register LONG _unit __asm("d2") = unit;
     register struct MsgPort *_port __asm("a1") = port;
     __asm volatile(".short 0xA402" // TRAP_PACKET
-                   : "=r"(res), "=r"(_vol), "+r"(_pkt), "+r"(_port)
+                   : "=r"(res), "=r"(_vol), "+r"(_pkt), "+r"(_unit), "+r"(_port)
                    :
                    : "cc", "memory");
     *vol = _vol;
@@ -80,14 +83,23 @@ void handler_main(void)
     struct Library *_dosbase = OpenLibrary((STRPTR) "dos.library", 36);
     struct Process *me = (struct Process *)FindTask(NULL);
     struct MsgPort *port = &me->pr_MsgPort;
+    LONG unit = -1;
 
     for (;;) {
         WaitPort(port);
         struct Message *msg;
         while ((msg = GetMsg(port)) != NULL) {
             struct DosPacket *pkt = (struct DosPacket *)msg->mn_Node.ln_Name;
+            // The first packet is ACTION_STARTUP (== ACTION_NIL == 0): dp_Arg3
+            // is our DeviceNode, whose dn_Startup FileSysStartupMsg holds our
+            // mount unit. Cache it once and pass it on every packet.
+            if (unit < 0) {
+                struct DeviceNode *dn = BADDR(pkt->dp_Arg3);
+                struct FileSysStartupMsg *fssm = BADDR(dn->dn_Startup);
+                unit = fssm->fssm_Unit;
+            }
             struct DosList *vol;
-            ULONG res = trap_packet(pkt, port, &vol);
+            ULONG res = trap_packet(pkt, port, unit, &vol);
             if (res != TRAP_RES_NOREPLY) {
                 struct MsgPort *reply = pkt->dp_Port;
                 pkt->dp_Port = port;

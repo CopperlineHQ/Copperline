@@ -152,10 +152,6 @@ pub struct FilesysHle {
     mounts: Vec<MountSpec>,
     /// Board base address, captured from A0 at the DiagPoint trap.
     board_base: Option<u32>,
-    /// Handler MsgPort address -> mount unit, learned from startup packets.
-    /// All per-boot state is cleared at the TRAP_DIAG_ENTRY of the next
-    /// boot (expansion init runs exactly once per boot).
-    ports: HashMap<u32, usize>,
     /// Mount unit -> guest address of its volume DosList node.
     volumes: HashMap<usize, u32>,
     /// Mount unit -> guest address of its DeviceNode (from the startup
@@ -411,31 +407,35 @@ impl FilesysHle {
     /// Handle one DosPacket; returns (dp_Res1, dp_Res2). Some packets also
     /// need DosList surgery only the guest may perform (the semaphore);
     /// `guest_op` tells the handler what to do after replying.
+    ///
+    /// `unit` routes the packet to its mount; `port` is the handler's MsgPort,
+    /// no longer a routing key but still stamped into the dn_Task/dol_Task/
+    /// fl_Task fields DOS uses to reach the handler.
     fn handle_packet(
         &mut self,
         bus: &mut dyn AddressBus,
         port: u32,
+        unit: usize,
         pkt: u32,
         guest_op: &mut Option<GuestOp>,
     ) -> (u32, u32) {
         let dp_type = bus.read_long(pkt + 8) as i32;
         let arg = |bus: &mut dyn AddressBus, n: u32| bus.read_long(pkt + 20 + 4 * (n - 1));
 
-        // The first packet on a port is the startup packet DOS sends when it
-        // starts the handler process (its dp_Type is not meaningful).
-        if !self.ports.contains_key(&port) {
+        if unit >= self.mounts.len() {
+            log::warn!("filesys: packet for unknown unit {unit}");
+            return (DOSFALSE, ERROR_OBJECT_NOT_FOUND);
+        }
+
+        // The first packet for a unit is the startup packet (ACTION_STARTUP,
+        // synonymous with ACTION_NIL == 0): the handler passes its unit in on
+        // every packet, so the first one we see for a unit is the one DOS sent
+        // to start its process. dp_Arg3 is the DeviceNode; wire dn_Task to the
+        // handler's MsgPort and hand the guest the volume node to AddDosEntry.
+        if let std::collections::hash_map::Entry::Vacant(slot) = self.device_nodes.entry(unit) {
             let dn = arg(bus, 3) << 2; // dp_Arg3: BPTR DeviceNode
-                                       // dn_Startup is a BPTR to the unit's FileSysStartupMsg (written
-                                       // by write_startup_msgs); fssm_Unit is its first field.
-            let fssm = bus.read_long(dn + DEVICENODE_STARTUP) << 2;
-            let unit = bus.read_long(fssm) as usize;
-            if unit >= self.mounts.len() {
-                log::warn!("filesys: startup packet for unknown unit {unit}");
-                return (DOSFALSE, ERROR_OBJECT_NOT_FOUND);
-            }
             bus.write_long(dn + DEVICENODE_TASK, port);
-            self.ports.insert(port, unit);
-            self.device_nodes.insert(unit, dn);
+            slot.insert(dn);
             *guest_op = Some(GuestOp::AddVolume(self.build_volume_node(bus, unit, port)));
             log::info!(
                 "filesys: {}: handler started ({}: -> {})",
@@ -445,7 +445,6 @@ impl FilesysHle {
             );
             return (DOSTRUE, 0);
         }
-        let unit = self.ports[&port];
 
         match dp_type {
             ACTION_IS_FILESYSTEM => (DOSTRUE, 0),
@@ -784,7 +783,6 @@ impl FilesysHle {
                 if let Some(dn) = self.device_nodes.remove(&unit) {
                     bus.write_long(dn + DEVICENODE_TASK, 0);
                 }
-                self.ports.remove(&port);
                 let vol = self.volumes.remove(&unit).unwrap_or(0);
                 *guest_op = Some(GuestOp::Die(vol));
                 log::info!("filesys: {}: ACTION_DIE, handler exits", device_name(unit));
@@ -839,15 +837,16 @@ impl HleHandler for FilesysHle {
             }
             TRAP_PACKET => {
                 let pkt = cpu.dar[1]; // D1
+                let unit = cpu.dar[2] as usize; // D2: mount unit (the handler
+                                                // passes its own; see handler.c)
                 let port = cpu.dar[9]; // A1
                 let dp_type = bus.read_long(pkt + 8) as i32;
                 let mut guest_op = None;
-                let (res1, res2) = self.handle_packet(bus, port, pkt, &mut guest_op);
-                let unit = self.ports.get(&port).copied();
+                let (res1, res2) = self.handle_packet(bus, port, unit, pkt, &mut guest_op);
                 log::debug!(
                     "filesys: {}: packet type {dp_type} at {pkt:#010X} -> \
                      res1={res1:#X} res2={res2}",
-                    unit.map_or("?".into(), device_name),
+                    device_name(unit),
                 );
                 bus.write_long(pkt + 12, res1); // dp_Res1
                 bus.write_long(pkt + 16, res2); // dp_Res2
