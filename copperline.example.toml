@@ -225,6 +225,21 @@ video = "PAL"
 # slave = "data.hdf"
 
 
+# Host directories mounted directly as AmigaDOS volumes (HOSTFS0:,
+# HOSTFS1:, ...), served live with no disk image in between. Read-only for
+# now: write operations fail with "disk is write-protected". Up to 16
+# mounts. volume defaults to the directory name. bootpri (-128..127,
+# default -128 = never boot) enters the boot-device vote: hard-disk boot
+# partitions typically sit at 0 and DF0: at 5.
+# [[filesys]]
+# path = "/data/amiga/Workbench"
+# volume = "Workbench"
+# bootpri = 6
+#
+# [[filesys]]
+# path = "/data/amiga/downloads"
+
+
 # Presentation options. overscan: "tv" (default; mask deep horizontal
 # overscan like a CRT bezel) or "full". pixel_aspect: "tv" (default; the
 # non-square pixel aspect of a 4:3 CRT) or "square" (one host row per

@@ -511,6 +511,37 @@ in-memory FFS volumes -- including the `{ path = "...", name = "..." }`
 table form that overrides a directory mount's volume name. The HDD
 activity LED covers SCSI traffic too.
 
+## `[[filesys]]` -- host directories as live volumes
+
+```toml
+[[filesys]]
+path = "/data/amiga/Workbench"
+volume = "Workbench"   # optional, defaults to the directory name
+bootpri = 6            # optional boot priority; default -128 = never boot
+
+[[filesys]]
+path = "/data/amiga/downloads"
+```
+
+Each `[[filesys]]` entry exports a host directory to the guest as an
+AmigaDOS volume on its own `HOSTFS<n>:` device, served live by the
+emulator: no disk image is built, and guest reads always see the current
+host contents. This differs from giving `[ide]`/`[scsi]` a directory
+path, which snapshots the tree into an in-memory FFS volume at startup.
+Up to 16 mounts.
+
+The volumes are read-only for now: write operations fail with the same
+"disk is write-protected" error a physical write-protected disk gives.
+Protection bits, comments, and exact datestamps are taken from UAE-style
+`.uaem` sidecar files when present (the sidecars stay hidden from
+listings).
+
+`volume` sets the AmigaDOS volume name (up to 30 characters, no `:` or
+`/`). `bootpri` enters the volume in the boot-device vote (-128..127;
+the default -128 means mounted but never booted from): hard-disk boot
+partitions typically sit at priority 0 and DF0: at 5, so a bootable
+Workbench directory with `bootpri = 6` boots ahead of both.
+
 ## `[cd]` -- CDTV and CD32
 
 ```toml
