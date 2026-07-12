@@ -791,15 +791,25 @@ fn diagrom_menu_preserves_left_margin_text_columns() -> Result<(), Box<dyn std::
         return Ok(());
     }
 
-    let img = run_screenshot("diagrom-left-margin", "6.0", &[])?;
+    // DiagROM boots as a Kickstart replacement, so the ROM is passed
+    // positionally (there is no ./diagrom.rom fallback; the bundled AROS
+    // ROM is the no-argument default). Boot-time memory detection plus the
+    // serial-mode countdown take ~28s on the default 512K chip + 512K slow
+    // machine; after that the main menu waits for input indefinitely, so a
+    // 35s screenshot is stable frame over frame.
+    let img = run_screenshot("diagrom-menu", "35.0", &["diagrom.rom"])?;
     assert_eq!((img.width, img.height), (716, 537));
 
+    // The yellow "Serial:" label of the menu's status bar is the leftmost
+    // text on screen (glyphs start at x=40 in the full-overscan frame);
+    // clipping the left margin cuts its columns away. The label renders
+    // ~230 pure-yellow pixels in this region.
     assert_region_color_count(
         &img,
-        (70, 103, 80, 116),
+        (38, 495, 95, 515),
         [255, 255, 0, 255],
-        12,
-        "DiagROM left-margin text column",
+        100,
+        "DiagROM menu status-bar left-margin text column",
     );
     Ok(())
 }
