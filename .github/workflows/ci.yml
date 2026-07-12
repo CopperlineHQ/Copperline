@@ -151,31 +151,59 @@ jobs:
     name: DiagROM boot smoke
     needs: build-test
     runs-on: macos-latest
-    # Opt-in. DiagROM is freely redistributable but not committed, so CI
-    # fetches it at run time. Set the DIAGROM_URL repository variable to a
-    # direct URL for the DiagROM ROM image to enable this job; until then it
-    # is skipped.
-    if: ${{ vars.DIAGROM_URL != '' }}
+    # DiagROM (diagrom.com) is freely downloadable but its author keeps
+    # redistribution to the official site, so it is fetched at run time
+    # (checksum-pinned, cached across runs) instead of being committed.
+    # The DIAGROM_URL repository variable optionally overrides the
+    # download location should the official URL move; the stable V1.3
+    # archive has been frozen upstream since 2023, so a checksum change
+    # means the pin below needs updating, not that the job is flaky.
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build (release)
         run: cargo build --release --locked
-      - name: Fetch DiagROM
-        run: curl -fsSL "${{ vars.DIAGROM_URL }}" -o diagrom.rom
-      - name: Boot smoke (headless screenshot)
-        # No config and no positional ROM: the built-in defaults point at
-        # ./diagrom.rom, so this boots DiagROM, renders a frame after 6
-        # emulated seconds, and exits. A non-empty PNG means it booted
-        # without halting.
+      - name: Restore cached DiagROM
+        id: diagrom-cache
+        uses: actions/cache@v4
+        with:
+          path: diagrom.rom
+          key: diagrom-stable-v1.3
+      - name: Fetch DiagROM (stable V1.3)
+        if: steps.diagrom-cache.outputs.cache-hit != 'true'
+        env:
+          DIAGROM_URL: ${{ vars.DIAGROM_URL }}
         run: |
-          ./target/release/copperline --noaudio --screenshot-after 6 diag.png
+          curl -fsSL --retry 3 "${DIAGROM_URL:-https://www.diagrom.com/files/stable/DiagROM.zip}" -o DiagROM.zip
+          echo "a575f8fa69b1ac7fd566fcdcd19a68e53d472ac6c56d8a6a9489229882c5b208  DiagROM.zip" | shasum -a 256 -c
+          unzip -o DiagROM.zip DiagROM/DiagROM
+          mv DiagROM/DiagROM diagrom.rom
+          rm -rf DiagROM.zip DiagROM
+      - name: Boot smoke (serial banner + headless screenshot)
+        # DiagROM boots as a Kickstart replacement, so the ROM is passed
+        # positionally (the no-argument default is the bundled AROS ROM).
+        # DiagROM mirrors its diagnostics to the serial port, which the
+        # emulator routes to stdout by default; seeing the version banner
+        # proves the ROM's boot code actually executed, which a non-empty
+        # PNG alone does not (a black screen still writes one).
+        run: |
+          ./target/release/copperline diagrom.rom --noaudio --screenshot-after 6 diag.png > serial.log
+          grep -q "Amiga DiagROM" serial.log
           test -s diag.png
+      - name: DiagROM menu image regression
+        # The asset-gated integration test boots to the main menu and
+        # asserts the status bar's left-margin text columns survive.
+        run: |
+          mkdir -p test-assets
+          cp diagrom.rom test-assets/
+          cargo test --release --locked --test image_regression diagrom -- --ignored --nocapture
       - name: Upload boot screenshot
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: diagrom-boot
-          path: diag.png
+          path: |
+            diag.png
+            serial.log
           if-no-files-found: ignore
