@@ -1276,7 +1276,7 @@ impl M68kMachine {
     }
 
     /// Configure the host directories served by the filesys trap gateway
-    /// (`[[filesys.mount]]`).
+    /// (`[[filesys]]`).
     pub fn set_filesys_mounts(&mut self, mounts: Vec<crate::filesys::MountSpec>) {
         self.hle.set_mounts(mounts);
     }
