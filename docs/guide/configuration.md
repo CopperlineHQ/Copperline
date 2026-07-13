@@ -575,3 +575,27 @@ Each entry adds a Zorro board described by a TOML metadata file, configured
 in file order after the built-in `[memory]` fast/z3 boards. See
 [](../zorro) for the metadata format and how autoconfig assigns
 addresses.
+
+## `[debug]` -- diagnostics
+
+```toml
+[debug]
+log_unmapped = "DD0000-DE0000"
+```
+
+`log_unmapped` logs every CPU read and write inside the given range that no
+device decodes. Reads report the floating bus value they returned, writes
+report the value that went nowhere. The value is a hex `START-END` range with
+an exclusive end (a leading `0x` is allowed), or `all` for the whole address
+space.
+
+This is how you find the registers a guest expects and Copperline does not
+implement yet. A missing register is usually invisible: a read floats, a write
+is dropped, and the guest either sulks or hangs with no diagnostic. Pointing
+this at the window a driver probes shows the access pattern directly -- an IDE
+presence probe, say, appears as a write of `$A0` to the device/head register
+followed by a long run of status reads that never come back ready.
+
+A booting Kickstart probes enough empty address space that `all` produces on
+the order of a million lines per boot, so prefer a range once you know roughly
+where to look.

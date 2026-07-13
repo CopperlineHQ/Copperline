@@ -18,11 +18,13 @@ pub const RAMSEY_CONTROL: u32 = 0x00DE_0003;
 /// Ramsey version register. Byte-wide, read-only.
 pub const RAMSEY_VERSION: u32 = 0x00DE_0043;
 
-/// Base of the page Ramsey answers on.
-pub const RAMSEY_BASE: u32 = 0x00DE_0000;
-/// Size of that page. Ramsey decodes only two addresses inside it; the rest
-/// reads back as a floating bus.
-pub const RAMSEY_SIZE: u32 = 0x0100;
+/// Whether Ramsey drives the bus for a byte access at `addr`. It has exactly
+/// two registers and decodes nothing else: everything else on the $DE0000 page
+/// stays undriven, so it floats (and shows up in `[debug] log_unmapped`)
+/// rather than reading back a value we invented.
+pub fn decodes(addr: u32) -> bool {
+    addr == RAMSEY_CONTROL || addr == RAMSEY_VERSION
+}
 
 // Control register bits.
 /// Page mode enabled.
@@ -129,37 +131,20 @@ impl Ramsey {
         (1 << addr_bits) * width
     }
 
-    /// The byte at `addr`, or an all-ones floating bus off the two registers.
-    fn read_byte(&self, addr: u32) -> u8 {
-        match addr {
-            RAMSEY_CONTROL => self.control,
-            RAMSEY_VERSION => self.revision.version_id(),
-            _ => 0xFF,
+    /// Read one of the two registers. Callers must have checked `decodes`.
+    pub fn read_byte(&self, addr: u32) -> u8 {
+        if addr == RAMSEY_VERSION {
+            self.revision.version_id()
+        } else {
+            self.control
         }
     }
 
-    fn write_byte(&mut self, addr: u32, value: u8) {
+    pub fn write_byte(&mut self, addr: u32, value: u8) {
         if addr == RAMSEY_CONTROL {
             self.control = value;
         }
-        // The version register is read-only, and nothing else decodes.
-    }
-
-    /// Read `size` bytes. Both registers are byte-wide and sit on odd
-    /// addresses, so a wider access just gathers whatever each byte decodes to.
-    pub fn read(&self, addr: u32, size: usize) -> u32 {
-        let mut value = 0u32;
-        for i in 0..size as u32 {
-            value = (value << 8) | u32::from(self.read_byte(addr.wrapping_add(i)));
-        }
-        value
-    }
-
-    pub fn write(&mut self, addr: u32, size: usize, value: u32) {
-        for i in 0..size as u32 {
-            let shift = 8 * (size as u32 - 1 - i);
-            self.write_byte(addr.wrapping_add(i), (value >> shift) as u8);
-        }
+        // The version register is read-only.
     }
 }
 
@@ -171,15 +156,15 @@ mod tests {
     fn the_version_register_identifies_the_part() {
         let a3000 = Ramsey::new(RamseyRevision::Rev4, 1024 * 1024);
         let a4000 = Ramsey::new(RamseyRevision::Rev7, 4 * 1024 * 1024);
-        assert_eq!(a3000.read(RAMSEY_VERSION, 1), 0x0D);
-        assert_eq!(a4000.read(RAMSEY_VERSION, 1), 0x0F);
+        assert_eq!(a3000.read_byte(RAMSEY_VERSION), 0x0D);
+        assert_eq!(a4000.read_byte(RAMSEY_VERSION), 0x0F);
     }
 
     #[test]
     fn the_version_register_ignores_writes() {
         let mut r = Ramsey::new(RamseyRevision::Rev4, 1024 * 1024);
-        r.write(RAMSEY_VERSION, 1, 0xA5);
-        assert_eq!(r.read(RAMSEY_VERSION, 1), 0x0D);
+        r.write_byte(RAMSEY_VERSION, 0xA5);
+        assert_eq!(r.read_byte(RAMSEY_VERSION), 0x0D);
     }
 
     /// ziptest and Kickstart both write a mode to the control register and
@@ -189,8 +174,8 @@ mod tests {
     fn the_control_register_reads_back_what_was_written() {
         let mut r = Ramsey::new(RamseyRevision::Rev7, 4 * 1024 * 1024);
         for value in [0x00, 0xFF, CONTROL_BURST, CONTROL_PAGE | CONTROL_WRAP] {
-            r.write(RAMSEY_CONTROL, 1, u32::from(value));
-            assert_eq!(r.read(RAMSEY_CONTROL, 1), u32::from(value));
+            r.write_byte(RAMSEY_CONTROL, value);
+            assert_eq!(r.read_byte(RAMSEY_CONTROL), value);
         }
     }
 
@@ -220,12 +205,17 @@ mod tests {
         assert_eq!(r.control() & CONTROL_TEST, 0);
     }
 
-    /// Ramsey decodes two byte addresses; the rest of the page floats high.
+    /// Ramsey has exactly two registers. Anything else on the page must stay
+    /// undriven so it floats and gets logged, rather than reading back a value
+    /// we made up -- a guest reading the version at the wrong offset should
+    /// look wrong, not plausibly wrong.
     #[test]
-    fn undecoded_addresses_float_high() {
-        let r = Ramsey::new(RamseyRevision::Rev4, 1024 * 1024);
-        assert_eq!(r.read(RAMSEY_BASE, 1), 0xFF);
-        assert_eq!(r.read(RAMSEY_CONTROL + 1, 1), 0xFF);
-        assert_eq!(r.read(RAMSEY_VERSION - 1, 1), 0xFF);
+    fn only_the_two_registers_are_decoded() {
+        assert!(decodes(RAMSEY_CONTROL));
+        assert!(decodes(RAMSEY_VERSION));
+        assert!(!decodes(0x00DE_0000));
+        assert!(!decodes(RAMSEY_CONTROL + 1));
+        assert!(!decodes(RAMSEY_VERSION - 1));
+        assert!(!decodes(0x00DE_1000)); // Gayle's ID page, on the wedge machines
     }
 }

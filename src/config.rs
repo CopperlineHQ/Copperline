@@ -88,6 +88,11 @@ pub struct Config {
     pub gate_array: GateArray,
     /// Memory controller fitted: a Ramsey on the big-box machines.
     pub mem_controller: MemController,
+    /// Log every CPU access that no device decodes, within this address range.
+    /// Set by `[debug] log_unmapped`. Off by default: on a booting machine the
+    /// ROM probes enough empty space to make this a firehose, so it is meant
+    /// to be pointed at one window (e.g. the A4000 IDE at $DD2020).
+    pub log_unmapped: Option<std::ops::Range<u32>>,
     /// Akiko gate array fitted (CD32 profile): ID + C2P port at $B80000.
     pub akiko: bool,
     /// CDTV DMAC/CD controller fitted (CDTV profile): a Zorro II
@@ -917,6 +922,7 @@ impl Default for Config {
             machine: None,
             gate_array: GateArray::None,
             mem_controller: MemController::None,
+            log_unmapped: None,
             akiko: false,
             cdtv_cd: false,
             cd32_pad: false,
@@ -1204,6 +1210,8 @@ pub struct RawConfig {
     pub(crate) identify: Option<bool>,
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) cd: RawCd,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub(crate) debug: RawDebug,
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) cpu: RawCpu,
     #[serde(default, skip_serializing_if = "is_default")]
@@ -1567,6 +1575,17 @@ pub(crate) struct RawMachine {
     /// exercise the diagnostic tools.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) mem_controller: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawDebug {
+    /// Log CPU accesses that no device decodes. Either `all`, or an address
+    /// range like `"DD0000-DE0000"` (hex, end exclusive) to watch one window.
+    /// Reads report the floating bus value they returned; writes report the
+    /// value that went nowhere.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) log_unmapped: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -2083,6 +2102,12 @@ impl TryFrom<RawConfig> for Config {
                 .map(PathBuf::from)
                 .or_else(|| defaults.akiko.then(|| PathBuf::from("cd32-nvram.bin"))),
             rtc_present: raw.machine.rtc.unwrap_or(defaults.rtc_present),
+            log_unmapped: raw
+                .debug
+                .log_unmapped
+                .as_deref()
+                .map(parse_log_unmapped)
+                .transpose()?,
             mem_controller: match raw.machine.mem_controller.as_deref() {
                 None => defaults.mem_controller,
                 Some("none") => MemController::None,
@@ -2203,6 +2228,32 @@ fn parse_chipset(s: &str) -> Result<Chipset> {
         "AGA" => Ok(Chipset::Aga),
         _ => Err(anyhow!("unknown chipset {:?}: expected OCS / ECS / AGA", s)),
     }
+}
+
+/// Parse `[debug] log_unmapped`: `all`, or a hex `START-END` range with an
+/// exclusive end (e.g. `"DD0000-DE0000"`, or `"0x00DD0000-0x00DE0000"`).
+pub(crate) fn parse_log_unmapped(s: &str) -> Result<std::ops::Range<u32>> {
+    let s = s.trim();
+    if s.eq_ignore_ascii_case("all") {
+        return Ok(0..u32::MAX);
+    }
+    let hex = |v: &str| -> Result<u32> {
+        let v = v.trim();
+        let digits = v
+            .strip_prefix("0x")
+            .or_else(|| v.strip_prefix("0X"))
+            .unwrap_or(v);
+        u32::from_str_radix(digits, 16)
+            .with_context(|| format!("[debug] log_unmapped: {v:?} is not a hex address"))
+    };
+    let (start, end) = s
+        .split_once('-')
+        .ok_or_else(|| anyhow!("[debug] log_unmapped {s:?}: expected \"all\" or \"START-END\""))?;
+    let (start, end) = (hex(start)?, hex(end)?);
+    if start >= end {
+        bail!("[debug] log_unmapped {s:?}: start must be below end");
+    }
+    Ok(start..end)
 }
 
 pub(crate) fn parse_machine_model(s: &str) -> Result<MachineModel> {
@@ -3731,6 +3782,39 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("ramsey-04"), "{err}");
+        Ok(())
+    }
+
+    #[test]
+    fn log_unmapped_takes_all_or_a_hex_range() -> anyhow::Result<()> {
+        let cfg = parse_config(
+            r#"
+            [debug]
+            log_unmapped = "DD0000-DE0000"
+            "#,
+        )?;
+        assert_eq!(cfg.log_unmapped, Some(0x00DD_0000..0x00DE_0000));
+
+        let cfg = parse_config(
+            r#"
+            [debug]
+            log_unmapped = "all"
+            "#,
+        )?;
+        assert_eq!(cfg.log_unmapped, Some(0..u32::MAX));
+
+        assert_eq!(parse_config("")?.log_unmapped, None);
+
+        // An end below the start would silently log nothing.
+        let err = parse_config(
+            r#"
+            [debug]
+            log_unmapped = "DE0000-DD0000"
+            "#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("start must be below end"), "{err}");
         Ok(())
     }
 

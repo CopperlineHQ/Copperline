@@ -1953,6 +1953,13 @@ pub fn build_machine(
         }
         bus.attach_gayle(gayle);
     }
+    if let Some(range) = cfg.log_unmapped.clone() {
+        info!(
+            "debug: logging unmapped CPU accesses in {:#08X}-{:#08X}",
+            range.start, range.end
+        );
+        bus.log_unmapped = Some(range);
+    }
     if let Some(revision) = cfg.mem_controller.ramsey_revision() {
         // TODO(codewiz): pass the real bank size once motherboard fast RAM
         // exists; until then Ramsey describes the stock DRAM for the part.

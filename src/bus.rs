@@ -664,6 +664,10 @@ pub struct Bus {
     /// Ramsey memory controller (A3000/A4000 machine profiles). Answers on
     /// the same $DE0000 page Gayle uses, so the two are never both fitted.
     pub ramsey: Option<crate::ramsey::Ramsey>,
+    /// `[debug] log_unmapped`: log CPU accesses in this range that no device
+    /// decodes, to find the registers a guest expects and we do not provide.
+    #[serde(default)]
+    pub log_unmapped: Option<std::ops::Range<u32>>,
     /// Akiko gate array (CD32 machine profile): ID, the C2P port, and
     /// NVRAM/CD stubs at $B80000.
     pub akiko: Option<crate::akiko::Akiko>,
@@ -2090,6 +2094,7 @@ impl Bus {
             rtc_present: true,
             gayle: None,
             ramsey: None,
+            log_unmapped: None,
             akiko: None,
             cdtv: None,
             devices: Vec::new(),

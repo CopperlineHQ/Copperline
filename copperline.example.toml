@@ -108,6 +108,16 @@ model = "68000"
 # rtc = true            # add a $DC0000 battery RTC (default: only A500+/CDTV have one)
 
 
+# Debugging aids. log_unmapped logs every CPU read and write that no device
+# decodes, which is how you find the registers a guest expects and Copperline
+# does not provide yet: reads report the floating bus value they returned,
+# writes report the value that went nowhere. A booting ROM probes enough empty
+# space to make "all" a firehose (a million lines a boot), so prefer aiming it
+# at one window.
+# [debug]
+# log_unmapped = "DD0000-DE0000"   # hex START-END, end exclusive; or "all"
+
+
 # Extended ROM image for CDTV/CD32 machines: a 256 KiB image maps at
 # $F00000 (CDTV), a 512 KiB image at $E00000 (CD32). The CDTV profile
 # boots its startup screen with this plus a Kickstart 1.3 rom; the CD32
