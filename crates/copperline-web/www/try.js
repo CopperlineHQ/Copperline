@@ -18,8 +18,6 @@ const bootBtn = $('boot');
 const loadStatus = $('load-status');
 const statLine = $('stat');
 
-const FB_W = 716;
-
 let wasm = null;
 let emu = null;
 let audioCtx = null;
@@ -151,8 +149,12 @@ function tick(nowMs) {
 
   const rows = emu.present_rows();
   if (rows > 0) {
-    if (canvas.height !== rows) {
-      canvas.width = FB_W;
+    // The presentation size follows the emulated display (the cropped TV
+    // aperture for a standard PAL screen, the full overscan framebuffer
+    // otherwise), so track both dimensions every frame.
+    const width = emu.present_width();
+    if (canvas.width !== width || canvas.height !== rows) {
+      canvas.width = width;
       canvas.height = rows;
     }
     // The view must be rebuilt every frame: wasm memory may grow and the
@@ -160,9 +162,9 @@ function tick(nowMs) {
     const view = new Uint8ClampedArray(
       wasm.memory.buffer,
       emu.present_ptr(),
-      FB_W * rows * 4,
+      width * rows * 4,
     );
-    ctx2d.putImageData(new ImageData(view, FB_W, rows), 0, 0);
+    ctx2d.putImageData(new ImageData(view, width, rows), 0, 0);
   }
 
   const audio = emu.take_audio();
@@ -259,7 +261,7 @@ window.addEventListener('keyup', (e) => {
 // Esc releases the lock, as the browser enforces.
 
 let lastPos = null;
-const cssToEmu = () => FB_W / canvas.clientWidth;
+const cssToEmu = () => canvas.width / canvas.clientWidth;
 
 canvas.addEventListener('mousedown', (e) => {
   if (!emu || !running) return;

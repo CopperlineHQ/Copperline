@@ -283,13 +283,9 @@ const VOLUME_GLYPH_X: usize = VOLUME_SLIDER_X - 16;
 // `joystick_toggle_clears_worst_case_media`.
 const JOY_TOGGLE_W: usize = 22;
 const JOY_TOGGLE_X: usize = VOLUME_GLYPH_X - 2 - JOY_TOGGLE_W;
-// The standard-window constants (and the TV overscan margin) live in
-// `video/present_common.rs` with the presentation helpers they anchor.
-use crate::video::present_common::STANDARD_PAL_VISIBLE_WIDTH;
-const TV_PAL_PRESENT_WIDTH: usize = STANDARD_PAL_VISIBLE_WIDTH + 2 * 26;
-const TV_PAL_PRESENT_HEIGHT: usize = 540;
-const TV_PAL_PRESENT_SOURCE_X: usize = bitplane::STANDARD_VISIBLE_X0 - 26;
-const TV_PAL_PRESENT_SOURCE_Y: usize = 18;
+// The standard-window and TV-aperture constants live in
+// `video/present_common.rs` with the presentation helpers they anchor
+// (re-exported through `use present::*` below).
 const TV_PAL_LIVE_PAD_X: usize = (FB_WIDTH - TV_PAL_PRESENT_WIDTH) / 2;
 const STATUS_BG: u32 = rgba(28, 28, 26);
 const STATUS_TOP: u32 = rgba(78, 76, 70);

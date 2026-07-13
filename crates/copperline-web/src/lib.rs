@@ -194,6 +194,7 @@ pub struct WebEmu {
     fb: Vec<u32>,
     deinterlacer: Deinterlacer,
     present: Vec<u32>,
+    present_width: usize,
     present_rows: usize,
     last_rendered_frame: Option<u64>,
     /// Wall-clock/emulated-time pair the pacer chases from; None until the
@@ -220,6 +221,7 @@ impl WebEmu {
             fb: vec![0u32; MAX_FB_PIXELS],
             deinterlacer: Deinterlacer::new(),
             present: Vec::new(),
+            present_width: FB_WIDTH,
             present_rows: 0,
             last_rendered_frame: None,
             anchor: None,
@@ -290,11 +292,33 @@ impl WebEmu {
             base.long_field,
             !geometry.programmable,
         );
-        self.present_rows = self.deinterlacer.output_rows();
-        let active = self.present_rows * FB_WIDTH;
-        self.present.resize(active, 0);
-        self.present
-            .copy_from_slice(&self.deinterlacer.output()[..active]);
+        let woven_rows = self.deinterlacer.output_rows();
+        let woven = self.deinterlacer.output();
+        if present_common::uses_standard_pal_tv_aperture(geometry, woven_rows, &base) {
+            // Standard PAL display: present the captured TV aperture, the
+            // browser counterpart of the desktop's TV-aperture crop. Clipped
+            // to real framebuffer columns so the canvas never shows the
+            // bezel-mask black stripe on the left or bezel padding on the
+            // right; the standard window sits exactly centred.
+            self.present_width = present_common::TV_PAL_CAPTURED_WIDTH;
+            self.present_rows = present_common::TV_PAL_PRESENT_HEIGHT;
+            self.present.resize(self.present_width * self.present_rows, 0);
+            for (y, dst) in self
+                .present
+                .chunks_exact_mut(present_common::TV_PAL_CAPTURED_WIDTH)
+                .enumerate()
+            {
+                let src = (present_common::TV_PAL_PRESENT_SOURCE_Y + y) * FB_WIDTH
+                    + present_common::TV_PAL_CAPTURED_SOURCE_X;
+                dst.copy_from_slice(&woven[src..src + present_common::TV_PAL_CAPTURED_WIDTH]);
+            }
+        } else {
+            self.present_width = FB_WIDTH;
+            self.present_rows = woven_rows;
+            let active = woven_rows * FB_WIDTH;
+            self.present.resize(active, 0);
+            self.present.copy_from_slice(&woven[..active]);
+        }
         self.last_rendered_frame = Some(emulated_frame);
     }
 
@@ -311,8 +335,12 @@ impl WebEmu {
         self.present_rows as u32
     }
 
+    /// Width of the presentation buffer in pixels. The captured TV aperture
+    /// for standard PAL displays, the full framebuffer width otherwise; it
+    /// can change between frames, so JS must size the canvas from it each
+    /// frame alongside `present_rows`.
     pub fn present_width(&self) -> u32 {
-        FB_WIDTH as u32
+        self.present_width as u32
     }
 
     /// Drain the mixed audio: interleaved stereo f32 at 44.1 kHz, one PAL

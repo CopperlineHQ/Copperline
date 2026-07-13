@@ -25,6 +25,29 @@ pub const STANDARD_PAL_VISIBLE_START_VPOS: u32 = 0x2C;
 // still hiding the deep edge columns that often contain unfinished effects.
 pub const TV_HORIZONTAL_OVERSCAN_MARGIN: usize = 24 * 2;
 
+// The reference TV aperture for standard PAL displays: the standard window
+// plus a symmetric 26-column overscan margin, cropped from the woven
+// presentation buffer. The desktop window and screenshot paths present this
+// rect; its right margin reaches 12 columns past the framebuffer's right
+// edge, which those paths pad with black bezel.
+pub const TV_PAL_PRESENT_WIDTH: usize = STANDARD_PAL_VISIBLE_WIDTH + 2 * 26;
+pub const TV_PAL_PRESENT_HEIGHT: usize = 540;
+pub const TV_PAL_PRESENT_SOURCE_X: usize = bitplane::STANDARD_VISIBLE_X0 - 26;
+pub const TV_PAL_PRESENT_SOURCE_Y: usize = 18;
+
+// The TV aperture clipped to columns the framebuffer actually captures, for
+// frontends whose frame should end on real pixels instead of black bezel
+// (the browser canvas hugs its border on every side). The margin is the
+// captured right-overscan width, mirrored to the left so the standard
+// window stays exactly centred; the right edge lands on the framebuffer's
+// edge by construction.
+pub const TV_PAL_CAPTURED_MARGIN_X: usize =
+    FB_WIDTH - bitplane::STANDARD_VISIBLE_X0 - STANDARD_PAL_VISIBLE_WIDTH;
+pub const TV_PAL_CAPTURED_SOURCE_X: usize =
+    bitplane::STANDARD_VISIBLE_X0 - TV_PAL_CAPTURED_MARGIN_X;
+pub const TV_PAL_CAPTURED_WIDTH: usize =
+    STANDARD_PAL_VISIBLE_WIDTH + 2 * TV_PAL_CAPTURED_MARGIN_X;
+
 pub fn post_process_rendered_field(
     fb: &mut [u32],
     geometry: FrameGeometry,
@@ -168,4 +191,31 @@ pub fn uses_standard_pal_tv_aperture(
 ) -> bool {
     is_standard_pal_presentation(geometry, src_rows)
         && bitplane::uses_standard_horizontal_content(snapshot)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn captured_aperture_centres_standard_window_on_real_pixels() {
+        // Ends exactly on the framebuffer edge: no black bezel columns.
+        assert_eq!(TV_PAL_CAPTURED_SOURCE_X + TV_PAL_CAPTURED_WIDTH, FB_WIDTH);
+        // Symmetric margins around the standard window.
+        assert_eq!(
+            bitplane::STANDARD_VISIBLE_X0 - TV_PAL_CAPTURED_SOURCE_X,
+            TV_PAL_CAPTURED_MARGIN_X
+        );
+        assert_eq!(
+            TV_PAL_CAPTURED_SOURCE_X + TV_PAL_CAPTURED_WIDTH
+                - (bitplane::STANDARD_VISIBLE_X0 + STANDARD_PAL_VISIBLE_WIDTH),
+            TV_PAL_CAPTURED_MARGIN_X
+        );
+        // Inside the reference aperture and clear of the TV bezel mask, so a
+        // captured-aperture crop never shows masked black columns.
+        assert!(TV_PAL_CAPTURED_SOURCE_X >= TV_PAL_PRESENT_SOURCE_X);
+        assert!(TV_PAL_CAPTURED_SOURCE_X >= tv_source_h_bounds().0);
+        // The vertical crop fits the woven field.
+        assert!(TV_PAL_PRESENT_SOURCE_Y + TV_PAL_PRESENT_HEIGHT <= OUT_HEIGHT);
+    }
 }
