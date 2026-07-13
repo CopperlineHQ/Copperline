@@ -3595,6 +3595,24 @@ fn truncate_to_width(text: &str, avail_px: usize) -> String {
     format!("{kept}~")
 }
 
+/// Clip a path to `avail_px`, keeping the TAIL and prefixing an ASCII "..."
+/// when it does not fit -- for a host directory the meaningful end (the leaf
+/// dir) stays visible. The bitmap font is ASCII-only, so a real ellipsis
+/// glyph cannot be drawn; "..." is the closest it can render. Mirrors
+/// [`truncate_to_width`], which keeps the head instead.
+fn clip_path_tail(text: &str, avail_px: usize) -> String {
+    let max_chars = avail_px / font::GLYPH_W;
+    let len = text.chars().count();
+    if len <= max_chars {
+        return text.to_string();
+    }
+    if max_chars <= 3 {
+        return ".".repeat(max_chars);
+    }
+    let tail: String = text.chars().skip(len - (max_chars - 3)).collect();
+    format!("...{tail}")
+}
+
 /// A model-selector / tab button: a flat bevel that fills with the title-bar
 /// blue when active/selected. Tabs label left, model buttons centred.
 fn draw_launcher_chip(
@@ -3762,7 +3780,13 @@ fn draw_launcher_row(
             let name_box = launcher_drive_name_rect(rect, row_y);
             let text_right = if has_image { name_box.x } else { browse.x };
             let avail = text_right.saturating_sub(value_x + 8);
-            let text = truncate_to_width(&setup.value_label(r.field), avail);
+            // Host FS mounts show the whole host path (tail-clipped with a
+            // leading "..." when long), since the full path is meaningful;
+            // other drives show the image's file name.
+            let text = match (r.field.is_filesys_dir_field(), setup.path(r.field)) {
+                (true, Some(p)) => clip_path_tail(&p.to_string_lossy(), avail),
+                _ => truncate_to_width(&setup.value_label(r.field), avail),
+            };
             draw_panel_text(frame, value_x, browse.y + 6, &text, PANEL_TEXT, 1, scale);
             if has_image {
                 draw_rect_bevel(

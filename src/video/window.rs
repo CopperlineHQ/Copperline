@@ -1397,6 +1397,7 @@ impl ApplicationHandler for App {
                         state,
                         physical_key: PhysicalKey::Code(code),
                         repeat,
+                        text,
                         ..
                     },
                 ..
@@ -1494,7 +1495,7 @@ impl ApplicationHandler for App {
                     }
                     (other, state) => {
                         let pressed = state == ElementState::Pressed;
-                        if pressed && self.ui_handle_key(other) {
+                        if pressed && self.ui_handle_key(other, text.as_deref()) {
                             return;
                         }
                         // Open panels are modal: key presses must not leak
@@ -3052,7 +3053,7 @@ impl App {
 
     /// Keys consumed by the open menu/panel (Escape, debugger hex entry).
     /// Returns true when the key was handled and must not reach the Amiga.
-    fn ui_handle_key(&mut self, code: KeyCode) -> bool {
+    fn ui_handle_key(&mut self, code: KeyCode, text: Option<&str>) -> bool {
         if self.ui.active() {
             if code == KeyCode::Escape {
                 // While typing into a plugin option, Escape cancels the edit
@@ -3069,7 +3070,7 @@ impl App {
                 return true;
             }
             // Route keys to a focused plugin-option text field, if any.
-            if self.launcher_handle_edit_key(code) {
+            if self.launcher_handle_edit_key(code, text) {
                 return true;
             }
             return false;
@@ -3095,7 +3096,7 @@ impl App {
 
     /// Feed a key to a focused plugin-option text field. Returns false (so the
     /// key falls through) when no field is being edited.
-    fn launcher_handle_edit_key(&mut self, code: KeyCode) -> bool {
+    fn launcher_handle_edit_key(&mut self, code: KeyCode, text: Option<&str>) -> bool {
         let handled = {
             let Some(state) = self.launcher_state_mut() else {
                 return false;
@@ -3103,14 +3104,22 @@ impl App {
             if state.editing().is_none() {
                 return false;
             }
-            if let Some(ch) = entry_char_for_key(code) {
-                state.edit_push(ch);
-            } else {
-                match code {
-                    KeyCode::Backspace => state.edit_backspace(),
-                    KeyCode::Enter | KeyCode::NumpadEnter => state.edit_commit(),
-                    // Swallow other keys while a field has focus.
-                    _ => {}
+            match code {
+                KeyCode::Backspace => state.edit_backspace(),
+                KeyCode::Enter | KeyCode::NumpadEnter => state.edit_commit(),
+                _ => {
+                    // Prefer the layout- and shift-aware text the platform
+                    // reports, so volume names can contain lowercase letters,
+                    // underscores, and other printable characters (the
+                    // keycode map is uppercase-only and lacks symbols). Fall
+                    // back to it only when no text is delivered.
+                    if let Some(t) = text.filter(|t| !t.is_empty()) {
+                        for ch in t.chars().filter(|c| !c.is_control()) {
+                            state.edit_push(ch);
+                        }
+                    } else if let Some(ch) = entry_char_for_key(code) {
+                        state.edit_push(ch);
+                    }
                 }
             }
             true
@@ -3689,6 +3698,12 @@ impl App {
     /// Open a native file dialog for a configuration-screen path field, seeded
     /// at the field's current directory, and store the picked path.
     fn launcher_browse(&mut self, field: LauncherField) {
+        // Host FS mounts are a host directory, not an image file, so they get
+        // a folder picker seeded at the current directory itself.
+        if LauncherField::is_filesys_dir_field(field) {
+            self.launcher_browse_folder(field);
+            return;
+        }
         let start_dir = self
             .launcher_state()
             .and_then(|s| s.setup.path(field))
@@ -3719,6 +3734,28 @@ impl App {
             if let Some(state) = self.launcher_state_mut() {
                 // A pending volume-name edit (on this or another drive row)
                 // would otherwise be left visually focused after the dialog.
+                state.edit_cancel();
+                state.setup.set_path(field, path);
+                state.status = None;
+            }
+        }
+        self.finish_host_io_pause();
+    }
+
+    /// Folder picker for a Host FS mount's directory field.
+    fn launcher_browse_folder(&mut self, field: LauncherField) {
+        let start_dir = self
+            .launcher_state()
+            .and_then(|s| s.setup.path(field))
+            .map(|p| p.to_path_buf());
+        self.suspend_live_audio_for_host_io();
+        let mut dialog = rfd::FileDialog::new().set_title("Select host directory");
+        if let Some(dir) = start_dir {
+            dialog = dialog.set_directory(dir);
+        }
+        let picked = dialog.pick_folder();
+        if let Some(path) = picked {
+            if let Some(state) = self.launcher_state_mut() {
                 state.edit_cancel();
                 state.setup.set_path(field, path);
                 state.status = None;

@@ -1002,23 +1002,8 @@ impl Config {
                 if !m.path.is_dir() {
                     anyhow::bail!("[[filesys]] path {} is not a directory", m.path.display());
                 }
-                // The volume name becomes an AmigaDOS volume label (a DosList
-                // BSTR): 1-30 bytes, and no ':' '/' or NUL.
-                let vol = &m.volume;
-                if vol.is_empty() {
-                    anyhow::bail!("[[filesys]] volume name must not be empty");
-                }
-                if vol.len() > 30 {
-                    anyhow::bail!(
-                        "[[filesys]] volume name {vol:?} is too long ({} bytes; max 30)",
-                        vol.len()
-                    );
-                }
-                if vol.contains([':', '/', '\0']) {
-                    anyhow::bail!(
-                        "[[filesys]] volume name {vol:?} contains an invalid \
-                         character (no ':' '/' or NUL)"
-                    );
+                if let Some(err) = crate::filesys::volume_name_error(&m.volume) {
+                    anyhow::bail!("[[filesys]] {err}");
                 }
             }
             chain.add_board_with_rom(
@@ -1631,10 +1616,8 @@ fn drive_image(raw: RawDrive) -> Result<DriveImage> {
             let trimmed = name.trim();
             if trimmed.is_empty() {
                 None
-            } else if trimmed.contains([':', '/']) {
-                bail!("drive name {name:?} must not contain ':' or '/'");
-            } else if trimmed.chars().count() > 30 {
-                bail!("drive name {name:?} is too long (AmigaDOS volume names hold 30 characters)");
+            } else if let Some(err) = crate::filesys::volume_name_error(trimmed) {
+                bail!("drive name: {err}");
             } else {
                 Some(trimmed.to_string())
             }
@@ -3689,7 +3672,7 @@ mod tests {
             "#,
         )
         .unwrap_err();
-        assert!(err.to_string().contains("must not contain"), "{err:#}");
+        assert!(err.to_string().contains("invalid character"), "{err:#}");
 
         // Over the 30-character FFS volume-label limit.
         let err = parse_config(&format!(
