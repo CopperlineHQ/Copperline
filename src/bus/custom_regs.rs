@@ -1141,7 +1141,7 @@ impl Bus {
                 if idx < 8 {
                     match reg {
                         0x0 => {
-                            self.denise.sprpos[idx] = val;
+                            self.denise.write_sprpos(idx, val);
                             self.latch_display_sprite_dma_control_from_registers(
                                 idx,
                                 SpriteControlRegisterWrite::Pos,

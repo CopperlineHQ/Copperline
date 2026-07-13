@@ -1874,11 +1874,22 @@ struct RenderState {
     bplpt: [u32; 8],
     bpldat: [u16; 8],
     sprpt: [u32; 8],
+    /// CPU/Copper write-shadow sprite registers: the replay's manual-sprite
+    /// model is calibrated against these (sprite DMA fetches never land
+    /// here). See the matching fields on `Denise`.
     sprpos: [u16; 8],
     sprctl: [u16; 8],
     sprdata: [u16; 8],
     sprdatb: [u16; 8],
     spr_armed: [bool; 8],
+    /// Hardware-true sprite registers (CPU/Copper writes AND sprite DMA
+    /// fetches, last writer wins). Seeds the armed-latch redisplay in
+    /// frames with sprite DMA idle.
+    spr_hw_pos: [u16; 8],
+    spr_hw_ctl: [u16; 8],
+    spr_hw_data: [u16; 8],
+    spr_hw_datb: [u16; 8],
+    spr_hw_armed: [bool; 8],
     bpl1mod: i16,
     bpl2mod: i16,
     palette: Palette,
@@ -1911,6 +1922,11 @@ impl RenderState {
             sprdata: snapshot.sprdata,
             sprdatb: snapshot.sprdatb,
             spr_armed: snapshot.spr_armed,
+            spr_hw_pos: snapshot.spr_hw_pos,
+            spr_hw_ctl: snapshot.spr_hw_ctl,
+            spr_hw_data: snapshot.spr_hw_data,
+            spr_hw_datb: snapshot.spr_hw_datb,
+            spr_hw_armed: snapshot.spr_hw_armed,
             bpl1mod: snapshot.bpl1mod,
             bpl2mod: snapshot.bpl2mod,
             palette: snapshot.palette,
@@ -2996,16 +3012,26 @@ fn apply_move(state: &mut RenderState, off: u16, val: u16) {
             let reg = (off - 0x140) & 0x0006;
             if idx < 8 {
                 match reg {
-                    0x0 => state.sprpos[idx] = val,
+                    0x0 => {
+                        state.sprpos[idx] = val;
+                        state.spr_hw_pos[idx] = val;
+                    }
                     0x2 => {
                         state.sprctl[idx] = val;
                         state.spr_armed[idx] = false;
+                        state.spr_hw_ctl[idx] = val;
+                        state.spr_hw_armed[idx] = false;
                     }
                     0x4 => {
                         state.sprdata[idx] = val;
                         state.spr_armed[idx] = true;
+                        state.spr_hw_data[idx] = val;
+                        state.spr_hw_armed[idx] = true;
                     }
-                    0x6 => state.sprdatb[idx] = val,
+                    0x6 => {
+                        state.sprdatb[idx] = val;
+                        state.spr_hw_datb[idx] = val;
+                    }
                     _ => {}
                 }
             }

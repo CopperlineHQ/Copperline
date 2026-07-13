@@ -1274,11 +1274,21 @@ pub struct RenderRegisterSnapshot {
     pub bplpt: [u32; 8],
     pub bpldat: [u16; 8],
     pub sprpt: [u32; 8],
+    /// CPU/Copper write-shadow sprite registers (see the matching fields
+    /// on `Denise`): the render replay and live collisions are calibrated
+    /// against these.
     pub sprpos: [u16; 8],
     pub sprctl: [u16; 8],
     pub sprdata: [u16; 8],
     pub sprdatb: [u16; 8],
     pub spr_armed: [bool; 8],
+    /// Hardware-true sprite registers (manual writes AND sprite DMA
+    /// fetches): the armed-latch redisplay source for DMA-idle frames.
+    pub spr_hw_pos: [u16; 8],
+    pub spr_hw_ctl: [u16; 8],
+    pub spr_hw_data: [u16; 8],
+    pub spr_hw_datb: [u16; 8],
+    pub spr_hw_armed: [bool; 8],
     pub bpl1mod: i16,
     pub bpl2mod: i16,
     pub palette: Palette,

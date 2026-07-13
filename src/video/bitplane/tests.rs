@@ -572,6 +572,11 @@ fn blank_state() -> RenderState {
         sprdata: [0; 8],
         sprdatb: [0; 8],
         spr_armed: [false; 8],
+        spr_hw_pos: [0; 8],
+        spr_hw_ctl: [0; 8],
+        spr_hw_data: [0; 8],
+        spr_hw_datb: [0; 8],
+        spr_hw_armed: [false; 8],
         bpl1mod: 0,
         bpl2mod: 0,
         palette: Palette::from_ocs([0x0103; 32]),
@@ -2206,9 +2211,13 @@ fn shres_sprite_control_bit4_adds_70ns_horizontal_offset() {
     };
     state.palette.write_ocs(17, 0x0F00);
     state.sprpos[0] = pos;
+    state.spr_hw_pos[0] = pos;
     state.sprctl[0] = ctl | 0x0010;
+    state.spr_hw_ctl[0] = ctl | 0x0010;
     state.sprdata[0] = 0x8000;
+    state.spr_hw_data[0] = 0x8000;
     state.spr_armed[0] = true;
+    state.spr_hw_armed[0] = true;
     let ram = vec![0; 64];
     let base_palettes = [state.palette; FB_HEIGHT];
     let palette_segments = vec![Vec::new(); FB_HEIGHT];
@@ -2426,7 +2435,9 @@ fn manual_sprite_data_writes_affect_only_later_beam_lines() {
         DIW_HSTART_FB0 as u16,
     );
     initial_state.sprpos[0] = pos;
+    initial_state.spr_hw_pos[0] = pos;
     initial_state.sprctl[0] = ctl;
+    initial_state.spr_hw_ctl[0] = ctl;
     initial_state.palette.write_ocs(17, 0x0F00);
 
     let write_line = PAL_VISIBLE_LINE0 + 4;
@@ -2499,10 +2510,15 @@ fn armed_sprite_latch_keeps_serializing_in_frames_without_sprite_writes() {
         DIW_HSTART_FB0 as u16 + 40,
     );
     initial_state.sprpos[7] = pos;
+    initial_state.spr_hw_pos[7] = pos;
     initial_state.sprctl[7] = ctl;
+    initial_state.spr_hw_ctl[7] = ctl;
     initial_state.sprdata[7] = 0xF000;
+    initial_state.spr_hw_data[7] = 0xF000;
     initial_state.sprdatb[7] = 0xF000;
+    initial_state.spr_hw_datb[7] = 0xF000;
     initial_state.spr_armed[7] = true;
+    initial_state.spr_hw_armed[7] = true;
 
     // Sprite DMA idle: the latch emits on every line of the window even
     // though this frame carries no sprite register writes.
@@ -2545,9 +2561,13 @@ fn latched_sprite_vstart_equal_vstop_is_empty() {
     let beam_y = PAL_VISIBLE_LINE0;
     let (pos, ctl) = sprite_control_words(beam_y as u16, beam_y as u16, DIW_HSTART_FB0 as u16);
     initial_state.sprpos[0] = pos;
+    initial_state.spr_hw_pos[0] = pos;
     initial_state.sprctl[0] = ctl;
+    initial_state.spr_hw_ctl[0] = ctl;
     initial_state.sprdata[0] = 0xFFFF;
+    initial_state.spr_hw_data[0] = 0xFFFF;
     initial_state.spr_armed[0] = true;
+    initial_state.spr_hw_armed[0] = true;
 
     let manual_sprite_lines = manual_sprite_lines_from_events_with_visible_line0(
         &initial_state,
@@ -2572,7 +2592,9 @@ fn direct_sprite_data_write_ignores_dma_vertical_window() {
         DIW_HSTART_FB0 as u16,
     );
     initial_state.sprpos[0] = pos;
+    initial_state.spr_hw_pos[0] = pos;
     initial_state.sprctl[0] = ctl;
+    initial_state.spr_hw_ctl[0] = ctl;
 
     let manual_sprite_lines = manual_sprite_lines_from_events_with_visible_line0(
         &initial_state,
@@ -2605,7 +2627,9 @@ fn manual_sprite_data_write_replicates_words_across_fmode_wide_register() {
         DIW_HSTART_FB0 as u16,
     );
     initial_state.sprpos[0] = pos;
+    initial_state.spr_hw_pos[0] = pos;
     initial_state.sprctl[0] = ctl;
+    initial_state.spr_hw_ctl[0] = ctl;
 
     let events = [
         cpu_event(PAL_VISIBLE_LINE0 as u32, 0, 0x146, 0x00FF),
@@ -2635,7 +2659,9 @@ fn manual_sprite_width_stays_one_word_without_aga_lisa() {
         DIW_HSTART_FB0 as u16,
     );
     initial_state.sprpos[0] = pos;
+    initial_state.spr_hw_pos[0] = pos;
     initial_state.sprctl[0] = ctl;
+    initial_state.spr_hw_ctl[0] = ctl;
 
     let events = [cpu_event(PAL_VISIBLE_LINE0 as u32, 0, 0x144, 0x8001)];
     let manual_sprite_lines = manual_sprite_lines_from_events(&initial_state, &events);
@@ -2657,7 +2683,9 @@ fn manual_sprite_fmode_event_changes_width_for_later_lines() {
         DIW_HSTART_FB0 as u16,
     );
     initial_state.sprpos[0] = pos;
+    initial_state.spr_hw_pos[0] = pos;
     initial_state.sprctl[0] = ctl;
+    initial_state.spr_hw_ctl[0] = ctl;
 
     let fmode_line = PAL_VISIBLE_LINE0 + 4;
     let events = [
@@ -2687,9 +2715,13 @@ fn sprite_dma_capture_suppresses_latched_manual_sprite_spans() {
         DIW_HSTART_FB0 as u16,
     );
     initial_state.sprpos[0] = pos;
+    initial_state.spr_hw_pos[0] = pos;
     initial_state.sprctl[0] = ctl;
+    initial_state.spr_hw_ctl[0] = ctl;
     initial_state.sprdata[0] = 0xFFFF;
+    initial_state.spr_hw_data[0] = 0xFFFF;
     initial_state.spr_armed[0] = true;
+    initial_state.spr_hw_armed[0] = true;
 
     let manual_sprite_lines = manual_sprite_lines_from_events_with_visible_line0(
         &initial_state,
@@ -2709,9 +2741,13 @@ fn manual_sprite_replay_does_not_seed_from_frame_start_data_latch() {
     let mut initial_state = blank_state();
     let (pos, ctl) = sprite_control_words(PAL_VISIBLE_LINE0 as u16, 0, DIW_HSTART_FB0 as u16);
     initial_state.sprpos[0] = pos;
+    initial_state.spr_hw_pos[0] = pos;
     initial_state.sprctl[0] = ctl;
+    initial_state.spr_hw_ctl[0] = ctl;
     initial_state.sprdata[0] = 0xFFFF;
+    initial_state.spr_hw_data[0] = 0xFFFF;
     initial_state.spr_armed[0] = true;
+    initial_state.spr_hw_armed[0] = true;
 
     let manual_sprite_lines = manual_sprite_lines_from_events_with_visible_line0(
         &initial_state,
@@ -2737,9 +2773,13 @@ fn pre_dma_position_write_does_not_preserve_frame_start_latch_when_dma_observed(
     let post_dma_hstart = (DIW_HSTART_FB0 + 32) as u16;
     let (post_dma_pos, _) = sprite_control_words(beam_y as u16, beam_y as u16 + 1, post_dma_hstart);
     initial_state.sprpos[0] = old_pos;
+    initial_state.spr_hw_pos[0] = old_pos;
     initial_state.sprctl[0] = ctl;
+    initial_state.spr_hw_ctl[0] = ctl;
     initial_state.sprdata[0] = 0x8000;
+    initial_state.spr_hw_data[0] = 0x8000;
     initial_state.spr_armed[0] = true;
+    initial_state.spr_hw_armed[0] = true;
 
     let manual_sprite_lines = manual_sprite_lines_from_events_with_visible_line0(
         &initial_state,
@@ -2776,9 +2816,13 @@ fn post_dma_position_write_does_not_reuse_frame_start_latch_when_dma_observed() 
     let reused_hstart = (DIW_HSTART_FB0 + 32) as u16;
     let (new_pos, _) = sprite_control_words(beam_y as u16, beam_y as u16 + 1, reused_hstart);
     initial_state.sprpos[0] = old_pos;
+    initial_state.spr_hw_pos[0] = old_pos;
     initial_state.sprctl[0] = ctl;
+    initial_state.spr_hw_ctl[0] = ctl;
     initial_state.sprdata[0] = 0x8000;
+    initial_state.spr_hw_data[0] = 0x8000;
     initial_state.spr_armed[0] = true;
+    initial_state.spr_hw_armed[0] = true;
 
     let manual_sprite_lines = manual_sprite_lines_from_events_with_visible_line0(
         &initial_state,
@@ -2803,10 +2847,15 @@ fn same_line_position_retime_does_not_reuse_frame_start_latch_when_dma_observed(
     let mut initial_state = blank_state();
     let beam_y = 99;
     initial_state.sprpos[3] = 0x5020;
+    initial_state.spr_hw_pos[3] = 0x5020;
     initial_state.sprctl[3] = 0x0602;
+    initial_state.spr_hw_ctl[3] = 0x0602;
     initial_state.sprdata[3] = 0xE92D;
+    initial_state.spr_hw_data[3] = 0xE92D;
     initial_state.sprdatb[3] = 0x16FF;
+    initial_state.spr_hw_datb[3] = 0x16FF;
     initial_state.spr_armed[3] = true;
+    initial_state.spr_hw_armed[3] = true;
 
     let manual_sprite_lines = manual_sprite_lines_from_events_with_visible_line0(
         &initial_state,
@@ -2828,6 +2877,7 @@ fn same_line_position_retime_does_not_reuse_frame_start_latch_when_dma_observed(
 fn pre_visible_data_write_seeds_latch_without_direct_output_guard() {
     let mut initial_state = blank_state();
     initial_state.sprpos[3] = 0x5020;
+    initial_state.spr_hw_pos[3] = 0x5020;
 
     let manual_sprite_lines = manual_sprite_lines_from_events_with_visible_line0(
         &initial_state,
@@ -2934,7 +2984,9 @@ fn manual_sprite_replay_starts_from_beam_timed_data_write() {
         DIW_HSTART_FB0 as u16,
     );
     initial_state.sprpos[0] = pos;
+    initial_state.spr_hw_pos[0] = pos;
     initial_state.sprctl[0] = ctl;
+    initial_state.spr_hw_ctl[0] = ctl;
 
     let manual_sprite_lines = manual_sprite_lines_from_events_with_visible_line0(
         &initial_state,
@@ -2962,7 +3014,9 @@ fn early_line_position_write_does_not_reuse_previous_manual_sprite_data() {
     let beam_y = PAL_VISIBLE_LINE0;
     let (pos, ctl) = sprite_control_words(beam_y as u16, beam_y as u16 + 4, DIW_HSTART_FB0 as u16);
     initial_state.sprpos[0] = pos;
+    initial_state.spr_hw_pos[0] = pos;
     initial_state.sprctl[0] = ctl;
+    initial_state.spr_hw_ctl[0] = ctl;
 
     let (next_pos, _) = sprite_control_words(
         (beam_y + 1) as u16,
@@ -3050,7 +3104,9 @@ fn held_sprite_after_dma_disable_persists_past_descriptor_vstop() {
     let (pos, ctl) =
         sprite_control_words(live_vstart as u16, live_vstop as u16, live_hstart as u16);
     initial_state.sprpos[0] = pos;
+    initial_state.spr_hw_pos[0] = pos;
     initial_state.sprctl[0] = ctl;
+    initial_state.spr_hw_ctl[0] = ctl;
 
     let mut held = [None; 8];
     held[0] = Some(HeldSpriteLine {
@@ -3151,9 +3207,13 @@ fn manual_sprite_position_write_before_hstart_uses_sprite_compare_domain() {
     let (old_pos, old_ctl) = sprite_control_words(beam_y as u16, beam_y as u16 + 1, old_hstart);
     let (new_pos, _) = sprite_control_words(beam_y as u16, beam_y as u16 + 1, new_hstart);
     initial_state.sprpos[2] = old_pos;
+    initial_state.spr_hw_pos[2] = old_pos;
     initial_state.sprctl[2] = old_ctl;
+    initial_state.spr_hw_ctl[2] = old_ctl;
     initial_state.sprdata[2] = 0xFFFF;
+    initial_state.spr_hw_data[2] = 0xFFFF;
     initial_state.spr_armed[2] = true;
+    initial_state.spr_hw_armed[2] = true;
 
     // SPRxPOS writes update the Denise sprite comparator before the
     // general colour-output register domain reaches the same beam hpos.
@@ -3210,9 +3270,13 @@ fn copper_sprite_position_write_repositions_four_cck_later_than_cpu() {
     let (old_pos, old_ctl) = sprite_control_words(beam_y as u16, beam_y as u16 + 1, old_hstart);
     let (new_pos, _) = sprite_control_words(beam_y as u16, beam_y as u16 + 1, new_hstart);
     initial_state.sprpos[0] = old_pos;
+    initial_state.spr_hw_pos[0] = old_pos;
     initial_state.sprctl[0] = old_ctl;
+    initial_state.spr_hw_ctl[0] = old_ctl;
     initial_state.sprdata[0] = 0xFFFF;
+    initial_state.spr_hw_data[0] = 0xFFFF;
     initial_state.spr_armed[0] = true;
+    initial_state.spr_hw_armed[0] = true;
 
     let cpu_lines = manual_sprite_lines_from_events(
         &initial_state,
@@ -3244,9 +3308,13 @@ fn manual_sprite_position_writes_use_denise_compare_lag() {
     let (first_pos, _) = sprite_control_words(beam_y as u16, beam_y as u16 + 1, first_hstart);
     let (second_pos, _) = sprite_control_words(beam_y as u16, beam_y as u16 + 1, second_hstart);
     initial_state.sprpos[0] = initial_pos;
+    initial_state.spr_hw_pos[0] = initial_pos;
     initial_state.sprctl[0] = ctl;
+    initial_state.spr_hw_ctl[0] = ctl;
     initial_state.sprdata[0] = 0xFFFF;
+    initial_state.spr_hw_data[0] = 0xFFFF;
     initial_state.spr_armed[0] = true;
+    initial_state.spr_hw_armed[0] = true;
 
     let first_hpos = 64;
     let second_hpos = 72;
@@ -3302,9 +3370,13 @@ fn manual_sprite_position_write_does_not_truncate_started_word() {
     let (first_pos, _) = sprite_control_words(beam_y as u16, beam_y as u16 + 1, first_hstart);
     let (second_pos, _) = sprite_control_words(beam_y as u16, beam_y as u16 + 1, second_hstart);
     initial_state.sprpos[0] = initial_pos;
+    initial_state.spr_hw_pos[0] = initial_pos;
     initial_state.sprctl[0] = ctl;
+    initial_state.spr_hw_ctl[0] = ctl;
     initial_state.sprdata[0] = 0xFFFF;
+    initial_state.spr_hw_data[0] = 0xFFFF;
     initial_state.spr_armed[0] = true;
+    initial_state.spr_hw_armed[0] = true;
 
     let manual_sprite_lines = manual_sprite_lines_from_events(
         &initial_state,
@@ -3356,9 +3428,13 @@ fn manual_sprite_position_write_on_compare_boundary_preserves_started_word() {
     let (first_pos, _) = sprite_control_words(beam_y as u16, beam_y as u16 + 1, first_hstart);
     let (second_pos, _) = sprite_control_words(beam_y as u16, beam_y as u16 + 1, second_hstart);
     initial_state.sprpos[0] = initial_pos;
+    initial_state.spr_hw_pos[0] = initial_pos;
     initial_state.sprctl[0] = ctl;
+    initial_state.spr_hw_ctl[0] = ctl;
     initial_state.sprdata[0] = 0xFFFF;
+    initial_state.spr_hw_data[0] = 0xFFFF;
     initial_state.spr_armed[0] = true;
+    initial_state.spr_hw_armed[0] = true;
 
     let boundary_hpos = u32::from(first_hstart / 2) + SPRITE_REGISTER_WRITE_PIPELINE_CCK;
     let manual_sprite_lines = manual_sprite_lines_from_events(
@@ -3394,7 +3470,9 @@ fn manual_sprite_data_write_before_compare_uses_sprite_compare_domain() {
     let hstart = 240;
     let (pos, ctl) = sprite_control_words(beam_y as u16, beam_y as u16 + 1, hstart);
     initial_state.sprpos[2] = pos;
+    initial_state.spr_hw_pos[2] = pos;
     initial_state.sprctl[2] = ctl;
+    initial_state.spr_hw_ctl[2] = ctl;
     initial_state.palette.write_ocs(25, 0x0F00);
 
     let event_hpos = 116;
@@ -3433,9 +3511,13 @@ fn attached_manual_sprite_data_write_before_compare_uses_sprite_compare_domain()
     let hstart = 240;
     let (pos, ctl) = sprite_control_words(beam_y as u16, beam_y as u16 + 1, hstart);
     initial_state.sprpos[0] = pos;
+    initial_state.spr_hw_pos[0] = pos;
     initial_state.sprctl[0] = ctl;
+    initial_state.spr_hw_ctl[0] = ctl;
     initial_state.sprpos[1] = pos;
+    initial_state.spr_hw_pos[1] = pos;
     initial_state.sprctl[1] = ctl | 0x0080;
+    initial_state.spr_hw_ctl[1] = ctl | 0x0080;
     initial_state.palette.write_ocs(20, 0x0F00);
 
     let event_hpos = 116;
@@ -3497,7 +3579,9 @@ fn manual_sprite_data_write_after_compare_waits_for_next_scanline() {
         DIW_HSTART_FB0 as u16,
     );
     initial_state.sprpos[0] = pos;
+    initial_state.spr_hw_pos[0] = pos;
     initial_state.sprctl[0] = ctl;
+    initial_state.spr_hw_ctl[0] = ctl;
     initial_state.palette.write_ocs(17, 0x0F00);
 
     let after_compare_hpos = (DIW_HSTART_FB0 as u32 / 2) + SPRITE_REGISTER_WRITE_PIPELINE_CCK + 2;
@@ -3563,7 +3647,9 @@ fn manual_sprite_datb_write_after_compare_waits_for_next_scanline() {
         DIW_HSTART_FB0 as u16,
     );
     initial_state.sprpos[0] = pos;
+    initial_state.spr_hw_pos[0] = pos;
     initial_state.sprctl[0] = ctl;
+    initial_state.spr_hw_ctl[0] = ctl;
     initial_state.palette.write_ocs(17, 0x0F00);
     initial_state.palette.write_ocs(19, 0x00F0);
 
@@ -3628,9 +3714,13 @@ fn manual_sprite_control_write_after_compare_preserves_loaded_word() {
         DIW_HSTART_FB0 as u16,
     );
     initial_state.sprpos[0] = pos;
+    initial_state.spr_hw_pos[0] = pos;
     initial_state.sprctl[0] = ctl;
+    initial_state.spr_hw_ctl[0] = ctl;
     initial_state.sprdata[0] = 0xFFFF;
+    initial_state.spr_hw_data[0] = 0xFFFF;
     initial_state.spr_armed[0] = true;
+    initial_state.spr_hw_armed[0] = true;
     initial_state.palette.write_ocs(17, 0x0F00);
 
     let events = [
@@ -3700,9 +3790,13 @@ fn attached_manual_sprite_writes_draw_odd_bits_without_even_data_bits() {
         DIW_HSTART_FB0 as u16,
     );
     initial_state.sprpos[0] = pos;
+    initial_state.spr_hw_pos[0] = pos;
     initial_state.sprctl[0] = ctl;
+    initial_state.spr_hw_ctl[0] = ctl;
     initial_state.sprpos[1] = pos;
+    initial_state.spr_hw_pos[1] = pos;
     initial_state.sprctl[1] = ctl | 0x0080;
+    initial_state.spr_hw_ctl[1] = ctl | 0x0080;
     initial_state.palette.write_ocs(20, 0x0F00);
 
     let events = [
@@ -3767,9 +3861,13 @@ fn attached_manual_sprite_data_after_compare_waits_for_next_scanline() {
         DIW_HSTART_FB0 as u16,
     );
     initial_state.sprpos[0] = pos;
+    initial_state.spr_hw_pos[0] = pos;
     initial_state.sprctl[0] = ctl;
+    initial_state.spr_hw_ctl[0] = ctl;
     initial_state.sprpos[1] = pos;
+    initial_state.spr_hw_pos[1] = pos;
     initial_state.sprctl[1] = ctl | 0x0080;
+    initial_state.spr_hw_ctl[1] = ctl | 0x0080;
     initial_state.palette.write_ocs(20, 0x0F00);
 
     let after_compare_hpos = (DIW_HSTART_FB0 as u32 / 2) + SPRITE_REGISTER_WRITE_PIPELINE_CCK + 2;
@@ -3838,11 +3936,17 @@ fn attached_manual_sprite_data_after_compare_preserves_loaded_even_pixels() {
         DIW_HSTART_FB0 as u16,
     );
     initial_state.sprpos[0] = pos;
+    initial_state.spr_hw_pos[0] = pos;
     initial_state.sprctl[0] = ctl;
+    initial_state.spr_hw_ctl[0] = ctl;
     initial_state.sprdata[0] = 0xA000;
+    initial_state.spr_hw_data[0] = 0xA000;
     initial_state.spr_armed[0] = true;
+    initial_state.spr_hw_armed[0] = true;
     initial_state.sprpos[1] = pos;
+    initial_state.spr_hw_pos[1] = pos;
     initial_state.sprctl[1] = ctl | 0x0080;
+    initial_state.spr_hw_ctl[1] = ctl | 0x0080;
     initial_state.palette.write_ocs(17, 0x0F00);
     initial_state.palette.write_ocs(21, 0x00F0);
 
@@ -4511,7 +4615,9 @@ fn dma_loaded_sprite_data_rearms_on_same_line_position_write() {
     state.palette.write_ocs(17, 0x0F00);
     state.palette.write_ocs(18, 0x00F0);
     state.sprdatb[0] = 0x8000;
+    state.spr_hw_datb[0] = 0x8000;
     state.spr_armed[0] = true;
+    state.spr_hw_armed[0] = true;
     let ram = vec![0; 64];
     let base_palettes = [state.palette; FB_HEIGHT];
     let palette_segments = vec![Vec::new(); FB_HEIGHT];
@@ -4614,7 +4720,9 @@ fn sprite_register_data_write_after_compare_preserves_dma_latch_on_same_beam_lin
     );
     state.dmacon = DMACON_DMAEN | DMACON_SPREN;
     state.sprpos[0] = pos;
+    state.spr_hw_pos[0] = pos;
     state.sprctl[0] = ctl;
+    state.spr_hw_ctl[0] = ctl;
     state.palette.write_ocs(17, 0x0F00);
     let ram = vec![0; 64];
     let base_palettes = [state.palette; FB_HEIGHT];
@@ -4974,15 +5082,25 @@ fn attached_manual_sprites_use_four_bit_color_indexes() {
         DIW_HSTART_FB0 as u16,
     );
     state.sprpos[0] = pos;
+    state.spr_hw_pos[0] = pos;
     state.sprctl[0] = ctl;
+    state.spr_hw_ctl[0] = ctl;
     state.sprdata[0] = 0x8000;
+    state.spr_hw_data[0] = 0x8000;
     state.sprdatb[0] = 0;
+    state.spr_hw_datb[0] = 0;
     state.spr_armed[0] = true;
+    state.spr_hw_armed[0] = true;
     state.sprpos[1] = pos;
+    state.spr_hw_pos[1] = pos;
     state.sprctl[1] = ctl | 0x0080;
+    state.spr_hw_ctl[1] = ctl | 0x0080;
     state.sprdata[1] = 0x8000;
+    state.spr_hw_data[1] = 0x8000;
     state.sprdatb[1] = 0;
+    state.spr_hw_datb[1] = 0;
     state.spr_armed[1] = true;
+    state.spr_hw_armed[1] = true;
     state.palette.write_ocs(21, 0x00F0);
     let ram = vec![0; 64];
     let base_palettes = [state.palette; FB_HEIGHT];
@@ -5026,15 +5144,25 @@ fn attached_manual_sprites_draw_odd_bits_without_even_data_bits() {
         DIW_HSTART_FB0 as u16,
     );
     state.sprpos[0] = pos;
+    state.spr_hw_pos[0] = pos;
     state.sprctl[0] = ctl;
+    state.spr_hw_ctl[0] = ctl;
     state.sprdata[0] = 0;
+    state.spr_hw_data[0] = 0;
     state.sprdatb[0] = 0;
+    state.spr_hw_datb[0] = 0;
     state.spr_armed[0] = true;
+    state.spr_hw_armed[0] = true;
     state.sprpos[1] = pos;
+    state.spr_hw_pos[1] = pos;
     state.sprctl[1] = ctl | 0x0080;
+    state.spr_hw_ctl[1] = ctl | 0x0080;
     state.sprdata[1] = 0x8000;
+    state.spr_hw_data[1] = 0x8000;
     state.sprdatb[1] = 0;
+    state.spr_hw_datb[1] = 0;
     state.spr_armed[1] = true;
+    state.spr_hw_armed[1] = true;
     state.palette.write_ocs(20, 0x00F0);
     let ram = vec![0; 64];
     let base_palettes = [state.palette; FB_HEIGHT];
@@ -5078,15 +5206,25 @@ fn attached_manual_sprite_pair_uses_even_control_attach_bit() {
         DIW_HSTART_FB0 as u16,
     );
     state.sprpos[0] = pos;
+    state.spr_hw_pos[0] = pos;
     state.sprctl[0] = ctl | 0x0080;
+    state.spr_hw_ctl[0] = ctl | 0x0080;
     state.sprdata[0] = 0x8000;
+    state.spr_hw_data[0] = 0x8000;
     state.sprdatb[0] = 0;
+    state.spr_hw_datb[0] = 0;
     state.spr_armed[0] = true;
+    state.spr_hw_armed[0] = true;
     state.sprpos[1] = pos;
+    state.spr_hw_pos[1] = pos;
     state.sprctl[1] = ctl;
+    state.spr_hw_ctl[1] = ctl;
     state.sprdata[1] = 0x8000;
+    state.spr_hw_data[1] = 0x8000;
     state.sprdatb[1] = 0;
+    state.spr_hw_datb[1] = 0;
     state.spr_armed[1] = true;
+    state.spr_hw_armed[1] = true;
     state.palette.write_ocs(21, 0x00F0);
     let ram = vec![0; 64];
     let base_palettes = [state.palette; FB_HEIGHT];
@@ -5130,10 +5268,15 @@ fn attached_manual_sprite_pair_decodes_odd_pixels_without_even_line() {
         DIW_HSTART_FB0 as u16,
     );
     state.sprpos[1] = pos;
+    state.spr_hw_pos[1] = pos;
     state.sprctl[1] = ctl | 0x0080;
+    state.spr_hw_ctl[1] = ctl | 0x0080;
     state.sprdata[1] = 0x8000;
+    state.spr_hw_data[1] = 0x8000;
     state.sprdatb[1] = 0;
+    state.spr_hw_datb[1] = 0;
     state.spr_armed[1] = true;
+    state.spr_hw_armed[1] = true;
     state.palette.write_ocs(20, 0x00F0);
     let ram = vec![0; 64];
     let base_palettes = [state.palette; FB_HEIGHT];

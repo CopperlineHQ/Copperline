@@ -5999,6 +5999,74 @@ fn sprite_dma_zero_height_descriptor_terminates_stream() {
 }
 
 #[test]
+fn sprite_dma_fetches_land_in_hardware_latch_view() {
+    // A DMA DATA fetch arms the hardware-true display latch and overwrites
+    // its data words; a DMA CTL fetch (the vstop control words, here the
+    // 0/0 terminator) disarms it and leaves the fetched control words in
+    // the registers. The CPU/Copper write shadow never sees DMA, so the
+    // calibrated manual replay keeps its inputs. Software relies on the
+    // hardware view across a scene switch: Hamazing re-arms its sprites
+    // with SPRxDATA=$0000 after a DMA sprite scene and expects the
+    // DMA-written zeros (an invisible sprite), not a redisplay of the last
+    // manually written pattern as full-height stale bars.
+    let mut bus = empty_bus();
+
+    // A manual arm long before the DMA scene: both views hold the bar.
+    assert!(!bus.write_custom_word_from(0x140, 0x1080, BeamWriteSource::Cpu));
+    assert!(!bus.write_custom_word_from(0x146, 0xAAAA, BeamWriteSource::Cpu));
+    assert!(!bus.write_custom_word_from(0x144, 0xFFFF, BeamWriteSource::Cpu));
+    assert!(bus.denise.spr_armed[0]);
+    assert!(bus.denise.spr_hw_armed[0]);
+
+    // One DMA data line, then the 0/0 terminator.
+    let sprite_ptr = 0x0100usize;
+    let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0091);
+    write_chip_word(&mut bus, sprite_ptr, pos);
+    write_chip_word(&mut bus, sprite_ptr + 2, ctl);
+    write_chip_word(&mut bus, sprite_ptr + 4, 0x1234);
+    write_chip_word(&mut bus, sprite_ptr + 6, 0x0000);
+    write_chip_word(&mut bus, sprite_ptr + 8, 0);
+    write_chip_word(&mut bus, sprite_ptr + 10, 0);
+
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN;
+    bus.denise.sprpt[0] = sprite_ptr as u32;
+    bus.display_dma_sprpt[0] = sprite_ptr as u32;
+
+    sprite_fetch_control_words_at_reset_line(&mut bus);
+    let line = bus.captured_sprite_line_at(0, 0x2C);
+    assert!(line.is_some());
+    assert!(
+        bus.denise.spr_hw_armed[0],
+        "the DATA fetch arms the hardware latch"
+    );
+    assert_eq!(bus.denise.spr_hw_data[0], 0x1234);
+    assert_eq!(bus.denise.spr_hw_datb[0], 0x0000);
+
+    // The vstop line consumes the terminator: POS/CTL land in the hardware
+    // view and the CTL write disarms it.
+    let line = bus.captured_sprite_line_at(0, 0x2D);
+    assert!(line.is_none());
+    assert!(
+        !bus.denise.spr_hw_armed[0],
+        "the terminator CTL fetch disarms the hardware latch"
+    );
+    assert_eq!(bus.denise.spr_hw_pos[0], 0);
+    assert_eq!(bus.denise.spr_hw_ctl[0], 0);
+
+    // The write shadow never sees DMA: still the manual bar.
+    assert!(bus.denise.spr_armed[0]);
+    assert_eq!(bus.denise.sprdata[0], 0xFFFF);
+    assert_eq!(bus.denise.sprdatb[0], 0xAAAA);
+
+    // The scene-switch arm-with-zero: the hardware view arms with A=0 over
+    // the DMA-written B=0 -- an invisible sprite, not the stale manual bar.
+    assert!(!bus.write_custom_word_from(0x144, 0x0000, BeamWriteSource::Cpu));
+    assert!(bus.denise.spr_hw_armed[0]);
+    assert_eq!(bus.denise.spr_hw_data[0], 0x0000);
+    assert_eq!(bus.denise.spr_hw_datb[0], 0x0000);
+}
+
+#[test]
 fn sprite_dma_capture_wraps_control_words_at_chip_ram_end() {
     let mut bus = empty_bus();
     let sprite_ptr = bus.mem.chip_ram.len() - 2;
