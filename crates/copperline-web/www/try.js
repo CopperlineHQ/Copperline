@@ -18,6 +18,20 @@ const bootBtn = $('boot');
 const loadStatus = $('load-status');
 const statLine = $('stat');
 
+// iOS's document picker only offers files whose extensions map to a
+// system-known type: .bin, .zip and .gz are fine, but .rom, .adf and
+// friends grey out, locking iPhone/iPad users out of their own dumps.
+// Drop the accept filters there so every file stays selectable; desktop
+// pickers keep the extension filter. (iPadOS reports itself as MacIntel,
+// hence the touch-points check.)
+if (
+  /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+  (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+) {
+  $('df0').removeAttribute('accept');
+  $('kick').removeAttribute('accept');
+}
+
 let wasm = null;
 let emu = null;
 let audioCtx = null;
