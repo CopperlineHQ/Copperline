@@ -78,7 +78,16 @@ async function boot() {
       if (typeof e.data?.queuedMs === 'number') queuedMs = e.data.queuedMs;
     };
     audioNode.connect(audioCtx.destination);
-    await audioCtx.resume();
+    // Autoplay policies can leave the context suspended, and resume() may
+    // not settle without a qualifying gesture; never let that block the
+    // boot. Video runs regardless, and the next real interaction unlocks
+    // the sound.
+    audioCtx.resume().catch(() => {});
+    if (audioCtx.state !== 'running') {
+      const unlock = () => audioCtx.resume().catch(() => {});
+      window.addEventListener('pointerdown', unlock, { once: true });
+      window.addEventListener('keydown', unlock, { once: true });
+    }
 
     emu = new WebEmu();
     emu.load_rom(romBytes, extBytes);
