@@ -33,7 +33,7 @@ pub const BUNDLED_AROS_ROM: &str = "<bundled-aros>";
 pub struct WasmBoardConfig {
     pub spec: BoardSpec,
     pub wasm_path: PathBuf,
-    pub manifest: crate::wasmboard::WasmManifest,
+    pub manifest: crate::wasm_manifest::WasmManifest,
 }
 
 #[derive(Debug, Clone)]
@@ -1217,6 +1217,7 @@ impl RawConfig {
     /// screen's Save. Only non-default fields are written (see the
     /// `skip_serializing_if` attributes), so the result reads like the
     /// hand-written example configs.
+    #[cfg_attr(not(feature = "frontend"), allow(dead_code))]
     pub(crate) fn to_toml_string(&self) -> Result<String> {
         toml::to_string_pretty(self).context("serializing configuration to TOML")
     }
@@ -2331,6 +2332,7 @@ fn parse_video_standard(s: &str) -> Result<VideoStandard> {
 /// produces): exact GiB/MiB/KiB get a `G`/`M`/`K` suffix, anything else falls
 /// back to a raw byte count. Always emits a 4 KiB-aligned value the parser
 /// round-trips.
+#[cfg_attr(not(feature = "frontend"), allow(dead_code))]
 pub(crate) fn format_size(bytes: usize) -> String {
     const K: usize = 1024;
     const M: usize = 1024 * 1024;

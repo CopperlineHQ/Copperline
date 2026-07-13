@@ -290,6 +290,7 @@ pub enum BoardDevice {
     A2091(crate::a2091::A2091),
     A4091(crate::a4091::A4091),
     A2065(crate::a2065::A2065),
+    #[cfg(feature = "wasm-boards")]
     Wasm(crate::wasmboard::WasmBoard),
 }
 
@@ -299,6 +300,7 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::A2091(d) => ZorroDevice::read(d, off, size, host),
             BoardDevice::A4091(d) => ZorroDevice::read(d, off, size, host),
             BoardDevice::A2065(d) => ZorroDevice::read(d, off, size, host),
+            #[cfg(feature = "wasm-boards")]
             BoardDevice::Wasm(d) => ZorroDevice::read(d, off, size, host),
         }
     }
@@ -308,6 +310,7 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::A2091(d) => ZorroDevice::write(d, off, size, value, host),
             BoardDevice::A4091(d) => ZorroDevice::write(d, off, size, value, host),
             BoardDevice::A2065(d) => ZorroDevice::write(d, off, size, value, host),
+            #[cfg(feature = "wasm-boards")]
             BoardDevice::Wasm(d) => ZorroDevice::write(d, off, size, value, host),
         }
     }
@@ -317,6 +320,7 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::A2091(d) => ZorroDevice::peek_word(d, off),
             BoardDevice::A4091(d) => ZorroDevice::peek_word(d, off),
             BoardDevice::A2065(d) => ZorroDevice::peek_word(d, off),
+            #[cfg(feature = "wasm-boards")]
             BoardDevice::Wasm(d) => ZorroDevice::peek_word(d, off),
         }
     }
@@ -326,6 +330,7 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::A2091(d) => ZorroDevice::tick(d, cck, host),
             BoardDevice::A4091(d) => ZorroDevice::tick(d, cck, host),
             BoardDevice::A2065(d) => ZorroDevice::tick(d, cck, host),
+            #[cfg(feature = "wasm-boards")]
             BoardDevice::Wasm(d) => ZorroDevice::tick(d, cck, host),
         }
     }
@@ -335,6 +340,7 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::A2091(d) => ZorroDevice::int2_line(d),
             BoardDevice::A4091(d) => ZorroDevice::int2_line(d),
             BoardDevice::A2065(d) => ZorroDevice::int2_line(d),
+            #[cfg(feature = "wasm-boards")]
             BoardDevice::Wasm(d) => ZorroDevice::int2_line(d),
         }
     }
@@ -344,6 +350,7 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::A2091(d) => ZorroDevice::int6_line(d),
             BoardDevice::A4091(d) => ZorroDevice::int6_line(d),
             BoardDevice::A2065(d) => ZorroDevice::int6_line(d),
+            #[cfg(feature = "wasm-boards")]
             BoardDevice::Wasm(d) => ZorroDevice::int6_line(d),
         }
     }
@@ -353,6 +360,7 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::A2091(d) => ZorroDevice::is_idle(d),
             BoardDevice::A4091(d) => ZorroDevice::is_idle(d),
             BoardDevice::A2065(d) => ZorroDevice::is_idle(d),
+            #[cfg(feature = "wasm-boards")]
             BoardDevice::Wasm(d) => ZorroDevice::is_idle(d),
         }
     }
@@ -362,6 +370,7 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::A2091(d) => ZorroDevice::next_event_cck(d),
             BoardDevice::A4091(d) => ZorroDevice::next_event_cck(d),
             BoardDevice::A2065(d) => ZorroDevice::next_event_cck(d),
+            #[cfg(feature = "wasm-boards")]
             BoardDevice::Wasm(d) => ZorroDevice::next_event_cck(d),
         }
     }
@@ -371,6 +380,7 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::A2091(d) => ZorroDevice::take_activity(d),
             BoardDevice::A4091(d) => ZorroDevice::take_activity(d),
             BoardDevice::A2065(d) => ZorroDevice::take_activity(d),
+            #[cfg(feature = "wasm-boards")]
             BoardDevice::Wasm(d) => ZorroDevice::take_activity(d),
         }
     }
@@ -380,6 +390,7 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::A2091(d) => ZorroDevice::reset(d),
             BoardDevice::A4091(d) => ZorroDevice::reset(d),
             BoardDevice::A2065(d) => ZorroDevice::reset(d),
+            #[cfg(feature = "wasm-boards")]
             BoardDevice::Wasm(d) => ZorroDevice::reset(d),
         }
     }
@@ -389,6 +400,7 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::A2091(d) => ZorroDevice::kind(d),
             BoardDevice::A4091(d) => ZorroDevice::kind(d),
             BoardDevice::A2065(d) => ZorroDevice::kind(d),
+            #[cfg(feature = "wasm-boards")]
             BoardDevice::Wasm(d) => ZorroDevice::kind(d),
         }
     }

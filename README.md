@@ -55,6 +55,12 @@ against real hardware.
   interactive chip-bus frame analyzer, remote GDB support, deterministic
   save states, input recording/replay, and headless screenshot/frame-dump
   capture -- the deterministic core makes every replay byte-identical.
+- **A browser build**: the same core compiled to WebAssembly with a
+  canvas/Web Audio frontend, hosted at
+  [copperline.dev/try](https://copperline.dev/try/) -- boots the bundled
+  AROS ROM, takes your own Kickstart and disk images, and runs entirely
+  client-side. See `docs/guide/browser.md` for how it works and how to
+  embed it.
 
 ## Requirements
 

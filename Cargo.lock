@@ -498,6 +498,7 @@ dependencies = [
  "toml",
  "wasmtime",
  "wat",
+ "web-time",
  "winit",
  "zerocopy",
 ]

@@ -95,7 +95,14 @@ fn elevate_current_thread(label: &str) {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+// No host threads to schedule on wasm32; the whole feature is a no-op there
+// (the thread-priority crate is excluded from the wasm32 dependency graph).
+#[cfg(target_arch = "wasm32")]
+fn elevate_current_thread(label: &str) {
+    log::info!("priority: {label} thread left as-is (no thread scheduling on wasm)");
+}
+
+#[cfg(not(any(target_os = "macos", target_arch = "wasm32")))]
 fn elevate_current_thread(label: &str) {
     use thread_priority::{set_current_thread_priority, ThreadPriority};
     // On Windows this maps to THREAD_PRIORITY_HIGHEST (no privilege needed).

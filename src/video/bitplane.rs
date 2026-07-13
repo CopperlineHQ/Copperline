@@ -24,10 +24,10 @@ use crate::chipset::denise::{
     color_register_value, rgb12_to_rgb24, rgb12_to_rgba8, rgb24_to_rgba8, BitplaneMode, DiwHigh,
     Palette, COLOR_RGB_MASK, COLOR_TRANSPARENCY_BIT,
 };
+use crate::timebase::Instant;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::OnceLock;
-use std::time::Instant;
 
 // Beam-to-framebuffer conversion anchors for the pragmatic renderer.
 // They are derived from the OCS PAL display window/fetch positions

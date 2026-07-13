@@ -19,6 +19,7 @@ project:
         - file: guide/configuration.md
         - file: guide/ui.md
         - file: guide/headless.md
+        - file: guide/browser.md
     - title: Extending
       children:
         - file: zorro.md
@@ -50,6 +51,7 @@ project:
         - guide/configuration.md
         - guide/ui.md
         - guide/headless.md
+        - guide/browser.md
         - zorro.md
         - debugger/window.md
         - debugger/console.md

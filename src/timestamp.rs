@@ -9,7 +9,7 @@
 //! is in the host's local time zone where the platform exposes one (via
 //! `localtime_r`), falling back to UTC otherwise.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use crate::timebase::{SystemTime, UNIX_EPOCH};
 
 /// Current host time formatted as `YYYYMMDDHHmmSS`, in local time where
 /// available.
