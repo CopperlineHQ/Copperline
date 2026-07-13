@@ -32,6 +32,13 @@ if (
   $('kick').removeAttribute('accept');
 }
 
+const hasTouch = navigator.maxTouchPoints > 0 || 'ontouchstart' in window;
+// Touches on the canvas are emulator input, never page gestures: no
+// scrolling, no double-tap zoom, no long-press callout.
+canvas.style.touchAction = 'none';
+canvas.style.webkitUserSelect = 'none';
+canvas.style.userSelect = 'none';
+
 let wasm = null;
 let emu = null;
 let audioCtx = null;
@@ -203,11 +210,12 @@ document.addEventListener('visibilitychange', () => {
   else audioCtx.resume();
 });
 
-// --- keyboard joystick (port 2) -------------------------------------------
-// The desktop frontend's FS-UAE-compatible mapping: cursor keys for
-// directions, Right Ctrl / Right Alt for fire, CD32 extras on
-// C/X/D/S/Enter/Z/A. While the toggle is on, these keys drive the port-2
-// joystick instead of reaching the Amiga keyboard.
+// --- joystick (port 2) -----------------------------------------------------
+// The toggle cycles off -> keys (-> touch on touch screens). Keys is the
+// desktop frontend's FS-UAE-compatible mapping: cursor keys for directions,
+// Right Ctrl / Right Alt for fire, CD32 extras on C/X/D/S/Enter/Z/A; while
+// on, these keys drive the port-2 joystick instead of reaching the Amiga
+// keyboard. Touch turns the canvas into a pad (see the touch section).
 
 const JOY_KEYS = {
   ArrowUp: 'up',
@@ -225,7 +233,8 @@ const JOY_KEYS = {
   KeyZ: 'rwd',
   KeyA: 'ffw',
 };
-let joyEnabled = false;
+const JOY_MODES = hasTouch ? ['off', 'keys', 'touch'] : ['off', 'keys'];
+let joyMode = 'off';
 const joyHeld = {};
 
 function applyJoystick() {
@@ -243,7 +252,7 @@ function applyJoystick() {
 
 // Returns true when the key was captured for the joystick.
 function joystickKey(code, pressed) {
-  if (!joyEnabled) return false;
+  if (joyMode !== 'keys') return false;
   const control = JOY_KEYS[code];
   if (!control) return false;
   joyHeld[control] = pressed;
@@ -252,10 +261,14 @@ function joystickKey(code, pressed) {
 }
 
 $('joy').addEventListener('click', () => {
-  joyEnabled = !joyEnabled;
-  $('joy').textContent = `Joystick: ${joyEnabled ? 'keys' : 'off'}`;
+  joyMode = JOY_MODES[(JOY_MODES.indexOf(joyMode) + 1) % JOY_MODES.length];
+  $('joy').textContent = `Joystick: ${joyMode}`;
   for (const k of Object.keys(joyHeld)) joyHeld[k] = false;
-  if (emu) applyJoystick();
+  resetTouchState();
+  if (emu) {
+    applyJoystick();
+    emu.set_cd32_buttons_port2(false, false, false, false, false);
+  }
 });
 
 // --- keyboard ------------------------------------------------------------
@@ -281,7 +294,7 @@ canvas.addEventListener('mousedown', (e) => {
   if (!emu || !running) return;
   e.preventDefault();
   if (document.pointerLockElement !== canvas && e.button === 0) {
-    canvas.requestPointerLock();
+    canvas.requestPointerLock?.();
   }
   emu.mouse_button(e.button, true);
 });
@@ -308,6 +321,261 @@ window.addEventListener('mousemove', (e) => {
 document.addEventListener('pointerlockchange', () => {
   lastPos = null;
 });
+
+// --- touch ---------------------------------------------------------------
+// The canvas is a trackpad on touch screens: the Amiga pointer only takes
+// relative motion, so absolute finger positions cannot map to it. One
+// finger drags the pointer, a quick tap left-clicks, holding still for a
+// moment picks the button up for a drag (icons, windows), and a second
+// finger holds the right button for Intuition menus. With the joystick
+// toggle in touch mode the canvas is a pad instead: the left half is a
+// floating eight-way stick, the right half is fire.
+
+const TAP_MAX_MS = 250;
+const TAP_SLOP_CSS_PX = 12;
+const CLICK_HOLD_MS = 90;
+const LONG_PRESS_MS = 400;
+const STICK_DEADZONE_CSS_PX = 14;
+const STICK_RANGE_CSS_PX = 40;
+const STICK_DIAGONAL = 0.383; // sin(22.5 deg): eight-way sectors
+
+let padTouch = null; // primary trackpad finger: {id, x, y, start, moved}
+let padDragging = false; // long-press engaged, LMB held until the finger lifts
+let padRmbTouchId = null; // second finger, RMB held while it is down
+let longPressTimer = 0;
+let stickTouch = null; // stick finger: {id, ox, oy}
+let stickDirs = { up: false, down: false, left: false, right: false };
+let fireTouchId = null;
+
+function resetTouchState() {
+  clearTimeout(longPressTimer);
+  if (emu) {
+    if (padDragging) emu.mouse_button(0, false);
+    if (padRmbTouchId !== null) emu.mouse_button(2, false);
+  }
+  padTouch = null;
+  padDragging = false;
+  padRmbTouchId = null;
+  stickTouch = null;
+  stickDirs = { up: false, down: false, left: false, right: false };
+  fireTouchId = null;
+  updateTouchJoyUi();
+}
+
+function applyTouchJoystick() {
+  emu.set_joystick_port2(
+    stickDirs.up,
+    stickDirs.down,
+    stickDirs.left,
+    stickDirs.right,
+    fireTouchId !== null,
+    false,
+  );
+}
+
+canvas.addEventListener(
+  'touchstart',
+  (e) => {
+    if (!emu || !running) return;
+    e.preventDefault();
+    if (joyMode === 'touch') return touchJoyStart(e);
+    const now = performance.now();
+    for (const t of e.changedTouches) {
+      if (padTouch === null) {
+        padTouch = { id: t.identifier, x: t.clientX, y: t.clientY, start: now, moved: 0 };
+        clearTimeout(longPressTimer);
+        longPressTimer = setTimeout(() => {
+          if (padTouch && padTouch.moved < TAP_SLOP_CSS_PX && padRmbTouchId === null) {
+            padDragging = true;
+            emu.mouse_button(0, true);
+            navigator.vibrate?.(15);
+          }
+        }, LONG_PRESS_MS);
+      } else if (padRmbTouchId === null) {
+        padRmbTouchId = t.identifier;
+        clearTimeout(longPressTimer);
+        emu.mouse_button(2, true);
+      }
+    }
+  },
+  { passive: false },
+);
+
+canvas.addEventListener(
+  'touchmove',
+  (e) => {
+    if (!emu || !running) return;
+    e.preventDefault();
+    if (joyMode === 'touch') return touchJoyMove(e);
+    for (const t of e.changedTouches) {
+      if (padTouch && t.identifier === padTouch.id) {
+        const scale = cssToEmu();
+        const dx = t.clientX - padTouch.x;
+        const dy = t.clientY - padTouch.y;
+        padTouch.moved += Math.abs(dx) + Math.abs(dy);
+        padTouch.x = t.clientX;
+        padTouch.y = t.clientY;
+        emu.mouse_delta(dx * scale, dy * scale);
+      }
+    }
+  },
+  { passive: false },
+);
+
+function onTouchEnd(e) {
+  if (!emu || !running) return;
+  e.preventDefault();
+  if (joyMode === 'touch') return touchJoyEnd(e);
+  const now = performance.now();
+  for (const t of e.changedTouches) {
+    if (padTouch && t.identifier === padTouch.id) {
+      clearTimeout(longPressTimer);
+      if (padDragging) {
+        emu.mouse_button(0, false);
+        padDragging = false;
+      } else if (
+        e.type === 'touchend' &&
+        now - padTouch.start < TAP_MAX_MS &&
+        padTouch.moved < TAP_SLOP_CSS_PX
+      ) {
+        emu.mouse_button(0, true);
+        setTimeout(() => emu.mouse_button(0, false), CLICK_HOLD_MS);
+      }
+      padTouch = null;
+    } else if (t.identifier === padRmbTouchId) {
+      emu.mouse_button(2, false);
+      padRmbTouchId = null;
+    }
+  }
+}
+canvas.addEventListener('touchend', onTouchEnd, { passive: false });
+canvas.addEventListener('touchcancel', onTouchEnd, { passive: false });
+
+// The touch-joystick overlay: stick base and knob on the left, fire pad on
+// the right. Built lazily so desktop sessions never touch the DOM; inline
+// styles keep the page shell independent of the glue.
+let touchJoyUi = null;
+
+function ensureTouchJoyUi() {
+  if (touchJoyUi) return touchJoyUi;
+  const shell = $('shell');
+  const mk = (size) => {
+    const el = document.createElement('div');
+    el.style.cssText =
+      'position:absolute;pointer-events:none;border-radius:50%;z-index:2;' +
+      'border:1px solid rgba(255,255,255,0.4);background:rgba(255,255,255,0.08);' +
+      'transform:translate(-50%,-50%);visibility:hidden;' +
+      'display:flex;align-items:center;justify-content:center;';
+    el.style.width = `${size}px`;
+    el.style.height = `${size}px`;
+    shell.appendChild(el);
+    return el;
+  };
+  const base = mk(96);
+  const knob = mk(44);
+  knob.style.background = 'rgba(255,255,255,0.25)';
+  const fire = mk(72);
+  fire.textContent = 'FIRE';
+  fire.style.font = '600 12px "IBM Plex Mono", ui-monospace, monospace';
+  fire.style.color = 'rgba(255,255,255,0.6)';
+  fire.style.letterSpacing = '0.1em';
+  touchJoyUi = { base, knob, fire };
+  return touchJoyUi;
+}
+
+// Rest positions while no finger is down, as fractions of the shell.
+function placeTouchJoyAtRest(ui) {
+  ui.base.style.left = '22%';
+  ui.base.style.top = '72%';
+  ui.knob.style.left = '22%';
+  ui.knob.style.top = '72%';
+  ui.fire.style.left = '80%';
+  ui.fire.style.top = '72%';
+}
+
+function updateTouchJoyUi() {
+  if (!touchJoyUi && joyMode !== 'touch') return;
+  const ui = ensureTouchJoyUi();
+  const on = joyMode === 'touch';
+  if (on) placeTouchJoyAtRest(ui);
+  ui.base.style.visibility = on ? 'visible' : 'hidden';
+  ui.knob.style.visibility = on ? 'visible' : 'hidden';
+  ui.fire.style.visibility = on ? 'visible' : 'hidden';
+  ui.fire.style.background = 'rgba(255,255,255,0.08)';
+}
+
+function shellPos(clientX, clientY) {
+  const r = $('shell').getBoundingClientRect();
+  return { x: clientX - r.left, y: clientY - r.top };
+}
+
+function touchJoyStart(e) {
+  const rect = canvas.getBoundingClientRect();
+  const ui = ensureTouchJoyUi();
+  for (const t of e.changedTouches) {
+    const leftHalf = t.clientX < rect.left + rect.width / 2;
+    if (leftHalf && stickTouch === null) {
+      stickTouch = { id: t.identifier, ox: t.clientX, oy: t.clientY };
+      const p = shellPos(t.clientX, t.clientY);
+      ui.base.style.left = `${p.x}px`;
+      ui.base.style.top = `${p.y}px`;
+      ui.knob.style.left = `${p.x}px`;
+      ui.knob.style.top = `${p.y}px`;
+    } else if (!leftHalf && fireTouchId === null) {
+      fireTouchId = t.identifier;
+      ui.fire.style.background = 'rgba(255,255,255,0.3)';
+      applyTouchJoystick();
+    }
+  }
+}
+
+function touchJoyMove(e) {
+  if (stickTouch === null) return;
+  const ui = ensureTouchJoyUi();
+  for (const t of e.changedTouches) {
+    if (t.identifier !== stickTouch.id) continue;
+    const dx = t.clientX - stickTouch.ox;
+    const dy = t.clientY - stickTouch.oy;
+    const dist = Math.hypot(dx, dy);
+    const clamp = dist > STICK_RANGE_CSS_PX ? STICK_RANGE_CSS_PX / dist : 1;
+    const origin = shellPos(stickTouch.ox, stickTouch.oy);
+    ui.knob.style.left = `${origin.x + dx * clamp}px`;
+    ui.knob.style.top = `${origin.y + dy * clamp}px`;
+    const dirs = { up: false, down: false, left: false, right: false };
+    if (dist >= STICK_DEADZONE_CSS_PX) {
+      const ux = dx / dist;
+      const uy = dy / dist;
+      dirs.right = ux > STICK_DIAGONAL;
+      dirs.left = ux < -STICK_DIAGONAL;
+      dirs.down = uy > STICK_DIAGONAL;
+      dirs.up = uy < -STICK_DIAGONAL;
+    }
+    if (
+      dirs.up !== stickDirs.up ||
+      dirs.down !== stickDirs.down ||
+      dirs.left !== stickDirs.left ||
+      dirs.right !== stickDirs.right
+    ) {
+      stickDirs = dirs;
+      applyTouchJoystick();
+    }
+  }
+}
+
+function touchJoyEnd(e) {
+  for (const t of e.changedTouches) {
+    if (stickTouch && t.identifier === stickTouch.id) {
+      stickTouch = null;
+      stickDirs = { up: false, down: false, left: false, right: false };
+      applyTouchJoystick();
+      updateTouchJoyUi();
+    } else if (t.identifier === fireTouchId) {
+      fireTouchId = null;
+      if (touchJoyUi) touchJoyUi.fire.style.background = 'rgba(255,255,255,0.08)';
+      applyTouchJoystick();
+    }
+  }
+}
 
 // --- controls ------------------------------------------------------------
 
