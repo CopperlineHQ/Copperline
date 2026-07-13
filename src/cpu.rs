@@ -2543,6 +2543,12 @@ impl CpuBus {
                 return u32::from(ramsey.read_byte(addr));
             }
         }
+        if size == 1 && self.bus.sdmac.is_some() && crate::sdmac::Sdmac::decodes(addr) {
+            self.bus.cpu_slow_external_access(1);
+            if let Some(sdmac) = self.bus.sdmac.as_mut() {
+                return u32::from(sdmac.read_byte(addr));
+            }
+        }
         // A configured functional Zorro board window (registers, boot ROM, DMA
         // strobes): the chain maps it to a device slot. Off the chip bus like
         // Gayle.
@@ -2757,6 +2763,13 @@ impl CpuBus {
             self.bus.cpu_slow_external_access(1);
             if let Some(ramsey) = self.bus.ramsey.as_mut() {
                 ramsey.write_byte(addr, value as u8);
+            }
+            return;
+        }
+        if size == 1 && self.bus.sdmac.is_some() && crate::sdmac::Sdmac::decodes(addr) {
+            self.bus.cpu_slow_external_access(1);
+            if let Some(sdmac) = self.bus.sdmac.as_mut() {
+                sdmac.write_byte(addr, value as u8);
             }
             return;
         }

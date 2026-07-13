@@ -104,8 +104,11 @@ model = "68000"
 # A500 (ECS 8372A Agnus, OCS 8362 Denise, 512 KiB chip + 512 KiB trapdoor
 # slow RAM) -- the most common and most-targeted Amiga.
 # The big-box profiles (A3000, A4000) are new and incomplete: Ramsey and the
-# chipset are there, but their on-board mass storage is not (the A3000 Super
-# DMAC SCSI and the A4000 IDE), so they need a Zorro controller to boot from.
+# chipset are there, but their on-board mass storage is not. The A4000 boots
+# (Kickstart times out probing the missing IDE at $DD2020, so give it a Zorro
+# controller or a [[filesys]] mount to boot from); the A3000 does not boot yet,
+# because its Super DMAC has no WD33C93 behind it and scsi.device waits forever
+# for an interrupt from it.
 # [machine]
 # profile = "A600"      # A1000 | A500 | A500OCS | A500Plus | A600 | A1200 | A3000 | A4000 | CDTV | CD32
 # rtc = true            # add a $DC0000 battery RTC (default: only A500+/CDTV/A3000/A4000 have one)

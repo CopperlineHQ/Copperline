@@ -51,6 +51,7 @@ pub mod rtc;
 pub mod savestate;
 pub mod screenshot;
 pub mod scsi;
+pub mod sdmac;
 pub mod serial;
 pub mod timebase;
 pub mod timestamp;

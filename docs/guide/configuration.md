@@ -127,12 +127,21 @@ The `A3000` and `A4000` profiles are the big-box machines, and they are new and
 incomplete. They carry a Ramsey memory controller (`mem_controller`), which is
 what the two registers at `$DE0003` and `$DE0043` answer as, and they carry
 Gary rather than Gayle -- so no PCMCIA and no Gayle IDE. What they do not carry
-yet is their on-board mass storage: the A3000's Super DMAC SCSI at `$DD0000`
-and the A4000's IDE at `$DD2020` are not implemented, so Kickstart probes them,
-finds nothing, and waits out a timeout on every boot. Give these machines a
-Zorro controller (`[scsi]`) or a host directory (`[[filesys]]`) to boot from.
-Motherboard fast RAM is not emulated either; use `[memory] z3` instead, which
-the OS is equally happy with.
+yet is their on-board mass storage, and the two machines fail differently
+because of it:
+
+- The **A4000** boots. Its IDE interface at `$DD2020` is not implemented, so
+  Kickstart probes it, finds no drive, and waits out a timeout -- every boot is
+  slow, but it completes. Give it a Zorro controller (`[scsi]`) or a host
+  directory (`[[filesys]]`) to boot from.
+- The **A3000 does not boot yet.** Its SCSI is a Super DMAC at `$DD0000`
+  driving a WD33C93, and only the DMAC's register file exists. Kickstart's
+  `scsi.device` gets through the register probe, arms interrupts, sends the
+  missing WD33C93 a command, and waits forever for the completion interrupt.
+  The machine sits at a black screen with Exec idle and no runnable task.
+
+Motherboard fast RAM is not emulated on either; use `[memory] z3` instead,
+which the OS is equally happy with.
 
 `mem_controller` is normally left to the profile. It is broken out because
 Ramsey answers at `$DE0000`, which nothing else decodes, so it can be fitted to

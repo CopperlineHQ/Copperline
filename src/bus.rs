@@ -664,6 +664,10 @@ pub struct Bus {
     /// Ramsey memory controller (A3000/A4000 machine profiles). Answers on
     /// the same $DE0000 page Gayle uses, so the two are never both fitted.
     pub ramsey: Option<crate::ramsey::Ramsey>,
+    /// Super DMAC (A3000 machine profile): the SCSI DMA controller at $DD0000.
+    /// Kickstart's scsi.device hangs during init if nothing answers here.
+    #[serde(default)]
+    pub sdmac: Option<crate::sdmac::Sdmac>,
     /// `[debug] log_unmapped`: log CPU accesses in this range that no device
     /// decodes, to find the registers a guest expects and we do not provide.
     #[serde(default)]
@@ -2094,6 +2098,7 @@ impl Bus {
             rtc_present: true,
             gayle: None,
             ramsey: None,
+            sdmac: None,
             log_unmapped: None,
             akiko: None,
             cdtv: None,
@@ -2524,6 +2529,10 @@ impl Bus {
         self.ramsey = Some(ramsey);
     }
 
+    pub fn attach_sdmac(&mut self, sdmac: crate::sdmac::Sdmac) {
+        self.sdmac = Some(sdmac);
+    }
+
     pub fn attach_akiko(&mut self, akiko: crate::akiko::Akiko) {
         self.akiko = Some(akiko);
     }
@@ -2740,6 +2749,9 @@ impl Bus {
         }
         if let Some(ramsey) = self.ramsey.as_mut() {
             ramsey.reset();
+        }
+        if let Some(sdmac) = self.sdmac.as_mut() {
+            sdmac.reset();
         }
         if let Some(akiko) = self.akiko.as_mut() {
             akiko.reset();

@@ -1960,6 +1960,10 @@ pub fn build_machine(
         );
         bus.log_unmapped = Some(range);
     }
+    if cfg.sdmac {
+        bus.attach_sdmac(crate::sdmac::Sdmac::new());
+        info!("sdmac: Super DMAC at $DD0000 (no WD33C93 fitted)");
+    }
     if let Some(revision) = cfg.mem_controller.ramsey_revision() {
         // TODO(codewiz): pass the real bank size once motherboard fast RAM
         // exists; until then Ramsey describes the stock DRAM for the part.

@@ -93,6 +93,10 @@ pub struct Config {
     /// ROM probes enough empty space to make this a firehose, so it is meant
     /// to be pointed at one window (e.g. the A4000 IDE at $DD2020).
     pub log_unmapped: Option<std::ops::Range<u32>>,
+    /// Super DMAC fitted (A3000 profile): the SCSI DMA controller at $DD0000.
+    /// No WD33C93 behind it yet, so the machine boots with an empty SCSI
+    /// socket -- but Kickstart hangs outright if nothing answers at all.
+    pub sdmac: bool,
     /// Akiko gate array fitted (CD32 profile): ID + C2P port at $B80000.
     pub akiko: bool,
     /// CDTV DMAC/CD controller fitted (CDTV profile): a Zorro II
@@ -933,6 +937,7 @@ impl Default for Config {
             gate_array: GateArray::None,
             mem_controller: MemController::None,
             log_unmapped: None,
+            sdmac: false,
             akiko: false,
             cdtv_cd: false,
             cd32_pad: false,
@@ -2097,6 +2102,7 @@ impl TryFrom<RawConfig> for Config {
             denise_revision,
             machine,
             gate_array: defaults.gate_array,
+            sdmac: defaults.sdmac,
             akiko: defaults.akiko,
             cdtv_cd: defaults.cdtv_cd,
             cd32_pad: defaults.cd32_pad,
@@ -2358,6 +2364,7 @@ pub(crate) fn machine_profile_defaults(model: MachineModel) -> Config {
             d.cpu_clock_mhz = 25.0;
             d.mem_controller = MemController::Ramsey4;
             d.rtc_present = true;
+            d.sdmac = true;
         }
         // The A4000: the same board a generation later -- AGA, a 25 MHz 68040,
         // and Ramsey-07. Its IDE lives at $DD2020, which is not emulated yet.
@@ -3304,6 +3311,8 @@ mod tests {
         assert_eq!(cfg.cpu, CpuModel::M68030);
         assert_eq!(cfg.gate_array, GateArray::None);
         assert_eq!(cfg.mem_controller, MemController::Ramsey4);
+        // Kickstart's scsi.device hangs in init if the SDMAC does not answer.
+        assert!(cfg.sdmac);
 
         let err = parse_config(
             r#"
