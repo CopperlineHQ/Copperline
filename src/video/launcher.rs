@@ -476,13 +476,15 @@ fn serial_rows() -> &'static [Row] {
 }
 
 /// Machine models offered in the selector strip, roughly chronological.
-pub const MODELS: [MachineModel; 8] = [
+pub const MODELS: [MachineModel; 10] = [
     MachineModel::A1000,
     MachineModel::A500Ocs,
     MachineModel::A500,
     MachineModel::A500Plus,
     MachineModel::A600,
     MachineModel::A1200,
+    MachineModel::A3000,
+    MachineModel::A4000,
     MachineModel::Cdtv,
     MachineModel::Cd32,
 ];
@@ -1947,6 +1949,8 @@ fn model_name(model: MachineModel) -> &'static str {
         MachineModel::A500Plus => "A500Plus",
         MachineModel::A600 => "A600",
         MachineModel::A1200 => "A1200",
+        MachineModel::A3000 => "A3000",
+        MachineModel::A4000 => "A4000",
         MachineModel::Cdtv => "CDTV",
         MachineModel::Cd32 => "CD32",
         MachineModel::A1000 => "A1000",
@@ -1961,6 +1965,8 @@ pub fn model_label(model: MachineModel) -> &'static str {
         MachineModel::A500Plus => "A500+",
         MachineModel::A600 => "A600",
         MachineModel::A1200 => "A1200",
+        MachineModel::A3000 => "A3000",
+        MachineModel::A4000 => "A4000",
         MachineModel::Cdtv => "CDTV",
         MachineModel::Cd32 => "CD32",
         MachineModel::A1000 => "A1000",

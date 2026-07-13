@@ -672,6 +672,16 @@ pub enum MachineModel {
     /// stock chip RAM, no trapdoor slow RAM, no RTC. (Added last so the
     /// serialized discriminants of the other models do not shift.)
     A1000,
+    /// A3000: ECS, 68030 at 25 MHz, 2 MB chip RAM, a Ramsey-04 memory
+    /// controller and the battery-backed MSM6242 clock. No Gayle -- the
+    /// big-box machines carry Gary -- and no slow RAM. Motherboard fast RAM is
+    /// not emulated; the OS is happy taking its fast RAM from the Zorro III
+    /// board instead.
+    A3000,
+    /// A4000: the same board a generation later -- AGA, a 25 MHz 68040, and
+    /// Ramsey-07. Same story on Gayle, slow RAM and motherboard fast RAM as
+    /// the A3000.
+    A4000,
 }
 
 /// Identity of a ROM image: its length and a CRC-32 of its bytes. Enough to
@@ -2265,10 +2275,12 @@ pub(crate) fn parse_machine_model(s: &str) -> Result<MachineModel> {
         "A500PLUS" | "A500+" => Ok(MachineModel::A500Plus),
         "A600" => Ok(MachineModel::A600),
         "A1200" => Ok(MachineModel::A1200),
+        "A3000" => Ok(MachineModel::A3000),
+        "A4000" => Ok(MachineModel::A4000),
         "CDTV" => Ok(MachineModel::Cdtv),
         "CD32" => Ok(MachineModel::Cd32),
         _ => Err(anyhow!(
-            "unknown machine model {:?}: expected A1000 / A500 / A500OCS / A500Plus / A600 / A1200 / CDTV / CD32",
+            "unknown machine model {:?}: expected A1000 / A500 / A500OCS / A500Plus / A600 / A1200 / A3000 / A4000 / CDTV / CD32",
             s
         )),
     }
@@ -2333,6 +2345,30 @@ pub(crate) fn machine_profile_defaults(model: MachineModel) -> Config {
             d.cpu = CpuModel::M68EC020;
             d.cpu_clock_mhz = 14.18;
             d.gate_array = GateArray::GayleA1200;
+        }
+        // The A3000: ECS on a big-box board, a 25 MHz 68030 with a real MMU,
+        // and Ramsey-04 in front of the motherboard DRAM. Gary, not Gayle, so
+        // no PCMCIA and no Gayle IDE. Its SCSI is a Super DMAC at $DD0000
+        // driving a WD33C93, which is not emulated yet.
+        MachineModel::A3000 => {
+            d.chipset = Chipset::Ecs;
+            d.chip_ram_bytes = 2 * 1024 * 1024;
+            d.slow_ram_bytes = 0;
+            d.cpu = CpuModel::M68030;
+            d.cpu_clock_mhz = 25.0;
+            d.mem_controller = MemController::Ramsey4;
+            d.rtc_present = true;
+        }
+        // The A4000: the same board a generation later -- AGA, a 25 MHz 68040,
+        // and Ramsey-07. Its IDE lives at $DD2020, which is not emulated yet.
+        MachineModel::A4000 => {
+            d.chipset = Chipset::Aga;
+            d.chip_ram_bytes = 2 * 1024 * 1024;
+            d.slow_ram_bytes = 0;
+            d.cpu = CpuModel::M68040;
+            d.cpu_clock_mhz = 25.0;
+            d.mem_controller = MemController::Ramsey7;
+            d.rtc_present = true;
         }
         // CDTV: A500-class board with the 1 MB ECS Agnus and 1 MB chip
         // RAM, plus the 256 KiB extended ROM at $F00000 (configure it via
@@ -3243,10 +3279,36 @@ mod tests {
         assert_eq!(cfg.agnus_revision, AgnusRevision::AgaAlice);
         assert_eq!(cfg.denise_revision, DeniseRevision::AgaLisa);
 
-        let err = parse_config(
+        // The big-box machines: Ramsey instead of Gayle, and a real CPU.
+        let cfg = parse_config(
             r#"
             [machine]
             profile = "A4000"
+            "#,
+        )?;
+        assert_eq!(cfg.chipset, Chipset::Aga);
+        assert_eq!(cfg.cpu, CpuModel::M68040);
+        assert_eq!(cfg.chip_ram_bytes, 2 * 1024 * 1024);
+        assert_eq!(cfg.slow_ram_bytes, 0);
+        assert_eq!(cfg.gate_array, GateArray::None);
+        assert_eq!(cfg.mem_controller, MemController::Ramsey7);
+        assert!(cfg.rtc_present);
+
+        let cfg = parse_config(
+            r#"
+            [machine]
+            profile = "A3000"
+            "#,
+        )?;
+        assert_eq!(cfg.chipset, Chipset::Ecs);
+        assert_eq!(cfg.cpu, CpuModel::M68030);
+        assert_eq!(cfg.gate_array, GateArray::None);
+        assert_eq!(cfg.mem_controller, MemController::Ramsey4);
+
+        let err = parse_config(
+            r#"
+            [machine]
+            profile = "A5000"
             "#,
         )
         .unwrap_err();

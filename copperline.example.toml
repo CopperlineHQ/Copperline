@@ -103,9 +103,13 @@ model = "68000"
 # Without any [machine] section the default machine is that same Rev 6A
 # A500 (ECS 8372A Agnus, OCS 8362 Denise, 512 KiB chip + 512 KiB trapdoor
 # slow RAM) -- the most common and most-targeted Amiga.
+# The big-box profiles (A3000, A4000) are new and incomplete: Ramsey and the
+# chipset are there, but their on-board mass storage is not (the A3000 Super
+# DMAC SCSI and the A4000 IDE), so they need a Zorro controller to boot from.
 # [machine]
-# profile = "A600"      # A1000 | A500 | A500OCS | A500Plus | A600 | A1200 | CDTV | CD32
-# rtc = true            # add a $DC0000 battery RTC (default: only A500+/CDTV have one)
+# profile = "A600"      # A1000 | A500 | A500OCS | A500Plus | A600 | A1200 | A3000 | A4000 | CDTV | CD32
+# rtc = true            # add a $DC0000 battery RTC (default: only A500+/CDTV/A3000/A4000 have one)
+# mem_controller = "ramsey-07"   # none | ramsey-04 (A3000) | ramsey-07 (A4000)
 
 
 # Debugging aids. log_unmapped logs every CPU read and write that no device
