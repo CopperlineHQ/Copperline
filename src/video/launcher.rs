@@ -1747,16 +1747,28 @@ impl LauncherState {
         }
     }
 
-    /// Commit the edit buffer to the focused field.
+    /// Commit the edit buffer to the focused field. A drive name that would
+    /// not survive the config validator keeps the field focused, so the name
+    /// can be fixed instead of failing later at save.
     pub fn edit_commit(&mut self) {
-        if let Some(target) = self.editing.take() {
-            let value = std::mem::take(&mut self.edit_buffer);
-            match target {
-                EditTarget::BoardOption { board, opt } => {
-                    self.setup.zorro_option_set(board, opt, value);
-                }
-                EditTarget::DriveName(field) => self.setup.set_drive_name(field, value),
+        let Some(target) = self.editing else { return };
+        if let EditTarget::DriveName(_) = target {
+            let name = self.edit_buffer.trim();
+            let invalid = (!name.is_empty())
+                .then(|| crate::filesys::volume_name_error(name))
+                .flatten();
+            if let Some(err) = invalid {
+                self.status = Some(StatusMessage::err(err));
+                return;
             }
+        }
+        self.editing = None;
+        let value = std::mem::take(&mut self.edit_buffer);
+        match target {
+            EditTarget::BoardOption { board, opt } => {
+                self.setup.zorro_option_set(board, opt, value)
+            }
+            EditTarget::DriveName(field) => self.setup.set_drive_name(field, value),
         }
     }
 
@@ -2111,6 +2123,77 @@ mod tests {
         assert_eq!(reloaded.zorro_boards()[0].value(1), "true");
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    fn raw_mount(path: &str) -> RawFilesysMount {
+        RawFilesysMount {
+            path: path.to_string(),
+            volume: Some(path.trim_start_matches('/').to_uppercase()),
+            bootpri: None,
+        }
+    }
+
+    #[test]
+    fn host_mounts_round_trip_and_keep_entries_past_the_gui_slots() {
+        let raw = RawConfig {
+            filesys: (0..6).map(|i| raw_mount(&format!("/host{i}"))).collect(),
+            ..RawConfig::default()
+        };
+
+        let mut setup = MachineSetup::from_raw(&raw).unwrap();
+        // The GUI edits the first FILESYS_GUI_SLOTS mounts; the rest are held
+        // verbatim so a save never drops a hand-written entry.
+        assert_eq!(setup.filesys_dirs[0], Some(PathBuf::from("/host0")));
+        assert_eq!(setup.filesys_dirs[3], Some(PathBuf::from("/host3")));
+        assert_eq!(setup.filesys_extra.len(), 2);
+
+        // An untouched save is a faithful round trip.
+        assert_eq!(setup.to_raw().filesys, raw.filesys);
+
+        // Clearing a slot removes that mount. HOSTFS<n> is the position in the
+        // config, so the mounts after it renumber, exactly as they would if the
+        // entry were deleted from the TOML by hand.
+        setup.filesys_dirs[1] = None;
+        setup.filesys_names[1] = None;
+        let saved = setup.to_raw().filesys;
+        let paths: Vec<&str> = saved.iter().map(|m| m.path.as_str()).collect();
+        assert_eq!(paths, ["/host0", "/host2", "/host3", "/host4", "/host5"]);
+
+        // The formerly-extra mounts now fall inside the GUI slots, and the
+        // volume names still travel with their own paths.
+        let back = MachineSetup::from_raw(&RawConfig {
+            filesys: saved,
+            ..RawConfig::default()
+        })
+        .unwrap();
+        assert_eq!(back.filesys_dirs[1], Some(PathBuf::from("/host2")));
+        assert_eq!(back.filesys_names[1].as_deref(), Some("HOST2"));
+        assert_eq!(back.filesys_extra.len(), 1);
+    }
+
+    #[test]
+    fn an_invalid_drive_name_is_reported_and_keeps_the_field_focused() {
+        let mut state = LauncherState::from_raw(&RawConfig {
+            filesys: vec![raw_mount("/host0")],
+            ..RawConfig::default()
+        });
+        state.begin_edit_drive_name(LauncherField::Filesys0Dir);
+        state.edit_buffer.clear();
+        for c in "Work:1".chars() {
+            state.edit_push(c);
+        }
+        state.edit_commit();
+        let status = state.status.as_ref().expect("invalid name is reported");
+        assert!(status.error);
+        assert!(status.text.contains("invalid character"), "{}", status.text);
+        assert_eq!(state.editing(), Some(EditTarget::DriveName(F::Filesys0Dir)));
+
+        // Fixing the name commits it.
+        state.edit_backspace();
+        state.edit_backspace();
+        state.edit_commit();
+        assert!(state.editing().is_none());
+        assert_eq!(state.setup.drive_name(F::Filesys0Dir), Some("Work"));
     }
 
     #[test]

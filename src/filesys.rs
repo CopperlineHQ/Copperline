@@ -36,6 +36,28 @@ pub const MOUNT_ENTRY_SIZE: usize = 32;
 /// Maximum host mounts (units), and the divisor for each unit's fixed
 /// board-window lock-pool slice.
 pub const MOUNT_MAX_COUNT: usize = 8;
+/// Longest AmigaDOS volume label: a DosList BSTR holds 30 bytes.
+pub const VOLUME_NAME_MAX: usize = 30;
+
+/// Why `name` would not work as an AmigaDOS volume label, or `None` if it
+/// would. Shared by the config validator and the launcher's name editor so
+/// the GUI cannot save a name the config would reject.
+pub fn volume_name_error(name: &str) -> Option<String> {
+    if name.is_empty() {
+        Some("volume name must not be empty".to_string())
+    } else if name.len() > VOLUME_NAME_MAX {
+        Some(format!(
+            "volume name {name:?} is too long ({} bytes; max {VOLUME_NAME_MAX})",
+            name.len()
+        ))
+    } else if name.contains([':', '/', '\0']) {
+        Some(format!(
+            "volume name {name:?} contains an invalid character (no ':' '/' or NUL)"
+        ))
+    } else {
+        None
+    }
+}
 /// The DiagArea (`BoardSpec::copperline_services` points er_InitDiagVec
 /// here): embedded in the handler ROM at +0x40, like real autoboot boards
 /// carry theirs in the device ROM (see `_diag_area` in entry.s).
