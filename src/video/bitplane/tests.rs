@@ -1484,6 +1484,9 @@ fn late_ddf_first_word_samples_all_planes_together() {
 
 #[test]
 fn bplcon1_delay_blanks_left_edge_without_shifting_row() {
+    // The scroll nibble counts lo-res pixels in every resolution, so a
+    // scroll of 4 blanks the same physical width - 8 framebuffer hi-res
+    // pixels - whether the playfield is hi-res or lo-res.
     assert_eq!(
         left_edge_blank_pixels(ControlState {
             bplcon0: 0x8000,
@@ -1491,7 +1494,7 @@ fn bplcon1_delay_blanks_left_edge_without_shifting_row() {
             bplcon2: 0,
             ..ControlState::default()
         }),
-        4
+        8
     );
     assert_eq!(
         left_edge_blank_pixels(ControlState {
@@ -5043,6 +5046,41 @@ fn bplcon1_scroll_nibbles_apply_to_odd_even_planes_without_dual_playfield() {
     assert!(!control.dual_playfield());
     assert_eq!(control.scroll_for_plane(0), 0);
     assert_eq!(control.scroll_for_plane(1), 2);
+}
+
+#[test]
+fn classic_bplcon1_scroll_nibble_counts_lores_pixels_at_every_resolution() {
+    // The OCS/ECS scroll nibble is a lo-res pixel count: Denise reloads the
+    // shifter when the low nibble bits match its pixel counter, so one step
+    // spans one lo-res pixel in native samples (1 lo-res / 2 hi-res /
+    // 4 super-hi-res) and the comparison narrows with the word cadence
+    // (hi-res compares 3 bits, super-hi-res 2). Regression example: the
+    // Kickstart 2.05 insert-disk screen (hi-res, BPLCON1 $44) sat one
+    // colour clock left of hardware when the hi-res scroll was halved,
+    // clipping the first text column and leaking the negative-modulo
+    // overlap words into the window's right edge.
+    let control = |bplcon0: u16, bplcon1: u16| ControlState {
+        bplcon0,
+        bplcon1,
+        ..ControlState::default()
+    };
+
+    // Lo-res: full nibble, one native sample per lo-res pixel.
+    assert_eq!(control(0x2200, 0x0044).scroll_for_plane(0), 4);
+    assert_eq!(control(0x2200, 0x0044).scroll_for_plane(1), 4);
+    assert_eq!(control(0x2200, 0x00FF).scroll_for_plane(0), 15);
+
+    // Hi-res: two native samples per lo-res pixel, nibble bit 3 ignored.
+    assert_eq!(control(0xA200, 0x0044).scroll_for_plane(0), 8);
+    assert_eq!(control(0xA200, 0x0044).scroll_for_plane(1), 8);
+    assert_eq!(control(0xA200, 0x0077).scroll_for_plane(0), 14);
+    assert_eq!(control(0xA200, 0x0088).scroll_for_plane(0), 0);
+
+    // ECS super-hi-res: four native samples per lo-res pixel, two nibble
+    // bits compared.
+    let shres = 0x2200 | BPLCON0_SHRES;
+    assert_eq!(control(shres, 0x0033).scroll_for_plane(0), 12);
+    assert_eq!(control(shres, 0x0044).scroll_for_plane(0), 0);
 }
 
 #[test]

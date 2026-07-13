@@ -970,14 +970,35 @@ impl ControlState {
         if self.aga() {
             return self.aga_bplcon1_scroll_samples(false);
         }
-        (self.bplcon1 & 0x000F) as usize
+        self.classic_scroll_samples((self.bplcon1 & 0x000F) as usize)
     }
 
     fn pf2_scroll(&self) -> usize {
         if self.aga() {
             return self.aga_bplcon1_scroll_samples(true);
         }
-        ((self.bplcon1 >> 4) & 0x000F) as usize
+        self.classic_scroll_samples(((self.bplcon1 >> 4) & 0x000F) as usize)
+    }
+
+    /// OCS/ECS BPLCON1 scroll nibbles are lo-res pixel counts: Denise
+    /// reloads a playfield's shifters when the low bits of its pixel
+    /// counter match the nibble, so one scroll step always spans one lo-res
+    /// pixel regardless of resolution (2 hi-res / 4 super-hi-res samples),
+    /// and the comparison narrows with the word cadence - hi-res compares
+    /// 3 nibble bits, super-hi-res 2 (vAmiga: the Agnus draw-flag grid uses
+    /// scrollOdd & 0b11/0b01 plus the nibble LSB as a 2-hires-pixel output
+    /// offset). Regression example: Kickstart 2.05's insert-disk screen
+    /// (hi-res, DDFSTRT $40, BPLCON1 $44, BPL1MOD -6) leaks the next row's
+    /// first character column into the window's right edge and clips the
+    /// first character at the left when the hi-res scroll is halved.
+    fn classic_scroll_samples(&self, nibble: usize) -> usize {
+        if self.shres() {
+            (nibble & 0x3) * 4
+        } else if self.hires() {
+            (nibble & 0x7) * 2
+        } else {
+            nibble
+        }
     }
 
     /// AGA Lisa expands BPLCON1 to two 8-bit scroll counters in 35 ns

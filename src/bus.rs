@@ -6937,7 +6937,8 @@ fn live_manual_bpl_word_collision_bits(
         let mut idx = 0u8;
         let mut word_active = false;
         for plane in 0..nplanes {
-            let delay = live_scroll_for_plane(source_control.bplcon1, plane);
+            let delay =
+                live_scroll_for_plane(source_control.bplcon0, source_control.bplcon1, plane);
             if native_idx < delay {
                 word_active = true;
                 continue;
@@ -6955,7 +6956,8 @@ fn live_manual_bpl_word_collision_bits(
         if shres {
             let right_native_idx = native_idx + 1;
             for plane in 0..nplanes {
-                let delay = live_scroll_for_plane(source_control.bplcon1, plane);
+                let delay =
+                    live_scroll_for_plane(source_control.bplcon0, source_control.bplcon1, plane);
                 if right_native_idx < delay {
                     word_active = true;
                     continue;
@@ -7089,7 +7091,7 @@ fn live_bitplane_collision_pixel_at(
     let dma_planes = mode.dma_planes().min(nplanes);
     let mut idx = 0u8;
     for plane in 0..nplanes {
-        let delay = live_scroll_for_plane(bplcon1, plane);
+        let delay = live_scroll_for_plane(bplcon0, bplcon1, plane);
         if native_x < delay {
             continue;
         }
@@ -7111,7 +7113,7 @@ fn live_bitplane_collision_pixel_at(
         let mut right_idx = 0u8;
         let right_native_x = native_x + 1;
         for plane in 0..nplanes {
-            let delay = live_scroll_for_plane(bplcon1, plane);
+            let delay = live_scroll_for_plane(bplcon0, bplcon1, plane);
             if right_native_x < delay {
                 continue;
             }
@@ -7177,11 +7179,23 @@ fn live_clxcon_planes_match(idx: u8, clxcon: u16, first_plane: usize) -> bool {
     matches
 }
 
-fn live_scroll_for_plane(bplcon1: u16, plane: usize) -> usize {
-    if plane & 1 != 0 {
+/// Per-plane BPLCON1 scroll in native samples, mirroring
+/// `ControlState::pf1_scroll`/`pf2_scroll`: the OCS/ECS nibble counts
+/// lo-res pixels, so it scales to 2 hi-res / 4 super-hi-res samples per
+/// step and the comparison narrows with the word cadence (hi-res uses 3
+/// nibble bits, super-hi-res 2).
+fn live_scroll_for_plane(bplcon0: u16, bplcon1: u16, plane: usize) -> usize {
+    let nibble = if plane & 1 != 0 {
         ((bplcon1 >> 4) & 0x000F) as usize
     } else {
         (bplcon1 & 0x000F) as usize
+    };
+    if bitplane_shres(bplcon0) {
+        (nibble & 0x3) * 4
+    } else if bitplane_hires(bplcon0) {
+        (nibble & 0x7) * 2
+    } else {
+        nibble
     }
 }
 

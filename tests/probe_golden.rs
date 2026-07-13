@@ -341,6 +341,12 @@ probe_tests! {
     // against vAmiga (the Rampage dot-cube pan regression class).
     golden_ddfprobe_phase => probe_ecs("ddfprobe-phase", "ddfprobe-phase.bin", 40.0);
     golden_ddfprobe_phase2 => probe_ecs("ddfprobe-phase2", "ddfprobe-phase2.bin", 40.0);
+    // BPLCON1 hi-res scroll placement map on the Kickstart 2.05 boot-screen
+    // constellation (late DDF, narrow DIW): one lo-res pixel = 2 hi-res px
+    // per scroll step, nibble bit 3 ignored, row-end overlap words clipped
+    // at the DIW stop (the KS 2.05 first-text-column regression class);
+    // vAmiga-verified band by band.
+    golden_ddfprobe_hscroll => probe_ecs("ddfprobe-hscroll", "ddfprobe-hscroll.bin", 40.0);
     // CPU pacing bars under BLTPRI copy/fill/line blits (the Rampage
     // "present" flicker / BLS fence regression class).
     golden_bltprobe_pace => probe("bltprobe-pace", "bltprobe-pace.bin", 40.0);
