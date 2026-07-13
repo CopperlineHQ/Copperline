@@ -45,8 +45,23 @@ pub const TV_PAL_CAPTURED_MARGIN_X: usize =
     FB_WIDTH - bitplane::STANDARD_VISIBLE_X0 - STANDARD_PAL_VISIBLE_WIDTH;
 pub const TV_PAL_CAPTURED_SOURCE_X: usize =
     bitplane::STANDARD_VISIBLE_X0 - TV_PAL_CAPTURED_MARGIN_X;
-pub const TV_PAL_CAPTURED_WIDTH: usize =
-    STANDARD_PAL_VISIBLE_WIDTH + 2 * TV_PAL_CAPTURED_MARGIN_X;
+pub const TV_PAL_CAPTURED_WIDTH: usize = STANDARD_PAL_VISIBLE_WIDTH + 2 * TV_PAL_CAPTURED_MARGIN_X;
+
+// The captured aperture's invariants: it ends exactly on the framebuffer
+// edge (no bezel columns), keeps symmetric margins around the standard
+// window, starts inside the reference aperture, and its vertical crop fits
+// the woven field.
+const _: () = {
+    assert!(TV_PAL_CAPTURED_SOURCE_X + TV_PAL_CAPTURED_WIDTH == FB_WIDTH);
+    assert!(bitplane::STANDARD_VISIBLE_X0 - TV_PAL_CAPTURED_SOURCE_X == TV_PAL_CAPTURED_MARGIN_X);
+    assert!(
+        TV_PAL_CAPTURED_SOURCE_X + TV_PAL_CAPTURED_WIDTH
+            - (bitplane::STANDARD_VISIBLE_X0 + STANDARD_PAL_VISIBLE_WIDTH)
+            == TV_PAL_CAPTURED_MARGIN_X
+    );
+    assert!(TV_PAL_CAPTURED_SOURCE_X >= TV_PAL_PRESENT_SOURCE_X);
+    assert!(TV_PAL_PRESENT_SOURCE_Y + TV_PAL_PRESENT_HEIGHT <= OUT_HEIGHT);
+};
 
 pub fn post_process_rendered_field(
     fb: &mut [u32],
@@ -198,24 +213,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn captured_aperture_centres_standard_window_on_real_pixels() {
-        // Ends exactly on the framebuffer edge: no black bezel columns.
-        assert_eq!(TV_PAL_CAPTURED_SOURCE_X + TV_PAL_CAPTURED_WIDTH, FB_WIDTH);
-        // Symmetric margins around the standard window.
-        assert_eq!(
-            bitplane::STANDARD_VISIBLE_X0 - TV_PAL_CAPTURED_SOURCE_X,
-            TV_PAL_CAPTURED_MARGIN_X
-        );
-        assert_eq!(
-            TV_PAL_CAPTURED_SOURCE_X + TV_PAL_CAPTURED_WIDTH
-                - (bitplane::STANDARD_VISIBLE_X0 + STANDARD_PAL_VISIBLE_WIDTH),
-            TV_PAL_CAPTURED_MARGIN_X
-        );
-        // Inside the reference aperture and clear of the TV bezel mask, so a
-        // captured-aperture crop never shows masked black columns.
-        assert!(TV_PAL_CAPTURED_SOURCE_X >= TV_PAL_PRESENT_SOURCE_X);
+    fn captured_aperture_clears_the_tv_bezel_mask() {
+        // The const block by the TV_PAL_CAPTURED_* definitions pins the
+        // aperture geometry at compile time; the mask bounds come from a
+        // runtime helper, so check here that a captured-aperture crop never
+        // shows masked black columns.
         assert!(TV_PAL_CAPTURED_SOURCE_X >= tv_source_h_bounds().0);
-        // The vertical crop fits the woven field.
-        assert!(TV_PAL_PRESENT_SOURCE_Y + TV_PAL_PRESENT_HEIGHT <= OUT_HEIGHT);
     }
 }
