@@ -3528,8 +3528,38 @@ impl App {
     }
 
     fn frame_analyzer_toggle_scrub(&mut self) {
+        // Snap inputs for enabling scrub: the traced frame's last slot and
+        // the frame-start DIW top-left corner in (vpos, cck) beam units
+        // (same decode as build_frame_analyzer_view's DIW overlay).
+        let trace_end = self.emu.bus().frame_bus_trace().map(|trace| {
+            (
+                trace.rows.saturating_sub(1).min(u16::MAX as usize) as u16,
+                trace.cols.saturating_sub(1).min(u16::MAX as usize) as u16,
+            )
+        });
+        let base = self.emu.bus().frame_render_base();
+        let diw_top_left = (!(base.diwstrt == 0 && base.diwstop == 0)).then(|| {
+            (
+                base.diwhigh.v_start(base.diwstrt),
+                base.diwhigh.h_start(base.diwstrt) / 2,
+            )
+        });
         if let Some(panel) = self.frame_analyzer_panel.as_mut() {
             panel.show_scrub = !panel.show_scrub;
+            // Enabling scrub with the selection at or before the display
+            // window's top-left corner would ghost the whole picture (the
+            // CRT has drawn none of it at that beam position), which reads
+            // as the underlay switching off. Snap the selection to the end
+            // of the traced frame instead: the picture starts fully drawn
+            // and scrubbing backward peels it away.
+            if panel.show_scrub {
+                if let (Some((end_v, end_h)), Some(diw)) = (trace_end, diw_top_left) {
+                    if (panel.selected_vpos, panel.selected_hpos) <= diw {
+                        panel.selected_vpos = end_v;
+                        panel.selected_hpos = end_h;
+                    }
+                }
+            }
             self.request_redraw();
         }
     }
