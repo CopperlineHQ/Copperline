@@ -2516,6 +2516,67 @@ fn frame_analyzer_underlay_toggles_and_renders() {
     assert!(app.analyzer_underlay_input.is_none());
 }
 
+#[test]
+fn frame_analyzer_scrub_enable_snaps_predisplay_selection_to_frame_end() {
+    let mut app = test_app();
+    app.open_frame_analyzer();
+
+    // Program a standard PAL display window. The analyzer reads the
+    // frame-start register snapshot, so run two frames: the first ends
+    // with a pre-write snapshot, the second starts after the writes.
+    {
+        let bus = app.emu.bus_mut();
+        bus.custom_write(0x08E, 2, 0x2C81); // DIWSTRT
+        bus.custom_write(0x090, 2, 0x2CC1); // DIWSTOP
+    }
+    app.frame_analyzer_step_frame();
+    app.frame_analyzer_step_frame();
+    let (max_vpos, max_hpos) = app
+        .emu
+        .bus()
+        .frame_bus_trace()
+        .map(|trace| (trace.rows as u16 - 1, trace.cols as u16 - 1))
+        .expect("frame trace armed");
+
+    // A fresh panel's selection sits at the DIW top-left corner, where the
+    // CRT has drawn nothing: enabling scrub there would ghost the whole
+    // picture, so the selection snaps to the end of the traced frame.
+    let panel = app.frame_analyzer_panel.as_ref().unwrap();
+    assert_eq!((panel.selected_vpos, panel.selected_hpos), (0x2C, 0x28));
+    app.activate_ui_control(UiControl::AnalyzerScrub);
+    let panel = app.frame_analyzer_panel.as_ref().unwrap();
+    assert!(panel.show_scrub);
+    assert_eq!(
+        (panel.selected_vpos, panel.selected_hpos),
+        (max_vpos, max_hpos)
+    );
+
+    // A selection inside the display window is a deliberate scrub point
+    // and survives re-enabling scrub.
+    app.activate_ui_control(UiControl::AnalyzerScrub);
+    if let Some(panel) = app.frame_analyzer_panel.as_mut() {
+        panel.selected_vpos = 100;
+        panel.selected_hpos = 0x80;
+    }
+    app.activate_ui_control(UiControl::AnalyzerScrub);
+    let panel = app.frame_analyzer_panel.as_ref().unwrap();
+    assert!(panel.show_scrub);
+    assert_eq!((panel.selected_vpos, panel.selected_hpos), (100, 0x80));
+}
+
+#[test]
+fn frame_analyzer_scrub_enable_without_display_window_keeps_selection() {
+    // No DIWSTRT/DIWSTOP programmed: there is no picture to reveal, so
+    // enabling scrub leaves the selection alone.
+    let mut app = test_app();
+    app.open_frame_analyzer();
+    app.frame_analyzer_step_frame();
+    app.activate_ui_control(UiControl::AnalyzerScrub);
+    let panel = app.frame_analyzer_panel.as_ref().unwrap();
+    assert!(panel.show_scrub);
+    assert_eq!((panel.selected_vpos, panel.selected_hpos), (0x2C, 0x28));
+}
+
 /// Type a command into the open console and return the lines it printed.
 fn console_run(app: &mut super::App, cmd: &str) -> Vec<String> {
     if let Some(panel) = app.console_panel.as_mut() {

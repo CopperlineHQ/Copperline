@@ -324,6 +324,10 @@ render reads a snapshot only -- it never perturbs the emulation.
 **Beam scrub** turns the underlay into a beam-time scrubber: only what the
 CRT had drawn by the time the beam reached the selected slot shows at
 normal underlay brightness; everything past it ghosts at low brightness.
+(Enabling it with the selection still at or before the display window's
+top-left corner -- where nothing has been drawn yet -- would ghost the
+whole picture, so the selection snaps to the end of the frame instead
+and scrubbing backward peels the picture away.)
 Because Copperline's renderer replays register writes at their recorded
 beam positions, every pixel before the cursor is exactly what the display
 carried at that instant -- drag the selection (or hold a cursor key) and
