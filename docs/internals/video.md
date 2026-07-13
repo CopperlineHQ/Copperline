@@ -137,6 +137,23 @@ comparator. A vblank arm sequence with VSTART equal to VSTOP therefore
 displays full-height columns, which is how Gen-X draws the vertical
 edge-masking line sprites of its shutter transitions.
 
+Because DMA fetches land in the same SPRxPOS/CTL/DATA/DATB registers a
+CPU/Copper write hits, Denise keeps two views of them: the CPU/Copper write
+shadow (`sprpos`/`sprctl`/`sprdata`/`sprdatb`/`spr_armed`), which the
+manual replay above and the live collision path are calibrated against, and
+the hardware-true view (`spr_hw_*`), which additionally receives every
+sprite DMA fetch -- a DATA fetch arms it, the vstop control fetch
+(including the 0/0 list terminator) disarms it. The DMA-idle latched
+redisplay seeds from the hardware-true view: software relies on the
+terminator's CTL to silence a channel for good, so a later bare
+SPRxDATA arm must redisplay the DMA-written words, not the last manual
+pattern (Hamazing's scene switch writes SPRxDATA=$0000 after a DMA sprite
+scene and expects invisible sprites; the stale write-shadow pattern would
+paint full-height bars). Only the authoritative sprite-DMA pass for a line
+writes the hardware view through: pre-display lines are computed twice, and
+the pre-display replay at the display start owns them (`sprprobe-latch` in
+timing-test/ pins the whole sequence).
+
 The mapping from beam coordinates to framebuffer x is anchored by
 constants that encode the hardware's fetch-to-display pipeline delays --
 register writes, palette writes, and bitplane data each land at their own

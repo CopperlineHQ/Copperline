@@ -357,4 +357,9 @@ probe_tests! {
     // enable/punch/disable/restart sequence (the issue #74 deferred
     // AUDxEN-disable regression class).
     golden_audprobe_en => probe("audprobe-en", "audprobe-en.bin", 40.0);
+    // Sprite DMA fetches land in the Denise display latches: the terminator
+    // CTL fetch disarms, DATA/DATB fetches overwrite, and a later bare
+    // SPRxDATA arm redisplays the DMA-written words (the Hamazing
+    // scene-switch stale-bar regression class).
+    golden_sprprobe_latch => probe("sprprobe-latch", "sprprobe-latch.bin", 40.0);
 }

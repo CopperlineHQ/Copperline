@@ -94,7 +94,12 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //  27: LineBlitState gained the USEB line-program state (use_a/use_b flags,
 //      the live B pointer bpt) and LineBlitPhase the two extra USEB pixel
 //      cycles (LB fetch, LBus bare bus cycle)
-pub const STATE_VERSION: u32 = 27;
+//  28: Denise and RenderRegisterSnapshot gained the hardware-true sprite
+//      latch view (spr_hw_pos/ctl/data/datb/armed - CPU/Copper writes AND
+//      sprite DMA fetches, last writer wins; the existing spr* fields
+//      remain the CPU/Copper write shadow the render replay is calibrated
+//      against)
+pub const STATE_VERSION: u32 = 28;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

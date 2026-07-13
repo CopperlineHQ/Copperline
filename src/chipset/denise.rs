@@ -275,11 +275,28 @@ pub struct Denise {
     pub bplpt: [u32; 8],
     pub bpldat: [u16; 8],
     pub sprpt: [u32; 8],
+    /// SPRxPOS/CTL/DATA/DATB as CPU/Copper writes left them, with `spr_armed`
+    /// tracking those writes only (DATA arms, CTL disarms). The render
+    /// replay's manual-sprite model is calibrated against this
+    /// write-shadow view; sprite DMA fetches do not land here.
     pub sprpos: [u16; 8],
     pub sprctl: [u16; 8],
     pub sprdata: [u16; 8],
     pub sprdatb: [u16; 8],
     pub spr_armed: [bool; 8],
+    /// The same registers as the hardware holds them: last-writer-wins
+    /// across CPU/Copper writes AND sprite DMA fetches (a DMA DATA fetch
+    /// arms the display latch, a DMA CTL fetch -- vstop control words or
+    /// the 0/0 list terminator -- disarms it). Feeds the armed-latch
+    /// redisplay in frames with sprite DMA idle: software relies on the
+    /// terminator's CTL to silence a channel for good, so a later bare
+    /// SPRxDATA write redisplays the DMA-written words, not the last
+    /// manual pattern (Hamazing scene-switch regression class).
+    pub spr_hw_pos: [u16; 8],
+    pub spr_hw_ctl: [u16; 8],
+    pub spr_hw_data: [u16; 8],
+    pub spr_hw_datb: [u16; 8],
+    pub spr_hw_armed: [bool; 8],
     pub bpl1mod: i16,
     pub bpl2mod: i16,
     pub diwstrt: u16,
@@ -380,6 +397,11 @@ impl Denise {
             sprdata: [0; 8],
             sprdatb: [0; 8],
             spr_armed: [false; 8],
+            spr_hw_pos: [0; 8],
+            spr_hw_ctl: [0; 8],
+            spr_hw_data: [0; 8],
+            spr_hw_datb: [0; 8],
+            spr_hw_armed: [false; 8],
             bpl1mod: 0,
             bpl2mod: 0,
             diwstrt: 0,
@@ -434,10 +456,19 @@ impl Denise {
         }
     }
 
+    pub fn write_sprpos(&mut self, idx: usize, val: u16) {
+        if idx < self.sprpos.len() {
+            self.sprpos[idx] = val;
+            self.spr_hw_pos[idx] = val;
+        }
+    }
+
     pub fn write_sprctl(&mut self, idx: usize, val: u16) {
         if idx < self.sprctl.len() {
             self.sprctl[idx] = val;
             self.spr_armed[idx] = false;
+            self.spr_hw_ctl[idx] = val;
+            self.spr_hw_armed[idx] = false;
         }
     }
 
@@ -445,12 +476,44 @@ impl Denise {
         if idx < self.sprdata.len() {
             self.sprdata[idx] = val;
             self.spr_armed[idx] = true;
+            self.spr_hw_data[idx] = val;
+            self.spr_hw_armed[idx] = true;
         }
     }
 
     pub fn write_sprdatb(&mut self, idx: usize, val: u16) {
         if idx < self.sprdatb.len() {
             self.sprdatb[idx] = val;
+            self.spr_hw_datb[idx] = val;
+        }
+    }
+
+    /// A sprite DMA fetch landing in the registers: same effect as the
+    /// matching CPU/Copper write on the hardware-true view, but invisible
+    /// to the CPU/Copper write shadow the render replay is seeded from.
+    pub fn dma_write_sprpos(&mut self, idx: usize, val: u16) {
+        if idx < self.spr_hw_pos.len() {
+            self.spr_hw_pos[idx] = val;
+        }
+    }
+
+    pub fn dma_write_sprctl(&mut self, idx: usize, val: u16) {
+        if idx < self.spr_hw_ctl.len() {
+            self.spr_hw_ctl[idx] = val;
+            self.spr_hw_armed[idx] = false;
+        }
+    }
+
+    pub fn dma_write_sprdata(&mut self, idx: usize, val: u16) {
+        if idx < self.spr_hw_data.len() {
+            self.spr_hw_data[idx] = val;
+            self.spr_hw_armed[idx] = true;
+        }
+    }
+
+    pub fn dma_write_sprdatb(&mut self, idx: usize, val: u16) {
+        if idx < self.spr_hw_datb.len() {
+            self.spr_hw_datb[idx] = val;
         }
     }
 

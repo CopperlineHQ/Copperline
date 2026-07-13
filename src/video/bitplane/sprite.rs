@@ -179,13 +179,34 @@ pub(super) struct BeamSpriteState {
 }
 
 impl BeamSpriteState {
+    /// `use_hardware_latch` picks the register view the replay starts from:
+    /// with sprite DMA idle this frame the armed latches follow Denise's own
+    /// rules across DMA history, so the hardware-true view (manual writes
+    /// AND DMA fetches) is the source; with captured DMA driving the frame
+    /// the replay owns only CPU/Copper writes and is calibrated against the
+    /// write-shadow view.
     pub(super) fn from_render_state(
         state: &RenderState,
         held: &[Option<HeldSpriteLine>; 8],
+        use_hardware_latch: bool,
     ) -> Self {
-        let mut sprpos = state.sprpos;
-        let mut sprctl = state.sprctl;
-        let mut spr_armed = state.spr_armed;
+        let (mut sprpos, mut sprctl, sprdata, sprdatb, mut spr_armed) = if use_hardware_latch {
+            (
+                state.spr_hw_pos,
+                state.spr_hw_ctl,
+                state.spr_hw_data,
+                state.spr_hw_datb,
+                state.spr_hw_armed,
+            )
+        } else {
+            (
+                state.sprpos,
+                state.sprctl,
+                state.sprdata,
+                state.sprdatb,
+                state.spr_armed,
+            )
+        };
         for (i, h) in held.iter().enumerate() {
             if let Some(held) = h {
                 let (pos, ctl) = sprite_control_words_from_parts(
@@ -203,8 +224,8 @@ impl BeamSpriteState {
         Self {
             sprpos,
             sprctl,
-            sprdata: state.sprdata,
-            sprdatb: state.sprdatb,
+            sprdata,
+            sprdatb,
             spr_armed,
             direct_data_armed: [false; 8],
             aga: matches!(state.agnus_revision, AgnusRevision::AgaAlice),
@@ -385,7 +406,8 @@ pub(super) fn manual_sprite_lines_from_events_with_visible_line0(
     include_latched_sprite_state: bool,
     sprite_dma_observed: bool,
 ) -> Vec<Vec<SpriteLine>> {
-    let mut regs = BeamSpriteState::from_render_state(initial_state, held);
+    let mut regs =
+        BeamSpriteState::from_render_state(initial_state, held, include_latched_sprite_state);
     if sprite_dma_observed && !include_latched_sprite_state {
         regs.disarm_nonheld_latched_output();
     }
@@ -518,7 +540,7 @@ pub(super) fn manual_sprite_lines_from_captured_dma_reuse(
             vstart: beam_y,
             vstop: beam_y + 1,
         });
-        let mut regs = BeamSpriteState::from_render_state(initial_state, &held);
+        let mut regs = BeamSpriteState::from_render_state(initial_state, &held, false);
         let mut next_beam = (visible_end, 0usize);
         let dma_hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[sprite / 2];
 
@@ -1403,10 +1425,10 @@ pub(super) fn collect_sprite_lines(
 }
 
 pub(super) fn register_latched_sprite_lines(sprite: usize, state: &RenderState) -> Vec<SpriteLine> {
-    if !state.spr_armed[sprite] {
+    if !state.spr_hw_armed[sprite] {
         return Vec::new();
     }
-    let regs = BeamSpriteState::from_render_state(state, &[None; 8]);
+    let regs = BeamSpriteState::from_render_state(state, &[None; 8], true);
     let pos = regs.sprpos[sprite];
     let ctl = regs.sprctl[sprite];
     (sprite_vstart(pos, ctl)..sprite_vstop(ctl))
