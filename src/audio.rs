@@ -5,24 +5,32 @@
 //! plus several concrete implementations chosen at startup time based
 //! on CLI flags.
 
+#[cfg(feature = "frontend")]
+use crate::timebase::Instant;
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::Path;
+#[cfg(feature = "frontend")]
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+#[cfg(feature = "frontend")]
 use std::sync::Arc;
-use std::time::Instant;
 
 use anyhow::{anyhow, Result};
+#[cfg(feature = "frontend")]
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+#[cfg(feature = "frontend")]
 use ringbuf::traits::{Consumer, Observer, Producer, Split};
+#[cfg(feature = "frontend")]
 use ringbuf::HeapRb;
 
 /// Sample rate the mixer feeds the sink at. This is the rate the
 /// emulator-side stereo mixer (Paula::tick_audio) runs at; live CPAL
 /// output resamples these frames to the selected device rate.
 pub const MIX_SAMPLE_RATE: u32 = 44_100;
+#[cfg(feature = "frontend")]
 const PAL_PAULA_CLOCK_HZ: u32 = 3_546_895;
 const AUDIO_PROFILE_ENV: &str = "COPPERLINE_AUDIO_PROFILE";
+#[cfg(feature = "frontend")]
 const CPAL_BUFFER_FRAMES: usize = 131072;
 // Live-output latency budget. The steady-state target is deliberately fixed:
 // the emulator's real-time pacer runs the core ahead of the wall clock by
@@ -31,8 +39,11 @@ const CPAL_BUFFER_FRAMES: usize = 131072;
 // drains an already-started queue below target, the sink reports the shortfall
 // as extra temporary lead so the pacer refills the fixed cushion instead of
 // settling into a fragile low-latency state.
+#[cfg(feature = "frontend")]
 const CPAL_TARGET_BUFFER_FRAMES: usize = 6615; // ~150 ms steady lead
+#[cfg(feature = "frontend")]
 const CPAL_PREBUFFER_FRAMES: usize = CPAL_TARGET_BUFFER_FRAMES;
+#[cfg(feature = "frontend")]
 const CPAL_STALE_DROP_THRESHOLD_FRAMES: usize = 13230; // trim only past ~300 ms
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -112,6 +123,7 @@ impl AudioSink for NullSink {
 // current Paula state instead of playing a stale backlog.
 // -----------------------------------------------------------------
 
+#[cfg(feature = "frontend")]
 pub struct CpalSink {
     producer: ringbuf::HeapProd<(f32, f32)>,
     // Keep the stream alive for the lifetime of the sink.
@@ -142,7 +154,7 @@ pub struct CpalSink {
 // ...`). A handler that ignores the trailing varargs is safe to install under
 // the C calling convention (the caller cleans the stack), so it is declared
 // without them.
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "frontend", target_os = "linux"))]
 type AlsaErrorHandler = extern "C" fn(
     *const std::ffi::c_char,
     std::ffi::c_int,
@@ -151,13 +163,13 @@ type AlsaErrorHandler = extern "C" fn(
     *const std::ffi::c_char,
 );
 
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "frontend", target_os = "linux"))]
 #[link(name = "asound")]
 extern "C" {
     fn snd_lib_error_set_handler(handler: Option<AlsaErrorHandler>) -> std::ffi::c_int;
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "frontend", target_os = "linux"))]
 extern "C" fn alsa_ignore_error(
     _file: *const std::ffi::c_char,
     _line: std::ffi::c_int,
@@ -173,7 +185,7 @@ extern "C" fn alsa_ignore_error(
 /// errors through its `Result` API, so nothing user-facing is hidden. Installs
 /// a no-op error handler once, process-wide, keeping `--list-audio-devices` and
 /// the picker readable. No-op off Linux, where the handler does not exist.
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "frontend", target_os = "linux"))]
 fn quiet_alsa_probe_logging() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
@@ -182,7 +194,7 @@ fn quiet_alsa_probe_logging() {
     });
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(feature = "frontend", not(target_os = "linux")))]
 fn quiet_alsa_probe_logging() {}
 
 /// Whether an ALSA device name is a low-level *plugin* handle rather than a
@@ -196,6 +208,7 @@ fn quiet_alsa_probe_logging() {}
 /// off any card or device name -- and hidden handles are still selectable by
 /// name in the config/CLI, since only the displayed list is filtered. A no-op on
 /// macOS/Windows, whose device names never take this form.
+#[cfg(feature = "frontend")]
 fn is_alsa_plugin_variant(name: &str) -> bool {
     let plugin = name.split(':').next().unwrap_or(name);
     matches!(
@@ -299,6 +312,7 @@ impl AudioOutput {
 /// Open the audio sink for a picker selection: a [`NullSink`] when disabled,
 /// otherwise a [`CpalSink`] on the chosen (or default) device. Device-open
 /// errors propagate so callers can report them; Disabled never fails.
+#[cfg(feature = "frontend")]
 pub fn open_output_sink(
     realtime_priority: bool,
     output: &AudioOutput,
@@ -326,6 +340,7 @@ pub fn open_output_sink(
 /// mixer). Naming individual sinks would need cpal's `jack` backend against
 /// pipewire-jack, which adds a libjack build dependency; not worth it for a niche
 /// control when macOS/Windows enumerate every device directly.
+#[cfg(feature = "frontend")]
 pub fn list_output_devices() -> Vec<String> {
     quiet_alsa_probe_logging();
     cpal::default_host()
@@ -343,6 +358,7 @@ pub fn list_output_devices() -> Vec<String> {
 /// to, so selecting it and selecting "Default" (the `None` option) do the same
 /// thing. `default_name` is the host's default output device name. When the
 /// default is some other device, `default` is a distinct choice and kept.
+#[cfg(feature = "frontend")]
 fn is_redundant_default(name: &str, default_name: Option<&str>) -> bool {
     name.eq_ignore_ascii_case("default")
         && default_name.is_some_and(|d| d.eq_ignore_ascii_case("default"))
@@ -352,6 +368,7 @@ fn is_redundant_default(name: &str, default_name: Option<&str>) -> bool {
 /// as [`list_output_devices`], but drops ALSA's "default" when it is the system
 /// default, since the picker already offers a synthetic "Default" (the `None`
 /// selection) for that. Still selectable by name in the config/CLI.
+#[cfg(feature = "frontend")]
 pub fn picker_output_devices() -> Vec<String> {
     let host = cpal::default_host();
     let default_name = host.default_output_device().and_then(|d| d.name().ok());
@@ -365,6 +382,7 @@ pub fn picker_output_devices() -> Vec<String> {
 /// (case-insensitive), otherwise the system default. A named-but-missing
 /// device warns and falls back to the default rather than leaving the machine
 /// silent.
+#[cfg(feature = "frontend")]
 fn select_output_device(host: &cpal::Host, want: Option<&str>) -> Result<cpal::Device> {
     if let Some(name) = want {
         let needle = name.to_lowercase();
@@ -384,6 +402,7 @@ fn select_output_device(host: &cpal::Host, want: Option<&str>) -> Result<cpal::D
         .ok_or_else(|| anyhow!("no default audio output device"))
 }
 
+#[cfg(feature = "frontend")]
 impl CpalSink {
     /// Build the live cpal output sink. When `realtime_priority` is set, the
     /// audio callback thread promotes itself on its first invocation (see
@@ -549,6 +568,7 @@ impl CpalSink {
     }
 }
 
+#[cfg(feature = "frontend")]
 fn next_live_audio_output_frame(
     resampler: &mut CpalResampler,
     consumer: &mut ringbuf::HeapCons<(f32, f32)>,
@@ -564,6 +584,7 @@ fn next_live_audio_output_frame(
     }
 }
 
+#[cfg(feature = "frontend")]
 struct CpalResampler {
     step: f64,
     phase: f64,
@@ -572,6 +593,7 @@ struct CpalResampler {
     primed: bool,
 }
 
+#[cfg(feature = "frontend")]
 impl CpalResampler {
     fn new(output_sample_rate: u32) -> Self {
         Self {
@@ -634,6 +656,7 @@ impl CpalResampler {
     }
 }
 
+#[cfg(feature = "frontend")]
 fn pop_live_audio_frame(
     consumer: &mut ringbuf::HeapCons<(f32, f32)>,
     underruns: &AtomicU64,
@@ -646,6 +669,7 @@ fn pop_live_audio_frame(
     })
 }
 
+#[cfg(feature = "frontend")]
 impl AudioSink for CpalSink {
     fn push(&mut self, left: f32, right: f32) {
         self.generated_frames = self.generated_frames.saturating_add(1);
@@ -772,6 +796,7 @@ impl AudioSink for CpalSink {
     }
 }
 
+#[cfg(feature = "frontend")]
 impl CpalSink {
     fn request_stale_frame_drop(&self) {
         let stale = stale_live_audio_frames_to_skip(
@@ -825,6 +850,7 @@ impl AudioSink for WavSink {
     }
 }
 
+#[cfg(feature = "frontend")]
 fn stale_live_audio_frames_to_skip(
     occupied_len: usize,
     target_len: usize,
@@ -837,10 +863,12 @@ fn stale_live_audio_frames_to_skip(
     }
 }
 
+#[cfg(feature = "frontend")]
 fn sample_is_audible(left: f32, right: f32) -> bool {
     left != 0.0 || right != 0.0
 }
 
+#[cfg(feature = "frontend")]
 fn live_output_lead_seconds_for_state(
     playback_started: bool,
     occupied_frames: usize,
@@ -856,6 +884,7 @@ fn live_output_lead_seconds_for_state(
     }
 }
 
+#[cfg(feature = "frontend")]
 fn live_output_prebuffering(
     playback_started: bool,
     occupied_frames: usize,
@@ -864,6 +893,7 @@ fn live_output_prebuffering(
     !playback_started && occupied_frames > 0 && occupied_frames < target_frames
 }
 
+#[cfg(feature = "frontend")]
 fn callback_device_cck(output_frames: usize, output_sample_rate: u32) -> u64 {
     let rate = u64::from(output_sample_rate.max(1));
     (output_frames as u64)
@@ -871,7 +901,7 @@ fn callback_device_cck(output_frames: usize, output_sample_rate: u32) -> u64 {
         .div_ceil(rate)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "frontend"))]
 mod tests {
     use super::{
         callback_device_cck, is_alsa_plugin_variant, is_redundant_default,

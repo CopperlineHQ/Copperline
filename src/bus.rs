@@ -26,10 +26,10 @@ use crate::floppy::FloppyController;
 use crate::gayle::Gayle;
 use crate::memory::Memory;
 use crate::rtc::Msm6242Rtc;
+use crate::timebase::{Duration, Instant};
 use crate::video::{beam::BeamEventIndex, FrameGeometry, FB_HEIGHT, FB_WIDTH, MAX_VISIBLE_LINES};
 use log::trace;
 use std::io::Write;
-use std::time::{Duration, Instant};
 
 const CHIP_BUS_SLOT_CCK: u32 = 1;
 const BLITTER_DEADLINE_SLOT_SCAN_LIMIT: u32 = 64;

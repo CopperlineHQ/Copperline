@@ -12,9 +12,9 @@ use crate::cpu;
 use crate::floppy::FloppyController;
 use crate::memory::Memory;
 use crate::serial::StdoutSink;
+use crate::timebase::{Duration, Instant};
 use anyhow::{anyhow, Result};
 use log::{info, warn};
-use std::time::{Duration, Instant};
 
 const INSTRUCTIONS_PER_SLICE: usize = 32_000;
 const INSTRUCTIONS_PER_REALTIME_SLICE: usize = 8_192;
@@ -369,7 +369,7 @@ pub struct EmuStats {
     pub frames: u64,
     pub slices: u64,
     pub instructions: u64,
-    pub started_at: Option<std::time::Instant>,
+    pub started_at: Option<crate::timebase::Instant>,
 }
 
 impl Emulator {
@@ -1208,7 +1208,7 @@ impl Emulator {
     /// without spinning on zero-instruction slices.
     pub fn debug_step_for_gdb(&mut self, cpu_idle: &mut bool) -> Result<()> {
         if self.stats.started_at.is_none() {
-            self.stats.started_at = Some(std::time::Instant::now());
+            self.stats.started_at = Some(crate::timebase::Instant::now());
         }
         let frame_before = self.bus().emulated_frames();
         self.run_one_step(cpu_idle, INSTRUCTIONS_PER_REALTIME_SLICE)?;
@@ -1359,7 +1359,7 @@ impl Emulator {
 
     pub fn step_frame(&mut self) -> Result<()> {
         if self.stats.started_at.is_none() {
-            self.stats.started_at = Some(std::time::Instant::now());
+            self.stats.started_at = Some(crate::timebase::Instant::now());
         }
         self.step_real()?;
         self.stats.frames += 1;
@@ -1840,6 +1840,7 @@ pub fn build_machine(
     }
     // WASM plugin boards: assign each a device slot, put its autoconfig
     // identity on the chain, and instantiate the module.
+    #[cfg(feature = "wasm-boards")]
     for wb in &cfg.wasm_boards {
         let slot = devices.len();
         let mut spec = wb.spec.clone();
@@ -1852,6 +1853,10 @@ pub fn build_machine(
             wb.wasm_path.display()
         );
         devices.push(crate::zorro_device::BoardDevice::Wasm(board));
+    }
+    #[cfg(not(feature = "wasm-boards"))]
+    if !cfg.wasm_boards.is_empty() {
+        anyhow::bail!("[[zorro]] wasm boards require a build with the wasm-boards feature");
     }
     // A2065 Ethernet board (in-tree LANCE NIC): networking is non-deterministic.
     if let Some(net_config) = cfg.a2065_net {

@@ -14,7 +14,7 @@
 //! deterministic `COPPERLINE_RTC_FIXED_SECS` override stays UTC so it
 //! remains host-independent.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use crate::timebase::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Msm6242Rtc {

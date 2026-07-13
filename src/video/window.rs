@@ -9,13 +9,11 @@ use super::deinterlace::{Deinterlacer, OUT_HEIGHT};
 use super::launcher::{LauncherField, LauncherState, MachineSetup, StatusMessage};
 use super::ui::{self, Panel, UiControl, UiState};
 use super::{
-    bitplane, font, present_height, FrameGeometry, FB_HEIGHT, FB_PIXELS, FB_WIDTH,
-    HOST_SHORTCUT_MODIFIER_LABEL, MAX_FB_PIXELS, MAX_VISIBLE_LINES,
+    bitplane, font, present_height, FB_HEIGHT, FB_PIXELS, FB_WIDTH, HOST_SHORTCUT_MODIFIER_LABEL,
+    MAX_FB_PIXELS, MAX_VISIBLE_LINES,
 };
 use crate::audio::{AudioSink, CpalSink};
-use crate::bus::{
-    BeamWriteSource, FrontPanelStatus, RenderRegisterSnapshot, VideoRenderFrameTiming,
-};
+use crate::bus::{BeamWriteSource, FrontPanelStatus, VideoRenderFrameTiming};
 use crate::config::{Config, Overscan, PixelAspect, RawConfig, WarpSpeed};
 use crate::emulator::Emulator;
 use crate::screenshot;
@@ -285,12 +283,9 @@ const VOLUME_GLYPH_X: usize = VOLUME_SLIDER_X - 16;
 // `joystick_toggle_clears_worst_case_media`.
 const JOY_TOGGLE_W: usize = 22;
 const JOY_TOGGLE_X: usize = VOLUME_GLYPH_X - 2 - JOY_TOGGLE_W;
-const STANDARD_PAL_VISIBLE_WIDTH: usize = 320 * 2;
-const STANDARD_PAL_VISIBLE_LINES: usize = 256;
-const STANDARD_PAL_VISIBLE_START_VPOS: u32 = 0x2C;
-// Default TV presentation keeps a small consumer-visible overscan margin while
-// still hiding the deep edge columns that often contain unfinished effects.
-const TV_HORIZONTAL_OVERSCAN_MARGIN: usize = 24 * 2;
+// The standard-window constants (and the TV overscan margin) live in
+// `video/present_common.rs` with the presentation helpers they anchor.
+use crate::video::present_common::STANDARD_PAL_VISIBLE_WIDTH;
 const TV_PAL_PRESENT_WIDTH: usize = STANDARD_PAL_VISIBLE_WIDTH + 2 * 26;
 const TV_PAL_PRESENT_HEIGHT: usize = 540;
 const TV_PAL_PRESENT_SOURCE_X: usize = bitplane::STANDARD_VISIBLE_X0 - 26;
@@ -2092,9 +2087,7 @@ impl Rect {
     }
 }
 
-pub(super) const fn rgba(r: u32, g: u32, b: u32) -> u32 {
-    0xFF00_0000 | (b << 16) | (g << 8) | r
-}
+pub(super) use crate::video::present_common::rgba;
 
 struct EmbeddedRgbaImage {
     width: usize,
@@ -6560,7 +6553,6 @@ pub(super) use statusbar::{draw_rect_bevel, fill_rect, fill_rect_blend};
 
 pub use host_input::parse_amiga_key;
 use host_input::*;
-pub(crate) use present::center_present_frame_for_visible_start;
 use present::*;
 use statusbar::*;
 

@@ -18,7 +18,7 @@
 //! [`BoardBacking`].
 
 use crate::net::NetConfig;
-use crate::wasmboard::{WasmCaps, WasmManifest};
+use crate::wasm_manifest::{WasmCaps, WasmManifest};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::collections::BTreeMap;

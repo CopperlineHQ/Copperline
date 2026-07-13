@@ -2,8 +2,8 @@
 
 //! Serial output sink. Paula's SERDAT writes are funneled through here.
 
+use crate::timebase::Instant;
 use std::io::{self, Write};
-use std::time::Instant;
 
 /// Maps the emulated serial timeline onto the host clock so a timing-sensitive
 /// sink can schedule its output. `host_epoch` is the host instant of emulated

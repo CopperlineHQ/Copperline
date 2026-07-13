@@ -366,6 +366,32 @@ impl FloppyController {
         Ok(())
     }
 
+    /// Insert a disk from in-memory image bytes (any format
+    /// [`FloppyImage::from_bytes`] accepts). `label` stands in for the file
+    /// path in logs and the UI; hosts without a filesystem should pass
+    /// `write_protected = true` (see `from_bytes`).
+    pub fn insert_disk_image_bytes(
+        &mut self,
+        drive_idx: usize,
+        bytes: Vec<u8>,
+        label: PathBuf,
+        write_protected: bool,
+    ) -> Result<()> {
+        ensure!(
+            drive_idx < self.drives.len(),
+            "invalid floppy drive df{}",
+            drive_idx
+        );
+        let image = FloppyImage::from_bytes(bytes, label, write_protected)
+            .with_context(|| format!("loading floppy.df{} image", drive_idx))?;
+        self.idle_cache = false;
+        self.drives[drive_idx].insert_image(image);
+        if self.selected_drive() == Some(drive_idx) {
+            self.ensure_track(drive_idx, self.track_for_drive(drive_idx));
+        }
+        Ok(())
+    }
+
     pub fn eject_disk_image(&mut self, drive_idx: usize) -> Result<()> {
         ensure!(
             drive_idx < self.drives.len(),
@@ -1891,18 +1917,31 @@ impl FloppyImage {
     fn load(config: &FloppyDriveConfig) -> Result<Self> {
         let packed = std::fs::read(&config.path)
             .with_context(|| format!("reading floppy image {}", config.path.display()))?;
+        Self::from_bytes(packed, config.path.clone(), config.write_protected)
+    }
+
+    /// Decode an already-loaded image (the byte-for-byte file contents:
+    /// ADF/extended ADF/DMS/SCP/IPF, optionally gzip- or zip-packed) without
+    /// touching the filesystem. `path` is the display/write-back label; hosts
+    /// with no filesystem (the browser build) must insert write-protected so
+    /// the extended-ADF write-back path never fires.
+    pub(crate) fn from_bytes(
+        packed: Vec<u8>,
+        path: PathBuf,
+        write_protected: bool,
+    ) -> Result<Self> {
         let (data, write_protected, legacy_extended_adf) = if packed.starts_with(GZIP_SIGNATURE) {
             let unpacked = decode_gzip_floppy_image(&packed)?;
-            decode_floppy_payload(unpacked, true, &config.path)?
+            decode_floppy_payload(unpacked, true, &path)?
         } else if packed.starts_with(ZIP_SIGNATURE) {
             let unpacked = decode_zip_floppy_image(&packed)?;
-            decode_floppy_payload(unpacked, true, &config.path)?
+            decode_floppy_payload(unpacked, true, &path)?
         } else {
-            decode_floppy_payload(packed, config.write_protected, &config.path)?
+            decode_floppy_payload(packed, write_protected, &path)?
         };
 
         Ok(Self {
-            path: config.path.clone(),
+            path,
             data,
             write_protected,
             legacy_extended_adf,

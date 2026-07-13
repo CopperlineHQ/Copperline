@@ -20,7 +20,16 @@ use std::sync::OnceLock;
 
 fn snapshot() -> &'static HashMap<OsString, OsString> {
     static SNAPSHOT: OnceLock<HashMap<OsString, OsString>> = OnceLock::new();
-    SNAPSHOT.get_or_init(|| std::env::vars_os().collect())
+    // The browser has no process environment and std::env::vars_os() panics
+    // there ("not supported on this platform"); every knob reads as unset.
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        SNAPSHOT.get_or_init(HashMap::new)
+    }
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        SNAPSHOT.get_or_init(|| std::env::vars_os().collect())
+    }
 }
 
 /// Whether any `COPPERLINE_*` variable is present at all. Every knob this

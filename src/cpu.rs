@@ -1253,7 +1253,10 @@ impl M68kMachine {
         let geometry = self.bus.bus.frame_geometry();
         if !geometry.programmable {
             let visible_start = self.bus.bus.frame_visible_start_vpos();
-            crate::video::window::center_present_frame_for_visible_start(&mut fb, visible_start);
+            crate::video::present_common::center_present_frame_for_visible_start(
+                &mut fb,
+                visible_start,
+            );
         } else if geometry.line_cck != 227 {
             crate::screenshot::stretch_rows_x(
                 &mut fb,

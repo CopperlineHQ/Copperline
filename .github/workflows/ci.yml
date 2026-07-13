@@ -79,6 +79,28 @@ jobs:
             | sed 's/^/--test /' \
             | xargs cargo test --release --lib
 
+  wasm:
+    name: Headless core and browser build
+    # Guards the portability split behind the browser build (see
+    # docs/guide/browser.md): the core must keep compiling without the
+    # desktop frontend, and the web crate must keep compiling for
+    # wasm32-unknown-unknown. Cheap check-only job, so plain ubuntu is fine
+    # (no GPU or audio stack is reached without the `frontend` feature).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Core without the desktop frontend
+        run: cargo check --no-default-features --locked
+      - name: Headless benchmark binary
+        run: cargo check --no-default-features --features bench-bin --locked
+      - name: Web crate (wasm32-unknown-unknown)
+        working-directory: crates/copperline-web
+        run: cargo check --target wasm32-unknown-unknown --locked
+
   m68k-singlestep:
     name: m68k SingleStepTests (68000 fixtures)
     # Runs the per-instruction 68000 fixture suite against the real

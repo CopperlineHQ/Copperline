@@ -32,6 +32,7 @@ pub mod emulator;
 pub mod envcfg;
 pub mod filesys;
 pub mod floppy;
+#[cfg(feature = "frontend")]
 pub mod gamepad;
 pub mod gayle;
 pub mod gdbstub;
@@ -50,9 +51,12 @@ pub mod savestate;
 pub mod screenshot;
 pub mod scsi;
 pub mod serial;
+pub mod timebase;
 pub mod timestamp;
 pub mod timetravel;
 pub mod video;
+pub mod wasm_manifest;
+#[cfg(feature = "wasm-boards")]
 pub mod wasmboard;
 pub mod zorro;
 pub mod zorro_device;

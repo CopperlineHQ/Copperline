@@ -1,0 +1,81 @@
+name: Browser demo
+
+# Builds the wasm browser frontend (crates/copperline-web) and publishes it
+# to the copperline.dev website repository (LinuxJedi/copperline.github.io)
+# under /try when a v* tag is pushed, so the in-browser emulator always
+# matches the latest release. A workflow_dispatch trigger allows
+# re-publishing from whatever ref it is run on without cutting a release.
+#
+# The page shell (try/index.html) is hand-written in the website repository
+# and left alone. This workflow replaces the parts that must change together
+# with the emulator: the wasm-bindgen bundle (try/pkg), the JS glue that
+# drives the WebEmu API (try/try.js, try/audio-worklet.js, sourced from
+# crates/copperline-web/www), and the AROS ROMs (try/aros).
+#
+# Pushing to the website repository needs the SITE_DEPLOY_KEY secret: the
+# private half of an SSH deploy key whose public half is installed with
+# write access on LinuxJedi/copperline.github.io (shared with docs-site.yml).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: wasm-demo-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    name: Build and publish the browser demo
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the wasm target
+        run: rustup target add wasm32-unknown-unknown
+      - name: Install wasm-bindgen-cli
+        # The CLI must match the crate dependency exactly; the version is
+        # pinned in crates/copperline-web/Cargo.toml and parsed from there so
+        # they cannot drift apart.
+        run: |
+          V=$(sed -n 's/^wasm-bindgen = "=\(.*\)"$/\1/p' crates/copperline-web/Cargo.toml)
+          test -n "$V"
+          cargo install wasm-bindgen-cli --version "$V" --locked
+      - name: Build the web crate
+        working-directory: crates/copperline-web
+        run: |
+          cargo build --release --target wasm32-unknown-unknown --locked
+          wasm-bindgen --target web --out-dir pkg \
+            target/wasm32-unknown-unknown/release/copperline_web.wasm
+          test -s pkg/copperline_web_bg.wasm
+      - name: Check out the website repository
+        uses: actions/checkout@v4
+        with:
+          repository: LinuxJedi/copperline.github.io
+          ssh-key: ${{ secrets.SITE_DEPLOY_KEY }}
+          path: site
+      - name: Replace the generated parts of /try
+        # The hand-written page shell must already exist in the site repo;
+        # refuse to publish a bundle onto a site that has no page for it.
+        run: |
+          test -f site/try/index.html
+          rm -rf site/try/pkg site/try/aros
+          mkdir -p site/try/pkg site/try/aros
+          cp crates/copperline-web/pkg/copperline_web.js \
+             crates/copperline-web/pkg/copperline_web_bg.wasm site/try/pkg/
+          cp crates/copperline-web/www/try.js \
+             crates/copperline-web/www/audio-worklet.js site/try/
+          cp assets/aros/aros-amiga-m68k-rom.bin \
+             assets/aros/aros-amiga-m68k-ext.bin \
+             assets/aros/LICENSE assets/aros/ACKNOWLEDGEMENTS site/try/aros/
+      - name: Commit and push
+        working-directory: site
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A try
+          if git diff --cached --quiet; then
+            echo "Browser demo is unchanged; nothing to publish."
+            exit 0
+          fi
+          git commit -m "Publish the browser demo for ${{ github.ref_name }}"
+          git push

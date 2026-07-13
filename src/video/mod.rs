@@ -4,8 +4,12 @@ pub mod beam;
 pub mod bitplane;
 pub mod deinterlace;
 pub mod font;
+#[cfg(feature = "frontend")]
 pub mod launcher;
+pub mod present_common;
+#[cfg(feature = "frontend")]
 pub mod ui;
+#[cfg(feature = "frontend")]
 pub mod window;
 
 #[cfg(target_os = "macos")]

@@ -10,9 +10,12 @@ repository = "https://github.com/LinuxJedi/Copperline"
 keywords = ["amiga", "emulator", "m68k"]
 categories = ["emulators"]
 publish = false
+# `cargo run` should keep launching the emulator now that the headless
+# `copperline-bench` bin target exists.
+default-run = "copperline"
 
 [features]
-default = ["midi"]
+default = ["midi", "frontend", "wasm-boards"]
 display-plan-trace = []
 # Local investigation switches that deliberately alter timing or rendering.
 # Normal builds keep these environment-variable overrides inert so release
@@ -24,6 +27,28 @@ internal-diagnostics = []
 # CoreMIDI (macOS), the ALSA sequencer (Linux), WinMM (Windows); other targets
 # get a stub. See src/midi/.
 midi = []
+# The interactive desktop frontend: the winit/pixels window and launcher,
+# host audio output, gamepads, file dialogs, and the debugger console's
+# clipboard paste. Off, the crate is the portable headless core (the surface
+# a wasm32 browser frontend builds against); the `copperline` binary
+# requires it.
+frontend = [
+    "dep:winit",
+    "dep:pixels",
+    "dep:cpal",
+    "dep:gilrs",
+    "dep:rfd",
+    "dep:arboard",
+    "dep:env_logger",
+]
+# The wasmtime host for functional Zorro boards (src/wasmboard.rs). Separate
+# from `frontend` because it is a core-machine feature, but Cranelift cannot
+# be compiled FOR wasm32, so browser builds turn it off.
+wasm-boards = ["dep:wasmtime"]
+# The headless `copperline-bench` benchmark binary (core-only; also builds
+# for wasm32-wasip1). Off by default so native release artifacts are
+# unchanged.
+bench-bin = []
 
 [dependencies]
 # Path-only dependency on the in-tree fork (crates/m68k). No version requirement
@@ -31,32 +56,34 @@ midi = []
 # always used and the upstream `m68k` crate can never be pulled in; aliased back
 # to `m68k` so source keeps `use m68k::...`. See crates/m68k/Cargo.toml.
 m68k = { package = "copperline-m68k", path = "crates/m68k" }
-pixels = "0.17"
-winit = "0.30"
+pixels = { version = "0.17", optional = true }
+winit = { version = "0.30", optional = true }
 anyhow = "1"
 log = "0.4"
-env_logger = "0.11"
+env_logger = { version = "0.11", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde-big-array = "0.5"
 bincode = "1"
 toml = "0.8"
 png = "0.17"
 flate2 = "1"
-cpal = "0.15"
+cpal = { version = "0.15", optional = true }
+# Kept unconditional (not `frontend`-gated) because the Windows MIDI backend
+# (src/midi/winmm.rs) also uses it; it is pure Rust and wasm-safe.
 ringbuf = "0.4"
 hound = "3.5"
-rfd = "0.17.2"
-gilrs = "0.11"
+rfd = { version = "0.17.2", optional = true }
+gilrs = { version = "0.11", optional = true }
 # Host clipboard for the debugger console's paste (text only; the default
 # image-data feature is left off). wayland-data-control covers Wayland
 # hosts; X11 support is built in on Linux.
-arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
+arboard = { version = "3", default-features = false, features = ["wayland-data-control"], optional = true }
 # WASM plugin host for functional Zorro boards (src/wasmboard.rs). Lean feature
 # set: the Cranelift JIT + runtime only -- no WASI, component model, GC, threads,
 # or wat parsing in the shipped binary (kept deterministic; see the determinism
 # Config in wasmboard.rs). Pin the version: save-state replay of a plugin's
 # linear-memory snapshot is only guaranteed within one wasmtime build.
-wasmtime = { version = "=27.0.0", default-features = false, features = ["cranelift", "runtime"] }
+wasmtime = { version = "=27.0.0", default-features = false, features = ["cranelift", "runtime"], optional = true }
 # Already pulled in transitively; used directly only for localtime_r (local
 # time-zone filename stamps) and, on macOS, the pthread QoS class used for the
 # optional realtime-priority feature (see src/priority.rs).
@@ -74,9 +101,26 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["NSD
 # Optional realtime-priority feature: cross-platform thread scheduling control.
 # Only used off macOS -- the macOS path uses the libc pthread QoS API directly
 # (Core Audio already runs the audio callback real-time), so this crate (and
-# the windows-sys it pulls in) never enters the macOS build.
-[target.'cfg(not(target_os = "macos"))'.dependencies]
+# the windows-sys it pulls in) never enters the macOS build. Excluded on
+# wasm32, where there are no host threads to schedule.
+[target.'cfg(not(any(target_os = "macos", target_arch = "wasm32")))'.dependencies]
 thread-priority = "3.1"
+
+# Browser builds only: std::time::Instant/SystemTime panic on
+# wasm32-unknown-unknown; web-time backs them with performance.now()/Date.now().
+# See src/timebase.rs -- native targets re-export std::time unchanged.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+web-time = "1"
+
+[[bin]]
+name = "copperline"
+path = "src/main.rs"
+required-features = ["frontend"]
+
+[[bin]]
+name = "copperline-bench"
+path = "src/bin/bench.rs"
+required-features = ["bench-bin"]
 
 [dev-dependencies]
 # Compile WAT to wasm bytes in the WASM-plugin-host tests, so golden test
