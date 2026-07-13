@@ -278,8 +278,8 @@ under `golden/`. The emulator core is deterministic, so any pixel change is
 a real behaviour change.
 
 Each probe is its own `#[test]`, so the harness runs the emulator boots in
-parallel on the available cores (the full suite of 17 takes ~20 s on an
-8-core host vs ~85 s sequentially).
+parallel on the available cores (the full suite of 18 takes ~20 s on an
+8-core host vs ~90 s sequentially).
 
 Covered: `timing-test` (all 32 timing rows as rendered hex), `ddfprobe`
 (DDF placement sweep), `ddfprobe-diw1` (DIW edge), `ddfprobe-toggle`
@@ -299,12 +299,19 @@ pair -- the sprite register-FSM class), `regprobe-bytemirror` (CPU byte
 writes latch the mirrored word into COLOR00 -- both byte lanes must render
 the same magenta), `clxprobe` (the CLXDAT collision matrix rendered as
 bit cells for two CLXCON programs, including a plane enabled beyond the
-BPU count), and `audprobe-en` (the AUD0 interrupt cadence as a
+BPU count), `audprobe-en` (the AUD0 interrupt cadence as a
 one-row-per-line strip across a scripted AUDxEN enable / same-word
 disable-re-enable punch / disable / cold-restart sequence -- the issue #74
 deferred AUDxEN-disable class, which the Paula HRM rework regressed once;
 the punch's gap-and-phase signature and the seamless handoff from DMA
-cycle interrupts to the free-running IRQ-mode tick are both pinned).
+cycle interrupts to the free-running IRQ-mode tick are both pinned), and
+`sprprobe-latch` (sprite DMA fetches land in the Denise display latches:
+bars armed manually with SPREN off, a DMA phase whose terminator CTL
+fetch disarms every channel and overwrites SPR0's data words, then SPREN
+off again with an arm-with-zero on SPR0 that must stay invisible, a full
+manual re-arm on SPR2 and a DATA-only re-arm on SPR6 that must both
+appear as full-height bars -- the Hamazing scene-switch stale-bar
+regression class; vAmiga-verified).
 Excluded by design: `ddfprobe-cc5`/`-cc6` sit on deliberate
 race boundaries and would flip on any unrelated timing change, and
 `ddfprobe-cc7` replays a chip-RAM dump of a running demo that is not
