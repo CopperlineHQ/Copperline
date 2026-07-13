@@ -116,7 +116,11 @@ function tick(nowMs) {
 
 Input goes through `key_event(event.code, pressed)` (returns whether the key
 mapped, for `preventDefault`), `mouse_delta(dx, dy)` and
-`mouse_button(button, pressed)`. `reset()` power-cycles, `eject_floppy(n)`
+`mouse_button(button, pressed)`; `set_joystick_port2(...)` and
+`set_cd32_buttons_port2(...)` drive a port-2 pad, which the hosted page
+feeds from the desktop frontend's FS-UAE-compatible keyboard mapping
+(cursor keys, Right Ctrl / Right Alt fire, CD32 extras on C/X/D/S/Enter/Z/A).
+`reset()` power-cycles, `eject_floppy(n)`
 and `set_volume_percent(p)` do what they say, and `emulated_seconds()`
 exposes the guest clock for diagnostics. The presentation pointer is only
 valid until the next `run` call -- rebuild the typed-array view every frame,

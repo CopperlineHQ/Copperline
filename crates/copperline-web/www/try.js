@@ -40,28 +40,46 @@ async function fetchBytes(url, label) {
 }
 
 // --- loading -------------------------------------------------------------
+// The ROM (and optionally a disk) can be chosen before booting: the file
+// pickers stash their bytes here until the boot click, and swap live once
+// the machine is running.
 
-let romBytes = null;
-let extBytes = null;
+let bootRom = null; // { rom, ext, label } - what the boot button will fit
+let pendingDisk = null; // { bytes, name } - inserted right after boot
+
+function refreshBootButton() {
+  bootBtn.disabled = !(wasm && bootRom);
+  bootBtn.textContent = bootRom && bootRom.label !== 'AROS' ? 'Boot Kickstart' : 'Boot AROS';
+}
 
 async function load() {
   try {
-    setLoadStatus('loading emulator + AROS ROMs...');
-    const [wasmExports, rom, ext] = await Promise.all([
-      init(),
+    setLoadStatus('loading emulator...');
+    wasm = await init();
+  } catch (e) {
+    setLoadStatus(`failed to load the emulator: ${e.message ?? e}`);
+    console.error(e);
+    return;
+  }
+  try {
+    setLoadStatus('loading AROS ROMs...');
+    const [rom, ext] = await Promise.all([
       fetchBytes('./aros/aros-amiga-m68k-rom.bin', 'AROS ROM'),
       fetchBytes('./aros/aros-amiga-m68k-ext.bin', 'AROS extended ROM'),
     ]);
-    wasm = wasmExports;
-    romBytes = rom;
-    extBytes = ext;
-    setLoadStatus('ready - boots the open-source AROS ROM');
-    bootBtn.disabled = false;
-    bootBtn.focus();
+    // A Kickstart picked while the ROMs were downloading wins.
+    if (!bootRom) {
+      bootRom = { rom, ext, label: 'AROS' };
+      setLoadStatus('ready - boots the open-source AROS ROM');
+    }
   } catch (e) {
-    setLoadStatus(`failed to load: ${e.message ?? e}`);
+    setLoadStatus(
+      `AROS ROMs failed to load (${e.message ?? e}) - load your own Kickstart to boot`,
+    );
     console.error(e);
   }
+  refreshBootButton();
+  if (!bootBtn.disabled) bootBtn.focus();
 }
 
 // --- boot ----------------------------------------------------------------
@@ -90,7 +108,11 @@ async function boot() {
     }
 
     emu = new WebEmu();
-    emu.load_rom(romBytes, extBytes);
+    emu.load_rom(bootRom.rom, bootRom.ext ?? undefined);
+    if (pendingDisk) {
+      emu.insert_floppy(0, pendingDisk.bytes, pendingDisk.name);
+      pendingDisk = null;
+    }
     emu.set_volume_percent(Number($('vol').value));
     window.__emu = emu; // for debugging/automation
 
@@ -165,15 +187,70 @@ document.addEventListener('visibilitychange', () => {
   else audioCtx.resume();
 });
 
+// --- keyboard joystick (port 2) -------------------------------------------
+// The desktop frontend's FS-UAE-compatible mapping: cursor keys for
+// directions, Right Ctrl / Right Alt for fire, CD32 extras on
+// C/X/D/S/Enter/Z/A. While the toggle is on, these keys drive the port-2
+// joystick instead of reaching the Amiga keyboard.
+
+const JOY_KEYS = {
+  ArrowUp: 'up',
+  ArrowDown: 'down',
+  ArrowLeft: 'left',
+  ArrowRight: 'right',
+  ControlRight: 'fireCtrl',
+  AltRight: 'fireAlt',
+  KeyC: 'red',
+  KeyX: 'blue',
+  KeyD: 'green',
+  KeyS: 'yellow',
+  Enter: 'play',
+  NumpadEnter: 'play',
+  KeyZ: 'rwd',
+  KeyA: 'ffw',
+};
+let joyEnabled = false;
+const joyHeld = {};
+
+function applyJoystick() {
+  const h = joyHeld;
+  emu.set_joystick_port2(
+    !!h.up,
+    !!h.down,
+    !!h.left,
+    !!h.right,
+    !!(h.fireCtrl || h.fireAlt || h.red),
+    !!h.blue,
+  );
+  emu.set_cd32_buttons_port2(!!h.play, !!h.rwd, !!h.ffw, !!h.green, !!h.yellow);
+}
+
+// Returns true when the key was captured for the joystick.
+function joystickKey(code, pressed) {
+  if (!joyEnabled) return false;
+  const control = JOY_KEYS[code];
+  if (!control) return false;
+  joyHeld[control] = pressed;
+  applyJoystick();
+  return true;
+}
+
+$('joy').addEventListener('click', () => {
+  joyEnabled = !joyEnabled;
+  $('joy').textContent = `Joystick: ${joyEnabled ? 'keys' : 'off'}`;
+  for (const k of Object.keys(joyHeld)) joyHeld[k] = false;
+  if (emu) applyJoystick();
+});
+
 // --- keyboard ------------------------------------------------------------
 
 window.addEventListener('keydown', (e) => {
   if (!emu || !running || e.repeat) return;
-  if (emu.key_event(e.code, true)) e.preventDefault();
+  if (joystickKey(e.code, true) || emu.key_event(e.code, true)) e.preventDefault();
 });
 window.addEventListener('keyup', (e) => {
   if (!emu || !running) return;
-  if (emu.key_event(e.code, false)) e.preventDefault();
+  if (joystickKey(e.code, false) || emu.key_event(e.code, false)) e.preventDefault();
 });
 
 // --- mouse ---------------------------------------------------------------
@@ -220,28 +297,39 @@ document.addEventListener('pointerlockchange', () => {
 
 $('df0').addEventListener('change', async (e) => {
   const file = e.target.files[0];
-  if (!file || !emu) return;
+  e.target.value = '';
+  if (!file) return;
   try {
     const bytes = new Uint8Array(await file.arrayBuffer());
-    emu.insert_floppy(0, bytes, file.name);
-    setLoadStatus(`DF0: ${file.name} (write-protected)`);
+    if (emu) {
+      emu.insert_floppy(0, bytes, file.name);
+      setLoadStatus(`DF0: ${file.name} (write-protected)`);
+    } else {
+      pendingDisk = { bytes, name: file.name };
+      setLoadStatus(`DF0: ${file.name} (inserts at boot)`);
+    }
   } catch (err) {
     setLoadStatus(`insert failed: ${err.message ?? err}`);
   }
-  e.target.value = '';
 });
 
 $('kick').addEventListener('change', async (e) => {
   const file = e.target.files[0];
-  if (!file || !emu) return;
+  e.target.value = '';
+  if (!file) return;
   try {
     const bytes = new Uint8Array(await file.arrayBuffer());
-    emu.load_rom(bytes, undefined);
-    setLoadStatus(`Kickstart loaded: ${file.name} - machine power-cycled`);
+    if (emu) {
+      emu.load_rom(bytes, undefined);
+      setLoadStatus(`Kickstart loaded: ${file.name} - machine power-cycled`);
+    } else {
+      bootRom = { rom: bytes, ext: null, label: file.name };
+      refreshBootButton();
+      setLoadStatus(`will boot ${file.name}`);
+    }
   } catch (err) {
     setLoadStatus(`ROM load failed: ${err.message ?? err}`);
   }
-  e.target.value = '';
 });
 
 $('eject').addEventListener('click', () => {

@@ -366,6 +366,41 @@ impl WebEmu {
         }
     }
 
+    /// Port-2 digital joystick state (the page's keyboard-joystick mapping,
+    /// or a Gamepad API bridge). Marks port 2 as a joystick; `fire` is the
+    /// red/primary button, `button2` the blue/second button.
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_joystick_port2(
+        &mut self,
+        up: bool,
+        down: bool,
+        left: bool,
+        right: bool,
+        fire: bool,
+        button2: bool,
+    ) {
+        self.emu
+            .bus_mut()
+            .input
+            .set_joystick_port2(up, down, left, right, fire, button2);
+    }
+
+    /// The CD32 pad's extra buttons on port 2 (red/blue arrive through
+    /// `set_joystick_port2` as fire/button2).
+    pub fn set_cd32_buttons_port2(
+        &mut self,
+        play: bool,
+        rwd: bool,
+        ffw: bool,
+        green: bool,
+        yellow: bool,
+    ) {
+        self.emu
+            .bus_mut()
+            .input
+            .set_cd32_buttons_port2(play, rwd, ffw, green, yellow);
+    }
+
     /// Insert a floppy image (ADF/ADZ/DMS/extended ADF, optionally
     /// gzip/zip-packed) from bytes. Always write-protected: the browser has
     /// nowhere to write changes back to.
