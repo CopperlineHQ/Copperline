@@ -86,6 +86,8 @@ pub struct Config {
     /// Selected machine profile, if a `[machine]` section was given.
     pub machine: Option<MachineModel>,
     pub gate_array: GateArray,
+    /// Memory controller fitted: a Ramsey on the big-box machines.
+    pub mem_controller: MemController,
     /// Akiko gate array fitted (CD32 profile): ID + C2P port at $B80000.
     pub akiko: bool,
     /// CDTV DMAC/CD controller fitted (CDTV profile): a Zorro II
@@ -856,6 +858,29 @@ impl GateArray {
     }
 }
 
+/// Which memory controller the machine carries. The big-box machines put a
+/// Ramsey at $DE0000, where the wedge machines put Gayle; the two are mutually
+/// exclusive, and everything else has neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MemController {
+    #[default]
+    None,
+    /// Ramsey-04, as fitted to the A3000.
+    Ramsey4,
+    /// Ramsey-07, as fitted to the A4000.
+    Ramsey7,
+}
+
+impl MemController {
+    pub fn ramsey_revision(self) -> Option<crate::ramsey::RamseyRevision> {
+        match self {
+            Self::None => None,
+            Self::Ramsey4 => Some(crate::ramsey::RamseyRevision::Rev4),
+            Self::Ramsey7 => Some(crate::ramsey::RamseyRevision::Rev7),
+        }
+    }
+}
+
 const A500_TRAPDOOR_RAM_BYTES: usize = 512 * 1024;
 
 impl Default for Config {
@@ -891,6 +916,7 @@ impl Default for Config {
             denise_revision: DeniseRevision::Ocs,
             machine: None,
             gate_array: GateArray::None,
+            mem_controller: MemController::None,
             akiko: false,
             cdtv_cd: false,
             cd32_pad: false,
@@ -1535,6 +1561,12 @@ pub(crate) struct RawMachine {
     /// clock-equipped A1200.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) rtc: Option<bool>,
+    /// Memory controller fitted, defaulting per profile: `none`, `ramsey-04`
+    /// (A3000) or `ramsey-07` (A4000). Ramsey answers at $DE0000, which no
+    /// other chip decodes, so it can also be fitted to a wedge machine to
+    /// exercise the diagnostic tools.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) mem_controller: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -2051,6 +2083,16 @@ impl TryFrom<RawConfig> for Config {
                 .map(PathBuf::from)
                 .or_else(|| defaults.akiko.then(|| PathBuf::from("cd32-nvram.bin"))),
             rtc_present: raw.machine.rtc.unwrap_or(defaults.rtc_present),
+            mem_controller: match raw.machine.mem_controller.as_deref() {
+                None => defaults.mem_controller,
+                Some("none") => MemController::None,
+                Some("ramsey-04") => MemController::Ramsey4,
+                Some("ramsey-07") => MemController::Ramsey7,
+                Some(other) => anyhow::bail!(
+                    "[machine] mem_controller {other:?} is not one of \
+                     none, ramsey-04, ramsey-07"
+                ),
+            },
             video_standard,
             audio,
             ide,
@@ -2766,6 +2808,7 @@ mod tests {
             machine: RawMachine {
                 profile: Some("A1200".to_string()),
                 rtc: Some(true),
+                mem_controller: Some("ramsey-07".to_string()),
             },
             cpu: RawCpu {
                 model: Some("68EC020".to_string()),
@@ -3125,6 +3168,7 @@ mod tests {
             profile = "A500Plus"
             "#,
         )?;
+        assert_eq!(cfg.mem_controller, MemController::None);
         assert_eq!(cfg.chipset, Chipset::Ecs);
         assert_eq!(cfg.chip_ram_bytes, 1024 * 1024);
         assert_eq!(cfg.slow_ram_bytes, 0);
@@ -3660,6 +3704,33 @@ mod tests {
         )?;
         let unit0 = cfg.scsi.units[0].as_ref().expect("unit0 configured");
         assert_eq!(unit0.volume_name.as_deref(), Some("Work Disk"));
+        Ok(())
+    }
+
+    #[test]
+    fn the_memory_controller_can_be_selected() -> anyhow::Result<()> {
+        let cfg = parse_config(
+            r#"
+            [machine]
+            profile = "A1200"
+            mem_controller = "ramsey-07"
+            "#,
+        )?;
+        assert_eq!(cfg.mem_controller, MemController::Ramsey7);
+        assert_eq!(
+            cfg.mem_controller.ramsey_revision(),
+            Some(crate::ramsey::RamseyRevision::Rev7)
+        );
+
+        let err = parse_config(
+            r#"
+            [machine]
+            mem_controller = "ramsey-08"
+            "#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("ramsey-04"), "{err}");
         Ok(())
     }
 

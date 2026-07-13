@@ -661,6 +661,9 @@ pub struct Bus {
     /// Gayle gate array (A600/A1200 machine profiles); None on machines
     /// without one, which leaves $DA0000/$DE1000 floating as before.
     pub gayle: Option<Gayle>,
+    /// Ramsey memory controller (A3000/A4000 machine profiles). Answers on
+    /// the same $DE0000 page Gayle uses, so the two are never both fitted.
+    pub ramsey: Option<crate::ramsey::Ramsey>,
     /// Akiko gate array (CD32 machine profile): ID, the C2P port, and
     /// NVRAM/CD stubs at $B80000.
     pub akiko: Option<crate::akiko::Akiko>,
@@ -2086,6 +2089,7 @@ impl Bus {
             rtc: Msm6242Rtc::default(),
             rtc_present: true,
             gayle: None,
+            ramsey: None,
             akiko: None,
             cdtv: None,
             devices: Vec::new(),
@@ -2511,6 +2515,10 @@ impl Bus {
         self.gayle = Some(gayle);
     }
 
+    pub fn attach_ramsey(&mut self, ramsey: crate::ramsey::Ramsey) {
+        self.ramsey = Some(ramsey);
+    }
+
     pub fn attach_akiko(&mut self, akiko: crate::akiko::Akiko) {
         self.akiko = Some(akiko);
     }
@@ -2724,6 +2732,9 @@ impl Bus {
         self.rtc = Msm6242Rtc::default();
         if let Some(gayle) = self.gayle.as_mut() {
             gayle.reset();
+        }
+        if let Some(ramsey) = self.ramsey.as_mut() {
+            ramsey.reset();
         }
         if let Some(akiko) = self.akiko.as_mut() {
             akiko.reset();

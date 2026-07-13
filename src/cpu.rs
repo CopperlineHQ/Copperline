@@ -26,6 +26,9 @@ pub const GAYLE_BASE: u32 = 0x00DA_0000;
 pub const GAYLE_SIZE: u32 = 0x0001_0000;
 pub const GAYLE_ID_BASE: u32 = 0x00DE_1000;
 pub const GAYLE_ID_SIZE: u32 = 0x0000_1000;
+/// Ramsey memory controller (A3000/A4000): control and version registers on
+/// the $DE0000 page, below the page Gayle uses for its ID register.
+pub use crate::ramsey::{RAMSEY_BASE, RAMSEY_SIZE};
 /// CDTV battery-backed bookmark RAM (top half of the RTC page).
 pub const CDTV_BATTRAM_BASE: u32 = 0x00DC_8000;
 pub const CDTV_BATTRAM_SIZE: u32 = 0x0000_8000;
@@ -2537,6 +2540,12 @@ impl CpuBus {
                 return value;
             }
         }
+        if self.bus.ramsey.is_some() && range_contains(RAMSEY_BASE, RAMSEY_SIZE, addr) {
+            self.bus.cpu_slow_external_access(Self::access_words(size));
+            if let Some(ramsey) = self.bus.ramsey.as_ref() {
+                return ramsey.read(addr, size);
+            }
+        }
         // A configured functional Zorro board window (registers, boot ROM, DMA
         // strobes): the chain maps it to a device slot. Off the chip bus like
         // Gayle.
@@ -2740,6 +2749,13 @@ impl CpuBus {
                 if gayle.take_activity() {
                     self.bus.note_hdd_activity();
                 }
+            }
+            return;
+        }
+        if self.bus.ramsey.is_some() && range_contains(RAMSEY_BASE, RAMSEY_SIZE, addr) {
+            self.bus.cpu_slow_external_access(Self::access_words(size));
+            if let Some(ramsey) = self.bus.ramsey.as_mut() {
+                ramsey.write(addr, size, value);
             }
             return;
         }

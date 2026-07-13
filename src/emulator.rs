@@ -1953,6 +1953,12 @@ pub fn build_machine(
         }
         bus.attach_gayle(gayle);
     }
+    if let Some(revision) = cfg.mem_controller.ramsey_revision() {
+        // TODO(codewiz): pass the real bank size once motherboard fast RAM
+        // exists; until then Ramsey describes the stock DRAM for the part.
+        let bank_bytes = revision.stock_bank_bytes();
+        bus.attach_ramsey(crate::ramsey::Ramsey::new(revision, bank_bytes));
+    }
     if !devices.is_empty() {
         bus.attach_devices(devices);
     }

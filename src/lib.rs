@@ -44,6 +44,7 @@ pub mod memory;
 pub mod midi;
 pub mod net;
 pub mod priority;
+pub mod ramsey;
 pub mod recorder;
 pub mod romsearch;
 pub mod rtc;
