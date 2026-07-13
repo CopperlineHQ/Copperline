@@ -10337,3 +10337,80 @@ fn debug_plane_mask_hides_pixels_but_not_collisions() {
         "a masked plane's colour must not reach the framebuffer"
     );
 }
+
+/// OCS/ECS BPLCON1 scroll nibbles count lo-res pixels, so a hi-res
+/// playfield shifts two hi-res samples per scroll step (Denise reloads the
+/// shifter when the low 3 nibble bits match the pixel counter; the vAmiga
+/// event model encodes the same grid as scrollOdd cck phase plus a
+/// 2-hires-pixel LSB offset). With the scroll halved, the whole picture
+/// sat one colour clock left of hardware. Regression example: Kickstart
+/// 2.05's insert-disk screen (hi-res, DDFSTRT $40, DIWSTRT hstart $95,
+/// BPLCON1 $44, BPL1MOD -6) clipped the first text column at the window's
+/// left edge and leaked the negative-modulo overlap words - the NEXT
+/// row's first characters - into the last pixels before the right edge.
+#[test]
+fn ecs_hires_bplcon1_scroll_counts_lores_pixels_on_late_ddf_row() {
+    let mut bus = empty_bus();
+    bus.set_agnus_revision(AgnusRevision::Ecs8375);
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
+    bus.denise.diwstrt = 0x6395;
+    bus.denise.diwstop = 0xF4AD;
+    bus.denise.ddfstrt = 0x0040;
+    bus.denise.ddfstop = 0x00D0;
+    bus.denise.bplcon0 = 0x9200;
+    bus.denise.bplcon1 = 0x0044;
+    // Re-fetch the identical 38-word row on every line, mirroring the boot
+    // screen's negative-modulo overlap in the simplest form.
+    bus.denise.bpl1mod = -76;
+    bus.denise.palette.write_ocs(1, 0x0FFF);
+    // Comb bitmap: a marker at the start of every fetched word, with the
+    // second and third words width-coded so the placement is unambiguous.
+    for w in 0..38 {
+        let val = match w {
+            1 => 0xC000,
+            2 => 0xE000,
+            _ => 0x8000,
+        };
+        write_chip_word(&mut bus, 0x1000 + w * 2, val);
+    }
+    bus.denise.bplpt[0] = 0x1000;
+    bus.display_dma_bplpt[0] = 0x1000;
+    bus.current_frame_render_base = bus.capture_render_snapshot();
+
+    bus.agnus.vpos = 0x63;
+    bus.agnus.hpos = 0;
+    for _ in 0..2 * COLORCLOCKS_PER_LINE {
+        bus.advance_chipset(1);
+    }
+
+    let mut fb = vec![0; FB_PIXELS];
+    bitplane::render(&mut bus, &mut fb);
+    let white = rgb12_to_rgba8(0x0FFF);
+    // The window spans fb x [102, 662). DDFSTRT $40 places the row's first
+    // sample 4 colour clocks (16 hi-res px) right of the standard $3C
+    // picture, and the scroll delays it another 8 hi-res px (4 lo-res px),
+    // so sample 0 sits at fb x 86 and the window edge shows fetch x 16.
+    let row = (0x63 + 1 - 0x2C) * FB_WIDTH;
+    // Word 1's two-pixel marker (fetch x 16, 17) is flush at the window
+    // edge: the first character column is fully visible.
+    assert_eq!(fb[row + 102], white, "fetch x 16 at the window edge");
+    assert_eq!(fb[row + 103], white, "fetch x 17 beside it");
+    assert_ne!(fb[row + 104], white, "marker is exactly two px wide");
+    // Word 2's three-pixel marker confirms the origin (86 + 32 = 118).
+    for x in 118..=120 {
+        assert_eq!(fb[row + x], white, "word 2 marker at x={x}");
+    }
+    assert_ne!(fb[row + 121], white, "marker is exactly three px wide");
+    // The last visible word marker is fetch x 560 at fb x 646. The three
+    // overlap words (fetch x 576+) belong past the window's right edge and
+    // must not leak inside it: with the hi-res scroll halved they painted
+    // at fb x 658+, which showed the next row's first characters.
+    assert_eq!(fb[row + 646], white, "fetch x 560 still inside the window");
+    for x in 647..662 {
+        assert_ne!(
+            fb[row + x],
+            white,
+            "overlap word content leaked inside the window at x={x}"
+        );
+    }
+}

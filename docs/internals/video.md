@@ -61,6 +61,13 @@ plane-by-plane according to each plane's individual DMA slot.
 If a manual BPL1DAT write starts a word before a later DMA BPL1DAT load
 point, replay stops the manual word where that DMA word replaces Denise's
 shifter.
+The OCS/ECS BPLCON1 scroll nibbles count lo-res pixels regardless of
+resolution: one step shifts a hi-res playfield two hi-res samples and a
+super-hi-res playfield four, and the comparison narrows with the word
+cadence, so hi-res ignores nibble bit 3 and super-hi-res bits 2-3 (pinned
+by the `ddfprobe-hscroll` golden probe on the Kickstart 2.05 boot-screen
+constellation, vAmiga-verified). AGA's extended BPLCON1 fields feed the
+same per-plane delays through `aga_bplcon1_scroll_samples`.
 BPLCON1-delayed samples at the left edge of a scanline do not reuse the
 previous line's final bitplane word. Before the current line's shifter has a
 sample for a delayed tap, replay marks playfield output active but returns

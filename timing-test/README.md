@@ -291,6 +291,12 @@ the DIW border transition, quiet bus vs 6-plane lores fetch starvation --
 the Shadow of the Beast title band), `ddfprobe-phase`/`-phase2` (DDFSTRT
 sub-unit phase and BPLCON1-scroll placement maps on the ECS 8372A, the
 Rampage dot-cube pan regression; vAmiga-verified band by band),
+`ddfprobe-hscroll` (the BPLCON1 hi-res scroll placement map on the
+Kickstart 2.05 boot-screen constellation -- late DDFSTRT $40 with a
+DIW narrower than the fetch: one lo-res pixel = 2 hi-res px per scroll
+step, nibble bit 3 ignored, and the row-end overlap words exactly
+clipped at the DIW stop; the KS 2.05 first-text-column wrap regression
+class, vAmiga-verified band by band),
 `bltprobe-pace` (CPU pacing bars under BLTPRI copy/fill/line blits and a
 nice-mode line blit -- the BLS-fence and blitter slot-cadence regression
 class; the whole-blit fence collapsed the fill/line bars),
