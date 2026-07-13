@@ -1,0 +1,67 @@
+name: Docs site HTML
+
+# Builds the HTML manual with MyST and publishes it to the copperline.dev
+# website repository (LinuxJedi/copperline.github.io) under /docs when a v*
+# tag is pushed, so the docs on the site always match the latest release.
+# The HTML build itself is checked on every push/PR by the docs job in
+# ci.yml; this workflow only handles publication. A workflow_dispatch
+# trigger allows re-publishing from whatever ref it is run on (e.g. after a
+# docs hotfix on main) without cutting a release.
+#
+# Pushing to the website repository needs the SITE_DEPLOY_KEY secret: the
+# private half of an SSH deploy key whose public half is installed with
+# write access on LinuxJedi/copperline.github.io.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: docs-site-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    name: Build and publish HTML docs
+    # No Typst/PDF here, so plain ubuntu is enough (unlike docs-release.yml).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install MyST CLI
+        run: npm install -g mystmd
+      - name: Build HTML
+        working-directory: docs
+        env:
+          # The docs live under copperline.dev/docs, not at the site root;
+          # MyST prepends this to every internal link and asset URL.
+          BASE_URL: /docs
+        run: |
+          myst build --html --ci --strict
+          test -s _build/html/index.html
+      - name: Check out the website repository
+        uses: actions/checkout@v4
+        with:
+          repository: LinuxJedi/copperline.github.io
+          ssh-key: ${{ secrets.SITE_DEPLOY_KEY }}
+          path: site
+      - name: Replace /docs with the new build
+        # A full replace (not an overlay) so pages and hashed assets deleted
+        # upstream do not linger on the site.
+        run: |
+          rm -rf site/docs
+          cp -r docs/_build/html site/docs
+      - name: Commit and push
+        working-directory: site
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A docs
+          if git diff --cached --quiet; then
+            echo "Docs are unchanged; nothing to publish."
+            exit 0
+          fi
+          git commit -m "Publish docs for ${{ github.ref_name }}"
+          git push

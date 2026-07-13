@@ -70,3 +70,10 @@ site:
   options:
     favicon: ../assets/brand/copperline.ico
     hide_authors: true
+    logo: ../assets/brand/copperline-logo.png
+    logo_alt: Copperline
+    # The logo links back to the main site; the sidebar TOC covers the
+    # docs themselves.
+    logo_url: https://copperline.dev/
+    # Restyles the HTML site build to match copperline.dev; see site.css.
+    style: site.css

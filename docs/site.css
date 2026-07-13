@@ -1,0 +1,177 @@
+/* Copperline theme for the MyST book-theme HTML export, applied via the
+   `style` option in myst.yml. It restyles the docs to match copperline.dev
+   (palette, fonts, copper hairline) without replacing the theme, so it only
+   affects the HTML site build, not the PDF export.
+
+   The @font-face sources point at the font files self-hosted by the website
+   repository; they resolve when the docs are served from copperline.dev/docs.
+   Anywhere else (myst start, CI preview) the fallback system fonts apply. */
+
+@font-face {
+  font-family: "Chakra Petch";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/assets/fonts/chakra-petch-500.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Chakra Petch";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/assets/fonts/chakra-petch-600.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Chakra Petch";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("/assets/fonts/chakra-petch-700.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/assets/fonts/ibm-plex-mono-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/assets/fonts/ibm-plex-mono-500.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/assets/fonts/ibm-plex-mono-600.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-style: normal;
+  font-weight: 100 700;
+  font-display: swap;
+  src: url("/assets/fonts/ibm-plex-sans-var.woff2") format("woff2");
+}
+
+:root {
+  /* Palette lifted from copperline.dev's style.css. */
+  --cl-bg: #080b13;
+  --cl-surface: #11151f;
+  --cl-surface-2: #161b29;
+  --cl-line: #232a3d;
+  --cl-ink: #eef1f8;
+  --cl-ink-soft: #b9c1d4;
+  --cl-copper: #e89154;
+  --cl-copper-hi: #f7b878;
+  --cl-copper-dp: #b9622c;
+  --cl-blue: #54a6ff;
+  --cl-blue-dp: #2e6dc4;
+}
+
+/* Typography: same three families as the website. ------------------------ */
+
+body {
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: "Chakra Petch", "IBM Plex Sans", sans-serif;
+  letter-spacing: 0.01em;
+}
+
+code, kbd, pre, samp {
+  font-family: "IBM Plex Mono", ui-monospace, "SF Mono", monospace;
+}
+
+/* Copper hairline under the sticky top nav - the site's signature motif. - */
+
+.myst-top-nav {
+  position: sticky;
+}
+
+.myst-top-nav::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: linear-gradient(
+    90deg,
+    var(--cl-copper-dp),
+    var(--cl-copper-hi),
+    var(--cl-blue)
+  );
+}
+
+/* Links: chrome blue, copper on hover, in both color schemes. ------------ */
+/* !important is needed to beat the theme's Tailwind utility classes. */
+
+article a,
+.myst-toc a {
+  color: var(--cl-blue-dp) !important;
+}
+
+html.dark article a,
+html.dark .myst-toc a {
+  color: var(--cl-blue) !important;
+}
+
+article a:hover,
+.myst-toc a:hover,
+html.dark article a:hover,
+html.dark .myst-toc a:hover {
+  color: var(--cl-copper-hi) !important;
+}
+
+/* Inline code: copper, as on the website. Fenced blocks keep the theme's
+   syntax highlighting. */
+
+article code:not(pre code) {
+  color: var(--cl-copper-dp) !important;
+}
+
+html.dark article code:not(pre code) {
+  color: var(--cl-copper-hi) !important;
+}
+
+/* Keyboard keys: little machined keycaps, as used heavily in the guide. -- */
+
+kbd {
+  padding: 0.1em 0.5em;
+  font-size: 0.85em;
+  border: 1px solid #c2c9d6;
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: #f4f6fa;
+}
+
+html.dark kbd {
+  color: var(--cl-ink-soft);
+  border-color: var(--cl-line);
+  background: var(--cl-surface-2);
+}
+
+/* Dark scheme surfaces: deep blue-black instead of the theme's stone. ---- */
+
+html.dark,
+html.dark body {
+  background-color: var(--cl-bg) !important;
+}
+
+html.dark body {
+  color: var(--cl-ink);
+}
+
+html.dark .myst-top-nav {
+  background-color: rgba(8, 11, 19, 0.85) !important;
+}
+
+html.dark pre {
+  background-color: var(--cl-surface) !important;
+  border: 1px solid var(--cl-line);
+}

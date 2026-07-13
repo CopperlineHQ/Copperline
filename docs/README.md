@@ -30,6 +30,14 @@ myst build --html        # static site in docs/_build/html
 myst start               # or: live-reloading local preview server
 ```
 
+The HTML site is themed to match copperline.dev via `site.css` (wired up
+through the `style` option in `myst.yml`). On every `v*` tag the
+`docs-site.yml` workflow rebuilds it with `BASE_URL=/docs` and publishes it
+to the website repository, where it is served at
+[copperline.dev/docs](https://copperline.dev/docs). The `@font-face` rules
+in `site.css` point at fonts hosted by the website, so local previews fall
+back to system fonts; everything else looks the same.
+
 ## PDF
 
 ```sh
