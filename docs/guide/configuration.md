@@ -607,13 +607,13 @@ addresses.
 
 ```toml
 [debug]
-log_unmapped = "DD0000-DE0000"
+log_unmapped = "DD0000-DEFFFF"
 ```
 
 `log_unmapped` logs every CPU read and write inside the given range that no
 device decodes. Reads report the floating bus value they returned, writes
-report the value that went nowhere. The value is a hex `START-END` range with
-an exclusive end (a leading `0x` is allowed), or `all` for the whole address
+report the value that went nowhere. The value is a hex `START-END` range whose
+end is included (a leading `0x` is allowed), or `all` for the whole address
 space.
 
 This is how you find the registers a guest expects and Copperline does not

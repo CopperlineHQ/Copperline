@@ -1956,7 +1956,8 @@ pub fn build_machine(
     if let Some(range) = cfg.log_unmapped.clone() {
         info!(
             "debug: logging unmapped CPU accesses in {:#08X}-{:#08X}",
-            range.start, range.end
+            range.start(),
+            range.end()
         );
         bus.log_unmapped = Some(range);
     }

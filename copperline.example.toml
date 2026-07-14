@@ -122,7 +122,7 @@ model = "68000"
 # space to make "all" a firehose (a million lines a boot), so prefer aiming it
 # at one window.
 # [debug]
-# log_unmapped = "DD0000-DE0000"   # hex START-END, end exclusive; or "all"
+# log_unmapped = "DD0000-DEFFFF"   # hex START-END, end included; or "all"
 
 
 # Extended ROM image for CDTV/CD32 machines: a 256 KiB image maps at

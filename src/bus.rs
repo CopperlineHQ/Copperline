@@ -671,7 +671,7 @@ pub struct Bus {
     /// `[debug] log_unmapped`: log CPU accesses in this range that no device
     /// decodes, to find the registers a guest expects and we do not provide.
     #[serde(default)]
-    pub log_unmapped: Option<std::ops::Range<u32>>,
+    pub log_unmapped: Option<std::ops::RangeInclusive<u32>>,
     /// Akiko gate array (CD32 machine profile): ID, the C2P port, and
     /// NVRAM/CD stubs at $B80000.
     pub akiko: Option<crate::akiko::Akiko>,

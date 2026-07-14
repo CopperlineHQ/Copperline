@@ -92,7 +92,7 @@ pub struct Config {
     /// Set by `[debug] log_unmapped`. Off by default: on a booting machine the
     /// ROM probes enough empty space to make this a firehose, so it is meant
     /// to be pointed at one window (e.g. the A4000 IDE at $DD2020).
-    pub log_unmapped: Option<std::ops::Range<u32>>,
+    pub log_unmapped: Option<std::ops::RangeInclusive<u32>>,
     /// Super DMAC fitted (A3000 profile): the SCSI DMA controller at $DD0000.
     /// No WD33C93 behind it yet, so the machine boots with an empty SCSI
     /// socket -- but Kickstart hangs outright if nothing answers at all.
@@ -2247,11 +2247,11 @@ fn parse_chipset(s: &str) -> Result<Chipset> {
 }
 
 /// Parse `[debug] log_unmapped`: `all`, or a hex `START-END` range with an
-/// exclusive end (e.g. `"DD0000-DE0000"`, or `"0x00DD0000-0x00DE0000"`).
-pub(crate) fn parse_log_unmapped(s: &str) -> Result<std::ops::Range<u32>> {
+/// inclusive end (e.g. `"DD0000-DEFFFF"`, or `"0x00DD0000-0x00DEFFFF"`).
+pub(crate) fn parse_log_unmapped(s: &str) -> Result<std::ops::RangeInclusive<u32>> {
     let s = s.trim();
     if s.eq_ignore_ascii_case("all") {
-        return Ok(0..u32::MAX);
+        return Ok(0..=u32::MAX);
     }
     let hex = |v: &str| -> Result<u32> {
         let v = v.trim();
@@ -2266,10 +2266,10 @@ pub(crate) fn parse_log_unmapped(s: &str) -> Result<std::ops::Range<u32>> {
         .split_once('-')
         .ok_or_else(|| anyhow!("[debug] log_unmapped {s:?}: expected \"all\" or \"START-END\""))?;
     let (start, end) = (hex(start)?, hex(end)?);
-    if start >= end {
-        bail!("[debug] log_unmapped {s:?}: start must be below end");
+    if start > end {
+        bail!("[debug] log_unmapped {s:?}: start must not be above end");
     }
-    Ok(start..end)
+    Ok(start..=end)
 }
 
 pub(crate) fn parse_machine_model(s: &str) -> Result<MachineModel> {
@@ -3861,10 +3861,10 @@ mod tests {
         let cfg = parse_config(
             r#"
             [debug]
-            log_unmapped = "DD0000-DE0000"
+            log_unmapped = "DD0000-DEFFFF"
             "#,
         )?;
-        assert_eq!(cfg.log_unmapped, Some(0x00DD_0000..0x00DE_0000));
+        assert_eq!(cfg.log_unmapped, Some(0x00DD_0000..=0x00DE_FFFF));
 
         let cfg = parse_config(
             r#"
@@ -3872,7 +3872,9 @@ mod tests {
             log_unmapped = "all"
             "#,
         )?;
-        assert_eq!(cfg.log_unmapped, Some(0..u32::MAX));
+        // "all" must include the very top of the address space.
+        assert_eq!(cfg.log_unmapped, Some(0..=u32::MAX));
+        assert!(cfg.log_unmapped.unwrap().contains(&0xFFFF_FFFF));
 
         assert_eq!(parse_config("")?.log_unmapped, None);
 
@@ -3885,7 +3887,7 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains("start must be below end"), "{err}");
+        assert!(err.contains("start must not be above end"), "{err}");
         Ok(())
     }
 
