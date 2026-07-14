@@ -1785,12 +1785,15 @@ pub fn build_machine(
     // the chain (mapping its window to a device slot) while the device object
     // is attached to the bus after it is built; the slot index ties them.
     let mut devices: Vec<crate::zorro_device::BoardDevice> = Vec::new();
-    if cfg.scsi.enabled() {
+    // The A3000's motherboard SCSI is not a Zorro board: its drives are fitted
+    // to the Super DMAC further down, once the bus exists.
+    if cfg.scsi.enabled() && cfg.scsi.controller.is_zorro_board() {
         use crate::config::ScsiController;
         let rom_path = cfg.scsi.rom.as_ref().expect("config validated [scsi] rom");
         let slot = devices.len();
         // The controller picks the board; the drive plumbing is identical.
         let device = match cfg.scsi.controller {
+            ScsiController::A3000 => unreachable!("not a Zorro board"),
             ScsiController::A2091 => {
                 let rom = crate::a2091::A2091::load_rom(rom_path, cfg.scsi.rom_odd.as_deref())?;
                 let mut board = crate::a2091::A2091::new(rom)?;
@@ -1962,8 +1965,24 @@ pub fn build_machine(
         bus.log_unmapped = Some(range);
     }
     if cfg.sdmac {
-        bus.attach_sdmac(crate::sdmac::Sdmac::new());
-        info!("sdmac: Super DMAC + WD33C93 at $DD0000 (no drives)");
+        let mut sdmac = crate::sdmac::Sdmac::new();
+        let mut drives = 0;
+        if cfg.scsi.controller == crate::config::ScsiController::A3000 {
+            for (unit, drive) in cfg.scsi.units.iter().enumerate() {
+                let Some(drive) = drive else { continue };
+                sdmac.attach_drive(
+                    unit,
+                    crate::scsi::ScsiDisk::open(&drive.path, unit, drive.volume_name.as_deref())?,
+                );
+                info!("scsi: unit {unit} {}", drive.path.display());
+                drives += 1;
+            }
+        }
+        bus.attach_sdmac(sdmac);
+        match drives {
+            0 => info!("sdmac: Super DMAC + WD33C93 at $DD0000 (no drives)"),
+            n => info!("sdmac: Super DMAC + WD33C93 at $DD0000, {n} drive(s)"),
+        }
     }
     if let Some(revision) = cfg.mem_controller.ramsey_revision() {
         // TODO(codewiz): pass the real bank size once motherboard fast RAM
