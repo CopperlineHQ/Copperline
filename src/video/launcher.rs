@@ -974,6 +974,8 @@ impl MachineSetup {
                         .filter(|s| !s.is_empty())
                         .map(str::to_string),
                     bootpri: (self.filesys_bootpri[i] != -128).then_some(self.filesys_bootpri[i]),
+                    // Not in the GUI yet: mounts it exports stay writable.
+                    readonly: None,
                 })
             })
             .chain(self.filesys_extra.iter().cloned())
@@ -2177,6 +2179,7 @@ mod tests {
             path: path.to_string(),
             volume: Some(path.trim_start_matches('/').to_uppercase()),
             bootpri: None,
+            readonly: None,
         }
     }
 
