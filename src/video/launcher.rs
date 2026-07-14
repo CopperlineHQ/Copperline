@@ -928,7 +928,9 @@ impl MachineSetup {
                 .then(|| self.scsi_rom.as_deref().map(path_string))
                 .flatten();
             // rom_odd is an A2091 split-EPROM option; the A4091 has one ROM.
-            raw.scsi.rom_odd = (controller == ScsiController::A2091)
+            // It is the odd half OF rom, so without rom there is nothing for it
+            // to complete and the config would not validate.
+            raw.scsi.rom_odd = (controller == ScsiController::A2091 && raw.scsi.rom.is_some())
                 .then(|| self.scsi_rom_odd.as_deref().map(path_string))
                 .flatten();
             raw.scsi.unit0 = drive_raw(
