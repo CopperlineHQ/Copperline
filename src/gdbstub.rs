@@ -83,21 +83,53 @@ enum StopReason {
     CopperBreak,
     Reverse,
     Interrupted,
+    /// A new program was LoadSeg'd; gdb re-reads the library list,
+    /// binds pending breakpoints, and resumes on its own.
+    LibraryLoad,
+    /// Same trigger, requested via `monitor loadseg-break`: a plain
+    /// user-visible stop.
+    LoadSeg,
 }
 
 pub fn run(mut emu: Emulator, config: Config) -> Result<()> {
     let bind = normalize_listen_addr(&config.listen)?;
     let listener = TcpListener::bind(&bind).with_context(|| format!("binding GDB stub {bind}"))?;
     log::info!("gdb: listening on {bind}");
-    let (stream, peer) = listener.accept().context("accepting GDB connection")?;
-    log::info!("gdb: connection from {peer}");
-    stream.set_nodelay(true).ok();
 
     emu.set_paced(false);
     emu.enable_time_travel(config.reverse_budget_mb, config.reverse_interval_frames);
     emu.debug_ensure_time_travel_anchor()?;
 
-    Session::new(emu, stream).run()
+    serve(listener, emu)
+}
+
+/// Accept GDB connections one at a time against the same machine. A
+/// detach (or dropped connection) keeps the emulator paused and waits
+/// for the next client -- reattaching re-runs `qOffsets`, which is the
+/// documented way to pick up a program loaded mid-session -- while
+/// GDB's `kill` ends the server.
+fn serve(listener: TcpListener, mut emu: Emulator) -> Result<()> {
+    loop {
+        let (stream, peer) = listener.accept().context("accepting GDB connection")?;
+        log::info!("gdb: connection from {peer}");
+        stream.set_nodelay(true).ok();
+        let mut session = Session::new(emu, stream);
+        let end = session.run()?;
+        session.clear_debug_hardware();
+        emu = session.emu;
+        match end {
+            SessionEnd::Detached => {
+                log::info!("gdb: client detached; machine paused, listening for reconnection");
+            }
+            SessionEnd::Killed => return Ok(()),
+        }
+    }
+}
+
+/// How a [`Session`] ended: a detach/EOF keeps serving, `k` shuts down.
+enum SessionEnd {
+    Detached,
+    Killed,
 }
 
 fn normalize_listen_addr(input: &str) -> Result<String> {
@@ -123,6 +155,15 @@ struct Session {
     reg_watches: Vec<u16>,
     stop: StopReason,
     cpu_idle: bool,
+    /// True once the client has fetched qXfer:libraries:read: from then
+    /// on new LoadSegs stop with a `library:` event.
+    lib_events_armed: bool,
+    /// `monitor loadseg-break`: new LoadSegs cause a user-visible stop.
+    loadseg_break: bool,
+    tracker: crate::amigaos::LibraryTracker,
+    /// Library-list XML cached at offset 0 so multi-chunk reads are
+    /// self-consistent.
+    libraries_xml: String,
 }
 
 impl Session {
@@ -136,13 +177,17 @@ impl Session {
             reg_watches: Vec::new(),
             stop: StopReason::Attached,
             cpu_idle: false,
+            lib_events_armed: false,
+            loadseg_break: false,
+            tracker: crate::amigaos::LibraryTracker::default(),
+            libraries_xml: String::new(),
         }
     }
 
-    fn run(&mut self) -> Result<()> {
+    fn run(&mut self) -> Result<SessionEnd> {
         loop {
             let Some(packet) = self.read_packet()? else {
-                return Ok(());
+                return Ok(SessionEnd::Detached);
             };
             if packet == "QStartNoAckMode" {
                 self.send_packet("OK")?;
@@ -153,10 +198,20 @@ impl Session {
                 PacketOutcome::Reply(reply) => self.send_packet(&reply)?,
                 PacketOutcome::Disconnect => {
                     self.send_packet("OK")?;
-                    return Ok(());
+                    return Ok(SessionEnd::Detached);
                 }
+                PacketOutcome::Kill => return Ok(SessionEnd::Killed),
             }
         }
+    }
+
+    /// Drop the bus-side debug state this session installed (register
+    /// watches, beam traps, Copper breakpoints), so a stale hit cannot
+    /// stop the next client's first continue.
+    fn clear_debug_hardware(&mut self) {
+        self.emu.bus_mut().set_ui_reg_watches(&[]);
+        self.emu.bus_mut().ui_clear_beam_traps();
+        self.emu.bus_mut().ui_clear_copper_breaks();
     }
 
     fn handle_packet(&mut self, packet: &str) -> Result<PacketOutcome> {
@@ -170,13 +225,14 @@ impl Session {
             "qsThreadInfo" => "l".to_string(),
             "vCont?" => "vCont;c;s".to_string(),
             "D" | "D;1" => return Ok(PacketOutcome::Disconnect),
-            "k" => return Ok(PacketOutcome::Disconnect),
+            "k" => return Ok(PacketOutcome::Kill),
             _ if packet.starts_with("qSupported") => {
-                "PacketSize=4000;QStartNoAckMode+;qXfer:features:read+;hwbreak+;ReverseStep+;ReverseContinue+".to_string()
+                "PacketSize=4000;QStartNoAckMode+;qXfer:features:read+;qXfer:libraries:read+;hwbreak+;ReverseStep+;ReverseContinue+".to_string()
             }
             _ if packet.starts_with("qXfer:features:read:target.xml:") => {
                 self.read_target_xml(packet)?
             }
+            _ if packet.starts_with("qXfer:libraries:read::") => self.read_libraries_xml(packet)?,
             _ if packet.starts_with("qOffsets") => self.query_offsets(),
             _ if packet.starts_with("qRcmd,") => {
                 let command = String::from_utf8(hex_decode(&packet[6..])?)
@@ -312,6 +368,7 @@ impl Session {
             StopReason::Watchpoint(addr) => format!("T05watch:{addr:x};thread:1;"),
             StopReason::RegisterWatch => "T05thread:1;".to_string(),
             StopReason::Breakpoint => "T05hwbreak:;thread:1;".to_string(),
+            StopReason::LibraryLoad => "T05library:;thread:1;".to_string(),
             _ => "T05thread:1;".to_string(),
         }
     }
@@ -496,6 +553,25 @@ impl Session {
                 return Ok(Some(StopReason::Watchpoint(watch.addr)));
             }
         }
+        if self.lib_events_armed || self.loadseg_break {
+            let tracker = &mut self.tracker;
+            let event = crate::amigaos::with_bus_memory(self.emu.bus(), |os| {
+                tracker.observe(os).map(|module| {
+                    let first = module.segments.first().map_or(0, |seg| seg.start);
+                    (module.name.clone(), first)
+                })
+            });
+            if let Some((name, first_hunk)) = event {
+                if self.loadseg_break {
+                    self.send_console(&format!(
+                        "loadseg: {name} first hunk ${first_hunk:06X} \
+                         (monitor segments / add-symbol-file FILE 0x{first_hunk:X})\n"
+                    ))?;
+                    return Ok(Some(StopReason::LoadSeg));
+                }
+                return Ok(Some(StopReason::LibraryLoad));
+            }
+        }
         Ok(None)
     }
 
@@ -529,24 +605,32 @@ impl Session {
         let Some((_, range)) = packet.rsplit_once(':') else {
             return Ok("E01".to_string());
         };
-        let Some((offset_s, len_s)) = range.split_once(',') else {
+        xml_chunk_reply(TARGET_XML, range)
+    }
+
+    /// qXfer:libraries:read: the programs LoadSeg has scattered through
+    /// RAM, as gdb's library-list XML. Fetching it arms LoadSeg
+    /// detection, so clients that never ask see no behavior change.
+    fn read_libraries_xml(&mut self, packet: &str) -> Result<String> {
+        let Some(range) = packet.strip_prefix("qXfer:libraries:read::") else {
             return Ok("E01".to_string());
         };
-        let offset = parse_hex_usize(offset_s)?;
-        let len = parse_hex_usize(len_s)?;
-        let bytes = TARGET_XML.as_bytes();
-        if offset >= bytes.len() {
-            return Ok("l".to_string());
+        let offset = range
+            .split_once(',')
+            .map(|(offset_s, _)| parse_hex_usize(offset_s))
+            .transpose()?;
+        // Regenerate only at offset 0 so a multi-chunk read stays
+        // self-consistent.
+        if offset == Some(0) {
+            let tracker = &mut self.tracker;
+            crate::amigaos::with_bus_memory(self.emu.bus(), |os| {
+                tracker.arm(os);
+                tracker.absorb_current(os);
+            });
+            self.lib_events_armed = true;
+            self.libraries_xml = build_library_list_xml(self.tracker.modules());
         }
-        let end = offset.saturating_add(len).min(bytes.len());
-        let prefix = if end == bytes.len() { 'l' } else { 'm' };
-        // TARGET_XML is pure ASCII today, so any offset/len is a valid char
-        // boundary, but both come straight from the peer: don't let a future
-        // non-ASCII addition (or a boundary that happens to split a
-        // multi-byte char) turn into a panic instead of a clean error.
-        let chunk = std::str::from_utf8(&bytes[offset..end])
-            .map_err(|_| anyhow!("target XML slice landed on a non-UTF-8 boundary"))?;
-        Ok(format!("{prefix}{chunk}"))
+        xml_chunk_reply(&self.libraries_xml, range)
     }
 
     /// qOffsets: relocate the debugged executable's sections to where
@@ -588,6 +672,29 @@ impl Session {
         }
     }
 
+    fn monitor_loadseg_list(&mut self) -> String {
+        // Fold in the current process so the list is useful even before
+        // any load event fired. Arming the tracker here does not enable
+        // stops; those are gated on lib_events_armed / loadseg_break.
+        let tracker = &mut self.tracker;
+        crate::amigaos::with_bus_memory(self.emu.bus(), |os| {
+            tracker.arm(os);
+            tracker.absorb_current(os);
+        });
+        if self.tracker.modules().is_empty() {
+            return "no tracked program loads (no walkable process seglist yet)\n".to_string();
+        }
+        let mut out = String::new();
+        for module in self.tracker.modules() {
+            out.push_str(&format!("{}:", module.name));
+            for seg in &module.segments {
+                out.push_str(&format!(" ${:06X} ({} bytes)", seg.start, seg.size));
+            }
+            out.push('\n');
+        }
+        out
+    }
+
     fn handle_monitor(&mut self, command: &str) -> Result<String> {
         let mut parts = command.split_whitespace();
         let Some(cmd) = parts.next() else {
@@ -606,6 +713,20 @@ impl Session {
             )),
             "custom" => Ok(self.monitor_custom()),
             "segments" => Ok(self.monitor_segments()),
+            "loadseg-break" => {
+                self.loadseg_break = !self.loadseg_break;
+                if self.loadseg_break {
+                    let tracker = &mut self.tracker;
+                    crate::amigaos::with_bus_memory(self.emu.bus(), |os| tracker.arm(os));
+                    Ok(
+                        "loadseg break armed: continue stops when a new program is loaded\n"
+                            .to_string(),
+                    )
+                } else {
+                    Ok("loadseg break disarmed\n".to_string())
+                }
+            }
+            "loadseg-list" => Ok(self.monitor_loadseg_list()),
             "stepover" => {
                 // Step over a BSR/JSR/TRAP call (single step otherwise),
                 // bounded so a call that never returns cannot hang the server.
@@ -836,6 +957,66 @@ impl Session {
 enum PacketOutcome {
     Reply(String),
     Disconnect,
+    Kill,
+}
+
+/// One qXfer chunk of `xml` for an "OFFSET,LENGTH" range, with the RSP
+/// more/last prefix.
+fn xml_chunk_reply(xml: &str, range: &str) -> Result<String> {
+    let Some((offset_s, len_s)) = range.split_once(',') else {
+        return Ok("E01".to_string());
+    };
+    let offset = parse_hex_usize(offset_s)?;
+    let len = parse_hex_usize(len_s)?;
+    let bytes = xml.as_bytes();
+    if offset >= bytes.len() {
+        return Ok("l".to_string());
+    }
+    let end = offset.saturating_add(len).min(bytes.len());
+    let prefix = if end == bytes.len() { 'l' } else { 'm' };
+    // The XML is pure ASCII today, so any offset/len is a valid char
+    // boundary, but both come straight from the peer: don't let a future
+    // non-ASCII addition (or a boundary that happens to split a
+    // multi-byte char) turn into a panic instead of a clean error.
+    let chunk = std::str::from_utf8(&bytes[offset..end])
+        .map_err(|_| anyhow!("qXfer XML slice landed on a non-UTF-8 boundary"))?;
+    Ok(format!("{prefix}{chunk}"))
+}
+
+/// gdb's library-list XML: one `<library>` per tracked program with a
+/// `<segment>` per hunk. gdb pairs the segments with the loadable
+/// sections of the file it finds under the library's name (see
+/// `set solib-search-path`).
+fn build_library_list_xml(modules: &[crate::amigaos::TrackedModule]) -> String {
+    if modules.is_empty() {
+        return "<library-list version=\"1.0\"/>".to_string();
+    }
+    let mut xml = String::from("<library-list version=\"1.0\">");
+    for module in modules {
+        xml.push_str(&format!("<library name=\"{}\">", xml_escape(&module.name)));
+        for seg in &module.segments {
+            xml.push_str(&format!("<segment address=\"0x{:08x}\"/>", seg.start));
+        }
+        xml.push_str("</library>");
+    }
+    xml.push_str("</library-list>");
+    xml
+}
+
+/// Names come from guest memory, so escape them before they land in an
+/// XML attribute.
+fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 fn monitor_help() -> String {
@@ -850,7 +1031,8 @@ fn monitor_help() -> String {
      copper-break ADDR | clear-copper-breaks\n\
      copper [auto|pc|ADDR] [COUNT]\n\
      last-writer ADDR\n\
-     segments\n"
+     segments\n\
+     loadseg-break | loadseg-list\n"
         .to_string()
 }
 
@@ -981,5 +1163,248 @@ mod tests {
         bytes = &bytes[bytes.len() - 8..];
         assert!(!bytes.is_empty());
         Ok(())
+    }
+
+    /// Build an emulator whose ROM program installs a seglist BPTR into
+    /// a staged CLI structure, mimicking the tail of AmigaDOS
+    /// RunCommand() after LoadSeg():
+    ///
+    /// ```text
+    /// F80010  NOP
+    /// F80012  MOVE.L #$5000,($1303C).L   ; cli_Module <- seglist BPTR
+    /// F8001C  BRA.S  *
+    /// ```
+    ///
+    /// Chip RAM holds a fake exec world: ExecBase at $10000 (installed
+    /// at address 4 after reset), ThisTask a process at $12000 whose
+    /// CLI at $13000 names "dh0:c/hello", and a two-hunk seglist at
+    /// $14000/$15000.
+    fn emulator_with_loadseg_program() -> Emulator {
+        let mut rom = vec![0u8; crate::memory::ROM_SIZE];
+        let put_word = |mem: &mut [u8], off: usize, word: u16| {
+            mem[off..off + 2].copy_from_slice(&word.to_be_bytes());
+        };
+        put_word(&mut rom, 0x10, 0x4E71); // NOP
+        put_word(&mut rom, 0x12, 0x23FC); // MOVE.L #imm,(abs).L
+        put_word(&mut rom, 0x14, 0x0000);
+        put_word(&mut rom, 0x16, 0x5000); // seglist BPTR ($14000 >> 2)
+        put_word(&mut rom, 0x18, 0x0001);
+        put_word(&mut rom, 0x1A, 0x303C); // cli_Module at $13000 + $3C
+        put_word(&mut rom, 0x1C, 0x60FE); // BRA.S *
+
+        let mut chip_ram = vec![0u8; 512 * 1024];
+        let put32 = |mem: &mut [u8], addr: usize, value: u32| {
+            mem[addr..addr + 4].copy_from_slice(&value.to_be_bytes());
+        };
+        put32(&mut chip_ram, 0, 0x0000_4000); // reset SSP
+        put32(&mut chip_ram, 4, 0x00F8_0010); // reset PC
+        let base = 0x0001_0000u32;
+        put32(&mut chip_ram, (base + 0x26) as usize, !base); // ChkBase
+        put32(&mut chip_ram, (base + 0x114) as usize, 0x0001_2000); // ThisTask
+        chip_ram[0x1_2008] = 13; // ln_Type NT_PROCESS
+        put32(&mut chip_ram, 0x1_20AC, 0x0001_3000 >> 2); // pr_CLI
+        put32(&mut chip_ram, 0x1_3010, 0x0001_3800 >> 2); // cli_CommandName
+        chip_ram[0x1_3800] = 11;
+        chip_ram[0x1_3801..0x1_380C].copy_from_slice(b"dh0:c/hello");
+        put32(&mut chip_ram, 0x1_3FFC, 0x100); // hunk 1 size
+        put32(&mut chip_ram, 0x1_4000, 0x0001_5000 >> 2); // hunk 1 next
+        put32(&mut chip_ram, 0x1_4FFC, 0x40); // hunk 2 size
+        put32(&mut chip_ram, 0x1_5000, 0); // end of list
+
+        let bus = crate::bus::Bus::new(
+            crate::memory::Memory {
+                chip_ram,
+                slow_ram: Vec::new(),
+                rom,
+                overlay: false,
+                zorro: crate::zorro::ZorroChain::default(),
+                extended_rom: Vec::new(),
+                extended_rom_base: 0,
+                wcs: Vec::new(),
+                wcs_write_protected: false,
+            },
+            crate::chipset::paula::Paula::new(
+                Box::new(crate::serial::NullSerialSink),
+                Box::new(crate::audio::NullSink),
+            ),
+            crate::floppy::FloppyController::default(),
+        );
+        let mut emu = Emulator::new(
+            bus,
+            crate::config::CpuModel::M68000,
+            false,
+            Default::default(),
+            crate::config::PacingBudget::Cycles,
+            2,
+            false,
+        )
+        .unwrap();
+        // The reset vectors are latched; address 4 can now hold the
+        // ExecBase pointer.
+        emu.machine.debug_write_memory(4, &base.to_be_bytes());
+        emu
+    }
+
+    /// A minimal RSP client for driving a [`Session`] over loopback.
+    struct GdbClient {
+        stream: TcpStream,
+    }
+
+    impl GdbClient {
+        fn connect(addr: std::net::SocketAddr) -> Self {
+            let stream = TcpStream::connect(addr).unwrap();
+            stream.set_nodelay(true).ok();
+            Self { stream }
+        }
+
+        fn send(&mut self, payload: &str) {
+            write!(
+                self.stream,
+                "${payload}#{:02x}",
+                checksum(payload.as_bytes())
+            )
+            .unwrap();
+            self.stream.flush().unwrap();
+        }
+
+        fn read_reply(&mut self) -> String {
+            let mut byte = [0u8; 1];
+            loop {
+                self.stream.read_exact(&mut byte).unwrap();
+                if byte[0] == b'$' {
+                    break;
+                }
+            }
+            let mut payload = Vec::new();
+            loop {
+                self.stream.read_exact(&mut byte).unwrap();
+                if byte[0] == b'#' {
+                    break;
+                }
+                payload.push(byte[0]);
+            }
+            let mut sum = [0u8; 2];
+            self.stream.read_exact(&mut sum).unwrap();
+            self.stream.write_all(b"+").unwrap();
+            String::from_utf8(payload).unwrap()
+        }
+
+        /// Send a request and collect decoded O (console) packets until
+        /// the final non-O reply.
+        fn request_collect(&mut self, payload: &str) -> (Vec<String>, String) {
+            self.send(payload);
+            let mut console = Vec::new();
+            loop {
+                let reply = self.read_reply();
+                if reply.starts_with('O') && reply != "OK" {
+                    console.push(String::from_utf8(hex_decode(&reply[1..]).unwrap()).unwrap());
+                    continue;
+                }
+                return (console, reply);
+            }
+        }
+
+        fn request(&mut self, payload: &str) -> String {
+            self.request_collect(payload).1
+        }
+    }
+
+    /// Run a [`Session`] against a scripted client on a loopback socket.
+    /// The session runs on the test thread; client panics propagate
+    /// through the join.
+    fn run_session(emu: Emulator, client: impl FnOnce(GdbClient) + Send + 'static) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let thread = std::thread::spawn(move || client(GdbClient::connect(addr)));
+        let (stream, _) = listener.accept().unwrap();
+        Session::new(emu, stream).run().unwrap();
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn detach_keeps_serving_and_reattach_reruns_qoffsets() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let thread = std::thread::spawn(move || {
+            // First client: arm loadseg-break, continue to the load,
+            // then detach.
+            let mut first = GdbClient::connect(addr);
+            let (_, reply) =
+                first.request_collect(&format!("qRcmd,{}", hex_encode(b"loadseg-break")));
+            assert_eq!(reply, "OK");
+            let (_, reply) = first.request_collect("c");
+            assert_eq!(reply, "T05thread:1;");
+            assert_eq!(first.request("D"), "OK");
+            drop(first);
+            // Second client: attach-time qOffsets now reports the
+            // program the first session ran into.
+            let mut second = GdbClient::connect(addr);
+            assert_eq!(second.request("qOffsets"), "TextSeg=14004;DataSeg=15004");
+            second.send("k");
+        });
+        serve(listener, emulator_with_loadseg_program()).unwrap();
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn qrcmd_monitor_commands_round_trip_over_the_wire() {
+        run_session(emulator_with_loadseg_program(), |mut client| {
+            let (console, reply) =
+                client.request_collect(&format!("qRcmd,{}", hex_encode(b"help")));
+            assert_eq!(reply, "OK");
+            let text = console.concat();
+            assert!(text.contains("segments"), "monitor help output: {text}");
+            assert_eq!(client.request("D"), "OK");
+        });
+    }
+
+    #[test]
+    fn library_list_serves_loadseg_events_over_the_wire() {
+        run_session(emulator_with_loadseg_program(), |mut client| {
+            let supported = client.request("qSupported:xmlRegisters=i386");
+            assert!(
+                supported.contains("qXfer:libraries:read+"),
+                "qSupported: {supported}"
+            );
+            // Fetching the (empty) library list arms LoadSeg detection.
+            assert_eq!(
+                client.request("qXfer:libraries:read::0,1000"),
+                "l<library-list version=\"1.0\"/>"
+            );
+            // The ROM program installs cli_Module: continue stops with
+            // a library event.
+            assert_eq!(client.request("c"), "T05library:;thread:1;");
+            let list = client.request("qXfer:libraries:read::0,1000");
+            assert!(list.contains("<library name=\"hello\">"), "list: {list}");
+            assert!(
+                list.contains("<segment address=\"0x00014004\"/>"),
+                "list: {list}"
+            );
+            assert!(
+                list.contains("<segment address=\"0x00015004\"/>"),
+                "list: {list}"
+            );
+            assert_eq!(client.request("D"), "OK");
+        });
+    }
+
+    #[test]
+    fn monitor_loadseg_break_stops_visibly() {
+        run_session(emulator_with_loadseg_program(), |mut client| {
+            let (console, reply) =
+                client.request_collect(&format!("qRcmd,{}", hex_encode(b"loadseg-break")));
+            assert_eq!(reply, "OK");
+            assert!(console.concat().contains("armed"));
+            let (console, reply) = client.request_collect("c");
+            assert_eq!(reply, "T05thread:1;");
+            let text = console.concat();
+            assert!(text.contains("loadseg: hello"), "console: {text}");
+            assert!(text.contains("$014004"), "console: {text}");
+            let (console, reply) =
+                client.request_collect(&format!("qRcmd,{}", hex_encode(b"loadseg-list")));
+            assert_eq!(reply, "OK");
+            assert!(console.concat().contains("hello:"), "loadseg-list output");
+            assert_eq!(client.request("D"), "OK");
+        });
     }
 }
