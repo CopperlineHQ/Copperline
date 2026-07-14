@@ -41,6 +41,15 @@ jobs:
         run: |
           myst build --html --ci --strict
           test -s _build/html/index.html
+      - name: Inject the analytics snippet
+        # GoatCounter is added at deploy time so the MyST sources stay
+        # analytics-free. The hand-written pages in the website repository
+        # carry the same snippet directly in their <head>.
+        working-directory: docs
+        run: |
+          find _build/html -name '*.html' -print0 | xargs -0 perl -0777 -pi -e \
+            's{</head>}{<script data-goatcounter="https://linuxjedi.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>\n</head>}'
+          grep -q 'data-goatcounter' _build/html/index.html
       - name: Check out the website repository
         uses: actions/checkout@v4
         with:
