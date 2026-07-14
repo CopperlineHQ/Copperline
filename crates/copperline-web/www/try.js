@@ -71,6 +71,58 @@ function refreshBootButton() {
   bootBtn.textContent = bootRom && bootRom.label !== 'AROS' ? 'Boot Kickstart' : 'Boot AROS';
 }
 
+// A disk image can also come from a link: /try/?df0=<url> fetches it and
+// inserts it at boot, so a bootable demo is one shareable URL, and the
+// "DF0 from URL" button does the same for a pasted address. The fetch
+// happens in the visitor's browser and nothing is proxied, so the host
+// must allow cross-origin GETs (same-origin always works, archive.org
+// does too). ROMs are deliberately local-only: Kickstart images are
+// copyrighted, and a ?kick= parameter would only exist to share them.
+
+// Sanity cap on fetched disk images; SCP flux dumps run tens of MB.
+const DISK_URL_MAX_BYTES = 64 << 20;
+
+async function insertDiskFromUrl(url) {
+  let parsed;
+  try {
+    parsed = new URL(url, location.href);
+  } catch {
+    setLoadStatus('disk URL: not a valid URL');
+    return;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    setLoadStatus('disk URL: only http(s) is supported');
+    return;
+  }
+  const name =
+    decodeURIComponent(parsed.pathname.split('/').pop() || '') || 'disk.adf';
+  setLoadStatus(`fetching ${name}...`);
+  try {
+    const resp = await fetch(parsed.href);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    if (Number(resp.headers.get('content-length') ?? 0) > DISK_URL_MAX_BYTES) {
+      throw new Error('file too large');
+    }
+    const bytes = new Uint8Array(await resp.arrayBuffer());
+    if (bytes.length > DISK_URL_MAX_BYTES) throw new Error('file too large');
+    if (emu) {
+      emu.insert_floppy(0, bytes, name);
+      setLoadStatus(`DF0: ${name} (write-protected)`);
+    } else {
+      pendingDisk = { bytes, name };
+      setLoadStatus(`DF0: ${name} (inserts at boot)`);
+    }
+  } catch (e) {
+    // A TypeError is the opaque network/CORS failure; HTTP and size errors
+    // speak for themselves.
+    const hint =
+      e instanceof TypeError
+        ? ' - the host must allow cross-origin requests (CORS)'
+        : '';
+    setLoadStatus(`disk fetch failed: ${e.message ?? e}${hint}`);
+  }
+}
+
 async function load() {
   try {
     setLoadStatus('loading emulator...');
@@ -89,7 +141,13 @@ async function load() {
     // A Kickstart picked while the ROMs were downloading wins.
     if (!bootRom) {
       bootRom = { rom, ext, label: 'AROS' };
-      setLoadStatus('ready - boots the open-source AROS ROM');
+      // A disk that landed first (file picker or ?df0= fetch) keeps its
+      // place in the status line.
+      setLoadStatus(
+        pendingDisk
+          ? `ready - DF0: ${pendingDisk.name} inserts at boot`
+          : 'ready - boots the open-source AROS ROM',
+      );
     }
   } catch (e) {
     setLoadStatus(
@@ -644,5 +702,15 @@ $('vol').addEventListener('input', (e) => {
   if (emu) emu.set_volume_percent(Number(e.target.value));
 });
 
+// Optional in the page shell: older shells have no URL button.
+$('df0url')?.addEventListener('click', () => {
+  const url = window.prompt(
+    'Disk image URL (ADF/ADZ/DMS/IPF/SCP, gzip or zip packed):',
+  );
+  if (url && url.trim()) insertDiskFromUrl(url.trim());
+});
+
 bootBtn.addEventListener('click', boot);
+const linkedDisk = new URLSearchParams(location.search).get('df0');
+if (linkedDisk) insertDiskFromUrl(linkedDisk);
 load();
