@@ -86,6 +86,17 @@ pub struct Config {
     /// Selected machine profile, if a `[machine]` section was given.
     pub machine: Option<MachineModel>,
     pub gate_array: GateArray,
+    /// Memory controller fitted: a Ramsey on the big-box machines.
+    pub mem_controller: MemController,
+    /// Log every CPU access that no device decodes, within this address range.
+    /// Set by `[debug] log_unmapped`. Off by default: on a booting machine the
+    /// ROM probes enough empty space to make this a firehose, so it is meant
+    /// to be pointed at one window (e.g. the A4000 IDE at $DD2020).
+    pub log_unmapped: Option<std::ops::RangeInclusive<u32>>,
+    /// Super DMAC fitted (A3000 profile): the SCSI DMA controller at $DD0000.
+    /// No WD33C93 behind it yet, so the machine boots with an empty SCSI
+    /// socket -- but Kickstart hangs outright if nothing answers at all.
+    pub sdmac: bool,
     /// Akiko gate array fitted (CD32 profile): ID + C2P port at $B80000.
     pub akiko: bool,
     /// CDTV DMAC/CD controller fitted (CDTV profile): a Zorro II
@@ -639,6 +650,9 @@ pub enum Chipset {
 /// RTC presence). With no `[machine]` section the defaults match the `A500`
 /// profile: the A500 Rev 6A (ECS 8372A Agnus, OCS 8362 Denise, 68000,
 /// 512 KiB chip RAM, and 512 KiB trapdoor slow RAM).
+///
+/// Append new models at the end: savestates carry the discriminant, so
+/// inserting one in the middle renames every model below it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MachineModel {
     /// A500 Rev 6A: the ECS "Fatter" 8372A Agnus (1 MiB chip reach, software
@@ -662,9 +676,18 @@ pub enum MachineModel {
     /// no Kickstart ROM -- the `rom` is the 64 KiB bootstrap ROM, which loads
     /// Kickstart from the Kickstart disk in DF0 into 256 KiB of writable
     /// control store (WCS) at $FC0000 and then write-protects it. 256 KiB
-    /// stock chip RAM, no trapdoor slow RAM, no RTC. (Added last so the
-    /// serialized discriminants of the other models do not shift.)
+    /// stock chip RAM, no trapdoor slow RAM, no RTC.
     A1000,
+    /// A3000: ECS, 68030 at 25 MHz, 2 MB chip RAM, a Ramsey-04 memory
+    /// controller and the battery-backed MSM6242 clock. No Gayle -- the
+    /// big-box machines carry Gary -- and no slow RAM. Motherboard fast RAM is
+    /// not emulated; the OS is happy taking its fast RAM from the Zorro III
+    /// board instead.
+    A3000,
+    /// A4000: the same board a generation later -- AGA, a 25 MHz 68040, and
+    /// Ramsey-07. Same story on Gayle, slow RAM and motherboard fast RAM as
+    /// the A3000.
+    A4000,
 }
 
 /// Identity of a ROM image: its length and a CRC-32 of its bytes. Enough to
@@ -834,24 +857,62 @@ impl MachineDescriptor {
     }
 }
 
-/// Which gate array the machine carries. Gayle owns IDE, PCMCIA, and the
-/// interrupt plumbing at $DA8000-$DAA000 plus the ID register at $DE1000.
+/// Which bus gate array the machine carries. A machine has exactly one, and
+/// they are not interchangeable parts so much as the same seat on the board:
+/// both decode the $DE0000 page, so fitting two would make the decode
+/// ambiguous.
+///
+/// Gayle (the wedge machines) is the bus controller plus IDE, PCMCIA, and the
+/// interrupt plumbing at $DA8000-$DAA000, with an ID register at $DE1000. Fat
+/// Gary (the big-box machines) is only a bus controller: three flag registers
+/// on byte lanes 0-2 of the $DE0000 page, with Ramsey answering on lane 3.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GateArray {
     #[default]
     None,
     GayleA600,
     GayleA1200,
+    /// Fat Gary, as fitted to the A3000 and A4000. Always accompanied by a
+    /// Ramsey (see [`MemController`]): they share one address decode.
+    FatGary,
 }
 
 impl GateArray {
     /// The 8-bit ID shifted out of $DE1000 (MSB first): $D0 on the A600,
-    /// $D1 on the A1200.
+    /// $D1 on the A1200. Only Gayle has one.
     pub fn gayle_id(self) -> Option<u8> {
         match self {
-            Self::None => None,
+            Self::None | Self::FatGary => None,
             Self::GayleA600 => Some(0xD0),
             Self::GayleA1200 => Some(0xD1),
+        }
+    }
+
+    /// Whether this machine's gate array is a Fat Gary.
+    pub fn is_fat_gary(self) -> bool {
+        self == Self::FatGary
+    }
+}
+
+/// Which memory controller the machine carries. The big-box machines put a
+/// Ramsey at $DE0000, where the wedge machines put Gayle; the two are mutually
+/// exclusive, and everything else has neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MemController {
+    #[default]
+    None,
+    /// Ramsey-04, as fitted to the A3000.
+    Ramsey4,
+    /// Ramsey-07, as fitted to the A4000.
+    Ramsey7,
+}
+
+impl MemController {
+    pub fn ramsey_revision(self) -> Option<crate::ramsey::RamseyRevision> {
+        match self {
+            Self::None => None,
+            Self::Ramsey4 => Some(crate::ramsey::RamseyRevision::Rev4),
+            Self::Ramsey7 => Some(crate::ramsey::RamseyRevision::Rev7),
         }
     }
 }
@@ -891,6 +952,9 @@ impl Default for Config {
             denise_revision: DeniseRevision::Ocs,
             machine: None,
             gate_array: GateArray::None,
+            mem_controller: MemController::None,
+            log_unmapped: None,
+            sdmac: false,
             akiko: false,
             cdtv_cd: false,
             cd32_pad: false,
@@ -1178,6 +1242,8 @@ pub struct RawConfig {
     pub(crate) identify: Option<bool>,
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) cd: RawCd,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub(crate) debug: RawDebug,
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) cpu: RawCpu,
     #[serde(default, skip_serializing_if = "is_default")]
@@ -1535,6 +1601,23 @@ pub(crate) struct RawMachine {
     /// clock-equipped A1200.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) rtc: Option<bool>,
+    /// Memory controller fitted, defaulting per profile: `none`, `ramsey-04`
+    /// (A3000) or `ramsey-07` (A4000). Ramsey answers at $DE0000, which no
+    /// other chip decodes, so it can also be fitted to a wedge machine to
+    /// exercise the diagnostic tools.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) mem_controller: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawDebug {
+    /// Log CPU accesses that no device decodes. Either `all`, or an address
+    /// range like `"DD0000-DE0000"` (hex, end exclusive) to watch one window.
+    /// Reads report the floating bus value they returned; writes report the
+    /// value that went nowhere.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) log_unmapped: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -1864,7 +1947,11 @@ impl TryFrom<RawConfig> for Config {
             master: raw.ide.master.map(drive_image).transpose()?,
             slave: raw.ide.slave.map(drive_image).transpose()?,
         };
-        if (ide.master.is_some() || ide.slave.is_some()) && defaults.gate_array == GateArray::None {
+        // Only Gayle carries an IDE interface. A Fat Gary machine has one too
+        // (the A4000's, at $DD2020), but it is not emulated yet and it is not
+        // Gayle's, so [ide] cannot drive it.
+        if (ide.master.is_some() || ide.slave.is_some()) && defaults.gate_array.gayle_id().is_none()
+        {
             errors.push(anyhow!(
                 "[ide] images need a Gayle machine: set [machine] profile = \"A600\" (or A1200)"
             ));
@@ -2036,6 +2123,7 @@ impl TryFrom<RawConfig> for Config {
             denise_revision,
             machine,
             gate_array: defaults.gate_array,
+            sdmac: defaults.sdmac,
             akiko: defaults.akiko,
             cdtv_cd: defaults.cdtv_cd,
             cd32_pad: defaults.cd32_pad,
@@ -2051,6 +2139,22 @@ impl TryFrom<RawConfig> for Config {
                 .map(PathBuf::from)
                 .or_else(|| defaults.akiko.then(|| PathBuf::from("cd32-nvram.bin"))),
             rtc_present: raw.machine.rtc.unwrap_or(defaults.rtc_present),
+            log_unmapped: raw
+                .debug
+                .log_unmapped
+                .as_deref()
+                .map(parse_log_unmapped)
+                .transpose()?,
+            mem_controller: match raw.machine.mem_controller.as_deref() {
+                None => defaults.mem_controller,
+                Some("none") => MemController::None,
+                Some("ramsey-04") => MemController::Ramsey4,
+                Some("ramsey-07") => MemController::Ramsey7,
+                Some(other) => anyhow::bail!(
+                    "[machine] mem_controller {other:?} is not one of \
+                     none, ramsey-04, ramsey-07"
+                ),
+            },
             video_standard,
             audio,
             ide,
@@ -2163,6 +2267,32 @@ fn parse_chipset(s: &str) -> Result<Chipset> {
     }
 }
 
+/// Parse `[debug] log_unmapped`: `all`, or a hex `START-END` range with an
+/// inclusive end (e.g. `"DD0000-DEFFFF"`, or `"0x00DD0000-0x00DEFFFF"`).
+pub(crate) fn parse_log_unmapped(s: &str) -> Result<std::ops::RangeInclusive<u32>> {
+    let s = s.trim();
+    if s.eq_ignore_ascii_case("all") {
+        return Ok(0..=u32::MAX);
+    }
+    let hex = |v: &str| -> Result<u32> {
+        let v = v.trim();
+        let digits = v
+            .strip_prefix("0x")
+            .or_else(|| v.strip_prefix("0X"))
+            .unwrap_or(v);
+        u32::from_str_radix(digits, 16)
+            .with_context(|| format!("[debug] log_unmapped: {v:?} is not a hex address"))
+    };
+    let (start, end) = s
+        .split_once('-')
+        .ok_or_else(|| anyhow!("[debug] log_unmapped {s:?}: expected \"all\" or \"START-END\""))?;
+    let (start, end) = (hex(start)?, hex(end)?);
+    if start > end {
+        bail!("[debug] log_unmapped {s:?}: start must not be above end");
+    }
+    Ok(start..=end)
+}
+
 pub(crate) fn parse_machine_model(s: &str) -> Result<MachineModel> {
     let norm = s.trim().to_ascii_uppercase().replace(['_', '-', ' '], "");
     match norm.as_str() {
@@ -2172,10 +2302,12 @@ pub(crate) fn parse_machine_model(s: &str) -> Result<MachineModel> {
         "A500PLUS" | "A500+" => Ok(MachineModel::A500Plus),
         "A600" => Ok(MachineModel::A600),
         "A1200" => Ok(MachineModel::A1200),
+        "A3000" => Ok(MachineModel::A3000),
+        "A4000" => Ok(MachineModel::A4000),
         "CDTV" => Ok(MachineModel::Cdtv),
         "CD32" => Ok(MachineModel::Cd32),
         _ => Err(anyhow!(
-            "unknown machine model {:?}: expected A1000 / A500 / A500OCS / A500Plus / A600 / A1200 / CDTV / CD32",
+            "unknown machine model {:?}: expected A1000 / A500 / A500OCS / A500Plus / A600 / A1200 / A3000 / A4000 / CDTV / CD32",
             s
         )),
     }
@@ -2240,6 +2372,33 @@ pub(crate) fn machine_profile_defaults(model: MachineModel) -> Config {
             d.cpu = CpuModel::M68EC020;
             d.cpu_clock_mhz = 14.18;
             d.gate_array = GateArray::GayleA1200;
+        }
+        // The A3000: ECS on a big-box board, a 25 MHz 68030 with a real MMU,
+        // and Ramsey-04 in front of the motherboard DRAM. Gary, not Gayle, so
+        // no PCMCIA and no Gayle IDE. Its SCSI is a Super DMAC at $DD0000
+        // driving a WD33C93, which is not emulated yet.
+        MachineModel::A3000 => {
+            d.chipset = Chipset::Ecs;
+            d.chip_ram_bytes = 2 * 1024 * 1024;
+            d.slow_ram_bytes = 0;
+            d.cpu = CpuModel::M68030;
+            d.cpu_clock_mhz = 25.0;
+            d.mem_controller = MemController::Ramsey4;
+            d.gate_array = GateArray::FatGary;
+            d.rtc_present = true;
+            d.sdmac = true;
+        }
+        // The A4000: the same board a generation later -- AGA, a 25 MHz 68040,
+        // and Ramsey-07. Its IDE lives at $DD2020, which is not emulated yet.
+        MachineModel::A4000 => {
+            d.chipset = Chipset::Aga;
+            d.chip_ram_bytes = 2 * 1024 * 1024;
+            d.slow_ram_bytes = 0;
+            d.cpu = CpuModel::M68040;
+            d.cpu_clock_mhz = 25.0;
+            d.mem_controller = MemController::Ramsey7;
+            d.gate_array = GateArray::FatGary;
+            d.rtc_present = true;
         }
         // CDTV: A500-class board with the 1 MB ECS Agnus and 1 MB chip
         // RAM, plus the 256 KiB extended ROM at $F00000 (configure it via
@@ -2766,6 +2925,7 @@ mod tests {
             machine: RawMachine {
                 profile: Some("A1200".to_string()),
                 rtc: Some(true),
+                mem_controller: Some("ramsey-07".to_string()),
             },
             cpu: RawCpu {
                 model: Some("68EC020".to_string()),
@@ -3125,6 +3285,7 @@ mod tests {
             profile = "A500Plus"
             "#,
         )?;
+        assert_eq!(cfg.mem_controller, MemController::None);
         assert_eq!(cfg.chipset, Chipset::Ecs);
         assert_eq!(cfg.chip_ram_bytes, 1024 * 1024);
         assert_eq!(cfg.slow_ram_bytes, 0);
@@ -3148,10 +3309,41 @@ mod tests {
         assert_eq!(cfg.agnus_revision, AgnusRevision::AgaAlice);
         assert_eq!(cfg.denise_revision, DeniseRevision::AgaLisa);
 
-        let err = parse_config(
+        // The big-box machines: Ramsey instead of Gayle, and a real CPU.
+        let cfg = parse_config(
             r#"
             [machine]
             profile = "A4000"
+            "#,
+        )?;
+        assert_eq!(cfg.chipset, Chipset::Aga);
+        assert_eq!(cfg.cpu, CpuModel::M68040);
+        assert_eq!(cfg.chip_ram_bytes, 2 * 1024 * 1024);
+        assert_eq!(cfg.slow_ram_bytes, 0);
+        // Fat Gary, not Gayle: the big-box machines fill the same seat with the
+        // other chip, so no PCMCIA and no Gayle IDE.
+        assert_eq!(cfg.gate_array, GateArray::FatGary);
+        assert_eq!(cfg.gate_array.gayle_id(), None);
+        assert_eq!(cfg.mem_controller, MemController::Ramsey7);
+        assert!(cfg.rtc_present);
+
+        let cfg = parse_config(
+            r#"
+            [machine]
+            profile = "A3000"
+            "#,
+        )?;
+        assert_eq!(cfg.chipset, Chipset::Ecs);
+        assert_eq!(cfg.cpu, CpuModel::M68030);
+        assert_eq!(cfg.gate_array, GateArray::FatGary);
+        assert_eq!(cfg.mem_controller, MemController::Ramsey4);
+        // Kickstart's scsi.device hangs in init if the SDMAC does not answer.
+        assert!(cfg.sdmac);
+
+        let err = parse_config(
+            r#"
+            [machine]
+            profile = "A5000"
             "#,
         )
         .unwrap_err();
@@ -3660,6 +3852,68 @@ mod tests {
         )?;
         let unit0 = cfg.scsi.units[0].as_ref().expect("unit0 configured");
         assert_eq!(unit0.volume_name.as_deref(), Some("Work Disk"));
+        Ok(())
+    }
+
+    #[test]
+    fn the_memory_controller_can_be_selected() -> anyhow::Result<()> {
+        let cfg = parse_config(
+            r#"
+            [machine]
+            profile = "A1200"
+            mem_controller = "ramsey-07"
+            "#,
+        )?;
+        assert_eq!(cfg.mem_controller, MemController::Ramsey7);
+        assert_eq!(
+            cfg.mem_controller.ramsey_revision(),
+            Some(crate::ramsey::RamseyRevision::Rev7)
+        );
+
+        let err = parse_config(
+            r#"
+            [machine]
+            mem_controller = "ramsey-08"
+            "#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("ramsey-04"), "{err}");
+        Ok(())
+    }
+
+    #[test]
+    fn log_unmapped_takes_all_or_a_hex_range() -> anyhow::Result<()> {
+        let cfg = parse_config(
+            r#"
+            [debug]
+            log_unmapped = "DD0000-DEFFFF"
+            "#,
+        )?;
+        assert_eq!(cfg.log_unmapped, Some(0x00DD_0000..=0x00DE_FFFF));
+
+        let cfg = parse_config(
+            r#"
+            [debug]
+            log_unmapped = "all"
+            "#,
+        )?;
+        // "all" must include the very top of the address space.
+        assert_eq!(cfg.log_unmapped, Some(0..=u32::MAX));
+        assert!(cfg.log_unmapped.unwrap().contains(&0xFFFF_FFFF));
+
+        assert_eq!(parse_config("")?.log_unmapped, None);
+
+        // An end below the start would silently log nothing.
+        let err = parse_config(
+            r#"
+            [debug]
+            log_unmapped = "DE0000-DD0000"
+            "#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("start must not be above end"), "{err}");
         Ok(())
     }
 

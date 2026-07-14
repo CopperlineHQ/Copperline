@@ -2537,6 +2537,32 @@ impl CpuBus {
                 return value;
             }
         }
+        if size == 1 && self.bus.ramsey.is_some() && crate::ramsey::decodes(addr) {
+            self.bus.cpu_slow_external_access(1);
+            if let Some(ramsey) = self.bus.ramsey.as_ref() {
+                return u32::from(ramsey.read_byte(addr));
+            }
+        }
+        if size == 1 && self.bus.gary.is_some() && crate::gary::decodes(addr) {
+            self.bus.cpu_slow_external_access(1);
+            if let Some(gary) = self.bus.gary.as_ref() {
+                return u32::from(gary.read_byte(addr));
+            }
+        }
+        if size == 1 && self.bus.sdmac.is_some() && crate::sdmac::Sdmac::decodes(addr) {
+            self.bus.cpu_slow_external_access(1);
+            let value = self
+                .bus
+                .sdmac
+                .as_mut()
+                .map(|sdmac| (u32::from(sdmac.read_byte(addr)), sdmac.take_activity()));
+            if let Some((value, activity)) = value {
+                if activity {
+                    self.bus.note_hdd_activity();
+                }
+                return value;
+            }
+        }
         // A configured functional Zorro board window (registers, boot ROM, DMA
         // strobes): the chain maps it to a device slot. Off the chip bus like
         // Gayle.
@@ -2608,11 +2634,6 @@ impl CpuBus {
             return value;
         }
 
-        if crate::envcfg::flag("COPPERLINE_DIAG_GAYLE")
-            && (0x00D8_0000..0x00F0_0000).contains(&addr)
-        {
-            log::info!("float rd {addr:#08X}");
-        }
         self.bus.cpu_slow_external_access(1);
         // Undriven (unmapped) read: float to the last value the chip data bus
         // carried (display/audio DMA), as on the Agnus-arbitrated chip bus --
@@ -2620,11 +2641,20 @@ impl CpuBus {
         // to byte reads); a 68000 byte read takes the high data-bus byte at even
         // addresses, the low byte at odd.
         let data_bus = self.bus.data_bus;
-        if addr & 1 == 0 {
+        let value = if addr & 1 == 0 {
             u32::from(data_bus >> 8)
         } else {
             u32::from(data_bus & 0xFF)
+        };
+        if self
+            .bus
+            .log_unmapped
+            .as_ref()
+            .is_some_and(|r| r.contains(&addr))
+        {
+            log::info!("unmapped rd {addr:#08X}.b -> {value:#04X} (floating bus)");
         }
+        value
     }
 
     fn write_sized(&mut self, address: u32, size: usize, value: u32) {
@@ -2743,6 +2773,27 @@ impl CpuBus {
             }
             return;
         }
+        if size == 1 && self.bus.gary.is_some() && crate::gary::decodes(addr) {
+            self.bus.cpu_slow_external_access(1);
+            if let Some(gary) = self.bus.gary.as_mut() {
+                gary.write_byte(addr, value as u8);
+                return;
+            }
+        }
+        if size == 1 && self.bus.ramsey.is_some() && crate::ramsey::decodes(addr) {
+            self.bus.cpu_slow_external_access(1);
+            if let Some(ramsey) = self.bus.ramsey.as_mut() {
+                ramsey.write_byte(addr, value as u8);
+            }
+            return;
+        }
+        if size == 1 && self.bus.sdmac.is_some() && crate::sdmac::Sdmac::decodes(addr) {
+            self.bus.cpu_slow_external_access(1);
+            if let Some(sdmac) = self.bus.sdmac.as_mut() {
+                sdmac.write_byte(addr, value as u8);
+            }
+            return;
+        }
         if let Some((crate::zorro::BoardBacking::Device(slot), off)) =
             self.bus.mem.zorro.device_region_at(addr, size)
         {
@@ -2824,10 +2875,13 @@ impl CpuBus {
             }
             return;
         }
-        if crate::envcfg::flag("COPPERLINE_DIAG_GAYLE")
-            && (0x00D8_0000..0x00F0_0000).contains(&addr)
+        if self
+            .bus
+            .log_unmapped
+            .as_ref()
+            .is_some_and(|r| r.contains(&addr))
         {
-            log::info!("float wr {addr:#08X} <- {value:#04X}");
+            log::info!("unmapped wr {addr:#08X}.b <- {value:#04X} (dropped)");
         }
     }
 

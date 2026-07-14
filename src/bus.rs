@@ -661,6 +661,22 @@ pub struct Bus {
     /// Gayle gate array (A600/A1200 machine profiles); None on machines
     /// without one, which leaves $DA0000/$DE1000 floating as before.
     pub gayle: Option<Gayle>,
+    /// Ramsey memory controller (A3000/A4000 machine profiles). Answers on
+    /// the same $DE0000 page Gayle uses, so the two are never both fitted.
+    #[serde(default)]
+    pub ramsey: Option<crate::ramsey::Ramsey>,
+    /// Fat Gary bus controller (A3000/A4000 machine profiles): the other three
+    /// byte lanes of the page Ramsey answers on. Fitted with it, never alone.
+    #[serde(default)]
+    pub gary: Option<crate::gary::Gary>,
+    /// Super DMAC (A3000 machine profile): the SCSI DMA controller at $DD0000.
+    /// Kickstart's scsi.device hangs during init if nothing answers here.
+    #[serde(default)]
+    pub sdmac: Option<crate::sdmac::Sdmac>,
+    /// `[debug] log_unmapped`: log CPU accesses in this range that no device
+    /// decodes, to find the registers a guest expects and we do not provide.
+    #[serde(default)]
+    pub log_unmapped: Option<std::ops::RangeInclusive<u32>>,
     /// Akiko gate array (CD32 machine profile): ID, the C2P port, and
     /// NVRAM/CD stubs at $B80000.
     pub akiko: Option<crate::akiko::Akiko>,
@@ -2086,6 +2102,10 @@ impl Bus {
             rtc: Msm6242Rtc::default(),
             rtc_present: true,
             gayle: None,
+            ramsey: None,
+            gary: None,
+            sdmac: None,
+            log_unmapped: None,
             akiko: None,
             cdtv: None,
             devices: Vec::new(),
@@ -2511,6 +2531,18 @@ impl Bus {
         self.gayle = Some(gayle);
     }
 
+    pub fn attach_ramsey(&mut self, ramsey: crate::ramsey::Ramsey) {
+        self.ramsey = Some(ramsey);
+    }
+
+    pub fn attach_gary(&mut self, gary: crate::gary::Gary) {
+        self.gary = Some(gary);
+    }
+
+    pub fn attach_sdmac(&mut self, sdmac: crate::sdmac::Sdmac) {
+        self.sdmac = Some(sdmac);
+    }
+
     pub fn attach_akiko(&mut self, akiko: crate::akiko::Akiko) {
         self.akiko = Some(akiko);
     }
@@ -2724,6 +2756,15 @@ impl Bus {
         self.rtc = Msm6242Rtc::default();
         if let Some(gayle) = self.gayle.as_mut() {
             gayle.reset();
+        }
+        if let Some(gary) = self.gary.as_mut() {
+            gary.reset();
+        }
+        if let Some(ramsey) = self.ramsey.as_mut() {
+            ramsey.reset();
+        }
+        if let Some(sdmac) = self.sdmac.as_mut() {
+            sdmac.reset();
         }
         if let Some(akiko) = self.akiko.as_mut() {
             akiko.reset();
@@ -3953,6 +3994,21 @@ impl Bus {
             .is_some_and(crate::gayle::Gayle::int2_line)
         {
             self.paula.intreq |= INT_PORTS;
+        }
+
+        // SDMAC (A3000 motherboard SCSI): advance the WD33C93 and its DMA, and
+        // level-feed its INT2 line like Gayle's. Kickstart's own scsi.device
+        // drives it, so nothing boots until this interrupt arrives.
+        {
+            let Self {
+                sdmac, mem, paula, ..
+            } = self;
+            if let Some(sdmac) = sdmac.as_mut() {
+                sdmac.tick(cck, mem);
+                if sdmac.int_line() {
+                    paula.intreq |= INT_PORTS;
+                }
+            }
         }
 
         // Akiko: advance the CD controller (sector DMA pacing, command

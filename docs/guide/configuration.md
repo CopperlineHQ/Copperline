@@ -89,8 +89,9 @@ missing.
 
 ```toml
 [machine]
-profile = "A1200" # A1000, A500, A500OCS, A500Plus (A500+), A600, A1200, CDTV, CD32
-rtc = true        # add a battery RTC (default: only A500+/CDTV ship with one)
+profile = "A1200" # A1000, A500, A500OCS, A500Plus (A500+), A600, A1200, A3000, A4000, CDTV, CD32
+rtc = true        # add a battery RTC (default: only A500+/CDTV/A3000/A4000 ship with one)
+mem_controller = "ramsey-07" # none, ramsey-04 (A3000), ramsey-07 (A4000)
 ```
 
 A machine profile bundles the chipset, CPU, memory, gate array, and
@@ -111,6 +112,8 @@ gives a plain 8371/8362 OCS machine.
 | `A500Plus` | ECS (8375 Agnus, ECS Denise) | 68000 @ 7.09 MHz | 1M | 0 | RTC |
 | `A600` | ECS (8375 Agnus, ECS Denise) | 68000 @ 7.09 MHz | 1M | 0 | Gayle IDE |
 | `A1200` | AGA (Alice/Lisa) | 68EC020 @ 14.18 MHz | 2M | 0 | Gayle IDE |
+| `A3000` | ECS | 68030 @ 25 MHz | 2M | 0 | Ramsey-04, RTC |
+| `A4000` | AGA (Alice/Lisa) | 68040 @ 25 MHz | 2M | 0 | Ramsey-07, RTC |
 | `CDTV` | ECS | 68000 @ 7.09 MHz | 1M | 0 | DMAC CD controller, RTC, 256K extended ROM |
 | `CD32` | AGA (Alice/Lisa) | 68EC020 @ 14.18 MHz | 2M | 0 | Akiko, CD32 pad, NVRAM, 512K extended ROM |
 
@@ -119,6 +122,28 @@ only some carried one. Only the `A500Plus` (an OKI RTC soldered to the Rev 8A
 board) and `CDTV` fit one by default; the base A500/A500OCS, A600, A1200,
 A1000, and CD32 have none. Set `rtc = true` to add one -- for an A600HD or a
 clock-equipped A1200, say -- so the Workbench clock keeps time.
+
+The `A3000` and `A4000` profiles are the big-box machines. Both boot, but they
+are new and incomplete. They carry a Ramsey memory controller
+(`mem_controller`), which is what the two registers at `$DE0003` and `$DE0043`
+answer as, and they carry Gary rather than Gayle -- so no PCMCIA and no Gayle
+IDE.
+
+- The **A3000** has its motherboard SCSI: a Super DMAC at `$DD0000` driving a
+  WD33C93, which Kickstart's own `scsi.device` initialises at boot. No drives
+  are attached to it yet, so give the machine a Zorro controller (`[scsi]`) or a
+  host directory (`[[filesys]]`) to boot from.
+- The **A4000**'s IDE interface at `$DD2020` is not implemented. Kickstart's
+  `scsi.device` probes it, finds nothing, and waits out a timeout, so every boot
+  spends several seconds in the driver before it completes. Same story for
+  where to boot from.
+
+Motherboard fast RAM is not emulated on either; use `[memory] z3` instead,
+which the OS is equally happy with.
+
+`mem_controller` is normally left to the profile. It is broken out because
+Ramsey answers at `$DE0000`, which nothing else decodes, so it can be fitted to
+a wedge machine to exercise diagnostic tools that expect one.
 
 The `A1000` profile models the original Amiga, which has no Kickstart ROM.
 Its `rom` is instead the 64K bootstrap ROM ("Amiga ROM Bootstrap"); on
@@ -575,3 +600,27 @@ Each entry adds a Zorro board described by a TOML metadata file, configured
 in file order after the built-in `[memory]` fast/z3 boards. See
 [](../zorro) for the metadata format and how autoconfig assigns
 addresses.
+
+## `[debug]` -- diagnostics
+
+```toml
+[debug]
+log_unmapped = "DD0000-DEFFFF"
+```
+
+`log_unmapped` logs every CPU read and write inside the given range that no
+device decodes. Reads report the floating bus value they returned, writes
+report the value that went nowhere. The value is a hex `START-END` range whose
+end is included (a leading `0x` is allowed), or `all` for the whole address
+space.
+
+This is how you find the registers a guest expects and Copperline does not
+implement yet. A missing register is usually invisible: a read floats, a write
+is dropped, and the guest either sulks or hangs with no diagnostic. Pointing
+this at the window a driver probes shows the access pattern directly -- an IDE
+presence probe, say, appears as a write of `$A0` to the device/head register
+followed by a long run of status reads that never come back ready.
+
+A booting Kickstart probes enough empty address space that `all` produces on
+the order of a million lines per boot, so prefer a range once you know roughly
+where to look.

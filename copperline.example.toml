@@ -103,9 +103,26 @@ model = "68000"
 # Without any [machine] section the default machine is that same Rev 6A
 # A500 (ECS 8372A Agnus, OCS 8362 Denise, 512 KiB chip + 512 KiB trapdoor
 # slow RAM) -- the most common and most-targeted Amiga.
+# The big-box profiles (A3000, A4000) are new and incomplete, but both boot.
+# The A3000 has its motherboard SCSI (Super DMAC + WD33C93 at $DD0000, driven by
+# Kickstart's own scsi.device) with no drives attached yet; the A4000's IDE at
+# $DD2020 is not emulated at all, so Kickstart spends several seconds probing for
+# it on every boot. Give either machine a Zorro controller or a [[filesys]] mount
+# to boot from.
 # [machine]
-# profile = "A600"      # A1000 | A500 | A500OCS | A500Plus | A600 | A1200 | CDTV | CD32
-# rtc = true            # add a $DC0000 battery RTC (default: only A500+/CDTV have one)
+# profile = "A600"      # A1000 | A500 | A500OCS | A500Plus | A600 | A1200 | A3000 | A4000 | CDTV | CD32
+# rtc = true            # add a $DC0000 battery RTC (default: only A500+/CDTV/A3000/A4000 have one)
+# mem_controller = "ramsey-07"   # none | ramsey-04 (A3000) | ramsey-07 (A4000)
+
+
+# Debugging aids. log_unmapped logs every CPU read and write that no device
+# decodes, which is how you find the registers a guest expects and Copperline
+# does not provide yet: reads report the floating bus value they returned,
+# writes report the value that went nowhere. A booting ROM probes enough empty
+# space to make "all" a firehose (a million lines a boot), so prefer aiming it
+# at one window.
+# [debug]
+# log_unmapped = "DD0000-DEFFFF"   # hex START-END, end included; or "all"
 
 
 # Extended ROM image for CDTV/CD32 machines: a 256 KiB image maps at

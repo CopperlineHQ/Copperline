@@ -1953,6 +1953,31 @@ pub fn build_machine(
         }
         bus.attach_gayle(gayle);
     }
+    if let Some(range) = cfg.log_unmapped.clone() {
+        info!(
+            "debug: logging unmapped CPU accesses in {:#08X}-{:#08X}",
+            range.start(),
+            range.end()
+        );
+        bus.log_unmapped = Some(range);
+    }
+    if cfg.sdmac {
+        bus.attach_sdmac(crate::sdmac::Sdmac::new());
+        info!("sdmac: Super DMAC + WD33C93 at $DD0000 (no drives)");
+    }
+    if let Some(revision) = cfg.mem_controller.ramsey_revision() {
+        // TODO(codewiz): pass the real bank size once motherboard fast RAM
+        // exists; until then Ramsey describes the stock DRAM for the part.
+        let bank_bytes = revision.stock_bank_bytes();
+        bus.attach_ramsey(crate::ramsey::Ramsey::new(revision, bank_bytes));
+    }
+    // Gary and Ramsey share one address decode -- Gary owns byte lanes 0-2 of
+    // the $DE0000 page and Ramsey lane 3 -- and tools probe Gary to find the
+    // Ramsey: xSysInfo gives up on the memory controller if it cannot first
+    // identify a Fat Gary. Fitting one without the other identifies as neither.
+    if cfg.gate_array.is_fat_gary() {
+        bus.attach_gary(crate::gary::Gary::new());
+    }
     if !devices.is_empty() {
         bus.attach_devices(devices);
     }
