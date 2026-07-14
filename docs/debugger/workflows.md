@@ -120,13 +120,14 @@ variable you can influence.
 
 ## Source-level debugging of your own program
 
-For programs you build yourself with an amiga-gcc toolchain, the GDB
-stub supports full source-level debugging -- breakpoints on lines,
-`next`, `print` on variables -- via automatic segment relocation. The
-walkthrough lives in the [GDB chapter](gdb), "Source-Level Debugging of
-Amiga Programs". The short version: build with `-g`, run inside the
-emulator from a CLI, and `m68k-amigaos-gdb prog` + `target remote`
-relocates itself using the emulator's `qOffsets` answer.
+For programs you build yourself, the GDB stub relocates symbols to the
+addresses `LoadSeg()` chose -- automatically at attach for a program
+already running (`qOffsets`), and via `monitor loadseg-break` plus a
+reattach for one the guest loads later. How much detail you get depends
+on the symbol file: a `-g` hunk executable carries function-level
+symbols, while source lines, `next`, and `print` need an
+ELF-with-DWARF sibling of the binary. The walkthrough lives in the
+[GDB chapter](gdb), "Source-Level Debugging of Amiga Programs".
 
 ## Making it reproducible
 

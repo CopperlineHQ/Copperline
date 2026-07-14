@@ -20,7 +20,20 @@ Connect from GDB with the 68k architecture selected:
 The target starts paused at reset. The stub implements the normal all-stop
 remote packets for register access, RAM reads/writes, hardware-style PC
 breakpoints, memory watchpoints, single-step, continue, Ctrl-C interrupt,
-and GDB reverse execution (`reverse-step` / `reverse-continue`).
+program load events (`qXfer:libraries:read`), and GDB reverse execution
+(`reverse-step` / `reverse-continue`). Detaching leaves the machine
+paused and the stub listening, so a later `target remote` picks up the
+same session (and re-runs `qOffsets`); GDB's `kill` ends the emulator.
+
+If `monitor` (or anything else) answers `"monitor" command not supported
+by this target.`, GDB is not actually connected: that is GDB's built-in
+dummy target speaking after a failed `target remote`, and `-batch`
+scripts carry on past the connection error. A common cause is running
+GDB inside a container (e.g. a cross-toolchain Docker image): the
+container's `localhost` is not the host's, so it never reaches
+Copperline's `127.0.0.1` listener. Run GDB on the host, or bind an
+address the container can reach (`--gdb 0.0.0.0:2345`, trusted networks
+only per the warning above) and connect to the host's address.
 
 ## CPU and Memory
 
@@ -131,28 +144,79 @@ avoid externally mutating hard-drive/CD images during a debug session.
 
 ## Source-Level Debugging of Amiga Programs
 
+What symbol detail you get depends on the file you feed GDB, not on the
+stub:
+
+- An AmigaOS hunk executable built with `-g` (bebbo's amiga-gcc) carries
+  a hunk symbol table: `file prog` gives function-level symbols --
+  `break main`, named disassembly -- but no DWARF, so source lines,
+  `next`, and `print` on variables are unavailable. Reading hunk files
+  at all requires a GDB whose BFD includes the `amiga` target (check
+  with `m68k-amigaos-objdump -i`); some builds of the same toolchain
+  lack it and report "file format not recognized".
+- Full source-level debugging needs an ELF file with DWARF kept
+  alongside the hunk binary you actually run: build with an m68k ELF
+  toolchain and convert the executable with `elf2hunk` (the flow the
+  amiga-debug VS Code extension uses), then load the ELF's symbols with
+  `add-symbol-file prog.elf ADDR` or through the library list below.
+
+Either way the symbols must land at the addresses `LoadSeg()` chose.
 Copperline answers GDB's `qOffsets` query with the load addresses of the
-current process's segment list (the hunks `LoadSeg()` scattered through
-RAM): `TextSeg=` is the first hunk and `DataSeg=` the second, when
-present. With an amiga-gcc toolchain (bebbo's `m68k-amigaos-gdb`), that
-means source-level debugging of a program running inside the emulator
-mostly just works:
-
-1. Build with debug info: `m68k-amigaos-gcc -g -O0 prog.c -o prog`.
-2. Start Copperline with `--gdb`, boot Workbench, and start `prog`
-   (easiest from a CLI so the process has a `cli_Module` seglist).
-3. `m68k-amigaos-gdb prog` then `target remote localhost:2345`. GDB asks
-   `qOffsets`, relocates the program's sections to the hunk addresses,
-   and `break main` / `next` / `print` work on source lines.
-
-If the program was not yet running when GDB attached, re-run `qOffsets`
-by reattaching, or relocate manually: `monitor segments` prints every
-hunk address, and `add-symbol-file prog.elf ADDR` (first hunk) loads the
-symbols at the right place. The `SEGMENTS` console command prints the
-same map, pre-formatted with that hint. When no process seglist is
-walkable (ROM code, task rather than process, OS not up yet), the
+current process's segment list: `TextSeg=` is the first hunk and
+`DataSeg=` the second, when present. GDB asks `qOffsets` once at attach,
+so this relocates a program that is already running: start `prog` from a
+CLI inside the emulator (so the process has a `cli_Module` seglist),
+then `m68k-amigaos-gdb prog` + `target remote localhost:2345` places
+`prog`'s symbols at the loaded hunk addresses. When no process seglist
+is walkable (ROM code, task rather than process, OS not up yet), the
 `qOffsets` reply is empty and GDB falls back to link-time addresses --
 harmless for ROM-level sessions.
+
+### Program Load Events
+
+For a program AmigaDOS loads *after* GDB is connected, the stub tracks
+the scheduled process's segment list and reports the load at the moment
+`LoadSeg()`'s result is installed -- after relocation, before the
+program's first instruction.
+
+The workflow that works with every client, `-batch` scripts included:
+
+```gdb
+(gdb) target remote :2345
+(gdb) monitor loadseg-break
+(gdb) continue
+loadseg: hello first hunk $018FE8 (monitor segments / add-symbol-file FILE 0x18FE8)
+Program received signal SIGTRAP, Trace/breakpoint trap.
+(gdb) disconnect
+(gdb) file hello
+(gdb) target remote :2345
+(gdb) break main
+(gdb) continue
+```
+
+`monitor loadseg-break` makes `continue` stop, with a console hint
+naming the program and its first hunk, whenever a new program is
+loaded. Detaching does not end the emulator: the machine stays paused
+and the stub listens for the next connection, so reattaching with the
+program's file loaded re-runs `qOffsets` against the now-current
+process and relocates the symbols with no manual addresses (GDB's
+`kill` command ends the server). Alternatively stay attached and use
+`add-symbol-file FILE ADDR` with the printed hunk address; `monitor
+segments` prints the full hunk map, and the `SEGMENTS` console command
+prints the same map pre-formatted with that hint.
+
+Clients that request GDB's target library lists get automatic load
+events instead: fetching `qXfer:libraries:read` once arms them, and
+each new program then reports a `library:` stop event -- GDB re-reads
+the stub's library list (one `<library>` per tracked program, a
+`<segment>` per hunk, named by the command's basename), relocates a
+matching file found via `set solib-search-path`, binds pending
+breakpoints, and resumes on its own. Be aware that stock bare-metal
+m68k GDB builds -- `m68k-amigaos-gdb` 13.x and a multi-arch host `gdb`
+alike -- never request library lists, so they never see these events;
+use the `monitor loadseg-break` flow with them. Programs already
+running when the list is first fetched are reported in it without a
+stop; `monitor loadseg-list` prints the same table.
 
 ## Monitor Commands
 
@@ -172,3 +236,5 @@ harmless for ROM-level sessions.
 | `copper [auto\|pc\|ADDR] [COUNT]` | disassemble Copper instructions |
 | `last-writer ADDR` | reverse-search the last write to a word |
 | `segments` | the current process's loaded hunks (LoadSeg addresses) |
+| `loadseg-break` | toggle a visible stop whenever a new program is loaded |
+| `loadseg-list` | tracked program loads with their hunk addresses |

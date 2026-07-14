@@ -9,6 +9,8 @@
 
 pub mod dos;
 
+use std::collections::HashMap;
+
 /// ExecBase field offsets (execbase.h).
 const EXECBASE_PTR: u32 = 4;
 const CHKBASE: u32 = 0x26;
@@ -220,7 +222,9 @@ pub struct Segment {
 const PR_SEGLIST: u32 = 0x80;
 const PR_CLI: u32 = 0xAC;
 /// CommandLineInterface field offsets: cli_Module is the BPTR to the
-/// currently running command's segment list.
+/// currently running command's segment list, cli_CommandName the BSTR
+/// naming the command it belongs to.
+const CLI_COMMAND_NAME: u32 = 0x10;
 const CLI_MODULE: u32 = 0x3C;
 /// NT_PROCESS in ln_Type.
 const NT_PROCESS: u8 = 13;
@@ -285,12 +289,201 @@ impl OsMemory<'_> {
             None => Vec::new(),
         }
     }
+
+    /// Read a BSTR (BPTR to a length-prefixed string): printable ASCII,
+    /// bounded by `cap`, empty for implausible pointers.
+    pub fn read_bstr(&self, bptr: u32, cap: usize) -> String {
+        if bptr == 0 || bptr >= 0x0040_0000 {
+            return String::new();
+        }
+        let addr = bptr << 2;
+        let len = (self.peek8)(addr) as usize;
+        let mut out = String::new();
+        for i in 0..len.min(cap) as u32 {
+            let byte = (self.peek8)(addr.wrapping_add(1 + i));
+            out.push(if (0x20..0x7F).contains(&byte) {
+                byte as char
+            } else {
+                '.'
+            });
+        }
+        out
+    }
+
+    /// The name of the program a process is running: the basename of
+    /// cli_CommandName when the task has a CLI, else the task's ln_Name.
+    pub fn process_command_name(&self, task: u32) -> String {
+        if (self.peek8)(task.wrapping_add(LN_TYPE)) == NT_PROCESS {
+            let cli = (self.peek32)(task.wrapping_add(PR_CLI));
+            if cli != 0 && cli < 0x0040_0000 {
+                let name_bptr = (self.peek32)((cli << 2).wrapping_add(CLI_COMMAND_NAME));
+                // A full AmigaDOS path fits in a 255-byte BSTR.
+                let name = self.read_bstr(name_bptr, 255);
+                let base = command_basename(&name);
+                if !base.is_empty() {
+                    return base.to_string();
+                }
+            }
+        }
+        self.node_name(task)
+    }
+
+    /// The addresses of every task exec knows about right now: ThisTask
+    /// plus the ready and waiting lists (bounded like `walk`).
+    pub fn task_addrs(&self, execbase: u32) -> Vec<u32> {
+        let mut out = Vec::new();
+        let this = (self.peek32)(execbase.wrapping_add(THIS_TASK));
+        if plausible_ptr(this) {
+            out.push(this);
+        }
+        for list in [TASK_READY, TASK_WAIT] {
+            let mut node = (self.peek32)(execbase.wrapping_add(list));
+            while plausible_ptr(node) && (self.peek32)(node) != 0 && out.len() < LIST_CAP {
+                out.push(node);
+                node = (self.peek32)(node);
+            }
+        }
+        out
+    }
 }
 
-/// Bus-backed convenience wrapper: the current process's segments, or
-/// why exec is not walkable. Shared by the console SEGMENTS command and
-/// the GDB stub (monitor segments / qOffsets).
-pub fn segments_on_bus(bus: &crate::bus::Bus) -> Result<Vec<Segment>, String> {
+/// The basename of an AmigaDOS path: the text after the last `/` or the
+/// volume/device colon.
+pub fn command_basename(path: &str) -> &str {
+    path.rsplit(['/', ':']).next().unwrap_or(path)
+}
+
+/// A loaded hunk must sit in RAM exec could have allocated and carry a
+/// believable size (the loader's size longword is bounded by the 16MB
+/// chip/Z2 space a seglist can live in).
+fn segment_plausible(seg: &Segment) -> bool {
+    plausible_ptr(seg.start) && seg.size < 0x0100_0000
+}
+
+/// One program the debugger has seen `LoadSeg()`'d into memory: its
+/// seglist BPTR, the process running it, its command name, and the hunk
+/// addresses walked at the moment it was recorded.
+pub struct TrackedModule {
+    pub seglist: u32,
+    pub task: u32,
+    pub name: String,
+    pub segments: Vec<Segment>,
+}
+
+/// Tracked programs kept at once; gdb re-reads the whole list on every
+/// load event, so the cap only bounds guest-driven growth.
+const MODULE_CAP: usize = 16;
+/// Task->module pairs remembered before the table is reset; exceeding it
+/// costs at worst one spurious (auto-resuming) library event.
+const TASK_TABLE_CAP: usize = 256;
+
+/// Bounded record of DOS-loaded programs, and the change detector that
+/// turns a new `LoadSeg()` result appearing in the scheduled process
+/// into a debugger event. Purely observational: built from
+/// side-effect-free peeks, never written back to guest memory.
+#[derive(Default)]
+pub struct LibraryTracker {
+    armed: bool,
+    /// Tasks that already existed when the tracker was armed: a program
+    /// first seen in one of these merely became visible via a context
+    /// switch, so it is recorded without firing an event.
+    known_tasks: Vec<u32>,
+    /// Last module BPTR observed per task (0 = none), so the common
+    /// nothing-changed case costs one map probe.
+    task_modules: HashMap<u32, u32>,
+    modules: Vec<TrackedModule>,
+}
+
+impl LibraryTracker {
+    /// Snapshot the live task set and absorb the current process's
+    /// program so neither fires a load event later. Idempotent.
+    pub fn arm(&mut self, os: &OsMemory) {
+        if self.armed {
+            return;
+        }
+        self.armed = true;
+        if let Ok(base) = os.exec_base() {
+            self.known_tasks = os.task_addrs(base);
+        }
+        self.absorb_current(os);
+    }
+
+    pub fn armed(&self) -> bool {
+        self.armed
+    }
+
+    /// Record the current process's program without firing an event.
+    pub fn absorb_current(&mut self, os: &OsMemory) {
+        let _ = self.observe(os);
+    }
+
+    pub fn modules(&self) -> &[TrackedModule] {
+        &self.modules
+    }
+
+    /// Compare the scheduled process's seglist against what was last
+    /// seen. Returns the newly recorded program when a genuine load
+    /// event fired: the watched task's module changed to an unseen
+    /// seglist (AmigaDOS `LoadSeg()` + `RunCommand()`), or a process
+    /// created after arming showed up with one (`Run`, Workbench).
+    /// A first sighting of a task that existed at arm time is absorbed
+    /// silently -- its program was already running. Known limits: exec
+    /// reusing a task's address can absorb one event, and a reverse
+    /// rewind can re-fire an already-pruned module (benign; library
+    /// events auto-resume).
+    pub fn observe(&mut self, os: &OsMemory) -> Option<&TrackedModule> {
+        let base = os.exec_base().ok()?;
+        let task = (os.peek32)(base.wrapping_add(THIS_TASK));
+        if !plausible_ptr(task) {
+            return None;
+        }
+        let module = os.process_seglist(task).unwrap_or(0);
+        let prev = self.task_modules.insert(task, module);
+        if prev == Some(module) {
+            return None;
+        }
+        if self.task_modules.len() > TASK_TABLE_CAP {
+            self.task_modules.clear();
+            self.task_modules.insert(task, module);
+        }
+        if let Some(old) = prev.filter(|&m| m != 0) {
+            // The task's previous program exited or was replaced: forget
+            // it, so a later LoadSeg reusing the same BPTR re-fires.
+            self.modules
+                .retain(|m| !(m.task == task && m.seglist == old));
+        }
+        if module == 0 || self.modules.iter().any(|m| m.seglist == module) {
+            return None;
+        }
+        let segments = os.walk_seglist(module);
+        // Early boot leaves garbage in not-yet-initialized process/CLI
+        // fields that can pass the BPTR range checks; only a seglist
+        // whose every hunk looks like allocated RAM is a program load.
+        if segments.is_empty() || !segments.iter().all(segment_plausible) {
+            return None;
+        }
+        if self.modules.len() >= MODULE_CAP {
+            self.modules.remove(0);
+        }
+        self.modules.push(TrackedModule {
+            seglist: module,
+            task,
+            name: os.process_command_name(task),
+            segments,
+        });
+        let fires = prev.is_some() || !self.known_tasks.contains(&task);
+        if fires {
+            self.modules.last()
+        } else {
+            None
+        }
+    }
+}
+
+/// Run `f` against an [`OsMemory`] view built from side-effect-free bus
+/// peeks. The callback shape exists because `OsMemory` borrows local
+/// peek closures.
+pub fn with_bus_memory<R>(bus: &crate::bus::Bus, f: impl FnOnce(&OsMemory) -> R) -> R {
     let peek8 = |addr: u32| {
         let word = bus.peek_word_any(addr & !1);
         if addr & 1 == 0 {
@@ -307,8 +500,17 @@ pub fn segments_on_bus(bus: &crate::bus::Bus) -> Result<Vec<Segment>, String> {
         peek8: &peek8,
         peek32: &peek32,
     };
-    let base = os.exec_base()?;
-    Ok(os.current_process_segments(base))
+    f(&os)
+}
+
+/// Bus-backed convenience wrapper: the current process's segments, or
+/// why exec is not walkable. Shared by the console SEGMENTS command and
+/// the GDB stub (monitor segments / qOffsets).
+pub fn segments_on_bus(bus: &crate::bus::Bus) -> Result<Vec<Segment>, String> {
+    with_bus_memory(bus, |os| {
+        let base = os.exec_base()?;
+        Ok(os.current_process_segments(base))
+    })
 }
 
 #[cfg(test)]
@@ -476,6 +678,199 @@ mod tests {
         let peek8 = |a: u32| mem.peek8(a);
         let peek32 = |a: u32| mem.peek32(a);
         assert!(os(&peek8, &peek32).exec_base().is_err());
+    }
+
+    #[test]
+    fn reads_a_bounded_bstr_command_name() {
+        let mut mem = FakeMem::new();
+        // BSTR at $8000: length 11, "dh0:c/hello".
+        mem.put8(0x8000, 11);
+        for (i, b) in b"dh0:c/hello".iter().enumerate() {
+            mem.put8(0x8001 + i as u32, *b);
+        }
+        {
+            let peek8 = |a: u32| mem.peek8(a);
+            let peek32 = |a: u32| mem.peek32(a);
+            let os = os(&peek8, &peek32);
+            assert_eq!(os.read_bstr(0x8000 >> 2, 255), "dh0:c/hello");
+            assert_eq!(os.read_bstr(0x8000 >> 2, 5), "dh0:c");
+            assert_eq!(os.read_bstr(0, 255), "");
+        }
+        // Unprintable bytes come back filtered, not raw.
+        let mut mem = FakeMem::new();
+        mem.put8(0x8000, 2);
+        mem.put8(0x8001, 0x07);
+        mem.put8(0x8002, b'x');
+        let peek8 = |a: u32| mem.peek8(a);
+        let peek32 = |a: u32| mem.peek32(a);
+        assert_eq!(os(&peek8, &peek32).read_bstr(0x8000 >> 2, 255), ".x");
+    }
+
+    #[test]
+    fn command_basename_strips_amigados_paths() {
+        assert_eq!(command_basename("dh0:c/hello"), "hello");
+        assert_eq!(command_basename("work:hello"), "hello");
+        assert_eq!(command_basename("hello"), "hello");
+        assert_eq!(command_basename(""), "");
+    }
+
+    /// Stage a CLI process world for the tracker: ThisTask is a process
+    /// whose CLI has a cli_CommandName but no cli_Module yet.
+    fn build_cli_world() -> FakeMem {
+        let mut mem = build_exec_world();
+        let this = 0x0002_1000;
+        mem.put8(this + LN_TYPE, NT_PROCESS);
+        let cli_addr = 0x0003_0000u32;
+        mem.put32(this + PR_CLI, cli_addr >> 2);
+        mem.put32(cli_addr + CLI_COMMAND_NAME, 0x0003_1000 >> 2);
+        mem.put8(0x0003_1000, 11);
+        for (i, b) in b"dh0:c/hello".iter().enumerate() {
+            mem.put8(0x0003_1001 + i as u32, *b);
+        }
+        // A two-hunk seglist parked at $8000/$9000, not yet installed.
+        mem.put32(0x8000 - 4, 0x100);
+        mem.put32(0x8000, 0x9000 >> 2);
+        mem.put32(0x9000 - 4, 0x40);
+        mem.put32(0x9000, 0);
+        mem
+    }
+
+    #[test]
+    fn library_tracker_fires_on_loads_and_absorbs_context_switches() {
+        let mut mem = build_cli_world();
+        let this = 0x0002_1000;
+        let cli_addr = 0x0003_0000u32;
+        let mut tracker = LibraryTracker::default();
+        {
+            let peek8 = |a: u32| mem.peek8(a);
+            let peek32 = |a: u32| mem.peek32(a);
+            let os = os(&peek8, &peek32);
+            tracker.arm(&os);
+            assert!(tracker.armed());
+            assert!(tracker.observe(&os).is_none(), "nothing loaded yet");
+        }
+
+        // The shell LoadSegs a command into cli_Module: fires, named.
+        mem.put32(cli_addr + CLI_MODULE, 0x8000 >> 2);
+        {
+            let peek8 = |a: u32| mem.peek8(a);
+            let peek32 = |a: u32| mem.peek32(a);
+            let os = os(&peek8, &peek32);
+            let event = tracker.observe(&os).expect("LoadSeg fires");
+            assert_eq!(event.name, "hello");
+            assert_eq!(event.segments.len(), 2);
+            assert_eq!(event.segments[0].start, 0x8004);
+            assert!(tracker.observe(&os).is_none(), "no re-fire");
+        }
+
+        // Context switch to a task that existed at arm time, already
+        // running a program: absorbed silently but listed.
+        let t1 = 0x0002_3000; // on TaskReady in build_exec_world
+        let base = 0x00C0_0676;
+        mem.put32(base + THIS_TASK, t1);
+        mem.put8(t1 + LN_TYPE, NT_PROCESS);
+        let cli2 = 0x0003_4000u32;
+        mem.put32(t1 + PR_CLI, cli2 >> 2);
+        mem.put32(cli2 + CLI_MODULE, 0xA000 >> 2);
+        mem.put32(0xA000 - 4, 0x20);
+        mem.put32(0xA000, 0);
+        {
+            let peek8 = |a: u32| mem.peek8(a);
+            let peek32 = |a: u32| mem.peek32(a);
+            let os = os(&peek8, &peek32);
+            assert!(tracker.observe(&os).is_none(), "old task absorbed");
+            assert_eq!(tracker.modules().len(), 2);
+        }
+
+        // A process created after arming shows up with a module: fires.
+        let t3 = 0x0002_9000;
+        mem.put32(base + THIS_TASK, t3);
+        mem.put8(t3 + LN_TYPE, NT_PROCESS);
+        let cli3 = 0x0003_6000u32;
+        mem.put32(t3 + PR_CLI, cli3 >> 2);
+        mem.put32(cli3 + CLI_MODULE, 0xB000 >> 2);
+        mem.put32(0xB000 - 4, 0x20);
+        mem.put32(0xB000, 0);
+        {
+            let peek8 = |a: u32| mem.peek8(a);
+            let peek32 = |a: u32| mem.peek32(a);
+            let os = os(&peek8, &peek32);
+            assert!(tracker.observe(&os).is_some(), "new process fires");
+        }
+
+        // Same task runs the next command: the old module is pruned and
+        // the new one fires, even at a reused seglist address.
+        mem.put32(base + THIS_TASK, this);
+        mem.put32(cli_addr + CLI_MODULE, 0x9000 >> 2);
+        {
+            let peek8 = |a: u32| mem.peek8(a);
+            let peek32 = |a: u32| mem.peek32(a);
+            let os = os(&peek8, &peek32);
+            let event = tracker.observe(&os).expect("replacement fires");
+            assert_eq!(event.seglist, 0x9000 >> 2);
+            assert!(!tracker
+                .modules()
+                .iter()
+                .any(|m| m.seglist == 0x8000 >> 2 && m.task == this));
+        }
+    }
+
+    #[test]
+    fn library_tracker_rejects_implausible_boot_garbage_seglists() {
+        // Seen on a real KS3.1 boot: the strap process's uninitialized
+        // CLI fields yield a "seglist" whose hunk lands in ROM space
+        // with a wild size. The tracker must not fire on it.
+        let mut mem = build_cli_world();
+        let cli_addr = 0x0003_0000u32;
+        let mut tracker = LibraryTracker::default();
+        {
+            let peek8 = |a: u32| mem.peek8(a);
+            let peek32 = |a: u32| mem.peek32(a);
+            let os = os(&peek8, &peek32);
+            tracker.arm(&os);
+        }
+        // A hunk at $FA8240 (ROM) with a garbage size longword.
+        mem.put32(cli_addr + CLI_MODULE, 0x00FA_8240 >> 2);
+        mem.put32(0x00FA_8240 - 4, 0x7200_0008);
+        mem.put32(0x00FA_8240, 0);
+        {
+            let peek8 = |a: u32| mem.peek8(a);
+            let peek32 = |a: u32| mem.peek32(a);
+            let os = os(&peek8, &peek32);
+            assert!(tracker.observe(&os).is_none(), "ROM-space hunk rejected");
+            assert!(tracker.modules().is_empty());
+        }
+        // A RAM hunk with an implausible size is rejected too.
+        mem.put32(cli_addr + CLI_MODULE, 0x8000 >> 2);
+        mem.put32(0x8000 - 4, 0x7200_0008);
+        mem.put32(0x8000, 0);
+        {
+            let peek8 = |a: u32| mem.peek8(a);
+            let peek32 = |a: u32| mem.peek32(a);
+            let os = os(&peek8, &peek32);
+            assert!(tracker.observe(&os).is_none(), "oversized hunk rejected");
+        }
+        // The real load afterwards still fires.
+        mem.put32(0x8000 - 4, 0x100);
+        mem.put32(0x8000, 0);
+        {
+            let peek8 = |a: u32| mem.peek8(a);
+            let peek32 = |a: u32| mem.peek32(a);
+            let os = os(&peek8, &peek32);
+            // Same BPTR as the rejected junk: force re-evaluation via a
+            // different module first, as a real shell would.
+            assert!(tracker.observe(&os).is_none(), "same BPTR, cached");
+        }
+        mem.put32(cli_addr + CLI_MODULE, 0x9000 >> 2);
+        mem.put32(0x9000 - 4, 0x40);
+        mem.put32(0x9000, 0);
+        {
+            let peek8 = |a: u32| mem.peek8(a);
+            let peek32 = |a: u32| mem.peek32(a);
+            let os = os(&peek8, &peek32);
+            let event = tracker.observe(&os).expect("valid load fires");
+            assert_eq!(event.segments[0].start, 0x9004);
+        }
     }
 
     #[test]
