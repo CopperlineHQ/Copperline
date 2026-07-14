@@ -2890,11 +2890,17 @@ impl Bus {
         self.cdtv.is_some() || self.akiko.is_some()
     }
 
-    /// Whether a SCSI controller board is fitted (lights the HDD LED).
+    /// Whether the machine has a hard-disk controller, which is what gives it
+    /// an HDD LED: a Zorro board, or the A3000's motherboard SCSI.
     fn has_scsi_device(&self) -> bool {
-        self.devices
-            .iter()
-            .any(|d| matches!(d, crate::zorro_device::BoardDevice::A2091(_)))
+        self.sdmac.is_some()
+            || self.devices.iter().any(|d| {
+                matches!(
+                    d,
+                    crate::zorro_device::BoardDevice::A2091(_)
+                        | crate::zorro_device::BoardDevice::A4091(_)
+                )
+            })
     }
 
     /// Whether a disc is mounted (or, on CDTV, waiting in the tray).
