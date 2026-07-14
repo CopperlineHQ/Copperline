@@ -318,16 +318,21 @@ function joystickKey(code, pressed) {
   return true;
 }
 
-$('joy').addEventListener('click', () => {
+// Cycles the mode; wired to the control-bar button and to the fullscreen
+// overlay's copy of it, which stay in step.
+function cycleJoyMode() {
   joyMode = JOY_MODES[(JOY_MODES.indexOf(joyMode) + 1) % JOY_MODES.length];
   $('joy').textContent = `Joystick: ${joyMode}`;
+  if (fsUi) fsUi.joy.textContent = `Joystick: ${joyMode}`;
   for (const k of Object.keys(joyHeld)) joyHeld[k] = false;
   resetTouchState();
   if (emu) {
     applyJoystick();
     emu.set_cd32_buttons_port2(false, false, false, false, false);
   }
-});
+}
+
+$('joy').addEventListener('click', cycleJoyMode);
 
 // --- keyboard ------------------------------------------------------------
 
@@ -346,7 +351,13 @@ window.addEventListener('keyup', (e) => {
 // Esc releases the lock, as the browser enforces.
 
 let lastPos = null;
-const cssToEmu = () => canvas.width / canvas.clientWidth;
+// Emulator pixels per CSS pixel. Fullscreen letterboxes the canvas
+// (object-fit: contain), so there the displayed scale is the larger of the
+// two axis ratios; in the normal layout the bitmap fills the element.
+const cssToEmu = () =>
+  isFullscreen()
+    ? Math.max(canvas.width / canvas.clientWidth, canvas.height / canvas.clientHeight)
+    : canvas.width / canvas.clientWidth;
 
 canvas.addEventListener('mousedown', (e) => {
   if (!emu || !running) return;
@@ -694,9 +705,109 @@ $('reset').addEventListener('click', () => {
   }
 });
 
+// --- fullscreen ------------------------------------------------------------
+// iPhone Safari has no element fullscreen (only <video> goes fullscreen
+// there), so the button falls back to pinning the shell over the page:
+// Safari's own chrome stays, but the page furniture goes. Either way the
+// control bar ends up off screen, so while fullscreen the shell carries a
+// small overlay with the two controls that matter mid-session: the joystick
+// toggle and Exit.
+
+const shell = $('shell');
+let cssFullscreen = false;
+let fsUi = null; // { bar, joy } - built lazily, like the touch-joystick UI
+
+function isFullscreen() {
+  return document.fullscreenElement !== null || cssFullscreen;
+}
+
+function ensureFsUi() {
+  if (fsUi) return fsUi;
+  const bar = document.createElement('div');
+  // The top-right corner sits in the letterbox in any orientation; the
+  // safe-area offsets keep the buttons clear of notches and rounded corners.
+  bar.style.cssText =
+    'position:absolute;z-index:3;display:none;gap:0.5rem;' +
+    'top:calc(0.6rem + env(safe-area-inset-top));' +
+    'right:calc(0.6rem + env(safe-area-inset-right));';
+  const mk = (label) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.style.cssText =
+      'padding:0.5rem 0.9rem;border-radius:8px;cursor:pointer;' +
+      'border:1px solid rgba(255,255,255,0.35);' +
+      'background:rgba(10,13,22,0.6);color:rgba(255,255,255,0.85);' +
+      'font:600 0.85rem "IBM Plex Mono",ui-monospace,monospace;' +
+      'touch-action:manipulation;-webkit-tap-highlight-color:transparent;';
+    bar.appendChild(b);
+    return b;
+  };
+  const joy = mk(`Joystick: ${joyMode}`);
+  joy.addEventListener('click', cycleJoyMode);
+  const exit = mk('Exit');
+  exit.addEventListener('click', exitFullscreen);
+  shell.appendChild(bar);
+  fsUi = { bar, joy };
+  return fsUi;
+}
+
+function updateFsUi() {
+  if (!isFullscreen()) {
+    if (fsUi) fsUi.bar.style.display = 'none';
+    return;
+  }
+  const ui = ensureFsUi();
+  ui.joy.textContent = `Joystick: ${joyMode}`;
+  ui.bar.style.display = 'flex';
+}
+
+// The pinned fallback is plain inline styles so it works with any page
+// shell. The z-index clears the page's fixed overlays (the scanline layer
+// sits at 9999); real fullscreen renders above them via the top layer.
+const CSS_FS_SHELL = {
+  position: 'fixed',
+  inset: '0',
+  zIndex: '10000',
+  border: 'none',
+  borderRadius: '0',
+};
+const CSS_FS_CANVAS = { width: '100%', height: '100%', objectFit: 'contain' };
+
+function setStyles(el, styles, on) {
+  for (const k of Object.keys(styles)) el.style[k] = on ? styles[k] : '';
+}
+
+function enterCssFullscreen() {
+  cssFullscreen = true;
+  setStyles(shell, CSS_FS_SHELL, true);
+  setStyles(canvas, CSS_FS_CANVAS, true);
+  document.documentElement.style.overflow = 'hidden';
+  updateFsUi();
+}
+
+function exitCssFullscreen() {
+  cssFullscreen = false;
+  setStyles(shell, CSS_FS_SHELL, false);
+  setStyles(canvas, CSS_FS_CANVAS, false);
+  document.documentElement.style.overflow = '';
+  updateFsUi();
+}
+
+function exitFullscreen() {
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  else exitCssFullscreen();
+}
+
 $('fullscreen').addEventListener('click', () => {
-  $('shell').requestFullscreen?.();
+  if (document.fullscreenEnabled && shell.requestFullscreen) {
+    shell.requestFullscreen().catch(enterCssFullscreen);
+  } else {
+    enterCssFullscreen();
+  }
 });
+
+// Covers Esc and any other browser-initiated exit from real fullscreen.
+document.addEventListener('fullscreenchange', updateFsUi);
 
 $('vol').addEventListener('input', (e) => {
   if (emu) emu.set_volume_percent(Number(e.target.value));
