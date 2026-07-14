@@ -1,32 +1,24 @@
-//! Super DMAC (SDMAC): the SCSI DMA controller of the A3000.
+//! Super DMAC (SDMAC): the SCSI DMA controller on the A3000 motherboard.
 //!
-//! The SDMAC sits between the CPU bus and a WD33C93 SCSI controller: it owns a
-//! DMA FIFO and the interrupt plumbing, and it maps the WD33C93's own register
-//! file into two of its addresses (a register-select latch and a data port).
+//! The SDMAC sits between the CPU bus and a WD33C93 SCSI controller: it owns
+//! the DMA FIFO and the interrupt plumbing, and it maps the WD33C93's own
+//! register file into two of its addresses (a register-select latch and a data
+//! port). Kickstart's built-in scsi.device drives the pair, so unlike the Zorro
+//! controllers there is no boot ROM to load: the machine either has a working
+//! SDMAC + WD33C93 or it hangs during scsi.device init.
 //!
-//! Only the register file is modelled: no DMA engine, and no WD33C93 behind
-//! it. This is not yet enough to boot an A3000, and the machine it leaves is
-//! not an A3000 with an empty SCSI socket either -- see below.
+//! This is the same layering `crate::a2091` uses, and the same one amiberry
+//! uses: the A2091's DMAC and the A3000's SDMAC are two front-ends onto one
+//! WD33C93 core ([`crate::scsi::Wd33c93`]). Only the front-end differs -- the
+//! register map, the ISTR bits, and a 32-bit DMA address counter instead of the
+//! Zorro II DMAC's 24-bit one.
 //!
-//! What it does fix is a hang. Kickstart's scsi.device spins on the interrupt
-//! status register waiting for the DMA FIFO to report itself empty, and with
-//! nothing decoding that address the FIFO-empty bit reads back as zero
-//! forever, so the ROM never reaches a display. An idle SDMAC reports an empty
-//! FIFO and no interrupt pending, which gets the driver moving again.
-//!
-//! It then deadlocks one step further along: the driver arms interrupts, sends
-//! the WD33C93 a command, and waits for the completion interrupt, which nothing
-//! here can raise. Exec ends up in its idle loop with no runnable task. Neither
-//! an all-ones nor an all-zeroes auxiliary status persuades it to give up on
-//! the missing chip, and amiberry offers no guidance because it has no
-//! absent-WD33C93 path at all: its SDMAC always routes the register window
-//! straight into a WD33C93 core.
-//!
-//! So the way out is to fit the chip. We already have a WD33C93 in
-//! `crate::scsi`, driven by the A2091's DMAC in `crate::a2091` -- exactly the
-//! layering amiberry uses, where the A2091 DMAC and the A3000 SDMAC are two
-//! front-ends onto one shared core. Wiring `SASR`/`SCMD` through to it, and
-//! its interrupt to INT2, is the next step and the one that should boot.
+//! The DMA engine has no FIFO of its own: a transfer moves every byte the
+//! WD33C93 offers or wants within the access that completes the handshake, so
+//! the FIFO always reads back empty and never full.
+
+use crate::memory::Memory;
+use crate::scsi::{DmaDir, ScsiDisk, Wd33c93};
 
 /// Base of the SDMAC register file.
 pub const SDMAC_BASE: u32 = 0x00DD_0000;
@@ -46,7 +38,9 @@ const CLR_INT: u32 = 0x1B; // W    Strobe: clear interrupts
 const ISTR: u32 = 0x1F; // R    Interrupt status
 const SP_DMA: u32 = 0x3F; // W    Strobe: stop DMA
 const SCMD: u32 = 0x43; // R/W  WD33C93 data port
-const SASR: u32 = 0x49; // R/W  WD33C93 register select
+const SCMD_ALT: u32 = 0x47; // R/W  ... and its alias
+const SASR: u32 = 0x49; // R/W  WD33C93 register select (reads: aux status)
+const SASR_ALT: u32 = 0x41; // R/W  ... and its alias
 const SSPBDAT: u32 = 0x58; // R/W  Synchronous serial periph. bus data, 32-bit
 const SSPBCTL: u32 = 0x5C; // R/W  Synchronous serial periph. bus control, 32-bit
 
@@ -72,38 +66,96 @@ pub const CONTR_INTEN: u8 = 0x04;
 /// Strobe: reset the WD33C93.
 pub const CONTR_RESET: u8 = 0x10;
 
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+/// The SDMAC masters the full 32-bit address space, word-aligned -- unlike the
+/// A2091's Zorro II DMAC, which is limited to 24 bits.
+const DMA_ADDR_MASK: u32 = 0xFFFF_FFFE;
+
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Sdmac {
+    /// The SCSI controller behind the DMA front-end.
+    pub wd: Wd33c93,
     /// Control register. Only the latched bits read back; RESET is a strobe.
     contr: u8,
     /// DACK width. Write-only on real silicon, so nothing ever reads it back.
     dawr: u8,
     /// DMA address register. It lives in Ramsey, not in the SDMAC, but it is
     /// addressed through the SDMAC window, so it is modelled here with the DMA
-    /// engine that would use it. The low two bits are wired to zero: this is a
+    /// engine that uses it. The low two bits are wired to zero: this is a
     /// longword address.
     acr: u32,
     /// Synchronous serial peripheral bus, used for the external clock/EEPROM
     /// on some boards. Nothing behind it here; the registers latch.
     sspbdat: u32,
     sspbctl: u32,
-    /// WD33C93 register-select latch. The chip it selects is not fitted.
-    sasr: u8,
+    /// Set by ST_DMA, cleared by SP_DMA and FLUSH.
+    dma_active: bool,
+    dma_warned: bool,
+    activity: bool,
+}
+
+impl Default for Sdmac {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Sdmac {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            wd: Wd33c93::new(),
+            contr: 0,
+            dawr: 0,
+            acr: 0,
+            sspbdat: 0,
+            sspbctl: 0,
+            dma_active: false,
+            dma_warned: false,
+            activity: false,
+        }
     }
 
+    /// Fit a drive at a SCSI ID (0-6; 7 is the controller itself).
+    pub fn attach_drive(&mut self, unit: usize, disk: ScsiDisk) {
+        self.wd.attach_target(unit, disk);
+    }
+
+    /// System reset: clear the DMAC and the SBIC, but keep the mounted drives.
     pub fn reset(&mut self) {
-        *self = Self::default();
+        self.wd.reset();
+        self.contr = 0;
+        self.dawr = 0;
+        self.acr = 0;
+        self.sspbdat = 0;
+        self.sspbctl = 0;
+        self.dma_active = false;
     }
 
-    /// Interrupt status. With no DMA engine the FIFO is always empty and never
-    /// full, and with no WD33C93 nothing ever raises an interrupt.
+    /// Drain the activity latch for the HDD LED.
+    pub fn take_activity(&mut self) -> bool {
+        std::mem::take(&mut self.activity) | self.wd.take_activity()
+    }
+
+    /// Advance emulated time: deliver delayed WD33C93 interrupts and pump any
+    /// DMA handshake that became ready.
+    pub fn tick(&mut self, cck: u32, mem: &mut Memory) {
+        self.wd.tick(cck);
+        self.pump_dma(mem);
+    }
+
+    /// Interrupt status. The DMA engine has no FIFO to fill, so it is empty
+    /// whenever no transfer is running and never full.
     fn istr(&self) -> u8 {
-        ISTR_FIFOE
+        let mut v = 0;
+        if !self.dma_active {
+            v |= ISTR_FIFOE;
+        }
+        if self.wd.int_asserted() {
+            v |= ISTR_INT_S | ISTR_INT_F;
+        }
+        if self.int_line() {
+            v |= ISTR_INT_P;
+        }
+        v
     }
 
     /// The word transfer count exists on the SDMAC-02 and was dropped on the
@@ -132,7 +184,16 @@ impl Sdmac {
         let in_long = |base: u32| (base..base + 4).contains(&off);
         let hit = matches!(
             off,
-            DAWR | CONTR | ST_DMA | FLUSH | CLR_INT | ISTR | SP_DMA | SCMD | SASR
+            DAWR | CONTR
+                | ST_DMA
+                | FLUSH
+                | CLR_INT
+                | ISTR
+                | SP_DMA
+                | SCMD
+                | SCMD_ALT
+                | SASR
+                | SASR_ALT
         ) || in_long(WTC)
             || in_long(ACR)
             || in_long(SSPBDAT)
@@ -157,14 +218,10 @@ impl Sdmac {
         match off {
             ISTR => self.istr(),
             CONTR => self.contr,
-            // TODO(codewiz): route these to a crate::scsi WD33C93. Reading the
-            // select address returns the chip's auxiliary status; the data
-            // port returns the selected register. Until a chip is fitted these
-            // are a guess, and no value works: scsi.device gets far enough to
-            // wait for an interrupt no one can raise. $00 at least does not
-            // claim a chip that is permanently busy (CIP and BSY set).
-            SASR => 0x00,
-            SCMD => 0xFF,
+            // Reading the select address gives the chip's auxiliary status;
+            // reading the data port gives the selected register.
+            SASR | SASR_ALT => self.wd.read_aux_status(),
+            SCMD | SCMD_ALT => self.wd.read_data_port(),
             _ if (WTC..WTC + 4).contains(&off) => Self::long_byte(self.wtc(), off, WTC),
             _ if (ACR..ACR + 4).contains(&off) => Self::long_byte(self.acr, off, ACR),
             _ if (SSPBDAT..SSPBDAT + 4).contains(&off) => {
@@ -184,17 +241,24 @@ impl Sdmac {
         };
         match off {
             DAWR => self.dawr = value,
-            // RESET would reset the WD33C93, which is not fitted. The bit is a
-            // strobe and does not latch.
-            CONTR => self.contr = value & !CONTR_RESET,
-            SASR => self.sasr = value,
-            // Writes to the missing WD33C93 go nowhere. Its register-select
-            // latch still holds, so a driver can write a register number and
-            // read $FF back from the data port, which is how it concludes the
-            // socket is empty.
-            SCMD => {}
-            // The strobes have no DMA engine to act on.
-            ST_DMA | SP_DMA | FLUSH | CLR_INT => {}
+            CONTR => {
+                // RESET is a strobe on the WD33C93's reset line: it does not
+                // latch, and it drops the drives' state, not the drives.
+                self.contr = value & !CONTR_RESET;
+                if value & CONTR_RESET != 0 {
+                    self.wd.reset();
+                }
+            }
+            SASR | SASR_ALT => self.wd.write_sasr(value),
+            SCMD | SCMD_ALT => self.wd.write_data_port(value),
+            // DMA start/stop. The transfer itself is pumped from `tick`, which
+            // runs before the driver can look at the result.
+            ST_DMA => self.dma_active = true,
+            SP_DMA | FLUSH => self.dma_active = false,
+            // Nothing to clear: ISTR is computed from the chip's own interrupt
+            // state, which the driver clears by reading the SCSI status
+            // register through SCMD.
+            CLR_INT => {}
             // The word transfer count does not exist on the SDMAC-04.
             _ if (WTC..WTC + 4).contains(&off) => {}
             _ if (ACR..ACR + 4).contains(&off) => {
@@ -211,9 +275,66 @@ impl Sdmac {
         }
     }
 
-    /// The SDMAC never raises an interrupt without a WD33C93 to raise one for.
+    /// The INT2 line into Paula (PORTS), gated by the control register's
+    /// interrupt enable.
     pub fn int_line(&self) -> bool {
-        false
+        self.contr & CONTR_INTEN != 0 && self.wd.int_asserted()
+    }
+
+    /// Move every byte the WD33C93 currently offers or wants between its data
+    /// path and Amiga memory, a word at a time, while DMA is started.
+    fn pump_dma(&mut self, mem: &mut Memory) {
+        if !self.dma_active {
+            return;
+        }
+        while let Some(dir) = self.wd.dma_request() {
+            if self.wd.dma_remaining() == 0 {
+                break;
+            }
+            self.activity = true;
+            let addr = self.acr & DMA_ADDR_MASK;
+            match dir {
+                DmaDir::In => {
+                    let b0 = self.wd.dma_in_byte();
+                    let b1 = if self.wd.dma_request().is_some() && self.wd.dma_remaining() > 0 {
+                        self.wd.dma_in_byte()
+                    } else {
+                        // An odd byte count still writes a full word; the pad
+                        // byte is whatever the FIFO carries (zero here).
+                        0
+                    };
+                    self.dma_write_word(mem, addr, (u16::from(b0) << 8) | u16::from(b1));
+                }
+                DmaDir::Out => {
+                    let w = self.dma_read_word(mem, addr);
+                    self.wd.dma_out_byte((w >> 8) as u8);
+                    if self.wd.dma_request().is_some() && self.wd.dma_remaining() > 0 {
+                        self.wd.dma_out_byte(w as u8);
+                    }
+                }
+            }
+            self.acr = self.acr.wrapping_add(2);
+        }
+    }
+
+    fn dma_read_word(&mut self, mem: &Memory, addr: u32) -> u16 {
+        crate::zorro_device::dma_read_word(mem, addr).unwrap_or_else(|| {
+            self.warn_dma_target(addr);
+            0xFFFF
+        })
+    }
+
+    fn dma_write_word(&mut self, mem: &mut Memory, addr: u32, w: u16) {
+        if !crate::zorro_device::dma_write_word(mem, addr, w) {
+            self.warn_dma_target(addr);
+        }
+    }
+
+    fn warn_dma_target(&mut self, addr: u32) {
+        if !self.dma_warned {
+            self.dma_warned = true;
+            log::warn!("sdmac: DMA to unmapped address {addr:#08X}; ignoring");
+        }
     }
 }
 
@@ -299,20 +420,78 @@ mod tests {
         }
     }
 
-    /// With no WD33C93 fitted the auxiliary status at least must not claim a
-    /// chip that is permanently busy: $FF sets CIP and BSY, and a driver then
-    /// waits forever for a command to finish. This does not make the machine
-    /// boot -- only fitting the chip will -- but it pins down the one value we
-    /// know to be wrong.
+    /// An idle WD33C93 is neither busy nor mid-command, and has nothing to say.
+    /// $FF here (CIP | BSY | INT set) leaves scsi.device waiting forever for a
+    /// command that never finishes.
     #[test]
-    fn an_absent_wd33c93_does_not_claim_to_be_permanently_busy() {
+    fn the_auxiliary_status_of_an_idle_chip_is_quiet() {
         use crate::scsi::{ASR_BSY, ASR_CIP, ASR_INT};
         let mut s = sdmac();
-        s.write_byte(SDMAC_BASE + SASR, 0x15);
-        assert_eq!(s.read_byte(SDMAC_BASE + SCMD), 0xFF);
-
         let aux = s.read_byte(SDMAC_BASE + SASR);
         assert_eq!(aux & (ASR_CIP | ASR_BSY | ASR_INT), 0, "aux {aux:#04X}");
+    }
+
+    /// The WD33C93's registers are reached by writing a register number to the
+    /// select latch and reading or writing the data port. Both addresses have
+    /// an alias four bytes below (the SDMAC decodes them loosely) -- SysInfo
+    /// polls the auxiliary status through the $41 alias, and read 250,000
+    /// floating $00s before this decoded.
+    #[test]
+    fn the_wd33c93_register_file_is_reachable_through_both_aliases() {
+        use crate::scsi::WD_OWN_ID;
+        for select in [SASR, SASR_ALT] {
+            for data in [SCMD, SCMD_ALT] {
+                let mut s = sdmac();
+                s.write_byte(SDMAC_BASE + select, WD_OWN_ID);
+                s.write_byte(SDMAC_BASE + data, 0x07);
+                s.write_byte(SDMAC_BASE + select, WD_OWN_ID);
+                assert_eq!(
+                    s.read_byte(SDMAC_BASE + data),
+                    0x07,
+                    "select {select:#04X} data {data:#04X}"
+                );
+            }
+        }
+    }
+
+    /// The control register's interrupt enable gates the INT2 line, and the
+    /// chip's interrupt shows up in ISTR whether or not it is enabled.
+    #[test]
+    fn the_interrupt_enable_gates_int2_but_not_the_status_register() {
+        let mut s = sdmac();
+        assert!(!s.int_line());
+        assert_eq!(s.istr() & (ISTR_INT_S | ISTR_INT_P), 0);
+
+        // Reset-complete raises the chip's interrupt without any drive.
+        s.write_byte(SDMAC_BASE + CONTR, CONTR_RESET);
+        s.write_byte(SDMAC_BASE + SASR, crate::scsi::WD_OWN_ID);
+        s.write_byte(SDMAC_BASE + SCMD, 0x07);
+        s.write_byte(SDMAC_BASE + SASR, crate::scsi::WD_COMMAND);
+        s.write_byte(SDMAC_BASE + SCMD, 0x00); // CSR_RESET
+        s.wd.tick(1000);
+        assert!(s.wd.int_asserted(), "the chip should interrupt after reset");
+
+        assert_eq!(s.istr() & ISTR_INT_S, ISTR_INT_S);
+        assert!(!s.int_line(), "INT2 is masked until CONTR enables it");
+
+        s.write_byte(SDMAC_BASE + CONTR, CONTR_INTEN);
+        assert!(s.int_line());
+        assert_eq!(s.istr() & ISTR_INT_P, ISTR_INT_P);
+    }
+
+    /// A started transfer takes the FIFO out of the empty state; stopping or
+    /// flushing it puts it back. Kickstart waits on this bit.
+    #[test]
+    fn the_dma_strobes_drive_the_fifo_empty_flag() {
+        let mut s = sdmac();
+        assert_eq!(s.read_byte(SDMAC_BASE + ISTR) & ISTR_FIFOE, ISTR_FIFOE);
+        s.write_byte(SDMAC_BASE + ST_DMA, 0);
+        assert_eq!(s.read_byte(SDMAC_BASE + ISTR) & ISTR_FIFOE, 0);
+        s.write_byte(SDMAC_BASE + FLUSH, 0);
+        assert_eq!(s.read_byte(SDMAC_BASE + ISTR) & ISTR_FIFOE, ISTR_FIFOE);
+        s.write_byte(SDMAC_BASE + ST_DMA, 0);
+        s.write_byte(SDMAC_BASE + SP_DMA, 0);
+        assert_eq!(s.read_byte(SDMAC_BASE + ISTR) & ISTR_FIFOE, ISTR_FIFOE);
     }
 
     /// The file repeats every $100; cdhooper's tool writes through the shadow

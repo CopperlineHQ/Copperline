@@ -123,22 +123,20 @@ board) and `CDTV` fit one by default; the base A500/A500OCS, A600, A1200,
 A1000, and CD32 have none. Set `rtc = true` to add one -- for an A600HD or a
 clock-equipped A1200, say -- so the Workbench clock keeps time.
 
-The `A3000` and `A4000` profiles are the big-box machines, and they are new and
-incomplete. They carry a Ramsey memory controller (`mem_controller`), which is
-what the two registers at `$DE0003` and `$DE0043` answer as, and they carry
-Gary rather than Gayle -- so no PCMCIA and no Gayle IDE. What they do not carry
-yet is their on-board mass storage, and the two machines fail differently
-because of it:
+The `A3000` and `A4000` profiles are the big-box machines. Both boot, but they
+are new and incomplete. They carry a Ramsey memory controller
+(`mem_controller`), which is what the two registers at `$DE0003` and `$DE0043`
+answer as, and they carry Gary rather than Gayle -- so no PCMCIA and no Gayle
+IDE.
 
-- The **A4000** boots. Its IDE interface at `$DD2020` is not implemented, so
-  Kickstart probes it, finds no drive, and waits out a timeout -- every boot is
-  slow, but it completes. Give it a Zorro controller (`[scsi]`) or a host
-  directory (`[[filesys]]`) to boot from.
-- The **A3000 does not boot yet.** Its SCSI is a Super DMAC at `$DD0000`
-  driving a WD33C93, and only the DMAC's register file exists. Kickstart's
-  `scsi.device` gets through the register probe, arms interrupts, sends the
-  missing WD33C93 a command, and waits forever for the completion interrupt.
-  The machine sits at a black screen with Exec idle and no runnable task.
+- The **A3000** has its motherboard SCSI: a Super DMAC at `$DD0000` driving a
+  WD33C93, which Kickstart's own `scsi.device` initialises at boot. No drives
+  are attached to it yet, so give the machine a Zorro controller (`[scsi]`) or a
+  host directory (`[[filesys]]`) to boot from.
+- The **A4000**'s IDE interface at `$DD2020` is not implemented. Kickstart's
+  `scsi.device` probes it, finds nothing, and waits out a timeout, so every boot
+  spends several seconds in the driver before it completes. Same story for
+  where to boot from.
 
 Motherboard fast RAM is not emulated on either; use `[memory] z3` instead,
 which the OS is equally happy with.

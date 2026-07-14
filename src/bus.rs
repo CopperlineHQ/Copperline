@@ -3984,6 +3984,21 @@ impl Bus {
             self.paula.intreq |= INT_PORTS;
         }
 
+        // SDMAC (A3000 motherboard SCSI): advance the WD33C93 and its DMA, and
+        // level-feed its INT2 line like Gayle's. Kickstart's own scsi.device
+        // drives it, so nothing boots until this interrupt arrives.
+        {
+            let Self {
+                sdmac, mem, paula, ..
+            } = self;
+            if let Some(sdmac) = sdmac.as_mut() {
+                sdmac.tick(cck, mem);
+                if sdmac.int_line() {
+                    paula.intreq |= INT_PORTS;
+                }
+            }
+        }
+
         // Akiko: advance the CD controller (sector DMA pacing, command
         // and response rings) and level-feed its INT2 line like Gayle's.
         if let Some(akiko) = self.akiko.as_mut() {

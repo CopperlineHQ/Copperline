@@ -2545,8 +2545,16 @@ impl CpuBus {
         }
         if size == 1 && self.bus.sdmac.is_some() && crate::sdmac::Sdmac::decodes(addr) {
             self.bus.cpu_slow_external_access(1);
-            if let Some(sdmac) = self.bus.sdmac.as_mut() {
-                return u32::from(sdmac.read_byte(addr));
+            let value = self
+                .bus
+                .sdmac
+                .as_mut()
+                .map(|sdmac| (u32::from(sdmac.read_byte(addr)), sdmac.take_activity()));
+            if let Some((value, activity)) = value {
+                if activity {
+                    self.bus.note_hdd_activity();
+                }
+                return value;
             }
         }
         // A configured functional Zorro board window (registers, boot ROM, DMA

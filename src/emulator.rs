@@ -1963,7 +1963,7 @@ pub fn build_machine(
     }
     if cfg.sdmac {
         bus.attach_sdmac(crate::sdmac::Sdmac::new());
-        info!("sdmac: Super DMAC at $DD0000 (no WD33C93 fitted)");
+        info!("sdmac: Super DMAC + WD33C93 at $DD0000 (no drives)");
     }
     if let Some(revision) = cfg.mem_controller.ramsey_revision() {
         // TODO(codewiz): pass the real bank size once motherboard fast RAM
