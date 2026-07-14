@@ -283,13 +283,22 @@ presentation buffer only and never touches the emulated framebuffer.
 - **Programmable interlaced (FF) weaving** is implemented but untested
   against real software.
 
-## Presentation (`video/window.rs`, `video/ui.rs`)
+## Presentation (`video/present_common.rs`, `video/window.rs`, `video/ui.rs`)
 
 `window.rs` owns the winit `ApplicationHandler` and the `pixels` GPU
 surface: the field is presented at a TV-like 4:3 aspect plus the
 44-pixel status bar, scaling continuously with the window. The GPU surface
 is fed from `present_fb`, the post-processed presentation buffer produced by
 either the render worker or the synchronous fallback.
+
+The frontend-independent half of this pass lives in
+`video/present_common.rs`: the post-render pipeline (vertical/horizontal
+recentring, the TV bezel mask, programmable-scan stretch) plus the
+standard-window and TV-aperture constants and the geometry predicates that
+key on them. `window/present.rs` re-exports everything there, so the
+desktop path is unchanged; headless consumers -- `cpu.rs`'s debug
+screenshots and the [browser (WebAssembly) frontend](../guide/browser.md)
+-- present frames through it without the winit stack.
 
 Two presentation-only adjustments (they never alter the emulated
 framebuffer):
@@ -313,7 +322,15 @@ framebuffer):
   True horizontal overscan fetches are not cropped to this aperture: they stay
   on the full-width TV path so intentional border content remains visible.
   `COPPERLINE_SHOT_RAW=1` bypasses the PNG crop and writes the raw 716x570
-  woven framebuffer.
+  woven framebuffer. A second, narrower aperture (`TV_PAL_CAPTURED_*`,
+  668x540) clips the same rect to columns the framebuffer actually
+  captures: the reference aperture's right margin reaches 12 columns past
+  the framebuffer's right edge, which the window and PNG paths pad with
+  black bezel. Frontends whose frame should end on real pixels present the
+  captured aperture instead -- the browser canvas hugs its border on every
+  side -- with the margin mirrored from the captured right-overscan width
+  so the standard window stays exactly centred. Its geometry invariants are
+  const-evaluated beside the definitions.
 - **Full-overscan horizontal recentring**: in `"full"` presentation, a standard
   (non-overscan) display is recentred because the framebuffer captures a deep
   slab of left overscan that would otherwise push the picture right of centre.

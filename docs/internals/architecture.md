@@ -10,12 +10,15 @@ This chapter is the map; the following chapters zoom into the
 ```
 src/
   main.rs           # thin CLI binary: arg parse, config load, boot
+  bin/bench.rs      # copperline-bench headless benchmark (native + wasm32-wasip1)
   lib.rs            # the copperline library crate all of src/ lives in
   config.rs         # TOML config + validation + machine profiles
   envcfg.rs         # cached COPPERLINE_* environment-variable snapshot
   emulator.rs       # frame loop driving CPU, chipset, and host I/O
   debugger.rs       # env-driven headless debugger
   disasm.rs         # 68000 + Copper-list disassemblers
+  gdbstub.rs        # GDB remote-protocol stub (host debugger transport)
+  amigaos.rs        # read-only exec.library structure walking for the debugger
   cpu.rs            # m68k core wrapper and CPU-visible bus adapter
   cache.rs          # 68020/030/040 on-chip instruction/data cache model
   bus.rs            # shared RAM, ROM, chipset, CIA, RTC, and I/O state
@@ -27,14 +30,21 @@ src/
   memory.rs         # chip/slow RAM, ROM, extended ROM containers
   romsearch.rs      # locate the bundled AROS default boot ROM
   zorro.rs          # Zorro II/III autoconfig chain and boards
+  zorro_device.rs   # the functional-Zorro-board boundary (ZorroDevice trait)
+  wasmboard.rs      # WASM plugin boards under wasmtime (wasm-boards feature)
+  wasm_manifest.rs  # plugin manifest types shared with wasmtime-less builds
   floppy.rs         # disk images + timed disk DMA controller
   dms.rs            # DMS archive decompression
   drive_sounds.rs   # synthesized floppy-drive sound effects
   gayle.rs          # A600/A1200 Gayle gate array + IDE
   a2091.rs          # A2091 SCSI controller board (DMAC + boot ROM)
+  a4091.rs          # A4091 Zorro III SCSI-2 controller (NCR 53C710)
   scsi.rs           # WD33C93A SBIC + SCSI-2 disk targets
   harddrive.rs      # shared hard-drive image backend (IDE + SCSI)
   dirfs.rs          # host directory -> in-memory FFS partition image
+  filesys.rs        # host directories mounted live as AmigaDOS volumes
+  a2065.rs          # A2065 Zorro II Ethernet board (Am7990 LANCE)
+  net.rs            # host networking backends for emulated Ethernet
   cdrom.rs          # CD image (BIN/CUE) parsing
   cdtv.rs           # CDTV DMAC + Matshita drive model
   akiko.rs          # CD32 Akiko (C2P, NVRAM, Chinon drive)
@@ -50,6 +60,7 @@ src/
   savestate.rs      # whole-machine snapshot/restore (versioned file format)
   timetravel.rs     # reverse-debugging snapshot ring + replay
   timestamp.rs      # compact wall-clock stamps for generated filenames
+  timebase.rs       # host clock imports shared with the browser build
   chipset/
     agnus.rs        # beam counters, DMACON, display fetch, arbitration data
     copper.rs       # Copper decode + cycle-stepped execution
@@ -64,12 +75,15 @@ src/
     bitplane/       # size-split renderer submodules + its test suite
                     #   (sprite.rs, fetch.rs, output.rs, diag.rs, tests.rs)
     deinterlace.rs  # motion-adaptive deinterlacer
+    present_common.rs # frontend-independent post-processing + TV apertures
     window.rs       # winit ApplicationHandler + render worker + main/tool pixels surfaces + status bar
     window/         # size-split window submodules + its test suite
                     #   (statusbar.rs, present.rs, host_input.rs, tests.rs)
     ui.rs           # pop-up menu, overlay panels, and debugger/analyzer panel drawing
     font.rs         # 8x8 overlay font
 crates/m68k/        # vendored m68k CPU core
+crates/copperline-web/   # standalone wasm-bindgen browser frontend (WebEmu + page glue)
+crates/cputest-runner/   # WinUAE cputest instruction-suite runner for the m68k core
 tests/              # ignored integration tests (need local ROM assets)
 timing-test/        # bootable cross-emulator timing-measurement disk
 ```
@@ -84,6 +98,14 @@ emulated time, cycle-stepping the CPU and the chipset together. By default,
 the completed-frame renderer runs one frame behind on a worker thread; set
 `COPPERLINE_THREADED_RENDER=0` to use the synchronous renderer for
 comparison.
+
+The winit window is only the default frontend. With the default `frontend`
+cargo feature disabled, the crate builds as the portable headless core plus
+the frontend-independent presentation helpers (`video/present_common.rs`),
+with no desktop dependencies; that is the surface the browser (WebAssembly)
+frontend in `crates/copperline-web` wraps
+([](../guide/browser.md)), and `cargo check --no-default-features` is the
+CI-enforced portability invariant.
 
 The flow of a frame:
 

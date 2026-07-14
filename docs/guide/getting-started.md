@@ -1,5 +1,10 @@
 # Getting started
 
+To try Copperline without installing anything, a WebAssembly build runs
+in the browser at [copperline.dev/try](https://copperline.dev/try/); see
+[](browser) for what it can do. The rest of this chapter covers the
+native desktop build.
+
 ## Requirements
 
 - Rust 1.87+ (stable). Tested with Rust 1.96.
