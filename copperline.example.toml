@@ -103,12 +103,9 @@ model = "68000"
 # Without any [machine] section the default machine is that same Rev 6A
 # A500 (ECS 8372A Agnus, OCS 8362 Denise, 512 KiB chip + 512 KiB trapdoor
 # slow RAM) -- the most common and most-targeted Amiga.
-# The big-box profiles (A3000, A4000) are new and incomplete, but both boot.
-# The A3000 boots off its motherboard SCSI (Super DMAC + WD33C93 at $DD0000,
-# driven by Kickstart's own scsi.device): put drives on it with [scsi]. The
-# A4000's IDE at $DD2020 is not emulated at all, so Kickstart spends several
-# seconds probing for it on every boot; give that machine a Zorro controller or
-# a [[filesys]] mount to boot from.
+# The big-box profiles (A3000, A4000) are new and incomplete, but both boot,
+# each off its own built-in disk controller: put drives on the A3000's SCSI
+# with [scsi], and on the A4000's IDE with [ide].
 # [machine]
 # profile = "A600"      # A1000 | A500 | A500OCS | A500Plus | A600 | A1200 | A3000 | A4000 | CDTV | CD32
 # rtc = true            # add a $DC0000 battery RTC (default: only A500+/CDTV/A3000/A4000 have one)
@@ -202,9 +199,9 @@ slow = "512K"
 #             odd half of a split even/odd EPROM dump).
 #   "a4091" - Zorro III, NCR 53C710. Needs a raw A4091 EPROM image (e.g. the
 #             open-source a4091.rom); single ROM, no rom_odd.
-#   "a3000" - the A3000's motherboard SCSI (Super DMAC + WD33C93 at $DD0000),
-#             and the default on that machine. No ROM: Kickstart's own
-#             scsi.device drives it and autoboots from an RDB drive.
+#   "a3000" - the A3000's built-in SCSI, and the default on that machine.
+#             Needs no ROM: the Kickstart carries its driver and autoboots
+#             from an RDB drive.
 # [scsi]
 # controller = "a2091"
 # rom = "a2091-v6.6.rom"
@@ -235,10 +232,10 @@ slow = "512K"
 video = "PAL"
 
 
-# Gayle IDE hard-disk images (A600/A1200 machine profiles only). Raw flat
-# HDF images opened read/write; both full images with their own RDB and
-# bare partition hardfiles (boot block "DOS\x..", size a multiple of
-# 256 KiB) work - the latter get a synthesized RDB on the fly. A path may
+# IDE hard-disk images, on the machines with a built-in IDE port: A600, A1200,
+# and A4000. Raw flat HDF images opened read/write; both full images with their
+# own RDB and bare partition hardfiles (boot block "DOS\x..", size a multiple
+# of 256 KiB) work - the latter get a synthesized RDB on the fly. A path may
 # also name a host directory, mounted as an in-memory FFS volume (guest
 # writes are not synced back to the host).
 # [ide]

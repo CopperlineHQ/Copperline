@@ -2563,6 +2563,16 @@ impl CpuBus {
                 return value;
             }
         }
+        if self.bus.ide_a4000.is_some() && crate::ide_a4000::IdeA4000::decodes(addr) {
+            self.bus.cpu_slow_external_access(Self::access_words(size));
+            if let Some(ide) = self.bus.ide_a4000.as_mut() {
+                let value = ide.read(addr, size);
+                if ide.take_activity() {
+                    self.bus.note_hdd_activity();
+                }
+                return value;
+            }
+        }
         // A configured functional Zorro board window (registers, boot ROM, DMA
         // strobes): the chain maps it to a device slot. Off the chip bus like
         // Gayle.
@@ -2791,6 +2801,16 @@ impl CpuBus {
             self.bus.cpu_slow_external_access(1);
             if let Some(sdmac) = self.bus.sdmac.as_mut() {
                 sdmac.write_byte(addr, value as u8);
+            }
+            return;
+        }
+        if self.bus.ide_a4000.is_some() && crate::ide_a4000::IdeA4000::decodes(addr) {
+            self.bus.cpu_slow_external_access(Self::access_words(size));
+            if let Some(ide) = self.bus.ide_a4000.as_mut() {
+                ide.write(addr, size, value);
+                if ide.take_activity() {
+                    self.bus.note_hdd_activity();
+                }
             }
             return;
         }

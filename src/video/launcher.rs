@@ -1125,7 +1125,7 @@ impl MachineSetup {
         self.realtime_priority = base.emulation.realtime_priority;
         self.warp = base.emulation.warp_speed;
         self.joystick_input_mode = base.joystick_input_mode;
-        if !self.has_gayle() {
+        if !self.has_ide() {
             self.ide_master = None;
             self.ide_master_name = None;
             self.ide_slave = None;
@@ -1153,6 +1153,11 @@ impl MachineSetup {
         self.model == Some(MachineModel::A3000)
     }
 
+    /// Machines with an IDE port: Gayle's, and the A4000's at $DD2020.
+    fn has_ide(&self) -> bool {
+        self.has_gayle() || self.model == Some(MachineModel::A4000)
+    }
+
     fn has_cd(&self) -> bool {
         matches!(self.model, Some(MachineModel::Cdtv | MachineModel::Cd32))
     }
@@ -1176,7 +1181,7 @@ impl MachineSetup {
             F::Icache => reason(self.cpu.has_instruction_cache(), "needs 68020+"),
             F::Dcache => reason(self.cpu.has_data_cache(), "needs 68030/040"),
             F::Z3Ram => reason(cpu_is_32bit(self.cpu), "needs 32-bit CPU"),
-            F::IdeMaster | F::IdeSlave => reason(self.has_gayle(), "needs A600/A1200"),
+            F::IdeMaster | F::IdeSlave => reason(self.has_ide(), "needs A600/A1200/A4000"),
             // The ROM and drives belong to the fitted controller; greyed with
             // none. The A3000's motherboard SCSI has no ROM of its own, and
             // rom_odd is an A2091 split-EPROM option only.
