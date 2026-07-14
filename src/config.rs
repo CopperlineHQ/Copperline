@@ -650,6 +650,9 @@ pub enum Chipset {
 /// RTC presence). With no `[machine]` section the defaults match the `A500`
 /// profile: the A500 Rev 6A (ECS 8372A Agnus, OCS 8362 Denise, 68000,
 /// 512 KiB chip RAM, and 512 KiB trapdoor slow RAM).
+///
+/// Append new models at the end: savestates carry the discriminant, so
+/// inserting one in the middle renames every model below it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MachineModel {
     /// A500 Rev 6A: the ECS "Fatter" 8372A Agnus (1 MiB chip reach, software
@@ -673,8 +676,7 @@ pub enum MachineModel {
     /// no Kickstart ROM -- the `rom` is the 64 KiB bootstrap ROM, which loads
     /// Kickstart from the Kickstart disk in DF0 into 256 KiB of writable
     /// control store (WCS) at $FC0000 and then write-protects it. 256 KiB
-    /// stock chip RAM, no trapdoor slow RAM, no RTC. (Added last so the
-    /// serialized discriminants of the other models do not shift.)
+    /// stock chip RAM, no trapdoor slow RAM, no RTC.
     A1000,
     /// A3000: ECS, 68030 at 25 MHz, 2 MB chip RAM, a Ramsey-04 memory
     /// controller and the battery-backed MSM6242 clock. No Gayle -- the
