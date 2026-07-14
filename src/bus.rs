@@ -663,6 +663,7 @@ pub struct Bus {
     pub gayle: Option<Gayle>,
     /// Ramsey memory controller (A3000/A4000 machine profiles). Answers on
     /// the same $DE0000 page Gayle uses, so the two are never both fitted.
+    #[serde(default)]
     pub ramsey: Option<crate::ramsey::Ramsey>,
     /// Super DMAC (A3000 machine profile): the SCSI DMA controller at $DD0000.
     /// Kickstart's scsi.device hangs during init if nothing answers here.
