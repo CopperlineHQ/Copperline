@@ -2543,6 +2543,12 @@ impl CpuBus {
                 return u32::from(ramsey.read_byte(addr));
             }
         }
+        if size == 1 && self.bus.gary.is_some() && crate::gary::decodes(addr) {
+            self.bus.cpu_slow_external_access(1);
+            if let Some(gary) = self.bus.gary.as_ref() {
+                return u32::from(gary.read_byte(addr));
+            }
+        }
         if size == 1 && self.bus.sdmac.is_some() && crate::sdmac::Sdmac::decodes(addr) {
             self.bus.cpu_slow_external_access(1);
             let value = self
@@ -2766,6 +2772,13 @@ impl CpuBus {
                 }
             }
             return;
+        }
+        if size == 1 && self.bus.gary.is_some() && crate::gary::decodes(addr) {
+            self.bus.cpu_slow_external_access(1);
+            if let Some(gary) = self.bus.gary.as_mut() {
+                gary.write_byte(addr, value as u8);
+                return;
+            }
         }
         if size == 1 && self.bus.ramsey.is_some() && crate::ramsey::decodes(addr) {
             self.bus.cpu_slow_external_access(1);

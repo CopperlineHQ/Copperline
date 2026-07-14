@@ -18,12 +18,22 @@ pub const RAMSEY_CONTROL: u32 = 0x00DE_0003;
 /// Ramsey version register. Byte-wide, read-only.
 pub const RAMSEY_VERSION: u32 = 0x00DE_0043;
 
-/// Whether Ramsey drives the bus for a byte access at `addr`. It has exactly
-/// two registers and decodes nothing else: everything else on the $DE0000 page
-/// stays undriven, so it floats (and shows up in `[debug] log_unmapped`)
-/// rather than reading back a value we invented.
+/// Whether Ramsey drives the bus for a byte access at `addr`.
+///
+/// Ramsey sits on byte lane 3 of the page Gary decodes (see [`crate::gary`]),
+/// and only two address bits pick the register, so both are mirrored many times
+/// over: the control register answers at $DE0003, $DE0007, ... $DE003F, and
+/// again every $100. Bits 6-7 of the address select which register, and the two
+/// blocks Ramsey does not use read back $FF.
 pub fn decodes(addr: u32) -> bool {
-    addr == RAMSEY_CONTROL || addr == RAMSEY_VERSION
+    (crate::gary::GARY_BASE..crate::gary::GARY_BASE + crate::gary::GARY_SIZE).contains(&addr)
+        && (addr & 3) == 3
+}
+
+/// Which of Ramsey's registers an address selects: block 0 is the control
+/// register, block 1 the version, and blocks 2 and 3 are undriven.
+fn block(addr: u32) -> u32 {
+    (addr >> 6) & 3
 }
 
 // Control register bits.
@@ -133,18 +143,19 @@ impl Ramsey {
 
     /// Read one of the two registers. Callers must have checked `decodes`.
     pub fn read_byte(&self, addr: u32) -> u8 {
-        if addr == RAMSEY_VERSION {
-            self.revision.version_id()
-        } else {
-            self.control
+        match block(addr) {
+            0 => self.control,
+            1 => self.revision.version_id(),
+            // Ramsey answers on the lane but drives nothing in these blocks.
+            _ => 0xFF,
         }
     }
 
     pub fn write_byte(&mut self, addr: u32, value: u8) {
-        if addr == RAMSEY_CONTROL {
+        // The version register is read-only, and so are the unused blocks.
+        if block(addr) == 0 {
             self.control = value;
         }
-        // The version register is read-only.
     }
 }
 

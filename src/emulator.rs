@@ -1971,6 +1971,13 @@ pub fn build_machine(
         let bank_bytes = revision.stock_bank_bytes();
         bus.attach_ramsey(crate::ramsey::Ramsey::new(revision, bank_bytes));
     }
+    // Gary and Ramsey share one address decode -- Gary owns byte lanes 0-2 of
+    // the $DE0000 page and Ramsey lane 3 -- and tools probe Gary to find the
+    // Ramsey: xSysInfo gives up on the memory controller if it cannot first
+    // identify a Fat Gary. Fitting one without the other identifies as neither.
+    if cfg.gate_array.is_fat_gary() {
+        bus.attach_gary(crate::gary::Gary::new());
+    }
     if !devices.is_empty() {
         bus.attach_devices(devices);
     }

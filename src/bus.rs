@@ -665,6 +665,10 @@ pub struct Bus {
     /// the same $DE0000 page Gayle uses, so the two are never both fitted.
     #[serde(default)]
     pub ramsey: Option<crate::ramsey::Ramsey>,
+    /// Fat Gary bus controller (A3000/A4000 machine profiles): the other three
+    /// byte lanes of the page Ramsey answers on. Fitted with it, never alone.
+    #[serde(default)]
+    pub gary: Option<crate::gary::Gary>,
     /// Super DMAC (A3000 machine profile): the SCSI DMA controller at $DD0000.
     /// Kickstart's scsi.device hangs during init if nothing answers here.
     #[serde(default)]
@@ -2099,6 +2103,7 @@ impl Bus {
             rtc_present: true,
             gayle: None,
             ramsey: None,
+            gary: None,
             sdmac: None,
             log_unmapped: None,
             akiko: None,
@@ -2530,6 +2535,10 @@ impl Bus {
         self.ramsey = Some(ramsey);
     }
 
+    pub fn attach_gary(&mut self, gary: crate::gary::Gary) {
+        self.gary = Some(gary);
+    }
+
     pub fn attach_sdmac(&mut self, sdmac: crate::sdmac::Sdmac) {
         self.sdmac = Some(sdmac);
     }
@@ -2747,6 +2756,9 @@ impl Bus {
         self.rtc = Msm6242Rtc::default();
         if let Some(gayle) = self.gayle.as_mut() {
             gayle.reset();
+        }
+        if let Some(gary) = self.gary.as_mut() {
+            gary.reset();
         }
         if let Some(ramsey) = self.ramsey.as_mut() {
             ramsey.reset();

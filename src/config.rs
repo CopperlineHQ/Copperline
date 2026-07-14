@@ -857,25 +857,40 @@ impl MachineDescriptor {
     }
 }
 
-/// Which gate array the machine carries. Gayle owns IDE, PCMCIA, and the
-/// interrupt plumbing at $DA8000-$DAA000 plus the ID register at $DE1000.
+/// Which bus gate array the machine carries. A machine has exactly one, and
+/// they are not interchangeable parts so much as the same seat on the board:
+/// both decode the $DE0000 page, so fitting two would make the decode
+/// ambiguous.
+///
+/// Gayle (the wedge machines) is the bus controller plus IDE, PCMCIA, and the
+/// interrupt plumbing at $DA8000-$DAA000, with an ID register at $DE1000. Fat
+/// Gary (the big-box machines) is only a bus controller: three flag registers
+/// on byte lanes 0-2 of the $DE0000 page, with Ramsey answering on lane 3.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GateArray {
     #[default]
     None,
     GayleA600,
     GayleA1200,
+    /// Fat Gary, as fitted to the A3000 and A4000. Always accompanied by a
+    /// Ramsey (see [`MemController`]): they share one address decode.
+    FatGary,
 }
 
 impl GateArray {
     /// The 8-bit ID shifted out of $DE1000 (MSB first): $D0 on the A600,
-    /// $D1 on the A1200.
+    /// $D1 on the A1200. Only Gayle has one.
     pub fn gayle_id(self) -> Option<u8> {
         match self {
-            Self::None => None,
+            Self::None | Self::FatGary => None,
             Self::GayleA600 => Some(0xD0),
             Self::GayleA1200 => Some(0xD1),
         }
+    }
+
+    /// Whether this machine's gate array is a Fat Gary.
+    pub fn is_fat_gary(self) -> bool {
+        self == Self::FatGary
     }
 }
 
@@ -1932,7 +1947,11 @@ impl TryFrom<RawConfig> for Config {
             master: raw.ide.master.map(drive_image).transpose()?,
             slave: raw.ide.slave.map(drive_image).transpose()?,
         };
-        if (ide.master.is_some() || ide.slave.is_some()) && defaults.gate_array == GateArray::None {
+        // Only Gayle carries an IDE interface. A Fat Gary machine has one too
+        // (the A4000's, at $DD2020), but it is not emulated yet and it is not
+        // Gayle's, so [ide] cannot drive it.
+        if (ide.master.is_some() || ide.slave.is_some()) && defaults.gate_array.gayle_id().is_none()
+        {
             errors.push(anyhow!(
                 "[ide] images need a Gayle machine: set [machine] profile = \"A600\" (or A1200)"
             ));
@@ -2365,6 +2384,7 @@ pub(crate) fn machine_profile_defaults(model: MachineModel) -> Config {
             d.cpu = CpuModel::M68030;
             d.cpu_clock_mhz = 25.0;
             d.mem_controller = MemController::Ramsey4;
+            d.gate_array = GateArray::FatGary;
             d.rtc_present = true;
             d.sdmac = true;
         }
@@ -2377,6 +2397,7 @@ pub(crate) fn machine_profile_defaults(model: MachineModel) -> Config {
             d.cpu = CpuModel::M68040;
             d.cpu_clock_mhz = 25.0;
             d.mem_controller = MemController::Ramsey7;
+            d.gate_array = GateArray::FatGary;
             d.rtc_present = true;
         }
         // CDTV: A500-class board with the 1 MB ECS Agnus and 1 MB chip
@@ -3299,7 +3320,10 @@ mod tests {
         assert_eq!(cfg.cpu, CpuModel::M68040);
         assert_eq!(cfg.chip_ram_bytes, 2 * 1024 * 1024);
         assert_eq!(cfg.slow_ram_bytes, 0);
-        assert_eq!(cfg.gate_array, GateArray::None);
+        // Fat Gary, not Gayle: the big-box machines fill the same seat with the
+        // other chip, so no PCMCIA and no Gayle IDE.
+        assert_eq!(cfg.gate_array, GateArray::FatGary);
+        assert_eq!(cfg.gate_array.gayle_id(), None);
         assert_eq!(cfg.mem_controller, MemController::Ramsey7);
         assert!(cfg.rtc_present);
 
@@ -3311,7 +3335,7 @@ mod tests {
         )?;
         assert_eq!(cfg.chipset, Chipset::Ecs);
         assert_eq!(cfg.cpu, CpuModel::M68030);
-        assert_eq!(cfg.gate_array, GateArray::None);
+        assert_eq!(cfg.gate_array, GateArray::FatGary);
         assert_eq!(cfg.mem_controller, MemController::Ramsey4);
         // Kickstart's scsi.device hangs in init if the SDMAC does not answer.
         assert!(cfg.sdmac);

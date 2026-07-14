@@ -34,6 +34,7 @@ pub mod filesys;
 pub mod floppy;
 #[cfg(feature = "frontend")]
 pub mod gamepad;
+pub mod gary;
 pub mod gayle;
 pub mod gdbstub;
 pub mod harddrive;
