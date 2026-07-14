@@ -87,11 +87,13 @@ impl AgnusRevision {
     fn chipset_id(self, video_standard: VideoStandard) -> u16 {
         match (self, video_standard) {
             (Self::Ocs, _) => 0x00,
-            (Self::Ecs8372Rev4, VideoStandard::Pal) => 0x20,
-            (Self::Ecs8372Rev4, VideoStandard::Ntsc) => 0x30,
-            // HRM table: "8372 (Fat-hr) rev 5" = $22 PAL / $31 NTSC.
-            (Self::Ecs8375, VideoStandard::Pal) => 0x22,
-            (Self::Ecs8375, VideoStandard::Ntsc) => 0x31,
+            // Every ECS Agnus reports the same ID: the HRM's "8372 (Fat-hr)
+            // rev 5" = $22 row is a part that apparently never shipped, and the
+            // 2 MB Agnus is not distinguishable from the 1 MB one here. $22 is
+            // Alice territory -- with it, ShowConfig calls an ECS A3000 an AGA
+            // machine. WinUAE/amiberry disable that row too (custom.cpp VPOSR).
+            (Self::Ecs8372Rev4 | Self::Ecs8375, VideoStandard::Pal) => 0x20,
+            (Self::Ecs8372Rev4 | Self::Ecs8375, VideoStandard::Ntsc) => 0x30,
             // HRM table: "8374 (Alice) rev 3 thru rev 4" = $23 PAL / $33 NTSC.
             (Self::AgaAlice, VideoStandard::Pal) => 0x23,
             (Self::AgaAlice, VideoStandard::Ntsc) => 0x33,
@@ -2163,15 +2165,21 @@ mod tests {
         );
     }
 
+    /// Every ECS Agnus reports one ID, 1 MB or 2 MB: $20 PAL, $30 NTSC. The
+    /// $22/$23 values belong to Alice, and reporting $22 for the 2 MB part made
+    /// ShowConfig call an ECS A3000 an "AGA Alice R1" machine.
     #[test]
-    fn vposr_reports_8375_chipset_id() {
-        // HRM identification table: 8375 ("8372 rev 5") = $22 PAL, $31 NTSC.
-        let pal =
-            Agnus::with_video_standard_and_revision(VideoStandard::Pal, AgnusRevision::Ecs8375);
-        assert_eq!(pal.read_vposr() & 0x7F00, 0x2200);
-        let ntsc =
-            Agnus::with_video_standard_and_revision(VideoStandard::Ntsc, AgnusRevision::Ecs8375);
-        assert_eq!(ntsc.read_vposr() & 0x7F00, 0x3100);
+    fn vposr_reports_the_same_chipset_id_for_every_ecs_agnus() {
+        for revision in [AgnusRevision::Ecs8372Rev4, AgnusRevision::Ecs8375] {
+            let pal = Agnus::with_video_standard_and_revision(VideoStandard::Pal, revision);
+            assert_eq!(pal.read_vposr() & 0x7F00, 0x2000, "{revision:?} PAL");
+            let ntsc = Agnus::with_video_standard_and_revision(VideoStandard::Ntsc, revision);
+            assert_eq!(ntsc.read_vposr() & 0x7F00, 0x3000, "{revision:?} NTSC");
+        }
+        // Alice is what $23 means, and it is a different chip.
+        let aga =
+            Agnus::with_video_standard_and_revision(VideoStandard::Pal, AgnusRevision::AgaAlice);
+        assert_eq!(aga.read_vposr() & 0x7F00, 0x2300);
     }
 
     #[test]
