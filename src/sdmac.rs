@@ -431,6 +431,32 @@ mod tests {
         assert_eq!(aux & (ASR_CIP | ASR_BSY | ASR_INT), 0, "aux {aux:#04X}");
     }
 
+    /// The register file ends at the data register: $1F is the auxiliary status
+    /// aliased in read-only, and $1A-$1E are not registers and float. This is
+    /// how cdhooper's sdmac tool identifies the chip -- with both writable, it
+    /// reported "SCSI Controller: Not detected: INVALID" and failed its WDC
+    /// test.
+    #[test]
+    fn the_registers_past_the_data_register_are_read_only_or_float() {
+        use crate::scsi::WD_AUX_STATUS;
+        let mut s = sdmac();
+        let aux = s.read_byte(SDMAC_BASE + SASR);
+
+        for value in [0xFFu8, 0xA5, 0x5A] {
+            // The auxiliary status ignores writes and keeps reading the status.
+            s.write_byte(SDMAC_BASE + SASR, WD_AUX_STATUS);
+            s.write_byte(SDMAC_BASE + SCMD, value);
+            s.write_byte(SDMAC_BASE + SASR, WD_AUX_STATUS);
+            assert_eq!(s.read_byte(SDMAC_BASE + SCMD), aux, "wrote {value:#04X}");
+
+            // An undefined register never drives the bus.
+            s.write_byte(SDMAC_BASE + SASR, 0x1E);
+            s.write_byte(SDMAC_BASE + SCMD, value);
+            s.write_byte(SDMAC_BASE + SASR, 0x1E);
+            assert_eq!(s.read_byte(SDMAC_BASE + SCMD), 0xFF, "wrote {value:#04X}");
+        }
+    }
+
     /// The WD33C93's registers are reached by writing a register number to the
     /// select latch and reading or writing the data port. Both addresses have
     /// an alias four bytes below (the SDMAC decodes them loosely) -- SysInfo
