@@ -1116,6 +1116,16 @@ impl FilesysUnit {
                     Ok(m) => m,
                     Err(e) => return (DOSFALSE, host_error(&e)),
                 };
+                // The object's own delete-protection bit (kept in the .uaem
+                // sidecar) refuses the delete, per the ACTION_DELETE_OBJECT
+                // autodoc. A residual host permission failure stays
+                // ERROR_WRITE_PROTECTED via host_error, which the same autodoc
+                // sanctions ("a delete operation on a file also implies a
+                // write"); the whole-volume case returns
+                // ERROR_DISK_WRITE_PROTECTED through write_refusal above.
+                if read_uaem(&path).is_some_and(|u| u.protection & FIBF_DELETE != 0) {
+                    return (DOSFALSE, ERROR_DELETE_PROTECTED);
+                }
                 let res = if meta.is_dir() {
                     std::fs::remove_dir(&path)
                 } else {
