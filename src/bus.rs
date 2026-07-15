@@ -673,6 +673,10 @@ pub struct Bus {
     /// Kickstart's scsi.device hangs during init if nothing answers here.
     #[serde(default)]
     pub sdmac: Option<crate::sdmac::Sdmac>,
+    /// A4000 motherboard IDE (A4000 machine profile): the ATA task file at
+    /// $DD2020.
+    #[serde(default)]
+    pub ide_a4000: Option<crate::ide_a4000::IdeA4000>,
     /// `[debug] log_unmapped`: log CPU accesses in this range that no device
     /// decodes, to find the registers a guest expects and we do not provide.
     #[serde(default)]
@@ -2105,6 +2109,7 @@ impl Bus {
             ramsey: None,
             gary: None,
             sdmac: None,
+            ide_a4000: None,
             log_unmapped: None,
             akiko: None,
             cdtv: None,
@@ -2543,6 +2548,10 @@ impl Bus {
         self.sdmac = Some(sdmac);
     }
 
+    pub fn attach_ide_a4000(&mut self, ide: crate::ide_a4000::IdeA4000) {
+        self.ide_a4000 = Some(ide);
+    }
+
     pub fn attach_akiko(&mut self, akiko: crate::akiko::Akiko) {
         self.akiko = Some(akiko);
     }
@@ -2766,6 +2775,9 @@ impl Bus {
         if let Some(sdmac) = self.sdmac.as_mut() {
             sdmac.reset();
         }
+        if let Some(ide) = self.ide_a4000.as_mut() {
+            ide.reset();
+        }
         if let Some(akiko) = self.akiko.as_mut() {
             akiko.reset();
         }
@@ -2874,7 +2886,7 @@ impl Bus {
             power_led_on: pra & 0x02 == 0,
             fdd_led_on: self.floppy.activity_led_on(),
             fdd_track: self.floppy.selected_track(),
-            hdd_led: (self.gayle.is_some() || self.has_scsi_device())
+            hdd_led: (self.gayle.is_some() || self.ide_a4000.is_some() || self.has_scsi_device())
                 .then_some(self.emulated_cck < self.hdd_led_until_cck),
             cd_led: self
                 .cdtv
@@ -3998,6 +4010,16 @@ impl Bus {
             .gayle
             .as_ref()
             .is_some_and(crate::gayle::Gayle::int2_line)
+        {
+            self.paula.intreq |= INT_PORTS;
+        }
+
+        // The A4000's IDE has no interrupt latch of its own: the drive's INTRQ
+        // is the INT2 line, and the driver drops it by reading the status.
+        if self
+            .ide_a4000
+            .as_ref()
+            .is_some_and(crate::ide_a4000::IdeA4000::int2_line)
         {
             self.paula.intreq |= INT_PORTS;
         }

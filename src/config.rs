@@ -93,6 +93,10 @@ pub struct Config {
     /// ROM probes enough empty space to make this a firehose, so it is meant
     /// to be pointed at one window (e.g. the A4000 IDE at $DD2020).
     pub log_unmapped: Option<std::ops::RangeInclusive<u32>>,
+    /// A4000 motherboard IDE fitted (A4000 profile): the ATA task file at
+    /// $DD2020, driven by Kickstart's own scsi.device. Takes its drives from
+    /// `[ide]`, like Gayle's.
+    pub ide_a4000: bool,
     /// Super DMAC fitted (A3000 profile): the SCSI DMA controller at $DD0000
     /// and the WD33C93 behind it. Kickstart hangs outright if nothing answers
     /// there. Drives go on its bus through `[scsi] controller = "a3000"`.
@@ -967,6 +971,7 @@ impl Default for Config {
             gate_array: GateArray::None,
             mem_controller: MemController::None,
             log_unmapped: None,
+            ide_a4000: false,
             sdmac: false,
             akiko: false,
             cdtv_cd: false,
@@ -1960,13 +1965,14 @@ impl TryFrom<RawConfig> for Config {
             master: raw.ide.master.map(drive_image).transpose()?,
             slave: raw.ide.slave.map(drive_image).transpose()?,
         };
-        // Only Gayle carries an IDE interface. A Fat Gary machine has one too
-        // (the A4000's, at $DD2020), but it is not emulated yet and it is not
-        // Gayle's, so [ide] cannot drive it.
-        if (ide.master.is_some() || ide.slave.is_some()) && defaults.gate_array.gayle_id().is_none()
-        {
+        // Two machines have an IDE port: a Gayle one (A600/A1200) and the
+        // A4000's, which is the same ATA cable off the Fat Gary bus. `[ide]`
+        // fits either; nothing else has anywhere to put the drives.
+        let has_ide_port = defaults.gate_array.gayle_id().is_some() || defaults.ide_a4000;
+        if (ide.master.is_some() || ide.slave.is_some()) && !has_ide_port {
             errors.push(anyhow!(
-                "[ide] images need a Gayle machine: set [machine] profile = \"A600\" (or A1200)"
+                "[ide] images need a machine with an IDE port: set [machine] profile = \"A600\" \
+                 (or A1200, or A4000)"
             ));
         }
 
@@ -2156,6 +2162,7 @@ impl TryFrom<RawConfig> for Config {
             denise_revision,
             machine,
             gate_array: defaults.gate_array,
+            ide_a4000: defaults.ide_a4000,
             sdmac: defaults.sdmac,
             akiko: defaults.akiko,
             cdtv_cd: defaults.cdtv_cd,
@@ -2422,7 +2429,8 @@ pub(crate) fn machine_profile_defaults(model: MachineModel) -> Config {
             d.sdmac = true;
         }
         // The A4000: the same board a generation later -- AGA, a 25 MHz 68040,
-        // and Ramsey-07. Its IDE lives at $DD2020, which is not emulated yet.
+        // and Ramsey-07. Its IDE at $DD2020 is Gayle's ATA cable without the
+        // gate array; `[ide]` fits drives to it.
         MachineModel::A4000 => {
             d.chipset = Chipset::Aga;
             d.chip_ram_bytes = 2 * 1024 * 1024;
@@ -2432,6 +2440,7 @@ pub(crate) fn machine_profile_defaults(model: MachineModel) -> Config {
             d.mem_controller = MemController::Ramsey7;
             d.gate_array = GateArray::FatGary;
             d.rtc_present = true;
+            d.ide_a4000 = true;
         }
         // CDTV: A500-class board with the 1 MB ECS Agnus and 1 MB chip
         // RAM, plus the 256 KiB extended ROM at $F00000 (configure it via
@@ -3509,7 +3518,8 @@ mod tests {
     }
 
     #[test]
-    fn ide_images_require_a_gayle_machine() {
+    fn ide_images_require_a_machine_with_an_ide_port() {
+        // The default A500 has nowhere to put them.
         let err = parse_config(
             r#"
             [ide]
@@ -3517,7 +3527,7 @@ mod tests {
             "#,
         )
         .unwrap_err();
-        assert!(err.to_string().contains("Gayle machine"), "{err:#}");
+        assert!(err.to_string().contains("IDE port"), "{err:#}");
 
         let cfg = parse_config(
             r#"
@@ -3533,6 +3543,23 @@ mod tests {
             Some(Path::new("disk.hdf"))
         );
         assert_eq!(cfg.ide.slave, None);
+
+        // The A4000's port is not Gayle's, but it takes the same drives.
+        let cfg = parse_config(
+            r#"
+            [machine]
+            profile = "A4000"
+            [ide]
+            master = "disk.hdf"
+            "#,
+        )
+        .unwrap();
+        assert!(cfg.ide_a4000);
+        assert!(cfg.gate_array.gayle_id().is_none());
+        assert_eq!(
+            cfg.ide.master.as_ref().map(|d| d.path.as_path()),
+            Some(Path::new("disk.hdf"))
+        );
     }
 
     #[test]

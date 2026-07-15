@@ -1956,6 +1956,20 @@ pub fn build_machine(
         }
         bus.attach_gayle(gayle);
     }
+    if cfg.ide_a4000 {
+        let mut ide = crate::ide_a4000::IdeA4000::new();
+        for (slot, drive) in [(0, &cfg.ide.master), (1, &cfg.ide.slave)] {
+            let Some(drive) = drive else { continue };
+            ide.attach_drive(
+                slot,
+                crate::ata::IdeDrive::open(&drive.path, slot, drive.volume_name.as_deref())?,
+            );
+            let which = if slot == 0 { "master" } else { "slave" };
+            info!("ide: {which} {}", drive.path.display());
+        }
+        bus.attach_ide_a4000(ide);
+        info!("ide: A4000 motherboard interface at $DD2020");
+    }
     if let Some(range) = cfg.log_unmapped.clone() {
         info!(
             "debug: logging unmapped CPU accesses in {:#08X}-{:#08X}",
