@@ -219,13 +219,25 @@ async function boot() {
       window.addEventListener('keydown', unlock, { once: true });
     }
 
+    // A fresh machine boots with an empty drive: DF0 holds the pending disk
+    // or nothing, never a name left over from before the reboot (a crash
+    // consumes the pending disk, and the bug report reads df0Name).
     if (pendingDisk) {
       machine.insert_floppy(0, pendingDisk.bytes, pendingDisk.name);
-      pendingDisk = null;
     }
+    df0Name = pendingDisk?.name ?? null;
+    pendingDisk = null;
     machine.set_volume_percent(Number($('vol').value));
     emu = machine;
     window.__emu = emu; // for debugging/automation
+
+    // Leave a fresh status behind: the old line ("inserts at boot", an
+    // earlier failure) would otherwise go stale into any bug report filed
+    // while the machine runs.
+    setLoadStatus(
+      `booted ${bootRom.label}` +
+        (df0Name ? ` - DF0: ${df0Name} (write-protected)` : ''),
+    );
 
     overlay.style.display = 'none';
     showBugLink(false);
