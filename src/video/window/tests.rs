@@ -3192,13 +3192,17 @@ fn memory_tab_find_scroll_and_bitmap_toggle() {
         assert_eq!(panel.mem_last_find, Some(0x60000));
         assert_eq!(panel.mem_addr, 0x60000);
     }
-    // Find again continues past the hit; with a single match the page
-    // wraps back around to the same place.
-    app.activate_ui_control(UiControl::DebugMemFind);
-    assert_eq!(
-        app.debugger_panel.as_ref().unwrap().mem_last_find,
-        Some(0x60000)
-    );
+    // Find again continues past the hit. The pattern is CPU-visible again
+    // at each Agnus image repeat of the 512 KiB chip RAM (OCS Agnus decodes
+    // only A1-A18, so the image recurs every $80000 across the $000000-
+    // $1FFFFF chip window), then the search wraps back to the original.
+    for expected in [0xE0000, 0x160000, 0x1E0000, 0x60000] {
+        app.activate_ui_control(UiControl::DebugMemFind);
+        assert_eq!(
+            app.debugger_panel.as_ref().unwrap().mem_last_find,
+            Some(expected)
+        );
+    }
 
     // Scrolling moves by 16-byte hex rows.
     app.debugger_mem_scroll(2);
