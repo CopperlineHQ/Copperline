@@ -1442,7 +1442,13 @@ fn set_host_mtime(path: &Path, days: u32, mins: u32, ticks: u32) -> std::io::Res
         + u64::from(days) * 86_400
         + u64::from(mins) * 60
         + u64::from(ticks) / 50;
-    let time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+    // checked_add: `+` panics when the sum exceeds the platform's time
+    // representation (Windows FILETIME tops out around year 30828, and a
+    // garbage guest DateStamp reaches far beyond), and a bad date from the
+    // guest must fail the packet, not the emulator.
+    let time = std::time::UNIX_EPOCH
+        .checked_add(std::time::Duration::from_secs(secs))
+        .ok_or(std::io::ErrorKind::InvalidInput)?;
     std::fs::File::options()
         .write(true)
         .open(path)
