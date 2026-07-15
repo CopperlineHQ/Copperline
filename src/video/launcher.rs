@@ -554,10 +554,11 @@ const JOYSTICK_MODES: [JoystickInputMode; 2] =
     [JoystickInputMode::Gamepad, JoystickInputMode::Keyboard];
 // `None` = no SCSI board fitted; the two boards are mutually exclusive here even
 // though the engine could run both, so a config round-trips through this picker.
-const SCSI_CONTROLLERS: [Option<ScsiController>; 3] = [
+const SCSI_CONTROLLERS: [Option<ScsiController>; 4] = [
     None,
     Some(ScsiController::A2091),
     Some(ScsiController::A4091),
+    Some(ScsiController::A3000),
 ];
 #[cfg(feature = "midi")]
 const SERIAL_MODES: [SerialMode; 5] = [
@@ -911,14 +912,25 @@ impl MachineSetup {
         // Only emit `[scsi]` when a controller is fitted, so an unset board
         // leaves the section absent rather than writing dangling ROM/units.
         if let Some(controller) = self.scsi_controller {
-            // "a2091" is the default, so omit it; name only "a4091".
-            raw.scsi.controller = match controller {
-                ScsiController::A2091 => None,
-                ScsiController::A4091 => Some("a4091".to_string()),
-            };
-            raw.scsi.rom = self.scsi_rom.as_deref().map(path_string);
+            // Name every controller: which one a bare [scsi] means depends on
+            // the machine (an A3000 defaults to its motherboard SCSI).
+            raw.scsi.controller = Some(
+                match controller {
+                    ScsiController::A2091 => "a2091",
+                    ScsiController::A4091 => "a4091",
+                    ScsiController::A3000 => "a3000",
+                }
+                .to_string(),
+            );
+            // The motherboard SCSI has no boot ROM of its own.
+            raw.scsi.rom = controller
+                .is_zorro_board()
+                .then(|| self.scsi_rom.as_deref().map(path_string))
+                .flatten();
             // rom_odd is an A2091 split-EPROM option; the A4091 has one ROM.
-            raw.scsi.rom_odd = (controller == ScsiController::A2091)
+            // It is the odd half OF rom, so without rom there is nothing for it
+            // to complete and the config would not validate.
+            raw.scsi.rom_odd = (controller == ScsiController::A2091 && raw.scsi.rom.is_some())
                 .then(|| self.scsi_rom_odd.as_deref().map(path_string))
                 .flatten();
             raw.scsi.unit0 = drive_raw(
@@ -1126,10 +1138,19 @@ impl MachineSetup {
         if model != Some(MachineModel::Cd32) {
             self.cd32_nvram = None;
         }
+        // The motherboard SCSI leaves with the motherboard; the drives stay and
+        // land on the default Zorro board instead.
+        if !self.has_sdmac() && self.scsi_controller == Some(ScsiController::A3000) {
+            self.scsi_controller = Some(ScsiController::A2091);
+        }
     }
 
     fn has_gayle(&self) -> bool {
         matches!(self.model, Some(MachineModel::A600 | MachineModel::A1200))
+    }
+
+    fn has_sdmac(&self) -> bool {
+        self.model == Some(MachineModel::A3000)
     }
 
     fn has_cd(&self) -> bool {
@@ -1157,9 +1178,18 @@ impl MachineSetup {
             F::Z3Ram => reason(cpu_is_32bit(self.cpu), "needs 32-bit CPU"),
             F::IdeMaster | F::IdeSlave => reason(self.has_gayle(), "needs A600/A1200"),
             // The ROM and drives belong to the fitted controller; greyed with
-            // none. rom_odd is an A2091 split-EPROM option only.
-            F::ScsiRom
-            | F::ScsiUnit0
+            // none. The A3000's motherboard SCSI has no ROM of its own, and
+            // rom_odd is an A2091 split-EPROM option only.
+            F::ScsiRom => reason(
+                self.scsi_controller
+                    .is_some_and(ScsiController::is_zorro_board),
+                if self.scsi_controller.is_some() {
+                    "Zorro boards only"
+                } else {
+                    "no controller"
+                },
+            ),
+            F::ScsiUnit0
             | F::ScsiUnit1
             | F::ScsiUnit2
             | F::ScsiUnit3
@@ -1371,6 +1401,7 @@ impl MachineSetup {
                 None => "None".to_string(),
                 Some(ScsiController::A2091) => "A2091 (Z2)".to_string(),
                 Some(ScsiController::A4091) => "A4091 (Z3)".to_string(),
+                Some(ScsiController::A3000) => "A3000 (onboard)".to_string(),
             },
             #[cfg(feature = "midi")]
             F::SerialMode => match self.serial_mode {
@@ -1476,7 +1507,12 @@ impl MachineSetup {
                     cycle_slice(&JOYSTICK_MODES, self.joystick_input_mode, forward)
             }
             F::ScsiController => {
-                self.scsi_controller = cycle_slice(&SCSI_CONTROLLERS, self.scsi_controller, forward)
+                // The motherboard SCSI is only on offer where the silicon is.
+                let choices: Vec<Option<ScsiController>> = SCSI_CONTROLLERS
+                    .into_iter()
+                    .filter(|c| self.has_sdmac() || *c != Some(ScsiController::A3000))
+                    .collect();
+                self.scsi_controller = cycle_slice(&choices, self.scsi_controller, forward)
             }
             #[cfg(feature = "midi")]
             F::SerialMode => {

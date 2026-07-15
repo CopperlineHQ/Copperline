@@ -93,9 +93,9 @@ pub struct Config {
     /// ROM probes enough empty space to make this a firehose, so it is meant
     /// to be pointed at one window (e.g. the A4000 IDE at $DD2020).
     pub log_unmapped: Option<std::ops::RangeInclusive<u32>>,
-    /// Super DMAC fitted (A3000 profile): the SCSI DMA controller at $DD0000.
-    /// No WD33C93 behind it yet, so the machine boots with an empty SCSI
-    /// socket -- but Kickstart hangs outright if nothing answers at all.
+    /// Super DMAC fitted (A3000 profile): the SCSI DMA controller at $DD0000
+    /// and the WD33C93 behind it. Kickstart hangs outright if nothing answers
+    /// there. Drives go on its bus through `[scsi] controller = "a3000"`.
     pub sdmac: bool,
     /// Akiko gate array fitted (CD32 profile): ID + C2P port at $B80000.
     pub akiko: bool,
@@ -127,10 +127,10 @@ pub struct Config {
     /// Gayle IDE drive images (raw flat HDF, RDB inside), opened
     /// read/write. Only valid on machines with a Gayle gate array.
     pub ide: IdeConfig,
-    /// SCSI controller (`[scsi]`): the `controller` selects an A2091 (Zorro II)
-    /// or A4091 (Zorro III), plus a boot ROM image and up to seven drive images
-    /// on SCSI IDs 0-6. The board autoconfigs on the Zorro chain and carries its
-    /// own scsi.device.
+    /// SCSI controller (`[scsi]`): the `controller` selects an A2091 (Zorro II),
+    /// an A4091 (Zorro III), or the A3000's motherboard SCSI, plus up to seven
+    /// drive images on SCSI IDs 0-6. The Zorro boards autoconfig on the chain
+    /// and carry their own boot ROM and scsi.device; the A3000's does not.
     pub scsi: ScsiConfig,
     /// A2065 Ethernet board (`[a2065]`): when set, an A2065 NIC autoconfigs on
     /// the Zorro chain using the named host network backend. Networking is
@@ -311,8 +311,10 @@ pub struct IdeConfig {
     pub slave: Option<DriveImage>,
 }
 
-/// Which SCSI host adapter the `[scsi]` section fits. Both are Zorro
-/// autoconfig boards carrying their own boot ROM and scsi.device.
+/// Which SCSI host adapter the `[scsi]` section fits: one of the two Zorro
+/// autoconfig boards, which carry their own boot ROM and scsi.device, or the
+/// A3000's motherboard SCSI, which has neither (Kickstart's own scsi.device
+/// drives it) and is only there on a machine with a Super DMAC.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ScsiController {
     /// Commodore A2091/A590: Zorro II, WD33C93. The default.
@@ -320,6 +322,17 @@ pub enum ScsiController {
     A2091,
     /// Commodore A4091: Zorro III, NCR 53C710.
     A4091,
+    /// A3000 motherboard SCSI: Super DMAC + WD33C93 at $DD0000. The default on
+    /// a machine that has one.
+    A3000,
+}
+
+impl ScsiController {
+    /// Whether the controller is a Zorro board (it autoconfigs and needs a boot
+    /// ROM) rather than motherboard silicon.
+    pub fn is_zorro_board(self) -> bool {
+        !matches!(self, ScsiController::A3000)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1958,14 +1971,18 @@ impl TryFrom<RawConfig> for Config {
         }
 
         let scsi_controller = match raw.scsi.controller.as_deref() {
+            // A machine with a Super DMAC already has a SCSI bus, so drives go
+            // on it unless the config asks for a Zorro board instead.
+            None if defaults.sdmac => ScsiController::A3000,
             None => ScsiController::A2091,
             Some(raw_ctrl) => match raw_ctrl.trim().to_ascii_lowercase().as_str() {
                 "a2091" => ScsiController::A2091,
                 "a4091" => ScsiController::A4091,
+                "a3000" => ScsiController::A3000,
                 _ => {
                     errors.push(anyhow!(
                         "[scsi] controller = {raw_ctrl:?} is not known \
-                         (expected \"a2091\" or \"a4091\")"
+                         (expected \"a2091\", \"a4091\", or \"a3000\")"
                     ));
                     ScsiController::A2091
                 }
@@ -1985,16 +2002,32 @@ impl TryFrom<RawConfig> for Config {
                 raw.scsi.unit6.map(drive_image).transpose()?,
             ],
         };
-        if scsi.enabled() && scsi.rom.is_none() {
+        if scsi.enabled() && scsi.rom.is_none() && scsi.controller.is_zorro_board() {
             let hint = match scsi.controller {
-                ScsiController::A2091 => {
-                    "an A590/A2091 6.x ROM image; its scsi.device drives the disks"
-                }
                 ScsiController::A4091 => "a raw A4091 EPROM image, e.g. the open-source a4091.rom",
+                _ => "an A590/A2091 6.x ROM image; its scsi.device drives the disks",
             };
             errors.push(anyhow!(
                 "[scsi] drives need the boot ROM: set [scsi] rom = \"...\" ({hint})"
             ));
+        }
+        // The motherboard SCSI is silicon, not a card: it has no boot ROM (the
+        // Kickstart carries its driver), and it only exists where the Super
+        // DMAC does.
+        if scsi.controller == ScsiController::A3000 {
+            if !defaults.sdmac {
+                errors.push(anyhow!(
+                    "[scsi] controller = \"a3000\" is the motherboard SCSI: set \
+                     [machine] profile = \"A3000\", or fit a Zorro board with \
+                     controller = \"a2091\" (or \"a4091\")"
+                ));
+            }
+            if scsi.rom.is_some() {
+                errors.push(anyhow!(
+                    "[scsi] rom does not apply to the A3000 motherboard SCSI: it has no \
+                     boot ROM, Kickstart's own scsi.device drives it"
+                ));
+            }
         }
         if scsi.rom_odd.is_some() && scsi.controller != ScsiController::A2091 {
             errors.push(anyhow!(
@@ -3820,6 +3853,66 @@ mod tests {
             "#,
         )?;
         assert!(cfg.scsi.enabled());
+        Ok(())
+    }
+
+    /// The A3000's SCSI is motherboard silicon: its drives need no boot ROM,
+    /// they are the default on that machine, and they fit nowhere else.
+    #[test]
+    fn the_a3000_scsi_bus_takes_drives_without_a_boot_rom() -> Result<()> {
+        let cfg = parse_config(
+            r#"
+            [machine]
+            profile = "A3000"
+            [scsi]
+            unit0 = "workbench.hdf"
+            "#,
+        )?;
+        assert!(cfg.sdmac);
+        assert_eq!(cfg.scsi.controller, ScsiController::A3000);
+        assert_eq!(
+            cfg.scsi.units[0].as_ref().map(|d| d.path.as_path()),
+            Some(Path::new("workbench.hdf"))
+        );
+
+        // A Zorro board still fits an A3000, and there it does need its ROM.
+        let cfg = parse_config(
+            r#"
+            [machine]
+            profile = "A3000"
+            [scsi]
+            controller = "a2091"
+            rom = "a2091.rom"
+            unit0 = "workbench.hdf"
+            "#,
+        )?;
+        assert_eq!(cfg.scsi.controller, ScsiController::A2091);
+
+        // No Super DMAC, no motherboard SCSI.
+        let err = parse_config(
+            r#"
+            [machine]
+            profile = "A1200"
+            [scsi]
+            controller = "a3000"
+            unit0 = "workbench.hdf"
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("motherboard SCSI"), "{err:#}");
+
+        // And there is no ROM to give it.
+        let err = parse_config(
+            r#"
+            [machine]
+            profile = "A3000"
+            [scsi]
+            rom = "a2091.rom"
+            unit0 = "workbench.hdf"
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("no boot ROM"), "{err:#}");
         Ok(())
     }
 

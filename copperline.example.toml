@@ -104,11 +104,11 @@ model = "68000"
 # A500 (ECS 8372A Agnus, OCS 8362 Denise, 512 KiB chip + 512 KiB trapdoor
 # slow RAM) -- the most common and most-targeted Amiga.
 # The big-box profiles (A3000, A4000) are new and incomplete, but both boot.
-# The A3000 has its motherboard SCSI (Super DMAC + WD33C93 at $DD0000, driven by
-# Kickstart's own scsi.device) with no drives attached yet; the A4000's IDE at
-# $DD2020 is not emulated at all, so Kickstart spends several seconds probing for
-# it on every boot. Give either machine a Zorro controller or a [[filesys]] mount
-# to boot from.
+# The A3000 boots off its motherboard SCSI (Super DMAC + WD33C93 at $DD0000,
+# driven by Kickstart's own scsi.device): put drives on it with [scsi]. The
+# A4000's IDE at $DD2020 is not emulated at all, so Kickstart spends several
+# seconds probing for it on every boot; give that machine a Zorro controller or
+# a [[filesys]] mount to boot from.
 # [machine]
 # profile = "A600"      # A1000 | A500 | A500OCS | A500Plus | A600 | A1200 | A3000 | A4000 | CDTV | CD32
 # rtc = true            # add a $DC0000 battery RTC (default: only A500+/CDTV/A3000/A4000 have one)
@@ -189,18 +189,22 @@ slow = "512K"
 # metadata = "boards/megaram.toml"
 
 
-# SCSI controller: a Zorro board with up to seven drives, on any machine
-# model. Preferred over [ide] for multiple disks: the board's own boot ROM
-# carries scsi.device and autoboots on Kickstart 1.3+, so it does not depend
-# on the Kickstart IDE driver (which only probes the master on stock 3.1).
-# Drive paths accept the same images as [ide]: RDB HDFs, bare partition
-# hardfiles, or host directories.
+# SCSI bus with up to seven drives, on any machine model. Preferred over [ide]
+# for multiple disks: a Zorro board's own boot ROM carries scsi.device and
+# autoboots on Kickstart 1.3+, so it does not depend on the Kickstart IDE
+# driver (which only probes the master on stock 3.1). Drive paths accept the
+# same images as [ide]: RDB HDFs, bare partition hardfiles, or host
+# directories.
 #
-# controller picks the board: "a2091" (Zorro II, WD33C93; the default) or
-# "a4091" (Zorro III, NCR 53C710). The A2091 needs an A590/A2091 boot ROM
-# (6.6+, 16K/32K; rom_odd takes the odd half of a split even/odd EPROM dump);
-# the A4091 needs a raw A4091 EPROM image (e.g. the open-source a4091.rom) and
-# has a single ROM (no rom_odd).
+# controller picks the host adapter:
+#   "a2091" - Zorro II, WD33C93. The default on machines without onboard SCSI.
+#             Needs an A590/A2091 boot ROM (6.6+, 16K/32K; rom_odd takes the
+#             odd half of a split even/odd EPROM dump).
+#   "a4091" - Zorro III, NCR 53C710. Needs a raw A4091 EPROM image (e.g. the
+#             open-source a4091.rom); single ROM, no rom_odd.
+#   "a3000" - the A3000's motherboard SCSI (Super DMAC + WD33C93 at $DD0000),
+#             and the default on that machine. No ROM: Kickstart's own
+#             scsi.device drives it and autoboots from an RDB drive.
 # [scsi]
 # controller = "a2091"
 # rom = "a2091-v6.6.rom"

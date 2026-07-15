@@ -38,6 +38,12 @@ pub const WD_DESTINATION_ID: u8 = 0x15;
 pub const WD_SCSI_STATUS: u8 = 0x17;
 pub const WD_COMMAND: u8 = 0x18;
 pub const WD_DATA: u8 = 0x19;
+/// The register file ends at the data register: 0x1A-0x1E are not registers at
+/// all and float, and 0x1F is the auxiliary status, which the chip also aliases
+/// into the register file as read-only. cdhooper's sdmac tool identifies the
+/// WD33C93 by exactly this: 0x1E must read $FF, and 0x1F must not be writable.
+const WD_LAST_REG: u8 = WD_DATA;
+pub const WD_AUX_STATUS: u8 = 0x1F;
 
 // ----- auxiliary status bits ------------------------------------------------
 
@@ -617,6 +623,12 @@ impl Wd33c93 {
     pub fn read_data_port(&mut self) -> u8 {
         match self.sasr {
             WD_DATA => self.pio_read_byte(),
+            WD_AUX_STATUS => self.read_aux_status(),
+            r if r > WD_LAST_REG => {
+                // Not a register: the chip does not drive the bus.
+                self.incr_sasr();
+                0xFF
+            }
             WD_SCSI_STATUS => {
                 let v = self.regs[usize::from(WD_SCSI_STATUS)];
                 // Reading the status register acknowledges the interrupt;
@@ -637,6 +649,9 @@ impl Wd33c93 {
         match self.sasr {
             WD_COMMAND => self.execute_command(v),
             WD_DATA => self.pio_write_byte(v),
+            // The auxiliary status is read-only, and past it there is nothing
+            // to write to.
+            r if r > WD_LAST_REG => self.incr_sasr(),
             r => {
                 self.regs[usize::from(r)] = v;
                 self.incr_sasr();
