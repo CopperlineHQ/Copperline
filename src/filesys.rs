@@ -1576,10 +1576,15 @@ mod tests {
         let rec = unit.resolve_for_create(0, b"Sub/brand-new.txt").unwrap();
         assert_eq!(rec.rel, PathBuf::from("Sub/brand-new.txt"));
         // The parent still has to exist, and is still matched case-insensitively.
-        assert_eq!(
-            unit.resolve_for_create(0, b"SUB/other.txt").unwrap().rel,
-            PathBuf::from("Sub/other.txt")
-        );
+        // The resolved parent keeps whatever spelling the host reports, which
+        // differs between case-sensitive and case-insensitive filesystems, so
+        // only the case-folded path is portable to assert.
+        let rec = unit.resolve_for_create(0, b"SUB/other.txt").unwrap();
+        assert!(rec.rel.file_name().unwrap() == "other.txt");
+        assert!(rec
+            .rel
+            .to_string_lossy()
+            .eq_ignore_ascii_case("Sub/other.txt"));
         assert!(unit.resolve_for_create(0, b"Nope/file.txt").is_none());
 
         // None of these may resolve: each would escape the mount or collide
