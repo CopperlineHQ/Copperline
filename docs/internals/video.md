@@ -46,6 +46,12 @@ against the vAmigaTS `Agnus/DIW/OLDDIW/diw1` A500 photos, OCS and ECS).
 Early and late single-word lo-res DDF keep the picture beam-anchored;
 the renderer must not add or subtract a sample just to
 align the picture to a fetch-unit boundary.
+Hi-res early DDF is beam-anchored the same way: content fetched ahead of the
+window edge is hidden by the window comparator alone (XSysInfo's DDFSTRT `$38`
+panel clips exactly its one pre-fetch word), so when an extreme-overscan
+screen opens the window early as well (KS 3.2 Overscan editor on ECS:
+DDFSTRT `$28` with DIWSTRT h `$5D`), the early words are visible inside the
+window rather than being snapped away (issue #186).
 When DDFSTRT is late enough that DIW opens before DMA has delivered the
 first BPL1DAT word for the row, playfield output remains border-colour until
 that plane-0 fetch reaches Denise instead of sampling stale shifter contents.

@@ -246,18 +246,16 @@ fn content_window_h_matches_standard_diw_for_stock_ddf() {
 }
 
 #[test]
-fn early_ddf_hires_origin_snaps_to_word_boundary() {
+fn early_ddf_hires_origin_clips_prefetch_against_the_window_edge() {
     // XSysInfo's hardware-information panel: hi-res, FMODE=0, DDFSTRT=$38
     // (the lo-res "Normal" slot) - one 4-cck fetch word earlier than the
     // hi-res standard $3C - with DIWSTRT=$81 and BPL1MOD/BPL2MOD=-4. The
     // early pre-fetch word is clocked into the left border before the
-    // window opens, so the picture origin must snap up to the first
-    // fully-fetched word: native x-offset 16 (one 16-pixel word) instead of
-    // the unsnapped 12. That clips the pre-fetch word on the left AND keeps
-    // the real right edge inside the window. Without it the negative modulo
-    // made that word both bleed into the left column one scanline down and
-    // crop off the right edge. Confirmed against vAmiga (clean left edge,
-    // the >OVERVIEW box keeps its right border).
+    // window opens: native x-offset 16 (one 16-pixel word) skips it. With
+    // the negative modulo that word equals the previous row's right-edge
+    // word; showing it bled that edge into the left column one scanline
+    // down and cropped it off the right. Confirmed against vAmiga (clean
+    // left edge, the >OVERVIEW box keeps its right border).
     let xsysinfo = ControlState {
         agnus_revision: AgnusRevision::AgaAlice,
         bplcon0: 0x8200,
@@ -292,6 +290,30 @@ fn early_ddf_hires_origin_snaps_to_word_boundary() {
         ..xsysinfo
     };
     assert_eq!(ks_boot.native_x_offset(ks_boot.diw_h_start(), repeat), 24);
+
+    // ECS extreme-overscan hi-res screen (KS 3.2 Overscan editor's edit
+    // display, issue #186): DDFSTRT=$28 fetches 80 hi-res px ahead of the
+    // standard slot, but DIWSTRT h=$5D opens the window 72 px early too, so
+    // nearly all of that early content is INSIDE the window. Only the part
+    // left of the framebuffer origin is skipped (10 px window clamp plus the
+    // 8 px between the window edge and the reference): origin 18, not the
+    // early-fetch width 80. Snapping to 80 shifted the whole picture left
+    // and left a blank band at the right window edge.
+    let overscan = ControlState {
+        agnus_revision: AgnusRevision::Ecs8375,
+        bplcon0: 0x9200,
+        diwstrt: 0x1D5D,
+        diwstop: 0x38C7,
+        diwhigh: DiwHigh::ecs_explicit(0x2100),
+        ddfstrt: 0x0028,
+        ddfstop: 0x00D8,
+        bplcon1: 0x0044,
+        ..xsysinfo
+    };
+    assert_eq!(overscan.diw_h_start(), 0x5D);
+    // (0x5D - 0x81)*2 display shift, -(0x3C - 0x28)*4 DDF shift, +(0x62 -
+    // 0x5D)*2 framebuffer-origin clamp = 18.
+    assert_eq!(overscan.native_x_offset(overscan.diw_h_start(), repeat), 18);
 }
 
 fn ocs_snapshot(diwstrt: u16, diwstop: u16, ddfstrt: u16, ddfstop: u16) -> RenderRegisterSnapshot {
