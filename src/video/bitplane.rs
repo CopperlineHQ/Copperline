@@ -1342,27 +1342,17 @@ impl ControlState {
         // window edge sitting one lo-res pixel too far right, which made a
         // standard DIW overrun the fetched row at the right edge on
         // early-DDF screens; the picture phase itself was never non-linear.
-        let mut origin_shift = display_native_shift - ddf_native_shift + clamped_window_native;
-        // A hi-res/SHRES FMODE=0 screen that starts DDFSTRT earlier than the
-        // standard $3C slot pre-fetches whole word(s) before the display window
-        // opens. On real hardware those words are shifted into the left border
-        // ahead of DIWSTRT and never appear inside the window; the negative
-        // `ddf_native_shift` is exactly that early pre-fetch width in pixels.
-        // Snap the picture origin up to the first fully-fetched word so the
-        // pre-fetch word is clipped on the left AND the real right edge (the
-        // last visible word) stays inside the window instead of being cropped.
-        //
-        // Confirmed against vAmiga for XSysInfo's hardware panel (hi-res,
-        // DDFSTRT=$38, DIWSTRT=$81, BPL1MOD/BPL2MOD=-4): a clean left edge with
-        // the >OVERVIEW box keeping its right border. With the negative modulo
-        // that pre-fetch word equals the previous row's right-edge word, so
-        // without this the right edge both bled into the left column one
-        // scanline down and was cropped off the right. Late DDFSTRT (e.g. the
-        // Kickstart insert-disk screen's $40, `ddf_native_shift >= 0`), lo-res,
-        // and wide-FMODE fetches are untouched.
-        if (self.hires() || self.shres()) && self.fetch_quantum() == 1 && ddf_native_shift < 0 {
-            origin_shift = origin_shift.max(-ddf_native_shift);
-        }
+        let origin_shift = display_native_shift - ddf_native_shift + clamped_window_native;
+        // No extra clipping of early-DDF hi-res pre-fetch words happens here:
+        // content fetched ahead of the window edge is exactly the positive
+        // part of `origin_shift`, so the window comparator already hides it
+        // (XSysInfo's hardware panel: DDFSTRT=$38, DIWSTRT=$81 -> the one
+        // pre-fetch word is the 16 skipped samples). When the display window
+        // itself opens left of the standard edge (ECS/AGA extreme-overscan
+        // screens: DDFSTRT=$28, DIWSTRT h=$5D), those early words ARE inside
+        // the window and must be shown - an unconditional snap to the early
+        // fetch width shifted the whole picture left and left a blank
+        // right-edge band (issue #186).
         // A playfield whose BPLCON1 scroll covers an off-grid fetch phase
         // catches the floor reload slot instead of the rounded-up one (see
         // `reload_advance_for_scroll`): extend the fetch span left by the
