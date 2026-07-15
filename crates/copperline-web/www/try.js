@@ -71,6 +71,19 @@ function refreshBootButton() {
   bootBtn.textContent = bootRom && bootRom.label !== 'AROS' ? 'Boot Kickstart' : 'Boot AROS';
 }
 
+// Route picked or dropped Kickstart bytes: live-swap a running machine, or
+// stash them for the boot button. The stash is updated on a live swap too,
+// so a reboot fits the ROM chosen last, not the one from the original boot;
+// a rejected image throws before the stash is touched and changes nothing.
+function fitRom(bytes, label) {
+  if (emu) emu.load_rom(bytes, undefined);
+  bootRom = { rom: bytes, ext: null, label };
+  refreshBootButton();
+  setLoadStatus(
+    emu ? `Kickstart loaded: ${label} - machine power-cycled` : `will boot ${label}`,
+  );
+}
+
 // A disk image can also come from a link: /try/?df0=<url> fetches it and
 // inserts it at boot, so a bootable demo is one shareable URL, and the
 // "DF0 from URL" button does the same for a pasted address. The fetch
@@ -164,6 +177,19 @@ async function load() {
 async function boot() {
   bootBtn.disabled = true;
   try {
+    // Fit the ROM into a fresh machine before anything else: a bad image
+    // must abort the boot with the page still in its pre-boot state (emu
+    // stays null, so the pickers keep updating bootRom for the retry).
+    const machine = new WebEmu();
+    machine.load_rom(bootRom.rom, bootRom.ext ?? undefined);
+
+    // A reboot after an emulator error builds a new audio stack; close the
+    // previous one so it cannot keep playing alongside.
+    if (audioCtx) {
+      audioNode?.disconnect();
+      audioCtx.close().catch(() => {});
+      audioNode = null;
+    }
     audioCtx = new AudioContext({ sampleRate: 44100 });
     await audioCtx.audioWorklet.addModule('./audio-worklet.js');
     audioNode = new AudioWorkletNode(audioCtx, 'copperline-audio', {
@@ -184,13 +210,12 @@ async function boot() {
       window.addEventListener('keydown', unlock, { once: true });
     }
 
-    emu = new WebEmu();
-    emu.load_rom(bootRom.rom, bootRom.ext ?? undefined);
     if (pendingDisk) {
-      emu.insert_floppy(0, pendingDisk.bytes, pendingDisk.name);
+      machine.insert_floppy(0, pendingDisk.bytes, pendingDisk.name);
       pendingDisk = null;
     }
-    emu.set_volume_percent(Number($('vol').value));
+    machine.set_volume_percent(Number($('vol').value));
+    emu = machine;
     window.__emu = emu; // for debugging/automation
 
     overlay.style.display = 'none';
@@ -222,6 +247,8 @@ function tick(nowMs) {
     running = false;
     setLoadStatus(`emulator error: ${e.message ?? e}`);
     overlay.style.display = '';
+    // Re-arm the boot button: a fresh boot replaces the wedged machine.
+    refreshBootButton();
     console.error(e);
     return;
   }
@@ -671,15 +698,7 @@ $('kick').addEventListener('change', async (e) => {
   e.target.value = '';
   if (!file) return;
   try {
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    if (emu) {
-      emu.load_rom(bytes, undefined);
-      setLoadStatus(`Kickstart loaded: ${file.name} - machine power-cycled`);
-    } else {
-      bootRom = { rom: bytes, ext: null, label: file.name };
-      refreshBootButton();
-      setLoadStatus(`will boot ${file.name}`);
-    }
+    fitRom(new Uint8Array(await file.arrayBuffer()), file.name);
   } catch (err) {
     setLoadStatus(`ROM load failed: ${err.message ?? err}`);
   }
@@ -863,15 +882,7 @@ async function handleDroppedFiles(files) {
   const disk = list.find((f) => !/\.rom$/i.test(f.name));
   try {
     if (rom) {
-      const bytes = new Uint8Array(await rom.arrayBuffer());
-      if (emu) {
-        emu.load_rom(bytes, undefined);
-        setLoadStatus(`Kickstart loaded: ${rom.name} - machine power-cycled`);
-      } else {
-        bootRom = { rom: bytes, ext: null, label: rom.name };
-        refreshBootButton();
-        setLoadStatus(`will boot ${rom.name}`);
-      }
+      fitRom(new Uint8Array(await rom.arrayBuffer()), rom.name);
     }
     if (disk) {
       const bytes = new Uint8Array(await disk.arrayBuffer());
