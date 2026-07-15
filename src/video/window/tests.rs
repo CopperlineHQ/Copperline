@@ -3414,3 +3414,174 @@ fn debugger_poke_writes_memory_and_registers() {
     app.debugger_poke();
     assert_eq!(app.emu.machine.d(3), 0x1234_5678);
 }
+
+// --- dropped disk images -------------------------------------------------
+
+/// A blank standard ADF written to a unique temp path (floppy inserts read
+/// from the filesystem). Callers remove it when done.
+fn temp_adf(name: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("copperline-drop-test-{nanos}-{counter}-{name}"));
+    std::fs::write(&path, vec![0u8; crate::floppy::ADF_SIZE]).unwrap();
+    path
+}
+
+#[test]
+fn dropped_media_classifies_by_extension() {
+    use super::{classify_dropped_media, DroppedMediaKind};
+    let kind = |name: &str| classify_dropped_media(std::path::Path::new(name));
+    assert_eq!(kind("game.adf"), DroppedMediaKind::Floppy);
+    assert_eq!(kind("game.ADZ"), DroppedMediaKind::Floppy);
+    assert_eq!(kind("game.dms"), DroppedMediaKind::Floppy);
+    assert_eq!(kind("dump.scp"), DroppedMediaKind::Floppy);
+    assert_eq!(kind("game.adf.gz"), DroppedMediaKind::Floppy);
+    assert_eq!(kind("game.zip"), DroppedMediaKind::Floppy);
+    assert_eq!(kind("mystery"), DroppedMediaKind::Floppy);
+    assert_eq!(kind("game.CUE"), DroppedMediaKind::CdCue);
+    assert_eq!(kind("disk.hdf"), DroppedMediaKind::HardDisk);
+    assert_eq!(kind("disk.img"), DroppedMediaKind::HardDisk);
+    assert_eq!(kind("kick31.rom"), DroppedMediaKind::Rom);
+}
+
+#[test]
+fn dropped_floppy_with_single_drive_inserts_directly() {
+    let mut app = test_app();
+    let adf = temp_adf("single.adf");
+    app.handle_dropped_files(vec![adf.clone()]);
+    assert!(app.emu.bus().floppy.disk_inserted(0));
+    assert_eq!(app.disk_playlists[0], vec![adf.clone()]);
+    assert!(app.ui.panel.is_none());
+    assert!(app.osd.as_ref().unwrap().text.starts_with("DF0:"));
+    std::fs::remove_file(&adf).unwrap();
+}
+
+#[test]
+fn dropped_floppies_with_multiple_drives_open_chooser() {
+    let mut app = test_app();
+    app.emu
+        .bus_mut()
+        .floppy
+        .set_connected_drives([true, true, false, false]);
+    let disks = vec![PathBuf::from("disk1.adf"), PathBuf::from("disk2.adf")];
+    app.handle_dropped_files(disks.clone());
+    // Nothing inserted yet; the chooser lists exactly the connected drives.
+    assert!(!app.emu.bus().floppy.disk_inserted(0));
+    match &app.ui.panel {
+        Some(Panel::DropChooser(state)) => {
+            assert_eq!(state.disks, disks);
+            assert_eq!(state.disk_label, "disk1.adf");
+            let drives: Vec<usize> = state.drives.iter().map(|e| e.drive).collect();
+            assert_eq!(drives, vec![0, 1]);
+            assert_eq!(state.drives[0].label, "DF0 (empty)");
+        }
+        _ => panic!("drop chooser should be open"),
+    }
+}
+
+#[test]
+fn drop_chooser_click_routes_playlist_to_drive() {
+    let mut app = test_app();
+    app.emu
+        .bus_mut()
+        .floppy
+        .set_connected_drives([true, true, false, false]);
+    let disk1 = temp_adf("multi1.adf");
+    let disk2 = temp_adf("multi2.adf");
+    app.handle_dropped_files(vec![disk1.clone(), disk2.clone()]);
+    assert!(matches!(app.ui.panel, Some(Panel::DropChooser(_))));
+
+    app.activate_ui_control(UiControl::DropDrive(1));
+    assert!(app.ui.panel.is_none());
+    assert!(app.emu.bus().floppy.disk_inserted(1));
+    assert!(!app.emu.bus().floppy.disk_inserted(0));
+    assert_eq!(app.disk_playlists[1], vec![disk1.clone(), disk2.clone()]);
+    assert_eq!(app.disk_playlist_index[1], 0);
+    assert!(app.osd.as_ref().unwrap().text.contains("(1/2)"));
+    std::fs::remove_file(&disk1).unwrap();
+    std::fs::remove_file(&disk2).unwrap();
+}
+
+#[test]
+fn drop_chooser_escape_cancels_without_insert() {
+    let mut app = test_app();
+    app.emu
+        .bus_mut()
+        .floppy
+        .set_connected_drives([true, true, false, false]);
+    app.handle_dropped_files(vec![PathBuf::from("disk.adf")]);
+    assert!(matches!(app.ui.panel, Some(Panel::DropChooser(_))));
+
+    assert!(app.ui_handle_key(KeyCode::Escape, None));
+    assert!(app.ui.panel.is_none());
+    assert!(!app.emu.bus().floppy.disk_inserted(0));
+    assert!(!app.emu.bus().floppy.disk_inserted(1));
+}
+
+#[test]
+fn drop_chooser_digit_selects_listed_drive() {
+    let mut app = test_app();
+    // DF0 and DF2 connected: digit 2 must pick the second LISTED drive
+    // (DF2), not literal DF1.
+    app.emu
+        .bus_mut()
+        .floppy
+        .set_connected_drives([true, false, true, false]);
+    let adf = temp_adf("digit.adf");
+    app.handle_dropped_files(vec![adf.clone()]);
+    assert!(matches!(app.ui.panel, Some(Panel::DropChooser(_))));
+
+    assert!(app.ui_handle_key(KeyCode::Digit2, None));
+    assert!(app.ui.panel.is_none());
+    assert!(app.emu.bus().floppy.disk_inserted(2));
+    std::fs::remove_file(&adf).unwrap();
+}
+
+#[test]
+fn dropped_hard_disk_shows_notice_only() {
+    let mut app = test_app();
+    app.handle_dropped_files(vec![PathBuf::from("system.hdf")]);
+    assert!(app.ui.panel.is_none());
+    assert!(!app.emu.bus().floppy.disk_inserted(0));
+    assert!(app.osd.as_ref().unwrap().text.contains("machine screen"));
+}
+
+#[test]
+fn dropped_cue_without_cd_drive_shows_notice() {
+    let mut app = test_app();
+    app.handle_dropped_files(vec![PathBuf::from("game.cue")]);
+    assert!(app.ui.panel.is_none());
+    assert_eq!(
+        app.osd.as_ref().map(|osd| osd.text.as_str()),
+        Some("No CD drive on this machine")
+    );
+}
+
+#[test]
+fn drop_on_launcher_screen_is_refused() {
+    let mut app = test_app();
+    app.open_launcher();
+    app.handle_dropped_files(vec![PathBuf::from("disk.adf")]);
+    // The launcher (and its unsaved state) survives; nothing was inserted.
+    assert!(matches!(app.ui.panel, Some(Panel::Launcher(_))));
+    assert!(!app.emu.bus().floppy.disk_inserted(0));
+    assert!(app.osd.as_ref().unwrap().text.contains("machine screen"));
+}
+
+#[test]
+fn dropped_files_coalesce_across_events() {
+    let mut app = test_app();
+    // One DroppedFile event per file lands in the pending list; the batch
+    // is then handled as a single action.
+    app.pending_dropped_files.push(PathBuf::from("a.adf"));
+    app.pending_dropped_files.push(PathBuf::from("b.adf"));
+    let files = std::mem::take(&mut app.pending_dropped_files);
+    app.handle_dropped_files(files);
+    // Single drive connected: both disks become DF0's playlist.
+    assert_eq!(app.disk_playlists[0].len(), 2);
+}

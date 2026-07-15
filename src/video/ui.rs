@@ -480,6 +480,25 @@ impl ConsolePanel {
     }
 }
 
+/// One drive target offered by the drop chooser.
+pub struct DropDriveEntry {
+    pub drive: usize,
+    /// Ready-made button label, e.g. "DF0: workbench.adf" or "DF1 (empty)".
+    pub label: String,
+}
+
+/// State of the dropped-disk drive chooser. Everything is snapshotted at
+/// open time: the panel is modal, so the drive labels cannot change under
+/// it, and no per-frame view data is needed.
+pub struct DropChooserState {
+    /// The dropped image paths; all become the chosen drive's swap playlist.
+    pub disks: Vec<std::path::PathBuf>,
+    /// Header line naming what is being inserted (first file's name).
+    pub disk_label: String,
+    /// One entry per connected drive, in DF order.
+    pub drives: Vec<DropDriveEntry>,
+}
+
 /// An open overlay sub-window.
 pub enum Panel {
     About,
@@ -491,6 +510,10 @@ pub enum Panel {
     /// The pre-boot machine-configuration screen. Boxed: its state is far
     /// larger than the other variants.
     Launcher(Box<LauncherState>),
+    /// Drive chooser for dropped disk images: winit reports file drops
+    /// with no cursor position, so with several connected drives the drop
+    /// lands anywhere on the window and the target is picked here.
+    DropChooser(DropChooserState),
 }
 
 /// Menu/panel state owned by the window.
@@ -609,6 +632,13 @@ pub fn panel_control_at(panel: &Panel, pos: (i32, i32)) -> Option<UiControl> {
         Panel::Launcher(state) => {
             if let Some(control) = launcher_control_at(rect, state, pos) {
                 return Some(control);
+            }
+        }
+        Panel::DropChooser(state) => {
+            for (control, button_rect) in drop_chooser_button_rects(rect, state) {
+                if button_rect.contains(pos) {
+                    return Some(control);
+                }
             }
         }
         Panel::About | Panel::Shortcuts => {}
@@ -765,6 +795,8 @@ pub enum UiControl {
     LauncherDefaults,
     /// Configuration screen: build and run the configured machine.
     LauncherRun,
+    /// Drop chooser: insert the dropped disk(s) into this drive.
+    DropDrive(usize),
 }
 
 fn panel_dims(panel: &Panel) -> (usize, usize) {
@@ -776,6 +808,13 @@ fn panel_dims(panel: &Panel) -> (usize, usize) {
         Panel::FrameAnalyzer(_) => (700, 526),
         Panel::Console(_) => (700, 460),
         Panel::Launcher(_) => (LAUNCHER_W, LAUNCHER_H),
+        Panel::DropChooser(state) => (
+            460,
+            TITLE_H
+                + DROP_HEADER_H
+                + state.drives.len() * (DROP_BUTTON_H + DROP_BUTTON_GAP)
+                + DROP_FOOTER_H,
+        ),
     }
 }
 
@@ -788,6 +827,7 @@ fn panel_title(panel: &Panel) -> &'static str {
         Panel::FrameAnalyzer(_) => "Frame Analyzer",
         Panel::Console(_) => "Console",
         Panel::Launcher(_) => "Machine Configuration",
+        Panel::DropChooser(_) => "Insert Disk",
     }
 }
 
@@ -837,6 +877,32 @@ fn cal_button_enabled(control: UiControl, session: &crate::gamepad::CalibrationS
         UiControl::CalSave => session.done(),
         _ => true,
     }
+}
+
+// Drop chooser: a header naming the dropped disk, then one large target
+// button per connected drive, and a key-hint footer.
+const DROP_BUTTON_H: usize = 30;
+const DROP_BUTTON_GAP: usize = 8;
+const DROP_HEADER_H: usize = 46;
+const DROP_FOOTER_H: usize = 24;
+
+fn drop_chooser_button_rects(rect: Rect, state: &DropChooserState) -> Vec<(UiControl, Rect)> {
+    state
+        .drives
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            (
+                UiControl::DropDrive(entry.drive),
+                Rect {
+                    x: rect.x + 16,
+                    y: rect.y + TITLE_H + DROP_HEADER_H + index * (DROP_BUTTON_H + DROP_BUTTON_GAP),
+                    w: rect.w - 32,
+                    h: DROP_BUTTON_H,
+                },
+            )
+        })
+        .collect()
 }
 
 // Debugger chrome: a tab row under the title and a control row at the
@@ -1651,6 +1717,92 @@ fn draw_about(frame: &mut [u8], rect: Rect, view: &AboutView, scale: usize) {
         draw_panel_text(frame, rect.x + 24, y, line, PANEL_TEXT_DIM, 1, scale);
         y += 12;
     }
+}
+
+fn draw_drop_chooser(
+    frame: &mut [u8],
+    rect: Rect,
+    state: &DropChooserState,
+    hover: Option<UiControl>,
+    scale: usize,
+) {
+    // The title bar carries the verb ("Insert Disk"); the header just
+    // names the image, truncated to the panel width.
+    let max_chars = (rect.w - 32) / 16;
+    let mut header = state.disk_label.clone();
+    if header.chars().count() > max_chars {
+        header = header.chars().take(max_chars.saturating_sub(2)).collect();
+        header.push_str("..");
+    }
+    let mut y = rect.y + TITLE_H + 10;
+    draw_panel_text(frame, rect.x + 16, y, &header, PANEL_TEXT, 2, scale);
+    y += 20;
+    if state.disks.len() > 1 {
+        let note = format!(
+            "{} disks: extras queue as the drive's swap playlist",
+            state.disks.len()
+        );
+        draw_panel_text(frame, rect.x + 16, y, &note, PANEL_TEXT_DIM, 1, scale);
+    }
+    for (index, (control, button_rect)) in drop_chooser_button_rects(rect, state)
+        .into_iter()
+        .enumerate()
+    {
+        let mut label = format!("{}  {}", index + 1, state.drives[index].label);
+        // draw_text_button does not clip; keep long disk names inside.
+        let max_label_chars = button_rect.w.saturating_sub(8) / font::GLYPH_W;
+        if label.chars().count() > max_label_chars {
+            label = label
+                .chars()
+                .take(max_label_chars.saturating_sub(2))
+                .collect();
+            label.push_str("..");
+        }
+        draw_text_button(
+            frame,
+            button_rect,
+            &label,
+            true,
+            hover == Some(control),
+            scale,
+        );
+    }
+    let hint = format!("1-{} selects - Esc cancels", state.drives.len());
+    draw_panel_text(
+        frame,
+        rect.x + 16,
+        rect.y + rect.h - DROP_FOOTER_H + 6,
+        &hint,
+        PANEL_TEXT_DIM,
+        1,
+        scale,
+    );
+}
+
+/// Full-display hint drawn while files hover over the window in a drag.
+/// Not a Panel: it must not gate input, and winit reports no positions
+/// during a file drag, so it can only announce that a drop will land.
+pub fn draw_drop_hint(frame: &mut [u8], texture_scale: usize) {
+    fill_rect_blend(
+        frame,
+        scale_rect(
+            Rect {
+                x: 0,
+                y: 0,
+                w: FB_WIDTH,
+                h: present_height(),
+            },
+            texture_scale,
+        ),
+        SCRIM,
+        SCRIM_ALPHA,
+        texture_scale,
+    );
+    let text = "Drop disk image to insert";
+    let px = 2;
+    let x = FB_WIDTH.saturating_sub(text.len() * 8 * px) / 2;
+    let y = present_height() / 2 - 8;
+    draw_panel_text(frame, x, y, text, PANEL_TEXT_HILIGHT, px, texture_scale);
 }
 
 const SHORTCUT_ROWS: [(&str, &str, bool); 16] = [
@@ -4156,6 +4308,9 @@ pub fn draw_panel_layer(
         // view-data snapshot.
         (Panel::Console(panel_state), _) => draw_console(frame, rect, panel_state, texture_scale),
         (Panel::Launcher(state), _) => draw_launcher(frame, rect, state, hover, texture_scale),
+        (Panel::DropChooser(state), _) => {
+            draw_drop_chooser(frame, rect, state, hover, texture_scale)
+        }
         _ => {}
     }
 }
@@ -5071,6 +5226,72 @@ mod tests {
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "shortcuts");
+
+        let mut frame = vec![0u8; w * h * 4];
+        let ui = UiState {
+            menu_open: false,
+            panel: Some(Panel::DropChooser(DropChooserState {
+                disks: vec![
+                    std::path::PathBuf::from("turrican2-disk1.adf"),
+                    std::path::PathBuf::from("turrican2-disk2.adf"),
+                ],
+                disk_label: "turrican2-disk1.adf".to_string(),
+                drives: vec![
+                    DropDriveEntry {
+                        drive: 0,
+                        label: "DF0: workbench.adf".to_string(),
+                    },
+                    DropDriveEntry {
+                        drive: 1,
+                        label: "DF1 (empty)".to_string(),
+                    },
+                ],
+            })),
+        };
+        draw(
+            &mut frame,
+            scale,
+            &ui,
+            Some(UiControl::DropDrive(1)),
+            None,
+            false,
+            MenuLabels {
+                warp: false,
+                warp_speed: WarpSpeed::Max,
+                recording: false,
+                input_recording: false,
+                joystick_input_mode: JoystickInputMode::Gamepad,
+                pixel_aspect: PixelAspect::Tv,
+                midi_in: "",
+                midi_out: "",
+                audio_output: "",
+            },
+        );
+        assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
+        // The hovered drive button renders inside the panel rect.
+        let panel = ui.panel.as_ref().unwrap();
+        if let Panel::DropChooser(state) = panel {
+            let rect = panel_rect(panel);
+            let buttons = drop_chooser_button_rects(rect, state);
+            assert_eq!(buttons.len(), 2);
+            assert_eq!(buttons[1].0, UiControl::DropDrive(1));
+            let button = buttons[1].1;
+            assert!(button.x >= rect.x && button.x + button.w <= rect.x + rect.w);
+            assert!(button.y >= rect.y && button.y + button.h <= rect.y + rect.h);
+            let probe = ((button.y + 2) * w + button.x + 2) * 4;
+            assert_eq!(&frame[probe..probe + 4], &BUTTON_FACE_HOVER.to_le_bytes());
+        } else {
+            unreachable!();
+        }
+        save(&frame, "drop-chooser");
+
+        // The pre-drop hover hint dims the display without opening a panel.
+        let mut frame = vec![0xFFu8; w * h * 4];
+        draw_drop_hint(&mut frame, scale);
+        // The scrim darkens the display area but not the status bar below.
+        assert!(frame[0] < 0xFF);
+        assert_eq!(frame[present_height() * w * 4], 0xFF);
+        save(&frame, "drop-hint");
 
         let mut frame = vec![0u8; w * h * 4];
         let session = crate::gamepad::CalibrationSession::new();
