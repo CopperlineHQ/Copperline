@@ -54,8 +54,9 @@ pub enum IdeReg {
 }
 
 /// The task-file register at `offset` bytes from the base of the file. Both
-/// Amiga interfaces space the eight registers four bytes apart and answer on
-/// either byte of the word, so a register covers offsets 4n and 4n+2.
+/// Amiga interfaces space the eight registers four bytes apart, and each
+/// register occupies both 16-bit halves of its slot, so it answers at offsets
+/// 4n and 4n+2 (the `& !0x02` folds the two halfword addresses together).
 pub fn task_file_reg(offset: u32) -> Option<IdeReg> {
     Some(match offset & !0x02 {
         0x00 => IdeReg::Data,

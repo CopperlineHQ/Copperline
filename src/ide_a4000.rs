@@ -17,7 +17,8 @@ use crate::ata::{task_file_reg, AtaBus, IdeDrive, IdeReg};
 /// lives one A12 page up.
 pub const IDE_BASE: u32 = 0x00DD_2020;
 const IDE_TASKFILE_END: u32 = 0x00DD_2040;
-/// Alternate status (read) / device control (write), on either byte of the word.
+/// Alternate status (read) / device control (write). Like the task file, it
+/// answers at both halfword addresses of its slot ($DD3038 and $DD303A).
 const IDE_CONTROL: u32 = 0x00DD_3038;
 /// Interrupt status: bit 7 is the drive's INTRQ. Kickstart's scsi.device polls
 /// this to decide whether the INT2 it took belongs to the IDE port, and spins
