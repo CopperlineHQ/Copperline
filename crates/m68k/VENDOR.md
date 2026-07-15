@@ -109,6 +109,45 @@ Upstream continues to chase throughput (re-adding the perf work that `9f5dab4`
 itself rolled back); the host already paces to wall-clock time, so none of it
 buys Copperline anything.
 
+## Upstream two-way review (reviewed 2026-07-15)
+
+Reviewed `benletchford/m68k-rs` through `19689d0` (0.2.0, 10 commits past the
+`327a7c3` review point). Upstream pivoted toward accuracy: 0.2.0 adds an
+M68000UM base+EA cycle-*totals* model (`src/core/timing.rs`) reaching 99.92%
+on the SingleStepTests m68000 fixtures, enforced in their default suite.
+
+Nothing to take:
+
+- Every post-0.1.13 accuracy fix (long-shift base 8 `2cfccb3`/`b52b01c`,
+  data-dependent mul/div `b008599`/`3bb0110`, EA charging and bit-op/CHK
+  timing in `64030d7`) was already present here in more exact form. Measured:
+  this fork's `cycle_gap_report` shows **0 cycle and 0 bus-access mismatches
+  across all 261,894 fixture cases** vs upstream's 99.92%.
+- The perf machinery (fastmem `run_batch`, opcode-indexed decode table,
+  Cranelift trace JIT) now pulls four cranelift crates plus an `unsafe`
+  perimeter and still bypasses the prefetch/bus-order model; the standing
+  reasons not to merge it got stronger. Upstream also never carried serde as
+  a runtime dep (the `CpuCore` serde derives are ours), so wholesale re-sync
+  stays off the table.
+- Parity nit, not taken: upstream `b52b01c` includes SCC68070 in the base-8
+  long-shift gate; ours (`shift_rotate.rs`) covers 68000|68010 only. Irrelevant
+  to any Amiga; extend the gate if SCC68070 parity ever matters.
+
+Given back (first Copperline -> upstream contributions, 2026-07-15):
+
+- https://github.com/benletchford/m68k-rs/pull/5 -- DIVS.L `i64::MIN / -1`
+  host-panic guard (from this fork's cputest batch).
+- https://github.com/benletchford/m68k-rs/pull/6 -- Bcc `$FF` displacement is
+  the byte value -1 on pre-68020 (this fork's fix from 2026-07-09).
+- https://github.com/benletchford/m68k-rs/pull/7 -- the CHK negative-bound
+  trap timing rule (signed word subtract overflow takes the 38-clock
+  upper-bound path), closing the residual upstream documented as unclear;
+  takes their SST cycle match to 100%.
+
+A larger give-side backlog (cputest semantics batch, exception frame formats,
+STOP semantics, 68060, 80-bit FPU, MMU completion) is catalogued in the
+repo-root `m68k-rs-trio-submission.md` intro-issue draft.
+
 ## Fixtures (not committed -- large)
 
 The SingleStepTests `m68000` set (~182M) is gitignored. To run the harness /
