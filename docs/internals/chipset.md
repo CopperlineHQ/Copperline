@@ -47,6 +47,18 @@ Alice adds the FMODE wide-fetch latch, which scales the bitplane and
 sprite fetch quanta (FMODE=0 stays byte-identical to the OCS/ECS slot
 timing).
 
+The CPU sees the reach too: the motherboard decode (Gary and equivalents)
+routes the whole $000000-$1FFFFF window to Agnus, which decodes only as
+many address bits as its DRAM reach, so the fitted chip RAM image repeats
+across the window. A 512K OCS machine mirrors chip RAM at
+$080000/$100000/$180000, and the 8372A (A20 unused) repeats its 1M image
+at $100000, while addresses past the fitted RAM inside one image select
+no DRAM bank and stay open bus ($080000-$0FFFFF on an 8372A with 512K
+fitted). Kickstart's chip sizing detects the wrap and still reports the
+fitted size. Action Replay freeze-disk loaders are a regression example:
+they park the supervisor stack at $100000 on a 512K OCS machine and rely
+on the pushes landing at the top of chip RAM.
+
 Sprite DMA is modelled at the register level, the way the chips work:
 there is no separate "descriptor" concept. Each channel keeps Agnus-side
 copies of its SPRxPOS/SPRxCTL words and the vertical comparator values

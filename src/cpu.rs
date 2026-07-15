@@ -6,7 +6,8 @@ use crate::bus::{Bus, CpuBusAccessKind};
 use crate::chipset::paula::{pending_ipl, INT_MASTER};
 use crate::config::CpuModel;
 use crate::memory::{
-    AUTOCONFIG_BASE, AUTOCONFIG_SIZE, CHIP_RAM_BASE, ROM_BASE, SLOW_RAM_BASE, WCS_BASE,
+    AUTOCONFIG_BASE, AUTOCONFIG_SIZE, CHIP_RAM_BASE, CHIP_WINDOW_SIZE, ROM_BASE, SLOW_RAM_BASE,
+    WCS_BASE,
 };
 use anyhow::{anyhow, Result};
 use log::{debug, trace};
@@ -2223,7 +2224,7 @@ impl CpuBus {
         if let Some(off) = self.overlay_rom_offset(addr, size) {
             return Some(PlainMemRegion::OverlayRom(off));
         }
-        if let Some(off) = region_offset(self.bus.mem.chip_ram.len(), CHIP_RAM_BASE, addr, size) {
+        if let Some(off) = self.chip_window_offset(addr, size) {
             return Some(PlainMemRegion::ChipRam(off));
         }
         if let Some((board, off)) = self.bus.mem.zorro.region_at(addr, size) {
@@ -2247,6 +2248,26 @@ impl CpuBus {
             return Some(PlainMemRegion::ExtendedRom(off));
         }
         None
+    }
+
+    /// CPU-side chip RAM decode. The motherboard address decode (Gary and
+    /// equivalents) routes the whole $000000-$1FFFFF window to Agnus, and
+    /// Agnus only decodes as many address bits as its DRAM reach
+    /// (dma_addr_capability_mask): an OCS 8370/8371 ignores A19/A20, so its
+    /// 512 KiB image repeats at $080000/$100000/$180000; the 1 MiB 8372A
+    /// ignores A20, repeating its 1 MiB image at $100000; the 2 MiB
+    /// 8375/Alice decode the full window with no repeat. Within one image,
+    /// addresses past the fitted RAM select no DRAM bank and stay open bus
+    /// (e.g. $080000-$0FFFFF on an 8372A with 512 KiB fitted). Kickstart's
+    /// chip sizing copes: it detects the wrap by checking whether a probe
+    /// write aliased the bottom of RAM.
+    fn chip_window_offset(&self, addr: u32, size: usize) -> Option<usize> {
+        let len = self.bus.mem.chip_ram.len();
+        if len == 0 || u64::from(addr) >= CHIP_WINDOW_SIZE {
+            return None;
+        }
+        let off = (addr & self.bus.agnus.revision().dma_addr_capability_mask()) as usize;
+        (off.checked_add(size)? <= len).then_some(off)
     }
 
     /// Canonical custom-register page offset for a CPU access that the
@@ -2464,7 +2485,7 @@ impl CpuBus {
         if self.overlay_rom_offset(addr, 1).is_some() {
             return false;
         }
-        region_offset(self.bus.mem.chip_ram.len(), CHIP_RAM_BASE, addr, 1).is_some()
+        self.chip_window_offset(addr, 1).is_some()
             || self.bus.mem.zorro.region_at(addr, 1).is_some()
             || region_offset(self.bus.mem.slow_ram.len(), SLOW_RAM_BASE, addr, 1).is_some()
             || region_offset(self.bus.mem.rom.len(), ROM_BASE, addr, 1).is_some()
@@ -2722,6 +2743,14 @@ impl CpuBus {
                 self.bus.ui_note_cpu_ram_write(addr, size);
                 write_be(&mut self.bus.mem.chip_ram, off, size, value);
                 self.dbg_note_memw(addr, size);
+                if off as u32 != addr {
+                    // The write landed through an Agnus image repeat: note
+                    // the canonical chip address as well as the CPU's bus
+                    // address, so watchpoints and UI highlights fire
+                    // whichever alias of the RAM cell they were set on.
+                    self.bus.ui_note_cpu_ram_write(off as u32, size);
+                    self.dbg_note_memw(off as u32, size);
+                }
                 return;
             }
             Some(PlainMemRegion::ZorroRam(board, off)) => {
@@ -3441,6 +3470,66 @@ mod tests {
             0xBEEF,
             "move.w (a1,d0.l),d1 must read the word at a1+d0"
         );
+        Ok(())
+    }
+
+    // The motherboard decode routes the whole $000000-$1FFFFF window to
+    // Agnus, which decodes only as many address bits as its DRAM reach, so
+    // the fitted chip RAM image repeats across the window (every 512 KiB on
+    // OCS). Regression example: Action Replay freeze-disk loaders point the
+    // supervisor stack at $100000 on a 512 KiB machine and rely on the
+    // pushes landing at the top of chip RAM.
+    #[test]
+    fn cpu_chip_window_image_aliases_fitted_ram() -> Result<()> {
+        // move.l #$DEADBEEF,$180010.l ; move.w $100012.l,d1
+        let mut machine = machine_with_program(
+            0x0500,
+            &[
+                0x23FC, 0xDEAD, 0xBEEF, 0x0018, 0x0010, // move.l #imm,$180010.l
+                0x3239, 0x0010, 0x0012, // move.w $100012.l,d1
+            ],
+        )?;
+        // Watch both aliases of the target cell: the mirror write must fire
+        // the watch whichever alias it was set on.
+        machine.bus_mut().set_ui_mem_watches(&[0x10, 0x180010]);
+        machine.step_slice(2)?;
+        // On the fixture's OCS Agnus both $180010 and $100012 are images of
+        // chip $10/$12.
+        assert_eq!(read_chip_long(machine.bus(), 0x10), 0xDEADBEEF);
+        assert_eq!(machine.d(1) & 0xFFFF, 0xBEEF);
+        assert!(machine.bus_mut().ui_take_mem_writer(0x10).is_some());
+        assert!(machine.bus_mut().ui_take_mem_writer(0x180010).is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn chip_window_images_follow_agnus_reach() -> Result<()> {
+        use crate::chipset::agnus::AgnusRevision;
+        let mut machine = machine_with_program(0x0500, &[0x4E71])?;
+        machine.bus_mut().mem.chip_ram[0x60000] = 0xA5;
+
+        // OCS (512 KiB reach, A19/A20 unused): the image repeats every
+        // 512 KiB, and a write through an image lands in the RAM cell.
+        assert_eq!(machine.debug_read_memory(0x0E0000, 1)[0], 0xA5);
+        assert_eq!(machine.debug_read_memory(0x160000, 1)[0], 0xA5);
+        assert_eq!(machine.debug_write_memory(0x1E0004, &[0x77]), 1);
+        assert_eq!(machine.bus().mem.chip_ram[0x60004], 0x77);
+
+        // 8372A (1 MiB reach, A20 unused): $0E0000 selects the unfitted
+        // second DRAM bank (open bus) while $160000 is the A20 image of
+        // $060000.
+        machine
+            .bus_mut()
+            .set_agnus_revision(AgnusRevision::Ecs8372Rev4);
+        assert_eq!(machine.debug_read_memory(0x0E0000, 1)[0], 0xFF);
+        assert_eq!(machine.debug_write_memory(0x0E0000, &[0x11]), 0);
+        assert_eq!(machine.debug_read_memory(0x160000, 1)[0], 0xA5);
+
+        // 8375/Alice (2 MiB reach): the full window is decoded, so nothing
+        // past the fitted RAM answers.
+        machine.bus_mut().set_agnus_revision(AgnusRevision::Ecs8375);
+        assert_eq!(machine.debug_read_memory(0x0E0000, 1)[0], 0xFF);
+        assert_eq!(machine.debug_read_memory(0x160000, 1)[0], 0xFF);
         Ok(())
     }
 

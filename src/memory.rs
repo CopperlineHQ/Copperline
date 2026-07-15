@@ -12,6 +12,11 @@ pub const ROM_SIZE: usize = 512 * 1024;
 pub const ROM_SIZE_256K: usize = 256 * 1024;
 pub const ROM_BASE: u64 = 0x00F8_0000;
 pub const CHIP_RAM_BASE: u64 = 0x0000_0000;
+/// Size of the chip-RAM select window the motherboard address decode (Gary
+/// and equivalents) routes to Agnus: $000000-$1FFFFF. Agnus decodes fewer
+/// address bits than the window on the smaller parts, so the fitted RAM
+/// image repeats inside it (see CpuBus::chip_window_offset).
+pub const CHIP_WINDOW_SIZE: u64 = 0x0020_0000;
 /// Conventional base of the first Zorro II RAM board (the start of the
 /// Zorro II expansion space, where the ROM assigns it). Test fixtures
 /// pre-configure their fast RAM boards here.
