@@ -742,16 +742,27 @@ impl FilesysUnit {
                 }
             }
             ACTION_SET_PROTECT => {
-                // Arg2 = lock, Arg3 = BSTR name, Arg4 = mask. The host
-                // filesystem has nowhere faithful to keep Amiga protection
-                // bits; accept and ignore (like a FAT filesystem would).
-                // TODO(codewiz): persist to the .uaem sidecar once write
-                // support lands, so protection round-trips.
+                // Arg2 = lock, Arg3 = BSTR name, Arg4 = mask (fib_Protection).
+                // The host mode cannot hold the h/s/p/a bits or a non-default
+                // rwed set, so anything but the default lands in a .uaem sidecar.
+                if let Some(err) = self.write_refusal() {
+                    return (DOSFALSE, err);
+                }
                 let name_bptr = arg(bus, 3);
                 let name = read_bstr(bus, name_bptr);
-                match self.resolve(arg(bus, 2), &name) {
-                    Some(rec) if self.lock_path(&rec).exists() => (DOSTRUE, 0),
-                    _ => (DOSFALSE, ERROR_OBJECT_NOT_FOUND),
+                let Some(rec) = self.resolve(arg(bus, 2), &name) else {
+                    return (DOSFALSE, ERROR_OBJECT_NOT_FOUND);
+                };
+                let path = self.lock_path(&rec);
+                if !path.exists() {
+                    return (DOSFALSE, ERROR_OBJECT_NOT_FOUND);
+                }
+                // Keep the existing date and comment; change only protection.
+                let mut info = read_uaem(&path).unwrap_or_default();
+                info.protection = arg(bus, 4) & 0xFF;
+                match write_uaem(&path, &info) {
+                    Ok(()) => (DOSTRUE, 0),
+                    Err(e) => (DOSFALSE, host_error(&e)),
                 }
             }
             ACTION_FINDINPUT => {
@@ -1154,24 +1165,45 @@ impl FilesysUnit {
                     bus.read_long(ds + 4),
                     bus.read_long(ds + 8),
                 );
-                match set_host_mtime(&self.lock_path(&rec), days, mins, ticks) {
-                    Ok(()) => (DOSTRUE, 0),
-                    Err(e) => (DOSFALSE, host_error(&e)),
+                let path = self.lock_path(&rec);
+                if let Err(e) = set_host_mtime(&path, days, mins, ticks) {
+                    return (DOSFALSE, host_error(&e));
                 }
+                // If a sidecar already exists (for protection or a comment), keep
+                // its stored date in step with the new mtime. A file with only a
+                // date and no other attributes needs no sidecar -- the mtime holds
+                // it -- so we never create one here.
+                if let Some(mut info) = read_uaem(&path) {
+                    info.date = Some((days, mins, ticks));
+                    if let Err(e) = write_uaem(&path, &info) {
+                        return (DOSFALSE, host_error(&e));
+                    }
+                }
+                (DOSTRUE, 0)
             }
             ACTION_SET_COMMENT => {
-                // The host has nowhere to keep an Amiga file comment. Accept it
-                // so the caller does not fail, and drop it.
-                // TODO(codewiz): persist comments and protection bits to the
-                // .uaem sidecar we already read back.
+                // Arg2 = lock, Arg3 = BSTR name, Arg4 = BSTR comment. The host
+                // cannot hold a file comment, so it goes in the .uaem sidecar.
                 if let Some(err) = self.write_refusal() {
                     return (DOSFALSE, err);
                 }
                 let name_bptr = arg(bus, 3);
                 let name = read_bstr(bus, name_bptr);
-                match self.resolve(arg(bus, 2), &name) {
-                    Some(rec) if self.lock_path(&rec).exists() => (DOSTRUE, 0),
-                    _ => (DOSFALSE, ERROR_OBJECT_NOT_FOUND),
+                let comment_bptr = arg(bus, 4);
+                let comment = read_bstr(bus, comment_bptr);
+                let Some(rec) = self.resolve(arg(bus, 2), &name) else {
+                    return (DOSFALSE, ERROR_OBJECT_NOT_FOUND);
+                };
+                let path = self.lock_path(&rec);
+                if !path.exists() {
+                    return (DOSFALSE, ERROR_OBJECT_NOT_FOUND);
+                }
+                // Keep the existing protection and date; change only the comment.
+                let mut info = read_uaem(&path).unwrap_or_default();
+                info.comment = comment;
+                match write_uaem(&path, &info) {
+                    Ok(()) => (DOSTRUE, 0),
+                    Err(e) => (DOSFALSE, host_error(&e)),
                 }
             }
             // Relabel: the volume name comes from the config, not the guest.
@@ -1267,8 +1299,10 @@ impl HleHandler for FilesysHle {
 /// Metadata from a UAE `.uaem` sidecar file: the attributes a host
 /// filesystem cannot hold (script/pure/archive bits, file comment, exact
 /// datestamp), written by UAE-family emulators next to the real file.
+#[derive(Default)]
 struct UaemInfo {
-    /// fib_Protection value (deny-style rwed like the FIB wants).
+    /// fib_Protection value (deny-style rwed like the FIB wants). 0 is the
+    /// default (rwed all allowed, no h/s/p/a), which needs no sidecar.
     protection: u32,
     /// DateStamp, when the sidecar's timestamp parses.
     date: Option<DateStamp>,
@@ -1285,6 +1319,75 @@ fn uaem_path(path: &Path) -> PathBuf {
     let mut side = path.as_os_str().to_owned();
     side.push(".uaem");
     PathBuf::from(side)
+}
+
+/// Persist `info` to `path`'s `.uaem` sidecar, or delete the sidecar when the
+/// attributes are all default (rwed allowed, no h/s/p/a bits, no comment) -- the
+/// host file's own mode and mtime then carry everything, so there is nothing to
+/// keep. The line format and the write-or-delete rule match amiberry's
+/// fsdb_host.cpp, so sidecars stay interoperable between the two emulators.
+fn write_uaem(path: &Path, info: &UaemInfo) -> std::io::Result<()> {
+    let side = uaem_path(path);
+    if info.protection & 0xFF == 0 && info.comment.is_empty() {
+        return match std::fs::remove_file(&side) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        };
+    }
+
+    // The rwed group is stored deny-style in fib_Protection; `^ 0xF` turns it
+    // back into the "allowed" letters the sidecar shows (the inverse of
+    // parse_uaem's flip). h/s/p/a are stored directly.
+    let mode = info.protection ^ 0xF;
+    let mut line: Vec<u8> = (0..8)
+        .zip(b"hsparwed")
+        .map(|(i, &l)| if mode & (1 << (7 - i)) != 0 { l } else { b'-' })
+        .collect();
+
+    let (days, mins, ticks) = info.date.unwrap_or_else(|| {
+        amiga_datestamp(std::fs::metadata(path).ok().and_then(|m| m.modified().ok()))
+    });
+    let (y, m, d) = civil_from_days(days_from_civil(1978, 1, 1) + i64::from(days));
+    let text = format!(
+        " {y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}.{:02}",
+        mins / 60,
+        mins % 60,
+        ticks / 50,
+        (ticks % 50) * 2,
+    );
+    line.extend_from_slice(text.as_bytes());
+    if !info.comment.is_empty() {
+        line.push(b' ');
+        // The sidecar body is UTF-8 like the host filenames (amiberry writes
+        // the comment through the same host-name encoding).
+        line.extend_from_slice(latin1_to_utf8(&info.comment).as_bytes());
+    }
+    line.push(b'\n');
+
+    // Write through a temp file and rename so a crash never leaves a truncated
+    // sidecar in place of the old one (matching amiberry).
+    let tmp = {
+        let mut t = side.clone().into_os_string();
+        t.push(".tmp");
+        PathBuf::from(t)
+    };
+    std::fs::write(&tmp, &line)?;
+    std::fs::rename(&tmp, &side)
+}
+
+/// The civil date of `z` days since 1970-01-01 (Howard Hinnant's algorithm,
+/// the inverse of [`days_from_civil`]).
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 /// Map a host I/O error onto the AmigaDOS error the guest expects, so a full
@@ -1727,6 +1830,42 @@ mod tests {
         let info = parse_uaem(b"---arwed").unwrap();
         assert_eq!(info.protection, 0x10); // FIBF_ARCHIVE
         assert_eq!(info.date, None);
+    }
+
+    /// write_uaem produces exactly the byte format amiberry reads, round-trips
+    /// through parse_uaem, and deletes the sidecar when attributes go default.
+    #[test]
+    fn write_uaem_matches_amiberry_and_removes_default() {
+        let root = std::env::temp_dir().join(format!("clfs-uaem-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("Shell-Startup");
+        std::fs::write(&file, b"; script").unwrap();
+
+        // Script bit + execute denied, a comment, and a fixed datestamp.
+        let info = UaemInfo {
+            protection: 0x42, // FIBF_SCRIPT | FIBF_EXECUTE
+            date: Some((17722, 16 * 60 + 16, 51 * 50 + 32 / 2)),
+            comment: b"a comment".to_vec(),
+        };
+        write_uaem(&file, &info).unwrap();
+
+        // Byte-for-byte what amiberry writes.
+        let raw = std::fs::read(uaem_path(&file)).unwrap();
+        assert_eq!(raw, b"-s--rw-d 2026-07-10 16:16:51.32 a comment\n");
+
+        // ...and it parses back to the same attributes.
+        let back = read_uaem(&file).unwrap();
+        assert_eq!(back.protection, 0x42);
+        assert_eq!(back.date, info.date);
+        assert_eq!(back.comment, b"a comment");
+
+        // Default attributes (rwed, no bits, no comment) delete the sidecar.
+        write_uaem(&file, &UaemInfo::default()).unwrap();
+        assert!(!uaem_path(&file).exists());
+        // Removing an already-absent sidecar is not an error.
+        write_uaem(&file, &UaemInfo::default()).unwrap();
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
