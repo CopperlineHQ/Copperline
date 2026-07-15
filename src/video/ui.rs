@@ -245,9 +245,10 @@ pub enum DebugTab {
     Memory,
     IoMap,
     Break,
+    Waveform,
 }
 
-pub const DEBUG_TABS: [DebugTab; 8] = [
+pub const DEBUG_TABS: [DebugTab; 9] = [
     DebugTab::Cpu,
     DebugTab::Chipset,
     DebugTab::Copper,
@@ -256,6 +257,7 @@ pub const DEBUG_TABS: [DebugTab; 8] = [
     DebugTab::Memory,
     DebugTab::IoMap,
     DebugTab::Break,
+    DebugTab::Waveform,
 ];
 
 fn debug_tab_label(tab: DebugTab) -> &'static str {
@@ -268,6 +270,7 @@ fn debug_tab_label(tab: DebugTab) -> &'static str {
         DebugTab::Memory => "Memory",
         DebugTab::IoMap => "IO Map",
         DebugTab::Break => "Break",
+        DebugTab::Waveform => "Wave",
     }
 }
 
@@ -363,8 +366,11 @@ impl DebuggerPanel {
         // Alphanumerics and spaces: hex for addresses/values, letters for
         // register names (Dn/An/PC/SR), memory operands (M<hex>), and the
         // breakpoint-condition mnemonics (EQ/NE/LT/GT/LE/GE/AND/IGN). A leading
-        // or doubled space is dropped so the tokens stay clean.
-        if (!ch.is_ascii_alphanumeric() && ch != ' ') || self.entry.len() >= 40 {
+        // or doubled space is dropped so the tokens stay clean. The extra
+        // punctuation set serves the Waveform tab's trigger/duration/signal
+        // specs (PC=..., BEAM=V:H, CPU,BUS, 2.5S) and output paths.
+        let punctuation = matches!(ch, '=' | ':' | ',' | '.' | '-' | '_' | '/');
+        if (!ch.is_ascii_alphanumeric() && ch != ' ' && !punctuation) || self.entry.len() >= 40 {
             return;
         }
         if ch == ' ' && (self.entry.is_empty() || self.entry.ends_with(' ')) {
@@ -609,6 +615,13 @@ pub fn panel_control_at(panel: &Panel, pos: (i32, i32)) -> Option<UiControl> {
                     }
                 }
             }
+            if panel.tab == DebugTab::Waveform {
+                for (control, button_rect) in waveform_tab_button_rects(rect) {
+                    if button_rect.contains(pos) {
+                        return Some(control);
+                    }
+                }
+            }
         }
         // The console has no controls beyond the shared close button and
         // the click-swallowing body.
@@ -718,6 +731,11 @@ pub enum UiControl {
     DebugSpriteToggle(usize),
     /// Break tab: remove all breakpoints and watchpoints.
     DebugBreaksClear,
+    /// Waveform tab: arm a VCD capture from the entry box's order-free
+    /// "[PATH] [TRIGGER] [DURATION] [SIGNALS]" spec (empty = defaults).
+    DebugWaveArm,
+    /// Waveform tab: stop the capture, finishing the file.
+    DebugWaveStop,
     /// Audio tab: toggle mute for a channel (0..3 = Paula, 4 = CD audio).
     DebugAudioMute(usize),
     /// Frame analyzer: run/pause the machine while keeping the pane open.
@@ -907,7 +925,9 @@ fn drop_chooser_button_rects(rect: Rect, state: &DropChooserState) -> Vec<(UiCon
 
 // Debugger chrome: a tab row under the title and a control row at the
 // bottom with the transport buttons and the shared hex-entry box.
-const DEBUG_TAB_W: usize = 80;
+// 9 tabs at 70+4 px fit the 684 px panel; the longest label (Chipset,
+// 7 glyphs at 8 px) still leaves 7 px of padding a side.
+const DEBUG_TAB_W: usize = 70;
 const DEBUG_TAB_H: usize = 18;
 const DEBUG_BUTTON_H: usize = 20;
 
@@ -984,6 +1004,25 @@ fn break_tab_button_rects(rect: Rect) -> [(UiControl, Rect); 6] {
         (UiControl::DebugBeamToggle, button(3)),
         (UiControl::DebugCatchToggle, button(4)),
         (UiControl::DebugBreaksClear, button(5)),
+    ]
+}
+
+/// Content lines the Waveform tab's view must leave blank so the Arm and
+/// Stop buttons drawn at the top of the content area do not overlap text.
+pub const WAVEFORM_TAB_HEADER_LINES: usize = 3;
+
+/// The Waveform tab's buttons, drawn at the top of the content area.
+fn waveform_tab_button_rects(rect: Rect) -> [(UiControl, Rect); 2] {
+    let y = debug_content_top(rect);
+    let button = |i: usize| Rect {
+        x: rect.x + 10 + i * 98,
+        y,
+        w: 90,
+        h: DEBUG_BUTTON_H,
+    };
+    [
+        (UiControl::DebugWaveArm, button(0)),
+        (UiControl::DebugWaveStop, button(1)),
     ]
 }
 
@@ -1969,6 +2008,27 @@ fn draw_debugger(
                 UiControl::DebugBeamToggle => parse_beam_spec(&panel.entry).is_some(),
                 UiControl::DebugCatchToggle => parse_catch_spec(&panel.entry).is_some(),
                 _ => panel.entry_addr().is_some(),
+            };
+            draw_text_button(
+                frame,
+                button_rect,
+                label,
+                enabled,
+                hover == Some(control),
+                scale,
+            );
+        }
+    }
+    // Waveform-tab buttons at the top of the content area (the view leaves
+    // WAVEFORM_TAB_HEADER_LINES blank so text starts below them).
+    if panel.tab == DebugTab::Waveform {
+        for (control, button_rect) in waveform_tab_button_rects(rect) {
+            let (label, enabled) = match control {
+                UiControl::DebugWaveArm => (
+                    "Arm",
+                    crate::waveform::parse_wave_args(panel.entry.split_whitespace()).is_ok(),
+                ),
+                _ => ("Stop", true),
             };
             draw_text_button(
                 frame,
@@ -5441,6 +5501,60 @@ mod tests {
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "debugger-break");
+
+        // Waveform tab: Arm/Stop buttons plus a capture status listing.
+        let mut frame = vec![0u8; w * h * 4];
+        let mut lines: Vec<DbgLine> = (0..WAVEFORM_TAB_HEADER_LINES)
+            .map(|_| DbgLine::plain(""))
+            .collect();
+        lines.push(DbgLine::hilit(
+            "waveform capturing: trigger pc=0xC033C2, duration 2f, signals all",
+        ));
+        lines.push(DbgLine::plain("  -> out.vcd"));
+        lines.push(DbgLine::plain("  14204 / 141748 cck, 35872 samples"));
+        lines.push(DbgLine::plain(""));
+        lines.push(DbgLine::plain(
+            "Trigger:  NOW  PC=ADDR  BEAM=VPOS[:HPOS]  REG=OFF  TIME=SECS",
+        ));
+        let data = PanelViewData::Debugger(Box::new(DebuggerView {
+            running: true,
+            reverse_available: false,
+            status: "running frame 1234 24.68s".to_string(),
+            lines,
+            bitmap: None,
+            video: None,
+            audio: None,
+        }));
+        let mut panel = DebuggerPanel::new();
+        panel.tab = DebugTab::Waveform;
+        panel.entry = "PC=C033C2 2F".to_string();
+        let ui = UiState {
+            menu_open: false,
+            panel: Some(Panel::Debugger(panel)),
+        };
+        draw(
+            &mut frame,
+            scale,
+            &ui,
+            Some(UiControl::DebugWaveArm),
+            Some(&data),
+            false,
+            MenuLabels {
+                warp: false,
+                warp_speed: WarpSpeed::Max,
+                recording: false,
+                input_recording: false,
+                joystick_input_mode: JoystickInputMode::Gamepad,
+                pixel_aspect: PixelAspect::Tv,
+                midi_in: "",
+                midi_out: "",
+                audio_output: "",
+            },
+        );
+        assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
+        // The Arm button must be enabled: its entry spec parses.
+        assert!(crate::waveform::parse_wave_args("PC=C033C2 2F".split_whitespace()).is_ok());
+        save(&frame, "debugger-waveform");
 
         // Audio tab: the four Paula channels plus CD, with representative
         // state, mute buttons (AUD2 shown muted), and synthetic scope traces.

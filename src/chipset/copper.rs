@@ -603,6 +603,18 @@ impl Copper {
         self.pc
     }
 
+    /// Coarse state name (run/wait/skip/jump/stop) for diagnostics and
+    /// the waveform export; the phase detail stays private.
+    pub fn state_label(&self) -> &'static str {
+        match self.state {
+            CopperState::Running => "run",
+            CopperState::Waiting { .. } => "wait",
+            CopperState::Skipping { .. } => "skip",
+            CopperState::Jumping { .. } => "jump",
+            CopperState::Stopped => "stop",
+        }
+    }
+
     /// Whether the first word of an instruction has been fetched but not
     /// its second (the PC points at the second word). Lets the debugger
     /// anchor its listing on the current instruction's start address.

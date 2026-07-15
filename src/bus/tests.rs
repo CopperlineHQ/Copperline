@@ -10414,3 +10414,144 @@ fn ecs_hires_bplcon1_scroll_counts_lores_pixels_on_late_ddf_row() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Waveform (VCD) capture taps
+// ---------------------------------------------------------------------------
+
+fn temp_vcd_path(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("copperline-wave-{}-{name}.vcd", std::process::id()))
+}
+
+fn wave_opts(path: std::path::PathBuf) -> crate::waveform::WaveOptions {
+    crate::waveform::WaveOptions::new(path)
+}
+
+#[test]
+fn waveform_capture_records_beam_and_owner_changes() {
+    let mut bus = empty_bus();
+    let path = temp_vcd_path("beam-owner");
+    let _ = std::fs::remove_file(&path);
+    let mut opts = wave_opts(path.clone());
+    opts.duration = crate::waveform::WaveDuration::Cck(500);
+    bus.wave_arm(opts).unwrap();
+    assert_eq!(bus.wave_status().unwrap().state, "capturing");
+
+    // Start a small A->D blit so the blitter's owner slots and pipeline
+    // labels land in the trace alongside the idle bus's refresh slots.
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BLTEN;
+    bus.blitter.bltcon0 = 0x09F0;
+    bus.blitter.start_scheduled((4 << 6) | 2, &bus.mem.chip_ram);
+
+    // Refresh slots, beam movement, and line rollovers are sampled even
+    // with the CPU quiet. Run well past the 500 cck window so it expires.
+    for _ in 0..2000 {
+        bus.advance_one_chip_bus_quantum(None);
+    }
+    let status = bus.wave_status().unwrap();
+    assert_eq!(status.state, "done");
+    assert!(status.samples > 0, "{status:?}");
+    assert!(status.captured_cck >= 490, "{status:?}");
+
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("$timescale 1 us $end"), "{text}");
+    assert!(text.contains("$enddefinitions $end"));
+    // All eight signal-group scopes are declared by default.
+    for scope in [
+        "beam", "bus", "cpu", "copper", "blitter", "regs", "irq", "audio",
+    ] {
+        assert!(
+            text.contains(&format!("$scope module {scope} $end")),
+            "missing scope {scope}"
+        );
+    }
+    // The beam moved: many timestamps, and hpos changes between them.
+    let stamps = text.lines().filter(|l| l.starts_with('#')).count();
+    assert!(stamps > 50, "only {stamps} timestamps:\n{text}");
+    // Owner names appear as string-var changes (refresh slots at least).
+    assert!(text.contains("srefresh "), "{text}");
+    // The blit shows up as the blitter owning bus slots and as its
+    // pipeline labels (A fetches and D writes for an A->D copy).
+    assert!(text.contains("sblitter "), "{text}");
+    assert!(text.contains("sA "), "{text}");
+    assert!(text.contains("sD "), "{text}");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn waveform_reg_trigger_fires_on_custom_register_write() {
+    let mut bus = empty_bus();
+    let path = temp_vcd_path("reg-trigger");
+    let _ = std::fs::remove_file(&path);
+    let mut opts = wave_opts(path.clone());
+    opts.trigger = crate::waveform::Trigger::RegWrite(0x180);
+    opts.duration = crate::waveform::WaveDuration::Cck(100);
+    bus.wave_arm(opts).unwrap();
+
+    // Unrelated writes and bus activity leave the capture armed.
+    bus.write_custom_word_from(0x096, 0x8000, BeamWriteSource::Cpu);
+    for _ in 0..50 {
+        bus.advance_one_chip_bus_quantum(None);
+    }
+    assert_eq!(bus.wave_status().unwrap().state, "armed");
+
+    // The matching write (COLOR00) fires the trigger and is itself the
+    // first recorded regs-group sample.
+    bus.write_custom_word_from(0x180, 0x0F0F, BeamWriteSource::Cpu);
+    assert_eq!(bus.wave_status().unwrap().state, "capturing");
+    for _ in 0..500 {
+        bus.advance_one_chip_bus_quantum(None);
+    }
+    let status = bus.wave_status().unwrap();
+    assert_eq!(status.state, "done");
+
+    let text = std::fs::read_to_string(&path).unwrap();
+    // The regs group recorded offset $180 (9-bit vector 110000000) and
+    // value $0F0F at the trigger point, attributed to the CPU.
+    assert!(text.contains("b110000000 "), "{text}");
+    assert!(text.contains("b0000111100001111 "), "{text}");
+    assert!(text.contains("scpu "), "{text}");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn waveform_stop_finishes_early_and_rearm_replaces() {
+    let mut bus = empty_bus();
+    let path = temp_vcd_path("stop-early");
+    let _ = std::fs::remove_file(&path);
+    let mut opts = wave_opts(path.clone());
+    opts.duration = crate::waveform::WaveDuration::Secs(5.0);
+    bus.wave_arm(opts).unwrap();
+    for _ in 0..50 {
+        bus.advance_one_chip_bus_quantum(None);
+    }
+    let status = bus.wave_stop().unwrap();
+    assert_eq!(status.state, "done");
+    assert!(bus.wave_status().is_none());
+    // The finished file is flushed and parseable.
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("$enddefinitions $end"));
+
+    // Re-arming with a beam trigger works after a stop, and the beam
+    // crossing fires it (line 5, any hpos).
+    let path2 = temp_vcd_path("beam-trigger");
+    let _ = std::fs::remove_file(&path2);
+    let mut opts = wave_opts(path2.clone());
+    opts.trigger = crate::waveform::Trigger::Beam {
+        vpos: 5,
+        hpos: None,
+    };
+    opts.duration = crate::waveform::WaveDuration::Cck(50);
+    bus.wave_arm(opts).unwrap();
+    assert_eq!(bus.wave_status().unwrap().state, "armed");
+    // 5 lines of 227 cck arrive within ~2000 quanta on an idle bus.
+    for _ in 0..4000 {
+        bus.advance_one_chip_bus_quantum(None);
+        if bus.wave_status().unwrap().state != "armed" {
+            break;
+        }
+    }
+    assert_ne!(bus.wave_status().unwrap().state, "armed");
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&path2);
+}

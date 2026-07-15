@@ -117,6 +117,9 @@ impl Bus {
                 self.blitter.busy,
             );
         }
+        if self.wave_on {
+            self.wave_tap_quantum(owner);
+        }
         // The Copper was already stepped above (or is held without fetching at
         // the end-of-line lockout); only drive the other owners here.
         if !matches!(owner, ChipBusOwner::Copper) {
@@ -281,6 +284,9 @@ impl Bus {
         let tick = self.agnus.advance_by_cck(cck);
         if !self.ui_beam_traps.is_empty() {
             self.check_ui_beam_traps((old_vpos, old_hpos), old_frame_lines, tick.new_frames);
+        }
+        if self.wave_on {
+            self.wave_note_beam((old_vpos, old_hpos), old_frame_lines, tick.new_frames);
         }
         if tick.new_frames == 0 && tick.new_lines == 0 {
             self.capture_sprite_dma_words_if_due(

@@ -1518,6 +1518,22 @@ impl M68kMachine {
             .map(|trace| (trace.path.as_path(), trace.lines))
     }
 
+    /// Arm a waveform (VCD) capture on the machine, replacing any
+    /// existing one. See src/waveform.rs.
+    pub fn ui_wave_start(&mut self, opts: crate::waveform::WaveOptions) -> std::io::Result<()> {
+        self.bus.bus.wave_arm(opts)
+    }
+
+    /// Stop and discard the waveform capture, returning its final status.
+    pub fn ui_wave_stop(&mut self) -> Option<crate::waveform::WaveStatus> {
+        self.bus.bus.wave_stop()
+    }
+
+    /// Status of the waveform capture (armed/capturing/done), if any.
+    pub fn ui_wave_status(&self) -> Option<crate::waveform::WaveStatus> {
+        self.bus.bus.wave_status()
+    }
+
     fn ui_trace_record(&mut self, pc: u32) {
         use std::io::Write;
         let (text, _) = crate::disasm::disassemble(
@@ -1951,6 +1967,11 @@ impl M68kMachine {
                         }
                         if self.ui_trace.is_some() {
                             self.ui_trace_record(dbg_pc_before);
+                        }
+                        if self.bus.bus.wave_pc_trigger {
+                            self.bus
+                                .bus
+                                .wave_note_pc(dbg_pc_before & self.cpu.address_mask);
                         }
                         self.debug_check_ipl(dbg_ipl_before, positive_cpu_cycles(cycles));
                         if self.ui_breaks.armed() {
