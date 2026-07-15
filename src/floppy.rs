@@ -341,6 +341,20 @@ impl FloppyController {
             .is_some_and(|drive| drive.image.is_some())
     }
 
+    /// File name of the inserted image, for UI labels. Read from the image
+    /// itself rather than any host-side playlist, so CLI and config-embedded
+    /// inserts are covered too.
+    pub fn inserted_disk_name(&self, drive_idx: usize) -> Option<String> {
+        let image = self.drives.get(drive_idx)?.image.as_ref()?;
+        Some(
+            image
+                .path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| image.path.display().to_string()),
+        )
+    }
+
     pub fn insert_disk_image(
         &mut self,
         drive_idx: usize,

@@ -821,6 +821,98 @@ $('df0url')?.addEventListener('click', () => {
   if (url && url.trim()) insertDiskFromUrl(url.trim());
 });
 
+// --- drag and drop ---------------------------------------------------------
+// Files dropped anywhere on the page route like the pickers: a .rom loads
+// (or queues) a Kickstart, anything else inserts into DF0. The hint overlay
+// is built here rather than in the page shell (index.html lives in the
+// website repository and is left alone).
+
+let dropHint = null; // built lazily, like the fullscreen UI
+let dragDepth = 0; // dragenter/dragleave fire per element crossed
+
+function ensureDropHint() {
+  if (dropHint) return dropHint;
+  dropHint = document.createElement('div');
+  dropHint.style.cssText =
+    'position:absolute;inset:0;z-index:4;display:none;' +
+    'align-items:center;justify-content:center;text-align:center;' +
+    'pointer-events:none;background:rgba(10,13,22,0.7);' +
+    'border:2px dashed rgba(255,255,255,0.5);' +
+    'color:rgba(255,255,255,0.9);padding:1rem;' +
+    'font:600 1rem "IBM Plex Mono",ui-monospace,monospace;';
+  dropHint.textContent = 'Drop: disk image -> DF0, .rom -> Kickstart';
+  shell.appendChild(dropHint);
+  return dropHint;
+}
+
+function showDropHint(on) {
+  ensureDropHint().style.display = on ? 'flex' : 'none';
+}
+
+async function handleDroppedFiles(files) {
+  const list = Array.from(files ?? []);
+  if (!list.length) return;
+  const oversize = list.find((f) => f.size > DISK_URL_MAX_BYTES);
+  if (oversize) {
+    setLoadStatus(`${oversize.name}: file too large`);
+    return;
+  }
+  // One drive and one ROM socket: the first of each kind wins, extras
+  // are ignored.
+  const rom = list.find((f) => /\.rom$/i.test(f.name));
+  const disk = list.find((f) => !/\.rom$/i.test(f.name));
+  try {
+    if (rom) {
+      const bytes = new Uint8Array(await rom.arrayBuffer());
+      if (emu) {
+        emu.load_rom(bytes, undefined);
+        setLoadStatus(`Kickstart loaded: ${rom.name} - machine power-cycled`);
+      } else {
+        bootRom = { rom: bytes, ext: null, label: rom.name };
+        refreshBootButton();
+        setLoadStatus(`will boot ${rom.name}`);
+      }
+    }
+    if (disk) {
+      const bytes = new Uint8Array(await disk.arrayBuffer());
+      if (emu) {
+        emu.insert_floppy(0, bytes, disk.name);
+        setLoadStatus(`DF0: ${disk.name} (write-protected)`);
+      } else {
+        pendingDisk = { bytes, name: disk.name };
+        setLoadStatus(`DF0: ${disk.name} (inserts at boot)`);
+      }
+    }
+  } catch (err) {
+    setLoadStatus(`drop failed: ${err.message ?? err}`);
+  }
+}
+
+// Document-level handlers so a missed drop never navigates the page away
+// to the dropped file.
+document.addEventListener('dragenter', (e) => {
+  if (!e.dataTransfer?.types?.includes('Files')) return;
+  e.preventDefault();
+  dragDepth += 1;
+  showDropHint(true);
+});
+document.addEventListener('dragover', (e) => {
+  if (!e.dataTransfer?.types?.includes('Files')) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'copy';
+});
+document.addEventListener('dragleave', () => {
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (dragDepth === 0) showDropHint(false);
+});
+document.addEventListener('drop', (e) => {
+  dragDepth = 0;
+  showDropHint(false);
+  if (!e.dataTransfer) return;
+  e.preventDefault();
+  handleDroppedFiles(e.dataTransfer.files);
+});
+
 bootBtn.addEventListener('click', boot);
 const linkedDisk = new URLSearchParams(location.search).get('df0');
 if (linkedDisk) insertDiskFromUrl(linkedDisk);

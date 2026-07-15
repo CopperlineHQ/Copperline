@@ -573,6 +573,13 @@ pub struct App {
     /// Transient on-screen overlay message (screenshot saved, disk
     /// swapped), or None when nothing is being shown.
     osd: Option<Osd>,
+    /// True while a file drag hovers over the main window; draws the
+    /// drop-hint overlay. winit sends no HoveredFileCancelled after a
+    /// successful drop, so DroppedFile clears this too.
+    drop_hover: bool,
+    /// Files from DroppedFile events, coalesced in about_to_wait: winit
+    /// delivers one event per file, and a multi-file drop must act once.
+    pending_dropped_files: Vec<PathBuf>,
     /// Per-drive disk-swap playlists: the ordered image paths the user can
     /// cycle through for each drive with the disk-swap shortcut. Lets a
     /// multi-disk demo run on a single drive.
@@ -938,6 +945,8 @@ impl App {
             render_generation: 0,
             last_fdd_track: None,
             osd: None,
+            drop_hover: false,
+            pending_dropped_files: Vec::new(),
             disk_playlists,
             disk_write_protected,
             disk_playlist_index: [0; 4],
@@ -1551,6 +1560,25 @@ impl ApplicationHandler for App {
                     self.request_redraw();
                 }
             }
+            WindowEvent::HoveredFile(_) => {
+                // One event per hovered file; flag once and redraw once.
+                if !self.drop_hover {
+                    self.drop_hover = true;
+                    self.request_redraw();
+                }
+            }
+            WindowEvent::HoveredFileCancelled => {
+                self.drop_hover = false;
+                self.request_redraw();
+            }
+            WindowEvent::DroppedFile(path) => {
+                // No HoveredFileCancelled follows a successful drop, so the
+                // hint is cleared here. One event arrives per dropped file;
+                // they are coalesced into a single action in about_to_wait.
+                self.drop_hover = false;
+                self.pending_dropped_files.push(path);
+                self.request_redraw();
+            }
             WindowEvent::Focused(focused) => {
                 self.main_window_focused = focused;
                 if !focused {
@@ -1755,6 +1783,12 @@ impl ApplicationHandler for App {
                             audio_output: self.audio_output.label(),
                         },
                     );
+                    // The drag hint sits on top of everything: the drop will
+                    // land wherever the drag is released, panels or not. The
+                    // launcher refuses drops, so no hint over it.
+                    if self.drop_hover && !matches!(self.ui.panel, Some(Panel::Launcher(_))) {
+                        ui::draw_drop_hint(frame, r.texture_scale);
+                    }
                     if let Err(e) = r.pixels.render() {
                         error!("pixels.render: {e}");
                     }
@@ -1784,6 +1818,12 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if self.render.is_none() {
             return;
+        }
+        // Act on a completed drop before the OSD/control-flow computation
+        // below, so a drop-raised OSD keeps the loop awake for its fade.
+        if !self.pending_dropped_files.is_empty() {
+            let files = std::mem::take(&mut self.pending_dropped_files);
+            self.handle_dropped_files(files);
         }
         let running = self.powered_on && !self.cpu_halted && !self.paused;
         // While a transient overlay is up, keep the loop awake (and, when
@@ -2044,6 +2084,35 @@ fn display_file_name(path: &std::path::Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())
+}
+
+/// What a file dropped on the window should be treated as. Extension-based:
+/// only floppies get content-sniffed (by the insert path itself), and cue
+/// sheets/hard disks/ROMs have no shared magic worth probing here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DroppedMediaKind {
+    /// Anything the floppy loader may accept (adf/adz/dms/scp/gz/zip and
+    /// unknown extensions): FloppyImage::from_bytes sniffs the content and
+    /// rejects what it cannot read, surfacing a clean OSD failure.
+    Floppy,
+    /// A cue sheet for the CD drive (runtime CD loading is cue-only).
+    CdCue,
+    /// Hard disk images cannot be hot-attached; point at the config screen.
+    HardDisk,
+    /// Kickstart ROMs load from the config screen, not at runtime.
+    Rom,
+}
+
+fn classify_dropped_media(path: &std::path::Path) -> DroppedMediaKind {
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase());
+    match ext.as_deref() {
+        Some("cue") => DroppedMediaKind::CdCue,
+        Some("hdf") | Some("img") => DroppedMediaKind::HardDisk,
+        Some("rom") => DroppedMediaKind::Rom,
+        _ => DroppedMediaKind::Floppy,
+    }
 }
 
 /// A one-line, length-bounded form of an error for the configuration panel's
@@ -2932,6 +3001,7 @@ impl App {
             UiControl::LauncherLoad => self.launcher_load(),
             UiControl::LauncherSave => self.launcher_save(),
             UiControl::LauncherRun => self.launcher_run(),
+            UiControl::DropDrive(drive_idx) => self.drop_chooser_route(drive_idx),
         }
         self.request_redraw();
     }
@@ -3057,6 +3127,23 @@ impl App {
                     self.close_panel();
                 }
                 return true;
+            }
+            // Drop chooser: a digit picks the Nth listed drive (the button
+            // labels carry the same numbers).
+            if let Some(Panel::DropChooser(state)) = &self.ui.panel {
+                let index = match code {
+                    KeyCode::Digit1 => Some(0),
+                    KeyCode::Digit2 => Some(1),
+                    KeyCode::Digit3 => Some(2),
+                    KeyCode::Digit4 => Some(3),
+                    _ => None,
+                };
+                if let Some(index) = index {
+                    if let Some(drive) = state.drives.get(index).map(|entry| entry.drive) {
+                        self.drop_chooser_route(drive);
+                    }
+                    return true;
+                }
             }
             // Route keys to a focused plugin-option text field, if any.
             if self.launcher_handle_edit_key(code, text) {
@@ -5020,9 +5107,11 @@ impl App {
             Panel::FrameAnalyzer(panel) => Some(ui::PanelViewData::FrameAnalyzer(Box::new(
                 self.build_frame_analyzer_view(panel),
             ))),
-            // The console and configuration panels render from their own state.
+            // The console, configuration, and drop-chooser panels render
+            // from their own state.
             Panel::Console(_) => None,
             Panel::Launcher(_) => None,
+            Panel::DropChooser(_) => None,
         }
     }
 
@@ -5813,23 +5902,32 @@ impl App {
         // pacer would fast-forward to catch up and corrupt pacing for the
         // freshly inserted disk. insert_disk_image -> bus floppy
         // insert_disk_image already asserts the disk-change/eject signal.
-        if let Some(paths) = picked.filter(|paths| !paths.is_empty()) {
-            let count = paths.len();
-            let path = paths[0].clone();
-            self.disk_playlists[drive_idx] = paths;
-            self.disk_playlist_index[drive_idx] = 0;
-            let name = display_file_name(&path);
-            if self.insert_disk_image(drive_idx, path, self.disk_write_protected[drive_idx]) {
-                if count > 1 {
-                    self.show_osd(format!("DF{drive_idx}: {name} (1/{count})"));
-                } else {
-                    self.show_osd(format!("DF{drive_idx}: {name}"));
-                }
-            } else {
-                self.show_osd(format!("DF{drive_idx}: load failed (see log)"));
-            }
+        if let Some(paths) = picked {
+            self.insert_disk_playlist(drive_idx, paths);
         }
         self.finish_host_io_pause();
+    }
+
+    /// Replace a drive's swap playlist with `paths` and insert the first
+    /// image, with the standard OSD. Shared by the load dialog and window
+    /// drops.
+    fn insert_disk_playlist(&mut self, drive_idx: usize, paths: Vec<PathBuf>) {
+        let Some(path) = paths.first().cloned() else {
+            return;
+        };
+        let count = paths.len();
+        self.disk_playlists[drive_idx] = paths;
+        self.disk_playlist_index[drive_idx] = 0;
+        let name = display_file_name(&path);
+        if self.insert_disk_image(drive_idx, path, self.disk_write_protected[drive_idx]) {
+            if count > 1 {
+                self.show_osd(format!("DF{drive_idx}: {name} (1/{count})"));
+            } else {
+                self.show_osd(format!("DF{drive_idx}: {name}"));
+            }
+        } else {
+            self.show_osd(format!("DF{drive_idx}: load failed (see log)"));
+        }
     }
 
     /// Advance the disk-swap playlist of the first drive that has more
@@ -5891,20 +5989,26 @@ impl App {
 
         // Re-baseline pacing after the modal dialog, as for floppies.
         if let Some(path) = picked {
-            match crate::cdrom::CdImage::load(&path) {
-                Ok(image) => {
-                    info!("cd image: {} ({})", path.display(), image.describe());
-                    self.emu.bus_mut().cd_insert_disc(image);
-                    self.show_osd(format!("CD: {}", display_file_name(&path)));
-                    self.request_redraw();
-                }
-                Err(e) => {
-                    warn!("cd image load failed ({}): {e:#}", path.display());
-                    self.show_osd("CD: load failed (see log)");
-                }
-            }
+            self.insert_cd_image_from_path(&path);
         }
         self.finish_host_io_pause();
+    }
+
+    /// Mount a CD image with the media-change notification, ejecting any
+    /// current disc first. Shared by the load dialog and window drops.
+    fn insert_cd_image_from_path(&mut self, path: &std::path::Path) {
+        match crate::cdrom::CdImage::load(path) {
+            Ok(image) => {
+                info!("cd image: {} ({})", path.display(), image.describe());
+                self.emu.bus_mut().cd_insert_disc(image);
+                self.show_osd(format!("CD: {}", display_file_name(path)));
+                self.request_redraw();
+            }
+            Err(e) => {
+                warn!("cd image load failed ({}): {e:#}", path.display());
+                self.show_osd("CD: load failed (see log)");
+            }
+        }
     }
 
     fn eject_cd(&mut self) {
@@ -5914,6 +6018,108 @@ impl App {
         }
         self.emu.bus_mut().cd_eject_disc();
         self.show_osd("CD: ejected");
+        self.request_redraw();
+    }
+
+    /// Route files dropped on the window: floppy images to a drive
+    /// (directly, or via the chooser panel when several drives could take
+    /// them), a cue sheet to the CD drive, and everything else to an
+    /// explanatory notice. winit reports drops with no cursor position, so
+    /// the target drive can only be picked after the fact.
+    fn handle_dropped_files(&mut self, files: Vec<PathBuf>) {
+        // The configuration screen runs on a placeholder machine: an insert
+        // would target hardware the launcher is about to rebuild, and the
+        // chooser would replace the launcher panel and its unsaved state.
+        if matches!(self.ui.panel, Some(Panel::Launcher(_))) {
+            self.show_osd("Close the machine screen to drop disks");
+            return;
+        }
+        let mut floppies: Vec<PathBuf> = Vec::new();
+        let mut cue: Option<PathBuf> = None;
+        let mut notice: Option<&'static str> = None;
+        for path in files {
+            match classify_dropped_media(&path) {
+                DroppedMediaKind::Floppy => floppies.push(path),
+                // One disc tray; the first cue sheet wins.
+                DroppedMediaKind::CdCue => cue = cue.or(Some(path)),
+                DroppedMediaKind::HardDisk => {
+                    notice = Some("Hard disks are configured in the machine screen");
+                }
+                DroppedMediaKind::Rom => {
+                    notice = Some("Kickstart ROMs are configured in the machine screen");
+                }
+            }
+        }
+        let mut handled = false;
+        if let Some(path) = cue {
+            if self.emu.bus().cd_drive_present() {
+                self.insert_cd_image_from_path(&path);
+            } else {
+                self.show_osd("No CD drive on this machine");
+            }
+            handled = true;
+        }
+        if !floppies.is_empty() {
+            let connected: Vec<usize> = (0..4)
+                .filter(|&idx| self.emu.bus().floppy.drive_connected(idx))
+                .collect();
+            match connected.len() {
+                0 => self.show_osd("No floppy drive connected"),
+                1 => self.insert_disk_playlist(connected[0], floppies),
+                _ => {
+                    // The chooser takes the panel slot; an open menu or an
+                    // informational panel (About, Shortcuts...) yields to it.
+                    self.ui.menu_open = false;
+                    if self.ui.panel.is_some() {
+                        self.close_panel();
+                    }
+                    self.open_drop_chooser(floppies, connected);
+                }
+            }
+            handled = true;
+        }
+        if !handled {
+            if let Some(text) = notice {
+                self.show_osd(text);
+            }
+        }
+    }
+
+    /// Open the modal drive chooser for dropped floppy images. Drive labels
+    /// are snapshotted now; the panel is modal, so they cannot go stale
+    /// under it.
+    fn open_drop_chooser(&mut self, disks: Vec<PathBuf>, connected: Vec<usize>) {
+        let floppy = &self.emu.bus().floppy;
+        let drives = connected
+            .into_iter()
+            .map(|drive| {
+                let label = match floppy.inserted_disk_name(drive) {
+                    Some(name) => format!("DF{drive}: {name}"),
+                    None => format!("DF{drive} (empty)"),
+                };
+                ui::DropDriveEntry { drive, label }
+            })
+            .collect();
+        let disk_label = display_file_name(&disks[0]);
+        self.ui.panel = Some(Panel::DropChooser(ui::DropChooserState {
+            disks,
+            disk_label,
+            drives,
+        }));
+        self.request_redraw();
+    }
+
+    /// Chooser click or digit key: insert the pending dropped disks into
+    /// the picked drive and close the panel.
+    fn drop_chooser_route(&mut self, drive_idx: usize) {
+        let state = match self.ui.panel.take() {
+            Some(Panel::DropChooser(state)) => state,
+            other => {
+                self.ui.panel = other;
+                return;
+            }
+        };
+        self.insert_disk_playlist(drive_idx, state.disks);
         self.request_redraw();
     }
 

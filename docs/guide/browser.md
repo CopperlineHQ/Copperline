@@ -22,6 +22,12 @@ offer every file rather than filtering by extension, because the system
 document picker greys out extensions it does not recognise, which would
 lock out `.adf` and friends.
 
+Files can also be dragged onto the page: a `.rom` file loads (or, before
+boot, queues) a Kickstart exactly like the ROM picker, and anything else
+inserts into DF0 like the disk picker -- dropped before boot it queues and
+inserts when the machine starts. The same 64 MiB cap as URL fetches
+applies.
+
 A disk can also come from a link: `/try/?df0=<url>` fetches the image while
 the emulator loads and inserts it at boot, so a bootable demo is one
 shareable URL, and the **DF0 from URL** button does the same for a pasted

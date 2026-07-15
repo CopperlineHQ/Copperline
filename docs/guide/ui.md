@@ -71,6 +71,27 @@ The status bar (44 pixels below the display) holds, left to right:
   powered; power cold-boots (clears RAM) or powers off back to the test
   screen; reboot is a warm reset.
 
+## Drag and drop
+
+Disk images can be dropped anywhere on the emulator window:
+
+- **Floppy images** (ADF/ADZ/DMS/SCP, gzip or zip packed): with one
+  connected drive the disk is inserted immediately. With several, a drive
+  chooser opens over the display -- click a drive, press its number
+  (`1`-`4`), or press `Esc` to cancel. Dropping several floppies at once
+  queues them all as the target drive's swap playlist, exactly like a
+  multi-selection in the disk dialog.
+- **Cue sheets** (`.cue`) mount in the CD drive on CDTV/CD32 machines,
+  with the media-change notification.
+- **Hard disk images and Kickstart ROMs** cannot be swapped at runtime; a
+  notice points at the machine-configuration screen, which also refuses
+  drops while it is open.
+
+The chooser opens after the drop rather than offering per-drive drop
+targets because the windowing layer reports file drops without a cursor
+position. For the same reason drops are unavailable under native Wayland
+(X11/XWayland works).
+
 ## Menu, tool windows, and overlay panels
 
 ```{figure} ../images/ui-preview-menu.png
