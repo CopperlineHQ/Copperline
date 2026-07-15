@@ -229,6 +229,10 @@ struct FilesysUnit {
     next_file_key: u32,
     /// Guest FileLock address -> what it locks.
     locks: HashMap<u32, LockRec>,
+    /// EXAMINE_NEXT cursor per directory lock: the last child name handed out.
+    /// Positioning by name (not a list index) keeps enumeration stable when the
+    /// caller deletes entries as it goes, as `Delete ALL` does.
+    examine: HashMap<u32, std::ffi::OsString>,
     /// This unit's fixed slice of the board-window FileLock pool.
     pool: LockPool,
 }
@@ -244,6 +248,7 @@ impl FilesysUnit {
             files: HashMap::new(),
             next_file_key: 0,
             locks: HashMap::new(),
+            examine: HashMap::new(),
             pool: LockPool::new(pool_base, pool_end),
         }
     }
@@ -671,14 +676,18 @@ impl FilesysUnit {
             ACTION_FREE_LOCK => {
                 let addr = arg(bus, 1) << 2;
                 if addr != 0 && self.locks.remove(&addr).is_some() {
+                    self.examine.remove(&addr);
                     self.pool.release(addr);
                 }
                 (DOSTRUE, 0)
             }
             ACTION_EXAMINE_OBJECT => {
-                let Some(rec) = self.locks.get(&(arg(bus, 1) << 2)).cloned() else {
+                let lock = arg(bus, 1) << 2;
+                let Some(rec) = self.locks.get(&lock).cloned() else {
                     return (DOSFALSE, ERROR_OBJECT_NOT_FOUND);
                 };
+                // Examine restarts any enumeration on this lock.
+                self.examine.remove(&lock);
                 let fib = arg(bus, 2) << 2;
                 match self.fill_fib(bus, fib, &rec, 0) {
                     Ok(()) => (DOSTRUE, 0),
@@ -686,21 +695,28 @@ impl FilesysUnit {
                 }
             }
             ACTION_EXAMINE_NEXT => {
-                let Some(rec) = self.locks.get(&(arg(bus, 1) << 2)).cloned() else {
+                let lock = arg(bus, 1) << 2;
+                let Some(rec) = self.locks.get(&lock).cloned() else {
                     return (DOSFALSE, ERROR_NO_MORE_ENTRIES);
                 };
                 let fib = arg(bus, 2) << 2;
-                // The enumeration cursor lives in fib_DiskKey, where the
-                // previous EXAMINE_OBJECT/EXAMINE_NEXT left it.
-                let index = bus.read_long(fib) as usize;
+                // Position by the last name handed out, not a list index: a
+                // caller that deletes each entry as it examines (Delete ALL)
+                // shrinks the host directory under us, so an index into the
+                // re-read, re-sorted listing would skip whatever slid into the
+                // used slot. The listing is sorted, so "the first name after the
+                // last one" is a cursor that survives the entries vanishing.
                 let names = self.dir_listing(&rec);
-                let Some(name) = names.get(index) else {
+                let last = self.examine.get(&lock).cloned();
+                let Some(name) = examine_after(&names, last.as_deref()).cloned() else {
+                    self.examine.remove(&lock);
                     return (DOSFALSE, ERROR_NO_MORE_ENTRIES);
                 };
                 let child = LockRec {
-                    rel: rec.rel.join(name),
+                    rel: rec.rel.join(&name),
                 };
-                match self.fill_fib(bus, fib, &child, index as u32 + 1) {
+                self.examine.insert(lock, name);
+                match self.fill_fib(bus, fib, &child, 0) {
                     Ok(()) => (DOSTRUE, 0),
                     Err(e) => (DOSFALSE, e),
                 }
@@ -1509,6 +1525,21 @@ fn utf8_to_latin1(name: &std::ffi::OsStr) -> Option<Vec<u8>> {
         .collect()
 }
 
+/// The next EXAMINE_NEXT entry from a sorted listing given the last name handed
+/// out (`None` to start). Positioning by name rather than index keeps a walk
+/// stable when the caller deletes each entry as it goes: the entry that slides
+/// into a vacated slot is never skipped, and the just-deleted name still orders
+/// the search correctly even though it is gone from `names`.
+fn examine_after<'a>(
+    names: &'a [std::ffi::OsString],
+    last: Option<&std::ffi::OsStr>,
+) -> Option<&'a std::ffi::OsString> {
+    match last {
+        None => names.first(),
+        Some(l) => names.iter().find(|n| n.as_os_str() > l),
+    }
+}
+
 /// Case-insensitive component match: prefer the exact host name, else scan
 /// the directory for a case-insensitive match (AmigaDOS names are
 /// case-insensitive but case-preserving).
@@ -1779,6 +1810,29 @@ mod tests {
         assert!(listing.iter().all(|n| n != "sn\u{2603}w"));
 
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// EXAMINE_NEXT must visit every entry exactly once even when the caller
+    /// deletes each one as it is examined (what `Delete ALL` does). Walking a
+    /// re-read listing by index skips whatever slides into the vacated slot;
+    /// walking by last-name-returned does not.
+    #[test]
+    fn examine_next_survives_deletion_mid_walk() {
+        let mut remaining: Vec<std::ffi::OsString> = ["a", "b", "c", "d", "e", "f"]
+            .iter()
+            .map(Into::into)
+            .collect();
+        let mut visited = Vec::new();
+        let mut last: Option<std::ffi::OsString> = None;
+        // Re-read the (shrinking) listing each step, exactly as the handler does.
+        while let Some(name) = examine_after(&remaining, last.as_deref()).cloned() {
+            visited.push(name.to_string_lossy().into_owned());
+            last = Some(name.clone());
+            // The caller deletes the entry it just examined.
+            remaining.retain(|n| *n != name);
+        }
+        assert_eq!(visited, ["a", "b", "c", "d", "e", "f"]);
+        assert!(remaining.is_empty());
     }
 
     /// A `readonly` mount answers every mutating packet like a write-protected
