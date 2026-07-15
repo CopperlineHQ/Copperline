@@ -149,8 +149,10 @@ pub fn parse_trigger(spec: &str) -> Option<Trigger> {
             Some(Trigger::Beam { vpos, hpos })
         }
         "reg" => {
+            // Custom registers are word offsets; reject odd values rather
+            // than silently rounding a typo down to the wrong register.
             let off = parse_hex_u32(value)?;
-            (off < 0x200).then_some(Trigger::RegWrite(off as u16 & 0x1FE))
+            (off < 0x200 && off & 1 == 0).then_some(Trigger::RegWrite(off as u16))
         }
         "time" => {
             let secs: f64 = value.trim().parse().ok()?;
@@ -345,6 +347,11 @@ struct VcdWriter<W: Write> {
     /// The `#time` most recently written to the change section.
     emitted_time: Option<u64>,
     bytes: u64,
+    /// Latched on the first change-section write error (disk full,
+    /// deleted file). A failed writer emits nothing further, and the
+    /// capture's expiry check aborts the window instead of silently
+    /// producing a truncated file.
+    failed: bool,
 }
 
 fn vcd_identifier(index: usize) -> String {
@@ -368,6 +375,7 @@ impl<W: Write> VcdWriter<W> {
             vars: Vec::new(),
             emitted_time: None,
             bytes: 0,
+            failed: false,
         }
     }
 
@@ -439,19 +447,28 @@ impl<W: Write> VcdWriter<W> {
         Ok(())
     }
 
-    /// Emit a vector/bit change if the value differs from the last one.
-    fn set(&mut self, time: u64, var: VarId, value: u64) -> io::Result<bool> {
+    /// Emit a vector/bit change if the value differs from the last one,
+    /// returning whether one was written. A write error latches `failed`
+    /// (silencing further output) so the capture aborts at its next
+    /// expiry check instead of quietly truncating the file.
+    fn set(&mut self, time: u64, var: VarId, value: u64) -> bool {
+        if self.failed {
+            return false;
+        }
         let slot = &mut self.vars[var.0];
         if slot.last == LastValue::Num(value) {
-            return Ok(false);
+            return false;
         }
         slot.last = LastValue::Num(value);
         let width = slot.width;
-        self.stamp(time)?;
+        if self.stamp(time).is_err() {
+            self.failed = true;
+            return false;
+        }
         let var = &self.vars[var.0];
-        if width == 1 {
+        let written = if width == 1 {
             self.bytes += 2 + var.id.len() as u64;
-            writeln!(self.out, "{}{}", value & 1, var.id)?;
+            writeln!(self.out, "{}{}", value & 1, var.id)
         } else {
             let mut bits = String::with_capacity(width as usize + 2);
             bits.push('b');
@@ -459,24 +476,38 @@ impl<W: Write> VcdWriter<W> {
                 bits.push(if value >> bit & 1 != 0 { '1' } else { '0' });
             }
             self.bytes += bits.len() as u64 + 2 + var.id.len() as u64;
-            writeln!(self.out, "{bits} {}", var.id)?;
+            writeln!(self.out, "{bits} {}", var.id)
+        };
+        if written.is_err() {
+            self.failed = true;
+            return false;
         }
-        Ok(true)
+        true
     }
 
-    /// Emit a string change if it differs from the last one. The text
-    /// must contain no whitespace.
-    fn set_text(&mut self, time: u64, var: VarId, text: &'static str) -> io::Result<bool> {
+    /// Emit a string change if it differs from the last one, with the
+    /// same failure latching as `set`. The text must contain no
+    /// whitespace.
+    fn set_text(&mut self, time: u64, var: VarId, text: &'static str) -> bool {
+        if self.failed {
+            return false;
+        }
         let slot = &mut self.vars[var.0];
         if slot.last == LastValue::Text(text) {
-            return Ok(false);
+            return false;
         }
         slot.last = LastValue::Text(text);
-        self.stamp(time)?;
+        if self.stamp(time).is_err() {
+            self.failed = true;
+            return false;
+        }
         let var = &self.vars[var.0];
         self.bytes += text.len() as u64 + 3 + var.id.len() as u64;
-        writeln!(self.out, "s{text} {}", var.id)?;
-        Ok(true)
+        if writeln!(self.out, "s{text} {}", var.id).is_err() {
+            self.failed = true;
+            return false;
+        }
+        true
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -691,15 +722,21 @@ impl WaveCapture {
         };
     }
 
-    /// Whether the capture window has run out (or the file grew past the
-    /// emergency byte cap) at `now_cck`. The caller finishes the capture.
+    /// Whether the capture window has run out at `now_cck` -- or must
+    /// abort because the file grew past the emergency byte cap or a
+    /// write failed. The caller finishes the capture.
     pub fn expired(&self, now_cck: u64) -> bool {
         match self.state {
             WaveState::Capturing { end_cck } => {
-                now_cck >= end_cck || self.writer.bytes >= MAX_CAPTURE_BYTES
+                now_cck >= end_cck || self.writer.bytes >= MAX_CAPTURE_BYTES || self.writer.failed
             }
             _ => false,
         }
+    }
+
+    /// Whether a change-section write failed (the file is incomplete).
+    pub fn write_failed(&self) -> bool {
+        self.writer.failed
     }
 
     fn rel(&self, cck: u64) -> u64 {
@@ -718,7 +755,7 @@ impl WaveCapture {
         let v = &self.vars;
         let mut set = |var: Option<VarId>, value: u64| {
             if let Some(var) = var {
-                changed |= w.set(t, var, value).unwrap_or(false);
+                changed |= w.set(t, var, value);
             }
         };
         set(v.vpos, u64::from(s.vpos as u16));
@@ -739,14 +776,12 @@ impl WaveCapture {
             set(v.aud_ch, u64::from(channel));
             if let Some(stb) = v.aud_stb {
                 self.aud_stb_level = !self.aud_stb_level;
-                changed |= w
-                    .set(t, stb, u64::from(self.aud_stb_level))
-                    .unwrap_or(false);
+                changed |= w.set(t, stb, u64::from(self.aud_stb_level));
             }
         }
         let mut set_text = |var: Option<VarId>, text: &'static str| {
             if let Some(var) = var {
-                changed |= w.set_text(t, var, text).unwrap_or(false);
+                changed |= w.set_text(t, var, text);
             }
         };
         set_text(v.bus_owner_s, s.owner_name);
@@ -766,17 +801,17 @@ impl WaveCapture {
         let w = &mut self.writer;
         let v = &self.vars;
         if let Some(var) = v.regw_off {
-            let _ = w.set(t, var, u64::from(off & 0x1FF));
+            w.set(t, var, u64::from(off & 0x1FF));
         }
         if let Some(var) = v.regw_val {
-            let _ = w.set(t, var, u64::from(value));
+            w.set(t, var, u64::from(value));
         }
         if let Some(var) = v.regw_src_s {
-            let _ = w.set_text(t, var, source);
+            w.set_text(t, var, source);
         }
         if let Some(var) = v.regw_stb {
             self.regw_stb_level = !self.regw_stb_level;
-            let _ = w.set(t, var, u64::from(self.regw_stb_level));
+            w.set(t, var, u64::from(self.regw_stb_level));
         }
         self.samples += 1;
     }
@@ -797,16 +832,16 @@ impl WaveCapture {
         let w = &mut self.writer;
         let v = &self.vars;
         if let (Some(var), Some(addr)) = (v.cpu_addr, addr) {
-            let _ = w.set(t, var, u64::from(addr & 0x00FF_FFFF));
+            w.set(t, var, u64::from(addr & 0x00FF_FFFF));
         }
         if let Some(var) = v.cpu_kind_s {
-            let _ = w.set_text(t, var, kind);
+            w.set_text(t, var, kind);
         }
         if let Some(var) = v.cpu_rw {
-            let _ = w.set(t, var, u64::from(is_write));
+            w.set(t, var, u64::from(is_write));
         }
         if let Some(var) = v.cpu_wait {
-            let _ = w.set(t, var, u64::from(wait_cck.min(0xFFFF) as u16));
+            w.set(t, var, u64::from(wait_cck.min(0xFFFF) as u16));
         }
         self.samples += 1;
     }
@@ -826,6 +861,7 @@ impl WaveCapture {
             WaveState::Capturing { end_cck } => {
                 ("capturing", Some(end_cck.saturating_sub(self.start_cck)))
             }
+            WaveState::Done if self.writer.failed => ("failed (write error)", None),
             WaveState::Done => ("done", None),
         };
         WaveStatus {
@@ -880,6 +916,8 @@ mod tests {
         assert_eq!(parse_trigger("reg=180"), Some(Trigger::RegWrite(0x180)));
         assert_eq!(parse_trigger("time=1.5"), Some(Trigger::Time(1.5)));
         assert_eq!(parse_trigger("reg=200"), None);
+        // Odd register offsets are typos, not something to round down.
+        assert_eq!(parse_trigger("reg=181"), None);
         assert_eq!(parse_trigger("pc="), None);
         assert_eq!(parse_trigger("bogus=1"), None);
     }
@@ -946,12 +984,12 @@ mod tests {
         let s = w.add_string("s").unwrap();
         w.upscope().unwrap();
         w.enddefinitions().unwrap();
-        assert!(w.set(0, a, 5).unwrap());
-        assert!(!w.set(0, a, 5).unwrap()); // dedup
-        assert!(w.set(0, b, 1).unwrap());
-        assert!(w.set_text(0, s, "run").unwrap());
-        assert!(!w.set_text(0, s, "run").unwrap());
-        assert!(w.set(3, a, 6).unwrap());
+        assert!(w.set(0, a, 5));
+        assert!(!w.set(0, a, 5)); // dedup
+        assert!(w.set(0, b, 1));
+        assert!(w.set_text(0, s, "run"));
+        assert!(!w.set_text(0, s, "run"));
+        assert!(w.set(3, a, 6));
         let text = String::from_utf8(w.out).unwrap();
         assert!(text.contains("$timescale 1 us $end"));
         assert!(text.contains("$var wire 4 ! a $end"));
@@ -965,6 +1003,36 @@ mod tests {
             .skip(1)
             .collect();
         assert_eq!(tail, ["#0", "b0101 !", "1\"", "srun #", "#3", "b0110 !"]);
+    }
+
+    #[test]
+    fn vcd_writer_latches_failure_on_write_error() {
+        /// A sink that accepts `remaining` bytes and then fails, like a
+        /// full disk.
+        struct FailAfter {
+            remaining: usize,
+        }
+        impl Write for FailAfter {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                if self.remaining < buf.len() {
+                    return Err(io::Error::other("disk full"));
+                }
+                self.remaining -= buf.len();
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut w = VcdWriter::new(FailAfter { remaining: 64 });
+        let a = w.add_wire(4, "a").unwrap();
+        assert!(!w.failed);
+        for i in 0..100u64 {
+            w.set(i, a, i);
+        }
+        assert!(w.failed, "the byte budget must have run out");
+        // A failed writer emits nothing further.
+        assert!(!w.set(1000, a, 0xF));
     }
 
     #[test]

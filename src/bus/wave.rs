@@ -77,11 +77,18 @@ impl Bus {
         self.wave_pc_trigger = false;
         if let Some(wave) = self.wave.as_deref_mut() {
             wave.finish();
-            log::info!(
-                "waveform: wrote {} ({} samples)",
-                wave.path().display(),
-                wave.samples()
-            );
+            if wave.write_failed() {
+                log::warn!(
+                    "waveform: capture aborted by a write error; {} is incomplete",
+                    wave.path().display()
+                );
+            } else {
+                log::info!(
+                    "waveform: wrote {} ({} samples)",
+                    wave.path().display(),
+                    wave.samples()
+                );
+            }
         }
     }
 

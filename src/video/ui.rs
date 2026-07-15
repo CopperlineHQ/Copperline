@@ -368,8 +368,9 @@ impl DebuggerPanel {
         // breakpoint-condition mnemonics (EQ/NE/LT/GT/LE/GE/AND/IGN). A leading
         // or doubled space is dropped so the tokens stay clean. The extra
         // punctuation set serves the Waveform tab's trigger/duration/signal
-        // specs (PC=..., BEAM=V:H, CPU,BUS, 2.5S) and output paths.
-        let punctuation = matches!(ch, '=' | ':' | ',' | '.' | '-' | '_' | '/');
+        // specs (PC=..., BEAM=V:H, CPU,BUS, 2.5S) and output paths (both
+        // separator styles, for Windows).
+        let punctuation = matches!(ch, '=' | ':' | ',' | '.' | '-' | '_' | '/' | '\\');
         if (!ch.is_ascii_alphanumeric() && ch != ' ' && !punctuation) || self.entry.len() >= 40 {
             return;
         }
