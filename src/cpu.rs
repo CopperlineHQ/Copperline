@@ -2249,6 +2249,40 @@ impl CpuBus {
         None
     }
 
+    /// Canonical custom-register page offset for a CPU access that the
+    /// motherboard address decode routes to the custom chips: the canonical
+    /// $DFF000 page on every machine, plus the mirrors Gary's coarse decode
+    /// creates on the small-box machines (A1000/A500/A2000/CDTV). There the
+    /// whole chip-register space answers custom-register accesses wherever
+    /// no RAM or motherboard device claims the address: the empty
+    /// trapdoor/"ranger" space above slow RAM in $C00000-$D7FFFF, the
+    /// reserved $D80000-$DBFFFF pages, and $DE0000-$DFEFFF. Kickstart's
+    /// slow-RAM sizing depends on the mirror to find the end of trapdoor
+    /// RAM: exec writes INTENA at $xxF09A and reads INTENAR at $xxF01C at
+    /// each 256K step, extending RAM until the mirror answers with the bits
+    /// it just cleared. KS 1.2 trusts that test alone, so a floating bus
+    /// there makes it size RAM to $DC0000 and crash into unmapped space
+    /// (yellow screen); KS 1.3 added a write/read-back check that also
+    /// stops on a floating bus. The big-box bus controllers decode this
+    /// space properly instead of mirroring -- Gayle (A600/A1200) claims it
+    /// and Fat Gary/Ramsey (A3000/A4000) time unanswered cycles out -- so
+    /// machines with any of them get no mirror.
+    fn custom_reg_page_offset(&self, addr: u32) -> Option<u32> {
+        if range_contains(CUSTOM_BASE, CUSTOM_SIZE, addr) {
+            return Some(addr & 0xFFF);
+        }
+        if self.bus.gayle.is_some() || self.bus.ramsey.is_some() || self.bus.gary.is_some() {
+            return None;
+        }
+        let ranger = (0x00C0_0000..0x00D8_0000).contains(&addr)
+            && region_offset(self.bus.mem.slow_ram.len(), SLOW_RAM_BASE, addr, 1).is_none();
+        let reserved = (0x00D8_0000..0x00DC_0000).contains(&addr);
+        // $DC0000 stays carved out for the RTC select (floating when no
+        // clock answers) and $DD0000 is undecoded, as on real boards.
+        let below_canonical = (0x00DE_0000..CUSTOM_BASE).contains(&addr);
+        (ranger || reserved || below_canonical).then_some(addr & 0xFFF)
+    }
+
     fn peek_word(&self, address: u32) -> u16 {
         let addr = self.mask(address);
         ((self.peek_byte(addr) as u16) << 8) | self.peek_byte(addr.wrapping_add(1)) as u16
@@ -2619,10 +2653,10 @@ impl CpuBus {
                 );
             }
         }
-        if range_contains(CUSTOM_BASE, CUSTOM_SIZE, addr) {
+        if let Some(off) = self.custom_reg_page_offset(addr) {
             // Custom registers live on the chip bus; custom_read itself
             // grants the contended chip-bus slot.
-            return self.bus.custom_read(u64::from(addr - CUSTOM_BASE), size) as u32;
+            return self.bus.custom_read(u64::from(off), size) as u32;
         }
         if range_contains(AUTOCONFIG_BASE as u32, AUTOCONFIG_SIZE as u32, addr) {
             self.bus.cpu_slow_external_access(Self::access_words(size));
@@ -2861,12 +2895,12 @@ impl CpuBus {
             }
             return;
         }
-        if range_contains(CUSTOM_BASE, CUSTOM_SIZE, addr) {
+        if let Some(off) = self.custom_reg_page_offset(addr) {
             // Custom registers live on the chip bus; custom_write itself
             // grants the contended chip-bus slot.
             if self
                 .bus
-                .custom_write(u64::from(addr - CUSTOM_BASE), size, u64::from(value))
+                .custom_write(u64::from(off), size, u64::from(value))
             {
                 self.bus.slice_preempted = true;
             }
@@ -3818,7 +3852,10 @@ mod tests {
             ipl_sample_held: false,
             diag_current_pc: 0,
         };
-        let addr = SLOW_RAM_BASE as u32 + 64 * 1024;
+        // $F00000 with no extended ROM fitted is genuinely undecoded (the
+        // chip-register space at $C00000-$DFFFFF is not: Gary mirrors the
+        // custom registers there, see custom_reg_page_offset).
+        let addr = 0x00F0_0000;
         // A write into unmapped space still drives the bus: the following
         // undriven read floats to the last word of the transfer.
         bus.write_long(addr, 0x1234_5678);
@@ -3831,6 +3868,76 @@ mod tests {
         assert_eq!(bus.read_byte(addr + 1), 0x3C);
         assert_eq!(bus.read_word(addr), 0xA53C);
         assert_eq!(bus.read_long(addr), 0xA53C_A53C);
+    }
+
+    fn cpu_bus(bus: Bus) -> CpuBus {
+        CpuBus {
+            bus,
+            address_mask: ADDRESS_MASK_24BIT,
+            dbg_memw_addr: None,
+            dbg_memw_hit: None,
+            icache: None,
+            dcache: None,
+            dbg_irq_window: None,
+            last_fetch_cache_hit: false,
+            sampled_irq_level: 0,
+            ipl_sample_held: false,
+            diag_current_pc: 0,
+        }
+    }
+
+    #[test]
+    fn gary_mirrors_custom_registers_in_empty_ranger_space() {
+        // On the small-box machines Gary's coarse decode answers custom
+        // register accesses throughout the chip-register space wherever no
+        // RAM claims the address. Kickstart's slow-RAM sizing relies on
+        // this: at each 256K step it writes INTENA at $xxF09A and reads
+        // INTENAR at $xxF01C, and treats the block as RAM until the mirror
+        // answers with the bits it just cleared (KS 1.2 has no further
+        // check, so without the mirror it sizes RAM into unmapped space
+        // and dies with a yellow screen).
+        let mut bus = cpu_bus(test_bus(reset_rom(0, 0)));
+
+        // Set an INTENA bit through the canonical page, then run the KS
+        // probe shape through the first mirror above the fixture's 64K of
+        // slow RAM: the write must land in INTENA and the read must see it.
+        bus.write_word(0x00DF_F09A, 0x8004);
+        assert_eq!(bus.read_word(0x00CB_F01C), 0x0004, "mirror INTENAR read");
+        bus.write_word(0x00CB_F09A, 0x3FFF);
+        assert_eq!(bus.read_word(0x00DF_F01C), 0x0000, "mirror INTENA write");
+
+        // The reserved $D8 pages and the $DE/$DF space below the canonical
+        // page mirror the same registers.
+        bus.write_word(0x00DB_F09A, 0x8004);
+        assert_eq!(bus.read_word(0x00DE_F01C), 0x0004);
+        bus.write_word(0x00DF_E09A, 0x3FFF);
+        assert_eq!(bus.read_word(0x00DF_F01C), 0x0000);
+
+        // Addresses backed by slow RAM stay RAM: the same probe offsets
+        // inside the fixture's 64K round-trip as memory and leave INTENA
+        // alone.
+        bus.write_word(0x00C0_F09A, 0x8004);
+        assert_eq!(bus.read_word(0x00C0_F09A), 0x8004);
+        assert_eq!(bus.read_word(0x00DF_F01C), 0x0000);
+    }
+
+    #[test]
+    fn gayle_and_fat_gary_machines_do_not_mirror_custom_registers() {
+        // Gayle (A600/A1200) and Fat Gary/Ramsey (A3000/A4000) decode the
+        // chip-register space properly, so the ranger space floats instead
+        // of mirroring the custom registers.
+        let mut gayle_bus = test_bus(reset_rom(0, 0));
+        gayle_bus.attach_gayle(crate::gayle::Gayle::new(0xD0));
+        let mut fat_gary_bus = test_bus(reset_rom(0, 0));
+        fat_gary_bus.attach_gary(crate::gary::Gary::new());
+        for machine_bus in [gayle_bus, fat_gary_bus] {
+            let mut bus = cpu_bus(machine_bus);
+            bus.write_word(0x00DF_F09A, 0x8004);
+            bus.bus.data_bus = 0xA53C;
+            assert_eq!(bus.read_word(0x00CB_F01C), 0xA53C, "floating bus");
+            bus.write_word(0x00CB_F09A, 0x3FFF);
+            assert_eq!(bus.read_word(0x00DF_F01C), 0x0004, "INTENA untouched");
+        }
     }
 
     #[test]

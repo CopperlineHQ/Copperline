@@ -176,6 +176,17 @@ The CPU-visible memory map:
 MMIO stubs cover every "gap" region DiagROM probes during fast-RAM
 detection, so probing software sees bus-like behaviour everywhere.
 
+On the small-box machines (A1000/A500/A2000/CDTV), Gary's coarse decode
+mirrors the custom-chip registers throughout the chip-register space where
+nothing else answers: the ranger space above the fitted slow RAM in
+`$C00000`-`$D7FFFF`, the reserved `$D80000`-`$DBFFFF` pages, and
+`$DE0000`-`$DFEFFF` (`CpuBus::custom_reg_page_offset`). Kickstart's
+slow-RAM sizing depends on this: exec probes each 256K step by writing
+INTENA at `$xxF09A` and reading INTENAR at `$xxF01C`, extending RAM until
+the mirror answers -- on a floating bus KS 1.2 sizes RAM into unmapped
+space and dies on a yellow screen. Machines with a Gayle or Fat
+Gary/Ramsey decode the space properly and have no mirror.
+
 A CPU read of an address no region claims floats to the last value the
 chip data bus carried (`Bus.data_bus`, fed by the live display and audio
 DMA fetches), as on real Agnus-arbitrated hardware -- not a fixed all-ones
