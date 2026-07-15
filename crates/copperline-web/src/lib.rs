@@ -229,6 +229,19 @@ impl WebEmu {
         })
     }
 
+    /// Identify this build for bug reports: the tag or branch and commit the
+    /// wasm was compiled from. GitHub Actions exports GITHUB_REF_NAME and
+    /// GITHUB_SHA to every step, so the publish workflow bakes them in for
+    /// free; anything built outside CI reports itself as a dev build.
+    pub fn build_info() -> String {
+        match (option_env!("GITHUB_REF_NAME"), option_env!("GITHUB_SHA")) {
+            (Some(ref_name), Some(sha)) => {
+                format!("{ref_name} ({})", sha.get(..9).unwrap_or(sha))
+            }
+            _ => "dev build".to_string(),
+        }
+    }
+
     /// Fit a Kickstart/AROS ROM (and optional extended ROM) from bytes and
     /// cold-reset, as if the chips had been swapped and the machine power
     /// cycled. 256 KiB Kickstart 1.x images are mirrored up automatically.

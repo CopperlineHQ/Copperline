@@ -65,6 +65,7 @@ async function fetchBytes(url, label) {
 
 let bootRom = null; // { rom, ext, label } - what the boot button will fit
 let pendingDisk = null; // { bytes, name } - inserted right after boot
+let df0Name = null; // what the page believes is in DF0, for bug reports
 
 function refreshBootButton() {
   bootBtn.disabled = !(wasm && bootRom);
@@ -82,6 +83,19 @@ function fitRom(bytes, label) {
   setLoadStatus(
     emu ? `Kickstart loaded: ${label} - machine power-cycled` : `will boot ${label}`,
   );
+}
+
+// Route disk bytes from any source (picker, URL, drop): insert into a
+// running machine, or stash them for the boot button to insert after boot.
+function insertDisk(bytes, name) {
+  if (emu) {
+    emu.insert_floppy(0, bytes, name);
+    setLoadStatus(`DF0: ${name} (write-protected)`);
+  } else {
+    pendingDisk = { bytes, name };
+    setLoadStatus(`DF0: ${name} (inserts at boot)`);
+  }
+  df0Name = name;
 }
 
 // A disk image can also come from a link: /try/?df0=<url> fetches it and
@@ -118,13 +132,7 @@ async function insertDiskFromUrl(url) {
     }
     const bytes = new Uint8Array(await resp.arrayBuffer());
     if (bytes.length > DISK_URL_MAX_BYTES) throw new Error('file too large');
-    if (emu) {
-      emu.insert_floppy(0, bytes, name);
-      setLoadStatus(`DF0: ${name} (write-protected)`);
-    } else {
-      pendingDisk = { bytes, name };
-      setLoadStatus(`DF0: ${name} (inserts at boot)`);
-    }
+    insertDisk(bytes, name);
   } catch (e) {
     // A TypeError is the opaque network/CORS failure; HTTP and size errors
     // speak for themselves.
@@ -140,6 +148,7 @@ async function load() {
   try {
     setLoadStatus('loading emulator...');
     wasm = await init();
+    buildInfo = WebEmu.build_info?.() ?? null;
   } catch (e) {
     setLoadStatus(`failed to load the emulator: ${e.message ?? e}`);
     console.error(e);
@@ -219,11 +228,13 @@ async function boot() {
     window.__emu = emu; // for debugging/automation
 
     overlay.style.display = 'none';
+    showBugLink(false);
     running = true;
     requestAnimationFrame(tick);
   } catch (e) {
     setLoadStatus(`boot failed: ${e.message ?? e}`);
     bootBtn.disabled = false;
+    showBugLink(true);
     console.error(e);
   }
 }
@@ -252,6 +263,7 @@ function tick(nowMs) {
     // may have panicked) and a fresh boot rebuilds from the stash.
     emu = null;
     refreshBootButton();
+    showBugLink(true);
     console.error(e);
     return;
   }
@@ -684,14 +696,7 @@ $('df0').addEventListener('change', async (e) => {
   e.target.value = '';
   if (!file) return;
   try {
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    if (emu) {
-      emu.insert_floppy(0, bytes, file.name);
-      setLoadStatus(`DF0: ${file.name} (write-protected)`);
-    } else {
-      pendingDisk = { bytes, name: file.name };
-      setLoadStatus(`DF0: ${file.name} (inserts at boot)`);
-    }
+    insertDisk(new Uint8Array(await file.arrayBuffer()), file.name);
   } catch (err) {
     setLoadStatus(`insert failed: ${err.message ?? err}`);
   }
@@ -712,6 +717,7 @@ $('eject').addEventListener('click', () => {
   if (!emu) return;
   try {
     emu.eject_floppy(0);
+    df0Name = null;
     setLoadStatus('DF0 ejected');
   } catch (err) {
     setLoadStatus(`${err.message ?? err}`);
@@ -844,6 +850,56 @@ $('df0url')?.addEventListener('click', () => {
   if (url && url.trim()) insertDiskFromUrl(url.trim());
 });
 
+// --- bug reports -----------------------------------------------------------
+// Two Report-a-bug links live in the page shell: one in the notes below the
+// emulator, one in the overlay that only shows once something has failed.
+// Both open the repository's bug-report issue form, which accepts its field
+// ids as query parameters, so everything this page can know arrives
+// prefilled: the wasm build, the browser, the machine state, and the status
+// line. The href is rebuilt on interaction to reflect that moment; nothing
+// is sent anywhere by the click itself - it all lands in an editable form
+// on GitHub. Older page shells have neither link and nothing here runs.
+
+const BUG_REPORT_URL = 'https://github.com/LinuxJedi/Copperline/issues/new';
+let buildInfo = null; // the wasm build's tag and commit, known once init resolves
+
+function bugReportHref() {
+  const toml = (v) =>
+    `"${String(v).replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
+  const params = new URLSearchParams({
+    template: 'bug_report.yml',
+    version: `copperline.dev/try web build: ${buildInfo ?? 'unknown'}`,
+    host: navigator.userAgent,
+    config: [
+      'frontend = "copperline.dev/try (WebAssembly)"',
+      'machine = "A500, 512K chip RAM + 512K trapdoor"',
+      `kickstart = ${toml(bootRom?.label ?? 'none')}`,
+      `df0 = ${toml(df0Name ?? 'empty')}`,
+      `joystick = ${toml(joyMode)}`,
+      `canvas = "${canvas.width}x${canvas.height}"`,
+      `running = ${running}`,
+    ].join('\n'),
+    logs: `status: ${loadStatus.textContent}\nstats: ${statLine.textContent || '-'}`,
+  });
+  return `${BUG_REPORT_URL}?${params}`;
+}
+
+// The overlay link only appears once something has gone wrong.
+function showBugLink(on) {
+  $('bug-report-err')?.toggleAttribute('hidden', !on);
+}
+
+for (const id of ['bug-report', 'bug-report-err']) {
+  // pointerdown catches middle clicks and context menus before the browser
+  // reads the href; click covers keyboard activation. When this module
+  // never ran, the shell's static href (the bare issue form) still works.
+  const refresh = (e) => {
+    e.currentTarget.href = bugReportHref();
+  };
+  $(id)?.addEventListener('pointerdown', refresh);
+  $(id)?.addEventListener('click', refresh);
+}
+
 // --- drag and drop ---------------------------------------------------------
 // Files dropped anywhere on the page route like the pickers: a .rom loads
 // (or queues) a Kickstart, anything else inserts into DF0. The hint overlay
@@ -889,14 +945,7 @@ async function handleDroppedFiles(files) {
       fitRom(new Uint8Array(await rom.arrayBuffer()), rom.name);
     }
     if (disk) {
-      const bytes = new Uint8Array(await disk.arrayBuffer());
-      if (emu) {
-        emu.insert_floppy(0, bytes, disk.name);
-        setLoadStatus(`DF0: ${disk.name} (write-protected)`);
-      } else {
-        pendingDisk = { bytes, name: disk.name };
-        setLoadStatus(`DF0: ${disk.name} (inserts at boot)`);
-      }
+      insertDisk(new Uint8Array(await disk.arrayBuffer()), disk.name);
     }
   } catch (err) {
     setLoadStatus(`drop failed: ${err.message ?? err}`);
