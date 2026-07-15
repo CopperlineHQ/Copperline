@@ -397,7 +397,7 @@ impl FilesysUnit {
                 }
                 continue;
             }
-            let comp = String::from_utf8_lossy(comp).into_owned();
+            let comp = latin1_to_utf8(comp);
             let dir = self.mount.path.join(&rel);
             match match_component(&dir, &comp) {
                 Some(existing) => rel.push(existing),
@@ -425,12 +425,16 @@ impl FilesysUnit {
     ) -> Result<(), u32> {
         let path = self.lock_path(rec);
         let meta = std::fs::metadata(&path).map_err(|_| ERROR_OBJECT_NOT_FOUND)?;
-        let name: String = if rec.rel.as_os_str().is_empty() {
-            self.mount.volume.clone()
+        // The volume label is config-supplied ASCII; a leaf name comes from the
+        // host and is mapped back to Latin-1. Anything the guest could have
+        // reached is representable (resolve only matches names it could name),
+        // and dir_listing already hides the rest, so this never loses data here.
+        let name: Vec<u8> = if rec.rel.as_os_str().is_empty() {
+            self.mount.volume.clone().into_bytes()
         } else {
             rec.rel
                 .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
+                .and_then(utf8_to_latin1)
                 .unwrap_or_default()
         };
         let entry_type: i32 = if !meta.is_dir() {
@@ -462,7 +466,7 @@ impl FilesysUnit {
         let fib_data = FileInfoBlock {
             disk_key: long(disk_key),
             dir_entry_type: long(entry_type as u32),
-            file_name: bcpl::<108>(name.as_bytes()),
+            file_name: bcpl::<108>(&name),
             protection: long(protection),
             entry_type: long(entry_type as u32),
             size: long(meta.len().min(u32::MAX as u64) as u32),
@@ -485,6 +489,9 @@ impl FilesysUnit {
             .flatten()
             .map(|e| e.file_name())
             .filter(|n| !n.as_encoded_bytes().ends_with(b".uaem"))
+            // Hide names that have no Latin-1 spelling: the guest could neither
+            // display nor reopen them. amiberry's my_readdir skips them too.
+            .filter(|n| utf8_to_latin1(n).is_some())
             .collect();
         names.sort();
         names
@@ -646,7 +653,7 @@ impl FilesysUnit {
                 log::debug!(
                     "filesys: {}: locate \"{}\" (lock {:#X})",
                     device_name(self.index),
-                    String::from_utf8_lossy(&name),
+                    latin1_to_utf8(&name),
                     arg(bus, 1)
                 );
                 let Some(rec) = self.resolve(arg(bus, 1), &name) else {
@@ -756,7 +763,7 @@ impl FilesysUnit {
                 log::debug!(
                     "filesys: {}: open \"{}\" (lock {:#X})",
                     device_name(self.index),
-                    String::from_utf8_lossy(&name),
+                    latin1_to_utf8(&name),
                     arg(bus, 2)
                 );
                 let Some(rec) = self.resolve(arg(bus, 2), &name) else {
@@ -1376,6 +1383,29 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146097 + doe - 719_468
 }
 
+// AmigaDOS filenames are ISO-8859-1 (Latin-1); the host filesystem is UTF-8.
+// Latin-1 is exactly the first 256 Unicode code points, so both directions are
+// a trivial per-character map and need no iconv. This mirrors amiberry's
+// osdep/amiberry_filesys.cpp (utf8_to_latin1_string / iso_8859_1_to_utf8) so
+// host directory mounts stay interoperable between the two emulators -- names
+// that amiberry drops, we drop the same way.
+
+/// A guest-supplied Latin-1 name -> the host UTF-8 string. Total: every byte is
+/// a valid Latin-1 code point.
+fn latin1_to_utf8(name: &[u8]) -> String {
+    name.iter().map(|&b| b as char).collect()
+}
+
+/// A host filename -> AmigaDOS Latin-1 bytes, or None if it contains any
+/// character outside Latin-1 (including invalid UTF-8). amiberry hides such
+/// entries from the guest rather than mangling them; so do we.
+fn utf8_to_latin1(name: &std::ffi::OsStr) -> Option<Vec<u8>> {
+    name.to_str()?
+        .chars()
+        .map(|c| (u32::from(c) <= 0xff).then_some(c as u8))
+        .collect()
+}
+
 /// Case-insensitive component match: prefer the exact host name, else scan
 /// the directory for a case-insensitive match (AmigaDOS names are
 /// case-insensitive but case-preserving).
@@ -1603,6 +1633,47 @@ mod tests {
                 String::from_utf8_lossy(escape)
             );
         }
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Latin-1 <-> UTF-8 mapping matches amiberry: a guest name with high bytes
+    /// finds its UTF-8 host file, the host name maps back to those same bytes,
+    /// and a host name outside Latin-1 is hidden from directory listings.
+    #[test]
+    fn utf8_host_names_map_to_latin1() {
+        // "francais" with a c-cedilla (U+00E7): Latin-1 byte 0xE7, UTF-8 0xC3 0xA7.
+        assert_eq!(latin1_to_utf8(b"fran\xe7ais"), "fran\u{e7}ais");
+        assert_eq!(
+            utf8_to_latin1(std::ffi::OsStr::new("fran\u{e7}ais")),
+            Some(b"fran\xe7ais".to_vec())
+        );
+        // Above Latin-1 (U+2603 SNOWMAN): no mapping.
+        assert_eq!(utf8_to_latin1(std::ffi::OsStr::new("sn\u{2603}w")), None);
+
+        let root = std::env::temp_dir().join(format!("clfs-latin1-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("fran\u{e7}ais"), b"x").unwrap();
+        std::fs::write(root.join("sn\u{2603}w"), b"x").unwrap();
+
+        let mut hle = FilesysHle::default();
+        hle.set_mounts(vec![MountSpec {
+            path: root.clone(),
+            volume: "Test".into(),
+            boot_pri: -128,
+            readonly: false,
+        }]);
+        let unit = &hle.units[0];
+
+        // The guest names it in Latin-1 and reaches the UTF-8 host file.
+        let rec = unit.resolve(0, b"fran\xe7ais").unwrap();
+        assert_eq!(rec.rel, PathBuf::from("fran\u{e7}ais"));
+        // The listing shows the mappable name and hides the snowman.
+        let listing = unit.dir_listing(&LockRec {
+            rel: PathBuf::new(),
+        });
+        assert!(listing.iter().any(|n| n == "fran\u{e7}ais"));
+        assert!(listing.iter().all(|n| n != "sn\u{2603}w"));
 
         std::fs::remove_dir_all(&root).unwrap();
     }
