@@ -2740,12 +2740,17 @@ impl CpuBus {
                 self.bus
                     .grant_cpu_bus_access_at(Some(addr), size, CpuBusAccessKind::Write);
                 self.bus.record_cpu_chip_ram_write(off, size, value);
-                // Note the canonical chip address (off), not the CPU's bus
-                // address: a write through an Agnus image repeat must hit
-                // watchpoints and UI highlights on the RAM cell it lands in.
-                self.bus.ui_note_cpu_ram_write(off as u32, size);
+                self.bus.ui_note_cpu_ram_write(addr, size);
                 write_be(&mut self.bus.mem.chip_ram, off, size, value);
-                self.dbg_note_memw(off as u32, size);
+                self.dbg_note_memw(addr, size);
+                if off as u32 != addr {
+                    // The write landed through an Agnus image repeat: note
+                    // the canonical chip address as well as the CPU's bus
+                    // address, so watchpoints and UI highlights fire
+                    // whichever alias of the RAM cell they were set on.
+                    self.bus.ui_note_cpu_ram_write(off as u32, size);
+                    self.dbg_note_memw(off as u32, size);
+                }
                 return;
             }
             Some(PlainMemRegion::ZorroRam(board, off)) => {
@@ -3484,11 +3489,16 @@ mod tests {
                 0x3239, 0x0010, 0x0012, // move.w $100012.l,d1
             ],
         )?;
+        // Watch both aliases of the target cell: the mirror write must fire
+        // the watch whichever alias it was set on.
+        machine.bus_mut().set_ui_mem_watches(&[0x10, 0x180010]);
         machine.step_slice(2)?;
         // On the fixture's OCS Agnus both $180010 and $100012 are images of
         // chip $10/$12.
         assert_eq!(read_chip_long(machine.bus(), 0x10), 0xDEADBEEF);
         assert_eq!(machine.d(1) & 0xFFFF, 0xBEEF);
+        assert!(machine.bus_mut().ui_take_mem_writer(0x10).is_some());
+        assert!(machine.bus_mut().ui_take_mem_writer(0x180010).is_some());
         Ok(())
     }
 
