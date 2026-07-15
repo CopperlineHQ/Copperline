@@ -247,7 +247,10 @@ function tick(nowMs) {
     running = false;
     setLoadStatus(`emulator error: ${e.message ?? e}`);
     overlay.style.display = '';
-    // Re-arm the boot button: a fresh boot replaces the wedged machine.
+    // Drop the wedged machine and re-arm the boot button: the pickers go
+    // back to stashing (never a live swap into a crashed instance, which
+    // may have panicked) and a fresh boot rebuilds from the stash.
+    emu = null;
     refreshBootButton();
     console.error(e);
     return;
@@ -481,7 +484,8 @@ canvas.addEventListener(
         padTouch = { id: t.identifier, x: t.clientX, y: t.clientY, start: now, moved: 0 };
         clearTimeout(longPressTimer);
         longPressTimer = setTimeout(() => {
-          if (padTouch && padTouch.moved < TAP_SLOP_CSS_PX && padRmbTouchId === null) {
+          // emu can be gone by now: an emulator error drops the machine.
+          if (emu && padTouch && padTouch.moved < TAP_SLOP_CSS_PX && padRmbTouchId === null) {
             padDragging = true;
             emu.mouse_button(0, true);
             navigator.vibrate?.(15);
@@ -535,7 +539,7 @@ function onTouchEnd(e) {
         padTouch.moved < TAP_SLOP_CSS_PX
       ) {
         emu.mouse_button(0, true);
-        setTimeout(() => emu.mouse_button(0, false), CLICK_HOLD_MS);
+        setTimeout(() => emu?.mouse_button(0, false), CLICK_HOLD_MS);
       }
       padTouch = null;
     } else if (t.identifier === padRmbTouchId) {
