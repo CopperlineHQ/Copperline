@@ -52,9 +52,11 @@ against real hardware.
   (ADF / ADZ / ZIP / DMS, read-only SCP), Gayle IDE, A2091 SCSI, and CDTV/CD32
   CD.
 - **Tooling**: an in-window debugger that can step backwards, an
-  interactive chip-bus frame analyzer, remote GDB support, deterministic
-  save states, input recording/replay, and headless screenshot/frame-dump
-  capture -- the deterministic core makes every replay byte-identical.
+  interactive chip-bus frame analyzer, a trigger-based VCD waveform export
+  of the chipset signals for GTKWave (`docs/debugger/waveform.md`), remote
+  GDB support, deterministic save states, input recording/replay, and
+  headless screenshot/frame-dump capture -- the deterministic core makes
+  every replay byte-identical.
 - **A browser build**: the same core compiled to WebAssembly with a
   canvas/Web Audio frontend, hosted at
   [copperline.dev/try](https://copperline.dev/try/) -- boots the bundled

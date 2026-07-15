@@ -931,6 +931,16 @@ pub struct Bus {
     current_frame_bus_trace: FrameBusTrace,
     #[serde(skip)]
     last_frame_bus_trace: Option<FrameBusTrace>,
+    /// Waveform (VCD) capture: `wave_on` is the single hot-path gate for
+    /// every sampling tap (true while armed or capturing), `wave_pc_trigger`
+    /// the per-instruction gate for the `pc=` trigger. Host-side observer
+    /// state, never serialized.
+    #[serde(skip)]
+    wave_on: bool,
+    #[serde(skip)]
+    pub(crate) wave_pc_trigger: bool,
+    #[serde(skip)]
+    wave: Option<Box<crate::waveform::WaveCapture>>,
     /// Debugger-window custom-register watch offsets ($000-$1FE, word
     /// aligned), mirrored from the CPU machine's InteractiveBreaks, and
     /// the first pending hit since the debugger last polled. Recorded in
@@ -2216,6 +2226,9 @@ impl Bus {
             frame_analyzer_enabled: false,
             current_frame_bus_trace: FrameBusTrace::default(),
             last_frame_bus_trace: None,
+            wave_on: false,
+            wave_pc_trigger: false,
+            wave: None,
             ui_reg_watches: Vec::new(),
             ui_reg_hit: None,
             ui_beam_traps: Vec::new(),
@@ -3596,6 +3609,9 @@ impl Bus {
                 // not from the beam position after the bus cycle's tail.
                 // A long-word access stores its second (low-word) slot.
                 self.cpu_custom_access_slot = Some(grant_slot);
+            }
+            if self.wave_on {
+                self.wave_note_cpu_access(addr, kind, wait_cck);
             }
             let (cck, tick) = self.advance_one_chip_bus_quantum(Some(ChipBusOwner::Cpu));
             self.note_cpu_granted_chip_bus_cycle();
@@ -7446,6 +7462,7 @@ mod custom_regs;
 mod ddf_line;
 mod dma_slots;
 mod frame_capture;
+mod wave;
 
 #[cfg(test)]
 mod tests;

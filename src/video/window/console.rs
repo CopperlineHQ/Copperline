@@ -137,6 +137,32 @@ fn parse_hex_pattern(tokens: &[&str]) -> Option<Vec<u8>> {
         .collect()
 }
 
+/// Human-readable status lines for a waveform capture, shared by the
+/// console WAVE command and the debugger window's Waveform tab.
+pub(super) fn wave_status_lines(status: &crate::waveform::WaveStatus) -> Vec<String> {
+    let mut lines = vec![
+        format!(
+            "waveform {}: trigger {}, duration {}, signals {}",
+            status.state, status.trigger, status.duration, status.signals
+        ),
+        format!("  -> {}", status.path.display()),
+    ];
+    match status.state {
+        "capturing" => lines.push(format!(
+            "  {} / {} cck, {} samples",
+            status.captured_cck,
+            status.window_cck.unwrap_or(0),
+            status.samples
+        )),
+        "done" => lines.push(format!(
+            "  {} cck captured, {} samples",
+            status.captured_cck, status.samples
+        )),
+        _ => {}
+    }
+    lines
+}
+
 const CONSOLE_HELP: &[&str] = &[
     "execution:  run  pause  step/s [N]  over  out  frame/f  line  cstep",
     "            runto ADDR   toslot V [H]   rstep [N]  rframe  rrun",
@@ -151,6 +177,8 @@ const CONSOLE_HELP: &[&str] = &[
     "os:         tasks  libs  devs  resources  ports   segments   guru [CODE]",
     "hunt:       hunt start [B|W]  hunt eq/ne/lt/gt VAL  hunt same|diff  hunt list",
     "modify:     poke ADDR VAL   setreg REG VAL   trace start [PATH]|stop",
+    "waveform:   wave start [PATH] [TRIGGER] [DURATION] [SIGNALS]   wave stop   wave",
+    "            TRIGGER: now  pc=ADDR  beam=V[:H]  reg=OFF  time=SECS",
     "console:    help  clear  close",
     "Addresses and values are hex; beam positions (V, H) are decimal.",
     "Cmd/Ctrl+V pastes; a multi-line paste runs each line in order.",
@@ -679,6 +707,44 @@ impl App {
                         None => ConsoleOutcome::one("no trace running (TRACE START [PATH])"),
                     },
                     Some(_) => ConsoleOutcome::error("usage: TRACE [START [PATH] | STOP]"),
+                }
+            }
+            "WAVE" | "WAVEFORM" => {
+                let sub = args.first().map(|t| t.to_ascii_uppercase());
+                match sub.as_deref() {
+                    Some("START") => {
+                        let opts = match crate::waveform::parse_wave_args(args[1..].iter().copied())
+                        {
+                            Ok(opts) => opts,
+                            Err(e) => return ConsoleOutcome::error(format!("WAVE START: {e}")),
+                        };
+                        let summary = format!(
+                            "waveform armed: trigger {}, duration {}, signals {} -> {}",
+                            opts.trigger,
+                            opts.duration,
+                            opts.signals,
+                            opts.path.display()
+                        );
+                        match self.emu.machine.ui_wave_start(opts) {
+                            Ok(()) => ConsoleOutcome::one(summary),
+                            Err(e) => ConsoleOutcome::error(format!("cannot arm waveform: {e}")),
+                        }
+                    }
+                    Some("STOP") => match self.emu.machine.ui_wave_stop() {
+                        Some(status) => ConsoleOutcome::one(format!(
+                            "waveform stopped: {} samples in {}",
+                            status.samples,
+                            status.path.display()
+                        )),
+                        None => ConsoleOutcome::one("no waveform capture"),
+                    },
+                    None => match self.emu.machine.ui_wave_status() {
+                        Some(status) => ConsoleOutcome::lines(wave_status_lines(&status)),
+                        None => ConsoleOutcome::one("no waveform capture (WAVE START [PATH] ...)"),
+                    },
+                    Some(_) => ConsoleOutcome::error(
+                        "usage: WAVE [START [PATH] [TRIGGER] [DURATION] [SIGNALS] | STOP]",
+                    ),
                 }
             }
             "BLITS" => {

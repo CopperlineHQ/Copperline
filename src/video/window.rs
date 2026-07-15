@@ -2893,6 +2893,10 @@ impl App {
             UiControl::DebugBreaksClear => {
                 self.activate_tool_control(ToolPanelKind::Debugger, control)
             }
+            UiControl::DebugWaveArm => self.activate_tool_control(ToolPanelKind::Debugger, control),
+            UiControl::DebugWaveStop => {
+                self.activate_tool_control(ToolPanelKind::Debugger, control)
+            }
             UiControl::DebugAudioMute(_) => {
                 self.activate_tool_control(ToolPanelKind::Debugger, control)
             }
@@ -3073,6 +3077,8 @@ impl App {
                 self.last_debug_stop = None;
                 self.show_osd("Cleared all breakpoints and watchpoints");
             }
+            (ToolPanelKind::Debugger, UiControl::DebugWaveArm) => self.debugger_wave_arm(),
+            (ToolPanelKind::Debugger, UiControl::DebugWaveStop) => self.debugger_wave_stop(),
             (ToolPanelKind::Debugger, UiControl::DebugAudioMute(idx)) => {
                 let paula = &mut self.emu.bus_mut().paula;
                 let (label, muted) = if idx < 4 {
@@ -4535,6 +4541,46 @@ impl App {
         self.show_osd(msg);
     }
 
+    /// Arm a waveform (VCD) capture from the Waveform tab's entry box:
+    /// an order-free "[PATH] [TRIGGER] [DURATION] [SIGNALS]" spec, with
+    /// an empty entry meaning all defaults (trigger now, one frame, all
+    /// signals, timestamped path).
+    fn debugger_wave_arm(&mut self) {
+        let entry = self
+            .debugger_panel
+            .as_ref()
+            .map(|panel| panel.entry.clone())
+            .unwrap_or_default();
+        let opts = match crate::waveform::parse_wave_args(entry.split_whitespace()) {
+            Ok(opts) => opts,
+            Err(e) => {
+                self.show_osd(format!("Waveform: {e}"));
+                return;
+            }
+        };
+        let summary = format!(
+            "Waveform armed ({}) -> {}",
+            opts.trigger,
+            opts.path.display()
+        );
+        match self.emu.machine.ui_wave_start(opts) {
+            Ok(()) => self.show_osd(summary),
+            Err(e) => self.show_osd(format!("Waveform: {e}")),
+        }
+    }
+
+    /// Stop the waveform capture (Waveform tab), finishing the VCD file.
+    fn debugger_wave_stop(&mut self) {
+        match self.emu.machine.ui_wave_stop() {
+            Some(status) => self.show_osd(format!(
+                "Waveform stopped: {} samples in {}",
+                status.samples,
+                status.path.display()
+            )),
+            None => self.show_osd("No waveform capture"),
+        }
+    }
+
     /// Toggle bitplane `plane` in the presented picture (Video tab).
     fn debugger_toggle_plane(&mut self, plane: usize) {
         let shown = self.emu.bus_mut().ui_toggle_layer_plane(plane);
@@ -5863,6 +5909,57 @@ impl App {
                     }
                     lines.push(ui::DbgLine::plain(text));
                 }
+            }
+            ui::DebugTab::Waveform => {
+                // Leave room for the Arm/Stop buttons drawn at the top of
+                // the content area.
+                for _ in 0..ui::WAVEFORM_TAB_HEADER_LINES {
+                    lines.push(ui::DbgLine::plain(""));
+                }
+                match self.emu.machine.ui_wave_status() {
+                    Some(status) => {
+                        for (index, text) in
+                            console::wave_status_lines(&status).into_iter().enumerate()
+                        {
+                            lines.push(if index == 0 {
+                                ui::DbgLine::hilit(text)
+                            } else {
+                                ui::DbgLine::plain(text)
+                            });
+                        }
+                    }
+                    None => lines.push(ui::DbgLine::plain("No waveform capture.")),
+                }
+                lines.push(ui::DbgLine::plain(""));
+                lines.push(ui::DbgLine::plain(
+                    "Arm records chipset signals to a VCD file for GTKWave.",
+                ));
+                lines.push(ui::DbgLine::plain(
+                    "Type an order-free spec in the box, then Arm. Empty = defaults",
+                ));
+                lines.push(ui::DbgLine::plain(
+                    "(trigger now, 1 frame, all signals, copperline-wave-*.vcd).",
+                ));
+                lines.push(ui::DbgLine::plain(""));
+                lines.push(ui::DbgLine::plain(
+                    "Trigger:  NOW  PC=ADDR  BEAM=VPOS[:HPOS]  REG=OFF  TIME=SECS",
+                ));
+                lines.push(ui::DbgLine::plain(
+                    "Duration: Ncck (bare N)  Nf (frames)  Nms  Ns",
+                ));
+                lines.push(ui::DbgLine::plain(
+                    "Signals:  comma list of beam,bus,cpu,copper,blitter,regs,irq,audio",
+                ));
+                lines.push(ui::DbgLine::plain(
+                    "Path:     any other token (e.g. OUT.VCD)",
+                ));
+                lines.push(ui::DbgLine::plain(""));
+                lines.push(ui::DbgLine::plain(
+                    "Example:  OUT.VCD PC=C033C2 20000CCK CPU,BUS,COPPER",
+                ));
+                lines.push(ui::DbgLine::plain(
+                    "The console WAVE command does the same (Cmd/Alt+K).",
+                ));
             }
         }
         // Keep lines inside the panel; the blitter clips at the texture

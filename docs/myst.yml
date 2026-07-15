@@ -29,6 +29,7 @@ project:
         - file: debugger/console.md
         - file: debugger/headless.md
         - file: debugger/reverse.md
+        - file: debugger/waveform.md
         - file: debugger/gdb.md
         - file: debugger/workflows.md
     - title: Internals
@@ -57,6 +58,7 @@ project:
         - debugger/console.md
         - debugger/headless.md
         - debugger/reverse.md
+        - debugger/waveform.md
         - debugger/gdb.md
         - debugger/workflows.md
         - internals/architecture.md

@@ -63,5 +63,6 @@ pub mod video;
 pub mod wasm_manifest;
 #[cfg(feature = "wasm-boards")]
 pub mod wasmboard;
+pub mod waveform;
 pub mod zorro;
 pub mod zorro_device;

@@ -246,6 +246,9 @@ impl Bus {
                 hpos: self.agnus.hpos as u16,
             });
         }
+        if self.wave_on {
+            self.wave_note_reg_write(off, val, source);
+        }
         if is_audio_timing_custom_write(off) {
             self.flush_audio();
         }

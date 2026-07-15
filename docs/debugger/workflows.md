@@ -129,6 +129,25 @@ symbols, while source lines, `next`, and `print` need an
 ELF-with-DWARF sibling of the binary. The walkthrough lives in the
 [GDB chapter](gdb), "Source-Level Debugging of Amiga Programs".
 
+## See the bus like a logic analyser
+
+When the question is *interleaving* -- who owned which DMA slot, when the
+blitter stalled the CPU, where the Copper woke relative to the display
+fetch -- text traces are the wrong shape. Capture a waveform instead:
+
+```
+WAVE START glitch.vcd beam=100 2f
+```
+
+arms a capture that triggers when the beam reaches line 100 and records two
+frames of every signal group (bus owner per colour clock, Copper PC/state,
+blitter pipeline slots and pointers, register writes, IPL/INTREQ/INTENA,
+CPU chip-bus accesses). Open `glitch.vcd` in GTKWave and read the bus
+arbitration directly off the screen; marker deltas measure in colour
+clocks. Headless runs arm the same capture with
+`--waveform glitch.vcd --wave-trigger beam=100 --wave-duration 2f`.
+[](waveform.md) has the full trigger/duration/signal reference.
+
 ## Making it reproducible
 
 Any of the above is dramatically easier when the failure replays

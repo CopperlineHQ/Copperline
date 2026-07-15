@@ -2173,8 +2173,37 @@ fn debugger_views_reflect_machine_state() {
                 assert!(view.lines.iter().any(|l| l.text == "Breakpoints:"));
                 assert!(view.lines.iter().any(|l| l.text == "  (none)"));
             }
+            super::ui::DebugTab::Waveform => {
+                assert!(view.lines.iter().any(|l| l.text == "No waveform capture."));
+                assert!(view
+                    .lines
+                    .iter()
+                    .any(|l| l.text.starts_with("Trigger:  NOW")));
+            }
         }
     }
+}
+
+#[test]
+fn waveform_tab_buttons_arm_and_stop_through_dispatch() {
+    let mut app = test_app();
+    app.open_debugger();
+    let path = std::env::temp_dir().join(format!("copperline-wave-tab-{}.vcd", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    if let Some(panel) = app.debugger_panel.as_mut() {
+        panel.tab = super::ui::DebugTab::Waveform;
+        panel.entry = format!("{} 200CCK", path.display());
+    }
+    app.activate_ui_control(super::ui::UiControl::DebugWaveArm);
+    let status = app.emu.machine.ui_wave_status().expect("armed capture");
+    assert_eq!(status.state, "capturing");
+    assert_eq!(status.path, path);
+    app.activate_ui_control(super::ui::UiControl::DebugWaveStop);
+    assert!(app.emu.machine.ui_wave_status().is_none());
+    assert!(std::fs::read_to_string(&path)
+        .unwrap()
+        .contains("$enddefinitions $end"));
+    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -2908,6 +2937,67 @@ fn console_trace_writes_disassembled_lines() {
     assert_eq!(lines.len(), 4, "{text}");
     // Disassembled NOP sled with beam annotations.
     assert!(lines[0].contains("NOP") && lines[0].contains('['), "{text}");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn console_wave_arms_captures_and_stops() {
+    let mut app = test_app();
+    app.open_console();
+    let path = std::env::temp_dir().join(format!(
+        "copperline-console-wave-{}.vcd",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+
+    let out = console_run(&mut app, "WAVE");
+    assert!(out[0].contains("no waveform capture"), "{out:?}");
+    // Arm with order-free arguments: path, immediate trigger, a short
+    // window, two signal groups.
+    let out = console_run(
+        &mut app,
+        &format!("WAVE START {} NOW 300CCK BEAM,BUS", path.display()),
+    );
+    assert!(out[0].contains("waveform armed"), "{out:?}");
+    assert!(out[0].contains("beam,bus"), "{out:?}");
+    let out = console_run(&mut app, "WAVE");
+    assert!(out[0].contains("waveform capturing"), "{out:?}");
+    // A malformed trigger is rejected, not treated as a path.
+    let out = console_run(&mut app, "WAVE START PC=ZZ");
+    assert!(out[0].contains("bad trigger"), "{out:?}");
+
+    // Stepping instructions advances the chipset past the 300 cck window.
+    console_run(&mut app, "S 400");
+    let out = console_run(&mut app, "WAVE");
+    assert!(out[0].contains("waveform done"), "{out:?}");
+    let out = console_run(&mut app, "WAVE STOP");
+    assert!(out[0].contains("waveform stopped"), "{out:?}");
+
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("$enddefinitions $end"), "{text}");
+    // Only the requested groups are declared.
+    assert!(text.contains("$scope module beam $end"));
+    assert!(text.contains("$scope module bus $end"));
+    assert!(!text.contains("$scope module copper $end"));
+    let _ = std::fs::remove_file(&path);
+
+    // A pc= trigger stays armed until the CPU retires the instruction at
+    // that address (a few NOPs ahead on the test machine's sled).
+    let target = app.emu.machine.pc() + 16;
+    let out = console_run(
+        &mut app,
+        &format!("WAVE START {} PC={target:X} 100CCK", path.display()),
+    );
+    assert!(out[0].contains("waveform armed"), "{out:?}");
+    let out = console_run(&mut app, "WAVE");
+    assert!(out[0].contains("waveform armed"), "{out:?}");
+    console_run(&mut app, "S 20");
+    let out = console_run(&mut app, "WAVE");
+    assert!(
+        out[0].contains("capturing") || out[0].contains("done"),
+        "pc trigger did not fire: {out:?}"
+    );
+    console_run(&mut app, "WAVE STOP");
     let _ = std::fs::remove_file(&path);
 }
 

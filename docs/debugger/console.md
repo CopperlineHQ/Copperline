@@ -87,6 +87,8 @@ Inspection and modification:
 | `SETREG REG VAL` | Set a CPU register (`SETREG D0 1234`) |
 | `TRACE START [PATH]` | Start a runtime instruction trace: one disassembled line per retired instruction with its beam position, no env var or restart needed (capped at a million lines) |
 | `TRACE STOP` / `TRACE` | Stop the trace / report its progress |
+| `WAVE START [PATH] [TRIGGER] [DURATION] [SIGNALS]` | Arm a trigger-based VCD "logic analyser" capture of chipset signals for GTKWave; the arguments are order-free and all optional (see [](waveform.md)) |
+| `WAVE STOP` / `WAVE` | Finish the capture early / report its progress |
 | `HELP`, `CLEAR`, `CLOSE` | Console housekeeping |
 
 Memory hunting (a trainer-style delta search over all writable RAM --

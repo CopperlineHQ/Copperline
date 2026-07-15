@@ -48,6 +48,10 @@ pub struct CliArgs {
     /// is intended for debugging flicker and frame-to-frame palette
     /// changes that a single screenshot cannot show.
     pub frame_dump: Option<FrameDumpSpec>,
+    /// `--waveform PATH` (+ `--wave-trigger/--wave-duration/--wave-signals`):
+    /// arm a trigger-based VCD logic-analyser capture of internal chipset
+    /// signals for GTKWave (see docs/debugger/waveform.md).
+    pub waveform: Option<copperline::waveform::WaveOptions>,
     /// Scripted key presses to inject after the window opens. Useful
     /// for headless testing of menus and modifier chords.
     pub press_after: Vec<KeyPressSpec>,
@@ -244,6 +248,10 @@ where
     let mut joy_after: Vec<(f32, JoyButtonKind, u32)> = Vec::new();
     let mut mouse_after: Vec<(f32, i32, i32)> = Vec::new();
     let mut record_input: Option<PathBuf> = None;
+    let mut wave_path: Option<PathBuf> = None;
+    let mut wave_trigger: Option<copperline::waveform::Trigger> = None;
+    let mut wave_duration: Option<copperline::waveform::WaveDuration> = None;
+    let mut wave_signals: Option<copperline::waveform::SignalSet> = None;
     let mut disk_insert_after: Vec<CliDiskInsert> = Vec::new();
     let mut audio_live = true;
     let mut explicit_audio_live = false;
@@ -511,6 +519,39 @@ where
                     .ok_or_else(|| anyhow!("--dump-frames requires a directory"))?;
                 dump_dir = Some(PathBuf::from(path));
             }
+            "--waveform" => {
+                let path = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--waveform requires a VCD output path"))?;
+                wave_path = Some(PathBuf::from(path));
+            }
+            "--wave-trigger" => {
+                const USAGE: &str =
+                    "--wave-trigger SPEC: now, pc=ADDR, beam=VPOS[:HPOS], reg=OFF, or time=SECS";
+                let spec = args.next().ok_or_else(|| anyhow!(USAGE))?;
+                wave_trigger = Some(
+                    copperline::waveform::parse_trigger(&spec)
+                        .ok_or_else(|| anyhow!("bad trigger {spec:?}; {USAGE}"))?,
+                );
+            }
+            "--wave-duration" => {
+                const USAGE: &str =
+                    "--wave-duration SPEC: Ncck (bare N is cck), Nf/Nframes, Nms, or Ns";
+                let spec = args.next().ok_or_else(|| anyhow!(USAGE))?;
+                wave_duration = Some(
+                    copperline::waveform::parse_duration(&spec)
+                        .ok_or_else(|| anyhow!("bad duration {spec:?}; {USAGE}"))?,
+                );
+            }
+            "--wave-signals" => {
+                const USAGE: &str = "--wave-signals LIST: comma list of \
+                     beam, bus, cpu, copper, blitter, regs, irq, audio, or all";
+                let spec = args.next().ok_or_else(|| anyhow!(USAGE))?;
+                wave_signals = Some(
+                    copperline::waveform::parse_signals(&spec)
+                        .ok_or_else(|| anyhow!("bad signal list {spec:?}; {USAGE}"))?,
+                );
+            }
             "--dump-start" => {
                 dump_start_secs = next_arg(
                     &mut args,
@@ -604,6 +645,29 @@ where
             None
         }
     };
+    let waveform = match wave_path {
+        Some(path) => {
+            let mut opts = copperline::waveform::WaveOptions::new(path);
+            if let Some(trigger) = wave_trigger {
+                opts.trigger = trigger;
+            }
+            if let Some(duration) = wave_duration {
+                opts.duration = duration;
+            }
+            if let Some(signals) = wave_signals {
+                opts.signals = signals;
+            }
+            Some(opts)
+        }
+        None => {
+            if wave_trigger.is_some() || wave_duration.is_some() || wave_signals.is_some() {
+                return Err(anyhow!(
+                    "--wave-trigger/--wave-duration/--wave-signals require --waveform PATH"
+                ));
+            }
+            None
+        }
+    };
     Ok(CliArgs {
         config_path,
         rom_path,
@@ -613,6 +677,7 @@ where
         benchmark_until,
         gdb,
         frame_dump,
+        waveform,
         press_after,
         click_after,
         joy_after,
@@ -672,6 +737,14 @@ fn print_help() {
          --dump-frames DIR              dump consecutive PNG frames into DIR, then exit\n  \
          --dump-start SECS              start frame dumping after SECS seconds (default: 0)\n  \
          --dump-count COUNT             number of frames to dump with --dump-frames\n  \
+         --waveform PATH                arm a VCD logic-analyser capture of chipset signals\n  \
+         \x20                            for GTKWave (see docs/debugger/waveform.md)\n  \
+         --wave-trigger SPEC            capture trigger: now (default), pc=ADDR,\n  \
+         \x20                            beam=VPOS[:HPOS], reg=OFF, or time=SECS\n  \
+         --wave-duration SPEC           capture length: Ncck (bare N is cck), Nf,\n  \
+         \x20                            Nms, or Ns (default: 1 frame)\n  \
+         --wave-signals LIST            comma list of beam, bus, cpu, copper, blitter,\n  \
+         \x20                            regs, irq, audio (default: all)\n  \
          --press-after SECS KEY         press/release Amiga KEY after SECS; KEY may be\n  \
          \x20                            decimal, 0x.., or a name like ctrl/lalt/lami/f1\n  \
          --key-after SECS KEY MS        press KEY after SECS, hold for MS milliseconds,\n  \
@@ -1165,6 +1238,9 @@ fn main() -> Result<()> {
         if let Some(addr) = rr.watch_addr {
             emu.arm_reverse_watch(addr, rr.target_secs);
         }
+    }
+    if let Some(opts) = cli.waveform {
+        emu.machine.ui_wave_start(opts)?;
     }
     if let Some(target_secs) = cli.benchmark_until {
         return run_headless_benchmark(emu, target_secs);

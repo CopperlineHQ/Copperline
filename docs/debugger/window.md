@@ -146,6 +146,15 @@ The Break tab with a PC breakpoint, a memory watchpoint, and a
 chipset-register watch armed.
 ```
 
+**Wave** arms and monitors the VCD "logic analyser" export
+([](waveform.md)): **Arm** starts a capture from the order-free spec in the
+`$` box -- any of an output path, a trigger (`PC=C033C2`, `BEAM=100:64`,
+`REG=180`, `TIME=2.5`, `NOW`), a duration (`20000CCK`, `2F`, `50MS`), and a
+signal-group list (`CPU,BUS,COPPER`); an empty box means all defaults.
+**Stop** finishes the file early. The tab shows the capture's state
+(armed / capturing with progress / done), its trigger, and where the file
+is going. The console `WAVE` command drives the same capture.
+
 ## Breakpoints and watchpoints
 
 On the Break tab, type an address into the `$` box and toggle any of:
