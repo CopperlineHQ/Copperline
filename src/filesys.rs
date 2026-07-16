@@ -1452,12 +1452,15 @@ fn set_host_mtime(path: &Path, days: u32, mins: u32, ticks: u32) -> std::io::Res
         + u64::from(days) * 86_400
         + u64::from(mins) * 60
         + u64::from(ticks) / 50;
+    // A tick is 1/50 s = 20 ms: keep the sub-second part, so a DateStamp
+    // round-trips through the host mtime at its native resolution.
+    let nanos = (ticks % 50) * 20_000_000;
     // checked_add: `+` panics when the sum exceeds the platform's time
     // representation (Windows FILETIME tops out around year 30828, and a
     // garbage guest DateStamp reaches far beyond), and a bad date from the
     // guest must fail the packet, not the emulator.
     let time = std::time::UNIX_EPOCH
-        .checked_add(std::time::Duration::from_secs(secs))
+        .checked_add(std::time::Duration::new(secs, nanos))
         .ok_or(std::io::ErrorKind::InvalidInput)?;
     std::fs::File::options()
         .write(true)
@@ -1885,6 +1888,25 @@ mod tests {
             Some(ERROR_DISK_WRITE_PROTECTED)
         );
         assert_eq!(hle.units[1].write_refusal(), None);
+    }
+
+    /// A DateStamp survives the trip through the host mtime at its native
+    /// 1/50 s resolution: SetFileDate then Examine must return the same
+    /// ticks, not the value truncated to whole seconds.
+    #[test]
+    fn datestamp_round_trips_subsecond_through_host_mtime() {
+        let root = std::env::temp_dir().join(format!("clfs-ticks-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("stamped");
+        std::fs::write(&file, b"x").unwrap();
+
+        // 2026-07-16 12:34:56.84: 42 ticks past the second.
+        let stamp = (17743, 12 * 60 + 34, 56 * 50 + 42);
+        set_host_mtime(&file, stamp.0, stamp.1, stamp.2).unwrap();
+        let mtime = std::fs::metadata(&file).unwrap().modified().ok();
+        assert_eq!(amiga_datestamp(mtime), stamp);
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

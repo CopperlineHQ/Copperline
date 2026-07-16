@@ -216,19 +216,19 @@ pub fn read_bstr(bus: &mut dyn AddressBus, bptr: u32) -> Vec<u8> {
 /// An AmigaDOS DateStamp: days/minutes/ticks since 1978-01-01.
 pub type DateStamp = (u32, u32, u32);
 
-/// Host mtime -> AmigaDOS DateStamp.
+/// Host mtime -> AmigaDOS DateStamp, at the DateStamp's native resolution:
+/// a tick is 1/50 s, so the host's sub-second part survives to 20 ms.
 pub fn amiga_datestamp(time: Option<std::time::SystemTime>) -> DateStamp {
     /// Seconds between the Unix epoch and the AmigaDOS epoch.
     const AMIGA_EPOCH_OFFSET: u64 = 252_460_800;
-    let secs = time
+    let since_epoch = time
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-        .saturating_sub(AMIGA_EPOCH_OFFSET);
+        .unwrap_or_default();
+    let secs = since_epoch.as_secs().saturating_sub(AMIGA_EPOCH_OFFSET);
     (
         (secs / 86_400) as u32,
         (secs % 86_400 / 60) as u32,
-        (secs % 60) as u32 * 50,
+        (secs % 60) as u32 * 50 + since_epoch.subsec_nanos() / 20_000_000,
     )
 }
 
