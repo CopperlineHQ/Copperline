@@ -106,6 +106,18 @@ pub(super) fn draw_status_bar(frame: &mut [u8], view: &StatusBarView, texture_sc
         hover == Some(BarControl::Joystick),
         texture_scale,
     );
+    if view.control_connected {
+        // A remote control-protocol client is attached; tag the bar so a
+        // machine that pauses or steps "by itself" is explicable.
+        draw_text(
+            frame,
+            (JOY_TOGGLE_X.saturating_sub(44)) * texture_scale,
+            (present_height() + STATUS_CONTROL_Y + 2) * texture_scale,
+            "CCP",
+            STATUS_TEXT,
+            texture_scale,
+        );
+    }
     draw_volume_control(frame, status.output_volume_percent, texture_scale);
     draw_menu_button(
         frame,
@@ -169,6 +181,8 @@ pub(super) struct StatusBarView {
     /// Active host joystick source, shown by the status-bar toggle icon.
     pub(super) joystick_input_mode: JoystickInputMode,
     pub(super) hover: Option<BarControl>,
+    /// A control-protocol client is attached (--control-gui).
+    pub(super) control_connected: bool,
 }
 
 /// A clickable status-bar control, used for hit-testing and hover.

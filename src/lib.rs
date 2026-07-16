@@ -23,6 +23,8 @@ pub mod cdrom;
 pub mod cdtv;
 pub mod chipset;
 pub mod config;
+#[cfg(feature = "control")]
+pub mod control;
 pub mod cpu;
 pub mod debugger;
 pub mod dirfs;

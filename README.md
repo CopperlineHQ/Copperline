@@ -54,7 +54,9 @@ against real hardware.
 - **Tooling**: an in-window debugger that can step backwards, an
   interactive chip-bus frame analyzer, a trigger-based VCD waveform export
   of the chipset signals for GTKWave (`docs/debugger/waveform.md`), remote
-  GDB support, deterministic save states, input recording/replay, and
+  GDB support, a JSON-RPC control protocol for scripts and AI agents
+  (`docs/debugger/control.md`, with the `copperline-ctl` client),
+  deterministic save states, input recording/replay, and
   headless screenshot/frame-dump capture -- the deterministic core makes
   every replay byte-identical.
 - **A browser build**: the same core compiled to WebAssembly with a
@@ -247,7 +249,8 @@ the OS.
 
 User and developer documentation -- getting started, the UI and shortcuts,
 headless capture, save states, input recording, the debugger frontends
-(window, headless, and remote GDB), the configuration reference, and the
+(window, headless, remote GDB, and the JSON-RPC control protocol), the
+configuration reference, and the
 internals (timing model, chipset, CPU, video pipeline) -- is published at
 [copperline.dev](https://copperline.dev/) and lives under `docs/` as a
 [MyST](https://mystmd.org/) project you can also build locally:

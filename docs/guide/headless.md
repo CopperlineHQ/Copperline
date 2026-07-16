@@ -158,6 +158,20 @@ exclusive with anything that needs a window or scheduled work --
 `--profile-live-audio`, `--record-input`, scripted input, and scheduled
 disk inserts are all rejected. `--bench-until` is an accepted alias.
 
+## Live control
+
+Scripted flags fix the whole run in advance. For a tool that needs to
+inspect, decide, and steer mid-session -- set a breakpoint, resume,
+rewind, inject input, capture the screen -- run the
+[control protocol](../debugger/control) instead: `--control ADDR` serves
+a headless machine over JSON-RPC (with `--control-token` /
+`--control-info` for the auth handoff), `--control-gui ADDR` attaches
+the same server to a normal windowed session, and the bundled
+`copperline-ctl` drives either from the shell. `--record-input` works
+with `--control` too: injected input is journaled into the same
+`.clscript` format, so an interactive control session replays
+deterministically.
+
 ## Investigating a run
 
 The [headless debugger](../debugger/headless) layers on top of any of

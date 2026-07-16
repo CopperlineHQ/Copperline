@@ -494,6 +494,7 @@ dependencies = [
  "ringbuf",
  "serde",
  "serde-big-array",
+ "serde_json",
  "thread-priority",
  "toml",
  "wasmtime",
