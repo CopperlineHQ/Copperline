@@ -783,10 +783,7 @@ impl FilesysUnit {
                 if !path.exists() {
                     return (DOSFALSE, ERROR_OBJECT_NOT_FOUND);
                 }
-                // Keep the existing date and comment; change only protection.
-                let mut info = read_uaem(&path).unwrap_or_default();
-                info.protection = arg(bus, 4) & 0xFF;
-                match write_uaem(&path, &info) {
+                match set_protection(&path, arg(bus, 4) & 0xFF) {
                     Ok(()) => (DOSTRUE, 0),
                     Err(e) => (DOSFALSE, host_error(&e)),
                 }
@@ -1234,8 +1231,10 @@ impl FilesysUnit {
                 if !path.exists() {
                     return (DOSFALSE, ERROR_OBJECT_NOT_FOUND);
                 }
-                // Keep the existing protection and date; change only the comment.
-                let mut info = read_uaem(&path).unwrap_or_default();
+                // Keep the existing protection and date -- including a
+                // denied `w` held only in the host mode -- and change just
+                // the comment.
+                let mut info = read_attributes(&path);
                 info.comment = comment;
                 match write_uaem(&path, &info) {
                     Ok(()) => (DOSTRUE, 0),
@@ -1350,6 +1349,65 @@ fn read_uaem(path: &Path) -> Option<UaemInfo> {
     parse_uaem(&std::fs::read(uaem_path(path)).ok()?)
 }
 
+/// The attributes of `path` as Examine would report them: the sidecar when
+/// one exists, otherwise what the host mode implies (fill_fib's fallback --
+/// read-only denies `w`). A read-modify-write of one attribute must start
+/// from this, not from a bare `read_uaem`, or a host-read-only file with no
+/// sidecar would lose its denied `w` in the rewrite.
+fn read_attributes(path: &Path) -> UaemInfo {
+    read_uaem(path).unwrap_or_else(|| UaemInfo {
+        protection: match std::fs::metadata(path) {
+            Ok(m) if m.permissions().readonly() => FIBF_WRITE,
+            _ => 0,
+        },
+        ..UaemInfo::default()
+    })
+}
+
+/// Mirror a protection mask's FIBF_WRITE bit onto the host mode, the one
+/// protection the host holds natively: a denied `w` becomes the read-only
+/// flag (fill_fib maps it back), so it needs no `.uaem` sidecar and
+/// host-side tools see it too.
+#[cfg(unix)]
+fn apply_host_write_bit(path: &Path, protection: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let perms = std::fs::metadata(path)?.permissions();
+    let mode = perms.mode();
+    // Deny: clear every write bit (that is what `readonly()` reports on).
+    // Allow: the owner bit is enough, leave group/other to the file.
+    let new_mode = if protection & FIBF_WRITE != 0 {
+        mode & !0o222
+    } else {
+        mode | 0o200
+    };
+    if new_mode != mode {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(new_mode))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn apply_host_write_bit(path: &Path, protection: u32) -> std::io::Result<()> {
+    let mut perms = std::fs::metadata(path)?.permissions();
+    let deny = protection & FIBF_WRITE != 0;
+    if perms.readonly() != deny {
+        // Not the world-writable hazard clippy fears: this mirrors the
+        // guest's own protection choice onto its own file.
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(deny);
+        std::fs::set_permissions(path, perms)?;
+    }
+    Ok(())
+}
+
+/// ACTION_SET_PROTECT's semantics: the `w` bit lands in the host mode, the
+/// rest of the mask (and any existing comment) in the `.uaem` sidecar --
+/// which write_uaem removes again when the mode alone says it all.
+fn set_protection(path: &Path, protection: u32) -> std::io::Result<()> {
+    let mut info = read_uaem(path).unwrap_or_default();
+    info.protection = protection;
+    write_uaem(path, &info)
+}
 /// The attribute sidecar that belongs to a host path.
 fn uaem_path(path: &Path) -> PathBuf {
     let mut side = path.as_os_str().to_owned();
@@ -1358,13 +1416,19 @@ fn uaem_path(path: &Path) -> PathBuf {
 }
 
 /// Persist `info` to `path`'s `.uaem` sidecar, or delete the sidecar when the
-/// attributes are all default (rwed allowed, no h/s/p/a bits, no comment) -- the
-/// host file's own mode and mtime then carry everything, so there is nothing to
-/// keep. The line format and the write-or-delete rule match amiberry's
-/// fsdb_host.cpp, so sidecars stay interoperable between the two emulators.
+/// host object itself can carry everything: the mtime holds the date, the
+/// host read-only flag holds a denied `w`, and default attributes need
+/// nothing at all. Only the bits with no host representation (h/s/p/a,
+/// denied r/e/d, a comment) force a sidecar. The line format matches
+/// amiberry's fsdb_host.cpp, so sidecars stay interoperable between the two
+/// emulators.
 fn write_uaem(path: &Path, info: &UaemInfo) -> std::io::Result<()> {
+    // The `w` bit lives in the host mode; sync it here rather than in the
+    // callers, or deleting a sidecar whose only content was a denied `w`
+    // (the fast path below) could leave the mode stale and lose the bit.
+    apply_host_write_bit(path, info.protection)?;
     let side = uaem_path(path);
-    if info.protection & 0xFF == 0 && info.comment.is_empty() {
+    if info.protection & 0xFF & !FIBF_WRITE == 0 && info.comment.is_empty() {
         return match std::fs::remove_file(&side) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             other => other,
@@ -1888,6 +1952,103 @@ mod tests {
             Some(ERROR_DISK_WRITE_PROTECTED)
         );
         assert_eq!(hle.units[1].write_refusal(), None);
+    }
+
+    /// SetProtection with only `w` denied lands in the host read-only flag,
+    /// not a sidecar -- so cloning a read-only file stays sidecar-free (the
+    /// spurious .uaem regression from a WB Copy CLONE). Bits the host cannot
+    /// hold still get the sidecar with the mode kept in sync, and returning
+    /// to default clears both.
+    #[test]
+    fn w_only_protection_lands_in_the_host_mode() {
+        let root = std::env::temp_dir().join(format!("clfs-prot-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("locked");
+        std::fs::write(&file, b"x").unwrap();
+        // What Examine reports: the sidecar, or the fill_fib host fallback.
+        let examine_prot = |file: &Path| read_attributes(file).protection;
+
+        set_protection(&file, FIBF_WRITE).unwrap();
+        assert!(!uaem_path(&file).exists());
+        assert!(std::fs::metadata(&file).unwrap().permissions().readonly());
+        assert_eq!(examine_prot(&file), FIBF_WRITE);
+
+        // FIBF_SCRIPT has no host representation: sidecar appears with the
+        // full mask, and the mode still mirrors the denied w.
+        set_protection(&file, 0x40 | FIBF_WRITE).unwrap();
+        assert!(uaem_path(&file).exists());
+        assert!(std::fs::metadata(&file).unwrap().permissions().readonly());
+        assert_eq!(examine_prot(&file), 0x40 | FIBF_WRITE);
+
+        set_protection(&file, 0).unwrap();
+        assert!(!uaem_path(&file).exists());
+        assert!(!std::fs::metadata(&file).unwrap().permissions().readonly());
+        assert_eq!(examine_prot(&file), 0);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// SetComment on a host-read-only file with no sidecar keeps the file
+    /// read-only: the implicit denied `w` is carried into the sidecar's mask
+    /// instead of being reset to 0 by the read-modify-write.
+    #[test]
+    fn a_comment_keeps_the_implicit_denied_w() {
+        let root = std::env::temp_dir().join(format!("clfs-cmt-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("guarded");
+        std::fs::write(&file, b"x").unwrap();
+        let mut perms = std::fs::metadata(&file).unwrap().permissions();
+        perms.set_readonly(true); // as a host tool would
+        std::fs::set_permissions(&file, perms).unwrap();
+
+        // What ACTION_SET_COMMENT does.
+        let mut info = read_attributes(&file);
+        assert_eq!(info.protection, FIBF_WRITE);
+        info.comment = b"do not touch".to_vec();
+        write_uaem(&file, &info).unwrap();
+
+        assert!(std::fs::metadata(&file).unwrap().permissions().readonly());
+        let back = read_uaem(&file).unwrap();
+        assert_eq!(back.protection, FIBF_WRITE);
+        assert_eq!(back.comment, b"do not touch");
+
+        // Clearing the comment removes the sidecar; the denied `w` stays
+        // behind in the host mode.
+        info.comment.clear();
+        write_uaem(&file, &info).unwrap();
+        assert!(!uaem_path(&file).exists());
+        assert!(std::fs::metadata(&file).unwrap().permissions().readonly());
+
+        // remove_dir_all cannot delete read-only files on Windows.
+        set_protection(&file, 0).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A legacy sidecar whose only content is a denied `w` (written by
+    /// amiberry, host file left writable) can be rewritten by actions that
+    /// never touch protection, like SET_DATE. Deleting it as redundant must
+    /// push the bit into the host mode, not drop it.
+    #[test]
+    fn deleting_a_w_only_legacy_sidecar_keeps_the_denied_w() {
+        let root = std::env::temp_dir().join(format!("clfs-legacy-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("inherited");
+        std::fs::write(&file, b"x").unwrap();
+        std::fs::write(uaem_path(&file), b"----r-ed 2026-07-10 00:00:00.00\n").unwrap();
+
+        // What ACTION_SET_DATE does after set_host_mtime.
+        let mut info = read_uaem(&file).unwrap();
+        assert_eq!(info.protection, FIBF_WRITE);
+        info.date = Some((17722, 0, 0));
+        write_uaem(&file, &info).unwrap();
+
+        assert!(!uaem_path(&file).exists());
+        assert!(std::fs::metadata(&file).unwrap().permissions().readonly());
+        assert_eq!(read_attributes(&file).protection, FIBF_WRITE);
+
+        // remove_dir_all cannot delete read-only files on Windows.
+        set_protection(&file, 0).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     /// A DateStamp survives the trip through the host mtime at its native
