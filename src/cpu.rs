@@ -1285,6 +1285,14 @@ impl M68kMachine {
         self.hle.set_mounts(mounts);
     }
 
+    /// `[machine] rom_scsi_device_disable`: cull the ROM's scsi.device at
+    /// expansion init. Rides on the filesys board's DiagPoint, which is the
+    /// one moment Kickstart gives us between building the resident list and
+    /// running it.
+    pub fn set_cull_rom_scsi_device(&mut self, cull: bool) {
+        self.hle.set_cull_rom_scsi_device(cull);
+    }
+
     pub fn bus(&self) -> &Bus {
         &self.bus.bus
     }

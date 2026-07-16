@@ -97,6 +97,7 @@ missing.
 profile = "A1200" # A1000, A500, A500OCS, A500Plus (A500+), A600, A1200, A3000, A4000, CDTV, CD32
 rtc = true        # add a battery RTC (default: only A500+/CDTV/A3000/A4000 ship with one)
 mem_controller = "ramsey-07" # none, ramsey-04 (A3000), ramsey-07 (A4000)
+rom_scsi_device_disable = true # skip the ROM's scsi.device (default: when its bus has no drives)
 ```
 
 A machine profile bundles the chipset, CPU, memory, gate array, and
@@ -141,11 +142,19 @@ at `$DE0003` and `$DE0043` answer as, and they carry Gary rather than Gayle
 - The **A4000** has its motherboard IDE interface at `$DD2020`; attach drives
   with `[ide]`, exactly as on a Gayle machine.
 
+`rom_scsi_device_disable` skips Kickstart's built-in disk driver. It defaults
+on when the machine's own controller -- the IDE port of an A600, A1200, or
+A4000, or the A3000's SCSI -- has no drives configured: with nothing to boot,
+the driver only costs startup time probing an empty bus. Configuring a drive
+turns the driver back on automatically (it is the boot path for those
+drives), and setting the flag explicitly wins in either direction. The ROM
+file itself is never modified.
+
 Motherboard fast RAM is not emulated on either; use `[memory] z3` instead,
 which the OS is equally happy with.
 
 `mem_controller` is normally left to the profile. It is broken out because
-Ramsey answers at `$DE0000`, which nothing else decodes, so it can be fitted to
+Ramsey's registers collide with nothing else, so it can be fitted to
 a wedge machine to exercise diagnostic tools that expect one.
 
 The `A1000` profile models the original Amiga, which has no Kickstart ROM.
