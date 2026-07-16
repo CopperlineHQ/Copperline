@@ -119,27 +119,6 @@ Raw key shortcuts:
   - Graphics test picture: `4`, `5`, then any key for the embedded
     gfxC intro prompt
 
-## Open Work
-
-Only genuinely-remaining work is listed here. Closed audit work lives in
-git history, not as a done-log in this file.
-
-1. **POTGO RC modelling.** `write_potgo`/`read_potgor`/`tick_pot_hsync`
-   (`src/chipset/paula.rs`) model output loopback with open-drain pin
-   sense, the START reset/restart, and a per-scan-line counter charge
-   paced by horizontal sync. Remaining: an RC-style charge curve from
-   real pot resistance and chip-revision bits.
-
-2. **CIA gaps.**
-   - Complete the parallel-port / Centronics signal path: consume CIA-B's
-     `PC` pulse from parallel-data (`PRB`) accesses as the external strobe,
-     and feed a peripheral acknowledge edge into CIA-A `FLAG`.
-   - CIA timer/TOD sub-cycle edges (next-E-clock TAHI/TBHI load, delayed
-     TOD carry, PB6/PB7 pulse width, `PC` pulse timing) are sub-cycle phase
-     delays the instruction-paced core cannot model faithfully; deferred to
-     any future cycle-exact CPU work rather than faked. (TOD write-stop and
-     the $000000 alarm reset are already correct, with tests.)
-
 ## Test Maintenance Policy
 
 Promote a repeated manual smoke path into a fast unit test, an ignored image

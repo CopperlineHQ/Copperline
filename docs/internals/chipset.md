@@ -162,13 +162,17 @@ modelled IPL-pin pipe and 68000 boundary sampling), serial, and audio:
   stream arrives this way.
 - **Disk registers**: DSKLEN/DSKBYTR/DSKSYNC/DSKDAT and the disk-block
   interrupt, fed by the floppy controller below.
-- **Pots**: POTGO/POTGOR counters at the hardware 512-CCK rate (the second
-  mouse/joystick button path). A pin driven HIGH as an output (its OUTxx and
-  DATxx bits both set) holds the matching POTxDAT counter at 0, modelling the
-  cap charging instantly through the driver; floating/driven-low pins charge
-  up as before. Software that writes POTGO=$FFFF to read POTxDAT back as ~0
-  (e.g. the Bitmap Brothers input poll, which keys a no-second-button test on
-  POT0DAT) depends on this.
+- **Pots**: POTGO/POTGOR's integrating converter is H-sync-clocked. START
+  discharges the four capacitors and holds their counters at zero for 8 PAL or
+  7 NTSC lines; each input then increments until its RC charge crosses the
+  comparator threshold. The fixed-threshold transfer is linear in resistance
+  (`t = -RC ln(1-Vt/Vcc)`), calibrated so the HRM's 528 kOhm maximum reaches
+  count 255 (the recommended 470 kOhm paddle reaches 227). Each channel
+  latches independently; a disconnected, grounded-button, or output-low pin
+  remains below threshold and wraps, while output-high charges immediately
+  unless the external button holds it low. POTGOR's production-Paula ID field
+  is explicitly zero. Software that writes POTGO=$FFFF to read POTxDAT back as
+  ~0 (e.g. the Bitmap Brothers input poll) depends on the output-high path.
 
 ## Denise (`denise.rs`)
 
@@ -221,7 +225,23 @@ CIA-A carries /OVL (the reset-time ROM overlay at `$0`), the keyboard
 serial port (SDR/ICR with the KDAT handshake and an emulated
 keyboard-controller pacing delay), and the fire-button lines. CIA-B
 carries the floppy control lines (motor, select, side, step) and the FLAG
-input pulsed by the disk index.
+input pulsed by the disk index. Its port-B access pulse (`PC`) is also the
+Centronics `/STROBE`: the bus samples the physical PRB pins without creating
+another access, forwards one strobe to the attached parallel peripheral, and
+feeds an accepted byte's `/ACK` edge back through CIA-A FLAG. With no
+peripheral attached the line remains unacknowledged, like an unplugged cable.
+PB6/PB7 pulse-output mode holds the selected pin low for one E-clock; reading
+PRB observes the pulse without shortening it.
+
+CIA timing is resolved on the E-clock grid (one tick per five colour clocks),
+which is the smallest phase the current CPU/bus boundary exposes. Timer
+underflow and delayed-source IRQ differences are preserved on that grid, as
+are the TOD mid-ripple alarm quirk and one-E PB pulse width. Transitions wholly
+inside one E-clock -- the internal high-byte load edge and individual TOD
+nibble carry phases -- are deliberately collapsed into the enclosing register
+access or TOD tick. They require a per-phase CIA scheduler before software can
+observe them; adding ad-hoc instruction delays would make their phase depend
+on host slice size and is therefore outside the deterministic timing model.
 
 The 68000 `RESET` instruction asserts the external reset line without
 resetting the CPU core or clearing RAM. Copperline resets the CIA port

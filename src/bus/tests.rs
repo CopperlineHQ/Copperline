@@ -26,8 +26,8 @@ use crate::chipset::agnus::{
     BEAMCON0_VARBEAMEN, COLORCLOCKS_PER_LINE, NTSC_LONG_COLORCLOCKS_PER_LINE, PAL_LINES,
 };
 use crate::chipset::cia::{
-    REG_CRA, REG_CRB, REG_ICR, REG_PRA, REG_TAHI, REG_TALO, REG_TBHI, REG_TBLO, REG_TODHI,
-    REG_TODLO, REG_TODMID,
+    REG_CRA, REG_CRB, REG_DDRB, REG_ICR, REG_PRA, REG_PRB, REG_TAHI, REG_TALO, REG_TBHI, REG_TBLO,
+    REG_TODHI, REG_TODLO, REG_TODMID,
 };
 use crate::chipset::copper::{CopperWait, DMACON_COPEN};
 use crate::chipset::denise::{rgb12_to_rgba8, DeniseRevision, DiwHigh, COLOR_TRANSPARENCY_BIT};
@@ -43,6 +43,7 @@ use crate::video::{bitplane, FB_HEIGHT, FB_PIXELS, FB_WIDTH};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const STANDARD_DIW_HSTART: i32 = 0x81;
@@ -572,6 +573,45 @@ fn cia_b_mask_enable_propagates_latched_timer_interrupt_to_paula() {
     assert_eq!(bus.paula.intreq & INT_EXTER, 0);
     bus.advance_devices(8);
     assert_ne!(bus.paula.intreq & INT_EXTER, 0);
+}
+
+#[test]
+fn cia_b_pc_strobe_reaches_parallel_port_and_ack_drives_cia_a_flag() {
+    struct AckCapture(Arc<Mutex<Vec<(u8, u64)>>>);
+
+    impl crate::parallel::ParallelPort for AckCapture {
+        fn strobe(&mut self, data: u8, at_cck: u64) -> bool {
+            self.0.lock().unwrap().push((data, at_cck));
+            true
+        }
+    }
+
+    let mut bus = empty_bus();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    bus.attach_parallel_port(Box::new(AckCapture(Arc::clone(&events))));
+    let addr = |reg: usize| (reg as u64) << 8;
+
+    // FLAG is a delayed CIA source. Enable it, drive all eight printer data
+    // pins, then access PRB: CIA-B pulses PC, the peripheral accepts $A5, and
+    // its acknowledge falling edge latches CIA-A ICR.FLG.
+    let _ = bus.cia_a_write(addr(REG_ICR), 1, 0x80 | 0x10);
+    let _ = bus.cia_b_write(addr(REG_DDRB), 1, 0xFF);
+    assert!(
+        events.lock().unwrap().is_empty(),
+        "DDRB sampling is not a strobe"
+    );
+    let _ = bus.cia_b_write(addr(REG_PRB), 1, 0xA5);
+
+    assert_eq!(&*events.lock().unwrap(), &[(0xA5, 0)]);
+    assert_ne!(bus.cia_a.debug_icr_data() & 0x10, 0);
+    assert_eq!(bus.paula.intreq & INT_PORTS, 0, "FLAG pin has one-E lag");
+    bus.advance_devices(5);
+    assert_ne!(bus.paula.intreq & INT_PORTS, 0);
+
+    // A guest PRB read generates the same hardware PC pulse. The bus samples
+    // the pins side-effect-free, so its floppy update cannot double-strobe.
+    assert_eq!(bus.cia_b_read(addr(REG_PRB), 1), 0xA5);
+    assert_eq!(events.lock().unwrap().len(), 2);
 }
 
 #[test]

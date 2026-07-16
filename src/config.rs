@@ -189,6 +189,10 @@ pub struct Config {
     /// Defaults to [`SerialMode::Stdout`], preserving the historical
     /// terminal-diagnostics behaviour.
     pub serial: SerialConfig,
+    /// Raw Centronics printer-byte capture (`[parallel] output`). `None`
+    /// leaves the parallel port electrically disconnected, so CIA-B strobes
+    /// receive no CIA-A FLAG acknowledge.
+    pub parallel_output_path: Option<PathBuf>,
 }
 
 /// How much of the overscan field the window presents. The
@@ -1016,6 +1020,7 @@ impl Default for Config {
             phosphor: 0.0,
             joystick_input_mode: JoystickInputMode::Gamepad,
             serial: SerialConfig::default(),
+            parallel_output_path: None,
         }
     }
 }
@@ -1325,6 +1330,8 @@ pub struct RawConfig {
     pub(crate) input: RawInput,
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) serial: RawSerial,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub(crate) parallel: RawParallel,
     /// `[[filesys]]` host-directory mount entries, in file order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) filesys: Vec<RawFilesysMount>,
@@ -1414,6 +1421,15 @@ pub(crate) struct RawSerial {
     /// TCP listen address; tcp mode only. Defaults to 127.0.0.1:1234.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) listen: Option<String>,
+}
+
+/// `[parallel]` host capture for the Amiga Centronics printer port.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawParallel {
+    /// Raw byte-stream output path. When absent, no printer is connected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) output: Option<String>,
 }
 
 /// A drive image entry in `[ide]`/`[scsi]`. Accepts either a bare path string
@@ -2329,6 +2345,7 @@ impl TryFrom<RawConfig> for Config {
             phosphor,
             joystick_input_mode,
             serial,
+            parallel_output_path: raw.parallel.output.map(PathBuf::from),
         })
     }
 }
@@ -4851,6 +4868,20 @@ mod tests {
 
         let err = parse_config("[serial]\nmode = \"rs232\"\n").unwrap_err();
         assert!(err.to_string().contains("unknown [serial] mode"), "{err:#}");
+        Ok(())
+    }
+
+    #[test]
+    fn parallel_section_selects_raw_capture_path() -> Result<()> {
+        let cfg = parse_config("[parallel]\noutput = \"printer.raw\"\n")?;
+        assert_eq!(
+            cfg.parallel_output_path.as_deref(),
+            Some(std::path::Path::new("printer.raw"))
+        );
+        assert_eq!(parse_config("")?.parallel_output_path, None);
+
+        let err = parse_config("[parallel]\nmode = \"printer\"\n").unwrap_err();
+        assert!(err.to_string().contains("unknown field `mode`"), "{err:#}");
         Ok(())
     }
 

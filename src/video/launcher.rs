@@ -663,6 +663,9 @@ pub struct MachineSetup {
     /// TCP listen address for `mode = "tcp"`; carried so the override
     /// round-trips through a launcher save even though no tab edits it.
     serial_listen: Option<String>,
+    /// Raw Centronics capture path. There is no launcher control yet, but a
+    /// hand-written `[parallel]` block must survive load/edit/save.
+    parallel_output: Option<PathBuf>,
     /// Host endpoints for the device pickers, read once when this setup is
     /// built so a fresh config screen sees currently-connected devices.
     #[cfg(feature = "midi")]
@@ -776,6 +779,7 @@ impl MachineSetup {
             midi_out: cfg.serial.midi_out.clone(),
             midi_in: cfg.serial.midi_in.clone(),
             serial_listen: cfg.serial.listen.clone(),
+            parallel_output: cfg.parallel_output_path.clone(),
             // Left empty here so config construction stays side-effect free; the
             // config screen fills it via refresh_midi_endpoints on open.
             #[cfg(feature = "midi")]
@@ -1047,6 +1051,7 @@ impl MachineSetup {
         raw.serial.midi_out = self.midi_out.clone();
         raw.serial.midi_in = self.midi_in.clone();
         raw.serial.listen = self.serial_listen.clone();
+        raw.parallel.output = self.parallel_output.as_deref().map(path_string);
         // The Audio output picker is one of default / a named device / Disabled.
         // A named device sets output_device; Disabled sets output_enabled=false
         // (the resolved default is true, so it is omitted otherwise).
@@ -2435,6 +2440,24 @@ mod tests {
         assert_eq!(setup.serial_listen.as_deref(), Some("0.0.0.0:2323"));
         let back = setup.to_raw();
         assert_eq!(back.serial.listen.as_deref(), Some("0.0.0.0:2323"));
+    }
+
+    #[test]
+    fn parallel_output_round_trips_through_raw() {
+        // There is no launcher control for [parallel], so loading and saving
+        // must preserve a hand-written capture path unchanged.
+        let mut raw = RawConfig::default();
+        raw.parallel.output = Some("captures/printer.raw".into());
+        let setup = MachineSetup::from_raw(&raw).unwrap();
+        assert_eq!(
+            setup.parallel_output.as_deref(),
+            Some(std::path::Path::new("captures/printer.raw"))
+        );
+        let back = setup.to_raw();
+        assert_eq!(
+            back.parallel.output.as_deref(),
+            Some("captures/printer.raw")
+        );
     }
 
     #[test]

@@ -8,10 +8,8 @@
 //!
 //! Each CIA exposes 16 registers, decoded from address bits A8..A11.
 //!
-//! Implemented: I/O ports (read/write of stored values), Timer A and
-//! Timer B (16-bit countdowns clocked from PHI2 / CPU clock, set the
-//! corresponding bit in ICR on underflow, optionally raise the IR
-//! line). Not implemented: serial shift register output.
+//! Implemented: I/O ports and PC pulse, Timer A/B, binary TOD/alarm, FLAG/CNT
+//! pins, PB6/PB7 timer outputs, and serial shift input/output.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Which {
@@ -414,9 +412,31 @@ impl Cia {
         self.regs[reg & 0xF]
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn take_pc_pulse(&mut self) -> bool {
         std::mem::take(&mut self.pc_pulse_pending)
+    }
+
+    /// Physical port-B pin levels without the `PC` strobe side effect of a
+    /// guest PRB read. Motherboard wiring (floppy outputs and the Centronics
+    /// data bus) observes pins continuously and must not create a second
+    /// printer strobe merely by sampling them.
+    pub fn port_b_pins(&self) -> u8 {
+        let mut v = self.read_port(REG_PRB, REG_DDRB);
+        if self.regs[REG_CRA] & CR_PBON != 0 {
+            if self.ta_pb_output_high {
+                v |= 1 << 6;
+            } else {
+                v &= !(1 << 6);
+            }
+        }
+        if self.regs[REG_CRB] & CR_PBON != 0 {
+            if self.tb_pb_output_high {
+                v |= 1 << 7;
+            } else {
+                v &= !(1 << 7);
+            }
+        }
+        v
     }
 
     pub fn write(&mut self, reg: usize, val: u8) -> CiaSideEffect {
@@ -637,6 +657,18 @@ impl Cia {
         // ticks is the common case (1 E-clock per 5 cck).
         if ticks == 0 {
             return false;
+        }
+        // PBON pulse mode holds PB6/PB7 low for one E-clock. A pulse armed by
+        // the previous timer/CNT underflow returns high at this E-clock; a new
+        // underflow later in this call can arm the next pulse. Reads only
+        // observe the pin and never shorten the pulse.
+        if self.ta_pb_pulse_low {
+            self.ta_pb_pulse_low = false;
+            self.ta_pb_output_high = true;
+        }
+        if self.tb_pb_pulse_low {
+            self.tb_pb_pulse_low = false;
+            self.tb_pb_output_high = true;
         }
         // Delayed asserts armed earlier (by FLAG, SDR, TOD, or mask
         // writes) surface here on the E-clock grid.
@@ -899,30 +931,7 @@ impl Cia {
 
     fn read_prb(&mut self) -> u8 {
         self.pc_pulse_pending = true;
-        let mut v = self.read_port(REG_PRB, REG_DDRB);
-        if self.regs[REG_CRA] & CR_PBON != 0 {
-            if self.ta_pb_output_high {
-                v |= 1 << 6;
-            } else {
-                v &= !(1 << 6);
-            }
-            if self.ta_pb_pulse_low {
-                self.ta_pb_pulse_low = false;
-                self.ta_pb_output_high = true;
-            }
-        }
-        if self.regs[REG_CRB] & CR_PBON != 0 {
-            if self.tb_pb_output_high {
-                v |= 1 << 7;
-            } else {
-                v &= !(1 << 7);
-            }
-            if self.tb_pb_pulse_low {
-                self.tb_pb_pulse_low = false;
-                self.tb_pb_output_high = true;
-            }
-        }
-        v
+        self.port_b_pins()
     }
 
     fn update_timer_a_pb_output(&mut self) {
@@ -1484,10 +1493,16 @@ mod tests {
         cia.write(REG_DDRB, 0x00);
         cia.write(REG_TBLO, 0);
         cia.write(REG_TBHI, 0);
-        cia.write(REG_CRB, CR_PBON | 0x01);
+        cia.write(REG_CRB, CR_PBON | 0x08 | 0x01); // one-shot pulse
 
         cia.tick(1);
         assert_eq!(cia.read(REG_PRB) & 0x80, 0);
+        assert_eq!(
+            cia.read(REG_PRB) & 0x80,
+            0,
+            "reading PRB must not shorten the E-clock pulse"
+        );
+        cia.tick(1);
         assert_ne!(cia.read(REG_PRB) & 0x80, 0);
     }
 
@@ -1502,6 +1517,12 @@ mod tests {
 
         let _ = cia.read(REG_PRB);
         assert!(cia.take_pc_pulse());
+
+        let _ = cia.port_b_pins();
+        assert!(
+            !cia.take_pc_pulse(),
+            "continuous pin sampling has no PC edge"
+        );
     }
 
     #[test]

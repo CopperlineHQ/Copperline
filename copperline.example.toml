@@ -366,6 +366,15 @@ floppy_sounds_volume = 100
 # listen = "127.0.0.1:1234"
 
 
+# Centronics parallel-printer capture. With no section the connector is
+# electrically unplugged: CIA-B still pulses /STROBE, but no peripheral
+# returns CIA-A /ACK. When output is set, every strobed data byte is appended
+# to this raw stream and acknowledged; feed it to the matching printer-language
+# converter or a real spooler.
+# [parallel]
+# output = "printer.raw"
+
+
 # Optional floppy drives. DF0 is always connected; set [floppy] drives
 # to wire empty external mechanisms as well (1-4 total drives). Missing
 # [floppy.dfN] tables mean no disk in that drive. Supported images:
