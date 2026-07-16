@@ -2073,6 +2073,10 @@ pub fn build_machine(
     emu.set_cache_emulation(cfg.cpu_icache, cfg.cpu_dcache);
     emu.set_machine_descriptor(cfg.descriptor());
     emu.machine.set_filesys_mounts(cfg.filesys.clone());
+    if cfg.rom_scsi_device_disable {
+        info!("romtags: the ROM's scsi.device will not be initialised");
+        emu.machine.set_cull_rom_scsi_device(true);
+    }
     Ok(emu)
 }
 

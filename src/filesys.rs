@@ -269,9 +269,20 @@ pub struct FilesysHle {
     units: Vec<FilesysUnit>,
     /// Board base address, captured from A0 at the DiagPoint trap.
     board_base: Option<u32>,
+    /// Cull the ROM's scsi.device at expansion init (`[machine]
+    /// rom_scsi_device_disable`). Our DiagPoint is the one moment the resident
+    /// list exists and the driver has not run yet; see [`crate::romtags`].
+    /// Survives the per-boot reset below -- it is configuration, not state.
+    cull_rom_scsi_device: bool,
 }
 
 impl FilesysHle {
+    /// `[machine] rom_scsi_device_disable`: unlink the ROM's scsi.device at
+    /// expansion init, before Kickstart initialises it.
+    pub fn set_cull_rom_scsi_device(&mut self, cull: bool) {
+        self.cull_rom_scsi_device = cull;
+    }
+
     pub fn set_mounts(&mut self, mounts: Vec<MountSpec>) {
         // Give each unit a fixed, non-overlapping slice of the board-window
         // lock pool. Size the slices by the board's *maximum* unit count, not
@@ -1276,8 +1287,10 @@ impl HleHandler for FilesysHle {
                     .into_iter()
                     .map(|u| u.mount)
                     .collect();
+                let cull_rom_scsi_device = self.cull_rom_scsi_device;
                 *self = FilesysHle::default();
                 self.set_mounts(mounts);
+                self.cull_rom_scsi_device = cull_rom_scsi_device;
                 self.board_base = Some(cpu.dar[8]);
                 self.write_startup_msgs(bus, cpu.dar[8]);
                 log::info!(
@@ -1285,6 +1298,10 @@ impl HleHandler for FilesysHle {
                     cpu.dar[8],
                     self.units.len()
                 );
+                if self.cull_rom_scsi_device {
+                    let culled = crate::romtags::cull_rom_device(bus, "scsi.device");
+                    log::info!("romtags: {culled} ROM scsi.device resident(s) culled");
+                }
                 true
             }
             TRAP_PACKET => {

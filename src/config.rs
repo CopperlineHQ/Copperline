@@ -101,6 +101,13 @@ pub struct Config {
     /// and the WD33C93 behind it. Kickstart hangs outright if nothing answers
     /// there. Drives go on its bus through `[scsi] controller = "a3000"`.
     pub sdmac: bool,
+    /// Keep the ROM's scsi.device from initialising. Defaults to set when
+    /// the machine's built-in disk controller (Gayle or A4000 IDE, A3000
+    /// SDMAC SCSI) has no drives configured: the driver would only cost boot
+    /// time probing an empty bus. With drives configured the default is
+    /// false and the driver runs -- scsi.device is their boot path. Set by
+    /// `[machine] rom_scsi_device_disable`; see [`crate::romtags`].
+    pub rom_scsi_device_disable: bool,
     /// Akiko gate array fitted (CD32 profile): ID + C2P port at $B80000.
     pub akiko: bool,
     /// CDTV DMAC/CD controller fitted (CDTV profile): a Zorro II
@@ -979,6 +986,7 @@ impl Default for Config {
             machine: None,
             gate_array: GateArray::None,
             mem_controller: MemController::None,
+            rom_scsi_device_disable: false,
             log_unmapped: None,
             ide_a4000: false,
             sdmac: false,
@@ -1083,8 +1091,9 @@ impl Config {
         // Copperline services board (experimental, `[[filesys]]`):
         // carries the guest handler, the mount table, and the DiagArea that
         // mounts the configured host directories at expansion init. See
-        // crate::filesys.
-        if !self.filesys.is_empty() {
+        // crate::filesys. The scsi.device cull rides the same DiagPoint, so
+        // the board is also fitted (with no mounts) when only that is wanted.
+        if !self.filesys.is_empty() || self.rom_scsi_device_disable {
             if self.filesys.len() > crate::filesys::MOUNT_MAX_COUNT {
                 anyhow::bail!(
                     "[[filesys]]: at most {} mounts supported",
@@ -1670,6 +1679,12 @@ pub(crate) struct RawMachine {
     /// exercise the diagnostic tools.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) mem_controller: Option<String>,
+    /// Skip the ROM's scsi.device. Defaults to true only when the machine's
+    /// built-in disk controller (Gayle or A4000 IDE, A3000 SDMAC SCSI) has no
+    /// drives configured, where the driver would only cost boot time probing
+    /// an empty bus; false everywhere else.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rom_scsi_device_disable: Option<bool>,
 }
 
 /// `[machine] rtc_time` accepts both TOML notations for one instant: a
@@ -2246,6 +2261,19 @@ impl TryFrom<RawConfig> for Config {
             gate_array: defaults.gate_array,
             ide_a4000: defaults.ide_a4000,
             sdmac: defaults.sdmac,
+            // The ROM's scsi.device is pure probe time when the machine's
+            // built-in disk controller (Gayle or A4000 IDE, A3000 SDMAC SCSI)
+            // has no drives on it: disable it then. With drives it is their
+            // boot path and runs; machines with no built-in controller carry
+            // no scsi.device in ROM, so there is nothing to disable.
+            rom_scsi_device_disable: raw.machine.rom_scsi_device_disable.unwrap_or({
+                let builtin_drives = (has_ide_port
+                    && (ide.master.is_some() || ide.slave.is_some()))
+                    || (defaults.sdmac
+                        && scsi.controller == ScsiController::A3000
+                        && scsi.units.iter().any(Option::is_some));
+                (has_ide_port || defaults.sdmac) && !builtin_drives
+            }),
             akiko: defaults.akiko,
             cdtv_cd: defaults.cdtv_cd,
             cd32_pad: defaults.cd32_pad,
@@ -3135,6 +3163,7 @@ mod tests {
                 rtc_time: Some(RawRtcTime::Text("2005-03-18 01:58:29".to_string())),
                 rtc_frozen: Some(true),
                 mem_controller: Some("ramsey-07".to_string()),
+                rom_scsi_device_disable: Some(true),
             },
             cpu: RawCpu {
                 model: Some("68EC020".to_string()),
@@ -3535,6 +3564,34 @@ mod tests {
         assert_eq!(cfg.gate_array.gayle_id(), None);
         assert_eq!(cfg.mem_controller, MemController::Ramsey7);
         assert!(cfg.rtc_present);
+        // With no [ide] drives the ROM's scsi.device would only stall the
+        // boot probing the empty cable, so it is disabled by default...
+        assert!(cfg.ide_a4000);
+        assert!(cfg.rom_scsi_device_disable);
+
+        // ...but drives on the cable need it: scsi.device is their boot path.
+        let img = std::env::temp_dir().join(format!("clfs-ide-{}.img", std::process::id()));
+        std::fs::write(&img, vec![0u8; 512 * 16]).unwrap();
+        let cfg = parse_config(&format!(
+            r#"
+            [machine]
+            profile = "A4000"
+            [ide]
+            master = "{}"
+            "#,
+            img.display()
+        ))?;
+        assert!(!cfg.rom_scsi_device_disable);
+
+        // Same rule on a Gayle machine: an A1200 with no drives skips the
+        // driver, one with drives keeps it.
+        let cfg = parse_config("[machine]\nprofile = \"A1200\"")?;
+        assert!(cfg.rom_scsi_device_disable);
+        let cfg = parse_config(&format!(
+            "[machine]\nprofile = \"A1200\"\n[ide]\nmaster = \"{}\"",
+            img.display()
+        ))?;
+        assert!(!cfg.rom_scsi_device_disable);
 
         let cfg = parse_config(
             r#"
@@ -3546,8 +3603,30 @@ mod tests {
         assert_eq!(cfg.cpu, CpuModel::M68030);
         assert_eq!(cfg.gate_array, GateArray::FatGary);
         assert_eq!(cfg.mem_controller, MemController::Ramsey4);
-        // Kickstart's scsi.device hangs in init if the SDMAC does not answer.
         assert!(cfg.sdmac);
+        // An empty SDMAC SCSI bus is probe time too, and a drive on it brings
+        // the driver back, exactly like the IDE machines.
+        assert!(cfg.rom_scsi_device_disable);
+        let cfg = parse_config(&format!(
+            "[machine]\nprofile = \"A3000\"\n[scsi]\nunit0 = \"{}\"",
+            img.display()
+        ))?;
+        assert!(!cfg.rom_scsi_device_disable);
+        std::fs::remove_file(&img).unwrap();
+
+        // The default is an opt-out, not a lock-out: setting the flag wins
+        // over the empty-bus heuristic in both directions.
+        let cfg = parse_config(
+            r#"
+            [machine]
+            profile = "A3000"
+            rom_scsi_device_disable = false
+            "#,
+        )?;
+        assert!(!cfg.rom_scsi_device_disable);
+        // A machine with no built-in controller has no scsi.device in ROM;
+        // there is nothing to disable.
+        assert!(!parse_config("")?.rom_scsi_device_disable);
 
         let err = parse_config(
             r#"
