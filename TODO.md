@@ -124,11 +124,10 @@ Raw key shortcuts:
 Only genuinely-remaining work is listed here. Closed audit work lives in
 git history, not as a done-log in this file.
 
-1. **CPU exception/interrupt test coverage.** `src/cpu.rs` covers reset
-   vectors, Line-F, illegal/privilege violations, and autovector/RTE
-   paths. Still missing: Line-A, stopped-CPU wakeup, an explicit 24-bit
-   address-masking test on `68EC020`, and a `68040`-as-LC040 snippet (the
-   `cpu_type_for_model` mapping exists but is untested).
+1. **Stopped-CPU interrupt coverage.** Add an end-to-end regression in
+   `src/cpu.rs` that executes `STOP`, advances devices until an interrupt
+   becomes pending, and verifies that the CPU wakes into the autovector
+   handler with the expected stack frame.
 
 2. **POTGO RC modelling.** `write_potgo`/`read_potgor`/`tick_pot_hsync`
    (`src/chipset/paula.rs`) model output loopback with open-drain pin
@@ -137,11 +136,9 @@ git history, not as a done-log in this file.
    real pot resistance and chip-revision bits.
 
 3. **CIA gaps.**
-   - CIA-A physical port restrictions: disk-sense bits PA5-PA2 must stay
-     inputs even when DDRA marks them as outputs.
-   - Parallel-port / Centronics behaviour: CIA-B PRA strobe on data write,
-     CIA-A FLAG acknowledge, PB6/PB7 timer-output handshake, and defined
-     behaviour for the dormant CIA-B SDR/CNT pins.
+   - Complete the parallel-port / Centronics signal path: consume CIA-B's
+     `PC` pulse from parallel-data (`PRB`) accesses as the external strobe,
+     and feed a peripheral acknowledge edge into CIA-A `FLAG`.
    - CIA timer/TOD sub-cycle edges (next-E-clock TAHI/TBHI load, delayed
      TOD carry, PB6/PB7 pulse width, `PC` pulse timing) are sub-cycle phase
      delays the instruction-paced core cannot model faithfully; deferred to
@@ -151,13 +148,15 @@ git history, not as a done-log in this file.
 4. **Memory-map tests.** Chip/slow/fast RAM sizes are config-selectable and
    `src/cpu.rs` covers the boot overlay, ROM write-protect, slow-RAM bus
    contention, chip-window aliasing by Agnus reach, and the small-box
-   custom-register mirror. Remaining: fast-RAM mirror coverage and an
-   explicit A500 Rev.6 512K+512K layout regression.
+   custom-register mirror. Remaining: CPU-visible fast-RAM window-boundary
+   and no-alias coverage, plus an explicit A500 Rev.6 512K-chip +
+   512K-trapdoor layout regression.
 
-5. **Keep the test matrix maintainable.** Promote a repeated manual smoke
-   path into a fast unit test, an ignored image regression, or a scripted
-   command here. Record completed audit work in commits and PR
-   descriptions, never as a done-log in this file.
+## Test Maintenance Policy
+
+Promote a repeated manual smoke path into a fast unit test, an ignored image
+regression, or a scripted command here. Record completed audit work in commits
+and PR descriptions, never as a done-log in this file.
 
 ## Known software regression watch
 

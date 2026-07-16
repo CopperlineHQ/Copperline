@@ -3504,6 +3504,32 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn m68ec020_masks_external_addresses_to_24_bits() -> Result<()> {
+        // MOVEA retains all 32 register bits, but the EC020 exposes only
+        // A0-A23 externally. The MOVE.W must therefore read $000800 when A0
+        // contains $01000800 rather than issuing an unmapped 32-bit access.
+        let mut machine = machine_with_program_model(
+            0x0500,
+            &[
+                0x207C, 0x0100, 0x0800, // movea.l #$01000800,a0
+                0x3010, // move.w (a0),d0
+            ],
+            CpuModel::M68EC020,
+        )?;
+        write_chip_word(machine.bus_mut(), 0x0800, 0xBEEF);
+
+        machine.step_slice(2)?;
+
+        assert_eq!(machine.a(0), 0x0100_0800, "address register stays 32-bit");
+        assert_eq!(
+            machine.d(0) & 0xFFFF,
+            0xBEEF,
+            "external address wraps at 24 bits"
+        );
+        Ok(())
+    }
+
     // The motherboard decode routes the whole $000000-$1FFFFF window to
     // Agnus, which decodes only as many address bits as its DRAM reach, so
     // the fitted chip RAM image repeats across the window (every 512 KiB on
