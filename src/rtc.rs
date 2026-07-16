@@ -228,12 +228,19 @@ pub fn parse_rtc_time(s: &str) -> Result<u64, String> {
     if year < 1970 {
         return Err(format!("rtc_time {s:?} is before 1970 (Unix epoch)"));
     }
+    // Explicit bounds before the casts below: a year above i32::MAX or a
+    // month/day above u32::MAX would wrap identically in the computation
+    // and in the round-trip check, slipping past it as a wrong date.
+    if year > 9999 || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return Err(format!("rtc_time {s:?} is not a valid calendar date"));
+    }
     if hour > 23 || minute > 59 || second > 59 {
         return Err(format!("rtc_time {s:?} has an out-of-range time of day"));
     }
     let days = days_from_civil(year as i64, month as u32, day as u32);
-    // Round-tripping through the decomposition rejects impossible dates
-    // (month 13, Feb 30) without a hand-written calendar table.
+    // Round-tripping through the decomposition rejects the impossible
+    // dates the bounds above cannot (Feb 30, Apr 31) without a
+    // hand-written calendar table.
     if civil_from_days(days) != (year as i32, month as u32, day as u32) {
         return Err(format!("rtc_time {s:?} is not a valid calendar date"));
     }
@@ -488,9 +495,15 @@ mod tests {
         assert!(parse_rtc_time("2005-03-18").is_err()); // no time of day
         assert!(parse_rtc_time("2005-13-01 00:00:00").is_err());
         assert!(parse_rtc_time("2005-02-30 00:00:00").is_err());
+        assert!(parse_rtc_time("2005-03-00 00:00:00").is_err());
         assert!(parse_rtc_time("2005-03-18 24:00:00").is_err());
         assert!(parse_rtc_time("1969-12-31 23:59:59").is_err());
         assert!(parse_rtc_time("-100").is_err());
+        // Values that would wrap the internal casts (u32 month, i32 year)
+        // must fail loudly, not alias onto a nearby valid date.
+        assert!(parse_rtc_time("2005-4294967299-18 00:00:00").is_err());
+        assert!(parse_rtc_time("4294969296-03-18 00:00:00").is_err());
+        assert!(parse_rtc_time("99999999999-01-01 00:00:00").is_err());
     }
 
     #[cfg(any(unix, windows))]

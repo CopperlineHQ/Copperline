@@ -354,7 +354,7 @@ where
             }
             "--rtc-time" => {
                 overrides.rtc_time = Some(args.next().ok_or_else(|| {
-                    anyhow!("--rtc-time requires Unix seconds or \"YYYY-MM-DD HH:MM:SS\"")
+                    anyhow!("--rtc-time requires Unix seconds or \"YYYY-MM-DD HH:MM[:SS]\"")
                 })?);
             }
             "--rtc-frozen" => {
@@ -787,7 +787,7 @@ fn print_help() {
          --slow SIZE                    trapdoor slow RAM at $C00000, e.g. 0, 512K\n  \
          --floppy-drives COUNT          wired floppy drives, 1-4 (DF0 plus externals)\n  \
          --rtc-time TIME                seed the battery clock (implies fitting one) with\n  \
-         \x20                            Unix seconds or \"YYYY-MM-DD HH:MM:SS\"; it then\n  \
+         \x20                            Unix seconds or \"YYYY-MM-DD HH:MM[:SS]\"; it then\n  \
          \x20                            ticks in emulated time, so runs are deterministic\n  \
          --rtc-frozen                   stop the seeded clock at --rtc-time exactly\n  \
          --joystick MODE                initial joystick input: gamepad or keyboard\n  \

@@ -1045,9 +1045,11 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
             let current = emu.bus().rtc.current_unix(secs);
             let target = match (unix, advance) {
                 (Some(u), _) => *u,
-                (None, Some(d)) => current
-                    .checked_add_signed(*d)
-                    .ok_or_else(|| CtlError::invalid_params("advance underflows the Unix epoch"))?,
+                (None, Some(d)) => current.checked_add_signed(*d).ok_or_else(|| {
+                    CtlError::invalid_params(
+                        "advance moves the clock outside the Unix-seconds range",
+                    )
+                })?,
                 (None, None) => current,
             };
             let frozen = frozen.unwrap_or_else(|| emu.bus().rtc.frozen());
