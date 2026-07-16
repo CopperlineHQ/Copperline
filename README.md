@@ -261,8 +261,9 @@ output = "printer.raw"
 ```
 
 The capture preserves the guest's printer-language bytes verbatim for a
-compatible converter or spooler. See the configuration guide for the signal
-and interrupt behaviour.
+compatible converter or spooler. The configured path is replaced when the
+emulator starts. See the configuration guide for the signal and interrupt
+behaviour.
 
 ## Documentation
 

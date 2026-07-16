@@ -504,10 +504,11 @@ output = "printer.raw"
 Without this section the parallel connector is electrically disconnected:
 CIA-B still produces its hardware `PC` strobe on port-B accesses, but no
 peripheral acknowledges it. Setting `output` attaches a raw Centronics sink.
-Each strobed byte is written verbatim to the file and returns the printer
-`/ACK` falling edge through CIA-A `FLAG`, including the normal CIA interrupt
-delay. The file is intentionally not decoded because the guest may emit any
-printer language; pass it to a compatible converter or spooler afterwards.
+The output file is created at startup, replacing any existing file at that
+path. Each strobed byte is then written verbatim and returns the printer `/ACK`
+falling edge through CIA-A `FLAG`, including the normal CIA interrupt delay.
+The file is intentionally not decoded because the guest may emit any printer
+language; pass it to a compatible converter or spooler afterwards.
 
 ## `[floppy]` and `[floppy.df0]` .. `[floppy.df3]`
 

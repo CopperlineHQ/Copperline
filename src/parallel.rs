@@ -33,10 +33,10 @@ pub fn null_parallel_port() -> Box<dyn ParallelPort> {
     Box::new(NullParallelPort)
 }
 
-/// Raw printer capture. Each accepted Centronics byte is appended to the host
-/// file and acknowledged. This deliberately does not interpret printer escape
-/// languages; it preserves the exact guest byte stream for a real spooler or
-/// conversion tool.
+/// Raw printer capture. Opening a capture replaces any existing host file;
+/// each accepted Centronics byte is then written in order and acknowledged.
+/// This deliberately does not interpret printer escape languages, preserving
+/// the exact guest byte stream for a real spooler or conversion tool.
 pub struct FileParallelPort {
     writer: std::io::BufWriter<std::fs::File>,
     failed: bool,
@@ -81,12 +81,12 @@ mod tests {
     }
 
     #[test]
-    fn file_parallel_port_captures_and_acknowledges_raw_bytes() {
+    fn file_parallel_port_replaces_old_capture_and_writes_raw_bytes() {
         let path = std::env::temp_dir().join(format!(
             "copperline-parallel-capture-{}.raw",
             std::process::id()
         ));
-        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, b"stale capture").unwrap();
 
         let mut port = FileParallelPort::create(&path).unwrap();
         assert!(port.strobe(0x1b, 10));
@@ -94,6 +94,7 @@ mod tests {
         port.flush().unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), [0x1b, b'@']);
 
+        drop(port);
         let _ = std::fs::remove_file(path);
     }
 }

@@ -368,9 +368,9 @@ floppy_sounds_volume = 100
 
 # Centronics parallel-printer capture. With no section the connector is
 # electrically unplugged: CIA-B still pulses /STROBE, but no peripheral
-# returns CIA-A /ACK. When output is set, every strobed data byte is appended
-# to this raw stream and acknowledged; feed it to the matching printer-language
-# converter or a real spooler.
+# returns CIA-A /ACK. When output is set, the path is replaced at startup and
+# every strobed data byte is captured in order and acknowledged; feed the raw
+# stream to the matching printer-language converter or a real spooler.
 # [parallel]
 # output = "printer.raw"
 
