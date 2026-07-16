@@ -126,6 +126,15 @@ pub struct Config {
     /// the CDTV carry one by default; the A600HD and a clock-equipped A1200 set
     /// `[machine] rtc = true`.
     pub rtc_present: bool,
+    /// Power-on RTC value in Unix seconds (`[machine] rtc_time` /
+    /// `--rtc-time`). When set, the clock starts here and ticks with
+    /// *emulated* time instead of following the host wall clock, so the
+    /// guest-visible time is deterministic and reproducible. Setting a time
+    /// implies fitting the clock (`rtc = true`).
+    pub rtc_seed_unix: Option<u64>,
+    /// Stop the seeded RTC (`[machine] rtc_frozen`): every read returns
+    /// exactly `rtc_seed_unix`, for pinning a guest to one time window.
+    pub rtc_frozen: bool,
     pub video_standard: VideoStandard,
     pub audio: AudioConfig,
     /// Gayle IDE drive images (raw flat HDF, RDB inside), opened
@@ -984,6 +993,8 @@ impl Default for Config {
             // clock; only the A500+/CDTV profiles fit one (see
             // machine_profile_defaults).
             rtc_present: false,
+            rtc_seed_unix: None,
+            rtc_frozen: false,
             video_standard: VideoStandard::Pal,
             audio: AudioConfig::default(),
             ide: IdeConfig::default(),
@@ -1154,6 +1165,12 @@ pub struct ConfigOverrides {
     pub audio_channel_mode: Option<String>,
     /// Stereo separation percent (`--audio-stereo-separation`), 0-100.
     pub audio_stereo_separation: Option<u16>,
+    /// Power-on RTC value (`--rtc-time`): Unix seconds or
+    /// "YYYY-MM-DD HH:MM[:SS]". Same parser as `[machine] rtc_time`.
+    pub rtc_time: Option<String>,
+    /// Freeze the seeded RTC (`--rtc-frozen`). Same as
+    /// `[machine] rtc_frozen`.
+    pub rtc_frozen: Option<bool>,
 }
 
 impl ConfigOverrides {
@@ -1175,6 +1192,8 @@ impl ConfigOverrides {
             && self.audio_device.is_none()
             && self.audio_channel_mode.is_none()
             && self.audio_stereo_separation.is_none()
+            && self.rtc_time.is_none()
+            && self.rtc_frozen.is_none()
     }
 
     /// Inject the set overrides into the raw config, replacing the values
@@ -1232,6 +1251,14 @@ impl ConfigOverrides {
         }
         if let Some(sep) = self.audio_stereo_separation {
             raw.audio.stereo_separation = Some(sep);
+        }
+        if let Some(time) = &self.rtc_time {
+            // The text form parses bare digits as Unix seconds, so both
+            // CLI notations funnel through one raw variant.
+            raw.machine.rtc_time = Some(RawRtcTime::Text(time.clone()));
+        }
+        if let Some(frozen) = self.rtc_frozen {
+            raw.machine.rtc_frozen = Some(frozen);
         }
     }
 }
@@ -1627,12 +1654,32 @@ pub(crate) struct RawMachine {
     /// clock-equipped A1200.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) rtc: Option<bool>,
+    /// Power-on clock value: an integer (Unix seconds, UTC) or a string
+    /// `"YYYY-MM-DD HH:MM[:SS]"` (the wall-clock time the guest reads).
+    /// Seeds the battery clock and ticks it in emulated time so the
+    /// guest-visible time is deterministic; implies `rtc = true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rtc_time: Option<RawRtcTime>,
+    /// Stop the seeded clock so every read returns `rtc_time` exactly.
+    /// Only meaningful together with `rtc_time`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rtc_frozen: Option<bool>,
     /// Memory controller fitted, defaulting per profile: `none`, `ramsey-04`
     /// (A3000) or `ramsey-07` (A4000). Ramsey answers at $DE0000, which no
     /// other chip decodes, so it can also be fitted to a wedge machine to
     /// exercise the diagnostic tools.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) mem_controller: Option<String>,
+}
+
+/// `[machine] rtc_time` accepts both TOML notations for one instant: a
+/// bare integer (Unix seconds) or a calendar string. Both funnel through
+/// `crate::rtc::parse_rtc_time` at validation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum RawRtcTime {
+    Unix(i64),
+    Text(String),
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -2122,6 +2169,32 @@ impl TryFrom<RawConfig> for Config {
             }
             None => 0.0,
         };
+        let rtc_seed_unix = match &raw.machine.rtc_time {
+            Some(RawRtcTime::Unix(n)) => match u64::try_from(*n) {
+                Ok(secs) => Some(secs),
+                Err(_) => {
+                    errors.push(anyhow!(
+                        "[machine] rtc_time must be non-negative Unix seconds \
+                         (1970 or later)"
+                    ));
+                    None
+                }
+            },
+            Some(RawRtcTime::Text(s)) => match crate::rtc::parse_rtc_time(s) {
+                Ok(secs) => Some(secs),
+                Err(e) => {
+                    errors.push(anyhow!("[machine] rtc_time: {e}"));
+                    None
+                }
+            },
+            None => None,
+        };
+        let rtc_frozen = raw.machine.rtc_frozen.unwrap_or(false);
+        if rtc_frozen && raw.machine.rtc_time.is_none() {
+            errors.push(anyhow!(
+                "[machine] rtc_frozen = true needs an rtc_time to freeze at"
+            ));
+        }
 
         match errors.len() {
             0 => {}
@@ -2187,7 +2260,18 @@ impl TryFrom<RawConfig> for Config {
                 .nvram
                 .map(PathBuf::from)
                 .or_else(|| defaults.akiko.then(|| PathBuf::from("cd32-nvram.bin"))),
-            rtc_present: raw.machine.rtc.unwrap_or(defaults.rtc_present),
+            rtc_present: match raw.machine.rtc {
+                // A configured time on an explicitly unfitted clock would
+                // silently do nothing; make the contradiction loud.
+                Some(false) if rtc_seed_unix.is_some() => anyhow::bail!(
+                    "[machine] rtc_time is set but rtc = false leaves the \
+                     clock unfitted; drop one of them"
+                ),
+                Some(fitted) => fitted,
+                None => defaults.rtc_present || rtc_seed_unix.is_some(),
+            },
+            rtc_seed_unix,
+            rtc_frozen,
             log_unmapped: raw
                 .debug
                 .log_unmapped
@@ -2923,6 +3007,77 @@ mod tests {
     }
 
     #[test]
+    fn rtc_time_accepts_both_notations_and_implies_a_fitted_clock() -> Result<()> {
+        // Integer form: Unix seconds (an RFC 6238 test-vector instant).
+        let cfg = parse_config(
+            r#"
+            [machine]
+            rtc_time = 1111111109
+            "#,
+        )?;
+        assert_eq!(cfg.rtc_seed_unix, Some(1_111_111_109));
+        assert!(!cfg.rtc_frozen);
+        // The default A500 has no clock, but seeding one fits it.
+        assert!(cfg.rtc_present);
+
+        // Calendar form: the same instant as the guest reads it.
+        let cfg = parse_config(
+            r#"
+            [machine]
+            rtc_time = "2005-03-18 01:58:29"
+            rtc_frozen = true
+            "#,
+        )?;
+        assert_eq!(cfg.rtc_seed_unix, Some(1_111_111_109));
+        assert!(cfg.rtc_frozen);
+        assert!(cfg.rtc_present);
+        Ok(())
+    }
+
+    #[test]
+    fn rtc_time_misconfigurations_are_rejected() {
+        // An explicitly unfitted clock contradicts a configured time.
+        let err = parse_config(
+            r#"
+            [machine]
+            rtc = false
+            rtc_time = 1111111109
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("rtc = false"), "{err:#}");
+
+        // Freezing needs a time to freeze at.
+        let err = parse_config(
+            r#"
+            [machine]
+            rtc_frozen = true
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("rtc_frozen"), "{err:#}");
+
+        // Negative Unix seconds and malformed strings fail validation.
+        for bad in ["rtc_time = -1", "rtc_time = \"tomorrow\""] {
+            let err = parse_config(&format!("[machine]\n{bad}\n")).unwrap_err();
+            assert!(err.to_string().contains("rtc_time"), "{bad}: {err:#}");
+        }
+    }
+
+    #[test]
+    fn rtc_time_cli_override_matches_the_config_field() -> Result<()> {
+        let cfg = load_overrides(&ConfigOverrides {
+            rtc_time: Some("1111111109".to_string()),
+            rtc_frozen: Some(true),
+            ..ConfigOverrides::default()
+        })?;
+        assert_eq!(cfg.rtc_seed_unix, Some(1_111_111_109));
+        assert!(cfg.rtc_frozen);
+        assert!(cfg.rtc_present);
+        Ok(())
+    }
+
+    #[test]
     fn format_size_inverts_parse_size() {
         for (bytes, text) in [
             (0usize, "0"),
@@ -2977,6 +3132,8 @@ mod tests {
             machine: RawMachine {
                 profile: Some("A1200".to_string()),
                 rtc: Some(true),
+                rtc_time: Some(RawRtcTime::Text("2005-03-18 01:58:29".to_string())),
+                rtc_frozen: Some(true),
                 mem_controller: Some("ramsey-07".to_string()),
             },
             cpu: RawCpu {

@@ -96,6 +96,8 @@ missing.
 [machine]
 profile = "A1200" # A1000, A500, A500OCS, A500Plus (A500+), A600, A1200, A3000, A4000, CDTV, CD32
 rtc = true        # add a battery RTC (default: only A500+/CDTV/A3000/A4000 ship with one)
+# rtc_time = "2005-03-18 01:58:29" # seed the clock; it then ticks in emulated time
+# rtc_frozen = true                # stop the seeded clock at rtc_time exactly
 mem_controller = "ramsey-07" # none, ramsey-04 (A3000), ramsey-07 (A4000)
 ```
 
@@ -128,6 +130,28 @@ board), `CDTV`, `A3000`, and `A4000` fit one by default; the base
 A500/A500OCS, A600, A1200, A1000, and CD32 have none. Set `rtc = true` to add
 one -- for an A600HD or a clock-equipped A1200, say -- so the Workbench clock
 keeps time.
+
+`rtc_time` seeds the clock instead of letting it mirror the host's: the value
+is either an integer (Unix seconds, UTC) or a string
+`"YYYY-MM-DD HH:MM[:SS]"` giving exactly the wall-clock time the guest reads
+at power-on. A seeded clock ticks with *emulated* time, so the time the guest
+sees is deterministic and reproducible byte-for-byte across runs -- the way
+to test time-dependent guest software (TOTP/RFC 6238 vectors, timestamped
+logs, date rollovers) or just to boot into a fixed date. Setting a time
+implies `rtc = true`; combining it with an explicit `rtc = false` is an
+error. `rtc_frozen = true` additionally stops the tick so every read returns
+`rtc_time` exactly. Both are also available as `--rtc-time` / `--rtc-frozen`
+CLI flags, and a control-protocol session can inspect and move the clock live
+with `rtc.get` / `rtc.set` (see `docs/debugger/control.md`).
+
+Two guest-side notes: Kickstart 2.0+ loads the system time from the battery
+clock automatically at boot, while Kickstart 1.3 only does so when the
+startup-sequence runs `SetClock LOAD`; and the chip's two-digit year registers
+mean AmigaOS applies its usual century window, so seeds outside 1978-2077
+will not read back as the year you set. A host-initiated reset or power
+cycle restarts the emulated timeline and therefore restarts a seeded clock
+from `rtc_time`; a guest-initiated reboot (the 68000 `RESET` instruction)
+leaves it ticking, like real battery-backed hardware.
 
 The `A3000` and `A4000` profiles are the big-box machines. They carry a
 Ramsey memory controller (`mem_controller`), which is what the two registers

@@ -99,7 +99,10 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      sprite DMA fetches, last writer wins; the existing spr* fields
 //      remain the CPU/Copper write shadow the render replay is calibrated
 //      against)
-pub const STATE_VERSION: u32 = 28;
+//  29: Msm6242Rtc gained the deterministic clock seed (seed_unix, frozen -
+//      [machine] rtc_time / rtc_frozen), so a resumed run keeps reading
+//      the same guest-visible time
+pub const STATE_VERSION: u32 = 29;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

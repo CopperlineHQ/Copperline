@@ -144,6 +144,18 @@ not touched), `disasm {addr?, count?}`, `custom.dump`,
 `custom.read {reg}` (name or offset), `cia.get {cia: "a"|"b"}`,
 `beam.get`, `display.get`, `copper.list {addr?, max?}`, `pc_history`.
 
+Battery clock (the $DC0000 RTC; see `rtc_time` in
+`docs/guide/configuration.md` for the boot-time seed): `rtc.get` reports
+`{present, seeded, frozen, unix, time}`; `rtc.set {unix | time |
+advance, frozen?}` moves it live -- `unix` (Unix seconds) or `time`
+(`"YYYY-MM-DD HH:MM[:SS]"`) set an absolute value the clock reads from
+this instant, `advance` (signed seconds) jumps relative to the current
+reading, and `frozen` stops or resumes the tick (alone it
+freezes/unfreezes in place). The guest only notices when it re-reads
+the chip -- AmigaOS loads system time from it at boot (KS 2.0+) or via
+`SetClock LOAD`, so pair `rtc.set` with a warm reset or a guest-side
+re-read. `-32007` on a machine with no clock fitted.
+
 Breakpoints (shared with the debugger window's live store, so
 GUI-toggled points appear in `break.list`): `break.add {kind: "pc",
 addr, cond?, ignore?}` / `{kind: "watch", addr, class?}` /

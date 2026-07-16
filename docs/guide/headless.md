@@ -128,6 +128,31 @@ motion is captured at frame granularity (one `mouse-after` per frame of
 movement); CD inserts are not recorded -- use the `[cd]` config section
 for those.
 
+## A deterministic guest clock
+
+The emulated core never depends on the host clock -- with one deliberate
+exception: the battery-backed RTC mirrors host time on machines that have
+one, and an RTC-less machine boots to whatever date the guest OS invents.
+Both are wrong for testing time-dependent guest software. `--rtc-time`
+(or `[machine] rtc_time`) fits a battery clock seeded to a fixed instant --
+Unix seconds or `"YYYY-MM-DD HH:MM:SS"` -- that then ticks in *emulated*
+time, so every run boots to the same time and reads the same clock at the
+same emulated instant, on any host. `--rtc-frozen` stops it entirely.
+
+```sh
+# Validate a TOTP generator against an RFC 6238 vector time: the guest
+# boots with the clock at 2005-03-18 01:58:29 UTC (unix 1111111109),
+# deterministically, on every run.
+./target/release/copperline --config auth.toml --noaudio \
+  --rtc-time 1111111109 \
+  --screenshot-after 45 /tmp/code.png
+```
+
+Kickstart 2.0+ loads system time from the battery clock at boot on its
+own; Kickstart 1.3 needs `SetClock LOAD` in the startup-sequence. A
+[control-protocol](../debugger/control) session can also inspect, move,
+freeze, and resume the clock mid-run with `rtc.get` / `rtc.set`.
+
 ## Audio capture
 
 - `--noaudio` runs silent (live audio is otherwise on by default).

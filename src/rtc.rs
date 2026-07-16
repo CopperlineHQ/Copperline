@@ -13,6 +13,14 @@
 //! real notion of time zones and a UTC clock just confuses users. The
 //! deterministic `COPPERLINE_RTC_FIXED_SECS` override stays UTC so it
 //! remains host-independent.
+//!
+//! A configured seed (`[machine] rtc_time` / `--rtc-time`) replaces the
+//! host clock entirely: the chip powers on reading the seed and ticks
+//! forward with *emulated* time, like a battery clock that was set before
+//! the machine was switched on. Reads are then reproducible byte-for-byte,
+//! which is what a guest program validating time-dependent behaviour
+//! (TOTP vectors, timestamped logs) needs. `rtc_frozen` additionally stops
+//! the tick, as if the chip's STOP bit were wired permanently high.
 
 use crate::timebase::{SystemTime, UNIX_EPOCH};
 
@@ -21,6 +29,12 @@ pub struct Msm6242Rtc {
     control_d: u8,
     control_e: u8,
     latched: Option<RtcDateTime>,
+    /// Power-on clock value in Unix seconds. When set, register reads
+    /// derive from seed + elapsed emulated seconds instead of the host
+    /// wall clock, making the guest-visible time deterministic.
+    seed_unix: Option<u64>,
+    /// Stop the seeded clock: reads always decompose the seed itself.
+    frozen: bool,
     #[cfg(test)]
     test_time: Option<SystemTime>,
 }
@@ -41,18 +55,18 @@ impl Msm6242Rtc {
     const CD_IRQ_FLAG: u8 = 1 << 2;
     const CF_24H: u8 = 1 << 2;
 
-    pub fn read(&mut self, addr: u64, _size: usize) -> u64 {
-        self.read_register(register_from_offset(addr)) as u64
+    pub fn read(&mut self, addr: u64, _size: usize, emulated_secs: f64) -> u64 {
+        self.read_register(register_from_offset(addr), emulated_secs) as u64
     }
 
-    pub fn write(&mut self, addr: u64, _size: usize, val: u64) {
+    pub fn write(&mut self, addr: u64, _size: usize, val: u64, emulated_secs: f64) {
         let reg = register_from_offset(addr);
         let val = (val & 0x0F) as u8;
         match reg {
             0xD => {
                 if val & Self::CD_HOLD != 0 {
                     if self.latched.is_none() {
-                        self.latched = Some(self.current_time());
+                        self.latched = Some(self.current_time(emulated_secs));
                     }
                     self.control_d = Self::CD_HOLD;
                 } else {
@@ -71,8 +85,10 @@ impl Msm6242Rtc {
         }
     }
 
-    fn read_register(&mut self, reg: u8) -> u8 {
-        let time = self.latched.unwrap_or_else(|| self.current_time());
+    fn read_register(&mut self, reg: u8, emulated_secs: f64) -> u8 {
+        let time = self
+            .latched
+            .unwrap_or_else(|| self.current_time(emulated_secs));
         (match reg {
             0x0 => time.second % 10,
             0x1 => time.second / 10,
@@ -94,7 +110,7 @@ impl Msm6242Rtc {
         }) & 0x0F
     }
 
-    fn current_time(&self) -> RtcDateTime {
+    fn current_time(&self, emulated_secs: f64) -> RtcDateTime {
         #[cfg(test)]
         if let Some(time) = self.test_time {
             return RtcDateTime::from_system_time(time);
@@ -102,19 +118,126 @@ impl Msm6242Rtc {
         // COPPERLINE_RTC_FIXED_SECS pins the clock to a fixed Unix-seconds
         // value, making RTC reads deterministic across runs (otherwise the
         // host wall-clock differs run-to-run, which pollutes differential
-        // traces with spurious timestamp divergences).
+        // traces with spurious timestamp divergences). As a diagnostic
+        // override it wins over the configured seed.
         if let Some(secs) = crate::envcfg::var("COPPERLINE_RTC_FIXED_SECS")
             .and_then(|s| s.trim().parse::<u64>().ok())
         {
             return RtcDateTime::from_unix_seconds(secs);
         }
+        if let Some(seed) = self.seed_unix {
+            return RtcDateTime::from_unix_seconds(self.seeded_unix(seed, emulated_secs));
+        }
         RtcDateTime::from_system_time_local(SystemTime::now())
+    }
+
+    fn seeded_unix(&self, seed: u64, emulated_secs: f64) -> u64 {
+        if self.frozen {
+            seed
+        } else {
+            seed + emulated_secs as u64
+        }
+    }
+
+    /// Configure the power-on clock value (`None` restores the live host
+    /// clock). The seed is the value the clock reads at emulated time zero.
+    pub fn set_seed(&mut self, seed_unix: Option<u64>, frozen: bool) {
+        self.seed_unix = seed_unix;
+        self.frozen = frozen && seed_unix.is_some();
+    }
+
+    pub fn seed(&self) -> Option<u64> {
+        self.seed_unix
+    }
+
+    pub fn frozen(&self) -> bool {
+        self.frozen
+    }
+
+    /// The Unix-seconds instant register reads decompose right now,
+    /// following the same source precedence as `current_time` (the
+    /// host-local path reports plain host Unix seconds).
+    pub fn current_unix(&self, emulated_secs: f64) -> u64 {
+        if let Some(secs) = crate::envcfg::var("COPPERLINE_RTC_FIXED_SECS")
+            .and_then(|s| s.trim().parse::<u64>().ok())
+        {
+            return secs;
+        }
+        if let Some(seed) = self.seed_unix {
+            return self.seeded_unix(seed, emulated_secs);
+        }
+        RtcDateTime::unix_secs(SystemTime::now())
+    }
+
+    /// The broken-down time register reads expose right now, formatted as
+    /// `YYYY-MM-DDTHH:MM:SS` (for status reporting, not the guest).
+    pub fn current_display(&self, emulated_secs: f64) -> String {
+        self.current_time(emulated_secs).iso8601()
+    }
+
+    /// A CPU reset does not reach the battery-backed chip, so the time
+    /// source keeps running; only the bus-visible latch state drops back
+    /// to power-on defaults.
+    pub fn reset(&mut self) {
+        self.control_d = 0;
+        self.control_e = 0;
+        self.latched = None;
     }
 
     #[cfg(test)]
     fn set_test_time(&mut self, time: SystemTime) {
         self.test_time = Some(time);
     }
+}
+
+/// Parse a `[machine] rtc_time` / `--rtc-time` value: either a bare
+/// integer (Unix seconds, UTC) or a calendar timestamp
+/// `YYYY-MM-DD HH:MM[:SS]` (a `T` date/time separator is also accepted).
+/// The calendar form is exactly the wall-clock time the guest reads at
+/// power-on, independent of the host time zone.
+pub fn parse_rtc_time(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("empty rtc_time value".into());
+    }
+    if s.bytes().all(|b| b.is_ascii_digit()) {
+        return s
+            .parse::<u64>()
+            .map_err(|_| format!("Unix-seconds value {s:?} is out of range"));
+    }
+    let form = "expected Unix seconds or \"YYYY-MM-DD HH:MM[:SS]\"";
+    let (date, time) = s
+        .split_once(['T', ' '])
+        .ok_or_else(|| format!("cannot parse rtc_time {s:?}: {form}"))?;
+    let mut date_parts = date.splitn(3, '-');
+    let num = |part: Option<&str>| -> Result<u64, String> {
+        part.filter(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+            .and_then(|p| p.parse::<u64>().ok())
+            .ok_or_else(|| format!("cannot parse rtc_time {s:?}: {form}"))
+    };
+    let year = num(date_parts.next())?;
+    let month = num(date_parts.next())?;
+    let day = num(date_parts.next())?;
+    let mut time_parts = time.splitn(3, ':');
+    let hour = num(time_parts.next())?;
+    let minute = num(time_parts.next())?;
+    let second = match time_parts.next() {
+        Some(sec) => num(Some(sec))?,
+        None => 0,
+    };
+    if year < 1970 {
+        return Err(format!("rtc_time {s:?} is before 1970 (Unix epoch)"));
+    }
+    if hour > 23 || minute > 59 || second > 59 {
+        return Err(format!("rtc_time {s:?} has an out-of-range time of day"));
+    }
+    let days = days_from_civil(year as i64, month as u32, day as u32);
+    // Round-tripping through the decomposition rejects impossible dates
+    // (month 13, Feb 30) without a hand-written calendar table.
+    if civil_from_days(days) != (year as i32, month as u32, day as u32) {
+        return Err(format!("rtc_time {s:?} is not a valid calendar date"));
+    }
+    Ok(days as u64 * 86_400 + hour * 3_600 + minute * 60 + second)
 }
 
 fn register_from_offset(addr: u64) -> u8 {
@@ -143,6 +266,13 @@ impl RtcDateTime {
         time.duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs()
+    }
+
+    fn iso8601(&self) -> String {
+        format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+            self.year, self.month, self.day, self.hour, self.minute, self.second
+        )
     }
 
     fn from_unix_seconds(secs: u64) -> Self {
@@ -212,6 +342,18 @@ impl RtcDateTime {
     }
 }
 
+/// Inverse of `civil_from_days` (Howard Hinnant's civil-calendar
+/// algorithm): days since the Unix epoch for a Gregorian date.
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let y = year - if month <= 2 { 1 } else { 0 };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let m = month as i64;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + day as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
 fn civil_from_days(days_since_unix_epoch: i64) -> (i32, u32, u32) {
     let z = days_since_unix_epoch + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
@@ -232,7 +374,11 @@ mod tests {
     use std::time::Duration;
 
     fn read_reg(rtc: &mut Msm6242Rtc, reg: u8) -> u8 {
-        rtc.read((reg as u64) * 4, 4) as u8
+        rtc.read((reg as u64) * 4, 4, 0.0) as u8
+    }
+
+    fn read_reg_at(rtc: &mut Msm6242Rtc, reg: u8, emulated_secs: f64) -> u8 {
+        rtc.read((reg as u64) * 4, 4, emulated_secs) as u8
     }
 
     #[test]
@@ -263,7 +409,7 @@ mod tests {
     fn hold_write_latches_time_without_setting_host_clock() {
         let mut rtc = Msm6242Rtc::default();
         rtc.set_test_time(UNIX_EPOCH + Duration::from_secs(946_782_245));
-        rtc.write(0xD * 4, 4, Msm6242Rtc::CD_HOLD as u64);
+        rtc.write(0xD * 4, 4, Msm6242Rtc::CD_HOLD as u64, 0.0);
         assert_eq!(
             read_reg(&mut rtc, 0xD) & Msm6242Rtc::CD_HOLD,
             Msm6242Rtc::CD_HOLD
@@ -272,8 +418,79 @@ mod tests {
         rtc.set_test_time(UNIX_EPOCH + Duration::from_secs(946_782_245 + 55));
         assert_eq!(read_reg(&mut rtc, 0x0), 5);
 
-        rtc.write(0xD * 4, 4, 0);
+        rtc.write(0xD * 4, 4, 0, 0.0);
         assert_eq!(read_reg(&mut rtc, 0x0), 0);
+    }
+
+    // RFC 6238 test-vector instant: 1111111109 = 2005-03-18T01:58:29Z,
+    // a Friday. The seeded clock must expose exactly this decomposition
+    // regardless of the host clock or time zone.
+    const VECTOR_UNIX: u64 = 1_111_111_109;
+
+    #[test]
+    fn seeded_clock_reads_seed_and_advances_with_emulated_time() {
+        let mut rtc = Msm6242Rtc::default();
+        rtc.set_seed(Some(VECTOR_UNIX), false);
+
+        assert_eq!(read_reg(&mut rtc, 0x0), 9); // seconds ones
+        assert_eq!(read_reg(&mut rtc, 0x1), 2); // seconds tens
+        assert_eq!(read_reg(&mut rtc, 0x2), 8); // minutes ones
+        assert_eq!(read_reg(&mut rtc, 0x3), 5); // minutes tens
+        assert_eq!(read_reg(&mut rtc, 0x4), 1); // hours ones
+        assert_eq!(read_reg(&mut rtc, 0x5), 0); // hours tens
+        assert_eq!(read_reg(&mut rtc, 0x6), 8); // day ones
+        assert_eq!(read_reg(&mut rtc, 0x7), 1); // day tens
+        assert_eq!(read_reg(&mut rtc, 0x8), 3); // month ones
+        assert_eq!(read_reg(&mut rtc, 0x9), 0); // month tens
+        assert_eq!(read_reg(&mut rtc, 0xA), 5); // year ones
+        assert_eq!(read_reg(&mut rtc, 0xB), 0); // year tens
+        assert_eq!(read_reg(&mut rtc, 0xC), 5); // Friday
+
+        // 31 emulated seconds later the clock reads :00 of the next minute.
+        assert_eq!(read_reg_at(&mut rtc, 0x0, 31.0), 0);
+        assert_eq!(read_reg_at(&mut rtc, 0x2, 31.0), 9);
+        assert_eq!(rtc.current_unix(31.9), VECTOR_UNIX + 31);
+    }
+
+    #[test]
+    fn frozen_clock_never_advances() {
+        let mut rtc = Msm6242Rtc::default();
+        rtc.set_seed(Some(VECTOR_UNIX), true);
+        assert_eq!(read_reg_at(&mut rtc, 0x0, 3600.0), 9);
+        assert_eq!(rtc.current_unix(3600.0), VECTOR_UNIX);
+        assert_eq!(rtc.current_display(3600.0), "2005-03-18T01:58:29");
+    }
+
+    #[test]
+    fn reset_keeps_the_seed_but_drops_the_hold_latch() {
+        let mut rtc = Msm6242Rtc::default();
+        rtc.set_seed(Some(VECTOR_UNIX), false);
+        rtc.write(0xD * 4, 4, Msm6242Rtc::CD_HOLD as u64, 0.0);
+        rtc.reset();
+        assert_eq!(read_reg(&mut rtc, 0xD) & Msm6242Rtc::CD_HOLD, 0);
+        assert_eq!(read_reg_at(&mut rtc, 0x0, 5.0), 4); // still ticking from the seed
+        assert_eq!(rtc.seed(), Some(VECTOR_UNIX));
+    }
+
+    #[test]
+    fn parse_accepts_unix_seconds_and_calendar_forms() {
+        assert_eq!(parse_rtc_time("1111111109"), Ok(VECTOR_UNIX));
+        assert_eq!(parse_rtc_time("2005-03-18 01:58:29"), Ok(VECTOR_UNIX));
+        assert_eq!(parse_rtc_time("2005-03-18T01:58:29"), Ok(VECTOR_UNIX));
+        assert_eq!(parse_rtc_time("2005-03-18T01:58"), Ok(VECTOR_UNIX - 29));
+        assert_eq!(parse_rtc_time("1970-01-01 00:00:00"), Ok(0));
+    }
+
+    #[test]
+    fn parse_rejects_malformed_and_impossible_values() {
+        assert!(parse_rtc_time("").is_err());
+        assert!(parse_rtc_time("yesterday").is_err());
+        assert!(parse_rtc_time("2005-03-18").is_err()); // no time of day
+        assert!(parse_rtc_time("2005-13-01 00:00:00").is_err());
+        assert!(parse_rtc_time("2005-02-30 00:00:00").is_err());
+        assert!(parse_rtc_time("2005-03-18 24:00:00").is_err());
+        assert!(parse_rtc_time("1969-12-31 23:59:59").is_err());
+        assert!(parse_rtc_time("-100").is_err());
     }
 
     #[cfg(any(unix, windows))]
