@@ -124,18 +124,13 @@ Raw key shortcuts:
 Only genuinely-remaining work is listed here. Closed audit work lives in
 git history, not as a done-log in this file.
 
-1. **Stopped-CPU interrupt coverage.** Add an end-to-end regression in
-   `src/cpu.rs` that executes `STOP`, advances devices until an interrupt
-   becomes pending, and verifies that the CPU wakes into the autovector
-   handler with the expected stack frame.
-
-2. **POTGO RC modelling.** `write_potgo`/`read_potgor`/`tick_pot_hsync`
+1. **POTGO RC modelling.** `write_potgo`/`read_potgor`/`tick_pot_hsync`
    (`src/chipset/paula.rs`) model output loopback with open-drain pin
    sense, the START reset/restart, and a per-scan-line counter charge
    paced by horizontal sync. Remaining: an RC-style charge curve from
    real pot resistance and chip-revision bits.
 
-3. **CIA gaps.**
+2. **CIA gaps.**
    - Complete the parallel-port / Centronics signal path: consume CIA-B's
      `PC` pulse from parallel-data (`PRB`) accesses as the external strobe,
      and feed a peripheral acknowledge edge into CIA-A `FLAG`.
@@ -144,13 +139,6 @@ git history, not as a done-log in this file.
      delays the instruction-paced core cannot model faithfully; deferred to
      any future cycle-exact CPU work rather than faked. (TOD write-stop and
      the $000000 alarm reset are already correct, with tests.)
-
-4. **Memory-map tests.** Chip/slow/fast RAM sizes are config-selectable and
-   `src/cpu.rs` covers the boot overlay, ROM write-protect, slow-RAM bus
-   contention, chip-window aliasing by Agnus reach, and the small-box
-   custom-register mirror. Remaining: CPU-visible fast-RAM window-boundary
-   and no-alias coverage, plus an explicit A500 Rev.6 512K-chip +
-   512K-trapdoor layout regression.
 
 ## Test Maintenance Policy
 

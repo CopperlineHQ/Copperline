@@ -4033,6 +4033,56 @@ mod tests {
     }
 
     #[test]
+    fn fast_ram_window_ends_without_aliasing() {
+        let mut bus = cpu_bus(test_bus(reset_rom(0, 0)));
+        let first = FAST_RAM_BASE as u32;
+        let last = first + 64 * 1024 - 2;
+        let outside = first + 64 * 1024;
+
+        bus.write_word(first, 0x1111);
+        bus.write_word(last, 0x2222);
+        assert_eq!(bus.read_word(first), 0x1111);
+        assert_eq!(bus.read_word(last), 0x2222);
+
+        // The first word beyond this configured Zorro RAM board is
+        // undecoded. In particular, it must not wrap onto either edge.
+        bus.write_word(outside, 0x3333);
+        assert_eq!(bus.read_word(first), 0x1111);
+        assert_eq!(bus.read_word(last), 0x2222);
+    }
+
+    #[test]
+    fn a500_rev6_512k_chip_and_trapdoor_layout_is_cpu_visible() {
+        use crate::chipset::agnus::AgnusRevision;
+
+        let mut machine_bus = test_bus(reset_rom(0, 0));
+        machine_bus.mem.zorro = ZorroChain::default();
+        machine_bus.mem.slow_ram.resize(512 * 1024, 0);
+        machine_bus.set_agnus_revision(AgnusRevision::Ecs8372Rev4);
+        let mut bus = cpu_bus(machine_bus);
+
+        // A Rev.6 board with an ECS 8372A still has only the fitted 512 KiB
+        // motherboard bank at $000000-$07FFFF. The unfitted upper half of the
+        // 1 MiB Agnus image is open, while A20 repeats the image at $100000.
+        bus.write_word(0x0000_0000, 0x1111);
+        bus.write_word(0x0007_FFFE, 0x2222);
+        bus.write_word(0x0008_0000, 0x3333);
+        assert_eq!(bus.read_word(0x0000_0000), 0x1111);
+        assert_eq!(bus.read_word(0x0007_FFFE), 0x2222);
+        bus.write_word(0x0010_0000, 0x4444);
+        assert_eq!(bus.read_word(0x0000_0000), 0x4444, "A20 chip image");
+
+        // The 512 KiB trapdoor expansion is separate slow RAM at
+        // $C00000-$C7FFFF. The following address is the small-box custom-chip
+        // mirror, not another image of the trapdoor RAM.
+        bus.write_word(0x00C0_0000, 0x5555);
+        bus.write_word(0x00C7_FFFE, 0x6666);
+        bus.write_word(0x00C8_0000, 0x7777);
+        assert_eq!(bus.read_word(0x00C0_0000), 0x5555);
+        assert_eq!(bus.read_word(0x00C7_FFFE), 0x6666);
+    }
+
+    #[test]
     fn gary_mirrors_custom_registers_in_empty_ranger_space() {
         // On the small-box machines Gary's coarse decode answers custom
         // register accesses throughout the chip-register space wherever no
@@ -4577,6 +4627,54 @@ mod tests {
         assert_eq!(read_chip_word(machine.bus(), machine.a(7)), 0x2000);
         assert_eq!(read_chip_long(machine.bus(), machine.a(7) + 2), 0x0000_0104);
         assert_eq!(machine.bus().delivered_irq_pending, INT_VERTB);
+        Ok(())
+    }
+
+    #[test]
+    fn stopped_cpu_wakes_when_cia_timer_raises_device_interrupt() -> Result<()> {
+        let mut bus = test_bus_with_pc(0x0000_0100);
+        write_program(&mut bus, 0x0000_0100, &[0x4E72, 0x2000]); // STOP #$2000
+        write_program(&mut bus, 0x0000_0200, &[0x4E71]); // IRQ handler NOP
+        set_autovector(&mut bus, 2, 0x0000_0200);
+        bus.paula.intena = INT_MASTER | INT_PORTS;
+        // Keep this a mechanism test: once the CIA line is asserted, expose it
+        // immediately. IRQ recognition latency has separate timing coverage.
+        bus.irq_latency_setting = 0;
+
+        let mut machine = M68kMachine::new(bus, CpuModel::M68000, false)?;
+        let stopped = machine.step_slice(1)?;
+        assert_eq!(stopped.instructions, 1);
+        assert!(machine.stopped());
+        assert_eq!(machine.pc(), 0x0000_0104);
+
+        // Arm CIA-A timer A only after STOP has retired, then advance device
+        // time just as the emulator's stopped-CPU idle path does.
+        let _ = machine.bus_mut().cia_a.write(REG_TALO, 1);
+        let _ = machine.bus_mut().cia_a.write(REG_TAHI, 0);
+        let _ = machine.bus_mut().cia_a.write(REG_ICR, 0x80 | 0x01);
+        let _ = machine.bus_mut().cia_a.write(REG_CRA, 0x11);
+        for _ in 0..64 {
+            machine.bus_mut().advance_devices(1);
+            if machine.bus().paula.intreq & INT_PORTS != 0 {
+                break;
+            }
+        }
+        assert_ne!(
+            machine.bus().paula.intreq & INT_PORTS,
+            0,
+            "CIA timer must raise Paula PORTS during the idle advance"
+        );
+
+        machine.refresh_irq_line();
+        let wake = machine.step_slice(1)?;
+
+        assert!(!wake.stopped);
+        assert!(!machine.stopped());
+        assert_eq!(machine.pc(), 0x0000_0202);
+        assert_eq!(machine.a(7), 0x0007_FFF8);
+        assert_eq!(read_chip_word(machine.bus(), machine.a(7)), 0x2000);
+        assert_eq!(read_chip_long(machine.bus(), machine.a(7) + 2), 0x0000_0104);
+        assert_eq!(machine.bus().delivered_irq_pending & INT_PORTS, INT_PORTS);
         Ok(())
     }
 
