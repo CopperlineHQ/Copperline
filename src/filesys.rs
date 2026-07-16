@@ -404,6 +404,12 @@ impl FilesysUnit {
             }
             let comp = latin1_to_utf8(comp);
             let dir = self.mount.path.join(&rel);
+            // Host symlinks are followed, wherever they point: the guest has no
+            // packet that creates one, so a symlink inside the mount was placed
+            // there by the host user, and grafting an outside directory into a
+            // mount that way is a feature (same trust model as the UAE family).
+            // The escapes we do block ("..", separators) are the ones a guest
+            // program could construct on its own.
             match match_component(&dir, &comp) {
                 Some(existing) => rel.push(existing),
                 // The leaf may legitimately not exist yet, but a name the host
@@ -485,8 +491,12 @@ impl FilesysUnit {
 
     /// Sorted directory listing used by EXAMINE_NEXT, hiding the `.uaem`
     /// metadata sidecars (their contents surface as the companion file's
-    /// attributes instead). Recomputed per call: simple and correct for
-    /// interactive use; cache if it ever shows up.
+    /// attributes instead). Recomputed per call, which makes a full
+    /// EXAMINE_NEXT walk quadratic in the directory size -- deliberately so:
+    /// the fresh listing is what keeps a walk correct while the caller
+    /// mutates the directory (Delete ALL), and EXAMINE_NEXT is the legacy
+    /// slow path anyway, superseded by ACTION_EXAMINE_ALL for software that
+    /// cares about speed. Revisit only if a real workload hurts.
     fn dir_listing(&self, rec: &LockRec) -> Vec<std::ffi::OsString> {
         let mut names: Vec<_> = std::fs::read_dir(self.lock_path(rec))
             .into_iter()
