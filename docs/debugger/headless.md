@@ -242,3 +242,30 @@ together:
 For interactive sessions, the same instruction trace is available at
 runtime without environment variables: the [console](console)'s
 `TRACE START [PATH]` / `TRACE STOP`.
+
+## CPU and AmigaOS probe notes
+
+CPU-visible behavior is best pinned with a tiny executed ROM program through
+`M68kMachine` and its `CpuBus`, rather than by directly mutating `Bus` state.
+Useful assertions include the final `PC`, `SR`, `A7`, exception stack frame,
+and Paula/CIA interrupt latches. Keep the external address mask explicit:
+68000, 68010, and 68EC020 use 24 bits; 68020, 68030, 68040, and 68060 use
+32 bits.
+
+The following addresses were observed while probing one Kickstart 2.05 ROM.
+The ExecBase field offsets are ABI layout; the absolute ROM and chip-RAM
+addresses are image/run-specific landmarks, useful for reproducing old traces
+but not emulator behavior to special-case:
+
+| Field or routine | Observed location |
+| --- | --- |
+| `ThisTask` | ExecBase `+$114` |
+| `ResModules` | ExecBase `+$12C` |
+| `LibList` head | ExecBase `+$17A` |
+| five soft-interrupt list heads | ExecBase `+$1B2..+$1F2` |
+| `OpenLibrary` (LVO -552) | ROM `$F819AE` |
+| `InitCode` (LVO -72) | ROM `$F80F4C` |
+| `InitResident` (LVO -102) | ROM `$F80F86` |
+| `graphics.library` resident header | ROM `$FA8C28` |
+| `graphics.library` base in that run | chip RAM around `$2A50` |
+| `expansion.library` base in that run | chip RAM around `$A44` |

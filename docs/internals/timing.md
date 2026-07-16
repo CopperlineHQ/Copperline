@@ -307,8 +307,8 @@ wait for the blitter to go idle.
   and restarts the Copper at the top of the next frame (vpos 0) through
   the vertical-blank lines -- it branches through a Copper-programmed
   COP1LC value, so a MOVE to COP1LC changes where the next frame restarts.
-  A falling-man handoff capture is the regression example recorded in
-  `TODO.md` (`t=165s`/`t=180s` frame dumps).
+  The `tests/README.md` manual chipset workflow records the falling-man
+  handoff regression example (`t=165s`/`t=180s` frame dumps).
 
 Copper writes to "dangerous" registers are gated by COPCON's CDANG bit.
 References: HRM [Coprocessor
