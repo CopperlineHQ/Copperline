@@ -44,6 +44,19 @@ pub struct CliArgs {
     /// `--gdb ADDR`: run a headless GDB remote-protocol server on ADDR,
     /// `:PORT`, or `PORT`, pausing at reset until the debugger resumes.
     pub gdb: Option<gdbstub::Config>,
+    /// `--control ADDR`: run the headless Copperline Control Protocol
+    /// server (JSON-RPC over loopback TCP), pausing at reset until a
+    /// client resumes. `--control-token`/`--control-info` refine it.
+    /// Kept as the raw listen address so the CLI parses without the
+    /// `control` feature; a build without it rejects the flags in
+    /// validation, and `main` assembles the server config at dispatch.
+    pub control: Option<String>,
+    /// `--control-gui ADDR`: attach a control server to the normal
+    /// windowed session instead of owning the machine.
+    pub control_gui: Option<String>,
+    /// `--control-token TOKEN` / `--control-info PATH` for either mode.
+    pub control_token: Option<String>,
+    pub control_info: Option<PathBuf>,
     /// Dump consecutive rendered frames after an emulated-time delay. This
     /// is intended for debugging flicker and frame-to-frame palette
     /// changes that a single screenshot cannot show.
@@ -240,6 +253,10 @@ where
     let mut load_state: Option<PathBuf> = None;
     let mut benchmark_until: Option<f32> = None;
     let mut gdb: Option<gdbstub::Config> = None;
+    let mut control_listen: Option<String> = None;
+    let mut control_gui_listen: Option<String> = None;
+    let mut control_token: Option<String> = None;
+    let mut control_info: Option<PathBuf> = None;
     let mut dump_dir: Option<PathBuf> = None;
     let mut dump_start_secs: f32 = 0.0;
     let mut dump_count: Option<u32> = None;
@@ -513,6 +530,30 @@ where
                     .ok_or_else(|| anyhow!("--gdb requires ADDR, :PORT, or PORT"))?;
                 gdb = Some(gdbstub::Config::new(listen));
             }
+            "--control" => {
+                let listen = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--control requires ADDR, :PORT, or PORT"))?;
+                control_listen = Some(listen);
+            }
+            "--control-gui" => {
+                let listen = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--control-gui requires ADDR, :PORT, or PORT"))?;
+                control_gui_listen = Some(listen);
+            }
+            "--control-token" => {
+                let token = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--control-token requires a token string"))?;
+                control_token = Some(token);
+            }
+            "--control-info" => {
+                let path = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--control-info requires a file path"))?;
+                control_info = Some(PathBuf::from(path));
+            }
             "--dump-frames" => {
                 let path = args
                     .next()
@@ -668,6 +709,17 @@ where
             None
         }
     };
+    if control_listen.is_some() && control_gui_listen.is_some() {
+        return Err(anyhow!("--control and --control-gui cannot be combined"));
+    }
+    if control_listen.is_none()
+        && control_gui_listen.is_none()
+        && (control_token.is_some() || control_info.is_some())
+    {
+        return Err(anyhow!(
+            "--control-token/--control-info require --control or --control-gui"
+        ));
+    }
     Ok(CliArgs {
         config_path,
         rom_path,
@@ -676,6 +728,10 @@ where
         load_state,
         benchmark_until,
         gdb,
+        control: control_listen,
+        control_gui: control_gui_listen,
+        control_token,
+        control_info,
         frame_dump,
         waveform,
         press_after,
@@ -734,6 +790,12 @@ fn print_help() {
          \x20                            time SECS, report counters, then exit\n  \
          --gdb ADDR                     run a headless GDB remote server on ADDR,\n  \
          \x20                            :PORT, or PORT; port-only forms bind 127.0.0.1\n  \
+         --control ADDR                 run the headless JSON-RPC control server on ADDR\n  \
+         \x20                            (port 0 picks a free port; see docs/debugger/control.md)\n  \
+         --control-gui ADDR             attach the control server to the normal window\n  \
+         --control-token TOKEN          pin the control auth token (default: generated;\n  \
+         \x20                            visible in ps -- prefer --control-info)\n  \
+         --control-info PATH            write the control endpoint and token to PATH as JSON\n  \
          --dump-frames DIR              dump consecutive PNG frames into DIR, then exit\n  \
          --dump-start SECS              start frame dumping after SECS seconds (default: 0)\n  \
          --dump-count COUNT             number of frames to dump with --dump-frames\n  \
@@ -948,6 +1010,67 @@ fn validate_gdb_args(cli: &CliArgs) -> Result<()> {
     Ok(())
 }
 
+fn validate_control_args(cli: &CliArgs) -> Result<()> {
+    #[cfg(not(feature = "control"))]
+    if cli.control.is_some() || cli.control_gui.is_some() {
+        return Err(anyhow!(
+            "this build was compiled without the control feature; \
+             rebuild with --features control for --control/--control-gui"
+        ));
+    }
+    if cli.control.is_some() || cli.control_gui.is_some() {
+        if cli.gdb.is_some() {
+            return Err(anyhow!(
+                "--control/--control-gui cannot be combined with --gdb"
+            ));
+        }
+        if cli.benchmark_until.is_some() {
+            return Err(anyhow!(
+                "--control/--control-gui cannot be combined with --benchmark-until"
+            ));
+        }
+    }
+    if cli.control.is_none() {
+        return Ok(());
+    }
+    // The headless server owns the machine like --gdb does; the windowed
+    // App (which fires the scheduled/capture flags) never runs. Input
+    // recording IS supported: the server journals injected input itself.
+    if cli.screenshot_after.is_some() {
+        return Err(anyhow!(
+            "--control cannot be combined with --screenshot-after (use capture.screenshot)"
+        ));
+    }
+    if cli.save_state_after.is_some() {
+        return Err(anyhow!(
+            "--control cannot be combined with --save-state-after (use state.save)"
+        ));
+    }
+    if cli.frame_dump.is_some() {
+        return Err(anyhow!("--control cannot be combined with --dump-frames"));
+    }
+    if cli.live_audio_profile_secs.is_some() {
+        return Err(anyhow!(
+            "--control cannot be combined with --profile-live-audio"
+        ));
+    }
+    if !cli.press_after.is_empty()
+        || !cli.click_after.is_empty()
+        || !cli.joy_after.is_empty()
+        || !cli.mouse_after.is_empty()
+    {
+        return Err(anyhow!(
+            "--control cannot be combined with scheduled input events (use input.*)"
+        ));
+    }
+    if !cli.disk_insert_after.is_empty() {
+        return Err(anyhow!(
+            "--control cannot be combined with scheduled disk inserts (use media.*)"
+        ));
+    }
+    Ok(())
+}
+
 fn run_headless_benchmark(mut emu: Emulator, target_secs: f32) -> Result<()> {
     emu.set_paced(false);
     emu.reset_stats();
@@ -1112,6 +1235,7 @@ fn main() -> Result<()> {
     let cli = parse_args()?;
     validate_benchmark_args(&cli)?;
     validate_gdb_args(&cli)?;
+    validate_control_args(&cli)?;
     if cli.calibrate_gamepad {
         return gamepad::run_calibration();
     }
@@ -1211,7 +1335,8 @@ fn main() -> Result<()> {
     let headless_capture = cli.screenshot_after.is_some()
         || cli.frame_dump.is_some()
         || cli.benchmark_until.is_some()
-        || cli.gdb.is_some();
+        || cli.gdb.is_some()
+        || cli.control.is_some();
     let paced = !headless_capture;
     info!("emulation timing: deterministic core, paced={paced}");
     let mut emu = emulator::build_machine(&cfg, audio, paced, cli.load_state.is_some())?;
@@ -1248,6 +1373,16 @@ fn main() -> Result<()> {
     if let Some(gdb) = cli.gdb {
         return gdbstub::run(emu, gdb);
     }
+    #[cfg(feature = "control")]
+    if let Some(listen) = cli.control.clone() {
+        let mut config = copperline::control::Config::new(listen);
+        config.token = cli.control_token.clone();
+        config.info_file = cli.control_info.clone();
+        // The headless server owns the machine, so it journals
+        // --record-input itself; windowed mode journals through the App.
+        config.record_input = cli.record_input.clone();
+        return copperline::control::headless::run(emu, config);
+    }
     let disk_write_protected = std::array::from_fn(|idx| {
         cfg.floppy.drives[idx]
             .as_ref()
@@ -1255,7 +1390,8 @@ fn main() -> Result<()> {
             .unwrap_or(true)
     });
     video::set_pixel_aspect(config::resolve_pixel_aspect(cfg.pixel_aspect));
-    let app = App::new(
+    #[cfg_attr(not(feature = "control"), allow(unused_mut))]
+    let mut app = App::new(
         emu,
         cfg.emulation.power_on,
         cli.screenshot_after,
@@ -1277,6 +1413,17 @@ fn main() -> Result<()> {
         raw_cfg,
         live_audio,
     );
+    #[cfg(feature = "control")]
+    if let Some(listen) = cli.control_gui {
+        // Bind (and announce) before the window opens so scripts can
+        // attach as soon as the endpoint line appears; the socket
+        // threads start inside App::run once the event loop exists.
+        let mut config = copperline::control::Config::new(listen);
+        config.token = cli.control_token;
+        config.info_file = cli.control_info;
+        let handle = copperline::control::windowed::ControlHandle::bind(&config)?;
+        app.attach_control(handle, &config);
+    }
 
     // Elevate the thread that is about to run the event loop and the pacer.
     // Only when actually pacing to wall-clock time: headless capture advances
@@ -1383,6 +1530,8 @@ fn launcher_requested(cli: &CliArgs) -> bool {
         && cli.frame_dump.is_none()
         && cli.benchmark_until.is_none()
         && cli.gdb.is_none()
+        && cli.control.is_none()
+        && cli.control_gui.is_none()
         && cli.load_state.is_none()
         && cli.press_after.is_empty()
         && cli.click_after.is_empty()

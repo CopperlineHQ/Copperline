@@ -31,6 +31,7 @@ project:
         - file: debugger/reverse.md
         - file: debugger/waveform.md
         - file: debugger/gdb.md
+        - file: debugger/control.md
         - file: debugger/workflows.md
     - title: Internals
       children:
@@ -60,6 +61,7 @@ project:
         - debugger/reverse.md
         - debugger/waveform.md
         - debugger/gdb.md
+        - debugger/control.md
         - debugger/workflows.md
         - internals/architecture.md
         - internals/timing.md

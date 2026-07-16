@@ -15,7 +15,7 @@ publish = false
 default-run = "copperline"
 
 [features]
-default = ["midi", "frontend", "wasm-boards"]
+default = ["midi", "frontend", "wasm-boards", "control", "ctl-bin"]
 display-plan-trace = []
 # Local investigation switches that deliberately alter timing or rendering.
 # Normal builds keep these environment-variable overrides inert so release
@@ -49,6 +49,13 @@ wasm-boards = ["dep:wasmtime"]
 # for wasm32-wasip1). Off by default so native release artifacts are
 # unchanged.
 bench-bin = []
+# The Copperline Control Protocol server (src/control/): a JSON-RPC interface
+# over loopback TCP for driving the emulator from scripts and external tools
+# (`--control` headless, `--control-gui` windowed). Uses std::net + threads,
+# so browser builds (--no-default-features) compile it out.
+control = ["dep:serde_json"]
+# The `copperline-ctl` command-line client for the control protocol.
+ctl-bin = ["dep:serde_json"]
 
 [dependencies]
 # Path-only dependency on the in-tree fork (crates/m68k). No version requirement
@@ -62,6 +69,7 @@ anyhow = "1"
 log = "0.4"
 env_logger = { version = "0.11", optional = true }
 serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", optional = true }
 serde-big-array = "0.5"
 bincode = "1"
 toml = "0.8"
@@ -121,6 +129,11 @@ required-features = ["frontend"]
 name = "copperline-bench"
 path = "src/bin/bench.rs"
 required-features = ["bench-bin"]
+
+[[bin]]
+name = "copperline-ctl"
+path = "src/bin/copperline-ctl.rs"
+required-features = ["ctl-bin"]
 
 [dev-dependencies]
 # Compile WAT to wasm bytes in the WASM-plugin-host tests, so golden test

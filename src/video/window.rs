@@ -536,6 +536,11 @@ pub struct App {
     pending_auto_joys: Vec<(f32, JoyButtonKind, u32)>,
     auto_joy_held: AutoJoyHeld,
     auto_joy_engaged: bool,
+    /// The windowed control-protocol server (`--control-gui`), attached
+    /// after construction via [`App::attach_control`]; its commands are
+    /// drained at the top of `about_to_wait` (see window/control.rs).
+    #[cfg(feature = "control")]
+    control: Option<control::ControlState>,
     /// Scheduled relative port-1 mouse motions from --mouse-after,
     /// one-shot per entry; (at_emulated_secs, dx, dy).
     auto_mouse: Vec<(f64, i32, i32)>,
@@ -921,6 +926,8 @@ impl App {
             pending_auto_joys: joy_after,
             auto_joy_held: AutoJoyHeld::default(),
             auto_joy_engaged: false,
+            #[cfg(feature = "control")]
+            control: None,
             auto_mouse: Vec::new(),
             pending_auto_mouse: mouse_after,
             auto_disk_inserts: Vec::new(),
@@ -1147,6 +1154,16 @@ impl App {
         let event_loop = EventLoop::new().map_err(|e| anyhow!("EventLoop::new: {e}"))?;
         event_loop.set_control_flow(ControlFlow::Poll);
         let mut app = self;
+        // Start the control server's socket threads with a wake that
+        // kicks the loop out of ControlFlow::Wait, so a command arriving
+        // while the machine is paused is serviced promptly.
+        #[cfg(feature = "control")]
+        if let Some(ctl) = app.control.as_mut() {
+            let proxy = event_loop.create_proxy();
+            ctl.handle.start(Box::new(move || {
+                let _ = proxy.send_event(());
+            }));
+        }
         event_loop
             .run_app(&mut app)
             .map_err(|e| anyhow!("event loop: {e}"))?;
@@ -1722,6 +1739,16 @@ impl ApplicationHandler for App {
                 let hover = self
                     .cursor_pos
                     .and_then(|pos| control_at(pos, &bar_layout(&media)));
+                let control_connected = {
+                    #[cfg(feature = "control")]
+                    {
+                        self.control.as_ref().is_some_and(|c| c.handle.connected())
+                    }
+                    #[cfg(not(feature = "control"))]
+                    {
+                        false
+                    }
+                };
                 let view = StatusBarView {
                     status,
                     powered_on: self.powered_on,
@@ -1729,6 +1756,7 @@ impl ApplicationHandler for App {
                     media,
                     joystick_input_mode: self.joystick_input_mode,
                     hover,
+                    control_connected,
                 };
                 let osd = self.active_osd_text();
                 let ui_hover = self.cursor_pos.and_then(|p| self.main_ui_control_at(p));
@@ -1816,6 +1844,18 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Drain remote control commands first, before this pass's run
+        // state is computed, so they land at a frame boundary. Sits
+        // ahead of the render guard so tests can drive the drain on an
+        // App that never opened a window.
+        #[cfg(feature = "control")]
+        {
+            self.drain_control();
+            if self.control_exit_requested() {
+                event_loop.exit();
+                return;
+            }
+        }
         if self.render.is_none() {
             return;
         }
@@ -1906,6 +1946,12 @@ impl ApplicationHandler for App {
                 // the debugger window up with the reason; end the burst so the
                 // stop surfaces at the frame where it happened.
                 if self.surface_debug_stop() {
+                    break;
+                }
+                // A remote run_until frame/cck target completes the
+                // pending resume and pauses at its boundary.
+                #[cfg(feature = "control")]
+                if self.control_run_target_reached() {
                     break;
                 }
                 if frames_done >= frame_cap {
@@ -4807,6 +4853,10 @@ impl App {
                 }
                 self.paused = true;
                 self.sync_live_audio_suspension();
+                #[cfg(feature = "control")]
+                if !self.control_complete_pending("double_fault", &message) {
+                    self.control_notify_stopped("double_fault", &message);
+                }
                 self.show_osd(message);
                 self.request_redraw();
                 return true;
@@ -4819,6 +4869,17 @@ impl App {
         };
         let message = stop.describe();
         info!("debugger stop: {message}");
+        // A stop while a remote resume is pending answers the client and
+        // pauses without commandeering the local debugger window.
+        #[cfg(feature = "control")]
+        if self.control_completes_stop(&stop) {
+            self.paused = true;
+            self.sync_live_audio_suspension();
+            self.last_debug_stop = Some(message.clone());
+            self.show_osd(message);
+            self.request_redraw();
+            return true;
+        }
         self.paused = true;
         self.paused_before_debugger = true;
         self.sync_live_audio_suspension();
@@ -6659,6 +6720,10 @@ impl App {
         self.sync_live_audio_suspension();
         if self.paused {
             info!("pause button: emulation paused");
+            // A user pause completes a remote client's pending resume;
+            // the client learns where the machine stopped.
+            #[cfg(feature = "control")]
+            self.control_complete_pending("user_pause", "paused from the window");
         } else {
             info!("pause button: emulation resumed");
         }
@@ -6672,6 +6737,8 @@ impl App {
         self.paused = false;
         self.sync_live_audio_suspension();
         info!("power button: machine powered off (cold boot state)");
+        #[cfg(feature = "control")]
+        self.control_complete_pending("pause", "power state changed");
         if let Err(e) = self.emu.power_on_reset() {
             error!("cold power-on reset failed: {e:#}");
             self.cpu_halted = true;
@@ -6881,6 +6948,8 @@ impl App {
 }
 
 mod console;
+#[cfg(feature = "control")]
+mod control;
 mod host_input;
 mod present;
 mod statusbar;

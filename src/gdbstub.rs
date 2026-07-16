@@ -132,10 +132,13 @@ enum SessionEnd {
     Killed,
 }
 
-fn normalize_listen_addr(input: &str) -> Result<String> {
+/// Expand the listen-address shorthand shared by the debug servers
+/// (`--gdb`, `--control`, `--control-gui`): bare `PORT` and `:PORT`
+/// bind loopback; anything else is taken verbatim.
+pub(crate) fn normalize_listen_addr(input: &str) -> Result<String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
-        return Err(anyhow!("--gdb requires ADDR, :PORT, or PORT"));
+        return Err(anyhow!("listen address requires ADDR, :PORT, or PORT"));
     }
     if trimmed.starts_with(':') {
         return Ok(format!("127.0.0.1{trimmed}"));

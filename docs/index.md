@@ -51,6 +51,8 @@ running in Copperline.
 - [](debugger/window), [](debugger/headless), and [](debugger/gdb) -- the
   interactive debugger window, chip-bus frame analyzer, environment-driven
   headless debugger, and remote GDB frontend.
+- [](debugger/control) -- the JSON-RPC control protocol for driving the
+  emulator from scripts, CI, and AI agents (`--control`, `copperline-ctl`).
 - [](internals/architecture) -- how the emulator works inside, for
   contributors.
 

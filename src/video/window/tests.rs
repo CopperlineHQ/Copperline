@@ -68,6 +68,7 @@ fn view(status: FrontPanelStatus, powered_on: bool, paused: bool) -> StatusBarVi
         media: single_drive_media(),
         joystick_input_mode: JoystickInputMode::Gamepad,
         hover: None,
+        control_connected: false,
     }
 }
 
@@ -951,6 +952,7 @@ fn status_bar_draws_cd_buttons_only_on_cd_machines() {
         media: bar,
         joystick_input_mode: JoystickInputMode::Gamepad,
         hover: None,
+        control_connected: false,
     };
     draw_status_bar(&mut frame, &v, scale);
     // The disc body below the hub.
@@ -3678,4 +3680,173 @@ fn dropped_files_coalesce_across_events() {
     app.handle_dropped_files(files);
     // Single drive connected: both disks become DF0's playlist.
     assert_eq!(app.disk_playlists[0].len(), 2);
+}
+
+/// Windowed control-protocol drain tests: a synthetic ControlHandle
+/// (channel pair, no sockets) feeds commands straight into the same
+/// drain `about_to_wait` runs, against the real App and emulator.
+#[cfg(feature = "control")]
+mod control_drain {
+    use super::test_app;
+    use crate::control::exec::parse_method;
+    use crate::control::windowed::{ControlHandle, CtlMsg};
+    use serde_json::{json, Value};
+    use std::sync::mpsc::{Receiver, Sender};
+
+    fn attached_app() -> (super::super::App, Sender<CtlMsg>, Receiver<String>) {
+        let mut app = test_app();
+        let (handle, cmd_tx, reply_rx) = ControlHandle::test_pair();
+        app.attach_control(handle, &crate::control::Config::new(":0".into()));
+        (app, cmd_tx, reply_rx)
+    }
+
+    fn push(cmd_tx: &Sender<CtlMsg>, id: u64, method: &str, params: Value) {
+        let req = parse_method(method, &params).expect("request should parse");
+        cmd_tx.send(CtlMsg::Request { id: json!(id), req }).unwrap();
+    }
+
+    fn reply(reply_rx: &Receiver<String>) -> Value {
+        serde_json::from_str(&reply_rx.try_recv().expect("a reply should be queued"))
+            .expect("replies are JSON")
+    }
+
+    #[test]
+    fn drain_executes_core_ops_and_replies() {
+        let (mut app, cmd_tx, reply_rx) = attached_app();
+        push(&cmd_tx, 1, "regs.get", Value::Null);
+        app.drain_control();
+        let msg = reply(&reply_rx);
+        assert_eq!(msg["id"], 1);
+        assert_eq!(msg["result"]["pc"], app.emu.machine.pc());
+    }
+
+    #[test]
+    fn continue_completes_on_breakpoint_without_opening_the_debugger() {
+        let (mut app, cmd_tx, reply_rx) = attached_app();
+        let target = app.emu.machine.pc() + 16; // ahead in the NOP sled
+        push(
+            &cmd_tx,
+            1,
+            "break.add",
+            json!({"kind": "pc", "addr": target}),
+        );
+        push(&cmd_tx, 2, "continue", json!({}));
+        app.drain_control();
+        assert_eq!(reply(&reply_rx)["result"]["id"], 1);
+        assert!(!app.paused, "continue unpaused the machine");
+
+        // Mimic the about_to_wait burst: step frames, surface stops.
+        let mut stopped = false;
+        for _ in 0..3 {
+            app.emu.step_frame().unwrap();
+            if app.surface_debug_stop() {
+                stopped = true;
+                break;
+            }
+        }
+        assert!(stopped, "the planted breakpoint should stop the run");
+        assert!(app.paused, "a remote stop pauses the machine");
+        assert!(
+            app.debugger_panel.is_none(),
+            "a remote-driven stop must not commandeer the debugger window"
+        );
+        let stop = reply(&reply_rx);
+        assert_eq!(stop["id"], 2);
+        assert_eq!(stop["result"]["reason"], "breakpoint");
+        assert_eq!(stop["result"]["pc"], target);
+    }
+
+    #[test]
+    fn run_until_frame_target_completes_in_the_burst_check() {
+        let (mut app, cmd_tx, reply_rx) = attached_app();
+        let target = app.emu.bus().emulated_frames() + 2;
+        push(&cmd_tx, 1, "run_until", json!({"frame": target}));
+        app.drain_control();
+        assert!(!app.paused);
+        let mut completed = false;
+        for _ in 0..4 {
+            app.emu.step_frame().unwrap();
+            if app.surface_debug_stop() {
+                break;
+            }
+            if app.control_run_target_reached() {
+                completed = true;
+                break;
+            }
+        }
+        assert!(completed, "the frame target should complete the run");
+        assert!(app.paused);
+        let stop = reply(&reply_rx);
+        assert_eq!(stop["result"]["reason"], "target");
+        assert!(stop["result"]["frame"].as_u64().unwrap() >= target);
+    }
+
+    #[test]
+    fn user_pause_completes_a_pending_resume() {
+        let (mut app, cmd_tx, reply_rx) = attached_app();
+        push(&cmd_tx, 1, "continue", json!({}));
+        app.drain_control();
+        assert!(!app.paused);
+        app.toggle_pause();
+        assert!(app.paused);
+        let stop = reply(&reply_rx);
+        assert_eq!(stop["id"], 1);
+        assert_eq!(stop["result"]["reason"], "user_pause");
+    }
+
+    #[test]
+    fn injected_key_reaches_the_app_recorder() {
+        let (mut app, cmd_tx, reply_rx) = attached_app();
+        app.input_recorder = Some(crate::inputrec::InputRecorder::new(0.0));
+        push(
+            &cmd_tx,
+            1,
+            "input.key",
+            json!({"rawkey": 0x45, "action": "press"}),
+        );
+        app.drain_control();
+        let msg = reply(&reply_rx);
+        assert!(msg["result"]["applied_at_seconds"].is_number());
+        let recorder = app.input_recorder.take().unwrap();
+        assert!(
+            recorder.events_recorded() > 0,
+            "the App recorder journals control-injected input"
+        );
+    }
+
+    #[test]
+    fn connected_arms_time_travel_and_shutdown_requests_exit() {
+        let (mut app, cmd_tx, reply_rx) = attached_app();
+        assert!(!app.emu.time_travel_enabled());
+        cmd_tx.send(CtlMsg::Connected).unwrap();
+        app.drain_control();
+        assert!(app.emu.time_travel_enabled(), "connect arms the ring");
+
+        cmd_tx.send(CtlMsg::Shutdown { id: json!(9) }).unwrap();
+        app.drain_control();
+        assert!(app.control_exit_requested());
+        let msg = reply(&reply_rx);
+        assert_eq!(msg["id"], 9);
+    }
+
+    #[test]
+    fn step_requires_a_paused_machine_and_advances_it() {
+        let (mut app, cmd_tx, reply_rx) = attached_app();
+        // test_app starts unpaused: step must refuse.
+        push(&cmd_tx, 1, "step", json!({"n": 2}));
+        app.drain_control();
+        assert_eq!(
+            reply(&reply_rx)["error"]["code"],
+            crate::control::proto::INVALID_STATE
+        );
+
+        app.paused = true;
+        let before = app.emu.machine.pc();
+        push(&cmd_tx, 2, "step", json!({"n": 2}));
+        app.drain_control();
+        let stop = reply(&reply_rx);
+        assert_eq!(stop["result"]["reason"], "step");
+        assert_eq!(stop["result"]["pc"], before + 4, "two NOPs retired");
+        assert!(app.paused, "sync steps leave the machine paused");
+    }
 }
