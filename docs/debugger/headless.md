@@ -35,6 +35,18 @@ cannot change at runtime (see [](../internals/architecture)).
   changes, whoever wrote it:
   `DBG WATCH 0x00c09580 0012->0013 by pc=0x00c03374`.
 
+`COPPERLINE_DBG_MEMW=ADDR`
+: CPU-write watchpoint on one word: whenever a CPU write covers the
+  watched word, logs the writer PC, the post-write value, and the emulated
+  time and frame. Narrower than `WATCH` (CPU writes only), but attributes
+  the write from inside the CPU's own decode, so chip-RAM mirror aliases
+  are noted too. Bounded by `AFTER`/`UNTIL`.
+
+`COPPERLINE_DBG_FC=ADDR`
+: Log every change of the 16-bit word at ADDR -- whoever caused it -- with
+  emulated time and a running change count. Useful for pacing questions
+  ("how often does this frame counter tick").
+
 `COPPERLINE_DBG_DUMP=ADDR:WORDS[,...]`
 : Memory regions to hex-dump with every break/watch report
   (`mem 0x00c09580: 0000 0001 0002 0003`).
@@ -65,6 +77,29 @@ cannot change at runtime (see [](../internals/architecture)).
   exec.library `Alert()`. Each hit includes the D7 alert code decoded with the
   same Guru table used by the interactive debugger.
 
+`COPPERLINE_DBG_IRQ=1`
+: Log every serviced interrupt -- level plus the enabled pending source
+  bits -- with emulated time. Bounded by `AFTER`/`UNTIL`.
+
+`COPPERLINE_DBG_CIA=1`
+: Log INTENA/INTREQ writes that touch the EXTER bit or the master enable,
+  for tracing CIA-interrupt enable/acknowledge traffic.
+
+`COPPERLINE_DBG_DSKLEN=1`
+: Log every DSKLEN write (disk DMA arming: word count, direction, DSKPT,
+  beam position) and the matching DSKBLK completion, closing each
+  arm-to-completion interval to correlate disk activity with scene
+  timing.
+
+`COPPERLINE_DBG_SPREN=1`
+: When a DMACON write clears the sprite-DMA-enable bit, log the
+  instruction that did it (previous PC) and the full register file.
+
+`COPPERLINE_DBG_BLIT=LO:HI`
+: Log each blit started between LO and HI emulated seconds: control
+  words, D pointer/modulo, size, and mode flags, with the starting beam
+  position. For finding which blit produces a given rendered region.
+
 `COPPERLINE_DBG_RAMDUMP=ADDR:LEN:FILE`
 : One-shot memory dump the first time the debugger activates: LEN bytes
   from hex address ADDR are written to FILE, read through the CPU's own
@@ -88,6 +123,16 @@ cannot change at runtime (see [](../internals/architecture)).
 `COPPERLINE_DBG_SHOT=PREFIX`
 : Save a PNG of the last completed frame on every hit, as
   `PREFIX-0000.png`, `PREFIX-0001.png`, ...
+
+`COPPERLINE_DBG_EXPORT_PLANES=1`
+: Export each bitplane and a composite colour-index image for every frame
+  rendered inside the `AFTER`/`UNTIL` window, using the exact per-line
+  plane words the renderer fetched -- a ground-truth view of each plane.
+  `COPPERLINE_DBG_EXPORT_PLANES_DIR=DIR` sets the output directory.
+
+`COPPERLINE_DBG_FRAMESTATE=1`
+: Log the per-frame display state (one summary line per rendered frame)
+  inside the `AFTER`/`UNTIL` window.
 
 ## Diagnostic knobs
 
@@ -166,9 +211,16 @@ Timing-model knobs that pair well with the debugger:
 
 Behavior-changing A/B switches such as `COPPERLINE_NO_*`,
 `COPPERLINE_EXP_*`, `COPPERLINE_DISK_SPEED_DIV`, and
-`COPPERLINE_DBG_EXTCCK` are compiled only with the
+`COPPERLINE_DBG_EXTCCK` (external-access cost in hundredths of a colour
+clock, default 200 = 2.00 cck) are compiled only with the
 `internal-diagnostics` feature. Normal builds ignore them so release runs
 stay hardware-derived and reproducible.
+
+For finding registers a guest probes that Copperline does not decode,
+see the `[debug] log_unmapped` config key in
+[Configuration](../guide/configuration.md) -- it is a config setting
+rather than an environment variable because it pairs with a specific
+machine setup.
 
 ## A worked example
 

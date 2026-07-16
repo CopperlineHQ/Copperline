@@ -37,19 +37,19 @@ Execution:
 
 | Command | Effect |
 |---|---|
-| `RUN` | Resume the machine (also `GO`, `C`) |
+| `RUN` | Resume the machine (also `GO`, `CONTINUE`, `C`) |
 | `PAUSE` | Pause and report where the machine is |
 | `STEP [N]`, `S` | Execute N instructions (default 1) |
-| `OVER`, `N` | Step over a BSR/JSR/TRAP call |
-| `OUT` | Run until the current subroutine returns |
+| `OVER`, `N` | Step over a BSR/JSR/TRAP call (also `NEXT`) |
+| `OUT` | Run until the current subroutine returns (also `FINISH`) |
 | `FRAME`, `F` | Run one video frame |
 | `LINE` | Run to the start of the next scanline |
 | `CSTEP` | Run until the Copper retires one instruction |
 | `RUNTO ADDR` | Run until the PC reaches ADDR |
 | `TOSLOT V [H]` | Run until the beam reaches the position |
-| `RSTEP [N]` | Step backward (reverse debugging) |
+| `RSTEP [N]`, `RS` | Step backward (reverse debugging) |
 | `RFRAME` | Step one frame backward |
-| `RRUN` | Run backward to the previous breakpoint |
+| `RRUN`, `RC` | Run backward to the previous breakpoint |
 
 Every forward command ends by printing the stop reason (if a breakpoint,
 watchpoint, trap, or catchpoint fired) and a status line: the PC with its
@@ -61,11 +61,11 @@ Stops (each toggles: repeat the command to remove):
 |---|---|
 | `BREAK ADDR [COND] [IGN N]`, `B` | PC breakpoint, with the Break tab's condition grammar |
 | `WATCH ADDR [CPU\|BLITTER\|DISK]`, `W` | Memory word watchpoint; the optional filter stops only on that writer |
-| `RWATCH NAME\|OFF` | Custom-register write watch (`RWATCH DMACON`) |
+| `RWATCH NAME\|OFF`, `RW` | Custom-register write watch (`RWATCH DMACON`) |
 | `BTRAP V [H]` | Beam trap (decimal position) |
 | `CBREAK ADDR` | Copper breakpoint |
 | `CATCH IRQ N \| TRAP N \| VEC N` | Exception catchpoint |
-| `BREAKS` | List everything armed |
+| `BREAKS`, `INFO` | List everything armed |
 | `CLEARBREAKS` | Remove everything |
 
 Inspection and modification:
@@ -88,8 +88,8 @@ Inspection and modification:
 | `TRACE START [PATH]` | Start a runtime instruction trace: one disassembled line per retired instruction with its beam position, no env var or restart needed (capped at a million lines) |
 | `TRACE STOP` / `TRACE` | Stop the trace / report its progress |
 | `WAVE START [PATH] [TRIGGER] [DURATION] [SIGNALS]` | Arm a trigger-based VCD "logic analyser" capture of chipset signals for GTKWave; the arguments are order-free and all optional (see [](waveform.md)) |
-| `WAVE STOP` / `WAVE` | Finish the capture early / report its progress |
-| `HELP`, `CLEAR`, `CLOSE` | Console housekeeping |
+| `WAVE STOP` / `WAVE` | Finish the capture early / report its progress (`WAVEFORM` is an alias) |
+| `HELP` (`?`), `CLEAR`, `CLOSE` (`QUIT`, `EXIT`) | Console housekeeping |
 
 Memory hunting (a trainer-style delta search over all writable RAM --
 chip, slow, and Zorro RAM boards):
@@ -113,8 +113,8 @@ garbage):
 | Command | Effect |
 |---|---|
 | `TASKS` | The scheduled task (`>`), then the ready and waiting lists, with priority, state, and name |
-| `LIBS` | Opened libraries with versions (`graphics.library v40.10`) |
-| `DEVS` | Devices with versions |
+| `LIBS`, `LIBRARIES` | Opened libraries with versions (`graphics.library v40.10`) |
+| `DEVS`, `DEVICES` | Devices with versions |
 | `RESOURCES`, `PORTS` | The resource and message-port lists |
 | `SEGMENTS` | The current process's loaded hunks (its CLI command's segment list when there is one), with the `add-symbol-file` line a source-level GDB session needs |
 | `CATCHTASK NAME` | Stop when exec schedules a task whose name contains NAME (case-insensitive); `CATCHTASK` alone clears it |

@@ -5,11 +5,15 @@
 - Copperline now uses the pure-Rust `m68k` CPU core. The Unicorn backend,
   forked QEMU patches, MOVEC/F-line hooks, and stopped-slice block
   estimator have been removed.
-- Configurable CPU models are `68000`, `68EC020`, `68020`, `68030`,
-  and `68040`. `68060` remains rejected (no backend support).
+- Configurable CPU models are `68000`, `68010`, `68EC020`, `68020`,
+  `68030`, `68040`, and `68060` (`[cpu] unimplemented` selects trap
+  vs. native handling for the instructions the 68060 dropped). The
+  68030 and 68040 MMUs are modelled with resumable fault frames.
   `cpu.fpu = true` fits a 68881/68882 on any 020+ (default-on for the
-  full 68040): the vendored core's 6888x implementation runs in f64
-  precision with all operand formats except packed decimal, real
+  full 68040 and the 68060, whose FPUs are on-die): the vendored
+  core's FPU is a pure-Rust 80-bit extended-precision softfloat
+  engine covering every operand format including packed decimal,
+  extended-precision transcendentals (faithful to ~64 bits), real
   FSAVE/FRESTORE frames (NULL after reset), and the full conditional
   family. Verified against Kickstart detection + exec context
   switching on 1.3/2.05/3.1 and SysInfo's hardware report (68881).
@@ -25,8 +29,9 @@
   Paula serial, live/WAV audio, Copper scheduling, blitter basics, and
   OCS bitplane rendering all have focused coverage.
 - Floppy support covers standard DD ADF, read-only ADZ/DMS/SCP, UAE
-  extended ADF variants, track-timed read/write DMA, and writable
-  sector/raw-track persistence for supported writable formats.
+  extended ADF variants, gzip- or single-file-ZIP-packed images,
+  track-timed read/write DMA, and writable sector/raw-track
+  persistence for supported writable formats.
 - IPF/CAPS protected-image support is an explicit non-goal for the
   built-in loader for now. IPF files start with a `CAPS` record; useful
   support should either be a direct IPF parser or an optional SPS/CAPS
@@ -39,10 +44,13 @@
   path has a prefetch-queue model with per-access cycle billing
   (~99.6% timing-exact against SingleStepTests, see
   `crates/m68k/CYCLE_TIMING_GAP.md`), interrupt-recognition latency,
-  and chip-bus slot arbitration with CPU/blitter/DMA contention.
-  68020+ timing, some Paula disk details, and ECS/AGA behavior remain
-  pragmatic and should be tightened only when driven by a concrete
-  regression.
+  and chip-bus slot arbitration with CPU/blitter/DMA contention. The
+  020+ models add the on-chip instruction/data caches with calibrated
+  bus costs rather than per-microcycle sequences, and all models run
+  clean through the cputest harness (`crates/cputest-runner`). Paula
+  audio follows the HRM DMA state machine. Remaining ECS/AGA gaps are
+  recorded next to each subsystem in `docs/internals/` and should be
+  tightened only when driven by a concrete regression.
 
 ## Standard Checks
 
@@ -52,10 +60,13 @@ done. DiagROM comes first; Kickstart is a follow-up chipset/OS check.
 1. `cargo test`
 2. `cargo build --release`
 3. `./target/release/copperline --noaudio --config copperline.example.toml --screenshot-after 5.0 /tmp/diag.png`
-4. `cargo test --release --test image_regression -- --ignored --nocapture`
-5. Kickstart 2.05 boot check, from a local config whose `rom` is a Kickstart 2.05 image: `./target/release/copperline --noaudio --config path/to/local.toml --screenshot-after 8.0 /tmp/ks.png`
-6. Run any local/private smoke configs needed for the subsystem under review.
-7. `git diff --check`
+4. `cargo test --release --test probe_golden` (the golden renders in
+   `timing-test/golden/`; a timing or render change that alters them must
+   be re-blessed with `COPPERLINE_BLESS_GOLDEN=1`, see timing-test/README.md)
+5. `cargo test --release --test image_regression -- --ignored --nocapture`
+6. Kickstart 2.05 boot check, from a local config whose `rom` is a Kickstart 2.05 image: `./target/release/copperline --noaudio --config path/to/local.toml --screenshot-after 8.0 /tmp/ks.png`
+7. Run any local/private smoke configs needed for the subsystem under review.
+8. `git diff --check`
 
 Expected results:
 
@@ -119,17 +130,13 @@ git history, not as a done-log in this file.
    address-masking test on `68EC020`, and a `68040`-as-LC040 snippet (the
    `cpu_type_for_model` mapping exists but is untested).
 
-2. **POTGO RC modelling.** `write_potgo`/`read_potgor`/`tick_pots`
+2. **POTGO RC modelling.** `write_potgo`/`read_potgor`/`tick_pot_hsync`
    (`src/chipset/paula.rs`) model output loopback with open-drain pin
-   sense, the START reset/restart, and a linear fixed-rate counter charge.
-   Remaining: an RC-style charge curve from real pot resistance,
-   chip-revision bits, and a scan-rate-dependent counter range.
+   sense, the START reset/restart, and a per-scan-line counter charge
+   paced by horizontal sync. Remaining: an RC-style charge curve from
+   real pot resistance and chip-revision bits.
 
 3. **CIA gaps.**
-   - A real reset path for CIA state (port DDRs, timer counters/latches,
-     TOD/alarm defaults, ICR masks, CIA-A `PRA.OVL`) driven by CPU
-     `RESET`. Power-on defaults exist via `Cia::new`, but there is no
-     RESET-instruction-driven reset.
    - CIA-A physical port restrictions: disk-sense bits PA5-PA2 must stay
      inputs even when DDRA marks them as outputs.
    - Parallel-port / Centronics behaviour: CIA-B PRA strobe on data write,
@@ -142,9 +149,10 @@ git history, not as a done-log in this file.
      the $000000 alarm reset are already correct, with tests.)
 
 4. **Memory-map tests.** Chip/slow/fast RAM sizes are config-selectable and
-   `src/cpu.rs` covers the boot overlay, ROM write-protect, and slow-RAM
-   bus contention. Remaining: chip/slow/fast mirror tests and an explicit
-   A500 Rev.6 512K+512K layout regression.
+   `src/cpu.rs` covers the boot overlay, ROM write-protect, slow-RAM bus
+   contention, chip-window aliasing by Agnus reach, and the small-box
+   custom-register mirror. Remaining: fast-RAM mirror coverage and an
+   explicit A500 Rev.6 512K+512K layout regression.
 
 5. **Keep the test matrix maintainable.** Promote a repeated manual smoke
    path into a fast unit test, an ignored image regression, or a scripted

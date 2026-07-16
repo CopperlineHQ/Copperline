@@ -24,11 +24,29 @@ WinUAE-verified model so device scans terminate correctly. PCMCIA reports
 an empty slot (the status/config registers exist so card.resource
 behaves); credit-card device emulation is a non-goal.
 
-## A2091 SCSI (`a2091.rs`, `scsi.rs`)
+## A4000 motherboard IDE (`ide_a4000.rs`)
 
-The `[scsi]` option attaches a Commodore A2091: a Zorro II device board
-pairing the Commodore DMAC (rev 02 modeled) with a WD33C93A SBIC, plus
-the board's autoboot ROM whose `scsi.device` drives them. The autoconfig
+The A4000 profile decodes the same ATA task file (`ata.rs`) at `$DD2020`
+with no gate array in front of it -- the layout Kickstart's own
+`scsi.device` probes, with the Gayle-style 4-byte register stride, the
+control block one A12 page up at `$DD3038`, and an interrupt status byte
+at `$DD3020` whose bit 7 is the drive's INTRQ. Unlike Gayle there is no
+interrupt-change latch: INTRQ feeds INT2 directly and the driver drops it
+by reading the status register. Drives come from the same `[ide]`
+section as Gayle machines.
+
+## SCSI controllers (`a2091.rs`, `a4091.rs`, `sdmac.rs`, `scsi.rs`)
+
+The `[scsi]` option attaches one of three host adapters, selected by its
+`controller` key: the Zorro II A2091 (the default), the Zorro III A4091,
+or the A3000's motherboard Super DMAC. All three drive the same SCSI-2
+target layer in `scsi.rs`.
+
+### A2091 (`a2091.rs`)
+
+The A2091 is a Zorro II device board pairing the Commodore DMAC (rev 02
+modeled) with a WD33C93A SBIC, plus the board's autoboot ROM whose
+`scsi.device` drives them. The autoconfig
 identity comes from the DMAC -- Commodore West Chester (514), product 3,
 `ERTF_DIAGVALID` with `er_InitDiagVec` pointing at `$2000` -- while the
 ROM supplies the DiagArea and the driver; the ROM image therefore is a
@@ -67,7 +85,37 @@ short emulated delay, and INT2 is the level `CNTR_INTEN && ISTR &
 (INTS|E_INT)` fed to Paula's PORTS latch each tick. DMAC bus-master
 cycles are not yet arbitrated against the CPU (TODO in `a2091.rs`).
 
-Both IDE and SCSI drives share the `harddrive.rs` sector backend: raw
+### A4091 (`a4091.rs`)
+
+The A4091 is a Zorro III SCSI-2 controller carrying an NCR 53C710 and a
+nibble-wide autoboot ROM. Within its 16M window, `$000000-$7FFFFF` is the
+boot ROM presented nibble-wide (expansion.library reassembles the
+DiagArea with DAC_NIBBLEWIDE, and the ROM's own relocator copies the
+driver the same way), `$800000` is the 53C710 register file (only the low
+6 address bits decode, so it mirrors across the window -- the driver
+relies on the `+$40` shadow as a cache write-allocate workaround), and
+`$8C0003` reads the DIP-switch byte (host ID, termination, negotiation
+enables). A DSP write starts the 53C710's SCRIPTS processor, whose phase
+engine executes the driver's SCRIPTS programs against the disk targets.
+The autoconfig identity is Commodore product 84 with `er_InitDiagVec`
+`$0200`.
+
+### A3000 Super DMAC (`sdmac.rs`)
+
+The SDMAC is the SCSI DMA controller on the A3000 motherboard, not a
+Zorro board: a register file at `$DD0000` (repeating at `$DD0100` -- the
+"ALT" shadow that write-through tools use to defeat CPU write buffering)
+that owns the DMA FIFO and interrupt plumbing and maps a WD33C93's
+register file into a select latch and data port. It is the same layering
+as the A2091 -- two front-ends onto the one `Wd33c93` core -- differing in
+the register map, the ISTR bits, and a 32-bit DMA address counter
+(physically in Ramsey) instead of the Zorro II DMAC's 24-bit one.
+Kickstart's built-in `scsi.device` drives the pair directly, so there is
+no boot ROM to configure.
+
+### Shared drive backend
+
+All IDE and SCSI drives share the `harddrive.rs` sector backend: raw
 HDF images, bare partition hardfiles wrapped in a synthesized RDB
 (bootable `DHn` named after the unit), and host directories built into
 in-memory FFS volumes by `dirfs.rs` (whose volume label defaults to the
@@ -76,6 +124,51 @@ SCSI-2 target layer in
 `scsi.rs` answers INQUIRY, MODE SENSE pages 3/4, READ CAPACITY,
 READ/WRITE(6)/(10), REQUEST SENSE, and the no-op housekeeping commands,
 with sense state kept per target.
+
+The drive controllers latch read/write activity, which the bus drains to
+light the status-bar HDD LED; the LED holds for a short minimum period so
+brief accesses stay visible. Gayle, the A4000 IDE, the A2091, and the
+SDMAC report activity today; the A4091 shows the LED but does not latch
+activity into it yet.
+
+## Host filesystem service (`filesys.rs`)
+
+`[[filesys]]` mounts export host directories as live AmigaDOS volumes
+(`HOSTFS0:` ... up to 8 mounts), with no disk image in between -- distinct
+from the `dirfs.rs` path above, which snapshots a directory into an
+in-memory FFS volume behind a virtual drive. The guest side is a tiny
+handler (see `guest/services/`) mapped into the Copperline services board
+with a mount table and a hand-built DiagArea; at expansion init it builds
+one DeviceNode per mount and `AddBootNode`s it, so DOS mounts the devices
+at boot. The handler forwards every DosPacket to the host through a
+reserved A-line trap, and all `ACTION_*` semantics -- reads, writes,
+create/rename/delete, directory walks, protection, comments, datestamps
+-- are implemented host-side against the real filesystem, with results
+written straight into guest memory.
+
+Amiga attributes a host filesystem cannot hold live in UAE-style `.uaem`
+sidecar files (read when present, written back on change, hidden from
+guest listings); the delete-protection bit is honoured on
+`ACTION_DELETE_OBJECT`. Filenames map between host UTF-8 and guest
+Latin-1, hiding names with no Latin-1 spelling; host symlinks are
+followed (the guest cannot create one, so a symlink is the host user
+deliberately grafting a tree into the mount), while the escapes a guest
+could construct itself (`..`, separators) are blocked. A `readonly`
+mount refuses writes with the standard write-protection error.
+
+## A2065 Ethernet (`a2065.rs`, `net.rs`)
+
+The `[a2065]` option fits a Commodore A2065: a Zorro II board carrying an
+Am7990 LANCE and 32 KiB of on-board RAM, driven by the AmigaOS SANA-II
+`a2065.device`. Unlike the DMAC boards the LANCE never masters the Amiga
+bus: its init block, descriptor rings, and packet buffers all live in the
+board's own RAM, which the CPU reaches through the board window, so the
+board is self-contained and owns a host `NetBackend` (`net.rs`) for real
+frames. Networking is inherently non-deterministic, so a fitted NIC
+breaks byte-identical replay while traffic flows; save states record only
+the chosen backend and bring up a fresh one on load. The board and
+backend story, including the WASM plugin `net` capability, is covered in
+[](../zorro).
 
 ## CDTV (`cdtv.rs`, `cdrom.rs`)
 
@@ -132,12 +225,12 @@ feed the JOY0DAT quadrature counters. Gamepads are read through raw
 the CD32 pad protocol instead of the plain digital joystick lines.
 
 The window layer has one host-source policy for the emulated port-2
-joystick/CD32 pad: auto, keyboard, or gamepad. Auto is the default. It
-polls the calibrated gamepad first and, when no usable pad state is
-available, resolves the keyboard joystick state instead. Keyboard mode
+joystick/CD32 pad: gamepad (the default) or keyboard. Keyboard mode
 skips gamepad polling for port-2 input; gamepad mode disables keyboard
 joystick capture so the mapped keys take the normal Amiga keyboard path.
-All three sources ultimately call the same `InputState::set_joystick_port2`
+(The old auto-detect mode has been removed; `"auto"` in a config parses
+as a backward-compatibility alias for gamepad.) Both sources ultimately
+call the same `InputState::set_joystick_port2`
 and `set_cd32_buttons_port2` helpers, so JOY1DAT, /FIR1, POT1Y/POTGOR, and
 the CD32 serial bits remain hardware-derived.
 
@@ -192,14 +285,20 @@ counter is nonzero.
 
 ## Serial (`serial.rs`)
 
-Paula's SERDAT transmit path lands on stdout through `StdoutSink` -- this
+Paula's SERDAT transmit path lands on a `SerialSink`. The default
+`StdoutSink` prints to the host terminal -- this
 is how DiagROM's diagnostic stream and the `timing-test/` results are
-captured in terminals and CI logs.
+captured in terminals and CI logs. `TcpSerialSink` bridges the port to a
+listening TCP socket (`[serial] mode = "tcp"`, one client at a time) and
+`PtySerialSink` to a host pseudo-terminal pair (`mode = "pty"`, Unix
+only); both are bidirectional, so an `AUX:` shell on the Amiga side gives
+a remote AmigaDOS console.
 
-A `SerialSink` that can *produce* input (none of the built-in sinks do)
-must override `has_pending_input` alongside `read_byte`/`read_word`:
+A `SerialSink` that can *produce* input must override
+`has_pending_input` alongside `read_byte`/`read_word`:
 Paula's per-tick UART step takes an idle fast path that skips the receiver
-entirely while it reports false.
+entirely while it reports false -- the TCP and pty sinks poll a counter
+there, never a syscall.
 
 ## MIDI serial bridge (`midi/`)
 

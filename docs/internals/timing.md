@@ -11,7 +11,10 @@ the inline suites (`src/chipset/copper.rs`, `blitter.rs`, `src/bus.rs`).
 ## Chip-bus arbitration
 
 Every colour clock of every scanline has an owner, decided in priority
-order (`fixed_dma_owner_at`, `src/bus.rs`):
+order. The fixed-DMA levels (steps 1-5) are decided by
+`fixed_dma_owner_at` (`src/bus/dma_slots.rs`); Copper, blitter, and CPU
+contend for the slots it leaves free. (The function tests audio before
+disk, which is equivalent because their fixed slots never overlap.)
 
 1. **Memory refresh** -- fixed odd slots 1/3/5 plus the line-end refresh
    slot (E2, or E3 on NTSC long lines). Refresh only ever uses odd slots,
@@ -326,7 +329,7 @@ with a delay: it is **scheduled per DMA slot**. Each word issues its
 hardware channel bus sequence, so DMACONR's BBUSY reflects genuine
 in-flight state and BBUSY-polling loops see hardware timing. Because the
 renderer and the CPU both need to know when a blit finishes,
-`cck_until_blitter_completes` (`src/bus.rs`) predicts completion by walking
+`cck_until_blitter_completes` (`src/bus/dma_slots.rs`) predicts completion by walking
 the same slot-eligibility primitive the live engine uses.
 
 ### Per-slot FSM

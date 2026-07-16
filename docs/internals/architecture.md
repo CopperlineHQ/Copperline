@@ -16,6 +16,7 @@ src/
   envcfg.rs         # cached COPPERLINE_* environment-variable snapshot
   emulator.rs       # frame loop driving CPU, chipset, and host I/O
   debugger.rs       # env-driven headless debugger
+  waveform.rs       # trigger-based VCD chipset-signal capture (GTKWave)
   disasm.rs         # 68000 + Copper-list disassemblers
   gdbstub.rs        # GDB remote-protocol stub (host debugger transport)
   amigaos.rs        # read-only exec.library structure walking for the debugger
@@ -25,8 +26,10 @@ src/
   bus/              # size-split impl Bus continuations + the bus test suite
     custom_regs.rs  #   custom-chip register read/write dispatch
     dma_slots.rs    #   chip-bus slot arbitration + DMA scheduling
+    ddf_line.rs     #   per-line DDF sequencer walk for slot planning
     collisions.rs   #   live (beam-timed) collision accumulation
     frame_capture.rs#   per-frame sprite/bitplane DMA + render capture
+    wave.rs         #   waveform-capture signal sampling hooks
   memory.rs         # chip/slow RAM, ROM, extended ROM containers
   romsearch.rs      # locate the bundled AROS default boot ROM
   zorro.rs          # Zorro II/III autoconfig chain and boards
@@ -36,10 +39,15 @@ src/
   floppy.rs         # disk images + timed disk DMA controller
   dms.rs            # DMS archive decompression
   drive_sounds.rs   # synthesized floppy-drive sound effects
+  gary.rs           # Gary motherboard address decode (big-box machines)
+  ramsey.rs         # Ramsey memory controller registers (A3000/A4000)
   gayle.rs          # A600/A1200 Gayle gate array + IDE
+  ata.rs            # shared ATA task-file/drive model behind Gayle and A4000 IDE
+  ide_a4000.rs      # A4000 motherboard IDE at $DD2020
   a2091.rs          # A2091 SCSI controller board (DMAC + boot ROM)
   a4091.rs          # A4091 Zorro III SCSI-2 controller (NCR 53C710)
   scsi.rs           # WD33C93A SBIC + SCSI-2 disk targets
+  sdmac.rs          # A3000 Super DMAC fronting the WD33C93
   harddrive.rs      # shared hard-drive image backend (IDE + SCSI)
   dirfs.rs          # host directory -> in-memory FFS partition image
   filesys.rs        # host directories mounted live as AmigaDOS volumes
@@ -49,7 +57,8 @@ src/
   cdtv.rs           # CDTV DMAC + Matshita drive model
   akiko.rs          # CD32 Akiko (C2P, NVRAM, Chinon drive)
   rtc.rs            # MSM6242-compatible battery RTC
-  serial.rs         # Paula serial sink (stdout)
+  serial.rs         # Paula serial sinks (stdout, TCP, pty)
+  midi/             # host MIDI serial bridge (CoreMIDI / ALSA / WinMM)
   audio.rs          # AudioSink trait + cpal/WAV/null outputs
   priority.rs       # opt-in realtime-like thread scheduling (pacer + audio)
   gamepad.rs        # gilrs input + guided calibration
@@ -64,6 +73,7 @@ src/
   chipset/
     agnus.rs        # beam counters, DMACON, display fetch, arbitration data
     copper.rs       # Copper decode + cycle-stepped execution
+    ddf_sequencer.rs#   Agnus DDF comparator/flop model (bitplane fetch gating)
     blitter.rs      # scheduled per-DMA-slot blitter engine
     paula.rs        # interrupts, audio DMA, serial, disk regs
     denise.rs       # palette + bitplane/sprite control registers
@@ -78,8 +88,9 @@ src/
     present_common.rs # frontend-independent post-processing + TV apertures
     window.rs       # winit ApplicationHandler + render worker + main/tool pixels surfaces + status bar
     window/         # size-split window submodules + its test suite
-                    #   (statusbar.rs, present.rs, host_input.rs, tests.rs)
+                    #   (statusbar.rs, present.rs, host_input.rs, console.rs, tests.rs)
     ui.rs           # pop-up menu, overlay panels, and debugger/analyzer panel drawing
+    launcher.rs     # machine-configuration (launcher) screen
     font.rs         # 8x8 overlay font
 crates/m68k/        # vendored m68k CPU core
 crates/copperline-web/   # standalone wasm-bindgen browser frontend (WebEmu + page glue)

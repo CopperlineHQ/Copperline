@@ -46,10 +46,11 @@ reboot lands a fraction of a second after the chord, as on real hardware.
 
 The status bar (44 pixels below the display) holds, left to right:
 
-- **LED block.** PWR and FDD always; a green HDD activity LED on Gayle IDE
-  machines (A600/A1200); a blue CD activity LED on CDTV/CD32 that lights
-  while the drive reads data or plays CD audio. A small digital counter
-  shows the current floppy track.
+- **LED block.** PWR and FDD always; a green HDD activity LED on machines
+  with a hard-disk controller (Gayle or A4000 IDE, or any SCSI adapter); a
+  blue CD activity LED on CDTV/CD32 that lights while the drive reads data
+  or plays CD audio. A small digital counter shows the current floppy
+  track.
 - **Per-drive floppy controls.** Every connected drive gets a disk button
   (marked with the drive number) that opens a file dialog -- multi-select
   several images to queue a swap playlist for that drive -- plus a swap
@@ -59,14 +60,14 @@ The status bar (44 pixels below the display) holds, left to right:
 - **CD controls** on CDTV/CD32 machines: a CD button that loads (or swaps)
   a cue sheet with the proper media-change notification, and a CD eject
   button. These do not appear on machines without a CD drive.
-- **Camera button**: saves a screenshot (same as `Cmd+S` on macOS or
-  `Alt+S` on Linux/Windows).
-- **Hamburger menu button**: opens the pop-up menu (below).
 - **Joystick toggle** (just left of the volume control): a gamepad or
   keyboard icon showing which source drives the port-2 joystick. Click it to
   flip between gamepad-only and keyboard joystick emulation; see
   [](#mouse-and-joystick).
 - **Volume slider**: drag, or scroll the mouse wheel over it for 5% steps.
+- **Hamburger menu button**: opens the pop-up menu (below).
+- **Camera button**: saves a screenshot (same as `Cmd+S` on macOS or
+  `Alt+S` on Linux/Windows).
 - **Pause / power / reboot buttons.** Pause freezes emulation while staying
   powered; power cold-boots (clears RAM) or powers off back to the test
   screen; reboot is a warm reset.
@@ -115,14 +116,22 @@ tool window or overlay.
   window showing which chip-bus owner had each Agnus colour clock across
   the captured frame, including overscan and blanking; see
   [](../debugger/window.md#frame-analyzer-pane).
-- **Debugger** (also `Cmd+B` on macOS or `Alt+B` on Linux/Windows):
+- **Debugger...** (also `Cmd+B` on macOS or `Alt+B` on Linux/Windows):
   pauses the machine and opens the tabbed debugger in a tool window; see
   [](../debugger/window).
 - **Console...** (also `Cmd+K` / `Alt+K`): a GDB-flavoured debugger
   command line in its own tool window; see [](../debugger/console).
+- **Audio Out** (also `Cmd+Shift+A` / `Alt+Shift+A`): cycles the audio
+  output through the system default, each host output device, and
+  **Disabled** (sound off entirely, equivalent to `--noaudio`). The
+  device switches live without a restart.
 - **Calibrate Gamepad...**: the guided calibration flow, described below.
 - **Joystick Input** (also `Cmd+J` / `Alt+J`, or the status-bar icon):
   toggles between gamepad-only and keyboard joystick emulation.
+- **MIDI In / MIDI Out** (shown when the serial port is in MIDI mode):
+  cycle Paula's serial bridge through the host's MIDI sources and
+  destinations; see the `[serial]` section of
+  [Configuration](configuration.md).
 - **Pixel Aspect**: flips the presentation between the 4:3 CRT pixel
   aspect (the default; PAL lo-res pixels slightly wider than tall, as a
   real TV shows them) and square pixels (a 320x256 screen is an exact
@@ -154,8 +163,8 @@ tool window or overlay.
   $E00000 or 256 KiB at $F00000; Cancel to skip and remove any fitted
   extended ROM). The machine then cold-resets, as if the chip had been
   swapped and the power cycled.
-- **Keyboard Shortcuts**: the shortcut reference.
-- **About**: app version plus a summary of the emulated machine. Builds
+- **Keyboard Shortcuts...**: the shortcut reference.
+- **About...**: app version plus a summary of the emulated machine. Builds
   made from an untagged git commit append the short commit ID to the version
   shown in the window title and About panel.
 
@@ -188,18 +197,26 @@ an A1200 is selected on the Memory tab; Zorro III RAM is greyed with the reason
 The layout is:
 
 - **Machine selector** (top). Pick a machine -- A1000, A500 (OCS), A500, A500+,
-  A600, A1200, CDTV, or CD32. With no profile chosen the A500 is highlighted,
+  A600, A1200, A3000, A4000, CDTV, or CD32. With no profile chosen the A500 is
+  highlighted,
   since that is the machine the defaults describe. Selecting a machine applies
   that profile's defaults (chipset, CPU, RAM, gate array, RTC) to every tab;
-  settings that no longer apply (an IDE image on a non-Gayle machine, a CD image
+  settings that no longer apply (an IDE image on a machine with no IDE port, a
+  CD image
   on a machine with no CD drive) are dropped so they cannot block a launch.
 - **Category tabs** (left sidebar). *System* (chipset and Agnus/Denise
   overrides, video standard, RTC, identify board), *CPU* (model, FPU, clock,
   caches), *Memory* (chip/fast/slow/Zorro III RAM), *ROM* (Kickstart and
   extended ROM), *Floppy* (drive count and per-drive image and write-protect),
-  *Hard Disk* (IDE master/slave and the A2091 SCSI ROM and units), *CD* (image,
-  insert delay, CD32 NVRAM), *Zorro* (extra autoconfig boards by metadata file),
-  and *A/V & Emu* (overscan, pixel aspect, phosphor, floppy sounds and
+  *Hard Disk* (IDE master/slave, the SCSI controller -- A2091, A4091, or the
+  A3000's onboard SCSI -- and its boot ROM and units), *Host Mounts* (host
+  directories served live as AmigaDOS volumes: up to four mounts, each with a
+  boot priority and a read-write/read-only **Access** field), *CD* (image,
+  insert delay, CD32 NVRAM), *Zorro* (extra autoconfig boards by metadata
+  file, with a config panel for a WASM plugin board's declared options),
+  *Serial* (serial mode and MIDI input/output endpoints),
+  and *A/V & Emu* (audio output device, channel mode, stereo separation,
+  overscan, pixel aspect, phosphor, floppy sounds and
   volume, power-on, pacing, realtime priority, warp speed, joystick input
   mode).
 - **Settings rows** (right pane). `[<]`/`[>]` step through a value, On/Off
@@ -210,7 +227,7 @@ The layout is:
   directory mount inherits the host directory's name; the box has no effect on a
   raw HDF). A setting that does not apply to the chosen machine is greyed and
   shows why in place of its control -- "needs 32-bit CPU" for Zorro III RAM,
-  "needs 68020+" for the FPU, "needs A600/A1200" for IDE.
+  "needs 68020+" for the FPU, "needs A600/A1200/A4000" for IDE.
 - **Action bar** (bottom). **Load...** and **Save...** read and write a `.toml`
   config
   through a file dialog (Save writes a minimal file, only the settings that

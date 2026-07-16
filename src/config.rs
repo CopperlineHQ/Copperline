@@ -1140,8 +1140,8 @@ pub struct ConfigOverrides {
     /// ("auto" still accepted as a compatibility alias). Validated by the same
     /// parser as `[input] joystick`.
     pub joystick: Option<String>,
-    /// Serial port wiring (`--serial`): "off", "stdout", or "midi". Same
-    /// parser as `[serial] mode`.
+    /// Serial port wiring (`--serial`): "off", "stdout", "midi", "tcp",
+    /// or "pty". Same parser as `[serial] mode`.
     pub serial: Option<String>,
     /// Host MIDI output endpoint (`--midi-out`), implying `--serial midi`.
     pub midi_out: Option<String>,
@@ -1483,7 +1483,8 @@ pub(crate) struct RawIde {
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawScsi {
-    /// Host adapter to fit: "a2091" (Zorro II, default) or "a4091" (Zorro III).
+    /// Host adapter to fit: "a2091" (Zorro II, default), "a4091" (Zorro
+    /// III), or "a3000" (the motherboard SDMAC, default on an A3000).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) controller: Option<String>,
     /// Boot ROM image. For split even/odd A2091 EPROM dumps, `rom` is the
@@ -1546,10 +1547,12 @@ pub(crate) struct RawCpu {
     /// Override the CPU clock in MHz. Defaults to the model's stock speed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) clock_mhz: Option<f64>,
-    /// Model the on-chip instruction cache (68020/030; default false).
+    /// Model the on-chip instruction cache. Defaults on for the models
+    /// that have one (all 020+).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) icache: Option<bool>,
-    /// Model the on-chip data cache (68030 only; default false).
+    /// Model the on-chip data cache. Defaults on for the models that have
+    /// one (030/040/060).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) dcache: Option<bool>,
     /// 68060 only: what happens on the instructions the 68060 dropped from
@@ -2421,7 +2424,7 @@ pub(crate) fn machine_profile_defaults(model: MachineModel) -> Config {
         // The A3000: ECS on a big-box board, a 25 MHz 68030 with a real MMU,
         // and Ramsey-04 in front of the motherboard DRAM. Gary, not Gayle, so
         // no PCMCIA and no Gayle IDE. Its SCSI is a Super DMAC at $DD0000
-        // driving a WD33C93, which is not emulated yet.
+        // driving a WD33C93; `[scsi]` fits drives to it.
         MachineModel::A3000 => {
             d.chipset = Chipset::Ecs;
             d.chip_ram_bytes = 2 * 1024 * 1024;

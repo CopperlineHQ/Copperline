@@ -35,7 +35,7 @@ range checks as the equivalent TOML fields:
 
 | Flag | Overrides | Accepts |
 |---|---|---|
-| `--model NAME` | `[machine] profile` | `A1000`, `A500`, `A500OCS`, `A500Plus`, `A600`, `A1200`, `CDTV`, `CD32` |
+| `--model NAME` | `[machine] profile` | `A1000`, `A500`, `A500OCS`, `A500Plus`, `A600`, `A1200`, `A3000`, `A4000`, `CDTV`, `CD32` |
 | `--chipset NAME` | `[chipset] revision` | `OCS`, `ECS`, `AGA` |
 | `--cpu MODEL` | `[cpu] model` | `68000`, `68010`, `68EC020`, `68020`, `68030`, `68040`, `68060` |
 | `--cpu-clock MHZ` | `[cpu] clock_mhz` | a number of MHz |
@@ -57,6 +57,11 @@ A `--model` profile supplies the chipset, CPU, and memory defaults of a real
 machine; the other flags then override individual values on top of it, just as
 explicit `[cpu]`/`[chipset]`/`[memory]` sections override a `[machine]`
 profile in a config file.
+
+The audio and serial surface has matching per-run flags too --
+`--audio-device`, `--audio-channel-mode`, `--audio-stereo-separation`,
+`--serial`, `--midi-in`, `--midi-out` -- described with their `[audio]` and
+`[serial]` keys below.
 
 ## Top level
 
@@ -118,25 +123,23 @@ gives a plain 8371/8362 OCS machine.
 | `CD32` | AGA (Alice/Lisa) | 68EC020 @ 14.18 MHz | 2M | 0 | Akiko, CD32 pad, NVRAM, 512K extended ROM |
 
 `rtc` exists because most Amigas shipped without a battery-backed clock and
-only some carried one. Only the `A500Plus` (an OKI RTC soldered to the Rev 8A
-board) and `CDTV` fit one by default; the base A500/A500OCS, A600, A1200,
-A1000, and CD32 have none. Set `rtc = true` to add one -- for an A600HD or a
-clock-equipped A1200, say -- so the Workbench clock keeps time.
+only some carried one. The `A500Plus` (an OKI RTC soldered to the Rev 8A
+board), `CDTV`, `A3000`, and `A4000` fit one by default; the base
+A500/A500OCS, A600, A1200, A1000, and CD32 have none. Set `rtc = true` to add
+one -- for an A600HD or a clock-equipped A1200, say -- so the Workbench clock
+keeps time.
 
-The `A3000` and `A4000` profiles are the big-box machines. Both boot, but they
-are new and incomplete. They carry a Ramsey memory controller
-(`mem_controller`), which is what the two registers at `$DE0003` and `$DE0043`
-answer as, and they carry Gary rather than Gayle -- so no PCMCIA and no Gayle
-IDE.
+The `A3000` and `A4000` profiles are the big-box machines. They carry a
+Ramsey memory controller (`mem_controller`), which is what the two registers
+at `$DE0003` and `$DE0043` answer as, and they carry Gary rather than Gayle
+-- so no PCMCIA and no Gayle IDE.
 
 - The **A3000** has its motherboard SCSI: a Super DMAC at `$DD0000` driving a
-  WD33C93, which Kickstart's own `scsi.device` initialises at boot. No drives
-  are attached to it yet, so give the machine a Zorro controller (`[scsi]`) or a
-  host directory (`[[filesys]]`) to boot from.
-- The **A4000**'s IDE interface at `$DD2020` is not implemented. Kickstart's
-  `scsi.device` probes it, finds nothing, and waits out a timeout, so every boot
-  spends several seconds in the driver before it completes. Same story for
-  where to boot from.
+  WD33C93, which Kickstart's own `scsi.device` initialises at boot. Attach
+  drives to it with `[scsi] controller = "a3000"` (the default controller on
+  an A3000; see the `[scsi]` section below).
+- The **A4000** has its motherboard IDE interface at `$DD2020`; attach drives
+  with `[ide]`, exactly as on a Gayle machine.
 
 Motherboard fast RAM is not emulated on either; use `[memory] z3` instead,
 which the OS is equally happy with.
@@ -222,7 +225,7 @@ carried no information.)
 [cpu]
 model = "68000"     # 68000, 68010, 68EC020, 68020, 68030, 68040, 68060
 clock_mhz = 14.0    # optional; defaults to the model's stock speed
-# icache = false    # instruction-cache model (on by default: 020/030/040/060)
+# icache = false    # instruction-cache model (on by default on all 020+ models)
 # dcache = false    # data-cache model (on by default: 030/040/060)
 # fpu = true        # fit a 68881/68882 (68020/68030; needs the coprocessor
 #                   # interface, so not valid on a 68000). The full 68040's
@@ -425,6 +428,39 @@ without changing the config. `--joystick MODE` overrides this for a single
 run. (`auto` is still accepted here as a backward-compatibility alias for
 `gamepad`; the old auto-detect mode has been removed.)
 
+## `[serial]` -- serial port and MIDI
+
+```toml
+[serial]
+mode = "stdout"          # off, stdout, midi, tcp, or pty
+# midi_out = "FluidSynth"  # midi mode: host destination, substring match
+# midi_in = "Keystation"   # midi mode: host source, substring match
+# listen = "127.0.0.1:1234"  # tcp mode: bind address
+```
+
+The Amiga serial port doubles as the MIDI port. `mode` selects where
+Paula's serial in/out is connected:
+
+- `stdout` (the default) -- serial output prints to the host terminal,
+  matching the historical behaviour (DiagROM and similar tools log here).
+- `off` -- serial output is discarded and there is no serial input.
+- `midi` -- serial in/out is bridged to host MIDI endpoints. Needs a build
+  with the `midi` feature (the default); `midi_out`/`midi_in` name the
+  endpoints by case-insensitive substring (a USB interface or a virtual
+  port). `--list-midi` prints the host endpoints.
+- `tcp` -- serial in/out is bridged to a host TCP port, like UAE's `TCP:`
+  device. `listen` sets the bind address (default `127.0.0.1:1234`);
+  connect with e.g. `nc`, `socat`, or a raw-mode telnet client.
+- `pty` -- serial in/out is bridged to a host pseudo-terminal (Unix only).
+  The slave path (`/dev/pts/N`) is logged at startup; attach a terminal
+  with e.g. `minicom -D`, `screen`, or `cu -l`.
+
+With an `AUX:` shell on the Amiga side, `tcp`/`pty` give a remote AmigaDOS
+console. `--serial MODE` overrides the mode per run, and
+`--midi-out NAME`/`--midi-in NAME` imply `mode = "midi"`. The launcher's
+**Serial** tab and the in-window **MIDI In / MIDI Out** menu items select
+the MIDI endpoints interactively.
+
 ## `[floppy]` and `[floppy.df0]` .. `[floppy.df3]`
 
 ```toml
@@ -455,11 +491,12 @@ without a second drive: the first entry is the boot disk and the disk-swap
 shortcut (`Cmd+D` on macOS, `Alt+D` on Linux/Windows) or the status-bar
 swap button cycles to the next image, wrapping around.
 
-## `[ide]` -- Gayle hard disks
+## `[ide]` -- IDE hard disks
 
 ```toml
 [machine]
-profile = "A600"             # IDE needs a Gayle machine (A600 or A1200)
+profile = "A600"             # IDE needs a machine with an IDE port
+                             # (A600 or A1200 Gayle, or the A4000)
 
 [ide]
 master = "AmigaSYS.hdf"      # raw flat HDF, read/write
@@ -502,35 +539,50 @@ effect on a raw HDF, which carries its own label inside the image.
 
 The drive responds to ATA IDENTIFY with the Gayle byte order real hardware
 uses, so both Kickstart 3.1 variants boot from it. An HDD activity LED
-appears in the status bar on IDE machines.
+appears in the status bar on IDE machines. On the `A4000` profile the same
+`[ide]` section attaches drives to the motherboard IDE interface at
+`$DD2020` (no Gayle involved; Kickstart's `scsi.device` drives it the same
+way).
 
-## `[scsi]` -- A2091 SCSI controller
+## `[scsi]` -- SCSI controllers
 
 ```toml
 [scsi]
-rom = "a2091-v6.6.rom"       # A590/A2091 boot ROM image (required)
-# rom_odd = "a2091-odd.rom"  # for split even/odd EPROM dumps
+# controller = "a2091"       # a2091 (default), a4091, or a3000
+rom = "a2091-v6.6.rom"       # boot ROM image (a2091/a4091; the a3000 needs none)
+# rom_odd = "a2091-odd.rom"  # a2091 only: split even/odd EPROM dumps
 unit0 = "workbench.hdf"      # SCSI IDs 0-6
 unit1 = "data.hdf"
 # unit2..unit6 = ...
 ```
 
-The `[scsi]` section attaches a Commodore A2091 controller (Commodore
-DMAC + WD33C93A) as a Zorro II autoconfig board. It is the preferred way
-to mount hard disks: up to **seven drives** on one controller, on **any
-machine model** (the board needs no Gayle), and with no dependence on the
-Kickstart IDE driver -- the board's own boot ROM carries `scsi.device`
-and autoboots on Kickstart 1.3 and newer, which also sidesteps the stock
-A600/A1200 `scsi.device` only probing the IDE master. `[ide]` remains
-available, and both can be used at once.
+The `[scsi]` section attaches a SCSI host adapter with up to **seven
+drives**. `controller` picks which one:
 
-`rom` must point at an A590/A2091 boot ROM image (version 6.6 or later;
-16K/32K, available from the same vendors and dump sets as Kickstart
-ROMs). Dumps split into even/odd EPROM halves can be given as `rom`
-(even, U13) plus `rom_odd` (odd, U12). The ROM is required because the
-autoboot DiagArea and the scsi.device driver itself live in it; the
-autoconfig identity comes from the board (Commodore, product 3, DiagArea
-vector at `$2000`).
+- `"a2091"` (the default on machines without onboard SCSI): a Commodore
+  A2091 (Commodore DMAC + WD33C93A) as a Zorro II autoconfig board. It
+  works on **any machine model** (the board needs no Gayle) and has no
+  dependence on the Kickstart IDE driver -- the board's own boot ROM
+  carries `scsi.device` and autoboots on Kickstart 1.3 and newer, which
+  also sidesteps the stock A600/A1200 `scsi.device` only probing the IDE
+  master. `[ide]` remains available, and both can be used at once.
+- `"a4091"`: a Commodore A4091 (NCR 53C710 SCSI-2) as a Zorro III
+  autoconfig board, for machines with a 32-bit CPU. It needs a raw A4091
+  EPROM image (e.g. the open-source `a4091.rom`) as `rom`; it has a single
+  ROM, so `rom_odd` does not apply.
+- `"a3000"` (the default on the `A3000` profile): the A3000's motherboard
+  SCSI -- the Super DMAC at `$DD0000` driving a WD33C93. It is silicon, not
+  a card, so it needs no boot ROM: Kickstart's own `scsi.device` drives it
+  and autoboots from an RDB drive. It is only valid on a machine with the
+  Super DMAC (the A3000).
+
+For the A2091, `rom` must point at an A590/A2091 boot ROM image (version
+6.6 or later; 16K/32K, available from the same vendors and dump sets as
+Kickstart ROMs). Dumps split into even/odd EPROM halves can be given as
+`rom` (even, U13) plus `rom_odd` (odd, U12). The ROM is required on the
+Zorro boards because the autoboot DiagArea and the scsi.device driver
+itself live in it; the autoconfig identity comes from the board (the
+A2091 is Commodore product 3, with its DiagArea vector at `$2000`).
 
 Each `unitN` accepts everything `[ide]` paths do: RDB images, bare
 partition hardfiles (a synthesized RDB advertises a bootable `DHn`
@@ -549,6 +601,7 @@ bootpri = 6            # optional boot priority; default -128 = never boot
 
 [[filesys]]
 path = "/data/amiga/downloads"
+readonly = true        # optional, export the directory write-protected
 ```
 
 Each `[[filesys]]` entry exports a host directory to the guest as an
@@ -556,13 +609,28 @@ AmigaDOS volume on its own `HOSTFS<n>:` device, served live by the
 emulator: no disk image is built, and guest reads always see the current
 host contents. This differs from giving `[ide]`/`[scsi]` a directory
 path, which snapshots the tree into an in-memory FFS volume at startup.
-Up to 16 mounts.
+Up to 8 mounts.
 
-The volumes are read-only for now: write operations fail with the same
-"disk is write-protected" error a physical write-protected disk gives.
-Protection bits, comments, and exact datestamps are taken from UAE-style
-`.uaem` sidecar files when present (the sidecars stay hidden from
-listings).
+The volumes are read-write by default: the guest creates, writes, renames,
+and deletes the host's files directly, and changes land in the directory
+as you would expect. Set `readonly = true` to export a directory
+write-protected instead -- the guest sees a read-only disk and every write
+fails with the same "disk is write-protected" error a physical
+write-protected disk gives, which is worth setting on anything you would
+rather the Amiga could not damage. The launcher's Host Mounts tab exposes
+the same choice as its **Access** field.
+
+Amiga file attributes a host filesystem cannot hold -- protection bits
+such as script/pure/archive, file comments, and exact datestamps -- are
+kept in UAE-style `.uaem` sidecar files, read when present and written
+back when the guest changes them; the sidecars stay hidden from guest
+listings, and the delete-protection bit is honoured. Host filenames are
+mapped between UTF-8 and the guest's Latin-1 (names with no Latin-1
+spelling are hidden, since the guest could neither display nor reopen
+them). Host symlinks inside the mount are followed, wherever they point:
+the guest has no way to create one, so a symlink is treated as the host
+user deliberately grafting a directory into the mount, the same trust
+model as the UAE family.
 
 `volume` sets the AmigaDOS volume name (up to 30 characters, no `:` or
 `/`). `bootpri` enters the volume in the boot-device vote (-128..127;
@@ -594,12 +662,35 @@ overridden; without a path the EEPROM is session-only.
 ```toml
 [[zorro]]
 metadata = "boards/megaram.toml"
+
+[[zorro]]
+metadata = "boards/myboard.toml"
+# config = { mode = "fast" }  # WASM plugin boards: setting overrides
 ```
 
 Each entry adds a Zorro board described by a TOML metadata file, configured
-in file order after the built-in `[memory]` fast/z3 boards. See
-[](../zorro) for the metadata format and how autoconfig assigns
-addresses.
+in file order after the built-in `[memory]` fast/z3 boards. For a WASM
+plugin board, the optional `config` table overrides individual settings
+that the plugin's manifest declares (layered over the manifest's `[config]`
+defaults; the launcher's Zorro tab edits the same values). See
+[](../zorro) for the metadata format, the plugin ABI, and how autoconfig
+assigns addresses.
+
+## `[a2065]` -- Ethernet
+
+```toml
+[a2065]
+net = "loopback"   # or "none" for an isolated NIC
+```
+
+Fits a Commodore A2065 Ethernet board (Am7990 LANCE) on the Zorro chain.
+`net` selects the host network backend: `"loopback"` echoes transmitted
+frames back (self-contained, useful for driver bring-up), `"none"` leaves
+the NIC isolated. Omit the section entirely for no board. Note that host
+networking is inherently non-deterministic: inbound frames arrive on the
+host's schedule, not the emulated clock, so a NIC board breaks
+byte-identical replay and save-state determinism while traffic flows. See
+[](../zorro) for the board details.
 
 ## `[debug]` -- diagnostics
 

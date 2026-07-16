@@ -41,7 +41,9 @@ spreading those slots across the 32-CCK unit.
 
 Agnus revisions are modelled independently of Denise (machines shipped
 mixed): OCS (8370/8371), ECS 8372A (1M chip RAM reach), ECS 8375 (2M), and
-AGA Alice (2M, HRM IDs $23/$33). The ECS Agnus adds DIWHIGH and the
+AGA Alice (2M, HRM IDs $23/$33). VPOSR bits 8-14 report the chipset ID:
+$00 on OCS, $20/$30 (PAL/NTSC) on every ECS Agnus regardless of revision,
+and the Alice IDs above. The ECS Agnus adds DIWHIGH and the
 implemented subset of BEAMCON0 (PAL/VARBEAMEN/LOLDIS/HARDDIS and friends);
 Alice adds the FMODE wide-fetch latch, which scales the bitplane and
 sprite fetch quanta (FMODE=0 stays byte-identical to the OCS/ECS slot
@@ -210,7 +212,10 @@ A small 8520 model used for both CIAs: I/O ports, the
 interval timers with cascading and underflow pulses, the 24-bit TOD
 counters (VSYNC-clocked on CIA-A, HSYNC on CIA-B) with latch and alarm
 semantics (including the hardware quirk that a reset alarm is $000000),
-and the ICR with its read-clears behaviour.
+and the ICR with its read-clears behaviour. The /IRQ pin follows an
+INT-flag edge one E-clock later, armed per interrupt source (timers land
+on the same E-cycle their underflow was observed; the other sources take
+the extra cycle), matching the CIASetInt latency observable from the CPU.
 
 CIA-A carries /OVL (the reset-time ROM overlay at `$0`), the keyboard
 serial port (SDR/ICR with the KDAT handshake and an emulated
@@ -228,7 +233,10 @@ visible again before Kickstart reads the reset vectors.
 The floppy subsystem is track-timed: a drive has a rotational position,
 and data under the head right now is what disk DMA sees. Track stepping
 pays settle time, direction reversals cost more, and the index pulse fires
-once per revolution into CIA-B FLAG. Reads assemble MFM bitstreams from
+once per revolution into CIA-B FLAG. The stepper also enforces a minimum
+step-pulse spacing (~40 us, 140 colour clocks): a pulse arriving sooner
+after the last accepted one -- in either direction -- is ignored, so the
+mechanism never over-steps on pulses faster than the head can move. Reads assemble MFM bitstreams from
 the 11-sector AmigaDOS track layout; DSKSYNC matching, word-at-a-time
 DSKDAT, and DMA into chip RAM behave as Paula documents. Non-WORDSYNC read
 DMA drains Paula's recovered 16-bit disk word phase even when DSKLEN is

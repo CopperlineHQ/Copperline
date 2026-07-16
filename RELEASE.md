@@ -18,8 +18,17 @@ resolve that dependency story before attempting a crates.io release.
    Expected tracked binary files are:
 
    - `assets/brand/*.png`
+   - `assets/aros/aros-amiga-m68k-rom.bin` and
+     `assets/aros/aros-amiga-m68k-ext.bin`, the bundled AROS boot ROMs
+     (APL-licensed; see `assets/aros/README.md`)
+   - `assets/services/services_rom.bin`, the guest-side host-filesystem
+     handler built from `guest/services/`
    - `docs/images/*.png`; review provenance before release when these change
-   - `timing-test/boot.bin`, built from `timing-test/boot.asm`
+   - `timing-test/*.bin` probe programs (`boot.bin`, `test.bin`, the
+     `ddfprobe-*`/`bltprobe-*`/`audprobe-*`/`clxprobe`/`regprobe-*`/
+     `sprprobe-*` bootblocks), each built from its adjacent `.asm`
+   - `timing-test/golden/*.png`, the blessed golden renders for
+     `tests/probe_golden.rs`
    - `crates/m68k/tests/fixtures/extra/**/bin/*.bin`, built from the
      adjacent assembly sources under sibling `src/` directories
 
