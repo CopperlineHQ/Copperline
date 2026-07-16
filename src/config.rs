@@ -1141,7 +1141,8 @@ pub struct ConfigOverrides {
     /// parser as `[input] joystick`.
     pub joystick: Option<String>,
     /// Serial port wiring (`--serial`): "off", "stdout", "midi", "tcp",
-    /// or "pty". Same parser as `[serial] mode`.
+    /// or "pty" ("none" and "terminal" parse as compatibility aliases of
+    /// the first two). Same parser as `[serial] mode`.
     pub serial: Option<String>,
     /// Host MIDI output endpoint (`--midi-out`), implying `--serial midi`.
     pub midi_out: Option<String>,

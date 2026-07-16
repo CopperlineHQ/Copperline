@@ -152,8 +152,9 @@ guest listings); the delete-protection bit is honoured on
 `ACTION_DELETE_OBJECT`. Filenames map between host UTF-8 and guest
 Latin-1, hiding names with no Latin-1 spelling; host symlinks are
 followed (the guest cannot create one, so a symlink is the host user
-deliberately grafting a tree into the mount), while the escapes a guest
-could construct itself (`..`, separators) are blocked. A `readonly`
+deliberately grafting a tree into the mount), while path escapes that a
+guest could construct on its own (`..`, embedded separators) are
+blocked. A `readonly`
 mount refuses writes with the standard write-protection error.
 
 ## A2065 Ethernet (`a2065.rs`, `net.rs`)
