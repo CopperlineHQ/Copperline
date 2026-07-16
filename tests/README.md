@@ -15,6 +15,68 @@ Run them, once the assets are in place, with:
 cargo test --release --test image_regression -- --ignored --nocapture
 ```
 
+## Contributor regression workflow
+
+The fast gate for a CPU, memory, bus, IRQ, or chipset change is:
+
+```sh
+cargo test
+cargo build --release
+cargo test --release --test probe_golden
+cargo fmt --check
+cargo clippy --all-targets --all-features --locked -- -D warnings
+git diff --check
+```
+
+The golden renders live under `timing-test/golden/`. A hardware-model change
+that intentionally alters them must be re-blessed with
+`COPPERLINE_BLESS_GOLDEN=1 cargo test --release --test probe_golden`, with the
+render differences reviewed as part of the change. Run the ignored image
+suite above when the required local assets are available, followed by any
+subsystem-specific private smoke configurations.
+
+Promote a repeated manual smoke path into a focused unit test, an ignored
+image regression, or a deterministic input script. Completed investigations
+belong in commits and PR descriptions rather than a permanent done-log.
+
+### DiagROM smoke
+
+DiagROM is the first asset-backed boot smoke before a Kickstart OS check:
+
+```sh
+./target/release/copperline --model A500 --noaudio \
+  --screenshot-after 5 /tmp/diag.png /path/to/diagrom.rom
+```
+
+The run should produce serial diagnostics and a nonblank screenshot without
+an unexpected CPU halt. On the current headless path the serial-enable prompt
+appears around `t=14s`, times out around `t=18s`, and menu input is reliable
+from `t=22s`. Useful DiagROM menu paths are `3`, `4`, `1` for the IRQ test and
+`4`, `5`, then any key for the embedded graphics-test intro. Script these with
+repeatable `--press-after` events rather than host-time input.
+
+### Manual chipset regressions
+
+These fixed regressions remain useful stress scenes when their underlying
+hardware models change. The media and local configurations are private test
+assets, never repository inputs or compatibility conditions:
+
+- **Inside The Machine**: `18s` board sparks/electric effect; `60s` coherent
+  tunnel runner rather than noise; `70s` face-light sprites clipped to the
+  active window; `80s` Roto/HAM bottom rows without captured-row garbage;
+  `90s` stable card traces; `127s` HAM torus/balls rather than vertical strips;
+  and a falling-man handoff that has left the static figure for the next
+  runner scene by `180s`. The `165s`/`180s` pair guards Copper frame reload,
+  BLTPRI-clear CPU access, and the enabled-audio-DMA reservation window.
+- **State of the Art**: dense hand/silhouette overlap should remain free of
+  diagonal blitter edge-mask trails. Use it after changes to line mode,
+  first/last-word masks, blitter completion, or bitplane capture.
+- **Frontier**: retain stable output after bus, blitter, bitplane, or chipset
+  timing changes.
+
+Logs from these runs should not contain unexpected `halt`, exception, or
+invalid-memory warnings unless the test deliberately exercises that path.
+
 ## Where the assets are looked up
 
 In order:

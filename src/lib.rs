@@ -48,6 +48,7 @@ pub mod memory;
 #[cfg(feature = "midi")]
 pub mod midi;
 pub mod net;
+pub mod parallel;
 pub mod priority;
 pub mod ramsey;
 pub mod recorder;

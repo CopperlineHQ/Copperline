@@ -104,6 +104,7 @@ impl Bus {
             left_y_released: !self.input.rmb_port1,
             right_x_released: !self.input.mmb_port2,
             right_y_released: !self.input.rmb_port2,
+            resistance_ohms: self.input.pot_resistance_ohms,
         }
     }
 

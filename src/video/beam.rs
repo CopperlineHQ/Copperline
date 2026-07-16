@@ -28,8 +28,8 @@ pub struct BeamLineEvents {
     sprite_register_writes: Vec<BeamRegisterWrite>,
 }
 
-// Open Work #4 adds the line index before every consumer is switched over;
-// until then some of these accessors have no caller.
+// The shared index exposes every event category even though individual render
+// and collision consumers only need subsets of it.
 #[allow(dead_code)]
 impl BeamLineEvents {
     pub fn register_writes(&self) -> &[BeamRegisterWrite] {

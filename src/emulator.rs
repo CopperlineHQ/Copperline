@@ -1935,6 +1935,10 @@ pub fn build_machine(
         log::warn!("[audio] stereo_separation is ignored while channel_mode is mono");
     }
     let mut bus = Bus::new(mem, paula, floppy);
+    if let Some(path) = &cfg.parallel_output_path {
+        bus.attach_parallel_port(Box::new(crate::parallel::FileParallelPort::create(path)?));
+        info!("parallel: capturing Centronics bytes to {}", path.display());
+    }
     bus.set_video_standard(cfg.video_standard);
     bus.set_chipset_revisions(cfg.agnus_revision, cfg.denise_revision);
     bus.set_rtc_present(cfg.rtc_present);

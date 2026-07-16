@@ -494,6 +494,22 @@ console. `--serial MODE` overrides the mode per run, and
 **Serial** tab and the in-window **MIDI In / MIDI Out** menu items select
 the MIDI endpoints interactively.
 
+## `[parallel]` -- Centronics printer capture
+
+```toml
+[parallel]
+output = "printer.raw"
+```
+
+Without this section the parallel connector is electrically disconnected:
+CIA-B still produces its hardware `PC` strobe on port-B accesses, but no
+peripheral acknowledges it. Setting `output` attaches a raw Centronics sink.
+The output file is created at startup, replacing any existing file at that
+path. Each strobed byte is then written verbatim and returns the printer `/ACK`
+falling edge through CIA-A `FLAG`, including the normal CIA interrupt delay.
+The file is intentionally not decoded because the guest may emit any printer
+language; pass it to a compatible converter or spooler afterwards.
+
 ## `[floppy]` and `[floppy.df0]` .. `[floppy.df3]`
 
 ```toml
@@ -518,6 +534,12 @@ images (ADZ), single file ZIP archives, DMS archives, UAE extended ADF, and
 read-only SCP flux images. DMS, gzip, and SCP images are decoded at load time
 and always treated as write-protected; set `write_protected = false` on a plain
 ADF to allow write-through updates to the image file.
+
+The native loader deliberately rejects IPF/CAPS images. Useful native support
+would require either a direct IPF parser or an optional SPS/CAPS library, with
+its licensing, platform packaging, and dynamic-loading strategy settled before
+it becomes a desktop dependency. (The browser frontend has its own
+write-protected media decoder and does accept IPF.)
 
 A `paths` playlist lets multi-disk software that only drives DF0: run
 without a second drive: the first entry is the boot disk and the disk-swap

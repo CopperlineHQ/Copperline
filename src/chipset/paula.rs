@@ -220,7 +220,33 @@ pub struct PotPins {
     pub left_y_released: bool,
     pub right_x_released: bool,
     pub right_y_released: bool,
+    /// External paddle resistance from +5 V to each POT pin, in ohms.
+    /// `None` is a disconnected/floating pin. The order is POT0X, POT0Y,
+    /// POT1X, POT1Y.
+    pub resistance_ohms: [Option<u32>; 4],
 }
+
+impl Default for PotPins {
+    fn default() -> Self {
+        Self {
+            left_x_released: true,
+            left_y_released: true,
+            right_x_released: true,
+            right_y_released: true,
+            resistance_ohms: [None; 4],
+        }
+    }
+}
+
+/// Largest controller resistance specified by the Amiga Hardware Reference
+/// Manual. The recommended 470 kΩ +/- 10% part fits under this 528 kΩ limit.
+pub const POT_MAX_RESISTANCE_OHMS: u32 = 528_000;
+
+/// POTGOR bits 7..1 are documented as a Paula chip-identification field, but
+/// the production 8364R7 fitted across OCS/ECS/AGA machines returns zero (and
+/// has no software-selectable revision). Keep the readback explicit rather
+/// than accidentally leaking POTGO.START or floating-bus state into it.
+const POTGOR_PAULA_ID: u16 = 0x0000;
 
 /// CD audio stream from the CD controller to the host mixer. CD-DA is
 /// 44.1 kHz stereo, exactly the mixer rate, so the controller pushes one
@@ -318,6 +344,8 @@ pub struct Paula {
     serial_tx_pin_high: bool,
     pot_counters: [u8; 4],
     pot_running: bool,
+    pot_active: [bool; 4],
+    pot_discharge_lines: u8,
 
     // Test-harness scanline bookkeeping for `tick_audio` (the bus drives
     // the real slot walk and line-end request transfer itself).
@@ -403,6 +431,8 @@ impl Paula {
             serial_tx_pin_high: true,
             pot_counters: [0; 4],
             pot_running: false,
+            pot_active: [false; 4],
+            pot_discharge_lines: 0,
             #[cfg(test)]
             test_last_dmacon: 0,
             #[cfg(test)]
@@ -548,6 +578,8 @@ impl Paula {
         self.serial_tx_pin_high = true;
         self.pot_counters = [0; 4];
         self.pot_running = false;
+        self.pot_active = [false; 4];
+        self.pot_discharge_lines = 0;
         self.host_sample_acc = 0;
         self.led_filter_enabled = true;
         self.led_filter = StereoLedFilter::new();
@@ -719,6 +751,8 @@ impl Paula {
         if val & 0x0001 != 0 {
             self.pot_counters = [0; 4];
             self.pot_running = true;
+            self.pot_active = [true; 4];
+            self.pot_discharge_lines = 0;
         }
     }
 
@@ -734,7 +768,7 @@ impl Paula {
     }
 
     pub fn read_potgor(&self, pins: PotPins) -> u16 {
-        let mut v = self.potgo & 0xFF00;
+        let mut v = (self.potgo & 0xFF00) | POTGOR_PAULA_ID;
         for (bit, released) in [
             (8, pins.left_x_released),
             (10, pins.left_y_released),
@@ -771,38 +805,87 @@ impl Paula {
         potgo & (1 << dat_bit) != 0 && potgo & (1 << out_bit) != 0
     }
 
-    /// Advance the pot capacitor scan by one horizontal line. Denise clocks the
-    /// POTxDAT counters at H-sync, so this is called once per scanline (from the
-    /// bus's new-line loop, the same clock as CIA-B's TOD), not on a
-    /// free-running colour-clock divider -- that keeps the counter phase-aligned
-    /// with the beam, which the read-once and the free-running pot tests need.
-    pub fn tick_pot_hsync(&mut self) {
+    /// Convert a controller resistance to the scanline on which its RC charge
+    /// reaches Paula's comparator threshold. For a fixed capacitor, supply and
+    /// threshold, `t = -R*C*ln(1 - Vthreshold/Vcc)`, so threshold time is
+    /// linear in R. Calibrate the documented 528 kΩ maximum to the last 8-bit
+    /// count; the recommended 470 kΩ part therefore lands at count 227.
+    fn pot_threshold_count(resistance_ohms: u32) -> u8 {
+        let resistance = resistance_ohms.min(POT_MAX_RESISTANCE_OHMS);
+        resistance
+            .saturating_mul(u32::from(u8::MAX))
+            .div_ceil(POT_MAX_RESISTANCE_OHMS) as u8
+    }
+
+    /// Advance the pot capacitor scan by one horizontal line. Paula holds all
+    /// four capacitors discharged for the first 8 PAL or 7 NTSC lines after
+    /// START. It then increments an input channel once per H-sync until the
+    /// channel's RC charge crosses the comparator threshold, latching that
+    /// count. Floating, grounded, or output-low pins never cross and keep
+    /// wrapping; output-high pins cross immediately unless an external button
+    /// is holding the pin low.
+    pub fn tick_pot_hsync(&mut self, pins: PotPins, discharge_lines: u8) {
         if !self.pot_running {
             return;
         }
         let potgo = self.potgo;
 
-        // Each line advances every pin that charges through the external pot
-        // (floating or driven low). A pin driven HIGH as an output charges
-        // through its own low-impedance driver, trips the comparator
-        // immediately, and stays at the START-reset value of 0. Games drive
-        // every pin high via POTGO=$FFFF to read POTxDAT back as ~0 (the Bitmap
-        // Brothers input code keys a "no second button" test on that, so a
-        // spuriously counting POT0DAT corrupts it). The 8-bit counter wraps at
-        // 256, so a floating pin keeps cycling for as long as the scan runs
-        // rather than saturating.
-        let mut any_counting = false;
-        for (i, counter) in self.pot_counters.iter_mut().enumerate() {
-            if !Self::pot_pin_driven_high(potgo, i) {
-                *counter = counter.wrapping_add(1);
-                any_counting = true;
+        let released = [
+            pins.left_x_released,
+            pins.left_y_released,
+            pins.right_x_released,
+            pins.right_y_released,
+        ];
+
+        // Output-high is a low-impedance charge path and trips immediately,
+        // but the controller button is a switch to ground and overrides it.
+        for (i, active) in self.pot_active.iter_mut().enumerate() {
+            if *active && released[i] && Self::pot_pin_driven_high(potgo, i) {
+                *active = false;
+                self.pot_counters[i] = 0;
             }
         }
-        // With every pin driven high nothing can ever change again: stop the
-        // scan until the next START.
-        if !any_counting {
+
+        if !self.pot_active.iter().any(|active| *active) {
             self.pot_running = false;
+            return;
         }
+
+        if self.pot_discharge_lines < discharge_lines {
+            self.pot_discharge_lines += 1;
+            self.pot_counters = [0; 4];
+            return;
+        }
+
+        for i in 0..self.pot_counters.len() {
+            if !self.pot_active[i] {
+                continue;
+            }
+
+            let dat_bit = 8 + 2 * i as u16;
+            let out_bit = dat_bit + 1;
+            let output_enabled = potgo & (1 << out_bit) != 0;
+            let output_low = output_enabled && potgo & (1 << dat_bit) == 0;
+            let grounded = !released[i];
+
+            // A grounded/button-held or output-low pin remains below the
+            // comparator threshold. A disconnected input behaves the same.
+            let threshold = if grounded || output_low {
+                None
+            } else {
+                pins.resistance_ohms[i].map(Self::pot_threshold_count)
+            };
+            if threshold == Some(0) {
+                self.pot_active[i] = false;
+                continue;
+            }
+
+            self.pot_counters[i] = self.pot_counters[i].wrapping_add(1);
+            if threshold.is_some_and(|threshold| self.pot_counters[i] >= threshold) {
+                self.pot_active[i] = false;
+            }
+        }
+        self.pot_running = self.pot_active.iter().any(|active| *active);
     }
 
     /// Advance the serial port by `cck` color clocks. `end_cck` is the power-on
@@ -3290,14 +3373,14 @@ mod tests {
         // Each H-sync advances both bytes of POT0DAT (the X and Y pin counters)
         // by one.
         for _ in 0..5 {
-            paula.tick_pot_hsync();
+            paula.tick_pot_hsync(PotPins::default(), 0);
         }
         assert_eq!(paula.read_potdat(0), 0x0505);
 
         // A floating pin wraps at 256 rather than saturating, so the scan keeps
         // running indefinitely.
         paula.pot_counters = [u8::MAX; 4];
-        paula.tick_pot_hsync();
+        paula.tick_pot_hsync(PotPins::default(), 0);
         assert_eq!(paula.read_potdat(0), 0x0000);
         assert!(paula.pot_running());
     }
@@ -3316,7 +3399,7 @@ mod tests {
         let (mut paula, _) = paula_with_collect_sink();
         paula.write_potgo(0xFFFF);
         for _ in 0..charge_lines {
-            paula.tick_pot_hsync();
+            paula.tick_pot_hsync(PotPins::default(), 8);
         }
         assert_eq!(paula.read_potdat(0), 0x0000);
         assert_eq!(paula.read_potdat(1), 0x0000);
@@ -3329,10 +3412,64 @@ mod tests {
         let (mut paula, _) = paula_with_collect_sink();
         paula.write_potgo(0x0F00 | 0x0001);
         for _ in 0..charge_lines {
-            paula.tick_pot_hsync();
+            paula.tick_pot_hsync(PotPins::default(), 8);
         }
         assert_eq!(paula.read_potdat(0), 0x0000);
         assert_ne!(paula.read_potdat(1), 0x0000);
+    }
+
+    #[test]
+    fn potgor_reports_the_production_paula_id_field() {
+        let (mut paula, _) = paula_with_collect_sink();
+        paula.write_potgo(0x00FF);
+        assert_eq!(
+            paula.read_potgor(PotPins::default()) & 0x00FE,
+            POTGOR_PAULA_ID
+        );
+    }
+
+    #[test]
+    fn pot_rc_scan_holds_reset_then_latches_from_resistance() {
+        let (mut paula, _) = paula_with_collect_sink();
+        let pins = PotPins {
+            resistance_ohms: [Some(0), Some(470_000), Some(264_000), None],
+            ..PotPins::default()
+        };
+        paula.write_potgo(0x0001);
+
+        for _ in 0..8 {
+            paula.tick_pot_hsync(pins, 8);
+            assert_eq!(paula.read_potdat(0), 0, "PAL discharge holds reset");
+        }
+
+        // Zero ohms crosses immediately at count zero. Half-scale resistance
+        // crosses at 128; the recommended 470 kOhm controller crosses at 227.
+        paula.tick_pot_hsync(pins, 8);
+        assert_eq!(paula.read_potdat(0) & 0x00FF, 0);
+        for _ in 1..128 {
+            paula.tick_pot_hsync(pins, 8);
+        }
+        assert_eq!(paula.read_potdat(1) & 0x00FF, 128);
+        for _ in 128..227 {
+            paula.tick_pot_hsync(pins, 8);
+        }
+        assert_eq!(paula.read_potdat(0) >> 8, 227);
+        assert!(paula.pot_running(), "the disconnected POT1Y keeps scanning");
+    }
+
+    #[test]
+    fn grounded_button_overrides_output_high_pot_charge() {
+        let (mut paula, _) = paula_with_collect_sink();
+        let pins = PotPins {
+            left_x_released: false,
+            ..PotPins::default()
+        };
+        paula.write_potgo(0x0301); // POT0X output-high + START
+        for _ in 0..12 {
+            paula.tick_pot_hsync(pins, 8);
+        }
+        assert_eq!(paula.read_potdat(0) & 0x00FF, 4);
+        assert!(paula.pot_running());
     }
 
     #[test]

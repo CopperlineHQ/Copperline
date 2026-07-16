@@ -102,7 +102,9 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //  29: Msm6242Rtc gained the deterministic clock seed (seed_unix, frozen -
 //      [machine] rtc_time / rtc_frozen), so a resumed run keeps reading
 //      the same guest-visible time
-pub const STATE_VERSION: u32 = 29;
+//  30: Paula gained per-channel POT scan/discharge state and InputState gained
+//      analogue paddle resistances for the RC-based POTxDAT converter
+pub const STATE_VERSION: u32 = 30;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

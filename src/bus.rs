@@ -653,6 +653,11 @@ pub struct Bus {
     chip_dma_mask: u32,
     pub blitter: Blitter,
     pub floppy: FloppyController,
+    /// Host-side Centronics peripheral. The CIA-B PC/data and CIA-A FLAG
+    /// signals are emulated, but the attached sink itself is not machine state
+    /// and therefore survives save-state loads like Paula's audio/serial sinks.
+    #[serde(skip, default = "crate::parallel::null_parallel_port")]
+    parallel_port: Box<dyn crate::parallel::ParallelPort>,
     pub rtc: Msm6242Rtc,
     /// Whether the $DC0000 RTC is fitted (machine-profile flag; the base
     /// A600 shipped without one). The CPU memory map consults this before
@@ -1800,6 +1805,11 @@ pub struct InputState {
     pub cd32_yellow_port2: bool,
     pub mmb_port1: bool,
     pub mmb_port2: bool,
+    /// Optional analogue paddle resistance from +5 V to POT0X/POT0Y/POT1X/
+    /// POT1Y, in ohms. `None` leaves the pin floating, which is the normal
+    /// mouse/digital-joystick default. Values above Paula's specified maximum
+    /// are clamped by the converter.
+    pub pot_resistance_ohms: [Option<u32>; 4],
     /// Digital-joystick direction lines per controller port. When the
     /// matching `joystick_portN` flag is set, JOYxDAT reports these as the
     /// Gray-coded direction bits an Amiga game decodes, instead of the mouse
@@ -1975,6 +1985,15 @@ impl InputState {
         self.cd32_green_port2 = green;
         self.cd32_yellow_port2 = yellow;
     }
+
+    /// Connect an analogue paddle pair to a controller port. Each resistance
+    /// is measured from +5 V to the corresponding POT pin; `None` disconnects
+    /// that axis. Port 0 maps to POT0X/Y, every other value to POT1X/Y.
+    pub fn set_paddle_resistance(&mut self, port: usize, x_ohms: Option<u32>, y_ohms: Option<u32>) {
+        let base = usize::from(port != 0) * 2;
+        self.pot_resistance_ohms[base] = x_ohms;
+        self.pot_resistance_ohms[base + 1] = y_ohms;
+    }
 }
 
 fn mouse_joydat(x: u8, y: u8) -> u16 {
@@ -2113,6 +2132,7 @@ impl Bus {
             chip_dma_mask: 0x0007_FFFF,
             blitter: Blitter::new(),
             floppy,
+            parallel_port: crate::parallel::null_parallel_port(),
             rtc: Msm6242Rtc::default(),
             rtc_present: true,
             gayle: None,
@@ -2979,6 +2999,7 @@ impl Bus {
     pub(crate) fn adopt_host_resources(&mut self, live: &mut Bus) {
         std::mem::swap(&mut self.paula.serial, &mut live.paula.serial);
         std::mem::swap(&mut self.paula.audio, &mut live.paula.audio);
+        std::mem::swap(&mut self.parallel_port, &mut live.parallel_port);
         self.blitter_trace = live.blitter_trace.take();
     }
 
@@ -3035,6 +3056,17 @@ impl Bus {
     /// [`crate::serial::SerialTimeAnchor`].
     pub fn set_serial_time_anchor(&mut self, anchor: crate::serial::SerialTimeAnchor) {
         self.paula.set_serial_time_anchor(anchor);
+    }
+
+    /// Attach a Centronics peripheral to CIA-B port B. The default is a null
+    /// peripheral (unplugged cable), so attaching one is an explicit host-side
+    /// choice and does not change ordinary machine behavior.
+    pub fn attach_parallel_port(&mut self, port: Box<dyn crate::parallel::ParallelPort>) {
+        self.parallel_port = port;
+    }
+
+    pub fn flush_parallel_port(&mut self) -> std::io::Result<()> {
+        self.parallel_port.flush()
     }
 
     /// The live MIDI sink, when the serial port is in MIDI mode, for switching
@@ -4136,7 +4168,11 @@ impl Bus {
         for _ in 0..agnus_tick.new_lines {
             // Denise clocks the POTxDAT counters at H-sync, the same per-line
             // clock as CIA-B's TOD, so advance the pot scan once per new line.
-            self.paula.tick_pot_hsync();
+            let discharge_lines = match self.agnus.video_standard() {
+                VideoStandard::Pal => 8,
+                VideoStandard::Ntsc => 7,
+            };
+            self.paula.tick_pot_hsync(self.pot_pins(), discharge_lines);
             if self.cia_b.tick_tod() {
                 self.paula.intreq |= INT_EXTER;
                 if dbg_cia {
@@ -4593,11 +4629,9 @@ impl Bus {
         let v = self.cia_b.read(reg);
         trace!("cia_b R reg={:X} sz={} val={:02X}", reg, size, v);
         self.poll_stats.tick_read("cia_b", reg);
-        if size == 2 {
-            (v as u64) << 8
-        } else {
-            v as u64
-        }
+        let result = if size == 2 { (v as u64) << 8 } else { v as u64 };
+        self.service_parallel_strobe();
+        result
     }
 
     pub fn cia_b_write(&mut self, addr: u64, size: usize, val: u64) -> CiaSideEffect {
@@ -4618,10 +4652,26 @@ impl Bus {
             self.cia_b.anchor_tod_to_frame(0);
         }
         if reg == REG_PRB || reg == REG_DDRB {
-            let prb = self.cia_b.read(REG_PRB);
+            let prb = self.cia_b.port_b_pins();
             self.floppy.write_prb(prb);
         }
+        self.service_parallel_strobe();
         eff
+    }
+
+    /// Consume CIA-B's one-shot `PC` pulse as the external Centronics
+    /// `/STROBE`. An accepting peripheral returns an `/ACK`; its falling edge
+    /// is fed into CIA-A FLAG, whose existing one-E-clock interrupt delay then
+    /// drives Paula PORTS through the normal timed-device path.
+    fn service_parallel_strobe(&mut self) {
+        if !self.cia_b.take_pc_pulse() {
+            return;
+        }
+        let data = self.cia_b.port_b_pins();
+        if self.parallel_port.strobe(data, self.emulated_cck) {
+            let _ = self.cia_a.assert_flag();
+            self.cia_a.release_flag();
+        }
     }
 
     // -----------------------------------------------------------------

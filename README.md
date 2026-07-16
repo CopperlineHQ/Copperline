@@ -249,6 +249,22 @@ The ALSA development headers the Linux backend links against are already a
 build requirement (see Requirements); macOS and Windows need nothing beyond
 the OS.
 
+## Parallel printer capture
+
+Copperline models CIA-B's Centronics data/strobe output and the printer
+acknowledge path back through CIA-A. A config can attach a raw byte-stream
+capture; with no `[parallel]` section the connector remains unplugged:
+
+```toml
+[parallel]
+output = "printer.raw"
+```
+
+The capture preserves the guest's printer-language bytes verbatim for a
+compatible converter or spooler. The configured path is replaced when the
+emulator starts. See the configuration guide for the signal and interrupt
+behaviour.
+
 ## Documentation
 
 User and developer documentation -- getting started, the UI and shortcuts,
