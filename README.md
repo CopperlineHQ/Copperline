@@ -11,8 +11,9 @@ menu; it now boots Kickstart and runs timing-sensitive OCS and AGA software
 from the regression set at real speed.
 
 It covers OCS, ECS, and AGA (independent Agnus/Denise revisions,
-programmable blanking, machine profiles from the A500 to the A1200,
-CDTV, and CD32, with Gayle IDE, A2091 SCSI, and the AGA display path: 8 bitplanes,
+programmable blanking, machine profiles from the A500 to the A4000,
+CDTV, and CD32, with Gayle and A4000 IDE, A2091/A4091/A3000 SCSI, and the
+AGA display path: 8 bitplanes,
 256-entry palette, HAM8, FMODE wide fetch; remaining gaps are recorded in
 the internals docs). Cycle-driven means the whole machine advances on one
 colour-clock timeline: the chip bus is arbitrated per colour clock, the
@@ -41,16 +42,19 @@ against real hardware.
   latency is modelled. Real-hardware reference numbers come from the
   cross-emulator disk in `timing-test/`.
 - **OCS, ECS, and AGA**, with independent Agnus/Denise revisions and machine
-  profiles from the A500 to the A1200, plus CDTV and CD32. Boots the bundled
+  profiles from the A500 to the A4000, plus CDTV and CD32. Boots the bundled
   AROS ROM out of the box, as well as Kickstart 1.3 / 2.05 / 3.1 and DiagROM
   v2.0, and runs the current timing-sensitive OCS and AGA regression set at
   real speed.
 - **Configurable CPU** (68000 / 68010 / 68EC020 / 68020 / 68030 / 68040 / 68060) and clock,
-  with an optional 68881/68882 FPU (default-on for the 68040).
+  with an optional 68881/68882 FPU (default-on for the 68040/68060) and the
+  68030/68040 MMUs.
 - **Peripherals**: a bit-timed keyboard (6500/1 MCU), mouse, USB gamepad
   (via the pure-Rust `gilrs`, no SDL2), 4-channel Paula audio, floppy
-  (ADF / ADZ / ZIP / DMS, read-only SCP), Gayle IDE, A2091 SCSI, and CDTV/CD32
-  CD.
+  (ADF / ADZ / ZIP / DMS, read-only SCP), Gayle and A4000 IDE, SCSI (A2091,
+  A4091, or the A3000's onboard Super DMAC), CDTV/CD32 CD, A2065 Ethernet,
+  host directories served live as AmigaDOS volumes, and Zorro boards
+  loadable as WASM plugins.
 - **Tooling**: an in-window debugger that can step backwards, an
   interactive chip-bus frame analyzer, a trigger-based VCD waveform export
   of the chipset signals for GTKWave (`docs/debugger/waveform.md`), remote
@@ -234,7 +238,7 @@ the in-window **MIDI In / MIDI Out** menu, or set in the config file:
 
 ```toml
 [serial]
-mode = "midi"            # off, stdout, or midi
+mode = "midi"            # off, stdout, midi, tcp, or pty
 midi_out = "FluidSynth"  # host destination; substring match
 midi_in = "Keystation"   # host source
 ```
@@ -273,17 +277,20 @@ release needs resolved first. Release steps for every channel are in
 
 | Subsystem | Notes |
 | --- | --- |
-| M68K CPU | Via a vendored pure-Rust m68k crate; model selectable through 68040, accurate 68000 cycle counts, 6888x FPU. |
+| M68K CPU | Via a vendored pure-Rust m68k crate; model selectable through 68060, accurate 68000 cycle counts, 020+ caches, 6888x FPU, 68030/68040 MMUs. |
 | Chip RAM | mem_map'd; reset starts with ROM overlaid at $0 until CIA-A releases /OVL. |
 | Fast RAM | Optional Zorro II autoconfig RAM at $00200000 and Zorro III autoconfig RAM (`[memory] z3`); runs at the CPU clock. |
 | Slow RAM | Optional A500 trapdoor/fake-fast RAM at $00C00000; arbitrated on the chip bus through Agnus like chip RAM. |
 | ROM | Kickstart at $F80000 (512 KiB); optional extended ROM for CD32 ($E00000) and CDTV ($F00000). |
 | Battery RTC | Read-only MSM6242-compatible register view at $DC0000; guest writes affect only emulated latch/control state. |
 | CIA-A / CIA-B | I/O ports, /OVL, timers, TOD, keyboard SDR/ICR, disk control/status lines, and CIA-B FLAG disk index pulses. |
-| Paula serial | SERDAT through a one-word transmit buffer and timed shift register, out to stdout or -- with the optional `midi` feature -- bridged to host MIDI in/out; SERDATR reports TBE/TSRE/RBF, and serial receive is fed from the selected MIDI input. |
+| Paula serial | SERDAT through a one-word transmit buffer and timed shift register, out to stdout, a TCP port, a pseudo-terminal, or -- with the default `midi` feature -- bridged to host MIDI in/out; SERDATR reports TBE/TSRE/RBF, and serial receive is fed from the selected input. |
 | Paula audio | 4-channel DMA/sample playback, stereo mix, LED filter. |
 | Paula DMACON / INTENA / INTREQ | IRQ bits are stored and delivered through manual M68K autovectors with modelled 68000 interrupt-recognition latency; audio and disk DMA raise completion IRQs. |
 | Floppy / ADF / DMS / SCP | DF0-DF3 standard DD ADF read/write, read-only ADZ/DMS, UAE extended ADF, initial read-only SCP flux import, track-timed disk DMA, CIA drive lines, index FLAG, DSKLEN/DSKBYTR/DSKSYNC/DSKDAT, per-drive multi-disk playlists with a swap key. |
+| Hard disks | Gayle IDE (A600/A1200) and A4000 motherboard IDE; SCSI via the A2091 (Zorro II DMAC + WD33C93A), A4091 (Zorro III 53C710 with SCRIPTS), or A3000 Super DMAC; RDB HDFs, bare partition hardfiles, and host-directory volumes. |
+| Host filesystem | `[[filesys]]` mounts serve host directories live as AmigaDOS volumes (read/write, `.uaem` attribute sidecars, Latin-1 name mapping). |
+| Expansion | Zorro II/III autoconfig chain, TOML-described RAM boards, WASM plugin boards (registers/interrupts/DMA in a sandboxed module), A2065 Ethernet (Am7990 LANCE) with host network backends. |
 | Agnus VPOSR / VHPOSR | Beam counters advanced per colour clock; PAL and NTSC timing (including NTSC long/short lines). |
 | Agnus Copper | Beam-scheduled OCS Copper with COP1/COP2 jumps, WAIT, SKIP, DMAEN/COPEN gating, and chip-bus grants. |
 | Agnus blitter | Scheduled per-slot engine: normal/line/fill modes, hardware per-word channel bus sequences (including the area-fill idle C slot), BBUSY/BZERO, BLTPRI "nasty" vs CPU starvation-yield arbitration, blit-done IRQ. |

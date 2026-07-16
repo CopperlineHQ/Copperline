@@ -175,7 +175,8 @@ COPPERLINE_DBG_BREAK=C033C2 COPPERLINE_DBG_DUMP=C09580:4 \
 For chip-bus timing questions, the [waveform export](../debugger/waveform)
 records a trigger-based VCD trace of the internal chipset signals during
 the same kind of run (`--waveform out.vcd --wave-trigger pc=0xC033C2
---wave-duration 20000cck`) for viewing in GTKWave.
+--wave-duration 20000cck`, with `--wave-signals` selecting the signal
+groups) for viewing in GTKWave.
 
 ## The vAmigaTS compatibility suite
 

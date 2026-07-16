@@ -71,13 +71,23 @@ tests; they follow the same "never committed" rule.
 
 The tracked `.bin` files are generated test programs, not ROM or disk images:
 
-- `timing-test/boot.bin` is built from `timing-test/boot.asm`.
+- `timing-test/*.bin` files (the boot block plus the `ddfprobe-*`,
+  `bltprobe-*`, `audprobe-*`, `clxprobe`, `regprobe-*`, and `sprprobe-*`
+  probe programs) are each built from the adjacent `.asm` source, and
+  `timing-test/golden/*.png` are their blessed reference renders (see
+  `timing-test/README.md` "CI golden renders").
+- `assets/services/services_rom.bin` is the guest-side host-filesystem
+  handler built from `guest/services/`.
 - `crates/m68k/tests/fixtures/extra/**/bin/*.bin` files are built from the
   adjacent assembly sources under sibling `src/` directories and are used by
   the vendored CPU core's tests.
 
 Run the tracked-file audit in `RELEASE.md` before publishing a rewritten
 public repository.
+
+Unlike the suites above, `probe_golden.rs` (the golden-render suite for
+those probes) needs no external assets: it boots the bundled AROS ROM and
+runs in CI on every push.
 
 ## vAmigaTS
 

@@ -56,12 +56,12 @@ pacing_budget = "cycles"
 
 [cpu]
 
-# CPU type. One of: 68000, 68EC020, 68020, 68030, 68040, 68060.
+# CPU type. One of: 68000, 68010, 68EC020, 68020, 68030, 68040, 68060.
 # 68EC020 uses the 68020 instruction set with a 24-bit external address bus.
 model = "68000"
 
 # FPU (68881/68882 coprocessor; on-die on the full 68040/68060). Needs a
-# 68020 or later -- a 68000 cannot drive one. The 68040 and 68060 enable
+# 68020 or later -- a 68000/68010 cannot drive one. The 68040 and 68060 enable
 # it by default; on other 020+ CPUs opt in here. fpu = false on the 68060
 # models the FPU-less LC/EC parts (PCR.DFP).
 # fpu = true
@@ -167,23 +167,34 @@ fast = "0"
 slow = "512K"
 
 # Zorro III autoconfig RAM. Kickstart assigns the base address (usually
-# $40000000). Needs a CPU with a 32-bit address bus (68020/68030/68040;
-# not the 24-bit 68000/68EC020). Must be 0 or a power of two from 64K
-# to 1G.
+# $40000000). Needs a CPU with a 32-bit address bus (68020 and later;
+# not the 24-bit 68000/68010/68EC020). Must be 0 or a power of two from
+# 64K to 1G.
 # z3 = "16M"
 
 
 # Additional Zorro boards described by TOML metadata files, configured
 # in file order after the built-in [memory] fast/z3 boards. The metadata
-# file carries the autoconfig identity (see src/zorro.rs for the schema):
+# file carries the autoconfig identity (see docs/zorro.md for the schema):
 #   name = "MegaRAM"
 #   zorro = 3            # 2 or 3
-#   type = "ram"         # board backing; only "ram" so far
-#   size = "64M"
+#   type = "ram"         # board backing: "ram", or "wasm" for a plugin
+#   size = "64M"         # board whose behaviour comes from a .wasm module
 #   manufacturer = 0x07DB
 #   product = 0x20
+# A "wasm" board's manifest can declare settings; override them per board
+# with config = { key = value, ... }.
 # [[zorro]]
 # metadata = "boards/megaram.toml"
+
+
+# A2065 Ethernet board (Am7990 LANCE, driven by the SANA-II a2065.device).
+# net picks the host network backend: "loopback" echoes transmitted frames
+# back (self-contained), "none" leaves the NIC isolated. Omit the section
+# for no board. Host networking is non-deterministic, so a fitted NIC
+# breaks byte-identical replay/save-state determinism while traffic flows.
+# [a2065]
+# net = "loopback"
 
 
 # SCSI bus with up to seven drives, on any machine model. Preferred over [ide]
@@ -223,8 +234,8 @@ slow = "512K"
 
 # Optional per-chip overrides on top of the preset, for mixed machines
 # that really shipped (e.g. a late A500: ECS Agnus + OCS Denise).
-#   agnus  = "OCS" | "8370" | "8371" | "8372" | "8372A" | "8375"
-#   denise = "OCS" | "8362" | "ECS" | "8373"
+#   agnus  = "OCS" | "8370" | "8371" | "8372" | "8372A" | "8372B" | "8375" | "ALICE" (8374)
+#   denise = "OCS" | "8362" | "ECS" | "8373" | "LISA" (4203)
 # agnus = "8372A"
 # denise = "OCS"
 
@@ -246,7 +257,7 @@ video = "PAL"
 # Host directories mounted directly as AmigaDOS volumes (HOSTFS0:,
 # HOSTFS1:, ...), served live with no disk image in between: the guest reads
 # and writes the host's files directly, and changes land in the directory as
-# you would expect. Up to 16 mounts. volume defaults to the directory name.
+# you would expect. Up to 8 mounts. volume defaults to the directory name.
 # bootpri (-128..127, default -128 = never boot) enters the boot-device vote:
 # hard-disk boot partitions typically sit at 0 and DF0: at 5. readonly exports
 # the directory write-protected: the guest sees a read-only disk and every
@@ -310,16 +321,14 @@ floppy_sounds_volume = 100
 # [input]
 
 # Initial source for the emulated port-2 joystick / CD32 pad:
-#   "auto"     (default) a calibrated USB gamepad drives port 2 when present,
-#              otherwise the keyboard-joystick mapping (cursor keys + fire keys)
-#              takes over so port 2 stays usable without a controller.
-#   "gamepad"  only a physical pad drives port 2; the keyboard passes straight
-#              through to the Amiga (Shell, editor, Workbench). With no pad
-#              connected there is simply no port-2 input -- ideal for
+#   "gamepad"  (default) only a physical pad drives port 2; the keyboard passes
+#              straight through to the Amiga (Shell, editor, Workbench). With
+#              no pad connected there is simply no port-2 input -- ideal for
 #              keyboard-driven setup of an AmigaOS environment.
-#   "keyboard" always use the keyboard-joystick mapping.
+#   "keyboard" always use the keyboard-joystick mapping (cursor keys + fire
+#              keys), so port 2 stays usable without a controller.
 # Cmd+J / Alt+J still cycles this live; --joystick MODE overrides it per run.
-# joystick = "auto"
+# joystick = "gamepad"
 
 
 # Serial port wiring. The Amiga serial port doubles as the MIDI port.

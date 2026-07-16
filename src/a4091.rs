@@ -16,9 +16,8 @@
 //!   low 6 address bits, so the 64-byte register file mirrors across the
 //!   whole window; the driver relies on this, writing TEMP/SCRATCH through
 //!   the `+$40` shadow (a 68030/68040 cache write-allocate workaround) and
-//!   reading them back at the base offsets. Registers are plain storage for
-//!   now -- enough for the driver's walking-bits hardware test -- with the
-//!   SCRIPTS processor still to come (a DSP write warns once).
+//!   reading them back at the base offsets. A DSP write starts the SCRIPTS
+//!   processor, whose phase engine drives the SCSI-2 targets.
 //! - `$8C0003` the DIP-switch byte (SCSI host ID, termination, sync/fast
 //!   negotiation enables). `$FF` means all switches off: host ID 7.
 //!
@@ -202,7 +201,7 @@ pub struct A4091 {
     /// DIP switches as read at `$8C0003`; `$FF` = all off (host ID 7).
     dip: u8,
     /// The 53C710 register file, indexed by CPU-visible (big-endian) byte
-    /// address. Plain storage until the SCRIPTS core lands.
+    /// address.
     regs: Vec<u8>,
     /// The DMA FIFO: four byte lanes, 16 entries deep, 8 data bits plus a
     /// parity bit per entry. CTEST6 pushes/pops the lane selected by

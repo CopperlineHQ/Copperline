@@ -234,6 +234,10 @@ stop; `monitor loadseg-list` prints the same table.
 | `unwatch-reg NAME\|OFFSET` | remove one custom-register watch |
 | `clear-reg-watches` | remove all custom-register watches |
 | `copper [auto\|pc\|ADDR] [COUNT]` | disassemble Copper instructions |
+| `beam-trap VPOS [HPOS]` | toggle a stop when the beam reaches that position |
+| `clear-beam-traps` | remove all beam traps |
+| `copper-break ADDR` | toggle a stop when the Copper PC reaches ADDR |
+| `clear-copper-breaks` | remove all Copper breakpoints |
 | `last-writer ADDR` | reverse-search the last write to a word |
 | `segments` | the current process's loaded hunks (LoadSeg addresses) |
 | `loadseg-break` | toggle a visible stop whenever a new program is loaded |

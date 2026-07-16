@@ -278,7 +278,7 @@ under `golden/`. The emulator core is deterministic, so any pixel change is
 a real behaviour change.
 
 Each probe is its own `#[test]`, so the harness runs the emulator boots in
-parallel on the available cores (the full suite of 18 takes ~20 s on an
+parallel on the available cores (the full suite of 20 takes ~20 s on an
 8-core host vs ~90 s sequentially).
 
 Covered: `timing-test` (all 32 timing rows as rendered hex), `ddfprobe`

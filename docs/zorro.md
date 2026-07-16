@@ -5,9 +5,11 @@ Copperline's expansion bus models Zorro II/III autoconfig
 described by a `BoardSpec`, and additional boards are added from TOML
 metadata files without writing any Rust. The built-in `[memory] fast` and
 `z3` options are themselves just boards built from the same specs, and the
-`[scsi]` option adds the A2091 SCSI controller (`src/a2091.rs`) as a
-device-backed board (see the device-board notes below and the `[scsi]`
-section of [](guide/configuration)).
+`[scsi]` option can add the A2091 (Zorro II, `src/a2091.rs`) or A4091
+(Zorro III, `src/a4091.rs`) SCSI controller as a device-backed board (see
+the device-board notes below and the `[scsi]` section of
+[](guide/configuration); the third `[scsi]` choice, the A3000's
+motherboard SDMAC, is silicon at `$DD0000` rather than a Zorro board).
 
 There are two board kinds:
 
@@ -19,9 +21,10 @@ There are two board kinds:
   forking and recompiling Copperline. See
   [WASM plugin boards](#wasm-plugin-boards) below.
 
-Functional boards (the A2091, the CDTV DMAC, and WASM plugins) all implement
-the `ZorroDevice` trait (`src/zorro_device.rs`): the bus drives every board
-through that one boundary for register access, ticking, interrupts, and DMA.
+Functional boards (the A2091, the A4091, the A2065, the CDTV DMAC, and WASM
+plugins) all implement the `ZorroDevice` trait (`src/zorro_device.rs`): the
+bus drives every board through that one boundary for register access,
+ticking, interrupts, and DMA.
 
 ## Describing a board in TOML
 
@@ -55,9 +58,9 @@ Field notes:
 - `zorro = 2` boards must be a legal Zorro II size: 64K, 128K, 256K, 512K,
   1M, 2M, 4M, or 8M. `zorro = 3` boards may be any power of two from 64K to
   1G. Sizes accept `K`/`KB`/`M`/`MB`/`G`/`GB` suffixes or plain bytes.
-- Zorro III boards need a 32-bit CPU (68020/68030/68040); configuring one
-  on a 68000/68EC020 machine is rejected at startup, since a 24-bit address
-  bus cannot reach the Zorro III space.
+- Zorro III boards need a 32-bit CPU (68020 and later); configuring one on
+  a 68000/68010/68EC020 machine is rejected at startup, since a 24-bit
+  address bus cannot reach the Zorro III space.
 - `memlist` sets the autoconfig `ERTF_MEMLIST` flag, which asks Kickstart to
   link the board's space into the Exec free-memory list. Leave it `true`
   for RAM boards; a future I/O-style board would set it `false`.
