@@ -264,12 +264,16 @@ pub enum LauncherField {
     // Host FS mounts (the GUI edits the first FILESYS_GUI_SLOTS entries)
     Filesys0Dir,
     Filesys0Boot,
+    Filesys0ReadOnly,
     Filesys1Dir,
     Filesys1Boot,
+    Filesys1ReadOnly,
     Filesys2Dir,
     Filesys2Boot,
+    Filesys2ReadOnly,
     Filesys3Dir,
     Filesys3Boot,
+    Filesys3ReadOnly,
     // CD
     CdImage,
     CdInsertDelay,
@@ -343,6 +347,17 @@ fn filesys_slot(field: LauncherField) -> Option<(usize, bool)> {
     })
 }
 
+/// The Host FS mount slot of an Access (read-only) spinner field.
+fn filesys_readonly_slot(field: LauncherField) -> Option<usize> {
+    Some(match field {
+        LauncherField::Filesys0ReadOnly => 0,
+        LauncherField::Filesys1ReadOnly => 1,
+        LauncherField::Filesys2ReadOnly => 2,
+        LauncherField::Filesys3ReadOnly => 3,
+        _ => return None,
+    })
+}
+
 impl LauncherField {
     /// Whether this field is a Host FS mount's directory (folder picker),
     /// as opposed to a boot-priority stepper or any other field.
@@ -407,15 +422,19 @@ const STORAGE_ROWS: [Row; 12] = [
     row(F::ScsiUnit5, "SCSI unit 5", Drive),
     row(F::ScsiUnit6, "SCSI unit 6", Drive),
 ];
-const HOSTFS_ROWS: [Row; 8] = [
+const HOSTFS_ROWS: [Row; 12] = [
     row(F::Filesys0Dir, "HOSTFS0", Drive),
     row(F::Filesys0Boot, "  Boot priority", Cycle),
+    row(F::Filesys0ReadOnly, "  Access", Cycle),
     row(F::Filesys1Dir, "HOSTFS1", Drive),
     row(F::Filesys1Boot, "  Boot priority", Cycle),
+    row(F::Filesys1ReadOnly, "  Access", Cycle),
     row(F::Filesys2Dir, "HOSTFS2", Drive),
     row(F::Filesys2Boot, "  Boot priority", Cycle),
+    row(F::Filesys2ReadOnly, "  Access", Cycle),
     row(F::Filesys3Dir, "HOSTFS3", Drive),
     row(F::Filesys3Boot, "  Boot priority", Cycle),
+    row(F::Filesys3ReadOnly, "  Access", Cycle),
 ];
 const CD_ROWS: [Row; 3] = [
     row(F::CdImage, "CD image", PathRow),
@@ -630,6 +649,7 @@ pub struct MachineSetup {
     filesys_dirs: [Option<PathBuf>; FILESYS_GUI_SLOTS],
     filesys_names: [Option<String>; FILESYS_GUI_SLOTS],
     filesys_bootpri: [i8; FILESYS_GUI_SLOTS],
+    filesys_readonly: [bool; FILESYS_GUI_SLOTS],
     filesys_extra: Vec<RawFilesysMount>,
     // CD
     cd_image: Option<PathBuf>,
@@ -737,6 +757,9 @@ impl MachineSetup {
             }),
             filesys_bootpri: std::array::from_fn(|i| {
                 raw.filesys.get(i).and_then(|m| m.bootpri).unwrap_or(-128)
+            }),
+            filesys_readonly: std::array::from_fn(|i| {
+                raw.filesys.get(i).and_then(|m| m.readonly).unwrap_or(false)
             }),
             filesys_extra: raw
                 .filesys
@@ -974,6 +997,9 @@ impl MachineSetup {
                         .filter(|s| !s.is_empty())
                         .map(str::to_string),
                     bootpri: (self.filesys_bootpri[i] != -128).then_some(self.filesys_bootpri[i]),
+                    // Emitted only when set, like bootpri: writable is the
+                    // default, so an untouched config stays as written.
+                    readonly: self.filesys_readonly[i].then_some(true),
                 })
             })
             .chain(self.filesys_extra.iter().cloned())
@@ -1211,9 +1237,17 @@ impl MachineSetup {
             F::Df1Image | F::Df1WriteProtect => reason(self.floppy_drives >= 2, "drive off"),
             F::Df2Image | F::Df2WriteProtect => reason(self.floppy_drives >= 3, "drive off"),
             F::Df3Image | F::Df3WriteProtect => reason(self.floppy_drives >= 4, "drive off"),
-            // A boot priority is meaningless without a directory to boot.
+            // A boot priority or read-only flag is meaningless without a
+            // directory to mount.
             F::Filesys0Boot | F::Filesys1Boot | F::Filesys2Boot | F::Filesys3Boot => {
                 let (slot, _) = filesys_slot(field).expect("boot field");
+                reason(self.filesys_dirs[slot].is_some(), "no directory")
+            }
+            F::Filesys0ReadOnly
+            | F::Filesys1ReadOnly
+            | F::Filesys2ReadOnly
+            | F::Filesys3ReadOnly => {
+                let slot = filesys_readonly_slot(field).expect("readonly field");
                 reason(self.filesys_dirs[slot].is_some(), "no directory")
             }
             #[cfg(feature = "midi")]
@@ -1433,6 +1467,17 @@ impl MachineSetup {
                     pri => pri.to_string(),
                 }
             }
+            F::Filesys0ReadOnly
+            | F::Filesys1ReadOnly
+            | F::Filesys2ReadOnly
+            | F::Filesys3ReadOnly => {
+                let slot = filesys_readonly_slot(field).expect("readonly field");
+                if self.filesys_readonly[slot] {
+                    "Read-only".to_string()
+                } else {
+                    "Read-write".to_string()
+                }
+            }
             // Path/drive fields: the file name, or a placeholder.
             F::Rom => self.path_label(field, "(bundled AROS)"),
             _ if rows_contains_kind(field, RowKind::Path)
@@ -1549,6 +1594,9 @@ impl MachineSetup {
             _ => {
                 if let Some((slot, true)) = filesys_slot(field) {
                     self.filesys_bootpri[slot] = cycle_bootpri(self.filesys_bootpri[slot], forward);
+                } else if let Some(slot) = filesys_readonly_slot(field) {
+                    // Two values: either direction lands on the other one.
+                    self.filesys_readonly[slot] = !self.filesys_readonly[slot];
                 }
             }
         }
@@ -1635,9 +1683,10 @@ impl MachineSetup {
             _ => {
                 if let Some((slot, false)) = filesys_slot(field) {
                     self.filesys_dirs[slot] = None;
-                    // Boot priority on a mount with no directory is
-                    // meaningless; reset it so a cleared slot emits nothing.
+                    // Boot priority or read-only on a mount with no directory is
+                    // meaningless; reset both so a cleared slot emits nothing.
                     self.filesys_bootpri[slot] = -128;
+                    self.filesys_readonly[slot] = false;
                 }
             }
         }
@@ -2177,15 +2226,18 @@ mod tests {
             path: path.to_string(),
             volume: Some(path.trim_start_matches('/').to_uppercase()),
             bootpri: None,
+            readonly: None,
         }
     }
 
     #[test]
     fn host_mounts_round_trip_and_keep_entries_past_the_gui_slots() {
-        let raw = RawConfig {
+        let mut raw = RawConfig {
             filesys: (0..6).map(|i| raw_mount(&format!("/host{i}"))).collect(),
             ..RawConfig::default()
         };
+        // A hand-written readonly flag on a GUI-slot mount must survive a save.
+        raw.filesys[0].readonly = Some(true);
 
         let mut setup = MachineSetup::from_raw(&raw).unwrap();
         // The GUI edits the first FILESYS_GUI_SLOTS mounts; the rest are held
@@ -2196,6 +2248,21 @@ mod tests {
 
         // An untouched save is a faithful round trip.
         assert_eq!(setup.to_raw().filesys, raw.filesys);
+
+        // The Access spinner flips between the two modes; a writable mount
+        // emits no readonly key at all rather than an explicit false.
+        assert_eq!(
+            setup.value_label(LauncherField::Filesys0ReadOnly),
+            "Read-only"
+        );
+        setup.cycle(LauncherField::Filesys0ReadOnly, true);
+        assert_eq!(
+            setup.value_label(LauncherField::Filesys0ReadOnly),
+            "Read-write"
+        );
+        assert_eq!(setup.to_raw().filesys[0].readonly, None);
+        setup.cycle(LauncherField::Filesys0ReadOnly, false);
+        assert_eq!(setup.to_raw().filesys[0].readonly, Some(true));
 
         // Clearing a slot removes that mount. HOSTFS<n> is the position in the
         // config, so the mounts after it renumber, exactly as they would if the

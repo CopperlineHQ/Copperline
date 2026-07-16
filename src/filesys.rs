@@ -111,6 +111,9 @@ pub struct MountSpec {
     /// AddBootNode priority: -128 = mounted but never a boot candidate
     /// (the default); higher beats other boot devices in strap's ranking.
     pub boot_pri: i8,
+    /// Refuse every write, answering like a write-protected disk. Off by
+    /// default: the mount is the host directory, and the guest can change it.
+    pub readonly: bool,
 }
 
 /// DOS device name of mount `unit` (`HOSTFS0`, `HOSTFS1`, ...).
@@ -226,6 +229,10 @@ struct FilesysUnit {
     next_file_key: u32,
     /// Guest FileLock address -> what it locks.
     locks: HashMap<u32, LockRec>,
+    /// EXAMINE_NEXT cursor per directory lock: the last child name handed out.
+    /// Positioning by name (not a list index) keeps enumeration stable when the
+    /// caller deletes entries as it goes, as `Delete ALL` does.
+    examine: HashMap<u32, std::ffi::OsString>,
     /// This unit's fixed slice of the board-window FileLock pool.
     pool: LockPool,
 }
@@ -241,6 +248,7 @@ impl FilesysUnit {
             files: HashMap::new(),
             next_file_key: 0,
             locks: HashMap::new(),
+            examine: HashMap::new(),
             pool: LockPool::new(pool_base, pool_end),
         }
     }
@@ -308,6 +316,13 @@ impl FilesysUnit {
         self.mount.path.join(&rec.rel)
     }
 
+    /// The error a mutating packet must fail with, or None when the mount takes
+    /// writes. A `[[filesys]] readonly` mount answers exactly like a
+    /// write-protected disk.
+    fn write_refusal(&self) -> Option<u32> {
+        self.mount.readonly.then_some(ERROR_DISK_WRITE_PROTECTED)
+    }
+
     /// Allocate a FileLock in this unit's board-window sub-pool and register
     /// it. The handler port and volume node come from the unit.
     fn alloc_lock(
@@ -334,7 +349,19 @@ impl FilesysUnit {
     /// semantics: an optional `prefix:` is stripped (the supplied lock is
     /// already the base it named), `/` goes to the parent, and names are
     /// case-insensitive.
+    /// Resolve a name that is about to be created: every component but the last
+    /// must exist (and is matched case-insensitively, like `resolve`), while a
+    /// missing last component is taken literally so it can be created under the
+    /// spelling the guest asked for.
+    fn resolve_for_create(&self, lock_bptr: u32, name: &[u8]) -> Option<LockRec> {
+        self.resolve_inner(lock_bptr, name, true)
+    }
+
     fn resolve(&self, lock_bptr: u32, name: &[u8]) -> Option<LockRec> {
+        self.resolve_inner(lock_bptr, name, false)
+    }
+
+    fn resolve_inner(&self, lock_bptr: u32, name: &[u8], create_leaf: bool) -> Option<LockRec> {
         // A lock handed to this unit's handler always belongs to this unit.
         let mut rel = if lock_bptr != 0 {
             self.locks.get(&(lock_bptr << 2))?.rel.clone()
@@ -366,7 +393,8 @@ impl FilesysUnit {
         if comps.last() == Some(&&b""[..]) {
             comps.pop();
         }
-        for comp in comps {
+        let last = comps.len().saturating_sub(1);
+        for (i, comp) in comps.iter().enumerate() {
             if comp.is_empty() {
                 // Leading or doubled '/': up to the parent.
                 if !rel.pop() {
@@ -374,9 +402,26 @@ impl FilesysUnit {
                 }
                 continue;
             }
-            let comp = String::from_utf8_lossy(comp).into_owned();
+            let comp = latin1_to_utf8(comp);
             let dir = self.mount.path.join(&rel);
-            rel.push(match_component(&dir, &comp)?);
+            // Host symlinks are followed, wherever they point: the guest has no
+            // packet that creates one, so a symlink inside the mount was placed
+            // there by the host user, and grafting an outside directory into a
+            // mount that way is a feature (same trust model as the UAE family).
+            // The escapes we do block ("..", separators) are the ones a guest
+            // program could construct on its own.
+            match match_component(&dir, &comp) {
+                Some(existing) => rel.push(existing),
+                // The leaf may legitimately not exist yet, but a name the host
+                // would read as a path (or as "here"/"up") never becomes one.
+                None if create_leaf && i == last && is_creatable_name(&comp) => {
+                    if !dir.is_dir() {
+                        return None;
+                    }
+                    rel.push(&comp);
+                }
+                None => return None,
+            }
         }
         Some(LockRec { rel })
     }
@@ -391,12 +436,16 @@ impl FilesysUnit {
     ) -> Result<(), u32> {
         let path = self.lock_path(rec);
         let meta = std::fs::metadata(&path).map_err(|_| ERROR_OBJECT_NOT_FOUND)?;
-        let name: String = if rec.rel.as_os_str().is_empty() {
-            self.mount.volume.clone()
+        // The volume label is config-supplied ASCII; a leaf name comes from the
+        // host and is mapped back to Latin-1. Anything the guest could have
+        // reached is representable (resolve only matches names it could name),
+        // and dir_listing already hides the rest, so this never loses data here.
+        let name: Vec<u8> = if rec.rel.as_os_str().is_empty() {
+            self.mount.volume.clone().into_bytes()
         } else {
             rec.rel
                 .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
+                .and_then(utf8_to_latin1)
                 .unwrap_or_default()
         };
         let entry_type: i32 = if !meta.is_dir() {
@@ -428,7 +477,7 @@ impl FilesysUnit {
         let fib_data = FileInfoBlock {
             disk_key: long(disk_key),
             dir_entry_type: long(entry_type as u32),
-            file_name: bcpl::<108>(name.as_bytes()),
+            file_name: bcpl::<108>(&name),
             protection: long(protection),
             entry_type: long(entry_type as u32),
             size: long(meta.len().min(u32::MAX as u64) as u32),
@@ -442,8 +491,12 @@ impl FilesysUnit {
 
     /// Sorted directory listing used by EXAMINE_NEXT, hiding the `.uaem`
     /// metadata sidecars (their contents surface as the companion file's
-    /// attributes instead). Recomputed per call: simple and correct for
-    /// interactive use; cache if it ever shows up.
+    /// attributes instead). Recomputed per call, which makes a full
+    /// EXAMINE_NEXT walk quadratic in the directory size -- deliberately so:
+    /// the fresh listing is what keeps a walk correct while the caller
+    /// mutates the directory (Delete ALL), and EXAMINE_NEXT is the legacy
+    /// slow path anyway, superseded by ACTION_EXAMINE_ALL for software that
+    /// cares about speed. Revisit only if a real workload hurts.
     fn dir_listing(&self, rec: &LockRec) -> Vec<std::ffi::OsString> {
         let mut names: Vec<_> = std::fs::read_dir(self.lock_path(rec))
             .into_iter()
@@ -451,6 +504,9 @@ impl FilesysUnit {
             .flatten()
             .map(|e| e.file_name())
             .filter(|n| !n.as_encoded_bytes().ends_with(b".uaem"))
+            // Hide names that have no Latin-1 spelling: the guest could neither
+            // display nor reopen them. amiberry's my_readdir skips them too.
+            .filter(|n| utf8_to_latin1(n).is_some())
             .collect();
         names.sort();
         names
@@ -585,8 +641,12 @@ impl FilesysUnit {
                 let info = InfoData {
                     num_soft_errors: long(0),
                     unit_number: long(self.index as u32),
-                    // Read-only for now: shows as "Read Only" in C:Info.
-                    disk_state: long(ID_WRITE_PROTECTED),
+                    // C:Info prints this as "Read Only" or "Read/Write".
+                    disk_state: long(if self.mount.readonly {
+                        ID_WRITE_PROTECTED
+                    } else {
+                        ID_VALIDATED
+                    }),
                     num_blocks: long(numblocks),
                     num_blocks_used: long(inuse),
                     bytes_per_block: long(blocksize),
@@ -608,7 +668,7 @@ impl FilesysUnit {
                 log::debug!(
                     "filesys: {}: locate \"{}\" (lock {:#X})",
                     device_name(self.index),
-                    String::from_utf8_lossy(&name),
+                    latin1_to_utf8(&name),
                     arg(bus, 1)
                 );
                 let Some(rec) = self.resolve(arg(bus, 1), &name) else {
@@ -626,14 +686,18 @@ impl FilesysUnit {
             ACTION_FREE_LOCK => {
                 let addr = arg(bus, 1) << 2;
                 if addr != 0 && self.locks.remove(&addr).is_some() {
+                    self.examine.remove(&addr);
                     self.pool.release(addr);
                 }
                 (DOSTRUE, 0)
             }
             ACTION_EXAMINE_OBJECT => {
-                let Some(rec) = self.locks.get(&(arg(bus, 1) << 2)).cloned() else {
+                let lock = arg(bus, 1) << 2;
+                let Some(rec) = self.locks.get(&lock).cloned() else {
                     return (DOSFALSE, ERROR_OBJECT_NOT_FOUND);
                 };
+                // Examine restarts any enumeration on this lock.
+                self.examine.remove(&lock);
                 let fib = arg(bus, 2) << 2;
                 match self.fill_fib(bus, fib, &rec, 0) {
                     Ok(()) => (DOSTRUE, 0),
@@ -641,21 +705,28 @@ impl FilesysUnit {
                 }
             }
             ACTION_EXAMINE_NEXT => {
-                let Some(rec) = self.locks.get(&(arg(bus, 1) << 2)).cloned() else {
+                let lock = arg(bus, 1) << 2;
+                let Some(rec) = self.locks.get(&lock).cloned() else {
                     return (DOSFALSE, ERROR_NO_MORE_ENTRIES);
                 };
                 let fib = arg(bus, 2) << 2;
-                // The enumeration cursor lives in fib_DiskKey, where the
-                // previous EXAMINE_OBJECT/EXAMINE_NEXT left it.
-                let index = bus.read_long(fib) as usize;
+                // Position by the last name handed out, not a list index: a
+                // caller that deletes each entry as it examines (Delete ALL)
+                // shrinks the host directory under us, so an index into the
+                // re-read, re-sorted listing would skip whatever slid into the
+                // used slot. The listing is sorted, so "the first name after the
+                // last one" is a cursor that survives the entries vanishing.
                 let names = self.dir_listing(&rec);
-                let Some(name) = names.get(index) else {
+                let last = self.examine.get(&lock).cloned();
+                let Some(name) = examine_after(&names, last.as_deref()).cloned() else {
+                    self.examine.remove(&lock);
                     return (DOSFALSE, ERROR_NO_MORE_ENTRIES);
                 };
                 let child = LockRec {
-                    rel: rec.rel.join(name),
+                    rel: rec.rel.join(&name),
                 };
-                match self.fill_fib(bus, fib, &child, index as u32 + 1) {
+                self.examine.insert(lock, name);
+                match self.fill_fib(bus, fib, &child, 0) {
                     Ok(()) => (DOSTRUE, 0),
                     Err(e) => (DOSFALSE, e),
                 }
@@ -697,16 +768,27 @@ impl FilesysUnit {
                 }
             }
             ACTION_SET_PROTECT => {
-                // Arg2 = lock, Arg3 = BSTR name, Arg4 = mask. The host
-                // filesystem has nowhere faithful to keep Amiga protection
-                // bits; accept and ignore (like a FAT filesystem would).
-                // TODO(codewiz): persist to the .uaem sidecar once write
-                // support lands, so protection round-trips.
+                // Arg2 = lock, Arg3 = BSTR name, Arg4 = mask (fib_Protection).
+                // The host mode cannot hold the h/s/p/a bits or a non-default
+                // rwed set, so anything but the default lands in a .uaem sidecar.
+                if let Some(err) = self.write_refusal() {
+                    return (DOSFALSE, err);
+                }
                 let name_bptr = arg(bus, 3);
                 let name = read_bstr(bus, name_bptr);
-                match self.resolve(arg(bus, 2), &name) {
-                    Some(rec) if self.lock_path(&rec).exists() => (DOSTRUE, 0),
-                    _ => (DOSFALSE, ERROR_OBJECT_NOT_FOUND),
+                let Some(rec) = self.resolve(arg(bus, 2), &name) else {
+                    return (DOSFALSE, ERROR_OBJECT_NOT_FOUND);
+                };
+                let path = self.lock_path(&rec);
+                if !path.exists() {
+                    return (DOSFALSE, ERROR_OBJECT_NOT_FOUND);
+                }
+                // Keep the existing date and comment; change only protection.
+                let mut info = read_uaem(&path).unwrap_or_default();
+                info.protection = arg(bus, 4) & 0xFF;
+                match write_uaem(&path, &info) {
+                    Ok(()) => (DOSTRUE, 0),
+                    Err(e) => (DOSFALSE, host_error(&e)),
                 }
             }
             ACTION_FINDINPUT => {
@@ -718,7 +800,7 @@ impl FilesysUnit {
                 log::debug!(
                     "filesys: {}: open \"{}\" (lock {:#X})",
                     device_name(self.index),
-                    String::from_utf8_lossy(&name),
+                    latin1_to_utf8(&name),
                     arg(bus, 2)
                 );
                 let Some(rec) = self.resolve(arg(bus, 2), &name) else {
@@ -907,14 +989,261 @@ impl FilesysUnit {
                 );
                 (DOSTRUE, 0)
             }
-            // Write-family actions: mounts are read-only for now, so the
-            // proper refusal is "write protected", not "unknown packet".
-            // Write() and SetFileSize() signal failure with Res1 = -1.
-            ACTION_WRITE | ACTION_SET_FILE_SIZE => (DOSTRUE, ERROR_DISK_WRITE_PROTECTED),
-            ACTION_FINDOUTPUT | ACTION_FINDUPDATE | ACTION_CREATE_DIR | ACTION_DELETE_OBJECT
-            | ACTION_RENAME_OBJECT | ACTION_SET_COMMENT | ACTION_SET_DATE | ACTION_RENAME_DISK => {
-                (DOSFALSE, ERROR_DISK_WRITE_PROTECTED)
+            ACTION_FINDOUTPUT | ACTION_FINDUPDATE => {
+                // Open(MODE_NEWFILE) truncates or creates; Open(MODE_READWRITE)
+                // opens for update, creating the file if it is not there.
+                // Arg1 = BPTR FileHandle, Arg2 = lock, Arg3 = BSTR name.
+                if let Some(err) = self.write_refusal() {
+                    return (DOSFALSE, err);
+                }
+                let fh = arg(bus, 1) << 2;
+                let name_bptr = arg(bus, 3);
+                let name = read_bstr(bus, name_bptr);
+                let Some(rec) = self.resolve_for_create(arg(bus, 2), &name) else {
+                    return (DOSFALSE, ERROR_OBJECT_NOT_FOUND);
+                };
+                let path = self.lock_path(&rec);
+                if path.is_dir() {
+                    return (DOSFALSE, ERROR_OBJECT_WRONG_TYPE);
+                }
+                let mut opts = std::fs::OpenOptions::new();
+                opts.read(true).write(true).create(true);
+                if dp_type == ACTION_FINDOUTPUT {
+                    opts.truncate(true);
+                }
+                match opts.open(&path) {
+                    Ok(f) => {
+                        self.next_file_key += 1;
+                        let key = self.next_file_key;
+                        self.files.insert(key, (f, rec));
+                        bus.write_long(fh + FILEHANDLE_ARG1, key);
+                        (DOSTRUE, 0)
+                    }
+                    Err(e) => (DOSFALSE, host_error(&e)),
+                }
             }
+            ACTION_WRITE => {
+                // Arg1 = fh_Arg1 cookie, Arg2 = buffer APTR, Arg3 = length.
+                // Res1 = bytes written, or -1 with Res2 = error.
+                use std::io::Write;
+                let key = arg(bus, 1);
+                let buf = arg(bus, 2);
+                let len = arg(bus, 3) as usize;
+                if let Some(err) = self.write_refusal() {
+                    return (DOSTRUE, err); // res1 = -1
+                }
+                let Some((f, _)) = self.files.get_mut(&key) else {
+                    return (DOSTRUE, ERROR_INVALID_LOCK);
+                };
+                // Chunked for the same reason as ACTION_READ: the length comes
+                // from the guest, so a bogus one must not size a host buffer.
+                const WRITE_CHUNK: usize = 64 * 1024;
+                let mut chunk = vec![0u8; len.min(WRITE_CHUNK)];
+                let mut done = 0usize;
+                while done < len {
+                    let want = (len - done).min(WRITE_CHUNK);
+                    for (i, b) in chunk[..want].iter_mut().enumerate() {
+                        *b = bus.read_byte(buf + (done + i) as u32);
+                    }
+                    match f.write_all(&chunk[..want]) {
+                        Ok(()) => done += want,
+                        Err(e) => return (DOSTRUE, host_error(&e)), // res1 = -1
+                    }
+                }
+                (done as u32, 0)
+            }
+            ACTION_SET_FILE_SIZE => {
+                // Arg1 = fh_Arg1, Arg2 = offset, Arg3 = OFFSET_* mode.
+                // Res1 = the new size, or -1 with Res2 = error.
+                use std::io::{Seek, SeekFrom};
+                let key = arg(bus, 1);
+                let offset = arg(bus, 2) as i32 as i64;
+                let mode = arg(bus, 3) as i32;
+                if let Some(err) = self.write_refusal() {
+                    return (DOSTRUE, err); // res1 = -1
+                }
+                let Some((f, _)) = self.files.get_mut(&key) else {
+                    return (DOSTRUE, ERROR_INVALID_LOCK);
+                };
+                let (pos, end) = match (f.stream_position(), f.metadata()) {
+                    (Ok(p), Ok(m)) => (p as i64, m.len() as i64),
+                    _ => return (DOSTRUE, ERROR_SEEK_ERROR),
+                };
+                let size = match mode {
+                    OFFSET_BEGINNING => offset,
+                    OFFSET_CURRENT => pos + offset,
+                    OFFSET_END => end + offset,
+                    _ => -1,
+                };
+                if size < 0 {
+                    return (DOSTRUE, ERROR_SEEK_ERROR);
+                }
+                if let Err(e) = f.set_len(size as u64) {
+                    return (DOSTRUE, host_error(&e));
+                }
+                // Truncating below the file position leaves it past the end;
+                // DOS expects the position clamped to the new size.
+                if pos > size && f.seek(SeekFrom::Start(size as u64)).is_err() {
+                    return (DOSTRUE, ERROR_SEEK_ERROR);
+                }
+                (size as u32, 0)
+            }
+            ACTION_CREATE_DIR => {
+                // Arg1 = lock, Arg2 = BSTR name. Result is a lock on the new
+                // directory (the caller frees it).
+                if let Some(err) = self.write_refusal() {
+                    return (DOSFALSE, err);
+                }
+                let name_bptr = arg(bus, 2);
+                let name = read_bstr(bus, name_bptr);
+                let Some(rec) = self.resolve_for_create(arg(bus, 1), &name) else {
+                    return (DOSFALSE, ERROR_OBJECT_NOT_FOUND);
+                };
+                let path = self.lock_path(&rec);
+                if path.exists() {
+                    return (DOSFALSE, ERROR_OBJECT_EXISTS);
+                }
+                if let Err(e) = std::fs::create_dir(&path) {
+                    return (DOSFALSE, host_error(&e));
+                }
+                match self.alloc_lock(bus, board_base, ACCESS_READ, rec) {
+                    Some(addr) => (addr >> 2, 0),
+                    None => (DOSFALSE, ERROR_OBJECT_NOT_FOUND),
+                }
+            }
+            ACTION_DELETE_OBJECT => {
+                // Arg1 = lock, Arg2 = BSTR name.
+                if let Some(err) = self.write_refusal() {
+                    return (DOSFALSE, err);
+                }
+                let name_bptr = arg(bus, 2);
+                let name = read_bstr(bus, name_bptr);
+                let Some(rec) = self.resolve(arg(bus, 1), &name) else {
+                    return (DOSFALSE, ERROR_OBJECT_NOT_FOUND);
+                };
+                let path = self.lock_path(&rec);
+                let meta = match std::fs::symlink_metadata(&path) {
+                    Ok(m) => m,
+                    Err(e) => return (DOSFALSE, host_error(&e)),
+                };
+                // The object's own delete-protection bit (kept in the .uaem
+                // sidecar) refuses the delete, per the ACTION_DELETE_OBJECT
+                // autodoc. A residual host permission failure stays
+                // ERROR_WRITE_PROTECTED via host_error, which the same autodoc
+                // sanctions ("a delete operation on a file also implies a
+                // write"); the whole-volume case returns
+                // ERROR_DISK_WRITE_PROTECTED through write_refusal above.
+                if read_uaem(&path).is_some_and(|u| u.protection & FIBF_DELETE != 0) {
+                    return (DOSFALSE, ERROR_DELETE_PROTECTED);
+                }
+                let res = if meta.is_dir() {
+                    std::fs::remove_dir(&path)
+                } else {
+                    std::fs::remove_file(&path)
+                };
+                match res {
+                    Ok(()) => {
+                        // The attribute sidecar belongs to the file, not to the
+                        // guest: it goes with it.
+                        let _ = std::fs::remove_file(uaem_path(&path));
+                        (DOSTRUE, 0)
+                    }
+                    Err(e) => (DOSFALSE, host_error(&e)),
+                }
+            }
+            ACTION_RENAME_OBJECT => {
+                // Arg1 = source lock, Arg2 = BSTR source name,
+                // Arg3 = target dir lock, Arg4 = BSTR target name. Both locks
+                // reached this handler, so both are on this unit's volume.
+                if let Some(err) = self.write_refusal() {
+                    return (DOSFALSE, err);
+                }
+                let (from_bptr, to_bptr) = (arg(bus, 2), arg(bus, 4));
+                let from_name = read_bstr(bus, from_bptr);
+                let to_name = read_bstr(bus, to_bptr);
+                let Some(from) = self.resolve(arg(bus, 1), &from_name) else {
+                    return (DOSFALSE, ERROR_OBJECT_NOT_FOUND);
+                };
+                let Some(to) = self.resolve_for_create(arg(bus, 3), &to_name) else {
+                    return (DOSFALSE, ERROR_DIRECTORY_NOT_FOUND);
+                };
+                let (from_path, to_path) = (self.lock_path(&from), self.lock_path(&to));
+                // A rename that only changes case is not an overwrite: on a
+                // case-insensitive host the two paths are the same file.
+                let renaming_in_place = from_path == to_path;
+                if to_path.exists() && !renaming_in_place {
+                    return (DOSFALSE, ERROR_OBJECT_EXISTS);
+                }
+                match std::fs::rename(&from_path, &to_path) {
+                    Ok(()) => {
+                        let (from_uaem, to_uaem) = (uaem_path(&from_path), uaem_path(&to_path));
+                        if from_uaem.exists() {
+                            let _ = std::fs::rename(&from_uaem, &to_uaem);
+                        }
+                        (DOSTRUE, 0)
+                    }
+                    Err(e) => (DOSFALSE, host_error(&e)),
+                }
+            }
+            ACTION_SET_DATE => {
+                // Arg2 = lock, Arg3 = BSTR name, Arg4 = ptr to DateStamp.
+                if let Some(err) = self.write_refusal() {
+                    return (DOSFALSE, err);
+                }
+                let name_bptr = arg(bus, 3);
+                let name = read_bstr(bus, name_bptr);
+                let Some(rec) = self.resolve(arg(bus, 2), &name) else {
+                    return (DOSFALSE, ERROR_OBJECT_NOT_FOUND);
+                };
+                let ds = arg(bus, 4);
+                let (days, mins, ticks) = (
+                    bus.read_long(ds),
+                    bus.read_long(ds + 4),
+                    bus.read_long(ds + 8),
+                );
+                let path = self.lock_path(&rec);
+                if let Err(e) = set_host_mtime(&path, days, mins, ticks) {
+                    return (DOSFALSE, host_error(&e));
+                }
+                // If a sidecar already exists (for protection or a comment), keep
+                // its stored date in step with the new mtime. A file with only a
+                // date and no other attributes needs no sidecar -- the mtime holds
+                // it -- so we never create one here.
+                if let Some(mut info) = read_uaem(&path) {
+                    info.date = Some((days, mins, ticks));
+                    if let Err(e) = write_uaem(&path, &info) {
+                        return (DOSFALSE, host_error(&e));
+                    }
+                }
+                (DOSTRUE, 0)
+            }
+            ACTION_SET_COMMENT => {
+                // Arg2 = lock, Arg3 = BSTR name, Arg4 = BSTR comment. The host
+                // cannot hold a file comment, so it goes in the .uaem sidecar.
+                if let Some(err) = self.write_refusal() {
+                    return (DOSFALSE, err);
+                }
+                let name_bptr = arg(bus, 3);
+                let name = read_bstr(bus, name_bptr);
+                let comment_bptr = arg(bus, 4);
+                let comment = read_bstr(bus, comment_bptr);
+                let Some(rec) = self.resolve(arg(bus, 2), &name) else {
+                    return (DOSFALSE, ERROR_OBJECT_NOT_FOUND);
+                };
+                let path = self.lock_path(&rec);
+                if !path.exists() {
+                    return (DOSFALSE, ERROR_OBJECT_NOT_FOUND);
+                }
+                // Keep the existing protection and date; change only the comment.
+                let mut info = read_uaem(&path).unwrap_or_default();
+                info.comment = comment;
+                match write_uaem(&path, &info) {
+                    Ok(()) => (DOSTRUE, 0),
+                    Err(e) => (DOSFALSE, host_error(&e)),
+                }
+            }
+            // Relabel: the volume name comes from the config, not the guest.
+            ACTION_RENAME_DISK => (DOSFALSE, ERROR_ACTION_NOT_KNOWN),
             _ => {
                 log::debug!(
                     "filesys: {}: unhandled action {dp_type}",
@@ -1006,8 +1335,10 @@ impl HleHandler for FilesysHle {
 /// Metadata from a UAE `.uaem` sidecar file: the attributes a host
 /// filesystem cannot hold (script/pure/archive bits, file comment, exact
 /// datestamp), written by UAE-family emulators next to the real file.
+#[derive(Default)]
 struct UaemInfo {
-    /// fib_Protection value (deny-style rwed like the FIB wants).
+    /// fib_Protection value (deny-style rwed like the FIB wants). 0 is the
+    /// default (rwed all allowed, no h/s/p/a), which needs no sidecar.
     protection: u32,
     /// DateStamp, when the sidecar's timestamp parses.
     date: Option<DateStamp>,
@@ -1016,9 +1347,126 @@ struct UaemInfo {
 
 /// Read and parse the `.uaem` sidecar of `path`, if any.
 fn read_uaem(path: &Path) -> Option<UaemInfo> {
+    parse_uaem(&std::fs::read(uaem_path(path)).ok()?)
+}
+
+/// The attribute sidecar that belongs to a host path.
+fn uaem_path(path: &Path) -> PathBuf {
     let mut side = path.as_os_str().to_owned();
     side.push(".uaem");
-    parse_uaem(&std::fs::read(Path::new(&side)).ok()?)
+    PathBuf::from(side)
+}
+
+/// Persist `info` to `path`'s `.uaem` sidecar, or delete the sidecar when the
+/// attributes are all default (rwed allowed, no h/s/p/a bits, no comment) -- the
+/// host file's own mode and mtime then carry everything, so there is nothing to
+/// keep. The line format and the write-or-delete rule match amiberry's
+/// fsdb_host.cpp, so sidecars stay interoperable between the two emulators.
+fn write_uaem(path: &Path, info: &UaemInfo) -> std::io::Result<()> {
+    let side = uaem_path(path);
+    if info.protection & 0xFF == 0 && info.comment.is_empty() {
+        return match std::fs::remove_file(&side) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        };
+    }
+
+    // The rwed group is stored deny-style in fib_Protection; `^ 0xF` turns it
+    // back into the "allowed" letters the sidecar shows (the inverse of
+    // parse_uaem's flip). h/s/p/a are stored directly.
+    let mode = info.protection ^ 0xF;
+    let mut line: Vec<u8> = (0..8)
+        .zip(b"hsparwed")
+        .map(|(i, &l)| if mode & (1 << (7 - i)) != 0 { l } else { b'-' })
+        .collect();
+
+    let (days, mins, ticks) = info.date.unwrap_or_else(|| {
+        amiga_datestamp(std::fs::metadata(path).ok().and_then(|m| m.modified().ok()))
+    });
+    let (y, m, d) = civil_from_days(days_from_civil(1978, 1, 1) + i64::from(days));
+    let text = format!(
+        " {y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}.{:02}",
+        mins / 60,
+        mins % 60,
+        ticks / 50,
+        (ticks % 50) * 2,
+    );
+    line.extend_from_slice(text.as_bytes());
+    if !info.comment.is_empty() {
+        line.push(b' ');
+        // The sidecar body is UTF-8 like the host filenames (amiberry writes
+        // the comment through the same host-name encoding).
+        line.extend_from_slice(latin1_to_utf8(&info.comment).as_bytes());
+    }
+    line.push(b'\n');
+
+    // Write through a temp file and rename so a crash never leaves a truncated
+    // sidecar in place of the old one (matching amiberry).
+    let tmp = {
+        let mut t = side.clone().into_os_string();
+        t.push(".tmp");
+        PathBuf::from(t)
+    };
+    std::fs::write(&tmp, &line)?;
+    std::fs::rename(&tmp, &side)
+}
+
+/// The civil date of `z` days since 1970-01-01 (Howard Hinnant's algorithm,
+/// the inverse of [`days_from_civil`]).
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// Map a host I/O error onto the AmigaDOS error the guest expects, so a full
+/// disk says "disk full" rather than a generic failure.
+fn host_error(e: &std::io::Error) -> u32 {
+    use std::io::ErrorKind as K;
+    match e.kind() {
+        K::NotFound => ERROR_OBJECT_NOT_FOUND,
+        K::PermissionDenied => ERROR_WRITE_PROTECTED,
+        K::AlreadyExists => ERROR_OBJECT_EXISTS,
+        K::DirectoryNotEmpty => ERROR_DIRECTORY_NOT_EMPTY,
+        K::StorageFull => ERROR_DISK_FULL,
+        K::CrossesDevices => ERROR_RENAME_ACROSS_DEVICES,
+        K::InvalidFilename => ERROR_INVALID_COMPONENT_NAME,
+        _ => ERROR_SEEK_ERROR,
+    }
+}
+
+/// Stamp a host file with an AmigaDOS DateStamp (days/minutes/ticks since
+/// 1978-01-01). The host keeps only the modification time, which is what
+/// Examine() reports back.
+fn set_host_mtime(path: &Path, days: u32, mins: u32, ticks: u32) -> std::io::Result<()> {
+    /// Seconds between the Unix epoch and the AmigaDOS epoch.
+    const AMIGA_EPOCH_OFFSET: u64 = 252_460_800;
+    let secs = AMIGA_EPOCH_OFFSET
+        + u64::from(days) * 86_400
+        + u64::from(mins) * 60
+        + u64::from(ticks) / 50;
+    // A tick is 1/50 s = 20 ms: keep the sub-second part, so a DateStamp
+    // round-trips through the host mtime at its native resolution.
+    let nanos = (ticks % 50) * 20_000_000;
+    // checked_add: `+` panics when the sum exceeds the platform's time
+    // representation (Windows FILETIME tops out around year 30828, and a
+    // garbage guest DateStamp reaches far beyond), and a bad date from the
+    // guest must fail the packet, not the emulator.
+    let time = std::time::UNIX_EPOCH
+        .checked_add(std::time::Duration::new(secs, nanos))
+        .ok_or(std::io::ErrorKind::InvalidInput)?;
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .or_else(|_| std::fs::File::open(path))?
+        .set_modified(time)
 }
 
 /// Parse a `.uaem` sidecar: one line, eight flag letters ("hsparwed", a
@@ -1083,9 +1531,63 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146097 + doe - 719_468
 }
 
+// AmigaDOS filenames are ISO-8859-1 (Latin-1); the host filesystem is UTF-8.
+// Latin-1 is exactly the first 256 Unicode code points, so both directions are
+// a trivial per-character map and need no iconv. This mirrors amiberry's
+// osdep/amiberry_filesys.cpp (utf8_to_latin1_string / iso_8859_1_to_utf8) so
+// host directory mounts stay interoperable between the two emulators -- names
+// that amiberry drops, we drop the same way.
+
+/// A guest-supplied Latin-1 name -> the host UTF-8 string. Total: every byte is
+/// a valid Latin-1 code point.
+fn latin1_to_utf8(name: &[u8]) -> String {
+    name.iter().map(|&b| b as char).collect()
+}
+
+/// A host filename -> AmigaDOS Latin-1 bytes, or None if it contains any
+/// character outside Latin-1 (including invalid UTF-8). amiberry hides such
+/// entries from the guest rather than mangling them; so do we.
+fn utf8_to_latin1(name: &std::ffi::OsStr) -> Option<Vec<u8>> {
+    name.to_str()?
+        .chars()
+        .map(|c| (u32::from(c) <= 0xff).then_some(c as u8))
+        .collect()
+}
+
+/// The next EXAMINE_NEXT entry from a sorted listing given the last name handed
+/// out (`None` to start). Positioning by name rather than index keeps a walk
+/// stable when the caller deletes each entry as it goes: the entry that slides
+/// into a vacated slot is never skipped, and the just-deleted name still orders
+/// the search correctly even though it is gone from `names`.
+fn examine_after<'a>(
+    names: &'a [std::ffi::OsString],
+    last: Option<&std::ffi::OsStr>,
+) -> Option<&'a std::ffi::OsString> {
+    match last {
+        None => names.first(),
+        Some(l) => names.iter().find(|n| n.as_os_str() > l),
+    }
+}
+
 /// Case-insensitive component match: prefer the exact host name, else scan
 /// the directory for a case-insensitive match (AmigaDOS names are
 /// case-insensitive but case-preserving).
+/// Whether a name the guest asked us to create is safe to create verbatim on
+/// the host. "." and ".." are ordinary names on AmigaDOS but path operators to
+/// the host, and a separator or NUL would let one component become several --
+/// either way the write could land outside the mount.
+fn is_creatable_name(comp: &str) -> bool {
+    !comp.is_empty()
+        && comp != "."
+        && comp != ".."
+        && !comp.contains('/')
+        && !comp.contains('\\')
+        && !comp.contains('\0')
+        // The .uaem sidecars are ours: a guest file by that name would shadow
+        // another file's attributes and vanish from directory listings.
+        && !comp.to_ascii_lowercase().ends_with(".uaem")
+}
+
 fn match_component(dir: &Path, comp: &str) -> Option<std::ffi::OsString> {
     // "." and ".." are not directory shortcuts in AmigaDOS ("/" is the
     // parent), but the host would honor them and ".." escapes the mount.
@@ -1149,6 +1651,7 @@ mod tests {
             path: "/nonexistent".into(),
             volume: "Test".into(),
             boot_pri: -128,
+            readonly: false,
         }]
     }
 
@@ -1218,6 +1721,7 @@ mod tests {
             path: root.clone(),
             volume: "Test".into(),
             boot_pri: -128,
+            readonly: false,
         }]);
         // A lock on Libs, as DOS supplies with opens through the LIBS:
         // assign. The name still carries the user's "LIBS:" prefix; it
@@ -1238,6 +1742,169 @@ mod tests {
         assert!(unit.resolve(0, b"..").is_none());
         assert!(unit.resolve(0, b"Libs/../../etc").is_none());
         assert!(unit.resolve(0, b"Libs/.").is_none());
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Creating a file resolves its parent like any other lookup, but takes the
+    /// leaf literally so it lands under the spelling the guest asked for. What
+    /// it must never do is let that leaf become a path: the guest picks the
+    /// name, and "..", a separator, or a `.uaem` suffix would write outside the
+    /// mount or shadow another file's attributes.
+    #[test]
+    fn a_created_name_stays_inside_the_mount() {
+        let root = std::env::temp_dir().join(format!("clfs-create-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("Sub")).unwrap();
+
+        let mut hle = FilesysHle::default();
+        hle.set_mounts(vec![MountSpec {
+            path: root.clone(),
+            volume: "Test".into(),
+            boot_pri: -128,
+            readonly: false,
+        }]);
+        let unit = &hle.units[0];
+
+        // A missing leaf under an existing directory is the whole point.
+        let rec = unit.resolve_for_create(0, b"Sub/brand-new.txt").unwrap();
+        assert_eq!(rec.rel, PathBuf::from("Sub/brand-new.txt"));
+        // The parent still has to exist, and is still matched case-insensitively.
+        // The resolved parent keeps whatever spelling the host reports, which
+        // differs between case-sensitive and case-insensitive filesystems, so
+        // only the case-folded path is portable to assert.
+        let rec = unit.resolve_for_create(0, b"SUB/other.txt").unwrap();
+        assert!(rec.rel.file_name().unwrap() == "other.txt");
+        assert!(rec
+            .rel
+            .to_string_lossy()
+            .eq_ignore_ascii_case("Sub/other.txt"));
+        assert!(unit.resolve_for_create(0, b"Nope/file.txt").is_none());
+
+        // None of these may resolve: each would escape the mount or collide
+        // with our own sidecars.
+        for escape in [
+            &b".."[..],
+            b"Sub/..",
+            b"../outside.txt",
+            b"Sub/../../outside.txt",
+            b".",
+            b"ReadMe.txt.uaem",
+        ] {
+            assert!(
+                unit.resolve_for_create(0, escape).is_none(),
+                "resolved {:?}",
+                String::from_utf8_lossy(escape)
+            );
+        }
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Latin-1 <-> UTF-8 mapping matches amiberry: a guest name with high bytes
+    /// finds its UTF-8 host file, the host name maps back to those same bytes,
+    /// and a host name outside Latin-1 is hidden from directory listings.
+    #[test]
+    fn utf8_host_names_map_to_latin1() {
+        // "francais" with a c-cedilla (U+00E7): Latin-1 byte 0xE7, UTF-8 0xC3 0xA7.
+        assert_eq!(latin1_to_utf8(b"fran\xe7ais"), "fran\u{e7}ais");
+        assert_eq!(
+            utf8_to_latin1(std::ffi::OsStr::new("fran\u{e7}ais")),
+            Some(b"fran\xe7ais".to_vec())
+        );
+        // Above Latin-1 (U+2603 SNOWMAN): no mapping.
+        assert_eq!(utf8_to_latin1(std::ffi::OsStr::new("sn\u{2603}w")), None);
+
+        let root = std::env::temp_dir().join(format!("clfs-latin1-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("fran\u{e7}ais"), b"x").unwrap();
+        std::fs::write(root.join("sn\u{2603}w"), b"x").unwrap();
+
+        let mut hle = FilesysHle::default();
+        hle.set_mounts(vec![MountSpec {
+            path: root.clone(),
+            volume: "Test".into(),
+            boot_pri: -128,
+            readonly: false,
+        }]);
+        let unit = &hle.units[0];
+
+        // The guest names it in Latin-1 and reaches the UTF-8 host file.
+        let rec = unit.resolve(0, b"fran\xe7ais").unwrap();
+        assert_eq!(rec.rel, PathBuf::from("fran\u{e7}ais"));
+        // The listing shows the mappable name and hides the snowman.
+        let listing = unit.dir_listing(&LockRec {
+            rel: PathBuf::new(),
+        });
+        assert!(listing.iter().any(|n| n == "fran\u{e7}ais"));
+        assert!(listing.iter().all(|n| n != "sn\u{2603}w"));
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// EXAMINE_NEXT must visit every entry exactly once even when the caller
+    /// deletes each one as it is examined (what `Delete ALL` does). Walking a
+    /// re-read listing by index skips whatever slides into the vacated slot;
+    /// walking by last-name-returned does not.
+    #[test]
+    fn examine_next_survives_deletion_mid_walk() {
+        let mut remaining: Vec<std::ffi::OsString> = ["a", "b", "c", "d", "e", "f"]
+            .iter()
+            .map(Into::into)
+            .collect();
+        let mut visited = Vec::new();
+        let mut last: Option<std::ffi::OsString> = None;
+        // Re-read the (shrinking) listing each step, exactly as the handler does.
+        while let Some(name) = examine_after(&remaining, last.as_deref()).cloned() {
+            visited.push(name.to_string_lossy().into_owned());
+            last = Some(name.clone());
+            // The caller deletes the entry it just examined.
+            remaining.retain(|n| *n != name);
+        }
+        assert_eq!(visited, ["a", "b", "c", "d", "e", "f"]);
+        assert!(remaining.is_empty());
+    }
+
+    /// A `readonly` mount answers every mutating packet like a write-protected
+    /// disk, and says so in the volume's InfoData.
+    #[test]
+    fn a_readonly_mount_refuses_every_write() {
+        let mut hle = FilesysHle::default();
+        hle.set_mounts(vec![
+            MountSpec {
+                path: "/nonexistent".into(),
+                volume: "Locked".into(),
+                boot_pri: -128,
+                readonly: true,
+            },
+            MountSpec {
+                path: "/nonexistent".into(),
+                volume: "Open".into(),
+                boot_pri: -128,
+                readonly: false,
+            },
+        ]);
+        assert_eq!(
+            hle.units[0].write_refusal(),
+            Some(ERROR_DISK_WRITE_PROTECTED)
+        );
+        assert_eq!(hle.units[1].write_refusal(), None);
+    }
+
+    /// A DateStamp survives the trip through the host mtime at its native
+    /// 1/50 s resolution: SetFileDate then Examine must return the same
+    /// ticks, not the value truncated to whole seconds.
+    #[test]
+    fn datestamp_round_trips_subsecond_through_host_mtime() {
+        let root = std::env::temp_dir().join(format!("clfs-ticks-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("stamped");
+        std::fs::write(&file, b"x").unwrap();
+
+        // 2026-07-16 12:34:56.84: 42 ticks past the second.
+        let stamp = (17743, 12 * 60 + 34, 56 * 50 + 42);
+        set_host_mtime(&file, stamp.0, stamp.1, stamp.2).unwrap();
+        let mtime = std::fs::metadata(&file).unwrap().modified().ok();
+        assert_eq!(amiga_datestamp(mtime), stamp);
 
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -1265,6 +1932,42 @@ mod tests {
         let info = parse_uaem(b"---arwed").unwrap();
         assert_eq!(info.protection, 0x10); // FIBF_ARCHIVE
         assert_eq!(info.date, None);
+    }
+
+    /// write_uaem produces exactly the byte format amiberry reads, round-trips
+    /// through parse_uaem, and deletes the sidecar when attributes go default.
+    #[test]
+    fn write_uaem_matches_amiberry_and_removes_default() {
+        let root = std::env::temp_dir().join(format!("clfs-uaem-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("Shell-Startup");
+        std::fs::write(&file, b"; script").unwrap();
+
+        // Script bit + execute denied, a comment, and a fixed datestamp.
+        let info = UaemInfo {
+            protection: 0x42, // FIBF_SCRIPT | FIBF_EXECUTE
+            date: Some((17722, 16 * 60 + 16, 51 * 50 + 32 / 2)),
+            comment: b"a comment".to_vec(),
+        };
+        write_uaem(&file, &info).unwrap();
+
+        // Byte-for-byte what amiberry writes.
+        let raw = std::fs::read(uaem_path(&file)).unwrap();
+        assert_eq!(raw, b"-s--rw-d 2026-07-10 16:16:51.32 a comment\n");
+
+        // ...and it parses back to the same attributes.
+        let back = read_uaem(&file).unwrap();
+        assert_eq!(back.protection, 0x42);
+        assert_eq!(back.date, info.date);
+        assert_eq!(back.comment, b"a comment");
+
+        // Default attributes (rwed, no bits, no comment) delete the sidecar.
+        write_uaem(&file, &UaemInfo::default()).unwrap();
+        assert!(!uaem_path(&file).exists());
+        // Removing an already-absent sidecar is not an error.
+        write_uaem(&file, &UaemInfo::default()).unwrap();
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

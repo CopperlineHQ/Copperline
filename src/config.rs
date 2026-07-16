@@ -1343,6 +1343,10 @@ pub(crate) struct RawFilesysMount {
     /// volume but never offers it as a boot candidate.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) bootpri: Option<i8>,
+    /// Export the directory write-protected: the guest sees the volume as a
+    /// read-only disk and every write fails. Defaults to false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) readonly: Option<bool>,
 }
 
 /// `[input]` host-input preferences. Currently just the initial joystick input
@@ -2155,6 +2159,7 @@ impl TryFrom<RawConfig> for Config {
                             .unwrap_or_else(|| "HostFS".into())
                     }),
                     boot_pri: m.bootpri.unwrap_or(-128),
+                    readonly: m.readonly.unwrap_or(false),
                 })
                 .collect(),
             chipset,
@@ -2940,6 +2945,7 @@ mod tests {
                 path: std::path::PathBuf::from("."),
                 volume: volume.to_string(),
                 boot_pri: -128,
+                readonly: false,
             }],
             ..Config::default()
         };

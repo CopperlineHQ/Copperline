@@ -244,11 +244,14 @@ video = "PAL"
 
 
 # Host directories mounted directly as AmigaDOS volumes (HOSTFS0:,
-# HOSTFS1:, ...), served live with no disk image in between. Read-only for
-# now: write operations fail with "disk is write-protected". Up to 16
-# mounts. volume defaults to the directory name. bootpri (-128..127,
-# default -128 = never boot) enters the boot-device vote: hard-disk boot
-# partitions typically sit at 0 and DF0: at 5.
+# HOSTFS1:, ...), served live with no disk image in between: the guest reads
+# and writes the host's files directly, and changes land in the directory as
+# you would expect. Up to 16 mounts. volume defaults to the directory name.
+# bootpri (-128..127, default -128 = never boot) enters the boot-device vote:
+# hard-disk boot partitions typically sit at 0 and DF0: at 5. readonly exports
+# the directory write-protected: the guest sees a read-only disk and every
+# write fails, which is worth setting on anything you would rather the Amiga
+# could not damage.
 # [[filesys]]
 # path = "/data/amiga/Workbench"
 # volume = "Workbench"
@@ -256,6 +259,7 @@ video = "PAL"
 #
 # [[filesys]]
 # path = "/data/amiga/downloads"
+# readonly = true
 
 
 # Presentation options. overscan: "tv" (default; mask deep horizontal

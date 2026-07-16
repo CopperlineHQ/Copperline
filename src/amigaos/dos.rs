@@ -48,12 +48,20 @@ pub const ACTION_EXAMINE_FH: i32 = 1034; // ExamineFH()
 pub const DOSTRUE: u32 = 0xFFFF_FFFF;
 pub const DOSFALSE: u32 = 0;
 pub const ERROR_OBJECT_IN_USE: u32 = 202;
+pub const ERROR_OBJECT_EXISTS: u32 = 203;
+pub const ERROR_DIRECTORY_NOT_FOUND: u32 = 204;
 pub const ERROR_OBJECT_NOT_FOUND: u32 = 205;
+pub const ERROR_INVALID_COMPONENT_NAME: u32 = 206;
 pub const ERROR_ACTION_NOT_KNOWN: u32 = 209;
 pub const ERROR_INVALID_LOCK: u32 = 211;
 pub const ERROR_OBJECT_WRONG_TYPE: u32 = 212;
 pub const ERROR_DISK_WRITE_PROTECTED: u32 = 214;
+pub const ERROR_RENAME_ACROSS_DEVICES: u32 = 215;
+pub const ERROR_DIRECTORY_NOT_EMPTY: u32 = 216;
 pub const ERROR_SEEK_ERROR: u32 = 219;
+pub const ERROR_DISK_FULL: u32 = 221;
+pub const ERROR_DELETE_PROTECTED: u32 = 222;
+pub const ERROR_WRITE_PROTECTED: u32 = 223;
 pub const ERROR_NO_MORE_ENTRIES: u32 = 232;
 /// ACTION_SEEK Arg3 modes (dos/dos.h OFFSET_*).
 pub const OFFSET_BEGINNING: i32 = -1;
@@ -208,19 +216,19 @@ pub fn read_bstr(bus: &mut dyn AddressBus, bptr: u32) -> Vec<u8> {
 /// An AmigaDOS DateStamp: days/minutes/ticks since 1978-01-01.
 pub type DateStamp = (u32, u32, u32);
 
-/// Host mtime -> AmigaDOS DateStamp.
+/// Host mtime -> AmigaDOS DateStamp, at the DateStamp's native resolution:
+/// a tick is 1/50 s, so the host's sub-second part survives to 20 ms.
 pub fn amiga_datestamp(time: Option<std::time::SystemTime>) -> DateStamp {
     /// Seconds between the Unix epoch and the AmigaDOS epoch.
     const AMIGA_EPOCH_OFFSET: u64 = 252_460_800;
-    let secs = time
+    let since_epoch = time
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-        .saturating_sub(AMIGA_EPOCH_OFFSET);
+        .unwrap_or_default();
+    let secs = since_epoch.as_secs().saturating_sub(AMIGA_EPOCH_OFFSET);
     (
         (secs / 86_400) as u32,
         (secs % 86_400 / 60) as u32,
-        (secs % 60) as u32 * 50,
+        (secs % 60) as u32 * 50 + since_epoch.subsec_nanos() / 20_000_000,
     )
 }
 
