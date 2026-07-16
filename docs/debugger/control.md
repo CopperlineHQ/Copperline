@@ -89,7 +89,9 @@ Every stop event carries a consistent position on the emulated timeline:
 
 Reasons: `breakpoint`, `watchpoint`, `reg_watch`, `beam_trap`,
 `copper_break`, `catch`, `task_catch`, `step`, `target`, `pause`,
-`user_pause`, `double_fault`, `reverse`, `budget`.
+`user_pause`, `double_fault`, `reverse`, `budget` (a bounded step ran
+out of its instruction budget), and `last_writer` (only as the
+`position` field of a `last_writer` reply).
 
 Resume verbs accept a `collect` list -- read-only requests evaluated
 atomically at the stop and returned inside the stop event -- so one

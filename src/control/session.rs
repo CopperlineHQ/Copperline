@@ -109,6 +109,11 @@ impl SessionCtx {
     /// local GUI), because the underlying store toggles: installing
     /// twice would silently remove it.
     pub fn install_break(&mut self, emu: &mut Emulator, spec: BreakSpec) -> Result<u32, String> {
+        // Store the spec exactly as the machine's break stores key it,
+        // so existence checks, `break.list` id attachment, and removal
+        // all compare like with like whatever address form the client
+        // sent.
+        let spec = normalize_spec(emu, spec);
         if self.break_exists(emu, &spec) {
             return Err(format!("already set: {}", describe_spec(&spec)));
         }
@@ -219,6 +224,33 @@ impl SessionCtx {
 impl Default for SessionCtx {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Rewrite `spec`'s coordinates into the canonical form the machine's
+/// break stores use, mirroring each `ui_*` install call's own masking:
+/// PC breakpoints and memory watches compare through the address-bus
+/// mask (watches also word-align), Copper breakpoints mask to an even
+/// 24-bit chip address. Beam traps and catches match their inputs
+/// exactly.
+fn normalize_spec(emu: &Emulator, spec: BreakSpec) -> BreakSpec {
+    let addr_mask = emu.machine.ui_addr_mask();
+    match spec {
+        BreakSpec::Pc { addr, cond, ignore } => BreakSpec::Pc {
+            addr: addr & addr_mask,
+            cond,
+            ignore,
+        },
+        BreakSpec::Watch { addr, source } => BreakSpec::Watch {
+            addr: addr & addr_mask & !1,
+            source,
+        },
+        BreakSpec::Copper { addr } => BreakSpec::Copper {
+            addr: addr & 0x00FF_FFFE,
+        },
+        other @ (BreakSpec::RegWatch { .. } | BreakSpec::Beam { .. } | BreakSpec::Catch { .. }) => {
+            other
+        }
     }
 }
 
@@ -446,6 +478,63 @@ mod tests {
         ctx.remove_all_breaks(&mut emu);
         assert!(emu.bus().ui_beam_traps().is_empty());
         assert!(emu.bus().ui_copper_breaks().is_empty());
+    }
+
+    #[test]
+    fn specs_are_normalized_like_the_machine_stores_key_them() {
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+        // A 24-bit machine masks PC breakpoint addresses; the session
+        // spec must key the same way or break.list/remove lose track.
+        let id = ctx
+            .install_break(
+                &mut emu,
+                BreakSpec::Pc {
+                    addr: 0xFFF8_001A,
+                    cond: None,
+                    ignore: 0,
+                },
+            )
+            .unwrap();
+        assert!(emu.machine.ui_breaks().is_breakpoint(0xF8_001A));
+        assert_eq!(
+            ctx.id_for(&BreakSpec::Pc {
+                addr: 0xF8_001A,
+                cond: None,
+                ignore: 0
+            }),
+            Some(id),
+            "the masked machine-store address must map back to the id"
+        );
+
+        // Copper breaks mask to an even 24-bit address; an odd raw spec
+        // must still toggle back off on removal (not leak).
+        let copper = ctx
+            .install_break(&mut emu, BreakSpec::Copper { addr: 0x2_0001 })
+            .unwrap();
+        assert_eq!(emu.bus().ui_copper_breaks(), &[0x2_0000]);
+        assert!(ctx.remove_break(&mut emu, copper));
+        assert!(emu.bus().ui_copper_breaks().is_empty());
+
+        // Watches word-align; duplicate adds through a different raw
+        // form of the same word are refused instead of toggled away.
+        ctx.install_break(
+            &mut emu,
+            BreakSpec::Watch {
+                addr: 0x3_0001,
+                source: None,
+            },
+        )
+        .unwrap();
+        let dup = ctx.install_break(
+            &mut emu,
+            BreakSpec::Watch {
+                addr: 0x3_0000,
+                source: None,
+            },
+        );
+        assert!(dup.is_err());
+        assert_eq!(emu.machine.ui_breaks().watches.len(), 1);
     }
 
     #[test]

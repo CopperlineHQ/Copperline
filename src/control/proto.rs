@@ -224,9 +224,10 @@ fn line_from_utf8(buf: Vec<u8>) -> io::Result<Option<String>> {
 /// `event.stopped`: a consistent coordinate on the emulated timeline.
 #[derive(Debug, Clone, Serialize)]
 pub struct StopEvent {
-    /// `breakpoint`, `watchpoint`, `reg_watch`, `beam_trap`,
-    /// `copper_break`, `catch`, `step`, `target`, `pause`, `user_pause`,
-    /// `double_fault`, `reverse`, or `history_partial`.
+    /// Why the machine stopped. The value set is part of the wire
+    /// contract and documented in docs/debugger/control.md; the trap
+    /// kinds come from `exec::stop_reason_of`, the run-control reasons
+    /// from the drivers.
     pub reason: String,
     /// Human-readable detail (the debug-stop description, target spec...).
     pub detail: String,

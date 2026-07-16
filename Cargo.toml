@@ -123,7 +123,7 @@ web-time = "1"
 [[bin]]
 name = "copperline"
 path = "src/main.rs"
-required-features = ["frontend", "control"]
+required-features = ["frontend"]
 
 [[bin]]
 name = "copperline-bench"

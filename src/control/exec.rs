@@ -421,7 +421,14 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
             host(HostOp::Input(InputCmd::Key {
                 rawkey: rawkey as u8,
                 kind,
-                at_seconds: p.f64_opt("at_seconds")?,
+                at_seconds: match p.f64_opt("at_seconds")? {
+                    Some(t) if !t.is_finite() => {
+                        return Err(CtlError::invalid_params(
+                            "at_seconds must be a finite number",
+                        ))
+                    }
+                    other => other,
+                },
             }))
         }
         "input.mouse" => host(HostOp::Input(InputCmd::Mouse {
@@ -521,10 +528,10 @@ fn parse_run_target(p: &ParamReader) -> Result<RunTarget, CtlError> {
     if let Some(pc) = p.u32_opt("pc")? {
         targets.push(RunTarget::Pc(pc));
     }
-    if let Some(vpos) = p.u32_opt("vpos")? {
+    if let Some(vpos) = p.u16_opt("vpos")? {
         targets.push(RunTarget::Beam {
-            vpos: vpos as u16,
-            hpos: p.u32_opt("hpos")?.map(|h| h as u16),
+            vpos,
+            hpos: p.u16_opt("hpos")?,
         });
     }
     if let Some(frame) = p.u64_opt("frame")? {
@@ -534,6 +541,11 @@ fn parse_run_target(p: &ParamReader) -> Result<RunTarget, CtlError> {
         targets.push(RunTarget::Cck(cck));
     }
     if let Some(secs) = p.f64_opt("seconds")? {
+        if !secs.is_finite() || secs < 0.0 {
+            return Err(CtlError::invalid_params(
+                "seconds must be a finite, non-negative number",
+            ));
+        }
         targets.push(RunTarget::Seconds(secs));
     }
     match targets.len() {
@@ -572,14 +584,14 @@ fn parse_break_spec(p: &ParamReader) -> Result<BreakSpec, CtlError> {
             off: parse_custom_reg_param(p)?,
         }),
         "beam" => Ok(BreakSpec::Beam {
-            vpos: p.u32_req("vpos")? as u16,
-            hpos: p.u32_opt("hpos")?.map(|h| h as u16),
+            vpos: p.u16_req("vpos")?,
+            hpos: p.u16_opt("hpos")?,
         }),
         "copper" => Ok(BreakSpec::Copper {
             addr: p.u32_req("addr")?,
         }),
         "catch" => Ok(BreakSpec::Catch {
-            vector: p.u32_req("vector")? as u16,
+            vector: p.u16_req("vector")?,
         }),
         other => Err(CtlError::invalid_params(format!(
             "kind must be pc|watch|reg_watch|beam|copper|catch, got {other}"
@@ -738,6 +750,20 @@ impl<'a> ParamReader<'a> {
 
     fn u32_or(&self, key: &str, default: u32) -> Result<u32, CtlError> {
         Ok(self.u32_opt(key)?.unwrap_or(default))
+    }
+
+    fn u16_req(&self, key: &str) -> Result<u16, CtlError> {
+        self.u16_opt(key)?
+            .ok_or_else(|| CtlError::invalid_params(format!("missing {key}")))
+    }
+
+    fn u16_opt(&self, key: &str) -> Result<Option<u16>, CtlError> {
+        match self.u32_opt(key)? {
+            None => Ok(None),
+            Some(value) => u16::try_from(value)
+                .map(Some)
+                .map_err(|_| CtlError::invalid_params(format!("{key} must be 0..={}", u16::MAX))),
+        }
     }
 
     fn u64_opt(&self, key: &str) -> Result<Option<u64>, CtlError> {
@@ -1323,6 +1349,24 @@ mod tests {
                 count: 2
             }
         );
+    }
+
+    #[test]
+    fn parse_rejects_out_of_range_targets() {
+        // u16 beam coordinates must not silently wrap.
+        let err = parse_method("run_until", &json!({"vpos": 70000})).unwrap_err();
+        assert_eq!(err.code, proto::INVALID_PARAMS);
+        let err = parse_method("run_until", &json!({"vpos": 100, "hpos": 65536})).unwrap_err();
+        assert_eq!(err.code, proto::INVALID_PARAMS);
+        // Negative or non-finite seconds would otherwise saturate to a
+        // cck target of 0 and complete immediately.
+        let err = parse_method("run_until", &json!({"seconds": -1.0})).unwrap_err();
+        assert_eq!(err.code, proto::INVALID_PARAMS);
+        let err = parse_method("break.add", &json!({"kind": "beam", "vpos": 70000})).unwrap_err();
+        assert_eq!(err.code, proto::INVALID_PARAMS);
+        let err =
+            parse_method("break.add", &json!({"kind": "catch", "vector": 70000})).unwrap_err();
+        assert_eq!(err.code, proto::INVALID_PARAMS);
     }
 
     #[test]

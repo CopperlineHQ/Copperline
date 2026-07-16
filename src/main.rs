@@ -47,10 +47,16 @@ pub struct CliArgs {
     /// `--control ADDR`: run the headless Copperline Control Protocol
     /// server (JSON-RPC over loopback TCP), pausing at reset until a
     /// client resumes. `--control-token`/`--control-info` refine it.
-    pub control: Option<copperline::control::Config>,
+    /// Kept as the raw listen address so the CLI parses without the
+    /// `control` feature; a build without it rejects the flags in
+    /// validation, and `main` assembles the server config at dispatch.
+    pub control: Option<String>,
     /// `--control-gui ADDR`: attach a control server to the normal
     /// windowed session instead of owning the machine.
-    pub control_gui: Option<copperline::control::Config>,
+    pub control_gui: Option<String>,
+    /// `--control-token TOKEN` / `--control-info PATH` for either mode.
+    pub control_token: Option<String>,
+    pub control_info: Option<PathBuf>,
     /// Dump consecutive rendered frames after an emulated-time delay. This
     /// is intended for debugging flicker and frame-to-frame palette
     /// changes that a single screenshot cannot show.
@@ -714,17 +720,6 @@ where
             "--control-token/--control-info require --control or --control-gui"
         ));
     }
-    let build_control = |listen: String, journal: Option<PathBuf>| {
-        let mut config = copperline::control::Config::new(listen);
-        config.token = control_token.clone();
-        config.info_file = control_info.clone();
-        config.record_input = journal;
-        config
-    };
-    // The headless control server owns the machine, so it journals
-    // --record-input itself; windowed mode journals through the App.
-    let control = control_listen.map(|listen| build_control(listen, record_input.clone()));
-    let control_gui = control_gui_listen.map(|listen| build_control(listen, None));
     Ok(CliArgs {
         config_path,
         rom_path,
@@ -733,8 +728,10 @@ where
         load_state,
         benchmark_until,
         gdb,
-        control,
-        control_gui,
+        control: control_listen,
+        control_gui: control_gui_listen,
+        control_token,
+        control_info,
         frame_dump,
         waveform,
         press_after,
@@ -1014,6 +1011,13 @@ fn validate_gdb_args(cli: &CliArgs) -> Result<()> {
 }
 
 fn validate_control_args(cli: &CliArgs) -> Result<()> {
+    #[cfg(not(feature = "control"))]
+    if cli.control.is_some() || cli.control_gui.is_some() {
+        return Err(anyhow!(
+            "this build was compiled without the control feature; \
+             rebuild with --features control for --control/--control-gui"
+        ));
+    }
     if cli.control.is_some() || cli.control_gui.is_some() {
         if cli.gdb.is_some() {
             return Err(anyhow!(
@@ -1369,8 +1373,15 @@ fn main() -> Result<()> {
     if let Some(gdb) = cli.gdb {
         return gdbstub::run(emu, gdb);
     }
-    if let Some(control) = cli.control {
-        return copperline::control::headless::run(emu, control);
+    #[cfg(feature = "control")]
+    if let Some(listen) = cli.control.clone() {
+        let mut config = copperline::control::Config::new(listen);
+        config.token = cli.control_token.clone();
+        config.info_file = cli.control_info.clone();
+        // The headless server owns the machine, so it journals
+        // --record-input itself; windowed mode journals through the App.
+        config.record_input = cli.record_input.clone();
+        return copperline::control::headless::run(emu, config);
     }
     let disk_write_protected = std::array::from_fn(|idx| {
         cfg.floppy.drives[idx]
@@ -1379,6 +1390,7 @@ fn main() -> Result<()> {
             .unwrap_or(true)
     });
     video::set_pixel_aspect(config::resolve_pixel_aspect(cfg.pixel_aspect));
+    #[cfg_attr(not(feature = "control"), allow(unused_mut))]
     let mut app = App::new(
         emu,
         cfg.emulation.power_on,
@@ -1401,12 +1413,16 @@ fn main() -> Result<()> {
         raw_cfg,
         live_audio,
     );
-    if let Some(control_gui) = cli.control_gui {
+    #[cfg(feature = "control")]
+    if let Some(listen) = cli.control_gui {
         // Bind (and announce) before the window opens so scripts can
         // attach as soon as the endpoint line appears; the socket
         // threads start inside App::run once the event loop exists.
-        let handle = copperline::control::windowed::ControlHandle::bind(&control_gui)?;
-        app.attach_control(handle, &control_gui);
+        let mut config = copperline::control::Config::new(listen);
+        config.token = cli.control_token;
+        config.info_file = cli.control_info;
+        let handle = copperline::control::windowed::ControlHandle::bind(&config)?;
+        app.attach_control(handle, &config);
     }
 
     // Elevate the thread that is about to run the event loop and the pacer.
