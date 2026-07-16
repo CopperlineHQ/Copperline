@@ -4,8 +4,9 @@
 (Zorro II, manufacturer 0x1448 "dec0de Consulting", product 5) to provide
 host-directory mounts (`HOSTFS0:`, `HOSTFS1:`, ...). It is deliberately tiny:
 all filesystem semantics live in the emulator (`src/filesys.rs`); the handler
-only mounts the DOS devices and pumps DosPackets to the host through one
-reserved A-line trap per packet.
+only mounts the DOS devices and pumps DosPackets to the host through its
+unit's doorbell register in the board window (each mount unit has its own
+register bank, so handler processes never synchronize with each other).
 
 Two entry points (see `entry.s` and `copperline_board.h`):
 
@@ -14,8 +15,9 @@ Two entry points (see `entry.s` and `copperline_board.h`):
   the mount table the emulator wrote into the board window and adds it with
   `AddBootNode` (priority -128: mounted at DOS init, never a boot candidate).
 - `handler_main()` -- the DOS handler process, started by DOS on first
-  reference to a mount. `WaitPort`/`GetMsg`, trap to the emulator (which
-  fills `dp_Res1`/`dp_Res2`), reply the packet.
+  reference to a mount. `WaitPort`/`GetMsg`, ring the packet in through the
+  unit's doorbell register (the emulator fills `dp_Res1`/`dp_Res2` within
+  the write), reply the packet.
 
 ## Rebuilding
 
@@ -33,5 +35,5 @@ runs at whatever base autoconfig assigns, so everything is compiled with
 relocations or data/bss hunks (checked with objdump before objcopy extracts
 the flat code hunk).
 
-`copperline_board.h` pins the board-window layout and trap opcodes shared with
-`src/filesys.rs`; keep the two in sync (Rust unit tests lock the layout).
+`copperline_board.h` pins the board-window layout and host registers shared
+with `src/filesys.rs`; keep the two in sync (Rust unit tests lock the layout).

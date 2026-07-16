@@ -7,9 +7,12 @@
 //! expansion-init entry with the DiagPoint context; the handler builds one
 //! DeviceNode per mount table entry and `AddBootNode`s it, so DOS mounts the
 //! devices at boot and starts the handler process on first reference.
-//! The handler forwards every DosPacket to [`FilesysHle`] through a reserved
-//! A-line trap; all ACTION_* semantics are implemented here against the host
-//! filesystem, with results written straight into guest memory.
+//! The handler forwards every DosPacket to [`FilesysBoard`] by writing its
+//! address to the unit's doorbell register in the board window (the board is
+//! a [`crate::zorro_device::ZorroDevice`], like the A4091); all ACTION_*
+//! semantics are implemented here against the host filesystem, with results
+//! written straight into guest memory. Each mount unit has its own register
+//! bank, so the per-unit handler processes never synchronize with each other.
 //!
 //! Guest-visible objects the handler must hand out (FileLocks) are allocated
 //! from a pool inside the board window, so the host never has to call
@@ -18,9 +21,11 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use m68k::{AddressBus, CpuCore, HleHandler};
+use m68k::AddressBus;
 
 use crate::amigaos::dos::*;
+use crate::memory::Memory;
+use crate::zorro_device::{DeviceHost, ZorroDevice};
 
 /// The guest-side handler ROM (see `guest/services/README.md`).
 pub const FILESYS_HANDLER: &[u8] = include_bytes!("../assets/services/services_rom.bin");
@@ -83,19 +88,34 @@ const POOL_END: u32 = 0x1_0000;
 /// FileLock is 20 bytes; keep slots longword-aligned.
 const LOCK_SLOT_SIZE: u32 = 24;
 
-// trap_packet return values (D0); see guest/services/copperline_board.h.
-const TRAP_RES_REPLY: u32 = 0;
-const TRAP_RES_ADDVOLUME: u32 = 2;
-const TRAP_RES_DIE: u32 = 3;
+// REG_RESULT values; see guest/services/copperline_board.h.
+const RES_REPLY: u32 = 0;
+const RES_ADDVOLUME: u32 = 2;
+const RES_DIE: u32 = 3;
 
-/// Base of the reserved A-line opcode range for filesys host traps. A-line
-/// (LINE 1010, exception vector 10) is unused by AmigaOS, so these never
-/// collide with guest code.
-pub const TRAP_BASE: u16 = 0xA400;
-/// DiagPoint entered: logged, and A0 (the board base) is captured.
-const TRAP_DIAG_ENTRY: u16 = 0xA400;
-/// DosPacket from the handler: D1 = packet APTR, A1 = handler MsgPort.
-const TRAP_PACKET: u16 = 0xA402;
+// Host registers: one bank of longword registers per mount unit, so each
+// handler process owns its bank and no locking is needed between them.
+// Registers with a write side effect sit alone on a 16-byte boundary, so
+// nothing else is disturbed even if a future CPU model bursts whole cache
+// lines at the window (today a Device-backed window is cache-inhibited and
+// never accessed wider than a longword).
+const REGS_OFFSET: u32 = 0x7C00;
+const REG_BANK_SIZE: u32 = 0x40;
+/// Write: DosPacket APTR. The doorbell: the packet is handled synchronously
+/// within the write, with dp_Res1/dp_Res2 filled and RESULT/ARG latched
+/// before the next guest instruction runs.
+const REG_DOSPKT: u32 = 0x00;
+/// Write: the handler process MsgPort APTR, once at process startup; cleared
+/// to 0 when the process exits. Nonzero means the unit is live.
+const REG_MSGPORT: u32 = 0x10;
+/// Read: what the handler must do with the packet just rung in (RES_*).
+const REG_RESULT: u32 = 0x20;
+/// Read: the volume DosList node APTR for RES_ADDVOLUME / RES_DIE.
+const REG_ARG: u32 = 0x30;
+/// Write: expansion-init strobe, value = the board base (DiagPoint's A0).
+/// Global rather than per-unit: it runs before any handler process exists,
+/// so it cannot race.
+const DIAG_DOORBELL: u32 = 0x7E00;
 
 /// 'CLFS' -- our own id_DiskType, honest about not being an FFS at all.
 /// (The UAE filesys reports 'DOS\1' here instead; if some tool turns out to
@@ -104,7 +124,7 @@ const ID_CLFS_DISK: u32 = 0x434C_4653;
 
 /// One `[[filesys]]` entry: a host directory exported as an AmigaDOS
 /// device `HOSTFS<n>:` with the given volume name.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MountSpec {
     pub path: PathBuf,
     pub volume: String,
@@ -160,7 +180,7 @@ enum GuestOp {
 /// A handed-out FileLock: the path relative to its unit's mount root (empty =
 /// the root itself). Keyed by the guest address of the FileLock structure in
 /// the board-window pool, and always stored in its owning unit.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct LockRec {
     rel: PathBuf,
 }
@@ -184,6 +204,7 @@ const EXALL_END: u32 = 0xDE11_11AD;
 /// board-relative range up to `end`, plus a free list of recycled absolute
 /// addresses. Slices are fixed and non-overlapping (see `set_mounts`), so units
 /// never share allocator state.
+#[derive(serde::Serialize, serde::Deserialize)]
 struct LockPool {
     /// Board-relative bump cursor.
     next: u32,
@@ -222,9 +243,10 @@ impl LockPool {
 
 /// Per-mount state: the immutable [`MountSpec`] from config plus everything the
 /// handler learns or hands out at run time, including this unit's slice of the
-/// board-window lock pool. `FilesysHle` owns one per unit, indexed by unit
+/// board-window lock pool. `FilesysBoard` owns one per unit, indexed by unit
 /// number, so all per-unit state lives in one place and the packet handler is
 /// a method on the unit.
+#[derive(serde::Serialize, serde::Deserialize)]
 struct FilesysUnit {
     /// Unit number: this mount's `HOSTFS<index>` device and board-window slot.
     index: usize,
@@ -239,6 +261,10 @@ struct FilesysUnit {
     volume: Option<u32>,
     /// Open files by fh_Arg1 cookie (host-side only, no guest structure).
     /// The LockRec remembers what the handle refers to, for EXAMINE_FH.
+    /// Not serialized: a host File handle cannot round-trip through a save
+    /// state, so files open at save time read as stale cookies after
+    /// restore (they fail cleanly with ERROR_OBJECT_NOT_FOUND).
+    #[serde(skip)]
     files: HashMap<u32, (std::fs::File, LockRec)>,
     /// Cookie counter for this unit's open files (unique within the unit).
     next_file_key: u32,
@@ -247,10 +273,17 @@ struct FilesysUnit {
     /// EXAMINE_NEXT cursor per directory lock: the last child name handed out.
     /// Positioning by name (not a list index) keeps enumeration stable when the
     /// caller deletes entries as it goes, as `Delete ALL` does.
+    /// Not serialized (serde has no OsString impl on wasm): a walk that
+    /// spans a save state restarts from the directory's first entry.
+    #[serde(skip)]
     examine: HashMap<u32, std::ffi::OsString>,
     /// In-progress ExAll() scans, keyed by the id this handler minted into
     /// eac_LastKey. Each holds the listing snapshotted when the scan began
     /// and the index of the next entry to deliver.
+    /// Not serialized, like `examine`: after a restore the guest's
+    /// eac_LastKey no longer matches a scan and ExAll() fails cleanly with
+    /// ERROR_OBJECT_WRONG_TYPE.
+    #[serde(skip)]
     exalls: HashMap<u32, ExAllScan>,
     /// Source of eac_LastKey ids (0 = "new scan" and [`EXALL_END`] are skipped).
     next_exall_id: u32,
@@ -280,26 +313,42 @@ impl FilesysUnit {
 /// Host side of the filesys trap gateway: implements the AmigaDOS packet
 /// ACTION_* semantics against the host directories in `units`.
 ///
-/// "Hle" is the m68k crate's HleHandler trait: High-Level Emulation, the
-/// hook that intercepts reserved opcodes on the host side instead of letting
-/// the guest take the exception. Installed as the CPU's HLE handler; it
-/// reacts only to the reserved [`TRAP_BASE`] range, so leaving it installed
-/// with no mounts configured changes nothing.
-#[derive(Default)]
-pub struct FilesysHle {
+/// The services board: a [`ZorroDevice`] whose 64K window carries the guest
+/// handler ROM, the mount table, the per-unit register banks, and the
+/// host-managed structures (volume nodes, FSSMs, the lock pool). The window
+/// contents live in `image`; the packet engine reaches the rest of guest
+/// memory through a [`GuestBus`] built per doorbell.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+pub struct FilesysBoard {
     /// Per-mount state, indexed by unit number (built from the config mounts
     /// in `set_mounts`).
     units: Vec<FilesysUnit>,
-    /// Board base address, captured from A0 at the DiagPoint trap.
+    /// Board base address, captured from the DIAG_DOORBELL value (the
+    /// DiagPoint's A0).
     board_base: Option<u32>,
     /// Cull the ROM's scsi.device at expansion init (`[machine]
     /// rom_scsi_device_disable`). Our DiagPoint is the one moment the resident
     /// list exists and the driver has not run yet; see [`crate::romtags`].
     /// Survives the per-boot reset below -- it is configuration, not state.
     cull_rom_scsi_device: bool,
+    /// The 64K window contents (see [`board_image`]). Registers live here
+    /// too: writes latch into the image (with side effects for the
+    /// doorbells), so the read side is plain memory at any size/alignment.
+    image: Vec<u8>,
 }
 
-impl FilesysHle {
+impl FilesysBoard {
+    /// A services board serving `mounts`, its window pre-seeded with the
+    /// handler ROM and mount table.
+    pub fn new(mounts: Vec<MountSpec>) -> Self {
+        let mut board = Self {
+            image: board_image(&mounts),
+            ..Self::default()
+        };
+        board.set_mounts(mounts);
+        board
+    }
+
     /// `[machine] rom_scsi_device_disable`: unlink the ROM's scsi.device at
     /// expansion init, before Kickstart initialises it.
     pub fn set_cull_rom_scsi_device(&mut self, cull: bool) {
@@ -530,7 +579,7 @@ impl FilesysUnit {
     }
 }
 
-impl FilesysHle {
+impl FilesysBoard {
     /// Write one FileSysStartupMsg per mount into the board window, plus the
     /// shared display device name and the per-unit DosEnvecs they reference.
     /// dn_Startup points at these so the Early Startup boot menu shows
@@ -1404,86 +1453,247 @@ impl FilesysUnit {
     }
 }
 
-impl HleHandler for FilesysHle {
-    fn handle_aline(&mut self, cpu: &mut CpuCore, bus: &mut dyn AddressBus, opcode: u16) -> bool {
-        if opcode & 0xFF00 != TRAP_BASE {
-            return false; // not ours: fall back to the real A-line exception
+/// The guest-memory view the packet engine works through while a doorbell is
+/// serviced: the board's own window (`image`, taken out of the device for the
+/// duration), all RAM the CPU can see (chip, slow, and every RAM-backed Zorro
+/// board -- which is where fast RAM lives), and the ROMs read-only (the
+/// romtags cull reads resident tags in Kickstart). Deliberately wider than
+/// the 24-bit Zorro II DMA decode a real bus-master gets: DosPackets and I/O
+/// buffers live wherever exec allocated them, and this board is paravirtual,
+/// not a DMA engine.
+struct GuestBus<'a> {
+    base: u32,
+    image: Vec<u8>,
+    mem: &'a mut Memory,
+}
+
+impl GuestBus<'_> {
+    fn byte_mut(&mut self, addr: u32) -> Option<&mut u8> {
+        let off = addr.wrapping_sub(self.base) as usize;
+        if off < self.image.len() {
+            return Some(&mut self.image[off]);
         }
-        // dar[0..8] = D0-D7, dar[8..16] = A0-A7.
-        match opcode {
-            TRAP_DIAG_ENTRY => {
-                // Expansion init runs exactly once per boot: (re)capture the
-                // board base and drop every per-boot structure -- after a
-                // warm reboot the old ports, locks, and open files are
-                // stale, and exec tends to reallocate the new handler ports
-                // at the same addresses, which would misroute the startup
-                // packets of the new boot. Rebuild from a fresh default,
-                // keeping only the configured mounts, so a newly added
-                // per-boot field can never be left un-reset (this is how
-                // next_file_key came to be missed).
-                let mounts: Vec<MountSpec> = std::mem::take(&mut self.units)
-                    .into_iter()
-                    .map(|u| u.mount)
-                    .collect();
-                let cull_rom_scsi_device = self.cull_rom_scsi_device;
-                *self = FilesysHle::default();
-                self.set_mounts(mounts);
-                self.cull_rom_scsi_device = cull_rom_scsi_device;
-                self.board_base = Some(cpu.dar[8]);
-                self.write_startup_msgs(bus, cpu.dar[8]);
-                log::info!(
-                    "filesys: expansion init at board {:#010X}, {} mount(s)",
-                    cpu.dar[8],
-                    self.units.len()
-                );
-                if self.cull_rom_scsi_device {
-                    let culled = crate::romtags::cull_rom_device(bus, "scsi.device");
-                    log::info!("romtags: {culled} ROM scsi.device resident(s) culled");
+        let a = addr as usize;
+        if a < self.mem.chip_ram.len() {
+            return Some(&mut self.mem.chip_ram[a]);
+        }
+        let slow = crate::memory::SLOW_RAM_BASE as usize;
+        if a >= slow && a < slow + self.mem.slow_ram.len() {
+            return Some(&mut self.mem.slow_ram[a - slow]);
+        }
+        if let Some((board, off)) = self.mem.zorro.region_at(addr, 1) {
+            return Some(&mut self.mem.zorro.board_ram_mut(board)[off]);
+        }
+        None
+    }
+
+    fn get(&mut self, addr: u32) -> u8 {
+        if let Some(b) = self.byte_mut(addr) {
+            return *b;
+        }
+        let a = u64::from(addr);
+        if (crate::memory::ROM_BASE..0x0100_0000).contains(&a) && !self.mem.rom.is_empty() {
+            // A 256K ROM mirrors across the 512K window (no A18 decode).
+            let off = (a - crate::memory::ROM_BASE) as usize;
+            return self.mem.rom[off % self.mem.rom.len()];
+        }
+        let ext = a.wrapping_sub(self.mem.extended_rom_base) as usize;
+        if a >= self.mem.extended_rom_base && ext < self.mem.extended_rom.len() {
+            return self.mem.extended_rom[ext];
+        }
+        log::warn!("filesys: guest read outside RAM/ROM at {addr:#010X}");
+        0
+    }
+
+    fn put(&mut self, addr: u32, value: u8) {
+        match self.byte_mut(addr) {
+            Some(b) => *b = value,
+            None => log::warn!("filesys: guest write outside RAM at {addr:#010X}"),
+        }
+    }
+}
+
+impl AddressBus for GuestBus<'_> {
+    fn read_byte(&mut self, addr: u32) -> u8 {
+        self.get(addr)
+    }
+    fn read_word(&mut self, addr: u32) -> u16 {
+        (u16::from(self.get(addr)) << 8) | u16::from(self.get(addr.wrapping_add(1)))
+    }
+    fn read_long(&mut self, addr: u32) -> u32 {
+        (u32::from(self.read_word(addr)) << 16) | u32::from(self.read_word(addr.wrapping_add(2)))
+    }
+    fn write_byte(&mut self, addr: u32, value: u8) {
+        self.put(addr, value);
+    }
+    fn write_word(&mut self, addr: u32, value: u16) {
+        self.put(addr, (value >> 8) as u8);
+        self.put(addr.wrapping_add(1), value as u8);
+    }
+    fn write_long(&mut self, addr: u32, value: u32) {
+        self.write_word(addr, (value >> 16) as u16);
+        self.write_word(addr.wrapping_add(2), value as u16);
+    }
+}
+
+impl FilesysBoard {
+    /// The (unit, register) a window offset falls in, if it is a register.
+    fn reg_at(off: u32) -> Option<(usize, u32)> {
+        let bank = off.checked_sub(REGS_OFFSET)?;
+        let unit = (bank / REG_BANK_SIZE) as usize;
+        (unit < MOUNT_MAX_COUNT).then_some((unit, bank % REG_BANK_SIZE))
+    }
+
+    /// Run `f` against the guest-memory view. The window image is moved into
+    /// the [`GuestBus`] for the duration so the engine sees its own board
+    /// through the same bus as the rest of guest memory.
+    fn with_guest_bus<R>(
+        &mut self,
+        host: &mut DeviceHost,
+        base: u32,
+        f: impl FnOnce(&mut Self, &mut GuestBus) -> R,
+    ) -> R {
+        let mut bus = GuestBus {
+            base,
+            image: std::mem::take(&mut self.image),
+            mem: host.memory_mut(),
+        };
+        let r = f(self, &mut bus);
+        self.image = bus.image;
+        r
+    }
+
+    /// DIAG_DOORBELL: expansion init runs exactly once per boot. (Re)capture
+    /// the board base (the doorbell value: DiagPoint's A0) and drop every
+    /// per-boot structure -- after a warm reboot the old ports, locks, and
+    /// open files are stale, and exec tends to reallocate the new handler
+    /// ports at the same addresses, which would misroute the startup packets
+    /// of the new boot. Rebuild from a fresh default, keeping only the
+    /// configured mounts, so a newly added per-boot field can never be left
+    /// un-reset (this is how next_file_key came to be missed).
+    fn diag_entry(&mut self, base: u32, host: &mut DeviceHost) {
+        let mounts: Vec<MountSpec> = std::mem::take(&mut self.units)
+            .into_iter()
+            .map(|u| u.mount)
+            .collect();
+        let cull_rom_scsi_device = self.cull_rom_scsi_device;
+        *self = FilesysBoard::new(mounts);
+        self.cull_rom_scsi_device = cull_rom_scsi_device;
+        self.board_base = Some(base);
+        log::info!(
+            "filesys: expansion init at board {base:#010X}, {} mount(s)",
+            self.units.len()
+        );
+        self.with_guest_bus(host, base, |board, bus| {
+            board.write_startup_msgs(bus, base);
+            if board.cull_rom_scsi_device {
+                let culled = crate::romtags::cull_rom_device(bus, "scsi.device");
+                log::info!("romtags: {culled} ROM scsi.device resident(s) culled");
+            }
+        });
+    }
+
+    /// REG_DOSPKT: handle the DosPacket at `pkt` for `unit`, filling
+    /// dp_Res1/dp_Res2 and latching REG_RESULT/REG_ARG.
+    fn ring_doorbell(&mut self, unit: usize, pkt: u32, host: &mut DeviceHost) {
+        let Some(base) = self.board_base else {
+            log::warn!("filesys: doorbell for unit {unit} before expansion init");
+            return;
+        };
+        let port = self.units.get(unit).and_then(|u| u.port).unwrap_or(0);
+        let mut guest_op = None;
+        let (res1, res2, dp_type) = self.with_guest_bus(host, base, |board, bus| {
+            let dp_type = bus.read_long(pkt + 8) as i32;
+            let (res1, res2) = board.handle_packet(bus, unit, port, pkt, &mut guest_op);
+            bus.write_long(pkt + 12, res1); // dp_Res1
+            bus.write_long(pkt + 16, res2); // dp_Res2
+            (res1, res2, dp_type)
+        });
+        log::debug!(
+            "filesys: {}: packet type {dp_type} at {pkt:#010X} -> res1={res1:#X} res2={res2}",
+            device_name(unit),
+        );
+        // REG_RESULT tells the handler what to do next (reply the packet,
+        // then Add/RemDosEntry the node in REG_ARG).
+        let (result, arg) = match guest_op {
+            Some(GuestOp::AddVolume(vol)) => (RES_ADDVOLUME, vol),
+            Some(GuestOp::Die(vol)) => (RES_DIE, vol),
+            None => (RES_REPLY, 0),
+        };
+        self.latch(
+            REGS_OFFSET + unit as u32 * REG_BANK_SIZE + REG_RESULT,
+            result,
+        );
+        self.latch(REGS_OFFSET + unit as u32 * REG_BANK_SIZE + REG_ARG, arg);
+    }
+
+    /// Store a longword into the window image (register latch).
+    fn latch(&mut self, off: u32, value: u32) {
+        self.image[off as usize..off as usize + 4].copy_from_slice(&value.to_be_bytes());
+    }
+}
+
+impl ZorroDevice for FilesysBoard {
+    /// The window is honest memory on the read side: registers are latched
+    /// into the image, so any size or alignment reads what was stored.
+    fn read(&mut self, off: u32, size: usize, _host: &mut DeviceHost) -> u32 {
+        let off = off as usize;
+        if off + size > self.image.len() {
+            return 0;
+        }
+        self.image[off..off + size]
+            .iter()
+            .fold(0, |acc, &b| (acc << 8) | u32::from(b))
+    }
+
+    fn write(&mut self, off: u32, size: usize, value: u32, host: &mut DeviceHost) {
+        // Latch first: the window behaves as RAM apart from the doorbells.
+        let at = off as usize;
+        if at + size <= self.image.len() {
+            for i in 0..size {
+                self.image[at + i] = (value >> (8 * (size - 1 - i))) as u8;
+            }
+        }
+        if off == DIAG_DOORBELL && size == 4 {
+            self.diag_entry(value, host);
+        } else if let Some((unit, reg)) = Self::reg_at(off) {
+            match (reg, size) {
+                (REG_DOSPKT, 4) => self.ring_doorbell(unit, value, host),
+                (REG_MSGPORT, 4) => {
+                    if let Some(u) = self.units.get_mut(unit) {
+                        u.port = (value != 0).then_some(value);
+                        if value == 0 {
+                            log::info!("filesys: {}: handler exited", device_name(unit));
+                        }
+                    }
                 }
-                true
-            }
-            TRAP_PACKET => {
-                let pkt = cpu.dar[1]; // D1
-                let unit = cpu.dar[2] as usize; // D2: mount unit (the handler
-                                                // passes its own; see handler.c)
-                let port = cpu.dar[9]; // A1
-                let dp_type = bus.read_long(pkt + 8) as i32;
-                let mut guest_op = None;
-                let (res1, res2) = self.handle_packet(bus, unit, port, pkt, &mut guest_op);
-                log::debug!(
-                    "filesys: {}: packet type {dp_type} at {pkt:#010X} -> \
-                     res1={res1:#X} res2={res2}",
-                    device_name(unit),
-                );
-                bus.write_long(pkt + 12, res1); // dp_Res1
-                bus.write_long(pkt + 16, res2); // dp_Res2
-                                                // D0 tells the handler what to do next (reply the packet,
-                                                // then Add/RemDosEntry the node passed in A0).
-                cpu.dar[0] = match guest_op {
-                    Some(GuestOp::AddVolume(vol)) => {
-                        cpu.dar[8] = vol; // A0
-                        TRAP_RES_ADDVOLUME
-                    }
-                    Some(GuestOp::Die(vol)) => {
-                        cpu.dar[8] = vol; // A0
-                        TRAP_RES_DIE
-                    }
-                    None => TRAP_RES_REPLY,
-                };
-                true
-            }
-            _ => {
-                // Not one of our two traps (0xA400/0xA402): hand the opcode
-                // back so the CPU takes the real A-line exception, as on
-                // hardware. Any other 0xA4xx is the guest's own trap, not
-                // ours to swallow.
-                log::trace!(
-                    "filesys: passing through A-line {opcode:#06X} at PC={:#010X}",
-                    cpu.pc
-                );
-                false
+                _ => {}
             }
         }
+    }
+
+    fn peek_word(&self, off: u32) -> Option<u16> {
+        let off = off as usize;
+        (off + 2 <= self.image.len())
+            .then(|| u16::from_be_bytes([self.image[off], self.image[off + 1]]))
+    }
+
+    fn tick(&mut self, _cck: u32, _host: &mut DeviceHost) {}
+
+    fn reset(&mut self) {
+        // Power-on state: per-boot structures dropped, mounts kept. The next
+        // DIAG_DOORBELL rebuilds the rest.
+        let mounts: Vec<MountSpec> = std::mem::take(&mut self.units)
+            .into_iter()
+            .map(|u| u.mount)
+            .collect();
+        let cull = self.cull_rom_scsi_device;
+        *self = FilesysBoard::new(mounts);
+        self.cull_rom_scsi_device = cull;
+    }
+
+    fn kind(&self) -> &'static str {
+        "filesys"
     }
 }
 
@@ -2027,6 +2237,68 @@ mod tests {
         }
     }
 
+    /// The whole MMIO surface, end to end through [`ZorroDevice`]: the
+    /// DIAG_DOORBELL captures the board base, the PORT write introduces the
+    /// handler, and the packet doorbell handles a startup packet placed in
+    /// chip RAM -- results latched in the registers and written into the
+    /// packet, dn_Task wired, and the volume node built inside the window.
+    #[test]
+    fn doorbell_rings_a_packet_through_the_device() {
+        let root = std::env::temp_dir().join(format!("clfs-mmio-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut board = FilesysBoard::new(vec![MountSpec {
+            path: root.clone(),
+            volume: "Test".into(),
+            boot_pri: -128,
+            readonly: false,
+        }]);
+        let mut mem = Memory {
+            chip_ram: vec![0u8; 0x1_0000],
+            slow_ram: Vec::new(),
+            rom: Vec::new(),
+            overlay: false,
+            zorro: crate::zorro::ZorroChain::default(),
+            extended_rom: Vec::new(),
+            extended_rom_base: 0,
+            wcs: Vec::new(),
+            wcs_write_protected: false,
+        };
+        let base = 0x00E9_0000u32;
+        board.write(DIAG_DOORBELL, 4, base, &mut DeviceHost::new(&mut mem));
+        assert_eq!(board.board_base, Some(base));
+
+        // A DeviceNode at 0x1000 and its ACTION_STARTUP packet at 0x2000
+        // (dp_Type = 0, dp_Arg3 = the node as a BPTR), both in chip RAM.
+        let (dn, pkt, port) = (0x1000u32, 0x2000u32, 0x3000u32);
+        mem.chip_ram[(pkt + 20 + 8) as usize..(pkt + 20 + 12) as usize]
+            .copy_from_slice(&(dn >> 2).to_be_bytes());
+
+        let unit0 = REGS_OFFSET;
+        board.write(unit0 + REG_MSGPORT, 4, port, &mut DeviceHost::new(&mut mem));
+        board.write(unit0 + REG_DOSPKT, 4, pkt, &mut DeviceHost::new(&mut mem));
+
+        // Verdict latched: hand the volume node (inside the window) to
+        // AddDosEntry; the packet succeeded; dn_Task points at the port.
+        let mut host = DeviceHost::new(&mut mem);
+        assert_eq!(board.read(unit0 + REG_RESULT, 4, &mut host), RES_ADDVOLUME);
+        let vol = board.read(unit0 + REG_ARG, 4, &mut host);
+        assert_eq!(vol, base + VOLUMES_OFFSET);
+        assert_eq!(
+            &mem.chip_ram[(pkt + 12) as usize..(pkt + 16) as usize],
+            &DOSTRUE.to_be_bytes()
+        );
+        assert_eq!(
+            &mem.chip_ram[(dn + DEVICENODE_TASK) as usize..(dn + DEVICENODE_TASK + 4) as usize],
+            &port.to_be_bytes()
+        );
+
+        // The handler exits: PORT goes to 0 and the unit reads as down.
+        board.write(unit0 + REG_MSGPORT, 4, 0, &mut DeviceHost::new(&mut mem));
+        assert_eq!(board.units[0].port, None);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn board_image_lays_out_rom_mounts_and_diagarea() {
         let img = board_image(&test_mounts());
@@ -2038,13 +2310,13 @@ mod tests {
             FILESYS_HANDLER
         );
         // The handler ROM's entry table: process entry (bra.w) at +0, the
-        // expansion-init entry at +4 starting with the TRAP_DIAG_ENTRY
-        // opcode (see guest/services/entry.s).
+        // expansion-init entry at +4 starting with the DIAG_DOORBELL ring:
+        // move.l a0,DIAG_DOORBELL(a0) (see guest/services/entry.s).
         assert_eq!(img[ROM_OFFSET], 0x60);
         assert_eq!(img[ROM_OFFSET + 1], 0x00);
         assert_eq!(
-            u16::from_be_bytes([img[ROM_OFFSET + 4], img[ROM_OFFSET + 5]]),
-            TRAP_DIAG_ENTRY
+            &img[ROM_OFFSET + 4..ROM_OFFSET + 8],
+            &[0x21, 0x48, (DIAG_DOORBELL >> 8) as u8, DIAG_DOORBELL as u8]
         );
 
         // Mount table.
@@ -2075,10 +2347,13 @@ mod tests {
         );
         assert_eq!((ROM_OFFSET + 4) as u16, 0x000C);
         assert_eq!(&img[d + da_name..d + da_name + 11], b"Copperline\0");
-        // The trap opcode must be A-line (group 0xA) to reach handle_aline.
-        assert_eq!(TRAP_BASE >> 12, 0xA);
-        // The per-unit DosEnvec array must not run into the lock pool.
-        assert!(FSSM_ENVEC_OFFSET + MOUNT_MAX_COUNT as u32 * ENVEC_SLOT_SIZE <= POOL_OFFSET);
+        // The register banks must not collide with their neighbours: the
+        // DosEnvec array below, the DIAG_DOORBELL and lock pool above.
+        const {
+            assert!(FSSM_ENVEC_OFFSET + MOUNT_MAX_COUNT as u32 * ENVEC_SLOT_SIZE <= REGS_OFFSET);
+            assert!(REGS_OFFSET + MOUNT_MAX_COUNT as u32 * REG_BANK_SIZE <= DIAG_DOORBELL);
+            assert!(DIAG_DOORBELL + 4 <= POOL_OFFSET);
+        }
         assert_eq!(ENVEC_SLOT_SIZE as usize, std::mem::size_of::<DosEnvec>());
     }
 
@@ -2088,7 +2363,7 @@ mod tests {
         std::fs::create_dir_all(root.join("Libs")).unwrap();
         std::fs::write(root.join("Libs/68040.library"), b"x").unwrap();
 
-        let mut hle = FilesysHle::default();
+        let mut hle = FilesysBoard::default();
         hle.set_mounts(vec![MountSpec {
             path: root.clone(),
             volume: "Test".into(),
@@ -2128,7 +2403,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("clfs-create-{}", std::process::id()));
         std::fs::create_dir_all(root.join("Sub")).unwrap();
 
-        let mut hle = FilesysHle::default();
+        let mut hle = FilesysBoard::default();
         hle.set_mounts(vec![MountSpec {
             path: root.clone(),
             volume: "Test".into(),
@@ -2191,7 +2466,7 @@ mod tests {
         std::fs::write(root.join("fran\u{e7}ais"), b"x").unwrap();
         std::fs::write(root.join("sn\u{2603}w"), b"x").unwrap();
 
-        let mut hle = FilesysHle::default();
+        let mut hle = FilesysBoard::default();
         hle.set_mounts(vec![MountSpec {
             path: root.clone(),
             volume: "Test".into(),
@@ -2240,7 +2515,7 @@ mod tests {
     /// disk, and says so in the volume's InfoData.
     #[test]
     fn a_readonly_mount_refuses_every_write() {
-        let mut hle = FilesysHle::default();
+        let mut hle = FilesysBoard::default();
         hle.set_mounts(vec![
             MountSpec {
                 path: "/nonexistent".into(),
@@ -2376,7 +2651,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut hle = FilesysHle::default();
+        let mut hle = FilesysBoard::default();
         hle.set_mounts(vec![MountSpec {
             path: root.clone(),
             volume: "Test".into(),

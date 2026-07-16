@@ -216,13 +216,12 @@ impl BoardSpec {
     /// emulator offers host-backed services to the guest -- currently the
     /// host filesystem (`HOSTFS0:`...), with room for more (RTG, mouse,
     /// clipboard) later. The window carries the guest-side handler, the mount
-    /// table, and a DiagArea (`diag_vec` points at
-    /// [`crate::filesys::DIAG_OFFSET`]) whose DiagPoint mounts the configured
-    /// host directories at expansion init; its packet pump then forwards
-    /// every DosPacket to the emulator through a reserved A-line trap. See
-    /// `guest/services/` and [`crate::filesys`]. RAM-backed and pre-seeded by
-    /// [`crate::filesys::board_image`].
-    pub fn copperline_services() -> Self {
+    /// table, per-unit host register banks, and a DiagArea (`diag_vec` points
+    /// at [`crate::filesys::DIAG_OFFSET`]) whose DiagPoint mounts the
+    /// configured host directories at expansion init; its packet pump then
+    /// rings each DosPacket in through its unit's doorbell register. Backed
+    /// by the [`crate::filesys::FilesysBoard`] device in `Bus::devices`.
+    pub fn copperline_services(slot: usize) -> Self {
         Self {
             name: "Copperline services".into(),
             version: ZorroVersion::II,
@@ -230,7 +229,7 @@ impl BoardSpec {
             product: PRODUCT_SERVICES,
             serial: 0,
             size_bytes: 0x1_0000,
-            backing: BoardBacking::Ram,
+            backing: BoardBacking::Device(slot),
             memlist: false,
             diag_vec: Some(crate::filesys::DIAG_OFFSET),
         }
