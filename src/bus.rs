@@ -2775,7 +2775,7 @@ impl Bus {
         self.denise = Denise::new();
         self.blitter = Blitter::new();
         self.configure_chip_dma_masks();
-        self.rtc = Msm6242Rtc::default();
+        self.rtc.reset();
         if let Some(gayle) = self.gayle.as_mut() {
             gayle.reset();
         }

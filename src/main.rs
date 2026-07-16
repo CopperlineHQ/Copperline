@@ -352,6 +352,14 @@ where
                     .ok_or_else(|| anyhow!("--floppy-drives requires COUNT (1-4)"))?;
                 overrides.floppy_drives = Some(parse_floppy_drive_count(&value)?);
             }
+            "--rtc-time" => {
+                overrides.rtc_time = Some(args.next().ok_or_else(|| {
+                    anyhow!("--rtc-time requires Unix seconds or \"YYYY-MM-DD HH:MM[:SS]\"")
+                })?);
+            }
+            "--rtc-frozen" => {
+                overrides.rtc_frozen = Some(true);
+            }
             "--joystick" => {
                 overrides.joystick = Some(
                     args.next()
@@ -778,6 +786,10 @@ fn print_help() {
          --fast SIZE                    Zorro II fast RAM size, e.g. 0, 1M, 4M, 8M\n  \
          --slow SIZE                    trapdoor slow RAM at $C00000, e.g. 0, 512K\n  \
          --floppy-drives COUNT          wired floppy drives, 1-4 (DF0 plus externals)\n  \
+         --rtc-time TIME                seed the battery clock (implies fitting one) with\n  \
+         \x20                            Unix seconds or \"YYYY-MM-DD HH:MM[:SS]\"; it then\n  \
+         \x20                            ticks in emulated time, so runs are deterministic\n  \
+         --rtc-frozen                   stop the seeded clock at --rtc-time exactly\n  \
          --joystick MODE                initial joystick input: gamepad or keyboard\n  \
          \x20                            (gamepad lets the keyboard pass through to the Amiga)\n  \
          \x20                            (--model/--cpu/etc. override the config file or defaults)\n  \

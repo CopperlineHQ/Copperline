@@ -1938,6 +1938,7 @@ pub fn build_machine(
     bus.set_video_standard(cfg.video_standard);
     bus.set_chipset_revisions(cfg.agnus_revision, cfg.denise_revision);
     bus.set_rtc_present(cfg.rtc_present);
+    bus.rtc.set_seed(cfg.rtc_seed_unix, cfg.rtc_frozen);
     if let Some(id) = cfg.gate_array.gayle_id() {
         let mut gayle = crate::gayle::Gayle::new(id);
         if let Some(drive) = &cfg.ide.master {

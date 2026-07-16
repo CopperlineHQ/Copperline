@@ -2598,7 +2598,8 @@ impl CpuBus {
         }
         if self.bus.rtc_present() && range_contains(RTC_BASE, RTC_SIZE, addr) {
             self.bus.cpu_slow_external_access(Self::access_words(size));
-            return self.bus.rtc.read(u64::from(addr - RTC_BASE), size) as u32;
+            let secs = self.bus.emulated_seconds();
+            return self.bus.rtc.read(u64::from(addr - RTC_BASE), size, secs) as u32;
         }
         if self.bus.gayle.is_some()
             && (range_contains(GAYLE_BASE, GAYLE_SIZE, addr)
@@ -2849,9 +2850,10 @@ impl CpuBus {
         }
         if self.bus.rtc_present() && range_contains(RTC_BASE, RTC_SIZE, addr) {
             self.bus.cpu_slow_external_access(Self::access_words(size));
+            let secs = self.bus.emulated_seconds();
             self.bus
                 .rtc
-                .write(u64::from(addr - RTC_BASE), size, u64::from(value));
+                .write(u64::from(addr - RTC_BASE), size, u64::from(value), secs);
             return;
         }
         if self.bus.gayle.is_some()

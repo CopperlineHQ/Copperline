@@ -54,6 +54,12 @@ Full reference: `docs/guide/headless.md`.
 Audio: `--noaudio` runs silent; `--audio-wav PATH` captures the mixed output
 as a WAV in emulated time instead of playing it.
 
+Guest clock: `--rtc-time "2005-03-18 01:58:29"` (Unix seconds also accepted)
+fits a battery clock seeded to that instant, ticking in emulated time -- the
+guest boots to the same deterministic time on every run, which is how to
+test time-dependent guest software (TOTP vectors, date logic).
+`--rtc-frozen` pins it to the seed exactly.
+
 ## Scripted input
 
 Input is scheduled at emulated timestamps and composes with screenshots and

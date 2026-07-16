@@ -44,27 +44,63 @@ pub enum Request {
 pub enum CoreOp {
     Status,
     RegsGet,
-    RegsSet { reg: usize, value: u32 },
-    MemRead { addr: u32, len: usize, base64: bool },
-    MemWrite { addr: u32, data: Vec<u8> },
-    Disasm { addr: Option<u32>, count: usize },
+    RegsSet {
+        reg: usize,
+        value: u32,
+    },
+    MemRead {
+        addr: u32,
+        len: usize,
+        base64: bool,
+    },
+    MemWrite {
+        addr: u32,
+        data: Vec<u8>,
+    },
+    Disasm {
+        addr: Option<u32>,
+        count: usize,
+    },
     CustomDump,
-    CustomRead { off: u16 },
-    CiaGet { b: bool },
+    CustomRead {
+        off: u16,
+    },
+    CiaGet {
+        b: bool,
+    },
     BeamGet,
     DisplayGet,
-    CopperList { addr: Option<u32>, max: usize },
-    LastWriter { addr: u32 },
+    RtcGet,
+    RtcSet {
+        unix: Option<u64>,
+        advance: Option<i64>,
+        frozen: Option<bool>,
+    },
+    CopperList {
+        addr: Option<u32>,
+        max: usize,
+    },
+    LastWriter {
+        addr: u32,
+    },
     PcHistory,
     BreakAdd(BreakSpec),
-    BreakRemove { id: u32 },
+    BreakRemove {
+        id: u32,
+    },
     BreakList,
     BreakClear,
     FloppyQuery,
-    StateSave { path: PathBuf },
+    StateSave {
+        path: PathBuf,
+    },
     Digest,
-    Screenshot { path: Option<PathBuf> },
-    ReverseStep { n: u64 },
+    Screenshot {
+        path: Option<PathBuf>,
+    },
+    ReverseStep {
+        n: u64,
+    },
     ReverseFrame,
     ReverseContinue,
 }
@@ -97,6 +133,7 @@ impl CoreOp {
                 | CoreOp::CiaGet { .. }
                 | CoreOp::BeamGet
                 | CoreOp::DisplayGet
+                | CoreOp::RtcGet
                 | CoreOp::CopperList { .. }
                 | CoreOp::PcHistory
                 | CoreOp::BreakList
@@ -387,6 +424,40 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
         }),
         "beam.get" => core(CoreOp::BeamGet),
         "display.get" => core(CoreOp::DisplayGet),
+        "rtc.get" => core(CoreOp::RtcGet),
+        "rtc.set" => {
+            let unix = p.u64_opt("unix")?;
+            let time = match p.str_opt("time")? {
+                Some(s) => Some(
+                    crate::rtc::parse_rtc_time(&s)
+                        .map_err(|e| CtlError::invalid_params(format!("time: {e}")))?,
+                ),
+                None => None,
+            };
+            let advance = p.i64_opt("advance")?;
+            let frozen = p.bool_opt("frozen")?;
+            let absolute = match (unix, time) {
+                (Some(_), Some(_)) => {
+                    return Err(CtlError::invalid_params("give unix or time, not both"))
+                }
+                (u, t) => u.or(t),
+            };
+            if absolute.is_some() && advance.is_some() {
+                return Err(CtlError::invalid_params(
+                    "give an absolute time or advance, not both",
+                ));
+            }
+            if absolute.is_none() && advance.is_none() && frozen.is_none() {
+                return Err(CtlError::invalid_params(
+                    "nothing to set: give unix, time, advance, or frozen",
+                ));
+            }
+            core(CoreOp::RtcSet {
+                unix: absolute,
+                advance,
+                frozen,
+            })
+        }
         "copper.list" => core(CoreOp::CopperList {
             addr: p.u32_opt("addr")?,
             max: p.usize_or("max", 32)?.clamp(1, 256),
@@ -793,6 +864,16 @@ impl<'a> ParamReader<'a> {
         }
     }
 
+    fn i64_opt(&self, key: &str) -> Result<Option<i64>, CtlError> {
+        match self.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(v) => v
+                .as_i64()
+                .map(Some)
+                .ok_or_else(|| CtlError::invalid_params(format!("bad {key}"))),
+        }
+    }
+
     fn f64_opt(&self, key: &str) -> Result<Option<f64>, CtlError> {
         match self.get(key) {
             None | Some(Value::Null) => Ok(None),
@@ -938,6 +1019,65 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
                 "dmacon": bus.debug_dmacon(),
                 "display": bus.debug_display_state(),
             }))
+        }
+        CoreOp::RtcGet => {
+            let bus = emu.bus();
+            let secs = bus.emulated_seconds();
+            Ok(json!({
+                "present": bus.rtc_present(),
+                "seeded": bus.rtc.seed().is_some(),
+                "frozen": bus.rtc.frozen(),
+                "unix": bus.rtc.current_unix(secs),
+                "time": bus.rtc.current_display(secs),
+            }))
+        }
+        CoreOp::RtcSet {
+            unix,
+            advance,
+            frozen,
+        } => {
+            if !emu.bus().rtc_present() {
+                return Err(CtlError::not_found(
+                    "no battery clock fitted ([machine] rtc = true or --rtc-time fits one)",
+                ));
+            }
+            let secs = emu.bus().emulated_seconds();
+            let current = emu.bus().rtc.current_unix(secs);
+            let target = match (unix, advance) {
+                (Some(u), _) => *u,
+                (None, Some(d)) => current.checked_add_signed(*d).ok_or_else(|| {
+                    CtlError::invalid_params(
+                        "advance moves the clock outside the Unix-seconds range",
+                    )
+                })?,
+                (None, None) => current,
+            };
+            let frozen = frozen.unwrap_or_else(|| emu.bus().rtc.frozen());
+            let seed = if frozen {
+                target
+            } else {
+                // The seed is the clock's value at emulated time zero, so
+                // subtract the elapsed timeline to make it read `target`
+                // from this instant onward.
+                target.checked_sub(secs as u64).ok_or_else(|| {
+                    CtlError::invalid_params(
+                        "time is earlier than the elapsed emulated timeline allows",
+                    )
+                })?
+            };
+            emu.bus_mut().rtc.set_seed(Some(seed), frozen);
+            let bus = emu.bus();
+            let mut result = json!({
+                "unix": bus.rtc.current_unix(secs),
+                "time": bus.rtc.current_display(secs),
+                "frozen": bus.rtc.frozen(),
+            });
+            if emu.time_travel_enabled() {
+                // Like mem.write, a clock change is not part of the replay
+                // journal, so a reverse replay across it can diverge.
+                result["replay_unsafe"] = Value::Bool(true);
+            }
+            Ok(result)
         }
         CoreOp::CopperList { addr, max } => {
             let bus = emu.bus();
@@ -1451,6 +1591,68 @@ mod tests {
             proto::decode_base64(read["data"].as_str().unwrap()).unwrap(),
             vec![0xde, 0xad, 0xbe, 0xef, 0x01, 0x02]
         );
+    }
+
+    #[test]
+    fn rtc_set_rejects_conflicting_or_empty_params() {
+        let err = parse_method("rtc.set", &json!({})).unwrap_err();
+        assert_eq!(err.code, proto::INVALID_PARAMS);
+        let err = parse_method(
+            "rtc.set",
+            &json!({"unix": 1, "time": "2005-03-18 01:58:29"}),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, proto::INVALID_PARAMS);
+        let err = parse_method("rtc.set", &json!({"unix": 1, "advance": 30})).unwrap_err();
+        assert_eq!(err.code, proto::INVALID_PARAMS);
+        let err = parse_method("rtc.set", &json!({"time": "later"})).unwrap_err();
+        assert_eq!(err.code, proto::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn rtc_set_seeds_freezes_and_advances_the_clock() {
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+
+        // Seed with an RFC 6238 vector instant via the calendar notation.
+        let set = exec_core(
+            &mut emu,
+            &mut ctx,
+            &core("rtc.set", json!({"time": "2005-03-18 01:58:29"})),
+        )
+        .unwrap();
+        assert_eq!(set["unix"], 1_111_111_109u64);
+        assert_eq!(set["time"], "2005-03-18T01:58:29");
+        assert_eq!(set["frozen"], false);
+
+        let get = exec_core(&mut emu, &mut ctx, &CoreOp::RtcGet).unwrap();
+        assert_eq!(get["present"], true);
+        assert_eq!(get["seeded"], true);
+        assert_eq!(get["unix"], 1_111_111_109u64);
+
+        // Freeze in place, then step the frozen clock forward one TOTP
+        // window at a time.
+        let set = exec_core(
+            &mut emu,
+            &mut ctx,
+            &core("rtc.set", json!({"frozen": true})),
+        )
+        .unwrap();
+        assert_eq!(set["frozen"], true);
+        assert_eq!(set["unix"], 1_111_111_109u64);
+        let set = exec_core(&mut emu, &mut ctx, &core("rtc.set", json!({"advance": 30}))).unwrap();
+        assert_eq!(set["unix"], 1_111_111_139u64);
+        assert_eq!(set["frozen"], true);
+
+        // Unfreeze without a time: the clock resumes from where it stood.
+        let set = exec_core(
+            &mut emu,
+            &mut ctx,
+            &core("rtc.set", json!({"frozen": false})),
+        )
+        .unwrap();
+        assert_eq!(set["unix"], 1_111_111_139u64);
+        assert_eq!(set["frozen"], false);
     }
 
     #[test]
