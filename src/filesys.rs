@@ -165,6 +165,21 @@ struct LockRec {
     rel: PathBuf,
 }
 
+/// One ExAll() enumeration in flight: the directory (relative to the mount
+/// root), its listing snapshotted when the scan began, and the next entry to
+/// deliver. The UAE filesys keeps an open host directory handle here instead;
+/// a snapshot has the same point-in-time semantics without a live descriptor.
+struct ExAllScan {
+    rel: PathBuf,
+    names: Vec<std::ffi::OsString>,
+    next: usize,
+}
+
+/// eac_LastKey poison stored after a finished scan, so an ExAll() called again
+/// without resetting the control structure fails cleanly instead of resuming a
+/// freed scan. Same sentinel as the UAE filesys.
+const EXALL_END: u32 = 0xDE11_11AD;
+
 /// One unit's slice of the board-window FileLock pool: a bump cursor over the
 /// board-relative range up to `end`, plus a free list of recycled absolute
 /// addresses. Slices are fixed and non-overlapping (see `set_mounts`), so units
@@ -233,6 +248,12 @@ struct FilesysUnit {
     /// Positioning by name (not a list index) keeps enumeration stable when the
     /// caller deletes entries as it goes, as `Delete ALL` does.
     examine: HashMap<u32, std::ffi::OsString>,
+    /// In-progress ExAll() scans, keyed by the id this handler minted into
+    /// eac_LastKey. Each holds the listing snapshotted when the scan began
+    /// and the index of the next entry to deliver.
+    exalls: HashMap<u32, ExAllScan>,
+    /// Source of eac_LastKey ids (0 = "new scan" and [`EXALL_END`] are skipped).
+    next_exall_id: u32,
     /// This unit's fixed slice of the board-window FileLock pool.
     pool: LockPool,
 }
@@ -249,6 +270,8 @@ impl FilesysUnit {
             next_file_key: 0,
             locks: HashMap::new(),
             examine: HashMap::new(),
+            exalls: HashMap::new(),
+            next_exall_id: 0,
             pool: LockPool::new(pool_base, pool_end),
         }
     }
@@ -467,24 +490,7 @@ impl FilesysUnit {
             ST_USERDIR
         };
 
-        // Protection, datestamp, and comment come from the UAE `.uaem`
-        // sidecar when one exists (written by UAE-family emulators for the
-        // attributes a host filesystem cannot hold: script/pure/archive,
-        // comments, exact datestamps). Otherwise fall back to what the host
-        // can express: read-only denies `w`; `e` stays allowed (mapping
-        // Unix x to it would stop most copied binaries from running) --
-        // both matching the UAE fsdb.
-        let uaem = read_uaem(&path);
-        let protection = match &uaem {
-            Some(u) => u.protection,
-            None if meta.permissions().readonly() => FIBF_WRITE,
-            None => 0,
-        };
-        let (days, mins, ticks) = uaem
-            .as_ref()
-            .and_then(|u| u.date)
-            .unwrap_or_else(|| amiga_datestamp(meta.modified().ok()));
-        let comment = uaem.map(|u| u.comment).unwrap_or_default();
+        let (protection, (days, mins, ticks), comment) = host_attributes(&path, &meta);
         let fib_data = FileInfoBlock {
             disk_key: long(disk_key),
             dir_entry_type: long(entry_type as u32),
@@ -740,6 +746,139 @@ impl FilesysUnit {
                 match self.fill_fib(bus, fib, &child, 0) {
                     Ok(()) => (DOSTRUE, 0),
                     Err(e) => (DOSFALSE, e),
+                }
+            }
+            ACTION_EXAMINE_ALL => {
+                // ExAll(): Arg1 = lock, Arg2 = buffer (APTR), Arg3 = its size,
+                // Arg4 = type (ED_NAME=1 .. 8, cumulative fields), Arg5 =
+                // struct ExAllControl. The autodoc declares Arg5 a BPTR, but
+                // dos.library passes the AllocDosObject pointer unshifted --
+                // use it raw, like the UAE filesys does.
+                //
+                // eac_MatchString/eac_MatchFunc are deliberately ignored, also
+                // like the UAE filesys: the doc makes filtering the handler's
+                // job, but the common callers pattern-match guest-side, and
+                // three decades of UAE mounts have not missed it.
+                let buf = arg(bus, 2);
+                let bufsize = arg(bus, 3);
+                let ed_type = arg(bus, 4);
+                let control = arg(bus, 5);
+                log::debug!(
+                    "filesys: {}: exall type {ed_type} buf {bufsize}B (lock {:#X})",
+                    device_name(self.index),
+                    arg(bus, 1)
+                );
+                bus.write_long(control, 0); // eac_Entries
+                if ed_type == 0 || ed_type > 8 {
+                    return (DOSFALSE, ERROR_BAD_NUMBER);
+                }
+                let id = bus.read_long(control + 4); // eac_LastKey
+                if id == EXALL_END {
+                    // Called again after the scan already ended.
+                    return (DOSFALSE, ERROR_NO_MORE_ENTRIES);
+                }
+                // eac_LastKey = 0 starts a scan; otherwise it resumes the one
+                // it names. The scan is taken out of the map and put back only
+                // if it continues, so every error path frees it (as the UAE
+                // filesys does).
+                let (scan_id, mut scan) = if id == 0 {
+                    let bptr = arg(bus, 1);
+                    let rec = match self.locks.get(&(bptr << 2)) {
+                        Some(r) => r.clone(),
+                        // Lock 0 (and, like the UAE filesys, any unknown
+                        // lock) scans the root.
+                        None => LockRec {
+                            rel: PathBuf::new(),
+                        },
+                    };
+                    let names = self.dir_listing(&rec);
+                    self.next_exall_id += 1;
+                    if self.next_exall_id == 0 || self.next_exall_id == EXALL_END {
+                        self.next_exall_id = 1;
+                    }
+                    let scan = ExAllScan {
+                        rel: rec.rel,
+                        names,
+                        next: 0,
+                    };
+                    bus.write_long(control + 4, self.next_exall_id);
+                    (self.next_exall_id, scan)
+                } else {
+                    match self.exalls.remove(&id) {
+                        Some(s) => (id, s),
+                        None => return (DOSFALSE, ERROR_OBJECT_WRONG_TYPE),
+                    }
+                };
+
+                let dir = self.mount.path.join(&scan.rel);
+                let end = u64::from(buf) + u64::from(bufsize);
+                let mut at = buf;
+                let mut last_entry = None;
+                let mut count = 0u32;
+                while let Some(name) = scan.names.get(scan.next) {
+                    // A stat failure means the entry vanished since the
+                    // snapshot: skip it, the guest could not open it anyway.
+                    let path = dir.join(name);
+                    let Ok(meta) = std::fs::metadata(&path) else {
+                        scan.next += 1;
+                        continue;
+                    };
+                    let latin = utf8_to_latin1(name).unwrap_or_default();
+                    let (protection, date, comment) = host_attributes(&path, &meta);
+                    let entry_type = if meta.is_dir() { ST_USERDIR } else { ST_FILE };
+                    let packed = write_exall_entry(
+                        bus,
+                        at,
+                        end,
+                        ed_type,
+                        &latin,
+                        entry_type,
+                        meta.len(),
+                        protection,
+                        date,
+                        &comment,
+                    );
+                    let Some(next_at) = packed else {
+                        break; // out of buffer; deliver what we have
+                    };
+                    last_entry = Some(at);
+                    at = next_at;
+                    count += 1;
+                    scan.next += 1;
+                }
+
+                // The chain ends with ed_Next = 0 (an empty batch zeroes the
+                // buffer head), and eac_Entries reports what was packed.
+                match last_entry {
+                    Some(e) => bus.write_long(e, 0),
+                    None if buf != 0 => bus.write_long(buf, 0),
+                    None => {}
+                }
+                bus.write_long(control, count);
+                if scan.next < scan.names.len() {
+                    if count == 0 {
+                        // Not even one entry fits the caller's buffer.
+                        return (DOSFALSE, ERROR_NO_FREE_STORE);
+                    }
+                    self.exalls.insert(scan_id, scan);
+                    (DOSTRUE, 0)
+                } else {
+                    // Done. The final batch is delivered on this failing
+                    // return: ExAll() defines RESULT1 = FALSE with
+                    // ERROR_NO_MORE_ENTRIES as "no continuation", and the
+                    // caller still consumes eac_Entries entries.
+                    bus.write_long(control + 4, EXALL_END);
+                    (DOSFALSE, ERROR_NO_MORE_ENTRIES)
+                }
+            }
+            ACTION_EXAMINE_ALL_END => {
+                // ExAllEnd(): abort the scan eac_LastKey (Arg5 = control)
+                // names, freeing its state early.
+                let control = arg(bus, 5);
+                let id = bus.read_long(control + 4);
+                match self.exalls.remove(&id) {
+                    Some(_) => (DOSTRUE, 0),
+                    None => (DOSFALSE, ERROR_OBJECT_WRONG_TYPE),
                 }
             }
             ACTION_COPY_DIR => {
@@ -1425,6 +1564,122 @@ fn set_protection(path: &Path, protection: u32) -> std::io::Result<()> {
     info.protection = protection;
     write_uaem(path, &info)
 }
+
+/// Protection, datestamp, and comment of a host object, for a FIB or an
+/// ExAllData entry. They come from the UAE `.uaem` sidecar when one exists
+/// (written by UAE-family emulators for the attributes a host filesystem
+/// cannot hold: script/pure/archive, comments, exact datestamps). Otherwise
+/// fall back to what the host can express: read-only denies `w`; `e` stays
+/// allowed (mapping Unix x to it would stop most copied binaries from
+/// running) -- both matching the UAE fsdb.
+fn host_attributes(path: &Path, meta: &std::fs::Metadata) -> (u32, DateStamp, Vec<u8>) {
+    let uaem = read_uaem(path);
+    let protection = match &uaem {
+        Some(u) => u.protection,
+        None if meta.permissions().readonly() => FIBF_WRITE,
+        None => 0,
+    };
+    let date = uaem
+        .as_ref()
+        .and_then(|u| u.date)
+        .unwrap_or_else(|| amiga_datestamp(meta.modified().ok()));
+    let comment = uaem.map(|u| u.comment).unwrap_or_default();
+    (protection, date, comment)
+}
+
+/// Pack one ExAllData entry at `at`, returning the address of the next entry,
+/// or `None` (writing nothing) if it does not fit before `end`. The layout
+/// matches the UAE filesys exalldo(): the fields the `ed_type` level requests
+/// are cumulative from ed_Next up, the strings follow the last field, and each
+/// string's slot is rounded up to a longword so entries stay aligned. The
+/// comment is a plain C string (the "ed_Comment is a BSTR" behavior was a V37
+/// FFS bug the autodoc warns about, not the contract).
+#[allow(clippy::too_many_arguments)]
+fn write_exall_entry(
+    bus: &mut dyn AddressBus,
+    at: u32,
+    end: u64,
+    ed_type: u32,
+    name: &[u8],
+    entry_type: i32,
+    size: u64,
+    protection: u32,
+    (days, mins, ticks): DateStamp,
+    comment: &[u8],
+) -> Option<u32> {
+    let mut fixed = 4u32; // ed_Next
+    let mut strings = 0u32;
+    if ed_type >= 1 {
+        fixed += 4; // ed_Name
+        strings += (name.len() as u32 + 1).next_multiple_of(4);
+    }
+    if ed_type >= 2 {
+        fixed += 4; // ed_Type
+    }
+    if ed_type >= 3 {
+        fixed += 4; // ed_Size
+    }
+    if ed_type >= 4 {
+        fixed += 4; // ed_Prot
+    }
+    if ed_type >= 5 {
+        fixed += 12; // ed_Days/Mins/Ticks
+    }
+    if ed_type >= 6 {
+        fixed += 4; // ed_Comment
+        strings += (comment.len() as u32 + 1).next_multiple_of(4);
+    }
+    if ed_type >= 7 {
+        fixed += 4; // ed_OwnerUID/GID (two words)
+    }
+    if ed_type >= 8 {
+        fixed += 8; // 64-bit size
+    }
+    let total = fixed + strings;
+    if u64::from(at) + u64::from(total) > end {
+        return None;
+    }
+
+    let next = at + total;
+    bus.write_long(at, next); // ed_Next; the caller zeroes the last one
+    let mut sp = at + fixed; // string cursor
+    if ed_type >= 1 {
+        bus.write_long(at + 4, sp);
+        write_bytes(bus, sp, name);
+        bus.write_byte(sp + name.len() as u32, 0);
+        // Advance by the rounded slot the size accounting reserved, so the
+        // next string starts longword-aligned as documented.
+        sp += (name.len() as u32 + 1).next_multiple_of(4);
+    }
+    if ed_type >= 2 {
+        bus.write_long(at + 8, entry_type as u32);
+    }
+    if ed_type >= 3 {
+        bus.write_long(at + 12, size.min(u32::MAX as u64) as u32);
+    }
+    if ed_type >= 4 {
+        bus.write_long(at + 16, protection);
+    }
+    if ed_type >= 5 {
+        bus.write_long(at + 20, days);
+        bus.write_long(at + 24, mins);
+        bus.write_long(at + 28, ticks);
+    }
+    if ed_type >= 6 {
+        bus.write_long(at + 32, sp);
+        write_bytes(bus, sp, comment);
+        bus.write_byte(sp + comment.len() as u32, 0);
+    }
+    if ed_type >= 7 {
+        bus.write_long(at + 36, 0); // uid/gid: the host has no Amiga owner
+    }
+    if ed_type >= 8 {
+        bus.write_long(at + 40, (size >> 32) as u32);
+        bus.write_long(at + 44, size as u32);
+    }
+    Some(next)
+}
+
 /// The attribute sidecar that belongs to a host path.
 fn uaem_path(path: &Path) -> PathBuf {
     let mut side = path.as_os_str().to_owned();
@@ -1734,6 +1989,42 @@ mod tests {
             boot_pri: -128,
             readonly: false,
         }]
+    }
+
+    /// A flat big-endian RAM for driving handle_packet without a machine.
+    struct RamBus(Vec<u8>);
+
+    impl AddressBus for RamBus {
+        fn read_byte(&mut self, a: u32) -> u8 {
+            self.0[a as usize]
+        }
+        fn read_word(&mut self, a: u32) -> u16 {
+            u16::from_be_bytes([self.0[a as usize], self.0[a as usize + 1]])
+        }
+        fn read_long(&mut self, a: u32) -> u32 {
+            u32::from_be_bytes(self.0[a as usize..a as usize + 4].try_into().unwrap())
+        }
+        fn write_byte(&mut self, a: u32, v: u8) {
+            self.0[a as usize] = v;
+        }
+        fn write_word(&mut self, a: u32, v: u16) {
+            self.0[a as usize..a as usize + 2].copy_from_slice(&v.to_be_bytes());
+        }
+        fn write_long(&mut self, a: u32, v: u32) {
+            self.0[a as usize..a as usize + 4].copy_from_slice(&v.to_be_bytes());
+        }
+    }
+
+    impl RamBus {
+        fn cstring(&self, at: u32) -> Vec<u8> {
+            let mut v = Vec::new();
+            let mut a = at as usize;
+            while self.0[a] != 0 {
+                v.push(self.0[a]);
+                a += 1;
+            }
+            v
+        }
     }
 
     #[test]
@@ -2065,6 +2356,100 @@ mod tests {
 
         // remove_dir_all cannot delete read-only files on Windows.
         set_protection(&file, 0).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A full ExAll() session through the packet interface: a batch that
+    /// fills the buffer continues (RESULT1 = DOSTRUE), the final batch is
+    /// delivered on the DOSFALSE/ERROR_NO_MORE_ENTRIES return, entries carry
+    /// the cumulative ED_COMMENT fields with sidecar attributes, and calling
+    /// again on the ended control fails cleanly.
+    #[test]
+    fn examine_all_streams_the_directory_in_batches() {
+        let root = std::env::temp_dir().join(format!("clfs-exall-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("beta")).unwrap();
+        std::fs::write(root.join("alpha.txt"), b"12345").unwrap();
+        std::fs::write(root.join("gamma.txt"), b"x").unwrap();
+        std::fs::write(
+            root.join("gamma.txt.uaem"),
+            b"----rwed 2001-02-03 04:05:06.00 hi there\n",
+        )
+        .unwrap();
+
+        let mut hle = FilesysHle::default();
+        hle.set_mounts(vec![MountSpec {
+            path: root.clone(),
+            volume: "Test".into(),
+            boot_pri: -128,
+            readonly: false,
+        }]);
+        let unit = &mut hle.units[0];
+        unit.device_node = Some(0x100); // pretend the startup packet happened
+
+        let mut bus = RamBus(vec![0u8; 0x8000]);
+        const PKT: u32 = 0x1000;
+        const CONTROL: u32 = 0x2000;
+        const BUF: u32 = 0x3000;
+        const ED_COMMENT: u32 = 6;
+        let send = |unit: &mut FilesysUnit, bus: &mut RamBus, action: i32, bufsize: u32| {
+            bus.write_long(PKT + 8, action as u32);
+            bus.write_long(PKT + 20, 0); // Arg1: lock 0 = the root
+            bus.write_long(PKT + 24, BUF);
+            bus.write_long(PKT + 28, bufsize);
+            bus.write_long(PKT + 32, ED_COMMENT);
+            bus.write_long(PKT + 36, CONTROL);
+            unit.handle_packet(bus, 0xEA_0000, 0, PKT, &mut None)
+        };
+
+        // 64 bytes fit exactly one ED_COMMENT entry for "alpha.txt" (36 fixed
+        // + 12 name + 4 empty comment = 52): the scan must pause and continue.
+        let res = send(unit, &mut bus, ACTION_EXAMINE_ALL, 64);
+        assert_eq!(res, (DOSTRUE, 0));
+        assert_eq!(bus.read_long(CONTROL), 1); // eac_Entries
+        let key = bus.read_long(CONTROL + 4);
+        assert!(key != 0 && key != EXALL_END);
+        assert_eq!(bus.read_long(BUF), 0); // sole entry ends the chain
+        let name_ptr = bus.read_long(BUF + 4);
+        assert_eq!(bus.cstring(name_ptr), b"alpha.txt");
+        assert_eq!(bus.read_long(BUF + 8), ST_FILE as u32);
+        assert_eq!(bus.read_long(BUF + 12), 5); // ed_Size
+        assert_eq!(bus.read_long(BUF + 16), 0); // ed_Prot
+        let comment_ptr = bus.read_long(BUF + 32);
+        assert_eq!(bus.cstring(comment_ptr), b"");
+
+        // The rest fits easily: the final batch arrives on the terminating
+        // ERROR_NO_MORE_ENTRIES return, and the control is poisoned.
+        let res = send(unit, &mut bus, ACTION_EXAMINE_ALL, 0x1000);
+        assert_eq!(res, (DOSFALSE, ERROR_NO_MORE_ENTRIES));
+        assert_eq!(bus.read_long(CONTROL), 2);
+        assert_eq!(bus.read_long(CONTROL + 4), EXALL_END);
+        let name_ptr = bus.read_long(BUF + 4);
+        assert_eq!(bus.cstring(name_ptr), b"beta");
+        assert_eq!(bus.read_long(BUF + 8), ST_USERDIR as u32);
+        let second = bus.read_long(BUF);
+        let name_ptr = bus.read_long(second + 4);
+        assert_eq!(bus.cstring(name_ptr), b"gamma.txt");
+        assert_eq!(bus.read_long(second), 0); // chain terminated
+        let comment_ptr = bus.read_long(second + 32);
+        assert_eq!(bus.cstring(comment_ptr), b"hi there");
+        // Strings are packed in longword-rounded slots: the comment starts
+        // aligned, past the name's padding, not at its NUL.
+        assert_eq!(comment_ptr % 4, 0);
+        let days = (days_from_civil(2001, 2, 3) - days_from_civil(1978, 1, 1)) as u32;
+        assert_eq!(bus.read_long(second + 20), days);
+        assert_eq!(bus.read_long(second + 24), 4 * 60 + 5);
+        assert_eq!(bus.read_long(second + 28), 6 * 50);
+
+        // Calling again on the ended control stays a clean failure.
+        let res = send(unit, &mut bus, ACTION_EXAMINE_ALL, 0x1000);
+        assert_eq!(res, (DOSFALSE, ERROR_NO_MORE_ENTRIES));
+        assert_eq!(bus.read_long(CONTROL), 0);
+
+        // ExAllEnd() on a control whose scan no longer exists is an error.
+        bus.write_long(CONTROL + 4, 0x1234);
+        let res = send(unit, &mut bus, ACTION_EXAMINE_ALL_END, 0x1000);
+        assert_eq!(res, (DOSFALSE, ERROR_OBJECT_WRONG_TYPE));
+
         std::fs::remove_dir_all(&root).unwrap();
     }
 
