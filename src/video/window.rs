@@ -159,27 +159,62 @@ impl KeyboardJoystickHeld {
     }
 }
 
-/// FS-UAE-compatible keyboard joystick/gamepad emulation:
-/// cursor keys for directions; Right Ctrl/Right Alt for fire; CD32 extras
-/// on C/X/D/S/Return/Z/A.
-fn keyboard_joystick_key_for(code: KeyCode) -> Option<KeyboardJoystickKey> {
+/// Keyboard controller emulation, two collision-free layouts so a
+/// two-controller setup can be driven from one keyboard:
+///
+/// - Mapping 0 (FS-UAE-compatible): cursor keys for directions; Right
+///   Ctrl/Right Alt for fire; CD32 extras on C/X/D/S/Return/Z/A. On a
+///   mouse port the same keys become pointer motion, with fire = left
+///   button, X = right, D = middle.
+/// - Mapping 1 (numpad): 8/2/4/6 for directions, 0 for fire, `.` for
+///   the second button, numpad Enter for play. It stands in for the
+///   gamepad when a two-controller setup has no physical pad.
+fn keyboard_joystick_key_for(code: KeyCode) -> Option<(usize, KeyboardJoystickKey)> {
     Some(match code {
-        KeyCode::ArrowUp => KeyboardJoystickKey::Up,
-        KeyCode::ArrowDown => KeyboardJoystickKey::Down,
-        KeyCode::ArrowLeft => KeyboardJoystickKey::Left,
-        KeyCode::ArrowRight => KeyboardJoystickKey::Right,
-        KeyCode::ControlRight => KeyboardJoystickKey::FireRightCtrl,
-        KeyCode::AltRight => KeyboardJoystickKey::FireRightAlt,
-        KeyCode::KeyC => KeyboardJoystickKey::Red,
-        KeyCode::KeyX => KeyboardJoystickKey::Blue,
-        KeyCode::KeyD => KeyboardJoystickKey::Green,
-        KeyCode::KeyS => KeyboardJoystickKey::Yellow,
-        KeyCode::Enter | KeyCode::NumpadEnter => KeyboardJoystickKey::Play,
-        KeyCode::KeyZ => KeyboardJoystickKey::Rewind,
-        KeyCode::KeyA => KeyboardJoystickKey::Forward,
+        KeyCode::ArrowUp => (0, KeyboardJoystickKey::Up),
+        KeyCode::ArrowDown => (0, KeyboardJoystickKey::Down),
+        KeyCode::ArrowLeft => (0, KeyboardJoystickKey::Left),
+        KeyCode::ArrowRight => (0, KeyboardJoystickKey::Right),
+        KeyCode::ControlRight => (0, KeyboardJoystickKey::FireRightCtrl),
+        KeyCode::AltRight => (0, KeyboardJoystickKey::FireRightAlt),
+        KeyCode::KeyC => (0, KeyboardJoystickKey::Red),
+        KeyCode::KeyX => (0, KeyboardJoystickKey::Blue),
+        KeyCode::KeyD => (0, KeyboardJoystickKey::Green),
+        KeyCode::KeyS => (0, KeyboardJoystickKey::Yellow),
+        KeyCode::Enter => (0, KeyboardJoystickKey::Play),
+        KeyCode::KeyZ => (0, KeyboardJoystickKey::Rewind),
+        KeyCode::KeyA => (0, KeyboardJoystickKey::Forward),
+        KeyCode::Numpad8 => (1, KeyboardJoystickKey::Up),
+        KeyCode::Numpad2 => (1, KeyboardJoystickKey::Down),
+        KeyCode::Numpad4 => (1, KeyboardJoystickKey::Left),
+        KeyCode::Numpad6 => (1, KeyboardJoystickKey::Right),
+        KeyCode::Numpad0 => (1, KeyboardJoystickKey::Red),
+        KeyCode::NumpadDecimal => (1, KeyboardJoystickKey::Blue),
+        KeyCode::NumpadEnter => (1, KeyboardJoystickKey::Play),
         _ => return None,
     })
 }
+
+/// Where each host input source lands this quantum; see
+/// [`App::host_routing`]. Ports are 0-based.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct HostRouting {
+    /// Port the host mouse drives: the lowest-numbered mouse port.
+    mouse: Option<usize>,
+    /// Port the physical gamepad drives (joystick/CD32 devices only).
+    gamepad: Option<usize>,
+    /// Port keyboard mapping 0 (cursor keys) drives; the device there may
+    /// be a joystick/pad or a mouse (keyboard mouse emulation).
+    keyboard: Option<usize>,
+    /// Port keyboard mapping 1 (numpad) drives, as the gamepad port's
+    /// stand-in in a two-controller setup.
+    keyboard2: Option<usize>,
+}
+
+/// Quadrature counter steps per scheduler quantum (~one frame) while a
+/// keyboard-mouse direction key is held: ~150 counts/second at PAL frame
+/// rate, a comfortable Workbench pointer speed.
+const KEYBOARD_MOUSE_COUNTS_PER_QUANTUM: i32 = 3;
 
 /// One port's controls currently held by `--joy-after` scripting.
 #[derive(Debug, Default, Clone, Copy)]
@@ -624,7 +659,7 @@ pub struct App {
     /// refresh rate. Adjustable from the Emulator menu and the keyboard.
     warp_speed: WarpSpeed,
     /// Mapped host keys currently held for keyboard joystick emulation.
-    keyboard_joy_held: KeyboardJoystickHeld,
+    keyboard_joy_held: [KeyboardJoystickHeld; 2],
     /// Pop-up menu and main-window overlay state. Debugger and frame
     /// analyzer panes live in separate tool-window state so they can be
     /// open at the same time.
@@ -966,7 +1001,7 @@ impl App {
             gamepad: crate::gamepad::GamepadReader::new(),
             joystick_input_mode,
             warp_speed,
-            keyboard_joy_held: KeyboardJoystickHeld::default(),
+            keyboard_joy_held: [KeyboardJoystickHeld::default(); 2],
             ui: UiState::default(),
             about_machine_lines,
             machine_config,
@@ -993,73 +1028,129 @@ impl App {
             .position(|p| p.device == PortDevice::Mouse)
     }
 
-    /// Which port each host joystick source drives, over the ascending list
-    /// of ports with a joystick or CD32 pad plugged in: with one such port,
-    /// the [`JoystickInputMode`] source drives it (Gamepad leaves the
-    /// keyboard passing through to the Amiga); with two (a two-player
-    /// setup), the gamepad and the keyboard mapping drive one each and the
-    /// mode picks which source gets the lower-numbered port. Returns
-    /// `(gamepad_port, keyboard_port)`, 0-based.
-    fn joystick_routing(&self) -> (Option<usize>, Option<usize>) {
+    /// Which port each host input source drives this quantum. The host
+    /// mouse claims the lowest-numbered mouse port; the ports left over
+    /// that a host source can drive (joysticks, CD32 pads, and a second
+    /// mouse) are assigned by count:
+    ///
+    /// - One port: the [`JoystickInputMode`] picks its source. `Gamepad`
+    ///   leaves the keyboard passing through to the Amiga -- and cannot
+    ///   drive a second mouse, which is then undriven until the mode is
+    ///   flipped to `Keyboard`.
+    /// - Two ports (a two-controller setup): the gamepad -- backed by the
+    ///   numpad keyboard mapping whenever no physical pad is present --
+    ///   and the cursor-key mapping drive one each, the mode picking
+    ///   which source pair gets the lower-numbered port.
+    ///
+    /// The cursor-key mapping drives whatever device its port carries:
+    /// direction lines on a joystick/pad, pointer motion and buttons on a
+    /// mouse.
+    fn host_routing(&self) -> HostRouting {
         let input = &self.emu.bus().input;
-        let mut ports = (0..2).filter(|&p| {
-            matches!(
-                input.ports[p].device,
-                PortDevice::Joystick | PortDevice::Cd32Pad
-            )
+        let mouse = input
+            .ports
+            .iter()
+            .position(|p| p.device == PortDevice::Mouse);
+        let mut remaining = (0..2).filter(|&p| {
+            Some(p) != mouse
+                && matches!(
+                    input.ports[p].device,
+                    PortDevice::Mouse | PortDevice::Joystick | PortDevice::Cd32Pad
+                )
         });
-        let first = ports.next();
-        let second = ports.next();
-        match (first, second, self.joystick_input_mode) {
-            (None, _, _) => (None, None),
-            (Some(p), None, JoystickInputMode::Gamepad) => (Some(p), None),
-            (Some(p), None, JoystickInputMode::Keyboard) => (None, Some(p)),
-            (Some(p), Some(q), JoystickInputMode::Gamepad) => (Some(p), Some(q)),
-            (Some(p), Some(q), JoystickInputMode::Keyboard) => (Some(q), Some(p)),
+        let first = remaining.next();
+        let second = remaining.next();
+        let (gamepad, keyboard, keyboard2) = match (first, second, self.joystick_input_mode) {
+            (None, _, _) => (None, None, None),
+            (Some(p), None, JoystickInputMode::Gamepad) => {
+                if input.ports[p].device == PortDevice::Mouse {
+                    (None, None, None)
+                } else {
+                    (Some(p), None, None)
+                }
+            }
+            (Some(p), None, JoystickInputMode::Keyboard) => (None, Some(p), None),
+            // Two leftover ports are always joysticks/pads: a second
+            // mouse would itself have been claimed as the mouse port.
+            (Some(p), Some(q), JoystickInputMode::Gamepad) => (Some(p), Some(q), Some(p)),
+            (Some(p), Some(q), JoystickInputMode::Keyboard) => (Some(q), Some(p), Some(q)),
+        };
+        HostRouting {
+            mouse,
+            gamepad,
+            keyboard,
+            keyboard2,
         }
     }
 
-    /// Poll the host joystick sources and drive the emulated joystick
-    /// port(s). Called once per scheduler quantum. Scripted --joy-after
-    /// state beats the keyboard mapping on a shared port and asserts alone
-    /// on ports no host source drives; a present physical pad beats the
-    /// scripted state on its port, as it always has.
+    /// Poll the host input sources and drive the emulated port(s). Called
+    /// once per scheduler quantum. Scripted --joy-after state beats the
+    /// keyboard mapping on a shared port and asserts alone on ports no
+    /// host source drives; a present physical pad beats the scripted
+    /// state on its port, as it always has.
     fn pump_joystick_input(&mut self) {
-        let (gamepad_port, keyboard_port) = self.joystick_routing();
-        if let Some(port) = gamepad_port {
+        let r = self.host_routing();
+        if let Some(port) = r.gamepad {
             match self.gamepad.poll() {
                 Some(state) => self.apply_joystick_state(port, state),
                 // No physical pad but --joy-after scripting has fired: keep
                 // asserting the scripted state so it survives this release
                 // path and drives the upcoming scheduler quantum.
                 None if self.auto_joy_engaged[port] => self.apply_auto_joy_state(port),
+                // No pad in a two-controller setup: the numpad keyboard
+                // mapping stands in for it.
+                None if r.keyboard2 == Some(port) => {
+                    self.apply_joystick_state(port, self.keyboard_joy_held[1].joystick_state())
+                }
                 // Pad gone/uncalibrated: release the port so nothing sticks.
                 None => self.release_joystick_lines(port),
             }
         }
-        if let Some(port) = keyboard_port {
-            if self.auto_joy_engaged[port] {
+        if let Some(port) = r.keyboard {
+            if self.emu.bus().input.device(port) == PortDevice::Mouse {
+                self.apply_keyboard_mouse_state(port);
+            } else if self.auto_joy_engaged[port] {
                 self.apply_auto_joy_state(port);
             } else {
-                self.apply_joystick_state(port, self.keyboard_joy_held.joystick_state());
+                self.apply_joystick_state(port, self.keyboard_joy_held[0].joystick_state());
             }
         }
         // Scripted joy state on ports no host source drives asserts
         // independently.
         for port in 0..2 {
-            if Some(port) != gamepad_port
-                && Some(port) != keyboard_port
-                && self.auto_joy_engaged[port]
-            {
+            if Some(port) != r.gamepad && Some(port) != r.keyboard && self.auto_joy_engaged[port] {
                 self.apply_auto_joy_state(port);
             }
         }
     }
 
-    /// Whether the keyboard-joystick mapping owns the mapped keys right
-    /// now: some port is routed to the keyboard source.
-    fn keyboard_joystick_enabled(&self) -> bool {
-        self.joystick_routing().1.is_some()
+    /// Whether a keyboard mapping owns its keys right now: mapping 0
+    /// (cursor keys) when a port routes to the keyboard source, mapping 1
+    /// (numpad) when it is the gamepad port's stand-in.
+    fn keyboard_mapping_active(&self, mapping: usize) -> bool {
+        let r = self.host_routing();
+        if mapping == 0 {
+            r.keyboard.is_some()
+        } else {
+            r.keyboard2.is_some()
+        }
+    }
+
+    /// Drive a mouse port from the cursor-key mapping: held direction
+    /// keys become steady pointer motion, the fire keys the left button,
+    /// X the right, D the middle.
+    fn apply_keyboard_mouse_state(&mut self, port: usize) {
+        let held = self.keyboard_joy_held[0];
+        let dx = KEYBOARD_MOUSE_COUNTS_PER_QUANTUM * (i32::from(held.right) - i32::from(held.left));
+        let dy = KEYBOARD_MOUSE_COUNTS_PER_QUANTUM * (i32::from(held.down) - i32::from(held.up));
+        if dx != 0 || dy != 0 {
+            self.apply_scripted_mouse_delta(port as u8, dx, dy);
+        }
+        let state = held.joystick_state();
+        let input = &mut self.emu.bus_mut().input;
+        input.set_mouse_button(port, 0, state.fire);
+        input.set_mouse_button(port, 1, state.button2);
+        input.set_mouse_button(port, 2, state.green);
     }
 
     fn apply_joystick_state(&mut self, port: usize, state: crate::gamepad::JoystickState) {
@@ -1081,12 +1172,6 @@ impl App {
             state.green,
             state.yellow,
         );
-    }
-
-    fn apply_keyboard_joystick_state(&mut self) {
-        if let (_, Some(port)) = self.joystick_routing() {
-            self.apply_joystick_state(port, self.keyboard_joy_held.joystick_state());
-        }
     }
 
     /// Release every control on a joystick port. A no-op unless a
@@ -1203,11 +1288,12 @@ impl App {
             self.pump_joystick_input();
         }
         info!("joystick input mode: {}", mode.label());
-        let osd = match (mode, self.joystick_routing()) {
-            (JoystickInputMode::Keyboard, (_, Some(port))) => {
+        let routing = self.host_routing();
+        let osd = match (mode, routing.keyboard, routing.gamepad) {
+            (JoystickInputMode::Keyboard, Some(port), _) => {
                 format!("Joystick input: keyboard (port {})", port + 1)
             }
-            (JoystickInputMode::Gamepad, (Some(port), _)) => {
+            (JoystickInputMode::Gamepad, _, Some(port)) => {
                 format!("Joystick input: gamepad (port {})", port + 1)
             }
             _ => format!("Joystick input: {}", mode.label()),
@@ -1219,16 +1305,19 @@ impl App {
     /// emulation is active. Releases for previously consumed mapped keys
     /// are also swallowed, even if a gamepad has taken over meanwhile.
     fn handle_keyboard_joystick_key(&mut self, code: KeyCode, pressed: bool) -> bool {
-        let Some(key) = keyboard_joystick_key_for(code) else {
+        let Some((mapping, key)) = keyboard_joystick_key_for(code) else {
             return false;
         };
-        let was_held = self.keyboard_joy_held.is_set(key);
-        if !self.keyboard_joystick_enabled() && !was_held {
+        let active = self.keyboard_mapping_active(mapping);
+        let was_held = self.keyboard_joy_held[mapping].is_set(key);
+        if !active && !was_held {
             return false;
         }
-        self.keyboard_joy_held.set(key, pressed);
-        if self.keyboard_joystick_enabled() {
-            self.apply_keyboard_joystick_state();
+        self.keyboard_joy_held[mapping].set(key, pressed);
+        if active {
+            // Re-run the input pump so the transition lands this quantum
+            // on whatever port and device the mapping drives.
+            self.pump_joystick_input();
         }
         true
     }
@@ -4258,7 +4347,7 @@ impl App {
         // Reset the host joystick source to the new machine's configured
         // start-up mode (a previous live Cmd+J toggle does not carry over).
         self.joystick_input_mode = cfg.joystick_input_mode;
-        self.keyboard_joy_held = KeyboardJoystickHeld::default();
+        self.keyboard_joy_held = [KeyboardJoystickHeld::default(); 2];
         self.about_machine_lines = crate::config::about_machine_lines(cfg);
         self.deinterlacer =
             Deinterlacer::with_phosphor(crate::config::resolve_phosphor(cfg.phosphor));

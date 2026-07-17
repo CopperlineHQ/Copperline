@@ -353,9 +353,13 @@ floppy_sounds_volume = 100
 #              environment.
 #   "keyboard" always use the keyboard-joystick mapping (cursor keys + fire
 #              keys), so the port stays usable without a controller.
-# With BOTH ports configured as joysticks, the gamepad and the keyboard
+# With BOTH ports configured as joysticks, the gamepad and the cursor-key
 # mapping drive one port each: this mode picks which source gets the
-# lower-numbered port.
+# lower-numbered port, and with no physical pad a second keyboard mapping
+# on the numeric keypad (8/2/4/6 + 0 fire + . second button) stands in
+# for the gamepad. With both ports as mice, "keyboard" drives the second
+# mouse from the cursor-key mapping (keys move the pointer, fire keys =
+# left button, X = right, D = middle).
 # Cmd+J / Alt+J still cycles this live; --joystick MODE overrides it per run.
 # joystick = "gamepad"
 

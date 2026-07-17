@@ -298,71 +298,51 @@ fn raw_device_alt_right_respects_keyboard_joystick_ownership() {
         physical_key: PhysicalKey::Code(KeyCode::AltRight),
         state: ElementState::Pressed,
     });
-    assert!(app.keyboard_joy_held.fire_right_alt);
+    assert!(app.keyboard_joy_held[0].fire_right_alt);
     assert!(!rawkey_is_held(&app.held_rawkeys, AMIGA_RAWKEY_RIGHT_ALT));
 
     app.handle_raw_device_key_event(RawKeyEvent {
         physical_key: PhysicalKey::Code(KeyCode::AltRight),
         state: ElementState::Released,
     });
-    assert!(!app.keyboard_joy_held.fire_right_alt);
+    assert!(!app.keyboard_joy_held[0].fire_right_alt);
     assert!(!rawkey_is_held(&app.held_rawkeys, AMIGA_RAWKEY_RIGHT_ALT));
 }
 
 #[test]
 fn keyboard_joystick_mapping_matches_fsuae_controls() {
-    assert_eq!(
-        keyboard_joystick_key_for(KeyCode::ArrowUp),
-        Some(KeyboardJoystickKey::Up)
-    );
-    assert_eq!(
-        keyboard_joystick_key_for(KeyCode::ArrowDown),
-        Some(KeyboardJoystickKey::Down)
-    );
-    assert_eq!(
-        keyboard_joystick_key_for(KeyCode::ArrowLeft),
-        Some(KeyboardJoystickKey::Left)
-    );
-    assert_eq!(
-        keyboard_joystick_key_for(KeyCode::ArrowRight),
-        Some(KeyboardJoystickKey::Right)
-    );
-    assert_eq!(
-        keyboard_joystick_key_for(KeyCode::ControlRight),
-        Some(KeyboardJoystickKey::FireRightCtrl)
-    );
-    assert_eq!(
-        keyboard_joystick_key_for(KeyCode::AltRight),
-        Some(KeyboardJoystickKey::FireRightAlt)
-    );
-    assert_eq!(
-        keyboard_joystick_key_for(KeyCode::KeyC),
-        Some(KeyboardJoystickKey::Red)
-    );
-    assert_eq!(
-        keyboard_joystick_key_for(KeyCode::KeyX),
-        Some(KeyboardJoystickKey::Blue)
-    );
-    assert_eq!(
-        keyboard_joystick_key_for(KeyCode::KeyD),
-        Some(KeyboardJoystickKey::Green)
-    );
-    assert_eq!(
-        keyboard_joystick_key_for(KeyCode::KeyS),
-        Some(KeyboardJoystickKey::Yellow)
-    );
-    assert_eq!(
-        keyboard_joystick_key_for(KeyCode::Enter),
-        Some(KeyboardJoystickKey::Play)
-    );
-    assert_eq!(
-        keyboard_joystick_key_for(KeyCode::KeyZ),
-        Some(KeyboardJoystickKey::Rewind)
-    );
-    assert_eq!(
-        keyboard_joystick_key_for(KeyCode::KeyA),
-        Some(KeyboardJoystickKey::Forward)
-    );
+    use KeyboardJoystickKey as K;
+    // Mapping 0: the FS-UAE-compatible cursor-key layout.
+    for (code, key) in [
+        (KeyCode::ArrowUp, K::Up),
+        (KeyCode::ArrowDown, K::Down),
+        (KeyCode::ArrowLeft, K::Left),
+        (KeyCode::ArrowRight, K::Right),
+        (KeyCode::ControlRight, K::FireRightCtrl),
+        (KeyCode::AltRight, K::FireRightAlt),
+        (KeyCode::KeyC, K::Red),
+        (KeyCode::KeyX, K::Blue),
+        (KeyCode::KeyD, K::Green),
+        (KeyCode::KeyS, K::Yellow),
+        (KeyCode::Enter, K::Play),
+        (KeyCode::KeyZ, K::Rewind),
+        (KeyCode::KeyA, K::Forward),
+    ] {
+        assert_eq!(keyboard_joystick_key_for(code), Some((0, key)), "{code:?}");
+    }
+    // Mapping 1: the numpad layout for the second controller, collision
+    // free against mapping 0's letters.
+    for (code, key) in [
+        (KeyCode::Numpad8, K::Up),
+        (KeyCode::Numpad2, K::Down),
+        (KeyCode::Numpad4, K::Left),
+        (KeyCode::Numpad6, K::Right),
+        (KeyCode::Numpad0, K::Red),
+        (KeyCode::NumpadDecimal, K::Blue),
+        (KeyCode::NumpadEnter, K::Play),
+    ] {
+        assert_eq!(keyboard_joystick_key_for(code), Some((1, key)), "{code:?}");
+    }
     assert_eq!(keyboard_joystick_key_for(KeyCode::ControlLeft), None);
 }
 
@@ -395,43 +375,75 @@ fn joystick_input_mode_toggles_between_two_explicit_modes() {
 }
 
 #[test]
-fn joystick_routing_assigns_sources_by_device_and_mode() {
+fn host_routing_assigns_sources_by_device_and_mode() {
+    use super::HostRouting;
     use crate::bus::PortDevice;
+    fn routing(
+        mouse: Option<usize>,
+        gamepad: Option<usize>,
+        keyboard: Option<usize>,
+        keyboard2: Option<usize>,
+    ) -> HostRouting {
+        HostRouting {
+            mouse,
+            gamepad,
+            keyboard,
+            keyboard2,
+        }
+    }
     let mut app = test_app();
+    let set = |app: &mut super::App, p0: PortDevice, p1: PortDevice| {
+        app.emu.bus_mut().input.set_port_device(0, p0);
+        app.emu.bus_mut().input.set_port_device(1, p1);
+    };
 
     // Stock wiring (mouse + joystick): the mode picks the single source
-    // for port 2 (index 1); the keyboard mapping is engaged exactly when
-    // (and only when) some port routes to it.
-    app.emu
-        .bus_mut()
-        .input
-        .set_port_device(0, PortDevice::Mouse);
-    app.emu
-        .bus_mut()
-        .input
-        .set_port_device(1, PortDevice::Joystick);
+    // for port 2 (index 1); the cursor-key mapping owns its keys exactly
+    // when some port routes to it.
+    set(&mut app, PortDevice::Mouse, PortDevice::Joystick);
     app.joystick_input_mode = JoystickInputMode::Gamepad;
-    assert_eq!(app.joystick_routing(), (Some(1), None));
-    assert!(!app.keyboard_joystick_enabled());
+    assert_eq!(app.host_routing(), routing(Some(0), Some(1), None, None));
+    assert!(!app.keyboard_mapping_active(0));
     app.joystick_input_mode = JoystickInputMode::Keyboard;
-    assert_eq!(app.joystick_routing(), (None, Some(1)));
-    assert!(app.keyboard_joystick_enabled());
+    assert_eq!(app.host_routing(), routing(Some(0), None, Some(1), None));
+    assert!(app.keyboard_mapping_active(0));
 
-    // Swapped wiring: the joystick port follows the device, wherever it is.
-    app.emu
-        .bus_mut()
-        .input
-        .set_port_device(0, PortDevice::Cd32Pad);
-    app.emu
-        .bus_mut()
-        .input
-        .set_port_device(1, PortDevice::Mouse);
+    // Swapped wiring: the sources follow the devices, wherever they are.
+    set(&mut app, PortDevice::Cd32Pad, PortDevice::Mouse);
     app.joystick_input_mode = JoystickInputMode::Gamepad;
-    assert_eq!(app.joystick_routing(), (Some(0), None));
+    assert_eq!(app.host_routing(), routing(Some(1), Some(0), None, None));
     assert_eq!(app.mouse_port(), Some(1));
 
-    // Two joysticks (two-player): both sources drive a port each; the
-    // mode picks which gets the lower-numbered one.
+    // Two joysticks (two-player): the gamepad -- backed by the numpad
+    // mapping -- and the cursor-key mapping drive one each; the mode
+    // picks which pair gets the lower-numbered port.
+    set(&mut app, PortDevice::Joystick, PortDevice::Joystick);
+    assert_eq!(app.host_routing(), routing(None, Some(0), Some(1), Some(0)));
+    assert!(app.keyboard_mapping_active(1));
+    app.joystick_input_mode = JoystickInputMode::Keyboard;
+    assert_eq!(app.host_routing(), routing(None, Some(1), Some(0), Some(1)));
+    assert_eq!(app.mouse_port(), None, "no mouse port in a two-stick setup");
+
+    // Two mice: the host mouse takes port 1; the second mouse is
+    // keyboard-driven in Keyboard mode and undriven in Gamepad mode (a
+    // pad cannot be a pointer, and the keyboard keeps passing through).
+    set(&mut app, PortDevice::Mouse, PortDevice::Mouse);
+    assert_eq!(app.host_routing(), routing(Some(0), None, Some(1), None));
+    app.joystick_input_mode = JoystickInputMode::Gamepad;
+    assert_eq!(app.host_routing(), routing(Some(0), None, None, None));
+
+    // No host-drivable port besides the mouse: neither joystick source
+    // engages and the keyboard passes through to the Amiga.
+    set(&mut app, PortDevice::Mouse, PortDevice::Analogue);
+    app.joystick_input_mode = JoystickInputMode::Keyboard;
+    assert_eq!(app.host_routing(), routing(Some(0), None, None, None));
+    assert!(!app.keyboard_mapping_active(0));
+}
+
+#[test]
+fn numpad_mapping_stands_in_for_the_missing_gamepad() {
+    use crate::bus::PortDevice;
+    let mut app = test_app();
     app.emu
         .bus_mut()
         .input
@@ -440,13 +452,28 @@ fn joystick_routing_assigns_sources_by_device_and_mode() {
         .bus_mut()
         .input
         .set_port_device(1, PortDevice::Joystick);
-    assert_eq!(app.joystick_routing(), (Some(0), Some(1)));
-    app.joystick_input_mode = JoystickInputMode::Keyboard;
-    assert_eq!(app.joystick_routing(), (Some(1), Some(0)));
-    assert_eq!(app.mouse_port(), None, "no mouse port in a two-stick setup");
+    app.joystick_input_mode = JoystickInputMode::Gamepad;
 
-    // No joystick anywhere: neither source drives a port and the keyboard
-    // passes through to the Amiga.
+    // No physical pad in the test rig: the numpad mapping drives the
+    // gamepad port (port 1) while the cursor-key mapping drives port 2,
+    // so both players work from one keyboard.
+    app.keyboard_joy_held[1].up = true;
+    app.keyboard_joy_held[0].down = true;
+    app.keyboard_joy_held[0].fire_right_ctrl = true;
+    app.pump_joystick_input();
+    assert!(app.emu.bus().input.ports[0].up, "numpad drives port 1");
+    assert!(!app.emu.bus().input.ports[0].down);
+    assert!(
+        app.emu.bus().input.ports[1].down,
+        "cursor keys drive port 2"
+    );
+    assert!(app.emu.bus().input.ports[1].fire);
+}
+
+#[test]
+fn keyboard_mouse_drives_a_second_mouse_port() {
+    use crate::bus::PortDevice;
+    let mut app = test_app();
     app.emu
         .bus_mut()
         .input
@@ -454,9 +481,35 @@ fn joystick_routing_assigns_sources_by_device_and_mode() {
     app.emu
         .bus_mut()
         .input
-        .set_port_device(1, PortDevice::Analogue);
-    assert_eq!(app.joystick_routing(), (None, None));
-    assert!(!app.keyboard_joystick_enabled());
+        .set_port_device(1, PortDevice::Mouse);
+    app.joystick_input_mode = JoystickInputMode::Keyboard;
+
+    // The cursor-key mapping drives the second mouse: held directions
+    // become steady pointer motion, fire the left button, X the right.
+    app.keyboard_joy_held[0].right = true;
+    app.keyboard_joy_held[0].fire_right_ctrl = true;
+    app.keyboard_joy_held[0].blue = true;
+    app.pump_joystick_input();
+    assert_eq!(
+        app.emu.bus().input.ports[1].counter_x,
+        super::KEYBOARD_MOUSE_COUNTS_PER_QUANTUM as u8
+    );
+    assert!(app.emu.bus().input.ports[1].fire, "fire keys = left button");
+    assert!(app.emu.bus().input.ports[1].button2, "X = right button");
+    assert_eq!(
+        app.emu.bus().input.device(1),
+        PortDevice::Mouse,
+        "stays a mouse"
+    );
+    // The host-mouse port is untouched.
+    assert_eq!(app.emu.bus().input.ports[0].counter_x, 0);
+    assert!(!app.emu.bus().input.ports[0].fire);
+
+    // Releasing the keys releases the buttons on the next pump.
+    app.keyboard_joy_held[0] = KeyboardJoystickHeld::default();
+    app.pump_joystick_input();
+    assert!(!app.emu.bus().input.ports[1].fire);
+    assert!(!app.emu.bus().input.ports[1].button2);
 }
 
 #[test]

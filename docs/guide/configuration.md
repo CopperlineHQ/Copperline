@@ -490,8 +490,17 @@ than depending on whether a pad happens to be connected:
   keys), so the port stays usable without a controller.
 
 With one joystick/CD32-pad port the mode picks its source. With two, both
-sources are in play -- the gamepad and the keyboard mapping drive one port
-each -- and the mode picks which source gets the lower-numbered port.
+sources are in play -- the gamepad and the cursor-key mapping drive one
+port each -- and the mode picks which source gets the lower-numbered port;
+whenever no physical pad is present, a second keyboard mapping on the
+numeric keypad (`8`/`2`/`4`/`6` directions, `0` fire, `.` second button)
+stands in for the gamepad, so two players can share one keyboard.
+
+The keyboard mapping drives whatever device its port carries. In
+particular, with mice in *both* ports the host mouse takes the
+lower-numbered one and, in `keyboard` mode, the cursor-key mapping drives
+the second as an emulated mouse: cursor keys move the pointer, the fire
+keys are the left button, `X` the right, `D` the middle.
 
 This only sets the starting mode. The status-bar toggle (the gamepad /
 keyboard icon next to the volume control), `Cmd+J` / `Alt+J`, the menu's

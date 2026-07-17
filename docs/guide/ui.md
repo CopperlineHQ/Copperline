@@ -372,19 +372,31 @@ keys aren't working" surprise can be spotted and fixed at a glance:
   works without a controller.
 
 With joysticks (or pads) in *both* ports -- a two-player setup -- the
-gamepad and the keyboard mapping drive one port each, and the mode picks
-which source gets the lower-numbered port.
+gamepad and the cursor-key mapping drive one port each, and the mode picks
+which source gets the lower-numbered port. Whenever no physical pad is
+present, a second keyboard mapping on the numeric keypad stands in for it,
+so two players can share one keyboard.
+
+With mice in both ports, the host mouse drives the lower-numbered one and
+the cursor-key mapping drives the second as an emulated mouse (in
+`keyboard` mode; in `gamepad` mode the second mouse is undriven and the
+keyboard passes through). The same applies whenever the keyboard-routed
+port carries a mouse: the mapping's keys become the pointer.
 
 Click the status-bar icon to flip between them; the menu's **Joystick Input**
 item and `Cmd+J` on macOS / `Alt+J` on Linux and Windows do the same. Set the
 starting mode with `[input] joystick` in the config (or `--joystick MODE`, or
 the launcher's *Input* tab).
 
-Keyboard joystick mode uses the FS-UAE-compatible mapping: cursor keys for
+The primary keyboard mapping is FS-UAE-compatible: cursor keys for
 directions, and Right Ctrl or Right Alt for fire. For CD32 pad buttons,
 `C` is red/fire, `X` is blue, `D` is green, `S` is yellow, Return is
-play/pause, `Z` is rewind, and `A` is forward. While keyboard joystick mode
-owns these keys, they are not sent to the Amiga keyboard.
+play/pause, `Z` is rewind, and `A` is forward. On a mouse port the same
+keys drive the pointer: cursor keys move it, the fire keys are the left
+button, `X` the right, and `D` the middle. The second (numpad) mapping is
+`8`/`2`/`4`/`6` for directions, `0` for fire, `.` for the second button,
+and numpad Enter for play. While a mapping owns its keys, they are not
+sent to the Amiga keyboard.
 
 ## Gamepad calibration
 
