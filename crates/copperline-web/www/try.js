@@ -103,11 +103,36 @@ function insertDisk(bytes, name) {
 // "DF0 from URL" button does the same for a pasted address. The fetch
 // happens in the visitor's browser and nothing is proxied, so the host
 // must allow cross-origin GETs (same-origin always works, archive.org
-// does too). ROMs are deliberately local-only: Kickstart images are
-// copyrighted, and a ?kick= parameter would only exist to share them.
+// does too).
+//
+// A Kickstart can come from a link too, but only from the page's own
+// origin: ?kick=<path> fetches the ROM and fits it like the picker. The
+// same-origin restriction is the copyright gate: Kickstart images are
+// copyrighted, and a cross-origin ?kick= would only exist to share them.
+// A same-origin path can never load a ROM the serving site does not
+// already host, so the public page stays exactly as ROM-free as its
+// server, while a self-hosted copy (a Docker image with a mounted ROM
+// volume, an intranet install) can serve its owner's ROMs next to the
+// page and boot them by URL.
 
 // Sanity cap on fetched disk images; SCP flux dumps run tens of MB.
 const DISK_URL_MAX_BYTES = 64 << 20;
+
+// Display name from a fetched URL's path. decodeURIComponent throws on a
+// malformed percent-escape (a literal "%" survives URL parsing), and a
+// throw here would escape the fetch functions' error handling as an
+// unhandled rejection; keep such a name undecoded instead.
+function nameFromUrlPath(pathname, fallback) {
+  const last = pathname.split('/').pop() || '';
+  try {
+    return decodeURIComponent(last) || fallback;
+  } catch {
+    return last || fallback;
+  }
+}
+// Kickstart images are 256 or 512 KiB (the core rejects anything else);
+// the cap only keeps a mislinked file from buffering unbounded.
+const ROM_URL_MAX_BYTES = 4 << 20;
 
 async function insertDiskFromUrl(url) {
   let parsed;
@@ -121,8 +146,7 @@ async function insertDiskFromUrl(url) {
     setLoadStatus('disk URL: only http(s) is supported');
     return;
   }
-  const name =
-    decodeURIComponent(parsed.pathname.split('/').pop() || '') || 'disk.adf';
+  const name = nameFromUrlPath(parsed.pathname, 'disk.adf');
   setLoadStatus(`fetching ${name}...`);
   try {
     const resp = await fetch(parsed.href);
@@ -141,6 +165,65 @@ async function insertDiskFromUrl(url) {
         ? ' - the host must allow cross-origin requests (CORS)'
         : '';
     setLoadStatus(`disk fetch failed: ${e.message ?? e}${hint}`);
+  }
+}
+
+// A failed ROM URL would flash past: load() overwrites the status line with
+// its own progress, and the AROS "ready" line follows. Remembering the
+// failure lets that ready line carry it, so the user learns both what will
+// boot and why their ?kick= did not take.
+let romUrlProblem = null;
+
+function romUrlFailed(message) {
+  romUrlProblem = message;
+  setLoadStatus(message);
+}
+
+async function fitRomFromUrl(url) {
+  romUrlProblem = null;
+  let parsed;
+  try {
+    parsed = new URL(url, location.href);
+  } catch {
+    romUrlFailed('Kickstart URL: not a valid URL');
+    return;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    romUrlFailed('Kickstart URL: only http(s) is supported');
+    return;
+  }
+  if (parsed.origin !== location.origin) {
+    romUrlFailed(
+      "Kickstart URL: ROMs only load from this page's own site (same-origin)",
+    );
+    return;
+  }
+  const name = nameFromUrlPath(parsed.pathname, 'kickstart.rom');
+  setLoadStatus(`fetching ${name}...`);
+  let bytes;
+  try {
+    const resp = await fetch(parsed.href);
+    // fetch follows redirects, and a same-origin path can redirect to a
+    // CORS-enabled foreign host; the origin gate holds only if the bytes'
+    // final origin is checked, not just the requested URL's.
+    if (!resp.url || new URL(resp.url).origin !== location.origin) {
+      throw new Error('redirected off this site');
+    }
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    if (Number(resp.headers.get('content-length') ?? 0) > ROM_URL_MAX_BYTES) {
+      throw new Error('file too large');
+    }
+    bytes = new Uint8Array(await resp.arrayBuffer());
+    if (bytes.length > ROM_URL_MAX_BYTES) throw new Error('file too large');
+  } catch (e) {
+    romUrlFailed(`Kickstart fetch failed: ${e.message ?? e}`);
+    return;
+  }
+  // Same failure label as the picker: the fetch worked, the image did not.
+  try {
+    fitRom(bytes, name);
+  } catch (err) {
+    romUrlFailed(`ROM load failed: ${err.message ?? err}`);
   }
 }
 
@@ -164,11 +247,12 @@ async function load() {
     if (!bootRom) {
       bootRom = { rom, ext, label: 'AROS' };
       // A disk that landed first (file picker or ?df0= fetch) keeps its
-      // place in the status line.
+      // place in the status line, and a ?kick= failure rides along.
+      const problem = romUrlProblem ? ` (${romUrlProblem})` : '';
       setLoadStatus(
-        pendingDisk
+        (pendingDisk
           ? `ready - DF0: ${pendingDisk.name} inserts at boot`
-          : 'ready - boots the open-source AROS ROM',
+          : 'ready - boots the open-source AROS ROM') + problem,
       );
     }
   } catch (e) {
@@ -862,6 +946,13 @@ $('df0url')?.addEventListener('click', () => {
   if (url && url.trim()) insertDiskFromUrl(url.trim());
 });
 
+// Optional too, for self-hosted shells that serve ROMs alongside the page;
+// the same-origin rule in fitRomFromUrl applies.
+$('kickurl')?.addEventListener('click', () => {
+  const url = window.prompt('Kickstart ROM URL (on this site only):');
+  if (url && url.trim()) fitRomFromUrl(url.trim());
+});
+
 // --- bug reports -----------------------------------------------------------
 // Two Report-a-bug links live in the page shell: one in the notes below the
 // emulator, one in the overlay that only shows once something has failed.
@@ -990,6 +1081,9 @@ document.addEventListener('drop', (e) => {
 });
 
 bootBtn.addEventListener('click', boot);
-const linkedDisk = new URLSearchParams(location.search).get('df0');
+const pageParams = new URLSearchParams(location.search);
+const linkedDisk = pageParams.get('df0');
 if (linkedDisk) insertDiskFromUrl(linkedDisk);
+const linkedKick = pageParams.get('kick');
+if (linkedKick) fitRomFromUrl(linkedKick);
 load();

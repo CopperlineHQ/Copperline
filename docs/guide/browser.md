@@ -35,8 +35,22 @@ address, inserting live when the machine is already running. The fetch
 happens in the visitor's browser and nothing is proxied, so the image's
 host must allow cross-origin GETs (same-origin always works; archive.org
 does too). Only http(s) URLs are accepted, capped at 64 MiB (SCP flux
-dumps run tens of MB). ROMs stay local-only on purpose: Kickstart images
-are copyrighted, and a `?kick=` parameter would only exist to share them.
+dumps run tens of MB).
+
+A Kickstart can come from a link too, but only from the page's own
+origin: `?kick=<path>` fetches the ROM and queues or fits it exactly like
+the picker (the boot button relabels; a running machine is power-cycled).
+The same-origin restriction is the copyright gate: Kickstart images are
+copyrighted, and a cross-origin `?kick=` would only exist to share them.
+A same-origin path can never load a ROM the serving site does not already
+host, so the hosted page stays exactly as ROM-free as its server -- while
+a self-hosted copy that serves its owner's ROM files next to the page (a
+Docker deployment with a mounted volume, an intranet install) can boot
+them by URL: `?kick=files/kick13.rom`. ROM fetches are capped at 4 MiB
+and the image is validated like a picked file. A page shell may also
+offer a **Kickstart from URL** button (id `kickurl`), which prompts for
+a same-origin address; the hosted page has no ROMs to point it at and
+omits it.
 
 Controls:
 
