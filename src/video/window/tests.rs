@@ -3849,4 +3849,34 @@ mod control_drain {
         assert_eq!(stop["result"]["pc"], before + 4, "two NOPs retired");
         assert!(app.paused, "sync steps leave the machine paused");
     }
+
+    #[test]
+    fn frame_subscription_streams_from_the_windowed_sampler() {
+        let (mut app, cmd_tx, reply_rx) = attached_app();
+        push(
+            &cmd_tx,
+            1,
+            "events.subscribe",
+            json!({"events": ["frame"], "frame_interval": 1}),
+        );
+        app.drain_control();
+        assert_eq!(reply(&reply_rx)["result"]["active"], json!(["frame"]));
+
+        for _ in 0..3 {
+            app.emu.step_frame().unwrap();
+            app.control_emit_events();
+        }
+        let mut notifications = Vec::new();
+        while let Ok(line) = reply_rx.try_recv() {
+            notifications.push(serde_json::from_str::<Value>(&line).unwrap());
+        }
+        let notification = notifications
+            .last()
+            .expect("at least one hardware frame should complete");
+        assert_eq!(notification["method"], "event.frame");
+        assert_eq!(
+            notification["params"]["position"]["frame"],
+            app.emu.bus().emulated_frames()
+        );
+    }
 }

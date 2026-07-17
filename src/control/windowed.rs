@@ -14,6 +14,7 @@
 //! one JSON error line and are closed.
 
 use super::exec::{self, Request};
+use super::observe::OUTBOUND_NOTIFICATION_CAPACITY;
 use super::proto::{self, AuthGate, CtlError, Gate};
 use super::Config;
 use anyhow::{Context, Result};
@@ -21,7 +22,7 @@ use serde_json::Value;
 use std::io::BufReader;
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 
 /// A message from the socket threads to the frame loop.
@@ -46,7 +47,7 @@ pub struct ControlHandle {
     token: String,
     cmd_tx: Sender<CtlMsg>,
     cmd_rx: Receiver<CtlMsg>,
-    reply_tx: Arc<Mutex<Option<Sender<String>>>>,
+    reply_tx: Arc<Mutex<Option<SyncSender<String>>>>,
     connected: Arc<AtomicBool>,
 }
 
@@ -79,7 +80,7 @@ impl ControlHandle {
     /// returned sender, replies arrive on the returned receiver.
     pub fn test_pair() -> (Self, Sender<CtlMsg>, Receiver<String>) {
         let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(OUTBOUND_NOTIFICATION_CAPACITY);
         let handle = Self {
             listener: None,
             token: String::new(),
@@ -128,13 +129,26 @@ impl ControlHandle {
             let _ = tx.send(line);
         }
     }
+
+    /// Attempt to enqueue a streaming notification without blocking the
+    /// emulator frame loop. A full queue means the client is not draining its
+    /// stream quickly enough; the caller records the drop in session stats.
+    pub fn try_send_event(&self, line: String) -> bool {
+        let Some(tx) = self.reply_tx.lock().expect("reply slot lock").clone() else {
+            return false;
+        };
+        match tx.try_send(line) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => false,
+        }
+    }
 }
 
 fn accept_loop(
     listener: TcpListener,
     token: String,
     cmd_tx: Sender<CtlMsg>,
-    reply_slot: Arc<Mutex<Option<Sender<String>>>>,
+    reply_slot: Arc<Mutex<Option<SyncSender<String>>>>,
     connected: Arc<AtomicBool>,
     wake: Arc<dyn Fn() + Send + Sync>,
 ) {
@@ -162,7 +176,8 @@ fn accept_loop(
         stream.set_nodelay(true).ok();
 
         // Writer thread: owns the write half, drains the reply channel.
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel::<String>();
+        let (reply_tx, reply_rx) =
+            std::sync::mpsc::sync_channel::<String>(OUTBOUND_NOTIFICATION_CAPACITY);
         let write_stream = match stream.try_clone() {
             Ok(clone) => clone,
             Err(e) => {
@@ -170,6 +185,9 @@ fn accept_loop(
                 continue;
             }
         };
+        write_stream
+            .set_write_timeout(Some(std::time::Duration::from_millis(250)))
+            .ok();
         let writer = std::thread::Builder::new()
             .name("control-write".into())
             .spawn(move || {
@@ -207,7 +225,7 @@ fn read_connection(
     stream: TcpStream,
     token: &str,
     cmd_tx: &Sender<CtlMsg>,
-    reply_tx: &Sender<String>,
+    reply_tx: &SyncSender<String>,
     wake: &Arc<dyn Fn() + Send + Sync>,
 ) {
     let mut reader = BufReader::new(stream);
@@ -256,5 +274,19 @@ fn read_connection(
                 let _ = reply_tx.send(proto::err_line(&req.id, &err));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn streaming_delivery_is_bounded_and_nonblocking() {
+        let (handle, _cmd_tx, _reply_rx) = ControlHandle::test_pair();
+        for index in 0..OUTBOUND_NOTIFICATION_CAPACITY {
+            assert!(handle.try_send_event(index.to_string()));
+        }
+        assert!(!handle.try_send_event("overflow".to_string()));
     }
 }

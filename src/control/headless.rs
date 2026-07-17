@@ -230,6 +230,9 @@ impl Session {
         recorder: Option<InputRecorder>,
     ) -> Self {
         let reader = LineReader::new(stream.try_clone().expect("cloning control stream"));
+        stream
+            .set_write_timeout(Some(Duration::from_millis(250)))
+            .ok();
         let mut ctx = SessionCtx::new();
         ctx.recorder = recorder;
         Self {
@@ -259,6 +262,7 @@ impl Session {
     /// Remove everything this session installed and drain any pending
     /// stop, so a stale hit cannot ambush the next client.
     fn teardown(&mut self) {
+        self.ctx.disable_events(&mut self.emu);
         self.ctx.remove_all_breaks(&mut self.emu);
         self.emu.bus_mut().ui_disarm_beam_trap_once();
         while self.emu.machine.take_ui_debug_stop().is_some() {}
@@ -266,6 +270,14 @@ impl Session {
 
     fn write(&mut self, line: &str) -> io::Result<()> {
         proto::write_line(&mut self.writer, line)
+    }
+
+    fn emit_events(&mut self) -> Result<()> {
+        let lines = self.ctx.poll_events(&mut self.emu);
+        for line in lines {
+            self.write(&line)?;
+        }
+        Ok(())
     }
 
     fn handle_line(&mut self, line: &str) -> Result<Option<SessionEnd>> {
@@ -308,9 +320,16 @@ impl Session {
                     Err(err) => proto::err_line(&req.id, &err),
                 };
                 self.write(&reply)?;
+                self.emit_events()?;
                 Ok(None)
             }
-            Request::Host(op) => self.dispatch_host(req.id, op),
+            Request::Host(op) => {
+                let end = self.dispatch_host(req.id, op)?;
+                if end.is_none() {
+                    self.emit_events()?;
+                }
+                Ok(end)
+            }
         }
     }
 
@@ -510,6 +529,7 @@ impl Session {
                 for _ in 0..*n {
                     self.emu.debug_step_for_gdb(&mut cpu_idle)?;
                     self.ctx.apply_due_scheduled(&mut self.emu);
+                    self.emit_events()?;
                     if let Some((reason, detail)) = self.take_stop() {
                         return stop(reason, detail);
                     }
@@ -518,14 +538,17 @@ impl Session {
             }
             ResumeKind::StepOver => {
                 self.emu.debug_step_over(RUN_BUDGET)?;
+                self.emit_events()?;
                 return self.bounded_result("stepped over");
             }
             ResumeKind::StepOut => {
                 self.emu.debug_step_out(RUN_BUDGET)?;
+                self.emit_events()?;
                 return self.bounded_result("stepped out");
             }
             ResumeKind::StepCopper => {
                 let advanced = self.emu.debug_step_copper(RUN_BUDGET)?;
+                self.emit_events()?;
                 if let Some((reason, detail)) = self.take_stop() {
                     return stop(reason, detail);
                 }
@@ -542,6 +565,7 @@ impl Session {
                 for _ in 0..*n {
                     self.emu.step_frame()?;
                     self.ctx.apply_due_scheduled(&mut self.emu);
+                    self.emit_events()?;
                     if let Some((reason, detail)) = self.take_stop() {
                         return stop(reason, detail);
                     }
@@ -633,6 +657,7 @@ impl Session {
                 }
             }
             self.ctx.apply_due_scheduled(&mut self.emu);
+            self.emit_events()?;
 
             if self.emu.machine.cpu_double_faulted() {
                 return finish(
@@ -778,6 +803,7 @@ impl Session {
                     if let Some(end) = self.dispatch_host(req.id, op)? {
                         return Ok(MidRun::Lost(end));
                     }
+                    self.emit_events()?;
                 }
                 Request::Core(op) if op.allowed_while_running() => {
                     let reply = match exec::exec_core(&mut self.emu, &mut self.ctx, &op) {
@@ -785,6 +811,7 @@ impl Session {
                         Err(err) => proto::err_line(&req.id, &err),
                     };
                     self.write(&reply)?;
+                    self.emit_events()?;
                 }
                 Request::Core(_) => {
                     self.write(&proto::err_line(
@@ -1032,6 +1059,40 @@ mod tests {
             let a = c.result("capture.digest", json!({}));
             let b = c.result("capture.digest", json!({}));
             assert_eq!(a["digest"], b["digest"]);
+        });
+    }
+
+    #[test]
+    fn frame_events_stream_before_the_resume_response() {
+        run_session(None, |c| {
+            c.auth();
+            let subscribed = c.result(
+                "events.subscribe",
+                json!({
+                    "events": ["frame"],
+                    "frame_interval": 1,
+                    "frame_digest": true,
+                }),
+            );
+            assert_eq!(subscribed["active"], json!(["frame"]));
+
+            let stop = c.result("step_frame", json!({"n": 3}));
+            let frame_events: Vec<&Value> = c
+                .stash
+                .iter()
+                .filter(|message| message["method"] == "event.frame")
+                .collect();
+            let event = frame_events
+                .last()
+                .expect("frame notification should precede the stop response");
+            assert_eq!(
+                event["params"]["position"]["frame"], stop["frame"],
+                "last notification and stop describe the same completed frame"
+            );
+            assert_eq!(event["params"]["digest"]["algo"], "fnv1a64");
+
+            let state = c.result("events.unsubscribe", json!({}));
+            assert_eq!(state["active"], json!([]));
         });
     }
 

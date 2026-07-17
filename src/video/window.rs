@@ -1941,6 +1941,8 @@ impl ApplicationHandler for App {
                     self.sync_live_audio_suspension();
                     break;
                 }
+                #[cfg(feature = "control")]
+                self.control_emit_events();
                 frames_done += 1;
                 // A breakpoint/watchpoint hit pauses the machine and brings
                 // the debugger window up with the reason; end the burst so the

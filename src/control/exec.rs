@@ -8,6 +8,7 @@
 //! debugger window, console, and GDB stub already share; there is no
 //! second debugger implementation.
 
+use super::observe::{EventKind, MAX_FRAME_INTERVAL};
 use super::proto::{self, CtlError, StopEvent};
 use super::session::{BreakSpec, InputAction, SessionCtx};
 use crate::debugger::{BreakCond, CondOp, CondOperand, DebugStop, WatchSource};
@@ -30,6 +31,9 @@ pub const RUN_BUDGET: usize = 5_000_000;
 /// so the stop lands at the first instruction boundary at or past the
 /// target.
 pub const CCK_FINE_WINDOW: u64 = 80_000;
+
+const DEFAULT_TRACE_LINE_CAP: u64 = 1_000_000;
+const MAX_TRACE_LINE_CAP: u64 = 10_000_000;
 
 /// A parsed request, split by which layer executes it.
 #[derive(Debug, Clone, PartialEq)]
@@ -91,6 +95,26 @@ pub enum CoreOp {
     BreakList,
     BreakClear,
     FloppyQuery,
+    EventsSubscribe {
+        events: Vec<EventKind>,
+        frame_interval: Option<u64>,
+        frame_digest: Option<bool>,
+    },
+    EventsUnsubscribe {
+        events: Option<Vec<EventKind>>,
+    },
+    EventsList,
+    TraceStart {
+        path: PathBuf,
+        max_lines: u64,
+    },
+    TraceStop,
+    TraceStatus,
+    WaveformStart {
+        options: crate::waveform::WaveOptions,
+    },
+    WaveformStop,
+    WaveformStatus,
     StateSave {
         path: PathBuf,
     },
@@ -138,6 +162,9 @@ impl CoreOp {
                 | CoreOp::PcHistory
                 | CoreOp::BreakList
                 | CoreOp::FloppyQuery
+                | CoreOp::EventsList
+                | CoreOp::TraceStatus
+                | CoreOp::WaveformStatus
                 | CoreOp::Digest
                 | CoreOp::Screenshot { .. }
         )
@@ -535,6 +562,71 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
             path: PathBuf::from(p.str_req("path")?),
         }),
         "media.cd.eject" => host(HostOp::CdEject),
+        "events.subscribe" => {
+            let events = parse_event_list(&p, true)?.expect("required event list");
+            let frame_interval = p.u64_opt("frame_interval")?;
+            if frame_interval.is_some_and(|interval| interval == 0 || interval > MAX_FRAME_INTERVAL)
+            {
+                return Err(CtlError::invalid_params(format!(
+                    "frame_interval must be 1..={MAX_FRAME_INTERVAL}"
+                )));
+            }
+            core(CoreOp::EventsSubscribe {
+                events,
+                frame_interval,
+                frame_digest: p.bool_opt("frame_digest")?,
+            })
+        }
+        "events.unsubscribe" => core(CoreOp::EventsUnsubscribe {
+            events: parse_event_list(&p, false)?,
+        }),
+        "events.list" => core(CoreOp::EventsList),
+        "trace.start" => {
+            let max_lines = p.u64_opt("max_lines")?.unwrap_or(DEFAULT_TRACE_LINE_CAP);
+            if max_lines == 0 || max_lines > MAX_TRACE_LINE_CAP {
+                return Err(CtlError::invalid_params(format!(
+                    "max_lines must be 1..={MAX_TRACE_LINE_CAP}"
+                )));
+            }
+            core(CoreOp::TraceStart {
+                path: p
+                    .str_opt("path")?
+                    .map(PathBuf::from)
+                    .unwrap_or_else(default_trace_path),
+                max_lines,
+            })
+        }
+        "trace.stop" => core(CoreOp::TraceStop),
+        "trace.status" => core(CoreOp::TraceStatus),
+        "waveform.start" => {
+            let mut options = crate::waveform::WaveOptions::new(
+                p.str_opt("path")?
+                    .map(PathBuf::from)
+                    .unwrap_or_else(crate::waveform::default_wave_path),
+            );
+            if let Some(trigger) = p.str_opt("trigger")? {
+                options.trigger = crate::waveform::parse_trigger(&trigger).ok_or_else(|| {
+                    CtlError::invalid_params(
+                        "bad trigger; expected now|pc=ADDR|beam=VPOS[:HPOS]|reg=OFF|time=SECS",
+                    )
+                })?;
+            }
+            if let Some(duration) = p.str_opt("duration")? {
+                options.duration = crate::waveform::parse_duration(&duration).ok_or_else(|| {
+                    CtlError::invalid_params("bad duration; expected Ncck|Nf|Nframes|Nms|Ns")
+                })?;
+            }
+            if let Some(signals) = p.str_opt("signals")? {
+                options.signals = crate::waveform::parse_signals(&signals).ok_or_else(|| {
+                    CtlError::invalid_params(
+                        "bad signals; expected beam,bus,cpu,copper,blitter,regs,irq,audio|all",
+                    )
+                })?;
+            }
+            core(CoreOp::WaveformStart { options })
+        }
+        "waveform.stop" => core(CoreOp::WaveformStop),
+        "waveform.status" => core(CoreOp::WaveformStatus),
         "state.save" => core(CoreOp::StateSave {
             path: PathBuf::from(p.str_req("path")?),
         }),
@@ -558,6 +650,43 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
         }),
         other => Err(CtlError::method_not_found(other)),
     }
+}
+
+fn parse_event_list(
+    p: &ParamReader<'_>,
+    required: bool,
+) -> Result<Option<Vec<EventKind>>, CtlError> {
+    let Some(value) = p.get("events") else {
+        return if required {
+            Err(CtlError::invalid_params("missing events"))
+        } else {
+            Ok(None)
+        };
+    };
+    if value.is_null() && !required {
+        return Ok(None);
+    }
+    let Some(items) = value.as_array() else {
+        return Err(CtlError::invalid_params("events must be an array"));
+    };
+    if items.is_empty() {
+        return Err(CtlError::invalid_params("events must not be empty"));
+    }
+    let mut events = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(name) = item.as_str() else {
+            return Err(CtlError::invalid_params("event names must be strings"));
+        };
+        let Some(event) = EventKind::from_name(name) else {
+            return Err(CtlError::invalid_params(format!(
+                "unknown event {name}; expected frame|serial|interrupt|media"
+            )));
+        };
+        if !events.contains(&event) {
+            events.push(event);
+        }
+    }
+    Ok(Some(events))
 }
 
 fn resume(kind: ResumeKind, p: &ParamReader) -> Result<Request, CtlError> {
@@ -1168,22 +1297,49 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
                 .collect();
             Ok(json!({"drives": drives}))
         }
+        CoreOp::EventsSubscribe {
+            events,
+            frame_interval,
+            frame_digest,
+        } => Ok(ctx.subscribe_events(emu, events, *frame_interval, *frame_digest)),
+        CoreOp::EventsUnsubscribe { events } => Ok(ctx.unsubscribe_events(emu, events.as_deref())),
+        CoreOp::EventsList => Ok(ctx.event_subscriptions()),
+        CoreOp::TraceStart { path, max_lines } => {
+            emu.machine
+                .ui_trace_start(path.clone(), *max_lines)
+                .map_err(|e| CtlError::io(format!("starting instruction trace: {e}")))?;
+            Ok(trace_status_value(emu))
+        }
+        CoreOp::TraceStop => match emu.machine.ui_trace_stop() {
+            Some((path, lines)) => Ok(json!({
+                "active": false,
+                "path": path.display().to_string(),
+                "lines": lines,
+            })),
+            None => Ok(json!({"active": false})),
+        },
+        CoreOp::TraceStatus => Ok(trace_status_value(emu)),
+        CoreOp::WaveformStart { options } => {
+            emu.machine
+                .ui_wave_start(options.clone())
+                .map_err(|e| CtlError::io(format!("starting waveform capture: {e}")))?;
+            Ok(waveform_status_value(emu))
+        }
+        CoreOp::WaveformStop => match emu.machine.ui_wave_stop() {
+            Some(status) => Ok(json!({
+                "active": false,
+                "present": false,
+                "capture": wave_status_value(&status),
+            })),
+            None => Ok(json!({"active": false, "present": false})),
+        },
+        CoreOp::WaveformStatus => Ok(waveform_status_value(emu)),
         CoreOp::StateSave { path } => {
             emu.save_state(path)
                 .map_err(|e| CtlError::io(format!("saving state: {e:#}")))?;
             Ok(json!({"path": path.display().to_string()}))
         }
-        CoreOp::Digest => {
-            let (fb, lines) = render_frame(emu);
-            let digest = fnv1a64(&fb[..FB_WIDTH * lines]);
-            Ok(json!({
-                "algo": "fnv1a64",
-                "digest": format!("{digest:016x}"),
-                "width": FB_WIDTH,
-                "height": lines,
-                "frame": emu.bus().emulated_frames(),
-            }))
-        }
+        CoreOp::Digest => Ok(digest_value(emu)),
         CoreOp::Screenshot { path } => {
             let (fb, lines) = render_frame(emu);
             let path = path
@@ -1427,6 +1583,49 @@ fn push_id(entry: &mut Value, id: Option<u32>) {
     }
 }
 
+fn default_trace_path() -> PathBuf {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    PathBuf::from(format!("copperline-trace-{stamp}.txt"))
+}
+
+fn trace_status_value(emu: &Emulator) -> Value {
+    match emu.machine.ui_trace_status() {
+        Some((path, lines)) => json!({
+            "active": true,
+            "path": path.display().to_string(),
+            "lines": lines,
+        }),
+        None => json!({"active": false}),
+    }
+}
+
+fn waveform_status_value(emu: &Emulator) -> Value {
+    match emu.machine.ui_wave_status() {
+        Some(status) => json!({
+            "active": matches!(status.state, "armed" | "capturing"),
+            "present": true,
+            "capture": wave_status_value(&status),
+        }),
+        None => json!({"active": false, "present": false}),
+    }
+}
+
+fn wave_status_value(status: &crate::waveform::WaveStatus) -> Value {
+    json!({
+        "path": status.path.display().to_string(),
+        "state": status.state,
+        "trigger": status.trigger,
+        "duration": status.duration,
+        "signals": status.signals,
+        "samples": status.samples,
+        "captured_cck": status.captured_cck,
+        "window_cck": status.window_cck,
+    })
+}
+
 /// Render the current frame into a fresh buffer via the side-effect-free
 /// display path, returning the buffer and its visible line count. Both
 /// `capture.digest` and `capture.screenshot` use this in BOTH server
@@ -1449,6 +1648,20 @@ fn fnv1a64(words: &[u32]) -> u64 {
         }
     }
     hash
+}
+
+/// Frame digest payload shared by the request/response capture method and the
+/// opt-in streaming frame notification.
+pub(crate) fn digest_value(emu: &Emulator) -> Value {
+    let (fb, lines) = render_frame(emu);
+    let digest = fnv1a64(&fb[..FB_WIDTH * lines]);
+    json!({
+        "algo": "fnv1a64",
+        "digest": format!("{digest:016x}"),
+        "width": FB_WIDTH,
+        "height": lines,
+        "frame": emu.bus().emulated_frames(),
+    })
 }
 
 #[cfg(test)]
@@ -1546,6 +1759,128 @@ mod tests {
     fn parse_unknown_method_reports_method_not_found() {
         let err = parse_method("warp.nine", &Value::Null).unwrap_err();
         assert_eq!(err.code, proto::METHOD_NOT_FOUND);
+    }
+
+    #[test]
+    fn parse_event_subscriptions_validates_names_and_interval() {
+        assert_eq!(
+            core(
+                "events.subscribe",
+                json!({
+                    "events": ["frame", "serial", "frame"],
+                    "frame_interval": 25,
+                    "frame_digest": true,
+                }),
+            ),
+            CoreOp::EventsSubscribe {
+                events: vec![EventKind::Frame, EventKind::Serial],
+                frame_interval: Some(25),
+                frame_digest: Some(true),
+            }
+        );
+        assert_eq!(
+            core("events.unsubscribe", json!({})),
+            CoreOp::EventsUnsubscribe { events: None }
+        );
+        for params in [
+            json!({}),
+            json!({"events": ["unknown"]}),
+            json!({"events": ["frame"], "frame_interval": 0}),
+            json!({"events": ["frame"], "frame_interval": MAX_FRAME_INTERVAL + 1}),
+        ] {
+            assert!(parse_method("events.subscribe", &params).is_err());
+        }
+    }
+
+    #[test]
+    fn parse_trace_and_waveform_controls_validate_bounds_and_specs() {
+        assert_eq!(
+            core(
+                "trace.start",
+                json!({"path": "/tmp/trace.txt", "max_lines": 123}),
+            ),
+            CoreOp::TraceStart {
+                path: PathBuf::from("/tmp/trace.txt"),
+                max_lines: 123,
+            }
+        );
+        assert_eq!(
+            core(
+                "waveform.start",
+                json!({
+                    "path": "/tmp/wave.vcd",
+                    "trigger": "beam=100:64",
+                    "duration": "2f",
+                    "signals": "cpu,bus",
+                }),
+            ),
+            CoreOp::WaveformStart {
+                options: crate::waveform::WaveOptions {
+                    path: PathBuf::from("/tmp/wave.vcd"),
+                    trigger: crate::waveform::Trigger::Beam {
+                        vpos: 100,
+                        hpos: Some(64),
+                    },
+                    duration: crate::waveform::WaveDuration::Frames(2),
+                    signals: crate::waveform::parse_signals("cpu,bus").unwrap(),
+                },
+            }
+        );
+        for (method, params) in [
+            ("trace.start", json!({"max_lines": 0})),
+            ("waveform.start", json!({"trigger": "later"})),
+            ("waveform.start", json!({"duration": "forever"})),
+            ("waveform.start", json!({"signals": "cpu,mystery"})),
+        ] {
+            assert!(parse_method(method, &params).is_err());
+        }
+    }
+
+    #[test]
+    fn trace_and_waveform_controls_create_report_and_finish_files() {
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+        let dir = std::env::temp_dir().join(format!("ccp-captures-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let trace_path = dir.join("instructions.txt");
+        let started = exec_core(
+            &mut emu,
+            &mut ctx,
+            &CoreOp::TraceStart {
+                path: trace_path.clone(),
+                max_lines: 100,
+            },
+        )
+        .unwrap();
+        assert_eq!(started["active"], true);
+        assert_eq!(
+            exec_core(&mut emu, &mut ctx, &CoreOp::TraceStatus).unwrap()["active"],
+            true
+        );
+        let stopped = exec_core(&mut emu, &mut ctx, &CoreOp::TraceStop).unwrap();
+        assert_eq!(stopped["active"], false);
+        assert!(trace_path.exists());
+
+        let wave_path = dir.join("signals.vcd");
+        let started = exec_core(
+            &mut emu,
+            &mut ctx,
+            &CoreOp::WaveformStart {
+                options: crate::waveform::WaveOptions::new(wave_path.clone()),
+            },
+        )
+        .unwrap();
+        assert_eq!(started["active"], true);
+        assert_eq!(started["capture"]["state"], "capturing");
+        let stopped = exec_core(&mut emu, &mut ctx, &CoreOp::WaveformStop).unwrap();
+        assert_eq!(stopped["active"], false);
+        assert_eq!(stopped["capture"]["state"], "done");
+        assert!(wave_path.exists());
+
+        std::fs::remove_file(trace_path).ok();
+        std::fs::remove_file(wave_path).ok();
+        std::fs::remove_dir(dir).ok();
     }
 
     #[test]

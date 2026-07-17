@@ -2973,11 +2973,15 @@ impl Bus {
 
     /// Move the host-side resources that a save state does not capture from
     /// the currently live Bus into this freshly deserialized one: the Paula
-    /// audio/serial sinks and the open blitter trace file. The realtime
+    /// audio/serial sinks, serial observer, and the open blitter trace file. The realtime
     /// device-clock anchor needs no carry-over -- it deserializes as None
     /// and `realtime_cck_due` re-anchors to the host clock on first use.
     pub(crate) fn adopt_host_resources(&mut self, live: &mut Bus) {
         std::mem::swap(&mut self.paula.serial, &mut live.paula.serial);
+        std::mem::swap(
+            &mut self.paula.serial_observer,
+            &mut live.paula.serial_observer,
+        );
         std::mem::swap(&mut self.paula.audio, &mut live.paula.audio);
         self.blitter_trace = live.blitter_trace.take();
     }

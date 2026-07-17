@@ -101,11 +101,34 @@ impl App {
                 CtlMsg::Request { id, req } => self.control_dispatch(id, req),
             }
         }
+        self.control_emit_events();
     }
 
     fn control_send(&self, line: String) {
         if let Some(ctl) = &self.control {
             ctl.handle.send(line);
+        }
+    }
+
+    /// Sample subscribed event families and enqueue notifications without
+    /// ever blocking the winit/emulation thread behind a slow client.
+    pub(super) fn control_emit_events(&mut self) {
+        let lines = {
+            let Some(ctl) = self.control.as_mut() else {
+                return;
+            };
+            ctl.ctx.poll_events(&mut self.emu)
+        };
+        for line in lines {
+            let sent = self
+                .control
+                .as_ref()
+                .is_some_and(|ctl| ctl.handle.try_send_event(line));
+            if !sent {
+                if let Some(ctl) = self.control.as_mut() {
+                    ctl.ctx.note_event_notification_dropped();
+                }
+            }
         }
     }
 
@@ -139,6 +162,7 @@ impl App {
         // keeps whatever run state it is in (the window still owns it).
         ctl.pending = None;
         let temp_pc = ctl.temp_pc_break.take();
+        ctl.ctx.disable_events(&mut self.emu);
         let mut ctx = std::mem::take(&mut ctl.ctx);
         if let Some(addr) = temp_pc {
             self.emu.machine.ui_set_breakpoint(addr, None, 0);
@@ -178,6 +202,7 @@ impl App {
                     Err(err) => proto::err_line(&id, &err),
                 };
                 self.control_send(line);
+                self.control_emit_events();
                 if repositions {
                     // Reverse steps / last-writer moved the timeline;
                     // refresh the presentation like the debugger's own
@@ -450,6 +475,7 @@ impl App {
             ("step", label.to_string())
         };
         self.control_reply_stop(&id, verb.collect, reason, &detail);
+        self.control_emit_events();
         self.last_debug_stop = Some(detail);
         self.finish_render_for_current_frame();
         self.request_redraw();

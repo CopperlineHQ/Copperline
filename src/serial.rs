@@ -3,7 +3,46 @@
 //! Serial output sink. Paula's SERDAT writes are funneled through here.
 
 use crate::timebase::Instant;
+use std::collections::VecDeque;
 use std::io::{self, Write};
+
+/// Maximum number of completed Paula transmissions retained for a host-side
+/// observer. The tap evicts the oldest word once full; it must never let a
+/// debugger client apply unbounded back-pressure to the emulated UART.
+pub const SERIAL_OBSERVATION_CAPACITY: usize = 4096;
+
+/// One word that finished shifting out of Paula's serial transmitter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SerialTxObservation {
+    pub word: u16,
+    pub long: bool,
+    pub at_cck: u64,
+}
+
+/// Bounded, host-side tap used by streaming debugger transports. This is not
+/// emulated state and is deliberately kept independent of the active serial
+/// sink, so observing output cannot change what the configured device sees.
+#[derive(Default)]
+pub struct SerialObserver {
+    pending: VecDeque<SerialTxObservation>,
+    dropped: u64,
+}
+
+impl SerialObserver {
+    pub fn push(&mut self, observation: SerialTxObservation) {
+        if self.pending.len() == SERIAL_OBSERVATION_CAPACITY {
+            self.pending.pop_front();
+            self.dropped = self.dropped.saturating_add(1);
+        }
+        self.pending.push_back(observation);
+    }
+
+    pub fn drain(&mut self) -> (Vec<SerialTxObservation>, u64) {
+        let observations = self.pending.drain(..).collect();
+        let dropped = std::mem::take(&mut self.dropped);
+        (observations, dropped)
+    }
+}
 
 /// Maps the emulated serial timeline onto the host clock so a timing-sensitive
 /// sink can schedule its output. `host_epoch` is the host instant of emulated
@@ -411,6 +450,23 @@ impl SerialSink for StdoutSink {
 mod tests {
     use super::*;
     use std::io::Read;
+
+    #[test]
+    fn serial_observer_evicts_oldest_records_at_its_limit() {
+        let mut observer = SerialObserver::default();
+        for word in 0..=SERIAL_OBSERVATION_CAPACITY {
+            observer.push(SerialTxObservation {
+                word: word as u16,
+                long: false,
+                at_cck: word as u64,
+            });
+        }
+        let (records, dropped) = observer.drain();
+        assert_eq!(records.len(), SERIAL_OBSERVATION_CAPACITY);
+        assert_eq!(records[0].word, 1);
+        assert_eq!(dropped, 1);
+        assert!(observer.drain().0.is_empty());
+    }
 
     #[test]
     fn tcp_sink_round_trips_input_and_output() {

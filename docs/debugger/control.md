@@ -121,6 +121,67 @@ and where a host-timed `pause` lands is inherently wall-clock, like a
 GDB Ctrl-C. Every deterministic stop condition is detected by the core
 per instruction regardless of how often the server polls the socket.
 
+## Streaming observability
+
+An authenticated connection can subscribe to low-overhead machine events:
+
+```text
+# In copperline-ctl --repl (subscriptions live for this connection):
+events.subscribe {"events":["frame","serial","interrupt","media"],"frame_interval":50,"frame_digest":true}
+events.list
+events.unsubscribe {"events":["serial"]}
+events.unsubscribe
+```
+
+`events.subscribe` adds the named families to the connection's current set.
+`frame_interval` is 1--1,000,000 completed frames (default 1), and
+`frame_digest` adds the same FNV-1a framebuffer result as
+`capture.digest` to each `event.frame`; leave it off when the pixels are
+not relevant because rendering and hashing every selected frame has a cost.
+`events.unsubscribe` removes the named families, or all of them when
+`events` is omitted. `events.list` returns `supported`, `active`, the frame
+options, buffer limits, and the cumulative `dropped_notifications` count.
+
+Subscriptions are per connection, so use `copperline-ctl --repl`, a client
+library, or a raw long-lived socket rather than separate one-shot client
+invocations. Both headless and windowed servers send JSON-RPC notifications
+without an `id`:
+
+- `event.frame`: current timeline `position`, `previous_frame`, and optional
+  `digest`.
+- `event.serial`: a batch of completed Paula transmissions as
+  `{word, long, at_cck}`, plus `dropped_words`. The tap observes output in
+  parallel with the configured serial sink; it does not replace or delay it.
+- `event.interrupt`: `previous` and `current` INTENA, raw INTREQ,
+  CPU-visible INTREQ, and enabled-pending values, plus raw-source `asserted`
+  and `cleared` masks.
+- `event.media`: floppy or CD `inserted`/`ejected`; floppy events also carry
+  the drive number and inserted image name.
+
+Every payload includes a deterministic `position` (`frame`, `cck`,
+`seconds`, beam position, PC, and retired-instruction count). Interrupt
+changes are coalesced between CCP sampling boundaries: instruction boundaries
+for an explicit instruction step, otherwise the running driver's quantum
+(normally one frame). Use register watches or a VCD waveform when every
+within-frame transition matters.
+
+Streaming is bounded. Paula retains at most 4,096 unconsumed serial words,
+evicts the oldest on overflow, and reports the count in `dropped_words`.
+The windowed socket path queues at most 256 stream notifications and drops
+new notifications rather than blocking the emulator; the next delivered
+event and `events.list` expose the cumulative drop count. Headless delivery
+writes events directly and detaches a client that stops draining the socket.
+
+The same connection can start and stop the heavier file-backed diagnostics
+when an event identifies an interesting window. `trace.start {path?,
+max_lines?}` writes a disassembled instruction trace (default cap 1,000,000;
+maximum 10,000,000), with `trace.status` and `trace.stop`. `waveform.start
+{path?, trigger?, duration?, signals?}` accepts the same trigger, duration,
+and signal strings as the command-line VCD exporter, with
+`waveform.status` and `waveform.stop`. Their replies report the output path,
+progress, and final sample/line count; the actual trace remains in the host
+file rather than being pushed through the bounded notification stream.
+
 ## Method reference
 
 Session: `hello {token?}`, `auth {token}`, `status`, `shutdown`.
@@ -178,6 +239,15 @@ Media: `media.floppy.insert {drive, path, write_protected?}`,
 `media.floppy.eject {drive}`, `media.floppy.query`,
 `media.cd.insert {path}`, `media.cd.eject`.
 
+Streaming: `events.subscribe {events, frame_interval?, frame_digest?}`,
+`events.unsubscribe {events?}`, `events.list`. Event names are `frame`,
+`serial`, `interrupt`, and `media`; see
+[Streaming observability](#streaming-observability).
+
+Diagnostic captures: `trace.start {path?, max_lines?}`, `trace.status`,
+`trace.stop`; `waveform.start {path?, trigger?, duration?, signals?}`,
+`waveform.status`, `waveform.stop`.
+
 State and capture: `state.save {path}`, `state.load {path}` (re-arms
 the reverse-debug ring on the loaded timeline), `capture.screenshot
 {path?}` (raw framebuffer PNG, 716 pixels wide), `capture.digest`
@@ -185,9 +255,11 @@ the reverse-debug ring on the loaded timeline), `capture.screenshot
 primitive, identical in both server modes), `machine.reset
 {kind: "warm"|"cold"}`.
 
-Notifications (windowed mode; no `id`): `event.stopped` fires when the
-machine stops without a pending resume -- a GUI breakpoint, a user
-pause, a guru/double fault -- so an attached client can follow along.
+Notifications have no `id`. The subscribed `event.frame`, `event.serial`,
+`event.interrupt`, and `event.media` streams work in both server modes.
+Additionally, windowed mode sends `event.stopped` when the machine stops
+without a pending resume -- a GUI breakpoint, a user pause, or a
+guru/double fault -- so an attached client can follow along.
 
 ## Errors
 

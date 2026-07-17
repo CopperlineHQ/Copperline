@@ -23,6 +23,7 @@
 
 pub mod exec;
 pub mod headless;
+pub mod observe;
 pub mod proto;
 pub mod session;
 pub mod windowed;

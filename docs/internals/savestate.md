@@ -35,10 +35,12 @@ What is captured:
 
 Deliberately excluded, with the mechanism in parentheses:
 
-- **Host sinks**: Paula's `Box<dyn SerialSink>` / `Box<dyn AudioSink>`
-  (`#[serde(skip, default = ...)]` producing inert null sinks). On load,
-  `Bus::adopt_host_resources` moves the live sinks from the old Bus onto
-  the restored one, so audio output continues uninterrupted.
+- **Host sinks and taps**: Paula's `Box<dyn SerialSink>` /
+  `Box<dyn AudioSink>` and the bounded CCP serial-observation tap
+  (`#[serde(skip)]`; the sink defaults produce inert null devices). On load,
+  `Bus::adopt_host_resources` moves the live sinks and tap from the old Bus
+  onto the restored one, so output and an active subscription continue
+  uninterrupted.
 - **Diagnostic host state**: the `COPPERLINE_TRACE_BLITTER` file handle
   (skipped, moved across like the sinks), the debugger and its
   breakpoints/watchpoints (never serialized; they stay armed across a
