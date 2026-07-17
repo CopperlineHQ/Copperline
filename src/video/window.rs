@@ -315,6 +315,19 @@ const LED_ROW_PITCH_TIGHT: usize = 11;
 const STATUS_CONTROL_H: usize = 22;
 const STATUS_CONTROL_Y: usize = (STATUS_BAR_HEIGHT - STATUS_CONTROL_H) / 2;
 const VOLUME_STEP_PERCENT: i16 = 5;
+/// Per-press step of the live sampler input-gain control, in decibels; the
+/// range is the sampler's [`crate::sampler::MIN_SAMPLER_GAIN_DB`]..
+/// [`crate::sampler::MAX_SAMPLER_GAIN_DB`].
+const SAMPLER_GAIN_STEP_DB: f32 = 3.0;
+
+/// Label a sampler gain in decibels for the OSD/menu, e.g. `0 dB`, `+6 dB`.
+fn sampler_gain_osd(gain_db: f32) -> String {
+    if gain_db.abs() < 0.05 {
+        "0 dB".to_string()
+    } else {
+        format!("{gain_db:+.0} dB")
+    }
+}
 // Media (floppy/CD) button clusters. Each connected drive gets a wide
 // load button plus narrow swap and eject buttons; a CD machine gets a
 // load and an eject button after the drives.
@@ -691,6 +704,14 @@ pub struct App {
     /// is rebuilt live (device switch, disconnect recovery, post-load install) so
     /// the new stream/callback thread keeps the same scheduling as the first sink.
     realtime_priority: bool,
+    /// Parallel-port sampler request for this session (from `[parallel]` /
+    /// `--parallel sampler` or the launcher). Re-applied whenever a machine
+    /// session starts, and edited live from the runtime menu / gain shortcut.
+    sampler: crate::sampler::SamplerRequest,
+    /// The live cpal capture stream feeding the attached sampler. The stream is
+    /// `!Send`, so it is kept here on the main thread while its `Send` read-port
+    /// sits in the bus; `None` when no sampler is attached.
+    sampler_stream: Option<cpal::Stream>,
     /// Output frame-skip level for warp/turbo mode: how many emulated frames
     /// are retired per presented frame while warp is engaged. Presentation is
     /// vsync-gated, so this is what decouples warp speed from the host monitor
@@ -926,6 +947,9 @@ impl App {
         // caller's --audio/--noaudio-resolved value; for the config-screen
         // placeholder the config intent (so a state loaded over it gets sound).
         audio_output_enabled: bool,
+        // Parallel-port sampler request (disabled for the config-screen
+        // placeholder; run_machine re-derives it from the launcher's config).
+        sampler: crate::sampler::SamplerRequest,
     ) -> Self {
         // Headless capture runs drive themselves off emulated time, so a
         // powered-off start would simply hang. Force power on for those.
@@ -959,11 +983,13 @@ impl App {
         // Config's realtime-priority request, re-fed to priority::requested when
         // the audio sink is rebuilt live so those streams keep the same setting.
         let realtime_priority = machine_config.emulation.realtime_priority.unwrap_or(false);
-        Self {
+        let mut app = Self {
             emu,
             serial_is_midi,
             audio_output,
             realtime_priority,
+            sampler,
+            sampler_stream: None,
             fb: vec![0u32; MAX_FB_PIXELS],
             deinterlacer: Deinterlacer::with_phosphor(phosphor),
             present_fb: vec![0u32; FB_WIDTH * OUT_HEIGHT],
@@ -1051,6 +1077,38 @@ impl App {
             hunt: None,
             recorder: None,
             record_fb: Vec::new(),
+        };
+        // Attach the sampler now for a directly-booted machine; the config-screen
+        // placeholder passes a disabled request and attaches on Run instead.
+        app.attach_session_sampler();
+        app
+    }
+
+    /// Build the parallel-port sampler for the current [`self.sampler`] request
+    /// and attach it to the live machine, replacing any previous one. The cpal
+    /// capture stream is kept here on the main thread (it is `!Send`); its `Send`
+    /// read-port goes into the bus. A disabled request detaches the port. A
+    /// device-open failure logs and leaves the port empty rather than aborting.
+    fn attach_session_sampler(&mut self) {
+        // Drop any prior stream first so the old capture device is released
+        // before a new one opens.
+        self.sampler_stream = None;
+        if !self.sampler.enabled {
+            return;
+        }
+        match crate::sampler::CpalSampler::open(
+            self.sampler.input_device.as_deref(),
+            self.sampler.gain_db,
+        ) {
+            Ok((stream, port)) => {
+                info!(
+                    "parallel: sampler attached (input {:?})",
+                    port.device_label()
+                );
+                self.emu.bus_mut().attach_parallel_port(Box::new(port));
+                self.sampler_stream = Some(stream);
+            }
+            Err(e) => warn!("parallel: sampler failed to attach: {e}"),
         }
     }
 
@@ -1285,6 +1343,52 @@ impl App {
             }
         }
         self.show_osd(format!("Audio output: {}", self.audio_output.label()));
+    }
+
+    /// Step the live sampler input through "Default" then the host capture
+    /// devices, rebuilding the capture so the change takes effect at once.
+    /// Re-reads the device list so a just-connected device appears. A no-op when
+    /// no sampler is attached.
+    fn cycle_sampler_input(&mut self) {
+        if !self.sampler.enabled {
+            return;
+        }
+        let devices = crate::sampler::picker_input_devices();
+        self.sampler.input_device =
+            crate::sampler::next_input_device(self.sampler.input_device.as_deref(), &devices, true);
+        self.attach_session_sampler();
+        let label = self
+            .sampler
+            .input_device
+            .clone()
+            .unwrap_or_else(|| "Default".to_string());
+        self.show_osd(format!("Sampler input: {label}"));
+    }
+
+    /// Raise (`forward`) or lower the live sampler input gain by one
+    /// [`SAMPLER_GAIN_STEP_DB`] step, clamped to the sampler's dB range,
+    /// rebuilding the capture so the new preamp level takes effect at once. A
+    /// no-op when no sampler is attached. Bound to the runtime menu and the
+    /// gain shortcut.
+    fn step_sampler_gain(&mut self, forward: bool) {
+        if !self.sampler.enabled {
+            return;
+        }
+        let delta = if forward {
+            SAMPLER_GAIN_STEP_DB
+        } else {
+            -SAMPLER_GAIN_STEP_DB
+        };
+        let gain_db = (self.sampler.gain_db + delta).clamp(
+            crate::sampler::MIN_SAMPLER_GAIN_DB,
+            crate::sampler::MAX_SAMPLER_GAIN_DB,
+        );
+        if gain_db == self.sampler.gain_db {
+            return;
+        }
+        self.sampler.gain_db = gain_db;
+        self.attach_session_sampler();
+        self.show_osd(format!("Sampler gain: {}", sampler_gain_osd(gain_db)));
     }
 
     fn set_joystick_input_mode(&mut self, mode: JoystickInputMode) {
@@ -1736,6 +1840,25 @@ impl ApplicationHandler for App {
                             self.cycle_audio_output()
                         }
                     }
+                    (KeyCode::Equal, ElementState::Pressed)
+                        if host_shortcut_modifier_pressed(self.modifiers)
+                            && self.modifiers.shift_key() =>
+                    {
+                        // Raise the sampler input gain (Shift+= is "+"). A no-op
+                        // unless a sampler is attached; ignored under a menu/panel.
+                        if !self.modal_ui_active() {
+                            self.step_sampler_gain(true)
+                        }
+                    }
+                    (KeyCode::Minus, ElementState::Pressed)
+                        if host_shortcut_modifier_pressed(self.modifiers)
+                            && self.modifiers.shift_key() =>
+                    {
+                        // Lower the sampler input gain (Shift+- is "_").
+                        if !self.modal_ui_active() {
+                            self.step_sampler_gain(false)
+                        }
+                    }
                     (other, state) => {
                         let pressed = state == ElementState::Pressed;
                         if pressed && self.ui_handle_key(other, text.as_deref()) {
@@ -2007,6 +2130,16 @@ impl ApplicationHandler for App {
                 } else {
                     (String::new(), String::new())
                 };
+                let sampler_active = self.sampler_stream.is_some();
+                let (sampler_input_label, sampler_gain_label) =
+                    if self.ui.menu_open && sampler_active {
+                        (
+                            self.sampler.input_device.clone().unwrap_or_default(),
+                            sampler_gain_osd(self.sampler.gain_db),
+                        )
+                    } else {
+                        (String::new(), String::new())
+                    };
                 let ui_data = self.build_panel_view_data();
                 if let Some(r) = self.render.as_mut() {
                     let frame = r.pixels.frame_mut();
@@ -2034,6 +2167,7 @@ impl ApplicationHandler for App {
                         ui_hover,
                         ui_data.as_ref(),
                         self.serial_is_midi,
+                        sampler_active,
                         ui::MenuLabels {
                             warp,
                             warp_speed,
@@ -2048,6 +2182,8 @@ impl ApplicationHandler for App {
                             midi_in: &midi_in_label,
                             midi_out: &midi_out_label,
                             audio_output: self.audio_output.label(),
+                            sampler_input: &sampler_input_label,
+                            sampler_gain: &sampler_gain_label,
                         },
                     );
                     // The drag hint sits on top of everything: the drop will
@@ -2746,7 +2882,8 @@ impl App {
         if self.ui.panel.is_none() && self.tool_panel_open() && !self.ui.menu_open {
             return None;
         }
-        self.ui.control_at(pos, self.serial_is_midi)
+        self.ui
+            .control_at(pos, self.serial_is_midi, self.sampler_stream.is_some())
     }
 
     fn main_ui_hover_changed(
@@ -3127,6 +3264,8 @@ impl App {
                     ui::MenuItem::MidiInput => self.cycle_midi_input(),
                     #[cfg(feature = "midi")]
                     ui::MenuItem::MidiOutput => self.cycle_midi_output(),
+                    ui::MenuItem::SamplerInput => self.cycle_sampler_input(),
+                    ui::MenuItem::SamplerGain => self.step_sampler_gain(true),
                     ui::MenuItem::PixelAspect => self.toggle_pixel_aspect(),
                     ui::MenuItem::AudioOutput => self.cycle_audio_output(),
                     ui::MenuItem::Warp => self.toggle_warp(),
@@ -4341,6 +4480,11 @@ impl App {
             self.serial_is_midi = self.emu.bus_mut().midi_serial_mut().is_some();
         }
         self.machine_config = raw;
+        // Re-derive the sampler from the launcher's parallel config and attach it
+        // to the fresh machine (the printer attaches inside build_machine, since
+        // its byte sink is Send).
+        self.sampler = crate::sampler::SamplerRequest::from_config(&cfg.parallel);
+        self.attach_session_sampler();
         self.disk_playlists = cfg.floppy_playlists.clone();
         self.disk_write_protected = std::array::from_fn(|i| {
             cfg.floppy.drives[i]

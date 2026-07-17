@@ -22,6 +22,7 @@ The app shortcut modifier is `Cmd` on macOS and `Alt` on Linux/Windows.
 | `Cmd+K` | `Alt+K` | Open the [debugger console](../debugger/console) |
 | `Cmd+J` | `Alt+J` | Toggle joystick input mode: gamepad / keyboard (also the status-bar icon) |
 | `Cmd+Shift+A` | `Alt+Shift+A` | Cycle the audio output: Default, each host device, then Disabled (also the menu's Audio Out item) |
+| `Cmd+Shift++` / `Cmd+Shift+-` | `Alt+Shift++` / `Alt+Shift+-` | Raise / lower the parallel-port sampler input gain (only when a sampler is attached; also the menu's Sampler Gain item) |
 | `Cmd+W` | `Alt+W` | Toggle Warp Speed (turbo) on / off |
 | `Cmd+Shift+W` | `Alt+Shift+W` | Cycle the Warp Speed limit: 2x, 4x, 8x, 16x, Max |
 | `Esc` | `Esc` | Close an open menu, tool window, or overlay panel; otherwise passed through to the Amiga |
@@ -135,6 +136,10 @@ tool window or overlay.
   cycle Paula's serial bridge through the host's MIDI sources and
   destinations; see the `[serial]` section of
   [Configuration](configuration.md).
+- **Sampler In / Sampler Gain** (shown when a parallel-port sampler is
+  attached): cycle the sampler's host capture device, and step its input
+  gain (also `Cmd/Alt+Shift +/-`). Both change live. See the `[parallel]`
+  section of [Configuration](configuration.md).
 - **Pixel Aspect**: flips the presentation between the 4:3 CRT pixel
   aspect (the default; PAL lo-res pixels slightly wider than tall, as a
   real TV shows them) and square pixels (a 320x256 screen is an exact
@@ -218,6 +223,8 @@ The layout is:
   insert delay, CD32 NVRAM), *Zorro* (extra autoconfig boards by metadata
   file, with a config panel for a WASM plugin board's declared options),
   *Serial* (serial mode and MIDI input/output endpoints),
+  *Parallel* (the parallel-port device -- None, Printer, or Sampler -- and, for
+  the sampler, its host audio input and input gain),
   *Input* (the controller device in each game port and the joystick input
   source), and *A/V & Emu* (audio output device, channel mode, stereo
   separation, overscan, pixel aspect, phosphor, floppy sounds and

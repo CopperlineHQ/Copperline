@@ -60,10 +60,11 @@ machine; the other flags then override individual values on top of it, just as
 explicit `[cpu]`/`[chipset]`/`[memory]` sections override a `[machine]`
 profile in a config file.
 
-The audio and serial surface has matching per-run flags too --
+The audio, serial, and parallel surface has matching per-run flags too --
 `--audio-device`, `--audio-channel-mode`, `--audio-stereo-separation`,
-`--serial`, `--midi-in`, `--midi-out` -- described with their `[audio]` and
-`[serial]` keys below.
+`--serial`, `--midi-in`, `--midi-out`, `--parallel`, `--sampler-audio-input`,
+`--sampler-input-gain` -- described with their `[audio]`, `[serial]`, and
+`[parallel]` keys below.
 
 ## Top level
 
@@ -542,21 +543,46 @@ console. `--serial MODE` overrides the mode per run, and
 **Serial** tab and the in-window **MIDI In / MIDI Out** menu items select
 the MIDI endpoints interactively.
 
-## `[parallel]` -- Centronics printer capture
+## `[parallel]` -- Centronics parallel port
 
 ```toml
 [parallel]
-output = "printer.raw"
+device = "printer"           # none | printer | sampler
+output = "printer.raw"       # printer capture path
+# device = "sampler"
+# sampler_input = "MacBook Air Microphone"  # host input; omit for the default
+# sampler_gain = 6.0                          # preamp gain in dB (0 = unity)
 ```
 
-Without this section the parallel connector is electrically disconnected:
-CIA-B still produces its hardware `PC` strobe on port-B accesses, but no
-peripheral acknowledges it. Setting `output` attaches a raw Centronics sink.
-The output file is created at startup, replacing any existing file at that
-path. Each strobed byte is then written verbatim and returns the printer `/ACK`
-falling edge through CIA-A `FLAG`, including the normal CIA interrupt delay.
-The file is intentionally not decoded because the guest may emit any printer
-language; pass it to a compatible converter or spooler afterwards.
+`device` chooses the peripheral on the parallel port (one at a time). Without
+this section the connector is electrically disconnected: CIA-A still produces
+its hardware `PC` strobe on port-B accesses (`$BFE101`), but no peripheral
+acknowledges it and port-B reads see the CIA's own pins. The equivalent per-run
+flags are `--parallel DEVICE`, `--sampler-audio-input NAME`, and
+`--sampler-input-gain X`; `--sampler-list-audio-inputs` prints the input-device
+names and exits.
+
+`"printer"` attaches a raw Centronics sink at `output` (a bare `output` with no
+`device` still selects the printer, for compatibility). The file is created at
+startup, replacing any existing file; each strobed byte is written verbatim and
+returns the printer `/ACK` falling edge through CIA-A `FLAG`, including the
+normal CIA interrupt delay. It is intentionally not decoded, since the guest may
+emit any printer language; pass it to a converter or spooler afterwards.
+
+`"sampler"` attaches an 8-bit audio sampler (digitizer) on the data lines -- the
+emulated equivalent of a classic parallel-port sampler cartridge, driving
+software such as AudioMaster, ProTracker, OctaMED, and TurboSound. It captures
+from a host input device (cpal, like live audio output, so it needs a build with
+the `frontend` feature) and presents each read of the data lines as an 8-bit
+offset-binary sample in emulated time, mono (host left/right are summed).
+`sampler_input` names the host device (case-insensitive substring, as
+`--sampler-list-audio-inputs` prints; omitted uses the system default);
+`sampler_gain` is the preamp gain in decibels (0 dB = unity) applied before the
+ADC, clamped to the sampler's range (roughly -24 to +24 dB). The input device
+and gain can also be changed live
+from the runtime menu, and the gain with `Cmd/Alt+Shift +/-`. On macOS the CLI
+binary needs microphone permission to capture a real input; routing audio in
+through a loopback device such as BlackHole needs none.
 
 ## `[floppy]` and `[floppy.df0]` .. `[floppy.df3]`
 

@@ -85,6 +85,8 @@ pub enum MenuItem {
     MidiInput,
     #[cfg(feature = "midi")]
     MidiOutput,
+    SamplerInput,
+    SamplerGain,
     PixelAspect,
     AudioOutput,
     Warp,
@@ -98,12 +100,13 @@ pub enum MenuItem {
 }
 
 /// The menu items, top to bottom. The MIDI device items appear only when the
-/// serial port is in MIDI mode, so the list is built per open rather than fixed.
-pub fn menu_items(midi_active: bool) -> Vec<MenuItem> {
+/// serial port is in MIDI mode, and the sampler items only when a parallel-port
+/// sampler is attached, so the list is built per open rather than fixed.
+pub fn menu_items(midi_active: bool, sampler_active: bool) -> Vec<MenuItem> {
     let _ = midi_active;
-    // 9 leading + up to 2 MIDI + 10 trailing items, sized so appending never
-    // reallocates.
-    let mut items = Vec::with_capacity(21);
+    // 9 leading + up to 2 MIDI + 2 sampler + 10 trailing items, sized so
+    // appending never reallocates.
+    let mut items = Vec::with_capacity(23);
     items.extend([
         MenuItem::MachineConfig,
         MenuItem::FrameAnalyzer,
@@ -119,6 +122,10 @@ pub fn menu_items(midi_active: bool) -> Vec<MenuItem> {
     if midi_active {
         items.push(MenuItem::MidiInput);
         items.push(MenuItem::MidiOutput);
+    }
+    if sampler_active {
+        items.push(MenuItem::SamplerInput);
+        items.push(MenuItem::SamplerGain);
     }
     items.push(MenuItem::PixelAspect);
     items.extend([
@@ -155,6 +162,10 @@ pub struct MenuLabels<'a> {
     /// Current audio output label: "Default", a device name, or "Disabled"
     /// (empty is treated as "Default").
     pub audio_output: &'a str,
+    /// Current sampler input device name (empty is treated as "Default") and
+    /// gain label (e.g. "2x"); only shown when a sampler is attached.
+    pub sampler_input: &'a str,
+    pub sampler_gain: &'a str,
 }
 
 fn menu_item_label(item: MenuItem, s: MenuLabels) -> String {
@@ -187,6 +198,15 @@ fn menu_item_label(item: MenuItem, s: MenuLabels) -> String {
             };
             format!("Audio Out [{}]", clip_menu_value(name))
         }
+        MenuItem::SamplerInput => {
+            let name = if s.sampler_input.is_empty() {
+                "Default"
+            } else {
+                s.sampler_input
+            };
+            format!("Sampler In [{}]", clip_menu_value(name))
+        }
+        MenuItem::SamplerGain => format!("Sampler Gain {:>5}", format!("[{}]", s.sampler_gain)),
         MenuItem::Warp if s.warp => "Warp Speed      [on]".to_string(),
         MenuItem::Warp => "Warp Speed     [off]".to_string(),
         // Right-pad so the closing bracket stays put as the value width
@@ -208,10 +228,10 @@ fn menu_item_label(item: MenuItem, s: MenuLabels) -> String {
     }
 }
 
-/// Clip a device name so a "MIDI Out [name]" / "Audio Out [name]" label stays
-/// within the popup.
+/// Clip a device name so a "MIDI Out [name]" / "Audio Out [name]" /
+/// "Sampler In [name]" label stays within the popup.
 fn clip_menu_value(name: &str) -> String {
-    const MAX: usize = MENU_MAX_LABEL_CHARS - 12; // widest prefix "Audio Out [" plus "]"
+    const MAX: usize = MENU_MAX_LABEL_CHARS - 13; // widest prefix "Sampler In [" plus "]"
     if name.chars().count() <= MAX {
         return name.to_string();
     }
@@ -545,12 +565,17 @@ impl UiState {
         self.menu_open || self.panel.is_some()
     }
 
-    /// The UI control under `pos`, if any. `midi_active` selects the same menu
-    /// item list the draw uses. `PanelBody` swallows clicks on a panel's
-    /// background so they never reach the emulated display.
-    pub fn control_at(&self, pos: (i32, i32), midi_active: bool) -> Option<UiControl> {
+    /// The UI control under `pos`, if any. `midi_active`/`sampler_active` select
+    /// the same menu item list the draw uses. `PanelBody` swallows clicks on a
+    /// panel's background so they never reach the emulated display.
+    pub fn control_at(
+        &self,
+        pos: (i32, i32),
+        midi_active: bool,
+        sampler_active: bool,
+    ) -> Option<UiControl> {
         if self.menu_open {
-            let items = menu_items(midi_active);
+            let items = menu_items(midi_active, sampler_active);
             for (index, item) in items.iter().enumerate() {
                 if menu_item_rect(index, items.len()).contains(pos) {
                     return Some(UiControl::MenuItem(*item));
@@ -1662,10 +1687,11 @@ fn draw_menu(
     frame: &mut [u8],
     hover: Option<UiControl>,
     midi_active: bool,
+    sampler_active: bool,
     labels: MenuLabels,
     scale: usize,
 ) {
-    let items = menu_items(midi_active);
+    let items = menu_items(midi_active, sampler_active);
     let rect = menu_rect(items.len());
     let scaled = scale_rect(rect, scale);
     fill_rect(frame, scaled, MENU_BG, scale);
@@ -3741,7 +3767,14 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
             return Some(UiControl::LauncherZorroAdd);
         }
     } else {
-        for (i, r) in launcher::rows(state.tab).iter().enumerate() {
+        for (i, r) in launcher::rows(
+            state.tab,
+            state.setup.parallel_device(),
+            state.setup.serial_mode(),
+        )
+        .iter()
+        .enumerate()
+        {
             if !state.setup.applies(r.field) {
                 continue;
             }
@@ -4316,14 +4349,30 @@ fn draw_launcher(
     if state.tab == LauncherTab::Zorro {
         draw_launcher_zorro(frame, rect, state, hover, scale);
     } else {
-        for (i, r) in launcher::rows(state.tab).iter().enumerate() {
+        for (i, r) in launcher::rows(
+            state.tab,
+            state.setup.parallel_device(),
+            state.setup.serial_mode(),
+        )
+        .iter()
+        .enumerate()
+        {
             draw_launcher_row(frame, rect, state, r, i, hover, scale);
         }
     }
     // The Input tab spells out what the chosen wiring means: which host
     // input source ends up driving each port, live as the values cycle.
     if state.tab == LauncherTab::Input {
-        let summary_top = launcher_row_y(rect, launcher::rows(LauncherTab::Input).len() + 1);
+        let summary_top = launcher_row_y(
+            rect,
+            launcher::rows(
+                LauncherTab::Input,
+                state.setup.parallel_device(),
+                state.setup.serial_mode(),
+            )
+            .len()
+                + 1,
+        );
         draw_panel_text(
             frame,
             launcher_pane_x(rect),
@@ -4419,13 +4468,21 @@ pub fn draw(
     hover: Option<UiControl>,
     data: Option<&PanelViewData>,
     midi_active: bool,
+    sampler_active: bool,
     labels: MenuLabels,
 ) {
     if let Some(panel) = &ui.panel {
         draw_panel_layer(frame, texture_scale, panel, hover, data);
     }
     if ui.menu_open {
-        draw_menu(frame, hover, midi_active, labels, texture_scale);
+        draw_menu(
+            frame,
+            hover,
+            midi_active,
+            sampler_active,
+            labels,
+            texture_scale,
+        );
     }
 }
 
@@ -4659,7 +4716,7 @@ mod tests {
 
     #[test]
     fn menu_sits_above_the_status_bar_and_hit_tests_items() {
-        let n = menu_items(false).len();
+        let n = menu_items(false, false).len();
         let rect = menu_rect(n);
         assert!(rect.y + rect.h <= present_height());
         assert!(rect.x + rect.w <= FB_WIDTH);
@@ -4671,7 +4728,7 @@ mod tests {
         let first = menu_item_rect(0, n);
         let pos = (first.x as i32 + 4, first.y as i32 + 4);
         assert_eq!(
-            ui.control_at(pos, false),
+            ui.control_at(pos, false, false),
             Some(UiControl::MenuItem(MenuItem::MachineConfig))
         );
         // Leading block is MachineConfig, FrameAnalyzer, Debugger, Console,
@@ -4679,18 +4736,18 @@ mod tests {
         let joystick = menu_item_rect(6, n);
         let pos = (joystick.x as i32 + 4, joystick.y as i32 + 4);
         assert_eq!(
-            ui.control_at(pos, false),
+            ui.control_at(pos, false, false),
             Some(UiControl::MenuItem(MenuItem::JoystickInput))
         );
         // Outside the menu: nothing (the click closes the menu).
-        assert_eq!(ui.control_at((0, 0), false), None);
+        assert_eq!(ui.control_at((0, 0), false, false), None);
     }
 
     #[test]
     fn every_menu_label_fits_inside_the_popup() {
         // The label is drawn at `item_rect.x + MENU_TEXT_INSET`; its glyphs
         // must end before the popup's right edge or the trailing "~" clips.
-        let items = menu_items(true);
+        let items = menu_items(true, true);
         let menu = menu_rect(items.len());
         let limit = menu.x + menu.w;
         let modes = [JoystickInputMode::Gamepad, JoystickInputMode::Keyboard];
@@ -4717,6 +4774,8 @@ mod tests {
                                         midi_in: long,
                                         midi_out: long,
                                         audio_output: long,
+                                        sampler_input: long,
+                                        sampler_gain: "-24 dB",
                                     };
                                     let label = menu_item_label(item, labels);
                                     let text_w =
@@ -4748,6 +4807,7 @@ mod tests {
         assert_eq!(
             ui.control_at(
                 (raster.x as i32 + raster.w as i32 / 2, raster.y as i32 + 2),
+                false,
                 false
             ),
             Some(UiControl::AnalyzerPick {
@@ -4763,6 +4823,7 @@ mod tests {
                     scanline.x as i32 + scanline.w as i32 / 2,
                     scanline.y as i32 + 2
                 ),
+                false,
                 false
             ),
             Some(UiControl::AnalyzerPick {
@@ -4774,12 +4835,12 @@ mod tests {
         let (control, button) = analyzer_button_rects(rect)[1];
         assert_eq!(control, UiControl::AnalyzerFrame);
         assert_eq!(
-            ui.control_at((button.x as i32 + 2, button.y as i32 + 2), false),
+            ui.control_at((button.x as i32 + 2, button.y as i32 + 2), false, false),
             Some(UiControl::AnalyzerFrame)
         );
         let underlay = analyzer_underlay_rect(rect);
         assert_eq!(
-            ui.control_at((underlay.x as i32 + 2, underlay.y as i32 + 2), false),
+            ui.control_at((underlay.x as i32 + 2, underlay.y as i32 + 2), false, false),
             Some(UiControl::AnalyzerUnderlay)
         );
         // The checkbox must not overlap the transport buttons.
@@ -4903,12 +4964,18 @@ mod tests {
         let rect = panel_rect(ui.panel.as_ref().unwrap());
         let close = close_button_rect(rect);
         let pos = (close.x as i32 + 2, close.y as i32 + 2);
-        assert_eq!(ui.control_at(pos, false), Some(UiControl::PanelClose));
+        assert_eq!(
+            ui.control_at(pos, false, false),
+            Some(UiControl::PanelClose)
+        );
         // Panel body swallows clicks.
         let body = (rect.x as i32 + 5, (rect.y + TITLE_H + 5) as i32);
-        assert_eq!(ui.control_at(body, false), Some(UiControl::PanelBody));
+        assert_eq!(
+            ui.control_at(body, false, false),
+            Some(UiControl::PanelBody)
+        );
         // Outside the panel: nothing.
-        assert_eq!(ui.control_at((0, 0), false), None);
+        assert_eq!(ui.control_at((0, 0), false, false), None);
     }
 
     #[test]
@@ -4920,22 +4987,22 @@ mod tests {
         let rect = panel_rect(ui.panel.as_ref().unwrap());
         let tab = debug_tab_rect(rect, 3);
         assert_eq!(
-            ui.control_at((tab.x as i32 + 2, tab.y as i32 + 2), false),
+            ui.control_at((tab.x as i32 + 2, tab.y as i32 + 2), false, false),
             Some(UiControl::DebugTab(DebugTab::Video))
         );
         let tab = debug_tab_rect(rect, 4);
         assert_eq!(
-            ui.control_at((tab.x as i32 + 2, tab.y as i32 + 2), false),
+            ui.control_at((tab.x as i32 + 2, tab.y as i32 + 2), false, false),
             Some(UiControl::DebugTab(DebugTab::Audio))
         );
         let tab = debug_tab_rect(rect, 6);
         assert_eq!(
-            ui.control_at((tab.x as i32 + 2, tab.y as i32 + 2), false),
+            ui.control_at((tab.x as i32 + 2, tab.y as i32 + 2), false, false),
             Some(UiControl::DebugTab(DebugTab::IoMap))
         );
         let tab = debug_tab_rect(rect, 7);
         assert_eq!(
-            ui.control_at((tab.x as i32 + 2, tab.y as i32 + 2), false),
+            ui.control_at((tab.x as i32 + 2, tab.y as i32 + 2), false, false),
             Some(UiControl::DebugTab(DebugTab::Break))
         );
         // All eight tabs fit inside the panel.
@@ -4944,7 +5011,7 @@ mod tests {
         let (control, step) = debug_button_rects(rect)[1];
         assert_eq!(control, UiControl::DebugStep);
         assert_eq!(
-            ui.control_at((step.x as i32 + 2, step.y as i32 + 2), false),
+            ui.control_at((step.x as i32 + 2, step.y as i32 + 2), false, false),
             Some(UiControl::DebugStep)
         );
 
@@ -4959,11 +5026,11 @@ mod tests {
         assert_eq!(control, UiControl::DebugBreakToggle);
         let pos = (toggle.x as i32 + 2, toggle.y as i32 + 2);
         assert_eq!(
-            ui_break.control_at(pos, false),
+            ui_break.control_at(pos, false, false),
             Some(UiControl::DebugBreakToggle)
         );
         // On another tab the same position is just panel body.
-        assert_eq!(ui.control_at(pos, false), Some(UiControl::PanelBody));
+        assert_eq!(ui.control_at(pos, false, false), Some(UiControl::PanelBody));
 
         // Audio-tab mute buttons hit-test only while the Audio tab is active.
         let mut panel = DebuggerPanel::new();
@@ -4976,7 +5043,7 @@ mod tests {
         assert_eq!(control, UiControl::DebugAudioMute(0));
         let pos = (mute0.x as i32 + 2, mute0.y as i32 + 2);
         assert_eq!(
-            ui_audio.control_at(pos, false),
+            ui_audio.control_at(pos, false, false),
             Some(UiControl::DebugAudioMute(0))
         );
         // The CD mute is the fifth (index 4) button.
@@ -4984,11 +5051,11 @@ mod tests {
         assert_eq!(cd_control, UiControl::DebugAudioMute(4));
         let cd_pos = (cd_mute.x as i32 + 2, cd_mute.y as i32 + 2);
         assert_eq!(
-            ui_audio.control_at(cd_pos, false),
+            ui_audio.control_at(cd_pos, false, false),
             Some(UiControl::DebugAudioMute(4))
         );
         // On another tab that position does not resolve to a mute.
-        assert_eq!(ui.control_at(pos, false), Some(UiControl::PanelBody));
+        assert_eq!(ui.control_at(pos, false, false), Some(UiControl::PanelBody));
 
         let mut panel = DebuggerPanel::new();
         for ch in ['c', '0', '0', '3', 'C'] {
@@ -5243,6 +5310,7 @@ mod tests {
             None,
             None,
             false,
+            false,
             MenuLabels {
                 warp: true,
                 warp_speed: WarpSpeed::Max,
@@ -5257,9 +5325,11 @@ mod tests {
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
+                sampler_input: "",
+                sampler_gain: "",
             },
         );
-        let menu = menu_rect(menu_items(false).len());
+        let menu = menu_rect(menu_items(false, false).len());
         let probe = ((menu.y + MENU_PAD + 2) * w + menu.x + 4) * 4;
         assert_eq!(&frame[probe..probe + 4], &MENU_BG.to_le_bytes());
         save(&frame, "menu");
@@ -5286,6 +5356,7 @@ mod tests {
             None,
             Some(&data),
             false,
+            false,
             MenuLabels {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
@@ -5300,6 +5371,8 @@ mod tests {
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
+                sampler_input: "",
+                sampler_gain: "",
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -5317,6 +5390,7 @@ mod tests {
             None,
             Some(&PanelViewData::Shortcuts),
             false,
+            false,
             MenuLabels {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
@@ -5331,6 +5405,8 @@ mod tests {
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
+                sampler_input: "",
+                sampler_gain: "",
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -5364,6 +5440,7 @@ mod tests {
             Some(UiControl::DropDrive(1)),
             None,
             false,
+            false,
             MenuLabels {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
@@ -5378,6 +5455,8 @@ mod tests {
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
+                sampler_input: "",
+                sampler_gain: "",
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -5435,6 +5514,7 @@ mod tests {
             Some(UiControl::CalCancel),
             Some(&data),
             false,
+            false,
             MenuLabels {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
@@ -5449,6 +5529,8 @@ mod tests {
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
+                sampler_input: "",
+                sampler_gain: "",
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -5493,6 +5575,7 @@ mod tests {
             Some(UiControl::DebugStep),
             Some(&data),
             false,
+            false,
             MenuLabels {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
@@ -5507,6 +5590,8 @@ mod tests {
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
+                sampler_input: "",
+                sampler_gain: "",
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -5548,6 +5633,7 @@ mod tests {
             Some(UiControl::DebugRegToggle),
             Some(&data),
             false,
+            false,
             MenuLabels {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
@@ -5562,6 +5648,8 @@ mod tests {
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
+                sampler_input: "",
+                sampler_gain: "",
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -5604,6 +5692,7 @@ mod tests {
             Some(UiControl::DebugWaveArm),
             Some(&data),
             false,
+            false,
             MenuLabels {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
@@ -5618,6 +5707,8 @@ mod tests {
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
+                sampler_input: "",
+                sampler_gain: "",
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -5713,6 +5804,7 @@ mod tests {
             Some(UiControl::DebugAudioMute(0)),
             Some(&data),
             false,
+            false,
             MenuLabels {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
@@ -5727,6 +5819,8 @@ mod tests {
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
+                sampler_input: "",
+                sampler_gain: "",
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -5782,6 +5876,7 @@ mod tests {
             None,
             Some(&data),
             false,
+            false,
             MenuLabels {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
@@ -5796,6 +5891,8 @@ mod tests {
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
+                sampler_input: "",
+                sampler_gain: "",
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -5862,6 +5959,7 @@ mod tests {
             Some(UiControl::DebugPlaneToggle(0)),
             Some(&data),
             false,
+            false,
             MenuLabels {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
@@ -5876,6 +5974,8 @@ mod tests {
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
+                sampler_input: "",
+                sampler_gain: "",
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -5979,6 +6079,7 @@ mod tests {
             Some(UiControl::AnalyzerUnderlay),
             Some(&data),
             false,
+            false,
             MenuLabels {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
@@ -5993,6 +6094,8 @@ mod tests {
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
+                sampler_input: "",
+                sampler_gain: "",
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -6026,6 +6129,7 @@ mod tests {
             None,
             None,
             false,
+            false,
             MenuLabels {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
@@ -6040,6 +6144,8 @@ mod tests {
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
+                sampler_input: "",
+                sampler_gain: "",
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -6064,6 +6170,7 @@ mod tests {
             Some(UiControl::LauncherRun),
             None,
             false,
+            false,
             MenuLabels {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
@@ -6078,6 +6185,8 @@ mod tests {
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
+                sampler_input: "",
+                sampler_gain: "",
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -6142,6 +6251,7 @@ mod tests {
             None,
             None,
             false,
+            false,
             MenuLabels {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
@@ -6156,6 +6266,8 @@ mod tests {
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
+                sampler_input: "",
+                sampler_gain: "",
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -6187,6 +6299,7 @@ mod tests {
             None,
             None,
             false,
+            false,
             MenuLabels {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
@@ -6201,6 +6314,8 @@ mod tests {
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
+                sampler_input: "",
+                sampler_gain: "",
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -6225,6 +6340,7 @@ mod tests {
             None,
             None,
             false,
+            false,
             MenuLabels {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
@@ -6239,6 +6355,8 @@ mod tests {
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
+                sampler_input: "",
+                sampler_gain: "",
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -6247,7 +6365,16 @@ mod tests {
         let rect = panel_rect(&Panel::Launcher(Box::new(LauncherState::new(
             launcher::MachineSetup::default(),
         ))));
-        let header_y = launcher_row_y(rect, launcher::rows(LauncherTab::Input).len() + 1);
+        let header_y = launcher_row_y(
+            rect,
+            launcher::rows(
+                LauncherTab::Input,
+                crate::config::ParallelDevice::None,
+                crate::config::SerialMode::default(),
+            )
+            .len()
+                + 1,
+        );
         let row = &frame[(header_y * w + launcher_pane_x(rect)) * 4
             ..(header_y * w + launcher_pane_x(rect) + 200) * 4];
         assert!(

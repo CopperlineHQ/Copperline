@@ -195,10 +195,11 @@ pub struct Config {
     /// Defaults to [`SerialMode::Stdout`], preserving the historical
     /// terminal-diagnostics behaviour.
     pub serial: SerialConfig,
-    /// Raw Centronics printer-byte capture (`[parallel] output`). `None`
-    /// leaves the parallel port electrically disconnected, so CIA-B strobes
-    /// receive no CIA-A FLAG acknowledge.
-    pub parallel_output_path: Option<PathBuf>,
+    /// The peripheral on the Centronics parallel port (printer capture or audio
+    /// sampler) and its settings. [`ParallelDevice::None`] leaves the port
+    /// electrically disconnected, so CIA-A strobes receive no FLAG acknowledge
+    /// and port-B reads see the CIA's own pin state.
+    pub parallel: ParallelConfig,
 }
 
 /// How much of the overscan field the window presents. The
@@ -322,6 +323,58 @@ pub struct SerialConfig {
     /// TCP listen address for [`SerialMode::Tcp`]; `None` means the
     /// default `127.0.0.1:1234` (the port UAE's `TCP:` serial uses).
     pub listen: Option<String>,
+}
+
+/// Which peripheral is plugged into the Amiga's Centronics parallel port. The
+/// port carries one device at a time, chosen by `[parallel] device`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ParallelDevice {
+    /// Nothing plugged in (an unplugged cable). The default.
+    #[default]
+    None,
+    /// A Centronics printer whose raw byte stream is captured to a host file
+    /// (`[parallel] output`).
+    Printer,
+    /// An 8-bit audio sampler (digitizer) on the data lines, fed from a host
+    /// capture device. Needs a build with the `frontend` feature (cpal).
+    Sampler,
+}
+
+impl ParallelDevice {
+    /// Config-string label (round-trips through [`parse_parallel_device`]).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Printer => "printer",
+            Self::Sampler => "sampler",
+        }
+    }
+}
+
+/// Resolved `[parallel]` settings. `printer_output` is consulted only for
+/// [`ParallelDevice::Printer`], and `sampler_input`/`sampler_gain_db` only for
+/// [`ParallelDevice::Sampler`]; the inactive fields are carried through so the
+/// configuration screen round-trips them unchanged.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParallelConfig {
+    pub device: ParallelDevice,
+    /// Raw printer-byte capture path for [`ParallelDevice::Printer`].
+    pub printer_output: Option<PathBuf>,
+    /// Host capture device for [`ParallelDevice::Sampler`]; `None` = default.
+    pub sampler_input: Option<String>,
+    /// Sampler input gain in decibels (preamp); 0 dB = unity.
+    pub sampler_gain_db: f32,
+}
+
+impl Default for ParallelConfig {
+    fn default() -> Self {
+        Self {
+            device: ParallelDevice::None,
+            printer_output: None,
+            sampler_input: None,
+            sampler_gain_db: 0.0,
+        }
+    }
 }
 
 /// A configured hard-drive image: the host path plus an optional volume-name
@@ -1026,7 +1079,7 @@ impl Default for Config {
             joystick_input_mode: JoystickInputMode::Gamepad,
             port_devices: [PortDevice::Mouse, PortDevice::Joystick],
             serial: SerialConfig::default(),
-            parallel_output_path: None,
+            parallel: ParallelConfig::default(),
         }
     }
 }
@@ -1178,6 +1231,15 @@ pub struct ConfigOverrides {
     pub midi_out: Option<String>,
     /// Host MIDI input endpoint (`--midi-in`), implying `--serial midi`.
     pub midi_in: Option<String>,
+    /// Parallel port device (`--parallel`): "none", "printer", or "sampler".
+    /// Same parser as `[parallel] device`.
+    pub parallel: Option<String>,
+    /// Sampler host capture device (`--sampler-audio-input`), implying
+    /// `--parallel sampler`. Substring match.
+    pub sampler_input: Option<String>,
+    /// Sampler input gain in decibels (`--sampler-input-gain`), implying
+    /// `--parallel sampler`. Preamp; 0 dB = unity.
+    pub sampler_gain: Option<f32>,
     /// Host audio output device (`--audio-device`), substring match.
     pub audio_device: Option<String>,
     /// Output channel mode (`--audio-channel-mode`): "stereo" or "mono".
@@ -1210,6 +1272,9 @@ impl ConfigOverrides {
             && self.serial.is_none()
             && self.midi_out.is_none()
             && self.midi_in.is_none()
+            && self.parallel.is_none()
+            && self.sampler_input.is_none()
+            && self.sampler_gain.is_none()
             && self.audio_device.is_none()
             && self.audio_channel_mode.is_none()
             && self.audio_stereo_separation.is_none()
@@ -1269,6 +1334,21 @@ impl ConfigOverrides {
         // `--serial` said otherwise.
         if self.serial.is_none() && (self.midi_out.is_some() || self.midi_in.is_some()) {
             raw.serial.mode = Some(SerialMode::Midi.label().to_string());
+        }
+        if let Some(device) = &self.parallel {
+            raw.parallel.device = Some(device.clone());
+        }
+        if let Some(input) = &self.sampler_input {
+            raw.parallel.sampler_input = Some(input.clone());
+        }
+        if let Some(gain) = self.sampler_gain {
+            raw.parallel.sampler_gain = Some(gain);
+        }
+        // Naming a sampler option selects the sampler unless `--parallel` said
+        // otherwise (mirrors `--midi-out` implying `--serial midi`).
+        if self.parallel.is_none() && (self.sampler_input.is_some() || self.sampler_gain.is_some())
+        {
+            raw.parallel.device = Some(ParallelDevice::Sampler.label().to_string());
         }
         if let Some(dev) = &self.audio_device {
             raw.audio.output_device = Some(dev.clone());
@@ -1445,13 +1525,24 @@ pub(crate) struct RawSerial {
     pub(crate) listen: Option<String>,
 }
 
-/// `[parallel]` host capture for the Amiga Centronics printer port.
+/// `[parallel]` peripheral selection for the Amiga Centronics parallel port.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawParallel {
-    /// Raw byte-stream output path. When absent, no printer is connected.
+    /// Which device is plugged in: `none`, `printer`, or `sampler`. When
+    /// omitted, a bare `output` path implies `printer` (back-compat) and
+    /// otherwise the port is empty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) device: Option<String>,
+    /// Printer raw byte-stream output path.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) output: Option<String>,
+    /// Sampler host capture device name (substring match); absent = default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) sampler_input: Option<String>,
+    /// Sampler input gain in decibels (preamp); absent = 0 dB (unity).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) sampler_gain: Option<f32>,
 }
 
 /// A drive image entry in `[ide]`/`[scsi]`. Accepts either a bare path string
@@ -2380,8 +2471,52 @@ impl TryFrom<RawConfig> for Config {
             joystick_input_mode,
             port_devices,
             serial,
-            parallel_output_path: raw.parallel.output.map(PathBuf::from),
+            parallel: resolve_parallel(raw.parallel)?,
         })
+    }
+}
+
+/// Resolve `[parallel]` into a [`ParallelConfig`]. An explicit `device` selects
+/// the peripheral; with none set, a bare `output` path implies a printer
+/// (back-compat with the original `[parallel] output = "..."`) and otherwise the
+/// port is empty. Rejects a printer with no capture path and an out-of-range
+/// sampler gain.
+fn resolve_parallel(raw: RawParallel) -> Result<ParallelConfig> {
+    let device = match raw.device.as_deref() {
+        Some(s) => parse_parallel_device(s)?,
+        None if raw.output.is_some() => ParallelDevice::Printer,
+        None => ParallelDevice::None,
+    };
+    if device == ParallelDevice::Printer && raw.output.is_none() {
+        bail!("[parallel] device = \"printer\" needs an output path (output = \"...\")");
+    }
+    let sampler_gain_db = raw.sampler_gain.unwrap_or(0.0);
+    let gain_range = crate::sampler::MIN_SAMPLER_GAIN_DB..=crate::sampler::MAX_SAMPLER_GAIN_DB;
+    if device == ParallelDevice::Sampler
+        && (!sampler_gain_db.is_finite() || !gain_range.contains(&sampler_gain_db))
+    {
+        bail!(
+            "[parallel] sampler_gain must be between {} and {} dB, got {sampler_gain_db}",
+            crate::sampler::MIN_SAMPLER_GAIN_DB,
+            crate::sampler::MAX_SAMPLER_GAIN_DB
+        );
+    }
+    Ok(ParallelConfig {
+        device,
+        printer_output: raw.output.map(PathBuf::from),
+        sampler_input: raw.sampler_input,
+        sampler_gain_db,
+    })
+}
+
+pub(crate) fn parse_parallel_device(s: &str) -> Result<ParallelDevice> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "none" | "off" => Ok(ParallelDevice::None),
+        "printer" => Ok(ParallelDevice::Printer),
+        "sampler" => Ok(ParallelDevice::Sampler),
+        other => bail!(
+            "[parallel] device must be \"none\", \"printer\", or \"sampler\", got \"{other}\""
+        ),
     }
 }
 
@@ -4982,15 +5117,55 @@ mod tests {
 
     #[test]
     fn parallel_section_selects_raw_capture_path() -> Result<()> {
+        // A bare output path implies the printer (back-compat).
         let cfg = parse_config("[parallel]\noutput = \"printer.raw\"\n")?;
+        assert_eq!(cfg.parallel.device, ParallelDevice::Printer);
         assert_eq!(
-            cfg.parallel_output_path.as_deref(),
+            cfg.parallel.printer_output.as_deref(),
             Some(std::path::Path::new("printer.raw"))
         );
-        assert_eq!(parse_config("")?.parallel_output_path, None);
+        // An empty port is the default.
+        assert_eq!(parse_config("")?.parallel.device, ParallelDevice::None);
+        assert_eq!(parse_config("")?.parallel.printer_output, None);
 
         let err = parse_config("[parallel]\nmode = \"printer\"\n").unwrap_err();
         assert!(err.to_string().contains("unknown field `mode`"), "{err:#}");
+        Ok(())
+    }
+
+    #[test]
+    fn parallel_device_selects_printer_or_sampler() -> Result<()> {
+        // An explicit sampler with its options (gain in dB).
+        let cfg = parse_config(
+            "[parallel]\ndevice = \"sampler\"\nsampler_input = \"BlackHole\"\nsampler_gain = 6.0\n",
+        )?;
+        assert_eq!(cfg.parallel.device, ParallelDevice::Sampler);
+        assert_eq!(cfg.parallel.sampler_input.as_deref(), Some("BlackHole"));
+        assert_eq!(cfg.parallel.sampler_gain_db, 6.0);
+        // 0 dB (unity) is valid.
+        assert_eq!(
+            parse_config("[parallel]\ndevice = \"sampler\"\nsampler_gain = 0\n")?
+                .parallel
+                .sampler_gain_db,
+            0.0
+        );
+
+        // An explicit printer needs an output path.
+        let err = parse_config("[parallel]\ndevice = \"printer\"\n").unwrap_err();
+        assert!(err.to_string().contains("needs an output path"), "{err:#}");
+
+        // Out-of-range gain (dB) is rejected.
+        let err =
+            parse_config("[parallel]\ndevice = \"sampler\"\nsampler_gain = 100\n").unwrap_err();
+        assert!(err.to_string().contains("sampler_gain"), "{err:#}");
+
+        // An unknown device name is rejected.
+        let err = parse_config("[parallel]\ndevice = \"plotter\"\n").unwrap_err();
+        assert!(err.to_string().contains("must be"), "{err:#}");
+
+        // `none` explicitly empties the port even with a stale output path.
+        let cfg = parse_config("[parallel]\ndevice = \"none\"\n")?;
+        assert_eq!(cfg.parallel.device, ParallelDevice::None);
         Ok(())
     }
 

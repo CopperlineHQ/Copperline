@@ -389,13 +389,31 @@ floppy_sounds_volume = 100
 # listen = "127.0.0.1:1234"
 
 
-# Centronics parallel-printer capture. With no section the connector is
-# electrically unplugged: CIA-B still pulses /STROBE, but no peripheral
-# returns CIA-A /ACK. When output is set, the path is replaced at startup and
-# every strobed data byte is captured in order and acknowledged; feed the raw
-# stream to the matching printer-language converter or a real spooler.
+# Parallel (Centronics) port peripheral. With no section the connector is
+# electrically unplugged: CIA-A still pulses /STROBE on port-B access, but no
+# peripheral returns CIA-A /ACK. `device` selects what is plugged in:
+#   "none"     (default) nothing connected.
+#   "printer"  a Centronics printer whose raw byte stream is captured. `output`
+#              sets the host file; it is replaced at startup and every strobed
+#              data byte is written in order and acknowledged. Feed the raw
+#              stream to the matching printer-language converter or a spooler.
+#              (A bare `output` with no `device` still implies the printer.)
+#   "sampler"  an 8-bit audio sampler (digitizer) on the data lines, fed from a
+#              host capture device -- the emulated equivalent of a classic
+#              parallel-port sampler cartridge (AudioMaster, ProTracker, OctaMED,
+#              TurboSound). `sampler_input` names the host input device
+#              (case-insensitive substring, as `--sampler-list-audio-inputs`
+#              prints; omitted = system default). `sampler_gain` is the preamp
+#              gain in decibels (0 dB = unity; ~ -24 to +24 dB). Needs a build
+#              with the `frontend` feature (it uses cpal, like live audio output).
+# --parallel DEVICE overrides this per run; --sampler-audio-input /
+# --sampler-input-gain imply "sampler".
 # [parallel]
+# device = "printer"
 # output = "printer.raw"
+# device = "sampler"
+# sampler_input = "MacBook Air Microphone"
+# sampler_gain = 6.0   # dB
 
 
 # Optional floppy drives. DF0 is always connected; set [floppy] drives
