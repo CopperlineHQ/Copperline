@@ -42,11 +42,15 @@ pub const ACTION_SET_FILE_SIZE: i32 = 1022;
 pub const ACTION_FH_FROM_LOCK: i32 = 1026; // OpenFromLock()
 pub const ACTION_IS_FILESYSTEM: i32 = 1027;
 pub const ACTION_PARENT_FH: i32 = 1031; // ParentOfFH()
+pub const ACTION_EXAMINE_ALL: i32 = 1033; // ExAll()
 pub const ACTION_EXAMINE_FH: i32 = 1034; // ExamineFH()
+pub const ACTION_EXAMINE_ALL_END: i32 = 1035; // ExAllEnd()
 
 // dos/dos.h.
 pub const DOSTRUE: u32 = 0xFFFF_FFFF;
 pub const DOSFALSE: u32 = 0;
+pub const ERROR_NO_FREE_STORE: u32 = 103;
+pub const ERROR_BAD_NUMBER: u32 = 115;
 pub const ERROR_OBJECT_IN_USE: u32 = 202;
 pub const ERROR_OBJECT_EXISTS: u32 = 203;
 pub const ERROR_DIRECTORY_NOT_FOUND: u32 = 204;
