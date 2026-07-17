@@ -447,7 +447,7 @@ port2 = "joystick"     # same values; default "cd32" on the CD32 profile
 joystick = "gamepad"   # "gamepad" (default) or "keyboard"
 ```
 
-### Controller ports
+### Port devices
 
 `port1` and `port2` name the controller device plugged into each game port.
 Either port accepts any device, exactly as on real hardware:
