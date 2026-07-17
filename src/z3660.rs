@@ -10,11 +10,12 @@
 //! the rest of the window is board RAM (P96 VRAM from +0x200000, the
 //! GFXData blit-parameter mailbox at +0x3200000).
 //!
-//! This is a bring-up stub, not a working display: the board autoconfigs,
-//! the identity/status registers the driver probes at init answer, every
-//! other register access is latched and logged so the driver's expectations
-//! can be mapped, and the RAM region is honest memory. No pixels are scanned
-//! out yet.
+//! Bring-up state: the board autoconfigs, the identity/status registers
+//! answer, every register access is latched and logged, and the RAM region
+//! is honest memory. The display pipeline presents the panned framebuffer
+//! (all four pixel formats, palette captured from the upload stream) when
+//! the driver switches the display to RTG; the blitter ops are not
+//! executed yet, so only CPU-rendered pixels show.
 
 use crate::zorro_device::{DeviceHost, ZorroDevice};
 

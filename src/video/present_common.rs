@@ -18,6 +18,31 @@ pub const fn rgba(r: u32, g: u32, b: u32) -> u32 {
     0xFF00_0000 | (b << 16) | (g << 8) | r
 }
 
+/// Compose the active RTG board frame (Z3660 scanout) into an
+/// FB_WIDTH-stride presentation buffer: the board frame lands in `scratch`
+/// at its own resolution and is scaled horizontally (nearest) into `out`,
+/// one output row per board row -- the shared vertical scaling then maps
+/// rows to the output height like any chipset frame. Returns the row count,
+/// or `None` while no RTG board drives the display.
+pub fn compose_rtg_present(
+    bus: &crate::bus::Bus,
+    scratch: &mut Vec<u32>,
+    out: &mut Vec<u32>,
+) -> Option<usize> {
+    let (w, h) = bus.rtg_frame(scratch)?;
+    let (w, h) = (w as usize, h as usize);
+    out.clear();
+    out.resize(h * FB_WIDTH, 0xFF00_0000);
+    for y in 0..h {
+        let src = &scratch[y * w..(y + 1) * w];
+        let dst = &mut out[y * FB_WIDTH..(y + 1) * FB_WIDTH];
+        for (x, px) in dst.iter_mut().enumerate() {
+            *px = src[x * w / FB_WIDTH];
+        }
+    }
+    Some(h)
+}
+
 pub const STANDARD_PAL_VISIBLE_WIDTH: usize = 320 * 2;
 pub const STANDARD_PAL_VISIBLE_LINES: usize = 256;
 pub const STANDARD_PAL_VISIBLE_START_VPOS: u32 = 0x2C;

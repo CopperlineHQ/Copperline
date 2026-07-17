@@ -568,6 +568,9 @@ pub struct App {
     present_fb: Vec<u32>,
     present_rows: usize,
     present_standard_tv_aperture: bool,
+    /// Scratch for composing an RTG board frame (Z3660 scanout); reused
+    /// across frames to avoid a per-frame allocation.
+    rtg_fb: Vec<u32>,
     render: Option<Render>,
     debugger_tool_window: Option<ToolWindow>,
     frame_analyzer_tool_window: Option<ToolWindow>,
@@ -1012,6 +1015,7 @@ impl App {
             deinterlacer: Deinterlacer::with_phosphor(phosphor),
             present_fb: vec![0u32; FB_WIDTH * OUT_HEIGHT],
             present_rows: OUT_HEIGHT,
+            rtg_fb: Vec::new(),
             present_standard_tv_aperture: true,
             render: None,
             debugger_tool_window: None,
@@ -7472,14 +7476,53 @@ impl App {
         rendered
     }
 
+    /// Present the RTG board frame when one is driving the display: the
+    /// board frame (own resolution) is scaled horizontally into the
+    /// FB_WIDTH-stride presentation buffer, and the shared vertical scaling
+    /// maps its rows to the output height. Returns `None` when no RTG board
+    /// is active (native chipset presentation as usual).
+    fn render_rtg_frame_if_active(&mut self) -> Option<bool> {
+        if !self.emu.bus().rtg_active() {
+            return None;
+        }
+        let emulated_frame = self.emu.bus().emulated_frames();
+        if !should_render_emulated_frame(self.last_rendered_emulated_frame, emulated_frame) {
+            return Some(false);
+        }
+        let mut rtg = std::mem::take(&mut self.rtg_fb);
+        let mut present = std::mem::take(&mut self.present_fb);
+        let rows = compose_rtg_present(self.emu.bus(), &mut rtg, &mut present);
+        self.rtg_fb = rtg;
+        self.present_fb = present;
+        let Some(rows) = rows else {
+            return Some(false);
+        };
+        self.present_rows = rows;
+        self.present_standard_tv_aperture = false;
+        self.last_rendered_emulated_frame = Some(emulated_frame);
+        self.last_submitted_render_frame = Some(emulated_frame);
+        Some(true)
+    }
+
     fn render_emulated_frame_if_needed(&mut self) -> bool {
         if !self.emu.bus().frame_render_available() {
             return false;
         }
+        // Drain in-flight chipset render results first (recycling their
+        // buffers) so a stale result cannot land on top of an RTG frame.
+        // Their "new frame applied" outcome must propagate to the caller,
+        // which uses it to schedule the window redraw.
+        let mut rendered = false;
         if self.render_worker.is_some() {
-            return self.render_emulated_frame_threaded();
+            rendered = self.collect_threaded_render_results(false);
         }
-        self.render_emulated_frame_sync()
+        if let Some(rtg_rendered) = self.render_rtg_frame_if_active() {
+            return rendered | rtg_rendered;
+        }
+        if self.render_worker.is_some() {
+            return rendered | self.render_emulated_frame_threaded();
+        }
+        rendered | self.render_emulated_frame_sync()
     }
 
     fn render_emulated_frame_sync(&mut self) -> bool {
