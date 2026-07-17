@@ -1136,7 +1136,9 @@ impl FilesysUnit {
                 // Res1 = previous position, or -1 with Res2 = error.
                 use std::io::{Seek, SeekFrom};
                 let key = arg(bus, 1);
-                let pos = arg(bus, 2) as i64;
+                // Sign-extend: a backward relative seek is a negative LONG
+                // (iffparse patches chunk lengths with Seek(-n, OFFSET_CURRENT)).
+                let pos = arg(bus, 2) as i32 as i64;
                 let mode = arg(bus, 3) as i32;
                 let Some((f, _)) = self.files.get_mut(&key) else {
                     return (DOSTRUE, ERROR_INVALID_LOCK); // res1 = -1
@@ -2443,6 +2445,116 @@ mod tests {
                 String::from_utf8_lossy(escape)
             );
         }
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Seek offsets are signed LONGs: a backward relative seek (negative
+    /// Arg2) must move the position, not zero-extend into a huge forward
+    /// seek. This is iffparse's PopChunk pattern -- stream chunks with
+    /// placeholder lengths, then Seek(-n, OFFSET_CURRENT/OFFSET_END) back
+    /// and patch them -- which P96Prefs saves rely on.
+    #[test]
+    fn seek_accepts_negative_offsets_like_iffparse() {
+        let root = std::env::temp_dir().join(format!("clfs-seek-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+
+        let mut hle = FilesysBoard::default();
+        hle.set_mounts(vec![MountSpec {
+            path: root.clone(),
+            volume: "Test".into(),
+            boot_pri: -128,
+            readonly: false,
+        }]);
+        let mut bus = RamBus(vec![0u8; 0x2_0000]);
+        let (board_base, port, pkt, dn, fh, name, buf) = (
+            0x1_0000u32,
+            0x3000u32,
+            0x2000u32,
+            0x1000u32,
+            0x4000u32,
+            0x5000u32,
+            0x6000u32,
+        );
+        let mut guest_op = None;
+        let send = |bus: &mut RamBus,
+                    unit: &mut FilesysUnit,
+                    guest_op: &mut Option<GuestOp>,
+                    ty: i32,
+                    args: [u32; 3]| {
+            bus.write_long(pkt + 8, ty as u32);
+            for (i, a) in args.iter().enumerate() {
+                bus.write_long(pkt + 20 + 4 * i as u32, *a);
+            }
+            unit.handle_packet(bus, board_base, port, pkt, guest_op)
+        };
+
+        // Startup packet wires the unit; then Open("iff.bin", MODE_NEWFILE).
+        let unit = &mut hle.units[0];
+        send(&mut bus, unit, &mut guest_op, 0, [0, 0, dn >> 2]);
+        bus.0[name as usize] = 7;
+        bus.0[name as usize + 1..name as usize + 8].copy_from_slice(b"iff.bin");
+        let (res1, res2) = send(
+            &mut bus,
+            unit,
+            &mut guest_op,
+            ACTION_FINDOUTPUT,
+            [fh >> 2, 0, name >> 2],
+        );
+        assert_eq!((res1, res2), (DOSTRUE, 0));
+        let cookie = bus.read_long(fh + FILEHANDLE_ARG1);
+
+        // Stream 24 bytes with two 0xFFFFFFFF length placeholders.
+        bus.0[buf as usize..buf as usize + 24]
+            .copy_from_slice(b"FORM\xff\xff\xff\xffP96SANNO\xff\xff\xff\xffp96p");
+        let (res1, _) = send(
+            &mut bus,
+            unit,
+            &mut guest_op,
+            ACTION_WRITE,
+            [cookie, buf, 24],
+        );
+        assert_eq!(res1, 24);
+
+        // Patch the ANNO length: back 8 from the current position (24 -> 16).
+        let (res1, res2) = send(
+            &mut bus,
+            unit,
+            &mut guest_op,
+            ACTION_SEEK,
+            [cookie, (-8i32) as u32, OFFSET_CURRENT as u32],
+        );
+        assert_eq!((res1, res2), (24, 0), "backward OFFSET_CURRENT seek failed");
+        bus.0[buf as usize..buf as usize + 4].copy_from_slice(&4u32.to_be_bytes());
+        send(
+            &mut bus,
+            unit,
+            &mut guest_op,
+            ACTION_WRITE,
+            [cookie, buf, 4],
+        );
+
+        // Patch the FORM length: 20 back from the end (24 -> 4).
+        let (res1, res2) = send(
+            &mut bus,
+            unit,
+            &mut guest_op,
+            ACTION_SEEK,
+            [cookie, (-20i32) as u32, OFFSET_END as u32],
+        );
+        assert_eq!((res1, res2), (20, 0), "backward OFFSET_END seek failed");
+        bus.0[buf as usize..buf as usize + 4].copy_from_slice(&16u32.to_be_bytes());
+        send(
+            &mut bus,
+            unit,
+            &mut guest_op,
+            ACTION_WRITE,
+            [cookie, buf, 4],
+        );
+
+        send(&mut bus, unit, &mut guest_op, ACTION_END, [cookie, 0, 0]);
+        let on_disk = std::fs::read(root.join("iff.bin")).unwrap();
+        assert_eq!(on_disk, b"FORM\x00\x00\x00\x10P96SANNO\x00\x00\x00\x04p96p");
 
         std::fs::remove_dir_all(&root).unwrap();
     }
