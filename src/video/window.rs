@@ -2434,8 +2434,8 @@ enum DroppedMediaKind {
     /// unknown extensions): FloppyImage::from_bytes sniffs the content and
     /// rejects what it cannot read, surfacing a clean OSD failure.
     Floppy,
-    /// A cue sheet for the CD drive (runtime CD loading is cue-only).
-    CdCue,
+    /// A CD image (cue sheet or bare ISO) for the CD drive.
+    Cd,
     /// Hard disk images cannot be hot-attached; point at the config screen.
     HardDisk,
     /// Kickstart ROMs load from the config screen, not at runtime.
@@ -2447,7 +2447,7 @@ fn classify_dropped_media(path: &std::path::Path) -> DroppedMediaKind {
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase());
     match ext.as_deref() {
-        Some("cue") | Some("iso") => DroppedMediaKind::CdCue,
+        Some("cue") | Some("iso") => DroppedMediaKind::Cd,
         Some("hdf") | Some("img") => DroppedMediaKind::HardDisk,
         Some("rom") => DroppedMediaKind::Rom,
         _ => DroppedMediaKind::Floppy,
@@ -4161,7 +4161,9 @@ impl App {
                 "Floppy images",
                 &["adf", "adz", "dms", "scp", "gz", "ipf", "zip"],
             ),
-            LauncherField::CdImage => dialog.add_filter("CD images", &["cue", "iso", "bin"]),
+            // Only formats CdImage::load takes: a cue sheet or a bare ISO
+            // (a raw .bin is a cue sheet's payload, not loadable alone).
+            LauncherField::CdImage => dialog.add_filter("CD images", &["cue", "iso"]),
             LauncherField::Cd32Nvram => dialog.add_filter("NVRAM images", &["bin", "nv", "sav"]),
             // SCSI units take hard disks or CD images (a cue/iso attaches a
             // CD-ROM drive at that ID).
@@ -6519,13 +6521,13 @@ impl App {
             return;
         }
         let mut floppies: Vec<PathBuf> = Vec::new();
-        let mut cue: Option<PathBuf> = None;
+        let mut cd: Option<PathBuf> = None;
         let mut notice: Option<&'static str> = None;
         for path in files {
             match classify_dropped_media(&path) {
                 DroppedMediaKind::Floppy => floppies.push(path),
-                // One disc tray; the first cue sheet wins.
-                DroppedMediaKind::CdCue => cue = cue.or(Some(path)),
+                // One disc tray; the first CD image wins.
+                DroppedMediaKind::Cd => cd = cd.or(Some(path)),
                 DroppedMediaKind::HardDisk => {
                     notice = Some("Hard disks are configured in the machine screen");
                 }
@@ -6535,7 +6537,7 @@ impl App {
             }
         }
         let mut handled = false;
-        if let Some(path) = cue {
+        if let Some(path) = cd {
             if self.emu.bus().cd_drive_present() {
                 self.insert_cd_image_from_path(&path);
             } else {

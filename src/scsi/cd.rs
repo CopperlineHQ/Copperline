@@ -281,20 +281,33 @@ impl ScsiCdRom {
         d
     }
 
-    /// A 4-byte TOC/header/sub-channel address: absolute MSF (with the
-    /// 2-second lead-in offset) or a plain LBA, by the CDB's TIME bit.
+    /// A 4-byte absolute TOC/header/sub-channel address: MSF with the
+    /// 2-second lead-in offset, or a plain LBA, by the CDB's TIME bit.
     fn addr4(sector: u32, msf: bool) -> [u8; 4] {
         if msf {
-            let s = sector + LEADIN_SECTORS;
-            [
-                0,
-                (s / (60 * 75)) as u8,
-                ((s / 75) % 60) as u8,
-                (s % 75) as u8,
-            ]
+            Self::msf_bytes(sector + LEADIN_SECTORS)
         } else {
             sector.to_be_bytes()
         }
+    }
+
+    /// A 4-byte track-relative address: MSF counted from the track start
+    /// (no lead-in offset), or the plain sector difference.
+    fn rel4(sectors: u32, msf: bool) -> [u8; 4] {
+        if msf {
+            Self::msf_bytes(sectors)
+        } else {
+            sectors.to_be_bytes()
+        }
+    }
+
+    fn msf_bytes(s: u32) -> [u8; 4] {
+        [
+            0,
+            (s / (60 * 75)) as u8,
+            ((s / 75) % 60) as u8,
+            (s % 75) as u8,
+        ]
     }
 
     /// The ADR/control byte a TOC entry carries: position-information ADR
@@ -796,7 +809,7 @@ impl ScsiCdRom {
                         (Self::ctl_adr(track), track.number, track.start_sector);
                     data.extend_from_slice(&[0x01, ctl, number, 1]);
                     data.extend_from_slice(&Self::addr4(self.play_pos, msf));
-                    data.extend_from_slice(&Self::addr4(self.play_pos.saturating_sub(start), msf));
+                    data.extend_from_slice(&Self::rel4(self.play_pos.saturating_sub(start), msf));
                 }
                 // Media catalogue number / ISRC: nothing encoded (the
                 // MCVal/TCVal bit stays clear).
@@ -1084,6 +1097,13 @@ mod tests {
         assert_eq!(data[1], AUDIO_STATUS_COMPLETED);
         assert_eq!(be32(&data, 8), 5); // last played sector
         assert_eq!(be32(&data, 12), 1); // relative to the track start
+
+        // MSF form: the absolute address carries the 2-second lead-in
+        // offset (sector 5 = 00:02:05); the track-relative address counts
+        // from the track start without it (sector 1 into track 2).
+        let data = data_in(&mut cd, &[0x42, 0x02, 0x40, 1, 0, 0, 0, 0, 16, 0]);
+        assert_eq!(&data[8..12], &[0, 0, 2, 5]);
+        assert_eq!(&data[12..16], &[0, 0, 0, 1]);
 
         // Playing a data track is an illegal mode.
         check_sense(
