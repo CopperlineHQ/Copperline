@@ -15,9 +15,9 @@
 //! is honest memory. The display pipeline presents the panned framebuffer
 //! (all four pixel formats, palette captured from the upload stream) when
 //! the driver switches the display to RTG, and the core blitter ops
-//! (fill/copy/invert/template/pattern) execute into VRAM on the doorbell.
-//! Still stubbed: DRAWLINE, P2C/P2D, the ACC_OP surface ops, and the
-//! hardware sprite (the pointer is invisible until it is composited).
+//! (fill/copy/invert/template/pattern) execute into VRAM on the doorbell,
+//! with the hardware sprite (mouse pointer) composited over the output.
+//! Still stubbed: DRAWLINE, P2C/P2D, and the ACC_OP surface ops.
 
 use crate::zorro_device::{DeviceHost, ZorroDevice};
 
@@ -41,6 +41,7 @@ const BACKED_BYTES: usize = 0x0400_0000;
 
 // The registers the FindCard/init path probes.
 const REG_MODE: u32 = 0x100;
+const REG_SPRITE_BITMAP: u32 = 0x174;
 const REG_VBLANK_STATUS: u32 = 0x17C;
 const REG_BLITTER_DMA_OP: u32 = 0x180;
 const REG_ACC_OP: u32 = 0x184;
@@ -110,6 +111,17 @@ pub struct Z3660 {
     /// Whether SetGC has programmed a display mode since power-on; RTG
     /// scanout is meaningless before the first mode set.
     mode_set: bool,
+    /// Hardware sprite (the mouse pointer): composited over the frame at
+    /// scanout, never written to VRAM. Pixel values 0-3 index
+    /// `sprite_colors` (0 = transparent), row-major `sprite_w` wide.
+    sprite_visible: bool,
+    sprite_x: i32,
+    sprite_y: i32,
+    sprite_w: usize,
+    sprite_h: usize,
+    sprite_pix: Vec<u8>,
+    /// Sprite pens as 0x00RRGGBB (pen 0 unused).
+    sprite_colors: [u32; 4],
 }
 
 impl Z3660 {
@@ -123,6 +135,13 @@ impl Z3660 {
             pan_offset: 0,
             pan_width: 0,
             mode_set: false,
+            sprite_visible: false,
+            sprite_x: 0,
+            sprite_y: 0,
+            sprite_w: 0,
+            sprite_h: 0,
+            sprite_pix: Vec::new(),
+            sprite_colors: [0; 4],
         }
     }
 
@@ -202,6 +221,15 @@ impl Z3660 {
                     value & 0xFFFF
                 );
             }
+            REG_SPRITE_BITMAP => {
+                // SetSprite: 1 = show the hardware sprite (2 = hide; the
+                // driver ships only the show write, hiding via position).
+                if value == 1 {
+                    self.sprite_visible = true;
+                } else if value == 2 {
+                    self.sprite_visible = false;
+                }
+            }
             REG_CUSTOM_VIDMODE => self.vidmode_param = value,
             REG_CUSTOM_VIDMODE_DATA => {
                 log::info!(
@@ -271,6 +299,9 @@ impl Z3660 {
         const OP_RECT_TEMPLATE: u32 = 5;
         const OP_RECT_PATTERN: u32 = 6;
         const OP_INVERTRECT: u32 = 9;
+        const OP_SPRITE_XY: u32 = 11;
+        const OP_SPRITE_COLOR: u32 = 12;
+        const OP_SPRITE_BITMAP: u32 = 13;
         const MINTERM_SRC: u8 = 0xC0;
         const JAM1: u8 = 0;
         const INVERSVID: u8 = 8;
@@ -438,6 +469,45 @@ impl Z3660 {
                     }
                 }
             }
+            OP_SPRITE_XY => {
+                self.sprite_x = i32::from(self.be16(g + 0x10) as i16);
+                self.sprite_y = i32::from(self.be16(g + 0x18) as i16);
+            }
+            OP_SPRITE_COLOR => {
+                // rgb0 was assembled bytewise on the 68k as B,G,R,0; the
+                // u8offset byte selects the pen (driver sends idx+1).
+                let pen = (self.vram[g + 0x3B] & 3) as usize;
+                let (b, gr, r) = (rgb0 >> 24, (rgb0 >> 16) & 0xFF, (rgb0 >> 8) & 0xFF);
+                self.sprite_colors[pen] = (r << 16) | (gr << 8) | b;
+            }
+            OP_SPRITE_BITMAP => {
+                // Amiga 2-plane sprite rows at offset[1]: `hires` words of
+                // plane 0 then plane 1 per row; pixel value = plane bits.
+                let (w, h) = (x1, y1);
+                let hires = y2 + 1;
+                // Row: `hires` words of plane 0, then plane 1 (the driver
+                // copies (w>>3)*2*hires bytes per row).
+                let row_bytes = (w / 8) * 2 * hires;
+                if w == 0 || h == 0 || w > 16 * hires {
+                    log::debug!("z3660: sprite bitmap {w}x{h} hires {hires} unsupported");
+                    self.sprite_pix.clear();
+                    return;
+                }
+                self.sprite_w = w;
+                self.sprite_h = h;
+                self.sprite_pix = vec![0u8; w * h];
+                for y in 0..h {
+                    let row = src + y * row_bytes;
+                    for x in 0..w {
+                        let word = x / 16;
+                        let bit = 15 - (x & 15);
+                        let p0 = self.be16(row + 2 * word);
+                        let p1 = self.be16(row + 2 * hires + 2 * word);
+                        let v = (((p1 >> bit) & 1) << 1) | ((p0 >> bit) & 1);
+                        self.sprite_pix[y * w + x] = v as u8;
+                    }
+                }
+            }
             _ => {
                 log::debug!("z3660: dma-op {} not executed yet", dma_op_name(op));
             }
@@ -531,6 +601,26 @@ impl Z3660 {
                     _ => (self.vram[at + 2], self.vram[at + 1], self.vram[at]),
                 };
                 out.push(0xFF00_0000 | (u32::from(b) << 16) | (u32::from(g) << 8) | u32::from(r));
+            }
+        }
+        // The hardware sprite (mouse pointer) is composited over the output
+        // stream; it never exists in VRAM. Pen 0 is transparent.
+        if self.sprite_visible && !self.sprite_pix.is_empty() {
+            for sy in 0..self.sprite_h {
+                let py = self.sprite_y + sy as i32;
+                if py < 0 || py >= h as i32 {
+                    continue;
+                }
+                for sx in 0..self.sprite_w {
+                    let px = self.sprite_x + sx as i32;
+                    let pen = self.sprite_pix[sy * self.sprite_w + sx];
+                    if pen == 0 || px < 0 || px >= w as i32 {
+                        continue;
+                    }
+                    let rgb = self.sprite_colors[pen as usize];
+                    out[py as usize * w as usize + px as usize] =
+                        0xFF00_0000 | ((rgb & 0xFF) << 16) | (rgb & 0xFF00) | ((rgb >> 16) & 0xFF);
+                }
             }
         }
         Some((w, h))
@@ -628,6 +718,9 @@ impl ZorroDevice for Z3660 {
         self.pan_offset = 0;
         self.pan_width = 0;
         self.mode_set = false;
+        self.sprite_visible = false;
+        self.sprite_pix.clear();
+        self.sprite_colors = [0; 4];
     }
 
     fn kind(&self) -> &'static str {
@@ -1041,5 +1134,70 @@ mod exec_tests {
         );
         ring(&mut z, &mut m, 5);
         assert_eq!(&z.vram[v..v + 4], &[3, 9, 3, 9]);
+    }
+}
+
+#[cfg(test)]
+mod sprite_tests {
+    use super::*;
+    use crate::memory::Memory;
+
+    fn mem() -> Memory {
+        Memory {
+            chip_ram: vec![0u8; 0x100],
+            slow_ram: Vec::new(),
+            rom: Vec::new(),
+            overlay: false,
+            zorro: crate::zorro::ZorroChain::default(),
+            extended_rom: Vec::new(),
+            extended_rom_base: 0,
+            wcs: Vec::new(),
+            wcs_write_protected: false,
+        }
+    }
+
+    fn w32(z: &mut Z3660, m: &mut Memory, off: u32, value: u32) {
+        z.write(off, 4, value, &mut DeviceHost::new(m));
+    }
+
+    /// The pointer overlays the frame at its position without touching
+    /// VRAM: SetSprite shows it, SPRITE_BITMAP uploads the 2-plane image,
+    /// SPRITE_COLOR sets pen 1 (u8offset = idx+1, B/G/R bytes), SPRITE_XY
+    /// places it.
+    #[test]
+    fn sprite_composites_over_the_frame() {
+        let (mut z, mut m) = (Z3660::new(), mem());
+        let g = GFXDATA_OFFSET;
+        // 4x2 8-bit screen showing palette entry 0 (black).
+        w32(&mut z, &mut m, REG_ORIG_RES, (4 << 16) | 2);
+        w32(&mut z, &mut m, REG_MODE, 0x16);
+        // Pen 1 = pure red: rgb0 guest bytes B,G,R,0 = 00 00 FF 00.
+        z.vram[g + 8..g + 12].copy_from_slice(&[0x00, 0x00, 0xFF, 0x00]);
+        z.vram[g + 0x3B] = 1;
+        w32(&mut z, &mut m, REG_BLITTER_DMA_OP, 12);
+        // 16x1 bitmap at src offset 0x1000: plane0 = 0x8000 (first pixel).
+        z.vram[g + 4..g + 8].copy_from_slice(&0x1000u32.to_be_bytes());
+        z.vram[g + 0x12..g + 0x14].copy_from_slice(&16u16.to_be_bytes()); // x[1]=w
+        z.vram[g + 0x1A..g + 0x1C].copy_from_slice(&1u16.to_be_bytes()); // y[1]=h
+        z.vram[g + 0x14..g + 0x16].copy_from_slice(&[0, 0]); // x[2] doubled=0
+        z.vram[g + 0x1C..g + 0x1E].copy_from_slice(&[0, 0]); // y[2] hires-1=0
+        let v = VRAM_OFFSET as usize + 0x1000;
+        z.vram[v] = 0x80; // plane 0 word 0x8000
+        w32(&mut z, &mut m, REG_BLITTER_DMA_OP, 13);
+        // Position (1,1), show.
+        z.vram[g + 0x10..g + 0x12].copy_from_slice(&1u16.to_be_bytes());
+        z.vram[g + 0x18..g + 0x1A].copy_from_slice(&1u16.to_be_bytes());
+        w32(&mut z, &mut m, REG_BLITTER_DMA_OP, 11);
+        w32(&mut z, &mut m, REG_SPRITE_BITMAP, 1);
+
+        let mut out = Vec::new();
+        assert_eq!(z.rtg_frame(&mut out), Some((4, 2)));
+        let red = 0xFF00_0000 | 0xFF; // R in the low byte
+        assert_eq!(out[0], 0xFF00_0000, "screen pixel outside the sprite");
+        assert_eq!(out[4 + 1], red, "sprite pixel at (1,1)");
+        // Hide: the overlay disappears.
+        w32(&mut z, &mut m, REG_SPRITE_BITMAP, 2);
+        z.rtg_frame(&mut out);
+        assert_eq!(out[4 + 1], 0xFF00_0000);
     }
 }
