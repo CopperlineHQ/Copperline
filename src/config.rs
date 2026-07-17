@@ -154,6 +154,11 @@ pub struct Config {
     /// the Zorro chain using the named host network backend. Networking is
     /// non-deterministic, so a fitted A2065 breaks byte-identical replay.
     pub a2065_net: Option<crate::net::NetConfig>,
+    /// Z3660 RTG board (`[z3660] enabled`): when true, the Z3660
+    /// accelerator's RTG core autoconfigs on the Zorro chain for the
+    /// open-source Z3660.card Picasso96 driver. Bring-up stub: registers
+    /// are logged, no display output yet.
+    pub z3660: bool,
     pub floppy: FloppyConfig,
     /// Which floppy drive slots are electrically present. DF0 is the
     /// internal drive and is always present; DF1-DF3 are external drives
@@ -1098,6 +1103,7 @@ impl Default for Config {
             ide: IdeConfig::default(),
             scsi: ScsiConfig::default(),
             a2065_net: None,
+            z3660: false,
             floppy: FloppyConfig::default(),
             floppy_connected: [true, false, false, false],
             floppy_playlists: std::array::from_fn(|_| Vec::new()),
@@ -1473,6 +1479,8 @@ pub struct RawConfig {
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) a2065: RawA2065,
     #[serde(default, skip_serializing_if = "is_default")]
+    pub(crate) z3660: RawZ3660,
+    #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) floppy: RawFloppy,
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) display: RawDisplay,
@@ -1744,6 +1752,15 @@ pub(crate) struct RawA2065 {
     /// isolated NIC. Absent means no A2065 board is fitted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) net: Option<String>,
+}
+
+/// `[z3660]` RTG board stub: the Z3660's FPGA RTG core on the Zorro chain.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawZ3660 {
+    /// Fit the board. Bring-up stub: registers are logged, no display yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) enabled: Option<bool>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -2537,6 +2554,7 @@ impl TryFrom<RawConfig> for Config {
             ide,
             scsi,
             a2065_net,
+            z3660: raw.z3660.enabled.unwrap_or(false),
             floppy,
             floppy_connected,
             floppy_playlists,

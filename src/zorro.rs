@@ -235,6 +235,25 @@ impl BoardSpec {
         }
     }
 
+    /// The Z3660 accelerator's FPGA RTG core: one 128 MB Zorro III window
+    /// (manufacturer 0x144B, product 1) holding the register file, the P96
+    /// VRAM, and the GFXData mailbox; no autoboot ROM (the Z3660.card
+    /// driver is disk-loaded). `slot` is the index of the matching `Z3660`
+    /// device in `Bus::devices`.
+    pub fn z3660(slot: usize) -> Self {
+        Self {
+            name: "Z3660 RTG".into(),
+            version: ZorroVersion::III,
+            manufacturer: crate::z3660::Z3660_MANUFACTURER_ID,
+            product: crate::z3660::Z3660_PRODUCT,
+            serial: 0,
+            size_bytes: crate::z3660::Z3660_WINDOW_BYTES,
+            backing: BoardBacking::Device(slot),
+            memlist: false,
+            diag_vec: None,
+        }
+    }
+
     fn validate(&self) -> Result<()> {
         match self.version {
             ZorroVersion::II => {

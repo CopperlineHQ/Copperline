@@ -895,6 +895,21 @@ schedule, not the emulated clock, so a NIC board breaks byte-identical
 replay and save-state determinism while traffic flows. See [](../zorro)
 for the board details and the NAT's limitations.
 
+## `[z3660]` -- RTG board stub
+
+```toml
+[z3660]
+enabled = true
+```
+
+Fits the Z3660 accelerator's RTG core on the Zorro chain: a 128 MB
+Zorro III autoconfig board (manufacturer 0x144B, product 1) with the
+register file and VRAM layout the open-source Z3660.card Picasso96 driver
+expects. This is a bring-up stub for driver development: the driver's
+FindCard probe succeeds and every register access is logged with the
+register's name, but register semantics are not implemented and nothing is
+displayed yet.
+
 ## `[debug]` -- diagnostics
 
 ```toml
