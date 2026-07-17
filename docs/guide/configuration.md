@@ -905,10 +905,16 @@ enabled = true
 Fits the Z3660 accelerator's RTG core on the Zorro chain: a 128 MB
 Zorro III autoconfig board (manufacturer 0x144B, product 1) with the
 register file and VRAM layout the open-source Z3660.card Picasso96 driver
-expects. This is a bring-up stub for driver development: the driver's
-FindCard probe succeeds and every register access is logged with the
-register's name, but register semantics are not implemented and nothing is
-displayed yet.
+expects. A Picasso96 install with the Z3660 monitor drives real RTG
+screens: the display switches between the native chipset and the board's
+framebuffer (all four pixel formats), the core blitter ops and the
+hardware mouse sprite are implemented, and every register access and
+mailbox op is logged by name for driver development. Not yet implemented:
+planar-to-chunky/direct blits, line draws, and the surface ops -- software
+using only those renders incompletely. Note that the monitor's stock
+`DISPLAYCHAIN=NO` tooltype models the real board's dual-display setup and
+never switches back to the native screen; set `DISPLAYCHAIN=YES` for a
+single-window emulator.
 
 ## `[debug]` -- diagnostics
 
