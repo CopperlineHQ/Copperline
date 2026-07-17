@@ -46,7 +46,17 @@ const REG_FW_VERSION: u32 = 0x1A0;
 const REG_INT_STATUS: u32 = 0x1A8;
 const REG_CUSTOM_VIDMODE: u32 = 0x200;
 const REG_CUSTOM_VIDMODE_DATA: u32 = 0x204;
+const REG_OP_DATA: u32 = 0x300;
+const REG_OP: u32 = 0x304;
+const REG_OP_CAPTUREMODE: u32 = 0x30C;
 const REG_MONITOR_SWITCH: u32 = 0x318;
+
+// REG_OP commands (the ARM mailbox the palette upload rides on).
+const ARM_OP_PALETTE: u32 = 3;
+const ARM_OP_PALETTE_HI: u32 = 19;
+
+// REG_BLITTER_DMA_OP selectors acted on (enum gfx_dma_op).
+const DMA_OP_PAN: u32 = 10;
 
 /// The GFXData blit-parameter mailbox the driver fills in board RAM before
 /// ringing REG_BLITTER_DMA_OP / REG_ACC_OP (window offset 0x3200000).
@@ -63,6 +73,16 @@ const VBLANK_CCK: u32 = 2400;
 /// exactly 1), minor 6 (>= 3, below which the driver raises an alert).
 const FW_VERSION: u32 = 0x0106;
 
+/// P96 VRAM starts at this window offset (Z3660_MEMBASE_ADDR in gfx.c);
+/// the framebuffer the driver pans to is relative to it.
+const VRAM_OFFSET: u32 = 0x0020_0000;
+
+// MNTVA colour modes (the MODE register's bits 8-11).
+const COLORMODE_8BIT: u32 = 0;
+const COLORMODE_16BIT565: u32 = 1;
+const COLORMODE_32BIT: u32 = 2;
+const COLORMODE_15BIT: u32 = 3;
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Z3660 {
     /// Latched register words, indexed by (offset - REG_FIRST) / 4.
@@ -75,6 +95,18 @@ pub struct Z3660 {
     /// The last CUSTOM_VIDMODE parameter index written, so the matching
     /// CUSTOM_VIDMODE_DATA write can be logged with the parameter's name.
     vidmode_param: u32,
+    /// The 512-entry palette (256 primary + 256 secondary), captured from
+    /// the OP_DATA/OP palette upload stream as packed 0x00RRGGBB.
+    palette: Vec<u32>,
+    /// Framebuffer start relative to VRAM_OFFSET, from the last PAN op.
+    pan_offset: u32,
+    /// Framebuffer row width in pixels, from the last PAN op (x[1]). For
+    /// pixel-doubled small modes this is the real framebuffer width while
+    /// ORIG_RES holds the doubled output resolution.
+    pan_width: u32,
+    /// Whether SetGC has programmed a display mode since power-on; RTG
+    /// scanout is meaningless before the first mode set.
+    mode_set: bool,
 }
 
 impl Z3660 {
@@ -84,6 +116,10 @@ impl Z3660 {
             vram: vec![0u8; BACKED_BYTES],
             frame_phase: 0,
             vidmode_param: 0,
+            palette: vec![0u32; 512],
+            pan_offset: 0,
+            pan_width: 0,
+            mode_set: false,
         }
     }
 
@@ -136,12 +172,25 @@ impl Z3660 {
     fn reg_written(&mut self, off: u32, value: u32) {
         match off {
             REG_MODE => {
+                self.mode_set = true;
                 log::info!(
                     "z3660: mode set: vmode {} colormode {} scalemode {}",
                     vmode_name(value & 0xFF),
                     colormode_name((value >> 8) & 0xF),
                     (value >> 12) & 0xF,
                 );
+            }
+            REG_OP => {
+                // The palette rides the ARM op mailbox: OP_DATA holds
+                // index<<24 | R<<16 | G<<8 | B, OP selects the bank.
+                let data = self.reg_value(REG_OP_DATA);
+                match value {
+                    ARM_OP_PALETTE => self.palette[(data >> 24) as usize] = data & 0x00FF_FFFF,
+                    ARM_OP_PALETTE_HI => {
+                        self.palette[256 + (data >> 24) as usize] = data & 0x00FF_FFFF;
+                    }
+                    _ => {}
+                }
             }
             REG_ORIG_RES => {
                 log::info!(
@@ -157,10 +206,100 @@ impl Z3660 {
                     vmode_param_name(self.vidmode_param)
                 );
             }
-            REG_BLITTER_DMA_OP => self.log_gfxdata("dma-op", dma_op_name(value), value),
+            REG_BLITTER_DMA_OP => {
+                self.log_gfxdata("dma-op", dma_op_name(value), value);
+                if value == DMA_OP_PAN {
+                    // GFXData: offset[0] = framebuffer start relative to
+                    // MemoryBase, x[1] = row width in pixels.
+                    self.pan_offset = self.be32(GFXDATA_OFFSET);
+                    self.pan_width = u32::from(self.be16(GFXDATA_OFFSET + 0x12));
+                }
+            }
             REG_ACC_OP => self.log_gfxdata("acc-op", acc_op_name(value), value),
             _ => {}
         }
+    }
+
+    /// Whether the board is driving the display: SetSwitch(1) turns video
+    /// capture off (RTG shown); SetSwitch(0) turns it on (the real firmware
+    /// then shows the captured native video, which for the emulator means
+    /// presenting the chipset output as usual).
+    pub fn rtg_active(&self) -> bool {
+        self.mode_set && self.reg_value(REG_OP_CAPTUREMODE) == 0
+    }
+
+    /// Compose the currently displayed RTG frame into `out` as presentation
+    /// pixels (RGBA byte order, alpha opaque), returning (width, height).
+    /// `None` when RTG is not active. Scaled small modes (MODE scalemode
+    /// != 0) compose at framebuffer resolution; the presenter scales.
+    pub fn rtg_frame(&self, out: &mut Vec<u32>) -> Option<(u32, u32)> {
+        if !self.rtg_active() {
+            return None;
+        }
+        let mode = self.reg_value(REG_MODE);
+        let colormode = (mode >> 8) & 0xF;
+        let scaled = (mode >> 12) & 0xF != 0;
+        let orig = self.reg_value(REG_ORIG_RES);
+        let (out_w, out_h) = (orig >> 16, orig & 0xFFFF);
+        let (mut w, mut h) = if scaled {
+            (out_w / 2, out_h / 2)
+        } else {
+            (out_w, out_h)
+        };
+        if self.pan_width != 0 {
+            w = self.pan_width;
+        }
+        w = w.min(4096);
+        h = h.min(4096);
+        if w == 0 || h == 0 {
+            return None;
+        }
+        let bpp: u32 = match colormode {
+            COLORMODE_8BIT => 1,
+            COLORMODE_16BIT565 | COLORMODE_15BIT => 2,
+            COLORMODE_32BIT => 4,
+            _ => return None,
+        };
+        let pitch = (w * bpp) as usize;
+        let base = (VRAM_OFFSET + self.pan_offset) as usize;
+        out.clear();
+        out.reserve((w * h) as usize);
+        for y in 0..h as usize {
+            let row = base + y * pitch;
+            for x in 0..w as usize {
+                let at = row + x * bpp as usize;
+                if at + bpp as usize > self.vram.len() {
+                    out.push(0xFF00_0000);
+                    continue;
+                }
+                let (r, g, b) = match colormode {
+                    COLORMODE_8BIT => {
+                        let rgb = self.palette[self.vram[at] as usize];
+                        ((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
+                    }
+                    COLORMODE_16BIT565 => {
+                        let v = self.be16(at);
+                        (
+                            ((v >> 11) as u8 & 0x1F) << 3,
+                            ((v >> 5) as u8 & 0x3F) << 2,
+                            (v as u8 & 0x1F) << 3,
+                        )
+                    }
+                    COLORMODE_15BIT => {
+                        let v = self.be16(at);
+                        (
+                            ((v >> 10) as u8 & 0x1F) << 3,
+                            ((v >> 5) as u8 & 0x1F) << 3,
+                            (v as u8 & 0x1F) << 3,
+                        )
+                    }
+                    // 32-bit is BGRA in memory (RTG_COLOR_FORMAT_BGRA).
+                    _ => (self.vram[at + 2], self.vram[at + 1], self.vram[at]),
+                };
+                out.push(0xFF00_0000 | (u32::from(b) << 16) | (u32::from(g) << 8) | u32::from(r));
+            }
+        }
+        Some((w, h))
     }
 }
 
@@ -251,6 +390,10 @@ impl ZorroDevice for Z3660 {
         self.regs.fill(0);
         self.frame_phase = 0;
         self.vidmode_param = 0;
+        self.palette.fill(0);
+        self.pan_offset = 0;
+        self.pan_width = 0;
+        self.mode_set = false;
     }
 
     fn kind(&self) -> &'static str {
@@ -399,5 +542,129 @@ fn reg_name(off: u32) -> &'static str {
         0x30C => "OP_CAPTUREMODE",
         0x318 => "MONITOR_SWITCH",
         _ => "reg",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory::Memory;
+
+    fn mem() -> Memory {
+        Memory {
+            chip_ram: vec![0u8; 0x100],
+            slow_ram: Vec::new(),
+            rom: Vec::new(),
+            overlay: false,
+            zorro: crate::zorro::ZorroChain::default(),
+            extended_rom: Vec::new(),
+            extended_rom_base: 0,
+            wcs: Vec::new(),
+            wcs_write_protected: false,
+        }
+    }
+
+    fn w32(z: &mut Z3660, mem: &mut Memory, off: u32, value: u32) {
+        z.write(off, 4, value, &mut DeviceHost::new(mem));
+    }
+
+    /// The driver's palette upload (SetColorArray): OP_DATA carries
+    /// index<<24|RGB, OP selects the primary or secondary bank.
+    #[test]
+    fn palette_capture_from_op_stream() {
+        let (mut z, mut m) = (Z3660::new(), mem());
+        w32(&mut z, &mut m, REG_OP_DATA, (7 << 24) | 0x0012_3456);
+        w32(&mut z, &mut m, REG_OP, ARM_OP_PALETTE);
+        w32(&mut z, &mut m, REG_OP_DATA, (7 << 24) | 0x00AB_CDEF);
+        w32(&mut z, &mut m, REG_OP, ARM_OP_PALETTE_HI);
+        assert_eq!(z.palette[7], 0x0012_3456);
+        assert_eq!(z.palette[256 + 7], 0x00AB_CDEF);
+    }
+
+    /// SetGC + SetSwitch gate the scanout: no frame before a mode is set,
+    /// none when capture mode (native video) is on.
+    #[test]
+    fn rtg_activates_on_mode_set_and_capture_off() {
+        let (mut z, mut m) = (Z3660::new(), mem());
+        let mut out = Vec::new();
+        assert!(z.rtg_frame(&mut out).is_none());
+        w32(&mut z, &mut m, REG_ORIG_RES, (4 << 16) | 2);
+        w32(&mut z, &mut m, REG_MODE, 0x16); // CUSTOM, 8BIT
+        assert!(z.rtg_active());
+        w32(&mut z, &mut m, REG_OP_CAPTUREMODE, 1);
+        assert!(!z.rtg_active());
+        w32(&mut z, &mut m, REG_OP_CAPTUREMODE, 0);
+        assert!(z.rtg_active());
+    }
+
+    /// An 8-bit frame reads pixels through the captured palette from the
+    /// panned framebuffer start.
+    #[test]
+    fn clut_frame_composes_through_palette() {
+        let (mut z, mut m) = (Z3660::new(), mem());
+        w32(&mut z, &mut m, REG_ORIG_RES, (4 << 16) | 2);
+        w32(&mut z, &mut m, REG_MODE, 0x16);
+        w32(&mut z, &mut m, REG_OP_DATA, (1 << 24) | 0x00FF_0000); // index 1 = red
+        w32(&mut z, &mut m, REG_OP, ARM_OP_PALETTE);
+        // Framebuffer at VRAM start: row 0 = 0,1,1,0; row 1 = 1,0,0,1.
+        for (i, px) in [0u8, 1, 1, 0, 1, 0, 0, 1].iter().enumerate() {
+            z.write(
+                VRAM_OFFSET + i as u32,
+                1,
+                u32::from(*px),
+                &mut DeviceHost::new(&mut m),
+            );
+        }
+        let mut out = Vec::new();
+        assert_eq!(z.rtg_frame(&mut out), Some((4, 2)));
+        let red = 0xFF00_0000 | 0x0000_00FF; // RGBA byte order: R in the low byte
+        let black = 0xFF00_0000;
+        assert_eq!(out, vec![black, red, red, black, red, black, black, red]);
+    }
+
+    /// Direct-colour pixel decoding: R5G6B5 and B8G8R8A8, big-endian in VRAM.
+    #[test]
+    fn direct_color_frames_decode() {
+        let (mut z, mut m) = (Z3660::new(), mem());
+        w32(&mut z, &mut m, REG_ORIG_RES, (1 << 16) | 1);
+        // 16-bit 565: pure green = 0x07E0.
+        w32(&mut z, &mut m, REG_MODE, 0x16 | (COLORMODE_16BIT565 << 8));
+        z.write(VRAM_OFFSET, 2, 0x07E0, &mut DeviceHost::new(&mut m));
+        let mut out = Vec::new();
+        assert_eq!(z.rtg_frame(&mut out), Some((1, 1)));
+        assert_eq!(out[0], 0xFF00_FC00); // green FC in byte 1
+                                         // 32-bit BGRA: bytes B,G,R,A.
+        w32(&mut z, &mut m, REG_MODE, 0x16 | (COLORMODE_32BIT << 8));
+        z.write(VRAM_OFFSET, 4, 0x2040_80FF, &mut DeviceHost::new(&mut m));
+        assert_eq!(z.rtg_frame(&mut out), Some((1, 1)));
+        assert_eq!(out[0], 0xFF20_4080); // B=0x20 high, G=0x40, R=0x80 low
+    }
+
+    /// The PAN op moves the framebuffer start inside VRAM.
+    #[test]
+    fn pan_offsets_the_framebuffer() {
+        let (mut z, mut m) = (Z3660::new(), mem());
+        w32(&mut z, &mut m, REG_ORIG_RES, (1 << 16) | 1);
+        w32(&mut z, &mut m, REG_MODE, 0x16);
+        w32(&mut z, &mut m, REG_OP_DATA, (5 << 24) | 0x00FF_FFFF);
+        w32(&mut z, &mut m, REG_OP, ARM_OP_PALETTE);
+        // GFXData offset[0] = 0x1000, x[1] = 1: pan one page in.
+        z.write(
+            GFXDATA_OFFSET as u32,
+            4,
+            0x1000,
+            &mut DeviceHost::new(&mut m),
+        );
+        z.write(
+            GFXDATA_OFFSET as u32 + 0x12,
+            2,
+            1,
+            &mut DeviceHost::new(&mut m),
+        );
+        w32(&mut z, &mut m, REG_BLITTER_DMA_OP, DMA_OP_PAN);
+        z.write(VRAM_OFFSET + 0x1000, 1, 5, &mut DeviceHost::new(&mut m));
+        let mut out = Vec::new();
+        assert_eq!(z.rtg_frame(&mut out), Some((1, 1)));
+        assert_eq!(out[0], 0xFFFF_FFFF);
     }
 }
