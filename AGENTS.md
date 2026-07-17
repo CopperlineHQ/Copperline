@@ -103,9 +103,9 @@ Scheduled-input timestamps stay absolute after `--load-state`: resuming a
 
 The scripted flags fix a run in advance. To inspect, decide, and steer
 mid-session -- breakpoints, resume, rewind, input injection, media swaps,
-screen capture -- use the Copperline Control Protocol, a JSON-RPC 2.0
-interface over loopback TCP designed for scripts and AI agents
-(`docs/debugger/control.md`):
+screen capture, streaming observation, diagnostic capture -- use the Copperline
+Control Protocol, a JSON-RPC 2.0 interface over loopback TCP designed for
+scripts and AI agents (`docs/debugger/control.md`):
 
 ```sh
 ./target/release/copperline --config my.toml --noaudio \
@@ -114,6 +114,22 @@ copperline-ctl --info /tmp/ccp.json status
 copperline-ctl --info /tmp/ccp.json break.add '{"kind": "pc", "addr": "0xFC0100"}'
 copperline-ctl --info /tmp/ccp.json continue    # blocks until the stop event
 ```
+
+For a persistent observation session, use `--repl`; subscriptions belong to
+that authenticated connection and end when it disconnects:
+
+```text
+# Shell:
+copperline-ctl --info /tmp/ccp.json --repl
+# Then enter in the REPL:
+events.subscribe {"events":["frame","serial","interrupt","media"],"frame_interval":50}
+```
+
+The event streams are bounded, so check their drop counts when observations
+must be complete. The same session can use `trace.start`/`trace.stop` and
+`waveform.start`/`waveform.stop` to bracket file-backed diagnostics at runtime
+once an event identifies the interesting window. See the protocol reference
+for payloads, limits, and status methods.
 
 `--control-gui ADDR` attaches the same server to a windowed session. The wire
 format is newline-delimited JSON-RPC, so anything that speaks TCP can drive it
