@@ -335,6 +335,16 @@ pub struct DriveImage {
     pub volume_name: Option<String>,
 }
 
+/// Whether a drive-image path names a CD image (a cue sheet or a bare ISO).
+/// On the SCSI bus such an entry attaches a CD-ROM drive instead of a hard
+/// disk; the file extension is the format signal, exactly as it is for the
+/// hard-drive back ends (HDF vs. directory).
+pub fn is_cd_image_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("cue") || e.eq_ignore_ascii_case("iso"))
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IdeConfig {
     pub master: Option<DriveImage>,
@@ -2095,6 +2105,17 @@ impl TryFrom<RawConfig> for Config {
                 "[ide] images need a machine with an IDE port: set [machine] profile = \"A600\" \
                  (or A1200, or A4000)"
             ));
+        }
+        // The IDE interfaces speak plain ATA, not ATAPI: a CD image on the
+        // cable would be served as a garbage hard disk.
+        for drive in [&ide.master, &ide.slave].into_iter().flatten() {
+            if is_cd_image_path(&drive.path) {
+                errors.push(anyhow!(
+                    "[ide] {}: CD images attach a CD-ROM drive on the SCSI bus \
+                     ([scsi] unit0..unit6); the IDE port has no ATAPI support",
+                    drive.path.display()
+                ));
+            }
         }
 
         let scsi_controller = match raw.scsi.controller.as_deref() {
@@ -4252,6 +4273,42 @@ mod tests {
             "#,
         )?;
         assert!(cfg.scsi.enabled());
+        Ok(())
+    }
+
+    /// CD images (cue sheets and bare ISOs) are recognised by extension:
+    /// they attach as SCSI CD-ROM drives, and the ATA-only IDE port
+    /// rejects them.
+    #[test]
+    fn cd_images_fit_scsi_units_but_not_the_ide_port() -> Result<()> {
+        assert!(is_cd_image_path(Path::new("games/Disc.CUE")));
+        assert!(is_cd_image_path(Path::new("cd32.iso")));
+        assert!(!is_cd_image_path(Path::new("workbench.hdf")));
+        assert!(!is_cd_image_path(Path::new("directory/")));
+
+        let cfg = parse_config(
+            r#"
+            [scsi]
+            rom = "a2091.rom"
+            unit0 = "workbench.hdf"
+            unit2 = "game.cue"
+            "#,
+        )?;
+        assert_eq!(
+            cfg.scsi.units[2].as_ref().map(|d| d.path.as_path()),
+            Some(Path::new("game.cue"))
+        );
+
+        let err = parse_config(
+            r#"
+            [machine]
+            profile = "A1200"
+            [ide]
+            master = "game.iso"
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("ATAPI"), "{err:#}");
         Ok(())
     }
 

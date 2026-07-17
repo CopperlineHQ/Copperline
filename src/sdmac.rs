@@ -18,7 +18,7 @@
 //! the FIFO always reads back empty and never full.
 
 use crate::memory::Memory;
-use crate::scsi::{DmaDir, ScsiDisk, Wd33c93};
+use crate::scsi::{DmaDir, ScsiTarget, Wd33c93};
 
 /// Base of the SDMAC register file.
 pub const SDMAC_BASE: u32 = 0x00DD_0000;
@@ -115,8 +115,8 @@ impl Sdmac {
     }
 
     /// Fit a drive at a SCSI ID (0-6; 7 is the controller itself).
-    pub fn attach_drive(&mut self, unit: usize, disk: ScsiDisk) {
-        self.wd.attach_target(unit, disk);
+    pub fn attach_drive(&mut self, unit: usize, target: impl Into<ScsiTarget>) {
+        self.wd.attach_target(unit, target);
     }
 
     /// System reset: clear the DMAC and the SBIC, but keep the mounted drives.

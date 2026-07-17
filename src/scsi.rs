@@ -20,6 +20,10 @@ use crate::harddrive::{HardDriveImage, SECTOR_SIZE};
 use std::collections::VecDeque;
 use std::path::Path;
 
+pub mod cd;
+
+pub use cd::ScsiCdRom;
+
 // ----- WD33C93A register file (SASR values) --------------------------------
 
 pub const WD_OWN_ID: u8 = 0x00;
@@ -101,34 +105,39 @@ const PHS_MESS_IN: u8 = 0x07;
 pub const GOOD: u8 = 0x00;
 pub const CHECK_CONDITION: u8 = 0x02;
 
-// Sense keys / additional sense codes.
-const SK_HARDWARE_ERROR: u8 = 0x04;
-const SK_ILLEGAL_REQUEST: u8 = 0x05;
-const ASC_INVALID_OPCODE: u8 = 0x20;
-const ASC_LBA_OUT_OF_RANGE: u8 = 0x21;
-const ASC_INVALID_FIELD_IN_CDB: u8 = 0x24;
-const ASC_LUN_NOT_SUPPORTED: u8 = 0x25;
-const SENSE_LEN: usize = 18;
+// Sense keys / additional sense codes (shared with the CD-ROM target).
+pub(crate) const SK_NOT_READY: u8 = 0x02;
+pub(crate) const SK_HARDWARE_ERROR: u8 = 0x04;
+pub(crate) const SK_ILLEGAL_REQUEST: u8 = 0x05;
+pub(crate) const SK_UNIT_ATTENTION: u8 = 0x06;
+pub(crate) const ASC_INVALID_OPCODE: u8 = 0x20;
+pub(crate) const ASC_LBA_OUT_OF_RANGE: u8 = 0x21;
+pub(crate) const ASC_INVALID_FIELD_IN_CDB: u8 = 0x24;
+pub(crate) const ASC_LUN_NOT_SUPPORTED: u8 = 0x25;
+pub(crate) const ASC_MEDIUM_MAY_HAVE_CHANGED: u8 = 0x28;
+pub(crate) const ASC_MEDIUM_NOT_PRESENT: u8 = 0x3A;
+pub(crate) const ASC_ILLEGAL_MODE_FOR_THIS_TRACK: u8 = 0x64;
+pub(crate) const SENSE_LEN: usize = 18;
 
 /// Emulated delay (chip-bus colour clocks) between issuing a command and
 /// its completion interrupt, so drivers see busy-then-interrupt rather
 /// than an instant flip mid-instruction.
 const CMD_DELAY_CCK: u32 = 64;
 
-fn be16(b: &[u8], off: usize) -> u32 {
+pub(crate) fn be16(b: &[u8], off: usize) -> u32 {
     (u32::from(b[off]) << 8) | u32::from(b[off + 1])
 }
 
-fn be24(b: &[u8], off: usize) -> u32 {
+pub(crate) fn be24(b: &[u8], off: usize) -> u32 {
     (u32::from(b[off]) << 16) | (u32::from(b[off + 1]) << 8) | u32::from(b[off + 2])
 }
 
-fn be32(b: &[u8], off: usize) -> u32 {
+pub(crate) fn be32(b: &[u8], off: usize) -> u32 {
     (be24(b, off) << 8) | u32::from(b[off + 3])
 }
 
 /// CDB length from the opcode's command group.
-fn cdb_len(opcode: u8) -> usize {
+pub(crate) fn cdb_len(opcode: u8) -> usize {
     match opcode >> 5 {
         0 => 6,
         1 | 2 => 10,
@@ -467,6 +476,48 @@ impl ScsiDisk {
     }
 }
 
+// ----- target dispatch -------------------------------------------------------
+
+/// A device on the SCSI bus: a direct-access disk or a CD-ROM drive. The
+/// host adapters only ever parse a CDB into a bus data phase and resolve a
+/// data-out payload, so this is the whole target interface.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub enum ScsiTarget {
+    Disk(ScsiDisk),
+    CdRom(ScsiCdRom),
+}
+
+impl ScsiTarget {
+    /// Parse and execute a CDB up to (but not including) any data-out
+    /// payload; see [`ScsiDisk::execute`].
+    pub fn execute(&mut self, cdb: &[u8], lun: u8) -> (ScsiExec, u8) {
+        match self {
+            ScsiTarget::Disk(disk) => disk.execute(cdb, lun),
+            ScsiTarget::CdRom(cd) => cd.execute(cdb, lun),
+        }
+    }
+
+    /// Complete a data-out command once the payload has arrived.
+    pub fn complete_out(&mut self, cdb: &[u8], data: &[u8]) -> u8 {
+        match self {
+            ScsiTarget::Disk(disk) => disk.complete_out(cdb, data),
+            ScsiTarget::CdRom(cd) => cd.complete_out(cdb, data),
+        }
+    }
+}
+
+impl From<ScsiDisk> for ScsiTarget {
+    fn from(disk: ScsiDisk) -> Self {
+        ScsiTarget::Disk(disk)
+    }
+}
+
+impl From<ScsiCdRom> for ScsiTarget {
+    fn from(cd: ScsiCdRom) -> Self {
+        ScsiTarget::CdRom(cd)
+    }
+}
+
 // ----- WD33C93A --------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -522,7 +573,7 @@ pub struct Wd33c93 {
     /// currently asserted; reading the SCSI status register acknowledges
     /// the current one and arms the next.
     pending: VecDeque<(u8, u32)>,
-    targets: [Option<ScsiDisk>; 8],
+    targets: [Option<ScsiTarget>; 8],
     xfer: Option<Transaction>,
     /// Active data phase routed to the DMAC (the board pumps bytes).
     dma_dir: Option<DmaDir>,
@@ -561,8 +612,8 @@ impl Wd33c93 {
         }
     }
 
-    pub fn attach_target(&mut self, id: usize, disk: ScsiDisk) {
-        self.targets[id.min(7)] = Some(disk);
+    pub fn attach_target(&mut self, id: usize, target: impl Into<ScsiTarget>) {
+        self.targets[id.min(7)] = Some(target.into());
     }
 
     pub fn target_present(&self, id: usize) -> bool {

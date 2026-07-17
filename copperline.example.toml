@@ -212,7 +212,9 @@ slow = "512K"
 # autoboots on Kickstart 1.3+, so it does not depend on the Kickstart IDE
 # driver (which only probes the master on stock 3.1). Drive paths accept the
 # same images as [ide]: RDB HDFs, bare partition hardfiles, or host
-# directories.
+# directories. A path ending in .cue or .iso attaches a SCSI CD-ROM drive
+# at that ID instead (read-only; mount it in the guest with a CD filesystem
+# pointed at the controller's scsi.device and that unit number).
 #
 # controller picks the host adapter:
 #   "a2091" - Zorro II, WD33C93. The default on machines without onboard SCSI.
@@ -228,6 +230,7 @@ slow = "512K"
 # rom = "a2091-v6.6.rom"
 # unit0 = "workbench.hdf"
 # unit1 = "data.hdf"
+# unit2 = "game.cue"
 
 
 [chipset]

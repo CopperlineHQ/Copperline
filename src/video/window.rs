@@ -4129,6 +4129,17 @@ impl App {
             ),
             LauncherField::CdImage => dialog.add_filter("CD images", &["cue", "iso", "bin"]),
             LauncherField::Cd32Nvram => dialog.add_filter("NVRAM images", &["bin", "nv", "sav"]),
+            // SCSI units take hard disks or CD images (a cue/iso attaches a
+            // CD-ROM drive at that ID).
+            LauncherField::ScsiUnit0
+            | LauncherField::ScsiUnit1
+            | LauncherField::ScsiUnit2
+            | LauncherField::ScsiUnit3
+            | LauncherField::ScsiUnit4
+            | LauncherField::ScsiUnit5
+            | LauncherField::ScsiUnit6 => dialog
+                .add_filter("Hard disk images", &["hdf", "img", "bin"])
+                .add_filter("CD images", &["cue", "iso"]),
             _ => dialog.add_filter("Hard disk images", &["hdf", "img", "bin"]),
         };
         if let Some(dir) = start_dir {

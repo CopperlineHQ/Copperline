@@ -647,6 +647,10 @@ appears in the status bar on IDE machines. On the `A4000` profile the same
 `$DD2020` (no Gayle involved; Kickstart's `scsi.device` drives it the same
 way).
 
+CD images (`.cue`/`.iso`) are rejected here: the emulated IDE port speaks
+plain ATA, not ATAPI. Attach CD-ROM drives as `[scsi]` units instead (see
+below).
+
 ## `[scsi]` -- SCSI controllers
 
 ```toml
@@ -656,7 +660,8 @@ rom = "a2091-v6.6.rom"       # boot ROM image (a2091/a4091; the a3000 needs none
 # rom_odd = "a2091-odd.rom"  # a2091 only: split even/odd EPROM dumps
 unit0 = "workbench.hdf"      # SCSI IDs 0-6
 unit1 = "data.hdf"
-# unit2..unit6 = ...
+unit2 = "game.cue"           # a .cue or .iso attaches a CD-ROM drive
+# unit3..unit6 = ...
 ```
 
 The `[scsi]` section attaches a SCSI host adapter with up to **seven
@@ -693,6 +698,21 @@ partition, named after the SCSI ID), and host directories built into
 in-memory FFS volumes -- including the `{ path = "...", name = "..." }`
 table form that overrides a directory mount's volume name. The HDD
 activity LED covers SCSI traffic too.
+
+A `unitN` path ending in `.cue` or `.iso` attaches a **SCSI CD-ROM
+drive** at that ID instead of a hard disk: a read-only removable SCSI-2
+target (INQUIRY device type 5) serving 2048-byte blocks, with the full
+READ TOC / READ CD / mode-page surface CD filesystems expect. Cue/bin
+images may mix data and audio tracks; a bare `.iso` is a single data
+track. The drive answers on the host adapter's `scsi.device` like any
+other unit, so mount it the way you would on real hardware: a
+`DOSDrivers` mount entry (or MountList) pointing `CDFileSystem` --
+CacheCDFS, AsimCDFS, and AmiCDROM work the same way -- at the controller's
+`scsi.device` and the drive's unit number. CD *data* is fully served;
+CD *audio* commands keep coherent play/status state for player software
+but produce no sound, matching a drive whose analogue audio output is
+simply not cabled to anything. The disc cannot be swapped at runtime;
+changing discs is a config change and restart.
 
 ## `[[filesys]]` -- host directories as live volumes
 

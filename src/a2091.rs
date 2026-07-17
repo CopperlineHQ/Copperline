@@ -26,7 +26,7 @@
 //! bus for cycle-accurate transfer timing.
 
 use crate::memory::Memory;
-use crate::scsi::{DmaDir, ScsiDisk, Wd33c93};
+use crate::scsi::{DmaDir, ScsiTarget, Wd33c93};
 use anyhow::{bail, Result};
 use std::path::Path;
 
@@ -115,8 +115,8 @@ impl A2091 {
         Ok(merged)
     }
 
-    pub fn attach_drive(&mut self, unit: usize, disk: ScsiDisk) {
-        self.wd.attach_target(unit, disk);
+    pub fn attach_drive(&mut self, unit: usize, target: impl Into<ScsiTarget>) {
+        self.wd.attach_target(unit, target);
     }
 
     /// System reset: clear the DMAC and SBIC but keep the mounted drives.
