@@ -1093,11 +1093,9 @@ impl Config {
         if self.identify_board {
             chain.add_board(BoardSpec::copperline_id())?;
         }
-        // Copperline services board (experimental, `[[filesys]]`):
-        // carries the guest handler, the mount table, and the DiagArea that
-        // mounts the configured host directories at expansion init. See
-        // crate::filesys. The scsi.device cull rides the same DiagPoint, so
-        // the board is also fitted (with no mounts) when only that is wanted.
+        // The Copperline services board itself (`[[filesys]]`) is a
+        // functional device, added in emulator.rs where its device slot is
+        // assigned (like the A4091); only the config validation lives here.
         if !self.filesys.is_empty() || self.rom_scsi_device_disable {
             if self.filesys.len() > crate::filesys::MOUNT_MAX_COUNT {
                 anyhow::bail!(
@@ -1113,10 +1111,6 @@ impl Config {
                     anyhow::bail!("[[filesys]] {err}");
                 }
             }
-            chain.add_board_with_rom(
-                BoardSpec::copperline_services(),
-                &crate::filesys::board_image(&self.filesys),
-            )?;
         }
         Ok(chain)
     }

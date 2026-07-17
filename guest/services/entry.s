@@ -15,12 +15,13 @@ _entry_table:
 
 	| +4: expansion-init entry. The DiagArea's DiagPoint jsr's here from
 	| the diag copy with the documented DiagPoint registers still live:
-	| A0 = board base, A3 = ConfigDev, A5 = ExpansionBase. Trap to the
-	| host (which captures the board base), mount the configured volumes,
-	| and return D0 != 0 so Kickstart keeps the diag copy: strap calls
+	| A0 = board base, A3 = ConfigDev, A5 = ExpansionBase. Ring the
+	| board's DIAG_DOORBELL with the base as the value (the host captures
+	| it and resets per-boot state), mount the configured volumes, and
+	| return D0 != 0 so Kickstart keeps the diag copy: strap calls
 	| da_BootPoint from it if one of our mounts wins the boot vote.
 _diag_entry:
-	.short	0xA400		| TRAP_DIAG_ENTRY
+	move.l	a0,0x7E00(a0)	| DIAG_DOORBELL = board base
 	move.l	a3,-(sp)	| ConfigDev
 	move.l	a5,-(sp)	| ExpansionBase
 	move.l	a0,-(sp)	| board base

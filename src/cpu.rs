@@ -97,7 +97,6 @@ struct UiTrace {
 pub struct M68kMachine {
     cpu: CpuCore,
     bus: CpuBus,
-    hle: crate::filesys::FilesysHle,
     fpu_enabled: bool,
     /// Last CACR value pushed into the cache models, so the per-instruction
     /// sync is a single compare when nothing changed.
@@ -334,7 +333,6 @@ impl M68kMachine {
                 ipl_sample_held: false,
                 diag_current_pc: 0,
             },
-            hle: crate::filesys::FilesysHle::default(),
             fpu_enabled,
             last_cacr: 0,
             dbg_ipl_main_cyc: 0,
@@ -1279,20 +1277,6 @@ impl M68kMachine {
         }
     }
 
-    /// Configure the host directories served by the filesys trap gateway
-    /// (`[[filesys]]`).
-    pub fn set_filesys_mounts(&mut self, mounts: Vec<crate::filesys::MountSpec>) {
-        self.hle.set_mounts(mounts);
-    }
-
-    /// `[machine] rom_scsi_device_disable`: cull the ROM's scsi.device at
-    /// expansion init. Rides on the filesys board's DiagPoint, which is the
-    /// one moment Kickstart gives us between building the resident list and
-    /// running it.
-    pub fn set_cull_rom_scsi_device(&mut self, cull: bool) {
-        self.hle.set_cull_rom_scsi_device(cull);
-    }
-
     pub fn bus(&self) -> &Bus {
         &self.bus.bus
     }
@@ -1952,7 +1936,13 @@ impl M68kMachine {
                     None
                 };
                 self.bus.diag_current_pc = dbg_pc_before;
-                match self.cpu.step_with_hle_handler(&mut self.bus, &mut self.hle) {
+                // The no-op handler declines every trap, so the CPU takes the
+                // real exception -- the plain step() would surface traps as
+                // StepResults instead of raising them.
+                match self
+                    .cpu
+                    .step_with_hle_handler(&mut self.bus, &mut m68k::NoOpHleHandler)
+                {
                     StepResult::Ok { cycles } => {
                         if self.bus.icache.is_some() || self.bus.dcache.is_some() {
                             self.apply_cacr_updates();
@@ -2912,15 +2902,26 @@ impl CpuBus {
             self.bus.mem.zorro.device_region_at(addr, size)
         {
             self.bus.cpu_slow_external_access(Self::access_words(size));
-            let activity = {
+            let (activity, touched_memory) = {
                 let mem = &mut self.bus.mem;
                 let dev = &mut self.bus.devices[slot];
                 let mut host = crate::zorro_device::DeviceHost::for_slot(mem, slot);
                 crate::zorro_device::ZorroDevice::write(dev, off, size, value, &mut host);
-                crate::zorro_device::ZorroDevice::take_activity(dev)
+                (
+                    crate::zorro_device::ZorroDevice::take_activity(dev),
+                    host.touched_memory(),
+                )
             };
             if activity {
                 self.bus.note_hdd_activity();
+            }
+            // A device that reached into guest memory (the filesys board
+            // handling a packet) wrote behind the data cache: drop it, or
+            // cached lines over the DMA'd RAM read back stale.
+            if touched_memory {
+                if let Some(dcache) = self.dcache.as_mut() {
+                    dcache.clear_all();
+                }
             }
             return;
         }

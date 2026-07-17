@@ -12,9 +12,11 @@
 //    process is started on first reference.
 //
 //  - handler_main(): the DOS handler process. A pure packet pump: every
-//    DosPacket is handed to the emulator with one reserved A-line opcode
-//    (TRAP_PACKET); the emulator implements the ACTION_* semantics against
-//    the host filesystem and fills dp_Res1/dp_Res2 before the trap returns.
+//    DosPacket is rung in through this unit's doorbell register in the
+//    board window; the emulator implements the ACTION_* semantics against
+//    the host filesystem and fills dp_Res1/dp_Res2 before the write
+//    completes. Each unit has its own register bank, so handler processes
+//    never synchronize with each other.
 //
 // The ROM must stay position-independent (compiled with -mpcrel) and free
 // of data/bss sections; the Makefile fails the build if the linked
@@ -56,26 +58,21 @@ static struct ExecBase *sysbase(void)
     return base;
 }
 
-// Hand the packet to the emulator, which fills dp_Res1/dp_Res2. Returns a
-// TRAP_RES_* code; for TRAP_RES_ADDVOLUME the host also returns the volume
-// DosList node it built in *vol (via A0). The mount unit (D2) tells the host
-// which mount this packet is for, so it routes by unit rather than by the
-// handler's MsgPort address.
-static ULONG trap_packet(struct DosPacket *pkt, struct MsgPort *port,
-                         LONG unit, struct DosList **vol)
-{
-    register ULONG res __asm("d0");
-    register struct DosList *_vol __asm("a0");
-    register struct DosPacket *_pkt __asm("d1") = pkt;
-    register LONG _unit __asm("d2") = unit;
-    register struct MsgPort *_port __asm("a1") = port;
-    __asm volatile(".short 0xA402" // TRAP_PACKET
-                   : "=r"(res), "=r"(_vol), "+r"(_pkt), "+r"(_unit), "+r"(_port)
-                   :
-                   : "cc", "memory");
-    *vol = _vol;
-    return res;
-}
+// This unit's register bank in the board window. All registers are
+// longwords; volatile, because writes have host side effects and reads
+// return what the host latched.
+struct HostRegs {
+    volatile ULONG dospkt;  // +0x00 write: DosPacket APTR (the doorbell)
+    ULONG pad0[3];
+    volatile ULONG msgport; // +0x10 write: our MsgPort (0 = exiting)
+    ULONG pad1[3];
+    volatile ULONG result;  // +0x20 read: RES_* verb
+    ULONG pad2[3];
+    volatile ULONG arg;     // +0x30 read: volume node for the verb
+    ULONG pad3[3];
+};
+_Static_assert(sizeof(struct HostRegs) == REG_BANK_SIZE,
+               "HostRegs must cover exactly one register bank");
 
 void handler_main(void)
 {
@@ -83,7 +80,7 @@ void handler_main(void)
     struct Library *_dosbase = OpenLibrary((STRPTR) "dos.library", 36);
     struct Process *me = (struct Process *)FindTask(NULL);
     struct MsgPort *port = &me->pr_MsgPort;
-    LONG unit = -1;
+    struct HostRegs *regs = NULL;
 
     for (;;) {
         WaitPort(port);
@@ -91,34 +88,44 @@ void handler_main(void)
         while ((msg = GetMsg(port)) != NULL) {
             struct DosPacket *pkt = (struct DosPacket *)msg->mn_Node.ln_Name;
             // The first packet is ACTION_STARTUP (== ACTION_NIL == 0): dp_Arg3
-            // is our DeviceNode, whose dn_Startup FileSysStartupMsg holds our
-            // mount unit. Cache it once and pass it on every packet.
-            if (unit < 0) {
+            // is our DeviceNode. dn_SegList points back into the board window
+            // (board + 4), locating the board; dn_Startup's FileSysStartupMsg
+            // holds our mount unit, selecting our register bank. Introduce
+            // ourselves to the host by writing our MsgPort, once.
+            if (regs == NULL) {
                 struct DeviceNode *dn = BADDR(pkt->dp_Arg3);
                 struct FileSysStartupMsg *fssm = BADDR(dn->dn_Startup);
-                unit = fssm->fssm_Unit;
+                UBYTE *board = (UBYTE *)BADDR(dn->dn_SegList) - 4;
+                regs = (struct HostRegs *)(board + REGS_OFFSET) +
+                       fssm->fssm_Unit;
+                regs->msgport = (ULONG)port;
             }
-            struct DosList *vol;
-            ULONG res = trap_packet(pkt, port, unit, &vol);
-            if (res != TRAP_RES_NOREPLY) {
+            // The doorbell: the host handles the packet within the write,
+            // filling dp_Res1/dp_Res2 and latching result/arg.
+            regs->dospkt = (ULONG)pkt;
+            ULONG res = regs->result;
+            struct DosList *vol = (struct DosList *)regs->arg;
+            if (res != RES_NOREPLY) {
                 struct MsgPort *reply = pkt->dp_Port;
                 pkt->dp_Port = port;
                 PutMsg(reply, pkt->dp_Link);
             }
             // After replying, so DOS is not blocked on us while we take
             // the DosList semaphore.
-            if (res == TRAP_RES_ADDVOLUME && _dosbase != NULL)
+            if (res == RES_ADDVOLUME && _dosbase != NULL)
                 AddDosEntry(vol);
-            else if (res == TRAP_RES_DIE) {
+            else if (res == RES_DIE) {
                 // ACTION_DIE: the emulator already cleared dn_Task and
                 // dropped this unit's state. Take the volume off the
                 // DosList (AddDosEntry locks internally, RemDosEntry
-                // does not) and end the process.
+                // does not), tell the host the unit is going dark, and
+                // end the process.
                 if (vol != NULL && _dosbase != NULL) {
                     LockDosList(LDF_VOLUMES | LDF_WRITE);
                     RemDosEntry(vol);
                     UnLockDosList(LDF_VOLUMES | LDF_WRITE);
                 }
+                regs->msgport = 0;
                 if (_dosbase != NULL)
                     CloseLibrary(_dosbase);
                 return;

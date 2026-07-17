@@ -1861,6 +1861,24 @@ pub fn build_machine(
     if !cfg.wasm_boards.is_empty() {
         anyhow::bail!("[[zorro]] wasm boards require a build with the wasm-boards feature");
     }
+    // Copperline services board (`[[filesys]]`): the guest-side handler ROM,
+    // mount table, and per-unit host register banks in one 64K window; see
+    // crate::filesys. The scsi.device cull rides the same DiagPoint, so the
+    // board is also fitted (with no mounts) when only that is wanted.
+    if !cfg.filesys.is_empty() || cfg.rom_scsi_device_disable {
+        let slot = devices.len();
+        zorro.add_board(crate::zorro::BoardSpec::copperline_services(slot))?;
+        let mut board = crate::filesys::FilesysBoard::new(cfg.filesys.clone());
+        if cfg.rom_scsi_device_disable {
+            info!("romtags: the ROM's scsi.device will not be initialised");
+            board.set_cull_rom_scsi_device(true);
+        }
+        info!(
+            "filesys: services board on the Zorro chain (slot {slot}), {} mount(s)",
+            cfg.filesys.len()
+        );
+        devices.push(crate::zorro_device::BoardDevice::Filesys(board));
+    }
     // A2065 Ethernet board (in-tree LANCE NIC): networking is non-deterministic.
     if let Some(net_config) = cfg.a2065_net {
         let slot = devices.len();
@@ -2076,11 +2094,6 @@ pub fn build_machine(
     )?;
     emu.set_cache_emulation(cfg.cpu_icache, cfg.cpu_dcache);
     emu.set_machine_descriptor(cfg.descriptor());
-    emu.machine.set_filesys_mounts(cfg.filesys.clone());
-    if cfg.rom_scsi_device_disable {
-        info!("romtags: the ROM's scsi.device will not be initialised");
-        emu.machine.set_cull_rom_scsi_device(true);
-    }
     Ok(emu)
 }
 

@@ -114,6 +114,11 @@ pub struct DeviceHost<'a> {
     /// can recognize DMA addresses inside its own configured window (the
     /// A4091 self-test DMAs its own registers) without re-entering itself.
     self_slot: Option<usize>,
+    /// Whether the device reached into guest memory through this host. The
+    /// CPU bus checks this after a device access and invalidates its data
+    /// cache: host-side writes land behind the CPU's cache model, so a
+    /// cached line over DMA'd RAM would otherwise read back stale.
+    touched_memory: bool,
 }
 
 impl<'a> DeviceHost<'a> {
@@ -122,6 +127,7 @@ impl<'a> DeviceHost<'a> {
             mem,
             cd_audio: None,
             self_slot: None,
+            touched_memory: false,
         }
     }
 
@@ -131,6 +137,7 @@ impl<'a> DeviceHost<'a> {
             mem,
             cd_audio: None,
             self_slot: Some(slot),
+            touched_memory: false,
         }
     }
 
@@ -152,12 +159,21 @@ impl<'a> DeviceHost<'a> {
             mem,
             cd_audio: Some(cd_audio),
             self_slot: None,
+            touched_memory: false,
         }
     }
 
     /// The guest memory the board DMAs into.
     pub fn memory_mut(&mut self) -> &mut Memory {
+        self.touched_memory = true;
         self.mem
+    }
+
+    /// Whether the device reached into guest memory through this host (see
+    /// `touched_memory`). Read by the CPU bus after an access to decide if
+    /// its data cache must be invalidated.
+    pub fn touched_memory(&self) -> bool {
+        self.touched_memory
     }
 
     /// Paula's CD-audio ring. Only present on a host built via
@@ -181,6 +197,7 @@ impl<'a> DeviceHost<'a> {
     /// 24-bit DMA word write; `false` when the target is unmapped.
     #[allow(dead_code)]
     pub fn dma_write_word(&mut self, addr: u32, w: u16) -> bool {
+        self.touched_memory = true;
         dma_write_word(self.mem, addr, w)
     }
 
@@ -205,6 +222,7 @@ impl<'a> DeviceHost<'a> {
     /// routes here.
     #[allow(dead_code)]
     pub fn dma_write(&mut self, addr: u32, buf: &[u8]) {
+        self.touched_memory = true;
         for (i, b) in buf.iter().enumerate() {
             dma_write_byte(self.mem, addr.wrapping_add(i as u32), *b);
         }
@@ -292,6 +310,9 @@ pub enum BoardDevice {
     A2065(crate::a2065::A2065),
     #[cfg(feature = "wasm-boards")]
     Wasm(crate::wasmboard::WasmBoard),
+    // Appended last: bincode encodes variants by index, so inserting
+    // anywhere else would break save states holding the boards above.
+    Filesys(crate::filesys::FilesysBoard),
 }
 
 impl ZorroDevice for BoardDevice {
@@ -302,6 +323,7 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::A2065(d) => ZorroDevice::read(d, off, size, host),
             #[cfg(feature = "wasm-boards")]
             BoardDevice::Wasm(d) => ZorroDevice::read(d, off, size, host),
+            BoardDevice::Filesys(d) => ZorroDevice::read(d, off, size, host),
         }
     }
 
@@ -312,6 +334,7 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::A2065(d) => ZorroDevice::write(d, off, size, value, host),
             #[cfg(feature = "wasm-boards")]
             BoardDevice::Wasm(d) => ZorroDevice::write(d, off, size, value, host),
+            BoardDevice::Filesys(d) => ZorroDevice::write(d, off, size, value, host),
         }
     }
 
@@ -322,6 +345,7 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::A2065(d) => ZorroDevice::peek_word(d, off),
             #[cfg(feature = "wasm-boards")]
             BoardDevice::Wasm(d) => ZorroDevice::peek_word(d, off),
+            BoardDevice::Filesys(d) => ZorroDevice::peek_word(d, off),
         }
     }
 
@@ -332,6 +356,7 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::A2065(d) => ZorroDevice::tick(d, cck, host),
             #[cfg(feature = "wasm-boards")]
             BoardDevice::Wasm(d) => ZorroDevice::tick(d, cck, host),
+            BoardDevice::Filesys(d) => ZorroDevice::tick(d, cck, host),
         }
     }
 
@@ -342,6 +367,7 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::A2065(d) => ZorroDevice::int2_line(d),
             #[cfg(feature = "wasm-boards")]
             BoardDevice::Wasm(d) => ZorroDevice::int2_line(d),
+            BoardDevice::Filesys(d) => ZorroDevice::int2_line(d),
         }
     }
 
@@ -352,6 +378,7 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::A2065(d) => ZorroDevice::int6_line(d),
             #[cfg(feature = "wasm-boards")]
             BoardDevice::Wasm(d) => ZorroDevice::int6_line(d),
+            BoardDevice::Filesys(d) => ZorroDevice::int6_line(d),
         }
     }
 
@@ -362,6 +389,7 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::A2065(d) => ZorroDevice::is_idle(d),
             #[cfg(feature = "wasm-boards")]
             BoardDevice::Wasm(d) => ZorroDevice::is_idle(d),
+            BoardDevice::Filesys(d) => ZorroDevice::is_idle(d),
         }
     }
 
@@ -372,6 +400,7 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::A2065(d) => ZorroDevice::next_event_cck(d),
             #[cfg(feature = "wasm-boards")]
             BoardDevice::Wasm(d) => ZorroDevice::next_event_cck(d),
+            BoardDevice::Filesys(d) => ZorroDevice::next_event_cck(d),
         }
     }
 
@@ -382,6 +411,7 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::A2065(d) => ZorroDevice::take_activity(d),
             #[cfg(feature = "wasm-boards")]
             BoardDevice::Wasm(d) => ZorroDevice::take_activity(d),
+            BoardDevice::Filesys(d) => ZorroDevice::take_activity(d),
         }
     }
 
@@ -392,6 +422,7 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::A2065(d) => ZorroDevice::reset(d),
             #[cfg(feature = "wasm-boards")]
             BoardDevice::Wasm(d) => ZorroDevice::reset(d),
+            BoardDevice::Filesys(d) => ZorroDevice::reset(d),
         }
     }
 
@@ -402,6 +433,7 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::A2065(d) => ZorroDevice::kind(d),
             #[cfg(feature = "wasm-boards")]
             BoardDevice::Wasm(d) => ZorroDevice::kind(d),
+            BoardDevice::Filesys(d) => ZorroDevice::kind(d),
         }
     }
 }
