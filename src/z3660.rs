@@ -176,7 +176,7 @@ impl Z3660 {
         let x: Vec<u16> = (0..4).map(|i| self.be16(g + 0x10 + 2 * i)).collect();
         let y: Vec<u16> = (0..4).map(|i| self.be16(g + 0x18 + 2 * i)).collect();
         let pitch: Vec<u16> = (0..4).map(|i| self.be16(g + 0x28 + 2 * i)).collect();
-        log::info!(
+        log::debug!(
             "z3660: {kind} {op_name} ({op}) dst={:#x} src={:#x} rgb={:#010x}/{:#010x} \
              x={x:?} y={y:?} pitch={pitch:?} colormode={} drawmode={} mask={:#04x} minterm={:#04x}",
             self.be32(g),
@@ -750,7 +750,7 @@ impl ZorroDevice for Z3660 {
             if aligned == REG_VBLANK_STATUS {
                 log::trace!("z3660: read  {} -> {value:#x}", reg_name(aligned));
             } else {
-                log::info!(
+                log::debug!(
                     "z3660: read  {} ({off:#05x},{size}) -> {value:#010x}",
                     reg_name(aligned)
                 );
@@ -779,7 +779,7 @@ impl ZorroDevice for Z3660 {
             let shift = 8 * (4 - (off & 3) as usize - size);
             let mask = (u32::MAX >> (8 * (4 - size))) << shift;
             self.regs[idx] = (self.regs[idx] & !mask) | ((value << shift) & mask);
-            log::info!(
+            log::debug!(
                 "z3660: write {} ({off:#05x},{size}) = {value:#010x}",
                 reg_name(aligned)
             );
