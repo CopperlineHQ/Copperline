@@ -14,8 +14,10 @@
 //! answer, every register access is latched and logged, and the RAM region
 //! is honest memory. The display pipeline presents the panned framebuffer
 //! (all four pixel formats, palette captured from the upload stream) when
-//! the driver switches the display to RTG; the blitter ops are not
-//! executed yet, so only CPU-rendered pixels show.
+//! the driver switches the display to RTG, and the core blitter ops
+//! (fill/copy/invert/template/pattern) execute into VRAM on the doorbell.
+//! Still stubbed: DRAWLINE, P2C/P2D, the ACC_OP surface ops, and the
+//! hardware sprite (the pointer is invisible until it is composited).
 
 use crate::zorro_device::{DeviceHost, ZorroDevice};
 
@@ -215,9 +217,240 @@ impl Z3660 {
                     self.pan_offset = self.be32(GFXDATA_OFFSET);
                     self.pan_width = u32::from(self.be16(GFXDATA_OFFSET + 0x12));
                 }
+                self.exec_dma_op(value);
             }
             REG_ACC_OP => self.log_gfxdata("acc-op", acc_op_name(value), value),
             _ => {}
+        }
+    }
+
+    // --- GFXData blitter-op executor -------------------------------------
+    //
+    // Semantics follow the ARM firmware (z3660-firmware src/rtg/gfx.c and
+    // dma_rtg.c, GPL-3.0-or-later like Copperline). Ops run synchronously on
+    // the doorbell write, which is faithful: the real board holds the CPU in
+    // bus wait states while the ARM services the register.
+    //
+    // Byte-order note: GFXData fields are written by the 68k and read
+    // byteswapped by the little-endian ARM, whose "fg >> 24" is therefore the
+    // guest value's LOW byte, and whose pixel stores land in guest byte
+    // order. This executor works directly in guest byte order: the 8-bit pen
+    // is `rgb & 0xFF`, wider pixels are stored big-endian.
+    //
+    // Pitch quirk: fill/copy/invert/line pass pitch[0] in longwords
+    // (BytesPerRow >> 2); template/pattern pass raw BytesPerRow (the
+    // firmware divides by 4 in u32-pointer arithmetic, so bytes here).
+
+    fn gfx_u16(&self, field: usize, i: usize) -> usize {
+        self.be16(GFXDATA_OFFSET + field + 2 * i) as usize
+    }
+
+    /// One pixel store in guest byte order, bounds-checked (out-of-window
+    /// pixels are dropped, as the firmware's fb writes wrap into scratch).
+    fn px_put(&mut self, at: usize, bpp: usize, v: u32) {
+        if at + bpp <= self.vram.len() {
+            let bytes = v.to_be_bytes();
+            self.vram[at..at + bpp].copy_from_slice(&bytes[4 - bpp..]);
+        }
+    }
+
+    fn px_get(&self, at: usize, bpp: usize) -> u32 {
+        if at + bpp > self.vram.len() {
+            return 0;
+        }
+        self.vram[at..at + bpp]
+            .iter()
+            .fold(0, |acc, &b| (acc << 8) | u32::from(b))
+    }
+
+    /// Execute one REG_BLITTER_DMA_OP request against VRAM.
+    fn exec_dma_op(&mut self, op: u32) {
+        const OP_FILLRECT: u32 = 2;
+        const OP_COPYRECT: u32 = 3;
+        const OP_COPYRECT_NOMASK: u32 = 4;
+        const OP_RECT_TEMPLATE: u32 = 5;
+        const OP_RECT_PATTERN: u32 = 6;
+        const OP_INVERTRECT: u32 = 9;
+        const MINTERM_SRC: u8 = 0xC0;
+        const JAM1: u8 = 0;
+        const INVERSVID: u8 = 8;
+
+        let g = GFXDATA_OFFSET;
+        let dst = VRAM_OFFSET as usize + self.be32(g) as usize;
+        let src = VRAM_OFFSET as usize + self.be32(g + 4) as usize;
+        let rgb0 = self.be32(g + 8);
+        let rgb1 = self.be32(g + 0xC);
+        let (x0, x1, x2) = (
+            self.gfx_u16(0x10, 0),
+            self.gfx_u16(0x10, 1),
+            self.gfx_u16(0x10, 2),
+        );
+        let (y0, y1, y2) = (
+            self.gfx_u16(0x18, 0),
+            self.gfx_u16(0x18, 1),
+            self.gfx_u16(0x18, 2),
+        );
+        let user0 = self.gfx_u16(0x20, 0);
+        let (pitch0, pitch1) = (self.gfx_u16(0x28, 0), self.gfx_u16(0x28, 1));
+        let colormode = u32::from(self.vram[g + 0x30]);
+        let drawmode = self.vram[g + 0x31];
+        let mask = self.vram[g + 0x39];
+        let minterm = self.vram[g + 0x3A];
+        let bpp: usize = match colormode {
+            COLORMODE_8BIT => 1,
+            COLORMODE_16BIT565 | COLORMODE_15BIT => 2,
+            COLORMODE_32BIT => 4,
+            _ => return,
+        };
+
+        match op {
+            OP_FILLRECT => {
+                // (x0,y0) w=x1 h=y1, colour rgb0; the 8-bit mask keeps
+                // unmasked destination bits (planar write masks).
+                let pitch = pitch0 * 4;
+                for y in 0..y1 {
+                    let row = dst + (y0 + y) * pitch + x0 * bpp;
+                    for x in 0..x1 {
+                        let at = row + x * bpp;
+                        if bpp == 1 && mask != 0xFF {
+                            let d = self.px_get(at, 1) as u8;
+                            let v = (d & !mask) | (rgb0 as u8 & mask);
+                            self.px_put(at, 1, u32::from(v));
+                        } else {
+                            self.px_put(at, bpp, rgb0);
+                        }
+                    }
+                }
+            }
+            OP_COPYRECT | OP_COPYRECT_NOMASK => {
+                // dst rect (x0,y0) w=x1 h=y1 from src rect (x2,y2). Plain
+                // COPYRECT blits within the surface at offset[0]/pitch[0];
+                // the NOMASK variant reads surface offset[1]/pitch[1] and
+                // carries a minterm (only SRC is implemented; others log).
+                let dpitch = pitch0 * 4;
+                let (sbase, spitch) = if op == OP_COPYRECT {
+                    (dst, dpitch)
+                } else {
+                    (src, pitch1 * 4)
+                };
+                if op == OP_COPYRECT_NOMASK && minterm != MINTERM_SRC {
+                    log::debug!("z3660: copyrect minterm {minterm:#04x} treated as SRC");
+                }
+                let apply_mask = op == OP_COPYRECT && bpp == 1 && mask != 0xFF;
+                // Snapshot the source rect first: rects may overlap.
+                let mut rect = vec![0u8; x1 * y1 * bpp];
+                for y in 0..y1 {
+                    let srow = sbase + (y2 + y) * spitch + x2 * bpp;
+                    for b in 0..x1 * bpp {
+                        rect[y * x1 * bpp + b] = if srow + b < self.vram.len() {
+                            self.vram[srow + b]
+                        } else {
+                            0
+                        };
+                    }
+                }
+                for y in 0..y1 {
+                    let drow = dst + (y0 + y) * dpitch + x0 * bpp;
+                    for x in 0..x1 * bpp {
+                        let at = drow + x;
+                        if at >= self.vram.len() {
+                            continue;
+                        }
+                        let s = rect[y * x1 * bpp + x];
+                        self.vram[at] = if apply_mask {
+                            (self.vram[at] & !mask) | (s & mask)
+                        } else {
+                            s
+                        };
+                    }
+                }
+            }
+            OP_INVERTRECT => {
+                let pitch = pitch0 * 4;
+                for y in 0..y1 {
+                    let row = dst + (y0 + y) * pitch + x0 * bpp;
+                    for x in 0..x1 {
+                        let at = row + x * bpp;
+                        let d = self.px_get(at, bpp);
+                        let v = if bpp == 1 {
+                            d ^ u32::from(mask)
+                        } else {
+                            !d & (u32::MAX >> (8 * (4 - bpp)))
+                        };
+                        self.px_put(at, bpp, v);
+                    }
+                }
+            }
+            OP_RECT_TEMPLATE | OP_RECT_PATTERN => {
+                // 1-bit source data at offset[1]: a template row is
+                // pitch[1] bytes; a pattern is 16 bits wide repeating every
+                // user[0] rows (power of two). (x2,y2) is the bit phase.
+                // JAM1 draws fg where set; JAM2 draws fg/bg; COMPLEMENT
+                // inverts where set; INVERSVID inverts the source bits.
+                let pitch = pitch0 & !3; // raw bytes, truncated like fb+n/4
+                let inversion = drawmode & INVERSVID != 0;
+                let dm = drawmode & 0x03;
+                let (pat_rows, tpitch) = if op == OP_RECT_PATTERN {
+                    (user0.max(1), 2)
+                } else {
+                    (usize::MAX, pitch1)
+                };
+                for y in 0..y1 {
+                    let trow = if op == OP_RECT_PATTERN {
+                        src + ((y2 + y) & (pat_rows - 1)) * tpitch
+                    } else {
+                        src + y * tpitch
+                    };
+                    let row = dst + (y0 + y) * pitch;
+                    for x in 0..x1 {
+                        let bit_index = x2 + x;
+                        let tat = if op == OP_RECT_PATTERN {
+                            trow + (bit_index & 15) / 8
+                        } else {
+                            trow + bit_index / 8
+                        };
+                        let byte = if tat < self.vram.len() {
+                            self.vram[tat]
+                        } else {
+                            0
+                        };
+                        let byte = if inversion { !byte } else { byte };
+                        let set = byte & (0x80 >> (bit_index & 7)) != 0;
+                        let at = row + (x0 + x) * bpp;
+                        match (dm, set) {
+                            (2, true) => {
+                                // COMPLEMENT
+                                let d = self.px_get(at, bpp);
+                                let v = if bpp == 1 {
+                                    d ^ u32::from(mask)
+                                } else {
+                                    !d & (u32::MAX >> (8 * (4 - bpp)))
+                                };
+                                self.px_put(at, bpp, v);
+                            }
+                            (2, false) => {}
+                            (_, true) => self.px_put_masked(at, bpp, rgb0, mask),
+                            (_, false) if dm != JAM1 => {
+                                self.px_put_masked(at, bpp, rgb1, mask);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            _ => {
+                log::debug!("z3660: dma-op {} not executed yet", dma_op_name(op));
+            }
+        }
+    }
+
+    /// Foreground/background store honouring the 8-bit plane mask.
+    fn px_put_masked(&mut self, at: usize, bpp: usize, v: u32, mask: u8) {
+        if bpp == 1 && mask != 0xFF {
+            let d = self.px_get(at, 1) as u8;
+            self.px_put(at, 1, u32::from((d & !mask) | (v as u8 & mask)));
+        } else {
+            self.px_put(at, bpp, v);
         }
     }
 
@@ -667,5 +900,146 @@ mod tests {
         let mut out = Vec::new();
         assert_eq!(z.rtg_frame(&mut out), Some((1, 1)));
         assert_eq!(out[0], 0xFFFF_FFFF);
+    }
+}
+
+#[cfg(test)]
+mod exec_tests {
+    use super::*;
+    use crate::memory::Memory;
+
+    fn mem() -> Memory {
+        Memory {
+            chip_ram: vec![0u8; 0x100],
+            slow_ram: Vec::new(),
+            rom: Vec::new(),
+            overlay: false,
+            zorro: crate::zorro::ZorroChain::default(),
+            extended_rom: Vec::new(),
+            extended_rom_base: 0,
+            wcs: Vec::new(),
+            wcs_write_protected: false,
+        }
+    }
+
+    /// Fill the GFXData mailbox fields a blit op reads.
+    #[allow(clippy::too_many_arguments)]
+    fn gfxdata(
+        z: &mut Z3660,
+        dst: u32,
+        src: u32,
+        rgb0: u32,
+        rgb1: u32,
+        x: [u16; 3],
+        y: [u16; 3],
+        user0: u16,
+        pitch: [u16; 2],
+        colormode: u8,
+        drawmode: u8,
+        mask: u8,
+        minterm: u8,
+    ) {
+        let g = GFXDATA_OFFSET;
+        z.vram[g..g + 4].copy_from_slice(&dst.to_be_bytes());
+        z.vram[g + 4..g + 8].copy_from_slice(&src.to_be_bytes());
+        z.vram[g + 8..g + 12].copy_from_slice(&rgb0.to_be_bytes());
+        z.vram[g + 12..g + 16].copy_from_slice(&rgb1.to_be_bytes());
+        for i in 0..3 {
+            z.vram[g + 0x10 + 2 * i..g + 0x12 + 2 * i].copy_from_slice(&x[i].to_be_bytes());
+            z.vram[g + 0x18 + 2 * i..g + 0x1A + 2 * i].copy_from_slice(&y[i].to_be_bytes());
+        }
+        z.vram[g + 0x20..g + 0x22].copy_from_slice(&user0.to_be_bytes());
+        for i in 0..2 {
+            z.vram[g + 0x28 + 2 * i..g + 0x2A + 2 * i].copy_from_slice(&pitch[i].to_be_bytes());
+        }
+        z.vram[g + 0x30] = colormode;
+        z.vram[g + 0x31] = drawmode;
+        z.vram[g + 0x39] = mask;
+        z.vram[g + 0x3A] = minterm;
+    }
+
+    fn ring(z: &mut Z3660, m: &mut Memory, op: u32) {
+        z.write(0x180, 4, op, &mut DeviceHost::new(m));
+    }
+
+    #[test]
+    fn fillrect_fills_the_rect_and_nothing_else() {
+        let (mut z, mut m) = (Z3660::new(), mem());
+        // 8-bit surface, pitch 16 bytes (pitch[0] = 4 longwords): fill a
+        // 3x2 rect of pen 7 at (1,1).
+        gfxdata(
+            &mut z,
+            0,
+            0,
+            7,
+            0,
+            [1, 3, 0],
+            [1, 2, 0],
+            0,
+            [4, 0],
+            0,
+            0,
+            0xFF,
+            0,
+        );
+        ring(&mut z, &mut m, 2);
+        let v = VRAM_OFFSET as usize;
+        assert_eq!(&z.vram[v..v + 4], &[0, 0, 0, 0], "row 0 untouched");
+        assert_eq!(&z.vram[v + 16..v + 21], &[0, 7, 7, 7, 0]);
+        assert_eq!(&z.vram[v + 32..v + 37], &[0, 7, 7, 7, 0]);
+        assert_eq!(z.vram[v + 48], 0, "row 3 untouched");
+    }
+
+    #[test]
+    fn copyrect_moves_an_overlapping_rect() {
+        let (mut z, mut m) = (Z3660::new(), mem());
+        let v = VRAM_OFFSET as usize;
+        // One row of 8 pixels 0..8; copy 4 pixels from x=0 to x=2 (overlap).
+        for i in 0..8 {
+            z.vram[v + i] = i as u8;
+        }
+        gfxdata(
+            &mut z,
+            0,
+            0,
+            0,
+            0,
+            [2, 4, 0],
+            [0, 1, 0],
+            0,
+            [4, 0],
+            0,
+            0,
+            0xFF,
+            0,
+        );
+        ring(&mut z, &mut m, 3);
+        assert_eq!(&z.vram[v..v + 8], &[0, 1, 0, 1, 2, 3, 6, 7]);
+    }
+
+    #[test]
+    fn template_jam2_draws_fg_and_bg() {
+        let (mut z, mut m) = (Z3660::new(), mem());
+        let v = VRAM_OFFSET as usize;
+        // Template data 0b1010_0000 at VRAM offset 0x1000; 4x1 rect at
+        // (0,0), fg pen 3, bg pen 9, JAM2 (drawmode 1), pitch[0] raw 16.
+        z.vram[v + 0x1000] = 0xA0;
+        gfxdata(
+            &mut z,
+            0,
+            0x1000,
+            3,
+            9,
+            [0, 4, 0],
+            [0, 1, 0],
+            0,
+            [16, 1],
+            0,
+            1,
+            0xFF,
+            0,
+        );
+        ring(&mut z, &mut m, 5);
+        assert_eq!(&z.vram[v..v + 4], &[3, 9, 3, 9]);
     }
 }
