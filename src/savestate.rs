@@ -104,7 +104,11 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      the same guest-visible time
 //  30: Paula gained per-channel POT scan/discharge state and InputState gained
 //      analogue paddle resistances for the RC-based POTxDAT converter
-pub const STATE_VERSION: u32 = 30;
+//  31: InputState reshaped into per-port ControllerPort device state (device
+//      kind, JOYxDAT counters, button/direction/pot lines, CD32 serial
+//      shifter); the Bus cd32_pad_shifter/cd32_pad_fire_oldstate fields
+//      moved into the port
+pub const STATE_VERSION: u32 = 31;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

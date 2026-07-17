@@ -392,7 +392,7 @@ impl WebEmu {
         let ix = take_integral_delta(&mut self.mouse_remainder.0);
         let iy = take_integral_delta(&mut self.mouse_remainder.1);
         if ix != 0 || iy != 0 {
-            self.emu.bus_mut().input.add_mouse_delta_port1(ix, iy);
+            self.emu.bus_mut().input.add_mouse_delta(0, ix, iy);
         }
     }
 
@@ -400,9 +400,9 @@ impl WebEmu {
     pub fn mouse_button(&mut self, button: u8, pressed: bool) {
         let input = &mut self.emu.bus_mut().input;
         match button {
-            0 => input.lmb_port1 = pressed,
-            1 => input.mmb_port1 = pressed,
-            2 => input.rmb_port1 = pressed,
+            0 => input.set_mouse_button(0, 0, pressed),
+            1 => input.set_mouse_button(0, 2, pressed),
+            2 => input.set_mouse_button(0, 1, pressed),
             _ => {}
         }
     }
@@ -423,7 +423,7 @@ impl WebEmu {
         self.emu
             .bus_mut()
             .input
-            .set_joystick_port2(up, down, left, right, fire, button2);
+            .set_joystick(1, up, down, left, right, fire, button2);
     }
 
     /// The CD32 pad's extra buttons on port 2 (red/blue arrive through
@@ -439,7 +439,7 @@ impl WebEmu {
         self.emu
             .bus_mut()
             .input
-            .set_cd32_buttons_port2(play, rwd, ffw, green, yellow);
+            .set_cd32_buttons(1, play, rwd, ffw, green, yellow);
     }
 
     /// Insert a floppy image (ADF/ADZ/DMS/extended ADF, optionally

@@ -330,13 +330,32 @@ floppy_sounds_volume = 100
 # Host input preferences.
 # [input]
 
-# Initial source for the emulated port-2 joystick / CD32 pad:
-#   "gamepad"  (default) only a physical pad drives port 2; the keyboard passes
-#              straight through to the Amiga (Shell, editor, Workbench). With
-#              no pad connected there is simply no port-2 input -- ideal for
-#              keyboard-driven setup of an AmigaOS environment.
+# Controller device plugged into each game port. Either port accepts any
+# device, as on a real Amiga:
+#   "mouse"    quadrature mouse (three buttons)
+#   "joystick" digital switch joystick (fire + second button)
+#   "cd32"     CD32 joypad (adds the serial button protocol)
+#   "analogue" analogue paddles / proportional stick on the POT pins,
+#              driven by --pot-after scripting or the CCP input.analogue
+#              method (no live host device maps to it yet)
+#   "none"     empty port
+# Defaults: port1 = "mouse", port2 = "joystick" ("cd32" on the CD32
+# profile). Also --port1 DEVICE / --port2 DEVICE per run; the runtime menu
+# and the CCP input.set_port method hot-plug a device live.
+# port1 = "mouse"
+# port2 = "joystick"
+
+# Initial host source for the joystick/CD32-pad port:
+#   "gamepad"  (default) only a physical pad drives the port; the keyboard
+#              passes straight through to the Amiga (Shell, editor,
+#              Workbench). With no pad connected there is simply no joystick
+#              input -- ideal for keyboard-driven setup of an AmigaOS
+#              environment.
 #   "keyboard" always use the keyboard-joystick mapping (cursor keys + fire
-#              keys), so port 2 stays usable without a controller.
+#              keys), so the port stays usable without a controller.
+# With BOTH ports configured as joysticks, the gamepad and the keyboard
+# mapping drive one port each: this mode picks which source gets the
+# lower-numbered port.
 # Cmd+J / Alt+J still cycles this live; --joystick MODE overrides it per run.
 # joystick = "gamepad"
 

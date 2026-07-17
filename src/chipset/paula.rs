@@ -242,6 +242,25 @@ impl Default for PotPins {
 /// Manual. The recommended 470 kΩ +/- 10% part fits under this 528 kΩ limit.
 pub const POT_MAX_RESISTANCE_OHMS: u32 = 528_000;
 
+/// Resistance from +5 V to a POT pin that makes the RC scan latch POTxDAT
+/// count == `position`: the exact inverse of `pot_resistance_position`, so
+/// an analogue controller's stick/paddle position round-trips through the
+/// comparator model unchanged.
+pub fn pot_position_resistance_ohms(position: u8) -> u32 {
+    u32::from(position) * POT_MAX_RESISTANCE_OHMS / u32::from(u8::MAX)
+}
+
+/// The count a POTxDAT byte latches for a pin charging through
+/// `resistance_ohms`: threshold time is linear in R (see
+/// `pot_threshold_count`), calibrated so the documented maximum lands on
+/// the last 8-bit count.
+pub fn pot_resistance_position(resistance_ohms: u32) -> u8 {
+    let resistance = resistance_ohms.min(POT_MAX_RESISTANCE_OHMS);
+    resistance
+        .saturating_mul(u32::from(u8::MAX))
+        .div_ceil(POT_MAX_RESISTANCE_OHMS) as u8
+}
+
 /// POTGOR bits 7..1 are documented as a Paula chip-identification field, but
 /// the production 8364R7 fitted across OCS/ECS/AGA machines returns zero (and
 /// has no software-selectable revision). Keep the readback explicit rather
@@ -830,10 +849,7 @@ impl Paula {
     /// linear in R. Calibrate the documented 528 kΩ maximum to the last 8-bit
     /// count; the recommended 470 kΩ part therefore lands at count 227.
     fn pot_threshold_count(resistance_ohms: u32) -> u8 {
-        let resistance = resistance_ohms.min(POT_MAX_RESISTANCE_OHMS);
-        resistance
-            .saturating_mul(u32::from(u8::MAX))
-            .div_ceil(POT_MAX_RESISTANCE_OHMS) as u8
+        pot_resistance_position(resistance_ohms)
     }
 
     /// Advance the pot capacitor scan by one horizontal line. Paula holds all
@@ -3494,6 +3510,22 @@ mod tests {
         }
         assert_eq!(paula.read_potdat(0) >> 8, 227);
         assert!(paula.pot_running(), "the disconnected POT1Y keeps scanning");
+    }
+
+    #[test]
+    fn pot_position_resistance_round_trips_every_count() {
+        // The analogue-controller position converter must be the exact
+        // inverse of the comparator threshold, or a device set to position N
+        // would latch a different POTxDAT count.
+        for position in 0..=u8::MAX {
+            let ohms = pot_position_resistance_ohms(position);
+            assert!(ohms <= POT_MAX_RESISTANCE_OHMS);
+            assert_eq!(
+                Paula::pot_threshold_count(ohms),
+                position,
+                "position {position} (ohms {ohms})"
+            );
+        }
     }
 
     #[test]

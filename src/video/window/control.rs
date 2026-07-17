@@ -297,6 +297,14 @@ impl App {
                 };
                 self.control_send(line);
             }
+            HostOp::SetPortDevice { port, device } => {
+                self.hot_plug_port_device(port as usize, device);
+                self.show_osd(format!("Port {}: {}", port + 1, device.label()));
+                self.control_send(proto::ok_line(
+                    &id,
+                    json!({"port": port + 1, "device": device.label()}),
+                ));
+            }
             HostOp::StateLoad { path } => {
                 if self.control.as_ref().is_some_and(|c| c.pending.is_some()) {
                     self.control_send(proto::err_line(
@@ -642,17 +650,28 @@ impl App {
     fn control_apply_input(&mut self, action: InputAction) {
         match action {
             InputAction::Key { rawkey, pressed } => self.handle_amiga_key_event(rawkey, pressed),
-            InputAction::MouseButton { index, pressed } => {
+            InputAction::MouseButton {
+                port,
+                index,
+                pressed,
+            } => {
                 let kind = match index {
                     0 => MouseButtonKind::Left,
                     1 => MouseButtonKind::Right,
                     _ => MouseButtonKind::Middle,
                 };
-                set_mouse_button(&mut self.emu, kind, pressed);
+                set_mouse_button(&mut self.emu, port, kind, pressed);
             }
-            InputAction::MouseMove { dx, dy } => self.add_mouse_delta_i32(dx, dy),
-            InputAction::Joy(j) => {
-                self.auto_joy_held = AutoJoyHeld {
+            InputAction::MouseMove { port, dx, dy } => {
+                self.emu
+                    .bus_mut()
+                    .input
+                    .add_mouse_delta(port as usize, dx, dy);
+                self.emu
+                    .tt_note_input(crate::inputsched::ReplayAction::MouseMove { port, dx, dy });
+            }
+            InputAction::Joy { port, state: j } => {
+                self.auto_joy_held[port as usize] = AutoJoyHeld {
                     up: j.up,
                     down: j.down,
                     left: j.left,
@@ -665,7 +684,12 @@ impl App {
                     rwd: j.rwd,
                     ffw: j.ffw,
                 };
-                self.apply_auto_joy_state();
+                self.apply_auto_joy_state(port as usize);
+            }
+            InputAction::Pot { port, x, y } => {
+                self.emu.bus_mut().input.set_analogue(port as usize, x, y);
+                self.emu
+                    .tt_note_input(crate::inputsched::ReplayAction::Pot { port, x, y });
             }
         }
     }

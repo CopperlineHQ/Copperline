@@ -2037,10 +2037,13 @@ pub fn build_machine(
     if !devices.is_empty() {
         bus.attach_devices(devices);
     }
-    if cfg.cd32_pad {
-        bus.input.cd32_pad_port2 = true;
-        info!("input: CD32 joypad on port 2 (serial button protocol)");
-    }
+    bus.input.set_port_device(0, cfg.port_devices[0]);
+    bus.input.set_port_device(1, cfg.port_devices[1]);
+    info!(
+        "input: port 1 = {}, port 2 = {}",
+        cfg.port_devices[0].label(),
+        cfg.port_devices[1].label()
+    );
     if cfg.akiko {
         let mut akiko = crate::akiko::Akiko::new();
         if let Some(path) = &cfg.cd32_nvram_path {

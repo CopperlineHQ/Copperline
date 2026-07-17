@@ -19,6 +19,7 @@
 //! fields that differ from the selected profile's defaults, so a saved file
 //! reads like the hand-written `*.example.toml`.
 
+use crate::bus::PortDevice;
 use crate::chipset::agnus::{AgnusRevision, VideoStandard};
 use crate::chipset::denise::DeniseRevision;
 use crate::config::{
@@ -171,6 +172,7 @@ pub enum LauncherTab {
     // Only reached in a `midi` build, where it is added to TABS.
     #[cfg_attr(not(feature = "midi"), allow(dead_code))]
     Serial,
+    Input,
     Zorro,
     AvEmulation,
 }
@@ -189,6 +191,7 @@ pub const TABS: &[LauncherTab] = &[
     LauncherTab::Cd,
     #[cfg(feature = "midi")]
     LauncherTab::Serial,
+    LauncherTab::Input,
     LauncherTab::Zorro,
     LauncherTab::AvEmulation,
 ];
@@ -205,6 +208,7 @@ impl LauncherTab {
             LauncherTab::HostFs => "Host Mounts",
             LauncherTab::Cd => "CD",
             LauncherTab::Serial => "Serial",
+            LauncherTab::Input => "Input",
             LauncherTab::Zorro => "Zorro",
             LauncherTab::AvEmulation => "A/V & Emu",
         }
@@ -298,7 +302,10 @@ pub enum LauncherField {
     PacingBudget,
     RealtimePriority,
     Warp,
+    // Input
     Joystick,
+    Port1Device,
+    Port2Device,
 }
 
 /// How a row's value is edited, and therefore which widget the panel draws.
@@ -447,7 +454,7 @@ const SERIAL_ROWS: [Row; 3] = [
     row(F::MidiIn, "MIDI input", Cycle),
     row(F::MidiOut, "MIDI output", Cycle),
 ];
-const AV_EMULATION_ROWS: [Row; 13] = [
+const AV_EMULATION_ROWS: [Row; 12] = [
     row(F::AudioDevice, "Audio output", Cycle),
     row(F::AudioChannelMode, "Channel mode", Cycle),
     row(F::AudioStereoSeparation, "Stereo separation", Cycle),
@@ -460,6 +467,10 @@ const AV_EMULATION_ROWS: [Row; 13] = [
     row(F::PacingBudget, "Pacing budget", Cycle),
     row(F::RealtimePriority, "Realtime priority", Toggle),
     row(F::Warp, "Warp speed", Cycle),
+];
+const INPUT_ROWS: [Row; 3] = [
+    row(F::Port1Device, "Port 1", Cycle),
+    row(F::Port2Device, "Port 2", Cycle),
     row(F::Joystick, "Joystick input", Cycle),
 ];
 
@@ -476,6 +487,7 @@ pub fn rows(tab: LauncherTab) -> &'static [Row] {
         LauncherTab::HostFs => &HOSTFS_ROWS,
         LauncherTab::Cd => &CD_ROWS,
         LauncherTab::Serial => serial_rows(),
+        LauncherTab::Input => &INPUT_ROWS,
         LauncherTab::Zorro => &[],
         LauncherTab::AvEmulation => &AV_EMULATION_ROWS,
     }
@@ -571,6 +583,14 @@ const WARPS: [WarpSpeed; 5] = [
 // The stepper flips the two explicit modes, matching the runtime toggle.
 const JOYSTICK_MODES: [JoystickInputMode; 2] =
     [JoystickInputMode::Gamepad, JoystickInputMode::Keyboard];
+// Controller devices a game port accepts, in stepper order.
+const PORT_DEVICES: [PortDevice; 5] = [
+    PortDevice::Mouse,
+    PortDevice::Joystick,
+    PortDevice::Cd32Pad,
+    PortDevice::Analogue,
+    PortDevice::None,
+];
 // `None` = no SCSI board fitted; the two boards are mutually exclusive here even
 // though the engine could run both, so a config round-trips through this picker.
 const SCSI_CONTROLLERS: [Option<ScsiController>; 4] = [
@@ -691,6 +711,7 @@ pub struct MachineSetup {
     realtime_priority: bool,
     warp: WarpSpeed,
     joystick_input_mode: JoystickInputMode,
+    port_devices: [PortDevice; 2],
     // Extra Zorro boards (metadata path + plugin config schema/overrides)
     zorro_boards: Vec<ZorroBoardSetup>,
 }
@@ -802,6 +823,7 @@ impl MachineSetup {
             realtime_priority: cfg.emulation.realtime_priority,
             warp: cfg.emulation.warp_speed,
             joystick_input_mode: cfg.joystick_input_mode,
+            port_devices: cfg.port_devices,
             zorro_boards: raw
                 .zorro
                 .iter()
@@ -1045,6 +1067,14 @@ impl MachineSetup {
         if self.joystick_input_mode != base.joystick_input_mode {
             raw.input.joystick = Some(self.joystick_input_mode.label().to_string());
         }
+        // Per port against the profile baseline, so a CD32 keeps its pad
+        // implicit and a stock machine emits no port keys at all.
+        if self.port_devices[0] != base.port_devices[0] {
+            raw.input.port1 = Some(self.port_devices[0].label().to_string());
+        }
+        if self.port_devices[1] != base.port_devices[1] {
+            raw.input.port2 = Some(self.port_devices[1].label().to_string());
+        }
         if self.serial_mode != base.serial.mode {
             raw.serial.mode = Some(self.serial_mode.label().to_string());
         }
@@ -1156,6 +1186,7 @@ impl MachineSetup {
         self.realtime_priority = base.emulation.realtime_priority;
         self.warp = base.emulation.warp_speed;
         self.joystick_input_mode = base.joystick_input_mode;
+        self.port_devices = base.port_devices;
         if !self.has_ide() {
             self.ide_master = None;
             self.ide_master_name = None;
@@ -1441,6 +1472,8 @@ impl MachineSetup {
                 JoystickInputMode::Keyboard => "Keyboard".to_string(),
                 JoystickInputMode::Gamepad => "Gamepad".to_string(),
             },
+            F::Port1Device => port_device_display(self.port_devices[0]).to_string(),
+            F::Port2Device => port_device_display(self.port_devices[1]).to_string(),
             F::ScsiController => match self.scsi_controller {
                 None => "None".to_string(),
                 Some(ScsiController::A2091) => "A2091 (Z2)".to_string(),
@@ -1560,6 +1593,12 @@ impl MachineSetup {
             F::Joystick => {
                 self.joystick_input_mode =
                     cycle_slice(&JOYSTICK_MODES, self.joystick_input_mode, forward)
+            }
+            F::Port1Device => {
+                self.port_devices[0] = cycle_slice(&PORT_DEVICES, self.port_devices[0], forward)
+            }
+            F::Port2Device => {
+                self.port_devices[1] = cycle_slice(&PORT_DEVICES, self.port_devices[1], forward)
             }
             F::ScsiController => {
                 // The motherboard SCSI is only on offer where the silicon is.
@@ -1953,6 +1992,18 @@ fn cycle_bootpri(current: i8, forward: bool) -> i8 {
         (idx + n - 1) % n
     };
     BOOTPRI_STEPS[next]
+}
+
+/// Human form of a port device for the picker rows (the config strings
+/// stay lowercase).
+fn port_device_display(device: PortDevice) -> &'static str {
+    match device {
+        PortDevice::Mouse => "Mouse",
+        PortDevice::Joystick => "Joystick",
+        PortDevice::Cd32Pad => "CD32 pad",
+        PortDevice::Analogue => "Analogue",
+        PortDevice::None => "None",
+    }
 }
 
 fn cycle_slice<T: Copy + PartialEq>(items: &[T], current: T, forward: bool) -> T {
@@ -2480,6 +2531,35 @@ mod tests {
         s.cycle(LauncherField::Joystick, true);
         s.select_model(Some(MachineModel::A1200));
         assert_eq!(s.joystick_input_mode, JoystickInputMode::Gamepad);
+    }
+
+    #[test]
+    fn port_devices_round_trip_through_raw_against_the_profile_baseline() {
+        let mut s = MachineSetup::default();
+        // Stock wiring emits no port keys.
+        assert_eq!(s.port_devices, [PortDevice::Mouse, PortDevice::Joystick]);
+        let raw = s.to_raw();
+        assert!(raw.input.port1.is_none());
+        assert!(raw.input.port2.is_none());
+
+        // Non-default devices are written and read back.
+        s.cycle(LauncherField::Port1Device, true); // Mouse -> Joystick
+        s.cycle(LauncherField::Port2Device, true); // Joystick -> Cd32Pad
+        let raw = s.to_raw();
+        assert_eq!(raw.input.port1.as_deref(), Some("joystick"));
+        assert_eq!(raw.input.port2.as_deref(), Some("cd32"));
+        let back = MachineSetup::from_raw(&raw).unwrap();
+        assert_eq!(
+            back.port_devices,
+            [PortDevice::Joystick, PortDevice::Cd32Pad]
+        );
+
+        // The CD32 profile's bundled pad is its baseline: selecting the
+        // model adopts it and keeps it implicit in the raw config.
+        let mut s = MachineSetup::default();
+        s.select_model(Some(MachineModel::Cd32));
+        assert_eq!(s.port_devices[1], PortDevice::Cd32Pad);
+        assert!(s.to_raw().input.port2.is_none());
     }
 
     #[test]

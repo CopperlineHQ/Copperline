@@ -67,9 +67,10 @@ deterministically:
 |---|---|
 | `--press-after SECS KEY` | Press and release an Amiga key (default ~100 ms hold) |
 | `--key-after SECS KEY MS` | Hold a key for exactly MS milliseconds (for modifier chords) |
-| `--click-after SECS BUTTON MS` | Press a mouse button (`left`/`right`/`middle`) for MS milliseconds |
-| `--joy-after SECS BUTTON MS` | Press a port-2 joystick / CD32-pad control (`up`/`down`/`left`/`right`/`red` (alias `fire`)/`blue`/`green`/`yellow`/`play`/`rwd`/`ffw`) for MS milliseconds |
-| `--mouse-after SECS DX DY` | Apply a relative port-1 mouse motion of (DX, DY) counter steps |
+| `--click-after SECS BUTTON MS [PORT]` | Press a mouse button (`left`/`right`/`middle`) for MS milliseconds (default port 1) |
+| `--joy-after SECS BUTTON MS [PORT]` | Press a joystick / CD32-pad control (`up`/`down`/`left`/`right`/`red` (alias `fire`)/`blue`/`green`/`yellow`/`play`/`rwd`/`ffw`) for MS milliseconds (default port 2) |
+| `--mouse-after SECS DX DY [PORT]` | Apply a relative mouse motion of (DX, DY) counter steps (default port 1) |
+| `--pot-after SECS X Y [PORT]` | Set an analogue controller's stick/paddle position, 0-255 per axis (default port 2) |
 | `--floppy-drives COUNT` | Connect `COUNT` floppy drives (`1` to `4`), so scheduled inserts can target empty external drives |
 | `--insert-disk-after SECS DFN PATH` | Insert a disk image into `df0`..`df3` |
 | `--defer-disk-insert SECS DFN` | Start with the configured drive empty, then insert its configured image |
@@ -82,6 +83,23 @@ on. All the flags repeat, so several inputs can be queued:
 
 ```sh
 ./target/release/copperline --key-after 14.0 ctrl 500 --press-after 14.1 c
+```
+
+The controller-port flags take an optional trailing `PORT` token (`1` or
+`2`) naming the game port the event lands on, so any controller wiring set
+with `--port1`/`--port2` (see the configuration guide) can be driven:
+omitted, each flag keeps its traditional port (mouse events port 1,
+joystick/pot events port 2), so existing invocations are unchanged. The
+events drive the named port's electrical lines whatever device is
+configured there. (One consequence of the optional token: a positional
+ROM/disk path literally named `1` or `2` cannot directly follow one of
+these flags -- write it as `./1`.)
+
+```sh
+# Joystick in port 1, mouse in port 2, and inputs aimed at each.
+./target/release/copperline --port1 joystick --port2 mouse \
+  --joy-after 43 up 3000 1 --click-after 43 left 3000 2 \
+  --mouse-after 43.5 20 10 2
 ```
 
 ## Input recording and script files
@@ -97,6 +115,9 @@ emulator configuration.
 joy-after 60.0 red 300
 key-after 75.0 f1 200
 insert-disk-after 90.0 df1 "disk 2.adf"
+# port-tagged forms work here too: fire on port 1, paddles on port 2
+joy-after 95.0 red 300 1
+pot-after 96.0 50 200
 ```
 
 Run it with `--script FILE` (combines freely with the other flags).
@@ -108,8 +129,9 @@ live-input recording, written to
 headless equivalent `--record-input PATH` records the whole run and
 writes the file on exit. Every input event that reaches the emulated
 machine is captured with its emulated timestamp -- key holds, mouse
-buttons and motion, port-2 joystick / CD32-pad controls, and floppy
-inserts -- so a manually driven session replays deterministically:
+buttons and motion, joystick / CD32-pad controls, analogue pot positions,
+and floppy inserts -- so a manually driven session replays
+deterministically:
 
 ```sh
 # Play through the section by hand once...
@@ -127,6 +149,16 @@ recorded from that point is a complete, shareable reproduction. Mouse
 motion is captured at frame granularity (one `mouse-after` per frame of
 movement); CD inserts are not recorded -- use the `[cd]` config section
 for those.
+
+The recorder is port-aware: each port is diffed according to the device
+plugged into it (mouse buttons/motion, joystick/pad controls, or analogue
+`pot-after` positions), and a port token is emitted only when it differs
+from the directive's default -- a session on the stock mouse+joystick
+wiring records byte-identically to the pre-port-aware format. Sessions on
+other wirings note it in a `# ports: port1=... port2=...` header comment;
+replay the script together with the matching `--port1`/`--port2` flags.
+Hot-plugging a device mid-recording closes that port's open holds; the
+device change itself has no directive and is not replayed.
 
 ## A deterministic guest clock
 

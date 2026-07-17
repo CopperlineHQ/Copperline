@@ -61,9 +61,9 @@ The status bar (44 pixels below the display) holds, left to right:
   a cue sheet with the proper media-change notification, and a CD eject
   button. These do not appear on machines without a CD drive.
 - **Joystick toggle** (just left of the volume control): a gamepad or
-  keyboard icon showing which source drives the port-2 joystick. Click it to
+  keyboard icon showing which source drives the joystick port. Click it to
   flip between gamepad-only and keyboard joystick emulation; see
-  [](#mouse-and-joystick).
+  [](#controller-ports).
 - **Volume slider**: drag, or scroll the mouse wheel over it for 5% steps.
 - **Hamburger menu button**: opens the pop-up menu (below).
 - **Camera button**: saves a screenshot (same as `Cmd+S` on macOS or
@@ -128,6 +128,9 @@ tool window or overlay.
 - **Calibrate Gamepad...**: the guided calibration flow, described below.
 - **Joystick Input** (also `Cmd+J` / `Alt+J`, or the status-bar icon):
   toggles between gamepad-only and keyboard joystick emulation.
+- **Port 1 Device / Port 2 Device**: hot-plug the controller in a game
+  port, cycling mouse, joystick, CD32 pad, analogue, and empty; see
+  [](#controller-ports).
 - **MIDI In / MIDI Out** (shown when the serial port is in MIDI mode):
   cycle Paula's serial bridge through the host's MIDI sources and
   destinations; see the `[serial]` section of
@@ -215,10 +218,10 @@ The layout is:
   insert delay, CD32 NVRAM), *Zorro* (extra autoconfig boards by metadata
   file, with a config panel for a WASM plugin board's declared options),
   *Serial* (serial mode and MIDI input/output endpoints),
-  and *A/V & Emu* (audio output device, channel mode, stereo separation,
-  overscan, pixel aspect, phosphor, floppy sounds and
-  volume, power-on, pacing, realtime priority, warp speed, joystick input
-  mode).
+  *Input* (the controller device in each game port and the joystick input
+  source), and *A/V & Emu* (audio output device, channel mode, stereo
+  separation, overscan, pixel aspect, phosphor, floppy sounds and
+  volume, power-on, pacing, realtime priority, warp speed).
 - **Settings rows** (right pane). `[<]`/`[>]` step through a value, On/Off
   buttons flip a toggle, and the **Browse** and **Clear** buttons set or remove
   a file path through a native file dialog. On the *Hard Disk* tab, once an IDE
@@ -273,7 +276,8 @@ continues.
 `Cmd+Shift+R` on macOS or `Alt+Shift+R` on Linux/Windows (or the menu's
 "Record Input") starts logging every input event that reaches the emulated
 machine -- key presses with their hold times, mouse buttons and motion,
-port-2 joystick / CD32-pad controls, and floppy inserts -- each stamped
+joystick / CD32-pad controls, analogue pot positions, and floppy inserts,
+on whichever port carries each device -- each stamped
 with its emulated time. Pressing it again stops the recording and writes
 `copperline-input-<YYYYMMDDHHmmSS>.clscript` in the working directory: a plain
 text file of scripted-input directives that
@@ -328,35 +332,53 @@ iterate from the state in seconds instead of re-emulating minutes. The
 file format and what exactly is (and is not) captured are specified in
 [the internals chapter](../internals/savestate.md).
 
-## Mouse and joystick
+## Controller ports
 
-The mouse lives on port 1 and feeds the JOY0DAT counters. Click the display
-(or press `Cmd+G` on macOS or `Alt+G` on Linux/Windows) to capture the host
-mouse; the same shortcut releases it. While an overlay panel is open, host
-cursor motion is not fed to the emulated mouse. Tool windows likewise keep
-the debugger or analyzer interaction separate from Amiga mouse input.
+An Amiga has two game ports, and either accepts any controller. Copperline
+models that: each port carries a device -- `mouse`, `joystick`, `cd32` pad,
+`analogue` paddles, or `none` -- set with `[input] port1`/`port2` in the
+config (or `--port1`/`--port2`, or the launcher's *Input* tab). The default
+is the stock wiring, a mouse in port 1 and a joystick in port 2 (a CD32 pad
+on the CD32 profile). The runtime menu's **Port 1 Device** / **Port 2
+Device** items hot-plug a different device live, exactly like swapping the
+physical plug: the old device's lines release, and the port's quadrature
+counters hold.
 
-A USB gamepad drives the emulated port-2 digital joystick: directions
-through JOY1DAT, fire through /FIR1, and a second button through
-POT1Y/POTGOR. On a CD32 machine the pad speaks the CD32 serial button
+The host mouse drives the (lowest-numbered) port with a mouse plugged in
+and feeds its JOYxDAT counters. Click the display (or press `Cmd+G` on
+macOS or `Alt+G` on Linux/Windows) to capture the host mouse; the same
+shortcut releases it. While an overlay panel is open, host cursor motion is
+not fed to the emulated mouse. Tool windows likewise keep the debugger or
+analyzer interaction separate from Amiga mouse input.
+
+A USB gamepad drives the emulated digital joystick on whichever port one is
+plugged into: directions through JOYxDAT, fire through /FIRx, and a second
+button through POTxY/POTGOR. A `cd32` device speaks the CD32 serial button
 protocol instead, including the red/blue/green/yellow and transport
-buttons. Mouse and gamepad coexist because they use different ports.
+buttons, on either port. An `analogue` device presents pot resistances on
+the POTxX/POTxY pins; no live host device maps to it yet -- drive it with
+`--pot-after` scripting or the control protocol's `input.analogue`.
 
-Copperline can also emulate the port-2 joystick from the host keyboard.
-There are two explicit input modes, and the active one is always shown by the
-gamepad / keyboard icon in the status bar (next to the volume control), so a
-"my keys aren't working" surprise can be spotted and fixed at a glance:
+Copperline can also emulate the joystick from the host keyboard. There are
+two explicit input modes, and the active one is always shown by the gamepad
+/ keyboard icon in the status bar (next to the volume control), so a "my
+keys aren't working" surprise can be spotted and fixed at a glance:
 
 - **gamepad** (the default): use only a calibrated gamepad; every keyboard
-  key passes through to the Amiga. With no pad connected there is no port-2
-  input. This is the no-surprise mode for interactive AmigaOS setup.
-- **keyboard**: use the keyboard-joystick mapping so port 2 works without a
-  controller.
+  key passes through to the Amiga. With no pad connected there is no
+  joystick input. This is the no-surprise mode for interactive AmigaOS
+  setup.
+- **keyboard**: use the keyboard-joystick mapping so the joystick port
+  works without a controller.
+
+With joysticks (or pads) in *both* ports -- a two-player setup -- the
+gamepad and the keyboard mapping drive one port each, and the mode picks
+which source gets the lower-numbered port.
 
 Click the status-bar icon to flip between them; the menu's **Joystick Input**
 item and `Cmd+J` on macOS / `Alt+J` on Linux and Windows do the same. Set the
 starting mode with `[input] joystick` in the config (or `--joystick MODE`, or
-the launcher's *A/V & Emu* tab).
+the launcher's *Input* tab).
 
 Keyboard joystick mode uses the FS-UAE-compatible mapping: cursor keys for
 directions, and Right Ctrl or Right Alt for fire. For CD32 pad buttons,

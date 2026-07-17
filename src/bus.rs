@@ -702,14 +702,6 @@ pub struct Bus {
     /// most recent Gayle IDE activity, so short synchronous transfers stay
     /// visible for a human-perceptible stretch.
     hdd_led_until_cck: u64,
-    /// CD32 joypad shift register position for port 2: starts at 8
-    /// (Blue), decremented by /FIR1 falling edges the CPU drives while
-    /// the pad is in serial mode, 1 returns the pad-present bit, 0
-    /// returns zeros. Reset to 8 whenever serial mode is left.
-    cd32_pad_shifter: i8,
-    /// Previous CPU-driven /FIR1 output level (DDR & PRA & 0x80), for
-    /// the shift-clock edge detector.
-    cd32_pad_fire_oldstate: u8,
     /// One-time diagnostic when software writes BPLCON3 and the write is
     /// dropped (OCS Denise, or ECS with ENBPLCN3 clear).
     bplcon3_drop_warned: bool,
@@ -1782,51 +1774,170 @@ impl VideoPipelineStats {
     }
 }
 
+/// The kind of controller plugged into an Amiga game port. Selects how the
+/// port's pins are driven: which JOYxDAT encoding the port reports, what
+/// /FIRx and POTxX/POTxY carry, and whether the CD32 pad's serial button
+/// shifter is present. Either port accepts any device, as on real hardware.
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum PortDevice {
+    /// Quadrature mouse: JOYxDAT reports the movement counters, left button
+    /// on /FIRx, right on POTxY, middle on POTxX.
+    #[default]
+    Mouse,
+    /// Digital switch joystick: directions encode into JOYxDAT, fire on
+    /// /FIRx, button 2 grounds POTxY.
+    Joystick,
+    /// CD32 joypad: a digital joystick plus the serial button shifter
+    /// (POTxX driven low selects shift mode, /FIRx clocks, POTxY is data).
+    Cd32Pad,
+    /// Analogue paddles / proportional stick: positions present resistances
+    /// on POTxX/POTxY; the two buttons ground the LEFT/RIGHT lines.
+    Analogue,
+    /// Empty port: nothing drives the pins. Reads like an idle mouse (the
+    /// JOYxDAT counters hold, the pot pins float).
+    None,
+}
+
+impl PortDevice {
+    /// Canonical configuration name, as accepted by `[input] port1/port2`.
+    pub fn label(self) -> &'static str {
+        match self {
+            PortDevice::Mouse => "mouse",
+            PortDevice::Joystick => "joystick",
+            PortDevice::Cd32Pad => "cd32",
+            PortDevice::Analogue => "analogue",
+            PortDevice::None => "none",
+        }
+    }
+
+    /// Parse a configuration name (canonical or alias, case-insensitive).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "mouse" => Some(PortDevice::Mouse),
+            "joystick" | "joy" => Some(PortDevice::Joystick),
+            "cd32" | "cd32pad" | "pad" => Some(PortDevice::Cd32Pad),
+            "analogue" | "analog" | "paddle" => Some(PortDevice::Analogue),
+            "none" | "off" => Some(PortDevice::None),
+            _ => None,
+        }
+    }
+}
+
+/// One Amiga game port: the device plugged into it plus the state of every
+/// line a controller can drive. The JOYxDAT counters are chip-side state, so
+/// they survive device changes and JOYTEST loads them whatever is plugged in.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct ControllerPort {
+    pub device: PortDevice,
+    /// JOYxDAT horizontal/vertical quadrature counters.
+    pub counter_x: u8,
+    pub counter_y: u8,
+    /// Primary button line /FIRx (CIA-A PRA bit 6/7 reports it active-low):
+    /// left mouse button / joystick fire / CD32 Red.
+    pub fire: bool,
+    /// POTxY switch to ground: right mouse button / joystick button 2 /
+    /// CD32 Blue.
+    pub button2: bool,
+    /// POTxX switch to ground: middle mouse button (third button).
+    pub button3: bool,
+    /// Direction switch lines. On an Analogue device the left/right lines
+    /// double as the two paddle buttons (HRM paddle wiring).
+    pub up: bool,
+    pub down: bool,
+    pub left: bool,
+    pub right: bool,
+    /// CD32 buttons that exist only in the serial report (Red rides `fire`,
+    /// Blue rides `button2`).
+    pub cd32_play: bool,
+    pub cd32_rwd: bool,
+    pub cd32_ffw: bool,
+    pub cd32_green: bool,
+    pub cd32_yellow: bool,
+    /// CD32 serial shift position: starts at 8 (Blue), decremented by /FIRx
+    /// falling edges the CPU drives while the pad is in serial mode, 1
+    /// returns the pad-present bit, 0 returns zeros. Reset to 8 whenever
+    /// serial mode is left.
+    pub cd32_shifter: i8,
+    /// Previous CPU-driven /FIRx output level (DDR and PRA), the shift-clock
+    /// falling-edge detector's memory.
+    pub cd32_fire_driven_high: bool,
+    /// Analogue resistance from +5 V to POTxX/POTxY in ohms; `None` leaves
+    /// the pin floating. Values above Paula's specified maximum are clamped
+    /// by the converter.
+    pub pot_x_ohms: Option<u32>,
+    pub pot_y_ohms: Option<u32>,
+}
+
+impl Default for ControllerPort {
+    fn default() -> Self {
+        Self {
+            device: PortDevice::Mouse,
+            counter_x: 0,
+            counter_y: 0,
+            fire: false,
+            button2: false,
+            button3: false,
+            up: false,
+            down: false,
+            left: false,
+            right: false,
+            cd32_play: false,
+            cd32_rwd: false,
+            cd32_ffw: false,
+            cd32_green: false,
+            cd32_yellow: false,
+            cd32_shifter: 8,
+            cd32_fire_driven_high: false,
+            pot_x_ohms: None,
+            pot_y_ohms: None,
+        }
+    }
+}
+
+impl ControllerPort {
+    /// The JOYxDAT word this port's device presents.
+    pub fn joydat(&self) -> u16 {
+        match self.device {
+            PortDevice::Mouse | PortDevice::None => mouse_joydat(self.counter_x, self.counter_y),
+            PortDevice::Joystick | PortDevice::Cd32Pad => {
+                digital_joydat(self.up, self.down, self.left, self.right)
+            }
+            PortDevice::Analogue => {
+                // Paddle buttons are switches on the LEFT/RIGHT lines, which
+                // read back directly as JOYxDAT bits 9 and 1 on top of the
+                // idle counters.
+                let mut v = mouse_joydat(self.counter_x, self.counter_y);
+                if self.left {
+                    v |= 0x0200;
+                }
+                if self.right {
+                    v |= 0x0002;
+                }
+                v
+            }
+        }
+    }
+
+    /// The /FIRx line pulled to ground (CIA-A reports it active-low).
+    pub fn fir_asserted(&self) -> bool {
+        self.fire
+    }
+
+    /// POTxX pin not switched to ground (the polarity `PotPins` carries).
+    pub fn pot_x_released(&self) -> bool {
+        !self.button3
+    }
+
+    /// POTxY pin not switched to ground.
+    pub fn pot_y_released(&self) -> bool {
+        !self.button2
+    }
+}
+
 #[derive(Default, Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct InputState {
-    pub mouse_x_port1: u8,
-    pub mouse_y_port1: u8,
-    pub mouse_x_port2: u8,
-    pub mouse_y_port2: u8,
-    pub lmb_port1: bool,
-    pub lmb_port2: bool,
-    pub rmb_port1: bool,
-    pub rmb_port2: bool,
-    /// A CD32 joypad is plugged into port 2: enables the pad's serial
-    /// button protocol (POT1X low selects shift mode, the /FIR1 line
-    /// clocks, POT1Y carries the active-low button bits). Red rides the
-    /// normal fire line (`lmb_port2`), Blue the button-2 line
-    /// (`rmb_port2`); the rest only exist serially.
-    pub cd32_pad_port2: bool,
-    pub cd32_play_port2: bool,
-    pub cd32_rwd_port2: bool,
-    pub cd32_ffw_port2: bool,
-    pub cd32_green_port2: bool,
-    pub cd32_yellow_port2: bool,
-    pub mmb_port1: bool,
-    pub mmb_port2: bool,
-    /// Optional analogue paddle resistance from +5 V to POT0X/POT0Y/POT1X/
-    /// POT1Y, in ohms. `None` leaves the pin floating, which is the normal
-    /// mouse/digital-joystick default. Values above Paula's specified maximum
-    /// are clamped by the converter.
-    pub pot_resistance_ohms: [Option<u32>; 4],
-    /// Digital-joystick direction lines per controller port. When the
-    /// matching `joystick_portN` flag is set, JOYxDAT reports these as the
-    /// Gray-coded direction bits an Amiga game decodes, instead of the mouse
-    /// quadrature counters. Fire reuses the FIR0/FIR1 lines (`lmb_portN`),
-    /// which CIA-A PRA bits 6/7 already report.
-    pub joy_up_port1: bool,
-    pub joy_down_port1: bool,
-    pub joy_left_port1: bool,
-    pub joy_right_port1: bool,
-    pub joy_up_port2: bool,
-    pub joy_down_port2: bool,
-    pub joy_left_port2: bool,
-    pub joy_right_port2: bool,
-    /// True when a digital joystick (not a mouse) is the active device on the
-    /// port, so JOYxDAT returns the direction encoding.
-    pub joystick_port1: bool,
-    pub joystick_port2: bool,
+    /// Index 0 = port 1 (JOY0DAT/POT0/FIR0), 1 = port 2 (JOY1DAT/POT1/FIR1).
+    pub ports: [ControllerPort; 2],
 }
 
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -1907,51 +2018,65 @@ impl DeviceClock {
 }
 
 impl InputState {
-    pub fn add_mouse_delta_port1(&mut self, dx: i32, dy: i32) {
-        self.mouse_x_port1 = self.mouse_x_port1.wrapping_add(dx as u8);
-        self.mouse_y_port1 = self.mouse_y_port1.wrapping_add(dy as u8);
+    /// Port argument convention across the input API: 0 selects port 1,
+    /// every other value port 2.
+    fn port_index(port: usize) -> usize {
+        usize::from(port != 0)
     }
 
-    pub fn write_joytest(&mut self, val: u16) {
-        self.mouse_y_port1 = (val >> 8) as u8;
-        self.mouse_x_port1 = val as u8;
-        self.mouse_y_port2 = (val >> 8) as u8;
-        self.mouse_x_port2 = val as u8;
+    /// The device currently plugged into a port.
+    pub fn device(&self, port: usize) -> PortDevice {
+        self.ports[Self::port_index(port)].device
     }
 
-    pub fn joy0dat(&self) -> u16 {
-        if self.joystick_port1 {
-            digital_joydat(
-                self.joy_up_port1,
-                self.joy_down_port1,
-                self.joy_left_port1,
-                self.joy_right_port1,
-            )
-        } else {
-            mouse_joydat(self.mouse_x_port1, self.mouse_y_port1)
+    /// Change the device plugged into a port. Unplugging releases every line
+    /// the old device drove; the JOYxDAT counters are chip-side and hold
+    /// their values. A freshly plugged analogue controller presents its pots
+    /// centred: a real paddle always shows some resistance.
+    pub fn set_port_device(&mut self, port: usize, device: PortDevice) {
+        let p = &mut self.ports[Self::port_index(port)];
+        if p.device == device {
+            return;
+        }
+        *p = ControllerPort {
+            device,
+            counter_x: p.counter_x,
+            counter_y: p.counter_y,
+            ..ControllerPort::default()
+        };
+        if device == PortDevice::Analogue {
+            let centre = crate::chipset::paula::pot_position_resistance_ohms(128);
+            p.pot_x_ohms = Some(centre);
+            p.pot_y_ohms = Some(centre);
         }
     }
 
-    pub fn joy1dat(&self) -> u16 {
-        if self.joystick_port2 {
-            digital_joydat(
-                self.joy_up_port2,
-                self.joy_down_port2,
-                self.joy_left_port2,
-                self.joy_right_port2,
-            )
-        } else {
-            mouse_joydat(self.mouse_x_port2, self.mouse_y_port2)
+    /// Accumulate mouse quadrature movement into a port's JOYxDAT counters.
+    pub fn add_mouse_delta(&mut self, port: usize, dx: i32, dy: i32) {
+        let p = &mut self.ports[Self::port_index(port)];
+        p.counter_x = p.counter_x.wrapping_add(dx as u8);
+        p.counter_y = p.counter_y.wrapping_add(dy as u8);
+    }
+
+    /// Mouse buttons by index: 0 = left (/FIRx), 1 = right (POTxY),
+    /// 2 = middle (POTxX).
+    pub fn set_mouse_button(&mut self, port: usize, index: u8, pressed: bool) {
+        let p = &mut self.ports[Self::port_index(port)];
+        match index {
+            0 => p.fire = pressed,
+            1 => p.button2 = pressed,
+            _ => p.button3 = pressed,
         }
     }
 
-    /// Set the port-2 digital joystick state from a host gamepad. Marks the
-    /// port as a joystick so JOY1DAT reports directions. Fire (button 1)
-    /// drives /FIR1 (CIA-A PRA bit 7) through the shared `lmb_port2` line;
-    /// button 2 drives POT1Y, read back through POTGOR (the shared
-    /// `rmb_port2` line), matching a real Amiga's second joystick button.
-    pub fn set_joystick_port2(
+    /// Set a port's digital-joystick state. Engages the Joystick device on a
+    /// Mouse or empty port so JOYxDAT reports directions; a CD32 pad or
+    /// analogue controller keeps its device and just has its lines driven --
+    /// fire is /FIRx, button 2 grounds POTxY, and the direction switch lines
+    /// double as the paddle buttons on an analogue device.
+    pub fn set_joystick(
         &mut self,
+        port: usize,
         up: bool,
         down: bool,
         left: bool,
@@ -1959,40 +2084,90 @@ impl InputState {
         fire: bool,
         button2: bool,
     ) {
-        self.joystick_port2 = true;
-        self.joy_up_port2 = up;
-        self.joy_down_port2 = down;
-        self.joy_left_port2 = left;
-        self.joy_right_port2 = right;
-        self.lmb_port2 = fire;
-        self.rmb_port2 = button2;
+        let idx = Self::port_index(port);
+        if matches!(self.ports[idx].device, PortDevice::Mouse | PortDevice::None) {
+            self.set_port_device(port, PortDevice::Joystick);
+        }
+        let p = &mut self.ports[idx];
+        p.up = up;
+        p.down = down;
+        p.left = left;
+        p.right = right;
+        p.fire = fire;
+        p.button2 = button2;
     }
 
-    /// Set the CD32 joypad's extra buttons (port 2). Red and Blue arrive
-    /// through `set_joystick_port2` as fire/button2; these five only
-    /// exist in the pad's serial report.
-    pub fn set_cd32_buttons_port2(
+    /// Set a CD32 joypad's extra buttons. Red and Blue arrive through
+    /// `set_joystick` as fire/button2; these five only exist in the pad's
+    /// serial report.
+    pub fn set_cd32_buttons(
         &mut self,
+        port: usize,
         play: bool,
         rwd: bool,
         ffw: bool,
         green: bool,
         yellow: bool,
     ) {
-        self.cd32_play_port2 = play;
-        self.cd32_rwd_port2 = rwd;
-        self.cd32_ffw_port2 = ffw;
-        self.cd32_green_port2 = green;
-        self.cd32_yellow_port2 = yellow;
+        let p = &mut self.ports[Self::port_index(port)];
+        p.cd32_play = play;
+        p.cd32_rwd = rwd;
+        p.cd32_ffw = ffw;
+        p.cd32_green = green;
+        p.cd32_yellow = yellow;
     }
 
-    /// Connect an analogue paddle pair to a controller port. Each resistance
-    /// is measured from +5 V to the corresponding POT pin; `None` disconnects
-    /// that axis. Port 0 maps to POT0X/Y, every other value to POT1X/Y.
+    /// Set an analogue controller's stick/paddle position, 0..=255 per axis:
+    /// the count the port's POTxDAT byte latches after a POTGO scan. Engages
+    /// the Analogue device.
+    pub fn set_analogue(&mut self, port: usize, x: u8, y: u8) {
+        let idx = Self::port_index(port);
+        if self.ports[idx].device != PortDevice::Analogue {
+            self.set_port_device(port, PortDevice::Analogue);
+        }
+        let p = &mut self.ports[idx];
+        p.pot_x_ohms = Some(crate::chipset::paula::pot_position_resistance_ohms(x));
+        p.pot_y_ohms = Some(crate::chipset::paula::pot_position_resistance_ohms(y));
+    }
+
+    /// Connect an analogue paddle pair to a controller port by raw
+    /// resistance. Each value is measured from +5 V to the corresponding POT
+    /// pin; `None` disconnects that axis. Does not change the port's device.
     pub fn set_paddle_resistance(&mut self, port: usize, x_ohms: Option<u32>, y_ohms: Option<u32>) {
-        let base = usize::from(port != 0) * 2;
-        self.pot_resistance_ohms[base] = x_ohms;
-        self.pot_resistance_ohms[base + 1] = y_ohms;
+        let p = &mut self.ports[Self::port_index(port)];
+        p.pot_x_ohms = x_ohms;
+        p.pot_y_ohms = y_ohms;
+    }
+
+    /// JOYTEST loads both ports' quadrature counters with the same value,
+    /// whatever devices are plugged in.
+    pub fn write_joytest(&mut self, val: u16) {
+        for p in &mut self.ports {
+            p.counter_y = (val >> 8) as u8;
+            p.counter_x = val as u8;
+        }
+    }
+
+    /// The JOYxDAT word for a port (0 = JOY0DAT, other = JOY1DAT).
+    pub fn joydat(&self, port: usize) -> u16 {
+        self.ports[Self::port_index(port)].joydat()
+    }
+
+    /// A machine reset: the chips reset but nothing is unplugged. Each
+    /// port keeps its device and analogue knob positions (physical
+    /// state), while the chip-side quadrature counters clear, the pad
+    /// shifters reload, and the driven lines release -- the host input
+    /// path re-asserts anything still physically held on the next
+    /// quantum.
+    pub fn reset_for_machine_reset(&mut self) {
+        for p in &mut self.ports {
+            *p = ControllerPort {
+                device: p.device,
+                pot_x_ohms: p.pot_x_ohms,
+                pot_y_ohms: p.pot_y_ohms,
+                ..ControllerPort::default()
+            };
+        }
     }
 }
 
@@ -2145,8 +2320,6 @@ impl Bus {
             cdtv: None,
             devices: Vec::new(),
             hdd_led_until_cck: 0,
-            cd32_pad_shifter: 8,
-            cd32_pad_fire_oldstate: 0,
             bplcon3_drop_warned: false,
             cpu_fetch_latch: [None; 2],
             overlay_disable_pending: false,
@@ -2827,7 +3000,7 @@ impl Bus {
         // held and are reported in the upcoming $FD/$FE stream.
         self.keyboard.begin_power_up();
         self.keyboard_system_reset_pending = false;
-        self.input = InputState::default();
+        self.input.reset_for_machine_reset();
         self.video_pipeline_stats = VideoPipelineStats::default();
         self.slice_preempted = false;
         self.pending_vbi = 0;
@@ -4533,12 +4706,12 @@ impl Bus {
             // PRA bits 6 and 7 (/FIR0, /FIR1) report the live port-1/port-2
             // primary button: left-mouse button or joystick fire (they share
             // the FIR line). Active-low: 0 = pressed, 1 = released.
-            if self.input.lmb_port1 {
+            if self.input.ports[0].fir_asserted() {
                 v &= !0x40;
             } else {
                 v |= 0x40;
             }
-            if self.input.lmb_port2 {
+            if self.input.ports[1].fir_asserted() {
                 v &= !0x80;
             } else {
                 v |= 0x80;
@@ -4583,47 +4756,54 @@ impl Bus {
         eff
     }
 
-    /// Whether the port-2 CD32 pad is in serial (shift) mode: the CPU
-    /// drives POT1X (P5) low through POTGO (OUTRX set, DATRX clear).
-    fn cd32_pad_serial_mode(&self) -> bool {
-        self.input.cd32_pad_port2 && self.paula.potgo & 0x3000 == 0x2000
+    /// Whether a port's CD32 pad is in serial (shift) mode: the CPU drives
+    /// that port's POTxX pin low through POTGO (output-enable set, data
+    /// clear; POT0X lives at bits 9/8, POT1X at bits 13/12).
+    fn cd32_pad_serial_mode(&self, port: usize) -> bool {
+        let x_dat = (8 + 4 * port) as u16;
+        self.input.ports[port].device == PortDevice::Cd32Pad
+            && self.paula.potgo & (0x3 << x_dat) == (0x2 << x_dat)
     }
 
-    /// CD32 pad shift clock: with the pad in serial mode, a falling edge
-    /// the CPU drives on /FIR1 (CIA-A PRA bit 7 with DDR output) steps
-    /// the shift register. Outside serial mode the register reloads.
+    /// CD32 pad shift clock: with a pad in serial mode, a falling edge the
+    /// CPU drives on that port's /FIRx line (CIA-A PRA bit 6/7 with DDR
+    /// output) steps its shift register. Outside serial mode the register
+    /// reloads.
     fn cd32_pad_cia_clock(&mut self) {
-        if !self.input.cd32_pad_port2 {
-            return;
-        }
-        const FIR1: u8 = 0x80;
         let pra = self.cia_a.peek_register(REG_PRA);
         let ddra = self.cia_a.peek_register(REG_DDRA);
-        if self.cd32_pad_serial_mode() {
-            if ddra & FIR1 != 0 && (pra & FIR1) != self.cd32_pad_fire_oldstate && pra & FIR1 == 0 {
-                self.cd32_pad_shifter = (self.cd32_pad_shifter - 1).max(0);
+        for port in 0..2 {
+            if self.input.ports[port].device != PortDevice::Cd32Pad {
+                continue;
             }
-        } else {
-            self.cd32_pad_shifter = 8;
+            let fir = 0x40u8 << port;
+            if self.cd32_pad_serial_mode(port) {
+                let p = &mut self.input.ports[port];
+                if ddra & fir != 0 && p.cd32_fire_driven_high && pra & fir == 0 {
+                    p.cd32_shifter = (p.cd32_shifter - 1).max(0);
+                }
+            } else {
+                self.input.ports[port].cd32_shifter = 8;
+            }
+            self.input.ports[port].cd32_fire_driven_high = ddra & pra & fir != 0;
         }
-        self.cd32_pad_fire_oldstate = ddra & pra & FIR1;
     }
 
-    /// The serial button bit for the current shift position, active-low
-    /// on POT1Y. Order from 8 down: Blue, Red, Yellow, Green, FFW, RWD,
-    /// Play; 1 is the always-high pad-present bit; 0 reads zero.
-    fn cd32_pad_serial_bit(&self) -> bool {
-        let input = &self.input;
-        match self.cd32_pad_shifter {
+    /// The serial button bit for a pad's current shift position, active-low
+    /// on its POTxY pin. Order from 8 down: Blue, Red, Yellow, Green, FFW,
+    /// RWD, Play; 1 is the always-high pad-present bit; 0 reads zero.
+    fn cd32_pad_serial_bit(&self, port: usize) -> bool {
+        let p = &self.input.ports[port];
+        match p.cd32_shifter {
             0 => false,
             1 => true,
-            2 => !input.cd32_play_port2,
-            3 => !input.cd32_rwd_port2,
-            4 => !input.cd32_ffw_port2,
-            5 => !input.cd32_green_port2,
-            6 => !input.cd32_yellow_port2,
-            7 => !input.lmb_port2, // Red
-            _ => !input.rmb_port2, // Blue
+            2 => !p.cd32_play,
+            3 => !p.cd32_rwd,
+            4 => !p.cd32_ffw,
+            5 => !p.cd32_green,
+            6 => !p.cd32_yellow,
+            7 => !p.fire,    // Red
+            _ => !p.button2, // Blue
         }
     }
 

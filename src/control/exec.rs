@@ -74,6 +74,7 @@ pub enum CoreOp {
     },
     BeamGet,
     DisplayGet,
+    InputPortsGet,
     RtcGet,
     RtcSet {
         unix: Option<u64>,
@@ -157,6 +158,7 @@ impl CoreOp {
                 | CoreOp::CiaGet { .. }
                 | CoreOp::BeamGet
                 | CoreOp::DisplayGet
+                | CoreOp::InputPortsGet
                 | CoreOp::RtcGet
                 | CoreOp::CopperList { .. }
                 | CoreOp::PcHistory
@@ -191,6 +193,13 @@ pub enum HostOp {
         path: PathBuf,
     },
     CdEject,
+    /// Hot-plug a controller device into a port (0 = port 1, 1 = port 2).
+    /// Releases every line the previous device drove; not journaled for
+    /// reverse replay (like a media change, it is host state).
+    SetPortDevice {
+        port: u8,
+        device: crate::bus::PortDevice,
+    },
     StateLoad {
         path: PathBuf,
     },
@@ -243,7 +252,9 @@ impl RunTarget {
 }
 
 /// A parsed input command, before the driver expands it into immediate
-/// and scheduled transitions.
+/// and scheduled transitions. Port fields are 0-based (0 = port 1), the
+/// bus convention; the wire protocol's 1-based `port` param is converted
+/// at parse time.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum InputCmd {
     Key {
@@ -252,13 +263,22 @@ pub enum InputCmd {
         at_seconds: Option<f64>,
     },
     Mouse {
+        port: u8,
         left: Option<bool>,
         right: Option<bool>,
         middle: Option<bool>,
         dx: i32,
         dy: i32,
     },
-    Joy(JoyState),
+    Joy {
+        port: u8,
+        state: JoyState,
+    },
+    Analogue {
+        port: u8,
+        x: u8,
+        y: u8,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -326,6 +346,7 @@ impl InputCmd {
                 }
             },
             InputCmd::Mouse {
+                port,
                 left,
                 right,
                 middle,
@@ -334,14 +355,22 @@ impl InputCmd {
             } => {
                 for (index, state) in [(0u8, left), (1, right), (2, middle)] {
                     if let Some(pressed) = state {
-                        emit(None, InputAction::MouseButton { index, pressed });
+                        emit(
+                            None,
+                            InputAction::MouseButton {
+                                port,
+                                index,
+                                pressed,
+                            },
+                        );
                     }
                 }
                 if dx != 0 || dy != 0 {
-                    emit(None, InputAction::MouseMove { dx, dy });
+                    emit(None, InputAction::MouseMove { port, dx, dy });
                 }
             }
-            InputCmd::Joy(j) => emit(None, InputAction::Joy(j)),
+            InputCmd::Joy { port, state } => emit(None, InputAction::Joy { port, state }),
+            InputCmd::Analogue { port, x, y } => emit(None, InputAction::Pot { port, x, y }),
         }
         (now, later)
     }
@@ -349,6 +378,25 @@ impl InputCmd {
 
 // ---------------------------------------------------------------------
 // Parsing
+
+/// Parse the optional 1-based `port` param (1 or 2), defaulting to
+/// `default`, into the bus's 0-based port index.
+fn parse_port_param(p: &ParamReader, default: u32) -> Result<u8, CtlError> {
+    let port = p.u32_or("port", default)?;
+    if !(1..=2).contains(&port) {
+        return Err(CtlError::invalid_params("port must be 1 or 2"));
+    }
+    Ok((port - 1) as u8)
+}
+
+/// Parse a required 1-based `port` param into the 0-based port index.
+fn parse_port_req(p: &ParamReader) -> Result<u8, CtlError> {
+    let port = p.u32_req("port")?;
+    if !(1..=2).contains(&port) {
+        return Err(CtlError::invalid_params("port must be 1 or 2"));
+    }
+    Ok((port - 1) as u8)
+}
 
 /// Parse a method name and params object into a typed request.
 pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
@@ -530,25 +578,53 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
             }))
         }
         "input.mouse" => host(HostOp::Input(InputCmd::Mouse {
+            port: parse_port_param(&p, 1)?,
             left: p.bool_opt("left")?,
             right: p.bool_opt("right")?,
             middle: p.bool_opt("middle")?,
             dx: p.i32_or("dx", 0)?,
             dy: p.i32_or("dy", 0)?,
         })),
-        "input.joy" => host(HostOp::Input(InputCmd::Joy(JoyState {
-            up: p.bool_or("up", false)?,
-            down: p.bool_or("down", false)?,
-            left: p.bool_or("left", false)?,
-            right: p.bool_or("right", false)?,
-            red: p.bool_or("red", false)? || p.bool_or("fire1", false)?,
-            blue: p.bool_or("blue", false)? || p.bool_or("fire2", false)?,
-            play: p.bool_or("play", false)?,
-            rwd: p.bool_or("rwd", false)?,
-            ffw: p.bool_or("ffw", false)?,
-            green: p.bool_or("green", false)?,
-            yellow: p.bool_or("yellow", false)?,
-        }))),
+        "input.joy" => host(HostOp::Input(InputCmd::Joy {
+            port: parse_port_param(&p, 2)?,
+            state: JoyState {
+                up: p.bool_or("up", false)?,
+                down: p.bool_or("down", false)?,
+                left: p.bool_or("left", false)?,
+                right: p.bool_or("right", false)?,
+                red: p.bool_or("red", false)? || p.bool_or("fire1", false)?,
+                blue: p.bool_or("blue", false)? || p.bool_or("fire2", false)?,
+                play: p.bool_or("play", false)?,
+                rwd: p.bool_or("rwd", false)?,
+                ffw: p.bool_or("ffw", false)?,
+                green: p.bool_or("green", false)?,
+                yellow: p.bool_or("yellow", false)?,
+            },
+        })),
+        "input.analogue" => {
+            let (x, y) = (p.u32_req("x")?, p.u32_req("y")?);
+            if x > 0xFF || y > 0xFF {
+                return Err(CtlError::invalid_params("x and y must be 0..=255"));
+            }
+            host(HostOp::Input(InputCmd::Analogue {
+                port: parse_port_param(&p, 2)?,
+                x: x as u8,
+                y: y as u8,
+            }))
+        }
+        "input.set_port" => {
+            let device = p.str_req("device")?;
+            let device = crate::bus::PortDevice::parse(&device).ok_or_else(|| {
+                CtlError::invalid_params(format!(
+                    "device must be mouse|joystick|cd32|analogue|none, got {device}"
+                ))
+            })?;
+            host(HostOp::SetPortDevice {
+                port: parse_port_req(&p)?,
+                device,
+            })
+        }
+        "input.get_ports" => core(CoreOp::InputPortsGet),
         "media.floppy.insert" => host(HostOp::FloppyInsert {
             drive: p.usize_req("drive")?,
             path: PathBuf::from(p.str_req("path")?),
@@ -1147,6 +1223,13 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
             Ok(json!({
                 "dmacon": bus.debug_dmacon(),
                 "display": bus.debug_display_state(),
+            }))
+        }
+        CoreOp::InputPortsGet => {
+            let input = &emu.bus().input;
+            Ok(json!({
+                "port1": input.ports[0].device.label(),
+                "port2": input.ports[1].device.label(),
             }))
         }
         CoreOp::RtcGet => {

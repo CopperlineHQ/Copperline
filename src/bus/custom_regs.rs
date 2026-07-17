@@ -28,8 +28,8 @@ impl Bus {
             }
             0x004 => self.agnus.read_vposr(), // VPOSR
             0x006 => self.agnus.read_vhposr(),
-            0x00A => self.input.joy0dat(), // JOY0DAT (mouse port 1 counters)
-            0x00C => self.input.joy1dat(), // JOY1DAT (mouse port 2 counters)
+            0x00A => self.input.joydat(0), // JOY0DAT (port 1)
+            0x00C => self.input.joydat(1), // JOY1DAT (port 2)
             0x00E => {
                 // Software is observing collisions: arm the per-frame flush from
                 // now on so the latch is maintained exactly as hardware does.
@@ -44,19 +44,25 @@ impl Bus {
             0x016 => {
                 // POTGOR
                 let mut v = self.paula.read_potgor(self.pot_pins());
-                if self.cd32_pad_serial_mode() {
-                    // P5 reads low (driven), P9 carries the serial bit.
-                    v &= !(1 << 12);
-                    if self.cd32_pad_serial_bit() && !self.input.rmb_port2 {
-                        v |= 1 << 14;
-                    } else {
-                        v &= !(1 << 14);
+                for port in 0..2 {
+                    let x_bit = (8 + 4 * port) as u16; // POT0X=8, POT1X=12
+                    let y_bit = x_bit + 2; // POT0Y=10, POT1Y=14
+                    if self.cd32_pad_serial_mode(port) {
+                        // The mode-select POTxX pin reads low (driven);
+                        // POTxY carries the serial bit, which a held Blue
+                        // button still grounds.
+                        v &= !(1 << x_bit);
+                        if self.cd32_pad_serial_bit(port) && !self.input.ports[port].button2 {
+                            v |= 1 << y_bit;
+                        } else {
+                            v &= !(1 << y_bit);
+                        }
+                    } else if self.input.ports[port].device == PortDevice::Cd32Pad {
+                        // Leaving serial mode reloads the shift register.
+                        // (Interior mutability not needed: POTGOR reads come
+                        // through custom_read with &mut self.)
+                        self.input.ports[port].cd32_shifter = 8;
                     }
-                } else if self.input.cd32_pad_port2 {
-                    // Leaving serial mode reloads the shift register.
-                    // (Interior mutability not needed: POTGOR reads come
-                    // through custom_read with &mut self.)
-                    self.cd32_pad_shifter = 8;
                 }
                 v
             }
@@ -99,12 +105,13 @@ impl Bus {
     }
 
     pub(super) fn pot_pins(&self) -> PotPins {
+        let [p1, p2] = &self.input.ports;
         PotPins {
-            left_x_released: !self.input.mmb_port1,
-            left_y_released: !self.input.rmb_port1,
-            right_x_released: !self.input.mmb_port2,
-            right_y_released: !self.input.rmb_port2,
-            resistance_ohms: self.input.pot_resistance_ohms,
+            left_x_released: p1.pot_x_released(),
+            left_y_released: p1.pot_y_released(),
+            right_x_released: p2.pot_x_released(),
+            right_y_released: p2.pot_y_released(),
+            resistance_ohms: [p1.pot_x_ohms, p1.pot_y_ohms, p2.pot_x_ohms, p2.pot_y_ohms],
         }
     }
 
@@ -118,6 +125,10 @@ impl Bus {
             0x02E => Some(self.agnus.copcon),
             0x032 => Some(self.paula.serper),
             0x034 => Some(self.paula.potgo),
+            // The pot counters are stored words a scan latches; reading
+            // them has no side effect, unlike most read-only counters.
+            0x012 => Some(self.paula.read_potdat(0)),
+            0x014 => Some(self.paula.read_potdat(1)),
             0x098 => Some(self.denise.clxcon),
             0x040 => Some(self.blitter.bltcon0),
             0x042 => Some(self.blitter.bltcon1),

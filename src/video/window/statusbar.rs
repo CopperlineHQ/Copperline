@@ -1312,10 +1312,12 @@ pub(super) fn draw_pause_button(
     }
 }
 
-/// Joystick input-source toggle: shows the device currently driving the
-/// emulated port-2 joystick (a gamepad in `Gamepad` mode, a keyboard in
-/// `Keyboard` mode). Clicking it flips between the two, so the active source is
-/// always visible rather than hidden behind a key combination.
+/// Joystick input-source toggle: shows the host source currently driving the
+/// emulated joystick port (a gamepad in `Gamepad` mode, a keyboard in
+/// `Keyboard` mode; with joysticks in both ports the mode picks which source
+/// gets the lower-numbered port). Clicking it flips between the two, so the
+/// active source is always visible rather than hidden behind a key
+/// combination.
 pub(super) fn draw_joystick_button(
     frame: &mut [u8],
     rect: Rect,

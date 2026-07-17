@@ -68,22 +68,29 @@ pub struct CliArgs {
     /// Scripted key presses to inject after the window opens. Useful
     /// for headless testing of menus and modifier chords.
     pub press_after: Vec<KeyPressSpec>,
-    /// `--click-after SECS BUTTON DURATION_MS`: at SECS seconds after
-    /// the window opens, press the named mouse button (left/right/middle),
-    /// hold for DURATION_MS, then release. Useful for headless testing
-    /// of the mouse-button-driven wait prompts.
-    pub click_after: Vec<(f32, MouseButtonKind, u32)>,
-    /// `--joy-after SECS BUTTON DURATION_MS`: at SECS emulated seconds,
-    /// press a port-2 joystick / CD32-pad control (up/down/left/right/
+    /// `--click-after SECS BUTTON DURATION_MS [PORT]`: at SECS seconds
+    /// after the window opens, press the named mouse button
+    /// (left/right/middle), hold for DURATION_MS, then release. The
+    /// optional trailing PORT (1 or 2) names the controller port,
+    /// defaulting to 1; the tuple carries it 0-based. Useful for headless
+    /// testing of the mouse-button-driven wait prompts.
+    pub click_after: Vec<(f32, MouseButtonKind, u32, u8)>,
+    /// `--joy-after SECS BUTTON DURATION_MS [PORT]`: at SECS emulated
+    /// seconds, press a joystick / CD32-pad control (up/down/left/right/
     /// red|fire/blue/green/yellow/play/rwd/ffw), hold for DURATION_MS,
-    /// then release. Useful for headless testing of joystick-driven
-    /// titles, especially CD32 games whose pad otherwise needs a
-    /// calibrated physical gamepad.
-    pub joy_after: Vec<(f32, JoyButtonKind, u32)>,
-    /// `--mouse-after SECS DX DY`: at SECS emulated seconds, apply a
-    /// relative port-1 mouse motion of (DX, DY) counter steps. Emitted
-    /// by the input recorder one event per frame of recorded movement.
-    pub mouse_after: Vec<(f32, i32, i32)>,
+    /// then release. PORT defaults to 2 (carried 0-based). Useful for
+    /// headless testing of joystick-driven titles, especially CD32 games
+    /// whose pad otherwise needs a calibrated physical gamepad.
+    pub joy_after: Vec<(f32, JoyButtonKind, u32, u8)>,
+    /// `--mouse-after SECS DX DY [PORT]`: at SECS emulated seconds, apply
+    /// a relative mouse motion of (DX, DY) counter steps. PORT defaults
+    /// to 1 (carried 0-based). Emitted by the input recorder one event
+    /// per frame of recorded movement.
+    pub mouse_after: Vec<(f32, i32, i32, u8)>,
+    /// `--pot-after SECS X Y [PORT]`: at SECS emulated seconds, set an
+    /// analogue controller's stick/paddle position (each axis 0-255, the
+    /// count POTxDAT latches). PORT defaults to 2 (carried 0-based).
+    pub pot_after: Vec<(f32, u8, u8, u8)>,
     /// `--record-input PATH`: record every input event that reaches the
     /// emulated machine for the whole run and write the scripted-input
     /// file to PATH on exit (the windowed toggle is the host shortcut
@@ -138,13 +145,14 @@ fn parse_args() -> Result<CliArgs> {
 /// the flag names (without the leading dashes) whose effects accumulate;
 /// anything else in a script is an error so a typo cannot silently change
 /// emulator configuration.
-const SCRIPT_DIRECTIVES: [&str; 8] = [
+const SCRIPT_DIRECTIVES: [&str; 9] = [
     "press-after",
     "key-after",
     "hold-key-after",
     "click-after",
     "joy-after",
     "mouse-after",
+    "pot-after",
     "insert-disk-after",
     "defer-disk-insert",
 ];
@@ -241,6 +249,29 @@ fn next_arg<T: std::str::FromStr>(
         .map_err(|_| anyhow!("{invalid}"))
 }
 
+/// Consume the optional trailing PORT token (exactly "1" or "2") a
+/// scripted-input flag accepts after its fixed arguments, returning the
+/// 0-based port index; anything else leaves the token for the main loop
+/// and yields the flag's traditional default port. (A positional ROM/disk
+/// path literally named "1" or "2" therefore cannot directly follow one
+/// of these flags; name it "./1" instead.)
+fn take_port_token(
+    args: &mut std::iter::Peekable<impl Iterator<Item = String>>,
+    default_port: u8,
+) -> u8 {
+    match args.peek().map(String::as_str) {
+        Some("1") => {
+            args.next();
+            0
+        }
+        Some("2") => {
+            args.next();
+            1
+        }
+        _ => default_port - 1,
+    }
+}
+
 fn parse_args_from<I>(args: I) -> Result<CliArgs>
 where
     I: IntoIterator<Item = String>,
@@ -261,9 +292,10 @@ where
     let mut dump_start_secs: f32 = 0.0;
     let mut dump_count: Option<u32> = None;
     let mut press_after: Vec<KeyPressSpec> = Vec::new();
-    let mut click_after: Vec<(f32, MouseButtonKind, u32)> = Vec::new();
-    let mut joy_after: Vec<(f32, JoyButtonKind, u32)> = Vec::new();
-    let mut mouse_after: Vec<(f32, i32, i32)> = Vec::new();
+    let mut click_after: Vec<(f32, MouseButtonKind, u32, u8)> = Vec::new();
+    let mut joy_after: Vec<(f32, JoyButtonKind, u32, u8)> = Vec::new();
+    let mut mouse_after: Vec<(f32, i32, i32, u8)> = Vec::new();
+    let mut pot_after: Vec<(f32, u8, u8, u8)> = Vec::new();
     let mut record_input: Option<PathBuf> = None;
     let mut wave_path: Option<PathBuf> = None;
     let mut wave_trigger: Option<copperline::waveform::Trigger> = None;
@@ -279,7 +311,7 @@ where
     let mut list_midi = false;
     let mut list_audio_devices = false;
     let mut overrides = ConfigOverrides::default();
-    let mut args = args.into_iter();
+    let mut args = args.into_iter().peekable();
     while let Some(a) = args.next() {
         match a.as_str() {
             "--calibrate-gamepad" => {
@@ -366,6 +398,16 @@ where
                         .ok_or_else(|| anyhow!("--joystick requires a mode (gamepad/keyboard)"))?,
                 );
             }
+            "--port1" => {
+                overrides.port1 = Some(args.next().ok_or_else(|| {
+                    anyhow!("--port1 requires a device (mouse/joystick/cd32/analogue/none)")
+                })?);
+            }
+            "--port2" => {
+                overrides.port2 = Some(args.next().ok_or_else(|| {
+                    anyhow!("--port2 requires a device (mouse/joystick/cd32/analogue/none)")
+                })?);
+            }
             "--serial" => {
                 overrides.serial = Some(args.next().ok_or_else(|| {
                     anyhow!("--serial requires a mode (off/stdout/midi/tcp/pty)")
@@ -419,7 +461,8 @@ where
                     USAGE,
                     "--click-after DURATION_MS must be a number",
                 )?;
-                click_after.push((secs, button, dur_ms));
+                let port = take_port_token(&mut args, 1);
+                click_after.push((secs, button, dur_ms, port));
             }
             "--joy-after" => {
                 const USAGE: &str = "--joy-after requires SECS BUTTON DURATION_MS";
@@ -432,14 +475,24 @@ where
                 })?;
                 let dur_ms: u32 =
                     next_arg(&mut args, USAGE, "--joy-after DURATION_MS must be a number")?;
-                joy_after.push((secs, button, dur_ms));
+                let port = take_port_token(&mut args, 2);
+                joy_after.push((secs, button, dur_ms, port));
             }
             "--mouse-after" => {
                 const USAGE: &str = "--mouse-after requires SECS DX DY";
                 let secs: f32 = next_arg(&mut args, USAGE, "--mouse-after SECS must be a number")?;
                 let dx: i32 = next_arg(&mut args, USAGE, "--mouse-after DX must be an integer")?;
                 let dy: i32 = next_arg(&mut args, USAGE, "--mouse-after DY must be an integer")?;
-                mouse_after.push((secs, dx, dy));
+                let port = take_port_token(&mut args, 1);
+                mouse_after.push((secs, dx, dy, port));
+            }
+            "--pot-after" => {
+                const USAGE: &str = "--pot-after requires SECS X Y";
+                let secs: f32 = next_arg(&mut args, USAGE, "--pot-after SECS must be a number")?;
+                let x: u8 = next_arg(&mut args, USAGE, "--pot-after X must be a number 0-255")?;
+                let y: u8 = next_arg(&mut args, USAGE, "--pot-after Y must be a number 0-255")?;
+                let port = take_port_token(&mut args, 2);
+                pot_after.push((secs, x, y, port));
             }
             "--record-input" => {
                 let v = args
@@ -746,6 +799,7 @@ where
         click_after,
         joy_after,
         mouse_after,
+        pot_after,
         record_input,
         disk_insert_after,
         audio_live,
@@ -792,6 +846,10 @@ fn print_help() {
          --rtc-frozen                   stop the seeded clock at --rtc-time exactly\n  \
          --joystick MODE                initial joystick input: gamepad or keyboard\n  \
          \x20                            (gamepad lets the keyboard pass through to the Amiga)\n  \
+         --port1 DEVICE                 controller in port 1: mouse (default), joystick,\n  \
+         \x20                            cd32, analogue, or none\n  \
+         --port2 DEVICE                 controller in port 2 (default: joystick;\n  \
+         \x20                            cd32 on the CD32 profile)\n  \
          \x20                            (--model/--cpu/etc. override the config file or defaults)\n  \
          --screenshot-after SECS PATH   save a PNG to PATH after SECS emulated seconds, then exit\n  \
          --save-state-after SECS PATH   write a save state to PATH after SECS emulated seconds,\n  \
@@ -823,9 +881,17 @@ fn print_help() {
          \x20                            decimal, 0x.., or a name like ctrl/lalt/lami/f1\n  \
          --key-after SECS KEY MS        press KEY after SECS, hold for MS milliseconds,\n  \
          \x20                            then release; may be passed multiple times\n  \
-         --click-after SECS BTN MS      press mouse BTN (left/right/middle) at SECS,\n  \
-         \x20                            release MS milliseconds later\n  \
-         --mouse-after SECS DX DY       apply a relative port-1 mouse motion at SECS\n  \
+         --click-after SECS BTN MS [PORT]\n  \
+         \x20                            press mouse BTN (left/right/middle) at SECS,\n  \
+         \x20                            release MS ms later, on PORT (default 1)\n  \
+         --joy-after SECS BTN MS [PORT] press joystick/CD32-pad BTN (up/down/left/right/\n  \
+         \x20                            red|fire/blue/green/yellow/play/rwd/ffw) at SECS,\n  \
+         \x20                            release MS ms later, on PORT (default 2)\n  \
+         --mouse-after SECS DX DY [PORT]\n  \
+         \x20                            apply a relative mouse motion at SECS on PORT\n  \
+         \x20                            (default 1)\n  \
+         --pot-after SECS X Y [PORT]    set an analogue controller position (0-255 per\n  \
+         \x20                            axis) at SECS on PORT (default 2)\n  \
          --record-input PATH            record all machine-bound input for the whole run\n  \
          \x20                            and write the script to PATH on exit\n  \
          --script FILE                  run scripted-input directives from FILE (the flag\n  \
@@ -961,6 +1027,7 @@ fn validate_benchmark_args(cli: &CliArgs) -> Result<()> {
         || !cli.click_after.is_empty()
         || !cli.joy_after.is_empty()
         || !cli.mouse_after.is_empty()
+        || !cli.pot_after.is_empty()
     {
         return Err(anyhow!(
             "--benchmark-until cannot be combined with scheduled input events"
@@ -1006,6 +1073,7 @@ fn validate_gdb_args(cli: &CliArgs) -> Result<()> {
         || !cli.click_after.is_empty()
         || !cli.joy_after.is_empty()
         || !cli.mouse_after.is_empty()
+        || !cli.pot_after.is_empty()
     {
         return Err(anyhow!(
             "--gdb cannot be combined with scheduled input events"
@@ -1070,6 +1138,7 @@ fn validate_control_args(cli: &CliArgs) -> Result<()> {
         || !cli.click_after.is_empty()
         || !cli.joy_after.is_empty()
         || !cli.mouse_after.is_empty()
+        || !cli.pot_after.is_empty()
     {
         return Err(anyhow!(
             "--control cannot be combined with scheduled input events (use input.*)"
@@ -1413,6 +1482,7 @@ fn main() -> Result<()> {
         cli.click_after,
         cli.joy_after,
         cli.mouse_after,
+        cli.pot_after,
         disk_insert_after,
         cli.record_input,
         cfg.floppy_playlists.clone(),
@@ -1513,6 +1583,7 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
         None,
         std::array::from_fn(|_| Vec::new()),
         [true; 4],
@@ -1549,6 +1620,7 @@ fn launcher_requested(cli: &CliArgs) -> bool {
         && cli.click_after.is_empty()
         && cli.joy_after.is_empty()
         && cli.mouse_after.is_empty()
+        && cli.pot_after.is_empty()
         && cli.disk_insert_after.is_empty()
         && cli.record_input.is_none()
         && cli.audio_wav.is_none()
@@ -1724,7 +1796,60 @@ mod tests {
     #[test]
     fn mouse_after_parses_signed_deltas() -> Result<()> {
         let args = parse(&["--mouse-after", "1.5", "-3", "10"])?;
-        assert_eq!(args.mouse_after, vec![(1.5, -3, 10)]);
+        assert_eq!(args.mouse_after, vec![(1.5, -3, 10, 0)]);
+        Ok(())
+    }
+
+    #[test]
+    fn scripted_input_flags_take_an_optional_trailing_port() -> Result<()> {
+        let args = parse(&[
+            "--mouse-after",
+            "1.5",
+            "-3",
+            "10",
+            "2",
+            "--click-after",
+            "5",
+            "left",
+            "100",
+            "2",
+            "--joy-after",
+            "60",
+            "red",
+            "300",
+            "1",
+            "--pot-after",
+            "12",
+            "50",
+            "200",
+            "1",
+        ])?;
+        assert_eq!(args.mouse_after, vec![(1.5, -3, 10, 1)]);
+        assert_eq!(args.click_after, vec![(5.0, MouseButtonKind::Left, 100, 1)]);
+        assert_eq!(args.joy_after, vec![(60.0, JoyButtonKind::Red, 300, 0)]);
+        assert_eq!(args.pot_after, vec![(12.0, 50, 200, 0)]);
+        Ok(())
+    }
+
+    #[test]
+    fn port_token_lookahead_does_not_eat_a_following_flag() -> Result<()> {
+        // No trailing port: the next flag must survive as a flag, and the
+        // defaults are click/mouse -> port 1, joy/pot -> port 2 (0-based
+        // 0/1 in the tuples).
+        let args = parse(&[
+            "--joy-after",
+            "60",
+            "red",
+            "300",
+            "--pot-after",
+            "12",
+            "50",
+            "200",
+            "--noaudio",
+        ])?;
+        assert_eq!(args.joy_after, vec![(60.0, JoyButtonKind::Red, 300, 1)]);
+        assert_eq!(args.pot_after, vec![(12.0, 50, 200, 1)]);
+        assert!(!args.audio_live);
         Ok(())
     }
 
@@ -1737,16 +1862,18 @@ mod tests {
              press-after 14.1 0x63\n\
              \n\
              click-after 5.0 left 100\n\
-             joy-after 60.0 red 300\n\
-             mouse-after 1.020 -3 10\n\
+             joy-after 60.0 red 300 1\n\
+             mouse-after 1.020 -3 10 2\n\
+             pot-after 12.0 50 200\n\
              insert-disk-after 30.0 df1 \"/tmp/with space.adf\"\n",
         );
         let args = parse(&["--script", path.to_str().unwrap()])?;
         assert_eq!(args.press_after.len(), 2);
         assert_eq!(args.press_after[0].hold_ms, 500);
-        assert_eq!(args.click_after, vec![(5.0, MouseButtonKind::Left, 100)]);
-        assert_eq!(args.joy_after, vec![(60.0, JoyButtonKind::Red, 300)]);
-        assert_eq!(args.mouse_after, vec![(1.02, -3, 10)]);
+        assert_eq!(args.click_after, vec![(5.0, MouseButtonKind::Left, 100, 0)]);
+        assert_eq!(args.joy_after, vec![(60.0, JoyButtonKind::Red, 300, 0)]);
+        assert_eq!(args.mouse_after, vec![(1.02, -3, 10, 1)]);
+        assert_eq!(args.pot_after, vec![(12.0, 50, 200, 1)]);
         assert_eq!(
             args.disk_insert_after,
             vec![CliDiskInsert::Explicit(DiskInsertSpec {
@@ -1793,13 +1920,14 @@ mod tests {
         // events through --script.
         let mut rec = copperline::inputrec::InputRecorder::new(0.0);
         let mut input = copperline::bus::InputState::default();
+        input.set_port_device(1, copperline::bus::PortDevice::Joystick);
         rec.observe(&input, 1.0);
         rec.record_key(0x45, true, 1.5);
         rec.record_key(0x45, false, 1.75);
-        input.mouse_x_port1 = 5;
-        input.lmb_port1 = true;
+        input.ports[0].counter_x = 5;
+        input.ports[0].fire = true;
         rec.observe(&input, 2.0);
-        input.lmb_port1 = false;
+        input.ports[0].fire = false;
         rec.observe(&input, 2.5);
         rec.record_disk_insert(0, Path::new("/tmp/demo.adf"), 3.0);
         let path = temp_script("roundtrip", &rec.finish());
@@ -1808,8 +1936,8 @@ mod tests {
         assert_eq!(args.press_after.len(), 1);
         assert_eq!(args.press_after[0].rawkey, 0x45);
         assert_eq!(args.press_after[0].hold_ms, 250);
-        assert_eq!(args.mouse_after, vec![(2.0, 5, 0)]);
-        assert_eq!(args.click_after, vec![(2.0, MouseButtonKind::Left, 500)]);
+        assert_eq!(args.mouse_after, vec![(2.0, 5, 0, 0)]);
+        assert_eq!(args.click_after, vec![(2.0, MouseButtonKind::Left, 500, 0)]);
         assert_eq!(args.disk_insert_after.len(), 1);
         let _ = std::fs::remove_file(&path);
         Ok(())

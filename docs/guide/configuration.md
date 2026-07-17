@@ -45,6 +45,8 @@ range checks as the equivalent TOML fields:
 | `--slow SIZE` | `[memory] slow` | `0`, up to `512K` |
 | `--floppy-drives COUNT` | `[floppy] drives` | `1` to `4` wired drives (`DF0:` plus external drives) |
 | `--joystick MODE` | `[input] joystick` | `gamepad` (default), `keyboard` |
+| `--port1 DEVICE` | `[input] port1` | `mouse` (default), `joystick`, `cd32`, `analogue`, `none` |
+| `--port2 DEVICE` | `[input] port2` | same devices; default `joystick` (`cd32` on the CD32 profile) |
 
 For example, to boot a stock A1200 profile but with 8 MB of fast RAM and a
 faster CPU, with no config file at all:
@@ -440,23 +442,60 @@ Windows select each device directly.
 
 ```toml
 [input]
+port1 = "mouse"        # mouse | joystick | cd32 | analogue | none
+port2 = "joystick"     # same values; default "cd32" on the CD32 profile
 joystick = "gamepad"   # "gamepad" (default) or "keyboard"
 ```
 
-Selects the initial host source for the emulated port-2 joystick / CD32 pad.
+### Controller ports
+
+`port1` and `port2` name the controller device plugged into each game port.
+Either port accepts any device, exactly as on real hardware:
+
+- `mouse` -- a quadrature mouse. Its three buttons are the left (`/FIRx`),
+  right (`POTxY`), and middle (`POTxX`) lines.
+- `joystick` -- a digital switch joystick with a fire button and a second
+  button on the `POTxY` line.
+- `cd32` -- a CD32 joypad: a digital joystick plus the serial button
+  protocol lowlevel.library reads (Red/Blue ride the fire/button-2 lines;
+  Green, Yellow, Play, Rewind and Forward exist only serially).
+- `analogue` -- analogue paddles or a proportional stick presenting
+  resistances on the `POTxX`/`POTxY` pins, with the two paddle buttons on
+  the left/right direction lines. No live host device maps to it yet:
+  drive it with `--pot-after` scripting or the control protocol's
+  `input.analogue` method (positions default to centre).
+- `none` -- an empty port.
+
+The defaults are today's stock wiring: a mouse in port 1 and a joystick in
+port 2 -- a CD32 pad on the CD32 profile, whose bundled controller the
+machine expects (an explicit key beats the profile; a real CD32 accepts any
+controller too). `--port1` / `--port2` override for one run, the runtime
+menu's **Port 1/2 Device** items hot-plug a device live, and the control
+protocol's `input.set_port` does the same from a script.
+
+Putting joysticks in *both* ports is a real two-player setup: the host
+gamepad and the keyboard mapping then drive one port each (see below).
+
+### Joystick input source
+
+`joystick` selects the initial host source for the joystick/CD32-pad port.
 There are two explicit modes, so the active source is always visible rather
 than depending on whether a pad happens to be connected:
 
-- `gamepad` (the default) -- only a physical pad drives port 2. The keyboard
-  is left to the Amiga, so it passes straight through to a Shell, an editor,
-  or Workbench, and no keys are unexpectedly captured as joystick input. With
-  no pad connected there is simply no port-2 input.
+- `gamepad` (the default) -- only a physical pad drives the joystick port.
+  The keyboard is left to the Amiga, so it passes straight through to a
+  Shell, an editor, or Workbench, and no keys are unexpectedly captured as
+  joystick input. With no pad connected there is simply no joystick input.
 - `keyboard` -- use the keyboard-joystick mapping (cursor keys plus the fire
-  keys), so port 2 stays usable without a controller.
+  keys), so the port stays usable without a controller.
+
+With one joystick/CD32-pad port the mode picks its source. With two, both
+sources are in play -- the gamepad and the keyboard mapping drive one port
+each -- and the mode picks which source gets the lower-numbered port.
 
 This only sets the starting mode. The status-bar toggle (the gamepad /
 keyboard icon next to the volume control), `Cmd+J` / `Alt+J`, the menu's
-**Joystick Input** item, and the launcher's *A/V & Emu* tab all flip it live
+**Joystick Input** item, and the launcher's *Input* tab all flip it live
 without changing the config. `--joystick MODE` overrides this for a single
 run. (`auto` is still accepted here as a backward-compatibility alias for
 `gamepad`; the old auto-detect mode has been removed.)

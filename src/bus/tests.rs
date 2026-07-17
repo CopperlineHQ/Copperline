@@ -12,7 +12,7 @@ use super::{
     live_sprite_sprite_collision_bits, visible_start_vpos_for_diw, BeamChipRamWrite,
     BeamRegisterWrite, BeamWriteSource, Bus, CapturedBitplaneRow, CapturedSpriteLine, ChipBusOwner,
     CpuBusAccessKind, DeviceClock, DisplaySpriteDmaState, DisplaySpriteLineData, FrameBusTrace,
-    LiveCollisionControl, LiveCollisionLineReplay, LiveSpriteCollisionSource,
+    LiveCollisionControl, LiveCollisionLineReplay, LiveSpriteCollisionSource, PortDevice,
     RenderRegisterSnapshot, BLITTER_SLOWDOWN_CPU_MISS_LIMIT, BLTCON0_USE_A, BLTCON0_USE_C,
     BLTCON0_USE_D, BLTCON1_DOFF, BLTCON1_LINE, BPLCON0_ECSENA, BPLCON3_BRDRBLNK, BPLCON3_BRDSPRT,
     BPLCON3_SPRES_HIRES, DENISE_HPOS_LAG_CCK, DMACON_BLTEN, DMACON_BLTPRI, DMACON_BPLEN,
@@ -9172,12 +9172,12 @@ fn a1000_led_line_does_not_switch_the_audio_filter() {
 fn cd32_pad_serial_protocol_shifts_button_bits() {
     use crate::chipset::cia::REG_DDRA;
     let mut bus = empty_bus();
-    bus.input.cd32_pad_port2 = true;
+    bus.input.set_port_device(1, PortDevice::Cd32Pad);
     // Pressed: Red (fire line), Green, Play. Released: Blue, Yellow,
     // FFW, RWD.
-    bus.input.lmb_port2 = true;
-    bus.input.cd32_green_port2 = true;
-    bus.input.cd32_play_port2 = true;
+    bus.input.ports[1].fire = true;
+    bus.input.ports[1].cd32_green = true;
+    bus.input.ports[1].cd32_play = true;
 
     // lowlevel.library's read: drive /FIR1 as output high, put the
     // pad into serial mode by driving POT1X low through POTGO, then
@@ -9220,6 +9220,190 @@ fn cd32_pad_serial_protocol_shifts_button_bits() {
 }
 
 #[test]
+fn cd32_pad_serial_protocol_on_port_1_uses_pot0x_fir0_and_pot0y() {
+    use crate::chipset::cia::REG_DDRA;
+    let mut bus = empty_bus();
+    bus.input.set_port_device(0, PortDevice::Cd32Pad);
+    // Pressed: Red (fire line), Green, Play. Released: Blue, Yellow,
+    // FFW, RWD.
+    bus.input.ports[0].fire = true;
+    bus.input.ports[0].cd32_green = true;
+    bus.input.ports[0].cd32_play = true;
+
+    // The port-1 mirror of the pad read: drive /FIR0 (PA6) as output
+    // high, select serial mode by driving POT0X low through POTGO
+    // (OUTLX set, DATLX clear -> bits 9/8 = 10), then sample POT0Y
+    // (bit 10) and clock with /FIR0 edges.
+    let ddra = (REG_DDRA as u64) << 8;
+    let pra = (REG_PRA as u64) << 8;
+    let _ = bus.cia_a_write(ddra, 1, 0x40);
+    let _ = bus.cia_a_write(pra, 1, 0x40);
+    bus.custom_write(0x034, 2, 0x0200);
+
+    let expected = [
+        true,  // 8 Blue released
+        false, // 7 Red pressed
+        true,  // 6 Yellow released
+        false, // 5 Green pressed
+        true,  // 4 FFW released
+        true,  // 3 RWD released
+        false, // 2 Play pressed
+        true,  // 1 pad-present
+        false, // 0 zeros
+        false, // stays zero
+    ];
+    for (step, want) in expected.iter().enumerate() {
+        let potgor = bus.custom_read(0x016, 2) as u16;
+        assert_eq!(potgor & (1 << 10) != 0, *want, "serial bit at step {step}");
+        // The mode-select POT0X pin reads low throughout.
+        assert_eq!(potgor & (1 << 8), 0, "POT0X driven low at step {step}");
+        let _ = bus.cia_a_write(pra, 1, 0x00); // falling edge: shift
+        let _ = bus.cia_a_write(pra, 1, 0x40); // rising edge
+    }
+
+    // Leaving serial mode reloads the shifter: Blue again first.
+    bus.custom_write(0x034, 2, 0x0300); // POT0X driven high
+    let _ = bus.custom_read(0x016, 2);
+    bus.custom_write(0x034, 2, 0x0200);
+    let potgor = bus.custom_read(0x016, 2) as u16;
+    assert!(potgor & (1 << 10) != 0, "Blue (released) after reload");
+}
+
+#[test]
+fn cd32_pads_shift_independently_per_port() {
+    use crate::chipset::cia::REG_DDRA;
+    let mut bus = empty_bus();
+    bus.input.set_port_device(0, PortDevice::Cd32Pad);
+    bus.input.set_port_device(1, PortDevice::Cd32Pad);
+    // Red pressed on both pads: a pad that has shifted once reports Red
+    // (0), one still at the reload position reports Blue released (1).
+    bus.input.ports[0].fire = true;
+    bus.input.ports[1].fire = true;
+
+    let ddra = (REG_DDRA as u64) << 8;
+    let pra = (REG_PRA as u64) << 8;
+    // Only /FIR1 is CPU-driven; /FIR0 stays an input.
+    let _ = bus.cia_a_write(ddra, 1, 0x80);
+    let _ = bus.cia_a_write(pra, 1, 0x80);
+    // Both X pins driven low: both pads in serial mode.
+    bus.custom_write(0x034, 2, 0x2200);
+
+    // Clock /FIR1 once: only the port-2 shifter advances to Red.
+    let _ = bus.cia_a_write(pra, 1, 0x00);
+    let _ = bus.cia_a_write(pra, 1, 0x80);
+    let potgor = bus.custom_read(0x016, 2) as u16;
+    assert_eq!(potgor & (1 << 14), 0, "port 2 shifted to Red (pressed)");
+    assert_ne!(potgor & (1 << 10), 0, "port 1 still at Blue (released)");
+}
+
+#[test]
+fn mouse_middle_button_grounds_potx_pin_per_port() {
+    let mut bus = empty_bus();
+    assert_eq!(bus.custom_read(0x016, 2) & 0x1100, 0x1100);
+    bus.input.set_mouse_button(0, 2, true);
+    assert_eq!(bus.custom_read(0x016, 2) & 0x1100, 0x1000);
+    bus.input.set_mouse_button(1, 2, true);
+    bus.input.set_mouse_button(0, 2, false);
+    assert_eq!(bus.custom_read(0x016, 2) & 0x1100, 0x0100);
+}
+
+#[test]
+fn analogue_stick_position_latches_as_potxdat_count_per_port() {
+    let mut bus = empty_bus();
+    bus.input.set_analogue(0, 100, 200);
+    bus.input.set_analogue(1, 30, 60);
+
+    // START the scan, then advance well past the 8 discharge lines plus
+    // the 255-count ramp.
+    assert!(!bus.custom_write(0x034, 2, 0x0001));
+    bus.advance_devices(227 * 300);
+
+    assert_eq!(bus.custom_read(0x012, 2), 0xC864); // POT0DAT: y=200, x=100
+    assert_eq!(bus.custom_read(0x014, 2), 0x3C1E); // POT1DAT: y=60, x=30
+}
+
+#[test]
+fn analogue_buttons_read_through_joydat_left_right_lines() {
+    let mut bus = empty_bus();
+    bus.input.set_analogue(0, 10, 10);
+    bus.input.set_analogue(1, 10, 10);
+
+    // Driving the joystick lines on an analogue port must not change the
+    // device: the left/right switch lines ARE the paddle buttons.
+    bus.input
+        .set_joystick(0, false, false, true, false, false, false);
+    bus.input
+        .set_joystick(1, false, false, false, true, false, false);
+    assert_eq!(bus.input.device(0), PortDevice::Analogue);
+    assert_eq!(bus.input.device(1), PortDevice::Analogue);
+
+    // Button 1 (left line) reads back as JOYxDAT bit 9, button 2 (right
+    // line) as bit 1, on top of the idle counters.
+    assert_eq!(bus.custom_read(0x00A, 2), 0x0200);
+    assert_eq!(bus.custom_read(0x00C, 2), 0x0002);
+    // The paddle buttons do not touch the /FIRx lines.
+    assert_eq!(bus.cia_a_read((REG_PRA as u64) * 256, 1) & 0xC0, 0xC0);
+}
+
+#[test]
+fn unplugging_a_device_releases_its_lines_but_keeps_the_counters() {
+    let mut bus = empty_bus();
+    assert!(!bus.custom_write(0x036, 2, 0x1234)); // JOYTEST loads counters
+    bus.input
+        .set_joystick(1, true, false, false, false, true, true);
+    assert_eq!(
+        bus.custom_read(0x00C, 2) as u16,
+        super::digital_joydat(true, false, false, false)
+    );
+
+    // Swapping the joystick for a mouse releases fire and button 2, and
+    // the chip-side quadrature counters still hold the JOYTEST value.
+    bus.input.set_port_device(1, PortDevice::Mouse);
+    assert_eq!(bus.custom_read(0x00C, 2), 0x1234);
+    assert_ne!(bus.cia_a_read((REG_PRA as u64) * 256, 1) & 0x80, 0);
+    assert_ne!(bus.custom_read(0x016, 2) & 0x4000, 0);
+}
+
+#[test]
+fn machine_reset_keeps_plugged_devices_and_knob_positions() {
+    let mut bus = empty_bus();
+    bus.input.set_port_device(0, PortDevice::Cd32Pad);
+    bus.input.set_analogue(1, 50, 200);
+    bus.input.ports[0].fire = true;
+    bus.input.ports[0].up = true;
+    assert!(!bus.custom_write(0x036, 2, 0x1234)); // JOYTEST loads counters
+
+    // A reset does not unplug anything: Ctrl-Amiga-Amiga, the CPU RESET
+    // instruction, and a cold boot all leave the physical controllers
+    // (and a paddle's knob position) where they are, while the chip-side
+    // counters clear and the driven lines release.
+    bus.reset_for_keyboard_reset();
+    assert_eq!(bus.input.device(0), PortDevice::Cd32Pad);
+    assert_eq!(bus.input.device(1), PortDevice::Analogue);
+    assert_eq!(
+        bus.input.ports[1].pot_x_ohms,
+        Some(crate::chipset::paula::pot_position_resistance_ohms(50))
+    );
+    assert!(!bus.input.ports[0].fire, "reset released the fire line");
+    assert!(!bus.input.ports[0].up);
+    assert_eq!(bus.input.ports[0].counter_x, 0, "chip counters cleared");
+    assert_eq!(bus.input.ports[0].cd32_shifter, 8, "pad shifter reloaded");
+}
+
+#[test]
+fn empty_port_reads_like_an_idle_mouse() {
+    let mut bus = empty_bus();
+    bus.input.set_port_device(0, PortDevice::None);
+    assert!(!bus.custom_write(0x036, 2, 0xABCD));
+
+    // Nothing drives the pins: JOY0DAT reports the counters, the pot
+    // pins float high, and /FIR0 stays released.
+    assert_eq!(bus.custom_read(0x00A, 2), 0xABCD);
+    assert_eq!(bus.custom_read(0x016, 2) & 0x0500, 0x0500);
+    assert_ne!(bus.cia_a_read((REG_PRA as u64) * 256, 1) & 0x40, 0);
+}
+
+#[test]
 fn front_panel_hdd_led_follows_gayle_activity_with_hold() {
     let mut bus = empty_bus();
     // No Gayle: no HDD LED at all.
@@ -9253,21 +9437,22 @@ fn front_panel_reports_host_output_volume() {
 fn joy0dat_reports_wrapping_mouse_counters() {
     let mut bus = empty_bus();
 
-    bus.input.add_mouse_delta_port1(5, -2);
+    bus.input.add_mouse_delta(0, 5, -2);
     assert_eq!(bus.custom_read(0x00A, 2), 0xFE05);
 
-    bus.input.add_mouse_delta_port1(-6, 4);
+    bus.input.add_mouse_delta(0, -6, 4);
     assert_eq!(bus.custom_read(0x00A, 2), 0x02FF);
 }
 
 #[test]
-fn joy1dat_reports_second_port_mouse_counters() {
+fn mouse_on_port_2_counts_through_real_deltas() {
     let mut bus = empty_bus();
 
-    bus.input.mouse_x_port2 = 0xFF;
-    bus.input.mouse_y_port2 = 0x03;
+    bus.input.add_mouse_delta(1, -1, 3);
 
     assert_eq!(bus.custom_read(0x00C, 2), 0x03FF);
+    // Port 1's counters are independent.
+    assert_eq!(bus.custom_read(0x00A, 2), 0x0000);
 }
 
 /// The decode an Amiga game (or AmigaTestKit) applies to a JOYxDAT word to
@@ -9290,13 +9475,10 @@ fn digital_joystick_directions_round_trip_through_joydat_on_both_ports() {
         let (up, down, left, right) = (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0);
 
         let mut bus = empty_bus();
-        bus.input.joystick_port1 = true;
-        bus.input.joy_up_port1 = up;
-        bus.input.joy_down_port1 = down;
-        bus.input.joy_left_port1 = left;
-        bus.input.joy_right_port1 = right;
         bus.input
-            .set_joystick_port2(up, down, left, right, false, false);
+            .set_joystick(0, up, down, left, right, false, false);
+        bus.input
+            .set_joystick(1, up, down, left, right, false, false);
 
         let p1 = bus.custom_read(0x00A, 2) as u16;
         let p2 = bus.custom_read(0x00C, 2) as u16;
@@ -9316,16 +9498,16 @@ fn digital_joystick_directions_round_trip_through_joydat_on_both_ports() {
 #[test]
 fn joydat_reports_mouse_until_joystick_engaged() {
     let mut bus = empty_bus();
-    bus.input.mouse_x_port2 = 0x12;
-    bus.input.mouse_y_port2 = 0x34;
+    bus.input.ports[1].counter_x = 0x12;
+    bus.input.ports[1].counter_y = 0x34;
     // Direction lines set but the port is still a mouse: JOY1DAT must keep
     // reporting the quadrature counters.
-    bus.input.joy_right_port2 = true;
+    bus.input.ports[1].right = true;
     assert_eq!(bus.custom_read(0x00C, 2), 0x3412);
 
     // Engaging the joystick switches JOY1DAT to the direction encoding.
     bus.input
-        .set_joystick_port2(false, false, false, true, false, false);
+        .set_joystick(1, false, false, false, true, false, false);
     assert_eq!(
         bus.custom_read(0x00C, 2) as u16,
         super::digital_joydat(false, false, false, true)
@@ -9333,29 +9515,46 @@ fn joydat_reports_mouse_until_joystick_engaged() {
 }
 
 #[test]
-fn joystick_fire_drives_cia_a_pra_fir1() {
+fn fire_drives_cia_a_pra_fir0_and_fir1_per_port() {
     let mut bus = empty_bus();
-    // Released: /FIR1 (PRA bit 7) reads high.
+    // Released: /FIR0 (PRA bit 6) and /FIR1 (PRA bit 7) read high.
     bus.input
-        .set_joystick_port2(false, false, false, false, false, false);
-    assert_ne!(bus.cia_a_read((REG_PRA as u64) * 256, 1) & 0x80, 0);
-    // Pressed: /FIR1 reads low (active-low).
+        .set_joystick(0, false, false, false, false, false, false);
     bus.input
-        .set_joystick_port2(false, false, false, false, true, false);
-    assert_eq!(bus.cia_a_read((REG_PRA as u64) * 256, 1) & 0x80, 0);
+        .set_joystick(1, false, false, false, false, false, false);
+    assert_eq!(bus.cia_a_read((REG_PRA as u64) * 256, 1) & 0xC0, 0xC0);
+    // Port-1 fire pulls only /FIR0 low (active-low).
+    bus.input
+        .set_joystick(0, false, false, false, false, true, false);
+    assert_eq!(bus.cia_a_read((REG_PRA as u64) * 256, 1) & 0xC0, 0x80);
+    // Port-2 fire pulls only /FIR1 low.
+    bus.input
+        .set_joystick(0, false, false, false, false, false, false);
+    bus.input
+        .set_joystick(1, false, false, false, false, true, false);
+    assert_eq!(bus.cia_a_read((REG_PRA as u64) * 256, 1) & 0xC0, 0x40);
 }
 
 #[test]
-fn joystick_button2_drives_pot1y_through_potgor() {
+fn joystick_button2_drives_potxy_through_potgor_per_port() {
     let mut bus = empty_bus();
-    // Released: POT1Y (POTGOR bit 14) reads high (input pin, button up).
+    // Released: POT0Y (bit 10) and POT1Y (bit 14) read high (input pins,
+    // buttons up).
     bus.input
-        .set_joystick_port2(false, false, false, false, false, false);
-    assert_ne!(bus.custom_read(0x016, 2) & 0x4000, 0);
-    // Pressed: POT1Y reads low.
+        .set_joystick(0, false, false, false, false, false, false);
     bus.input
-        .set_joystick_port2(false, false, false, false, false, true);
-    assert_eq!(bus.custom_read(0x016, 2) & 0x4000, 0);
+        .set_joystick(1, false, false, false, false, false, false);
+    assert_eq!(bus.custom_read(0x016, 2) & 0x4400, 0x4400);
+    // Port-2 button 2 pulls only POT1Y low.
+    bus.input
+        .set_joystick(1, false, false, false, false, false, true);
+    assert_eq!(bus.custom_read(0x016, 2) & 0x4400, 0x0400);
+    // Port-1 button 2 pulls only POT0Y low.
+    bus.input
+        .set_joystick(0, false, false, false, false, false, true);
+    bus.input
+        .set_joystick(1, false, false, false, false, false, false);
+    assert_eq!(bus.custom_read(0x016, 2) & 0x4400, 0x4000);
 }
 
 #[test]
@@ -9370,18 +9569,18 @@ fn fire_buttons_read_through_potgo_pullup_mode() {
     // Port 2 pull-ups (POT1X bits 12/13, POT1Y bits 14/15).
     assert!(!bus.custom_write(0x034, 2, 0xF000));
     bus.input
-        .set_joystick_port2(false, false, false, false, false, false);
+        .set_joystick(1, false, false, false, false, false, false);
     assert_ne!(bus.custom_read(0x016, 2) & 0x4000, 0); // button 2 up -> high
     bus.input
-        .set_joystick_port2(false, false, false, false, false, true);
+        .set_joystick(1, false, false, false, false, false, true);
     assert_eq!(bus.custom_read(0x016, 2) & 0x4000, 0); // button 2 down -> low
 
     // Port 1 pull-ups (POT0X bits 8/9, POT0Y bits 10/11): the right mouse
     // button reads through POT0Y the same way.
     assert!(!bus.custom_write(0x034, 2, 0x0F00));
-    bus.input.rmb_port1 = false;
+    bus.input.set_mouse_button(0, 1, false);
     assert_ne!(bus.custom_read(0x016, 2) & 0x0400, 0); // RMB up -> high
-    bus.input.rmb_port1 = true;
+    bus.input.set_mouse_button(0, 1, true);
     assert_eq!(bus.custom_read(0x016, 2) & 0x0400, 0); // RMB down -> low
 }
 
@@ -9411,7 +9610,7 @@ fn joytest_sets_both_mouse_counter_pairs() {
 #[test]
 fn potgo_starts_counters_and_potgor_reflects_button_pins() {
     let mut bus = empty_bus();
-    bus.input.rmb_port1 = true;
+    bus.input.set_mouse_button(0, 1, true);
 
     assert!(!bus.custom_write(0x034, 2, 0x0001));
     // The pot counters clock at H-sync, so while the scan runs it caps the

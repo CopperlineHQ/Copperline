@@ -417,6 +417,17 @@ impl Session {
                 self.write(&reply)?;
                 Ok(None)
             }
+            HostOp::SetPortDevice { port, device } => {
+                self.emu
+                    .bus_mut()
+                    .input
+                    .set_port_device(port as usize, device);
+                self.write(&proto::ok_line(
+                    &id,
+                    json!({"port": port + 1, "device": device.label()}),
+                ))?;
+                Ok(None)
+            }
             HostOp::StateLoad { path } => {
                 let reply = match self.emu.load_state(&path) {
                     Ok(outcome) => {
@@ -796,10 +807,11 @@ impl Session {
                     | HostOp::FloppyEject { .. }
                     | HostOp::CdInsert { .. }
                     | HostOp::CdEject
+                    | HostOp::SetPortDevice { .. }
                     | HostOp::Reset { .. }),
                 ) => {
-                    // Media changes and reset are ordinary live events;
-                    // apply them at this boundary.
+                    // Media changes, controller hot-plug, and reset are
+                    // ordinary live events; apply them at this boundary.
                     if let Some(end) = self.dispatch_host(req.id, op)? {
                         return Ok(MidRun::Lost(end));
                     }
@@ -1130,6 +1142,34 @@ mod tests {
             script.contains("0x45"),
             "recording carries the injected key: {script}"
         );
+    }
+
+    #[test]
+    fn input_port_methods_hot_plug_and_report_devices() {
+        run_session(None, |c| {
+            c.auth();
+            // A fresh machine (no config layer here) has two mouse ports.
+            let ports = c.result("input.get_ports", json!({}));
+            assert_eq!(ports["port1"], "mouse");
+            assert_eq!(ports["port2"], "mouse");
+
+            // Hot-plug a CD32 pad into port 1 and report it back.
+            let set = c.result("input.set_port", json!({"port": 1, "device": "cd32"}));
+            assert_eq!(set["port"], 1);
+            assert_eq!(set["device"], "cd32");
+            let ports = c.result("input.get_ports", json!({}));
+            assert_eq!(ports["port1"], "cd32");
+
+            // input.joy/analogue take an optional port; port 3 is refused.
+            c.result("input.joy", json!({"port": 1, "up": true, "red": true}));
+            c.result("input.analogue", json!({"port": 2, "x": 50, "y": 200}));
+            let ports = c.result("input.get_ports", json!({}));
+            assert_eq!(ports["port2"], "analogue");
+            let bad = c.call("input.mouse", json!({"port": 3, "dx": 1}));
+            assert_eq!(bad["error"]["code"], proto::INVALID_PARAMS);
+            let bad = c.call("input.set_port", json!({"port": 1, "device": "trackball"}));
+            assert_eq!(bad["error"]["code"], proto::INVALID_PARAMS);
+        });
     }
 
     #[test]

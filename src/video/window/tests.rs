@@ -9,9 +9,9 @@ use super::{
     bar_layout, center_present_frame_for_visible_start, center_present_frame_horizontally,
     control_at, copperline_icon_image, copperline_logo_image, copy_present_frame,
     copy_window_present_frame, draw_status_bar, fdd_track_counter_rect, fdd_track_digit_rect,
-    host_shortcut_modifier_pressed, host_to_amiga_rawkey, joystick_mode_uses_keyboard,
-    joystick_toggle_rect, keyboard_joystick_key_for, led_row_rect, mask_present_frame_to_tv,
-    paint_test_screen, parse_amiga_key, pause_button_rect, power_button_rect, present_height,
+    host_shortcut_modifier_pressed, host_to_amiga_rawkey, joystick_toggle_rect,
+    keyboard_joystick_key_for, led_row_rect, mask_present_frame_to_tv, paint_test_screen,
+    parse_amiga_key, pause_button_rect, power_button_rect, present_height,
     presentation_h_shift_for, presentation_source_y_offset, raw_device_qualifier_family_held,
     raw_device_qualifier_rawkey, rawkey_is_held, rawkey_transition_is_duplicate,
     reboot_button_rect, repeated_main_key_should_drop, rgba, shot_button_rect,
@@ -383,8 +383,7 @@ fn keyboard_joystick_fire_aliases_release_independently() {
 #[test]
 fn joystick_input_mode_toggles_between_two_explicit_modes() {
     // The toggle flips directly between the two modes; there is no hidden
-    // auto-detect state, so the keyboard mapping is engaged exactly when
-    // (and only when) the mode is Keyboard.
+    // auto-detect state.
     assert_eq!(
         JoystickInputMode::Gamepad.next(),
         JoystickInputMode::Keyboard
@@ -393,9 +392,133 @@ fn joystick_input_mode_toggles_between_two_explicit_modes() {
         JoystickInputMode::Keyboard.next(),
         JoystickInputMode::Gamepad
     );
+}
 
-    assert!(joystick_mode_uses_keyboard(JoystickInputMode::Keyboard));
-    assert!(!joystick_mode_uses_keyboard(JoystickInputMode::Gamepad));
+#[test]
+fn joystick_routing_assigns_sources_by_device_and_mode() {
+    use crate::bus::PortDevice;
+    let mut app = test_app();
+
+    // Stock wiring (mouse + joystick): the mode picks the single source
+    // for port 2 (index 1); the keyboard mapping is engaged exactly when
+    // (and only when) some port routes to it.
+    app.emu
+        .bus_mut()
+        .input
+        .set_port_device(0, PortDevice::Mouse);
+    app.emu
+        .bus_mut()
+        .input
+        .set_port_device(1, PortDevice::Joystick);
+    app.joystick_input_mode = JoystickInputMode::Gamepad;
+    assert_eq!(app.joystick_routing(), (Some(1), None));
+    assert!(!app.keyboard_joystick_enabled());
+    app.joystick_input_mode = JoystickInputMode::Keyboard;
+    assert_eq!(app.joystick_routing(), (None, Some(1)));
+    assert!(app.keyboard_joystick_enabled());
+
+    // Swapped wiring: the joystick port follows the device, wherever it is.
+    app.emu
+        .bus_mut()
+        .input
+        .set_port_device(0, PortDevice::Cd32Pad);
+    app.emu
+        .bus_mut()
+        .input
+        .set_port_device(1, PortDevice::Mouse);
+    app.joystick_input_mode = JoystickInputMode::Gamepad;
+    assert_eq!(app.joystick_routing(), (Some(0), None));
+    assert_eq!(app.mouse_port(), Some(1));
+
+    // Two joysticks (two-player): both sources drive a port each; the
+    // mode picks which gets the lower-numbered one.
+    app.emu
+        .bus_mut()
+        .input
+        .set_port_device(0, PortDevice::Joystick);
+    app.emu
+        .bus_mut()
+        .input
+        .set_port_device(1, PortDevice::Joystick);
+    assert_eq!(app.joystick_routing(), (Some(0), Some(1)));
+    app.joystick_input_mode = JoystickInputMode::Keyboard;
+    assert_eq!(app.joystick_routing(), (Some(1), Some(0)));
+    assert_eq!(app.mouse_port(), None, "no mouse port in a two-stick setup");
+
+    // No joystick anywhere: neither source drives a port and the keyboard
+    // passes through to the Amiga.
+    app.emu
+        .bus_mut()
+        .input
+        .set_port_device(0, PortDevice::Mouse);
+    app.emu
+        .bus_mut()
+        .input
+        .set_port_device(1, PortDevice::Analogue);
+    assert_eq!(app.joystick_routing(), (None, None));
+    assert!(!app.keyboard_joystick_enabled());
+}
+
+#[test]
+fn hot_plug_drops_scripted_joy_ownership_so_the_new_device_sticks() {
+    use crate::bus::PortDevice;
+    let mut app = test_app();
+    // A --joy-after event has fired and released: the scripted state owns
+    // the port until something changes.
+    app.auto_joy_engaged[1] = true;
+    app.auto_joy_held[1] = super::AutoJoyHeld::default();
+
+    // Hot-plugging a mouse must drop that ownership; otherwise the next
+    // input pump would re-assert the scripted state and set_joystick
+    // would flip the device straight back to Joystick.
+    app.hot_plug_port_device(1, PortDevice::Mouse);
+    assert!(!app.auto_joy_engaged[1]);
+    app.pump_joystick_input();
+    assert_eq!(app.emu.bus().input.device(1), PortDevice::Mouse);
+}
+
+#[test]
+fn mouse_capture_is_refused_with_no_mouse_on_either_port() {
+    use crate::bus::PortDevice;
+    let mut app = test_app();
+    app.emu
+        .bus_mut()
+        .input
+        .set_port_device(0, PortDevice::Joystick);
+    app.emu
+        .bus_mut()
+        .input
+        .set_port_device(1, PortDevice::Joystick);
+    assert_eq!(app.mouse_port(), None);
+    app.toggle_mouse_capture();
+    assert!(!app.mouse_captured, "nothing to capture for");
+}
+
+#[test]
+fn cycle_port_device_hot_plugs_and_releases_held_lines() {
+    use crate::bus::PortDevice;
+    let mut app = test_app();
+    app.emu
+        .bus_mut()
+        .input
+        .set_port_device(1, PortDevice::Joystick);
+    app.emu
+        .bus_mut()
+        .input
+        .set_joystick(1, true, false, false, false, true, false);
+
+    // Joystick -> Cd32Pad -> Analogue -> None -> Mouse, releasing the
+    // held fire/direction lines at the first swap.
+    app.cycle_port_device(1);
+    assert_eq!(app.emu.bus().input.device(1), PortDevice::Cd32Pad);
+    assert!(!app.emu.bus().input.ports[1].fire, "hot-plug released fire");
+    assert!(!app.emu.bus().input.ports[1].up);
+    app.cycle_port_device(1);
+    assert_eq!(app.emu.bus().input.device(1), PortDevice::Analogue);
+    app.cycle_port_device(1);
+    assert_eq!(app.emu.bus().input.device(1), PortDevice::None);
+    app.cycle_port_device(1);
+    assert_eq!(app.emu.bus().input.device(1), PortDevice::Mouse);
 }
 
 #[test]
@@ -1635,7 +1758,14 @@ fn pixel(frame: &[u8], x: usize, y: usize, scale: usize) -> [u8; 4] {
 /// debugger window's actions and view builders run against the real
 /// emulator without a host window.
 fn test_app() -> super::App {
-    test_app_with_audio(Box::new(NullSink))
+    let mut app = test_app_with_audio(Box::new(NullSink));
+    // The stock wiring the config layer applies on a real machine: mouse
+    // in port 1, joystick in port 2.
+    app.emu
+        .bus_mut()
+        .input
+        .set_port_device(1, crate::bus::PortDevice::Joystick);
+    app
 }
 
 fn test_app_with_audio(audio: Box<dyn AudioSink>) -> super::App {
@@ -1686,6 +1816,7 @@ fn test_app_with_audio(audio: Box<dyn AudioSink>) -> super::App {
         None,
         None,
         None,
+        Vec::new(),
         Vec::new(),
         Vec::new(),
         Vec::new(),
