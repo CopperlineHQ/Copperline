@@ -15,9 +15,9 @@
 //! is honest memory. The display pipeline presents the panned framebuffer
 //! (all four pixel formats, palette captured from the upload stream) when
 //! the driver switches the display to RTG, and the core blitter ops
-//! (fill/copy/invert/template/pattern) execute into VRAM on the doorbell,
-//! with the hardware sprite (mouse pointer) composited over the output.
-//! Still stubbed: DRAWLINE, P2C/P2D, and the ACC_OP surface ops.
+//! (fill/copy/invert/template/pattern/line/planar) execute into VRAM on
+//! the doorbell, with the hardware sprite (mouse pointer) composited over
+//! the output. Still stubbed: the ACC_OP surface ops and exotic minterms.
 
 use crate::zorro_device::{DeviceHost, ZorroDevice};
 
@@ -298,8 +298,14 @@ impl Z3660 {
         const OP_COPYRECT_NOMASK: u32 = 4;
         const OP_RECT_TEMPLATE: u32 = 5;
         const OP_RECT_PATTERN: u32 = 6;
+        const OP_DRAWLINE: u32 = 1;
+        const OP_P2C: u32 = 7;
+        const OP_P2D: u32 = 8;
         const OP_INVERTRECT: u32 = 9;
         const OP_SPRITE_XY: u32 = 11;
+        const MINTERM_NOTSRC: u8 = 3;
+        const MINTERM_SRC_IDX: u8 = 12;
+        const COMPLEMENT: u8 = 2;
         const OP_SPRITE_COLOR: u32 = 12;
         const OP_SPRITE_BITMAP: u32 = 13;
         const MINTERM_SRC: u8 = 0xC0;
@@ -465,6 +471,103 @@ impl Z3660 {
                                 self.px_put_masked(at, bpp, rgb1, mask);
                             }
                             _ => {}
+                        }
+                    }
+                }
+            }
+            OP_DRAWLINE => {
+                // From (x[0],y[0]) along the signed deltas (x[1],y[1]);
+                // pattern user[1] rotates per pixel (0xFFFF = solid). JAM2
+                // draws bg where the pattern bit is clear; the COMPLEMENT
+                // bit inverts the destination instead (shell XOR cursor).
+                let pitch = pitch0 * 4;
+                let (ax, ay) = (
+                    i32::from(self.be16(g + 0x10) as i16),
+                    i32::from(self.be16(g + 0x18) as i16),
+                );
+                let (dx, dy) = (
+                    i32::from(self.be16(g + 0x12) as i16),
+                    i32::from(self.be16(g + 0x1A) as i16),
+                );
+                let mut pattern = self.gfx_u16(0x20, 1) as u16;
+                if drawmode & INVERSVID != 0 {
+                    pattern ^= 0xFFFF;
+                }
+                let complement = drawmode & COMPLEMENT != 0;
+                let jam2 = !complement && drawmode & 1 != 0;
+                let steps = dx.abs().max(dy.abs());
+                let mut cur_bit = 0x8000u16;
+                for i in 0..=steps {
+                    let px = ax + if steps == 0 { 0 } else { dx * i / steps };
+                    let py = ay + if steps == 0 { 0 } else { dy * i / steps };
+                    if px >= 0 && py >= 0 {
+                        let at = dst + py as usize * pitch + px as usize * bpp;
+                        if pattern & cur_bit != 0 {
+                            if complement {
+                                let d = self.px_get(at, bpp);
+                                let v = if bpp == 1 {
+                                    d ^ u32::from(mask)
+                                } else {
+                                    !d & (u32::MAX >> (8 * (4 - bpp)))
+                                };
+                                self.px_put(at, bpp, v);
+                            } else {
+                                self.px_put_masked(at, bpp, rgb0, mask);
+                            }
+                        } else if jam2 {
+                            self.px_put_masked(at, bpp, rgb1, mask);
+                        }
+                    }
+                    cur_bit = cur_bit.rotate_right(1);
+                }
+            }
+            OP_P2C | OP_P2D => {
+                // Planar source staged at offset[1] (P2D: after a 256-entry
+                // CLUT of destination-format pixel values): `planes`
+                // consecutive planes of pitch[1]-byte rows. x[0] = source
+                // bit phase, dest rect (x[1],y[1]) w=x[2] h=y[2],
+                // layer_mask user[0] gates planes, depth user[1].
+                let (phase, dxr, w) = (x0, x1, x2);
+                let (dyr, h) = (y1, y2);
+                let planes = self.gfx_u16(0x20, 1).min(8);
+                let layer_mask = user0 as u8;
+                let sp = pitch1;
+                let plane_size = sp * h;
+                let (pal, data) = if op == OP_P2D {
+                    (src, src + 1024)
+                } else {
+                    (0, src)
+                };
+                let dpitch = pitch0 * 4;
+                if minterm != MINTERM_SRC_IDX && minterm != MINTERM_NOTSRC {
+                    log::debug!("z3660: p2c/p2d minterm {minterm} treated as SRC");
+                }
+                let inv = if minterm == MINTERM_NOTSRC { 0xFF } else { 0 };
+                for y in 0..h {
+                    for i in 0..w {
+                        let bitpos = phase + i;
+                        let bit = 0x80u8 >> (bitpos & 7);
+                        let mut pen = 0usize;
+                        for p in 0..planes {
+                            if layer_mask & (1 << p) == 0 {
+                                continue;
+                            }
+                            let at = data + plane_size * p + y * sp + bitpos / 8;
+                            let b = if at < self.vram.len() {
+                                self.vram[at] ^ inv
+                            } else {
+                                0
+                            };
+                            if b & bit != 0 {
+                                pen |= 1 << p;
+                            }
+                        }
+                        let at = dst + (dyr + y) * dpitch + (dxr + i) * bpp;
+                        if op == OP_P2C {
+                            self.px_put_masked(at, 1, pen as u32, mask);
+                        } else {
+                            let col = self.px_get(pal + 4 * pen, 4);
+                            self.px_put(at, bpp, col);
                         }
                     }
                 }
@@ -1134,6 +1237,64 @@ mod exec_tests {
         );
         ring(&mut z, &mut m, 5);
         assert_eq!(&z.vram[v..v + 4], &[3, 9, 3, 9]);
+    }
+
+    /// P2C decodes staged bitplanes to pens; P2D looks the pens up in the
+    /// staged destination-format CLUT.
+    #[test]
+    fn planar_blits_decode_planes() {
+        let (mut z, mut m) = (Z3660::new(), mem());
+        let v = VRAM_OFFSET as usize;
+        // Two planes staged at 0x1000, 1 byte per row, 1 row: plane 0 =
+        // 0b1100_0000, plane 1 = 0b0100_0000 -> pens 1, 3, 0, 0 ...
+        z.vram[v + 0x1000] = 0xC0;
+        z.vram[v + 0x1001] = 0x40;
+        // P2C to an 8-bit row at (0,0): minterm SRC (12), depth 2 in
+        // user[1], layer mask 0xFF in user[0], src pitch[1] = 1.
+        gfxdata(
+            &mut z,
+            0,
+            0x1000,
+            0,
+            0,
+            [0, 0, 4],
+            [0, 0, 1],
+            0xFF,
+            [4, 1],
+            0,
+            0,
+            0xFF,
+            12,
+        );
+        let g = GFXDATA_OFFSET;
+        z.vram[g + 0x22..g + 0x24].copy_from_slice(&2u16.to_be_bytes()); // user[1] depth
+        ring(&mut z, &mut m, 7);
+        assert_eq!(&z.vram[v..v + 4], &[1, 3, 0, 0]);
+
+        // P2D to a 16-bit row at (0,4): CLUT staged at 0x2000, planes
+        // follow at +1024; pen 3 = 0xB67D.
+        z.vram[v + 0x2000 + 4 * 3 + 2..v + 0x2000 + 4 * 3 + 4].copy_from_slice(&[0xB6, 0x7D]);
+        z.vram[v + 0x2400] = 0xC0;
+        z.vram[v + 0x2401] = 0x40;
+        gfxdata(
+            &mut z,
+            0x100,
+            0x2000,
+            0,
+            0,
+            [0, 0, 2],
+            [0, 0, 1],
+            0xFF,
+            [4, 1],
+            1,
+            0,
+            0xFF,
+            12,
+        );
+        z.vram[g + 0x22..g + 0x24].copy_from_slice(&2u16.to_be_bytes());
+        ring(&mut z, &mut m, 8);
+        // Pixel 0 = pen 1 (CLUT entry 0), pixel 1 = pen 3 = 0xB67D.
+        assert_eq!(&z.vram[v + 0x100..v + 0x104], &[0x00, 0x00, 0xB6, 0x7D]);
     }
 }
 
