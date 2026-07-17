@@ -1419,6 +1419,42 @@ impl MachineSetup {
         *slot = value;
     }
 
+    /// The Input tab's live summary: which host input ends up driving
+    /// each port under the chosen devices and joystick-input mode.
+    /// Computed by the same routing function the runtime input pump
+    /// uses, so the promise cannot drift from the behavior.
+    pub fn input_routing_summary(&self) -> [String; 2] {
+        let routing =
+            crate::video::window::host_routing_for(self.port_devices, self.joystick_input_mode);
+        std::array::from_fn(|port| {
+            let source = if routing.mouse == Some(port) {
+                "the host mouse".to_string()
+            } else if routing.gamepad == Some(port) && routing.keyboard2 == Some(port) {
+                "the gamepad (numpad keys without a pad)".to_string()
+            } else if routing.gamepad == Some(port) {
+                "the gamepad".to_string()
+            } else if routing.keyboard == Some(port) {
+                if self.port_devices[port] == PortDevice::Mouse {
+                    "cursor keys as a mouse (fire keys = buttons)".to_string()
+                } else {
+                    "cursor keys (Right Ctrl / Right Alt = fire)".to_string()
+                }
+            } else {
+                match self.port_devices[port] {
+                    PortDevice::Mouse => "nothing (flip Joystick input to keyboard)".to_string(),
+                    PortDevice::Joystick | PortDevice::Cd32Pad => {
+                        "nothing (keyboard passes through to the Amiga)".to_string()
+                    }
+                    PortDevice::Analogue => {
+                        "--pot-after scripting or the control protocol".to_string()
+                    }
+                    PortDevice::None => "nothing (empty port)".to_string(),
+                }
+            };
+            format!("Port {} is driven by {}", port + 1, source)
+        })
+    }
+
     /// The value text shown on a row (the current enum/size/number; the file
     /// name or a placeholder for paths; On/Off for toggles).
     pub fn value_label(&self, field: LauncherField) -> String {
@@ -2531,6 +2567,71 @@ mod tests {
         s.cycle(LauncherField::Joystick, true);
         s.select_model(Some(MachineModel::A1200));
         assert_eq!(s.joystick_input_mode, JoystickInputMode::Gamepad);
+    }
+
+    #[test]
+    fn input_routing_summary_names_the_driving_source_per_port() {
+        let mut s = MachineSetup::default();
+        // Stock wiring, gamepad mode.
+        let lines = s.input_routing_summary();
+        assert!(lines[0].contains("host mouse"), "{lines:?}");
+        assert!(lines[1].contains("gamepad"), "{lines:?}");
+
+        // Stock wiring, keyboard mode: the cursor keys take the joystick.
+        s.cycle(LauncherField::Joystick, true);
+        let lines = s.input_routing_summary();
+        assert!(lines[1].contains("cursor keys"), "{lines:?}");
+
+        // Two joysticks: the numpad stand-in is called out.
+        s.port_devices = [PortDevice::Joystick, PortDevice::Joystick];
+        let lines = s.input_routing_summary();
+        assert!(lines.iter().any(|l| l.contains("numpad")), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("cursor keys")), "{lines:?}");
+
+        // Two mice, keyboard mode: the second mouse is keyboard-driven.
+        s.port_devices = [PortDevice::Mouse, PortDevice::Mouse];
+        let lines = s.input_routing_summary();
+        assert!(lines[0].contains("host mouse"), "{lines:?}");
+        assert!(lines[1].contains("as a mouse"), "{lines:?}");
+
+        // Two mice, gamepad mode: the second mouse is undriven, with the
+        // remedy named.
+        s.cycle(LauncherField::Joystick, true);
+        let lines = s.input_routing_summary();
+        assert!(
+            lines[1].contains("flip Joystick input to keyboard"),
+            "{lines:?}"
+        );
+
+        // Analogue and empty ports say how (or that nothing) drives them.
+        s.port_devices = [PortDevice::Analogue, PortDevice::None];
+        let lines = s.input_routing_summary();
+        assert!(lines[0].contains("pot-after"), "{lines:?}");
+        assert!(lines[1].contains("empty"), "{lines:?}");
+
+        // Every device/mode combination fits the settings pane (the panel
+        // draws these at 8 px per character with no wrapping).
+        let all = [
+            PortDevice::Mouse,
+            PortDevice::Joystick,
+            PortDevice::Cd32Pad,
+            PortDevice::Analogue,
+            PortDevice::None,
+        ];
+        for p0 in all {
+            for p1 in all {
+                for _ in 0..2 {
+                    s.cycle(LauncherField::Joystick, true);
+                    s.port_devices = [p0, p1];
+                    for line in s.input_routing_summary() {
+                        assert!(
+                            line.chars().count() <= 68,
+                            "summary line too wide for the pane: {line:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

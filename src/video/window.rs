@@ -196,19 +196,57 @@ fn keyboard_joystick_key_for(code: KeyCode) -> Option<(usize, KeyboardJoystickKe
 }
 
 /// Where each host input source lands this quantum; see
-/// [`App::host_routing`]. Ports are 0-based.
+/// [`host_routing_for`]. Ports are 0-based.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-struct HostRouting {
+pub(crate) struct HostRouting {
     /// Port the host mouse drives: the lowest-numbered mouse port.
-    mouse: Option<usize>,
+    pub(crate) mouse: Option<usize>,
     /// Port the physical gamepad drives (joystick/CD32 devices only).
-    gamepad: Option<usize>,
+    pub(crate) gamepad: Option<usize>,
     /// Port keyboard mapping 0 (cursor keys) drives; the device there may
     /// be a joystick/pad or a mouse (keyboard mouse emulation).
-    keyboard: Option<usize>,
+    pub(crate) keyboard: Option<usize>,
     /// Port keyboard mapping 1 (numpad) drives, as the gamepad port's
     /// stand-in in a two-controller setup.
-    keyboard2: Option<usize>,
+    pub(crate) keyboard2: Option<usize>,
+}
+
+/// The host input sources' port assignment for a device wiring and
+/// joystick-input mode. Pure, and shared by the live input pump and the
+/// launcher's Input-tab summary, so what the GUI promises is exactly what
+/// the pump does. The rules are documented on [`App::host_routing`].
+pub(crate) fn host_routing_for(devices: [PortDevice; 2], mode: JoystickInputMode) -> HostRouting {
+    let mouse = devices.iter().position(|&d| d == PortDevice::Mouse);
+    let mut remaining = (0..2).filter(|&p| {
+        Some(p) != mouse
+            && matches!(
+                devices[p],
+                PortDevice::Mouse | PortDevice::Joystick | PortDevice::Cd32Pad
+            )
+    });
+    let first = remaining.next();
+    let second = remaining.next();
+    let (gamepad, keyboard, keyboard2) = match (first, second, mode) {
+        (None, _, _) => (None, None, None),
+        (Some(p), None, JoystickInputMode::Gamepad) => {
+            if devices[p] == PortDevice::Mouse {
+                (None, None, None)
+            } else {
+                (Some(p), None, None)
+            }
+        }
+        (Some(p), None, JoystickInputMode::Keyboard) => (None, Some(p), None),
+        // Two leftover ports are always joysticks/pads: a second mouse
+        // would itself have been claimed as the mouse port.
+        (Some(p), Some(q), JoystickInputMode::Gamepad) => (Some(p), Some(q), Some(p)),
+        (Some(p), Some(q), JoystickInputMode::Keyboard) => (Some(q), Some(p), Some(q)),
+    };
+    HostRouting {
+        mouse,
+        gamepad,
+        keyboard,
+        keyboard2,
+    }
 }
 
 /// Quadrature counter steps per scheduler quantum (~one frame) while a
@@ -1047,40 +1085,10 @@ impl App {
     /// mouse.
     fn host_routing(&self) -> HostRouting {
         let input = &self.emu.bus().input;
-        let mouse = input
-            .ports
-            .iter()
-            .position(|p| p.device == PortDevice::Mouse);
-        let mut remaining = (0..2).filter(|&p| {
-            Some(p) != mouse
-                && matches!(
-                    input.ports[p].device,
-                    PortDevice::Mouse | PortDevice::Joystick | PortDevice::Cd32Pad
-                )
-        });
-        let first = remaining.next();
-        let second = remaining.next();
-        let (gamepad, keyboard, keyboard2) = match (first, second, self.joystick_input_mode) {
-            (None, _, _) => (None, None, None),
-            (Some(p), None, JoystickInputMode::Gamepad) => {
-                if input.ports[p].device == PortDevice::Mouse {
-                    (None, None, None)
-                } else {
-                    (Some(p), None, None)
-                }
-            }
-            (Some(p), None, JoystickInputMode::Keyboard) => (None, Some(p), None),
-            // Two leftover ports are always joysticks/pads: a second
-            // mouse would itself have been claimed as the mouse port.
-            (Some(p), Some(q), JoystickInputMode::Gamepad) => (Some(p), Some(q), Some(p)),
-            (Some(p), Some(q), JoystickInputMode::Keyboard) => (Some(q), Some(p), Some(q)),
-        };
-        HostRouting {
-            mouse,
-            gamepad,
-            keyboard,
-            keyboard2,
-        }
+        host_routing_for(
+            [input.ports[0].device, input.ports[1].device],
+            self.joystick_input_mode,
+        )
     }
 
     /// Poll the host input sources and drive the emulated port(s). Called
