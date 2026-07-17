@@ -14,14 +14,15 @@
 //! one JSON error line and are closed.
 
 use super::exec::{self, Request};
+use super::observe::OUTBOUND_NOTIFICATION_CAPACITY;
 use super::proto::{self, AuthGate, CtlError, Gate};
 use super::Config;
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::io::BufReader;
-use std::net::{TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 
 /// A message from the socket threads to the frame loop.
@@ -46,8 +47,13 @@ pub struct ControlHandle {
     token: String,
     cmd_tx: Sender<CtlMsg>,
     cmd_rx: Receiver<CtlMsg>,
-    reply_tx: Arc<Mutex<Option<Sender<String>>>>,
+    connection: Arc<Mutex<Option<Arc<OutboundConnection>>>>,
     connected: Arc<AtomicBool>,
+}
+
+struct OutboundConnection {
+    reply_tx: SyncSender<String>,
+    disconnect_stream: Option<TcpStream>,
 }
 
 impl ControlHandle {
@@ -69,7 +75,7 @@ impl ControlHandle {
             token,
             cmd_tx,
             cmd_rx,
-            reply_tx: Arc::new(Mutex::new(None)),
+            connection: Arc::new(Mutex::new(None)),
             connected: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -79,13 +85,17 @@ impl ControlHandle {
     /// returned sender, replies arrive on the returned receiver.
     pub fn test_pair() -> (Self, Sender<CtlMsg>, Receiver<String>) {
         let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(OUTBOUND_NOTIFICATION_CAPACITY);
+        let connection = OutboundConnection {
+            reply_tx,
+            disconnect_stream: None,
+        };
         let handle = Self {
             listener: None,
             token: String::new(),
             cmd_tx: cmd_tx.clone(),
             cmd_rx,
-            reply_tx: Arc::new(Mutex::new(Some(reply_tx))),
+            connection: Arc::new(Mutex::new(Some(Arc::new(connection)))),
             connected: Arc::new(AtomicBool::new(true)),
         };
         (handle, cmd_tx, reply_rx)
@@ -99,13 +109,13 @@ impl ControlHandle {
         };
         let token = self.token.clone();
         let cmd_tx = self.cmd_tx.clone();
-        let reply_slot = Arc::clone(&self.reply_tx);
+        let connection_slot = Arc::clone(&self.connection);
         let connected = Arc::clone(&self.connected);
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::from(wake);
         std::thread::Builder::new()
             .name("control-accept".into())
             .spawn(move || {
-                accept_loop(listener, token, cmd_tx, reply_slot, connected, wake);
+                accept_loop(listener, token, cmd_tx, connection_slot, connected, wake);
             })
             .expect("spawning control accept thread");
     }
@@ -120,12 +130,64 @@ impl ControlHandle {
         self.cmd_rx.try_recv().ok()
     }
 
-    /// Send one reply/notification line to the current client; quietly
-    /// drops it if the client is gone (its stop already ended the
-    /// session).
+    /// Enqueue one required reply/notification without blocking the emulator
+    /// frame loop. If the bounded queue is full, disconnect the slow client:
+    /// silently dropping a JSON-RPC reply would leave its request unresolved.
     pub fn send(&self, line: String) {
-        if let Some(tx) = self.reply_tx.lock().expect("reply slot lock").as_ref() {
-            let _ = tx.send(line);
+        let Some(connection) = self.connection.lock().expect("connection lock").clone() else {
+            return;
+        };
+        match connection.reply_tx.try_send(line) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                self.disconnect_current(&connection, "outbound reply queue is full");
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.disconnect_current(&connection, "control writer stopped");
+            }
+        }
+    }
+
+    /// Attempt to enqueue a streaming notification without blocking the
+    /// emulator frame loop. A full queue means the client is not draining its
+    /// stream quickly enough; the caller records the drop in session stats.
+    pub fn try_send_event(&self, line: String) -> bool {
+        let Some(connection) = self.connection.lock().expect("connection lock").clone() else {
+            return false;
+        };
+        match connection.reply_tx.try_send(line) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) => false,
+            Err(TrySendError::Disconnected(_)) => {
+                self.disconnect_current(&connection, "control writer stopped");
+                false
+            }
+        }
+    }
+
+    /// Tear down the socket side of the current connection. `shutdown`
+    /// wakes the blocking reader so the accept thread can perform normal
+    /// session cleanup and begin accepting a replacement client.
+    fn disconnect_current(&self, connection: &Arc<OutboundConnection>, reason: &str) {
+        let removed = {
+            let mut active = self.connection.lock().expect("connection lock");
+            if active
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, connection))
+            {
+                active.take();
+                true
+            } else {
+                false
+            }
+        };
+        if !removed {
+            return;
+        }
+        log::warn!("control: {reason}; detaching client");
+        self.connected.store(false, Ordering::Relaxed);
+        if let Some(stream) = &connection.disconnect_stream {
+            let _ = stream.shutdown(Shutdown::Both);
         }
     }
 }
@@ -134,7 +196,7 @@ fn accept_loop(
     listener: TcpListener,
     token: String,
     cmd_tx: Sender<CtlMsg>,
-    reply_slot: Arc<Mutex<Option<Sender<String>>>>,
+    connection_slot: Arc<Mutex<Option<Arc<OutboundConnection>>>>,
     connected: Arc<AtomicBool>,
     wake: Arc<dyn Fn() + Send + Sync>,
 ) {
@@ -162,7 +224,15 @@ fn accept_loop(
         stream.set_nodelay(true).ok();
 
         // Writer thread: owns the write half, drains the reply channel.
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel::<String>();
+        let (reply_tx, reply_rx) =
+            std::sync::mpsc::sync_channel::<String>(OUTBOUND_NOTIFICATION_CAPACITY);
+        let disconnect_stream = match stream.try_clone() {
+            Ok(clone) => clone,
+            Err(e) => {
+                log::warn!("control: cloning disconnect stream failed: {e}");
+                continue;
+            }
+        };
         let write_stream = match stream.try_clone() {
             Ok(clone) => clone,
             Err(e) => {
@@ -170,6 +240,9 @@ fn accept_loop(
                 continue;
             }
         };
+        write_stream
+            .set_write_timeout(Some(std::time::Duration::from_millis(250)))
+            .ok();
         let writer = std::thread::Builder::new()
             .name("control-write".into())
             .spawn(move || {
@@ -182,20 +255,31 @@ fn accept_loop(
             })
             .expect("spawning control writer thread");
 
-        *reply_slot.lock().expect("reply slot lock") = Some(reply_tx.clone());
+        let connection = Arc::new(OutboundConnection {
+            reply_tx,
+            disconnect_stream: Some(disconnect_stream),
+        });
+        *connection_slot.lock().expect("connection lock") = Some(Arc::clone(&connection));
         connected.store(true, Ordering::Relaxed);
         let _ = cmd_tx.send(CtlMsg::Connected);
         wake();
 
         // Read this connection to completion on the accept thread; the
         // next client is only accepted afterwards (one at a time).
-        read_connection(stream, &token, &cmd_tx, &reply_tx, &wake);
+        read_connection(stream, &token, &cmd_tx, &connection.reply_tx, &wake);
 
-        *reply_slot.lock().expect("reply slot lock") = None;
+        let mut active = connection_slot.lock().expect("connection lock");
+        if active
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &connection))
+        {
+            active.take();
+        }
+        drop(active);
         connected.store(false, Ordering::Relaxed);
         let _ = cmd_tx.send(CtlMsg::Disconnected);
         wake();
-        drop(reply_tx); // writer thread drains and exits
+        drop(connection); // writer thread drains and exits
         let _ = writer.join();
         log::info!("control: client detached; listening again");
     }
@@ -207,7 +291,7 @@ fn read_connection(
     stream: TcpStream,
     token: &str,
     cmd_tx: &Sender<CtlMsg>,
-    reply_tx: &Sender<String>,
+    reply_tx: &SyncSender<String>,
     wake: &Arc<dyn Fn() + Send + Sync>,
 ) {
     let mut reader = BufReader::new(stream);
@@ -224,13 +308,17 @@ fn read_connection(
         let req = match proto::parse_request(&line) {
             Ok(req) => req,
             Err(reply) => {
-                let _ = reply_tx.send(reply);
+                if reply_tx.send(reply).is_err() {
+                    return;
+                }
                 continue;
             }
         };
         match gate.handle(&req) {
             Gate::Reply(reply) => {
-                let _ = reply_tx.send(reply);
+                if reply_tx.send(reply).is_err() {
+                    return;
+                }
                 continue;
             }
             Gate::ReplyAndClose(reply) => {
@@ -253,8 +341,48 @@ fn read_connection(
                 wake();
             }
             Err(err) => {
-                let _ = reply_tx.send(proto::err_line(&req.id, &err));
+                if reply_tx.send(proto::err_line(&req.id, &err)).is_err() {
+                    return;
+                }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn streaming_delivery_is_bounded_and_nonblocking() {
+        let (handle, _cmd_tx, _reply_rx) = ControlHandle::test_pair();
+        for index in 0..OUTBOUND_NOTIFICATION_CAPACITY {
+            assert!(handle.try_send_event(index.to_string()));
+        }
+        assert!(!handle.try_send_event("overflow".to_string()));
+        assert!(handle.connected());
+    }
+
+    #[test]
+    fn required_reply_overflow_disconnects_without_blocking() {
+        let (handle, _cmd_tx, reply_rx) = ControlHandle::test_pair();
+        for index in 0..OUTBOUND_NOTIFICATION_CAPACITY {
+            assert!(handle.try_send_event(index.to_string()));
+        }
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            handle.send("required reply".to_string());
+            done_tx.send(handle.connected()).unwrap();
+        });
+        let completed = done_rx.recv_timeout(std::time::Duration::from_secs(2));
+        if completed.is_err() {
+            drop(reply_rx);
+            worker.join().unwrap();
+            panic!("required reply blocked behind a full outbound queue");
+        }
+        assert!(!completed.unwrap());
+        drop(reply_rx);
+        worker.join().unwrap();
     }
 }

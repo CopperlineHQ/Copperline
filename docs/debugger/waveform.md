@@ -37,6 +37,14 @@ WAVE            (status)
 WAVE STOP       (finish early)
 ```
 
+From a live [CCP control session](control.md), using the same spec strings:
+
+```text
+waveform.start {"path":"out.vcd","trigger":"pc=0x00C033C2","duration":"20000cck","signals":"cpu,bus,copper,blitter"}
+waveform.status
+waveform.stop
+```
+
 From the debugger window (`Cmd/Alt+B`): the **Wave** tab has Arm and Stop
 buttons; type the same order-free spec into the entry box (empty means all
 defaults) and click Arm.

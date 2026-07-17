@@ -59,7 +59,8 @@ against real hardware.
   interactive chip-bus frame analyzer, a trigger-based VCD waveform export
   of the chipset signals for GTKWave (`docs/debugger/waveform.md`), remote
   GDB support, a JSON-RPC control protocol for scripts and AI agents
-  (`docs/debugger/control.md`, with the `copperline-ctl` client),
+  (`docs/debugger/control.md`, with the `copperline-ctl` client and bounded
+  frame/serial/interrupt/media event streams),
   deterministic save states, input recording/replay, and
   headless screenshot/frame-dump capture -- the deterministic core makes
   every replay byte-identical.

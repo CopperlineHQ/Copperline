@@ -301,6 +301,14 @@ Paula's per-tick UART step takes an idle fast path that skips the receiver
 entirely while it reports false -- the TCP and pty sinks poll a counter
 there, never a syscall.
 
+CCP serial observability is a host-side tap beside `SerialSink`, not another
+serial device. When a control connection subscribes, each successfully
+completed transmit word is copied into a 4,096-entry `VecDeque`; the normal
+sink receives the same word immediately. Overflow evicts and counts the
+oldest observation, so a debugger cannot back-pressure Paula. The tap is
+skipped by serde and carried across state loads with the live serial/audio
+sinks; disconnecting or unsubscribing removes it.
+
 ## MIDI serial bridge (`midi/`)
 
 `[serial] mode = "midi"` (or `--midi-out`/`--midi-in`) bridges Paula's

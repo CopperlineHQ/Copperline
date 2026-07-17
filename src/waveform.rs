@@ -243,7 +243,7 @@ impl fmt::Display for WaveDuration {
 // ---------------------------------------------------------------------------
 
 /// Everything needed to arm a capture.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WaveOptions {
     pub path: PathBuf,
     pub trigger: Trigger,

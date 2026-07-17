@@ -327,6 +327,10 @@ pub struct Paula {
     // loader moves the live sinks across to the restored Paula.
     #[serde(skip, default = "null_serial_sink")]
     pub serial: Box<dyn SerialSink>,
+    /// Optional debugger tap for completed transmissions. Host-only: save
+    /// states carry it over from the live machine like the serial sink.
+    #[serde(skip)]
+    pub(crate) serial_observer: Option<crate::serial::SerialObserver>,
     #[serde(skip, default = "null_audio_sink")]
     pub audio: Box<dyn AudioSink>,
     pub adkcon: u16,
@@ -411,6 +415,7 @@ impl Paula {
             intena: 0,
             intreq: 0,
             serial,
+            serial_observer: None,
             audio,
             adkcon: 0,
             potgo: 0,
@@ -469,6 +474,20 @@ impl Paula {
             Some(buf) => std::mem::take(buf),
             None => Vec::new(),
         }
+    }
+
+    /// Enable or disable the bounded host-side serial transmit tap.
+    pub fn set_serial_observation_enabled(&mut self, enabled: bool) {
+        self.serial_observer = enabled.then(crate::serial::SerialObserver::default);
+    }
+
+    /// Drain transmissions completed since the last poll, plus the number of
+    /// oldest records evicted because the observer was not drained in time.
+    pub fn take_serial_observations(&mut self) -> (Vec<crate::serial::SerialTxObservation>, u64) {
+        self.serial_observer
+            .as_mut()
+            .map(crate::serial::SerialObserver::drain)
+            .unwrap_or_default()
     }
 
     /// Developer mute for one audio channel (debugger audio tab). Toggling
@@ -925,11 +944,15 @@ impl Paula {
                     if !shift.break_seen && !self.uart_break_active() {
                         // Stop bit done: this many clocks are left of the span.
                         let at_cck = end_cck.saturating_sub(u64::from(remaining));
-                        self.serial.write_word(
-                            Self::serial_tx_data_word(&shift),
-                            shift.long,
-                            at_cck,
-                        );
+                        let word = Self::serial_tx_data_word(&shift);
+                        if let Some(observer) = self.serial_observer.as_mut() {
+                            observer.push(crate::serial::SerialTxObservation {
+                                word,
+                                long: shift.long,
+                                at_cck,
+                            });
+                        }
+                        self.serial.write_word(word, shift.long, at_cck);
                     }
                     self.serial_tx_pin_high = true;
                     irq |= self.load_serial_shift_if_idle();
@@ -2937,6 +2960,22 @@ mod tests {
         assert_eq!(word_b, 0x41);
         assert!(at0 > 0, "emit time should be before the span end");
         assert_eq!(at_b, at0 + 5000, "the span end offsets the emit time");
+    }
+
+    #[test]
+    fn serial_observer_taps_completed_words_without_replacing_the_sink() {
+        let (mut paula, written, _) = paula_with_collect_serial_words();
+        paula.set_serial_observation_enabled(true);
+        assert_eq!(paula.write_serdat(0x0141), INT_TBE);
+        assert_eq!(paula.tick_serial(10, 100), 0);
+
+        assert_eq!(&*written.lock().unwrap(), &[(0x0041, false)]);
+        let (observations, dropped) = paula.take_serial_observations();
+        assert_eq!(dropped, 0);
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].word, 0x0041);
+        assert!(!observations[0].long);
+        assert_eq!(observations[0].at_cck, 100);
     }
 
     #[test]

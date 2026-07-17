@@ -89,6 +89,7 @@ pub struct SessionCtx {
     /// A resume verb's response is still outstanding.
     pub pending: bool,
     pub powered_on: bool,
+    observations: super::observe::Observer,
 }
 
 impl SessionCtx {
@@ -101,6 +102,7 @@ impl SessionCtx {
             running: false,
             pending: false,
             powered_on: true,
+            observations: super::observe::Observer::new(),
         }
     }
 
@@ -218,6 +220,41 @@ impl SessionCtx {
     /// landed at.
     pub fn inject_now(&mut self, emu: &mut Emulator, action: InputAction) -> f64 {
         inject_input(emu, &mut self.recorder, action)
+    }
+
+    pub fn subscribe_events(
+        &mut self,
+        emu: &mut Emulator,
+        events: &[super::observe::EventKind],
+        frame_interval: Option<u64>,
+        frame_digest: Option<bool>,
+    ) -> serde_json::Value {
+        self.observations
+            .subscribe(emu, events, frame_interval, frame_digest)
+    }
+
+    pub fn unsubscribe_events(
+        &mut self,
+        emu: &mut Emulator,
+        events: Option<&[super::observe::EventKind]>,
+    ) -> serde_json::Value {
+        self.observations.unsubscribe(emu, events)
+    }
+
+    pub fn event_subscriptions(&self) -> serde_json::Value {
+        self.observations.list_value()
+    }
+
+    pub fn poll_events(&mut self, emu: &mut Emulator) -> Vec<String> {
+        self.observations.poll(emu)
+    }
+
+    pub fn note_event_notification_dropped(&mut self) {
+        self.observations.note_notification_dropped();
+    }
+
+    pub fn disable_events(&mut self, emu: &mut Emulator) {
+        self.observations.disable(emu);
     }
 }
 
