@@ -18,9 +18,9 @@
 
 use crate::bus::Bus;
 
-/// Full port-2 joystick / CD32-pad held state. Reverse replay re-applies the
-/// whole state (matching how the live joystick path asserts the held set),
-/// so it is self-contained and order-independent.
+/// Full joystick / CD32-pad held state for one port. Reverse replay
+/// re-applies the whole state (matching how the live joystick path asserts
+/// the held set), so it is self-contained and order-independent.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct JoyState {
     pub up: bool,
@@ -37,16 +37,19 @@ pub struct JoyState {
 }
 
 /// One machine-visible input action, captured for deterministic replay.
+/// Port fields follow the bus convention: 0 = port 1, 1 = port 2.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReplayAction {
     /// Keyboard transition (`rawkey` is the Amiga raw keycode).
     Key { rawkey: u8, pressed: bool },
-    /// Port-1 mouse button: index 0 = left, 1 = right, 2 = middle.
-    MouseButton { index: u8, pressed: bool },
-    /// Port-1 quadrature mouse motion.
-    MouseMove { dx: i32, dy: i32 },
-    /// Port-2 joystick / CD32-pad held state.
-    Joy(JoyState),
+    /// Mouse button on a port: index 0 = left, 1 = right, 2 = middle.
+    MouseButton { port: u8, index: u8, pressed: bool },
+    /// Quadrature mouse motion on a port.
+    MouseMove { port: u8, dx: i32, dy: i32 },
+    /// Joystick / CD32-pad held state on a port.
+    Joy { port: u8, state: JoyState },
+    /// Analogue pot positions on a port.
+    Pot { port: u8, x: u8, y: u8 },
     /// A floppy media change occurred. Replaying across a media change cannot
     /// be reconstructed from the log (the inserted image is host-file state),
     /// so the engine warns rather than silently diverging.
@@ -65,19 +68,22 @@ impl ReplayAction {
                     bus.enqueue_key_event(rawkey, false);
                 }
             }
-            ReplayAction::MouseButton { index, pressed } => match index {
-                0 => bus.input.lmb_port1 = pressed,
-                1 => bus.input.rmb_port1 = pressed,
-                2 => bus.input.mmb_port1 = pressed,
-                _ => {}
-            },
-            ReplayAction::MouseMove { dx, dy } => bus.input.add_mouse_delta_port1(dx, dy),
-            ReplayAction::Joy(j) => {
-                bus.input
-                    .set_joystick_port2(j.up, j.down, j.left, j.right, j.red, j.blue);
-                bus.input
-                    .set_cd32_buttons_port2(j.play, j.rwd, j.ffw, j.green, j.yellow);
+            ReplayAction::MouseButton {
+                port,
+                index,
+                pressed,
+            } => bus.input.set_mouse_button(port as usize, index, pressed),
+            ReplayAction::MouseMove { port, dx, dy } => {
+                bus.input.add_mouse_delta(port as usize, dx, dy)
             }
+            ReplayAction::Joy { port, state: j } => {
+                let port = port as usize;
+                bus.input
+                    .set_joystick(port, j.up, j.down, j.left, j.right, j.red, j.blue);
+                bus.input
+                    .set_cd32_buttons(port, j.play, j.rwd, j.ffw, j.green, j.yellow);
+            }
+            ReplayAction::Pot { port, x, y } => bus.input.set_analogue(port as usize, x, y),
             ReplayAction::DiskChange => {
                 log::warn!(
                     "reverse-debug replay crossed a floppy media change; \

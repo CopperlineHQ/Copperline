@@ -51,16 +51,28 @@ pub enum InputAction {
         rawkey: u8,
         pressed: bool,
     },
-    /// Port-1 mouse button: index 0 = left, 1 = right, 2 = middle.
+    /// Mouse button on a port (0 = port 1, 1 = port 2): index 0 = left,
+    /// 1 = right, 2 = middle.
     MouseButton {
+        port: u8,
         index: u8,
         pressed: bool,
     },
     MouseMove {
+        port: u8,
         dx: i32,
         dy: i32,
     },
-    Joy(JoyState),
+    Joy {
+        port: u8,
+        state: JoyState,
+    },
+    /// Analogue pot positions on a port.
+    Pot {
+        port: u8,
+        x: u8,
+        y: u8,
+    },
 }
 
 /// An input action deferred to an emulated-time boundary (`at_seconds`
@@ -380,27 +392,36 @@ pub fn inject_input(
                 rec.record_key(rawkey, pressed, secs);
             }
         }
-        InputAction::MouseButton { index, pressed } => {
-            let input = &mut emu.bus_mut().input;
-            match index {
-                0 => input.lmb_port1 = pressed,
-                1 => input.rmb_port1 = pressed,
-                2 => input.mmb_port1 = pressed,
-                _ => {}
-            }
-            emu.tt_note_input(ReplayAction::MouseButton { index, pressed });
+        InputAction::MouseButton {
+            port,
+            index,
+            pressed,
+        } => {
+            emu.bus_mut()
+                .input
+                .set_mouse_button(port as usize, index, pressed);
+            emu.tt_note_input(ReplayAction::MouseButton {
+                port,
+                index,
+                pressed,
+            });
             observe_recorder(emu, recorder, secs);
         }
-        InputAction::MouseMove { dx, dy } => {
-            emu.bus_mut().input.add_mouse_delta_port1(dx, dy);
-            emu.tt_note_input(ReplayAction::MouseMove { dx, dy });
+        InputAction::MouseMove { port, dx, dy } => {
+            emu.bus_mut().input.add_mouse_delta(port as usize, dx, dy);
+            emu.tt_note_input(ReplayAction::MouseMove { port, dx, dy });
             observe_recorder(emu, recorder, secs);
         }
-        InputAction::Joy(j) => {
+        InputAction::Joy { port, state: j } => {
             let input = &mut emu.bus_mut().input;
-            input.set_joystick_port2(j.up, j.down, j.left, j.right, j.red, j.blue);
-            input.set_cd32_buttons_port2(j.play, j.rwd, j.ffw, j.green, j.yellow);
-            emu.tt_note_input(ReplayAction::Joy(j));
+            input.set_joystick(port as usize, j.up, j.down, j.left, j.right, j.red, j.blue);
+            input.set_cd32_buttons(port as usize, j.play, j.rwd, j.ffw, j.green, j.yellow);
+            emu.tt_note_input(ReplayAction::Joy { port, state: j });
+            observe_recorder(emu, recorder, secs);
+        }
+        InputAction::Pot { port, x, y } => {
+            emu.bus_mut().input.set_analogue(port as usize, x, y);
+            emu.tt_note_input(ReplayAction::Pot { port, x, y });
             observe_recorder(emu, recorder, secs);
         }
     }
@@ -453,6 +474,63 @@ mod tests {
         emu.step_frame().unwrap();
         ctx.apply_due_scheduled(&mut emu);
         assert!(ctx.scheduled.is_empty());
+    }
+
+    #[test]
+    fn injected_input_routes_to_the_named_port() {
+        use crate::bus::PortDevice;
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+
+        // Mouse motion and buttons land on the named port's lines.
+        ctx.inject_now(
+            &mut emu,
+            InputAction::MouseMove {
+                port: 1,
+                dx: 7,
+                dy: -2,
+            },
+        );
+        ctx.inject_now(
+            &mut emu,
+            InputAction::MouseButton {
+                port: 1,
+                index: 0,
+                pressed: true,
+            },
+        );
+        assert_eq!(emu.bus().input.ports[1].counter_x, 7);
+        assert_eq!(emu.bus().input.ports[1].counter_y, 0xFE);
+        assert!(emu.bus().input.ports[1].fire);
+        assert_eq!(emu.bus().input.ports[0].counter_x, 0);
+
+        // A joystick state on port 1 engages the device there.
+        ctx.inject_now(
+            &mut emu,
+            InputAction::Joy {
+                port: 0,
+                state: JoyState {
+                    up: true,
+                    red: true,
+                    ..JoyState::default()
+                },
+            },
+        );
+        assert_eq!(emu.bus().input.device(0), PortDevice::Joystick);
+        assert!(emu.bus().input.ports[0].up);
+        assert!(emu.bus().input.ports[0].fire);
+
+        // Analogue positions engage the Analogue device and set the pots.
+        ctx.inject_now(
+            &mut emu,
+            InputAction::Pot {
+                port: 1,
+                x: 50,
+                y: 200,
+            },
+        );
+        assert_eq!(emu.bus().input.device(1), PortDevice::Analogue);
+        assert!(emu.bus().input.ports[1].pot_x_ohms.is_some());
     }
 
     #[test]

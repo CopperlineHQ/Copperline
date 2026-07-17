@@ -3,6 +3,7 @@
 //! Loadable configuration. The file format is TOML; see
 //! `copperline.example.toml` (or the README) for the full schema.
 
+use crate::bus::PortDevice;
 use crate::chipset::agnus::{AgnusRevision, VideoStandard};
 use crate::chipset::denise::DeniseRevision;
 use crate::zorro::{zorro_ii_size_code, zorro_iii_size_bits, BoardSpec, ZorroChain, ZorroVersion};
@@ -113,9 +114,6 @@ pub struct Config {
     /// CDTV DMAC/CD controller fitted (CDTV profile): a Zorro II
     /// autoconfig board carrying the 6525 TPI and the Matshita drive.
     pub cdtv_cd: bool,
-    /// A CD32 joypad is plugged into port 2 (CD32 profile): enables the
-    /// pad's serial button protocol for lowlevel.library.
-    pub cd32_pad: bool,
     /// Extended ROM image (`extended_rom = "path"`): 512 KiB maps at
     /// $E00000 (CD32), 256 KiB at $F00000 (CDTV).
     pub extended_rom_path: Option<PathBuf>,
@@ -179,12 +177,20 @@ pub struct Config {
     /// decay that fuses field-rate dither and interlace flicker on a
     /// real CRT.
     pub phosphor: f32,
-    /// Initial host input source for the emulated port-2 joystick/CD32 pad
+    /// Initial host input source for the emulated joystick/CD32-pad port
     /// (`[input] joystick` / `--joystick`). Defaults to
     /// [`JoystickInputMode::Gamepad`]; the runtime status-bar toggle, `Cmd+J` /
     /// `Alt+J`, and the menu's Joystick Input item flip it live without
     /// affecting this start-up value.
     pub joystick_input_mode: JoystickInputMode,
+    /// Controller devices plugged into the two game ports at power-on
+    /// (`[input] port1` / `port2`, `--port1` / `--port2`); index 0 = port 1.
+    /// Defaults to a mouse in port 1 and a joystick in port 2 -- a CD32
+    /// joypad on the CD32 profile, whose serial button protocol
+    /// lowlevel.library expects. Runtime hot-plug (menu, CCP
+    /// `input.set_port`) changes the live machine without affecting this
+    /// start-up value.
+    pub port_devices: [PortDevice; 2],
     /// Host wiring for Paula's serial port (`[serial]` / `--serial`).
     /// Defaults to [`SerialMode::Stdout`], preserving the historical
     /// terminal-diagnostics behaviour.
@@ -996,7 +1002,6 @@ impl Default for Config {
             sdmac: false,
             akiko: false,
             cdtv_cd: false,
-            cd32_pad: false,
             extended_rom_path: None,
             cd_image_path: None,
             cd_insert_delay_secs: 0.0,
@@ -1019,6 +1024,7 @@ impl Default for Config {
             pixel_aspect: PixelAspect::Tv,
             phosphor: 0.0,
             joystick_input_mode: JoystickInputMode::Gamepad,
+            port_devices: [PortDevice::Mouse, PortDevice::Joystick],
             serial: SerialConfig::default(),
             parallel_output_path: None,
         }
@@ -1159,6 +1165,11 @@ pub struct ConfigOverrides {
     /// ("auto" still accepted as a compatibility alias). Validated by the same
     /// parser as `[input] joystick`.
     pub joystick: Option<String>,
+    /// Device in game port 1 (`--port1`): "mouse", "joystick", "cd32",
+    /// "analogue", or "none". Same parser as `[input] port1`.
+    pub port1: Option<String>,
+    /// Device in game port 2 (`--port2`). Same parser as `[input] port2`.
+    pub port2: Option<String>,
     /// Serial port wiring (`--serial`): "off", "stdout", "midi", "tcp",
     /// or "pty" ("none" and "terminal" parse as compatibility aliases of
     /// the first two). Same parser as `[serial] mode`.
@@ -1194,6 +1205,8 @@ impl ConfigOverrides {
             && self.slow.is_none()
             && self.floppy_drives.is_none()
             && self.joystick.is_none()
+            && self.port1.is_none()
+            && self.port2.is_none()
             && self.serial.is_none()
             && self.midi_out.is_none()
             && self.midi_in.is_none()
@@ -1236,6 +1249,12 @@ impl ConfigOverrides {
         }
         if let Some(joystick) = &self.joystick {
             raw.input.joystick = Some(joystick.clone());
+        }
+        if let Some(port1) = &self.port1 {
+            raw.input.port1 = Some(port1.clone());
+        }
+        if let Some(port2) = &self.port2 {
+            raw.input.port2 = Some(port2.clone());
         }
         if let Some(mode) = &self.serial {
             raw.serial.mode = Some(mode.clone());
@@ -1387,8 +1406,9 @@ pub(crate) struct RawFilesysMount {
     pub(crate) readonly: Option<bool>,
 }
 
-/// `[input]` host-input preferences. Currently just the initial joystick input
-/// mode; the status-bar toggle and `Cmd+J` / `Alt+J` flip it live.
+/// `[input]` host-input preferences: which controller device is plugged into
+/// each game port, and the host source for the joystick port. The status-bar
+/// toggle and `Cmd+J` / `Alt+J` flip the joystick source live.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawInput {
@@ -1397,6 +1417,14 @@ pub(crate) struct RawInput {
     /// "gamepad".)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) joystick: Option<String>,
+    /// Device in game port 1: "mouse" (default), "joystick", "cd32",
+    /// "analogue", or "none".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) port1: Option<String>,
+    /// Device in game port 2: same values; defaults to "joystick"
+    /// ("cd32" on the CD32 profile).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) port2: Option<String>,
 }
 
 /// `[serial]` host wiring for Paula's serial (a.k.a. MIDI) port.
@@ -2031,6 +2059,19 @@ impl TryFrom<RawConfig> for Config {
             None => defaults.joystick_input_mode,
             Some(s) => parse_joystick_input_mode(s)?,
         };
+        // The profile carries the default wiring (mouse + joystick, with a
+        // CD32 pad on the CD32 profile); an explicit key beats it either
+        // way -- a real CD32 accepts any controller too.
+        let port_devices = [
+            match raw.input.port1.as_deref() {
+                None => defaults.port_devices[0],
+                Some(s) => parse_port_device(s, "port1")?,
+            },
+            match raw.input.port2.as_deref() {
+                None => defaults.port_devices[1],
+                Some(s) => parse_port_device(s, "port2")?,
+            },
+        ];
         let serial = SerialConfig {
             mode: match raw.serial.mode.as_deref() {
                 None => defaults.serial.mode,
@@ -2286,7 +2327,6 @@ impl TryFrom<RawConfig> for Config {
             }),
             akiko: defaults.akiko,
             cdtv_cd: defaults.cdtv_cd,
-            cd32_pad: defaults.cd32_pad,
             extended_rom_path: raw
                 .extended_rom
                 .map(PathBuf::from)
@@ -2338,6 +2378,7 @@ impl TryFrom<RawConfig> for Config {
             pixel_aspect,
             phosphor,
             joystick_input_mode,
+            port_devices,
             serial,
             parallel_output_path: raw.parallel.output.map(PathBuf::from),
         })
@@ -2358,6 +2399,15 @@ pub(crate) fn parse_pixel_aspect(s: &str) -> Result<PixelAspect> {
         "square" => Ok(PixelAspect::Square),
         other => bail!("[display] pixel_aspect must be \"tv\" or \"square\", got \"{other}\""),
     }
+}
+
+pub(crate) fn parse_port_device(s: &str, key: &str) -> Result<PortDevice> {
+    PortDevice::parse(s).ok_or_else(|| {
+        anyhow!(
+            "[input] {key} must be \"mouse\", \"joystick\", \"cd32\", \
+             \"analogue\", or \"none\", got {s:?}"
+        )
+    })
 }
 
 pub(crate) fn parse_joystick_input_mode(s: &str) -> Result<JoystickInputMode> {
@@ -2593,7 +2643,9 @@ pub(crate) fn machine_profile_defaults(model: MachineModel) -> Config {
             d.cpu = CpuModel::M68EC020;
             d.cpu_clock_mhz = 14.18;
             d.akiko = true;
-            d.cd32_pad = true;
+            // The bundled controller: lowlevel.library expects the pad's
+            // serial button protocol on port 2.
+            d.port_devices[1] = PortDevice::Cd32Pad;
         }
     }
     d
@@ -3343,6 +3395,69 @@ mod tests {
         assert_eq!(
             load_overrides(&overrides)?.joystick_input_mode,
             JoystickInputMode::Gamepad
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn port_devices_default_to_mouse_and_joystick() -> Result<()> {
+        // No [input] port keys: the stock wiring, on every non-CD32 profile.
+        assert_eq!(
+            parse_config("")?.port_devices,
+            [PortDevice::Mouse, PortDevice::Joystick]
+        );
+        assert_eq!(
+            parse_config("[machine]\nprofile = \"A1200\"\n")?.port_devices,
+            [PortDevice::Mouse, PortDevice::Joystick]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cd32_profile_defaults_port_2_to_the_bundled_pad() -> Result<()> {
+        let cfg = parse_config("[machine]\nprofile = \"CD32\"\n")?;
+        assert_eq!(cfg.port_devices, [PortDevice::Mouse, PortDevice::Cd32Pad]);
+        // An explicit key beats the profile: a real CD32 accepts any
+        // controller.
+        let cfg = parse_config("[machine]\nprofile = \"CD32\"\n[input]\nport2 = \"joystick\"\n")?;
+        assert_eq!(cfg.port_devices[1], PortDevice::Joystick);
+        Ok(())
+    }
+
+    #[test]
+    fn port_device_keys_parse_aliases_and_reject_garbage() -> Result<()> {
+        for (text, expected) in [
+            ("mouse", PortDevice::Mouse),
+            ("joystick", PortDevice::Joystick),
+            ("JOY", PortDevice::Joystick),
+            ("cd32", PortDevice::Cd32Pad),
+            ("cd32pad", PortDevice::Cd32Pad),
+            ("pad", PortDevice::Cd32Pad),
+            ("analogue", PortDevice::Analogue),
+            ("analog", PortDevice::Analogue),
+            ("paddle", PortDevice::Analogue),
+            ("none", PortDevice::None),
+            ("off", PortDevice::None),
+        ] {
+            let cfg = parse_config(&format!("[input]\nport1 = {text:?}\n"))?;
+            assert_eq!(cfg.port_devices[0], expected, "for {text:?}");
+        }
+        let err = parse_config("[input]\nport2 = \"trackball\"\n").unwrap_err();
+        assert!(err.to_string().contains("port2"), "{err}");
+        Ok(())
+    }
+
+    #[test]
+    fn port_device_cli_overrides_swap_the_wiring() -> Result<()> {
+        let overrides = ConfigOverrides {
+            port1: Some("joystick".to_string()),
+            port2: Some("mouse".to_string()),
+            ..ConfigOverrides::default()
+        };
+        assert!(!overrides.is_empty());
+        assert_eq!(
+            load_overrides(&overrides)?.port_devices,
+            [PortDevice::Joystick, PortDevice::Mouse]
         );
         Ok(())
     }

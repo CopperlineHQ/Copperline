@@ -5114,14 +5114,18 @@ mod tests {
         }
         // Apply a port-1 mouse motion live and note it for replay, exactly as
         // the window's add_mouse_delta_i32 does.
-        emu.bus_mut().input.add_mouse_delta_port1(40, 0);
-        emu.tt_note_input(ReplayAction::MouseMove { dx: 40, dy: 0 });
+        emu.bus_mut().input.add_mouse_delta(0, 40, 0);
+        emu.tt_note_input(ReplayAction::MouseMove {
+            port: 0,
+            dx: 40,
+            dy: 0,
+        });
 
         while emu.bus().emulated_frames() < 6 {
             emu.step_frame()?;
         }
         let pos_now = emu.retired_instructions();
-        let counter_with_input = emu.bus().input.mouse_x_port1;
+        let counter_with_input = emu.bus().input.ports[0].counter_x;
         assert_eq!(counter_with_input, 40, "the motion landed");
 
         // Reverse to before the motion: replaying from the early anchor stops
@@ -5142,7 +5146,7 @@ mod tests {
             other => panic!("restore_to failed: {other:?}"),
         }
         assert_eq!(
-            emu.bus().input.mouse_x_port1,
+            emu.bus().input.ports[0].counter_x,
             counter_with_input,
             "replay did not reproduce the logged mouse motion"
         );

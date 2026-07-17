@@ -234,9 +234,26 @@ alone.
 Input (applied now by default, or scheduled with `at_seconds`; `tap`
 presses and schedules the release after `hold_ms`, default 80):
 `input.key {rawkey, action: "press"|"release"|"tap", hold_ms?,
-at_seconds?}`, `input.mouse {left?, right?, middle?, dx?, dy?}`,
-`input.joy {up, down, left, right, red/fire1, blue/fire2, green,
-yellow, play, rwd, ffw}` (port-2 held state, replaced wholesale).
+at_seconds?}`, `input.mouse {port?, left?, right?, middle?, dx?, dy?}`
+(port defaults to 1), `input.joy {port?, up, down, left, right,
+red/fire1, blue/fire2, green, yellow, play, rwd, ffw}` (held state,
+replaced wholesale; port defaults to 2), `input.analogue {port?, x, y}`
+(analogue stick/paddle position, 0-255 per axis, the count POTxDAT
+latches; port defaults to 2). Events drive the named port's electrical
+lines whatever device is configured there.
+
+Controller ports: `input.get_ports` -> `{"port1": "mouse", "port2":
+"joystick"}`; `input.set_port {port, device:
+"mouse"|"joystick"|"cd32"|"analogue"|"none"}` hot-plugs a device, as if
+swapping the physical plug (the old device's held lines release; the
+change is applied live, mid-run included, and is not journaled for
+reverse replay):
+
+```sh
+copperline-ctl --info /tmp/ccp.json input.set_port '{"port": 1, "device": "cd32"}'
+copperline-ctl --info /tmp/ccp.json input.joy '{"port": 1, "red": true}'
+copperline-ctl --info /tmp/ccp.json input.analogue '{"port": 2, "x": 50, "y": 200}'
+```
 
 Media: `media.floppy.insert {drive, path, write_protected?}`,
 `media.floppy.eject {drive}`, `media.floppy.query`,

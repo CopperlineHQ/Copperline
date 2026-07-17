@@ -13,7 +13,7 @@ use super::{
     MAX_FB_PIXELS, MAX_VISIBLE_LINES,
 };
 use crate::audio::{AudioSink, CpalSink};
-use crate::bus::{BeamWriteSource, FrontPanelStatus, VideoRenderFrameTiming};
+use crate::bus::{BeamWriteSource, FrontPanelStatus, PortDevice, VideoRenderFrameTiming};
 use crate::config::{Config, Overscan, PixelAspect, RawConfig, WarpSpeed};
 use crate::emulator::Emulator;
 use crate::screenshot;
@@ -159,36 +159,102 @@ impl KeyboardJoystickHeld {
     }
 }
 
-/// FS-UAE-compatible keyboard joystick/gamepad emulation:
-/// cursor keys for directions; Right Ctrl/Right Alt for fire; CD32 extras
-/// on C/X/D/S/Return/Z/A.
-fn keyboard_joystick_key_for(code: KeyCode) -> Option<KeyboardJoystickKey> {
+/// Keyboard controller emulation, two collision-free layouts so a
+/// two-controller setup can be driven from one keyboard:
+///
+/// - Mapping 0 (FS-UAE-compatible): cursor keys for directions; Right
+///   Ctrl/Right Alt for fire; CD32 extras on C/X/D/S/Return/Z/A. On a
+///   mouse port the same keys become pointer motion, with fire = left
+///   button, X = right, D = middle.
+/// - Mapping 1 (numpad): 8/2/4/6 for directions, 0 for fire, `.` for
+///   the second button, numpad Enter for play. It stands in for the
+///   gamepad when a two-controller setup has no physical pad.
+fn keyboard_joystick_key_for(code: KeyCode) -> Option<(usize, KeyboardJoystickKey)> {
     Some(match code {
-        KeyCode::ArrowUp => KeyboardJoystickKey::Up,
-        KeyCode::ArrowDown => KeyboardJoystickKey::Down,
-        KeyCode::ArrowLeft => KeyboardJoystickKey::Left,
-        KeyCode::ArrowRight => KeyboardJoystickKey::Right,
-        KeyCode::ControlRight => KeyboardJoystickKey::FireRightCtrl,
-        KeyCode::AltRight => KeyboardJoystickKey::FireRightAlt,
-        KeyCode::KeyC => KeyboardJoystickKey::Red,
-        KeyCode::KeyX => KeyboardJoystickKey::Blue,
-        KeyCode::KeyD => KeyboardJoystickKey::Green,
-        KeyCode::KeyS => KeyboardJoystickKey::Yellow,
-        KeyCode::Enter | KeyCode::NumpadEnter => KeyboardJoystickKey::Play,
-        KeyCode::KeyZ => KeyboardJoystickKey::Rewind,
-        KeyCode::KeyA => KeyboardJoystickKey::Forward,
+        KeyCode::ArrowUp => (0, KeyboardJoystickKey::Up),
+        KeyCode::ArrowDown => (0, KeyboardJoystickKey::Down),
+        KeyCode::ArrowLeft => (0, KeyboardJoystickKey::Left),
+        KeyCode::ArrowRight => (0, KeyboardJoystickKey::Right),
+        KeyCode::ControlRight => (0, KeyboardJoystickKey::FireRightCtrl),
+        KeyCode::AltRight => (0, KeyboardJoystickKey::FireRightAlt),
+        KeyCode::KeyC => (0, KeyboardJoystickKey::Red),
+        KeyCode::KeyX => (0, KeyboardJoystickKey::Blue),
+        KeyCode::KeyD => (0, KeyboardJoystickKey::Green),
+        KeyCode::KeyS => (0, KeyboardJoystickKey::Yellow),
+        KeyCode::Enter => (0, KeyboardJoystickKey::Play),
+        KeyCode::KeyZ => (0, KeyboardJoystickKey::Rewind),
+        KeyCode::KeyA => (0, KeyboardJoystickKey::Forward),
+        KeyCode::Numpad8 => (1, KeyboardJoystickKey::Up),
+        KeyCode::Numpad2 => (1, KeyboardJoystickKey::Down),
+        KeyCode::Numpad4 => (1, KeyboardJoystickKey::Left),
+        KeyCode::Numpad6 => (1, KeyboardJoystickKey::Right),
+        KeyCode::Numpad0 => (1, KeyboardJoystickKey::Red),
+        KeyCode::NumpadDecimal => (1, KeyboardJoystickKey::Blue),
+        KeyCode::NumpadEnter => (1, KeyboardJoystickKey::Play),
         _ => return None,
     })
 }
 
-/// Whether the active mode routes the keyboard joystick mapping to port 2. With
-/// only the two explicit modes this is a direct read of the mode -- `Keyboard`
-/// captures the arrow/fire keys, `Gamepad` lets every key reach the Amiga.
-fn joystick_mode_uses_keyboard(mode: JoystickInputMode) -> bool {
-    matches!(mode, JoystickInputMode::Keyboard)
+/// Where each host input source lands this quantum; see
+/// [`host_routing_for`]. Ports are 0-based.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HostRouting {
+    /// Port the host mouse drives: the lowest-numbered mouse port.
+    pub(crate) mouse: Option<usize>,
+    /// Port the physical gamepad drives (joystick/CD32 devices only).
+    pub(crate) gamepad: Option<usize>,
+    /// Port keyboard mapping 0 (cursor keys) drives; the device there may
+    /// be a joystick/pad or a mouse (keyboard mouse emulation).
+    pub(crate) keyboard: Option<usize>,
+    /// Port keyboard mapping 1 (numpad) drives, as the gamepad port's
+    /// stand-in in a two-controller setup.
+    pub(crate) keyboard2: Option<usize>,
 }
 
-/// The port-2 controls currently held by `--joy-after` scripting.
+/// The host input sources' port assignment for a device wiring and
+/// joystick-input mode. Pure, and shared by the live input pump and the
+/// launcher's Input-tab summary, so what the GUI promises is exactly what
+/// the pump does. The rules are documented on [`App::host_routing`].
+pub(crate) fn host_routing_for(devices: [PortDevice; 2], mode: JoystickInputMode) -> HostRouting {
+    let mouse = devices.iter().position(|&d| d == PortDevice::Mouse);
+    let mut remaining = (0..2).filter(|&p| {
+        Some(p) != mouse
+            && matches!(
+                devices[p],
+                PortDevice::Mouse | PortDevice::Joystick | PortDevice::Cd32Pad
+            )
+    });
+    let first = remaining.next();
+    let second = remaining.next();
+    let (gamepad, keyboard, keyboard2) = match (first, second, mode) {
+        (None, _, _) => (None, None, None),
+        (Some(p), None, JoystickInputMode::Gamepad) => {
+            if devices[p] == PortDevice::Mouse {
+                (None, None, None)
+            } else {
+                (Some(p), None, None)
+            }
+        }
+        (Some(p), None, JoystickInputMode::Keyboard) => (None, Some(p), None),
+        // Two leftover ports are always joysticks/pads: a second mouse
+        // would itself have been claimed as the mouse port.
+        (Some(p), Some(q), JoystickInputMode::Gamepad) => (Some(p), Some(q), Some(p)),
+        (Some(p), Some(q), JoystickInputMode::Keyboard) => (Some(q), Some(p), Some(q)),
+    };
+    HostRouting {
+        mouse,
+        gamepad,
+        keyboard,
+        keyboard2,
+    }
+}
+
+/// Quadrature counter steps per scheduler quantum (~one frame) while a
+/// keyboard-mouse direction key is held: ~150 counts/second at PAL frame
+/// rate, a comfortable Workbench pointer speed.
+const KEYBOARD_MOUSE_COUNTS_PER_QUANTUM: i32 = 3;
+
+/// One port's controls currently held by `--joy-after` scripting.
 #[derive(Debug, Default, Clone, Copy)]
 struct AutoJoyHeld {
     up: bool,
@@ -527,15 +593,16 @@ pub struct App {
     /// Scheduled mouse-button press/release events from --click-after.
     /// `Press` and `Release` deadlines per requested click.
     auto_clicks: Vec<ScheduledClick>,
-    pending_auto_clicks: Vec<(f32, MouseButtonKind, u32)>,
-    /// Scheduled port-2 joystick/CD32-pad events from --joy-after, plus
-    /// the controls currently held. `auto_joy_engaged` stays true once
-    /// any scripted joy event has fired so the state keeps overriding
-    /// the (absent) physical pad, including the final release.
+    pending_auto_clicks: Vec<(f32, MouseButtonKind, u32, u8)>,
+    /// Scheduled joystick/CD32-pad events from --joy-after, plus the
+    /// controls currently held per port. An `auto_joy_engaged` entry stays
+    /// true once any scripted joy event has fired on that port so the state
+    /// keeps overriding the (absent) physical pad, including the final
+    /// release.
     auto_joys: Vec<ScheduledJoy>,
-    pending_auto_joys: Vec<(f32, JoyButtonKind, u32)>,
-    auto_joy_held: AutoJoyHeld,
-    auto_joy_engaged: bool,
+    pending_auto_joys: Vec<(f32, JoyButtonKind, u32, u8)>,
+    auto_joy_held: [AutoJoyHeld; 2],
+    auto_joy_engaged: [bool; 2],
     /// The windowed control-protocol server (`--control-gui`), attached
     /// after construction via [`App::attach_control`]; its commands are
     /// drained at the top of `about_to_wait` (see window/control.rs).
@@ -543,8 +610,11 @@ pub struct App {
     control: Option<control::ControlState>,
     /// Scheduled relative port-1 mouse motions from --mouse-after,
     /// one-shot per entry; (at_emulated_secs, dx, dy).
-    auto_mouse: Vec<(f64, i32, i32)>,
-    pending_auto_mouse: Vec<(f32, i32, i32)>,
+    auto_mouse: Vec<(f64, i32, i32, u8)>,
+    pending_auto_mouse: Vec<(f32, i32, i32, u8)>,
+    /// Scheduled analogue pot positions from --pot-after (one-shot each).
+    auto_pots: Vec<(f64, u8, u8, u8)>,
+    pending_auto_pots: Vec<(f32, u8, u8, u8)>,
     auto_disk_inserts: Vec<ScheduledDiskInsert>,
     pending_auto_disk_inserts: Vec<DiskInsertSpec>,
     /// Live-input recorder: logs every input event that reaches the
@@ -627,7 +697,7 @@ pub struct App {
     /// refresh rate. Adjustable from the Emulator menu and the keyboard.
     warp_speed: WarpSpeed,
     /// Mapped host keys currently held for keyboard joystick emulation.
-    keyboard_joy_held: KeyboardJoystickHeld,
+    keyboard_joy_held: [KeyboardJoystickHeld; 2],
     /// Pop-up menu and main-window overlay state. Debugger and frame
     /// analyzer panes live in separate tool-window state so they can be
     /// open at the same time.
@@ -670,6 +740,8 @@ struct ScheduledClick {
     press_at_emulated_secs: f64,
     release_at_emulated_secs: f64,
     button: MouseButtonKind,
+    /// 0-based controller port the click lands on.
+    port: u8,
     pressed: bool,
 }
 
@@ -686,6 +758,8 @@ struct ScheduledJoy {
     press_at_emulated_secs: f64,
     release_at_emulated_secs: f64,
     button: JoyButtonKind,
+    /// 0-based controller port the control belongs to.
+    port: u8,
     pressed: bool,
 }
 
@@ -834,9 +908,10 @@ impl App {
         save_state_after: Option<(f32, PathBuf)>,
         frame_dump: Option<FrameDumpSpec>,
         press_after: Vec<KeyPressSpec>,
-        click_after: Vec<(f32, MouseButtonKind, u32)>,
-        joy_after: Vec<(f32, JoyButtonKind, u32)>,
-        mouse_after: Vec<(f32, i32, i32)>,
+        click_after: Vec<(f32, MouseButtonKind, u32, u8)>,
+        joy_after: Vec<(f32, JoyButtonKind, u32, u8)>,
+        mouse_after: Vec<(f32, i32, i32, u8)>,
+        pot_after: Vec<(f32, u8, u8, u8)>,
         disk_insert_after: Vec<DiskInsertSpec>,
         record_input: Option<PathBuf>,
         disk_playlists: [Vec<PathBuf>; 4],
@@ -924,12 +999,14 @@ impl App {
             pending_auto_clicks: click_after,
             auto_joys: Vec::new(),
             pending_auto_joys: joy_after,
-            auto_joy_held: AutoJoyHeld::default(),
-            auto_joy_engaged: false,
+            auto_joy_held: [AutoJoyHeld::default(); 2],
+            auto_joy_engaged: [false; 2],
             #[cfg(feature = "control")]
             control: None,
             auto_mouse: Vec::new(),
             pending_auto_mouse: mouse_after,
+            auto_pots: Vec::new(),
+            pending_auto_pots: pot_after,
             auto_disk_inserts: Vec::new(),
             pending_auto_disk_inserts: disk_insert_after,
             input_recorder: record_input
@@ -962,7 +1039,7 @@ impl App {
             gamepad: crate::gamepad::GamepadReader::new(),
             joystick_input_mode,
             warp_speed,
-            keyboard_joy_held: KeyboardJoystickHeld::default(),
+            keyboard_joy_held: [KeyboardJoystickHeld::default(); 2],
             ui: UiState::default(),
             about_machine_lines,
             machine_config,
@@ -977,39 +1054,117 @@ impl App {
         }
     }
 
-    /// Poll the active host joystick source and drive the emulated port-2
-    /// joystick. Called once per scheduler quantum. In Gamepad mode a calibrated
-    /// physical pad drives the port; in Keyboard mode the keyboard mapping does,
-    /// so port 2 stays usable without a physical controller.
-    fn pump_joystick_input(&mut self) {
-        let gamepad_state = match self.joystick_input_mode {
-            JoystickInputMode::Keyboard => None,
-            JoystickInputMode::Gamepad => self.gamepad.poll(),
-        };
+    /// The port live host-mouse input drives: the lowest-numbered port with
+    /// a mouse plugged in. With no mouse on either port, live mouse input is
+    /// dropped.
+    fn mouse_port(&self) -> Option<usize> {
+        self.emu
+            .bus()
+            .input
+            .ports
+            .iter()
+            .position(|p| p.device == PortDevice::Mouse)
+    }
 
-        match gamepad_state {
-            Some(state) => self.apply_joystick_state(state),
-            // No physical pad but --joy-after scripting has fired: keep
-            // asserting the scripted state so it survives this release
-            // path and drives the upcoming scheduler quantum.
-            None if self.auto_joy_engaged => self.apply_auto_joy_state(),
-            None if self.keyboard_joystick_enabled() => self.apply_keyboard_joystick_state(),
-            // Pad gone/uncalibrated and keyboard fallback disabled: release
-            // everything so nothing sticks.
-            None if self.emu.bus().input.joystick_port2 => {
-                self.release_port2_joystick();
+    /// Which port each host input source drives this quantum. The host
+    /// mouse claims the lowest-numbered mouse port; the ports left over
+    /// that a host source can drive (joysticks, CD32 pads, and a second
+    /// mouse) are assigned by count:
+    ///
+    /// - One port: the [`JoystickInputMode`] picks its source. `Gamepad`
+    ///   leaves the keyboard passing through to the Amiga -- and cannot
+    ///   drive a second mouse, which is then undriven until the mode is
+    ///   flipped to `Keyboard`.
+    /// - Two ports (a two-controller setup): the gamepad -- backed by the
+    ///   numpad keyboard mapping whenever no physical pad is present --
+    ///   and the cursor-key mapping drive one each, the mode picking
+    ///   which source pair gets the lower-numbered port.
+    ///
+    /// The cursor-key mapping drives whatever device its port carries:
+    /// direction lines on a joystick/pad, pointer motion and buttons on a
+    /// mouse.
+    fn host_routing(&self) -> HostRouting {
+        let input = &self.emu.bus().input;
+        host_routing_for(
+            [input.ports[0].device, input.ports[1].device],
+            self.joystick_input_mode,
+        )
+    }
+
+    /// Poll the host input sources and drive the emulated port(s). Called
+    /// once per scheduler quantum. Scripted --joy-after state beats the
+    /// keyboard mapping on a shared port and asserts alone on ports no
+    /// host source drives; a present physical pad beats the scripted
+    /// state on its port, as it always has.
+    fn pump_joystick_input(&mut self) {
+        let r = self.host_routing();
+        if let Some(port) = r.gamepad {
+            match self.gamepad.poll() {
+                Some(state) => self.apply_joystick_state(port, state),
+                // No physical pad but --joy-after scripting has fired: keep
+                // asserting the scripted state so it survives this release
+                // path and drives the upcoming scheduler quantum.
+                None if self.auto_joy_engaged[port] => self.apply_auto_joy_state(port),
+                // No pad in a two-controller setup: the numpad keyboard
+                // mapping stands in for it.
+                None if r.keyboard2 == Some(port) => {
+                    self.apply_joystick_state(port, self.keyboard_joy_held[1].joystick_state())
+                }
+                // Pad gone/uncalibrated: release the port so nothing sticks.
+                None => self.release_joystick_lines(port),
             }
-            None => {}
+        }
+        if let Some(port) = r.keyboard {
+            if self.emu.bus().input.device(port) == PortDevice::Mouse {
+                self.apply_keyboard_mouse_state(port);
+            } else if self.auto_joy_engaged[port] {
+                self.apply_auto_joy_state(port);
+            } else {
+                self.apply_joystick_state(port, self.keyboard_joy_held[0].joystick_state());
+            }
+        }
+        // Scripted joy state on ports no host source drives asserts
+        // independently.
+        for port in 0..2 {
+            if Some(port) != r.gamepad && Some(port) != r.keyboard && self.auto_joy_engaged[port] {
+                self.apply_auto_joy_state(port);
+            }
         }
     }
 
-    fn keyboard_joystick_enabled(&self) -> bool {
-        joystick_mode_uses_keyboard(self.joystick_input_mode)
+    /// Whether a keyboard mapping owns its keys right now: mapping 0
+    /// (cursor keys) when a port routes to the keyboard source, mapping 1
+    /// (numpad) when it is the gamepad port's stand-in.
+    fn keyboard_mapping_active(&self, mapping: usize) -> bool {
+        let r = self.host_routing();
+        if mapping == 0 {
+            r.keyboard.is_some()
+        } else {
+            r.keyboard2.is_some()
+        }
     }
 
-    fn apply_joystick_state(&mut self, state: crate::gamepad::JoystickState) {
+    /// Drive a mouse port from the cursor-key mapping: held direction
+    /// keys become steady pointer motion, the fire keys the left button,
+    /// X the right, D the middle.
+    fn apply_keyboard_mouse_state(&mut self, port: usize) {
+        let held = self.keyboard_joy_held[0];
+        let dx = KEYBOARD_MOUSE_COUNTS_PER_QUANTUM * (i32::from(held.right) - i32::from(held.left));
+        let dy = KEYBOARD_MOUSE_COUNTS_PER_QUANTUM * (i32::from(held.down) - i32::from(held.up));
+        if dx != 0 || dy != 0 {
+            self.apply_scripted_mouse_delta(port as u8, dx, dy);
+        }
+        let state = held.joystick_state();
         let input = &mut self.emu.bus_mut().input;
-        input.set_joystick_port2(
+        input.set_mouse_button(port, 0, state.fire);
+        input.set_mouse_button(port, 1, state.button2);
+        input.set_mouse_button(port, 2, state.green);
+    }
+
+    fn apply_joystick_state(&mut self, port: usize, state: crate::gamepad::JoystickState) {
+        let input = &mut self.emu.bus_mut().input;
+        input.set_joystick(
+            port,
             state.up,
             state.down,
             state.left,
@@ -1017,17 +1172,56 @@ impl App {
             state.fire,
             state.button2,
         );
-        input.set_cd32_buttons_port2(state.play, state.rwd, state.ffw, state.green, state.yellow);
+        input.set_cd32_buttons(
+            port,
+            state.play,
+            state.rwd,
+            state.ffw,
+            state.green,
+            state.yellow,
+        );
     }
 
-    fn apply_keyboard_joystick_state(&mut self) {
-        self.apply_joystick_state(self.keyboard_joy_held.joystick_state());
-    }
-
-    fn release_port2_joystick(&mut self) {
+    /// Release every control on a joystick port. A no-op unless a
+    /// joystick/pad is engaged there, so a mouse sharing the line fields is
+    /// never clobbered.
+    fn release_joystick_lines(&mut self, port: usize) {
         let input = &mut self.emu.bus_mut().input;
-        input.set_joystick_port2(false, false, false, false, false, false);
-        input.set_cd32_buttons_port2(false, false, false, false, false);
+        if matches!(
+            input.device(port),
+            PortDevice::Joystick | PortDevice::Cd32Pad
+        ) {
+            input.set_joystick(port, false, false, false, false, false, false);
+            input.set_cd32_buttons(port, false, false, false, false, false);
+        }
+    }
+
+    /// Hot-plug a controller device into a port, as if swapping the
+    /// physical plug: the old device's lines release, the quadrature
+    /// counters hold, and any stale scripted --joy-after ownership of the
+    /// port is dropped so it cannot re-engage the old device kind on the
+    /// next quantum. Not journaled for reverse replay -- like a media
+    /// change, the plugged device is host state.
+    fn hot_plug_port_device(&mut self, port: usize, device: PortDevice) {
+        self.auto_joy_engaged[port] = false;
+        self.auto_joy_held[port] = AutoJoyHeld::default();
+        self.emu.bus_mut().input.set_port_device(port, device);
+    }
+
+    /// The menu items' stepper: hot-plug the next device in the cycle.
+    fn cycle_port_device(&mut self, port: usize) {
+        const CYCLE: [PortDevice; 5] = [
+            PortDevice::Mouse,
+            PortDevice::Joystick,
+            PortDevice::Cd32Pad,
+            PortDevice::Analogue,
+            PortDevice::None,
+        ];
+        let current = self.emu.bus().input.device(port);
+        let idx = CYCLE.iter().position(|&d| d == current).unwrap_or(0);
+        let next = CYCLE[(idx + 1) % CYCLE.len()];
+        self.hot_plug_port_device(port, next);
+        self.show_osd(format!("Port {}: {}", port + 1, next.label()));
     }
 
     fn cycle_joystick_input_mode(&mut self) {
@@ -1102,52 +1296,67 @@ impl App {
             self.pump_joystick_input();
         }
         info!("joystick input mode: {}", mode.label());
-        self.show_osd(format!("Joystick input: {}", mode.label()));
+        let routing = self.host_routing();
+        let osd = match (mode, routing.keyboard, routing.gamepad) {
+            (JoystickInputMode::Keyboard, Some(port), _) => {
+                format!("Joystick input: keyboard (port {})", port + 1)
+            }
+            (JoystickInputMode::Gamepad, _, Some(port)) => {
+                format!("Joystick input: gamepad (port {})", port + 1)
+            }
+            _ => format!("Joystick input: {}", mode.label()),
+        };
+        self.show_osd(osd);
     }
 
     /// Consume a mapped host key as joystick input when keyboard joystick
     /// emulation is active. Releases for previously consumed mapped keys
     /// are also swallowed, even if a gamepad has taken over meanwhile.
     fn handle_keyboard_joystick_key(&mut self, code: KeyCode, pressed: bool) -> bool {
-        let Some(key) = keyboard_joystick_key_for(code) else {
+        let Some((mapping, key)) = keyboard_joystick_key_for(code) else {
             return false;
         };
-        let was_held = self.keyboard_joy_held.is_set(key);
-        if !self.keyboard_joystick_enabled() && !was_held {
+        let active = self.keyboard_mapping_active(mapping);
+        let was_held = self.keyboard_joy_held[mapping].is_set(key);
+        if !active && !was_held {
             return false;
         }
-        self.keyboard_joy_held.set(key, pressed);
-        if self.keyboard_joystick_enabled() {
-            self.apply_keyboard_joystick_state();
+        self.keyboard_joy_held[mapping].set(key, pressed);
+        if active {
+            // Re-run the input pump so the transition lands this quantum
+            // on whatever port and device the mapping drives.
+            self.pump_joystick_input();
         }
         true
     }
 
-    /// Drive the emulated port-2 joystick/CD32 pad from the --joy-after
+    /// Drive a port's emulated joystick/CD32 pad from the --joy-after
     /// held-control set.
-    fn apply_auto_joy_state(&mut self) {
-        let held = self.auto_joy_held;
+    fn apply_auto_joy_state(&mut self, port: usize) {
+        let held = self.auto_joy_held[port];
         let input = &mut self.emu.bus_mut().input;
-        input.set_joystick_port2(
-            held.up, held.down, held.left, held.right, held.red, held.blue,
+        input.set_joystick(
+            port, held.up, held.down, held.left, held.right, held.red, held.blue,
         );
-        input.set_cd32_buttons_port2(held.play, held.rwd, held.ffw, held.green, held.yellow);
+        input.set_cd32_buttons(port, held.play, held.rwd, held.ffw, held.green, held.yellow);
         // Reverse-debug: note the held state so replay can reproduce it.
-        self.emu.tt_note_input(crate::inputsched::ReplayAction::Joy(
-            crate::inputsched::JoyState {
-                up: held.up,
-                down: held.down,
-                left: held.left,
-                right: held.right,
-                red: held.red,
-                blue: held.blue,
-                play: held.play,
-                rwd: held.rwd,
-                ffw: held.ffw,
-                green: held.green,
-                yellow: held.yellow,
-            },
-        ));
+        self.emu
+            .tt_note_input(crate::inputsched::ReplayAction::Joy {
+                port: port as u8,
+                state: crate::inputsched::JoyState {
+                    up: held.up,
+                    down: held.down,
+                    left: held.left,
+                    right: held.right,
+                    red: held.red,
+                    blue: held.blue,
+                    play: held.play,
+                    rwd: held.rwd,
+                    ffw: held.ffw,
+                    green: held.green,
+                    yellow: held.yellow,
+                },
+            });
     }
 
     pub fn run(self) -> Result<()> {
@@ -1333,22 +1542,26 @@ impl ApplicationHandler for App {
                 pressed: false,
             });
         }
-        for (secs, button, dur_ms) in self.pending_auto_clicks.drain(..) {
+        for (secs, button, dur_ms, port) in self.pending_auto_clicks.drain(..) {
             let press_at = secs.max(0.0) as f64;
             let release_at = press_at + dur_ms as f64 / 1000.0;
             info!(
-                "auto-click armed: {:?} press at {:.1}s emulated, hold {}ms",
-                button, secs, dur_ms
+                "auto-click armed: {:?} press at {:.1}s emulated, hold {}ms, port {}",
+                button,
+                secs,
+                dur_ms,
+                port + 1
             );
             self.auto_clicks.push(ScheduledClick {
                 press_at_emulated_secs: press_at,
                 release_at_emulated_secs: release_at,
                 button,
+                port,
                 pressed: false,
             });
         }
-        for (secs, dx, dy) in self.pending_auto_mouse.drain(..) {
-            self.auto_mouse.push((secs.max(0.0) as f64, dx, dy));
+        for (secs, dx, dy, port) in self.pending_auto_mouse.drain(..) {
+            self.auto_mouse.push((secs.max(0.0) as f64, dx, dy, port));
         }
         if !self.auto_mouse.is_empty() {
             info!(
@@ -1356,17 +1569,30 @@ impl ApplicationHandler for App {
                 self.auto_mouse.len()
             );
         }
-        for (secs, button, dur_ms) in self.pending_auto_joys.drain(..) {
+        for (secs, x, y, port) in self.pending_auto_pots.drain(..) {
+            self.auto_pots.push((secs.max(0.0) as f64, x, y, port));
+        }
+        if !self.auto_pots.is_empty() {
+            info!(
+                "auto-pot armed: {} scheduled positions",
+                self.auto_pots.len()
+            );
+        }
+        for (secs, button, dur_ms, port) in self.pending_auto_joys.drain(..) {
             let press_at = secs.max(0.0) as f64;
             let release_at = press_at + dur_ms as f64 / 1000.0;
             info!(
-                "auto-joy armed: {:?} press at {:.1}s emulated, hold {}ms",
-                button, secs, dur_ms
+                "auto-joy armed: {:?} press at {:.1}s emulated, hold {}ms, port {}",
+                button,
+                secs,
+                dur_ms,
+                port + 1
             );
             self.auto_joys.push(ScheduledJoy {
                 press_at_emulated_secs: press_at,
                 release_at_emulated_secs: release_at,
                 button,
+                port,
                 pressed: false,
             });
         }
@@ -1670,14 +1896,23 @@ impl ApplicationHandler for App {
                 }
                 if pressed && !self.mouse_captured && self.cursor_pos.is_some_and(cursor_in_display)
                 {
-                    self.set_mouse_captured(true);
+                    // With no mouse on either port there is nothing to
+                    // drive: grabbing and hiding the host cursor would
+                    // just trap it.
+                    if self.mouse_port().is_some() {
+                        self.set_mouse_captured(true);
+                    } else {
+                        self.show_osd("No mouse on either port".to_string());
+                    }
                 }
-                let input = &mut self.emu.bus_mut().input;
-                match button {
-                    MouseButton::Left => input.lmb_port1 = pressed,
-                    MouseButton::Right => input.rmb_port1 = pressed,
-                    MouseButton::Middle => input.mmb_port1 = pressed,
-                    _ => {}
+                if let Some(port) = self.mouse_port() {
+                    let input = &mut self.emu.bus_mut().input;
+                    match button {
+                        MouseButton::Left => input.set_mouse_button(port, 0, pressed),
+                        MouseButton::Right => input.set_mouse_button(port, 1, pressed),
+                        MouseButton::Middle => input.set_mouse_button(port, 2, pressed),
+                        _ => {}
+                    }
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -1805,6 +2040,10 @@ impl ApplicationHandler for App {
                             recording,
                             input_recording,
                             joystick_input_mode: self.joystick_input_mode,
+                            port_devices: [
+                                self.emu.bus().input.device(0),
+                                self.emu.bus().input.device(1),
+                            ],
                             pixel_aspect: super::pixel_aspect(),
                             midi_in: &midi_in_label,
                             midi_out: &midi_out_label,
@@ -1897,10 +2136,8 @@ impl ApplicationHandler for App {
                     self.request_redraw();
                 }
             }
-            let input = &mut self.emu.bus_mut().input;
-            if input.joystick_port2 {
-                input.set_joystick_port2(false, false, false, false, false, false);
-                input.set_cd32_buttons_port2(false, false, false, false, false);
+            for port in 0..2 {
+                self.release_joystick_lines(port);
             }
             if !running {
                 // Nothing paces the loop while the machine is not stepping;
@@ -2016,55 +2253,75 @@ impl ApplicationHandler for App {
         // release_at, then drop the entry.
         self.auto_clicks.retain_mut(|c| {
             if !c.pressed && emu_secs >= c.press_at_emulated_secs {
-                info!("auto-click pressing: {:?}", c.button);
-                set_mouse_button(&mut self.emu, c.button, true);
+                info!("auto-click pressing: {:?} (port {})", c.button, c.port + 1);
+                set_mouse_button(&mut self.emu, c.port, c.button, true);
                 c.pressed = true;
             }
             if c.pressed && emu_secs >= c.release_at_emulated_secs {
                 info!("auto-click releasing: {:?}", c.button);
-                set_mouse_button(&mut self.emu, c.button, false);
+                set_mouse_button(&mut self.emu, c.port, c.button, false);
                 return false;
             }
             true
         });
-        // Fire any scheduled --joy-after events into the port-2
-        // joystick/CD32-pad state, then assert the held set (input polling
-        // re-applies it every quantum while scripting is engaged).
-        let mut joy_changed = false;
+        // Fire any scheduled --joy-after events into the named port's
+        // joystick/CD32-pad state, then assert the held sets (input polling
+        // re-applies them every quantum while scripting is engaged).
+        let mut joy_changed = [false; 2];
         let held = &mut self.auto_joy_held;
         self.auto_joys.retain_mut(|j| {
+            let port = usize::from(j.port != 0);
             if !j.pressed && emu_secs >= j.press_at_emulated_secs {
-                info!("auto-joy pressing: {:?}", j.button);
-                held.set(j.button, true);
+                info!("auto-joy pressing: {:?} (port {})", j.button, port + 1);
+                held[port].set(j.button, true);
                 j.pressed = true;
-                joy_changed = true;
+                joy_changed[port] = true;
             }
             if j.pressed && emu_secs >= j.release_at_emulated_secs {
                 info!("auto-joy releasing: {:?}", j.button);
-                held.set(j.button, false);
-                joy_changed = true;
+                held[port].set(j.button, false);
+                joy_changed[port] = true;
                 return false;
             }
             true
         });
-        if joy_changed {
-            self.auto_joy_engaged = true;
-            self.apply_auto_joy_state();
+        for port in 0..2 {
+            if joy_changed[port] {
+                self.auto_joy_engaged[port] = true;
+                self.apply_auto_joy_state(port);
+            }
         }
         // Fire any scheduled --mouse-after relative motions (one-shot
-        // each); these land on the same port-1 quadrature counters as
-        // live captured-mouse movement.
+        // each); these land on the named port's quadrature counters,
+        // whatever device is configured there (the lines are the lines).
         let mut mouse_deltas = Vec::new();
-        self.auto_mouse.retain(|&(at, dx, dy)| {
+        self.auto_mouse.retain(|&(at, dx, dy, port)| {
             if emu_secs >= at {
-                mouse_deltas.push((dx, dy));
+                mouse_deltas.push((dx, dy, port));
                 false
             } else {
                 true
             }
         });
-        for (dx, dy) in mouse_deltas {
-            self.add_mouse_delta_i32(dx, dy);
+        for (dx, dy, port) in mouse_deltas {
+            self.apply_scripted_mouse_delta(port, dx, dy);
+        }
+        // Fire any scheduled --pot-after analogue positions (one-shot
+        // each).
+        let mut pot_sets = Vec::new();
+        self.auto_pots.retain(|&(at, x, y, port)| {
+            if emu_secs >= at {
+                pot_sets.push((x, y, port));
+                false
+            } else {
+                true
+            }
+        });
+        for (x, y, port) in pot_sets {
+            info!("auto-pot: position ({x}, {y}) on port {}", port + 1);
+            self.emu.bus_mut().input.set_analogue(port as usize, x, y);
+            self.emu
+                .tt_note_input(crate::inputsched::ReplayAction::Pot { port, x, y });
         }
         let mut disk_inserts = Vec::new();
         self.auto_disk_inserts.retain(|insert| {
@@ -2171,24 +2428,21 @@ fn short_status_error(err: &anyhow::Error) -> String {
     first_line.chars().take(96).collect()
 }
 
-fn set_mouse_button(emu: &mut Emulator, button: MouseButtonKind, pressed: bool) {
-    let input = &mut emu.bus_mut().input;
+fn set_mouse_button(emu: &mut Emulator, port: u8, button: MouseButtonKind, pressed: bool) {
     let index = match button {
-        MouseButtonKind::Left => {
-            input.lmb_port1 = pressed;
-            0
-        }
-        MouseButtonKind::Right => {
-            input.rmb_port1 = pressed;
-            1
-        }
-        MouseButtonKind::Middle => {
-            input.mmb_port1 = pressed;
-            2
-        }
+        MouseButtonKind::Left => 0,
+        MouseButtonKind::Right => 1,
+        MouseButtonKind::Middle => 2,
     };
+    emu.bus_mut()
+        .input
+        .set_mouse_button(port as usize, index, pressed);
     // Reverse-debug: note the transition so replay can reproduce it.
-    emu.tt_note_input(crate::inputsched::ReplayAction::MouseButton { index, pressed });
+    emu.tt_note_input(crate::inputsched::ReplayAction::MouseButton {
+        port,
+        index,
+        pressed,
+    });
 }
 
 impl Rect {
@@ -2317,6 +2571,10 @@ fn decode_embedded_png(bytes: &[u8]) -> Result<EmbeddedRgbaImage> {
 
 impl App {
     fn toggle_mouse_capture(&mut self) {
+        if !self.mouse_captured && self.mouse_port().is_none() {
+            self.show_osd("No mouse on either port".to_string());
+            return;
+        }
         self.set_mouse_captured(!self.mouse_captured);
     }
 
@@ -2403,10 +2661,12 @@ impl App {
     }
 
     fn release_mouse_buttons(&mut self) {
-        let input = &mut self.emu.bus_mut().input;
-        input.lmb_port1 = false;
-        input.rmb_port1 = false;
-        input.mmb_port1 = false;
+        if let Some(port) = self.mouse_port() {
+            let input = &mut self.emu.bus_mut().input;
+            for index in 0..3 {
+                input.set_mouse_button(port, index, false);
+            }
+        }
     }
 
     fn track_uncaptured_cursor_motion(&mut self, pos: Option<(i32, i32)>) {
@@ -2438,10 +2698,23 @@ impl App {
     }
 
     fn add_mouse_delta_i32(&mut self, dx: i32, dy: i32) {
-        self.emu.bus_mut().input.add_mouse_delta_port1(dx, dy);
+        let Some(port) = self.mouse_port() else {
+            return;
+        };
+        self.apply_scripted_mouse_delta(port as u8, dx, dy);
+    }
+
+    /// Apply quadrature motion to an explicit port: scripted/CCP events
+    /// drive the named port's counters whatever device is configured
+    /// there, while live host-mouse motion goes through `mouse_port`.
+    fn apply_scripted_mouse_delta(&mut self, port: u8, dx: i32, dy: i32) {
+        self.emu
+            .bus_mut()
+            .input
+            .add_mouse_delta(port as usize, dx, dy);
         // Reverse-debug: note the motion so replay can reproduce it.
         self.emu
-            .tt_note_input(crate::inputsched::ReplayAction::MouseMove { dx, dy });
+            .tt_note_input(crate::inputsched::ReplayAction::MouseMove { port, dx, dy });
     }
 
     fn set_output_volume_from_pos(&mut self, pos: (i32, i32)) {
@@ -2848,6 +3121,8 @@ impl App {
                     ui::MenuItem::Debugger => self.open_debugger(),
                     ui::MenuItem::Console => self.open_console(),
                     ui::MenuItem::JoystickInput => self.cycle_joystick_input_mode(),
+                    ui::MenuItem::Port1Device => self.cycle_port_device(0),
+                    ui::MenuItem::Port2Device => self.cycle_port_device(1),
                     #[cfg(feature = "midi")]
                     ui::MenuItem::MidiInput => self.cycle_midi_input(),
                     #[cfg(feature = "midi")]
@@ -4080,7 +4355,7 @@ impl App {
         // Reset the host joystick source to the new machine's configured
         // start-up mode (a previous live Cmd+J toggle does not carry over).
         self.joystick_input_mode = cfg.joystick_input_mode;
-        self.keyboard_joy_held = KeyboardJoystickHeld::default();
+        self.keyboard_joy_held = [KeyboardJoystickHeld::default(); 2];
         self.about_machine_lines = crate::config::about_machine_lines(cfg);
         self.deinterlacer =
             Deinterlacer::with_phosphor(crate::config::resolve_phosphor(cfg.phosphor));

@@ -79,6 +79,8 @@ pub enum MenuItem {
     Debugger,
     Console,
     JoystickInput,
+    Port1Device,
+    Port2Device,
     #[cfg(feature = "midi")]
     MidiInput,
     #[cfg(feature = "midi")]
@@ -99,9 +101,9 @@ pub enum MenuItem {
 /// serial port is in MIDI mode, so the list is built per open rather than fixed.
 pub fn menu_items(midi_active: bool) -> Vec<MenuItem> {
     let _ = midi_active;
-    // 7 leading + up to 2 MIDI + 10 trailing items, sized so appending never
+    // 9 leading + up to 2 MIDI + 10 trailing items, sized so appending never
     // reallocates.
-    let mut items = Vec::with_capacity(19);
+    let mut items = Vec::with_capacity(21);
     items.extend([
         MenuItem::MachineConfig,
         MenuItem::FrameAnalyzer,
@@ -110,6 +112,8 @@ pub fn menu_items(midi_active: bool) -> Vec<MenuItem> {
         MenuItem::AudioOutput,
         MenuItem::Calibration,
         MenuItem::JoystickInput,
+        MenuItem::Port1Device,
+        MenuItem::Port2Device,
     ]);
     #[cfg(feature = "midi")]
     if midi_active {
@@ -139,6 +143,9 @@ pub struct MenuLabels<'a> {
     pub recording: bool,
     pub input_recording: bool,
     pub joystick_input_mode: JoystickInputMode,
+    /// Devices currently plugged into the two game ports (hot-pluggable
+    /// through the Port 1/2 Device items).
+    pub port_devices: [crate::bus::PortDevice; 2],
     pub pixel_aspect: PixelAspect,
     /// Current MIDI input/output device names (empty when not applicable).
     #[cfg_attr(not(feature = "midi"), allow(dead_code))]
@@ -159,6 +166,8 @@ fn menu_item_label(item: MenuItem, s: MenuLabels) -> String {
         MenuItem::Debugger => "Debugger...".to_string(),
         MenuItem::Console => "Console...".to_string(),
         MenuItem::JoystickInput => format!("Joystick Input  [{}]", s.joystick_input_mode.label()),
+        MenuItem::Port1Device => format!("Port 1 Device  [{}]", s.port_devices[0].label()),
+        MenuItem::Port2Device => format!("Port 2 Device  [{}]", s.port_devices[1].label()),
         MenuItem::PixelAspect => {
             let value = match s.pixel_aspect {
                 PixelAspect::Tv => "tv",
@@ -4311,6 +4320,31 @@ fn draw_launcher(
             draw_launcher_row(frame, rect, state, r, i, hover, scale);
         }
     }
+    // The Input tab spells out what the chosen wiring means: which host
+    // input source ends up driving each port, live as the values cycle.
+    if state.tab == LauncherTab::Input {
+        let summary_top = launcher_row_y(rect, launcher::rows(LauncherTab::Input).len() + 1);
+        draw_panel_text(
+            frame,
+            launcher_pane_x(rect),
+            summary_top,
+            "With these settings:",
+            PANEL_TEXT_DIM,
+            1,
+            scale,
+        );
+        for (i, line) in setup.input_routing_summary().iter().enumerate() {
+            draw_panel_text(
+                frame,
+                launcher_pane_x(rect) + 8,
+                summary_top + 16 + i * 14,
+                line,
+                PANEL_TEXT,
+                1,
+                scale,
+            );
+        }
+    }
     // Status / error line.
     if let Some(status) = &state.status {
         let color = if status.error {
@@ -4677,6 +4711,8 @@ mod tests {
                                         recording,
                                         input_recording,
                                         joystick_input_mode: mode,
+                                        // The longest device label.
+                                        port_devices: [crate::bus::PortDevice::Analogue; 2],
                                         pixel_aspect: aspect,
                                         midi_in: long,
                                         midi_out: long,
@@ -5213,6 +5249,10 @@ mod tests {
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
+                port_devices: [
+                    crate::bus::PortDevice::Mouse,
+                    crate::bus::PortDevice::Joystick,
+                ],
                 pixel_aspect: PixelAspect::Tv,
                 midi_in: "",
                 midi_out: "",
@@ -5252,6 +5292,10 @@ mod tests {
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
+                port_devices: [
+                    crate::bus::PortDevice::Mouse,
+                    crate::bus::PortDevice::Joystick,
+                ],
                 pixel_aspect: PixelAspect::Tv,
                 midi_in: "",
                 midi_out: "",
@@ -5279,6 +5323,10 @@ mod tests {
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
+                port_devices: [
+                    crate::bus::PortDevice::Mouse,
+                    crate::bus::PortDevice::Joystick,
+                ],
                 pixel_aspect: PixelAspect::Tv,
                 midi_in: "",
                 midi_out: "",
@@ -5322,6 +5370,10 @@ mod tests {
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
+                port_devices: [
+                    crate::bus::PortDevice::Mouse,
+                    crate::bus::PortDevice::Joystick,
+                ],
                 pixel_aspect: PixelAspect::Tv,
                 midi_in: "",
                 midi_out: "",
@@ -5389,6 +5441,10 @@ mod tests {
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
+                port_devices: [
+                    crate::bus::PortDevice::Mouse,
+                    crate::bus::PortDevice::Joystick,
+                ],
                 pixel_aspect: PixelAspect::Tv,
                 midi_in: "",
                 midi_out: "",
@@ -5443,6 +5499,10 @@ mod tests {
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
+                port_devices: [
+                    crate::bus::PortDevice::Mouse,
+                    crate::bus::PortDevice::Joystick,
+                ],
                 pixel_aspect: PixelAspect::Tv,
                 midi_in: "",
                 midi_out: "",
@@ -5494,6 +5554,10 @@ mod tests {
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
+                port_devices: [
+                    crate::bus::PortDevice::Mouse,
+                    crate::bus::PortDevice::Joystick,
+                ],
                 pixel_aspect: PixelAspect::Tv,
                 midi_in: "",
                 midi_out: "",
@@ -5546,6 +5610,10 @@ mod tests {
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
+                port_devices: [
+                    crate::bus::PortDevice::Mouse,
+                    crate::bus::PortDevice::Joystick,
+                ],
                 pixel_aspect: PixelAspect::Tv,
                 midi_in: "",
                 midi_out: "",
@@ -5651,6 +5719,10 @@ mod tests {
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
+                port_devices: [
+                    crate::bus::PortDevice::Mouse,
+                    crate::bus::PortDevice::Joystick,
+                ],
                 pixel_aspect: PixelAspect::Tv,
                 midi_in: "",
                 midi_out: "",
@@ -5716,6 +5788,10 @@ mod tests {
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
+                port_devices: [
+                    crate::bus::PortDevice::Mouse,
+                    crate::bus::PortDevice::Joystick,
+                ],
                 pixel_aspect: PixelAspect::Tv,
                 midi_in: "",
                 midi_out: "",
@@ -5792,6 +5868,10 @@ mod tests {
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
+                port_devices: [
+                    crate::bus::PortDevice::Mouse,
+                    crate::bus::PortDevice::Joystick,
+                ],
                 pixel_aspect: PixelAspect::Tv,
                 midi_in: "",
                 midi_out: "",
@@ -5905,6 +5985,10 @@ mod tests {
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
+                port_devices: [
+                    crate::bus::PortDevice::Mouse,
+                    crate::bus::PortDevice::Joystick,
+                ],
                 pixel_aspect: PixelAspect::Tv,
                 midi_in: "",
                 midi_out: "",
@@ -5948,6 +6032,10 @@ mod tests {
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
+                port_devices: [
+                    crate::bus::PortDevice::Mouse,
+                    crate::bus::PortDevice::Joystick,
+                ],
                 pixel_aspect: PixelAspect::Tv,
                 midi_in: "",
                 midi_out: "",
@@ -5982,6 +6070,10 @@ mod tests {
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
+                port_devices: [
+                    crate::bus::PortDevice::Mouse,
+                    crate::bus::PortDevice::Joystick,
+                ],
                 pixel_aspect: PixelAspect::Tv,
                 midi_in: "",
                 midi_out: "",
@@ -6056,6 +6148,10 @@ mod tests {
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
+                port_devices: [
+                    crate::bus::PortDevice::Mouse,
+                    crate::bus::PortDevice::Joystick,
+                ],
                 pixel_aspect: PixelAspect::Tv,
                 midi_in: "",
                 midi_out: "",
@@ -6097,6 +6193,10 @@ mod tests {
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
+                port_devices: [
+                    crate::bus::PortDevice::Mouse,
+                    crate::bus::PortDevice::Joystick,
+                ],
                 pixel_aspect: PixelAspect::Tv,
                 midi_in: "",
                 midi_out: "",
@@ -6105,5 +6205,56 @@ mod tests {
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "launcher-storage");
+
+        // Configuration screen: the Input tab, with the live routing
+        // summary spelled out under the rows (two joysticks, so the
+        // numpad stand-in line shows).
+        let mut frame = vec![0u8; w * h * 4];
+        let mut state = LauncherState::new(launcher::MachineSetup::default());
+        // Port 1: Mouse -> Joystick, making a two-stick setup.
+        state.setup.cycle(LauncherField::Port1Device, true);
+        state.tab = LauncherTab::Input;
+        let ui = UiState {
+            menu_open: false,
+            panel: Some(Panel::Launcher(Box::new(state))),
+        };
+        draw(
+            &mut frame,
+            scale,
+            &ui,
+            None,
+            None,
+            false,
+            MenuLabels {
+                warp: false,
+                warp_speed: WarpSpeed::Max,
+                recording: false,
+                input_recording: false,
+                joystick_input_mode: JoystickInputMode::Gamepad,
+                port_devices: [
+                    crate::bus::PortDevice::Mouse,
+                    crate::bus::PortDevice::Joystick,
+                ],
+                pixel_aspect: PixelAspect::Tv,
+                midi_in: "",
+                midi_out: "",
+                audio_output: "",
+            },
+        );
+        assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
+        // The summary header landed below the rows: some text pixel is lit
+        // on its line inside the settings pane.
+        let rect = panel_rect(&Panel::Launcher(Box::new(LauncherState::new(
+            launcher::MachineSetup::default(),
+        ))));
+        let header_y = launcher_row_y(rect, launcher::rows(LauncherTab::Input).len() + 1);
+        let row = &frame[(header_y * w + launcher_pane_x(rect)) * 4
+            ..(header_y * w + launcher_pane_x(rect) + 200) * 4];
+        assert!(
+            row.chunks_exact(4)
+                .any(|px| px == PANEL_TEXT_DIM.to_le_bytes()),
+            "routing summary header not drawn"
+        );
+        save(&frame, "launcher-input");
     }
 }

@@ -70,9 +70,10 @@ repeat.
 |---|---|
 | `--press-after SECS KEY` | Press and release an Amiga key (~100 ms hold) |
 | `--key-after SECS KEY MS` | Hold a key for exactly MS milliseconds |
-| `--click-after SECS BUTTON MS` | Mouse button (`left`/`right`/`middle`) for MS ms |
-| `--joy-after SECS BUTTON MS` | Port-2 joystick / CD32-pad control (`up`/`down`/`left`/`right`/`red`/`blue`/...) |
-| `--mouse-after SECS DX DY` | Relative mouse motion |
+| `--click-after SECS BUTTON MS [PORT]` | Mouse button (`left`/`right`/`middle`) for MS ms (default port 1) |
+| `--joy-after SECS BUTTON MS [PORT]` | Joystick / CD32-pad control (`up`/`down`/`left`/`right`/`red`/`blue`/...) (default port 2) |
+| `--mouse-after SECS DX DY [PORT]` | Relative mouse motion (default port 1) |
+| `--pot-after SECS X Y [PORT]` | Analogue stick/paddle position, 0-255 per axis (default port 2) |
 | `--insert-disk-after SECS DFN PATH` | Insert a disk image into `df0`..`df3` |
 | `--script FILE` | Same directives from a file, one per line, no leading dashes |
 | `--record-input PATH` | Record all machine-bound input as a replayable script |
@@ -80,6 +81,13 @@ repeat.
 `KEY` is a raw key code (`0x45`) or a name (`ctrl`, `f1`, `esc`, letters,
 digits). A session played by hand under `--record-input` (or Cmd+Shift+R /
 Alt+Shift+R in the window) replays deterministically via `--script`.
+
+Either controller port takes any device -- `[input] port1/port2` in the
+TOML, or `--port1`/`--port2` (`mouse`/`joystick`/`cd32`/`analogue`/`none`;
+default mouse + joystick, CD32 pad on the CD32 profile). The scripted-input
+flags' optional trailing `PORT` token (`1` or `2`) aims an event at either
+port; omitted, each flag keeps its traditional port, so existing scripts
+are unchanged.
 
 ## Save states
 
