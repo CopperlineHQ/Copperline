@@ -3098,14 +3098,61 @@ impl Bus {
                 .cdtv
                 .as_ref()
                 .map(|cdtv| cdtv.activity_led_on())
-                .or_else(|| self.akiko.as_ref().map(|akiko| akiko.activity_led_on())),
+                .or_else(|| self.akiko.as_ref().map(|akiko| akiko.activity_led_on()))
+                // A SCSI CD-ROM's data traffic rides the HDD LED with the
+                // rest of the bus; its own LED shows CD-DA playback (and
+                // brings the status-bar eject button with it).
+                .or_else(|| {
+                    self.scsi_cd_ref()
+                        .map(crate::scsi::ScsiCdRom::audio_playing)
+                }),
             output_volume_percent: self.paula.output_volume_percent(),
         }
     }
 
-    /// Whether the machine has a CD drive (CDTV DMAC or CD32 Akiko).
+    /// Whether the machine has a CD drive: the CDTV DMAC, the CD32 Akiko,
+    /// or a CD-ROM target on a SCSI bus.
     pub fn cd_drive_present(&self) -> bool {
-        self.cdtv.is_some() || self.akiko.is_some()
+        self.cdtv.is_some() || self.akiko.is_some() || self.scsi_cd_ref().is_some()
+    }
+
+    /// The first SCSI CD-ROM drive across the machine's SCSI buses (the
+    /// A3000 motherboard SCSI, then the Zorro boards), when one is fitted.
+    pub fn scsi_cd_ref(&self) -> Option<&crate::scsi::ScsiCdRom> {
+        if let Some(cd) = self.sdmac.as_ref().and_then(crate::sdmac::Sdmac::first_cd) {
+            return Some(cd);
+        }
+        self.devices.iter().find_map(|dev| match dev {
+            crate::zorro_device::BoardDevice::A2091(board) => board.first_cd(),
+            crate::zorro_device::BoardDevice::A4091(board) => board.first_cd(),
+            _ => None,
+        })
+    }
+
+    /// Mutable view of the first SCSI CD-ROM drive; the disc-swap target.
+    pub fn scsi_cd_mut(&mut self) -> Option<&mut crate::scsi::ScsiCdRom> {
+        if self
+            .sdmac
+            .as_ref()
+            .is_some_and(|sdmac| sdmac.first_cd().is_some())
+        {
+            return self
+                .sdmac
+                .as_mut()
+                .and_then(crate::sdmac::Sdmac::first_cd_mut);
+        }
+        self.devices.iter_mut().find_map(|dev| match dev {
+            crate::zorro_device::BoardDevice::A2091(board) => board.first_cd_mut(),
+            crate::zorro_device::BoardDevice::A4091(board) => board.first_cd_mut(),
+            _ => None,
+        })
+    }
+
+    /// The SCSI CD-ROM drive's playback status line for the debugger's
+    /// audio tab, when a drive is present and a play operation has state.
+    pub fn scsi_cd_playback_line(&self) -> Option<String> {
+        self.scsi_cd_ref()
+            .and_then(crate::scsi::ScsiCdRom::playback_line)
     }
 
     /// Whether the machine has a hard-disk controller, which is what gives it
@@ -3121,17 +3168,22 @@ impl Bus {
             })
     }
 
-    /// Whether a disc is mounted (or, on CDTV, waiting in the tray).
+    /// Whether a disc is mounted (or waiting in the tray).
     pub fn cd_disc_inserted(&self) -> bool {
         self.cdtv.as_ref().is_some_and(|cdtv| cdtv.has_disc())
             || self.akiko.as_ref().is_some_and(|akiko| akiko.has_disc())
+            || self
+                .scsi_cd_ref()
+                .is_some_and(crate::scsi::ScsiCdRom::has_disc)
     }
 
     /// Runtime disc insert with media-change notification. On CDTV the
     /// disc lands after a short tray delay (the same media-change STCH
     /// path as `[cd] insert_delay`); Akiko mounts immediately and
-    /// volunteers a media-status packet.
-    pub fn cd_insert_disc(&mut self, image: crate::cdrom::CdImage) {
+    /// volunteers a media-status packet; a SCSI CD-ROM mounts after its
+    /// tray delay and raises a medium-change unit attention. `path` names
+    /// the image for the SCSI drive's logs.
+    pub fn cd_insert_disc(&mut self, image: crate::cdrom::CdImage, path: &std::path::Path) {
         // A second or so of tray time keeps the eject and insert
         // media-change interrupts distinct for cdtv.device.
         const CDTV_TRAY_SECS: f64 = 1.0;
@@ -3143,6 +3195,8 @@ impl Bus {
             // after a delay (media-present), so cd.device sees the
             // absent->present change instead of an instantaneous swap.
             akiko.insert_disc_after(image, CDTV_TRAY_SECS);
+        } else if let Some(cd) = self.scsi_cd_mut() {
+            cd.swap_disc(image, path);
         }
     }
 
@@ -3152,6 +3206,8 @@ impl Bus {
             cdtv.eject_disc();
         } else if let Some(akiko) = self.akiko.as_mut() {
             akiko.eject_disc();
+        } else if let Some(cd) = self.scsi_cd_mut() {
+            cd.eject();
         }
     }
 
@@ -4257,7 +4313,7 @@ impl Bus {
                 sdmac, mem, paula, ..
             } = self;
             if let Some(sdmac) = sdmac.as_mut() {
-                sdmac.tick(cck, mem);
+                sdmac.tick(cck, mem, paula.cd_audio_mut());
                 if sdmac.int_line() {
                     paula.intreq |= INT_PORTS;
                 }
@@ -4299,7 +4355,11 @@ impl Bus {
                 ..
             } = self;
             for (slot, dev) in devices.iter_mut().enumerate() {
-                let mut host = crate::zorro_device::DeviceHost::for_slot(&mut *mem, slot);
+                let mut host = crate::zorro_device::DeviceHost::for_slot_with_cd_audio(
+                    &mut *mem,
+                    slot,
+                    paula.cd_audio_mut(),
+                );
                 crate::zorro_device::ZorroDevice::tick(dev, cck, &mut host);
                 if crate::zorro_device::ZorroDevice::int2_line(dev) {
                     paula.intreq |= INT_PORTS;

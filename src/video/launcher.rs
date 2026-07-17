@@ -1457,6 +1457,15 @@ impl MachineSetup {
 
     /// The value text shown on a row (the current enum/size/number; the file
     /// name or a placeholder for paths; On/Off for toggles).
+    /// Whether the drive row's volume-name box applies: a name labels a
+    /// directory mount's FFS volume, so a CD image (which attaches a
+    /// CD-ROM drive) has nothing to name.
+    pub fn drive_name_applies(&self, field: LauncherField) -> bool {
+        !self
+            .path(field)
+            .is_some_and(crate::config::is_cd_image_path)
+    }
+
     pub fn value_label(&self, field: LauncherField) -> String {
         match field {
             F::Chipset => chipset_name(self.chipset).to_string(),
@@ -1550,6 +1559,21 @@ impl MachineSetup {
                     "Read-only".to_string()
                 } else {
                     "Read-write".to_string()
+                }
+            }
+            // SCSI units: flag CD images, which attach a CD-ROM drive
+            // rather than a hard disk at that ID.
+            F::ScsiUnit0
+            | F::ScsiUnit1
+            | F::ScsiUnit2
+            | F::ScsiUnit3
+            | F::ScsiUnit4
+            | F::ScsiUnit5
+            | F::ScsiUnit6 => {
+                let label = self.path_label(field, "(none)");
+                match self.path(field) {
+                    Some(p) if crate::config::is_cd_image_path(p) => format!("{label} (CD-ROM)"),
+                    _ => label,
                 }
             }
             // Path/drive fields: the file name, or a placeholder.

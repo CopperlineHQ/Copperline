@@ -109,7 +109,8 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      shifter); the Bus cd32_pad_shifter/cd32_pad_fire_oldstate fields
 //      moved into the port
 //  32: SCSI target slots (Wd33c93, A4091) hold a ScsiTarget enum (disk or
-//      CD-ROM drive) instead of a bare ScsiDisk
+//      CD-ROM drive) instead of a bare ScsiDisk; the CD-ROM drive carries
+//      CD-DA playback state and the tray countdown of a pending disc swap
 pub const STATE_VERSION: u32 = 32;
 
 /// Default state file name, timestamped like the screenshot/recorder names.

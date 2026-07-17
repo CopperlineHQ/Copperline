@@ -262,6 +262,19 @@ impl A4091 {
         }
     }
 
+    /// The lowest-ID CD-ROM drive on the board's bus, when one is attached.
+    pub fn first_cd(&self) -> Option<&crate::scsi::ScsiCdRom> {
+        self.targets.iter().flatten().find_map(ScsiTarget::cd_ref)
+    }
+
+    /// Mutable view of the lowest-ID CD-ROM drive on the board's bus.
+    pub fn first_cd_mut(&mut self) -> Option<&mut crate::scsi::ScsiCdRom> {
+        self.targets
+            .iter_mut()
+            .flatten()
+            .find_map(ScsiTarget::cd_mut)
+    }
+
     /// Whether a target answers at the given SCSI ID.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn target_present(&self, id: usize) -> bool {
@@ -943,10 +956,32 @@ impl crate::zorro_device::ZorroDevice for A4091 {
         }
     }
 
-    fn tick(&mut self, _cck: u32, _host: &mut crate::zorro_device::DeviceHost) {}
+    fn tick(&mut self, cck: u32, host: &mut crate::zorro_device::DeviceHost) {
+        // The chip itself completes everything within the SCRIPTS run; only
+        // the targets carry emulated-time state (a CD-ROM drive's tray
+        // countdown and CD-DA streaming into the host mixer ring).
+        if let Some(cd_audio) = host.cd_audio_opt() {
+            for target in self.targets.iter_mut().flatten() {
+                if let ScsiTarget::CdRom(cd) = target {
+                    cd.tick(cck, cd_audio);
+                }
+            }
+        }
+    }
 
     fn int2_line(&self) -> bool {
         self.irq_line()
+    }
+
+    // The 53C710 model completes its work within each SCRIPTS run, but a
+    // CD-ROM target with playback or a tray load in flight needs its tick.
+    fn is_idle(&self) -> bool {
+        !self
+            .targets
+            .iter()
+            .flatten()
+            .filter_map(ScsiTarget::cd_ref)
+            .any(crate::scsi::ScsiCdRom::needs_tick)
     }
 
     fn reset(&mut self) {

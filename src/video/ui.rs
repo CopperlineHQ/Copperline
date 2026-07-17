@@ -3784,8 +3784,10 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                     if clear.contains(pos) {
                         return Some(UiControl::LauncherClear(r.field));
                     }
-                    // The volume name only matters once an image is chosen.
+                    // The volume name only matters once an image is chosen
+                    // (and never for a CD image).
                     if state.setup.path(r.field).is_some()
+                        && state.setup.drive_name_applies(r.field)
                         && launcher_drive_name_rect(rect, row_y).contains(pos)
                     {
                         return Some(UiControl::LauncherDriveNameEdit(r.field));
@@ -3996,9 +3998,10 @@ fn draw_launcher_row(
             let (browse, clear) = launcher_path_rects(rect, row_y);
             let value_x = launcher_control_x(rect);
             // The volume-name box only appears once an image is chosen (a name
-            // has nothing to label otherwise); until then the row reads like a
-            // plain path row and the path text fills the full width.
-            let has_image = setup.path(r.field).is_some();
+            // has nothing to label otherwise, and never labels a CD image);
+            // until then the row reads like a plain path row and the path text
+            // fills the full width.
+            let has_image = setup.path(r.field).is_some() && setup.drive_name_applies(r.field);
             let name_box = launcher_drive_name_rect(rect, row_y);
             let text_right = if has_image { name_box.x } else { browse.x };
             let avail = text_right.saturating_sub(value_x + 8);

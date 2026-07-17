@@ -119,6 +119,16 @@ impl A2091 {
         self.wd.attach_target(unit, target);
     }
 
+    /// The lowest-ID CD-ROM drive on the board's bus, when one is attached.
+    pub fn first_cd(&self) -> Option<&crate::scsi::ScsiCdRom> {
+        self.wd.first_cd()
+    }
+
+    /// Mutable view of the lowest-ID CD-ROM drive on the board's bus.
+    pub fn first_cd_mut(&mut self) -> Option<&mut crate::scsi::ScsiCdRom> {
+        self.wd.first_cd_mut()
+    }
+
     /// System reset: clear the DMAC and SBIC but keep the mounted drives.
     pub fn reset(&mut self) {
         self.wd.reset();
@@ -385,7 +395,12 @@ impl crate::zorro_device::ZorroDevice for A2091 {
     }
 
     fn tick(&mut self, cck: u32, host: &mut crate::zorro_device::DeviceHost) {
-        Self::tick(self, cck, host.memory_mut())
+        Self::tick(self, cck, host.memory_mut());
+        // A CD-ROM target streams its CD-DA playback into the host mixer
+        // ring, which the bus tick loop provides.
+        if let Some(cd_audio) = host.cd_audio_opt() {
+            self.wd.tick_targets(cck, cd_audio);
+        }
     }
 
     fn int2_line(&self) -> bool {

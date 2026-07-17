@@ -16,6 +16,7 @@
 //! delay so software that issues a command and then polls the auxiliary
 //! status register observes the busy-then-interrupt sequence.
 
+use crate::chipset::paula::CdAudioRing;
 use crate::harddrive::{HardDriveImage, SECTOR_SIZE};
 use std::collections::VecDeque;
 use std::path::Path;
@@ -504,6 +505,22 @@ impl ScsiTarget {
             ScsiTarget::CdRom(cd) => cd.complete_out(cdb, data),
         }
     }
+
+    /// The CD-ROM drive behind this target, when it is one.
+    pub fn cd_ref(&self) -> Option<&ScsiCdRom> {
+        match self {
+            ScsiTarget::CdRom(cd) => Some(cd),
+            ScsiTarget::Disk(_) => None,
+        }
+    }
+
+    /// Mutable view of the CD-ROM drive behind this target, when it is one.
+    pub fn cd_mut(&mut self) -> Option<&mut ScsiCdRom> {
+        match self {
+            ScsiTarget::CdRom(cd) => Some(cd),
+            ScsiTarget::Disk(_) => None,
+        }
+    }
 }
 
 impl From<ScsiDisk> for ScsiTarget {
@@ -618,6 +635,29 @@ impl Wd33c93 {
 
     pub fn target_present(&self, id: usize) -> bool {
         self.targets.get(id).is_some_and(Option::is_some)
+    }
+
+    /// The lowest-ID CD-ROM drive on the bus, when one is attached.
+    pub fn first_cd(&self) -> Option<&ScsiCdRom> {
+        self.targets.iter().flatten().find_map(ScsiTarget::cd_ref)
+    }
+
+    /// Mutable view of the lowest-ID CD-ROM drive on the bus.
+    pub fn first_cd_mut(&mut self) -> Option<&mut ScsiCdRom> {
+        self.targets
+            .iter_mut()
+            .flatten()
+            .find_map(ScsiTarget::cd_mut)
+    }
+
+    /// Advance the targets' emulated time: CD-ROM drives run their tray
+    /// countdowns and stream CD-DA playback into the host mixer ring.
+    pub fn tick_targets(&mut self, cck: u32, cd_audio: &mut CdAudioRing) {
+        for target in self.targets.iter_mut().flatten() {
+            if let ScsiTarget::CdRom(cd) = target {
+                cd.tick(cck, cd_audio);
+            }
+        }
     }
 
     /// Hardware reset (board /RST or system reset): clear chip state but

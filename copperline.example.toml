@@ -214,7 +214,9 @@ slow = "512K"
 # same images as [ide]: RDB HDFs, bare partition hardfiles, or host
 # directories. A path ending in .cue or .iso attaches a SCSI CD-ROM drive
 # at that ID instead (read-only; mount it in the guest with a CD filesystem
-# pointed at the controller's scsi.device and that unit number).
+# pointed at the controller's scsi.device and that unit number). CD audio
+# tracks play through the machine's audio output, and discs swap at runtime
+# (status-bar CD buttons, drag-and-drop, --insert-cd-after).
 #
 # controller picks the host adapter:
 #   "a2091" - Zorro II, WD33C93. The default on machines without onboard SCSI.

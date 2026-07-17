@@ -708,11 +708,19 @@ track. The drive answers on the host adapter's `scsi.device` like any
 other unit, so mount it the way you would on real hardware: a
 `DOSDrivers` mount entry (or MountList) pointing `CDFileSystem` --
 CacheCDFS, AsimCDFS, and AmiCDROM work the same way -- at the controller's
-`scsi.device` and the drive's unit number. CD *data* is fully served;
-CD *audio* commands keep coherent play/status state for player software
-but produce no sound, matching a drive whose analogue audio output is
-simply not cabled to anything. The disc cannot be swapped at runtime;
-changing discs is a config change and restart.
+`scsi.device` and the drive's unit number.
+
+CD audio plays: the PLAY AUDIO command group streams the disc's audio
+tracks into the machine's audio output at 75 sectors per second of
+emulated time (as if the drive's analogue output were cabled to the
+machine), the sub-channel reports the live playback position, and the
+debugger's Audio tab shows the stream on its CD-DA row with the play
+state, track, and position. Discs swap at runtime like CDTV/CD32 media:
+the status bar's CD load/eject buttons, dropping a `.cue`/`.iso` on the
+window, the scheduled `--insert-cd-after SECS PATH` flag, or the control
+protocol's `media.cd.insert` all eject the current disc, run the tray
+for a second of emulated time, and mount the new one with a
+medium-change unit attention for the guest's filesystem to notice.
 
 ## `[[filesys]]` -- host directories as live volumes
 

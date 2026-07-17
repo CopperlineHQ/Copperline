@@ -1875,6 +1875,7 @@ fn test_app_with_audio(audio: Box<dyn AudioSink>) -> super::App {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
         None,
         std::array::from_fn(|_| Vec::new()),
         [true; 4],
