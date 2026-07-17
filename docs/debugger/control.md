@@ -169,8 +169,11 @@ Streaming is bounded. Paula retains at most 4,096 unconsumed serial words,
 evicts the oldest on overflow, and reports the count in `dropped_words`.
 The windowed socket path queues at most 256 stream notifications and drops
 new notifications rather than blocking the emulator; the next delivered
-event and `events.list` expose the cumulative drop count. Headless delivery
-writes events directly and detaches a client that stops draining the socket.
+event and `events.list` expose the cumulative drop count. If that bounded
+queue cannot accept a required request reply, the server detaches the slow
+client rather than blocking emulation or silently losing the reply. Headless
+delivery writes events directly and detaches a client that stops draining the
+socket.
 
 The same connection can start and stop the heavier file-backed diagnostics
 when an event identifies an interesting window. `trace.start {path?,
