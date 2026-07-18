@@ -114,7 +114,10 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //  33: A2065 gained the latched init-block MODE word (DTX/DRX/LOOP gating
 //      of the LANCE engines) and NetConfig the Nat variant (userspace NAT
 //      backend)
-pub const STATE_VERSION: u32 = 33;
+//  34: the Z3660 RTG board was appended to the BoardDevice enum; a state
+//      holding one cannot be read by a build without the variant, so the
+//      shape change bumps the version
+pub const STATE_VERSION: u32 = 34;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {
