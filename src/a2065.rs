@@ -25,10 +25,13 @@
 //!
 //! Word fields in the init block and descriptors are accessed big-endian, the
 //! layout a 68000 driver writes with the LANCE's byte-swap (CSR3 BSWP) set;
-//! packet payloads are byte streams and are not swapped. Note: this models the
-//! documented LANCE behaviour and is unit-tested against the programming model,
-//! but has not yet been validated end-to-end against `a2065.device` plus a guest
-//! TCP/IP stack -- see the tests and the Zorro chapter in the docs.
+//! packet payloads are byte streams and are not swapped. The engine models the
+//! Am7990 features a real driver exercises -- TX/RX buffer chaining across
+//! descriptors, the stored FCS trailer counted in MCNT, the init-block MODE
+//! gates (DTX/DRX and the LOOP internal-loopback self-test), and MISS on an RX
+//! ring overrun -- and has been validated end-to-end against the AmigaOS
+//! SANA-II `a2065.device` driving AmiTCP over the userspace NAT backend
+//! (`crate::net::nat`). See the tests and the Zorro chapter in the docs.
 
 use crate::net::{make_backend, NetBackend, NetConfig};
 use crate::zorro_device::{DeviceHost, ZorroDevice};
@@ -51,17 +54,36 @@ const CSR0_INTR: u16 = 1 << 7;
 const CSR0_IDON: u16 = 1 << 8;
 const CSR0_TINT: u16 = 1 << 9;
 const CSR0_RINT: u16 = 1 << 10;
+const CSR0_MISS: u16 = 1 << 12;
 const CSR0_ERR: u16 = 1 << 15;
 /// Status bits the host clears by writing 1 (the rest of CSR0 is control).
 const CSR0_RC_BITS: u16 = CSR0_IDON | CSR0_TINT | CSR0_RINT | (0xF << 11) | CSR0_ERR;
 
+// Init-block MODE word bits (Am7990). PROM (bit 15) and the LADRF hash are
+// not modelled: the receiver accepts every frame the backend delivers, which
+// behaves like PROM permanently set. A NAT/loopback backend only ever hands
+// the board frames addressed to it (or broadcasts), so the filter would be
+// a no-op anyway.
+const MODE_DRX: u16 = 1 << 0;
+const MODE_DTX: u16 = 1 << 1;
+const MODE_LOOP: u16 = 1 << 2;
+
 // Descriptor status byte (high byte of the second word).
 const DESC_OWN: u8 = 1 << 7;
+const DESC_ERR: u8 = 1 << 6;
+const DESC_BUFF: u8 = 1 << 2;
 const DESC_STP: u8 = 1 << 1;
 const DESC_ENP: u8 = 1 << 0;
 
 /// Largest Ethernet frame the chip will move (no jumbo frames).
 const MAX_FRAME: usize = 1518;
+
+/// The frame check sequence the chip stores after a received payload. The
+/// receiver writes the frame as it came off the wire, FCS included, and MCNT
+/// counts it; drivers recover the payload length as `MCNT - 4`. No CRC is
+/// modelled (drivers strip the FCS, they never verify it), so zeros are
+/// stored.
+const FCS_LEN: usize = 4;
 
 #[derive(Serialize, Deserialize)]
 pub struct A2065 {
@@ -81,6 +103,7 @@ pub struct A2065 {
     csr3: u16,
 
     // Ring state derived from the init block on INIT.
+    mode: u16,
     rx_ring: u32,
     rx_len: u32,
     rx_mask: u32,
@@ -113,6 +136,7 @@ impl A2065 {
             csr1: 0,
             csr2: 0,
             csr3: 0,
+            mode: 0,
             rx_ring: 0,
             rx_len: 0,
             rx_mask: 0,
@@ -164,7 +188,7 @@ impl A2065 {
     fn lance_init(&mut self) {
         let iadr = self.init_block_addr();
         // +0 MODE, +2..+8 PADR (MAC), +8..+10 LADRF (filter, ignored).
-        let _mode = self.ram_word(iadr);
+        self.mode = self.ram_word(iadr);
         for i in 0..3 {
             let w = self.ram_word(iadr + 2 + i * 2);
             // PADR is stored low-byte-first per word in LANCE order.
@@ -213,57 +237,134 @@ impl A2065 {
         self.set_ram_word(dbase + 2, (u16::from(status) << 8) | (w & 0xFF));
     }
 
-    /// Walk the TX ring, sending every chip-owned descriptor.
+    /// Walk the TX ring, sending every complete chip-owned frame. A frame may
+    /// span several descriptors (Am7990 buffer chaining: STP marks the first
+    /// buffer, ENP the last); the chip only takes a frame once the whole
+    /// STP..ENP span is chip-owned, so a frame the driver is still handing
+    /// over stays untouched until the ENP descriptor's OWN bit lands.
     fn poll_tx(&mut self) {
-        if !self.running || self.tx_len == 0 {
+        if !self.running || self.tx_len == 0 || self.mode & MODE_DTX != 0 {
             return;
         }
-        for _ in 0..self.tx_len {
-            let dbase = Self::desc_addr(self.tx_ring, self.tx_cur);
-            let status = self.desc_status(dbase);
-            if status & DESC_OWN == 0 {
-                break; // host still owns it: nothing to send
+        'frames: loop {
+            // Scan the frame without consuming anything first.
+            let mut span: Vec<(u32, u32, usize)> = Vec::new(); // (desc, buf, len)
+            let mut desc = self.tx_cur;
+            loop {
+                if span.len() as u32 >= self.tx_len {
+                    // The whole ring is chip-owned with no ENP anywhere: a
+                    // malformed ring the real chip would flag BUFF on. Stall
+                    // rather than spin.
+                    break 'frames;
+                }
+                let dbase = Self::desc_addr(self.tx_ring, desc);
+                let status = self.desc_status(dbase);
+                if status & DESC_OWN == 0 {
+                    break 'frames; // frame not fully handed over yet
+                }
+                if span.is_empty() && status & DESC_STP == 0 {
+                    // Chip-owned buffer with no STP: the chip skips it while
+                    // hunting for a start of packet, handing it back.
+                    self.set_desc_status(dbase, status & !DESC_OWN);
+                    self.tx_cur = (self.tx_cur + 1) & self.tx_mask;
+                    continue 'frames;
+                }
+                let (buf_addr, len) = self.desc_buffer(dbase);
+                span.push((dbase, buf_addr, len));
+                if status & DESC_ENP != 0 {
+                    break;
+                }
+                desc = (desc + 1) & self.tx_mask;
             }
-            let (buf_addr, len) = self.desc_buffer(dbase);
-            let len = len.min(MAX_FRAME);
-            let mut frame = vec![0u8; len];
-            for (i, b) in frame.iter_mut().enumerate() {
-                let a = (buf_addr as usize + i) & (RAM_SIZE - 1);
-                *b = self.ram[a];
+            let mut frame = Vec::new();
+            for &(_, buf_addr, len) in &span {
+                for i in 0..len {
+                    if frame.len() >= MAX_FRAME {
+                        break;
+                    }
+                    frame.push(self.ram[(buf_addr as usize + i) & (RAM_SIZE - 1)]);
+                }
             }
-            if let Some(net) = self.net.as_mut() {
+            if self.mode & MODE_LOOP != 0 {
+                // Internal loopback: the frame goes straight to our own
+                // receiver and never reaches the wire. SANA-II drivers run a
+                // power-up self-test this way before going online.
+                self.receive_frame(&frame);
+            } else if let Some(net) = self.net.as_mut() {
                 net.send(&frame);
             }
             self.activity = true;
-            // Hand the descriptor back to the host, clearing OWN.
-            self.set_desc_status(dbase, status & !DESC_OWN);
+            for &(dbase, _, _) in &span {
+                let status = self.desc_status(dbase);
+                self.set_desc_status(dbase, status & !DESC_OWN);
+            }
+            self.tx_cur = (desc + 1) & self.tx_mask;
             self.csr0 |= CSR0_TINT;
-            self.tx_cur = (self.tx_cur + 1) & self.tx_mask;
         }
     }
 
-    /// Deliver one inbound frame into the next chip-owned RX descriptor.
+    /// Deliver one inbound frame into chip-owned RX descriptors, chaining
+    /// across buffers when the frame is longer than one buffer (Am7990: STP
+    /// set in the first descriptor, ENP and MCNT written in the last). The
+    /// stored message is payload plus [`FCS_LEN`] trailer bytes, as received
+    /// off the wire.
     fn receive_frame(&mut self, frame: &[u8]) -> bool {
-        if !self.running || self.rx_len == 0 {
+        if !self.running || self.rx_len == 0 || self.mode & MODE_DRX != 0 {
             return false;
         }
-        let dbase = Self::desc_addr(self.rx_ring, self.rx_cur);
-        let status = self.desc_status(dbase);
-        if status & DESC_OWN == 0 {
-            return false; // no free descriptor: drop (MISS would be set on HW)
+        let total = (frame.len() + FCS_LEN).min(MAX_FRAME);
+        let mut remaining = total;
+        let mut copied = 0usize;
+        let mut desc = self.rx_cur;
+        let mut first = true;
+        loop {
+            let dbase = Self::desc_addr(self.rx_ring, desc);
+            let status = self.desc_status(dbase);
+            if status & DESC_OWN == 0 {
+                if first {
+                    // No descriptor to start the frame in: missed frame.
+                    self.csr0 |= CSR0_MISS;
+                    return false;
+                }
+                // Ran out of chained buffers mid-frame: the last buffer the
+                // chip filled gets BUFF, the frame is truncated, no ENP.
+                let prev = (desc + self.rx_mask) & self.rx_mask;
+                let pbase = Self::desc_addr(self.rx_ring, prev);
+                let pstatus = self.desc_status(pbase);
+                self.set_desc_status(pbase, (pstatus & !DESC_ENP) | DESC_BUFF | DESC_ERR);
+                self.rx_cur = desc;
+                self.activity = true;
+                self.csr0 |= CSR0_RINT;
+                return true;
+            }
+            let (buf_addr, cap) = self.desc_buffer(dbase);
+            let n = remaining.min(cap);
+            for i in 0..n {
+                let a = (buf_addr as usize + i) & (RAM_SIZE - 1);
+                self.ram[a] = *frame.get(copied + i).unwrap_or(&0);
+            }
+            copied += n;
+            remaining -= n;
+            let mut st = status & !(DESC_OWN | DESC_ERR | DESC_BUFF | DESC_STP | DESC_ENP);
+            if first {
+                st |= DESC_STP;
+            }
+            if remaining == 0 {
+                // MCNT (message byte count, FCS included) is only valid in
+                // the descriptor carrying ENP.
+                st |= DESC_ENP;
+                self.set_ram_word(dbase + 6, total as u16);
+            }
+            self.set_desc_status(dbase, st);
+            desc = (desc + 1) & self.rx_mask;
+            first = false;
+            if remaining == 0 {
+                break;
+            }
         }
-        let (buf_addr, cap) = self.desc_buffer(dbase);
-        let n = frame.len().min(cap).min(MAX_FRAME);
-        for (i, b) in frame.iter().take(n).enumerate() {
-            let a = (buf_addr as usize + i) & (RAM_SIZE - 1);
-            self.ram[a] = *b;
-        }
-        // MCNT (message byte count) at +6, plus STP|ENP and OWN cleared.
-        self.set_ram_word(dbase + 6, n as u16);
-        self.set_desc_status(dbase, (status & !DESC_OWN) | DESC_STP | DESC_ENP);
+        self.rx_cur = desc;
         self.activity = true;
         self.csr0 |= CSR0_RINT;
-        self.rx_cur = (self.rx_cur + 1) & self.rx_mask;
         true
     }
 
@@ -370,8 +471,8 @@ impl ZorroDevice for A2065 {
                 None => break,
             };
             if !self.receive_frame(&frame) {
-                break; // ring full: leave the frame for next time would need a
-                       // queue; for now it is dropped (a real chip sets MISS)
+                break; // no RX descriptor (MISS latched) or receiver off:
+                       // the frame is lost, as on the real chip
             }
         }
     }
@@ -394,6 +495,7 @@ impl ZorroDevice for A2065 {
         self.csr1 = 0;
         self.csr2 = 0;
         self.csr3 = 0;
+        self.mode = 0;
         self.running = false;
         self.ram.fill(0);
         self.net = make_backend(self.net_config);
@@ -636,6 +738,294 @@ mod tests {
         write_csr(&mut board, &mut mem, 0, CSR0_STOP);
         assert!(!board.int2_line());
         assert!(!board.running);
+    }
+
+    /// Lay an init block with the given MODE word plus multi-entry rings into
+    /// board RAM: RX ring at 0x100 (2^rx_log2 entries, chip-owned, each with a
+    /// rx_cap-byte buffer at 0x1000 + n*rx_cap), TX ring at 0x200 (2^tx_log2
+    /// entries, host-owned, buffers at 0x3000 + n*0x200).
+    fn set_up_rings_geom(
+        board: &mut A2065,
+        mem: &mut crate::memory::Memory,
+        mode: u16,
+        rx_log2: u16,
+        rx_cap: u16,
+        tx_log2: u16,
+    ) {
+        let iadr = 0x000u32;
+        let rx_ring = 0x100u32;
+        let tx_ring = 0x200u32;
+        let put = |board: &mut A2065, mem: &mut crate::memory::Memory, addr: u32, w: u16| {
+            let mut host = DeviceHost::new(mem);
+            board.write(RAM_BASE + addr, 2, u32::from(w), &mut host);
+        };
+        put(board, mem, iadr, mode);
+        put(board, mem, iadr + 2, 0x0201);
+        put(board, mem, iadr + 4, 0x0403);
+        put(board, mem, iadr + 6, 0x0605);
+        put(board, mem, iadr + 0x10, rx_ring as u16);
+        put(
+            board,
+            mem,
+            iadr + 0x12,
+            (rx_log2 << 13) | ((rx_ring >> 16) as u16 & 0xFF),
+        );
+        put(board, mem, iadr + 0x14, tx_ring as u16);
+        put(
+            board,
+            mem,
+            iadr + 0x16,
+            (tx_log2 << 13) | ((tx_ring >> 16) as u16 & 0xFF),
+        );
+        for n in 0..(1u32 << rx_log2) {
+            let dbase = rx_ring + n * 8;
+            let buf = 0x1000 + n * u32::from(rx_cap);
+            put(board, mem, dbase, buf as u16);
+            put(
+                board,
+                mem,
+                dbase + 2,
+                (u16::from(DESC_OWN) << 8) | ((buf >> 16) as u16 & 0xFF),
+            );
+            put(
+                board,
+                mem,
+                dbase + 4,
+                0xF000 | ((!rx_cap).wrapping_add(1) & 0x0FFF),
+            );
+        }
+        for n in 0..(1u32 << tx_log2) {
+            let dbase = tx_ring + n * 8;
+            let buf = 0x3000 + n * 0x200;
+            put(board, mem, dbase, buf as u16);
+            put(board, mem, dbase + 2, (buf >> 16) as u16 & 0xFF);
+        }
+        write_csr(board, mem, 1, iadr as u16);
+        write_csr(board, mem, 2, (iadr >> 16) as u16);
+    }
+
+    /// Hand TX descriptor `n` to the chip with a byte count and status bits.
+    fn arm_tx_desc(
+        board: &mut A2065,
+        mem: &mut crate::memory::Memory,
+        n: u32,
+        len: u16,
+        status: u8,
+    ) {
+        let dbase = 0x200 + n * 8;
+        let mut host = DeviceHost::new(mem);
+        board.write(
+            RAM_BASE + dbase + 4,
+            2,
+            u32::from(0xF000 | ((!len).wrapping_add(1) & 0x0FFF)),
+            &mut host,
+        );
+        board.write(
+            RAM_BASE + dbase + 2,
+            2,
+            u32::from(u16::from(status) << 8),
+            &mut host,
+        );
+    }
+
+    fn rx_desc_status(board: &mut A2065, mem: &mut crate::memory::Memory, n: u32) -> u8 {
+        let mut host = DeviceHost::new(mem);
+        (board.read(RAM_BASE + 0x100 + n * 8 + 2, 2, &mut host) >> 8) as u8
+    }
+
+    fn fill_tx_buf(board: &mut A2065, mem: &mut crate::memory::Memory, n: u32, data: &[u8]) {
+        let mut host = DeviceHost::new(mem);
+        for (i, b) in data.iter().enumerate() {
+            board.write(
+                RAM_BASE + 0x3000 + n * 0x200 + i as u32,
+                1,
+                u32::from(*b),
+                &mut host,
+            );
+        }
+    }
+
+    #[test]
+    fn tx_frame_chains_across_descriptors() {
+        let mut board = A2065::new(NetConfig::Loopback);
+        let mut mem = host_mem();
+        set_up_rings_geom(&mut board, &mut mem, 0, 0, 256, 1);
+        write_csr(&mut board, &mut mem, 0, CSR0_INIT);
+        write_csr(&mut board, &mut mem, 0, CSR0_STRT | CSR0_INEA);
+
+        let part0: Vec<u8> = (0..40u8).collect();
+        let part1: Vec<u8> = (40..64u8).collect();
+        fill_tx_buf(&mut board, &mut mem, 0, &part0);
+        fill_tx_buf(&mut board, &mut mem, 1, &part1);
+
+        // Hand over only the STP half: the chip must not touch the frame yet.
+        arm_tx_desc(&mut board, &mut mem, 0, 40, DESC_OWN | DESC_STP);
+        write_csr(&mut board, &mut mem, 0, CSR0_TDMD);
+        assert_eq!(read_csr(&mut board, &mut mem, 0) & CSR0_TINT, 0);
+        assert!(board.net.as_mut().unwrap().poll().is_none());
+
+        // Complete the span with the ENP half: one 64-byte frame goes out.
+        arm_tx_desc(&mut board, &mut mem, 1, 24, DESC_OWN | DESC_ENP);
+        write_csr(&mut board, &mut mem, 0, CSR0_TDMD);
+        assert_ne!(read_csr(&mut board, &mut mem, 0) & CSR0_TINT, 0);
+        let frame = board.net.as_mut().unwrap().poll().expect("chained frame");
+        assert_eq!(frame.len(), 64);
+        assert!(frame.iter().enumerate().all(|(i, b)| *b == i as u8));
+        // Both descriptors handed back to the host.
+        let mut host = DeviceHost::new(&mut mem);
+        assert_eq!(board.read(RAM_BASE + 0x202, 2, &mut host) >> 8 & 0x80, 0);
+        assert_eq!(board.read(RAM_BASE + 0x20A, 2, &mut host) >> 8 & 0x80, 0);
+    }
+
+    #[test]
+    fn rx_frame_chains_across_buffers() {
+        let mut board = A2065::new(NetConfig::Loopback);
+        let mut mem = host_mem();
+        set_up_rings_geom(&mut board, &mut mem, 0, 2, 128, 0);
+        write_csr(&mut board, &mut mem, 0, CSR0_INIT);
+        write_csr(&mut board, &mut mem, 0, CSR0_STRT | CSR0_INEA);
+
+        let frame: Vec<u8> = (0..300u16).map(|i| i as u8).collect();
+        board.net.as_mut().unwrap().send(&frame);
+        {
+            let mut host = DeviceHost::new(&mut mem);
+            board.tick(1, &mut host);
+        }
+
+        // 300 + 4 FCS = 304 bytes across three 128-byte buffers.
+        let d0 = rx_desc_status(&mut board, &mut mem, 0);
+        let d1 = rx_desc_status(&mut board, &mut mem, 1);
+        let d2 = rx_desc_status(&mut board, &mut mem, 2);
+        let d3 = rx_desc_status(&mut board, &mut mem, 3);
+        assert_eq!(d0 & (DESC_OWN | DESC_STP | DESC_ENP), DESC_STP);
+        assert_eq!(d1 & (DESC_OWN | DESC_STP | DESC_ENP), 0);
+        assert_eq!(d2 & (DESC_OWN | DESC_STP | DESC_ENP), DESC_ENP);
+        assert_ne!(d3 & DESC_OWN, 0, "fourth descriptor stays chip-owned");
+        let mut host = DeviceHost::new(&mut mem);
+        // MCNT lives in the ENP descriptor and counts the FCS.
+        assert_eq!(
+            board.read(RAM_BASE + 0x100 + 2 * 8 + 6, 2, &mut host) & 0xFFF,
+            304
+        );
+        // Payload spans the buffers; the FCS trailer bytes are zeros.
+        assert_eq!(board.read(RAM_BASE + 0x1000, 1, &mut host), 0);
+        assert_eq!(board.read(RAM_BASE + 0x1080, 1, &mut host), 128);
+        assert_eq!(
+            board.read(RAM_BASE + 0x1100 + 43, 1, &mut host),
+            299u32 & 0xFF
+        );
+        assert_eq!(board.read(RAM_BASE + 0x1100 + 44, 1, &mut host), 0);
+        assert_ne!(read_csr(&mut board, &mut mem, 0) & CSR0_RINT, 0);
+    }
+
+    #[test]
+    fn rx_without_free_descriptor_sets_miss() {
+        let mut board = A2065::new(NetConfig::Loopback);
+        let mut mem = host_mem();
+        set_up_rings_geom(&mut board, &mut mem, 0, 0, 256, 0);
+        write_csr(&mut board, &mut mem, 0, CSR0_INIT);
+        write_csr(&mut board, &mut mem, 0, CSR0_STRT | CSR0_INEA);
+        // Take the only RX descriptor away from the chip.
+        {
+            let mut host = DeviceHost::new(&mut mem);
+            board.write(RAM_BASE + 0x102, 2, 0, &mut host);
+        }
+        board.net.as_mut().unwrap().send(&[1, 2, 3]);
+        {
+            let mut host = DeviceHost::new(&mut mem);
+            board.tick(1, &mut host);
+        }
+        let csr0 = read_csr(&mut board, &mut mem, 0);
+        assert_ne!(csr0 & CSR0_MISS, 0);
+        assert_ne!(csr0 & CSR0_ERR, 0, "MISS rolls up into ERR");
+        assert_eq!(csr0 & CSR0_RINT, 0);
+    }
+
+    #[test]
+    fn rx_out_of_chained_buffers_sets_buff() {
+        let mut board = A2065::new(NetConfig::Loopback);
+        let mut mem = host_mem();
+        set_up_rings_geom(&mut board, &mut mem, 0, 0, 128, 0);
+        write_csr(&mut board, &mut mem, 0, CSR0_INIT);
+        write_csr(&mut board, &mut mem, 0, CSR0_STRT | CSR0_INEA);
+        board.net.as_mut().unwrap().send(&[0x55u8; 200]);
+        {
+            let mut host = DeviceHost::new(&mut mem);
+            board.tick(1, &mut host);
+        }
+        let d0 = rx_desc_status(&mut board, &mut mem, 0);
+        assert_eq!(d0 & DESC_OWN, 0);
+        assert_ne!(d0 & DESC_STP, 0);
+        assert_eq!(d0 & DESC_ENP, 0, "truncated frame has no end of packet");
+        assert_ne!(d0 & DESC_BUFF, 0);
+        assert_ne!(d0 & DESC_ERR, 0);
+        assert_ne!(read_csr(&mut board, &mut mem, 0) & CSR0_RINT, 0);
+    }
+
+    #[test]
+    fn mode_loop_returns_tx_frames_to_own_receiver() {
+        // No backend at all: internal loopback never reaches the wire.
+        let mut board = A2065::new(NetConfig::None);
+        let mut mem = host_mem();
+        set_up_rings_geom(&mut board, &mut mem, MODE_LOOP, 0, 256, 0);
+        write_csr(&mut board, &mut mem, 0, CSR0_INIT);
+        write_csr(&mut board, &mut mem, 0, CSR0_STRT | CSR0_INEA);
+
+        let data: Vec<u8> = (0..32u8).map(|i| i ^ 0x5A).collect();
+        fill_tx_buf(&mut board, &mut mem, 0, &data);
+        arm_tx_desc(&mut board, &mut mem, 0, 32, DESC_OWN | DESC_STP | DESC_ENP);
+        write_csr(&mut board, &mut mem, 0, CSR0_TDMD);
+
+        let csr0 = read_csr(&mut board, &mut mem, 0);
+        assert_ne!(csr0 & CSR0_TINT, 0);
+        assert_ne!(csr0 & CSR0_RINT, 0, "looped frame lands in the RX ring");
+        let mut host = DeviceHost::new(&mut mem);
+        assert_eq!(board.read(RAM_BASE + 0x1000, 1, &mut host), 0x5A);
+        assert_eq!(board.read(RAM_BASE + 0x100 + 6, 2, &mut host) & 0xFFF, 36);
+    }
+
+    #[test]
+    fn mode_dtx_drx_disable_the_engines() {
+        let mut board = A2065::new(NetConfig::Loopback);
+        let mut mem = host_mem();
+        set_up_rings_geom(&mut board, &mut mem, MODE_DTX | MODE_DRX, 0, 256, 0);
+        write_csr(&mut board, &mut mem, 0, CSR0_INIT);
+        write_csr(&mut board, &mut mem, 0, CSR0_STRT | CSR0_INEA);
+
+        fill_tx_buf(&mut board, &mut mem, 0, &[1, 2, 3, 4]);
+        arm_tx_desc(&mut board, &mut mem, 0, 4, DESC_OWN | DESC_STP | DESC_ENP);
+        write_csr(&mut board, &mut mem, 0, CSR0_TDMD);
+        assert_eq!(read_csr(&mut board, &mut mem, 0) & CSR0_TINT, 0);
+        assert!(board.net.as_mut().unwrap().poll().is_none());
+
+        board.net.as_mut().unwrap().send(&[9, 9, 9]);
+        {
+            let mut host = DeviceHost::new(&mut mem);
+            board.tick(1, &mut host);
+        }
+        assert_eq!(read_csr(&mut board, &mut mem, 0) & CSR0_RINT, 0);
+        assert_ne!(rx_desc_status(&mut board, &mut mem, 0) & DESC_OWN, 0);
+    }
+
+    #[test]
+    fn rx_appends_fcs_to_short_frame() {
+        let mut board = A2065::new(NetConfig::Loopback);
+        let mut mem = host_mem();
+        set_up_rings_geom(&mut board, &mut mem, 0, 0, 256, 0);
+        write_csr(&mut board, &mut mem, 0, CSR0_INIT);
+        write_csr(&mut board, &mut mem, 0, CSR0_STRT | CSR0_INEA);
+        board.net.as_mut().unwrap().send(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        {
+            let mut host = DeviceHost::new(&mut mem);
+            board.tick(1, &mut host);
+        }
+        let mut host = DeviceHost::new(&mut mem);
+        assert_eq!(board.read(RAM_BASE + 0x100 + 6, 2, &mut host) & 0xFFF, 8);
+        assert_eq!(board.read(RAM_BASE + 0x1000 + 3, 1, &mut host), 0xDD);
+        assert_eq!(board.read(RAM_BASE + 0x1000 + 4, 1, &mut host), 0);
+        assert_eq!(board.read(RAM_BASE + 0x1000 + 7, 1, &mut host), 0);
+        let d0 = rx_desc_status(&mut board, &mut mem, 0);
+        assert_eq!(d0 & (DESC_STP | DESC_ENP), DESC_STP | DESC_ENP);
     }
 
     #[test]

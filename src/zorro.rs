@@ -659,8 +659,8 @@ struct RawBoardMeta {
     dma: Option<bool>,
     int2: Option<bool>,
     int6: Option<bool>,
-    /// Host network backend ("none"/"loopback"); presence grants the `net`
-    /// capability (the net_send/net_recv imports).
+    /// Host network backend ("none"/"loopback"/"nat"); presence grants the
+    /// `net` capability (the net_send/net_recv imports).
     net: Option<String>,
     /// Default plugin settings (free-form key/value).
     config: Option<toml::Table>,
@@ -805,7 +805,7 @@ pub fn load_board_metadata(path: &Path) -> Result<LoadedZorroBoard> {
             let net = match &raw.net {
                 Some(s) => crate::net::parse_net_config(s).ok_or_else(|| {
                     anyhow::anyhow!(
-                        "{}: net = {:?} is not a known backend (expected \"none\" or \"loopback\")",
+                        "{}: net = {:?} is not a known backend (expected \"none\", \"loopback\", or \"nat\")",
                         path.display(),
                         s
                     )

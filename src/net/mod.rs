@@ -15,15 +15,21 @@
 //! only the board's chosen backend ([`NetConfig`]) and brings up a fresh
 //! backend on load (in-flight frames are dropped; the guest's TCP retransmits).
 //!
-//! One backend is built in: [`LoopbackBackend`] (frames echo back to the
-//! sender, for tests and a self-contained two-station demo). [`NetConfig::None`]
-//! brings up no backend at all, which is how an isolated NIC (one with the
-//! capability but no host connectivity) is expressed. Userspace NAT
-//! (libslirp/smoltcp) and a host TAP bridge are planned and will slot in behind
-//! [`make_backend`] under build features.
+//! Two backends are built in: [`LoopbackBackend`] (frames echo back to the
+//! sender, for tests and a self-contained two-station demo) and, behind the
+//! `net-nat` build feature, the userspace NAT in [`nat`] -- a slirp-style
+//! virtual gateway (guest 10.0.2.15, gateway 10.0.2.2, DNS 10.0.2.3) that
+//! gives the guest outbound IPv4 through ordinary host sockets, with no host
+//! privileges. [`NetConfig::None`] brings up no backend at all, which is how
+//! an isolated NIC (one with the capability but no host connectivity) is
+//! expressed. A host TAP bridge would also slot in behind [`make_backend`]
+//! under a build feature, but is not implemented.
 
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+
+#[cfg(all(feature = "net-nat", not(target_arch = "wasm32")))]
+pub mod nat;
 
 /// A host networking backend an emulated NIC sends and receives frames through.
 /// `Send` so it can live in a wasmtime store's data (which the bus owns).
@@ -47,6 +53,12 @@ pub enum NetConfig {
     /// guest see its own broadcasts and supports a self-contained demo without
     /// touching the host network; also the deterministic backend for tests.
     Loopback,
+    /// Userspace NAT: a virtual gateway NATs the guest's IPv4 onto ordinary
+    /// host sockets (no privileges, outbound only). Needs the `net-nat` build
+    /// feature; without it the variant still parses and saves, but no backend
+    /// comes up. The variant stays a unit (no per-flow options) so the config
+    /// remains `Copy`; host port-forwards would need a richer shape.
+    Nat,
 }
 
 /// Bring up the live backend a [`NetConfig`] names. `None` means the board has
@@ -55,6 +67,13 @@ pub fn make_backend(cfg: NetConfig) -> Option<Box<dyn NetBackend>> {
     match cfg {
         NetConfig::None => None,
         NetConfig::Loopback => Some(Box::new(LoopbackBackend::default())),
+        #[cfg(all(feature = "net-nat", not(target_arch = "wasm32")))]
+        NetConfig::Nat => Some(Box::new(nat::NatBackend::new())),
+        #[cfg(not(all(feature = "net-nat", not(target_arch = "wasm32"))))]
+        NetConfig::Nat => {
+            log::warn!("net = \"nat\" needs the net-nat build feature; NIC left isolated");
+            None
+        }
     }
 }
 
@@ -79,6 +98,7 @@ pub fn parse_net_config(s: &str) -> Option<NetConfig> {
     match s.trim().to_ascii_lowercase().as_str() {
         "none" | "off" | "" => Some(NetConfig::None),
         "loopback" | "loop" => Some(NetConfig::Loopback),
+        "nat" => Some(NetConfig::Nat),
         _ => None,
     }
 }
@@ -103,6 +123,7 @@ mod tests {
         assert_eq!(parse_net_config("loopback"), Some(NetConfig::Loopback));
         assert_eq!(parse_net_config("None"), Some(NetConfig::None));
         assert_eq!(parse_net_config(""), Some(NetConfig::None));
+        assert_eq!(parse_net_config("nat"), Some(NetConfig::Nat));
         assert_eq!(parse_net_config("tap0"), None);
     }
 
