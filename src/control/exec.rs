@@ -1718,7 +1718,7 @@ fn render_frame(emu: &Emulator) -> (Vec<u32>, usize) {
     // exactly as the window presentation does.
     let mut fb = Vec::new();
     let mut scratch = Vec::new();
-    if let Some(rows) =
+    if let Some((rows, _, _)) =
         crate::video::present_common::compose_rtg_present(emu.bus(), &mut scratch, &mut fb)
     {
         return (fb, rows);

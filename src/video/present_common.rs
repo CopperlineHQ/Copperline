@@ -18,17 +18,18 @@ pub const fn rgba(r: u32, g: u32, b: u32) -> u32 {
     0xFF00_0000 | (b << 16) | (g << 8) | r
 }
 
-/// Compose the active RTG board frame (Z3660 scanout) into an
-/// FB_WIDTH-stride presentation buffer: the board frame lands in `scratch`
-/// at its own resolution and is scaled horizontally (nearest) into `out`,
-/// one output row per board row -- the shared vertical scaling then maps
-/// rows to the output height like any chipset frame. Returns the row count,
-/// or `None` while no RTG board drives the display.
+/// Compose the active RTG board frame (Z3660 scanout). The board frame lands
+/// in `scratch` at its native resolution; `out` gets an FB_WIDTH-stride copy
+/// (nearest, one output row per board row) for the screenshot path, which
+/// reads the shared presentation buffer. Returns
+/// `(present_rows, native_w, native_h)`, or `None` while no RTG board drives
+/// the display. The window presents the native `scratch` frame directly (see
+/// [`crate::video::window`]); `out` exists only for the screenshot path.
 pub fn compose_rtg_present(
     bus: &crate::bus::Bus,
     scratch: &mut Vec<u32>,
     out: &mut Vec<u32>,
-) -> Option<usize> {
+) -> Option<(usize, u32, u32)> {
     let (w, h) = bus.rtg_frame(scratch)?;
     let (w, h) = (w as usize, h as usize);
     out.clear();
@@ -40,7 +41,7 @@ pub fn compose_rtg_present(
             *px = src[x * w / FB_WIDTH];
         }
     }
-    Some(h)
+    Some((h, w as u32, h as u32))
 }
 
 pub const STANDARD_PAL_VISIBLE_WIDTH: usize = 320 * 2;
