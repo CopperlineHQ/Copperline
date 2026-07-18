@@ -61,6 +61,11 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.12.0" date="2026-07-18">
+      <description>
+        <p>A browser (WebAssembly) build with touch input and URL media loading, A3000 and A4000 machine profiles with onboard SCSI and IDE, writable host-directory mounts, the Copperline Control Protocol for scripted live control, SCSI CD-ROM drives with CD audio and runtime disc swap, any controller device in either game port, parallel-port printer capture and audio sampler peripherals, deterministic guest clock seeding, VCD chip-signal waveform export, and chip-bus mirroring and display accuracy fixes.</p>
+      </description>
+    </release>
     <release version="0.11.0" date="2026-07-12">
       <description>
         <p>Host directories mounted as bootable HOSTFS volumes, unified A2091/A4091 SCSI controller selection, a serial PTY bridge, a broad 68000 microcode bus-ordering pass, blitter BLTPRI bus fencing, Copper wake-up and sprite serializer timing fixes, floppy motor spin-up DMA arming, display aperture and phantom-line rendering fixes, frame-time performance work, and a golden-render timing-probe regression suite.</p>
