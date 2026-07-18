@@ -310,7 +310,9 @@ impl Z3660 {
         const OP_SPRITE_BITMAP: u32 = 13;
         const MINTERM_SRC: u8 = 0xC0;
         const JAM1: u8 = 0;
-        const INVERSVID: u8 = 8;
+        // Drawmode bits (firmware rtg/gfx.h): JAM1/JAM2 in bit 0, COMPLEMENT
+        // in bit 1, INVERSVID in bit 2.
+        const INVERSVID: u8 = 4;
 
         let g = GFXDATA_OFFSET;
         let dst = VRAM_OFFSET as usize + self.be32(g) as usize;
