@@ -17,6 +17,7 @@ use std::rc::Rc;
 use copperline::audio::AudioSink;
 use copperline::config::{Config, Overscan};
 use copperline::emulator::{build_machine, Emulator};
+use copperline::serial::{ChannelSerialHandle, ChannelSerialSink};
 use copperline::video::deinterlace::Deinterlacer;
 use copperline::video::{bitplane, present_common, FB_WIDTH, MAX_FB_PIXELS};
 use wasm_bindgen::prelude::*;
@@ -201,6 +202,9 @@ pub struct WebEmu {
     /// first `run` call after (re)boot.
     anchor: Option<(f64, f64)>,
     mouse_remainder: (f64, f64),
+    /// Host side of Paula's serial port; the page bridges it to whatever
+    /// byte stream it likes (typically a WebSocket to a telnet gateway).
+    serial: ChannelSerialHandle,
 }
 
 #[wasm_bindgen]
@@ -214,7 +218,13 @@ impl WebEmu {
         let sink = WebAudioSink { buf: audio.clone() };
         // rom_optional: the default rom_path names the bundled AROS file,
         // which does not exist in the browser; build with a placeholder.
-        let emu = build_machine(&cfg, Box::new(sink), false, true).map_err(js_err)?;
+        let mut emu = build_machine(&cfg, Box::new(sink), false, true).map_err(js_err)?;
+        // Replace the default stdout serial sink (useless in a browser) with
+        // the channel pair the serial_* methods drive. Paula keeps host sinks
+        // across resets and ROM swaps, so installing it once here holds for
+        // the machine's whole life.
+        let (serial_sink, serial) = ChannelSerialSink::pair();
+        emu.bus_mut().paula.serial = Box::new(serial_sink);
         Ok(WebEmu {
             emu,
             audio,
@@ -226,6 +236,7 @@ impl WebEmu {
             last_rendered_frame: None,
             anchor: None,
             mouse_remainder: (0.0, 0.0),
+            serial,
         })
     }
 
@@ -459,6 +470,30 @@ impl WebEmu {
             .floppy
             .eject_disk_image(drive as usize)
             .map_err(js_err)
+    }
+
+    /// Queue received bytes for Paula's serial receiver (the page's
+    /// socket -> the guest). The queue is unbounded and the UART consumes it
+    /// at the emulated baud rate, so pace large transfers with
+    /// `serial_input_backlog` instead of pushing megabytes at once.
+    pub fn serial_send(&mut self, bytes: Vec<u8>) {
+        self.serial.push_input(&bytes);
+    }
+
+    /// Drain everything the guest transmitted on the serial port since the
+    /// last call (the guest -> the page's socket). Call once per animation
+    /// frame, like `take_audio`; output is bounded, and anything a
+    /// non-draining page lets pile up past that bound is dropped oldest
+    /// first. This also carries boot-ROM/OS debug output, so a page may log
+    /// it even with no socket connected.
+    pub fn serial_take(&mut self) -> Vec<u8> {
+        self.serial.take_output()
+    }
+
+    /// Bytes queued by `serial_send` that the guest's UART has not yet
+    /// consumed. Flow control: stop reading the socket while this is large.
+    pub fn serial_input_backlog(&self) -> u32 {
+        self.serial.input_backlog().min(u32::MAX as usize) as u32
     }
 
     /// Cold reset (power cycle), keeping the fitted ROM and inserted disks.

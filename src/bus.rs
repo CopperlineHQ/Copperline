@@ -4448,7 +4448,16 @@ impl Bus {
         // emulated_cck already covers this span, so it is the color clock at
         // the span's end. Paula uses it to stamp any serial byte that finishes
         // here; passing it avoids arithmetic on the common (no byte) path.
-        self.paula.intreq |= self.paula.tick_serial(cck, self.emulated_cck);
+        // A freshly-raised serial interrupt preempts the slice like any
+        // other interrupt source: OR-ing it in silently would leave a
+        // running CPU blind to RBF until its instruction slice ran out,
+        // which is longer than a character time at BBS baud rates -- the
+        // next word would overrun the one-word receive buffer before the
+        // guest's handler ever ran.
+        let serial_irq = self.paula.tick_serial(cck, self.emulated_cck);
+        if serial_irq != 0 && self.paula.latch_interrupt_sources(serial_irq) {
+            self.slice_preempted = true;
+        }
         let dmacon = self.agnus.dmacon;
         self.flush_audio();
         // The floppy mechanism is quiescent for almost all of normal running

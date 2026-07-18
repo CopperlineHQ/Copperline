@@ -423,8 +423,14 @@ where
             }
             "--serial" => {
                 overrides.serial = Some(args.next().ok_or_else(|| {
-                    anyhow!("--serial requires a mode (off/stdout/midi/tcp/pty)")
+                    anyhow!("--serial requires a mode (off/stdout/midi/tcp/tcp-connect/pty)")
                 })?);
+            }
+            "--serial-connect" => {
+                overrides.serial_connect =
+                    Some(args.next().ok_or_else(|| {
+                        anyhow!("--serial-connect requires an address (host:port)")
+                    })?);
             }
             "--midi-out" => {
                 overrides.midi_out = Some(
@@ -955,7 +961,10 @@ fn print_help() {
          \x20                            instead of live output\n  \
          --profile-live-audio SECS      run a no-window Paula-to-cpal profile workload;\n  \
          \x20                            combine with COPPERLINE_AUDIO_PROFILE=1 for counters\n  \
-         --serial MODE                  Paula serial port: off, stdout, midi, tcp, or pty\n  \
+         --serial MODE                  Paula serial port: off, stdout, midi, tcp,\n  \
+         \x20                            tcp-connect, or pty\n  \
+         --serial-connect HOST:PORT     dial a remote TCP service (a telnet BBS) with the\n  \
+         \x20                            serial port (implies --serial tcp-connect)\n  \
          --parallel DEVICE              parallel port: none, printer, or sampler\n  \
          --sampler-audio-input NAME     sampler host capture device (implies --parallel sampler)\n  \
          --sampler-input-gain DB        sampler input gain in dB (implies --parallel sampler)\n  \

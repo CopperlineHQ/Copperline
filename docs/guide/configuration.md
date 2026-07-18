@@ -514,10 +514,11 @@ run. (`auto` is still accepted here as a backward-compatibility alias for
 
 ```toml
 [serial]
-mode = "stdout"          # off, stdout, midi, tcp, or pty
+mode = "stdout"          # off, stdout, midi, tcp, tcp-connect, or pty
 # midi_out = "FluidSynth"  # midi mode: host destination, substring match
 # midi_in = "Keystation"   # midi mode: host source, substring match
 # listen = "127.0.0.1:1234"  # tcp mode: bind address
+# connect = "bbs.example.com:1337"  # tcp-connect mode: remote to dial
 ```
 
 The Amiga serial port doubles as the MIDI port. `mode` selects where
@@ -533,15 +534,28 @@ Paula's serial in/out is connected:
 - `tcp` -- serial in/out is bridged to a host TCP port, like UAE's `TCP:`
   device. `listen` sets the bind address (default `127.0.0.1:1234`);
   connect with e.g. `nc`, `socat`, or a raw-mode telnet client.
+- `tcp-connect` -- the outbound counterpart of `tcp`: at startup the
+  serial port dials the remote named by `connect` (required, `host:port`)
+  and the session talks to that service. Point a guest terminal program
+  at a telnet BBS, a `tcpser` modem bridge, or any TCP byte service. The
+  connection is made once; if the remote hangs up, output drops like an
+  unplugged cable until the next run. Note that the wire carries raw
+  bytes: for telnet servers that insist on option negotiation, put a
+  telnet-aware relay in between, or pick a BBS/port that accepts raw
+  connections (most do).
 - `pty` -- serial in/out is bridged to a host pseudo-terminal (Unix only).
   The slave path (`/dev/pts/N`) is logged at startup; attach a terminal
   with e.g. `minicom -D`, `screen`, or `cu -l`.
 
 With an `AUX:` shell on the Amiga side, `tcp`/`pty` give a remote AmigaDOS
-console. `--serial MODE` overrides the mode per run, and
-`--midi-out NAME`/`--midi-in NAME` imply `mode = "midi"`. The launcher's
-**Serial** tab and the in-window **MIDI In / MIDI Out** menu items select
-the MIDI endpoints interactively.
+console. `--serial MODE` overrides the mode per run,
+`--serial-connect HOST:PORT` sets the dial-out target (and implies
+`mode = "tcp-connect"`), and `--midi-out NAME`/`--midi-in NAME` imply
+`mode = "midi"`. The launcher's **Serial** tab and the in-window
+**MIDI In / MIDI Out** menu items select the MIDI endpoints interactively.
+
+The browser build has its own serial transport (the page bridges the port
+to a WebSocket); see [the browser chapter](browser.md).
 
 ## `[parallel]` -- Centronics parallel port
 

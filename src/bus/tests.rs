@@ -8124,6 +8124,27 @@ fn same_line_bplcon3_spres_write_does_not_retime_earlier_live_sprite_playfield_c
 }
 
 #[test]
+fn serial_receive_completion_preempts_the_cpu_slice() {
+    // A word finishing in Paula's receiver raises RBF through the same
+    // slice-preempting path as every other interrupt source. Regression:
+    // the serial tick's bits were OR'd into INTREQ silently, so a running
+    // CPU stayed blind to RBF until its instruction slice ran out --
+    // longer than a character time at BBS baud rates, overrunning the
+    // one-word receive buffer before the guest handler ran.
+    let mut bus = empty_bus();
+    let (sink, handle) = crate::serial::ChannelSerialSink::pair();
+    bus.paula.serial = Box::new(sink);
+    bus.paula.serper = 0; // 1 cck per bit: a word completes in 10 ccks
+    handle.push_input(b"a");
+    bus.begin_cpu_slice();
+
+    bus.advance_devices(20);
+
+    assert!(bus.slice_preempted);
+    assert_ne!(bus.paula.intreq & crate::chipset::paula::INT_RBF, 0);
+}
+
+#[test]
 fn bltsize_starts_dma_and_preempts_cpu_slice_without_irq_preempt() {
     let mut bus = empty_bus();
     bus.paula.intena = INT_BLIT;
