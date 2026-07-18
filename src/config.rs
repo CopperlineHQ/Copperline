@@ -292,6 +292,13 @@ pub enum SerialMode {
     /// serial device. With an `AUX:` shell on the Amiga side, a connected
     /// client gets a remote AmigaDOS console.
     Tcp,
+    /// Serial in/out dials out to a remote TCP service at startup (the
+    /// address in [`SerialConfig::connect`]): a telnet BBS, a `tcpser`
+    /// modem bridge, a `socat`-exposed device. The outbound counterpart
+    /// of [`Tcp`].
+    ///
+    /// [`Tcp`]: SerialMode::Tcp
+    TcpConnect,
     /// Serial in/out is bridged to a host pseudo-terminal. The emulator
     /// allocates a pty and logs the slave path (`/dev/pts/N`); a terminal
     /// program (`minicom`, `screen`, `cu`) attaches to it. Unix hosts only.
@@ -306,6 +313,7 @@ impl SerialMode {
             Self::Stdout => "stdout",
             Self::Midi => "midi",
             Self::Tcp => "tcp",
+            Self::TcpConnect => "tcp-connect",
             Self::Pty => "pty",
         }
     }
@@ -323,6 +331,9 @@ pub struct SerialConfig {
     /// TCP listen address for [`SerialMode::Tcp`]; `None` means the
     /// default `127.0.0.1:1234` (the port UAE's `TCP:` serial uses).
     pub listen: Option<String>,
+    /// Remote `host:port` for [`SerialMode::TcpConnect`]. Required in that
+    /// mode (there is no sensible default host to dial).
+    pub connect: Option<String>,
 }
 
 /// Which peripheral is plugged into the Amiga's Centronics parallel port. The
@@ -1234,9 +1245,13 @@ pub struct ConfigOverrides {
     /// Device in game port 2 (`--port2`). Same parser as `[input] port2`.
     pub port2: Option<String>,
     /// Serial port wiring (`--serial`): "off", "stdout", "midi", "tcp",
-    /// or "pty" ("none" and "terminal" parse as compatibility aliases of
-    /// the first two). Same parser as `[serial] mode`.
+    /// "tcp-connect", or "pty" ("none" and "terminal" parse as
+    /// compatibility aliases of the first two). Same parser as
+    /// `[serial] mode`.
     pub serial: Option<String>,
+    /// Remote host:port the serial port dials (`--serial-connect`),
+    /// implying `--serial tcp-connect`.
+    pub serial_connect: Option<String>,
     /// Host MIDI output endpoint (`--midi-out`), implying `--serial midi`.
     pub midi_out: Option<String>,
     /// Host MIDI input endpoint (`--midi-in`), implying `--serial midi`.
@@ -1280,6 +1295,7 @@ impl ConfigOverrides {
             && self.port1.is_none()
             && self.port2.is_none()
             && self.serial.is_none()
+            && self.serial_connect.is_none()
             && self.midi_out.is_none()
             && self.midi_in.is_none()
             && self.parallel.is_none()
@@ -1334,16 +1350,26 @@ impl ConfigOverrides {
         if let Some(mode) = &self.serial {
             raw.serial.mode = Some(mode.clone());
         }
+        if let Some(addr) = &self.serial_connect {
+            raw.serial.connect = Some(addr.clone());
+        }
         if let Some(out) = &self.midi_out {
             raw.serial.midi_out = Some(out.clone());
         }
         if let Some(input) = &self.midi_in {
             raw.serial.midi_in = Some(input.clone());
         }
-        // Naming a MIDI endpoint on the command line selects MIDI mode unless
-        // `--serial` said otherwise.
+        // Naming a MIDI endpoint or a dial-out address on the command line
+        // selects the matching mode unless `--serial` said otherwise.
         if self.serial.is_none() && (self.midi_out.is_some() || self.midi_in.is_some()) {
             raw.serial.mode = Some(SerialMode::Midi.label().to_string());
+        }
+        if self.serial.is_none()
+            && self.midi_out.is_none()
+            && self.midi_in.is_none()
+            && self.serial_connect.is_some()
+        {
+            raw.serial.mode = Some(SerialMode::TcpConnect.label().to_string());
         }
         if let Some(device) = &self.parallel {
             raw.parallel.device = Some(device.clone());
@@ -1533,6 +1559,9 @@ pub(crate) struct RawSerial {
     /// TCP listen address; tcp mode only. Defaults to 127.0.0.1:1234.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) listen: Option<String>,
+    /// Remote host:port to dial; tcp-connect mode only, and required there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) connect: Option<String>,
 }
 
 /// `[parallel]` peripheral selection for the Amiga Centronics parallel port.
@@ -2181,6 +2210,7 @@ impl TryFrom<RawConfig> for Config {
             midi_out: raw.serial.midi_out.clone(),
             midi_in: raw.serial.midi_in.clone(),
             listen: raw.serial.listen.clone(),
+            connect: raw.serial.connect.clone(),
         };
 
         let ide = IdeConfig {
@@ -2586,9 +2616,11 @@ pub(crate) fn parse_serial_mode(s: &str) -> Result<SerialMode> {
         "stdout" | "terminal" => Ok(SerialMode::Stdout),
         "midi" => Ok(SerialMode::Midi),
         "tcp" => Ok(SerialMode::Tcp),
+        "tcp-connect" => Ok(SerialMode::TcpConnect),
         "pty" => Ok(SerialMode::Pty),
         _ => Err(anyhow!(
-            "unknown [serial] mode {:?}: expected \"off\", \"stdout\", \"midi\", \"tcp\", or \"pty\"",
+            "unknown [serial] mode {:?}: expected \"off\", \"stdout\", \"midi\", \"tcp\", \
+             \"tcp-connect\", or \"pty\"",
             s
         )),
     }
@@ -5169,6 +5201,38 @@ mod tests {
 
         let err = parse_config("[serial]\nmode = \"rs232\"\n").unwrap_err();
         assert!(err.to_string().contains("unknown [serial] mode"), "{err:#}");
+        Ok(())
+    }
+
+    #[test]
+    fn serial_section_selects_tcp_connect_and_address() -> Result<()> {
+        let cfg =
+            parse_config("[serial]\nmode = \"tcp-connect\"\nconnect = \"bbs.example.com:1337\"\n")?;
+        assert_eq!(cfg.serial.mode, SerialMode::TcpConnect);
+        assert_eq!(cfg.serial.connect.as_deref(), Some("bbs.example.com:1337"));
+        Ok(())
+    }
+
+    #[test]
+    fn cli_serial_connect_implies_tcp_connect_mode() -> Result<()> {
+        // Like --midi-out implying midi mode: naming a dial-out address is
+        // enough, unless --serial explicitly chose another mode.
+        let overrides = ConfigOverrides {
+            serial_connect: Some("bbs.example.com:1337".to_string()),
+            ..Default::default()
+        };
+        let cfg = load_overrides(&overrides)?;
+        assert_eq!(cfg.serial.mode, SerialMode::TcpConnect);
+        assert_eq!(cfg.serial.connect.as_deref(), Some("bbs.example.com:1337"));
+
+        let overrides = ConfigOverrides {
+            serial: Some("off".to_string()),
+            serial_connect: Some("bbs.example.com:1337".to_string()),
+            ..Default::default()
+        };
+        let cfg = load_overrides(&overrides)?;
+        assert_eq!(cfg.serial.mode, SerialMode::Off);
+        assert_eq!(cfg.serial.connect.as_deref(), Some("bbs.example.com:1337"));
         Ok(())
     }
 

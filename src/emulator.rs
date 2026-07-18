@@ -1765,6 +1765,15 @@ fn build_serial_sink(cfg: &Config) -> Result<Box<dyn crate::serial::SerialSink>>
         SerialMode::Tcp => Ok(Box::new(crate::serial::TcpSerialSink::listen(
             cfg.serial.listen.as_deref().unwrap_or("127.0.0.1:1234"),
         )?)),
+        SerialMode::TcpConnect => {
+            let addr = cfg.serial.connect.as_deref().ok_or_else(|| {
+                anyhow!(
+                    "[serial] mode = \"tcp-connect\" needs a remote address: set \
+                     [serial] connect = \"host:port\" or pass --serial-connect"
+                )
+            })?;
+            Ok(Box::new(crate::serial::TcpSerialSink::connect(addr)?))
+        }
         #[cfg(unix)]
         SerialMode::Pty => Ok(Box::new(crate::serial::PtySerialSink::open()?)),
         #[cfg(not(unix))]

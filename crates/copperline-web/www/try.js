@@ -9,6 +9,7 @@
 // worklet. Everything is served from this site - no external requests.
 
 import init, { WebEmu } from './pkg/copperline_web.js';
+import { TelnetSession } from './serial-telnet.js';
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('screen');
@@ -389,6 +390,8 @@ function tick(nowMs) {
     audioNode.port.postMessage(audio, [audio.buffer]);
   }
 
+  pumpSerial();
+
   if (nowMs - lastStatUpdate >= 1000) {
     statLine.textContent =
       `${framesThisSecond} fps | ` +
@@ -405,6 +408,103 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) audioCtx.suspend();
   else audioCtx.resume();
 });
+
+// --- serial / BBS bridge ---------------------------------------------------
+// Optional page feature: a shell that provides #serial-url (text input) and
+// #serial-connect (button) gets the Amiga serial port bridged to a WebSocket
+// (a websockify-style gateway in front of a telnet BBS or any TCP service).
+// #serial-status (a status span) and #serial-raw (a checkbox that bypasses
+// the telnet layer, for gateways to non-telnet services) are optional too.
+// Pages without the elements are untouched - the pump still drains the
+// guest's bounded serial buffer every frame, it just goes nowhere.
+
+const serialUrlInput = $('serial-url');
+const serialConnectBtn = $('serial-connect');
+const serialStatus = $('serial-status');
+const serialRawToggle = $('serial-raw');
+
+let serialWs = null;
+let serialTelnet = null;
+// Inbound chunks the guest's UART has not had room for yet. The UART
+// consumes at the emulated baud rate, so a fast sender (a file download)
+// backlogs here rather than ballooning inside the wasm heap.
+let serialRxQueue = [];
+// Stop feeding the guest while its input backlog exceeds this many bytes;
+// the queue above absorbs the difference, a frame at a time.
+const SERIAL_BACKLOG_LIMIT = 32768;
+
+function setSerialStatus(text) {
+  if (serialStatus) serialStatus.textContent = text;
+}
+
+function serialDisconnect(status) {
+  if (serialWs) {
+    // Neuter the handlers first: close() fires onclose asynchronously, and
+    // a stale handler would clobber the status of a connection made later.
+    serialWs.onopen = serialWs.onclose = serialWs.onerror = serialWs.onmessage = null;
+    serialWs.close();
+    serialWs = null;
+  }
+  serialTelnet = null;
+  serialRxQueue = [];
+  if (serialConnectBtn) serialConnectBtn.textContent = 'Connect';
+  setSerialStatus(status);
+}
+
+function serialConnect() {
+  const url = serialUrlInput?.value?.trim();
+  if (!url) {
+    setSerialStatus('enter a ws:// or wss:// gateway URL');
+    return;
+  }
+  let ws;
+  try {
+    ws = new WebSocket(url);
+  } catch (e) {
+    setSerialStatus(`bad URL: ${e.message ?? e}`);
+    return;
+  }
+  ws.binaryType = 'arraybuffer';
+  serialWs = ws;
+  serialTelnet = serialRawToggle?.checked ? null : new TelnetSession();
+  serialRxQueue = [];
+  if (serialConnectBtn) serialConnectBtn.textContent = 'Disconnect';
+  setSerialStatus('connecting...');
+  ws.onopen = () => setSerialStatus(`connected (${serialTelnet ? 'telnet' : 'raw'})`);
+  ws.onclose = () => serialDisconnect('disconnected');
+  ws.onerror = () => setSerialStatus('connection failed');
+  ws.onmessage = (e) => {
+    let bytes = new Uint8Array(e.data);
+    if (serialTelnet) {
+      const { data, reply } = serialTelnet.receive(bytes);
+      if (reply.length && ws.readyState === WebSocket.OPEN) ws.send(reply);
+      bytes = data;
+    }
+    if (bytes.length) serialRxQueue.push(bytes);
+  };
+}
+
+if (serialConnectBtn) {
+  serialConnectBtn.addEventListener('click', () => {
+    if (serialWs) serialDisconnect('disconnected');
+    else serialConnect();
+  });
+}
+
+function pumpSerial() {
+  if (!emu) return;
+  // Guest -> socket. Drained every frame even with no socket connected, so
+  // the guest's bounded output buffer (which also carries boot-ROM debug
+  // chatter) never overflows into dropped bytes mid-session.
+  const out = emu.serial_take();
+  if (out.length && serialWs?.readyState === WebSocket.OPEN) {
+    serialWs.send(serialTelnet ? serialTelnet.send(out) : out);
+  }
+  // Socket -> guest, paced by the UART's own consumption.
+  while (serialRxQueue.length && emu.serial_input_backlog() < SERIAL_BACKLOG_LIMIT) {
+    emu.serial_send(serialRxQueue.shift());
+  }
+}
 
 // --- joystick (port 2) -----------------------------------------------------
 // The toggle cycles off -> keys (-> touch on touch screens). Keys is the

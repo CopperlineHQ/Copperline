@@ -642,11 +642,12 @@ const SCSI_CONTROLLERS: [Option<ScsiController>; 4] = [
     Some(ScsiController::A3000),
 ];
 #[cfg(feature = "midi")]
-const SERIAL_MODES: [SerialMode; 5] = [
+const SERIAL_MODES: [SerialMode; 6] = [
     SerialMode::Off,
     SerialMode::Stdout,
     SerialMode::Midi,
     SerialMode::Tcp,
+    SerialMode::TcpConnect,
     SerialMode::Pty,
 ];
 
@@ -744,6 +745,9 @@ pub struct MachineSetup {
     /// TCP listen address for `mode = "tcp"`; carried so the override
     /// round-trips through a launcher save even though no tab edits it.
     serial_listen: Option<String>,
+    /// Dial-out address for `mode = "tcp-connect"`; carried like
+    /// `serial_listen` (no tab edits it, a save must not drop it).
+    serial_connect: Option<String>,
     /// The Centronics parallel-port device (None/Printer/Sampler), edited on the
     /// Parallel tab.
     parallel_device: crate::config::ParallelDevice,
@@ -873,6 +877,7 @@ impl MachineSetup {
             midi_out: cfg.serial.midi_out.clone(),
             midi_in: cfg.serial.midi_in.clone(),
             serial_listen: cfg.serial.listen.clone(),
+            serial_connect: cfg.serial.connect.clone(),
             parallel_device: cfg.parallel.device,
             parallel_output: cfg.parallel.printer_output.clone(),
             sampler_input: cfg.parallel.sampler_input.clone(),
@@ -1175,6 +1180,7 @@ impl MachineSetup {
         raw.serial.midi_out = self.midi_out.clone();
         raw.serial.midi_in = self.midi_in.clone();
         raw.serial.listen = self.serial_listen.clone();
+        raw.serial.connect = self.serial_connect.clone();
         // Parallel port. Carry each peripheral's settings whenever they are set
         // so a Save round-trips them even while another device is temporarily
         // selected. The sampler options do not imply the sampler, so they are
@@ -1642,6 +1648,7 @@ impl MachineSetup {
                 SerialMode::Stdout => "Stdout".to_string(),
                 SerialMode::Midi => "MIDI".to_string(),
                 SerialMode::Tcp => "TCP".to_string(),
+                SerialMode::TcpConnect => "TCP connect".to_string(),
                 SerialMode::Pty => "PTY".to_string(),
             },
             #[cfg(feature = "midi")]
@@ -2698,6 +2705,24 @@ mod tests {
         assert_eq!(setup.serial_listen.as_deref(), Some("0.0.0.0:2323"));
         let back = setup.to_raw();
         assert_eq!(back.serial.listen.as_deref(), Some("0.0.0.0:2323"));
+    }
+
+    #[test]
+    fn serial_tcp_connect_round_trips_through_raw() {
+        // Same contract as the listen override: the dial-out address has no
+        // launcher editor, so loading and saving must carry it unchanged.
+        let mut raw = RawConfig::default();
+        raw.serial.mode = Some("tcp-connect".into());
+        raw.serial.connect = Some("bbs.example.com:1337".into());
+        let setup = MachineSetup::from_raw(&raw).unwrap();
+        assert_eq!(setup.serial_mode, SerialMode::TcpConnect);
+        assert_eq!(
+            setup.serial_connect.as_deref(),
+            Some("bbs.example.com:1337")
+        );
+        let back = setup.to_raw();
+        assert_eq!(back.serial.mode.as_deref(), Some("tcp-connect"));
+        assert_eq!(back.serial.connect.as_deref(), Some("bbs.example.com:1337"));
     }
 
     #[test]

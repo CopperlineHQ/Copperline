@@ -382,13 +382,18 @@ floppy_sounds_volume = 100
 #   "tcp"     serial in/out is bridged to a host TCP port, like UAE's "TCP:"
 #             device. listen sets the bind address (default 127.0.0.1:1234);
 #             connect with e.g. `nc`, `socat`, or a raw-mode telnet client.
+#   "tcp-connect"
+#             the outbound counterpart of "tcp": dial the remote named by
+#             connect (required, "host:port") at startup - a telnet BBS, a
+#             tcpser modem bridge, any TCP byte service.
 #   "pty"     serial in/out is bridged to a host pseudo-terminal (Unix only).
 #             The slave path (/dev/pts/N) is logged at startup; attach a
 #             terminal with e.g. `minicom -D`, `screen`, or `cu -l`.
 # With an AUX: shell on the Amiga side, "tcp"/"pty" give a remote AmigaDOS
-# console. --serial MODE overrides this per run; --midi-out/--midi-in NAME
-# imply "midi".
+# console. --serial MODE overrides this per run; --serial-connect HOST:PORT
+# implies "tcp-connect"; --midi-out/--midi-in NAME imply "midi".
 # mode = "stdout"
+# connect = "bbs.example.com:1337"
 # midi_out = "USB MIDI Interface"
 # midi_in = "USB MIDI Interface"
 # listen = "127.0.0.1:1234"

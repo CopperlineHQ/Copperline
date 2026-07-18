@@ -202,7 +202,10 @@ feeds from the desktop frontend's FS-UAE-compatible keyboard mapping
 (cursor keys, Right Ctrl / Right Alt fire, CD32 extras on C/X/D/S/Enter/Z/A).
 `reset()` power-cycles, `eject_floppy(n)`
 and `set_volume_percent(p)` do what they say, and `emulated_seconds()`
-exposes the guest clock for diagnostics. The presentation pointer is only
+exposes the guest clock for diagnostics. `serial_send(bytes)`,
+`serial_take()` and `serial_input_backlog()` bridge Paula's serial port to
+whatever byte stream the page likes (see
+[the serial bridge section](#browser-serial-bridge)). The presentation pointer is only
 valid until the next `run` call -- rebuild the typed-array view every frame,
 because wasm memory can grow. The presentation *size* is dynamic too:
 `present_width()` and `present_rows()` change when the guest switches
@@ -212,6 +215,49 @@ from both every frame rather than assuming fixed dimensions.
 
 `www/try.js` and `www/audio-worklet.js` are the reference implementation of
 all of the above, including the audio drift control.
+
+(browser-serial-bridge)=
+## The serial port: dialling a BBS from a browser
+
+The wasm build exposes Paula's serial port as a byte channel, so a page can
+bridge the emulated Amiga to a network service -- the classic use being a
+telnet BBS, with a terminal program running on the guest. Three calls:
+
+- `serial_send(bytes)` queues received bytes for the guest's UART. The
+  queue is unbounded and consumed at the emulated baud rate, so pace large
+  transfers with `serial_input_backlog()` (stop reading the socket while
+  it is large) instead of pushing megabytes at once.
+- `serial_take()` drains everything the guest transmitted since the last
+  call; call it once per animation frame like `take_audio`. The buffer
+  behind it is bounded (oldest bytes drop if a page never drains), and it
+  also carries boot-ROM/OS debug output, which a page may simply log.
+- `serial_input_backlog()` reports the bytes `serial_send` has queued that
+  the UART has not yet consumed -- the flow-control signal.
+
+Browsers cannot open raw TCP, so the page's transport is a WebSocket to a
+gateway that forwards to the real service --
+[websockify](https://github.com/novnc/websockify) in front of a telnet
+port is the standard shape, and the page must use `wss://` when it is
+served over HTTPS. Telnet servers also negotiate options in-band (IAC
+sequences) that a guest terminal program knows nothing about;
+`www/serial-telnet.js` is a small NVT layer that answers the negotiation
+(ECHO, suppress-go-ahead, binary mode for ZModem, and a terminal-type
+reply of "ANSI"), unescapes inbound data, and escapes outbound data.
+
+`try.js` wires all of this up when the page shell provides the elements:
+an input `#serial-url` for the gateway URL, a button `#serial-connect`,
+and optionally a status span `#serial-status` and a checkbox `#serial-raw`
+that bypasses the telnet layer (for gateways to non-telnet byte services).
+The hosted `/try` page omits them; a page embedding the emulator next to a
+BBS adds four elements and inherits the whole flow. The guest side needs a
+terminal program on a bootable disk (set to serial.device, 8N1 -- the
+bridge carries whatever baud the guest picks), inserted like any other
+floppy.
+
+On the desktop build the equivalent is `[serial] mode = "tcp-connect"`
+plus `connect = "host:port"` (or `--serial-connect host:port`), which
+dials the service directly with no gateway in between; see
+[the configuration chapter](configuration.md).
 
 (benchmarking-the-core-as-wasm)=
 ## Benchmarking the core as wasm
