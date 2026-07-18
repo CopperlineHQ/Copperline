@@ -18,6 +18,13 @@ use log::{info, warn};
 
 const INSTRUCTIONS_PER_SLICE: usize = 32_000;
 const INSTRUCTIONS_PER_REALTIME_SLICE: usize = 8_192;
+/// Longest blind STOP-state fast-forward, in colour clocks, while a serial
+/// sink with a live host input side is attached (see the cap site in
+/// `idle_fast_forward_chunk`). 256 cck is about 72 microseconds: well under
+/// one character time even at 115200 baud (about 10 x 31 cck), so a byte
+/// arriving from the host mid-nap raises RBF and wakes the CPU before a
+/// second byte can complete and overrun Paula's one-word receive buffer.
+const SERIAL_LIVE_IDLE_CAP_CCK: u32 = 256;
 /// Safety bound on a single reverse-debug replay so a pathological target
 /// (e.g. a permanently halted CPU) cannot spin forever. Far larger than the
 /// instruction distance between two snapshots at any sane capture interval.
@@ -1496,6 +1503,16 @@ impl Emulator {
         }
         if let Some(cck) = bus.next_serial_event_cck() {
             cap_cck(cck, &mut chunk);
+        }
+        // A serial sink wired to a live host byte source (TCP, pty, the
+        // browser channel) can start a reception at any wall-clock moment,
+        // invisibly to the event horizon computed here. Bound the blind nap
+        // while one is attached, so a byte landing mid-nap is recognized
+        // within a fraction of a character time -- a real machine halted in
+        // STOP wakes on RBF within microseconds, and sleeping past a whole
+        // character would overrun the one-word receive buffer.
+        if bus.paula.serial.can_produce_input() {
+            cap_cck(SERIAL_LIVE_IDLE_CAP_CCK, &mut chunk);
         }
         if let Some(cck) = bus.next_keyboard_event_cck() {
             cap_cck(cck, &mut chunk);

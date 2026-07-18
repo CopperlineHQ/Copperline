@@ -399,7 +399,14 @@ Paula's INTENA/INTREQ levels are delivered as M68K autovectors through the
 modelled IPL pipe and boundary sampling described in [](timing). When the CPU
 executes `STOP`, the frame loop fast-forwards device time to the next
 event that can raise an interrupt instead of spinning -- behaviour the
-debugger's Step control inherits.
+debugger's Step control inherits. One event source is invisible to that
+horizon: a serial sink with a live host input side (TCP, pty, the browser
+channel) can start a reception at any wall-clock moment. While such a sink
+is attached, the blind fast-forward span is capped to a fraction of a
+serial character time, so a byte landing mid-nap raises RBF and wakes the
+CPU before a second byte can complete and overrun Paula's one-word receive
+buffer -- matching a real machine, which wakes from `STOP` within
+microseconds of the interrupt.
 
 ## Exceptions
 

@@ -1032,10 +1032,19 @@ impl Paula {
             .serial_tx_shift
             .as_ref()
             .map(|shift| shift.remaining_cck.max(1));
+        // Host input waiting with the receiver idle is an imminent event
+        // too: real Paula starts shifting the moment the start bit hits the
+        // pin, so the next span must be short enough to load the shift now.
+        // Without this, an idle machine runs a multi-millisecond span in
+        // which a whole burst loads AND completes inside one tick_serial
+        // call -- the first word buffers, the rest overrun -- before the
+        // CPU ever gets to service RBF, dropping bytes real hardware would
+        // have delivered.
         let rx = self
             .serial_rx_shift
             .as_ref()
-            .map(|shift| shift.remaining_cck.max(1));
+            .map(|shift| shift.remaining_cck.max(1))
+            .or_else(|| self.serial.has_pending_input().then_some(1));
         match (tx, rx) {
             (Some(tx), Some(rx)) => Some(tx.min(rx)),
             (Some(tx), None) => Some(tx),
@@ -2992,6 +3001,32 @@ mod tests {
         assert_eq!(observations[0].word, 0x0041);
         assert!(!observations[0].long);
         assert_eq!(observations[0].at_cck, 100);
+    }
+
+    #[test]
+    fn pending_sink_input_bounds_the_serial_event_horizon() {
+        // An idle receiver with host bytes queued must report an imminent
+        // serial event: real Paula starts shifting when the start bit hits
+        // the pin, so the bus needs a span boundary now, not at the end of
+        // a long idle chunk. Regression: without this, a burst arriving on
+        // an idle machine loaded and completed several words inside one
+        // span -- the first buffered, the rest overran -- before the CPU
+        // ever saw RBF.
+        let (mut paula, _, _) = paula_with_collect_serial_words();
+        paula.serper = 30;
+        assert_eq!(paula.next_serial_event_cck(), None);
+
+        let (sink, handle) = crate::serial::ChannelSerialSink::pair();
+        paula.serial = Box::new(sink);
+        handle.push_input(b"ab");
+        assert_eq!(paula.next_serial_event_cck(), Some(1));
+
+        // Ticking loads the shift; the horizon then tracks it bit by bit,
+        // and the queued second byte keeps the horizon short after the
+        // first completes instead of letting it go idle-long again.
+        assert_eq!(paula.tick_serial(1, 1), 0);
+        let horizon = paula.next_serial_event_cck().expect("shift active");
+        assert!(horizon <= 31, "horizon {horizon} exceeds a bit time");
     }
 
     #[test]

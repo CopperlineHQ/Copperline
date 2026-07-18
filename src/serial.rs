@@ -94,6 +94,17 @@ pub trait SerialSink: Send {
         false
     }
 
+    /// Whether this sink can EVER produce input (a live host byte source is
+    /// wired up), regardless of whether any is pending right now. Input
+    /// arrives on the host's schedule, invisible to the emulated event
+    /// horizon, so the emulator bounds its blind idle fast-forwards while
+    /// such a sink is attached (a real machine halted in STOP wakes within
+    /// microseconds of RBF; a multi-millisecond blind nap would overrun the
+    /// one-word receive buffer instead). Output-only sinks keep the default.
+    fn can_produce_input(&self) -> bool {
+        false
+    }
+
     /// Update the emulated-to-host time mapping (see [`SerialTimeAnchor`]).
     /// Sinks that schedule output store it; others ignore it.
     fn set_time_anchor(&mut self, _anchor: SerialTimeAnchor) {}
@@ -277,6 +288,10 @@ impl SerialSink for TcpSerialSink {
         self.buffered.load(std::sync::atomic::Ordering::Acquire) > 0
     }
 
+    fn can_produce_input(&self) -> bool {
+        true
+    }
+
     fn flush(&mut self) {}
 }
 
@@ -443,6 +458,10 @@ impl SerialSink for PtySerialSink {
         self.buffered.load(std::sync::atomic::Ordering::Acquire) > 0
     }
 
+    fn can_produce_input(&self) -> bool {
+        true
+    }
+
     fn flush(&mut self) {
         let _ = self.master.flush();
     }
@@ -517,6 +536,10 @@ impl SerialSink for ChannelSerialSink {
 
     fn has_pending_input(&self) -> bool {
         self.buffered.load(std::sync::atomic::Ordering::Acquire) > 0
+    }
+
+    fn can_produce_input(&self) -> bool {
+        true
     }
 
     fn flush(&mut self) {}
