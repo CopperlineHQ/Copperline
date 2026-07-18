@@ -61,9 +61,14 @@ Controls:
   as the desktop frontend.
 - **Joystick**: the toggle cycles off -> keys (-> touch on touch screens).
   Keys is the desktop frontend's FS-UAE-compatible mapping -- cursor keys
-  for directions, Right Ctrl / Right Alt for fire, CD32 extras on
-  C/X/D/S/Enter/Z/A -- and while enabled those keys are captured from the
-  Amiga keyboard, like the desktop toggle.
+  for directions, Right Ctrl / Right Alt or Left Ctrl for fire, Left Alt
+  for the second button (the left-hand fire keys pair with the right-hand
+  arrows, and compact keyboards often lack the right-side modifiers), CD32
+  extras on C/X/D/S/Enter/Z/A -- and while enabled those keys are captured
+  from the Amiga keyboard, like the desktop toggle. A link can preset the
+  mode with `?joy=keys` (or `off`/`touch`), so a game URL starts with the
+  joystick already on; `touch` falls back to `keys` on screens without
+  touch.
 - **Touch**: the canvas works like a trackpad, because the Amiga pointer
   only takes relative motion and an absolute finger position cannot map to
   it. One finger drags the pointer, a quick tap left-clicks, holding still
@@ -202,7 +207,9 @@ feeds from the desktop frontend's FS-UAE-compatible keyboard mapping
 (cursor keys, Right Ctrl / Right Alt fire, CD32 extras on C/X/D/S/Enter/Z/A).
 `reset()` power-cycles, `eject_floppy(n)`
 and `set_volume_percent(p)` do what they say, and `emulated_seconds()`
-exposes the guest clock for diagnostics. `serial_send(bytes)`,
+exposes the guest clock for diagnostics. `set_floppy_sounds(on)` and
+`set_floppy_sounds_volume(p)` control the synthesized drive sounds (on and
+100 by default, like the desktop's `[audio] floppy_sounds` knobs). `serial_send(bytes)`,
 `serial_take()` and `serial_input_backlog()` bridge Paula's serial port to
 whatever byte stream the page likes (see
 [the serial bridge section](#browser-serial-bridge)). The presentation pointer is only
@@ -215,6 +222,32 @@ from both every frame rather than assuming fixed dimensions.
 
 `www/try.js` and `www/audio-worklet.js` are the reference implementation of
 all of the above, including the audio drift control.
+
+### Optional page-shell hooks
+
+`try.js` drives any page shell that provides its element ids; beyond the
+required canvas and control bar, a shell can opt into extras by adding
+elements, and pages without them are untouched:
+
+- `#df0url` / `#kickurl` (buttons): prompt for a disk / same-origin ROM
+  URL, as described above.
+- `#floppy-sounds` (checkbox): toggles the synthesized floppy drive
+  sounds -- motor hum, head-step clicks, read hiss -- live and at boot, so
+  a shell can also default them off by shipping the box unchecked.
+- `#df0list` (a `<select>`): fills itself with the disk images the site
+  serves next to the page and inserts the picked one into DF0 (queued
+  when picked before boot, live after). The folder is the select's
+  `data-src` attribute (default `adf/`), and the list comes from
+  `<folder>/index.json` -- a JSON array of file names, or of
+  `{name, url}` objects with URLs resolved against the folder. Without a
+  manifest, a server directory listing of the folder (nginx `autoindex`,
+  Apache, `python -m http.server`) is scraped for disk-image links
+  instead. If the folder yields nothing, the select hides itself.
+- `data-default="keys"` on the `#joy` toggle: the joystick mode the page
+  starts in (`?joy=` in the URL overrides it).
+- `#serial-url`, `#serial-connect`, `#serial-status`, `#serial-raw`: the
+  serial/BBS bridge, described in
+  [the serial bridge section](#browser-serial-bridge).
 
 (browser-serial-bridge)=
 ## The serial port: dialling a BBS from a browser

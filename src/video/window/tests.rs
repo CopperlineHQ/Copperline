@@ -320,6 +320,8 @@ fn keyboard_joystick_mapping_matches_fsuae_controls() {
         (KeyCode::ArrowRight, K::Right),
         (KeyCode::ControlRight, K::FireRightCtrl),
         (KeyCode::AltRight, K::FireRightAlt),
+        (KeyCode::ControlLeft, K::FireLeftCtrl),
+        (KeyCode::AltLeft, K::BlueLeftAlt),
         (KeyCode::KeyC, K::Red),
         (KeyCode::KeyX, K::Blue),
         (KeyCode::KeyD, K::Green),
@@ -343,7 +345,7 @@ fn keyboard_joystick_mapping_matches_fsuae_controls() {
     ] {
         assert_eq!(keyboard_joystick_key_for(code), Some((1, key)), "{code:?}");
     }
-    assert_eq!(keyboard_joystick_key_for(KeyCode::ControlLeft), None);
+    assert_eq!(keyboard_joystick_key_for(KeyCode::Space), None);
 }
 
 #[test]
@@ -351,13 +353,31 @@ fn keyboard_joystick_fire_aliases_release_independently() {
     let mut held = KeyboardJoystickHeld::default();
     held.set(KeyboardJoystickKey::FireRightCtrl, true);
     held.set(KeyboardJoystickKey::Red, true);
+    held.set(KeyboardJoystickKey::FireLeftCtrl, true);
     assert!(held.joystick_state().fire);
 
     held.set(KeyboardJoystickKey::FireRightCtrl, false);
     assert!(held.joystick_state().fire);
 
     held.set(KeyboardJoystickKey::Red, false);
+    assert!(held.joystick_state().fire);
+
+    held.set(KeyboardJoystickKey::FireLeftCtrl, false);
     assert!(!held.joystick_state().fire);
+}
+
+#[test]
+fn keyboard_joystick_second_button_aliases_release_independently() {
+    let mut held = KeyboardJoystickHeld::default();
+    held.set(KeyboardJoystickKey::Blue, true);
+    held.set(KeyboardJoystickKey::BlueLeftAlt, true);
+    assert!(held.joystick_state().button2);
+
+    held.set(KeyboardJoystickKey::Blue, false);
+    assert!(held.joystick_state().button2);
+
+    held.set(KeyboardJoystickKey::BlueLeftAlt, false);
+    assert!(!held.joystick_state().button2);
 }
 
 #[test]

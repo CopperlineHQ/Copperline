@@ -507,6 +507,27 @@ impl WebEmu {
         self.emu.bus_mut().set_output_volume_percent(percent);
     }
 
+    /// Enable or mute the synthesized floppy drive sounds (motor hum,
+    /// head-step clicks, read hiss). On by default, like the desktop's
+    /// `[audio] floppy_sounds` knob.
+    pub fn set_floppy_sounds(&mut self, enabled: bool) {
+        self.emu
+            .bus_mut()
+            .paula
+            .drive_sounds_mut()
+            .set_enabled(enabled);
+    }
+
+    /// Drive-sound level, 0-100, relative to Paula's output (the desktop's
+    /// `[audio] floppy_sounds_volume`).
+    pub fn set_floppy_sounds_volume(&mut self, percent: u8) {
+        self.emu
+            .bus_mut()
+            .paula
+            .drive_sounds_mut()
+            .set_volume_percent(percent);
+    }
+
     pub fn emulated_seconds(&self) -> f64 {
         self.emu.bus().emulated_seconds()
     }

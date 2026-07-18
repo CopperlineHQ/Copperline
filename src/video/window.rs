@@ -76,8 +76,10 @@ enum KeyboardJoystickKey {
     Right,
     FireRightCtrl,
     FireRightAlt,
+    FireLeftCtrl,
     Red,
     Blue,
+    BlueLeftAlt,
     Green,
     Yellow,
     Play,
@@ -96,8 +98,10 @@ struct KeyboardJoystickHeld {
     right: bool,
     fire_right_ctrl: bool,
     fire_right_alt: bool,
+    fire_left_ctrl: bool,
     red: bool,
     blue: bool,
+    blue_left_alt: bool,
     green: bool,
     yellow: bool,
     play: bool,
@@ -114,8 +118,10 @@ impl KeyboardJoystickHeld {
             KeyboardJoystickKey::Right => self.right = held,
             KeyboardJoystickKey::FireRightCtrl => self.fire_right_ctrl = held,
             KeyboardJoystickKey::FireRightAlt => self.fire_right_alt = held,
+            KeyboardJoystickKey::FireLeftCtrl => self.fire_left_ctrl = held,
             KeyboardJoystickKey::Red => self.red = held,
             KeyboardJoystickKey::Blue => self.blue = held,
+            KeyboardJoystickKey::BlueLeftAlt => self.blue_left_alt = held,
             KeyboardJoystickKey::Green => self.green = held,
             KeyboardJoystickKey::Yellow => self.yellow = held,
             KeyboardJoystickKey::Play => self.play = held,
@@ -132,8 +138,10 @@ impl KeyboardJoystickHeld {
             KeyboardJoystickKey::Right => self.right,
             KeyboardJoystickKey::FireRightCtrl => self.fire_right_ctrl,
             KeyboardJoystickKey::FireRightAlt => self.fire_right_alt,
+            KeyboardJoystickKey::FireLeftCtrl => self.fire_left_ctrl,
             KeyboardJoystickKey::Red => self.red,
             KeyboardJoystickKey::Blue => self.blue,
+            KeyboardJoystickKey::BlueLeftAlt => self.blue_left_alt,
             KeyboardJoystickKey::Green => self.green,
             KeyboardJoystickKey::Yellow => self.yellow,
             KeyboardJoystickKey::Play => self.play,
@@ -148,8 +156,8 @@ impl KeyboardJoystickHeld {
             down: self.down,
             left: self.left,
             right: self.right,
-            fire: self.fire_right_ctrl || self.fire_right_alt || self.red,
-            button2: self.blue,
+            fire: self.fire_right_ctrl || self.fire_right_alt || self.fire_left_ctrl || self.red,
+            button2: self.blue || self.blue_left_alt,
             green: self.green,
             yellow: self.yellow,
             play: self.play,
@@ -162,10 +170,13 @@ impl KeyboardJoystickHeld {
 /// Keyboard controller emulation, two collision-free layouts so a
 /// two-controller setup can be driven from one keyboard:
 ///
-/// - Mapping 0 (FS-UAE-compatible): cursor keys for directions; Right
-///   Ctrl/Right Alt for fire; CD32 extras on C/X/D/S/Return/Z/A. On a
-///   mouse port the same keys become pointer motion, with fire = left
-///   button, X = right, D = middle.
+/// - Mapping 0 (FS-UAE-compatible, plus left-hand fire keys): cursor keys
+///   for directions; Right Ctrl/Right Alt or Left Ctrl for fire; Left Alt
+///   for the second button (left-hand fire keys pair with the right-hand
+///   arrows, and compact keyboards often lack the right-side modifiers);
+///   CD32 extras on C/X/D/S/Return/Z/A. On a mouse port the same keys
+///   become pointer motion, with fire = left button, X or Left Alt =
+///   right, D = middle.
 /// - Mapping 1 (numpad): 8/2/4/6 for directions, 0 for fire, `.` for
 ///   the second button, numpad Enter for play. It stands in for the
 ///   gamepad when a two-controller setup has no physical pad.
@@ -177,6 +188,8 @@ fn keyboard_joystick_key_for(code: KeyCode) -> Option<(usize, KeyboardJoystickKe
         KeyCode::ArrowRight => (0, KeyboardJoystickKey::Right),
         KeyCode::ControlRight => (0, KeyboardJoystickKey::FireRightCtrl),
         KeyCode::AltRight => (0, KeyboardJoystickKey::FireRightAlt),
+        KeyCode::ControlLeft => (0, KeyboardJoystickKey::FireLeftCtrl),
+        KeyCode::AltLeft => (0, KeyboardJoystickKey::BlueLeftAlt),
         KeyCode::KeyC => (0, KeyboardJoystickKey::Red),
         KeyCode::KeyX => (0, KeyboardJoystickKey::Blue),
         KeyCode::KeyD => (0, KeyboardJoystickKey::Green),
