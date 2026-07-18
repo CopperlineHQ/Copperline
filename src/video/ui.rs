@@ -88,6 +88,7 @@ pub enum MenuItem {
     SamplerInput,
     SamplerGain,
     PixelAspect,
+    Fullscreen,
     AudioOutput,
     Warp,
     WarpLimit,
@@ -104,9 +105,9 @@ pub enum MenuItem {
 /// sampler is attached, so the list is built per open rather than fixed.
 pub fn menu_items(midi_active: bool, sampler_active: bool) -> Vec<MenuItem> {
     let _ = midi_active;
-    // 9 leading + up to 2 MIDI + 2 sampler + 10 trailing items, sized so
-    // appending never reallocates.
-    let mut items = Vec::with_capacity(23);
+    // 9 leading + up to 2 MIDI + 2 sampler + pixel aspect + 10 trailing
+    // items = 24, sized so appending never reallocates.
+    let mut items = Vec::with_capacity(24);
     items.extend([
         MenuItem::MachineConfig,
         MenuItem::FrameAnalyzer,
@@ -129,6 +130,7 @@ pub fn menu_items(midi_active: bool, sampler_active: bool) -> Vec<MenuItem> {
     }
     items.push(MenuItem::PixelAspect);
     items.extend([
+        MenuItem::Fullscreen,
         MenuItem::Warp,
         MenuItem::WarpLimit,
         MenuItem::Record,
@@ -147,6 +149,8 @@ pub fn menu_items(midi_active: bool, sampler_active: bool) -> Vec<MenuItem> {
 pub struct MenuLabels<'a> {
     pub warp: bool,
     pub warp_speed: WarpSpeed,
+    /// True while the host window is fullscreen (the menu item toggles it).
+    pub fullscreen: bool,
     pub recording: bool,
     pub input_recording: bool,
     pub joystick_input_mode: JoystickInputMode,
@@ -207,6 +211,8 @@ fn menu_item_label(item: MenuItem, s: MenuLabels) -> String {
             format!("Sampler In [{}]", clip_menu_value(name))
         }
         MenuItem::SamplerGain => format!("Sampler Gain {:>5}", format!("[{}]", s.sampler_gain)),
+        MenuItem::Fullscreen if s.fullscreen => "Fullscreen      [on]".to_string(),
+        MenuItem::Fullscreen => "Fullscreen     [off]".to_string(),
         MenuItem::Warp if s.warp => "Warp Speed      [on]".to_string(),
         MenuItem::Warp => "Warp Speed     [off]".to_string(),
         // Right-pad so the closing bracket stays put as the value width
@@ -855,7 +861,7 @@ pub enum UiControl {
 fn panel_dims(panel: &Panel) -> (usize, usize) {
     match panel {
         Panel::About => (560, 380),
-        Panel::Shortcuts => (600, 440),
+        Panel::Shortcuts => (600, 464),
         Panel::Calibration(_) => (620, 372),
         Panel::Debugger(_) => (684, 520),
         Panel::FrameAnalyzer(_) => (700, 526),
@@ -1880,7 +1886,7 @@ pub fn draw_drop_hint(frame: &mut [u8], texture_scale: usize) {
     draw_panel_text(frame, x, y, text, PANEL_TEXT_HILIGHT, px, texture_scale);
 }
 
-const SHORTCUT_ROWS: [(&str, &str, bool); 16] = [
+const SHORTCUT_ROWS: [(&str, &str, bool); 17] = [
     ("Q", "Quit", true),
     ("S", "Save screenshot", true),
     ("R", "Record video on/off", true),
@@ -1893,6 +1899,7 @@ const SHORTCUT_ROWS: [(&str, &str, bool); 16] = [
     ("K", "Console", true),
     ("J", "Joystick input mode", true),
     ("Shift+A", "Cycle audio output", true),
+    ("F", "Fullscreen on/off", true),
     ("W", "Warp speed on/off", true),
     ("Shift+W", "Warp limit (2x..Max)", true),
     ("Esc", "Close menu/window", false),
@@ -4747,6 +4754,37 @@ mod tests {
     }
 
     #[test]
+    fn fullscreen_menu_item_label_tracks_window_state() {
+        assert!(menu_items(false, false).contains(&MenuItem::Fullscreen));
+        let labels = |fullscreen| MenuLabels {
+            warp: false,
+            warp_speed: WarpSpeed::Max,
+            fullscreen,
+            recording: false,
+            input_recording: false,
+            joystick_input_mode: JoystickInputMode::Gamepad,
+            port_devices: [
+                crate::bus::PortDevice::Mouse,
+                crate::bus::PortDevice::Joystick,
+            ],
+            pixel_aspect: PixelAspect::Tv,
+            midi_in: "",
+            midi_out: "",
+            audio_output: "",
+            sampler_input: "",
+            sampler_gain: "",
+        };
+        assert_eq!(
+            menu_item_label(MenuItem::Fullscreen, labels(false)),
+            "Fullscreen     [off]"
+        );
+        assert_eq!(
+            menu_item_label(MenuItem::Fullscreen, labels(true)),
+            "Fullscreen      [on]"
+        );
+    }
+
+    #[test]
     fn every_menu_label_fits_inside_the_popup() {
         // The label is drawn at `item_rect.x + MENU_TEXT_INSET`; its glyphs
         // must end before the popup's right edge or the trailing "~" clips.
@@ -4768,6 +4806,9 @@ mod tests {
                                     let labels = MenuLabels {
                                         warp,
                                         warp_speed: speed,
+                                        // Rides warp's sweep so both label
+                                        // states are width-checked.
+                                        fullscreen: warp,
                                         recording,
                                         input_recording,
                                         joystick_input_mode: mode,
@@ -5317,6 +5358,7 @@ mod tests {
             MenuLabels {
                 warp: true,
                 warp_speed: WarpSpeed::Max,
+                fullscreen: false,
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
@@ -5363,6 +5405,7 @@ mod tests {
             MenuLabels {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
+                fullscreen: false,
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
@@ -5397,6 +5440,7 @@ mod tests {
             MenuLabels {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
+                fullscreen: false,
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
@@ -5447,6 +5491,7 @@ mod tests {
             MenuLabels {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
+                fullscreen: false,
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
@@ -5521,6 +5566,7 @@ mod tests {
             MenuLabels {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
+                fullscreen: false,
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
@@ -5582,6 +5628,7 @@ mod tests {
             MenuLabels {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
+                fullscreen: false,
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
@@ -5640,6 +5687,7 @@ mod tests {
             MenuLabels {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
+                fullscreen: false,
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
@@ -5699,6 +5747,7 @@ mod tests {
             MenuLabels {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
+                fullscreen: false,
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
@@ -5811,6 +5860,7 @@ mod tests {
             MenuLabels {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
+                fullscreen: false,
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
@@ -5883,6 +5933,7 @@ mod tests {
             MenuLabels {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
+                fullscreen: false,
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
@@ -5966,6 +6017,7 @@ mod tests {
             MenuLabels {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
+                fullscreen: false,
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
@@ -6086,6 +6138,7 @@ mod tests {
             MenuLabels {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
+                fullscreen: false,
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
@@ -6136,6 +6189,7 @@ mod tests {
             MenuLabels {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
+                fullscreen: false,
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
@@ -6177,6 +6231,7 @@ mod tests {
             MenuLabels {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
+                fullscreen: false,
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
@@ -6258,6 +6313,7 @@ mod tests {
             MenuLabels {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
+                fullscreen: false,
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
@@ -6306,6 +6362,7 @@ mod tests {
             MenuLabels {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
+                fullscreen: false,
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
@@ -6347,6 +6404,7 @@ mod tests {
             MenuLabels {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
+                fullscreen: false,
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,

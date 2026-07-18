@@ -499,7 +499,7 @@ use winit::event::{
 };
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
-use winit::window::{CursorGrabMode, Icon, Window, WindowAttributes, WindowId};
+use winit::window::{CursorGrabMode, Fullscreen, Icon, Window, WindowAttributes, WindowId};
 
 fn rawkey_index(rawkey: u8) -> usize {
     (rawkey & 0x7F) as usize
@@ -1820,6 +1820,11 @@ impl ApplicationHandler for App {
                     {
                         self.cycle_joystick_input_mode()
                     }
+                    (KeyCode::KeyF, ElementState::Pressed)
+                        if host_shortcut_modifier_pressed(self.modifiers) =>
+                    {
+                        self.toggle_fullscreen()
+                    }
                     (KeyCode::KeyR, ElementState::Pressed)
                         if host_shortcut_modifier_pressed(self.modifiers)
                             && self.modifiers.shift_key() =>
@@ -2185,6 +2190,7 @@ impl ApplicationHandler for App {
                         ui::MenuLabels {
                             warp,
                             warp_speed,
+                            fullscreen: r.window.fullscreen().is_some(),
                             recording,
                             input_recording,
                             joystick_input_mode: self.joystick_input_mode,
@@ -3302,6 +3308,7 @@ impl App {
                     ui::MenuItem::SamplerGain => self.step_sampler_gain(true),
                     ui::MenuItem::PixelAspect => self.toggle_pixel_aspect(),
                     ui::MenuItem::AudioOutput => self.cycle_audio_output(),
+                    ui::MenuItem::Fullscreen => self.toggle_fullscreen(),
                     ui::MenuItem::Warp => self.toggle_warp(),
                     ui::MenuItem::WarpLimit => self.cycle_warp_speed(),
                     ui::MenuItem::Record => self.toggle_recording(),
@@ -4618,6 +4625,27 @@ impl App {
                 warn!("gamepad calibration save failed: {e:#}");
                 self.show_osd("Calibration save failed (see log)");
             }
+        }
+    }
+
+    /// Toggle borderless fullscreen on the main window. Borderless (not
+    /// exclusive) keeps the compositor path and the existing Resized-driven
+    /// surface rebuild; the presentation already letterboxes any window
+    /// shape, so no display-mode change is wanted.
+    fn toggle_fullscreen(&mut self) {
+        let Some(window) = self.render.as_ref().map(|r| r.window.clone()) else {
+            return;
+        };
+        if window.fullscreen().is_some() {
+            window.set_fullscreen(None);
+            info!("fullscreen off");
+            self.show_osd("Fullscreen off");
+        } else {
+            window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+            info!("fullscreen on");
+            self.show_osd(format!(
+                "Fullscreen on ({HOST_SHORTCUT_MODIFIER_LABEL}+F restores)"
+            ));
         }
     }
 

@@ -23,6 +23,7 @@ The app shortcut modifier is `Cmd` on macOS and `Alt` on Linux/Windows.
 | `Cmd+J` | `Alt+J` | Toggle joystick input mode: gamepad / keyboard (also the status-bar icon) |
 | `Cmd+Shift+A` | `Alt+Shift+A` | Cycle the audio output: Default, each host device, then Disabled (also the menu's Audio Out item) |
 | `Cmd+Shift++` / `Cmd+Shift+-` | `Alt+Shift++` / `Alt+Shift+-` | Raise / lower the parallel-port sampler input gain (only when a sampler is attached; also the menu's Sampler Gain item) |
+| `Cmd+F` | `Alt+F` | Toggle fullscreen on / off |
 | `Cmd+W` | `Alt+W` | Toggle Warp Speed (turbo) on / off |
 | `Cmd+Shift+W` | `Alt+Shift+W` | Cycle the Warp Speed limit: 2x, 4x, 8x, 16x, Max |
 | `Esc` | `Esc` | Close an open menu, tool window, or overlay panel; otherwise passed through to the Amiga |
@@ -150,6 +151,10 @@ tool window or overlay.
   The window and its backing texture resize with the mode. The start-up
   mode comes from `[display] pixel_aspect`
   (see [Configuration](configuration.md)).
+- **Fullscreen** (also `Cmd+F` / `Alt+F`): borderless fullscreen on the
+  window's current monitor. The picture keeps its aspect and letterboxes
+  as needed, exactly as when resizing the window; the same shortcut (or
+  menu item) restores the window.
 - **Warp Speed** (also `Cmd+W` / `Alt+W`): runs the emulator unpaced for
   fast-forward. Toggling back re-anchors real-time pacing cleanly.
 - **Warp Limit** (also `Cmd+Shift+W` / `Alt+Shift+W`): cycles how fast warp
