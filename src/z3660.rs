@@ -586,30 +586,39 @@ impl Z3660 {
                 self.sprite_colors[pen] = (r << 16) | (gr << 8) | b;
             }
             OP_SPRITE_BITMAP => {
-                // Amiga 2-plane sprite rows at offset[1]: `hires` words of
-                // plane 0 then plane 1 per row; pixel value = plane bits.
-                let (w, h) = (x1, y1);
-                let hires = y2 + 1;
-                // Row: `hires` words of plane 0, then plane 1 (the driver
-                // copies (w>>3)*2*hires bytes per row).
-                let row_bytes = (w / 8) * 2 * hires;
-                if w == 0 || h == 0 || w > 16 * hires {
-                    log::debug!("z3660: sprite bitmap {w}x{h} hires {hires} unsupported");
+                // The pointer image at offset[1] is a 2-bitplane sprite (pen
+                // 0-3, 0 transparent). Each source row is plane 0's bytes
+                // followed by plane 1's (firmware update_hw_sprite, video.c).
+                // x[2] doubles the sprite: a w/2 x h/2 source shown 2x. The
+                // firmware buffer caps at 32x48, so clamp there.
+                let double = x2 != 0;
+                let scale = if double { 2 } else { 1 };
+                let (out_w, out_h) = (x1.min(64), y1.min(64));
+                let (sw, sh) = (out_w / scale, out_h / scale);
+                if sw == 0 || sh == 0 {
+                    log::debug!("z3660: sprite bitmap {out_w}x{out_h} empty");
                     self.sprite_pix.clear();
                     return;
                 }
-                self.sprite_w = w;
-                self.sprite_h = h;
-                self.sprite_pix = vec![0u8; w * h];
-                for y in 0..h {
-                    let row = src + y * row_bytes;
-                    for x in 0..w {
-                        let word = x / 16;
-                        let bit = 15 - (x & 15);
-                        let p0 = self.be16(row + 2 * word);
-                        let p1 = self.be16(row + 2 * hires + 2 * word);
-                        let v = (((p1 >> bit) & 1) << 1) | ((p0 >> bit) & 1);
-                        self.sprite_pix[y * w + x] = v as u8;
+                let plane = sw.div_ceil(8); // bytes per plane per source row
+                let row_bytes = plane * 2;
+                self.sprite_w = out_w;
+                self.sprite_h = out_h;
+                self.sprite_pix = vec![0u8; out_w * out_h];
+                for sy in 0..sh {
+                    let row = src + sy * row_bytes;
+                    for sx in 0..sw {
+                        let byte = sx / 8;
+                        let bit = 7 - (sx & 7);
+                        let p0 = self.px_get(row + byte, 1) as u8;
+                        let p1 = self.px_get(row + plane + byte, 1) as u8;
+                        let pen = ((p0 >> bit) & 1) | (((p1 >> bit) & 1) << 1);
+                        for dy in 0..scale {
+                            for dx in 0..scale {
+                                let (ox, oy) = (sx * scale + dx, sy * scale + dy);
+                                self.sprite_pix[oy * out_w + ox] = pen;
+                            }
+                        }
                     }
                 }
             }
@@ -1362,5 +1371,46 @@ mod sprite_tests {
         w32(&mut z, &mut m, REG_SPRITE_BITMAP, 2);
         z.rtg_frame(&mut out);
         assert_eq!(out[4 + 1], 0xFF00_0000);
+    }
+
+    /// A doubled sprite (x[2] = 1, as the OS 3.2 32x48 pointer uses) decodes
+    /// its half-size source and scales each pixel to a 2x2 block, instead of
+    /// being rejected as too wide.
+    #[test]
+    fn doubled_sprite_scales_2x() {
+        let (mut z, mut m) = (Z3660::new(), mem());
+        let g = GFXDATA_OFFSET;
+        w32(&mut z, &mut m, REG_ORIG_RES, (4 << 16) | 4);
+        w32(&mut z, &mut m, REG_MODE, 0x16);
+        // Pen 1 = red.
+        z.vram[g + 8..g + 12].copy_from_slice(&[0x00, 0x00, 0xFF, 0x00]);
+        z.vram[g + 0x3B] = 1;
+        w32(&mut z, &mut m, REG_BLITTER_DMA_OP, 12);
+        // Doubled 4x4 sprite from a 2x2 source at src 0x1000; source row is
+        // one plane-0 byte then one plane-1 byte. Row 0 plane 0 = 0x80
+        // (source pixel (0,0) set) -> a 2x2 red block at output (0,0).
+        z.vram[g + 4..g + 8].copy_from_slice(&0x1000u32.to_be_bytes());
+        z.vram[g + 0x12..g + 0x14].copy_from_slice(&4u16.to_be_bytes()); // x[1]=out w
+        z.vram[g + 0x14..g + 0x16].copy_from_slice(&1u16.to_be_bytes()); // x[2]=double
+        z.vram[g + 0x1A..g + 0x1C].copy_from_slice(&4u16.to_be_bytes()); // y[1]=out h
+        z.vram[g + 0x1C..g + 0x1E].copy_from_slice(&[0, 0]); // y[2]=hires-1=0
+        z.vram[VRAM_OFFSET as usize + 0x1000] = 0x80;
+        w32(&mut z, &mut m, REG_BLITTER_DMA_OP, 13);
+        z.vram[g + 0x10..g + 0x12].copy_from_slice(&[0, 0]); // pos (0,0)
+        z.vram[g + 0x18..g + 0x1A].copy_from_slice(&[0, 0]);
+        w32(&mut z, &mut m, REG_BLITTER_DMA_OP, 11);
+        w32(&mut z, &mut m, REG_SPRITE_BITMAP, 1);
+
+        let mut out = Vec::new();
+        assert_eq!(z.rtg_frame(&mut out), Some((4, 4)));
+        let red = 0xFF00_0000 | 0xFF;
+        // The single source pixel fills the 2x2 top-left block.
+        assert_eq!(out[0], red);
+        assert_eq!(out[1], red);
+        assert_eq!(out[4], red);
+        assert_eq!(out[5], red);
+        // Outside the block is transparent (screen shows through).
+        assert_eq!(out[2], 0xFF00_0000);
+        assert_eq!(out[8], 0xFF00_0000);
     }
 }
