@@ -87,6 +87,12 @@ const COLORMODE_16BIT565: u32 = 1;
 const COLORMODE_32BIT: u32 = 2;
 const COLORMODE_15BIT: u32 = 3;
 
+/// Upper bound on a blit rect / framebuffer dimension. The mailbox fields
+/// are guest-controlled, so clamping them keeps a bogus op from sizing a
+/// huge allocation or a multi-billion-iteration loop; no real screen or
+/// blit exceeds this.
+const MAX_DIM: usize = 4096;
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Z3660 {
     /// Latched register words, indexed by (offset - REG_FIRST) / 4.
@@ -319,15 +325,18 @@ impl Z3660 {
         let src = VRAM_OFFSET as usize + self.be32(g + 4) as usize;
         let rgb0 = self.be32(g + 8);
         let rgb1 = self.be32(g + 0xC);
+        // x1/y1 are the blit width/height (x2/y2 for the planar ops); clamp
+        // the extents so a guest-supplied field cannot size an oversized
+        // allocation or loop. x0/y0 are positions, bounds-checked per access.
         let (x0, x1, x2) = (
             self.gfx_u16(0x10, 0),
-            self.gfx_u16(0x10, 1),
-            self.gfx_u16(0x10, 2),
+            self.gfx_u16(0x10, 1).min(MAX_DIM),
+            self.gfx_u16(0x10, 2).min(MAX_DIM),
         );
         let (y0, y1, y2) = (
             self.gfx_u16(0x18, 0),
-            self.gfx_u16(0x18, 1),
-            self.gfx_u16(0x18, 2),
+            self.gfx_u16(0x18, 1).min(MAX_DIM),
+            self.gfx_u16(0x18, 2).min(MAX_DIM),
         );
         let user0 = self.gfx_u16(0x20, 0);
         let (pitch0, pitch1) = (self.gfx_u16(0x28, 0), self.gfx_u16(0x28, 1));
@@ -667,8 +676,8 @@ impl Z3660 {
         if self.pan_width != 0 {
             w = self.pan_width;
         }
-        w = w.min(4096);
-        h = h.min(4096);
+        w = w.min(MAX_DIM as u32);
+        h = h.min(MAX_DIM as u32);
         if w == 0 || h == 0 {
             return None;
         }
