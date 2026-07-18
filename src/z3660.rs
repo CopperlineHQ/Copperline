@@ -550,6 +550,10 @@ impl Z3660 {
                     (0, src)
                 };
                 let dpitch = pitch0 * 4;
+                // P2C output is always one chunky byte per pixel;
+                // BlitPlanar2Chunky leaves the mailbox colormode from a prior
+                // op, so it cannot be used for the destination stride here.
+                let dbpp = if op == OP_P2C { 1 } else { bpp };
                 if minterm != MINTERM_SRC_IDX && minterm != MINTERM_NOTSRC {
                     log::debug!("z3660: p2c/p2d minterm {minterm} treated as SRC");
                 }
@@ -573,7 +577,7 @@ impl Z3660 {
                                 pen |= 1 << p;
                             }
                         }
-                        let at = dst + (dyr + y) * dpitch + (dxr + i) * bpp;
+                        let at = dst + (dyr + y) * dpitch + (dxr + i) * dbpp;
                         if op == OP_P2C {
                             self.px_put_masked(at, 1, pen as u32, mask);
                         } else {
@@ -1269,8 +1273,11 @@ mod exec_tests {
         // 0b1100_0000, plane 1 = 0b0100_0000 -> pens 1, 3, 0, 0 ...
         z.vram[v + 0x1000] = 0xC0;
         z.vram[v + 0x1001] = 0x40;
-        // P2C to an 8-bit row at (0,0): minterm SRC (12), depth 2 in
-        // user[1], layer mask 0xFF in user[0], src pitch[1] = 1.
+        // P2C to a chunky row at (0,0): minterm SRC (12), depth 2 in
+        // user[1], layer mask 0xFF in user[0], src pitch[1] = 1. Colormode
+        // is deliberately 16-bit (a stale value from a prior op): P2C output
+        // is one byte per pixel regardless, so the pens must land at
+        // consecutive bytes, not on a 2-byte stride.
         gfxdata(
             &mut z,
             0,
@@ -1281,7 +1288,7 @@ mod exec_tests {
             [0, 0, 1],
             0xFF,
             [4, 1],
-            0,
+            1,
             0,
             0xFF,
             12,
