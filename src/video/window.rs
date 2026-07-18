@@ -7495,7 +7495,10 @@ impl App {
         self.rtg_fb = rtg;
         self.present_fb = present;
         let Some(rows) = rows else {
-            return Some(false);
+            // rtg_active() is true but the frame did not compose (e.g. MODE
+            // set before ORIG_RES): fall back to the chipset render rather
+            // than freezing on the stale frame.
+            return None;
         };
         self.present_rows = rows;
         self.present_standard_tv_aperture = false;
