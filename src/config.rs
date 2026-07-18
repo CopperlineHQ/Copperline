@@ -156,8 +156,8 @@ pub struct Config {
     pub a2065_net: Option<crate::net::NetConfig>,
     /// Z3660 RTG board (`[z3660] enabled`): when true, the Z3660
     /// accelerator's RTG core autoconfigs on the Zorro chain for the
-    /// open-source Z3660.card Picasso96 driver. Bring-up stub: registers
-    /// are logged, no display output yet.
+    /// open-source Z3660.card Picasso96 driver, presenting RTG screens
+    /// (all pixel formats, core blitter ops, hardware mouse sprite).
     pub z3660: bool,
     pub floppy: FloppyConfig,
     /// Which floppy drive slots are electrically present. DF0 is the
@@ -1754,11 +1754,11 @@ pub(crate) struct RawA2065 {
     pub(crate) net: Option<String>,
 }
 
-/// `[z3660]` RTG board stub: the Z3660's FPGA RTG core on the Zorro chain.
+/// `[z3660]` RTG board: the Z3660's FPGA RTG core on the Zorro chain.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawZ3660 {
-    /// Fit the board. Bring-up stub: registers are logged, no display yet.
+    /// Fit the board (drives Picasso96 RTG screens via the Z3660.card driver).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) enabled: Option<bool>,
 }

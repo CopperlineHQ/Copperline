@@ -210,12 +210,9 @@ slow = "512K"
 # net = "nat"
 
 
-# Z3660 RTG board: autoconfigs the Z3660 accelerator's RTG core
-# (manufacturer 0x144B, product 1, 128 MB Zorro III window) for the
-# open-source Z3660.card Picasso96 driver. RTG screens display (all pixel
-# formats, core blitter ops, hardware mouse sprite); planar blits, line
-# draws, and surface ops are not implemented yet. Register accesses are
-# logged by name.
+# Z3660 RTG graphics board: adds high-resolution, high-colour (RTG)
+# screens, driven by the open-source Z3660.card Picasso96 driver in the
+# guest.
 # [z3660]
 # enabled = true
 

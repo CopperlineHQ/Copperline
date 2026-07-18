@@ -895,26 +895,24 @@ schedule, not the emulated clock, so a NIC board breaks byte-identical
 replay and save-state determinism while traffic flows. See [](../zorro)
 for the board details and the NAT's limitations.
 
-## `[z3660]` -- RTG board stub
+## `[z3660]` -- RTG board
 
 ```toml
 [z3660]
 enabled = true
 ```
 
-Fits the Z3660 accelerator's RTG core on the Zorro chain: a 128 MB
-Zorro III autoconfig board (manufacturer 0x144B, product 1) with the
-register file and VRAM layout the open-source Z3660.card Picasso96 driver
-expects. A Picasso96 install with the Z3660 monitor drives real RTG
-screens: the display switches between the native chipset and the board's
-framebuffer (all four pixel formats), the core blitter ops and the
-hardware mouse sprite are implemented, and every register access and
-mailbox op is logged by name for driver development. Not yet implemented:
-planar-to-chunky/direct blits, line draws, and the surface ops -- software
-using only those renders incompletely. Note that the monitor's stock
-`DISPLAYCHAIN=NO` tooltype models the real board's dual-display setup and
-never switches back to the native screen; set `DISPLAYCHAIN=YES` for a
-single-window emulator.
+Fits a Z3660 RTG graphics board on the Zorro chain, giving the guest
+high-resolution, high-colour screens through Picasso96. It needs the
+open-source Z3660.card driver installed in the guest (with its monitor in
+`DEVS:Monitors`); with that in place, Z3660 screen modes appear in
+ScreenMode, and the window shows the board's output when a screen is
+opened, switching back to the native Amiga display when it closes.
+
+The board's stock monitor ships with the `DISPLAYCHAIN=NO` tooltype, which
+models the real hardware's separate RTG monitor and never hands the display
+back to the native screen. On a single-window emulator you usually want
+`DISPLAYCHAIN=YES`, so the one window follows whichever screen is active.
 
 ## `[debug]` -- diagnostics
 
