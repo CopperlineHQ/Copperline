@@ -4628,8 +4628,6 @@ impl App {
         }
     }
 
-    /// Toggle warp speed: emulation runs unpaced (as fast as the host
-    /// allows) until switched back, when pacing re-anchors to "now".
     /// Toggle borderless fullscreen on the main window. Borderless (not
     /// exclusive) keeps the compositor path and the existing Resized-driven
     /// surface rebuild; the presentation already letterboxes any window
@@ -4651,6 +4649,8 @@ impl App {
         }
     }
 
+    /// Toggle warp speed: emulation runs unpaced (as fast as the host
+    /// allows) until switched back, when pacing re-anchors to "now".
     fn toggle_warp(&mut self) {
         let warp = self.emu.paced();
         self.emu.set_paced(!warp);

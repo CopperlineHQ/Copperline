@@ -105,8 +105,8 @@ pub enum MenuItem {
 /// sampler is attached, so the list is built per open rather than fixed.
 pub fn menu_items(midi_active: bool, sampler_active: bool) -> Vec<MenuItem> {
     let _ = midi_active;
-    // 9 leading + up to 2 MIDI + 2 sampler + 11 trailing items, sized so
-    // appending never reallocates.
+    // 9 leading + up to 2 MIDI + 2 sampler + pixel aspect + 10 trailing
+    // items = 24, sized so appending never reallocates.
     let mut items = Vec::with_capacity(24);
     items.extend([
         MenuItem::MachineConfig,
