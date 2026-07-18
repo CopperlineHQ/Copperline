@@ -1875,6 +1875,7 @@ fn test_app_with_audio(audio: Box<dyn AudioSink>) -> super::App {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
         None,
         std::array::from_fn(|_| Vec::new()),
         [true; 4],
@@ -3724,7 +3725,8 @@ fn dropped_media_classifies_by_extension() {
     assert_eq!(kind("game.adf.gz"), DroppedMediaKind::Floppy);
     assert_eq!(kind("game.zip"), DroppedMediaKind::Floppy);
     assert_eq!(kind("mystery"), DroppedMediaKind::Floppy);
-    assert_eq!(kind("game.CUE"), DroppedMediaKind::CdCue);
+    assert_eq!(kind("game.CUE"), DroppedMediaKind::Cd);
+    assert_eq!(kind("game.iso"), DroppedMediaKind::Cd);
     assert_eq!(kind("disk.hdf"), DroppedMediaKind::HardDisk);
     assert_eq!(kind("disk.img"), DroppedMediaKind::HardDisk);
     assert_eq!(kind("kick31.rom"), DroppedMediaKind::Rom);

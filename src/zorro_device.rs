@@ -163,6 +163,21 @@ impl<'a> DeviceHost<'a> {
         }
     }
 
+    /// A slot-aware host that also exposes Paula's CD-audio ring: the bus
+    /// device-tick loop, where a SCSI board's CD-ROM target streams CD-DA.
+    pub fn for_slot_with_cd_audio(
+        mem: &'a mut Memory,
+        slot: usize,
+        cd_audio: &'a mut CdAudioRing,
+    ) -> Self {
+        Self {
+            mem,
+            cd_audio: Some(cd_audio),
+            self_slot: Some(slot),
+            touched_memory: false,
+        }
+    }
+
     /// The guest memory the board DMAs into.
     pub fn memory_mut(&mut self) -> &mut Memory {
         self.touched_memory = true;
@@ -183,6 +198,12 @@ impl<'a> DeviceHost<'a> {
         self.cd_audio
             .as_deref_mut()
             .expect("DeviceHost::cd_audio requested without a CD-audio ring")
+    }
+
+    /// Paula's CD-audio ring when this host carries one. The bus tick loop
+    /// provides it; hosts built for memory-access dispatch do not.
+    pub fn cd_audio_opt(&mut self) -> Option<&mut CdAudioRing> {
+        self.cd_audio.as_deref_mut()
     }
 
     // These wrap the shared decode for boards that hold a `DeviceHost` rather

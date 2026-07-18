@@ -99,6 +99,10 @@ pub struct CliArgs {
     /// Scripted floppy image insertion. This supports both explicit
     /// paths and deferring a disk image already configured in the TOML.
     pub disk_insert_after: Vec<CliDiskInsert>,
+    /// Scripted CD swaps: (SECS, image path) pairs from --insert-cd-after,
+    /// landing in whichever CD drive the machine has (CDTV, CD32, or a
+    /// SCSI CD-ROM unit).
+    pub cd_insert_after: Vec<(f32, PathBuf)>,
     /// Real-time stereo audio output through cpal. Enabled by default;
     /// `--noaudio` disables it, and `--audio-wav` selects WAV output.
     pub audio_live: bool,
@@ -148,7 +152,7 @@ fn parse_args() -> Result<CliArgs> {
 /// the flag names (without the leading dashes) whose effects accumulate;
 /// anything else in a script is an error so a typo cannot silently change
 /// emulator configuration.
-const SCRIPT_DIRECTIVES: [&str; 9] = [
+const SCRIPT_DIRECTIVES: [&str; 10] = [
     "press-after",
     "key-after",
     "hold-key-after",
@@ -158,6 +162,7 @@ const SCRIPT_DIRECTIVES: [&str; 9] = [
     "pot-after",
     "insert-disk-after",
     "defer-disk-insert",
+    "insert-cd-after",
 ];
 
 /// Split one script line into tokens: whitespace-separated, with
@@ -305,6 +310,7 @@ where
     let mut wave_duration: Option<copperline::waveform::WaveDuration> = None;
     let mut wave_signals: Option<copperline::waveform::SignalSet> = None;
     let mut disk_insert_after: Vec<CliDiskInsert> = Vec::new();
+    let mut cd_insert_after: Vec<(f32, PathBuf)> = Vec::new();
     let mut audio_live = true;
     let mut explicit_audio_live = false;
     let mut explicit_noaudio = false;
@@ -553,6 +559,13 @@ where
                 let drive_s = args.next().ok_or_else(|| anyhow!(USAGE))?;
                 let drive_idx = parse_floppy_drive_idx(&drive_s, "--defer-disk-insert")?;
                 disk_insert_after.push(CliDiskInsert::Configured { secs, drive_idx });
+            }
+            "--insert-cd-after" => {
+                const USAGE: &str = "--insert-cd-after requires SECS PATH";
+                let secs: f32 =
+                    next_arg(&mut args, USAGE, "--insert-cd-after SECS must be a number")?;
+                let path = args.next().ok_or_else(|| anyhow!(USAGE))?;
+                cd_insert_after.push((secs, PathBuf::from(path)));
             }
             "--press-after" => {
                 const USAGE: &str = "--press-after requires SECS KEY";
@@ -828,6 +841,7 @@ where
         pot_after,
         record_input,
         disk_insert_after,
+        cd_insert_after,
         audio_live,
         audio_live_forced: explicit_audio_live,
         audio_wav,
@@ -928,6 +942,9 @@ fn print_help() {
          \x20                            insert PATH into DFN after SECS seconds\n  \
          --defer-disk-insert SECS DFN   start with configured DFN empty, then insert\n  \
          \x20                            its configured disk image after SECS seconds\n  \
+         --insert-cd-after SECS PATH    swap the CD image (cue/iso) in the machine's CD\n  \
+         \x20                            drive (CDTV, CD32, or a SCSI CD-ROM unit) after\n  \
+         \x20                            SECS seconds\n  \
          --audio                        enable real-time stereo audio output via cpal (default)\n  \
          --noaudio                      disable real-time audio output\n  \
          --audio-device NAME            host audio output device (substring match)\n  \
@@ -1533,6 +1550,7 @@ fn main() -> Result<()> {
         cli.mouse_after,
         cli.pot_after,
         disk_insert_after,
+        cli.cd_insert_after,
         cli.record_input,
         cfg.floppy_playlists.clone(),
         disk_write_protected,
@@ -1628,6 +1646,7 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
         None,
         None,
         None,
+        Vec::new(),
         Vec::new(),
         Vec::new(),
         Vec::new(),

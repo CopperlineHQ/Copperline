@@ -50,7 +50,9 @@ The status bar (44 pixels below the display) holds, left to right:
 - **LED block.** PWR and FDD always; a green HDD activity LED on machines
   with a hard-disk controller (Gayle or A4000 IDE, or any SCSI adapter); a
   blue CD activity LED on CDTV/CD32 that lights while the drive reads data
-  or plays CD audio. A small digital counter shows the current floppy
+  or plays CD audio (on a machine whose CD drive is a SCSI CD-ROM unit,
+  the LED shows CD-DA playback; its data reads ride the HDD LED with the
+  rest of the SCSI bus). A small digital counter shows the current floppy
   track.
 - **Per-drive floppy controls.** Every connected drive gets a disk button
   (marked with the drive number) that opens a file dialog -- multi-select
@@ -58,9 +60,10 @@ The status bar (44 pixels below the display) holds, left to right:
   button that cycles to the next queued disk and an eject button. Swap and
   eject grey out when there is nothing to swap to or eject. With three or
   four drives the clusters stack two-up.
-- **CD controls** on CDTV/CD32 machines: a CD button that loads (or swaps)
-  a cue sheet with the proper media-change notification, and a CD eject
-  button. These do not appear on machines without a CD drive.
+- **CD controls** on machines with a CD drive (CDTV, CD32, or a SCSI
+  CD-ROM unit): a CD button that loads (or swaps) a CD image
+  (`.cue`/`.iso`) with the proper media-change notification, and a CD
+  eject button. These do not appear on machines without a CD drive.
 - **Joystick toggle** (just left of the volume control): a gamepad or
   keyboard icon showing which source drives the joystick port. Click it to
   flip between gamepad-only and keyboard joystick emulation; see
@@ -83,8 +86,8 @@ Disk images can be dropped anywhere on the emulator window:
   (`1`-`4`), or press `Esc` to cancel. Dropping several floppies at once
   queues them all as the target drive's swap playlist, exactly like a
   multi-selection in the disk dialog.
-- **Cue sheets** (`.cue`) mount in the CD drive on CDTV/CD32 machines,
-  with the media-change notification.
+- **CD images** (`.cue`/`.iso`) mount in the machine's CD drive (CDTV,
+  CD32, or a SCSI CD-ROM unit), with the media-change notification.
 - **Hard disk images and Kickstart ROMs** cannot be swapped at runtime; a
   notice points at the machine-configuration screen, which also refuses
   drops while it is open.

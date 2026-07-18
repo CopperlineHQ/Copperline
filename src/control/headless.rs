@@ -398,7 +398,7 @@ impl Session {
                     match crate::cdrom::CdImage::load(&path) {
                         Ok(image) => {
                             let describe = image.describe();
-                            self.emu.bus_mut().cd_insert_disc(image);
+                            self.emu.bus_mut().cd_insert_disc(image, &path);
                             proto::ok_line(&id, json!({"disc": describe}))
                         }
                         Err(e) => proto::err_line(&id, &CtlError::io(format!("{e:#}"))),

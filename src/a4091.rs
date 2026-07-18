@@ -26,7 +26,7 @@
 //! the same nibbles are also baked into the first `$60` bytes of the real
 //! EPROM, which is how the physical board presents them.
 
-use crate::scsi::{ScsiDisk, ScsiExec};
+use crate::scsi::{ScsiExec, ScsiTarget};
 use anyhow::{bail, Result};
 use std::collections::VecDeque;
 use std::path::Path;
@@ -210,10 +210,10 @@ pub struct A4091 {
     /// The SCSI FIFO: 8 entries, 8 data bits plus parity. SODL pushes it
     /// (with CTEST4.SFWR), CTEST3 pops it, SSTAT2 counts it.
     scsi_fifo: Vec<u16>,
-    /// SCSI-2 disk targets on the bus, indexed by SCSI ID (0-6; 7 is the
-    /// host adapter). Kept across resets; part of save state.
+    /// SCSI-2 targets (disks and CD-ROMs) on the bus, indexed by SCSI ID
+    /// (0-6; 7 is the host adapter). Kept across resets; part of save state.
     #[serde(default)]
-    targets: [Option<ScsiDisk>; 7],
+    targets: [Option<ScsiTarget>; 7],
     /// The live nexus while a SCRIPTS command is in flight. Rebuilt as the
     /// driver reissues commands, so it is not persisted.
     #[serde(skip)]
@@ -255,11 +255,24 @@ impl A4091 {
         })
     }
 
-    /// Attach a disk target at the given SCSI ID (0-6).
-    pub fn attach_drive(&mut self, id: usize, disk: ScsiDisk) {
+    /// Attach a target at the given SCSI ID (0-6).
+    pub fn attach_drive(&mut self, id: usize, target: impl Into<ScsiTarget>) {
         if id < self.targets.len() {
-            self.targets[id] = Some(disk);
+            self.targets[id] = Some(target.into());
         }
+    }
+
+    /// The lowest-ID CD-ROM drive on the board's bus, when one is attached.
+    pub fn first_cd(&self) -> Option<&crate::scsi::ScsiCdRom> {
+        self.targets.iter().flatten().find_map(ScsiTarget::cd_ref)
+    }
+
+    /// Mutable view of the lowest-ID CD-ROM drive on the board's bus.
+    pub fn first_cd_mut(&mut self) -> Option<&mut crate::scsi::ScsiCdRom> {
+        self.targets
+            .iter_mut()
+            .flatten()
+            .find_map(ScsiTarget::cd_mut)
     }
 
     /// Whether a target answers at the given SCSI ID.
@@ -531,7 +544,7 @@ impl A4091 {
             c.cdb = cdb.to_vec();
         }
         let (exec, status) = match self.targets[target].as_mut() {
-            Some(disk) => disk.execute(cdb, lun),
+            Some(dev) => dev.execute(cdb, lun),
             None => (ScsiExec::NoData, 0x02),
         };
         let Some(conn) = self.conn.as_mut() else {
@@ -567,7 +580,7 @@ impl A4091 {
             return;
         };
         let status = match self.targets[target].as_mut() {
-            Some(disk) => disk.complete_out(&cdb, &data),
+            Some(dev) => dev.complete_out(&cdb, &data),
             None => 0x02,
         };
         if let Some(conn) = self.conn.as_mut() {
@@ -943,10 +956,32 @@ impl crate::zorro_device::ZorroDevice for A4091 {
         }
     }
 
-    fn tick(&mut self, _cck: u32, _host: &mut crate::zorro_device::DeviceHost) {}
+    fn tick(&mut self, cck: u32, host: &mut crate::zorro_device::DeviceHost) {
+        // The chip itself completes everything within the SCRIPTS run; only
+        // the targets carry emulated-time state (a CD-ROM drive's tray
+        // countdown and CD-DA streaming into the host mixer ring).
+        if let Some(cd_audio) = host.cd_audio_opt() {
+            for target in self.targets.iter_mut().flatten() {
+                if let ScsiTarget::CdRom(cd) = target {
+                    cd.tick(cck, cd_audio);
+                }
+            }
+        }
+    }
 
     fn int2_line(&self) -> bool {
         self.irq_line()
+    }
+
+    // The 53C710 model completes its work within each SCRIPTS run, but a
+    // CD-ROM target with playback or a tray load in flight needs its tick.
+    fn is_idle(&self) -> bool {
+        !self
+            .targets
+            .iter()
+            .flatten()
+            .filter_map(ScsiTarget::cd_ref)
+            .any(crate::scsi::ScsiCdRom::needs_tick)
     }
 
     fn reset(&mut self) {

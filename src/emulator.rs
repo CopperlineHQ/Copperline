@@ -1774,6 +1774,27 @@ fn build_serial_sink(cfg: &Config) -> Result<Box<dyn crate::serial::SerialSink>>
     }
 }
 
+/// Open a `[scsi]` unit entry as a bus target: a CD image (cue/ISO) becomes
+/// a CD-ROM drive, anything else a hard disk. Logs the fitted unit.
+fn open_scsi_target(
+    drive: &crate::config::DriveImage,
+    unit: usize,
+) -> Result<crate::scsi::ScsiTarget> {
+    if crate::config::is_cd_image_path(&drive.path) {
+        let cd = crate::scsi::ScsiCdRom::open(&drive.path)?;
+        info!(
+            "scsi: unit {unit} CD-ROM {} ({})",
+            drive.path.display(),
+            cd.describe()
+        );
+        Ok(cd.into())
+    } else {
+        let disk = crate::scsi::ScsiDisk::open(&drive.path, unit, drive.volume_name.as_deref())?;
+        info!("scsi: unit {unit} {}", drive.path.display());
+        Ok(disk.into())
+    }
+}
+
 pub fn build_machine(
     cfg: &Config,
     audio: Box<dyn AudioSink>,
@@ -1799,15 +1820,7 @@ pub fn build_machine(
                 let mut board = crate::a2091::A2091::new(rom)?;
                 for (unit, drive) in cfg.scsi.units.iter().enumerate() {
                     let Some(drive) = drive else { continue };
-                    board.attach_drive(
-                        unit,
-                        crate::scsi::ScsiDisk::open(
-                            &drive.path,
-                            unit,
-                            drive.volume_name.as_deref(),
-                        )?,
-                    );
-                    info!("scsi: unit {unit} {}", drive.path.display());
+                    board.attach_drive(unit, open_scsi_target(drive, unit)?);
                 }
                 zorro.add_board(crate::zorro::BoardSpec::a2091(slot))?;
                 info!(
@@ -1821,15 +1834,7 @@ pub fn build_machine(
                 let mut board = crate::a4091::A4091::new(rom)?;
                 for (unit, drive) in cfg.scsi.units.iter().enumerate() {
                     let Some(drive) = drive else { continue };
-                    board.attach_drive(
-                        unit,
-                        crate::scsi::ScsiDisk::open(
-                            &drive.path,
-                            unit,
-                            drive.volume_name.as_deref(),
-                        )?,
-                    );
-                    info!("scsi: unit {unit} {}", drive.path.display());
+                    board.attach_drive(unit, open_scsi_target(drive, unit)?);
                 }
                 zorro.add_board(crate::zorro::BoardSpec::a4091(slot))?;
                 info!(
@@ -2012,11 +2017,7 @@ pub fn build_machine(
         if cfg.scsi.controller == crate::config::ScsiController::A3000 {
             for (unit, drive) in cfg.scsi.units.iter().enumerate() {
                 let Some(drive) = drive else { continue };
-                sdmac.attach_drive(
-                    unit,
-                    crate::scsi::ScsiDisk::open(&drive.path, unit, drive.volume_name.as_deref())?,
-                );
-                info!("scsi: unit {unit} {}", drive.path.display());
+                sdmac.attach_drive(unit, open_scsi_target(drive, unit)?);
                 drives += 1;
             }
         }

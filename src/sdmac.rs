@@ -17,8 +17,9 @@
 //! WD33C93 offers or wants within the access that completes the handshake, so
 //! the FIFO always reads back empty and never full.
 
+use crate::chipset::paula::CdAudioRing;
 use crate::memory::Memory;
-use crate::scsi::{DmaDir, ScsiDisk, Wd33c93};
+use crate::scsi::{DmaDir, ScsiTarget, Wd33c93};
 
 /// Base of the SDMAC register file.
 pub const SDMAC_BASE: u32 = 0x00DD_0000;
@@ -115,8 +116,18 @@ impl Sdmac {
     }
 
     /// Fit a drive at a SCSI ID (0-6; 7 is the controller itself).
-    pub fn attach_drive(&mut self, unit: usize, disk: ScsiDisk) {
-        self.wd.attach_target(unit, disk);
+    pub fn attach_drive(&mut self, unit: usize, target: impl Into<ScsiTarget>) {
+        self.wd.attach_target(unit, target);
+    }
+
+    /// The lowest-ID CD-ROM drive on the bus, when one is attached.
+    pub fn first_cd(&self) -> Option<&crate::scsi::ScsiCdRom> {
+        self.wd.first_cd()
+    }
+
+    /// Mutable view of the lowest-ID CD-ROM drive on the bus.
+    pub fn first_cd_mut(&mut self) -> Option<&mut crate::scsi::ScsiCdRom> {
+        self.wd.first_cd_mut()
     }
 
     /// System reset: clear the DMAC and the SBIC, but keep the mounted drives.
@@ -135,11 +146,13 @@ impl Sdmac {
         std::mem::take(&mut self.activity) | self.wd.take_activity()
     }
 
-    /// Advance emulated time: deliver delayed WD33C93 interrupts and pump any
-    /// DMA handshake that became ready.
-    pub fn tick(&mut self, cck: u32, mem: &mut Memory) {
+    /// Advance emulated time: deliver delayed WD33C93 interrupts, pump any
+    /// DMA handshake that became ready, and run the targets (a CD-ROM
+    /// drive's tray countdown and CD-DA streaming into the mixer ring).
+    pub fn tick(&mut self, cck: u32, mem: &mut Memory, cd_audio: &mut CdAudioRing) {
         self.wd.tick(cck);
         self.pump_dma(mem);
+        self.wd.tick_targets(cck, cd_audio);
     }
 
     /// Interrupt status. The DMA engine has no FIFO to fill, so it is empty

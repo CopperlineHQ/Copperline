@@ -630,6 +630,10 @@ pub struct App {
     pending_auto_pots: Vec<(f32, u8, u8, u8)>,
     auto_disk_inserts: Vec<ScheduledDiskInsert>,
     pending_auto_disk_inserts: Vec<DiskInsertSpec>,
+    /// Scheduled CD swaps from --insert-cd-after (one-shot each);
+    /// (at_emulated_secs, image path).
+    auto_cd_inserts: Vec<(f64, PathBuf)>,
+    pending_auto_cd_inserts: Vec<(f32, PathBuf)>,
     /// Live-input recorder: logs every input event that reaches the
     /// emulated machine and writes a --script-replayable file on stop.
     /// None while not recording.
@@ -934,6 +938,7 @@ impl App {
         mouse_after: Vec<(f32, i32, i32, u8)>,
         pot_after: Vec<(f32, u8, u8, u8)>,
         disk_insert_after: Vec<DiskInsertSpec>,
+        cd_insert_after: Vec<(f32, PathBuf)>,
         record_input: Option<PathBuf>,
         disk_playlists: [Vec<PathBuf>; 4],
         disk_write_protected: [bool; 4],
@@ -1035,6 +1040,8 @@ impl App {
             pending_auto_pots: pot_after,
             auto_disk_inserts: Vec::new(),
             pending_auto_disk_inserts: disk_insert_after,
+            auto_cd_inserts: Vec::new(),
+            pending_auto_cd_inserts: cd_insert_after,
             input_recorder: record_input
                 .is_some()
                 .then(|| crate::inputrec::InputRecorder::new(0.0)),
@@ -1714,6 +1721,13 @@ impl ApplicationHandler for App {
                 path: insert.path,
                 write_protected: insert.write_protected,
             });
+        }
+        for (secs, path) in self.pending_auto_cd_inserts.drain(..) {
+            info!(
+                "auto-cd armed: insert {} at {secs:.1}s emulated time",
+                path.display()
+            );
+            self.auto_cd_inserts.push((secs.max(0.0) as f64, path));
         }
     }
 
@@ -2471,6 +2485,26 @@ impl ApplicationHandler for App {
         for insert in disk_inserts {
             self.insert_disk_image(insert.drive_idx, insert.path, insert.write_protected);
         }
+        // Fire any scheduled --insert-cd-after swaps (one-shot each).
+        let mut cd_inserts = Vec::new();
+        self.auto_cd_inserts.retain(|(at, path)| {
+            if emu_secs >= *at {
+                cd_inserts.push(path.clone());
+                false
+            } else {
+                true
+            }
+        });
+        for path in cd_inserts {
+            if self.emu.bus().cd_drive_present() {
+                self.insert_cd_image_from_path(&path);
+            } else {
+                warn!(
+                    "--insert-cd-after {}: no CD drive on this machine",
+                    path.display()
+                );
+            }
+        }
         // Input recording: with every input source for this quantum
         // applied (live, gamepad, and the scheduled events above), diff
         // the machine-visible input state once at this quantum's emulated
@@ -2536,8 +2570,8 @@ enum DroppedMediaKind {
     /// unknown extensions): FloppyImage::from_bytes sniffs the content and
     /// rejects what it cannot read, surfacing a clean OSD failure.
     Floppy,
-    /// A cue sheet for the CD drive (runtime CD loading is cue-only).
-    CdCue,
+    /// A CD image (cue sheet or bare ISO) for the CD drive.
+    Cd,
     /// Hard disk images cannot be hot-attached; point at the config screen.
     HardDisk,
     /// Kickstart ROMs load from the config screen, not at runtime.
@@ -2549,7 +2583,7 @@ fn classify_dropped_media(path: &std::path::Path) -> DroppedMediaKind {
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase());
     match ext.as_deref() {
-        Some("cue") => DroppedMediaKind::CdCue,
+        Some("cue") | Some("iso") => DroppedMediaKind::Cd,
         Some("hdf") | Some("img") => DroppedMediaKind::HardDisk,
         Some("rom") => DroppedMediaKind::Rom,
         _ => DroppedMediaKind::Floppy,
@@ -4266,8 +4300,21 @@ impl App {
                 "Floppy images",
                 &["adf", "adz", "dms", "scp", "gz", "ipf", "zip"],
             ),
-            LauncherField::CdImage => dialog.add_filter("CD images", &["cue", "iso", "bin"]),
+            // Only formats CdImage::load takes: a cue sheet or a bare ISO
+            // (a raw .bin is a cue sheet's payload, not loadable alone).
+            LauncherField::CdImage => dialog.add_filter("CD images", &["cue", "iso"]),
             LauncherField::Cd32Nvram => dialog.add_filter("NVRAM images", &["bin", "nv", "sav"]),
+            // SCSI units take hard disks or CD images (a cue/iso attaches a
+            // CD-ROM drive at that ID).
+            LauncherField::ScsiUnit0
+            | LauncherField::ScsiUnit1
+            | LauncherField::ScsiUnit2
+            | LauncherField::ScsiUnit3
+            | LauncherField::ScsiUnit4
+            | LauncherField::ScsiUnit5
+            | LauncherField::ScsiUnit6 => dialog
+                .add_filter("Hard disk images", &["hdf", "img", "bin"])
+                .add_filter("CD images", &["cue", "iso"]),
             _ => dialog.add_filter("Hard disk images", &["hdf", "img", "bin"]),
         };
         if let Some(dir) = start_dir {
@@ -6156,12 +6203,15 @@ impl App {
                     .map(|&s| (s as i16).abs())
                     .max()
                     .unwrap_or(0);
+                // A SCSI CD-ROM drive reports its play operation (state,
+                // track, position); the CDTV/CD32 controllers stream
+                // without one, so their row keeps the scope-derived state.
+                let cd_status = bus
+                    .scsi_cd_playback_line()
+                    .unwrap_or_else(|| if cd_active { "playing" } else { "idle" }.to_string());
                 let cd = ui::AudioRowView {
                     text: vec![
-                        ui::DbgLine::hilit(format!(
-                            "CD-DA  {}",
-                            if cd_active { "playing" } else { "idle" }
-                        )),
+                        ui::DbgLine::hilit(format!("CD-DA  {cd_status}")),
                         ui::DbgLine::plain(format!("  peak {cd_peak:>3}")),
                     ],
                     muted: bus.paula.cd_muted(),
@@ -6562,8 +6612,8 @@ impl App {
     fn load_cd_from_dialog(&mut self) {
         self.suspend_live_audio_for_host_io();
         let picked = rfd::FileDialog::new()
-            .set_title("Load CD image (cue sheet)")
-            .add_filter("CD cue sheets", &["cue"])
+            .set_title("Load CD image")
+            .add_filter("CD images", &["cue", "iso"])
             .pick_file();
 
         // Re-baseline pacing after the modal dialog, as for floppies.
@@ -6574,12 +6624,13 @@ impl App {
     }
 
     /// Mount a CD image with the media-change notification, ejecting any
-    /// current disc first. Shared by the load dialog and window drops.
+    /// current disc first. Shared by the load dialog, window drops, and
+    /// scheduled `--insert-cd-after` events.
     fn insert_cd_image_from_path(&mut self, path: &std::path::Path) {
         match crate::cdrom::CdImage::load(path) {
             Ok(image) => {
                 info!("cd image: {} ({})", path.display(), image.describe());
-                self.emu.bus_mut().cd_insert_disc(image);
+                self.emu.bus_mut().cd_insert_disc(image, path);
                 self.show_osd(format!("CD: {}", display_file_name(path)));
                 self.request_redraw();
             }
@@ -6602,9 +6653,9 @@ impl App {
 
     /// Route files dropped on the window: floppy images to a drive
     /// (directly, or via the chooser panel when several drives could take
-    /// them), a cue sheet to the CD drive, and everything else to an
-    /// explanatory notice. winit reports drops with no cursor position, so
-    /// the target drive can only be picked after the fact.
+    /// them), a CD image (cue/iso) to the CD drive, and everything else to
+    /// an explanatory notice. winit reports drops with no cursor position,
+    /// so the target drive can only be picked after the fact.
     fn handle_dropped_files(&mut self, files: Vec<PathBuf>) {
         // The configuration screen runs on a placeholder machine: an insert
         // would target hardware the launcher is about to rebuild, and the
@@ -6614,13 +6665,13 @@ impl App {
             return;
         }
         let mut floppies: Vec<PathBuf> = Vec::new();
-        let mut cue: Option<PathBuf> = None;
+        let mut cd: Option<PathBuf> = None;
         let mut notice: Option<&'static str> = None;
         for path in files {
             match classify_dropped_media(&path) {
                 DroppedMediaKind::Floppy => floppies.push(path),
-                // One disc tray; the first cue sheet wins.
-                DroppedMediaKind::CdCue => cue = cue.or(Some(path)),
+                // One disc tray; the first CD image wins.
+                DroppedMediaKind::Cd => cd = cd.or(Some(path)),
                 DroppedMediaKind::HardDisk => {
                     notice = Some("Hard disks are configured in the machine screen");
                 }
@@ -6630,7 +6681,7 @@ impl App {
             }
         }
         let mut handled = false;
-        if let Some(path) = cue {
+        if let Some(path) = cd {
             if self.emu.bus().cd_drive_present() {
                 self.insert_cd_image_from_path(&path);
             } else {

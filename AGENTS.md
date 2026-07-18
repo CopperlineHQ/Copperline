@@ -75,6 +75,7 @@ repeat.
 | `--mouse-after SECS DX DY [PORT]` | Relative mouse motion (default port 1) |
 | `--pot-after SECS X Y [PORT]` | Analogue stick/paddle position, 0-255 per axis (default port 2) |
 | `--insert-disk-after SECS DFN PATH` | Insert a disk image into `df0`..`df3` |
+| `--insert-cd-after SECS PATH` | Swap the CD image in the machine's CD drive (CDTV/CD32/SCSI CD-ROM) |
 | `--script FILE` | Same directives from a file, one per line, no leading dashes |
 | `--record-input PATH` | Record all machine-bound input as a replayable script |
 

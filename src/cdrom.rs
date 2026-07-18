@@ -6,7 +6,9 @@
 //! MODE1/2352, and AUDIO tracks, including INDEX 00 pregaps stored in
 //! the files. INDEX times are file-relative running time at 75 sectors
 //! per second regardless of each track's sector size; the disc address
-//! space is the concatenation of all files in cue order.
+//! space is the concatenation of all files in cue order. A bare `.iso`
+//! image (2048-byte cooked data sectors, no cue sheet) loads as a
+//! single-track data disc.
 
 use anyhow::{bail, Context, Result};
 use std::fs::File;
@@ -129,8 +131,58 @@ struct RawTrack {
 }
 
 impl CdImage {
+    /// Load a CD image: a cue sheet (with its BINARY file(s)), or a bare
+    /// `.iso` data image.
+    pub fn load(path: &Path) -> Result<Self> {
+        let is_iso = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("iso"));
+        if is_iso {
+            Self::load_iso(path)
+        } else {
+            Self::load_cue(path)
+        }
+    }
+
+    /// Load a bare data image as one MODE1/2048 track.
+    fn load_iso(path: &Path) -> Result<Self> {
+        let file =
+            File::open(path).with_context(|| format!("opening CD image {}", path.display()))?;
+        let len = file
+            .metadata()
+            .with_context(|| format!("stat {}", path.display()))?
+            .len();
+        if len == 0 || !len.is_multiple_of(DATA_SECTOR_BYTES as u64) {
+            bail!(
+                "{}: {len} bytes is not a whole number of 2048-byte data sectors",
+                path.display()
+            );
+        }
+        let sectors = (len / DATA_SECTOR_BYTES as u64) as u32;
+        Ok(Self {
+            files: vec![file],
+            paths: vec![path.to_path_buf()],
+            tracks: vec![CdTrack {
+                number: 1,
+                kind: TrackKind::Mode1_2048,
+                start_sector: 0,
+                sector_count: sectors,
+            }],
+            extents: vec![Extent {
+                disc_start: 0,
+                sector_count: sectors,
+                sector_bytes: DATA_SECTOR_BYTES,
+                file_index: 0,
+                byte_offset: 0,
+                kind: TrackKind::Mode1_2048,
+            }],
+            total_sectors: sectors,
+        })
+    }
+
     /// Load a cue sheet and open its BINARY image file(s).
-    pub fn load(cue_path: &Path) -> Result<Self> {
+    fn load_cue(cue_path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(cue_path)
             .with_context(|| format!("reading cue sheet {}", cue_path.display()))?;
         let dir = cue_path.parent().unwrap_or_else(|| Path::new("."));
@@ -702,6 +754,34 @@ mod tests {
         );
         let _ = std::fs::remove_file(&cue);
         let _ = std::fs::remove_file(&bin);
+    }
+
+    #[test]
+    fn bare_iso_loads_as_single_data_track() {
+        let iso = temp_path("plain.iso");
+        let mut bytes = Vec::new();
+        for s in 0..3u8 {
+            bytes.extend(std::iter::repeat_n(s, DATA_SECTOR_BYTES));
+        }
+        write_file(&iso, &bytes);
+        let mut image = CdImage::load(&iso).unwrap();
+        assert_eq!(image.tracks().len(), 1);
+        assert_eq!(image.tracks()[0].kind, TrackKind::Mode1_2048);
+        assert_eq!(image.total_sectors(), 3);
+        let mut data = [0u8; DATA_SECTOR_BYTES];
+        image.read_data_sector(2, &mut data).unwrap();
+        assert!(data.iter().all(|&b| b == 2));
+        assert!(!image.is_audio_sector(0));
+        let _ = std::fs::remove_file(&iso);
+    }
+
+    #[test]
+    fn iso_with_partial_sector_is_rejected() {
+        let iso = temp_path("ragged.iso");
+        write_file(&iso, &vec![0u8; DATA_SECTOR_BYTES + 100]);
+        let err = CdImage::load(&iso).unwrap_err();
+        assert!(err.to_string().contains("2048-byte"), "{err:#}");
+        let _ = std::fs::remove_file(&iso);
     }
 
     #[test]
