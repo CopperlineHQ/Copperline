@@ -80,6 +80,10 @@ export class TelnetSession {
       switch (this.state) {
         case 'data':
           if (b === IAC) {
+            // CR/NUL collapsing applies only to adjacent data bytes: a
+            // command sequence starting here must not leave a stale CR
+            // flag that would swallow a later, unrelated NUL.
+            this.lastWasCr = false;
             this.state = 'iac';
           } else if (this.lastWasCr && b === 0 && !this.remoteOn.has(OPT_BINARY)) {
             // CR NUL is the NVT encoding of a bare CR; the CR already went

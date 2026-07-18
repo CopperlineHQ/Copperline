@@ -1798,7 +1798,15 @@ impl MachineSetup {
             }
             #[cfg(feature = "midi")]
             F::SerialMode => {
-                self.serial_mode = cycle_slice(&SERIAL_MODES, self.serial_mode, forward)
+                // tcp-connect is only on offer when the config already
+                // carries a dial-out address (the launcher has no editor
+                // for it, and the mode fails at Run without one) -- same
+                // pattern as the printer's capture path below.
+                let choices: Vec<SerialMode> = SERIAL_MODES
+                    .into_iter()
+                    .filter(|m| self.serial_connect.is_some() || *m != SerialMode::TcpConnect)
+                    .collect();
+                self.serial_mode = cycle_slice(&choices, self.serial_mode, forward)
             }
             #[cfg(feature = "midi")]
             F::MidiOut => cycle_endpoint(&mut self.midi_out, &self.midi_endpoints.outputs, forward),
@@ -2705,6 +2713,28 @@ mod tests {
         assert_eq!(setup.serial_listen.as_deref(), Some("0.0.0.0:2323"));
         let back = setup.to_raw();
         assert_eq!(back.serial.listen.as_deref(), Some("0.0.0.0:2323"));
+    }
+
+    #[cfg(feature = "midi")]
+    #[test]
+    fn serial_mode_cycle_offers_tcp_connect_only_with_an_address() {
+        // The launcher has no editor for the dial-out address, so without
+        // one in the loaded config the mode would always fail at Run;
+        // cycling skips it (same pattern as the printer capture path).
+        let mut setup = MachineSetup {
+            serial_mode: SerialMode::Tcp,
+            ..Default::default()
+        };
+        setup.cycle(LauncherField::SerialMode, true);
+        assert_eq!(setup.serial_mode, SerialMode::Pty);
+
+        let mut setup = MachineSetup {
+            serial_mode: SerialMode::Tcp,
+            serial_connect: Some("bbs.example.com:1337".into()),
+            ..Default::default()
+        };
+        setup.cycle(LauncherField::SerialMode, true);
+        assert_eq!(setup.serial_mode, SerialMode::TcpConnect);
     }
 
     #[test]
