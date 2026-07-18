@@ -653,9 +653,9 @@ pub struct Bus {
     chip_dma_mask: u32,
     pub blitter: Blitter,
     pub floppy: FloppyController,
-    /// Host-side Centronics peripheral. The CIA-B PC/data and CIA-A FLAG
-    /// signals are emulated, but the attached sink itself is not machine state
-    /// and therefore survives save-state loads like Paula's audio/serial sinks.
+    /// Host-side Centronics peripheral. The CIA-A PC/data and FLAG signals are
+    /// emulated, but the attached peripheral itself is not machine state and
+    /// therefore survives save-state loads like Paula's audio/serial sinks.
     #[serde(skip, default = "crate::parallel::null_parallel_port")]
     parallel_port: Box<dyn crate::parallel::ParallelPort>,
     pub rtc: Msm6242Rtc,
@@ -3235,7 +3235,7 @@ impl Bus {
         self.paula.set_serial_time_anchor(anchor);
     }
 
-    /// Attach a Centronics peripheral to CIA-B port B. The default is a null
+    /// Attach a Centronics peripheral to CIA-A port B. The default is a null
     /// peripheral (unplugged cable), so attaching one is an explicit host-side
     /// choice and does not change ordinary machine behavior.
     pub fn attach_parallel_port(&mut self, port: Box<dyn crate::parallel::ParallelPort>) {
@@ -4720,8 +4720,17 @@ impl Bus {
             // status lines: /CHNG, /WPRO, /TK0, /RDY.
             v = (v & !0x3C) | self.floppy.cia_a_status_bits();
         }
+        if reg == REG_PRB {
+            // The parallel data pins are CIA-A port B. An input peripheral (an
+            // audio sampler digitizing the data lines) drives them, so let it
+            // override the byte the guest reads back from $BFE101.
+            if let Some(byte) = self.parallel_port.read_data(self.emulated_cck) {
+                v = byte;
+            }
+        }
         trace!("cia_a R reg={:X} sz={} val={:02X}", reg, size, v);
         self.poll_stats.tick_read("cia_a", reg);
+        self.service_parallel_strobe();
         v as u64
     }
 
@@ -4753,6 +4762,7 @@ impl Bus {
             }
             self.cd32_pad_cia_clock();
         }
+        self.service_parallel_strobe();
         eff
     }
 
@@ -4813,9 +4823,11 @@ impl Bus {
         let v = self.cia_b.read(reg);
         trace!("cia_b R reg={:X} sz={} val={:02X}", reg, size, v);
         self.poll_stats.tick_read("cia_b", reg);
-        let result = if size == 2 { (v as u64) << 8 } else { v as u64 };
-        self.service_parallel_strobe();
-        result
+        if size == 2 {
+            (v as u64) << 8
+        } else {
+            v as u64
+        }
     }
 
     pub fn cia_b_write(&mut self, addr: u64, size: usize, val: u64) -> CiaSideEffect {
@@ -4839,19 +4851,21 @@ impl Bus {
             let prb = self.cia_b.port_b_pins();
             self.floppy.write_prb(prb);
         }
-        self.service_parallel_strobe();
         eff
     }
 
-    /// Consume CIA-B's one-shot `PC` pulse as the external Centronics
-    /// `/STROBE`. An accepting peripheral returns an `/ACK`; its falling edge
-    /// is fed into CIA-A FLAG, whose existing one-E-clock interrupt delay then
-    /// drives Paula PORTS through the normal timed-device path.
+    /// Consume CIA-A's one-shot `PC` pulse as the external Centronics
+    /// `/STROBE`. The parallel data pins are CIA-A port B, and CIA-A's `PC`
+    /// output pulses on any port-B access, so a guest that writes a byte to
+    /// `$BFE101` and toggles the strobe drives this path. An accepting
+    /// peripheral returns an `/ACK`; its falling edge is fed into CIA-A FLAG,
+    /// whose existing one-E-clock interrupt delay then drives Paula PORTS
+    /// through the normal timed-device path.
     fn service_parallel_strobe(&mut self) {
-        if !self.cia_b.take_pc_pulse() {
+        if !self.cia_a.take_pc_pulse() {
             return;
         }
-        let data = self.cia_b.port_b_pins();
+        let data = self.cia_a.port_b_pins();
         if self.parallel_port.strobe(data, self.emulated_cck) {
             let _ = self.cia_a.assert_flag();
             self.cia_a.release_flag();

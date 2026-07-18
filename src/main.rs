@@ -121,6 +121,9 @@ pub struct CliArgs {
     pub list_midi: bool,
     /// `--list-audio-devices`: print the host audio output devices and exit.
     pub list_audio_devices: bool,
+    /// `--sampler-list-audio-inputs`: print the host audio input devices (for
+    /// `--sampler-audio-input`) and exit.
+    pub list_sampler_inputs: bool,
     /// Command-line machine overrides (`--model`, `--chipset`, `--cpu`,
     /// `--fpu`/`--no-fpu`, `--cpu-clock`, `--chip`, `--fast`, `--slow`,
     /// `--floppy-drives`).
@@ -310,6 +313,7 @@ where
     let mut calibrate_gamepad = false;
     let mut list_midi = false;
     let mut list_audio_devices = false;
+    let mut list_sampler_inputs = false;
     let mut overrides = ConfigOverrides::default();
     let mut args = args.into_iter().peekable();
     while let Some(a) = args.next() {
@@ -322,6 +326,9 @@ where
             }
             "--list-audio-devices" => {
                 list_audio_devices = true;
+            }
+            "--sampler-list-audio-inputs" => {
+                list_sampler_inputs = true;
             }
             "--config" | "-c" => {
                 let v = args
@@ -424,6 +431,25 @@ where
                     args.next()
                         .ok_or_else(|| anyhow!("--midi-in requires a device name"))?,
                 );
+            }
+            "--parallel" => {
+                overrides.parallel = Some(args.next().ok_or_else(|| {
+                    anyhow!("--parallel requires a device (none/printer/sampler)")
+                })?);
+            }
+            "--sampler-audio-input" => {
+                overrides.sampler_input = Some(
+                    args.next()
+                        .ok_or_else(|| anyhow!("--sampler-audio-input requires a device name"))?,
+                );
+            }
+            "--sampler-input-gain" => {
+                let gain: f32 = next_arg(
+                    &mut args,
+                    "--sampler-input-gain requires a value in dB (e.g. 0, 6, -6)",
+                    "--sampler-input-gain must be a number",
+                )?;
+                overrides.sampler_gain = Some(gain);
             }
             "--audio-device" => {
                 overrides.audio_device = Some(
@@ -809,6 +835,7 @@ where
         calibrate_gamepad,
         list_midi,
         list_audio_devices,
+        list_sampler_inputs,
         overrides,
     })
 }
@@ -912,6 +939,10 @@ fn print_help() {
          --profile-live-audio SECS      run a no-window Paula-to-cpal profile workload;\n  \
          \x20                            combine with COPPERLINE_AUDIO_PROFILE=1 for counters\n  \
          --serial MODE                  Paula serial port: off, stdout, midi, tcp, or pty\n  \
+         --parallel DEVICE              parallel port: none, printer, or sampler\n  \
+         --sampler-audio-input NAME     sampler host capture device (implies --parallel sampler)\n  \
+         --sampler-input-gain DB        sampler input gain in dB (implies --parallel sampler)\n  \
+         --sampler-list-audio-inputs    list host audio input devices and exit\n  \
          {midi}--calibrate-gamepad            interactively bind a USB gamepad to the port-2\n  \
          \x20                            joystick, save the calibration, then exit\n  \
          -h, --help                     show this help and exit\n  \
@@ -1263,6 +1294,21 @@ fn print_audio_output_devices() -> Result<()> {
     Ok(())
 }
 
+/// Print the host audio input devices for `--sampler-list-audio-inputs`. These
+/// are the names `--sampler-audio-input` and `[parallel] sampler_input` match
+/// against.
+fn print_sampler_input_devices() -> Result<()> {
+    println!("Audio input devices (for --sampler-audio-input / [parallel] sampler_input):");
+    let devices = copperline::sampler::list_input_devices();
+    if devices.is_empty() {
+        println!("  (none found)");
+    }
+    for name in devices {
+        println!("  {name}");
+    }
+    Ok(())
+}
+
 /// Print the host MIDI endpoints for `--list-midi`. This is how a user finds the
 /// names `--midi-out`/`--midi-in` and `[serial]` expect. Without the `midi`
 /// feature it says how to get MIDI support rather than printing nothing.
@@ -1325,6 +1371,9 @@ fn main() -> Result<()> {
     }
     if cli.list_audio_devices {
         return print_audio_output_devices();
+    }
+    if cli.list_sampler_inputs {
+        return print_sampler_input_devices();
     }
     let (cfg, mut raw_cfg) = load_config(cli.config_path.as_deref(), &cli.overrides)?;
     if let Some(p) = &cli.rom_path {
@@ -1494,6 +1543,7 @@ fn main() -> Result<()> {
         config::about_machine_lines(&cfg),
         raw_cfg,
         live_audio,
+        copperline::sampler::SamplerRequest::from_config(&cfg.parallel),
     );
     #[cfg(feature = "control")]
     if let Some(listen) = cli.control_gui {
@@ -1594,6 +1644,8 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
         vec!["Configure a machine, then press Run.".to_string()],
         raw_cfg,
         audio_output_enabled,
+        // The placeholder runs no sampler; run_machine attaches it on Run.
+        copperline::sampler::SamplerRequest::default(),
     );
     app.open_launcher();
     app.run()

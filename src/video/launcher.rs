@@ -24,8 +24,9 @@ use crate::chipset::agnus::{AgnusRevision, VideoStandard};
 use crate::chipset::denise::DeniseRevision;
 use crate::config::{
     format_size, machine_profile_defaults, ChannelMode, Chipset, Config, CpuModel,
-    JoystickInputMode, MachineModel, Overscan, PacingBudget, PixelAspect, RawConfig, RawDrive,
-    RawFilesysMount, RawFloppyDrive, RawZorroBoard, ScsiController, SerialMode, WarpSpeed,
+    JoystickInputMode, MachineModel, Overscan, PacingBudget, ParallelDevice, PixelAspect,
+    RawConfig, RawDrive, RawFilesysMount, RawFloppyDrive, RawZorroBoard, ScsiController,
+    SerialMode, WarpSpeed,
 };
 use crate::zorro::{ConfigOption, ConfigOptionKind, LoadedZorroBoard};
 use anyhow::Result;
@@ -172,6 +173,7 @@ pub enum LauncherTab {
     // Only reached in a `midi` build, where it is added to TABS.
     #[cfg_attr(not(feature = "midi"), allow(dead_code))]
     Serial,
+    Parallel,
     Input,
     Zorro,
     AvEmulation,
@@ -191,6 +193,7 @@ pub const TABS: &[LauncherTab] = &[
     LauncherTab::Cd,
     #[cfg(feature = "midi")]
     LauncherTab::Serial,
+    LauncherTab::Parallel,
     LauncherTab::Input,
     LauncherTab::Zorro,
     LauncherTab::AvEmulation,
@@ -208,6 +211,7 @@ impl LauncherTab {
             LauncherTab::HostFs => "Host Mounts",
             LauncherTab::Cd => "CD",
             LauncherTab::Serial => "Serial",
+            LauncherTab::Parallel => "Parallel",
             LauncherTab::Input => "Input",
             LauncherTab::Zorro => "Zorro",
             LauncherTab::AvEmulation => "A/V & Emu",
@@ -289,6 +293,10 @@ pub enum LauncherField {
     MidiOut,
     #[cfg(feature = "midi")]
     MidiIn,
+    // Parallel
+    ParallelDevice,
+    SamplerInput,
+    SamplerGain,
     // A/V and emulation
     AudioDevice,
     AudioChannelMode,
@@ -448,11 +456,23 @@ const CD_ROWS: [Row; 3] = [
     row(F::CdInsertDelay, "Insert delay", Cycle),
     row(F::Cd32Nvram, "CD32 NVRAM", PathRow),
 ];
+// The MIDI endpoint rows appear only when the serial port is in MIDI mode, so
+// the Serial tab shows just the Mode selector otherwise.
 #[cfg(feature = "midi")]
-const SERIAL_ROWS: [Row; 3] = [
+const SERIAL_ROWS_BASE: [Row; 1] = [row(F::SerialMode, "Mode", Cycle)];
+#[cfg(feature = "midi")]
+const SERIAL_ROWS_MIDI: [Row; 3] = [
     row(F::SerialMode, "Mode", Cycle),
     row(F::MidiIn, "MIDI input", Cycle),
     row(F::MidiOut, "MIDI output", Cycle),
+];
+// The sampler input/gain rows appear only when the sampler is the selected
+// device, so None/Printer show just the Device selector.
+const PARALLEL_ROWS_BASE: [Row; 1] = [row(F::ParallelDevice, "Device", Cycle)];
+const PARALLEL_ROWS_SAMPLER: [Row; 3] = [
+    row(F::ParallelDevice, "Device", Cycle),
+    row(F::SamplerInput, "Audio input", Cycle),
+    row(F::SamplerGain, "Input gain", Cycle),
 ];
 const AV_EMULATION_ROWS: [Row; 12] = [
     row(F::AudioDevice, "Audio output", Cycle),
@@ -474,9 +494,16 @@ const INPUT_ROWS: [Row; 3] = [
     row(F::Joystick, "Joystick input", Cycle),
 ];
 
-/// The rows shown on a tab, top to bottom. The `Zorro` tab has no rows: it is
-/// drawn as a board list with Add/Remove controls (see the panel code).
-pub fn rows(tab: LauncherTab) -> &'static [Row] {
+/// The rows shown on a tab, top to bottom. The Serial and Parallel tabs are
+/// dynamic: the MIDI endpoint rows appear only in MIDI mode and the sampler
+/// rows only when the sampler is selected, so unrelated options stay hidden
+/// rather than greyed. The `Zorro` tab has no rows: it is drawn as a board list
+/// with Add/Remove controls (see the panel code).
+pub fn rows(
+    tab: LauncherTab,
+    parallel_device: ParallelDevice,
+    serial_mode: SerialMode,
+) -> &'static [Row] {
     match tab {
         LauncherTab::System => &SYSTEM_ROWS,
         LauncherTab::Cpu => &CPU_ROWS,
@@ -486,23 +513,38 @@ pub fn rows(tab: LauncherTab) -> &'static [Row] {
         LauncherTab::Storage => &STORAGE_ROWS,
         LauncherTab::HostFs => &HOSTFS_ROWS,
         LauncherTab::Cd => &CD_ROWS,
-        LauncherTab::Serial => serial_rows(),
+        LauncherTab::Serial => serial_rows(serial_mode),
+        LauncherTab::Parallel => parallel_rows(parallel_device),
         LauncherTab::Input => &INPUT_ROWS,
         LauncherTab::Zorro => &[],
         LauncherTab::AvEmulation => &AV_EMULATION_ROWS,
     }
 }
 
-/// Serial-tab rows. Only the `midi` build has any; without it the tab is absent
-/// from [`TABS`] and this is never reached.
-fn serial_rows() -> &'static [Row] {
+/// Serial-tab rows for the current mode. Only the `midi` build has any; without
+/// it the tab is absent from [`TABS`] and this is never reached.
+fn serial_rows(serial_mode: SerialMode) -> &'static [Row] {
     #[cfg(feature = "midi")]
     {
-        &SERIAL_ROWS
+        if serial_mode == SerialMode::Midi {
+            &SERIAL_ROWS_MIDI
+        } else {
+            &SERIAL_ROWS_BASE
+        }
     }
     #[cfg(not(feature = "midi"))]
     {
+        let _ = serial_mode;
         &[]
+    }
+}
+
+/// Parallel-tab rows for the selected device: the sampler adds its input and
+/// gain rows; None/Printer show just the Device selector.
+fn parallel_rows(parallel_device: ParallelDevice) -> &'static [Row] {
+    match parallel_device {
+        ParallelDevice::Sampler => &PARALLEL_ROWS_SAMPLER,
+        ParallelDevice::None | ParallelDevice::Printer => &PARALLEL_ROWS_BASE,
     }
 }
 
@@ -613,6 +655,25 @@ const SERIAL_MODES: [SerialMode; 5] = [
 /// The config/CLI accept any 0-100; an off-grid value snaps to the nearest here.
 const STEREO_SEPARATION_STEPS: [usize; 11] = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
 
+/// Sampler input-gain presets the picker steps through (preamp decibels, in
+/// 3 dB steps), ascending. 0 dB is unity; the ends are the sampler's
+/// [`crate::sampler::MIN_SAMPLER_GAIN_DB`]..[`crate::sampler::MAX_SAMPLER_GAIN_DB`].
+/// The config/CLI accept any value in range; an off-grid value snaps to the
+/// nearest here.
+const SAMPLER_GAIN_STEPS: [f64; 17] = [
+    -24.0, -21.0, -18.0, -15.0, -12.0, -9.0, -6.0, -3.0, 0.0, 3.0, 6.0, 9.0, 12.0, 15.0, 18.0,
+    21.0, 24.0,
+];
+
+/// Label a sampler gain in decibels, e.g. `0 dB`, `+6 dB`, `-12 dB`.
+fn sampler_gain_label(gain_db: f32) -> String {
+    if gain_db.abs() < 0.05 {
+        "0 dB".to_string()
+    } else {
+        format!("{gain_db:+.0} dB")
+    }
+}
+
 /// A fully-typed, editable mirror of a configurable machine. See the module
 /// docs for how it round-trips through [`RawConfig`].
 #[derive(Debug, Clone)]
@@ -683,9 +744,21 @@ pub struct MachineSetup {
     /// TCP listen address for `mode = "tcp"`; carried so the override
     /// round-trips through a launcher save even though no tab edits it.
     serial_listen: Option<String>,
-    /// Raw Centronics capture path. There is no launcher control yet, but a
-    /// hand-written `[parallel]` block must survive load/edit/save.
+    /// The Centronics parallel-port device (None/Printer/Sampler), edited on the
+    /// Parallel tab.
+    parallel_device: crate::config::ParallelDevice,
+    /// Raw Centronics printer capture path. There is no launcher control for the
+    /// path itself, but a hand-written `[parallel] output` must survive
+    /// load/edit/save, and its presence is what makes Printer selectable.
     parallel_output: Option<PathBuf>,
+    /// Sampler host capture device (`None` = system default) and its input gain,
+    /// edited on the Parallel tab.
+    sampler_input: Option<String>,
+    sampler_gain_db: f32,
+    /// Input device names for the sampler picker: filled when the screen opens
+    /// and re-read each time the field is cycled, so a reconnected device
+    /// appears.
+    sampler_input_devices: Vec<String>,
     /// Host endpoints for the device pickers, read once when this setup is
     /// built so a fresh config screen sees currently-connected devices.
     #[cfg(feature = "midi")]
@@ -800,7 +873,12 @@ impl MachineSetup {
             midi_out: cfg.serial.midi_out.clone(),
             midi_in: cfg.serial.midi_in.clone(),
             serial_listen: cfg.serial.listen.clone(),
-            parallel_output: cfg.parallel_output_path.clone(),
+            parallel_device: cfg.parallel.device,
+            parallel_output: cfg.parallel.printer_output.clone(),
+            sampler_input: cfg.parallel.sampler_input.clone(),
+            sampler_gain_db: cfg.parallel.sampler_gain_db,
+            // Filled by refresh_sampler_inputs on open, like the audio devices.
+            sampler_input_devices: Vec::new(),
             // Left empty here so config construction stays side-effect free; the
             // config screen fills it via refresh_midi_endpoints on open.
             #[cfg(feature = "midi")]
@@ -858,14 +936,30 @@ impl MachineSetup {
         self.audio_devices = crate::audio::picker_output_devices();
     }
 
-    /// Re-read every host device list (MIDI endpoints + audio outputs) for the
-    /// pickers. Call after (re)building the setup -- e.g. loading a config or
-    /// resetting to defaults -- so the pickers show what is connected now
-    /// instead of an empty list that can only land on "Default"/"None".
+    /// Re-read the host audio input devices for the sampler "Audio input" picker.
+    pub fn refresh_sampler_inputs(&mut self) {
+        self.sampler_input_devices = crate::sampler::picker_input_devices();
+    }
+
+    /// The selected serial mode and parallel device, so the panel can pick the
+    /// dynamic Serial/Parallel row sets (see [`rows`]).
+    pub fn serial_mode(&self) -> SerialMode {
+        self.serial_mode
+    }
+
+    pub fn parallel_device(&self) -> ParallelDevice {
+        self.parallel_device
+    }
+
+    /// Re-read every host device list (MIDI endpoints + audio outputs + sampler
+    /// inputs) for the pickers. Call after (re)building the setup -- e.g. loading
+    /// a config or resetting to defaults -- so the pickers show what is connected
+    /// now instead of an empty list that can only land on "Default"/"None".
     pub fn refresh_host_devices(&mut self) {
         #[cfg(feature = "midi")]
         self.refresh_midi_endpoints();
         self.refresh_audio_devices();
+        self.refresh_sampler_inputs();
     }
 
     /// The bare-profile config this setup is compared against when emitting
@@ -1081,7 +1175,24 @@ impl MachineSetup {
         raw.serial.midi_out = self.midi_out.clone();
         raw.serial.midi_in = self.midi_in.clone();
         raw.serial.listen = self.serial_listen.clone();
+        // Parallel port. Carry each peripheral's settings whenever they are set
+        // so a Save round-trips them even while another device is temporarily
+        // selected. The sampler options do not imply the sampler, so they are
+        // always safe to emit; a bare `output` path implies the printer, so an
+        // explicit `device` disambiguates when it is carried under None.
         raw.parallel.output = self.parallel_output.as_deref().map(path_string);
+        raw.parallel.sampler_input = self.sampler_input.clone();
+        raw.parallel.sampler_gain = (self.sampler_gain_db != 0.0).then_some(self.sampler_gain_db);
+        raw.parallel.device = match self.parallel_device {
+            // None is the resolved default (omitted to keep the TOML minimal),
+            // but emit it explicitly to override a carried-over `output` path
+            // that would otherwise be read back as the printer.
+            ParallelDevice::None => self
+                .parallel_output
+                .is_some()
+                .then(|| ParallelDevice::None.label().to_string()),
+            other => Some(other.label().to_string()),
+        };
         // The Audio output picker is one of default / a named device / Disabled.
         // A named device sets output_device; Disabled sets output_enabled=false
         // (the resolved default is true, so it is omitted otherwise).
@@ -1286,8 +1397,8 @@ impl MachineSetup {
                 let slot = filesys_readonly_slot(field).expect("readonly field");
                 reason(self.filesys_dirs[slot].is_some(), "no directory")
             }
-            #[cfg(feature = "midi")]
-            F::MidiOut | F::MidiIn => reason(self.serial_mode == SerialMode::Midi, "MIDI off"),
+            // The MIDI endpoint and sampler input/gain rows are hidden entirely
+            // when inactive (see `rows`), so they never need a greyed state.
             // Channel mode and separation shape the output, so they do nothing
             // once audio is disabled; separation also does nothing in mono.
             F::AudioChannelMode => reason(self.audio_output.is_enabled(), "off"),
@@ -1528,6 +1639,16 @@ impl MachineSetup {
             F::MidiOut => self.midi_out.clone().unwrap_or_else(|| "None".to_string()),
             #[cfg(feature = "midi")]
             F::MidiIn => self.midi_in.clone().unwrap_or_else(|| "None".to_string()),
+            F::ParallelDevice => match self.parallel_device {
+                ParallelDevice::None => "None".to_string(),
+                ParallelDevice::Printer => "Printer".to_string(),
+                ParallelDevice::Sampler => "Sampler".to_string(),
+            },
+            F::SamplerInput => self
+                .sampler_input
+                .clone()
+                .unwrap_or_else(|| "Default".to_string()),
+            F::SamplerGain => sampler_gain_label(self.sampler_gain_db),
             F::AudioDevice => self.audio_output.label().to_string(),
             F::AudioChannelMode => match self.audio_channel_mode {
                 ChannelMode::Stereo => "Stereo".to_string(),
@@ -1652,6 +1773,30 @@ impl MachineSetup {
             F::MidiOut => cycle_endpoint(&mut self.midi_out, &self.midi_endpoints.outputs, forward),
             #[cfg(feature = "midi")]
             F::MidiIn => cycle_endpoint(&mut self.midi_in, &self.midi_endpoints.inputs, forward),
+            F::ParallelDevice => {
+                // Printer is only on offer when a capture path exists (the
+                // launcher has no path editor), so a fresh screen cycles
+                // None <-> Sampler and a loaded printer config round-trips.
+                let mut choices = vec![ParallelDevice::None, ParallelDevice::Sampler];
+                if self.parallel_output.is_some() {
+                    choices.insert(1, ParallelDevice::Printer);
+                }
+                self.parallel_device = cycle_slice(&choices, self.parallel_device, forward);
+            }
+            F::SamplerInput => {
+                // Re-read on each step so a device connected since the screen
+                // opened appears; on-demand only, so no background polling.
+                self.refresh_sampler_inputs();
+                self.sampler_input = crate::sampler::next_input_device(
+                    self.sampler_input.as_deref(),
+                    &self.sampler_input_devices,
+                    forward,
+                );
+            }
+            F::SamplerGain => {
+                self.sampler_gain_db =
+                    cycle_floats(&SAMPLER_GAIN_STEPS, self.sampler_gain_db as f64, forward) as f32;
+            }
             F::AudioDevice => {
                 // Re-read on each step so a device connected since the screen
                 // opened appears; on-demand only, so no background polling.
@@ -1979,10 +2124,12 @@ fn cycle_endpoint(
 }
 
 /// Whether `field` appears anywhere with the given row kind. Used to classify a
-/// field (toggle vs path) without threading the tab through every call.
+/// field (toggle vs path) without threading the tab through every call. Passes
+/// the row-maximising selections so the dynamic Serial/Parallel rows are all in
+/// view.
 fn rows_contains_kind(field: LauncherField, kind: RowKind) -> bool {
     TABS.iter()
-        .flat_map(|&t| rows(t))
+        .flat_map(|&t| rows(t, ParallelDevice::Sampler, SerialMode::Midi))
         .any(|r| r.field == field && r.kind == kind)
 }
 
@@ -2531,20 +2678,82 @@ mod tests {
 
     #[test]
     fn parallel_output_round_trips_through_raw() {
-        // There is no launcher control for [parallel], so loading and saving
-        // must preserve a hand-written capture path unchanged.
+        // The launcher has no printer-path editor, so loading and saving must
+        // preserve a hand-written capture path (and its implied Printer device)
+        // unchanged.
         let mut raw = RawConfig::default();
         raw.parallel.output = Some("captures/printer.raw".into());
         let setup = MachineSetup::from_raw(&raw).unwrap();
+        assert_eq!(setup.parallel_device, ParallelDevice::Printer);
         assert_eq!(
             setup.parallel_output.as_deref(),
             Some(std::path::Path::new("captures/printer.raw"))
         );
         let back = setup.to_raw();
+        assert_eq!(back.parallel.device.as_deref(), Some("printer"));
         assert_eq!(
             back.parallel.output.as_deref(),
             Some("captures/printer.raw")
         );
+    }
+
+    #[test]
+    fn parallel_sampler_rows_appear_only_when_selected() {
+        let has = |device| {
+            rows(LauncherTab::Parallel, device, SerialMode::default())
+                .iter()
+                .any(|r| r.field == LauncherField::SamplerInput)
+        };
+        // The sampler rows are hidden (not greyed) unless the sampler is chosen.
+        assert!(!has(ParallelDevice::None));
+        assert!(!has(ParallelDevice::Printer));
+        assert!(has(ParallelDevice::Sampler));
+    }
+
+    #[test]
+    fn midi_rows_appear_only_in_midi_mode() {
+        let has = |mode| {
+            rows(LauncherTab::Serial, ParallelDevice::None, mode)
+                .iter()
+                .any(|r| r.field == LauncherField::MidiOut)
+        };
+        assert!(!has(SerialMode::Stdout));
+        assert!(has(SerialMode::Midi));
+    }
+
+    #[test]
+    fn parallel_sampler_selection_round_trips_through_raw() {
+        let mut s = MachineSetup::default();
+        assert_eq!(s.parallel_device, ParallelDevice::None);
+
+        // Cycle None -> Sampler (Printer is absent without a capture path).
+        s.cycle(LauncherField::ParallelDevice, true);
+        assert_eq!(s.parallel_device, ParallelDevice::Sampler);
+
+        s.sampler_input = Some("BlackHole".into());
+        s.sampler_gain_db = 6.0;
+        let raw = s.to_raw();
+        assert_eq!(raw.parallel.device.as_deref(), Some("sampler"));
+        assert_eq!(raw.parallel.sampler_input.as_deref(), Some("BlackHole"));
+        assert_eq!(raw.parallel.sampler_gain, Some(6.0));
+
+        let back = MachineSetup::from_raw(&raw).unwrap();
+        assert_eq!(back.parallel_device, ParallelDevice::Sampler);
+        assert_eq!(back.sampler_input.as_deref(), Some("BlackHole"));
+        assert_eq!(back.sampler_gain_db, 6.0);
+
+        // Switching the device to None must still carry the sampler settings
+        // through a Save (they do not imply the sampler on reload).
+        s.cycle(LauncherField::ParallelDevice, false); // Sampler -> None
+        assert_eq!(s.parallel_device, ParallelDevice::None);
+        let raw = s.to_raw();
+        assert_eq!(raw.parallel.device, None);
+        assert_eq!(raw.parallel.sampler_input.as_deref(), Some("BlackHole"));
+        assert_eq!(raw.parallel.sampler_gain, Some(6.0));
+        let back = MachineSetup::from_raw(&raw).unwrap();
+        assert_eq!(back.parallel_device, ParallelDevice::None);
+        assert_eq!(back.sampler_input.as_deref(), Some("BlackHole"));
+        assert_eq!(back.sampler_gain_db, 6.0);
     }
 
     #[test]
@@ -2683,8 +2892,6 @@ mod tests {
 
         s.cycle(LauncherField::SerialMode, true); // Stdout -> MIDI
         assert_eq!(s.serial_mode, SerialMode::Midi);
-        // The device rows are live only in MIDI mode.
-        assert_eq!(s.disabled_reason(LauncherField::MidiOut), None);
         s.midi_out = Some("USB MIDI".to_string());
 
         let raw = s.to_raw();
@@ -2774,10 +2981,16 @@ mod tests {
 
     #[cfg(feature = "midi")]
     #[test]
-    fn midi_device_rows_are_disabled_off_midi_mode() {
-        let s = MachineSetup::default(); // Stdout by default
-        assert!(s.disabled_reason(LauncherField::MidiOut).is_some());
-        assert!(s.disabled_reason(LauncherField::MidiIn).is_some());
+    fn midi_device_rows_are_hidden_off_midi_mode() {
+        // Off MIDI mode the endpoint rows are absent from the Serial tab (they
+        // are hidden, not greyed), so the tab shows only the Mode selector.
+        let serial = rows(
+            LauncherTab::Serial,
+            ParallelDevice::None,
+            SerialMode::Stdout,
+        );
+        assert!(!serial.iter().any(|r| r.field == LauncherField::MidiOut));
+        assert!(!serial.iter().any(|r| r.field == LauncherField::MidiIn));
     }
 
     #[test]

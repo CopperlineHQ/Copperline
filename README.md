@@ -250,21 +250,37 @@ The ALSA development headers the Linux backend links against are already a
 build requirement (see Requirements); macOS and Windows need nothing beyond
 the OS.
 
-## Parallel printer capture
+## Parallel port
 
-Copperline models CIA-B's Centronics data/strobe output and the printer
-acknowledge path back through CIA-A. A config can attach a raw byte-stream
-capture; with no `[parallel]` section the connector remains unplugged:
+Copperline models the Centronics parallel port on CIA-A (data and `PC` strobe
+on port B at `$BFE101`, printer `/ACK` back through CIA-A `FLAG`) and can attach
+one peripheral, chosen by `[parallel] device`. With no `[parallel]` section the
+connector is unplugged.
+
+A **printer** captures the guest's raw byte stream to a file, preserving the
+printer-language bytes verbatim for a compatible converter or spooler:
 
 ```toml
 [parallel]
+device = "printer"
 output = "printer.raw"
 ```
 
-The capture preserves the guest's printer-language bytes verbatim for a
-compatible converter or spooler. The configured path is replaced when the
-emulator starts. See the configuration guide for the signal and interrupt
-behaviour.
+A **sampler** is an 8-bit audio digitizer on the data lines -- the emulated
+equivalent of a classic parallel-port sampler cartridge, driving AudioMaster,
+ProTracker, OctaMED, TurboSound and the like. It captures from a host audio
+input (via cpal, like live audio output) and can switch input device and gain
+live:
+
+```toml
+[parallel]
+device = "sampler"
+sampler_input = "MacBook Air Microphone"  # omit for the system default
+sampler_gain = 6.0                        # preamp gain in dB (0 = unity)
+```
+
+See the configuration guide for the full set of options, the equivalent
+`--parallel` / `--sampler-*` flags, and the signal/interrupt behaviour.
 
 ## Documentation
 

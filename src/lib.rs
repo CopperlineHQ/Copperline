@@ -55,6 +55,7 @@ pub mod recorder;
 pub mod romsearch;
 pub mod romtags;
 pub mod rtc;
+pub mod sampler;
 pub mod savestate;
 pub mod screenshot;
 pub mod scsi;

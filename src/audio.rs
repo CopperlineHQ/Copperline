@@ -186,7 +186,7 @@ extern "C" fn alsa_ignore_error(
 /// a no-op error handler once, process-wide, keeping `--list-audio-devices` and
 /// the picker readable. No-op off Linux, where the handler does not exist.
 #[cfg(all(feature = "frontend", target_os = "linux"))]
-fn quiet_alsa_probe_logging() {
+pub(crate) fn quiet_alsa_probe_logging() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
     ONCE.call_once(|| unsafe {
@@ -195,7 +195,7 @@ fn quiet_alsa_probe_logging() {
 }
 
 #[cfg(all(feature = "frontend", not(target_os = "linux")))]
-fn quiet_alsa_probe_logging() {}
+pub(crate) fn quiet_alsa_probe_logging() {}
 
 /// Whether an ALSA device name is a low-level *plugin* handle rather than a
 /// device a user would pick: the channel-layout plugins (`front`, `surround51`,
@@ -209,7 +209,7 @@ fn quiet_alsa_probe_logging() {}
 /// name in the config/CLI, since only the displayed list is filtered. A no-op on
 /// macOS/Windows, whose device names never take this form.
 #[cfg(feature = "frontend")]
-fn is_alsa_plugin_variant(name: &str) -> bool {
+pub(crate) fn is_alsa_plugin_variant(name: &str) -> bool {
     let plugin = name.split(':').next().unwrap_or(name);
     matches!(
         plugin,
@@ -359,7 +359,7 @@ pub fn list_output_devices() -> Vec<String> {
 /// thing. `default_name` is the host's default output device name. When the
 /// default is some other device, `default` is a distinct choice and kept.
 #[cfg(feature = "frontend")]
-fn is_redundant_default(name: &str, default_name: Option<&str>) -> bool {
+pub(crate) fn is_redundant_default(name: &str, default_name: Option<&str>) -> bool {
     name.eq_ignore_ascii_case("default")
         && default_name.is_some_and(|d| d.eq_ignore_ascii_case("default"))
 }

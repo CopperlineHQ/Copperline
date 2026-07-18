@@ -576,7 +576,7 @@ fn cia_b_mask_enable_propagates_latched_timer_interrupt_to_paula() {
 }
 
 #[test]
-fn cia_b_pc_strobe_reaches_parallel_port_and_ack_drives_cia_a_flag() {
+fn cia_a_pc_strobe_reaches_parallel_port_and_ack_drives_cia_a_flag() {
     struct AckCapture(Arc<Mutex<Vec<(u8, u64)>>>);
 
     impl crate::parallel::ParallelPort for AckCapture {
@@ -592,15 +592,15 @@ fn cia_b_pc_strobe_reaches_parallel_port_and_ack_drives_cia_a_flag() {
     let addr = |reg: usize| (reg as u64) << 8;
 
     // FLAG is a delayed CIA source. Enable it, drive all eight printer data
-    // pins, then access PRB: CIA-B pulses PC, the peripheral accepts $A5, and
-    // its acknowledge falling edge latches CIA-A ICR.FLG.
+    // pins on CIA-A port B, then access PRB: CIA-A pulses PC, the peripheral
+    // accepts $A5, and its acknowledge falling edge latches CIA-A ICR.FLG.
     let _ = bus.cia_a_write(addr(REG_ICR), 1, 0x80 | 0x10);
-    let _ = bus.cia_b_write(addr(REG_DDRB), 1, 0xFF);
+    let _ = bus.cia_a_write(addr(REG_DDRB), 1, 0xFF);
     assert!(
         events.lock().unwrap().is_empty(),
         "DDRB sampling is not a strobe"
     );
-    let _ = bus.cia_b_write(addr(REG_PRB), 1, 0xA5);
+    let _ = bus.cia_a_write(addr(REG_PRB), 1, 0xA5);
 
     assert_eq!(&*events.lock().unwrap(), &[(0xA5, 0)]);
     assert_ne!(bus.cia_a.debug_icr_data() & 0x10, 0);
@@ -608,9 +608,9 @@ fn cia_b_pc_strobe_reaches_parallel_port_and_ack_drives_cia_a_flag() {
     bus.advance_devices(5);
     assert_ne!(bus.paula.intreq & INT_PORTS, 0);
 
-    // A guest PRB read generates the same hardware PC pulse. The bus samples
-    // the pins side-effect-free, so its floppy update cannot double-strobe.
-    assert_eq!(bus.cia_b_read(addr(REG_PRB), 1), 0xA5);
+    // A guest PRB read generates the same hardware PC pulse, so it strobes the
+    // peripheral again with the latched pin levels.
+    assert_eq!(bus.cia_a_read(addr(REG_PRB), 1), 0xA5);
     assert_eq!(events.lock().unwrap().len(), 2);
 }
 

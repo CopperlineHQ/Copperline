@@ -1885,6 +1885,7 @@ fn test_app_with_audio(audio: Box<dyn AudioSink>) -> super::App {
         vec!["Machine: test".to_string()],
         crate::config::RawConfig::default(),
         true,
+        crate::sampler::SamplerRequest::default(),
     )
 }
 

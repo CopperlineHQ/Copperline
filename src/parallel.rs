@@ -2,19 +2,31 @@
 
 //! Amiga Centronics parallel-port peripheral boundary.
 //!
-//! CIA-B port B carries the eight data pins and its `PC` output is the
-//! active-low printer strobe. A peripheral that accepts a strobed byte returns
-//! `true`; the bus turns that response into the printer's active-low `/ACK`
-//! edge on CIA-A `FLAG`. The default null peripheral is an unplugged cable and
-//! never acknowledges.
+//! CIA-A port B (`$BFE101`) carries the eight data pins and CIA-A's `PC` output
+//! is the active-low printer strobe. An output peripheral that accepts a
+//! strobed byte returns `true`; the bus turns that response into the printer's
+//! active-low `/ACK` edge on CIA-A `FLAG`. An input peripheral instead drives
+//! the data pins itself (see [`ParallelPort::read_data`]), which is how an
+//! audio sampler digitizes the port. The default null peripheral is an
+//! unplugged cable: it neither acknowledges nor drives the pins.
 
 use std::io::Write;
 
 pub trait ParallelPort: Send {
-    /// Observe one CIA-B `PC` strobe with the current physical port-B pin
+    /// Observe one CIA-A `PC` strobe with the current physical port-B pin
     /// levels. `at_cck` is the deterministic power-on colour-clock timestamp.
     /// Return true to drive one `/ACK` falling edge back to CIA-A `FLAG`.
     fn strobe(&mut self, data: u8, at_cck: u64) -> bool;
+
+    /// Drive the eight parallel data pins as an input peripheral. Called on
+    /// every CIA-A port-B read; returning `Some(byte)` replaces the value the
+    /// guest reads from `$BFE101`, `None` leaves the CIA's own pin state. An
+    /// output-only peripheral (printer) keeps the default and never drives the
+    /// pins. `at_cck` is the deterministic power-on colour-clock timestamp,
+    /// which a free-running capture device uses to advance in emulated time.
+    fn read_data(&mut self, _at_cck: u64) -> Option<u8> {
+        None
+    }
 
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
