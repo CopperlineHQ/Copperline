@@ -225,16 +225,20 @@ The layout is:
   caches), *Memory* (chip/fast/slow/Zorro III RAM), *ROM* (Kickstart and
   extended ROM), *Floppy* (drive count and per-drive image and write-protect),
   *Hard Disk* (IDE master/slave, the SCSI controller -- A2091, A4091, or the
-  A3000's onboard SCSI -- and its boot ROM and units), *Host Mounts* (host
-  directories served live as AmigaDOS volumes: up to four mounts, each with a
-  boot priority and a read-write/read-only **Access** field), *CD* (image,
-  insert delay, CD32 NVRAM), *Zorro* (extra autoconfig boards by metadata
-  file, with a config panel for a WASM plugin board's declared options),
-  *Serial* (serial mode and MIDI input/output endpoints),
-  *Parallel* (the parallel-port device -- None, Printer, or Sampler -- and, for
-  the sampler, its host audio input and input gain),
+  A3000's onboard SCSI -- and its boot ROM and units, plus a **Host Mounts**
+  link to a sub-page for host directories served live as AmigaDOS volumes: up
+  to four mounts, each with a boot priority and a read-write/read-only
+  **Access** field), *CD* (image,
+  insert delay, CD32 NVRAM),
   *Input* (the controller device in each game port and the joystick input
-  source), and *A/V & Emu* (audio output device, channel mode, stereo
+  source),
+  *I/O Ports* (the serial and parallel ports under **Serial:** / **Parallel:**
+  headings: serial mode and MIDI endpoints; and the parallel device -- None,
+  Printer, or Sampler -- with, for the printer, its capture output file, or for
+  the sampler, its host audio input and input gain),
+  *Zorro* (extra autoconfig boards by metadata file, with a config panel for a
+  WASM plugin board's declared options),
+  and *A/V & Emu* (audio output device, channel mode, stereo
   separation, overscan, pixel aspect, phosphor, floppy sounds and
   volume, power-on, pacing, realtime priority, warp speed).
 - **Settings rows** (right pane). `[<]`/`[>]` step through a value, On/Off

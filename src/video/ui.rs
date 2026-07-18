@@ -3468,6 +3468,10 @@ const LAUNCH_ACTION_W: usize = 84;
 const LAUNCH_ACTION_H: usize = 22;
 const LAUNCH_BROWSE_W: usize = 66;
 const LAUNCH_CLEAR_W: usize = 54;
+/// Width of the path-preview text column before a path row's Browse/Clear
+/// buttons. The buttons sit just after it (near the other control widgets)
+/// rather than out at the panel's right edge; a long value is clipped to fit.
+const LAUNCH_PATH_VALUE_W: usize = 216;
 /// Width of the editable volume-name box on a drive row.
 const LAUNCH_NAME_W: usize = 96;
 const LAUNCH_REMOVE_W: usize = 70;
@@ -3575,19 +3579,32 @@ fn launcher_toggle_rect(rect: Rect, row_y: usize) -> Rect {
     }
 }
 
-/// (Browse, Clear) buttons for a path row, right-aligned in the settings pane.
+/// The navigation button of a sub-page link row: sized to its label and
+/// aligned to the top-left of the settings pane (where the row labels sit),
+/// not stretched across the control area.
+fn launcher_sub_page_rect(rect: Rect, row_y: usize, label: &str) -> Rect {
+    Rect {
+        x: launcher_pane_x(rect),
+        y: row_y + 2,
+        w: label.chars().count() * font::GLYPH_W + 16,
+        h: LAUNCH_CONTROL_H,
+    }
+}
+
+/// (Browse, Clear) buttons for a path row, just after the fixed-width value
+/// column ([`LAUNCH_PATH_VALUE_W`]) rather than out at the panel's right edge.
 fn launcher_path_rects(rect: Rect, row_y: usize) -> (Rect, Rect) {
     let y = row_y + 2;
-    let clear = Rect {
-        x: rect.x + rect.w - LAUNCH_MARGIN - LAUNCH_CLEAR_W,
-        y,
-        w: LAUNCH_CLEAR_W,
-        h: LAUNCH_CONTROL_H,
-    };
     let browse = Rect {
-        x: clear.x - 4 - LAUNCH_BROWSE_W,
+        x: launcher_control_x(rect) + LAUNCH_PATH_VALUE_W,
         y,
         w: LAUNCH_BROWSE_W,
+        h: LAUNCH_CONTROL_H,
+    };
+    let clear = Rect {
+        x: browse.x + LAUNCH_BROWSE_W + 4,
+        y,
+        w: LAUNCH_CLEAR_W,
         h: LAUNCH_CONTROL_H,
     };
     (browse, clear)
@@ -3787,6 +3804,14 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
             }
             let row_y = launcher_row_y(rect, i);
             match r.kind {
+                // A section heading is non-interactive.
+                RowKind::SectionHeader => {}
+                // A sub-page link navigates to its target tab.
+                RowKind::SubPageLink(target) => {
+                    if launcher_sub_page_rect(rect, row_y, r.label).contains(pos) {
+                        return Some(UiControl::LauncherTab(target));
+                    }
+                }
                 RowKind::Cycle => {
                     let (prev, _value, next) = launcher_cycle_rects(rect, row_y);
                     if prev.contains(pos) {
@@ -3877,6 +3902,38 @@ fn clip_path_tail(text: &str, avail_px: usize) -> String {
     format!("...{tail}")
 }
 
+/// Clip a host path to `avail_px`, always keeping the final component (the file
+/// name) whole: leading directories are dropped and replaced by a "..." prefix,
+/// rather than cutting into the name. Splits on both `/` and `\` so Windows and
+/// Unix paths work. If even the name alone is too wide, its tail is shown.
+fn clip_path_keep_name(text: &str, avail_px: usize) -> String {
+    let max_chars = avail_px / font::GLYPH_W;
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let mut comps: Vec<&str> = text.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
+    let name = comps.pop().unwrap_or(text);
+    let sep = if text.contains('\\') { '\\' } else { '/' };
+    // Grow from the name, prepending whole parent components while the result
+    // (with its "..." prefix) still fits.
+    let mut shown = name.to_string();
+    for comp in comps.into_iter().rev() {
+        let candidate = format!("{comp}{sep}{shown}");
+        if 3 + 1 + candidate.chars().count() <= max_chars {
+            shown = candidate;
+        } else {
+            break;
+        }
+    }
+    let prefixed = format!("...{sep}{shown}");
+    if prefixed.chars().count() <= max_chars {
+        prefixed
+    } else {
+        // The file name alone does not fit; fall back to a plain tail clip.
+        clip_path_tail(name, avail_px)
+    }
+}
+
 /// A model-selector / tab button: a flat bevel that fills with the title-bar
 /// blue when active/selected. Tabs label left, model buttons centred.
 fn draw_launcher_chip(
@@ -3924,6 +3981,32 @@ fn draw_launcher_row(
 ) {
     let setup = &state.setup;
     let row_y = launcher_row_y(rect, i);
+    // A section heading is a greyed, non-interactive label grouping the rows
+    // below it (the Serial:/Parallel: sections of the I/O Ports tab).
+    if r.kind == RowKind::SectionHeader {
+        draw_panel_text(
+            frame,
+            launcher_pane_x(rect),
+            row_y + 8,
+            r.label,
+            PANEL_TEXT_DIM,
+            1,
+            scale,
+        );
+        return;
+    }
+    // A sub-page link is a navigation button carrying its own label.
+    if let RowKind::SubPageLink(target) = r.kind {
+        draw_text_button(
+            frame,
+            launcher_sub_page_rect(rect, row_y, r.label),
+            r.label,
+            true,
+            hover == Some(UiControl::LauncherTab(target)),
+            scale,
+        );
+        return;
+    }
     let reason = setup.disabled_reason(r.field);
     let label_color = if reason.is_none() {
         PANEL_TEXT
@@ -3962,6 +4045,8 @@ fn draw_launcher_row(
         return;
     }
     match r.kind {
+        // Drawn above with an early return.
+        RowKind::SectionHeader | RowKind::SubPageLink(_) => {}
         RowKind::Cycle => {
             let (prev, value, next) = launcher_cycle_rects(rect, row_y);
             draw_text_button(
@@ -4015,7 +4100,17 @@ fn draw_launcher_row(
             let (browse, clear) = launcher_path_rects(rect, row_y);
             let value_x = launcher_control_x(rect);
             let avail = browse.x.saturating_sub(value_x + 8);
-            let text = truncate_to_width(&setup.value_label(r.field), avail);
+            // The printer output shows its full path (clipped to keep the file
+            // name if long, so the row never overflows), "(none)" until one is
+            // chosen; other path rows show the image file name.
+            let text = if r.field == LauncherField::ParallelOutput {
+                match setup.path(r.field) {
+                    Some(p) => clip_path_keep_name(&p.to_string_lossy(), avail),
+                    None => "(none)".to_string(),
+                }
+            } else {
+                truncate_to_width(&setup.value_label(r.field), avail)
+            };
             draw_panel_text(frame, value_x, browse.y + 6, &text, PANEL_TEXT, 1, scale);
             draw_text_button(
                 frame,
@@ -4045,11 +4140,11 @@ fn draw_launcher_row(
             let name_box = launcher_drive_name_rect(rect, row_y);
             let text_right = if has_image { name_box.x } else { browse.x };
             let avail = text_right.saturating_sub(value_x + 8);
-            // Host FS mounts show the whole host path (tail-clipped with a
-            // leading "..." when long), since the full path is meaningful;
-            // other drives show the image's file name.
+            // Host FS mounts show the whole host path (clipped to keep the final
+            // directory name, with a leading "..." when long), since the path is
+            // meaningful; other drives show the image's file name.
             let text = match (r.field.is_filesys_dir_field(), setup.path(r.field)) {
-                (true, Some(p)) => clip_path_tail(&p.to_string_lossy(), avail),
+                (true, Some(p)) => clip_path_keep_name(&p.to_string_lossy(), avail),
                 _ => truncate_to_width(&setup.value_label(r.field), avail),
             };
             draw_panel_text(frame, value_x, browse.y + 6, &text, PANEL_TEXT, 1, scale);
@@ -4349,7 +4444,7 @@ fn draw_launcher(
             frame,
             launcher_tab_rect(rect, i),
             tab.label(),
-            state.tab == tab,
+            state.tab.strip_tab() == tab,
             hover == Some(UiControl::LauncherTab(tab)),
             true,
             scale,
@@ -4723,6 +4818,27 @@ pub fn hex_dump_row(addr: u32, bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clip_path_keeps_the_file_name() {
+        let g = font::GLYPH_W;
+        // Fits: returned unchanged.
+        assert_eq!(clip_path_keep_name("/a/b.txt", 100 * g), "/a/b.txt");
+
+        // A long Unix path keeps the whole file name after a "..." prefix.
+        let unix = "/Users/me/Documents/amiga/captures/printer-output.txt";
+        let out = clip_path_keep_name(unix, 24 * g);
+        assert!(out.starts_with("..."), "{out}");
+        assert!(out.ends_with("printer-output.txt"), "{out}");
+        assert!(out.chars().count() <= 24, "{out}");
+
+        // A long Windows path: backslash separators, file name preserved.
+        let win = r"C:\Users\me\Documents\amiga\captures\printer-output.txt";
+        let out = clip_path_keep_name(win, 24 * g);
+        assert!(out.contains('\\'), "{out}");
+        assert!(out.ends_with("printer-output.txt"), "{out}");
+        assert!(out.chars().count() <= 24, "{out}");
+    }
 
     #[test]
     fn menu_sits_above_the_status_bar_and_hit_tests_items() {
@@ -6444,5 +6560,65 @@ mod tests {
             "routing summary header not drawn"
         );
         save(&frame, "launcher-input");
+
+        // Configuration screen: the I/O Ports tab, with the sampler selected so
+        // both the Serial: and Parallel: sections and the sampler rows show.
+        let labels = || MenuLabels {
+            warp: false,
+            warp_speed: WarpSpeed::Max,
+            fullscreen: false,
+            recording: false,
+            input_recording: false,
+            joystick_input_mode: JoystickInputMode::Gamepad,
+            port_devices: [
+                crate::bus::PortDevice::Mouse,
+                crate::bus::PortDevice::Joystick,
+            ],
+            pixel_aspect: PixelAspect::Tv,
+            midi_in: "",
+            midi_out: "",
+            audio_output: "",
+            sampler_input: "",
+            sampler_gain: "",
+        };
+        let mut frame = vec![0u8; w * h * 4];
+        let mut state = LauncherState::new(launcher::MachineSetup::default());
+        state.tab = LauncherTab::IoPorts;
+        state.setup.cycle(LauncherField::ParallelDevice, true); // None -> Printer
+        state.setup.cycle(LauncherField::ParallelDevice, true); // Printer -> Sampler
+        let ui = UiState {
+            menu_open: false,
+            panel: Some(Panel::Launcher(Box::new(state))),
+        };
+        draw(&mut frame, scale, &ui, None, None, false, false, labels());
+        save(&frame, "launcher-io-ports");
+
+        // I/O Ports with the printer selected and a long output path set, to
+        // check the "Output file" value and the Browse/Clear placement.
+        let mut frame = vec![0u8; w * h * 4];
+        let mut state = LauncherState::new(launcher::MachineSetup::default());
+        state.tab = LauncherTab::IoPorts;
+        state.setup.cycle(LauncherField::ParallelDevice, true); // None -> Printer
+        state.setup.set_path(
+            LauncherField::ParallelOutput,
+            std::path::PathBuf::from("/Users/me/Documents/amiga/captures/printer-output.txt"),
+        );
+        let ui = UiState {
+            menu_open: false,
+            panel: Some(Panel::Launcher(Box::new(state))),
+        };
+        draw(&mut frame, scale, &ui, None, None, false, false, labels());
+        save(&frame, "launcher-printer");
+
+        // The Host Mounts sub-page reached from the Hard Disk tab.
+        let mut frame = vec![0u8; w * h * 4];
+        let mut state = LauncherState::new(launcher::MachineSetup::default());
+        state.tab = LauncherTab::HostFs;
+        let ui = UiState {
+            menu_open: false,
+            panel: Some(Panel::Launcher(Box::new(state))),
+        };
+        draw(&mut frame, scale, &ui, None, None, false, false, labels());
+        save(&frame, "launcher-host-mounts");
     }
 }
