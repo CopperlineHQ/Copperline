@@ -111,7 +111,10 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //  32: SCSI target slots (Wd33c93, A4091) hold a ScsiTarget enum (disk or
 //      CD-ROM drive) instead of a bare ScsiDisk; the CD-ROM drive carries
 //      CD-DA playback state and the tray countdown of a pending disc swap
-pub const STATE_VERSION: u32 = 32;
+//  33: A2065 gained the latched init-block MODE word (DTX/DRX/LOOP gating
+//      of the LANCE engines) and NetConfig the Nat variant (userspace NAT
+//      backend)
+pub const STATE_VERSION: u32 = 33;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

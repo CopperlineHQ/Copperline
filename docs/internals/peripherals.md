@@ -164,12 +164,27 @@ Am7990 LANCE and 32 KiB of on-board RAM, driven by the AmigaOS SANA-II
 `a2065.device`. Unlike the DMAC boards the LANCE never masters the Amiga
 bus: its init block, descriptor rings, and packet buffers all live in the
 board's own RAM, which the CPU reaches through the board window, so the
-board is self-contained and owns a host `NetBackend` (`net.rs`) for real
-frames. Networking is inherently non-deterministic, so a fitted NIC
+board is self-contained and owns a host `NetBackend` (`net/`) for real
+frames. The LANCE engine models the Am7990 programming surface a real
+driver exercises: TX and RX buffer chaining (STP..ENP spans across
+descriptors), the stored FCS trailer (MCNT counts it; drivers read the
+payload as `MCNT - 4`), the init-block MODE gates (DTX/DRX and the LOOP
+internal-loopback self-test SANA-II drivers run at power-up), and MISS on
+an RX ring overrun.
+
+The `nat` backend (`net/nat/`, `net-nat` build feature) is a slirp-style
+userspace NAT: a dedicated `a2065-nat` thread owns a smoltcp interface
+that terminates ARP and the guest's TCP on the virtual gateway
+(10.0.2.2, DNS forwarder 10.0.2.3, guest 10.0.2.15/24), splices each TCP
+flow onto a non-blocking host socket, NATs UDP per flow, resolves DNS
+through the host's own resolver, and answers BOOTP/DHCP and ICMP echo at
+frame level. Frames cross to the emulated NIC over bounded channels that
+drop on overflow, so the emulator thread never blocks on the host
+network. Networking is inherently non-deterministic, so a fitted NIC
 breaks byte-identical replay while traffic flows; save states record only
-the chosen backend and bring up a fresh one on load. The board and
-backend story, including the WASM plugin `net` capability, is covered in
-[](../zorro).
+the chosen backend and bring up a fresh one on load (flows die; the
+guest's TCP retransmits). The board and backend story, including the WASM
+plugin `net` capability, is covered in [](../zorro).
 
 ## CDTV (`cdtv.rs`, `cdrom.rs`)
 

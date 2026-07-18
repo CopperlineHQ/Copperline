@@ -199,12 +199,15 @@ slow = "512K"
 
 
 # A2065 Ethernet board (Am7990 LANCE, driven by the SANA-II a2065.device).
-# net picks the host network backend: "loopback" echoes transmitted frames
-# back (self-contained), "none" leaves the NIC isolated. Omit the section
-# for no board. Host networking is non-deterministic, so a fitted NIC
-# breaks byte-identical replay/save-state determinism while traffic flows.
+# net picks the host network backend: "nat" is a slirp-style userspace NAT
+# giving the guest outbound IPv4 with no host privileges (guest 10.0.2.15/24,
+# gateway 10.0.2.2, DNS 10.0.2.3, DHCP built in); "loopback" echoes
+# transmitted frames back (self-contained); "none" leaves the NIC isolated.
+# Omit the section for no board. Host networking is non-deterministic, so a
+# fitted NIC breaks byte-identical replay/save-state determinism while
+# traffic flows.
 # [a2065]
-# net = "loopback"
+# net = "nat"
 
 
 # SCSI bus with up to seven drives, on any machine model. Preferred over [ide]

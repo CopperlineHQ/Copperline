@@ -183,19 +183,44 @@ config:
 
 ```toml
 [a2065]
-net = "loopback"   # host network backend; "none" for an isolated NIC
+net = "nat"   # host network backend; "loopback", or "none" for isolation
 ```
+
+(`--a2065-net BACKEND` is the matching per-run flag.)
 
 Unlike the DMAC boards, the LANCE does not master the Amiga bus: its init
 block, descriptor rings, and packet buffers live in the board's own 32 KiB RAM
 (which the CPU reaches through the board window), so the board is self-contained
 and owns its host network backend directly.
 
-Host network backends live in `src/net.rs` behind the `NetBackend` trait. Built
-in today is **loopback** (transmitted frames are queued straight back -- useful
-for a self-contained demo and for tests); a userspace NAT (libslirp/smoltcp) and
-a host TAP bridge are planned and will slot in behind `make_backend` under build
-features. TAP will require host privileges and interface setup; NAT will not.
+Host network backends live in `src/net/` behind the `NetBackend` trait. Two are
+built in:
+
+- **`nat`** -- userspace NAT (`src/net/nat/`, behind the default-on `net-nat`
+  build feature): a slirp-style virtual gateway that NATs the guest's outbound
+  IPv4 onto ordinary host sockets. No host privileges, drivers, or setup, and
+  identical behavior on Linux, macOS, and Windows. The guest sees the QEMU/slirp
+  segment -- configure its TCP/IP stack with:
+
+  | Setting | Value |
+  |---|---|
+  | IP address | `10.0.2.15` (or use the built-in BOOTP/DHCP server) |
+  | Netmask | `255.255.255.0` |
+  | Gateway | `10.0.2.2` |
+  | DNS server | `10.0.2.3` |
+
+  DNS is answered through the host's own resolver; TCP and UDP to the gateway
+  address reach the host's `127.0.0.1`, so guest software can talk to services
+  on the host. Limitations: outbound only (no inbound connections or port
+  forwards yet), IPv4 only, no IP fragmentation, and ICMP echo is answered
+  locally by the gateway for any destination -- a ping "succeeding" proves the
+  NAT is up, not that the target is reachable.
+- **`loopback`** -- transmitted frames are queued straight back; useful for a
+  self-contained demo, driver bring-up, and tests.
+
+A host TAP bridge would slot in behind `make_backend` the same way but is not
+implemented; TAP would require host privileges and per-OS interface setup,
+which is exactly what `nat` avoids.
 
 **Networking is non-deterministic.** Inbound frames arrive on the host's
 schedule, not the emulated clock, so a fitted A2065 (or any `net`-capable WASM

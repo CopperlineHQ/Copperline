@@ -432,6 +432,11 @@ where
                         anyhow!("--serial-connect requires an address (host:port)")
                     })?);
             }
+            "--a2065-net" => {
+                overrides.a2065_net = Some(args.next().ok_or_else(|| {
+                    anyhow!("--a2065-net requires a backend (none/loopback/nat)")
+                })?);
+            }
             "--midi-out" => {
                 overrides.midi_out = Some(
                     args.next()
@@ -965,6 +970,8 @@ fn print_help() {
          \x20                            tcp-connect, or pty\n  \
          --serial-connect HOST:PORT     dial a remote TCP service (a telnet BBS) with the\n  \
          \x20                            serial port (implies --serial tcp-connect)\n  \
+         --a2065-net BACKEND            fit an A2065 Ethernet board: none, loopback, or\n  \
+         \x20                            nat (user-mode NAT, no host privileges)\n  \
          --parallel DEVICE              parallel port: none, printer, or sampler\n  \
          --sampler-audio-input NAME     sampler host capture device (implies --parallel sampler)\n  \
          --sampler-input-gain DB        sampler input gain in dB (implies --parallel sampler)\n  \

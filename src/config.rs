@@ -1277,6 +1277,9 @@ pub struct ConfigOverrides {
     /// Freeze the seeded RTC (`--rtc-frozen`). Same as
     /// `[machine] rtc_frozen`.
     pub rtc_frozen: Option<bool>,
+    /// A2065 Ethernet backend (`--a2065-net`): "none", "loopback", or "nat".
+    /// Same parser as `[a2065] net`; setting it fits the board.
+    pub a2065_net: Option<String>,
 }
 
 impl ConfigOverrides {
@@ -1306,6 +1309,7 @@ impl ConfigOverrides {
             && self.audio_stereo_separation.is_none()
             && self.rtc_time.is_none()
             && self.rtc_frozen.is_none()
+            && self.a2065_net.is_none()
     }
 
     /// Inject the set overrides into the raw config, replacing the values
@@ -1402,6 +1406,9 @@ impl ConfigOverrides {
         }
         if let Some(frozen) = self.rtc_frozen {
             raw.machine.rtc_frozen = Some(frozen);
+        }
+        if let Some(net) = &self.a2065_net {
+            raw.a2065.net = Some(net.clone());
         }
     }
 }
@@ -2311,7 +2318,7 @@ impl TryFrom<RawConfig> for Config {
             None => None,
             Some(s) => Some(crate::net::parse_net_config(s).ok_or_else(|| {
                 anyhow::anyhow!(
-                    "[a2065] net = {:?} is not a known backend (expected \"none\" or \"loopback\")",
+                    "[a2065] net = {:?} is not a known backend (expected \"none\", \"loopback\", or \"nat\")",
                     s
                 )
             })?),

@@ -60,11 +60,11 @@ machine; the other flags then override individual values on top of it, just as
 explicit `[cpu]`/`[chipset]`/`[memory]` sections override a `[machine]`
 profile in a config file.
 
-The audio, serial, and parallel surface has matching per-run flags too --
-`--audio-device`, `--audio-channel-mode`, `--audio-stereo-separation`,
+The audio, serial, parallel, and network surface has matching per-run flags
+too -- `--audio-device`, `--audio-channel-mode`, `--audio-stereo-separation`,
 `--serial`, `--midi-in`, `--midi-out`, `--parallel`, `--sampler-audio-input`,
-`--sampler-input-gain` -- described with their `[audio]`, `[serial]`, and
-`[parallel]` keys below.
+`--sampler-input-gain`, `--a2065-net` -- described with their `[audio]`,
+`[serial]`, `[parallel]`, and `[a2065]` keys below.
 
 ## Top level
 
@@ -855,17 +855,27 @@ assigns addresses.
 
 ```toml
 [a2065]
-net = "loopback"   # or "none" for an isolated NIC
+net = "nat"   # or "loopback"; "none" for an isolated NIC
 ```
 
-Fits a Commodore A2065 Ethernet board (Am7990 LANCE) on the Zorro chain.
-`net` selects the host network backend: `"loopback"` echoes transmitted
-frames back (self-contained, useful for driver bring-up), `"none"` leaves
-the NIC isolated. Omit the section entirely for no board. Note that host
-networking is inherently non-deterministic: inbound frames arrive on the
-host's schedule, not the emulated clock, so a NIC board breaks
-byte-identical replay and save-state determinism while traffic flows. See
-[](../zorro) for the board details.
+Fits a Commodore A2065 Ethernet board (Am7990 LANCE) on the Zorro chain;
+`--a2065-net BACKEND` is the matching per-run flag. `net` selects the host
+network backend:
+
+- `"nat"` -- userspace NAT: the guest gets outbound IPv4 internet through a
+  virtual gateway with no host privileges or setup, identically on Linux,
+  macOS, and Windows. Configure the guest's TCP/IP stack with IP
+  `10.0.2.15`, netmask `255.255.255.0`, gateway `10.0.2.2`, DNS `10.0.2.3`
+  (or let it BOOTP/DHCP). Outbound only, IPv4 only.
+- `"loopback"` -- echoes transmitted frames back (self-contained, useful
+  for driver bring-up).
+- `"none"` -- the NIC is fitted but isolated.
+
+Omit the section entirely for no board. Note that host networking is
+inherently non-deterministic: inbound frames arrive on the host's
+schedule, not the emulated clock, so a NIC board breaks byte-identical
+replay and save-state determinism while traffic flows. See [](../zorro)
+for the board details and the NAT's limitations.
 
 ## `[debug]` -- diagnostics
 

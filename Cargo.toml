@@ -15,7 +15,7 @@ publish = false
 default-run = "copperline"
 
 [features]
-default = ["midi", "frontend", "wasm-boards", "control", "ctl-bin"]
+default = ["midi", "frontend", "wasm-boards", "control", "ctl-bin", "net-nat"]
 display-plan-trace = []
 # Local investigation switches that deliberately alter timing or rendering.
 # Normal builds keep these environment-variable overrides inert so release
@@ -54,6 +54,10 @@ bench-bin = []
 # (`--control` headless, `--control-gui` windowed). Uses std::net + threads,
 # so browser builds (--no-default-features) compile it out.
 control = ["dep:serde_json"]
+# User-mode NAT backend for emulated NICs (`[a2065] net = "nat"`, src/net/nat/):
+# a slirp-style virtual gateway giving the guest outbound IPv4 with no host
+# privileges. Uses std::net + threads, so browser builds compile it out.
+net-nat = ["dep:smoltcp"]
 # The `copperline-ctl` command-line client for the control protocol.
 ctl-bin = ["dep:serde_json"]
 
@@ -92,6 +96,16 @@ arboard = { version = "3", default-features = false, features = ["wayland-data-c
 # Config in wasmboard.rs). Pin the version: save-state replay of a plugin's
 # linear-memory snapshot is only guaranteed within one wasmtime build.
 wasmtime = { version = "=27.0.0", default-features = false, features = ["cranelift", "runtime"], optional = true }
+# Userspace TCP/IP stack for the NAT backend (src/net/nat/): terminates the
+# guest's ARP and TCP on the virtual gateway so flows can be spliced onto host
+# sockets. Pure Rust, 0BSD, lean feature set: Ethernet + IPv4 + TCP sockets
+# only (DHCP/DNS/UDP/ICMP are handled at frame level with the wire parsers).
+smoltcp = { version = "0.12", default-features = false, features = [
+    "alloc",
+    "medium-ethernet",
+    "proto-ipv4",
+    "socket-tcp",
+], optional = true }
 # Already pulled in transitively; used directly only for localtime_r (local
 # time-zone filename stamps) and, on macOS, the pthread QoS class used for the
 # optional realtime-priority feature (see src/priority.rs).
