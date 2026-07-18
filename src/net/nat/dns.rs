@@ -84,6 +84,9 @@ impl DnsResolver {
                 self.outstanding.fetch_add(1, Ordering::Relaxed);
                 let tx = self.results_tx.clone();
                 let outstanding = Arc::clone(&self.outstanding);
+                // Built before the closure consumes `q`, so the spawn-failure
+                // path can still answer (a fast SERVFAIL beats a DNS timeout).
+                let servfail = q.response(None, RCODE_SERVFAIL);
                 let spawned = std::thread::Builder::new()
                     .name("a2065-nat-dns".into())
                     .spawn(move || {
@@ -103,6 +106,7 @@ impl DnsResolver {
                     });
                 if spawned.is_err() {
                     self.outstanding.fetch_sub(1, Ordering::Relaxed);
+                    let _ = self.results_tx.send((guest_port, servfail));
                 }
             }
             QTYPE_PTR => {

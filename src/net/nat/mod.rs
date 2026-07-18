@@ -75,8 +75,12 @@ impl NatBackend {
             .spawn(move || run_engine(in_rx, out_tx))
             .map_err(|e| log::warn!("NAT thread failed to start: {e}; NIC left isolated"))
             .ok();
+        // With no engine thread the receiver is already dropped, so keep no
+        // sender either: `send()` then skips the per-frame allocation and the
+        // board behaves like a cleanly isolated NIC.
+        let to_engine = thread.is_some().then_some(in_tx);
         Self {
-            to_engine: Some(in_tx),
+            to_engine,
             from_engine: out_rx,
             thread,
         }
