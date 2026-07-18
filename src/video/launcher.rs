@@ -1554,7 +1554,7 @@ impl MachineSetup {
                 if self.port_devices[port] == PortDevice::Mouse {
                     "cursor keys as a mouse (fire keys = buttons)".to_string()
                 } else {
-                    "cursor keys (Ctrl = fire, Left Alt = button 2)".to_string()
+                    "cursor keys (Ctrl / Right Alt = fire, Left Alt = button 2)".to_string()
                 }
             } else {
                 match self.port_devices[port] {

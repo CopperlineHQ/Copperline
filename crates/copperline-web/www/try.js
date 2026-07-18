@@ -1073,23 +1073,28 @@ const diskListSelect = $('df0list');
 const DISK_LIST_EXT = /\.(adf|adz|dms|ipf|scp|zip|gz)$/i;
 
 async function diskListEntries(folder) {
-  // A manifest wins when the site ships one; only a missing or invalid
-  // one falls through to the directory listing.
+  // A manifest wins when the site ships one; a missing or invalid one
+  // (fetch error, unparsable JSON, not an array) falls through to the
+  // directory listing.
   try {
     const resp = await fetch(new URL('index.json', folder).href);
     if (resp.ok) {
       const manifest = await resp.json();
-      return (Array.isArray(manifest) ? manifest : [])
-        .map((entry) => {
-          const rel = typeof entry === 'string' ? entry : entry?.url;
-          if (typeof rel !== 'string') return null;
-          const url = new URL(rel, folder);
-          const name =
-            (typeof entry === 'object' && entry?.name) ||
-            nameFromUrlPath(url.pathname, rel);
-          return { name, url: url.href };
-        })
-        .filter(Boolean);
+      if (Array.isArray(manifest)) {
+        return manifest
+          .map((entry) => {
+            const rel = typeof entry === 'string' ? entry : entry?.url;
+            if (typeof rel !== 'string') return null;
+            const url = new URL(rel, folder);
+            // A non-string name is ignored rather than trusted: the
+            // sort and the option label both expect a string.
+            const name =
+              (typeof entry?.name === 'string' && entry.name) ||
+              nameFromUrlPath(url.pathname, rel);
+            return { name, url: url.href };
+          })
+          .filter(Boolean);
+      }
     }
   } catch {
     // fall through to the directory listing
