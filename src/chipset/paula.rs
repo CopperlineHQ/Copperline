@@ -746,8 +746,13 @@ impl Paula {
             self.intreq |= bits;
         } else {
             self.intreq &= !bits;
+            // Clearing RBF releases the receiver for the next word and
+            // clears OVRUN, but the receive buffer is a physical latch:
+            // its data stays readable in SERDATR until the next word
+            // overwrites it. AROS's level-5 dispatcher relies on this --
+            // it acks INTREQ BEFORE running the RBF handler, which then
+            // reads the still-latched word from SERDATR.
             if bits & INT_RBF != 0 && source_bits & INT_RBF == 0 {
-                self.serial_rx_buffer = None;
                 self.serial_overrun = false;
             }
         }
@@ -1010,7 +1015,12 @@ impl Paula {
             shift.bit_index += 1;
             if shift.bit_index >= shift.total_bits {
                 let word = Self::serdatr_receive_word(shift.word, shift.long);
-                if self.serial_rx_buffer.is_some() {
+                // Overrun is gated on the RBF interrupt flag (the buffer
+                // itself always holds the last received word): a word
+                // completing while RBF is still pending is dropped and
+                // latches OVRUN. `irq` carries completions from earlier in
+                // this same span that the caller has not latched yet.
+                if (self.intreq | irq) & INT_RBF != 0 {
                     self.serial_overrun = true;
                 } else {
                     self.serial_rx_buffer = Some(word);
@@ -3098,6 +3108,34 @@ mod tests {
 
         paula.write_intreq(INT_RBF);
         assert_eq!(paula.read_serdatr() & ((1 << 15) | (1 << 14)), 0);
+    }
+
+    #[test]
+    fn rbf_ack_leaves_received_word_latched_in_serdatr() {
+        // AROS's level-5 dispatcher acks INTREQ BEFORE running the RBF
+        // handler, which then reads the word from SERDATR. The receive
+        // buffer is a physical latch: the ack drops RBF and OVRUN but must
+        // leave the data readable, and with RBF clear the next word stores
+        // instead of overrunning.
+        let (mut paula, _, read) = paula_with_collect_serial();
+        read.lock().unwrap().extend_from_slice(&[0x41, 0x42]);
+
+        assert_eq!(paula.tick_serial(9, 0) & INT_RBF, 0);
+        let irq = paula.tick_serial(1, 0);
+        assert_eq!(irq & INT_RBF, INT_RBF);
+        paula.latch_interrupt_sources(irq);
+
+        paula.write_intreq(INT_RBF); // the AROS-style early ack
+        let serdatr = paula.read_serdatr();
+        assert_eq!(serdatr & (1 << 14), 0, "RBF drops with the ack");
+        assert_eq!(serdatr & 0x00FF, 0x41, "data survives the ack");
+
+        let irq = paula.tick_serial(10, 0);
+        assert_eq!(irq & INT_RBF, INT_RBF, "next word stores, no overrun");
+        paula.latch_interrupt_sources(irq);
+        let serdatr = paula.read_serdatr();
+        assert_eq!(serdatr & 0x00FF, 0x42);
+        assert_eq!(serdatr & (1 << 15), 0);
     }
 
     #[test]
