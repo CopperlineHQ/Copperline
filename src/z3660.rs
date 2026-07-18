@@ -839,6 +839,10 @@ impl ZorroDevice for Z3660 {
 
     fn reset(&mut self) {
         self.regs.fill(0);
+        // Clear VRAM so a cold boot comes up with zeroed board RAM, like the
+        // rest of the machine (Bus::power_on_reset). A warm reset re-inits
+        // the board and repaints, so clearing here too is harmless.
+        self.vram.fill(0);
         self.frame_phase = 0;
         self.vidmode_param = 0;
         self.palette.fill(0);
