@@ -22,7 +22,7 @@
 //! `target/probe-golden/` (uploaded as artifacts by CI).
 //!
 //! The suite runs release-only: `cargo test` in the debug profile skips it
-//! (a debug-build emulator is far too slow for the ~40s emulated boots).
+//! (a debug-build emulator is far too slow for the ~16s emulated boots).
 //!
 //! Probes excluded by design: ddfprobe-cc5/-cc6 sit on deliberate race
 //! boundaries (they demonstrate launch-phase bistability and free-running
@@ -48,10 +48,11 @@ enum Machine {
 
 /// One golden-render probe: name, main-program binary, emulated seconds
 /// before the shot, and the machine it boots on.
-/// The AROS bootstrap hands control to the bootblock at ~32s emulated;
-/// every display probe is settled and static by 40s (verified 40 == 44),
-/// and the timing test has printed all its measurement rows by 55s
-/// (verified 55 == 65).
+/// The AROS bootstrap hands control to the bootblock at ~11s emulated
+/// (boot-time-optimized ROM, see assets/aros/README.md; it was ~32s before);
+/// every display probe is settled and static by 16s (ddfprobe matches its
+/// golden from 12s on, verified 16 == 20), and the timing test has printed
+/// all its measurement rows by 32s (verified 30 == 44).
 struct Probe {
     name: &'static str,
     program: &'static str,
@@ -326,46 +327,46 @@ macro_rules! probe_tests {
 }
 
 probe_tests! {
-    golden_timing_test => probe("timing-test", "test.bin", 55.0);
-    golden_ddfprobe => probe("ddfprobe", "ddfprobe.bin", 40.0);
-    golden_ddfprobe_diw1 => probe("ddfprobe-diw1", "ddfprobe-diw1.bin", 40.0);
-    golden_ddfprobe_toggle => probe("ddfprobe-toggle", "ddfprobe-toggle.bin", 40.0);
-    golden_ddfprobe_cc => probe("ddfprobe-cc", "ddfprobe-cc.bin", 40.0);
-    golden_ddfprobe_cc3 => probe("ddfprobe-cc3", "ddfprobe-cc3.bin", 40.0);
-    golden_ddfprobe_cc4 => probe("ddfprobe-cc4", "ddfprobe-cc4.bin", 40.0);
-    golden_ddfprobe_sprbar => probe("ddfprobe-sprbar", "ddfprobe-sprbar.bin", 40.0);
-    golden_ddfprobe_sprbar2 => probe("ddfprobe-sprbar2", "ddfprobe-sprbar2.bin", 40.0);
-    golden_ddfprobe_sotb => probe("ddfprobe-sotb", "ddfprobe-sotb.bin", 40.0);
-    golden_ddfprobe_sotb2 => probe("ddfprobe-sotb2", "ddfprobe-sotb2.bin", 40.0);
+    golden_timing_test => probe("timing-test", "test.bin", 32.0);
+    golden_ddfprobe => probe("ddfprobe", "ddfprobe.bin", 16.0);
+    golden_ddfprobe_diw1 => probe("ddfprobe-diw1", "ddfprobe-diw1.bin", 16.0);
+    golden_ddfprobe_toggle => probe("ddfprobe-toggle", "ddfprobe-toggle.bin", 16.0);
+    golden_ddfprobe_cc => probe("ddfprobe-cc", "ddfprobe-cc.bin", 16.0);
+    golden_ddfprobe_cc3 => probe("ddfprobe-cc3", "ddfprobe-cc3.bin", 16.0);
+    golden_ddfprobe_cc4 => probe("ddfprobe-cc4", "ddfprobe-cc4.bin", 16.0);
+    golden_ddfprobe_sprbar => probe("ddfprobe-sprbar", "ddfprobe-sprbar.bin", 16.0);
+    golden_ddfprobe_sprbar2 => probe("ddfprobe-sprbar2", "ddfprobe-sprbar2.bin", 16.0);
+    golden_ddfprobe_sotb => probe("ddfprobe-sotb", "ddfprobe-sotb.bin", 16.0);
+    golden_ddfprobe_sotb2 => probe("ddfprobe-sotb2", "ddfprobe-sotb2.bin", 16.0);
     // DDFSTRT sub-unit phase / BPLCON1 scroll placement maps, ECS-verified
     // against vAmiga (the Rampage dot-cube pan regression class).
-    golden_ddfprobe_phase => probe_ecs("ddfprobe-phase", "ddfprobe-phase.bin", 40.0);
-    golden_ddfprobe_phase2 => probe_ecs("ddfprobe-phase2", "ddfprobe-phase2.bin", 40.0);
+    golden_ddfprobe_phase => probe_ecs("ddfprobe-phase", "ddfprobe-phase.bin", 16.0);
+    golden_ddfprobe_phase2 => probe_ecs("ddfprobe-phase2", "ddfprobe-phase2.bin", 16.0);
     // BPLCON1 hi-res scroll placement map on the Kickstart 2.05 boot-screen
     // constellation (late DDF, narrow DIW): one lo-res pixel = 2 hi-res px
     // per scroll step, nibble bit 3 ignored, row-end overlap words clipped
     // at the DIW stop (the KS 2.05 first-text-column regression class);
     // vAmiga-verified band by band.
-    golden_ddfprobe_hscroll => probe_ecs("ddfprobe-hscroll", "ddfprobe-hscroll.bin", 40.0);
+    golden_ddfprobe_hscroll => probe_ecs("ddfprobe-hscroll", "ddfprobe-hscroll.bin", 16.0);
     // CPU pacing bars under BLTPRI copy/fill/line blits (the Rampage
     // "present" flicker / BLS fence regression class).
-    golden_bltprobe_pace => probe("bltprobe-pace", "bltprobe-pace.bin", 40.0);
+    golden_bltprobe_pace => probe("bltprobe-pace", "bltprobe-pace.bin", 16.0);
     // DMA sprite vertical reuse + attached pair placement (the sprite
     // register-FSM regression class).
-    golden_ddfprobe_sprmulti => probe("ddfprobe-sprmulti", "ddfprobe-sprmulti.bin", 40.0);
+    golden_ddfprobe_sprmulti => probe("ddfprobe-sprmulti", "ddfprobe-sprmulti.bin", 16.0);
     // CPU byte writes to a custom register latch the mirrored word (the
     // COLOR00 byte-write regression class).
-    golden_regprobe_bytemirror => probe("regprobe-bytemirror", "regprobe-bytemirror.bin", 40.0);
+    golden_regprobe_bytemirror => probe("regprobe-bytemirror", "regprobe-bytemirror.bin", 16.0);
     // CLXDAT collision matrix bits rendered as cells (the collision
     // matching/enable regression class).
-    golden_clxprobe => probe("clxprobe", "clxprobe.bin", 40.0);
+    golden_clxprobe => probe("clxprobe", "clxprobe.bin", 16.0);
     // AUD0 interrupt cadence strip across a scripted AUDxEN
     // enable/punch/disable/restart sequence (the issue #74 deferred
     // AUDxEN-disable regression class).
-    golden_audprobe_en => probe("audprobe-en", "audprobe-en.bin", 40.0);
+    golden_audprobe_en => probe("audprobe-en", "audprobe-en.bin", 16.0);
     // Sprite DMA fetches land in the Denise display latches: the terminator
     // CTL fetch disarms, DATA/DATB fetches overwrite, and a later bare
     // SPRxDATA arm redisplays the DMA-written words (the Hamazing
     // scene-switch stale-bar regression class).
-    golden_sprprobe_latch => probe("sprprobe-latch", "sprprobe-latch.bin", 40.0);
+    golden_sprprobe_latch => probe("sprprobe-latch", "sprprobe-latch.bin", 16.0);
 }
