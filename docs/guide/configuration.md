@@ -566,7 +566,11 @@ names and exits.
 `device` still selects the printer, for compatibility). The file is created at
 startup, replacing any existing file; each strobed byte is written verbatim and
 returns the printer `/ACK` falling edge through CIA-A `FLAG`, including the
-normal CIA interrupt delay. It is intentionally not decoded, since the guest may
+normal CIA interrupt delay. The printer also drives the Centronics status
+lines on CIA-B port A -- SEL high, BUSY and POUT low -- so the guest's
+`parallel.device` sees a ready online printer and starts sending. (Without an
+attached device those lines float high, and printing waits forever for a
+printer to appear, as on a real machine.) It is intentionally not decoded, since the guest may
 emit any printer language; pass it to a converter or spooler afterwards.
 
 `"sampler"` attaches an 8-bit audio sampler (digitizer) on the data lines -- the

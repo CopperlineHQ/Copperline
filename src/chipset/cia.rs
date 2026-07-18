@@ -416,6 +416,14 @@ impl Cia {
         std::mem::take(&mut self.pc_pulse_pending)
     }
 
+    /// Port-A data direction register: set bits are CIA-driven outputs. The
+    /// bus consults this to decide which port-A pins an external peripheral
+    /// (the parallel port's Centronics status lines on CIA-B PA0-2) may
+    /// drive.
+    pub fn port_a_ddr(&self) -> u8 {
+        self.regs[REG_DDRA]
+    }
+
     /// Physical port-B pin levels without the `PC` strobe side effect of a
     /// guest PRB read. Motherboard wiring (floppy outputs and the Centronics
     /// data bus) observes pins continuously and must not create a second

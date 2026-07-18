@@ -253,9 +253,11 @@ the OS.
 ## Parallel port
 
 Copperline models the Centronics parallel port on CIA-A (data and `PC` strobe
-on port B at `$BFE101`, printer `/ACK` back through CIA-A `FLAG`) and can attach
-one peripheral, chosen by `[parallel] device`. With no `[parallel]` section the
-connector is unplugged.
+on port B at `$BFE101`, printer `/ACK` back through CIA-A `FLAG`, the
+BUSY/POUT/SEL status lines on CIA-B port A) and can attach one peripheral,
+chosen by `[parallel] device`. With no `[parallel]` section the connector is
+unplugged: the status lines float high on their pull-ups, so guest software
+waits for a printer exactly as on a real machine with an empty port.
 
 A **printer** captures the guest's raw byte stream to a file, preserving the
 printer-language bytes verbatim for a compatible converter or spooler:

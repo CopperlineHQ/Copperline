@@ -26,8 +26,8 @@ use crate::chipset::agnus::{
     BEAMCON0_VARBEAMEN, COLORCLOCKS_PER_LINE, NTSC_LONG_COLORCLOCKS_PER_LINE, PAL_LINES,
 };
 use crate::chipset::cia::{
-    REG_CRA, REG_CRB, REG_DDRB, REG_ICR, REG_PRA, REG_PRB, REG_TAHI, REG_TALO, REG_TBHI, REG_TBLO,
-    REG_TODHI, REG_TODLO, REG_TODMID,
+    REG_CRA, REG_CRB, REG_DDRA, REG_DDRB, REG_ICR, REG_PRA, REG_PRB, REG_TAHI, REG_TALO, REG_TBHI,
+    REG_TBLO, REG_TODHI, REG_TODLO, REG_TODMID,
 };
 use crate::chipset::copper::{CopperWait, DMACON_COPEN};
 use crate::chipset::denise::{rgb12_to_rgba8, DeniseRevision, DiwHigh, COLOR_TRANSPARENCY_BIT};
@@ -612,6 +612,35 @@ fn cia_a_pc_strobe_reaches_parallel_port_and_ack_drives_cia_a_flag() {
     // peripheral again with the latched pin levels.
     assert_eq!(bus.cia_a_read(addr(REG_PRB), 1), 0xA5);
     assert_eq!(events.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn parallel_peripheral_drives_cia_b_centronics_status_inputs() {
+    let mut bus = empty_bus();
+    let addr = |reg: usize| (reg as u64) << 8;
+
+    // An empty port: BUSY, POUT, and SEL float high on the pull-ups, like
+    // the serial handshake lines on PA3-7. parallel.device reads this as a
+    // busy offline printer and never sends a byte, as on a real machine.
+    assert_eq!(bus.cia_b_read(addr(REG_PRA), 1), 0xFF);
+
+    // A printer holds SEL high with BUSY and POUT low, so the guest reads
+    // $FC: online, ready, paper loaded.
+    let path = std::env::temp_dir().join(format!(
+        "copperline-bus-parallel-status-{}.raw",
+        std::process::id()
+    ));
+    let printer = crate::parallel::FileParallelPort::create(&path).unwrap();
+    bus.attach_parallel_port(Box::new(printer));
+    assert_eq!(bus.cia_b_read(addr(REG_PRA), 1), 0xFC);
+
+    // Pins the guest switches to outputs stay CIA-driven: BUSY written high
+    // as an output reads back high even with the printer attached.
+    let _ = bus.cia_b_write(addr(REG_DDRA), 1, 0x01);
+    let _ = bus.cia_b_write(addr(REG_PRA), 1, 0x01);
+    assert_eq!(bus.cia_b_read(addr(REG_PRA), 1), 0xFD);
+
+    let _ = std::fs::remove_file(path);
 }
 
 #[test]
