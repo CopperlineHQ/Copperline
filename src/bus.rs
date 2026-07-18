@@ -4880,7 +4880,17 @@ impl Bus {
     pub fn cia_b_read(&mut self, addr: u64, size: usize) -> u64 {
         self.sync_realtime_devices();
         let reg = reg_from_addr(addr);
-        let v = self.cia_b.read(reg);
+        let mut v = self.cia_b.read(reg);
+        if reg == REG_PRA {
+            // CIA-B PA0-2 are the parallel port's Centronics status inputs
+            // (BUSY, POUT, SEL), pulled up when nothing drives them. An
+            // attached peripheral holds them at its own levels; pins the
+            // guest has switched to outputs stay CIA-driven.
+            if let Some(lines) = self.parallel_port.control_lines() {
+                let inputs = !self.cia_b.port_a_ddr() & 0x07;
+                v = (v & !inputs) | (lines & inputs);
+            }
+        }
         trace!("cia_b R reg={:X} sz={} val={:02X}", reg, size, v);
         self.poll_stats.tick_read("cia_b", reg);
         if size == 2 {
