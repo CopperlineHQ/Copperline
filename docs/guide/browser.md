@@ -252,11 +252,14 @@ elements, and pages without them are untouched:
   sounds -- motor hum, head-step clicks, read hiss -- live and at boot, so
   a shell can also default them off by shipping the box unchecked.
 - `#floppy-speed` (a `<select>` with option values `100`, `200`, `400`,
-  `800`, and `0` for turbo): sets the emulated floppy drive speed, live
-  and at boot, so a shell can default it by its initial selection.
+  `800`, and `0` for turbo): hosts the floppy drive speed control, letting
+  the page place and style it. Unlike the other hooks this one is always
+  on: without the element the page gets a self-inserted, labelled speed
+  select directly below the canvas shell (the status strip's pattern), so
+  the option is reachable on any shell. Changes apply live and at boot;
   `?fdspeed=` in the URL (`100`..`800`, `0`, or `turbo`) overrides the
-  initial choice, so a game link can ship fast loading without any page
-  element.
+  initial choice, so a game link can ship fast loading regardless of what
+  the control shows by default.
 - `#df0list` (a `<select>`): fills itself with the disk images the site
   serves next to the page and inserts the picked one into DF0 (queued
   when picked before boot, live after). The folder is the select's
