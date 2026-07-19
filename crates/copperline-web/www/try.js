@@ -92,6 +92,7 @@ function insertDisk(bytes, name) {
   if (emu) {
     emu.insert_floppy(0, bytes, name);
     setLoadStatus(`DF0: ${name} (write-protected)`);
+    lastFddTrack = null; // desktop clears its track latch on insert too
     updateStatusDisks();
   } else {
     pendingDisk = { bytes, name };
@@ -941,6 +942,7 @@ $('reset').addEventListener('click', () => {
   if (!emu) return;
   try {
     emu.reset();
+    lastFddTrack = null; // desktop clears its track latch on reset too
     setLoadStatus('machine reset');
   } catch (err) {
     setLoadStatus(`reset failed: ${err.message ?? err}`);
