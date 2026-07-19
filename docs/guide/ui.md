@@ -404,11 +404,14 @@ starting mode with `[input] joystick` in the config (or `--joystick MODE`, or
 the launcher's *Input* tab).
 
 The primary keyboard mapping is FS-UAE-compatible: cursor keys for
-directions, and Right Ctrl or Right Alt for fire. For CD32 pad buttons,
-`C` is red/fire, `X` is blue, `D` is green, `S` is yellow, Return is
-play/pause, `Z` is rewind, and `A` is forward. On a mouse port the same
-keys drive the pointer: cursor keys move it, the fire keys are the left
-button, `X` the right, and `D` the middle. The second (numpad) mapping is
+directions, and Right Ctrl, Right Alt or Left Ctrl for fire, with Left
+Alt as the second button (the left-hand fire keys pair naturally with the
+right-hand arrows, and compact keyboards often lack the right-side
+modifiers). For CD32 pad buttons, `C` is red/fire, `X` is blue, `D` is
+green, `S` is yellow, Return is play/pause, `Z` is rewind, and `A` is
+forward. On a mouse port the same keys drive the pointer: cursor keys
+move it, the fire keys are the left button, `X` or Left Alt the right,
+and `D` the middle. The second (numpad) mapping is
 `8`/`2`/`4`/`6` for directions, `0` for fire, `.` for the second button,
 and numpad Enter for play. While a mapping owns its keys, they are not
 sent to the Amiga keyboard.

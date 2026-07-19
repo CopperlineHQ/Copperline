@@ -313,6 +313,7 @@ async function boot() {
     df0Name = pendingDisk?.name ?? null;
     pendingDisk = null;
     machine.set_volume_percent(Number($('vol').value));
+    if (floppySoundsToggle) machine.set_floppy_sounds(floppySoundsToggle.checked);
     emu = machine;
     window.__emu = emu; // for debugging/automation
 
@@ -508,10 +509,14 @@ function pumpSerial() {
 
 // --- joystick (port 2) -----------------------------------------------------
 // The toggle cycles off -> keys (-> touch on touch screens). Keys is the
-// desktop frontend's FS-UAE-compatible mapping: cursor keys for directions,
-// Right Ctrl / Right Alt for fire, CD32 extras on C/X/D/S/Enter/Z/A; while
-// on, these keys drive the port-2 joystick instead of reaching the Amiga
-// keyboard. Touch turns the canvas into a pad (see the touch section).
+// desktop frontend's FS-UAE-compatible mapping plus left-hand fire keys:
+// cursor keys for directions, Right Ctrl / Right Alt or Left Ctrl for fire,
+// Left Alt for the second button (left-hand fire pairs with the right-hand
+// arrows, and compact keyboards often lack the right-side modifiers), CD32
+// extras on C/X/D/S/Enter/Z/A; while on, these keys drive the port-2
+// joystick instead of reaching the Amiga keyboard. Touch turns the canvas
+// into a pad (see the touch section). The page shell can preset the mode
+// (data-default on the toggle) and ?joy=off|keys|touch overrides per link.
 
 const JOY_KEYS = {
   ArrowUp: 'up',
@@ -520,6 +525,8 @@ const JOY_KEYS = {
   ArrowRight: 'right',
   ControlRight: 'fireCtrl',
   AltRight: 'fireAlt',
+  ControlLeft: 'fireLCtrl',
+  AltLeft: 'blueLAlt',
   KeyC: 'red',
   KeyX: 'blue',
   KeyD: 'green',
@@ -540,8 +547,8 @@ function applyJoystick() {
     !!h.down,
     !!h.left,
     !!h.right,
-    !!(h.fireCtrl || h.fireAlt || h.red),
-    !!h.blue,
+    !!(h.fireCtrl || h.fireAlt || h.fireLCtrl || h.red),
+    !!(h.blue || h.blueLAlt),
   );
   emu.set_cd32_buttons_port2(!!h.play, !!h.rwd, !!h.ffw, !!h.green, !!h.yellow);
 }
@@ -556,10 +563,8 @@ function joystickKey(code, pressed) {
   return true;
 }
 
-// Cycles the mode; wired to the control-bar button and to the fullscreen
-// overlay's copy of it, which stay in step.
-function cycleJoyMode() {
-  joyMode = JOY_MODES[(JOY_MODES.indexOf(joyMode) + 1) % JOY_MODES.length];
+function setJoyMode(mode) {
+  joyMode = mode;
   $('joy').textContent = `Joystick: ${joyMode}`;
   if (fsUi) fsUi.joy.textContent = `Joystick: ${joyMode}`;
   for (const k of Object.keys(joyHeld)) joyHeld[k] = false;
@@ -568,6 +573,12 @@ function cycleJoyMode() {
     applyJoystick();
     emu.set_cd32_buttons_port2(false, false, false, false, false);
   }
+}
+
+// Cycles the mode; wired to the control-bar button and to the fullscreen
+// overlay's copy of it, which stay in step.
+function cycleJoyMode() {
+  setJoyMode(JOY_MODES[(JOY_MODES.indexOf(joyMode) + 1) % JOY_MODES.length]);
 }
 
 $('joy').addEventListener('click', cycleJoyMode);
@@ -1038,6 +1049,114 @@ $('vol').addEventListener('input', (e) => {
   if (emu) emu.set_volume_percent(Number(e.target.value));
 });
 
+// Optional in the page shell: a checkbox #floppy-sounds toggles the
+// synthesized drive sounds (motor hum, head-step clicks, read hiss).
+// Without the element the sounds stay on, as before; the checkbox's
+// initial state is applied at boot, so a shell can default them off.
+const floppySoundsToggle = $('floppy-sounds');
+floppySoundsToggle?.addEventListener('change', () => {
+  if (emu) emu.set_floppy_sounds(floppySoundsToggle.checked);
+});
+
+// --- disk list ---------------------------------------------------------
+// Optional in the page shell: a <select id="df0list"> fills itself with
+// the disk images the site serves next to the page and inserts the picked
+// one into DF0 (before boot it queues, like the picker). The folder comes
+// from the select's data-src attribute (default "adf/"), and the list from
+// <folder>/index.json - a JSON array of file names, or of {name, url}
+// objects with URLs relative to the folder. Without a manifest, a server
+// directory listing of the folder (nginx autoindex, Apache, python -m
+// http.server) is scraped for disk-image links instead. An empty or
+// unreachable folder hides the select.
+
+const diskListSelect = $('df0list');
+const DISK_LIST_EXT = /\.(adf|adz|dms|ipf|scp|zip|gz)$/i;
+
+async function diskListEntries(folder) {
+  // A manifest wins when the site ships one; a missing or invalid one
+  // (fetch error, unparsable JSON, not an array) falls through to the
+  // directory listing.
+  try {
+    const resp = await fetch(new URL('index.json', folder).href);
+    if (resp.ok) {
+      const manifest = await resp.json();
+      if (Array.isArray(manifest)) {
+        return manifest
+          .map((entry) => {
+            const rel = typeof entry === 'string' ? entry : entry?.url;
+            if (typeof rel !== 'string') return null;
+            const url = new URL(rel, folder);
+            // A non-string name is ignored rather than trusted: the
+            // sort and the option label both expect a string.
+            const name =
+              (typeof entry?.name === 'string' && entry.name) ||
+              nameFromUrlPath(url.pathname, rel);
+            return { name, url: url.href };
+          })
+          .filter(Boolean);
+      }
+    }
+  } catch {
+    // fall through to the directory listing
+  }
+  try {
+    const resp = await fetch(folder.href);
+    if (!resp.ok) return [];
+    const doc = new DOMParser().parseFromString(await resp.text(), 'text/html');
+    const entries = [];
+    for (const a of doc.querySelectorAll('a[href]')) {
+      let url;
+      try {
+        url = new URL(a.getAttribute('href'), folder);
+      } catch {
+        continue;
+      }
+      // Only files inside the folder itself; autoindex pages also carry
+      // parent-directory and sort links.
+      if (url.origin !== folder.origin || !url.pathname.startsWith(folder.pathname)) continue;
+      if (!DISK_LIST_EXT.test(url.pathname)) continue;
+      entries.push({ name: nameFromUrlPath(url.pathname, url.pathname), url: url.href });
+    }
+    return entries;
+  } catch {
+    return [];
+  }
+}
+
+async function loadDiskList(select) {
+  let folder;
+  try {
+    folder = new URL(select.dataset.src || 'adf/', location.href);
+  } catch {
+    select.hidden = true;
+    return;
+  }
+  if (!folder.pathname.endsWith('/')) folder.pathname += '/';
+  const entries = await diskListEntries(folder);
+  if (!entries.length) {
+    select.hidden = true;
+    return;
+  }
+  entries.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  if (!select.options.length) {
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = 'DF0 from list...';
+    select.appendChild(placeholder);
+  }
+  for (const { name, url } of entries) {
+    const option = document.createElement('option');
+    option.value = url;
+    option.textContent = name;
+    select.appendChild(option);
+  }
+  select.addEventListener('change', () => {
+    if (select.value) insertDiskFromUrl(select.value);
+  });
+}
+
+if (diskListSelect) loadDiskList(diskListSelect);
+
 // Optional in the page shell: older shells have no URL button.
 $('df0url')?.addEventListener('click', () => {
   const url = window.prompt(
@@ -1186,4 +1305,14 @@ const linkedDisk = pageParams.get('df0');
 if (linkedDisk) insertDiskFromUrl(linkedDisk);
 const linkedKick = pageParams.get('kick');
 if (linkedKick) fitRomFromUrl(linkedKick);
+
+// Starting joystick mode: the page shell's default (data-default on the
+// toggle), overridden per link by ?joy=off|keys|touch. A touch request on
+// a screen without touch falls back to keys, so a game link written for
+// tablets still gets a joystick on a desktop.
+const requestedJoy = (pageParams.get('joy') ?? $('joy').dataset.default ?? '').trim();
+if (requestedJoy && requestedJoy !== joyMode) {
+  if (JOY_MODES.includes(requestedJoy)) setJoyMode(requestedJoy);
+  else if (requestedJoy === 'touch') setJoyMode('keys');
+}
 load();
