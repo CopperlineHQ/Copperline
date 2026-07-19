@@ -348,6 +348,17 @@ impl FloppyController {
             } else {
                 default_speed_percent()
             };
+        // Entering turbo starts a fresh grace window and burst attempt, so a
+        // live toggle with a DMA already in flight defers its burst exactly
+        // like a freshly armed transfer would, instead of completing on the
+        // very next tick (or staying blocked by a spent attempt from an
+        // earlier turbo phase).
+        if self.turbo() {
+            self.turbo_grace_cck = TURBO_DMA_GRACE_CCK;
+            self.turbo_burst_spent = false;
+        } else {
+            self.turbo_grace_cck = 0;
+        }
     }
 
     pub fn speed_percent(&self) -> u16 {
@@ -1117,20 +1128,32 @@ impl FloppyController {
         std::mem::take(&mut self.sync_irq_latch)
     }
 
-    /// Scale a raw event-horizon prediction to the configured drive speed:
-    /// the events land a whole multiple sooner at >100%, and a turbo burst
-    /// completes them within the grace window. Predictions only cap the idle
-    /// fast-forward, so an under-estimate is always safe.
-    fn scale_prediction(&self, cck: u32) -> u32 {
+    /// Scale a raw event-horizon prediction for `drive_idx` to the
+    /// configured drive speed: at percentage speeds the events land a whole
+    /// multiple sooner, and a turbo burst completes them within the grace
+    /// window. Predictions only cap the idle fast-forward, so an
+    /// under-estimate is always safe -- but a 1-cck prediction the burst
+    /// cannot actually honour (drive spinning up, head settling, attempt
+    /// already spent) would pin STOP-state fast-forward to single steps for
+    /// the whole spin-up, so those cases keep the normal-paced deadline.
+    fn scale_prediction(&self, drive_idx: usize, cck: u32) -> u32 {
         if self.turbo() {
-            return cck.min(self.turbo_grace_cck).max(1);
+            if self.turbo_grace_cck > 0 {
+                return cck.min(self.turbo_grace_cck).max(1);
+            }
+            let drive = &self.drives[drive_idx];
+            if !self.turbo_burst_spent && drive.ready() && drive.seek_settle_cck == 0 {
+                return 1;
+            }
+            return cck.max(1);
         }
         (cck / self.speed_multiplier()).max(1)
     }
 
     pub fn next_completion_cck(&self, dmacon: u16) -> Option<u32> {
+        let drive_idx = self.dma.as_ref()?.drive;
         self.next_completion_cck_raw(dmacon)
-            .map(|cck| self.scale_prediction(cck))
+            .map(|cck| self.scale_prediction(drive_idx, cck))
     }
 
     fn next_completion_cck_raw(&self, dmacon: u16) -> Option<u32> {
@@ -1170,7 +1193,7 @@ impl FloppyController {
         let rev = drive.cur_rev()?;
         let bits = rev.bits_until_sync(drive.rotation_bit, self.dsksync)?;
         let raw = (drive.head_cck_for_bits(bits).min(u64::from(u32::MAX)) as u32).max(1);
-        Some(self.scale_prediction(raw))
+        Some(self.scale_prediction(dma.drive, raw))
     }
 
     pub fn next_index_pulse_cck(&self) -> Option<u32> {
@@ -5391,6 +5414,71 @@ mod tests {
         assert!(ctrl.dma.is_some());
         assert!(ctrl.turbo_burst_spent);
         assert_eq!(read_chip_word(&chip_ram, 0), 0);
+        let _ = fs::remove_file(path);
+        Ok(())
+    }
+
+    #[test]
+    fn floppy_live_turbo_toggle_mid_dma_honors_grace() -> Result<()> {
+        // Flipping the menu to turbo while a transfer is in flight must
+        // defer the burst by the same two-scanline grace as a fresh arming,
+        // not complete on the very next tick.
+        let raw_words = [0x1111, 0x2222, 0x3333, 0x4444];
+        let word_cck = FloppyController::word_cck_for_track_words(raw_words.len());
+        let dmacon = DMACON_DMAEN | DMACON_DISK;
+        let (mut ctrl, path) = spun_up_speed_controller(&raw_words, 100)?;
+        let mut chip_ram = vec![0u8; 8];
+        let len = DSKLEN_DMAEN | 3;
+        assert!(!ctrl.write_dsklen(len, 0));
+        assert!(!ctrl.write_dsklen(len, 0));
+        // One word into the transfer, switch to turbo live.
+        assert!(!ctrl.tick(word_cck, dmacon, &mut chip_ram));
+        ctrl.set_speed_percent(SPEED_TURBO);
+        // A stale spent flag must not survive the toggle either.
+        assert!(!ctrl.turbo_burst_spent);
+        assert!(!ctrl.tick(TURBO_DMA_GRACE_CCK - 10, dmacon, &mut chip_ram));
+        assert!(ctrl.tick(10, dmacon, &mut chip_ram));
+        assert_eq!(read_chip_word(&chip_ram, 4), 0x3333);
+        let _ = fs::remove_file(path);
+        Ok(())
+    }
+
+    #[test]
+    fn floppy_turbo_prediction_paces_normally_while_drive_not_ready() -> Result<()> {
+        // With the grace elapsed but the drive still spinning up, the burst
+        // cannot run; the completion prediction must fall back to the
+        // normal-paced deadline instead of forcing 1-cck idle stepping for
+        // the rest of the spin-up.
+        let raw_words = [0x1111, 0x2222, 0x3333, 0x4444];
+        let path = temp_ext2_raw(&raw_words)?;
+        let cfg = FloppyConfig {
+            speed: SPEED_TURBO,
+            drives: [
+                Some(FloppyDriveConfig {
+                    path: path.clone(),
+                    write_protected: true,
+                }),
+                None,
+                None,
+                None,
+            ],
+        };
+        let mut ctrl = FloppyController::from_config(&cfg)?;
+        let mut chip_ram = vec![0u8; 8];
+        let dmacon = DMACON_DMAEN | DMACON_DISK;
+        ctrl.write_prb(!CIAB_DSKMOTOR & !CIAB_DSKSEL0);
+        ctrl.set_dskpt_low(0);
+        let len = DSKLEN_DMAEN | 1;
+        assert!(!ctrl.write_dsklen(len, 0));
+        assert!(!ctrl.write_dsklen(len, 0));
+        // Inside the grace the prediction is bounded by it.
+        assert!(ctrl.next_completion_cck(dmacon).unwrap() <= TURBO_DMA_GRACE_CCK);
+        // Grace elapsed, motor still spinning up: normal-paced deadline.
+        assert!(!ctrl.tick(TURBO_DMA_GRACE_CCK, dmacon, &mut chip_ram));
+        assert!(ctrl.next_completion_cck(dmacon).unwrap() > TURBO_DMA_GRACE_CCK);
+        // Once ready the burst is imminent again.
+        ctrl.tick(MOTOR_READY_CCK, 0, &mut chip_ram);
+        assert_eq!(ctrl.next_completion_cck(dmacon), Some(1));
         let _ = fs::remove_file(path);
         Ok(())
     }
