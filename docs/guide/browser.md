@@ -273,9 +273,11 @@ elements, and pages without them are untouched:
   instead. If the folder yields nothing, the select hides itself.
 - `#kicklist` (a `<select>`): the same list pattern for Kickstart ROMs.
   The folder is the select's `data-src` attribute (default `kick/`), with
-  the same manifest-or-directory-listing contract as `#df0list`, filtered
-  to raw `.rom`/`.bin` images (a list pick feeds the ROM loader directly,
-  which takes uncompressed 256/512 KiB images). A picked ROM is fitted
+  the same manifest-or-directory-listing contract as `#df0list`: a
+  manifest lists whatever the site chooses, while a scraped directory
+  listing is filtered to raw `.rom`/`.bin` images (a list pick feeds the
+  ROM loader directly, which takes uncompressed 256/512 KiB images). A
+  picked ROM is fitted
   like the picker: queued before boot (the boot button relabels), and a
   running machine is power-cycled. Picks go through the same-origin
   copyright gate described above, and the list enforces it up front -- a
