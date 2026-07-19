@@ -22,10 +22,13 @@ use std::sync::Mutex;
 /// directory (see [`install`]).
 pub const CRASH_FILE_NAME: &str = "copperline-crash.txt";
 
-/// Serializes concurrently panicking threads and remembers whether this
-/// process has already written a report: the first panic truncates a stale
-/// report left by an earlier run, later panics in the same process append.
-static REPORT_WRITTEN: Mutex<bool> = Mutex::new(false);
+/// Serializes concurrently panicking threads and remembers where this
+/// process wrote its report: the first panic picks a location, truncating
+/// a stale report left by an earlier run, and later panics in the same
+/// process append to that same file even if the candidate list would
+/// resolve differently by then (the working directory can change at
+/// runtime).
+static REPORT_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 /// Install the process panic hook: print the panic to stderr, persist a
 /// crash report, and chain to the previously installed hook.
@@ -76,19 +79,29 @@ fn candidate_dirs() -> Vec<PathBuf> {
 /// Write `report` to [`CRASH_FILE_NAME`] in the first directory that
 /// accepts it, returning the path written.
 fn write_report(dirs: &[PathBuf], report: &str) -> Option<PathBuf> {
-    write_report_locked(&REPORT_WRITTEN, dirs, report)
+    write_report_locked(&REPORT_PATH, dirs, report)
 }
 
-/// Testable core of [`write_report`]: `written` carries the
-/// truncate-or-append state so tests get isolated instances. A poisoned
-/// lock is taken anyway -- the flag stays usable, and the alternative is
-/// dropping the report.
-fn write_report_locked(written: &Mutex<bool>, dirs: &[PathBuf], report: &str) -> Option<PathBuf> {
-    let mut written = written.lock().unwrap_or_else(|e| e.into_inner());
+/// Testable core of [`write_report`]: `state` carries the chosen report
+/// path so tests get isolated instances. A poisoned lock is taken
+/// anyway -- the path stays usable, and the alternative is dropping the
+/// report.
+fn write_report_locked(
+    state: &Mutex<Option<PathBuf>>,
+    dirs: &[PathBuf],
+    report: &str,
+) -> Option<PathBuf> {
+    let mut chosen = state.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(path) = chosen.as_ref() {
+        if write_file(path, true, report).is_ok() {
+            return Some(path.clone());
+        }
+        // The chosen location vanished mid-run; fall through to pick anew.
+    }
     for dir in dirs {
         let path = dir.join(CRASH_FILE_NAME);
-        if write_file(&path, *written, report).is_ok() {
-            *written = true;
+        if write_file(&path, false, report).is_ok() {
+            *chosen = Some(path.clone());
             return Some(path);
         }
     }
@@ -141,7 +154,7 @@ mod tests {
         let dir = temp_dir("truncate");
         let path = dir.join(CRASH_FILE_NAME);
         std::fs::write(&path, "stale report from an earlier run").unwrap();
-        let state = Mutex::new(false);
+        let state = Mutex::new(None);
         let got =
             write_report_locked(&state, std::slice::from_ref(&dir), "first\n").expect("written");
         assert_eq!(got, path);
@@ -154,7 +167,7 @@ mod tests {
     #[test]
     fn falls_back_past_an_unwritable_directory() {
         let dir = temp_dir("fallback");
-        let state = Mutex::new(false);
+        let state = Mutex::new(None);
         let got = write_report_locked(&state, &[unwritable_dir(), dir.clone()], "report")
             .expect("written");
         assert_eq!(got, dir.join(CRASH_FILE_NAME));
@@ -166,10 +179,49 @@ mod tests {
     }
 
     #[test]
+    fn later_panic_stays_with_the_chosen_file() {
+        // A second panic must append to the file the first one picked even
+        // when the candidate list has since changed (e.g. the working
+        // directory moved), not start a second report elsewhere.
+        let first = temp_dir("chosen");
+        let other = temp_dir("other");
+        let state = Mutex::new(None);
+        write_report_locked(&state, std::slice::from_ref(&first), "first\n").expect("written");
+        let got = write_report_locked(&state, &[other.clone(), first.clone()], "second\n")
+            .expect("written");
+        assert_eq!(got, first.join(CRASH_FILE_NAME));
+        assert_eq!(
+            std::fs::read_to_string(first.join(CRASH_FILE_NAME)).unwrap(),
+            "first\nsecond\n"
+        );
+        assert!(!other.join(CRASH_FILE_NAME).exists());
+        std::fs::remove_dir_all(&first).ok();
+        std::fs::remove_dir_all(&other).ok();
+    }
+
+    #[test]
+    fn vanished_chosen_file_location_is_repicked() {
+        let first = temp_dir("vanishing");
+        let fallback = temp_dir("repick");
+        let state = Mutex::new(None);
+        write_report_locked(&state, std::slice::from_ref(&first), "first\n").expect("written");
+        std::fs::remove_dir_all(&first).unwrap();
+        let got = write_report_locked(&state, std::slice::from_ref(&fallback), "second\n")
+            .expect("written");
+        assert_eq!(got, fallback.join(CRASH_FILE_NAME));
+        assert_eq!(
+            std::fs::read_to_string(fallback.join(CRASH_FILE_NAME)).unwrap(),
+            "second\n"
+        );
+        assert_eq!(*state.lock().unwrap(), Some(got));
+        std::fs::remove_dir_all(&fallback).ok();
+    }
+
+    #[test]
     fn no_writable_candidate_returns_none() {
-        let state = Mutex::new(false);
+        let state = Mutex::new(None);
         assert!(write_report_locked(&state, &[unwritable_dir()], "report").is_none());
-        assert!(!*state.lock().unwrap());
+        assert!(state.lock().unwrap().is_none());
     }
 
     #[test]
