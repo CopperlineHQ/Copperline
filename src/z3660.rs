@@ -514,8 +514,13 @@ impl Z3660 {
                 let x_step = if dx < 0 { -1 } else { 1 };
                 let y_step = if dy < 0 { -1 } else { 1 };
                 let mut cur_bit = 0x8000u16;
+                // A pixel past the end of a row would otherwise address the
+                // start of the next one, drawing a wrapped line rather than a
+                // clipped one. The row is the only bound the request carries;
+                // beyond the bitmap's last row the VRAM bound in px_put applies.
+                let row_px = (pitch / bpp) as i32;
                 let put = |z: &mut Self, x: i32, y: i32, bit: u16| {
-                    if x < 0 || y < 0 {
+                    if x < 0 || y < 0 || x >= row_px {
                         return;
                     }
                     if pattern & bit == 0 && !jam2 {
