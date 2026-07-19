@@ -38,7 +38,11 @@ pub fn compose_rtg_present(
         let src = &scratch[y * w..(y + 1) * w];
         let dst = &mut out[y * FB_WIDTH..(y + 1) * FB_WIDTH];
         for (x, px) in dst.iter_mut().enumerate() {
-            *px = src[x * w / FB_WIDTH];
+            // Sample the centre of each output pixel's source span, not its
+            // left edge: `x * w / FB_WIDTH` tops out below `w - 1` whenever
+            // the board frame is wider than FB_WIDTH, so the rightmost
+            // source columns never reach a downscaled screenshot.
+            *px = src[(2 * x + 1) * w / (2 * FB_WIDTH)];
         }
     }
     Some((h, w as u32, h as u32))
