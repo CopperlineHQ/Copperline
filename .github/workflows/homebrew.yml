@@ -25,7 +25,7 @@ jobs:
     name: Style and audit
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: Homebrew/actions/setup-homebrew@main
       - name: Style
         run: brew style "$GITHUB_WORKSPACE/Formula/copperline.rb"

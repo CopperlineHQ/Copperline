@@ -34,7 +34,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Install build dependencies
         # Development headers for the dynamically-linked runtime stack:
@@ -52,7 +52,7 @@ jobs:
       - name: Locate artifact
         id: artifact
         run: echo "path=$(ls Copperline-*.AppImage | head -n1)" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: copperline-appimage
           path: ${{ steps.artifact.outputs.path }}

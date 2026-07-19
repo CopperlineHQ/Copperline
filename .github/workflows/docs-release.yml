@@ -30,10 +30,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
       - name: Install MyST CLI
         run: npm install -g mystmd
       - name: Install Typst (PDF renderer)
@@ -55,7 +55,7 @@ jobs:
           out="Copperline-$ver-manual.pdf"
           cp docs/_build/exports/copperline.pdf "$out"
           echo "path=$out" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: copperline-docs-pdf
           path: ${{ steps.asset.outputs.path }}

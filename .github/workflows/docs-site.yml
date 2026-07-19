@@ -26,10 +26,10 @@ jobs:
     # No Typst/PDF here, so plain ubuntu is enough (unlike docs-release.yml).
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
       - name: Install MyST CLI
         run: npm install -g mystmd
       - name: Build HTML
@@ -51,7 +51,7 @@ jobs:
             's{</head>}{<script data-goatcounter="https://linuxjedi.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>\n</head>}'
           grep -q 'data-goatcounter' _build/html/index.html
       - name: Check out the website repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: LinuxJedi/copperline.github.io
           ssh-key: ${{ secrets.SITE_DEPLOY_KEY }}

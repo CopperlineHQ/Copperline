@@ -13,15 +13,45 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build-test:
-    name: Build, test, lint
+  build:
+    name: Build (release)
     # Copperline is developed and tested on macOS; the Linux and Windows
     # paths are not yet verified, so CI runs on macOS to match. The runner's
     # Metal stack also makes the headless render path (the smoke job below)
     # reliable. Linux/Windows jobs can be added once those paths are verified.
+    #
+    # This job compiles everything once and publishes the build tree through
+    # the rust-cache shared key ("ci-build"); the test jobs below fan out
+    # from it (needs: build), restore the same key, and go straight to
+    # running, paying at most a relink. cache-workspace-crates keeps the
+    # workspace's own compiled artifacts in the cache -- without it
+    # rust-cache stores dependencies only and every dependent job would
+    # recompile the leaf crate from scratch.
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-build
+          cache-workspace-crates: true
+      - name: Build (release)
+        run: cargo build --release --locked
+      - name: Compile test binaries
+        # cargo build does not compile #[test] targets; compile them here so
+        # the shared cache hands the test jobs ready-to-run binaries. This
+        # is also the step that keeps the asset-gated integration tests
+        # under tests/ compiling on a clean checkout (they are #[ignore]d at
+        # run time, not excluded from the build).
+        run: cargo test --release --locked --no-run
+
+  lint:
+    name: Rustfmt and clippy
+    # Style and lints need no release build, so this runs alongside the
+    # build job instead of gating it.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -34,41 +64,81 @@ jobs:
         # Hold the binary, tests, examples, and diagnostic feature gates to
         # the same warning-clean standard used for release checks.
         run: cargo clippy --all-targets --all-features --locked -- -D warnings
-      - name: Build (release)
-        run: cargo build --release --locked
-      - name: Unit tests and probe golden renders
-        # The asset-gated integration tests under tests/ are #[ignore]d
-        # (they need local Kickstart ROM/disk assets) and are intentionally
-        # not run here. tests/probe_golden.rs is the exception: it is fully
-        # self-contained (committed probe binaries booted on the bundled
-        # AROS ROM) and compares each probe's deterministic render
-        # pixel-for-pixel against the references in timing-test/golden/ --
-        # the hardware-behaviour regression net (DDF/DIW placement and
-        # DDFSTRT-phase/scroll maps, raced copper-chunky COLOR00 trains,
-        # sprite serializer/DMA-FSM positions, BLTPRI CPU pacing bars,
-        # byte-write register mirroring, the CLXDAT collision matrix, and
-        # the 32 CPU/chip-bus timing rows). Each probe is its own #[test],
-        # so the boots run in parallel on the runner's cores. See
-        # timing-test/README.md "CI golden renders" for the re-bless
-        # workflow.
-        run: cargo test --release --locked
+
+  unit-tests:
+    name: Unit tests
+    needs: build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-build
+          save-if: false
+      - name: Unit tests
+        # The inline #[cfg(test)] suites in the lib and binaries. The
+        # asset-gated integration tests under tests/ are #[ignore]d (they
+        # need local Kickstart ROM/disk assets) and are intentionally not
+        # run here; tests/probe_golden.rs runs in the probe-golden job. The
+        # crate has no doctests, so --lib --bins loses nothing.
+        run: cargo test --release --locked --lib --bins
+
+  probe-golden:
+    name: Probe golden renders
+    needs: build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-build
+          save-if: false
+      - name: Probe golden renders
+        # tests/probe_golden.rs is fully self-contained (committed probe
+        # binaries booted on the bundled AROS ROM) and compares each probe's
+        # deterministic render pixel-for-pixel against the references in
+        # timing-test/golden/ -- the hardware-behaviour regression net
+        # (DDF/DIW placement and DDFSTRT-phase/scroll maps, raced
+        # copper-chunky COLOR00 trains, sprite serializer/DMA-FSM positions,
+        # BLTPRI CPU pacing bars, byte-write register mirroring, the CLXDAT
+        # collision matrix, and the 32 CPU/chip-bus timing rows). Each probe
+        # is its own #[test], so the boots run in parallel on the runner's
+        # cores. See timing-test/README.md "CI golden renders" for the
+        # re-bless workflow.
+        run: cargo test --release --locked --test probe_golden
       - name: Upload probe render diffs
         # On a golden mismatch the test writes the actual renders and diff
         # masks; surface them so the regression is reviewable from the run.
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: probe-golden-diffs
           path: target/probe-golden/
           if-no-files-found: ignore
+
+  m68k-core:
+    name: m68k core tests
+    # Gated on the build job like the other test jobs, but shares no
+    # artifacts with it: the vendored CPU core (crates/m68k) is a path
+    # dependency, not a workspace member, so it builds standalone into its
+    # own target directory, cached here under its own key.
+    needs: build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/m68k
       - name: m68k core tests
-        # The vendored CPU core (crates/m68k) is a path dependency, not a
-        # workspace member, so the root `cargo test` above never reaches its
-        # suites -- including the MMU walker, access-fault frame, exception,
-        # and per-model architecture tests. Two suites are excluded because
-        # they include_bytes! gitignored fixture binaries and do not compile
-        # on a clean checkout (cross_cpu, musashi); the SingleStepTests
-        # suite compiles and skips itself here, and runs for real in the
+        # The root cargo test never reaches the vendored core's own suites
+        # -- including the MMU walker, access-fault frame, exception, and
+        # per-model architecture tests. Two suites are excluded because they
+        # include_bytes! gitignored fixture binaries and do not compile on a
+        # clean checkout (cross_cpu, musashi); the SingleStepTests suite
+        # compiles and skips itself here, and runs for real in the
         # m68k-singlestep job below. No --locked: the crate's own Cargo.lock
         # is deliberately gitignored (the root lockfile pins it when built
         # as a dependency).
@@ -79,99 +149,9 @@ jobs:
             | sed 's/^/--test /' \
             | xargs cargo test --release --lib
 
-  wasm:
-    name: Headless core and browser build
-    # Guards the portability split behind the browser build (see
-    # docs/guide/browser.md): the core must keep compiling without the
-    # desktop frontend, and the web crate must keep compiling for
-    # wasm32-unknown-unknown. Cheap check-only job, so plain ubuntu is fine
-    # (no GPU or audio stack is reached without the `frontend` feature).
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
-      - name: Core without the desktop frontend
-        run: cargo check --no-default-features --locked
-      - name: Headless benchmark binary
-        run: cargo check --no-default-features --features bench-bin --locked
-      - name: Web crate (wasm32-unknown-unknown)
-        working-directory: crates/copperline-web
-        run: cargo check --target wasm32-unknown-unknown --locked
-
-  m68k-singlestep:
-    name: m68k SingleStepTests (68000 fixtures)
-    # Runs the per-instruction 68000 fixture suite against the real
-    # SingleStepTests data (MIT, generated from MAME's microcoded core):
-    # every opcode's final register/memory state, plus address-error
-    # behavior. The fixture clone is ~1 GB, so it lives in its own job and
-    # does not gate the main build.
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Fetch SingleStepTests m68000 fixtures
-        uses: actions/checkout@v4
-        with:
-          repository: SingleStepTests/m68000
-          path: sst-m68000
-      - name: Run fixture suite
-        working-directory: crates/m68k
-        env:
-          M68K_SST_FIXTURES: ${{ github.workspace }}/sst-m68000/v1
-        run: cargo test --release --test singlestep_m68000_v1_tests
-
-  docs:
-    name: Docs build (HTML + PDF)
-    # Independent of the Rust build: catches MyST/cross-reference breakage
-    # (e.g. duplicate labels that only collide in the single-document PDF).
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-      - name: Install MyST CLI
-        run: npm install -g mystmd
-      - name: Install Typst (PDF renderer)
-        # MyST shells out to Typst for PDF export; brew matches docs/README.md.
-        run: brew install typst
-      - name: Build HTML
-        working-directory: docs
-        run: myst build --html --ci --strict --check-links
-      - name: Build PDF
-        working-directory: docs
-        # The PDF export merges every chapter into one document, so it is the
-        # build that surfaces duplicate-label and cross-reference errors.
-        # Assert the artifact exists and is non-empty so the job fails even if
-        # the CLI ever returns success on a partial render.
-        run: |
-          myst build --pdf --ci --strict
-          test -s _build/exports/copperline.pdf
-      - name: Upload PDF
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: copperline-docs-pdf
-          path: docs/_build/exports/copperline.pdf
-          if-no-files-found: ignore
-
-  gdb-remote:
-    name: GDB remote protocol tests
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: RSP unit tests
-        run: cargo test --locked gdbstub
-
   diagrom-smoke:
     name: DiagROM boot smoke
-    needs: build-test
+    needs: build
     runs-on: macos-latest
     # DiagROM (diagrom.com) is freely downloadable but its author keeps
     # redistribution to the official site, so it is fetched at run time
@@ -181,14 +161,20 @@ jobs:
     # archive has been frozen upstream since 2023, so a checksum change
     # means the pin below needs updating, not that the job is flaky.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-build
+          save-if: false
       - name: Build (release)
+        # The shared cache stores compiled artifacts but not the linked
+        # binary, so this is normally just a relink; it degrades to a full
+        # build if the cache was evicted.
         run: cargo build --release --locked
       - name: Restore cached DiagROM
         id: diagrom-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: diagrom.rom
           key: diagrom-stable-v1.3
@@ -222,10 +208,102 @@ jobs:
           cargo test --release --locked --test image_regression diagrom -- --ignored --nocapture
       - name: Upload boot screenshot
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: diagrom-boot
           path: |
             diag.png
             serial.log
           if-no-files-found: ignore
+
+  wasm:
+    name: Headless core and browser build
+    # Guards the portability split behind the browser build (see
+    # docs/guide/browser.md): the core must keep compiling without the
+    # desktop frontend, and the web crate must keep compiling for
+    # wasm32-unknown-unknown. Cheap check-only job, so plain ubuntu is fine
+    # (no GPU or audio stack is reached without the `frontend` feature).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Core without the desktop frontend
+        run: cargo check --no-default-features --locked
+      - name: Headless benchmark binary
+        run: cargo check --no-default-features --features bench-bin --locked
+      - name: Web crate (wasm32-unknown-unknown)
+        working-directory: crates/copperline-web
+        run: cargo check --target wasm32-unknown-unknown --locked
+
+  m68k-singlestep:
+    name: m68k SingleStepTests (68000 fixtures)
+    # Runs the per-instruction 68000 fixture suite against the real
+    # SingleStepTests data (MIT, generated from MAME's microcoded core):
+    # every opcode's final register/memory state, plus address-error
+    # behavior. The fixture clone is ~1 GB, so it lives in its own job and
+    # does not gate the main build.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/m68k
+      - name: Fetch SingleStepTests m68000 fixtures
+        uses: actions/checkout@v7
+        with:
+          repository: SingleStepTests/m68000
+          path: sst-m68000
+      - name: Run fixture suite
+        working-directory: crates/m68k
+        env:
+          M68K_SST_FIXTURES: ${{ github.workspace }}/sst-m68000/v1
+        run: cargo test --release --test singlestep_m68000_v1_tests
+
+  docs:
+    name: Docs build (HTML + PDF)
+    # Independent of the Rust build: catches MyST/cross-reference breakage
+    # (e.g. duplicate labels that only collide in the single-document PDF).
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Install MyST CLI
+        run: npm install -g mystmd
+      - name: Install Typst (PDF renderer)
+        # MyST shells out to Typst for PDF export; brew matches docs/README.md.
+        run: brew install typst
+      - name: Build HTML
+        working-directory: docs
+        run: myst build --html --ci --strict --check-links
+      - name: Build PDF
+        working-directory: docs
+        # The PDF export merges every chapter into one document, so it is the
+        # build that surfaces duplicate-label and cross-reference errors.
+        # Assert the artifact exists and is non-empty so the job fails even if
+        # the CLI ever returns success on a partial render.
+        run: |
+          myst build --pdf --ci --strict
+          test -s _build/exports/copperline.pdf
+      - name: Upload PDF
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: copperline-docs-pdf
+          path: docs/_build/exports/copperline.pdf
+          if-no-files-found: ignore
+
+  gdb-remote:
+    name: GDB remote protocol tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: RSP unit tests
+        run: cargo test --locked gdbstub

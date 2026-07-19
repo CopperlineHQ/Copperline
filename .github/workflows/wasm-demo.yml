@@ -30,7 +30,7 @@ jobs:
     name: Build and publish the browser demo
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install the wasm target
         run: rustup target add wasm32-unknown-unknown
       - name: Install wasm-bindgen-cli
@@ -49,7 +49,7 @@ jobs:
             target/wasm32-unknown-unknown/release/copperline_web.wasm
           test -s pkg/copperline_web_bg.wasm
       - name: Check out the website repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: LinuxJedi/copperline.github.io
           ssh-key: ${{ secrets.SITE_DEPLOY_KEY }}

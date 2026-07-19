@@ -29,7 +29,7 @@ jobs:
     name: cargo-sources.json is current
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Regenerate and diff
         run: |
           ./packaging/flatpak/generate-cargo-sources.sh
@@ -48,7 +48,7 @@ jobs:
       image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-24.08
       options: --privileged
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
           bundle: copperline.flatpak
