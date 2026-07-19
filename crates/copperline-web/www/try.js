@@ -92,6 +92,8 @@ function insertDisk(bytes, name) {
   if (emu) {
     emu.insert_floppy(0, bytes, name);
     setLoadStatus(`DF0: ${name} (write-protected)`);
+    lastFddTrack = null; // desktop clears its track latch on insert too
+    updateStatusDisks();
   } else {
     pendingDisk = { bytes, name };
     setLoadStatus(`DF0: ${name} (inserts at boot)`);
@@ -316,6 +318,8 @@ async function boot() {
     if (floppySoundsToggle) machine.set_floppy_sounds(floppySoundsToggle.checked);
     emu = machine;
     window.__emu = emu; // for debugging/automation
+    lastFddTrack = null; // a new machine starts the track latch over
+    updateStatusDisks();
 
     // Leave a fresh status behind: the old line ("inserts at boot", an
     // earlier failure) would otherwise go stale into any bug report filed
@@ -392,6 +396,7 @@ function tick(nowMs) {
   }
 
   pumpSerial();
+  updateStatusLeds();
 
   if (nowMs - lastStatUpdate >= 1000) {
     statLine.textContent =
@@ -400,6 +405,7 @@ function tick(nowMs) {
       `audio ${queuedMs.toFixed(0)} ms`;
     framesThisSecond = 0;
     lastStatUpdate = nowMs;
+    updateStatusDisks();
   }
   requestAnimationFrame(tick);
 }
@@ -926,6 +932,7 @@ $('eject').addEventListener('click', () => {
     emu.eject_floppy(0);
     df0Name = null;
     setLoadStatus('DF0 ejected');
+    updateStatusDisks();
   } catch (err) {
     setLoadStatus(`${err.message ?? err}`);
   }
@@ -935,6 +942,7 @@ $('reset').addEventListener('click', () => {
   if (!emu) return;
   try {
     emu.reset();
+    lastFddTrack = null; // desktop clears its track latch on reset too
     setLoadStatus('machine reset');
   } catch (err) {
     setLoadStatus(`reset failed: ${err.message ?? err}`);
@@ -1057,6 +1065,132 @@ const floppySoundsToggle = $('floppy-sounds');
 floppySoundsToggle?.addEventListener('change', () => {
   if (emu) emu.set_floppy_sounds(floppySoundsToggle.checked);
 });
+
+// --- status bar --------------------------------------------------------
+// Front-panel status strip mirroring the desktop status bar's LED block:
+// PWR/FDD LEDs (HDD/CD only on machines fitted with the drive), the
+// floppy track counter, and the inserted disk name per connected drive.
+// Built lazily at first boot, like the fullscreen UI, so it never sits on
+// an idle page. Optional in the page shell: a #ledbar element hosts the
+// strip and the page owns its layout; without one the strip drops in
+// directly below the canvas shell with its own styling.
+
+// The desktop status bar's LED and track-counter palette (window.rs).
+const LED_COLORS = {
+  pwr: ['rgb(232,31,24)', 'rgb(66,12,10)'],
+  fdd: ['rgb(236,142,28)', 'rgb(72,38,10)'],
+  hdd: ['rgb(44,200,80)', 'rgb(14,56,24)'],
+  cd: ['rgb(64,170,234)', 'rgb(16,46,70)'],
+};
+
+let statusBar = null;
+// Latched like the desktop bar: the counter keeps showing the last track
+// between accesses instead of flickering back to "---".
+let lastFddTrack = null;
+
+function ensureStatusBar() {
+  if (statusBar) return statusBar;
+  const host = $('ledbar');
+  const bar = host ?? document.createElement('div');
+  if (!host) {
+    bar.style.cssText =
+      'display:flex;align-items:center;gap:0.9rem;flex-wrap:wrap;' +
+      'margin:0.4rem 0;' +
+      'font:600 0.8rem "IBM Plex Mono",ui-monospace,monospace;' +
+      'color:rgba(255,255,255,0.75);';
+  }
+  const mkLed = (label, [onColor, offColor]) => {
+    const row = document.createElement('span');
+    row.style.cssText = 'display:inline-flex;align-items:center;gap:0.35rem;';
+    const dot = document.createElement('span');
+    dot.style.cssText =
+      'width:10px;height:10px;border-radius:50%;' +
+      `border:1px solid rgba(0,0,0,0.6);background:${offColor};`;
+    row.appendChild(dot);
+    row.appendChild(document.createTextNode(label));
+    bar.appendChild(row);
+    return { row, dot, onColor, offColor, state: null };
+  };
+  const pwr = mkLed('PWR', LED_COLORS.pwr);
+  const fdd = mkLed('FDD', LED_COLORS.fdd);
+  const hdd = mkLed('HDD', LED_COLORS.hdd);
+  const cd = mkLed('CD', LED_COLORS.cd);
+  const track = document.createElement('span');
+  // The desktop's seven-segment track counter, as text.
+  track.style.cssText =
+    'background:rgb(6,8,6);color:rgb(27,220,71);padding:0.1rem 0.4rem;' +
+    'border-radius:3px;letter-spacing:0.1em;';
+  track.textContent = '---';
+  bar.appendChild(track);
+  const disks = document.createElement('span');
+  disks.style.cssText =
+    'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' +
+    'max-width:24rem;color:rgba(255,255,255,0.55);';
+  bar.appendChild(disks);
+  if (!host) shell.insertAdjacentElement('afterend', bar);
+  statusBar = {
+    bar,
+    pwr,
+    fdd,
+    hdd,
+    cd,
+    track,
+    disks,
+    trackText: '---',
+    disksText: null,
+  };
+  return statusBar;
+}
+
+// state: true/false lights or dims the LED; undefined hides the whole row
+// (the machine has no such drive). Early-returns on no change so steady
+// frames do no DOM writes.
+function setLed(led, state) {
+  if (led.state === state) return;
+  led.state = state;
+  if (state === undefined) {
+    led.row.style.display = 'none';
+    return;
+  }
+  led.row.style.display = 'inline-flex';
+  led.dot.style.background = state ? led.onColor : led.offColor;
+}
+
+// Called every animation frame: LEDs and the track counter.
+function updateStatusLeds() {
+  if (!emu) return;
+  const sb = ensureStatusBar();
+  setLed(sb.pwr, emu.power_led());
+  setLed(sb.fdd, emu.fdd_led());
+  setLed(sb.hdd, emu.hdd_led());
+  setLed(sb.cd, emu.cd_led());
+  const track = emu.fdd_track();
+  if (track !== undefined) lastFddTrack = track;
+  const text =
+    lastFddTrack === null ? '---' : String(lastFddTrack).padStart(3, '0');
+  if (text !== sb.trackText) {
+    sb.trackText = text;
+    sb.track.textContent = text;
+  }
+}
+
+// Called at the 1 Hz stat refresh and right after insert/eject/boot, so a
+// disk change shows immediately.
+function updateStatusDisks() {
+  if (!emu) return;
+  const sb = ensureStatusBar();
+  const parts = [];
+  for (let drive = 0; drive < 4; drive++) {
+    if (!emu.drive_connected(drive)) continue;
+    parts.push(`DF${drive}: ${emu.disk_name(drive) ?? '-'}`);
+  }
+  const text = parts.join('  ');
+  if (text !== sb.disksText) {
+    sb.disksText = text;
+    sb.disks.textContent = text;
+    sb.disks.title = text;
+  }
+}
 
 // --- disk list ---------------------------------------------------------
 // Optional in the page shell: a <select id="df0list"> fills itself with

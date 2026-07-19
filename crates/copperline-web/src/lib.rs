@@ -326,7 +326,8 @@ impl WebEmu {
             // right; the standard window sits exactly centred.
             self.present_width = present_common::TV_PAL_CAPTURED_WIDTH;
             self.present_rows = present_common::TV_PAL_PRESENT_HEIGHT;
-            self.present.resize(self.present_width * self.present_rows, 0);
+            self.present
+                .resize(self.present_width * self.present_rows, 0);
             for (y, dst) in self
                 .present
                 .chunks_exact_mut(present_common::TV_PAL_CAPTURED_WIDTH)
@@ -470,6 +471,47 @@ impl WebEmu {
             .floppy
             .eject_disk_image(drive as usize)
             .map_err(js_err)
+    }
+
+    /// Power LED, following CIA-A's /LED output like the desktop status
+    /// bar's LED block. The front-panel getters below are cheap enough to
+    /// poll once per animation frame.
+    pub fn power_led(&self) -> bool {
+        self.emu.bus().front_panel_status().power_led_on
+    }
+
+    /// Floppy activity LED: lit while any drive's motor runs.
+    pub fn fdd_led(&self) -> bool {
+        self.emu.bus().front_panel_status().fdd_led_on
+    }
+
+    /// Cylinder under the selected floppy drive's head, or undefined when
+    /// no drive is selected. The page latches the last value so a track
+    /// counter does not flicker between accesses, like the desktop bar.
+    pub fn fdd_track(&self) -> Option<u8> {
+        self.emu.bus().front_panel_status().fdd_track
+    }
+
+    /// Hard-disk activity LED, or undefined on machines without a disk
+    /// controller (the page hides the LED).
+    pub fn hdd_led(&self) -> Option<bool> {
+        self.emu.bus().front_panel_status().hdd_led
+    }
+
+    /// CD activity LED, or undefined on machines without a CD drive.
+    pub fn cd_led(&self) -> Option<bool> {
+        self.emu.bus().front_panel_status().cd_led
+    }
+
+    /// Whether DFn is wired up: DF0 always, DF1-DF3 when configured.
+    pub fn drive_connected(&self, drive: u8) -> bool {
+        self.emu.bus().floppy.drive_connected(drive as usize)
+    }
+
+    /// File name of the image in DFn, or undefined when the drive is
+    /// empty (so this doubles as the inserted check).
+    pub fn disk_name(&self, drive: u8) -> Option<String> {
+        self.emu.bus().floppy.inserted_disk_name(drive as usize)
     }
 
     /// Queue received bytes for Paula's serial receiver (the page's

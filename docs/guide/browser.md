@@ -78,6 +78,11 @@ Controls:
   touch mode the canvas is a pad instead: a floating eight-way stick on
   the left half and a fire button on the right.
 
+Once a machine boots, a status strip appears below the screen with the
+same front-panel readouts as the desktop [status bar](ui.md): the PWR and
+FDD LEDs (plus HDD/CD on machines fitted with those drives), the floppy
+track counter, and the name of the disk in each connected drive.
+
 Audio starts with the boot click, but a browser autoplay policy can keep
 the AudioContext suspended anyway; the boot never waits for it. The
 emulator runs silent and the next click or key press unlocks the sound.
@@ -209,7 +214,15 @@ feeds from the desktop frontend's FS-UAE-compatible keyboard mapping
 and `set_volume_percent(p)` do what they say, and `emulated_seconds()`
 exposes the guest clock for diagnostics. `set_floppy_sounds(on)` and
 `set_floppy_sounds_volume(p)` control the synthesized drive sounds (on and
-100 by default, like the desktop's `[audio] floppy_sounds` knobs). `serial_send(bytes)`,
+100 by default, like the desktop's `[audio] floppy_sounds` knobs).
+Front-panel status getters mirror the desktop status bar's LED block and
+are cheap enough to poll every frame: `power_led()` and `fdd_led()` return
+booleans, `hdd_led()` and `cd_led()` return `undefined` on machines
+without the drive (hide the LED), `fdd_track()` returns the cylinder under
+the selected drive's head or `undefined` when no drive is selected (latch
+the last value so a counter does not flicker), and `drive_connected(n)` /
+`disk_name(n)` describe DF0-DF3 -- a `disk_name` of `undefined` means the
+drive is empty. `serial_send(bytes)`,
 `serial_take()` and `serial_input_backlog()` bridge Paula's serial port to
 whatever byte stream the page likes (see
 [the serial bridge section](#browser-serial-bridge)). The presentation pointer is only
@@ -243,6 +256,10 @@ elements, and pages without them are untouched:
   manifest, a server directory listing of the folder (nginx `autoindex`,
   Apache, `python -m http.server`) is scraped for disk-image links
   instead. If the folder yields nothing, the select hides itself.
+- `#ledbar` (a container): hosts the front-panel status strip (LEDs,
+  track counter, disk names), letting the page own its placement and
+  outer styling. Without it the strip inserts itself directly below the
+  canvas shell. Either way it fills in once a machine boots.
 - `data-default="keys"` on the `#joy` toggle: the joystick mode the page
   starts in (`?joy=` in the URL overrides it).
 - `#serial-url`, `#serial-connect`, `#serial-status`, `#serial-raw`: the
