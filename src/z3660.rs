@@ -87,6 +87,17 @@ const COLORMODE_16BIT565: u32 = 1;
 const COLORMODE_32BIT: u32 = 2;
 const COLORMODE_15BIT: u32 = 3;
 
+/// Bytes per pixel of a colour mode, or `None` if the mode is not one we
+/// can scan out.
+fn colormode_bpp(colormode: u32) -> Option<u32> {
+    match colormode {
+        COLORMODE_8BIT => Some(1),
+        COLORMODE_16BIT565 | COLORMODE_15BIT => Some(2),
+        COLORMODE_32BIT => Some(4),
+        _ => None,
+    }
+}
+
 /// Upper bound on a blit rect / framebuffer dimension. The mailbox fields
 /// are guest-controlled, so clamping them keeps a bogus op from sizing a
 /// huge allocation or a multi-billion-iteration loop; no real screen or
@@ -108,11 +119,15 @@ pub struct Z3660 {
     /// The 512-entry palette (256 primary + 256 secondary), captured from
     /// the OP_DATA/OP palette upload stream as packed 0x00RRGGBB.
     palette: Vec<u32>,
-    /// Framebuffer start relative to VRAM_OFFSET, from the last PAN op.
+    /// Framebuffer start relative to VRAM_OFFSET, from the last PAN op, with
+    /// its x/y viewport offsets already folded in. The sprite needs no such
+    /// adjustment: SetSpritePosition sends viewport coordinates already.
     pan_offset: u32,
-    /// Framebuffer row width in pixels, from the last PAN op (x[1]). For
-    /// pixel-doubled small modes this is the real framebuffer width while
-    /// ORIG_RES holds the doubled output resolution.
+    /// The bitmap's row width in pixels, from the last PAN op (x[1]). This
+    /// is a stride, not a visible width: a bitmap wider than the display
+    /// mode scans out only the mode's worth of each row. For pixel-doubled
+    /// small modes it is the real framebuffer width while ORIG_RES holds the
+    /// doubled output resolution.
     pan_width: u32,
     /// Whether SetGC has programmed a display mode since power-on; RTG
     /// scanout is meaningless before the first mode set.
@@ -247,9 +262,31 @@ impl Z3660 {
                 self.log_gfxdata("dma-op", dma_op_name(value), value);
                 if value == DMA_OP_PAN {
                     // GFXData: offset[0] = framebuffer start relative to
-                    // MemoryBase, x[1] = row width in pixels.
-                    self.pan_offset = self.be32(GFXDATA_OFFSET);
-                    self.pan_width = u32::from(self.be16(GFXDATA_OFFSET + 0x12));
+                    // MemoryBase, x[0]/y[0] = signed viewport offsets within
+                    // the bitmap, x[1] = the bitmap's row width in pixels.
+                    //
+                    // The viewport offsets fold into the scanout base, so
+                    // panning around a bitmap larger than the mode just
+                    // moves the DMA start address:
+                    //   pan = offset[0] + x[0] * bpp + y[0] * x[1] * bpp
+                    //
+                    // The firmware writes this as a shift by the GFXData
+                    // colormode, which equals the pixel size for 8/16/32-bit
+                    // but strides 8 bytes per pixel for colormode 3
+                    // (15-bit). Panning a 15-bit screen on real hardware is
+                    // therefore broken; the pixel size is what P96 means, so
+                    // that is what we scan with.
+                    let cm = u32::from(self.vram[GFXDATA_OFFSET + 0x30]) & 0xF;
+                    let bpp = i64::from(colormode_bpp(cm).unwrap_or(1));
+                    let x0 = i32::from(self.be16(GFXDATA_OFFSET + 0x10) as i16);
+                    let y0 = i32::from(self.be16(GFXDATA_OFFSET + 0x18) as i16);
+                    let width = u32::from(self.be16(GFXDATA_OFFSET + 0x12));
+                    let base = self.be32(GFXDATA_OFFSET) as i64;
+                    let pan = base + (i64::from(x0) + i64::from(y0) * i64::from(width)) * bpp;
+                    // A guest offset that leaves the board's RAM scans
+                    // nothing; clamp rather than wrapping into live VRAM.
+                    self.pan_offset = u32::try_from(pan.max(0)).unwrap_or(u32::MAX);
+                    self.pan_width = width;
                 }
                 self.exec_dma_op(value);
             }
@@ -344,11 +381,9 @@ impl Z3660 {
         let drawmode = self.vram[g + 0x31];
         let mask = self.vram[g + 0x39];
         let minterm = self.vram[g + 0x3A];
-        let bpp: usize = match colormode {
-            COLORMODE_8BIT => 1,
-            COLORMODE_16BIT565 | COLORMODE_15BIT => 2,
-            COLORMODE_32BIT => 4,
-            _ => return,
+        let bpp = match colormode_bpp(colormode) {
+            Some(b) => b as usize,
+            None => return,
         };
 
         match op {
@@ -715,22 +750,23 @@ impl Z3660 {
         } else {
             (out_w, out_h)
         };
-        if self.pan_width != 0 {
-            w = self.pan_width;
-        }
         w = w.min(MAX_DIM as u32);
         h = h.min(MAX_DIM as u32);
         if w == 0 || h == 0 {
             return None;
         }
-        let bpp: u32 = match colormode {
-            COLORMODE_8BIT => 1,
-            COLORMODE_16BIT565 | COLORMODE_15BIT => 2,
-            COLORMODE_32BIT => 4,
-            _ => return None,
+        let bpp = colormode_bpp(colormode)?;
+        // Rows advance by the bitmap's stride, which is wider than the
+        // visible width when the guest pans around an oversized bitmap; the
+        // board scans out only the mode's worth of each row (video.c sets
+        // the VDMA stride from pan_width whenever it differs from hsize).
+        let stride = if self.pan_width != 0 {
+            self.pan_width
+        } else {
+            w
         };
-        let pitch = (w * bpp) as usize;
-        let base = (VRAM_OFFSET + self.pan_offset) as usize;
+        let pitch = (stride * bpp) as usize;
+        let base = VRAM_OFFSET.checked_add(self.pan_offset)? as usize;
         out.clear();
         out.reserve((w * h) as usize);
         for y in 0..h as usize {
@@ -1162,6 +1198,56 @@ mod tests {
         let mut out = Vec::new();
         assert_eq!(z.rtg_frame(&mut out), Some((1, 1)));
         assert_eq!(out[0], 0xFFFF_FFFF);
+    }
+
+    /// A 2x2 screen on a 4-pixel-wide bitmap, pen p at every cell:
+    ///     1 2 3 4
+    ///     5 6 7 8
+    ///     9 A B C
+    /// Pen p is coloured 0x0000pp, so a scanned-out pen appears as
+    /// 0xFF00_0000 | (p << 16).
+    fn panned_bitmap(x: u16, y: u16) -> Vec<u32> {
+        let (mut z, mut m) = (Z3660::new(), mem());
+        w32(&mut z, &mut m, REG_ORIG_RES, (2 << 16) | 2);
+        w32(&mut z, &mut m, REG_MODE, 0x16);
+        for pen in 1..=12u32 {
+            w32(&mut z, &mut m, REG_OP_DATA, (pen << 24) | pen);
+            w32(&mut z, &mut m, REG_OP, ARM_OP_PALETTE);
+            let at = VRAM_OFFSET + pen - 1;
+            z.write(at, 1, pen, &mut DeviceHost::new(&mut m));
+        }
+        let g = GFXDATA_OFFSET as u32;
+        let mut h = DeviceHost::new(&mut m);
+        z.write(g, 4, 0, &mut h); // offset[0]: bitmap at VRAM start
+        z.write(g + 0x10, 2, u32::from(x), &mut h); // x[0]
+        z.write(g + 0x18, 2, u32::from(y), &mut h); // y[0]
+        z.write(g + 0x12, 2, 4, &mut h); // x[1]: bitmap is 4 wide
+        z.write(g + 0x30, 1, COLORMODE_8BIT, &mut h); // u8_user[COLORMODE]
+        w32(&mut z, &mut m, REG_BLITTER_DMA_OP, DMA_OP_PAN);
+        let mut out = Vec::new();
+        // The visible size is the mode's, not the bitmap's.
+        assert_eq!(z.rtg_frame(&mut out), Some((2, 2)));
+        out
+    }
+
+    /// PAN's x[1] is the bitmap's row stride, not the visible width: a
+    /// bitmap wider than the mode still scans out only the mode's width,
+    /// with rows advancing by the full stride.
+    #[test]
+    fn pan_width_is_a_stride_not_a_visible_width() {
+        let pen = |p: u32| 0xFF00_0000 | (p << 16);
+        // Top-left 2x2 of the bitmap: pens 1,2 over 5,6 -- so row 1 starts
+        // 4 pixels in, not 2.
+        assert_eq!(panned_bitmap(0, 0), [pen(1), pen(2), pen(5), pen(6)]);
+    }
+
+    /// PAN's x[0]/y[0] move the viewport within the bitmap, which the board
+    /// implements by folding them into the scanout base.
+    #[test]
+    fn pan_viewport_offsets_move_the_scanout_origin() {
+        let pen = |p: u32| 0xFF00_0000 | (p << 16);
+        // One pixel right and one row down: pens 6,7 over 10,11.
+        assert_eq!(panned_bitmap(1, 1), [pen(6), pen(7), pen(10), pen(11)]);
     }
 }
 
