@@ -4302,6 +4302,12 @@ impl App {
             self.launcher_browse_folder(field);
             return;
         }
+        // The printer capture is a file we create/overwrite, not an existing
+        // image to open, so it gets a save dialog seeded with a default name.
+        if field == LauncherField::ParallelOutput {
+            self.launcher_browse_save(field, "printer.txt");
+            return;
+        }
         let start_dir = self
             .launcher_state()
             .and_then(|s| s.setup.path(field))
@@ -4365,6 +4371,39 @@ impl App {
             dialog = dialog.set_directory(dir);
         }
         let picked = dialog.pick_folder();
+        if let Some(path) = picked {
+            if let Some(state) = self.launcher_state_mut() {
+                state.edit_cancel();
+                state.setup.set_path(field, path);
+                state.status = None;
+            }
+        }
+        self.finish_host_io_pause();
+    }
+
+    /// Save-file picker for a path field that names a host file to create or
+    /// overwrite (the printer capture), seeded with `default_name` so the dialog
+    /// suggests a filename without the user typing one. An existing file can
+    /// still be chosen.
+    fn launcher_browse_save(&mut self, field: LauncherField, default_name: &str) {
+        let current = self
+            .launcher_state()
+            .and_then(|s| s.setup.path(field))
+            .map(|p| p.to_path_buf());
+        self.suspend_live_audio_for_host_io();
+        let mut dialog = rfd::FileDialog::new().set_title("Choose output file");
+        // Seed with the existing path's directory and name, else the default.
+        match current.as_ref().and_then(|p| p.parent()) {
+            Some(dir) if !dir.as_os_str().is_empty() => dialog = dialog.set_directory(dir),
+            _ => {}
+        }
+        let name = current
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or(default_name);
+        dialog = dialog.set_file_name(name);
+        let picked = dialog.save_file();
         if let Some(path) = picked {
             if let Some(state) = self.launcher_state_mut() {
                 state.edit_cancel();

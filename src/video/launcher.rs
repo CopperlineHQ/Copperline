@@ -30,6 +30,7 @@ use crate::config::{
 };
 use crate::zorro::{ConfigOption, ConfigOptionKind, LoadedZorroBoard};
 use anyhow::Result;
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -170,18 +171,15 @@ pub enum LauncherTab {
     Storage,
     HostFs,
     Cd,
-    // Only reached in a `midi` build, where it is added to TABS.
-    #[cfg_attr(not(feature = "midi"), allow(dead_code))]
-    Serial,
-    Parallel,
+    /// Serial and parallel ports on one tab, under `Serial:` / `Parallel:`
+    /// section headings.
+    IoPorts,
     Input,
     Zorro,
     AvEmulation,
 }
 
-/// Tabs shown top to bottom. The Serial tab only holds MIDI settings for now, so
-/// it is present only in a `midi` build; drop the `cfg` if the tab gains other
-/// serial options.
+/// Tabs shown top to bottom.
 pub const TABS: &[LauncherTab] = &[
     LauncherTab::System,
     LauncherTab::Cpu,
@@ -189,12 +187,11 @@ pub const TABS: &[LauncherTab] = &[
     LauncherTab::Rom,
     LauncherTab::Floppy,
     LauncherTab::Storage,
-    LauncherTab::HostFs,
+    // HostFs is reached as a sub-page from the Hard Disk (Storage) tab, so it is
+    // not a top-level strip entry.
     LauncherTab::Cd,
-    #[cfg(feature = "midi")]
-    LauncherTab::Serial,
-    LauncherTab::Parallel,
     LauncherTab::Input,
+    LauncherTab::IoPorts,
     LauncherTab::Zorro,
     LauncherTab::AvEmulation,
 ];
@@ -210,11 +207,19 @@ impl LauncherTab {
             LauncherTab::Storage => "Hard Disk",
             LauncherTab::HostFs => "Host Mounts",
             LauncherTab::Cd => "CD",
-            LauncherTab::Serial => "Serial",
-            LauncherTab::Parallel => "Parallel",
+            LauncherTab::IoPorts => "I/O Ports",
             LauncherTab::Input => "Input",
             LauncherTab::Zorro => "Zorro",
             LauncherTab::AvEmulation => "A/V & Emu",
+        }
+    }
+
+    /// The strip entry to highlight for this (possibly sub-page) tab: the Host
+    /// Mounts sub-page keeps its parent Hard Disk tab highlighted.
+    pub fn strip_tab(self) -> LauncherTab {
+        match self {
+            LauncherTab::HostFs => LauncherTab::Storage,
+            other => other,
         }
     }
 }
@@ -295,8 +300,11 @@ pub enum LauncherField {
     MidiIn,
     // Parallel
     ParallelDevice,
+    ParallelOutput,
     SamplerInput,
     SamplerGain,
+    /// Inert field for a non-interactive [`RowKind::SectionHeader`] row.
+    SectionHeader,
     // A/V and emulation
     AudioDevice,
     AudioChannelMode,
@@ -328,6 +336,14 @@ pub enum RowKind {
     /// A hard-drive image: a path with Browse/Clear, plus an editable
     /// volume-name field (used when the image is a host directory).
     Drive,
+    /// A non-interactive greyed heading that groups the rows beneath it
+    /// (e.g. the `Serial:` / `Parallel:` sections of the I/O Ports tab). Its
+    /// `field` is inert.
+    SectionHeader,
+    /// A button that navigates to another tab used as a sub-page (the Hard Disk
+    /// tab's link to Host Mounts, and the Back link the other way). Its `field`
+    /// is inert; the payload is the destination tab.
+    SubPageLink(LauncherTab),
 }
 
 /// One settings row: a label, the field it edits, and how to edit it.
@@ -340,6 +356,25 @@ pub struct Row {
 
 const fn row(field: LauncherField, label: &'static str, kind: RowKind) -> Row {
     Row { field, label, kind }
+}
+
+/// A non-interactive section heading row (see [`RowKind::SectionHeader`]).
+const fn section_header(label: &'static str) -> Row {
+    Row {
+        field: F::SectionHeader,
+        label,
+        kind: RowKind::SectionHeader,
+    }
+}
+
+/// A row whose button navigates to `target` used as a sub-page (see
+/// [`RowKind::SubPageLink`]).
+const fn sub_page_link(label: &'static str, target: LauncherTab) -> Row {
+    Row {
+        field: F::SectionHeader,
+        label,
+        kind: RowKind::SubPageLink(target),
+    }
 }
 
 /// How many `[[filesys]]` mounts the launcher edits (the config file
@@ -457,18 +492,25 @@ const CD_ROWS: [Row; 3] = [
     row(F::Cd32Nvram, "CD32 NVRAM", PathRow),
 ];
 // The MIDI endpoint rows appear only when the serial port is in MIDI mode, so
-// the Serial tab shows just the Mode selector otherwise.
+// the Serial section shows just the Device / Mode selector otherwise. The
+// selector is labelled "Device / Mode" because some choices are devices (MIDI)
+// and some are modes (stdout, PTY, TCP).
 #[cfg(feature = "midi")]
-const SERIAL_ROWS_BASE: [Row; 1] = [row(F::SerialMode, "Mode", Cycle)];
+const SERIAL_ROWS_BASE: [Row; 1] = [row(F::SerialMode, "Device / Mode", Cycle)];
 #[cfg(feature = "midi")]
 const SERIAL_ROWS_MIDI: [Row; 3] = [
-    row(F::SerialMode, "Mode", Cycle),
+    row(F::SerialMode, "Device / Mode", Cycle),
     row(F::MidiIn, "MIDI input", Cycle),
     row(F::MidiOut, "MIDI output", Cycle),
 ];
 // The sampler input/gain rows appear only when the sampler is the selected
 // device, so None/Printer show just the Device selector.
 const PARALLEL_ROWS_BASE: [Row; 1] = [row(F::ParallelDevice, "Device", Cycle)];
+// The printer adds a capture-file picker; the sampler adds its input/gain rows.
+const PARALLEL_ROWS_PRINTER: [Row; 2] = [
+    row(F::ParallelDevice, "Device", Cycle),
+    row(F::ParallelOutput, "Output file", PathRow),
+];
 const PARALLEL_ROWS_SAMPLER: [Row; 3] = [
     row(F::ParallelDevice, "Device", Cycle),
     row(F::SamplerInput, "Audio input", Cycle),
@@ -494,35 +536,62 @@ const INPUT_ROWS: [Row; 3] = [
     row(F::Joystick, "Joystick input", Cycle),
 ];
 
-/// The rows shown on a tab, top to bottom. The Serial and Parallel tabs are
-/// dynamic: the MIDI endpoint rows appear only in MIDI mode and the sampler
-/// rows only when the sampler is selected, so unrelated options stay hidden
+/// The rows shown on a tab, top to bottom. Most tabs are fixed and borrow their
+/// static row table; only the three composed tabs (Storage/HostFs with their
+/// sub-page links, and the dynamic I/O Ports tab) allocate. The I/O Ports tab is
+/// dynamic: the MIDI endpoint rows appear only in MIDI mode and the
+/// sampler/printer rows only for those devices, so unrelated options stay hidden
 /// rather than greyed. The `Zorro` tab has no rows: it is drawn as a board list
 /// with Add/Remove controls (see the panel code).
 pub fn rows(
     tab: LauncherTab,
     parallel_device: ParallelDevice,
     serial_mode: SerialMode,
-) -> &'static [Row] {
+) -> Cow<'static, [Row]> {
     match tab {
-        LauncherTab::System => &SYSTEM_ROWS,
-        LauncherTab::Cpu => &CPU_ROWS,
-        LauncherTab::Memory => &MEMORY_ROWS,
-        LauncherTab::Rom => &ROM_ROWS,
-        LauncherTab::Floppy => &FLOPPY_ROWS,
-        LauncherTab::Storage => &STORAGE_ROWS,
-        LauncherTab::HostFs => &HOSTFS_ROWS,
-        LauncherTab::Cd => &CD_ROWS,
-        LauncherTab::Serial => serial_rows(serial_mode),
-        LauncherTab::Parallel => parallel_rows(parallel_device),
-        LauncherTab::Input => &INPUT_ROWS,
-        LauncherTab::Zorro => &[],
-        LauncherTab::AvEmulation => &AV_EMULATION_ROWS,
+        LauncherTab::System => Cow::Borrowed(&SYSTEM_ROWS),
+        LauncherTab::Cpu => Cow::Borrowed(&CPU_ROWS),
+        LauncherTab::Memory => Cow::Borrowed(&MEMORY_ROWS),
+        LauncherTab::Rom => Cow::Borrowed(&ROM_ROWS),
+        LauncherTab::Floppy => Cow::Borrowed(&FLOPPY_ROWS),
+        LauncherTab::Storage => {
+            // The Hard Disk tab links to the Host Mounts sub-page, at the top so
+            // it sits where the sub-page's own Back link is.
+            let mut rows = vec![sub_page_link("Host Mounts", LauncherTab::HostFs)];
+            rows.extend_from_slice(&STORAGE_ROWS);
+            Cow::Owned(rows)
+        }
+        LauncherTab::HostFs => {
+            // The Host Mounts sub-page opens with a link back to Hard Disk.
+            let mut rows = vec![sub_page_link("< Hard Disk", LauncherTab::Storage)];
+            rows.extend_from_slice(&HOSTFS_ROWS);
+            Cow::Owned(rows)
+        }
+        LauncherTab::Cd => Cow::Borrowed(&CD_ROWS),
+        LauncherTab::IoPorts => Cow::Owned(io_ports_rows(serial_mode, parallel_device)),
+        LauncherTab::Input => Cow::Borrowed(&INPUT_ROWS),
+        LauncherTab::Zorro => Cow::Borrowed(&[]),
+        LauncherTab::AvEmulation => Cow::Borrowed(&AV_EMULATION_ROWS),
     }
 }
 
-/// Serial-tab rows for the current mode. Only the `midi` build has any; without
-/// it the tab is absent from [`TABS`] and this is never reached.
+/// The I/O Ports tab: a `Serial:` section (only in a `midi` build, which is the
+/// only build with serial rows) then a `Parallel:` section, each under a greyed
+/// heading and each showing only the rows relevant to its selected device/mode.
+fn io_ports_rows(serial_mode: SerialMode, parallel_device: ParallelDevice) -> Vec<Row> {
+    let mut rows = Vec::new();
+    let serial = serial_rows(serial_mode);
+    if !serial.is_empty() {
+        rows.push(section_header("Serial:"));
+        rows.extend_from_slice(serial);
+    }
+    rows.push(section_header("Parallel:"));
+    rows.extend_from_slice(parallel_rows(parallel_device));
+    rows
+}
+
+/// Serial rows for the current mode. Only the `midi` build has any; without it
+/// the Serial section is empty and omitted from the I/O Ports tab.
 fn serial_rows(serial_mode: SerialMode) -> &'static [Row] {
     #[cfg(feature = "midi")]
     {
@@ -539,12 +608,13 @@ fn serial_rows(serial_mode: SerialMode) -> &'static [Row] {
     }
 }
 
-/// Parallel-tab rows for the selected device: the sampler adds its input and
-/// gain rows; None/Printer show just the Device selector.
+/// Parallel rows for the selected device: the printer adds its output-file
+/// picker, the sampler its input and gain; None shows just the Device selector.
 fn parallel_rows(parallel_device: ParallelDevice) -> &'static [Row] {
     match parallel_device {
         ParallelDevice::Sampler => &PARALLEL_ROWS_SAMPLER,
-        ParallelDevice::None | ParallelDevice::Printer => &PARALLEL_ROWS_BASE,
+        ParallelDevice::Printer => &PARALLEL_ROWS_PRINTER,
+        ParallelDevice::None => &PARALLEL_ROWS_BASE,
     }
 }
 
@@ -738,7 +808,8 @@ pub struct MachineSetup {
     cd_insert_delay: f64,
     cd32_nvram: Option<PathBuf>,
     // Serial port. Carried in every build so a config's `[serial]` block
-    // round-trips; only edited on the Serial tab, which is a `midi` build only.
+    // round-trips; only edited in the I/O Ports tab's Serial section, which a
+    // `midi` build shows.
     serial_mode: SerialMode,
     midi_out: Option<String>,
     midi_in: Option<String>,
@@ -748,15 +819,15 @@ pub struct MachineSetup {
     /// Dial-out address for `mode = "tcp-connect"`; carried like
     /// `serial_listen` (no tab edits it, a save must not drop it).
     serial_connect: Option<String>,
-    /// The Centronics parallel-port device (None/Printer/Sampler), edited on the
-    /// Parallel tab.
+    /// The Centronics parallel-port device (None/Printer/Sampler), edited in the
+    /// I/O Ports tab's Parallel section.
     parallel_device: crate::config::ParallelDevice,
-    /// Raw Centronics printer capture path. There is no launcher control for the
-    /// path itself, but a hand-written `[parallel] output` must survive
-    /// load/edit/save, and its presence is what makes Printer selectable.
+    /// The printer capture path, edited by the Output file row (shown when the
+    /// Printer device is selected) and carried through from a hand-written
+    /// `[parallel] output`.
     parallel_output: Option<PathBuf>,
     /// Sampler host capture device (`None` = system default) and its input gain,
-    /// edited on the Parallel tab.
+    /// edited in the I/O Ports tab's Parallel section.
     sampler_input: Option<String>,
     sampler_gain_db: f32,
     /// Input device names for the sampler picker: filled when the screen opens
@@ -1197,7 +1268,14 @@ impl MachineSetup {
                 .parallel_output
                 .is_some()
                 .then(|| ParallelDevice::None.label().to_string()),
-            other => Some(other.label().to_string()),
+            // A printer needs a capture file. Without one it is an incomplete
+            // selection, so persist nothing (a bare `output` would already imply
+            // the printer, so no explicit device is needed when it is set).
+            ParallelDevice::Printer => self
+                .parallel_output
+                .is_some()
+                .then(|| ParallelDevice::Printer.label().to_string()),
+            ParallelDevice::Sampler => Some(ParallelDevice::Sampler.label().to_string()),
         };
         // The Audio output picker is one of default / a named device / Disabled.
         // A named device sets output_device; Disabled sets output_enabled=false
@@ -1464,6 +1542,7 @@ impl MachineSetup {
             F::Filesys3Dir => self.filesys_dirs[3].as_deref(),
             F::CdImage => self.cd_image.as_deref(),
             F::Cd32Nvram => self.cd32_nvram.as_deref(),
+            F::ParallelOutput => self.parallel_output.as_deref(),
             _ => None,
         }
     }
@@ -1644,7 +1723,9 @@ impl MachineSetup {
             },
             #[cfg(feature = "midi")]
             F::SerialMode => match self.serial_mode {
-                SerialMode::Off => "Off".to_string(),
+                // "None" (matching the Parallel device selector) reads better
+                // than "Off" for the no-connection state.
+                SerialMode::Off => "None".to_string(),
                 SerialMode::Stdout => "Stdout".to_string(),
                 SerialMode::Midi => "MIDI".to_string(),
                 SerialMode::Tcp => "TCP".to_string(),
@@ -1813,14 +1894,15 @@ impl MachineSetup {
             #[cfg(feature = "midi")]
             F::MidiIn => cycle_endpoint(&mut self.midi_in, &self.midi_endpoints.inputs, forward),
             F::ParallelDevice => {
-                // Printer is only on offer when a capture path exists (the
-                // launcher has no path editor), so a fresh screen cycles
-                // None <-> Sampler and a loaded printer config round-trips.
-                let mut choices = vec![ParallelDevice::None, ParallelDevice::Sampler];
-                if self.parallel_output.is_some() {
-                    choices.insert(1, ParallelDevice::Printer);
-                }
-                self.parallel_device = cycle_slice(&choices, self.parallel_device, forward);
+                // None -> Printer -> Sampler. Selecting Printer reveals its
+                // Output file row (with a Browse button); until a file is set
+                // the printer is not persisted or attached (see to_raw).
+                const DEVICES: [ParallelDevice; 3] = [
+                    ParallelDevice::None,
+                    ParallelDevice::Printer,
+                    ParallelDevice::Sampler,
+                ];
+                self.parallel_device = cycle_slice(&DEVICES, self.parallel_device, forward);
             }
             F::SamplerInput => {
                 // Re-read on each step so a device connected since the screen
@@ -1908,6 +1990,7 @@ impl MachineSetup {
             F::ScsiUnit6 => self.scsi_units[6] = Some(path),
             F::CdImage => self.cd_image = Some(path),
             F::Cd32Nvram => self.cd32_nvram = Some(path),
+            F::ParallelOutput => self.parallel_output = Some(path),
             _ => {
                 if let Some((slot, false)) = filesys_slot(field) {
                     self.filesys_dirs[slot] = Some(path);
@@ -1944,6 +2027,7 @@ impl MachineSetup {
             F::ScsiUnit6 => self.scsi_units[6] = None,
             F::CdImage => self.cd_image = None,
             F::Cd32Nvram => self.cd32_nvram = None,
+            F::ParallelOutput => self.parallel_output = None,
             _ => {
                 if let Some((slot, false)) = filesys_slot(field) {
                     self.filesys_dirs[slot] = None;
@@ -2163,12 +2247,34 @@ fn cycle_endpoint(
 }
 
 /// Whether `field` appears anywhere with the given row kind. Used to classify a
-/// field (toggle vs path) without threading the tab through every call. Passes
-/// the row-maximising selections so the dynamic Serial/Parallel rows are all in
-/// view.
+/// field (toggle vs path) without threading the tab through every call, called
+/// per drawn row, so it scans the static row tables directly rather than
+/// composing tabs (which would allocate every frame). The composed tabs only
+/// add `SectionHeader`/`SubPageLink` rows, which carry no real field, so the raw
+/// tables cover every classifiable field.
 fn rows_contains_kind(field: LauncherField, kind: RowKind) -> bool {
-    TABS.iter()
-        .flat_map(|&t| rows(t, ParallelDevice::Sampler, SerialMode::Midi))
+    #[cfg(feature = "midi")]
+    let serial: &[&[Row]] = &[&SERIAL_ROWS_MIDI];
+    #[cfg(not(feature = "midi"))]
+    let serial: &[&[Row]] = &[];
+    let sources: &[&[Row]] = &[
+        &SYSTEM_ROWS,
+        &CPU_ROWS,
+        &MEMORY_ROWS,
+        &ROM_ROWS,
+        &FLOPPY_ROWS,
+        &STORAGE_ROWS,
+        &HOSTFS_ROWS,
+        &CD_ROWS,
+        &INPUT_ROWS,
+        &AV_EMULATION_ROWS,
+        &PARALLEL_ROWS_PRINTER,
+        &PARALLEL_ROWS_SAMPLER,
+    ];
+    sources
+        .iter()
+        .chain(serial.iter())
+        .flat_map(|table| table.iter())
         .any(|r| r.field == field && r.kind == kind)
 }
 
@@ -2777,9 +2883,55 @@ mod tests {
     }
 
     #[test]
+    fn host_mounts_is_a_sub_page_of_hard_disk() {
+        // Host Mounts is not a top-level strip tab any more.
+        assert!(!TABS.contains(&LauncherTab::HostFs));
+        // The Hard Disk tab opens with a link into the Host Mounts sub-page.
+        let storage = rows(
+            LauncherTab::Storage,
+            ParallelDevice::None,
+            SerialMode::default(),
+        );
+        assert_eq!(
+            storage.first().map(|r| r.kind),
+            Some(RowKind::SubPageLink(LauncherTab::HostFs))
+        );
+        // The sub-page opens with a Back link, then the mount rows.
+        let mounts = rows(
+            LauncherTab::HostFs,
+            ParallelDevice::None,
+            SerialMode::default(),
+        );
+        assert_eq!(
+            mounts.first().map(|r| r.kind),
+            Some(RowKind::SubPageLink(LauncherTab::Storage))
+        );
+        assert!(mounts.iter().any(|r| r.field == LauncherField::Filesys0Dir));
+        // The sub-page keeps the Hard Disk strip tab highlighted.
+        assert_eq!(LauncherTab::HostFs.strip_tab(), LauncherTab::Storage);
+    }
+
+    #[cfg(feature = "midi")]
+    #[test]
+    fn io_ports_tab_groups_serial_and_parallel_under_headers() {
+        let r = rows(LauncherTab::IoPorts, ParallelDevice::None, SerialMode::Midi);
+        let headers: Vec<_> = r
+            .iter()
+            .filter(|x| x.kind == RowKind::SectionHeader)
+            .map(|x| x.label)
+            .collect();
+        assert_eq!(headers, ["Serial:", "Parallel:"]);
+        // Serial section: the Device / Mode selector, and (in MIDI) the endpoints.
+        assert!(r.iter().any(|x| x.field == LauncherField::SerialMode));
+        assert!(r.iter().any(|x| x.field == LauncherField::MidiOut));
+        // Parallel section: the device selector.
+        assert!(r.iter().any(|x| x.field == LauncherField::ParallelDevice));
+    }
+
+    #[test]
     fn parallel_sampler_rows_appear_only_when_selected() {
         let has = |device| {
-            rows(LauncherTab::Parallel, device, SerialMode::default())
+            rows(LauncherTab::IoPorts, device, SerialMode::default())
                 .iter()
                 .any(|r| r.field == LauncherField::SamplerInput)
         };
@@ -2792,7 +2944,7 @@ mod tests {
     #[test]
     fn midi_rows_appear_only_in_midi_mode() {
         let has = |mode| {
-            rows(LauncherTab::Serial, ParallelDevice::None, mode)
+            rows(LauncherTab::IoPorts, ParallelDevice::None, mode)
                 .iter()
                 .any(|r| r.field == LauncherField::MidiOut)
         };
@@ -2801,16 +2953,53 @@ mod tests {
     }
 
     #[test]
-    fn parallel_sampler_selection_round_trips_through_raw() {
+    fn parallel_device_cycles_none_printer_sampler() {
         let mut s = MachineSetup::default();
         assert_eq!(s.parallel_device, ParallelDevice::None);
-
-        // Cycle None -> Sampler (Printer is absent without a capture path).
+        s.cycle(LauncherField::ParallelDevice, true);
+        assert_eq!(s.parallel_device, ParallelDevice::Printer);
         s.cycle(LauncherField::ParallelDevice, true);
         assert_eq!(s.parallel_device, ParallelDevice::Sampler);
+        s.cycle(LauncherField::ParallelDevice, true);
+        assert_eq!(s.parallel_device, ParallelDevice::None);
+    }
 
-        s.sampler_input = Some("BlackHole".into());
-        s.sampler_gain_db = 6.0;
+    #[test]
+    fn parallel_printer_output_row_appears_and_round_trips() {
+        let mut s = MachineSetup::default();
+        // The Output file row shows only when the printer is selected.
+        let has_output = |device| {
+            rows(LauncherTab::IoPorts, device, SerialMode::default())
+                .iter()
+                .any(|r| r.field == LauncherField::ParallelOutput)
+        };
+        assert!(!has_output(ParallelDevice::None));
+        assert!(has_output(ParallelDevice::Printer));
+
+        s.parallel_device = ParallelDevice::Printer;
+        // A printer with no capture file yet is not persisted (incomplete).
+        assert_eq!(s.to_raw().parallel.device, None);
+
+        s.set_path(LauncherField::ParallelOutput, "captures/out.prn".into());
+        let raw = s.to_raw();
+        assert_eq!(raw.parallel.device.as_deref(), Some("printer"));
+        assert_eq!(raw.parallel.output.as_deref(), Some("captures/out.prn"));
+        let back = MachineSetup::from_raw(&raw).unwrap();
+        assert_eq!(back.parallel_device, ParallelDevice::Printer);
+        assert_eq!(
+            back.parallel_output.as_deref(),
+            Some(std::path::Path::new("captures/out.prn"))
+        );
+    }
+
+    #[test]
+    fn parallel_sampler_selection_round_trips_through_raw() {
+        let mut s = MachineSetup {
+            parallel_device: ParallelDevice::Sampler,
+            sampler_input: Some("BlackHole".into()),
+            sampler_gain_db: 6.0,
+            ..MachineSetup::default()
+        };
         let raw = s.to_raw();
         assert_eq!(raw.parallel.device.as_deref(), Some("sampler"));
         assert_eq!(raw.parallel.sampler_input.as_deref(), Some("BlackHole"));
@@ -2823,8 +3012,7 @@ mod tests {
 
         // Switching the device to None must still carry the sampler settings
         // through a Save (they do not imply the sampler on reload).
-        s.cycle(LauncherField::ParallelDevice, false); // Sampler -> None
-        assert_eq!(s.parallel_device, ParallelDevice::None);
+        s.parallel_device = ParallelDevice::None;
         let raw = s.to_raw();
         assert_eq!(raw.parallel.device, None);
         assert_eq!(raw.parallel.sampler_input.as_deref(), Some("BlackHole"));
@@ -3061,10 +3249,10 @@ mod tests {
     #[cfg(feature = "midi")]
     #[test]
     fn midi_device_rows_are_hidden_off_midi_mode() {
-        // Off MIDI mode the endpoint rows are absent from the Serial tab (they
-        // are hidden, not greyed), so the tab shows only the Mode selector.
+        // Off MIDI mode the endpoint rows are absent from the Serial section
+        // (they are hidden, not greyed), so it shows only the Device / Mode row.
         let serial = rows(
-            LauncherTab::Serial,
+            LauncherTab::IoPorts,
             ParallelDevice::None,
             SerialMode::Stdout,
         );
