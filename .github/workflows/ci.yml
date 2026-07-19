@@ -20,30 +20,49 @@ jobs:
     # Metal stack also makes the headless render path (the smoke job below)
     # reliable. Linux/Windows jobs can be added once those paths are verified.
     #
-    # This job compiles everything once and publishes the build tree through
-    # the rust-cache shared key ("ci-build"); the test jobs below fan out
-    # from it (needs: build), restore the same key, and go straight to
-    # running, paying at most a relink. cache-workspace-crates keeps the
-    # workspace's own compiled artifacts in the cache -- without it
-    # rust-cache stores dependencies only and every dependent job would
-    # recompile the leaf crate from scratch.
+    # This job compiles everything once and hands the finished binaries to
+    # the test jobs below (needs: build) as a workflow artifact. Binaries,
+    # not a shared cargo cache: cargo fingerprints local path crates by
+    # source mtime, and every job's fresh checkout is newer than any cached
+    # artifact, so a downstream cargo invocation always recompiles the
+    # copperline and vendored m68k crates no matter how complete the cache
+    # is. The test executables are plain libtest binaries and run fine
+    # without cargo.
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-build
-          cache-workspace-crates: true
       - name: Build (release)
         run: cargo build --release --locked
       - name: Compile test binaries
-        # cargo build does not compile #[test] targets; compile them here so
-        # the shared cache hands the test jobs ready-to-run binaries. This
-        # is also the step that keeps the asset-gated integration tests
-        # under tests/ compiling on a clean checkout (they are #[ignore]d at
-        # run time, not excluded from the build).
-        run: cargo test --release --locked --no-run
+        # cargo build does not compile #[test] targets. This is also the
+        # step that keeps the asset-gated integration tests under tests/
+        # compiling on a clean checkout (they are #[ignore]d at run time,
+        # not excluded from the build). The JSON build plan maps each test
+        # target to its hash-suffixed executable so the binaries can be
+        # staged under stable names for the fan-out jobs.
+        run: |
+          cargo test --release --locked --no-run --message-format=json > cargo-test-build.json
+          mkdir -p ci-bins
+          cp target/release/copperline ci-bins/
+          jq -r 'select(.reason == "compiler-artifact" and .profile.test == true and .executable != null)
+                   | [.target.kind[0], .target.name, .executable] | @tsv' cargo-test-build.json \
+            | while IFS=$'\t' read -r kind name exe; do
+                case "$kind:$name" in
+                  lib:copperline)        cp "$exe" ci-bins/unit-lib ;;
+                  bin:copperline)        cp "$exe" ci-bins/unit-bin-copperline ;;
+                  bin:copperline-ctl)    cp "$exe" ci-bins/unit-bin-copperline-ctl ;;
+                  test:probe_golden)     cp "$exe" ci-bins/probe_golden ;;
+                  test:image_regression) cp "$exe" ci-bins/image_regression ;;
+                esac
+              done
+          ls -l ci-bins
+      - name: Upload binaries for the test jobs
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-bins
+          path: ci-bins/
 
   lint:
     name: Rustfmt and clippy
@@ -71,18 +90,21 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v8
         with:
-          shared-key: ci-build
-          save-if: false
+          name: ci-bins
+          path: ci-bins
       - name: Unit tests
-        # The inline #[cfg(test)] suites in the lib and binaries. The
-        # asset-gated integration tests under tests/ are #[ignore]d (they
-        # need local Kickstart ROM/disk assets) and are intentionally not
-        # run here; tests/probe_golden.rs runs in the probe-golden job. The
-        # crate has no doctests, so --lib --bins loses nothing.
-        run: cargo test --release --locked --lib --bins
+        # The inline #[cfg(test)] suites in the lib and binaries, prebuilt
+        # by the build job (this is everything a root `cargo test` runs
+        # besides tests/probe_golden.rs, which has its own job below; the
+        # crate has no doctests). Artifact zips do not preserve the
+        # executable bit, hence the chmod.
+        run: |
+          chmod +x ci-bins/*
+          ./ci-bins/unit-lib
+          ./ci-bins/unit-bin-copperline
+          ./ci-bins/unit-bin-copperline-ctl
 
   probe-golden:
     name: Probe golden renders
@@ -90,11 +112,10 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v8
         with:
-          shared-key: ci-build
-          save-if: false
+          name: ci-bins
+          path: ci-bins
       - name: Probe golden renders
         # tests/probe_golden.rs is fully self-contained (committed probe
         # binaries booted on the bundled AROS ROM) and compares each probe's
@@ -107,7 +128,16 @@ jobs:
         # is its own #[test], so the boots run in parallel on the runner's
         # cores. See timing-test/README.md "CI golden renders" for the
         # re-bless workflow.
-        run: cargo test --release --locked --test probe_golden
+        #
+        # The test harness spawns the emulator through the compile-time
+        # CARGO_BIN_EXE_copperline path, which on hosted runners is the
+        # same absolute path in every job of this repo -- hence the copy
+        # into target/release before running.
+        run: |
+          chmod +x ci-bins/*
+          mkdir -p target/release
+          cp ci-bins/copperline target/release/copperline
+          ./ci-bins/probe_golden
       - name: Upload probe render diffs
         # On a golden mismatch the test writes the actual renders and diff
         # masks; surface them so the regression is reviewable from the run.
@@ -162,16 +192,19 @@ jobs:
     # means the pin below needs updating, not that the job is flaky.
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v8
         with:
-          shared-key: ci-build
-          save-if: false
-      - name: Build (release)
-        # The shared cache stores compiled artifacts but not the linked
-        # binary, so this is normally just a relink; it degrades to a full
-        # build if the cache was evicted.
-        run: cargo build --release --locked
+          name: ci-bins
+          path: ci-bins
+      - name: Install prebuilt binaries
+        # The image-regression harness spawns the emulator through the
+        # compile-time CARGO_BIN_EXE_copperline path, which on hosted
+        # runners is the same absolute path in every job of this repo --
+        # hence the copy into target/release.
+        run: |
+          chmod +x ci-bins/*
+          mkdir -p target/release
+          cp ci-bins/copperline target/release/copperline
       - name: Restore cached DiagROM
         id: diagrom-cache
         uses: actions/cache@v6
@@ -188,6 +221,13 @@ jobs:
           unzip -o DiagROM.zip DiagROM/DiagROM
           mv DiagROM/DiagROM diagrom.rom
           rm -rf DiagROM.zip DiagROM
+      - name: Verify DiagROM checksum
+        # Runs on the cache-hit path too, so a corrupted or tampered cache
+        # entry cannot slip through (the step above only checks the freshly
+        # downloaded archive). This pin is the extracted ROM inside the
+        # checksum-pinned stable V1.3 zip.
+        run: |
+          echo "1803bfff5d866de7605dbcf8445b590f36ed7cb7ee92166b240907e488cf0ff7  diagrom.rom" | shasum -a 256 -c
       - name: Boot smoke (serial banner + headless screenshot)
         # DiagROM boots as a Kickstart replacement, so the ROM is passed
         # positionally (the no-argument default is the bundled AROS ROM).
@@ -205,7 +245,7 @@ jobs:
         run: |
           mkdir -p test-assets
           cp diagrom.rom test-assets/
-          cargo test --release --locked --test image_regression diagrom -- --ignored --nocapture
+          ./ci-bins/image_regression diagrom --ignored --nocapture
       - name: Upload boot screenshot
         if: always()
         uses: actions/upload-artifact@v7
