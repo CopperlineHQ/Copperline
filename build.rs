@@ -29,6 +29,27 @@ fn main() {
     };
 
     println!("cargo:rustc-env=COPPERLINE_DISPLAY_VERSION={display_version}");
+
+    set_windows_main_thread_stack();
+}
+
+/// Give the Windows binaries the same ~8 MiB main-thread stack that Linux and
+/// macOS provide by default; the MSVC linker otherwise reserves only 1 MiB.
+///
+/// The winit event loop must run on the main thread, and the configuration
+/// screen's Run boots the machine from inside that event-loop callback -- so the
+/// machine build, the render-state rebuild, and the first present all run deep in
+/// the OS message-pump stack. That bounded-but-substantial work overflows the
+/// 1 MiB default (a silent exit / STATUS_STACK_OVERFLOW when the user clicks Run),
+/// while it fits comfortably in the 8 MiB the other platforms already give. Scoped
+/// to binary targets and, via the target cfg, to Windows MSVC builds only.
+fn set_windows_main_thread_stack() {
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    if target_os == "windows" && target_env == "msvc" {
+        const STACK_BYTES: usize = 8 * 1024 * 1024;
+        println!("cargo:rustc-link-arg-bins=/STACK:{STACK_BYTES}");
+    }
 }
 
 fn current_head_ref(git_dir: &str) -> Option<String> {
