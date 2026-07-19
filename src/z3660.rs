@@ -487,12 +487,15 @@ impl Z3660 {
                 }
             }
             OP_DRAWLINE => {
-                // From (x[0],y[0]) along the signed deltas (x[1],y[1]);
-                // pattern user[1] rotates per pixel (0xFFFF = solid). JAM2
-                // draws bg where the pattern bit is clear; the COMPLEMENT
-                // bit inverts the destination instead (shell XOR cursor).
+                // Bresenham from (x[0],y[0]) along the signed deltas
+                // (x[1],y[1]), per the P96 DrawLine spec. user[0] is
+                // Line.Length -- authoritative over the delta so a clipped
+                // line segment draws the right pixel count (0 = major-axis
+                // span). The 16-bit pattern (user[1]) rotates one bit per
+                // pixel; JAM2 draws bg on pattern-clear pixels, COMPLEMENT
+                // inverts the destination.
                 let pitch = pitch0 * 4;
-                let (ax, ay) = (
+                let (mut x, mut y) = (
                     i32::from(self.be16(g + 0x10) as i16),
                     i32::from(self.be16(g + 0x18) as i16),
                 );
@@ -500,36 +503,66 @@ impl Z3660 {
                     i32::from(self.be16(g + 0x12) as i16),
                     i32::from(self.be16(g + 0x1A) as i16),
                 );
+                let req_len = self.gfx_u16(0x20, 0);
                 let mut pattern = self.gfx_u16(0x20, 1) as u16;
                 if drawmode & INVERSVID != 0 {
                     pattern ^= 0xFFFF;
                 }
                 let complement = drawmode & COMPLEMENT != 0;
-                let jam2 = !complement && drawmode & 1 != 0;
-                let steps = dx.abs().max(dy.abs());
+                let jam2 = drawmode & 1 != 0;
+                let (dx_abs, dy_abs) = (dx.unsigned_abs() as i32, dy.unsigned_abs() as i32);
+                let x_step = if dx < 0 { -1 } else { 1 };
+                let y_step = if dy < 0 { -1 } else { 1 };
                 let mut cur_bit = 0x8000u16;
-                for i in 0..=steps {
-                    let px = ax + if steps == 0 { 0 } else { dx * i / steps };
-                    let py = ay + if steps == 0 { 0 } else { dy * i / steps };
-                    if px >= 0 && py >= 0 {
-                        let at = dst + py as usize * pitch + px as usize * bpp;
-                        if pattern & cur_bit != 0 {
-                            if complement {
-                                let d = self.px_get(at, bpp);
-                                let v = if bpp == 1 {
-                                    d ^ u32::from(mask)
-                                } else {
-                                    !d & (u32::MAX >> (8 * (4 - bpp)))
-                                };
-                                self.px_put(at, bpp, v);
-                            } else {
-                                self.px_put_masked(at, bpp, rgb0, mask);
-                            }
-                        } else if jam2 {
-                            self.px_put_masked(at, bpp, rgb1, mask);
-                        }
+                let put = |z: &mut Self, x: i32, y: i32, bit: u16| {
+                    if x < 0 || y < 0 {
+                        return;
                     }
-                    cur_bit = cur_bit.rotate_right(1);
+                    if pattern & bit == 0 && !jam2 {
+                        return;
+                    }
+                    let at = dst + y as usize * pitch + x as usize * bpp;
+                    if complement {
+                        let d = z.px_get(at, bpp);
+                        let v = if bpp == 1 {
+                            d ^ u32::from(mask)
+                        } else {
+                            !d & (u32::MAX >> (8 * (4 - bpp)))
+                        };
+                        z.px_put(at, bpp, v);
+                    } else {
+                        let pen = if pattern & bit != 0 { rgb0 } else { rgb1 };
+                        z.px_put_masked(at, bpp, pen, mask);
+                    }
+                };
+                put(self, x, y, cur_bit);
+                cur_bit = cur_bit.rotate_right(1);
+                if dx_abs >= dy_abs {
+                    let len = if req_len != 0 { req_len as i32 } else { dx_abs };
+                    let mut err = dx_abs >> 1;
+                    for _ in 0..len {
+                        err += dy_abs;
+                        if err >= dx_abs {
+                            err -= dx_abs;
+                            y += y_step;
+                        }
+                        x += x_step;
+                        put(self, x, y, cur_bit);
+                        cur_bit = cur_bit.rotate_right(1);
+                    }
+                } else {
+                    let len = if req_len != 0 { req_len as i32 } else { dy_abs };
+                    let mut err = dy_abs >> 1;
+                    for _ in 0..len {
+                        err += dx_abs;
+                        if err >= dy_abs {
+                            err -= dy_abs;
+                            x += x_step;
+                        }
+                        y += y_step;
+                        put(self, x, y, cur_bit);
+                        cur_bit = cur_bit.rotate_right(1);
+                    }
                 }
             }
             OP_P2C | OP_P2D => {
@@ -1265,6 +1298,65 @@ mod exec_tests {
         );
         ring(&mut z, &mut m, 5);
         assert_eq!(&z.vram[v..v + 4], &[3, 9, 3, 9]);
+    }
+
+    #[test]
+    fn drawline_steps_like_bresenham() {
+        let (mut z, mut m) = (Z3660::new(), mem());
+        let v = VRAM_OFFSET as usize;
+        // 8-bit surface, pitch 8 bytes (pitch[0] = 2 longwords). Line from
+        // (0,0) with delta (2,1), pen 5, solid pattern, JAM1. Bresenham on
+        // the major (x) axis puts the second pixel at (1,1) -- not (1,0) as
+        // the old interpolation did.
+        gfxdata(
+            &mut z,
+            0,
+            0,
+            5,
+            0,
+            [0, 2, 0],
+            [0, 1, 0],
+            0,
+            [2, 0],
+            0,
+            0,
+            0xFF,
+            0,
+        );
+        let g = GFXDATA_OFFSET;
+        z.vram[g + 0x22..g + 0x24].copy_from_slice(&0xFFFFu16.to_be_bytes()); // user[1] pattern
+        ring(&mut z, &mut m, 1);
+        assert_eq!(z.vram[v], 5, "(0,0)");
+        assert_eq!(z.vram[v + 8 + 1], 5, "(1,1)");
+        assert_eq!(z.vram[v + 8 + 2], 5, "(2,1)");
+        assert_eq!(z.vram[v + 1], 0, "(1,0) must be untouched");
+    }
+
+    #[test]
+    fn drawline_honors_line_length() {
+        let (mut z, mut m) = (Z3660::new(), mem());
+        let v = VRAM_OFFSET as usize;
+        // Horizontal delta (10,0) but Line.Length (user[0]) = 3, so only
+        // pixels 0..=3 are drawn -- the clipped segment, not the full delta.
+        gfxdata(
+            &mut z,
+            0,
+            0,
+            7,
+            0,
+            [0, 10, 0],
+            [0, 0, 0],
+            3,
+            [4, 0],
+            0,
+            0,
+            0xFF,
+            0,
+        );
+        let g = GFXDATA_OFFSET;
+        z.vram[g + 0x22..g + 0x24].copy_from_slice(&0xFFFFu16.to_be_bytes());
+        ring(&mut z, &mut m, 1);
+        assert_eq!(&z.vram[v..v + 6], &[7, 7, 7, 7, 0, 0]);
     }
 
     /// P2C decodes staged bitplanes to pens; P2D looks the pens up in the
