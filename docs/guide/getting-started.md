@@ -197,3 +197,16 @@ Copperline logs through the standard Rust `log`/`env_logger` machinery.
 `RUST_LOG=debug` (or `trace`) prints more detail from the CPU and MMIO
 layers, and is also how the [headless debugger](../debugger/headless)
 output is surfaced.
+
+## Crash reports
+
+If Copperline itself crashes, it writes the crash message and a backtrace
+to `copperline-crash.txt` before exiting, so the details survive launches
+where nobody is watching the terminal (double-clicking `copperline.exe` on
+Windows, desktop launchers). The file is written next to the executable
+where possible, falling back to the current working directory and then the
+system temporary directory when that location is read-only (installed
+Homebrew/AppImage/Flatpak layouts); a run from a terminal prints the path
+chosen. The first crash of a run replaces the file, and any further
+crashes in the same run are appended to it, so it always covers the most
+recent session -- attach it when filing a bug report.

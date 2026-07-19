@@ -30,4 +30,13 @@ own Kickstart ROM and disk/hard-disk images, and launch with:
 
 Run "copperline.exe --help" for the full command-line surface.
 
+Troubleshooting
+---------------
+If Copperline crashes, it writes the crash details to copperline-crash.txt
+next to copperline.exe (or, if that folder is read-only, to the current
+directory or the system temporary directory). The file is replaced at the
+first crash of each run, and any further crashes in the same run are
+appended to it; please attach it when reporting a bug at
+https://github.com/LinuxJedi/Copperline/issues
+
 Copperline is licensed under GPL-3.0-or-later; see LICENSE.txt.
