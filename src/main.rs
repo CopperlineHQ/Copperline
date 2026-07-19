@@ -397,6 +397,12 @@ where
                     .ok_or_else(|| anyhow!("--floppy-drives requires COUNT (1-4)"))?;
                 overrides.floppy_drives = Some(parse_floppy_drive_count(&value)?);
             }
+            "--floppy-speed" | "--fdd-speed" => {
+                let value = args.next().ok_or_else(|| {
+                    anyhow!("--floppy-speed requires PERCENT (100, 200, 400, 800, or 0 for turbo)")
+                })?;
+                overrides.floppy_speed = Some(parse_floppy_speed(&value)?);
+            }
             "--rtc-time" => {
                 overrides.rtc_time = Some(args.next().ok_or_else(|| {
                     anyhow!("--rtc-time requires Unix seconds or \"YYYY-MM-DD HH:MM[:SS]\"")
@@ -892,6 +898,7 @@ fn print_help() {
          --fast SIZE                    Zorro II fast RAM size, e.g. 0, 1M, 4M, 8M\n  \
          --slow SIZE                    trapdoor slow RAM at $C00000, e.g. 0, 512K\n  \
          --floppy-drives COUNT          wired floppy drives, 1-4 (DF0 plus externals)\n  \
+         --floppy-speed PERCENT         drive speed: 100, 200, 400, 800, or 0 (turbo)\n  \
          --rtc-time TIME                seed the battery clock (implies fitting one) with\n  \
          \x20                            Unix seconds or \"YYYY-MM-DD HH:MM[:SS]\"; it then\n  \
          \x20                            ticks in emulated time, so runs are deterministic\n  \
@@ -1009,6 +1016,17 @@ fn parse_floppy_drive_idx(s: &str, option: &str) -> Result<usize> {
         return Err(anyhow!("{option} drive must be df0, df1, df2, or df3"));
     }
     Ok(idx)
+}
+
+fn parse_floppy_speed(s: &str) -> Result<u16> {
+    const MSG: &str = "--floppy-speed PERCENT must be 100, 200, 400, 800, or 0 (turbo)";
+    let speed: u16 = s.trim().parse().map_err(|_| anyhow!(MSG))?;
+    if speed != copperline::floppy::SPEED_TURBO
+        && !copperline::floppy::SUPPORTED_SPEED_PERCENTS.contains(&speed)
+    {
+        return Err(anyhow!(MSG));
+    }
+    Ok(speed)
 }
 
 fn parse_floppy_drive_count(s: &str) -> Result<u8> {
@@ -2222,6 +2240,22 @@ mod tests {
         );
         let err = parse(&["--floppy-drives", "0"]).unwrap_err();
         assert!(err.to_string().contains("from 1 to 4"), "{err:#}");
+        Ok(())
+    }
+
+    #[test]
+    fn floppy_speed_override_parses_with_alias() -> Result<()> {
+        assert_eq!(
+            parse(&["--floppy-speed", "800"])?.overrides.floppy_speed,
+            Some(800)
+        );
+        // 0 selects turbo.
+        assert_eq!(
+            parse(&["--fdd-speed", "0"])?.overrides.floppy_speed,
+            Some(0)
+        );
+        let err = parse(&["--floppy-speed", "150"]).unwrap_err();
+        assert!(err.to_string().contains("100, 200, 400, 800"), "{err:#}");
         Ok(())
     }
 

@@ -44,6 +44,7 @@ range checks as the equivalent TOML fields:
 | `--fast SIZE` | `[memory] fast` | `0`, `1M`, `4M`, `8M`, ... |
 | `--slow SIZE` | `[memory] slow` | `0`, up to `512K` |
 | `--floppy-drives COUNT` | `[floppy] drives` | `1` to `4` wired drives (`DF0:` plus external drives) |
+| `--floppy-speed PERCENT` | `[floppy] speed` | `100` (real), `200`, `400`, `800`, or `0` (turbo) |
 | `--joystick MODE` | `[input] joystick` | `gamepad` (default), `keyboard` |
 | `--port1 DEVICE` | `[input] port1` | `mouse` (default), `joystick`, `cd32`, `analogue`, `none` |
 | `--port2 DEVICE` | `[input] port2` | same devices; default `joystick` (`cd32` on the CD32 profile) |
@@ -607,6 +608,7 @@ through a loopback device such as BlackHole needs none.
 ```toml
 [floppy]
 drives = 2                 # DF0 and DF1 connected; default is DF0 only
+speed = 100                # 100/200/400/800 percent, or 0 for turbo
 
 [floppy.df0]
 path = "demo.adf"            # single image, or:
@@ -620,6 +622,22 @@ the internal drive; DF1-DF3 are external drives that answer the standard
 Amiga external-drive ID protocol when connected. A configured disk image
 also connects that drive automatically, so existing configs that name
 `[floppy.df1]` .. `[floppy.df3]` keep working.
+
+`speed` accelerates the emulated drives beyond the authentic data rate.
+`100` (the default) is real speed. `200`, `400`, and `800` clock the whole
+data path -- platter rotation, the MFM read shifter, sync detection,
+DSKBYTR, and DMA pacing -- at that multiple, so everything software can
+observe stays bit-identical to real speed, only compressed in time. `0`
+selects turbo: a started disk DMA transfer completes almost instantly
+(deferred by two scanlines, matching other emulators' turbo modes, so
+loaders that clear stale interrupt flags right after starting a transfer
+still see the completion). Drive mechanics are never accelerated: motor
+spin-up, head stepping, and post-seek settle always run at real time.
+Faster-than-real speeds are a compatibility trade-off, exactly as in other
+emulators: the operating system and most loaders tolerate them, but
+software that times its own loading against the beam, CIA timers, or music
+playback can break. The setting can be changed live from the runtime menu
+("Floppy Speed") without restarting the machine.
 
 Supported image formats: standard 901120-byte DD ADF, gzip-compressed
 images (ADZ), single file ZIP archives, DMS archives, UAE extended ADF, and

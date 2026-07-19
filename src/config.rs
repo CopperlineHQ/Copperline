@@ -656,12 +656,19 @@ impl Default for AudioConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FloppyConfig {
     pub drives: [Option<FloppyDriveConfig>; 4],
+    /// Emulated drive speed as a data-rate percentage: 100 (real speed),
+    /// 200/400/800 (that many times faster), or 0 for turbo, where DMA
+    /// transfers complete almost instantly. Values above 100 keep the full
+    /// bit-level pipeline, only compressed in time; drive mechanics (motor
+    /// spin-up, stepping) always run at real speed.
+    pub speed: u16,
 }
 
 impl Default for FloppyConfig {
     fn default() -> Self {
         Self {
             drives: std::array::from_fn(|_| None),
+            speed: 100,
         }
     }
 }
@@ -1235,6 +1242,9 @@ pub struct ConfigOverrides {
     pub fast: Option<String>,
     pub slow: Option<String>,
     pub floppy_drives: Option<u8>,
+    /// Drive speed override (`--floppy-speed`): a percentage (100/200/400/
+    /// 800) or 0 for turbo. Same values as `[floppy] speed`.
+    pub floppy_speed: Option<u16>,
     /// Initial joystick input mode (`--joystick`): "gamepad" or "keyboard"
     /// ("auto" still accepted as a compatibility alias). Validated by the same
     /// parser as `[input] joystick`.
@@ -1294,6 +1304,7 @@ impl ConfigOverrides {
             && self.fast.is_none()
             && self.slow.is_none()
             && self.floppy_drives.is_none()
+            && self.floppy_speed.is_none()
             && self.joystick.is_none()
             && self.port1.is_none()
             && self.port2.is_none()
@@ -1341,6 +1352,9 @@ impl ConfigOverrides {
         }
         if let Some(drives) = self.floppy_drives {
             raw.floppy.drives = Some(drives);
+        }
+        if let Some(speed) = self.floppy_speed {
+            raw.floppy.speed = Some(speed);
         }
         if let Some(joystick) = &self.joystick {
             raw.input.joystick = Some(joystick.clone());
@@ -1925,6 +1939,9 @@ pub(crate) struct RawFloppy {
     /// so the valid range is 1-4.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) drives: Option<u8>,
+    /// Drive speed percentage (100/200/400/800) or 0 for turbo.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) speed: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) df0: Option<RawFloppyDrive>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3059,6 +3076,16 @@ fn parse_floppy(raw: RawFloppy) -> Result<(FloppyConfig, [bool; 4], [Vec<PathBuf
         Some(n @ 1..=4) => Some(usize::from(n)),
         Some(n) => bail!("[floppy] drives must be between 1 and 4, got {n}"),
     };
+    let speed = match raw.speed {
+        None => 100,
+        Some(s)
+            if s == crate::floppy::SPEED_TURBO
+                || crate::floppy::SUPPORTED_SPEED_PERCENTS.contains(&s) =>
+        {
+            s
+        }
+        Some(s) => bail!("[floppy] speed must be 100, 200, 400, 800, or 0 (turbo), got {s}"),
+    };
     let raws = [raw.df0, raw.df1, raw.df2, raw.df3];
     let mut drives: [Option<FloppyDriveConfig>; 4] = std::array::from_fn(|_| None);
     let mut connected = match connected_count {
@@ -3115,7 +3142,7 @@ fn parse_floppy(raw: RawFloppy) -> Result<(FloppyConfig, [bool; 4], [Vec<PathBuf
         });
         playlists[idx] = images;
     }
-    Ok((FloppyConfig { drives }, connected, playlists))
+    Ok((FloppyConfig { drives, speed }, connected, playlists))
 }
 
 fn validate_floppy_image_path(idx: usize, path: &Path) -> Result<()> {
@@ -4854,6 +4881,37 @@ mod tests {
         )?;
         assert_eq!(cfg.floppy_connected, [true, true, true, false]);
         assert!(cfg.floppy.drives.iter().all(Option::is_none));
+        Ok(())
+    }
+
+    #[test]
+    fn floppy_speed_defaults_and_parses_supported_values() -> Result<()> {
+        assert_eq!(parse_config("")?.floppy.speed, 100);
+        for speed in [100u16, 200, 400, 800, 0] {
+            let cfg = parse_config(&format!("[floppy]\nspeed = {speed}\n"))?;
+            assert_eq!(cfg.floppy.speed, speed);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn floppy_speed_rejects_unsupported_values() {
+        for speed in [50, 150, 300, 1600] {
+            let err = parse_config(&format!("[floppy]\nspeed = {speed}\n")).unwrap_err();
+            assert!(
+                err.to_string().contains("[floppy] speed"),
+                "unexpected error for speed {speed}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn floppy_speed_cli_override_reaches_config() -> Result<()> {
+        let cfg = load_overrides(&ConfigOverrides {
+            floppy_speed: Some(0),
+            ..Default::default()
+        })?;
+        assert_eq!(cfg.floppy.speed, 0);
         Ok(())
     }
 

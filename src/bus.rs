@@ -3234,6 +3234,9 @@ impl Bus {
         std::mem::swap(&mut self.paula.audio, &mut live.paula.audio);
         std::mem::swap(&mut self.parallel_port, &mut live.parallel_port);
         self.blitter_trace = live.blitter_trace.take();
+        // Drive speed is host configuration, not machine state: a loaded
+        // state keeps the running session's setting.
+        self.floppy.set_speed_percent(live.floppy.speed_percent());
     }
 
     pub(crate) fn reset_transient_video_after_state_load(&mut self) {

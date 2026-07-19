@@ -88,6 +88,7 @@ pub enum MenuItem {
     SamplerInput,
     SamplerGain,
     PixelAspect,
+    FloppySpeed,
     Fullscreen,
     AudioOutput,
     Warp,
@@ -105,9 +106,9 @@ pub enum MenuItem {
 /// sampler is attached, so the list is built per open rather than fixed.
 pub fn menu_items(midi_active: bool, sampler_active: bool) -> Vec<MenuItem> {
     let _ = midi_active;
-    // 9 leading + up to 2 MIDI + 2 sampler + pixel aspect + 10 trailing
-    // items = 24, sized so appending never reallocates.
-    let mut items = Vec::with_capacity(24);
+    // 9 leading + up to 2 MIDI + 2 sampler + pixel aspect + floppy speed +
+    // 10 trailing items = 25, sized so appending never reallocates.
+    let mut items = Vec::with_capacity(25);
     items.extend([
         MenuItem::MachineConfig,
         MenuItem::FrameAnalyzer,
@@ -129,6 +130,7 @@ pub fn menu_items(midi_active: bool, sampler_active: bool) -> Vec<MenuItem> {
         items.push(MenuItem::SamplerGain);
     }
     items.push(MenuItem::PixelAspect);
+    items.push(MenuItem::FloppySpeed);
     items.extend([
         MenuItem::Fullscreen,
         MenuItem::Warp,
@@ -158,6 +160,8 @@ pub struct MenuLabels<'a> {
     /// through the Port 1/2 Device items).
     pub port_devices: [crate::bus::PortDevice; 2],
     pub pixel_aspect: PixelAspect,
+    /// Current `[floppy] speed` value (a percentage, or 0 for turbo).
+    pub floppy_speed: u16,
     /// Current MIDI input/output device names (empty when not applicable).
     #[cfg_attr(not(feature = "midi"), allow(dead_code))]
     pub midi_in: &'a str,
@@ -189,6 +193,14 @@ fn menu_item_label(item: MenuItem, s: MenuLabels) -> String {
                 PixelAspect::Square => "square",
             };
             format!("Pixel Aspect {:>8}", format!("[{value}]"))
+        }
+        // Right-pad like Warp Limit below so the closing bracket stays put
+        // as the value width changes (100% vs turbo).
+        MenuItem::FloppySpeed => {
+            format!(
+                "Floppy Speed {:>7}",
+                format!("[{}]", crate::floppy::speed_label(s.floppy_speed))
+            )
         }
         #[cfg(feature = "midi")]
         MenuItem::MidiInput => format!("MIDI In  [{}]", clip_menu_value(s.midi_in)),
@@ -4884,6 +4896,7 @@ mod tests {
                 crate::bus::PortDevice::Joystick,
             ],
             pixel_aspect: PixelAspect::Tv,
+            floppy_speed: 100,
             midi_in: "",
             midi_out: "",
             audio_output: "",
@@ -4931,6 +4944,14 @@ mod tests {
                                         // The longest device label.
                                         port_devices: [crate::bus::PortDevice::Analogue; 2],
                                         pixel_aspect: aspect,
+                                        // Rides warp's sweep: "turbo" is the
+                                        // widest value, "100%" the tallest
+                                        // percent form.
+                                        floppy_speed: if warp {
+                                            crate::floppy::SPEED_TURBO
+                                        } else {
+                                            100
+                                        },
                                         midi_in: long,
                                         midi_out: long,
                                         audio_output: long,
@@ -5483,6 +5504,7 @@ mod tests {
                     crate::bus::PortDevice::Joystick,
                 ],
                 pixel_aspect: PixelAspect::Tv,
+                floppy_speed: 100,
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
@@ -5530,6 +5552,7 @@ mod tests {
                     crate::bus::PortDevice::Joystick,
                 ],
                 pixel_aspect: PixelAspect::Tv,
+                floppy_speed: 100,
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
@@ -5565,6 +5588,7 @@ mod tests {
                     crate::bus::PortDevice::Joystick,
                 ],
                 pixel_aspect: PixelAspect::Tv,
+                floppy_speed: 100,
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
@@ -5616,6 +5640,7 @@ mod tests {
                     crate::bus::PortDevice::Joystick,
                 ],
                 pixel_aspect: PixelAspect::Tv,
+                floppy_speed: 100,
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
@@ -5691,6 +5716,7 @@ mod tests {
                     crate::bus::PortDevice::Joystick,
                 ],
                 pixel_aspect: PixelAspect::Tv,
+                floppy_speed: 100,
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
@@ -5753,6 +5779,7 @@ mod tests {
                     crate::bus::PortDevice::Joystick,
                 ],
                 pixel_aspect: PixelAspect::Tv,
+                floppy_speed: 100,
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
@@ -5812,6 +5839,7 @@ mod tests {
                     crate::bus::PortDevice::Joystick,
                 ],
                 pixel_aspect: PixelAspect::Tv,
+                floppy_speed: 100,
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
@@ -5872,6 +5900,7 @@ mod tests {
                     crate::bus::PortDevice::Joystick,
                 ],
                 pixel_aspect: PixelAspect::Tv,
+                floppy_speed: 100,
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
@@ -5985,6 +6014,7 @@ mod tests {
                     crate::bus::PortDevice::Joystick,
                 ],
                 pixel_aspect: PixelAspect::Tv,
+                floppy_speed: 100,
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
@@ -6058,6 +6088,7 @@ mod tests {
                     crate::bus::PortDevice::Joystick,
                 ],
                 pixel_aspect: PixelAspect::Tv,
+                floppy_speed: 100,
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
@@ -6142,6 +6173,7 @@ mod tests {
                     crate::bus::PortDevice::Joystick,
                 ],
                 pixel_aspect: PixelAspect::Tv,
+                floppy_speed: 100,
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
@@ -6263,6 +6295,7 @@ mod tests {
                     crate::bus::PortDevice::Joystick,
                 ],
                 pixel_aspect: PixelAspect::Tv,
+                floppy_speed: 100,
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
@@ -6314,6 +6347,7 @@ mod tests {
                     crate::bus::PortDevice::Joystick,
                 ],
                 pixel_aspect: PixelAspect::Tv,
+                floppy_speed: 100,
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
@@ -6356,6 +6390,7 @@ mod tests {
                     crate::bus::PortDevice::Joystick,
                 ],
                 pixel_aspect: PixelAspect::Tv,
+                floppy_speed: 100,
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
@@ -6438,6 +6473,7 @@ mod tests {
                     crate::bus::PortDevice::Joystick,
                 ],
                 pixel_aspect: PixelAspect::Tv,
+                floppy_speed: 100,
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
@@ -6487,6 +6523,7 @@ mod tests {
                     crate::bus::PortDevice::Joystick,
                 ],
                 pixel_aspect: PixelAspect::Tv,
+                floppy_speed: 100,
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
@@ -6529,6 +6566,7 @@ mod tests {
                     crate::bus::PortDevice::Joystick,
                 ],
                 pixel_aspect: PixelAspect::Tv,
+                floppy_speed: 100,
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
@@ -6575,6 +6613,7 @@ mod tests {
                 crate::bus::PortDevice::Joystick,
             ],
             pixel_aspect: PixelAspect::Tv,
+            floppy_speed: 100,
             midi_in: "",
             midi_out: "",
             audio_output: "",

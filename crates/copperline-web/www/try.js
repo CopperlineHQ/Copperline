@@ -316,6 +316,7 @@ async function boot() {
     pendingDisk = null;
     machine.set_volume_percent(Number($('vol').value));
     if (floppySoundsToggle) machine.set_floppy_sounds(floppySoundsToggle.checked);
+    if (floppySpeed !== null) machine.set_floppy_speed(floppySpeed);
     emu = machine;
     window.__emu = emu; // for debugging/automation
     lastFddTrack = null; // a new machine starts the track latch over
@@ -1066,6 +1067,49 @@ floppySoundsToggle?.addEventListener('change', () => {
   if (emu) emu.set_floppy_sounds(floppySoundsToggle.checked);
 });
 
+// The floppy drive speed control, always visible: a page shell can host
+// its own <select id="floppy-speed"> (option values 100/200/400/800 for
+// percent, 0 for turbo) wherever its control bar wants it; without one
+// the control builds itself directly below the canvas shell with its own
+// styling, like the status strip. Applied at boot and live on change; a
+// ?fdspeed= link overrides the initial choice.
+const FLOPPY_SPEEDS = [100, 200, 400, 800, 0];
+const FLOPPY_SPEED_LABELS = { 100: '100%', 200: '200%', 400: '400%', 800: '800%', 0: 'Turbo' };
+function buildFloppySpeedControl() {
+  const row = document.createElement('label');
+  row.style.cssText =
+    'display:inline-flex;align-items:center;gap:0.45rem;margin:0.4rem 0;' +
+    'font:600 0.8rem "IBM Plex Mono",ui-monospace,monospace;' +
+    'color:rgba(255,255,255,0.75);';
+  row.appendChild(document.createTextNode('Floppy speed'));
+  const sel = document.createElement('select');
+  sel.style.cssText =
+    'padding:0.15rem 0.4rem;border-radius:6px;cursor:pointer;' +
+    'border:1px solid rgba(255,255,255,0.35);' +
+    'background:rgba(10,13,22,0.6);color:rgba(255,255,255,0.85);' +
+    'font:inherit;';
+  for (const value of FLOPPY_SPEEDS) {
+    const option = document.createElement('option');
+    option.value = String(value);
+    option.textContent = FLOPPY_SPEED_LABELS[value];
+    sel.appendChild(option);
+  }
+  row.appendChild(sel);
+  shell.insertAdjacentElement('afterend', row);
+  return sel;
+}
+const floppySpeedSel = $('floppy-speed') ?? buildFloppySpeedControl();
+let floppySpeed = null; // null = leave the emulator at its default (100%)
+function setFloppySpeed(value) {
+  if (!FLOPPY_SPEEDS.includes(value)) return;
+  floppySpeed = value;
+  floppySpeedSel.value = String(value);
+  if (emu) emu.set_floppy_speed(value);
+}
+floppySpeedSel.addEventListener('change', () => {
+  setFloppySpeed(Number(floppySpeedSel.value));
+});
+
 // --- status bar --------------------------------------------------------
 // Front-panel status strip mirroring the desktop status bar's LED block:
 // PWR/FDD LEDs (HDD/CD only on machines fitted with the drive), the
@@ -1448,5 +1492,15 @@ const requestedJoy = (pageParams.get('joy') ?? $('joy').dataset.default ?? '').t
 if (requestedJoy && requestedJoy !== joyMode) {
   if (JOY_MODES.includes(requestedJoy)) setJoyMode(requestedJoy);
   else if (requestedJoy === 'touch') setJoyMode('keys');
+}
+
+// Starting floppy speed: the speed select's initial value, overridden
+// per link by ?fdspeed=100|200|400|800|0|turbo. Applied to the machine
+// at boot.
+const requestedSpeed = (pageParams.get('fdspeed') ?? '').trim();
+if (requestedSpeed) {
+  setFloppySpeed(requestedSpeed === 'turbo' ? 0 : Number(requestedSpeed));
+} else {
+  setFloppySpeed(Number(floppySpeedSel.value));
 }
 load();

@@ -436,8 +436,15 @@ floppy_sounds_volume = 100
 # ADF, and read-only SCP flux captures. DMS/gzip/SCP are always treated as
 # write-protected.
 #
+# Drive speed: 100 (real, the default), 200/400/800 (that many percent of
+# real speed; the whole data path stays bit-identical, just faster), or 0
+# for turbo (disk DMA transfers complete almost instantly). Mechanics
+# (motor spin-up, stepping) always run at real speed. Faster-than-real
+# loading is a compatibility trade-off; some software times its loading.
+#
 # [floppy]
 # drives = 2
+# speed = 100
 #
 # [floppy.df0]
 # path = "Workbench.adf"

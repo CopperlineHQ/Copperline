@@ -85,6 +85,34 @@ const MIN_STEP_PULSE_CCK: u64 = 140;
 const SEEK_REVERSAL_SETTLE_CCK: u32 = PAULA_CLOCK_HZ / 1_000 * 18; // ~18 ms on reversal
                                                                    // 300 RPM.
 const ROTATION_HZ: u32 = 5;
+// Turbo mode defers the burst completion of a freshly armed DMA by two
+// scanlines of emulated time (the same deferral WinUAE/FS-UAE apply to
+// their instant path): loaders commonly write DSKLEN and only then clear
+// stale INTREQ bits before enabling the DSKBLK interrupt, and a completion
+// raised in the very next colour clock would be eaten by that clear.
+const TURBO_DMA_GRACE_CCK: u32 = 454;
+
+/// Drive data-rate percentages the `[floppy] speed` option accepts, besides
+/// 0 (turbo). Whole multiples of real speed keep the cck -> bitcell scaling
+/// exact, so the entire read/write pipeline (shifter, sync, DSKBYTR, index)
+/// stays bit-identical to real speed, only compressed in time.
+pub const SUPPORTED_SPEED_PERCENTS: [u16; 4] = [100, 200, 400, 800];
+/// `[floppy] speed` value selecting turbo mode.
+pub const SPEED_TURBO: u16 = 0;
+
+fn default_speed_percent() -> u16 {
+    100
+}
+
+/// Human-readable label for a `[floppy] speed` value: "100%".."800%", or
+/// "turbo" for `SPEED_TURBO`. Shared by the menu, launcher, and OSD.
+pub fn speed_label(percent: u16) -> String {
+    if percent == SPEED_TURBO {
+        "turbo".to_string()
+    } else {
+        format!("{percent}%")
+    }
+}
 // 11 AmigaDOS sectors occupy 5984 MFM words. PAL Amiga floppy read timing is
 // slightly faster than nominal 250 kbit/s, so a normal 300 RPM revolution is
 // about 12668 raw bytes (6334 16-bit MFM words). Keeping generated ADF streams
@@ -182,6 +210,26 @@ pub struct FloppyController {
     dma: Option<DiskDma>,
     direct_write: Option<DiskDirectWrite>,
     dma_addr_mask: u32,
+    /// Emulated drive speed: a data-rate percentage from
+    /// `SUPPORTED_SPEED_PERCENTS`, or `SPEED_TURBO` (0) for turbo, where DMA
+    /// transfers complete almost instantly. Host configuration rather than
+    /// machine state: never serialized, carried across save-state loads by
+    /// `Bus::adopt_host_resources`.
+    #[serde(skip, default = "default_speed_percent")]
+    speed_percent: u16,
+    /// Turbo: emulated cck left before a freshly armed DMA may burst to
+    /// completion (see `TURBO_DMA_GRACE_CCK`). Transient pacing state for a
+    /// host speed hack, so not serialized; a state restored mid-grace just
+    /// bursts on the next tick.
+    #[serde(skip)]
+    turbo_grace_cck: u32,
+    /// Turbo: the pending DMA already had its burst attempt. A transfer the
+    /// burst cannot finish (a sync word missing from the track, a fuzzy
+    /// multi-revolution image moving the sync) falls back to normal pacing
+    /// instead of rescanning the track on every tick; the next DSKLEN
+    /// arming tries again, like FS-UAE's per-DSKLEN turbo scan.
+    #[serde(skip)]
+    turbo_burst_spent: bool,
     // Head-step pulses since the last take_sound_steps() drain; feeds
     // the synthesized drive sound effects.
     sound_steps: u32,
@@ -232,6 +280,9 @@ impl Default for FloppyController {
             dma: None,
             direct_write: None,
             dma_addr_mask: 0x001F_FFFF,
+            speed_percent: default_speed_percent(),
+            turbo_grace_cck: 0,
+            turbo_burst_spent: false,
             sound_steps: 0,
             read_shifter: PaulaDiskReadDpllFifo::new(),
             // Idle at power-on; the first tick confirms it.
@@ -253,6 +304,7 @@ impl FloppyController {
 
     pub fn from_config(config: &FloppyConfig) -> Result<Self> {
         let mut ctrl = Self { ..Self::default() };
+        ctrl.set_speed_percent(config.speed);
         for (idx, drive_cfg) in config.drives.iter().enumerate() {
             if let Some(drive_cfg) = drive_cfg {
                 ctrl.drives[idx] = FloppyDrive::load(drive_cfg)
@@ -283,6 +335,47 @@ impl FloppyController {
     pub fn set_dma_addr_mask(&mut self, mask: u32) {
         self.dma_addr_mask = mask | 1;
         self.dskpt &= self.dma_ptr_mask();
+    }
+
+    /// Set the emulated drive speed: a percentage from
+    /// `SUPPORTED_SPEED_PERCENTS` or `SPEED_TURBO` (0). Unsupported values
+    /// fall back to real speed. Takes effect immediately; drive mechanics
+    /// (motor spin-up, stepping, settle) are never accelerated.
+    pub fn set_speed_percent(&mut self, percent: u16) {
+        self.speed_percent =
+            if percent == SPEED_TURBO || SUPPORTED_SPEED_PERCENTS.contains(&percent) {
+                percent
+            } else {
+                default_speed_percent()
+            };
+        // Entering turbo starts a fresh grace window and burst attempt, so a
+        // live toggle with a DMA already in flight defers its burst exactly
+        // like a freshly armed transfer would, instead of completing on the
+        // very next tick (or staying blocked by a spent attempt from an
+        // earlier turbo phase).
+        if self.turbo() {
+            self.turbo_grace_cck = TURBO_DMA_GRACE_CCK;
+            self.turbo_burst_spent = false;
+        } else {
+            self.turbo_grace_cck = 0;
+        }
+    }
+
+    pub fn speed_percent(&self) -> u16 {
+        self.speed_percent
+    }
+
+    /// Whole multiple of real speed the data path runs at. Turbo paces the
+    /// platter at real speed between bursts, so it maps to 1 here.
+    fn speed_multiplier(&self) -> u32 {
+        match self.speed_percent {
+            0..=100 => 1,
+            p => u32::from(p / 100),
+        }
+    }
+
+    fn turbo(&self) -> bool {
+        self.speed_percent == SPEED_TURBO
     }
 
     pub fn cia_a_status_bits(&self) -> u8 {
@@ -758,12 +851,91 @@ impl FloppyController {
         };
         let is_selected = selected_drive == Some(idx);
 
-        match active_dma {
+        // Speed >100% overclocks the data path: the platter (and with it the
+        // shifter, sync detection, DSKBYTR, and DMA pacing) sees a whole
+        // multiple of the elapsed time, leaving every per-cell decision
+        // bit-identical to real speed. Mechanics (motor, seek, settle, index
+        // pulse width) above tick at real time regardless.
+        let data_cck = cck.saturating_mul(self.speed_multiplier());
+        let mut irq = match active_dma {
             Some((dma_idx, _, true)) if dma_idx == idx => {
-                self.tick_write_dma(idx, cck, is_selected, chip_ram)
+                self.tick_write_dma(idx, data_cck, is_selected, chip_ram)
             }
-            _ => self.tick_read_and_rotate(idx, cck, dmacon, is_selected, chip_ram),
+            _ => self.tick_read_and_rotate(idx, data_cck, dmacon, is_selected, chip_ram),
+        };
+        if self.turbo() {
+            irq |= self.turbo_burst(cck, dmacon, chip_ram);
         }
+        irq
+    }
+
+    /// Turbo: spin the platter forward far enough, in zero emulated time, to
+    /// complete the pending DMA through the ordinary bit engine -- first to
+    /// the next DSKSYNC match when the read is sync-waiting, then to the
+    /// transfer's end. Everything (shifter framing, sync realign, the write
+    /// path, DSKBLK) behaves exactly as if the time had really passed; only
+    /// the machine's clock does not advance. Mirrors FS-UAE's turbo, which
+    /// completes the transfer inside the DSKLEN write: here the deferred
+    /// `TURBO_DMA_GRACE_CCK` window stands in for its two-scanline delay.
+    /// A sync word that never matches leaves the DMA to normal pacing, like
+    /// FS-UAE falling back to its bit engine.
+    fn turbo_burst(&mut self, cck: u32, dmacon: u16, chip_ram: &mut [u8]) -> bool {
+        if self.turbo_grace_cck > 0 {
+            self.turbo_grace_cck = self.turbo_grace_cck.saturating_sub(cck);
+            if self.turbo_grace_cck > 0 {
+                return false;
+            }
+        }
+        if self.turbo_burst_spent {
+            return false;
+        }
+        let Some(dma) = self.dma.as_ref() else {
+            return false;
+        };
+        if !self.dma_enabled(dmacon) {
+            return false;
+        }
+        let (idx, write) = (dma.drive, dma.write);
+        // Mechanics stay honest: a drive that is still spinning up or whose
+        // head is settling after a step delivers no stable cells, so the
+        // burst waits for it like real-time pacing would.
+        if !self.drives[idx].ready() || self.drives[idx].seek_settle_cck > 0 {
+            return false;
+        }
+        let is_selected = self.selected_drive() == Some(idx);
+        let mut irq = false;
+        // Two phases at most (reach sync, then drain the transfer), plus one
+        // spare for per-word framing rounding.
+        for _ in 0..3 {
+            let Some(dma) = self.dma.as_ref() else { break };
+            // Slack above the exact prediction absorbs sub-word framing
+            // phase; the engine idles through any excess.
+            let burst = if dma.wait_sync {
+                let drive = &self.drives[idx];
+                let Some(rev) = drive.cur_rev() else { break };
+                let Some(bits) = rev.bits_until_sync(drive.rotation_bit, self.dsksync) else {
+                    break;
+                };
+                drive.head_cck_for_bits(bits.max(1)) + 32
+            } else if let Some(pred) = self.next_completion_cck_raw(dmacon) {
+                u64::from(pred) + 32
+            } else {
+                break;
+            };
+            let burst = burst.min(u64::from(u32::MAX)) as u32;
+            irq |= if write {
+                self.tick_write_dma(idx, burst, is_selected, chip_ram)
+            } else {
+                self.tick_read_and_rotate(idx, burst, dmacon, is_selected, chip_ram)
+            };
+            if irq {
+                break;
+            }
+        }
+        // A transfer still pending got its one attempt; leave it to normal
+        // pacing until the next DSKLEN arming.
+        self.turbo_burst_spent = self.dma.is_some();
+        irq
     }
 
     /// Advance the reading drive's head one MFM cell at a time at the recovered
@@ -956,7 +1128,35 @@ impl FloppyController {
         std::mem::take(&mut self.sync_irq_latch)
     }
 
+    /// Scale a raw event-horizon prediction for `drive_idx` to the
+    /// configured drive speed: at percentage speeds the events land a whole
+    /// multiple sooner, and a turbo burst completes them within the grace
+    /// window. Predictions only cap the idle fast-forward, so an
+    /// under-estimate is always safe -- but a 1-cck prediction the burst
+    /// cannot actually honour (drive spinning up, head settling, attempt
+    /// already spent) would pin STOP-state fast-forward to single steps for
+    /// the whole spin-up, so those cases keep the normal-paced deadline.
+    fn scale_prediction(&self, drive_idx: usize, cck: u32) -> u32 {
+        if self.turbo() {
+            if self.turbo_grace_cck > 0 {
+                return cck.min(self.turbo_grace_cck).max(1);
+            }
+            let drive = &self.drives[drive_idx];
+            if !self.turbo_burst_spent && drive.ready() && drive.seek_settle_cck == 0 {
+                return 1;
+            }
+            return cck.max(1);
+        }
+        (cck / self.speed_multiplier()).max(1)
+    }
+
     pub fn next_completion_cck(&self, dmacon: u16) -> Option<u32> {
+        let drive_idx = self.dma.as_ref()?.drive;
+        self.next_completion_cck_raw(dmacon)
+            .map(|cck| self.scale_prediction(drive_idx, cck))
+    }
+
+    fn next_completion_cck_raw(&self, dmacon: u16) -> Option<u32> {
         let dma = self.dma.as_ref()?;
         if !self.dma_enabled(dmacon) || dma.wait_sync {
             return None;
@@ -992,7 +1192,8 @@ impl FloppyController {
         }
         let rev = drive.cur_rev()?;
         let bits = rev.bits_until_sync(drive.rotation_bit, self.dsksync)?;
-        Some((drive.head_cck_for_bits(bits).min(u64::from(u32::MAX)) as u32).max(1))
+        let raw = (drive.head_cck_for_bits(bits).min(u64::from(u32::MAX)) as u32).max(1);
+        Some(self.scale_prediction(dma.drive, raw))
     }
 
     pub fn next_index_pulse_cck(&self) -> Option<u32> {
@@ -1010,12 +1211,14 @@ impl FloppyController {
             return None;
         }
         let bits_to_end = rev.bit_len - (drive.rotation_bit % rev.bit_len);
-        Some(
-            (drive
-                .head_cck_for_bits(bits_to_end)
-                .min(u64::from(u32::MAX)) as u32)
-                .max(1),
-        )
+        let raw = (drive
+            .head_cck_for_bits(bits_to_end)
+            .min(u64::from(u32::MAX)) as u32)
+            .max(1);
+        // The platter spins at the data-rate multiple; turbo bursts do not
+        // move the index prediction (they are bounded by the completion
+        // prediction above, which already caps the fast-forward).
+        Some((raw / self.speed_multiplier()).max(1))
     }
 
     pub fn dma_active(&self, dmacon: u16) -> bool {
@@ -1109,6 +1312,10 @@ impl FloppyController {
             write_start_word,
             write_start_bit,
         });
+        if self.turbo() {
+            self.turbo_grace_cck = TURBO_DMA_GRACE_CCK;
+            self.turbo_burst_spent = false;
+        }
         debug!(
             "floppy DMA start df{} track={} write={} words={} sync_wait={} msb_sync={}",
             idx, track, write, remaining, word_sync, msb_sync
@@ -3764,6 +3971,7 @@ mod tests {
         }
         let path = temp_adz(&adf)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -3794,6 +4002,7 @@ mod tests {
         let ext_image = fs::read(&ext_path)?;
         let path = temp_gzip("test.ext.adf.gz", &ext_image)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -3831,6 +4040,7 @@ mod tests {
         image.extend_from_slice(&0u32.to_be_bytes());
         fs::write(&path, image)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -3859,6 +4069,7 @@ mod tests {
         let first = temp_adf()?;
         let second = temp_adf()?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: first.clone(),
@@ -3898,6 +4109,7 @@ mod tests {
         let first = temp_adf()?;
         let second = temp_adf()?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: first.clone(),
@@ -3990,6 +4202,7 @@ mod tests {
         let protected = temp_adf()?;
         let writable = temp_adf()?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: protected.clone(),
@@ -4023,6 +4236,7 @@ mod tests {
     fn cia_status_reflects_write_protect_track0_and_ready() -> Result<()> {
         let path = temp_adf()?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -4048,6 +4262,7 @@ mod tests {
     fn cia_status_ready_line_tracks_motor_spinup_and_off() -> Result<()> {
         let path = temp_adf()?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -4113,6 +4328,7 @@ mod tests {
     fn side_select_maps_lower_head_to_even_adf_tracks() -> Result<()> {
         let path = temp_adf()?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -4299,6 +4515,7 @@ mod tests {
     fn track_zero_line_follows_head_position() -> Result<()> {
         let path = temp_adf()?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -4551,6 +4768,7 @@ mod tests {
     fn dskbytr_byte_valid_tracks_new_rotation_words() -> Result<()> {
         let path = temp_adf()?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -4590,6 +4808,7 @@ mod tests {
         let raw_words = [0x1234, 0xABCD];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -4792,6 +5011,7 @@ mod tests {
         let raw_words = [0x1234, 0x5678];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -4833,6 +5053,7 @@ mod tests {
         let raw_words = [DEFAULT_DSKSYNC, 0x5678];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -4865,6 +5086,7 @@ mod tests {
         let raw_words = [DEFAULT_DSKSYNC, 0x5678];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -4904,6 +5126,7 @@ mod tests {
         let raw_words = [0x1234, DEFAULT_DSKSYNC];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -4952,6 +5175,7 @@ mod tests {
         let raw_words = [0x1234, 0x5678];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -4985,6 +5209,7 @@ mod tests {
         let raw_words = [0x1234, 0x5678];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -5016,6 +5241,7 @@ mod tests {
         let raw_words = [0x1234, 0x5678];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -5052,11 +5278,284 @@ mod tests {
         Ok(())
     }
 
+    /// Controller with one raw ext-ADF track in DF0 at the given `[floppy]
+    /// speed`, spun up with the head pinned to word 0, ready to arm a DMA.
+    fn spun_up_speed_controller(
+        raw_words: &[u16],
+        speed: u16,
+    ) -> Result<(FloppyController, PathBuf)> {
+        let path = temp_ext2_raw(raw_words)?;
+        let cfg = FloppyConfig {
+            speed,
+            drives: [
+                Some(FloppyDriveConfig {
+                    path: path.clone(),
+                    write_protected: true,
+                }),
+                None,
+                None,
+                None,
+            ],
+        };
+        let mut ctrl = FloppyController::from_config(&cfg)?;
+        ctrl.write_prb(!CIAB_DSKMOTOR & !CIAB_DSKSEL0);
+        ctrl.tick(MOTOR_READY_CCK, 0, &mut []);
+        ctrl.ensure_track(0, 0);
+        ctrl.drives[0].set_rotation_word(0);
+        ctrl.drives[0].rotation_acc_cck = 0;
+        ctrl.set_dskpt_low(0);
+        Ok((ctrl, path))
+    }
+
+    #[test]
+    fn floppy_speed_800_compresses_read_dma_eightfold_with_identical_data() -> Result<()> {
+        let raw_words = [0x1111, 0x2222, 0x3333, 0x4444];
+        let word_cck = FloppyController::word_cck_for_track_words(raw_words.len());
+        let dmacon = DMACON_DMAEN | DMACON_DISK;
+        let mut data = [[0u16; 3]; 2];
+        for (run, speed) in [100u16, 800].into_iter().enumerate() {
+            let (mut ctrl, path) = spun_up_speed_controller(&raw_words, speed)?;
+            let mut chip_ram = vec![0u8; 8];
+            let len = DSKLEN_DMAEN | 3;
+            assert!(!ctrl.write_dsklen(len, 0));
+            assert!(!ctrl.write_dsklen(len, 0));
+            // The whole data path is scaled, so the transfer lands the
+            // multiple sooner to the exact cck, and the completion
+            // prediction reports the scaled deadline.
+            let scaled = 3 * word_cck / u32::from(speed / 100);
+            assert_eq!(ctrl.next_completion_cck(dmacon), Some(scaled));
+            assert!(!ctrl.tick(scaled - 1, dmacon, &mut chip_ram));
+            assert!(ctrl.tick(1, dmacon, &mut chip_ram));
+            data[run] = [
+                read_chip_word(&chip_ram, 0),
+                read_chip_word(&chip_ram, 2),
+                read_chip_word(&chip_ram, 4),
+            ];
+            let _ = fs::remove_file(path);
+        }
+        // Faster, but bit-identical: both speeds deliver the same words.
+        assert_eq!(data[0], data[1]);
+        assert_eq!(data[0], [0x1111, 0x2222, 0x3333]);
+        Ok(())
+    }
+
+    #[test]
+    fn floppy_turbo_bursts_read_dma_after_two_line_grace() -> Result<()> {
+        // ~177000 cck per word on this track: real pacing moves well under
+        // one word inside the grace window, so a completion there can only
+        // come from the burst.
+        let raw_words = [0x1111, 0x2222, 0x3333, 0x4444];
+        let dmacon = DMACON_DMAEN | DMACON_DISK;
+        let (mut ctrl, path) = spun_up_speed_controller(&raw_words, SPEED_TURBO)?;
+        let mut chip_ram = vec![0u8; 8];
+        let len = DSKLEN_DMAEN | 3;
+        assert!(!ctrl.write_dsklen(len, 0));
+        assert!(!ctrl.write_dsklen(len, 0));
+        // Inside the deferral window the transfer paces normally...
+        assert!(!ctrl.tick(TURBO_DMA_GRACE_CCK - 10, dmacon, &mut chip_ram));
+        // ...and the tick that crosses it bursts the transfer to the end.
+        assert!(ctrl.tick(10, dmacon, &mut chip_ram));
+        assert_eq!(read_chip_word(&chip_ram, 0), 0x1111);
+        assert_eq!(read_chip_word(&chip_ram, 2), 0x2222);
+        assert_eq!(read_chip_word(&chip_ram, 4), 0x3333);
+        let _ = fs::remove_file(path);
+        Ok(())
+    }
+
+    #[test]
+    fn floppy_turbo_sync_wait_matches_real_speed_data() -> Result<()> {
+        // A sync-waiting read: the burst must first spin to the DSKSYNC
+        // match, then drain the transfer, delivering exactly the words a
+        // real-speed run recovers.
+        let raw_words = [0x1111, DEFAULT_DSKSYNC, 0x2222, 0x3333];
+        let word_cck = FloppyController::word_cck_for_track_words(raw_words.len());
+        let dmacon = DMACON_DMAEN | DMACON_DISK;
+        let mut data = [[0u16; 2]; 2];
+        for (run, speed) in [100u16, SPEED_TURBO].into_iter().enumerate() {
+            let (mut ctrl, path) = spun_up_speed_controller(&raw_words, speed)?;
+            let mut chip_ram = vec![0u8; 8];
+            ctrl.write_dsksync(DEFAULT_DSKSYNC);
+            let len = DSKLEN_DMAEN | 2;
+            assert!(!ctrl.write_dsklen(len, ADK_WORDSYNC));
+            assert!(!ctrl.write_dsklen(len, ADK_WORDSYNC));
+            let mut done = false;
+            for _ in 0..8 {
+                if ctrl.tick(word_cck, dmacon, &mut chip_ram) {
+                    done = true;
+                    break;
+                }
+            }
+            assert!(done, "sync-wait DMA should complete at speed {speed}");
+            assert!(ctrl.take_sync_irq());
+            data[run] = [read_chip_word(&chip_ram, 0), read_chip_word(&chip_ram, 2)];
+            let _ = fs::remove_file(path);
+        }
+        assert_eq!(data[0], data[1]);
+        Ok(())
+    }
+
+    #[test]
+    fn floppy_turbo_missing_sync_leaves_dma_to_normal_pacing() -> Result<()> {
+        // No DSKSYNC word anywhere on the track: the burst gets one look,
+        // gives up, and the armed transfer keeps waiting at normal pace
+        // (forever, like real hardware) instead of rescanning every tick.
+        let raw_words = [0x1111, 0x2222, 0x3333, 0x4444];
+        let word_cck = FloppyController::word_cck_for_track_words(raw_words.len());
+        let dmacon = DMACON_DMAEN | DMACON_DISK;
+        let (mut ctrl, path) = spun_up_speed_controller(&raw_words, SPEED_TURBO)?;
+        let mut chip_ram = vec![0u8; 8];
+        ctrl.write_dsksync(DEFAULT_DSKSYNC);
+        let len = DSKLEN_DMAEN | 2;
+        assert!(!ctrl.write_dsklen(len, ADK_WORDSYNC));
+        assert!(!ctrl.write_dsklen(len, ADK_WORDSYNC));
+        for _ in 0..8 {
+            assert!(!ctrl.tick(word_cck, dmacon, &mut chip_ram));
+        }
+        assert!(ctrl.dma.is_some());
+        assert!(ctrl.turbo_burst_spent);
+        assert_eq!(read_chip_word(&chip_ram, 0), 0);
+        let _ = fs::remove_file(path);
+        Ok(())
+    }
+
+    #[test]
+    fn floppy_live_turbo_toggle_mid_dma_honors_grace() -> Result<()> {
+        // Flipping the menu to turbo while a transfer is in flight must
+        // defer the burst by the same two-scanline grace as a fresh arming,
+        // not complete on the very next tick.
+        let raw_words = [0x1111, 0x2222, 0x3333, 0x4444];
+        let word_cck = FloppyController::word_cck_for_track_words(raw_words.len());
+        let dmacon = DMACON_DMAEN | DMACON_DISK;
+        let (mut ctrl, path) = spun_up_speed_controller(&raw_words, 100)?;
+        let mut chip_ram = vec![0u8; 8];
+        let len = DSKLEN_DMAEN | 3;
+        assert!(!ctrl.write_dsklen(len, 0));
+        assert!(!ctrl.write_dsklen(len, 0));
+        // One word into the transfer, switch to turbo live.
+        assert!(!ctrl.tick(word_cck, dmacon, &mut chip_ram));
+        ctrl.set_speed_percent(SPEED_TURBO);
+        // A stale spent flag must not survive the toggle either.
+        assert!(!ctrl.turbo_burst_spent);
+        assert!(!ctrl.tick(TURBO_DMA_GRACE_CCK - 10, dmacon, &mut chip_ram));
+        assert!(ctrl.tick(10, dmacon, &mut chip_ram));
+        assert_eq!(read_chip_word(&chip_ram, 4), 0x3333);
+        let _ = fs::remove_file(path);
+        Ok(())
+    }
+
+    #[test]
+    fn floppy_turbo_prediction_paces_normally_while_drive_not_ready() -> Result<()> {
+        // With the grace elapsed but the drive still spinning up, the burst
+        // cannot run; the completion prediction must fall back to the
+        // normal-paced deadline instead of forcing 1-cck idle stepping for
+        // the rest of the spin-up.
+        let raw_words = [0x1111, 0x2222, 0x3333, 0x4444];
+        let path = temp_ext2_raw(&raw_words)?;
+        let cfg = FloppyConfig {
+            speed: SPEED_TURBO,
+            drives: [
+                Some(FloppyDriveConfig {
+                    path: path.clone(),
+                    write_protected: true,
+                }),
+                None,
+                None,
+                None,
+            ],
+        };
+        let mut ctrl = FloppyController::from_config(&cfg)?;
+        let mut chip_ram = vec![0u8; 8];
+        let dmacon = DMACON_DMAEN | DMACON_DISK;
+        ctrl.write_prb(!CIAB_DSKMOTOR & !CIAB_DSKSEL0);
+        ctrl.set_dskpt_low(0);
+        let len = DSKLEN_DMAEN | 1;
+        assert!(!ctrl.write_dsklen(len, 0));
+        assert!(!ctrl.write_dsklen(len, 0));
+        // Inside the grace the prediction is bounded by it.
+        assert!(ctrl.next_completion_cck(dmacon).unwrap() <= TURBO_DMA_GRACE_CCK);
+        // Grace elapsed, motor still spinning up: normal-paced deadline.
+        assert!(!ctrl.tick(TURBO_DMA_GRACE_CCK, dmacon, &mut chip_ram));
+        assert!(ctrl.next_completion_cck(dmacon).unwrap() > TURBO_DMA_GRACE_CCK);
+        // Once ready the burst is imminent again.
+        ctrl.tick(MOTOR_READY_CCK, 0, &mut chip_ram);
+        assert_eq!(ctrl.next_completion_cck(dmacon), Some(1));
+        let _ = fs::remove_file(path);
+        Ok(())
+    }
+
+    #[test]
+    fn floppy_turbo_burst_waits_for_motor_spinup() -> Result<()> {
+        let raw_words = [0x1111, 0x2222, 0x3333, 0x4444];
+        let path = temp_ext2_raw(&raw_words)?;
+        let cfg = FloppyConfig {
+            speed: SPEED_TURBO,
+            drives: [
+                Some(FloppyDriveConfig {
+                    path: path.clone(),
+                    write_protected: true,
+                }),
+                None,
+                None,
+                None,
+            ],
+        };
+        let mut ctrl = FloppyController::from_config(&cfg)?;
+        let mut chip_ram = vec![0u8; 8];
+        let dmacon = DMACON_DMAEN | DMACON_DISK;
+        // Motor just latched on: the DMA arms (spin-up arming is modelled),
+        // but turbo must not deliver data before the mechanism is ready.
+        ctrl.write_prb(!CIAB_DSKMOTOR & !CIAB_DSKSEL0);
+        ctrl.set_dskpt_low(0);
+        let len = DSKLEN_DMAEN | 1;
+        assert!(!ctrl.write_dsklen(len, 0));
+        assert!(!ctrl.write_dsklen(len, 0));
+        assert!(!ctrl.tick(TURBO_DMA_GRACE_CCK, dmacon, &mut chip_ram));
+        assert!(ctrl.dma.is_some());
+        // Spin-up completes within this tick; the burst follows in the
+        // same tick and finishes the transfer.
+        assert!(ctrl.tick(MOTOR_READY_CCK, dmacon, &mut chip_ram));
+        let _ = fs::remove_file(path);
+        Ok(())
+    }
+
+    #[test]
+    fn floppy_speed_never_accelerates_motor_spinup() -> Result<()> {
+        for speed in [800u16, SPEED_TURBO] {
+            let raw_words = [0x1234, 0x5678];
+            let path = temp_ext2_raw(&raw_words)?;
+            let cfg = FloppyConfig {
+                speed,
+                drives: [
+                    Some(FloppyDriveConfig {
+                        path: path.clone(),
+                        write_protected: true,
+                    }),
+                    None,
+                    None,
+                    None,
+                ],
+            };
+            let mut ctrl = FloppyController::from_config(&cfg)?;
+            ctrl.write_prb(!CIAB_DSKMOTOR & !CIAB_DSKSEL0);
+            ctrl.tick(MOTOR_READY_CCK - 1, 0, &mut []);
+            assert_ne!(
+                ctrl.cia_a_status_bits() & CIAA_DSKRDY,
+                0,
+                "speed {speed} must not shorten spin-up"
+            );
+            ctrl.tick(1, 0, &mut []);
+            assert_eq!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
+            let _ = fs::remove_file(path);
+        }
+        Ok(())
+    }
+
     #[test]
     fn motor_off_blocks_read_dma_until_next_spinup() -> Result<()> {
         let raw_words = [0x1234, 0x5678];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -5108,6 +5607,7 @@ mod tests {
     fn dsksync_write_latches_current_word_match() -> Result<()> {
         let path = temp_adf()?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -5136,6 +5636,7 @@ mod tests {
         let raw_words = [DEFAULT_DSKSYNC, 0x2222];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -5166,6 +5667,7 @@ mod tests {
     fn read_dma_sync_irq_does_not_require_wordsync() -> Result<()> {
         let path = temp_adf()?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -5207,6 +5709,7 @@ mod tests {
     fn wordsync_skips_initial_sync_then_transfers_repeated_sync_word() -> Result<()> {
         let path = temp_adf()?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -5257,6 +5760,7 @@ mod tests {
         let raw_words = [0xAA44u16, 0x8955, 0x1234, 0x5678, 0x0000];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -5302,6 +5806,7 @@ mod tests {
         let raw_words = [0x1111, DEFAULT_DSKSYNC, 0x2222];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -5351,6 +5856,7 @@ mod tests {
         let raw_words = [0x1111, 0x2222, 0x3333];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -5396,6 +5902,7 @@ mod tests {
         let raw_words = [0x1111, 0x2222, 0x3333, 0x4444];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -5441,6 +5948,7 @@ mod tests {
         let raw_words = [0x1111, 0x2222, 0x3333, 0x4444];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -5481,6 +5989,7 @@ mod tests {
         let track2 = [0xAAAA, 0xBBBB];
         let path = temp_ext2_raw_tracks(&[(0, &track0), (2, &track2)])?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -5533,6 +6042,7 @@ mod tests {
         let track0 = [0x1111u16, 0x2222, 0x3333, 0x4444];
         let path = temp_ext2_raw_tracks(&[(0, &track0)])?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -5584,6 +6094,7 @@ mod tests {
         let raw_words = [0x1111, DEFAULT_DSKSYNC, 0x2222];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -5626,6 +6137,7 @@ mod tests {
         let raw_words = [0x1111, DEFAULT_DSKSYNC, 0x2222];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -5663,6 +6175,7 @@ mod tests {
         let raw_words = [0x1111, DEFAULT_DSKSYNC, 0x2222];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -5707,6 +6220,7 @@ mod tests {
         let raw_words = [DEFAULT_DSKSYNC, 0x2222];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -5749,6 +6263,7 @@ mod tests {
         let raw_words = [0x1111, 0x2222];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -5788,6 +6303,7 @@ mod tests {
     fn selected_drive_index_pulse_latches_once_per_wrap() -> Result<()> {
         let path = temp_adf()?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -5821,6 +6337,7 @@ mod tests {
     fn selected_drive_index_pulse_has_fixed_width() -> Result<()> {
         let path = temp_adf()?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -5858,6 +6375,7 @@ mod tests {
     fn motor_off_drive_does_not_emit_index_pulse() -> Result<()> {
         let path = temp_adf()?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -5887,6 +6405,7 @@ mod tests {
     fn next_index_pulse_reports_selected_drive_time() -> Result<()> {
         let path = temp_adf()?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -5920,6 +6439,7 @@ mod tests {
         let raw_words = [0x4489, 0x2AAA, 0x5555, 0xA144];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -5950,6 +6470,7 @@ mod tests {
     fn uae_extended_adf_raw_track_preserves_odd_byte_payload() -> Result<()> {
         let path = temp_ext2_track(1, 20, &[0x12, 0x34, 0xA0])?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -6034,6 +6555,7 @@ mod tests {
         let raw_words: [u16; 4] = [0x1111, 0x2222, 0x3333, 0x4444];
         let path = temp_ext2_raw_revolutions(&raw_words, 32, 2)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -6082,6 +6604,7 @@ mod tests {
         let raw_words = [0x4489, 0x2AAA];
         let path = temp_scp_raw_revolutions(&[&raw_words], 32)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -6113,6 +6636,7 @@ mod tests {
     fn scp_flux_decode_resolves_variable_intervals_to_cells() -> Result<()> {
         let path = temp_scp_flux_entries(&[60, 100, 80], 3)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -6148,6 +6672,7 @@ mod tests {
         let rev1 = [0x5555, 0xA144];
         let path = temp_scp_raw_revolutions(&[&rev0, &rev1], 32)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -6199,6 +6724,7 @@ mod tests {
             SCP_FLAG_INDEX | SCP_FLAG_EXTENDED_MODE,
         )?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -6232,6 +6758,7 @@ mod tests {
         fs::write(&path, &image)?;
 
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -6263,6 +6790,7 @@ mod tests {
         let raw_words = [0x4489, 0x2AAA];
         let path = temp_scp_raw_revolutions_with_flags(&[&raw_words], 32, 0)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -6302,6 +6830,7 @@ mod tests {
         fs::write(&path, &image)?;
 
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -6402,6 +6931,7 @@ mod tests {
         let raw_words = [0x1111, 0x2222, 0x3333, 0x4444];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -6441,6 +6971,7 @@ mod tests {
         let raw_words = [0x4489];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -6472,6 +7003,7 @@ mod tests {
         let raw_words = [0x1111, 0x2222, 0x3333, 0x4444];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -6513,6 +7045,7 @@ mod tests {
         let raw_words = [0x1111, 0x2222, 0x3333, 0x4444];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -6557,6 +7090,7 @@ mod tests {
         track_data[0..BYTES_PER_SECTOR].fill(0x5A);
         let path = temp_ext2_amigados(&track_data)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -6590,6 +7124,7 @@ mod tests {
         payload.resize(0x31f0, 0);
         let path = temp_ext2_track(0, (track_data.len() * 8) as u32, &payload)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -6648,6 +7183,7 @@ mod tests {
     fn writable_extended_adf_amigados_track_persists_sector_updates() -> Result<()> {
         let path = temp_ext2_amigados(&vec![0u8; SECTORS_PER_TRACK * BYTES_PER_SECTOR])?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -6713,6 +7249,7 @@ mod tests {
             2,
         )?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -6771,6 +7308,7 @@ mod tests {
         let raw_words = [0x4489, 0x2AAA, 0x5555, 0xA144];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -6837,6 +7375,7 @@ mod tests {
         let raw_words = [0x0000, 0x0000, 0x0000, 0x0000];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -6882,6 +7421,7 @@ mod tests {
         let raw_words = [0x0000, 0x0000];
         let path = temp_ext2_raw_revolutions(&raw_words, 20, 1)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -6931,6 +7471,7 @@ mod tests {
     fn writable_extended_adf_raw_track_preserves_partial_word_tail() -> Result<()> {
         let path = temp_ext2_track(1, 20, &[0xFF, 0xFF, 0xF0])?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -6984,6 +7525,7 @@ mod tests {
         let raw_words = [0xFFFF];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -7028,6 +7570,7 @@ mod tests {
         let raw_words = [0x1111, 0x2222];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -7072,6 +7615,7 @@ mod tests {
         let raw_words = [0x1111, 0x2222, 0x3333, 0x4444];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -7118,6 +7662,7 @@ mod tests {
         let raw_words = [0x1111, 0x2222, 0x3333, 0x4444];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -7174,6 +7719,7 @@ mod tests {
         let raw_words = [0x1111, 0x2222, 0x3333, 0x4444];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -7225,6 +7771,7 @@ mod tests {
         let track2 = [0xFFFF, 0xFFFF];
         let path = temp_ext2_raw_tracks(&[(0, &track0), (2, &track2)])?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -7276,6 +7823,7 @@ mod tests {
     fn writable_legacy_extended_adf_raw_track_persists_word_stream() -> Result<()> {
         let path = temp_ext1_raw(&[0x4489, 0x1111, 0x2222])?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -7331,6 +7879,7 @@ mod tests {
     fn writable_legacy_extended_adf_raw_track_overwrites_sync_boundary() -> Result<()> {
         let path = temp_ext1_raw(&[0x4489, 0x1111, 0x2222])?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -7380,6 +7929,7 @@ mod tests {
     fn writable_legacy_extended_adf_raw_track_preserves_odd_payload_length() -> Result<()> {
         let path = temp_ext1_raw_payload(0x4489, &[0x12, 0x34, 0xA0])?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -7428,6 +7978,7 @@ mod tests {
     fn write_dma_decodes_and_persists_track() -> Result<()> {
         let path = temp_adf()?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -7460,6 +8011,49 @@ mod tests {
 
         let persisted = fs::read(&path)?;
         assert_eq!(&persisted[0..BYTES_PER_SECTOR], &[0xA5; BYTES_PER_SECTOR]);
+        let _ = fs::remove_file(path);
+        Ok(())
+    }
+
+    #[test]
+    fn floppy_turbo_bursts_write_dma_and_persists_track() -> Result<()> {
+        let path = temp_adf()?;
+        let cfg = FloppyConfig {
+            speed: SPEED_TURBO,
+            drives: [
+                Some(FloppyDriveConfig {
+                    path: path.clone(),
+                    write_protected: false,
+                }),
+                None,
+                None,
+                None,
+            ],
+        };
+        let mut ctrl = FloppyController::from_config(&cfg)?;
+        let mut source = vec![0u8; ADF_SIZE];
+        source[0..BYTES_PER_SECTOR].fill(0x5C);
+        let words = encode_adf_track(0, &source);
+        let mut chip_ram = vec![0u8; words.len() * 2 + 2];
+        for (i, word) in words.iter().copied().enumerate() {
+            let [hi, lo] = word.to_be_bytes();
+            chip_ram[i * 2] = hi;
+            chip_ram[i * 2 + 1] = lo;
+        }
+
+        ctrl.write_prb(!CIAB_DSKMOTOR & !CIAB_DSKSEL0);
+        ctrl.tick(MOTOR_READY_CCK, 0, &mut chip_ram);
+        ctrl.set_dskpt_low(0);
+        let len = DSKLEN_DMAEN | DSKLEN_WRITE | (words.len() as u16 & DSKLEN_MASK);
+        assert!(!ctrl.write_dsklen(len, 0));
+        assert!(!ctrl.write_dsklen(len, 0));
+        let dmacon = DMACON_DMAEN | DMACON_DISK;
+        // A full-track write takes a whole revolution at real pace; the
+        // tick that crosses the grace window bursts it to completion.
+        assert!(ctrl.tick(TURBO_DMA_GRACE_CCK, dmacon, &mut chip_ram));
+
+        let persisted = fs::read(&path)?;
+        assert_eq!(&persisted[0..BYTES_PER_SECTOR], &[0x5C; BYTES_PER_SECTOR]);
         let _ = fs::remove_file(path);
         Ok(())
     }
@@ -7565,6 +8159,7 @@ mod tests {
         let path = temp_path("full-track-dma-checksum.adf");
         fs::write(&path, &adf)?;
         let cfg = FloppyConfig {
+            speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
                     path: path.clone(),
@@ -7644,7 +8239,7 @@ mod tests {
             path: adf.clone(),
             write_protected: true,
         });
-        let ctrl = FloppyController::from_config(&FloppyConfig { drives })?;
+        let ctrl = FloppyController::from_config(&FloppyConfig { drives, speed: 100 })?;
         assert!(ctrl.drive_connected(1));
         assert!(ctrl.disk_inserted(1));
         let _ = fs::remove_file(&adf);
