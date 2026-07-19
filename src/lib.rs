@@ -26,6 +26,7 @@ pub mod config;
 #[cfg(feature = "control")]
 pub mod control;
 pub mod cpu;
+pub mod crashlog;
 pub mod debugger;
 pub mod dirfs;
 pub mod disasm;

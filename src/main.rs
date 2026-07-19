@@ -8,7 +8,7 @@
 //!   the bundled AROS open-source Kickstart replacement (see src/romsearch.rs).
 
 use anyhow::{anyhow, Result};
-use copperline::{config, debugger, emulator, envcfg, gamepad, gdbstub, priority, video};
+use copperline::{config, crashlog, debugger, emulator, envcfg, gamepad, gdbstub, priority, video};
 use log::{info, warn};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -1386,11 +1386,7 @@ fn main() -> Result<()> {
     }
     log_builder.init();
 
-    let prev = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        eprintln!("\n!!! PANIC: {info}");
-        prev(info);
-    }));
+    crashlog::install();
 
     let cli = parse_args()?;
     validate_benchmark_args(&cli)?;
