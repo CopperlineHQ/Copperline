@@ -1236,21 +1236,25 @@ function updateStatusDisks() {
   }
 }
 
-// --- disk list ---------------------------------------------------------
+// --- disk and Kickstart lists ------------------------------------------
 // Optional in the page shell: a <select id="df0list"> fills itself with
 // the disk images the site serves next to the page and inserts the picked
-// one into DF0 (before boot it queues, like the picker). The folder comes
-// from the select's data-src attribute (default "adf/"), and the list from
+// one into DF0 (before boot it queues, like the picker), and a
+// <select id="kicklist"> does the same for Kickstart ROMs, fitting the
+// picked one like the ROM picker. Each folder comes from the select's
+// data-src attribute (defaults "adf/" and "kick/"), and the list from
 // <folder>/index.json - a JSON array of file names, or of {name, url}
 // objects with URLs relative to the folder. Without a manifest, a server
 // directory listing of the folder (nginx autoindex, Apache, python -m
-// http.server) is scraped for disk-image links instead. An empty or
-// unreachable folder hides the select.
+// http.server) is scraped for links with a matching extension instead.
+// An empty or unreachable folder hides the select.
 
-const diskListSelect = $('df0list');
 const DISK_LIST_EXT = /\.(adf|adz|dms|ipf|scp|zip|gz)$/i;
+// Raw ROM images only: a list pick feeds load_rom directly, which takes
+// uncompressed 256/512 KiB images.
+const KICK_LIST_EXT = /\.(rom|bin)$/i;
 
-async function diskListEntries(folder) {
+async function folderListEntries(folder, extensions) {
   // A manifest wins when the site ships one; a missing or invalid one
   // (fetch error, unparsable JSON, not an array) falls through to the
   // directory listing.
@@ -1292,7 +1296,7 @@ async function diskListEntries(folder) {
       // Only files inside the folder itself; autoindex pages also carry
       // parent-directory and sort links.
       if (url.origin !== folder.origin || !url.pathname.startsWith(folder.pathname)) continue;
-      if (!DISK_LIST_EXT.test(url.pathname)) continue;
+      if (!extensions.test(url.pathname)) continue;
       entries.push({ name: nameFromUrlPath(url.pathname, url.pathname), url: url.href });
     }
     return entries;
@@ -1301,26 +1305,37 @@ async function diskListEntries(folder) {
   }
 }
 
-async function loadDiskList(select) {
+// sameOriginOnly enforces the Kickstart copyright gate at the list level:
+// the folder must be on the page's own site and cross-origin manifest
+// entries are dropped, so the select never offers a ROM that
+// fitRomFromUrl's own gate would refuse pick by pick.
+async function loadFolderList(select, defaultSrc, extensions, placeholder, sameOriginOnly, pick) {
   let folder;
   try {
-    folder = new URL(select.dataset.src || 'adf/', location.href);
+    folder = new URL(select.dataset.src || defaultSrc, location.href);
   } catch {
     select.hidden = true;
     return;
   }
+  if (sameOriginOnly && folder.origin !== location.origin) {
+    select.hidden = true;
+    return;
+  }
   if (!folder.pathname.endsWith('/')) folder.pathname += '/';
-  const entries = await diskListEntries(folder);
+  let entries = await folderListEntries(folder, extensions);
+  if (sameOriginOnly) {
+    entries = entries.filter((entry) => new URL(entry.url).origin === location.origin);
+  }
   if (!entries.length) {
     select.hidden = true;
     return;
   }
   entries.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
   if (!select.options.length) {
-    const placeholder = document.createElement('option');
-    placeholder.value = '';
-    placeholder.textContent = 'DF0 from list...';
-    select.appendChild(placeholder);
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = placeholder;
+    select.appendChild(option);
   }
   for (const { name, url } of entries) {
     const option = document.createElement('option');
@@ -1329,11 +1344,22 @@ async function loadDiskList(select) {
     select.appendChild(option);
   }
   select.addEventListener('change', () => {
-    if (select.value) insertDiskFromUrl(select.value);
+    if (select.value) pick(select.value);
   });
 }
 
-if (diskListSelect) loadDiskList(diskListSelect);
+const diskListSelect = $('df0list');
+if (diskListSelect) {
+  loadFolderList(diskListSelect, 'adf/', DISK_LIST_EXT, 'DF0 from list...', false, insertDiskFromUrl);
+}
+
+// The hosted page's server carries no ROMs, so its kick/ folder lists
+// nothing and the select hides; a self-hosted shell that serves its
+// owner's ROMs next to the page gets a one-click ROM chooser.
+const kickListSelect = $('kicklist');
+if (kickListSelect) {
+  loadFolderList(kickListSelect, 'kick/', KICK_LIST_EXT, 'Kickstart from list...', true, fitRomFromUrl);
+}
 
 // Optional in the page shell: older shells have no URL button.
 $('df0url')?.addEventListener('click', () => {
