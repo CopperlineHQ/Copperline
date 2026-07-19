@@ -2212,6 +2212,7 @@ impl ApplicationHandler for App {
                                 self.emu.bus().input.device(1),
                             ],
                             pixel_aspect: super::pixel_aspect(),
+                            floppy_speed: self.emu.bus().floppy.speed_percent(),
                             midi_in: &midi_in_label,
                             midi_out: &midi_out_label,
                             audio_output: self.audio_output.label(),
@@ -3320,6 +3321,7 @@ impl App {
                     ui::MenuItem::SamplerInput => self.cycle_sampler_input(),
                     ui::MenuItem::SamplerGain => self.step_sampler_gain(true),
                     ui::MenuItem::PixelAspect => self.toggle_pixel_aspect(),
+                    ui::MenuItem::FloppySpeed => self.cycle_floppy_speed(),
                     ui::MenuItem::AudioOutput => self.cycle_audio_output(),
                     ui::MenuItem::Fullscreen => self.toggle_fullscreen(),
                     ui::MenuItem::Warp => self.toggle_warp(),
@@ -4747,6 +4749,20 @@ impl App {
         } else {
             self.show_osd(format!("Warp limit: {limit} (warp off)"));
         }
+        self.request_redraw();
+    }
+
+    /// Cycle the emulated floppy drive speed (100% -> 200% -> 400% -> 800%
+    /// -> turbo). Applies to the live machine immediately.
+    fn cycle_floppy_speed(&mut self) {
+        const CYCLE: [u16; 5] = [100, 200, 400, 800, crate::floppy::SPEED_TURBO];
+        let current = self.emu.bus().floppy.speed_percent();
+        let idx = CYCLE.iter().position(|&s| s == current).unwrap_or(0);
+        let next = CYCLE[(idx + 1) % CYCLE.len()];
+        self.emu.bus_mut().floppy.set_speed_percent(next);
+        let label = crate::floppy::speed_label(next);
+        info!("floppy speed: {label}");
+        self.show_osd(format!("Floppy speed: {label}"));
         self.request_redraw();
     }
 

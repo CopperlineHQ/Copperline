@@ -253,6 +253,7 @@ pub enum LauncherField {
     ExtendedRom,
     // Floppy
     FloppyDrives,
+    FloppySpeed,
     Df0Image,
     Df0WriteProtect,
     Df1Image,
@@ -447,8 +448,9 @@ const ROM_ROWS: [Row; 2] = [
     row(F::Rom, "Kickstart ROM", PathRow),
     row(F::ExtendedRom, "Extended ROM", PathRow),
 ];
-const FLOPPY_ROWS: [Row; 9] = [
+const FLOPPY_ROWS: [Row; 10] = [
     row(F::FloppyDrives, "Drives", Cycle),
+    row(F::FloppySpeed, "Drive speed", Cycle),
     row(F::Df0Image, "DF0 image", PathRow),
     row(F::Df0WriteProtect, "DF0 write-protect", Toggle),
     row(F::Df1Image, "DF1 image", PathRow),
@@ -684,6 +686,7 @@ const Z3_PRESETS: [usize; 8] = [
 ];
 const OVERSCANS: [Overscan; 2] = [Overscan::Tv, Overscan::Full];
 const PIXEL_ASPECTS: [PixelAspect; 2] = [PixelAspect::Tv, PixelAspect::Square];
+const FLOPPY_SPEEDS: [u16; 5] = [100, 200, 400, 800, crate::floppy::SPEED_TURBO];
 const PACINGS: [PacingBudget; 2] = [PacingBudget::Cycles, PacingBudget::Instructions];
 const WARPS: [WarpSpeed; 5] = [
     WarpSpeed::X2,
@@ -777,6 +780,8 @@ pub struct MachineSetup {
     extended_rom: Option<PathBuf>,
     // Floppy
     floppy_drives: u8,
+    /// `[floppy] speed`: a percentage (100/200/400/800) or 0 for turbo.
+    floppy_speed: u16,
     /// Per-drive disk-swap playlists (entry 0 is the boot disk). A single
     /// image is a one-element list.
     df_playlists: [Vec<PathBuf>; 4],
@@ -906,6 +911,7 @@ impl MachineSetup {
             rom: raw.rom.as_deref().map(PathBuf::from),
             extended_rom: raw.extended_rom.as_deref().map(PathBuf::from),
             floppy_drives: raw.floppy.drives.unwrap_or(connected).clamp(1, 4),
+            floppy_speed: cfg.floppy.speed,
             df_playlists: cfg.floppy_playlists.clone(),
             df_write_protected,
             ide_master: cfg.ide.master.as_ref().map(|d| d.path.clone()),
@@ -1120,6 +1126,9 @@ impl MachineSetup {
         let drives = self.floppy_drives.max(media_max);
         if drives != 1 {
             raw.floppy.drives = Some(drives);
+        }
+        if self.floppy_speed != 100 {
+            raw.floppy.speed = Some(self.floppy_speed);
         }
         raw.floppy.df0 = self.floppy_drive_raw(0);
         raw.floppy.df1 = self.floppy_drive_raw(1);
@@ -1681,6 +1690,7 @@ impl MachineSetup {
             F::SlowRam => size_label(self.slow_ram),
             F::Z3Ram => size_label(self.z3_ram),
             F::FloppyDrives => self.floppy_drives.to_string(),
+            F::FloppySpeed => crate::floppy::speed_label(self.floppy_speed),
             F::CdInsertDelay => {
                 if self.cd_insert_delay <= 0.0 {
                     "At boot".to_string()
@@ -1840,6 +1850,9 @@ impl MachineSetup {
             F::Z3Ram => self.z3_ram = cycle_nearest(&Z3_PRESETS, self.z3_ram, forward),
             F::FloppyDrives => {
                 self.floppy_drives = step_u8(self.floppy_drives, forward, 1, 4);
+            }
+            F::FloppySpeed => {
+                self.floppy_speed = cycle_slice(&FLOPPY_SPEEDS, self.floppy_speed, forward)
             }
             F::CdInsertDelay => {
                 let secs = self.cd_insert_delay + if forward { 1.0 } else { -1.0 };

@@ -151,6 +151,12 @@ tool window or overlay.
   The window and its backing texture resize with the mode. The start-up
   mode comes from `[display] pixel_aspect`
   (see [Configuration](configuration.md)).
+- **Floppy Speed**: cycles the emulated drive speed through 100% (real
+  speed), 200%, 400%, 800%, and turbo (disk DMA transfers complete almost
+  instantly). Changes apply to the live machine immediately. The start-up
+  value comes from `[floppy] speed`; see
+  [Configuration](configuration.md) for what each level preserves and the
+  compatibility trade-off.
 - **Fullscreen** (also `Cmd+F` / `Alt+F`): borderless fullscreen on the
   window's current monitor. The picture keeps its aspect and letterboxes
   as needed, exactly as when resizing the window; the same shortcut (or
@@ -223,7 +229,8 @@ The layout is:
 - **Category tabs** (left sidebar). *System* (chipset and Agnus/Denise
   overrides, video standard, RTC, identify board), *CPU* (model, FPU, clock,
   caches), *Memory* (chip/fast/slow/Zorro III RAM), *ROM* (Kickstart and
-  extended ROM), *Floppy* (drive count and per-drive image and write-protect),
+  extended ROM), *Floppy* (drive count and speed, per-drive image and
+  write-protect),
   *Hard Disk* (IDE master/slave, the SCSI controller -- A2091, A4091, or the
   A3000's onboard SCSI -- and its boot ROM and units, plus a **Host Mounts**
   link to a sub-page for host directories served live as AmigaDOS volumes: up

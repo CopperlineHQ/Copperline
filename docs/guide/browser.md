@@ -215,6 +215,10 @@ and `set_volume_percent(p)` do what they say, and `emulated_seconds()`
 exposes the guest clock for diagnostics. `set_floppy_sounds(on)` and
 `set_floppy_sounds_volume(p)` control the synthesized drive sounds (on and
 100 by default, like the desktop's `[audio] floppy_sounds` knobs).
+`set_floppy_speed(percent)` / `floppy_speed()` set and read the emulated
+drive speed -- 100/200/400/800 percent, or 0 for turbo -- like the
+desktop's `[floppy] speed` option (see
+[Configuration](configuration.md)); changes apply to the live machine.
 Front-panel status getters mirror the desktop status bar's LED block and
 are cheap enough to poll every frame: `power_led()` and `fdd_led()` return
 booleans, `hdd_led()` and `cd_led()` return `undefined` on machines
@@ -247,6 +251,12 @@ elements, and pages without them are untouched:
 - `#floppy-sounds` (checkbox): toggles the synthesized floppy drive
   sounds -- motor hum, head-step clicks, read hiss -- live and at boot, so
   a shell can also default them off by shipping the box unchecked.
+- `#floppy-speed` (a `<select>` with option values `100`, `200`, `400`,
+  `800`, and `0` for turbo): sets the emulated floppy drive speed, live
+  and at boot, so a shell can default it by its initial selection.
+  `?fdspeed=` in the URL (`100`..`800`, `0`, or `turbo`) overrides the
+  initial choice, so a game link can ship fast loading without any page
+  element.
 - `#df0list` (a `<select>`): fills itself with the disk images the site
   serves next to the page and inserts the picked one into DF0 (queued
   when picked before boot, live after). The folder is the select's

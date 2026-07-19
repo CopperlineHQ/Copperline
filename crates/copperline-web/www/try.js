@@ -316,6 +316,7 @@ async function boot() {
     pendingDisk = null;
     machine.set_volume_percent(Number($('vol').value));
     if (floppySoundsToggle) machine.set_floppy_sounds(floppySoundsToggle.checked);
+    if (floppySpeed !== null) machine.set_floppy_speed(floppySpeed);
     emu = machine;
     window.__emu = emu; // for debugging/automation
     lastFddTrack = null; // a new machine starts the track latch over
@@ -1066,6 +1067,24 @@ floppySoundsToggle?.addEventListener('change', () => {
   if (emu) emu.set_floppy_sounds(floppySoundsToggle.checked);
 });
 
+// Optional in the page shell: a <select id="floppy-speed"> with option
+// values 100/200/400/800 (percent) or 0 (turbo) sets the emulated floppy
+// drive speed. Applied at boot and live on change; a ?fdspeed= link
+// overrides the select's initial choice. Without the element (and without
+// ?fdspeed=) the drives run at real speed.
+const FLOPPY_SPEEDS = [100, 200, 400, 800, 0];
+const floppySpeedSel = $('floppy-speed');
+let floppySpeed = null; // null = leave the emulator at its default (100%)
+function setFloppySpeed(value) {
+  if (!FLOPPY_SPEEDS.includes(value)) return;
+  floppySpeed = value;
+  if (floppySpeedSel) floppySpeedSel.value = String(value);
+  if (emu) emu.set_floppy_speed(value);
+}
+floppySpeedSel?.addEventListener('change', () => {
+  setFloppySpeed(Number(floppySpeedSel.value));
+});
+
 // --- status bar --------------------------------------------------------
 // Front-panel status strip mirroring the desktop status bar's LED block:
 // PWR/FDD LEDs (HDD/CD only on machines fitted with the drive), the
@@ -1448,5 +1467,15 @@ const requestedJoy = (pageParams.get('joy') ?? $('joy').dataset.default ?? '').t
 if (requestedJoy && requestedJoy !== joyMode) {
   if (JOY_MODES.includes(requestedJoy)) setJoyMode(requestedJoy);
   else if (requestedJoy === 'touch') setJoyMode('keys');
+}
+
+// Starting floppy speed: the #floppy-speed select's initial value,
+// overridden per link by ?fdspeed=100|200|400|800|0|turbo. Applied to the
+// machine at boot.
+const requestedSpeed = (pageParams.get('fdspeed') ?? '').trim();
+if (requestedSpeed) {
+  setFloppySpeed(requestedSpeed === 'turbo' ? 0 : Number(requestedSpeed));
+} else if (floppySpeedSel) {
+  setFloppySpeed(Number(floppySpeedSel.value));
 }
 load();
