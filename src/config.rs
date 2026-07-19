@@ -154,11 +154,10 @@ pub struct Config {
     /// the Zorro chain using the named host network backend. Networking is
     /// non-deterministic, so a fitted A2065 breaks byte-identical replay.
     pub a2065_net: Option<crate::net::NetConfig>,
-    /// Z3660 RTG board (`[z3660] enabled`): when true, the Z3660
-    /// accelerator's RTG core autoconfigs on the Zorro chain for the
-    /// open-source Z3660.card Picasso96 driver, presenting RTG screens
-    /// (all pixel formats, core blitter ops, hardware mouse sprite).
-    pub z3660: bool,
+    /// RTG graphics card (`[rtg] card`): when set, the card autoconfigs on
+    /// the Zorro chain and presents RTG screens (all pixel formats, core
+    /// blitter ops, hardware mouse sprite) to its Picasso96 driver.
+    pub rtg: RtgCard,
     pub floppy: FloppyConfig,
     /// Which floppy drive slots are electrically present. DF0 is the
     /// internal drive and is always present; DF1-DF3 are external drives
@@ -418,6 +417,19 @@ pub fn is_cd_image_path(path: &std::path::Path) -> bool {
 pub struct IdeConfig {
     pub master: Option<DriveImage>,
     pub slave: Option<DriveImage>,
+}
+
+/// Which RTG graphics card the `[rtg]` section fits. A machine has at most
+/// one: RTG screens come from whichever card the P96 driver finds, so a
+/// second board would only compete for the display.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RtgCard {
+    /// No RTG board; the chipset drives the display. The default.
+    #[default]
+    None,
+    /// The Z3660 accelerator's FPGA RTG core, driven by the open-source
+    /// Z3660.card Picasso96 driver.
+    Z3660,
 }
 
 /// Which SCSI host adapter the `[scsi]` section fits: one of the two Zorro
@@ -1103,7 +1115,7 @@ impl Default for Config {
             ide: IdeConfig::default(),
             scsi: ScsiConfig::default(),
             a2065_net: None,
-            z3660: false,
+            rtg: RtgCard::None,
             floppy: FloppyConfig::default(),
             floppy_connected: [true, false, false, false],
             floppy_playlists: std::array::from_fn(|_| Vec::new()),
@@ -1479,7 +1491,7 @@ pub struct RawConfig {
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) a2065: RawA2065,
     #[serde(default, skip_serializing_if = "is_default")]
-    pub(crate) z3660: RawZ3660,
+    pub(crate) rtg: RawRtg,
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) floppy: RawFloppy,
     #[serde(default, skip_serializing_if = "is_default")]
@@ -1754,13 +1766,14 @@ pub(crate) struct RawA2065 {
     pub(crate) net: Option<String>,
 }
 
-/// `[z3660]` RTG board: the Z3660's FPGA RTG core on the Zorro chain.
+/// `[rtg]` graphics card: an RTG board on the Zorro chain.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawZ3660 {
-    /// Fit the board (drives Picasso96 RTG screens via the Z3660.card driver).
+pub(crate) struct RawRtg {
+    /// Card to fit: "z3660" (the Z3660's FPGA RTG core, driven by
+    /// Z3660.card) or "none" (the default).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) enabled: Option<bool>,
+    pub(crate) card: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -2298,6 +2311,21 @@ impl TryFrom<RawConfig> for Config {
                 }
             },
         };
+        let rtg = match raw.rtg.card.as_deref() {
+            None => RtgCard::None,
+            Some(raw_card) => match raw_card.trim().to_ascii_lowercase().as_str() {
+                "none" => RtgCard::None,
+                "z3660" => RtgCard::Z3660,
+                _ => {
+                    errors.push(anyhow!(
+                        "[rtg] card = {raw_card:?} is not known \
+                         (expected \"z3660\" or \"none\")"
+                    ));
+                    RtgCard::None
+                }
+            },
+        };
+
         let scsi = ScsiConfig {
             controller: scsi_controller,
             rom: raw.scsi.rom.map(PathBuf::from),
@@ -2554,7 +2582,7 @@ impl TryFrom<RawConfig> for Config {
             ide,
             scsi,
             a2065_net,
-            z3660: raw.z3660.enabled.unwrap_or(false),
+            rtg,
             floppy,
             floppy_connected,
             floppy_playlists,
@@ -5178,6 +5206,29 @@ mod tests {
         let err = parse_config("[floppy]\ndrives = 0").unwrap_err();
         assert!(err.to_string().contains("between 1 and 4"), "{err:#}");
         Ok(())
+    }
+
+    #[test]
+    fn rtg_card_selects_the_board() -> Result<()> {
+        assert_eq!(
+            parse_config("[rtg]\ncard = \"z3660\"\n")?.rtg,
+            RtgCard::Z3660
+        );
+        // Spelling and spacing are forgiving, as for [scsi] controller.
+        assert_eq!(
+            parse_config("[rtg]\ncard = \" Z3660 \"\n")?.rtg,
+            RtgCard::Z3660
+        );
+        assert_eq!(parse_config("[rtg]\ncard = \"none\"\n")?.rtg, RtgCard::None);
+        // Absent section: no RTG board, chipset drives the display.
+        assert_eq!(parse_config("")?.rtg, RtgCard::None);
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_rtg_card_fails_cleanly() {
+        let err = parse_config("[rtg]\ncard = \"picasso4\"\n").unwrap_err();
+        assert!(err.to_string().contains("is not known"), "{err:#}");
     }
 
     #[test]

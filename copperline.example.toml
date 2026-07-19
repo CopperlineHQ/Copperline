@@ -210,11 +210,9 @@ slow = "512K"
 # net = "nat"
 
 
-# Z3660 RTG graphics board: adds high-resolution, high-colour (RTG)
-# screens, driven by the open-source Z3660.card Picasso96 driver in the
-# guest.
-# [z3660]
-# enabled = true
+# RTG graphics card: high-resolution, high-colour screens via Picasso96.
+# [rtg]
+# card = "z3660"           # or "none" (default)
 
 
 # SCSI bus with up to seven drives, on any machine model. Preferred over [ide]

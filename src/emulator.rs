@@ -1922,9 +1922,9 @@ pub fn build_machine(
             crate::a2065::A2065::new(net_config),
         ));
     }
-    // Z3660 RTG board (`[z3660]`): the Z3660.card P96 driver drives RTG
-    // screens through its register file and framebuffer; see crate::z3660.
-    if cfg.z3660 {
+    // RTG board (`[rtg] card`): the Z3660.card P96 driver drives RTG screens
+    // through its register file and framebuffer; see crate::z3660.
+    if cfg.rtg == crate::config::RtgCard::Z3660 {
         let slot = devices.len();
         zorro.add_board(crate::zorro::BoardSpec::z3660(slot))?;
         info!("z3660: RTG board on the Zorro chain (slot {slot})");
