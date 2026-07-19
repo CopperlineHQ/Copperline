@@ -2192,8 +2192,15 @@ impl ApplicationHandler for App {
                 if let Some(r) = self.render.as_mut() {
                     // RTG with a working GPU pipeline presents the native frame
                     // through its own texture in the GPU render pass below.
-                    let rtg_gpu = self.rtg_present_dims.is_some();
-                    if let Some((w, h)) = self.rtg_present_dims {
+                    //
+                    // Not while the UI is up, though: that pass overdraws the
+                    // display region after the UI has been drawn into it, so
+                    // an open menu or panel would be painted over and vanish.
+                    // Fall back to the CPU present, which composites the UI on
+                    // top as usual, at the cost of the FB_WIDTH downscale for
+                    // as long as the overlay is open.
+                    let rtg_gpu = self.rtg_present_dims.is_some() && !self.ui.active();
+                    if let Some((w, h)) = self.rtg_present_dims.filter(|_| rtg_gpu) {
                         r.rtg_texture.upload(
                             r.pixels.device(),
                             r.pixels.queue(),
@@ -2216,7 +2223,11 @@ impl ApplicationHandler for App {
                             frame,
                             r.texture_scale,
                             self.overscan,
-                            self.present_standard_tv_aperture,
+                            // The TV aperture is a chipset crop rect. An RTG
+                            // frame fills the buffer on its own terms, so
+                            // applying it here would show a sub-rect of the
+                            // board's screen.
+                            self.present_standard_tv_aperture && self.rtg_present_dims.is_none(),
                         );
                     }
                     draw_status_bar(frame, &view, r.texture_scale);
