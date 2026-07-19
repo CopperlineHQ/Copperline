@@ -326,7 +326,8 @@ impl WebEmu {
             // right; the standard window sits exactly centred.
             self.present_width = present_common::TV_PAL_CAPTURED_WIDTH;
             self.present_rows = present_common::TV_PAL_PRESENT_HEIGHT;
-            self.present.resize(self.present_width * self.present_rows, 0);
+            self.present
+                .resize(self.present_width * self.present_rows, 0);
             for (y, dst) in self
                 .present
                 .chunks_exact_mut(present_common::TV_PAL_CAPTURED_WIDTH)

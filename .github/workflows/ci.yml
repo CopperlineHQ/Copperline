@@ -269,6 +269,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+          components: rustfmt
       - uses: Swatinem/rust-cache@v2
       - name: Core without the desktop frontend
         run: cargo check --no-default-features --locked
@@ -277,6 +278,11 @@ jobs:
       - name: Web crate (wasm32-unknown-unknown)
         working-directory: crates/copperline-web
         run: cargo check --target wasm32-unknown-unknown --locked
+      - name: Web crate formatting
+        # The web crate is a standalone workspace, so the root Formatting
+        # step never reaches it.
+        working-directory: crates/copperline-web
+        run: cargo fmt --check
 
   m68k-singlestep:
     name: m68k SingleStepTests (68000 fixtures)
