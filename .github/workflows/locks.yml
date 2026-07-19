@@ -33,7 +33,7 @@ jobs:
     name: Committed lockfiles resolve with --locked
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       # cargo tree resolves the full dependency graph without compiling
       # anything, and --locked turns any would-be lockfile update into an

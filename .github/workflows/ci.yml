@@ -13,15 +13,64 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build-test:
-    name: Build, test, lint
+  build:
+    name: Build (release)
     # Copperline is developed and tested on macOS; the Linux and Windows
     # paths are not yet verified, so CI runs on macOS to match. The runner's
     # Metal stack also makes the headless render path (the smoke job below)
     # reliable. Linux/Windows jobs can be added once those paths are verified.
+    #
+    # This job compiles everything once and hands the finished binaries to
+    # the test jobs below (needs: build) as a workflow artifact. Binaries,
+    # not a shared cargo cache: cargo fingerprints local path crates by
+    # source mtime, and every job's fresh checkout is newer than any cached
+    # artifact, so a downstream cargo invocation always recompiles the
+    # copperline and vendored m68k crates no matter how complete the cache
+    # is. The test executables are plain libtest binaries and run fine
+    # without cargo.
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build (release)
+        run: cargo build --release --locked
+      - name: Compile test binaries
+        # cargo build does not compile #[test] targets. This is also the
+        # step that keeps the asset-gated integration tests under tests/
+        # compiling on a clean checkout (they are #[ignore]d at run time,
+        # not excluded from the build). The JSON build plan maps each test
+        # target to its hash-suffixed executable so the binaries can be
+        # staged under stable names for the fan-out jobs.
+        run: |
+          cargo test --release --locked --no-run --message-format=json > cargo-test-build.json
+          mkdir -p ci-bins
+          cp target/release/copperline ci-bins/
+          jq -r 'select(.reason == "compiler-artifact" and .profile.test == true and .executable != null)
+                   | [.target.kind[0], .target.name, .executable] | @tsv' cargo-test-build.json \
+            | while IFS=$'\t' read -r kind name exe; do
+                case "$kind:$name" in
+                  lib:copperline)        cp "$exe" ci-bins/unit-lib ;;
+                  bin:copperline)        cp "$exe" ci-bins/unit-bin-copperline ;;
+                  bin:copperline-ctl)    cp "$exe" ci-bins/unit-bin-copperline-ctl ;;
+                  test:probe_golden)     cp "$exe" ci-bins/probe_golden ;;
+                  test:image_regression) cp "$exe" ci-bins/image_regression ;;
+                esac
+              done
+          ls -l ci-bins
+      - name: Upload binaries for the test jobs
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-bins
+          path: ci-bins/
+
+  lint:
+    name: Rustfmt and clippy
+    # Style and lints need no release build, so this runs alongside the
+    # build job instead of gating it.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -34,41 +83,92 @@ jobs:
         # Hold the binary, tests, examples, and diagnostic feature gates to
         # the same warning-clean standard used for release checks.
         run: cargo clippy --all-targets --all-features --locked -- -D warnings
-      - name: Build (release)
-        run: cargo build --release --locked
-      - name: Unit tests and probe golden renders
-        # The asset-gated integration tests under tests/ are #[ignore]d
-        # (they need local Kickstart ROM/disk assets) and are intentionally
-        # not run here. tests/probe_golden.rs is the exception: it is fully
-        # self-contained (committed probe binaries booted on the bundled
-        # AROS ROM) and compares each probe's deterministic render
-        # pixel-for-pixel against the references in timing-test/golden/ --
-        # the hardware-behaviour regression net (DDF/DIW placement and
-        # DDFSTRT-phase/scroll maps, raced copper-chunky COLOR00 trains,
-        # sprite serializer/DMA-FSM positions, BLTPRI CPU pacing bars,
-        # byte-write register mirroring, the CLXDAT collision matrix, and
-        # the 32 CPU/chip-bus timing rows). Each probe is its own #[test],
-        # so the boots run in parallel on the runner's cores. See
-        # timing-test/README.md "CI golden renders" for the re-bless
-        # workflow.
-        run: cargo test --release --locked
+
+  unit-tests:
+    name: Unit tests
+    needs: build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: ci-bins
+          path: ci-bins
+      - name: Unit tests
+        # The inline #[cfg(test)] suites in the lib and binaries, prebuilt
+        # by the build job (this is everything a root `cargo test` runs
+        # besides tests/probe_golden.rs, which has its own job below; the
+        # crate has no doctests). Artifact zips do not preserve the
+        # executable bit, hence the chmod.
+        run: |
+          chmod +x ci-bins/*
+          ./ci-bins/unit-lib
+          ./ci-bins/unit-bin-copperline
+          ./ci-bins/unit-bin-copperline-ctl
+
+  probe-golden:
+    name: Probe golden renders
+    needs: build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: ci-bins
+          path: ci-bins
+      - name: Probe golden renders
+        # tests/probe_golden.rs is fully self-contained (committed probe
+        # binaries booted on the bundled AROS ROM) and compares each probe's
+        # deterministic render pixel-for-pixel against the references in
+        # timing-test/golden/ -- the hardware-behaviour regression net
+        # (DDF/DIW placement and DDFSTRT-phase/scroll maps, raced
+        # copper-chunky COLOR00 trains, sprite serializer/DMA-FSM positions,
+        # BLTPRI CPU pacing bars, byte-write register mirroring, the CLXDAT
+        # collision matrix, and the 32 CPU/chip-bus timing rows). Each probe
+        # is its own #[test], so the boots run in parallel on the runner's
+        # cores. See timing-test/README.md "CI golden renders" for the
+        # re-bless workflow.
+        #
+        # The test harness spawns the emulator through the compile-time
+        # CARGO_BIN_EXE_copperline path, which on hosted runners is the
+        # same absolute path in every job of this repo -- hence the copy
+        # into target/release before running.
+        run: |
+          chmod +x ci-bins/*
+          mkdir -p target/release
+          cp ci-bins/copperline target/release/copperline
+          ./ci-bins/probe_golden
       - name: Upload probe render diffs
         # On a golden mismatch the test writes the actual renders and diff
         # masks; surface them so the regression is reviewable from the run.
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: probe-golden-diffs
           path: target/probe-golden/
           if-no-files-found: ignore
+
+  m68k-core:
+    name: m68k core tests
+    # Gated on the build job like the other test jobs, but shares no
+    # artifacts with it: the vendored CPU core (crates/m68k) is a path
+    # dependency, not a workspace member, so it builds standalone into its
+    # own target directory, cached here under its own key.
+    needs: build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/m68k
       - name: m68k core tests
-        # The vendored CPU core (crates/m68k) is a path dependency, not a
-        # workspace member, so the root `cargo test` above never reaches its
-        # suites -- including the MMU walker, access-fault frame, exception,
-        # and per-model architecture tests. Two suites are excluded because
-        # they include_bytes! gitignored fixture binaries and do not compile
-        # on a clean checkout (cross_cpu, musashi); the SingleStepTests
-        # suite compiles and skips itself here, and runs for real in the
+        # The root cargo test never reaches the vendored core's own suites
+        # -- including the MMU walker, access-fault frame, exception, and
+        # per-model architecture tests. Two suites are excluded because they
+        # include_bytes! gitignored fixture binaries and do not compile on a
+        # clean checkout (cross_cpu, musashi); the SingleStepTests suite
+        # compiles and skips itself here, and runs for real in the
         # m68k-singlestep job below. No --locked: the crate's own Cargo.lock
         # is deliberately gitignored (the root lockfile pins it when built
         # as a dependency).
@@ -79,6 +179,83 @@ jobs:
             | sed 's/^/--test /' \
             | xargs cargo test --release --lib
 
+  diagrom-smoke:
+    name: DiagROM boot smoke
+    needs: build
+    runs-on: macos-latest
+    # DiagROM (diagrom.com) is freely downloadable but its author keeps
+    # redistribution to the official site, so it is fetched at run time
+    # (checksum-pinned, cached across runs) instead of being committed.
+    # The DIAGROM_URL repository variable optionally overrides the
+    # download location should the official URL move; the stable V1.3
+    # archive has been frozen upstream since 2023, so a checksum change
+    # means the pin below needs updating, not that the job is flaky.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: ci-bins
+          path: ci-bins
+      - name: Install prebuilt binaries
+        # The image-regression harness spawns the emulator through the
+        # compile-time CARGO_BIN_EXE_copperline path, which on hosted
+        # runners is the same absolute path in every job of this repo --
+        # hence the copy into target/release.
+        run: |
+          chmod +x ci-bins/*
+          mkdir -p target/release
+          cp ci-bins/copperline target/release/copperline
+      - name: Restore cached DiagROM
+        id: diagrom-cache
+        uses: actions/cache@v6
+        with:
+          path: diagrom.rom
+          key: diagrom-stable-v1.3
+      - name: Fetch DiagROM (stable V1.3)
+        if: steps.diagrom-cache.outputs.cache-hit != 'true'
+        env:
+          DIAGROM_URL: ${{ vars.DIAGROM_URL }}
+        run: |
+          curl -fsSL --retry 3 "${DIAGROM_URL:-https://www.diagrom.com/files/stable/DiagROM.zip}" -o DiagROM.zip
+          echo "a575f8fa69b1ac7fd566fcdcd19a68e53d472ac6c56d8a6a9489229882c5b208  DiagROM.zip" | shasum -a 256 -c
+          unzip -o DiagROM.zip DiagROM/DiagROM
+          mv DiagROM/DiagROM diagrom.rom
+          rm -rf DiagROM.zip DiagROM
+      - name: Verify DiagROM checksum
+        # Runs on the cache-hit path too, so a corrupted or tampered cache
+        # entry cannot slip through (the step above only checks the freshly
+        # downloaded archive). This pin is the extracted ROM inside the
+        # checksum-pinned stable V1.3 zip.
+        run: |
+          echo "1803bfff5d866de7605dbcf8445b590f36ed7cb7ee92166b240907e488cf0ff7  diagrom.rom" | shasum -a 256 -c
+      - name: Boot smoke (serial banner + headless screenshot)
+        # DiagROM boots as a Kickstart replacement, so the ROM is passed
+        # positionally (the no-argument default is the bundled AROS ROM).
+        # DiagROM mirrors its diagnostics to the serial port, which the
+        # emulator routes to stdout by default; seeing the version banner
+        # proves the ROM's boot code actually executed, which a non-empty
+        # PNG alone does not (a black screen still writes one).
+        run: |
+          ./target/release/copperline diagrom.rom --noaudio --screenshot-after 6 diag.png > serial.log
+          grep -q "Amiga DiagROM" serial.log
+          test -s diag.png
+      - name: DiagROM menu image regression
+        # The asset-gated integration test boots to the main menu and
+        # asserts the status bar's left-margin text columns survive.
+        run: |
+          mkdir -p test-assets
+          cp diagrom.rom test-assets/
+          ./ci-bins/image_regression diagrom --ignored --nocapture
+      - name: Upload boot screenshot
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: diagrom-boot
+          path: |
+            diag.png
+            serial.log
+          if-no-files-found: ignore
+
   wasm:
     name: Headless core and browser build
     # Guards the portability split behind the browser build (see
@@ -88,7 +265,7 @@ jobs:
     # (no GPU or audio stack is reached without the `frontend` feature).
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -110,11 +287,13 @@ jobs:
     # does not gate the main build.
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/m68k
       - name: Fetch SingleStepTests m68000 fixtures
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: SingleStepTests/m68000
           path: sst-m68000
@@ -130,10 +309,10 @@ jobs:
     # (e.g. duplicate labels that only collide in the single-document PDF).
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
       - name: Install MyST CLI
         run: npm install -g mystmd
       - name: Install Typst (PDF renderer)
@@ -153,7 +332,7 @@ jobs:
           test -s _build/exports/copperline.pdf
       - name: Upload PDF
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: copperline-docs-pdf
           path: docs/_build/exports/copperline.pdf
@@ -163,69 +342,8 @@ jobs:
     name: GDB remote protocol tests
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: RSP unit tests
         run: cargo test --locked gdbstub
-
-  diagrom-smoke:
-    name: DiagROM boot smoke
-    needs: build-test
-    runs-on: macos-latest
-    # DiagROM (diagrom.com) is freely downloadable but its author keeps
-    # redistribution to the official site, so it is fetched at run time
-    # (checksum-pinned, cached across runs) instead of being committed.
-    # The DIAGROM_URL repository variable optionally overrides the
-    # download location should the official URL move; the stable V1.3
-    # archive has been frozen upstream since 2023, so a checksum change
-    # means the pin below needs updating, not that the job is flaky.
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Build (release)
-        run: cargo build --release --locked
-      - name: Restore cached DiagROM
-        id: diagrom-cache
-        uses: actions/cache@v4
-        with:
-          path: diagrom.rom
-          key: diagrom-stable-v1.3
-      - name: Fetch DiagROM (stable V1.3)
-        if: steps.diagrom-cache.outputs.cache-hit != 'true'
-        env:
-          DIAGROM_URL: ${{ vars.DIAGROM_URL }}
-        run: |
-          curl -fsSL --retry 3 "${DIAGROM_URL:-https://www.diagrom.com/files/stable/DiagROM.zip}" -o DiagROM.zip
-          echo "a575f8fa69b1ac7fd566fcdcd19a68e53d472ac6c56d8a6a9489229882c5b208  DiagROM.zip" | shasum -a 256 -c
-          unzip -o DiagROM.zip DiagROM/DiagROM
-          mv DiagROM/DiagROM diagrom.rom
-          rm -rf DiagROM.zip DiagROM
-      - name: Boot smoke (serial banner + headless screenshot)
-        # DiagROM boots as a Kickstart replacement, so the ROM is passed
-        # positionally (the no-argument default is the bundled AROS ROM).
-        # DiagROM mirrors its diagnostics to the serial port, which the
-        # emulator routes to stdout by default; seeing the version banner
-        # proves the ROM's boot code actually executed, which a non-empty
-        # PNG alone does not (a black screen still writes one).
-        run: |
-          ./target/release/copperline diagrom.rom --noaudio --screenshot-after 6 diag.png > serial.log
-          grep -q "Amiga DiagROM" serial.log
-          test -s diag.png
-      - name: DiagROM menu image regression
-        # The asset-gated integration test boots to the main menu and
-        # asserts the status bar's left-margin text columns survive.
-        run: |
-          mkdir -p test-assets
-          cp diagrom.rom test-assets/
-          cargo test --release --locked --test image_regression diagrom -- --ignored --nocapture
-      - name: Upload boot screenshot
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: diagrom-boot
-          path: |
-            diag.png
-            serial.log
-          if-no-files-found: ignore
