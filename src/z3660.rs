@@ -358,8 +358,15 @@ impl Z3660 {
         const INVERSVID: u8 = 4;
 
         let g = GFXDATA_OFFSET;
-        let dst = VRAM_OFFSET as usize + self.be32(g) as usize;
-        let src = VRAM_OFFSET as usize + self.be32(g + 4) as usize;
+        // The surface offsets are guest-controlled, and usize is 32-bit on
+        // wasm32, where adding VRAM_OFFSET could wrap a large offset back
+        // into live VRAM. Widen, then saturate: an out-of-range base stays
+        // out of range, so every access below fails its bounds check and the
+        // op drops, which is what the firmware's writes into scratch do.
+        let base_of =
+            |v: u32| usize::try_from(u64::from(VRAM_OFFSET) + u64::from(v)).unwrap_or(usize::MAX);
+        let dst = base_of(self.be32(g));
+        let src = base_of(self.be32(g + 4));
         let rgb0 = self.be32(g + 8);
         let rgb1 = self.be32(g + 0xC);
         // x1/y1 are the blit width/height (x2/y2 for the planar ops); clamp
@@ -420,26 +427,32 @@ impl Z3660 {
                     log::debug!("z3660: copyrect minterm {minterm:#04x} treated as SRC");
                 }
                 let apply_mask = op == OP_COPYRECT && bpp == 1 && mask != 0xFF;
-                // Snapshot the source rect first: rects may overlap.
-                let mut rect = vec![0u8; x1 * y1 * bpp];
-                for y in 0..y1 {
+                // Rects may overlap, so a row cannot be written while it is
+                // still needed as source. Buffer one row rather than the
+                // whole rect: x1/y1 are clamped to MAX_DIM apiece, so a
+                // whole-rect snapshot would reach 64 MiB per blit, which is
+                // a large allocation and a long stall for a guest-supplied
+                // pair of numbers. Vertical overlap is handled by walking
+                // rows away from the destination instead.
+                let row_bytes = x1 * bpp;
+                let mut row = vec![0u8; row_bytes];
+                let down = dst + y0 * dpitch >= sbase + y2 * spitch;
+                for i in 0..y1 {
+                    let y = if down { y1 - 1 - i } else { i };
                     let srow = sbase + (y2 + y) * spitch + x2 * bpp;
-                    for b in 0..x1 * bpp {
-                        rect[y * x1 * bpp + b] = if srow + b < self.vram.len() {
+                    for (b, r) in row.iter_mut().enumerate() {
+                        *r = if srow + b < self.vram.len() {
                             self.vram[srow + b]
                         } else {
                             0
                         };
                     }
-                }
-                for y in 0..y1 {
                     let drow = dst + (y0 + y) * dpitch + x0 * bpp;
-                    for x in 0..x1 * bpp {
+                    for (x, &s) in row.iter().enumerate() {
                         let at = drow + x;
                         if at >= self.vram.len() {
                             continue;
                         }
-                        let s = rect[y * x1 * bpp + x];
                         self.vram[at] = if apply_mask {
                             (self.vram[at] & !mask) | (s & mask)
                         } else {
@@ -1363,6 +1376,77 @@ mod exec_tests {
         );
         ring(&mut z, &mut m, 3);
         assert_eq!(&z.vram[v..v + 8], &[0, 1, 0, 1, 2, 3, 6, 7]);
+    }
+
+    /// Rects that overlap vertically scroll without smearing. Only one row
+    /// is buffered, so rows must be walked away from the destination: a
+    /// downward copy taken top-first would overwrite row n before reading
+    /// it as the source for row n+1, painting the first row everywhere.
+    #[test]
+    fn copyrect_scrolls_down_without_smearing() {
+        let (mut z, mut m) = (Z3660::new(), mem());
+        let v = VRAM_OFFSET as usize;
+        // Four 4-byte rows, contiguous (pitch0 = 1 longword).
+        for i in 0..16 {
+            z.vram[v + i] = i as u8;
+        }
+        // Copy rows 0..3 down one row, so each row takes the one above it.
+        gfxdata(
+            &mut z,
+            0,
+            0,
+            0,
+            0,
+            [0, 4, 0],
+            [1, 3, 0],
+            0,
+            [1, 0],
+            0,
+            0,
+            0xFF,
+            0,
+        );
+        ring(&mut z, &mut m, 3);
+        assert_eq!(
+            &z.vram[v..v + 16],
+            &[0, 1, 2, 3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        );
+    }
+
+    /// A surface offset near the top of the 32-bit address space must not
+    /// wrap back into live VRAM when VRAM_OFFSET is added to it.
+    ///
+    /// This only discriminates where usize is 32 bits: on wasm32 the
+    /// unwidened add wrapped to 0x1FFFF0, inside the mailbox region, and
+    /// corrupted it. On a 64-bit host the sum is merely far out of range and
+    /// the op drops either way, so here this is a guard rather than a
+    /// reproduction.
+    #[test]
+    fn blit_base_near_the_address_space_top_does_not_wrap() {
+        let (mut z, mut m) = (Z3660::new(), mem());
+        let v = VRAM_OFFSET as usize;
+        for i in 0..8 {
+            z.vram[v + i] = i as u8;
+        }
+        // dst = 0xFFFF_FFF0: adding VRAM_OFFSET overflows 32 bits, and a
+        // wrapped base would land inside VRAM and corrupt it.
+        gfxdata(
+            &mut z,
+            0xFFFF_FFF0,
+            0,
+            0xAA,
+            0,
+            [0, 4, 0],
+            [0, 1, 0],
+            0,
+            [4, 0],
+            0,
+            0,
+            0xFF,
+            0,
+        );
+        ring(&mut z, &mut m, 2); // FILLRECT
+        assert_eq!(&z.vram[v..v + 8], &[0, 1, 2, 3, 4, 5, 6, 7]);
     }
 
     #[test]
