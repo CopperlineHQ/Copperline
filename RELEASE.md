@@ -38,6 +38,35 @@ resolve that dependency story before attempting a crates.io release.
    git check-ignore -v KICK13.ROM AmigaTestKit.adf cdtv_single.bin
    ```
 
+## Version bump
+
+`crates/copperline-web` and `crates/cputest-runner` are separate workspaces
+with their own committed `Cargo.lock` files, so a root build never refreshes
+them (`crates/m68k` is also its own workspace, but its lock is deliberately
+gitignored, so it cannot drift). Both pin sibling crates by path:
+`copperline-web` locks the root `copperline` version and `cputest-runner`
+locks the `copperline-m68k` version. If either version is bumped without
+regenerating the matching nested lock, every `cargo build --locked` in that
+crate fails at the release tag, and tags are immutable so the breakage
+cannot be fixed after the fact (issue #219: the `v0.12.0` tag shipped
+`crates/copperline-web/Cargo.lock` still pinning `copperline 0.11.0`).
+
+In the same commit as any version bump, resync the affected nested locks
+and commit them:
+
+```sh
+(cd crates/copperline-web && cargo update -p copperline)      # root version bump
+(cd crates/cputest-runner && cargo update -p copperline-m68k) # crates/m68k bump
+```
+
+The `Lockfile sync` workflow (`.github/workflows/locks.yml`) runs these
+checks on every pull request, push to `main`, and `v*` tag push, so a tag
+cut from a commit with a stale lock turns red within about a minute --
+delete and re-cut the tag if that happens. The pre-tag check below is still
+part of the checklist so the drift never reaches the tag at all; the
+v0.12.0 breakage happened precisely because the tag was cut from a fresh
+bump commit before any CI had run against it.
+
 ## Checks
 
 Run these before tagging a source release:
@@ -46,6 +75,14 @@ Run these before tagging a source release:
 cargo fmt --check
 cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo test --locked
+```
+
+Confirm every nested workspace lockfile is in sync (fails if a version bump
+missed one; see "Version bump" above):
+
+```sh
+(cd crates/copperline-web && cargo tree --locked > /dev/null)
+(cd crates/cputest-runner && cargo tree --locked > /dev/null)
 ```
 
 Build the documentation:

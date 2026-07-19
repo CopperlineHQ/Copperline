@@ -8,6 +8,18 @@ project:
   title: Copperline
   description: A cycle-driven Amiga emulator in Rust
   keywords: [amiga, emulator, ocs, ecs, rust]
+  # --check-links + --strict fails the CI docs build when a linked site is
+  # unreachable. archive.org has outages regularly enough that it broke an
+  # unrelated PR; exempt it from link resolution (the link stays in the
+  # rendered docs) so CI does not depend on its uptime. Keys match the
+  # exact link URL, not the domain, so any new archive.org link needs its
+  # own entry here. Everything else stays checked; add a key only for
+  # sites with a history of downtime.
+  error_rules:
+    - rule: link-resolves
+      severity: ignore
+      keys:
+        - http://archive.org
   authors:
     - name: Andrew Hutchings
   github: https://github.com/LinuxJedi/Copperline
