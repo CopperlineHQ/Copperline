@@ -49,8 +49,10 @@ Docker deployment with a mounted volume, an intranet install) can boot
 them by URL: `?kick=files/kick13.rom`. ROM fetches are capped at 4 MiB
 and the image is validated like a picked file. A page shell may also
 offer a **Kickstart from URL** button (id `kickurl`), which prompts for
-a same-origin address; the hosted page has no ROMs to point it at and
-omits it.
+a same-origin address, or a **Kickstart list** select (id `kicklist`)
+that fills itself with the ROMs the site serves next to the page (see
+the page-shell hooks below); the hosted page has no ROMs to point them
+at and omits both.
 
 Controls:
 
@@ -269,6 +271,18 @@ elements, and pages without them are untouched:
   manifest, a server directory listing of the folder (nginx `autoindex`,
   Apache, `python -m http.server`) is scraped for disk-image links
   instead. If the folder yields nothing, the select hides itself.
+- `#kicklist` (a `<select>`): the same list pattern for Kickstart ROMs.
+  The folder is the select's `data-src` attribute (default `kick/`), with
+  the same manifest-or-directory-listing contract as `#df0list`, filtered
+  to raw `.rom`/`.bin` images (a list pick feeds the ROM loader directly,
+  which takes uncompressed 256/512 KiB images). A picked ROM is fitted
+  like the picker: queued before boot (the boot button relabels), and a
+  running machine is power-cycled. Picks go through the same-origin
+  copyright gate described above, and the list enforces it up front -- a
+  cross-origin folder or manifest entry is hidden rather than offered and
+  refused pick by pick. The hosted page's server carries no ROMs, so the
+  select never appears there; a self-hosted shell that serves its owner's
+  ROMs next to the page gets a one-click ROM chooser.
 - `#ledbar` (a container): hosts the front-panel status strip (LEDs,
   track counter, disk names), letting the page own its placement and
   outer styling. Without it the strip inserts itself directly below the
