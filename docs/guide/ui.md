@@ -24,6 +24,7 @@ The app shortcut modifier is `Cmd` on macOS and `Alt` on Linux/Windows.
 | `Cmd+Shift+A` | `Alt+Shift+A` | Cycle the audio output: Default, each host device, then Disabled (also the menu's Audio Out item) |
 | `Cmd+Shift++` / `Cmd+Shift+-` | `Alt+Shift++` / `Alt+Shift+-` | Raise / lower the parallel-port sampler input gain (only when a sampler is attached; also the menu's Sampler Gain item) |
 | `Cmd+F` | `Alt+F` | Toggle fullscreen on / off |
+| `Cmd+Shift+F` | `Alt+Shift+F` | Show / hide the status bar |
 | `Cmd+W` | `Alt+W` | Toggle Warp Speed (turbo) on / off |
 | `Cmd+Shift+W` | `Alt+Shift+W` | Cycle the Warp Speed limit: 2x, 4x, 8x, 16x, Max |
 | `Esc` | `Esc` | Close an open menu, tool window, or overlay panel; otherwise passed through to the Amiga |
@@ -161,6 +162,9 @@ tool window or overlay.
   window's current monitor. The picture keeps its aspect and letterboxes
   as needed, exactly as when resizing the window; the same shortcut (or
   menu item) restores the window.
+- **Status Bar** (also `Cmd+Shift+F` / `Alt+Shift+F`): show or hide the
+  status bar. Handy alongside fullscreen for a clean, chrome-free picture;
+  the same shortcut or menu item brings it back.
 - **Warp Speed** (also `Cmd+W` / `Alt+W`): runs the emulator unpaced for
   fast-forward. Toggling back re-anchors real-time pacing cleanly.
 - **Warp Limit** (also `Cmd+Shift+W` / `Alt+Shift+W`): cycles how fast warp

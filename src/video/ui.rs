@@ -90,6 +90,7 @@ pub enum MenuItem {
     PixelAspect,
     FloppySpeed,
     Fullscreen,
+    StatusBar,
     AudioOutput,
     Warp,
     WarpLimit,
@@ -107,8 +108,8 @@ pub enum MenuItem {
 pub fn menu_items(midi_active: bool, sampler_active: bool) -> Vec<MenuItem> {
     let _ = midi_active;
     // 9 leading + up to 2 MIDI + 2 sampler + pixel aspect + floppy speed +
-    // 10 trailing items = 25, sized so appending never reallocates.
-    let mut items = Vec::with_capacity(25);
+    // 11 trailing items = 26, sized so appending never reallocates.
+    let mut items = Vec::with_capacity(26);
     items.extend([
         MenuItem::MachineConfig,
         MenuItem::FrameAnalyzer,
@@ -133,6 +134,7 @@ pub fn menu_items(midi_active: bool, sampler_active: bool) -> Vec<MenuItem> {
     items.push(MenuItem::FloppySpeed);
     items.extend([
         MenuItem::Fullscreen,
+        MenuItem::StatusBar,
         MenuItem::Warp,
         MenuItem::WarpLimit,
         MenuItem::Record,
@@ -153,6 +155,8 @@ pub struct MenuLabels<'a> {
     pub warp_speed: WarpSpeed,
     /// True while the host window is fullscreen (the menu item toggles it).
     pub fullscreen: bool,
+    /// True while the status bar is hidden (the menu item toggles it).
+    pub status_bar_hidden: bool,
     pub recording: bool,
     pub input_recording: bool,
     pub joystick_input_mode: JoystickInputMode,
@@ -225,6 +229,8 @@ fn menu_item_label(item: MenuItem, s: MenuLabels) -> String {
         MenuItem::SamplerGain => format!("Sampler Gain {:>5}", format!("[{}]", s.sampler_gain)),
         MenuItem::Fullscreen if s.fullscreen => "Fullscreen      [on]".to_string(),
         MenuItem::Fullscreen => "Fullscreen     [off]".to_string(),
+        MenuItem::StatusBar if s.status_bar_hidden => "Status Bar     [off]".to_string(),
+        MenuItem::StatusBar => "Status Bar      [on]".to_string(),
         MenuItem::Warp if s.warp => "Warp Speed      [on]".to_string(),
         MenuItem::Warp => "Warp Speed     [off]".to_string(),
         // Right-pad so the closing bracket stays put as the value width
@@ -873,7 +879,7 @@ pub enum UiControl {
 fn panel_dims(panel: &Panel) -> (usize, usize) {
     match panel {
         Panel::About => (560, 380),
-        Panel::Shortcuts => (600, 464),
+        Panel::Shortcuts => (600, 486),
         Panel::Calibration(_) => (620, 372),
         Panel::Debugger(_) => (684, 520),
         Panel::FrameAnalyzer(_) => (700, 526),
@@ -1898,7 +1904,7 @@ pub fn draw_drop_hint(frame: &mut [u8], texture_scale: usize) {
     draw_panel_text(frame, x, y, text, PANEL_TEXT_HILIGHT, px, texture_scale);
 }
 
-const SHORTCUT_ROWS: [(&str, &str, bool); 17] = [
+const SHORTCUT_ROWS: [(&str, &str, bool); 18] = [
     ("Q", "Quit", true),
     ("S", "Save screenshot", true),
     ("R", "Record video on/off", true),
@@ -1912,6 +1918,7 @@ const SHORTCUT_ROWS: [(&str, &str, bool); 17] = [
     ("J", "Joystick input mode", true),
     ("Shift+A", "Cycle audio output", true),
     ("F", "Fullscreen on/off", true),
+    ("Shift+F", "Status bar on/off", true),
     ("W", "Warp speed on/off", true),
     ("Shift+W", "Warp limit (2x..Max)", true),
     ("Esc", "Close menu/window", false),
@@ -4893,6 +4900,7 @@ mod tests {
             warp: false,
             warp_speed: WarpSpeed::Max,
             fullscreen,
+            status_bar_hidden: false,
             recording: false,
             input_recording: false,
             joystick_input_mode: JoystickInputMode::Gamepad,
@@ -4915,6 +4923,40 @@ mod tests {
         assert_eq!(
             menu_item_label(MenuItem::Fullscreen, labels(true)),
             "Fullscreen      [on]"
+        );
+    }
+
+    #[test]
+    fn status_bar_menu_item_label_tracks_state() {
+        assert!(menu_items(false, false).contains(&MenuItem::StatusBar));
+        let labels = |status_bar_hidden| MenuLabels {
+            warp: false,
+            warp_speed: WarpSpeed::Max,
+            fullscreen: false,
+            status_bar_hidden,
+            recording: false,
+            input_recording: false,
+            joystick_input_mode: JoystickInputMode::Gamepad,
+            port_devices: [
+                crate::bus::PortDevice::Mouse,
+                crate::bus::PortDevice::Joystick,
+            ],
+            pixel_aspect: PixelAspect::Tv,
+            floppy_speed: 100,
+            midi_in: "",
+            midi_out: "",
+            audio_output: "",
+            sampler_input: "",
+            sampler_gain: "",
+        };
+        // "on" means the bar is shown.
+        assert_eq!(
+            menu_item_label(MenuItem::StatusBar, labels(false)),
+            "Status Bar      [on]"
+        );
+        assert_eq!(
+            menu_item_label(MenuItem::StatusBar, labels(true)),
+            "Status Bar     [off]"
         );
     }
 
@@ -4943,6 +4985,7 @@ mod tests {
                                         // Rides warp's sweep so both label
                                         // states are width-checked.
                                         fullscreen: warp,
+                                        status_bar_hidden: warp,
                                         recording,
                                         input_recording,
                                         joystick_input_mode: mode,
@@ -5501,6 +5544,7 @@ mod tests {
                 warp: true,
                 warp_speed: WarpSpeed::Max,
                 fullscreen: false,
+                status_bar_hidden: false,
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
@@ -5549,6 +5593,7 @@ mod tests {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
                 fullscreen: false,
+                status_bar_hidden: false,
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
@@ -5585,6 +5630,7 @@ mod tests {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
                 fullscreen: false,
+                status_bar_hidden: false,
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
@@ -5637,6 +5683,7 @@ mod tests {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
                 fullscreen: false,
+                status_bar_hidden: false,
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
@@ -5713,6 +5760,7 @@ mod tests {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
                 fullscreen: false,
+                status_bar_hidden: false,
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
@@ -5776,6 +5824,7 @@ mod tests {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
                 fullscreen: false,
+                status_bar_hidden: false,
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
@@ -5836,6 +5885,7 @@ mod tests {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
                 fullscreen: false,
+                status_bar_hidden: false,
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
@@ -5897,6 +5947,7 @@ mod tests {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
                 fullscreen: false,
+                status_bar_hidden: false,
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
@@ -6011,6 +6062,7 @@ mod tests {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
                 fullscreen: false,
+                status_bar_hidden: false,
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
@@ -6085,6 +6137,7 @@ mod tests {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
                 fullscreen: false,
+                status_bar_hidden: false,
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
@@ -6170,6 +6223,7 @@ mod tests {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
                 fullscreen: false,
+                status_bar_hidden: false,
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
@@ -6292,6 +6346,7 @@ mod tests {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
                 fullscreen: false,
+                status_bar_hidden: false,
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
@@ -6344,6 +6399,7 @@ mod tests {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
                 fullscreen: false,
+                status_bar_hidden: false,
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
@@ -6387,6 +6443,7 @@ mod tests {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
                 fullscreen: false,
+                status_bar_hidden: false,
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
@@ -6470,6 +6527,7 @@ mod tests {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
                 fullscreen: false,
+                status_bar_hidden: false,
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
@@ -6520,6 +6578,7 @@ mod tests {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
                 fullscreen: false,
+                status_bar_hidden: false,
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
@@ -6563,6 +6622,7 @@ mod tests {
                 warp: false,
                 warp_speed: WarpSpeed::Max,
                 fullscreen: false,
+                status_bar_hidden: false,
                 recording: false,
                 input_recording: false,
                 joystick_input_mode: JoystickInputMode::Gamepad,
@@ -6610,6 +6670,7 @@ mod tests {
             warp: false,
             warp_speed: WarpSpeed::Max,
             fullscreen: false,
+            status_bar_hidden: false,
             recording: false,
             input_recording: false,
             joystick_input_mode: JoystickInputMode::Gamepad,

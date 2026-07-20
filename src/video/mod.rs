@@ -106,6 +106,19 @@ pub fn set_pixel_aspect(aspect: crate::config::PixelAspect) {
     );
 }
 
+/// Whether the status bar is hidden, so the emulated display scales to fill the
+/// whole window. Toggled live from the window/menu (main thread only, like
+/// [`SQUARE_PIXEL_ASPECT`]); the atomic only satisfies `static` safety.
+static STATUS_BAR_HIDDEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_status_bar_hidden(hidden: bool) {
+    STATUS_BAR_HIDDEN.store(hidden, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn status_bar_hidden() -> bool {
+    STATUS_BAR_HIDDEN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn pixel_aspect() -> crate::config::PixelAspect {
     if SQUARE_PIXEL_ASPECT.load(std::sync::atomic::Ordering::Relaxed) {
         crate::config::PixelAspect::Square

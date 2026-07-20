@@ -308,10 +308,20 @@ pub const DEFAULT_KEY_HOLD_MS: u32 = 100;
 const DEBUGGER_REVERSE_INTERVAL_FRAMES: u64 = 10;
 const MAX_TEXTURE_SCALE: usize = 2;
 const STATUS_BAR_HEIGHT: usize = 44;
-/// Logical window height: the presentation canvas for the active pixel
-/// aspect plus the status bar below it.
+/// Logical window height: the presentation canvas for the active pixel aspect,
+/// plus the status bar below it unless it is hidden (in which case the display
+/// scales to fill the whole window).
 fn window_present_height() -> usize {
-    present_height() + STATUS_BAR_HEIGHT
+    present_height() + status_bar_height()
+}
+
+/// The status bar's height, or 0 while it is hidden.
+fn status_bar_height() -> usize {
+    if super::status_bar_hidden() {
+        0
+    } else {
+        STATUS_BAR_HEIGHT
+    }
 }
 const STATUS_LABEL_X: usize = 18;
 const STATUS_LED_X: usize = 58;
@@ -1858,6 +1868,12 @@ impl ApplicationHandler for App {
                         self.cycle_joystick_input_mode()
                     }
                     (KeyCode::KeyF, ElementState::Pressed)
+                        if host_shortcut_modifier_pressed(self.modifiers)
+                            && self.modifiers.shift_key() =>
+                    {
+                        self.toggle_status_bar()
+                    }
+                    (KeyCode::KeyF, ElementState::Pressed)
                         if host_shortcut_modifier_pressed(self.modifiers) =>
                     {
                         self.toggle_fullscreen()
@@ -2238,7 +2254,9 @@ impl ApplicationHandler for App {
                             self.present_standard_tv_aperture && self.rtg_present_dims.is_none(),
                         );
                     }
-                    draw_status_bar(frame, &view, r.texture_scale);
+                    if !super::status_bar_hidden() {
+                        draw_status_bar(frame, &view, r.texture_scale);
+                    }
                     if recording {
                         // Painted into the presentation texture only, so
                         // the badge never appears in the recorded file.
@@ -2259,6 +2277,7 @@ impl ApplicationHandler for App {
                             warp,
                             warp_speed,
                             fullscreen: r.window.fullscreen().is_some(),
+                            status_bar_hidden: super::status_bar_hidden(),
                             recording,
                             input_recording,
                             joystick_input_mode: self.joystick_input_mode,
@@ -3424,6 +3443,7 @@ impl App {
                     ui::MenuItem::FloppySpeed => self.cycle_floppy_speed(),
                     ui::MenuItem::AudioOutput => self.cycle_audio_output(),
                     ui::MenuItem::Fullscreen => self.toggle_fullscreen(),
+                    ui::MenuItem::StatusBar => self.toggle_status_bar(),
                     ui::MenuItem::Warp => self.toggle_warp(),
                     ui::MenuItem::WarpLimit => self.cycle_warp_speed(),
                     ui::MenuItem::Record => self.toggle_recording(),
@@ -7137,6 +7157,40 @@ impl App {
         }
         self.resize_for_active_panel();
         self.request_redraw();
+    }
+
+    /// Show or hide the status bar. Hidden, the emulated display scales to fill
+    /// the whole window (the canvas loses the bar's height, so the presentation
+    /// grows into it while keeping its aspect). This is the same canvas-height
+    /// change as a pixel-aspect switch, so it resizes the texture and window the
+    /// same way; the recorder captures only the display, so a recording is
+    /// unaffected. Bound to the status-bar shortcut and the menu.
+    fn toggle_status_bar(&mut self) {
+        let hidden = !super::status_bar_hidden();
+        super::set_status_bar_hidden(hidden);
+        if let Some(r) = self.render.as_mut() {
+            if let Err(e) = r.pixels.resize_buffer(
+                texture_width(r.texture_scale) as u32,
+                texture_height(r.texture_scale) as u32,
+            ) {
+                // The draw helpers size themselves from the hidden flag, so a
+                // failed resize must not commit the toggle: a taller canvas over
+                // an unchanged, shorter buffer would index past it. Revert and
+                // leave the flag and buffer consistent.
+                warn!("resize texture buffer for status bar toggle failed: {e}");
+                super::set_status_bar_hidden(!hidden);
+                return;
+            }
+        }
+        self.resize_for_active_panel();
+        self.request_redraw();
+        if hidden {
+            self.show_osd(format!(
+                "Status bar hidden ({HOST_SHORTCUT_MODIFIER_LABEL}+Shift+F restores)"
+            ));
+        } else {
+            self.show_osd("Status bar restored");
+        }
     }
 
     fn request_main_redraw(&self) {
