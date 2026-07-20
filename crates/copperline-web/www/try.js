@@ -338,6 +338,10 @@ async function boot() {
     // A reboot from a paused machine must not start the new one paused.
     paused = false;
     setPauseLabel();
+    // Port fittings live on the machine, so a fresh one needs the pads
+    // that are still plugged into the host put back.
+    for (const port of padAssignments.values()) fitCd32Pad(port);
+    if (joyMode === 'cd32') fitCd32Pad(2);
     requestAnimationFrame(tick);
   } catch (e) {
     setLoadStatus(`boot failed: ${e.message ?? e}`);
@@ -781,6 +785,9 @@ function setJoyMode(mode) {
   if (fsUi) fsUi.joy.textContent = `Joystick: ${joyMode}`;
   for (const k of Object.keys(joyHeld)) joyHeld[k] = false;
   resetTouchState();
+  // The cd32 mapping's extra buttons only reach a guest through a fitted
+  // CD32 pad; the plain modes leave whatever is in the port alone.
+  if (joyMode === 'cd32') fitCd32Pad(2);
   applyJoystick();
 }
 
@@ -811,6 +818,17 @@ $('joy').addEventListener('click', cycleJoyMode);
 const PAD_AXIS_THRESHOLD = 0.5; // analogue stick deflection that counts
 const padAssignments = new Map(); // gamepad index -> Amiga port (2 first)
 
+// A port only reports the CD32 pad's extra buttons while a CD32 pad is
+// what is plugged into it: the core runs the pad's shift register for
+// PortDevice::Cd32Pad alone, so on a plain joystick those buttons exist
+// but nothing can read them. Fitting the pad costs nothing elsewhere --
+// outside the serial mode a CD32-aware game selects through POTGO, a pad
+// reads exactly like a two-button stick -- so any source that can produce
+// the extras (a gamepad, or the keyboard's cd32 mapping) fits one.
+function fitCd32Pad(port) {
+  emu?.set_port_device(port, 'cd32');
+}
+
 function padPressed(pad, index) {
   const b = pad.buttons[index];
   if (!b) return false;
@@ -835,17 +853,23 @@ function readPad(pad) {
 }
 
 // Assign connected pads to ports and drop assignments for pads that went
-// away. Returns true when the mapping changed, so the caller can report it.
+// away. Returns what changed, so the caller can report it accurately.
 function refreshPadAssignments(pads) {
   let changed = false;
+  let releasedPort1 = false;
   for (const index of [...padAssignments.keys()]) {
     if (!pads[index]) {
       const port = padAssignments.get(index);
       padAssignments.delete(index);
       padPort[port] = null;
-      // Port 1 belongs to the mouse when no pad holds it; port 2 keeps its
-      // (now idle) joystick, which is the machine's normal fitting.
-      if (port === 1 && emu) emu.set_port_device(1, 'mouse');
+      // Port 1 is the mouse socket on every machine this build boots, so
+      // a pad leaving it puts the mouse back; port 2 keeps the pad fitting
+      // (idle, and indistinguishable from a joystick to anything that is
+      // not driving the CD32 serial protocol).
+      if (port === 1 && emu) {
+        emu.set_port_device(1, 'mouse');
+        releasedPort1 = true;
+      }
       changed = true;
     }
   }
@@ -855,9 +879,10 @@ function refreshPadAssignments(pads) {
     const port = !taken.has(2) ? 2 : !taken.has(1) ? 1 : null;
     if (port === null) continue; // a third pad has nowhere to go
     padAssignments.set(pad.index, port);
+    fitCd32Pad(port); // a real pad has the extra buttons; let them count
     changed = true;
   }
-  return changed;
+  return { changed, releasedPort1 };
 }
 
 function pumpGamepads() {
@@ -865,28 +890,33 @@ function pumpGamepads() {
   const pads = navigator.getGamepads();
   const anyConnected = [...pads].some((p) => p);
   if (!anyConnected && padAssignments.size === 0) return;
-  const changed = refreshPadAssignments(pads);
+  const { changed, releasedPort1 } = refreshPadAssignments(pads);
   for (const [index, port] of padAssignments) {
     const pad = pads[index];
     if (pad) padPort[port] = readPad(pad);
   }
   applyJoystick();
-  if (changed) updatePadStatus();
+  if (changed) updatePadStatus(releasedPort1);
 }
 
 // A pad is invisible until the browser reports it, and the assignment is
 // not something the visitor chose, so say which port each one landed on.
-function updatePadStatus() {
-  if (padAssignments.size === 0) {
-    setLoadStatus('gamepad disconnected - mouse restored on port 1');
-    return;
-  }
+// The mouse is only worth mentioning when a pad actually vacated port 1,
+// which is the only case where the pointer was displaced.
+function updatePadStatus(releasedPort1) {
   const where = [...padAssignments.values()]
     .sort()
     .map((port) => `port ${port}`)
     .join(' + ');
+  const mouse = releasedPort1 ? ' - mouse restored on port 1' : '';
+  if (padAssignments.size === 0) {
+    setLoadStatus(`gamepad disconnected${mouse}`);
+    return;
+  }
   setLoadStatus(
-    `gamepad ready: ${where}` + (padAssignments.size > 1 ? ' (two players)' : ''),
+    `gamepad ready: ${where}` +
+      (padAssignments.size > 1 ? ' (two players)' : '') +
+      mouse,
   );
 }
 
@@ -1418,7 +1448,9 @@ async function copyScreenshot() {
       a.href = url;
       a.download = `copperline-${new Date().toISOString().replace(/[:.]/g, '-')}.png`;
       a.click();
-      URL.revokeObjectURL(url);
+      // Revoking synchronously can cancel the download that click just
+      // started; let the current task finish first.
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
       setLoadStatus(`screenshot downloaded (clipboard unavailable: ${e.message ?? e})`);
     } catch (err) {
       setLoadStatus(`screenshot failed: ${err.message ?? err}`);

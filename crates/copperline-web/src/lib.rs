@@ -167,8 +167,8 @@ fn w3c_code_to_amiga_rawkey(code: &str) -> Option<u8> {
     })
 }
 
-/// Page-facing port number (1 or 2) to the core's index convention, where 0
-/// selects port 1 and anything else port 2.
+/// Map a page-facing port number to the core's port index: `1` selects the
+/// mouse/port-1 socket (index 0) and any other value port 2 (index 1).
 fn port_index(port: u8) -> usize {
     usize::from(port != 1)
 }
@@ -480,10 +480,15 @@ impl WebEmu {
         fire: bool,
         button2: bool,
     ) {
-        self.emu
-            .bus_mut()
-            .input
-            .set_joystick(port_index(port), up, down, left, right, fire, button2);
+        self.emu.bus_mut().input.set_joystick(
+            port_index(port),
+            up,
+            down,
+            left,
+            right,
+            fire,
+            button2,
+        );
     }
 
     /// The CD32 pad's extra buttons on either port (red/blue arrive through
