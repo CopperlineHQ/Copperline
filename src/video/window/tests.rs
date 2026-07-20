@@ -14,18 +14,18 @@ use super::{
     parse_amiga_key, pause_button_rect, power_button_rect, present_height,
     presentation_h_shift_for, presentation_source_y_offset, raw_device_qualifier_family_held,
     raw_device_qualifier_rawkey, rawkey_is_held, rawkey_transition_is_duplicate,
-    reboot_button_rect, repeated_main_key_should_drop, rgba, shot_button_rect,
-    should_render_emulated_frame, standard_window_top_row, status_with_latched_fdd_track,
-    take_integral_mouse_delta, texture_height, texture_width, tv_aperture_source_row,
-    tv_source_h_bounds, volume_percent_from_pos, volume_slider_track_rect, BarControl, DriveBar,
-    JoystickInputMode, KeyboardJoystickHeld, KeyboardJoystickKey, MediaBar, StatusBarView,
-    ToolPanelKind, AMIGA_RAWKEY_LEFT_ALT, AMIGA_RAWKEY_LEFT_SHIFT, AMIGA_RAWKEY_RIGHT_ALT,
-    AMIGA_RAWKEY_RIGHT_SHIFT, BUTTON_GLYPH, BUTTON_GLYPH_DISABLED, CD_BODY, CD_LED_OFF, CD_LED_ON,
-    DISK_BODY, DISK_BODY_SHADOW, DISK_LABEL, FDD_LED_OFF, FDD_LED_ON, HDD_LED_OFF, HDD_LED_ON,
-    POWER_GLYPH_OFF, POWER_GLYPH_ON, POWER_LED_OFF, POWER_LED_ON, STANDARD_PAL_VISIBLE_LINES,
-    STANDARD_PAL_VISIBLE_START_VPOS, STATUS_BG, TRACK_SEGMENT_OFF, TRACK_SEGMENT_ON,
-    TV_PAL_LIVE_PAD_X, TV_PAL_PRESENT_HEIGHT, TV_PAL_PRESENT_SOURCE_X, TV_PAL_PRESENT_SOURCE_Y,
-    TV_PAL_PRESENT_WIDTH, VOLUME_FILL, VOLUME_GLYPH_X,
+    reboot_button_rect, repeated_main_key_should_drop, rgba, short_status_error,
+    shorten_status_paths, shot_button_rect, should_render_emulated_frame, standard_window_top_row,
+    status_with_latched_fdd_track, take_integral_mouse_delta, texture_height, texture_width,
+    tv_aperture_source_row, tv_source_h_bounds, volume_percent_from_pos, volume_slider_track_rect,
+    BarControl, DriveBar, JoystickInputMode, KeyboardJoystickHeld, KeyboardJoystickKey, MediaBar,
+    StatusBarView, ToolPanelKind, AMIGA_RAWKEY_LEFT_ALT, AMIGA_RAWKEY_LEFT_SHIFT,
+    AMIGA_RAWKEY_RIGHT_ALT, AMIGA_RAWKEY_RIGHT_SHIFT, BUTTON_GLYPH, BUTTON_GLYPH_DISABLED, CD_BODY,
+    CD_LED_OFF, CD_LED_ON, DISK_BODY, DISK_BODY_SHADOW, DISK_LABEL, FDD_LED_OFF, FDD_LED_ON,
+    HDD_LED_OFF, HDD_LED_ON, POWER_GLYPH_OFF, POWER_GLYPH_ON, POWER_LED_OFF, POWER_LED_ON,
+    STANDARD_PAL_VISIBLE_LINES, STANDARD_PAL_VISIBLE_START_VPOS, STATUS_BG, TRACK_SEGMENT_OFF,
+    TRACK_SEGMENT_ON, TV_PAL_LIVE_PAD_X, TV_PAL_PRESENT_HEIGHT, TV_PAL_PRESENT_SOURCE_X,
+    TV_PAL_PRESENT_SOURCE_Y, TV_PAL_PRESENT_WIDTH, VOLUME_FILL, VOLUME_GLYPH_X,
 };
 use crate::audio::{AudioSink, NullSink};
 use crate::bus::{FrontPanelStatus, RenderRegisterSnapshot};
@@ -4124,4 +4124,58 @@ mod control_drain {
             app.emu.bus().emulated_frames()
         );
     }
+}
+
+#[test]
+fn a_missing_rom_reads_as_a_failure_with_a_shortened_path() {
+    // A config naming a ROM that is not there must say so, not read like a
+    // progress message, and must not run the whole path past the panel. A
+    // synthetic NotFound cause keeps this deterministic and off the filesystem.
+    let cause = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+    let err = anyhow::Error::new(cause)
+        .context("reading ROM /Users/me/Desktop/Amiga/kickstarts/roms/kick31.rom".to_string());
+
+    // The cause is what says it failed, so it must survive; the path is
+    // shortened to keep the whole line inside the panel.
+    let status = short_status_error(&err);
+    assert!(
+        status.starts_with("Reading ROM .../roms/kick31.rom:"),
+        "{status}"
+    );
+    assert!(status.contains("no such file"), "{status}");
+    assert!(!status.contains("/Users/me/Desktop"), "{status}");
+    assert!(status.chars().count() <= 80, "{status}");
+}
+
+#[test]
+fn status_paths_keep_the_file_name() {
+    // Short paths are left alone.
+    let short = "unable to read ROM roms/kick.rom";
+    assert_eq!(shorten_status_paths(short), short);
+
+    // A long Unix path collapses to its file name.
+    let unix = "unable to read ROM /Users/me/Desktop/Amiga/roms/kickstart31.rom";
+    let out = shorten_status_paths(unix);
+    assert!(out.ends_with("kickstart31.rom"), "{out}");
+    assert!(out.contains("..."), "{out}");
+
+    // A long Windows path keeps its separator and file name.
+    let win = r"unable to read ROM C:\Users\me\Documents\Amiga\roms\kickstart31.rom";
+    let out = shorten_status_paths(win);
+    assert!(out.ends_with("kickstart31.rom"), "{out}");
+    assert!(out.contains('\\'), "{out}");
+
+    // A path containing spaces is clipped as one span, not split apart into
+    // several "..." fragments, and the cause after it survives.
+    let spaced = "reading ROM /Users/me/My Amiga Roms/kickstart31.rom: no such file";
+    let out = shorten_status_paths(spaced);
+    assert!(out.contains("kickstart31.rom"), "{out}");
+    assert!(out.ends_with(": no such file"), "{out}");
+    assert_eq!(out.matches("...").count(), 1, "{out}");
+
+    // The cause is kept behind the "reading ROM" context (Display's ": " chain).
+    let with_cause =
+        "unable to read extended ROM /Users/me/Desktop/Amiga/roms/cd32ext.rom: No such file";
+    let out = shorten_status_paths(with_cause);
+    assert!(out.contains("cd32ext.rom: No such file"), "{out}");
 }
