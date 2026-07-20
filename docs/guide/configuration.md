@@ -902,8 +902,11 @@ for the board details and the NAT's limitations.
 card = "z3660"
 ```
 
-`card` is `"z3660"` or `"none"` (the default); a machine takes at most one.
-The Z3660 fits on the Zorro chain, giving the guest high-resolution,
+`card` is `"z3660"` or `"none"`; a machine takes at most one. The Z3660 is a
+Zorro III board, so it comes fitted by default on machines whose CPU has a
+32-bit address bus (the A3000 and A4000) and is unavailable on the rest --
+asking for it there is an error, as it is for Zorro III RAM. It gives the
+guest high-resolution,
 high-colour screens through Picasso96. It needs the
 open-source Z3660.card driver installed in the guest (with its monitor in
 `DEVS:Monitors`); with that in place, Z3660 screen modes appear in

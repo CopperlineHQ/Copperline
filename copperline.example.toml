@@ -211,8 +211,9 @@ slow = "512K"
 
 
 # RTG graphics card: high-resolution, high-colour screens via Picasso96.
+# Fitted by default on machines with Zorro III (A3000/A4000).
 # [rtg]
-# card = "z3660"           # or "none" (default)
+# card = "z3660"           # or "none"
 
 
 # SCSI bus with up to seven drives, on any machine model. Preferred over [ide]

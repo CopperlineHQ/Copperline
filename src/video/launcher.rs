@@ -2818,25 +2818,31 @@ mod tests {
 
     #[test]
     fn rtg_card_round_trips_through_raw() {
+        // An A4000 hosts Zorro III, so it comes with the card fitted; that
+        // matches its baseline, so nothing is written for it.
         let mut s = MachineSetup::default();
-        assert_eq!(s.rtg, RtgCard::None);
-        assert_eq!(s.value_label(LauncherField::Rtg), "None");
-        s.cycle(LauncherField::Rtg, true);
+        s.select_model(Some(MachineModel::A4000));
         assert_eq!(s.rtg, RtgCard::Z3660);
         assert_eq!(s.value_label(LauncherField::Rtg), "Z3660");
-
-        // The written key must be what [rtg] card parses back, not the
-        // display label: the parse is case-forgiving but the round trip
-        // should not depend on that.
-        let raw = s.to_raw();
-        assert_eq!(raw.rtg.card.as_deref(), Some("z3660"));
-        let back = MachineSetup::from_raw(&raw).unwrap();
-        assert_eq!(back.rtg, RtgCard::Z3660);
-
-        // Back to the default, which is the baseline, so nothing is written.
-        s.cycle(LauncherField::Rtg, false);
-        assert_eq!(s.rtg, RtgCard::None);
         assert!(s.to_raw().rtg.card.is_none());
+
+        // Turning it off differs from the baseline, so it is written, and
+        // the written key is what [rtg] card parses back rather than the
+        // display label -- the parse is case-forgiving, the round trip
+        // should not lean on that.
+        s.cycle(LauncherField::Rtg, true);
+        assert_eq!(s.rtg, RtgCard::None);
+        assert_eq!(s.value_label(LauncherField::Rtg), "None");
+        let raw = s.to_raw();
+        assert_eq!(raw.rtg.card.as_deref(), Some("none"));
+        let back = MachineSetup::from_raw(&raw).unwrap();
+        assert_eq!(back.rtg, RtgCard::None);
+        assert!(s.build_config().is_ok());
+
+        // A 68000 machine cannot host the board, so it has none and the row
+        // still cycles without producing an unbuildable config.
+        s.select_model(Some(MachineModel::A500));
+        assert_eq!(s.rtg, RtgCard::None);
     }
 
     #[test]
