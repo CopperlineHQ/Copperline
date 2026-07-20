@@ -91,11 +91,12 @@ function showOsd(text) {
 
 function setLoadStatus(text) {
   loadStatus.textContent = text;
-  // Raise the caption only when the shell's own status line cannot be seen
-  // (offsetParent goes null when any ancestor is display:none, which is
-  // exactly the hidden-overlay case). A shell that keeps its status line
-  // permanently visible keeps sole ownership of the message.
-  if (loadStatus.offsetParent === null) showOsd(text);
+  // Raise the caption only when the shell's own status line cannot be seen.
+  // A display:none ancestor -- the hidden-overlay case -- generates no
+  // layout boxes, so an empty getClientRects() is the test. (offsetParent
+  // would look simpler, but it is also null for a position:fixed element,
+  // so a shell with a pinned status line would get the message twice.)
+  if (loadStatus.getClientRects().length === 0) showOsd(text);
 }
 
 async function fetchBytes(url, label) {
