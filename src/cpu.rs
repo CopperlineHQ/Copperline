@@ -2323,6 +2323,33 @@ impl CpuBus {
         (ranger || reserved || below_canonical).then_some(addr & 0xFFF)
     }
 
+    /// Read the `$DC0000` clock page.
+    ///
+    /// The MSM6242 is a four-bit part sitting on the low byte lane alone, so
+    /// register N answers at `base + N * 4 + 3` and only there. The even lane
+    /// is not wired to the clock at all: it floats whether or not a clock is
+    /// fitted, which is why the OS probes address the page a byte at a time.
+    fn rtc_page_read(&mut self, addr: u32, size: usize) -> u32 {
+        let mut value = 0u32;
+        for i in 0..size {
+            let byte = self.rtc_page_byte(addr.wrapping_add(i as u32));
+            value = (value << 8) | u32::from(byte);
+        }
+        value
+    }
+
+    fn rtc_page_byte(&mut self, addr: u32) -> u8 {
+        if addr & 1 == 0 {
+            // The clock never drives this lane; it keeps the bus's charge.
+            return (self.bus.data_bus >> 8) as u8;
+        }
+        if !self.bus.rtc_present() {
+            return crate::rtc::EMPTY_SOCKET_LANE;
+        }
+        let secs = self.bus.emulated_seconds();
+        self.bus.rtc.read(u64::from(addr - RTC_BASE), 1, secs) as u8
+    }
+
     fn peek_word(&self, address: u32) -> u16 {
         let addr = self.mask(address);
         ((self.peek_byte(addr) as u16) << 8) | self.peek_byte(addr.wrapping_add(1)) as u16
@@ -2594,10 +2621,9 @@ impl CpuBus {
                 return cdtv.battram_read(addr - CDTV_BATTRAM_BASE, size);
             }
         }
-        if self.bus.rtc_present() && range_contains(RTC_BASE, RTC_SIZE, addr) {
+        if range_contains(RTC_BASE, RTC_SIZE, addr) {
             self.bus.cpu_slow_external_access(Self::access_words(size));
-            let secs = self.bus.emulated_seconds();
-            return self.bus.rtc.read(u64::from(addr - RTC_BASE), size, secs) as u32;
+            return self.rtc_page_read(addr, size);
         }
         if self.bus.gayle.is_some()
             && (range_contains(GAYLE_BASE, GAYLE_SIZE, addr)
@@ -2846,12 +2872,15 @@ impl CpuBus {
             }
             return;
         }
-        if self.bus.rtc_present() && range_contains(RTC_BASE, RTC_SIZE, addr) {
+        if range_contains(RTC_BASE, RTC_SIZE, addr) {
             self.bus.cpu_slow_external_access(Self::access_words(size));
-            let secs = self.bus.emulated_seconds();
-            self.bus
-                .rtc
-                .write(u64::from(addr - RTC_BASE), size, u64::from(value), secs);
+            // An empty clock socket answers the cycle but latches nothing.
+            if self.bus.rtc_present() {
+                let secs = self.bus.emulated_seconds();
+                self.bus
+                    .rtc
+                    .write(u64::from(addr - RTC_BASE), size, u64::from(value), secs);
+            }
             return;
         }
         if self.bus.gayle.is_some()
@@ -4031,6 +4060,123 @@ mod tests {
             ipl_sample_held: false,
             diag_current_pc: 0,
         }
+    }
+
+    /// `getreg`/`putreg` as every AmigaOS clock probe writes them: the
+    /// four-bit part answers at `base + reg * 4 + 3` and the read is masked
+    /// to the nibble.
+    fn clock_reg(bus: &mut CpuBus, reg: u32) -> u8 {
+        bus.read_byte(RTC_BASE + reg * 4 + 3) & 0x0F
+    }
+
+    fn set_clock_reg(bus: &mut CpuBus, reg: u32, value: u8) {
+        bus.write_byte(RTC_BASE + reg * 4 + 3, value);
+    }
+
+    /// An empty clock socket must not be talked into existing. Every OS probe
+    /// asks the same question -- write a control nibble, read it back -- so a
+    /// lane that floated to the last value on the data bus would eventually
+    /// echo the write and hand the guest a clock, and a date, that the machine
+    /// does not have (issue #235: KS1.3 `SetClock` printing `<unset>` instead
+    /// of "Battery Backed up Clock not found", AROS inventing a past date).
+    #[test]
+    fn an_empty_clock_socket_never_reads_back_a_written_control_nibble() {
+        let mut bus = cpu_bus(test_bus(reset_rom(0, 0)));
+        bus.bus.set_rtc_present(false);
+
+        // Whatever the bus last carried -- including the value about to be
+        // written, which is the case that invented a clock.
+        for float in [0x0000u16, 0x0404, 0x4444, 0xFFFF, 0xA53C] {
+            for reg in 0x0u32..=0xF {
+                for nibble in 0x0u8..=0xF {
+                    bus.bus.data_bus = float;
+                    set_clock_reg(&mut bus, reg, nibble);
+                    bus.bus.data_bus = float;
+                    assert_eq!(
+                        clock_reg(&mut bus, reg),
+                        0,
+                        "reg {reg:#X} echoed {nibble:#X} with the bus at {float:#06X}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// AROS `battclock.resource` init (arch/m68k-amiga), the probe from the
+    /// issue, played out in full: it looks for an RF5C01A (control D reading
+    /// 8 with control F reading 0) and an MSM6242B (control F reading 4),
+    /// resetting the part and retrying once before giving up. With no clock
+    /// fitted it must reach the end having found neither.
+    #[test]
+    fn the_aros_clock_probe_finds_nothing_in_an_empty_socket() {
+        let mut bus = cpu_bus(test_bus(reset_rom(0, 0)));
+        bus.bus.set_rtc_present(false);
+        bus.bus.data_bus = 0x0404; // the float that used to fake an MSM6242B
+
+        // "10 minutes or hours bit 3 set = not a clock" -- the early out.
+        assert_eq!(clock_reg(&mut bus, 0x01) & 8, 0);
+        assert_eq!(clock_reg(&mut bus, 0x03) & 8, 0);
+
+        let mut found = false;
+        for _ in 0..2 {
+            if clock_reg(&mut bus, 0x0D) == 0x8 && clock_reg(&mut bus, 0x0F) == 0x0 {
+                found = true; // RF5C01A
+                break;
+            }
+            if clock_reg(&mut bus, 0x0F) == 0x4 {
+                found = true; // MSM6242B
+                break;
+            }
+            set_clock_reg(&mut bus, 0xE, 0);
+            set_clock_reg(&mut bus, 0xD, 0);
+            set_clock_reg(&mut bus, 0xD, 4); // set the IRQ flag...
+            if clock_reg(&mut bus, 0xD) == 0 {
+                // ...which an MSM6242B cannot hold, so reset it as one.
+                set_clock_reg(&mut bus, 0xF, 7);
+                set_clock_reg(&mut bus, 0xF, 4);
+            } else {
+                set_clock_reg(&mut bus, 0xF, 3);
+                set_clock_reg(&mut bus, 0xF, 0);
+                set_clock_reg(&mut bus, 0xD, 8);
+            }
+        }
+        assert!(!found, "AROS found a clock in an empty socket");
+    }
+
+    /// The same probe against a fitted MSM6242 has to succeed, or the fix
+    /// above would have cost the machine its clock: control F reads the
+    /// 24-hour bit, which is the tell AROS matches on.
+    #[test]
+    fn the_aros_clock_probe_identifies_a_fitted_msm6242() {
+        let mut bus = cpu_bus(test_bus(reset_rom(0, 0)));
+        bus.bus.set_rtc_present(true);
+        bus.bus.data_bus = 0xFFFF;
+
+        assert_eq!(clock_reg(&mut bus, 0x01) & 8, 0);
+        assert_eq!(clock_reg(&mut bus, 0x03) & 8, 0);
+        assert_ne!(clock_reg(&mut bus, 0x0D), 0x8); // not an RF5C01A
+        assert_eq!(clock_reg(&mut bus, 0x0F), 0x4); // an MSM6242B
+    }
+
+    /// The clock sits on the low byte lane only: the even lane is not wired
+    /// to it and floats whether or not a chip is in the socket. AROS reads a
+    /// *word* at $DC0010 to test whether the custom registers are mirrored
+    /// into clock space, so the even lane has to keep floating.
+    #[test]
+    fn only_the_odd_byte_lane_reaches_the_clock() {
+        let mut bus = cpu_bus(test_bus(reset_rom(0, 0)));
+        bus.bus.set_rtc_present(false);
+        bus.bus.data_bus = 0xA53C;
+
+        assert_eq!(bus.read_byte(RTC_BASE + 0x34), 0xA5);
+        assert_eq!(
+            bus.read_byte(RTC_BASE + 0x37),
+            crate::rtc::EMPTY_SOCKET_LANE
+        );
+        assert_eq!(
+            bus.read_word(RTC_BASE + 0x36),
+            0xA500 | u16::from(crate::rtc::EMPTY_SOCKET_LANE)
+        );
     }
 
     #[test]

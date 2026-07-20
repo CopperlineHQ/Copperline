@@ -219,6 +219,17 @@ An MSM6242-compatible register view at `$DC0000`, present on machines
 configured with `rtc = true`. Reads reflect host time; guest writes only
 affect the emulated latch/control state, never the host clock.
 
+The part is four bits wide and sits on the low byte lane alone, so register
+N answers at `$DC0000 + N * 4 + 3` and nowhere else; the even lane is not
+wired to the clock and floats with the bus whether or not a chip is fitted.
+With `rtc = false` the page still answers the cycle, and the odd lane reads
+back `$40` (measured on real A500 hardware) rather than floating. That
+distinction matters: every OS clock probe -- AROS `battclock.resource`,
+1.3's `SetClock`, 2.0+'s `battclock.resource` -- decides a clock is present
+by writing a control nibble and reading it back, so a lane floating to the
+last value on the data bus eventually echoes the write and hands the guest
+an imaginary clock, and then an imaginary date.
+
 ## Input (`gamepad.rs`, window input paths)
 
 Host keyboard events translate to Amiga raw codes and feed a 6500/1
