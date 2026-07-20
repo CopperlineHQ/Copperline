@@ -424,6 +424,18 @@ impl Cia {
         self.regs[REG_DDRA]
     }
 
+    /// Port-A pin levels as contributed by the CIA itself: outputs at their
+    /// programmed level, inputs released (open-drain, pulled high). External
+    /// peripherals are not overlaid here, so a pin an attached device drives
+    /// (the parallel port's Centronics status inputs on CIA-B PA0-2, see
+    /// `Bus::cia_b_read`) can sit at a different board-level value. The
+    /// RS-232 control outputs on CIA-B (/DTR on PA7, /RTS on PA6) have no
+    /// external driver, so for them this is the wire level, which a
+    /// host-side serial bridge observes the way an attached modem would.
+    pub fn port_a_pins(&self) -> u8 {
+        self.read_port(REG_PRA, REG_DDRA)
+    }
+
     /// Physical port-B pin levels without the `PC` strobe side effect of a
     /// guest PRB read. Motherboard wiring (floppy outputs and the Centronics
     /// data bus) observes pins continuously and must not create a second
@@ -1171,6 +1183,26 @@ mod tests {
             cia.ta_count, count,
             "input-mode PRA writes must not clock CNT"
         );
+    }
+
+    #[test]
+    fn port_a_pins_report_driven_levels_and_released_inputs() {
+        // CIA-B PA7 is /DTR: driven low = asserted, and an undriven pin
+        // (input) reads high through the pull-up, so a freshly reset CIA
+        // reports the line deasserted. This is what a host-side serial
+        // bridge observes to tell whether a terminal has opened the port.
+        let mut cia = Cia::new(Which::B);
+        assert_eq!(cia.port_a_pins() & 0x80, 0x80, "reset: /DTR released");
+
+        cia.write(REG_DDRA, 0xC0); // /DTR + /RTS as outputs
+        cia.write(REG_PRA, 0x00); // drive both low = asserted
+        assert_eq!(cia.port_a_pins() & 0xC0, 0x00, "driven low = asserted");
+
+        cia.write(REG_PRA, 0x80); // raise /DTR, keep /RTS low
+        assert_eq!(cia.port_a_pins() & 0xC0, 0x80);
+
+        cia.write(REG_DDRA, 0x00); // back to inputs: pins float high
+        assert_eq!(cia.port_a_pins() & 0xC0, 0xC0, "inputs read released");
     }
 
     #[test]
