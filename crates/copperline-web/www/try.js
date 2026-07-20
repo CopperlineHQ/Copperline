@@ -46,6 +46,7 @@ let audioCtx = null;
 let audioNode = null;
 let queuedMs = 0;
 let running = false;
+let paused = false;
 let framesThisSecond = 0;
 let lastStatUpdate = 0;
 
@@ -334,6 +335,13 @@ async function boot() {
     overlay.style.display = 'none';
     showBugLink(false);
     running = true;
+    // A reboot from a paused machine must not start the new one paused.
+    paused = false;
+    setPauseLabel();
+    // Port fittings live on the machine, so a fresh one needs the pads
+    // that are still plugged into the host put back.
+    for (const port of padAssignments.values()) fitCd32Pad(port);
+    if (joyMode === 'cd32') fitCd32Pad(2);
     requestAnimationFrame(tick);
   } catch (e) {
     setLoadStatus(`boot failed: ${e.message ?? e}`);
@@ -356,6 +364,10 @@ function maxFramesForQueue() {
 
 function tick(nowMs) {
   if (!running) return;
+  if (paused) return; // resumePause() restarts the loop
+  // Polled, not event-driven: the Gamepad API reports button state only
+  // when asked, so this is where a controller reaches the machine.
+  pumpGamepads();
   try {
     framesThisSecond += emu.run(nowMs, maxFramesForQueue());
   } catch (e) {
@@ -669,17 +681,87 @@ const JOY_MODES = hasTouch ? ['off', 'keys', 'cd32', 'touch'] : ['off', 'keys', 
 let joyMode = 'off';
 const joyHeld = {};
 
-function applyJoystick() {
+// Port state each input source contributes. The keyboard mapping and the
+// touch pad always drive port 2 (the Amiga's joystick port); gamepads fill
+// port 2 first and port 1 second (see the gamepad section). Sources on the
+// same port are OR-ed rather than one silencing the other, so a pad and
+// the keyboard can both be live without either going dead mid-game.
+const EMPTY_PAD = {
+  up: false,
+  down: false,
+  left: false,
+  right: false,
+  fire: false,
+  button2: false,
+  play: false,
+  rwd: false,
+  ffw: false,
+  green: false,
+  yellow: false,
+};
+const padPort = { 1: null, 2: null }; // gamepad-sourced state per Amiga port
+
+// The touch pad's stick and fire button, when the canvas is in pad mode.
+// Declared before the touch section that fills these in; hoisting makes
+// that safe, and keeping every port source in one merge is worth it.
+function touchPortState() {
+  if (joyMode !== 'touch') return null;
+  return {
+    ...EMPTY_PAD,
+    up: stickDirs.up,
+    down: stickDirs.down,
+    left: stickDirs.left,
+    right: stickDirs.right,
+    fire: fireTouchId !== null,
+  };
+}
+
+function keyboardPortState() {
   const h = joyHeld;
-  emu.set_joystick_port2(
-    !!h.up,
-    !!h.down,
-    !!h.left,
-    !!h.right,
-    !!(h.fireCtrl || h.fireAlt || h.fireLCtrl || h.red),
-    !!(h.blue || h.blueLAlt),
-  );
-  emu.set_cd32_buttons_port2(!!h.play, !!h.rwd, !!h.ffw, !!h.green, !!h.yellow);
+  return {
+    up: !!h.up,
+    down: !!h.down,
+    left: !!h.left,
+    right: !!h.right,
+    fire: !!(h.fireCtrl || h.fireAlt || h.fireLCtrl || h.red),
+    button2: !!(h.blue || h.blueLAlt),
+    play: !!h.play,
+    rwd: !!h.rwd,
+    ffw: !!h.ffw,
+    green: !!h.green,
+    yellow: !!h.yellow,
+  };
+}
+
+function orPortState(a, b) {
+  if (!a) return b ?? EMPTY_PAD;
+  if (!b) return a;
+  const out = {};
+  for (const k of Object.keys(EMPTY_PAD)) out[k] = a[k] || b[k];
+  return out;
+}
+
+// Push both ports' merged state into the machine. Port 1 is only touched
+// while a gamepad holds it, so a mouse-only session never has its port 1
+// switched away from the mouse.
+function applyJoystick() {
+  if (!emu) return;
+  const port2 = orPortState(orPortState(keyboardPortState(), touchPortState()), padPort[2]);
+  emu.set_joystick_port(2, port2.up, port2.down, port2.left, port2.right, port2.fire, port2.button2);
+  emu.set_cd32_buttons_port(2, port2.play, port2.rwd, port2.ffw, port2.green, port2.yellow);
+  const port1 = padPort[1];
+  if (port1) {
+    emu.set_joystick_port(
+      1,
+      port1.up,
+      port1.down,
+      port1.left,
+      port1.right,
+      port1.fire,
+      port1.button2,
+    );
+    emu.set_cd32_buttons_port(1, port1.play, port1.rwd, port1.ffw, port1.green, port1.yellow);
+  }
 }
 
 // Returns true when the key was captured for the joystick.
@@ -703,10 +785,10 @@ function setJoyMode(mode) {
   if (fsUi) fsUi.joy.textContent = `Joystick: ${joyMode}`;
   for (const k of Object.keys(joyHeld)) joyHeld[k] = false;
   resetTouchState();
-  if (emu) {
-    applyJoystick();
-    emu.set_cd32_buttons_port2(false, false, false, false, false);
-  }
+  // The cd32 mapping's extra buttons only reach a guest through a fitted
+  // CD32 pad; the plain modes leave whatever is in the port alone.
+  if (joyMode === 'cd32') fitCd32Pad(2);
+  applyJoystick();
 }
 
 // Cycles the mode; wired to the control-bar button and to the fullscreen
@@ -716,6 +798,127 @@ function cycleJoyMode() {
 }
 
 $('joy').addEventListener('click', cycleJoyMode);
+
+// --- gamepads (USB / Bluetooth controllers) --------------------------------
+// Real controllers need no toggle: the Gamepad API has no events for
+// button state, so the frame loop polls it and whatever is plugged in
+// drives a port. The first pad takes port 2 (where an Amiga game looks for
+// its joystick), the second takes port 1 -- which is two-player, and is
+// also literally what the hardware does: plugging a stick into port 1
+// means the mouse is not there any more. When a pad on port 1 goes away
+// the mouse is plugged back in, so the pointer never stays dead.
+//
+// Sticks and d-pads both steer, so the same pad works whichever a game
+// expects. The face buttons follow the CD32 pad, which is a superset of a
+// two-button stick: A fires (red), B is button 2 (blue), X/Y are
+// green/yellow, the shoulders are rewind/forward, Start is play. A plain
+// joystick guest only ever sees fire and button 2; the rest exist for
+// CD32 titles and cost nothing when unused.
+
+const PAD_AXIS_THRESHOLD = 0.5; // analogue stick deflection that counts
+const padAssignments = new Map(); // gamepad index -> Amiga port (2 first)
+
+// A port only reports the CD32 pad's extra buttons while a CD32 pad is
+// what is plugged into it: the core runs the pad's shift register for
+// PortDevice::Cd32Pad alone, so on a plain joystick those buttons exist
+// but nothing can read them. Fitting the pad costs nothing elsewhere --
+// outside the serial mode a CD32-aware game selects through POTGO, a pad
+// reads exactly like a two-button stick -- so any source that can produce
+// the extras (a gamepad, or the keyboard's cd32 mapping) fits one.
+function fitCd32Pad(port) {
+  emu?.set_port_device(port, 'cd32');
+}
+
+function padPressed(pad, index) {
+  const b = pad.buttons[index];
+  if (!b) return false;
+  return typeof b === 'object' ? b.pressed || b.value > 0.5 : b > 0.5;
+}
+
+function readPad(pad) {
+  const axis = (i) => (typeof pad.axes[i] === 'number' ? pad.axes[i] : 0);
+  return {
+    up: padPressed(pad, 12) || axis(1) <= -PAD_AXIS_THRESHOLD,
+    down: padPressed(pad, 13) || axis(1) >= PAD_AXIS_THRESHOLD,
+    left: padPressed(pad, 14) || axis(0) <= -PAD_AXIS_THRESHOLD,
+    right: padPressed(pad, 15) || axis(0) >= PAD_AXIS_THRESHOLD,
+    fire: padPressed(pad, 0),
+    button2: padPressed(pad, 1),
+    green: padPressed(pad, 2),
+    yellow: padPressed(pad, 3),
+    rwd: padPressed(pad, 4),
+    ffw: padPressed(pad, 5),
+    play: padPressed(pad, 9),
+  };
+}
+
+// Assign connected pads to ports and drop assignments for pads that went
+// away. Returns what changed, so the caller can report it accurately.
+function refreshPadAssignments(pads) {
+  let changed = false;
+  let releasedPort1 = false;
+  for (const index of [...padAssignments.keys()]) {
+    if (!pads[index]) {
+      const port = padAssignments.get(index);
+      padAssignments.delete(index);
+      padPort[port] = null;
+      // Port 1 is the mouse socket on every machine this build boots, so
+      // a pad leaving it puts the mouse back; port 2 keeps the pad fitting
+      // (idle, and indistinguishable from a joystick to anything that is
+      // not driving the CD32 serial protocol).
+      if (port === 1 && emu) {
+        emu.set_port_device(1, 'mouse');
+        releasedPort1 = true;
+      }
+      changed = true;
+    }
+  }
+  for (const pad of pads) {
+    if (!pad || padAssignments.has(pad.index)) continue;
+    const taken = new Set(padAssignments.values());
+    const port = !taken.has(2) ? 2 : !taken.has(1) ? 1 : null;
+    if (port === null) continue; // a third pad has nowhere to go
+    padAssignments.set(pad.index, port);
+    fitCd32Pad(port); // a real pad has the extra buttons; let them count
+    changed = true;
+  }
+  return { changed, releasedPort1 };
+}
+
+function pumpGamepads() {
+  if (!navigator.getGamepads) return;
+  const pads = navigator.getGamepads();
+  const anyConnected = [...pads].some((p) => p);
+  if (!anyConnected && padAssignments.size === 0) return;
+  const { changed, releasedPort1 } = refreshPadAssignments(pads);
+  for (const [index, port] of padAssignments) {
+    const pad = pads[index];
+    if (pad) padPort[port] = readPad(pad);
+  }
+  applyJoystick();
+  if (changed) updatePadStatus(releasedPort1);
+}
+
+// A pad is invisible until the browser reports it, and the assignment is
+// not something the visitor chose, so say which port each one landed on.
+// The mouse is only worth mentioning when a pad actually vacated port 1,
+// which is the only case where the pointer was displaced.
+function updatePadStatus(releasedPort1) {
+  const where = [...padAssignments.values()]
+    .sort()
+    .map((port) => `port ${port}`)
+    .join(' + ');
+  const mouse = releasedPort1 ? ' - mouse restored on port 1' : '';
+  if (padAssignments.size === 0) {
+    setLoadStatus(`gamepad disconnected${mouse}`);
+    return;
+  }
+  setLoadStatus(
+    `gamepad ready: ${where}` +
+      (padAssignments.size > 1 ? ' (two players)' : '') +
+      mouse,
+  );
+}
 
 // --- keyboard ------------------------------------------------------------
 
@@ -815,14 +1018,7 @@ function resetTouchState() {
 }
 
 function applyTouchJoystick() {
-  emu.set_joystick_port2(
-    stickDirs.up,
-    stickDirs.down,
-    stickDirs.left,
-    stickDirs.right,
-    fireTouchId !== null,
-    false,
-  );
+  applyJoystick(); // the touch pad is one more port-2 source; see the merge
 }
 
 canvas.addEventListener(
@@ -1116,10 +1312,12 @@ function ensureFsUi() {
   };
   const joy = mk(`Joystick: ${joyMode}`);
   joy.addEventListener('click', cycleJoyMode);
+  const pause = mk(paused ? 'Resume' : 'Pause');
+  pause.addEventListener('click', togglePause);
   const exit = mk('Exit');
   exit.addEventListener('click', exitFullscreen);
   shell.appendChild(bar);
-  fsUi = { bar, joy };
+  fsUi = { bar, joy, pause };
   return fsUi;
 }
 
@@ -1130,6 +1328,7 @@ function updateFsUi() {
   }
   const ui = ensureFsUi();
   ui.joy.textContent = `Joystick: ${joyMode}`;
+  ui.pause.textContent = paused ? 'Resume' : 'Pause';
   ui.bar.style.display = 'flex';
 }
 
@@ -1184,6 +1383,111 @@ document.addEventListener('fullscreenchange', updateFsUi);
 $('vol').addEventListener('input', (e) => {
   if (emu) emu.set_volume_percent(Number(e.target.value));
 });
+
+// --- pause / screenshot ----------------------------------------------------
+// Two machine controls that belong on every shell, so they follow the
+// floppy-speed pattern: a page can host its own #pause / #screenshot
+// buttons wherever its control bar wants them, and without those elements
+// the controls insert themselves below the canvas.
+//
+// Pause stops the emulated clock rather than the page: the frame loop
+// stops stepping, audio is suspended so the last buffer does not loop,
+// and resuming resyncs the pacer's wall-clock anchor (otherwise the first
+// tick back would sprint through every frame the pause "owed").
+
+function setPauseLabel() {
+  const label = paused ? 'Resume' : 'Pause';
+  if (pauseBtn) pauseBtn.textContent = label;
+  if (fsUi) fsUi.pause.textContent = label;
+}
+
+function setPaused(next) {
+  if (!emu || !running || next === paused) return;
+  paused = next;
+  setPauseLabel();
+  if (paused) {
+    audioCtx?.suspend().catch(() => {});
+    setLoadStatus('paused');
+  } else {
+    audioCtx?.resume().catch(() => {});
+    // Nothing elapsed for the guest while paused; start pacing from now.
+    emu.resync_clock?.();
+    setLoadStatus('running');
+    requestAnimationFrame(tick);
+  }
+}
+
+function togglePause() {
+  setPaused(!paused);
+}
+
+// The canvas already holds exactly what the screen shows, so a screenshot
+// is the canvas itself. Clipboard first (what was asked for), with a file
+// download as the fallback: clipboard image writes need a secure context
+// and browser support, and Firefox has neither for ClipboardItem in all
+// versions. Both paths are driven from a click, which is the user gesture
+// the clipboard API requires.
+async function copyScreenshot() {
+  if (!emu || !running) return;
+  const blobOf = () =>
+    new Promise((resolve, reject) => {
+      canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('canvas capture failed'))), 'image/png');
+    });
+  try {
+    if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
+      throw new Error('clipboard images unsupported');
+    }
+    // Safari requires the ClipboardItem to be constructed with the promise
+    // inside the gesture; Chrome and Firefox accept that form too.
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': blobOf() })]);
+    setLoadStatus('screenshot copied to the clipboard');
+  } catch (e) {
+    try {
+      const url = URL.createObjectURL(await blobOf());
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `copperline-${new Date().toISOString().replace(/[:.]/g, '-')}.png`;
+      a.click();
+      // Revoking synchronously can cancel the download that click just
+      // started; let the current task finish first.
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      setLoadStatus(`screenshot downloaded (clipboard unavailable: ${e.message ?? e})`);
+    } catch (err) {
+      setLoadStatus(`screenshot failed: ${err.message ?? err}`);
+    }
+  }
+}
+
+// Build whichever of the two the shell did not provide, in one row that
+// matches the self-inserted floppy-speed control's styling. Listeners are
+// attached afterwards, once, so a shell-provided and a self-built button
+// take exactly the same path.
+function buildMachineControls() {
+  const missing = [
+    ['pause', 'Pause'],
+    ['screenshot', 'Screenshot'],
+  ].filter(([id]) => !$(id));
+  if (missing.length === 0) return;
+  const row = document.createElement('div');
+  row.style.cssText = 'display:inline-flex;align-items:center;gap:0.45rem;margin:0.4rem 0.6rem 0.4rem 0;';
+  for (const [id, label] of missing) {
+    const b = document.createElement('button');
+    b.id = id;
+    b.textContent = label;
+    b.style.cssText =
+      'padding:0.25rem 0.7rem;border-radius:6px;cursor:pointer;' +
+      'border:1px solid rgba(255,255,255,0.35);' +
+      'background:rgba(10,13,22,0.6);color:rgba(255,255,255,0.85);' +
+      'font:600 0.8rem "IBM Plex Mono",ui-monospace,monospace;';
+    row.appendChild(b);
+  }
+  shell.insertAdjacentElement('afterend', row);
+}
+buildMachineControls();
+const pauseBtn = $('pause');
+const screenshotBtn = $('screenshot');
+pauseBtn?.addEventListener('click', togglePause);
+screenshotBtn?.addEventListener('click', copyScreenshot);
 
 // Optional in the page shell: a checkbox #floppy-sounds toggles the
 // synthesized drive sounds (motor hum, head-step clicks, read hiss).

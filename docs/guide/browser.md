@@ -74,6 +74,18 @@ Controls:
   title captures them. A link can preset the mode with `?joy=keys` (or
   `off`/`cd32`/`touch`), so a game URL starts with the joystick already
   on; `touch` falls back to `keys` on screens without touch.
+- **Gamepads**: a USB or Bluetooth controller needs no toggle -- the page
+  polls the Gamepad API every frame and whatever is plugged in drives a
+  port. The first pad takes port 2 (where a game looks for its joystick),
+  a second pad takes port 1, which is two-player. Claiming port 1 also
+  displaces the mouse, exactly as plugging a stick into that socket does
+  on real hardware; unplugging the pad plugs the mouse back in. Sticks
+  and d-pads both steer. The face buttons follow the CD32 pad, a superset
+  of a two-button stick: A fires (red), B is button 2 (blue), X and Y are
+  green and yellow, the shoulders are rewind and forward, Start is play --
+  a plain joystick guest only ever sees fire and button 2. Browsers hide
+  gamepads until the page has seen a real interaction, so the first
+  button press after loading may be the one that makes a pad appear.
 - **Touch**: the canvas works like a trackpad, because the Amiga pointer
   only takes relative motion and an absolute finger position cannot map to
   it. One finger drags the pointer, a quick tap left-clicks, holding still
@@ -215,11 +227,19 @@ mapped, for `preventDefault`), `mouse_delta(dx, dy)` and
 hardware counters at a physically plausible rate (at most 100 counts per
 emulated frame): browsers coalesce pointer events, and a fast flick
 delivered as one huge delta would wrap the 8-bit JOYxDAT counters and
-read back as motion in the wrong direction. `set_joystick_port2(...)` and
-`set_cd32_buttons_port2(...)` drive a port-2 pad, which the hosted page
-feeds from the desktop frontend's FS-UAE-compatible keyboard mapping
-(cursor keys, Right Ctrl / Right Alt fire, CD32 extras on C/X/D/S/Enter/Z/A).
-`reset()` power-cycles, `eject_floppy(n)`
+read back as motion in the wrong direction. `set_joystick_port(port, ...)`
+and `set_cd32_buttons_port(port, ...)` drive a joystick or CD32 pad in
+either port (`1` or `2`) -- two ports is two players, and the hosted page
+feeds them from the keyboard mapping and from the Gamepad API.
+`set_port_device(port, name)` plugs a device into a port (`"mouse"`,
+`"joystick"`, `"cd32"`, `"analogue"`, `"none"`); a page whose gamepad
+disappears restores the mouse with `set_port_device(1, "mouse")` rather
+than leaving a stuck stick where the pointer used to be. The older
+`set_joystick_port2(...)` / `set_cd32_buttons_port2(...)` still work and
+now forward to the port-taking calls. `reset()` power-cycles,
+`resync_clock()` forgets the pacer's wall-clock anchor so a page resuming
+from a pause does not sprint through the frames the pause "owed",
+`eject_floppy(n)`
 and `set_volume_percent(p)` do what they say, and `emulated_seconds()`
 exposes the guest clock for diagnostics. `set_floppy_sounds(on)` and
 `set_floppy_sounds_volume(p)` control the synthesized drive sounds (on and
@@ -292,6 +312,19 @@ elements, and pages without them are untouched:
   refused pick by pick. The hosted page's server carries no ROMs, so the
   select never appears there; a self-hosted shell that serves its owner's
   ROMs next to the page gets a one-click ROM chooser.
+- `#pause` and `#screenshot` (buttons): pause/resume the machine, and
+  copy the current screen to the clipboard. Like `#floppy-speed` these
+  are always on -- without the elements the two buttons insert
+  themselves below the canvas shell, so both are reachable on any shell.
+  Pause stops the emulated clock (not just the page): the frame loop
+  stops stepping, audio is suspended, and resuming resyncs the pacer so
+  the guest carries on from where it was rather than racing to catch up;
+  the button relabels itself Resume, and the fullscreen overlay carries
+  a copy of it. Screenshot writes a PNG of the canvas -- exactly what
+  the screen shows -- to the clipboard, falling back to downloading the
+  file when the browser has no clipboard image support or refuses the
+  write (an unfocused document, an insecure origin); the status line
+  says which happened.
 - `#ledbar` (a container): hosts the front-panel status strip (LEDs,
   track counter, disk names), letting the page own its placement and
   outer styling. Without it the strip inserts itself directly below the
