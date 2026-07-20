@@ -533,6 +533,15 @@ impl Emulator {
         crate::savestate::save(&self.machine, &self.descriptor, path)
     }
 
+    /// `save_state` into memory instead of a file, for hosts with no
+    /// filesystem to write to (the browser build hands the blob to a
+    /// download or IndexedDB). Same bytes, same format version.
+    pub fn save_state_bytes(&self) -> Result<Vec<u8>> {
+        let mut blob = Vec::new();
+        crate::savestate::save_to_writer(&self.machine, &self.descriptor, &mut blob)?;
+        Ok(blob)
+    }
+
     /// Restore a save state from `path`. The state carries its own machine
     /// (RAM, ROM, chip revisions, CPU), so a load fully rebuilds it; when that
     /// machine differs from the one running, the host is reconfigured to match
@@ -541,11 +550,28 @@ impl Emulator {
     /// timeline, so the real-time pacing anchor is re-baselined to "now"; on
     /// failure the running machine is untouched.
     pub fn load_state(&mut self, path: &std::path::Path) -> Result<StateLoadOutcome> {
+        self.adopt_loaded_state(|machine| crate::savestate::load(machine, path))
+    }
+
+    /// `load_state` from bytes instead of a file: the browser counterpart,
+    /// restoring a state that came from a picked file or IndexedDB. The
+    /// blob is a whole state file, so a desktop `.clstate` loads here and
+    /// vice versa; a failed parse leaves the running machine untouched.
+    pub fn load_state_bytes(&mut self, blob: &[u8]) -> Result<StateLoadOutcome> {
+        self.adopt_loaded_state(|machine| crate::savestate::load_from_reader(machine, blob))
+    }
+
+    /// Shared tail of both load paths: restore through `load`, then put the
+    /// host back in step with the machine that came out of it.
+    fn adopt_loaded_state(
+        &mut self,
+        load: impl FnOnce(&mut cpu::M68kMachine) -> Result<crate::config::MachineDescriptor>,
+    ) -> Result<StateLoadOutcome> {
         // Channel mode and stereo separation are host preferences, not part of
         // the saved machine, so carry the current choices across the load.
         let mono = self.bus_mut().paula.mono_output();
         let separation = self.bus_mut().paula.stereo_separation();
-        let loaded = crate::savestate::load(&mut self.machine, path)?;
+        let loaded = load(&mut self.machine)?;
         self.bus_mut().paula.set_mono_output(mono);
         self.bus_mut().paula.set_stereo_separation(separation);
         let reconfigured = loaded != self.descriptor;

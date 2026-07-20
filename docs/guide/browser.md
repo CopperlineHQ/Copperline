@@ -23,10 +23,10 @@ document picker greys out extensions it does not recognise, which would
 lock out `.adf` and friends.
 
 Files can also be dragged onto the page: a `.rom` file loads (or, before
-boot, queues) a Kickstart exactly like the ROM picker, and anything else
-inserts into DF0 like the disk picker -- dropped before boot it queues and
-inserts when the machine starts. The same 64 MiB cap as URL fetches
-applies.
+boot, queues) a Kickstart exactly like the ROM picker, a `.clstate` file
+restores a [save state](#browser-save-states), and anything else inserts
+into DF0 like the disk picker -- dropped before boot it queues and inserts
+when the machine starts. The same 64 MiB cap as URL fetches applies.
 
 A disk can also come from a link: `/try/?df0=<url>` fetches the image while
 the emulator loads and inserts it at boot, so a bootable demo is one
@@ -103,6 +103,44 @@ track counter, and the name of the disk in each connected drive.
 Audio starts with the boot click, but a browser autoplay policy can keep
 the AudioContext suspended anyway; the boot never waits for it. The
 emulator runs silent and the next click or key press unlocks the sound.
+
+(browser-save-states)=
+### Save states
+
+The page carries the desktop's [save states](ui.md#save-states), which
+snapshot the whole emulated machine -- RAM, ROM, chipset, CPU, and the
+inserted floppy images themselves -- in the same `.clstate` format, so a
+state moves between a browser and a desktop build in either direction.
+Four buttons, which insert themselves below the canvas on a shell that
+does not place them:
+
+- **Save state** downloads the snapshot as a `.clstate` file. This is the
+  form that survives everything and can be shared or carried to a desktop
+  build.
+- **Load state...** picks a `.clstate` file and restores it; dropping the
+  file on the page does the same.
+- **Quick save** keeps the snapshot in the browser itself (IndexedDB),
+  under a single slot, which is what resuming a game usually wants: one
+  click out, one click back in, and it survives page reloads and browser
+  restarts.
+- **Quick load** restores that slot. It is enabled only when the browser
+  holds a quick state, and its tooltip says when the state was taken,
+  what was in DF0, and how far the machine had run.
+
+Loading works from a cold page: with no machine booted, a load boots one
+and restores over it, so a visitor returning to a game lands straight back
+in it. States carry their own ROM and disks, so nothing needs to be
+re-picked first. A blob that is not a readable state of this build's
+format version is refused with the running machine untouched -- including
+a state from an older Copperline whose format version has moved on.
+
+There are no keyboard shortcuts for these (the desktop's
+Cmd/Alt+Shift+S and +L): every key on the page belongs to the guest, so a
+host shortcut would shadow an Amiga key.
+
+Host-side settings are not part of a machine and do not travel in a state:
+the page re-applies its own volume, drive-sound, floppy-speed and
+controller choices over whatever is restored.
 
 ## How it is put together
 
@@ -241,7 +279,19 @@ now forward to the port-taking calls. `reset()` power-cycles,
 from a pause does not sprint through the frames the pause "owed",
 `eject_floppy(n)`
 and `set_volume_percent(p)` do what they say, and `emulated_seconds()`
-exposes the guest clock for diagnostics. `set_floppy_sounds(on)` and
+exposes the guest clock for diagnostics.
+
+`save_state()` returns the whole emulated machine as a `Uint8Array` in the
+desktop's `.clstate` format, and `load_state(bytes)` restores one --
+the browser side of [save states](#browser-save-states). Where the bytes
+live is the page's choice (a download, IndexedDB, a fetch); the core only
+deals in the blob. Both are frame-boundary operations, which any
+JS-facing call is by construction, and a blob that does not parse throws
+with the running machine untouched. A load re-anchors the pacer and
+repaints the restored screen immediately, so a paused page shows where it
+resumes; host-side settings (volume, drive sounds, floppy speed, port
+devices) are not part of the machine, so a page that keeps its own should
+re-apply them afterwards. `set_floppy_sounds(on)` and
 `set_floppy_sounds_volume(p)` control the synthesized drive sounds (on and
 100 by default, like the desktop's `[audio] floppy_sounds` knobs).
 `set_floppy_speed(percent)` / `floppy_speed()` set and read the emulated
@@ -325,6 +375,13 @@ elements, and pages without them are untouched:
   file when the browser has no clipboard image support or refuses the
   write (an unfocused document, an insecure origin); the status line
   says which happened.
+- `#savestate`, `#loadstate`, `#quicksave`, `#quickload` (buttons): the
+  [save-state controls](#browser-save-states) -- download a state, pick a
+  state file, and the browser-resident quick slot. Always on like
+  `#pause`: without the elements they insert themselves below the canvas
+  shell. `#loadstate` is a plain button wherever the shell puts it; the
+  file picker behind it is built by the glue, so no `<input type="file">`
+  is needed in the shell.
 - `#ledbar` (a container): hosts the front-panel status strip (LEDs,
   track counter, disk names), letting the page own its placement and
   outer styling. Without it the strip inserts itself directly below the

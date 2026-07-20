@@ -25,6 +25,10 @@
 //! config and reconfigure the host to match it; the serialized components
 //! already carry the actual hardware, so the machine itself always rebuilds
 //! from the state regardless.
+//!
+//! `save`/`load` name a file; `save_to_writer`/`load_from_reader` are the
+//! same format over any byte stream, for hosts without a filesystem (the
+//! browser build keeps its states in a download or IndexedDB).
 
 use anyhow::{anyhow, bail, Context, Result};
 use flate2::read::ZlibDecoder;
@@ -128,7 +132,20 @@ pub fn auto_filename() -> std::path::PathBuf {
 pub fn save(machine: &M68kMachine, descriptor: &MachineDescriptor, path: &Path) -> Result<()> {
     let file =
         File::create(path).with_context(|| format!("creating save state {}", path.display()))?;
-    let mut writer = BufWriter::new(file);
+    save_to_writer(machine, descriptor, BufWriter::new(file))
+        .with_context(|| format!("writing save state {}", path.display()))
+}
+
+/// `save` without a filesystem: write the same bytes a state file holds into
+/// any sink. Hosts with nowhere to put a file -- the browser build, which
+/// hands the blob to a download or IndexedDB -- go through here, so a state
+/// produced in a browser and one produced by the desktop are the same format
+/// and interchangeable.
+pub fn save_to_writer<W: Write>(
+    machine: &M68kMachine,
+    descriptor: &MachineDescriptor,
+    mut writer: W,
+) -> Result<()> {
     writer.write_all(STATE_MAGIC)?;
     writer.write_all(&STATE_VERSION.to_le_bytes())?;
     // The descriptor sits uncompressed ahead of the zlib stream so it can be
@@ -137,10 +154,7 @@ pub fn save(machine: &M68kMachine, descriptor: &MachineDescriptor, path: &Path) 
         .map_err(|e| anyhow!("serializing machine descriptor: {e}"))?;
     let mut encoder = ZlibEncoder::new(writer, Compression::fast());
     machine.write_state(&mut encoder)?;
-    encoder
-        .finish()
-        .and_then(|mut w| w.flush())
-        .with_context(|| format!("writing save state {}", path.display()))?;
+    encoder.finish().and_then(|mut w| w.flush())?;
     Ok(())
 }
 
@@ -154,34 +168,42 @@ pub fn save(machine: &M68kMachine, descriptor: &MachineDescriptor, path: &Path) 
 pub fn load(machine: &mut M68kMachine, path: &Path) -> Result<MachineDescriptor> {
     let file =
         File::open(path).with_context(|| format!("opening save state {}", path.display()))?;
-    let mut reader = BufReader::new(file);
+    load_from_reader(machine, BufReader::new(file))
+        .with_context(|| format!("loading save state {}", path.display()))
+}
+
+/// `load` without a filesystem: restore from the bytes of a state file held
+/// anywhere (a browser download, an IndexedDB record, a network response).
+/// The same guarantees hold -- the live machine is untouched unless the whole
+/// state parses -- and the caller still owns re-anchoring host pacing.
+pub fn load_from_reader<R: Read>(
+    machine: &mut M68kMachine,
+    mut reader: R,
+) -> Result<MachineDescriptor> {
     let mut magic = [0u8; STATE_MAGIC.len()];
     reader
         .read_exact(&mut magic)
-        .with_context(|| format!("reading save state {}", path.display()))?;
+        .context("reading save state header")?;
     if &magic != STATE_MAGIC {
-        bail!("{} is not a Copperline save state", path.display());
+        bail!("not a Copperline save state");
     }
     let mut version_bytes = [0u8; 4];
     reader
         .read_exact(&mut version_bytes)
-        .with_context(|| format!("reading save state {}", path.display()))?;
+        .context("reading save state header")?;
     let version = u32::from_le_bytes(version_bytes);
     if version != STATE_VERSION {
         bail!(
-            "save state {} is format version {version}; this build reads version {}",
-            path.display(),
+            "save state is format version {version}; this build reads version {}",
             STATE_VERSION
         );
     }
-    // Read the descriptor straight from the BufReader; bincode consumes exactly
+    // Read the descriptor straight from the reader; bincode consumes exactly
     // its encoded bytes, leaving the reader positioned at the zlib stream.
     let descriptor: MachineDescriptor = bincode::deserialize_from(&mut reader)
-        .map_err(|e| anyhow!("reading machine descriptor from {}: {e}", path.display()))?;
+        .map_err(|e| anyhow!("reading machine descriptor: {e}"))?;
     let mut decoder = ZlibDecoder::new(reader);
-    machine
-        .apply_state(&mut decoder)
-        .with_context(|| format!("loading save state {}", path.display()))?;
+    machine.apply_state(&mut decoder)?;
     Ok(descriptor)
 }
 
@@ -438,6 +460,53 @@ mod tests {
         }
     }
 
+    /// The in-memory API writes the same format the file API reads, and
+    /// round-trips a machine through a `Vec<u8>` with no filesystem in the
+    /// way. This is the path the browser build takes, where `save`/`load`
+    /// cannot work at all.
+    #[test]
+    fn writer_reader_round_trip_matches_the_file_format() {
+        let mut machine = blitting_workload_machine();
+        // Into the running workload, then to a frame boundary: where a
+        // production save happens.
+        machine.step_slice(20_000).unwrap();
+        let start_frames = machine.bus().emulated_frames();
+        while machine.bus().emulated_frames() == start_frames {
+            machine.step_slice(16).unwrap();
+        }
+        let descriptor = MachineDescriptor::default();
+
+        let mut blob = Vec::new();
+        save_to_writer(&machine, &descriptor, &mut blob).unwrap();
+
+        // A file written by `save` is byte-identical to the blob, so states
+        // move between the desktop and the browser in either direction.
+        let path = temp_state("writer-parity");
+        save(&machine, &descriptor, &path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), blob);
+        let _ = std::fs::remove_file(&path);
+
+        let mut restored = test_machine();
+        let loaded = load_from_reader(&mut restored, blob.as_slice()).unwrap();
+        assert_eq!(loaded, descriptor);
+        assert_eq!(restored.pc(), machine.pc());
+        assert_eq!(
+            restored.bus().emulated_cck(),
+            machine.bus().emulated_cck(),
+            "the restored timeline must resume where the save left off"
+        );
+        assert_eq!(restored.bus().mem.chip_ram, machine.bus().mem.chip_ram);
+    }
+
+    #[test]
+    fn reader_rejects_a_blob_without_the_state_magic() {
+        let mut machine = test_machine();
+        let before_pc = machine.pc();
+        let err = load_from_reader(&mut machine, b"NOTASTATEFILE".as_slice()).unwrap_err();
+        assert!(format!("{err:#}").contains("not a Copperline save state"));
+        assert_eq!(machine.pc(), before_pc);
+    }
+
     #[test]
     fn rejects_files_without_the_state_magic() {
         let path = temp_state("magic");
@@ -445,7 +514,10 @@ mod tests {
         let mut machine = test_machine();
         let before_pc = machine.pc();
         let err = load(&mut machine, &path).unwrap_err();
-        assert!(err.to_string().contains("not a Copperline save state"));
+        // The cause carries the diagnosis; the outer context names the file.
+        let reported = format!("{err:#}");
+        assert!(reported.contains("not a Copperline save state"));
+        assert!(reported.contains(&path.display().to_string()));
         // A failed load leaves the live machine untouched.
         assert_eq!(machine.pc(), before_pc);
         let _ = std::fs::remove_file(&path);
@@ -459,7 +531,7 @@ mod tests {
         std::fs::write(&path, &bytes).unwrap();
         let mut machine = test_machine();
         let err = load(&mut machine, &path).unwrap_err();
-        assert!(err.to_string().contains("format version"));
+        assert!(format!("{err:#}").contains("format version"));
         let _ = std::fs::remove_file(&path);
     }
 
