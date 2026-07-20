@@ -324,12 +324,15 @@ anything the visitor changes by hand wins as usual:
 }
 ```
 
-`kick` follows the same same-origin rule as `?kick=` (the file can only
-name a ROM the site already serves); `df0` is any URL the visitor's
-browser may fetch, like `?df0=`. `floppy_sounds`, `floppy_speed`,
-`serial_url` and `serial_raw` preset the matching controls (and apply
-even on a shell without the optional elements). `joy` picks the starting
-joystick mode. `autoboot: true` powers the machine on by itself once the
+`kick` follows the same-origin rule as `?kick=` (the file can only name
+a ROM the site already serves); `df0` is any URL the visitor's browser
+may fetch, like `?df0=`. `floppy_sounds` and `floppy_speed` reach the
+machine whether or not the shell has their controls -- the speed select
+inserts itself, and a configured `floppy_sounds` is applied at boot even
+with no checkbox to show it. `serial_url` and `serial_raw` preset the
+serial bridge's inputs and therefore need those elements: a shell
+without them has no connect button to dial with either. `joy` picks the
+starting joystick mode. `autoboot: true` powers the machine on by itself once the
 emulator, the ROM, and any configured disk have loaded -- the whole
 recipe for a page dedicated to one demo or a BBS: name the disk, set
 `autoboot`, and a visitor lands in the running machine. Browsers keep
