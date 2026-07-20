@@ -316,6 +316,7 @@ async function boot() {
     pendingDisk = null;
     machine.set_volume_percent(Number($('vol').value));
     if (floppySoundsToggle) machine.set_floppy_sounds(floppySoundsToggle.checked);
+    else if (configFloppySounds !== null) machine.set_floppy_sounds(configFloppySounds);
     if (floppySpeed !== null) machine.set_floppy_speed(floppySpeed);
     emu = machine;
     window.__emu = emu; // for debugging/automation
@@ -628,17 +629,22 @@ function pumpSerial() {
 }
 
 // --- joystick (port 2) -----------------------------------------------------
-// The toggle cycles off -> keys (-> touch on touch screens). Keys is the
-// desktop frontend's FS-UAE-compatible mapping plus left-hand fire keys:
-// cursor keys for directions, Right Ctrl / Right Alt or Left Ctrl for fire,
-// Left Alt for the second button (left-hand fire pairs with the right-hand
-// arrows, and compact keyboards often lack the right-side modifiers), CD32
-// extras on C/X/D/S/Enter/Z/A; while on, these keys drive the port-2
-// joystick instead of reaching the Amiga keyboard. Touch turns the canvas
-// into a pad (see the touch section). The page shell can preset the mode
-// (data-default on the toggle) and ?joy=off|keys|touch overrides per link.
+// The toggle cycles off -> keys -> cd32 (-> touch on touch screens). Keys
+// is a two-button stick, the desktop frontend's FS-UAE-compatible mapping
+// plus left-hand fire keys: cursor keys for directions, Right Ctrl /
+// Right Alt or Left Ctrl for fire, Left Alt for the second button
+// (left-hand fire pairs with the right-hand arrows, and compact keyboards
+// often lack the right-side modifiers). Cd32 adds the pad extras on
+// C/X/D/S/Enter/Z/A. The split matters for typing-heavy guests (a BBS
+// terminal): keys mode leaves Enter and the letters on the Amiga
+// keyboard, so only a CD32 title needs the full capture. While a mode is
+// on, its mapped keys drive the port-2 joystick instead of reaching the
+// Amiga keyboard. Touch turns the canvas into a pad (see the touch
+// section). The page shell can preset the mode (data-default on the
+// toggle, or the config file's "joy") and ?joy=off|keys|cd32|touch
+// overrides per link.
 
-const JOY_KEYS = {
+const JOY_KEYS_TWO_BUTTON = {
   ArrowUp: 'up',
   ArrowDown: 'down',
   ArrowLeft: 'left',
@@ -647,6 +653,9 @@ const JOY_KEYS = {
   AltRight: 'fireAlt',
   ControlLeft: 'fireLCtrl',
   AltLeft: 'blueLAlt',
+};
+const JOY_KEYS_CD32 = {
+  ...JOY_KEYS_TWO_BUTTON,
   KeyC: 'red',
   KeyX: 'blue',
   KeyD: 'green',
@@ -656,7 +665,7 @@ const JOY_KEYS = {
   KeyZ: 'rwd',
   KeyA: 'ffw',
 };
-const JOY_MODES = hasTouch ? ['off', 'keys', 'touch'] : ['off', 'keys'];
+const JOY_MODES = hasTouch ? ['off', 'keys', 'cd32', 'touch'] : ['off', 'keys', 'cd32'];
 let joyMode = 'off';
 const joyHeld = {};
 
@@ -675,8 +684,13 @@ function applyJoystick() {
 
 // Returns true when the key was captured for the joystick.
 function joystickKey(code, pressed) {
-  if (joyMode !== 'keys') return false;
-  const control = JOY_KEYS[code];
+  const map =
+    joyMode === 'keys'
+      ? JOY_KEYS_TWO_BUTTON
+      : joyMode === 'cd32'
+        ? JOY_KEYS_CD32
+        : null;
+  const control = map?.[code];
   if (!control) return false;
   joyHeld[control] = pressed;
   applyJoystick();
@@ -1176,6 +1190,9 @@ $('vol').addEventListener('input', (e) => {
 // Without the element the sounds stay on, as before; the checkbox's
 // initial state is applied at boot, so a shell can default them off.
 const floppySoundsToggle = $('floppy-sounds');
+// The config file's floppy_sounds on a shell without the checkbox: stashed
+// here and applied at boot.
+let configFloppySounds = null;
 floppySoundsToggle?.addEventListener('change', () => {
   if (emu) emu.set_floppy_sounds(floppySoundsToggle.checked);
 });
@@ -1618,28 +1635,98 @@ document.addEventListener('drop', (e) => {
 
 bootBtn.addEventListener('click', boot);
 const pageParams = new URLSearchParams(location.search);
-const linkedDisk = pageParams.get('df0');
-if (linkedDisk) insertDiskFromUrl(linkedDisk);
-const linkedKick = pageParams.get('kick');
-if (linkedKick) fitRomFromUrl(linkedKick);
 
-// Starting joystick mode: the page shell's default (data-default on the
-// toggle), overridden per link by ?joy=off|keys|touch. A touch request on
-// a screen without touch falls back to keys, so a game link written for
-// tablets still gets a joystick on a desktop.
-const requestedJoy = (pageParams.get('joy') ?? $('joy').dataset.default ?? '').trim();
-if (requestedJoy && requestedJoy !== joyMode) {
-  if (JOY_MODES.includes(requestedJoy)) setJoyMode(requestedJoy);
-  else if (requestedJoy === 'touch') setJoyMode('keys');
+// --- page configuration file ---------------------------------------------
+// Optional copperline.json next to the page: a site sets its defaults in
+// one hand-editable file instead of touching the shell or this glue. All
+// keys are optional; a missing or invalid file is simply no defaults.
+// Link parameters (?df0=, ?kick=, ?joy=, ?fdspeed=) override the file,
+// and anything the visitor changes by hand wins as usual.
+//
+//   {
+//     "kick": "roms/kick31.rom",     same-origin path, like ?kick=
+//     "df0": "adf/demo.adf",         URL, like ?df0=
+//     "floppy_sounds": false,        preset the drive-sounds toggle
+//     "floppy_speed": 800,           100|200|400|800|0 (0 = turbo)
+//     "joy": "keys",                 off|keys|cd32|touch
+//     "serial_url": "wss://...",     preset the BBS gateway input
+//     "serial_raw": true,            preset the raw checkbox
+//     "autoboot": true               power on once everything is loaded
+//   }
+async function fetchPageConfig() {
+  try {
+    const resp = await fetch('./copperline.json');
+    if (!resp.ok) return {};
+    const cfg = await resp.json();
+    return cfg && typeof cfg === 'object' && !Array.isArray(cfg) ? cfg : {};
+  } catch {
+    return {};
+  }
 }
 
-// Starting floppy speed: the speed select's initial value, overridden
-// per link by ?fdspeed=100|200|400|800|0|turbo. Applied to the machine
-// at boot.
-const requestedSpeed = (pageParams.get('fdspeed') ?? '').trim();
-if (requestedSpeed) {
-  setFloppySpeed(requestedSpeed === 'turbo' ? 0 : Number(requestedSpeed));
-} else {
-  setFloppySpeed(Number(floppySpeedSel.value));
+async function startup() {
+  // The wasm + AROS download starts immediately; the config fetch rides
+  // alongside and its choices land before anything needs them (a config
+  // Kickstart simply replaces the stashed boot ROM when it arrives).
+  const loaded = load();
+  const cfg = await fetchPageConfig();
+
+  if (serialUrlInput && typeof cfg.serial_url === 'string') {
+    serialUrlInput.value = cfg.serial_url;
+  }
+  if (serialRawToggle && typeof cfg.serial_raw === 'boolean') {
+    serialRawToggle.checked = cfg.serial_raw;
+  }
+  if (typeof cfg.floppy_sounds === 'boolean') {
+    if (floppySoundsToggle) floppySoundsToggle.checked = cfg.floppy_sounds;
+    else configFloppySounds = cfg.floppy_sounds;
+  }
+
+  const fetches = [];
+  const linkedDisk =
+    pageParams.get('df0') ?? (typeof cfg.df0 === 'string' ? cfg.df0 : null);
+  if (linkedDisk) fetches.push(insertDiskFromUrl(linkedDisk));
+  const linkedKick =
+    pageParams.get('kick') ?? (typeof cfg.kick === 'string' ? cfg.kick : null);
+  if (linkedKick) fetches.push(fitRomFromUrl(linkedKick));
+
+  // Starting joystick mode: the page shell's default (data-default on the
+  // toggle or the config file), overridden per link by
+  // ?joy=off|keys|cd32|touch. A touch request on a screen without touch
+  // falls back to keys, so a game link written for tablets still gets a
+  // joystick on a desktop.
+  const requestedJoy = (
+    pageParams.get('joy') ??
+    (typeof cfg.joy === 'string' ? cfg.joy : null) ??
+    $('joy').dataset.default ??
+    ''
+  ).trim();
+  if (requestedJoy && requestedJoy !== joyMode) {
+    if (JOY_MODES.includes(requestedJoy)) setJoyMode(requestedJoy);
+    else if (requestedJoy === 'touch') setJoyMode('keys');
+  }
+
+  // Starting floppy speed: the speed select's initial value, overridden by
+  // the config file and per link by ?fdspeed=100|200|400|800|0|turbo.
+  // Applied to the machine at boot.
+  const requestedSpeed = (
+    pageParams.get('fdspeed') ??
+    (typeof cfg.floppy_speed === 'number' ? String(cfg.floppy_speed) : '')
+  ).trim();
+  if (requestedSpeed) {
+    setFloppySpeed(requestedSpeed === 'turbo' ? 0 : Number(requestedSpeed));
+  } else {
+    setFloppySpeed(Number(floppySpeedSel.value));
+  }
+
+  // Autoboot: a page dedicated to one demo or the BBS can land straight in
+  // the machine. Waits for the ROM/disk choices above so the boot never
+  // races its own media; the boot button staying disabled (ROMs failed)
+  // vetoes it. Browsers keep audio locked until a real gesture - the
+  // existing unlock listeners pick that up.
+  if (cfg.autoboot === true) {
+    await Promise.all([loaded, ...fetches]);
+    if (!bootBtn.disabled && !emu) boot();
+  }
 }
-load();
+startup();

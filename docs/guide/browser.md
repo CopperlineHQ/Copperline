@@ -61,16 +61,19 @@ Controls:
   requests pointer lock for relative motion (games), and Esc releases it.
 - **Keyboard**: physical keys map to Amiga raw keycodes with the same table
   as the desktop frontend.
-- **Joystick**: the toggle cycles off -> keys (-> touch on touch screens).
-  Keys is the desktop frontend's FS-UAE-compatible mapping -- cursor keys
-  for directions, Right Ctrl / Right Alt or Left Ctrl for fire, Left Alt
-  for the second button (the left-hand fire keys pair with the right-hand
-  arrows, and compact keyboards often lack the right-side modifiers), CD32
-  extras on C/X/D/S/Enter/Z/A -- and while enabled those keys are captured
-  from the Amiga keyboard, like the desktop toggle. A link can preset the
-  mode with `?joy=keys` (or `off`/`touch`), so a game URL starts with the
-  joystick already on; `touch` falls back to `keys` on screens without
-  touch.
+- **Joystick**: the toggle cycles off -> keys -> cd32 (-> touch on touch
+  screens). Keys is a two-button stick, the desktop frontend's
+  FS-UAE-compatible mapping -- cursor keys for directions, Right Ctrl /
+  Right Alt or Left Ctrl for fire, Left Alt for the second button (the
+  left-hand fire keys pair with the right-hand arrows, and compact
+  keyboards often lack the right-side modifiers). Cd32 adds the pad
+  extras on C/X/D/S/Enter/Z/A. While a mode is enabled its mapped keys
+  are captured from the Amiga keyboard, like the desktop toggle -- the
+  two-mode split exists so a typing-heavy guest (a BBS terminal) keeps
+  Enter and the letters on the keyboard in keys mode, and only a CD32
+  title captures them. A link can preset the mode with `?joy=keys` (or
+  `off`/`cd32`/`touch`), so a game URL starts with the joystick already
+  on; `touch` falls back to `keys` on screens without touch.
 - **Touch**: the canvas works like a trackpad, because the Amiga pointer
   only takes relative motion and an absolute finger position cannot map to
   it. One finger drags the pointer, a quick tap left-clicks, holding still
@@ -208,7 +211,11 @@ function tick(nowMs) {
 
 Input goes through `key_event(event.code, pressed)` (returns whether the key
 mapped, for `preventDefault`), `mouse_delta(dx, dy)` and
-`mouse_button(button, pressed)`; `set_joystick_port2(...)` and
+`mouse_button(button, pressed)`. Mouse motion is pooled and fed to the
+hardware counters at a physically plausible rate (at most 100 counts per
+emulated frame): browsers coalesce pointer events, and a fast flick
+delivered as one huge delta would wrap the 8-bit JOYxDAT counters and
+read back as motion in the wrong direction. `set_joystick_port2(...)` and
 `set_cd32_buttons_port2(...)` drive a port-2 pad, which the hosted page
 feeds from the desktop frontend's FS-UAE-compatible keyboard mapping
 (cursor keys, Right Ctrl / Right Alt fire, CD32 extras on C/X/D/S/Enter/Z/A).
@@ -290,10 +297,44 @@ elements, and pages without them are untouched:
   outer styling. Without it the strip inserts itself directly below the
   canvas shell. Either way it fills in once a machine boots.
 - `data-default="keys"` on the `#joy` toggle: the joystick mode the page
-  starts in (`?joy=` in the URL overrides it).
+  starts in -- `off`, `keys`, `cd32`, or `touch` (the config file's
+  `joy` and then `?joy=` in the URL override it).
 - `#serial-url`, `#serial-connect`, `#serial-status`, `#serial-raw`: the
   serial/BBS bridge, described in
   [the serial bridge section](#browser-serial-bridge).
+
+### The page configuration file
+
+A site can set its defaults in one hand-editable file instead of editing
+the shell: `copperline.json`, served next to the page. Every key is
+optional, a missing or invalid file means no defaults, link parameters
+(`?df0=`, `?kick=`, `?joy=`, `?fdspeed=`) override the file per URL, and
+anything the visitor changes by hand wins as usual:
+
+```json
+{
+  "kick": "roms/kick31.rom",
+  "df0": "adf/demo.adf",
+  "floppy_sounds": false,
+  "floppy_speed": 800,
+  "joy": "keys",
+  "serial_url": "wss://bbs.example.com:8443/",
+  "serial_raw": false,
+  "autoboot": true
+}
+```
+
+`kick` follows the same same-origin rule as `?kick=` (the file can only
+name a ROM the site already serves); `df0` is any URL the visitor's
+browser may fetch, like `?df0=`. `floppy_sounds`, `floppy_speed`,
+`serial_url` and `serial_raw` preset the matching controls (and apply
+even on a shell without the optional elements). `joy` picks the starting
+joystick mode. `autoboot: true` powers the machine on by itself once the
+emulator, the ROM, and any configured disk have loaded -- the whole
+recipe for a page dedicated to one demo or a BBS: name the disk, set
+`autoboot`, and a visitor lands in the running machine. Browsers keep
+audio suspended until the first real click or keypress; the page unlocks
+it on that gesture.
 
 (browser-serial-bridge)=
 ## The serial port: dialling a BBS from a browser

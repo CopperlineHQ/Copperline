@@ -202,6 +202,13 @@ pub struct WebEmu {
     /// first `run` call after (re)boot.
     anchor: Option<(f64, f64)>,
     mouse_remainder: (f64, f64),
+    /// Whole-pixel mouse motion not yet applied to the hardware counters.
+    /// The JOYxDAT counters are 8 bits and input.device samples them once
+    /// per vblank, so any burst past +/-127 counts in a frame reads back
+    /// as motion in the opposite direction. Browsers coalesce pointer
+    /// events (a fast flick can arrive as one huge delta), so the pool
+    /// re-spreads host input at a rate a physical mouse could produce.
+    mouse_pending: (i32, i32),
     /// Host side of Paula's serial port; the page bridges it to whatever
     /// byte stream it likes (typically a WebSocket to a telnet gateway).
     serial: ChannelSerialHandle,
@@ -236,6 +243,7 @@ impl WebEmu {
             last_rendered_frame: None,
             anchor: None,
             mouse_remainder: (0.0, 0.0),
+            mouse_pending: (0, 0),
             serial,
         })
     }
@@ -275,8 +283,14 @@ impl WebEmu {
         let target = anchor_emu + (now_ms - anchor_wall) / 1000.0;
         let mut stepped = 0u32;
         while self.emu.bus().emulated_seconds() < target && stepped < max_frames {
+            self.drain_pending_mouse();
             self.emu.step_frame().map_err(js_err)?;
             stepped += 1;
+        }
+        // Audio-saturated or already-on-target ticks step no frames; keep
+        // the pool draining so buffered motion cannot stall.
+        if stepped == 0 {
+            self.drain_pending_mouse();
         }
         if target - self.emu.bus().emulated_seconds() > MAX_CATCHUP_SECONDS {
             self.anchor = Some((now_ms, self.emu.bus().emulated_seconds()));
@@ -403,8 +417,31 @@ impl WebEmu {
         self.mouse_remainder.1 += dy;
         let ix = take_integral_delta(&mut self.mouse_remainder.0);
         let iy = take_integral_delta(&mut self.mouse_remainder.1);
-        if ix != 0 || iy != 0 {
-            self.emu.bus_mut().input.add_mouse_delta(0, ix, iy);
+        // Into the pending pool, not the counters: `run` drains it a
+        // bounded amount per emulated frame (see `mouse_pending`).
+        self.mouse_pending.0 = self.mouse_pending.0.saturating_add(ix);
+        self.mouse_pending.1 = self.mouse_pending.1.saturating_add(iy);
+    }
+
+    /// Move at most one frame's worth of physically plausible mouse motion
+    /// from the pending pool into the hardware counters. 100 counts per
+    /// vblank sits under the 127-count wrap limit of the 8-bit JOYxDAT
+    /// counters with margin, and is still ~5000 counts/second - faster
+    /// than a hand can sweep a real mouse.
+    fn drain_pending_mouse(&mut self) {
+        const MAX_COUNTS_PER_FRAME: i32 = 100;
+        let dx = self
+            .mouse_pending
+            .0
+            .clamp(-MAX_COUNTS_PER_FRAME, MAX_COUNTS_PER_FRAME);
+        let dy = self
+            .mouse_pending
+            .1
+            .clamp(-MAX_COUNTS_PER_FRAME, MAX_COUNTS_PER_FRAME);
+        if dx != 0 || dy != 0 {
+            self.mouse_pending.0 -= dx;
+            self.mouse_pending.1 -= dy;
+            self.emu.bus_mut().input.add_mouse_delta(0, dx, dy);
         }
     }
 
@@ -553,6 +590,10 @@ impl WebEmu {
     pub fn reset(&mut self) -> Result<(), JsValue> {
         self.emu.power_on_reset().map_err(js_err)?;
         self.anchor = None;
+        // Motion buffered against the old machine must not replay into the
+        // fresh one.
+        self.mouse_remainder = (0.0, 0.0);
+        self.mouse_pending = (0, 0);
         Ok(())
     }
 
