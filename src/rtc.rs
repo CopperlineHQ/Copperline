@@ -24,6 +24,18 @@
 
 use crate::timebase::{SystemTime, UNIX_EPOCH};
 
+/// What the clock's byte lane reads back with no chip in the socket.
+///
+/// An empty socket does not leave the lane floating: it settles on a fixed
+/// pattern, measured as `$40` on real A500 hardware (vAmiga reports the same
+/// value from the same measurement). The low nibble reading zero is the part
+/// that matters. Every OS clock probe -- AROS `battclock.resource`, 1.3's
+/// `SetClock`, 2.0+'s `battclock.resource` -- decides a clock is there by
+/// writing a control nibble and reading it back, so a lane that floated to
+/// the last value on the data bus would sooner or later echo the written
+/// nibble and invent a clock (and then a date) that the machine does not have.
+pub const EMPTY_SOCKET_LANE: u8 = 0x40;
+
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Msm6242Rtc {
     control_d: u8,

@@ -867,6 +867,14 @@ enum ToolPanelKind {
     Console,
 }
 
+impl ToolPanelKind {
+    /// Every kind of tool window. The lifecycle passes and, above all,
+    /// `request_redraw` iterate this rather than naming windows one by one:
+    /// a window left out of the redraw only shows what it drew last, and the
+    /// panels that pause the machine have nothing else to repaint them.
+    const ALL: [Self; 3] = [Self::Debugger, Self::FrameAnalyzer, Self::Console];
+}
+
 struct RenderJob {
     generation: u64,
     input: bitplane::RenderInput,
@@ -3079,18 +3087,9 @@ impl App {
     }
 
     fn tool_window_kind(&self, window_id: WindowId) -> Option<ToolPanelKind> {
-        [
-            (ToolPanelKind::Debugger, self.debugger_tool_window.as_ref()),
-            (
-                ToolPanelKind::FrameAnalyzer,
-                self.frame_analyzer_tool_window.as_ref(),
-            ),
-            (ToolPanelKind::Console, self.console_tool_window.as_ref()),
-        ]
-        .into_iter()
-        .find_map(|(kind, tool)| {
-            tool.is_some_and(|tool| tool.window.id() == window_id)
-                .then_some(kind)
+        ToolPanelKind::ALL.into_iter().find(|&kind| {
+            self.tool_window(kind)
+                .is_some_and(|tool| tool.window.id() == window_id)
         })
     }
 
@@ -4083,9 +4082,9 @@ impl App {
     }
 
     fn ensure_tool_windows_for_open_panels(&mut self, event_loop: &ActiveEventLoop) {
-        self.ensure_tool_window_for_kind(event_loop, ToolPanelKind::Debugger, true);
-        self.ensure_tool_window_for_kind(event_loop, ToolPanelKind::FrameAnalyzer, true);
-        self.ensure_tool_window_for_kind(event_loop, ToolPanelKind::Console, true);
+        for kind in ToolPanelKind::ALL {
+            self.ensure_tool_window_for_kind(event_loop, kind, true);
+        }
     }
 
     /// Frame-loop variant of ensure_tool_windows_for_open_panels: still
@@ -4096,9 +4095,9 @@ impl App {
         if due {
             self.last_tool_redraw = Instant::now();
         }
-        self.ensure_tool_window_for_kind(event_loop, ToolPanelKind::Debugger, due);
-        self.ensure_tool_window_for_kind(event_loop, ToolPanelKind::FrameAnalyzer, due);
-        self.ensure_tool_window_for_kind(event_loop, ToolPanelKind::Console, due);
+        for kind in ToolPanelKind::ALL {
+            self.ensure_tool_window_for_kind(event_loop, kind, due);
+        }
     }
 
     fn ensure_tool_window_for_kind(
@@ -7108,14 +7107,11 @@ impl App {
 
     fn request_redraw(&self) {
         self.request_main_redraw();
-        if let Some(tool) = self.debugger_tool_window.as_ref() {
-            if !tool.minimized {
-                tool.window.request_redraw();
-            }
-        }
-        if let Some(tool) = self.frame_analyzer_tool_window.as_ref() {
-            if !tool.minimized {
-                tool.window.request_redraw();
+        for kind in ToolPanelKind::ALL {
+            if let Some(tool) = self.tool_window(kind) {
+                if !tool.minimized {
+                    tool.window.request_redraw();
+                }
             }
         }
     }

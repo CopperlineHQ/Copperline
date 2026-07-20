@@ -2256,6 +2256,44 @@ fn debugger_window_pauses_steps_and_restores_run_state() {
     assert!(!app.paused);
 }
 
+/// Every tool-window kind has to appear in `ToolPanelKind::ALL`, because
+/// that is what `request_redraw` iterates. The panels that pause the machine
+/// (debugger, console) stop the frame loop, and the frame loop is the only
+/// other thing that repaints tool windows -- so a kind missing from `ALL` is
+/// a window frozen on whatever it last drew. That was issue #236: the console
+/// opened blank and stayed blank until a click happened to expose it, and
+/// typed characters did not show up until something else forced a repaint.
+#[test]
+fn every_tool_panel_kind_is_in_the_redraw_pass() {
+    for kind in [
+        ToolPanelKind::Debugger,
+        ToolPanelKind::FrameAnalyzer,
+        ToolPanelKind::Console,
+    ] {
+        // Exhaustive on purpose: a new kind stops compiling here, which is
+        // the prompt to add it to the list above and to ALL.
+        match kind {
+            ToolPanelKind::Debugger | ToolPanelKind::FrameAnalyzer | ToolPanelKind::Console => {}
+        }
+        assert!(
+            ToolPanelKind::ALL.contains(&kind),
+            "{kind:?} is not in ToolPanelKind::ALL, so its window never repaints"
+        );
+    }
+}
+
+/// The console pauses the machine, which is what makes the redraw pass the
+/// only thing that can repaint its window.
+#[test]
+fn opening_the_console_pauses_the_machine() {
+    let mut app = test_app();
+    assert!(!app.paused);
+    app.open_console();
+    assert!(app.paused);
+    app.close_tool_panel(ToolPanelKind::Console);
+    assert!(!app.paused);
+}
+
 #[test]
 fn debugger_and_frame_analyzer_can_stay_open_together() {
     let mut app = test_app();
