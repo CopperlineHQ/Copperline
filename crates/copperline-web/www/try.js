@@ -50,8 +50,53 @@ let paused = false;
 let framesThisSecond = 0;
 let lastStatUpdate = 0;
 
+// Transient caption over the screen, the page's version of the desktop's
+// on-screen display. It exists because the shell's status line lives inside
+// the boot overlay, which is hidden for the whole life of a running
+// machine: without this, everything the page says after boot -- screenshot
+// copied to the clipboard, state saved, disk inserted -- is written
+// somewhere nobody can see, and a button that worked perfectly looks like
+// it did nothing. Over the screen rather than below it so it reads in
+// fullscreen too, where there is no page left to put a status line on.
+let osd = null;
+let osdHideTimer = 0;
+
+function ensureOsd() {
+  if (osd) return osd;
+  osd = document.createElement('div');
+  // Below the drop hint (z-index 4) and never in the way of the pointer.
+  osd.style.cssText =
+    'position:absolute;left:0;right:0;bottom:0;z-index:3;' +
+    'padding:0.5rem 0.75rem;pointer-events:none;opacity:0;' +
+    'transition:opacity 220ms ease;' +
+    'background:linear-gradient(transparent,rgba(8,11,19,0.82));' +
+    'color:rgba(255,255,255,0.92);text-align:center;' +
+    'font:600 0.8rem "IBM Plex Mono",ui-monospace,monospace;';
+  // Looked up here rather than through the module's `shell` binding, which
+  // is declared further down the file: a status message can be raised
+  // before that line has run.
+  $('shell').appendChild(osd);
+  return osd;
+}
+
+function showOsd(text) {
+  const el = ensureOsd();
+  el.textContent = text;
+  el.style.opacity = '1';
+  clearTimeout(osdHideTimer);
+  osdHideTimer = setTimeout(() => {
+    el.style.opacity = '0';
+  }, 3200);
+}
+
 function setLoadStatus(text) {
   loadStatus.textContent = text;
+  // Raise the caption only when the shell's own status line cannot be seen.
+  // A display:none ancestor -- the hidden-overlay case -- generates no
+  // layout boxes, so an empty getClientRects() is the test. (offsetParent
+  // would look simpler, but it is also null for a position:fixed element,
+  // so a shell with a pinned status line would get the message twice.)
+  if (loadStatus.getClientRects().length === 0) showOsd(text);
 }
 
 async function fetchBytes(url, label) {
