@@ -280,8 +280,12 @@ async function boot() {
     // Fit the ROM into a fresh machine before anything else: a bad image
     // must abort the boot with the page still in its pre-boot state (emu
     // stays null, so the pickers keep updating bootRom for the retry).
+    // With no ROM to fit at all, the machine keeps the placeholder WebEmu
+    // builds itself: nothing the boot button can reach (it stays disabled
+    // until a ROM exists), but a save state carries its own ROM and
+    // replaces the whole machine, so a restore can start from one.
     const machine = new WebEmu();
-    machine.load_rom(bootRom.rom, bootRom.ext ?? undefined);
+    if (bootRom) machine.load_rom(bootRom.rom, bootRom.ext ?? undefined);
 
     // A reboot after an emulator error builds a new audio stack; close the
     // previous one so it cannot keep playing alongside.
@@ -331,7 +335,9 @@ async function boot() {
     // earlier failure) would otherwise go stale into any bug report filed
     // while the machine runs.
     setLoadStatus(
-      `booted ${bootRom.label}` +
+      // A ROM-less boot is only ever a landing place for a state load,
+      // which overwrites this line the moment it lands.
+      (bootRom ? `booted ${bootRom.label}` : 'machine built, waiting for the state') +
         (df0Name ? ` - DF0: ${df0Name} (write-protected)` : ''),
     );
 
@@ -1570,15 +1576,36 @@ function updateStateButtons() {
 
 // The machine a state loads into: states carry their own ROM and disks, so
 // booting first and restoring over it is enough, and a visitor can land
-// straight back in a game from a cold page load.
+// straight back in a game from a cold page load. No boot ROM is needed for
+// that - not even AROS, whose download may have failed, or a self-hosted
+// shell that serves none - because the restore replaces the whole machine
+// including its ROM. Reports whether it had to boot, so a restore that
+// then fails can put the page back rather than strand the visitor on a
+// machine they never asked to start.
 async function machineForStateLoad() {
-  if (emu && running) return true;
-  if (bootBtn.disabled) {
-    setLoadStatus('nothing to boot yet - load a Kickstart first');
-    return false;
+  if (emu && running) return { ready: true, booted: false };
+  if (!wasm) {
+    setLoadStatus('the emulator is still loading');
+    return { ready: false, booted: false };
   }
   await boot();
-  return Boolean(emu && running);
+  return { ready: Boolean(emu && running), booted: true };
+}
+
+// Undo a boot that only happened to receive a state which then would not
+// load. Without the state there is nothing to run - a ROM-less machine
+// does nothing at all - so the page returns to its pre-boot screen with
+// the failure still on the status line.
+function unbootAfterFailedStateLoad() {
+  const failure = loadStatus.textContent;
+  emu = null;
+  window.__emu = null;
+  running = false;
+  paused = false;
+  setPauseLabel();
+  overlay.style.display = '';
+  refreshBootButton();
+  setLoadStatus(failure);
 }
 
 // Restore from a blob, whatever produced it. The core leaves the running
@@ -1647,8 +1674,9 @@ async function loadStateFromFile(file) {
     setLoadStatus(`${file.name}: could not be read (${e.message ?? e})`);
     return;
   }
-  if (!(await machineForStateLoad())) return;
-  restoreState(bytes, file.name);
+  const machine = await machineForStateLoad();
+  if (!machine.ready) return;
+  if (!restoreState(bytes, file.name) && machine.booted) unbootAfterFailedStateLoad();
 }
 
 async function quickSaveState() {
@@ -1689,8 +1717,11 @@ async function quickLoadState() {
     updateStateButtons();
     return;
   }
-  if (!(await machineForStateLoad())) return;
-  restoreState(record.bytes, 'this browser');
+  const machine = await machineForStateLoad();
+  if (!machine.ready) return;
+  if (!restoreState(record.bytes, 'this browser') && machine.booted) {
+    unbootAfterFailedStateLoad();
+  }
 }
 
 // What the quick slot holds, for the button's enabled state and tooltip.

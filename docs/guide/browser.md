@@ -129,10 +129,16 @@ does not place them:
 
 Loading works from a cold page: with no machine booted, a load boots one
 and restores over it, so a visitor returning to a game lands straight back
-in it. States carry their own ROM and disks, so nothing needs to be
-re-picked first. A blob that is not a readable state of this build's
-format version is refused with the running machine untouched -- including
-a state from an older Copperline whose format version has moved on.
+in it. A state carries its own ROM and disks and replaces the whole
+machine, so nothing needs to be re-picked first -- and no boot ROM is
+needed at all, not even AROS. A page whose ROM download failed, or a
+self-hosted shell that serves none, can still restore a state; the
+machine that comes out of it is complete. A blob that is not a readable
+state of this build's format version is refused with the running machine
+untouched -- including a state from an older Copperline whose format
+version has moved on. If that refusal follows a boot the load itself
+asked for, the page returns to its pre-boot screen rather than leaving a
+machine running that nothing was restored into.
 
 There are no keyboard shortcuts for these (the desktop's
 Cmd/Alt+Shift+S and +L): every key on the page belongs to the guest, so a
