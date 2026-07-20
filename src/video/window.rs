@@ -6966,10 +6966,17 @@ impl App {
         self.emu.set_live_audio_suspended(suspended);
     }
 
+    /// Size the window to the presentation canvas, unless it is fullscreen: the
+    /// request resizes nothing there and instead shrinks the drawable into a
+    /// corner (macOS and Windows; Linux window managers ignore it), so leave the
+    /// display-sized surface alone and let the presentation scale into it.
     fn resize_for_active_panel(&self) {
         let Some(window) = self.render.as_ref().map(|r| r.window.clone()) else {
             return;
         };
+        if window.fullscreen().is_some() {
+            return;
+        }
         let size = LogicalSize::new(FB_WIDTH as f64, window_present_height() as f64);
         let _ = window.request_inner_size(size);
     }
