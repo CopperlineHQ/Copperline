@@ -219,9 +219,13 @@ An MSM6242-compatible register view at `$DC0000`, present on machines
 configured with `rtc = true`. Reads reflect host time; guest writes only
 affect the emulated latch/control state, never the host clock.
 
-The part is four bits wide and sits on the low byte lane alone, so register
-N answers at `$DC0000 + N * 4 + 3` and nowhere else; the even lane is not
-wired to the clock and floats with the bus whether or not a chip is fitted.
+The part is four bits wide and wired to the low byte lane alone, so it answers
+on odd addresses while the even lane floats with the bus -- with or without a
+chip in the socket, since nothing else drives it either. The register select is
+A2-A5, so A1 does not reach the decode and each register answers at both of its
+odd bytes (register 0 at `+1` and `+3`, register 1 at `+5` and `+7`, ...);
+AmigaOS uses `$DC0000 + N * 4 + 3` by convention, not because the part is deaf
+at `+1`. Writes take the same lanes as reads.
 With `rtc = false` the page still answers the cycle, and the odd lane reads
 back `$40` (measured on real A500 hardware) rather than floating. That
 distinction matters: every OS clock probe -- AROS `battclock.resource`,

@@ -2323,12 +2323,16 @@ impl CpuBus {
         (ranger || reserved || below_canonical).then_some(addr & 0xFFF)
     }
 
-    /// Read the `$DC0000` clock page.
+    /// The `$DC0000` clock page, a byte lane at a time.
     ///
-    /// The MSM6242 is a four-bit part sitting on the low byte lane alone, so
-    /// register N answers at `base + N * 4 + 3` and only there. The even lane
-    /// is not wired to the clock at all: it floats whether or not a clock is
-    /// fitted, which is why the OS probes address the page a byte at a time.
+    /// The MSM6242 is a four-bit part wired to the low byte lane alone, so it
+    /// answers on odd addresses and the even lane floats -- with or without a
+    /// chip in the socket, since nothing else drives it either.
+    ///
+    /// The register select is A2-A5, so A1 does not reach the decode and each
+    /// register answers at *both* of its odd bytes: register 0 at `+1` and
+    /// `+3`, register 1 at `+5` and `+7`, and so on. AmigaOS addresses them at
+    /// `base + N * 4 + 3` by convention, not because the part is deaf at `+1`.
     fn rtc_page_read(&mut self, addr: u32, size: usize) -> u32 {
         let mut value = 0u32;
         for i in 0..size {
@@ -2348,6 +2352,22 @@ impl CpuBus {
         }
         let secs = self.bus.emulated_seconds();
         self.bus.rtc.read(u64::from(addr - RTC_BASE), 1, secs) as u8
+    }
+
+    /// Writes take the same lanes as reads: a byte aimed at the even lane
+    /// reaches nothing, and a wider access lands only its odd bytes.
+    fn rtc_page_write(&mut self, addr: u32, size: usize, value: u32) {
+        for i in 0..size {
+            let addr = addr.wrapping_add(i as u32);
+            if addr & 1 == 0 {
+                continue;
+            }
+            let byte = u64::from(value >> (8 * (size - 1 - i)) & 0xFF);
+            let secs = self.bus.emulated_seconds();
+            self.bus
+                .rtc
+                .write(u64::from(addr - RTC_BASE), 1, byte, secs);
+        }
     }
 
     fn peek_word(&self, address: u32) -> u16 {
@@ -2876,10 +2896,7 @@ impl CpuBus {
             self.bus.cpu_slow_external_access(Self::access_words(size));
             // An empty clock socket answers the cycle but latches nothing.
             if self.bus.rtc_present() {
-                let secs = self.bus.emulated_seconds();
-                self.bus
-                    .rtc
-                    .write(u64::from(addr - RTC_BASE), size, u64::from(value), secs);
+                self.rtc_page_write(addr, size, value);
             }
             return;
         }
@@ -4158,10 +4175,29 @@ mod tests {
         assert_eq!(clock_reg(&mut bus, 0x0F), 0x4); // an MSM6242B
     }
 
+    /// The register select is A2-A5, so A1 never reaches the decode: each
+    /// register answers at both of its odd bytes, `+1` as well as the `+3`
+    /// AmigaOS uses by convention. Writes take the same lanes, so a value
+    /// poked at `+1` is readable at `+3` and vice versa.
+    #[test]
+    fn a1_is_not_decoded_so_both_odd_bytes_reach_the_same_register() {
+        let mut bus = cpu_bus(test_bus(reset_rom(0, 0)));
+        bus.bus.set_rtc_present(true);
+
+        // Control E (register $E) is plain readable/writable storage.
+        let plus_one = RTC_BASE + 0xE * 4 + 1;
+        let plus_three = RTC_BASE + 0xE * 4 + 3;
+        bus.write_byte(plus_three, 0x5);
+        assert_eq!(bus.read_byte(plus_one) & 0x0F, 0x5);
+        bus.write_byte(plus_one, 0xA);
+        assert_eq!(bus.read_byte(plus_three) & 0x0F, 0xA);
+    }
+
     /// The clock sits on the low byte lane only: the even lane is not wired
     /// to it and floats whether or not a chip is in the socket. AROS reads a
     /// *word* at $DC0010 to test whether the custom registers are mirrored
-    /// into clock space, so the even lane has to keep floating.
+    /// into clock space, so the even lane has to keep floating. A byte write
+    /// aimed at that lane reaches nothing.
     #[test]
     fn only_the_odd_byte_lane_reaches_the_clock() {
         let mut bus = cpu_bus(test_bus(reset_rom(0, 0)));
@@ -4177,6 +4213,13 @@ mod tests {
             bus.read_word(RTC_BASE + 0x36),
             0xA500 | u16::from(crate::rtc::EMPTY_SOCKET_LANE)
         );
+
+        // A byte write to the even lane goes nowhere, so control E keeps the
+        // value the odd lane put there.
+        bus.bus.set_rtc_present(true);
+        bus.write_byte(RTC_BASE + 0xE * 4 + 3, 0x6);
+        bus.write_byte(RTC_BASE + 0xE * 4, 0x9);
+        assert_eq!(bus.read_byte(RTC_BASE + 0xE * 4 + 3) & 0x0F, 0x6);
     }
 
     #[test]
