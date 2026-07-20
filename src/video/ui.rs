@@ -3919,7 +3919,12 @@ fn clip_path_tail(text: &str, avail_px: usize) -> String {
 /// rather than cutting into the name. Splits on both `/` and `\` so Windows and
 /// Unix paths work. If even the name alone is too wide, its tail is shown.
 fn clip_path_keep_name(text: &str, avail_px: usize) -> String {
-    let max_chars = avail_px / font::GLYPH_W;
+    clip_path_to_chars(text, avail_px / font::GLYPH_W)
+}
+
+/// [`clip_path_keep_name`] in characters rather than pixels, shared with the
+/// status line (see `window::shorten_status_paths`).
+pub(super) fn clip_path_to_chars(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         return text.to_string();
     }
@@ -3942,7 +3947,7 @@ fn clip_path_keep_name(text: &str, avail_px: usize) -> String {
         prefixed
     } else {
         // The file name alone does not fit; fall back to a plain tail clip.
-        clip_path_tail(name, avail_px)
+        clip_path_tail(name, max_chars * font::GLYPH_W)
     }
 }
 

@@ -2610,12 +2610,49 @@ fn classify_dropped_media(path: &std::path::Path) -> DroppedMediaKind {
     }
 }
 
+/// Shorten any filesystem path in a status message so its file name stays
+/// visible: a long path keeps its final component behind a "..." prefix instead
+/// of running past the panel. Windows and Unix paths both work.
+///
+/// `anyhow`'s alternate Display joins the error chain with `": "`, and a path
+/// sits at the end of its segment (`reading ROM <path>`), so each segment is
+/// clipped as one span. That keeps paths containing spaces intact instead of
+/// splitting them into several fragments.
+fn shorten_status_paths(msg: &str) -> String {
+    // Enough for the file name plus a directory or two, leaving room for the
+    // cause after it; the status line holds roughly eighty characters.
+    const MAX_PATH_CHARS: usize = 28;
+    msg.split(": ")
+        .map(|segment| {
+            let Some(sep) = segment.find(['/', '\\']) else {
+                return segment.to_string();
+            };
+            // The path runs from the token holding the first separator (back up
+            // to the preceding space) to the end of the segment.
+            let start = segment[..sep].rfind(' ').map_or(0, |i| i + 1);
+            let (prose, path) = segment.split_at(start);
+            format!("{prose}{}", ui::clip_path_to_chars(path, MAX_PATH_CHARS))
+        })
+        .collect::<Vec<_>>()
+        .join(": ")
+}
+
 /// A one-line, length-bounded form of an error for the configuration panel's
-/// status line (the full chain still goes to the log).
+/// status line. `{:#}` walks the whole chain, so the cause is kept: showing
+/// only the outermost context turned "reading ROM <path>" into what looked like
+/// a progress message when the ROM was simply not there. Paths are shortened to
+/// their file name and the first letter capitalised so it reads as a sentence
+/// instead of trailing off past the edge of the panel.
 fn short_status_error(err: &anyhow::Error) -> String {
-    let msg = err.to_string();
+    let msg = format!("{err:#}");
     let first_line = msg.lines().next().unwrap_or("").trim();
-    first_line.chars().take(96).collect()
+    let shortened = shorten_status_paths(first_line);
+    let mut chars = shortened.chars();
+    let sentence = match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    };
+    sentence.chars().take(96).collect()
 }
 
 fn set_mouse_button(emu: &mut Emulator, port: u8, button: MouseButtonKind, pressed: bool) {
@@ -4529,12 +4566,16 @@ impl App {
         let mut cfg = match self.launcher_state().map(|s| s.setup.build_config()) {
             Some(Ok(cfg)) => cfg,
             Some(Err(e)) => {
+                // The status line is one shortened sentence; the log keeps the
+                // whole chain (which names the underlying cause).
+                warn!("run failed: {e:#}");
                 self.set_launcher_status(StatusMessage::err(short_status_error(&e)));
                 return;
             }
             None => return,
         };
         if let Err(e) = crate::config::resolve_bundled_rom(&mut cfg) {
+            warn!("run failed: {e:#}");
             self.set_launcher_status(StatusMessage::err(short_status_error(&e)));
             return;
         }
@@ -4564,6 +4605,7 @@ impl App {
         let emu = match crate::emulator::build_machine(&cfg, audio, true, false) {
             Ok(emu) => emu,
             Err(e) => {
+                warn!("run failed: {e:#}");
                 self.set_launcher_status(StatusMessage::err(short_status_error(&e)));
                 return;
             }
