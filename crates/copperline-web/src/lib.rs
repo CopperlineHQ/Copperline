@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use copperline::audio::AudioSink;
+use copperline::bus::PortDevice;
 use copperline::config::{Config, Overscan};
 use copperline::emulator::{build_machine, Emulator};
 use copperline::serial::{ChannelSerialHandle, ChannelSerialSink};
@@ -164,6 +165,12 @@ fn w3c_code_to_amiga_rawkey(code: &str) -> Option<u8> {
         "NumpadParenRight" => 0x5B,
         _ => return None,
     })
+}
+
+/// Page-facing port number (1 or 2) to the core's index convention, where 0
+/// selects port 1 and anything else port 2.
+fn port_index(port: u8) -> usize {
+    usize::from(port != 1)
 }
 
 /// Mirrors the desktop frontend's fractional mouse-delta accumulator
@@ -456,12 +463,16 @@ impl WebEmu {
         }
     }
 
-    /// Port-2 digital joystick state (the page's keyboard-joystick mapping,
-    /// or a Gamepad API bridge). Marks port 2 as a joystick; `fire` is the
-    /// red/primary button, `button2` the blue/second button.
+    /// Digital joystick state for either port (1 or 2): the page's
+    /// keyboard-joystick mapping, or a Gamepad API bridge. Marks the port as
+    /// a joystick, which is what makes two-player work -- a second pad takes
+    /// port 1, exactly like unplugging the mouse to plug a stick in. `fire`
+    /// is the red/primary button, `button2` the blue/second button. Any port
+    /// number other than 1 means port 2, matching the core's convention.
     #[allow(clippy::too_many_arguments)]
-    pub fn set_joystick_port2(
+    pub fn set_joystick_port(
         &mut self,
+        port: u8,
         up: bool,
         down: bool,
         left: bool,
@@ -472,13 +483,14 @@ impl WebEmu {
         self.emu
             .bus_mut()
             .input
-            .set_joystick(1, up, down, left, right, fire, button2);
+            .set_joystick(port_index(port), up, down, left, right, fire, button2);
     }
 
-    /// The CD32 pad's extra buttons on port 2 (red/blue arrive through
-    /// `set_joystick_port2` as fire/button2).
-    pub fn set_cd32_buttons_port2(
+    /// The CD32 pad's extra buttons on either port (red/blue arrive through
+    /// `set_joystick_port` as fire/button2).
+    pub fn set_cd32_buttons_port(
         &mut self,
+        port: u8,
         play: bool,
         rwd: bool,
         ffw: bool,
@@ -488,7 +500,48 @@ impl WebEmu {
         self.emu
             .bus_mut()
             .input
-            .set_cd32_buttons(1, play, rwd, ffw, green, yellow);
+            .set_cd32_buttons(port_index(port), play, rwd, ffw, green, yellow);
+    }
+
+    /// Plug a device into a port: "mouse", "joystick", "cd32", "analogue",
+    /// or "none". Unplugging releases every line the old device drove, so a
+    /// page whose gamepad goes away restores the mouse on port 1 with
+    /// `set_port_device(1, "mouse")` rather than leaving a stuck stick.
+    /// Unknown names are ignored.
+    pub fn set_port_device(&mut self, port: u8, device: &str) {
+        if let Some(device) = PortDevice::parse(device) {
+            self.emu
+                .bus_mut()
+                .input
+                .set_port_device(port_index(port), device);
+        }
+    }
+
+    /// Port-2 joystick state. Superseded by `set_joystick_port`, kept
+    /// because it is the published page-glue API.
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_joystick_port2(
+        &mut self,
+        up: bool,
+        down: bool,
+        left: bool,
+        right: bool,
+        fire: bool,
+        button2: bool,
+    ) {
+        self.set_joystick_port(2, up, down, left, right, fire, button2);
+    }
+
+    /// Port-2 CD32 buttons. Superseded by `set_cd32_buttons_port`.
+    pub fn set_cd32_buttons_port2(
+        &mut self,
+        play: bool,
+        rwd: bool,
+        ffw: bool,
+        green: bool,
+        yellow: bool,
+    ) {
+        self.set_cd32_buttons_port(2, play, rwd, ffw, green, yellow);
     }
 
     /// Insert a floppy image (ADF/ADZ/DMS/extended ADF, optionally
@@ -595,6 +648,15 @@ impl WebEmu {
         self.mouse_remainder = (0.0, 0.0);
         self.mouse_pending = (0, 0);
         Ok(())
+    }
+
+    /// Forget the wall-clock/emulated-time pairing, so the next `run` starts
+    /// pacing from now instead of trying to make up the gap. A page calls
+    /// this when resuming from a pause: without it the first tick after the
+    /// pause sees a wall clock that ran on while the guest did not, and
+    /// sprints through frames until the catch-up clamp trips.
+    pub fn resync_clock(&mut self) {
+        self.anchor = None;
     }
 
     pub fn set_volume_percent(&mut self, percent: u8) {
