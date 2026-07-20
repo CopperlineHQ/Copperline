@@ -154,6 +154,10 @@ pub struct Config {
     /// the Zorro chain using the named host network backend. Networking is
     /// non-deterministic, so a fitted A2065 breaks byte-identical replay.
     pub a2065_net: Option<crate::net::NetConfig>,
+    /// RTG graphics card (`[rtg] card`): when set, the card autoconfigs on
+    /// the Zorro chain and presents RTG screens (all pixel formats, core
+    /// blitter ops, hardware mouse sprite) to its Picasso96 driver.
+    pub rtg: RtgCard,
     pub floppy: FloppyConfig,
     /// Which floppy drive slots are electrically present. DF0 is the
     /// internal drive and is always present; DF1-DF3 are external drives
@@ -413,6 +417,19 @@ pub fn is_cd_image_path(path: &std::path::Path) -> bool {
 pub struct IdeConfig {
     pub master: Option<DriveImage>,
     pub slave: Option<DriveImage>,
+}
+
+/// Which RTG graphics card the `[rtg]` section fits. A machine has at most
+/// one: RTG screens come from whichever card the P96 driver finds, so a
+/// second board would only compete for the display.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RtgCard {
+    /// No RTG board; the chipset drives the display. The default.
+    #[default]
+    None,
+    /// The Z3660 accelerator's FPGA RTG core, driven by the open-source
+    /// Z3660.card Picasso96 driver.
+    Z3660,
 }
 
 /// Which SCSI host adapter the `[scsi]` section fits: one of the two Zorro
@@ -1098,6 +1115,7 @@ impl Default for Config {
             ide: IdeConfig::default(),
             scsi: ScsiConfig::default(),
             a2065_net: None,
+            rtg: RtgCard::None,
             floppy: FloppyConfig::default(),
             floppy_connected: [true, false, false, false],
             floppy_playlists: std::array::from_fn(|_| Vec::new()),
@@ -1473,6 +1491,8 @@ pub struct RawConfig {
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) a2065: RawA2065,
     #[serde(default, skip_serializing_if = "is_default")]
+    pub(crate) rtg: RawRtg,
+    #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) floppy: RawFloppy,
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) display: RawDisplay,
@@ -1744,6 +1764,16 @@ pub(crate) struct RawA2065 {
     /// isolated NIC. Absent means no A2065 board is fitted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) net: Option<String>,
+}
+
+/// `[rtg]` graphics card: an RTG board on the Zorro chain.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawRtg {
+    /// Card to fit: "z3660" (the Z3660's FPGA RTG core, driven by
+    /// Z3660.card) or "none" (the default).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) card: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -2281,6 +2311,21 @@ impl TryFrom<RawConfig> for Config {
                 }
             },
         };
+        let rtg = match raw.rtg.card.as_deref() {
+            None => defaults.rtg,
+            Some(raw_card) => match raw_card.trim().to_ascii_lowercase().as_str() {
+                "none" => RtgCard::None,
+                "z3660" => RtgCard::Z3660,
+                _ => {
+                    errors.push(anyhow!(
+                        "[rtg] card = {raw_card:?} is not known \
+                         (expected \"z3660\" or \"none\")"
+                    ));
+                    RtgCard::None
+                }
+            },
+        };
+
         let scsi = ScsiConfig {
             controller: scsi_controller,
             rom: raw.scsi.rom.map(PathBuf::from),
@@ -2380,6 +2425,7 @@ impl TryFrom<RawConfig> for Config {
         errors.extend(validate_fast_ram(fast_ram_bytes, chip_ram_bytes).err());
         errors.extend(validate_slow_ram(slow_ram_bytes).err());
         errors.extend(validate_z3_ram(z3_ram_bytes, cpu).err());
+        errors.extend(validate_rtg_card(rtg, cpu).err());
         let board_specs = zorro_boards
             .iter()
             .chain(wasm_boards.iter().map(|w| &w.spec));
@@ -2537,6 +2583,7 @@ impl TryFrom<RawConfig> for Config {
             ide,
             scsi,
             a2065_net,
+            rtg,
             floppy,
             floppy_connected,
             floppy_playlists,
@@ -2860,6 +2907,14 @@ pub(crate) fn machine_profile_defaults(model: MachineModel) -> Config {
             d.port_devices[1] = PortDevice::Cd32Pad;
         }
     }
+    // An RTG card comes fitted wherever the machine can host one, so RTG
+    // needs no config step beyond installing the guest driver. The Z3660 is
+    // a Zorro III board, so the gate is the same one Zorro III RAM uses: a
+    // CPU with a 32-bit address bus. That is the A3000 and A4000 today, and
+    // any future profile that qualifies, without a model list to maintain.
+    if cpu_has_32bit_bus(d.cpu) {
+        d.rtg = RtgCard::Z3660;
+    }
     d
 }
 
@@ -3035,6 +3090,18 @@ fn cpu_has_32bit_bus(cpu: CpuModel) -> bool {
         cpu,
         CpuModel::M68020 | CpuModel::M68030 | CpuModel::M68040 | CpuModel::M68060
     )
+}
+
+fn validate_rtg_card(rtg: RtgCard, cpu: CpuModel) -> Result<()> {
+    if rtg == RtgCard::Z3660 && !cpu_has_32bit_bus(cpu) {
+        bail!(
+            "[rtg] card = \"z3660\" is a Zorro III board and needs a CPU \
+             with a 32-bit address bus (68020/68030/68040/68060); {:?} has \
+             a 24-bit bus",
+            cpu
+        );
+    }
+    Ok(())
 }
 
 fn validate_z3_ram(z3: usize, cpu: CpuModel) -> Result<()> {
@@ -5160,6 +5227,64 @@ mod tests {
         let err = parse_config("[floppy]\ndrives = 0").unwrap_err();
         assert!(err.to_string().contains("between 1 and 4"), "{err:#}");
         Ok(())
+    }
+
+    #[test]
+    fn rtg_card_selects_the_board() -> Result<()> {
+        // The board is Zorro III, so these need a 32-bit-bus CPU.
+        let with_cpu = |rtg: &str| format!("[cpu]\nmodel = \"68030\"\n{rtg}");
+        assert_eq!(
+            parse_config(&with_cpu("[rtg]\ncard = \"z3660\"\n"))?.rtg,
+            RtgCard::Z3660
+        );
+        // Spelling and spacing are forgiving, as for [scsi] controller.
+        assert_eq!(
+            parse_config(&with_cpu("[rtg]\ncard = \" Z3660 \"\n"))?.rtg,
+            RtgCard::Z3660
+        );
+        assert_eq!(
+            parse_config(&with_cpu("[rtg]\ncard = \"none\"\n"))?.rtg,
+            RtgCard::None
+        );
+        // A bare config is a 68000 machine, which cannot host a Zorro III
+        // board, so nothing is fitted.
+        assert_eq!(parse_config("")?.rtg, RtgCard::None);
+        Ok(())
+    }
+
+    /// A machine that can host a Zorro III board gets one fitted by default,
+    /// so RTG needs no config beyond the guest driver. The gate is the CPU's
+    /// address bus, the same one Zorro III RAM uses, not a model list.
+    #[test]
+    fn rtg_card_defaults_to_the_machine_capability() -> Result<()> {
+        assert_eq!(
+            parse_config("[machine]\nprofile = \"A4000\"\n")?.rtg,
+            RtgCard::Z3660
+        );
+        assert_eq!(
+            parse_config("[machine]\nprofile = \"A3000\"\n")?.rtg,
+            RtgCard::Z3660
+        );
+        // 68EC020: 24-bit bus, so no Zorro III and no card.
+        assert_eq!(
+            parse_config("[machine]\nprofile = \"A1200\"\n")?.rtg,
+            RtgCard::None
+        );
+        assert_eq!(
+            parse_config("[machine]\nprofile = \"A500\"\n")?.rtg,
+            RtgCard::None
+        );
+        // Asking anyway is an error rather than a board the CPU cannot reach.
+        let err =
+            parse_config("[machine]\nprofile = \"A500\"\n[rtg]\ncard = \"z3660\"\n").unwrap_err();
+        assert!(err.to_string().contains("32-bit address bus"), "{err:#}");
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_rtg_card_fails_cleanly() {
+        let err = parse_config("[rtg]\ncard = \"picasso4\"\n").unwrap_err();
+        assert!(err.to_string().contains("is not known"), "{err:#}");
     }
 
     #[test]

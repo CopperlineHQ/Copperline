@@ -895,6 +895,29 @@ schedule, not the emulated clock, so a NIC board breaks byte-identical
 replay and save-state determinism while traffic flows. See [](../zorro)
 for the board details and the NAT's limitations.
 
+## `[rtg]` -- RTG graphics card
+
+```toml
+[rtg]
+card = "z3660"
+```
+
+`card` is `"z3660"` or `"none"`; a machine takes at most one. The Z3660 is a
+Zorro III board, so it comes fitted by default on machines whose CPU has a
+32-bit address bus (the A3000 and A4000) and is unavailable on the rest --
+asking for it there is an error, as it is for Zorro III RAM. It gives the
+guest high-resolution,
+high-colour screens through Picasso96. It needs the
+open-source Z3660.card driver installed in the guest (with its monitor in
+`DEVS:Monitors`); with that in place, Z3660 screen modes appear in
+ScreenMode, and the window shows the board's output when a screen is
+opened, switching back to the native Amiga display when it closes.
+
+The board's stock monitor ships with the `DISPLAYCHAIN=NO` tooltype, which
+models the real hardware's separate RTG monitor and never hands the display
+back to the native screen. On a single-window emulator you usually want
+`DISPLAYCHAIN=YES`, so the one window follows whichever screen is active.
+
 ## `[debug]` -- diagnostics
 
 ```toml

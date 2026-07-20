@@ -568,6 +568,13 @@ pub struct App {
     present_fb: Vec<u32>,
     present_rows: usize,
     present_standard_tv_aperture: bool,
+    /// Scratch for composing an RTG board frame (Z3660 scanout); reused
+    /// across frames to avoid a per-frame allocation.
+    rtg_fb: Vec<u32>,
+    /// Native (width, height) of the RTG frame in `rtg_fb` when the last
+    /// presented frame was RTG; `None` when the chipset drives the display.
+    /// The draw path uploads `rtg_fb` to the RTG texture when set.
+    rtg_present_dims: Option<(u32, u32)>,
     render: Option<Render>,
     debugger_tool_window: Option<ToolWindow>,
     frame_analyzer_tool_window: Option<ToolWindow>,
@@ -822,6 +829,10 @@ struct Render {
     window: Arc<Window>,
     pixels: Pixels<'static>,
     texture_scale: usize,
+    /// Native-resolution RTG display texture, drawn over the UI buffer in
+    /// the `pixels` render pass (see [`rtg_texture`]). Present whenever the
+    /// window is (its pipeline uses the same GPU device as `pixels`).
+    rtg_texture: rtg_texture::RtgTexture,
     /// True while the host window is minimized (Windows delivers a 0x0
     /// Resized). Presenting while minimized deadlocks on Windows: DWM stops
     /// consuming swapchain frames, so once the in-flight buffers fill,
@@ -1012,6 +1023,8 @@ impl App {
             deinterlacer: Deinterlacer::with_phosphor(phosphor),
             present_fb: vec![0u32; FB_WIDTH * OUT_HEIGHT],
             present_rows: OUT_HEIGHT,
+            rtg_fb: Vec::new(),
+            rtg_present_dims: None,
             present_standard_tv_aperture: true,
             render: None,
             debugger_tool_window: None,
@@ -1600,10 +1613,13 @@ impl ApplicationHandler for App {
             texture_width(texture_scale),
             texture_height(texture_scale)
         );
+        let rtg_texture =
+            rtg_texture::RtgTexture::new(pixels.device(), pixels.render_texture_format());
         self.render = Some(Render {
             window,
             pixels,
             texture_scale,
+            rtg_texture,
             minimized: false,
         });
         // Paint at least once so the status bar (and power button) is
@@ -2174,15 +2190,46 @@ impl ApplicationHandler for App {
                     };
                 let ui_data = self.build_panel_view_data();
                 if let Some(r) = self.render.as_mut() {
+                    // RTG with a working GPU pipeline presents the native frame
+                    // through its own texture in the GPU render pass below.
+                    //
+                    // Not while the UI is up, though: that pass overdraws the
+                    // display region after the UI has been drawn into it, so
+                    // an open menu or panel would be painted over and vanish.
+                    // Fall back to the CPU present, which composites the UI on
+                    // top as usual, at the cost of the FB_WIDTH downscale for
+                    // as long as the overlay is open.
+                    let rtg_gpu = self.rtg_present_dims.is_some() && !self.ui.active();
+                    if let Some((w, h)) = self.rtg_present_dims.filter(|_| rtg_gpu) {
+                        r.rtg_texture.upload(
+                            r.pixels.device(),
+                            r.pixels.queue(),
+                            &self.rtg_fb,
+                            w,
+                            h,
+                        );
+                    }
                     let frame = r.pixels.frame_mut();
-                    copy_window_present_frame(
-                        &self.present_fb,
-                        self.present_rows,
-                        frame,
-                        r.texture_scale,
-                        self.overscan,
-                        self.present_standard_tv_aperture,
-                    );
+                    if rtg_gpu {
+                        // The GPU pass overdraws the display region; black it
+                        // out so nothing stale shows at the seams.
+                        let rows = present_height() * r.texture_scale;
+                        let stride = texture_width(r.texture_scale) * 4;
+                        frame[..rows * stride].fill(0);
+                    } else {
+                        copy_window_present_frame(
+                            &self.present_fb,
+                            self.present_rows,
+                            frame,
+                            r.texture_scale,
+                            self.overscan,
+                            // The TV aperture is a chipset crop rect. An RTG
+                            // frame fills the buffer on its own terms, so
+                            // applying it here would show a sub-rect of the
+                            // board's screen.
+                            self.present_standard_tv_aperture && self.rtg_present_dims.is_none(),
+                        );
+                    }
                     draw_status_bar(frame, &view, r.texture_scale);
                     if recording {
                         // Painted into the presentation texture only, so
@@ -2226,7 +2273,24 @@ impl ApplicationHandler for App {
                     if self.drop_hover && !matches!(self.ui.panel, Some(Panel::Launcher(_))) {
                         ui::draw_drop_hint(frame, r.texture_scale);
                     }
-                    if let Err(e) = r.pixels.render() {
+                    let render_result = if rtg_gpu {
+                        // Draw the UI buffer, then overdraw the display region
+                        // with the native RTG texture (GPU-scaled). The display
+                        // rect is the top present_height fraction of the buffer's
+                        // letterboxed clip rect on the surface.
+                        let rtg = &r.rtg_texture;
+                        r.pixels.render_with(|encoder, target, ctx| {
+                            ctx.scaling_renderer.render(encoder, target);
+                            let (cx, cy, cw, ch) = ctx.scaling_renderer.clip_rect();
+                            let disp_h = ch as f32 * present_height() as f32
+                                / window_present_height() as f32;
+                            rtg.render(encoder, target, (cx as f32, cy as f32, cw as f32, disp_h));
+                            Ok(())
+                        })
+                    } else {
+                        r.pixels.render()
+                    };
+                    if let Err(e) = render_result {
                         error!("pixels.render: {e}");
                     }
                 }
@@ -7379,6 +7443,7 @@ impl App {
         self.render_recycle_fb = old;
         self.present_rows = result.present_rows;
         self.present_standard_tv_aperture = result.standard_tv_aperture;
+        self.rtg_present_dims = None;
         self.last_rendered_emulated_frame = Some(result.emulated_frame);
         true
     }
@@ -7472,14 +7537,61 @@ impl App {
         rendered
     }
 
+    /// Present the RTG board frame when one is driving the display: the
+    /// board frame (own resolution) is scaled horizontally into the
+    /// FB_WIDTH-stride presentation buffer, and the shared vertical scaling
+    /// maps its rows to the output height. Returns `None` when no RTG board
+    /// is active (native chipset presentation as usual).
+    fn render_rtg_frame_if_active(&mut self) -> Option<bool> {
+        if !self.emu.bus().rtg_active() {
+            return None;
+        }
+        let emulated_frame = self.emu.bus().emulated_frames();
+        if !should_render_emulated_frame(self.last_rendered_emulated_frame, emulated_frame) {
+            return Some(false);
+        }
+        let mut rtg = std::mem::take(&mut self.rtg_fb);
+        let mut present = std::mem::take(&mut self.present_fb);
+        let composed = compose_rtg_present(self.emu.bus(), &mut rtg, &mut present);
+        self.rtg_fb = rtg;
+        self.present_fb = present;
+        let Some((rows, native_w, native_h)) = composed else {
+            // rtg_active() is true but the frame did not compose (e.g. MODE
+            // set before ORIG_RES): fall back to the chipset render rather
+            // than freezing on the stale frame.
+            self.rtg_present_dims = None;
+            return None;
+        };
+        // The native frame stays in `rtg_fb`; the window presents it at full
+        // resolution through the RTG texture, while `present_fb` keeps the
+        // FB_WIDTH version the screenshot path reads.
+        self.rtg_present_dims = Some((native_w, native_h));
+        self.present_rows = rows;
+        self.present_standard_tv_aperture = false;
+        self.last_rendered_emulated_frame = Some(emulated_frame);
+        self.last_submitted_render_frame = Some(emulated_frame);
+        Some(true)
+    }
+
     fn render_emulated_frame_if_needed(&mut self) -> bool {
         if !self.emu.bus().frame_render_available() {
             return false;
         }
+        // Drain in-flight chipset render results first (recycling their
+        // buffers) so a stale result cannot land on top of an RTG frame.
+        // Their "new frame applied" outcome must propagate to the caller,
+        // which uses it to schedule the window redraw.
+        let mut rendered = false;
         if self.render_worker.is_some() {
-            return self.render_emulated_frame_threaded();
+            rendered = self.collect_threaded_render_results(false);
         }
-        self.render_emulated_frame_sync()
+        if let Some(rtg_rendered) = self.render_rtg_frame_if_active() {
+            return rendered | rtg_rendered;
+        }
+        if self.render_worker.is_some() {
+            return rendered | self.render_emulated_frame_threaded();
+        }
+        rendered | self.render_emulated_frame_sync()
     }
 
     fn render_emulated_frame_sync(&mut self) -> bool {
@@ -7516,6 +7628,7 @@ impl App {
         self.refresh_present_from_deinterlacer();
         self.present_standard_tv_aperture =
             uses_standard_pal_tv_aperture(geometry, self.present_rows, &base);
+        self.rtg_present_dims = None;
         self.last_rendered_emulated_frame = Some(emulated_frame);
         self.last_submitted_render_frame = Some(emulated_frame);
         true
@@ -7527,6 +7640,7 @@ mod console;
 mod control;
 mod host_input;
 mod present;
+mod rtg_texture;
 mod statusbar;
 pub(super) use present::{scale_rect, texture_height, texture_width, Rect};
 pub(super) use statusbar::{draw_rect_bevel, fill_rect, fill_rect_blend};

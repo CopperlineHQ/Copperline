@@ -210,6 +210,12 @@ slow = "512K"
 # net = "nat"
 
 
+# RTG graphics card: high-resolution, high-colour screens via Picasso96.
+# Fitted by default on machines with Zorro III (A3000/A4000).
+# [rtg]
+# card = "z3660"           # or "none"
+
+
 # SCSI bus with up to seven drives, on any machine model. Preferred over [ide]
 # for multiple disks: a Zorro board's own boot ROM carries scsi.device and
 # autoboots on Kickstart 1.3+, so it does not depend on the Kickstart IDE

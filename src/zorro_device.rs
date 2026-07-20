@@ -334,6 +334,7 @@ pub enum BoardDevice {
     // Appended last: bincode encodes variants by index, so inserting
     // anywhere else would break save states holding the boards above.
     Filesys(crate::filesys::FilesysBoard),
+    Z3660(crate::z3660::Z3660),
 }
 
 impl ZorroDevice for BoardDevice {
@@ -345,6 +346,7 @@ impl ZorroDevice for BoardDevice {
             #[cfg(feature = "wasm-boards")]
             BoardDevice::Wasm(d) => ZorroDevice::read(d, off, size, host),
             BoardDevice::Filesys(d) => ZorroDevice::read(d, off, size, host),
+            BoardDevice::Z3660(d) => ZorroDevice::read(d, off, size, host),
         }
     }
 
@@ -356,6 +358,7 @@ impl ZorroDevice for BoardDevice {
             #[cfg(feature = "wasm-boards")]
             BoardDevice::Wasm(d) => ZorroDevice::write(d, off, size, value, host),
             BoardDevice::Filesys(d) => ZorroDevice::write(d, off, size, value, host),
+            BoardDevice::Z3660(d) => ZorroDevice::write(d, off, size, value, host),
         }
     }
 
@@ -367,6 +370,7 @@ impl ZorroDevice for BoardDevice {
             #[cfg(feature = "wasm-boards")]
             BoardDevice::Wasm(d) => ZorroDevice::peek_word(d, off),
             BoardDevice::Filesys(d) => ZorroDevice::peek_word(d, off),
+            BoardDevice::Z3660(d) => ZorroDevice::peek_word(d, off),
         }
     }
 
@@ -378,6 +382,7 @@ impl ZorroDevice for BoardDevice {
             #[cfg(feature = "wasm-boards")]
             BoardDevice::Wasm(d) => ZorroDevice::tick(d, cck, host),
             BoardDevice::Filesys(d) => ZorroDevice::tick(d, cck, host),
+            BoardDevice::Z3660(d) => ZorroDevice::tick(d, cck, host),
         }
     }
 
@@ -389,6 +394,7 @@ impl ZorroDevice for BoardDevice {
             #[cfg(feature = "wasm-boards")]
             BoardDevice::Wasm(d) => ZorroDevice::int2_line(d),
             BoardDevice::Filesys(d) => ZorroDevice::int2_line(d),
+            BoardDevice::Z3660(d) => ZorroDevice::int2_line(d),
         }
     }
 
@@ -400,6 +406,7 @@ impl ZorroDevice for BoardDevice {
             #[cfg(feature = "wasm-boards")]
             BoardDevice::Wasm(d) => ZorroDevice::int6_line(d),
             BoardDevice::Filesys(d) => ZorroDevice::int6_line(d),
+            BoardDevice::Z3660(d) => ZorroDevice::int6_line(d),
         }
     }
 
@@ -411,6 +418,7 @@ impl ZorroDevice for BoardDevice {
             #[cfg(feature = "wasm-boards")]
             BoardDevice::Wasm(d) => ZorroDevice::is_idle(d),
             BoardDevice::Filesys(d) => ZorroDevice::is_idle(d),
+            BoardDevice::Z3660(d) => ZorroDevice::is_idle(d),
         }
     }
 
@@ -422,6 +430,7 @@ impl ZorroDevice for BoardDevice {
             #[cfg(feature = "wasm-boards")]
             BoardDevice::Wasm(d) => ZorroDevice::next_event_cck(d),
             BoardDevice::Filesys(d) => ZorroDevice::next_event_cck(d),
+            BoardDevice::Z3660(d) => ZorroDevice::next_event_cck(d),
         }
     }
 
@@ -433,6 +442,7 @@ impl ZorroDevice for BoardDevice {
             #[cfg(feature = "wasm-boards")]
             BoardDevice::Wasm(d) => ZorroDevice::take_activity(d),
             BoardDevice::Filesys(d) => ZorroDevice::take_activity(d),
+            BoardDevice::Z3660(d) => ZorroDevice::take_activity(d),
         }
     }
 
@@ -444,6 +454,7 @@ impl ZorroDevice for BoardDevice {
             #[cfg(feature = "wasm-boards")]
             BoardDevice::Wasm(d) => ZorroDevice::reset(d),
             BoardDevice::Filesys(d) => ZorroDevice::reset(d),
+            BoardDevice::Z3660(d) => ZorroDevice::reset(d),
         }
     }
 
@@ -455,6 +466,7 @@ impl ZorroDevice for BoardDevice {
             #[cfg(feature = "wasm-boards")]
             BoardDevice::Wasm(d) => ZorroDevice::kind(d),
             BoardDevice::Filesys(d) => ZorroDevice::kind(d),
+            BoardDevice::Z3660(d) => ZorroDevice::kind(d),
         }
     }
 }

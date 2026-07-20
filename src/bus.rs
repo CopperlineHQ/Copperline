@@ -3168,6 +3168,25 @@ impl Bus {
             })
     }
 
+    /// Whether an RTG board is driving the display (native chipset output
+    /// is presented otherwise). Cheap; safe to poll every frame.
+    pub fn rtg_active(&self) -> bool {
+        self.devices.iter().any(|d| match d {
+            crate::zorro_device::BoardDevice::Z3660(z) => z.rtg_active(),
+            _ => false,
+        })
+    }
+
+    /// Compose the active RTG board frame (Z3660 scanout) into `out` as
+    /// presentation pixels, returning its dimensions; `None` while no RTG
+    /// board is driving the display (native chipset output shown).
+    pub fn rtg_frame(&self, out: &mut Vec<u32>) -> Option<(u32, u32)> {
+        self.devices.iter().find_map(|d| match d {
+            crate::zorro_device::BoardDevice::Z3660(z) => z.rtg_frame(out),
+            _ => None,
+        })
+    }
+
     /// Whether a disc is mounted (or waiting in the tray).
     pub fn cd_disc_inserted(&self) -> bool {
         self.cdtv.as_ref().is_some_and(|cdtv| cdtv.has_disc())

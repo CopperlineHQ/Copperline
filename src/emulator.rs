@@ -1948,6 +1948,16 @@ pub fn build_machine(
             crate::a2065::A2065::new(net_config),
         ));
     }
+    // RTG board (`[rtg] card`): the Z3660.card P96 driver drives RTG screens
+    // through its register file and framebuffer; see crate::z3660.
+    if cfg.rtg == crate::config::RtgCard::Z3660 {
+        let slot = devices.len();
+        zorro.add_board(crate::zorro::BoardSpec::z3660(slot))?;
+        info!("z3660: RTG board on the Zorro chain (slot {slot})");
+        devices.push(crate::zorro_device::BoardDevice::Z3660(
+            crate::z3660::Z3660::new(),
+        ));
+    }
     // The A1000 has no Kickstart ROM: cfg.rom_path is its 64 KiB bootstrap
     // ROM, and a 256 KiB WCS is allocated for it to load Kickstart into from
     // the Kickstart disk in DF0.

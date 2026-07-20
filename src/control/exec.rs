@@ -1714,7 +1714,16 @@ fn wave_status_value(status: &crate::waveform::WaveStatus) -> Value {
 /// `capture.digest` and `capture.screenshot` use this in BOTH server
 /// modes, so captures are mode-identical and comparable.
 fn render_frame(emu: &Emulator) -> (Vec<u32>, usize) {
-    let mut fb = vec![0u32; MAX_FB_PIXELS];
+    // An RTG board driving the display supersedes the chipset output,
+    // exactly as the window presentation does.
+    let mut fb = Vec::new();
+    let mut scratch = Vec::new();
+    if let Some((rows, _, _)) =
+        crate::video::present_common::compose_rtg_present(emu.bus(), &mut scratch, &mut fb)
+    {
+        return (fb, rows);
+    }
+    fb = vec![0u32; MAX_FB_PIXELS];
     crate::video::bitplane::render_display_only(emu.bus(), &mut fb);
     let lines = emu.bus().frame_geometry().visible_lines;
     (fb, lines)

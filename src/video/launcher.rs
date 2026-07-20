@@ -25,7 +25,7 @@ use crate::chipset::denise::DeniseRevision;
 use crate::config::{
     format_size, machine_profile_defaults, ChannelMode, Chipset, Config, CpuModel,
     JoystickInputMode, MachineModel, Overscan, PacingBudget, ParallelDevice, PixelAspect,
-    RawConfig, RawDrive, RawFilesysMount, RawFloppyDrive, RawZorroBoard, ScsiController,
+    RawConfig, RawDrive, RawFilesysMount, RawFloppyDrive, RawZorroBoard, RtgCard, ScsiController,
     SerialMode, WarpSpeed,
 };
 use crate::zorro::{ConfigOption, ConfigOptionKind, LoadedZorroBoard};
@@ -237,6 +237,7 @@ pub enum LauncherField {
     Video,
     Rtc,
     Identify,
+    Rtg,
     // CPU
     Cpu,
     Fpu,
@@ -423,13 +424,14 @@ use RowKind::{Cycle, Drive, Toggle};
 // `std::path::Path` import.
 use RowKind::Path as PathRow;
 
-const SYSTEM_ROWS: [Row; 6] = [
+const SYSTEM_ROWS: [Row; 7] = [
     row(F::Chipset, "Chipset", Cycle),
     row(F::Agnus, "Agnus", Cycle),
     row(F::Denise, "Denise", Cycle),
     row(F::Video, "Video", Cycle),
     row(F::Rtc, "Real-time clock", Toggle),
     row(F::Identify, "Identify board", Toggle),
+    row(F::Rtg, "RTG card", Cycle),
 ];
 const CPU_ROWS: [Row; 5] = [
     row(F::Cpu, "CPU", Cycle),
@@ -637,6 +639,7 @@ pub const MODELS: [MachineModel; 10] = [
 // --- value preset lists for the cycle/stepper controls -------------------
 
 const CHIPSETS: [Chipset; 3] = [Chipset::Ocs, Chipset::Ecs, Chipset::Aga];
+const RTG_CARDS: [RtgCard; 2] = [RtgCard::None, RtgCard::Z3660];
 const AGNUS_CHOICES: [Option<AgnusRevision>; 5] = [
     None,
     Some(AgnusRevision::Ocs),
@@ -764,6 +767,7 @@ pub struct MachineSetup {
     video: VideoStandard,
     rtc: bool,
     identify: bool,
+    rtg: RtgCard,
     // CPU
     cpu: CpuModel,
     fpu: bool,
@@ -899,6 +903,7 @@ impl MachineSetup {
             video: cfg.video_standard,
             rtc: cfg.rtc_present,
             identify: cfg.identify_board,
+            rtg: cfg.rtg,
             cpu: cfg.cpu,
             fpu: cfg.fpu,
             clock_mhz: cfg.cpu_clock_mhz,
@@ -1083,6 +1088,9 @@ impl MachineSetup {
         }
         if self.identify != base.identify_board {
             raw.identify = Some(self.identify);
+        }
+        if self.rtg != base.rtg {
+            raw.rtg.card = Some(rtg_card_name(self.rtg).to_ascii_lowercase());
         }
         // CPU
         if self.cpu != base.cpu {
@@ -1371,6 +1379,7 @@ impl MachineSetup {
         self.video = base.video_standard;
         self.rtc = base.rtc_present;
         self.identify = base.identify_board;
+        self.rtg = base.rtg;
         self.cpu = base.cpu;
         self.fpu = base.fpu;
         self.clock_mhz = base.cpu_clock_mhz;
@@ -1674,6 +1683,7 @@ impl MachineSetup {
     pub fn value_label(&self, field: LauncherField) -> String {
         match field {
             F::Chipset => chipset_name(self.chipset).to_string(),
+            F::Rtg => rtg_card_name(self.rtg).to_string(),
             F::Agnus => match self.agnus {
                 None => "Auto".to_string(),
                 Some(a) => agnus_name(a).to_string(),
@@ -1827,6 +1837,7 @@ impl MachineSetup {
     pub fn cycle(&mut self, field: LauncherField, forward: bool) {
         match field {
             F::Chipset => self.chipset = cycle_slice(&CHIPSETS, self.chipset, forward),
+            F::Rtg => self.rtg = cycle_slice(&RTG_CARDS, self.rtg, forward),
             F::Agnus => self.agnus = cycle_slice(&AGNUS_CHOICES, self.agnus, forward),
             F::Denise => self.denise = cycle_slice(&DENISE_CHOICES, self.denise, forward),
             F::Video => self.video = cycle_slice(&VIDEO_CHOICES, self.video, forward),
@@ -2460,6 +2471,13 @@ pub fn model_label(model: MachineModel) -> &'static str {
     }
 }
 
+fn rtg_card_name(card: RtgCard) -> &'static str {
+    match card {
+        RtgCard::None => "None",
+        RtgCard::Z3660 => "Z3660",
+    }
+}
+
 fn chipset_name(chipset: Chipset) -> &'static str {
     match chipset {
         Chipset::Ocs => "OCS",
@@ -2796,6 +2814,35 @@ mod tests {
         assert!(raw.cpu.model.is_none());
         assert!(raw.chipset.revision.is_none());
         assert!(s.build_config().is_ok());
+    }
+
+    #[test]
+    fn rtg_card_round_trips_through_raw() {
+        // An A4000 hosts Zorro III, so it comes with the card fitted; that
+        // matches its baseline, so nothing is written for it.
+        let mut s = MachineSetup::default();
+        s.select_model(Some(MachineModel::A4000));
+        assert_eq!(s.rtg, RtgCard::Z3660);
+        assert_eq!(s.value_label(LauncherField::Rtg), "Z3660");
+        assert!(s.to_raw().rtg.card.is_none());
+
+        // Turning it off differs from the baseline, so it is written, and
+        // the written key is what [rtg] card parses back rather than the
+        // display label -- the parse is case-forgiving, the round trip
+        // should not lean on that.
+        s.cycle(LauncherField::Rtg, true);
+        assert_eq!(s.rtg, RtgCard::None);
+        assert_eq!(s.value_label(LauncherField::Rtg), "None");
+        let raw = s.to_raw();
+        assert_eq!(raw.rtg.card.as_deref(), Some("none"));
+        let back = MachineSetup::from_raw(&raw).unwrap();
+        assert_eq!(back.rtg, RtgCard::None);
+        assert!(s.build_config().is_ok());
+
+        // A 68000 machine cannot host the board, so it has none and the row
+        // still cycles without producing an unbuildable config.
+        s.select_model(Some(MachineModel::A500));
+        assert_eq!(s.rtg, RtgCard::None);
     }
 
     #[test]
