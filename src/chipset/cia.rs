@@ -424,10 +424,14 @@ impl Cia {
         self.regs[REG_DDRA]
     }
 
-    /// Physical port-A pin levels: outputs at their programmed level, inputs
-    /// released (open-drain, pulled high). On CIA-B the high bits are the
-    /// RS-232 control lines (/DTR on PA7, /RTS on PA6), which a host-side
-    /// serial bridge observes the way an attached modem would.
+    /// Port-A pin levels as contributed by the CIA itself: outputs at their
+    /// programmed level, inputs released (open-drain, pulled high). External
+    /// peripherals are not overlaid here, so a pin an attached device drives
+    /// (the parallel port's Centronics status inputs on CIA-B PA0-2, see
+    /// `Bus::cia_b_read`) can sit at a different board-level value. The
+    /// RS-232 control outputs on CIA-B (/DTR on PA7, /RTS on PA6) have no
+    /// external driver, so for them this is the wire level, which a
+    /// host-side serial bridge observes the way an attached modem would.
     pub fn port_a_pins(&self) -> u8 {
         self.read_port(REG_PRA, REG_DDRA)
     }
