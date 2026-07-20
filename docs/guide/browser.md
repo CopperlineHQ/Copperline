@@ -100,6 +100,15 @@ same front-panel readouts as the desktop [status bar](ui.md): the PWR and
 FDD LEDs (plus HDD/CD on machines fitted with those drives), the floppy
 track counter, and the name of the disk in each connected drive.
 
+What the page has to say -- a screenshot copied, a state saved, a disk
+inserted, something refused -- appears as a caption across the bottom of
+the screen for a few seconds, the browser's version of the desktop's
+on-screen display. It is over the screen rather than under it so it reads
+in fullscreen too. Before boot the same messages go to the status line in
+the middle of the boot overlay, which is where a shell's own
+`#load-status` element lives; the caption takes over when that line is
+hidden, which is the whole time a machine is running.
+
 Audio starts with the boot click, but a browser autoplay policy can keep
 the AudioContext suspended anyway; the boot never waits for it. The
 emulator runs silent and the next click or key press unlocks the sound.
@@ -379,8 +388,9 @@ elements, and pages without them are untouched:
   a copy of it. Screenshot writes a PNG of the canvas -- exactly what
   the screen shows -- to the clipboard, falling back to downloading the
   file when the browser has no clipboard image support or refuses the
-  write (an unfocused document, an insecure origin); the status line
-  says which happened.
+  write (an unfocused document, an insecure origin); the caption over the
+  screen says which happened, since a clipboard copy has nothing else to
+  show for itself.
 - `#savestate`, `#loadstate`, `#quicksave`, `#quickload` (buttons): the
   [save-state controls](#browser-save-states) -- download a state, pick a
   state file, and the browser-resident quick slot. Always on like
