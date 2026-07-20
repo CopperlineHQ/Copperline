@@ -72,6 +72,9 @@ let df0Name = null; // what the page believes is in DF0, for bug reports
 function refreshBootButton() {
   bootBtn.disabled = !(wasm && bootRom);
   bootBtn.textContent = bootRom && bootRom.label !== 'AROS' ? 'Boot Kickstart' : 'Boot AROS';
+  // The save-state controls follow the same milestones (the module is
+  // ready, a machine is running or has just died), so they refresh here.
+  updateStateButtons();
 }
 
 // Route picked or dropped Kickstart bytes: live-swap a running machine, or
@@ -277,8 +280,12 @@ async function boot() {
     // Fit the ROM into a fresh machine before anything else: a bad image
     // must abort the boot with the page still in its pre-boot state (emu
     // stays null, so the pickers keep updating bootRom for the retry).
+    // With no ROM to fit at all, the machine keeps the placeholder WebEmu
+    // builds itself: nothing the boot button can reach (it stays disabled
+    // until a ROM exists), but a save state carries its own ROM and
+    // replaces the whole machine, so a restore can start from one.
     const machine = new WebEmu();
-    machine.load_rom(bootRom.rom, bootRom.ext ?? undefined);
+    if (bootRom) machine.load_rom(bootRom.rom, bootRom.ext ?? undefined);
 
     // A reboot after an emulator error builds a new audio stack; close the
     // previous one so it cannot keep playing alongside.
@@ -328,7 +335,9 @@ async function boot() {
     // earlier failure) would otherwise go stale into any bug report filed
     // while the machine runs.
     setLoadStatus(
-      `booted ${bootRom.label}` +
+      // A ROM-less boot is only ever a landing place for a state load,
+      // which overwrites this line the moment it lands.
+      (bootRom ? `booted ${bootRom.label}` : 'machine built, waiting for the state') +
         (df0Name ? ` - DF0: ${df0Name} (write-protected)` : ''),
     );
 
@@ -338,6 +347,7 @@ async function boot() {
     // A reboot from a paused machine must not start the new one paused.
     paused = false;
     setPauseLabel();
+    updateStateButtons();
     // Port fittings live on the machine, so a fresh one needs the pads
     // that are still plugged into the host put back.
     for (const port of padAssignments.values()) fitCd32Pad(port);
@@ -362,6 +372,31 @@ function maxFramesForQueue() {
   return queuedMs > 150 ? 0 : 5;
 }
 
+// Blit whatever the core last rendered onto the canvas. Called once per
+// tick, and again after a save state is loaded: that repaints the restored
+// screen straight away, so a load into a paused machine shows where it
+// resumes instead of the frame from before the load.
+function presentFrame() {
+  const rows = emu.present_rows();
+  if (rows === 0) return;
+  // The presentation size follows the emulated display (the cropped TV
+  // aperture for a standard PAL screen, the full overscan framebuffer
+  // otherwise), so track both dimensions every frame.
+  const width = emu.present_width();
+  if (canvas.width !== width || canvas.height !== rows) {
+    canvas.width = width;
+    canvas.height = rows;
+  }
+  // The view must be rebuilt every frame: wasm memory may grow and the
+  // present buffer may reallocate.
+  const view = new Uint8ClampedArray(
+    wasm.memory.buffer,
+    emu.present_ptr(),
+    width * rows * 4,
+  );
+  ctx2d.putImageData(new ImageData(view, width, rows), 0, 0);
+}
+
 function tick(nowMs) {
   if (!running) return;
   if (paused) return; // resumePause() restarts the loop
@@ -384,25 +419,7 @@ function tick(nowMs) {
     return;
   }
 
-  const rows = emu.present_rows();
-  if (rows > 0) {
-    // The presentation size follows the emulated display (the cropped TV
-    // aperture for a standard PAL screen, the full overscan framebuffer
-    // otherwise), so track both dimensions every frame.
-    const width = emu.present_width();
-    if (canvas.width !== width || canvas.height !== rows) {
-      canvas.width = width;
-      canvas.height = rows;
-    }
-    // The view must be rebuilt every frame: wasm memory may grow and the
-    // present buffer may reallocate.
-    const view = new Uint8ClampedArray(
-      wasm.memory.buffer,
-      emu.present_ptr(),
-      width * rows * 4,
-    );
-    ctx2d.putImageData(new ImageData(view, width, rows), 0, 0);
-  }
+  presentFrame();
 
   const audio = emu.take_audio();
   if (audio.length > 0 && audioNode) {
@@ -1458,7 +1475,271 @@ async function copyScreenshot() {
   }
 }
 
-// Build whichever of the two the shell did not provide, in one row that
+// --- save states -----------------------------------------------------------
+// The desktop's save states, with the browser's storage instead of a
+// filesystem. A state is the whole machine - RAM, ROM, chipset, CPU and the
+// inserted floppy images themselves - in the same .clstate format the
+// desktop writes, so one moves between the two in either direction.
+//
+// Two destinations, because they answer different questions. "Save state"
+// downloads the blob as a file: it survives everything, and it can be
+// shared or carried to a desktop build. Quick save keeps it in IndexedDB
+// under a single slot, which is what a visitor resuming a game actually
+// wants - one click out, one click back in, across page loads and browser
+// restarts, with nothing in the downloads folder.
+//
+// No keyboard shortcuts: every key on this page belongs to the guest (the
+// desktop's Cmd/Alt+Shift+S has no equivalent here that would not shadow an
+// Amiga key), so these are buttons only.
+
+const STATE_DB_NAME = 'copperline';
+const STATE_STORE = 'states';
+// One quick slot. A visitor wants "where I left off", not a slot manager;
+// named slots can key off the same store later without a format change.
+const QUICK_SLOT = 'quick';
+
+let quickStateInfo = null; // metadata of the stored quick state, when there is one
+
+function openStateDb() {
+  return new Promise((resolve, reject) => {
+    if (!window.indexedDB) {
+      reject(new Error('this browser has no IndexedDB'));
+      return;
+    }
+    const req = indexedDB.open(STATE_DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(STATE_STORE)) db.createObjectStore(STATE_STORE);
+    };
+    req.onsuccess = () => resolve(req.result);
+    // Private-browsing modes and blocked storage reject the open itself.
+    req.onerror = () => reject(req.error ?? new Error('IndexedDB unavailable'));
+    req.onblocked = () => reject(new Error('IndexedDB blocked by another tab'));
+  });
+}
+
+// Resolve on commit, not on the request: a put that succeeds can still lose
+// its transaction to the storage quota, and a quick save that quietly did
+// not persist is exactly the failure a visitor would discover too late.
+function stateTx(db, mode, run) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STATE_STORE, mode);
+    const req = run(tx.objectStore(STATE_STORE));
+    tx.oncomplete = () => resolve(req?.result);
+    tx.onerror = () => reject(tx.error ?? new Error('IndexedDB transaction failed'));
+    tx.onabort = () => reject(tx.error ?? new Error('IndexedDB transaction aborted'));
+  });
+}
+
+async function withStateDb(mode, run) {
+  const db = await openStateDb();
+  try {
+    return await stateTx(db, mode, run);
+  } finally {
+    db.close();
+  }
+}
+
+// Everything a state needs to describe itself in the UI. Uint8Array and Date
+// are structured-cloneable, so the record stores as it stands.
+function stateRecord(bytes) {
+  return {
+    bytes,
+    saved: new Date(),
+    emulated: emu.emulated_seconds(),
+    rom: bootRom?.label ?? 'unknown',
+    df0: df0Name,
+  };
+}
+
+function describeState(info) {
+  if (!info) return '';
+  const when = info.saved instanceof Date ? info.saved.toLocaleString() : 'unknown time';
+  return `${when} - ${info.df0 ?? 'no disk'} (${Math.round(info.emulated ?? 0)}s emulated)`;
+}
+
+// Enablement follows what each control can actually do right now: saving
+// needs a running machine, loading only needs the wasm module (it boots one
+// on demand), and quick load additionally needs something in the slot.
+function updateStateButtons() {
+  const live = Boolean(emu && running);
+  if (saveStateBtn) saveStateBtn.disabled = !live;
+  if (quickSaveBtn) quickSaveBtn.disabled = !live;
+  if (loadStateBtn) loadStateBtn.disabled = !wasm;
+  if (quickLoadBtn) {
+    quickLoadBtn.disabled = !wasm || !quickStateInfo;
+    quickLoadBtn.title = quickStateInfo
+      ? `Saved in this browser: ${describeState(quickStateInfo)}`
+      : 'No quick state saved in this browser yet';
+  }
+}
+
+// The machine a state loads into: states carry their own ROM and disks, so
+// booting first and restoring over it is enough, and a visitor can land
+// straight back in a game from a cold page load. No boot ROM is needed for
+// that - not even AROS, whose download may have failed, or a self-hosted
+// shell that serves none - because the restore replaces the whole machine
+// including its ROM. Reports whether it had to boot, so a restore that
+// then fails can put the page back rather than strand the visitor on a
+// machine they never asked to start.
+async function machineForStateLoad() {
+  if (emu && running) return { ready: true, booted: false };
+  if (!wasm) {
+    setLoadStatus('the emulator is still loading');
+    return { ready: false, booted: false };
+  }
+  await boot();
+  return { ready: Boolean(emu && running), booted: true };
+}
+
+// Undo a boot that only happened to receive a state which then would not
+// load. Without the state there is nothing to run - a ROM-less machine
+// does nothing at all - so the page returns to its pre-boot screen with
+// the failure still on the status line.
+function unbootAfterFailedStateLoad() {
+  const failure = loadStatus.textContent;
+  emu = null;
+  window.__emu = null;
+  running = false;
+  paused = false;
+  setPauseLabel();
+  overlay.style.display = '';
+  refreshBootButton();
+  setLoadStatus(failure);
+}
+
+// Restore from a blob, whatever produced it. The core leaves the running
+// machine untouched when a blob does not parse, so a bad file costs the
+// visitor nothing but the message.
+function restoreState(bytes, source) {
+  try {
+    emu.load_state(bytes);
+  } catch (e) {
+    setLoadStatus(`${source} failed to load: ${e.message ?? e}`);
+    return false;
+  }
+  // Host-side settings are not part of the machine, so the page's own
+  // choices are re-applied over the restored one; the state's idea of them
+  // came from whatever session saved it.
+  emu.set_volume_percent(Number($('vol').value));
+  if (floppySoundsToggle) emu.set_floppy_sounds(floppySoundsToggle.checked);
+  else if (configFloppySounds !== null) emu.set_floppy_sounds(configFloppySounds);
+  if (floppySpeed !== null) emu.set_floppy_speed(floppySpeed);
+  // Port fittings live on the machine, so the pads plugged into the host go
+  // back into the restored one, exactly as after a boot. Port 1 is the
+  // mouse socket first: a state saved while a pad occupied it would
+  // otherwise restore a stick nothing drives, and the pointer would be
+  // dead until the visitor plugged that pad back in.
+  if (!new Set(padAssignments.values()).has(1)) emu.set_port_device(1, 'mouse');
+  for (const port of padAssignments.values()) fitCd32Pad(port);
+  if (joyMode === 'cd32') fitCd32Pad(2);
+  // The disk came back inside the state; believe the machine, not the page.
+  df0Name = emu.disk_name(0) ?? null;
+  lastFddTrack = null;
+  updateStatusDisks();
+  // Paint the restored screen now: a load into a paused machine steps no
+  // frames, so nothing else would.
+  presentFrame();
+  setLoadStatus(
+    `state loaded from ${source}` + (df0Name ? ` - DF0: ${df0Name}` : ''),
+  );
+  return true;
+}
+
+// Download the state as a file, the shareable, permanent form.
+function downloadState() {
+  if (!emu || !running) return;
+  try {
+    const blob = new Blob([emu.save_state()], { type: 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `copperline-${new Date().toISOString().replace(/[:.]/g, '-')}.clstate`;
+    a.click();
+    // Revoking synchronously can cancel the download that click just
+    // started; let the current task finish first (as for screenshots).
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    setLoadStatus('save state downloaded');
+  } catch (e) {
+    setLoadStatus(`save state failed: ${e.message ?? e}`);
+  }
+}
+
+async function loadStateFromFile(file) {
+  if (!file) return;
+  let bytes;
+  try {
+    bytes = new Uint8Array(await file.arrayBuffer());
+  } catch (e) {
+    setLoadStatus(`${file.name}: could not be read (${e.message ?? e})`);
+    return;
+  }
+  const machine = await machineForStateLoad();
+  if (!machine.ready) return;
+  if (!restoreState(bytes, file.name) && machine.booted) unbootAfterFailedStateLoad();
+}
+
+async function quickSaveState() {
+  if (!emu || !running) return;
+  let record;
+  try {
+    record = stateRecord(emu.save_state());
+  } catch (e) {
+    setLoadStatus(`quick save failed: ${e.message ?? e}`);
+    return;
+  }
+  try {
+    await withStateDb('readwrite', (store) => store.put(record, QUICK_SLOT));
+  } catch (e) {
+    // Quota is the failure worth naming: states are around a megabyte and a
+    // browser low on storage refuses the write rather than evicting.
+    const hint = e.name === 'QuotaExceededError' ? ' - browser storage is full' : '';
+    setLoadStatus(`quick save failed: ${e.message ?? e}${hint}`);
+    return;
+  }
+  const { bytes, ...info } = record;
+  quickStateInfo = info;
+  updateStateButtons();
+  setLoadStatus(`quick state saved in this browser (${Math.round(bytes.length / 1024)} KB)`);
+}
+
+async function quickLoadState() {
+  let record;
+  try {
+    record = await withStateDb('readonly', (store) => store.get(QUICK_SLOT));
+  } catch (e) {
+    setLoadStatus(`quick load failed: ${e.message ?? e}`);
+    return;
+  }
+  if (!record?.bytes) {
+    setLoadStatus('no quick state saved in this browser');
+    quickStateInfo = null;
+    updateStateButtons();
+    return;
+  }
+  const machine = await machineForStateLoad();
+  if (!machine.ready) return;
+  if (!restoreState(record.bytes, 'this browser') && machine.booted) {
+    unbootAfterFailedStateLoad();
+  }
+}
+
+// What the quick slot holds, for the button's enabled state and tooltip.
+// A browser that refuses storage simply leaves quick load disabled.
+async function probeQuickState() {
+  try {
+    const record = await withStateDb('readonly', (store) => store.get(QUICK_SLOT));
+    if (record?.bytes) {
+      const { bytes, ...info } = record;
+      quickStateInfo = info;
+    }
+  } catch {
+    quickStateInfo = null;
+  }
+  updateStateButtons();
+}
+
+// Build whichever of the controls the shell did not provide, in one row that
 // matches the self-inserted floppy-speed control's styling. Listeners are
 // attached afterwards, once, so a shell-provided and a self-built button
 // take exactly the same path.
@@ -1466,6 +1747,10 @@ function buildMachineControls() {
   const missing = [
     ['pause', 'Pause'],
     ['screenshot', 'Screenshot'],
+    ['savestate', 'Save state'],
+    ['loadstate', 'Load state...'],
+    ['quicksave', 'Quick save'],
+    ['quickload', 'Quick load'],
   ].filter(([id]) => !$(id));
   if (missing.length === 0) return;
   const row = document.createElement('div');
@@ -1488,6 +1773,32 @@ const pauseBtn = $('pause');
 const screenshotBtn = $('screenshot');
 pauseBtn?.addEventListener('click', togglePause);
 screenshotBtn?.addEventListener('click', copyScreenshot);
+
+const saveStateBtn = $('savestate');
+const loadStateBtn = $('loadstate');
+const quickSaveBtn = $('quicksave');
+const quickLoadBtn = $('quickload');
+saveStateBtn?.addEventListener('click', downloadState);
+quickSaveBtn?.addEventListener('click', quickSaveState);
+quickLoadBtn?.addEventListener('click', quickLoadState);
+// The file picker is built here rather than expected from the shell, so
+// #loadstate is a plain button like the rest of the row wherever it lives.
+if (loadStateBtn) {
+  const picker = document.createElement('input');
+  picker.type = 'file';
+  picker.accept = '.clstate';
+  picker.hidden = true;
+  document.body.appendChild(picker);
+  picker.addEventListener('change', () => {
+    const file = picker.files?.[0];
+    // Clear the selection so picking the same file twice fires again.
+    picker.value = '';
+    loadStateFromFile(file);
+  });
+  loadStateBtn.addEventListener('click', () => picker.click());
+}
+updateStateButtons();
+probeQuickState();
 
 // Optional in the page shell: a checkbox #floppy-sounds toggles the
 // synthesized drive sounds (motor hum, head-step clicks, read hiss).
@@ -1879,7 +2190,7 @@ function ensureDropHint() {
     'border:2px dashed rgba(255,255,255,0.5);' +
     'color:rgba(255,255,255,0.9);padding:1rem;' +
     'font:600 1rem "IBM Plex Mono",ui-monospace,monospace;';
-  dropHint.textContent = 'Drop: disk image -> DF0, .rom -> Kickstart';
+  dropHint.textContent = 'Drop: disk image -> DF0, .rom -> Kickstart, .clstate -> restore';
   shell.appendChild(dropHint);
   return dropHint;
 }
@@ -1894,6 +2205,14 @@ async function handleDroppedFiles(files) {
   const oversize = list.find((f) => f.size > DISK_URL_MAX_BYTES);
   if (oversize) {
     setLoadStatus(`${oversize.name}: file too large`);
+    return;
+  }
+  // A dropped save state replaces the whole machine, so it takes the drop
+  // on its own: a ROM or disk alongside it would be overwritten by the
+  // state's own ROM and disks anyway.
+  const state = list.find((f) => /\.clstate$/i.test(f.name));
+  if (state) {
+    await loadStateFromFile(state);
     return;
   }
   // One drive and one ROM socket: the first of each kind wins, extras

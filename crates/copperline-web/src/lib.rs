@@ -644,6 +644,42 @@ impl WebEmu {
         self.emu.bus().cia_b.port_a_pins() & 0x80 == 0
     }
 
+    /// Snapshot the whole emulated machine (RAM, ROM, chipset, CPU, the
+    /// floppy images themselves) into a `.clstate` blob, the same format the
+    /// desktop builds write, so a state saved here loads there and back. The
+    /// page decides where it goes: a download, IndexedDB, anywhere it can
+    /// keep bytes. Call between frames -- outside `run`, which every
+    /// JS-facing method is by construction.
+    pub fn save_state(&self) -> Result<Vec<u8>, JsValue> {
+        self.emu.save_state_bytes().map_err(js_err)
+    }
+
+    /// Restore a state produced by `save_state` (or by a desktop build).
+    /// The machine rebuilds from the blob, so the fitted ROM and inserted
+    /// disks come back with it. A blob that is not a readable state of this
+    /// build's format version throws and leaves the running machine
+    /// untouched, so a page can offer a load without risking the session.
+    ///
+    /// Host-side settings do not travel with the state (they are not part of
+    /// the machine): a page that keeps its own volume, drive-sound or floppy
+    /// speed choices should re-apply them after a load.
+    pub fn load_state(&mut self, blob: &[u8]) -> Result<(), JsValue> {
+        self.emu.load_state_bytes(blob).map_err(js_err)?;
+        // Emulated time jumps to the state's timeline, so the pacer must
+        // start over from now rather than chase the gap, and motion buffered
+        // against the pre-load machine must not replay into it.
+        self.anchor = None;
+        self.mouse_remainder = (0.0, 0.0);
+        self.mouse_pending = (0, 0);
+        // The restored frame counter may match or precede the last one
+        // presented; forget it so the next render is unconditional, and
+        // paint the restored screen now so a paused page shows it without
+        // stepping the machine.
+        self.last_rendered_frame = None;
+        self.render_completed_frame();
+        Ok(())
+    }
+
     /// Cold reset (power cycle), keeping the fitted ROM and inserted disks.
     pub fn reset(&mut self) -> Result<(), JsValue> {
         self.emu.power_on_reset().map_err(js_err)?;
