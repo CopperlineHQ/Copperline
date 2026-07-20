@@ -425,6 +425,23 @@ document.addEventListener('visibilitychange', () => {
 // the telnet layer, for gateways to non-telnet services) are optional too.
 // Pages without the elements are untouched - the pump still drains the
 // guest's bounded serial buffer every frame, it just goes nowhere.
+//
+// Telnet-mode connections follow the guest's DTR line the way a modem
+// follows its terminal. Dialling before the terminal is up would scroll the
+// BBS greeting into a UART nobody is reading and leak boot-ROM chatter to
+// the BBS as phantom keypresses (a stray newline at a login prompt starts
+// the new-user flow), so Connect defers the dial until the terminal has
+// opened the serial port, and a live session hangs up when the guest drops
+// the line (terminal exit, reboot, power cycle) - then re-arms, so the
+// next boot of the terminal reconnects by itself. Raw mode is ungated, for
+// byte services and guests that never drive CIA-B DTR.
+//
+// The dial waits for the line to be READY (DTR asserted) and QUIET (no
+// guest transmit) continuously for a guard period, not for a mere DTR
+// edge: AROS raises DTR for a couple of seconds during early boot while
+// its kernel debug output streams to the serial port, and dialling into
+// that window is exactly the reported failure. The debug burst fails both
+// conditions; a terminal holds DTR silently and passes.
 
 const serialUrlInput = $('serial-url');
 const serialConnectBtn = $('serial-connect');
@@ -433,6 +450,21 @@ const serialRawToggle = $('serial-raw');
 
 let serialWs = null;
 let serialTelnet = null;
+// Connect clicked before the guest's line was ready: dial once it is.
+let serialWaitingDtr = false;
+// The open session is DTR-gated (telnet mode): drop of the line hangs up.
+let serialDtrGated = false;
+// Emulated-time instant the guest's line last became ready-and-quiet;
+// pushed forward by every disqualifier (DTR down, guest transmit) the
+// pump sees. Emulated seconds, not wall time: in a throttled background
+// tab the machine runs far slower than the wall clock, and a wall-time
+// guard would fire inside a stretched boot transient.
+let serialLineReadySince = 0;
+// The line must hold ready-and-quiet this long (emulated seconds) before
+// a deferred dial fires. The AROS boot-debug burst holds DTR for ~1.75s
+// while transmitting; 3s of held silence clears it with margin and still
+// feels immediate once a terminal is really up.
+const SERIAL_DIAL_GUARD_EMU_S = 3.0;
 // Inbound chunks the guest's UART has not had room for yet. The UART
 // consumes at the emulated baud rate, so a fast sender (a file download)
 // backlogs here rather than ballooning inside the wasm heap.
@@ -441,11 +473,33 @@ let serialRxQueue = [];
 // the queue above absorbs the difference, a frame at a time.
 const SERIAL_BACKLOG_LIMIT = 32768;
 
+// The guest's view of the serial DTR line. A powered-off machine has the
+// line down; a wasm bundle older than serial_dtr() reports it up, which
+// disengages the gate (see serialLineSettled) rather than waiting forever.
+function guestDtr() {
+  if (!emu) return false;
+  if (typeof emu.serial_dtr !== 'function') return true;
+  return emu.serial_dtr();
+}
+
+function emuSeconds() {
+  return emu && typeof emu.emulated_seconds === 'function' ? emu.emulated_seconds() : 0;
+}
+
+// Ready-and-quiet for the full guard period, judged from what the pump
+// has observed. Only meaningful while the machine is emulating, which is
+// when the pump keeps serialLineReadySince honest.
+function serialLineSettled() {
+  if (!emu) return false;
+  if (typeof emu.serial_dtr !== 'function') return true; // pre-gate wasm
+  return emu.serial_dtr() && emuSeconds() - serialLineReadySince >= SERIAL_DIAL_GUARD_EMU_S;
+}
+
 function setSerialStatus(text) {
   if (serialStatus) serialStatus.textContent = text;
 }
 
-function serialDisconnect(status) {
+function serialTeardown() {
   if (serialWs) {
     // Neuter the handlers first: close() fires onclose asynchronously, and
     // a stale handler would clobber the status of a connection made later.
@@ -454,27 +508,47 @@ function serialDisconnect(status) {
     serialWs = null;
   }
   serialTelnet = null;
+  serialDtrGated = false;
   serialRxQueue = [];
+}
+
+function serialDisconnect(status) {
+  serialTeardown();
+  serialWaitingDtr = false;
   if (serialConnectBtn) serialConnectBtn.textContent = 'Connect';
   setSerialStatus(status);
 }
 
-function serialConnect() {
+// DTR dropped mid-session: hang up like a modem losing its terminal, but
+// keep the visitor's intent armed - when the line settles again (the
+// terminal is back after a reboot) the dial repeats by itself.
+function serialHangup() {
+  serialTeardown();
+  serialWaitingDtr = true;
+  if (serialConnectBtn) serialConnectBtn.textContent = 'Cancel';
+  setSerialStatus('terminal closed the serial port - reconnects when it is back...');
+}
+
+// Open the socket now, with whatever is in the URL box. Reached directly
+// from a Connect click when the guest is ready (or in raw mode), or from
+// the pump when a deferred connect sees DTR rise.
+function serialOpen() {
   const url = serialUrlInput?.value?.trim();
   if (!url) {
-    setSerialStatus('enter a ws:// or wss:// gateway URL');
+    serialDisconnect('enter a ws:// or wss:// gateway URL');
     return;
   }
   let ws;
   try {
     ws = new WebSocket(url);
   } catch (e) {
-    setSerialStatus(`bad URL: ${e.message ?? e}`);
+    serialDisconnect(`bad URL: ${e.message ?? e}`);
     return;
   }
   ws.binaryType = 'arraybuffer';
   serialWs = ws;
   serialTelnet = serialRawToggle?.checked ? null : new TelnetSession();
+  serialDtrGated = serialTelnet !== null;
   serialRxQueue = [];
   if (serialConnectBtn) serialConnectBtn.textContent = 'Disconnect';
   setSerialStatus('connecting...');
@@ -492,9 +566,28 @@ function serialConnect() {
   };
 }
 
+function serialConnect() {
+  const url = serialUrlInput?.value?.trim();
+  if (!url) {
+    setSerialStatus('enter a ws:// or wss:// gateway URL');
+    return;
+  }
+  if (!serialRawToggle?.checked && !serialLineSettled()) {
+    // Telnet mode with no settled terminal yet: arm the deferred dial
+    // instead of connecting into the void. The pump completes it once
+    // the guest's line has been ready and quiet for the guard period.
+    serialWaitingDtr = true;
+    if (serialConnectBtn) serialConnectBtn.textContent = 'Cancel';
+    setSerialStatus('waiting for the terminal - boot the terminal disk, connects when it is ready...');
+    return;
+  }
+  serialOpen();
+}
+
 if (serialConnectBtn) {
   serialConnectBtn.addEventListener('click', () => {
-    if (serialWs) serialDisconnect('disconnected');
+    if (serialWaitingDtr) serialDisconnect('cancelled');
+    else if (serialWs) serialDisconnect('disconnected');
     else serialConnect();
   });
 }
@@ -505,6 +598,26 @@ function pumpSerial() {
   // the guest's bounded output buffer (which also carries boot-ROM debug
   // chatter) never overflows into dropped bytes mid-session.
   const out = emu.serial_take();
+  // Any disqualifier - line down, guest transmit, or the emulated clock
+  // rewinding (a power cycle) - restarts the ready-and-quiet guard clock.
+  // Checked here rather than on a timer because the line can only change
+  // while the machine is emulating, and emulation is what drives this
+  // pump.
+  const nowEmu = emuSeconds();
+  if (!guestDtr() || out.length || nowEmu < serialLineReadySince) {
+    serialLineReadySince = nowEmu;
+  }
+  // Deferred dial: the guest's line has settled, so connect now.
+  if (serialWaitingDtr && serialLineSettled()) {
+    serialWaitingDtr = false;
+    serialOpen();
+  }
+  // Modem-style hangup (and automatic re-arm): the guest dropped DTR, so
+  // the session ends before boot chatter can reach the far end as
+  // phantom input.
+  if (serialDtrGated && serialWs && !guestDtr()) {
+    serialHangup();
+  }
   if (out.length && serialWs?.readyState === WebSocket.OPEN) {
     serialWs.send(serialTelnet ? serialTelnet.send(out) : out);
   }

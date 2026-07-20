@@ -538,6 +538,17 @@ impl WebEmu {
         self.serial.input_backlog().min(u32::MAX as usize) as u32
     }
 
+    /// Whether the guest is asserting the serial port's DTR line (CIA-B PA7
+    /// driven low). A terminal raises DTR when it opens the port --
+    /// serial.device does it on OpenDevice, hardware-level terminals set the
+    /// CIA bit themselves -- and drops it on close and at reset, so this is
+    /// the "guest terminal is ready" signal a modem would key off. The page
+    /// bridge uses it to defer dialling until the terminal can actually
+    /// display the far end's greeting.
+    pub fn serial_dtr(&self) -> bool {
+        self.emu.bus().cia_b.port_a_pins() & 0x80 == 0
+    }
+
     /// Cold reset (power cycle), keeping the fitted ROM and inserted disks.
     pub fn reset(&mut self) -> Result<(), JsValue> {
         self.emu.power_on_reset().map_err(js_err)?;

@@ -229,8 +229,8 @@ the selected drive's head or `undefined` when no drive is selected (latch
 the last value so a counter does not flicker), and `drive_connected(n)` /
 `disk_name(n)` describe DF0-DF3 -- a `disk_name` of `undefined` means the
 drive is empty. `serial_send(bytes)`,
-`serial_take()` and `serial_input_backlog()` bridge Paula's serial port to
-whatever byte stream the page likes (see
+`serial_take()`, `serial_input_backlog()` and `serial_dtr()` bridge
+Paula's serial port to whatever byte stream the page likes (see
 [the serial bridge section](#browser-serial-bridge)). The presentation pointer is only
 valid until the next `run` call -- rebuild the typed-array view every frame,
 because wasm memory can grow. The presentation *size* is dynamic too:
@@ -312,6 +312,12 @@ telnet BBS, with a terminal program running on the guest. Three calls:
   also carries boot-ROM/OS debug output, which a page may simply log.
 - `serial_input_backlog()` reports the bytes `serial_send` has queued that
   the UART has not yet consumed -- the flow-control signal.
+- `serial_dtr()` reports whether the guest is asserting the serial port's
+  DTR line (CIA-B PA7 driven low). A terminal raises DTR when it opens the
+  port -- serial.device does it on OpenDevice, hardware-level terminals
+  set the CIA bit themselves -- and drops it on exit and at reset, so this
+  is the "a terminal is actually listening" signal, exactly what a real
+  modem keys off.
 
 Browsers cannot open raw TCP, so the page's transport is a WebSocket to a
 gateway that forwards to the real service --
@@ -332,6 +338,26 @@ BBS adds four elements and inherits the whole flow. The guest side needs a
 terminal program on a bootable disk (set to serial.device, 8N1 -- the
 bridge carries whatever baud the guest picks), inserted like any other
 floppy.
+
+In telnet mode the connection follows the guest's DTR line the way a
+modem follows its terminal. Clicking Connect before the terminal is up
+would scroll the BBS greeting into a UART nobody is reading and forward
+boot-ROM chatter to the BBS as phantom keypresses (a stray newline at a
+login prompt walks straight into the new-user flow), so Connect defers
+the dial until the guest's line has *settled*: DTR asserted and no guest
+transmit, both held for a three-second guard period measured in emulated
+time (so a throttled background tab cannot shrink it). The guard matters
+because AROS raises DTR for a couple of seconds during early boot while
+its kernel debug output streams to the serial port; that burst fails
+both conditions, while a real terminal holds DTR silently and passes.
+While deferred, the status line shows "waiting for the terminal" and the
+button cancels. A connected session hangs up when the guest drops DTR
+(terminal exit, reboot, power cycle) and re-arms the deferred dial, so
+rebooting the terminal disk reconnects by itself. Visitors can therefore
+click Connect at any point -- before booting, after booting, mid-session
+before a reboot -- and the dial always lands on a listening terminal.
+Raw mode is ungated for byte services and guest programs that never
+drive the CIA-B DTR bit.
 
 On the desktop build the equivalent is `[serial] mode = "tcp-connect"`
 plus `connect = "host:port"` (or `--serial-connect host:port`), which
