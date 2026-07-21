@@ -1457,12 +1457,13 @@ impl FilesysUnit {
 
 /// The guest-memory view the packet engine works through while a doorbell is
 /// serviced: the board's own window (`image`, taken out of the device for the
-/// duration), all RAM the CPU can see (chip, slow, and every RAM-backed Zorro
-/// board -- which is where fast RAM lives), and the ROMs read-only (the
-/// romtags cull reads resident tags in Kickstart). Deliberately wider than
-/// the 24-bit Zorro II DMA decode a real bus-master gets: DosPackets and I/O
-/// buffers live wherever exec allocated them, and this board is paravirtual,
-/// not a DMA engine.
+/// duration), all RAM the CPU can see (chip, slow, Ramsey motherboard and
+/// CPU-slot accelerator fast RAM, and every RAM-backed Zorro board), and the
+/// ROMs read-only (the romtags cull reads resident tags in Kickstart).
+/// Deliberately wider than the 24-bit Zorro II DMA decode a real bus-master
+/// gets: DosPackets and I/O buffers live wherever exec allocated them -- on a
+/// big-box machine that is the 32-bit motherboard RAM -- and this board is
+/// paravirtual, not a DMA engine.
 struct GuestBus<'a> {
     base: u32,
     image: Vec<u8>,
@@ -1482,6 +1483,14 @@ impl GuestBus<'_> {
         let slow = crate::memory::SLOW_RAM_BASE as usize;
         if a >= slow && a < slow + self.mem.slow_ram.len() {
             return Some(&mut self.mem.slow_ram[a - slow]);
+        }
+        let mb = self.mem.mb_ram_base() as usize;
+        if a >= mb && a < mb + self.mem.mb_ram.len() {
+            return Some(&mut self.mem.mb_ram[a - mb]);
+        }
+        let accel = crate::memory::ACCEL_RAM_BASE as usize;
+        if a >= accel && a < accel + self.mem.accel_ram.len() {
+            return Some(&mut self.mem.accel_ram[a - accel]);
         }
         if let Some((board, off)) = self.mem.zorro.region_at(addr, 1) {
             return Some(&mut self.mem.zorro.board_ram_mut(board)[off]);
@@ -2301,6 +2310,75 @@ mod tests {
         assert_eq!(board.units[0].port, None);
 
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The romtags cull walks ExecBase's ResModules list through the
+    /// GuestBus, and on an A3000/A4000 exec builds that list in the best RAM
+    /// it has: Ramsey motherboard fast RAM. The bus must reach the
+    /// motherboard and CPU-slot banks like any other CPU-visible RAM;
+    /// without them every read returns 0, the walk stops at the first slot,
+    /// and the boot logs "0 ROM scsi.device resident(s) culled".
+    #[test]
+    fn guest_bus_reaches_motherboard_and_cpu_slot_ram() {
+        let mut mem = Memory {
+            chip_ram: vec![0u8; 0x1000],
+            slow_ram: Vec::new(),
+            mb_ram: Vec::new(),
+            accel_ram: Vec::new(),
+            rom: vec![0u8; crate::memory::ROM_SIZE],
+            overlay: false,
+            zorro: crate::zorro::ZorroChain::default(),
+            extended_rom: Vec::new(),
+            extended_rom_base: 0,
+            wcs: Vec::new(),
+            wcs_write_protected: false,
+        };
+        mem.fit_mb_ram(1024 * 1024);
+        mem.fit_accel_ram(1024 * 1024);
+
+        // A scsi.device resident tag in Kickstart ROM (struct Resident:
+        // rtc_MatchWord, rt_MatchTag, rt_Type = NT_DEVICE, rt_Name).
+        let tag = 0x00F8_590Cu32;
+        let name = tag + 32;
+        let at = (tag - crate::memory::ROM_BASE as u32) as usize;
+        mem.rom[at..at + 2].copy_from_slice(&0x4AFCu16.to_be_bytes());
+        mem.rom[at + 2..at + 6].copy_from_slice(&tag.to_be_bytes());
+        mem.rom[at + 12] = 3;
+        mem.rom[at + 14..at + 18].copy_from_slice(&name.to_be_bytes());
+        mem.rom[at + 32..at + 44].copy_from_slice(b"scsi.device\0");
+
+        // ExecBase in chip RAM, its ResModules list in motherboard RAM.
+        let exec_base = 0x400u32;
+        let list = mem.mb_ram_base() as u32 + 0x10;
+        mem.chip_ram[4..8].copy_from_slice(&exec_base.to_be_bytes());
+        let rm = (exec_base + 300) as usize; // ExecBase.ResModules
+        mem.chip_ram[rm..rm + 4].copy_from_slice(&list.to_be_bytes());
+        mem.mb_ram[0x10..0x14].copy_from_slice(&tag.to_be_bytes());
+        mem.mb_ram[0x14..0x18].copy_from_slice(&0u32.to_be_bytes());
+
+        let mut bus = GuestBus {
+            base: 0x00E9_0000,
+            image: Vec::new(),
+            mem: &mut mem,
+        };
+        assert_eq!(crate::romtags::cull_rom_device(&mut bus, "scsi.device"), 1);
+        // The slot in motherboard RAM was rewritten into a jump entry
+        // (bit 31 | next slot), unlinking the tag.
+        assert_eq!(
+            &mem.mb_ram[0x10..0x14],
+            &(0x8000_0000u32 | (list + 4)).to_be_bytes()
+        );
+
+        // CPU-slot accelerator RAM is reachable the same way.
+        let accel = crate::memory::ACCEL_RAM_BASE as u32;
+        let mut bus = GuestBus {
+            base: 0x00E9_0000,
+            image: Vec::new(),
+            mem: &mut mem,
+        };
+        bus.write_long(accel + 8, 0xDEAD_BEEF);
+        assert_eq!(bus.read_long(accel + 8), 0xDEAD_BEEF);
+        assert_eq!(&mem.accel_ram[8..12], &0xDEAD_BEEFu32.to_be_bytes());
     }
 
     #[test]
