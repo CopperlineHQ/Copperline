@@ -1976,6 +1976,15 @@ pub fn build_machine(
     } else {
         Memory::load(&cfg.rom_path, cfg.chip_ram_bytes, cfg.slow_ram_bytes, zorro)?
     };
+    if cfg.mb_ram_bytes > 0 {
+        mem.fit_mb_ram(cfg.mb_ram_bytes);
+        info!(
+            "ramsey: {}K motherboard fast RAM at {:#010X}-{:#010X}",
+            cfg.mb_ram_bytes / 1024,
+            mem.mb_ram_base(),
+            crate::memory::MB_RAM_TOP - 1
+        );
+    }
     if let Some(path) = &cfg.extended_rom_path {
         if rom_optional && !path.is_file() {
             // As with the main ROM above, the save state carries the extended
@@ -2090,9 +2099,11 @@ pub fn build_machine(
         }
     }
     if let Some(revision) = cfg.mem_controller.ramsey_revision() {
-        // TODO(codewiz): pass the real bank size once motherboard fast RAM
-        // exists; until then Ramsey describes the stock DRAM for the part.
-        let bank_bytes = revision.stock_bank_bytes();
+        // Seed the control register with the DRAM geometry backing the fitted
+        // motherboard RAM (stock geometry when none is fitted), so Kickstart's
+        // sizing probe and the diagnostic tools read a description matching
+        // the RAM that answers.
+        let bank_bytes = revision.bank_bytes_for(cfg.mb_ram_bytes);
         bus.attach_ramsey(crate::ramsey::Ramsey::new(revision, bank_bytes));
     }
     // Gary and Ramsey share one address decode -- Gary owns byte lanes 0-2 of
@@ -2551,6 +2562,7 @@ mod tests {
             crate::memory::Memory {
                 chip_ram: vec![0u8; 512 * 1024],
                 slow_ram: Vec::new(),
+                mb_ram: Vec::new(),
                 rom,
                 overlay: false,
                 zorro: crate::zorro::ZorroChain::default(),
@@ -2606,6 +2618,7 @@ mod tests {
             crate::memory::Memory {
                 chip_ram,
                 slow_ram: Vec::new(),
+                mb_ram: Vec::new(),
                 rom,
                 overlay: false,
                 zorro: crate::zorro::ZorroChain::default(),
@@ -2661,6 +2674,7 @@ mod tests {
             crate::memory::Memory {
                 chip_ram,
                 slow_ram: Vec::new(),
+                mb_ram: Vec::new(),
                 rom,
                 overlay: false,
                 zorro: crate::zorro::ZorroChain::default(),
@@ -2823,6 +2837,7 @@ mod tests {
             crate::memory::Memory {
                 chip_ram,
                 slow_ram: Vec::new(),
+                mb_ram: Vec::new(),
                 rom,
                 overlay: false,
                 zorro: crate::zorro::ZorroChain::default(),

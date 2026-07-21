@@ -182,6 +182,14 @@ slow = "512K"
 # 64K to 1G.
 # z3 = "16M"
 
+# Ramsey-controlled motherboard fast RAM (A3000/A4000): 32-bit local RAM
+# ending at $08000000 and growing downward, sized by Kickstart's own
+# probe rather than autoconfig. Needs a Ramsey memory controller (the
+# A3000/A4000 profiles fit one, and 4M of this RAM, by default) and a
+# 32-bit CPU. Must fill whole Ramsey banks: 1M-4M in 1M steps, or
+# 8M/12M/16M. Set to 0 to remove it.
+# motherboard = "16M"
+
 
 # Additional Zorro boards described by TOML metadata files, configured
 # in file order after the built-in [memory] fast/z3 boards. The metadata

@@ -121,7 +121,10 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //  34: the Z3660 RTG board was appended to the BoardDevice enum; a state
 //      holding one cannot be read by a build without the variant, so the
 //      shape change bumps the version
-pub const STATE_VERSION: u32 = 34;
+//  35: Memory gained the Ramsey-controlled motherboard fast RAM bank
+//      (mb_ram, ending at $08000000) and MachineDescriptor its size
+//      (mb_ram_bytes)
+pub const STATE_VERSION: u32 = 35;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {
@@ -232,6 +235,7 @@ mod tests {
             Memory {
                 chip_ram: vec![0u8; 512 * 1024],
                 slow_ram: Vec::new(),
+                mb_ram: Vec::new(),
                 rom,
                 overlay: false,
                 zorro: ZorroChain::default(),
@@ -323,6 +327,7 @@ mod tests {
             Memory {
                 chip_ram,
                 slow_ram: Vec::new(),
+                mb_ram: Vec::new(),
                 rom: vec![0u8; ROM_SIZE],
                 overlay: false,
                 zorro: ZorroChain::default(),
@@ -569,6 +574,7 @@ mod tests {
             chip_ram_bytes: 2 * 1024 * 1024,
             fast_ram_bytes: 8 * 1024 * 1024,
             slow_ram_bytes: 0,
+            mb_ram_bytes: 4 * 1024 * 1024,
             chipset: crate::config::Chipset::Aga,
             video_standard: crate::chipset::agnus::VideoStandard::Ntsc,
             machine: Some(crate::config::MachineModel::A1200),

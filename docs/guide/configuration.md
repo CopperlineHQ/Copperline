@@ -43,6 +43,7 @@ range checks as the equivalent TOML fields:
 | `--chip SIZE` | `[memory] chip` | `512K`, `1M`, `2M`, ... |
 | `--fast SIZE` | `[memory] fast` | `0`, `1M`, `4M`, `8M`, ... |
 | `--slow SIZE` | `[memory] slow` | `0`, up to `512K` |
+| `--motherboard SIZE` | `[memory] motherboard` | Ramsey RAM (A3000/A4000): `0`, `1M`..`4M`, `8M`, `12M`, `16M` |
 | `--floppy-drives COUNT` | `[floppy] drives` | `1` to `4` wired drives (`DF0:` plus external drives) |
 | `--floppy-speed PERCENT` | `[floppy] speed` | `100` (real), `200`, `400`, `800`, or `0` (turbo) |
 | `--joystick MODE` | `[input] joystick` | `gamepad` (default), `keyboard` |
@@ -178,8 +179,8 @@ turns the driver back on automatically (it is the boot path for those
 drives), and setting the flag explicitly wins in either direction. The ROM
 file itself is never modified.
 
-Motherboard fast RAM is not emulated on either; use `[memory] z3` instead,
-which the OS is equally happy with.
+Both profiles fit their stock 4M of Ramsey-controlled motherboard fast RAM;
+`[memory] motherboard` resizes it up to 16M (see the `[memory]` section).
 
 `mem_controller` is normally left to the profile. It is broken out because
 Ramsey's registers collide with nothing else, so it can be fitted to
@@ -311,10 +312,11 @@ clock_mhz = 14.0    # optional; defaults to the model's stock speed
 
 ```toml
 [memory]
-chip = "512K"   # OCS max 512K; ECS/AGA max 2M
-fast = "0"      # Zorro II fast RAM at $200000: 64K..8M board sizes
-slow = "512K"   # A500 trapdoor RAM at $C00000: 0 or up to 512K
-z3   = "0"      # Zorro III RAM (needs a 32-bit CPU): 64K..1G, power of two
+chip = "512K"        # OCS max 512K; ECS/AGA max 2M
+fast = "0"           # Zorro II fast RAM at $200000: 64K..8M board sizes
+slow = "512K"        # A500 trapdoor RAM at $C00000: 0 or up to 512K
+motherboard = "0"    # Ramsey motherboard RAM (A3000/A4000): up to 16M
+z3   = "0"           # Zorro III RAM (needs a 32-bit CPU): 64K..1G, power of two
 ```
 
 Sizes accept `K`/`KB`/`M`/`MB` (and `G`/`GB` for Zorro III) suffixes or
@@ -327,6 +329,13 @@ plain byte counts, and must be multiples of 4 KiB.
   4M, or 8M.
 - **Slow RAM** ($C00000 "ranger" RAM) is arbitrated on the chip bus through
   Agnus exactly like chip RAM -- it is slow in the authentic way.
+- **Motherboard RAM** is the 32-bit local memory Ramsey drives on the
+  A3000/A4000: it ends at `$08000000` and grows downward (16M reaches
+  `$07000000`), and Kickstart sizes it with its own probe -- no autoconfig
+  involved. It needs a Ramsey (`[machine] mem_controller`, fitted by the
+  A3000/A4000 profiles, which also fit their stock 4M of this RAM by
+  default) and a 32-bit CPU, and must fill whole Ramsey banks: 1M-4M in
+  1M steps, or 8M, 12M, 16M. Set `motherboard = "0"` to remove it.
 - **Z3 RAM** requires a 68020/68030/68040/68060 (a 24-bit bus cannot reach it);
   Kickstart assigns its base address, usually `$40000000`.
 

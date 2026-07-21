@@ -59,6 +59,12 @@ pub struct Config {
     pub chip_ram_bytes: usize,
     pub fast_ram_bytes: usize,
     pub slow_ram_bytes: usize,
+    /// Ramsey-controlled motherboard fast RAM (`[memory] motherboard`):
+    /// 32-bit local RAM ending at $08000000 and growing downward, sized by
+    /// Kickstart's own probe rather than autoconfig. Needs a Ramsey
+    /// ([`MemController`]) and a CPU with a 32-bit address bus. The
+    /// A3000/A4000 profiles fit 4 MiB by default.
+    pub mb_ram_bytes: usize,
     /// Zorro III autoconfig RAM (`[memory] z3`). Needs a CPU with a 32-bit
     /// address bus (68020/030/040; not the 24-bit 68000/68EC020).
     pub z3_ram_bytes: usize,
@@ -820,14 +826,13 @@ pub enum MachineModel {
     /// stock chip RAM, no trapdoor slow RAM, no RTC.
     A1000,
     /// A3000: ECS, 68030 at 25 MHz, 2 MB chip RAM, a Ramsey-04 memory
-    /// controller and the battery-backed MSM6242 clock. No Gayle -- the
-    /// big-box machines carry Gary -- and no slow RAM. Motherboard fast RAM is
-    /// not emulated; the OS is happy taking its fast RAM from the Zorro III
-    /// board instead.
+    /// controller with the stock 4 MB of motherboard fast RAM
+    /// (`[memory] motherboard` resizes it), and the battery-backed MSM6242
+    /// clock. No Gayle -- the big-box machines carry Gary -- and no slow RAM.
     A3000,
     /// A4000: the same board a generation later -- AGA, a 25 MHz 68040, and
-    /// Ramsey-07. Same story on Gayle, slow RAM and motherboard fast RAM as
-    /// the A3000.
+    /// Ramsey-07 with the same stock 4 MB of motherboard fast RAM. Same
+    /// story on Gayle and slow RAM as the A3000.
     A4000,
 }
 
@@ -878,6 +883,9 @@ pub struct MachineDescriptor {
     pub chip_ram_bytes: usize,
     pub fast_ram_bytes: usize,
     pub slow_ram_bytes: usize,
+    /// Ramsey-controlled motherboard fast RAM (A3000/A4000).
+    #[serde(default)]
+    pub mb_ram_bytes: usize,
     pub chipset: Chipset,
     pub video_standard: VideoStandard,
     pub machine: Option<MachineModel>,
@@ -898,6 +906,7 @@ impl Default for MachineDescriptor {
             chip_ram_bytes: 512 * 1024,
             fast_ram_bytes: 0,
             slow_ram_bytes: 0,
+            mb_ram_bytes: 0,
             chipset: Chipset::Ocs,
             video_standard: VideoStandard::Pal,
             machine: None,
@@ -928,13 +937,14 @@ impl MachineDescriptor {
             None => String::new(),
         };
         format!(
-            "{profile} / {:?} / {:?} / {:?} / chip {}K fast {}K slow {}K / ROM {}{ext}",
+            "{profile} / {:?} / {:?} / {:?} / chip {}K fast {}K slow {}K mb {}K / ROM {}{ext}",
             self.cpu,
             self.chipset,
             self.video_standard,
             self.chip_ram_bytes / 1024,
             self.fast_ram_bytes / 1024,
             self.slow_ram_bytes / 1024,
+            self.mb_ram_bytes / 1024,
             self.rom.label(),
         )
     }
@@ -978,6 +988,13 @@ impl MachineDescriptor {
                 "slow RAM {}K -> {}K",
                 self.slow_ram_bytes / 1024,
                 other.slow_ram_bytes / 1024
+            ));
+        }
+        if self.mb_ram_bytes != other.mb_ram_bytes {
+            diffs.push(format!(
+                "motherboard RAM {}K -> {}K",
+                self.mb_ram_bytes / 1024,
+                other.mb_ram_bytes / 1024
             ));
         }
         if self.rom != other.rom {
@@ -1079,6 +1096,7 @@ impl Default for Config {
             chip_ram_bytes: 512 * 1024,
             fast_ram_bytes: 0,
             slow_ram_bytes: A500_TRAPDOOR_RAM_BYTES,
+            mb_ram_bytes: 0,
             z3_ram_bytes: 0,
             zorro_boards: Vec::new(),
             wasm_boards: Vec::new(),
@@ -1170,6 +1188,7 @@ impl Config {
             chip_ram_bytes: self.chip_ram_bytes,
             fast_ram_bytes: self.fast_ram_bytes,
             slow_ram_bytes: self.slow_ram_bytes,
+            mb_ram_bytes: self.mb_ram_bytes,
             chipset: self.chipset,
             video_standard: self.video_standard,
             machine: self.machine,
@@ -1259,6 +1278,9 @@ pub struct ConfigOverrides {
     pub chip: Option<String>,
     pub fast: Option<String>,
     pub slow: Option<String>,
+    /// Ramsey motherboard fast RAM size (`--motherboard`). Same parser as
+    /// `[memory] motherboard`.
+    pub motherboard: Option<String>,
     pub floppy_drives: Option<u8>,
     /// Drive speed override (`--floppy-speed`): a percentage (100/200/400/
     /// 800) or 0 for turbo. Same values as `[floppy] speed`.
@@ -1321,6 +1343,7 @@ impl ConfigOverrides {
             && self.chip.is_none()
             && self.fast.is_none()
             && self.slow.is_none()
+            && self.motherboard.is_none()
             && self.floppy_drives.is_none()
             && self.floppy_speed.is_none()
             && self.joystick.is_none()
@@ -1367,6 +1390,9 @@ impl ConfigOverrides {
         }
         if let Some(slow) = &self.slow {
             raw.memory.slow = Some(slow.clone());
+        }
+        if let Some(motherboard) = &self.motherboard {
+            raw.memory.motherboard = Some(motherboard.clone());
         }
         if let Some(drives) = self.floppy_drives {
             raw.floppy.drives = Some(drives);
@@ -1850,6 +1876,10 @@ pub(crate) struct RawMemory {
     pub(crate) fast: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) slow: Option<String>,
+    /// Ramsey-controlled motherboard fast RAM size (e.g. "16M"); needs a
+    /// Ramsey (A3000/A4000 profiles) and a 32-bit CPU.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) motherboard: Option<String>,
     /// Zorro III autoconfig RAM size (e.g. "16M"); 32-bit CPUs only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) z3: Option<String>,
@@ -2136,6 +2166,10 @@ impl TryFrom<RawConfig> for Config {
             None => defaults.slow_ram_bytes,
             Some(s) => parse_size(s, "slow RAM")?,
         };
+        let mb_ram_bytes = match raw.memory.motherboard.as_deref() {
+            None => defaults.mb_ram_bytes,
+            Some(s) => parse_size(s, "motherboard RAM")?,
+        };
         let z3_ram_bytes = match raw.memory.z3.as_deref() {
             None => defaults.z3_ram_bytes,
             Some(s) => parse_size(s, "Zorro III RAM")?,
@@ -2421,9 +2455,21 @@ impl TryFrom<RawConfig> for Config {
             Some(s) => parse_denise_revision(s)?,
         };
 
+        let mem_controller = match raw.machine.mem_controller.as_deref() {
+            None => defaults.mem_controller,
+            Some("none") => MemController::None,
+            Some("ramsey-04") => MemController::Ramsey4,
+            Some("ramsey-07") => MemController::Ramsey7,
+            Some(other) => anyhow::bail!(
+                "[machine] mem_controller {other:?} is not one of \
+                 none, ramsey-04, ramsey-07"
+            ),
+        };
+
         errors.extend(validate_chip_ram(chip_ram_bytes, chipset, agnus_revision).err());
         errors.extend(validate_fast_ram(fast_ram_bytes, chip_ram_bytes).err());
         errors.extend(validate_slow_ram(slow_ram_bytes).err());
+        errors.extend(validate_mb_ram(mb_ram_bytes, mem_controller, cpu).err());
         errors.extend(validate_z3_ram(z3_ram_bytes, cpu).err());
         errors.extend(validate_rtg_card(rtg, cpu).err());
         let board_specs = zorro_boards
@@ -2498,6 +2544,7 @@ impl TryFrom<RawConfig> for Config {
             chip_ram_bytes,
             fast_ram_bytes,
             slow_ram_bytes,
+            mb_ram_bytes,
             z3_ram_bytes,
             zorro_boards,
             wasm_boards,
@@ -2568,16 +2615,7 @@ impl TryFrom<RawConfig> for Config {
                 .as_deref()
                 .map(parse_log_unmapped)
                 .transpose()?,
-            mem_controller: match raw.machine.mem_controller.as_deref() {
-                None => defaults.mem_controller,
-                Some("none") => MemController::None,
-                Some("ramsey-04") => MemController::Ramsey4,
-                Some("ramsey-07") => MemController::Ramsey7,
-                Some(other) => anyhow::bail!(
-                    "[machine] mem_controller {other:?} is not one of \
-                     none, ramsey-04, ramsey-07"
-                ),
-            },
+            mem_controller,
             video_standard,
             audio,
             ide,
@@ -2862,6 +2900,8 @@ pub(crate) fn machine_profile_defaults(model: MachineModel) -> Config {
             d.chipset = Chipset::Ecs;
             d.chip_ram_bytes = 2 * 1024 * 1024;
             d.slow_ram_bytes = 0;
+            // Stock motherboard fast RAM: four banks of 256Kx4 ZIPs.
+            d.mb_ram_bytes = 4 * 1024 * 1024;
             d.cpu = CpuModel::M68030;
             d.cpu_clock_mhz = 25.0;
             d.mem_controller = MemController::Ramsey4;
@@ -2876,6 +2916,8 @@ pub(crate) fn machine_profile_defaults(model: MachineModel) -> Config {
             d.chipset = Chipset::Aga;
             d.chip_ram_bytes = 2 * 1024 * 1024;
             d.slow_ram_bytes = 0;
+            // Stock motherboard fast RAM: one 4 MiB bank of 1Mx4 SIMMs.
+            d.mb_ram_bytes = 4 * 1024 * 1024;
             d.cpu = CpuModel::M68040;
             d.cpu_clock_mhz = 25.0;
             d.mem_controller = MemController::Ramsey7;
@@ -3085,6 +3127,42 @@ fn validate_fast_ram(fast: usize, chip: usize) -> Result<()> {
     Ok(())
 }
 
+/// Motherboard fast RAM must land on Ramsey's bank layout: four banks of
+/// either 256Kx4 parts (1 MiB per bank) or 1Mx4 parts (4 MiB per bank), so
+/// 1M-4M in 1M steps or 4M/8M/12M/16M. It also needs the Ramsey itself and
+/// a CPU whose address bus reaches $07000000 at all.
+fn validate_mb_ram(mb: usize, mem_controller: MemController, cpu: CpuModel) -> Result<()> {
+    const BANK_1M: usize = 1024 * 1024;
+    const BANK_4M: usize = 4 * 1024 * 1024;
+    if mb == 0 {
+        return Ok(());
+    }
+    if mem_controller.ramsey_revision().is_none() {
+        bail!(
+            "motherboard RAM needs a Ramsey memory controller \
+             ([machine] mem_controller = \"ramsey-04\" or \"ramsey-07\", \
+             fitted by the A3000/A4000 profiles)"
+        );
+    }
+    if !cpu_has_32bit_bus(cpu) {
+        bail!(
+            "motherboard RAM ends at $08000000, beyond a 24-bit address bus: \
+             {:?} cannot reach it (needs a 68020/68030/68040/68060)",
+            cpu
+        );
+    }
+    let on_1m_banks = mb.is_multiple_of(BANK_1M) && mb <= 4 * BANK_1M;
+    let on_4m_banks = mb.is_multiple_of(BANK_4M) && mb <= 4 * BANK_4M;
+    if !(on_1m_banks || on_4m_banks) {
+        bail!(
+            "motherboard RAM {} bytes does not fill Ramsey banks \
+             (1M-4M in 1M steps, or 8M, 12M, 16M)",
+            mb
+        );
+    }
+    Ok(())
+}
+
 fn cpu_has_32bit_bus(cpu: CpuModel) -> bool {
     matches!(
         cpu,
@@ -3270,6 +3348,9 @@ pub fn about_machine_lines(cfg: &Config) -> Vec<String> {
     }
     if cfg.fast_ram_bytes > 0 {
         ram.push_str(&format!(", {}K fast", cfg.fast_ram_bytes / 1024));
+    }
+    if cfg.mb_ram_bytes > 0 {
+        ram.push_str(&format!(", {}K motherboard", cfg.mb_ram_bytes / 1024));
     }
     if cfg.z3_ram_bytes > 0 {
         ram.push_str(&format!(", {}K Z3", cfg.z3_ram_bytes / 1024));
@@ -3529,6 +3610,7 @@ mod tests {
                 chip: Some("2M".to_string()),
                 fast: Some("8M".to_string()),
                 slow: None,
+                motherboard: None,
                 z3: None,
             },
             chipset: RawChipset {
@@ -4397,6 +4479,69 @@ mod tests {
             err.to_string().contains("not an autoconfigurable"),
             "{err:#}"
         );
+    }
+
+    /// The big-box profiles fit their stock 4 MB of Ramsey motherboard RAM;
+    /// `[memory] motherboard` resizes it within Ramsey's bank layout, and it
+    /// is refused where no Ramsey (or no 32-bit CPU) could drive it.
+    #[test]
+    fn motherboard_ram_defaults_and_constraints() -> Result<()> {
+        let cfg = parse_config("[machine]\nprofile = \"A3000\"")?;
+        assert_eq!(cfg.mb_ram_bytes, 4 * 1024 * 1024);
+        let cfg = parse_config("[machine]\nprofile = \"A4000\"")?;
+        assert_eq!(cfg.mb_ram_bytes, 4 * 1024 * 1024);
+
+        // Resizable up to the full 16 MB, and removable.
+        let cfg = parse_config(
+            r#"
+            [machine]
+            profile = "A4000"
+            [memory]
+            motherboard = "16M"
+            "#,
+        )?;
+        assert_eq!(cfg.mb_ram_bytes, 16 * 1024 * 1024);
+        let cfg = parse_config(
+            r#"
+            [machine]
+            profile = "A4000"
+            [memory]
+            motherboard = "0"
+            "#,
+        )?;
+        assert_eq!(cfg.mb_ram_bytes, 0);
+
+        // A total that fills no whole bank layout is refused.
+        let err = parse_config(
+            r#"
+            [machine]
+            profile = "A4000"
+            [memory]
+            motherboard = "5M"
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Ramsey banks"), "{err:#}");
+
+        // No Ramsey to drive it on the default A500-class machine.
+        let err = parse_config("[memory]\nmotherboard = \"4M\"").unwrap_err();
+        assert!(
+            err.to_string().contains("Ramsey memory controller"),
+            "{err:#}"
+        );
+
+        // A 24-bit CPU cannot reach $08000000 at all.
+        let err = parse_config(
+            r#"
+            [machine]
+            profile = "A3000"
+            [cpu]
+            model = "68000"
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("24-bit"), "{err:#}");
+        Ok(())
     }
 
     #[test]

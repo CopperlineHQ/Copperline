@@ -391,6 +391,12 @@ where
                         .ok_or_else(|| anyhow!("--slow requires a size (e.g. 0, 512K)"))?,
                 );
             }
+            "--motherboard" => {
+                overrides.motherboard =
+                    Some(args.next().ok_or_else(|| {
+                        anyhow!("--motherboard requires a size (e.g. 0, 4M, 16M)")
+                    })?);
+            }
             "--floppy-drives" | "--fdd-drives" => {
                 let value = args
                     .next()
@@ -897,6 +903,7 @@ fn print_help() {
          --chip SIZE                    chip RAM size, e.g. 512K, 1M, 2M\n  \
          --fast SIZE                    Zorro II fast RAM size, e.g. 0, 1M, 4M, 8M\n  \
          --slow SIZE                    trapdoor slow RAM at $C00000, e.g. 0, 512K\n  \
+         --motherboard SIZE             Ramsey motherboard fast RAM (A3000/A4000), e.g. 0, 4M, 16M\n  \
          --floppy-drives COUNT          wired floppy drives, 1-4 (DF0 plus externals)\n  \
          --floppy-speed PERCENT         drive speed: 100, 200, 400, 800, or 0 (turbo)\n  \
          --rtc-time TIME                seed the battery clock (implies fitting one) with\n  \
@@ -1635,6 +1642,7 @@ fn build_placeholder_machine() -> Result<Emulator> {
     let mem = Memory {
         chip_ram: vec![0u8; 512 * 1024],
         slow_ram: Vec::new(),
+        mb_ram: Vec::new(),
         rom,
         overlay: true,
         zorro: copperline::zorro::ZorroChain::default(),

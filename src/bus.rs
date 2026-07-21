@@ -5330,8 +5330,8 @@ impl Bus {
     }
 
     /// The writable RAM regions a memory hunt should scan: chip RAM,
-    /// slow/ranger RAM, and configured Zorro RAM boards, as
-    /// (base, length) pairs.
+    /// slow/ranger RAM, motherboard fast RAM, and configured Zorro RAM
+    /// boards, as (base, length) pairs.
     pub fn writable_ram_regions(&self) -> Vec<(u32, u32)> {
         let mut regions = Vec::new();
         if !self.mem.chip_ram.is_empty() {
@@ -5346,13 +5346,16 @@ impl Bus {
                 self.mem.slow_ram.len() as u32,
             ));
         }
+        if !self.mem.mb_ram.is_empty() {
+            regions.push((self.mem.mb_ram_base() as u32, self.mem.mb_ram.len() as u32));
+        }
         regions.extend(self.mem.zorro.ram_regions());
         regions
     }
 
     /// Read a 16-bit big-endian word from whichever RAM/ROM region maps
-    /// `addr` (chip, fast, slow, or ROM), for the debugger's memory dumps.
-    /// Returns 0 for unmapped addresses.
+    /// `addr` (chip, fast, slow, motherboard, or ROM), for the debugger's
+    /// memory dumps. Returns 0 for unmapped addresses.
     pub fn peek_word_any(&self, addr: u32) -> u16 {
         use crate::memory::{CHIP_RAM_BASE, ROM_BASE, SLOW_RAM_BASE};
         if let Some((board, off)) = self.mem.zorro.region_at(addr, 2) {
@@ -5369,9 +5372,10 @@ impl Bus {
                 .unwrap_or(0);
         }
         let a = addr as usize;
-        let regions: [(usize, &[u8]); 4] = [
+        let regions: [(usize, &[u8]); 5] = [
             (CHIP_RAM_BASE as usize, &self.mem.chip_ram),
             (SLOW_RAM_BASE as usize, &self.mem.slow_ram),
+            (self.mem.mb_ram_base() as usize, &self.mem.mb_ram),
             (ROM_BASE as usize, &self.mem.rom),
             (self.mem.extended_rom_base as usize, &self.mem.extended_rom),
         ];
