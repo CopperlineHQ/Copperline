@@ -5330,8 +5330,8 @@ impl Bus {
     }
 
     /// The writable RAM regions a memory hunt should scan: chip RAM,
-    /// slow/ranger RAM, motherboard fast RAM, and configured Zorro RAM
-    /// boards, as (base, length) pairs.
+    /// slow/ranger RAM, motherboard fast RAM, accelerator (CPU-slot) fast
+    /// RAM, and configured Zorro RAM boards, as (base, length) pairs.
     pub fn writable_ram_regions(&self) -> Vec<(u32, u32)> {
         let mut regions = Vec::new();
         if !self.mem.chip_ram.is_empty() {
