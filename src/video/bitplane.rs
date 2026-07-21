@@ -1274,8 +1274,19 @@ impl ControlState {
     }
 
     fn fetch_origin_native_shift(&self, diw_h_start: u16, pixel_repeat: usize) -> i32 {
+        // Native samples per DIW H unit (one lo-res pixel): 1 in lo-res,
+        // 2 in hi-res, 4 in super-hi-res. The last factor comes from the
+        // two native samples per framebuffer pixel in SHRES; without it a
+        // non-standard DIW<->DDF relation placed SHRES content at half its
+        // real offset (Linux amifb: DIW $45 with DDF $18, 60 units left of
+        // standard - the picture landed 194 native px left of the window
+        // and the console lost its first 24 columns; lo-res/hi-res and
+        // every standard-DIW SHRES screen are unchanged, the terms below
+        // are zero or scale-independent there).
+        let native_per_h_unit_num = 2 * self.native_samples_per_framebuffer_pixel() as i32;
         let display_native_shift =
-            ((diw_h_start as i32 - self.fetch_reference()) * 2) / pixel_repeat as i32;
+            (diw_h_start as i32 - self.fetch_reference()) * native_per_h_unit_num
+                / pixel_repeat as i32;
         let standard_ddf = if self.hires() || self.shres() {
             0x003C
         } else {
@@ -1336,8 +1347,10 @@ impl ControlState {
         // not push the content to the right. Without this correction the
         // content shifted right by (DIW_HSTART_FB0 - diw_h_start) lores pixels
         // and lost its right edge off the framebuffer.
-        let clamped_window_native =
-            ((DIW_HSTART_FB0 - diw_h_start as i32).max(0) * 2) / pixel_repeat as i32;
+        let clamped_window_native = ((DIW_HSTART_FB0 - active_canvas_shift_h() - diw_h_start as i32)
+            .max(0)
+            * native_per_h_unit_num)
+            / pixel_repeat as i32;
         // Lo-res FMODE=0 placement is linear in DDFSTRT: moving DDFSTRT one
         // 8-cck fetch period earlier moves the picture exactly 16 lo-res
         // pixels left. Real hardware confirms this (vAmigaTS
