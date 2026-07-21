@@ -364,13 +364,25 @@ but leaves V set gets the restart's store instead (a double store to plain
 memory, the restart-model gap). The other writeback slots and continuation
 fields stay clear; mid-instruction continuation is not modelled.
 
-A *data* access through an invalid/unconfigured descriptor raises an access
-fault -- this is how Enforcer/MuForce catch low-memory and freed-memory hits. An
-*instruction fetch* through an invalid descriptor instead falls back to identity:
-a 68040 enables TC before all of its code is mapped during boot, so faulting the
-fetch stream there would derail it. The bus-error delivery sets the
-exception-processing flag, so the frame writes and vector fetch do not
-re-translate (and a fault while delivering a fault is a clean double-fault halt).
+Any access through an invalid/unconfigured descriptor raises an access
+fault, instruction fetches included -- data faults are how Enforcer/MuForce
+catch low-memory and freed-memory hits, and fetch faults are how a
+demand-paged OS (Linux/m68k) pages code in; software that must keep
+executing across an MMU enable covers itself with the transparent
+translation registers. The fault delivery itself translates like any other
+supervisor access: the frame pushes and the vector fetch go through the
+MMU (supervisor stacks and VBR hold logical addresses -- Linux runs its
+kernel at virtual 0 with RAM at a physical offset and splits URP from
+SRP, so an untranslated push or vector read lands in unrelated physical
+memory), a `MOVES` fault's SFC/DFC override is consumed into the frame's
+SSW rather than leaking into the dispatch, and a fault raised while
+delivering a fault is a clean double-fault halt. Because the rollback
+model re-executes the faulting instruction, its post-fault side effects
+are also contained: bus accesses are suppressed, and the handler-entry
+PC/SR/register state is re-asserted at the instruction boundary so an
+aborted flow instruction (a `JSR` whose stack push faulted) cannot divert
+the dispatch into its branch target, nor a predecrement `MOVEM` walk the
+handler's stack pointer away.
 
 `PTEST` (68040) walks the addressed page and reports the physical address and
 resident bit in MMUSR (the cache-mode/used/modified attribute bits are not yet

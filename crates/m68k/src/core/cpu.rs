@@ -277,6 +277,16 @@ pub struct CpuCore {
     /// can stack it in the 030 frame's data output buffer (the handler
     /// completes the write from there).
     pub(crate) pending_fault_wdata: u32,
+    /// Handler-entry state captured when a mid-instruction fault dispatch
+    /// completes: (PC, SR, D0-D7/A0-A7). The aborted instruction's
+    /// remaining execution is suppressed via `faulted()` on the bus side,
+    /// but its register updates still land -- a JSR/RTS assigns `pc` on
+    /// the way out and a `movem -(a7)` keeps stepping the (now
+    /// supervisor) stack pointer -- which would corrupt the handler's
+    /// entry state. The run loop re-asserts this snapshot when it clears
+    /// the fault state. Transient within one instruction boundary.
+    #[serde(skip)]
+    pub(crate) fault_resume: Option<(u32, u16, [u32; 16])>,
 
     // ========== Execution State ==========
     /// Remaining cycles in current timeslice
@@ -488,6 +498,7 @@ impl CpuCore {
             mmu_read_override: None,
             mmu_write_suppress: None,
             pending_fault_wdata: 0,
+            fault_resume: None,
             cycles_remaining: 0,
             initial_cycles: 0,
             oep060: Default::default(),
@@ -1220,6 +1231,22 @@ impl CpuCore {
         self.run_mode == RUN_MODE_BERR_AERR_RESET
     }
 
+    /// Close out an instruction that faulted mid-execution: re-assert the
+    /// handler-entry PC/SR/registers the fault dispatch established (a flow
+    /// instruction whose stack access faulted -- JSR/BSR/RTS -- still
+    /// assigns `pc` on its way out, and a predecrement MOVEM keeps stepping
+    /// A7, which would divert or corrupt the handler) and return to normal
+    /// run mode.
+    pub(crate) fn end_faulted_instruction(&mut self) {
+        if let Some((handler_pc, handler_sr, handler_dar)) = self.fault_resume.take() {
+            self.pc = handler_pc;
+            // No bank swap: handler_dar carries the post-switch A7.
+            self.set_sr_noint_nosp(handler_sr);
+            self.dar = handler_dar;
+        }
+        self.run_mode = super::execute::RUN_MODE_NORMAL;
+    }
+
     /// Trigger a 68000-style address error and mark the current instruction as faulted so that
     /// subsequent EA resolution/memory operations become no-ops.
     pub(crate) fn trigger_address_error<B: AddressBus>(
@@ -1265,6 +1292,7 @@ impl CpuCore {
         self.set_sr_noint_nosp(self.sr_save);
         self.dar = self.dar_save;
         let _ = self.exception_address_error(bus, address, write, instruction);
+        self.fault_resume = Some((self.pc, self.get_sr(), self.dar));
         self.run_mode = RUN_MODE_BERR_AERR_RESET;
     }
 
@@ -1282,8 +1310,9 @@ impl CpuCore {
             return;
         }
         // A fault while already delivering a fault is a double fault: halt
-        // rather than recurse. (translate() also bypasses while this flag is
-        // set, so the frame writes and vector fetch below do not re-translate.)
+        // rather than recurse -- the frame writes and vector fetch below
+        // translate like any other supervisor access, and a fault raised
+        // from one of them lands right back here.
         if self.exception_processing {
             self.stopped = 1;
             self.run_mode = RUN_MODE_BERR_AERR_RESET;
@@ -1297,6 +1326,7 @@ impl CpuCore {
         let cause = self.pending_fault_cause.take();
         let _ = self.exception_bus_error(bus, address, write, instruction, size, cause);
         self.exception_processing = false;
+        self.fault_resume = Some((self.pc, self.get_sr(), self.dar));
         self.run_mode = RUN_MODE_BERR_AERR_RESET;
     }
 
@@ -1613,10 +1643,12 @@ impl CpuCore {
             }
             MmuFaultKind::ConfigurationError => {
                 let _ = self.take_exception(bus, vector::MMU_CONFIGURATION_ERROR);
+                self.fault_resume = Some((self.pc, self.get_sr(), self.dar));
                 self.run_mode = RUN_MODE_BERR_AERR_RESET;
             }
             MmuFaultKind::IllegalOperation => {
                 let _ = self.take_exception(bus, vector::MMU_ILLEGAL_OPERATION_ERROR);
+                self.fault_resume = Some((self.pc, self.get_sr(), self.dar));
                 self.run_mode = RUN_MODE_BERR_AERR_RESET;
             }
             MmuFaultKind::AccessLevelViolation => {
@@ -1629,6 +1661,10 @@ impl CpuCore {
                 self.trigger_bus_error(bus, fault.address, write, instruction, size);
             }
         }
+        // A faulted MOVES cycle never reaches its own override cleanup: the
+        // dispatch above is the instruction's end, so drop the SFC/DFC
+        // override here (the frame's SSW has already captured it).
+        self.mmu_fc_override = None;
     }
 
     /// Execute COP0 / PMMU op0 (0xF0xx) style instructions.

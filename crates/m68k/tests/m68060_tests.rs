@@ -636,9 +636,11 @@ fn rte_pops_format_7_frame_on_68040() {
 fn plpar_translates_and_ptest_is_line_f_on_68060() {
     let (mut cpu, mut bus) = setup_060();
     // Identity table for page 0x1000, then remap it to 0x5000 before
-    // enabling translation.
+    // enabling translation. The code/vector page must be mapped too:
+    // instruction fetches translate and fault like data.
     let root = build_060_table(&mut bus, 0x1000, false);
     bus.write_long_at(0x4000 + 1 * 4, 0x5000 | 1); // page descriptor -> 0x5000
+    bus.write_long_at(0x4000, 0x0000_0001); // page 0: code + vectors, identity
     movec_to(&mut cpu, &mut bus, 0x807, root);
     movec_to(&mut cpu, &mut bus, 0x003, 0x0000_8000);
     movec_to(&mut cpu, &mut bus, 0x001, 5); // DFC = supervisor data

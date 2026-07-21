@@ -124,9 +124,9 @@ const FAULT_PAGE: u32 = 0x5000;
 /// table. The stack/vector page, the code page, and the table page are
 /// identity-mapped (so fault handlers can run with translation on); the
 /// FAULT_PAGE page-table slot holds `page_desc`; everything else is
-/// invalid. Instruction fetches through invalid descriptors use the
-/// identity fallback, and the exception frame itself is pushed with
-/// translation bypassed (exception_processing).
+/// invalid. All accesses translate, exception frame pushes and vector
+/// fetches included -- an invalid descriptor faults instruction fetches
+/// exactly like data (demand-paged code).
 fn user_mode_040_with_table(bus: &mut TestBus, page_desc: u32) -> CpuCore {
     // Root and pointer table entries: UDT resident (bits 1:0 >= 2).
     bus.write_long(ROOT_TABLE, PTR_TABLE | 2);
@@ -387,5 +387,116 @@ fn physical_bus_error_keeps_atc_clear() {
         bus.read_word(f + F_SSW),
         0x0101,
         "SSW = RW=read | SZ=long | TM=user data, ATC clear"
+    );
+}
+
+/// A JSR whose stack push faults must end up in the vector-2 handler, not
+/// at its branch target: the aborted instruction's flow change may not
+/// survive the dispatch (Linux/m68k grows user stacks by faulting exactly
+/// this push; diverting into the target skips the kernel entirely).
+#[test]
+fn jsr_whose_stack_push_faults_enters_the_handler() {
+    let mut bus = TestBus::new(0x10000);
+    let mut cpu = user_mode_040_with_table(&mut bus, 0);
+
+    cpu.set_a(7, FAULT_PAGE + 0x20); // user SP on the invalid page
+    bus.write_word(CODE, 0x4EB9); // JSR ($00000400).L
+    bus.write_long(CODE + 2, 0x0000_0400);
+
+    let _ = cpu.step(&mut bus);
+    assert!(cpu.is_supervisor(), "push fault must enter supervisor mode");
+    assert_eq!(cpu.pc, HANDLER, "dispatch wins over the JSR target");
+
+    let f = frame_base(&cpu);
+    assert_eq!(bus.read_word(f + F_FMT), 0x7008, "format $7, vector 2");
+    assert_eq!(bus.read_long(f + F_PC), CODE, "restart PC is the JSR");
+}
+
+/// A predecrement MOVEM whose first store faults must leave the handler on
+/// an intact supervisor stack: the aborted instruction may not keep
+/// stepping A7 underneath the freshly-pushed frame (the handler would run
+/// on a stale, user-derived stack pointer).
+#[test]
+fn movem_predecrement_fault_leaves_the_dispatch_stack_intact() {
+    let mut bus = TestBus::new(0x10000);
+    let mut cpu = user_mode_040_with_table(&mut bus, 0);
+
+    cpu.set_a(7, FAULT_PAGE + 0x40); // user SP on the invalid page
+    bus.write_word(CODE, 0x48E7); // MOVEM.L D0-D7/A0-A6,-(A7)
+    bus.write_word(CODE + 2, 0xFFFE);
+
+    let _ = cpu.step(&mut bus);
+    assert!(
+        cpu.is_supervisor(),
+        "store fault must enter supervisor mode"
+    );
+    assert_eq!(cpu.pc, HANDLER, "dispatch reaches the handler");
+
+    // frame_base itself asserts A7 == SSP - FRAME_LEN: no residual
+    // decrements from the aborted MOVEM.
+    let f = frame_base(&cpu);
+    assert_eq!(bus.read_long(f + F_PC), CODE, "restart PC is the MOVEM");
+}
+
+/// A faulted MOVES data cycle translates in the SFC/DFC space, but the
+/// dispatch it triggers does not: the frame pushes and the vector fetch
+/// run in supervisor space. With split user/supervisor root pointers
+/// (Linux/m68k), a leaked override would walk the user table for the
+/// vector and read garbage where the handler address should be.
+#[test]
+fn moves_data_fault_vectors_in_supervisor_space() {
+    const U_ROOT: u32 = 0x9000;
+    const U_PTR: u32 = 0x9200;
+
+    let mut bus = TestBus::new(0x10000);
+
+    // Supervisor table: identity map for vectors/code/stack/tables.
+    bus.write_long(ROOT_TABLE, PTR_TABLE | 2);
+    bus.write_long(PTR_TABLE, PAGE_TABLE | 2);
+    bus.write_long(PAGE_TABLE, 0x0000_0001);
+    bus.write_long(PAGE_TABLE + 4, 0x0000_1001);
+    bus.write_long(PAGE_TABLE + 8 * 4, 0x0000_8001);
+    // User table: every page invalid (the U_PAGE table is all zeros).
+    bus.write_long(U_ROOT, U_PTR | 2);
+    bus.write_long(U_PTR, (U_PTR + 0x100) | 2);
+
+    bus.write_long(8, HANDLER);
+    bus.write_word(HANDLER, 0x4E73);
+
+    let mut cpu = CpuCore::new();
+    cpu.set_cpu_type(CpuType::M68040);
+    cpu.mmu_crp_aptr = U_ROOT; // URP: user space, nothing mapped
+    cpu.mmu_srp_aptr = ROOT_TABLE; // SRP: kernel space, vectors live here
+    cpu.mmu_tc = 0x0000_8000;
+    cpu.pmmu_enabled = true;
+    cpu.set_sr(0x2700);
+    cpu.set_a(7, SSP);
+    cpu.set_a(0, FAULT_PAGE);
+    cpu.set_d(0, 0xDEAD_BEEF);
+    cpu.set_d(1, 1); // DFC = 1: user data space
+    cpu.pc = CODE;
+
+    bus.write_word(CODE, 0x4E7B); // MOVEC D1,DFC
+    bus.write_word(CODE + 2, 0x1001);
+    bus.write_word(CODE + 4, 0x0E90); // MOVES.L D0,(A0)
+    bus.write_word(CODE + 6, 0x0800);
+
+    let _ = cpu.step(&mut bus); // MOVEC
+    let _ = cpu.step(&mut bus); // MOVES faults in the user space
+    assert_eq!(cpu.stopped, 0, "no double fault: the vector fetch is fine");
+    assert_eq!(cpu.pc, HANDLER, "vector read through SRP");
+
+    let sp = cpu.a(7);
+    assert_eq!(sp, SSP - FRAME_LEN, "frame pushed on the supervisor stack");
+    assert_eq!(bus.read_word(sp + F_FMT), 0x7008, "format $7, vector 2");
+    assert_eq!(
+        bus.read_word(sp + F_SSW),
+        0x0401,
+        "SSW = ATC | write | SZ=long | TM=1: the MOVES DFC space"
+    );
+    assert_eq!(
+        bus.read_long(sp + F_WB3D),
+        0xDEAD_BEEF,
+        "writeback data is the faulted store's value"
     );
 }
