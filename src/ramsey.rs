@@ -93,7 +93,10 @@ impl RamseyRevision {
     /// (1 MiB banks) cover totals up to 4 MiB and 1Mx4 parts (4 MiB banks)
     /// anything larger; each machine stays on its stock part where both
     /// could fit the total. Zero (no RAM fitted) falls back to the stock
-    /// geometry.
+    /// geometry. Totals beyond the four banks (motherboard expansion RAM
+    /// below $07000000) keep the fully-populated 1Mx4 description: the
+    /// control register has no way to describe the expansion decode, and
+    /// on real hardware it would not go through Ramsey's geometry either.
     pub fn bank_bytes_for(self, total_bytes: usize) -> u32 {
         const BANK_1M: u32 = 1024 * 1024;
         const BANK_4M: u32 = 4 * 1024 * 1024;
@@ -254,6 +257,9 @@ mod tests {
         assert_eq!(RamseyRevision::Rev7.bank_bytes_for(4 * M), 4 * M as u32);
         assert_eq!(RamseyRevision::Rev7.bank_bytes_for(16 * M), 4 * M as u32);
         assert_eq!(RamseyRevision::Rev7.bank_bytes_for(2 * M), M as u32);
+        // Expansion totals below $07000000 keep the fully-populated
+        // 1Mx4 description; the control register cannot say more.
+        assert_eq!(RamseyRevision::Rev7.bank_bytes_for(64 * M), 4 * M as u32);
     }
 
     /// Refresh comes up at index 0 (154 clocks), which is what both diagnostic

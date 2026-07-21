@@ -93,3 +93,103 @@ fn kickstart_sizes_the_motherboard_ram_bank() {
         "mh_Lower ${lower:08X} is not the top-down 4 MiB bank"
     );
 }
+
+/// Boot a machine and collect exec's memory list as (mh_Lower, mh_Upper)
+/// pairs once Kickstart has finished sizing memory.
+fn boot_and_walk_memlist(cfg: &copperline::config::Config) -> Vec<(u32, u32)> {
+    let mut emu = copperline::emulator::build_machine(
+        cfg,
+        Box::new(copperline::audio::NullSink),
+        false,
+        false,
+    )
+    .expect("machine builds");
+    // Exec sizes memory in the first moments of boot; run well past it.
+    for _ in 0..400 {
+        emu.step_frame().expect("frame");
+    }
+    let bus = emu.bus();
+    let execbase = peek32(bus, 4);
+    let mut headers = Vec::new();
+    let mut node = peek32(bus, execbase + 322); // lh_Head
+    while node != 0 {
+        let succ = peek32(bus, node); // ln_Succ; 0 at the lh_Tail sentinel
+        if succ == 0 {
+            break;
+        }
+        headers.push((peek32(bus, node + 20), peek32(bus, node + 24)));
+        node = succ;
+    }
+    headers
+}
+
+/// The A4000 motherboard RAM expansion space: with 64 MiB fitted the bank
+/// grows down from $08000000 all the way to $04000000, and Kickstart's
+/// top-down probe must size the whole window, not stop at Ramsey's own
+/// four-bank 16 MiB.
+#[test]
+#[ignore = "needs the local Kickstart 3.1 A4000 ROM (see tests/README.md)"]
+fn kickstart_sizes_the_expanded_motherboard_ram() {
+    let Some(rom) = asset("Kickstart v3.1 r40.68 (1993)(Commodore)(A4000).rom") else {
+        eprintln!("skipping: Kickstart 3.1 A4000 ROM not in the asset directory");
+        return;
+    };
+    let overrides = ConfigOverrides {
+        model: Some("A4000".into()),
+        motherboard: Some("64M".into()),
+        ..Default::default()
+    };
+    let raw = Config::load_raw(None, &overrides).expect("raw config");
+    let cfg = Config::try_from(raw)
+        .expect("A4000 with 64M motherboard RAM validates")
+        .with_rom_override(Some(rom));
+    assert_eq!(cfg.mb_ram_bytes, 64 * 1024 * 1024);
+    let headers = boot_and_walk_memlist(&cfg);
+    let (lower, upper) = headers
+        .iter()
+        .copied()
+        .find(|&(_, upper)| upper == 0x0800_0000)
+        .unwrap_or_else(|| panic!("no MemHeader ending at $08000000 in {headers:X?}"));
+    assert_eq!(upper, 0x0800_0000);
+    // Exec claims a little of the bottom of the bank for its header.
+    assert_eq!(
+        lower & 0xFFF0_0000,
+        0x0400_0000,
+        "mh_Lower ${lower:08X}: the probe did not reach the bottom of the \
+         expansion window at $04000000"
+    );
+}
+
+/// CPU-slot (accelerator) RAM at $08000000: Kickstart's bottom-up probe of
+/// the coprocessor-slot space must find the fitted bank and add it to the
+/// memory list.
+#[test]
+#[ignore = "needs the local Kickstart 3.1 A4000 ROM (see tests/README.md)"]
+fn kickstart_sizes_the_cpu_slot_ram() {
+    let Some(rom) = asset("Kickstart v3.1 r40.68 (1993)(Commodore)(A4000).rom") else {
+        eprintln!("skipping: Kickstart 3.1 A4000 ROM not in the asset directory");
+        return;
+    };
+    let overrides = ConfigOverrides {
+        model: Some("A4000".into()),
+        accelerator: Some("64M".into()),
+        ..Default::default()
+    };
+    let raw = Config::load_raw(None, &overrides).expect("raw config");
+    let cfg = Config::try_from(raw)
+        .expect("A4000 with 64M accelerator RAM validates")
+        .with_rom_override(Some(rom));
+    assert_eq!(cfg.accel_ram_bytes, 64 * 1024 * 1024);
+    let headers = boot_and_walk_memlist(&cfg);
+    let (lower, upper) = headers
+        .iter()
+        .copied()
+        .find(|&(lower, _)| (0x0800_0000..0x0810_0000).contains(&lower))
+        .unwrap_or_else(|| panic!("no MemHeader starting at $08000000 in {headers:X?}"));
+    // Exec claims a little of the bottom of the bank for its header.
+    assert_eq!(
+        upper, 0x0C00_0000,
+        "mh_Upper ${upper:08X}: the probe did not size the whole 64 MiB \
+         CPU-slot bank from ${lower:08X}"
+    );
+}

@@ -191,8 +191,18 @@ slow = "512K"
 # probe rather than autoconfig. Needs a Ramsey memory controller (the
 # A3000/A4000 profiles fit one, and 4M of this RAM, by default) and a
 # 32-bit CPU. Must fill whole Ramsey banks: 1M-4M in 1M steps, or
-# 8M/12M/16M. Set to 0 to remove it.
+# 8M/12M/16M. On the A4000 (Ramsey-07), sizes beyond 16M fill the
+# $04000000-$06FFFFFF motherboard RAM expansion space in 4M steps up
+# to 64M. Set to 0 to remove it.
 # motherboard = "16M"
+
+# CPU-slot (accelerator) fast RAM: 32-bit local RAM starting at $08000000
+# and growing upward through the coprocessor-slot space, up to 128M
+# (ending at $10000000, where Zorro III space begins). Sized by
+# Kickstart's own probe rather than autoconfig; the big-box Kickstarts
+# scan for it, elsewhere guest software has to AddMem it. Needs a CPU
+# with a 32-bit address bus. Any whole number of megabytes.
+# accelerator = "64M"
 
 
 # Additional Zorro boards described by TOML metadata files, configured

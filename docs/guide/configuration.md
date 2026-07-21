@@ -43,7 +43,8 @@ range checks as the equivalent TOML fields:
 | `--chip SIZE` | `[memory] chip` | `512K`, `1M`, `2M`, ... |
 | `--fast SIZE` | `[memory] fast` | `0`, `1M`, `4M`, `8M`, ... |
 | `--slow SIZE` | `[memory] slow` | `0`, up to `512K` |
-| `--motherboard SIZE` | `[memory] motherboard` | Ramsey RAM (A3000/A4000): `0`, `1M`..`4M`, `8M`, `12M`, `16M` |
+| `--motherboard SIZE` | `[memory] motherboard` | Ramsey RAM (A3000/A4000): `0`, `1M`..`4M`, `8M`, `12M`, `16M`; A4000 up to `64M` |
+| `--accelerator SIZE` | `[memory] accelerator` | CPU-slot RAM at `$08000000` (32-bit CPUs): `0` to `128M` |
 | `--floppy-drives COUNT` | `[floppy] drives` | `1` to `4` wired drives (`DF0:` plus external drives) |
 | `--floppy-speed PERCENT` | `[floppy] speed` | `100` (real), `200`, `400`, `800`, or `0` (turbo) |
 | `--joystick MODE` | `[input] joystick` | `gamepad` (default), `keyboard` |
@@ -180,7 +181,10 @@ drives), and setting the flag explicitly wins in either direction. The ROM
 file itself is never modified.
 
 Both profiles fit their stock 4M of Ramsey-controlled motherboard fast RAM;
-`[memory] motherboard` resizes it up to 16M (see the `[memory]` section).
+`[memory] motherboard` resizes it up to 16M, and on the A4000 up to 64M
+via the motherboard RAM expansion space (see the `[memory]` section).
+`[memory] accelerator` adds CPU-slot RAM at `$08000000` on any 32-bit
+machine.
 
 `mem_controller` is normally left to the profile. It is broken out because
 Ramsey's registers collide with nothing else, so it can be fitted to
@@ -315,7 +319,8 @@ clock_mhz = 14.0    # optional; defaults to the model's stock speed
 chip = "512K"        # OCS max 512K; ECS/AGA max 2M
 fast = "0"           # Zorro II fast RAM at $200000: 64K..8M board sizes
 slow = "512K"        # A500 trapdoor RAM at $C00000: 0 or up to 512K
-motherboard = "0"    # Ramsey motherboard RAM (A3000/A4000): up to 16M
+motherboard = "0"    # Ramsey motherboard RAM (A3000/A4000): up to 16M (A4000: 64M)
+accelerator = "0"    # CPU-slot RAM at $08000000 (32-bit CPUs): up to 128M
 z3   = "0"           # Zorro III RAM (needs a 32-bit CPU): 64K..1G, power of two
 ```
 
@@ -335,7 +340,16 @@ plain byte counts, and must be multiples of 4 KiB.
   involved. It needs a Ramsey (`[machine] mem_controller`, fitted by the
   A3000/A4000 profiles, which also fit their stock 4M of this RAM by
   default) and a 32-bit CPU, and must fill whole Ramsey banks: 1M-4M in
-  1M steps, or 8M, 12M, 16M. Set `motherboard = "0"` to remove it.
+  1M steps, or 8M, 12M, 16M. On the A4000 (Ramsey-07), sizes beyond 16M
+  keep growing downward into the `$04000000`-`$06FFFFFF` motherboard RAM
+  expansion space, in 4M steps up to 64M (which reaches `$04000000`).
+  Set `motherboard = "0"` to remove it.
+- **Accelerator RAM** is CPU-slot local memory: it starts at `$08000000`
+  and grows upward through the coprocessor-slot expansion space, up to
+  128M (ending at `$10000000`, where Zorro III space begins). This is the
+  RAM an accelerator/CPU board carries, so it needs a 32-bit CPU but no
+  particular machine profile; any whole number of megabytes fits.
+  Kickstart sizes it with its own probe, like the motherboard bank.
 - **Z3 RAM** requires a 68020/68030/68040/68060 (a 24-bit bus cannot reach it);
   Kickstart assigns its base address, usually `$40000000`.
 

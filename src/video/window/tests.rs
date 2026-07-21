@@ -1861,6 +1861,7 @@ fn test_app_with_audio(audio: Box<dyn AudioSink>) -> super::App {
         chip_ram: vec![0u8; 512 * 1024],
         slow_ram: Vec::new(),
         mb_ram: Vec::new(),
+        accel_ram: Vec::new(),
         rom,
         overlay: true,
         zorro: crate::zorro::ZorroChain::default(),

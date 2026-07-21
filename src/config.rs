@@ -63,8 +63,16 @@ pub struct Config {
     /// 32-bit local RAM ending at $08000000 and growing downward, sized by
     /// Kickstart's own probe rather than autoconfig. Needs a Ramsey
     /// ([`MemController`]) and a CPU with a 32-bit address bus. The
-    /// A3000/A4000 profiles fit 4 MiB by default.
+    /// A3000/A4000 profiles fit 4 MiB by default. Ramsey's four banks stop
+    /// at 16 MiB; larger totals (up to 64 MiB, Ramsey-07/A4000 only) fill
+    /// the $04000000-$06FFFFFF motherboard RAM expansion space below them.
     pub mb_ram_bytes: usize,
+    /// CPU-slot (accelerator) fast RAM (`[memory] accelerator`): 32-bit
+    /// local RAM in the big-box coprocessor-slot space, starting at
+    /// $08000000 and growing upward (up to 128 MiB, ending where Zorro III
+    /// space begins), sized by Kickstart's own probe rather than autoconfig.
+    /// Needs a CPU with a 32-bit address bus.
+    pub accel_ram_bytes: usize,
     /// Zorro III autoconfig RAM (`[memory] z3`). Needs a CPU with a 32-bit
     /// address bus (68020/030/040; not the 24-bit 68000/68EC020).
     pub z3_ram_bytes: usize,
@@ -886,6 +894,9 @@ pub struct MachineDescriptor {
     /// Ramsey-controlled motherboard fast RAM (A3000/A4000).
     #[serde(default)]
     pub mb_ram_bytes: usize,
+    /// CPU-slot (accelerator) fast RAM at $08000000.
+    #[serde(default)]
+    pub accel_ram_bytes: usize,
     pub chipset: Chipset,
     pub video_standard: VideoStandard,
     pub machine: Option<MachineModel>,
@@ -907,6 +918,7 @@ impl Default for MachineDescriptor {
             fast_ram_bytes: 0,
             slow_ram_bytes: 0,
             mb_ram_bytes: 0,
+            accel_ram_bytes: 0,
             chipset: Chipset::Ocs,
             video_standard: VideoStandard::Pal,
             machine: None,
@@ -937,7 +949,7 @@ impl MachineDescriptor {
             None => String::new(),
         };
         format!(
-            "{profile} / {:?} / {:?} / {:?} / chip {}K fast {}K slow {}K mb {}K / ROM {}{ext}",
+            "{profile} / {:?} / {:?} / {:?} / chip {}K fast {}K slow {}K mb {}K accel {}K / ROM {}{ext}",
             self.cpu,
             self.chipset,
             self.video_standard,
@@ -945,6 +957,7 @@ impl MachineDescriptor {
             self.fast_ram_bytes / 1024,
             self.slow_ram_bytes / 1024,
             self.mb_ram_bytes / 1024,
+            self.accel_ram_bytes / 1024,
             self.rom.label(),
         )
     }
@@ -995,6 +1008,13 @@ impl MachineDescriptor {
                 "motherboard RAM {}K -> {}K",
                 self.mb_ram_bytes / 1024,
                 other.mb_ram_bytes / 1024
+            ));
+        }
+        if self.accel_ram_bytes != other.accel_ram_bytes {
+            diffs.push(format!(
+                "accelerator RAM {}K -> {}K",
+                self.accel_ram_bytes / 1024,
+                other.accel_ram_bytes / 1024
             ));
         }
         if self.rom != other.rom {
@@ -1097,6 +1117,7 @@ impl Default for Config {
             fast_ram_bytes: 0,
             slow_ram_bytes: A500_TRAPDOOR_RAM_BYTES,
             mb_ram_bytes: 0,
+            accel_ram_bytes: 0,
             z3_ram_bytes: 0,
             zorro_boards: Vec::new(),
             wasm_boards: Vec::new(),
@@ -1189,6 +1210,7 @@ impl Config {
             fast_ram_bytes: self.fast_ram_bytes,
             slow_ram_bytes: self.slow_ram_bytes,
             mb_ram_bytes: self.mb_ram_bytes,
+            accel_ram_bytes: self.accel_ram_bytes,
             chipset: self.chipset,
             video_standard: self.video_standard,
             machine: self.machine,
@@ -1281,6 +1303,9 @@ pub struct ConfigOverrides {
     /// Ramsey motherboard fast RAM size (`--motherboard`). Same parser as
     /// `[memory] motherboard`.
     pub motherboard: Option<String>,
+    /// CPU-slot accelerator fast RAM size (`--accelerator`). Same parser as
+    /// `[memory] accelerator`.
+    pub accelerator: Option<String>,
     pub floppy_drives: Option<u8>,
     /// Drive speed override (`--floppy-speed`): a percentage (100/200/400/
     /// 800) or 0 for turbo. Same values as `[floppy] speed`.
@@ -1344,6 +1369,7 @@ impl ConfigOverrides {
             && self.fast.is_none()
             && self.slow.is_none()
             && self.motherboard.is_none()
+            && self.accelerator.is_none()
             && self.floppy_drives.is_none()
             && self.floppy_speed.is_none()
             && self.joystick.is_none()
@@ -1393,6 +1419,9 @@ impl ConfigOverrides {
         }
         if let Some(motherboard) = &self.motherboard {
             raw.memory.motherboard = Some(motherboard.clone());
+        }
+        if let Some(accelerator) = &self.accelerator {
+            raw.memory.accelerator = Some(accelerator.clone());
         }
         if let Some(drives) = self.floppy_drives {
             raw.floppy.drives = Some(drives);
@@ -1877,9 +1906,15 @@ pub(crate) struct RawMemory {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) slow: Option<String>,
     /// Ramsey-controlled motherboard fast RAM size (e.g. "16M"); needs a
-    /// Ramsey (A3000/A4000 profiles) and a 32-bit CPU.
+    /// Ramsey (A3000/A4000 profiles) and a 32-bit CPU. Sizes beyond 16M
+    /// (up to 64M) fill the motherboard RAM expansion space and need the
+    /// A4000's Ramsey-07.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) motherboard: Option<String>,
+    /// CPU-slot (accelerator) fast RAM size at $08000000 (e.g. "64M", up
+    /// to 128M); 32-bit CPUs only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) accelerator: Option<String>,
     /// Zorro III autoconfig RAM size (e.g. "16M"); 32-bit CPUs only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) z3: Option<String>,
@@ -2169,6 +2204,10 @@ impl TryFrom<RawConfig> for Config {
         let mb_ram_bytes = match raw.memory.motherboard.as_deref() {
             None => defaults.mb_ram_bytes,
             Some(s) => parse_size(s, "motherboard RAM")?,
+        };
+        let accel_ram_bytes = match raw.memory.accelerator.as_deref() {
+            None => defaults.accel_ram_bytes,
+            Some(s) => parse_size(s, "accelerator RAM")?,
         };
         let z3_ram_bytes = match raw.memory.z3.as_deref() {
             None => defaults.z3_ram_bytes,
@@ -2470,6 +2509,7 @@ impl TryFrom<RawConfig> for Config {
         errors.extend(validate_fast_ram(fast_ram_bytes, chip_ram_bytes).err());
         errors.extend(validate_slow_ram(slow_ram_bytes).err());
         errors.extend(validate_mb_ram(mb_ram_bytes, mem_controller, cpu).err());
+        errors.extend(validate_accel_ram(accel_ram_bytes, cpu).err());
         errors.extend(validate_z3_ram(z3_ram_bytes, cpu).err());
         errors.extend(validate_rtg_card(rtg, cpu).err());
         let board_specs = zorro_boards
@@ -2545,6 +2585,7 @@ impl TryFrom<RawConfig> for Config {
             fast_ram_bytes,
             slow_ram_bytes,
             mb_ram_bytes,
+            accel_ram_bytes,
             z3_ram_bytes,
             zorro_boards,
             wasm_boards,
@@ -3129,8 +3170,11 @@ fn validate_fast_ram(fast: usize, chip: usize) -> Result<()> {
 
 /// Motherboard fast RAM must land on Ramsey's bank layout: four banks of
 /// either 256Kx4 parts (1 MiB per bank) or 1Mx4 parts (4 MiB per bank), so
-/// 1M-4M in 1M steps or 4M/8M/12M/16M. It also needs the Ramsey itself and
-/// a CPU whose address bus reaches $07000000 at all.
+/// 1M-4M in 1M steps or 4M/8M/12M/16M. Beyond the four banks the big-box
+/// memory map reserves $04000000-$06FFFFFF for motherboard RAM expansion;
+/// filling it (whole 4M steps up to 64M) is an A4000/Ramsey-07 option,
+/// sized by the same top-down Kickstart probe. It also needs the Ramsey
+/// itself and a CPU whose address bus reaches $07000000 at all.
 fn validate_mb_ram(mb: usize, mem_controller: MemController, cpu: CpuModel) -> Result<()> {
     const BANK_1M: usize = 1024 * 1024;
     const BANK_4M: usize = 4 * 1024 * 1024;
@@ -3151,13 +3195,56 @@ fn validate_mb_ram(mb: usize, mem_controller: MemController, cpu: CpuModel) -> R
             cpu
         );
     }
+    if mb > 4 * BANK_4M {
+        if mem_controller.ramsey_revision() != Some(crate::ramsey::RamseyRevision::Rev7) {
+            bail!(
+                "motherboard RAM beyond 16M fills the $04000000-$06FFFFFF \
+                 expansion space, an A4000 option (needs \
+                 [machine] mem_controller = \"ramsey-07\")"
+            );
+        }
+        if !mb.is_multiple_of(BANK_4M) || mb > crate::memory::MB_RAM_MAX {
+            bail!(
+                "motherboard RAM {} bytes does not fill the expansion space \
+                 in whole 4M banks (20M-64M in 4M steps)",
+                mb
+            );
+        }
+        return Ok(());
+    }
     let on_1m_banks = mb.is_multiple_of(BANK_1M) && mb <= 4 * BANK_1M;
     let on_4m_banks = mb.is_multiple_of(BANK_4M) && mb <= 4 * BANK_4M;
     if !(on_1m_banks || on_4m_banks) {
         bail!(
             "motherboard RAM {} bytes does not fill Ramsey banks \
-             (1M-4M in 1M steps, or 8M, 12M, 16M)",
+             (1M-4M in 1M steps, or 8M, 12M, 16M; the A4000 extends \
+             in 4M steps to 64M)",
             mb
+        );
+    }
+    Ok(())
+}
+
+/// CPU-slot (accelerator) fast RAM occupies $08000000-$0FFFFFFF, which only
+/// a 32-bit address bus reaches. The bank is whatever DRAM the CPU board
+/// carries, so any whole number of megabytes up to the 128M slot space fits.
+fn validate_accel_ram(accel: usize, cpu: CpuModel) -> Result<()> {
+    const MB: usize = 1024 * 1024;
+    if accel == 0 {
+        return Ok(());
+    }
+    if !cpu_has_32bit_bus(cpu) {
+        bail!(
+            "accelerator RAM sits at $08000000-$0FFFFFFF, beyond a 24-bit \
+             address bus: {:?} cannot reach it (needs a 68020/68030/68040/68060)",
+            cpu
+        );
+    }
+    if !accel.is_multiple_of(MB) || accel > crate::memory::ACCEL_RAM_MAX {
+        bail!(
+            "accelerator RAM {} bytes is not a whole number of megabytes \
+             up to the 128M CPU-slot space",
+            accel
         );
     }
     Ok(())
@@ -3351,6 +3438,9 @@ pub fn about_machine_lines(cfg: &Config) -> Vec<String> {
     }
     if cfg.mb_ram_bytes > 0 {
         ram.push_str(&format!(", {}K motherboard", cfg.mb_ram_bytes / 1024));
+    }
+    if cfg.accel_ram_bytes > 0 {
+        ram.push_str(&format!(", {}K accelerator", cfg.accel_ram_bytes / 1024));
     }
     if cfg.z3_ram_bytes > 0 {
         ram.push_str(&format!(", {}K Z3", cfg.z3_ram_bytes / 1024));
@@ -3611,6 +3701,7 @@ mod tests {
                 fast: Some("8M".to_string()),
                 slow: None,
                 motherboard: None,
+                accelerator: None,
                 z3: None,
             },
             chipset: RawChipset {
@@ -4541,6 +4632,102 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("24-bit"), "{err:#}");
+        Ok(())
+    }
+
+    /// Beyond Ramsey's four banks the A4000 fills the $04000000-$06FFFFFF
+    /// motherboard RAM expansion space in whole 4M banks up to 64M; the
+    /// A3000's Ramsey-04 does not, and partial banks are refused.
+    #[test]
+    fn motherboard_ram_expansion_space_is_an_a4000_option() -> Result<()> {
+        let cfg = parse_config(
+            r#"
+            [machine]
+            profile = "A4000"
+            [memory]
+            motherboard = "64M"
+            "#,
+        )?;
+        assert_eq!(cfg.mb_ram_bytes, 64 * 1024 * 1024);
+        let cfg = parse_config(
+            r#"
+            [machine]
+            profile = "A4000"
+            [memory]
+            motherboard = "20M"
+            "#,
+        )?;
+        assert_eq!(cfg.mb_ram_bytes, 20 * 1024 * 1024);
+
+        // The A3000 stops at Ramsey's own 16M.
+        let err = parse_config(
+            r#"
+            [machine]
+            profile = "A3000"
+            [memory]
+            motherboard = "32M"
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("A4000 option"), "{err:#}");
+
+        // Partial expansion banks and totals past the window are refused.
+        for size in ["18M", "65M", "128M"] {
+            let err = parse_config(&format!(
+                "[machine]\nprofile = \"A4000\"\n[memory]\nmotherboard = \"{size}\""
+            ))
+            .unwrap_err();
+            assert!(err.to_string().contains("expansion space"), "{err:#}");
+        }
+        Ok(())
+    }
+
+    /// Accelerator (CPU-slot) RAM at $08000000 needs only a 32-bit address
+    /// bus: any megabyte total up to the 128M slot space, on any machine.
+    #[test]
+    fn accelerator_ram_gates_on_the_cpu_bus() -> Result<()> {
+        let cfg = parse_config(
+            r#"
+            [cpu]
+            model = "68030"
+            [memory]
+            accelerator = "128M"
+            "#,
+        )?;
+        assert_eq!(cfg.accel_ram_bytes, 128 * 1024 * 1024);
+        // Not tied to the big-box profiles: an accelerated A1200 counts.
+        let cfg = parse_config(
+            r#"
+            [machine]
+            profile = "A1200"
+            [cpu]
+            model = "68030"
+            [memory]
+            accelerator = "64M"
+            "#,
+        )?;
+        assert_eq!(cfg.accel_ram_bytes, 64 * 1024 * 1024);
+
+        // The stock A1200 EC020 has a 24-bit bus.
+        let err = parse_config(
+            r#"
+            [machine]
+            profile = "A1200"
+            [memory]
+            accelerator = "64M"
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("24-bit"), "{err:#}");
+
+        // Sub-megabyte and beyond-the-slot totals are refused.
+        for size in ["512K", "129M"] {
+            let err = parse_config(&format!(
+                "[cpu]\nmodel = \"68030\"\n[memory]\naccelerator = \"{size}\""
+            ))
+            .unwrap_err();
+            assert!(err.to_string().contains("CPU-slot space"), "{err:#}");
+        }
         Ok(())
     }
 
