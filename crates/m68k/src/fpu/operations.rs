@@ -583,8 +583,9 @@ impl CpuCore {
                 if self.fpu_just_reset {
                     self.write_32(bus, addr, 0);
                 } else {
-                    // Total frame size is 7 longs (28 bytes). EA increment already did +4.
-                    self.set_a(ea_reg, self.a(ea_reg).wrapping_add(6 * 4));
+                    // EA increment already did +4; cover the rest of the frame.
+                    let extra = fsave_extra_longs(self);
+                    self.set_a(ea_reg, self.a(ea_reg).wrapping_add(extra * 4));
                     perform_fsave(bus, self, addr, true);
                 }
                 8
@@ -597,8 +598,9 @@ impl CpuCore {
                 if self.fpu_just_reset {
                     self.write_32(bus, addr_hi, 0);
                 } else {
-                    // Total frame size is 28 bytes; one predecrement already happened (-4).
-                    self.set_a(ea_reg, self.a(ea_reg).wrapping_sub(6 * 4));
+                    // One predecrement already happened (-4); cover the rest.
+                    let extra = fsave_extra_longs(self);
+                    self.set_a(ea_reg, self.a(ea_reg).wrapping_sub(extra * 4));
                     perform_fsave(bus, self, addr_hi, false);
                 }
                 8
@@ -740,15 +742,11 @@ impl CpuCore {
                 } else {
                     self.fpu_just_reset = false;
 
-                    // Musashi adjusts A-reg by additional bytes based on frame type.
-                    // (EA macro already did +4.)
-                    let kind = header & 0x00FF_0000;
-                    let extra = match kind {
-                        0x0018_0000 => 6 * 4,  // IDLE
-                        0x0038_0000 => 14 * 4, // UNIMP
-                        0x00B4_0000 => 45 * 4, // BUSY
-                        _ => 0,
-                    };
+                    // The frame's size byte counts the state bytes after the
+                    // header long ($18 6888x idle, $38 unimp, $B4 busy, $28
+                    // 68040 idle, $60 68040 busy); the postincrement covers
+                    // header plus state. (EA macro already did +4.)
+                    let extra = (header >> 16) & 0x00FF;
                     self.set_a(ea_reg, self.a(ea_reg).wrapping_add(extra));
                 }
                 8
@@ -1364,25 +1362,40 @@ impl CpuCore {
     }
 }
 
-fn perform_fsave<B: AddressBus>(bus: &mut B, cpu: &mut CpuCore, addr: u32, inc: bool) {
-    // Generate a 68881-style "IDLE" frame as Musashi does for 68040 FSAVE.
-    // This is sufficient for many OSes that only probe save/restore behavior.
-    if inc {
-        cpu.write_32(bus, addr, 0x1F18_0000);
-        cpu.write_32(bus, addr.wrapping_add(4), 0);
-        cpu.write_32(bus, addr.wrapping_add(8), 0);
-        cpu.write_32(bus, addr.wrapping_add(12), 0);
-        cpu.write_32(bus, addr.wrapping_add(16), 0);
-        cpu.write_32(bus, addr.wrapping_add(20), 0);
-        cpu.write_32(bus, addr.wrapping_add(24), 0x7000_0000);
+/// The FSAVE IDLE frame is CPU-specific: the 68040's on-chip FPU saves a
+/// version-$41 frame with size byte $28 ($2C bytes in total), while the
+/// 68881 co-processor of 020/030 systems saves the $18-byte IDLE frame.
+/// The size byte matters to guests: Linux/m68k validates a signal frame's
+/// saved FPU state against the per-CPU size set ($00/$28/$60 on the 040)
+/// before FRESTOREing it, and kills the process with SIGSEGV on any other
+/// value -- a 68881 frame from a 68040 FSAVE turns every signal-handler
+/// return into a fault.
+fn fsave_idle_frame(cpu: &CpuCore) -> (u32, u32, u32) {
+    if cpu.is_040() {
+        (0x4128_0000, 11, 0) // header, total longs, last long
     } else {
-        cpu.write_32(bus, addr, 0x7000_0000);
-        cpu.write_32(bus, addr.wrapping_sub(4), 0);
-        cpu.write_32(bus, addr.wrapping_sub(8), 0);
-        cpu.write_32(bus, addr.wrapping_sub(12), 0);
-        cpu.write_32(bus, addr.wrapping_sub(16), 0);
-        cpu.write_32(bus, addr.wrapping_sub(20), 0);
-        cpu.write_32(bus, addr.wrapping_sub(24), 0x1F18_0000);
+        (0x1F18_0000, 7, 0x7000_0000)
     }
 }
 
+/// Longs the FSAVE EA register update covers beyond the header long.
+pub(crate) fn fsave_extra_longs(cpu: &CpuCore) -> u32 {
+    fsave_idle_frame(cpu).1 - 1
+}
+
+fn perform_fsave<B: AddressBus>(bus: &mut B, cpu: &mut CpuCore, addr: u32, inc: bool) {
+    let (header, longs, last) = fsave_idle_frame(cpu);
+    if inc {
+        cpu.write_32(bus, addr, header);
+        for i in 1..longs - 1 {
+            cpu.write_32(bus, addr.wrapping_add(i * 4), 0);
+        }
+        cpu.write_32(bus, addr.wrapping_add((longs - 1) * 4), last);
+    } else {
+        cpu.write_32(bus, addr, last);
+        for i in 1..longs - 1 {
+            cpu.write_32(bus, addr.wrapping_sub(i * 4), 0);
+        }
+        cpu.write_32(bus, addr.wrapping_sub((longs - 1) * 4), header);
+    }
+}

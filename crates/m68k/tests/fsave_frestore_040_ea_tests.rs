@@ -144,3 +144,54 @@ fn fsave_indirect_and_frestore_absolute_decode() {
     assert_eq!(cpu.pc, 0x0208);
     assert_eq!(cpu.dar[8], 0x6000, "A0 untouched");
 }
+
+/// A 68040 FSAVE after the FPU has been used writes the 040's own IDLE
+/// frame -- version $41, size byte $28, $2C bytes in total -- not the
+/// 68881 co-processor's $18-byte frame. Guests validate the size byte:
+/// Linux/m68k's sigreturn accepts only $00/$28/$60 from a 68040 and
+/// SIGSEGVs the process on anything else, which turned every signal
+/// handler return in Debian/m68k into a "PANIC: segmentation violation"
+/// loop in init.
+#[test]
+fn fsave_040_idle_frame_has_040_version_and_size() {
+    let (mut cpu, mut bus) = setup_040();
+
+    // Touch the FPU so FSAVE leaves the NULL state: FMOVE.L D0,FPCR.
+    bus.write_word_at(0x0200, 0xF200);
+    bus.write_word_at(0x0202, 0x9000);
+    // FSAVE ($8,A7), then FRESTORE ($8,A7) to round-trip our own frame.
+    bus.write_word_at(0x0204, 0xF32F);
+    bus.write_word_at(0x0206, 0x0008);
+    bus.write_word_at(0x0208, 0xF36F);
+    bus.write_word_at(0x020A, 0x0008);
+
+    let r = step(&mut cpu, &mut bus);
+    assert!(matches!(r, StepResult::Ok { .. }), "FMOVE: {r:?}");
+    let r = step(&mut cpu, &mut bus);
+    assert!(matches!(r, StepResult::Ok { .. }), "FSAVE: {r:?}");
+
+    let header = bus.read_long_at(0x5008);
+    assert_eq!(header >> 24, 0x41, "68040 FPU frame version");
+    assert_eq!((header >> 16) & 0xFF, 0x28, "68040 IDLE frame size byte");
+
+    let r = step(&mut cpu, &mut bus);
+    assert!(matches!(r, StepResult::Ok { .. }), "FRESTORE: {r:?}");
+}
+
+/// FRESTORE (A7)+ of a 68040 IDLE frame advances the stack pointer by the
+/// whole $2C-byte frame, the size the frame's own size byte declares.
+#[test]
+fn frestore_postincrement_advances_by_the_040_frame_size() {
+    let (mut cpu, mut bus) = setup_040();
+
+    bus.write_long_at(0x5000, 0x4128_0000); // 040 IDLE frame header
+    bus.write_word_at(0x0200, 0xF35F); // FRESTORE (A7)+
+
+    let r = step(&mut cpu, &mut bus);
+    assert!(matches!(r, StepResult::Ok { .. }), "FRESTORE (A7)+: {r:?}");
+    assert_eq!(
+        cpu.dar[15],
+        0x5000 + 4 + 0x28,
+        "header + state bytes popped"
+    );
+}

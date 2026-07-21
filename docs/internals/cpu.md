@@ -27,8 +27,11 @@ mul, div, sqrt), ordered compare, round-to-integer, scale, getexp/getman,
 the format conversions, FMOVE/FMOVEM in every operand format (including
 packed decimal), the constant ROM, FBcc/FScc/FDBcc/FTRAPcc, control
 registers, the FPCR rounding mode/precision and the FPSR exception/accrued
-bytes, and the FSAVE/FRESTORE state frames (NULL after reset, 68881-style
-IDLE once touched) are all modelled. The transcendentals (FSIN/FCOS/FTAN,
+bytes, and the FSAVE/FRESTORE state frames (NULL after reset, and once
+touched the CPU's own IDLE frame: the 68881-style $18-byte frame on
+020/030 systems, the 68040's version-$41, $28-byte frame on the 040 --
+guests validate the size byte, and Linux/m68k's sigreturn kills a process
+whose saved FPU frame carries a foreign size) are all modelled. The transcendentals (FSIN/FCOS/FTAN,
 FASIN/FACOS/FATAN, the hyperbolics, FETOX/FETOXM1/FTWOTOX/FTENTOX,
 FLOGN/FLOGNP1/FLOG2/FLOG10) and FSINCOS run in extended precision too: a
 double-`FloatX80` ("double-double", ~128-bit) layer
