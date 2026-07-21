@@ -69,6 +69,11 @@ impl CpuCore {
             // If a bus/address error occurred during fetch, the exception is already taken.
             if self.run_mode == RUN_MODE_BERR_AERR_RESET {
                 self.end_faulted_instruction();
+                // A double fault halts the CPU: no further fetches, and the
+                // fault run mode is left set for is_halted().
+                if self.stopped != 0 {
+                    break;
+                }
                 continue;
             }
 
@@ -95,6 +100,12 @@ impl CpuCore {
             // and jumped to the handler. Skip trace/interrupt checks for the faulting instruction.
             if self.run_mode == RUN_MODE_BERR_AERR_RESET {
                 self.end_faulted_instruction();
+                // A double fault halts the CPU: stop the batch dead instead
+                // of letting another opcode through before the bottom-of-loop
+                // stopped check.
+                if self.stopped != 0 {
+                    break;
+                }
                 continue;
             }
 

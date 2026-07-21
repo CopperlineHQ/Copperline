@@ -500,3 +500,27 @@ fn moves_data_fault_vectors_in_supervisor_space() {
         "writeback data is the faulted store's value"
     );
 }
+
+/// A fault while delivering a fault is a double bus fault: the CPU halts
+/// on the spot -- classified as halted, not stopped -- and the batch
+/// execute loop may not fetch another opcode past it (a halted 68k stays
+/// dead until reset).
+#[test]
+fn double_fault_halts_the_batch_loop_immediately() {
+    let mut bus = TestBus::new(0x10000);
+    let mut cpu = user_mode_040_with_table(&mut bus, 0);
+
+    // Rebank the supervisor stack onto the invalid page so the fault
+    // dispatch's own frame pushes fault.
+    cpu.set_sr(0x2700);
+    cpu.set_a(7, FAULT_PAGE + 0x100);
+    cpu.set_sr(0x0000);
+    cpu.set_a(7, USP);
+
+    bus.write_word(CODE, 0x2010); // MOVE.L (A0),D0: data fault
+
+    cpu.execute(&mut bus, 400);
+    assert!(cpu.is_halted(), "double fault must report as halted");
+    assert!(!cpu.is_stopped(), "a halt is not a STOP");
+    assert_eq!(cpu.pc, 0, "no opcode fetched or executed past the halt");
+}

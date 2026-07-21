@@ -1244,6 +1244,13 @@ impl CpuCore {
             self.set_sr_noint_nosp(handler_sr);
             self.dar = handler_dar;
         }
+        // A double fault mid-dispatch has parked the CPU: keep the fault
+        // run mode so `is_halted()` classifies it (a halted 68k stays dead
+        // until reset, distinct from a STOP), and let the caller stop
+        // executing rather than resume.
+        if self.stopped != 0 {
+            return;
+        }
         self.run_mode = super::execute::RUN_MODE_NORMAL;
     }
 
