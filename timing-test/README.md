@@ -271,11 +271,19 @@ runs from slow/trapdoor RAM.
 `tests/probe_golden.rs` runs the timing test and the stable display probes
 in CI on every push: each probe's committed `.bin` is wrapped into a
 bootable ADF, booted on the bundled AROS ROM (the probes take over the
-machine, so the settled frame is ROM-independent -- verified byte-identical
-to a Kickstart 1.3 boot), captured as a raw screenshot at a fixed emulated
-time, and compared pixel-for-pixel against the reference render committed
-under `golden/`. The emulator core is deterministic, so any pixel change is
-a real behaviour change.
+machine, so the settled frame of the display-geometry probes is
+ROM-independent -- verified byte-identical to a Kickstart 1.3 boot),
+captured as a raw screenshot at a fixed emulated time, and compared
+pixel-for-pixel against the reference render committed under `golden/`.
+The emulator core is deterministic, so any pixel change is a real
+behaviour change.
+
+The two probes that render live E-clock-referenced counts (`timing-test`,
+`bltprobe-pace`) are the exception: the E-clock and DMA-cadence phase at
+bootblock handoff depends on how long the ROM took to boot, so their
+displayed counts shift by a tick or two whenever the bundled AROS ROM is
+refreshed (or a count sitting on an 8-iteration display-bucket edge flips a
+whole bar word). Re-bless and review the diff after a ROM refresh.
 
 Each probe is its own `#[test]`, so the harness runs the emulator boots in
 parallel on the available cores (the full suite of 20 takes ~20 s on an
