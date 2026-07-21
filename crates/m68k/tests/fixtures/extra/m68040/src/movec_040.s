@@ -30,15 +30,25 @@ run_test:
     /* =================================================================== */
     /* Test 4: TC - Translation Control */
     /* =================================================================== */
+    /* Shield fetches and data with transparent translation first: with E
+       set and no page tables, a real 68040 faults the next fetch. The
+       shield is dropped before the DACR/IACR value tests below (those are
+       the same registers under their EC040 names). */
+    move.l #0x00FFC000, %d0     | base 0x00, mask 0xFF (all), E=1, both FCs
+    movec %d0, %itt0
+    movec %d0, %dtt0
+
     move.l #0x00008000, %d0     | Enable bit set
     movec %d0, %tc              | Write TC
     movec %tc, %d1              | Read back
     cmp.l %d0, %d1
     bne TEST_FAIL
-    
-    /* Disable for safety */
+
+    /* Disable for safety, dropping the shield with it */
     move.l #0, %d0
     movec %d0, %tc
+    movec %d0, %itt0
+    movec %d0, %dtt0
     
     /* =================================================================== */
     /* Test 5: DACR0 - Data Access Control 0 */

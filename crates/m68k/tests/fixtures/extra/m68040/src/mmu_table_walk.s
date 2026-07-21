@@ -4,11 +4,19 @@
 /* and that address translation concepts are functional */
 
 run_test:
+    /* Cover the whole address space with transparent translation before
+       touching TC: with E set and no page tables, a real 68040 faults the
+       very next instruction fetch (and the fault dispatch itself), so
+       bring-up code shields fetches and data with the TTRs first. */
+    move.l #0x00FFC000, %d0 | base 0x00, mask 0xFF (all), E=1, both FC spaces
+    movec %d0, %itt0
+    movec %d0, %dtt0
+
     /* =================================================================== */
     /* Test 1: TC (Translation Control) Register */
     /* Verify we can enable/disable translation via TC */
     /* =================================================================== */
-    
+
     /* Read current TC value */
     movec %tc, %d0
     
@@ -102,5 +110,7 @@ run_test:
     movec %d0, %tc
     movec %d0, %urp
     movec %d0, %srp
-    
+    movec %d0, %itt0
+    movec %d0, %dtt0
+
     rts
