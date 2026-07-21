@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Z3660 RTG board stub.
+//! Z3660 RTG board.
 //!
 //! The Z3660 accelerator's FPGA presents its RTG core as an ordinary
 //! Zorro III autoconfig board (manufacturer 0x144B, product 1, one 128 MB
@@ -10,9 +10,9 @@
 //! the rest of the window is board RAM (P96 VRAM from +0x200000, the
 //! GFXData blit-parameter mailbox at +0x3200000).
 //!
-//! Bring-up state: the board autoconfigs, the identity/status registers
-//! answer, every register access is latched and logged, and the RAM region
-//! is honest memory. The display pipeline presents the panned framebuffer
+//! Implemented: the board autoconfigs, the identity/status registers
+//! answer, every register access is latched, and the RAM region is honest
+//! memory. The display pipeline presents the panned framebuffer
 //! (all four pixel formats, palette captured from the upload stream) when
 //! the driver switches the display to RTG, and the core blitter ops
 //! (fill/copy/invert/template/pattern/line/planar) execute into VRAM on

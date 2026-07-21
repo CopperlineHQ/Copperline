@@ -895,9 +895,10 @@ fn print_help() {
          \n\
          Options:\n  \
          -c, --config FILE              load configuration from FILE (default: ./copperline.toml)\n  \
-         --model NAME                   machine profile: A500, A500Plus, A600, A1200, CDTV, CD32\n  \
+         --model NAME                   machine profile: A1000, A500, A500OCS, A500Plus, A600,\n  \
+         \x20                              A1200, A3000, A4000, CDTV, CD32\n  \
          --chipset NAME                 chipset preset: OCS, ECS, or AGA\n  \
-         --cpu MODEL                    CPU: 68000, 68EC020, 68020, 68030, 68040, or 68060\n  \
+         --cpu MODEL                    CPU: 68000, 68010, 68EC020, 68020, 68030, 68040, or 68060\n  \
          --cpu-clock MHZ                CPU clock in MHz (default: the model's stock speed)\n  \
          --fpu / --no-fpu               fit / omit a 68881/68882 (68040/68060 on-die)\n  \
          --chip SIZE                    chip RAM size, e.g. 512K, 1M, 2M\n  \
@@ -1007,7 +1008,7 @@ fn print_help() {
          \n\
          If ROM is given on the command line it overrides the rom path from\n\
          the config. If no config file exists, built-in defaults are used:\n  \
-         CPU: 68000   chip RAM: 512K   slow RAM: 512K   fast RAM: 0   chipset: OCS\n  \
+         CPU: 68000   chip RAM: 512K   slow RAM: 512K   fast RAM: 0   chipset: ECS\n  \
          ROM: bundled AROS"
     );
 }

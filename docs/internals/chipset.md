@@ -223,15 +223,17 @@ the extra cycle), matching the CIASetInt latency observable from the CPU.
 
 CIA-A carries /OVL (the reset-time ROM overlay at `$0`), the keyboard
 serial port (SDR/ICR with the KDAT handshake and an emulated
-keyboard-controller pacing delay), and the fire-button lines. CIA-B
-carries the floppy control lines (motor, select, side, step) and the FLAG
-input pulsed by the disk index. Its port-B access pulse (`PC`) is also the
-Centronics `/STROBE`: the bus samples the physical PRB pins without creating
-another access, forwards one strobe to the attached parallel peripheral, and
-feeds an accepted byte's `/ACK` edge back through CIA-A FLAG. With no
-peripheral attached the line remains unacknowledged, like an unplugged cable.
-PB6/PB7 pulse-output mode holds the selected pin low for one E-clock; reading
-PRB observes the pulse without shortening it.
+keyboard-controller pacing delay), the fire-button lines, and the
+Centronics parallel data port: its port-B access pulse (`PC`) is the
+Centronics `/STROBE`, so the bus samples the physical PRB pins without
+creating another access, forwards one strobe to the attached parallel
+peripheral, and feeds an accepted byte's `/ACK` edge back through CIA-A
+FLAG. With no peripheral attached the line remains unacknowledged, like an
+unplugged cable. CIA-B carries the floppy control lines (motor, select,
+side, step), the FLAG input pulsed by the disk index, and the parallel
+status lines (BUSY/POUT/SEL on port A bits 0-2). PB6/PB7 pulse-output mode
+holds the selected pin low for one E-clock; reading PRB observes the pulse
+without shortening it.
 
 CIA timing is resolved on the E-clock grid (one tick per five colour clocks),
 which is the smallest phase the current CPU/bus boundary exposes. Timer
