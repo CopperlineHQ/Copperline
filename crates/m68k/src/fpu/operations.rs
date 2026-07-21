@@ -534,11 +534,46 @@ impl CpuCore {
         }
     }
 
+    /// Resolve a control-mode effective address for FSAVE/FRESTORE,
+    /// consuming any extension words: (An), (d16,An), (d8,An,Xn),
+    /// (xxx).W/(xxx).L, and -- for FRESTORE, whose frame is a source
+    /// operand -- (d16,PC)/(d8,PC,Xn). The register-direct, (An)+/-(An),
+    /// and immediate modes are not control modes; the callers keep their
+    /// own arms for the increment/decrement forms and everything else is
+    /// an undefined encoding (None -> Line-F).
+    fn fpu_frame_control_ea<B: AddressBus>(
+        &mut self,
+        bus: &mut B,
+        ea_mode: u8,
+        ea_reg: usize,
+        allow_pc_relative: bool,
+    ) -> Option<u32> {
+        let mode = AddressingMode::decode(ea_mode, ea_reg as u8)?;
+        let control = matches!(
+            mode,
+            AddressingMode::AddressIndirect(_)
+                | AddressingMode::Displacement(_)
+                | AddressingMode::Index(_)
+                | AddressingMode::AbsoluteShort
+                | AddressingMode::AbsoluteLong
+        ) || (allow_pc_relative
+            && matches!(
+                mode,
+                AddressingMode::PcDisplacement | AddressingMode::PcIndex
+            ));
+        if !control {
+            return None;
+        }
+        match self.resolve_ea(bus, mode, Size::Long) {
+            EaResult::Memory(addr) => Some(addr),
+            _ => None,
+        }
+    }
+
     fn exec_fsave<B: AddressBus>(&mut self, bus: &mut B, ea_mode: u8, ea_reg: usize) -> i32 {
         if self.is_060() {
             return self.exec_fsave_060(bus, ea_mode, ea_reg);
         }
-        // Musashi supports only (An)+ and -(An) here for 68040.
         match ea_mode {
             3 => {
                 // (An)+
@@ -568,7 +603,21 @@ impl CpuCore {
                 }
                 8
             }
-            _ => 0,
+            // Control modes -- (An), (d16,An), (d8,An,Xn), (xxx).W/.L --
+            // write the frame ascending from the resolved address with no
+            // register update (Linux/m68k's bootstrap parks FPU state with
+            // FSAVE/FRESTORE d16(sp)).
+            _ => match self.fpu_frame_control_ea(bus, ea_mode, ea_reg, false) {
+                Some(addr) => {
+                    if self.fpu_just_reset {
+                        self.write_32(bus, addr, 0);
+                    } else {
+                        perform_fsave(bus, self, addr, true);
+                    }
+                    8
+                }
+                None => 0,
+            },
         }
     }
 
@@ -609,7 +658,18 @@ impl CpuCore {
                 }
                 8
             }
-            _ => 0,
+            // Remaining control modes: frame written at the resolved
+            // address, no register update.
+            _ => match self.fpu_frame_control_ea(bus, ea_mode, ea_reg, false) {
+                Some(addr) => {
+                    self.write_32(bus, addr, header);
+                    for off in (4..size).step_by(4) {
+                        self.write_32(bus, addr.wrapping_add(off), 0);
+                    }
+                    8
+                }
+                None => 0,
+            },
         }
     }
 
@@ -635,7 +695,21 @@ impl CpuCore {
                 }
                 8
             }
-            _ => 0,
+            // Remaining control modes, plus PC-relative (the frame is a
+            // source operand): read the header at the resolved address,
+            // no register update.
+            _ => match self.fpu_frame_control_ea(bus, ea_mode, ea_reg, true) {
+                Some(addr) => {
+                    let header = self.read_32(bus, addr);
+                    if (header & 0x0000_FF00) == 0 {
+                        self.do_frestore_null();
+                    } else {
+                        self.fpu_just_reset = false;
+                    }
+                    8
+                }
+                None => 0,
+            },
         }
     }
 
@@ -679,7 +753,22 @@ impl CpuCore {
                 }
                 8
             }
-            _ => 0,
+            // Remaining control modes, plus PC-relative (the frame is a
+            // source operand): read the header at the resolved address,
+            // no register update. Linux/m68k's Amiga bootstrap resets the
+            // FPU with FRESTORE d16(sp) before jumping to the kernel.
+            _ => match self.fpu_frame_control_ea(bus, ea_mode, ea_reg, true) {
+                Some(addr) => {
+                    let header = self.read_32(bus, addr);
+                    if (header & 0xFF00_0000) == 0 {
+                        self.do_frestore_null();
+                    } else {
+                        self.fpu_just_reset = false;
+                    }
+                    8
+                }
+                None => 0,
+            },
         }
     }
 
