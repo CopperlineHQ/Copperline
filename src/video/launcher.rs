@@ -1475,12 +1475,21 @@ impl MachineSetup {
             F::Icache => reason(self.cpu.has_instruction_cache(), "needs 68020+"),
             F::Dcache => reason(self.cpu.has_data_cache(), "needs 68030/040"),
             F::Z3Ram => reason(cpu_is_32bit(self.cpu), "needs 32-bit CPU"),
+            // The Z3660 is a Zorro III board: same address-reach gate.
+            F::Rtg => reason(cpu_is_32bit(self.cpu), "needs 32-bit CPU"),
             // Motherboard fast RAM hangs off Ramsey, which only the big-box
-            // profiles fit.
-            F::MbRam => reason(
-                matches!(self.model, Some(MachineModel::A3000 | MachineModel::A4000)),
-                "needs A3000/A4000",
-            ),
+            // profiles fit, and its bank ends beyond a 24-bit address bus.
+            F::MbRam => {
+                let big_box = matches!(self.model, Some(MachineModel::A3000 | MachineModel::A4000));
+                reason(
+                    big_box && cpu_is_32bit(self.cpu),
+                    if big_box {
+                        "needs 32-bit CPU"
+                    } else {
+                        "needs A3000/A4000"
+                    },
+                )
+            }
             F::IdeMaster | F::IdeSlave => reason(self.has_ide(), "needs A600/A1200/A4000"),
             // The ROM and drives belong to the fitted controller; greyed with
             // none. The A3000's motherboard SCSI has no ROM of its own, and
@@ -1877,7 +1886,13 @@ impl MachineSetup {
                 self.dcache = self.cpu.has_data_cache();
                 self.clock_mhz = self.cpu.default_clock_mhz();
                 if !cpu_is_32bit(self.cpu) {
+                    // Zorro III RAM, motherboard RAM, and the Zorro III RTG
+                    // card all sit beyond a 24-bit bus; dropping them (rather
+                    // than just greying their rows) keeps the emitted config
+                    // launchable.
                     self.z3_ram = 0;
+                    self.mb_ram = 0;
+                    self.rtg = RtgCard::None;
                 }
             }
             F::Clock => self.clock_mhz = cycle_floats(&CLOCK_PRESETS, self.clock_mhz, forward),
@@ -3195,6 +3210,42 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Motherboard RAM tracks both of its hardware constraints: the big-box
+    /// model gate and the CPU's address reach. Downgrading the CPU to a
+    /// 24-bit part drops the profile-default bank (not just the row's
+    /// editability) so the emitted config still validates, and the greyed
+    /// row names whichever constraint bit.
+    #[test]
+    fn motherboard_ram_follows_model_and_cpu_gates() {
+        let mut s = MachineSetup::default();
+        assert_eq!(
+            s.disabled_reason(LauncherField::MbRam),
+            Some("needs A3000/A4000")
+        );
+        s.select_model(Some(MachineModel::A3000));
+        assert!(s.applies(LauncherField::MbRam));
+        assert_eq!(s.mb_ram, 4 * 1024 * 1024);
+        while s.cpu != CpuModel::M68000 {
+            s.cycle(LauncherField::Cpu, true);
+        }
+        assert_eq!(s.mb_ram, 0);
+        assert_eq!(
+            s.disabled_reason(LauncherField::MbRam),
+            Some("needs 32-bit CPU")
+        );
+        // The profile's Zorro III RTG card is beyond a 24-bit bus too.
+        assert_eq!(s.rtg, RtgCard::None);
+        assert_eq!(
+            s.disabled_reason(LauncherField::Rtg),
+            Some("needs 32-bit CPU")
+        );
+        // The raw config overrides the profile default back to zero, so
+        // this machine still launches.
+        assert_eq!(s.to_raw().memory.motherboard.as_deref(), Some("0"));
+        s.build_config()
+            .expect("68000 A3000 with no mb RAM validates");
     }
 
     #[test]

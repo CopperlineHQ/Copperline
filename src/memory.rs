@@ -28,6 +28,10 @@ pub const SLOW_RAM_BASE: u64 = 0x00C0_0000;
 /// Kickstart sizes it from the top down; unpopulated space below the fitted
 /// RAM stays undecoded (Fat Gary times the cycle out).
 pub const MB_RAM_TOP: u64 = 0x0800_0000;
+/// The most motherboard RAM Ramsey can drive: four 4 MiB banks of 1Mx4
+/// parts. [`Memory::fit_mb_ram`] enforces this, which keeps the
+/// [`Memory::mb_ram_base`] subtraction from ever underflowing.
+pub const MB_RAM_MAX: usize = 16 * 1024 * 1024;
 /// Amiga 1000 WCS / WOM: 256 KiB of writable control store at $FC0000 that
 /// the boot ROM loads Kickstart into and then write-protects. The 256 KiB
 /// boot-ROM window ($F80000-$FBFFFF) sits immediately below it, so a boot
@@ -191,8 +195,15 @@ impl Memory {
     }
 
     /// Fit `bytes` of Ramsey-controlled motherboard fast RAM (see
-    /// [`Memory::mb_ram`]). Zero removes the bank.
+    /// [`Memory::mb_ram`]). Zero removes the bank. Panics beyond
+    /// [`MB_RAM_MAX`]: config validation rejects such sizes long before
+    /// this, and enforcing the bound at the only mutation point keeps
+    /// [`Memory::mb_ram_base`] a plain subtraction.
     pub fn fit_mb_ram(&mut self, bytes: usize) {
+        assert!(
+            bytes <= MB_RAM_MAX,
+            "motherboard RAM {bytes} bytes exceeds Ramsey's {MB_RAM_MAX}-byte maximum"
+        );
         self.mb_ram = vec![0u8; bytes];
     }
 
@@ -301,6 +312,15 @@ mod tests {
         mem.power_on_reset();
         assert_eq!(mem.mb_ram[0], 0);
         assert_eq!(mem.mb_ram.len(), 2 * 1024 * 1024);
+    }
+
+    /// The only mutation point enforces Ramsey's 16 MiB maximum, which is
+    /// what keeps `mb_ram_base` a plain subtraction.
+    #[test]
+    #[should_panic(expected = "exceeds Ramsey")]
+    fn mb_ram_beyond_the_ramsey_maximum_is_refused() {
+        let mut mem = Memory::placeholder(1024, 0, ZorroChain::default());
+        mem.fit_mb_ram(MB_RAM_MAX + 1);
     }
 
     #[test]
