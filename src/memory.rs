@@ -23,6 +23,11 @@ pub const CHIP_WINDOW_SIZE: u64 = 0x0020_0000;
 #[cfg_attr(not(test), allow(dead_code))]
 pub const FAST_RAM_BASE: u64 = 0x0020_0000;
 pub const SLOW_RAM_BASE: u64 = 0x00C0_0000;
+/// Exclusive top of the Ramsey-controlled motherboard fast RAM (A3000/A4000):
+/// the bank ends here and grows downward, so a full 16 MiB reaches $07000000.
+/// Kickstart sizes it from the top down; unpopulated space below the fitted
+/// RAM stays undecoded (Fat Gary times the cycle out).
+pub const MB_RAM_TOP: u64 = 0x0800_0000;
 /// Amiga 1000 WCS / WOM: 256 KiB of writable control store at $FC0000 that
 /// the boot ROM loads Kickstart into and then write-protects. The 256 KiB
 /// boot-ROM window ($F80000-$FBFFFF) sits immediately below it, so a boot
@@ -82,6 +87,10 @@ pub fn normalize_a1000_boot_rom(rom: Vec<u8>) -> Result<Vec<u8>> {
 pub struct Memory {
     pub chip_ram: Vec<u8>,
     pub slow_ram: Vec<u8>,
+    /// Ramsey-controlled motherboard fast RAM (A3000/A4000): 32-bit local
+    /// RAM off the chip bus, ending at [`MB_RAM_TOP`] and growing downward.
+    /// Empty on machines without a Ramsey; fitted via [`Memory::fit_mb_ram`].
+    pub mb_ram: Vec<u8>,
     pub rom: Vec<u8>,
     pub overlay: bool,
     /// Zorro expansion boards (autoconfig chain plus their RAM windows).
@@ -170,6 +179,7 @@ impl Memory {
         Self {
             chip_ram: vec![0u8; chip_ram_bytes],
             slow_ram: vec![0u8; slow_ram_bytes],
+            mb_ram: Vec::new(),
             rom,
             overlay: true,
             zorro,
@@ -178,6 +188,18 @@ impl Memory {
             wcs,
             wcs_write_protected: false,
         }
+    }
+
+    /// Fit `bytes` of Ramsey-controlled motherboard fast RAM (see
+    /// [`Memory::mb_ram`]). Zero removes the bank.
+    pub fn fit_mb_ram(&mut self, bytes: usize) {
+        self.mb_ram = vec![0u8; bytes];
+    }
+
+    /// Base address of the fitted motherboard RAM: the bank ends at
+    /// [`MB_RAM_TOP`] and grows downward, so the base depends on its size.
+    pub fn mb_ram_base(&self) -> u64 {
+        MB_RAM_TOP - self.mb_ram.len() as u64
     }
 
     /// Attach an extended ROM image: 512 KiB maps at $E00000 (CD32),
@@ -211,6 +233,7 @@ impl Memory {
     pub fn power_on_reset(&mut self) {
         self.chip_ram.fill(0);
         self.slow_ram.fill(0);
+        self.mb_ram.fill(0);
         // Cold boot loses the WCS contents and returns the latch to boot mode
         // (WCS writable), so the A1000 reloads Kickstart from disk. A warm
         // (keyboard) reset preserves the WCS, as the real machine does.
@@ -264,6 +287,20 @@ mod tests {
         assert_eq!(&mem.rom[0..4], &0x0000_4000u32.to_be_bytes()); // initial SP
         assert_eq!(&mem.rom[4..8], &0x00F8_0010u32.to_be_bytes()); // initial PC
         assert_eq!(&mem.rom[0x10..0x12], &0x60FEu16.to_be_bytes()); // bra.s self
+    }
+
+    #[test]
+    fn mb_ram_ends_at_its_top_and_clears_on_power_on() {
+        let mut mem = Memory::placeholder(1024, 0, ZorroChain::default());
+        assert_eq!(mem.mb_ram_base(), MB_RAM_TOP); // empty bank: zero-length
+        mem.fit_mb_ram(2 * 1024 * 1024);
+        // The bank grows downward from MB_RAM_TOP, so the base tracks size.
+        assert_eq!(mem.mb_ram_base(), MB_RAM_TOP - 2 * 1024 * 1024);
+        mem.mb_ram[0] = 0xAA;
+        // Power-on loses the contents like every other RAM.
+        mem.power_on_reset();
+        assert_eq!(mem.mb_ram[0], 0);
+        assert_eq!(mem.mb_ram.len(), 2 * 1024 * 1024);
     }
 
     #[test]

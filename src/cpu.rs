@@ -2219,8 +2219,8 @@ impl M68kMachine {
 /// offset into that region's backing store. Shared by every access path
 /// (peek/debug-write for the debugger, and the real uncached read/write)
 /// so the plain-memory part of the address map -- overlay ROM, chip RAM,
-/// Zorro RAM, slow RAM, ROM, WCS, extended ROM -- is only decoded in one
-/// place. I/O regions (CIA, RTC, Gayle, custom chips, Zorro devices,
+/// Zorro RAM, slow RAM, motherboard RAM, ROM, WCS, extended ROM -- is only
+/// decoded in one place. I/O regions (CIA, RTC, Gayle, custom chips, Zorro devices,
 /// autoconfig) are not plain memory and stay in `read_sized_uncached` /
 /// `write_sized`, which only reach them once this classifier returns
 /// `None`.
@@ -2229,6 +2229,7 @@ enum PlainMemRegion {
     ChipRam(usize),
     ZorroRam(usize, usize),
     SlowRam(usize),
+    MbRam(usize),
     Rom(usize),
     Wcs(usize),
     ExtendedRom(usize),
@@ -2251,6 +2252,14 @@ impl CpuBus {
         }
         if let Some(off) = region_offset(self.bus.mem.slow_ram.len(), SLOW_RAM_BASE, addr, size) {
             return Some(PlainMemRegion::SlowRam(off));
+        }
+        if let Some(off) = region_offset(
+            self.bus.mem.mb_ram.len(),
+            self.bus.mem.mb_ram_base(),
+            addr,
+            size,
+        ) {
+            return Some(PlainMemRegion::MbRam(off));
         }
         if let Some(off) = region_offset(self.bus.mem.rom.len(), ROM_BASE, addr, size) {
             return Some(PlainMemRegion::Rom(off));
@@ -2403,6 +2412,7 @@ impl CpuBus {
             Some(PlainMemRegion::ChipRam(off)) => self.bus.mem.chip_ram[off],
             Some(PlainMemRegion::ZorroRam(board, off)) => self.bus.mem.zorro.board_ram(board)[off],
             Some(PlainMemRegion::SlowRam(off)) => self.bus.mem.slow_ram[off],
+            Some(PlainMemRegion::MbRam(off)) => self.bus.mem.mb_ram[off],
             Some(PlainMemRegion::Wcs(off)) => self.bus.mem.wcs[off],
             Some(PlainMemRegion::ExtendedRom(off)) => self.bus.mem.extended_rom[off],
             None => 0xFF,
@@ -2424,6 +2434,11 @@ impl CpuBus {
             }
             Some(PlainMemRegion::SlowRam(off)) => {
                 self.bus.mem.slow_ram[off] = value;
+                self.invalidate_debug_write(addr, 1);
+                true
+            }
+            Some(PlainMemRegion::MbRam(off)) => {
+                self.bus.mem.mb_ram[off] = value;
                 self.invalidate_debug_write(addr, 1);
                 true
             }
@@ -2554,6 +2569,13 @@ impl CpuBus {
         self.chip_window_offset(addr, 1).is_some()
             || self.bus.mem.zorro.region_at(addr, 1).is_some()
             || region_offset(self.bus.mem.slow_ram.len(), SLOW_RAM_BASE, addr, 1).is_some()
+            || region_offset(
+                self.bus.mem.mb_ram.len(),
+                self.bus.mem.mb_ram_base(),
+                addr,
+                1,
+            )
+            .is_some()
             || region_offset(self.bus.mem.rom.len(), ROM_BASE, addr, 1).is_some()
             || region_offset(
                 self.bus.mem.extended_rom.len(),
@@ -2564,14 +2586,21 @@ impl CpuBus {
             .is_some()
     }
 
-    /// What the data cache may hold: expansion RAM and ROM only. Chip and
-    /// slow RAM are excluded (CIIN), as on real Amigas, because DMA writes
-    /// them behind the CPU's back.
+    /// What the data cache may hold: expansion RAM, motherboard RAM, and ROM
+    /// only. Chip and slow RAM are excluded (CIIN), as on real Amigas,
+    /// because DMA writes them behind the CPU's back.
     fn dcache_cacheable(&self, addr: u32) -> bool {
         if self.overlay_rom_offset(addr, 1).is_some() {
             return false;
         }
         self.bus.mem.zorro.region_at(addr, 1).is_some()
+            || region_offset(
+                self.bus.mem.mb_ram.len(),
+                self.bus.mem.mb_ram_base(),
+                addr,
+                1,
+            )
+            .is_some()
             || region_offset(self.bus.mem.rom.len(), ROM_BASE, addr, 1).is_some()
             || region_offset(
                 self.bus.mem.extended_rom.len(),
@@ -2598,6 +2627,13 @@ impl CpuBus {
                 // chip bus, exactly like the old fixed fast RAM mapping.
                 self.bus.cpu_external_access(Self::access_words(size));
                 return read_be(self.bus.mem.zorro.board_ram(board), off, size);
+            }
+            Some(PlainMemRegion::MbRam(off)) => {
+                // Ramsey-controlled motherboard RAM (A3000/A4000): 32-bit
+                // local RAM off the chip bus, at uncontended external speed
+                // like expansion RAM.
+                self.bus.cpu_external_access(Self::access_words(size));
+                return read_be(&self.bus.mem.mb_ram, off, size);
             }
             Some(PlainMemRegion::SlowRam(off)) => {
                 // "Slow"/trapdoor RAM at $C00000 is decoded by Gary and reached
@@ -2822,6 +2858,11 @@ impl CpuBus {
             Some(PlainMemRegion::ZorroRam(board, off)) => {
                 self.bus.cpu_external_access(Self::access_words(size));
                 write_be(self.bus.mem.zorro.board_ram_mut(board), off, size, value);
+                return;
+            }
+            Some(PlainMemRegion::MbRam(off)) => {
+                self.bus.cpu_external_access(Self::access_words(size));
+                write_be(&mut self.bus.mem.mb_ram, off, size, value);
                 return;
             }
             Some(PlainMemRegion::SlowRam(off)) => {
@@ -3353,6 +3394,7 @@ mod tests {
             Memory {
                 chip_ram,
                 slow_ram: vec![0; 64 * 1024],
+                mb_ram: Vec::new(),
                 rom,
                 overlay: false,
                 zorro,
@@ -3405,6 +3447,45 @@ mod tests {
         let off = region_offset(bus.mem.chip_ram.len(), CHIP_RAM_BASE, address, 4)
             .expect("test chip long address must fit chip RAM");
         bus.mem.chip_ram[off..off + 4].copy_from_slice(&value.to_be_bytes());
+    }
+
+    /// Ramsey motherboard RAM decodes at the top of its window (ending at
+    /// $08000000) for a 32-bit CPU: stores land in the bank and read back
+    /// through the same decode. The bank sits beyond a 24-bit address bus,
+    /// so the same access on a 68000 wraps into the low 16 MB and must
+    /// leave the fitted RAM untouched.
+    #[test]
+    fn motherboard_ram_decodes_at_the_top_of_its_window() -> Result<()> {
+        let program = [
+            0x23FCu16, 0xCAFE, 0xBABE, 0x07FF, 0xFFFC, // move.l #$CAFEBABE,$07FFFFFC
+            0x2039, 0x07FF, 0xFFFC, // move.l $07FFFFFC,d0
+            0x23C0, 0x0000, 0x1000, // move.l d0,$1000
+            0x60FE, // bra.s *
+        ];
+
+        let mut bus = test_bus_with_pc(0x00F8_0100);
+        bus.mem.fit_mb_ram(2 * 1024 * 1024);
+        assert_eq!(bus.mem.mb_ram_base(), 0x07E0_0000);
+        write_program(&mut bus, 0x00F8_0100, &program);
+        let mut machine = build(bus, CpuModel::M68030, false, 2, Default::default(), false)?;
+        machine.step_slice(3)?;
+        let mem = &machine.bus.bus.mem;
+        let top = mem.mb_ram.len();
+        assert_eq!(&mem.mb_ram[top - 4..], &0xCAFE_BABEu32.to_be_bytes());
+        // The readback flowed through d0 into chip RAM.
+        assert_eq!(&mem.chip_ram[0x1000..0x1004], &0xCAFE_BABEu32.to_be_bytes());
+        // The debugger's any-region peek sees the bank at its bus address.
+        assert_eq!(machine.bus.bus.peek_word_any(0x07FF_FFFC), 0xCAFE);
+
+        let mut bus = test_bus_with_pc(0x00F8_0100);
+        bus.mem.fit_mb_ram(2 * 1024 * 1024);
+        write_program(&mut bus, 0x00F8_0100, &program);
+        let mut machine = build(bus, CpuModel::M68000, false, 2, Default::default(), false)?;
+        machine.step_slice(3)?;
+        let mem = &machine.bus.bus.mem;
+        let top = mem.mb_ram.len();
+        assert_eq!(&mem.mb_ram[top - 4..], &[0, 0, 0, 0]);
+        Ok(())
     }
 
     fn write_chip_word(bus: &mut Bus, address: u32, value: u16) {
@@ -3674,6 +3755,7 @@ mod tests {
                 Memory {
                     chip_ram: vec![0; 512 * 1024],
                     slow_ram: Vec::new(),
+                    mb_ram: Vec::new(),
                     rom,
                     overlay: true,
                     zorro: ZorroChain::default(),

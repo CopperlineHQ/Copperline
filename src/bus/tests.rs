@@ -215,6 +215,7 @@ fn empty_bus_with_chip_ram(chip_ram_bytes: usize) -> Bus {
         Memory {
             chip_ram: vec![0; chip_ram_bytes],
             slow_ram: Vec::new(),
+            mb_ram: Vec::new(),
             rom: vec![0; 512 * 1024],
             overlay: true,
             zorro: crate::zorro::ZorroChain::default(),
@@ -234,6 +235,7 @@ fn empty_bus_with_collect_audio() -> (Bus, SharedFrames) {
         Memory {
             chip_ram: vec![0; 512 * 1024],
             slow_ram: Vec::new(),
+            mb_ram: Vec::new(),
             rom: vec![0; 512 * 1024],
             overlay: true,
             zorro: crate::zorro::ZorroChain::default(),
@@ -10843,4 +10845,24 @@ fn waveform_stop_finishes_early_and_rearm_replaces() {
     assert_ne!(bus.wave_status().unwrap().state, "armed");
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&path2);
+}
+
+/// The debugger-facing helpers must reach the Ramsey motherboard RAM bank:
+/// peek_word_any serves memory dumps at its bus address and
+/// writable_ram_regions offers it to the memory hunt.
+#[test]
+fn motherboard_ram_reaches_the_debugger_helpers() {
+    let mut bus = empty_bus();
+    bus.mem.fit_mb_ram(1024 * 1024);
+    let base = bus.mem.mb_ram_base() as u32;
+    assert_eq!(base, 0x07F0_0000);
+    let top = bus.mem.mb_ram.len();
+    bus.mem.mb_ram[top - 2] = 0xBE;
+    bus.mem.mb_ram[top - 1] = 0xEF;
+    assert_eq!(bus.peek_word_any(0x07FF_FFFE), 0xBEEF);
+    // Below the fitted bank nothing answers.
+    assert_eq!(bus.peek_word_any(base - 2), 0);
+    assert!(bus
+        .writable_ram_regions()
+        .contains(&(base, 1024 * 1024_u32)));
 }

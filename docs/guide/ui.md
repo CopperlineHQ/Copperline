@@ -232,7 +232,8 @@ The layout is:
   on a machine with no CD drive) are dropped so they cannot block a launch.
 - **Category tabs** (left sidebar). *System* (chipset and Agnus/Denise
   overrides, video standard, RTC, identify board), *CPU* (model, FPU, clock,
-  caches), *Memory* (chip/fast/slow/Zorro III RAM), *ROM* (Kickstart and
+  caches), *Memory* (chip/fast/slow/motherboard/Zorro III RAM), *ROM*
+  (Kickstart and
   extended ROM), *Floppy* (drive count and speed, per-drive image and
   write-protect),
   *Hard Disk* (IDE master/slave, the SCSI controller -- A2091, A4091, or the

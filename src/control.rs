@@ -182,6 +182,7 @@ pub(crate) fn test_emulator() -> crate::emulator::Emulator {
         crate::memory::Memory {
             chip_ram,
             slow_ram: Vec::new(),
+            mb_ram: Vec::new(),
             rom,
             overlay: false,
             zorro: crate::zorro::ZorroChain::default(),

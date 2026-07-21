@@ -480,6 +480,7 @@ mod tests {
         Memory {
             chip_ram: vec![0u8; chip],
             slow_ram: vec![0u8; slow],
+            mb_ram: Vec::new(),
             rom: Vec::new(),
             overlay: false,
             zorro: ZorroChain::default(),

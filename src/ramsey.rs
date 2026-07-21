@@ -1,11 +1,12 @@
 //! Ramsey: the memory controller of the A3000 and A4000.
 //!
-//! Ramsey drives the motherboard fast RAM (32-bit local RAM at $07000000 on
-//! the A3000, $08000000 on the A4000): it refreshes the DRAM and decides
-//! whether to use page mode, burst mode and, on Ramsey-07, cycle-skip mode.
-//! The CPU sees only two registers.
+//! Ramsey drives the motherboard fast RAM (32-bit local RAM ending at
+//! $08000000 and growing downward, so a full 16 MiB reaches $07000000): it
+//! refreshes the DRAM and decides whether to use page mode, burst mode and,
+//! on Ramsey-07, cycle-skip mode. The CPU sees only two registers.
 //!
-//! Only the register file is modelled. Refresh has no observable effect on an
+//! Only the register file lives here; the RAM bank itself is
+//! [`crate::memory::Memory::mb_ram`]. Refresh has no observable effect on an
 //! emulator that never loses a DRAM cell, and page/burst/skip mode only change
 //! how fast a real memory cycle completes, which we do not simulate either.
 //! The bits are still stored and read back, because Kickstart and the
@@ -82,6 +83,27 @@ impl RamseyRevision {
         match self {
             Self::Rev4 => 1024 * 1024,
             Self::Rev7 => 4 * 1024 * 1024,
+        }
+    }
+
+    /// Bytes per bank of the DRAM that would carry `total_bytes` of fitted
+    /// motherboard RAM: the geometry the control register should describe so
+    /// Kickstart's sizing probe and the diagnostic tools see parts matching
+    /// the RAM that answers. The board has four banks, so 256Kx4 parts
+    /// (1 MiB banks) cover totals up to 4 MiB and 1Mx4 parts (4 MiB banks)
+    /// anything larger; each machine stays on its stock part where both
+    /// could fit the total. Zero (no RAM fitted) falls back to the stock
+    /// geometry.
+    pub fn bank_bytes_for(self, total_bytes: usize) -> u32 {
+        const BANK_1M: u32 = 1024 * 1024;
+        const BANK_4M: u32 = 4 * 1024 * 1024;
+        if total_bytes == 0 {
+            return self.stock_bank_bytes();
+        }
+        match self {
+            Self::Rev4 if total_bytes <= 4 * BANK_1M as usize => BANK_1M,
+            _ if total_bytes.is_multiple_of(BANK_4M as usize) => BANK_4M,
+            _ => BANK_1M,
         }
     }
 }
@@ -205,6 +227,33 @@ mod tests {
         assert_eq!(a3000.control() & CONTROL_RAMSIZE, 0);
         assert_eq!(a3000.control() & CONTROL_RAMWIDTH, CONTROL_RAMWIDTH);
         assert_eq!(a3000.bank_bytes(), 1024 * 1024);
+    }
+
+    /// The seeded control register must describe DRAM that could actually
+    /// carry the fitted total across the board's four banks: each machine
+    /// stays on its stock part while that part can cover the total.
+    #[test]
+    fn bank_geometry_tracks_the_fitted_total() {
+        const M: usize = 1024 * 1024;
+        // No RAM fitted: fall back to the stock geometry.
+        assert_eq!(
+            RamseyRevision::Rev4.bank_bytes_for(0),
+            RamseyRevision::Rev4.stock_bank_bytes()
+        );
+        assert_eq!(
+            RamseyRevision::Rev7.bank_bytes_for(0),
+            RamseyRevision::Rev7.stock_bank_bytes()
+        );
+        // A3000: stock 256Kx4 parts (1 MiB banks) up to full population,
+        // 1Mx4 beyond.
+        assert_eq!(RamseyRevision::Rev4.bank_bytes_for(2 * M), M as u32);
+        assert_eq!(RamseyRevision::Rev4.bank_bytes_for(4 * M), M as u32);
+        assert_eq!(RamseyRevision::Rev4.bank_bytes_for(16 * M), 4 * M as u32);
+        // A4000: stock 1Mx4 parts whenever whole 4 MiB banks fill, 256Kx4
+        // for the sub-4M totals.
+        assert_eq!(RamseyRevision::Rev7.bank_bytes_for(4 * M), 4 * M as u32);
+        assert_eq!(RamseyRevision::Rev7.bank_bytes_for(16 * M), 4 * M as u32);
+        assert_eq!(RamseyRevision::Rev7.bank_bytes_for(2 * M), M as u32);
     }
 
     /// Refresh comes up at index 0 (154 clocks), which is what both diagnostic

@@ -1099,6 +1099,7 @@ mod tests {
         Memory {
             chip_ram: vec![0u8; 0x100],
             slow_ram: Vec::new(),
+            mb_ram: Vec::new(),
             rom: Vec::new(),
             overlay: false,
             zorro: crate::zorro::ZorroChain::default(),
@@ -1273,6 +1274,7 @@ mod exec_tests {
         Memory {
             chip_ram: vec![0u8; 0x100],
             slow_ram: Vec::new(),
+            mb_ram: Vec::new(),
             rom: Vec::new(),
             overlay: false,
             zorro: crate::zorro::ZorroChain::default(),
@@ -1605,6 +1607,7 @@ mod sprite_tests {
         Memory {
             chip_ram: vec![0u8; 0x100],
             slow_ram: Vec::new(),
+            mb_ram: Vec::new(),
             rom: Vec::new(),
             overlay: false,
             zorro: crate::zorro::ZorroChain::default(),

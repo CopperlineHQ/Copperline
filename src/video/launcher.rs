@@ -248,6 +248,7 @@ pub enum LauncherField {
     ChipRam,
     FastRam,
     SlowRam,
+    MbRam,
     Z3Ram,
     // ROM
     Rom,
@@ -440,10 +441,11 @@ const CPU_ROWS: [Row; 5] = [
     row(F::Icache, "Instruction cache", Toggle),
     row(F::Dcache, "Data cache", Toggle),
 ];
-const MEMORY_ROWS: [Row; 4] = [
+const MEMORY_ROWS: [Row; 5] = [
     row(F::ChipRam, "Chip RAM", Cycle),
     row(F::FastRam, "Fast RAM", Cycle),
     row(F::SlowRam, "Slow RAM", Cycle),
+    row(F::MbRam, "Motherboard RAM", Cycle),
     row(F::Z3Ram, "Zorro III RAM", Cycle),
 ];
 const ROM_ROWS: [Row; 2] = [
@@ -677,6 +679,17 @@ const FAST_PRESETS: [usize; 9] = [
     8 * 1024 * 1024,
 ];
 const SLOW_PRESETS: [usize; 3] = [0, 256 * 1024, 512 * 1024];
+/// Ramsey bank fills: 1M-4M on 256Kx4 parts, then whole 4M banks of 1Mx4.
+const MB_PRESETS: [usize; 8] = [
+    0,
+    1024 * 1024,
+    2 * 1024 * 1024,
+    3 * 1024 * 1024,
+    4 * 1024 * 1024,
+    8 * 1024 * 1024,
+    12 * 1024 * 1024,
+    16 * 1024 * 1024,
+];
 const Z3_PRESETS: [usize; 8] = [
     0,
     16 * 1024 * 1024,
@@ -778,6 +791,7 @@ pub struct MachineSetup {
     chip_ram: usize,
     fast_ram: usize,
     slow_ram: usize,
+    mb_ram: usize,
     z3_ram: usize,
     // ROM (None = bundled AROS for the boot ROM, none for extended)
     rom: Option<PathBuf>,
@@ -912,6 +926,7 @@ impl MachineSetup {
             chip_ram: cfg.chip_ram_bytes,
             fast_ram: cfg.fast_ram_bytes,
             slow_ram: cfg.slow_ram_bytes,
+            mb_ram: cfg.mb_ram_bytes,
             z3_ram: cfg.z3_ram_bytes,
             rom: raw.rom.as_deref().map(PathBuf::from),
             extended_rom: raw.extended_rom.as_deref().map(PathBuf::from),
@@ -1117,6 +1132,9 @@ impl MachineSetup {
         }
         if self.slow_ram != base.slow_ram_bytes {
             raw.memory.slow = Some(format_size(self.slow_ram));
+        }
+        if self.mb_ram != base.mb_ram_bytes {
+            raw.memory.motherboard = Some(format_size(self.mb_ram));
         }
         if self.z3_ram != base.z3_ram_bytes {
             raw.memory.z3 = Some(format_size(self.z3_ram));
@@ -1388,6 +1406,7 @@ impl MachineSetup {
         self.chip_ram = base.chip_ram_bytes;
         self.fast_ram = base.fast_ram_bytes;
         self.slow_ram = base.slow_ram_bytes;
+        self.mb_ram = base.mb_ram_bytes;
         self.z3_ram = base.z3_ram_bytes;
         self.overscan = base.overscan;
         self.pixel_aspect = base.pixel_aspect;
@@ -1456,6 +1475,12 @@ impl MachineSetup {
             F::Icache => reason(self.cpu.has_instruction_cache(), "needs 68020+"),
             F::Dcache => reason(self.cpu.has_data_cache(), "needs 68030/040"),
             F::Z3Ram => reason(cpu_is_32bit(self.cpu), "needs 32-bit CPU"),
+            // Motherboard fast RAM hangs off Ramsey, which only the big-box
+            // profiles fit.
+            F::MbRam => reason(
+                matches!(self.model, Some(MachineModel::A3000 | MachineModel::A4000)),
+                "needs A3000/A4000",
+            ),
             F::IdeMaster | F::IdeSlave => reason(self.has_ide(), "needs A600/A1200/A4000"),
             // The ROM and drives belong to the fitted controller; greyed with
             // none. The A3000's motherboard SCSI has no ROM of its own, and
@@ -1698,6 +1723,7 @@ impl MachineSetup {
             F::ChipRam => size_label(self.chip_ram),
             F::FastRam => size_label(self.fast_ram),
             F::SlowRam => size_label(self.slow_ram),
+            F::MbRam => size_label(self.mb_ram),
             F::Z3Ram => size_label(self.z3_ram),
             F::FloppyDrives => self.floppy_drives.to_string(),
             F::FloppySpeed => crate::floppy::speed_label(self.floppy_speed),
@@ -1858,6 +1884,7 @@ impl MachineSetup {
             F::ChipRam => self.chip_ram = cycle_slice(&CHIP_PRESETS, self.chip_ram, forward),
             F::FastRam => self.fast_ram = cycle_nearest(&FAST_PRESETS, self.fast_ram, forward),
             F::SlowRam => self.slow_ram = cycle_nearest(&SLOW_PRESETS, self.slow_ram, forward),
+            F::MbRam => self.mb_ram = cycle_nearest(&MB_PRESETS, self.mb_ram, forward),
             F::Z3Ram => self.z3_ram = cycle_nearest(&Z3_PRESETS, self.z3_ram, forward),
             F::FloppyDrives => {
                 self.floppy_drives = step_u8(self.floppy_drives, forward, 1, 4);
