@@ -1614,7 +1614,7 @@ pub(crate) struct RawInput {
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawSerial {
-    /// "stdout" (default), "off", or "midi".
+    /// "stdout" (default), "off", "midi", "tcp", "tcp-connect", or "pty".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) mode: Option<String>,
     /// Host MIDI output endpoint name (substring match); MIDI mode only.

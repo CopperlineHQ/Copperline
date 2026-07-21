@@ -27,10 +27,12 @@ file and no Kickstart at all. Configuration is a TOML file
 `docs/guide/configuration.md`), and the common machine knobs are also CLI
 flags layered on top: `--model A500|A1200|CD32|...`, `--chipset OCS|ECS|AGA`,
 `--cpu 68000..68060`, `--chip`/`--fast`/`--slow` memory sizes,
-`--floppy-drives N`. A bare ROM or disk-image path is accepted positionally:
+`--floppy-drives N`. A bare ROM path (only) is accepted positionally; disk
+images go in via `[floppy.df0] path` in the config or `--insert-disk-after`:
 
 ```sh
-./target/release/copperline --model A1200 --fast 8M KICK31.ROM game.adf
+./target/release/copperline --model A1200 --fast 8M KICK31.ROM \
+  --insert-disk-after 0 df0 game.adf
 ```
 
 Running with no arguments at all opens an interactive launcher window; any

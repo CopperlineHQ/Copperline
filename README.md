@@ -53,8 +53,10 @@ against real hardware.
   (via the pure-Rust `gilrs`, no SDL2), 4-channel Paula audio, floppy
   (ADF / ADZ / ZIP / DMS, read-only SCP), Gayle and A4000 IDE, SCSI (A2091,
   A4091, or the A3000's onboard Super DMAC), CDTV/CD32 CD, A2065 Ethernet,
-  host directories served live as AmigaDOS volumes, and Zorro boards
-  loadable as WASM plugins.
+  a Z3660 RTG card (high-colour Picasso96 screens), the serial port bridged
+  to host stdout/TCP/PTY/MIDI, a parallel-port printer capture and audio
+  sampler, host directories served live as AmigaDOS volumes, and Zorro
+  boards loadable as WASM plugins.
 - **Tooling**: an in-window debugger that can step backwards, an
   interactive chip-bus frame analyzer, a trigger-based VCD waveform export
   of the chipset signals for GTKWave (`docs/debugger/waveform.md`), remote
@@ -142,11 +144,12 @@ cargo build --release
 ./target/release/copperline
 ```
 
-The binary looks for `./copperline.toml`; if it isn't present, built-in
-defaults are used (68000 at ~7.09 MHz, OCS, PAL, real speed, and the bundled
-[AROS](https://www.aros.org/) ROM on a 1 MB A500: 512 KiB chip plus 512 KiB
-trapdoor slow RAM). Boot your own ROM with a positional argument, or point at a
-config file:
+The binary looks for `./copperline.toml`; if it isn't present, a bare
+invocation opens the machine-configuration screen, starting from the built-in
+defaults (an A500 Rev 6A: 68000 at ~7.09 MHz, ECS 8372A Agnus with OCS Denise,
+PAL, real speed, and the bundled [AROS](https://www.aros.org/) ROM with
+512 KiB chip plus 512 KiB trapdoor slow RAM). Any argument skips the screen
+and boots directly: your own ROM as a positional argument, or a config file:
 
 ```sh
 ./target/release/copperline path/to/kickstart.rom
@@ -236,12 +239,12 @@ substring is enough); `--midi-out`/`--midi-in` imply `--serial midi`:
 ./target/release/copperline --midi-out "FluidSynth" --midi-in "Keystation"
 ```
 
-Devices can also be chosen in the launcher's **Serial** tab, swapped live from
-the in-window **MIDI In / MIDI Out** menu, or set in the config file:
+Devices can also be chosen in the launcher's **I/O Ports** tab, swapped live
+from the in-window **MIDI In / MIDI Out** menu, or set in the config file:
 
 ```toml
 [serial]
-mode = "midi"            # off, stdout, midi, tcp, or pty
+mode = "midi"            # off, stdout, midi, tcp, tcp-connect, or pty
 midi_out = "FluidSynth"  # host destination; substring match
 midi_in = "Keystation"   # host source
 ```
@@ -321,7 +324,7 @@ release needs resolved first. Release steps for every channel are in
 | Slow RAM | Optional A500 trapdoor/fake-fast RAM at $00C00000; arbitrated on the chip bus through Agnus like chip RAM. |
 | ROM | Kickstart at $F80000 (512 KiB); optional extended ROM for CD32 ($E00000) and CDTV ($F00000). |
 | Battery RTC | Read-only MSM6242-compatible register view at $DC0000; guest writes affect only emulated latch/control state. |
-| CIA-A / CIA-B | I/O ports, /OVL, timers, TOD, keyboard SDR/ICR, disk control/status lines, and CIA-B FLAG disk index pulses. |
+| CIA-A / CIA-B | I/O ports, /OVL, timers, TOD, keyboard SDR/ICR, disk control/status lines, CIA-B FLAG disk index pulses, and the Centronics parallel port (data/strobe/ACK on CIA-A, BUSY/POUT/SEL on CIA-B). |
 | Paula serial | SERDAT through a one-word transmit buffer and timed shift register, out to stdout, a TCP port, a pseudo-terminal, or -- with the default `midi` feature -- bridged to host MIDI in/out; SERDATR reports TBE/TSRE/RBF, and serial receive is fed from the selected input. |
 | Paula audio | 4-channel DMA/sample playback, stereo mix, LED filter. |
 | Paula DMACON / INTENA / INTREQ | IRQ bits are stored and delivered through manual M68K autovectors with modelled 68000 interrupt-recognition latency; audio and disk DMA raise completion IRQs. |

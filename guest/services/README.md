@@ -13,9 +13,10 @@ Two entry points (see `entry.s` and `copperline_board.h`):
 - `mount_boards()` -- called at expansion init from the board's DiagArea
   with the documented DiagPoint context. Builds one DeviceNode per entry in
   the mount table the emulator wrote into the board window and adds it with
-  `AddBootNode` (priority -128: mounted at DOS init, never a boot candidate).
-- `handler_main()` -- the DOS handler process, started by DOS on first
-  reference to a mount. `WaitPort`/`GetMsg`, ring the packet in through the
+  `AddBootNode` at the priority from the mount's `bootpri` config (default
+  -128: mounted at DOS init, never a boot candidate).
+- `handler_main()` -- the DOS handler process, started by DOS at mount time
+  (`ADNF_STARTPROC`). `WaitPort`/`GetMsg`, ring the packet in through the
   unit's doorbell register (the emulator fills `dp_Res1`/`dp_Res2` within
   the write), reply the packet.
 

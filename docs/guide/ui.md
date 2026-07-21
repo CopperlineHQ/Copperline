@@ -47,7 +47,9 @@ reboot lands a fraction of a second after the chord, as on real hardware.
 
 ## Status bar
 
-The status bar (44 pixels below the display) holds, left to right:
+The status bar (44 pixels below the display) holds, left to right (it can
+be hidden entirely with `Cmd+Shift+F` / `Alt+Shift+F` or the **Status Bar**
+menu item):
 
 - **LED block.** PWR and FDD always; a green HDD activity LED on machines
   with a hard-disk controller (Gayle or A4000 IDE, or any SCSI adapter); a
@@ -231,8 +233,9 @@ The layout is:
   CD image
   on a machine with no CD drive) are dropped so they cannot block a launch.
 - **Category tabs** (left sidebar). *System* (chipset and Agnus/Denise
-  overrides, video standard, RTC, identify board), *CPU* (model, FPU, clock,
-  caches), *Memory* (chip/fast/slow/motherboard/Zorro III RAM), *ROM*
+  overrides, video standard, RTC, identify board, RTG card), *CPU* (model,
+  FPU, clock, caches), *Memory* (chip/fast/slow/motherboard/Zorro III RAM),
+  *ROM*
   (Kickstart and
   extended ROM), *Floppy* (drive count and speed, per-drive image and
   write-protect),
@@ -240,7 +243,8 @@ The layout is:
   A3000's onboard SCSI -- and its boot ROM and units, plus a **Host Mounts**
   link to a sub-page for host directories served live as AmigaDOS volumes: up
   to four mounts, each with a boot priority and a read-write/read-only
-  **Access** field), *CD* (image,
+  **Access** field -- the config file itself takes up to eight `[[filesys]]`
+  mounts, of which the launcher edits the first four), *CD* (image,
   insert delay, CD32 NVRAM),
   *Input* (the controller device in each game port and the joystick input
   source),
@@ -260,15 +264,17 @@ The layout is:
   click it and type to set the volume name for a directory mount (left blank, a
   directory mount inherits the host directory's name; the box has no effect on a
   raw HDF). A setting that does not apply to the chosen machine is greyed and
-  shows why in place of its control -- "needs 32-bit CPU" for Zorro III RAM,
-  "needs 68020+" for the FPU, "needs A600/A1200/A4000" for IDE.
+  shows why in place of its control -- "needs 32-bit CPU" for Zorro III RAM
+  and the RTG card, "needs 68020+" for the FPU, "needs A600/A1200/A4000" for
+  IDE.
 - **Action bar** (bottom). **Load...** and **Save...** read and write a `.toml`
   config
   through a file dialog (Save writes a minimal file, only the settings that
   differ from the chosen profile's defaults, so it reads like the example
   configs). **Defaults** resets to the selected profile. **Run** validates the
   configuration and boots it; if anything is wrong -- an unusable RAM size, a
-  missing disk image, an option the chosen machine cannot use -- the reason is
+  missing disk image, a ROM file that cannot be read, an option the chosen
+  machine cannot use -- the reason is
   shown on the status line and you stay on the screen to fix it.
 
 Saved files use the same schema as a hand-written `copperline.toml`

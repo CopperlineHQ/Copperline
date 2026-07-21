@@ -346,6 +346,31 @@ framebuffer):
   display that genuinely fetches bitplane data into the overscan border is left
   exactly as rendered.
 
+### RTG scanout (Z3660)
+
+When a fitted `[rtg]` board's guest driver switches the display to RTG,
+the presentation path swaps sources: the board's panned framebuffer
+(decoded from VRAM in the scanout's pixel format, with the board's
+hardware mouse sprite -- including wide and doubled sprites -- composited
+over it in `z3660.rs`) replaces the chipset render. The window presents
+that frame at its native resolution through a dedicated GPU texture
+rather than the 716-wide chipset buffer, and the TV aperture crop is
+suppressed -- it is a chipset crop rect, and applying it would show a
+sub-rect of the board's screen. While a menu or panel is open the window
+falls back to the CPU present path (at the cost of the downscale) so the
+overlay is not overdrawn by the GPU pass. If the board claims the display
+but its frame does not compose yet (mode set before the resolution
+registers), presentation falls back to the chipset render rather than
+freezing on a stale frame.
+
+`compose_rtg_present` (`present_common.rs`) also keeps an
+`FB_WIDTH`-stride copy of the native frame for the screenshot and CCP
+capture paths, which read the shared presentation buffer: one output row
+per board row at the board's native height, downsampled horizontally by
+sampling each output pixel's source-span centre so the rightmost source
+columns survive. Screenshots under RTG are therefore 716 wide at the
+board's native row count.
+
 `ui.rs` implements the status bar widgets, the pop-up menu, the smaller
 overlay panels (About, Shortcuts, Calibration), and the shared debugger/tool
 panel drawing used by the native debugger and frame-analyzer windows. The UI
