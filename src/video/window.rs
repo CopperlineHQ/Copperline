@@ -5353,6 +5353,7 @@ impl App {
         let field_rows = post_process_rendered_field(
             &mut self.fb,
             geometry,
+            self.emu.bus().frame_presentation_h_window(),
             visible_start_vpos,
             h_shift,
             self.overscan,
@@ -7703,6 +7704,7 @@ impl App {
         let field_rows = post_process_rendered_field(
             &mut self.fb,
             geometry,
+            self.emu.bus().frame_presentation_h_window(),
             visible_start_vpos,
             h_shift,
             self.overscan,

@@ -96,6 +96,7 @@ const _: () = {
 pub fn post_process_rendered_field(
     fb: &mut [u32],
     geometry: FrameGeometry,
+    presentation_h_window: Option<(i32, u32)>,
     visible_start_vpos: u32,
     h_shift: usize,
     overscan: Overscan,
@@ -111,10 +112,17 @@ pub fn post_process_rendered_field(
         if overscan == Overscan::Tv {
             mask_present_frame_to_tv(fb, h_shift, standard_window_top_row(visible_start_vpos));
         }
+    } else if let Some((src_x0, src_w)) = presentation_h_window {
+        // A multisync monitor locks its horizontal deflection to the
+        // programmed sync pulse: the glass shows the line from the sync
+        // trailing edge to the next pulse, centring the picture the way
+        // the mode's own porches place it.
+        screenshot::stretch_rows_x_window(fb, FB_WIDTH, field_rows, src_x0, src_w);
     } else if geometry.line_cck != 227 {
-        // A multisync monitor's horizontal deflection is time-linear:
-        // each colour clock of this scan's shorter/longer line covers
-        // 227/line_cck of the glass a standard line's clock would.
+        // No programmed sync to anchor on: fall back to the time-linear
+        // whole-line map (each colour clock of this scan's shorter/longer
+        // line covers 227/line_cck of the glass a standard line's clock
+        // would).
         screenshot::stretch_rows_x(fb, FB_WIDTH, field_rows, geometry.line_cck, 227);
     }
     field_rows

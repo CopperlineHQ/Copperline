@@ -28,8 +28,14 @@ pub(super) fn render_job_to_presentation(
     let render_result = bitplane::render_from_input(&input, fb);
     let geometry = input.geometry();
     let visible_start_vpos = input.visible_start_vpos();
-    let field_rows =
-        post_process_rendered_field(fb, geometry, visible_start_vpos, h_shift, overscan);
+    let field_rows = post_process_rendered_field(
+        fb,
+        geometry,
+        input.presentation_h_window(),
+        visible_start_vpos,
+        h_shift,
+        overscan,
+    );
     let base = input.render_base();
     deinterlacer.push_field(
         fb,

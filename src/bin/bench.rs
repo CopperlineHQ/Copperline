@@ -144,6 +144,7 @@ fn main() -> Result<()> {
                 let field_rows = present_common::post_process_rendered_field(
                     &mut fb,
                     geometry,
+                    emu.bus().frame_presentation_h_window(),
                     visible_start_vpos,
                     0,
                     Overscan::Tv,

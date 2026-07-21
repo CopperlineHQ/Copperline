@@ -195,6 +195,40 @@ pub fn stretch_rows_x(fb: &mut [u32], width: usize, rows: usize, src_num: u32, s
     }
 }
 
+/// Like [`stretch_rows_x`], but resampling an explicit source window:
+/// output pixel x samples source position src_x0 + (x + 0.5) * src_w /
+/// width - 0.5. The presentation uses this to show the visible interval
+/// of a programmable scan the way a multisync monitor does: the glass is
+/// anchored at the horizontal sync pulse, not at the capture buffer's
+/// left edge, so `src_x0` may be negative (the sync tail sits left of
+/// the captured aperture) and positions outside the buffer clamp to its
+/// edge columns (the border colour).
+pub fn stretch_rows_x_window(fb: &mut [u32], width: usize, rows: usize, src_x0: i32, src_w: u32) {
+    debug_assert!(fb.len() >= width * rows);
+    if width == 0 || src_w == 0 || (src_x0 == 0 && src_w as usize == width) {
+        return;
+    }
+    let mut scratch = vec![0u32; width];
+    for y in 0..rows {
+        let row = &mut fb[y * width..(y + 1) * width];
+        scratch.copy_from_slice(row);
+        for (x, out) in row.iter_mut().enumerate() {
+            // Source-pixel centre in 24.8 fixed point:
+            // src_x0 + (x + 0.5) * src_w / width - 0.5.
+            let pos = ((src_x0 as i64) << 8)
+                + ((2 * x as i64 + 1) * src_w as i64 * 128 / width as i64 - 128);
+            let pos = pos.clamp(0, ((width - 1) as i64) << 8) as usize;
+            let src_x0i = pos >> 8;
+            let frac = (pos & 0xFF) as u32;
+            *out = if frac == 0 || src_x0i + 1 >= width {
+                scratch[src_x0i]
+            } else {
+                crate::video::blend_rgba(scratch[src_x0i], scratch[src_x0i + 1], frac)
+            };
+        }
+    }
+}
+
 /// Pick a default filename for an interactive screenshot grab.
 pub fn auto_filename() -> PathBuf {
     let ts = crate::timestamp::compact_now();

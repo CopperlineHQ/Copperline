@@ -199,7 +199,16 @@ acts as the hardware display-window flip-flop: it decides when the frame's
 chip-RAM snapshot and bitplane DMA capture begin, but changing DIWSTRT later
 in the field does not recenter the already-visible top border. Programmable
 VARBEAMEN scans instead use their programmed visible window as the render
-origin.
+origin. Under VARBEAMEN, Denise's horizontal counter restarts at 0 with the
+programmable line rather than free-running at the standard 15 kHz phase, so
+the DIW and sprite comparators sit later on the canvas by that origin
+difference (Linux/m68k amifb and the KS3.1 DblPAL screen both program their
+windows against the zero origin). Horizontally, a programmable frame is
+presented like a multisync monitor: when the mode programs its sync pulse
+(VARHSYEN), the glass shows the line from the HSYNC trailing edge to the
+next pulse, so the picture sits where the mode's own porches place it;
+without a programmed sync the whole line maps onto the glass time-linearly
+(each colour clock covers 227/line_cck of a standard clock's width).
 
 Two vertical edge cases the replay honours:
 
@@ -299,7 +308,7 @@ either the render worker or the synchronous fallback.
 
 The frontend-independent half of this pass lives in
 `video/present_common.rs`: the post-render pipeline (vertical/horizontal
-recentring, the TV bezel mask, programmable-scan stretch) plus the
+recentring, the TV bezel mask, programmable-scan presentation) plus the
 standard-window and TV-aperture constants and the geometry predicates that
 key on them. `window/present.rs` re-exports everything there, so the
 desktop path is unchanged; headless consumers -- `cpu.rs`'s debug

@@ -1284,9 +1284,9 @@ impl ControlState {
         // every standard-DIW SHRES screen are unchanged, the terms below
         // are zero or scale-independent there).
         let native_per_h_unit_num = 2 * self.native_samples_per_framebuffer_pixel() as i32;
-        let display_native_shift =
-            (diw_h_start as i32 - self.fetch_reference()) * native_per_h_unit_num
-                / pixel_repeat as i32;
+        let display_native_shift = (diw_h_start as i32 - self.fetch_reference())
+            * native_per_h_unit_num
+            / pixel_repeat as i32;
         let standard_ddf = if self.hires() || self.shres() {
             0x003C
         } else {
@@ -1347,10 +1347,10 @@ impl ControlState {
         // not push the content to the right. Without this correction the
         // content shifted right by (DIW_HSTART_FB0 - diw_h_start) lores pixels
         // and lost its right edge off the framebuffer.
-        let clamped_window_native = ((DIW_HSTART_FB0 - active_canvas_shift_h() - diw_h_start as i32)
-            .max(0)
-            * native_per_h_unit_num)
-            / pixel_repeat as i32;
+        let clamped_window_native =
+            ((DIW_HSTART_FB0 - active_canvas_shift_h() - diw_h_start as i32).max(0)
+                * native_per_h_unit_num)
+                / pixel_repeat as i32;
         // Lo-res FMODE=0 placement is linear in DDFSTRT: moving DDFSTRT one
         // 8-cck fetch period earlier moves the picture exactly 16 lo-res
         // pixels left. Real hardware confirms this (vAmigaTS
@@ -3250,6 +3250,9 @@ fn palette_event_sequences_equivalent(a: &[BeamRegisterWrite], b: &[BeamRegister
 /// end-of-frame swap, so rendering is a pure function of this bundle.
 pub struct RenderInput {
     geometry: FrameGeometry,
+    /// Sync-anchored glass window for programmable scans
+    /// ([`crate::bus::Bus::frame_presentation_h_window`]).
+    presentation_h_window: Option<(i32, u32)>,
     visible_start_vpos: u32,
     palette_split: (Palette, Palette, bool),
     render_base: RenderRegisterSnapshot,
@@ -3285,6 +3288,7 @@ impl RenderInput {
     pub fn from_bus(bus: &Bus) -> Self {
         Self {
             geometry: bus.frame_geometry(),
+            presentation_h_window: bus.frame_presentation_h_window(),
             visible_start_vpos: bus.frame_visible_start_vpos(),
             palette_split: bus.frame_palette_split(),
             render_base: bus.frame_render_base(),
@@ -3320,6 +3324,7 @@ impl RenderInput {
             dst.extend_from_slice(src);
         }
         self.geometry = bus.frame_geometry();
+        self.presentation_h_window = bus.frame_presentation_h_window();
         self.visible_start_vpos = bus.frame_visible_start_vpos();
         self.palette_split = bus.frame_palette_split();
         self.render_base = bus.frame_render_base();
@@ -3367,6 +3372,10 @@ impl RenderInput {
 
     pub fn geometry(&self) -> FrameGeometry {
         self.geometry
+    }
+
+    pub fn presentation_h_window(&self) -> Option<(i32, u32)> {
+        self.presentation_h_window
     }
 
     pub fn visible_start_vpos(&self) -> u32 {

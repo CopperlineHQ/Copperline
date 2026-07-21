@@ -4614,6 +4614,28 @@ impl Bus {
 
     /// Display geometry of the frame the renderer is about to draw
     /// (the completed frame once one exists, like `frame_render_base`).
+    /// The horizontal glass window for presenting a programmable scan, as
+    /// (source x, width) in framebuffer pixels: a multisync monitor
+    /// anchors its visible raster at the horizontal sync pulse, showing
+    /// the line from the sync trailing edge to the next pulse. The
+    /// captured aperture starts 31 colour clocks into the line (fb x = 0
+    /// sits at Denise tick 62), so the sync-anchored window's origin can
+    /// be negative. None on standard frames or when the mode leaves sync
+    /// unprogrammed (the presentation then falls back to the time-linear
+    /// whole-line map).
+    pub fn frame_presentation_h_window(&self) -> Option<(i32, u32)> {
+        const CAPTURE_APERTURE_START_CCK: i32 = 31;
+        let geometry = self.frame_geometry();
+        if !geometry.programmable {
+            return None;
+        }
+        let (hsstrt, hsstop) = self.agnus.programmable_hsync_window()?;
+        let sync_len = hsstop - hsstrt;
+        let visible_cck = geometry.line_cck.saturating_sub(sync_len).max(1);
+        let src_x0 = (hsstop as i32 - CAPTURE_APERTURE_START_CCK) * 4;
+        Some((src_x0, visible_cck * 4))
+    }
+
     pub fn frame_geometry(&self) -> FrameGeometry {
         if self.last_frame_render_base.is_some() {
             self.last_frame_geometry
