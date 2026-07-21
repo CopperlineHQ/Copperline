@@ -491,10 +491,15 @@ fn scan_h_window_line(
     mut record: Option<&mut HWindowRow>,
 ) {
     let free_run = beam_line < 9 && !is_ecs;
+    let fb_start_tick = H_COUNTER_FB_START_TICK;
+    // On a programmable (VARBEAMEN) scan Denise's counter restarts with
+    // the line instead of free-running at the standard 15 kHz phase; see
+    // ACTIVE_CANVAS_SHIFT_H (the shift equals H_COUNTER_LINE_ORIGIN
+    // there, making the line-start counter 0).
     let mut counter = if free_run {
         (H_COUNTER_LINE_ORIGIN + beam_line * 0x1C6) & 0x1FF
     } else {
-        H_COUNTER_LINE_ORIGIN
+        H_COUNTER_LINE_ORIGIN - active_canvas_shift_h()
     };
     let mut hstrt = control.diw_h_start() as i32;
     let mut hstop = control.diw_h_stop() as i32;
@@ -507,7 +512,7 @@ fn scan_h_window_line(
             hstop = control.diw_h_stop() as i32;
             seg_idx += 1;
         }
-        if record.is_some() && tick == H_COUNTER_FB_START_TICK && *flop {
+        if record.is_some() && tick == fb_start_tick && *flop {
             open_from = Some(0);
         }
         let was_open = *flop;
@@ -519,7 +524,7 @@ fn scan_h_window_line(
         }
         if *flop != was_open {
             if let Some(row) = record.as_deref_mut() {
-                let fb_tick = tick - H_COUNTER_FB_START_TICK;
+                let fb_tick = tick - fb_start_tick;
                 if (0..FB_WIDTH as i32 / 2).contains(&fb_tick) {
                     let x = (fb_tick * 2) as usize;
                     if *flop {
@@ -821,13 +826,14 @@ impl ControlState {
         if display_window_unprogrammed(self.diwstrt, self.diwstop) {
             return (0, FB_WIDTH);
         }
+        let anchor = DIW_HSTART_FB0 - active_canvas_shift_h();
         let start = self.diw_h_start() as i32;
         let mut stop = self.diw_h_stop() as i32;
         if stop <= start {
             stop += 0x100;
         }
-        let left = ((start - DIW_HSTART_FB0).max(0) as usize * 2).min(FB_WIDTH);
-        let mut right = ((stop - DIW_HSTART_FB0).max(0) as usize * 2).min(FB_WIDTH);
+        let left = ((start - anchor).max(0) as usize * 2).min(FB_WIDTH);
+        let mut right = ((stop - anchor).max(0) as usize * 2).min(FB_WIDTH);
         if FB_WIDTH.saturating_sub(right) <= 2 {
             right = FB_WIDTH;
         }
@@ -3424,6 +3430,30 @@ thread_local! {
         const { std::cell::Cell::new((0xFF, 0xFF)) };
 }
 
+thread_local! {
+    /// The running render's comparator-origin shift in DIW H units,
+    /// captured from the [`RenderInput`] at [`render_from_input`]'s entry
+    /// like the debug masks. Standard scans use 0 and keep every
+    /// calibrated mapping bit-identical. On a programmable (VARBEAMEN)
+    /// scan Denise's horizontal counter restarts at 0 with the line
+    /// instead of free-running at the standard phase, so every
+    /// comparator-anchored position (the DIW window and sprite HSTART
+    /// matches) sits H_COUNTER_LINE_ORIGIN units later on the canvas;
+    /// beam-anchored positions (fetch slots, register-write landings) do
+    /// not move. Calibrated on two independent guests: Linux/m68k amifb
+    /// programs DIW $45 against HSYNC $0C..$1A, which only leaves the
+    /// documented back porch under a zero line-start counter (under the
+    /// standard phase the window would open inside the sync pulse and
+    /// the console's first column falls off the canvas), and the KS3.1
+    /// DblPAL screen's DIW $5B places its picture flush with the same
+    /// zero origin.
+    static ACTIVE_CANVAS_SHIFT_H: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+}
+
+pub(super) fn active_canvas_shift_h() -> i32 {
+    ACTIVE_CANVAS_SHIFT_H.with(|shift| shift.get())
+}
+
 fn active_debug_plane_mask() -> u8 {
     ACTIVE_DEBUG_MASKS.with(|masks| masks.get().0)
 }
@@ -3435,6 +3465,13 @@ pub(super) fn active_debug_sprite_mask() -> u8 {
 pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
     let render_started = Instant::now();
     ACTIVE_DEBUG_MASKS.with(|masks| masks.set((input.debug_plane_mask, input.debug_sprite_mask)));
+    ACTIVE_CANVAS_SHIFT_H.with(|shift| {
+        shift.set(if input.geometry.programmable {
+            H_COUNTER_LINE_ORIGIN
+        } else {
+            0
+        })
+    });
     let mut render_timing = VideoRenderFrameTiming::default();
     let mut state = RenderState::from_snapshot(input.render_base);
     let geometry = input.geometry;

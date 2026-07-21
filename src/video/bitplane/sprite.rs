@@ -1453,15 +1453,20 @@ pub(super) fn sprite_base_framebuffer_x(
 ) -> i32 {
     // The serializer's first pixel appears one lo-res pixel after the
     // horizontal comparator match (crate::bus::SPRITE_OUTPUT_DELAY_LORES,
-    // ruler-probed against FS-UAE and vAmiga).
-    let base_x = (hstart + crate::bus::SPRITE_OUTPUT_DELAY_LORES - DIW_HSTART_FB0) * 2;
+    // ruler-probed against FS-UAE and vAmiga). The anchor carries the
+    // active canvas shift like every comparator mapping.
+    let base_x =
+        (hstart + crate::bus::SPRITE_OUTPUT_DELAY_LORES - DIW_HSTART_FB0 + active_canvas_shift_h())
+            * 2;
     let sample_x = base_x.clamp(0, FB_WIDTH.saturating_sub(1) as i32) as usize;
     let control = control_at_x(base_control, control_segments, sample_x);
     base_x + i32::from(hsub_70ns && control.shres())
 }
 
 pub(super) fn sprite_nominal_base_framebuffer_x(pos: u16, ctl: u16) -> i32 {
-    (sprite_hstart(pos, ctl) + crate::bus::SPRITE_OUTPUT_DELAY_LORES - DIW_HSTART_FB0) * 2
+    (sprite_hstart(pos, ctl) + crate::bus::SPRITE_OUTPUT_DELAY_LORES - DIW_HSTART_FB0
+        + active_canvas_shift_h())
+        * 2
         + i32::from(sprite_hsub_70ns(ctl))
 }
 
