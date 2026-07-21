@@ -249,6 +249,7 @@ pub enum LauncherField {
     FastRam,
     SlowRam,
     MbRam,
+    AccelRam,
     Z3Ram,
     // ROM
     Rom,
@@ -441,11 +442,12 @@ const CPU_ROWS: [Row; 5] = [
     row(F::Icache, "Instruction cache", Toggle),
     row(F::Dcache, "Data cache", Toggle),
 ];
-const MEMORY_ROWS: [Row; 5] = [
+const MEMORY_ROWS: [Row; 6] = [
     row(F::ChipRam, "Chip RAM", Cycle),
     row(F::FastRam, "Fast RAM", Cycle),
     row(F::SlowRam, "Slow RAM", Cycle),
     row(F::MbRam, "Motherboard RAM", Cycle),
+    row(F::AccelRam, "Accelerator RAM", Cycle),
     row(F::Z3Ram, "Zorro III RAM", Cycle),
 ];
 const ROM_ROWS: [Row; 2] = [
@@ -690,6 +692,29 @@ const MB_PRESETS: [usize; 8] = [
     12 * 1024 * 1024,
     16 * 1024 * 1024,
 ];
+/// The A4000 additionally fills the $04000000-$06FFFFFF motherboard RAM
+/// expansion space beyond Ramsey's four banks.
+const MB_PRESETS_A4000: [usize; 10] = [
+    0,
+    1024 * 1024,
+    2 * 1024 * 1024,
+    3 * 1024 * 1024,
+    4 * 1024 * 1024,
+    8 * 1024 * 1024,
+    12 * 1024 * 1024,
+    16 * 1024 * 1024,
+    32 * 1024 * 1024,
+    64 * 1024 * 1024,
+];
+/// CPU-slot accelerator RAM at $08000000: whatever the CPU board carries,
+/// up to the whole 128M coprocessor-slot space.
+const ACCEL_PRESETS: [usize; 5] = [
+    0,
+    16 * 1024 * 1024,
+    32 * 1024 * 1024,
+    64 * 1024 * 1024,
+    128 * 1024 * 1024,
+];
 const Z3_PRESETS: [usize; 8] = [
     0,
     16 * 1024 * 1024,
@@ -792,6 +817,7 @@ pub struct MachineSetup {
     fast_ram: usize,
     slow_ram: usize,
     mb_ram: usize,
+    accel_ram: usize,
     z3_ram: usize,
     // ROM (None = bundled AROS for the boot ROM, none for extended)
     rom: Option<PathBuf>,
@@ -927,6 +953,7 @@ impl MachineSetup {
             fast_ram: cfg.fast_ram_bytes,
             slow_ram: cfg.slow_ram_bytes,
             mb_ram: cfg.mb_ram_bytes,
+            accel_ram: cfg.accel_ram_bytes,
             z3_ram: cfg.z3_ram_bytes,
             rom: raw.rom.as_deref().map(PathBuf::from),
             extended_rom: raw.extended_rom.as_deref().map(PathBuf::from),
@@ -1135,6 +1162,9 @@ impl MachineSetup {
         }
         if self.mb_ram != base.mb_ram_bytes {
             raw.memory.motherboard = Some(format_size(self.mb_ram));
+        }
+        if self.accel_ram != base.accel_ram_bytes {
+            raw.memory.accelerator = Some(format_size(self.accel_ram));
         }
         if self.z3_ram != base.z3_ram_bytes {
             raw.memory.z3 = Some(format_size(self.z3_ram));
@@ -1407,6 +1437,7 @@ impl MachineSetup {
         self.fast_ram = base.fast_ram_bytes;
         self.slow_ram = base.slow_ram_bytes;
         self.mb_ram = base.mb_ram_bytes;
+        self.accel_ram = base.accel_ram_bytes;
         self.z3_ram = base.z3_ram_bytes;
         self.overscan = base.overscan;
         self.pixel_aspect = base.pixel_aspect;
@@ -1475,6 +1506,8 @@ impl MachineSetup {
             F::Icache => reason(self.cpu.has_instruction_cache(), "needs 68020+"),
             F::Dcache => reason(self.cpu.has_data_cache(), "needs 68030/040"),
             F::Z3Ram => reason(cpu_is_32bit(self.cpu), "needs 32-bit CPU"),
+            // The CPU-slot space at $08000000 is beyond a 24-bit bus too.
+            F::AccelRam => reason(cpu_is_32bit(self.cpu), "needs 32-bit CPU"),
             // The Z3660 is a Zorro III board: same address-reach gate.
             F::Rtg => reason(cpu_is_32bit(self.cpu), "needs 32-bit CPU"),
             // Motherboard fast RAM hangs off Ramsey, which only the big-box
@@ -1733,6 +1766,7 @@ impl MachineSetup {
             F::FastRam => size_label(self.fast_ram),
             F::SlowRam => size_label(self.slow_ram),
             F::MbRam => size_label(self.mb_ram),
+            F::AccelRam => size_label(self.accel_ram),
             F::Z3Ram => size_label(self.z3_ram),
             F::FloppyDrives => self.floppy_drives.to_string(),
             F::FloppySpeed => crate::floppy::speed_label(self.floppy_speed),
@@ -1886,12 +1920,13 @@ impl MachineSetup {
                 self.dcache = self.cpu.has_data_cache();
                 self.clock_mhz = self.cpu.default_clock_mhz();
                 if !cpu_is_32bit(self.cpu) {
-                    // Zorro III RAM, motherboard RAM, and the Zorro III RTG
-                    // card all sit beyond a 24-bit bus; dropping them (rather
-                    // than just greying their rows) keeps the emitted config
-                    // launchable.
+                    // Zorro III RAM, motherboard RAM, accelerator RAM, and
+                    // the Zorro III RTG card all sit beyond a 24-bit bus;
+                    // dropping them (rather than just greying their rows)
+                    // keeps the emitted config launchable.
                     self.z3_ram = 0;
                     self.mb_ram = 0;
+                    self.accel_ram = 0;
                     self.rtg = RtgCard::None;
                 }
             }
@@ -1899,7 +1934,17 @@ impl MachineSetup {
             F::ChipRam => self.chip_ram = cycle_slice(&CHIP_PRESETS, self.chip_ram, forward),
             F::FastRam => self.fast_ram = cycle_nearest(&FAST_PRESETS, self.fast_ram, forward),
             F::SlowRam => self.slow_ram = cycle_nearest(&SLOW_PRESETS, self.slow_ram, forward),
-            F::MbRam => self.mb_ram = cycle_nearest(&MB_PRESETS, self.mb_ram, forward),
+            F::MbRam => {
+                // Only the A4000's Ramsey-07 extends past its four banks
+                // into the $04000000-$06FFFFFF expansion space.
+                let presets: &[usize] = if self.model == Some(MachineModel::A4000) {
+                    &MB_PRESETS_A4000
+                } else {
+                    &MB_PRESETS
+                };
+                self.mb_ram = cycle_nearest(presets, self.mb_ram, forward);
+            }
+            F::AccelRam => self.accel_ram = cycle_nearest(&ACCEL_PRESETS, self.accel_ram, forward),
             F::Z3Ram => self.z3_ram = cycle_nearest(&Z3_PRESETS, self.z3_ram, forward),
             F::FloppyDrives => {
                 self.floppy_drives = step_u8(self.floppy_drives, forward, 1, 4);
@@ -3246,6 +3291,61 @@ mod tests {
         assert_eq!(s.to_raw().memory.motherboard.as_deref(), Some("0"));
         s.build_config()
             .expect("68000 A3000 with no mb RAM validates");
+    }
+
+    /// Only the A4000 cycles past Ramsey's 16M four-bank maximum into the
+    /// $04000000-$06FFFFFF expansion presets; the A3000 wraps back to zero.
+    #[test]
+    fn motherboard_ram_expansion_presets_are_a4000_only() {
+        let mut s = MachineSetup::default();
+        s.select_model(Some(MachineModel::A4000));
+        while s.mb_ram != 16 * 1024 * 1024 {
+            s.cycle(LauncherField::MbRam, true);
+        }
+        s.cycle(LauncherField::MbRam, true);
+        assert_eq!(s.mb_ram, 32 * 1024 * 1024);
+        s.cycle(LauncherField::MbRam, true);
+        assert_eq!(s.mb_ram, 64 * 1024 * 1024);
+        s.build_config().expect("64M A4000 motherboard validates");
+
+        let mut s = MachineSetup::default();
+        s.select_model(Some(MachineModel::A3000));
+        while s.mb_ram != 16 * 1024 * 1024 {
+            s.cycle(LauncherField::MbRam, true);
+        }
+        s.cycle(LauncherField::MbRam, true);
+        assert_eq!(s.mb_ram, 0);
+    }
+
+    /// Accelerator RAM follows only the CPU's address reach: any 32-bit
+    /// machine can carry it, and downgrading the CPU to a 24-bit part drops
+    /// the bank so the emitted config still validates.
+    #[test]
+    fn accelerator_ram_follows_the_cpu_gate() {
+        let mut s = MachineSetup::default();
+        // The default machine is a 68000 A500: greyed out.
+        assert_eq!(
+            s.disabled_reason(LauncherField::AccelRam),
+            Some("needs 32-bit CPU")
+        );
+        s.select_model(Some(MachineModel::A1200));
+        while !cpu_is_32bit(s.cpu) {
+            s.cycle(LauncherField::Cpu, true);
+        }
+        assert!(s.applies(LauncherField::AccelRam));
+        s.cycle(LauncherField::AccelRam, true);
+        assert_eq!(s.accel_ram, 16 * 1024 * 1024);
+        assert_eq!(s.to_raw().memory.accelerator.as_deref(), Some("16M"));
+        s.build_config()
+            .expect("32-bit A1200 with accelerator RAM validates");
+        while s.cpu != CpuModel::M68EC020 {
+            s.cycle(LauncherField::Cpu, true);
+        }
+        assert_eq!(s.accel_ram, 0);
+        assert_eq!(
+            s.disabled_reason(LauncherField::AccelRam),
+            Some("needs 32-bit CPU")
+        );
     }
 
     #[test]

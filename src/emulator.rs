@@ -1985,6 +1985,15 @@ pub fn build_machine(
             crate::memory::MB_RAM_TOP - 1
         );
     }
+    if cfg.accel_ram_bytes > 0 {
+        mem.fit_accel_ram(cfg.accel_ram_bytes);
+        info!(
+            "cpu slot: {}K accelerator fast RAM at {:#010X}-{:#010X}",
+            cfg.accel_ram_bytes / 1024,
+            crate::memory::ACCEL_RAM_BASE,
+            crate::memory::ACCEL_RAM_BASE + cfg.accel_ram_bytes as u64 - 1
+        );
+    }
     if let Some(path) = &cfg.extended_rom_path {
         if rom_optional && !path.is_file() {
             // As with the main ROM above, the save state carries the extended
@@ -2563,6 +2572,7 @@ mod tests {
                 chip_ram: vec![0u8; 512 * 1024],
                 slow_ram: Vec::new(),
                 mb_ram: Vec::new(),
+                accel_ram: Vec::new(),
                 rom,
                 overlay: false,
                 zorro: crate::zorro::ZorroChain::default(),
@@ -2619,6 +2629,7 @@ mod tests {
                 chip_ram,
                 slow_ram: Vec::new(),
                 mb_ram: Vec::new(),
+                accel_ram: Vec::new(),
                 rom,
                 overlay: false,
                 zorro: crate::zorro::ZorroChain::default(),
@@ -2675,6 +2686,7 @@ mod tests {
                 chip_ram,
                 slow_ram: Vec::new(),
                 mb_ram: Vec::new(),
+                accel_ram: Vec::new(),
                 rom,
                 overlay: false,
                 zorro: crate::zorro::ZorroChain::default(),
@@ -2838,6 +2850,7 @@ mod tests {
                 chip_ram,
                 slow_ram: Vec::new(),
                 mb_ram: Vec::new(),
+                accel_ram: Vec::new(),
                 rom,
                 overlay: false,
                 zorro: crate::zorro::ZorroChain::default(),

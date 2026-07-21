@@ -28,10 +28,26 @@ pub const SLOW_RAM_BASE: u64 = 0x00C0_0000;
 /// Kickstart sizes it from the top down; unpopulated space below the fitted
 /// RAM stays undecoded (Fat Gary times the cycle out).
 pub const MB_RAM_TOP: u64 = 0x0800_0000;
-/// The most motherboard RAM Ramsey can drive: four 4 MiB banks of 1Mx4
-/// parts. [`Memory::fit_mb_ram`] enforces this, which keeps the
-/// [`Memory::mb_ram_base`] subtraction from ever underflowing.
-pub const MB_RAM_MAX: usize = 16 * 1024 * 1024;
+/// Ramsey's own four banks of 1Mx4 parts stop at 16 MiB ($07000000-$07FFFFFF),
+/// but the big-box memory map reserves the whole $04000000-$07FFFFFF window
+/// for motherboard RAM expansion, and Kickstart's top-down sizing probe walks
+/// all of it. Fitting more than [`MB_RAM_RAMSEY_MAX`] models an expanded
+/// motherboard decode filling that window (A4000/Ramsey-07 only; config
+/// validation enforces the gate). The cap keeps the [`Memory::mb_ram_base`]
+/// subtraction from ever underflowing.
+pub const MB_RAM_MAX: usize = 64 * 1024 * 1024;
+/// The most motherboard RAM Ramsey itself can drive: four 4 MiB banks of
+/// 1Mx4 parts. Totals beyond this spill into the expansion window below
+/// $07000000 (see [`MB_RAM_MAX`]).
+pub const MB_RAM_RAMSEY_MAX: usize = 16 * 1024 * 1024;
+/// Base of the CPU-slot (accelerator) fast RAM: the $08000000-$0FFFFFFF
+/// coprocessor-slot expansion space of the big-box memory map, where
+/// accelerator boards carry their local RAM. The bank starts here and grows
+/// upward; Kickstart's sizing probe scans the space bottom-up.
+pub const ACCEL_RAM_BASE: u64 = 0x0800_0000;
+/// The whole coprocessor-slot space: $08000000 up to $10000000, where the
+/// Zorro III expansion space begins.
+pub const ACCEL_RAM_MAX: usize = 128 * 1024 * 1024;
 /// Amiga 1000 WCS / WOM: 256 KiB of writable control store at $FC0000 that
 /// the boot ROM loads Kickstart into and then write-protects. The 256 KiB
 /// boot-ROM window ($F80000-$FBFFFF) sits immediately below it, so a boot
@@ -95,6 +111,11 @@ pub struct Memory {
     /// RAM off the chip bus, ending at [`MB_RAM_TOP`] and growing downward.
     /// Empty on machines without a Ramsey; fitted via [`Memory::fit_mb_ram`].
     pub mb_ram: Vec<u8>,
+    /// CPU-slot (accelerator) fast RAM: 32-bit local RAM in the big-box
+    /// coprocessor-slot space, starting at [`ACCEL_RAM_BASE`] and growing
+    /// upward. Empty when no accelerator RAM is fitted; fitted via
+    /// [`Memory::fit_accel_ram`].
+    pub accel_ram: Vec<u8>,
     pub rom: Vec<u8>,
     pub overlay: bool,
     /// Zorro expansion boards (autoconfig chain plus their RAM windows).
@@ -184,6 +205,7 @@ impl Memory {
             chip_ram: vec![0u8; chip_ram_bytes],
             slow_ram: vec![0u8; slow_ram_bytes],
             mb_ram: Vec::new(),
+            accel_ram: Vec::new(),
             rom,
             overlay: true,
             zorro,
@@ -202,7 +224,7 @@ impl Memory {
     pub fn fit_mb_ram(&mut self, bytes: usize) {
         assert!(
             bytes <= MB_RAM_MAX,
-            "motherboard RAM {bytes} bytes exceeds Ramsey's {MB_RAM_MAX}-byte maximum"
+            "motherboard RAM {bytes} bytes exceeds the {MB_RAM_MAX}-byte expansion window"
         );
         self.mb_ram = vec![0u8; bytes];
     }
@@ -211,6 +233,19 @@ impl Memory {
     /// [`MB_RAM_TOP`] and grows downward, so the base depends on its size.
     pub fn mb_ram_base(&self) -> u64 {
         MB_RAM_TOP - self.mb_ram.len() as u64
+    }
+
+    /// Fit `bytes` of CPU-slot (accelerator) fast RAM (see
+    /// [`Memory::accel_ram`]). Zero removes the bank. Panics beyond
+    /// [`ACCEL_RAM_MAX`]: config validation rejects such sizes long before
+    /// this, and enforcing the bound at the only mutation point keeps the
+    /// bank inside the coprocessor-slot space.
+    pub fn fit_accel_ram(&mut self, bytes: usize) {
+        assert!(
+            bytes <= ACCEL_RAM_MAX,
+            "accelerator RAM {bytes} bytes exceeds the {ACCEL_RAM_MAX}-byte CPU-slot space"
+        );
+        self.accel_ram = vec![0u8; bytes];
     }
 
     /// Attach an extended ROM image: 512 KiB maps at $E00000 (CD32),
@@ -245,6 +280,7 @@ impl Memory {
         self.chip_ram.fill(0);
         self.slow_ram.fill(0);
         self.mb_ram.fill(0);
+        self.accel_ram.fill(0);
         // Cold boot loses the WCS contents and returns the latch to boot mode
         // (WCS writable), so the A1000 reloads Kickstart from disk. A warm
         // (keyboard) reset preserves the WCS, as the real machine does.
@@ -314,13 +350,42 @@ mod tests {
         assert_eq!(mem.mb_ram.len(), 2 * 1024 * 1024);
     }
 
-    /// The only mutation point enforces Ramsey's 16 MiB maximum, which is
-    /// what keeps `mb_ram_base` a plain subtraction.
+    /// The only mutation point enforces the 64 MiB expansion-window maximum,
+    /// which is what keeps `mb_ram_base` a plain subtraction.
     #[test]
-    #[should_panic(expected = "exceeds Ramsey")]
-    fn mb_ram_beyond_the_ramsey_maximum_is_refused() {
+    #[should_panic(expected = "expansion window")]
+    fn mb_ram_beyond_the_expansion_window_is_refused() {
         let mut mem = Memory::placeholder(1024, 0, ZorroChain::default());
         mem.fit_mb_ram(MB_RAM_MAX + 1);
+    }
+
+    /// A full 64 MiB motherboard fit reaches the bottom of the expansion
+    /// window at $04000000.
+    #[test]
+    fn mb_ram_expansion_window_reaches_04000000() {
+        let mut mem = Memory::placeholder(1024, 0, ZorroChain::default());
+        mem.fit_mb_ram(MB_RAM_MAX);
+        assert_eq!(mem.mb_ram_base(), 0x0400_0000);
+    }
+
+    #[test]
+    fn accel_ram_starts_at_its_base_and_clears_on_power_on() {
+        let mut mem = Memory::placeholder(1024, 0, ZorroChain::default());
+        mem.fit_accel_ram(16 * 1024 * 1024);
+        assert_eq!(mem.accel_ram.len(), 16 * 1024 * 1024);
+        mem.accel_ram[0] = 0xAA;
+        mem.power_on_reset();
+        assert_eq!(mem.accel_ram[0], 0);
+        assert_eq!(mem.accel_ram.len(), 16 * 1024 * 1024);
+    }
+
+    /// The CPU-slot space ends at $10000000 where Zorro III begins; the only
+    /// mutation point refuses a bank that would cross it.
+    #[test]
+    #[should_panic(expected = "CPU-slot space")]
+    fn accel_ram_beyond_the_cpu_slot_space_is_refused() {
+        let mut mem = Memory::placeholder(1024, 0, ZorroChain::default());
+        mem.fit_accel_ram(ACCEL_RAM_MAX + 1);
     }
 
     #[test]

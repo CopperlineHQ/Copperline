@@ -712,6 +712,7 @@ mod tests {
             chip_ram: vec![0u8; 0x1000],
             slow_ram: Vec::new(),
             mb_ram: Vec::new(),
+            accel_ram: Vec::new(),
             rom: Vec::new(),
             overlay: false,
             zorro: crate::zorro::ZorroChain::default(),

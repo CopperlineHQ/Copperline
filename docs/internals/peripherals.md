@@ -45,6 +45,17 @@ geometry bits are seeded to describe DRAM parts matching the fitted RAM
 size so sizing probes agree with the RAM that answers. Only the register
 file lives in `ramsey.rs`; the RAM bank itself is `memory::Memory::mb_ram`.
 
+Beyond Ramsey's four banks the big-box memory map reserves
+`$04000000`-`$06FFFFFF` for motherboard RAM expansion; on the A4000
+profile the bank keeps growing downward through it, up to 64 MiB at
+`$04000000`, still sized by Kickstart's top-down probe (the control
+register keeps describing the fully populated 1Mx4 geometry -- it has
+no way to say more). The complementary `[memory] accelerator` bank
+models CPU-slot local RAM: it starts at `$08000000` and grows upward
+through the coprocessor-slot space, up to 128 MiB at `$10000000` where
+Zorro III space begins, gated only on a 32-bit CPU
+(`memory::Memory::accel_ram`).
+
 ## Gayle IDE (`gayle.rs`)
 
 A600/A1200 machines get the Gayle gate array: the ID register at
