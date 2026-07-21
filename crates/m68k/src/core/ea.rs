@@ -366,6 +366,21 @@ impl CpuCore {
         }
         let mut addr = self.address(addr);
         if self.has_pmmu && self.pmmu_enabled {
+            let pm = self.mmu_page_mask();
+            if addr & pm > pm - 3 {
+                // The two extension words straddle an MMU page: fetch each
+                // through its own translation. A single base translation
+                // would fetch the second word from the physically adjacent
+                // page instead of the mapped one -- under Linux/m68k that
+                // handed BSR.L a displacement half from an unrelated page
+                // and sent execution into the middle of an instruction.
+                let hi = self.read_imm_16(bus) as u32;
+                if self.faulted() {
+                    return 0;
+                }
+                let lo = self.read_imm_16(bus) as u32;
+                return (hi << 16) | lo;
+            }
             match crate::mmu::translate_address(
                 self,
                 bus,

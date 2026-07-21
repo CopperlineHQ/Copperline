@@ -384,6 +384,17 @@ aborted flow instruction (a `JSR` whose stack push faulted) cannot divert
 the dispatch into its branch target, nor a predecrement `MOVEM` walk the
 handler's stack pointer away.
 
+Access granularity follows the 32-bit bus: an aligned long transfer is one
+bus cycle, so a faulted long RMW writeback is reported as one long-sized
+WB3 entry (not the 68000's low-word-first word pair -- a writeback-
+completing handler like Linux `do_040writebacks` would otherwise complete
+half a store). A misaligned access that straddles an MMU page boundary
+runs as separate cycles with each side translated on its own page, data
+and instruction-stream fetches alike; translating only the base address
+would touch the physically adjacent page instead of the mapped one (under
+Linux/m68k that mis-fetched the low half of a page-straddling `BSR.L`
+displacement and sent execution mid-instruction).
+
 `PTEST` (68040) walks the addressed page and reports the physical address and
 resident bit in MMUSR (the cache-mode/used/modified attribute bits are not yet
 filled in). The 68030 `PTEST` performs a real level-limited walk in the

@@ -1227,7 +1227,7 @@ impl CpuCore {
     }
 
     #[inline]
-    fn faulted(&self) -> bool {
+    pub(crate) fn faulted(&self) -> bool {
         self.run_mode == RUN_MODE_BERR_AERR_RESET
     }
 
@@ -1337,6 +1337,28 @@ impl CpuCore {
         self.run_mode = RUN_MODE_BERR_AERR_RESET;
     }
 
+    /// Byte mask of the active MMU page (page size - 1). A misaligned access
+    /// whose bytes straddle this boundary runs as separate bus cycles on the
+    /// 32-bit-bus CPUs, each cycle translated on its own: the two halves live
+    /// on different virtual pages that map to unrelated physical pages.
+    /// Translating only the base address would read or write the physically
+    /// adjacent page instead of the mapped one.
+    #[inline]
+    pub(crate) fn mmu_page_mask(&self) -> u32 {
+        if self.is_040() || self.is_060() {
+            // 68040/68060 TC.P (bit 14): 0 = 4K pages, 1 = 8K pages.
+            if self.mmu_tc & 0x0000_4000 != 0 {
+                0x1FFF
+            } else {
+                0xFFF
+            }
+        } else {
+            // 68030 TC.PS (bits 23:20): page size 2^PS, PS = 8..15.
+            let ps = ((self.mmu_tc >> 20) & 0xF).clamp(8, 15);
+            (1u32 << ps) - 1
+        }
+    }
+
     /// Read byte from memory (data space).
     #[inline]
     pub fn read_8<B: AddressBus>(&mut self, bus: &mut B, addr: u32) -> u8 {
@@ -1400,6 +1422,19 @@ impl CpuCore {
             self.trigger_address_error(bus, addr, false, false);
             return 0;
         }
+        if self.has_pmmu && self.pmmu_enabled {
+            let pm = self.mmu_page_mask();
+            if addr & pm == pm {
+                // Misaligned word straddling an MMU page: two byte cycles,
+                // each translated on its own page.
+                let hi = self.read_8(bus, addr) as u16;
+                if self.faulted() {
+                    return 0;
+                }
+                let lo = self.read_8(bus, addr.wrapping_add(1)) as u16;
+                return (hi << 8) | lo;
+            }
+        }
         if let Some((a, v)) = self.mmu_read_override {
             if a == addr {
                 // RTE'd 030 bus-fault frame with DF cleared: the handler
@@ -1453,6 +1488,20 @@ impl CpuCore {
         {
             self.trigger_address_error(bus, addr, false, false);
             return 0;
+        }
+        if self.has_pmmu && self.pmmu_enabled {
+            let pm = self.mmu_page_mask();
+            if addr & pm > pm - 3 {
+                // Long straddling an MMU page: two word cycles, each
+                // translated on its own page (read_16 sub-splits further if
+                // a half is itself misaligned across the boundary).
+                let hi = self.read_16(bus, addr) as u32;
+                if self.faulted() {
+                    return 0;
+                }
+                let lo = self.read_16(bus, addr.wrapping_add(2)) as u32;
+                return (hi << 16) | lo;
+            }
         }
         if let Some((a, v)) = self.mmu_read_override {
             if a == addr {
@@ -1549,6 +1598,19 @@ impl CpuCore {
             self.trigger_address_error(bus, addr, true, false);
             return;
         }
+        if self.has_pmmu && self.pmmu_enabled {
+            let pm = self.mmu_page_mask();
+            if addr & pm == pm {
+                // Misaligned word straddling an MMU page: two byte cycles,
+                // each translated (and fault-suppressed) on its own page.
+                self.write_8(bus, addr, (value >> 8) as u8);
+                if self.faulted() {
+                    return;
+                }
+                self.write_8(bus, addr.wrapping_add(1), value as u8);
+                return;
+            }
+        }
         if self.mmu_write_suppress == Some(addr) {
             // See write_8: DF-cleared write fault, already completed.
             self.mmu_write_suppress = None;
@@ -1596,6 +1658,19 @@ impl CpuCore {
         {
             self.trigger_address_error(bus, addr, true, false);
             return;
+        }
+        if self.has_pmmu && self.pmmu_enabled {
+            let pm = self.mmu_page_mask();
+            if addr & pm > pm - 3 {
+                // Long straddling an MMU page: two word cycles, each
+                // translated (and fault-suppressed) on its own page.
+                self.write_16(bus, addr, (value >> 16) as u16);
+                if self.faulted() {
+                    return;
+                }
+                self.write_16(bus, addr.wrapping_add(2), value as u16);
+                return;
+            }
         }
         if self.mmu_write_suppress == Some(addr) {
             // See write_8: DF-cleared write fault, already completed.
