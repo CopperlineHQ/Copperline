@@ -19,7 +19,8 @@ The two halves are consumed exactly as WinUAE and FS-UAE take them.
 
 Built from source on 2026-07-21 from AROS upstream master
 (https://github.com/aros-development-team/AROS) at commit 8c21e46f51.
-Master includes the boot-time optimizations of pull request 829 (single-pass
+Master includes the boot-time optimizations of pull request 829
+(https://github.com/aros-development-team/AROS/pull/829: single-pass
 romtag scan, fast memory clearing, blitter-drawn boot animation), which cut
 the m68k boot to the insert-disk screen from roughly 25-30 s to under 10 s
 and shorten every AROS-booted golden probe run in CI (tests/probe_golden.rs).
