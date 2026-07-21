@@ -524,3 +524,91 @@ fn double_fault_halts_the_batch_loop_immediately() {
     assert!(!cpu.is_stopped(), "a halt is not a STOP");
     assert_eq!(cpu.pc, 0, "no opcode fetched or executed past the halt");
 }
+
+/// A read-modify-write long store (ADD.L Dn,<ea>) that write-faults is one
+/// 32-bit bus cycle on the 68040, so the frame must describe the whole
+/// long: SSW/WB3S size long, WB3A on the operand address, WB3D the full
+/// computed value. Splitting it 68000-style into two word cycles makes a
+/// writeback-completing handler (Linux do_040writebacks) complete only
+/// half the store -- Debian/m68k's ld.so relocated libc's DT_HASH pointer
+/// through exactly this add and crashed init on the mangled result.
+#[test]
+fn rmw_long_write_fault_reports_one_full_long_writeback() {
+    let mut bus = TestBus::new(0x10000);
+    // FAULT_PAGE resident at physical 0x6000 but write-protected (W).
+    let mut cpu = user_mode_040_with_table(&mut bus, 0x6000 | 0x4 | 0x1);
+    bus.write_long(0x6000, 0x0000_0134);
+
+    cpu.set_d(0, 0x1111_0000);
+    bus.write_word(CODE, 0xD190); // ADD.L D0,(A0)
+
+    let _ = cpu.step(&mut bus);
+    assert!(cpu.is_supervisor(), "the store must write-fault");
+    let f = frame_base(&cpu);
+    assert_eq!(
+        bus.read_word(f + F_SSW),
+        0x0401,
+        "SSW = ATC | write | SZ=long | TM=user data"
+    );
+    assert_eq!(
+        bus.read_word(f + F_WB3S),
+        0x0081,
+        "WB3S = V | SZ=long | TM=user data"
+    );
+    assert_eq!(
+        bus.read_long(f + F_WB3A),
+        FAULT_PAGE,
+        "writeback address is the operand base"
+    );
+    assert_eq!(
+        bus.read_long(f + F_WB3D),
+        0x1111_0134,
+        "writeback data is the whole computed long"
+    );
+}
+
+/// The Linux/m68k access-error protocol on a faulted RMW store: the
+/// handler makes the page writable, completes the write from WB3A/WB3D
+/// itself, clears WB3S.V, and RTEs. The restarted instruction re-reads
+/// the completed value but its store is absorbed, so memory keeps the
+/// handler-completed result -- it must be neither half-written nor
+/// double-applied.
+#[test]
+fn completed_and_absorbed_rmw_writeback_is_not_reapplied() {
+    let mut bus = TestBus::new(0x10000);
+    let mut cpu = user_mode_040_with_table(&mut bus, 0x6000 | 0x4 | 0x1);
+    bus.write_long(0x6000, 0x0000_0134);
+
+    cpu.set_d(0, 0x1111_0000);
+    bus.write_word(CODE, 0xD190); // ADD.L D0,(A0)
+    bus.write_word(CODE + 2, 0x4E71); // NOP
+
+    // Handler, in the order Linux resolves a write fault:
+    //   MOVE.L #$00006001,(page slot).L  ; make the page writable
+    //   PFLUSHA
+    //   MOVEA.L ($18,A7),A0              ; WB3A
+    //   MOVE.L ($1C,A7),(A0)             ; complete WB3D
+    //   CLR.B ($0F,A7)                   ; clear WB3S.V
+    //   RTE
+    bus.write_word(HANDLER, 0x23FC);
+    bus.write_long(HANDLER + 2, 0x0000_6001);
+    bus.write_long(HANDLER + 6, PAGE_TABLE + (FAULT_PAGE >> 12) * 4);
+    bus.write_word(HANDLER + 10, 0xF518);
+    bus.write_word(HANDLER + 12, 0x206F);
+    bus.write_word(HANDLER + 14, 0x0018);
+    bus.write_word(HANDLER + 16, 0x20AF);
+    bus.write_word(HANDLER + 18, 0x001C);
+    bus.write_word(HANDLER + 20, 0x422F);
+    bus.write_word(HANDLER + 22, 0x000F);
+    bus.write_word(HANDLER + 24, 0x4E73);
+
+    // Fault + 6 handler instructions + absorbed rerun + NOP.
+    step_n(&mut cpu, &mut bus, 9);
+    assert!(!cpu.is_supervisor(), "no re-fault loop");
+    assert_eq!(cpu.pc & 0xFFFF, (CODE + 4) & 0xFFFF, "past the NOP");
+    assert_eq!(
+        bus.read_long(0x6000),
+        0x1111_0134,
+        "memory keeps the handler-completed value: not half-written, not double-added"
+    );
+}
