@@ -860,6 +860,15 @@ pub struct Bus {
     /// vs ECS/AGA VARBEAMEN programmable scan); see `FrameGeometry`.
     current_frame_geometry: FrameGeometry,
     last_frame_geometry: FrameGeometry,
+    /// Sync-anchored presentation window latched at the frame wrap with the
+    /// geometry, so the presented frame never mixes its latched geometry
+    /// with sync registers rewritten after the wrap. A pure presentation
+    /// cache: never serialized (restored None and recomputed after a state
+    /// load, like `FrameGeometry::frame_lines`).
+    #[serde(skip)]
+    current_frame_presentation_h_window: Option<(i32, u32)>,
+    #[serde(skip)]
+    last_frame_presentation_h_window: Option<(i32, u32)>,
     lazy_collision_vpos: u32,
     lazy_collision_hpos: u32,
     /// Sticky gate for the per-frame collision accumulation. Collision results
@@ -2394,6 +2403,8 @@ impl Bus {
                 PAL_LINES,
                 false,
             ),
+            current_frame_presentation_h_window: None,
+            last_frame_presentation_h_window: None,
             last_frame_geometry: FrameGeometry::standard(
                 RENDER_VISIBLE_START_VPOS,
                 PAL_LINES,
@@ -3049,6 +3060,8 @@ impl Bus {
             FrameGeometry::standard(RENDER_VISIBLE_START_VPOS, frame_lines, false);
         self.last_frame_geometry =
             FrameGeometry::standard(RENDER_VISIBLE_START_VPOS, frame_lines, false);
+        self.current_frame_presentation_h_window = None;
+        self.last_frame_presentation_h_window = None;
         self.lazy_collision_vpos = RENDER_VISIBLE_START_VPOS;
         self.lazy_collision_hpos = RENDER_COPPER_WAIT_HPOS_FB0;
         self.collision_tracking_active = false;
@@ -3273,6 +3286,8 @@ impl Bus {
         }
         self.last_frame_visible_start_vpos = self.current_frame_visible_start_vpos;
         self.last_frame_geometry.visible_start_vpos = self.current_frame_visible_start_vpos;
+        self.current_frame_presentation_h_window = self.compute_presentation_h_window();
+        self.last_frame_presentation_h_window = self.current_frame_presentation_h_window;
         self.lazy_collision_vpos = self.current_frame_visible_start_vpos;
         self.ocs_same_line_diw_start_blocked_vpos = None;
         self.reset_frame_capture_buffers();
@@ -4624,8 +4639,19 @@ impl Bus {
     /// unprogrammed (the presentation then falls back to the time-linear
     /// whole-line map).
     pub fn frame_presentation_h_window(&self) -> Option<(i32, u32)> {
+        if self.last_frame_render_base.is_some() {
+            self.last_frame_presentation_h_window
+        } else {
+            self.current_frame_presentation_h_window
+        }
+    }
+
+    /// Compute the window from the live Agnus sync latches and the
+    /// just-latched frame geometry; called at the frame wrap (and after a
+    /// state load) so presentation always sees a consistent snapshot.
+    pub(crate) fn compute_presentation_h_window(&self) -> Option<(i32, u32)> {
         const CAPTURE_APERTURE_START_CCK: i32 = 31;
-        let geometry = self.frame_geometry();
+        let geometry = self.current_frame_geometry;
         if !geometry.programmable {
             return None;
         }
