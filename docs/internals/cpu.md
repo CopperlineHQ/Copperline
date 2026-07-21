@@ -23,7 +23,11 @@ fits a 68881/68882 to any 020/030 (and is on by default for the 68040,
 whose FPU is on-die): the vendored core executes the 6888x instruction
 set in true 80-bit extended precision via a pure-Rust software floating-
 point engine (`crates/m68k/src/fpu/softfloat.rs`). Arithmetic (add, sub,
-mul, div, sqrt), ordered compare, round-to-integer, scale, getexp/getman,
+mul, div, sqrt, and the single-accuracy FSGLMUL/FSGLDIV, which round the
+mantissa to 24 bits but keep the extended exponent range -- gcc -m68040
+emits them for `float` arithmetic and the Linux/m68k kernel FPSP has no
+emulation entry for them, so a Line-F here is a userspace SIGILL),
+ordered compare, round-to-integer, scale, getexp/getman,
 the format conversions, FMOVE/FMOVEM in every operand format (including
 packed decimal), the constant ROM, FBcc/FScc/FDBcc/FTRAPcc, control
 registers, the FPCR rounding mode/precision and the FPSR exception/accrued

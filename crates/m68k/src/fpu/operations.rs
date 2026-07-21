@@ -90,6 +90,19 @@ fn fpu_060_traps_opmode(opmode: u16) -> bool {
     )
 }
 
+/// Truncate a finite operand's mantissa to its 24 most significant bits,
+/// the FSGLMUL input reduction (M68000PM 3-157). NaNs keep their payload
+/// and infinities their encoding.
+fn sgl_truncate(v: FloatX80) -> FloatX80 {
+    if v.is_nan() || v.is_inf() {
+        return v;
+    }
+    FloatX80 {
+        mantissa: v.mantissa & 0xFFFF_FF00_0000_0000,
+        ..v
+    }
+}
+
 /// Sign-extend a 7-bit FMOVE k-factor to i8.
 fn sign_extend7(v: u16) -> i8 {
     let raw = (v & 0x7F) as i16;
@@ -990,6 +1003,41 @@ impl CpuCore {
                 let ctx = self.fpu_ctx(opmode);
                 let mut f = ExcFlags::default();
                 self.fpr[dst] = softfloat::mul(self.fpr[dst], src, ctx, &mut f);
+                self.fpu_set_cc(self.fpr[dst]);
+                self.fpu_commit(f);
+                4
+            }
+            0x24 => {
+                // FSGLDIV - dst = dst / src with the quotient mantissa
+                // rounded to single precision but the extended exponent
+                // range kept (M68000PM 3-155: only the accuracy drops, not
+                // the range). In silicon on every part with an FPU -- gcc
+                // -m68040 emits it for float divides, so Debian/m68k
+                // binaries die with SIGILL if it Line-Fs (the kernel FPSP
+                // has no emulation entry for a hardware instruction).
+                let ctx = RoundCtx {
+                    mode: RoundMode::from_fpcr(self.fpcr),
+                    prec: Precision::Single,
+                };
+                let mut f = ExcFlags::default();
+                self.fpr[dst] = softfloat::div(self.fpr[dst], src, ctx, &mut f);
+                self.fpu_set_cc(self.fpr[dst]);
+                self.fpu_commit(f);
+                4
+            }
+            0x27 => {
+                // FSGLMUL - like FSGLDIV for the product; the operand
+                // mantissas are truncated to 24 bits before the multiply
+                // (M68000PM 3-157), which real code can observe in the
+                // last bit of the result.
+                let ctx = RoundCtx {
+                    mode: RoundMode::from_fpcr(self.fpcr),
+                    prec: Precision::Single,
+                };
+                let mut f = ExcFlags::default();
+                let a = sgl_truncate(self.fpr[dst]);
+                let b = sgl_truncate(src);
+                self.fpr[dst] = softfloat::mul(a, b, ctx, &mut f);
                 self.fpu_set_cc(self.fpr[dst]);
                 self.fpu_commit(f);
                 4
