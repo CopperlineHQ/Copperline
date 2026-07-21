@@ -79,11 +79,13 @@ pub fn translate<B: AddressBus>(
         None => (supervisor, instruction),
     };
 
-    // During exception processing, bypass translation to prevent recursive faults.
-    // Real hardware uses transparent translation or physical addressing for exception frames.
-    if cpu.exception_processing {
-        return Ok(logical);
-    }
+    // Exception frame pushes and vector fetches translate like any other
+    // access on real silicon: supervisor stacks and VBR hold logical
+    // addresses (Linux/m68k runs its kernel at virtual 0 with RAM at
+    // 0x04000000 -- an untranslated frame write would land in the wrong
+    // physical page). A translation fault raised while exception_processing
+    // is set re-enters take_exception, whose double-fault guard halts the
+    // CPU -- the same double bus fault real hardware takes.
 
     // Check Transparent Translation Registers first - they bypass page table walk.
     if let Some(phys) = super::ttr::check_transparent_translation(cpu, logical, write, instruction)
@@ -436,30 +438,26 @@ pub(crate) fn ptest_030<B: AddressBus>(
 /// page descriptors use PDT (bits [1:0]): 0 = invalid, 2 = indirect, 1/3 =
 /// resident.
 ///
-/// A *data* access through an invalid/unconfigured descriptor raises an access
-/// fault (this is how Enforcer/MuForce catch low-memory and freed-memory hits).
-/// An *instruction fetch* through an invalid descriptor instead falls back to
-/// identity translation: a 68040 enables TC before all of its code is mapped
-/// during boot, and faulting the fetch stream there would derail it (the
-/// codebase's "safe direction"). Resident pages additionally enforce the W
-/// (write-protect) and S (supervisor-only) descriptor bits.
+/// Any access through an invalid/unconfigured descriptor raises an access
+/// fault, instruction fetches included: demand-paged operating systems
+/// (Linux/m68k) fault code pages in exactly this way, and Enforcer/MuForce
+/// catch low-memory and freed-memory hits with the data-side faults. Code
+/// that must keep executing across an MMU enable covers itself with the
+/// transparent translation registers, which are checked before the walk.
+/// Resident pages additionally enforce the W (write-protect) and S
+/// (supervisor-only) descriptor bits.
 fn translate_040<B: AddressBus>(
     cpu: &mut CpuCore,
     bus: &mut B,
     logical: u32,
     write: bool,
     supervisor: bool,
-    instruction: bool,
+    _instruction: bool,
 ) -> MmuResult<u32> {
-    // Invalid-descriptor outcome: fault on data, identity-fallback on a
-    // fetch. The cause records which walk level held the invalid
-    // descriptor (the 68060 FSLW reports it).
+    // Invalid-descriptor outcome: an access fault whose cause records which
+    // walk level held the invalid descriptor (the 68060 FSLW reports it).
     let invalid = |logical: u32, cause: MmuFaultCause| -> MmuResult<u32> {
-        if instruction {
-            Ok(logical)
-        } else {
-            Err(access_fault_cause(logical, cause))
-        }
+        Err(access_fault_cause(logical, cause))
     };
     // Page size: TC bit 14 (P) selects 8 KB, else 4 KB.
     let page_bits = if cpu.mmu_tc & 0x0000_4000 != 0 { 13 } else { 12 };

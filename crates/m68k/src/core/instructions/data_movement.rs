@@ -716,13 +716,24 @@ impl CpuCore {
                 match size {
                     Size::Byte => self.write_8(bus, addr, value as u8),
                     Size::Word => self.write_16(bus, addr, value as u16),
-                    // 68000 long RMW writebacks go low word first, then high
+                    // 16-bit-bus CPUs (68000/68010/SCC68070) run a long RMW
+                    // writeback as two word cycles, low word first, then high
                     // word (unlike MOVE.L destinations, which write high
-                    // first).
-                    Size::Long => {
+                    // first). The 32-bit-bus CPUs issue one aligned long
+                    // access; splitting it breaks MMU fault reporting (the
+                    // access-error frame would describe a word-sized half, so
+                    // a handler that completes the writeback -- Linux
+                    // do_040writebacks -- completes only half the store).
+                    Size::Long
+                        if matches!(
+                            self.cpu_type,
+                            CpuType::M68000 | CpuType::M68010 | CpuType::SCC68070
+                        ) =>
+                    {
                         self.write_16(bus, addr.wrapping_add(2), (value & 0xFFFF) as u16);
                         self.write_16(bus, addr, (value >> 16) as u16);
                     }
+                    Size::Long => self.write_32(bus, addr, value),
                 }
             }
             EaResult::Immediate(_) => {

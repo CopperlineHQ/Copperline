@@ -277,6 +277,16 @@ pub struct CpuCore {
     /// can stack it in the 030 frame's data output buffer (the handler
     /// completes the write from there).
     pub(crate) pending_fault_wdata: u32,
+    /// Handler-entry state captured when a mid-instruction fault dispatch
+    /// completes: (PC, SR, D0-D7/A0-A7). The aborted instruction's
+    /// remaining execution is suppressed via `faulted()` on the bus side,
+    /// but its register updates still land -- a JSR/RTS assigns `pc` on
+    /// the way out and a `movem -(a7)` keeps stepping the (now
+    /// supervisor) stack pointer -- which would corrupt the handler's
+    /// entry state. The run loop re-asserts this snapshot when it clears
+    /// the fault state. Transient within one instruction boundary.
+    #[serde(skip)]
+    pub(crate) fault_resume: Option<(u32, u16, [u32; 16])>,
 
     // ========== Execution State ==========
     /// Remaining cycles in current timeslice
@@ -488,6 +498,7 @@ impl CpuCore {
             mmu_read_override: None,
             mmu_write_suppress: None,
             pending_fault_wdata: 0,
+            fault_resume: None,
             cycles_remaining: 0,
             initial_cycles: 0,
             oep060: Default::default(),
@@ -1216,8 +1227,31 @@ impl CpuCore {
     }
 
     #[inline]
-    fn faulted(&self) -> bool {
+    pub(crate) fn faulted(&self) -> bool {
         self.run_mode == RUN_MODE_BERR_AERR_RESET
+    }
+
+    /// Close out an instruction that faulted mid-execution: re-assert the
+    /// handler-entry PC/SR/registers the fault dispatch established (a flow
+    /// instruction whose stack access faulted -- JSR/BSR/RTS -- still
+    /// assigns `pc` on its way out, and a predecrement MOVEM keeps stepping
+    /// A7, which would divert or corrupt the handler) and return to normal
+    /// run mode.
+    pub(crate) fn end_faulted_instruction(&mut self) {
+        if let Some((handler_pc, handler_sr, handler_dar)) = self.fault_resume.take() {
+            self.pc = handler_pc;
+            // No bank swap: handler_dar carries the post-switch A7.
+            self.set_sr_noint_nosp(handler_sr);
+            self.dar = handler_dar;
+        }
+        // A double fault mid-dispatch has parked the CPU: keep the fault
+        // run mode so `is_halted()` classifies it (a halted 68k stays dead
+        // until reset, distinct from a STOP), and let the caller stop
+        // executing rather than resume.
+        if self.stopped != 0 {
+            return;
+        }
+        self.run_mode = super::execute::RUN_MODE_NORMAL;
     }
 
     /// Trigger a 68000-style address error and mark the current instruction as faulted so that
@@ -1265,6 +1299,7 @@ impl CpuCore {
         self.set_sr_noint_nosp(self.sr_save);
         self.dar = self.dar_save;
         let _ = self.exception_address_error(bus, address, write, instruction);
+        self.fault_resume = Some((self.pc, self.get_sr(), self.dar));
         self.run_mode = RUN_MODE_BERR_AERR_RESET;
     }
 
@@ -1282,8 +1317,9 @@ impl CpuCore {
             return;
         }
         // A fault while already delivering a fault is a double fault: halt
-        // rather than recurse. (translate() also bypasses while this flag is
-        // set, so the frame writes and vector fetch below do not re-translate.)
+        // rather than recurse -- the frame writes and vector fetch below
+        // translate like any other supervisor access, and a fault raised
+        // from one of them lands right back here.
         if self.exception_processing {
             self.stopped = 1;
             self.run_mode = RUN_MODE_BERR_AERR_RESET;
@@ -1297,7 +1333,30 @@ impl CpuCore {
         let cause = self.pending_fault_cause.take();
         let _ = self.exception_bus_error(bus, address, write, instruction, size, cause);
         self.exception_processing = false;
+        self.fault_resume = Some((self.pc, self.get_sr(), self.dar));
         self.run_mode = RUN_MODE_BERR_AERR_RESET;
+    }
+
+    /// Byte mask of the active MMU page (page size - 1). A misaligned access
+    /// whose bytes straddle this boundary runs as separate bus cycles on the
+    /// 32-bit-bus CPUs, each cycle translated on its own: the two halves live
+    /// on different virtual pages that map to unrelated physical pages.
+    /// Translating only the base address would read or write the physically
+    /// adjacent page instead of the mapped one.
+    #[inline]
+    pub(crate) fn mmu_page_mask(&self) -> u32 {
+        if self.is_040() || self.is_060() {
+            // 68040/68060 TC.P (bit 14): 0 = 4K pages, 1 = 8K pages.
+            if self.mmu_tc & 0x0000_4000 != 0 {
+                0x1FFF
+            } else {
+                0xFFF
+            }
+        } else {
+            // 68030 TC.PS (bits 23:20): page size 2^PS, PS = 8..15.
+            let ps = ((self.mmu_tc >> 20) & 0xF).clamp(8, 15);
+            (1u32 << ps) - 1
+        }
     }
 
     /// Read byte from memory (data space).
@@ -1363,6 +1422,19 @@ impl CpuCore {
             self.trigger_address_error(bus, addr, false, false);
             return 0;
         }
+        if self.has_pmmu && self.pmmu_enabled {
+            let pm = self.mmu_page_mask();
+            if addr & pm == pm {
+                // Misaligned word straddling an MMU page: two byte cycles,
+                // each translated on its own page.
+                let hi = self.read_8(bus, addr) as u16;
+                if self.faulted() {
+                    return 0;
+                }
+                let lo = self.read_8(bus, addr.wrapping_add(1)) as u16;
+                return (hi << 8) | lo;
+            }
+        }
         if let Some((a, v)) = self.mmu_read_override {
             if a == addr {
                 // RTE'd 030 bus-fault frame with DF cleared: the handler
@@ -1416,6 +1488,20 @@ impl CpuCore {
         {
             self.trigger_address_error(bus, addr, false, false);
             return 0;
+        }
+        if self.has_pmmu && self.pmmu_enabled {
+            let pm = self.mmu_page_mask();
+            if addr & pm > pm - 3 {
+                // Long straddling an MMU page: two word cycles, each
+                // translated on its own page (read_16 sub-splits further if
+                // a half is itself misaligned across the boundary).
+                let hi = self.read_16(bus, addr) as u32;
+                if self.faulted() {
+                    return 0;
+                }
+                let lo = self.read_16(bus, addr.wrapping_add(2)) as u32;
+                return (hi << 16) | lo;
+            }
         }
         if let Some((a, v)) = self.mmu_read_override {
             if a == addr {
@@ -1512,6 +1598,19 @@ impl CpuCore {
             self.trigger_address_error(bus, addr, true, false);
             return;
         }
+        if self.has_pmmu && self.pmmu_enabled {
+            let pm = self.mmu_page_mask();
+            if addr & pm == pm {
+                // Misaligned word straddling an MMU page: two byte cycles,
+                // each translated (and fault-suppressed) on its own page.
+                self.write_8(bus, addr, (value >> 8) as u8);
+                if self.faulted() {
+                    return;
+                }
+                self.write_8(bus, addr.wrapping_add(1), value as u8);
+                return;
+            }
+        }
         if self.mmu_write_suppress == Some(addr) {
             // See write_8: DF-cleared write fault, already completed.
             self.mmu_write_suppress = None;
@@ -1559,6 +1658,19 @@ impl CpuCore {
         {
             self.trigger_address_error(bus, addr, true, false);
             return;
+        }
+        if self.has_pmmu && self.pmmu_enabled {
+            let pm = self.mmu_page_mask();
+            if addr & pm > pm - 3 {
+                // Long straddling an MMU page: two word cycles, each
+                // translated (and fault-suppressed) on its own page.
+                self.write_16(bus, addr, (value >> 16) as u16);
+                if self.faulted() {
+                    return;
+                }
+                self.write_16(bus, addr.wrapping_add(2), value as u16);
+                return;
+            }
         }
         if self.mmu_write_suppress == Some(addr) {
             // See write_8: DF-cleared write fault, already completed.
@@ -1613,10 +1725,12 @@ impl CpuCore {
             }
             MmuFaultKind::ConfigurationError => {
                 let _ = self.take_exception(bus, vector::MMU_CONFIGURATION_ERROR);
+                self.fault_resume = Some((self.pc, self.get_sr(), self.dar));
                 self.run_mode = RUN_MODE_BERR_AERR_RESET;
             }
             MmuFaultKind::IllegalOperation => {
                 let _ = self.take_exception(bus, vector::MMU_ILLEGAL_OPERATION_ERROR);
+                self.fault_resume = Some((self.pc, self.get_sr(), self.dar));
                 self.run_mode = RUN_MODE_BERR_AERR_RESET;
             }
             MmuFaultKind::AccessLevelViolation => {
@@ -1629,6 +1743,10 @@ impl CpuCore {
                 self.trigger_bus_error(bus, fault.address, write, instruction, size);
             }
         }
+        // A faulted MOVES cycle never reaches its own override cleanup: the
+        // dispatch above is the instruction's end, so drop the SFC/DFC
+        // override here (the frame's SSW has already captured it).
+        self.mmu_fc_override = None;
     }
 
     /// Execute COP0 / PMMU op0 (0xF0xx) style instructions.

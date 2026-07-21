@@ -90,6 +90,19 @@ fn fpu_060_traps_opmode(opmode: u16) -> bool {
     )
 }
 
+/// Truncate a finite operand's mantissa to its 24 most significant bits,
+/// the FSGLMUL input reduction (M68000PM 3-157). NaNs keep their payload
+/// and infinities their encoding.
+fn sgl_truncate(v: FloatX80) -> FloatX80 {
+    if v.is_nan() || v.is_inf() {
+        return v;
+    }
+    FloatX80 {
+        mantissa: v.mantissa & 0xFFFF_FF00_0000_0000,
+        ..v
+    }
+}
+
 /// Sign-extend a 7-bit FMOVE k-factor to i8.
 fn sign_extend7(v: u16) -> i8 {
     let raw = (v & 0x7F) as i16;
@@ -534,11 +547,46 @@ impl CpuCore {
         }
     }
 
+    /// Resolve a control-mode effective address for FSAVE/FRESTORE,
+    /// consuming any extension words: (An), (d16,An), (d8,An,Xn),
+    /// (xxx).W/(xxx).L, and -- for FRESTORE, whose frame is a source
+    /// operand -- (d16,PC)/(d8,PC,Xn). The register-direct, (An)+/-(An),
+    /// and immediate modes are not control modes; the callers keep their
+    /// own arms for the increment/decrement forms and everything else is
+    /// an undefined encoding (None -> Line-F).
+    fn fpu_frame_control_ea<B: AddressBus>(
+        &mut self,
+        bus: &mut B,
+        ea_mode: u8,
+        ea_reg: usize,
+        allow_pc_relative: bool,
+    ) -> Option<u32> {
+        let mode = AddressingMode::decode(ea_mode, ea_reg as u8)?;
+        let control = matches!(
+            mode,
+            AddressingMode::AddressIndirect(_)
+                | AddressingMode::Displacement(_)
+                | AddressingMode::Index(_)
+                | AddressingMode::AbsoluteShort
+                | AddressingMode::AbsoluteLong
+        ) || (allow_pc_relative
+            && matches!(
+                mode,
+                AddressingMode::PcDisplacement | AddressingMode::PcIndex
+            ));
+        if !control {
+            return None;
+        }
+        match self.resolve_ea(bus, mode, Size::Long) {
+            EaResult::Memory(addr) => Some(addr),
+            _ => None,
+        }
+    }
+
     fn exec_fsave<B: AddressBus>(&mut self, bus: &mut B, ea_mode: u8, ea_reg: usize) -> i32 {
         if self.is_060() {
             return self.exec_fsave_060(bus, ea_mode, ea_reg);
         }
-        // Musashi supports only (An)+ and -(An) here for 68040.
         match ea_mode {
             3 => {
                 // (An)+
@@ -548,8 +596,9 @@ impl CpuCore {
                 if self.fpu_just_reset {
                     self.write_32(bus, addr, 0);
                 } else {
-                    // Total frame size is 7 longs (28 bytes). EA increment already did +4.
-                    self.set_a(ea_reg, self.a(ea_reg).wrapping_add(6 * 4));
+                    // EA increment already did +4; cover the rest of the frame.
+                    let extra = fsave_extra_longs(self);
+                    self.set_a(ea_reg, self.a(ea_reg).wrapping_add(extra * 4));
                     perform_fsave(bus, self, addr, true);
                 }
                 8
@@ -562,13 +611,28 @@ impl CpuCore {
                 if self.fpu_just_reset {
                     self.write_32(bus, addr_hi, 0);
                 } else {
-                    // Total frame size is 28 bytes; one predecrement already happened (-4).
-                    self.set_a(ea_reg, self.a(ea_reg).wrapping_sub(6 * 4));
+                    // One predecrement already happened (-4); cover the rest.
+                    let extra = fsave_extra_longs(self);
+                    self.set_a(ea_reg, self.a(ea_reg).wrapping_sub(extra * 4));
                     perform_fsave(bus, self, addr_hi, false);
                 }
                 8
             }
-            _ => 0,
+            // Control modes -- (An), (d16,An), (d8,An,Xn), (xxx).W/.L --
+            // write the frame ascending from the resolved address with no
+            // register update (Linux/m68k's bootstrap parks FPU state with
+            // FSAVE/FRESTORE d16(sp)).
+            _ => match self.fpu_frame_control_ea(bus, ea_mode, ea_reg, false) {
+                Some(addr) => {
+                    if self.fpu_just_reset {
+                        self.write_32(bus, addr, 0);
+                    } else {
+                        perform_fsave(bus, self, addr, true);
+                    }
+                    8
+                }
+                None => 0,
+            },
         }
     }
 
@@ -609,7 +673,18 @@ impl CpuCore {
                 }
                 8
             }
-            _ => 0,
+            // Remaining control modes: frame written at the resolved
+            // address, no register update.
+            _ => match self.fpu_frame_control_ea(bus, ea_mode, ea_reg, false) {
+                Some(addr) => {
+                    self.write_32(bus, addr, header);
+                    for off in (4..size).step_by(4) {
+                        self.write_32(bus, addr.wrapping_add(off), 0);
+                    }
+                    8
+                }
+                None => 0,
+            },
         }
     }
 
@@ -635,7 +710,21 @@ impl CpuCore {
                 }
                 8
             }
-            _ => 0,
+            // Remaining control modes, plus PC-relative (the frame is a
+            // source operand): read the header at the resolved address,
+            // no register update.
+            _ => match self.fpu_frame_control_ea(bus, ea_mode, ea_reg, true) {
+                Some(addr) => {
+                    let header = self.read_32(bus, addr);
+                    if (header & 0x0000_FF00) == 0 {
+                        self.do_frestore_null();
+                    } else {
+                        self.fpu_just_reset = false;
+                    }
+                    8
+                }
+                None => 0,
+            },
         }
     }
 
@@ -666,20 +755,31 @@ impl CpuCore {
                 } else {
                     self.fpu_just_reset = false;
 
-                    // Musashi adjusts A-reg by additional bytes based on frame type.
-                    // (EA macro already did +4.)
-                    let kind = header & 0x00FF_0000;
-                    let extra = match kind {
-                        0x0018_0000 => 6 * 4,  // IDLE
-                        0x0038_0000 => 14 * 4, // UNIMP
-                        0x00B4_0000 => 45 * 4, // BUSY
-                        _ => 0,
-                    };
+                    // The frame's size byte counts the state bytes after the
+                    // header long ($18 6888x idle, $38 unimp, $B4 busy, $28
+                    // 68040 idle, $60 68040 busy); the postincrement covers
+                    // header plus state. (EA macro already did +4.)
+                    let extra = (header >> 16) & 0x00FF;
                     self.set_a(ea_reg, self.a(ea_reg).wrapping_add(extra));
                 }
                 8
             }
-            _ => 0,
+            // Remaining control modes, plus PC-relative (the frame is a
+            // source operand): read the header at the resolved address,
+            // no register update. Linux/m68k's Amiga bootstrap resets the
+            // FPU with FRESTORE d16(sp) before jumping to the kernel.
+            _ => match self.fpu_frame_control_ea(bus, ea_mode, ea_reg, true) {
+                Some(addr) => {
+                    let header = self.read_32(bus, addr);
+                    if (header & 0xFF00_0000) == 0 {
+                        self.do_frestore_null();
+                    } else {
+                        self.fpu_just_reset = false;
+                    }
+                    8
+                }
+                None => 0,
+            },
         }
     }
 
@@ -903,6 +1003,41 @@ impl CpuCore {
                 let ctx = self.fpu_ctx(opmode);
                 let mut f = ExcFlags::default();
                 self.fpr[dst] = softfloat::mul(self.fpr[dst], src, ctx, &mut f);
+                self.fpu_set_cc(self.fpr[dst]);
+                self.fpu_commit(f);
+                4
+            }
+            0x24 => {
+                // FSGLDIV - dst = dst / src with the quotient mantissa
+                // rounded to single precision but the extended exponent
+                // range kept (M68000PM 3-155: only the accuracy drops, not
+                // the range). In silicon on every part with an FPU -- gcc
+                // -m68040 emits it for float divides, so Debian/m68k
+                // binaries die with SIGILL if it Line-Fs (the kernel FPSP
+                // has no emulation entry for a hardware instruction).
+                let ctx = RoundCtx {
+                    mode: RoundMode::from_fpcr(self.fpcr),
+                    prec: Precision::Single,
+                };
+                let mut f = ExcFlags::default();
+                self.fpr[dst] = softfloat::div(self.fpr[dst], src, ctx, &mut f);
+                self.fpu_set_cc(self.fpr[dst]);
+                self.fpu_commit(f);
+                4
+            }
+            0x27 => {
+                // FSGLMUL - like FSGLDIV for the product; the operand
+                // mantissas are truncated to 24 bits before the multiply
+                // (M68000PM 3-157), which real code can observe in the
+                // last bit of the result.
+                let ctx = RoundCtx {
+                    mode: RoundMode::from_fpcr(self.fpcr),
+                    prec: Precision::Single,
+                };
+                let mut f = ExcFlags::default();
+                let a = sgl_truncate(self.fpr[dst]);
+                let b = sgl_truncate(src);
+                self.fpr[dst] = softfloat::mul(a, b, ctx, &mut f);
                 self.fpu_set_cc(self.fpr[dst]);
                 self.fpu_commit(f);
                 4
@@ -1275,25 +1410,40 @@ impl CpuCore {
     }
 }
 
-fn perform_fsave<B: AddressBus>(bus: &mut B, cpu: &mut CpuCore, addr: u32, inc: bool) {
-    // Generate a 68881-style "IDLE" frame as Musashi does for 68040 FSAVE.
-    // This is sufficient for many OSes that only probe save/restore behavior.
-    if inc {
-        cpu.write_32(bus, addr, 0x1F18_0000);
-        cpu.write_32(bus, addr.wrapping_add(4), 0);
-        cpu.write_32(bus, addr.wrapping_add(8), 0);
-        cpu.write_32(bus, addr.wrapping_add(12), 0);
-        cpu.write_32(bus, addr.wrapping_add(16), 0);
-        cpu.write_32(bus, addr.wrapping_add(20), 0);
-        cpu.write_32(bus, addr.wrapping_add(24), 0x7000_0000);
+/// The FSAVE IDLE frame is CPU-specific: the 68040's on-chip FPU saves a
+/// version-$41 frame with size byte $28 ($2C bytes in total), while the
+/// 68881 co-processor of 020/030 systems saves the $18-byte IDLE frame.
+/// The size byte matters to guests: Linux/m68k validates a signal frame's
+/// saved FPU state against the per-CPU size set ($00/$28/$60 on the 040)
+/// before FRESTOREing it, and kills the process with SIGSEGV on any other
+/// value -- a 68881 frame from a 68040 FSAVE turns every signal-handler
+/// return into a fault.
+fn fsave_idle_frame(cpu: &CpuCore) -> (u32, u32, u32) {
+    if cpu.is_040() {
+        (0x4128_0000, 11, 0) // header, total longs, last long
     } else {
-        cpu.write_32(bus, addr, 0x7000_0000);
-        cpu.write_32(bus, addr.wrapping_sub(4), 0);
-        cpu.write_32(bus, addr.wrapping_sub(8), 0);
-        cpu.write_32(bus, addr.wrapping_sub(12), 0);
-        cpu.write_32(bus, addr.wrapping_sub(16), 0);
-        cpu.write_32(bus, addr.wrapping_sub(20), 0);
-        cpu.write_32(bus, addr.wrapping_sub(24), 0x1F18_0000);
+        (0x1F18_0000, 7, 0x7000_0000)
     }
 }
 
+/// Longs the FSAVE EA register update covers beyond the header long.
+pub(crate) fn fsave_extra_longs(cpu: &CpuCore) -> u32 {
+    fsave_idle_frame(cpu).1 - 1
+}
+
+fn perform_fsave<B: AddressBus>(bus: &mut B, cpu: &mut CpuCore, addr: u32, inc: bool) {
+    let (header, longs, last) = fsave_idle_frame(cpu);
+    if inc {
+        cpu.write_32(bus, addr, header);
+        for i in 1..longs - 1 {
+            cpu.write_32(bus, addr.wrapping_add(i * 4), 0);
+        }
+        cpu.write_32(bus, addr.wrapping_add((longs - 1) * 4), last);
+    } else {
+        cpu.write_32(bus, addr, last);
+        for i in 1..longs - 1 {
+            cpu.write_32(bus, addr.wrapping_sub(i * 4), 0);
+        }
+        cpu.write_32(bus, addr.wrapping_sub((longs - 1) * 4), header);
+    }
+}

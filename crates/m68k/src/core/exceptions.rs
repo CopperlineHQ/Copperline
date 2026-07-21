@@ -342,6 +342,12 @@ impl CpuCore {
     ) -> i32 {
         let old_sr = self.get_sr();
         let was_supervisor = (old_sr & 0x2000) != 0;
+        // The faulted write's data, captured before any frame push: the
+        // pushes below are ordinary translated writes and each one replaces
+        // pending_fault_wdata, so reading the field mid-frame would hand the
+        // handler's writeback (WB3D / the 030 data output buffer) a zero
+        // instead of the value the guest was storing.
+        let fault_wdata = self.pending_fault_wdata;
 
         // Enter supervisor mode, clear trace
         self.set_s_flag(SFLAG_SET);
@@ -351,8 +357,13 @@ impl CpuCore {
         // Build function code / status word. A MOVES data fault carries the
         // SFC/DFC space it faulted in, not the CPU-state code: the handler
         // reads the fc back out of the frame's SSW to PTEST the faulted
-        // space (mmu.library does exactly this).
-        let fc = match self.mmu_fc_override {
+        // space (mmu.library does exactly this). The override is consumed
+        // here: SFC/DFC only governs the MOVES operand cycle, never the
+        // exception dispatch itself -- the frame pushes and vector fetch
+        // below run in supervisor space (a stuck override would walk the
+        // user root pointer for the vector fetch, which on a kernel with
+        // split user/supervisor trees reads garbage).
+        let fc = match self.mmu_fc_override.take() {
             Some(ofc) => ofc as u16,
             None => {
                 if was_supervisor {
@@ -404,11 +415,11 @@ impl CpuCore {
                 // RTE restarts it (same demand-paging model as the 040).
                 let fslw = fslw_060(write, instruction, size, fc, cause);
                 let fmt_vec = 0x4000 | ((vector::BUS_ERROR as u16) << 2);
-                self.push_32_raw(bus, fslw);
-                self.push_32_raw(bus, address);
-                self.push_16_raw(bus, fmt_vec);
-                self.push_32_raw(bus, self.ppc); // restart PC
-                self.push_16_raw(bus, old_sr);
+                self.push_32(bus, fslw);
+                self.push_32(bus, address);
+                self.push_16(bus, fmt_vec);
+                self.push_32(bus, self.ppc); // restart PC
+                self.push_16(bus, old_sr);
                 let _ = status_word;
             }
             _ if self.is_040() => {
@@ -452,23 +463,23 @@ impl CpuCore {
                     0
                 };
                 for _ in 0..3 {
-                    self.push_32_raw(bus, 0); // PD3, PD2, PD1
+                    self.push_32(bus, 0); // PD3, PD2, PD1
                 }
-                self.push_32_raw(bus, 0); // WB1D / PD0
-                self.push_32_raw(bus, 0); // WB1A
-                self.push_32_raw(bus, 0); // WB2D
-                self.push_32_raw(bus, 0); // WB2A
-                self.push_32_raw(bus, if write { self.pending_fault_wdata } else { 0 }); // WB3D
-                self.push_32_raw(bus, if write { address } else { 0 }); // WB3A
-                self.push_32_raw(bus, address); // fault address
-                self.push_16_raw(bus, 0); // WB1S
-                self.push_16_raw(bus, 0); // WB2S
-                self.push_16_raw(bus, wb3s); // WB3S
-                self.push_16_raw(bus, ssw); // special status word
-                self.push_32_raw(bus, address); // effective address
-                self.push_16_raw(bus, fmt_vec); // format 7 / vector offset
-                self.push_32_raw(bus, self.ppc); // restart PC
-                self.push_16_raw(bus, old_sr);
+                self.push_32(bus, 0); // WB1D / PD0
+                self.push_32(bus, 0); // WB1A
+                self.push_32(bus, 0); // WB2D
+                self.push_32(bus, 0); // WB2A
+                self.push_32(bus, if write { fault_wdata } else { 0 }); // WB3D
+                self.push_32(bus, if write { address } else { 0 }); // WB3A
+                self.push_32(bus, address); // fault address
+                self.push_16(bus, 0); // WB1S
+                self.push_16(bus, 0); // WB2S
+                self.push_16(bus, wb3s); // WB3S
+                self.push_16(bus, ssw); // special status word
+                self.push_32(bus, address); // effective address
+                self.push_16(bus, fmt_vec); // format 7 / vector offset
+                self.push_32(bus, self.ppc); // restart PC
+                self.push_16(bus, old_sr);
             }
             _ => {
                 // 68020/68030 long bus-cycle fault frame (format $B, 46
@@ -515,29 +526,29 @@ impl CpuCore {
                 // +$18, internal +$14/$16, data fault address +$10, stage B
                 // and C pipe words +$0E/$0C, SSW +$0A, internal +$08.
                 for _ in 0..9 {
-                    self.push_32_raw(bus, 0); // +$38..$5A
+                    self.push_32(bus, 0); // +$38..$5A
                 }
-                self.push_16_raw(bus, 0); // +$36 version/internal
+                self.push_16(bus, 0); // +$36 version/internal
                 for _ in 0..3 {
-                    self.push_16_raw(bus, 0); // +$30..$34
+                    self.push_16(bus, 0); // +$30..$34
                 }
-                self.push_32_raw(bus, 0); // +$2C data input buffer
-                self.push_32_raw(bus, 0); // +$28/$2A internal
-                self.push_32_raw(bus, if data_fault { 0 } else { address }); // +$24 stage B address
-                self.push_32_raw(bus, 0); // +$20/$22 internal
-                self.push_32_raw(bus, 0); // +$1C/$1E internal
+                self.push_32(bus, 0); // +$2C data input buffer
+                self.push_32(bus, 0); // +$28/$2A internal
+                self.push_32(bus, if data_fault { 0 } else { address }); // +$24 stage B address
+                self.push_32(bus, 0); // +$20/$22 internal
+                self.push_32(bus, 0); // +$1C/$1E internal
                 // +$18 data output buffer: the value of a faulted write, so
                 // a handler can complete the write itself (clear DF).
-                self.push_32_raw(bus, if write { self.pending_fault_wdata } else { 0 });
-                self.push_32_raw(bus, 0); // +$14/$16 internal
-                self.push_32_raw(bus, if data_fault { address } else { 0 }); // +$10 data fault address
-                self.push_16_raw(bus, 0); // +$0E pipe stage B
-                self.push_16_raw(bus, 0); // +$0C pipe stage C
-                self.push_16_raw(bus, ssw); // +$0A special status word
-                self.push_16_raw(bus, 0); // +$08 internal
-                self.push_16_raw(bus, fmt_vec); // +$06 format/vector
-                self.push_32_raw(bus, self.ppc); // +$02 restart PC
-                self.push_16_raw(bus, old_sr); // +$00 SR
+                self.push_32(bus, if write { fault_wdata } else { 0 });
+                self.push_32(bus, 0); // +$14/$16 internal
+                self.push_32(bus, if data_fault { address } else { 0 }); // +$10 data fault address
+                self.push_16(bus, 0); // +$0E pipe stage B
+                self.push_16(bus, 0); // +$0C pipe stage C
+                self.push_16(bus, ssw); // +$0A special status word
+                self.push_16(bus, 0); // +$08 internal
+                self.push_16(bus, fmt_vec); // +$06 format/vector
+                self.push_32(bus, self.ppc); // +$02 restart PC
+                self.push_16(bus, old_sr); // +$00 SR
             }
         }
 

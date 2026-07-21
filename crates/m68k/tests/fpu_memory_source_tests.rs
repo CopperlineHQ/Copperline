@@ -256,3 +256,83 @@ fn fpu_packed_decimal_source() {
     assert_no_fline(&cpu);
     assert_fpr_eq(cpu.fpr[0], 2.5);
 }
+
+const FMT_SINGLE: u16 = 1;
+
+/// FSGLDIV/FSGLMUL are hardware instructions on every FPU-bearing part --
+/// gcc -m68040 emits them for `float` arithmetic -- and they used to fall
+/// into the unimplemented-opmode Line-F arm. Under Linux/m68k the kernel
+/// FPSP has no emulation entry for a hardware instruction, so Debian rc
+/// children (mv, exim's config rebuild) died with SIGILL mid-boot.
+#[test]
+fn fpu_mem_source_fsgldiv_single() {
+    // fsgldiv.s (a0),fp0 : 42.0 / 2.0 -> 21.0
+    let (mut cpu, mut bus) = new_machine();
+    bus.write_word(CODE, 0xF200 | (2 << 3));
+    bus.write_word(CODE.wrapping_add(2), ext(FMT_SINGLE, 0, 0x24));
+    bus.write_word(CODE.wrapping_add(4), 0x4E72); // STOP #$2700
+    bus.write_word(CODE.wrapping_add(6), 0x2700);
+    bus.write_long(DATA, 2.0f32.to_bits());
+    cpu.dar[8] = DATA;
+    cpu.fpr[0] = FloatX80::from_f64(42.0);
+    run(&mut cpu, &mut bus);
+    assert_no_fline(&cpu);
+    assert_fpr_eq(cpu.fpr[0], 21.0);
+}
+
+/// The FSGLDIV quotient carries only single-precision accuracy: 1/3 comes
+/// out as the single-rounded value, not the extended one.
+#[test]
+fn fpu_fsgldiv_rounds_quotient_to_single() {
+    let (mut cpu, mut bus) = new_machine();
+    bus.write_word(CODE, 0xF200 | (2 << 3));
+    bus.write_word(CODE.wrapping_add(2), ext(FMT_SINGLE, 0, 0x24));
+    bus.write_word(CODE.wrapping_add(4), 0x4E72);
+    bus.write_word(CODE.wrapping_add(6), 0x2700);
+    bus.write_long(DATA, 3.0f32.to_bits());
+    cpu.dar[8] = DATA;
+    cpu.fpr[0] = FloatX80::from_f64(1.0);
+    run(&mut cpu, &mut bus);
+    assert_no_fline(&cpu);
+    assert_fpr_eq(cpu.fpr[0], (1.0f32 / 3.0f32) as f64);
+}
+
+/// FSGLMUL truncates the operand mantissas to 24 bits before multiplying:
+/// (2^24 + 1) * 1.0 loses the low bit even though both the operand and the
+/// product are exactly representable in extended precision.
+#[test]
+fn fpu_fsglmul_truncates_operand_mantissas() {
+    let (mut cpu, mut bus) = new_machine();
+    bus.write_word(CODE, 0xF200 | (2 << 3));
+    bus.write_word(CODE.wrapping_add(2), ext(FMT_SINGLE, 0, 0x27));
+    bus.write_word(CODE.wrapping_add(4), 0x4E72);
+    bus.write_word(CODE.wrapping_add(6), 0x2700);
+    bus.write_long(DATA, 1.0f32.to_bits());
+    cpu.dar[8] = DATA;
+    cpu.fpr[0] = FloatX80::from_f64(16_777_217.0); // 2^24 + 1
+    run(&mut cpu, &mut bus);
+    assert_no_fline(&cpu);
+    assert_fpr_eq(cpu.fpr[0], 16_777_216.0);
+}
+
+/// FSGL results keep the extended exponent range (M68000PM: only the
+/// mantissa accuracy drops): a product far outside single range must not
+/// overflow to infinity the way FSMUL would force it to.
+#[test]
+fn fpu_fsglmul_keeps_extended_exponent_range() {
+    let (mut cpu, mut bus) = new_machine();
+    bus.write_word(CODE, 0xF200 | (2 << 3));
+    bus.write_word(CODE.wrapping_add(2), ext(FMT_DOUBLE, 0, 0x27));
+    bus.write_word(CODE.wrapping_add(4), 0x4E72);
+    bus.write_word(CODE.wrapping_add(6), 0x2700);
+    write_f64(&mut bus, DATA, 1.0e200);
+    cpu.dar[8] = DATA;
+    cpu.fpr[0] = FloatX80::from_f64(1.0e200);
+    run(&mut cpu, &mut bus);
+    assert_no_fline(&cpu);
+    assert!(
+        !cpu.fpr[0].is_inf() && !cpu.fpr[0].is_nan(),
+        "1e200 * 1e200 stays finite in the extended exponent range, got {:?}",
+        cpu.fpr[0]
+    );
+}

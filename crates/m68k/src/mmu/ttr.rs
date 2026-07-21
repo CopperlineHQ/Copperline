@@ -23,7 +23,8 @@ const TTR_ADDR_MASK_SHIFT: u32 = 16;
 const TTR_FC_BASE_SHIFT: u32 = 8;
 const TTR_FC_MASK_SHIFT: u32 = 2;
 
-/// Check if a single TTR matches the given address and function code.
+/// Check if a single 68030-format TT register matches the given address
+/// and function code.
 ///
 /// Returns `true` if the TTR is enabled and matches.
 pub fn ttr_matches(ttr: u32, addr: u32, fc: u8, _write: bool) -> bool {
@@ -46,6 +47,31 @@ pub fn ttr_matches(ttr: u32, addr: u32, fc: u8, _write: bool) -> bool {
     let fc_match = (fc & !fc_mask) == (fc_base & !fc_mask);
 
     addr_match && fc_match
+}
+
+/// Check if a single 68040-format ITT/DTT register matches. The 040
+/// dropped the 030's function-code base/mask fields: privilege matching is
+/// the two-bit S-field at bits 14:13 (00 = user accesses only, 01 =
+/// supervisor only, 1x = both), with the address base/mask and enable bit
+/// unchanged (M68040UM 3.1.2). Matching an 040 TTR with the 030 rules
+/// silently turns most real configurations into never-matching no-ops --
+/// 68040 bring-up code shields itself with `S = both` TTRs across an MMU
+/// enable, and that shield must hold.
+pub fn ttr_matches_040(ttr: u32, addr: u32, supervisor: bool) -> bool {
+    if (ttr & TTR_ENABLE) == 0 {
+        return false;
+    }
+    let base = (ttr & TTR_BASE_MASK) >> 24;
+    let addr_mask = (ttr >> TTR_ADDR_MASK_SHIFT) & 0xFF;
+    let addr_high = (addr >> 24) & 0xFF;
+    if (addr_high & !addr_mask) != (base & !addr_mask) {
+        return false;
+    }
+    match (ttr >> 13) & 3 {
+        0b00 => !supervisor,
+        0b01 => supervisor,
+        _ => true,
+    }
 }
 
 /// Check if transparent translation applies for the given access.
@@ -75,20 +101,23 @@ pub fn check_transparent_translation(
             }
         }
         CpuType::M68EC040 | CpuType::M68LC040 | CpuType::M68040 => {
+            // The 040 TTRs carry the S-field, not 030 FC base/mask; the
+            // access's privilege is FC2 (MOVES' SFC/DFC override included).
+            let supervisor = (fc & 4) != 0;
             if instruction {
                 // Instruction access: check ITT0, ITT1
-                if ttr_matches(cpu.itt0, addr, fc, write) {
+                if ttr_matches_040(cpu.itt0, addr, supervisor) {
                     return Some(addr);
                 }
-                if ttr_matches(cpu.itt1, addr, fc, write) {
+                if ttr_matches_040(cpu.itt1, addr, supervisor) {
                     return Some(addr);
                 }
             } else {
                 // Data access: check DTT0, DTT1
-                if ttr_matches(cpu.dtt0, addr, fc, write) {
+                if ttr_matches_040(cpu.dtt0, addr, supervisor) {
                     return Some(addr);
                 }
-                if ttr_matches(cpu.dtt1, addr, fc, write) {
+                if ttr_matches_040(cpu.dtt1, addr, supervisor) {
                     return Some(addr);
                 }
             }
@@ -176,5 +205,28 @@ mod tests {
         assert!(ttr_matches(ttr, 0x4000_0000, 6, false));
         assert!(ttr_matches(ttr, 0x4000_0000, 7, false));
         assert!(!ttr_matches(ttr, 0x4000_0000, 1, false)); // User data
+    }
+
+    #[test]
+    fn test_ttr_040_s_field() {
+        // 040 format: S = 00 user only, 01 supervisor only, 1x both.
+        let user_only = 0x00FF_8000; // whole space, S=00
+        assert!(ttr_matches_040(user_only, 0x1234_5678, false));
+        assert!(!ttr_matches_040(user_only, 0x1234_5678, true));
+
+        let super_only = 0x00FF_A000; // whole space, S=01
+        assert!(!ttr_matches_040(super_only, 0x1234_5678, false));
+        assert!(ttr_matches_040(super_only, 0x1234_5678, true));
+
+        // The bring-up shield: whole space, both privilege levels.
+        let both = 0x00FF_C000;
+        assert!(ttr_matches_040(both, 0x1234_5678, false));
+        assert!(ttr_matches_040(both, 0x1234_5678, true));
+
+        // Address base/mask work as on the 030; disabled never matches.
+        let range = 0x400F_C000; // 0x40-0x4F, both
+        assert!(ttr_matches_040(range, 0x4A00_0000, true));
+        assert!(!ttr_matches_040(range, 0x5000_0000, true));
+        assert!(!ttr_matches_040(0x00FF_4000, 0x1234_5678, true)); // E=0
     }
 }

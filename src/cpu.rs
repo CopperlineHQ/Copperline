@@ -2180,13 +2180,21 @@ impl M68kMachine {
             return 0;
         }
 
-        let vector_addr = self
-            .cpu
-            .vbr
-            .wrapping_add(0x60)
-            .wrapping_add(u32::from(level) * 4);
-        if self.bus.peek_long(vector_addr) == 0 {
-            return 0;
+        // Bring-up guard: hold off an autovector whose handler slot still
+        // reads zero. The peek is untranslated, so it only means anything
+        // while the MMU is off (with translation enabled, VBR holds a
+        // virtual address and the physical bytes under it are unrelated --
+        // Linux/m68k maps its vector table high while low chip RAM is
+        // cleared, and the guard would silence every interrupt for good).
+        if !self.cpu.tc_enable() {
+            let vector_addr = self
+                .cpu
+                .vbr
+                .wrapping_add(0x60)
+                .wrapping_add(u32::from(level) * 4);
+            if self.bus.peek_long(vector_addr) == 0 {
+                return 0;
+            }
         }
         level
     }

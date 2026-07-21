@@ -23,12 +23,19 @@ fits a 68881/68882 to any 020/030 (and is on by default for the 68040,
 whose FPU is on-die): the vendored core executes the 6888x instruction
 set in true 80-bit extended precision via a pure-Rust software floating-
 point engine (`crates/m68k/src/fpu/softfloat.rs`). Arithmetic (add, sub,
-mul, div, sqrt), ordered compare, round-to-integer, scale, getexp/getman,
+mul, div, sqrt, and the single-accuracy FSGLMUL/FSGLDIV, which round the
+mantissa to 24 bits but keep the extended exponent range -- gcc -m68040
+emits them for `float` arithmetic and the Linux/m68k kernel FPSP has no
+emulation entry for them, so a Line-F here is a userspace SIGILL),
+ordered compare, round-to-integer, scale, getexp/getman,
 the format conversions, FMOVE/FMOVEM in every operand format (including
 packed decimal), the constant ROM, FBcc/FScc/FDBcc/FTRAPcc, control
 registers, the FPCR rounding mode/precision and the FPSR exception/accrued
-bytes, and the FSAVE/FRESTORE state frames (NULL after reset, 68881-style
-IDLE once touched) are all modelled. The transcendentals (FSIN/FCOS/FTAN,
+bytes, and the FSAVE/FRESTORE state frames (NULL after reset, and once
+touched the CPU's own IDLE frame: the 68881-style $18-byte frame on
+020/030 systems, the 68040's version-$41, $28-byte frame on the 040 --
+guests validate the size byte, and Linux/m68k's sigreturn kills a process
+whose saved FPU frame carries a foreign size) are all modelled. The transcendentals (FSIN/FCOS/FTAN,
 FASIN/FACOS/FATAN, the hyperbolics, FETOX/FETOXM1/FTWOTOX/FTENTOX,
 FLOGN/FLOGNP1/FLOG2/FLOG10) and FSINCOS run in extended precision too: a
 double-`FloatX80` ("double-double", ~128-bit) layer
@@ -364,13 +371,36 @@ but leaves V set gets the restart's store instead (a double store to plain
 memory, the restart-model gap). The other writeback slots and continuation
 fields stay clear; mid-instruction continuation is not modelled.
 
-A *data* access through an invalid/unconfigured descriptor raises an access
-fault -- this is how Enforcer/MuForce catch low-memory and freed-memory hits. An
-*instruction fetch* through an invalid descriptor instead falls back to identity:
-a 68040 enables TC before all of its code is mapped during boot, so faulting the
-fetch stream there would derail it. The bus-error delivery sets the
-exception-processing flag, so the frame writes and vector fetch do not
-re-translate (and a fault while delivering a fault is a clean double-fault halt).
+Any access through an invalid/unconfigured descriptor raises an access
+fault, instruction fetches included -- data faults are how Enforcer/MuForce
+catch low-memory and freed-memory hits, and fetch faults are how a
+demand-paged OS (Linux/m68k) pages code in; software that must keep
+executing across an MMU enable covers itself with the transparent
+translation registers. The fault delivery itself translates like any other
+supervisor access: the frame pushes and the vector fetch go through the
+MMU (supervisor stacks and VBR hold logical addresses -- Linux runs its
+kernel at virtual 0 with RAM at a physical offset and splits URP from
+SRP, so an untranslated push or vector read lands in unrelated physical
+memory), a `MOVES` fault's SFC/DFC override is consumed into the frame's
+SSW rather than leaking into the dispatch, and a fault raised while
+delivering a fault is a clean double-fault halt. Because the rollback
+model re-executes the faulting instruction, its post-fault side effects
+are also contained: bus accesses are suppressed, and the handler-entry
+PC/SR/register state is re-asserted at the instruction boundary so an
+aborted flow instruction (a `JSR` whose stack push faulted) cannot divert
+the dispatch into its branch target, nor a predecrement `MOVEM` walk the
+handler's stack pointer away.
+
+Access granularity follows the 32-bit bus: an aligned long transfer is one
+bus cycle, so a faulted long RMW writeback is reported as one long-sized
+WB3 entry (not the 68000's low-word-first word pair -- a writeback-
+completing handler like Linux `do_040writebacks` would otherwise complete
+half a store). A misaligned access that straddles an MMU page boundary
+runs as separate cycles with each side translated on its own page, data
+and instruction-stream fetches alike; translating only the base address
+would touch the physically adjacent page instead of the mapped one (under
+Linux/m68k that mis-fetched the low half of a page-straddling `BSR.L`
+displacement and sent execution mid-instruction).
 
 `PTEST` (68040) walks the addressed page and reports the physical address and
 resident bit in MMUSR (the cache-mode/used/modified attribute bits are not yet

@@ -68,7 +68,12 @@ impl CpuCore {
 
             // If a bus/address error occurred during fetch, the exception is already taken.
             if self.run_mode == RUN_MODE_BERR_AERR_RESET {
-                self.run_mode = RUN_MODE_NORMAL;
+                self.end_faulted_instruction();
+                // A double fault halts the CPU: no further fetches, and the
+                // fault run mode is left set for is_halted().
+                if self.stopped != 0 {
+                    break;
+                }
                 continue;
             }
 
@@ -94,7 +99,13 @@ impl CpuCore {
             // If a bus/address error occurred mid-instruction, we already built the exception frame
             // and jumped to the handler. Skip trace/interrupt checks for the faulting instruction.
             if self.run_mode == RUN_MODE_BERR_AERR_RESET {
-                self.run_mode = RUN_MODE_NORMAL;
+                self.end_faulted_instruction();
+                // A double fault halts the CPU: stop the batch dead instead
+                // of letting another opcode through before the bottom-of-loop
+                // stopped check.
+                if self.stopped != 0 {
+                    break;
+                }
                 continue;
             }
 
@@ -148,7 +159,7 @@ impl CpuCore {
         self.ir = self.fetch_opcode(bus) as u32;
 
         if self.run_mode == RUN_MODE_BERR_AERR_RESET {
-            self.run_mode = RUN_MODE_NORMAL;
+            self.end_faulted_instruction();
             return StepResult::Ok { cycles: 0 };
         }
 
@@ -172,7 +183,7 @@ impl CpuCore {
 
         if matches!(res, StepResult::Ok { .. }) {
             if self.run_mode == RUN_MODE_BERR_AERR_RESET {
-                self.run_mode = RUN_MODE_NORMAL;
+                self.end_faulted_instruction();
                 return res;
             }
 
@@ -244,7 +255,7 @@ impl CpuCore {
         self.ir = self.fetch_opcode(bus) as u32;
 
         if self.run_mode == RUN_MODE_BERR_AERR_RESET {
-            self.run_mode = RUN_MODE_NORMAL;
+            self.end_faulted_instruction();
             return StepResult::Ok { cycles: 0 };
         }
 
@@ -296,7 +307,7 @@ impl CpuCore {
         };
 
         if self.run_mode == RUN_MODE_BERR_AERR_RESET {
-            self.run_mode = RUN_MODE_NORMAL;
+            self.end_faulted_instruction();
             return StepResult::Ok { cycles };
         }
 

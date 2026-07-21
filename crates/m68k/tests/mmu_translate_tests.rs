@@ -239,7 +239,8 @@ fn ptest_040_reports_resident_and_physical_in_mmusr() {
     let mut bus = TestBus::new(0x2_0000);
     let resident = 0x0001_0000;
     let root = build_040_table(&mut bus, resident, resident); // identity resident
-    bus.write_word(0x1000, 0xF568); // PTESTR (A0) -- fetched via identity fallback
+    bus.poke_long(0x4000 + 4, 0x0000_1001); // identity-map the code page too
+    bus.write_word(0x1000, 0xF568); // PTESTR (A0)
     bus.write_word(0x1002, 0x4E71); // NOP
 
     let mut cpu = CpuCore::new();
@@ -273,7 +274,11 @@ fn translate_040_write_protect_delivers_resumable_format7_frame() {
     let mut bus = TestBus::new(0x8_0000);
     let target = 0x0001_0000; // write-protected resident page
     let root = build_040_table_prot(&mut bus, target, target, true, false);
-    bus.poke_long(0x8, 0x0002_0000); // vector 2 handler (VBR=0, unmapped page -> identity)
+    // The dispatch translates its frame pushes and vector fetch: identity-map
+    // the vector page and the page the supervisor stack descends into.
+    bus.poke_long(0x4000, 0x0000_0001); // page 0: vectors
+    bus.poke_long(0x4000 + 2 * 4, 0x0000_2001); // page 2: the frame lands here
+    bus.poke_long(0x8, 0x0002_0000); // vector 2 handler
 
     let mut cpu = enabled_040_cpu();
     cpu.write_control_register(0x807, root);
@@ -300,11 +305,13 @@ fn translate_040_write_protect_delivers_resumable_format7_frame() {
 }
 
 #[test]
-fn translate_040_invalid_page_faults_data_but_falls_back_for_fetch() {
-    // With no valid tables, a DATA access through the invalid descriptor faults
-    // (this is Enforcer's low-memory catch), while an INSTRUCTION fetch falls
-    // back to identity so a 68040 enabling TC before its code is mapped does
-    // not derail.
+fn translate_040_invalid_page_faults_data_and_fetch_alike() {
+    // With no valid tables, any access through the invalid descriptor faults:
+    // data (Enforcer's low-memory catch) and instruction fetches equally --
+    // demand-paged operating systems fault code pages in exactly this way,
+    // and an identity fallback would execute whatever bytes sit at the
+    // untranslated address instead. Code that must survive an MMU enable
+    // covers itself with the transparent translation registers.
     let mut bus = TestBus::new(0x10000);
     let mut cpu = enabled_040_cpu();
     cpu.write_control_register(0x807, 0x00FF_0000); // garbage root (unmapped)
@@ -314,5 +321,9 @@ fn translate_040_invalid_page_faults_data_but_falls_back_for_fetch() {
     assert_eq!(data.unwrap_err().kind, MmuFaultKind::AccessLevelViolation);
 
     let fetch = translate_address(&mut cpu, &mut bus, 0x0000_1000, false, true, true);
-    assert_eq!(fetch, Ok(0x0000_1000), "an instruction fetch falls back");
+    assert_eq!(
+        fetch.unwrap_err().kind,
+        MmuFaultKind::AccessLevelViolation,
+        "an instruction fetch faults exactly like data"
+    );
 }
