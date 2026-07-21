@@ -784,6 +784,23 @@ impl Agnus {
         self.revision.is_ecs() && self.beamcon0 & BEAMCON0_LOLDIS != 0
     }
 
+    /// The programmed horizontal sync pulse (HSSTRT..HSSTOP, colour
+    /// clocks) of a VARBEAMEN scan whose sync generator is under
+    /// programmable control, or None when the mode leaves sync on the
+    /// hardware defaults or programs a degenerate pulse.
+    pub fn programmable_hsync_window(&self) -> Option<(u32, u32)> {
+        const BEAMCON0_VARHSYEN: u16 = 1 << 8;
+        if !self.revision.is_ecs()
+            || self.beamcon0 & BEAMCON0_VARBEAMEN == 0
+            || self.beamcon0 & BEAMCON0_VARHSYEN == 0
+        {
+            return None;
+        }
+        let strt = u32::from(self.hsstrt);
+        let stop = u32::from(self.hsstop);
+        (strt < stop && stop <= u32::from(self.htotal)).then_some((strt, stop))
+    }
+
     pub fn programmable_line_cck(&self) -> Option<u32> {
         if !self.revision.is_ecs() || self.beamcon0 & BEAMCON0_VARBEAMEN == 0 {
             return None;

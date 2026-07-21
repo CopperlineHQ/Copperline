@@ -1256,6 +1256,14 @@ impl M68kMachine {
                 &mut fb,
                 visible_start,
             );
+        } else if let Some((src_x0, src_w)) = self.bus.bus.frame_presentation_h_window() {
+            crate::screenshot::stretch_rows_x_window(
+                &mut fb,
+                crate::video::FB_WIDTH,
+                geometry.visible_lines,
+                src_x0,
+                src_w,
+            );
         } else if geometry.line_cck != 227 {
             crate::screenshot::stretch_rows_x(
                 &mut fb,

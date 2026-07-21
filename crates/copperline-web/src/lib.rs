@@ -325,6 +325,7 @@ impl WebEmu {
         let field_rows = present_common::post_process_rendered_field(
             &mut self.fb,
             geometry,
+            self.emu.bus().frame_presentation_h_window(),
             visible_start_vpos,
             0,
             Overscan::Tv,
