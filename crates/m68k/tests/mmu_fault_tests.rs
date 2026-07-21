@@ -105,29 +105,34 @@ fn test_ttr_address_mask() {
     assert!(!ttr_matches(ttr, 0x5000_0000, 5, false));
 }
 
-/// Test that exception processing bypass prevents MMU translation.
+/// Exception dispatch runs through the MMU like real silicon: frame pushes
+/// and vector fetches translate, and a translation failure during dispatch
+/// is a double fault that halts the CPU -- the recursion stop is the halt,
+/// not a translation bypass (an OS with split root pointers relies on the
+/// dispatch translating in supervisor space).
 #[test]
-fn test_exception_processing_bypass() {
+fn test_exception_processing_translates_and_double_faults() {
     let mut cpu = CpuCore::new();
     cpu.set_cpu_type(CpuType::M68030);
 
-    // Enable PMMU with invalid configuration (this would cause config error)
+    // Enable PMMU with an invalid configuration (walks raise config errors).
     cpu.pmmu_enabled = true;
     cpu.mmu_crp_limit = 0; // Invalid mode
 
-    // Set exception_processing flag - should bypass translation
     cpu.exception_processing = true;
 
     let mut bus = TestBus::new(0x10000);
-
-    // Write some test data
     bus.write_long(0x1000, 0x12345678);
 
-    // Read should succeed because exception_processing bypasses MMU
+    // The read must translate (and fault); faulting mid-dispatch halts.
     let val = cpu.read_32(&mut bus, 0x1000);
-    assert_eq!(
+    assert_ne!(
         val, 0x12345678,
-        "Read during exception processing should bypass MMU"
+        "a read during exception processing must translate, not bypass"
+    );
+    assert_eq!(
+        cpu.stopped, 1,
+        "MMU fault during dispatch is a double fault"
     );
 }
 
