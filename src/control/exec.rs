@@ -15,7 +15,7 @@ use crate::debugger::{BreakCond, CondOp, CondOperand, DebugStop, WatchSource};
 use crate::emulator::Emulator;
 use crate::inputsched::JoyState;
 use crate::timetravel::ReverseOutcome;
-use crate::video::{FB_WIDTH, MAX_FB_PIXELS};
+use crate::video::{FB_WIDTH, MAX_CANVAS_PIXELS};
 use serde_json::{json, Map, Value};
 use std::path::PathBuf;
 
@@ -1424,20 +1424,15 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
         }
         CoreOp::Digest => Ok(digest_value(emu)),
         CoreOp::Screenshot { path } => {
-            let (fb, lines) = render_frame(emu);
+            let (fb, lines, width) = render_frame(emu);
             let path = path
                 .clone()
                 .unwrap_or_else(crate::screenshot::auto_filename);
-            crate::screenshot::save(
-                &path,
-                &fb[..FB_WIDTH * lines],
-                FB_WIDTH as u32,
-                lines as u32,
-            )
-            .map_err(|e| CtlError::io(format!("saving screenshot: {e:#}")))?;
+            crate::screenshot::save(&path, &fb[..width * lines], width as u32, lines as u32)
+                .map_err(|e| CtlError::io(format!("saving screenshot: {e:#}")))?;
             Ok(json!({
                 "path": path.display().to_string(),
-                "width": FB_WIDTH,
+                "width": width,
                 "height": lines,
             }))
         }
@@ -1713,7 +1708,7 @@ fn wave_status_value(status: &crate::waveform::WaveStatus) -> Value {
 /// display path, returning the buffer and its visible line count. Both
 /// `capture.digest` and `capture.screenshot` use this in BOTH server
 /// modes, so captures are mode-identical and comparable.
-fn render_frame(emu: &Emulator) -> (Vec<u32>, usize) {
+fn render_frame(emu: &Emulator) -> (Vec<u32>, usize, usize) {
     // An RTG board driving the display supersedes the chipset output,
     // exactly as the window presentation does.
     let mut fb = Vec::new();
@@ -1721,12 +1716,13 @@ fn render_frame(emu: &Emulator) -> (Vec<u32>, usize) {
     if let Some((rows, _, _)) =
         crate::video::present_common::compose_rtg_present(emu.bus(), &mut scratch, &mut fb)
     {
-        return (fb, rows);
+        return (fb, rows, FB_WIDTH);
     }
-    fb = vec![0u32; MAX_FB_PIXELS];
+    fb = vec![0u32; MAX_CANVAS_PIXELS];
     crate::video::bitplane::render_display_only(emu.bus(), &mut fb);
     let lines = emu.bus().frame_geometry().visible_lines;
-    (fb, lines)
+    let width = FB_WIDTH * emu.bus().frame_canvas_scale();
+    (fb, lines, width)
 }
 
 /// FNV-1a over the framebuffer words (little-endian byte order), for
@@ -1745,12 +1741,12 @@ fn fnv1a64(words: &[u32]) -> u64 {
 /// Frame digest payload shared by the request/response capture method and the
 /// opt-in streaming frame notification.
 pub(crate) fn digest_value(emu: &Emulator) -> Value {
-    let (fb, lines) = render_frame(emu);
-    let digest = fnv1a64(&fb[..FB_WIDTH * lines]);
+    let (fb, lines, width) = render_frame(emu);
+    let digest = fnv1a64(&fb[..width * lines]);
     json!({
         "algo": "fnv1a64",
         "digest": format!("{digest:016x}"),
-        "width": FB_WIDTH,
+        "width": width,
         "height": lines,
         "frame": emu.bus().emulated_frames(),
     })

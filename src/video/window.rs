@@ -10,7 +10,7 @@ use super::launcher::{LauncherField, LauncherState, MachineSetup, StatusMessage}
 use super::ui::{self, Panel, UiControl, UiState};
 use super::{
     bitplane, font, present_height, FB_HEIGHT, FB_PIXELS, FB_WIDTH, HOST_SHORTCUT_MODIFIER_LABEL,
-    MAX_FB_PIXELS, MAX_VISIBLE_LINES,
+    MAX_CANVAS_PIXELS, MAX_VISIBLE_LINES,
 };
 use crate::audio::{AudioSink, CpalSink};
 use crate::bus::{BeamWriteSource, FrontPanelStatus, PortDevice, VideoRenderFrameTiming};
@@ -577,6 +577,9 @@ pub struct App {
     /// post-processed. The first `present_rows * FB_WIDTH` pixels are valid.
     present_fb: Vec<u32>,
     present_rows: usize,
+    /// Pixels per `present_fb` row: FB_WIDTH classically, twice that for
+    /// a 35 ns super-hi-res canvas.
+    present_width: usize,
     present_standard_tv_aperture: bool,
     /// Scratch for composing an RTG board frame (Z3660 scanout); reused
     /// across frames to avoid a per-frame allocation.
@@ -604,6 +607,8 @@ pub struct App {
     analyzer_underlay_fb: std::rc::Rc<Vec<u32>>,
     /// Rows valid in `analyzer_underlay_fb` (the traced frame's scan height).
     analyzer_underlay_rows: usize,
+    /// Pixels per `analyzer_underlay_fb` row (the frame's canvas width).
+    analyzer_underlay_width: usize,
     /// Emulated frame `analyzer_underlay_fb` was rendered for.
     analyzer_underlay_frame: Option<u64>,
     /// Recycled snapshot buffers for the underlay's side-effect-free render.
@@ -788,6 +793,9 @@ pub struct App {
     /// Scratch presentation-scaled framebuffer for the recorder (same
     /// vertical resample as screenshots).
     record_fb: Vec<u32>,
+    /// Scratch for narrowing a 35 ns-canvas presentation to the recorder's
+    /// fixed FB_WIDTH frame.
+    record_scratch_fb: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -899,6 +907,7 @@ struct RenderWorkerResult {
     timing: VideoRenderFrameTiming,
     presentation_fb: Vec<u32>,
     present_rows: usize,
+    present_width: usize,
     standard_tv_aperture: bool,
     /// The job's frame snapshot, handed back for buffer reuse.
     input: bitplane::RenderInput,
@@ -917,7 +926,7 @@ impl RenderWorker {
         let handle = std::thread::Builder::new()
             .name("copperline-render".to_string())
             .spawn(move || {
-                let mut fb = vec![0u32; MAX_FB_PIXELS];
+                let mut fb = vec![0u32; MAX_CANVAS_PIXELS];
                 let mut deinterlacer = Deinterlacer::with_phosphor(phosphor);
                 while let Ok(job) = job_rx.recv() {
                     let result = render_job_to_presentation(job, &mut fb, &mut deinterlacer);
@@ -1037,10 +1046,11 @@ impl App {
             realtime_priority,
             sampler,
             sampler_stream: None,
-            fb: vec![0u32; MAX_FB_PIXELS],
+            fb: vec![0u32; MAX_CANVAS_PIXELS],
             deinterlacer: Deinterlacer::with_phosphor(phosphor),
             present_fb: vec![0u32; FB_WIDTH * OUT_HEIGHT],
             present_rows: OUT_HEIGHT,
+            present_width: FB_WIDTH,
             rtg_fb: Vec::new(),
             rtg_present_dims: None,
             present_standard_tv_aperture: true,
@@ -1054,6 +1064,7 @@ impl App {
             console_panel: None,
             analyzer_underlay_fb: std::rc::Rc::new(Vec::new()),
             analyzer_underlay_rows: 0,
+            analyzer_underlay_width: FB_WIDTH,
             analyzer_underlay_frame: None,
             analyzer_underlay_input: None,
             render_worker,
@@ -1128,6 +1139,7 @@ impl App {
             hunt: None,
             recorder: None,
             record_fb: Vec::new(),
+            record_scratch_fb: Vec::new(),
         };
         // Attach the sampler now for a directly-booted machine; the config-screen
         // placeholder passes a disabled request and attaches on Run instead.
@@ -1647,7 +1659,7 @@ impl ApplicationHandler for App {
         if !self.powered_on {
             paint_test_screen(&mut self.fb);
             self.deinterlacer
-                .push_field(&self.fb, FB_HEIGHT, false, true, true);
+                .push_field(&self.fb, FB_HEIGHT, FB_WIDTH, false, true, true);
             self.refresh_present_from_deinterlacer();
         }
         self.request_redraw();
@@ -2244,6 +2256,7 @@ impl ApplicationHandler for App {
                         copy_window_present_frame(
                             &self.present_fb,
                             self.present_rows,
+                            self.present_width,
                             frame,
                             r.texture_scale,
                             self.overscan,
@@ -4322,10 +4335,12 @@ impl App {
             .analyzer_underlay_input
             .as_ref()
             .expect("underlay render input just filled");
+        let underlay_width = FB_WIDTH * input.canvas_scale();
         let fb = std::rc::Rc::make_mut(&mut self.analyzer_underlay_fb);
-        fb.resize(MAX_FB_PIXELS, 0);
+        fb.resize(MAX_CANVAS_PIXELS, 0);
         fb.fill(0);
         let _ = bitplane::render_from_input(input, fb.as_mut_slice());
+        self.analyzer_underlay_width = underlay_width;
         self.analyzer_underlay_rows = self
             .emu
             .bus()
@@ -5113,13 +5128,32 @@ impl App {
         if let Some(rec) = self.recorder.as_mut() {
             rec.push_audio(&samples);
             if rendered {
-                screenshot::scale_y_into(
-                    &self.present_fb,
-                    FB_WIDTH,
-                    self.present_rows,
-                    present_height(),
-                    &mut self.record_fb,
-                );
+                // The recorder's frame size is fixed at FB_WIDTH; average a
+                // 35 ns canvas's pixel pairs down to it first.
+                if self.present_width != FB_WIDTH {
+                    screenshot::downsample_x_into(
+                        &self.present_fb,
+                        self.present_width,
+                        self.present_rows,
+                        FB_WIDTH,
+                        &mut self.record_scratch_fb,
+                    );
+                    screenshot::scale_y_into(
+                        &self.record_scratch_fb,
+                        FB_WIDTH,
+                        self.present_rows,
+                        present_height(),
+                        &mut self.record_fb,
+                    );
+                } else {
+                    screenshot::scale_y_into(
+                        &self.present_fb,
+                        FB_WIDTH,
+                        self.present_rows,
+                        present_height(),
+                        &mut self.record_fb,
+                    );
+                }
                 if let Err(e) = rec.push_frame(&self.record_fb) {
                     failure = Some(e);
                 }
@@ -5350,10 +5384,13 @@ impl App {
         };
         bitplane::render_display_only(self.emu.bus(), &mut self.fb);
         let geometry = self.emu.bus().frame_geometry();
+        let canvas_scale = self.emu.bus().frame_canvas_scale();
         let field_rows = post_process_rendered_field(
             &mut self.fb,
             geometry,
+            canvas_scale,
             self.emu.bus().frame_presentation_h_window(),
+            self.emu.bus().frame_presentation_v_window(),
             visible_start_vpos,
             h_shift,
             self.overscan,
@@ -5362,6 +5399,7 @@ impl App {
         self.deinterlacer.push_field(
             &self.fb,
             field_rows,
+            FB_WIDTH * canvas_scale,
             base.bplcon0 & 0x0004 != 0,
             base.long_field,
             !geometry.programmable,
@@ -5946,6 +5984,7 @@ impl App {
             ui::AnalyzerUnderlayView {
                 fb: std::rc::Rc::clone(&self.analyzer_underlay_fb),
                 rows: self.analyzer_underlay_rows,
+                width: self.analyzer_underlay_width,
             }
         });
         let selected_vpos = usize::from(panel.selected_vpos).min(trace.rows.saturating_sub(1));
@@ -7316,6 +7355,7 @@ impl App {
             path,
             &self.present_fb,
             src_rows,
+            self.present_width,
             self.overscan,
             self.present_standard_tv_aperture,
         );
@@ -7389,6 +7429,7 @@ impl App {
             &path,
             &self.present_fb,
             src_rows,
+            self.present_width,
             self.overscan,
             self.present_standard_tv_aperture,
         );
@@ -7484,7 +7525,7 @@ impl App {
         self.last_fdd_track = None;
         paint_test_screen(&mut self.fb);
         self.deinterlacer
-            .push_field(&self.fb, FB_HEIGHT, false, true, true);
+            .push_field(&self.fb, FB_HEIGHT, FB_WIDTH, false, true, true);
         self.refresh_present_from_deinterlacer();
     }
 
@@ -7506,11 +7547,13 @@ impl App {
 
     fn refresh_present_from_deinterlacer(&mut self) {
         let rows = self.deinterlacer.output_rows();
-        let active = rows * FB_WIDTH;
+        let width = self.deinterlacer.output_width();
+        let active = rows * width;
         self.present_fb.resize(active, 0);
         self.present_fb
             .copy_from_slice(&self.deinterlacer.output()[..active]);
         self.present_rows = rows;
+        self.present_width = width;
     }
 
     fn reset_render_pipeline(&mut self) {
@@ -7535,6 +7578,7 @@ impl App {
         let old = std::mem::replace(&mut self.present_fb, result.presentation_fb);
         self.render_recycle_fb = old;
         self.present_rows = result.present_rows;
+        self.present_width = result.present_width;
         self.present_standard_tv_aperture = result.standard_tv_aperture;
         self.rtg_present_dims = None;
         self.last_rendered_emulated_frame = Some(result.emulated_frame);
@@ -7660,6 +7704,7 @@ impl App {
         // FB_WIDTH version the screenshot path reads.
         self.rtg_present_dims = Some((native_w, native_h));
         self.present_rows = rows;
+        self.present_width = FB_WIDTH;
         self.present_standard_tv_aperture = false;
         self.last_rendered_emulated_frame = Some(emulated_frame);
         self.last_submitted_render_frame = Some(emulated_frame);
@@ -7701,10 +7746,13 @@ impl App {
         };
         bitplane::render(self.emu.bus_mut(), &mut self.fb);
         let geometry = self.emu.bus().frame_geometry();
+        let canvas_scale = self.emu.bus().frame_canvas_scale();
         let field_rows = post_process_rendered_field(
             &mut self.fb,
             geometry,
+            canvas_scale,
             self.emu.bus().frame_presentation_h_window(),
+            self.emu.bus().frame_presentation_v_window(),
             visible_start_vpos,
             h_shift,
             self.overscan,
@@ -7715,6 +7763,7 @@ impl App {
         self.deinterlacer.push_field(
             &self.fb,
             field_rows,
+            FB_WIDTH * canvas_scale,
             base.bplcon0 & 0x0004 != 0,
             base.long_field,
             !geometry.programmable,

@@ -96,36 +96,98 @@ const _: () = {
 pub fn post_process_rendered_field(
     fb: &mut [u32],
     geometry: FrameGeometry,
+    canvas_scale: usize,
     presentation_h_window: Option<(i32, u32)>,
+    presentation_v_window: Option<(i32, u32)>,
     visible_start_vpos: u32,
     h_shift: usize,
     overscan: Overscan,
 ) -> usize {
-    let field_rows = geometry.visible_lines.min(fb.len() / FB_WIDTH);
+    let canvas_width = FB_WIDTH * canvas_scale;
+    let field_rows = geometry.visible_lines.min(fb.len() / canvas_width);
     // Vertical centring, optional full-overscan horizontal recentring, and the
     // TV bezel mask are 15 kHz CRT concepts anchored to the standard PAL/NTSC
     // window; a programmable scan defines its own window and presents in full,
     // like a multisync monitor.
     if !geometry.programmable {
+        // Standard scans always render the classic canvas pitch
+        // (`bitplane::canvas_scale_for`).
+        debug_assert_eq!(canvas_scale, 1);
         center_present_frame_for_visible_start(fb, visible_start_vpos);
         center_present_frame_horizontally(fb, h_shift);
         if overscan == Overscan::Tv {
             mask_present_frame_to_tv(fb, h_shift, standard_window_top_row(visible_start_vpos));
         }
-    } else if let Some((src_x0, src_w)) = presentation_h_window {
+        return field_rows;
+    }
+    if let Some((src_x0, src_w)) = presentation_h_window {
         // A multisync monitor locks its horizontal deflection to the
         // programmed sync pulse: the glass shows the line from the sync
         // trailing edge to the next pulse, centring the picture the way
-        // the mode's own porches place it.
-        screenshot::stretch_rows_x_window(fb, FB_WIDTH, field_rows, src_x0, src_w);
+        // the mode's own porches place it. The window is computed in
+        // classic-canvas pixels; scale it to this frame's pitch.
+        screenshot::stretch_rows_x_window(
+            fb,
+            canvas_width,
+            field_rows,
+            src_x0 * canvas_scale as i32,
+            src_w * canvas_scale as u32,
+        );
     } else if geometry.line_cck != 227 {
         // No programmed sync to anchor on: fall back to the time-linear
         // whole-line map (each colour clock of this scan's shorter/longer
         // line covers 227/line_cck of the glass a standard line's clock
         // would).
-        screenshot::stretch_rows_x(fb, FB_WIDTH, field_rows, geometry.line_cck, 227);
+        screenshot::stretch_rows_x(fb, canvas_width, field_rows, geometry.line_cck, 227);
     }
-    field_rows
+    apply_presentation_v_window(fb, canvas_width, field_rows, presentation_v_window)
+}
+
+/// Vertical counterpart of the sync-anchored horizontal window: place the
+/// captured rows inside the glass's full vertical span (the frame minus the
+/// programmed sync pulse), bordered with blanked rows where the mode's own
+/// porches put them, and return the new row count. Without a programmed
+/// vertical sync the captured rows keep covering the whole glass height.
+pub fn apply_presentation_v_window(
+    fb: &mut [u32],
+    canvas_width: usize,
+    field_rows: usize,
+    presentation_v_window: Option<(i32, u32)>,
+) -> usize {
+    let Some((v_offset, glass_rows)) = presentation_v_window else {
+        return field_rows;
+    };
+    let buf_rows = fb.len() / canvas_width;
+    let glass_rows = (glass_rows as usize).min(buf_rows).max(1);
+    if glass_rows <= field_rows {
+        return field_rows;
+    }
+    // Rows the sync-anchored glass top cuts off the capture (offset < 0)
+    // vs. blanked glass rows above the captured window (offset > 0).
+    let skip_top = (-v_offset).max(0) as usize;
+    let pad_top = (v_offset).max(0) as usize;
+    let black = rgba(0, 0, 0);
+    if skip_top >= field_rows || pad_top >= glass_rows {
+        fb[..glass_rows * canvas_width].fill(black);
+        return glass_rows;
+    }
+    let content_rows = (field_rows - skip_top).min(glass_rows - pad_top);
+    if pad_top > skip_top {
+        for row in (0..content_rows).rev() {
+            let src = (skip_top + row) * canvas_width;
+            let dst = (pad_top + row) * canvas_width;
+            fb.copy_within(src..src + canvas_width, dst);
+        }
+    } else if pad_top < skip_top {
+        for row in 0..content_rows {
+            let src = (skip_top + row) * canvas_width;
+            let dst = (pad_top + row) * canvas_width;
+            fb.copy_within(src..src + canvas_width, dst);
+        }
+    }
+    fb[..pad_top * canvas_width].fill(black);
+    fb[(pad_top + content_rows) * canvas_width..glass_rows * canvas_width].fill(black);
+    glass_rows
 }
 
 /// `[display] overscan = "tv"`: black out the deep-overscan margins like the
@@ -257,5 +319,59 @@ mod tests {
         // runtime helper, so check here that a captured-aperture crop never
         // shows masked black columns.
         assert!(TV_PAL_CAPTURED_SOURCE_X >= tv_source_h_bounds().0);
+    }
+
+    fn v_window_fixture(field_rows: usize, total_rows: usize) -> Vec<u32> {
+        // Each captured row is tagged with its index + 1 in every column so
+        // relocation is visible; rows past field_rows start as garbage the
+        // applier must overwrite or ignore.
+        let mut fb = vec![0xDEAD_BEEF; total_rows * FB_WIDTH];
+        for row in 0..field_rows {
+            fb[row * FB_WIDTH..(row + 1) * FB_WIDTH].fill(row as u32 + 1);
+        }
+        fb
+    }
+
+    #[test]
+    fn presentation_v_window_places_rows_by_the_modes_porches() {
+        let mut fb = v_window_fixture(4, 12);
+        let rows = apply_presentation_v_window(&mut fb, FB_WIDTH, 4, Some((3, 10)));
+        assert_eq!(rows, 10);
+        let black = rgba(0, 0, 0);
+        for row in 0..10 {
+            let expected = match row {
+                3..=6 => (row - 2) as u32,
+                _ => black,
+            };
+            assert_eq!(fb[row * FB_WIDTH], expected, "row {row}");
+        }
+    }
+
+    #[test]
+    fn presentation_v_window_clips_rows_above_the_glass_top() {
+        let mut fb = v_window_fixture(4, 12);
+        let rows = apply_presentation_v_window(&mut fb, FB_WIDTH, 4, Some((-2, 10)));
+        assert_eq!(rows, 10);
+        let black = rgba(0, 0, 0);
+        // Captured rows 0-1 fall above the sync-anchored glass; rows 2-3
+        // land at the top.
+        assert_eq!(fb[0], 3);
+        assert_eq!(fb[FB_WIDTH], 4);
+        for row in 2..10 {
+            assert_eq!(fb[row * FB_WIDTH], black, "row {row}");
+        }
+    }
+
+    #[test]
+    fn presentation_v_window_absent_or_degenerate_keeps_the_field() {
+        let mut fb = v_window_fixture(4, 12);
+        assert_eq!(apply_presentation_v_window(&mut fb, FB_WIDTH, 4, None), 4);
+        assert_eq!(fb[0], 1);
+        // A glass no taller than the captured field cannot add borders.
+        assert_eq!(
+            apply_presentation_v_window(&mut fb, FB_WIDTH, 4, Some((1, 4))),
+            4
+        );
+        assert_eq!(fb[0], 1);
     }
 }

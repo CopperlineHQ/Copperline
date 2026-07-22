@@ -98,8 +98,10 @@ pub(super) fn fill_background_with_visible_line0(
     h_window_rows: &[HWindowRow],
     visible_line0: i32,
 ) {
+    let canvas_scale = super::active_canvas_scale();
+    let out_w = FB_WIDTH * canvas_scale;
     for y in 0..base_palettes.len() {
-        let row = &mut fb[y * FB_WIDTH..(y + 1) * FB_WIDTH];
+        let row = &mut fb[y * out_w..(y + 1) * out_w];
         let pal_segs = &palette_segments[y];
         let ctl_segs = &control_segments[y];
         let mut palette = base_palettes[y];
@@ -133,7 +135,8 @@ pub(super) fn fill_background_with_visible_line0(
 
             if !control.display_window_contains_line(y, visible_line0) {
                 // Whole run is border: a single fill.
-                row[x..run_end].fill(background_pixel(&control, color0, true));
+                row[x * canvas_scale..run_end * canvas_scale]
+                    .fill(background_pixel(&control, color0, true));
                 x = run_end;
                 continue;
             }
@@ -151,7 +154,8 @@ pub(super) fn fill_background_with_visible_line0(
                     .min()
                     .unwrap_or(FB_WIDTH);
                 let sub_end = flip.min(run_end).max(sx + 1);
-                row[sx..sub_end].fill(background_pixel(&control, color0, !open));
+                row[sx * canvas_scale..sub_end * canvas_scale]
+                    .fill(background_pixel(&control, color0, !open));
                 sx = sub_end;
             }
             x = run_end;
@@ -214,30 +218,46 @@ pub(super) fn shres_composite_sample(
     right: DeniseBitplaneSample,
 ) -> DeniseBitplaneSample {
     DeniseBitplaneSample {
-        idx: (left.idx | right.idx) & 0x03,
-        nplanes: left.nplanes.max(right.nplanes).min(2),
+        idx: left.idx | right.idx,
+        nplanes: left.nplanes.max(right.nplanes),
         active: left.active || right.active,
     }
 }
 
-pub(super) fn shres_palette_index(left_idx: u8, right_idx: u8) -> usize {
-    ((left_idx as usize) & 0x03) | (((right_idx as usize) & 0x03) << 2)
+/// Per-channel mean of two 24-bit colours without intermediate overflow.
+pub(super) fn rgb24_blend_halves(a: u32, b: u32) -> u32 {
+    (a & b) + (((a ^ b) & 0x00FE_FEFE) >> 1)
 }
 
-pub(super) fn denise_shres_playfield_output(
+/// Resolve the two 35 ns samples of one 70 ns framebuffer column, each
+/// through the full palette pipeline (ECS Denise carries at most two
+/// bitplanes into SHRES; AGA Lisa runs the complete 8-bit index path). On
+/// a 35 ns-pitch canvas each half is emitted as its own pixel; on the
+/// classic hi-res-pitch canvas the pair is blended by
+/// [`denise_shres_playfield_output`].
+pub(super) fn denise_shres_playfield_output_pair(
+    control: ControlState,
     palette: Palette,
     left_idx: u8,
     right_idx: u8,
     ham_color: &mut u32,
+) -> (DenisePlayfieldOutput, DenisePlayfieldOutput) {
+    let left = denise_playfield_output(control, palette, left_idx, ham_color);
+    let right = denise_playfield_output(control, palette, right_idx, ham_color);
+    (left, right)
+}
+
+/// Merge a resolved 35 ns pair into one hi-res-pitch output: the blend is
+/// a framebuffer-pitch compromise, not hardware, used when the canvas
+/// carries one colour per 70 ns pixel.
+pub(super) fn blend_shres_outputs(
+    left: DenisePlayfieldOutput,
+    right: DenisePlayfieldOutput,
 ) -> DenisePlayfieldOutput {
-    let color_idx = shres_palette_index(left_idx, right_idx);
-    let color_latch = palette[color_idx];
-    let color = rgb12_to_rgb24(color_rgb12(color_latch));
-    *ham_color = color;
     DenisePlayfieldOutput {
-        color,
-        color_latch,
-        pf_mask: u8::from((left_idx | right_idx) & 0x03 != 0) * 2,
+        color: rgb24_blend_halves(left.color, right.color),
+        color_latch: right.color_latch,
+        pf_mask: left.pf_mask | right.pf_mask,
     }
 }
 

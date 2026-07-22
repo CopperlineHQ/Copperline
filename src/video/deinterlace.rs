@@ -63,8 +63,17 @@ pub struct Deinterlacer {
     /// Field row count of the history buffers; a geometry change drops
     /// the history (fields of different scans must not weave together).
     field_rows: usize,
+    /// Field row width (pixels per row) of the history buffers; a canvas
+    /// pitch change (a 35 ns super-hi-res scan arriving) drops the history
+    /// like a row-count change.
+    field_width: usize,
     /// Active rows in `out` after the last push.
     out_rows: usize,
+    /// Pixels per row of `out` after the last push.
+    out_width: usize,
+    /// Reusable motion mask for the weave path (one flag per canvas
+    /// column); kept on the struct so a laced push does not allocate.
+    moved: Vec<bool>,
     enabled: bool,
     /// CRT phosphor persistence: each presented frame keeps this fraction
     /// of the previous one (0 = off), expressed as an alpha in 0..=243
@@ -101,7 +110,10 @@ impl Deinterlacer {
             have: [false; 2],
             have2: [false; 2],
             field_rows: FB_HEIGHT,
+            field_width: FB_WIDTH,
             out_rows: OUT_HEIGHT,
+            out_width: FB_WIDTH,
+            moved: vec![false; FB_WIDTH],
             enabled,
             phosphor_alpha,
             presented: (phosphor_alpha > 0).then(|| vec![0; MAX_OUT_PIXELS]),
@@ -121,6 +133,13 @@ impl Deinterlacer {
         self.out_rows
     }
 
+    /// Pixels per row of [`Self::output`] after the last pushed field:
+    /// FB_WIDTH for the classic canvas, twice that for a 35 ns
+    /// super-hi-res canvas.
+    pub fn output_width(&self) -> usize {
+        self.out_width
+    }
+
     /// Decay the presented frame towards the freshly woven one: each
     /// channel keeps `phosphor_alpha`/256 of its previous value, an
     /// exponential trail like CRT phosphor persistence.
@@ -129,7 +148,7 @@ impl Deinterlacer {
             return;
         };
         let a = self.phosphor_alpha;
-        let active = self.out_rows * FB_WIDTH;
+        let active = self.out_rows * self.out_width;
         for (shown, &new) in presented[..active]
             .iter_mut()
             .zip(self.out[..active].iter())
@@ -148,23 +167,36 @@ impl Deinterlacer {
         &mut self,
         field: &[u32],
         rows: usize,
+        width: usize,
         lace: bool,
         long_field: bool,
         double_rows: bool,
     ) {
-        debug_assert!(field.len() >= rows * FB_WIDTH);
+        debug_assert!(field.len() >= rows * width);
         let rows = rows.clamp(1, MAX_VISIBLE_LINES);
-        if rows != self.field_rows {
+        if rows != self.field_rows || width != self.field_width {
             // Fields of a different scan must not weave with the old
             // history (mode switch); drop it.
             self.have = [false; 2];
             self.have2 = [false; 2];
             self.field_rows = rows;
+            self.field_width = width;
+        }
+        self.out_width = width;
+        // A 35 ns-pitch canvas outgrows the standard-canvas buffers.
+        let out_need = rows * width * if double_rows || lace { 2 } else { 1 };
+        if self.out.len() < out_need {
+            self.out.resize(out_need, 0);
+        }
+        if let Some(presented) = &mut self.presented {
+            if presented.len() < out_need {
+                presented.resize(out_need, 0);
+            }
         }
         if !lace && !double_rows {
             // Programmable progressive scan: every output line is already
             // in the field; present at native height.
-            self.out[..rows * FB_WIDTH].copy_from_slice(&field[..rows * FB_WIDTH]);
+            self.out[..rows * width].copy_from_slice(&field[..rows * width]);
             self.out_rows = rows;
             self.have = [false; 2];
             self.have2 = [false; 2];
@@ -175,9 +207,9 @@ impl Deinterlacer {
             // Progressive: line-double. Field history would pair lines
             // from unrelated displays across a mode switch; drop it.
             for y in 0..rows {
-                let row = &field[y * FB_WIDTH..(y + 1) * FB_WIDTH];
-                self.out[2 * y * FB_WIDTH..(2 * y + 1) * FB_WIDTH].copy_from_slice(row);
-                self.out[(2 * y + 1) * FB_WIDTH..(2 * y + 2) * FB_WIDTH].copy_from_slice(row);
+                let row = &field[y * width..(y + 1) * width];
+                self.out[2 * y * width..(2 * y + 1) * width].copy_from_slice(row);
+                self.out[(2 * y + 1) * width..(2 * y + 2) * width].copy_from_slice(row);
             }
             self.out_rows = rows * 2;
             self.have = [false; 2];
@@ -187,11 +219,18 @@ impl Deinterlacer {
         }
 
         let parity = usize::from(!long_field);
+        // The lace history buffers must hold this scan's field size.
+        let field_need = rows * width;
+        for buf in self.prev.iter_mut().chain(self.prev2.iter_mut()) {
+            if buf.len() < field_need {
+                buf.resize(field_need, 0);
+            }
+        }
         // This field's rows land on its own parity lines.
         for y in 0..rows {
-            let row = &field[y * FB_WIDTH..(y + 1) * FB_WIDTH];
+            let row = &field[y * width..(y + 1) * width];
             let r = 2 * y + parity;
-            self.out[r * FB_WIDTH..(r + 1) * FB_WIDTH].copy_from_slice(row);
+            self.out[r * width..(r + 1) * width].copy_from_slice(row);
         }
         self.out_rows = rows * 2;
 
@@ -204,43 +243,46 @@ impl Deinterlacer {
         // parity (content moving within the woven line itself, e.g. an
         // animation drawn one field ago that has since moved on).
         let opposite = parity ^ 1;
+        if self.moved.len() < width {
+            self.moved.resize(width, false);
+        }
         let prev_same = &self.prev[parity];
         let prev_opp = &self.prev[opposite];
         let prev2_opp = &self.prev2[opposite];
+        let moved = &mut self.moved[..width];
         for y in 0..rows {
             let r = 2 * y + opposite;
             // The current-parity field rows directly above and below
             // output row r (clamped at the frame edges).
             let above = if r == 0 { 0 } else { (r - 1 - parity) / 2 };
             let below = (((r + 1 - parity) / 2).min(rows - 1)).max(above);
-            let above_row = &field[above * FB_WIDTH..(above + 1) * FB_WIDTH];
-            let below_row = &field[below * FB_WIDTH..(below + 1) * FB_WIDTH];
-            let out_row = &mut self.out[r * FB_WIDTH..(r + 1) * FB_WIDTH];
+            let above_row = &field[above * width..(above + 1) * width];
+            let below_row = &field[below * width..(below + 1) * width];
+            let out_row = &mut self.out[r * width..(r + 1) * width];
             if !self.have[opposite] {
-                for x in 0..FB_WIDTH {
+                for x in 0..width {
                     out_row[x] = avg_rgba(above_row[x], below_row[x]);
                 }
                 continue;
             }
-            let opp_row = &prev_opp[y * FB_WIDTH..(y + 1) * FB_WIDTH];
-            let opp2_row = &prev2_opp[y * FB_WIDTH..(y + 1) * FB_WIDTH];
+            let opp_row = &prev_opp[y * width..(y + 1) * width];
+            let opp2_row = &prev2_opp[y * width..(y + 1) * width];
             let check_same = self.have[parity];
             let check_opp = self.have2[opposite];
             if check_same || check_opp {
-                let prev_above = &prev_same[above * FB_WIDTH..(above + 1) * FB_WIDTH];
-                let prev_below = &prev_same[below * FB_WIDTH..(below + 1) * FB_WIDTH];
-                let mut moved = [false; FB_WIDTH];
-                for x in 0..FB_WIDTH {
+                let prev_above = &prev_same[above * width..(above + 1) * width];
+                let prev_below = &prev_same[below * width..(below + 1) * width];
+                for x in 0..width {
                     let same_moved = check_same
                         && (above_row[x] != prev_above[x] || below_row[x] != prev_below[x]);
                     moved[x] = same_moved || (check_opp && opp_row[x] != opp2_row[x]);
                 }
-                for x in 0..FB_WIDTH {
+                for x in 0..width {
                     // Dilate the motion mask one pixel sideways so dithered
                     // moving art bobs as a region instead of weaving and
                     // interpolating on alternate pixels.
                     let near_motion =
-                        moved[x] || (x > 0 && moved[x - 1]) || (x + 1 < FB_WIDTH && moved[x + 1]);
+                        moved[x] || (x > 0 && moved[x - 1]) || (x + 1 < width && moved[x + 1]);
                     if near_motion {
                         out_row[x] = avg_rgba(above_row[x], below_row[x]);
                     }
@@ -251,7 +293,10 @@ impl Deinterlacer {
         }
 
         std::mem::swap(&mut self.prev[parity], &mut self.prev2[parity]);
-        self.prev[parity][..rows * FB_WIDTH].copy_from_slice(&field[..rows * FB_WIDTH]);
+        if self.prev[parity].len() < field_need {
+            self.prev[parity].resize(field_need, 0);
+        }
+        self.prev[parity][..rows * width].copy_from_slice(&field[..rows * width]);
         self.have2[parity] = self.have[parity];
         self.have[parity] = true;
         self.present_with_phosphor();
@@ -309,7 +354,7 @@ mod tests {
     fn progressive_fields_are_line_doubled() {
         let mut d = Deinterlacer::with_options(true, 0.0);
         let f = field_filled_rows(|y| y as u32 + 1);
-        d.push_field(&f, FB_HEIGHT, false, true, true);
+        d.push_field(&f, FB_HEIGHT, FB_WIDTH, false, true, true);
         for y in 0..FB_HEIGHT {
             assert_eq!(out_row(&d, 2 * y), y as u32 + 1);
             assert_eq!(out_row(&d, 2 * y + 1), y as u32 + 1);
@@ -325,10 +370,10 @@ mod tests {
         let short = field_filled_rows(|y| 0x2000 + y as u32);
         // Two full field pairs: the second pair is static against the
         // first, so every opposite-parity line weaves.
-        d.push_field(&long, FB_HEIGHT, true, true, true);
-        d.push_field(&short, FB_HEIGHT, true, false, true);
-        d.push_field(&long, FB_HEIGHT, true, true, true);
-        d.push_field(&short, FB_HEIGHT, true, false, true);
+        d.push_field(&long, FB_HEIGHT, FB_WIDTH, true, true, true);
+        d.push_field(&short, FB_HEIGHT, FB_WIDTH, true, false, true);
+        d.push_field(&long, FB_HEIGHT, FB_WIDTH, true, true, true);
+        d.push_field(&short, FB_HEIGHT, FB_WIDTH, true, false, true);
         for y in 0..FB_HEIGHT {
             assert_eq!(out_row(&d, 2 * y), 0x1000 + y as u32, "even row {y}");
             assert_eq!(out_row(&d, 2 * y + 1), 0x2000 + y as u32, "odd row {y}");
@@ -340,10 +385,10 @@ mod tests {
         let mut d = Deinterlacer::with_options(true, 0.0);
         let long_a = field_filled_rows(|_| 0x10);
         let short_a = field_filled_rows(|_| 0x30);
-        d.push_field(&long_a, FB_HEIGHT, true, true, true);
-        d.push_field(&short_a, FB_HEIGHT, true, false, true);
-        d.push_field(&long_a, FB_HEIGHT, true, true, true);
-        d.push_field(&short_a, FB_HEIGHT, true, false, true);
+        d.push_field(&long_a, FB_HEIGHT, FB_WIDTH, true, true, true);
+        d.push_field(&short_a, FB_HEIGHT, FB_WIDTH, true, false, true);
+        d.push_field(&long_a, FB_HEIGHT, FB_WIDTH, true, true, true);
+        d.push_field(&short_a, FB_HEIGHT, FB_WIDTH, true, false, true);
         // Static so far: full weave.
         assert_eq!(out_row(&d, 10), 0x10);
         assert_eq!(out_row(&d, 11), 0x30);
@@ -352,20 +397,20 @@ mod tests {
         // short lines back in as a ghost - it interpolates its own
         // neighbours there until the short content settles.
         let short_b = field_filled_rows(|_| 0x50);
-        d.push_field(&short_b, FB_HEIGHT, true, false, true);
+        d.push_field(&short_b, FB_HEIGHT, FB_WIDTH, true, false, true);
         assert_eq!(out_row(&d, 11), 0x50);
-        d.push_field(&long_a, FB_HEIGHT, true, true, true);
+        d.push_field(&long_a, FB_HEIGHT, FB_WIDTH, true, true, true);
         assert_eq!(out_row(&d, 10), 0x10);
         assert_eq!(out_row(&d, 11), avg_rgba(0x10, 0x10));
         // The short content settles: weave resumes with its next pair.
-        d.push_field(&short_b, FB_HEIGHT, true, false, true);
-        d.push_field(&long_a, FB_HEIGHT, true, true, true);
+        d.push_field(&short_b, FB_HEIGHT, FB_WIDTH, true, false, true);
+        d.push_field(&long_a, FB_HEIGHT, FB_WIDTH, true, true, true);
         assert_eq!(out_row(&d, 11), 0x50);
         // Now the long field moves: its own rows update immediately and
         // the short-parity rows interpolate the new long field instead of
         // keeping stale short_b lines.
         let long_b = field_filled_rows(|_| 0x70);
-        d.push_field(&long_b, FB_HEIGHT, true, true, true);
+        d.push_field(&long_b, FB_HEIGHT, FB_WIDTH, true, true, true);
         assert_eq!(out_row(&d, 10), 0x70);
         assert_eq!(out_row(&d, 11), avg_rgba(0x70, 0x70));
     }
@@ -375,15 +420,15 @@ mod tests {
         let mut d = Deinterlacer::with_options(true, 0.0);
         let long = field_filled_rows(|_| 0x11);
         let short = field_filled_rows(|_| 0x22);
-        d.push_field(&long, FB_HEIGHT, true, true, true);
-        d.push_field(&short, FB_HEIGHT, true, false, true);
+        d.push_field(&long, FB_HEIGHT, FB_WIDTH, true, true, true);
+        d.push_field(&short, FB_HEIGHT, FB_WIDTH, true, false, true);
         let prog = field_filled_rows(|_| 0x33);
-        d.push_field(&prog, FB_HEIGHT, false, true, true);
+        d.push_field(&prog, FB_HEIGHT, FB_WIDTH, false, true, true);
         assert_eq!(out_row(&d, 10), 0x33);
         assert_eq!(out_row(&d, 11), 0x33);
         // Lace resumes: no stale pre-switch lines weave back in; the
         // missing parity interpolates until its field arrives.
-        d.push_field(&long, FB_HEIGHT, true, true, true);
+        d.push_field(&long, FB_HEIGHT, FB_WIDTH, true, true, true);
         assert_eq!(out_row(&d, 10), 0x11);
         assert_eq!(out_row(&d, 11), 0x11);
     }
@@ -398,7 +443,7 @@ mod tests {
         for y in 0..rows {
             f[y * FB_WIDTH..(y + 1) * FB_WIDTH].fill(y as u32 + 1);
         }
-        d.push_field(&f, rows, false, true, false);
+        d.push_field(&f, rows, FB_WIDTH, false, true, false);
         assert_eq!(d.output_rows(), rows);
         for y in (0..rows).step_by(97) {
             assert_eq!(out_row(&d, y), y as u32 + 1);
@@ -413,8 +458,8 @@ mod tests {
         let mut d = Deinterlacer::with_options(true, 0.0);
         let long = field_filled_rows(|_| 0x11);
         let short = field_filled_rows(|_| 0x22);
-        d.push_field(&long, FB_HEIGHT, true, true, true);
-        d.push_field(&short, FB_HEIGHT, true, false, true);
+        d.push_field(&long, FB_HEIGHT, FB_WIDTH, true, true, true);
+        d.push_field(&short, FB_HEIGHT, FB_WIDTH, true, false, true);
         assert_eq!(d.output_rows(), OUT_HEIGHT);
 
         // A shorter laced scan arrives: nothing from the 285-row fields
@@ -422,7 +467,7 @@ mod tests {
         let rows = 200usize;
         let mut f = vec![0u32; rows * FB_WIDTH];
         f.fill(0x77);
-        d.push_field(&f, rows, true, true, true);
+        d.push_field(&f, rows, FB_WIDTH, true, true, true);
         assert_eq!(d.output_rows(), rows * 2);
         assert_eq!(out_row(&d, 10), 0x77);
         assert_eq!(out_row(&d, 11), 0x77);
@@ -433,8 +478,8 @@ mod tests {
         let mut d = Deinterlacer::with_options(false, 0.0);
         let long = field_filled_rows(|y| y as u32);
         let short = field_filled_rows(|y| 0x8000 + y as u32);
-        d.push_field(&long, FB_HEIGHT, true, true, true);
-        d.push_field(&short, FB_HEIGHT, true, false, true);
+        d.push_field(&long, FB_HEIGHT, FB_WIDTH, true, true, true);
+        d.push_field(&short, FB_HEIGHT, FB_WIDTH, true, false, true);
         for y in 0..FB_HEIGHT {
             assert_eq!(out_row(&d, 2 * y), 0x8000 + y as u32);
             assert_eq!(out_row(&d, 2 * y + 1), 0x8000 + y as u32);
@@ -465,13 +510,13 @@ mod tests {
         let mut d = Deinterlacer::with_options(true, 0.5);
         let bright = field_filled_rows(|_| 0x00FF_FFFF);
         let black = field_filled_rows(|_| 0);
-        d.push_field(&bright, FB_HEIGHT, false, true, true);
+        d.push_field(&bright, FB_HEIGHT, FB_WIDTH, false, true, true);
         // First frame over a black presented buffer: half brightness.
         assert_eq!(out_row(&d, 10), 0x007F_7F7F);
-        d.push_field(&bright, FB_HEIGHT, false, true, true);
+        d.push_field(&bright, FB_HEIGHT, FB_WIDTH, false, true, true);
         // Converging towards full brightness.
         assert_eq!(out_row(&d, 10), 0x00BF_BFBF);
-        d.push_field(&black, FB_HEIGHT, false, true, true);
+        d.push_field(&black, FB_HEIGHT, FB_WIDTH, false, true, true);
         // A black frame keeps half of the previous output as the trail.
         assert_eq!(out_row(&d, 10), 0x005F_5F5F);
     }
@@ -480,7 +525,7 @@ mod tests {
     fn zero_phosphor_presents_the_woven_frame_untouched() {
         let mut d = Deinterlacer::with_options(true, 0.0);
         let f = field_filled_rows(|_| 0x0012_3456);
-        d.push_field(&f, FB_HEIGHT, false, true, true);
+        d.push_field(&f, FB_HEIGHT, FB_WIDTH, false, true, true);
         assert_eq!(out_row(&d, 10), 0x0012_3456);
         assert!(d.presented.is_none(), "no blend buffer when disabled");
     }

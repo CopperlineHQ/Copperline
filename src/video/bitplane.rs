@@ -619,12 +619,14 @@ fn enforce_h_window_closed_intervals(
     visible_line0: i32,
     rows: usize,
 ) {
+    let canvas_scale = active_canvas_scale();
+    let out_w = FB_WIDTH * canvas_scale;
     for y in 0..rows {
         let open_runs = h_window_rows[y].open_runs();
         if open_runs.len() == 1 && open_runs[0] == (0, FB_WIDTH) {
             continue;
         }
-        let row = &mut fb[y * FB_WIDTH..(y + 1) * FB_WIDTH];
+        let row = &mut fb[y * out_w..(y + 1) * out_w];
         let mut x = 0usize;
         while x < FB_WIDTH {
             let next_open = open_runs
@@ -675,7 +677,7 @@ fn enforce_h_window_closed_intervals(
                 }
                 let palette = palette_at_x(base_palettes[y], &palette_segments[y], sx);
                 let pixel = background_pixel(&control, palette[0], true);
-                row[sx..next_bound].fill(pixel);
+                row[sx * canvas_scale..next_bound * canvas_scale].fill(pixel);
                 sx = next_bound;
             }
             x = closed_end;
@@ -3283,6 +3285,9 @@ pub struct RenderInput {
     /// Sync-anchored glass window for programmable scans
     /// ([`crate::bus::Bus::frame_presentation_h_window`]).
     presentation_h_window: Option<(i32, u32)>,
+    /// Vertical counterpart
+    /// ([`crate::bus::Bus::frame_presentation_v_window`]).
+    presentation_v_window: Option<(i32, u32)>,
     visible_start_vpos: u32,
     palette_split: (Palette, Palette, bool),
     render_base: RenderRegisterSnapshot,
@@ -3319,6 +3324,7 @@ impl RenderInput {
         Self {
             geometry: bus.frame_geometry(),
             presentation_h_window: bus.frame_presentation_h_window(),
+            presentation_v_window: bus.frame_presentation_v_window(),
             visible_start_vpos: bus.frame_visible_start_vpos(),
             palette_split: bus.frame_palette_split(),
             render_base: bus.frame_render_base(),
@@ -3355,6 +3361,7 @@ impl RenderInput {
         }
         self.geometry = bus.frame_geometry();
         self.presentation_h_window = bus.frame_presentation_h_window();
+        self.presentation_v_window = bus.frame_presentation_v_window();
         self.visible_start_vpos = bus.frame_visible_start_vpos();
         self.palette_split = bus.frame_palette_split();
         self.render_base = bus.frame_render_base();
@@ -3408,6 +3415,10 @@ impl RenderInput {
         self.presentation_h_window
     }
 
+    pub fn presentation_v_window(&self) -> Option<(i32, u32)> {
+        self.presentation_v_window
+    }
+
     pub fn visible_start_vpos(&self) -> u32 {
         self.visible_start_vpos
     }
@@ -3418,6 +3429,17 @@ impl RenderInput {
 
     pub fn emulated_frames(&self) -> u64 {
         self.emulated_frames
+    }
+
+    /// Output canvas supersample factor for this frame (see
+    /// [`canvas_scale_for`]): callers size the render buffer as
+    /// `FB_WIDTH * canvas_scale()` pixels per row.
+    pub fn canvas_scale(&self) -> usize {
+        canvas_scale_for(
+            self.geometry.programmable,
+            self.render_base.bplcon0,
+            &self.frame_render_events,
+        )
     }
 }
 
@@ -3506,6 +3528,47 @@ pub(super) fn active_canvas_shift_h() -> i32 {
     ACTIVE_CANVAS_SHIFT_H.with(|shift| shift.get())
 }
 
+thread_local! {
+    /// The running render's output supersample factor, captured from the
+    /// [`RenderInput`] at [`render_from_input`]'s entry like the debug
+    /// masks. 1 paints the classic hi-res-pitch (70 ns per pixel) canvas.
+    /// 2 paints a double-width canvas whose columns are 35 ns apart, so a
+    /// super-hi-res playfield emits each of its two per-column samples as
+    /// its own pixel instead of blending the pair. Every logical
+    /// coordinate in the replay (comparators, fetch origins, sprite
+    /// positions, collision buffers) stays in the hi-res-pitch domain;
+    /// only the framebuffer writes fan out.
+    static ACTIVE_CANVAS_SCALE: std::cell::Cell<usize> = const { std::cell::Cell::new(1) };
+}
+
+pub(super) fn active_canvas_scale() -> usize {
+    ACTIVE_CANVAS_SCALE.with(|scale| scale.get())
+}
+
+/// The canvas supersample factor for a frame: 2 (35 ns pixel pitch) when a
+/// programmable scan drives super-hi-res at any point in the frame, else 1
+/// (the classic 70 ns pitch). Standard 15 kHz scans always use 1, keeping
+/// every calibrated presentation byte-identical; their SHRES screens keep
+/// the blended hi-res-pitch canvas for now.
+pub fn canvas_scale_for(
+    programmable: bool,
+    base_bplcon0: u16,
+    render_events: &[BeamRegisterWrite],
+) -> usize {
+    if !programmable {
+        return 1;
+    }
+    let shres = base_bplcon0 & BPLCON0_SHRES != 0
+        || render_events
+            .iter()
+            .any(|event| event.offset & 0x01FE == 0x100 && event.value & BPLCON0_SHRES != 0);
+    if shres {
+        2
+    } else {
+        1
+    }
+}
+
 fn active_debug_plane_mask() -> u8 {
     ACTIVE_DEBUG_MASKS.with(|masks| masks.get().0)
 }
@@ -3524,14 +3587,17 @@ pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
             0
         })
     });
+    let canvas_scale = input.canvas_scale();
+    ACTIVE_CANVAS_SCALE.with(|scale| scale.set(canvas_scale));
+    let out_w = FB_WIDTH * canvas_scale;
     let mut render_timing = VideoRenderFrameTiming::default();
     let mut state = RenderState::from_snapshot(input.render_base);
     let geometry = input.geometry;
     // Rows rendered this frame: the frame geometry's scan height, bounded
     // by the caller's buffer (legacy fixed-size callers keep the classic
     // field height).
-    let rows = geometry.visible_lines.min(fb.len() / FB_WIDTH);
-    debug_assert!(fb.len() >= FB_WIDTH * rows);
+    let rows = geometry.visible_lines.min(fb.len() / out_w);
+    debug_assert!(fb.len() >= out_w * rows);
     let visible_line0 = input.visible_start_vpos as i32;
     let (beam_top_palette, beam_bottom_palette, beam_bottom_palette_valid) = input.palette_split;
     let frame_render_events = input.frame_render_events.as_slice();
@@ -4347,11 +4413,10 @@ pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
 /// fetched past the image. Hardware is in vertical blank there; force black.
 fn blank_rows_past_frame_end(frame_lines: u32, fb: &mut [u32], visible_line0: i32, rows: usize) {
     const BLANK_RGBA: u32 = 0xFF00_0000;
+    let out_w = FB_WIDTH * active_canvas_scale();
     let frame_lines = frame_lines as i32;
     let first_blank_row = (frame_lines - visible_line0).clamp(0, rows as i32) as usize;
-    for row in fb[first_blank_row * FB_WIDTH..rows * FB_WIDTH].chunks_exact_mut(FB_WIDTH) {
-        row.fill(BLANK_RGBA);
-    }
+    fb[first_blank_row * out_w..rows * out_w].fill(BLANK_RGBA);
 }
 
 /// ECS programmable blanking (plan 1.2): force the composite blank windows
@@ -4381,11 +4446,13 @@ fn apply_programmable_blanking(
         }
     };
 
+    let canvas_scale = active_canvas_scale();
+    let out_w = FB_WIDTH * canvas_scale;
     if let Some((strt, stop)) = programmable_vertical_blank {
         for y in 0..rows {
             let vpos = (visible_line0 + y as i32).max(0) as u32;
             if in_window(vpos, strt, stop) {
-                fb[y * FB_WIDTH..(y + 1) * FB_WIDTH].fill(BLANK_RGBA);
+                fb[y * out_w..(y + 1) * out_w].fill(BLANK_RGBA);
             }
         }
     }
@@ -4404,10 +4471,10 @@ fn apply_programmable_blanking(
             }
         }
         if any {
-            for row in fb.chunks_exact_mut(FB_WIDTH) {
-                for (x, px) in row.iter_mut().enumerate() {
-                    if blank_cols[x] {
-                        *px = BLANK_RGBA;
+            for row in fb.chunks_exact_mut(out_w) {
+                for (x, blank) in blank_cols.iter().enumerate() {
+                    if *blank {
+                        row[x * canvas_scale..(x + 1) * canvas_scale].fill(BLANK_RGBA);
                     }
                 }
             }
@@ -4529,6 +4596,8 @@ fn render_planned_playfield_line(
             0
         };
         let shres = pixel_control.shres();
+        let canvas_scale = active_canvas_scale();
+        let out_w = FB_WIDTH * canvas_scale;
         let line_visible = pixel_control.display_window_contains_line(plan.y, visible_line0);
         let background_rgb24 = rgb12_to_rgb24(color_rgb12(palette[0]));
         let nplanes = sample_control.nplanes().min(plan.plane_words.len());
@@ -4620,17 +4689,20 @@ fn render_planned_playfield_line(
                 }
                 continue;
             }
-            let (sample, output) = if shres {
+            let (sample, output, shres_pair) = if shres {
                 let left = plan.sample_prepared(nplanes, &delays, min_fetch_x, native_x);
                 let right = plan.sample_prepared(nplanes, &delays, min_fetch_x, native_x + 1);
+                let (left_out, right_out) = denise_shres_playfield_output_pair(
+                    pixel_control,
+                    palette,
+                    left.idx & plane_mask,
+                    right.idx & plane_mask,
+                    &mut ham_color,
+                );
                 (
                     shres_composite_sample(left, right),
-                    denise_shres_playfield_output(
-                        palette,
-                        left.idx & plane_mask,
-                        right.idx & plane_mask,
-                        &mut ham_color,
-                    ),
+                    blend_shres_outputs(left_out, right_out),
+                    Some((left_out, right_out)),
                 )
             } else {
                 let sample = plan.sample_prepared_with_final_fetch_hold(
@@ -4676,7 +4748,7 @@ fn render_planned_playfield_line(
                         );
                     }
                 }
-                (sample, output)
+                (sample, output, None)
             };
             if ham_mode || !shres {
                 next_ham_native_x = next_ham_native_x.max(native_x + 1);
@@ -4699,9 +4771,32 @@ fn render_planned_playfield_line(
                     playfield_mask[fb_idx] = pf_mask;
                 }
                 collision_pixels[fb_idx] = collision;
+                let out_base = plan.y * out_w + pixel_x * canvas_scale;
+                if let (2, Some((left_out, right_out))) = (canvas_scale, shres_pair) {
+                    // 35 ns canvas: each half of the SHRES pair is its own
+                    // output pixel with its own genlock transparency.
+                    let left_transparent = pixel_control.genlock_transparent(
+                        left_out.color_latch,
+                        Some(sample),
+                        false,
+                    );
+                    let right_transparent = pixel_control.genlock_transparent(
+                        right_out.color_latch,
+                        Some(sample),
+                        false,
+                    );
+                    fb[out_base] = rgb24_to_rgba8_alpha(left_out.color, !left_transparent);
+                    fb[out_base + 1] = rgb24_to_rgba8_alpha(right_out.color, !right_transparent);
+                    continue;
+                }
                 let transparent =
                     pixel_control.genlock_transparent(output.color_latch, Some(sample), false);
-                fb[fb_idx] = rgb24_to_rgba8_alpha(output.color, !transparent);
+                let pixel = rgb24_to_rgba8_alpha(output.color, !transparent);
+                if canvas_scale == 1 {
+                    fb[out_base] = pixel;
+                } else {
+                    fb[out_base..out_base + canvas_scale].fill(pixel);
+                }
             }
             x += pixel_repeat;
             if x >= run_stop {
@@ -4927,7 +5022,8 @@ fn manual_bpl_ham_seed_color(
         ));
     }
     let previous_x = (seg.x - 1).min(FB_WIDTH.saturating_sub(1) as i32) as usize;
-    rgba8_to_rgb24(fb[seg.line * FB_WIDTH + previous_x])
+    let out_w = FB_WIDTH * active_canvas_scale();
+    rgba8_to_rgb24(fb[seg.line * out_w + previous_x * active_canvas_scale()])
 }
 
 fn manual_bpl_ham_seed_select(seg: &ManualBplSegment, ham_select_pixels: &[u8]) -> u8 {
@@ -5032,22 +5128,29 @@ fn draw_manual_bpl_word(
         } else {
             masked_idx
         };
-        let source_output = if source_control.shres() {
+        let (source_output, manual_shres_pair) = if source_control.shres() {
             let right_sample = shifter
                 .sample(source_control, native_idx + 1)
                 .unwrap_or_default();
-            denise_shres_playfield_output(
+            let (left_out, right_out) = denise_shres_playfield_output_pair(
+                source_control,
                 source_palette,
                 left_sample.idx & plane_mask,
                 right_sample.idx & plane_mask,
                 ham_color,
+            );
+            (
+                blend_shres_outputs(left_out, right_out),
+                Some((left_out, right_out)),
             )
         } else {
             let output =
                 denise_playfield_output(source_control, source_palette, output_idx, ham_color);
             *ham_select = masked_idx;
-            output
+            (output, None)
         };
+        let canvas_scale = active_canvas_scale();
+        let out_w = FB_WIDTH * canvas_scale;
         for dx in 0..pixel_repeat {
             let x = x_cursor + dx as i32;
             if !(0..FB_WIDTH as i32).contains(&x) {
@@ -5136,9 +5239,20 @@ fn draw_manual_bpl_word(
                     )
                 };
             *ham_color = pixel_color;
+            let out_base = seg.line * out_w + x * canvas_scale;
+            if let (2, Some((left_out, right_out))) = (canvas_scale, manual_shres_pair) {
+                let left_transparent =
+                    pixel_control.genlock_transparent(left_out.color_latch, Some(sample), false);
+                let right_transparent =
+                    pixel_control.genlock_transparent(right_out.color_latch, Some(sample), false);
+                fb[out_base] = rgb24_to_rgba8_alpha(left_out.color, !left_transparent);
+                fb[out_base + 1] = rgb24_to_rgba8_alpha(right_out.color, !right_transparent);
+                continue;
+            }
             let transparent =
                 pixel_control.genlock_transparent(pixel_color_latch, Some(sample), false);
-            fb[fb_idx] = rgb24_to_rgba8_alpha(pixel_color, !transparent);
+            let pixel = rgb24_to_rgba8_alpha(pixel_color, !transparent);
+            fb[out_base..out_base + canvas_scale].fill(pixel);
         }
         x_cursor += pixel_repeat as i32;
         native_idx += native_step;

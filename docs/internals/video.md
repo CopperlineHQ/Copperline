@@ -222,12 +222,33 @@ origin. Under VARBEAMEN, Denise's horizontal counter restarts at 0 with the
 programmable line rather than free-running at the standard 15 kHz phase, so
 the DIW and sprite comparators sit later on the canvas by that origin
 difference (Linux/m68k amifb and the KS3.1 DblPAL screen both program their
-windows against the zero origin). Horizontally, a programmable frame is
-presented like a multisync monitor: when the mode programs its sync pulse
-(VARHSYEN), the glass shows the line from the HSYNC trailing edge to the
-next pulse, so the picture sits where the mode's own porches place it;
-without a programmed sync the whole line maps onto the glass time-linearly
-(each colour clock covers 227/line_cck of a standard clock's width).
+windows against the zero origin). A programmable frame is presented like a
+multisync monitor on both axes: when the mode programs its sync pulses, the
+glass shows the line from the HSYNC trailing edge to the next pulse
+(VARHSYEN) and the frame from the VSYNC trailing edge to the next pulse
+(VARVSYEN), so the picture sits where the mode's own porches place it, with
+blanked border rows above and below the programmed vertical window. Without
+a programmed horizontal sync the whole line maps onto the glass
+time-linearly (each colour clock covers 227/line_cck of a standard clock's
+width); without a programmed vertical sync the captured rows keep covering
+the full glass height.
+
+Super-hi-res output: Denise/Lisa resolve every 35 ns sample through the
+full palette pipeline (ECS Denise carries at most two bitplanes into
+SHRES; AGA Lisa runs the complete 8-bit index path, e.g. the 4-plane
+FMODE=3 Linux amifb console). A programmable scan that drives SHRES
+renders a double-width canvas at the 35 ns pixel pitch
+(`canvas_scale_for`): each of the two per-column samples is emitted as
+its own framebuffer pixel, and the presentation, screenshots, and the
+browser canvas carry the doubled width through (the desktop window shows
+it 1:1 on a 2x HiDPI texture). Every logical coordinate in the replay --
+comparators, fetch origins, sprite positions, the collision buffers --
+stays in the classic hi-res-pitch domain; only the framebuffer writes
+fan out, with non-SHRES pixels and sprites doubled. Standard 15 kHz
+scans keep the classic single-width canvas byte-identical; their SHRES
+screens still blend each 35 ns pair into the 70 ns pixel. Sprite
+positions remain at hi-res resolution on either canvas (true 35 ns
+sprite placement is a remaining TODO).
 
 Two vertical edge cases the replay honours:
 

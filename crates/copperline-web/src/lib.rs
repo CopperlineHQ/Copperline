@@ -20,7 +20,7 @@ use copperline::config::{Config, Overscan};
 use copperline::emulator::{build_machine, Emulator};
 use copperline::serial::{ChannelSerialHandle, ChannelSerialSink};
 use copperline::video::deinterlace::Deinterlacer;
-use copperline::video::{bitplane, present_common, FB_WIDTH, MAX_FB_PIXELS};
+use copperline::video::{bitplane, present_common, FB_WIDTH, MAX_CANVAS_PIXELS};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(start)]
@@ -242,7 +242,7 @@ impl WebEmu {
         Ok(WebEmu {
             emu,
             audio,
-            fb: vec![0u32; MAX_FB_PIXELS],
+            fb: vec![0u32; MAX_CANVAS_PIXELS],
             deinterlacer: Deinterlacer::new(),
             present: Vec::new(),
             present_width: FB_WIDTH,
@@ -322,10 +322,13 @@ impl WebEmu {
         let visible_start_vpos = self.emu.bus().frame_visible_start_vpos();
         bitplane::render(self.emu.bus_mut(), &mut self.fb);
         let geometry = self.emu.bus().frame_geometry();
+        let canvas_scale = self.emu.bus().frame_canvas_scale();
         let field_rows = present_common::post_process_rendered_field(
             &mut self.fb,
             geometry,
+            canvas_scale,
             self.emu.bus().frame_presentation_h_window(),
+            self.emu.bus().frame_presentation_v_window(),
             visible_start_vpos,
             0,
             Overscan::Tv,
@@ -334,6 +337,7 @@ impl WebEmu {
         self.deinterlacer.push_field(
             &self.fb,
             field_rows,
+            FB_WIDTH * canvas_scale,
             base.bplcon0 & 0x0004 != 0,
             base.long_field,
             !geometry.programmable,
@@ -360,9 +364,9 @@ impl WebEmu {
                 dst.copy_from_slice(&woven[src..src + present_common::TV_PAL_CAPTURED_WIDTH]);
             }
         } else {
-            self.present_width = FB_WIDTH;
+            self.present_width = self.deinterlacer.output_width();
             self.present_rows = woven_rows;
-            let active = woven_rows * FB_WIDTH;
+            let active = woven_rows * self.present_width;
             self.present.resize(active, 0);
             self.present.copy_from_slice(&woven[..active]);
         }

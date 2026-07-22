@@ -270,9 +270,10 @@ Diagnostic captures: `trace.start {path?, max_lines?}`, `trace.status`,
 
 State and capture: `state.save {path}`, `state.load {path}` (re-arms
 the reverse-debug ring on the loaded timeline), `capture.screenshot
-{path?}` (raw framebuffer PNG, 716 pixels wide; with an active RTG
-screen it is the board frame downsampled to that width at the board's
-native row count), `capture.digest`
+{path?}` (raw framebuffer PNG, 716 pixels wide -- 1432 for a
+programmable super-hi-res scan's 35 ns canvas; with an active RTG
+screen it is the board frame downsampled to 716 at the board's
+native row count; the response reports the width), `capture.digest`
 (FNV-1a hash of the rendered frame -- the cheap change-detection
 primitive, identical in both server modes), `machine.reset
 {kind: "warm"|"cold"}`.
