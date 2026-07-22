@@ -131,7 +131,12 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      A3000/A4000's RP5C01 ([machine] rtc_chip), the Ricoh part carrying
 //      its mode/alarm/battery-RAM state and both sharing the seeded
 //      ClockSource
-pub const STATE_VERSION: u32 = 37;
+//  38: DriveSounds voices reshaped for the measured clack model (thump/
+//      body/ring/tick components, pending rebound clatter, step spacing
+//      counter) and the rev-locked motor (hum partial phases, revolution
+//      phase, cascaded rumble poles, per-drive pattern seed); the
+//      read-gated hiss voice was removed outright
+pub const STATE_VERSION: u32 = 38;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

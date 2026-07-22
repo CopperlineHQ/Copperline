@@ -339,10 +339,10 @@ video = "PAL"
 [audio]
 
 # Synthesized floppy-drive sound effects: motor hum with spin-up/down,
-# head-step clicks for seeks (including the classic empty-drive click),
-# and a faint hiss while disk DMA is transferring. Generated from
-# scratch, not sampled. Mixed into the normal audio output, so they
-# need live audio (or --audio-wav) to be heard.
+# head-step clacks (including the classic empty-drive poll click) and
+# the seek buzz of fast stepping. Generated from scratch, not sampled.
+# Mixed into the normal audio output, so they need live audio (or
+# --audio-wav) to be heard.
 floppy_sounds = true
 
 # Drive sound level, 0-100, relative to Paula's output.

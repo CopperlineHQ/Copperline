@@ -660,8 +660,8 @@ pub(crate) fn parse_channel_mode(s: &str) -> Result<ChannelMode> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioConfig {
     /// Synthesized floppy-drive sound effects: motor hum, head-step
-    /// clicks for seeks (and the empty-drive change-line poll), and a
-    /// faint hiss while disk DMA moves data.
+    /// clacks and seek buzz (and the empty-drive change-line poll
+    /// click).
     pub floppy_sounds: bool,
     /// Drive sound level, 0-100, relative to Paula's output.
     pub floppy_sounds_volume: u8,

@@ -4522,7 +4522,7 @@ impl Bus {
         // drive-sound feed -- on a single cached bool while that holds. The
         // cache is cleared by every activation write and recomputed in
         // `floppy.tick`, so a newly active drive is serviced from the next
-        // access. Drive sounds need no feed once idle: the spin/read levels are
+        // access. Drive sounds need no feed once idle: the spin levels are
         // already zeroed and the tails decay in Paula's mixer.
         if !self.floppy.is_idle_cached() {
             self.floppy.set_adkcon(self.paula.adkcon);
@@ -4550,7 +4550,7 @@ impl Bus {
                     self.paula.intreq |= INT_EXTER;
                 }
             }
-            self.feed_drive_sounds(dmacon);
+            self.feed_drive_sounds();
         }
         self.refresh_cia_irq_lines();
         self.flush_pending_vbi();
@@ -4558,14 +4558,13 @@ impl Bus {
     }
 
     /// Forward floppy mechanism activity (head steps, motor spin
-    /// levels, read/write DMA) to the synthesized drive sound effects
-    /// mixed into Paula's host output. State updates here trail the
+    /// levels) to the synthesized drive sound effects mixed into
+    /// Paula's host output. State updates here trail the
     /// already-flushed audio batch by at most one chipset tick, well
     /// under a single host sample.
-    fn feed_drive_sounds(&mut self, dmacon: u16) {
+    fn feed_drive_sounds(&mut self) {
         let steps = self.floppy.take_sound_steps();
         let spins = self.floppy.motor_spin_levels();
-        let reading = self.floppy.dma_active(dmacon);
         let sounds = self.paula.drive_sounds_mut();
         if !sounds.enabled() {
             return;
@@ -4576,7 +4575,6 @@ impl Bus {
         for (drive, spin) in spins.into_iter().enumerate() {
             sounds.set_motor_spin(drive, spin);
         }
-        sounds.set_read_active(reading);
     }
 
     fn refresh_cia_irq_lines(&mut self) {
