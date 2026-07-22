@@ -112,6 +112,7 @@ image instead.
 [machine]
 profile = "A1200" # A1000, A500, A500OCS, A500Plus (A500+), A600, A1200, A3000, A4000, CDTV, CD32
 rtc = true        # add a battery RTC (default: only A500+/CDTV/A3000/A4000 ship with one)
+# rtc_chip = "RP5C01"              # MSM6242 (default) or RP5C01 (A3000/A4000 default)
 # rtc_time = "2005-03-18 01:58:29" # seed the clock; it then ticks in emulated time
 # rtc_frozen = true                # stop the seeded clock at rtc_time exactly
 mem_controller = "ramsey-07" # none, ramsey-04 (A3000), ramsey-07 (A4000)
@@ -136,8 +137,8 @@ gives a plain 8371/8362 OCS machine.
 | `A500Plus` | ECS (8375 Agnus, ECS Denise) | 68000 @ 7.09 MHz | 1M | 0 | RTC |
 | `A600` | ECS (8375 Agnus, ECS Denise) | 68000 @ 7.09 MHz | 1M | 0 | Gayle IDE |
 | `A1200` | AGA (Alice/Lisa) | 68EC020 @ 14.18 MHz | 2M | 0 | Gayle IDE |
-| `A3000` | ECS | 68030 @ 25 MHz | 2M | 0 | Ramsey-04, RTC |
-| `A4000` | AGA (Alice/Lisa) | 68040 @ 25 MHz | 2M | 0 | Ramsey-07, RTC |
+| `A3000` | ECS | 68030 @ 25 MHz | 2M | 0 | Ramsey-04, RP5C01 RTC |
+| `A4000` | AGA (Alice/Lisa) | 68040 @ 25 MHz | 2M | 0 | Ramsey-07, RP5C01 RTC |
 | `CDTV` | ECS | 68000 @ 7.09 MHz | 1M | 0 | DMAC CD controller, RTC, 256K extended ROM |
 | `CD32` | AGA (Alice/Lisa) | 68EC020 @ 14.18 MHz | 2M | 0 | Akiko, CD32 pad, NVRAM, 512K extended ROM |
 
@@ -147,6 +148,17 @@ board), `CDTV`, `A3000`, and `A4000` fit one by default; the base
 A500/A500OCS, A600, A1200, A1000, and CD32 have none. Set `rtc = true` to add
 one -- for an A600HD or a clock-equipped A1200, say -- so the Workbench clock
 keeps time.
+
+`rtc_chip` names the part in that socket, because Commodore used two with
+different register protocols: the OKI **MSM6242** on the small boxes, the
+CDTV, and the aftermarket clock expansions, and the Ricoh **RP5C01** on the
+A3000/A4000 motherboards (the Ricoh also carries 26 nibbles of battery RAM,
+which AmigaOS uses via `battmem.resource` on those machines). The default
+follows the profile -- `RP5C01` on `A3000`/`A4000`, `MSM6242` everywhere else
+-- and setting the key implies `rtc = true`. AmigaOS probes for either part,
+so the choice is mostly invisible to it, but Linux/m68k does not probe: it
+drives the chip the machine model dictates, so an A3000/A4000 booting Linux
+needs the RP5C01 answering for its clock to work.
 
 `rtc_time` seeds the clock instead of letting it mirror the host's: the value
 is either an integer (Unix seconds, UTC) or a string

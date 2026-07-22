@@ -1237,6 +1237,7 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
             let secs = bus.emulated_seconds();
             Ok(json!({
                 "present": bus.rtc_present(),
+                "chip": bus.rtc.chip().label(),
                 "seeded": bus.rtc.seed().is_some(),
                 "frozen": bus.rtc.frozen(),
                 "unix": bus.rtc.current_unix(secs),
