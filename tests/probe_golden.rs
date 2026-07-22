@@ -5,14 +5,22 @@
 //! draws a display exercising one calibrated hardware behaviour. The test
 //! assembles each probe into a bootable ADF in a temp directory, boots it on
 //! the bundled AROS ROM (no Kickstart needed -- the probes own the machine
-//! once loaded, so the settled frame is ROM-independent), captures a raw
-//! screenshot at a fixed emulated time, and compares it pixel-for-pixel
-//! against the committed reference under `timing-test/golden/`.
+//! once loaded, so the settled frame of the display-geometry probes is
+//! ROM-independent), captures a raw screenshot at a fixed emulated time, and
+//! compares it pixel-for-pixel against the committed reference under
+//! `timing-test/golden/`.
+//!
+//! Exception: the two probes that render live E-clock-referenced counts
+//! (`timing-test`, `bltprobe-pace`) do depend on the instant the ROM hands
+//! control to the bootblock -- the E-clock and DMA-cadence phase relative to
+//! the beam at probe start varies with boot duration, shifting the displayed
+//! counts by a tick or two. Refreshing the bundled AROS ROM therefore moves
+//! those two goldens and requires a re-bless.
 //!
 //! The emulator core is deterministic, so any pixel difference is a real
 //! behaviour change. When a change is intentional (a hardware-model fix that
-//! moves calibrated output), re-bless the goldens and review the diff in the
-//! commit:
+//! moves calibrated output, or a bundled-ROM refresh), re-bless the goldens
+//! and review the diff in the commit:
 //!
 //! ```sh
 //! COPPERLINE_BLESS_GOLDEN=1 cargo test --release --test probe_golden
