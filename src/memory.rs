@@ -71,7 +71,7 @@ pub use crate::zorro::{AUTOCONFIG_BASE, AUTOCONFIG_SIZE};
 /// instead -- bytes no big-endian ROM can start with, since $F94E in the
 /// opcode slot would be an F-line instruction -- so the orientation is
 /// detected from the header and the CPU byte order restored before use.
-pub fn normalize_rom_byte_order(mut rom: Vec<u8>) -> Vec<u8> {
+fn normalize_rom_byte_order(mut rom: Vec<u8>) -> Vec<u8> {
     let swapped = rom.len() >= 4
         && rom.len().is_multiple_of(2)
         && rom[1] == 0x11
@@ -91,7 +91,7 @@ pub fn normalize_rom_byte_order(mut rom: Vec<u8>) -> Vec<u8> {
 /// $F80000-$FFFFFF space; the 512 KiB images distributed for these versions
 /// are simply that 256 KiB ROM doubled. Mirroring a 256 KiB image up to
 /// ROM_SIZE makes both forms behave identically. Byte-swapped EPROM-burner
-/// images are accepted and restored (see [`normalize_rom_byte_order`]).
+/// images are accepted and restored (see `normalize_rom_byte_order`).
 pub fn normalize_boot_rom(rom: Vec<u8>) -> Result<Vec<u8>> {
     let rom = normalize_rom_byte_order(rom);
     match rom.len() {
@@ -279,7 +279,7 @@ impl Memory {
 
     /// Attach an extended ROM image: 512 KiB maps at $E00000 (CD32),
     /// 256 KiB at $F00000 (CDTV). Byte-swapped EPROM-burner images are
-    /// accepted and restored (see [`normalize_rom_byte_order`]).
+    /// accepted and restored (see `normalize_rom_byte_order`).
     pub fn attach_extended_rom(&mut self, image: Vec<u8>) -> Result<()> {
         let image = normalize_rom_byte_order(image);
         self.extended_rom_base = match image.len() {
@@ -394,10 +394,11 @@ mod tests {
 
     #[test]
     fn byte_swapped_extended_rom_is_restored_on_attach() {
-        // The CDTV extended ROM opens with the same $111x + JMP header as a
-        // Kickstart, so a byte-swapped dump is detected the same way.
+        // The CDTV extended ROM's magic word is $1111, not $1114. $1111 reads
+        // the same in either byte order, so this is the case where detection
+        // rests on the swapped JMP bytes alone.
         let mut image = headered_rom(0x4_0000);
-        image[1] = 0x11;
+        image[..2].copy_from_slice(&[0x11, 0x11]);
         let mut mem = Memory::placeholder(1024, 0, ZorroChain::default());
         mem.attach_extended_rom(byte_swapped(&image)).unwrap();
         assert_eq!(mem.extended_rom, image);
