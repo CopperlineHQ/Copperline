@@ -146,7 +146,7 @@ fn probe_config(adf: &Path, machine: Machine) -> String {
     };
     let (cpu, memory) = match machine {
         Machine::Ocs | Machine::Ecs => ("68000", "chip = \"512K\"\nslow = \"512K\"\n"),
-        Machine::Aga => ("68020", "chip = \"2M\"\n"),
+        Machine::Aga => ("68EC020", "chip = \"2M\"\n"),
     };
     format!(
         "rom = \"<bundled-aros>\"\n\
