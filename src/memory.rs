@@ -59,13 +59,41 @@ pub const WCS_SIZE: usize = 256 * 1024;
 pub const A1000_BOOT_ROM_SIZE: usize = 64 * 1024;
 pub use crate::zorro::{AUTOCONFIG_BASE, AUTOCONFIG_SIZE};
 
+/// Restore big-endian byte order in a byte-swapped ROM image.
+///
+/// Every bootable Amiga ROM -- Kickstart parts of both sizes, the CDTV/CD32
+/// extended ROMs, the A1000 bootstrap, AROS -- opens with the same big-endian
+/// header: a $11xx ROM magic word followed by a JMP absolute long ($4EF9) to
+/// the reset entry. Images prepared for an EPROM programmer store the same
+/// content with the two bytes of every 16-bit word exchanged (Hyperion's
+/// OS 3.1.4/3.2 releases ship their single-chip `.bin` ROM files this way,
+/// alongside the `.rom` files in CPU order). Such a file opens $xx11 $F94E
+/// instead -- bytes no big-endian ROM can start with, since $F94E in the
+/// opcode slot would be an F-line instruction -- so the orientation is
+/// detected from the header and the CPU byte order restored before use.
+fn normalize_rom_byte_order(mut rom: Vec<u8>) -> Vec<u8> {
+    let swapped = rom.len() >= 4
+        && rom.len().is_multiple_of(2)
+        && rom[1] == 0x11
+        && rom[2..4] == [0xF9, 0x4E];
+    if swapped {
+        for pair in rom.chunks_exact_mut(2) {
+            pair.swap(0, 1);
+        }
+        log::info!("byte-swapped (EPROM programmer) ROM image detected; restoring byte order");
+    }
+    rom
+}
+
 /// Normalise a boot-ROM image to the full 512 KiB ROM window. A 512 KiB
 /// image is taken as-is. A 256 KiB image (Kickstart 1.2/1.3) does not decode
 /// A18, so on real hardware the part appears mirrored across the whole
 /// $F80000-$FFFFFF space; the 512 KiB images distributed for these versions
 /// are simply that 256 KiB ROM doubled. Mirroring a 256 KiB image up to
-/// ROM_SIZE makes both forms behave identically.
+/// ROM_SIZE makes both forms behave identically. Byte-swapped EPROM-burner
+/// images are accepted and restored (see `normalize_rom_byte_order`).
 pub fn normalize_boot_rom(rom: Vec<u8>) -> Result<Vec<u8>> {
+    let rom = normalize_rom_byte_order(rom);
     match rom.len() {
         ROM_SIZE => Ok(rom),
         ROM_SIZE_256K => {
@@ -89,6 +117,7 @@ pub fn normalize_boot_rom(rom: Vec<u8>) -> Result<Vec<u8>> {
 /// $F80000-$FBFFFF boot-ROM window; echoing it here lets the standard ROM
 /// decode at ROM_BASE cover that window, leaving $FC0000-$FFFFFF for the WCS.
 pub fn normalize_a1000_boot_rom(rom: Vec<u8>) -> Result<Vec<u8>> {
+    let rom = normalize_rom_byte_order(rom);
     if rom.len() != A1000_BOOT_ROM_SIZE {
         anyhow::bail!(
             "A1000 boot ROM is {} bytes; expected {} (64 KiB)",
@@ -249,8 +278,10 @@ impl Memory {
     }
 
     /// Attach an extended ROM image: 512 KiB maps at $E00000 (CD32),
-    /// 256 KiB at $F00000 (CDTV).
+    /// 256 KiB at $F00000 (CDTV). Byte-swapped EPROM-burner images are
+    /// accepted and restored (see `normalize_rom_byte_order`).
     pub fn attach_extended_rom(&mut self, image: Vec<u8>) -> Result<()> {
+        let image = normalize_rom_byte_order(image);
         self.extended_rom_base = match image.len() {
             0x8_0000 => 0x00E0_0000,
             0x4_0000 => 0x00F0_0000,
@@ -313,6 +344,72 @@ mod tests {
         assert_eq!(out.len(), ROM_SIZE);
         assert_eq!(&out[..ROM_SIZE_256K], &half[..]);
         assert_eq!(&out[ROM_SIZE_256K..], &half[..]);
+    }
+
+    /// A patterned image of `len` bytes opening with the ROM header: the
+    /// $1114 magic word and a JMP absolute long to the reset entry.
+    fn headered_rom(len: usize) -> Vec<u8> {
+        let mut rom: Vec<u8> = (0..len).map(|i| (i / 3) as u8).collect();
+        rom[..8].copy_from_slice(&[0x11, 0x14, 0x4E, 0xF9, 0x00, 0xF8, 0x00, 0xD2]);
+        rom
+    }
+
+    /// `rom` with the two bytes of every 16-bit word exchanged, as an EPROM
+    /// programmer image stores it.
+    fn byte_swapped(rom: &[u8]) -> Vec<u8> {
+        rom.chunks(2).flat_map(|p| [p[1], p[0]]).collect()
+    }
+
+    #[test]
+    fn byte_swapped_boot_rom_is_restored_to_cpu_order() {
+        // Hyperion's single-chip `.bin` ROM files are the `.rom` images with
+        // every 16-bit word byte-swapped for the EPROM programmer; the header
+        // then opens $1411 $F94E, which no big-endian ROM can start with.
+        let rom = headered_rom(ROM_SIZE);
+        let out = normalize_boot_rom(byte_swapped(&rom)).unwrap();
+        assert_eq!(out, rom);
+    }
+
+    #[test]
+    fn byte_swapped_256k_boot_rom_is_restored_then_mirrored() {
+        let rom = headered_rom(ROM_SIZE_256K);
+        let out = normalize_boot_rom(byte_swapped(&rom)).unwrap();
+        assert_eq!(&out[..ROM_SIZE_256K], &rom[..]);
+        assert_eq!(&out[ROM_SIZE_256K..], &rom[..]);
+    }
+
+    #[test]
+    fn rom_without_the_swapped_header_is_left_alone() {
+        // The swapped-JMP bytes alone are not enough: without the ROM magic
+        // word the image is taken at face value. This keeps arbitrary data
+        // (the A1000 WCS-loaded Kickstart disk path feeds this function too)
+        // from being scrambled by a coincidental match.
+        let mut rom = headered_rom(ROM_SIZE);
+        rom[..4].copy_from_slice(&[0x12, 0x34, 0xF9, 0x4E]);
+        assert_eq!(normalize_rom_byte_order(rom.clone()), rom);
+        // Likewise a swapped magic word without the swapped JMP.
+        rom[..4].copy_from_slice(&[0x14, 0x11, 0x4E, 0xF9]);
+        assert_eq!(normalize_rom_byte_order(rom.clone()), rom);
+    }
+
+    #[test]
+    fn byte_swapped_extended_rom_is_restored_on_attach() {
+        // The CDTV extended ROM's magic word is $1111, not $1114. $1111 reads
+        // the same in either byte order, so this is the case where detection
+        // rests on the swapped JMP bytes alone.
+        let mut image = headered_rom(0x4_0000);
+        image[..2].copy_from_slice(&[0x11, 0x11]);
+        let mut mem = Memory::placeholder(1024, 0, ZorroChain::default());
+        mem.attach_extended_rom(byte_swapped(&image)).unwrap();
+        assert_eq!(mem.extended_rom, image);
+        assert_eq!(mem.extended_rom_base, 0x00F0_0000);
+    }
+
+    #[test]
+    fn byte_swapped_a1000_boot_rom_is_restored_before_echoing() {
+        let rom = headered_rom(A1000_BOOT_ROM_SIZE);
+        let out = normalize_a1000_boot_rom(byte_swapped(&rom)).unwrap();
+        assert_eq!(&out[..A1000_BOOT_ROM_SIZE], &rom[..]);
     }
 
     #[test]
