@@ -43,7 +43,9 @@ pub struct Config {
     pub cpu: CpuModel,
     pub fpu: bool,
     /// CPU clock in MHz. Defaults to the model's stock speed
-    /// ([`CpuModel::default_clock_mhz`]); overridable via `[cpu] clock_mhz`.
+    /// ([`CpuModel::default_clock_mhz`]), or the machine profile's pinned
+    /// clock (the A1200/CD32's authentic 14.18 MHz) when the profile names
+    /// one; overridable via `[cpu] clock_mhz`.
     pub cpu_clock_mhz: f64,
     /// Model the 68020/030 on-chip instruction cache (CACR-controlled).
     /// Defaults on for the parts that have one (68EC020/68020/68030), as on
@@ -2127,6 +2129,12 @@ impl TryFrom<RawConfig> for Config {
                 errors.push(anyhow!("[cpu] clock_mhz must be a positive number"));
                 cpu.default_clock_mhz()
             }
+            // With the whole [cpu] pair absent, the profile's clock stands:
+            // the A1200/CD32 profiles pin the authentic 14.18 MHz (4x the
+            // PAL colour clock), where the generic 020 default is 14.0. An
+            // explicit [cpu] model is a different part in the socket, so it
+            // takes its own stock speed instead.
+            None if raw.cpu.model.is_none() => defaults.cpu_clock_mhz,
             None => cpu.default_clock_mhz(),
         };
         if fpu && matches!(cpu, CpuModel::M68000 | CpuModel::M68010) {
@@ -3029,6 +3037,32 @@ pub fn machine_profile_defaults(model: MachineModel) -> Config {
             d.port_devices[1] = PortDevice::Cd32Pad;
         }
     }
+    // Hardware that follows from the parts picked above, derived exactly as
+    // the raw-config pipeline derives it when the matching [chipset]/[cpu]
+    // keys are absent, so a profile built directly (the browser build, the
+    // launcher's fallback) is the same machine as a config file naming the
+    // profile. Skipping this is how the browser's first A1200 ended up an
+    // AGA machine with a 1 MiB-reach ECS Agnus: the chip window mirrors by
+    // Agnus reach, so the guest sized 1 MiB of its 2 MiB chip RAM.
+    // machine_profile_defaults_match_bare_profile_configs pins the parity.
+    d.agnus_revision = match model {
+        // The A500+/A600 boards have the 2 MB "Super Fat" 8375 soldered on,
+        // regardless of fitted chip RAM.
+        MachineModel::A500Plus | MachineModel::A600 => AgnusRevision::Ecs8375,
+        // The A500 Rev 6A keeps its pinned 8372A/OCS-Denise pairing (also
+        // the no-profile default machine's chips).
+        MachineModel::A500 => AgnusRevision::Ecs8372Rev4,
+        _ => default_agnus_revision(d.chipset, d.chip_ram_bytes),
+    };
+    d.denise_revision = match model {
+        MachineModel::A500 => DeniseRevision::Ocs,
+        _ => default_denise_revision(d.chipset),
+    };
+    // The FPU and on-chip caches are silicon: present whenever the CPU has
+    // them, exactly like the pipeline's [cpu] defaults.
+    d.fpu = d.cpu.default_fpu();
+    d.cpu_icache = d.cpu.has_instruction_cache();
+    d.cpu_dcache = d.cpu.has_data_cache();
     // An RTG card comes fitted wherever the machine can host one, so RTG
     // needs no config step beyond installing the guest driver. The Z3660 is
     // a Zorro III board, so the gate is the same one Zorro III RAM uses: a
@@ -4131,6 +4165,62 @@ mod tests {
             "#,
         )?;
         assert_eq!(cfg.video_standard, VideoStandard::Ntsc);
+        Ok(())
+    }
+
+    #[test]
+    fn machine_profile_defaults_match_bare_profile_configs() -> Result<()> {
+        // machine_profile_defaults is also consumed directly, outside the
+        // raw-config pipeline (the browser build, the launcher fallback), so
+        // the machine it returns must be the machine a config file naming
+        // just the profile produces -- including everything the pipeline
+        // derives for absent [chipset]/[cpu] keys. The browser's first
+        // A1200 shipped with this broken: an AGA machine carrying the
+        // default 1 MiB-reach ECS Agnus, whose chip-window mirroring made
+        // the guest size 1 MiB of the 2 MiB fitted chip RAM.
+        use MachineModel::*;
+        for model in [
+            A1000, A500, A500Ocs, A500Plus, A600, A1200, A3000, A4000, Cdtv, Cd32,
+        ] {
+            let direct = machine_profile_defaults(model);
+            let piped = parse_config(&format!("[machine]\nprofile = \"{model:?}\"\n"))?;
+            assert_eq!(piped.chipset, direct.chipset, "{model:?} chipset");
+            assert_eq!(
+                piped.agnus_revision, direct.agnus_revision,
+                "{model:?} agnus"
+            );
+            assert_eq!(
+                piped.denise_revision, direct.denise_revision,
+                "{model:?} denise"
+            );
+            assert_eq!(piped.cpu, direct.cpu, "{model:?} cpu");
+            assert!(
+                (piped.cpu_clock_mhz - direct.cpu_clock_mhz).abs() < 1e-9,
+                "{model:?} cpu clock: piped {} vs direct {}",
+                piped.cpu_clock_mhz,
+                direct.cpu_clock_mhz
+            );
+            assert_eq!(piped.fpu, direct.fpu, "{model:?} fpu");
+            assert_eq!(piped.cpu_icache, direct.cpu_icache, "{model:?} icache");
+            assert_eq!(piped.cpu_dcache, direct.cpu_dcache, "{model:?} dcache");
+            assert_eq!(
+                piped.chip_ram_bytes, direct.chip_ram_bytes,
+                "{model:?} chip RAM"
+            );
+            assert_eq!(
+                piped.slow_ram_bytes, direct.slow_ram_bytes,
+                "{model:?} slow RAM"
+            );
+            assert_eq!(piped.mb_ram_bytes, direct.mb_ram_bytes, "{model:?} mb RAM");
+            assert_eq!(piped.gate_array, direct.gate_array, "{model:?} gate array");
+            assert_eq!(
+                piped.mem_controller, direct.mem_controller,
+                "{model:?} mem controller"
+            );
+            assert_eq!(piped.rtc_present, direct.rtc_present, "{model:?} rtc");
+            assert_eq!(piped.rtc_chip, direct.rtc_chip, "{model:?} rtc chip");
+            assert_eq!(piped.rtg, direct.rtg, "{model:?} rtg");
+        }
         Ok(())
     }
 

@@ -383,7 +383,9 @@ elements, and pages without them are untouched:
   [configuration file](#browser-page-config) sets `mono_audio`.
 - `#machine` (a `<select>`): hosts the machine model control, letting the
   page place and style it. Like `#floppy-speed` it is always on: without
-  the element a labelled select inserts itself below the canvas shell. The
+  the element a labelled select inserts itself below the canvas shell
+  (carrying the same `machine` id, so page scripts can drive it either
+  way). The
   glue fills an empty select from `WebEmu.models()` (a shell may also ship
   its own options, whose values must be model names), a
   `data-default="A1200"` attribute presets the choice, and the control

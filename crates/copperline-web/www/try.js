@@ -1955,6 +1955,9 @@ function buildMachineControl() {
     'color:rgba(255,255,255,0.75);';
   row.appendChild(document.createTextNode('Machine'));
   const sel = document.createElement('select');
+  // Carry the hook id even when self-built (like the self-inserted
+  // buttons), so page-side scripts can drive the control either way.
+  sel.id = 'machine';
   sel.style.cssText =
     'padding:0.15rem 0.4rem;border-radius:6px;cursor:pointer;' +
     'border:1px solid rgba(255,255,255,0.35);' +
