@@ -6164,24 +6164,61 @@ fn aga_playfield_output_resolves_ham8_ehb_and_bplam() {
 }
 
 #[test]
-fn shres_playfield_output_selects_encoded_35ns_color_pair() {
+fn shres_playfield_output_resolves_each_35ns_sample_through_the_palette() {
     let mut palette = Palette::new();
     palette.write_ocs(1, 0x00F0);
     palette.write_ocs(4, 0x0F00);
     palette.write_ocs(5, 0x000F);
+    let control = ControlState::default();
     let mut ham_color = 0;
 
+    // A solid run of colour 1 keeps colour 1: each 35 ns half resolves
+    // palette[1], never a pair-encoded entry.
     assert_eq!(
-        denise_shres_playfield_output(palette, 0, 1, &mut ham_color),
+        denise_shres_playfield_output(control, palette, 1, 1, &mut ham_color),
         DenisePlayfieldOutput {
-            color: rgb12_to_rgb24(0x0F00),
-            color_latch: 0x0F00,
+            color: rgb12_to_rgb24(0x00F0),
+            color_latch: 0x00F0,
             pf_mask: 2,
         }
     );
+    // A background/colour-1 pair blends the two resolved colours into the
+    // 70 ns framebuffer pixel.
     assert_eq!(
-        denise_shres_playfield_output(palette, 1, 1, &mut ham_color).color,
-        rgb12_to_rgb24(0x000F)
+        denise_shres_playfield_output(control, palette, 0, 1, &mut ham_color),
+        DenisePlayfieldOutput {
+            color: rgb24_blend_halves(rgb12_to_rgb24(0x0000), rgb12_to_rgb24(0x00F0)),
+            color_latch: 0x00F0,
+            pf_mask: 2,
+        }
+    );
+}
+
+#[test]
+fn aga_shres_playfield_output_keeps_four_plane_indices() {
+    // Regression: the Debian/m68k amifb console (SHRES, 4 bitplanes,
+    // FMODE=3) rendered index 14 (yellow) as index 10 (light green) and
+    // index 7 (grey) as index 15 (white) while the pair encoding truncated
+    // every 35 ns sample to two planes.
+    let mut palette = Palette::new();
+    palette.write_ocs(7, 0x0AAA);
+    palette.write_ocs(10, 0x05F5);
+    palette.write_ocs(14, 0x0FF5);
+    palette.write_ocs(15, 0x0FFF);
+    let control = ControlState {
+        agnus_revision: AgnusRevision::AgaAlice,
+        bplcon0: 0x4240, // 4 planes, SHRES
+        ..ControlState::default()
+    };
+    let mut ham_color = 0;
+
+    assert_eq!(
+        denise_shres_playfield_output(control, palette, 14, 14, &mut ham_color).color,
+        palette.rgb24(14) & 0x00FF_FFFF
+    );
+    assert_eq!(
+        denise_shres_playfield_output(control, palette, 7, 7, &mut ham_color).color,
+        palette.rgb24(7) & 0x00FF_FFFF
     );
 }
 

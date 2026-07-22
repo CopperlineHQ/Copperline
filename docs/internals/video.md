@@ -229,6 +229,16 @@ next pulse, so the picture sits where the mode's own porches place it;
 without a programmed sync the whole line maps onto the glass time-linearly
 (each colour clock covers 227/line_cck of a standard clock's width).
 
+Super-hi-res output: the framebuffer pixel pitch is hi-res (70 ns), so each
+framebuffer pixel covers two 35 ns SHRES samples. Denise/Lisa resolve every
+35 ns sample through the full palette pipeline (ECS Denise carries at most
+two bitplanes into SHRES; AGA Lisa runs the complete 8-bit index path,
+e.g. the 4-plane FMODE=3 Linux amifb console), so the renderer resolves
+each half independently and blends the two resulting colours into the
+framebuffer pixel. The blend is a framebuffer-pitch compromise, not
+hardware; a true 35 ns output path is a TODO shared with SHRES sprite
+resolution.
+
 Two vertical edge cases the replay honours:
 
 - A display window can open above the captured canvas. Bitplane pointers are

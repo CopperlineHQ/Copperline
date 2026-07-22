@@ -214,30 +214,37 @@ pub(super) fn shres_composite_sample(
     right: DeniseBitplaneSample,
 ) -> DeniseBitplaneSample {
     DeniseBitplaneSample {
-        idx: (left.idx | right.idx) & 0x03,
-        nplanes: left.nplanes.max(right.nplanes).min(2),
+        idx: left.idx | right.idx,
+        nplanes: left.nplanes.max(right.nplanes),
         active: left.active || right.active,
     }
 }
 
-pub(super) fn shres_palette_index(left_idx: u8, right_idx: u8) -> usize {
-    ((left_idx as usize) & 0x03) | (((right_idx as usize) & 0x03) << 2)
+/// Per-channel mean of two 24-bit colours without intermediate overflow.
+pub(super) fn rgb24_blend_halves(a: u32, b: u32) -> u32 {
+    (a & b) + (((a ^ b) & 0x00FE_FEFE) >> 1)
 }
 
+/// Super-hi-res output at the framebuffer's 70 ns pitch. Denise/Lisa resolve
+/// every 35 ns sample through the full palette pipeline (ECS Denise carries
+/// at most two bitplanes into SHRES; AGA Lisa runs the complete 8-bit index
+/// path), so resolve each half independently and blend the two colours into
+/// the one framebuffer pixel. The blend is a framebuffer-pitch compromise,
+/// not hardware. TODO: emit true 35 ns samples once the output path grows a
+/// super-hi-res canvas; the sprite path carries the same limitation.
 pub(super) fn denise_shres_playfield_output(
+    control: ControlState,
     palette: Palette,
     left_idx: u8,
     right_idx: u8,
     ham_color: &mut u32,
 ) -> DenisePlayfieldOutput {
-    let color_idx = shres_palette_index(left_idx, right_idx);
-    let color_latch = palette[color_idx];
-    let color = rgb12_to_rgb24(color_rgb12(color_latch));
-    *ham_color = color;
+    let left = denise_playfield_output(control, palette, left_idx, ham_color);
+    let right = denise_playfield_output(control, palette, right_idx, ham_color);
     DenisePlayfieldOutput {
-        color,
-        color_latch,
-        pf_mask: u8::from((left_idx | right_idx) & 0x03 != 0) * 2,
+        color: rgb24_blend_halves(left.color, right.color),
+        color_latch: right.color_latch,
+        pf_mask: left.pf_mask | right.pf_mask,
     }
 }
 
