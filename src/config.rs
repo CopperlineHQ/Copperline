@@ -2882,7 +2882,11 @@ pub(crate) fn parse_log_unmapped(s: &str) -> Result<std::ops::RangeInclusive<u32
     Ok(start..=end)
 }
 
-pub(crate) fn parse_machine_model(s: &str) -> Result<MachineModel> {
+/// Parse a machine model name (`"A500"`, `"A1200"`, ...) as the `--model`
+/// flag and `[machine] profile` accept it: case-insensitive, with `_`/`-`/
+/// spaces ignored. Public for alternative frontends (the browser build) that
+/// take a model name from their own UI.
+pub fn parse_machine_model(s: &str) -> Result<MachineModel> {
     let norm = s.trim().to_ascii_uppercase().replace(['_', '-', ' '], "");
     match norm.as_str() {
         "A1000" => Ok(MachineModel::A1000),
@@ -2903,8 +2907,10 @@ pub(crate) fn parse_machine_model(s: &str) -> Result<MachineModel> {
 }
 
 /// The defaults a `[machine] profile` supplies before the explicit
-/// `[cpu]`/`[chipset]`/`[memory]` sections override them.
-pub(crate) fn machine_profile_defaults(model: MachineModel) -> Config {
+/// `[cpu]`/`[chipset]`/`[memory]` sections override them. Also the way an
+/// alternative frontend builds a stock machine of a given model without a
+/// config file, as the desktop launcher and the browser build do.
+pub fn machine_profile_defaults(model: MachineModel) -> Config {
     let mut d = Config {
         machine: Some(model),
         ..Config::default()

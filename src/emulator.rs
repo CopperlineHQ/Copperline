@@ -446,6 +446,14 @@ impl Emulator {
         self.refresh_rom_fingerprint();
     }
 
+    /// The shape descriptor of the running machine: stamped from the boot
+    /// `Config` by `build_machine` and adopted from the state on a
+    /// successful `load_state`, so it always describes the machine as it
+    /// stands.
+    pub fn machine_descriptor(&self) -> &crate::config::MachineDescriptor {
+        &self.descriptor
+    }
+
     /// Re-fingerprint the descriptor's ROM from the live in-memory images.
     /// Call whenever the shape descriptor is (re)set or the ROM is swapped.
     fn refresh_rom_fingerprint(&mut self) {

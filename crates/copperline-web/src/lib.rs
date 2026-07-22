@@ -16,7 +16,7 @@ use std::rc::Rc;
 
 use copperline::audio::AudioSink;
 use copperline::bus::PortDevice;
-use copperline::config::{Config, Overscan};
+use copperline::config::{machine_profile_defaults, parse_machine_model, Config, Overscan};
 use copperline::emulator::{build_machine, Emulator};
 use copperline::serial::{ChannelSerialHandle, ChannelSerialSink};
 use copperline::video::deinterlace::Deinterlacer;
@@ -223,11 +223,21 @@ pub struct WebEmu {
 
 #[wasm_bindgen]
 impl WebEmu {
-    /// Build the default machine (the A500 AROS profile of the desktop
-    /// launcher) with a placeholder ROM; `load_rom` supplies the real one.
+    /// Build a machine with a placeholder ROM; `load_rom` supplies the real
+    /// one. `model` picks the machine profile by name ("A500", "A1200", ...)
+    /// exactly as the desktop's `--model` flag does; omitted or empty, the
+    /// default machine is the A500 of the desktop launcher, so pages built
+    /// against the model-less constructor keep booting what they always did.
+    /// `models` lists the profiles the hosted page offers; any name the
+    /// desktop flag takes is accepted here, but the ones outside that list
+    /// may need pieces a browser page cannot supply (CDTV/CD32 want an
+    /// extended ROM and a CD). An unknown name throws.
     #[wasm_bindgen(constructor)]
-    pub fn new() -> Result<WebEmu, JsValue> {
-        let cfg = Config::default();
+    pub fn new(model: Option<String>) -> Result<WebEmu, JsValue> {
+        let cfg = match model.as_deref().map(str::trim) {
+            None | Some("") => Config::default(),
+            Some(name) => machine_profile_defaults(parse_machine_model(name).map_err(js_err)?),
+        };
         let audio = Rc::new(RefCell::new(Vec::new()));
         let sink = WebAudioSink { buf: audio.clone() };
         // rom_optional: the default rom_path names the bundled AROS file,
@@ -266,6 +276,35 @@ impl WebEmu {
             }
             _ => "dev build".to_string(),
         }
+    }
+
+    /// The machine profiles the page's machine select offers, in menu
+    /// order. A vetted subset of what the constructor accepts: every model
+    /// here boots the bundled AROS ROM (or a plain Kickstart) with nothing
+    /// but a floppy, so the page can offer it unconditionally. The page
+    /// builds its select from this list, which is also its feature test --
+    /// older bundles have no `models` and the select stays hidden.
+    pub fn models() -> Vec<String> {
+        vec!["A500".to_string(), "A1200".to_string()]
+    }
+
+    /// The running machine's profile name ("A500", "A1200", ...), or
+    /// undefined for a machine no profile describes -- the model-less
+    /// default constructor's machine, or a custom-shaped machine restored
+    /// from a save state. Follows `load_state`, so a page can re-point its
+    /// machine select at what a state brought back.
+    pub fn machine_model(&self) -> Option<String> {
+        self.emu
+            .machine_descriptor()
+            .machine
+            .map(|model| format!("{model:?}"))
+    }
+
+    /// One-line description of the running machine for bug reports and
+    /// diagnostics: profile, CPU, chipset, RAM sizes, and the fitted ROM's
+    /// fingerprint. Tracks ROM swaps and state loads.
+    pub fn machine_summary(&self) -> String {
+        self.emu.machine_descriptor().summary()
     }
 
     /// Fit a Kickstart/AROS ROM (and optional extended ROM) from bytes and
