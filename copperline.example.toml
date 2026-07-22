@@ -118,6 +118,9 @@ model = "68000"
 # [machine]
 # profile = "A600"      # A1000 | A500 | A500OCS | A500Plus | A600 | A1200 | A3000 | A4000 | CDTV | CD32
 # rtc = true            # add a $DC0000 battery RTC (default: only A500+/CDTV/A3000/A4000 have one)
+# rtc_chip = "RP5C01"   # clock part: MSM6242 (OKI, the default) or RP5C01 (Ricoh, the
+#                       # A3000/A4000 part and their profile default; Linux/m68k requires
+#                       # it on those machines). Setting the key implies rtc = true.
 # rtc_time = "2005-03-18 01:58:29" # seed the clock (implies rtc = true); Unix seconds also accepted.
 #                                  # A seeded clock ticks in emulated time, so the guest-visible
 #                                  # time is deterministic across runs.

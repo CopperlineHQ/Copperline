@@ -2,11 +2,21 @@
 
 //! Battery-backed real-time clock emulation.
 //!
-//! Classic big-box Amigas expose the Oki MSM6242 at $DC0000. The chip
-//! has sixteen four-bit registers; on Amiga each register is visible as
-//! a 32-bit word, so register N lives at base + N * 4. Copperline exposes a
-//! read-only wall-clock view: guest writes can control the HOLD latch,
-//! but they never change the host clock.
+//! Classic big-box Amigas expose a four-bit battery clock at $DC0000 with
+//! sixteen register selects; on Amiga each register is visible as a 32-bit
+//! word, so register N lives at base + N * 4. Two different parts fill
+//! that socket: the Oki MSM6242 (A500+/A2000/CDTV boards and the clock
+//! expansions), and the Ricoh RP5C01 on the A3000/A4000 motherboards --
+//! a different register layout, banked register blocks, and 26 nibbles of
+//! battery-backed RAM. AmigaOS probes for either part, but Linux/m68k
+//! drives the chip its machine model dictates, so an A3000/A4000 has to
+//! answer the RP5C01 protocol for the guest clock to work. [`RtcChip`]
+//! names the fitted part (`[machine] rtc_chip`) and [`Rtc`] dispatches
+//! guest traffic to it.
+//!
+//! Copperline exposes a read-only wall-clock view: guest writes drive the
+//! chips' latch/bank/control state (and the RP5C01's battery RAM), but
+//! they never change the host clock.
 //!
 //! The clock is reported in the host's *local* time zone (matching the
 //! auto-generated filename stamps in `timestamp.rs`), since AmigaOS has no
@@ -36,11 +46,124 @@ use crate::timebase::{SystemTime, UNIX_EPOCH};
 /// nibble and invent a clock (and then a date) that the machine does not have.
 pub const EMPTY_SOCKET_LANE: u8 = 0x40;
 
+/// Which battery-clock part sits in the $DC0000 socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RtcChip {
+    /// Oki MSM6242: the A500+/A2000/CDTV part and what the aftermarket
+    /// clock expansions carry.
+    Msm6242,
+    /// Ricoh RP5C01: the A3000/A4000 motherboard part.
+    Rp5c01,
+}
+
+impl RtcChip {
+    /// The part name shown to the user (status output, control protocol).
+    pub fn label(self) -> &'static str {
+        match self {
+            RtcChip::Msm6242 => "MSM6242",
+            RtcChip::Rp5c01 => "RP5C01",
+        }
+    }
+}
+
+/// The fitted clock chip. Guest register traffic and host-side queries all
+/// funnel through here so the two parts stay interchangeable behind the one
+/// bus field.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum Rtc {
+    Msm6242(Msm6242Rtc),
+    Rp5c01(Rp5c01Rtc),
+}
+
+impl Default for Rtc {
+    fn default() -> Self {
+        Rtc::Msm6242(Msm6242Rtc::default())
+    }
+}
+
+impl Rtc {
+    pub fn new(chip: RtcChip) -> Self {
+        match chip {
+            RtcChip::Msm6242 => Rtc::Msm6242(Msm6242Rtc::default()),
+            RtcChip::Rp5c01 => Rtc::Rp5c01(Rp5c01Rtc::default()),
+        }
+    }
+
+    pub fn chip(&self) -> RtcChip {
+        match self {
+            Rtc::Msm6242(_) => RtcChip::Msm6242,
+            Rtc::Rp5c01(_) => RtcChip::Rp5c01,
+        }
+    }
+
+    pub fn read(&mut self, addr: u64, size: usize, emulated_secs: f64) -> u64 {
+        match self {
+            Rtc::Msm6242(chip) => chip.read(addr, size, emulated_secs),
+            Rtc::Rp5c01(chip) => chip.read(addr, size, emulated_secs),
+        }
+    }
+
+    pub fn write(&mut self, addr: u64, size: usize, val: u64, emulated_secs: f64) {
+        match self {
+            Rtc::Msm6242(chip) => chip.write(addr, size, val, emulated_secs),
+            Rtc::Rp5c01(chip) => chip.write(addr, size, val, emulated_secs),
+        }
+    }
+
+    /// A CPU reset does not reach the battery-backed chip; see the concrete
+    /// chips' `reset` for what little state drops back to power-on defaults.
+    pub fn reset(&mut self) {
+        match self {
+            Rtc::Msm6242(chip) => chip.reset(),
+            Rtc::Rp5c01(chip) => chip.reset(),
+        }
+    }
+
+    /// Configure the power-on clock value (`None` restores the live host
+    /// clock). The seed is the value the clock reads at emulated time zero.
+    pub fn set_seed(&mut self, seed_unix: Option<u64>, frozen: bool) {
+        self.clock_mut().set_seed(seed_unix, frozen);
+    }
+
+    pub fn seed(&self) -> Option<u64> {
+        self.clock().seed()
+    }
+
+    pub fn frozen(&self) -> bool {
+        self.clock().frozen()
+    }
+
+    /// The Unix-seconds instant register reads decompose right now.
+    pub fn current_unix(&self, emulated_secs: f64) -> u64 {
+        self.clock().current_unix(emulated_secs)
+    }
+
+    /// The broken-down time register reads expose right now, formatted as
+    /// `YYYY-MM-DDTHH:MM:SS` (for status reporting, not the guest).
+    pub fn current_display(&self, emulated_secs: f64) -> String {
+        self.clock().current_display(emulated_secs)
+    }
+
+    fn clock(&self) -> &ClockSource {
+        match self {
+            Rtc::Msm6242(chip) => &chip.clock,
+            Rtc::Rp5c01(chip) => &chip.clock,
+        }
+    }
+
+    fn clock_mut(&mut self) -> &mut ClockSource {
+        match self {
+            Rtc::Msm6242(chip) => &mut chip.clock,
+            Rtc::Rp5c01(chip) => &mut chip.clock,
+        }
+    }
+}
+
+/// The time source both chips decompose into registers: the host's local
+/// wall clock by default, or the deterministic seed (`[machine] rtc_time`)
+/// ticking forward in emulated time.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct Msm6242Rtc {
-    control_d: u8,
-    control_e: u8,
-    latched: Option<RtcDateTime>,
+struct ClockSource {
     /// Power-on clock value in Unix seconds. When set, register reads
     /// derive from seed + elapsed emulated seconds instead of the host
     /// wall clock, making the guest-visible time deterministic.
@@ -51,77 +174,7 @@ pub struct Msm6242Rtc {
     test_time: Option<SystemTime>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-struct RtcDateTime {
-    year: u16,
-    month: u8,
-    day: u8,
-    weekday: u8,
-    hour: u8,
-    minute: u8,
-    second: u8,
-}
-
-impl Msm6242Rtc {
-    const CD_HOLD: u8 = 1 << 0;
-    const CD_IRQ_FLAG: u8 = 1 << 2;
-    const CF_24H: u8 = 1 << 2;
-
-    pub fn read(&mut self, addr: u64, _size: usize, emulated_secs: f64) -> u64 {
-        self.read_register(register_from_offset(addr), emulated_secs) as u64
-    }
-
-    pub fn write(&mut self, addr: u64, _size: usize, val: u64, emulated_secs: f64) {
-        let reg = register_from_offset(addr);
-        let val = (val & 0x0F) as u8;
-        match reg {
-            0xD => {
-                if val & Self::CD_HOLD != 0 {
-                    if self.latched.is_none() {
-                        self.latched = Some(self.current_time(emulated_secs));
-                    }
-                    self.control_d = Self::CD_HOLD;
-                } else {
-                    self.latched = None;
-                    self.control_d = 0;
-                }
-            }
-            0xE => {
-                self.control_e = val;
-            }
-            0xF => {
-                // Keep the clock running in 24-hour mode. STOP, RESET
-                // and TEST writes are deliberately not persistent.
-            }
-            _ => {}
-        }
-    }
-
-    fn read_register(&mut self, reg: u8, emulated_secs: f64) -> u8 {
-        let time = self
-            .latched
-            .unwrap_or_else(|| self.current_time(emulated_secs));
-        (match reg {
-            0x0 => time.second % 10,
-            0x1 => time.second / 10,
-            0x2 => time.minute % 10,
-            0x3 => time.minute / 10,
-            0x4 => time.hour % 10,
-            0x5 => time.hour / 10,
-            0x6 => time.day % 10,
-            0x7 => time.day / 10,
-            0x8 => time.month % 10,
-            0x9 => time.month / 10,
-            0xA => (time.year % 10) as u8,
-            0xB => ((time.year / 10) % 10) as u8,
-            0xC => time.weekday,
-            0xD => self.control_d | Self::CD_IRQ_FLAG,
-            0xE => self.control_e,
-            0xF => Self::CF_24H,
-            _ => 0,
-        }) & 0x0F
-    }
-
+impl ClockSource {
     fn current_time(&self, emulated_secs: f64) -> RtcDateTime {
         #[cfg(test)]
         if let Some(time) = self.test_time {
@@ -151,25 +204,23 @@ impl Msm6242Rtc {
         }
     }
 
-    /// Configure the power-on clock value (`None` restores the live host
-    /// clock). The seed is the value the clock reads at emulated time zero.
-    pub fn set_seed(&mut self, seed_unix: Option<u64>, frozen: bool) {
+    fn set_seed(&mut self, seed_unix: Option<u64>, frozen: bool) {
         self.seed_unix = seed_unix;
         self.frozen = frozen && seed_unix.is_some();
     }
 
-    pub fn seed(&self) -> Option<u64> {
+    fn seed(&self) -> Option<u64> {
         self.seed_unix
     }
 
-    pub fn frozen(&self) -> bool {
+    fn frozen(&self) -> bool {
         self.frozen
     }
 
     /// The Unix-seconds instant register reads decompose right now,
     /// following the same source precedence as `current_time` (the
     /// host-local path reports plain host Unix seconds).
-    pub fn current_unix(&self, emulated_secs: f64) -> u64 {
+    fn current_unix(&self, emulated_secs: f64) -> u64 {
         if let Some(secs) = crate::envcfg::var("COPPERLINE_RTC_FIXED_SECS")
             .and_then(|s| s.trim().parse::<u64>().ok())
         {
@@ -181,10 +232,93 @@ impl Msm6242Rtc {
         RtcDateTime::unix_secs(SystemTime::now())
     }
 
-    /// The broken-down time register reads expose right now, formatted as
-    /// `YYYY-MM-DDTHH:MM:SS` (for status reporting, not the guest).
-    pub fn current_display(&self, emulated_secs: f64) -> String {
+    fn current_display(&self, emulated_secs: f64) -> String {
         self.current_time(emulated_secs).iso8601()
+    }
+
+    #[cfg(test)]
+    fn set_test_time(&mut self, time: SystemTime) {
+        self.test_time = Some(time);
+    }
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct Msm6242Rtc {
+    control_d: u8,
+    control_e: u8,
+    latched: Option<RtcDateTime>,
+    clock: ClockSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct RtcDateTime {
+    year: u16,
+    month: u8,
+    day: u8,
+    weekday: u8,
+    hour: u8,
+    minute: u8,
+    second: u8,
+}
+
+impl Msm6242Rtc {
+    const CD_HOLD: u8 = 1 << 0;
+    const CD_IRQ_FLAG: u8 = 1 << 2;
+    const CF_24H: u8 = 1 << 2;
+
+    pub fn read(&mut self, addr: u64, _size: usize, emulated_secs: f64) -> u64 {
+        self.read_register(register_from_offset(addr), emulated_secs) as u64
+    }
+
+    pub fn write(&mut self, addr: u64, _size: usize, val: u64, emulated_secs: f64) {
+        let reg = register_from_offset(addr);
+        let val = (val & 0x0F) as u8;
+        match reg {
+            0xD => {
+                if val & Self::CD_HOLD != 0 {
+                    if self.latched.is_none() {
+                        self.latched = Some(self.clock.current_time(emulated_secs));
+                    }
+                    self.control_d = Self::CD_HOLD;
+                } else {
+                    self.latched = None;
+                    self.control_d = 0;
+                }
+            }
+            0xE => {
+                self.control_e = val;
+            }
+            0xF => {
+                // Keep the clock running in 24-hour mode. STOP, RESET
+                // and TEST writes are deliberately not persistent.
+            }
+            _ => {}
+        }
+    }
+
+    fn read_register(&mut self, reg: u8, emulated_secs: f64) -> u8 {
+        let time = self
+            .latched
+            .unwrap_or_else(|| self.clock.current_time(emulated_secs));
+        (match reg {
+            0x0 => time.second % 10,
+            0x1 => time.second / 10,
+            0x2 => time.minute % 10,
+            0x3 => time.minute / 10,
+            0x4 => time.hour % 10,
+            0x5 => time.hour / 10,
+            0x6 => time.day % 10,
+            0x7 => time.day / 10,
+            0x8 => time.month % 10,
+            0x9 => time.month / 10,
+            0xA => (time.year % 10) as u8,
+            0xB => ((time.year / 10) % 10) as u8,
+            0xC => time.weekday,
+            0xD => self.control_d | Self::CD_IRQ_FLAG,
+            0xE => self.control_e,
+            0xF => Self::CF_24H,
+            _ => 0,
+        }) & 0x0F
     }
 
     /// A CPU reset does not reach the battery-backed chip, so the time
@@ -195,10 +329,205 @@ impl Msm6242Rtc {
         self.control_e = 0;
         self.latched = None;
     }
+}
 
-    #[cfg(test)]
-    fn set_test_time(&mut self, time: SystemTime) {
-        self.test_time = Some(time);
+/// The Ricoh RP5C01, the A3000/A4000 battery clock.
+///
+/// Same four-bit bus presence as the MSM6242, entirely different register
+/// model: the MODE register (D) selects one of four register blocks for
+/// selects 0-C -- block 0 is the time/calendar counters (note the layout
+/// differs from the Oki part: day-of-week at 6, day at 7-8, month at 9-A,
+/// year at B-C), block 1 the alarm digits plus the 12/24 select and the
+/// leap-year counter, and blocks 2/3 are 13 battery-backed RAM nibbles
+/// each (low and high halves of an internal byte, respectively), which
+/// AmigaOS uses via battmem.resource on these machines. MODE bit 3 gates
+/// the timer -- Linux's rtc-rp5c01 driver clears it around every read and
+/// write for a tearing-free window -- and bit 2 arms the alarm (stored
+/// here, but no interrupt line is wired on the Amiga boards). TEST (E) and
+/// RESET (F) are write-only and read back zero, which together with MODE
+/// reading its power-on $8 is exactly how battclock.resource-style probes
+/// (AROS names it "RF5C01A") tell this part from an MSM6242.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Rp5c01Rtc {
+    /// MODE register (select D): TIMER_EN | ALARM_EN | block select.
+    mode: u8,
+    /// Block-1 register storage (alarm digits, 12/24 select). Slots the
+    /// write mask zeroes never hold anything.
+    bank1: [u8; 13],
+    /// The 26 battery-backed RAM nibbles, one byte per select: block 2
+    /// reads/writes the low nibble, block 3 the high one.
+    ram: [u8; 13],
+    /// Time held while TIMER_EN is low. The underlying source keeps
+    /// running, so unlike the real stopped chip no time is lost.
+    latched: Option<RtcDateTime>,
+    clock: ClockSource,
+}
+
+impl Default for Rp5c01Rtc {
+    fn default() -> Self {
+        Self {
+            // Power-on: timer running, block 0. The probes match on MODE
+            // reading exactly this.
+            mode: Self::MODE_TIMER_EN,
+            // Battery-fresh block 1 with the 12/24 select in 24-hour mode,
+            // matching what AmigaOS and Linux configure and expect.
+            bank1: Self::bank1_default(),
+            ram: [0; 13],
+            latched: None,
+            clock: ClockSource::default(),
+        }
+    }
+}
+
+impl Rp5c01Rtc {
+    const MODE_TIMER_EN: u8 = 1 << 3;
+    const MODE_BLOCK_MASK: u8 = 0x03;
+    const BLOCK_TIME: u8 = 0;
+    const BLOCK_ALARM: u8 = 1;
+    const BLOCK_RAM_LO: u8 = 2;
+    const RESET_ALARM: u8 = 1 << 0;
+    /// Block-1 selects: the 12/24 flag (bit 0: 1 = 24-hour) and the
+    /// leap-year counter.
+    const REG_1224: usize = 0xA;
+    const REG_LEAP: u8 = 0xB;
+    /// Alarm digit selects within block 1 (1-minute through 10-day).
+    const ALARM_REGS: std::ops::RangeInclusive<usize> = 0x2..=0x8;
+
+    /// Writable bits per block-1 select, mirroring the digit widths the
+    /// part implements (a 10-minute alarm digit is three bits, and so on).
+    /// Selects 0, 1, 9 and C hold no register at all. The leap-year
+    /// counter (B) is masked off too: reads derive it from the year
+    /// counter, which is the value it can never drift from here.
+    const BANK1_WRITE_MASK: [u8; 13] = [
+        0x0, 0x0, 0xF, 0x7, 0xF, 0x3, 0x7, 0xF, 0x3, 0x0, 0x1, 0x0, 0x0,
+    ];
+
+    fn bank1_default() -> [u8; 13] {
+        let mut bank1 = [0u8; 13];
+        bank1[Self::REG_1224] = 1;
+        bank1
+    }
+
+    pub fn read(&mut self, addr: u64, _size: usize, emulated_secs: f64) -> u64 {
+        let reg = register_from_offset(addr);
+        let val = match reg {
+            0xD => self.mode,
+            // TEST and RESET are write-only; the lane reads back zero.
+            0xE | 0xF => 0,
+            _ => match self.mode & Self::MODE_BLOCK_MASK {
+                Self::BLOCK_TIME => self.read_time_register(reg, emulated_secs),
+                Self::BLOCK_ALARM => self.read_alarm_register(reg, emulated_secs),
+                Self::BLOCK_RAM_LO => self.ram[reg as usize],
+                _ => self.ram[reg as usize] >> 4,
+            },
+        };
+        u64::from(val & 0x0F)
+    }
+
+    pub fn write(&mut self, addr: u64, _size: usize, val: u64, emulated_secs: f64) {
+        let reg = register_from_offset(addr);
+        let val = (val & 0x0F) as u8;
+        match reg {
+            0xD => {
+                // Clearing TIMER_EN holds the read view still -- the
+                // tearing-free window Linux's driver opens around every
+                // access. The time source keeps running underneath, so
+                // the stopped interval is not actually lost.
+                if val & Self::MODE_TIMER_EN == 0 {
+                    if self.latched.is_none() {
+                        self.latched = Some(self.clock.current_time(emulated_secs));
+                    }
+                } else {
+                    self.latched = None;
+                }
+                self.mode = val;
+            }
+            0xE => {
+                // TEST: not modelled, deliberately not persistent.
+            }
+            0xF => {
+                if val & Self::RESET_ALARM != 0 {
+                    self.bank1[Self::ALARM_REGS].fill(0);
+                }
+                // The fraction reset and the 16 Hz / 1 Hz output gates go
+                // nowhere: sub-second phase derives from the time source
+                // and no output pin is wired on the Amiga boards.
+            }
+            _ => match self.mode & Self::MODE_BLOCK_MASK {
+                // Time-counter writes never move the read-only host or
+                // seeded clock (module policy, same as the MSM6242).
+                Self::BLOCK_TIME => {}
+                Self::BLOCK_ALARM => {
+                    self.bank1[reg as usize] = val & Self::BANK1_WRITE_MASK[reg as usize];
+                }
+                Self::BLOCK_RAM_LO => {
+                    self.ram[reg as usize] = (self.ram[reg as usize] & 0xF0) | val;
+                }
+                _ => {
+                    self.ram[reg as usize] = (val << 4) | (self.ram[reg as usize] & 0x0F);
+                }
+            },
+        }
+    }
+
+    fn time(&self, emulated_secs: f64) -> RtcDateTime {
+        self.latched
+            .unwrap_or_else(|| self.clock.current_time(emulated_secs))
+    }
+
+    fn read_time_register(&self, reg: u8, emulated_secs: f64) -> u8 {
+        let time = self.time(emulated_secs);
+        match reg {
+            0x0 => time.second % 10,
+            0x1 => time.second / 10,
+            0x2 => time.minute % 10,
+            0x3 => time.minute / 10,
+            0x4 => self.hour_digits(time.hour).0,
+            0x5 => self.hour_digits(time.hour).1,
+            0x6 => time.weekday,
+            0x7 => time.day % 10,
+            0x8 => time.day / 10,
+            0x9 => time.month % 10,
+            0xA => time.month / 10,
+            0xB => (time.year % 10) as u8,
+            0xC => ((time.year / 10) % 10) as u8,
+            _ => 0,
+        }
+    }
+
+    /// Hour digits under the current 12/24 select: in 12-hour mode the
+    /// ten-hours register carries the PM flag in bit 1 and hours read
+    /// 12, 1..11.
+    fn hour_digits(&self, hour: u8) -> (u8, u8) {
+        if self.bank1[Self::REG_1224] & 1 != 0 {
+            return (hour % 10, hour / 10);
+        }
+        let pm = u8::from(hour >= 12);
+        let hour = match hour % 12 {
+            0 => 12,
+            h => h,
+        };
+        (hour % 10, (hour / 10) | (pm << 1))
+    }
+
+    fn read_alarm_register(&self, reg: u8, emulated_secs: f64) -> u8 {
+        if reg == Self::REG_LEAP {
+            // The real part counts this alongside the year counter
+            // (0 = leap year); deriving both from the same source keeps
+            // them agreeing by construction.
+            return (self.time(emulated_secs).year % 4) as u8;
+        }
+        self.bank1[reg as usize]
+    }
+
+    /// A CPU reset does not reach the battery-backed chip: the time
+    /// source, alarm registers, 12/24 select, and battery RAM all
+    /// survive. Only the volatile-looking selector state returns to its
+    /// power-on default, which is also the first thing any OS probe
+    /// re-establishes.
+    pub fn reset(&mut self) {
+        self.mode = Self::MODE_TIMER_EN;
+        self.latched = None;
     }
 }
 
@@ -400,6 +729,12 @@ mod tests {
         rtc.read((reg as u64) * 4, 4, emulated_secs) as u8
     }
 
+    impl Msm6242Rtc {
+        fn set_test_time(&mut self, time: SystemTime) {
+            self.clock.set_test_time(time);
+        }
+    }
+
     #[test]
     fn registers_expose_bcd_host_time() {
         let mut rtc = Msm6242Rtc::default();
@@ -449,7 +784,7 @@ mod tests {
     #[test]
     fn seeded_clock_reads_seed_and_advances_with_emulated_time() {
         let mut rtc = Msm6242Rtc::default();
-        rtc.set_seed(Some(VECTOR_UNIX), false);
+        rtc.clock.set_seed(Some(VECTOR_UNIX), false);
 
         assert_eq!(read_reg(&mut rtc, 0x0), 9); // seconds ones
         assert_eq!(read_reg(&mut rtc, 0x1), 2); // seconds tens
@@ -468,14 +803,14 @@ mod tests {
         // 31 emulated seconds later the clock reads :00 of the next minute.
         assert_eq!(read_reg_at(&mut rtc, 0x0, 31.0), 0);
         assert_eq!(read_reg_at(&mut rtc, 0x2, 31.0), 9);
-        assert_eq!(rtc.current_unix(31.9), VECTOR_UNIX + 31);
+        assert_eq!(rtc.clock.current_unix(31.9), VECTOR_UNIX + 31);
     }
 
     #[test]
     fn frozen_clock_never_advances() {
-        let mut rtc = Msm6242Rtc::default();
+        let mut rtc = Rtc::new(RtcChip::Msm6242);
         rtc.set_seed(Some(VECTOR_UNIX), true);
-        assert_eq!(read_reg_at(&mut rtc, 0x0, 3600.0), 9);
+        assert_eq!(rtc.read(0x0, 4, 3600.0), 9);
         assert_eq!(rtc.current_unix(3600.0), VECTOR_UNIX);
         assert_eq!(rtc.current_display(3600.0), "2005-03-18T01:58:29");
     }
@@ -483,12 +818,203 @@ mod tests {
     #[test]
     fn reset_keeps_the_seed_but_drops_the_hold_latch() {
         let mut rtc = Msm6242Rtc::default();
-        rtc.set_seed(Some(VECTOR_UNIX), false);
+        rtc.clock.set_seed(Some(VECTOR_UNIX), false);
         rtc.write(0xD * 4, 4, Msm6242Rtc::CD_HOLD as u64, 0.0);
         rtc.reset();
         assert_eq!(read_reg(&mut rtc, 0xD) & Msm6242Rtc::CD_HOLD, 0);
         assert_eq!(read_reg_at(&mut rtc, 0x0, 5.0), 4); // still ticking from the seed
+        assert_eq!(rtc.clock.seed(), Some(VECTOR_UNIX));
+    }
+
+    fn seeded_rp5c01(seed: u64) -> Rp5c01Rtc {
+        let mut rtc = Rp5c01Rtc::default();
+        rtc.clock.set_seed(Some(seed), false);
+        rtc
+    }
+
+    fn rp_read_at(rtc: &mut Rp5c01Rtc, reg: u8, emulated_secs: f64) -> u8 {
+        rtc.read((reg as u64) * 4, 4, emulated_secs) as u8
+    }
+
+    fn rp_read(rtc: &mut Rp5c01Rtc, reg: u8) -> u8 {
+        rp_read_at(rtc, reg, 0.0)
+    }
+
+    fn rp_write(rtc: &mut Rp5c01Rtc, reg: u8, val: u8) {
+        rtc.write((reg as u64) * 4, 4, val as u64, 0.0);
+    }
+
+    /// The power-on tell every battclock probe matches on: MODE reads $8
+    /// (timer running, block 0) while the write-only TEST and RESET
+    /// selects read zero. AROS accepts exactly D == 8 && F == 0 as an
+    /// "RF5C01A"; an MSM6242 shows control F's 24-hour bit instead.
+    #[test]
+    fn rp5c01_powers_on_as_the_clock_probes_expect() {
+        let mut rtc = seeded_rp5c01(VECTOR_UNIX);
+        assert_eq!(rp_read(&mut rtc, 0xD), 0x8);
+        assert_eq!(rp_read(&mut rtc, 0xE), 0x0);
+        assert_eq!(rp_read(&mut rtc, 0xF), 0x0);
+        // The "not a clock" early-outs: 10-second and 10-minute digits
+        // never show bit 3.
+        assert_eq!(rp_read(&mut rtc, 0x1) & 8, 0);
+        assert_eq!(rp_read(&mut rtc, 0x3) & 8, 0);
+    }
+
+    /// Block 0 has the Ricoh layout: weekday at 6, day at 7-8, month at
+    /// 9-A, year at B-C -- shifted one select up from the Oki map by the
+    /// weekday register moving to the front.
+    #[test]
+    fn rp5c01_time_registers_expose_the_ricoh_layout() {
+        let mut rtc = seeded_rp5c01(VECTOR_UNIX);
+        assert_eq!(rp_read(&mut rtc, 0x0), 9); // seconds ones
+        assert_eq!(rp_read(&mut rtc, 0x1), 2); // seconds tens
+        assert_eq!(rp_read(&mut rtc, 0x2), 8); // minutes ones
+        assert_eq!(rp_read(&mut rtc, 0x3), 5); // minutes tens
+        assert_eq!(rp_read(&mut rtc, 0x4), 1); // hours ones
+        assert_eq!(rp_read(&mut rtc, 0x5), 0); // hours tens
+        assert_eq!(rp_read(&mut rtc, 0x6), 5); // Friday
+        assert_eq!(rp_read(&mut rtc, 0x7), 8); // day ones
+        assert_eq!(rp_read(&mut rtc, 0x8), 1); // day tens
+        assert_eq!(rp_read(&mut rtc, 0x9), 3); // month ones
+        assert_eq!(rp_read(&mut rtc, 0xA), 0); // month tens
+        assert_eq!(rp_read(&mut rtc, 0xB), 5); // year ones
+        assert_eq!(rp_read(&mut rtc, 0xC), 0); // year tens
+    }
+
+    /// The Linux rtc-rp5c01 access pattern: clear TIMER_EN (MODE = block
+    /// 0) for a tearing-free window, read the digits, then park the chip
+    /// in MODE = $9. The held view must not advance, and re-enabling the
+    /// timer must resume the running clock without losing the interval.
+    #[test]
+    fn rp5c01_timer_enable_gates_a_tearing_free_read_window() {
+        let mut rtc = seeded_rp5c01(VECTOR_UNIX);
+        rp_write(&mut rtc, 0xD, 0x0); // lock: timer off, block 0
+        assert_eq!(rp_read_at(&mut rtc, 0x0, 31.0), 9); // still :29, not :00
+        assert_eq!(rp_read_at(&mut rtc, 0x2, 31.0), 8);
+
+        rtc.write(0xD * 4, 4, 0x9, 31.0); // unlock: timer on, block 1
+        assert_eq!(rtc.read(0xD * 4, 4, 31.0), 0x9);
+        // Back in block 0 the clock has kept ticking underneath the hold.
+        rtc.write(0xD * 4, 4, 0x8, 31.0);
+        assert_eq!(rp_read_at(&mut rtc, 0x0, 31.0), 0); // :00
+        assert_eq!(rp_read_at(&mut rtc, 0x2, 31.0), 9); // of minute 59
+    }
+
+    /// Block 1 stores alarm digits behind their hardware write masks, and
+    /// RESET bit 0 clears them all.
+    #[test]
+    fn rp5c01_alarm_registers_store_masked_digits_until_alarm_reset() {
+        let mut rtc = seeded_rp5c01(VECTOR_UNIX);
+        rp_write(&mut rtc, 0xD, 0x9); // block 1
+        for reg in 0x2..=0x8 {
+            rp_write(&mut rtc, reg, 0xF);
+        }
+        assert_eq!(rp_read(&mut rtc, 0x2), 0xF); // 1-minute alarm
+        assert_eq!(rp_read(&mut rtc, 0x3), 0x7); // 10-minute: 3 bits
+        assert_eq!(rp_read(&mut rtc, 0x5), 0x3); // 10-hour: 2 bits
+        assert_eq!(rp_read(&mut rtc, 0x8), 0x3); // 10-day: 2 bits
+                                                 // Selects with no register behind them stay empty.
+        rp_write(&mut rtc, 0x0, 0xF);
+        rp_write(&mut rtc, 0x9, 0xF);
+        assert_eq!(rp_read(&mut rtc, 0x0), 0x0);
+        assert_eq!(rp_read(&mut rtc, 0x9), 0x0);
+
+        rp_write(&mut rtc, 0xF, Rp5c01Rtc::RESET_ALARM);
+        for reg in 0x2..=0x8 {
+            assert_eq!(rp_read(&mut rtc, reg), 0, "alarm select {reg:#X}");
+        }
+    }
+
+    /// The 12/24 select (block 1, select A) reshapes the hour digits: in
+    /// 12-hour mode the ten-hours register carries PM in bit 1 and hours
+    /// read 12, 1..11.
+    #[test]
+    fn rp5c01_12_hour_mode_sets_the_pm_flag() {
+        // 13:58:29 (VECTOR + 12h): 24-hour mode first.
+        let mut rtc = seeded_rp5c01(VECTOR_UNIX + 12 * 3600);
+        assert_eq!(rp_read(&mut rtc, 0x4), 3);
+        assert_eq!(rp_read(&mut rtc, 0x5), 1);
+
+        rp_write(&mut rtc, 0xD, 0x9); // block 1
+        rp_write(&mut rtc, 0xA, 0x0); // 12-hour mode
+        rp_write(&mut rtc, 0xD, 0x8); // back to time
+        assert_eq!(rp_read(&mut rtc, 0x4), 1); // 1 PM
+        assert_eq!(rp_read(&mut rtc, 0x5), 2); // PM flag, no tens
+
+        // Midnight reads as 12 with the PM flag clear.
+        let mut rtc = seeded_rp5c01(VECTOR_UNIX - 3600 - 58 * 60 - 29);
+        rp_write(&mut rtc, 0xD, 0x9);
+        rp_write(&mut rtc, 0xA, 0x0);
+        rp_write(&mut rtc, 0xD, 0x8);
+        assert_eq!(rp_read(&mut rtc, 0x4), 2);
+        assert_eq!(rp_read(&mut rtc, 0x5), 1);
+    }
+
+    /// The leap-year counter tracks the year counter: 0 in a leap year,
+    /// counting up to 3. 2005 % 4 = 1; one year earlier it reads 0.
+    #[test]
+    fn rp5c01_leap_year_counter_tracks_the_year() {
+        let mut rtc = seeded_rp5c01(VECTOR_UNIX);
+        rp_write(&mut rtc, 0xD, 0x9);
+        assert_eq!(rp_read(&mut rtc, 0xB), 1);
+
+        let mut rtc = seeded_rp5c01(VECTOR_UNIX - 365 * 86_400);
+        rp_write(&mut rtc, 0xD, 0x9);
+        assert_eq!(rp_read(&mut rtc, 0xB), 0); // 2004
+    }
+
+    /// Blocks 2 and 3 are the 26 battery RAM nibbles (battmem.resource's
+    /// storage on the A3000/A4000): block 2 holds the low nibble of each
+    /// of 13 bytes, block 3 the high one, and both survive a CPU reset
+    /// like everything battery-powered.
+    #[test]
+    fn rp5c01_ram_blocks_hold_26_battery_nibbles_across_reset() {
+        let mut rtc = seeded_rp5c01(VECTOR_UNIX);
+        rp_write(&mut rtc, 0xD, 0xA); // block 2: low nibbles
+        rp_write(&mut rtc, 0x0, 0x5);
+        rp_write(&mut rtc, 0xC, 0xF);
+        rp_write(&mut rtc, 0xD, 0xB); // block 3: high nibbles
+        rp_write(&mut rtc, 0x0, 0xA);
+
+        rp_write(&mut rtc, 0xD, 0xA);
+        assert_eq!(rp_read(&mut rtc, 0x0), 0x5);
+        assert_eq!(rp_read(&mut rtc, 0xC), 0xF);
+        rp_write(&mut rtc, 0xD, 0xB);
+        assert_eq!(rp_read(&mut rtc, 0x0), 0xA);
+        assert_eq!(rp_read(&mut rtc, 0xC), 0x0);
+
+        rtc.reset();
+        assert_eq!(rp_read(&mut rtc, 0xD), 0x8); // selector back to power-on
+        rp_write(&mut rtc, 0xD, 0xB);
+        assert_eq!(rp_read(&mut rtc, 0x0), 0xA); // RAM kept
+        rp_write(&mut rtc, 0xD, 0x9);
+        assert_eq!(rp_read(&mut rtc, 0xA), 0x1); // 12/24 select kept too
+    }
+
+    /// Writes to the time counters never move the read-only clock view
+    /// (module policy: the guest cannot set the host or seeded clock).
+    #[test]
+    fn rp5c01_time_counter_writes_never_move_the_clock() {
+        let mut rtc = seeded_rp5c01(VECTOR_UNIX);
+        for reg in 0x0..=0xC {
+            rp_write(&mut rtc, reg, 0x7);
+        }
+        assert_eq!(rp_read(&mut rtc, 0x0), 9);
+        assert_eq!(rp_read(&mut rtc, 0x6), 5);
+        assert_eq!(rp_read(&mut rtc, 0xB), 5);
+        assert_eq!(rtc.clock.seed(), Some(VECTOR_UNIX));
+    }
+
+    #[test]
+    fn rtc_wrapper_selects_and_reports_the_chip() {
+        let mut rtc = Rtc::new(RtcChip::Rp5c01);
+        assert_eq!(rtc.chip(), RtcChip::Rp5c01);
+        assert_eq!(rtc.chip().label(), "RP5C01");
+        rtc.set_seed(Some(VECTOR_UNIX), true);
         assert_eq!(rtc.seed(), Some(VECTOR_UNIX));
+        assert!(rtc.frozen());
+        assert_eq!(rtc.read(0xD * 4, 4, 0.0), 0x8);
+        assert_eq!(Rtc::default().chip(), RtcChip::Msm6242);
     }
 
     #[test]

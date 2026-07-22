@@ -25,7 +25,7 @@ use crate::chipset::paula::{
 use crate::floppy::FloppyController;
 use crate::gayle::Gayle;
 use crate::memory::Memory;
-use crate::rtc::Msm6242Rtc;
+use crate::rtc::{Rtc, RtcChip};
 use crate::timebase::{Duration, Instant};
 use crate::video::{beam::BeamEventIndex, FrameGeometry, FB_HEIGHT, FB_WIDTH, MAX_VISIBLE_LINES};
 use log::trace;
@@ -658,7 +658,7 @@ pub struct Bus {
     /// therefore survives save-state loads like Paula's audio/serial sinks.
     #[serde(skip, default = "crate::parallel::null_parallel_port")]
     parallel_port: Box<dyn crate::parallel::ParallelPort>,
-    pub rtc: Msm6242Rtc,
+    pub rtc: Rtc,
     /// Whether the $DC0000 RTC is fitted (machine-profile flag; the base
     /// A600 shipped without one). The CPU memory map consults this before
     /// decoding the RTC range.
@@ -2321,7 +2321,7 @@ impl Bus {
             blitter: Blitter::new(),
             floppy,
             parallel_port: crate::parallel::null_parallel_port(),
-            rtc: Msm6242Rtc::default(),
+            rtc: Rtc::default(),
             rtc_present: true,
             gayle: None,
             ramsey: None,
@@ -2792,6 +2792,15 @@ impl Bus {
 
     pub fn set_rtc_present(&mut self, present: bool) {
         self.rtc_present = present;
+    }
+
+    /// Fit the configured clock part (machine-profile default or
+    /// `[machine] rtc_chip`). Swapping parts starts from power-on state,
+    /// so apply it before the deterministic seed.
+    pub fn set_rtc_chip(&mut self, chip: RtcChip) {
+        if self.rtc.chip() != chip {
+            self.rtc = Rtc::new(chip);
+        }
     }
 
     pub fn set_video_standard(&mut self, video_standard: VideoStandard) {

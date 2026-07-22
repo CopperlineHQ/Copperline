@@ -2050,6 +2050,7 @@ pub fn build_machine(
     bus.set_video_standard(cfg.video_standard);
     bus.set_chipset_revisions(cfg.agnus_revision, cfg.denise_revision);
     bus.set_rtc_present(cfg.rtc_present);
+    bus.set_rtc_chip(cfg.rtc_chip);
     bus.rtc.set_seed(cfg.rtc_seed_unix, cfg.rtc_frozen);
     if let Some(id) = cfg.gate_array.gayle_id() {
         let mut gayle = crate::gayle::Gayle::new(id);
@@ -2170,7 +2171,13 @@ pub fn build_machine(
     if let Some(machine) = cfg.machine {
         info!(
             "machine profile: {:?} (gate array {:?}, rtc {})",
-            machine, cfg.gate_array, cfg.rtc_present
+            machine,
+            cfg.gate_array,
+            if cfg.rtc_present {
+                cfg.rtc_chip.label()
+            } else {
+                "none"
+            }
         );
     }
     let cpu_clocks_per_cck = crate::config::clocks_per_cck_for_mhz(cfg.cpu_clock_mhz);

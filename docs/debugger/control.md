@@ -210,7 +210,8 @@ not touched), `disasm {addr?, count?}`, `custom.dump`,
 
 Battery clock (the $DC0000 RTC; see `rtc_time` in
 `docs/guide/configuration.md` for the boot-time seed): `rtc.get` reports
-`{present, seeded, frozen, unix, time}`; `rtc.set {unix | time |
+`{present, chip, seeded, frozen, unix, time}` (`chip` is the fitted part,
+`"MSM6242"` or `"RP5C01"`); `rtc.set {unix | time |
 advance, frozen?}` moves it live -- `unix` (Unix seconds) or `time`
 (`"YYYY-MM-DD HH:MM[:SS]"`) set an absolute value the clock reads from
 this instant, `advance` (signed seconds) jumps relative to the current

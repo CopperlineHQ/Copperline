@@ -139,12 +139,18 @@ pub struct Config {
     pub cd_insert_delay_secs: f64,
     /// CD32 NVRAM backing file (None = session-only EEPROM).
     pub cd32_nvram_path: Option<PathBuf>,
-    /// Whether the MSM6242/OKI RTC at $DC0000 is fitted. Defaults to false:
+    /// Whether the battery RTC at $DC0000 is fitted. Defaults to false:
     /// the base A500/A500OCS, A600, A1200, A1000, and CD32 shipped without a
-    /// battery-backed clock. Only the A500+ (soldered on the Rev 8A board) and
-    /// the CDTV carry one by default; the A600HD and a clock-equipped A1200 set
-    /// `[machine] rtc = true`.
+    /// battery-backed clock. Only the A500+ (soldered on the Rev 8A board),
+    /// the CDTV, and the big-box A3000/A4000 carry one by default; the A600HD
+    /// and a clock-equipped A1200 set `[machine] rtc = true`.
     pub rtc_present: bool,
+    /// Which clock part answers there (`[machine] rtc_chip`): the OKI
+    /// MSM6242 on most boards, the Ricoh RP5C01 on the A3000/A4000 -- a
+    /// different register protocol, which battclock.resource probes for
+    /// but Linux/m68k assumes from the machine model. Defaults per
+    /// profile; setting it implies `rtc = true`.
+    pub rtc_chip: crate::rtc::RtcChip,
     /// Power-on RTC value in Unix seconds (`[machine] rtc_time` /
     /// `--rtc-time`). When set, the clock starts here and ticks with
     /// *emulated* time instead of following the host wall clock, so the
@@ -835,8 +841,9 @@ pub enum MachineModel {
     A1000,
     /// A3000: ECS, 68030 at 25 MHz, 2 MB chip RAM, a Ramsey-04 memory
     /// controller with the stock 4 MB of motherboard fast RAM
-    /// (`[memory] motherboard` resizes it), and the battery-backed MSM6242
-    /// clock. No Gayle -- the big-box machines carry Gary -- and no slow RAM.
+    /// (`[memory] motherboard` resizes it), and the battery-backed Ricoh
+    /// RP5C01 clock. No Gayle -- the big-box machines carry Gary -- and no
+    /// slow RAM.
     A3000,
     /// A4000: the same board a generation later -- AGA, a 25 MHz 68040, and
     /// Ramsey-07 with the same stock 4 MB of motherboard fast RAM. Same
@@ -1147,6 +1154,7 @@ impl Default for Config {
             // clock; only the A500+/CDTV profiles fit one (see
             // machine_profile_defaults).
             rtc_present: false,
+            rtc_chip: crate::rtc::RtcChip::Msm6242,
             rtc_seed_unix: None,
             rtc_frozen: false,
             video_standard: VideoStandard::Pal,
@@ -1947,6 +1955,12 @@ pub(crate) struct RawMachine {
     /// clock-equipped A1200.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) rtc: Option<bool>,
+    /// Which clock part fills the socket: `"MSM6242"` (OKI, most boards)
+    /// or `"RP5C01"` (Ricoh, the A3000/A4000 part and the only protocol
+    /// Linux/m68k drives on those models). Defaults per profile; setting
+    /// it implies `rtc = true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rtc_chip: Option<String>,
     /// Power-on clock value: an integer (Unix seconds, UTC) or a string
     /// `"YYYY-MM-DD HH:MM[:SS]"` (the wall-clock time the guest reads).
     /// Seeds the battery clock and ticks it in emulated time so the
@@ -2559,6 +2573,14 @@ impl TryFrom<RawConfig> for Config {
                 "[machine] rtc_frozen = true needs an rtc_time to freeze at"
             ));
         }
+        let rtc_chip = match raw.machine.rtc_chip.as_deref().map(parse_rtc_chip) {
+            Some(Ok(chip)) => Some(chip),
+            Some(Err(e)) => {
+                errors.push(e);
+                None
+            }
+            None => None,
+        };
 
         match errors.len() {
             0 => {}
@@ -2645,9 +2667,16 @@ impl TryFrom<RawConfig> for Config {
                     "[machine] rtc_time is set but rtc = false leaves the \
                      clock unfitted; drop one of them"
                 ),
+                // Naming a chip for a socket declared empty is the same
+                // contradiction.
+                Some(false) if rtc_chip.is_some() => anyhow::bail!(
+                    "[machine] rtc_chip is set but rtc = false leaves the \
+                     clock unfitted; drop one of them"
+                ),
                 Some(fitted) => fitted,
-                None => defaults.rtc_present || rtc_seed_unix.is_some(),
+                None => defaults.rtc_present || rtc_seed_unix.is_some() || rtc_chip.is_some(),
             },
+            rtc_chip: rtc_chip.unwrap_or(defaults.rtc_chip),
             rtc_seed_unix,
             rtc_frozen,
             log_unmapped: raw
@@ -2948,6 +2977,9 @@ pub(crate) fn machine_profile_defaults(model: MachineModel) -> Config {
             d.mem_controller = MemController::Ramsey4;
             d.gate_array = GateArray::FatGary;
             d.rtc_present = true;
+            // The big boxes carry the Ricoh clock part, not the OKI one --
+            // and Linux/m68k hard-assumes RP5C01 on these models.
+            d.rtc_chip = crate::rtc::RtcChip::Rp5c01;
             d.sdmac = true;
         }
         // The A4000: the same board a generation later -- AGA, a 25 MHz 68040,
@@ -2964,6 +2996,7 @@ pub(crate) fn machine_profile_defaults(model: MachineModel) -> Config {
             d.mem_controller = MemController::Ramsey7;
             d.gate_array = GateArray::FatGary;
             d.rtc_present = true;
+            d.rtc_chip = crate::rtc::RtcChip::Rp5c01;
             d.ide_a4000 = true;
         }
         // CDTV: A500-class board with the 1 MB ECS Agnus and 1 MB chip
@@ -3023,6 +3056,19 @@ fn default_denise_revision(chipset: Chipset) -> DeniseRevision {
         Chipset::Ocs => DeniseRevision::Ocs,
         Chipset::Ecs => DeniseRevision::Ecs8373,
         Chipset::Aga => DeniseRevision::AgaLisa,
+    }
+}
+
+/// Parse `[machine] rtc_chip`. "RF5C01A" is accepted as an alias for the
+/// Ricoh part because that is what AmigaOS-lineage sources call it.
+fn parse_rtc_chip(s: &str) -> Result<crate::rtc::RtcChip> {
+    match s.trim().to_ascii_uppercase().as_str() {
+        "MSM6242" | "MSM6242B" | "OKI" => Ok(crate::rtc::RtcChip::Msm6242),
+        "RP5C01" | "RP5C01A" | "RF5C01A" | "RICOH" => Ok(crate::rtc::RtcChip::Rp5c01),
+        _ => Err(anyhow!(
+            "unknown machine rtc_chip {:?}: expected MSM6242 / RP5C01",
+            s
+        )),
     }
 }
 
@@ -3616,6 +3662,56 @@ mod tests {
     }
 
     #[test]
+    fn rtc_chip_defaults_per_profile_and_implies_a_fitted_clock() -> Result<()> {
+        use crate::rtc::RtcChip;
+
+        // The big boxes carry the Ricoh part by default.
+        for profile in ["A3000", "A4000"] {
+            let cfg = parse_config(&format!("[machine]\nprofile = \"{profile}\"\n"))?;
+            assert!(cfg.rtc_present, "{profile}");
+            assert_eq!(cfg.rtc_chip, RtcChip::Rp5c01, "{profile}");
+        }
+        // The clock-equipped small boxes keep the OKI one.
+        let cfg = parse_config("[machine]\nprofile = \"A500+\"\n")?;
+        assert!(cfg.rtc_present);
+        assert_eq!(cfg.rtc_chip, RtcChip::Msm6242);
+
+        // Naming a chip fits the clock on a machine that has none...
+        let cfg = parse_config("[machine]\nrtc_chip = \"RP5C01\"\n")?;
+        assert!(cfg.rtc_present);
+        assert_eq!(cfg.rtc_chip, RtcChip::Rp5c01);
+        // ...and the aliases and the big-box override both parse.
+        let cfg = parse_config(
+            r#"
+            [machine]
+            profile = "A3000"
+            rtc_chip = "MSM6242B"
+            "#,
+        )?;
+        assert_eq!(cfg.rtc_chip, RtcChip::Msm6242);
+        let cfg = parse_config("[machine]\nrtc_chip = \"rf5c01a\"\n")?;
+        assert_eq!(cfg.rtc_chip, RtcChip::Rp5c01);
+        Ok(())
+    }
+
+    #[test]
+    fn rtc_chip_misconfigurations_are_rejected() {
+        // A chip named for a socket declared empty is a contradiction.
+        let err = parse_config(
+            r#"
+            [machine]
+            rtc = false
+            rtc_chip = "RP5C01"
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("rtc = false"), "{err:#}");
+
+        let err = parse_config("[machine]\nrtc_chip = \"DS1307\"\n").unwrap_err();
+        assert!(err.to_string().contains("rtc_chip"), "{err:#}");
+    }
+
+    #[test]
     fn rtc_time_cli_override_matches_the_config_field() -> Result<()> {
         let cfg = load_overrides(&ConfigOverrides {
             rtc_time: Some("1111111109".to_string()),
@@ -3683,6 +3779,7 @@ mod tests {
             machine: RawMachine {
                 profile: Some("A1200".to_string()),
                 rtc: Some(true),
+                rtc_chip: Some("RP5C01".to_string()),
                 rtc_time: Some(RawRtcTime::Text("2005-03-18 01:58:29".to_string())),
                 rtc_frozen: Some(true),
                 mem_controller: Some("ramsey-07".to_string()),

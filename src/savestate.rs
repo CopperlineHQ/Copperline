@@ -127,7 +127,11 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //  36: Memory gained the CPU-slot accelerator fast RAM bank (accel_ram,
 //      starting at $08000000) and MachineDescriptor its size
 //      (accel_ram_bytes)
-pub const STATE_VERSION: u32 = 36;
+//  37: the Bus rtc field became the Rtc chip enum - MSM6242 or the
+//      A3000/A4000's RP5C01 ([machine] rtc_chip), the Ricoh part carrying
+//      its mode/alarm/battery-RAM state and both sharing the seeded
+//      ClockSource
+pub const STATE_VERSION: u32 = 37;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {
