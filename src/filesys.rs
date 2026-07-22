@@ -1983,12 +1983,9 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-/// Open an existing file the way AmigaDOS hands out a file handle: writable.
-/// MODE_OLDFILE and OpenFromLock both yield a handle a program may write to --
-/// icon.library's snapshot reads an .info and writes it back through the same
-/// handle -- so a read-only host open would fail that write. A file the host
-/// will not let us write still opens read-only; the write then fails, which is
-/// what a protected file does on the Amiga too.
+/// Open an existing file writable, the way AmigaDOS hands out a file handle;
+/// fall back to read-only if the host refuses, so a later write fails as it
+/// would on a protected Amiga file.
 fn open_existing(path: &Path) -> std::io::Result<std::fs::File> {
     std::fs::OpenOptions::new()
         .read(true)
@@ -2259,6 +2256,81 @@ mod tests {
                 a += 1;
             }
             v
+        }
+    }
+
+    /// A single mounted HOSTFS unit backed by a temp dir, over a flat guest
+    /// RAM, for driving `handle_packet` without a machine. Fixed guest
+    /// addresses for the objects a packet references; the temp dir is removed
+    /// on drop.
+    struct FsTester {
+        root: PathBuf,
+        board: FilesysBoard,
+        bus: RamBus,
+        guest_op: Option<GuestOp>,
+    }
+
+    impl FsTester {
+        const BOARD_BASE: u32 = 0x1_0000;
+        const PORT: u32 = 0x3000;
+        const PKT: u32 = 0x2000;
+        const DN: u32 = 0x1000;
+        const FH: u32 = 0x4000;
+        const NAME: u32 = 0x5000;
+        const BUF: u32 = 0x6000;
+
+        /// Mount `tag` and send the startup packet, so the unit is wired.
+        fn mounted(tag: &str) -> Self {
+            let root = std::env::temp_dir().join(format!("clfs-{tag}-{}", std::process::id()));
+            std::fs::create_dir_all(&root).unwrap();
+            let mut board = FilesysBoard::default();
+            board.set_mounts(vec![MountSpec {
+                path: root.clone(),
+                volume: "Test".into(),
+                boot_pri: -128,
+                readonly: false,
+            }]);
+            let mut fs = Self {
+                root,
+                board,
+                bus: RamBus(vec![0u8; 0x2_0000]),
+                guest_op: None,
+            };
+            fs.send(0, [0, 0, Self::DN >> 2]);
+            fs
+        }
+
+        /// Post one packet of type `ty` with three args; returns (Res1, Res2).
+        fn send(&mut self, ty: i32, args: [u32; 3]) -> (u32, u32) {
+            self.bus.write_long(Self::PKT + 8, ty as u32);
+            for (i, a) in args.iter().enumerate() {
+                self.bus.write_long(Self::PKT + 20 + 4 * i as u32, *a);
+            }
+            self.board.units[0].handle_packet(
+                &mut self.bus,
+                Self::BOARD_BASE,
+                Self::PORT,
+                Self::PKT,
+                &mut self.guest_op,
+            )
+        }
+
+        /// Lay a BSTR file name at NAME for the next packet to reference.
+        fn set_name(&mut self, s: &[u8]) {
+            self.bus.0[Self::NAME as usize] = s.len() as u8;
+            self.bus.0[Self::NAME as usize + 1..Self::NAME as usize + 1 + s.len()]
+                .copy_from_slice(s);
+        }
+
+        /// Write `bytes` into the shared buffer at BUF.
+        fn set_buf(&mut self, bytes: &[u8]) {
+            self.bus.0[Self::BUF as usize..Self::BUF as usize + bytes.len()].copy_from_slice(bytes);
+        }
+    }
+
+    impl Drop for FsTester {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
         }
     }
 
@@ -2549,66 +2621,34 @@ mod tests {
     /// the same handle. Opening the host file read-only failed that write.
     #[test]
     fn handles_on_existing_files_are_writable() {
-        let root = std::env::temp_dir().join(format!("clfs-rw-{}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
-        let mut hle = FilesysBoard::default();
-        hle.set_mounts(vec![MountSpec {
-            path: root.clone(),
-            volume: "Test".into(),
-            boot_pri: -128,
-            readonly: false,
-        }]);
-        let mut bus = RamBus(vec![0u8; 0x2_0000]);
-        let (board_base, port, pkt, dn, fh, name, buf) = (
-            0x1_0000u32,
-            0x3000u32,
-            0x2000u32,
-            0x1000u32,
-            0x4000u32,
-            0x5000u32,
-            0x6000u32,
-        );
-        let mut guest_op = None;
-        let unit = &mut hle.units[0];
-        // A macro, not a closure: it reborrows the bus at each call, so the
-        // packets read as one line each.
-        macro_rules! send {
-            ($ty:expr, $args:expr) => {{
-                bus.write_long(pkt + 8, $ty as u32);
-                for (i, a) in $args.iter().enumerate() {
-                    bus.write_long(pkt + 20 + 4 * i as u32, *a);
-                }
-                unit.handle_packet(&mut bus, board_base, port, pkt, &mut guest_op)
-            }};
-        }
-        send!(0, [0, 0, dn >> 2]);
-        bus.0[buf as usize..buf as usize + 3].copy_from_slice(b"new");
+        let mut fs = FsTester::mounted("rw");
+        fs.set_buf(b"new");
 
         // OpenFromLock() on a shared lock, then Open(MODE_OLDFILE), which is
         // read/write on the Amiga as well.
         for (file, from_lock) in [("a.info", true), ("b.info", false)] {
-            std::fs::write(root.join(file), b"old").unwrap();
-            bus.0[name as usize] = file.len() as u8;
-            bus.0[name as usize + 1..name as usize + 1 + file.len()]
-                .copy_from_slice(file.as_bytes());
+            std::fs::write(fs.root.join(file), b"old").unwrap();
+            fs.set_name(file.as_bytes());
             let open = if from_lock {
-                let (lock, _) = send!(ACTION_LOCATE_OBJECT, [0, name >> 2, ACCESS_READ]);
-                send!(ACTION_FH_FROM_LOCK, [fh >> 2, lock, 0])
+                let (lock, _) =
+                    fs.send(ACTION_LOCATE_OBJECT, [0, FsTester::NAME >> 2, ACCESS_READ]);
+                fs.send(ACTION_FH_FROM_LOCK, [FsTester::FH >> 2, lock, 0])
             } else {
-                send!(ACTION_FINDINPUT, [fh >> 2, 0, name >> 2])
+                fs.send(
+                    ACTION_FINDINPUT,
+                    [FsTester::FH >> 2, 0, FsTester::NAME >> 2],
+                )
             };
             assert_eq!(open, (DOSTRUE, 0), "open {file}");
-            let cookie = bus.read_long(fh + FILEHANDLE_ARG1);
+            let cookie = fs.bus.read_long(FsTester::FH + FILEHANDLE_ARG1);
             assert_eq!(
-                send!(ACTION_WRITE, [cookie, buf, 3]),
+                fs.send(ACTION_WRITE, [cookie, FsTester::BUF, 3]),
                 (3, 0),
                 "write {file}"
             );
-            send!(ACTION_END, [cookie, 0, 0]);
-            assert_eq!(std::fs::read(root.join(file)).unwrap(), b"new");
+            fs.send(ACTION_END, [cookie, 0, 0]);
+            assert_eq!(std::fs::read(fs.root.join(file)).unwrap(), b"new");
         }
-
-        std::fs::remove_dir_all(&root).unwrap();
     }
 
     /// Seek offsets are signed LONGs: a backward relative seek (negative
@@ -2617,108 +2657,45 @@ mod tests {
     /// placeholder lengths, then Seek(-n, OFFSET_CURRENT/OFFSET_END) back
     /// and patch them -- which P96Prefs saves rely on.
     #[test]
-    fn seek_accepts_negative_offsets_like_iffparse() {
-        let root = std::env::temp_dir().join(format!("clfs-seek-{}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
+    fn seek_accepts_negative_offsets() {
+        let mut fs = FsTester::mounted("seek");
 
-        let mut hle = FilesysBoard::default();
-        hle.set_mounts(vec![MountSpec {
-            path: root.clone(),
-            volume: "Test".into(),
-            boot_pri: -128,
-            readonly: false,
-        }]);
-        let mut bus = RamBus(vec![0u8; 0x2_0000]);
-        let (board_base, port, pkt, dn, fh, name, buf) = (
-            0x1_0000u32,
-            0x3000u32,
-            0x2000u32,
-            0x1000u32,
-            0x4000u32,
-            0x5000u32,
-            0x6000u32,
+        // Open("iff.bin", MODE_NEWFILE).
+        fs.set_name(b"iff.bin");
+        assert_eq!(
+            fs.send(
+                ACTION_FINDOUTPUT,
+                [FsTester::FH >> 2, 0, FsTester::NAME >> 2]
+            ),
+            (DOSTRUE, 0)
         );
-        let mut guest_op = None;
-        let send = |bus: &mut RamBus,
-                    unit: &mut FilesysUnit,
-                    guest_op: &mut Option<GuestOp>,
-                    ty: i32,
-                    args: [u32; 3]| {
-            bus.write_long(pkt + 8, ty as u32);
-            for (i, a) in args.iter().enumerate() {
-                bus.write_long(pkt + 20 + 4 * i as u32, *a);
-            }
-            unit.handle_packet(bus, board_base, port, pkt, guest_op)
-        };
-
-        // Startup packet wires the unit; then Open("iff.bin", MODE_NEWFILE).
-        let unit = &mut hle.units[0];
-        send(&mut bus, unit, &mut guest_op, 0, [0, 0, dn >> 2]);
-        bus.0[name as usize] = 7;
-        bus.0[name as usize + 1..name as usize + 8].copy_from_slice(b"iff.bin");
-        let (res1, res2) = send(
-            &mut bus,
-            unit,
-            &mut guest_op,
-            ACTION_FINDOUTPUT,
-            [fh >> 2, 0, name >> 2],
-        );
-        assert_eq!((res1, res2), (DOSTRUE, 0));
-        let cookie = bus.read_long(fh + FILEHANDLE_ARG1);
+        let cookie = fs.bus.read_long(FsTester::FH + FILEHANDLE_ARG1);
 
         // Stream 24 bytes with two 0xFFFFFFFF length placeholders.
-        bus.0[buf as usize..buf as usize + 24]
-            .copy_from_slice(b"FORM\xff\xff\xff\xffP96SANNO\xff\xff\xff\xffp96p");
-        let (res1, _) = send(
-            &mut bus,
-            unit,
-            &mut guest_op,
-            ACTION_WRITE,
-            [cookie, buf, 24],
-        );
-        assert_eq!(res1, 24);
+        fs.set_buf(b"FORM\xff\xff\xff\xffP96SANNO\xff\xff\xff\xffp96p");
+        assert_eq!(fs.send(ACTION_WRITE, [cookie, FsTester::BUF, 24]).0, 24);
 
         // Patch the ANNO length: back 8 from the current position (24 -> 16).
-        let (res1, res2) = send(
-            &mut bus,
-            unit,
-            &mut guest_op,
-            ACTION_SEEK,
-            [cookie, (-8i32) as u32, OFFSET_CURRENT as u32],
+        assert_eq!(
+            fs.send(ACTION_SEEK, [cookie, (-8i32) as u32, OFFSET_CURRENT as u32]),
+            (24, 0),
+            "backward OFFSET_CURRENT seek failed"
         );
-        assert_eq!((res1, res2), (24, 0), "backward OFFSET_CURRENT seek failed");
-        bus.0[buf as usize..buf as usize + 4].copy_from_slice(&4u32.to_be_bytes());
-        send(
-            &mut bus,
-            unit,
-            &mut guest_op,
-            ACTION_WRITE,
-            [cookie, buf, 4],
-        );
+        fs.set_buf(&4u32.to_be_bytes());
+        fs.send(ACTION_WRITE, [cookie, FsTester::BUF, 4]);
 
         // Patch the FORM length: 20 back from the end (24 -> 4).
-        let (res1, res2) = send(
-            &mut bus,
-            unit,
-            &mut guest_op,
-            ACTION_SEEK,
-            [cookie, (-20i32) as u32, OFFSET_END as u32],
+        assert_eq!(
+            fs.send(ACTION_SEEK, [cookie, (-20i32) as u32, OFFSET_END as u32]),
+            (20, 0),
+            "backward OFFSET_END seek failed"
         );
-        assert_eq!((res1, res2), (20, 0), "backward OFFSET_END seek failed");
-        bus.0[buf as usize..buf as usize + 4].copy_from_slice(&16u32.to_be_bytes());
-        send(
-            &mut bus,
-            unit,
-            &mut guest_op,
-            ACTION_WRITE,
-            [cookie, buf, 4],
-        );
+        fs.set_buf(&16u32.to_be_bytes());
+        fs.send(ACTION_WRITE, [cookie, FsTester::BUF, 4]);
 
-        send(&mut bus, unit, &mut guest_op, ACTION_END, [cookie, 0, 0]);
-        let on_disk = std::fs::read(root.join("iff.bin")).unwrap();
+        fs.send(ACTION_END, [cookie, 0, 0]);
+        let on_disk = std::fs::read(fs.root.join("iff.bin")).unwrap();
         assert_eq!(on_disk, b"FORM\x00\x00\x00\x10P96SANNO\x00\x00\x00\x04p96p");
-
-        std::fs::remove_dir_all(&root).unwrap();
     }
 
     /// Latin-1 <-> UTF-8 mapping matches amiberry: a guest name with high bytes
