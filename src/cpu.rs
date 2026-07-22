@@ -2366,9 +2366,10 @@ impl CpuBus {
 
     /// The `$DC0000` clock page, a byte lane at a time.
     ///
-    /// The MSM6242 is a four-bit part wired to the low byte lane alone, so it
-    /// answers on odd addresses and the even lane floats -- with or without a
-    /// chip in the socket, since nothing else drives it either.
+    /// Both clock parts (MSM6242 and RP5C01) are four-bit chips wired to the
+    /// low byte lane alone, so they answer on odd addresses and the even lane
+    /// floats -- with or without a chip in the socket, since nothing else
+    /// drives it either.
     ///
     /// The register select is A2-A5, so A1 does not reach the decode and each
     /// register answers at *both* of its odd bytes: register 0 at `+1` and
@@ -4345,6 +4346,23 @@ mod tests {
         assert_eq!(clock_reg(&mut bus, 0x03) & 8, 0);
         assert_ne!(clock_reg(&mut bus, 0x0D), 0x8); // not an RF5C01A
         assert_eq!(clock_reg(&mut bus, 0x0F), 0x4); // an MSM6242B
+    }
+
+    /// The Ricoh branch of the same probe: an RP5C01 (the A3000/A4000
+    /// part) answers with its power-on MODE, $8 (timer running, block 0),
+    /// while the write-only RESET select reads zero -- exactly the pair
+    /// AROS matches as an "RF5C01A" before ever considering an MSM6242.
+    #[test]
+    fn the_aros_clock_probe_identifies_a_fitted_rp5c01() {
+        let mut bus = cpu_bus(test_bus(reset_rom(0, 0)));
+        bus.bus.set_rtc_chip(crate::rtc::RtcChip::Rp5c01);
+        bus.bus.set_rtc_present(true);
+        bus.bus.data_bus = 0xFFFF;
+
+        assert_eq!(clock_reg(&mut bus, 0x01) & 8, 0);
+        assert_eq!(clock_reg(&mut bus, 0x03) & 8, 0);
+        assert_eq!(clock_reg(&mut bus, 0x0D), 0x8); // an RF5C01A...
+        assert_eq!(clock_reg(&mut bus, 0x0F), 0x0); // ...whose RESET reads 0
     }
 
     /// The register select is A2-A5, so A1 never reaches the decode: each
