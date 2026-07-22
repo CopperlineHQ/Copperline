@@ -1006,7 +1006,7 @@ impl FilesysUnit {
                 if path.is_dir() {
                     return (DOSFALSE, ERROR_OBJECT_WRONG_TYPE);
                 }
-                match std::fs::File::open(&path) {
+                match open_existing(&path) {
                     Ok(f) => {
                         self.next_file_key += 1;
                         let key = self.next_file_key;
@@ -1054,7 +1054,7 @@ impl FilesysUnit {
                 if path.is_dir() {
                     return (DOSFALSE, ERROR_OBJECT_WRONG_TYPE);
                 }
-                match std::fs::File::open(&path) {
+                match open_existing(&path) {
                     Ok(f) => {
                         self.next_file_key += 1;
                         let key = self.next_file_key;
@@ -1983,6 +1983,20 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
+/// Open an existing file the way AmigaDOS hands out a file handle: writable.
+/// MODE_OLDFILE and OpenFromLock both yield a handle a program may write to --
+/// icon.library's snapshot reads an .info and writes it back through the same
+/// handle -- so a read-only host open would fail that write. A file the host
+/// will not let us write still opens read-only; the write then fails, which is
+/// what a protected file does on the Amiga too.
+fn open_existing(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .or_else(|_| std::fs::File::open(path))
+}
+
 /// Map a host I/O error onto the AmigaDOS error the guest expects, so a full
 /// disk says "disk full" rather than a generic failure.
 fn host_error(e: &std::io::Error) -> u32 {
@@ -2524,6 +2538,74 @@ mod tests {
                 "resolved {:?}",
                 String::from_utf8_lossy(escape)
             );
+        }
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A handle on an existing file is writable, whichever way it was opened.
+    /// This is Workbench's Snapshot: icon.library takes a shared lock on the
+    /// .info, OpenFromLock()s it, reads the header, and writes it back through
+    /// the same handle. Opening the host file read-only failed that write.
+    #[test]
+    fn handles_on_existing_files_are_writable() {
+        let root = std::env::temp_dir().join(format!("clfs-rw-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut hle = FilesysBoard::default();
+        hle.set_mounts(vec![MountSpec {
+            path: root.clone(),
+            volume: "Test".into(),
+            boot_pri: -128,
+            readonly: false,
+        }]);
+        let mut bus = RamBus(vec![0u8; 0x2_0000]);
+        let (board_base, port, pkt, dn, fh, name, buf) = (
+            0x1_0000u32,
+            0x3000u32,
+            0x2000u32,
+            0x1000u32,
+            0x4000u32,
+            0x5000u32,
+            0x6000u32,
+        );
+        let mut guest_op = None;
+        let unit = &mut hle.units[0];
+        // A macro, not a closure: it reborrows the bus at each call, so the
+        // packets read as one line each.
+        macro_rules! send {
+            ($ty:expr, $args:expr) => {{
+                bus.write_long(pkt + 8, $ty as u32);
+                for (i, a) in $args.iter().enumerate() {
+                    bus.write_long(pkt + 20 + 4 * i as u32, *a);
+                }
+                unit.handle_packet(&mut bus, board_base, port, pkt, &mut guest_op)
+            }};
+        }
+        send!(0, [0, 0, dn >> 2]);
+        bus.0[buf as usize..buf as usize + 3].copy_from_slice(b"new");
+
+        // OpenFromLock() on a shared lock, then Open(MODE_OLDFILE), which is
+        // read/write on the Amiga as well.
+        for (file, from_lock) in [("a.info", true), ("b.info", false)] {
+            std::fs::write(root.join(file), b"old").unwrap();
+            bus.0[name as usize] = file.len() as u8;
+            bus.0[name as usize + 1..name as usize + 1 + file.len()]
+                .copy_from_slice(file.as_bytes());
+            let open = if from_lock {
+                let (lock, _) = send!(ACTION_LOCATE_OBJECT, [0, name >> 2, ACCESS_READ]);
+                send!(ACTION_FH_FROM_LOCK, [fh >> 2, lock, 0])
+            } else {
+                send!(ACTION_FINDINPUT, [fh >> 2, 0, name >> 2])
+            };
+            assert_eq!(open, (DOSTRUE, 0), "open {file}");
+            let cookie = bus.read_long(fh + FILEHANDLE_ARG1);
+            assert_eq!(
+                send!(ACTION_WRITE, [cookie, buf, 3]),
+                (3, 0),
+                "write {file}"
+            );
+            send!(ACTION_END, [cookie, 0, 0]);
+            assert_eq!(std::fs::read(root.join(file)).unwrap(), b"new");
         }
 
         std::fs::remove_dir_all(&root).unwrap();
