@@ -5007,6 +5007,50 @@ fn covered_scroll_catches_floor_reload_slot_for_off_grid_ddfstrt() {
 }
 
 #[test]
+fn wide_fmode_scroll_folds_into_the_early_masked_fetch_start() {
+    // Lo-res 32-bit fetch (FMODE BPL32) with DDFSTRT $24: Agnus masks the
+    // start down to the 16-cck fetch-unit grid ($20), so the data arrives
+    // 4 cck (8 lo-res px) EARLY relative to the programmed start - the
+    // opposite sense of the FMODE=0 round-up above. Denise's reload
+    // comparator window is anchored at that early fetch start, so scroll
+    // taps in the last 8 px of the 32-px gulp window already see the NEXT
+    // gulp's data and the playfield sits one full gulp left: the display
+    // delay folds as ((scroll + earliness) mod gulp) - earliness.
+    // Calibrated against Alien Breed II AGA's playfield scroller, which
+    // pairs the folded BPLCON1 taps ($CC99..$CCFF, taps 25..31) with a
+    // one-gulp bitplane-pointer step; without the fold the pan jumps 32 px
+    // for 4 of every 16 frames (issue #248).
+    let control = |bplcon1: u16| ControlState {
+        agnus_revision: AgnusRevision::AgaAlice,
+        bplcon0: 0x6200, // 6 planes, lo-res
+        ddfstrt: 0x0024,
+        ddfstop: 0x00D4,
+        fmode: 0x0005, // BPL32 | SPR32
+        bplcon1,
+        ..ControlState::default()
+    };
+
+    // $CC77: raw 55 -> masked tap 23, outside the fold window: no advance.
+    assert_eq!(control(0xCC77).row_reload_advance(), 0);
+    assert_eq!(control(0xCC77).sample_delay_for_plane(0), 23);
+    // $CC99: raw 57 -> masked tap 25 >= 32 - 8: one gulp (32 px) left.
+    assert_eq!(control(0xCC99).row_reload_advance(), 32);
+    assert_eq!(control(0xCC99).sample_delay_for_plane(0), 25);
+    assert_eq!(control(0xCC99).sample_delay_for_plane(1), 25);
+    // $CCFF: raw 63 -> tap 31 folds; past the wrap, raw 1 does not.
+    assert_eq!(control(0xCCFF).row_reload_advance(), 32);
+    assert_eq!(control(0x0011).row_reload_advance(), 0);
+    // On the unit grid the comparator window starts with the programmed
+    // fetch: no fold at any scroll.
+    let on_grid = ControlState {
+        ddfstrt: 0x0020,
+        ..control(0xCC99)
+    };
+    assert_eq!(on_grid.row_reload_advance(), 0);
+    assert_eq!(on_grid.sample_delay_for_plane(0), 25);
+}
+
+#[test]
 fn aga_bplcon1_decodes_expanded_scroll_fields() {
     let control = ControlState {
         agnus_revision: AgnusRevision::AgaAlice,

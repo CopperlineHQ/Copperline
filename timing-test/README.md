@@ -286,7 +286,7 @@ refreshed (or a count sitting on an 8-iteration display-bucket edge flips a
 whole bar word). Re-bless and review the diff after a ROM refresh.
 
 Each probe is its own `#[test]`, so the harness runs the emulator boots in
-parallel on the available cores (the full suite of 20 takes ~20 s on an
+parallel on the available cores (the full suite of 21 takes ~20 s on an
 8-core host vs ~90 s sequentially).
 
 Covered: `timing-test` (all 32 timing rows as rendered hex), `ddfprobe`
@@ -305,6 +305,13 @@ DIW narrower than the fetch: one lo-res pixel = 2 hi-res px per scroll
 step, nibble bit 3 ignored, and the row-end overlap words exactly
 clipped at the DIW stop; the KS 2.05 first-text-column wrap regression
 class, vAmiga-verified band by band),
+`ddfprobe-agafold` (the AGA wide-FMODE scroll fold: an off-grid DDFSTRT
+is masked down to the fetch-unit grid, so scroll taps in the last
+`earliness` px of the gulp window show the next gulp one full gulp left,
+swept against bitplane-pointer byte offsets on the Alien Breed II AGA
+playfield constellation -- the issue #248 horizontal scroll-jump
+regression class; boots the A1200/AGA machine shape, FS-UAE-verified
+band by band since vAmiga cannot arbitrate AGA),
 `bltprobe-pace` (CPU pacing bars under BLTPRI copy/fill/line blits and a
 nice-mode line blit -- the BLS-fence and blitter slot-cadence regression
 class; the whole-blit fence collapsed the fill/line bars),

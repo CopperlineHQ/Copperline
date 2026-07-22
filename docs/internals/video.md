@@ -73,7 +73,26 @@ super-hi-res playfield four, and the comparison narrows with the word
 cadence, so hi-res ignores nibble bit 3 and super-hi-res bits 2-3 (pinned
 by the `ddfprobe-hscroll` golden probe on the Kickstart 2.05 boot-screen
 constellation, vAmiga-verified). AGA's extended BPLCON1 fields feed the
-same per-plane delays through `aga_bplcon1_scroll_samples`.
+same per-plane delays through `aga_bplcon1_scroll_samples`, masked to one
+fetch-unit width (32-bit fetches scroll within 32 lo-res px, 64-bit within
+64).
+An off-grid DDFSTRT interacts with the scroll in both fetch regimes. An
+FMODE=0 fetch placed off the shifter reload grid rounds UP (the data is
+late for its own slot), and a scroll that covers the lateness catches the
+floor slot one gulp earlier (vAmiga-verified, `ddfprobe-phase`). A wide
+FMODE fetch has the opposite sense: Agnus masks DDFSTRT DOWN to the
+fetch-unit grid, the data arrives early, and Denise's reload comparator
+window is anchored at that early fetch start, so scroll taps folding into
+the last `earliness` px of the gulp window already see the next gulp's
+data and the playfield sits one full gulp left -- the display delay is
+`((tap + earliness) mod gulp) - earliness`. On-grid starts never fold.
+Pinned by the `ddfprobe-agafold` golden probe on the Alien Breed II AGA
+playfield constellation (lo-res BPL32, DDFSTRT $24 -> earliness 8 px),
+whose scroller pairs the folded taps with a one-gulp pointer step and
+jumps 32 px for 4 of every 16 pan frames without the fold. FS-UAE
+(WinUAE core) renders the probe's 16-band map identically, band by band
+(vAmiga is OCS/ECS-only and cannot arbitrate AGA); the hi-res/SHRES
+scaling of the fold is not yet externally verified.
 BPLCON1-delayed samples at the left edge of a scanline do not reuse the
 previous line's final bitplane word. Before the current line's shifter has a
 sample for a delayed tap, replay marks playfield output active but returns
