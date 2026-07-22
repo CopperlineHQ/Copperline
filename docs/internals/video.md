@@ -233,15 +233,22 @@ time-linearly (each colour clock covers 227/line_cck of a standard clock's
 width); without a programmed vertical sync the captured rows keep covering
 the full glass height.
 
-Super-hi-res output: the framebuffer pixel pitch is hi-res (70 ns), so each
-framebuffer pixel covers two 35 ns SHRES samples. Denise/Lisa resolve every
-35 ns sample through the full palette pipeline (ECS Denise carries at most
-two bitplanes into SHRES; AGA Lisa runs the complete 8-bit index path,
-e.g. the 4-plane FMODE=3 Linux amifb console), so the renderer resolves
-each half independently and blends the two resulting colours into the
-framebuffer pixel. The blend is a framebuffer-pitch compromise, not
-hardware; a true 35 ns output path is a TODO shared with SHRES sprite
-resolution.
+Super-hi-res output: Denise/Lisa resolve every 35 ns sample through the
+full palette pipeline (ECS Denise carries at most two bitplanes into
+SHRES; AGA Lisa runs the complete 8-bit index path, e.g. the 4-plane
+FMODE=3 Linux amifb console). A programmable scan that drives SHRES
+renders a double-width canvas at the 35 ns pixel pitch
+(`canvas_scale_for`): each of the two per-column samples is emitted as
+its own framebuffer pixel, and the presentation, screenshots, and the
+browser canvas carry the doubled width through (the desktop window shows
+it 1:1 on a 2x HiDPI texture). Every logical coordinate in the replay --
+comparators, fetch origins, sprite positions, the collision buffers --
+stays in the classic hi-res-pitch domain; only the framebuffer writes
+fan out, with non-SHRES pixels and sprites doubled. Standard 15 kHz
+scans keep the classic single-width canvas byte-identical; their SHRES
+screens still blend each 35 ns pair into the 70 ns pixel. Sprite
+positions remain at hi-res resolution on either canvas (true 35 ns
+sprite placement is a remaining TODO).
 
 Two vertical edge cases the replay honours:
 

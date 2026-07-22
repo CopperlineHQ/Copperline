@@ -6174,8 +6174,9 @@ fn shres_playfield_output_resolves_each_35ns_sample_through_the_palette() {
 
     // A solid run of colour 1 keeps colour 1: each 35 ns half resolves
     // palette[1], never a pair-encoded entry.
+    let (left, right) = denise_shres_playfield_output_pair(control, palette, 1, 1, &mut ham_color);
     assert_eq!(
-        denise_shres_playfield_output(control, palette, 1, 1, &mut ham_color),
+        blend_shres_outputs(left, right),
         DenisePlayfieldOutput {
             color: rgb12_to_rgb24(0x00F0),
             color_latch: 0x00F0,
@@ -6183,15 +6184,42 @@ fn shres_playfield_output_resolves_each_35ns_sample_through_the_palette() {
         }
     );
     // A background/colour-1 pair blends the two resolved colours into the
-    // 70 ns framebuffer pixel.
+    // 70 ns framebuffer pixel (the classic-pitch canvas path); a 35 ns
+    // canvas emits the halves separately.
+    let (left, right) = denise_shres_playfield_output_pair(control, palette, 0, 1, &mut ham_color);
+    assert_eq!(left.color, rgb12_to_rgb24(0x0000));
+    assert_eq!(right.color, rgb12_to_rgb24(0x00F0));
     assert_eq!(
-        denise_shres_playfield_output(control, palette, 0, 1, &mut ham_color),
+        blend_shres_outputs(left, right),
         DenisePlayfieldOutput {
             color: rgb24_blend_halves(rgb12_to_rgb24(0x0000), rgb12_to_rgb24(0x00F0)),
             color_latch: 0x00F0,
             pf_mask: 2,
         }
     );
+}
+
+#[test]
+fn canvas_scale_doubles_only_for_programmable_shres_frames() {
+    let shres_write = BeamRegisterWrite {
+        vpos: 100,
+        hpos: 20,
+        offset: 0x100,
+        value: 0x4240,
+        source: BeamWriteSource::Copper,
+    };
+    let lores_write = BeamRegisterWrite {
+        value: 0x4200,
+        ..shres_write.clone()
+    };
+    // Standard scans never double, SHRES or not.
+    assert_eq!(canvas_scale_for(false, 0x4240, &[]), 1);
+    assert_eq!(canvas_scale_for(false, 0x4200, &[shres_write.clone()]), 1);
+    // Programmable scans double when SHRES is active at the frame start or
+    // arrives mid-frame.
+    assert_eq!(canvas_scale_for(true, 0x4240, &[]), 2);
+    assert_eq!(canvas_scale_for(true, 0x4200, &[shres_write]), 2);
+    assert_eq!(canvas_scale_for(true, 0x4200, &[lores_write]), 1);
 }
 
 #[test]
@@ -6212,12 +6240,15 @@ fn aga_shres_playfield_output_keeps_four_plane_indices() {
     };
     let mut ham_color = 0;
 
+    let (left, right) =
+        denise_shres_playfield_output_pair(control, palette, 14, 14, &mut ham_color);
     assert_eq!(
-        denise_shres_playfield_output(control, palette, 14, 14, &mut ham_color).color,
+        blend_shres_outputs(left, right).color,
         palette.rgb24(14) & 0x00FF_FFFF
     );
+    let (left, right) = denise_shres_playfield_output_pair(control, palette, 7, 7, &mut ham_color);
     assert_eq!(
-        denise_shres_playfield_output(control, palette, 7, 7, &mut ham_color).color,
+        blend_shres_outputs(left, right).color,
         palette.rgb24(7) & 0x00FF_FFFF
     );
 }

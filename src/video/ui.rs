@@ -1550,6 +1550,9 @@ impl AnalyzerTraceView {
 pub struct AnalyzerUnderlayView {
     pub fb: std::rc::Rc<Vec<u32>>,
     pub rows: usize,
+    /// Pixels per row: FB_WIDTH classically, twice that for a 35 ns
+    /// super-hi-res canvas.
+    pub width: usize,
 }
 
 pub struct FrameAnalyzerView {
@@ -2837,9 +2840,11 @@ fn underlay_sample(
     if !(0..FB_WIDTH as i64).contains(&fb_x) || !(0..underlay.rows as i64).contains(&fb_y) {
         return None;
     }
+    // The underlay canvas may carry a 35 ns pixel pitch; sample at its scale.
+    let canvas_scale = underlay.width / FB_WIDTH;
     underlay
         .fb
-        .get(fb_y as usize * FB_WIDTH + fb_x as usize)
+        .get(fb_y as usize * underlay.width + fb_x as usize * canvas_scale)
         .copied()
 }
 
@@ -5163,6 +5168,7 @@ mod tests {
         let underlay = AnalyzerUnderlayView {
             fb: std::rc::Rc::new(fb),
             rows: 285,
+            width: FB_WIDTH,
         };
         let rect = Rect {
             x: 0,
@@ -6323,6 +6329,7 @@ mod tests {
             underlay: Some(AnalyzerUnderlayView {
                 fb: std::rc::Rc::new(under_fb),
                 rows: underlay_rows,
+                width: FB_WIDTH,
             }),
         }));
         let mut panel = FrameAnalyzerPanel::new();

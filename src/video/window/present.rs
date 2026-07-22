@@ -27,10 +27,13 @@ pub(super) fn render_job_to_presentation(
     } = job;
     let render_result = bitplane::render_from_input(&input, fb);
     let geometry = input.geometry();
+    let canvas_scale = input.canvas_scale();
+    let canvas_width = FB_WIDTH * canvas_scale;
     let visible_start_vpos = input.visible_start_vpos();
     let field_rows = post_process_rendered_field(
         fb,
         geometry,
+        canvas_scale,
         input.presentation_h_window(),
         input.presentation_v_window(),
         visible_start_vpos,
@@ -41,12 +44,14 @@ pub(super) fn render_job_to_presentation(
     deinterlacer.push_field(
         fb,
         field_rows,
+        canvas_width,
         base.bplcon0 & 0x0004 != 0,
         base.long_field,
         !geometry.programmable,
     );
     let present_rows = deinterlacer.output_rows();
-    let active = present_rows * FB_WIDTH;
+    let present_width = deinterlacer.output_width();
+    let active = present_rows * present_width;
     presentation_fb.resize(active, 0);
     presentation_fb.copy_from_slice(&deinterlacer.output()[..active]);
     RenderWorkerResult {
@@ -55,6 +60,7 @@ pub(super) fn render_job_to_presentation(
         timing: render_result.timing,
         presentation_fb,
         present_rows,
+        present_width,
         standard_tv_aperture: uses_standard_pal_tv_aperture(geometry, present_rows, &base),
         input,
     }
@@ -368,15 +374,17 @@ pub(super) fn owner_name_from_code(code: u8) -> &'static str {
 pub(super) fn copy_present_frame(
     src_fb: &[u32],
     src_rows: usize,
+    src_width: usize,
     frame: &mut [u8],
     texture_scale: usize,
 ) {
-    debug_assert!(src_fb.len() >= src_rows * FB_WIDTH);
+    debug_assert!(src_fb.len() >= src_rows * src_width);
     debug_assert_eq!(
         frame.len(),
         texture_width(texture_scale) * texture_height(texture_scale) * 4
     );
-    let dst_stride = texture_width(texture_scale) * 4;
+    let dst_stride_px = texture_width(texture_scale);
+    let dst_stride = dst_stride_px * 4;
     let out_rows = present_height() * texture_scale;
     // The 570 woven scanlines map onto the 537-row 4:3 presentation (times
     // the HiDPI texture scale). Select whole source rows instead of blending
@@ -384,9 +392,31 @@ pub(super) fn copy_present_frame(
     // intermediate colours from line-to-line dithering.
     for y in 0..out_rows {
         let src_y = screenshot::scaled_source_row(y, src_rows, out_rows);
-        let row = &src_fb[src_y * FB_WIDTH..(src_y + 1) * FB_WIDTH];
+        let row = &src_fb[src_y * src_width..(src_y + 1) * src_width];
 
         let dst_off = y * dst_stride;
+        if src_width == dst_stride_px {
+            // A 35 ns canvas whose width matches the HiDPI texture row
+            // (the common Retina case): every canvas pixel is one texture
+            // pixel, no resampling.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    row.as_ptr() as *const u8,
+                    frame.as_mut_ptr().add(dst_off),
+                    src_width * 4,
+                );
+            }
+            continue;
+        }
+        if src_width != FB_WIDTH {
+            // Generic canvas-to-texture width map (nearest sample).
+            let dst = &mut frame[dst_off..dst_off + dst_stride];
+            for x in 0..dst_stride_px {
+                let src_x = x * src_width / dst_stride_px;
+                dst[x * 4..x * 4 + 4].copy_from_slice(&row[src_x].to_le_bytes());
+            }
+            continue;
+        }
         match texture_scale {
             1 => unsafe {
                 std::ptr::copy_nonoverlapping(
@@ -416,15 +446,18 @@ pub(super) fn copy_present_frame(
 pub(super) fn copy_window_present_frame(
     src_fb: &[u32],
     src_rows: usize,
+    src_width: usize,
     frame: &mut [u8],
     texture_scale: usize,
     overscan: Overscan,
     standard_tv_aperture: bool,
 ) {
-    if overscan == Overscan::Tv && standard_tv_aperture {
+    // The TV aperture is a standard-scan crop; standard scans always render
+    // the classic canvas width.
+    if overscan == Overscan::Tv && standard_tv_aperture && src_width == FB_WIDTH {
         copy_tv_aperture_to_window(src_fb, src_rows, frame, texture_scale);
     } else {
-        copy_present_frame(src_fb, src_rows, frame, texture_scale);
+        copy_present_frame(src_fb, src_rows, src_width, frame, texture_scale);
     }
 }
 
@@ -682,19 +715,20 @@ pub(super) fn save_present_frame(
     path: &std::path::Path,
     present_fb: &[u32],
     src_rows: usize,
+    src_width: usize,
     overscan: Overscan,
     standard_tv_aperture: bool,
 ) -> anyhow::Result<()> {
     if crate::envcfg::flag("COPPERLINE_SHOT_RAW") {
         return screenshot::save(
             path,
-            &present_fb[..src_rows * FB_WIDTH],
-            FB_WIDTH as u32,
+            &present_fb[..src_rows * src_width],
+            src_width as u32,
             src_rows as u32,
         );
     }
 
-    if overscan == Overscan::Tv && standard_tv_aperture {
+    if overscan == Overscan::Tv && standard_tv_aperture && src_width == FB_WIDTH {
         return screenshot::save_cropped_black_padded(
             path,
             present_fb,
@@ -707,11 +741,14 @@ pub(super) fn save_present_frame(
         );
     }
 
+    // A double-width (35 ns) canvas saves at double height too, keeping the
+    // 4:3 glass shape at the higher resolution.
+    let out_rows = present_height() * src_width / FB_WIDTH;
     screenshot::save_scaled_y(
         path,
         present_fb,
-        FB_WIDTH as u32,
+        src_width as u32,
         src_rows as u32,
-        present_height() as u32,
+        out_rows as u32,
     )
 }

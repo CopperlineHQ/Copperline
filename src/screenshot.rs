@@ -160,6 +160,37 @@ pub fn scale_y_into(fb: &[u32], width: usize, height: usize, out: usize, scaled:
     }
 }
 
+/// Narrow a wide canvas to `dst_width` pixels per row by averaging each
+/// source pixel group (cleared and resized). Consumers whose frame width
+/// is fixed (the video recorder) use this to fold a 35 ns-pitch canvas
+/// back to the classic width.
+pub fn downsample_x_into(
+    fb: &[u32],
+    src_width: usize,
+    rows: usize,
+    dst_width: usize,
+    out: &mut Vec<u32>,
+) {
+    debug_assert!(fb.len() >= src_width * rows);
+    debug_assert!(src_width >= dst_width && src_width.is_multiple_of(dst_width));
+    let group = (src_width / dst_width).max(1);
+    out.clear();
+    out.resize(dst_width * rows, 0);
+    for y in 0..rows {
+        let src = &fb[y * src_width..(y + 1) * src_width];
+        let dst = &mut out[y * dst_width..(y + 1) * dst_width];
+        for (x, px) in dst.iter_mut().enumerate() {
+            if group == 2 {
+                let a = src[x * 2];
+                let b = src[x * 2 + 1];
+                *px = ((a ^ b) & 0xFEFE_FEFE) / 2 + (a & b);
+            } else {
+                *px = src[x * group];
+            }
+        }
+    }
+}
+
 /// Centre-aligned bilinear horizontal resample, in place, of the leading
 /// `rows` rows of the `width`-pixel-wide `fb`: output pixel x samples
 /// source position x * src_num / src_den. The presentation uses this to

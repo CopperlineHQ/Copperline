@@ -1247,9 +1247,11 @@ impl M68kMachine {
         let Some(path) = self.dbg.as_mut().and_then(|d| d.next_shot_path()) else {
             return;
         };
-        let mut fb = vec![0u32; crate::video::MAX_FB_PIXELS];
+        let mut fb = vec![0u32; crate::video::MAX_CANVAS_PIXELS];
         crate::video::bitplane::render(&mut self.bus.bus, &mut fb);
         let geometry = self.bus.bus.frame_geometry();
+        let canvas_scale = self.bus.bus.frame_canvas_scale();
+        let canvas_width = crate::video::FB_WIDTH * canvas_scale;
         let mut present_rows = geometry.visible_lines;
         if !geometry.programmable {
             let visible_start = self.bus.bus.frame_visible_start_vpos();
@@ -1261,15 +1263,15 @@ impl M68kMachine {
             if let Some((src_x0, src_w)) = self.bus.bus.frame_presentation_h_window() {
                 crate::screenshot::stretch_rows_x_window(
                     &mut fb,
-                    crate::video::FB_WIDTH,
+                    canvas_width,
                     geometry.visible_lines,
-                    src_x0,
-                    src_w,
+                    src_x0 * canvas_scale as i32,
+                    src_w * canvas_scale as u32,
                 );
             } else if geometry.line_cck != 227 {
                 crate::screenshot::stretch_rows_x(
                     &mut fb,
-                    crate::video::FB_WIDTH,
+                    canvas_width,
                     geometry.visible_lines,
                     geometry.line_cck,
                     227,
@@ -1277,6 +1279,7 @@ impl M68kMachine {
             }
             present_rows = crate::video::present_common::apply_presentation_v_window(
                 &mut fb,
+                canvas_width,
                 geometry.visible_lines,
                 self.bus.bus.frame_presentation_v_window(),
             );
@@ -1284,9 +1287,9 @@ impl M68kMachine {
         match crate::screenshot::save_scaled_y(
             std::path::Path::new(&path),
             &fb,
-            crate::video::FB_WIDTH as u32,
+            canvas_width as u32,
             present_rows as u32,
-            crate::video::present_height() as u32,
+            (crate::video::present_height() * canvas_scale) as u32,
         ) {
             Ok(()) => log::info!("  screenshot: {path}"),
             Err(e) => log::warn!("  screenshot failed ({path}): {e:#}"),

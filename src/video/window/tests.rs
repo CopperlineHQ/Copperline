@@ -1408,7 +1408,7 @@ fn present_frame_copy_scales_texture_rows_at_hidpi() {
     src[(OUT_HEIGHT - 1) * FB_WIDTH] = 0xAABB_CCDD;
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
 
-    copy_present_frame(&src, OUT_HEIGHT, &mut frame, scale);
+    copy_present_frame(&src, OUT_HEIGHT, FB_WIDTH, &mut frame, scale);
 
     // The top output row samples the top source row exactly (the
     // centre-aligned position clamps at the edge), and horizontal
@@ -1421,6 +1421,42 @@ fn present_frame_copy_scales_texture_rows_at_hidpi() {
         pixel(&frame, 0, present_height() * scale - 1, scale),
         src[(OUT_HEIGHT - 1) * FB_WIDTH].to_le_bytes()
     );
+}
+
+#[test]
+fn present_frame_copy_passes_35ns_canvas_through_on_matching_hidpi_texture() {
+    // A double-width (35 ns) canvas whose row equals the HiDPI texture row
+    // copies 1:1: adjacent SHRES pixels stay distinct on the glass.
+    let scale = 2;
+    let src_width = FB_WIDTH * 2;
+    let rows = 400usize;
+    let mut src = vec![0u32; src_width * rows];
+    src[0] = 0x1122_3344;
+    src[1] = 0x5566_7788;
+    let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+
+    copy_present_frame(&src, rows, src_width, &mut frame, scale);
+
+    assert_eq!(pixel(&frame, 0, 0, 1), src[0].to_le_bytes());
+    assert_eq!(pixel(&frame, 1, 0, 1), src[1].to_le_bytes());
+}
+
+#[test]
+fn present_frame_copy_downmaps_35ns_canvas_on_single_scale_texture() {
+    // The same canvas on a non-HiDPI texture maps nearest: each texture
+    // pixel samples one of its pair.
+    let scale = 1;
+    let src_width = FB_WIDTH * 2;
+    let rows = 400usize;
+    let mut src = vec![0u32; src_width * rows];
+    src[0] = 0x1122_3344;
+    src[2] = 0x5566_7788;
+    let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+
+    copy_present_frame(&src, rows, src_width, &mut frame, scale);
+
+    assert_eq!(pixel(&frame, 0, 0, 1), src[0].to_le_bytes());
+    assert_eq!(pixel(&frame, 1, 0, 1), src[2].to_le_bytes());
 }
 
 #[test]
@@ -1442,7 +1478,15 @@ fn tv_window_copy_centres_reference_aperture_in_live_texture() {
     src[row_y * FB_WIDTH + standard_right] = right_marker;
 
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
-    copy_window_present_frame(&src, OUT_HEIGHT, &mut frame, scale, Overscan::Tv, true);
+    copy_window_present_frame(
+        &src,
+        OUT_HEIGHT,
+        FB_WIDTH,
+        &mut frame,
+        scale,
+        Overscan::Tv,
+        true,
+    );
 
     let dst_standard_left = TV_PAL_LIVE_PAD_X + (standard_left - TV_PAL_PRESENT_SOURCE_X);
     let dst_standard_right = dst_standard_left + 320 * 2 - 1;
@@ -1479,7 +1523,15 @@ fn tv_window_copy_black_pads_aperture_past_framebuffer() {
         src[row_y * FB_WIDTH + FB_WIDTH - 1] = edge;
 
         let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
-        copy_window_present_frame(&src, OUT_HEIGHT, &mut frame, scale, Overscan::Tv, true);
+        copy_window_present_frame(
+            &src,
+            OUT_HEIGHT,
+            FB_WIDTH,
+            &mut frame,
+            scale,
+            Overscan::Tv,
+            true,
+        );
 
         let dst_fb_right = TV_PAL_LIVE_PAD_X + (FB_WIDTH - 1 - TV_PAL_PRESENT_SOURCE_X);
         assert_eq!(
@@ -1509,7 +1561,15 @@ fn tv_window_copy_preserves_true_overscan_fetches() {
     src[TV_PAL_PRESENT_SOURCE_X] = standard_crop_edge;
 
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
-    copy_window_present_frame(&src, OUT_HEIGHT, &mut frame, scale, Overscan::Tv, false);
+    copy_window_present_frame(
+        &src,
+        OUT_HEIGHT,
+        FB_WIDTH,
+        &mut frame,
+        scale,
+        Overscan::Tv,
+        false,
+    );
 
     assert_eq!(pixel(&frame, 0, 0, scale), left_overscan.to_le_bytes());
     assert_ne!(pixel(&frame, 0, 0, scale), standard_crop_edge.to_le_bytes());

@@ -4711,6 +4711,17 @@ impl Bus {
         }
     }
 
+    /// Canvas supersample factor of the frame the renderer is about to
+    /// draw (see `bitplane::canvas_scale_for`): callers that render
+    /// straight from the bus size their buffer and stride with this.
+    pub fn frame_canvas_scale(&self) -> usize {
+        crate::video::bitplane::canvas_scale_for(
+            self.frame_geometry().programmable,
+            self.frame_render_base().bplcon0,
+            self.frame_render_events(),
+        )
+    }
+
     /// Beam-line count for the frame the renderer is about to draw. This is
     /// latched with `FrameGeometry`; the fallback covers old in-process
     /// snapshots whose transient geometry field predates `frame_lines`.

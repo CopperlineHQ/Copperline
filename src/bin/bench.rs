@@ -18,7 +18,7 @@ use copperline::config::{Config, ConfigOverrides, Overscan};
 use copperline::emulator::build_machine;
 use copperline::timebase::Instant;
 use copperline::video::deinterlace::Deinterlacer;
-use copperline::video::{bitplane, present_common, FB_WIDTH, MAX_FB_PIXELS};
+use copperline::video::{bitplane, present_common, FB_WIDTH, MAX_CANVAS_PIXELS};
 use std::path::PathBuf;
 
 struct StdoutLogger;
@@ -121,7 +121,7 @@ fn main() -> Result<()> {
     emu.set_paced(false);
     emu.reset_stats();
 
-    let mut fb = vec![0u32; MAX_FB_PIXELS];
+    let mut fb = vec![0u32; MAX_CANVAS_PIXELS];
     let mut deinterlacer = Deinterlacer::new();
     let mut last_rendered: Option<u64> = None;
     let mut rendered_frames: u64 = 0;
@@ -141,9 +141,11 @@ fn main() -> Result<()> {
                 let visible_start_vpos = emu.bus().frame_visible_start_vpos();
                 bitplane::render(emu.bus_mut(), &mut fb);
                 let geometry = emu.bus().frame_geometry();
+                let canvas_scale = emu.bus().frame_canvas_scale();
                 let field_rows = present_common::post_process_rendered_field(
                     &mut fb,
                     geometry,
+                    canvas_scale,
                     emu.bus().frame_presentation_h_window(),
                     emu.bus().frame_presentation_v_window(),
                     visible_start_vpos,
@@ -154,6 +156,7 @@ fn main() -> Result<()> {
                 deinterlacer.push_field(
                     &fb,
                     field_rows,
+                    FB_WIDTH * canvas_scale,
                     base.bplcon0 & 0x0004 != 0,
                     base.long_field,
                     !geometry.programmable,

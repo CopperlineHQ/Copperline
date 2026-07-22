@@ -41,6 +41,12 @@ pub const FB_PIXELS: usize = FB_WIDTH * FB_HEIGHT;
 pub const MAX_VISIBLE_LINES: usize = 626;
 pub const MAX_FB_PIXELS: usize = FB_WIDTH * MAX_VISIBLE_LINES;
 
+/// Largest render canvas: the tallest scan at the 35 ns (double-width)
+/// pixel pitch a programmable super-hi-res frame paints
+/// (`bitplane::canvas_scale_for`). Buffers passed to the render paths are
+/// sized for this so any frame's canvas fits.
+pub const MAX_CANVAS_PIXELS: usize = 2 * MAX_FB_PIXELS;
+
 /// Per-frame display geometry, latched at the frame wrap (like the
 /// interlace long-field flag). Standard PAL/NTSC frames report exactly
 /// the fixed-canvas values (FB_HEIGHT rows, 227-cck lines) so the

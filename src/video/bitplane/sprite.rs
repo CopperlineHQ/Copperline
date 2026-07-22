@@ -1143,7 +1143,9 @@ pub(super) fn render_attached_sprite_pair_lines(
             } else {
                 rgb12_to_rgb24(color_rgb12(color_latch))
             };
-            fb[fb_idx] = rgb24_to_rgba8_alpha(color, !transparent);
+            let canvas_scale = super::active_canvas_scale();
+            let out_base = y * FB_WIDTH * canvas_scale + x_usize * canvas_scale;
+            fb[out_base..out_base + canvas_scale].fill(rgb24_to_rgba8_alpha(color, !transparent));
         }
     }
     clxdat
@@ -1378,7 +1380,10 @@ pub(super) fn draw_sprite_line(
                 } else {
                     rgb12_to_rgb24(color_rgb12(color_latch))
                 };
-                fb[fb_idx] = rgb24_to_rgba8_alpha(color, !transparent);
+                let canvas_scale = super::active_canvas_scale();
+                let out_base = y * FB_WIDTH * canvas_scale + x * canvas_scale;
+                fb[out_base..out_base + canvas_scale]
+                    .fill(rgb24_to_rgba8_alpha(color, !transparent));
             }
             x_cursor += sprite_pixel_repeat;
         }

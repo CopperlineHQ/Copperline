@@ -192,7 +192,9 @@ through wasm-bindgen; the page's JavaScript drives everything from
   symmetric overscan margins, so the canvas carries none of the bezel-mask
   black columns of the full framebuffer; non-standard frames (true
   overscan, NTSC, programmable scans) keep the full 716-pixel width, as on
-  the desktop (see [the presentation internals](../internals/video.md)).
+  the desktop, and a programmable super-hi-res scan carries its double
+  (1432-pixel, 35 ns pitch) canvas straight to the browser canvas (see
+  [the presentation internals](../internals/video.md)).
   There is no wgpu in the build, which keeps the wasm
   around 1.4 MiB (about 0.6 MiB over the wire).
 - **Audio**: Paula's 44.1 kHz stereo mix is drained once per animation frame
