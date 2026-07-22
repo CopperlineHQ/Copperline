@@ -1863,9 +1863,9 @@ floppySoundsToggle?.addEventListener('change', () => {
 
 // Optional in the page shell: a checkbox #mono-audio mixes the left and
 // right channels into both speakers (the desktop's [audio]
-// channel_mode = "mono"). Without the element the output stays stereo;
-// the checkbox's initial state is applied at boot, so a shell can
-// default it on.
+// channel_mode = "mono"). Without the element (and no mono_audio key in
+// copperline.json) the output stays stereo; the checkbox's initial
+// state is applied at boot, so a shell can default it on.
 const monoAudioToggle = $('mono-audio');
 // The config file's mono_audio on a shell without the checkbox: stashed
 // here and applied at boot.

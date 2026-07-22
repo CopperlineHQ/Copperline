@@ -353,7 +353,8 @@ elements, and pages without them are untouched:
 - `#mono-audio` (checkbox): mixes the left and right channels into both
   speakers (the desktop's `[audio] channel_mode = "mono"`), live and at
   boot, so a shell can default to mono by shipping the box checked.
-  Without the element the output stays stereo.
+  Without the element the output stays stereo unless the
+  [configuration file](#browser-page-config) sets `mono_audio`.
 - `#floppy-speed` (a `<select>` with option values `100`, `200`, `400`,
   `800`, and `0` for turbo): hosts the floppy drive speed control, letting
   the page place and style it. Unlike the other hooks this one is always
@@ -418,6 +419,7 @@ elements, and pages without them are untouched:
   serial/BBS bridge, described in
   [the serial bridge section](#browser-serial-bridge).
 
+(browser-page-config)=
 ### The page configuration file
 
 A site can set its defaults in one hand-editable file instead of editing
