@@ -901,8 +901,9 @@ net = "nat"   # or "loopback"; "none" for an isolated NIC
 ```
 
 Fits a Commodore A2065 Ethernet board (Am7990 LANCE) on the Zorro chain;
-`--a2065-net BACKEND` is the matching per-run flag. `net` selects the host
-network backend:
+`--a2065-net BACKEND` is the matching per-run flag, and the launcher's
+**I/O Ports** tab (Ethernet section) has the same picker. `net` selects the
+host network backend:
 
 - `"nat"` -- userspace NAT: the guest gets outbound IPv4 internet through a
   virtual gateway with no host privileges or setup, identically on Linux,

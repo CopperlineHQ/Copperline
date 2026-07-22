@@ -4523,6 +4523,47 @@ fn draw_launcher(
             );
         }
     }
+    // The NAT backend delivers inbound traffic on the host's schedule, not
+    // the emulated clock, so warn that runs stop being reproducible the
+    // moment packets flow (loopback and an isolated NIC stay deterministic).
+    if state.tab == LauncherTab::IoPorts && setup.ethernet_breaks_determinism() {
+        let note_top = launcher_row_y(
+            rect,
+            launcher::rows(
+                LauncherTab::IoPorts,
+                state.setup.parallel_device(),
+                state.setup.serial_mode(),
+            )
+            .len()
+                + 1,
+        );
+        draw_panel_text(
+            frame,
+            launcher_pane_x(rect),
+            note_top,
+            "Warning: NAT networking is non-deterministic.",
+            PANEL_TEXT_ACCENT,
+            1,
+            scale,
+        );
+        for (i, line) in [
+            "Inbound traffic follows the host clock, so input recordings",
+            "and save-state replays are not byte-identical while it flows.",
+        ]
+        .iter()
+        .enumerate()
+        {
+            draw_panel_text(
+                frame,
+                launcher_pane_x(rect) + 8,
+                note_top + 16 + i * 14,
+                line,
+                PANEL_TEXT,
+                1,
+                scale,
+            );
+        }
+    }
     // Status / error line.
     if let Some(status) = &state.status {
         let color = if status.error {
@@ -6697,6 +6738,23 @@ mod tests {
         };
         draw(&mut frame, scale, &ui, None, None, false, false, labels());
         save(&frame, "launcher-io-ports");
+
+        // I/O Ports with the A2065 on the NAT backend, to check the
+        // non-determinism warning under the rows.
+        let mut frame = vec![0u8; w * h * 4];
+        let mut state = LauncherState::new(launcher::MachineSetup::default());
+        state.tab = LauncherTab::IoPorts;
+        // Not fitted -> Isolated -> Loopback -> NAT (without the net-nat
+        // feature this wraps back to Not fitted and no warning is shown).
+        for _ in 0..3 {
+            state.setup.cycle(LauncherField::Ethernet, true);
+        }
+        let ui = UiState {
+            menu_open: false,
+            panel: Some(Panel::Launcher(Box::new(state))),
+        };
+        draw(&mut frame, scale, &ui, None, None, false, false, labels());
+        save(&frame, "launcher-ethernet-warning");
 
         // I/O Ports with the printer selected and a long output path set, to
         // check the "Output file" value and the Browse/Clear placement.

@@ -28,6 +28,7 @@ use crate::config::{
     RawConfig, RawDrive, RawFilesysMount, RawFloppyDrive, RawZorroBoard, RtgCard, ScsiController,
     SerialMode, WarpSpeed,
 };
+use crate::net::NetConfig;
 use crate::zorro::{ConfigOption, ConfigOptionKind, LoadedZorroBoard};
 use anyhow::Result;
 use std::borrow::Cow;
@@ -307,6 +308,9 @@ pub enum LauncherField {
     ParallelOutput,
     SamplerInput,
     SamplerGain,
+    /// The A2065 Ethernet board: absent, or fitted with a chosen host
+    /// backend (isolated / loopback / NAT).
+    Ethernet,
     /// Inert field for a non-interactive [`RowKind::SectionHeader`] row.
     SectionHeader,
     // A/V and emulation
@@ -524,6 +528,7 @@ const PARALLEL_ROWS_SAMPLER: [Row; 3] = [
     row(F::SamplerInput, "Audio input", Cycle),
     row(F::SamplerGain, "Input gain", Cycle),
 ];
+const ETHERNET_ROWS: [Row; 1] = [row(F::Ethernet, "A2065 board", Cycle)];
 const AV_EMULATION_ROWS: [Row; 12] = [
     row(F::AudioDevice, "Audio output", Cycle),
     row(F::AudioChannelMode, "Channel mode", Cycle),
@@ -584,8 +589,9 @@ pub fn rows(
 }
 
 /// The I/O Ports tab: a `Serial:` section (only in a `midi` build, which is the
-/// only build with serial rows) then a `Parallel:` section, each under a greyed
-/// heading and each showing only the rows relevant to its selected device/mode.
+/// only build with serial rows), a `Parallel:` section, then an `Ethernet:`
+/// section, each under a greyed heading and each showing only the rows relevant
+/// to its selected device/mode.
 fn io_ports_rows(serial_mode: SerialMode, parallel_device: ParallelDevice) -> Vec<Row> {
     let mut rows = Vec::new();
     let serial = serial_rows(serial_mode);
@@ -595,6 +601,8 @@ fn io_ports_rows(serial_mode: SerialMode, parallel_device: ParallelDevice) -> Ve
     }
     rows.push(section_header("Parallel:"));
     rows.extend_from_slice(parallel_rows(parallel_device));
+    rows.push(section_header("Ethernet:"));
+    rows.extend_from_slice(&ETHERNET_ROWS);
     rows
 }
 
@@ -764,6 +772,14 @@ const SERIAL_MODES: [SerialMode; 6] = [
     SerialMode::TcpConnect,
     SerialMode::Pty,
 ];
+// `None` = no A2065 fitted; `Some(NetConfig::None)` fits the board with an
+// isolated NIC (the guest sees the hardware but no traffic ever arrives).
+const ETHERNET_CHOICES: [Option<NetConfig>; 4] = [
+    None,
+    Some(NetConfig::None),
+    Some(NetConfig::Loopback),
+    Some(NetConfig::Nat),
+];
 
 /// Stereo-separation presets the picker steps through (percent), ascending so
 /// the right arrow steps up (wrapping 100 -> 0) and the left arrow steps down.
@@ -879,6 +895,10 @@ pub struct MachineSetup {
     /// edited in the I/O Ports tab's Parallel section.
     sampler_input: Option<String>,
     sampler_gain_db: f32,
+    /// The A2065 Ethernet board, edited in the I/O Ports tab's Ethernet
+    /// section: `None` = not fitted, `Some(backend)` fits the board with that
+    /// host backend (`NetConfig::None` = fitted but isolated).
+    a2065_net: Option<NetConfig>,
     /// Input device names for the sampler picker: filled when the screen opens
     /// and re-read each time the field is cycled, so a reconnected device
     /// appears.
@@ -1006,6 +1026,7 @@ impl MachineSetup {
             parallel_output: cfg.parallel.printer_output.clone(),
             sampler_input: cfg.parallel.sampler_input.clone(),
             sampler_gain_db: cfg.parallel.sampler_gain_db,
+            a2065_net: cfg.a2065_net,
             // Filled by refresh_sampler_inputs on open, like the audio devices.
             sampler_input_devices: Vec::new(),
             // Left empty here so config construction stays side-effect free; the
@@ -1078,6 +1099,15 @@ impl MachineSetup {
 
     pub fn parallel_device(&self) -> ParallelDevice {
         self.parallel_device
+    }
+
+    /// Whether the selected Ethernet backend carries traffic on the host's
+    /// schedule rather than the emulated clock, breaking byte-identical
+    /// replay (the I/O Ports tab shows a warning). The loopback backend
+    /// echoes frames deterministically and an isolated or absent NIC never
+    /// sees traffic, so only NAT qualifies.
+    pub fn ethernet_breaks_determinism(&self) -> bool {
+        self.a2065_net == Some(NetConfig::Nat)
     }
 
     /// Re-read every host device list (MIDI endpoints + audio outputs + sampler
@@ -1342,6 +1372,11 @@ impl MachineSetup {
                 .then(|| ParallelDevice::Printer.label().to_string()),
             ParallelDevice::Sampler => Some(ParallelDevice::Sampler.label().to_string()),
         };
+        // Ethernet: no profile fits an A2065 by default, so the board is
+        // emitted whenever it is on (absent key = not fitted).
+        raw.a2065.net = self
+            .a2065_net
+            .map(|n| crate::net::net_config_name(n).to_string());
         // The Audio output picker is one of default / a named device / Disabled.
         // A named device sets output_device; Disabled sets output_enabled=false
         // (the resolved default is true, so it is omitted otherwise).
@@ -1835,6 +1870,12 @@ impl MachineSetup {
                 .clone()
                 .unwrap_or_else(|| "Default".to_string()),
             F::SamplerGain => sampler_gain_label(self.sampler_gain_db),
+            F::Ethernet => match self.a2065_net {
+                None => "Not fitted".to_string(),
+                Some(NetConfig::None) => "Isolated".to_string(),
+                Some(NetConfig::Loopback) => "Loopback".to_string(),
+                Some(NetConfig::Nat) => "NAT".to_string(),
+            },
             F::AudioDevice => self.audio_output.label().to_string(),
             F::AudioChannelMode => match self.audio_channel_mode {
                 ChannelMode::Stereo => "Stereo".to_string(),
@@ -2028,6 +2069,15 @@ impl MachineSetup {
             F::SamplerGain => {
                 self.sampler_gain_db =
                     cycle_floats(&SAMPLER_GAIN_STEPS, self.sampler_gain_db as f64, forward) as f32;
+            }
+            F::Ethernet => {
+                // NAT is only on offer when the userspace NAT is compiled in;
+                // without it the choice would fit a board that never connects.
+                let choices: Vec<Option<NetConfig>> = ETHERNET_CHOICES
+                    .into_iter()
+                    .filter(|c| cfg!(feature = "net-nat") || *c != Some(NetConfig::Nat))
+                    .collect();
+                self.a2065_net = cycle_slice(&choices, self.a2065_net, forward);
             }
             F::AudioDevice => {
                 // Re-read on each step so a device connected since the screen
@@ -3060,19 +3110,70 @@ mod tests {
 
     #[cfg(feature = "midi")]
     #[test]
-    fn io_ports_tab_groups_serial_and_parallel_under_headers() {
+    fn io_ports_tab_groups_serial_parallel_and_ethernet_under_headers() {
         let r = rows(LauncherTab::IoPorts, ParallelDevice::None, SerialMode::Midi);
         let headers: Vec<_> = r
             .iter()
             .filter(|x| x.kind == RowKind::SectionHeader)
             .map(|x| x.label)
             .collect();
-        assert_eq!(headers, ["Serial:", "Parallel:"]);
+        assert_eq!(headers, ["Serial:", "Parallel:", "Ethernet:"]);
         // Serial section: the Device / Mode selector, and (in MIDI) the endpoints.
         assert!(r.iter().any(|x| x.field == LauncherField::SerialMode));
         assert!(r.iter().any(|x| x.field == LauncherField::MidiOut));
         // Parallel section: the device selector.
         assert!(r.iter().any(|x| x.field == LauncherField::ParallelDevice));
+        // Ethernet section: the A2065 board selector.
+        assert!(r.iter().any(|x| x.field == LauncherField::Ethernet));
+    }
+
+    #[test]
+    fn a2065_board_cycles_and_round_trips() {
+        let mut s = MachineSetup::default();
+        assert_eq!(s.value_label(LauncherField::Ethernet), "Not fitted");
+        assert!(s.to_raw().a2065.net.is_none());
+        assert!(!s.ethernet_breaks_determinism());
+
+        s.cycle(LauncherField::Ethernet, true);
+        assert_eq!(s.value_label(LauncherField::Ethernet), "Isolated");
+        s.cycle(LauncherField::Ethernet, true);
+        assert_eq!(s.value_label(LauncherField::Ethernet), "Loopback");
+        // Loopback echoes frames on the emulated clock: no determinism warning.
+        assert!(!s.ethernet_breaks_determinism());
+
+        // The fitted board and its backend survive a save/load round trip.
+        let raw = s.to_raw();
+        assert_eq!(raw.a2065.net.as_deref(), Some("loopback"));
+        let back = MachineSetup::from_raw(&raw).unwrap();
+        assert_eq!(back.a2065_net, Some(NetConfig::Loopback));
+
+        #[cfg(feature = "net-nat")]
+        {
+            s.cycle(LauncherField::Ethernet, true);
+            assert_eq!(s.value_label(LauncherField::Ethernet), "NAT");
+            // Only NAT carries traffic on the host's schedule.
+            assert!(s.ethernet_breaks_determinism());
+            assert_eq!(s.to_raw().a2065.net.as_deref(), Some("nat"));
+            s.cycle(LauncherField::Ethernet, true);
+        }
+        #[cfg(not(feature = "net-nat"))]
+        {
+            // Without the userspace NAT the picker skips straight past it.
+            s.cycle(LauncherField::Ethernet, true);
+        }
+        assert_eq!(s.value_label(LauncherField::Ethernet), "Not fitted");
+    }
+
+    #[test]
+    fn an_isolated_a2065_round_trips_as_net_none() {
+        let mut s = MachineSetup::default();
+        s.cycle(LauncherField::Ethernet, true);
+        let raw = s.to_raw();
+        // Fitted-but-isolated is `net = "none"`; not fitted is an absent key.
+        assert_eq!(raw.a2065.net.as_deref(), Some("none"));
+        let back = MachineSetup::from_raw(&raw).unwrap();
+        assert_eq!(back.a2065_net, Some(NetConfig::None));
+        assert_eq!(back.value_label(LauncherField::Ethernet), "Isolated");
     }
 
     #[test]

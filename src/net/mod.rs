@@ -103,6 +103,16 @@ pub fn parse_net_config(s: &str) -> Option<NetConfig> {
     }
 }
 
+/// The canonical config-file spelling of a [`NetConfig`]: the inverse of
+/// [`parse_net_config`], used when emitting a config from the launcher.
+pub fn net_config_name(cfg: NetConfig) -> &'static str {
+    match cfg {
+        NetConfig::None => "none",
+        NetConfig::Loopback => "loopback",
+        NetConfig::Nat => "nat",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
