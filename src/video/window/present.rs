@@ -32,6 +32,7 @@ pub(super) fn render_job_to_presentation(
         fb,
         geometry,
         input.presentation_h_window(),
+        input.presentation_v_window(),
         visible_start_vpos,
         h_shift,
         overscan,

@@ -3283,6 +3283,9 @@ pub struct RenderInput {
     /// Sync-anchored glass window for programmable scans
     /// ([`crate::bus::Bus::frame_presentation_h_window`]).
     presentation_h_window: Option<(i32, u32)>,
+    /// Vertical counterpart
+    /// ([`crate::bus::Bus::frame_presentation_v_window`]).
+    presentation_v_window: Option<(i32, u32)>,
     visible_start_vpos: u32,
     palette_split: (Palette, Palette, bool),
     render_base: RenderRegisterSnapshot,
@@ -3319,6 +3322,7 @@ impl RenderInput {
         Self {
             geometry: bus.frame_geometry(),
             presentation_h_window: bus.frame_presentation_h_window(),
+            presentation_v_window: bus.frame_presentation_v_window(),
             visible_start_vpos: bus.frame_visible_start_vpos(),
             palette_split: bus.frame_palette_split(),
             render_base: bus.frame_render_base(),
@@ -3355,6 +3359,7 @@ impl RenderInput {
         }
         self.geometry = bus.frame_geometry();
         self.presentation_h_window = bus.frame_presentation_h_window();
+        self.presentation_v_window = bus.frame_presentation_v_window();
         self.visible_start_vpos = bus.frame_visible_start_vpos();
         self.palette_split = bus.frame_palette_split();
         self.render_base = bus.frame_render_base();
@@ -3406,6 +3411,10 @@ impl RenderInput {
 
     pub fn presentation_h_window(&self) -> Option<(i32, u32)> {
         self.presentation_h_window
+    }
+
+    pub fn presentation_v_window(&self) -> Option<(i32, u32)> {
+        self.presentation_v_window
     }
 
     pub fn visible_start_vpos(&self) -> u32 {
@@ -4626,6 +4635,7 @@ fn render_planned_playfield_line(
                 (
                     shres_composite_sample(left, right),
                     denise_shres_playfield_output(
+                        pixel_control,
                         palette,
                         left.idx & plane_mask,
                         right.idx & plane_mask,
@@ -5037,6 +5047,7 @@ fn draw_manual_bpl_word(
                 .sample(source_control, native_idx + 1)
                 .unwrap_or_default();
             denise_shres_playfield_output(
+                source_control,
                 source_palette,
                 left_sample.idx & plane_mask,
                 right_sample.idx & plane_mask,

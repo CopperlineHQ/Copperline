@@ -801,6 +801,23 @@ impl Agnus {
         (strt < stop && stop <= u32::from(self.htotal)).then_some((strt, stop))
     }
 
+    /// The programmed vertical sync pulse (VSSTRT..VSSTOP, lines) of a
+    /// VARBEAMEN scan whose vertical sync generator is under programmable
+    /// control, or None when the mode leaves sync on the hardware defaults
+    /// or programs a degenerate pulse.
+    pub fn programmable_vsync_window(&self) -> Option<(u32, u32)> {
+        const BEAMCON0_VARVSYEN: u16 = 1 << 9;
+        if !self.revision.is_ecs()
+            || self.beamcon0 & BEAMCON0_VARBEAMEN == 0
+            || self.beamcon0 & BEAMCON0_VARVSYEN == 0
+        {
+            return None;
+        }
+        let strt = u32::from(self.vsstrt);
+        let stop = u32::from(self.vsstop);
+        (strt < stop && stop <= u32::from(self.vtotal)).then_some((strt, stop))
+    }
+
     pub fn programmable_line_cck(&self) -> Option<u32> {
         if !self.revision.is_ecs() || self.beamcon0 & BEAMCON0_VARBEAMEN == 0 {
             return None;

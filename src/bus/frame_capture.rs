@@ -25,6 +25,7 @@ impl Bus {
             self.last_frame_visible_start_vpos = self.current_frame_visible_start_vpos;
             self.last_frame_geometry = self.current_frame_geometry;
             self.last_frame_presentation_h_window = self.current_frame_presentation_h_window;
+            self.last_frame_presentation_v_window = self.current_frame_presentation_v_window;
             self.last_frame_render_events = std::mem::take(&mut self.current_frame_render_events);
         } else {
             self.last_frame_render_base = None;
@@ -143,6 +144,7 @@ impl Bus {
         self.current_frame_render_base.long_field = self.agnus.lof;
         self.current_frame_geometry = self.compute_frame_geometry();
         self.current_frame_presentation_h_window = self.compute_presentation_h_window();
+        self.current_frame_presentation_v_window = self.compute_presentation_v_window();
         if self.current_frame_geometry.programmable {
             self.current_frame_visible_start_vpos = self.current_frame_geometry.visible_start_vpos;
             self.lazy_collision_vpos = self.current_frame_visible_start_vpos;

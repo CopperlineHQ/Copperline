@@ -1250,34 +1250,42 @@ impl M68kMachine {
         let mut fb = vec![0u32; crate::video::MAX_FB_PIXELS];
         crate::video::bitplane::render(&mut self.bus.bus, &mut fb);
         let geometry = self.bus.bus.frame_geometry();
+        let mut present_rows = geometry.visible_lines;
         if !geometry.programmable {
             let visible_start = self.bus.bus.frame_visible_start_vpos();
             crate::video::present_common::center_present_frame_for_visible_start(
                 &mut fb,
                 visible_start,
             );
-        } else if let Some((src_x0, src_w)) = self.bus.bus.frame_presentation_h_window() {
-            crate::screenshot::stretch_rows_x_window(
+        } else {
+            if let Some((src_x0, src_w)) = self.bus.bus.frame_presentation_h_window() {
+                crate::screenshot::stretch_rows_x_window(
+                    &mut fb,
+                    crate::video::FB_WIDTH,
+                    geometry.visible_lines,
+                    src_x0,
+                    src_w,
+                );
+            } else if geometry.line_cck != 227 {
+                crate::screenshot::stretch_rows_x(
+                    &mut fb,
+                    crate::video::FB_WIDTH,
+                    geometry.visible_lines,
+                    geometry.line_cck,
+                    227,
+                );
+            }
+            present_rows = crate::video::present_common::apply_presentation_v_window(
                 &mut fb,
-                crate::video::FB_WIDTH,
                 geometry.visible_lines,
-                src_x0,
-                src_w,
-            );
-        } else if geometry.line_cck != 227 {
-            crate::screenshot::stretch_rows_x(
-                &mut fb,
-                crate::video::FB_WIDTH,
-                geometry.visible_lines,
-                geometry.line_cck,
-                227,
+                self.bus.bus.frame_presentation_v_window(),
             );
         }
         match crate::screenshot::save_scaled_y(
             std::path::Path::new(&path),
             &fb,
             crate::video::FB_WIDTH as u32,
-            geometry.visible_lines as u32,
+            present_rows as u32,
             crate::video::present_height() as u32,
         ) {
             Ok(()) => log::info!("  screenshot: {path}"),

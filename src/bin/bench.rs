@@ -145,6 +145,7 @@ fn main() -> Result<()> {
                     &mut fb,
                     geometry,
                     emu.bus().frame_presentation_h_window(),
+                    emu.bus().frame_presentation_v_window(),
                     visible_start_vpos,
                     0,
                     Overscan::Tv,

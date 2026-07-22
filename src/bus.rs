@@ -869,6 +869,10 @@ pub struct Bus {
     current_frame_presentation_h_window: Option<(i32, u32)>,
     #[serde(skip)]
     last_frame_presentation_h_window: Option<(i32, u32)>,
+    #[serde(skip)]
+    current_frame_presentation_v_window: Option<(i32, u32)>,
+    #[serde(skip)]
+    last_frame_presentation_v_window: Option<(i32, u32)>,
     lazy_collision_vpos: u32,
     lazy_collision_hpos: u32,
     /// Sticky gate for the per-frame collision accumulation. Collision results
@@ -2405,6 +2409,8 @@ impl Bus {
             ),
             current_frame_presentation_h_window: None,
             last_frame_presentation_h_window: None,
+            current_frame_presentation_v_window: None,
+            last_frame_presentation_v_window: None,
             last_frame_geometry: FrameGeometry::standard(
                 RENDER_VISIBLE_START_VPOS,
                 PAL_LINES,
@@ -3062,6 +3068,8 @@ impl Bus {
             FrameGeometry::standard(RENDER_VISIBLE_START_VPOS, frame_lines, false);
         self.current_frame_presentation_h_window = None;
         self.last_frame_presentation_h_window = None;
+        self.current_frame_presentation_v_window = None;
+        self.last_frame_presentation_v_window = None;
         self.lazy_collision_vpos = RENDER_VISIBLE_START_VPOS;
         self.lazy_collision_hpos = RENDER_COPPER_WAIT_HPOS_FB0;
         self.collision_tracking_active = false;
@@ -3288,6 +3296,8 @@ impl Bus {
         self.last_frame_geometry.visible_start_vpos = self.current_frame_visible_start_vpos;
         self.current_frame_presentation_h_window = self.compute_presentation_h_window();
         self.last_frame_presentation_h_window = self.current_frame_presentation_h_window;
+        self.current_frame_presentation_v_window = self.compute_presentation_v_window();
+        self.last_frame_presentation_v_window = self.current_frame_presentation_v_window;
         self.lazy_collision_vpos = self.current_frame_visible_start_vpos;
         self.ocs_same_line_diw_start_blocked_vpos = None;
         self.reset_frame_capture_buffers();
@@ -4660,6 +4670,37 @@ impl Bus {
         let visible_cck = geometry.line_cck.saturating_sub(sync_len).max(1);
         let src_x0 = (hsstop as i32 - CAPTURE_APERTURE_START_CCK) * 4;
         Some((src_x0, visible_cck * 4))
+    }
+
+    /// The vertical glass window for presenting a programmable scan, as
+    /// (captured rows above the glass top negated, glass rows): a multisync
+    /// monitor locks its vertical deflection to the programmed sync pulse,
+    /// so the glass covers the frame from the sync trailing edge to the
+    /// next pulse and the picture sits where the mode's own porches place
+    /// it. The offset is the captured window's first line relative to
+    /// VSSTOP. None on standard frames or when the mode leaves vertical
+    /// sync unprogrammed (the presentation then keeps stretching the
+    /// captured rows over the full glass height).
+    pub fn frame_presentation_v_window(&self) -> Option<(i32, u32)> {
+        if self.last_frame_render_base.is_some() {
+            self.last_frame_presentation_v_window
+        } else {
+            self.current_frame_presentation_v_window
+        }
+    }
+
+    /// Vertical counterpart of `compute_presentation_h_window`, latched at
+    /// the same frame wrap.
+    pub(crate) fn compute_presentation_v_window(&self) -> Option<(i32, u32)> {
+        let geometry = self.current_frame_geometry;
+        if !geometry.programmable {
+            return None;
+        }
+        let (vsstrt, vsstop) = self.agnus.programmable_vsync_window()?;
+        let sync_len = vsstop - vsstrt;
+        let glass_lines = geometry.frame_lines.saturating_sub(sync_len).max(1);
+        let offset = geometry.visible_start_vpos as i32 - vsstop as i32;
+        Some((offset, glass_lines))
     }
 
     pub fn frame_geometry(&self) -> FrameGeometry {

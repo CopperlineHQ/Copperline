@@ -326,6 +326,7 @@ impl WebEmu {
             &mut self.fb,
             geometry,
             self.emu.bus().frame_presentation_h_window(),
+            self.emu.bus().frame_presentation_v_window(),
             visible_start_vpos,
             0,
             Overscan::Tv,
