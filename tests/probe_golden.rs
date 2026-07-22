@@ -52,6 +52,9 @@ const BOOTBLOCK_SIZE: usize = 1024;
 enum Machine {
     Ocs,
     Ecs,
+    /// A1200 shape (68EC020, AGA, 2M chip) for probes of AGA-only
+    /// behaviour (FMODE wide fetches, extended BPLCON1 scroll).
+    Aga,
 }
 
 /// One golden-render probe: name, main-program binary, emulated seconds
@@ -83,6 +86,15 @@ const fn probe_ecs(name: &'static str, program: &'static str, seconds: f64) -> P
         program,
         seconds,
         machine: Machine::Ecs,
+    }
+}
+
+const fn probe_aga(name: &'static str, program: &'static str, seconds: f64) -> Probe {
+    Probe {
+        name,
+        program,
+        seconds,
+        machine: Machine::Aga,
     }
 }
 
@@ -130,16 +142,20 @@ fn probe_config(adf: &Path, machine: Machine) -> String {
     let chipset = match machine {
         Machine::Ocs => "revision = \"OCS\"\n",
         Machine::Ecs => "revision = \"ECS\"\nagnus = \"8372A\"\ndenise = \"OCS\"\n",
+        Machine::Aga => "revision = \"AGA\"\n",
+    };
+    let (cpu, memory) = match machine {
+        Machine::Ocs | Machine::Ecs => ("68000", "chip = \"512K\"\nslow = \"512K\"\n"),
+        Machine::Aga => ("68EC020", "chip = \"2M\"\n"),
     };
     format!(
         "rom = \"<bundled-aros>\"\n\
          [display]\n\
          overscan = \"full\"\n\
          [cpu]\n\
-         model = \"68000\"\n\
+         model = \"{cpu}\"\n\
          [memory]\n\
-         chip = \"512K\"\n\
-         slow = \"512K\"\n\
+         {memory}\
          [chipset]\n\
          {chipset}\
          video = \"PAL\"\n\
@@ -356,6 +372,11 @@ probe_tests! {
     // at the DIW stop (the KS 2.05 first-text-column regression class);
     // vAmiga-verified band by band.
     golden_ddfprobe_hscroll => probe_ecs("ddfprobe-hscroll", "ddfprobe-hscroll.bin", 16.0);
+    // AGA wide-FMODE off-grid DDFSTRT scroll fold: taps in the last
+    // `earliness` px of the gulp window show the next gulp, one gulp left
+    // (the Alien Breed II AGA horizontal-scroll regression class, issue
+    // #248); FS-UAE-verified band by band.
+    golden_ddfprobe_agafold => probe_aga("ddfprobe-agafold", "ddfprobe-agafold.bin", 16.0);
     // CPU pacing bars under BLTPRI copy/fill/line blits (the Rampage
     // "present" flicker / BLS fence regression class).
     golden_bltprobe_pace => probe("bltprobe-pace", "bltprobe-pace.bin", 16.0);
