@@ -113,6 +113,10 @@ async function fetchBytes(url, label) {
 let bootRom = null; // { rom, ext, label } - what the boot button will fit
 let pendingDisk = null; // { bytes, name } - inserted right after boot
 let df0Name = null; // what the page believes is in DF0, for bug reports
+// The page's copy of the last disk that went into DF0. The inserted bytes
+// live inside the machine, so switching the machine model (which builds a
+// new one) re-inserts from this stash; kept forever, like the ROM stash.
+let lastDisk = null; // { bytes, name }
 
 function refreshBootButton() {
   bootBtn.disabled = !(wasm && bootRom);
@@ -138,6 +142,7 @@ function fitRom(bytes, label) {
 // Route disk bytes from any source (picker, URL, drop): insert into a
 // running machine, or stash them for the boot button to insert after boot.
 function insertDisk(bytes, name) {
+  lastDisk = { bytes, name };
   if (emu) {
     emu.insert_floppy(0, bytes, name);
     setLoadStatus(`DF0: ${name} (write-protected)`);
@@ -284,6 +289,7 @@ async function load() {
     setLoadStatus('loading emulator...');
     wasm = await init();
     buildInfo = WebEmu.build_info?.() ?? null;
+    populateMachineSelect();
   } catch (e) {
     setLoadStatus(`failed to load the emulator: ${e.message ?? e}`);
     console.error(e);
@@ -329,7 +335,9 @@ async function boot() {
     // builds itself: nothing the boot button can reach (it stays disabled
     // until a ROM exists), but a save state carries its own ROM and
     // replaces the whole machine, so a restore can start from one.
-    const machine = new WebEmu();
+    // The model argument picks the machine profile; undefined (an older
+    // shell, or the list not knowing better) builds the default A500.
+    const machine = new WebEmu(machineModel ?? undefined);
     if (bootRom) machine.load_rom(bootRom.rom, bootRom.ext ?? undefined);
 
     // A reboot after an emulator error builds a new audio stack; close the
@@ -384,7 +392,9 @@ async function boot() {
     setLoadStatus(
       // A ROM-less boot is only ever a landing place for a state load,
       // which overwrites this line the moment it lands.
-      (bootRom ? `booted ${bootRom.label}` : 'machine built, waiting for the state') +
+      (bootRom
+        ? `booted ${bootRom.label}${machineModel ? ` on the ${machineModel}` : ''}`
+        : 'machine built, waiting for the state') +
         (df0Name ? ` - DF0: ${df0Name} (write-protected)` : ''),
     );
 
@@ -1686,6 +1696,8 @@ function restoreState(bytes, source) {
   df0Name = emu.disk_name(0) ?? null;
   lastFddTrack = null;
   updateStatusDisks();
+  // So did the machine itself, model and all.
+  syncMachineSelect();
   // Paint the restored screen now: a load into a paused machine steps no
   // frames, so nothing else would.
   presentFrame();
@@ -1915,6 +1927,128 @@ function setFloppySpeed(value) {
 }
 floppySpeedSel.addEventListener('change', () => {
   setFloppySpeed(Number(floppySpeedSel.value));
+});
+
+// --- machine model ---------------------------------------------------------
+// Which Amiga the boot button builds: the A500 the page has always booted,
+// or an AGA A1200. Always visible like the floppy speed select: a page
+// shell can host its own <select id="machine"> wherever its control bar
+// wants it (option values are model names; data-default presets one), and
+// without the element the control inserts itself below the canvas. The
+// option list comes from WebEmu.models() once the wasm module is ready,
+// which doubles as the feature test: an older wasm bundle has no models()
+// and the control hides rather than promising a switch it cannot make.
+// The config file's "machine" and ?machine= in the URL preset the choice.
+//
+// Changing the model while a machine runs rebuilds it: the model is the
+// board itself, not a knob on it. The chosen ROM (the boot stash) and the
+// page's copy of the inserted disk carry over, and the new machine powers
+// up - the browser version of picking another profile in the launcher.
+
+const MACHINE_LABELS = { A500: 'A500', A1200: 'A1200 (AGA)' };
+
+function buildMachineControl() {
+  const row = document.createElement('label');
+  row.style.cssText =
+    'display:inline-flex;align-items:center;gap:0.45rem;margin:0.4rem 0.6rem 0.4rem 0;' +
+    'font:600 0.8rem "IBM Plex Mono",ui-monospace,monospace;' +
+    'color:rgba(255,255,255,0.75);';
+  row.appendChild(document.createTextNode('Machine'));
+  const sel = document.createElement('select');
+  sel.style.cssText =
+    'padding:0.15rem 0.4rem;border-radius:6px;cursor:pointer;' +
+    'border:1px solid rgba(255,255,255,0.35);' +
+    'background:rgba(10,13,22,0.6);color:rgba(255,255,255,0.85);' +
+    'font:inherit;';
+  row.appendChild(sel);
+  shell.insertAdjacentElement('afterend', row);
+  return sel;
+}
+const machineShellSel = $('machine');
+const machineSel = machineShellSel ?? buildMachineControl();
+// null = the wasm default machine (the A500); boot() passes it through.
+let machineModel = null;
+// A ?machine=/config/data-default choice that arrived before the model
+// list did; applied once both exist.
+let requestedMachine = null;
+
+// Model names compare like the core parses them: case-insensitive, with
+// separator characters ignored, so ?machine=a1200 matches "A1200".
+function matchModelOption(name) {
+  const norm = (s) => String(s).replace(/[-_ ]/g, '').toUpperCase();
+  return [...machineSel.options].map((o) => o.value).find((v) => v && norm(v) === norm(name));
+}
+
+function tryApplyRequestedMachine() {
+  if (requestedMachine === null || !machineSel.options.length) return;
+  const name = String(requestedMachine).trim();
+  requestedMachine = null;
+  // A blank request (?machine= with no value, "machine": "" in the config)
+  // is no request, like the constructor's empty model and the joy param.
+  if (!name) return;
+  const model = matchModelOption(name);
+  if (model) {
+    machineModel = model;
+    machineSel.value = model;
+  } else {
+    console.warn(`unknown machine ${name}; keeping ${machineSel.value}`);
+  }
+}
+
+// Called once the wasm module is ready (load()): fill the select from the
+// build's own list - unless the shell shipped its own options - and hide
+// the control on a bundle too old to take a model.
+function populateMachineSelect() {
+  let models = null;
+  try {
+    models = WebEmu.models?.();
+  } catch {
+    models = null;
+  }
+  if (!models?.length) {
+    (machineShellSel ?? machineSel.parentElement).hidden = true;
+    return;
+  }
+  if (!machineSel.options.length) {
+    for (const name of models) {
+      const option = document.createElement('option');
+      option.value = name;
+      option.textContent = MACHINE_LABELS[name] ?? name;
+      machineSel.appendChild(option);
+    }
+  }
+  // From here on every boot names its model explicitly, so the machine is
+  // properly labelled in save states and bug reports.
+  if (machineModel === null) machineModel = machineSel.value || null;
+  tryApplyRequestedMachine();
+}
+
+// A restored state carries its machine, model and all; point the select at
+// what is actually running. A shape no offered profile describes (a state
+// from a custom desktop config) leaves the select alone.
+function syncMachineSelect() {
+  const model = emu?.machine_model?.();
+  if (!model) return;
+  const match = matchModelOption(model);
+  if (match) {
+    machineModel = match;
+    machineSel.value = match;
+  }
+}
+
+machineSel.addEventListener('change', () => {
+  const model = machineSel.value;
+  if (!model || model === machineModel) return;
+  machineModel = model;
+  if (emu && running) {
+    // Carry the page's copy of the inserted disk into the new machine; a
+    // disk that only exists inside the old one (restored from a state)
+    // cannot come along.
+    if (df0Name && lastDisk?.name === df0Name) pendingDisk = lastDisk;
+    boot();
+  } else if (!emu) {
+    setLoadStatus(`machine: ${model} - applies at boot`);
+  }
 });
 
 // --- status bar --------------------------------------------------------
@@ -2205,7 +2339,9 @@ function bugReportHref() {
     host: navigator.userAgent,
     config: [
       'frontend = "copperline.dev/try (WebAssembly)"',
-      'machine = "A500, 512K chip RAM + 512K trapdoor"',
+      // The running machine's own description when there is one (it also
+      // tracks state loads); otherwise what the next boot would build.
+      `machine = ${toml(emu?.machine_summary?.() ?? machineModel ?? 'A500 (default)')}`,
       `kickstart = ${toml(bootRom?.label ?? 'none')}`,
       `df0 = ${toml(df0Name ?? 'empty')}`,
       `joystick = ${toml(joyMode)}`,
@@ -2325,10 +2461,11 @@ const pageParams = new URLSearchParams(location.search);
 // Optional copperline.json next to the page: a site sets its defaults in
 // one hand-editable file instead of touching the shell or this glue. All
 // keys are optional; a missing or invalid file is simply no defaults.
-// Link parameters (?df0=, ?kick=, ?joy=, ?fdspeed=) override the file,
-// and anything the visitor changes by hand wins as usual.
+// Link parameters (?df0=, ?kick=, ?machine=, ?joy=, ?fdspeed=) override
+// the file, and anything the visitor changes by hand wins as usual.
 //
 //   {
+//     "machine": "A1200",            machine model (WebEmu.models() lists them)
 //     "kick": "roms/kick31.rom",     same-origin path, like ?kick=
 //     "df0": "adf/demo.adf",         URL, like ?df0=
 //     "floppy_sounds": false,        preset the drive-sounds toggle
@@ -2379,6 +2516,18 @@ async function startup() {
   const linkedKick =
     pageParams.get('kick') ?? (typeof cfg.kick === 'string' ? cfg.kick : null);
   if (linkedKick) fetches.push(fitRomFromUrl(linkedKick));
+
+  // Starting machine model: the shell's data-default on the #machine
+  // select or the config file's "machine", overridden per link by
+  // ?machine=A1200 (names compare like the core parses them, so a1200
+  // works too). Applied once the wasm module has supplied the model list;
+  // whichever of the two arrives second completes it.
+  requestedMachine =
+    pageParams.get('machine') ??
+    (typeof cfg.machine === 'string' ? cfg.machine : null) ??
+    machineSel.dataset.default ??
+    null;
+  tryApplyRequestedMachine();
 
   // Starting joystick mode: the page shell's default (data-default on the
   // toggle or the config file), overridden per link by

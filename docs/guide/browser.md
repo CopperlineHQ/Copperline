@@ -10,6 +10,15 @@ locally, and how to embed the emulator in your own page.
 ## Using the hosted page
 
 [copperline.dev/try](https://copperline.dev/try/) boots a default A500. The
+**Machine** select below the screen switches to an AGA A1200 (68EC020,
+2 MiB chip RAM, like the desktop's `--model A1200`); both models boot the
+AROS ROM or a loaded Kickstart. Changing it before boot just changes what
+the boot button builds, and changing it while a machine runs rebuilds the
+machine and powers it up again -- the model is the board itself, not a
+knob on it -- keeping the chosen ROM and the inserted disk. A link can
+preset the model with `?machine=A1200`, and a
+[save state](#browser-save-states) carries its own machine, so loading
+one switches the select to whatever the state brings back. The
 page fetches the open-source AROS ROM while it loads, so the boot button
 works with no files of your own; the **Kickstart ROM** and **DF0 disk**
 pickers load local images instead. Both work before or after boot: a
@@ -259,6 +268,7 @@ import init, { WebEmu } from './pkg/copperline_web.js';
 
 const wasm = await init();
 const emu = new WebEmu();          // default A500 machine, placeholder ROM
+// ...or pick a machine model: new WebEmu('A1200')
 emu.load_rom(romBytes, extBytes);  // Kickstart or AROS bytes; cold reset
 emu.insert_floppy(0, adfBytes, 'game.adf');
 
@@ -275,6 +285,22 @@ function tick(nowMs) {
   requestAnimationFrame(tick);
 }
 ```
+
+The constructor's optional argument picks the machine profile by name,
+exactly as the desktop's `--model` flag does ("A500", "A1200", ...);
+omitted, it builds the default A500, so pages written against the
+model-less constructor keep booting what they always did. The static
+`WebEmu.models()` lists the vetted profiles a page can offer
+unconditionally (currently `A500` and `A1200` -- both boot AROS or a
+plain Kickstart with nothing but a floppy; other names the desktop flag
+takes are accepted too, but CDTV/CD32 want pieces a browser page cannot
+supply), and its absence on an older bundle is the feature test.
+`machine_model()` returns the running machine's profile name
+(`undefined` for a shape no profile describes, such as a state saved
+from a custom desktop config) and follows `load_state`, so a page can
+re-point its machine select at what a state brought back;
+`machine_summary()` is a one-line description of the machine -- profile,
+CPU, chipset, RAM, ROM fingerprint -- for bug reports and diagnostics.
 
 Input goes through `key_event(event.code, pressed)` (returns whether the key
 mapped, for `preventDefault`), `mouse_delta(dx, dy)` and
@@ -355,6 +381,16 @@ elements, and pages without them are untouched:
   boot, so a shell can default to mono by shipping the box checked.
   Without the element the output stays stereo unless the
   [configuration file](#browser-page-config) sets `mono_audio`.
+- `#machine` (a `<select>`): hosts the machine model control, letting the
+  page place and style it. Like `#floppy-speed` it is always on: without
+  the element a labelled select inserts itself below the canvas shell. The
+  glue fills an empty select from `WebEmu.models()` (a shell may also ship
+  its own options, whose values must be model names), a
+  `data-default="A1200"` attribute presets the choice, and the control
+  hides itself on a wasm bundle too old to take a model. Changing it
+  rebuilds a running machine as described above; `?machine=` in the URL
+  overrides the initial choice (model names match the way the core parses
+  them, so `?machine=a1200` works).
 - `#floppy-speed` (a `<select>` with option values `100`, `200`, `400`,
   `800`, and `0` for turbo): hosts the floppy drive speed control, letting
   the page place and style it. Unlike the other hooks this one is always
@@ -425,11 +461,12 @@ elements, and pages without them are untouched:
 A site can set its defaults in one hand-editable file instead of editing
 the shell: `copperline.json`, served next to the page. Every key is
 optional, a missing or invalid file means no defaults, link parameters
-(`?df0=`, `?kick=`, `?joy=`, `?fdspeed=`) override the file per URL, and
-anything the visitor changes by hand wins as usual:
+(`?df0=`, `?kick=`, `?machine=`, `?joy=`, `?fdspeed=`) override the file
+per URL, and anything the visitor changes by hand wins as usual:
 
 ```json
 {
+  "machine": "A1200",
   "kick": "roms/kick31.rom",
   "df0": "adf/demo.adf",
   "floppy_sounds": false,
@@ -442,9 +479,10 @@ anything the visitor changes by hand wins as usual:
 }
 ```
 
-`kick` follows the same-origin rule as `?kick=` (the file can only name
-a ROM the site already serves); `df0` is any URL the visitor's browser
-may fetch, like `?df0=`. `floppy_sounds`, `mono_audio`, and
+`machine` picks the machine model, like `?machine=`; `kick` follows the
+same-origin rule as `?kick=` (the file can only name a ROM the site
+already serves); `df0` is any URL the visitor's browser may fetch, like
+`?df0=`. `floppy_sounds`, `mono_audio`, and
 `floppy_speed` reach the machine whether or not the shell has their
 controls -- the speed select inserts itself, and a configured
 `floppy_sounds` or `mono_audio` is applied at boot even with no checkbox
