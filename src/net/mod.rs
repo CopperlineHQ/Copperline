@@ -61,6 +61,12 @@ pub enum NetConfig {
     Nat,
 }
 
+/// Whether this build can bring up the userspace NAT backend: the same
+/// condition [`make_backend`]'s `NetConfig::Nat` arms are compiled under
+/// (the `net-nat` feature, and never on wasm32). Pickers and warnings key
+/// off this so they track what `make_backend` will actually do.
+pub const NAT_AVAILABLE: bool = cfg!(all(feature = "net-nat", not(target_arch = "wasm32")));
+
 /// Bring up the live backend a [`NetConfig`] names. `None` means the board has
 /// no host networking (its NIC still works, it just never sees traffic).
 pub fn make_backend(cfg: NetConfig) -> Option<Box<dyn NetBackend>> {
@@ -100,6 +106,16 @@ pub fn parse_net_config(s: &str) -> Option<NetConfig> {
         "loopback" | "loop" => Some(NetConfig::Loopback),
         "nat" => Some(NetConfig::Nat),
         _ => None,
+    }
+}
+
+/// The canonical config-file spelling of a [`NetConfig`]: the inverse of
+/// [`parse_net_config`], used when emitting a config from the launcher.
+pub fn net_config_name(cfg: NetConfig) -> &'static str {
+    match cfg {
+        NetConfig::None => "none",
+        NetConfig::Loopback => "loopback",
+        NetConfig::Nat => "nat",
     }
 }
 

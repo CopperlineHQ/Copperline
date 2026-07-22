@@ -186,7 +186,9 @@ config:
 net = "nat"   # host network backend; "loopback", or "none" for isolation
 ```
 
-(`--a2065-net BACKEND` is the matching per-run flag.)
+(`--a2065-net BACKEND` is the matching per-run flag, and the launcher's
+**I/O Ports** tab has the same picker under its **Ethernet:** heading, with a
+warning shown when the non-deterministic NAT backend is selected.)
 
 Unlike the DMAC boards, the LANCE does not master the Amiga bus: its init
 block, descriptor rings, and packet buffers live in the board's own 32 KiB RAM
