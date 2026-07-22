@@ -311,6 +311,9 @@ devices) are not part of the machine, so a page that keeps its own should
 re-apply them afterwards. `set_floppy_sounds(on)` and
 `set_floppy_sounds_volume(p)` control the synthesized drive sounds (on and
 100 by default, like the desktop's `[audio] floppy_sounds` knobs).
+`set_mono_audio(on)` averages the left and right channels into both
+outputs, like the desktop's `[audio] channel_mode = "mono"`; off by
+default, leaving Paula's hardware stereo panning.
 `set_floppy_speed(percent)` / `floppy_speed()` set and read the emulated
 drive speed -- 100/200/400/800 percent, or 0 for turbo -- like the
 desktop's `[floppy] speed` option (see
@@ -347,6 +350,10 @@ elements, and pages without them are untouched:
 - `#floppy-sounds` (checkbox): toggles the synthesized floppy drive
   sounds -- motor hum, head-step clicks, read hiss -- live and at boot, so
   a shell can also default them off by shipping the box unchecked.
+- `#mono-audio` (checkbox): mixes the left and right channels into both
+  speakers (the desktop's `[audio] channel_mode = "mono"`), live and at
+  boot, so a shell can default to mono by shipping the box checked.
+  Without the element the output stays stereo.
 - `#floppy-speed` (a `<select>` with option values `100`, `200`, `400`,
   `800`, and `0` for turbo): hosts the floppy drive speed control, letting
   the page place and style it. Unlike the other hooks this one is always
@@ -424,6 +431,7 @@ anything the visitor changes by hand wins as usual:
   "kick": "roms/kick31.rom",
   "df0": "adf/demo.adf",
   "floppy_sounds": false,
+  "mono_audio": true,
   "floppy_speed": 800,
   "joy": "keys",
   "serial_url": "wss://bbs.example.com:8443/",
@@ -434,10 +442,11 @@ anything the visitor changes by hand wins as usual:
 
 `kick` follows the same-origin rule as `?kick=` (the file can only name
 a ROM the site already serves); `df0` is any URL the visitor's browser
-may fetch, like `?df0=`. `floppy_sounds` and `floppy_speed` reach the
-machine whether or not the shell has their controls -- the speed select
-inserts itself, and a configured `floppy_sounds` is applied at boot even
-with no checkbox to show it. `serial_url` and `serial_raw` preset the
+may fetch, like `?df0=`. `floppy_sounds`, `mono_audio`, and
+`floppy_speed` reach the machine whether or not the shell has their
+controls -- the speed select inserts itself, and a configured
+`floppy_sounds` or `mono_audio` is applied at boot even with no checkbox
+to show it. `serial_url` and `serial_raw` preset the
 serial bridge's inputs and therefore need those elements: a shell
 without them has no connect button to dial with either. `joy` picks the
 starting joystick mode. `autoboot: true` powers the machine on by itself once the

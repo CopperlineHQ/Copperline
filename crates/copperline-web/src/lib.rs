@@ -709,6 +709,13 @@ impl WebEmu {
         self.emu.bus_mut().set_output_volume_percent(percent);
     }
 
+    /// Average the left and right channels into both outputs (the desktop's
+    /// `[audio] channel_mode = "mono"`). Off by default: Paula's hardware
+    /// panning, with two channels on each side.
+    pub fn set_mono_audio(&mut self, enabled: bool) {
+        self.emu.bus_mut().paula.set_mono_output(enabled);
+    }
+
     /// Enable or mute the synthesized floppy drive sounds (motor hum,
     /// head-step clicks, read hiss). On by default, like the desktop's
     /// `[audio] floppy_sounds` knob.
