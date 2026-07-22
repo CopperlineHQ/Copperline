@@ -370,6 +370,8 @@ async function boot() {
     machine.set_volume_percent(Number($('vol').value));
     if (floppySoundsToggle) machine.set_floppy_sounds(floppySoundsToggle.checked);
     else if (configFloppySounds !== null) machine.set_floppy_sounds(configFloppySounds);
+    if (monoAudioToggle) machine.set_mono_audio(monoAudioToggle.checked);
+    else if (configMonoAudio !== null) machine.set_mono_audio(configMonoAudio);
     if (floppySpeed !== null) machine.set_floppy_speed(floppySpeed);
     emu = machine;
     window.__emu = emu; // for debugging/automation
@@ -1669,6 +1671,8 @@ function restoreState(bytes, source) {
   emu.set_volume_percent(Number($('vol').value));
   if (floppySoundsToggle) emu.set_floppy_sounds(floppySoundsToggle.checked);
   else if (configFloppySounds !== null) emu.set_floppy_sounds(configFloppySounds);
+  if (monoAudioToggle) emu.set_mono_audio(monoAudioToggle.checked);
+  else if (configMonoAudio !== null) emu.set_mono_audio(configMonoAudio);
   if (floppySpeed !== null) emu.set_floppy_speed(floppySpeed);
   // Port fittings live on the machine, so the pads plugged into the host go
   // back into the restored one, exactly as after a boot. Port 1 is the
@@ -1855,6 +1859,19 @@ const floppySoundsToggle = $('floppy-sounds');
 let configFloppySounds = null;
 floppySoundsToggle?.addEventListener('change', () => {
   if (emu) emu.set_floppy_sounds(floppySoundsToggle.checked);
+});
+
+// Optional in the page shell: a checkbox #mono-audio mixes the left and
+// right channels into both speakers (the desktop's [audio]
+// channel_mode = "mono"). Without the element (and no mono_audio key in
+// copperline.json) the output stays stereo; the checkbox's initial
+// state is applied at boot, so a shell can default it on.
+const monoAudioToggle = $('mono-audio');
+// The config file's mono_audio on a shell without the checkbox: stashed
+// here and applied at boot.
+let configMonoAudio = null;
+monoAudioToggle?.addEventListener('change', () => {
+  if (emu) emu.set_mono_audio(monoAudioToggle.checked);
 });
 
 // The floppy drive speed control, always visible: a page shell can host
@@ -2315,6 +2332,7 @@ const pageParams = new URLSearchParams(location.search);
 //     "kick": "roms/kick31.rom",     same-origin path, like ?kick=
 //     "df0": "adf/demo.adf",         URL, like ?df0=
 //     "floppy_sounds": false,        preset the drive-sounds toggle
+//     "mono_audio": true,            preset the mono-audio toggle
 //     "floppy_speed": 800,           100|200|400|800|0 (0 = turbo)
 //     "joy": "keys",                 off|keys|cd32|touch
 //     "serial_url": "wss://...",     preset the BBS gateway input
@@ -2348,6 +2366,10 @@ async function startup() {
   if (typeof cfg.floppy_sounds === 'boolean') {
     if (floppySoundsToggle) floppySoundsToggle.checked = cfg.floppy_sounds;
     else configFloppySounds = cfg.floppy_sounds;
+  }
+  if (typeof cfg.mono_audio === 'boolean') {
+    if (monoAudioToggle) monoAudioToggle.checked = cfg.mono_audio;
+    else configMonoAudio = cfg.mono_audio;
   }
 
   const fetches = [];
