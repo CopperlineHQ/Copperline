@@ -72,7 +72,7 @@ too -- `--audio-device`, `--audio-channel-mode`, `--audio-stereo-separation`,
 ## Top level
 
 ```toml
-rom = "KICK13.ROM"            # Kickstart image, exactly 512 KiB
+rom = "KICK13.ROM"            # Kickstart image, 512 KiB (or a 256 KiB 1.x part)
 extended_rom = "cd32ext.rom"  # optional: CDTV (256K at $F00000) or
                               # CD32 (512K at $E00000) extended ROM
 # identify = false            # drop the Copperline identification board
@@ -95,6 +95,16 @@ its main and extended halves are located next to the binary (under
 menu's **Load Kickstart ROM...** item, which hard-resets the machine. Machine
 profiles that need an extended ROM (CDTV, CD32) will tell you if it is
 missing.
+
+Both ROM keys accept images in either byte order. Alongside plain CPU-order
+dumps, the byte-swapped images prepared for EPROM programmers -- the
+single-chip `.bin` ROM files in Hyperion's Kickstart 3.1.4/3.2 releases, such
+as `kick.a500a600a2000.46.143.bin`, store every 16-bit word with its bytes
+exchanged -- are recognised from their header and restored on load, so either
+file boots identically. A 256 KiB Kickstart 1.x part is mirrored across the
+512 KiB ROM window, as it decodes on real hardware. The split `hi`/`lo` chip
+pairs for the 32-bit machines are not accepted; use the matching single-file
+image instead.
 
 ## `[machine]` -- machine profiles
 
