@@ -181,11 +181,23 @@ pub fn downsample_x_into(
         let dst = &mut out[y * dst_width..(y + 1) * dst_width];
         for (x, px) in dst.iter_mut().enumerate() {
             if group == 2 {
+                // Overflow-free per-channel mean of the pair (the 35 ns
+                // canvas case).
                 let a = src[x * 2];
                 let b = src[x * 2 + 1];
                 *px = ((a ^ b) & 0xFEFE_FEFE) / 2 + (a & b);
             } else {
-                *px = src[x * group];
+                let mut sums = [0u32; 4];
+                for &p in &src[x * group..(x + 1) * group] {
+                    for (lane, sum) in sums.iter_mut().enumerate() {
+                        *sum += (p >> (lane * 8)) & 0xFF;
+                    }
+                }
+                let n = group as u32;
+                *px = sums
+                    .iter()
+                    .enumerate()
+                    .fold(0u32, |acc, (lane, sum)| acc | ((sum / n) << (lane * 8)));
             }
         }
     }
@@ -281,6 +293,20 @@ mod tests {
 
         assert_eq!(scaled.len(), 5);
         assert!(scaled.iter().all(|px| *px == a || *px == b));
+    }
+
+    #[test]
+    fn downsample_averages_each_source_pixel_group() {
+        // 2:1 (the 35 ns canvas case): per-channel mean of the pair.
+        let fb = [0xFF00_00FF, 0xFF00_0001, 0x0000_0000, 0x0808_0808];
+        let mut out = Vec::new();
+        downsample_x_into(&fb, 4, 1, 2, &mut out);
+        assert_eq!(out, vec![0xFF00_0080, 0x0404_0404]);
+
+        // Wider groups average too, matching the documented behaviour.
+        let fb = [0x0000_0003, 0x0000_0006, 0x0000_0009];
+        downsample_x_into(&fb, 3, 1, 1, &mut out);
+        assert_eq!(out, vec![0x0000_0006]);
     }
 
     #[test]

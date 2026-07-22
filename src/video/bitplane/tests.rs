@@ -6210,11 +6210,11 @@ fn canvas_scale_doubles_only_for_programmable_shres_frames() {
     };
     let lores_write = BeamRegisterWrite {
         value: 0x4200,
-        ..shres_write.clone()
+        ..shres_write
     };
     // Standard scans never double, SHRES or not.
     assert_eq!(canvas_scale_for(false, 0x4240, &[]), 1);
-    assert_eq!(canvas_scale_for(false, 0x4200, &[shres_write.clone()]), 1);
+    assert_eq!(canvas_scale_for(false, 0x4200, &[shres_write]), 1);
     // Programmable scans double when SHRES is active at the frame start or
     // arrives mid-frame.
     assert_eq!(canvas_scale_for(true, 0x4240, &[]), 2);

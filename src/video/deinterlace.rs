@@ -71,6 +71,9 @@ pub struct Deinterlacer {
     out_rows: usize,
     /// Pixels per row of `out` after the last push.
     out_width: usize,
+    /// Reusable motion mask for the weave path (one flag per canvas
+    /// column); kept on the struct so a laced push does not allocate.
+    moved: Vec<bool>,
     enabled: bool,
     /// CRT phosphor persistence: each presented frame keeps this fraction
     /// of the previous one (0 = off), expressed as an alpha in 0..=243
@@ -110,6 +113,7 @@ impl Deinterlacer {
             field_width: FB_WIDTH,
             out_rows: OUT_HEIGHT,
             out_width: FB_WIDTH,
+            moved: vec![false; FB_WIDTH],
             enabled,
             phosphor_alpha,
             presented: (phosphor_alpha > 0).then(|| vec![0; MAX_OUT_PIXELS]),
@@ -239,10 +243,13 @@ impl Deinterlacer {
         // parity (content moving within the woven line itself, e.g. an
         // animation drawn one field ago that has since moved on).
         let opposite = parity ^ 1;
+        if self.moved.len() < width {
+            self.moved.resize(width, false);
+        }
         let prev_same = &self.prev[parity];
         let prev_opp = &self.prev[opposite];
         let prev2_opp = &self.prev2[opposite];
-        let mut moved = vec![false; width];
+        let moved = &mut self.moved[..width];
         for y in 0..rows {
             let r = 2 * y + opposite;
             // The current-parity field rows directly above and below
