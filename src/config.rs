@@ -43,7 +43,9 @@ pub struct Config {
     pub cpu: CpuModel,
     pub fpu: bool,
     /// CPU clock in MHz. Defaults to the model's stock speed
-    /// ([`CpuModel::default_clock_mhz`]); overridable via `[cpu] clock_mhz`.
+    /// ([`CpuModel::default_clock_mhz`]), or the machine profile's pinned
+    /// clock (the A1200/CD32's authentic 14.18 MHz) when the profile names
+    /// one; overridable via `[cpu] clock_mhz`.
     pub cpu_clock_mhz: f64,
     /// Model the 68020/030 on-chip instruction cache (CACR-controlled).
     /// Defaults on for the parts that have one (68EC020/68020/68030), as on
@@ -2127,6 +2129,12 @@ impl TryFrom<RawConfig> for Config {
                 errors.push(anyhow!("[cpu] clock_mhz must be a positive number"));
                 cpu.default_clock_mhz()
             }
+            // With the whole [cpu] pair absent, the profile's clock stands:
+            // the A1200/CD32 profiles pin the authentic 14.18 MHz (4x the
+            // PAL colour clock), where the generic 020 default is 14.0. An
+            // explicit [cpu] model is a different part in the socket, so it
+            // takes its own stock speed instead.
+            None if raw.cpu.model.is_none() => defaults.cpu_clock_mhz,
             None => cpu.default_clock_mhz(),
         };
         if fpu && matches!(cpu, CpuModel::M68000 | CpuModel::M68010) {
@@ -4186,6 +4194,12 @@ mod tests {
                 "{model:?} denise"
             );
             assert_eq!(piped.cpu, direct.cpu, "{model:?} cpu");
+            assert!(
+                (piped.cpu_clock_mhz - direct.cpu_clock_mhz).abs() < 1e-9,
+                "{model:?} cpu clock: piped {} vs direct {}",
+                piped.cpu_clock_mhz,
+                direct.cpu_clock_mhz
+            );
             assert_eq!(piped.fpu, direct.fpu, "{model:?} fpu");
             assert_eq!(piped.cpu_icache, direct.cpu_icache, "{model:?} icache");
             assert_eq!(piped.cpu_dcache, direct.cpu_dcache, "{model:?} dcache");
