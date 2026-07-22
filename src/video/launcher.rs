@@ -1105,9 +1105,11 @@ impl MachineSetup {
     /// schedule rather than the emulated clock, breaking byte-identical
     /// replay (the I/O Ports tab shows a warning). The loopback backend
     /// echoes frames deterministically and an isolated or absent NIC never
-    /// sees traffic, so only NAT qualifies.
+    /// sees traffic, so only NAT qualifies -- and only in a build that can
+    /// actually bring the NAT up (a loaded config can still name it in one
+    /// that cannot, where `make_backend` leaves the NIC isolated).
     pub fn ethernet_breaks_determinism(&self) -> bool {
-        self.a2065_net == Some(NetConfig::Nat)
+        self.a2065_net == Some(NetConfig::Nat) && crate::net::NAT_AVAILABLE
     }
 
     /// Re-read every host device list (MIDI endpoints + audio outputs + sampler
@@ -2071,11 +2073,11 @@ impl MachineSetup {
                     cycle_floats(&SAMPLER_GAIN_STEPS, self.sampler_gain_db as f64, forward) as f32;
             }
             F::Ethernet => {
-                // NAT is only on offer when the userspace NAT is compiled in;
-                // without it the choice would fit a board that never connects.
+                // NAT is only on offer when this build can bring it up;
+                // otherwise the choice would fit a board that never connects.
                 let choices: Vec<Option<NetConfig>> = ETHERNET_CHOICES
                     .into_iter()
-                    .filter(|c| cfg!(feature = "net-nat") || *c != Some(NetConfig::Nat))
+                    .filter(|c| crate::net::NAT_AVAILABLE || *c != Some(NetConfig::Nat))
                     .collect();
                 self.a2065_net = cycle_slice(&choices, self.a2065_net, forward);
             }
@@ -3147,21 +3149,30 @@ mod tests {
         let back = MachineSetup::from_raw(&raw).unwrap();
         assert_eq!(back.a2065_net, Some(NetConfig::Loopback));
 
-        #[cfg(feature = "net-nat")]
-        {
+        if crate::net::NAT_AVAILABLE {
             s.cycle(LauncherField::Ethernet, true);
             assert_eq!(s.value_label(LauncherField::Ethernet), "NAT");
             // Only NAT carries traffic on the host's schedule.
             assert!(s.ethernet_breaks_determinism());
             assert_eq!(s.to_raw().a2065.net.as_deref(), Some("nat"));
             s.cycle(LauncherField::Ethernet, true);
-        }
-        #[cfg(not(feature = "net-nat"))]
-        {
-            // Without the userspace NAT the picker skips straight past it.
+        } else {
+            // Where the NAT cannot come up the picker skips straight past it.
             s.cycle(LauncherField::Ethernet, true);
         }
         assert_eq!(s.value_label(LauncherField::Ethernet), "Not fitted");
+    }
+
+    #[test]
+    fn a2065_nat_from_a_config_warns_only_where_the_nat_can_come_up() {
+        // A loaded config can name NAT even in a build whose picker skips it;
+        // there make_backend leaves the NIC isolated (deterministic), so the
+        // warning must track NAT_AVAILABLE, not just the selected backend.
+        let mut raw = RawConfig::default();
+        raw.a2065.net = Some("nat".to_string());
+        let s = MachineSetup::from_raw(&raw).unwrap();
+        assert_eq!(s.value_label(LauncherField::Ethernet), "NAT");
+        assert_eq!(s.ethernet_breaks_determinism(), crate::net::NAT_AVAILABLE);
     }
 
     #[test]

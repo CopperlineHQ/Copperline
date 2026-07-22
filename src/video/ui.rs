@@ -6744,8 +6744,8 @@ mod tests {
         let mut frame = vec![0u8; w * h * 4];
         let mut state = LauncherState::new(launcher::MachineSetup::default());
         state.tab = LauncherTab::IoPorts;
-        // Not fitted -> Isolated -> Loopback -> NAT (without the net-nat
-        // feature this wraps back to Not fitted and no warning is shown).
+        // Not fitted -> Isolated -> Loopback -> NAT (where the NAT cannot
+        // come up this wraps back to Not fitted and no warning is shown).
         for _ in 0..3 {
             state.setup.cycle(LauncherField::Ethernet, true);
         }
