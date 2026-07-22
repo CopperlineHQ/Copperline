@@ -1981,14 +1981,18 @@ function matchModelOption(name) {
 
 function tryApplyRequestedMachine() {
   if (requestedMachine === null || !machineSel.options.length) return;
-  const model = matchModelOption(requestedMachine);
+  const name = String(requestedMachine).trim();
+  requestedMachine = null;
+  // A blank request (?machine= with no value, "machine": "" in the config)
+  // is no request, like the constructor's empty model and the joy param.
+  if (!name) return;
+  const model = matchModelOption(name);
   if (model) {
     machineModel = model;
     machineSel.value = model;
   } else {
-    console.warn(`unknown machine ${requestedMachine}; keeping ${machineSel.value}`);
+    console.warn(`unknown machine ${name}; keeping ${machineSel.value}`);
   }
-  requestedMachine = null;
 }
 
 // Called once the wasm module is ready (load()): fill the select from the
