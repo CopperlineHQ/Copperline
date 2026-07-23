@@ -1983,15 +1983,20 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-/// Open an existing file writable, the way AmigaDOS hands out a file handle;
-/// fall back to read-only if the host refuses, so a later write fails as it
-/// would on a protected Amiga file.
+/// Open an existing file writable, the way AmigaDOS hands out a file handle.
+/// When the host denies write only because the file or its filesystem is
+/// read-only, fall back to a read-only handle, so a later write fails as it
+/// would on a protected Amiga file. Any other error propagates unchanged.
 fn open_existing(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::io::ErrorKind as K;
     std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(path)
-        .or_else(|_| std::fs::File::open(path))
+        .or_else(|e| match e.kind() {
+            K::PermissionDenied | K::ReadOnlyFilesystem => std::fs::File::open(path),
+            _ => Err(e),
+        })
 }
 
 /// Map a host I/O error onto the AmigaDOS error the guest expects, so a full
