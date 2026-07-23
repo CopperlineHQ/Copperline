@@ -349,10 +349,14 @@ impl DriveSounds {
 
     /// Render the next mono sample. Exact 0.0 while idle.
     pub fn next_sample(&mut self) -> f32 {
+        // Elapsed time counts even while disabled or muted (Paula
+        // mixes every host sample either way), so a step fired after a
+        // disable/enable toggle still classifies against the real time
+        // since the last audible step instead of a frozen counter.
+        self.since_step = self.since_step.saturating_add(1);
         if !self.enabled || self.volume <= 0.0 {
             return 0.0;
         }
-        self.since_step = self.since_step.saturating_add(1);
         for i in 0..NUM_PENDING_CLICKS {
             if !self.pending[i].live {
                 continue;
@@ -561,6 +565,26 @@ mod tests {
     }
 
     #[test]
+    fn step_after_disable_toggle_classifies_as_isolated() {
+        // Disabling must not freeze the step-spacing clock: a step
+        // fired shortly before a disable, with the re-enabled drive
+        // stepping much later, is an isolated clack (with rebound
+        // clatter), not the continuation of a seek burst.
+        let mut sounds = DriveSounds::new();
+        sounds.step_pulse();
+        render(&mut sounds, ms(3.0)); // well inside the seek gap
+        sounds.set_enabled(false);
+        render(&mut sounds, ms(30.0)); // time passes while disabled
+        sounds.set_enabled(true);
+        sounds.step_pulse();
+        assert_eq!(
+            sounds.pending.iter().filter(|p| p.live).count(),
+            REBOUND_DELAY_S.len(),
+            "step after a disable toggle lost its rebound clatter"
+        );
+    }
+
+    #[test]
     fn motor_spin_produces_hum_and_spindown_returns_to_silence() {
         let mut sounds = DriveSounds::new();
         sounds.set_motor_spin(0, 1.0);
@@ -625,9 +649,9 @@ mod tests {
         fn goertzel(samples: &[f32], hz: f32) -> f32 {
             let w = TWO_PI * hz / MIX_SAMPLE_RATE as f32;
             let coeff = 2.0 * w.cos();
-            let (mut s0, mut s1, mut s2) = (0.0f32, 0.0f32, 0.0f32);
+            let (mut s1, mut s2) = (0.0f32, 0.0f32);
             for &x in samples {
-                s0 = x + coeff * s1 - s2;
+                let s0 = x + coeff * s1 - s2;
                 s2 = s1;
                 s1 = s0;
             }
