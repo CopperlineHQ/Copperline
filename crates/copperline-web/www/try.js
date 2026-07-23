@@ -1011,13 +1011,10 @@ window.addEventListener('keyup', (e) => {
 // Esc releases the lock, as the browser enforces.
 
 let lastPos = null;
-// Emulator pixels per CSS pixel. Fullscreen letterboxes the canvas
-// (object-fit: contain), so there the displayed scale is the larger of the
-// two axis ratios; in the normal layout the bitmap fills the element.
-const cssToEmu = () =>
-  isFullscreen()
-    ? Math.max(canvas.width / canvas.clientWidth, canvas.height / canvas.clientHeight)
-    : canvas.width / canvas.clientWidth;
+// Emulator pixels per CSS pixel. The bitmap fills the canvas element in
+// every mode - fullscreen letterboxes the element itself, keeping the
+// display's shape - so the width ratio is the displayed scale.
+const cssToEmu = () => canvas.width / canvas.clientWidth;
 
 canvas.addEventListener('mousedown', (e) => {
   if (!emu || !running) return;
@@ -1416,7 +1413,29 @@ const CSS_FS_SHELL = {
   border: 'none',
   borderRadius: '0',
 };
-const CSS_FS_CANVAS = { width: '100%', height: '100%', objectFit: 'contain' };
+// Fullscreen letterbox. The shell takes the monitor's shape, which has
+// nothing to do with the display's, and a page shell's normal canvas rule
+// (width: 100%) would stretch the picture to fill it - grotesquely so on
+// an ultrawide monitor. The canvas instead becomes the largest 4:3 box
+// that fits, the TV shape every shell gives it in the page layout, and
+// the auto margins centre it. Inline styles rather than a page CSS rule
+// so every embedding shell letterboxes, not just the hosted page, and
+// applied to real fullscreen too. Dynamic viewport units: they measure
+// the monitor exactly in real fullscreen, and in the pinned fallback
+// (iPhone, where Safari's chrome stays) they track the visible area
+// where plain vh would reach under the browser chrome.
+const CSS_FS_CANVAS = {
+  position: 'absolute',
+  inset: '0',
+  margin: 'auto',
+  width: 'min(100dvw, calc(100dvh * 4 / 3))',
+  height: 'min(100dvh, calc(100dvw * 3 / 4))',
+  // The bitmap fills the box, as in the page layout: the presentation
+  // buffer is not itself 4:3 (the PAL capture is 668x540), and a shell's
+  // own :fullscreen object-fit rule would re-letterbox it inside the box
+  // at the buffer's ratio.
+  objectFit: 'fill',
+};
 
 function setStyles(el, styles, on) {
   for (const k of Object.keys(styles)) el.style[k] = on ? styles[k] : '';
@@ -1451,8 +1470,13 @@ $('fullscreen').addEventListener('click', () => {
   }
 });
 
-// Covers Esc and any other browser-initiated exit from real fullscreen.
-document.addEventListener('fullscreenchange', updateFsUi);
+// Real fullscreen carries the same canvas letterbox as the CSS fallback,
+// applied on the state change so it also covers Esc and any other
+// browser-initiated exit.
+document.addEventListener('fullscreenchange', () => {
+  setStyles(canvas, CSS_FS_CANVAS, document.fullscreenElement !== null);
+  updateFsUi();
+});
 
 $('vol').addEventListener('input', (e) => {
   if (emu) emu.set_volume_percent(Number(e.target.value));
