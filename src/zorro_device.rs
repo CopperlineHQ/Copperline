@@ -37,12 +37,12 @@ pub(crate) fn dma_read_word(mem: &Memory, addr: u32) -> Option<u16> {
         return Some((u16::from(mem.slow_ram[o]) << 8) | u16::from(mem.slow_ram[o + 1]));
     }
     let mb = mem.mb_ram_base() as usize;
-    if a >= mb && a + 1 < mb + mem.mb_ram.len() {
+    if a >= mb && a - mb + 1 < mem.mb_ram.len() {
         let o = a - mb;
         return Some((u16::from(mem.mb_ram[o]) << 8) | u16::from(mem.mb_ram[o + 1]));
     }
     let accel = ACCEL_RAM_BASE as usize;
-    if a >= accel && a + 1 < accel + mem.accel_ram.len() {
+    if a >= accel && a - accel + 1 < mem.accel_ram.len() {
         let o = a - accel;
         return Some((u16::from(mem.accel_ram[o]) << 8) | u16::from(mem.accel_ram[o + 1]));
     }
@@ -70,14 +70,14 @@ pub(crate) fn dma_write_word(mem: &mut Memory, addr: u32, w: u16) -> bool {
         return true;
     }
     let mb = mem.mb_ram_base() as usize;
-    if a >= mb && a + 1 < mb + mem.mb_ram.len() {
+    if a >= mb && a - mb + 1 < mem.mb_ram.len() {
         let o = a - mb;
         mem.mb_ram[o] = (w >> 8) as u8;
         mem.mb_ram[o + 1] = w as u8;
         return true;
     }
     let accel = ACCEL_RAM_BASE as usize;
-    if a >= accel && a + 1 < accel + mem.accel_ram.len() {
+    if a >= accel && a - accel + 1 < mem.accel_ram.len() {
         let o = a - accel;
         mem.accel_ram[o] = (w >> 8) as u8;
         mem.accel_ram[o + 1] = w as u8;
@@ -105,11 +105,11 @@ pub(crate) fn dma_read_byte(mem: &Memory, addr: u32) -> Option<u8> {
         return Some(mem.slow_ram[a - slow]);
     }
     let mb = mem.mb_ram_base() as usize;
-    if a >= mb && a < mb + mem.mb_ram.len() {
+    if a >= mb && a - mb < mem.mb_ram.len() {
         return Some(mem.mb_ram[a - mb]);
     }
     let accel = ACCEL_RAM_BASE as usize;
-    if a >= accel && a < accel + mem.accel_ram.len() {
+    if a >= accel && a - accel < mem.accel_ram.len() {
         return Some(mem.accel_ram[a - accel]);
     }
     if let Some((board, off)) = mem.zorro.region_at(addr, 1) {
@@ -132,12 +132,12 @@ pub(crate) fn dma_write_byte(mem: &mut Memory, addr: u32, b: u8) -> bool {
         return true;
     }
     let mb = mem.mb_ram_base() as usize;
-    if a >= mb && a < mb + mem.mb_ram.len() {
+    if a >= mb && a - mb < mem.mb_ram.len() {
         mem.mb_ram[a - mb] = b;
         return true;
     }
     let accel = ACCEL_RAM_BASE as usize;
-    if a >= accel && a < accel + mem.accel_ram.len() {
+    if a >= accel && a - accel < mem.accel_ram.len() {
         mem.accel_ram[a - accel] = b;
         return true;
     }
@@ -598,9 +598,16 @@ mod tests {
 
     #[test]
     fn unmapped_addresses_report_none() {
-        let mem = mem_with(0x100, 0x100);
+        let mut mem = mem_with(0x100, 0x100);
         // Between chip top and slow base: nothing backs it.
         assert_eq!(dma_read_word(&mem, 0x0040_0000), None);
         assert_eq!(dma_read_byte(&mem, 0x0040_0000), None);
+
+        // The top of the 32-bit space is above the fitted banks; the offset
+        // bound must reject it without overflowing `a + 1`.
+        mem.mb_ram = vec![0u8; 0x100];
+        mem.accel_ram = vec![0u8; 0x100];
+        assert_eq!(dma_read_word(&mem, 0xFFFF_FFFF), None);
+        assert_eq!(dma_read_byte(&mem, 0xFFFF_FFFF), None);
     }
 }
