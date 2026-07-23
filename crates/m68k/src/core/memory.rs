@@ -90,6 +90,20 @@ pub trait AddressBus {
         true
     }
 
+    /// Start tracking cache residency for one complete instruction. The
+    /// MC68020 timing tables define their cache case for an instruction that
+    /// is in the cache, including extension and immediate words rather than
+    /// only the opcode word. Hosts with an instruction-cache model use this
+    /// hook to reset their per-instruction hit accumulator.
+    fn begin_instruction_fetches(&mut self) {}
+
+    /// Whether every instruction-stream access since
+    /// `begin_instruction_fetches` hit the instruction cache. Functional test
+    /// buses without a cache model default to the most recent fetch result.
+    fn instruction_fetches_were_cached(&self) -> bool {
+        self.last_fetch_was_cached()
+    }
+
     fn interrupt_acknowledge(&mut self, _level: u8) -> u32 {
         0xFFFF_FFFF
     }

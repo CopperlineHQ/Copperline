@@ -75,6 +75,15 @@ and ROM are external-bus accesses billed at the CPU clock without chip-bus
 arbitration -- so an accelerated CPU speeds up exactly what a real
 accelerator would.
 
+The A1200's 32-bit Alice path moves an aligned longword in one granted CPU
+slot, but the slot is not the complete latency of a read. A 68020 chip-RAM
+read, instruction-cache fill, or custom-register read waits one more CCK for
+the chipset data-return phase; a write can be posted after the 020's shorter
+three-clock local-bus cycle. Sequential instruction words from the same
+aligned longword use the AGA fetch latch and do not request or wait for the
+same value twice. This read/write asymmetry is covered by
+`aga_68020_chip_reads_wait_for_data_but_writes_are_posted`.
+
 ### Deferred timed-device ticks
 
 The chipset and beam advance every colour clock, but the *timed devices*

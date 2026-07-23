@@ -260,57 +260,70 @@ generated (the softfloat FPU retires every operation completely); FPSR
 quotient-bit and denormal traps behave as on the other parts rather
 than through the 060's unsupported-data path.
 
-## 68020+ timing
+## 68020 timing
 
 The 68000/68010 cycle counts are validated against the
 [SingleStepTests](https://github.com/SingleStepTests) (TomHarte) corpus,
-but **no equivalent vectors exist for the 68020, 68030, or 68040** -- the
-project publishes cycle-accurate vectors for the 68000 only. That is not
-an oversight: the 020+ parts have an instruction cache, a three-stage
-pipeline, and dynamic bus sizing, so there is no single cycle-exact count
-per instruction and therefore no widely-trusted reference to generate
-vectors from.
+but no equivalent vectors exist for the 68020. The later part has an
+instruction cache, a three-stage pipeline, execution overlap, dynamic bus
+sizing, and alignment-dependent transfers, so an opcode does not have one
+context-free cycle count.
 
-Copperline handles this by approximation rather than precision.
-`scale_cycles_for_cpu_type` (`crates/m68k/src/core/cpu.rs`) derives 020+
-timing from the corrected 68000 counts: the pipeline and cache make most
-instructions cost roughly half their 68000 cycles, with a two-cycle
-floor, and memory-bound work is dominated by the host bus model anyway.
-The flat scale is wrong for a few instructions whose 020 cost does not
-track the 68000 count, so those carry an explicit 020 cycle value (still
-pre-scale): the barrel-shifter shift/rotate, the fixed-cost MULU/MULS, a
-taken `DBcc`'s pipeline refill, and `MOVE` (register vs memory-source
-read latency). These are calibrated against a cycle-exact A1200 reference
-(FS-UAE) using the `timing-test/` ADF -- with the instruction cache
-enabled, since that is the A1200 default; `timing-test/compare.py` checks
-each row against the reference. This is good enough because Copperline
-paces to wall-clock time and models the CPU:chipset clock ratio and
-chip-bus arbitration exactly; per-instruction 020 cycles matter far less
-than those for Amiga software, which is overwhelmingly 68000. The
-68000/68010 paths are left untouched so the TomHarte-validated timing is
-never disturbed. If 020+ accuracy ever becomes a real requirement, the
-Motorola 68020/030 user-manual timing tables or differential testing
-against Moira/Musashi are the realistic sources.
+`crates/m68k/src/core/timing_020.rs` transcribes the integer timing tables
+from section 8.2 of the
+[MC68020 User's Manual](https://www.nxp.com/docs/en/data-sheet/MC68020UM.pdf).
+The manual publishes Best Case (cached with maximum execution overlap),
+Cache Case (cached without overlap), and Worst Case (uncached without
+overlap). Copperline does not yet model execution-stage overlap, so an
+instruction selects Cache Case only when all of its opcode, extension, and
+immediate fetches hit the instruction cache; any instruction-stream miss
+selects Worst Case. This covers the standard effective-address tables, the
+complete MOVE matrix, arithmetic and logical instructions, multiply/divide,
+shifts, bit/bitfield operations, branches, control flow, and save/restore
+paths. The 68000 and 68010 timing paths are unchanged, and the 68030/040
+retain the earlier scaled approximation rather than incorrectly inheriting
+68020 silicon timings.
 
-On the A1200 the 020 chip-bus timing is calibrated against a cycle-exact
-FS-UAE A1200 (the 6/8 scaling above, a 32-bit Alice chip-bus data path, and
-a two-entry longword fetch latch). The 020's chip-bus cycle is modelled as 3
+The manual's totals assume aligned operands and stack, a 32-bit bus, and
+three-clock no-wait reads and writes. They include those ideal transfers.
+Copperline bills every actual operand and instruction access while the
+instruction executes, then advances only the unconsumed part of the table
+total. An A1200 chip-RAM access can therefore extend an instruction through
+Alice arbitration; selecting a smaller CPU total cannot erase a bus wait
+that already happened.
+
+This is intentionally a datasheet model, not a claim of cycle exactness.
+The opcode word does not retain a consumed extension word, so full-format
+indexed modes use the brief-index table row, `MOVES` uses the slower of its
+two direction bases, and long divide uses the conservative signed base.
+Coprocessor operations and unclassified encodings retain the old scaled
+fallback. Misalignment, detailed cache-refill sequencing, and instruction
+overlap remain to be added. Motorola explicitly demonstrates in section 8.1
+that the timing of an instruction stream cannot be obtained by simply
+summing isolated table entries; hardware traces are still the final reference
+once a machine is available. `timing-test/` remains the end-to-end regression
+for checking the combined CPU, cache, and chip-bus model rather than the
+source of the per-opcode constants.
+
+On the A1200 the 020 uses a 32-bit Alice chip-bus data path and a two-entry
+longword fetch latch. The 020's chip-bus cycle is modelled as 3
 CPU clocks, not the 68000's 4: after the granted colour-clock slot the access
 bills only the shorter remaining tail (one clock -- half a cck at the stock
-2-clock ratio, none at 14 MHz where the 3-clock cycle fits inside one slot),
-which is the whole chip-slot cost at the native 14 MHz ratio. On Alice, reads,
-writes, and custom-register reads all consume that granted slot without an
-additional colour-clock bubble; adding one over-stalls AGA 020 chip-RAM
-read/modify/write loops, while the A1200 timing-test chip-read row remains
-aligned without it. On OCS/ECS machines the 020 still talks to the 16-bit chip
-bus, so chip/slow/custom reads pay a one-CCK data-return wait when the
-3-clock short bus cycle is otherwise hidden inside a single colour-clock slot.
-The tail's fractional cck are carried so none are lost; the 68000/010 keep the
-full 4-clock (2-cck) cycle (`Bus::cpu_short_bus_cycle`). Residuals: per-frame
-throughput still runs below the reference, and the cycle model does not reflect
-instruction-cache hit/miss *latency* (only its bus-traffic effect), so software
-that toggles CACR cache-on/off and depends on the exact transition timing can
-diverge.
+2-clock ratio, none at 14 MHz where the 3-clock cycle fits inside one slot).
+That is enough for a posted write. A chip-RAM read or custom-register read
+also waits one colour clock for the chipset's data-return phase. An AGA
+instruction-cache fill does the same for its first word; the second word from
+the already-latched 32-bit value is free. On OCS/ECS machines the 020 still
+talks to the 16-bit chip bus, so chip/slow/custom data reads likewise pay the
+return wait. The tail's fractional cck are carried so none are lost; the
+68000/010 keep the full 4-clock (2-cck) cycle
+(`Bus::cpu_short_bus_cycle`).
+
+This distinction is visible in SysInfo 4.4: treating Alice reads and cache
+fills like posted writes made the A1200 profile report 5.52x A600 chip speed
+and 1.61x A1200 CPU speed after the instruction-table update. Billing the
+data-return phase changes those figures to 3.55x and 1.10x respectively,
+without altering register-only timing-test rows.
 
 ## MMU
 

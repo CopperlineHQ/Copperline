@@ -257,6 +257,11 @@ struct CpuBus {
     /// folding on a cached fetch stream. Recomputed on every fetch, never
     /// carried across a save state.
     last_fetch_cache_hit: bool,
+    /// True only if every opcode/extension/immediate fetch in the current
+    /// instruction hit the icache. The 68020 timing tables' cache case is
+    /// defined for the complete instruction being resident, not merely its
+    /// opcode word.
+    instruction_fetches_cached: bool,
     /// IPL level as sampled at the CPU's most recent bus access. The real
     /// 68000 latches its IPL pins during bus cycles, and the take-interrupt
     /// decision at an instruction boundary uses the value latched during the
@@ -329,6 +334,7 @@ impl M68kMachine {
                 dcache: None,
                 dbg_irq_window: debug_irq_window_setting(),
                 last_fetch_cache_hit: false,
+                instruction_fetches_cached: false,
                 sampled_irq_level: 0,
                 ipl_sample_held: false,
                 diag_current_pc: 0,
@@ -2544,12 +2550,14 @@ impl CpuBus {
             self.cache_fill_after_miss(addr, size, kind);
             if kind == CpuBusAccessKind::Fetch {
                 self.last_fetch_cache_hit = false;
+                self.instruction_fetches_cached = false;
             }
             self.note_cpu_data_bus(addr, size, value);
             return value;
         }
         if kind == CpuBusAccessKind::Fetch {
             self.last_fetch_cache_hit = false;
+            self.instruction_fetches_cached = false;
         }
         let value = self.read_sized_uncached(addr, size, kind);
         self.note_cpu_data_bus(addr, size, value);
@@ -3174,6 +3182,14 @@ impl CpuBus {
 impl AddressBus for CpuBus {
     fn last_fetch_was_cached(&self) -> bool {
         self.last_fetch_cache_hit
+    }
+
+    fn begin_instruction_fetches(&mut self) {
+        self.instruction_fetches_cached = true;
+    }
+
+    fn instruction_fetches_were_cached(&self) -> bool {
+        self.instruction_fetches_cached
     }
 
     fn read_byte(&mut self, address: u32) -> u8 {
@@ -3865,6 +3881,7 @@ mod tests {
             dcache: None,
             dbg_irq_window: None,
             last_fetch_cache_hit: false,
+            instruction_fetches_cached: false,
             sampled_irq_level: 0,
             ipl_sample_held: false,
             diag_current_pc: 0,
@@ -3892,6 +3909,7 @@ mod tests {
             dcache: None,
             dbg_irq_window: None,
             last_fetch_cache_hit: false,
+            instruction_fetches_cached: false,
             sampled_irq_level: 0,
             ipl_sample_held: false,
             diag_current_pc: 0,
@@ -3926,6 +3944,7 @@ mod tests {
             dcache: None,
             dbg_irq_window: None,
             last_fetch_cache_hit: false,
+            instruction_fetches_cached: false,
             sampled_irq_level: 0,
             ipl_sample_held: false,
             diag_current_pc: 0,
@@ -3958,6 +3977,46 @@ mod tests {
     //   $106: 4E71            nop                  (patch target)
     //   $108: 31FC 5282 0106  move.w #$5282,($106).w   (addq.l #1,d2)
     const ICACHE_SMC_PROLOGUE: [u16; 7] = [0x7001, 0x4E7B, 0x0002, 0x4E71, 0x31FC, 0x5282, 0x0106];
+
+    #[test]
+    fn timing_cache_case_requires_every_instruction_fetch_to_hit() {
+        let mut icache = crate::cache::CpuCache::default();
+        icache.enabled = true;
+        let mut bus = CpuBus {
+            bus: test_bus(reset_rom(0, 0)),
+            address_mask: ADDRESS_MASK_24BIT,
+            dbg_memw_addr: None,
+            dbg_memw_hit: None,
+            icache: Some(Box::new(icache)),
+            dcache: None,
+            dbg_irq_window: None,
+            last_fetch_cache_hit: false,
+            instruction_fetches_cached: false,
+            sampled_irq_level: 0,
+            ipl_sample_held: false,
+            diag_current_pc: 0,
+        };
+
+        // Warm the opcode longword and a separate extension longword.
+        let _ = bus.read_immediate_word(0x100);
+        let _ = bus.read_immediate_word(0x108);
+
+        bus.begin_instruction_fetches();
+        let _ = bus.read_immediate_word(0x100);
+        let _ = bus.read_immediate_word(0x108);
+        assert!(
+            bus.instruction_fetches_were_cached(),
+            "all-resident instruction stream must select Cache Case"
+        );
+
+        bus.begin_instruction_fetches();
+        let _ = bus.read_immediate_word(0x100);
+        let _ = bus.read_immediate_word(0x110);
+        assert!(
+            !bus.instruction_fetches_were_cached(),
+            "an extension-word miss must select Worst Case even after an opcode hit"
+        );
+    }
 
     #[test]
     fn icache_serves_stale_opcode_until_cacr_clear() -> Result<()> {
@@ -4140,6 +4199,7 @@ mod tests {
             dcache: Some(Box::new(dcache)),
             dbg_irq_window: None,
             last_fetch_cache_hit: false,
+            instruction_fetches_cached: false,
             sampled_irq_level: 0,
             ipl_sample_held: false,
             diag_current_pc: 0,
@@ -4188,6 +4248,7 @@ mod tests {
             dcache: None,
             dbg_irq_window: None,
             last_fetch_cache_hit: false,
+            instruction_fetches_cached: false,
             sampled_irq_level: 0,
             ipl_sample_held: false,
             diag_current_pc: 0,
@@ -4214,6 +4275,7 @@ mod tests {
             dcache: None,
             dbg_irq_window: None,
             last_fetch_cache_hit: false,
+            instruction_fetches_cached: false,
             sampled_irq_level: 0,
             ipl_sample_held: false,
             diag_current_pc: 0,
@@ -4246,6 +4308,7 @@ mod tests {
             dcache: None,
             dbg_irq_window: None,
             last_fetch_cache_hit: false,
+            instruction_fetches_cached: false,
             sampled_irq_level: 0,
             ipl_sample_held: false,
             diag_current_pc: 0,

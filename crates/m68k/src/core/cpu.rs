@@ -167,6 +167,10 @@ pub struct CpuCore {
     pub run_mode: u32,
     /// True while processing an exception (for double-fault detection)
     pub exception_processing: bool,
+    /// Vector taken by the instruction currently being timed. Unlike the
+    /// debugger field below, this is cleared before every opcode fetch.
+    #[serde(skip)]
+    pub(crate) instruction_exception_vector: Option<u32>,
     /// Vector number of the most recent exception entry (trap, fault, or
     /// interrupt -- everything routed through `jump_vector`), for the
     /// host debugger's exception catchpoints. Polled and cleared by the
@@ -388,18 +392,10 @@ impl Default for CpuCore {
 }
 
 impl CpuCore {
-    /// Approximate 68020/030/040 instruction timing from the 68000 cycle
-    /// counts the instruction handlers produce: the 020's three-stage
-    /// pipeline and instruction cache make most instructions cost roughly
-    /// half their 68000 cycles (memory-bound work is additionally dominated
-    /// by the host bus model), with a two-cycle floor. Calibrated against a
-    /// cycle-exact A1200 reference (FS-UAE) using the Copperline
-    /// timing-test ADF: 68000 MULU.W #imm with 8 set bits = 54 cycles
-    /// scales to the measured 27, and the chip-RAM dbra loop lands on the
-    /// measured 8 clocks per iteration. The 68000/68010 paths (validated
-    /// against SingleStepTests) are untouched; see the "68020+ timing"
-    /// section of docs/internals/cpu.md for why no per-instruction 020
-    /// reference exists.
+    /// Legacy 68030/040 approximation from the handlers' corrected 68000
+    /// counts. The 68020/68EC020 is routed through its MC68020UM section-8
+    /// timing model before this function; the 68060 has a separate pipeline
+    /// engine. The 68000/68010 paths remain untouched.
     #[inline]
     pub(crate) fn scale_cycles_for_cpu_type(&self, cycles: i32) -> i32 {
         use crate::core::types::CpuType;
@@ -459,6 +455,7 @@ impl CpuCore {
             instr_mode: 0,
             run_mode: 0,
             exception_processing: false,
+            instruction_exception_vector: None,
             last_exception_vector: None,
             has_pmmu: false,
             pmmu_enabled: false,
