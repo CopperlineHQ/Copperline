@@ -1677,8 +1677,12 @@ mod tests {
     fn nvram_retries_the_backing_file_write_after_a_failure() {
         let mut chip = no_chip();
         let mut akiko = Akiko::new();
+        let unique = {
+            static UNIQUE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        };
         let dir = std::env::temp_dir().join(format!(
-            "copperline-akiko-nvram-retry-{}",
+            "copperline-akiko-nvram-retry-{}-{unique}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
