@@ -461,12 +461,18 @@ channel_mode = "stereo"     # "stereo" (default) or "mono"
 stereo_separation = 100     # 0-100; 100 = hardware panning, 0 = mono
 ```
 
-The drive sounds are generated from scratch: motor hum with spin-up/down,
-head-step clicks for seeks and the empty-drive poll, and faint read/write
-hiss during disk DMA. Only step pulses that actually fire the stepper are
-audible: like a real 3.5" mechanism, an outward pulse with the head at
-track 0 is gated by the /TRK0 sensor, so NoClick-style patches silence
-the empty-drive poll just as they do on real hardware.
+The drive sounds are generated from scratch: motor hum with spin-up/down
+over a rumble that repeats with each platter revolution, and head-step
+clacks (an isolated step -- the empty-drive poll, or the track-to-track
+advance while loading -- lands with its rebound clatter, and fast
+multi-track seeks blur into the characteristic buzz). Reading adds no
+noise of its own; the loading sound is the step rhythm over the spinning
+motor, as on the real mechanism. The synthesis targets were measured
+from recordings of real Amiga drive mechanisms, but no sample data is
+used. Only step pulses that actually fire the stepper are audible: like
+a real 3.5" mechanism, an outward pulse with the head at track 0 is
+gated by the /TRK0 sensor, so NoClick-style patches silence the
+empty-drive poll just as they do on real hardware.
 
 `output_device` picks the host output by a case-insensitive substring of the
 names `--list-audio-devices` prints (`--audio-device` overrides it); an omitted
