@@ -327,12 +327,16 @@ impl Nvram {
         self.sda_drive_low = false;
         self.phase = I2cPhase::DeviceAddress;
         if self.dirty {
-            self.dirty = false;
             if let Some(path) = &self.path {
                 if let Err(e) = std::fs::write(path, &self.memory) {
+                    // Stay dirty so the next STOP retries: a transient
+                    // host error must not lose the EEPROM contents (save
+                    // games) until the guest happens to write them again.
                     log::warn!("cd32 nvram: writing {}: {e}", path.display());
+                    return;
                 }
             }
+            self.dirty = false;
         }
     }
 }
@@ -1664,6 +1668,40 @@ mod tests {
         i2c::start(&mut akiko, &mut chip);
         assert!(i2c::write_byte(&mut akiko, &mut chip, 0x55), "no ACK");
         i2c::stop(&mut akiko, &mut chip);
+    }
+
+    /// A failed backing-file write must leave the EEPROM dirty so a
+    /// later STOP retries; clearing it up front would silently drop the
+    /// NVRAM contents (save games) on a transient host error.
+    #[test]
+    fn nvram_retries_the_backing_file_write_after_a_failure() {
+        let mut chip = no_chip();
+        let mut akiko = Akiko::new();
+        let unique = {
+            static UNIQUE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "copperline-akiko-nvram-retry-{}-{unique}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("cd32-nvram.bin"); // parent dir missing
+        akiko.set_nvram_path(path.clone());
+
+        i2c::start(&mut akiko, &mut chip);
+        assert!(!i2c::write_byte(&mut akiko, &mut chip, 0xA2));
+        assert!(!i2c::write_byte(&mut akiko, &mut chip, 0x42));
+        assert!(!i2c::write_byte(&mut akiko, &mut chip, 0xDE));
+        i2c::stop(&mut akiko, &mut chip); // flush fails
+        assert!(!path.exists());
+
+        std::fs::create_dir(&dir).unwrap();
+        i2c::start(&mut akiko, &mut chip);
+        i2c::stop(&mut akiko, &mut chip); // still dirty: retried and lands
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes[0x142], 0xDE);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
