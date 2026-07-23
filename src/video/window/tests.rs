@@ -4241,3 +4241,74 @@ fn status_paths_keep_the_file_name() {
     let out = shorten_status_paths(with_cause);
     assert!(out.contains("cd32ext.rom: No such file"), "{out}");
 }
+
+// --- windowless capture runs ----------------------------------------------
+
+/// A unique temp path for a windowless-capture output artifact.
+fn temp_capture_path(name: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("copperline-headless-{nanos}-{counter}-{name}"))
+}
+
+#[test]
+fn windowless_screenshot_run_saves_png_and_exits() {
+    let path = temp_capture_path("shot.png");
+    let mut app = test_app();
+    app.pending_auto_shot = Some((0.04, path.clone()));
+    app.run_headless().expect("windowless screenshot run");
+    let data = std::fs::read(&path).expect("screenshot file written");
+    assert_eq!(&data[1..4], b"PNG");
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn windowless_frame_dump_run_saves_frames_and_exits() {
+    let dir = temp_capture_path("dump");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut app = test_app();
+    app.pending_frame_dump = Some(super::FrameDumpSpec {
+        dir: dir.clone(),
+        start_secs: 0.0,
+        count: 2,
+    });
+    app.run_headless().expect("windowless frame dump run");
+    assert!(dir.join("frame-000000.png").exists());
+    assert!(dir.join("frame-000001.png").exists());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn windowless_run_fires_scheduled_input_and_flushes_recording() {
+    let shot = temp_capture_path("input-shot.png");
+    let script = temp_capture_path("session.clscript");
+    let mut app = test_app();
+    app.pending_auto_shot = Some((0.2, shot.clone()));
+    app.pending_auto_keys.push(super::KeyPressSpec {
+        secs: 0.04,
+        rawkey: 0x45,
+        hold_ms: 40,
+    });
+    app.input_recorder = Some(crate::inputrec::InputRecorder::new(0.0));
+    app.record_input_path = Some(script.clone());
+    app.run_headless()
+        .expect("windowless run with scheduled input");
+    let text = std::fs::read_to_string(&script).expect("recorded script written");
+    assert!(
+        text.contains("key-after") && text.contains("0x45"),
+        "scheduled key should be recorded: {text}"
+    );
+    std::fs::remove_file(&shot).ok();
+    std::fs::remove_file(&script).ok();
+}
+
+#[test]
+fn windowless_run_without_captures_errors_instead_of_spinning() {
+    let app = test_app();
+    assert!(app.run_headless().is_err());
+}
