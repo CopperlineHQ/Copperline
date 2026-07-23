@@ -996,13 +996,26 @@ function updatePadStatus(releasedPort1) {
 
 // --- keyboard ------------------------------------------------------------
 
+// Auto-repeat keydowns must not reach the emulator (the Amiga keyboard
+// sends one down code; the guest OS does its own repeat), but the browser
+// default still has to be suppressed on every repeat or holding a cursor
+// key scrolls the page. Track which codes the first keydown consumed.
+const consumedKeys = new Set();
 window.addEventListener('keydown', (e) => {
-  if (!emu || !running || e.repeat) return;
-  if (joystickKey(e.code, true) || emu.key_event(e.code, true)) e.preventDefault();
+  if (!emu || !running) return;
+  if (e.repeat) {
+    if (consumedKeys.has(e.code)) e.preventDefault();
+    return;
+  }
+  if (joystickKey(e.code, true) || emu.key_event(e.code, true)) {
+    consumedKeys.add(e.code);
+    e.preventDefault();
+  }
 });
 window.addEventListener('keyup', (e) => {
   if (!emu || !running) return;
-  if (joystickKey(e.code, false) || emu.key_event(e.code, false)) e.preventDefault();
+  const consumed = joystickKey(e.code, false) || emu.key_event(e.code, false);
+  if (consumedKeys.delete(e.code) || consumed) e.preventDefault();
 });
 
 // --- mouse ---------------------------------------------------------------
