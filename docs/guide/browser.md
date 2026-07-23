@@ -104,6 +104,17 @@ Controls:
   touch mode the canvas is a pad instead: a floating eight-way stick on
   the left half and a fire button on the right.
 
+The **Fullscreen** button takes over the whole monitor, keeping the
+display's 4:3 shape: the picture becomes the largest 4:3 box that fits
+and is letterboxed against the monitor's own aspect ratio, so an
+ultrawide gets pillarbox bars instead of a stretched screen. The
+letterbox is applied by the page glue itself, not the page's stylesheet,
+so it holds on any shell that embeds the emulator. While fullscreen,
+small Joystick, Pause and Exit buttons sit in the top-right corner. On
+iPhones, where Safari has no element fullscreen, the button pins the
+shell over the page instead -- Safari's chrome stays, the page furniture
+goes, and the same letterbox applies.
+
 Once a machine boots, a status strip appears below the screen with the
 same front-panel readouts as the desktop [status bar](ui.md): the PWR and
 FDD LEDs (plus HDD/CD on machines fitted with those drives), the floppy
