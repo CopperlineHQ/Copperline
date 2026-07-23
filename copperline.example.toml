@@ -125,6 +125,9 @@ model = "68000"
 #                                  # A seeded clock ticks in emulated time, so the guest-visible
 #                                  # time is deterministic across runs.
 # rtc_frozen = true                # stop the seeded clock at rtc_time exactly
+# battmem = "battmem.nvram"        # RP5C01 battery-RAM (battmem.resource) backing file, in the
+#                                  # WinUAE/Amiberry .nvram layout. Defaults on when an RP5C01
+#                                  # is fitted; "" keeps the battery registers session-only.
 # mem_controller = "ramsey-07"   # none | ramsey-04 (A3000) | ramsey-07 (A4000)
 # rom_scsi_device_disable = true # skip the ROM's scsi.device (default: see above)
 

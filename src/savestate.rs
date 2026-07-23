@@ -136,7 +136,10 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      counter) and the rev-locked motor (hum partial phases, revolution
 //      phase, cascaded rumble poles, per-drive pattern seed); the
 //      read-gated hiss voice was removed outright
-pub const STATE_VERSION: u32 = 38;
+//  39: Rp5c01Rtc gained the battmem backing-file binding (battmem_path,
+//      battmem_dirty - [machine] battmem), so a resumed run keeps
+//      persisting battery RAM to the same file
+pub const STATE_VERSION: u32 = 39;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

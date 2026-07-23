@@ -40,11 +40,13 @@
 !/assets/aros/aros-amiga-m68k-ext.bin
 !/assets/services/services_rom.bin
 
-# Local run artifacts (screenshots, recordings, save states, input scripts).
+# Local run artifacts (screenshots, recordings, save states, input scripts,
+# RTC battery-RAM backing files).
 copperline-screenshot-*.png
 copperline-video-*.avi
 *.clstate
 *.clscript
+*.nvram
 .DS_Store
 
 # MyST documentation build output (see docs/README.md).
