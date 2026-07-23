@@ -115,6 +115,7 @@ rtc = true        # add a battery RTC (default: only A500+/CDTV/A3000/A4000 ship
 # rtc_chip = "RP5C01"              # MSM6242 (default) or RP5C01 (A3000/A4000 default)
 # rtc_time = "2005-03-18 01:58:29" # seed the clock; it then ticks in emulated time
 # rtc_frozen = true                # stop the seeded clock at rtc_time exactly
+# battmem = "battmem.nvram"        # RP5C01 battery-RAM backing file (default when fitted)
 mem_controller = "ramsey-07" # none, ramsey-04 (A3000), ramsey-07 (A4000)
 rom_scsi_device_disable = true # skip the ROM's scsi.device (default: when its bus has no drives)
 ```
@@ -159,6 +160,22 @@ follows the profile -- `RP5C01` on `A3000`/`A4000`, `MSM6242` everywhere else
 so the choice is mostly invisible to it, but Linux/m68k does not probe: it
 drives the chip the machine model dictates, so an A3000/A4000 booting Linux
 needs the RP5C01 answering for its clock to work.
+
+`battmem` persists the RP5C01's battery-backed registers -- the 26 RAM
+nibbles behind `battmem.resource` plus the alarm and 12/24 settings --
+across runs, the way the real board's battery does. This is where
+`scsi.device` keeps its per-unit SCSI host settings (an A3000's or A4091's
+synchronous-transfer, disconnect, and last-drive options, including
+remembering attached CD-ROM drives), so without it those revert every run.
+The file uses the same `.nvram` layout as WinUAE and Amiberry, so backing
+files interchange between emulators; only the battery payload loads back --
+the time-of-save digits in the file never override the (host- or
+`rtc_time`-driven) clock. It defaults to `battmem.nvram` in the working
+directory whenever an RP5C01 is fitted; point it elsewhere with a path, or
+set `battmem = ""` to keep the battery registers session-only. Note that a
+persisted file carries guest-visible state from one run into the next by
+design, so delete it (or disable it) where byte-for-byte reproducible
+headless runs matter.
 
 `rtc_time` seeds the clock instead of letting it mirror the host's: the value
 is either an integer (Unix seconds, UTC) or a string

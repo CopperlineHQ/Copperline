@@ -162,6 +162,11 @@ pub struct Config {
     /// Stop the seeded RTC (`[machine] rtc_frozen`): every read returns
     /// exactly `rtc_seed_unix`, for pinning a guest to one time window.
     pub rtc_frozen: bool,
+    /// RP5C01 battery-RAM (battmem) backing file (`[machine] battmem`),
+    /// in the WinUAE/Amiberry `.nvram` layout; `None` keeps the battery
+    /// registers session-only. Defaults to `battmem.nvram` when an
+    /// RP5C01 is fitted.
+    pub battmem_path: Option<PathBuf>,
     pub video_standard: VideoStandard,
     pub audio: AudioConfig,
     /// Gayle IDE drive images (raw flat HDF, RDB inside), opened
@@ -1159,6 +1164,7 @@ impl Default for Config {
             rtc_chip: crate::rtc::RtcChip::Msm6242,
             rtc_seed_unix: None,
             rtc_frozen: false,
+            battmem_path: None,
             video_standard: VideoStandard::Pal,
             audio: AudioConfig::default(),
             ide: IdeConfig::default(),
@@ -1973,6 +1979,13 @@ pub(crate) struct RawMachine {
     /// Only meaningful together with `rtc_time`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) rtc_frozen: Option<bool>,
+    /// Backing file for the RP5C01's battery RAM (the storage behind
+    /// AmigaOS `battmem.resource` on the A3000/A4000), in the
+    /// WinUAE/Amiberry `.nvram` file layout so files interchange between
+    /// emulators. Defaults to `battmem.nvram` whenever an RP5C01 is
+    /// fitted; an empty string keeps the battery registers session-only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) battmem: Option<String>,
     /// Memory controller fitted, defaulting per profile: `none`, `ramsey-04`
     /// (A3000) or `ramsey-07` (A4000). Ramsey answers at $DE0000, which no
     /// other chip decodes, so it can also be fitted to a wedge machine to
@@ -2602,6 +2615,38 @@ impl TryFrom<RawConfig> for Config {
             }
         }
 
+        let rtc_present = match raw.machine.rtc {
+            // A configured time on an explicitly unfitted clock would
+            // silently do nothing; make the contradiction loud.
+            Some(false) if rtc_seed_unix.is_some() => anyhow::bail!(
+                "[machine] rtc_time is set but rtc = false leaves the \
+                 clock unfitted; drop one of them"
+            ),
+            // Naming a chip for a socket declared empty is the same
+            // contradiction.
+            Some(false) if rtc_chip.is_some() => anyhow::bail!(
+                "[machine] rtc_chip is set but rtc = false leaves the \
+                 clock unfitted; drop one of them"
+            ),
+            Some(fitted) => fitted,
+            None => defaults.rtc_present || rtc_seed_unix.is_some() || rtc_chip.is_some(),
+        };
+        let rtc_chip = rtc_chip.unwrap_or(defaults.rtc_chip);
+        let rp5c01_fitted = rtc_present && rtc_chip == crate::rtc::RtcChip::Rp5c01;
+        let battmem_path = match raw.machine.battmem.as_deref() {
+            // An empty path keeps the battery registers session-only.
+            Some("") => None,
+            // A backing file for battery RAM the machine does not have
+            // would silently never fill; make the contradiction loud.
+            Some(path) if !rp5c01_fitted => anyhow::bail!(
+                "[machine] battmem ({path}) backs the RP5C01's battery RAM, \
+                 but this machine has no RP5C01 fitted; set \
+                 rtc_chip = \"RP5C01\" or drop battmem"
+            ),
+            Some(path) => Some(PathBuf::from(path)),
+            None => rp5c01_fitted.then(|| PathBuf::from("battmem.nvram")),
+        };
+
         Ok(Config {
             rom_path: raw.rom.map(PathBuf::from).unwrap_or(defaults.rom_path),
             cpu,
@@ -2668,25 +2713,11 @@ impl TryFrom<RawConfig> for Config {
                 .nvram
                 .map(PathBuf::from)
                 .or_else(|| defaults.akiko.then(|| PathBuf::from("cd32-nvram.bin"))),
-            rtc_present: match raw.machine.rtc {
-                // A configured time on an explicitly unfitted clock would
-                // silently do nothing; make the contradiction loud.
-                Some(false) if rtc_seed_unix.is_some() => anyhow::bail!(
-                    "[machine] rtc_time is set but rtc = false leaves the \
-                     clock unfitted; drop one of them"
-                ),
-                // Naming a chip for a socket declared empty is the same
-                // contradiction.
-                Some(false) if rtc_chip.is_some() => anyhow::bail!(
-                    "[machine] rtc_chip is set but rtc = false leaves the \
-                     clock unfitted; drop one of them"
-                ),
-                Some(fitted) => fitted,
-                None => defaults.rtc_present || rtc_seed_unix.is_some() || rtc_chip.is_some(),
-            },
-            rtc_chip: rtc_chip.unwrap_or(defaults.rtc_chip),
+            rtc_present,
+            rtc_chip,
             rtc_seed_unix,
             rtc_frozen,
+            battmem_path,
             log_unmapped: raw
                 .debug
                 .log_unmapped
@@ -3752,6 +3783,65 @@ mod tests {
     }
 
     #[test]
+    fn battmem_defaults_to_a_backing_file_only_where_an_rp5c01_sits() -> Result<()> {
+        // The big boxes get the default backing file with their Ricoh part.
+        for profile in ["A3000", "A4000"] {
+            let cfg = parse_config(&format!("[machine]\nprofile = \"{profile}\"\n"))?;
+            assert_eq!(
+                cfg.battmem_path.as_deref(),
+                Some(std::path::Path::new("battmem.nvram")),
+                "{profile}"
+            );
+        }
+        // The OKI part has no battery RAM: no file, even with a clock.
+        let cfg = parse_config("[machine]\nprofile = \"A500+\"\n")?;
+        assert_eq!(cfg.battmem_path, None);
+        // Fitting an RP5C01 anywhere brings the default with it.
+        let cfg = parse_config("[machine]\nrtc_chip = \"RP5C01\"\n")?;
+        assert!(cfg.battmem_path.is_some());
+
+        // An explicit path wins; an empty one keeps RAM session-only.
+        let cfg = parse_config(
+            r#"
+            [machine]
+            profile = "A4000"
+            battmem = "shared/A4000.nvram"
+            "#,
+        )?;
+        assert_eq!(
+            cfg.battmem_path.as_deref(),
+            Some(std::path::Path::new("shared/A4000.nvram"))
+        );
+        let cfg = parse_config(
+            r#"
+            [machine]
+            profile = "A4000"
+            battmem = ""
+            "#,
+        )?;
+        assert_eq!(cfg.battmem_path, None);
+        Ok(())
+    }
+
+    #[test]
+    fn battmem_without_an_rp5c01_is_rejected() {
+        // The default A500 has no RP5C01 for the file to back.
+        let err = parse_config("[machine]\nbattmem = \"battmem.nvram\"\n").unwrap_err();
+        assert!(err.to_string().contains("RP5C01"), "{err:#}");
+
+        // An MSM6242 clock is not enough: it carries no battery RAM.
+        let err = parse_config(
+            r#"
+            [machine]
+            rtc = true
+            battmem = "battmem.nvram"
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("RP5C01"), "{err:#}");
+    }
+
+    #[test]
     fn rtc_time_cli_override_matches_the_config_field() -> Result<()> {
         let cfg = load_overrides(&ConfigOverrides {
             rtc_time: Some("1111111109".to_string()),
@@ -3822,6 +3912,7 @@ mod tests {
                 rtc_chip: Some("RP5C01".to_string()),
                 rtc_time: Some(RawRtcTime::Text("2005-03-18 01:58:29".to_string())),
                 rtc_frozen: Some(true),
+                battmem: Some("battmem.nvram".to_string()),
                 mem_controller: Some("ramsey-07".to_string()),
                 rom_scsi_device_disable: Some(true),
             },

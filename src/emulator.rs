@@ -2060,6 +2060,10 @@ pub fn build_machine(
     bus.set_rtc_present(cfg.rtc_present);
     bus.set_rtc_chip(cfg.rtc_chip);
     bus.rtc.set_seed(cfg.rtc_seed_unix, cfg.rtc_frozen);
+    if let Some(path) = &cfg.battmem_path {
+        info!("rtc: battery RAM (battmem) persisted to {}", path.display());
+        bus.rtc.set_battmem_path(path.clone());
+    }
     if let Some(id) = cfg.gate_array.gayle_id() {
         let mut gayle = crate::gayle::Gayle::new(id);
         if let Some(drive) = &cfg.ide.master {

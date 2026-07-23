@@ -18,6 +18,13 @@
 //! chips' latch/bank/control state (and the RP5C01's battery RAM), but
 //! they never change the host clock.
 //!
+//! The RP5C01's battery-backed registers can persist across runs to a
+//! backing file (`[machine] battmem`) in the same `.nvram` layout
+//! WinUAE and Amiberry use, so files interchange between emulators.
+//! This is how AmigaOS `battmem.resource` settings -- the SCSI host
+//! options an A3000's or A4091's `scsi.device` stores, among others --
+//! survive a power cycle like they do on a real battery-fitted board.
+//!
 //! The clock is reported in the host's *local* time zone (matching the
 //! auto-generated filename stamps in `timestamp.rs`), since AmigaOS has no
 //! real notion of time zones and a UTC clock just confuses users. The
@@ -123,6 +130,15 @@ impl Rtc {
     /// clock). The seed is the value the clock reads at emulated time zero.
     pub fn set_seed(&mut self, seed_unix: Option<u64>, frozen: bool) {
         self.clock_mut().set_seed(seed_unix, frozen);
+    }
+
+    /// Persist the RP5C01's battery-backed registers to (and preload them
+    /// from) `path`, in the WinUAE/Amiberry `.nvram` file layout. No-op
+    /// for the MSM6242, which carries no battery RAM.
+    pub fn set_battmem_path(&mut self, path: std::path::PathBuf) {
+        if let Rtc::Rp5c01(chip) = self {
+            chip.set_battmem_path(path);
+        }
     }
 
     pub fn seed(&self) -> Option<u64> {
@@ -361,6 +377,12 @@ pub struct Rp5c01Rtc {
     /// running, so unlike the real stopped chip no time is lost.
     latched: Option<RtcDateTime>,
     clock: ClockSource,
+    /// Backing file for the battery-backed registers (`[machine]
+    /// battmem`), in the WinUAE/Amiberry `.nvram` layout. `None` keeps
+    /// them session-only, like a board with a flat battery.
+    battmem_path: Option<std::path::PathBuf>,
+    /// Battery state changed since the last flush to `battmem_path`.
+    battmem_dirty: bool,
 }
 
 impl Default for Rp5c01Rtc {
@@ -375,6 +397,8 @@ impl Default for Rp5c01Rtc {
             ram: [0; 13],
             latched: None,
             clock: ClockSource::default(),
+            battmem_path: None,
+            battmem_dirty: false,
         }
     }
 }
@@ -401,6 +425,16 @@ impl Rp5c01Rtc {
     const BANK1_WRITE_MASK: [u8; 13] = [
         0x0, 0x0, 0xF, 0x7, 0xF, 0x3, 0x7, 0xF, 0x3, 0x0, 0x1, 0x0, 0x0,
     ];
+
+    /// The WinUAE/Amiberry RP5C01 `.nvram` file layout, kept bit-for-bit
+    /// compatible so backing files interchange between emulators: three
+    /// 16-byte blocks of one register value per byte -- the time digits
+    /// as of the last save plus MODE/TEST/RESET at selects D-F, then the
+    /// block-1 (alarm) registers, then the 13 battery RAM bytes (block 2
+    /// low nibbles, block 3 high).
+    const BATTMEM_FILE_SIZE: usize = 48;
+    const BATTMEM_ALARM_OFFSET: usize = 16;
+    const BATTMEM_RAM_OFFSET: usize = 32;
 
     fn bank1_default() -> [u8; 13] {
         let mut bank1 = [0u8; 13];
@@ -441,12 +475,23 @@ impl Rp5c01Rtc {
                     self.latched = None;
                 }
                 self.mode = val;
+                // Every battery-RAM access sequence brackets its nibble
+                // writes in MODE writes (bank select in, bank restore
+                // out -- battmem.resource and Linux's nvram driver both
+                // do), so a MODE write is the transaction boundary that
+                // flushes changed battery state to the backing file.
+                if self.battmem_dirty {
+                    self.flush_battmem(emulated_secs);
+                }
             }
             0xE => {
                 // TEST: not modelled, deliberately not persistent.
             }
             0xF => {
                 if val & Self::RESET_ALARM != 0 {
+                    if self.bank1[Self::ALARM_REGS].iter().any(|&digit| digit != 0) {
+                        self.battmem_dirty = true;
+                    }
                     self.bank1[Self::ALARM_REGS].fill(0);
                 }
                 // The fraction reset and the 16 Hz / 1 Hz output gates go
@@ -458,15 +503,30 @@ impl Rp5c01Rtc {
                 // seeded clock (module policy, same as the MSM6242).
                 Self::BLOCK_TIME => {}
                 Self::BLOCK_ALARM => {
-                    self.bank1[reg as usize] = val & Self::BANK1_WRITE_MASK[reg as usize];
+                    self.store_battery(reg, val & Self::BANK1_WRITE_MASK[reg as usize], true);
                 }
                 Self::BLOCK_RAM_LO => {
-                    self.ram[reg as usize] = (self.ram[reg as usize] & 0xF0) | val;
+                    self.store_battery(reg, (self.ram[reg as usize] & 0xF0) | val, false);
                 }
                 _ => {
-                    self.ram[reg as usize] = (val << 4) | (self.ram[reg as usize] & 0x0F);
+                    self.store_battery(reg, (val << 4) | (self.ram[reg as usize] & 0x0F), false);
                 }
             },
+        }
+    }
+
+    /// Store into a battery-backed register (`bank1` when `alarm`, the
+    /// RAM byte otherwise), marking the backing file stale only when the
+    /// value actually changed.
+    fn store_battery(&mut self, reg: u8, val: u8, alarm: bool) {
+        let slot = if alarm {
+            &mut self.bank1[reg as usize]
+        } else {
+            &mut self.ram[reg as usize]
+        };
+        if *slot != val {
+            *slot = val;
+            self.battmem_dirty = true;
         }
     }
 
@@ -518,6 +578,64 @@ impl Rp5c01Rtc {
             return (self.time(emulated_secs).year % 4) as u8;
         }
         self.bank1[reg as usize]
+    }
+
+    /// Persist the battery-backed registers to (and preload them from)
+    /// `path`, in the WinUAE/Amiberry `.nvram` layout. Only the alarm
+    /// block (behind the hardware write masks) and the RAM bytes load
+    /// back: the stored time digits are ignored because the clock is
+    /// read-only (host- or seed-driven), and the stored MODE is ignored
+    /// because restoring a parked selector would defeat the power-on
+    /// probe tell every battclock probe matches on (MODE reads `$8`).
+    pub fn set_battmem_path(&mut self, path: std::path::PathBuf) {
+        match std::fs::read(&path) {
+            Ok(data) if data.len() >= Self::BATTMEM_FILE_SIZE => {
+                for (reg, slot) in self.bank1.iter_mut().enumerate() {
+                    *slot = data[Self::BATTMEM_ALARM_OFFSET + reg] & Self::BANK1_WRITE_MASK[reg];
+                }
+                for (reg, slot) in self.ram.iter_mut().enumerate() {
+                    *slot = data[Self::BATTMEM_RAM_OFFSET + reg];
+                }
+            }
+            Ok(data) if data.is_empty() => {}
+            // A 16-byte file is WinUAE's MSM6242 flavour; anything else
+            // short is a truncated write. Neither holds RP5C01 RAM, so
+            // start battery-fresh rather than misread it.
+            Ok(data) => log::warn!(
+                "rp5c01 battmem: {} is {} bytes, not a {}-byte RP5C01 nvram file; starting fresh",
+                path.display(),
+                data.len(),
+                Self::BATTMEM_FILE_SIZE
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => log::warn!("rp5c01 battmem: reading {}: {e}", path.display()),
+        }
+        self.battmem_path = Some(path);
+        self.battmem_dirty = false;
+    }
+
+    fn flush_battmem(&mut self, emulated_secs: f64) {
+        self.battmem_dirty = false;
+        if let Some(path) = &self.battmem_path {
+            if let Err(e) = std::fs::write(path, self.battmem_bytes(emulated_secs)) {
+                log::warn!("rp5c01 battmem: writing {}: {e}", path.display());
+            }
+        }
+    }
+
+    /// The full `.nvram` image: WinUAE also stores the time digits and
+    /// control registers as of the save, so write them for file
+    /// compatibility even though only the alarm and RAM blocks load back.
+    fn battmem_bytes(&self, emulated_secs: f64) -> [u8; Self::BATTMEM_FILE_SIZE] {
+        let mut bytes = [0u8; Self::BATTMEM_FILE_SIZE];
+        for reg in 0x0..=0xC {
+            bytes[reg as usize] = self.read_time_register(reg, emulated_secs);
+        }
+        bytes[0xD] = self.mode;
+        // Selects E/F (TEST, RESET) are write-only and hold nothing.
+        bytes[Self::BATTMEM_ALARM_OFFSET..][..self.bank1.len()].copy_from_slice(&self.bank1);
+        bytes[Self::BATTMEM_RAM_OFFSET..][..self.ram.len()].copy_from_slice(&self.ram);
+        bytes
     }
 
     /// A CPU reset does not reach the battery-backed chip: the time
@@ -1003,6 +1121,127 @@ mod tests {
         assert_eq!(rp_read(&mut rtc, 0x6), 5);
         assert_eq!(rp_read(&mut rtc, 0xB), 5);
         assert_eq!(rtc.clock.seed(), Some(VECTOR_UNIX));
+    }
+
+    /// A per-test battmem backing path in the host temp directory,
+    /// removed up front so each test starts battery-fresh.
+    fn battmem_file(name: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "copperline-battmem-{}-{name}.nvram",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        path
+    }
+
+    /// A battery-RAM write sequence (bank select in, nibble writes, bank
+    /// restore out) must land on disk in the WinUAE/Amiberry layout:
+    /// time digits + MODE in the first 16-byte block, the alarm bank in
+    /// the second, the 13 combined RAM bytes in the third. The restore
+    /// of MODE is the flush boundary.
+    #[test]
+    fn rp5c01_battmem_flushes_the_winuae_nvram_layout_on_mode_restore() {
+        let path = battmem_file("flush");
+        let mut rtc = seeded_rp5c01(VECTOR_UNIX);
+        rtc.set_battmem_path(path.clone());
+
+        rp_write(&mut rtc, 0xD, 0xA); // block 2: low nibbles
+        rp_write(&mut rtc, 0x0, 0x5);
+        rp_write(&mut rtc, 0xD, 0xB); // block 3: high nibbles
+        rp_write(&mut rtc, 0x0, 0xA);
+        rp_write(&mut rtc, 0xD, 0x8); // restore: transaction over
+
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes.len(), 48);
+        // Time digits of the seeded 2005-03-18T01:58:29 (a Friday) in the
+        // Ricoh block-0 layout, then MODE as restored.
+        assert_eq!(&bytes[0x0..=0xC], &[9, 2, 8, 5, 1, 0, 5, 8, 1, 3, 0, 5, 0]);
+        assert_eq!(bytes[0xD], 0x8);
+        assert_eq!(bytes[0xE], 0);
+        assert_eq!(bytes[0xF], 0);
+        assert_eq!(bytes[0x1A], 1); // 12/24 select in the alarm block: 24h
+        assert_eq!(bytes[0x20], 0xA5); // RAM byte 0: high and low nibbles
+
+        // A fresh chip preloads the same battery state from the file.
+        let mut resumed = seeded_rp5c01(VECTOR_UNIX);
+        resumed.set_battmem_path(path.clone());
+        rp_write(&mut resumed, 0xD, 0xA);
+        assert_eq!(rp_read(&mut resumed, 0x0), 0x5);
+        rp_write(&mut resumed, 0xD, 0xB);
+        assert_eq!(rp_read(&mut resumed, 0x0), 0xA);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Loading an Amiberry/WinUAE file takes only the battery payload:
+    /// alarm digits (behind the hardware write masks) and RAM bytes. The
+    /// stored time never touches the read-only clock, and the stored
+    /// MODE never overrides the power-on value the chip probes match on.
+    #[test]
+    fn rp5c01_battmem_load_takes_ram_and_alarm_but_not_clock_or_mode() {
+        let path = battmem_file("load");
+        let mut file = [0u8; 48];
+        // Time block from a foreign save, MODE parked at $9.
+        file[..16].copy_from_slice(&[7, 4, 4, 5, 4, 1, 4, 3, 2, 7, 0, 6, 2, 9, 0, 0]);
+        file[0x12] = 0xF; // 1-minute alarm digit (4 bits wide)
+        file[0x13] = 0xFF; // 10-minute alarm digit: masked to 3 bits
+        file[0x1A] = 1; // 24-hour select
+        file[0x20] = 0x07;
+        file[0x2C] = 0x89;
+        std::fs::write(&path, file).unwrap();
+
+        let mut rtc = seeded_rp5c01(VECTOR_UNIX);
+        rtc.set_battmem_path(path.clone());
+        assert_eq!(rp_read(&mut rtc, 0xD), 0x8); // power-on probe tell kept
+        assert_eq!(rp_read(&mut rtc, 0x0), 9); // seeded clock, not the file's
+        rp_write(&mut rtc, 0xD, 0x9); // block 1
+        assert_eq!(rp_read(&mut rtc, 0x2), 0xF);
+        assert_eq!(rp_read(&mut rtc, 0x3), 0x7); // hardware mask applied
+        rp_write(&mut rtc, 0xD, 0xA); // block 2
+        assert_eq!(rp_read(&mut rtc, 0x0), 0x7);
+        assert_eq!(rp_read(&mut rtc, 0xC), 0x9);
+        rp_write(&mut rtc, 0xD, 0xB); // block 3
+        assert_eq!(rp_read(&mut rtc, 0xC), 0x8);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Clock reads bracket their digit reads in MODE writes too; those
+    /// must not rewrite the backing file. Only a write that changes
+    /// battery state arms the flush -- rewriting an identical value does
+    /// not count as a change.
+    #[test]
+    fn rp5c01_battmem_flushes_only_after_a_real_battery_change() {
+        let path = battmem_file("clean");
+        let mut rtc = seeded_rp5c01(VECTOR_UNIX);
+        rtc.set_battmem_path(path.clone());
+
+        rp_write(&mut rtc, 0xD, 0x0); // lock for a clock read
+        rp_write(&mut rtc, 0xD, 0x8); // unlock
+        rp_write(&mut rtc, 0xD, 0xA); // select RAM
+        rp_write(&mut rtc, 0x3, 0x0); // rewrite the value already there
+        rp_write(&mut rtc, 0xD, 0x8);
+        assert!(!path.exists(), "no battery change, no file");
+
+        rp_write(&mut rtc, 0xD, 0xA);
+        rp_write(&mut rtc, 0x3, 0x6);
+        rp_write(&mut rtc, 0xD, 0x8);
+        assert!(path.exists(), "a changed nibble flushes on MODE restore");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A file that is not a 48-byte RP5C01 image (WinUAE's 16-byte
+    /// MSM6242 flavour, or a truncated write) is ignored: the chip
+    /// starts battery-fresh instead of misreading it.
+    #[test]
+    fn rp5c01_battmem_ignores_files_of_the_wrong_shape() {
+        let path = battmem_file("short");
+        std::fs::write(&path, [0xAB; 16]).unwrap();
+        let mut rtc = seeded_rp5c01(VECTOR_UNIX);
+        rtc.set_battmem_path(path.clone());
+        rp_write(&mut rtc, 0xD, 0xA);
+        for reg in 0x0..=0xC {
+            assert_eq!(rp_read(&mut rtc, reg), 0, "RAM select {reg:#X}");
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
