@@ -17,13 +17,17 @@ The two halves are consumed exactly as WinUAE and FS-UAE take them.
 
 ## Provenance
 
-Built from source on 2026-07-21 from AROS upstream master
-(https://github.com/aros-development-team/AROS) at commit 8c21e46f51.
+Built from source on 2026-07-23 from AROS upstream master
+(https://github.com/aros-development-team/AROS) at commit 3d4928c6d4.
 Master includes the boot-time optimizations of pull request 829
 (https://github.com/aros-development-team/AROS/pull/829: single-pass
 romtag scan, fast memory clearing, blitter-drawn boot animation), which cut
 the m68k boot to the insert-disk screen from roughly 25-30 s to under 10 s
-and shorten every AROS-booted golden probe run in CI (tests/probe_golden.rs).
+and shorten every AROS-booted golden probe run in CI (tests/probe_golden.rs),
+plus the boot-animation rendering fix of pull request 848
+(https://github.com/aros-development-team/AROS/pull/848: reverts an unsafe
+OCS rollover display change in the amigavideo driver) and the m68k
+Workbench/console rendering speedups of pull request 844.
 
 Build recipe (Linux, or a Linux container; the AROS crosstools do not build
 cleanly on macOS):
