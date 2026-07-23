@@ -4263,7 +4263,11 @@ fn windowless_screenshot_run_saves_png_and_exits() {
     app.pending_auto_shot = Some((0.04, path.clone()));
     app.run_headless().expect("windowless screenshot run");
     let data = std::fs::read(&path).expect("screenshot file written");
-    assert_eq!(&data[1..4], b"PNG");
+    assert!(
+        data.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "screenshot should be a PNG, got {} bytes",
+        data.len()
+    );
     std::fs::remove_file(&path).ok();
 }
 
