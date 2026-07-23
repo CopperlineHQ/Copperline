@@ -1584,6 +1584,15 @@ fn main() -> Result<()> {
             .unwrap_or(true)
     });
     video::set_pixel_aspect(config::resolve_pixel_aspect(cfg.pixel_aspect));
+    // Capture runs (--screenshot-after / --dump-frames) never present a
+    // frame, so they skip the host window and event loop entirely: winit's
+    // event-loop setup registers with the display server, which aborts or
+    // blocks on hosts without one (SSH sessions, sandboxes without
+    // window-server access), and a capture run must work anywhere.
+    // --control-gui keeps the windowed path: it explicitly asks for an
+    // interactive session.
+    let windowless_capture =
+        (cli.screenshot_after.is_some() || cli.frame_dump.is_some()) && cli.control_gui.is_none();
     #[cfg_attr(not(feature = "control"), allow(unused_mut))]
     let mut app = App::new(
         emu,
@@ -1627,6 +1636,10 @@ fn main() -> Result<()> {
     // the core unthrottled, so priority buys it nothing.
     if realtime_priority && paced {
         priority::elevate_pacer_thread();
+    }
+    if windowless_capture {
+        info!("headless capture: running without a window (no display connection)");
+        return app.run_headless();
     }
     info!(
         "entering event loop. {HOST_SHORTCUT_MODIFIER_LABEL}+Q to quit, {HOST_SHORTCUT_MODIFIER_LABEL}+S to screenshot, {HOST_SHORTCUT_MODIFIER_LABEL}+G to capture/release mouse."

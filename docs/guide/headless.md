@@ -2,8 +2,13 @@
 
 The emulated core is deterministic and independent of wall-clock pacing, so
 the preferred way to verify behaviour -- in CI, in regression tests, or
-while developing -- is a headless run: the window stays hidden, the core
-runs unthrottled, and the result is reproducible.
+while developing -- is a headless run: nothing is presented to the screen,
+the core runs unthrottled, and the result is reproducible.
+
+Capture runs (`--screenshot-after`, `--dump-frames`) never open a window or
+connect to the host's display server at all, so they work in environments
+without one: SSH sessions, CI runners, and sandboxes that block
+window-server access.
 
 ## Screenshots
 

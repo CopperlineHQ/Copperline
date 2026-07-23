@@ -1547,122 +1547,56 @@ impl App {
     }
 }
 
-impl Drop for App {
-    /// Flush a whole-run `--record-input` recording on any exit path
-    /// (auto-screenshot exit, window close, shortcut quit). The interactive
-    /// recording toggle writes its file when stopped, so by the time the app
-    /// drops there is nothing left for it here.
-    fn drop(&mut self) {
-        let (Some(rec), Some(path)) = (self.input_recorder.take(), self.record_input_path.take())
-        else {
-            return;
-        };
-        let events = rec.events_recorded();
-        match std::fs::write(&path, rec.finish()) {
-            Ok(()) => info!(
-                "input recording saved: {} ({events} events)",
-                path.display()
-            ),
-            Err(e) => warn!("input recording save failed ({}): {e:#}", path.display()),
+/// The event-loop-free half of the session driver: arming and firing the
+/// scheduled capture/input flags is shared verbatim between the windowed
+/// event loop (about_to_wait) and the windowless capture loop below, so a
+/// capture run produces byte-identical output either way.
+impl App {
+    /// Drive a scheduled capture run (--screenshot-after / --dump-frames)
+    /// to completion without a host window or event loop. Scheduled input
+    /// and captures fire on emulated time exactly as in the windowed loop,
+    /// and the run ends when the first capture completes, matching the
+    /// windowed exit. Never touching winit means no display-server
+    /// connection is made, so capture runs work over SSH and in sandboxes
+    /// without window-server access.
+    pub fn run_headless(mut self) -> Result<()> {
+        self.arm_scheduled_events();
+        if self.auto_shot.is_none() && self.frame_dump.is_none() {
+            return Err(anyhow!(
+                "windowless capture run needs --screenshot-after or --dump-frames"
+            ));
+        }
+        loop {
+            // The windowed loop parks a halted machine so the user can
+            // inspect it; with no window the captures can never fire, so
+            // surface the halt as the run's failure.
+            if let Err(e) = self.emu.step_frame() {
+                return Err(anyhow!(
+                    "emulator halted before the scheduled captures completed: {e:#}"
+                ));
+            }
+            // Audio may be live (--screenshot-after without --noaudio):
+            // recover a lost output device exactly as the windowed loop does.
+            self.recover_audio_if_device_lost();
+            self.render_emulated_frame_if_needed();
+            if self.dump_frame_if_due() {
+                return Ok(());
+            }
+            self.fire_scheduled_events();
+            self.fire_auto_save_state();
+            if self.fire_auto_shot() {
+                return Ok(());
+            }
         }
     }
-}
 
-impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.render.is_some() {
-            return;
-        }
-        // Keep the internal overscan field buffer, but present it with
-        // the configured pixel aspect: a standard 4:3 Amiga display by
-        // default, or square pixels ([display] pixel_aspect = "square").
-        let size = LogicalSize::new(FB_WIDTH as f64, window_present_height() as f64);
-        // Headless capture (screenshot / frame dump) renders into the
-        // framebuffer for the saved PNG but has no interactive viewer, so
-        // create the window hidden: it avoids flashing an empty window on
-        // screen and removes the vsync present gate, letting the run
-        // advance as fast as the host allows. Emulated state is identical.
-        let headless_capture =
-            self.pending_auto_shot.is_some() || self.pending_frame_dump.is_some();
-        let attrs = WindowAttributes::default()
-            .with_title(WINDOW_TITLE)
-            .with_window_icon(copperline_window_icon())
-            .with_visible(!headless_capture)
-            .with_inner_size(size)
-            .with_min_inner_size(LogicalSize::new(
-                FB_WIDTH as f64 / 2.0,
-                window_present_height() as f64 / 2.0,
-            ));
-        let window = match event_loop.create_window(attrs) {
-            Ok(w) => Arc::new(w),
-            Err(e) => {
-                error!("create_window failed: {e}");
-                event_loop.exit();
-                return;
-            }
-        };
-        // winit's with_window_icon above does nothing for the macOS dock; set
-        // the application icon explicitly now that NSApplication exists.
-        #[cfg(target_os = "macos")]
-        set_macos_dock_icon();
-        let inner = window.inner_size();
-        let texture_scale = texture_scale_for_window(&window);
-        // On Linux, restrict wgpu to the Vulkan backend. wgpu's GL fallback
-        // initializes its EGL instance without a display handle (pixels uses
-        // InstanceDescriptor::new_without_display_handle), so EGL drops to the
-        // Mesa "surfaceless" platform, which is not compatible with an on-screen
-        // window surface -- adapter selection then fails with "No suitable
-        // wgpu::Adapter found" on any machine that lacks a hardware Vulkan
-        // driver. Vulkan does not need the display handle at instance creation,
-        // so it works; GPUs without a hardware Vulkan driver (pre-Skylake Intel
-        // and other pre-2015 parts) can fall back to the software lavapipe ICD.
-        // An explicit WGPU_BACKEND override is still honoured for debugging.
-        // Other platforms keep wgpu's default backend set (Metal on macOS,
-        // DX12/Vulkan on Windows). cfg!() (not #[cfg]) keeps the Linux branch
-        // type-checked on every host.
-        let pixels = match build_pixels_for_window(window.clone(), texture_scale, true) {
-            Ok(p) => p,
-            Err(e) => {
-                error!("pixels init failed: {e}");
-                if cfg!(target_os = "linux") {
-                    error!(
-                        "Copperline requires a Vulkan driver on Linux. Update your GPU \
-                         drivers, or install a software Vulkan ICD (lavapipe): \
-                         'vulkan-swrast' on Arch, 'mesa-vulkan-drivers' on Debian/Ubuntu, \
-                         'mesa-vulkan-drivers' (or 'vulkan-loader') on Fedora."
-                    );
-                }
-                event_loop.exit();
-                return;
-            }
-        };
-        info!(
-            "window + pixels surface ready ({}x{}, texture {}x{})",
-            inner.width,
-            inner.height,
-            texture_width(texture_scale),
-            texture_height(texture_scale)
-        );
-        let rtg_texture =
-            rtg_texture::RtgTexture::new(pixels.device(), pixels.render_texture_format());
-        self.render = Some(Render {
-            window,
-            pixels,
-            texture_scale,
-            rtg_texture,
-            minimized: false,
-        });
-        // Paint at least once so the status bar (and power button) is
-        // visible immediately, even when the machine starts powered off
-        // and no emulated frame is being produced yet. A powered-off
-        // start shows the test screen rather than a black display.
-        if !self.powered_on {
-            paint_test_screen(&mut self.fb);
-            self.deinterlacer
-                .push_field(&self.fb, FB_HEIGHT, FB_WIDTH, false, true, true);
-            self.refresh_present_from_deinterlacer();
-        }
-        self.request_redraw();
+    /// Arm every scheduled capture and input flag: pending (parse-time)
+    /// entries become live ones gated on emulated time. Scheduled events
+    /// are gated on emulated time (like disk inserts and the
+    /// auto-screenshot): headless runs are unthrottled, so wall-clock
+    /// scheduling would fire at the wrong emulated point or never fire at
+    /// all before the run exits.
+    fn arm_scheduled_events(&mut self) {
         if let Some((secs, path)) = self.pending_auto_shot.take() {
             info!(
                 "auto-screenshot armed: will save {} after {:.1}s emulated time",
@@ -1788,6 +1722,320 @@ impl ApplicationHandler for App {
             );
             self.auto_cd_inserts.push((secs.max(0.0) as f64, path));
         }
+    }
+
+    /// Fire any scheduled key/click/joy/mouse/pot/disk/CD events whose
+    /// emulated timestamps have passed, then let the input recorder
+    /// observe the resulting machine-visible input state once for this
+    /// quantum. Runs after step_frame so events land at frame boundaries.
+    fn fire_scheduled_events(&mut self) {
+        // Fire any scheduled key/click/disk events on emulated time
+        // (mirroring the auto-screenshot below): headless runs are
+        // unthrottled, so wall-clock gating would land the events at the
+        // wrong emulated point or after the run already exited.
+        let emu_secs = self.emu.bus().emulated_seconds();
+        let mut key_events = Vec::new();
+        self.auto_keys.retain_mut(|key| {
+            if !key.pressed && emu_secs >= key.press_at_emulated_secs {
+                info!("auto-key pressing: rawkey {:#04X}", key.rawkey);
+                key_events.push((key.rawkey, true));
+                key.pressed = true;
+            }
+            if key.pressed && emu_secs >= key.release_at_emulated_secs {
+                info!("auto-key releasing: rawkey {:#04X}", key.rawkey);
+                key_events.push((key.rawkey, false));
+                false
+            } else {
+                true
+            }
+        });
+        for (rawkey, pressed) in key_events {
+            self.handle_amiga_key_event(rawkey, pressed);
+        }
+        // Fire any scheduled --click-after events: transition the
+        // corresponding button to pressed at press_at, released at
+        // release_at, then drop the entry.
+        self.auto_clicks.retain_mut(|c| {
+            if !c.pressed && emu_secs >= c.press_at_emulated_secs {
+                info!("auto-click pressing: {:?} (port {})", c.button, c.port + 1);
+                set_mouse_button(&mut self.emu, c.port, c.button, true);
+                c.pressed = true;
+            }
+            if c.pressed && emu_secs >= c.release_at_emulated_secs {
+                info!("auto-click releasing: {:?}", c.button);
+                set_mouse_button(&mut self.emu, c.port, c.button, false);
+                return false;
+            }
+            true
+        });
+        // Fire any scheduled --joy-after events into the named port's
+        // joystick/CD32-pad state, then assert the held sets (input polling
+        // re-applies them every quantum while scripting is engaged).
+        let mut joy_changed = [false; 2];
+        let held = &mut self.auto_joy_held;
+        self.auto_joys.retain_mut(|j| {
+            let port = usize::from(j.port != 0);
+            if !j.pressed && emu_secs >= j.press_at_emulated_secs {
+                info!("auto-joy pressing: {:?} (port {})", j.button, port + 1);
+                held[port].set(j.button, true);
+                j.pressed = true;
+                joy_changed[port] = true;
+            }
+            if j.pressed && emu_secs >= j.release_at_emulated_secs {
+                info!("auto-joy releasing: {:?}", j.button);
+                held[port].set(j.button, false);
+                joy_changed[port] = true;
+                return false;
+            }
+            true
+        });
+        for port in 0..2 {
+            if joy_changed[port] {
+                self.auto_joy_engaged[port] = true;
+                self.apply_auto_joy_state(port);
+            }
+        }
+        // Fire any scheduled --mouse-after relative motions (one-shot
+        // each); these land on the named port's quadrature counters,
+        // whatever device is configured there (the lines are the lines).
+        let mut mouse_deltas = Vec::new();
+        self.auto_mouse.retain(|&(at, dx, dy, port)| {
+            if emu_secs >= at {
+                mouse_deltas.push((dx, dy, port));
+                false
+            } else {
+                true
+            }
+        });
+        for (dx, dy, port) in mouse_deltas {
+            self.apply_scripted_mouse_delta(port, dx, dy);
+        }
+        // Fire any scheduled --pot-after analogue positions (one-shot
+        // each).
+        let mut pot_sets = Vec::new();
+        self.auto_pots.retain(|&(at, x, y, port)| {
+            if emu_secs >= at {
+                pot_sets.push((x, y, port));
+                false
+            } else {
+                true
+            }
+        });
+        for (x, y, port) in pot_sets {
+            info!("auto-pot: position ({x}, {y}) on port {}", port + 1);
+            self.emu.bus_mut().input.set_analogue(port as usize, x, y);
+            self.emu
+                .tt_note_input(crate::inputsched::ReplayAction::Pot { port, x, y });
+        }
+        let mut disk_inserts = Vec::new();
+        self.auto_disk_inserts.retain(|insert| {
+            if emu_secs >= insert.insert_at_emulated_secs {
+                disk_inserts.push(insert.clone());
+                false
+            } else {
+                true
+            }
+        });
+        for insert in disk_inserts {
+            self.insert_disk_image(insert.drive_idx, insert.path, insert.write_protected);
+        }
+        // Fire any scheduled --insert-cd-after swaps (one-shot each).
+        let mut cd_inserts = Vec::new();
+        self.auto_cd_inserts.retain(|(at, path)| {
+            if emu_secs >= *at {
+                cd_inserts.push(path.clone());
+                false
+            } else {
+                true
+            }
+        });
+        for path in cd_inserts {
+            if self.emu.bus().cd_drive_present() {
+                self.insert_cd_image_from_path(&path);
+            } else {
+                warn!(
+                    "--insert-cd-after {}: no CD drive on this machine",
+                    path.display()
+                );
+            }
+        }
+        // Input recording: with every input source for this quantum
+        // applied (live, gamepad, and the scheduled events above), diff
+        // the machine-visible input state once at this quantum's emulated
+        // timestamp. Skipped while the core is not advancing so paused
+        // wall-clock time records nothing.
+        if self.powered_on && !self.cpu_halted && !self.paused {
+            if let Some(rec) = self.input_recorder.as_mut() {
+                rec.observe(&self.emu.bus().input, emu_secs);
+            }
+        }
+    }
+
+    /// Scheduled --save-state-after capture. Runs after step_frame for
+    /// the quantum, so the machine is at the frame-boundary quiescent
+    /// point save states require. Unlike the auto-screenshot this does not
+    /// end the run: a state save is a capture along the way, not the end
+    /// of a verification run.
+    fn fire_auto_save_state(&mut self) {
+        let Some((secs, path)) = self.auto_save_state.take() else {
+            return;
+        };
+        if self.emu.bus().emulated_seconds() < secs as f64 {
+            self.auto_save_state = Some((secs, path));
+            return;
+        }
+        match self.emu.save_state(&path) {
+            Ok(()) => info!("auto-save-state saved: {}", path.display()),
+            Err(e) => warn!("auto-save-state failed ({}): {e:#}", path.display()),
+        }
+    }
+
+    /// Fire the scheduled --screenshot-after capture once its emulated
+    /// timestamp has passed. Returns true when the screenshot has been
+    /// saved and the run is complete (both loops exit on it); the capture
+    /// stays armed while the target frame is still being rendered.
+    fn fire_auto_shot(&mut self) -> bool {
+        let Some((secs, path)) = self.auto_shot.take() else {
+            return false;
+        };
+        if self.emu.bus().emulated_seconds() < secs as f64 {
+            self.auto_shot = Some((secs, path));
+            return false;
+        }
+        let emulated_frame = self.emu.bus().emulated_frames();
+        self.finish_render_for_current_frame();
+        if self.last_rendered_emulated_frame != Some(emulated_frame) {
+            self.auto_shot = Some((secs, path));
+            return false;
+        }
+        self.save_screenshot(&path);
+        self.emu.report_stats();
+        self.emu.bus().poll_stats.dump_top("at screenshot");
+        // Evaluate an untargeted reverse watchpoint at run end.
+        if let Err(e) = self.emu.tt_finalize_reverse_watch() {
+            warn!("reverse watchpoint evaluation failed: {e:#}");
+        }
+        true
+    }
+}
+
+impl Drop for App {
+    /// Flush a whole-run `--record-input` recording on any exit path
+    /// (auto-screenshot exit, window close, shortcut quit). The interactive
+    /// recording toggle writes its file when stopped, so by the time the app
+    /// drops there is nothing left for it here.
+    fn drop(&mut self) {
+        let (Some(rec), Some(path)) = (self.input_recorder.take(), self.record_input_path.take())
+        else {
+            return;
+        };
+        let events = rec.events_recorded();
+        match std::fs::write(&path, rec.finish()) {
+            Ok(()) => info!(
+                "input recording saved: {} ({events} events)",
+                path.display()
+            ),
+            Err(e) => warn!("input recording save failed ({}): {e:#}", path.display()),
+        }
+    }
+}
+
+impl ApplicationHandler for App {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.render.is_some() {
+            return;
+        }
+        // Keep the internal overscan field buffer, but present it with
+        // the configured pixel aspect: a standard 4:3 Amiga display by
+        // default, or square pixels ([display] pixel_aspect = "square").
+        let size = LogicalSize::new(FB_WIDTH as f64, window_present_height() as f64);
+        // Headless capture (screenshot / frame dump) renders into the
+        // framebuffer for the saved PNG but has no interactive viewer, so
+        // create the window hidden: it avoids flashing an empty window on
+        // screen and removes the vsync present gate, letting the run
+        // advance as fast as the host allows. Emulated state is identical.
+        let headless_capture =
+            self.pending_auto_shot.is_some() || self.pending_frame_dump.is_some();
+        let attrs = WindowAttributes::default()
+            .with_title(WINDOW_TITLE)
+            .with_window_icon(copperline_window_icon())
+            .with_visible(!headless_capture)
+            .with_inner_size(size)
+            .with_min_inner_size(LogicalSize::new(
+                FB_WIDTH as f64 / 2.0,
+                window_present_height() as f64 / 2.0,
+            ));
+        let window = match event_loop.create_window(attrs) {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                error!("create_window failed: {e}");
+                event_loop.exit();
+                return;
+            }
+        };
+        // winit's with_window_icon above does nothing for the macOS dock; set
+        // the application icon explicitly now that NSApplication exists.
+        #[cfg(target_os = "macos")]
+        set_macos_dock_icon();
+        let inner = window.inner_size();
+        let texture_scale = texture_scale_for_window(&window);
+        // On Linux, restrict wgpu to the Vulkan backend. wgpu's GL fallback
+        // initializes its EGL instance without a display handle (pixels uses
+        // InstanceDescriptor::new_without_display_handle), so EGL drops to the
+        // Mesa "surfaceless" platform, which is not compatible with an on-screen
+        // window surface -- adapter selection then fails with "No suitable
+        // wgpu::Adapter found" on any machine that lacks a hardware Vulkan
+        // driver. Vulkan does not need the display handle at instance creation,
+        // so it works; GPUs without a hardware Vulkan driver (pre-Skylake Intel
+        // and other pre-2015 parts) can fall back to the software lavapipe ICD.
+        // An explicit WGPU_BACKEND override is still honoured for debugging.
+        // Other platforms keep wgpu's default backend set (Metal on macOS,
+        // DX12/Vulkan on Windows). cfg!() (not #[cfg]) keeps the Linux branch
+        // type-checked on every host.
+        let pixels = match build_pixels_for_window(window.clone(), texture_scale, true) {
+            Ok(p) => p,
+            Err(e) => {
+                error!("pixels init failed: {e}");
+                if cfg!(target_os = "linux") {
+                    error!(
+                        "Copperline requires a Vulkan driver on Linux. Update your GPU \
+                         drivers, or install a software Vulkan ICD (lavapipe): \
+                         'vulkan-swrast' on Arch, 'mesa-vulkan-drivers' on Debian/Ubuntu, \
+                         'mesa-vulkan-drivers' (or 'vulkan-loader') on Fedora."
+                    );
+                }
+                event_loop.exit();
+                return;
+            }
+        };
+        info!(
+            "window + pixels surface ready ({}x{}, texture {}x{})",
+            inner.width,
+            inner.height,
+            texture_width(texture_scale),
+            texture_height(texture_scale)
+        );
+        let rtg_texture =
+            rtg_texture::RtgTexture::new(pixels.device(), pixels.render_texture_format());
+        self.render = Some(Render {
+            window,
+            pixels,
+            texture_scale,
+            rtg_texture,
+            minimized: false,
+        });
+        // Paint at least once so the status bar (and power button) is
+        // visible immediately, even when the machine starts powered off
+        // and no emulated frame is being produced yet. A powered-off
+        // start shows the test screen rather than a black display.
+        if !self.powered_on {
+            paint_test_screen(&mut self.fb);
+            self.deinterlacer
+                .push_field(&self.fb, FB_HEIGHT, FB_WIDTH, false, true, true);
+            self.refresh_present_from_deinterlacer();
+        }
+        self.request_redraw();
+        self.arm_scheduled_events();
     }
 
     fn window_event(
@@ -2478,7 +2726,6 @@ impl ApplicationHandler for App {
             }
             self.refresh_tool_windows_paced(event_loop);
         }
-        let now = Instant::now();
         // While powered off, leave the parked test screen in place; the
         // emulator is not advancing, so there is no new frame to show.
         let mut rendered = self.powered_on && self.render_emulated_frame_if_needed();
@@ -2495,184 +2742,15 @@ impl ApplicationHandler for App {
             self.request_main_redraw();
         }
 
-        if self.dump_frame_if_due(now, event_loop) {
+        if self.dump_frame_if_due() {
+            event_loop.exit();
             return;
         }
 
-        // Fire any scheduled key/click/disk events on emulated time
-        // (mirroring the auto-screenshot below): headless runs are
-        // unthrottled, so wall-clock gating would land the events at the
-        // wrong emulated point or after the run already exited.
-        let emu_secs = self.emu.bus().emulated_seconds();
-        let mut key_events = Vec::new();
-        self.auto_keys.retain_mut(|key| {
-            if !key.pressed && emu_secs >= key.press_at_emulated_secs {
-                info!("auto-key pressing: rawkey {:#04X}", key.rawkey);
-                key_events.push((key.rawkey, true));
-                key.pressed = true;
-            }
-            if key.pressed && emu_secs >= key.release_at_emulated_secs {
-                info!("auto-key releasing: rawkey {:#04X}", key.rawkey);
-                key_events.push((key.rawkey, false));
-                false
-            } else {
-                true
-            }
-        });
-        for (rawkey, pressed) in key_events {
-            self.handle_amiga_key_event(rawkey, pressed);
-        }
-        // Fire any scheduled --click-after events: transition the
-        // corresponding button to pressed at press_at, released at
-        // release_at, then drop the entry.
-        self.auto_clicks.retain_mut(|c| {
-            if !c.pressed && emu_secs >= c.press_at_emulated_secs {
-                info!("auto-click pressing: {:?} (port {})", c.button, c.port + 1);
-                set_mouse_button(&mut self.emu, c.port, c.button, true);
-                c.pressed = true;
-            }
-            if c.pressed && emu_secs >= c.release_at_emulated_secs {
-                info!("auto-click releasing: {:?}", c.button);
-                set_mouse_button(&mut self.emu, c.port, c.button, false);
-                return false;
-            }
-            true
-        });
-        // Fire any scheduled --joy-after events into the named port's
-        // joystick/CD32-pad state, then assert the held sets (input polling
-        // re-applies them every quantum while scripting is engaged).
-        let mut joy_changed = [false; 2];
-        let held = &mut self.auto_joy_held;
-        self.auto_joys.retain_mut(|j| {
-            let port = usize::from(j.port != 0);
-            if !j.pressed && emu_secs >= j.press_at_emulated_secs {
-                info!("auto-joy pressing: {:?} (port {})", j.button, port + 1);
-                held[port].set(j.button, true);
-                j.pressed = true;
-                joy_changed[port] = true;
-            }
-            if j.pressed && emu_secs >= j.release_at_emulated_secs {
-                info!("auto-joy releasing: {:?}", j.button);
-                held[port].set(j.button, false);
-                joy_changed[port] = true;
-                return false;
-            }
-            true
-        });
-        for port in 0..2 {
-            if joy_changed[port] {
-                self.auto_joy_engaged[port] = true;
-                self.apply_auto_joy_state(port);
-            }
-        }
-        // Fire any scheduled --mouse-after relative motions (one-shot
-        // each); these land on the named port's quadrature counters,
-        // whatever device is configured there (the lines are the lines).
-        let mut mouse_deltas = Vec::new();
-        self.auto_mouse.retain(|&(at, dx, dy, port)| {
-            if emu_secs >= at {
-                mouse_deltas.push((dx, dy, port));
-                false
-            } else {
-                true
-            }
-        });
-        for (dx, dy, port) in mouse_deltas {
-            self.apply_scripted_mouse_delta(port, dx, dy);
-        }
-        // Fire any scheduled --pot-after analogue positions (one-shot
-        // each).
-        let mut pot_sets = Vec::new();
-        self.auto_pots.retain(|&(at, x, y, port)| {
-            if emu_secs >= at {
-                pot_sets.push((x, y, port));
-                false
-            } else {
-                true
-            }
-        });
-        for (x, y, port) in pot_sets {
-            info!("auto-pot: position ({x}, {y}) on port {}", port + 1);
-            self.emu.bus_mut().input.set_analogue(port as usize, x, y);
-            self.emu
-                .tt_note_input(crate::inputsched::ReplayAction::Pot { port, x, y });
-        }
-        let mut disk_inserts = Vec::new();
-        self.auto_disk_inserts.retain(|insert| {
-            if emu_secs >= insert.insert_at_emulated_secs {
-                disk_inserts.push(insert.clone());
-                false
-            } else {
-                true
-            }
-        });
-        for insert in disk_inserts {
-            self.insert_disk_image(insert.drive_idx, insert.path, insert.write_protected);
-        }
-        // Fire any scheduled --insert-cd-after swaps (one-shot each).
-        let mut cd_inserts = Vec::new();
-        self.auto_cd_inserts.retain(|(at, path)| {
-            if emu_secs >= *at {
-                cd_inserts.push(path.clone());
-                false
-            } else {
-                true
-            }
-        });
-        for path in cd_inserts {
-            if self.emu.bus().cd_drive_present() {
-                self.insert_cd_image_from_path(&path);
-            } else {
-                warn!(
-                    "--insert-cd-after {}: no CD drive on this machine",
-                    path.display()
-                );
-            }
-        }
-        // Input recording: with every input source for this quantum
-        // applied (live, gamepad, and the scheduled events above), diff
-        // the machine-visible input state once at this quantum's emulated
-        // timestamp. Skipped while the core is not advancing so paused
-        // wall-clock time records nothing.
-        if self.powered_on && !self.cpu_halted && !self.paused {
-            if let Some(rec) = self.input_recorder.as_mut() {
-                rec.observe(&self.emu.bus().input, emu_secs);
-            }
-        }
-        // Scheduled --save-state-after capture. step_frame has completed for
-        // this quantum, so the machine is at the frame-boundary quiescent
-        // point save states require. Unlike the auto-screenshot this does
-        // not exit: a state save is a capture along the way, not the end of
-        // a verification run.
-        if let Some((secs, path)) = self.auto_save_state.take() {
-            if self.emu.bus().emulated_seconds() >= secs as f64 {
-                match self.emu.save_state(&path) {
-                    Ok(()) => info!("auto-save-state saved: {}", path.display()),
-                    Err(e) => warn!("auto-save-state failed ({}): {e:#}", path.display()),
-                }
-            } else {
-                self.auto_save_state = Some((secs, path));
-            }
-        }
-        if let Some((secs, path)) = self.auto_shot.take() {
-            if self.emu.bus().emulated_seconds() >= secs as f64 {
-                let emulated_frame = self.emu.bus().emulated_frames();
-                self.finish_render_for_current_frame();
-                if self.last_rendered_emulated_frame != Some(emulated_frame) {
-                    self.auto_shot = Some((secs, path));
-                    return;
-                }
-                self.save_screenshot(&path);
-                self.emu.report_stats();
-                self.emu.bus().poll_stats.dump_top("at screenshot");
-                // Evaluate an untargeted reverse watchpoint at run end.
-                if let Err(e) = self.emu.tt_finalize_reverse_watch() {
-                    warn!("reverse watchpoint evaluation failed: {e:#}");
-                }
-                event_loop.exit();
-            } else {
-                self.auto_shot = Some((secs, path));
-            }
+        self.fire_scheduled_events();
+        self.fire_auto_save_state();
+        if self.fire_auto_shot() {
+            event_loop.exit();
         }
     }
 }
@@ -7401,7 +7479,7 @@ impl App {
         }
     }
 
-    fn dump_frame_if_due(&mut self, _now: Instant, event_loop: &ActiveEventLoop) -> bool {
+    fn dump_frame_if_due(&mut self) -> bool {
         let Some(state) = self.frame_dump.as_ref() else {
             return false;
         };
@@ -7449,7 +7527,6 @@ impl App {
             Err(e) => {
                 warn!("frame dump failed ({}): {e:#}", path.display());
                 self.frame_dump = None;
-                event_loop.exit();
                 return true;
             }
         }
@@ -7463,7 +7540,6 @@ impl App {
             self.emu.report_stats();
             self.emu.bus().poll_stats.dump_top("at frame dump");
             self.frame_dump = None;
-            event_loop.exit();
             true
         } else {
             false
