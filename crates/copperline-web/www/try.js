@@ -1011,10 +1011,15 @@ window.addEventListener('keyup', (e) => {
 // Esc releases the lock, as the browser enforces.
 
 let lastPos = null;
-// Emulator pixels per CSS pixel. The bitmap fills the canvas element in
-// every mode - fullscreen letterboxes the element itself, keeping the
-// display's shape - so the width ratio is the displayed scale.
-const cssToEmu = () => canvas.width / canvas.clientWidth;
+// Emulator pixels per CSS pixel, one scale per axis. The bitmap fills the
+// canvas element in every mode - fullscreen letterboxes the element
+// itself, keeping the display's shape - but the bitmap is not the
+// element's shape (the PAL capture is 668x540 shown as 4:3), so the two
+// axis ratios differ and sharing one would skew vertical pointer speed.
+const cssToEmu = () => ({
+  x: canvas.width / canvas.clientWidth,
+  y: canvas.height / canvas.clientHeight,
+});
 
 canvas.addEventListener('mousedown', (e) => {
   if (!emu || !running) return;
@@ -1033,11 +1038,11 @@ window.addEventListener('mousemove', (e) => {
   if (!emu || !running) return;
   const scale = cssToEmu();
   if (document.pointerLockElement === canvas) {
-    emu.mouse_delta(e.movementX * scale, e.movementY * scale);
+    emu.mouse_delta(e.movementX * scale.x, e.movementY * scale.y);
     lastPos = null;
   } else if (e.target === canvas) {
     if (lastPos) {
-      emu.mouse_delta((e.clientX - lastPos.x) * scale, (e.clientY - lastPos.y) * scale);
+      emu.mouse_delta((e.clientX - lastPos.x) * scale.x, (e.clientY - lastPos.y) * scale.y);
     }
     lastPos = { x: e.clientX, y: e.clientY };
   } else {
@@ -1135,7 +1140,7 @@ canvas.addEventListener(
         padTouch.moved += Math.abs(dx) + Math.abs(dy);
         padTouch.x = t.clientX;
         padTouch.y = t.clientY;
-        emu.mouse_delta(dx * scale, dy * scale);
+        emu.mouse_delta(dx * scale.x, dy * scale.y);
       }
     }
   },
