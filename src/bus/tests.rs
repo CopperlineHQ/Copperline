@@ -8654,7 +8654,7 @@ fn cpu_chip_access_uses_two_color_clocks_slot_plus_bus_free_tail() {
 }
 
 #[test]
-fn aga_68020_chip_and_custom_reads_use_alice_slot_without_extra_wait() {
+fn aga_68020_chip_reads_wait_for_data_but_writes_are_posted() {
     let mut bus = empty_bus();
     bus.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
     bus.set_cpu_clocks_per_cck(4);
@@ -8664,18 +8664,23 @@ fn aga_68020_chip_and_custom_reads_use_alice_slot_without_extra_wait() {
     bus.agnus.hpos = 0x20;
     bus.grant_cpu_bus_access_at(Some(0x0002_0000), 2, CpuBusAccessKind::Read);
     let (chip_read_cck, _) = bus.take_slice_bus_advance();
-    assert_eq!(chip_read_cck, 1);
-    assert_eq!(bus.last_chip_bus_owner(), ChipBusOwner::Cpu);
+    assert_eq!(chip_read_cck, 2);
+    assert_eq!(bus.last_chip_bus_owner(), ChipBusOwner::Idle);
 
     bus.grant_cpu_bus_access_at(Some(0x0002_0000), 2, CpuBusAccessKind::Write);
     let (chip_write_cck, _) = bus.take_slice_bus_advance();
     assert_eq!(chip_write_cck, 1);
     assert_eq!(bus.last_chip_bus_owner(), ChipBusOwner::Cpu);
 
+    bus.grant_cpu_bus_access_at(Some(0x0002_0004), 2, CpuBusAccessKind::Fetch);
+    let (chip_fetch_cck, _) = bus.take_slice_bus_advance();
+    assert_eq!(chip_fetch_cck, 2);
+    assert_eq!(bus.last_chip_bus_owner(), ChipBusOwner::Idle);
+
     let _ = bus.custom_read(0x002, 2);
     let (custom_read_cck, _) = bus.take_slice_bus_advance();
-    assert_eq!(custom_read_cck, 1);
-    assert_eq!(bus.last_chip_bus_owner(), ChipBusOwner::Cpu);
+    assert_eq!(custom_read_cck, 2);
+    assert_eq!(bus.last_chip_bus_owner(), ChipBusOwner::Idle);
 }
 
 #[test]

@@ -721,15 +721,15 @@ impl CpuCore {
         cost
     }
 
-    /// Model-dispatching wrapper for the three step paths: the 68060 uses its
-    /// own cost model; every other model keeps the existing scaling
-    /// byte-for-byte.
+    /// Model-dispatching wrapper for the three step paths.
     #[inline]
     pub(crate) fn finalize_cycles(&mut self, raw: i32, fetch_cached: bool) -> i32 {
-        if self.cpu_type == super::types::CpuType::M68060 {
-            self.cycles_060(raw, fetch_cached)
-        } else {
-            self.scale_cycles_for_cpu_type(raw)
+        match self.cpu_type {
+            super::types::CpuType::M68EC020 | super::types::CpuType::M68020 => {
+                self.cycles_020(raw, fetch_cached)
+            }
+            super::types::CpuType::M68060 => self.cycles_060(raw, fetch_cached),
+            _ => self.scale_cycles_for_cpu_type(raw),
         }
     }
 }

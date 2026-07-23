@@ -55,6 +55,8 @@ impl CpuCore {
 
         // Main execution loop
         while self.cycles_remaining > 0 {
+            self.instruction_exception_vector = None;
+            bus.begin_instruction_fetches();
             // Save previous PC
             self.ppc = self.pc;
 
@@ -79,8 +81,16 @@ impl CpuCore {
 
             // Dispatch instruction (sampling whether the opcode fetch
             // hit the icache before dispatch consumes more of the stream).
-            let fetch_cached = bus.last_fetch_was_cached();
+            let opcode_fetch_cached = bus.last_fetch_was_cached();
             let result = dispatch_instruction(self, bus, self.ir as u16);
+            let fetch_cached = if matches!(
+                self.cpu_type,
+                super::types::CpuType::M68EC020 | super::types::CpuType::M68020
+            ) {
+                bus.instruction_fetches_were_cached()
+            } else {
+                opcode_fetch_cached
+            };
 
             // Auto-take all trap exceptions, extract cycles
             use crate::core::types::InternalStepResult;
@@ -153,6 +163,8 @@ impl CpuCore {
             return StepResult::Stopped;
         }
 
+        self.instruction_exception_vector = None;
+        bus.begin_instruction_fetches();
         self.ppc = self.pc;
         self.dar_save = self.dar;
         self.sr_save = self.get_sr();
@@ -163,8 +175,16 @@ impl CpuCore {
             return StepResult::Ok { cycles: 0 };
         }
 
-        let fetch_cached = bus.last_fetch_was_cached();
+        let opcode_fetch_cached = bus.last_fetch_was_cached();
         let result = dispatch_instruction(self, bus, self.ir as u16);
+        let fetch_cached = if matches!(
+            self.cpu_type,
+            super::types::CpuType::M68EC020 | super::types::CpuType::M68020
+        ) {
+            bus.instruction_fetches_were_cached()
+        } else {
+            opcode_fetch_cached
+        };
 
         let res = match result {
             InternalStepResult::Ok { cycles } => StepResult::Ok {
@@ -249,6 +269,8 @@ impl CpuCore {
             return StepResult::Stopped;
         }
 
+        self.instruction_exception_vector = None;
+        bus.begin_instruction_fetches();
         self.ppc = self.pc;
         self.dar_save = self.dar;
         self.sr_save = self.get_sr();
@@ -259,8 +281,16 @@ impl CpuCore {
             return StepResult::Ok { cycles: 0 };
         }
 
-        let fetch_cached = bus.last_fetch_was_cached();
+        let opcode_fetch_cached = bus.last_fetch_was_cached();
         let result = dispatch_instruction(self, bus, self.ir as u16);
+        let fetch_cached = if matches!(
+            self.cpu_type,
+            super::types::CpuType::M68EC020 | super::types::CpuType::M68020
+        ) {
+            bus.instruction_fetches_were_cached()
+        } else {
+            opcode_fetch_cached
+        };
 
         // Handle trap results via callbacks, fallback to exception if not handled
         let cycles = match result {
@@ -385,6 +415,7 @@ impl CpuCore {
         // restores normal instruction fetching.
         self.loop_mode = false;
         self.last_exception_vector = Some(vector);
+        self.instruction_exception_vector = Some(vector);
         let addr = (vector << 2).wrapping_add(self.vbr);
         self.pc = self.read_32(bus, addr);
         // Exception entry refills the prefetch queue from the handler

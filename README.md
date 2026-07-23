@@ -48,7 +48,8 @@ against real hardware.
   real speed.
 - **Configurable CPU** (68000 / 68010 / 68EC020 / 68020 / 68030 / 68040 / 68060) and clock,
   with an optional 68881/68882 FPU (default-on for the 68040/68060) and the
-  68030/68040 MMUs.
+  68030/68040 MMUs. The 68020 integer timing model selects the cache or
+  uncached execution totals from the MC68020 User's Manual per instruction.
 - **Peripherals**: a bit-timed keyboard (6500/1 MCU), mouse, USB gamepad
   (via the pure-Rust `gilrs`, no SDL2), 4-channel Paula audio, floppy
   (ADF / ADZ / ZIP / DMS, read-only SCP), Gayle and A4000 IDE, SCSI (A2091,
@@ -318,7 +319,7 @@ release needs resolved first. Release steps for every channel are in
 
 | Subsystem | Notes |
 | --- | --- |
-| M68K CPU | Via a vendored pure-Rust m68k crate; model selectable through 68060, accurate 68000 cycle counts, 020+ caches, 6888x FPU, 68030/68040 MMUs. |
+| M68K CPU | Via a vendored pure-Rust m68k crate; model selectable through 68060, accurate 68000 cycle counts, datasheet-based 68020 integer timing, 020+ caches, 6888x FPU, 68030/68040 MMUs. |
 | Chip RAM | mem_map'd; reset starts with ROM overlaid at $0 until CIA-A releases /OVL. |
 | Fast RAM | Optional Zorro II autoconfig RAM at $00200000 and Zorro III autoconfig RAM (`[memory] z3`); runs at the CPU clock. |
 | Slow RAM | Optional A500 trapdoor/fake-fast RAM at $00C00000; arbitrated on the chip bus through Agnus like chip RAM. |

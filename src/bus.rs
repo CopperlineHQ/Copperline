@@ -903,10 +903,10 @@ pub struct Bus {
     /// hundredths of a CPU clock. At high clock ratios a single word access
     /// costs less than one cck; the carry accumulates so no time is lost.
     ext_clock_carry_x100: u32,
-    /// True for the 68020+: its chip-bus cycle is 3 CPU clocks, not the
-    /// 68000's 4 (2 cck) -- so after the granted slot it bills a shorter tail
-    /// (write-posting and the faster 020 bus). Derived from the CPU model and
-    /// re-set on construction / state load; not serialized.
+    /// True for the 68020+: its local bus cycle is 3 CPU clocks, not the
+    /// 68000's 4 (2 cck). Writes can finish after that shorter, posted cycle;
+    /// reads also wait for the chipset's data-return phase. Derived from the
+    /// CPU model and re-set on construction / state load; not serialized.
     #[serde(skip)]
     cpu_short_bus_cycle: bool,
     /// Sub-cck remainder (in CPU clocks) for the 020+ short-bus-cycle tail:
@@ -3706,9 +3706,10 @@ impl Bus {
         self.cpu_clocks_per_cck = clocks.max(1);
     }
 
-    /// Select the chip-bus cycle length: the 68020+ completes a word access in
-    /// 3 CPU clocks where the 68000 takes 4, so its post-grant tail is shorter
-    /// (write-posting; faster reads). Derived from the CPU model.
+    /// Select the local bus cycle length: the 68020+ completes its side of an
+    /// access in 3 CPU clocks where the 68000 takes 4. Chipset reads still
+    /// have a separate data-return phase; writes can be posted after the
+    /// shorter cycle. Derived from the CPU model.
     /// Whether the CPU runs the shorter 020+ bus cycle (see the field doc);
     /// also distinguishes the 68000's shared chip data bus from the 020+
     /// local bus for the floating-bus latch.
@@ -3939,12 +3940,11 @@ impl Bus {
             self.record_slice_bus_advance(cck, tick);
             // After the granted slot (one cck), the CPU's bus cycle runs out
             // its remaining clocks with the chip bus free for DMA. The 68000's
-            // 4-clock cycle leaves one whole cck (2 clocks at the stock ratio);
-            // the 68020+'s 3-clock cycle leaves only one clock -- half a cck at
-            // the stock ratio, and none at all once a slot is >= 3 clocks
-            // (14 MHz), which is the write-posting / faster-020-bus effect.
-            // Bill the 020 tail in CPU clocks through a carry so the fractional
-            // cck are not lost.
+            // 4-clock cycle leaves one whole cck (2 clocks at the stock ratio).
+            // A 020+ write can be posted after its shorter cycle; reads need
+            // the chipset's data-return phase, billed below. Bill the residual
+            // 020 write tail in CPU clocks through a carry so fractional cck
+            // are not lost on slower CPU ratios.
             if self.cpu_short_bus_cycle {
                 self.cpu_bus_tail_carry += 3u32.saturating_sub(self.cpu_clocks_per_cck);
                 while self.cpu_bus_tail_carry >= self.cpu_clocks_per_cck {
@@ -3969,7 +3969,10 @@ impl Bus {
                 );
             }
         }
-        if self.cpu_short_bus_cycle && !wide_bus && matches!(kind, CpuBusAccessKind::Read) {
+        if self.cpu_short_bus_cycle
+            && (matches!(kind, CpuBusAccessKind::Read)
+                || wide_bus && matches!(kind, CpuBusAccessKind::Fetch))
+        {
             self.bill_020_read_data_wait();
         }
     }
@@ -5090,7 +5093,7 @@ impl Bus {
             size,
             CpuBusAccessKind::Custom,
         );
-        if self.cpu_short_bus_cycle && !self.aga_enabled() {
+        if self.cpu_short_bus_cycle {
             self.bill_020_read_data_wait();
         }
         // Read-only custom registers (INTREQR, DSKBYTR, SERDATR, POTxDAT, ...)
