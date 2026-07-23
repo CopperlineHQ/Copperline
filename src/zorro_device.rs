@@ -12,14 +12,17 @@
 //! [`DeviceHost`] is the narrow host-services view a device is handed on every
 //! call. Today it exposes guest memory for DMA; capability hooks (CD audio,
 //! networking) are added alongside the devices that need them. It also owns the
-//! single 24-bit DMA address decode (chip / slow / Zorro-board RAM) that the
-//! A2091 and CDTV bus masters previously each open-coded.
+//! single DMA address decode (chip / slow / motherboard / accelerator /
+//! Zorro-board RAM) that the A2091 and CDTV bus masters previously each
+//! open-coded. Zorro II masters only drive the low 24 bits; a Zorro III master
+//! like the A4091 reaches the 32-bit motherboard and accelerator banks too.
 
 use crate::chipset::paula::CdAudioRing;
-use crate::memory::{Memory, SLOW_RAM_BASE};
+use crate::memory::{Memory, ACCEL_RAM_BASE, SLOW_RAM_BASE};
 
-/// 24-bit DMA bus-master word read: the chip / slow / Zorro-board RAM decode a
-/// Zorro DMA controller sees. Returns `None` when the (word-aligned) address is
+/// DMA bus-master word read: the chip / slow / motherboard / accelerator /
+/// Zorro-board RAM decode a Zorro DMA controller sees. Returns `None` when the
+/// (word-aligned) address is
 /// not backed by RAM, leaving the unmapped sentinel and warn policy to the
 /// caller. Word reads require both bytes in range, matching the hardware word
 /// access; the last odd byte of a region therefore does not satisfy a word.
@@ -32,6 +35,16 @@ pub(crate) fn dma_read_word(mem: &Memory, addr: u32) -> Option<u16> {
     if a >= slow && a + 1 < slow + mem.slow_ram.len() {
         let o = a - slow;
         return Some((u16::from(mem.slow_ram[o]) << 8) | u16::from(mem.slow_ram[o + 1]));
+    }
+    let mb = mem.mb_ram_base() as usize;
+    if a >= mb && a + 1 < mb + mem.mb_ram.len() {
+        let o = a - mb;
+        return Some((u16::from(mem.mb_ram[o]) << 8) | u16::from(mem.mb_ram[o + 1]));
+    }
+    let accel = ACCEL_RAM_BASE as usize;
+    if a >= accel && a + 1 < accel + mem.accel_ram.len() {
+        let o = a - accel;
+        return Some((u16::from(mem.accel_ram[o]) << 8) | u16::from(mem.accel_ram[o + 1]));
     }
     if let Some((board, off)) = mem.zorro.region_at(addr, 2) {
         let ram = mem.zorro.board_ram(board);
@@ -56,6 +69,20 @@ pub(crate) fn dma_write_word(mem: &mut Memory, addr: u32, w: u16) -> bool {
         mem.slow_ram[o + 1] = w as u8;
         return true;
     }
+    let mb = mem.mb_ram_base() as usize;
+    if a >= mb && a + 1 < mb + mem.mb_ram.len() {
+        let o = a - mb;
+        mem.mb_ram[o] = (w >> 8) as u8;
+        mem.mb_ram[o + 1] = w as u8;
+        return true;
+    }
+    let accel = ACCEL_RAM_BASE as usize;
+    if a >= accel && a + 1 < accel + mem.accel_ram.len() {
+        let o = a - accel;
+        mem.accel_ram[o] = (w >> 8) as u8;
+        mem.accel_ram[o + 1] = w as u8;
+        return true;
+    }
     if let Some((board, off)) = mem.zorro.region_at(addr, 2) {
         let ram = mem.zorro.board_ram_mut(board);
         ram[off] = (w >> 8) as u8;
@@ -77,6 +104,14 @@ pub(crate) fn dma_read_byte(mem: &Memory, addr: u32) -> Option<u8> {
     if a >= slow && a < slow + mem.slow_ram.len() {
         return Some(mem.slow_ram[a - slow]);
     }
+    let mb = mem.mb_ram_base() as usize;
+    if a >= mb && a < mb + mem.mb_ram.len() {
+        return Some(mem.mb_ram[a - mb]);
+    }
+    let accel = ACCEL_RAM_BASE as usize;
+    if a >= accel && a < accel + mem.accel_ram.len() {
+        return Some(mem.accel_ram[a - accel]);
+    }
     if let Some((board, off)) = mem.zorro.region_at(addr, 1) {
         return Some(mem.zorro.board_ram(board)[off]);
     }
@@ -94,6 +129,16 @@ pub(crate) fn dma_write_byte(mem: &mut Memory, addr: u32, b: u8) -> bool {
     let slow = SLOW_RAM_BASE as usize;
     if a >= slow && a < slow + mem.slow_ram.len() {
         mem.slow_ram[a - slow] = b;
+        return true;
+    }
+    let mb = mem.mb_ram_base() as usize;
+    if a >= mb && a < mb + mem.mb_ram.len() {
+        mem.mb_ram[a - mb] = b;
+        return true;
+    }
+    let accel = ACCEL_RAM_BASE as usize;
+    if a >= accel && a < accel + mem.accel_ram.len() {
+        mem.accel_ram[a - accel] = b;
         return true;
     }
     if let Some((board, off)) = mem.zorro.region_at(addr, 1) {
@@ -504,6 +549,29 @@ mod tests {
         assert!(dma_write_word(&mut mem, slow + 0x20, 0x1234));
         assert_eq!(dma_read_word(&mem, slow + 0x20), Some(0x1234));
         assert_eq!(mem.slow_ram[0x20], 0x12);
+    }
+
+    #[test]
+    fn dma_round_trips_motherboard_and_accelerator_ram() {
+        // A Zorro III bus master (the A4091) reaches the 32-bit motherboard and
+        // accelerator fast-RAM banks. The A4000 profile fits its stock RAM
+        // there, so a driver's DMA buffers land in these banks; a decode that
+        // stopped at slow RAM read them back as 0xFF and dropped writes.
+        let mut mem = mem_with(0x100, 0x100);
+        mem.mb_ram = vec![0u8; 0x100];
+        mem.accel_ram = vec![0u8; 0x100];
+
+        let mb = mem.mb_ram_base() as u32;
+        assert!(dma_write_word(&mut mem, mb + 0x40, 0xCAFE));
+        assert_eq!(dma_read_word(&mem, mb + 0x40), Some(0xCAFE));
+        assert!(dma_write_byte(&mut mem, mb + 0x42, 0x5A));
+        assert_eq!(dma_read_byte(&mem, mb + 0x42), Some(0x5A));
+
+        let accel = ACCEL_RAM_BASE as u32;
+        assert!(dma_write_word(&mut mem, accel + 0x08, 0xF00D));
+        assert_eq!(dma_read_word(&mem, accel + 0x08), Some(0xF00D));
+        assert!(dma_write_byte(&mut mem, accel + 0x0A, 0xA5));
+        assert_eq!(dma_read_byte(&mem, accel + 0x0A), Some(0xA5));
     }
 
     #[test]
