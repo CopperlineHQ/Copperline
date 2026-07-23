@@ -1010,12 +1010,18 @@ window.addEventListener('keydown', (e) => {
   if (joystickKey(e.code, true) || emu.key_event(e.code, true)) {
     consumedKeys.add(e.code);
     e.preventDefault();
+  } else {
+    consumedKeys.delete(e.code);
   }
 });
 window.addEventListener('keyup', (e) => {
+  // Delete before the running check: a hold that spans an emulator stop
+  // or a focus loss must not leave a stale entry behind.
+  const consumed = consumedKeys.delete(e.code);
   if (!emu || !running) return;
-  const consumed = joystickKey(e.code, false) || emu.key_event(e.code, false);
-  if (consumedKeys.delete(e.code) || consumed) e.preventDefault();
+  if (joystickKey(e.code, false) || emu.key_event(e.code, false) || consumed) {
+    e.preventDefault();
+  }
 });
 
 // --- mouse ---------------------------------------------------------------
