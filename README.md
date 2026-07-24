@@ -90,7 +90,7 @@ against real hardware.
 ## Install (macOS, Homebrew)
 
 ```sh
-brew tap LinuxJedi/copperline https://github.com/LinuxJedi/Copperline
+brew tap copperlinehq/copperline https://github.com/CopperlineHQ/Copperline
 brew install copperline
 ```
 
@@ -107,7 +107,7 @@ flatpak install flathub dev.copperline.Copperline   # any distribution
 ```
 
 Or grab the single-file `Copperline-*.AppImage` from the
-[releases page](https://github.com/LinuxJedi/Copperline/releases),
+[releases page](https://github.com/CopperlineHQ/Copperline/releases),
 `chmod +x` it and run. Both bundle the AROS boot ROM. Packaging sources are in
 `packaging/`.
 

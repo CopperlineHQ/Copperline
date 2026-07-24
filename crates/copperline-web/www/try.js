@@ -2378,7 +2378,7 @@ $('kickurl')?.addEventListener('click', () => {
 // is sent anywhere by the click itself - it all lands in an editable form
 // on GitHub. Older page shells have neither link and nothing here runs.
 
-const BUG_REPORT_URL = 'https://github.com/LinuxJedi/Copperline/issues/new';
+const BUG_REPORT_URL = 'https://github.com/CopperlineHQ/Copperline/issues/new';
 let buildInfo = null; // the wasm build's tag and commit, known once init resolves
 
 function bugReportHref() {

@@ -22,7 +22,7 @@ project:
         - http://archive.org
   authors:
     - name: Andrew Hutchings
-  github: https://github.com/LinuxJedi/Copperline
+  github: https://github.com/CopperlineHQ/Copperline
   toc:
     - file: index.md
     - title: User guide

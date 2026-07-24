@@ -39,8 +39,8 @@
   <launchable type="desktop-id">dev.copperline.Copperline.desktop</launchable>
 
   <url type="homepage">https://copperline.dev/</url>
-  <url type="bugtracker">https://github.com/LinuxJedi/Copperline/issues</url>
-  <url type="vcs-browser">https://github.com/LinuxJedi/Copperline</url>
+  <url type="bugtracker">https://github.com/CopperlineHQ/Copperline/issues</url>
+  <url type="vcs-browser">https://github.com/CopperlineHQ/Copperline</url>
 
   <developer id="dev.copperline">
     <name>Andrew Hutchings</name>
@@ -49,11 +49,11 @@
   <screenshots>
     <screenshot type="default">
       <caption>Spaceballs State of the Art running in Copperline</caption>
-      <image>https://raw.githubusercontent.com/LinuxJedi/Copperline/main/docs/images/state-of-the-art.png</image>
+      <image>https://raw.githubusercontent.com/CopperlineHQ/Copperline/main/docs/images/state-of-the-art.png</image>
     </screenshot>
     <screenshot>
       <caption>Built-in debugger overlay</caption>
-      <image>https://raw.githubusercontent.com/LinuxJedi/Copperline/main/docs/images/ui-preview-debugger.png</image>
+      <image>https://raw.githubusercontent.com/CopperlineHQ/Copperline/main/docs/images/ui-preview-debugger.png</image>
     </screenshot>
   </screenshots>
 
