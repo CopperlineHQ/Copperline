@@ -348,8 +348,8 @@ playfield constellation -- the issue #248 horizontal scroll-jump
 regression class; boots the A1200/AGA machine shape, FS-UAE-verified
 band by band since vAmiga cannot arbitrate AGA),
 `dblpal-hires-lace` (the DblPAL High Res Laced sprite-horizontal
-comparator alias: with FMODE SSCAN2 enabled, HSTART `$357` must compare
-as `$057`, while `$128` remains distinct -- the issue #270 invisible
+comparator alias: with FMODE SSCAN2 enabled, HSTART `$165` must compare
+as `$065`, while `$080` remains distinct -- the issue #270 invisible
 pointer regression class, FS-UAE-verified at exact SHRES placement),
 `bltprobe-pace` (CPU pacing bars under BLTPRI copy/fill/line blits and a
 nice-mode line blit -- the BLS-fence and blitter slot-cadence regression

@@ -378,7 +378,7 @@ probe_tests! {
     // #248); FS-UAE-verified band by band.
     golden_ddfprobe_agafold => probe_aga("ddfprobe-agafold", "ddfprobe-agafold.bin", 16.0);
     // FMODE.SSCAN2 masks the sprite horizontal comparator's high bit:
-    // HSTART $357 aliases $057 while $128 remains distinct (the DblPAL
+    // HSTART $165 aliases $065 while $080 remains distinct (the DblPAL
     // High Res Laced invisible-pointer regression class, issue #270);
     // FS-UAE-verified exact placement.
     golden_dblpal_hires_lace => probe_aga("dblpal-hires-lace", "dblpal-hires-lace.bin", 16.0);
