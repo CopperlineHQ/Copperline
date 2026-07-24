@@ -286,7 +286,7 @@ impl BeamSpriteState {
         let held = self.held[sprite];
         let hstart = sprite_hstart(pos, ctl);
         let hsub_70ns = sprite_hsub_70ns(ctl);
-        let base_x = sprite_nominal_base_framebuffer_x(pos, ctl);
+        let base_x = sprite_nominal_base_framebuffer_x(pos, ctl, self.fmode);
         // A held sprite was already active when SPREN was cleared. With no
         // sprite DMA slot running, the DMA descriptor's stop comparator cannot
         // retire the latched data; later SPRxPOS writes simply reposition it.
@@ -749,7 +749,7 @@ pub(super) fn flush_manual_sprite_lines(
         if mode == ManualSpriteFlushMode::PreserveStartedOutput && beam_y == end_line {
             let pos = regs.sprpos[sprite];
             let ctl = regs.sprctl[sprite];
-            let base_x = sprite_nominal_base_framebuffer_x(pos, ctl);
+            let base_x = sprite_nominal_base_framebuffer_x(pos, ctl, regs.fmode);
             if x_stop as i32 >= base_x {
                 x_stop = FB_WIDTH;
             }
@@ -1460,6 +1460,7 @@ pub(super) fn sprite_base_framebuffer_x(
     // horizontal comparator match (crate::bus::SPRITE_OUTPUT_DELAY_LORES,
     // ruler-probed against FS-UAE and vAmiga). The anchor carries the
     // active canvas shift like every comparator mapping.
+    let hstart = crate::bus::sprite_hstart_for_fmode(hstart, base_control.fmode);
     let base_x = (hstart + crate::bus::SPRITE_OUTPUT_DELAY_LORES - DIW_HSTART_FB0
         + active_canvas_shift_h())
         * 2;
@@ -1468,10 +1469,9 @@ pub(super) fn sprite_base_framebuffer_x(
     base_x + i32::from(hsub_70ns && control.shres())
 }
 
-pub(super) fn sprite_nominal_base_framebuffer_x(pos: u16, ctl: u16) -> i32 {
-    (sprite_hstart(pos, ctl) + crate::bus::SPRITE_OUTPUT_DELAY_LORES - DIW_HSTART_FB0
-        + active_canvas_shift_h())
-        * 2
+pub(super) fn sprite_nominal_base_framebuffer_x(pos: u16, ctl: u16, fmode: u16) -> i32 {
+    let hstart = crate::bus::sprite_hstart_for_fmode(sprite_hstart(pos, ctl), fmode);
+    (hstart + crate::bus::SPRITE_OUTPUT_DELAY_LORES - DIW_HSTART_FB0 + active_canvas_shift_h()) * 2
         + i32::from(sprite_hsub_70ns(ctl))
 }
 

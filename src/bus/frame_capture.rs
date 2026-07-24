@@ -717,6 +717,7 @@ impl Bus {
                 Some(live_sprite_collision_sources_with_beam_gated_odd(
                     &self.current_frame_sprite_lines_by_y[fb_y],
                     vpos as i32,
+                    self.agnus.fmode(),
                 ));
         }
     }

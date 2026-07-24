@@ -377,6 +377,11 @@ probe_tests! {
     // (the Alien Breed II AGA horizontal-scroll regression class, issue
     // #248); FS-UAE-verified band by band.
     golden_ddfprobe_agafold => probe_aga("ddfprobe-agafold", "ddfprobe-agafold.bin", 16.0);
+    // FMODE.SSCAN2 masks the sprite horizontal comparator's high bit:
+    // HSTART $357 aliases $057 while $128 remains distinct (the DblPAL
+    // High Res Laced invisible-pointer regression class, issue #270);
+    // FS-UAE-verified exact placement.
+    golden_dblpal_hires_lace => probe_aga("dblpal-hires-lace", "dblpal-hires-lace.bin", 16.0);
     // CPU pacing bars under BLTPRI copy/fill/line blits (the Rampage
     // "present" flicker / BLS fence regression class).
     golden_bltprobe_pace => probe("bltprobe-pace", "bltprobe-pace.bin", 16.0);

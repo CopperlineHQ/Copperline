@@ -573,6 +573,19 @@ fn reg_hstart(output_hstart: i32) -> i32 {
     output_hstart - crate::bus::SPRITE_OUTPUT_DELAY_LORES
 }
 
+#[test]
+fn fmode_sscan2_aliases_sprite_hstart_high_bit_in_renderer() {
+    let (red_pos, red_ctl) = sprite_control_words_from_parts(42, 74, 357, false, false);
+    let (green_pos, green_ctl) = sprite_control_words_from_parts(42, 74, 128, false, false);
+
+    let red_without_sscan2 = sprite_nominal_base_framebuffer_x(red_pos, red_ctl, 0);
+    let red_with_sscan2 = sprite_nominal_base_framebuffer_x(red_pos, red_ctl, 0x8000);
+    let green_with_sscan2 = sprite_nominal_base_framebuffer_x(green_pos, green_ctl, 0x8000);
+
+    assert_eq!(red_without_sscan2 - red_with_sscan2, 256 * 2);
+    assert_eq!(green_with_sscan2 - red_with_sscan2, (128 - 101) * 2);
+}
+
 fn blank_state() -> RenderState {
     RenderState {
         agnus_revision: AgnusRevision::Ocs,
@@ -3503,7 +3516,7 @@ fn manual_sprite_data_write_before_compare_uses_sprite_compare_domain() {
     let event_hpos = 116;
     let data_x = sprite_data_write_framebuffer_x(event_hpos);
     let colour_output_x = beam_to_framebuffer_x_unclamped(event_hpos) as usize;
-    let base_x = sprite_nominal_base_framebuffer_x(pos, ctl) as usize;
+    let base_x = sprite_nominal_base_framebuffer_x(pos, ctl, initial_state.fmode) as usize;
     assert!(data_x < base_x);
     assert!(colour_output_x > base_x);
 
@@ -3548,7 +3561,7 @@ fn attached_manual_sprite_data_write_before_compare_uses_sprite_compare_domain()
     let event_hpos = 116;
     let data_x = sprite_data_write_framebuffer_x(event_hpos);
     let colour_output_x = beam_to_framebuffer_x_unclamped(event_hpos) as usize;
-    let base_x = sprite_nominal_base_framebuffer_x(pos, ctl) as usize;
+    let base_x = sprite_nominal_base_framebuffer_x(pos, ctl, initial_state.fmode) as usize;
     assert!(data_x < base_x);
     assert!(colour_output_x > base_x);
 
