@@ -166,6 +166,7 @@ pub(super) struct BeamSpriteState {
     /// of the wide holding register, so a manual wide sprite repeats its
     /// 16-pixel pattern across the 32/64-pixel window (WinUAE model).
     pub(super) aga: bool,
+    pub(super) bplcon0: u16,
     pub(super) fmode: u16,
     /// Sprites reused with DMA off (SPREN cleared mid-frame): the bus
     /// established the held pixel data off-screen, and the Copper repositions
@@ -229,6 +230,7 @@ impl BeamSpriteState {
             spr_armed,
             direct_data_armed: [false; 8],
             aga: matches!(state.agnus_revision, AgnusRevision::AgaAlice),
+            bplcon0: state.bplcon0,
             fmode: state.fmode,
             held: *held,
         }
@@ -244,6 +246,10 @@ impl BeamSpriteState {
     }
 
     pub(super) fn apply_write(&mut self, off: u16, val: u16) {
+        if off == 0x100 {
+            self.bplcon0 = val;
+            return;
+        }
         if off == 0x1FC {
             if self.aga {
                 self.fmode = val & 0xC00F;
@@ -286,7 +292,7 @@ impl BeamSpriteState {
         let held = self.held[sprite];
         let hstart = sprite_hstart(pos, ctl);
         let hsub_70ns = sprite_hsub_70ns(ctl);
-        let base_x = sprite_nominal_base_framebuffer_x(pos, ctl);
+        let base_x = sprite_nominal_base_framebuffer_x(pos, ctl, self.bplcon0, self.fmode);
         // A held sprite was already active when SPREN was cleared. With no
         // sprite DMA slot running, the DMA descriptor's stop comparator cannot
         // retire the latched data; later SPRxPOS writes simply reposition it.
@@ -423,6 +429,12 @@ pub(super) fn manual_sprite_lines_from_events_with_visible_line0(
 
     for event in events {
         let off = event.offset & 0x01FE;
+        if off == 0x100 {
+            // BPLCON0.SHRES controls whether SPRxCTL's 70 ns horizontal
+            // sub-position bit participates in the comparator.
+            regs.apply_write(off, event.value);
+            continue;
+        }
         if off == 0x1FC {
             // FMODE changes the manual sprite output width, so flush every
             // sprite's pending span at the old width before applying it.
@@ -749,7 +761,7 @@ pub(super) fn flush_manual_sprite_lines(
         if mode == ManualSpriteFlushMode::PreserveStartedOutput && beam_y == end_line {
             let pos = regs.sprpos[sprite];
             let ctl = regs.sprctl[sprite];
-            let base_x = sprite_nominal_base_framebuffer_x(pos, ctl);
+            let base_x = sprite_nominal_base_framebuffer_x(pos, ctl, regs.bplcon0, regs.fmode);
             if x_stop as i32 >= base_x {
                 x_stop = FB_WIDTH;
             }
@@ -1460,6 +1472,7 @@ pub(super) fn sprite_base_framebuffer_x(
     // horizontal comparator match (crate::bus::SPRITE_OUTPUT_DELAY_LORES,
     // ruler-probed against FS-UAE and vAmiga). The anchor carries the
     // active canvas shift like every comparator mapping.
+    let hstart = crate::bus::sprite_hstart_for_fmode(hstart, base_control.fmode);
     let base_x = (hstart + crate::bus::SPRITE_OUTPUT_DELAY_LORES - DIW_HSTART_FB0
         + active_canvas_shift_h())
         * 2;
@@ -1468,11 +1481,15 @@ pub(super) fn sprite_base_framebuffer_x(
     base_x + i32::from(hsub_70ns && control.shres())
 }
 
-pub(super) fn sprite_nominal_base_framebuffer_x(pos: u16, ctl: u16) -> i32 {
-    (sprite_hstart(pos, ctl) + crate::bus::SPRITE_OUTPUT_DELAY_LORES - DIW_HSTART_FB0
-        + active_canvas_shift_h())
-        * 2
-        + i32::from(sprite_hsub_70ns(ctl))
+pub(super) fn sprite_nominal_base_framebuffer_x(
+    pos: u16,
+    ctl: u16,
+    bplcon0: u16,
+    fmode: u16,
+) -> i32 {
+    let hstart = crate::bus::sprite_hstart_for_fmode(sprite_hstart(pos, ctl), fmode);
+    (hstart + crate::bus::SPRITE_OUTPUT_DELAY_LORES - DIW_HSTART_FB0 + active_canvas_shift_h()) * 2
+        + i32::from(sprite_hsub_70ns(ctl) && bplcon0 & BPLCON0_SHRES != 0)
 }
 
 pub(super) fn sprite_display_enable_x_for_y(

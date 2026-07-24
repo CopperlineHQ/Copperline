@@ -47,7 +47,10 @@ and the Alice IDs above. The ECS Agnus adds DIWHIGH and the
 implemented subset of BEAMCON0 (PAL/VARBEAMEN/LOLDIS/HARDDIS and friends);
 Alice adds the FMODE wide-fetch latch, which scales the bitplane and
 sprite fetch quanta (FMODE=0 stays byte-identical to the OCS/ECS slot
-timing).
+timing). FMODE's BSCAN2 and SSCAN2 bits repeat bitplane and sprite data on
+successive display lines. SSCAN2 also masks the high bit of Lisa's sprite
+horizontal comparator: HSTART `$100..$1FF` aliases `$000..$0FF` while the bit
+is active. DblPAL/DblNTSC modes rely on that alias for the Workbench pointer.
 
 The CPU sees the reach too: the motherboard decode (Gary and equivalents)
 routes the whole $000000-$1FFFFF window to Agnus, which decodes only as

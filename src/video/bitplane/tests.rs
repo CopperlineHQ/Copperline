@@ -573,6 +573,58 @@ fn reg_hstart(output_hstart: i32) -> i32 {
     output_hstart - crate::bus::SPRITE_OUTPUT_DELAY_LORES
 }
 
+#[test]
+fn fmode_sscan2_aliases_sprite_hstart_high_bit_in_renderer() {
+    let (red_pos, red_ctl) = sprite_control_words_from_parts(42, 74, 357, false, false);
+    let (green_pos, green_ctl) = sprite_control_words_from_parts(42, 74, 128, false, false);
+
+    let red_without_sscan2 = sprite_nominal_base_framebuffer_x(red_pos, red_ctl, 0, 0);
+    let red_with_sscan2 = sprite_nominal_base_framebuffer_x(red_pos, red_ctl, 0, 0x8000);
+    let green_with_sscan2 = sprite_nominal_base_framebuffer_x(green_pos, green_ctl, 0, 0x8000);
+
+    assert_eq!(red_without_sscan2 - red_with_sscan2, 256 * 2);
+    assert_eq!(green_with_sscan2 - red_with_sscan2, (128 - 101) * 2);
+}
+
+#[test]
+fn sprite_horizontal_subposition_only_applies_in_shres() {
+    let (base_pos, base_ctl) = sprite_control_words_from_parts(42, 74, 128, false, false);
+    let (sub_pos, sub_ctl) = sprite_control_words_from_parts(42, 74, 128, true, false);
+    let base_x = sprite_nominal_base_framebuffer_x(base_pos, base_ctl, 0, 0x8000);
+
+    assert_eq!(
+        sprite_nominal_base_framebuffer_x(sub_pos, sub_ctl, 0, 0x8000),
+        base_x
+    );
+    assert_eq!(
+        sprite_nominal_base_framebuffer_x(sub_pos, sub_ctl, BPLCON0_SHRES, 0x8000),
+        base_x + 1
+    );
+}
+
+#[test]
+fn manual_sprite_compare_tracks_midline_shres_enable() {
+    let mut state = blank_state();
+    let beam_y = PAL_VISIBLE_LINE0;
+    let (pos, ctl) = sprite_control_words_from_parts(beam_y, beam_y + 1, 160, true, false);
+    state.spr_hw_pos[0] = pos;
+    state.spr_hw_ctl[0] = ctl;
+    state.spr_hw_data[0] = 0x8000;
+    state.spr_hw_armed[0] = true;
+
+    let mut regs = BeamSpriteState::from_render_state(&state, &[None; 8], true);
+    let lowres_base_x = sprite_nominal_base_framebuffer_x(pos, ctl, state.bplcon0, state.fmode);
+    let after_lowres_compare = (lowres_base_x + 1) as usize;
+
+    assert!(regs
+        .line_for_sprite(0, beam_y, after_lowres_compare, FB_WIDTH)
+        .is_none());
+    regs.apply_write(0x100, BPLCON0_SHRES);
+    assert!(regs
+        .line_for_sprite(0, beam_y, after_lowres_compare, FB_WIDTH)
+        .is_some());
+}
+
 fn blank_state() -> RenderState {
     RenderState {
         agnus_revision: AgnusRevision::Ocs,
@@ -3503,7 +3555,9 @@ fn manual_sprite_data_write_before_compare_uses_sprite_compare_domain() {
     let event_hpos = 116;
     let data_x = sprite_data_write_framebuffer_x(event_hpos);
     let colour_output_x = beam_to_framebuffer_x_unclamped(event_hpos) as usize;
-    let base_x = sprite_nominal_base_framebuffer_x(pos, ctl) as usize;
+    let base_x =
+        sprite_nominal_base_framebuffer_x(pos, ctl, initial_state.bplcon0, initial_state.fmode)
+            as usize;
     assert!(data_x < base_x);
     assert!(colour_output_x > base_x);
 
@@ -3548,7 +3602,9 @@ fn attached_manual_sprite_data_write_before_compare_uses_sprite_compare_domain()
     let event_hpos = 116;
     let data_x = sprite_data_write_framebuffer_x(event_hpos);
     let colour_output_x = beam_to_framebuffer_x_unclamped(event_hpos) as usize;
-    let base_x = sprite_nominal_base_framebuffer_x(pos, ctl) as usize;
+    let base_x =
+        sprite_nominal_base_framebuffer_x(pos, ctl, initial_state.bplcon0, initial_state.fmode)
+            as usize;
     assert!(data_x < base_x);
     assert!(colour_output_x > base_x);
 

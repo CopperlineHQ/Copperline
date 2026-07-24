@@ -6085,6 +6085,17 @@ fn sprite_hstart_from_words(pos: u16, ctl: u16) -> i32 {
     (((pos & 0x00FF) << 1) | (ctl & 0x0001)) as i32
 }
 
+/// Alice FMODE.SSCAN2 masks the high bit of the sprite horizontal comparator
+/// as well as scan-doubling its DMA data. Thus HSTART $100..$1FF aliases
+/// $000..$0FF while SSCAN2 is active.
+pub(crate) fn sprite_hstart_for_fmode(hstart: i32, fmode: u16) -> i32 {
+    if fmode & 0x8000 != 0 {
+        hstart & 0x00FF
+    } else {
+        hstart
+    }
+}
+
 fn sprite_hsub_70ns_from_ctl(ctl: u16) -> bool {
     ctl & 0x0010 != 0
 }
@@ -6110,20 +6121,23 @@ struct LiveManualSpriteCollisionSource {
 fn live_sprite_playfield_collision_sources(
     lines: &[CapturedSpriteLine],
     beam_y: i32,
+    fmode: u16,
 ) -> Vec<LiveSpriteCollisionSource> {
-    live_sprite_collision_sources_with_beam_gated_odd(lines, beam_y)
+    live_sprite_collision_sources_with_beam_gated_odd(lines, beam_y, fmode)
 }
 
 fn live_sprite_collision_sources_with_beam_gated_odd(
     lines: &[CapturedSpriteLine],
     beam_y: i32,
+    fmode: u16,
 ) -> Vec<LiveSpriteCollisionSource> {
-    live_sprite_collision_sources_with_odd_policy(lines, beam_y, 0, true)
+    live_sprite_collision_sources_with_odd_policy(lines, beam_y, fmode, 0, true)
 }
 
 fn live_sprite_collision_sources_with_odd_policy(
     lines: &[CapturedSpriteLine],
     beam_y: i32,
+    fmode: u16,
     clxcon: u16,
     include_disabled_odd: bool,
 ) -> Vec<LiveSpriteCollisionSource> {
@@ -6145,7 +6159,7 @@ fn live_sprite_collision_sources_with_odd_policy(
             &mut sources,
             LiveSpriteCollisionSource {
                 group,
-                hstart: line.hstart,
+                hstart: sprite_hstart_for_fmode(line.hstart, fmode),
                 hsub_70ns: line.hsub_70ns,
                 words: [line.data, line.datb, 0, 0],
                 requires_odd_enable,
@@ -6555,6 +6569,7 @@ fn live_manual_sprite_collision_sources(
             sprpos[sprite],
             sprctl[sprite],
             bitplane_shres(frame_base.bplcon0),
+            frame_base.fmode,
             event_x,
             x_stop,
         );
@@ -6567,6 +6582,7 @@ fn live_manual_sprite_collision_sources(
             sprdatb[sprite],
             spr_armed[sprite],
             bitplane_shres(frame_base.bplcon0),
+            frame_base.fmode,
             beam_y,
             interval_start[sprite].max(x_start),
             source_stop.min(x_stop),
@@ -6592,6 +6608,7 @@ fn live_manual_sprite_collision_sources(
             sprdatb[sprite],
             spr_armed[sprite],
             bitplane_shres(frame_base.bplcon0),
+            frame_base.fmode,
             beam_y,
             interval_start[sprite].max(x_start),
             x_stop,
@@ -6606,6 +6623,7 @@ fn live_manual_sprite_preserved_source_stop(
     sprpos: u16,
     sprctl: u16,
     shres: bool,
+    fmode: u16,
     event_x: i32,
     query_x_stop: i32,
 ) -> i32 {
@@ -6613,9 +6631,8 @@ fn live_manual_sprite_preserved_source_stop(
     if !(0x140..=0x17F).contains(&off) || (off - 0x140) & 0x0006 != 0 {
         return event_x;
     }
-    let base_x = (sprite_hstart_from_words(sprpos, sprctl) + SPRITE_OUTPUT_DELAY_LORES
-        - RENDER_DIW_HSTART_FB0)
-        * 2
+    let hstart = sprite_hstart_for_fmode(sprite_hstart_from_words(sprpos, sprctl), fmode);
+    let base_x = (hstart + SPRITE_OUTPUT_DELAY_LORES - RENDER_DIW_HSTART_FB0) * 2
         + i32::from(shres && sprite_hsub_70ns_from_ctl(sprctl));
     if event_x >= base_x {
         query_x_stop
@@ -6832,6 +6849,7 @@ fn push_live_manual_sprite_source(
     sprdatb: u16,
     spr_armed: bool,
     shres: bool,
+    fmode: u16,
     beam_y: i32,
     x_start: i32,
     x_stop: i32,
@@ -6848,7 +6866,7 @@ fn push_live_manual_sprite_source(
         sprite,
         source: LiveSpriteCollisionSource {
             group: sprite / 2,
-            hstart: sprite_hstart_from_words(sprpos, sprctl),
+            hstart: sprite_hstart_for_fmode(sprite_hstart_from_words(sprpos, sprctl), fmode),
             hsub_70ns: shres && sprite_hsub_70ns_from_ctl(sprctl),
             words: [sprdata, sprdatb, 0, 0],
             requires_odd_enable: sprite & 1 != 0,
@@ -7487,7 +7505,7 @@ fn live_manual_bpl_word_collision_bits(
 ) -> u16 {
     const MANUAL_BPL_WORD_BITS: usize = 16;
 
-    let sources = live_sprite_playfield_collision_sources(sprite_lines, beam_y);
+    let sources = live_sprite_playfield_collision_sources(sprite_lines, beam_y, frame_base.fmode);
     let manual_sources =
         live_manual_sprite_collision_sources(frame_base, sprite_index, beam_y, x_start, x_stop);
     let mut clxdat = 0u16;

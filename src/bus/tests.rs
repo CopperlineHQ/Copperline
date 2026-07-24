@@ -9,16 +9,17 @@ use super::{
     display_window_contains_vpos, diw_h_start, diw_h_stop, diw_v_start, diw_v_stop,
     framebuffer_x_for_live_collision_hpos, live_bitplane_collision_bits, live_display_window_x,
     live_manual_sprite_collision_sources, live_sprite_playfield_collision_bits_in_range,
-    live_sprite_sprite_collision_bits, visible_start_vpos_for_diw, BeamChipRamWrite,
-    BeamRegisterWrite, BeamWriteSource, Bus, CapturedBitplaneRow, CapturedSpriteLine, ChipBusOwner,
-    CpuBusAccessKind, DeviceClock, DisplaySpriteDmaState, DisplaySpriteLineData, FrameBusTrace,
-    LiveCollisionControl, LiveCollisionLineReplay, LiveSpriteCollisionSource, PortDevice,
-    RenderRegisterSnapshot, BLITTER_SLOWDOWN_CPU_MISS_LIMIT, BLTCON0_USE_A, BLTCON0_USE_C,
-    BLTCON0_USE_D, BLTCON1_DOFF, BLTCON1_LINE, BPLCON0_ECSENA, BPLCON3_BRDRBLNK, BPLCON3_BRDSPRT,
-    BPLCON3_SPRES_HIRES, DENISE_HPOS_LAG_CCK, DMACON_BLTEN, DMACON_BLTPRI, DMACON_BPLEN,
-    DMACON_SPREN, PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS, RENDER_COPPER_WAIT_HPOS_FB0,
-    RENDER_DIW_HSTART_FB0, RENDER_MIN_OVERSCAN_START_VPOS, RENDER_VISIBLE_LINES,
-    RENDER_VISIBLE_START_VPOS, SPRITE_DMA_SLOT1_HPOS, SPRITE_OUTPUT_DELAY_LORES,
+    live_sprite_sprite_collision_bits, sprite_hstart_for_fmode, visible_start_vpos_for_diw,
+    BeamChipRamWrite, BeamRegisterWrite, BeamWriteSource, Bus, CapturedBitplaneRow,
+    CapturedSpriteLine, ChipBusOwner, CpuBusAccessKind, DeviceClock, DisplaySpriteDmaState,
+    DisplaySpriteLineData, FrameBusTrace, LiveCollisionControl, LiveCollisionLineReplay,
+    LiveSpriteCollisionSource, PortDevice, RenderRegisterSnapshot, BLITTER_SLOWDOWN_CPU_MISS_LIMIT,
+    BLTCON0_USE_A, BLTCON0_USE_C, BLTCON0_USE_D, BLTCON1_DOFF, BLTCON1_LINE, BPLCON0_ECSENA,
+    BPLCON3_BRDRBLNK, BPLCON3_BRDSPRT, BPLCON3_SPRES_HIRES, DENISE_HPOS_LAG_CCK, DMACON_BLTEN,
+    DMACON_BLTPRI, DMACON_BPLEN, DMACON_SPREN, PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS,
+    RENDER_COPPER_WAIT_HPOS_FB0, RENDER_DIW_HSTART_FB0, RENDER_MIN_OVERSCAN_START_VPOS,
+    RENDER_VISIBLE_LINES, RENDER_VISIBLE_START_VPOS, SPRITE_DMA_SLOT1_HPOS,
+    SPRITE_OUTPUT_DELAY_LORES,
 };
 use crate::audio::AudioSink;
 use crate::chipset::agnus::{
@@ -5547,6 +5548,29 @@ fn fmode_sscan2_sprite_dma_doubles_each_data_line() {
             (0x32, 0x5555, 0x6666),
         ]
     );
+}
+
+#[test]
+fn fmode_sscan2_masks_sprite_horizontal_comparator_high_bit() {
+    assert_eq!(sprite_hstart_for_fmode(0x165, 0), 0x165);
+    assert_eq!(sprite_hstart_for_fmode(0x165, 0x8000), 0x065);
+    assert_eq!(sprite_hstart_for_fmode(0x080, 0x8000), 0x080);
+
+    let line = CapturedSpriteLine {
+        sprite: 0,
+        hstart: 0x165,
+        hsub_70ns: false,
+        beam_y: 42,
+        data: 0x8000,
+        datb: 0,
+        data_ext: [0; 3],
+        datb_ext: [0; 3],
+        width_words: 1,
+        attached: false,
+    };
+    let sources = super::live_sprite_collision_sources_with_beam_gated_odd(&[line], 42, 0x8000);
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].hstart, 0x065);
 }
 
 /// Frame geometry latches at the frame wrap: a standard frame reports

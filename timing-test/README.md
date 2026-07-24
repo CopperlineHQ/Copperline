@@ -266,6 +266,41 @@ emulator times code differently depending on whether it runs from slow or chip
 RAM, rows 13 and 14 diverge -- which matters for any program (like a demo) that
 runs from slow/trapdoor RAM.
 
+## Programmable SHRES/interlace reproducer
+
+`dblpal-hires-lace.asm` is a ROM-independent reproducer for the programmable
+31 kHz DblPAL High Res Laced constellation. Its beam, sync, blanking, DIW/DDF,
+`BPLCON0`, `BPLCON3`, and `FMODE` values were captured from AmigaOS 3.1, but the
+probe itself contains no OS code or assets. It draws a dense two-plane ruler and
+two DMA sprites over the same scan:
+
+- red sprite 0 uses HSTART 357, the position captured from the missing
+  Workbench pointer;
+- green sprite 1 uses HSTART 128 as a positive DMA/output control.
+
+On the affected renderer, both sprite streams are fetched, but only the green
+bar appears. The red bar is mapped to framebuffer x 592 and rejected by the
+emulated DIW gate; the diagnostic reports its non-transparent samples with
+`display=false`. With FMODE SSCAN2 active, Lisa masks HSTART's high bit, so
+`357` (`$165`) compares as `101` (`$065`). Hardware therefore shows the red
+bar 108 SHRES output pixels to the left of the green bar, as well as showing
+both bars.
+
+```sh
+cd timing-test
+VASM=/path/to/vasmm68k_mot ./build.sh dblpal-hires-lace
+cd ..
+./target/release/copperline --cpu 68EC020 --chipset AGA --chip 2M --noaudio \
+  --insert-disk-after 0 df0 timing-test/dblpal-hires-lace.adf \
+  --screenshot-after 16 /tmp/dblpal-hires-lace.png
+```
+
+To expose the fetch/render split directly, add:
+
+```sh
+COPPERLINE_DIAG_SPRCAP=42 COPPERLINE_DIAG_SPRITE_PIXELS=42,1
+```
+
 ## CI golden renders (`timing-test/golden/`)
 
 `tests/probe_golden.rs` runs the timing test and the stable display probes
@@ -286,7 +321,7 @@ refreshed (or a count sitting on an 8-iteration display-bucket edge flips a
 whole bar word). Re-bless and review the diff after a ROM refresh.
 
 Each probe is its own `#[test]`, so the harness runs the emulator boots in
-parallel on the available cores (the full suite of 21 takes ~20 s on an
+parallel on the available cores (the full suite of 22 takes ~20 s on an
 8-core host vs ~90 s sequentially).
 
 Covered: `timing-test` (all 32 timing rows as rendered hex), `ddfprobe`
@@ -312,6 +347,10 @@ swept against bitplane-pointer byte offsets on the Alien Breed II AGA
 playfield constellation -- the issue #248 horizontal scroll-jump
 regression class; boots the A1200/AGA machine shape, FS-UAE-verified
 band by band since vAmiga cannot arbitrate AGA),
+`dblpal-hires-lace` (the DblPAL High Res Laced sprite-horizontal
+comparator alias: with FMODE SSCAN2 enabled, HSTART `$165` must compare
+as `$065`, while `$080` remains distinct -- the issue #270 invisible
+pointer regression class, FS-UAE-verified at exact SHRES placement),
 `bltprobe-pace` (CPU pacing bars under BLTPRI copy/fill/line blits and a
 nice-mode line blit -- the BLS-fence and blitter slot-cadence regression
 class; the whole-blit fence collapsed the fill/line bars),
