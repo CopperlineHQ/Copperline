@@ -334,8 +334,36 @@ impl Z3660 {
             .fold(0, |acc, &b| (acc << 8) | u32::from(b))
     }
 
+    /// OP_SET_PALETTE: bulk CLUT upload. A Zorro III driver (v1.03b21+)
+    /// no longer streams colours through REG_OP one at a time; it fills the
+    /// mailbox with user[0]=start, user[1]=count, u8_user[0]=secondary-bank
+    /// flag, and clut1[] as `count` packed R,G,B byte triplets, then rings
+    /// this op. clut1 is written by the 68k as bytes, so no byteswap applies.
+    fn apply_set_palette(&mut self) {
+        let g = GFXDATA_OFFSET;
+        let start = self.gfx_u16(0x20, 0); // user[0]
+        let count = self.gfx_u16(0x20, 1).min(256); // user[1]
+        let base = if self.vram[g + 0x30] != 0 { 256 } else { 0 }; // u8_user[0]
+        let clut = g + 0x5C; // clut1[]
+        for i in 0..count {
+            let idx = base + ((start + i) & 0xFF);
+            let r = u32::from(self.vram[clut + i * 3]);
+            let grn = u32::from(self.vram[clut + i * 3 + 1]);
+            let b = u32::from(self.vram[clut + i * 3 + 2]);
+            self.palette[idx] = (r << 16) | (grn << 8) | b;
+        }
+    }
+
     /// Execute one REG_BLITTER_DMA_OP request against VRAM.
     fn exec_dma_op(&mut self, op: u32) {
+        const OP_SET_PALETTE: u32 = 17;
+        // A CLUT upload carries no blit geometry: the driver leaves the
+        // rect/pitch fields stale and puts the palette in the mailbox's
+        // clut1[] block, so service it before the geometry reads below.
+        if op == OP_SET_PALETTE {
+            self.apply_set_palette();
+            return;
+        }
         const OP_FILLRECT: u32 = 2;
         const OP_COPYRECT: u32 = 3;
         const OP_COPYRECT_NOMASK: u32 = 4;
@@ -948,7 +976,7 @@ impl ZorroDevice for Z3660 {
 
 /// `enum gfx_dma_op` (common/z3660_regs.h): REG_BLITTER_DMA_OP selectors.
 fn dma_op_name(op: u32) -> &'static str {
-    const NAMES: [&str; 17] = [
+    const NAMES: [&str; 18] = [
         "NONE",
         "DRAWLINE",
         "FILLRECT",
@@ -966,6 +994,7 @@ fn dma_op_name(op: u32) -> &'static str {
         "SPRITE_CLUT_BITMAP",
         "ETH_USB_OFFSETS",
         "SET_SPLIT_POS",
+        "SET_PALETTE",
     ];
     NAMES.get(op as usize).copied().unwrap_or("unknown")
 }
@@ -1126,6 +1155,32 @@ mod tests {
         w32(&mut z, &mut m, REG_OP, ARM_OP_PALETTE_HI);
         assert_eq!(z.palette[7], 0x0012_3456);
         assert_eq!(z.palette[256 + 7], 0x00AB_CDEF);
+    }
+
+    /// The Zorro III driver's bulk CLUT upload (OP_SET_PALETTE): the palette
+    /// arrives as packed R,G,B triplets in the mailbox's clut1[] block, keyed
+    /// by user[0]=start / user[1]=count, with u8_user[0] selecting the bank.
+    #[test]
+    fn palette_capture_from_set_palette_op() {
+        const OP_SET_PALETTE: u32 = 17;
+        let g = GFXDATA_OFFSET;
+        let (mut z, mut m) = (Z3660::new(), mem());
+        // Primary bank, start 1, two entries: index 1 = red, index 2 = green.
+        z.vram[g + 0x21] = 1; // user[0] low byte (start)
+        z.vram[g + 0x23] = 2; // user[1] low byte (count)
+        z.vram[g + 0x30] = 0; // u8_user[0]: primary bank
+        z.vram[g + 0x5C..g + 0x62].copy_from_slice(&[0xFF, 0, 0, 0, 0xFF, 0]);
+        w32(&mut z, &mut m, REG_BLITTER_DMA_OP, OP_SET_PALETTE);
+        assert_eq!(z.palette[1], 0x00FF_0000);
+        assert_eq!(z.palette[2], 0x0000_FF00);
+
+        // Secondary bank: u8_user[0] != 0 offsets the destination by 256.
+        z.vram[g + 0x21] = 5; // start 5
+        z.vram[g + 0x23] = 1; // count 1
+        z.vram[g + 0x30] = 1; // secondary bank
+        z.vram[g + 0x5C..g + 0x5F].copy_from_slice(&[0, 0, 0xFF]);
+        w32(&mut z, &mut m, REG_BLITTER_DMA_OP, OP_SET_PALETTE);
+        assert_eq!(z.palette[256 + 5], 0x0000_00FF);
     }
 
     /// SetGC + SetSwitch gate the scanout: no frame before a mode is set,
