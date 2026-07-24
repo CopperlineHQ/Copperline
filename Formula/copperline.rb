@@ -5,7 +5,7 @@
 # subject to macOS Gatekeeper quarantine -- no Security & Privacy override is
 # ever needed. Install with:
 #
-#   brew tap LinuxJedi/copperline https://github.com/LinuxJedi/Copperline
+#   brew tap CopperlineHQ/copperline https://github.com/CopperlineHQ/Copperline
 #   brew install copperline
 #
 # or build the in-development tree directly:
@@ -15,14 +15,14 @@
 # When tagging a release, update both `url` and `sha256` below. Compute the
 # checksum from the tagged tarball:
 #
-#   curl -fsSL https://github.com/LinuxJedi/Copperline/archive/refs/tags/vX.Y.Z.tar.gz | shasum -a 256
+#   curl -fsSL https://github.com/CopperlineHQ/Copperline/archive/refs/tags/vX.Y.Z.tar.gz | shasum -a 256
 class Copperline < Formula
   desc "Cycle-driven Amiga emulator (OCS/ECS/AGA) written in Rust"
   homepage "https://copperline.dev/"
-  url "https://github.com/LinuxJedi/Copperline/archive/refs/tags/v0.12.0.tar.gz"
+  url "https://github.com/CopperlineHQ/Copperline/archive/refs/tags/v0.12.0.tar.gz"
   sha256 "941c08aee236f1fd0a79fdff028b3ed90adb8e74b83b78a52256dcfddab9b145"
   license "GPL-3.0-or-later"
-  head "https://github.com/LinuxJedi/Copperline.git", branch: "main"
+  head "https://github.com/CopperlineHQ/Copperline.git", branch: "main"
 
   depends_on "rust" => :build
 

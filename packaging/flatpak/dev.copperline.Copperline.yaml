@@ -95,7 +95,7 @@ modules:
       # For the Flathub submission, replace this with the tagged release so
       # builds are reproducible from a fixed point:
       #   - type: git
-      #     url: https://github.com/LinuxJedi/Copperline.git
+      #     url: https://github.com/CopperlineHQ/Copperline.git
       #     tag: vX.Y.Z
       #     commit: <sha>
       # NOTE: the tag must be one that already contains assets/aros/ (the AROS

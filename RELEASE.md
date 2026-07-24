@@ -108,7 +108,7 @@ the new version:
 
 ```sh
 VER=X.Y.Z
-curl -fsSL "https://github.com/LinuxJedi/Copperline/archive/refs/tags/v$VER.tar.gz" | shasum -a 256
+curl -fsSL "https://github.com/CopperlineHQ/Copperline/archive/refs/tags/v$VER.tar.gz" | shasum -a 256
 ```
 
 Set `url` to the `v$VER.tar.gz` tarball and `sha256` to the printed digest.
@@ -125,9 +125,9 @@ commands unless the formula is loaded from a tap.
 
 ```sh
 brew update
-brew audit --strict --formula linuxjedi/copperline/copperline
-brew upgrade --build-from-source linuxjedi/copperline/copperline
-brew test linuxjedi/copperline/copperline
+brew audit --strict --formula copperlinehq/copperline/copperline
+brew upgrade --build-from-source copperlinehq/copperline/copperline
+brew test copperlinehq/copperline/copperline
 ```
 
 ## Linux: Flatpak and AppImage

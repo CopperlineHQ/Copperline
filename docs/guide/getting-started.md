@@ -25,7 +25,7 @@ native desktop build.
 ## Installing on macOS (Homebrew)
 
 ```sh
-brew tap LinuxJedi/copperline https://github.com/LinuxJedi/Copperline
+brew tap CopperlineHQ/copperline https://github.com/CopperlineHQ/Copperline
 brew install copperline
 ```
 
@@ -36,7 +36,7 @@ override to click through, unlike a downloaded prebuilt app. Use
 most recent tagged release, then run `copperline` from the terminal.
 
 For a no-compiler install, download `Copperline-X.Y.Z-macos-universal.dmg`
-from the [releases page](https://github.com/LinuxJedi/Copperline/releases),
+from the [releases page](https://github.com/CopperlineHQ/Copperline/releases),
 open it, and drag `Copperline.app` onto the Applications shortcut. The app is a
 universal binary that runs natively on Apple Silicon and Intel, and bundles the
 AROS boot ROM, so it runs out of the box. The image is not code-signed or
@@ -60,7 +60,7 @@ flatpak run dev.copperline.Copperline
 
 **AppImage** is a single self-contained file that needs no installation:
 download `Copperline-X.Y.Z-<arch>.AppImage` from the
-[releases page](https://github.com/LinuxJedi/Copperline/releases), then:
+[releases page](https://github.com/CopperlineHQ/Copperline/releases), then:
 
 ```sh
 chmod +x Copperline-*.AppImage

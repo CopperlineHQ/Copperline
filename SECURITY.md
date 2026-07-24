@@ -1,7 +1,7 @@
 # Security Policy
 
 Report security issues through GitHub private vulnerability reporting once the
-public `LinuxJedi/Copperline` repository is available. If that is not enabled,
+public `CopperlineHQ/Copperline` repository is available. If that is not enabled,
 open a public issue asking for a private contact path and omit exploit details.
 
 Do not attach copyrighted ROMs, disks, hard-disk images, CD images, or other

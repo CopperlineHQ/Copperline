@@ -22,7 +22,7 @@ it run the current cycle-sensitive OCS and AGA regression set, as well as
 Kickstart, Workbench, games, and CDTV/CD32 titles.
 
 The project home is [copperline.dev](https://copperline.dev/); the source
-lives on [GitHub](https://github.com/LinuxJedi/Copperline).
+lives on [GitHub](https://github.com/CopperlineHQ/Copperline).
 
 ```{figure} images/state-of-the-art.png
 :alt: Spaceballs' State of the Art running in Copperline

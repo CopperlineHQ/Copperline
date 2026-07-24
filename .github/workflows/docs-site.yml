@@ -1,7 +1,7 @@
 name: Docs site HTML
 
 # Builds the HTML manual with MyST and publishes it to the copperline.dev
-# website repository (LinuxJedi/copperline.github.io) under /docs when a v*
+# website repository (CopperlineHQ/copperline.github.io) under /docs when a v*
 # tag is pushed, so the docs on the site always match the latest release.
 # The HTML build itself is checked on every push/PR by the docs job in
 # ci.yml; this workflow only handles publication. A workflow_dispatch
@@ -10,7 +10,7 @@ name: Docs site HTML
 #
 # Pushing to the website repository needs the SITE_DEPLOY_KEY secret: the
 # private half of an SSH deploy key whose public half is installed with
-# write access on LinuxJedi/copperline.github.io.
+# write access on CopperlineHQ/copperline.github.io.
 on:
   push:
     tags: ["v*"]
@@ -53,7 +53,7 @@ jobs:
       - name: Check out the website repository
         uses: actions/checkout@v7
         with:
-          repository: LinuxJedi/copperline.github.io
+          repository: CopperlineHQ/copperline.github.io
           ssh-key: ${{ secrets.SITE_DEPLOY_KEY }}
           path: site
       - name: Replace /docs with the new build

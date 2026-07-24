@@ -1,7 +1,7 @@
 name: Browser demo
 
 # Builds the wasm browser frontend (crates/copperline-web) and publishes it
-# to the copperline.dev website repository (LinuxJedi/copperline.github.io)
+# to the copperline.dev website repository (CopperlineHQ/copperline.github.io)
 # under /try when a v* tag is pushed, so the in-browser emulator always
 # matches the latest release. A workflow_dispatch trigger allows
 # re-publishing from whatever ref it is run on without cutting a release.
@@ -15,7 +15,7 @@ name: Browser demo
 #
 # Pushing to the website repository needs the SITE_DEPLOY_KEY secret: the
 # private half of an SSH deploy key whose public half is installed with
-# write access on LinuxJedi/copperline.github.io (shared with docs-site.yml).
+# write access on CopperlineHQ/copperline.github.io (shared with docs-site.yml).
 on:
   push:
     tags: ["v*"]
@@ -51,7 +51,7 @@ jobs:
       - name: Check out the website repository
         uses: actions/checkout@v7
         with:
-          repository: LinuxJedi/copperline.github.io
+          repository: CopperlineHQ/copperline.github.io
           ssh-key: ${{ secrets.SITE_DEPLOY_KEY }}
           path: site
       - name: Replace the generated parts of /try
