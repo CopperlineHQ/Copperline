@@ -25,7 +25,7 @@ native desktop build.
 ## Installing on macOS (Homebrew)
 
 ```sh
-brew tap CopperlineHQ/copperline https://github.com/CopperlineHQ/Copperline
+brew tap copperlinehq/copperline https://github.com/CopperlineHQ/Copperline
 brew install copperline
 ```
 

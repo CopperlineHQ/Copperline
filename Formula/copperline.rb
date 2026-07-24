@@ -5,7 +5,7 @@
 # subject to macOS Gatekeeper quarantine -- no Security & Privacy override is
 # ever needed. Install with:
 #
-#   brew tap CopperlineHQ/copperline https://github.com/CopperlineHQ/Copperline
+#   brew tap copperlinehq/copperline https://github.com/CopperlineHQ/Copperline
 #   brew install copperline
 #
 # or build the in-development tree directly:

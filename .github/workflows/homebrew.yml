@@ -34,5 +34,5 @@ jobs:
         # that the release tarball is reachable and its sha256 matches; this
         # is the part `brew style` alone cannot catch.
         run: |
-          brew tap CopperlineHQ/copperline "$GITHUB_WORKSPACE"
-          brew audit --strict --online CopperlineHQ/copperline/copperline
+          brew tap copperlinehq/copperline "$GITHUB_WORKSPACE"
+          brew audit --strict --online copperlinehq/copperline/copperline
