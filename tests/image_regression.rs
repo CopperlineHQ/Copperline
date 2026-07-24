@@ -464,12 +464,20 @@ fn assert_no_live_audio_underrun_bursts(report: &FrameDumpReport, label: &str) {
     );
 }
 
+/// The failure this guards is a blank or near-blank playfield: BPU=7 on OCS
+/// latches the seventh plane, and getting that wrong drops the HAM scene to
+/// black. The bound is deliberately loose. The captured frame is one instant
+/// of a moving effect whose lit area varies with it, so a bound pinned near
+/// the current count tracks the animation rather than the decode -- 20000 of
+/// the region's 216936 pixels still sits an order of magnitude above a broken
+/// render, and the distinct-colour count below is what actually pins HAM
+/// decoding.
 fn assert_bpu7_latched_plane_ham_content(img: &Image, label: &str) {
     assert_region_non_color_count(
         img,
         (76, 77, 628, 470),
         [0, 0, 0, 255],
-        25_000,
+        20_000,
         &format!("{label} latched high-plane HAM playfield"),
     );
     assert_distinct_color_count(img, 80, label);

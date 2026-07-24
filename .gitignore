@@ -49,8 +49,16 @@ copperline-video-*.avi
 *.nvram
 .DS_Store
 
-# MyST documentation build output (see docs/README.md).
+# MyST documentation build output (see docs/README.md). The root copy
+# appears when myst runs from the repository root rather than docs/.
 /docs/_build
+/_build
+
+# Python bytecode from the tools/ helper scripts.
+__pycache__/
+
+# Default linker output, from compiling a scratch C probe in the tree.
+/a.out
 
 # Linux AppImage build artifacts (packaging/appimage/build-appimage.sh).
 /AppDir

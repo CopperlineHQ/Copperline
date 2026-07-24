@@ -639,11 +639,21 @@ mod tests {
     /// Utility for cross-checking against external FFS tools (e.g.
     /// amitools' xdftool): builds an image from COPPERLINE_DIRFS_SRC and
     /// writes it to COPPERLINE_DIRFS_OUT.
+    ///
+    /// A generator rather than a check, so it skips cleanly when its
+    /// inputs are unset: `cargo test -- --ignored` stops at the first
+    /// failing binary, and panicking here would hide every asset-gated
+    /// integration test behind it (see tests/README.md).
     #[test]
     #[ignore]
     fn dump_directory_image() {
-        let src = crate::envcfg::var("COPPERLINE_DIRFS_SRC").expect("COPPERLINE_DIRFS_SRC");
-        let out = crate::envcfg::var("COPPERLINE_DIRFS_OUT").expect("COPPERLINE_DIRFS_OUT");
+        let (Some(src), Some(out)) = (
+            crate::envcfg::var("COPPERLINE_DIRFS_SRC"),
+            crate::envcfg::var("COPPERLINE_DIRFS_OUT"),
+        ) else {
+            eprintln!("skipping: set COPPERLINE_DIRFS_SRC and COPPERLINE_DIRFS_OUT to run it");
+            return;
+        };
         let image = build_ffs_image(Path::new(&src), "DirVolume").unwrap();
         std::fs::write(&out, image).unwrap();
         eprintln!("wrote {out}");

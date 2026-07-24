@@ -166,6 +166,7 @@ authoritative list. The most useful ones:
 | `COPPERLINE_EXP_NO_SPRITE_RENDER` | With `--features internal-diagnostics`, skip sprite rendering in full-frame output while leaving playfield/manual-BPL rendering active; useful for isolating sprite-owned pixels in screenshots |
 | `COPPERLINE_DIAG_BLITREGS` | `=START:END` (emulated seconds): log the full blitter register set at every blit start (classic BLTSIZE and ECS BLTSIZH); pairs with `COPPERLINE_DUMP_BLITMEM` snapshots for offline blit verification |
 | `COPPERLINE_TRACE_BLITTER` | Path to a JSONL trace of blitter starts, forced finishes, DMACONR polls, and completion IRQ latches; start records include minterm/control registers, DMA/display context, FMODE, and all eight bitplane pointers |
+| `COPPERLINE_DIAG_POLLSTATS` | At every screenshot and frame dump, log the most-read CIA and custom registers -- what a stuck guest is busy-polling |
 | `COPPERLINE_DIAG_DISK` | Disk DMA state changes (DSKLEN writes) |
 | `COPPERLINE_DIAG_AUDIO_NOTES` | Paula channel note on/off events |
 | `COPPERLINE_DIAG_CRASH` | CPU empty-RAM execution and low-memory blitter write context |
