@@ -981,6 +981,11 @@ mod tests {
     /// end-to-end boot testing and as a starting point for plugin authors.
     /// Run with: `COPPERLINE_EMIT_WASM=/path/board.wasm cargo test --release \
     /// emit_example_plugin_wasm -- --ignored`.
+    ///
+    /// A generator rather than a check, so it skips cleanly when the path is
+    /// unset: `cargo test -- --ignored` stops at the first failing binary, and
+    /// panicking here would hide every asset-gated integration test behind it
+    /// (see tests/README.md).
     #[test]
     #[ignore]
     fn emit_example_plugin_wasm() {
@@ -992,7 +997,10 @@ mod tests {
               (func (export "write") (param i32 i32 i32))
               (func (export "tick") (param i32)))
         "#;
-        let out = std::env::var("COPPERLINE_EMIT_WASM").expect("set COPPERLINE_EMIT_WASM");
+        let Some(out) = crate::envcfg::var("COPPERLINE_EMIT_WASM") else {
+            eprintln!("skipping: set COPPERLINE_EMIT_WASM to a .wasm output path to run it");
+            return;
+        };
         std::fs::write(&out, wat::parse_str(inert).expect("valid WAT")).expect("write wasm");
         eprintln!("wrote example plugin to {out}");
     }

@@ -3,10 +3,10 @@ abstract: |
   Copperline is a cycle-driven Commodore Amiga emulator (OCS, ECS, and
   AGA) written in Rust. This document covers using the emulator,
   configuring machines from the A500 to the A4000 and CD32, describing
-  Zorro expansion boards, the browser (WebAssembly) build, the
-  interactive and headless debuggers, and the
-  internal architecture: the per-colour-clock chip-bus timing model, the
-  chipset modules, and the beam-event-replay video pipeline.
+  Zorro expansion boards including RTG graphics and Ethernet, the
+  browser (WebAssembly) build, the interactive and headless debuggers,
+  and the internal architecture: the per-colour-clock chip-bus timing
+  model, the chipset modules, and the beam-event-replay video pipeline.
 ---
 
 # Copperline
@@ -38,7 +38,8 @@ running in Copperline.
   machine.
 - [](guide/configuration) -- the `copperline.toml` reference: machine
   profiles (A500 through the A4000 and CD32), CPU, memory, chipset,
-  floppy, IDE/SCSI, host-directory mounts, serial/MIDI, and CD options.
+  floppy, IDE/SCSI, host-directory mounts, RTG graphics, Ethernet,
+  serial/MIDI, and CD options.
 - [](guide/ui) -- the window, status bar, keyboard shortcuts, menus, and
   gamepad calibration.
 - [](guide/headless) -- scripted, deterministic runs: screenshots, frame

@@ -2249,7 +2249,15 @@ impl PollStats {
             *count += 1;
         }
     }
+    /// Dump the busiest polled registers, for working out what a stuck
+    /// guest is spinning on. Opt-in via `COPPERLINE_DIAG_POLLSTATS`: this
+    /// runs at every screenshot and frame dump, and headless capture is
+    /// the everyday workflow, so unconditional output would bury a normal
+    /// run's log in emulator-internal counters.
     pub fn dump_top(&self, label: &str) {
+        if !crate::envcfg::flag("COPPERLINE_DIAG_POLLSTATS") {
+            return;
+        }
         log::info!("== poll stats ({}) ==", label);
         for (i, &n) in self.cia_a.iter().enumerate() {
             if n > 0 {
