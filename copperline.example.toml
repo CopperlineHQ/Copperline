@@ -413,6 +413,13 @@ floppy_sounds_volume = 100
 # Cmd+J / Alt+J still cycles this live; --joystick MODE overrides it per run.
 # joystick = "gamepad"
 
+# Host mouse sensitivity, 0-100. 50 (default, shown as "Default" in the GUI)
+# tracks the host mouse 1:1; 0 is a quarter speed and 100 quadruple, on an
+# exponential scale. A host-input scale only -- it does not affect the emulated
+# machine or scripted --mouse-after input. Also --mouse-sensitivity N, the
+# launcher's Input tab, and Cmd/Alt+Shift+> / < (held to ramp) to adjust live.
+# mouse_sensitivity = 50
+
 
 # Serial port wiring. The Amiga serial port doubles as the MIDI port.
 # [serial]

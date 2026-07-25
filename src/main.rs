@@ -513,6 +513,15 @@ where
                         anyhow!("--audio-stereo-separation must be a number 0-100")
                     })?);
             }
+            "--mouse-sensitivity" => {
+                let v = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--mouse-sensitivity requires a value (0-100)"))?;
+                overrides.mouse_sensitivity = Some(
+                    v.parse::<u16>()
+                        .map_err(|_| anyhow!("--mouse-sensitivity must be a number 0-100"))?,
+                );
+            }
             "--click-after" => {
                 const USAGE: &str = "--click-after requires SECS BUTTON DURATION_MS";
                 let secs: f32 = next_arg(&mut args, USAGE, "--click-after SECS must be a number")?;
@@ -928,6 +937,7 @@ fn print_help() {
          --rtc-frozen                   stop the seeded clock at --rtc-time exactly\n  \
          --joystick MODE                initial joystick input: gamepad or keyboard\n  \
          \x20                            (gamepad lets the keyboard pass through to the Amiga)\n  \
+         --mouse-sensitivity N          host mouse sensitivity 0-100 (50 default = 1:1)\n  \
          --port1 DEVICE                 controller in port 1: mouse (default), joystick,\n  \
          \x20                            cd32, analogue, or none\n  \
          --port2 DEVICE                 controller in port 2 (default: joystick;\n  \
@@ -1621,6 +1631,7 @@ fn main() -> Result<()> {
         config::resolve_phosphor(cfg.phosphor),
         cfg.emulation.warp_speed,
         cfg.joystick_input_mode,
+        cfg.mouse_sensitivity,
         config::about_machine_lines(&cfg),
         raw_cfg,
         live_audio,
@@ -1729,6 +1740,7 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
         config::resolve_phosphor(0.0),
         config::WarpSpeed::default(),
         config::JoystickInputMode::default(),
+        50,
         vec!["Configure a machine, then press Run.".to_string()],
         raw_cfg,
         audio_output_enabled,

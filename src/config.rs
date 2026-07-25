@@ -214,6 +214,12 @@ pub struct Config {
     /// `Alt+J`, and the menu's Joystick Input item flip it live without
     /// affecting this start-up value.
     pub joystick_input_mode: JoystickInputMode,
+    /// Host mouse sensitivity, 0-100 (`[input] mouse_sensitivity` /
+    /// `--mouse-sensitivity`). 50 (default) is 1:1 with the host mouse; 0 is a
+    /// quarter speed and 100 quadruple, on an exponential scale. A host-input
+    /// scale only -- it does not affect the emulated machine or scripted mouse
+    /// input.
+    pub mouse_sensitivity: u8,
     /// Controller devices plugged into the two game ports at power-on
     /// (`[input] port1` / `port2`, `--port1` / `--port2`); index 0 = port 1.
     /// Defaults to a mouse in port 1 and a joystick in port 2 -- a CD32
@@ -1213,6 +1219,7 @@ impl Default for Config {
             pixel_aspect: PixelAspect::Tv,
             phosphor: 0.0,
             joystick_input_mode: JoystickInputMode::Gamepad,
+            mouse_sensitivity: 50,
             port_devices: [PortDevice::Mouse, PortDevice::Joystick],
             serial: SerialConfig::default(),
             parallel: ParallelConfig::default(),
@@ -1365,6 +1372,9 @@ pub struct ConfigOverrides {
     /// ("auto" still accepted as a compatibility alias). Validated by the same
     /// parser as `[input] joystick`.
     pub joystick: Option<String>,
+    /// Host mouse sensitivity (`--mouse-sensitivity`), 0-100. Same as
+    /// `[input] mouse_sensitivity`.
+    pub mouse_sensitivity: Option<u16>,
     /// Device in game port 1 (`--port1`): "mouse", "joystick", "cd32",
     /// "analogue", or "none". Same parser as `[input] port1`.
     pub port1: Option<String>,
@@ -1426,6 +1436,7 @@ impl ConfigOverrides {
             && self.floppy_drives.is_none()
             && self.floppy_speed.is_none()
             && self.joystick.is_none()
+            && self.mouse_sensitivity.is_none()
             && self.port1.is_none()
             && self.port2.is_none()
             && self.serial.is_none()
@@ -1485,6 +1496,9 @@ impl ConfigOverrides {
         }
         if let Some(joystick) = &self.joystick {
             raw.input.joystick = Some(joystick.clone());
+        }
+        if let Some(sensitivity) = self.mouse_sensitivity {
+            raw.input.mouse_sensitivity = Some(sensitivity);
         }
         if let Some(port1) = &self.port1 {
             raw.input.port1 = Some(port1.clone());
@@ -1694,6 +1708,9 @@ pub(crate) struct RawInput {
     /// ("cd32" on the CD32 profile).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) port2: Option<String>,
+    /// Host mouse sensitivity, 0-100 (default 50).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) mouse_sensitivity: Option<u16>,
 }
 
 /// `[serial]` host wiring for Paula's serial (a.k.a. MIDI) port.
@@ -2408,6 +2425,14 @@ impl TryFrom<RawConfig> for Config {
             None => defaults.joystick_input_mode,
             Some(s) => parse_joystick_input_mode(s)?,
         };
+        let mouse_sensitivity = match raw.input.mouse_sensitivity {
+            None => defaults.mouse_sensitivity,
+            Some(v) if v <= 100 => v as u8,
+            Some(v) => {
+                errors.push(anyhow!("[input] mouse_sensitivity must be 0-100, got {v}"));
+                defaults.mouse_sensitivity
+            }
+        };
         // The profile carries the default wiring (mouse + joystick, with a
         // CD32 pad on the CD32 profile); an explicit key beats it either
         // way -- a real CD32 accepts any controller too.
@@ -2795,6 +2820,7 @@ impl TryFrom<RawConfig> for Config {
             pixel_aspect,
             phosphor,
             joystick_input_mode,
+            mouse_sensitivity,
             port_devices,
             serial,
             parallel: resolve_parallel(raw.parallel)?,
@@ -2869,6 +2895,17 @@ pub(crate) fn parse_port_device(s: &str, key: &str) -> Result<PortDevice> {
              \"analogue\", or \"none\", got {s:?}"
         )
     })
+}
+
+/// Display label for a mouse sensitivity value: the neutral midpoint shows as
+/// "Default" in the GUI and OSD, every other value as its number. The config
+/// and CLI still use the number 50.
+pub(crate) fn mouse_sensitivity_label(sensitivity: u8) -> String {
+    if sensitivity == 50 {
+        "Default".to_string()
+    } else {
+        sensitivity.to_string()
+    }
 }
 
 pub(crate) fn parse_joystick_input_mode(s: &str) -> Result<JoystickInputMode> {
@@ -4114,6 +4151,28 @@ mod tests {
             parse_config("[machine]\nprofile = \"A1200\"\n")?.joystick_input_mode,
             JoystickInputMode::Gamepad
         );
+        Ok(())
+    }
+
+    #[test]
+    fn mouse_sensitivity_defaults_to_50_and_validates() -> Result<()> {
+        assert_eq!(parse_config("")?.mouse_sensitivity, 50);
+        assert_eq!(
+            parse_config("[input]\nmouse_sensitivity = 0\n")?.mouse_sensitivity,
+            0
+        );
+        assert_eq!(
+            parse_config("[input]\nmouse_sensitivity = 100\n")?.mouse_sensitivity,
+            100
+        );
+        assert!(parse_config("[input]\nmouse_sensitivity = 101\n").is_err());
+
+        // CLI override.
+        let overrides = ConfigOverrides {
+            mouse_sensitivity: Some(75),
+            ..Default::default()
+        };
+        assert_eq!(load_overrides(&overrides)?.mouse_sensitivity, 75);
         Ok(())
     }
 

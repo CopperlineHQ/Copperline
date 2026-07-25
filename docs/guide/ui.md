@@ -24,6 +24,7 @@ The app shortcut modifier is `Cmd` on macOS and `Alt` on Linux/Windows.
 | `Cmd+Shift+A` | `Alt+Shift+A` | Cycle the audio output: Default, each host device, then Disabled (also the menu's Audio Out item) |
 | `Cmd+A` | `Alt+A` | Cycle Paula's audio filter: auto, on, off (also the menu's Audio Filter item) |
 | `Cmd+Shift++` / `Cmd+Shift+-` | `Alt+Shift++` / `Alt+Shift+-` | Raise / lower the parallel-port sampler input gain (only when a sampler is attached; also the menu's Sampler Gain item) |
+| `Cmd+Shift+>` / `Cmd+Shift+<` | `Alt+Shift+>` / `Alt+Shift+<` | Raise / lower the host mouse sensitivity (also the launcher's Input tab) |
 | `Cmd+F` | `Alt+F` | Toggle fullscreen on / off |
 | `Cmd+Shift+F` | `Alt+Shift+F` | Show / hide the status bar |
 | `Cmd+W` | `Alt+W` | Toggle Warp Speed (turbo) on / off |

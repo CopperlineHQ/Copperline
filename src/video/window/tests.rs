@@ -2009,11 +2009,24 @@ fn test_app_with_audio_and_cpu(
         0.0,
         crate::config::WarpSpeed::Max,
         crate::config::JoystickInputMode::Gamepad,
+        50,
         vec!["Machine: test".to_string()],
         crate::config::RawConfig::default(),
         true,
         crate::sampler::SamplerRequest::default(),
     )
+}
+
+#[test]
+fn mouse_sensitivity_factor_hits_the_anchors_and_is_monotonic() {
+    use super::mouse_sensitivity_factor as f;
+    // 0 quarter speed, 50 exactly 1:1 (today's speed), 100 quadruple.
+    assert!((f(0) - 0.25).abs() < 1e-9);
+    assert!((f(50) - 1.0).abs() < 1e-9);
+    assert!((f(100) - 4.0).abs() < 1e-9);
+    assert!(f(25) < f(50) && f(50) < f(75));
+    // Out-of-range clamps to 100.
+    assert!((f(200) - 4.0).abs() < 1e-9);
 }
 
 #[test]
