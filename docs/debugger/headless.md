@@ -132,7 +132,15 @@ cannot change at runtime (see [](../internals/architecture)).
 
 `COPPERLINE_DBG_FRAMESTATE=1`
 : Log the per-frame display state (one summary line per rendered frame)
-  inside the `AFTER`/`UNTIL` window.
+  inside the `AFTER`/`UNTIL` window, followed by the frame geometry, the
+  palette, a captured-sprite-DMA summary, and *both* of Denise's sprite
+  register views: the CPU/Copper write shadow (`sprpos`/`sprctl`/`sprarmed`)
+  and the hardware-true latch view (`hw_sprpos`/`hw_sprctl`/`hw_sprdata`/
+  `hw_sprdatb`/`hw_sprarmed`), which sprite DMA fetches write through as
+  well. The two disagreeing on a channel is the signature of a stale
+  display latch: the shadow shows what software last wrote, the hardware
+  view what Denise would actually serialize, and the latter drives the
+  DMA-idle latched redisplay.
 
 ## Diagnostic knobs
 
