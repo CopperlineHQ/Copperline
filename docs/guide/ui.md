@@ -280,11 +280,12 @@ The layout is:
   extended ROM), *Floppy* (drive count and speed, per-drive image and
   write-protect),
   *Hard Disk* (IDE master/slave, the SCSI controller -- A2091, A4091, or the
-  A3000's onboard SCSI -- and its boot ROM and units, plus a **Host Mounts**
-  link to a sub-page for host directories served live as AmigaDOS volumes: up
-  to four mounts, each with a boot priority and a read-write/read-only
-  **Access** field -- the config file itself takes up to eight `[[filesys]]`
-  mounts, of which the launcher edits the first four), *CD* (image,
+  A3000's onboard SCSI -- and its boot ROM and units, plus links to two
+  sub-pages: **Boot Priority**, which sets each hard-disk drive's synthesized-RDB
+  boot priority (see below), and **Host Mounts**, for host directories served
+  live as AmigaDOS volumes: up to four mounts, each with a boot priority and a
+  read-write/read-only **Access** field -- the config file itself takes up to
+  eight `[[filesys]]` mounts, of which the launcher edits the first four), *CD* (image,
   insert delay, CD32 NVRAM),
   *Input* (the controller device in each game port and the joystick input
   source),
@@ -310,6 +311,17 @@ The layout is:
   shows why in place of its control -- "needs 32-bit CPU" for Zorro III RAM
   and the RTG card, "needs 68020+" for the FPU, "needs A600/A1200/A4000" for
   IDE.
+- **Boot Priority sub-page** (from *Hard Disk*). One row per hard-disk drive,
+  setting the `de_BootPri` written into the partition Copperline synthesizes in
+  front of a bare hardfile (it has no effect on an image carrying its own RDB).
+  `[<]`/`[>]` nudge the value by one; the value box is also a text field --
+  click it and type any priority in -128..127, then Enter. **Default** leaves the
+  synthesized partition at 0 (and writes no `bootpri` key, so a config that never
+  set one is unchanged); **Never** (-128) mounts the volume but keeps it out of
+  the boot vote; clear the box to return to Default. A drive with no image, or a
+  CD image, is greyed ("no drive" / "CD-ROM"). See
+  [](configuration.md) for how the priority ranks against Kickstart's DF0: boot
+  node at 5.
 - **Action bar** (bottom). **Load...** and **Save...** read and write a `.toml`
   config
   through a file dialog (Save writes a minimal file, only the settings that
@@ -319,6 +331,15 @@ The layout is:
   missing disk image, a ROM file that cannot be read, an option the chosen
   machine cannot use -- the reason is
   shown on the status line and you stay on the screen to fix it.
+
+```{figure} ../images/ui-preview-launcher-boot-priority.png
+:alt: The Boot Priority sub-page of the Hard Disk tab
+:width: 75%
+
+The Boot Priority sub-page: an A1200 whose IDE master has a hardfile set to
+priority 5 (click the value and type, or step it with `<`/`>`). The empty IDE
+slave and SCSI units are greyed "no drive".
+```
 
 Saved files use the same schema as a hand-written `copperline.toml`
 (see [](configuration.md)), so the screen and the config file are

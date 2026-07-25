@@ -3999,6 +3999,11 @@ impl App {
                     state.begin_edit_drive_name(field);
                 }
             }
+            UiControl::LauncherDriveBootpriEdit(field) => {
+                if let Some(state) = self.launcher_state_mut() {
+                    state.begin_edit_drive_bootpri(field);
+                }
+            }
             UiControl::LauncherZorroRemove(idx) => {
                 if let Some(state) = self.launcher_state_mut() {
                     state.edit_cancel();

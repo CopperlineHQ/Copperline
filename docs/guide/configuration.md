@@ -869,6 +869,10 @@ mounts but is never offered for boot. It has **no effect on an image that
 carries its own RDB** -- those priorities live inside the image, where
 HDToolBox put them -- and Copperline logs a warning if you set it on one.
 
+The configuration screen edits `bootpri` on the *Hard Disk* tab's **Boot
+Priority** sub-page, one row per drive (see [](ui.md)); a drive left at
+**Default** writes no `bootpri` key.
+
 The drive responds to ATA IDENTIFY with the Gayle byte order real hardware
 uses, so both Kickstart 3.1 variants boot from it. An HDD activity LED
 appears in the status bar on IDE machines. On the `A4000` profile the same

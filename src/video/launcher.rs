@@ -26,7 +26,7 @@ use crate::config::{
     format_size, machine_profile_defaults, AudioFilterMode, ChannelMode, Chipset, Config, CpuModel,
     JoystickInputMode, MachineModel, Overscan, PacingBudget, ParallelDevice, PixelAspect,
     RawConfig, RawDrive, RawFilesysMount, RawFloppyDrive, RawZorroBoard, RtgCard, ScsiController,
-    SerialMode, WarpSpeed,
+    SerialMode, WarpSpeed, BOOT_PRI_NEVER, HARDFILE_DEFAULT_BOOT_PRI,
 };
 use crate::net::NetConfig;
 use crate::zorro::{ConfigOption, ConfigOptionKind, LoadedZorroBoard};
@@ -170,6 +170,7 @@ pub enum LauncherTab {
     Rom,
     Floppy,
     Storage,
+    BootPriority,
     HostFs,
     Cd,
     /// Serial and parallel ports on one tab, under `Serial:` / `Parallel:`
@@ -188,8 +189,8 @@ pub const TABS: &[LauncherTab] = &[
     LauncherTab::Rom,
     LauncherTab::Floppy,
     LauncherTab::Storage,
-    // HostFs is reached as a sub-page from the Hard Disk (Storage) tab, so it is
-    // not a top-level strip entry.
+    // BootPriority and HostFs are reached as sub-pages from the Hard Disk
+    // (Storage) tab, so they are not top-level strip entries.
     LauncherTab::Cd,
     LauncherTab::Input,
     LauncherTab::IoPorts,
@@ -206,6 +207,7 @@ impl LauncherTab {
             LauncherTab::Rom => "ROM",
             LauncherTab::Floppy => "Floppy",
             LauncherTab::Storage => "Hard Disk",
+            LauncherTab::BootPriority => "Boot Priority",
             LauncherTab::HostFs => "Host Mounts",
             LauncherTab::Cd => "CD",
             LauncherTab::IoPorts => "I/O Ports",
@@ -215,11 +217,12 @@ impl LauncherTab {
         }
     }
 
-    /// The strip entry to highlight for this (possibly sub-page) tab: the Host
-    /// Mounts sub-page keeps its parent Hard Disk tab highlighted.
+    /// The strip entry to highlight for this (possibly sub-page) tab: the Boot
+    /// Priority and Host Mounts sub-pages keep their parent Hard Disk tab
+    /// highlighted.
     pub fn strip_tab(self) -> LauncherTab {
         match self {
-            LauncherTab::HostFs => LauncherTab::Storage,
+            LauncherTab::BootPriority | LauncherTab::HostFs => LauncherTab::Storage,
             other => other,
         }
     }
@@ -279,6 +282,17 @@ pub enum LauncherField {
     ScsiUnit4,
     ScsiUnit5,
     ScsiUnit6,
+    // Boot priority sub-page: the synthesized-RDB de_BootPri for each hard-disk
+    // drive above, edited on its own page so it does not crowd the Hard Disk tab.
+    IdeMasterBoot,
+    IdeSlaveBoot,
+    ScsiUnit0Boot,
+    ScsiUnit1Boot,
+    ScsiUnit2Boot,
+    ScsiUnit3Boot,
+    ScsiUnit4Boot,
+    ScsiUnit5Boot,
+    ScsiUnit6Boot,
     // Host FS mounts (the GUI edits the first FILESYS_GUI_SLOTS entries)
     Filesys0Dir,
     Filesys0Boot,
@@ -341,6 +355,10 @@ pub enum LauncherField {
 pub enum RowKind {
     /// A `[<] value [>]` picker / stepper.
     Cycle,
+    /// A `[<] value [>]` stepper whose value is also a text field: the arrows
+    /// nudge it by one and clicking the value types an exact number. Used for
+    /// the hard-disk boot priorities, where any value in -128..=127 is valid.
+    Bootpri,
     /// An On/Off button.
     Toggle,
     /// A file path with Browse/Clear buttons.
@@ -429,7 +447,7 @@ impl LauncherField {
 }
 
 use LauncherField as F;
-use RowKind::{Cycle, Drive, Toggle};
+use RowKind::{Bootpri, Cycle, Drive, Toggle};
 // `RowKind::Path` is written out below so it does not collide with the
 // `std::path::Path` import.
 use RowKind::Path as PathRow;
@@ -502,6 +520,19 @@ const HOSTFS_ROWS: [Row; 12] = [
     row(F::Filesys3Boot, "  Boot priority", Cycle),
     row(F::Filesys3ReadOnly, "  Access", Cycle),
 ];
+// One boot-priority row per hard-disk drive, matching the Hard Disk tab's drive
+// rows. Greyed when the matching slot holds no image.
+const BOOTPRI_ROWS: [Row; 9] = [
+    row(F::IdeMasterBoot, "IDE master", Bootpri),
+    row(F::IdeSlaveBoot, "IDE slave", Bootpri),
+    row(F::ScsiUnit0Boot, "SCSI unit 0", Bootpri),
+    row(F::ScsiUnit1Boot, "SCSI unit 1", Bootpri),
+    row(F::ScsiUnit2Boot, "SCSI unit 2", Bootpri),
+    row(F::ScsiUnit3Boot, "SCSI unit 3", Bootpri),
+    row(F::ScsiUnit4Boot, "SCSI unit 4", Bootpri),
+    row(F::ScsiUnit5Boot, "SCSI unit 5", Bootpri),
+    row(F::ScsiUnit6Boot, "SCSI unit 6", Bootpri),
+];
 const CD_ROWS: [Row; 3] = [
     row(F::CdImage, "CD image", PathRow),
     row(F::CdInsertDelay, "Insert delay", Cycle),
@@ -558,8 +589,8 @@ const INPUT_ROWS: [Row; 4] = [
 ];
 
 /// The rows shown on a tab, top to bottom. Most tabs are fixed and borrow their
-/// static row table; only the three composed tabs (Storage/HostFs with their
-/// sub-page links, and the dynamic I/O Ports tab) allocate. The I/O Ports tab is
+/// static row table; only the composed tabs (Storage, its Boot Priority and Host
+/// Mounts sub-pages, and the dynamic I/O Ports tab) allocate. The I/O Ports tab is
 /// dynamic: the MIDI endpoint rows appear only in MIDI mode and the
 /// sampler/printer rows only for those devices, so unrelated options stay hidden
 /// rather than greyed. The `Zorro` tab has no rows: it is drawn as a board list
@@ -576,10 +607,19 @@ pub fn rows(
         LauncherTab::Rom => Cow::Borrowed(&ROM_ROWS),
         LauncherTab::Floppy => Cow::Borrowed(&FLOPPY_ROWS),
         LauncherTab::Storage => {
-            // The Hard Disk tab links to the Host Mounts sub-page, at the top so
-            // it sits where the sub-page's own Back link is.
-            let mut rows = vec![sub_page_link("Host Mounts", LauncherTab::HostFs)];
+            // The Hard Disk tab links to its two sub-pages, at the top so they sit
+            // where each sub-page's own Back link is. Boot Priority comes first.
+            let mut rows = vec![
+                sub_page_link("Boot Priority", LauncherTab::BootPriority),
+                sub_page_link("Host Mounts", LauncherTab::HostFs),
+            ];
             rows.extend_from_slice(&STORAGE_ROWS);
+            Cow::Owned(rows)
+        }
+        LauncherTab::BootPriority => {
+            // The Boot Priority sub-page opens with a link back to Hard Disk.
+            let mut rows = vec![sub_page_link("< Hard Disk", LauncherTab::Storage)];
+            rows.extend_from_slice(&BOOTPRI_ROWS);
             Cow::Owned(rows)
         }
         LauncherTab::HostFs => {
@@ -861,9 +901,9 @@ pub struct MachineSetup {
     df_write_protected: [bool; 4],
     // Hard disk. Each drive's optional volume-name override (directory mounts
     // only) sits in the matching `*_name` slot, paralleling the path slot, and
-    // its synthesized-RDB boot priority in the matching `*_bootpri` slot. The
-    // GUI has no bootpri editor for hard disks yet, so the values are carried
-    // through unchanged rather than reset to the default on save.
+    // its synthesized-RDB boot priority in the matching `*_bootpri` slot, edited
+    // on the Boot Priority sub-page. `None` is the keyless "Default" state, kept
+    // distinct from `Some(0)` so a config with no `bootpri` key round-trips.
     ide_master: Option<PathBuf>,
     ide_master_name: Option<String>,
     ide_master_bootpri: Option<i8>,
@@ -1662,6 +1702,24 @@ impl MachineSetup {
                 let (slot, _) = filesys_slot(field).expect("boot field");
                 reason(self.filesys_dirs[slot].is_some(), "no directory")
             }
+            // Boot priority applies only to a hard-disk image: greyed for an
+            // empty slot, or a CD image (which boots by its own rules).
+            F::IdeMasterBoot
+            | F::IdeSlaveBoot
+            | F::ScsiUnit0Boot
+            | F::ScsiUnit1Boot
+            | F::ScsiUnit2Boot
+            | F::ScsiUnit3Boot
+            | F::ScsiUnit4Boot
+            | F::ScsiUnit5Boot
+            | F::ScsiUnit6Boot => {
+                let drive = Self::boot_field_drive(field).expect("boot field");
+                match self.path(drive) {
+                    None => Some("no drive"),
+                    Some(p) if crate::config::is_cd_image_path(p) => Some("CD-ROM"),
+                    Some(_) => None,
+                }
+            }
             F::Filesys0ReadOnly
             | F::Filesys1ReadOnly
             | F::Filesys2ReadOnly
@@ -1970,6 +2028,15 @@ impl MachineSetup {
                     pri => pri.to_string(),
                 }
             }
+            F::IdeMasterBoot
+            | F::IdeSlaveBoot
+            | F::ScsiUnit0Boot
+            | F::ScsiUnit1Boot
+            | F::ScsiUnit2Boot
+            | F::ScsiUnit3Boot
+            | F::ScsiUnit4Boot
+            | F::ScsiUnit5Boot
+            | F::ScsiUnit6Boot => drive_bootpri_label(self.drive_bootpri(field)),
             F::Filesys0ReadOnly
             | F::Filesys1ReadOnly
             | F::Filesys2ReadOnly
@@ -2189,6 +2256,20 @@ impl MachineSetup {
                     forward,
                 ) as u8
             }
+            F::IdeMasterBoot
+            | F::IdeSlaveBoot
+            | F::ScsiUnit0Boot
+            | F::ScsiUnit1Boot
+            | F::ScsiUnit2Boot
+            | F::ScsiUnit3Boot
+            | F::ScsiUnit4Boot
+            | F::ScsiUnit5Boot
+            | F::ScsiUnit6Boot => {
+                self.set_drive_bootpri(
+                    field,
+                    step_drive_bootpri(self.drive_bootpri(field), forward),
+                );
+            }
             _ => {
                 if let Some((slot, true)) = filesys_slot(field) {
                     self.filesys_bootpri[slot] = cycle_bootpri(self.filesys_bootpri[slot], forward);
@@ -2300,23 +2381,85 @@ impl MachineSetup {
         }
     }
 
-    /// Drop a hard-disk drive's carried-over boot priority. The GUI has no
-    /// editor for it, so this is the only way it changes here: clearing the
-    /// image clears the entry it belonged to.
+    /// Reset a hard-disk drive's boot priority to the keyless "Default" state.
+    /// Called both when clearing the image (the priority has nothing to attach
+    /// to) and from the Boot Priority page's own reset. `field` is either the
+    /// drive field or its boot-priority twin.
     fn clear_drive_bootpri(&mut self, field: LauncherField) {
         use LauncherField as F;
         match field {
-            F::IdeMaster => self.ide_master_bootpri = None,
-            F::IdeSlave => self.ide_slave_bootpri = None,
-            F::ScsiUnit0 => self.scsi_unit_bootpri[0] = None,
-            F::ScsiUnit1 => self.scsi_unit_bootpri[1] = None,
-            F::ScsiUnit2 => self.scsi_unit_bootpri[2] = None,
-            F::ScsiUnit3 => self.scsi_unit_bootpri[3] = None,
-            F::ScsiUnit4 => self.scsi_unit_bootpri[4] = None,
-            F::ScsiUnit5 => self.scsi_unit_bootpri[5] = None,
-            F::ScsiUnit6 => self.scsi_unit_bootpri[6] = None,
+            F::IdeMaster | F::IdeMasterBoot => self.ide_master_bootpri = None,
+            F::IdeSlave | F::IdeSlaveBoot => self.ide_slave_bootpri = None,
+            F::ScsiUnit0 | F::ScsiUnit0Boot => self.scsi_unit_bootpri[0] = None,
+            F::ScsiUnit1 | F::ScsiUnit1Boot => self.scsi_unit_bootpri[1] = None,
+            F::ScsiUnit2 | F::ScsiUnit2Boot => self.scsi_unit_bootpri[2] = None,
+            F::ScsiUnit3 | F::ScsiUnit3Boot => self.scsi_unit_bootpri[3] = None,
+            F::ScsiUnit4 | F::ScsiUnit4Boot => self.scsi_unit_bootpri[4] = None,
+            F::ScsiUnit5 | F::ScsiUnit5Boot => self.scsi_unit_bootpri[5] = None,
+            F::ScsiUnit6 | F::ScsiUnit6Boot => self.scsi_unit_bootpri[6] = None,
             _ => {}
         }
+    }
+
+    /// The hard-disk drive field a boot-priority field belongs to (its twin on
+    /// the Hard Disk tab), or None when `field` is not a boot-priority field.
+    fn boot_field_drive(field: LauncherField) -> Option<LauncherField> {
+        use LauncherField as F;
+        Some(match field {
+            F::IdeMasterBoot => F::IdeMaster,
+            F::IdeSlaveBoot => F::IdeSlave,
+            F::ScsiUnit0Boot => F::ScsiUnit0,
+            F::ScsiUnit1Boot => F::ScsiUnit1,
+            F::ScsiUnit2Boot => F::ScsiUnit2,
+            F::ScsiUnit3Boot => F::ScsiUnit3,
+            F::ScsiUnit4Boot => F::ScsiUnit4,
+            F::ScsiUnit5Boot => F::ScsiUnit5,
+            F::ScsiUnit6Boot => F::ScsiUnit6,
+            _ => return None,
+        })
+    }
+
+    /// The stored boot priority for a boot-priority field: `None` is the keyless
+    /// "Default" (the synthesized RDB gets `HARDFILE_DEFAULT_BOOT_PRI`).
+    fn drive_bootpri(&self, field: LauncherField) -> Option<i8> {
+        use LauncherField as F;
+        match field {
+            F::IdeMasterBoot => self.ide_master_bootpri,
+            F::IdeSlaveBoot => self.ide_slave_bootpri,
+            F::ScsiUnit0Boot => self.scsi_unit_bootpri[0],
+            F::ScsiUnit1Boot => self.scsi_unit_bootpri[1],
+            F::ScsiUnit2Boot => self.scsi_unit_bootpri[2],
+            F::ScsiUnit3Boot => self.scsi_unit_bootpri[3],
+            F::ScsiUnit4Boot => self.scsi_unit_bootpri[4],
+            F::ScsiUnit5Boot => self.scsi_unit_bootpri[5],
+            F::ScsiUnit6Boot => self.scsi_unit_bootpri[6],
+            _ => None,
+        }
+    }
+
+    /// Store a boot priority; `None` returns the field to the keyless "Default".
+    pub fn set_drive_bootpri(&mut self, field: LauncherField, value: Option<i8>) {
+        use LauncherField as F;
+        match field {
+            F::IdeMasterBoot => self.ide_master_bootpri = value,
+            F::IdeSlaveBoot => self.ide_slave_bootpri = value,
+            F::ScsiUnit0Boot => self.scsi_unit_bootpri[0] = value,
+            F::ScsiUnit1Boot => self.scsi_unit_bootpri[1] = value,
+            F::ScsiUnit2Boot => self.scsi_unit_bootpri[2] = value,
+            F::ScsiUnit3Boot => self.scsi_unit_bootpri[3] = value,
+            F::ScsiUnit4Boot => self.scsi_unit_bootpri[4] = value,
+            F::ScsiUnit5Boot => self.scsi_unit_bootpri[5] = value,
+            F::ScsiUnit6Boot => self.scsi_unit_bootpri[6] = value,
+            _ => {}
+        }
+    }
+
+    /// Whether a boot-priority field is editable: its drive holds a hard-disk
+    /// image. Priority is meaningless for an empty slot or a CD image.
+    fn boot_field_applies(&self, field: LauncherField) -> bool {
+        Self::boot_field_drive(field)
+            .and_then(|drive| self.path(drive))
+            .is_some_and(|p| !crate::config::is_cd_image_path(p))
     }
 
     pub fn zorro_boards(&self) -> &[ZorroBoardSetup] {
@@ -2392,6 +2535,8 @@ pub enum EditTarget {
     BoardOption { board: usize, opt: usize },
     /// A hard-drive volume-name override.
     DriveName(LauncherField),
+    /// A hard-disk boot priority typed as a number (the Boot Priority page).
+    DriveBootpri(LauncherField),
 }
 
 /// The full interactive state of the open configuration panel.
@@ -2450,10 +2595,31 @@ impl LauncherState {
         self.status = None;
     }
 
-    pub fn edit_push(&mut self, c: char) {
-        if self.editing.is_some() {
-            self.edit_buffer.push(c);
+    /// Focus a drive's boot-priority field for typing, seeding the buffer with
+    /// the current number ("Default" seeds empty, so a blank commit keeps it).
+    pub fn begin_edit_drive_bootpri(&mut self, field: LauncherField) {
+        // Do not offer typing on a greyed row (no image, or a CD image).
+        if !self.setup.boot_field_applies(field) {
+            return;
         }
+        self.edit_buffer = match self.setup.drive_bootpri(field) {
+            Some(n) => n.to_string(),
+            None => String::new(),
+        };
+        self.editing = Some(EditTarget::DriveBootpri(field));
+        self.status = None;
+    }
+
+    pub fn edit_push(&mut self, c: char) {
+        let Some(target) = self.editing else { return };
+        // A boot priority is a signed integer: digits, and a leading minus.
+        if let EditTarget::DriveBootpri(_) = target {
+            let minus_ok = c == '-' && self.edit_buffer.is_empty();
+            if !(c.is_ascii_digit() || minus_ok) {
+                return;
+            }
+        }
+        self.edit_buffer.push(c);
     }
 
     pub fn edit_backspace(&mut self) {
@@ -2467,15 +2633,32 @@ impl LauncherState {
     /// can be fixed instead of failing later at save.
     pub fn edit_commit(&mut self) {
         let Some(target) = self.editing else { return };
-        if let EditTarget::DriveName(_) = target {
-            let name = self.edit_buffer.trim();
-            let invalid = (!name.is_empty())
-                .then(|| crate::filesys::volume_name_error(name))
-                .flatten();
-            if let Some(err) = invalid {
-                self.status = Some(StatusMessage::err(err));
+        match target {
+            EditTarget::DriveName(_) => {
+                let name = self.edit_buffer.trim();
+                let invalid = (!name.is_empty())
+                    .then(|| crate::filesys::volume_name_error(name))
+                    .flatten();
+                if let Some(err) = invalid {
+                    self.status = Some(StatusMessage::err(err));
+                    return;
+                }
+            }
+            EditTarget::DriveBootpri(field) => {
+                // A bad number keeps the field focused so it can be fixed, the
+                // same as a rejected drive name.
+                match parse_drive_bootpri(&self.edit_buffer) {
+                    Ok(value) => self.setup.set_drive_bootpri(field, value),
+                    Err(err) => {
+                        self.status = Some(StatusMessage::err(err.to_string()));
+                        return;
+                    }
+                }
+                self.editing = None;
+                self.edit_buffer.clear();
                 return;
             }
+            EditTarget::BoardOption { .. } => {}
         }
         self.editing = None;
         let value = std::mem::take(&mut self.edit_buffer);
@@ -2484,6 +2667,7 @@ impl LauncherState {
                 self.setup.zorro_option_set(board, opt, value)
             }
             EditTarget::DriveName(field) => self.setup.set_drive_name(field, value),
+            EditTarget::DriveBootpri(_) => {}
         }
     }
 
@@ -2589,6 +2773,41 @@ fn raw_scsi_unit(scsi: &crate::config::RawScsi, unit: usize) -> Option<&RawDrive
 /// "never boot" sentinel; the rest bracket the usual device priorities
 /// (hard-disk partitions boot at 0, DF0: at 5).
 const BOOTPRI_STEPS: [i8; 8] = [-128, -10, -5, 0, 5, 6, 10, 20];
+
+/// Display form of a hard-disk boot priority: `None` is the keyless "Default"
+/// (the synthesized RDB is left at `HARDFILE_DEFAULT_BOOT_PRI`), `BOOT_PRI_NEVER`
+/// reads "Never" (mounts but never boots), anything else its number.
+fn drive_bootpri_label(pri: Option<i8>) -> String {
+    match pri {
+        None => "Default".to_string(),
+        Some(BOOT_PRI_NEVER) => "Never".to_string(),
+        Some(n) => n.to_string(),
+    }
+}
+
+/// Nudge a hard-disk boot priority by one, saturating at the i8 ends (-128 is
+/// `BOOT_PRI_NEVER`, 127 the top). A `None`/"Default" field steps off from the
+/// value it would otherwise take, `HARDFILE_DEFAULT_BOOT_PRI`.
+fn step_drive_bootpri(current: Option<i8>, forward: bool) -> Option<i8> {
+    let base = current.unwrap_or(HARDFILE_DEFAULT_BOOT_PRI);
+    Some(if forward {
+        base.saturating_add(1)
+    } else {
+        base.saturating_sub(1)
+    })
+}
+
+/// Parse typed Boot Priority input: empty returns to "Default" (`None`), any
+/// integer in -128..=127 becomes that priority, anything else is rejected.
+fn parse_drive_bootpri(text: &str) -> std::result::Result<Option<i8>, &'static str> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    text.parse::<i8>()
+        .map(Some)
+        .map_err(|_| "boot priority must be -128..127")
+}
 
 fn cycle_bootpri(current: i8, forward: bool) -> i8 {
     let idx = BOOTPRI_STEPS
@@ -3242,32 +3461,88 @@ mod tests {
     }
 
     #[test]
-    fn host_mounts_is_a_sub_page_of_hard_disk() {
-        // Host Mounts is not a top-level strip tab any more.
+    fn sub_pages_of_hard_disk() {
+        // Neither sub-page is a top-level strip tab.
+        assert!(!TABS.contains(&LauncherTab::BootPriority));
         assert!(!TABS.contains(&LauncherTab::HostFs));
-        // The Hard Disk tab opens with a link into the Host Mounts sub-page.
+        // The Hard Disk tab opens with links into both sub-pages, Boot Priority
+        // first, then Host Mounts.
         let storage = rows(
             LauncherTab::Storage,
             ParallelDevice::None,
             SerialMode::default(),
         );
-        assert_eq!(
-            storage.first().map(|r| r.kind),
-            Some(RowKind::SubPageLink(LauncherTab::HostFs))
-        );
-        // The sub-page opens with a Back link, then the mount rows.
-        let mounts = rows(
-            LauncherTab::HostFs,
-            ParallelDevice::None,
-            SerialMode::default(),
-        );
-        assert_eq!(
-            mounts.first().map(|r| r.kind),
-            Some(RowKind::SubPageLink(LauncherTab::Storage))
-        );
-        assert!(mounts.iter().any(|r| r.field == LauncherField::Filesys0Dir));
-        // The sub-page keeps the Hard Disk strip tab highlighted.
-        assert_eq!(LauncherTab::HostFs.strip_tab(), LauncherTab::Storage);
+        let links: Vec<_> = storage
+            .iter()
+            .filter_map(|r| match r.kind {
+                RowKind::SubPageLink(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(links, vec![LauncherTab::BootPriority, LauncherTab::HostFs]);
+
+        // Each sub-page opens with a Back link, then its own rows.
+        for (tab, marker) in [
+            (LauncherTab::BootPriority, LauncherField::IdeMasterBoot),
+            (LauncherTab::HostFs, LauncherField::Filesys0Dir),
+        ] {
+            let page = rows(tab, ParallelDevice::None, SerialMode::default());
+            assert_eq!(
+                page.first().map(|r| r.kind),
+                Some(RowKind::SubPageLink(LauncherTab::Storage))
+            );
+            assert!(page.iter().any(|r| r.field == marker));
+            // The sub-page keeps the Hard Disk strip tab highlighted.
+            assert_eq!(tab.strip_tab(), LauncherTab::Storage);
+        }
+    }
+
+    #[test]
+    fn boot_priority_round_trips_and_greys_empty_slots() {
+        use LauncherField as F;
+        // A drive carrying a bootpri loads it; an empty slot is greyed.
+        let raw: RawConfig = toml::from_str(
+            r#"
+            [machine]
+            model = "A1200"
+            [ide]
+            master = { path = "wb.hdf", bootpri = 5 }
+        "#,
+        )
+        .unwrap();
+        let mut setup = MachineSetup::from_raw(&raw).unwrap();
+        assert_eq!(setup.value_label(F::IdeMasterBoot), "5");
+        assert_eq!(setup.disabled_reason(F::IdeMasterBoot), None);
+        // No slave image, so its boot row is greyed and inert.
+        assert_eq!(setup.disabled_reason(F::IdeSlaveBoot), Some("no drive"));
+
+        // Stepping and typing both reach the stored value and re-emit it.
+        setup.cycle(F::IdeMasterBoot, true); // 5 -> 6
+        assert_eq!(setup.value_label(F::IdeMasterBoot), "6");
+        setup.set_drive_bootpri(F::IdeMasterBoot, Some(20));
+        let raw2 = setup.to_raw();
+        assert_eq!(raw2.ide.master.as_ref().unwrap().bootpri, Some(20));
+
+        // "Default" (None) stays keyless on save, distinct from Some(0).
+        setup.set_drive_bootpri(F::IdeMasterBoot, None);
+        assert_eq!(setup.value_label(F::IdeMasterBoot), "Default");
+        assert_eq!(setup.to_raw().ide.master.as_ref().unwrap().bootpri, None);
+    }
+
+    #[test]
+    fn boot_priority_steps_saturate_and_label_sentinels() {
+        assert_eq!(step_drive_bootpri(Some(127), true), Some(127));
+        assert_eq!(step_drive_bootpri(Some(-128), false), Some(-128));
+        // "Default" steps off from the effective default of 0.
+        assert_eq!(step_drive_bootpri(None, true), Some(1));
+        assert_eq!(step_drive_bootpri(None, false), Some(-1));
+        assert_eq!(drive_bootpri_label(None), "Default");
+        assert_eq!(drive_bootpri_label(Some(BOOT_PRI_NEVER)), "Never");
+        assert_eq!(drive_bootpri_label(Some(7)), "7");
+        // Typed entry: blank clears to Default, range is enforced.
+        assert_eq!(parse_drive_bootpri("  "), Ok(None));
+        assert_eq!(parse_drive_bootpri("-128"), Ok(Some(-128)));
+        assert!(parse_drive_bootpri("200").is_err());
     }
 
     #[cfg(feature = "midi")]

@@ -1071,6 +1071,8 @@ pub enum UiControl {
     LauncherClear(LauncherField),
     /// Configuration screen: focus a drive's volume-name field for text entry.
     LauncherDriveNameEdit(LauncherField),
+    /// Boot Priority page: focus a drive's boot-priority field for typing.
+    LauncherDriveBootpriEdit(LauncherField),
     /// Configuration screen: add a Zorro metadata board file.
     LauncherZorroAdd,
     /// Configuration screen: remove the Zorro board at this index.
@@ -4387,6 +4389,26 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                         });
                     }
                 }
+                RowKind::Bootpri => {
+                    // Greyed rows (no image, or a CD image) are skipped by the
+                    // `applies` guard above, so this only runs for editable ones.
+                    let (prev, value, next) = launcher_cycle_rects(rect, row_y);
+                    if prev.contains(pos) {
+                        return Some(UiControl::LauncherCycle {
+                            field: r.field,
+                            forward: false,
+                        });
+                    }
+                    if next.contains(pos) {
+                        return Some(UiControl::LauncherCycle {
+                            field: r.field,
+                            forward: true,
+                        });
+                    }
+                    if value.contains(pos) {
+                        return Some(UiControl::LauncherDriveBootpriEdit(r.field));
+                    }
+                }
                 RowKind::Toggle => {
                     if launcher_toggle_rect(rect, row_y).contains(pos) {
                         return Some(UiControl::LauncherToggle(r.field));
@@ -4647,6 +4669,57 @@ fn draw_launcher_row(
             let tw = text.chars().count() * font::GLYPH_W;
             let tx = value.x + value.w.saturating_sub(tw) / 2;
             draw_panel_text(frame, tx, value.y + 6, &text, PANEL_TEXT_HILIGHT, 1, scale);
+        }
+        RowKind::Bootpri => {
+            let (prev, value, next) = launcher_cycle_rects(rect, row_y);
+            draw_text_button(
+                frame,
+                prev,
+                "<",
+                true,
+                hover
+                    == Some(UiControl::LauncherCycle {
+                        field: r.field,
+                        forward: false,
+                    }),
+                scale,
+            );
+            draw_text_button(
+                frame,
+                next,
+                ">",
+                true,
+                hover
+                    == Some(UiControl::LauncherCycle {
+                        field: r.field,
+                        forward: true,
+                    }),
+                scale,
+            );
+            // The value doubles as a text field: a bevel signals it is typeable,
+            // and a trailing caret shows the buffer while it has focus.
+            draw_rect_bevel(
+                frame,
+                scale_rect(value, scale),
+                BUTTON_EDGE_DARK,
+                BUTTON_EDGE_LIGHT,
+                scale,
+            );
+            let editing = state.editing() == Some(EditTarget::DriveBootpri(r.field));
+            let text = if editing {
+                format!("{}_", state.edit_buffer())
+            } else {
+                setup.value_label(r.field)
+            };
+            let text = truncate_to_width(&text, value.w.saturating_sub(8));
+            let tw = text.chars().count() * font::GLYPH_W;
+            let tx = value.x + value.w.saturating_sub(tw) / 2;
+            let color = if editing {
+                PANEL_TEXT_HILIGHT
+            } else {
+                PANEL_TEXT
+            };
+            draw_panel_text(frame, tx, value.y + 6, &text, color, 1, scale);
         }
         RowKind::Toggle => {
             let button = launcher_toggle_rect(rect, row_y);
@@ -7618,5 +7691,22 @@ mod tests {
         };
         draw(&mut frame, scale, &ui, None, None, false, false, labels());
         save(&frame, "launcher-host-mounts");
+
+        // The Boot Priority sub-page: an A1200 with an IDE master carrying a
+        // priority (an editable row), the empty SCSI slots greyed.
+        let mut frame = vec![0u8; w * h * 4];
+        let mut setup = launcher::MachineSetup::default();
+        setup.select_model(Some(MachineModel::A1200));
+        setup.set_path(LauncherField::IdeMaster, std::path::PathBuf::from("wb.hdf"));
+        setup.set_drive_bootpri(LauncherField::IdeMasterBoot, Some(5));
+        let mut state = LauncherState::new(setup);
+        state.tab = LauncherTab::BootPriority;
+        let ui = UiState {
+            menu_open: false,
+            menu_scroll: 0,
+            panel: Some(Panel::Launcher(Box::new(state))),
+        };
+        draw(&mut frame, scale, &ui, None, None, false, false, labels());
+        save(&frame, "launcher-boot-priority");
     }
 }
