@@ -1,6 +1,8 @@
 ![Copperline](assets/brand/copperline-logo.png)
 
-Website: [copperline.dev](https://copperline.dev/)
+Website: [copperline.dev](https://copperline.dev/) |
+Chat: [Discord](https://discord.gg/HDTjt3tYAC) |
+Support: [Patreon](https://www.patreon.com/cw/Copperline)
 
 An Amiga emulator written in Rust, built around a vendored copy of
 the pure-Rust [m68k](crates/m68k) CPU core, with a
@@ -367,6 +369,22 @@ chip-bus timings against the CIA E-clock for cross-emulator comparison.
   custom register or CIA edge case). This is non-fatal: the window stays
   alive showing the last framebuffer, and the debugger can inspect the
   halted state.
+
+## Community
+
+The project Discord is where development, bug hunting, and general Amiga
+talk happen: [discord.gg/HDTjt3tYAC](https://discord.gg/HDTjt3tYAC). Bug
+reports and feature requests are best filed as GitHub issues so they do not
+scroll away; [`CONTRIBUTING.md`](CONTRIBUTING.md) covers what a useful
+report looks like and the hardware-first rule that patches follow.
+
+If you would like to support development, [`FUNDING.md`](FUNDING.md) lists
+the options -- [Patreon](https://www.patreon.com/cw/Copperline) for ongoing
+support of Copperline, or GitHub Sponsors, Ko-fi, and PayPal for one-off
+contributions. Copperline stays GPL and freely available regardless;
+funding buys development time, real hardware to measure against, and the
+Apple and Windows code-signing subscriptions needed to ship binaries that
+open without a Gatekeeper or SmartScreen warning.
 
 ## Credits
 
