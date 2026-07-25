@@ -727,6 +727,10 @@ pub struct App {
     /// Presentation-level overscan handling ([display] overscan): Tv masks
     /// the deep-overscan margins with black like a CRT bezel.
     overscan: Overscan,
+    /// Open the window fullscreen when it is first created ([display]
+    /// full_screen). Applied once in `resumed`; the runtime toggle takes over
+    /// after that.
+    start_fullscreen: bool,
     /// Host USB gamepad reader (pure-Rust, no SDL2), mapped to the emulated
     /// port-2 digital joystick via a per-pad calibration. A no-op when no
     /// input backend is available (e.g. headless CI) or the pad is not yet
@@ -1000,6 +1004,8 @@ impl App {
         disk_write_protected: [bool; 4],
         overscan: Overscan,
         phosphor: f32,
+        start_fullscreen: bool,
+        hide_status_bar: bool,
         warp_speed: WarpSpeed,
         joystick_input_mode: JoystickInputMode,
         about_machine_lines: Vec<String>,
@@ -1012,6 +1018,10 @@ impl App {
         // placeholder; run_machine re-derives it from the launcher's config).
         sampler: crate::sampler::SamplerRequest,
     ) -> Self {
+        // The status-bar visibility is a process-global read from deep in the
+        // presentation code; seed it before the window is built so the initial
+        // window size accounts for it.
+        super::set_status_bar_hidden(hide_status_bar);
         // Headless capture runs drive themselves off emulated time, so a
         // powered-off start would simply hang. Force power on for those.
         let powered_on = power_on
@@ -1129,6 +1139,7 @@ impl App {
             disk_playlist_index: [0; 4],
             hcenter: hcenter_enabled(),
             overscan,
+            start_fullscreen,
             gamepad: crate::gamepad::GamepadReader::new(),
             joystick_input_mode,
             warp_speed,
@@ -1980,10 +1991,15 @@ impl ApplicationHandler for App {
         // advance as fast as the host allows. Emulated state is identical.
         let headless_capture =
             self.pending_auto_shot.is_some() || self.pending_frame_dump.is_some();
+        // Start fullscreen only for an interactive window ([display] full_screen
+        // / --full-screen); a headless capture window stays hidden and windowed.
+        let fullscreen =
+            (self.start_fullscreen && !headless_capture).then(|| Fullscreen::Borderless(None));
         let attrs = WindowAttributes::default()
             .with_title(WINDOW_TITLE)
             .with_window_icon(copperline_window_icon())
             .with_visible(!headless_capture)
+            .with_fullscreen(fullscreen)
             .with_inner_size(size)
             .with_min_inner_size(LogicalSize::new(
                 FB_WIDTH as f64 / 2.0,
@@ -4857,6 +4873,19 @@ impl App {
         self.disk_playlist_index = [0; 4];
         self.overscan = crate::config::resolve_overscan(cfg.overscan);
         self.apply_pixel_aspect(crate::config::resolve_pixel_aspect(cfg.pixel_aspect));
+        // Apply the configured start-up window state; the runtime toggles
+        // (Cmd+F, Cmd+Shift+F) take over from here. Reuse the toggles so the
+        // surface/window resize stays in one place.
+        let is_fullscreen = self
+            .render
+            .as_ref()
+            .map(|r| r.window.fullscreen().is_some());
+        if is_fullscreen == Some(!cfg.full_screen) {
+            self.toggle_fullscreen();
+        }
+        if super::status_bar_hidden() != !cfg.status_bar {
+            self.toggle_status_bar();
+        }
         self.warp_speed = cfg.emulation.warp_speed;
         // Reset the host joystick source to the new machine's configured
         // start-up mode (a previous live Cmd+J toggle does not carry over).

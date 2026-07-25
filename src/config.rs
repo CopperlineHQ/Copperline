@@ -208,6 +208,14 @@ pub struct Config {
     /// decay that fuses field-rate dither and interlace flicker on a
     /// real CRT.
     pub phosphor: f32,
+    /// Open the window in fullscreen at start (`[display] full_screen`, or
+    /// `--full-screen` / `--windowed`). The `Cmd+F` / `Alt+F` toggle flips it
+    /// live without affecting this start-up value.
+    pub full_screen: bool,
+    /// Show the status bar at start (`[display] status_bar`, or
+    /// `--show-status-bar` / `--hide-status-bar`). `Cmd+Shift+F` /
+    /// `Alt+Shift+F` toggles it live.
+    pub status_bar: bool,
     /// Initial host input source for the emulated joystick/CD32-pad port
     /// (`[input] joystick` / `--joystick`). Defaults to
     /// [`JoystickInputMode::Gamepad`]; the runtime status-bar toggle, `Cmd+J` /
@@ -1212,6 +1220,8 @@ impl Default for Config {
             overscan: Overscan::Tv,
             pixel_aspect: PixelAspect::Tv,
             phosphor: 0.0,
+            full_screen: false,
+            status_bar: true,
             joystick_input_mode: JoystickInputMode::Gamepad,
             port_devices: [PortDevice::Mouse, PortDevice::Joystick],
             serial: SerialConfig::default(),
@@ -1408,6 +1418,12 @@ pub struct ConfigOverrides {
     /// A2065 Ethernet backend (`--a2065-net`): "none", "loopback", or "nat".
     /// Same parser as `[a2065] net`; setting it fits the board.
     pub a2065_net: Option<String>,
+    /// Open fullscreen at start (`--full-screen` / `--windowed`). Same as
+    /// `[display] full_screen`.
+    pub full_screen: Option<bool>,
+    /// Show the status bar at start (`--show-status-bar` /
+    /// `--hide-status-bar`). Same as `[display] status_bar`.
+    pub status_bar: Option<bool>,
 }
 
 impl ConfigOverrides {
@@ -1442,6 +1458,8 @@ impl ConfigOverrides {
             && self.rtc_time.is_none()
             && self.rtc_frozen.is_none()
             && self.a2065_net.is_none()
+            && self.full_screen.is_none()
+            && self.status_bar.is_none()
     }
 
     /// Inject the set overrides into the raw config, replacing the values
@@ -1554,6 +1572,12 @@ impl ConfigOverrides {
         if let Some(net) = &self.a2065_net {
             raw.a2065.net = Some(net.clone());
         }
+        if let Some(full_screen) = self.full_screen {
+            raw.display.full_screen = Some(full_screen);
+        }
+        if let Some(status_bar) = self.status_bar {
+            raw.display.status_bar = Some(status_bar);
+        }
     }
 }
 
@@ -1653,6 +1677,12 @@ pub(crate) struct RawDisplay {
     /// CRT phosphor persistence fraction, 0.0 (off, default) to 0.95.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) phosphor: Option<f32>,
+    /// Open fullscreen at start (default false).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) full_screen: Option<bool>,
+    /// Show the status bar at start (default true).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) status_bar: Option<bool>,
 }
 
 /// One `[[filesys]]` entry (experimental): a host directory exported to the
@@ -2404,6 +2434,8 @@ impl TryFrom<RawConfig> for Config {
                 defaults.phosphor
             }
         };
+        let full_screen = raw.display.full_screen.unwrap_or(defaults.full_screen);
+        let status_bar = raw.display.status_bar.unwrap_or(defaults.status_bar);
         let joystick_input_mode = match raw.input.joystick.as_deref() {
             None => defaults.joystick_input_mode,
             Some(s) => parse_joystick_input_mode(s)?,
@@ -2794,6 +2826,8 @@ impl TryFrom<RawConfig> for Config {
             overscan,
             pixel_aspect,
             phosphor,
+            full_screen,
+            status_bar,
             joystick_input_mode,
             port_devices,
             serial,
@@ -4258,6 +4292,29 @@ mod tests {
             "#,
         )?;
         assert!(!cfg.emulation.power_on);
+        Ok(())
+    }
+
+    #[test]
+    fn display_fullscreen_and_status_bar_default_and_parse() -> Result<()> {
+        // Defaults: windowed, status bar shown.
+        let cfg = parse_config("")?;
+        assert!(!cfg.full_screen);
+        assert!(cfg.status_bar);
+
+        let cfg = parse_config("[display]\nfull_screen = true\nstatus_bar = false\n")?;
+        assert!(cfg.full_screen);
+        assert!(!cfg.status_bar);
+
+        // CLI overrides.
+        let overrides = ConfigOverrides {
+            full_screen: Some(true),
+            status_bar: Some(false),
+            ..Default::default()
+        };
+        let cfg = load_overrides(&overrides)?;
+        assert!(cfg.full_screen);
+        assert!(!cfg.status_bar);
         Ok(())
     }
 

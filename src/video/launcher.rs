@@ -321,6 +321,8 @@ pub enum LauncherField {
     Overscan,
     PixelAspect,
     Phosphor,
+    StartFullscreen,
+    ShowStatusBar,
     FloppySounds,
     FloppyVolume,
     PowerOn,
@@ -530,7 +532,7 @@ const PARALLEL_ROWS_SAMPLER: [Row; 3] = [
     row(F::SamplerGain, "Input gain", Cycle),
 ];
 const ETHERNET_ROWS: [Row; 1] = [row(F::Ethernet, "A2065 board", Cycle)];
-const AV_EMULATION_ROWS: [Row; 13] = [
+const AV_EMULATION_ROWS: [Row; 15] = [
     row(F::AudioDevice, "Audio output", Cycle),
     row(F::AudioChannelMode, "Channel mode", Cycle),
     row(F::AudioStereoSeparation, "Stereo separation", Cycle),
@@ -538,6 +540,8 @@ const AV_EMULATION_ROWS: [Row; 13] = [
     row(F::Overscan, "Overscan", Cycle),
     row(F::PixelAspect, "Pixel aspect", Cycle),
     row(F::Phosphor, "Phosphor", Cycle),
+    row(F::StartFullscreen, "Start fullscreen", Toggle),
+    row(F::ShowStatusBar, "Status bar", Toggle),
     row(F::FloppySounds, "Floppy sounds", Toggle),
     row(F::FloppyVolume, "Floppy volume", Cycle),
     row(F::PowerOn, "Power on at start", Toggle),
@@ -930,6 +934,10 @@ pub struct MachineSetup {
     overscan: Overscan,
     pixel_aspect: PixelAspect,
     phosphor: f32,
+    /// Open fullscreen at start ([display] full_screen).
+    start_fullscreen: bool,
+    /// Show the status bar at start ([display] status_bar).
+    show_status_bar: bool,
     floppy_sounds: bool,
     floppy_volume: u8,
     power_on: bool,
@@ -1054,6 +1062,8 @@ impl MachineSetup {
             overscan: cfg.overscan,
             pixel_aspect: cfg.pixel_aspect,
             phosphor: cfg.phosphor,
+            start_fullscreen: cfg.full_screen,
+            show_status_bar: cfg.status_bar,
             floppy_sounds: cfg.audio.floppy_sounds,
             floppy_volume: cfg.audio.floppy_sounds_volume,
             power_on: cfg.emulation.power_on,
@@ -1323,6 +1333,12 @@ impl MachineSetup {
         if (self.phosphor - base.phosphor).abs() > 1e-6 {
             raw.display.phosphor = Some(self.phosphor);
         }
+        if self.start_fullscreen != base.full_screen {
+            raw.display.full_screen = Some(self.start_fullscreen);
+        }
+        if self.show_status_bar != base.status_bar {
+            raw.display.status_bar = Some(self.show_status_bar);
+        }
         if self.floppy_sounds != base.audio.floppy_sounds {
             raw.audio.floppy_sounds = Some(self.floppy_sounds);
         }
@@ -1491,6 +1507,8 @@ impl MachineSetup {
         self.overscan = base.overscan;
         self.pixel_aspect = base.pixel_aspect;
         self.phosphor = base.phosphor;
+        self.start_fullscreen = base.full_screen;
+        self.show_status_bar = base.status_bar;
         self.floppy_sounds = base.audio.floppy_sounds;
         self.floppy_volume = base.audio.floppy_sounds_volume;
         self.power_on = base.emulation.power_on;
@@ -1645,6 +1663,8 @@ impl MachineSetup {
             F::Df2WriteProtect => self.df_write_protected[2],
             F::Df3WriteProtect => self.df_write_protected[3],
             F::FloppySounds => self.floppy_sounds,
+            F::StartFullscreen => self.start_fullscreen,
+            F::ShowStatusBar => self.show_status_bar,
             F::PowerOn => self.power_on,
             F::RealtimePriority => self.realtime_priority,
             _ => false,
@@ -2145,6 +2165,8 @@ impl MachineSetup {
             F::Df2WriteProtect => self.df_write_protected[2] = !self.df_write_protected[2],
             F::Df3WriteProtect => self.df_write_protected[3] = !self.df_write_protected[3],
             F::FloppySounds => self.floppy_sounds = !self.floppy_sounds,
+            F::StartFullscreen => self.start_fullscreen = !self.start_fullscreen,
+            F::ShowStatusBar => self.show_status_bar = !self.show_status_bar,
             F::PowerOn => self.power_on = !self.power_on,
             F::RealtimePriority => self.realtime_priority = !self.realtime_priority,
             _ => {}
@@ -3568,6 +3590,24 @@ mod tests {
             s.disabled_reason(LauncherField::AudioStereoSeparation),
             Some("mono")
         );
+    }
+
+    #[test]
+    fn display_start_toggles_round_trip_through_raw_config() {
+        let mut s = MachineSetup::default();
+        // Defaults (windowed, status bar shown) emit nothing.
+        let raw = s.to_raw();
+        assert_eq!(raw.display.full_screen, None);
+        assert_eq!(raw.display.status_bar, None);
+        assert!(!s.toggle_value(LauncherField::StartFullscreen));
+        assert!(s.toggle_value(LauncherField::ShowStatusBar));
+
+        // Flip both; the non-default values now persist to [display].
+        s.toggle(LauncherField::StartFullscreen);
+        s.toggle(LauncherField::ShowStatusBar);
+        let raw = s.to_raw();
+        assert_eq!(raw.display.full_screen, Some(true));
+        assert_eq!(raw.display.status_bar, Some(false));
     }
 
     #[test]

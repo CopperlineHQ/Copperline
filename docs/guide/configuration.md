@@ -50,6 +50,8 @@ range checks as the equivalent TOML fields:
 | `--joystick MODE` | `[input] joystick` | `gamepad` (default), `keyboard` |
 | `--port1 DEVICE` | `[input] port1` | `mouse` (default), `joystick`, `cd32`, `analogue`, `none` |
 | `--port2 DEVICE` | `[input] port2` | same devices; default `joystick` (`cd32` on the CD32 profile) |
+| `--full-screen` / `--windowed` | `[display] full_screen` | open fullscreen or windowed at start (default windowed) |
+| `--show-status-bar` / `--hide-status-bar` | `[display] status_bar` | status bar at start (default shown) |
 
 For example, to boot a stock A1200 profile but with 8 MB of fast RAM and a
 faster CPU, with no config file at all:
@@ -429,6 +431,8 @@ recorded in [](../internals/chipset)).
 overscan = "tv"      # "tv" (default) or "full"
 pixel_aspect = "tv"  # "tv" (default, 4:3 CRT) or "square" (exact 2x2 lo-res)
 phosphor = 0.0       # CRT persistence fraction, 0.0 (off) to 0.95
+full_screen = false  # open fullscreen at start (default false)
+status_bar = true    # show the status bar at start (default true)
 ```
 
 The emulated framebuffer always carries the full overscan field Denise
@@ -460,6 +464,16 @@ around `0.3`-`0.5`,
 at the cost of a slight motion trail. Off by default so screenshots and
 frame dumps stay frame-exact. `COPPERLINE_PHOSPHOR=0.4` overrides the
 config for a single run.
+
+`full_screen` opens the window fullscreen at start (borderless), and
+`status_bar` chooses whether the status bar starts visible. Both are start-up
+preferences; the runtime toggles -- `Cmd+F` / `Alt+F` for fullscreen and
+`Cmd+Shift+F` / `Alt+Shift+F` for the status bar, plus their menu items --
+still flip either live without changing the saved value. On the command line
+`--full-screen` / `--windowed` set the fullscreen state and `--show-status-bar` /
+`--hide-status-bar` set the status bar; the launcher's A/V & Emu page has
+*Start fullscreen* and *Status bar* toggles for the same. Left unset they keep
+the defaults: windowed, status bar shown.
 
 Rendering completed frames uses a worker thread by default so emulation can
 advance while the previous frame is painted. The worker is an implementation
