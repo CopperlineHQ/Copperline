@@ -156,6 +156,21 @@ sprite DMA and crossing an empty sprite pair slot is not enough to make
 captured DMA authoritative; the frame must contain actual fetched or held
 sprite data.
 
+A DMA fetch arms the channel as it lands, but the serializer still only
+copies the latches when the horizontal comparator fires, so a SPRxCTL write
+between the fetch slot and HSTART cancels the fetched line outright: it is
+displayed neither at its own HSTART nor at a position a later same-line
+SPRxPOS write moves it to, because POS never re-arms. Captured lines whose
+channel is disarmed before their comparator fires are dropped before
+rendering and collision accumulation; a CTL write past HSTART leaves the
+line alone, since it cannot recall pixels already shifted out. This is how a
+Copper-multiplexed sprite panel retires its channels on the line below the
+panel while sprite DMA is still fetching against a descriptor whose vertical
+stop never matches -- Hybris's SCORE/LIVES/HIGH panel does exactly that, and
+without the disarm the still-fetching channels paint a stray 16-pixel dash
+under the digits (issue #278). `sprprobe-disarm` in timing-test/ pins both
+directions against vAmiga.
+
 Two manual-replay guards exist only to reconcile DMA writes the beam replay
 cannot see (Agnus drives POS/CTL/DATA through the same Denise registers
 without recording beam events): an early same-line SPRxPOS write hands the

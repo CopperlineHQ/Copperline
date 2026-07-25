@@ -588,7 +588,10 @@ pub(super) fn manual_sprite_lines_from_captured_dma_reuse(
                 }
                 // DATA/CTL writes leave the DMA-seeded reuse model. The normal
                 // beam-timed manual replay handles explicitly written data;
-                // CTL disarms output until DATA arms it again.
+                // CTL disarms output until DATA arms it again. The disarm has
+                // to stick in this replay too: it clears Denise's armed latch,
+                // so a later SPRxPOS write on the same line cannot serialize
+                // the DMA-loaded words either.
                 _ => {
                     flush_manual_sprite_lines(
                         sprite,
@@ -598,6 +601,9 @@ pub(super) fn manual_sprite_lines_from_captured_dma_reuse(
                         ManualSpriteFlushMode::ClipAtEnd,
                         &mut lines,
                     );
+                    if (off - 0x140) & 0x0006 == 0x2 {
+                        regs.apply_write(off, event.value);
+                    }
                     next_beam = (visible_end, 0);
                 }
             }
@@ -614,6 +620,85 @@ pub(super) fn manual_sprite_lines_from_captured_dma_reuse(
     }
 
     lines
+}
+
+/// Sprite DMA lands its fetched words in Denise's data latches and arms the
+/// channel, but the serializer only copies those latches when the horizontal
+/// comparator fires at HSTART. A SPRxCTL write clears the armed bit, so a CTL
+/// write that lands between the fetch slot and the comparator match cancels
+/// the fetched line outright: nothing is ever loaded for it. That is how a
+/// Copper-multiplexed sprite panel retires its channels on the line below the
+/// panel, where sprite DMA is still fetching against a descriptor whose
+/// vertical stop never matches. A CTL write *after* the match cannot recall
+/// pixels the serializer has already shifted out, and a SPRxDATA write arms
+/// the channel again.
+///
+/// Returns the captured lines that are still armed when their comparator
+/// fires; a cancelled fetch reaches neither the renderer nor the collision
+/// accumulator. HSTART is in lo-res pixels and the beam position in colour
+/// clocks, hence the halving.
+pub(super) fn retain_armed_captured_sprite_lines<'a>(
+    captured_sprite_lines: &'a [CapturedSpriteLine],
+    events: &[BeamRegisterWrite],
+) -> Cow<'a, [CapturedSpriteLine]> {
+    let is_sprite_ctl_write = |event: &BeamRegisterWrite| {
+        let off = event.offset & 0x01FE;
+        (0x140..=0x17F).contains(&off) && (off - 0x140) & 0x0006 == 0x2
+    };
+    if captured_sprite_lines.is_empty() || !events.iter().any(is_sprite_ctl_write) {
+        return Cow::Borrowed(captured_sprite_lines);
+    }
+
+    // Per channel, the writes that move the armed latch as (line, beam, arms),
+    // sorted so each captured line can binary-search its own line's block.
+    let mut arming_writes: [Vec<(u32, u32, bool)>; 8] = std::array::from_fn(|_| Vec::new());
+    for event in events {
+        let off = event.offset & 0x01FE;
+        if !(0x140..=0x17F).contains(&off) {
+            continue;
+        }
+        // Only SPRxCTL (disarm) and SPRxDATA (arm) touch the armed latch.
+        let arms = match (off - 0x140) & 0x0006 {
+            0x2 => false,
+            0x4 => true,
+            _ => continue,
+        };
+        let sprite = ((off - 0x140) / 8) as usize;
+        arming_writes[sprite].push((event.vpos, event.hpos, arms));
+    }
+    for writes in &mut arming_writes {
+        writes.sort_unstable();
+    }
+
+    let armed_at_hstart = |line: &CapturedSpriteLine| {
+        if line.sprite >= 8 || line.beam_y < 0 {
+            return true;
+        }
+        let writes = &arming_writes[line.sprite];
+        let dma_hpos = SPRITE_DMA_PAIR_CAPTURE_HPOS[line.sprite / 2];
+        let match_hpos = (line.hstart.max(0) / 2) as u32;
+        let beam_y = line.beam_y as u32;
+        let first = writes.partition_point(|&(vpos, hpos, _)| (vpos, hpos) < (beam_y, dma_hpos));
+        let mut armed = true;
+        for &(vpos, hpos, arms) in &writes[first..] {
+            if vpos != beam_y || hpos > match_hpos {
+                break;
+            }
+            armed = arms;
+        }
+        armed
+    };
+
+    if captured_sprite_lines.iter().all(armed_at_hstart) {
+        return Cow::Borrowed(captured_sprite_lines);
+    }
+    Cow::Owned(
+        captured_sprite_lines
+            .iter()
+            .filter(|line| armed_at_hstart(line))
+            .copied()
+            .collect(),
+    )
 }
 
 pub(super) fn merge_dma_seeded_manual_sprite_lines(

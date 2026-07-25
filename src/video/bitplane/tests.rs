@@ -4791,6 +4791,207 @@ fn dma_loaded_sprite_data_rearms_on_same_line_position_write() {
     assert_ne!(fb[reused_x as usize], rgb12_to_rgba8(0x00F0));
 }
 
+/// A DMA fetch arms Denise, but the serializer only loads the latched words
+/// at HSTART: a SPRxCTL write in between clears the armed bit, so the fetched
+/// line is never displayed -- not at its own HSTART, and not at a position a
+/// later same-line SPRxPOS write moves it to (SPRxPOS never arms). This is the
+/// Hybris status-panel idiom: the panel's multiplexed channels are retired
+/// with SPRxCTL writes at the start of the line below the panel, where sprite
+/// DMA is still fetching.
+#[test]
+fn sprite_ctl_write_before_hstart_cancels_dma_loaded_line() {
+    let (captured, events, reused_hstart) =
+        dma_loaded_line_with_ctl_write_at(COPPER_WAIT_HPOS_FB0 as u32);
+
+    // Nothing survives: neither the captured fetch nor a reuse of its data.
+    assert!(retain_armed_captured_sprite_lines(&captured, &events).is_empty());
+    let (fb, base_control) = render_dma_loaded_line_with_events(&captured, &events);
+    for hstart in [captured[0].hstart, reg_hstart(i32::from(reused_hstart))] {
+        let x = sprite_base_framebuffer_x(hstart, false, base_control, &[]);
+        assert_eq!(fb[x as usize], rgb12_to_rgba8(0), "hstart {hstart}");
+    }
+}
+
+/// The mirror image: a SPRxCTL write past HSTART cannot recall pixels the
+/// serializer has already started shifting out, so the fetched line stays.
+#[test]
+fn sprite_ctl_write_after_hstart_keeps_dma_loaded_line() {
+    let hstart_hpos = (DIW_HSTART_FB0 / 2 + 8) as u32;
+    let (captured, events, _) = dma_loaded_line_with_ctl_write_at(hstart_hpos);
+
+    assert_eq!(
+        retain_armed_captured_sprite_lines(&captured, &events).len(),
+        1
+    );
+    let (fb, base_control) = render_dma_loaded_line_with_events(&captured, &events);
+    let x = sprite_base_framebuffer_x(captured[0].hstart, false, base_control, &[]);
+    assert_eq!(fb[x as usize], rgb12_to_rgba8(0x0F00));
+}
+
+/// The same disarm, seen through the DMA-data reuse path alone: the fetch
+/// lands with HSTART left of the disarm (so the fetched line's own comparator
+/// already fired and it is not itself cancelled), and the Copper then disarms
+/// and repositions the channel to the right of it. Nothing may appear at the
+/// new position -- SPRxPOS reuses DMA-loaded data only while the channel is
+/// still armed. Hybris's panel does exactly this on one of its two channels.
+#[test]
+fn sprite_ctl_write_stops_dma_data_reuse_by_later_position_write() {
+    let beam_y = PAL_VISIBLE_LINE0;
+    // HSTART before the sprite's fetch slot: its own output is off-screen
+    // left, so only the repositioned copy could be visible.
+    let fetched_hstart = 20i32;
+    let reused_hstart = DIW_HSTART_FB0 as u16 + 100;
+    let (_, ctl) = sprite_control_words(beam_y as u16, beam_y as u16 + 1, 0);
+    let (reused_pos, _) = sprite_control_words(beam_y as u16, beam_y as u16 + 1, reused_hstart);
+    let captured = [CapturedSpriteLine {
+        sprite: 0,
+        hstart: fetched_hstart,
+        hsub_70ns: false,
+        beam_y,
+        // A full opaque word, so any surviving output is unmissable wherever
+        // the reposition lands it.
+        data: 0xFFFF,
+        datb: 0,
+        attached: false,
+        data_ext: [0; 3],
+        datb_ext: [0; 3],
+        width_words: 1,
+    }];
+    let events = [
+        beam_event(
+            beam_y as u32,
+            COPPER_WAIT_HPOS_FB0 as u32,
+            0x0142,
+            ctl | (fetched_hstart as u16 & 1),
+        ),
+        beam_event(
+            beam_y as u32,
+            COPPER_WAIT_HPOS_FB0 as u32 + 4,
+            0x0140,
+            reused_pos,
+        ),
+    ];
+
+    // The fetched line survives the filter (its comparator fired before the
+    // disarm) but must not be re-serialized at the repositioned HSTART, so
+    // the whole scanline stays background: the fetch's own output sits off
+    // the left edge and the reposition may not resurrect it.
+    assert_eq!(
+        retain_armed_captured_sprite_lines(&captured, &events).len(),
+        1
+    );
+    let (fb, base_control) = render_dma_loaded_line_with_events(&captured, &events);
+    let row = (beam_y - PAL_VISIBLE_LINE0) as usize * FB_WIDTH;
+    assert!(
+        fb[row..row + FB_WIDTH]
+            .iter()
+            .all(|&px| px == rgb12_to_rgba8(0)),
+        "repositioned HSTART {} painted after the disarm",
+        sprite_base_framebuffer_x(
+            reg_hstart(i32::from(reused_hstart)),
+            false,
+            base_control,
+            &[]
+        )
+    );
+}
+
+/// One DMA-loaded sprite line on the first visible line, with a Copper
+/// SPRxCTL write at `ctl_hpos` (the channel's own control words, so the only
+/// effect is the disarm) followed by a SPRxPOS reposition four colour clocks
+/// later. Returns the captured line, the events, and the repositioned hstart.
+fn dma_loaded_line_with_ctl_write_at(
+    ctl_hpos: u32,
+) -> ([CapturedSpriteLine; 1], [BeamRegisterWrite; 2], u16) {
+    let beam_y = PAL_VISIBLE_LINE0;
+    let hstart = DIW_HSTART_FB0 as u16;
+    let reused_hstart = hstart + 65;
+    let (_, ctl) = sprite_control_words(beam_y as u16, beam_y as u16 + 1, hstart);
+    let (reused_pos, _) = sprite_control_words(beam_y as u16, beam_y as u16 + 1, reused_hstart);
+    let captured = [CapturedSpriteLine {
+        sprite: 0,
+        hstart: reg_hstart(i32::from(hstart)),
+        hsub_70ns: false,
+        beam_y,
+        data: 0x8000,
+        datb: 0,
+        attached: false,
+        data_ext: [0; 3],
+        datb_ext: [0; 3],
+        width_words: 1,
+    }];
+    let events = [
+        beam_event(beam_y as u32, ctl_hpos, 0x0142, ctl),
+        beam_event(beam_y as u32, ctl_hpos + 4, 0x0140, reused_pos),
+    ];
+    (captured, events, reused_hstart)
+}
+
+/// Render `captured` under `events` the way the frame renderer does: the
+/// beam-timed manual replay, then the DMA-loaded reuse replay merged into it,
+/// against the captured lines that are still armed at their HSTART.
+fn render_dma_loaded_line_with_events(
+    captured: &[CapturedSpriteLine],
+    events: &[BeamRegisterWrite],
+) -> (Vec<u32>, ControlState) {
+    let mut state = blank_state();
+    state.dmacon = DMACON_DMAEN | DMACON_SPREN;
+    state.palette.write_ocs(17, 0x0F00);
+    state.palette.write_ocs(18, 0x00F0);
+    state.sprdatb[0] = 0x8000;
+    state.spr_hw_datb[0] = 0x8000;
+    state.spr_armed[0] = true;
+    state.spr_hw_armed[0] = true;
+    let base_palettes = [state.palette; FB_HEIGHT];
+    let palette_segments = vec![Vec::new(); FB_HEIGHT];
+    let base_controls = [ControlState::from_render_state(&state); FB_HEIGHT];
+    let control_segments = vec![Vec::new(); FB_HEIGHT];
+    let playfield_mask = vec![0u8; FB_PIXELS];
+    let mut collision_pixels = vec![CollisionPixel::default(); FB_PIXELS];
+    let mut fb = vec![rgb12_to_rgba8(0); FB_PIXELS];
+
+    let armed = retain_armed_captured_sprite_lines(captured, events);
+    let mut manual_sprite_lines = manual_sprite_lines_from_events_with_visible_line0(
+        &state,
+        events,
+        &[None; 8],
+        PAL_VISIBLE_LINE0,
+        FB_HEIGHT,
+        false,
+        true,
+    );
+    let dma_seeded_lines = manual_sprite_lines_from_captured_dma_reuse(
+        &state,
+        events,
+        &armed,
+        PAL_VISIBLE_LINE0,
+        FB_HEIGHT,
+    );
+    merge_dma_seeded_manual_sprite_lines(&mut manual_sprite_lines, dma_seeded_lines);
+    render_sprites_with_manual_lines(
+        &state,
+        &[],
+        &mut fb,
+        SpriteClip {
+            x_start: 0,
+            x_stop: FB_WIDTH,
+            y_start: 0,
+            y_stop: FB_HEIGHT,
+        },
+        &base_palettes,
+        &palette_segments,
+        &base_controls,
+        &control_segments,
+        &playfield_mask,
+        &mut collision_pixels,
+        sprite_pointer_refreshes_from_mask([false; 8]),
+        &armed,
+        true,
+        Some(&manual_sprite_lines),
+    );
+    (fb, base_controls[0])
+}
+
 #[test]
 fn sprite_register_data_write_after_compare_preserves_dma_latch_on_same_beam_line() {
     let mut state = blank_state();

@@ -403,4 +403,9 @@ probe_tests! {
     // SPRxDATA arm redisplays the DMA-written words (the Hamazing
     // scene-switch stale-bar regression class).
     golden_sprprobe_latch => probe("sprprobe-latch", "sprprobe-latch.bin", 16.0);
+    // A SPRxCTL write between a DMA fetch slot and that channel's HSTART
+    // disarms Denise before the serializer loads, cancelling the fetched
+    // line; a write past HSTART cannot recall it (the Hybris panel
+    // stray-dash regression class, issue #278). vAmiga-verified.
+    golden_sprprobe_disarm => probe("sprprobe-disarm", "sprprobe-disarm.bin", 16.0);
 }
