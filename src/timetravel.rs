@@ -30,6 +30,11 @@ pub struct Snapshot {
     pub pos: u64,
     /// Emulated frame index at capture.
     pub frame: u64,
+    /// Colour clocks emulated at capture. Frames alone cannot be turned into
+    /// emulated seconds without knowing the video standard and any
+    /// programmable geometry; this is the timeline coordinate that can, and
+    /// it is what "how much history is left" is reported in.
+    pub cck: u64,
     pub blob: Vec<u8>,
 }
 
@@ -89,10 +94,39 @@ impl SnapshotRing {
         }
     }
 
+    /// Discard every snapshot after position `pos`, and re-baseline the
+    /// capture interval to the newest one that survives.
+    ///
+    /// Restoring an earlier position abandons the timeline that followed it:
+    /// the machine will re-run those instructions, but with whatever input
+    /// arrives next, so the snapshots taken along the old path describe a
+    /// future that no longer happens. Left in place they would be picked as
+    /// anchors once the position counter climbs past them again. The
+    /// `last_capture_frame` reset matters just as much -- it is a *frame*
+    /// number from the abandoned future, and until it is rolled back
+    /// `capture_due` reports "not yet" for the whole interval being re-run.
+    pub fn truncate_after(&mut self, pos: u64) {
+        while let Some(newest) = self.snaps.back() {
+            if newest.pos <= pos {
+                break;
+            }
+            if let Some(dropped) = self.snaps.pop_back() {
+                self.used_bytes = self.used_bytes.saturating_sub(dropped.heap_bytes());
+            }
+        }
+        self.last_capture_frame = self.snaps.back().map(|s| s.frame);
+    }
+
     /// Newest snapshot with `pos <= target`, i.e. the closest anchor to
     /// replay forward from. `None` if `target` predates all retained history.
     pub fn nearest_at_or_before(&self, target: u64) -> Option<&Snapshot> {
         self.snaps.iter().rev().find(|s| s.pos <= target)
+    }
+
+    /// Position of the newest retained snapshot -- the anchor a plain rewind
+    /// step lands on when it is strictly earlier than the current position.
+    pub fn newest_pos(&self) -> Option<u64> {
+        self.snaps.back().map(|s| s.pos)
     }
 
     /// Newest snapshot at strictly less than `pos` (the anchor for walking
@@ -106,6 +140,12 @@ impl SnapshotRing {
     /// recorded history".
     pub fn oldest_pos(&self) -> Option<u64> {
         self.snaps.front().map(|s| s.pos)
+    }
+
+    /// Colour clock of the oldest retained snapshot, for reporting how much
+    /// emulated time the ring currently covers.
+    pub fn oldest_cck(&self) -> Option<u64> {
+        self.snaps.front().map(|s| s.cck)
     }
 
     pub fn len(&self) -> usize {
@@ -162,6 +202,7 @@ mod tests {
         Snapshot {
             pos,
             frame,
+            cck: frame * 1000,
             blob: vec![0u8; bytes],
         }
     }
@@ -214,5 +255,53 @@ mod tests {
         assert_eq!(ring.nearest_at_or_before(50).map(|s| s.pos), Some(0));
         assert_eq!(ring.nearest_before(200).map(|s| s.pos), Some(100));
         assert!(ring.nearest_before(0).is_none());
+    }
+
+    #[test]
+    fn truncate_after_drops_the_abandoned_future_and_rebases_the_interval() {
+        let mut ring = SnapshotRing::new(64, 5);
+        ring.push(snap(0, 0, 16));
+        ring.push(snap(100, 5, 16));
+        ring.push(snap(200, 10, 16));
+        assert_eq!(ring.used_bytes(), 48);
+
+        // Rewound to pos 100: the pos-200 snapshot describes a future that no
+        // longer happens.
+        ring.truncate_after(100);
+        assert_eq!(ring.len(), 2);
+        assert_eq!(newest_pos(&ring), Some(100));
+        assert_eq!(ring.used_bytes(), 32, "dropped bytes are returned");
+        // The interval is re-baselined to frame 5, so re-running frames 5..10
+        // captures again instead of being suppressed by the old frame-10 mark.
+        assert!(ring.capture_due(10));
+        assert!(!ring.capture_due(7));
+    }
+
+    #[test]
+    fn truncate_after_can_empty_the_ring() {
+        let mut ring = SnapshotRing::new(64, 1);
+        ring.push(snap(50, 1, 8));
+        ring.truncate_after(10);
+        assert!(ring.is_empty());
+        assert_eq!(ring.used_bytes(), 0);
+        assert!(ring.capture_due(0), "an empty ring always wants an anchor");
+    }
+
+    #[test]
+    fn truncate_after_keeps_a_snapshot_exactly_at_the_position() {
+        let mut ring = SnapshotRing::new(64, 1);
+        ring.push(snap(0, 0, 8));
+        ring.push(snap(100, 1, 8));
+        ring.truncate_after(100);
+        assert_eq!(newest_pos(&ring), Some(100), "the anchor itself survives");
+    }
+
+    #[test]
+    fn newest_pos_tracks_the_back_of_the_ring() {
+        let mut ring = SnapshotRing::new(64, 1);
+        assert_eq!(ring.newest_pos(), None);
+        ring.push(snap(7, 0, 8));
+        ring.push(snap(9, 1, 8));
+        assert_eq!(ring.newest_pos(), Some(9));
     }
 }

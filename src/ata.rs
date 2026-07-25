@@ -108,14 +108,20 @@ impl IdeDrive {
     /// name a synthesized RDB advertises). The path may be a raw HDF image
     /// file, or a host directory, which is built into an in-memory FFS
     /// volume at open time; `volume_name` labels that volume (directory
-    /// mounts only).
-    pub fn open(path: &Path, unit: usize, volume_name: Option<&str>) -> anyhow::Result<Self> {
+    /// mounts only). `boot_pri` is the synthesized partition's `de_BootPri`.
+    pub fn open(
+        path: &Path,
+        unit: usize,
+        volume_name: Option<&str>,
+        boot_pri: i8,
+    ) -> anyhow::Result<Self> {
         let disk = HardDriveImage::open(
             path,
             &format!("DH{unit}"),
             "ide",
             "COPPERLINE IDE DISK",
             volume_name,
+            boot_pri,
         )?;
         // The classic Amiga HDF geometry: 16 surfaces, 32 sectors per track
         // (what HDToolBox/RDB tooling defaults to), so the CHS the host

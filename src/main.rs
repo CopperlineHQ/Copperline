@@ -451,6 +451,16 @@ where
                     anyhow!("--port2 requires a device (mouse/joystick/cd32/analogue/none)")
                 })?);
             }
+            "--autofire" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--autofire requires a rate in Hz (0 = off)"))?;
+                overrides.autofire_hz = Some(
+                    value
+                        .parse::<u8>()
+                        .map_err(|_| anyhow!("--autofire rate must be a whole number of Hz"))?,
+                );
+            }
             "--serial" => {
                 overrides.serial = Some(args.next().ok_or_else(|| {
                     anyhow!("--serial requires a mode (off/stdout/midi/tcp/tcp-connect/pty)")
@@ -954,6 +964,7 @@ fn print_help() {
          \x20                            cd32, analogue, or none\n  \
          --port2 DEVICE                 controller in port 2 (default: joystick;\n  \
          \x20                            cd32 on the CD32 profile)\n  \
+         --autofire HZ                  pulse a held fire button at HZ (0 = off, the default)\n  \
          \x20                            (--model/--cpu/etc. override the config file or defaults)\n  \
          --screenshot-after SECS PATH   save a PNG to PATH after SECS emulated seconds, then exit\n  \
          --save-state-after SECS PATH   write a save state to PATH after SECS emulated seconds,\n  \

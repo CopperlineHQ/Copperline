@@ -169,16 +169,19 @@ fn build_rdsk_block(total_cyls: u32, disk_label: &str) -> Vec<u8> {
     b
 }
 
-/// Build the PART block: one bootable partition (device `name`, e.g. DH0)
-/// spanning cylinders 1..total_cyls-1 with the dostype found in the image's
-/// boot block.
-fn build_part_block(total_cyls: u32, dostype: u32, name: &[u8]) -> Vec<u8> {
+/// Build the PART block: one partition (device `name`, e.g. DH0) spanning
+/// cylinders 1..total_cyls-1 with the dostype found in the image's boot block.
+/// `boot_pri` becomes `de_BootPri`, which is what strap ranks boot nodes by;
+/// the `PBFB_BOOTABLE` flag is cleared for the `BOOT_PRI_NEVER` sentinel so
+/// such a partition mounts without ever being a boot candidate.
+fn build_part_block(total_cyls: u32, dostype: u32, name: &[u8], boot_pri: i8) -> Vec<u8> {
     let mut b = vec![0u8; SECTOR_SIZE];
     b[0..4].copy_from_slice(b"PART");
     put_be32(&mut b, 4, 64);
     put_be32(&mut b, 12, 7); // host id
     put_be32(&mut b, 16, !0); // next partition: none
-    put_be32(&mut b, 20, 1); // flags: bootable
+    let bootable = u32::from(boot_pri != crate::config::BOOT_PRI_NEVER);
+    put_be32(&mut b, 20, bootable); // flags: PBFB_BOOTABLE
     let name = &name[..name.len().min(31)];
     b[36] = name.len() as u8;
     b[37..37 + name.len()].copy_from_slice(name);
@@ -194,11 +197,11 @@ fn build_part_block(total_cyls: u32, dostype: u32, name: &[u8]) -> Vec<u8> {
         0, // interleave
         1, // low cylinder
         total_cyls - 1,
-        30,          // buffers
-        0,           // buffer memory type
-        0x00FF_FFFF, // max transfer
-        0x7FFF_FFFE, // mask
-        0,           // boot priority
+        30,                         // buffers
+        0,                          // buffer memory type
+        0x00FF_FFFF,                // max transfer
+        0x7FFF_FFFE,                // mask
+        i32::from(boot_pri) as u32, // boot priority (de_BootPri, signed)
         dostype,
     ];
     for (i, v) in env.iter().enumerate() {
@@ -216,12 +219,15 @@ impl HardDriveImage {
     /// built into an in-memory FFS volume at open time. `volume_override`
     /// names that FFS volume; when `None` the directory name is used. It has
     /// no effect on a raw HDF, which carries its own label inside the image.
+    /// `boot_pri` is the `de_BootPri` written into a synthesized RDB; it too is
+    /// ignored by an image that carries its own RDB.
     pub fn open(
         path: &Path,
         device_name: &str,
         bus_name: &'static str,
         disk_label: &str,
         volume_override: Option<&str>,
+        boot_pri: i8,
     ) -> anyhow::Result<Self> {
         let mut backing = if path.is_dir() {
             let volume = volume_override.map(str::to_string).unwrap_or_else(|| {
@@ -308,18 +314,27 @@ impl HardDriveImage {
                 total_cyls,
                 dostype,
                 device_name.as_bytes(),
+                boot_pri,
             ));
             log::info!(
                 "{bus_name}: {} is a bare partition hardfile (dostype {:08X}); wrapping it in \
-                 a synthesized RDB ({} cylinders, partition {} on 1-{})",
+                 a synthesized RDB ({} cylinders, partition {} on 1-{}, bootpri {})",
                 path.display(),
                 dostype,
                 total_cyls,
                 device_name,
-                total_cyls - 1
+                total_cyls - 1,
+                boot_pri
             );
             Some(overlay)
         } else {
+            if boot_pri != crate::config::HARDFILE_DEFAULT_BOOT_PRI {
+                log::warn!(
+                    "{bus_name}: {} carries its own RDB; the configured bootpri ({boot_pri}) is \
+                     ignored (the partition priorities live inside the image)",
+                    path.display()
+                );
+            }
             None
         };
 
@@ -437,7 +452,7 @@ mod tests {
         let mut bytes = vec![0u8; 64 * SECTOR_SIZE];
         bytes[5 * SECTOR_SIZE..5 * SECTOR_SIZE + 4].copy_from_slice(b"MARK");
         let path = temp_image("serde.hdf", &bytes);
-        let mut original = HardDriveImage::open(&path, "DH0", "ide", "TEST DISK", None).unwrap();
+        let mut original = HardDriveImage::open(&path, "DH0", "ide", "TEST DISK", None, 0).unwrap();
 
         let encoded = bincode::serialize(&original).unwrap();
         let mut restored: HardDriveImage = bincode::deserialize(&encoded).unwrap();
@@ -499,7 +514,7 @@ mod tests {
     #[test]
     fn directory_mount_uses_the_directory_name_as_the_volume_label() {
         let (parent, mount) = temp_mount_dir("Games");
-        let mut disk = HardDriveImage::open(&mount, "DH0", "ide", "TEST DISK", None).unwrap();
+        let mut disk = HardDriveImage::open(&mount, "DH0", "ide", "TEST DISK", None, 0).unwrap();
         assert_eq!(volume_label(&mut disk), "Games");
         let _ = std::fs::remove_dir_all(&parent);
     }
@@ -508,7 +523,7 @@ mod tests {
     fn directory_mount_volume_override_sets_the_label() {
         let (parent, mount) = temp_mount_dir("Games");
         let mut disk =
-            HardDriveImage::open(&mount, "DH0", "ide", "TEST DISK", Some("Workbench")).unwrap();
+            HardDriveImage::open(&mount, "DH0", "ide", "TEST DISK", Some("Workbench"), 0).unwrap();
         assert_eq!(volume_label(&mut disk), "Workbench");
         let _ = std::fs::remove_dir_all(&parent);
     }
@@ -516,12 +531,95 @@ mod tests {
     #[test]
     fn serde_errors_when_backing_file_is_missing() {
         let path = temp_image("gone.hdf", &vec![0u8; 8 * SECTOR_SIZE]);
-        let original = HardDriveImage::open(&path, "DH0", "ide", "TEST DISK", None).unwrap();
+        let original = HardDriveImage::open(&path, "DH0", "ide", "TEST DISK", None, 0).unwrap();
         let encoded = bincode::serialize(&original).unwrap();
         let _ = std::fs::remove_file(&path);
         let Err(err) = bincode::deserialize::<HardDriveImage>(&encoded) else {
             panic!("deserializing with the image file gone must fail");
         };
         assert!(err.to_string().contains("reopening hard-drive image"));
+    }
+
+    /// A bare partition hardfile: an FFS boot block and no RDSK, sized to a
+    /// whole number of 16x32 cylinders so the RDB wrapper can be synthesized.
+    fn bare_partition_image(name: &str) -> PathBuf {
+        let mut bytes = vec![0u8; CYL_BYTES as usize];
+        bytes[..4].copy_from_slice(b"DOS\x01");
+        temp_image(name, &bytes)
+    }
+
+    /// The PART block of a synthesized RDB (LBA 1), read back through the
+    /// overlay exactly as the guest driver sees it.
+    fn part_block(disk: &mut HardDriveImage) -> Vec<u8> {
+        let mut sector = vec![0u8; SECTOR_SIZE];
+        disk.read_sector(1, &mut sector).unwrap();
+        assert_eq!(&sector[..4], b"PART");
+        sector
+    }
+
+    fn be32(block: &[u8], off: usize) -> u32 {
+        u32::from_be_bytes(block[off..off + 4].try_into().unwrap())
+    }
+
+    /// `de_BootPri` is env word 15, at PART offset 128 + 15*4.
+    const DE_BOOT_PRI_OFF: usize = 128 + 15 * 4;
+    const PART_FLAGS_OFF: usize = 20;
+
+    #[test]
+    fn synthesized_partition_carries_the_configured_boot_priority() {
+        let path = bare_partition_image("bootpri.hdf");
+        for pri in [0i8, 6, 20, -5, 127] {
+            let mut disk =
+                HardDriveImage::open(&path, "DH0", "ide", "TEST DISK", None, pri).unwrap();
+            let part = part_block(&mut disk);
+            assert_eq!(
+                be32(&part, DE_BOOT_PRI_OFF) as i32,
+                i32::from(pri),
+                "de_BootPri for {pri}"
+            );
+            assert_eq!(be32(&part, PART_FLAGS_OFF), 1, "PBFB_BOOTABLE for {pri}");
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn boot_pri_never_mounts_the_partition_without_making_it_bootable() {
+        let path = bare_partition_image("neverboot.hdf");
+        let mut disk = HardDriveImage::open(
+            &path,
+            "DH1",
+            "scsi",
+            "TEST DISK",
+            None,
+            crate::config::BOOT_PRI_NEVER,
+        )
+        .unwrap();
+        let part = part_block(&mut disk);
+        assert_eq!(
+            be32(&part, DE_BOOT_PRI_OFF) as i32,
+            i32::from(crate::config::BOOT_PRI_NEVER)
+        );
+        assert_eq!(
+            be32(&part, PART_FLAGS_OFF),
+            0,
+            "PBFB_BOOTABLE must be clear so strap never offers the partition"
+        );
+        // The partition still mounts: the device name is intact.
+        assert_eq!(part[36], 3);
+        assert_eq!(&part[37..40], b"DH1");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn part_block_checksum_stays_valid_for_every_boot_priority() {
+        let path = bare_partition_image("checksum.hdf");
+        for pri in [i8::MIN, -1, 0, 1, i8::MAX] {
+            let mut disk =
+                HardDriveImage::open(&path, "DH0", "ide", "TEST DISK", None, pri).unwrap();
+            let part = part_block(&mut disk);
+            let sum = (0..64).fold(0u32, |acc, i| acc.wrapping_add(be32(&part, i * 4)));
+            assert_eq!(sum, 0, "RDB checksum rule broken for bootpri {pri}");
+        }
+        let _ = std::fs::remove_file(&path);
     }
 }

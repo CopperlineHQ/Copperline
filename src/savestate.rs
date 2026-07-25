@@ -156,6 +156,26 @@ pub fn auto_filename() -> std::path::PathBuf {
     std::path::PathBuf::from(format!("copperline-state-{ts}.clstate"))
 }
 
+/// Number of numbered quick-save slots. Ten, so they map onto the host
+/// number-row keys `1`..`9`, `0`.
+pub const SLOT_COUNT: usize = 10;
+
+/// File backing quick-save slot `slot` (1-based, `1..=SLOT_COUNT`). `None`
+/// when the host offers no per-user directory to keep them in.
+///
+/// Slots live in the per-user state directory rather than beside a config
+/// file or in the working directory: they are a host convenience, they must
+/// be reachable however the emulator was launched, and a bare relative path
+/// would scatter them across whatever directory happened to be current. A
+/// state carries its own [`MachineDescriptor`], so loading a slot saved from
+/// a different machine is caught and reported rather than silently wrong.
+pub fn slot_path(slot: usize) -> Option<std::path::PathBuf> {
+    (1..=SLOT_COUNT)
+        .contains(&slot)
+        .then(|| crate::paths::state_slot_dir().map(|dir| dir.join(format!("slot{slot}.clstate"))))
+        .flatten()
+}
+
 /// Write the machine's emulated state to `path`, stamped with `descriptor`
 /// (the shape of the machine that produced it). Call only between emulated
 /// frames.

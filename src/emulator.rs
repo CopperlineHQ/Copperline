@@ -672,6 +672,13 @@ impl Emulator {
         self.tt_input = Some(crate::inputsched::ReplayInputLog::new());
     }
 
+    /// Stop recording reverse history and release the retained snapshots.
+    /// Reverse ops report "not armed" afterwards until something re-arms.
+    pub fn disable_time_travel(&mut self) {
+        self.tt_ring = None;
+        self.tt_input = None;
+    }
+
     pub fn time_travel_enabled(&self) -> bool {
         self.tt_ring.is_some()
     }
@@ -758,9 +765,15 @@ impl Emulator {
             return Ok(());
         }
         let pos = self.retired_instructions;
+        let cck = self.bus().emulated_cck();
         let blob = self.snapshot_blob()?;
         if let Some(ring) = self.tt_ring.as_mut() {
-            ring.push(crate::timetravel::Snapshot { pos, frame, blob });
+            ring.push(crate::timetravel::Snapshot {
+                pos,
+                frame,
+                cck,
+                blob,
+            });
         }
         // Drop input-log entries older than the oldest retained snapshot: they
         // can never be replayed again.
@@ -820,7 +833,53 @@ impl Emulator {
         self.restore_blob(&anchor.1, anchor.0)?;
         self.tt_begin_replay_input(anchor.0);
         self.tt_replay_to(target_pos)?;
+        self.tt_discard_after(target_pos);
         Ok(ReverseOutcome::Found(()))
+    }
+
+    /// Forget the reverse history recorded after `pos`. Repositioning the
+    /// machine there abandons the timeline that followed: those snapshots
+    /// describe a future that will not happen again once new input arrives,
+    /// and leaving them in the ring would let one be picked as an anchor as
+    /// soon as the position counter climbs past it a second time.
+    fn tt_discard_after(&mut self, pos: u64) {
+        if let Some(ring) = self.tt_ring.as_mut() {
+            ring.truncate_after(pos);
+        }
+        if let Some(log) = self.tt_input.as_mut() {
+            log.prune_after(pos);
+        }
+    }
+
+    /// Rewind to the newest capture point strictly earlier than the current
+    /// position -- the user-facing "rewind one step", as distinct from the
+    /// debugger's instruction- and frame-exact reverse steps. It lands on a
+    /// snapshot rather than an arbitrary boundary, so it costs one restore and
+    /// no replay, and one step covers `rewind_interval_frames` of emulated
+    /// time. `BeyondHistory` means nothing earlier is retained.
+    pub fn tt_rewind_step(&mut self) -> Result<crate::timetravel::ReverseOutcome<u64>> {
+        use crate::timetravel::ReverseOutcome;
+        let target = match self
+            .tt_ring
+            .as_ref()
+            .and_then(|r| r.nearest_before(self.retired_instructions))
+        {
+            Some(s) => s.pos,
+            None => return Ok(ReverseOutcome::BeyondHistory),
+        };
+        Ok(match self.tt_restore_to(target)? {
+            ReverseOutcome::Found(()) => ReverseOutcome::Found(self.retired_instructions),
+            ReverseOutcome::NotFound => ReverseOutcome::NotFound,
+            ReverseOutcome::BeyondHistory => ReverseOutcome::BeyondHistory,
+        })
+    }
+
+    /// Emulated seconds of rewind history behind the current position. `None`
+    /// unless the ring is armed and holds at least one snapshot.
+    pub fn rewind_history_seconds(&self) -> Option<f64> {
+        let oldest = self.tt_ring.as_ref()?.oldest_cck()?;
+        let span = self.bus().emulated_cck().saturating_sub(oldest);
+        Some(span as f64 / f64::from(crate::chipset::paula::PAULA_CLOCK_HZ))
     }
 
     /// Step backward `n` instructions. On success the machine is left exactly
@@ -1179,7 +1238,10 @@ impl Emulator {
 
     /// Run the reverse "last writer" query for the armed watchpoint and report
     /// it, preserving the live forward state across the (state-mutating)
-    /// query so the run continues unaffected.
+    /// query so the run continues unaffected. The retained history is not
+    /// preserved: parking on the writing instruction discards the snapshots
+    /// after it, so the ring restarts from the next capture. This is a
+    /// one-shot diagnostic, so that costs the run nothing.
     fn tt_fire_reverse_watch(&mut self) -> Result<()> {
         use crate::timetravel::ReverseOutcome;
         let addr = match self.tt_rwatch.as_ref() {
@@ -1857,7 +1919,12 @@ fn open_scsi_target(
         );
         Ok(cd.into())
     } else {
-        let disk = crate::scsi::ScsiDisk::open(&drive.path, unit, drive.volume_name.as_deref())?;
+        let disk = crate::scsi::ScsiDisk::open(
+            &drive.path,
+            unit,
+            drive.volume_name.as_deref(),
+            drive.boot_pri,
+        )?;
         info!("scsi: unit {unit} {}", drive.path.display());
         Ok(disk.into())
     }
@@ -2078,14 +2145,24 @@ pub fn build_machine(
         if let Some(drive) = &cfg.ide.master {
             gayle.attach_drive(
                 0,
-                crate::gayle::IdeDrive::open(&drive.path, 0, drive.volume_name.as_deref())?,
+                crate::gayle::IdeDrive::open(
+                    &drive.path,
+                    0,
+                    drive.volume_name.as_deref(),
+                    drive.boot_pri,
+                )?,
             );
             info!("ide: master {}", drive.path.display());
         }
         if let Some(drive) = &cfg.ide.slave {
             gayle.attach_drive(
                 1,
-                crate::gayle::IdeDrive::open(&drive.path, 1, drive.volume_name.as_deref())?,
+                crate::gayle::IdeDrive::open(
+                    &drive.path,
+                    1,
+                    drive.volume_name.as_deref(),
+                    drive.boot_pri,
+                )?,
             );
             info!("ide: slave {}", drive.path.display());
         }
@@ -2097,7 +2174,12 @@ pub fn build_machine(
             let Some(drive) = drive else { continue };
             ide.attach_drive(
                 slot,
-                crate::ata::IdeDrive::open(&drive.path, slot, drive.volume_name.as_deref())?,
+                crate::ata::IdeDrive::open(
+                    &drive.path,
+                    slot,
+                    drive.volume_name.as_deref(),
+                    drive.boot_pri,
+                )?,
             );
             let which = if slot == 0 { "master" } else { "slave" };
             info!("ide: {which} {}", drive.path.display());

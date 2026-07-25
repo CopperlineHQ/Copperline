@@ -45,11 +45,18 @@ pub mod harddrive;
 pub mod ide_a4000;
 pub mod inputrec;
 pub mod inputsched;
+// Host-keyboard controller bindings: a frontend concern (it speaks winit key
+// codes and produces the same `JoystickState` the gamepad reader does), so it
+// rides the same feature gate as `gamepad`. The autofire policy that pairs
+// with it lives in `config`, which every build has.
+#[cfg(feature = "frontend")]
+pub mod keymap;
 pub mod memory;
 #[cfg(feature = "midi")]
 pub mod midi;
 pub mod net;
 pub mod parallel;
+pub mod paths;
 pub mod priority;
 pub mod ramsey;
 pub mod recorder;
