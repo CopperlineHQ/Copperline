@@ -111,7 +111,10 @@ PageUp/PageDown by whole pages. Four buttons sit above the dump:
 
 - **Find** searches CPU-visible memory for the `$` box's hex byte pattern
   (`4E75`, or spaced pairs like `C0 FF EE`), starting past the previous
-  hit and wrapping the 24-bit space once. The view jumps to the match.
+  hit and wrapping the decoded memory map once. The sweep covers every RAM
+  bank the machine decodes -- chip, slow, Zorro II, and on a 32-bit CPU the
+  motherboard (`$04000000`), CPU-slot (`$08000000`), and Zorro III banks --
+  plus the Kickstart and extended-ROM windows. The view jumps to the match.
 - **Save...** writes the `$` box's `ADDR LEN` (hex) region to a file via
   a save dialog -- the GUI counterpart of `COPPERLINE_DBG_RAMDUMP`.
 - **Writer?** reports the last instruction that wrote the word at the

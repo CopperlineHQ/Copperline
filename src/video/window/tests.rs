@@ -1902,8 +1902,18 @@ fn test_app() -> super::App {
 }
 
 fn test_app_with_audio(audio: Box<dyn AudioSink>) -> super::App {
+    test_app_with_audio_and_cpu(audio, crate::config::CpuModel::M68000, 0)
+}
+
+/// The same fixture on a chosen CPU model, optionally with `accel_ram_bytes`
+/// of CPU-slot fast RAM fitted at $08000000 (a 32-bit model only reaches it).
+fn test_app_with_audio_and_cpu(
+    audio: Box<dyn AudioSink>,
+    cpu: crate::config::CpuModel,
+    accel_ram_bytes: usize,
+) -> super::App {
     use crate::chipset::paula::Paula;
-    use crate::config::{CpuModel, PacingBudget};
+    use crate::config::PacingBudget;
     use crate::emulator::Emulator;
     use crate::floppy::FloppyController;
     use crate::memory::{Memory, ROM_BASE, ROM_SIZE};
@@ -1921,7 +1931,7 @@ fn test_app_with_audio(audio: Box<dyn AudioSink>) -> super::App {
         chip_ram: vec![0u8; 512 * 1024],
         slow_ram: Vec::new(),
         mb_ram: Vec::new(),
-        accel_ram: Vec::new(),
+        accel_ram: vec![0u8; accel_ram_bytes],
         rom,
         overlay: true,
         zorro: crate::zorro::ZorroChain::default(),
@@ -1937,7 +1947,7 @@ fn test_app_with_audio(audio: Box<dyn AudioSink>) -> super::App {
     );
     let emu = Emulator::new(
         bus,
-        CpuModel::M68000,
+        cpu,
         false,
         Default::default(),
         PacingBudget::Cycles,
@@ -3630,6 +3640,37 @@ fn memory_tab_find_scroll_and_bitmap_toggle() {
     }
     app.activate_ui_control(UiControl::DebugMemBits);
     assert!(!app.debugger_panel.as_ref().unwrap().mem_view_bits);
+}
+
+/// Find sweeps the decoded memory map, so on a 32-bit CPU it reaches the
+/// RAM banks past the 24-bit space -- here the CPU-slot accelerator bank at
+/// $08000000. A search of a fixed 16 MiB span could never see them.
+#[test]
+fn memory_tab_find_reaches_ram_above_the_24_bit_space() {
+    let mut app = test_app_with_audio_and_cpu(
+        Box::new(NullSink),
+        crate::config::CpuModel::M68030,
+        1024 * 1024,
+    );
+    app.open_debugger();
+    if let Some(panel) = app.debugger_panel.as_mut() {
+        panel.tab = super::ui::DebugTab::Memory;
+        panel.mem_addr = 0;
+    }
+    app.emu.bus_mut().mem.accel_ram[0x4_0000..0x4_0004].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+    if let Some(panel) = app.debugger_panel.as_mut() {
+        panel.entry = "DEADBEEF".to_string();
+    }
+    app.activate_ui_control(UiControl::DebugMemFind);
+    let panel = app.debugger_panel.as_ref().unwrap();
+    assert_eq!(
+        panel.mem_last_find,
+        Some(crate::memory::ACCEL_RAM_BASE as u32 + 0x4_0000)
+    );
+    assert_eq!(
+        panel.mem_addr,
+        crate::memory::ACCEL_RAM_BASE as u32 + 0x4_0000
+    );
 }
 
 #[test]

@@ -5477,6 +5477,37 @@ impl Bus {
         regions
     }
 
+    /// The regions a debugger pattern search should sweep: every writable
+    /// RAM bank plus the Kickstart and extended-ROM windows, in ascending
+    /// address order. Sweeping the decoded map rather than a fixed
+    /// address span is what lets a search reach RAM above the 24-bit
+    /// space (motherboard, CPU-slot, and Zorro III banks) without walking
+    /// the gigabytes of undecoded address space between them.
+    ///
+    /// Chip RAM is offered as the whole $000000-$1FFFFF select window
+    /// rather than the fitted bank: Agnus decodes fewer address bits than
+    /// the window on the smaller parts, so the bank repeats inside it and
+    /// a search of CPU-visible memory sees every image.
+    pub fn searchable_regions(&self) -> Vec<(u32, u32)> {
+        let mut regions = self.writable_ram_regions();
+        for (base, len) in regions.iter_mut() {
+            if *base == crate::memory::CHIP_RAM_BASE as u32 {
+                *len = crate::memory::CHIP_WINDOW_SIZE as u32;
+            }
+        }
+        if !self.mem.rom.is_empty() {
+            regions.push((crate::memory::ROM_BASE as u32, self.mem.rom.len() as u32));
+        }
+        if !self.mem.extended_rom.is_empty() {
+            regions.push((
+                self.mem.extended_rom_base as u32,
+                self.mem.extended_rom.len() as u32,
+            ));
+        }
+        regions.sort_by_key(|(base, _)| *base);
+        regions
+    }
+
     /// Read a 16-bit big-endian word from whichever RAM/ROM region maps
     /// `addr` (chip, fast, slow, motherboard, accelerator, or ROM), for the
     /// debugger's memory dumps. Returns 0 for unmapped addresses.

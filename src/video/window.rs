@@ -5807,7 +5807,7 @@ impl App {
 
     /// Find the entry's hex byte pattern in CPU-visible memory, starting
     /// past the previous hit (or the current page) and wrapping around
-    /// the 24-bit space once.
+    /// the decoded memory map once.
     fn debugger_mem_find(&mut self) {
         let Some(panel) = self.debugger_panel.as_ref() else {
             return;
@@ -5821,27 +5821,8 @@ impl App {
             .map(|addr| addr.wrapping_add(1))
             .unwrap_or(panel.mem_addr)
             & self.emu.machine.ui_addr_mask();
-        const SPACE: u64 = 0x0100_0000;
-        const CHUNK: usize = 4096;
-        let mut offset = 0u64;
-        let mut found = None;
-        while offset < SPACE {
-            let base = ((u64::from(start) + offset) % SPACE) as u32;
-            // Overlap chunks by the pattern length so matches spanning a
-            // chunk boundary are seen.
-            let bytes = self
-                .emu
-                .machine
-                .debug_read_memory(base, CHUNK + pattern.len() - 1);
-            if let Some(hit) = bytes
-                .windows(pattern.len())
-                .position(|window| window == pattern)
-            {
-                found = Some(base.wrapping_add(hit as u32) & 0x00FF_FFFF);
-                break;
-            }
-            offset += CHUNK as u64;
-        }
+        let regions = self.emu.bus().searchable_regions();
+        let found = console::search_cpu_memory(&self.emu.machine, &regions, &pattern, start);
         match found {
             Some(addr) => {
                 if let Some(panel) = self.debugger_panel.as_mut() {

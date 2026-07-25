@@ -10897,3 +10897,38 @@ fn motherboard_ram_reaches_the_debugger_helpers() {
         .writable_ram_regions()
         .contains(&(base, 1024 * 1024_u32)));
 }
+
+/// A debugger pattern search sweeps the decoded map, so it must offer the
+/// RAM banks that sit past the 24-bit space -- the Ramsey motherboard
+/// bank, the CPU-slot accelerator bank, and Zorro III boards -- alongside
+/// the chip window and the ROMs. Chip RAM is offered as the whole
+/// $000000-$1FFFFF select window so the Agnus image repeats are searched.
+#[test]
+fn searchable_regions_cover_the_32_bit_ram_banks() {
+    let mut bus = empty_bus();
+    bus.mem.fit_mb_ram(4 * 1024 * 1024);
+    bus.mem.fit_accel_ram(8 * 1024 * 1024);
+    bus.mem
+        .zorro
+        .add_board_configured_at(
+            crate::zorro::BoardSpec::z3_ram(16 * 1024 * 1024),
+            0x1000_0000,
+        )
+        .expect("Z3 RAM board");
+
+    let regions = bus.searchable_regions();
+    assert!(regions.contains(&(0, crate::memory::CHIP_WINDOW_SIZE as u32)));
+    assert!(regions.contains(&(0x07C0_0000, 4 * 1024 * 1024)));
+    assert!(regions.contains(&(crate::memory::ACCEL_RAM_BASE as u32, 8 * 1024 * 1024)));
+    assert!(
+        regions
+            .iter()
+            .any(|(base, len)| *base >= 0x1000_0000 && *len == 16 * 1024 * 1024),
+        "Zorro III RAM board missing: {regions:08X?}"
+    );
+    assert!(regions.contains(&(crate::memory::ROM_BASE as u32, 512 * 1024)));
+    assert!(
+        regions.windows(2).all(|w| w[0].0 <= w[1].0),
+        "regions must be in ascending address order: {regions:08X?}"
+    );
+}

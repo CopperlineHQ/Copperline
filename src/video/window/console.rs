@@ -99,29 +99,61 @@ fn reg_index(token: &str) -> Option<usize> {
     }
 }
 
-/// Search CPU-visible memory for `pattern`, starting at `start` and
-/// wrapping the 24-bit space once. Shared by the console FIND command
-/// and the Memory tab's Find button.
-pub(super) fn search_cpu_memory(
+/// Search one `[from, end)` span of CPU-visible memory for `pattern`.
+fn search_span(
     machine: &crate::cpu::M68kMachine,
     pattern: &[u8],
-    start: u32,
+    from: u32,
+    end: u64,
 ) -> Option<u32> {
-    const SPACE: u64 = 0x0100_0000;
     const CHUNK: usize = 4096;
-    let mut offset = 0u64;
-    while offset < SPACE {
-        let base = ((u64::from(start) + offset) % SPACE) as u32;
+    let mut addr = u64::from(from);
+    while addr < end {
         // Overlap chunks by the pattern length so matches spanning a
         // chunk boundary are seen.
-        let bytes = machine.debug_read_memory(base, CHUNK + pattern.len() - 1);
+        let span = (end - addr) as usize;
+        let bytes = machine.debug_read_memory(addr as u32, span.min(CHUNK) + pattern.len() - 1);
         if let Some(hit) = bytes
             .windows(pattern.len())
             .position(|window| window == pattern)
         {
-            return Some(base.wrapping_add(hit as u32) & 0x00FF_FFFF);
+            return Some((addr as u32).wrapping_add(hit as u32));
         }
-        offset += CHUNK as u64;
+        addr += CHUNK as u64;
+    }
+    None
+}
+
+/// Search CPU-visible memory for `pattern`, starting at `start` and
+/// wrapping the decoded map once. `regions` is the machine's
+/// [`crate::bus::Bus::searchable_regions`], so RAM above the 24-bit space
+/// (motherboard, CPU-slot, and Zorro III banks) is covered and the
+/// undecoded gaps between the banks are skipped. Shared by the console
+/// FIND command and the Memory tab's Find button.
+pub(super) fn search_cpu_memory(
+    machine: &crate::cpu::M68kMachine,
+    regions: &[(u32, u32)],
+    pattern: &[u8],
+    start: u32,
+) -> Option<u32> {
+    // Two sweeps: the map from `start` up to its top, then its bottom back
+    // up to `start`, so the search wraps the whole map exactly once.
+    for (base, len) in regions {
+        let end = u64::from(*base) + u64::from(*len);
+        let from = u64::from(start).max(u64::from(*base));
+        if from < end {
+            if let Some(hit) = search_span(machine, pattern, from as u32, end) {
+                return Some(hit);
+            }
+        }
+    }
+    for (base, len) in regions {
+        let end = (u64::from(*base) + u64::from(*len)).min(u64::from(start));
+        if u64::from(*base) < end {
+            if let Some(hit) = search_span(machine, pattern, *base, end) {
+                return Some(hit);
+            }
+        }
     }
     None
 }
@@ -865,7 +897,8 @@ impl App {
                 let Some(pattern) = parse_hex_pattern(pattern_tokens) else {
                     return ConsoleOutcome::error("FIND takes hex byte pairs (e.g. 4E75)");
                 };
-                match search_cpu_memory(&self.emu.machine, &pattern, start) {
+                let regions = self.emu.bus().searchable_regions();
+                match search_cpu_memory(&self.emu.machine, &regions, &pattern, start) {
                     Some(addr) => ConsoleOutcome::one(format!("found at ${addr:06X}")),
                     None => ConsoleOutcome::one("pattern not found"),
                 }
@@ -1312,8 +1345,8 @@ impl App {
     }
 
     /// Heuristic 68k call-stack walk: scan up the stack for longwords
-    /// that look like return addresses (even, in the 24-bit space, and
-    /// immediately preceded by a JSR or BSR encoding). Heuristic by
+    /// that look like return addresses (even, on the CPU's address bus,
+    /// and immediately preceded by a JSR or BSR encoding). Heuristic by
     /// nature -- data words that happen to follow call opcodes can slip
     /// in -- but each frame shows its stack slot so it can be judged.
     fn console_stack_lines(&self) -> Vec<String> {
@@ -1324,8 +1357,13 @@ impl App {
         let peek16 = |addr: u32| bus.peek_word_any(addr);
         let peek32 =
             |addr: u32| (u32::from(peek16(addr)) << 16) | u32::from(peek16(addr.wrapping_add(2)));
+        // A0-A23 on the 24-bit models, the full 32 bits on 020+, so code
+        // running from motherboard, CPU-slot, or Zorro III RAM is walked
+        // rather than rejected. Unmapped words peek as 0, which matches no
+        // JSR/BSR encoding, so the opcode test still does the filtering.
+        let addr_mask = machine.ui_addr_mask();
         let looks_like_return = |addr: u32| -> bool {
-            if addr == 0 || addr & 1 != 0 || addr >= 0x0100_0000 {
+            if addr == 0 || addr & 1 != 0 || addr & addr_mask != addr {
                 return false;
             }
             // JSR (An)/-(An)+modes and BSR.B end 2 bytes before the
