@@ -89,6 +89,17 @@ pub(super) fn maybe_log_frame_state(
         state.sprctl,
         state.spr_armed,
     );
+    // The hardware-true latch view (spr_hw_*, fed by DMA fetches as well as
+    // CPU/Copper writes) decides the DMA-idle latched redisplay. The labels
+    // are the field names, so a line from a log grep straight back to here.
+    log::info!(
+        "  spr_hw_pos={:04X?} spr_hw_ctl={:04X?} spr_hw_data={:04X?} spr_hw_datb={:04X?} spr_hw_armed={:?}",
+        state.spr_hw_pos,
+        state.spr_hw_ctl,
+        state.spr_hw_data,
+        state.spr_hw_datb,
+        state.spr_hw_armed,
+    );
 }
 
 #[derive(Clone, Copy)]
