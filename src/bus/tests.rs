@@ -709,7 +709,7 @@ fn real_mode_cpu_bus_advance_ticks_cia_without_double_counting() {
 #[test]
 fn audio_time_flushes_before_audio_register_write() {
     let (mut bus, frames) = empty_bus_with_collect_audio();
-    bus.paula.set_led_filter_enabled(false);
+    bus.paula.set_led_filter_guest(false);
     bus.mem.chip_ram[0] = 0x7F;
     bus.mem.chip_ram[1] = 0x7F;
     bus.mem.chip_ram[2] = 0x7F;
@@ -9215,14 +9215,21 @@ fn bltpri_line_blit_bresenham_cycles_stay_cpu_available_after_warmup() {
 #[test]
 fn front_panel_power_led_follows_cia_a_led_bit() {
     let mut bus = empty_bus();
-    assert!(bus.front_panel_status().power_led_on);
+    // Filter engaged at power-on (the default /LED state).
+    assert!(bus.front_panel_status().audio_filter_on);
+
+    // Drive PA1 (/LED) as an output, as the OS does, so the written level
+    // reaches the pin the filter follows.
+    let ddra = (REG_DDRA as u64) << 8;
+    let _ = bus.cia_a_write(ddra, 1, 0x02);
 
     let pra = (REG_PRA as u64) << 8;
-    let _ = bus.cia_a_write(pra, 1, 0xC3);
-    assert!(!bus.front_panel_status().power_led_on);
-
-    let _ = bus.cia_a_write(pra, 1, 0xC1);
-    assert!(bus.front_panel_status().power_led_on);
+    // Bit 1 high = /LED released = filter bypassed.
+    let _ = bus.cia_a_write(pra, 1, 0x02);
+    assert!(!bus.front_panel_status().audio_filter_on);
+    // Bit 1 low = /LED asserted = filter engaged.
+    let _ = bus.cia_a_write(pra, 1, 0x00);
+    assert!(bus.front_panel_status().audio_filter_on);
 }
 
 #[test]

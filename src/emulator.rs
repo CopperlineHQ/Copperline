@@ -575,13 +575,16 @@ impl Emulator {
         &mut self,
         load: impl FnOnce(&mut cpu::M68kMachine) -> Result<crate::config::MachineDescriptor>,
     ) -> Result<StateLoadOutcome> {
-        // Channel mode and stereo separation are host preferences, not part of
-        // the saved machine, so carry the current choices across the load.
+        // Channel mode, stereo separation, and the filter override are host
+        // preferences, not part of the saved machine, so carry the current
+        // choices across the load.
         let mono = self.bus_mut().paula.mono_output();
         let separation = self.bus_mut().paula.stereo_separation();
+        let filter = self.bus_mut().paula.led_filter_mode();
         let loaded = load(&mut self.machine)?;
         self.bus_mut().paula.set_mono_output(mono);
         self.bus_mut().paula.set_stereo_separation(separation);
+        self.bus_mut().paula.set_led_filter_mode(filter);
         let reconfigured = loaded != self.descriptor;
         if reconfigured {
             let diffs = self.descriptor.differences(&loaded).join(", ");
@@ -728,14 +731,16 @@ impl Emulator {
     /// coordinate to `pos`. The pacing anchor is re-baselined like a normal
     /// save-state load.
     fn restore_blob(&mut self, blob: &[u8], pos: u64) -> Result<()> {
-        // Preserve host-side channel mode + separation across the restore (see
-        // load_state).
+        // Preserve host-side channel mode, separation, and filter override
+        // across the restore (see load_state).
         let mono = self.bus_mut().paula.mono_output();
         let separation = self.bus_mut().paula.stereo_separation();
+        let filter = self.bus_mut().paula.led_filter_mode();
         let mut cursor = std::io::Cursor::new(blob);
         self.machine.apply_state(&mut cursor)?;
         self.bus_mut().paula.set_mono_output(mono);
         self.bus_mut().paula.set_stereo_separation(separation);
+        self.bus_mut().paula.set_led_filter_mode(filter);
         self.retired_instructions = pos;
         self.reset_live_audio_after_timeline_jump();
         self.reanchor_realtime_clock();
@@ -2042,6 +2047,7 @@ pub fn build_machine(
         .set_volume_percent(cfg.audio.floppy_sounds_volume);
     paula.set_mono_output(cfg.audio.channel_mode.is_mono());
     paula.set_stereo_separation(f32::from(cfg.audio.stereo_separation) / 100.0);
+    paula.set_led_filter_mode(cfg.audio.filter);
     if cfg.audio.channel_mode.is_mono() && cfg.audio.stereo_separation != 100 {
         log::warn!("[audio] stereo_separation is ignored while channel_mode is mono");
     }

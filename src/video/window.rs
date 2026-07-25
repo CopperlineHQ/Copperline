@@ -394,7 +394,12 @@ const STATUS_TOP: u32 = rgba(78, 76, 70);
 const STATUS_BOTTOM: u32 = rgba(12, 12, 11);
 const LED_BEZEL_DARK: u32 = rgba(8, 8, 7);
 const LED_BEZEL_LIGHT: u32 = rgba(78, 76, 68);
-const POWER_LED_ON: u32 = rgba(232, 31, 24);
+// The power LED is lit whenever the machine is powered. POWER_LED_NORMAL is the
+// resting lit red (the filter bypassed, its usual state); it burns to a more
+// intense POWER_LED_BRIGHT while Paula's analogue filter is engaged, as the real
+// /LED line drives it. POWER_LED_OFF is the unpowered bezel.
+const POWER_LED_BRIGHT: u32 = rgba(255, 38, 28);
+const POWER_LED_NORMAL: u32 = rgba(232, 31, 24);
 const POWER_LED_OFF: u32 = rgba(66, 12, 10);
 const FDD_LED_ON: u32 = rgba(236, 142, 28);
 const FDD_LED_OFF: u32 = rgba(72, 38, 10);
@@ -1408,6 +1413,25 @@ impl App {
         self.show_osd(format!("Audio output: {}", self.audio_output.label()));
     }
 
+    /// Cycle Paula's analogue filter override: Auto (guest-driven) -> On -> Off.
+    /// Applies live and updates the PWR LED brightness on the next redraw.
+    fn cycle_audio_filter(&mut self) {
+        use crate::config::AudioFilterMode;
+        let next = match self.emu.bus().paula.led_filter_mode() {
+            AudioFilterMode::Auto => AudioFilterMode::On,
+            AudioFilterMode::On => AudioFilterMode::Off,
+            AudioFilterMode::Off => AudioFilterMode::Auto,
+        };
+        self.emu.bus_mut().paula.set_led_filter_mode(next);
+        let label = match next {
+            AudioFilterMode::Auto => "Auto",
+            AudioFilterMode::On => "Enabled",
+            AudioFilterMode::Off => "Disabled",
+        };
+        self.show_osd(format!("Audio filter: {label}"));
+        self.request_redraw();
+    }
+
     /// Step the live sampler input through "Default" then the host capture
     /// devices, rebuilding the capture so the change takes effect at once.
     /// Re-reads the device list so a just-connected device appears. A no-op when
@@ -2172,6 +2196,16 @@ impl ApplicationHandler for App {
                             self.cycle_audio_output()
                         }
                     }
+                    (KeyCode::KeyA, ElementState::Pressed)
+                        if host_shortcut_modifier_pressed(self.modifiers) =>
+                    {
+                        // Cycle Paula's analogue filter (auto -> on -> off),
+                        // the counterpart to Cmd/Alt+Shift+A. Ignored while a
+                        // menu or panel is open.
+                        if !self.modal_ui_active() {
+                            self.cycle_audio_filter()
+                        }
+                    }
                     (KeyCode::Equal, ElementState::Pressed)
                         if host_shortcut_modifier_pressed(self.modifiers)
                             && self.modifiers.shift_key() =>
@@ -2551,6 +2585,7 @@ impl ApplicationHandler for App {
                             midi_in: &midi_in_label,
                             midi_out: &midi_out_label,
                             audio_output: self.audio_output.label(),
+                            audio_filter: self.emu.bus().paula.led_filter_mode(),
                             sampler_input: &sampler_input_label,
                             sampler_gain: &sampler_gain_label,
                         },
@@ -3533,6 +3568,7 @@ impl App {
                     ui::MenuItem::PixelAspect => self.toggle_pixel_aspect(),
                     ui::MenuItem::FloppySpeed => self.cycle_floppy_speed(),
                     ui::MenuItem::AudioOutput => self.cycle_audio_output(),
+                    ui::MenuItem::AudioFilter => self.cycle_audio_filter(),
                     ui::MenuItem::Fullscreen => self.toggle_fullscreen(),
                     ui::MenuItem::StatusBar => self.toggle_status_bar(),
                     ui::MenuItem::Warp => self.toggle_warp(),

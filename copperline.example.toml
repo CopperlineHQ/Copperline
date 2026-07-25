@@ -369,6 +369,13 @@ floppy_sounds_volume = 100
 # values narrow it and 0 collapses to mono. Also `--audio-stereo-separation`.
 # stereo_separation = 100
 
+# Paula's analogue low-pass ("power LED") filter. "auto" (default) lets the
+# guest drive it through CIA-A's /LED line, as real hardware does; "on" and
+# "off" force it regardless of the software. Also `--audio-filter`, the runtime
+# Audio Filter menu item, and Cmd/Alt+A. The PWR LED burns brighter while the
+# filter is engaged.
+# audio_filter = "auto"
+
 
 # Host input preferences.
 # [input]

@@ -498,6 +498,12 @@ where
                         .ok_or_else(|| anyhow!("--audio-channel-mode requires stereo or mono"))?,
                 );
             }
+            "--audio-filter" => {
+                overrides.audio_filter = Some(
+                    args.next()
+                        .ok_or_else(|| anyhow!("--audio-filter requires auto, on, or off"))?,
+                );
+            }
             "--audio-stereo-separation" => {
                 let v = args.next().ok_or_else(|| {
                     anyhow!("--audio-stereo-separation requires a percent (0-100)")
@@ -984,6 +990,7 @@ fn print_help() {
          --noaudio                      disable real-time audio output\n  \
          --audio-device NAME            host audio output device (substring match)\n  \
          --audio-channel-mode MODE      output channels: stereo (default) or mono\n  \
+         --audio-filter MODE            Paula filter: auto (default), on, or off\n  \
          --audio-stereo-separation PCT  stereo width 0-100 (100 default, 0 = mono)\n  \
          --list-audio-devices           list host audio output devices and exit\n  \
          --audio-wav PATH               dump mixed stereo audio to a 32-bit float WAV file\n  \
@@ -1769,7 +1776,7 @@ fn run_live_audio_profile(secs: f32) -> Result<()> {
     // and it always uses the default output device.
     let audio = Box::new(CpalSink::new(priority::requested(false), None)?);
     let mut paula = Paula::new(Box::new(StdoutSink::new()), audio);
-    paula.set_led_filter_enabled(true);
+    paula.set_led_filter_guest(true);
 
     let mut chip_ram = vec![0u8; 64];
     chip_ram[0] = 0x40;

@@ -337,6 +337,12 @@ fn default_stereo_separation() -> f32 {
     1.0
 }
 
+/// serde default for `led_filter_guest_on`: the guest's /LED line reads engaged
+/// until it drives it otherwise, matching the power-on default.
+fn default_true() -> bool {
+    true
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Paula {
     pub serper: u16,
@@ -384,7 +390,18 @@ pub struct Paula {
     // time this reaches PAULA_CLOCK_HZ.
     host_sample_acc: u64,
 
+    /// Effective filter state (what the mix actually applies), resolved from
+    /// the mode and the guest's /LED line.
     led_filter_enabled: bool,
+    /// User override: `Auto` follows the guest, `On`/`Off` force it. A host
+    /// preference, skipped and carried across state loads from config like
+    /// mono_output.
+    #[serde(skip)]
+    led_filter_mode: crate::config::AudioFilterMode,
+    /// The guest's request via CIA-A /LED (bit 1 low = engaged); what `Auto`
+    /// follows. Machine state, so it rides the save state.
+    #[serde(default = "default_true")]
+    led_filter_guest_on: bool,
     led_filter: StereoLedFilter,
     output_volume: f32,
     // Host output preference: average L/R into both channels. Not part of the
@@ -463,6 +480,8 @@ impl Paula {
             test_line_cck: 0,
             host_sample_acc: 0,
             led_filter_enabled: true,
+            led_filter_mode: crate::config::AudioFilterMode::Auto,
+            led_filter_guest_on: true,
             led_filter: StereoLedFilter::new(),
             output_volume: 1.0,
             mono_output: false,
@@ -619,12 +638,37 @@ impl Paula {
         self.pot_active = [false; 4];
         self.pot_discharge_lines = 0;
         self.host_sample_acc = 0;
-        self.led_filter_enabled = true;
+        // A reset releases the guest's /LED line; the filter override is a host
+        // preference and stays put.
+        self.led_filter_guest_on = true;
+        self.recompute_led_filter();
         self.led_filter = StereoLedFilter::new();
     }
 
-    pub fn set_led_filter_enabled(&mut self, enabled: bool) {
-        self.led_filter_enabled = enabled;
+    /// Record the guest's /LED line (CIA-A PRA bit 1: true = engaged). Followed
+    /// only in `Auto` mode.
+    pub fn set_led_filter_guest(&mut self, on: bool) {
+        self.led_filter_guest_on = on;
+        self.recompute_led_filter();
+    }
+
+    /// Set the user's filter override (`Auto`/`On`/`Off`).
+    pub fn set_led_filter_mode(&mut self, mode: crate::config::AudioFilterMode) {
+        self.led_filter_mode = mode;
+        self.recompute_led_filter();
+    }
+
+    pub fn led_filter_mode(&self) -> crate::config::AudioFilterMode {
+        self.led_filter_mode
+    }
+
+    fn recompute_led_filter(&mut self) {
+        use crate::config::AudioFilterMode;
+        self.led_filter_enabled = match self.led_filter_mode {
+            AudioFilterMode::On => true,
+            AudioFilterMode::Off => false,
+            AudioFilterMode::Auto => self.led_filter_guest_on,
+        };
     }
 
     /// Publish the emulated-to-host time mapping to the serial sink.
@@ -2067,9 +2111,30 @@ mod tests {
     }
 
     #[test]
+    fn audio_filter_mode_overrides_the_guest_led_line() {
+        use crate::config::AudioFilterMode;
+        let (mut paula, _frames) = paula_with_collect_sink();
+        // Auto follows the guest /LED line.
+        paula.set_led_filter_mode(AudioFilterMode::Auto);
+        paula.set_led_filter_guest(true);
+        assert!(paula.led_filter_enabled());
+        paula.set_led_filter_guest(false);
+        assert!(!paula.led_filter_enabled());
+        // On forces the filter engaged whatever the guest asks.
+        paula.set_led_filter_mode(AudioFilterMode::On);
+        assert!(paula.led_filter_enabled());
+        paula.set_led_filter_guest(false);
+        assert!(paula.led_filter_enabled());
+        // Off forces it bypassed whatever the guest asks.
+        paula.set_led_filter_mode(AudioFilterMode::Off);
+        paula.set_led_filter_guest(true);
+        assert!(!paula.led_filter_enabled());
+    }
+
+    #[test]
     fn audio_capture_tap_mirrors_sink_frames_before_master_volume() {
         let (mut paula, frames) = paula_with_collect_sink();
-        paula.set_led_filter_enabled(false);
+        paula.set_led_filter_guest(false);
         paula.set_output_volume_percent(50);
         let mut ram = vec![0u8; 512 * 1024];
         ram[0] = 0x7F;
@@ -2109,7 +2174,7 @@ mod tests {
     #[test]
     fn large_audio_tick_emits_chronological_samples() {
         let (mut paula, frames) = paula_with_collect_sink();
-        paula.set_led_filter_enabled(false);
+        paula.set_led_filter_guest(false);
         let mut ram = vec![0u8; 512 * 1024];
         ram[0] = 0x7F;
         ram[1] = 0x81;
@@ -2688,7 +2753,7 @@ mod tests {
     #[test]
     fn cd_audio_mute_zeroes_cd_contribution_but_scope_keeps_tracing() {
         let (mut paula, frames) = paula_with_collect_sink();
-        paula.set_led_filter_enabled(false);
+        paula.set_led_filter_guest(false);
         let ram = vec![0u8; 64];
         // One CD-DA sector (2352 bytes = 588 s16le stereo frames) of a
         // constant non-zero level.
@@ -2865,7 +2930,7 @@ mod tests {
         {
             let wav = WavSink::new(&path).expect("create wav sink");
             let mut paula = Paula::new(Box::new(NoopSerial), Box::new(wav));
-            paula.set_led_filter_enabled(false);
+            paula.set_led_filter_guest(false);
             let mut ram = vec![0u8; 64];
             ram[0] = 0x40;
             ram[1] = 0xC0;
@@ -2914,7 +2979,7 @@ mod tests {
         {
             let wav = WavSink::new(&path).expect("create wav sink");
             let mut paula = Paula::new(Box::new(NoopSerial), Box::new(wav));
-            paula.set_led_filter_enabled(false);
+            paula.set_led_filter_guest(false);
 
             for ch_idx in 0..4 {
                 paula.chans[ch_idx].current = 64;
@@ -3310,7 +3375,7 @@ mod tests {
     #[test]
     fn adkcon_attached_source_channel_is_not_mixed_to_dac() {
         let (mut paula, frames) = paula_with_collect_sink();
-        paula.set_led_filter_enabled(false);
+        paula.set_led_filter_guest(false);
         paula.chans[0].current = 127;
         paula.chans[0].audvol = 64;
         paula.chans[1].current = 127;
@@ -3329,7 +3394,7 @@ mod tests {
     fn led_filter_attenuates_high_frequency_output() {
         fn alternating_average(filter_enabled: bool) -> f32 {
             let (mut paula, frames) = paula_with_collect_sink();
-            paula.set_led_filter_enabled(filter_enabled);
+            paula.set_led_filter_guest(filter_enabled);
             paula.chans[0].audvol = 64;
             for i in 0..256 {
                 paula.chans[0].current = if i & 1 == 0 { 127 } else { -127 };
@@ -3397,7 +3462,7 @@ mod tests {
             {
                 let wav = WavSink::new(&path).expect("create wav sink");
                 let mut paula = Paula::new(Box::new(NoopSerial), Box::new(wav));
-                paula.set_led_filter_enabled(filter_enabled);
+                paula.set_led_filter_guest(filter_enabled);
                 paula.chans[0].audvol = 64;
                 for i in 0..256 {
                     paula.chans[0].current = if i & 1 == 0 { 127 } else { -127 };
@@ -3432,7 +3497,7 @@ mod tests {
     #[test]
     fn host_output_volume_scales_mixed_audio_without_changing_audvol() {
         let (mut paula, frames) = paula_with_collect_sink();
-        paula.set_led_filter_enabled(false);
+        paula.set_led_filter_guest(false);
         paula.set_output_volume_percent(50);
         paula.chans[0].current = 64;
         paula.chans[0].audvol = 64;
@@ -3449,7 +3514,7 @@ mod tests {
     #[test]
     fn mono_output_averages_left_and_right_into_both_channels() {
         let (mut paula, frames) = paula_with_collect_sink();
-        paula.set_led_filter_enabled(false);
+        paula.set_led_filter_guest(false);
         paula.set_mono_output(true);
         // Drive only a left channel (0); the right side stays silent, so stereo
         // output would be (0.5, 0.0) and mono is the average, 0.25, in both.
@@ -3468,7 +3533,7 @@ mod tests {
         // Drive left channel only: hardware panning gives (0.5, 0.0).
         let out = |sep: f32| {
             let (mut paula, frames) = paula_with_collect_sink();
-            paula.set_led_filter_enabled(false);
+            paula.set_led_filter_guest(false);
             paula.set_stereo_separation(sep);
             paula.chans[0].current = 64;
             paula.chans[0].audvol = 64;
