@@ -94,8 +94,11 @@ arboard = { version = "3", default-features = false, features = ["wayland-data-c
 # set: the Cranelift JIT + runtime only -- no WASI, component model, GC, threads,
 # or wat parsing in the shipped binary (kept deterministic; see the determinism
 # Config in wasmboard.rs). Pin the version: save-state replay of a plugin's
-# linear-memory snapshot is only guaranteed within one wasmtime build.
-wasmtime = { version = "=27.0.0", default-features = false, features = ["cranelift", "runtime"], optional = true }
+# linear-memory snapshot is only guaranteed within one wasmtime build, so
+# changing this is a savestate::STATE_VERSION bump, not a routine update.
+# Track an LTS line (24.x, 36.x, 48.x, ...): those keep receiving security
+# backports, which the line this was previously pinned to (27.x) did not.
+wasmtime = { version = "=36.0.12", default-features = false, features = ["cranelift", "runtime"], optional = true }
 # Userspace TCP/IP stack for the NAT backend (src/net/nat/): terminates the
 # guest's ARP and TCP on the virtual gateway so flows can be spliced onto host
 # sockets. Pure Rust, 0BSD, lean feature set: Ethernet + IPv4 + TCP sockets

@@ -139,7 +139,13 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //  39: Rp5c01Rtc gained the battmem backing-file binding (battmem_path,
 //      battmem_dirty - [machine] battmem), so a resumed run keeps
 //      persisting battery RAM to the same file
-pub const STATE_VERSION: u32 = 39;
+//  40: the WASM plugin host moved from wasmtime 27 to the 36 LTS. A board
+//      snapshot stores a linear-memory image replayed against a module
+//      recompiled at load time, so the serialized shape is unchanged and
+//      an older state would still deserialize - and then run against
+//      different codegen. Bump so it is refused rather than resumed into
+//      a silent divergence (see the wasmtime pin in Cargo.toml)
+pub const STATE_VERSION: u32 = 40;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {
