@@ -321,7 +321,7 @@ refreshed (or a count sitting on an 8-iteration display-bucket edge flips a
 whole bar word). Re-bless and review the diff after a ROM refresh.
 
 Each probe is its own `#[test]`, so the harness runs the emulator boots in
-parallel on the available cores (the full suite of 22 takes ~20 s on an
+parallel on the available cores (the full suite of 23 takes ~20 s on an
 8-core host vs ~90 s sequentially).
 
 Covered: `timing-test` (all 32 timing rows as rendered hex), `ddfprobe`
@@ -371,7 +371,14 @@ fetch disarms every channel and overwrites SPR0's data words, then SPREN
 off again with an arm-with-zero on SPR0 that must stay invisible, a full
 manual re-arm on SPR2 and a DATA-only re-arm on SPR6 that must both
 appear as full-height bars -- the Hamazing scene-switch stale-bar
-regression class; vAmiga-verified).
+regression class; vAmiga-verified), and
+`sprprobe-disarm` (a SPRxCTL write between a sprite DMA fetch slot and
+that channel's HSTART disarms Denise before the serializer loads, so the
+fetched line vanishes -- including when a later same-line SPRxPOS write
+repositions it -- while a CTL write past HSTART leaves the bar intact; the
+interventions write the channel's own control words, so the disarm is the
+only variable. The Hybris status-panel stray-dash class, issue #278;
+vAmiga-verified byte-for-byte).
 Excluded by design: `ddfprobe-cc5`/`-cc6` sit on deliberate
 race boundaries and would flip on any unrelated timing change, and
 `ddfprobe-cc7` replays a chip-RAM dump of a running demo that is not

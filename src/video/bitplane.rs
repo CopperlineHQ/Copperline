@@ -3709,11 +3709,16 @@ pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
         !input.sprite_dma_observed,
         input.sprite_dma_observed,
     );
+    // A SPRxCTL write between a fetch slot and that channel's HSTART disarms
+    // Denise before the serializer ever loads the fetched words, so those
+    // captured lines are not displayed at all.
+    let armed_captured_sprite_lines =
+        retain_armed_captured_sprite_lines(&input.captured_sprite_lines, render_events);
     if input.sprite_dma_observed {
         let dma_seeded_lines = manual_sprite_lines_from_captured_dma_reuse(
             &state,
             render_events,
-            &input.captured_sprite_lines,
+            &armed_captured_sprite_lines,
             visible_line0,
             rows,
         );
@@ -3795,7 +3800,7 @@ pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
         }
     }
     let has_captured_bitplane_rows = captured_bitplane_rows.iter().any(Option::is_some);
-    let captured_sprite_lines = input.captured_sprite_lines.as_slice();
+    let captured_sprite_lines = armed_captured_sprite_lines.as_ref();
     let sprite_display_enable_x_by_y = input.sprite_display_enable_x_by_y.as_slice();
     let sprite_dma_observed = input.sprite_dma_observed;
     render_timing.sprite_lines = captured_sprite_lines.len() as u64
@@ -4347,7 +4352,7 @@ pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
         input.emulated_frames,
         &state,
         fb,
-        input.captured_sprite_lines.as_slice(),
+        captured_sprite_lines,
         input.sprite_dma_observed,
         &manual_sprite_lines,
         &base_palettes,
