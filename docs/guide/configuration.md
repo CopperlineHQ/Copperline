@@ -48,6 +48,7 @@ range checks as the equivalent TOML fields:
 | `--floppy-drives COUNT` | `[floppy] drives` | `1` to `4` wired drives (`DF0:` plus external drives) |
 | `--floppy-speed PERCENT` | `[floppy] speed` | `100` (real), `200`, `400`, `800`, or `0` (turbo) |
 | `--joystick MODE` | `[input] joystick` | `gamepad` (default), `keyboard` |
+| `--mouse-sensitivity N` | `[input] mouse_sensitivity` | `0`-`100` host mouse speed (`50` default = 1:1) |
 | `--port1 DEVICE` | `[input] port1` | `mouse` (default), `joystick`, `cd32`, `analogue`, `none` |
 | `--port2 DEVICE` | `[input] port2` | same devices; default `joystick` (`cd32` on the CD32 profile) |
 
@@ -524,9 +525,10 @@ Windows select each device directly.
 
 ```toml
 [input]
-port1 = "mouse"        # mouse | joystick | cd32 | analogue | none
-port2 = "joystick"     # same values; default "cd32" on the CD32 profile
-joystick = "gamepad"   # "gamepad" (default) or "keyboard"
+port1 = "mouse"           # mouse | joystick | cd32 | analogue | none
+port2 = "joystick"        # same values; default "cd32" on the CD32 profile
+joystick = "gamepad"      # "gamepad" (default) or "keyboard"
+mouse_sensitivity = 50    # host mouse speed 0-100 (50 default = 1:1)
 ```
 
 ### Port devices
@@ -590,6 +592,16 @@ keyboard icon next to the volume control), `Cmd+J` / `Alt+J`, the menu's
 without changing the config. `--joystick MODE` overrides this for a single
 run. (`auto` is still accepted here as a backward-compatibility alias for
 `gamepad`; the old auto-detect mode has been removed.)
+
+`mouse_sensitivity` scales how fast the emulated pointer tracks the host
+mouse, 0-100. `50` (the default, shown as *Default* in the GUI) is 1:1 --
+exactly the previous behaviour -- `0` is a quarter speed and `100` quadruple,
+on an exponential scale so each step is an even ratio. It is a host-input
+scale applied to live mouse motion only: it never touches the emulated machine
+or scripted `--mouse-after` input, so headless and recorded runs stay
+deterministic. Set it from the launcher's *Input* tab or
+`--mouse-sensitivity N`, and adjust it live with `Cmd+Shift+>` / `Cmd+Shift+<`
+(`Alt+Shift+>` / `Alt+Shift+<` on Linux and Windows), which ramp while held.
 
 ## `[serial]` -- serial port and MIDI
 

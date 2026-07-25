@@ -329,6 +329,7 @@ pub enum LauncherField {
     Warp,
     // Input
     Joystick,
+    MouseSensitivity,
     Port1Device,
     Port2Device,
 }
@@ -545,10 +546,11 @@ const AV_EMULATION_ROWS: [Row; 13] = [
     row(F::RealtimePriority, "Realtime priority", Toggle),
     row(F::Warp, "Warp speed", Cycle),
 ];
-const INPUT_ROWS: [Row; 3] = [
+const INPUT_ROWS: [Row; 4] = [
     row(F::Port1Device, "Port 1", Cycle),
     row(F::Port2Device, "Port 2", Cycle),
     row(F::Joystick, "Joystick input", Cycle),
+    row(F::MouseSensitivity, "Mouse sensitivity", Cycle),
 ];
 
 /// The rows shown on a tab, top to bottom. Most tabs are fixed and borrow their
@@ -937,6 +939,7 @@ pub struct MachineSetup {
     realtime_priority: bool,
     warp: WarpSpeed,
     joystick_input_mode: JoystickInputMode,
+    mouse_sensitivity: u8,
     port_devices: [PortDevice; 2],
     // Extra Zorro boards (metadata path + plugin config schema/overrides)
     zorro_boards: Vec<ZorroBoardSetup>,
@@ -1061,6 +1064,7 @@ impl MachineSetup {
             realtime_priority: cfg.emulation.realtime_priority,
             warp: cfg.emulation.warp_speed,
             joystick_input_mode: cfg.joystick_input_mode,
+            mouse_sensitivity: cfg.mouse_sensitivity,
             port_devices: cfg.port_devices,
             zorro_boards: raw
                 .zorro
@@ -1344,6 +1348,9 @@ impl MachineSetup {
         if self.joystick_input_mode != base.joystick_input_mode {
             raw.input.joystick = Some(self.joystick_input_mode.label().to_string());
         }
+        if self.mouse_sensitivity != base.mouse_sensitivity {
+            raw.input.mouse_sensitivity = Some(u16::from(self.mouse_sensitivity));
+        }
         // Per port against the profile baseline, so a CD32 keeps its pad
         // implicit and a stock machine emits no port keys at all.
         if self.port_devices[0] != base.port_devices[0] {
@@ -1498,6 +1505,7 @@ impl MachineSetup {
         self.realtime_priority = base.emulation.realtime_priority;
         self.warp = base.emulation.warp_speed;
         self.joystick_input_mode = base.joystick_input_mode;
+        self.mouse_sensitivity = base.mouse_sensitivity;
         self.port_devices = base.port_devices;
         if !self.has_ide() {
             self.ide_master = None;
@@ -1627,6 +1635,10 @@ impl MachineSetup {
                 } else {
                     reason(self.audio_channel_mode != ChannelMode::Mono, "mono")
                 }
+            }
+            // Mouse sensitivity does nothing unless a port holds a mouse.
+            F::MouseSensitivity => {
+                reason(self.port_devices.contains(&PortDevice::Mouse), "no mouse")
             }
             _ => None,
         }
@@ -1852,6 +1864,7 @@ impl MachineSetup {
                 JoystickInputMode::Keyboard => "Keyboard".to_string(),
                 JoystickInputMode::Gamepad => "Gamepad".to_string(),
             },
+            F::MouseSensitivity => crate::config::mouse_sensitivity_label(self.mouse_sensitivity),
             F::Port1Device => port_device_display(self.port_devices[0]).to_string(),
             F::Port2Device => port_device_display(self.port_devices[1]).to_string(),
             F::ScsiController => match self.scsi_controller {
@@ -2034,6 +2047,13 @@ impl MachineSetup {
             F::Joystick => {
                 self.joystick_input_mode =
                     cycle_slice(&JOYSTICK_MODES, self.joystick_input_mode, forward)
+            }
+            F::MouseSensitivity => {
+                self.mouse_sensitivity = if forward {
+                    self.mouse_sensitivity.saturating_add(1).min(100)
+                } else {
+                    self.mouse_sensitivity.saturating_sub(1)
+                }
             }
             F::Port1Device => {
                 self.port_devices[0] = cycle_slice(&PORT_DEVICES, self.port_devices[0], forward)
@@ -2974,6 +2994,39 @@ mod tests {
         assert!(raw.cpu.model.is_none());
         assert!(raw.chipset.revision.is_none());
         assert!(s.build_config().is_ok());
+    }
+
+    #[test]
+    fn mouse_sensitivity_round_trips_through_raw() {
+        let mut s = MachineSetup::default();
+        // The neutral midpoint shows as "Default" and matches the baseline, so
+        // nothing is written.
+        assert_eq!(s.value_label(LauncherField::MouseSensitivity), "Default");
+        assert_eq!(s.to_raw().input.mouse_sensitivity, None);
+
+        // Cycle down twice (step 1): 50 -> 49 -> 48, and it now persists.
+        s.cycle(LauncherField::MouseSensitivity, false);
+        s.cycle(LauncherField::MouseSensitivity, false);
+        assert_eq!(s.value_label(LauncherField::MouseSensitivity), "48");
+        assert_eq!(s.to_raw().input.mouse_sensitivity, Some(48));
+    }
+
+    #[test]
+    fn mouse_sensitivity_greys_out_without_a_mouse() {
+        let mut s = MachineSetup::default();
+        // The default A500 has a mouse in port 1, so it is active.
+        assert_eq!(s.disabled_reason(LauncherField::MouseSensitivity), None);
+
+        // Neither port a mouse: greyed.
+        s.port_devices = [PortDevice::Joystick, PortDevice::Joystick];
+        assert_eq!(
+            s.disabled_reason(LauncherField::MouseSensitivity),
+            Some("no mouse")
+        );
+
+        // A mouse in either port re-enables it.
+        s.port_devices = [PortDevice::Joystick, PortDevice::Mouse];
+        assert_eq!(s.disabled_reason(LauncherField::MouseSensitivity), None);
     }
 
     #[test]

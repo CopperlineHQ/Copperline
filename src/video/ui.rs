@@ -4067,12 +4067,15 @@ fn draw_launcher_row(
         scale,
     );
     // Greyed: explain why instead of drawing controls (e.g. "needs 32-bit CPU").
-    // The audio shaping rows are the exception -- channel mode and separation are
-    // merely inapplicable (audio disabled, or separation in mono), so the greyed
-    // label alone says enough and column 2 is left blank.
+    // The shaping rows are the exception -- channel mode, separation and mouse
+    // sensitivity are merely inapplicable (audio disabled, separation in mono,
+    // or no mouse in either port), so the greyed label alone says enough and
+    // column 2 is left blank.
     let blank_when_greyed = matches!(
         r.field,
-        LauncherField::AudioChannelMode | LauncherField::AudioStereoSeparation
+        LauncherField::AudioChannelMode
+            | LauncherField::AudioStereoSeparation
+            | LauncherField::MouseSensitivity
     );
     if let Some(reason) = reason {
         if !blank_when_greyed {

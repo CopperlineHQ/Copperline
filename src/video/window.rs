@@ -441,6 +441,13 @@ const WINDOW_TITLE: &str = concat!("Copperline ", env!("COPPERLINE_DISPLAY_VERSI
 const COPPERLINE_LOGO_PNG: &[u8] = include_bytes!("../../assets/brand/copperline-logo.png");
 const COPPERLINE_ICON_PNG: &[u8] = include_bytes!("../../assets/brand/copperline-icon.png");
 const MOUSE_MOTION_SCALE: f64 = 1.0;
+
+/// Host mouse speed multiplier for a 0-100 sensitivity. Exponential so 50 is
+/// exactly 1:1 (2^0), 0 is a quarter speed (2^-2) and 100 quadruple (2^2),
+/// with perceptually even steps between.
+fn mouse_sensitivity_factor(sensitivity: u8) -> f64 {
+    2.0_f64.powf((f64::from(sensitivity.min(100)) - 50.0) / 25.0)
+}
 /// How long a transient on-screen overlay message (screenshot saved,
 /// disk swapped) stays visible.
 const OSD_DURATION: std::time::Duration = std::time::Duration::from_millis(2500);
@@ -734,6 +741,11 @@ pub struct App {
     gamepad: crate::gamepad::GamepadReader,
     /// Host source policy for the emulated port-2 joystick/CD32 pad.
     joystick_input_mode: JoystickInputMode,
+    /// Host mouse sensitivity, 0-100 ([input] mouse_sensitivity), and the speed
+    /// multiplier derived from it. A host-input scale only: it multiplies the
+    /// live host mouse delta, never scripted --mouse-after input or the core.
+    mouse_sensitivity: u8,
+    mouse_sensitivity_factor: f64,
     /// Whether the serial port is bridged to MIDI, so the runtime menu offers
     /// the device items. Fixed for the machine's life.
     serial_is_midi: bool,
@@ -1002,6 +1014,7 @@ impl App {
         phosphor: f32,
         warp_speed: WarpSpeed,
         joystick_input_mode: JoystickInputMode,
+        mouse_sensitivity: u8,
         about_machine_lines: Vec<String>,
         machine_config: RawConfig,
         // Effective live-audio state for this machine: for a real machine the
@@ -1131,6 +1144,8 @@ impl App {
             overscan,
             gamepad: crate::gamepad::GamepadReader::new(),
             joystick_input_mode,
+            mouse_sensitivity,
+            mouse_sensitivity_factor: mouse_sensitivity_factor(mouse_sensitivity),
             warp_speed,
             keyboard_joy_held: [KeyboardJoystickHeld::default(); 2],
             ui: UiState::default(),
@@ -2225,6 +2240,24 @@ impl ApplicationHandler for App {
                             self.step_sampler_gain(false)
                         }
                     }
+                    (KeyCode::Period, ElementState::Pressed)
+                        if host_shortcut_modifier_pressed(self.modifiers)
+                            && self.modifiers.shift_key() =>
+                    {
+                        // Raise the host mouse sensitivity (Shift+. is ">").
+                        if !self.modal_ui_active() {
+                            self.step_mouse_sensitivity(true)
+                        }
+                    }
+                    (KeyCode::Comma, ElementState::Pressed)
+                        if host_shortcut_modifier_pressed(self.modifiers)
+                            && self.modifiers.shift_key() =>
+                    {
+                        // Lower the host mouse sensitivity (Shift+, is "<").
+                        if !self.modal_ui_active() {
+                            self.step_mouse_sensitivity(false)
+                        }
+                    }
                     (other, state) => {
                         let pressed = state == ElementState::Pressed;
                         if pressed && self.ui_handle_key(other, text.as_deref()) {
@@ -3132,13 +3165,43 @@ impl App {
         if !dx.is_finite() || !dy.is_finite() {
             return;
         }
-        self.mouse_delta_remainder.0 += dx * MOUSE_MOTION_SCALE;
-        self.mouse_delta_remainder.1 += dy * MOUSE_MOTION_SCALE;
+        // The sensitivity scale is applied to the live host mouse only, here --
+        // scripted --mouse-after deltas go through apply_scripted_mouse_delta
+        // and stay exact, so the core is deterministic regardless of it.
+        let scale = MOUSE_MOTION_SCALE * self.mouse_sensitivity_factor;
+        self.mouse_delta_remainder.0 += dx * scale;
+        self.mouse_delta_remainder.1 += dy * scale;
         let ix = take_integral_mouse_delta(&mut self.mouse_delta_remainder.0);
         let iy = take_integral_mouse_delta(&mut self.mouse_delta_remainder.1);
         if ix != 0 || iy != 0 {
             self.add_mouse_delta_i32(ix, iy);
         }
+    }
+
+    /// Set the host mouse sensitivity (0-100), recomputing the speed factor.
+    fn set_mouse_sensitivity(&mut self, sensitivity: u8) {
+        self.mouse_sensitivity = sensitivity.min(100);
+        self.mouse_sensitivity_factor = mouse_sensitivity_factor(self.mouse_sensitivity);
+    }
+
+    /// Nudge the mouse sensitivity by one, clamped to 0-100, with an on-screen
+    /// readout. Bound to the Cmd/Alt+Shift+> / < shortcuts, which ramp while
+    /// held via key repeat. A no-op when no port holds a mouse, since the scale
+    /// would have nothing to act on.
+    fn step_mouse_sensitivity(&mut self, up: bool) {
+        if self.mouse_port().is_none() {
+            return;
+        }
+        let next = if up {
+            self.mouse_sensitivity.saturating_add(1)
+        } else {
+            self.mouse_sensitivity.saturating_sub(1)
+        };
+        self.set_mouse_sensitivity(next);
+        self.show_osd(format!(
+            "Mouse sensitivity: {}",
+            crate::config::mouse_sensitivity_label(self.mouse_sensitivity)
+        ));
     }
 
     fn add_mouse_delta_i32(&mut self, dx: i32, dy: i32) {
@@ -4861,6 +4924,7 @@ impl App {
         // Reset the host joystick source to the new machine's configured
         // start-up mode (a previous live Cmd+J toggle does not carry over).
         self.joystick_input_mode = cfg.joystick_input_mode;
+        self.set_mouse_sensitivity(cfg.mouse_sensitivity);
         self.keyboard_joy_held = [KeyboardJoystickHeld::default(); 2];
         self.about_machine_lines = crate::config::about_machine_lines(cfg);
         self.deinterlacer =
