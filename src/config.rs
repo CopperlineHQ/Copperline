@@ -662,6 +662,38 @@ pub(crate) fn parse_channel_mode(s: &str) -> Result<ChannelMode> {
     }
 }
 
+/// Control over Paula's analogue low-pass ("power LED") filter. `Auto` lets the
+/// guest drive it through CIA-A's /LED line, as real hardware does; `On`/`Off`
+/// force it regardless of what the software asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum AudioFilterMode {
+    #[default]
+    Auto,
+    On,
+    Off,
+}
+
+impl AudioFilterMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            AudioFilterMode::Auto => "auto",
+            AudioFilterMode::On => "on",
+            AudioFilterMode::Off => "off",
+        }
+    }
+}
+
+pub(crate) fn parse_audio_filter_mode(s: &str) -> Result<AudioFilterMode> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "auto" => Ok(AudioFilterMode::Auto),
+        "on" | "enabled" | "true" => Ok(AudioFilterMode::On),
+        "off" | "disabled" | "false" => Ok(AudioFilterMode::Off),
+        other => {
+            bail!("unknown [audio] audio_filter {other:?}; expected \"auto\", \"on\", or \"off\"")
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioConfig {
     /// Synthesized floppy-drive sound effects: motor hum, head-step
@@ -682,6 +714,8 @@ pub struct AudioConfig {
     /// Stereo width, 0-100. 100 keeps the hardware left/right panning (default),
     /// 0 collapses to mono; values between narrow the separation.
     pub stereo_separation: u8,
+    /// Paula's analogue low-pass filter: guest-driven (`Auto`) or forced.
+    pub filter: AudioFilterMode,
 }
 
 impl Default for AudioConfig {
@@ -693,6 +727,7 @@ impl Default for AudioConfig {
             output_enabled: true,
             channel_mode: ChannelMode::Stereo,
             stereo_separation: 100,
+            filter: AudioFilterMode::Auto,
         }
     }
 }
@@ -1360,6 +1395,8 @@ pub struct ConfigOverrides {
     pub audio_device: Option<String>,
     /// Output channel mode (`--audio-channel-mode`): "stereo" or "mono".
     pub audio_channel_mode: Option<String>,
+    /// Paula audio filter mode (`--audio-filter`): "auto", "on", or "off".
+    pub audio_filter: Option<String>,
     /// Stereo separation percent (`--audio-stereo-separation`), 0-100.
     pub audio_stereo_separation: Option<u16>,
     /// Power-on RTC value (`--rtc-time`): Unix seconds or
@@ -1400,6 +1437,7 @@ impl ConfigOverrides {
             && self.sampler_gain.is_none()
             && self.audio_device.is_none()
             && self.audio_channel_mode.is_none()
+            && self.audio_filter.is_none()
             && self.audio_stereo_separation.is_none()
             && self.rtc_time.is_none()
             && self.rtc_frozen.is_none()
@@ -1498,6 +1536,9 @@ impl ConfigOverrides {
         }
         if let Some(mode) = &self.audio_channel_mode {
             raw.audio.channel_mode = Some(mode.clone());
+        }
+        if let Some(filter) = &self.audio_filter {
+            raw.audio.audio_filter = Some(filter.clone());
         }
         if let Some(sep) = self.audio_stereo_separation {
             raw.audio.stereo_separation = Some(sep);
@@ -2052,6 +2093,12 @@ pub(crate) struct RawAudio {
     pub(crate) output_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) channel_mode: Option<String>,
+    // `filter` is accepted as an alias so a config that followed the #278
+    // request (which spelled it `[audio] filter`) still loads under
+    // deny_unknown_fields; `audio_filter` is canonical and matches
+    // `--audio-filter`.
+    #[serde(alias = "filter", skip_serializing_if = "Option::is_none")]
+    pub(crate) audio_filter: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) stereo_separation: Option<u16>,
 }
@@ -2326,6 +2373,16 @@ impl TryFrom<RawConfig> for Config {
                     errors.push(anyhow!("[audio] stereo_separation must be 0-100, got {v}"));
                     defaults.audio.stereo_separation
                 }
+            },
+            filter: match raw.audio.audio_filter.as_deref() {
+                None => defaults.audio.filter,
+                Some(s) => match parse_audio_filter_mode(s) {
+                    Ok(mode) => mode,
+                    Err(e) => {
+                        errors.push(e);
+                        defaults.audio.filter
+                    }
+                },
             },
         };
         let (floppy, floppy_connected, floppy_playlists) = parse_floppy(raw.floppy)?;
@@ -6176,6 +6233,46 @@ mod tests {
         assert_eq!(
             load_overrides(&overrides)?.audio.channel_mode,
             ChannelMode::Mono
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn audio_filter_defaults_to_auto_and_parses() -> Result<()> {
+        assert_eq!(parse_config("")?.audio.filter, AudioFilterMode::Auto);
+        assert_eq!(
+            parse_config("[audio]\naudio_filter = \"on\"\n")?
+                .audio
+                .filter,
+            AudioFilterMode::On
+        );
+        assert_eq!(
+            parse_config("[audio]\naudio_filter = \"OFF\"\n")?
+                .audio
+                .filter,
+            AudioFilterMode::Off
+        );
+        assert_eq!(
+            parse_config("[audio]\naudio_filter = \"disabled\"\n")?
+                .audio
+                .filter,
+            AudioFilterMode::Off
+        );
+        assert!(parse_config("[audio]\naudio_filter = \"sometimes\"\n").is_err());
+        // `filter` is accepted as an alias for `audio_filter`.
+        assert_eq!(
+            parse_config("[audio]\nfilter = \"off\"\n")?.audio.filter,
+            AudioFilterMode::Off
+        );
+
+        // CLI override.
+        let overrides = ConfigOverrides {
+            audio_filter: Some("on".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            load_overrides(&overrides)?.audio.filter,
+            AudioFilterMode::On
         );
         Ok(())
     }

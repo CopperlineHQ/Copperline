@@ -22,6 +22,7 @@ The app shortcut modifier is `Cmd` on macOS and `Alt` on Linux/Windows.
 | `Cmd+K` | `Alt+K` | Open the [debugger console](../debugger/console) |
 | `Cmd+J` | `Alt+J` | Toggle joystick input mode: gamepad / keyboard (also the status-bar icon) |
 | `Cmd+Shift+A` | `Alt+Shift+A` | Cycle the audio output: Default, each host device, then Disabled (also the menu's Audio Out item) |
+| `Cmd+A` | `Alt+A` | Cycle Paula's audio filter: auto, on, off (also the menu's Audio Filter item) |
 | `Cmd+Shift++` / `Cmd+Shift+-` | `Alt+Shift++` / `Alt+Shift+-` | Raise / lower the parallel-port sampler input gain (only when a sampler is attached; also the menu's Sampler Gain item) |
 | `Cmd+F` | `Alt+F` | Toggle fullscreen on / off |
 | `Cmd+Shift+F` | `Alt+Shift+F` | Show / hide the status bar |
@@ -57,7 +58,9 @@ menu item):
   or plays CD audio (on a machine whose CD drive is a SCSI CD-ROM unit,
   the LED shows CD-DA playback; its data reads ride the HDD LED with the
   rest of the SCSI bus). A small digital counter shows the current floppy
-  track.
+  track. The PWR LED is lit whenever the machine is powered and burns
+  brighter while Paula's analogue filter is engaged, as the real /LED line
+  drives it (see the **Audio Filter** menu item).
 - **Per-drive floppy controls.** Every connected drive gets a disk button
   (marked with the drive number) that opens a file dialog -- multi-select
   several images to queue a swap playlist for that drive -- plus a swap
@@ -133,6 +136,10 @@ tool window or overlay.
   output through the system default, each host output device, and
   **Disabled** (sound off entirely, equivalent to `--noaudio`). The
   device switches live without a restart.
+- **Audio Filter** (also `Cmd+A` / `Alt+A`): cycles Paula's analogue
+  low-pass filter through **auto** (guest-driven, the default), **on**, and
+  **off**. `on`/`off` force it regardless of what the software asks; `auto`
+  restores hardware behaviour. The PWR LED brightens while it is engaged.
 - **Calibrate Gamepad...**: the guided calibration flow, described below.
 - **Joystick Input** (also `Cmd+J` / `Alt+J`, or the status-bar icon):
   toggles between gamepad-only and keyboard joystick emulation.

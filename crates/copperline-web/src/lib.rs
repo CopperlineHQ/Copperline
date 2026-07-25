@@ -612,11 +612,12 @@ impl WebEmu {
             .map_err(js_err)
     }
 
-    /// Power LED, following CIA-A's /LED output like the desktop status
-    /// bar's LED block. The front-panel getters below are cheap enough to
-    /// poll once per animation frame.
+    /// Power LED: true while Paula's analogue filter is engaged (CIA-A's /LED
+    /// output), which the desktop status bar shows as the PWR LED brightness.
+    /// The front-panel getters below are cheap enough to poll once per
+    /// animation frame.
     pub fn power_led(&self) -> bool {
-        self.emu.bus().front_panel_status().power_led_on
+        self.emu.bus().front_panel_status().audio_filter_on
     }
 
     /// Floppy activity LED: lit while any drive's motor runs.

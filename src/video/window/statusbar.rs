@@ -355,11 +355,21 @@ pub(super) struct LedRowSpec {
 pub(super) fn led_rows(status: &FrontPanelStatus, powered_on: bool) -> Vec<LedRowSpec> {
     let mut rows = vec![
         LedRowSpec {
+            // Lit whenever powered, like a real Amiga; brighter when Paula's
+            // analogue filter is engaged.
             label: "PWR",
-            on: powered_on && status.power_led_on,
-            on_color: POWER_LED_ON,
+            on: powered_on,
+            on_color: if status.audio_filter_on {
+                POWER_LED_BRIGHT
+            } else {
+                POWER_LED_NORMAL
+            },
             off_color: POWER_LED_OFF,
-            highlight_on: rgba(255, 91, 82),
+            highlight_on: if status.audio_filter_on {
+                rgba(255, 120, 108)
+            } else {
+                rgba(255, 91, 82)
+            },
             highlight_off: rgba(90, 27, 24),
         },
         LedRowSpec {

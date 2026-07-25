@@ -64,10 +64,11 @@ explicit `[cpu]`/`[chipset]`/`[memory]` sections override a `[machine]`
 profile in a config file.
 
 The audio, serial, parallel, and network surface has matching per-run flags
-too -- `--audio-device`, `--audio-channel-mode`, `--audio-stereo-separation`,
-`--serial`, `--midi-in`, `--midi-out`, `--parallel`, `--sampler-audio-input`,
-`--sampler-input-gain`, `--a2065-net` -- described with their `[audio]`,
-`[serial]`, `[parallel]`, and `[a2065]` keys below.
+too -- `--audio-device`, `--audio-channel-mode`, `--audio-filter`,
+`--audio-stereo-separation`, `--serial`, `--midi-in`, `--midi-out`,
+`--parallel`, `--sampler-audio-input`, `--sampler-input-gain`, `--a2065-net` --
+described with their `[audio]`, `[serial]`, `[parallel]`, and `[a2065]` keys
+below.
 
 ## Top level
 
@@ -476,6 +477,7 @@ floppy_sounds_volume = 100  # 0-100, relative to Paula's output
 # output_enabled = true     # false = no sound (GUI "Disabled"); --audio/--noaudio still win
 channel_mode = "stereo"     # "stereo" (default) or "mono"
 stereo_separation = 100     # 0-100; 100 = hardware panning, 0 = mono
+audio_filter = "auto"       # Paula filter: "auto" (guest-driven), "on", or "off"
 ```
 
 The drive sounds are generated from scratch: motor hum with spin-up/down
@@ -502,6 +504,16 @@ at all (the launcher and runtime-menu "Disabled" option); the `--audio` and
 not change the emulated audio and are not stored in save states. The equivalent
 CLI flags are `--audio-device`, `--audio-channel-mode`, `--audio-stereo-separation`
 and `--list-audio-devices`.
+
+`audio_filter` controls Paula's analogue low-pass filter, the one a
+post-A1000 Amiga switches with the same CIA-A line that drives the power
+LED. `"auto"` (the default) lets the guest engage or bypass it as the
+software asks, matching real hardware; `"on"` and `"off"` force it either
+way as a listener override. Unlike the host-output settings above it is
+part of the emulated audio path, so it also affects WAV capture. Also on
+`--audio-filter`, the runtime **Audio Filter** menu item, and Cmd/Alt+A;
+the status-bar PWR LED is lit whenever the machine is powered and burns
+brighter while the filter is engaged.
 
 On Linux with PipeWire/PulseAudio, individual sinks are not ALSA devices, so
 only the `default`/`pipewire` route is offered; pick the output in the desktop

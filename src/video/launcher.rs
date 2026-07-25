@@ -23,7 +23,7 @@ use crate::bus::PortDevice;
 use crate::chipset::agnus::{AgnusRevision, VideoStandard};
 use crate::chipset::denise::DeniseRevision;
 use crate::config::{
-    format_size, machine_profile_defaults, ChannelMode, Chipset, Config, CpuModel,
+    format_size, machine_profile_defaults, AudioFilterMode, ChannelMode, Chipset, Config, CpuModel,
     JoystickInputMode, MachineModel, Overscan, PacingBudget, ParallelDevice, PixelAspect,
     RawConfig, RawDrive, RawFilesysMount, RawFloppyDrive, RawZorroBoard, RtgCard, ScsiController,
     SerialMode, WarpSpeed,
@@ -317,6 +317,7 @@ pub enum LauncherField {
     AudioDevice,
     AudioChannelMode,
     AudioStereoSeparation,
+    AudioFilter,
     Overscan,
     PixelAspect,
     Phosphor,
@@ -529,10 +530,11 @@ const PARALLEL_ROWS_SAMPLER: [Row; 3] = [
     row(F::SamplerGain, "Input gain", Cycle),
 ];
 const ETHERNET_ROWS: [Row; 1] = [row(F::Ethernet, "A2065 board", Cycle)];
-const AV_EMULATION_ROWS: [Row; 12] = [
+const AV_EMULATION_ROWS: [Row; 13] = [
     row(F::AudioDevice, "Audio output", Cycle),
     row(F::AudioChannelMode, "Channel mode", Cycle),
     row(F::AudioStereoSeparation, "Stereo separation", Cycle),
+    row(F::AudioFilter, "Audio filter", Cycle),
     row(F::Overscan, "Overscan", Cycle),
     row(F::PixelAspect, "Pixel aspect", Cycle),
     row(F::Phosphor, "Phosphor", Cycle),
@@ -735,6 +737,11 @@ const Z3_PRESETS: [usize; 8] = [
 ];
 const OVERSCANS: [Overscan; 2] = [Overscan::Tv, Overscan::Full];
 const PIXEL_ASPECTS: [PixelAspect; 2] = [PixelAspect::Tv, PixelAspect::Square];
+const AUDIO_FILTER_MODES: [AudioFilterMode; 3] = [
+    AudioFilterMode::Auto,
+    AudioFilterMode::On,
+    AudioFilterMode::Off,
+];
 const FLOPPY_SPEEDS: [u16; 5] = [100, 200, 400, 800, crate::floppy::SPEED_TURBO];
 const PACINGS: [PacingBudget; 2] = [PacingBudget::Cycles, PacingBudget::Instructions];
 const WARPS: [WarpSpeed; 5] = [
@@ -918,6 +925,8 @@ pub struct MachineSetup {
     audio_channel_mode: ChannelMode,
     /// Stereo width, 0-100 (100 = full hardware panning).
     audio_stereo_separation: u8,
+    /// Paula analogue filter override: Auto (guest-driven), On, or Off.
+    audio_filter: AudioFilterMode,
     overscan: Overscan,
     pixel_aspect: PixelAspect,
     phosphor: f32,
@@ -1041,6 +1050,7 @@ impl MachineSetup {
             audio_devices: Vec::new(),
             audio_channel_mode: cfg.audio.channel_mode,
             audio_stereo_separation: cfg.audio.stereo_separation,
+            audio_filter: cfg.audio.filter,
             overscan: cfg.overscan,
             pixel_aspect: cfg.pixel_aspect,
             phosphor: cfg.phosphor,
@@ -1390,6 +1400,8 @@ impl MachineSetup {
             .then(|| self.audio_channel_mode.label().to_string());
         raw.audio.stereo_separation = (self.audio_stereo_separation != 100)
             .then_some(u16::from(self.audio_stereo_separation));
+        raw.audio.audio_filter = (self.audio_filter != AudioFilterMode::Auto)
+            .then(|| self.audio_filter.label().to_string());
         // Zorro boards: emit the metadata path plus any per-board overrides
         // (typed per the option schema), only when the user changed something.
         raw.zorro = self
@@ -1608,6 +1620,7 @@ impl MachineSetup {
             // Channel mode and separation shape the output, so they do nothing
             // once audio is disabled; separation also does nothing in mono.
             F::AudioChannelMode => reason(self.audio_output.is_enabled(), "off"),
+            F::AudioFilter => reason(self.audio_output.is_enabled(), "off"),
             F::AudioStereoSeparation => {
                 if !self.audio_output.is_enabled() {
                     Some("off")
@@ -1884,6 +1897,11 @@ impl MachineSetup {
                 ChannelMode::Mono => "Mono".to_string(),
             },
             F::AudioStereoSeparation => format!("{}%", self.audio_stereo_separation),
+            F::AudioFilter => match self.audio_filter {
+                AudioFilterMode::Auto => "Auto".to_string(),
+                AudioFilterMode::On => "Enabled".to_string(),
+                AudioFilterMode::Off => "Disabled".to_string(),
+            },
             F::Filesys0Boot | F::Filesys1Boot | F::Filesys2Boot | F::Filesys3Boot => {
                 let (slot, _) = filesys_slot(field).expect("boot field");
                 match self.filesys_bootpri[slot] {
@@ -2092,6 +2110,9 @@ impl MachineSetup {
                     ChannelMode::Stereo => ChannelMode::Mono,
                     ChannelMode::Mono => ChannelMode::Stereo,
                 }
+            }
+            F::AudioFilter => {
+                self.audio_filter = cycle_slice(&AUDIO_FILTER_MODES, self.audio_filter, forward)
             }
             F::AudioStereoSeparation => {
                 self.audio_stereo_separation = cycle_nearest(
@@ -3553,19 +3574,21 @@ mod tests {
     fn disabled_audio_greys_out_channel_mode_and_separation() {
         use crate::audio::AudioOutput;
         let mut s = MachineSetup::default();
-        // Enabled: channel mode is active, separation active in stereo.
+        // Enabled: channel mode, filter, and separation are all active.
         assert_eq!(s.disabled_reason(LauncherField::AudioChannelMode), None);
+        assert_eq!(s.disabled_reason(LauncherField::AudioFilter), None);
         assert_eq!(
             s.disabled_reason(LauncherField::AudioStereoSeparation),
             None
         );
 
-        // Disabled audio greys both shaping controls.
+        // Disabled audio greys the shaping controls.
         s.audio_output = AudioOutput::Disabled;
         assert_eq!(
             s.disabled_reason(LauncherField::AudioChannelMode),
             Some("off")
         );
+        assert_eq!(s.disabled_reason(LauncherField::AudioFilter), Some("off"));
         assert_eq!(
             s.disabled_reason(LauncherField::AudioStereoSeparation),
             Some("off")

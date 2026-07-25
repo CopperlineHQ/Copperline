@@ -1632,7 +1632,10 @@ impl BusAccounting {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrontPanelStatus {
-    pub power_led_on: bool,
+    /// The Paula analogue low-pass filter is engaged. The PWR LED is lit
+    /// whenever the machine is powered; it burns brighter when this is set, as
+    /// the real /LED line does.
+    pub audio_filter_on: bool,
     pub fdd_led_on: bool,
     pub fdd_track: Option<u8>,
     /// HDD activity LED: None on machines without an IDE port (no Gayle),
@@ -1647,7 +1650,7 @@ pub struct FrontPanelStatus {
 impl Default for FrontPanelStatus {
     fn default() -> Self {
         Self {
-            power_led_on: false,
+            audio_filter_on: false,
             fdd_led_on: false,
             fdd_track: None,
             hdd_led: None,
@@ -3125,9 +3128,8 @@ impl Bus {
     }
 
     pub fn front_panel_status(&self) -> FrontPanelStatus {
-        let pra = self.cia_a.peek_register(REG_PRA);
         FrontPanelStatus {
-            power_led_on: pra & 0x02 == 0,
+            audio_filter_on: self.paula.led_filter_enabled(),
             fdd_led_on: self.floppy.activity_led_on(),
             fdd_track: self.floppy.selected_track(),
             hdd_led: (self.gayle.is_some() || self.ide_a4000.is_some() || self.has_scsi_device())
@@ -4967,7 +4969,7 @@ impl Bus {
             let is_a1000 = !self.mem.wcs.is_empty();
             if !is_a1000 {
                 let pra = self.cia_a.read(REG_PRA);
-                self.paula.set_led_filter_enabled(pra & 0x02 == 0);
+                self.paula.set_led_filter_guest(pra & 0x02 == 0);
             }
             self.cd32_pad_cia_clock();
         }

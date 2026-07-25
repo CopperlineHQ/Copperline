@@ -92,6 +92,7 @@ pub enum MenuItem {
     Fullscreen,
     StatusBar,
     AudioOutput,
+    AudioFilter,
     Warp,
     WarpLimit,
     Record,
@@ -107,15 +108,16 @@ pub enum MenuItem {
 /// sampler is attached, so the list is built per open rather than fixed.
 pub fn menu_items(midi_active: bool, sampler_active: bool) -> Vec<MenuItem> {
     let _ = midi_active;
-    // 9 leading + up to 2 MIDI + 2 sampler + pixel aspect + floppy speed +
-    // 11 trailing items = 26, sized so appending never reallocates.
-    let mut items = Vec::with_capacity(26);
+    // 10 leading + up to 2 MIDI + 2 sampler + pixel aspect + floppy speed +
+    // 11 trailing items = 27, sized so appending never reallocates.
+    let mut items = Vec::with_capacity(27);
     items.extend([
         MenuItem::MachineConfig,
         MenuItem::FrameAnalyzer,
         MenuItem::Debugger,
         MenuItem::Console,
         MenuItem::AudioOutput,
+        MenuItem::AudioFilter,
         MenuItem::Calibration,
         MenuItem::JoystickInput,
         MenuItem::Port1Device,
@@ -174,6 +176,9 @@ pub struct MenuLabels<'a> {
     /// Current audio output label: "Default", a device name, or "Disabled"
     /// (empty is treated as "Default").
     pub audio_output: &'a str,
+    /// Current Paula filter override (Auto/On/Off), shown on the Audio Filter
+    /// item.
+    pub audio_filter: crate::config::AudioFilterMode,
     /// Current sampler input device name (empty is treated as "Default") and
     /// gain label (e.g. "2x"); only shown when a sampler is attached.
     pub sampler_input: &'a str,
@@ -217,6 +222,14 @@ fn menu_item_label(item: MenuItem, s: MenuLabels) -> String {
                 s.audio_output
             };
             format!("Audio Out [{}]", clip_menu_value(name))
+        }
+        MenuItem::AudioFilter => {
+            let value = match s.audio_filter {
+                crate::config::AudioFilterMode::Auto => "auto",
+                crate::config::AudioFilterMode::On => "on",
+                crate::config::AudioFilterMode::Off => "off",
+            };
+            format!("Audio Filter {:>7}", format!("[{value}]"))
         }
         MenuItem::SamplerInput => {
             let name = if s.sampler_input.is_empty() {
@@ -4928,8 +4941,9 @@ mod tests {
             Some(UiControl::MenuItem(MenuItem::MachineConfig))
         );
         // Leading block is MachineConfig, FrameAnalyzer, Debugger, Console,
-        // AudioOutput, Calibration, so Joystick Input sits at index 6.
-        let joystick = menu_item_rect(6, n);
+        // AudioOutput, AudioFilter, Calibration, so Joystick Input sits at
+        // index 7.
+        let joystick = menu_item_rect(7, n);
         let pos = (joystick.x as i32 + 4, joystick.y as i32 + 4);
         assert_eq!(
             ui.control_at(pos, false, false),
@@ -4959,6 +4973,7 @@ mod tests {
             midi_in: "",
             midi_out: "",
             audio_output: "",
+            audio_filter: crate::config::AudioFilterMode::Auto,
             sampler_input: "",
             sampler_gain: "",
         };
@@ -4992,6 +5007,7 @@ mod tests {
             midi_in: "",
             midi_out: "",
             audio_output: "",
+            audio_filter: crate::config::AudioFilterMode::Auto,
             sampler_input: "",
             sampler_gain: "",
         };
@@ -5049,6 +5065,7 @@ mod tests {
                                         midi_in: long,
                                         midi_out: long,
                                         audio_output: long,
+                                        audio_filter: crate::config::AudioFilterMode::Auto,
                                         sampler_input: long,
                                         sampler_gain: "-24 dB",
                                     };
@@ -5604,6 +5621,7 @@ mod tests {
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
+                audio_filter: crate::config::AudioFilterMode::Auto,
                 sampler_input: "",
                 sampler_gain: "",
             },
@@ -5653,6 +5671,7 @@ mod tests {
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
+                audio_filter: crate::config::AudioFilterMode::Auto,
                 sampler_input: "",
                 sampler_gain: "",
             },
@@ -5690,6 +5709,7 @@ mod tests {
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
+                audio_filter: crate::config::AudioFilterMode::Auto,
                 sampler_input: "",
                 sampler_gain: "",
             },
@@ -5743,6 +5763,7 @@ mod tests {
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
+                audio_filter: crate::config::AudioFilterMode::Auto,
                 sampler_input: "",
                 sampler_gain: "",
             },
@@ -5820,6 +5841,7 @@ mod tests {
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
+                audio_filter: crate::config::AudioFilterMode::Auto,
                 sampler_input: "",
                 sampler_gain: "",
             },
@@ -5884,6 +5906,7 @@ mod tests {
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
+                audio_filter: crate::config::AudioFilterMode::Auto,
                 sampler_input: "",
                 sampler_gain: "",
             },
@@ -5945,6 +5968,7 @@ mod tests {
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
+                audio_filter: crate::config::AudioFilterMode::Auto,
                 sampler_input: "",
                 sampler_gain: "",
             },
@@ -6007,6 +6031,7 @@ mod tests {
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
+                audio_filter: crate::config::AudioFilterMode::Auto,
                 sampler_input: "",
                 sampler_gain: "",
             },
@@ -6122,6 +6147,7 @@ mod tests {
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
+                audio_filter: crate::config::AudioFilterMode::Auto,
                 sampler_input: "",
                 sampler_gain: "",
             },
@@ -6197,6 +6223,7 @@ mod tests {
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
+                audio_filter: crate::config::AudioFilterMode::Auto,
                 sampler_input: "",
                 sampler_gain: "",
             },
@@ -6283,6 +6310,7 @@ mod tests {
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
+                audio_filter: crate::config::AudioFilterMode::Auto,
                 sampler_input: "",
                 sampler_gain: "",
             },
@@ -6407,6 +6435,7 @@ mod tests {
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
+                audio_filter: crate::config::AudioFilterMode::Auto,
                 sampler_input: "",
                 sampler_gain: "",
             },
@@ -6460,6 +6489,7 @@ mod tests {
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
+                audio_filter: crate::config::AudioFilterMode::Auto,
                 sampler_input: "",
                 sampler_gain: "",
             },
@@ -6504,6 +6534,7 @@ mod tests {
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
+                audio_filter: crate::config::AudioFilterMode::Auto,
                 sampler_input: "",
                 sampler_gain: "",
             },
@@ -6588,6 +6619,7 @@ mod tests {
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
+                audio_filter: crate::config::AudioFilterMode::Auto,
                 sampler_input: "",
                 sampler_gain: "",
             },
@@ -6639,6 +6671,7 @@ mod tests {
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
+                audio_filter: crate::config::AudioFilterMode::Auto,
                 sampler_input: "",
                 sampler_gain: "",
             },
@@ -6683,6 +6716,7 @@ mod tests {
                 midi_in: "",
                 midi_out: "",
                 audio_output: "",
+                audio_filter: crate::config::AudioFilterMode::Auto,
                 sampler_input: "",
                 sampler_gain: "",
             },
@@ -6731,6 +6765,7 @@ mod tests {
             midi_in: "",
             midi_out: "",
             audio_output: "",
+            audio_filter: crate::config::AudioFilterMode::Auto,
             sampler_input: "",
             sampler_gain: "",
         };

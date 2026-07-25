@@ -145,7 +145,10 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      an older state would still deserialize - and then run against
 //      different codegen. Bump so it is refused rather than resumed into
 //      a silent divergence (see the wasmtime pin in Cargo.toml)
-pub const STATE_VERSION: u32 = 40;
+//  41: Paula records the guest /LED bit (led_filter_guest_on) apart from the
+//      effective filter state, for the [audio] audio_filter override; the
+//      override mode itself is a host preference and is not serialized
+pub const STATE_VERSION: u32 = 41;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {
