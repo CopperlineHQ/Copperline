@@ -5848,6 +5848,11 @@ impl App {
             self.show_osd("Save: type \"ADDR LEN\" (hex) first");
             return;
         };
+        // Through the machine's address bus, like every other debugger
+        // surface: the file name and the OSD then name the address the
+        // bytes actually came from on a 24-bit model, and a 32-bit dump
+        // above the 24-bit space passes through untouched on 020+.
+        let addr = addr & self.emu.machine.ui_addr_mask();
         self.suspend_live_audio_for_host_io();
         let picked = rfd::FileDialog::new()
             .set_title("Save memory region")

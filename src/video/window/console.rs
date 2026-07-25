@@ -100,6 +100,16 @@ fn reg_index(token: &str) -> Option<usize> {
 }
 
 /// Search one `[from, end)` span of CPU-visible memory for `pattern`.
+///
+/// Every read runs `pattern.len() - 1` bytes past its chunk, including the
+/// last chunk of the span. That tail is deliberate twice over: it is what
+/// lets a match straddle a chunk boundary, and at the end of a span it is
+/// what lets a match straddle two banks that abut in the map (a full
+/// motherboard bank ends at $08000000, exactly where the CPU-slot bank
+/// begins). The tail only ever supplies trailing bytes -- the window count
+/// is the chunk length, so a reported hit always starts inside
+/// `[from, end)` -- and the bytes it reads are what the CPU would see
+/// there, unmapped space included.
 fn search_span(
     machine: &crate::cpu::M68kMachine,
     pattern: &[u8],
@@ -109,8 +119,6 @@ fn search_span(
     const CHUNK: usize = 4096;
     let mut addr = u64::from(from);
     while addr < end {
-        // Overlap chunks by the pattern length so matches spanning a
-        // chunk boundary are seen.
         let span = (end - addr) as usize;
         let bytes = machine.debug_read_memory(addr as u32, span.min(CHUNK) + pattern.len() - 1);
         if let Some(hit) = bytes
@@ -897,6 +905,11 @@ impl App {
                 let Some(pattern) = parse_hex_pattern(pattern_tokens) else {
                     return ConsoleOutcome::error("FIND takes hex byte pairs (e.g. 4E75)");
                 };
+                // Through the machine's address bus, as the Memory tab's
+                // Find does: the sweep must start where the reads will
+                // land, or a START past a 24-bit bus would skip the
+                // whole map and silently restart from the bottom.
+                let start = start & self.emu.machine.ui_addr_mask();
                 let regions = self.emu.bus().searchable_regions();
                 match search_cpu_memory(&self.emu.machine, &regions, &pattern, start) {
                     Some(addr) => ConsoleOutcome::one(format!("found at ${addr:06X}")),
