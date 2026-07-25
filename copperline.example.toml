@@ -333,10 +333,16 @@ video = "PAL"
 # pixel-exact comparison against square-pixel emulators). phosphor: CRT
 # persistence fraction (0.0-0.95, default 0.0): fuses field-rate
 # flicker/dither like a real tube at the cost of a slight motion trail.
+# full_screen: open the window fullscreen at start (default false; also
+# --full-screen / --windowed, and Cmd/Alt+F toggles it live).
+# status_bar: show the status bar at start (default true; also
+# --show-status-bar / --hide-status-bar, and Cmd/Alt+Shift+F toggles it live).
 # [display]
 # overscan = "tv"
 # pixel_aspect = "tv"
 # phosphor = 0.4
+# full_screen = false
+# status_bar = true
 
 
 [audio]

@@ -2007,6 +2007,8 @@ fn test_app_with_audio_and_cpu(
         [true; 4],
         crate::config::Overscan::Full,
         0.0,
+        false,
+        false,
         crate::config::WarpSpeed::Max,
         crate::config::JoystickInputMode::Gamepad,
         50,

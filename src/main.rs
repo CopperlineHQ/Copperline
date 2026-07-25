@@ -365,6 +365,18 @@ where
             "--no-fpu" => {
                 overrides.fpu = Some(false);
             }
+            "--full-screen" => {
+                overrides.full_screen = Some(true);
+            }
+            "--windowed" => {
+                overrides.full_screen = Some(false);
+            }
+            "--show-status-bar" => {
+                overrides.status_bar = Some(true);
+            }
+            "--hide-status-bar" => {
+                overrides.status_bar = Some(false);
+            }
             "--cpu-clock" => {
                 let mhz: f64 = next_arg(
                     &mut args,
@@ -1007,6 +1019,8 @@ fn print_help() {
          \x20                            instead of live output\n  \
          --profile-live-audio SECS      run a no-window Paula-to-cpal profile workload;\n  \
          \x20                            combine with COPPERLINE_AUDIO_PROFILE=1 for counters\n  \
+         --full-screen / --windowed     open fullscreen / windowed at start (default: windowed)\n  \
+         --show-status-bar / --hide-status-bar  status bar at start (default: shown)\n  \
          --serial MODE                  Paula serial port: off, stdout, midi, tcp,\n  \
          \x20                            tcp-connect, or pty\n  \
          --serial-connect HOST:PORT     dial a remote TCP service (a telnet BBS) with the\n  \
@@ -1629,6 +1643,8 @@ fn main() -> Result<()> {
         disk_write_protected,
         config::resolve_overscan(cfg.overscan),
         config::resolve_phosphor(cfg.phosphor),
+        cfg.full_screen,
+        !cfg.status_bar,
         cfg.emulation.warp_speed,
         cfg.joystick_input_mode,
         cfg.mouse_sensitivity,
@@ -1738,6 +1754,9 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
         [true; 4],
         config::resolve_overscan(config::Overscan::Tv),
         config::resolve_phosphor(0.0),
+        // The config-screen placeholder is always a normal windowed UI.
+        false,
+        false,
         config::WarpSpeed::default(),
         config::JoystickInputMode::default(),
         50,
