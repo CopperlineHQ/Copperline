@@ -1,16 +1,20 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Host-keyboard to controller mapping, and the autofire policy that rides on
-//! top of it.
+//! Host-keyboard to controller mapping.
 //!
 //! Copperline drives an emulated game port from three host sources: a physical
 //! gamepad (calibrated in `gamepad.rs`), scripted `--joy-after` events, and the
 //! host keyboard. This module owns the last of those: which host keys stand in
 //! for which controller control, for each of the two keyboard mappings, plus
-//! the defaults and the persisted overrides.
+//! the defaults and the persisted overrides. The autofire policy that gates
+//! every source's fire button lives in [`crate::config`], since it is a
+//! function of emulated time rather than of host keys.
 //!
-//! Two mappings exist so one keyboard can drive a two-controller setup. They
-//! must not overlap: a key bound in both would drive both ports at once.
+//! A key means exactly one thing: binding it to a control unbinds it from
+//! wherever it was, and the same rule is applied when loading a hand-written
+//! file. Two mappings exist so one keyboard can drive a two-controller setup,
+//! and they must not overlap either -- a key listed in both would bind to
+//! whichever `lookup` reaches first, leaving the other silently dead.
 //!
 //! Persistence follows the gamepad-calibration precedent: this is a host
 //! preference, not part of the emulated machine, so it lives in the per-user
@@ -519,12 +523,22 @@ struct KeyMapStore {
 
 impl KeyMapStore {
     fn into_keymap(self) -> KeyMap {
-        KeyMap {
-            mappings: [
-                decode_mapping(&self.controller1),
-                decode_mapping(&self.controller2),
-            ],
+        let mut map = KeyMap {
+            mappings: [KeyboardMapping::empty(), KeyboardMapping::empty()],
+        };
+        // Both mappings are decoded into the one map so a key cannot be
+        // claimed twice: the panel enforces "a key means one thing" as you
+        // edit, and a hand-written file has to arrive at the same invariant.
+        // Without this a key listed under two controls drives both at once,
+        // and one listed under both mappings binds to whichever `lookup`
+        // reaches first, leaving the other silently dead.
+        for (index, table) in [&self.controller1, &self.controller2]
+            .into_iter()
+            .enumerate()
+        {
+            decode_mapping_into(&mut map, index, table);
         }
+        map
     }
 }
 
@@ -549,21 +563,40 @@ fn encode_mapping(mapping: &KeyboardMapping) -> BTreeMap<String, Vec<String>> {
         .collect()
 }
 
-fn decode_mapping(table: &BTreeMap<String, Vec<String>>) -> KeyboardMapping {
-    let mut mapping = KeyboardMapping::empty();
-    for (control_key, names) in table {
-        let Some(control) = JoyControl::from_key(control_key) else {
+/// Decode one persisted mapping table into `map` at `index`, skipping any key
+/// another control or mapping has already claimed.
+///
+/// Controls are walked in [`CONTROLS`] order rather than the table's
+/// (alphabetical) key order, so which binding of a duplicated key survives is
+/// the order the panel lists them in, not an artefact of the control names.
+fn decode_mapping_into(map: &mut KeyMap, index: usize, table: &BTreeMap<String, Vec<String>>) {
+    for control_key in table.keys() {
+        if JoyControl::from_key(control_key).is_none() {
             log::warn!("keymap.toml: ignoring unknown control {control_key:?}");
+        }
+    }
+    for control in CONTROLS {
+        let Some(names) = table.get(control.key()) else {
             continue;
         };
         for name in names {
-            match key_from_name(name) {
-                Some(code) => mapping.keys[control.index()].push(code),
-                None => log::warn!("keymap.toml: ignoring unknown key {name:?}"),
+            let Some(code) = key_from_name(name) else {
+                log::warn!("keymap.toml: ignoring unknown key {name:?}");
+                continue;
+            };
+            if let Some((claimed_index, claimed_control)) = map.lookup(code) {
+                log::warn!(
+                    "keymap.toml: {name} is already bound to {} on controller {}; \
+                     ignoring the duplicate on {}",
+                    claimed_control.label(),
+                    claimed_index + 1,
+                    control.label()
+                );
+                continue;
             }
+            map.bind(index, control, code);
         }
     }
-    mapping
 }
 
 #[cfg(test)]
@@ -636,6 +669,53 @@ mod tests {
         let text = toml::to_string_pretty(&KeyMapStore::from(&map)).unwrap();
         let back: KeyMapStore = toml::from_str(&text).unwrap();
         assert_eq!(back.into_keymap(), map);
+    }
+
+    /// A hand-written file must arrive at the same "a key means one thing"
+    /// invariant the panel enforces as you edit. Left unchecked, a key listed
+    /// under two controls drove both at once, and one listed under both
+    /// mappings bound to whichever `lookup` reached first while the other
+    /// binding silently did nothing.
+    #[test]
+    fn duplicate_bindings_in_a_hand_written_file_are_dropped() {
+        let text = r#"
+            [controller1]
+            up = ["ArrowUp"]
+            fire = ["ArrowUp", "KeyC"]
+            [controller2]
+            down = ["ArrowUp"]
+            left = ["KeyC", "Numpad4"]
+        "#;
+        let map = toml::from_str::<KeyMapStore>(text).unwrap().into_keymap();
+
+        // First claim in UI order wins, and no other control keeps the key.
+        assert_eq!(map.lookup(KeyCode::ArrowUp), Some((0, JoyControl::Up)));
+        assert_eq!(map.mapping(0).keys(JoyControl::Up), &[KeyCode::ArrowUp]);
+        assert_eq!(map.mapping(0).keys(JoyControl::Fire), &[KeyCode::KeyC]);
+        assert!(map.mapping(1).keys(JoyControl::Down).is_empty());
+        assert!(!map
+            .mapping(1)
+            .keys(JoyControl::Left)
+            .contains(&KeyCode::KeyC));
+        // Non-duplicate bindings alongside a dropped one still land.
+        assert_eq!(map.mapping(1).keys(JoyControl::Left), &[KeyCode::Numpad4]);
+
+        // With one key held, exactly one control reads as pressed.
+        let mut held = HeldKeys::default();
+        held.set(KeyCode::ArrowUp, true);
+        let state = map.mapping(0).joystick_state(&held);
+        assert!(state.up);
+        assert!(!state.fire, "one key must not drive two controls");
+        assert!(!map.mapping(1).joystick_state(&held).down);
+
+        // Repeating a key under one control is deduplicated too, so the
+        // binding text does not read "Up / Up".
+        let text = r#"
+            [controller1]
+            up = ["ArrowUp", "ArrowUp"]
+        "#;
+        let map = toml::from_str::<KeyMapStore>(text).unwrap().into_keymap();
+        assert_eq!(map.mapping(0).keys(JoyControl::Up), &[KeyCode::ArrowUp]);
     }
 
     #[test]
