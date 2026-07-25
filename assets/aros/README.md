@@ -17,17 +17,22 @@ The two halves are consumed exactly as WinUAE and FS-UAE take them.
 
 ## Provenance
 
-Built from source on 2026-07-23 from AROS upstream master
-(https://github.com/aros-development-team/AROS) at commit 3d4928c6d4.
+Built from source on 2026-07-25 from AROS upstream master
+(https://github.com/aros-development-team/AROS) at commit f1e856cf7f.
 Master includes the boot-time optimizations of pull request 829
 (https://github.com/aros-development-team/AROS/pull/829: single-pass
 romtag scan, fast memory clearing, blitter-drawn boot animation), which cut
 the m68k boot to the insert-disk screen from roughly 25-30 s to under 10 s
 and shorten every AROS-booted golden probe run in CI (tests/probe_golden.rs),
-plus the boot-animation rendering fix of pull request 848
+the boot-animation rendering fix of pull request 848
 (https://github.com/aros-development-team/AROS/pull/848: reverts an unsafe
-OCS rollover display change in the amigavideo driver) and the m68k
-Workbench/console rendering speedups of pull request 844.
+OCS rollover display change in the amigavideo driver), the m68k
+Workbench/console rendering speedups of pull request 844, and the fix for
+issue 849 (https://github.com/aros-development-team/AROS/issues/849,
+commit 747405ba10): the early-startup Boot Options page formatted its
+device list with a 64-bit UQUAD block count under a 32-bit `%d` specifier,
+so every following argument read from the wrong varargs offset and the Exec
+Bootstrap Task crashed on machines with RDB drives attached.
 
 Build recipe (Linux, or a Linux container; the AROS crosstools do not build
 cleanly on macOS):
