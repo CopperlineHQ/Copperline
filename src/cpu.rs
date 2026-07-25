@@ -1674,11 +1674,11 @@ impl M68kMachine {
                 | u32::from(self.bus.bus.peek_word_any(addr.wrapping_add(2)))
         };
         let execbase = peek32(4);
-        if execbase == 0 || execbase & 1 != 0 || execbase >= 0x0100_0000 {
+        if !crate::amigaos::plausible_ptr(execbase) {
             return None;
         }
         let task = peek32(execbase.wrapping_add(0x114));
-        (task != 0 && task & 1 == 0 && task < 0x0100_0000).then_some(task)
+        crate::amigaos::plausible_ptr(task).then_some(task)
     }
 
     /// The name a task node points at, uppercased for matching.
@@ -1688,7 +1688,10 @@ impl M68kMachine {
                 | u32::from(self.bus.bus.peek_word_any(addr.wrapping_add(2)))
         };
         let name_ptr = peek32(task.wrapping_add(10));
-        if name_ptr == 0 || name_ptr >= 0x0100_0000 {
+        // Names may live in ROM or at odd addresses (the ROM devices' node
+        // names are Kickstart strings), so no plausible_ptr bound here;
+        // unmapped pointers read as zero bytes and end the string at once.
+        if name_ptr == 0 {
             return String::new();
         }
         let mut name = String::new();
