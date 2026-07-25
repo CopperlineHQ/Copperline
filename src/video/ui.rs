@@ -1071,6 +1071,10 @@ pub enum UiControl {
     LauncherClear(LauncherField),
     /// Configuration screen: focus a drive's volume-name field for text entry.
     LauncherDriveNameEdit(LauncherField),
+    /// Boot Priority page: focus a drive's boot-priority field for typing.
+    LauncherDriveBootpriEdit(LauncherField),
+    /// Boot Priority page: toggle a drive's Bootable box.
+    LauncherDriveBootToggle(LauncherField),
     /// Configuration screen: add a Zorro metadata board file.
     LauncherZorroAdd,
     /// Configuration screen: remove the Zorro board at this index.
@@ -4139,17 +4143,50 @@ fn launcher_toggle_rect(rect: Rect, row_y: usize) -> Rect {
     }
 }
 
-/// The navigation button of a sub-page link row: sized to its label and
-/// aligned to the top-left of the settings pane (where the row labels sit),
-/// not stretched across the control area.
-fn launcher_sub_page_rect(rect: Rect, row_y: usize, label: &str) -> Rect {
+/// A sub-page navigation button (a Back link, or one of the Hard Disk tab's two
+/// sub-page links) at horizontal `slot` (0 or 1) from the pane's left edge. All
+/// are sized to match the left-hand category tabs so navigating in and out keeps
+/// the button the same size.
+fn launcher_sub_page_rect(rect: Rect, row_y: usize, slot: usize) -> Rect {
     Rect {
-        x: launcher_pane_x(rect),
+        x: launcher_pane_x(rect) + slot * (LAUNCH_SIDEBAR_W + 8),
+        y: row_y + (LAUNCH_ROW_H.saturating_sub(LAUNCH_TAB_H)) / 2,
+        w: LAUNCH_SIDEBAR_W,
+        h: LAUNCH_TAB_H,
+    }
+}
+
+/// The two side-by-side buttons of a [`RowKind::SubPageLinkPair`] row.
+fn launcher_sub_page_pair_rects(rect: Rect, row_y: usize) -> (Rect, Rect) {
+    (
+        launcher_sub_page_rect(rect, row_y, 0),
+        launcher_sub_page_rect(rect, row_y, 1),
+    )
+}
+
+/// The Status column's clickable area (the "Bootable" label plus its tick box),
+/// sitting to the right of the priority stepper on a Boot Priority row.
+fn launcher_bootable_rect(rect: Rect, row_y: usize) -> Rect {
+    let (_, _, next) = launcher_cycle_rects(rect, row_y);
+    Rect {
+        x: next.x + next.w + 24,
         y: row_y + 2,
-        w: label.chars().count() * font::GLYPH_W + 16,
+        w: BOOTABLE_LABEL.len() * font::GLYPH_W + 8 + 12,
         h: LAUNCH_CONTROL_H,
     }
 }
+
+/// The tick box within a Bootable cell, after its label.
+fn launcher_bootable_box(cell: Rect) -> Rect {
+    Rect {
+        x: cell.x + BOOTABLE_LABEL.len() * font::GLYPH_W + 8,
+        y: cell.y + (cell.h.saturating_sub(12)) / 2,
+        w: 12,
+        h: 12,
+    }
+}
+
+const BOOTABLE_LABEL: &str = "Bootable";
 
 /// (Browse, Clear) buttons for a path row, just after the fixed-width value
 /// column ([`LAUNCH_PATH_VALUE_W`]) rather than out at the panel's right edge.
@@ -4364,12 +4401,21 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
             }
             let row_y = launcher_row_y(rect, i);
             match r.kind {
-                // A section heading is non-interactive.
-                RowKind::SectionHeader => {}
+                // Non-interactive rows.
+                RowKind::SectionHeader | RowKind::BootpriHeader => {}
                 // A sub-page link navigates to its target tab.
                 RowKind::SubPageLink(target) => {
-                    if launcher_sub_page_rect(rect, row_y, r.label).contains(pos) {
+                    if launcher_sub_page_rect(rect, row_y, 0).contains(pos) {
                         return Some(UiControl::LauncherTab(target));
+                    }
+                }
+                RowKind::SubPageLinkPair(left, right) => {
+                    let (lr, rr) = launcher_sub_page_pair_rects(rect, row_y);
+                    if lr.contains(pos) {
+                        return Some(UiControl::LauncherTab(left));
+                    }
+                    if rr.contains(pos) {
+                        return Some(UiControl::LauncherTab(right));
                     }
                 }
                 RowKind::Cycle => {
@@ -4385,6 +4431,34 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                             field: r.field,
                             forward: true,
                         });
+                    }
+                }
+                RowKind::Bootpri => {
+                    // No-drive / CD-image rows are skipped by the `applies` guard
+                    // above, so this only runs for a drive with an image. The
+                    // Bootable box is always live; the priority stepper/field is
+                    // inert while the box is cleared (the priority shows greyed).
+                    if launcher_bootable_rect(rect, row_y).contains(pos) {
+                        return Some(UiControl::LauncherDriveBootToggle(r.field));
+                    }
+                    if state.setup.drive_boot_off(r.field) {
+                        continue;
+                    }
+                    let (prev, value, next) = launcher_cycle_rects(rect, row_y);
+                    if prev.contains(pos) {
+                        return Some(UiControl::LauncherCycle {
+                            field: r.field,
+                            forward: false,
+                        });
+                    }
+                    if next.contains(pos) {
+                        return Some(UiControl::LauncherCycle {
+                            field: r.field,
+                            forward: true,
+                        });
+                    }
+                    if value.contains(pos) {
+                        return Some(UiControl::LauncherDriveBootpriEdit(r.field));
                     }
                 }
                 RowKind::Toggle => {
@@ -4564,12 +4638,44 @@ fn draw_launcher_row(
     if let RowKind::SubPageLink(target) = r.kind {
         draw_text_button(
             frame,
-            launcher_sub_page_rect(rect, row_y, r.label),
+            launcher_sub_page_rect(rect, row_y, 0),
             r.label,
             true,
             hover == Some(UiControl::LauncherTab(target)),
             scale,
         );
+        return;
+    }
+    // Two side-by-side sub-page buttons (the Hard Disk tab's links).
+    if let RowKind::SubPageLinkPair(left, right) = r.kind {
+        let (lr, rr) = launcher_sub_page_pair_rects(rect, row_y);
+        draw_text_button(
+            frame,
+            lr,
+            left.label(),
+            true,
+            hover == Some(UiControl::LauncherTab(left)),
+            scale,
+        );
+        draw_text_button(
+            frame,
+            rr,
+            right.label(),
+            true,
+            hover == Some(UiControl::LauncherTab(right)),
+            scale,
+        );
+        return;
+    }
+    // The greyed column titles above the Boot Priority rows.
+    if r.kind == RowKind::BootpriHeader {
+        for (x, title) in [
+            (launcher_pane_x(rect), "Drive"),
+            (launcher_control_x(rect), "Priority"),
+            (launcher_bootable_rect(rect, row_y).x, "Status"),
+        ] {
+            draw_panel_text(frame, x, row_y + 8, title, PANEL_TEXT_DIM, 1, scale);
+        }
         return;
     }
     let reason = setup.disabled_reason(r.field);
@@ -4614,7 +4720,10 @@ fn draw_launcher_row(
     }
     match r.kind {
         // Drawn above with an early return.
-        RowKind::SectionHeader | RowKind::SubPageLink(_) => {}
+        RowKind::SectionHeader
+        | RowKind::SubPageLink(_)
+        | RowKind::SubPageLinkPair(..)
+        | RowKind::BootpriHeader => {}
         RowKind::Cycle => {
             let (prev, value, next) = launcher_cycle_rects(rect, row_y);
             draw_text_button(
@@ -4647,6 +4756,98 @@ fn draw_launcher_row(
             let tw = text.chars().count() * font::GLYPH_W;
             let tx = value.x + value.w.saturating_sub(tw) / 2;
             draw_panel_text(frame, tx, value.y + 6, &text, PANEL_TEXT_HILIGHT, 1, scale);
+        }
+        RowKind::Bootpri => {
+            // Priority column: a `< value >` stepper whose value is also a text
+            // field. Greyed and inert while the Bootable box (drawn last) is
+            // cleared -- the number stays visible so re-ticking restores it.
+            let disabled = setup.drive_boot_off(r.field);
+            let (prev, value, next) = launcher_cycle_rects(rect, row_y);
+            draw_text_button(
+                frame,
+                prev,
+                "<",
+                !disabled,
+                hover
+                    == Some(UiControl::LauncherCycle {
+                        field: r.field,
+                        forward: false,
+                    }),
+                scale,
+            );
+            draw_text_button(
+                frame,
+                next,
+                ">",
+                !disabled,
+                hover
+                    == Some(UiControl::LauncherCycle {
+                        field: r.field,
+                        forward: true,
+                    }),
+                scale,
+            );
+            draw_rect_bevel(
+                frame,
+                scale_rect(value, scale),
+                BUTTON_EDGE_DARK,
+                BUTTON_EDGE_LIGHT,
+                scale,
+            );
+            let editing = state.editing() == Some(EditTarget::DriveBootpri(r.field));
+            let text = if editing {
+                format!("{}_", state.edit_buffer())
+            } else {
+                setup.value_label(r.field)
+            };
+            let text = truncate_to_width(&text, value.w.saturating_sub(8));
+            let tw = text.chars().count() * font::GLYPH_W;
+            let tx = value.x + value.w.saturating_sub(tw) / 2;
+            let color = if disabled {
+                PANEL_TEXT_DIM
+            } else if editing {
+                PANEL_TEXT_HILIGHT
+            } else {
+                PANEL_TEXT
+            };
+            draw_panel_text(frame, tx, value.y + 6, &text, color, 1, scale);
+            // Status column: the "Bootable" label then a tick box, ticked when
+            // the drive is bootable.
+            let cell = launcher_bootable_rect(rect, row_y);
+            draw_panel_text(
+                frame,
+                cell.x,
+                cell.y + 6,
+                BOOTABLE_LABEL,
+                PANEL_TEXT,
+                1,
+                scale,
+            );
+            let box_rect = launcher_bootable_box(cell);
+            let hovered = hover == Some(UiControl::LauncherDriveBootToggle(r.field));
+            fill_rect(
+                frame,
+                scale_rect(box_rect, scale),
+                if hovered { BUTTON_FACE_HOVER } else { ENTRY_BG },
+                scale,
+            );
+            draw_outline(frame, box_rect, BUTTON_EDGE_LIGHT, scale);
+            if !disabled {
+                fill_rect(
+                    frame,
+                    scale_rect(
+                        Rect {
+                            x: box_rect.x + 3,
+                            y: box_rect.y + 3,
+                            w: 6,
+                            h: 6,
+                        },
+                        scale,
+                    ),
+                    PANEL_TEXT_HILIGHT,
+                    scale,
+                );
+            }
         }
         RowKind::Toggle => {
             let button = launcher_toggle_rect(rect, row_y);
@@ -5062,6 +5263,47 @@ fn draw_launcher(
                 summary_top + 16 + i * 14,
                 line,
                 PANEL_TEXT,
+                1,
+                scale,
+            );
+        }
+    }
+    // The Boot Priority page spells out the valid range and the floppy-drive
+    // priorities its cascade defaults sort around, all greyed like a footnote.
+    if state.tab == LauncherTab::BootPriority {
+        let help_top = launcher_row_y(
+            rect,
+            launcher::rows(
+                LauncherTab::BootPriority,
+                state.setup.parallel_device(),
+                state.setup.serial_mode(),
+            )
+            .len()
+                + 1,
+        );
+        draw_panel_text(
+            frame,
+            launcher_pane_x(rect),
+            help_top,
+            "Help:",
+            PANEL_TEXT_DIM,
+            1,
+            scale,
+        );
+        for (i, line) in [
+            "Valid boot priorities are any value between 127 (highest) to -128",
+            "(disabled). The primary Floppy Drive (DF0:) assumes a value of 5 and",
+            "all subsequent Floppy Drives (DF1:, DF2:, DF3:) assume -10, -20, -30.",
+        ]
+        .iter()
+        .enumerate()
+        {
+            draw_panel_text(
+                frame,
+                launcher_pane_x(rect) + 8,
+                help_top + 16 + i * 14,
+                line,
+                PANEL_TEXT_DIM,
                 1,
                 scale,
             );
@@ -7618,5 +7860,28 @@ mod tests {
         };
         draw(&mut frame, scale, &ui, None, None, false, false, labels());
         save(&frame, "launcher-host-mounts");
+
+        // The Boot Priority sub-page: an A1200 with two IDE drives -- the master
+        // bootable at 5, the slave with its Bootable box cleared (priority
+        // greyed) -- and the empty SCSI slots greyed "no drive".
+        let mut frame = vec![0u8; w * h * 4];
+        let mut setup = launcher::MachineSetup::default();
+        setup.select_model(Some(MachineModel::A1200));
+        setup.set_path(LauncherField::IdeMaster, std::path::PathBuf::from("wb.hdf"));
+        setup.set_drive_bootpri(LauncherField::IdeMasterBoot, Some(5));
+        setup.set_path(
+            LauncherField::IdeSlave,
+            std::path::PathBuf::from("games.hdf"),
+        );
+        setup.toggle_drive_boot(LauncherField::IdeSlaveBoot);
+        let mut state = LauncherState::new(setup);
+        state.tab = LauncherTab::BootPriority;
+        let ui = UiState {
+            menu_open: false,
+            menu_scroll: 0,
+            panel: Some(Panel::Launcher(Box::new(state))),
+        };
+        draw(&mut frame, scale, &ui, None, None, false, false, labels());
+        save(&frame, "launcher-boot-priority");
     }
 }
