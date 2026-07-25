@@ -99,15 +99,24 @@ pub fn task_state_name(state: u8) -> &'static str {
 }
 
 /// Heuristic: even and in an address range where exec structures can
-/// live -- chip+Z2 RAM, slow RAM, or Zorro III space (OS 3.2+ SetPatch
-/// moves ExecBase to fast RAM, which may be a Z3 board).
-fn plausible_ptr(addr: u32) -> bool {
+/// live -- chip+Z2 RAM, slow RAM, the big-box motherboard and CPU-slot
+/// fast-RAM windows, or Zorro III space (OS 3.2+ SetPatch moves ExecBase
+/// to fast RAM, which on a big-box machine is well above the 24-bit space).
+pub(crate) fn plausible_ptr(addr: u32) -> bool {
     addr & 1 == 0
         && ((0x100..0x00A0_0000).contains(&addr)           // chip + Z2 fast
             || (0x00C0_0000..0x00D8_0000).contains(&addr)  // slow
             || (0x0400_0000..0x0800_0000).contains(&addr)  // A3000/A4000 fast
             || (0x0800_0000..0x1000_0000).contains(&addr)  // CPU-slot RAM
             || (0x1000_0000..0x8000_0000).contains(&addr)) // Zorro III
+}
+
+/// The same test for a BPTR (an address shifted right by two, as AmigaDOS
+/// stores pointers). The pointed-at address must be longword aligned, so
+/// the shift is exact; BPTRs past a quarter of the address space cannot
+/// name a real address at all and are rejected before the shift.
+fn plausible_bptr(bptr: u32) -> bool {
+    bptr < 0x4000_0000 && plausible_ptr(bptr << 2)
 }
 
 /// Read-only view of guest memory, built from the debugger's peek
@@ -240,14 +249,14 @@ impl OsMemory<'_> {
             return None;
         }
         let cli = (self.peek32)(task.wrapping_add(PR_CLI));
-        if cli != 0 && cli < 0x0040_0000 {
+        if plausible_bptr(cli) {
             let module = (self.peek32)((cli << 2).wrapping_add(CLI_MODULE));
             if module != 0 {
                 return Some(module);
             }
         }
         let array = (self.peek32)(task.wrapping_add(PR_SEGLIST));
-        if array == 0 || array >= 0x0040_0000 {
+        if !plausible_bptr(array) {
             return None;
         }
         let count = (self.peek32)(array << 2);
@@ -263,11 +272,8 @@ impl OsMemory<'_> {
     /// size longword; the payload follows the next pointer.
     pub fn walk_seglist(&self, mut bptr: u32) -> Vec<Segment> {
         let mut out = Vec::new();
-        while bptr != 0 && bptr < 0x0040_0000 && out.len() < 64 {
+        while plausible_bptr(bptr) && out.len() < 64 {
             let addr = bptr << 2;
-            if !(4..0x0100_0000).contains(&addr) {
-                break;
-            }
             let size = (self.peek32)(addr.wrapping_sub(4));
             let next = (self.peek32)(addr);
             out.push(Segment {
@@ -295,7 +301,7 @@ impl OsMemory<'_> {
     /// Read a BSTR (BPTR to a length-prefixed string): printable ASCII,
     /// bounded by `cap`, empty for implausible pointers.
     pub fn read_bstr(&self, bptr: u32, cap: usize) -> String {
-        if bptr == 0 || bptr >= 0x0040_0000 {
+        if !plausible_bptr(bptr) {
             return String::new();
         }
         let addr = bptr << 2;
@@ -317,7 +323,7 @@ impl OsMemory<'_> {
     pub fn process_command_name(&self, task: u32) -> String {
         if (self.peek8)(task.wrapping_add(LN_TYPE)) == NT_PROCESS {
             let cli = (self.peek32)(task.wrapping_add(PR_CLI));
-            if cli != 0 && cli < 0x0040_0000 {
+            if plausible_bptr(cli) {
                 let name_bptr = (self.peek32)((cli << 2).wrapping_add(CLI_COMMAND_NAME));
                 // A full AmigaDOS path fits in a 255-byte BSTR.
                 let name = self.read_bstr(name_bptr, 255);
@@ -356,8 +362,10 @@ pub fn command_basename(path: &str) -> &str {
 }
 
 /// A loaded hunk must sit in RAM exec could have allocated and carry a
-/// believable size (the loader's size longword is bounded by the 16MB
-/// chip/Z2 space a seglist can live in).
+/// believable size. The 16 MiB size ceiling is a sanity bound on the
+/// loader's size longword, not an address-space limit: the hunk itself may
+/// sit anywhere `plausible_ptr` accepts, including the 32-bit fast-RAM
+/// windows of a big-box machine.
 fn segment_plausible(seg: &Segment) -> bool {
     plausible_ptr(seg.start) && seg.size < 0x0100_0000
 }
@@ -889,5 +897,71 @@ mod tests {
         let peek32 = |a: u32| mem.peek32(a);
         let err = os(&peek8, &peek32).exec_base().unwrap_err();
         assert!(err.contains("ChkBase"), "{err}");
+    }
+
+    /// Exec structures live wherever exec allocated them. On a big-box
+    /// machine that is the Ramsey motherboard bank ($04000000-$07FFFFFF),
+    /// the CPU-slot accelerator bank ($08000000-$0FFFFFFF), or a Zorro III
+    /// board -- all beyond the 24-bit space the small-box map fits in.
+    #[test]
+    fn plausible_pointers_cover_the_32_bit_ram_windows() {
+        for addr in [
+            0x0000_1000, // chip
+            0x0020_0000, // Zorro II fast
+            0x00C0_0000, // slow
+            0x0400_0000, // motherboard (Ramsey), bottom of the window
+            0x07FF_FFFE, // motherboard, top of the window
+            0x0800_0000, // CPU slot, bottom
+            0x0FFF_FFFE, // CPU slot, top
+            0x1000_0000, // Zorro III, bottom
+            0x4000_0000, // Zorro III
+        ] {
+            assert!(plausible_ptr(addr), "${addr:08X} should be plausible");
+            assert!(
+                plausible_bptr(addr >> 2),
+                "BPTR ${:08X} should be plausible",
+                addr >> 2
+            );
+        }
+        // Still rejected: odd addresses, the zero page, the custom-register
+        // and ROM spaces, and anything past the Zorro III window.
+        for addr in [
+            0x0000_0001,
+            0x0000_0080,
+            0x00DF_F000,
+            0x00F8_0000,
+            0x8000_0000u32,
+        ] {
+            assert!(!plausible_ptr(addr), "${addr:08X} should be rejected");
+        }
+    }
+
+    /// A seglist walked from a hunk in motherboard RAM: the BPTR bound
+    /// must follow the same address windows, not a 16 MiB ceiling.
+    #[test]
+    fn walks_a_seglist_loaded_above_the_24_bit_space() {
+        let hunk = 0x0450_0000u32;
+        let mut mem = FakeMem::new();
+        mem.put32(hunk - 4, 0x100); // loader size longword
+        mem.put32(hunk, 0); // end of list
+        let peek8 = |a: u32| mem.peek8(a);
+        let peek32 = |a: u32| mem.peek32(a);
+        let segs = os(&peek8, &peek32).walk_seglist(hunk >> 2);
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].start, hunk + 4);
+        assert!(segment_plausible(&segs[0]));
+    }
+
+    /// The same for a BSTR: cli_CommandName points into whatever RAM the
+    /// shell was loaded into.
+    #[test]
+    fn reads_a_bstr_above_the_24_bit_space() {
+        let bstr = 0x0900_0000u32;
+        let mut mem = FakeMem::new();
+        mem.put8(bstr, 3);
+        mem.put_str(bstr + 1, "Dir");
+        let peek8 = |a: u32| mem.peek8(a);
+        let peek32 = |a: u32| mem.peek32(a);
+        assert_eq!(os(&peek8, &peek32).read_bstr(bstr >> 2, 255), "Dir");
     }
 }

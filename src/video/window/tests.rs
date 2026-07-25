@@ -1936,8 +1936,18 @@ fn test_app() -> super::App {
 }
 
 fn test_app_with_audio(audio: Box<dyn AudioSink>) -> super::App {
+    test_app_with_audio_and_cpu(audio, crate::config::CpuModel::M68000)
+}
+
+/// The same fixture on a chosen CPU model. Fast-RAM banks past the 24-bit
+/// space are fitted by the caller through `bus_mut().mem`, since only a
+/// 32-bit model reaches them.
+fn test_app_with_audio_and_cpu(
+    audio: Box<dyn AudioSink>,
+    cpu: crate::config::CpuModel,
+) -> super::App {
     use crate::chipset::paula::Paula;
-    use crate::config::{CpuModel, PacingBudget};
+    use crate::config::PacingBudget;
     use crate::emulator::Emulator;
     use crate::floppy::FloppyController;
     use crate::memory::{Memory, ROM_BASE, ROM_SIZE};
@@ -1971,7 +1981,7 @@ fn test_app_with_audio(audio: Box<dyn AudioSink>) -> super::App {
     );
     let emu = Emulator::new(
         bus,
-        CpuModel::M68000,
+        cpu,
         false,
         Default::default(),
         PacingBudget::Cycles,
@@ -3486,6 +3496,16 @@ fn console_modify_search_and_transport_commands() {
     let out = console_run(&mut app, "FIND BEEF 50000");
     assert!(out[0].contains("found at $060000"), "{out:?}");
 
+    // A START is taken through the machine's address bus, so on this
+    // 24-bit fixture $2050000 sweeps from $050000 and reports the hit
+    // above it. Unmasked it would name no region at all and restart from
+    // the bottom of the map, reporting the earlier copy instead.
+    console_run(&mut app, "POKE 40000 BEEF");
+    let out = console_run(&mut app, "FIND BEEF 2050000");
+    assert!(out[0].contains("found at $060000"), "{out:?}");
+    let out = console_run(&mut app, "FIND BEEF 0");
+    assert!(out[0].contains("found at $040000"), "{out:?}");
+
     // Run to an exact beam slot; the one-shot trap reports its position.
     let out = console_run(&mut app, "TOSLOT 50 30");
     assert!(
@@ -3664,6 +3684,65 @@ fn memory_tab_find_scroll_and_bitmap_toggle() {
     }
     app.activate_ui_control(UiControl::DebugMemBits);
     assert!(!app.debugger_panel.as_ref().unwrap().mem_view_bits);
+}
+
+/// Find sweeps the decoded memory map, so on a 32-bit CPU it reaches the
+/// RAM banks past the 24-bit space -- here the CPU-slot accelerator bank at
+/// $08000000. A search of a fixed 16 MiB span could never see them.
+#[test]
+fn memory_tab_find_reaches_ram_above_the_24_bit_space() {
+    let mut app = test_app_with_audio_and_cpu(Box::new(NullSink), crate::config::CpuModel::M68030);
+    app.emu.bus_mut().mem.fit_accel_ram(1024 * 1024);
+    app.open_debugger();
+    if let Some(panel) = app.debugger_panel.as_mut() {
+        panel.tab = super::ui::DebugTab::Memory;
+        panel.mem_addr = 0;
+    }
+    app.emu.bus_mut().mem.accel_ram[0x4_0000..0x4_0004].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+    if let Some(panel) = app.debugger_panel.as_mut() {
+        panel.entry = "DEADBEEF".to_string();
+    }
+    app.activate_ui_control(UiControl::DebugMemFind);
+    let panel = app.debugger_panel.as_ref().unwrap();
+    assert_eq!(
+        panel.mem_last_find,
+        Some(crate::memory::ACCEL_RAM_BASE as u32 + 0x4_0000)
+    );
+    assert_eq!(
+        panel.mem_addr,
+        crate::memory::ACCEL_RAM_BASE as u32 + 0x4_0000
+    );
+}
+
+/// A full motherboard bank ends at $08000000, exactly where the CPU-slot
+/// bank begins, so the two abut in the decoded map. The per-span reads run
+/// one pattern short of a chunk past their span end precisely so a match
+/// straddling that seam is still found, anchored in the bank it starts in.
+#[test]
+fn memory_tab_find_spans_two_abutting_ram_banks() {
+    let mut app = test_app_with_audio_and_cpu(Box::new(NullSink), crate::config::CpuModel::M68030);
+    {
+        let mem = &mut app.emu.bus_mut().mem;
+        mem.fit_mb_ram(4 * 1024 * 1024);
+        mem.fit_accel_ram(1024 * 1024);
+        assert_eq!(mem.mb_ram_base(), 0x07C0_0000);
+        // DE AD in the last two bytes of the motherboard bank, BE EF in
+        // the first two of the CPU-slot bank.
+        let top = mem.mb_ram.len();
+        mem.mb_ram[top - 2..].copy_from_slice(&[0xDE, 0xAD]);
+        mem.accel_ram[..2].copy_from_slice(&[0xBE, 0xEF]);
+    }
+    app.open_debugger();
+    if let Some(panel) = app.debugger_panel.as_mut() {
+        panel.tab = super::ui::DebugTab::Memory;
+        panel.mem_addr = 0;
+        panel.entry = "DEADBEEF".to_string();
+    }
+    app.activate_ui_control(UiControl::DebugMemFind);
+    assert_eq!(
+        app.debugger_panel.as_ref().unwrap().mem_last_find,
+        Some(0x07FF_FFFE)
+    );
 }
 
 #[test]

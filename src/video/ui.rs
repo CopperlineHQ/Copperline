@@ -416,8 +416,10 @@ impl DebuggerPanel {
             .collect()
     }
 
-    /// Region spec for Save region: "ADDR LEN", both hex, length bounded
-    /// to the 24-bit bus.
+    /// Region spec for Save region: "ADDR LEN", both hex. The address is
+    /// taken as written -- a dump can start anywhere the CPU decodes,
+    /// including the motherboard, CPU-slot, and Zorro III RAM above the
+    /// 24-bit space -- and only the length is capped, at 16 MiB per dump.
     pub fn region_spec(&self) -> Option<(u32, u32)> {
         let mut tokens = self.entry.split_whitespace();
         let addr = parse_hex_u32(tokens.next()?)?;
@@ -425,7 +427,7 @@ impl DebuggerPanel {
         if tokens.next().is_some() || len == 0 || len > 0x0100_0000 {
             return None;
         }
-        Some((addr & 0x00FF_FFFF, len))
+        Some((addr, len))
     }
 
     pub fn push_entry_char(&mut self, ch: char) {
