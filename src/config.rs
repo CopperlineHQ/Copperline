@@ -228,6 +228,10 @@ pub struct Config {
     /// scale only -- it does not affect the emulated machine or scripted mouse
     /// input.
     pub mouse_sensitivity: u8,
+    /// `[input] autofire_hz`: how fast a held fire button is pulsed, or 0 for
+    /// off (the default). A host input convenience, not machine state -- the
+    /// emulated port sees an ordinary button being pressed and released.
+    pub autofire_hz: u8,
     /// Controller devices plugged into the two game ports at power-on
     /// (`[input] port1` / `port2`, `--port1` / `--port2`); index 0 = port 1.
     /// Defaults to a mouse in port 1 and a joystick in port 2 -- a CD32
@@ -442,7 +446,21 @@ impl Default for ParallelConfig {
 pub struct DriveImage {
     pub path: PathBuf,
     pub volume_name: Option<String>,
+    /// `de_BootPri` for the partition Copperline synthesizes in front of a
+    /// bare hardfile. Only reaches the guest for such images: an HDF that
+    /// carries its own RDB keeps the priorities recorded inside it.
+    pub boot_pri: i8,
 }
+
+/// Priority a synthesized hard-disk partition boots at when the config says
+/// nothing, matching what HDToolBox writes for a plain hard-disk partition.
+/// Kickstart's own DF0: boot node sits at 5, so a hard disk loses the tie to a
+/// bootable floppy unless it is raised.
+pub const HARDFILE_DEFAULT_BOOT_PRI: i8 = 0;
+
+/// `de_BootPri` value that mounts a partition without offering it for boot,
+/// the same sentinel `[[filesys]] bootpri` uses.
+pub const BOOT_PRI_NEVER: i8 = -128;
 
 /// Whether a drive-image path names a CD image (a cue sheet or a bare ISO).
 /// On the SCSI bus such an entry attaches a CD-ROM drive instead of a hard
@@ -540,6 +558,72 @@ pub struct Emulation {
     /// as an output frame-skip level. See [`WarpSpeed`]. Adjustable at runtime
     /// from the Emulator menu and the keyboard.
     pub warp_speed: WarpSpeed,
+    /// Record rewind history from power-on, so the rewind hotkey and menu item
+    /// work without opening the debugger. Off by default: capturing costs a
+    /// whole-machine serialize every `rewind_interval_frames` and the retained
+    /// snapshots cost `rewind_budget_mb` of host memory.
+    pub rewind: bool,
+    /// Host-memory cap on the retained rewind snapshots. Oldest snapshots are
+    /// evicted first, so this sets how far back rewind can reach: how much
+    /// emulated time that buys depends on the machine's RAM size.
+    pub rewind_budget_mb: usize,
+    /// Emulated frames between rewind snapshots, and therefore the granularity
+    /// of one rewind step. Larger is cheaper but coarser.
+    pub rewind_interval_frames: u64,
+}
+
+/// Default rewind snapshot budget in MiB when `[emulation] rewind` is on.
+pub const REWIND_DEFAULT_BUDGET_MB: usize = 256;
+/// Default emulated frames between rewind snapshots: half a second of PAL,
+/// which is a comfortable step size for a rewind hotkey.
+pub const REWIND_DEFAULT_INTERVAL_FRAMES: u64 = 25;
+
+// ---------------------------------------------------------------------------
+// Autofire
+//
+// The `[input] autofire_hz` policy: how a held fire button is turned into a
+// pulse train. It lives here rather than with the keyboard bindings in
+// `keymap` because it is not a host-key concern -- the phase is a function of
+// emulated time alone, and every input source (gamepad, keyboard, and any
+// future one) is gated through it.
+// ---------------------------------------------------------------------------
+
+/// Autofire rates offered by the menu, in Hz. 0 is off.
+pub const AUTOFIRE_RATES: [u8; 6] = [0, 3, 5, 8, 12, 16];
+
+/// Fastest configurable autofire. Above roughly this the assert window is
+/// shorter than the video frame the guest samples the port on, so the button
+/// reads as noise rather than as a fast tap.
+pub const AUTOFIRE_MAX_HZ: u8 = 30;
+
+/// Label for an autofire rate.
+pub fn autofire_label(hz: u8) -> String {
+    if hz == 0 {
+        "off".to_string()
+    } else {
+        format!("{hz} Hz")
+    }
+}
+
+/// The next rate in the menu's cycle.
+pub fn next_autofire_rate(hz: u8) -> u8 {
+    let idx = AUTOFIRE_RATES.iter().position(|&r| r == hz).unwrap_or(0);
+    AUTOFIRE_RATES[(idx + 1) % AUTOFIRE_RATES.len()]
+}
+
+/// Whether a held fire button should be *asserted* right now, given the
+/// autofire rate and how much emulated time has passed.
+///
+/// The phase is taken from emulated seconds rather than host frames, so the
+/// rate is the same under warp, on a paced run, and on PAL or NTSC -- an
+/// autofire that sped up in warp would be a different game.
+pub fn autofire_asserted(hz: u8, emulated_seconds: f64) -> bool {
+    if hz == 0 {
+        return true; // Off: the button is simply held.
+    }
+    // One full press+release per 1/hz second: assert on the first half.
+    let half_periods = emulated_seconds * f64::from(hz) * 2.0;
+    (half_periods as i64).rem_euclid(2) == 0
 }
 
 /// Real-mode pacing budget model.
@@ -1175,6 +1259,9 @@ impl Default for Config {
                 pacing_budget: PacingBudget::Cycles,
                 realtime_priority: false,
                 warp_speed: WarpSpeed::default(),
+                rewind: false,
+                rewind_budget_mb: REWIND_DEFAULT_BUDGET_MB,
+                rewind_interval_frames: REWIND_DEFAULT_INTERVAL_FRAMES,
             },
             chip_ram_bytes: 512 * 1024,
             fast_ram_bytes: 0,
@@ -1230,6 +1317,7 @@ impl Default for Config {
             status_bar: true,
             joystick_input_mode: JoystickInputMode::Gamepad,
             mouse_sensitivity: 50,
+            autofire_hz: 0,
             port_devices: [PortDevice::Mouse, PortDevice::Joystick],
             serial: SerialConfig::default(),
             parallel: ParallelConfig::default(),
@@ -1390,6 +1478,9 @@ pub struct ConfigOverrides {
     pub port1: Option<String>,
     /// Device in game port 2 (`--port2`). Same parser as `[input] port2`.
     pub port2: Option<String>,
+    /// Autofire rate in Hz (`--autofire`), 0 for off. Same validation as
+    /// `[input] autofire_hz`.
+    pub autofire_hz: Option<u8>,
     /// Serial port wiring (`--serial`): "off", "stdout", "midi", "tcp",
     /// "tcp-connect", or "pty" ("none" and "terminal" parse as
     /// compatibility aliases of the first two). Same parser as
@@ -1455,6 +1546,7 @@ impl ConfigOverrides {
             && self.mouse_sensitivity.is_none()
             && self.port1.is_none()
             && self.port2.is_none()
+            && self.autofire_hz.is_none()
             && self.serial.is_none()
             && self.serial_connect.is_none()
             && self.midi_out.is_none()
@@ -1523,6 +1615,9 @@ impl ConfigOverrides {
         }
         if let Some(port2) = &self.port2 {
             raw.input.port2 = Some(port2.clone());
+        }
+        if let Some(hz) = self.autofire_hz {
+            raw.input.autofire_hz = Some(hz);
         }
         if let Some(mode) = &self.serial {
             raw.serial.mode = Some(mode.clone());
@@ -1741,6 +1836,9 @@ pub(crate) struct RawInput {
     /// Host mouse sensitivity, 0-100 (default 50).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) mouse_sensitivity: Option<u16>,
+    /// Autofire rate in Hz for the fire button, or 0 (the default) for off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) autofire_hz: Option<u8>,
 }
 
 /// `[serial]` host wiring for Paula's serial (a.k.a. MIDI) port.
@@ -1786,13 +1884,17 @@ pub(crate) struct RawParallel {
 
 /// A drive image entry in `[ide]`/`[scsi]`. Accepts either a bare path string
 /// (`master = "disk.hdf"`) or a table carrying an explicit volume-name override
-/// (`master = { path = "games/", name = "Games" }`). It serializes back to the
-/// bare string when no name is set, so existing minimal configs round-trip
-/// unchanged.
+/// and/or boot priority (`master = { path = "games/", name = "Games",
+/// bootpri = 5 }`). It serializes back to the bare string when neither
+/// override is set, so existing minimal configs round-trip unchanged.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RawDrive {
     pub(crate) path: String,
     pub(crate) name: Option<String>,
+    /// Boot priority written into the synthesized RDB's `de_BootPri`
+    /// (-128..=127); defaults to 0, the priority HDToolBox gives a hard-disk
+    /// boot partition. -128 mounts the partition without offering it for boot.
+    pub(crate) bootpri: Option<i8>,
 }
 
 impl RawDrive {
@@ -1800,6 +1902,7 @@ impl RawDrive {
         Self {
             path: path.into(),
             name: None,
+            bootpri: None,
         }
     }
 }
@@ -1809,17 +1912,21 @@ impl Serialize for RawDrive {
     where
         S: serde::Serializer,
     {
-        match &self.name {
-            // No override: a plain string keeps saved configs minimal.
-            None => serializer.serialize_str(&self.path),
-            Some(name) => {
-                use serde::ser::SerializeMap;
-                let mut map = serializer.serialize_map(Some(2))?;
-                map.serialize_entry("path", &self.path)?;
-                map.serialize_entry("name", name)?;
-                map.end()
-            }
+        if self.name.is_none() && self.bootpri.is_none() {
+            // No overrides: a plain string keeps saved configs minimal.
+            return serializer.serialize_str(&self.path);
         }
+        use serde::ser::SerializeMap;
+        let len = 1 + usize::from(self.name.is_some()) + usize::from(self.bootpri.is_some());
+        let mut map = serializer.serialize_map(Some(len))?;
+        map.serialize_entry("path", &self.path)?;
+        if let Some(name) = &self.name {
+            map.serialize_entry("name", name)?;
+        }
+        if let Some(bootpri) = &self.bootpri {
+            map.serialize_entry("bootpri", bootpri)?;
+        }
+        map.end()
     }
 }
 
@@ -1832,7 +1939,9 @@ impl<'de> Deserialize<'de> for RawDrive {
         impl<'de> serde::de::Visitor<'de> for DriveVisitor {
             type Value = RawDrive;
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("a drive image path, or a table with `path` and optional `name`")
+                f.write_str(
+                    "a drive image path, or a table with `path` and optional `name`/`bootpri`",
+                )
             }
             fn visit_str<E: serde::de::Error>(self, v: &str) -> std::result::Result<RawDrive, E> {
                 Ok(RawDrive::from_path(v))
@@ -1849,6 +1958,7 @@ impl<'de> Deserialize<'de> for RawDrive {
             {
                 let mut path: Option<String> = None;
                 let mut name: Option<String> = None;
+                let mut bootpri: Option<i8> = None;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "path" => {
@@ -1863,13 +1973,26 @@ impl<'de> Deserialize<'de> for RawDrive {
                             }
                             name = Some(map.next_value()?);
                         }
+                        "bootpri" => {
+                            if bootpri.is_some() {
+                                return Err(serde::de::Error::duplicate_field("bootpri"));
+                            }
+                            bootpri = Some(map.next_value()?);
+                        }
                         other => {
-                            return Err(serde::de::Error::unknown_field(other, &["path", "name"]));
+                            return Err(serde::de::Error::unknown_field(
+                                other,
+                                &["path", "name", "bootpri"],
+                            ));
                         }
                     }
                 }
                 let path = path.ok_or_else(|| serde::de::Error::missing_field("path"))?;
-                Ok(RawDrive { path, name })
+                Ok(RawDrive {
+                    path,
+                    name,
+                    bootpri,
+                })
             }
         }
         deserializer.deserialize_any(DriveVisitor)
@@ -1998,6 +2121,16 @@ pub(crate) struct RawEmulation {
     /// UI warp/turbo speed: "2x", "4x", "8x", "16x", or "max" (default).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) warp_speed: Option<String>,
+    /// Record rewind history from power-on (default false), so the rewind
+    /// hotkey works outside the debugger.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rewind: Option<bool>,
+    /// Host memory (MiB) the rewind snapshot ring may hold.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rewind_budget_mb: Option<usize>,
+    /// Emulated frames between rewind snapshots (one rewind step).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rewind_interval_frames: Option<u64>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -2208,6 +2341,7 @@ fn drive_image(raw: RawDrive) -> Result<DriveImage> {
     Ok(DriveImage {
         path: PathBuf::from(raw.path),
         volume_name,
+        boot_pri: raw.bootpri.unwrap_or(HARDFILE_DEFAULT_BOOT_PRI),
     })
 }
 
@@ -2316,6 +2450,20 @@ impl TryFrom<RawConfig> for Config {
             warp_speed: match raw.emulation.warp_speed.as_deref() {
                 None => defaults.emulation.warp_speed,
                 Some(s) => parse_warp_speed(s)?,
+            },
+            rewind: raw.emulation.rewind.unwrap_or(defaults.emulation.rewind),
+            rewind_budget_mb: match raw.emulation.rewind_budget_mb {
+                None => defaults.emulation.rewind_budget_mb,
+                // A ring that cannot hold a single snapshot has no anchor to
+                // rewind to, so reject the degenerate value rather than
+                // silently recording nothing.
+                Some(0) => bail!("[emulation] rewind_budget_mb must be at least 1 MiB"),
+                Some(mb) => mb,
+            },
+            rewind_interval_frames: match raw.emulation.rewind_interval_frames {
+                None => defaults.emulation.rewind_interval_frames,
+                Some(0) => bail!("[emulation] rewind_interval_frames must be at least 1"),
+                Some(n) => n,
             },
         };
         let chip_ram_bytes = match raw.memory.chip.as_deref() {
@@ -2463,6 +2611,19 @@ impl TryFrom<RawConfig> for Config {
             Some(v) => {
                 errors.push(anyhow!("[input] mouse_sensitivity must be 0-100, got {v}"));
                 defaults.mouse_sensitivity
+            }
+        };
+        // An implausibly fast autofire is a typo, not a preference: at more
+        // than ~30 Hz the pulse is shorter than the frame the guest samples
+        // it on, so the button would read as noise or as never pressed.
+        let autofire_hz = match raw.input.autofire_hz {
+            None => defaults.autofire_hz,
+            Some(hz) if hz <= AUTOFIRE_MAX_HZ => hz,
+            Some(hz) => {
+                errors.push(anyhow!(
+                    "[input] autofire_hz must be 0 (off) to {AUTOFIRE_MAX_HZ}, got {hz}"
+                ));
+                defaults.autofire_hz
             }
         };
         // The profile carries the default wiring (mouse + joystick, with a
@@ -2855,6 +3016,7 @@ impl TryFrom<RawConfig> for Config {
             status_bar,
             joystick_input_mode,
             mouse_sensitivity,
+            autofire_hz,
             port_devices,
             serial,
             parallel: resolve_parallel(raw.parallel)?,
@@ -4265,6 +4427,70 @@ mod tests {
     }
 
     #[test]
+    fn autofire_off_holds_the_button_and_a_rate_pulses_it() {
+        // Off: always asserted, so a held button is simply held.
+        for t in [0.0, 0.01, 12.7] {
+            assert!(autofire_asserted(0, t));
+        }
+        // 5 Hz: 100 ms asserted, 100 ms released, from t=0.
+        assert!(autofire_asserted(5, 0.0));
+        assert!(autofire_asserted(5, 0.099));
+        assert!(!autofire_asserted(5, 0.101));
+        assert!(!autofire_asserted(5, 0.199));
+        assert!(autofire_asserted(5, 0.201));
+
+        // One full cycle per 1/hz second, at every offered rate.
+        for hz in AUTOFIRE_RATES.into_iter().filter(|&r| r != 0) {
+            let period = 1.0 / f64::from(hz);
+            let samples = 400;
+            let asserted = (0..samples)
+                .filter(|i| autofire_asserted(hz, period * f64::from(*i) / f64::from(samples)))
+                .count();
+            assert!(
+                (asserted as i32 - samples / 2).abs() <= 1,
+                "{hz} Hz should be asserted for half of each period, was {asserted}/{samples}"
+            );
+        }
+    }
+
+    #[test]
+    fn autofire_rate_cycles_through_the_menu_list_and_wraps() {
+        let mut hz = 0;
+        let mut seen = vec![hz];
+        for _ in 0..AUTOFIRE_RATES.len() {
+            hz = next_autofire_rate(hz);
+            seen.push(hz);
+        }
+        assert_eq!(seen.first(), seen.last(), "the cycle returns to off");
+        assert_eq!(autofire_label(0), "off");
+        assert_eq!(autofire_label(8), "8 Hz");
+        // An off-list value (hand-edited config) rejoins the cycle.
+        assert_eq!(next_autofire_rate(99), AUTOFIRE_RATES[1]);
+    }
+
+    #[test]
+    fn autofire_defaults_off_and_rejects_implausible_rates() -> Result<()> {
+        assert_eq!(parse_config("")?.autofire_hz, 0);
+        assert_eq!(parse_config("[input]\nautofire_hz = 8\n")?.autofire_hz, 8);
+        assert_eq!(
+            parse_config(&format!("[input]\nautofire_hz = {}\n", AUTOFIRE_MAX_HZ))?.autofire_hz,
+            AUTOFIRE_MAX_HZ
+        );
+        // Faster than the guest can sample the port is a typo, not a setting.
+        assert!(
+            parse_config(&format!("[input]\nautofire_hz = {}\n", AUTOFIRE_MAX_HZ + 1)).is_err()
+        );
+
+        // The CLI flag layers over the config file, as the other input keys do.
+        let overrides = ConfigOverrides {
+            autofire_hz: Some(12),
+            ..Default::default()
+        };
+        assert_eq!(load_overrides(&overrides)?.autofire_hz, 12);
+        Ok(())
+    }
+
+    #[test]
     fn port_device_keys_parse_aliases_and_reject_garbage() -> Result<()> {
         for (text, expected) in [
             ("mouse", PortDevice::Mouse),
@@ -5582,6 +5808,7 @@ mod tests {
                 unit0: Some(RawDrive {
                     path: "work/".to_string(),
                     name: Some("Work".to_string()),
+                    bootpri: None,
                 }),
                 unit1: Some(RawDrive::from_path("data.hdf")),
                 ..RawScsi::default()
@@ -5608,12 +5835,58 @@ mod tests {
             master: Some(RawDrive {
                 path: "games/".to_string(),
                 name: Some("Games".to_string()),
+                bootpri: None,
             }),
             slave: None,
         };
         let text = toml::to_string(&named).unwrap();
         let parsed: RawIde = toml::from_str(&text).unwrap();
         assert_eq!(parsed, named);
+
+        // With only a boot priority: still the inline-table form, and the
+        // name key stays absent.
+        let prioritised = RawIde {
+            master: Some(RawDrive {
+                path: "wb.hdf".to_string(),
+                name: None,
+                bootpri: Some(6),
+            }),
+            slave: None,
+        };
+        let text = toml::to_string(&prioritised).unwrap();
+        assert!(!text.contains("name"), "{text}");
+        let parsed: RawIde = toml::from_str(&text).unwrap();
+        assert_eq!(parsed, prioritised);
+    }
+
+    #[test]
+    fn drive_bootpri_defaults_to_zero_and_parses() -> Result<()> {
+        let cfg = parse_config(
+            r#"
+            [machine]
+            profile = "A1200"
+            [ide]
+            master = "wb.hdf"
+            slave = { path = "extra.hdf", bootpri = -128 }
+            "#,
+        )?;
+        assert_eq!(
+            cfg.ide.master.as_ref().unwrap().boot_pri,
+            HARDFILE_DEFAULT_BOOT_PRI
+        );
+        assert_eq!(cfg.ide.slave.as_ref().unwrap().boot_pri, BOOT_PRI_NEVER);
+
+        // Out-of-range values are rejected by the i8 field type.
+        assert!(parse_config(
+            r#"
+            [machine]
+            profile = "A1200"
+            [ide]
+            master = { path = "wb.hdf", bootpri = 500 }
+            "#,
+        )
+        .is_err());
+        Ok(())
     }
 
     #[test]

@@ -51,6 +51,7 @@ range checks as the equivalent TOML fields:
 | `--mouse-sensitivity N` | `[input] mouse_sensitivity` | `0`-`100` host mouse speed (`50` default = 1:1) |
 | `--port1 DEVICE` | `[input] port1` | `mouse` (default), `joystick`, `cd32`, `analogue`, `none` |
 | `--port2 DEVICE` | `[input] port2` | same devices; default `joystick` (`cd32` on the CD32 profile) |
+| `--autofire HZ` | `[input] autofire_hz` | `0` (off, the default) to `30` |
 | `--full-screen` / `--windowed` | `[display] full_screen` | open fullscreen or windowed at start (default windowed) |
 | `--show-status-bar` / `--hide-status-bar` | `[display] status_bar` | status bar at start (default shown) |
 
@@ -260,6 +261,9 @@ power_on = true            # false = start powered off at the test screen
 pacing_budget = "cycles"   # "cycles" (hardware-accurate) or "instructions"
 realtime_priority = false  # true = raise the pacer/audio thread priority
 warp_speed = "max"         # turbo limit: "2x", "4x", "8x", "16x", or "max"
+rewind = false             # true = record rewind history from power-on
+rewind_budget_mb = 256     # host memory the rewind history may hold
+rewind_interval_frames = 25 # emulated frames per rewind step
 ```
 
 The deterministic cycle-driven core is the only emulation timing. It is
@@ -303,6 +307,18 @@ carried no information.)
   out and still presents at vsync. Adjust it live from the **Warp Limit**
   menu item or `Cmd+Shift+W` / `Alt+Shift+W` (see [The window and its
   controls](ui.md)).
+- `rewind = true` records rewind history from power-on, so `Cmd+Z` / `Alt+Z`
+  and the **Rewind** menu item can step the whole machine backward through
+  it. It rides the same deterministic snapshot ring as the debugger's reverse
+  controls (see [](../debugger/reverse)) and is off by default because it is
+  not free: `rewind_budget_mb` (default 256) of host memory holds the
+  snapshots, and one whole-machine serialize happens every
+  `rewind_interval_frames` (default 25, half a second of PAL). One rewind
+  step goes back exactly one interval; oldest snapshots are evicted first, so
+  how much emulated time the budget buys scales with the machine's RAM size.
+  Turning the menu item off releases the retained snapshots. The same
+  determinism preconditions as reverse debugging apply -- a real-time clock
+  and host disk writes are not rolled back.
 
 ## `[cpu]`
 
@@ -543,6 +559,7 @@ port1 = "mouse"           # mouse | joystick | cd32 | analogue | none
 port2 = "joystick"        # same values; default "cd32" on the CD32 profile
 joystick = "gamepad"      # "gamepad" (default) or "keyboard"
 mouse_sensitivity = 50    # host mouse speed 0-100 (50 default = 1:1)
+autofire_hz = 0           # pulse a held fire button at this rate; 0 = off
 ```
 
 ### Port devices
@@ -616,6 +633,37 @@ or scripted `--mouse-after` input, so headless and recorded runs stay
 deterministic. Set it from the launcher's *Input* tab or
 `--mouse-sensitivity N`, and adjust it live with `Cmd+Shift+>` / `Cmd+Shift+<`
 (`Alt+Shift+>` / `Alt+Shift+<` on Linux and Windows), which ramp while held.
+
+### Autofire
+
+`autofire_hz` turns a *held* fire button into a pulse train at that many
+presses per second; `0` (the default) leaves the button alone. It applies to
+live input only -- the gamepad and the keyboard mapping -- and never to
+scripted input (`--joy-after`, `--script`, the control protocol's
+`input.joy`), which must replay exactly the events it was given.
+
+The phase comes from emulated time, so the rate is the same under warp and
+on PAL or NTSC. Nothing about the emulated machine changes: the port sees an
+ordinary button being pressed and released on `/FIRx`. Only the fire button
+is pulsed; directions and the second button pass through untouched.
+
+`--autofire HZ` sets it for one run, and the menu's **Autofire** item cycles
+off / 3 / 5 / 8 / 12 / 16 Hz live. The maximum is 30 Hz -- above that the
+assert window is shorter than the frame the guest samples the port on.
+
+### Remapping the keyboard controller
+
+The keyboard-to-controller bindings are a host preference, not part of the
+emulated machine, so they live beside the gamepad calibration rather than in
+a machine config: the menu's **Input Mapping...** item edits them and Save
+writes `keymap.toml` next to `gamepads.toml` (see
+[Gamepad calibration](ui.md#gamepad-calibration) for the per-platform
+location). Any control may take several keys -- fire ships with four aliases
+so compact keyboards without the right-hand modifiers still work -- and
+binding a key removes it from wherever it was before, including from the
+other mapping, so the two controllers can never fight over one key. Deleting
+the file restores the built-in layouts, as does the panel's **Defaults**
+button.
 
 ## `[serial]` -- serial port and MIDI
 
@@ -796,18 +844,30 @@ exit. Note that the stock A1200/A600 Kickstart `scsi.device` only probes
 the IDE master; a slave drive needs a guest OS or driver that supports
 two units (e.g. Kickstart 3.1.4).
 
-To override the volume name (instead of inheriting the directory name),
-give the drive as a table with `path` and `name`:
+To override the volume name (instead of inheriting the directory name) or
+the boot priority, give the drive as a table with `path` plus `name`
+and/or `bootpri`:
 
 ```toml
 [ide]
 master = { path = "/host/Games", name = "Games" }
+slave = { path = "wb.hdf", bootpri = 6 }
 # slave = "scratch.hdf"        # the bare-string form still works
 ```
 
 The name sets the FFS volume label of a directory mount; AmigaDOS volume
 names hold up to 30 characters and cannot contain `:` or `/`. It has no
 effect on a raw HDF, which carries its own label inside the image.
+
+`bootpri` (-128..127, default 0) is the `de_BootPri` written into the
+**synthesized** RDB's partition, which is what the ROM's strap ranks boot
+candidates by. Kickstart enters DF0: at priority 5, so the default 0 loses
+the tie to a bootable floppy; raise it to 6 to boot the hard disk ahead of
+one, or lower it to sort two hardfiles against each other. The sentinel
+-128 also clears the partition's `PBFB_BOOTABLE` flag, so the volume
+mounts but is never offered for boot. It has **no effect on an image that
+carries its own RDB** -- those priorities live inside the image, where
+HDToolBox put them -- and Copperline logs a warning if you set it on one.
 
 The drive responds to ATA IDENTIFY with the Gayle byte order real hardware
 uses, so both Kickstart 3.1 variants boot from it. An HDD activity LED
@@ -864,9 +924,10 @@ A2091 is Commodore product 3, with its DiagArea vector at `$2000`).
 Each `unitN` accepts everything `[ide]` paths do: RDB images, bare
 partition hardfiles (a synthesized RDB advertises a bootable `DHn`
 partition, named after the SCSI ID), and host directories built into
-in-memory FFS volumes -- including the `{ path = "...", name = "..." }`
-table form that overrides a directory mount's volume name. The HDD
-activity LED covers SCSI traffic too.
+in-memory FFS volumes -- including the
+`{ path = "...", name = "...", bootpri = N }` table form that overrides a
+directory mount's volume name and the synthesized partition's boot
+priority. The HDD activity LED covers SCSI traffic too.
 
 A `unitN` path ending in `.cue` or `.iso` attaches a **SCSI CD-ROM
 drive** at that ID instead of a hard disk: a read-only removable SCSI-2

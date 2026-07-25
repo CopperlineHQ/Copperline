@@ -496,7 +496,7 @@ mod tests {
     fn board_with_disk(sectors: u64) -> (A2091, PathBuf) {
         let mut board = A2091::new(fake_rom()).unwrap();
         let path = temp_image(sectors);
-        board.attach_drive(0, crate::scsi::ScsiDisk::open(&path, 0, None).unwrap());
+        board.attach_drive(0, crate::scsi::ScsiDisk::open(&path, 0, None, 0).unwrap());
         (board, path)
     }
 
@@ -606,7 +606,7 @@ mod tests {
         std::fs::write(&path, &img).unwrap();
         let (mut board2, _) = (board, ());
         // Reopen the drive so the new image content is seen.
-        board2.attach_drive(0, crate::scsi::ScsiDisk::open(&path, 0, None).unwrap());
+        board2.attach_drive(0, crate::scsi::ScsiDisk::open(&path, 0, None, 0).unwrap());
         let mut board = board2;
         let mut mem = test_memory();
 

@@ -9,17 +9,16 @@ use super::{
     bar_layout, center_present_frame_for_visible_start, center_present_frame_horizontally,
     control_at, copperline_icon_image, copperline_logo_image, copy_present_frame,
     copy_window_present_frame, draw_status_bar, fdd_track_counter_rect, fdd_track_digit_rect,
-    host_shortcut_modifier_pressed, host_to_amiga_rawkey, joystick_toggle_rect,
-    keyboard_joystick_key_for, led_row_rect, mask_present_frame_to_tv, paint_test_screen,
-    parse_amiga_key, pause_button_rect, power_button_rect, present_height,
-    presentation_h_shift_for, presentation_source_y_offset, raw_device_qualifier_family_held,
-    raw_device_qualifier_rawkey, rawkey_is_held, rawkey_transition_is_duplicate,
-    reboot_button_rect, repeated_main_key_should_drop, rgba, short_status_error,
-    shorten_status_paths, shot_button_rect, should_render_emulated_frame, standard_window_top_row,
-    status_with_latched_fdd_track, take_integral_mouse_delta, texture_height, texture_width,
-    tv_aperture_source_row, tv_source_h_bounds, volume_percent_from_pos, volume_slider_track_rect,
-    BarControl, DriveBar, JoystickInputMode, KeyboardJoystickHeld, KeyboardJoystickKey, MediaBar,
-    StatusBarView, ToolPanelKind, AMIGA_RAWKEY_LEFT_ALT, AMIGA_RAWKEY_LEFT_SHIFT,
+    host_shortcut_modifier_pressed, host_to_amiga_rawkey, joystick_toggle_rect, led_row_rect,
+    mask_present_frame_to_tv, paint_test_screen, parse_amiga_key, pause_button_rect,
+    power_button_rect, present_height, presentation_h_shift_for, presentation_source_y_offset,
+    raw_device_qualifier_family_held, raw_device_qualifier_rawkey, rawkey_is_held,
+    rawkey_transition_is_duplicate, reboot_button_rect, repeated_main_key_should_drop, rgba,
+    short_status_error, shorten_status_paths, shot_button_rect, should_render_emulated_frame,
+    standard_window_top_row, status_with_latched_fdd_track, take_integral_mouse_delta,
+    texture_height, texture_width, tv_aperture_source_row, tv_source_h_bounds,
+    volume_percent_from_pos, volume_slider_track_rect, BarControl, DriveBar, JoystickInputMode,
+    MediaBar, StatusBarView, ToolPanelKind, AMIGA_RAWKEY_LEFT_ALT, AMIGA_RAWKEY_LEFT_SHIFT,
     AMIGA_RAWKEY_RIGHT_ALT, AMIGA_RAWKEY_RIGHT_SHIFT, BUTTON_GLYPH, BUTTON_GLYPH_DISABLED, CD_BODY,
     CD_LED_OFF, CD_LED_ON, DISK_BODY, DISK_BODY_SHADOW, DISK_LABEL, FDD_LED_OFF, FDD_LED_ON,
     HDD_LED_OFF, HDD_LED_ON, POWER_GLYPH_OFF, POWER_GLYPH_ON, POWER_LED_BRIGHT, POWER_LED_NORMAL,
@@ -299,86 +298,91 @@ fn raw_device_alt_right_respects_keyboard_joystick_ownership() {
         physical_key: PhysicalKey::Code(KeyCode::AltRight),
         state: ElementState::Pressed,
     });
-    assert!(app.keyboard_joy_held[0].fire_right_alt);
+    assert!(app.keyboard_joy_held[0].is_set(KeyCode::AltRight));
     assert!(!rawkey_is_held(&app.held_rawkeys, AMIGA_RAWKEY_RIGHT_ALT));
 
     app.handle_raw_device_key_event(RawKeyEvent {
         physical_key: PhysicalKey::Code(KeyCode::AltRight),
         state: ElementState::Released,
     });
-    assert!(!app.keyboard_joy_held[0].fire_right_alt);
+    assert!(!app.keyboard_joy_held[0].is_set(KeyCode::AltRight));
     assert!(!rawkey_is_held(&app.held_rawkeys, AMIGA_RAWKEY_RIGHT_ALT));
 }
 
 #[test]
 fn keyboard_joystick_mapping_matches_fsuae_controls() {
-    use KeyboardJoystickKey as K;
+    use crate::keymap::JoyControl as C;
+    let map = crate::keymap::KeyMap::default();
     // Mapping 0: the FS-UAE-compatible cursor-key layout.
-    for (code, key) in [
-        (KeyCode::ArrowUp, K::Up),
-        (KeyCode::ArrowDown, K::Down),
-        (KeyCode::ArrowLeft, K::Left),
-        (KeyCode::ArrowRight, K::Right),
-        (KeyCode::ControlRight, K::FireRightCtrl),
-        (KeyCode::AltRight, K::FireRightAlt),
-        (KeyCode::ControlLeft, K::FireLeftCtrl),
-        (KeyCode::AltLeft, K::BlueLeftAlt),
-        (KeyCode::KeyC, K::Red),
-        (KeyCode::KeyX, K::Blue),
-        (KeyCode::KeyD, K::Green),
-        (KeyCode::KeyS, K::Yellow),
-        (KeyCode::Enter, K::Play),
-        (KeyCode::KeyZ, K::Rewind),
-        (KeyCode::KeyA, K::Forward),
+    for (code, control) in [
+        (KeyCode::ArrowUp, C::Up),
+        (KeyCode::ArrowDown, C::Down),
+        (KeyCode::ArrowLeft, C::Left),
+        (KeyCode::ArrowRight, C::Right),
+        (KeyCode::ControlRight, C::Fire),
+        (KeyCode::AltRight, C::Fire),
+        (KeyCode::ControlLeft, C::Fire),
+        (KeyCode::AltLeft, C::Button2),
+        (KeyCode::KeyC, C::Fire),
+        (KeyCode::KeyX, C::Button2),
+        (KeyCode::KeyD, C::Green),
+        (KeyCode::KeyS, C::Yellow),
+        (KeyCode::Enter, C::Play),
+        (KeyCode::KeyZ, C::Rewind),
+        (KeyCode::KeyA, C::Forward),
     ] {
-        assert_eq!(keyboard_joystick_key_for(code), Some((0, key)), "{code:?}");
+        assert_eq!(map.lookup(code), Some((0, control)), "{code:?}");
     }
     // Mapping 1: the numpad layout for the second controller, collision
     // free against mapping 0's letters.
-    for (code, key) in [
-        (KeyCode::Numpad8, K::Up),
-        (KeyCode::Numpad2, K::Down),
-        (KeyCode::Numpad4, K::Left),
-        (KeyCode::Numpad6, K::Right),
-        (KeyCode::Numpad0, K::Red),
-        (KeyCode::NumpadDecimal, K::Blue),
-        (KeyCode::NumpadEnter, K::Play),
+    for (code, control) in [
+        (KeyCode::Numpad8, C::Up),
+        (KeyCode::Numpad2, C::Down),
+        (KeyCode::Numpad4, C::Left),
+        (KeyCode::Numpad6, C::Right),
+        (KeyCode::Numpad0, C::Fire),
+        (KeyCode::NumpadDecimal, C::Button2),
+        (KeyCode::NumpadEnter, C::Play),
     ] {
-        assert_eq!(keyboard_joystick_key_for(code), Some((1, key)), "{code:?}");
+        assert_eq!(map.lookup(code), Some((1, control)), "{code:?}");
     }
-    assert_eq!(keyboard_joystick_key_for(KeyCode::Space), None);
+    assert_eq!(map.lookup(KeyCode::Space), None);
 }
 
 #[test]
 fn keyboard_joystick_fire_aliases_release_independently() {
-    let mut held = KeyboardJoystickHeld::default();
-    held.set(KeyboardJoystickKey::FireRightCtrl, true);
-    held.set(KeyboardJoystickKey::Red, true);
-    held.set(KeyboardJoystickKey::FireLeftCtrl, true);
-    assert!(held.joystick_state().fire);
+    let map = crate::keymap::KeyMap::default();
+    let mapping = map.mapping(0);
+    let mut held = crate::keymap::HeldKeys::default();
+    held.set(KeyCode::ControlRight, true);
+    held.set(KeyCode::KeyC, true);
+    held.set(KeyCode::ControlLeft, true);
+    assert!(mapping.joystick_state(&held).fire);
 
-    held.set(KeyboardJoystickKey::FireRightCtrl, false);
-    assert!(held.joystick_state().fire);
+    held.set(KeyCode::ControlRight, false);
+    assert!(mapping.joystick_state(&held).fire);
 
-    held.set(KeyboardJoystickKey::Red, false);
-    assert!(held.joystick_state().fire);
+    held.set(KeyCode::KeyC, false);
+    assert!(mapping.joystick_state(&held).fire);
 
-    held.set(KeyboardJoystickKey::FireLeftCtrl, false);
-    assert!(!held.joystick_state().fire);
+    held.set(KeyCode::ControlLeft, false);
+    assert!(!mapping.joystick_state(&held).fire);
 }
 
 #[test]
 fn keyboard_joystick_second_button_aliases_release_independently() {
-    let mut held = KeyboardJoystickHeld::default();
-    held.set(KeyboardJoystickKey::Blue, true);
-    held.set(KeyboardJoystickKey::BlueLeftAlt, true);
-    assert!(held.joystick_state().button2);
+    let map = crate::keymap::KeyMap::default();
+    let mapping = map.mapping(0);
+    let mut held = crate::keymap::HeldKeys::default();
+    held.set(KeyCode::KeyX, true);
+    held.set(KeyCode::AltLeft, true);
+    assert!(mapping.joystick_state(&held).button2);
 
-    held.set(KeyboardJoystickKey::Blue, false);
-    assert!(held.joystick_state().button2);
+    held.set(KeyCode::KeyX, false);
+    assert!(mapping.joystick_state(&held).button2);
 
-    held.set(KeyboardJoystickKey::BlueLeftAlt, false);
-    assert!(!held.joystick_state().button2);
+    held.set(KeyCode::AltLeft, false);
+    assert!(!mapping.joystick_state(&held).button2);
 }
 
 #[test]
@@ -478,9 +482,9 @@ fn numpad_mapping_stands_in_for_the_missing_gamepad() {
     // No physical pad in the test rig: the numpad mapping drives the
     // gamepad port (port 1) while the cursor-key mapping drives port 2,
     // so both players work from one keyboard.
-    app.keyboard_joy_held[1].up = true;
-    app.keyboard_joy_held[0].down = true;
-    app.keyboard_joy_held[0].fire_right_ctrl = true;
+    app.keyboard_joy_held[1].set(KeyCode::Numpad8, true);
+    app.keyboard_joy_held[0].set(KeyCode::ArrowDown, true);
+    app.keyboard_joy_held[0].set(KeyCode::ControlRight, true);
     app.pump_joystick_input();
     assert!(app.emu.bus().input.ports[0].up, "numpad drives port 1");
     assert!(!app.emu.bus().input.ports[0].down);
@@ -489,6 +493,227 @@ fn numpad_mapping_stands_in_for_the_missing_gamepad() {
         "cursor keys drive port 2"
     );
     assert!(app.emu.bus().input.ports[1].fire);
+}
+
+#[test]
+fn autofire_pulses_a_held_fire_button_and_leaves_the_rest_alone() {
+    use crate::bus::PortDevice;
+    let mut app = test_app();
+    app.emu
+        .bus_mut()
+        .input
+        .set_port_device(1, PortDevice::Joystick);
+    app.joystick_input_mode = JoystickInputMode::Keyboard;
+    app.keyboard_joy_held[0].set(KeyCode::ControlRight, true);
+    app.keyboard_joy_held[0].set(KeyCode::ArrowRight, true);
+    app.keyboard_joy_held[0].set(KeyCode::KeyX, true);
+
+    // Off: a held fire button is simply held.
+    app.autofire_hz = 0;
+    app.pump_joystick_input();
+    assert!(app.emu.bus().input.ports[1].fire);
+
+    // On: fire alternates as emulated time passes, while the direction and
+    // the second button stay steady -- only fire is gated. At 16 Hz a half
+    // period is under two PAL frames, so a handful of frames covers several.
+    app.autofire_hz = 16;
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..10 {
+        app.pump_joystick_input();
+        seen.insert(app.emu.bus().input.ports[1].fire);
+        assert!(app.emu.bus().input.ports[1].right, "direction is not gated");
+        assert!(
+            app.emu.bus().input.ports[1].button2,
+            "the second button is not gated"
+        );
+        app.emu.step_frame().expect("frame");
+    }
+    assert_eq!(
+        seen.len(),
+        2,
+        "autofire should both assert and release the fire line"
+    );
+
+    // Releasing fire releases it regardless of the autofire phase.
+    app.keyboard_joy_held[0].set(KeyCode::ControlRight, false);
+    for _ in 0..6 {
+        app.pump_joystick_input();
+        assert!(!app.emu.bus().input.ports[1].fire);
+        app.emu.step_frame().expect("frame");
+    }
+}
+
+#[test]
+fn autofire_does_not_gate_scripted_joystick_input() {
+    use crate::bus::PortDevice;
+    // A --joy-after / control-protocol run must replay the events it was
+    // given, verbatim: autofire is a live-input convenience only.
+    let mut app = test_app();
+    app.emu
+        .bus_mut()
+        .input
+        .set_port_device(1, PortDevice::Joystick);
+    app.autofire_hz = 16;
+    app.auto_joy_held[1].set(super::JoyButtonKind::Red, true);
+    app.auto_joy_engaged[1] = true;
+    for _ in 0..12 {
+        app.apply_auto_joy_state(1);
+        assert!(app.emu.bus().input.ports[1].fire);
+        app.emu.step_frame().expect("frame");
+    }
+}
+
+#[test]
+fn input_mapping_panel_rebinds_only_on_save() {
+    // Save writes the per-user keymap.toml, which on a developer's machine is
+    // a real file they may have customised; put it back afterwards.
+    let path = crate::keymap::keymap_path_for_test();
+    let saved = path.as_ref().and_then(|p| std::fs::read(p).ok());
+
+    let mut app = test_app();
+    app.open_input_mapping();
+
+    let fire_index = crate::keymap::CONTROLS
+        .iter()
+        .position(|c| *c == crate::keymap::JoyControl::Fire)
+        .unwrap();
+
+    // Arming a row and pressing a key binds it in the panel's working copy
+    // only; the live map is untouched until Save.
+    app.activate_ui_control(UiControl::RemapBind(fire_index));
+    assert!(
+        app.ui_handle_key(KeyCode::KeyQ, None),
+        "capture eats the key"
+    );
+    assert_eq!(
+        app.keymap.lookup(KeyCode::KeyQ),
+        None,
+        "the live map must not change before Save"
+    );
+
+    app.activate_ui_control(UiControl::RemapSave);
+    assert_eq!(
+        app.keymap.lookup(KeyCode::KeyQ),
+        Some((0, crate::keymap::JoyControl::Fire))
+    );
+    assert!(app.ui.panel.is_none(), "Save closes the panel");
+
+    // The new binding drives the port.
+    app.emu
+        .bus_mut()
+        .input
+        .set_port_device(1, crate::bus::PortDevice::Joystick);
+    app.joystick_input_mode = JoystickInputMode::Keyboard;
+    assert!(app.handle_keyboard_joystick_key(KeyCode::KeyQ, true));
+    assert!(app.emu.bus().input.ports[1].fire);
+
+    // Restore the defaults so the edited map does not leak into the rest of
+    // the suite, then put the developer's own file back byte for byte.
+    app.open_input_mapping();
+    app.activate_ui_control(UiControl::RemapDefaults);
+    app.activate_ui_control(UiControl::RemapSave);
+    assert_eq!(app.keymap, crate::keymap::KeyMap::default());
+    if let Some(path) = path {
+        match saved {
+            Some(bytes) => std::fs::write(&path, bytes).unwrap(),
+            None => {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+}
+
+#[test]
+fn input_mapping_panel_discards_edits_when_closed() {
+    let mut app = test_app();
+    let before = app.keymap.clone();
+    app.open_input_mapping();
+    app.activate_ui_control(UiControl::RemapBind(0));
+    app.ui_handle_key(KeyCode::KeyP, None);
+    // Escape while a row is armed cancels the binding, not the panel.
+    app.activate_ui_control(UiControl::RemapBind(0));
+    assert!(app.ui_handle_key(KeyCode::Escape, None));
+    assert!(app.ui.panel.is_some(), "Escape cancelled the capture only");
+
+    app.activate_ui_control(UiControl::PanelClose);
+    assert!(app.ui.panel.is_none());
+    assert_eq!(app.keymap, before, "closing discards the edits");
+}
+
+#[test]
+fn input_mapping_panel_clears_and_switches_mappings() {
+    let mut app = test_app();
+    app.open_input_mapping();
+    let Some(Panel::InputMap(panel)) = app.ui.panel.as_ref() else {
+        panic!("panel open");
+    };
+    assert_eq!(panel.mapping, 0);
+
+    app.activate_ui_control(UiControl::RemapClear(0));
+    let Some(Panel::InputMap(panel)) = app.ui.panel.as_ref() else {
+        panic!("panel open");
+    };
+    assert_eq!(
+        panel
+            .map
+            .mapping(0)
+            .binding_text(crate::keymap::CONTROLS[0]),
+        "-"
+    );
+
+    // Switching mapping leaves the other one's edits alone.
+    app.activate_ui_control(UiControl::RemapSet(1));
+    let Some(Panel::InputMap(panel)) = app.ui.panel.as_ref() else {
+        panic!("panel open");
+    };
+    assert_eq!(panel.mapping, 1);
+    assert!(panel.capturing.is_none(), "switching disarms the capture");
+    assert_ne!(
+        panel
+            .map
+            .mapping(1)
+            .binding_text(crate::keymap::CONTROLS[0]),
+        "-"
+    );
+}
+
+#[test]
+fn menu_scroll_controls_move_the_list_without_closing_the_menu() {
+    let mut app = test_app();
+    app.activate_bar_control(super::BarControl::Menu);
+    assert!(app.ui.menu_open);
+    assert_eq!(app.ui.menu_scroll, 0, "each open starts at the top");
+
+    // The real menu fits, so there is nothing to scroll -- but the controls
+    // must be inert rather than wrong, and must never close the menu.
+    app.activate_ui_control(UiControl::MenuScrollDown);
+    assert_eq!(app.ui.menu_scroll, 0);
+    app.activate_ui_control(UiControl::MenuScrollUp);
+    assert_eq!(app.ui.menu_scroll, 0);
+    assert!(app.ui.menu_open, "scrolling never dismisses the menu");
+
+    // A scroll position left over from a previous open is cleared, so the
+    // list never reappears part-way down.
+    app.ui.menu_scroll = 3;
+    app.activate_bar_control(super::BarControl::Menu); // close
+    app.activate_bar_control(super::BarControl::Menu); // open again
+    assert_eq!(app.ui.menu_scroll, 0);
+
+    // Choosing an item still closes the menu.
+    app.activate_ui_control(UiControl::MenuItem(super::ui::MenuItem::Autofire));
+    assert!(!app.ui.menu_open);
+}
+
+#[test]
+fn autofire_menu_item_cycles_the_rate() {
+    let mut app = test_app();
+    assert_eq!(app.autofire_hz, 0);
+    app.activate_ui_control(UiControl::MenuItem(super::ui::MenuItem::Autofire));
+    assert_eq!(app.autofire_hz, crate::config::AUTOFIRE_RATES[1]);
+    for _ in 0..crate::config::AUTOFIRE_RATES.len() - 1 {
+        app.activate_ui_control(UiControl::MenuItem(super::ui::MenuItem::Autofire));
+    }
+    assert_eq!(app.autofire_hz, 0, "the cycle returns to off");
 }
 
 #[test]
@@ -507,9 +732,9 @@ fn keyboard_mouse_drives_a_second_mouse_port() {
 
     // The cursor-key mapping drives the second mouse: held directions
     // become steady pointer motion, fire the left button, X the right.
-    app.keyboard_joy_held[0].right = true;
-    app.keyboard_joy_held[0].fire_right_ctrl = true;
-    app.keyboard_joy_held[0].blue = true;
+    app.keyboard_joy_held[0].set(KeyCode::ArrowRight, true);
+    app.keyboard_joy_held[0].set(KeyCode::ControlRight, true);
+    app.keyboard_joy_held[0].set(KeyCode::KeyX, true);
     app.pump_joystick_input();
     assert_eq!(
         app.emu.bus().input.ports[1].counter_x,
@@ -527,7 +752,7 @@ fn keyboard_mouse_drives_a_second_mouse_port() {
     assert!(!app.emu.bus().input.ports[0].fire);
 
     // Releasing the keys releases the buttons on the next pump.
-    app.keyboard_joy_held[0] = KeyboardJoystickHeld::default();
+    app.keyboard_joy_held[0] = crate::keymap::HeldKeys::default();
     app.pump_joystick_input();
     assert!(!app.emu.bus().input.ports[1].fire);
     assert!(!app.emu.bus().input.ports[1].button2);
@@ -2697,6 +2922,209 @@ fn opening_the_debugger_arms_reverse_and_step_reconstructs() {
     app.activate_ui_control(super::ui::UiControl::DebugReverseRun);
     assert_eq!(app.emu.retired_instructions(), pos);
     let _ = pc_before;
+}
+
+#[test]
+fn quick_save_slots_round_trip_and_report_empty_slots() {
+    // The slot directory comes from the per-user config location; skip on a
+    // host that has none (no HOME/APPDATA/XDG_CONFIG_HOME).
+    let Some(path) = crate::savestate::slot_path(7) else {
+        return;
+    };
+    let restore = std::fs::read(&path).ok();
+    let _ = std::fs::remove_file(&path);
+
+    let mut app = test_app();
+    // An unwritten slot reports rather than failing the load.
+    app.quick_load_state(7, None);
+    assert_eq!(app.save_slot, 7, "addressing a slot selects it");
+    assert_eq!(app.emu.bus().emulated_frames(), 0, "nothing was restored");
+
+    for _ in 0..6 {
+        app.emu.step_frame().expect("frame");
+    }
+    let saved_frame = app.emu.bus().emulated_frames();
+    let saved_pc = app.emu.machine.pc();
+    app.quick_save_state(7);
+    assert!(path.exists(), "slot 7 written to {}", path.display());
+
+    // Run on, then load the slot back: the machine returns to the saved point.
+    for _ in 0..6 {
+        app.emu.step_frame().expect("frame");
+    }
+    assert!(app.emu.bus().emulated_frames() > saved_frame);
+    app.quick_load_state(7, None);
+    assert_eq!(app.emu.bus().emulated_frames(), saved_frame);
+    assert_eq!(app.emu.machine.pc(), saved_pc);
+
+    let _ = std::fs::remove_file(&path);
+    if let Some(bytes) = restore {
+        let _ = std::fs::write(&path, bytes);
+    }
+}
+
+#[test]
+fn save_slot_selection_wraps_through_every_slot() {
+    let mut app = test_app();
+    assert_eq!(app.save_slot, 1);
+    let mut seen = Vec::new();
+    for _ in 0..crate::savestate::SLOT_COUNT {
+        app.cycle_save_slot();
+        seen.push(app.save_slot);
+    }
+    assert_eq!(seen.last(), Some(&1), "wraps back to the first slot");
+    let mut sorted = seen.clone();
+    sorted.sort_unstable();
+    assert_eq!(
+        sorted,
+        (1..=crate::savestate::SLOT_COUNT).collect::<Vec<_>>(),
+        "every slot is reachable from the menu"
+    );
+    // Every slot the hotkeys address has a distinct file.
+    let paths: Vec<_> = (1..=crate::savestate::SLOT_COUNT)
+        .map(crate::savestate::slot_path)
+        .collect();
+    if paths[0].is_some() {
+        let mut unique = paths.clone();
+        unique.dedup();
+        assert_eq!(unique.len(), paths.len());
+    }
+    assert!(crate::savestate::slot_path(0).is_none());
+    assert!(crate::savestate::slot_path(crate::savestate::SLOT_COUNT + 1).is_none());
+}
+
+#[test]
+fn number_row_keys_map_onto_the_ten_slots_in_printed_order() {
+    use winit::keyboard::KeyCode;
+    assert_eq!(super::save_slot_for_key(KeyCode::Digit1), Some(1));
+    assert_eq!(super::save_slot_for_key(KeyCode::Digit9), Some(9));
+    assert_eq!(
+        super::save_slot_for_key(KeyCode::Digit0),
+        Some(crate::savestate::SLOT_COUNT),
+        "0 sits after 9 on the row, so it is the tenth slot"
+    );
+    assert_eq!(super::save_slot_for_key(KeyCode::KeyA), None);
+    // The numpad keeps driving the emulated machine (it is the port-2
+    // joystick mapping), so it must not be swallowed as a slot shortcut.
+    assert_eq!(super::save_slot_for_key(KeyCode::Numpad0), None);
+}
+
+#[test]
+fn rewind_toggle_arms_the_ring_and_steps_back_a_capture_point() {
+    let mut app = test_app();
+    // Off by default: the hotkey reports rather than silently doing nothing.
+    assert!(!app.rewind_armed);
+    assert!(!app.emu.time_travel_enabled());
+    app.rewind_one_step();
+    assert_eq!(app.emu.retired_instructions(), 0, "nothing to rewind to");
+
+    // Two frames per capture keeps the test short.
+    app.rewind_interval_frames = 2;
+    app.toggle_rewind();
+    assert!(app.rewind_armed && app.emu.time_travel_enabled());
+
+    for _ in 0..12 {
+        app.emu.step_frame().expect("frame");
+    }
+    let pos_before = app.emu.retired_instructions();
+    let frame_before = app.emu.bus().emulated_frames();
+    assert!(pos_before > 0);
+
+    app.rewind_one_step();
+    assert!(
+        app.emu.retired_instructions() < pos_before,
+        "rewind moves the position backward"
+    );
+    assert!(
+        app.emu.bus().emulated_frames() < frame_before,
+        "rewind moves emulated time backward"
+    );
+    // A rewind step lands exactly on a capture point, so no replay is needed.
+    assert_eq!(
+        app.emu.retired_instructions(),
+        app.emu
+            .time_travel_ring()
+            .and_then(|r| r.newest_pos())
+            .expect("a retained anchor"),
+    );
+
+    // Repeated steps keep walking back until history runs out, and running
+    // off the end leaves the machine parked on the oldest anchor rather than
+    // failing.
+    for _ in 0..20 {
+        app.rewind_one_step();
+    }
+    let oldest = app
+        .emu
+        .time_travel_ring()
+        .and_then(|r| r.oldest_pos())
+        .expect("the arming anchor");
+    assert_eq!(app.emu.retired_instructions(), oldest);
+    assert_eq!(oldest, 0, "arming takes an anchor immediately, at power-on");
+}
+
+#[test]
+fn rewinding_then_running_forward_recaptures_and_can_rewind_again() {
+    // The regression: a snapshot taken on the abandoned timeline must not
+    // survive a rewind, and the capture interval must be re-baselined so the
+    // re-run frames are captured again instead of being suppressed.
+    let mut app = test_app();
+    app.rewind_interval_frames = 2;
+    app.toggle_rewind();
+    for _ in 0..12 {
+        app.emu.step_frame().expect("frame");
+    }
+    let snaps_before = app.emu.time_travel_ring().map(|r| r.len()).unwrap();
+    assert!(snaps_before > 2);
+
+    app.rewind_one_step();
+    app.rewind_one_step();
+    let pos_rewound = app.emu.retired_instructions();
+    let ring = app.emu.time_travel_ring().unwrap();
+    assert!(ring.len() < snaps_before, "the abandoned future is dropped");
+    assert_eq!(
+        ring.newest_pos(),
+        Some(pos_rewound),
+        "no snapshot survives past the rewound position"
+    );
+
+    // Run forward again: captures resume immediately rather than waiting out
+    // an interval measured against the abandoned timeline's frame counter.
+    for _ in 0..4 {
+        app.emu.step_frame().expect("frame");
+    }
+    let ring = app.emu.time_travel_ring().unwrap();
+    assert!(
+        ring.newest_pos().is_some_and(|p| p > pos_rewound),
+        "the re-run interval was captured"
+    );
+
+    // And rewind still works from the re-run timeline.
+    let pos_now = app.emu.retired_instructions();
+    app.rewind_one_step();
+    assert!(app.emu.retired_instructions() < pos_now);
+}
+
+#[test]
+fn turning_rewind_off_releases_the_ring_unless_the_debugger_needs_it() {
+    let mut app = test_app();
+    app.toggle_rewind();
+    assert!(app.emu.time_travel_enabled());
+    app.toggle_rewind();
+    assert!(
+        !app.emu.time_travel_enabled(),
+        "the snapshot memory is the cost; turning it off must release it"
+    );
+
+    // With the debugger open the ring stays armed for its reverse controls.
+    app.toggle_rewind();
+    app.open_debugger();
+    app.toggle_rewind();
+    assert!(!app.rewind_armed);
+    assert!(
+        app.emu.time_travel_enabled(),
+        "the debugger's reverse controls still need the ring"
+    );
 }
 
 #[test]

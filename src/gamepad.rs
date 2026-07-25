@@ -148,9 +148,7 @@ impl CalibrationStore {
     fn save(&self) -> Result<()> {
         let path =
             calibration_path().ok_or_else(|| anyhow!("no config directory for calibration"))?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        crate::paths::ensure_parent(&path)?;
         std::fs::write(&path, toml::to_string_pretty(self)?)?;
         log::info!("saved gamepad calibration to {}", path.display());
         Ok(())
@@ -161,28 +159,9 @@ impl CalibrationStore {
     }
 }
 
-/// Location of the persisted calibration store, following the platform's
-/// config-directory conventions without pulling in a dependency.
+/// Location of the persisted calibration store.
 fn calibration_path() -> Option<PathBuf> {
-    if let Some(dir) = crate::envcfg::var_os("XDG_CONFIG_HOME") {
-        return Some(PathBuf::from(dir).join("copperline").join("gamepads.toml"));
-    }
-    if let Some(appdata) = crate::envcfg::var_os("APPDATA") {
-        return Some(
-            PathBuf::from(appdata)
-                .join("copperline")
-                .join("gamepads.toml"),
-        );
-    }
-    if let Some(home) = crate::envcfg::var_os("HOME") {
-        return Some(
-            PathBuf::from(home)
-                .join(".config")
-                .join("copperline")
-                .join("gamepads.toml"),
-        );
-    }
-    None
+    crate::paths::config_file("gamepads.toml")
 }
 
 fn uuid_hex(uuid: [u8; 16]) -> String {

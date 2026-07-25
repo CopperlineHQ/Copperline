@@ -16,6 +16,8 @@ The app shortcut modifier is `Cmd` on macOS and `Alt` on Linux/Windows.
 | `Cmd+Shift+R` | `Alt+Shift+R` | Start / stop an input recording (below) |
 | `Cmd+Shift+S` | `Alt+Shift+S` | Save a state (`copperline-state-<YYYYMMDDHHmmSS>.clstate` in the working directory) |
 | `Cmd+Shift+L` | `Alt+Shift+L` | Load a save state from a file dialog |
+| `Cmd+1`..`Cmd+9`, `Cmd+0` | `Alt+1`..`Alt+9`, `Alt+0` | Quick-save to numbered slot 1-10 |
+| `Cmd+Shift+1`..`Cmd+Shift+0` | `Alt+Shift+1`..`Alt+Shift+0` | Quick-load from that slot |
 | `Cmd+D` | `Alt+D` | Swap to the next disk in a drive's configured playlist |
 | `Cmd+G` | `Alt+G` | Capture / release the host mouse (clicking the display also captures) |
 | `Cmd+B` | `Alt+B` | Open the [debugger window](../debugger/window) |
@@ -29,6 +31,7 @@ The app shortcut modifier is `Cmd` on macOS and `Alt` on Linux/Windows.
 | `Cmd+Shift+F` | `Alt+Shift+F` | Show / hide the status bar |
 | `Cmd+W` | `Alt+W` | Toggle Warp Speed (turbo) on / off |
 | `Cmd+Shift+W` | `Alt+Shift+W` | Cycle the Warp Speed limit: 2x, 4x, 8x, 16x, Max |
+| `Cmd+Z` | `Alt+Z` | Rewind the machine one step (needs `[emulation] rewind` or the Rewind menu item) |
 | `Esc` | `Esc` | Close an open menu, tool window, or overlay panel; otherwise passed through to the Amiga |
 | `Ctrl+Amiga+Amiga` | `Ctrl+Amiga+Amiga` | Keyboard reset (warm reboot) |
 
@@ -114,8 +117,14 @@ position. For the same reason drops are unavailable under native Wayland
 The pop-up menu opened from the status bar.
 ```
 
-The menu opens debugger-style tool windows and smaller overlay panels. Tool
-windows are separate native windows so the emulated display remains visible;
+The menu opens debugger-style tool windows and smaller overlay panels. It
+grows upward from the status bar, and adapts when the list is long (the MIDI
+and sampler items only appear in some sessions): the rows tighten first, and
+past that the list scrolls, showing `^ more ^` / `v more v` rows at the ends.
+Scroll with the mouse wheel over the menu or by clicking those rows; neither
+dismisses the menu, and it always reopens at the top.
+
+Tool windows are separate native windows so the emulated display remains visible;
 the debugger and frame analyzer can be open at the same time. Overlay panels
 are drawn over the display. While either kind is open, key presses and display
 clicks stay in the UI instead of reaching the Amiga; `Esc` closes the focused
@@ -147,6 +156,12 @@ tool window or overlay.
 - **Port 1 Device / Port 2 Device**: hot-plug the controller in a game
   port, cycling mouse, joystick, CD32 pad, analogue, and empty; see
   [](#controller-ports).
+- **Autofire**: cycles the autofire rate (off, 3, 5, 8, 12, 16 Hz), which
+  pulses a *held* fire button on live gamepad and keyboard input. Scripted
+  input is never gated; see the `[input]` section of
+  [Configuration](configuration.md).
+- **Input Mapping...**: edits which host keys drive the controller controls,
+  for both keyboard mappings; see [](#input-mapping).
 - **MIDI In / MIDI Out** (shown when the serial port is in MIDI mode):
   cycle Paula's serial bridge through the host's MIDI sources and
   destinations; see the `[serial]` section of
@@ -186,6 +201,17 @@ tool window or overlay.
   times the refresh rate (host CPU permitting). `Max` runs flat out and
   still presents at vsync. The default is set by `[emulation] warp_speed`
   (see [Configuration](configuration.md)).
+- **Rewind** (the hotkey is `Cmd+Z` / `Alt+Z`): toggles recording of rewind
+  history. While it is on, the emulator keeps a ring of whole-machine
+  snapshots and the hotkey steps the machine back through them -- the whole
+  machine, not just the picture: CPU, chips, RAM and all. One press goes back
+  one capture interval (half a second of emulated time by default). Turning
+  the item off releases the snapshots, which is where the memory goes; the
+  budget and interval are `[emulation] rewind_budget_mb` and
+  `rewind_interval_frames`, and `rewind = true` starts recording at launch
+  (see [Configuration](configuration.md)). It shares its substrate with the
+  debugger's reverse controls, so the same determinism caveats apply -- see
+  [](../debugger/reverse).
 - **Record Video** (also `Cmd+R` / `Alt+R`): starts a video-with-audio
   recording; the same item (or shortcut again) stops it. See below.
 - **Record Input** (also `Cmd+Shift+R` / `Alt+Shift+R`): records every
@@ -194,6 +220,12 @@ tool window or overlay.
 - **Save State** (also `Cmd+Shift+S` / `Alt+Shift+S`) and **Load State...**
   (also `Cmd+Shift+L` / `Alt+Shift+L`): snapshot the whole emulated machine
   to a file, or restore one and continue from exactly that point. See below.
+- **Quick Save** and **Quick Load** write and read one of ten numbered
+  slots, with no dialog and no file to name. **Save Slot** picks which slot
+  those two items use; the hotkeys reach any slot directly --
+  `Cmd/Alt+<digit>` saves to it and `Cmd/Alt+Shift+<digit>` loads it, with
+  `0` as the tenth. Addressing a slot from the keyboard also makes it the
+  current one. See below.
 - **Load Kickstart ROM...**: fit a different boot ROM. Pick a 512 KiB
   Kickstart, then optionally a second file for the extended ROM (512 KiB at
   $E00000 or 256 KiB at $F00000; Cancel to skip and remove any fitted
@@ -373,6 +405,31 @@ not silently mixed in. Two caveats:
   volumes (directory-as-HDD) and floppy images are embedded whole.
 - CD images are likewise reopened by path; keep the cue/bin where it was.
 
+### Quick-save slots
+
+Naming a file is the wrong interaction for the "before this jump" save you
+take twenty times an hour, so there are ten numbered slots as well.
+`Cmd/Alt+<digit>` saves to that slot and `Cmd/Alt+Shift+<digit>` loads it,
+with `0` as the tenth; the **Quick Save** and **Quick Load** menu items do
+the same for whichever slot **Save Slot** currently names (addressing a slot
+from the keyboard also makes it the current one).
+
+A quick save overwrites its slot without asking -- that is the point of it --
+and loading a slot that has never been written reports "Slot N is empty"
+rather than failing. Slots are ordinary `.clstate` files, identical in format
+to a named save, kept per user rather than per working directory so they are
+reachable however Copperline was launched:
+
+| Host | Location |
+|---|---|
+| Linux/BSD | `$XDG_CONFIG_HOME/copperline/states/`, else `~/.config/copperline/states/` |
+| macOS | `~/.config/copperline/states/` |
+| Windows | `%APPDATA%\copperline\states\` |
+
+Because they are per user and not per machine, a slot may hold a state from
+a different Amiga than the one running. That is safe: as above, the state
+carries its own machine and the load reconfigures to match it and says so.
+
 The headless flags `--save-state-after SECS PATH` and `--load-state PATH`
 script the same feature for [debugging workflows](headless.md): snapshot a
 long-running program just before the scene under investigation once, then
@@ -449,6 +506,11 @@ and `D` the middle. The second (numpad) mapping is
 and numpad Enter for play. While a mapping owns its keys, they are not
 sent to the Amiga keyboard.
 
+Those are the defaults; every binding is editable from the menu's **Input
+Mapping...** item (see [](#input-mapping)). A held fire button can also be
+turned into a pulse train with the **Autofire** item or `[input]
+autofire_hz`.
+
 ## Gamepad calibration
 
 Pads are read through raw `gilrs` events with no controller database, so
@@ -475,3 +537,33 @@ cannot bleed into the next binding.
 Calibrations are saved per controller UUID in
 `~/.config/copperline/gamepads.toml` (`$XDG_CONFIG_HOME` respected;
 `%APPDATA%\copperline\` on Windows).
+
+## Input mapping
+
+The keyboard also stands in for a controller, on two independent mappings so
+one keyboard can drive a two-player setup (see [](#controller-ports)). The
+menu's **Input Mapping...** item edits both.
+
+```{figure} ../images/ui-preview-input-mapping.png
+:alt: The input mapping window
+:width: 75%
+
+Editing the first keyboard mapping, with the Fire row armed for capture.
+```
+
+Pick the mapping with the **Controller 1** / **Controller 2** tabs, then
+**Set** on a row and press the key to bind (Escape cancels that row without
+closing the panel). **Clear** unbinds a control entirely, **Defaults**
+restores the built-in layouts, and **Save** writes the map and applies it to
+the running machine. Closing the window discards the edits.
+
+A control may hold several keys, and they OR together: fire ships bound to
+Right Ctrl, Right Alt, Left Ctrl and `C`, so compact keyboards without the
+right-hand modifiers still work, and releasing one alias while another is
+held keeps the button down. Binding a key removes it from wherever it was
+before -- including from the other mapping -- so the two controllers can
+never end up fighting over one key.
+
+Saved maps live next to the gamepad calibrations, in
+`~/.config/copperline/keymap.toml` (same per-platform locations as above).
+Deleting the file restores the defaults.

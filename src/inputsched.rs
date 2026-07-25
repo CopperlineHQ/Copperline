@@ -124,6 +124,16 @@ impl ReplayInputLog {
         }
     }
 
+    /// Drop entries after `pos`, i.e. the input applied along a timeline that
+    /// a reposition has just abandoned. Keeping them would break the sorted
+    /// invariant `record` relies on as soon as the run appends new input at
+    /// the (now earlier) live position.
+    pub fn prune_after(&mut self, pos: u64) {
+        let keep = self.events.partition_point(|(p, _)| *p <= pos);
+        self.events.truncate(keep);
+        self.cursor = self.cursor.min(self.events.len());
+    }
+
     /// Position the replay cursor at the first action at or after `from_pos`,
     /// ready for a replay that starts at `from_pos`.
     pub fn begin_replay(&mut self, from_pos: u64) {

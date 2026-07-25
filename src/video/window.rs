@@ -16,6 +16,7 @@ use crate::audio::{AudioSink, CpalSink};
 use crate::bus::{BeamWriteSource, FrontPanelStatus, PortDevice, VideoRenderFrameTiming};
 use crate::config::{Config, Overscan, PixelAspect, RawConfig, WarpSpeed};
 use crate::emulator::Emulator;
+use crate::keymap;
 use crate::screenshot;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,146 +68,6 @@ impl JoyButtonKind {
 // here because the window/menu/ui code refers to it as
 // `crate::video::window::JoystickInputMode`.
 pub use crate::config::JoystickInputMode;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum KeyboardJoystickKey {
-    Up,
-    Down,
-    Left,
-    Right,
-    FireRightCtrl,
-    FireRightAlt,
-    FireLeftCtrl,
-    Red,
-    Blue,
-    BlueLeftAlt,
-    Green,
-    Yellow,
-    Play,
-    Rewind,
-    Forward,
-}
-
-/// Host keys currently held for keyboard joystick emulation. Fire has
-/// multiple aliases, so this tracks individual keys and resolves them to
-/// one port state when applied.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-struct KeyboardJoystickHeld {
-    up: bool,
-    down: bool,
-    left: bool,
-    right: bool,
-    fire_right_ctrl: bool,
-    fire_right_alt: bool,
-    fire_left_ctrl: bool,
-    red: bool,
-    blue: bool,
-    blue_left_alt: bool,
-    green: bool,
-    yellow: bool,
-    play: bool,
-    rwd: bool,
-    ffw: bool,
-}
-
-impl KeyboardJoystickHeld {
-    fn set(&mut self, key: KeyboardJoystickKey, held: bool) {
-        match key {
-            KeyboardJoystickKey::Up => self.up = held,
-            KeyboardJoystickKey::Down => self.down = held,
-            KeyboardJoystickKey::Left => self.left = held,
-            KeyboardJoystickKey::Right => self.right = held,
-            KeyboardJoystickKey::FireRightCtrl => self.fire_right_ctrl = held,
-            KeyboardJoystickKey::FireRightAlt => self.fire_right_alt = held,
-            KeyboardJoystickKey::FireLeftCtrl => self.fire_left_ctrl = held,
-            KeyboardJoystickKey::Red => self.red = held,
-            KeyboardJoystickKey::Blue => self.blue = held,
-            KeyboardJoystickKey::BlueLeftAlt => self.blue_left_alt = held,
-            KeyboardJoystickKey::Green => self.green = held,
-            KeyboardJoystickKey::Yellow => self.yellow = held,
-            KeyboardJoystickKey::Play => self.play = held,
-            KeyboardJoystickKey::Rewind => self.rwd = held,
-            KeyboardJoystickKey::Forward => self.ffw = held,
-        }
-    }
-
-    fn is_set(&self, key: KeyboardJoystickKey) -> bool {
-        match key {
-            KeyboardJoystickKey::Up => self.up,
-            KeyboardJoystickKey::Down => self.down,
-            KeyboardJoystickKey::Left => self.left,
-            KeyboardJoystickKey::Right => self.right,
-            KeyboardJoystickKey::FireRightCtrl => self.fire_right_ctrl,
-            KeyboardJoystickKey::FireRightAlt => self.fire_right_alt,
-            KeyboardJoystickKey::FireLeftCtrl => self.fire_left_ctrl,
-            KeyboardJoystickKey::Red => self.red,
-            KeyboardJoystickKey::Blue => self.blue,
-            KeyboardJoystickKey::BlueLeftAlt => self.blue_left_alt,
-            KeyboardJoystickKey::Green => self.green,
-            KeyboardJoystickKey::Yellow => self.yellow,
-            KeyboardJoystickKey::Play => self.play,
-            KeyboardJoystickKey::Rewind => self.rwd,
-            KeyboardJoystickKey::Forward => self.ffw,
-        }
-    }
-
-    fn joystick_state(&self) -> crate::gamepad::JoystickState {
-        crate::gamepad::JoystickState {
-            up: self.up,
-            down: self.down,
-            left: self.left,
-            right: self.right,
-            fire: self.fire_right_ctrl || self.fire_right_alt || self.fire_left_ctrl || self.red,
-            button2: self.blue || self.blue_left_alt,
-            green: self.green,
-            yellow: self.yellow,
-            play: self.play,
-            rwd: self.rwd,
-            ffw: self.ffw,
-        }
-    }
-}
-
-/// Keyboard controller emulation, two collision-free layouts so a
-/// two-controller setup can be driven from one keyboard:
-///
-/// - Mapping 0 (FS-UAE-compatible, plus left-hand fire keys): cursor keys
-///   for directions; Right Ctrl/Right Alt or Left Ctrl for fire; Left Alt
-///   for the second button (left-hand fire keys pair with the right-hand
-///   arrows, and compact keyboards often lack the right-side modifiers);
-///   CD32 extras on C/X/D/S/Return/Z/A. On a mouse port the same keys
-///   become pointer motion, with fire = left button, X or Left Alt =
-///   right, D = middle.
-/// - Mapping 1 (numpad): 8/2/4/6 for directions, 0 for fire, `.` for
-///   the second button, numpad Enter for play. It stands in for the
-///   gamepad when a two-controller setup has no physical pad.
-fn keyboard_joystick_key_for(code: KeyCode) -> Option<(usize, KeyboardJoystickKey)> {
-    Some(match code {
-        KeyCode::ArrowUp => (0, KeyboardJoystickKey::Up),
-        KeyCode::ArrowDown => (0, KeyboardJoystickKey::Down),
-        KeyCode::ArrowLeft => (0, KeyboardJoystickKey::Left),
-        KeyCode::ArrowRight => (0, KeyboardJoystickKey::Right),
-        KeyCode::ControlRight => (0, KeyboardJoystickKey::FireRightCtrl),
-        KeyCode::AltRight => (0, KeyboardJoystickKey::FireRightAlt),
-        KeyCode::ControlLeft => (0, KeyboardJoystickKey::FireLeftCtrl),
-        KeyCode::AltLeft => (0, KeyboardJoystickKey::BlueLeftAlt),
-        KeyCode::KeyC => (0, KeyboardJoystickKey::Red),
-        KeyCode::KeyX => (0, KeyboardJoystickKey::Blue),
-        KeyCode::KeyD => (0, KeyboardJoystickKey::Green),
-        KeyCode::KeyS => (0, KeyboardJoystickKey::Yellow),
-        KeyCode::Enter => (0, KeyboardJoystickKey::Play),
-        KeyCode::KeyZ => (0, KeyboardJoystickKey::Rewind),
-        KeyCode::KeyA => (0, KeyboardJoystickKey::Forward),
-        KeyCode::Numpad8 => (1, KeyboardJoystickKey::Up),
-        KeyCode::Numpad2 => (1, KeyboardJoystickKey::Down),
-        KeyCode::Numpad4 => (1, KeyboardJoystickKey::Left),
-        KeyCode::Numpad6 => (1, KeyboardJoystickKey::Right),
-        KeyCode::Numpad0 => (1, KeyboardJoystickKey::Red),
-        KeyCode::NumpadDecimal => (1, KeyboardJoystickKey::Blue),
-        KeyCode::NumpadEnter => (1, KeyboardJoystickKey::Play),
-        _ => return None,
-    })
-}
 
 /// Where each host input source lands this quantum; see
 /// [`host_routing_for`]. Ports are 0-based.
@@ -460,6 +321,25 @@ const AMIGA_RAWKEY_LEFT_SHIFT: u8 = 0x60;
 const AMIGA_RAWKEY_RIGHT_SHIFT: u8 = 0x61;
 const AMIGA_RAWKEY_LEFT_ALT: u8 = 0x64;
 const AMIGA_RAWKEY_RIGHT_ALT: u8 = 0x65;
+
+/// The quick-save slot a number-row key selects: `1`..`9` are slots 1-9 and
+/// `0` is slot 10, so the ten slots sit under the row in printed order.
+/// `None` for every other key.
+fn save_slot_for_key(code: KeyCode) -> Option<usize> {
+    Some(match code {
+        KeyCode::Digit1 => 1,
+        KeyCode::Digit2 => 2,
+        KeyCode::Digit3 => 3,
+        KeyCode::Digit4 => 4,
+        KeyCode::Digit5 => 5,
+        KeyCode::Digit6 => 6,
+        KeyCode::Digit7 => 7,
+        KeyCode::Digit8 => 8,
+        KeyCode::Digit9 => 9,
+        KeyCode::Digit0 => crate::savestate::SLOT_COUNT,
+        _ => return None,
+    })
+}
 
 fn host_shortcut_modifier_pressed(modifiers: ModifiersState) -> bool {
     if cfg!(target_os = "macos") {
@@ -777,8 +657,27 @@ pub struct App {
     /// vsync-gated, so this is what decouples warp speed from the host monitor
     /// refresh rate. Adjustable from the Emulator menu and the keyboard.
     warp_speed: WarpSpeed,
+    /// Rewind capture settings from `[emulation]`, kept so the Rewind menu
+    /// item can re-arm the ring with the configured budget after it is
+    /// toggled off. `rewind_armed` tracks the user's intent independently of
+    /// `Emulator::time_travel_enabled`, which the debugger also arms.
+    rewind_budget_mb: usize,
+    rewind_interval_frames: u64,
+    rewind_armed: bool,
+    /// Numbered save-state slot the Quick Save / Quick Load menu items act
+    /// on, 1-based. The `Cmd/Alt+<digit>` hotkeys address any slot directly
+    /// and set this as a side effect.
+    save_slot: usize,
     /// Mapped host keys currently held for keyboard joystick emulation.
-    keyboard_joy_held: [KeyboardJoystickHeld; 2],
+    keyboard_joy_held: [keymap::HeldKeys; keymap::MAPPING_COUNT],
+    /// Host-key to controller-control bindings, loaded from the per-user
+    /// `keymap.toml` (defaults when there is none) and editable from the
+    /// Input Mapping panel.
+    keymap: keymap::KeyMap,
+    /// Autofire rate in Hz for the fire button on both ports, 0 = off. A
+    /// host input policy, not machine state: it gates a *held* fire button
+    /// into a pulse train, so nothing changes unless the user holds fire.
+    autofire_hz: u8,
     /// Pop-up menu and main-window overlay state. Debugger and frame
     /// analyzer panes live in separate tool-window state so they can be
     /// open at the same time.
@@ -1067,6 +966,22 @@ impl App {
         // Config's realtime-priority request, re-fed to priority::requested when
         // the audio sink is rebuilt live so those streams keep the same setting.
         let realtime_priority = machine_config.emulation.realtime_priority.unwrap_or(false);
+        let rewind_budget_mb = machine_config
+            .emulation
+            .rewind_budget_mb
+            .unwrap_or(crate::config::REWIND_DEFAULT_BUDGET_MB)
+            .max(1);
+        let rewind_interval_frames = machine_config
+            .emulation
+            .rewind_interval_frames
+            .unwrap_or(crate::config::REWIND_DEFAULT_INTERVAL_FRAMES)
+            .max(1);
+        let rewind_armed = machine_config.emulation.rewind.unwrap_or(false);
+        let autofire_hz = machine_config
+            .input
+            .autofire_hz
+            .unwrap_or(0)
+            .min(crate::config::AUTOFIRE_MAX_HZ);
         let mut app = Self {
             emu,
             serial_is_midi,
@@ -1158,7 +1073,13 @@ impl App {
             mouse_sensitivity,
             mouse_sensitivity_factor: mouse_sensitivity_factor(mouse_sensitivity),
             warp_speed,
-            keyboard_joy_held: [KeyboardJoystickHeld::default(); 2],
+            rewind_budget_mb,
+            rewind_interval_frames,
+            rewind_armed,
+            save_slot: 1,
+            keyboard_joy_held: [keymap::HeldKeys::default(); keymap::MAPPING_COUNT],
+            keymap: keymap::KeyMap::load(),
+            autofire_hz,
             ui: UiState::default(),
             about_machine_lines,
             machine_config,
@@ -1175,7 +1096,81 @@ impl App {
         // Attach the sampler now for a directly-booted machine; the config-screen
         // placeholder passes a disabled request and attaches on Run instead.
         app.attach_session_sampler();
+        if app.rewind_armed {
+            app.arm_rewind_ring();
+        }
         app
+    }
+
+    /// Start recording rewind history with the configured budget/interval.
+    /// The debugger arms the same ring on its own terms; this re-arms it so
+    /// the rewind hotkey gets the interval the user asked for.
+    fn arm_rewind_ring(&mut self) {
+        self.emu
+            .enable_time_travel(self.rewind_budget_mb, self.rewind_interval_frames);
+        // Take the first anchor now rather than at the end of the next frame,
+        // so rewind can reach back to the moment recording was switched on.
+        // Callers are always between frames (App::new before the first one,
+        // the menu/hotkey handlers between two), which is where the renderer's
+        // capture buffers are consistent enough to serialize.
+        if let Err(e) = self.emu.debug_ensure_time_travel_anchor() {
+            warn!("rewind: could not take the initial snapshot: {e:#}");
+        }
+        info!(
+            "rewind: recording history ({} MiB budget, one snapshot every {} frames)",
+            self.rewind_budget_mb, self.rewind_interval_frames
+        );
+    }
+
+    /// Menu/hotkey toggle for rewind capture. Turning it off releases the
+    /// retained snapshots, which is the point: the ring is the memory cost.
+    fn toggle_rewind(&mut self) {
+        self.rewind_armed = !self.rewind_armed;
+        if self.rewind_armed {
+            self.arm_rewind_ring();
+            self.show_osd("Rewind recording on");
+        } else {
+            // Leave the ring alone if the debugger armed it for its own
+            // reverse controls; only the user's rewind recording stops.
+            if !self.debugger_wants_time_travel() {
+                self.emu.disable_time_travel();
+            }
+            self.show_osd("Rewind recording off");
+        }
+    }
+
+    /// Whether a debugger-family window is open and relying on the snapshot
+    /// ring for its reverse controls.
+    fn debugger_wants_time_travel(&self) -> bool {
+        self.debugger_panel.is_some() || self.console_panel.is_some()
+    }
+
+    /// Rewind the machine one capture point. Unlike the debugger's reverse
+    /// controls this leaves the run state alone: rewinding a running machine
+    /// keeps it running, from the earlier point.
+    fn rewind_one_step(&mut self) {
+        use crate::timetravel::ReverseOutcome;
+        if !self.emu.time_travel_enabled() {
+            self.show_osd("Rewind is off (Emulator menu > Rewind)");
+            return;
+        }
+        match self.emu.tt_rewind_step() {
+            Ok(ReverseOutcome::Found(_)) => {
+                let secs = self.emu.rewind_history_seconds().unwrap_or(0.0);
+                self.show_osd(format!("Rewind ({secs:.0}s of history left)"));
+            }
+            Ok(ReverseOutcome::NotFound | ReverseOutcome::BeyondHistory) => {
+                self.show_osd("Rewind: start of recorded history")
+            }
+            Err(e) => {
+                error!("rewind step halted: {e:?}");
+                self.show_osd("Rewind failed (see log)");
+            }
+        }
+        // The restore rewrote the whole machine, including the renderer's
+        // capture buffers; repaint from the restored frame rather than
+        // leaving the pre-rewind image on screen.
+        self.finish_render_for_current_frame();
     }
 
     /// Build the parallel-port sampler for the current [`self.sampler`] request
@@ -1260,7 +1255,7 @@ impl App {
                 // No pad in a two-controller setup: the numpad keyboard
                 // mapping stands in for it.
                 None if r.keyboard2 == Some(port) => {
-                    self.apply_joystick_state(port, self.keyboard_joy_held[1].joystick_state())
+                    self.apply_joystick_state(port, self.keyboard_joystick_state(1))
                 }
                 // Pad gone/uncalibrated: release the port so nothing sticks.
                 None => self.release_joystick_lines(port),
@@ -1272,7 +1267,7 @@ impl App {
             } else if self.auto_joy_engaged[port] {
                 self.apply_auto_joy_state(port);
             } else {
-                self.apply_joystick_state(port, self.keyboard_joy_held[0].joystick_state());
+                self.apply_joystick_state(port, self.keyboard_joystick_state(0));
             }
         }
         // Scripted joy state on ports no host source drives asserts
@@ -1300,20 +1295,41 @@ impl App {
     /// keys become steady pointer motion, the fire keys the left button,
     /// X the right, D the middle.
     fn apply_keyboard_mouse_state(&mut self, port: usize) {
-        let held = self.keyboard_joy_held[0];
-        let dx = KEYBOARD_MOUSE_COUNTS_PER_QUANTUM * (i32::from(held.right) - i32::from(held.left));
-        let dy = KEYBOARD_MOUSE_COUNTS_PER_QUANTUM * (i32::from(held.down) - i32::from(held.up));
+        let state = self.keyboard_joystick_state(0);
+        let dx =
+            KEYBOARD_MOUSE_COUNTS_PER_QUANTUM * (i32::from(state.right) - i32::from(state.left));
+        let dy = KEYBOARD_MOUSE_COUNTS_PER_QUANTUM * (i32::from(state.down) - i32::from(state.up));
         if dx != 0 || dy != 0 {
             self.apply_scripted_mouse_delta(port as u8, dx, dy);
         }
-        let state = held.joystick_state();
         let input = &mut self.emu.bus_mut().input;
         input.set_mouse_button(port, 0, state.fire);
         input.set_mouse_button(port, 1, state.button2);
         input.set_mouse_button(port, 2, state.green);
     }
 
-    fn apply_joystick_state(&mut self, port: usize, state: crate::gamepad::JoystickState) {
+    /// The controller state keyboard mapping `index` is producing right now.
+    fn keyboard_joystick_state(&self, index: usize) -> crate::gamepad::JoystickState {
+        self.keymap
+            .mapping(index)
+            .joystick_state(&self.keyboard_joy_held[index])
+    }
+
+    fn apply_joystick_state(&mut self, port: usize, mut state: crate::gamepad::JoystickState) {
+        // Autofire gates a *held* fire button into a pulse train. It is a host
+        // input convenience applied before the port sees anything, so the
+        // emulated machine reads ordinary presses and releases on /FIRx --
+        // nothing downstream knows autofire exists. Scripted --joy-after input
+        // deliberately bypasses this (see apply_auto_joy_state): a recorded or
+        // scripted run must replay the events it was given, verbatim.
+        if state.fire
+            && !crate::config::autofire_asserted(
+                self.autofire_hz,
+                self.emu.bus().emulated_seconds(),
+            )
+        {
+            state.fire = false;
+        }
         let input = &mut self.emu.bus_mut().input;
         input.set_joystick(
             port,
@@ -1526,19 +1542,147 @@ impl App {
         self.show_osd(osd);
     }
 
+    /// Move an over-long menu's window into the item list by `delta` items.
+    /// A menu that fits has nothing to scroll and clamps to 0.
+    fn scroll_menu(&mut self, delta: isize) {
+        let items = ui::menu_items(self.serial_is_midi, self.sampler_stream.is_some()).len();
+        let next = self.ui.menu_scroll.saturating_add_signed(delta);
+        let clamped = ui::clamp_menu_scroll(next, items);
+        if clamped != self.ui.menu_scroll {
+            self.ui.menu_scroll = clamped;
+            self.request_redraw();
+        }
+    }
+
+    /// Cycle the autofire rate (off -> 3 -> 5 -> 8 -> 12 -> 16 Hz -> off).
+    /// Applies immediately to whichever host source is driving fire.
+    fn cycle_autofire(&mut self) {
+        self.autofire_hz = crate::config::next_autofire_rate(self.autofire_hz);
+        let label = crate::config::autofire_label(self.autofire_hz);
+        info!("autofire: {label}");
+        self.show_osd(format!("Autofire: {label}"));
+        self.request_redraw();
+    }
+
+    /// Open the Input Mapping panel on a working copy of the live map, so
+    /// closing without saving changes nothing.
+    fn open_input_mapping(&mut self) {
+        self.ui.panel = Some(Panel::InputMap(Box::new(ui::InputMapPanel::new(
+            self.keymap.clone(),
+        ))));
+        self.resize_for_active_panel();
+        self.request_redraw();
+    }
+
+    fn input_map_panel_mut(&mut self) -> Option<&mut ui::InputMapPanel> {
+        match self.ui.panel.as_mut() {
+            Some(Panel::InputMap(panel)) => Some(panel),
+            _ => None,
+        }
+    }
+
+    fn input_map_select_mapping(&mut self, set: usize) {
+        if let Some(panel) = self.input_map_panel_mut() {
+            panel.mapping = set.min(keymap::MAPPING_COUNT - 1);
+            // An armed row belongs to the mapping it was armed on.
+            panel.capturing = None;
+            panel.message = "Click Set, then press the key to bind.".to_string();
+        }
+        self.request_redraw();
+    }
+
+    fn input_map_arm_capture(&mut self, index: usize) {
+        if let Some(panel) = self.input_map_panel_mut() {
+            let Some(control) = keymap::CONTROLS.get(index).copied() else {
+                return;
+            };
+            panel.capturing = Some(control);
+            panel.message = format!("Press a key for {}... (Esc cancels)", control.label());
+        }
+        self.request_redraw();
+    }
+
+    fn input_map_clear(&mut self, index: usize) {
+        if let Some(panel) = self.input_map_panel_mut() {
+            let Some(control) = keymap::CONTROLS.get(index).copied() else {
+                return;
+            };
+            let mapping = panel.mapping;
+            panel.map.mapping_mut(mapping).clear(control);
+            panel.capturing = None;
+            panel.message = format!("{} unbound.", control.label());
+        }
+        self.request_redraw();
+    }
+
+    fn input_map_defaults(&mut self) {
+        if let Some(panel) = self.input_map_panel_mut() {
+            panel.map = keymap::KeyMap::default();
+            panel.capturing = None;
+            panel.message = "Restored the built-in bindings (not saved yet).".to_string();
+        }
+        self.request_redraw();
+    }
+
+    /// Commit the edited map: apply it to the live session and persist it.
+    /// Any keys held under the old map are released first, so a binding that
+    /// just moved cannot leave a controller line stuck asserted.
+    fn input_map_save(&mut self) {
+        let Some(map) = self.input_map_panel_mut().map(|panel| panel.map.clone()) else {
+            return;
+        };
+        self.keyboard_joy_held = [keymap::HeldKeys::default(); keymap::MAPPING_COUNT];
+        self.keymap = map;
+        match self.keymap.save() {
+            Ok(()) => self.show_osd("Input mapping saved"),
+            Err(e) => {
+                warn!("saving the keyboard map failed: {e:#}");
+                self.show_osd("Input mapping applied (not saved; see log)");
+            }
+        }
+        self.pump_joystick_input();
+        self.close_panel();
+    }
+
+    /// Feed a key press to an armed Input Mapping row. Returns true when the
+    /// panel consumed it, which also keeps the key out of the emulated
+    /// machine while the panel is open.
+    fn input_map_handle_key(&mut self, code: KeyCode) -> bool {
+        let armed = matches!(
+            self.ui.panel.as_ref(),
+            Some(Panel::InputMap(panel)) if panel.capturing.is_some()
+        );
+        if !armed {
+            return false;
+        }
+        if code == KeyCode::Escape {
+            if let Some(panel) = self.input_map_panel_mut() {
+                panel.capturing = None;
+                panel.message = "Binding cancelled.".to_string();
+            }
+            self.request_redraw();
+            return true;
+        }
+        if let Some(panel) = self.input_map_panel_mut() {
+            panel.capture_key(code);
+        }
+        self.request_redraw();
+        true
+    }
+
     /// Consume a mapped host key as joystick input when keyboard joystick
     /// emulation is active. Releases for previously consumed mapped keys
     /// are also swallowed, even if a gamepad has taken over meanwhile.
     fn handle_keyboard_joystick_key(&mut self, code: KeyCode, pressed: bool) -> bool {
-        let Some((mapping, key)) = keyboard_joystick_key_for(code) else {
+        let Some((mapping, _control)) = self.keymap.lookup(code) else {
             return false;
         };
         let active = self.keyboard_mapping_active(mapping);
-        let was_held = self.keyboard_joy_held[mapping].is_set(key);
+        let was_held = self.keyboard_joy_held[mapping].is_set(code);
         if !active && !was_held {
             return false;
         }
-        self.keyboard_joy_held[mapping].set(key, pressed);
+        self.keyboard_joy_held[mapping].set(code, pressed);
         if active {
             // Re-run the input pump so the transition lands this quantum
             // on whatever port and device the mapping drives.
@@ -2210,6 +2354,15 @@ impl ApplicationHandler for App {
                     {
                         self.cycle_warp_speed()
                     }
+                    (KeyCode::KeyZ, ElementState::Pressed)
+                        if host_shortcut_modifier_pressed(self.modifiers) =>
+                    {
+                        // Rewind acts on the running machine, so ignore it
+                        // while a menu or panel has the foreground.
+                        if !self.modal_ui_active() {
+                            self.rewind_one_step()
+                        }
+                    }
                     (KeyCode::KeyW, ElementState::Pressed)
                         if host_shortcut_modifier_pressed(self.modifiers) =>
                     {
@@ -2235,6 +2388,22 @@ impl ApplicationHandler for App {
                         // menu or panel is open.
                         if !self.modal_ui_active() {
                             self.cycle_audio_filter()
+                        }
+                    }
+                    // Quick save/load slots on the number row: the modifier
+                    // alone saves, adding Shift loads. Matched on the
+                    // physical key so the mapping holds on non-QWERTY
+                    // layouts, and `0` is the tenth slot as it sits.
+                    (code, ElementState::Pressed)
+                        if host_shortcut_modifier_pressed(self.modifiers)
+                            && save_slot_for_key(code).is_some()
+                            && !self.modal_ui_active() =>
+                    {
+                        let slot = save_slot_for_key(code).expect("guarded above");
+                        if self.modifiers.shift_key() {
+                            self.quick_load_state(slot, Some(event_loop));
+                        } else {
+                            self.quick_save_state(slot);
                         }
                     }
                     (KeyCode::Equal, ElementState::Pressed)
@@ -2454,7 +2623,14 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                if !self.mouse_captured
+                // An open menu claims the wheel: a too-long list scrolls with
+                // it, and over a menu that fits the wheel simply does nothing
+                // rather than reaching the volume slider underneath.
+                if self.ui.menu_open {
+                    if let Some(steps) = volume_scroll_steps(delta) {
+                        self.scroll_menu(isize::from(-steps));
+                    }
+                } else if !self.mouse_captured
                     && self
                         .cursor_pos
                         .is_some_and(|pos| volume_control_hit_rect().contains(pos))
@@ -2624,6 +2800,9 @@ impl ApplicationHandler for App {
                             status_bar_hidden: super::status_bar_hidden(),
                             recording,
                             input_recording,
+                            rewind: self.rewind_armed,
+                            save_slot: self.save_slot,
+                            autofire_hz: self.autofire_hz,
                             joystick_input_mode: self.joystick_input_mode,
                             port_devices: [
                                 self.emu.bus().input.device(0),
@@ -3596,6 +3775,9 @@ impl App {
             BarControl::Screenshot => self.take_screenshot(),
             BarControl::Menu => {
                 self.ui.menu_open = !self.ui.menu_open;
+                // Each open starts at the top of the list; a scroll position
+                // left over from the last time would be a small mystery.
+                self.ui.menu_scroll = 0;
                 self.request_redraw();
             }
             BarControl::DriveLoad(idx) => self.load_drive_disks_from_dialog(idx),
@@ -3638,6 +3820,8 @@ impl App {
                     ui::MenuItem::JoystickInput => self.cycle_joystick_input_mode(),
                     ui::MenuItem::Port1Device => self.cycle_port_device(0),
                     ui::MenuItem::Port2Device => self.cycle_port_device(1),
+                    ui::MenuItem::Autofire => self.cycle_autofire(),
+                    ui::MenuItem::InputMapping => self.open_input_mapping(),
                     #[cfg(feature = "midi")]
                     ui::MenuItem::MidiInput => self.cycle_midi_input(),
                     #[cfg(feature = "midi")]
@@ -3652,14 +3836,25 @@ impl App {
                     ui::MenuItem::StatusBar => self.toggle_status_bar(),
                     ui::MenuItem::Warp => self.toggle_warp(),
                     ui::MenuItem::WarpLimit => self.cycle_warp_speed(),
+                    ui::MenuItem::Rewind => self.toggle_rewind(),
                     ui::MenuItem::Record => self.toggle_recording(),
                     ui::MenuItem::RecordInput => self.toggle_input_recording(),
                     ui::MenuItem::SaveState => self.save_state_interactive(),
                     ui::MenuItem::LoadState => self.load_state_from_dialog(event_loop),
+                    ui::MenuItem::QuickSave => self.quick_save_state(self.save_slot),
+                    ui::MenuItem::QuickLoad => self.quick_load_state(self.save_slot, event_loop),
+                    ui::MenuItem::SaveSlot => self.cycle_save_slot(),
                     ui::MenuItem::LoadRom => self.load_rom_from_dialog(),
                     ui::MenuItem::MachineConfig => self.open_launcher(),
                 }
             }
+            UiControl::MenuScrollUp => self.scroll_menu(-1),
+            UiControl::MenuScrollDown => self.scroll_menu(1),
+            UiControl::RemapSet(set) => self.input_map_select_mapping(set),
+            UiControl::RemapBind(index) => self.input_map_arm_capture(index),
+            UiControl::RemapClear(index) => self.input_map_clear(index),
+            UiControl::RemapDefaults => self.input_map_defaults(),
+            UiControl::RemapSave => self.input_map_save(),
             UiControl::PanelClose | UiControl::CalCancel => self.close_panel(),
             UiControl::PanelBody => {}
             UiControl::CalSkip => {
@@ -3964,6 +4159,11 @@ impl App {
     /// Returns true when the key was handled and must not reach the Amiga.
     fn ui_handle_key(&mut self, code: KeyCode, text: Option<&str>) -> bool {
         if self.ui.active() {
+            // An armed Input Mapping row eats the next key, including Escape
+            // (which cancels the binding rather than closing the panel).
+            if self.input_map_handle_key(code) {
+                return true;
+            }
             if code == KeyCode::Escape {
                 // While typing into a plugin option, Escape cancels the edit
                 // rather than closing the panel.
@@ -4954,7 +5154,18 @@ impl App {
         // start-up mode (a previous live Cmd+J toggle does not carry over).
         self.joystick_input_mode = cfg.joystick_input_mode;
         self.set_mouse_sensitivity(cfg.mouse_sensitivity);
-        self.keyboard_joy_held = [KeyboardJoystickHeld::default(); 2];
+        self.autofire_hz = cfg.autofire_hz;
+        // Rewind history belongs to the machine that recorded it, so the new
+        // machine starts a fresh ring under its own config (or none at all).
+        self.rewind_budget_mb = cfg.emulation.rewind_budget_mb;
+        self.rewind_interval_frames = cfg.emulation.rewind_interval_frames;
+        self.rewind_armed = cfg.emulation.rewind;
+        if self.rewind_armed {
+            self.arm_rewind_ring();
+        } else if !self.debugger_wants_time_travel() {
+            self.emu.disable_time_travel();
+        }
+        self.keyboard_joy_held = [keymap::HeldKeys::default(); keymap::MAPPING_COUNT];
         self.about_machine_lines = crate::config::about_machine_lines(cfg);
         self.deinterlacer =
             Deinterlacer::with_phosphor(crate::config::resolve_phosphor(cfg.phosphor));
@@ -5131,6 +5342,64 @@ impl App {
             }
         }
         self.finish_host_io_pause();
+    }
+
+    /// Save to numbered slot `slot` (1-based), which also becomes the slot
+    /// the Quick Save / Quick Load menu items act on. Overwrites silently:
+    /// a quick save is expected to be instant, and the previous contents of
+    /// the slot are what the user is replacing.
+    fn quick_save_state(&mut self, slot: usize) {
+        self.save_slot = slot;
+        let Some(path) = crate::savestate::slot_path(slot) else {
+            self.show_osd("No per-user directory for save slots");
+            return;
+        };
+        self.suspend_live_audio_for_host_io();
+        let result = crate::paths::ensure_parent(&path)
+            .map_err(anyhow::Error::from)
+            .and_then(|()| self.emu.save_state(&path));
+        match result {
+            Ok(()) => {
+                info!("save state written to slot {slot}: {}", path.display());
+                self.show_osd(format!("Slot {slot} saved"));
+            }
+            Err(e) => {
+                warn!("slot {slot} save failed ({}): {e:#}", path.display());
+                self.show_osd(format!("Slot {slot} save failed (see log)"));
+            }
+        }
+        self.finish_host_io_pause();
+    }
+
+    /// Restore numbered slot `slot` (1-based), which also becomes the current
+    /// slot. An empty slot is reported rather than treated as an error: the
+    /// hotkeys cover all ten, and most of them are usually unused.
+    fn quick_load_state(&mut self, slot: usize, event_loop: Option<&ActiveEventLoop>) {
+        self.save_slot = slot;
+        let Some(path) = crate::savestate::slot_path(slot) else {
+            self.show_osd("No per-user directory for save slots");
+            return;
+        };
+        if !path.exists() {
+            self.show_osd(format!("Slot {slot} is empty"));
+            return;
+        }
+        self.suspend_live_audio_for_host_io();
+        if self.load_state_from_path(&path) {
+            self.show_osd(format!("Slot {slot} loaded"));
+            if let Some(event_loop) = event_loop {
+                event_loop.set_control_flow(ControlFlow::Poll);
+            }
+        }
+        self.finish_host_io_pause();
+    }
+
+    /// Step the slot the Quick Save / Quick Load menu items act on. The
+    /// hotkeys address all ten directly; this is the menu's way in.
+    fn cycle_save_slot(&mut self) {
+        self.save_slot = self.save_slot % crate::savestate::SLOT_COUNT + 1;
+        self.show_osd(format!("Save slot {}", self.save_slot));
+        self.request_redraw();
     }
 
     /// Pick a save-state file and restore it (shortcut / menu). On
@@ -6126,6 +6395,8 @@ impl App {
                 machine_lines: self.about_machine_lines.clone(),
             })),
             Panel::Shortcuts => Some(ui::PanelViewData::Shortcuts),
+            // Self-contained: the panel's own state is everything it draws.
+            Panel::InputMap(_) => None,
             Panel::Calibration(session) => Some(ui::PanelViewData::Calibration(
                 build_calibration_view(session),
             )),

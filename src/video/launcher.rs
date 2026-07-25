@@ -860,11 +860,16 @@ pub struct MachineSetup {
     df_playlists: [Vec<PathBuf>; 4],
     df_write_protected: [bool; 4],
     // Hard disk. Each drive's optional volume-name override (directory mounts
-    // only) sits in the matching `*_name` slot, paralleling the path slot.
+    // only) sits in the matching `*_name` slot, paralleling the path slot, and
+    // its synthesized-RDB boot priority in the matching `*_bootpri` slot. The
+    // GUI has no bootpri editor for hard disks yet, so the values are carried
+    // through unchanged rather than reset to the default on save.
     ide_master: Option<PathBuf>,
     ide_master_name: Option<String>,
+    ide_master_bootpri: Option<i8>,
     ide_slave: Option<PathBuf>,
     ide_slave_name: Option<String>,
+    ide_slave_bootpri: Option<i8>,
     /// Which SCSI host adapter is fitted, or `None` for no board. Shares the
     /// `scsi_*` ROM/unit block below (the drives are portable between boards).
     scsi_controller: Option<ScsiController>,
@@ -872,6 +877,7 @@ pub struct MachineSetup {
     scsi_rom_odd: Option<PathBuf>,
     scsi_units: [Option<PathBuf>; 7],
     scsi_unit_names: [Option<String>; 7],
+    scsi_unit_bootpri: [Option<i8>; 7],
     // Host FS mounts. The GUI edits the first FILESYS_GUI_SLOTS entries
     // (directory + optional volume name + boot priority, -128 = never boot);
     // any further hand-written [[filesys]] entries are carried in
@@ -1003,8 +1009,10 @@ impl MachineSetup {
             df_write_protected,
             ide_master: cfg.ide.master.as_ref().map(|d| d.path.clone()),
             ide_master_name: cfg.ide.master.as_ref().and_then(|d| d.volume_name.clone()),
+            ide_master_bootpri: raw.ide.master.as_ref().and_then(|d| d.bootpri),
             ide_slave: cfg.ide.slave.as_ref().map(|d| d.path.clone()),
             ide_slave_name: cfg.ide.slave.as_ref().and_then(|d| d.volume_name.clone()),
+            ide_slave_bootpri: raw.ide.slave.as_ref().and_then(|d| d.bootpri),
             scsi_controller: cfg.scsi.enabled().then_some(cfg.scsi.controller),
             scsi_rom: cfg.scsi.rom.clone(),
             scsi_rom_odd: cfg.scsi.rom_odd.clone(),
@@ -1013,6 +1021,9 @@ impl MachineSetup {
                 cfg.scsi.units[i]
                     .as_ref()
                     .and_then(|d| d.volume_name.clone())
+            }),
+            scsi_unit_bootpri: std::array::from_fn(|i| {
+                raw_scsi_unit(&raw.scsi, i).and_then(|d| d.bootpri)
             }),
             filesys_dirs: std::array::from_fn(|i| {
                 raw.filesys.get(i).map(|m| PathBuf::from(&m.path))
@@ -1247,8 +1258,16 @@ impl MachineSetup {
         raw.floppy.df2 = self.floppy_drive_raw(2);
         raw.floppy.df3 = self.floppy_drive_raw(3);
         // Hard disk
-        raw.ide.master = drive_raw(self.ide_master.as_deref(), self.ide_master_name.as_deref());
-        raw.ide.slave = drive_raw(self.ide_slave.as_deref(), self.ide_slave_name.as_deref());
+        raw.ide.master = drive_raw(
+            self.ide_master.as_deref(),
+            self.ide_master_name.as_deref(),
+            self.ide_master_bootpri,
+        );
+        raw.ide.slave = drive_raw(
+            self.ide_slave.as_deref(),
+            self.ide_slave_name.as_deref(),
+            self.ide_slave_bootpri,
+        );
         // Only emit `[scsi]` when a controller is fitted, so an unset board
         // leaves the section absent rather than writing dangling ROM/units.
         if let Some(controller) = self.scsi_controller {
@@ -1276,30 +1295,37 @@ impl MachineSetup {
             raw.scsi.unit0 = drive_raw(
                 self.scsi_units[0].as_deref(),
                 self.scsi_unit_names[0].as_deref(),
+                self.scsi_unit_bootpri[0],
             );
             raw.scsi.unit1 = drive_raw(
                 self.scsi_units[1].as_deref(),
                 self.scsi_unit_names[1].as_deref(),
+                self.scsi_unit_bootpri[1],
             );
             raw.scsi.unit2 = drive_raw(
                 self.scsi_units[2].as_deref(),
                 self.scsi_unit_names[2].as_deref(),
+                self.scsi_unit_bootpri[2],
             );
             raw.scsi.unit3 = drive_raw(
                 self.scsi_units[3].as_deref(),
                 self.scsi_unit_names[3].as_deref(),
+                self.scsi_unit_bootpri[3],
             );
             raw.scsi.unit4 = drive_raw(
                 self.scsi_units[4].as_deref(),
                 self.scsi_unit_names[4].as_deref(),
+                self.scsi_unit_bootpri[4],
             );
             raw.scsi.unit5 = drive_raw(
                 self.scsi_units[5].as_deref(),
                 self.scsi_unit_names[5].as_deref(),
+                self.scsi_unit_bootpri[5],
             );
             raw.scsi.unit6 = drive_raw(
                 self.scsi_units[6].as_deref(),
                 self.scsi_unit_names[6].as_deref(),
+                self.scsi_unit_bootpri[6],
             );
         }
         // Host FS mounts: the edited slots (empty ones drop out), then any
@@ -1528,8 +1554,10 @@ impl MachineSetup {
         if !self.has_ide() {
             self.ide_master = None;
             self.ide_master_name = None;
+            self.ide_master_bootpri = None;
             self.ide_slave = None;
             self.ide_slave_name = None;
+            self.ide_slave_bootpri = None;
         }
         if !self.has_cd() {
             self.cd_image = None;
@@ -2264,9 +2292,30 @@ impl MachineSetup {
                 }
             }
         }
-        // A drive's volume name is meaningless once its image is gone.
+        // A drive's volume name and boot priority are meaningless once its
+        // image is gone.
         if Self::is_drive_field(field) {
             self.set_drive_name(field, String::new());
+            self.clear_drive_bootpri(field);
+        }
+    }
+
+    /// Drop a hard-disk drive's carried-over boot priority. The GUI has no
+    /// editor for it, so this is the only way it changes here: clearing the
+    /// image clears the entry it belonged to.
+    fn clear_drive_bootpri(&mut self, field: LauncherField) {
+        use LauncherField as F;
+        match field {
+            F::IdeMaster => self.ide_master_bootpri = None,
+            F::IdeSlave => self.ide_slave_bootpri = None,
+            F::ScsiUnit0 => self.scsi_unit_bootpri[0] = None,
+            F::ScsiUnit1 => self.scsi_unit_bootpri[1] = None,
+            F::ScsiUnit2 => self.scsi_unit_bootpri[2] = None,
+            F::ScsiUnit3 => self.scsi_unit_bootpri[3] = None,
+            F::ScsiUnit4 => self.scsi_unit_bootpri[4] = None,
+            F::ScsiUnit5 => self.scsi_unit_bootpri[5] = None,
+            F::ScsiUnit6 => self.scsi_unit_bootpri[6] = None,
+            _ => {}
         }
     }
 
@@ -2511,14 +2560,29 @@ fn path_string(path: &Path) -> String {
 /// Build a `[ide]`/`[scsi]` drive entry from an editable path + optional
 /// volume-name override. A blank name emits the bare path string so saved
 /// configs stay minimal.
-fn drive_raw(path: Option<&Path>, name: Option<&str>) -> Option<RawDrive> {
+fn drive_raw(path: Option<&Path>, name: Option<&str>, bootpri: Option<i8>) -> Option<RawDrive> {
     path.map(|p| RawDrive {
         path: path_string(p),
         name: name
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string),
+        bootpri,
     })
+}
+
+/// A `[scsi]` unit entry by SCSI ID. `RawScsi` names its units as separate
+/// fields (that is the TOML shape), so indexed access needs this shim.
+fn raw_scsi_unit(scsi: &crate::config::RawScsi, unit: usize) -> Option<&RawDrive> {
+    match unit {
+        0 => scsi.unit0.as_ref(),
+        1 => scsi.unit1.as_ref(),
+        2 => scsi.unit2.as_ref(),
+        3 => scsi.unit3.as_ref(),
+        4 => scsi.unit4.as_ref(),
+        5 => scsi.unit5.as_ref(),
+        _ => scsi.unit6.as_ref(),
+    }
 }
 
 /// Boot priorities offered on the Host FS boot-pri stepper. -128 is the

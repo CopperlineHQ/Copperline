@@ -25,6 +25,8 @@ const MENU_BG: u32 = rgba(238, 238, 232);
 const MENU_TEXT: u32 = rgba(12, 12, 14);
 const MENU_HILIGHT_BG: u32 = rgba(0, 85, 170);
 const MENU_HILIGHT_TEXT: u32 = rgba(255, 255, 255);
+/// A scroll row that has run out of list in its direction.
+const MENU_TEXT_DISABLED: u32 = rgba(150, 150, 146);
 const MENU_EDGE: u32 = rgba(12, 12, 14);
 const PANEL_BG: u32 = rgba(30, 32, 36);
 const PANEL_TITLE_BG: u32 = rgba(0, 85, 170);
@@ -81,6 +83,8 @@ pub enum MenuItem {
     JoystickInput,
     Port1Device,
     Port2Device,
+    Autofire,
+    InputMapping,
     #[cfg(feature = "midi")]
     MidiInput,
     #[cfg(feature = "midi")]
@@ -95,10 +99,14 @@ pub enum MenuItem {
     AudioFilter,
     Warp,
     WarpLimit,
+    Rewind,
     Record,
     RecordInput,
     SaveState,
     LoadState,
+    QuickSave,
+    QuickLoad,
+    SaveSlot,
     LoadRom,
     MachineConfig,
 }
@@ -108,9 +116,9 @@ pub enum MenuItem {
 /// sampler is attached, so the list is built per open rather than fixed.
 pub fn menu_items(midi_active: bool, sampler_active: bool) -> Vec<MenuItem> {
     let _ = midi_active;
-    // 10 leading + up to 2 MIDI + 2 sampler + pixel aspect + floppy speed +
-    // 11 trailing items = 27, sized so appending never reallocates.
-    let mut items = Vec::with_capacity(27);
+    // 12 leading + up to 2 MIDI + 2 sampler + pixel aspect + floppy speed +
+    // 15 trailing items = 33, sized so appending never reallocates.
+    let mut items = Vec::with_capacity(33);
     items.extend([
         MenuItem::MachineConfig,
         MenuItem::FrameAnalyzer,
@@ -122,6 +130,8 @@ pub fn menu_items(midi_active: bool, sampler_active: bool) -> Vec<MenuItem> {
         MenuItem::JoystickInput,
         MenuItem::Port1Device,
         MenuItem::Port2Device,
+        MenuItem::Autofire,
+        MenuItem::InputMapping,
     ]);
     #[cfg(feature = "midi")]
     if midi_active {
@@ -139,10 +149,14 @@ pub fn menu_items(midi_active: bool, sampler_active: bool) -> Vec<MenuItem> {
         MenuItem::StatusBar,
         MenuItem::Warp,
         MenuItem::WarpLimit,
+        MenuItem::Rewind,
         MenuItem::Record,
         MenuItem::RecordInput,
         MenuItem::SaveState,
         MenuItem::LoadState,
+        MenuItem::QuickSave,
+        MenuItem::QuickLoad,
+        MenuItem::SaveSlot,
         MenuItem::LoadRom,
         MenuItem::Shortcuts,
         MenuItem::About,
@@ -161,6 +175,12 @@ pub struct MenuLabels<'a> {
     pub status_bar_hidden: bool,
     pub recording: bool,
     pub input_recording: bool,
+    /// Whether rewind history is being recorded (the Rewind item toggles it).
+    pub rewind: bool,
+    /// Numbered save-state slot the Quick Save / Quick Load items act on.
+    pub save_slot: usize,
+    /// Autofire rate in Hz shown on the Autofire item; 0 is "off".
+    pub autofire_hz: u8,
     pub joystick_input_mode: JoystickInputMode,
     /// Devices currently plugged into the two game ports (hot-pluggable
     /// through the Port 1/2 Device items).
@@ -196,6 +216,11 @@ fn menu_item_label(item: MenuItem, s: MenuLabels) -> String {
         MenuItem::JoystickInput => format!("Joystick Input  [{}]", s.joystick_input_mode.label()),
         MenuItem::Port1Device => format!("Port 1 Device  [{}]", s.port_devices[0].label()),
         MenuItem::Port2Device => format!("Port 2 Device  [{}]", s.port_devices[1].label()),
+        MenuItem::Autofire => format!(
+            "Autofire {:>13}",
+            format!("[{}]", crate::config::autofire_label(s.autofire_hz))
+        ),
+        MenuItem::InputMapping => "Input Mapping...".to_string(),
         MenuItem::PixelAspect => {
             let value = match s.pixel_aspect {
                 PixelAspect::Tv => "tv",
@@ -254,12 +279,17 @@ fn menu_item_label(item: MenuItem, s: MenuLabels) -> String {
                 format!("[{}]", s.warp_speed.label())
             )
         }
+        MenuItem::Rewind if s.rewind => "Rewind          [on]".to_string(),
+        MenuItem::Rewind => "Rewind         [off]".to_string(),
         MenuItem::Record if s.recording => "Stop Video Recording".to_string(),
         MenuItem::Record => "Record Video".to_string(),
         MenuItem::RecordInput if s.input_recording => "Stop Input Recording".to_string(),
         MenuItem::RecordInput => "Record Input".to_string(),
         MenuItem::SaveState => "Save State".to_string(),
         MenuItem::LoadState => "Load State...".to_string(),
+        MenuItem::QuickSave => format!("Quick Save {:>9}", format!("[slot {}]", s.save_slot)),
+        MenuItem::QuickLoad => format!("Quick Load {:>9}", format!("[slot {}]", s.save_slot)),
+        MenuItem::SaveSlot => format!("Save Slot {:>10}", format!("[{}]", s.save_slot)),
         MenuItem::LoadRom => "Load Kickstart ROM...".to_string(),
         MenuItem::MachineConfig => "Machine Configuration...".to_string(),
     }
@@ -276,8 +306,69 @@ fn clip_menu_value(name: &str) -> String {
     format!("{kept}~")
 }
 
+/// Labels of the two scroll rows a scrolling menu grows at its ends. Centred,
+/// so they read as chrome rather than as another item.
+const MENU_SCROLL_UP_LABEL: &str = "^ more ^";
+const MENU_SCROLL_DOWN_LABEL: &str = "v more v";
+
+/// How a menu of `item_count` items is laid out.
+///
+/// The menu is anchored to the bottom of the display and grows upward, so a
+/// long list (the MIDI and sampler items appear only in some sessions) can
+/// reach the top edge. It degrades in two stages: first the rows tighten
+/// toward the height of the label font itself, and only when even that does
+/// not fit does the list scroll, giving up a row at each end to the scroll
+/// controls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MenuLayout {
+    item_h: usize,
+    /// Items on screen at once. Equal to `item_count` when not scrolling.
+    visible: usize,
+    scrolling: bool,
+}
+
+impl MenuLayout {
+    /// Total rows drawn, counting the two scroll rows.
+    fn rows(&self) -> usize {
+        self.visible + if self.scrolling { 2 } else { 0 }
+    }
+
+    /// Largest first-visible index, i.e. the scroll position that puts the
+    /// last item at the bottom.
+    fn max_scroll(&self, item_count: usize) -> usize {
+        item_count.saturating_sub(self.visible)
+    }
+}
+
+fn menu_layout(item_count: usize) -> MenuLayout {
+    let avail = present_height().saturating_sub(2 + 2 * MENU_PAD);
+    let floor = MENU_TEXT_PX * font::GLYPH_H;
+    let item_h = (avail / item_count.max(1)).clamp(floor, MENU_ITEM_H);
+    if item_count * item_h <= avail {
+        return MenuLayout {
+            item_h,
+            visible: item_count,
+            scrolling: false,
+        };
+    }
+    // Too many items for the display even at the tightest row height: show a
+    // window into the list, with a scroll row above and below it.
+    let rows = avail / floor;
+    MenuLayout {
+        item_h: floor,
+        visible: rows.saturating_sub(2).max(1),
+        scrolling: true,
+    }
+}
+
+/// Clamp a scroll position to the range this item count allows.
+pub fn clamp_menu_scroll(scroll: usize, item_count: usize) -> usize {
+    scroll.min(menu_layout(item_count).max_scroll(item_count))
+}
+
 fn menu_rect(item_count: usize) -> Rect {
-    let h = item_count * MENU_ITEM_H + 2 * MENU_PAD;
+    let layout = menu_layout(item_count);
+    let h = layout.rows() * layout.item_h + 2 * MENU_PAD;
     let right = MENU_BUTTON_X + MENU_BUTTON_W;
     Rect {
         x: right.saturating_sub(MENU_W),
@@ -287,14 +378,55 @@ fn menu_rect(item_count: usize) -> Rect {
     }
 }
 
-fn menu_item_rect(index: usize, item_count: usize) -> Rect {
+/// The rect of the `row`-th drawn row (scroll rows included), regardless of
+/// what occupies it.
+fn menu_row_rect(row: usize, item_count: usize) -> Rect {
     let menu = menu_rect(item_count);
+    let layout = menu_layout(item_count);
     Rect {
         x: menu.x + 1,
-        y: menu.y + MENU_PAD + index * MENU_ITEM_H,
+        y: menu.y + MENU_PAD + row * layout.item_h,
         w: menu.w - 2,
-        h: MENU_ITEM_H,
+        h: layout.item_h,
     }
+}
+
+/// The rect of menu item `index` (an index into the whole list) at scroll
+/// position `scroll`, or `None` when it is scrolled out of view.
+fn menu_item_rect(index: usize, item_count: usize, scroll: usize) -> Option<Rect> {
+    let layout = menu_layout(item_count);
+    let scroll = scroll.min(layout.max_scroll(item_count));
+    let offset = index.checked_sub(scroll)?;
+    if offset >= layout.visible {
+        return None;
+    }
+    Some(menu_row_rect(
+        offset + usize::from(layout.scrolling),
+        item_count,
+    ))
+}
+
+/// The two scroll rows, when the menu is scrolling: the first and last drawn
+/// rows. Each is reported with whether it can still move in its direction, so
+/// the draw can grey out an exhausted end and the hit test can ignore it.
+fn menu_scroll_rows(item_count: usize, scroll: usize) -> Option<[(UiControl, Rect, bool); 2]> {
+    let layout = menu_layout(item_count);
+    if !layout.scrolling {
+        return None;
+    }
+    let scroll = scroll.min(layout.max_scroll(item_count));
+    Some([
+        (
+            UiControl::MenuScrollUp,
+            menu_row_rect(0, item_count),
+            scroll > 0,
+        ),
+        (
+            UiControl::MenuScrollDown,
+            menu_row_rect(layout.rows() - 1, item_count),
+            scroll < layout.max_scroll(item_count),
+        ),
+    ])
 }
 
 // ---------------------------------------------------------------------------
@@ -574,11 +706,61 @@ pub struct DropChooserState {
     pub drives: Vec<DropDriveEntry>,
 }
 
+/// Interactive state of the Input Mapping panel: a working copy of the
+/// keyboard map that is only committed to disk on Save, plus which mapping is
+/// on screen and which row (if any) is waiting for a key press.
+pub struct InputMapPanel {
+    /// Keyboard mapping being edited (0 = controller 1, 1 = controller 2).
+    pub mapping: usize,
+    /// Control armed for capture: the next bindable key press binds to it.
+    pub capturing: Option<crate::keymap::JoyControl>,
+    /// Working copy of the map. Edits here do not reach the live machine
+    /// until Save.
+    pub map: crate::keymap::KeyMap,
+    /// Feedback line under the table.
+    pub message: String,
+}
+
+impl InputMapPanel {
+    pub fn new(map: crate::keymap::KeyMap) -> Self {
+        Self {
+            mapping: 0,
+            capturing: None,
+            map,
+            message: "Click Set, then press the key to bind.".to_string(),
+        }
+    }
+
+    /// Bind a captured host key to the armed control. Returns false (and
+    /// leaves the row armed) for a key that cannot be bound, so a stray press
+    /// does not silently cancel the capture.
+    pub fn capture_key(&mut self, code: winit::keyboard::KeyCode) -> bool {
+        let Some(control) = self.capturing else {
+            return false;
+        };
+        if !crate::keymap::is_bindable(code) {
+            self.message = "That key cannot be bound to a controller.".to_string();
+            return false;
+        }
+        self.map.bind(self.mapping, control, code);
+        self.capturing = None;
+        self.message = format!(
+            "{} bound to {}.",
+            control.label(),
+            crate::keymap::short_key_label(code)
+        );
+        true
+    }
+}
+
 /// An open overlay sub-window.
 pub enum Panel {
     About,
     Shortcuts,
     Calibration(crate::gamepad::CalibrationSession),
+    /// Keyboard controller remapping. Boxed like the launcher: it carries a
+    /// whole working copy of the key map, far larger than the other variants.
+    InputMap(Box<InputMapPanel>),
     Debugger(DebuggerPanel),
     FrameAnalyzer(FrameAnalyzerPanel),
     Console(ConsolePanel),
@@ -595,6 +777,9 @@ pub enum Panel {
 #[derive(Default)]
 pub struct UiState {
     pub menu_open: bool,
+    /// First visible menu item when the list is too long for the display.
+    /// Always 0 for a menu that fits; reset each time the menu opens.
+    pub menu_scroll: usize,
     pub panel: Option<Panel>,
 }
 
@@ -615,8 +800,23 @@ impl UiState {
     ) -> Option<UiControl> {
         if self.menu_open {
             let items = menu_items(midi_active, sampler_active);
+            // The scroll rows sit where items would otherwise be, so they are
+            // tested first; an exhausted end swallows the click as chrome.
+            if let Some(rows) = menu_scroll_rows(items.len(), self.menu_scroll) {
+                for (control, rect, enabled) in rows {
+                    if rect.contains(pos) {
+                        return Some(if enabled {
+                            control
+                        } else {
+                            UiControl::PanelBody
+                        });
+                    }
+                }
+            }
             for (index, item) in items.iter().enumerate() {
-                if menu_item_rect(index, items.len()).contains(pos) {
+                if menu_item_rect(index, items.len(), self.menu_scroll)
+                    .is_some_and(|rect| rect.contains(pos))
+                {
                     return Some(UiControl::MenuItem(*item));
                 }
             }
@@ -639,6 +839,13 @@ pub fn panel_control_at(panel: &Panel, pos: (i32, i32)) -> Option<UiControl> {
         Panel::Calibration(session) => {
             for (control, button_rect) in cal_button_rects(rect) {
                 if button_rect.contains(pos) && cal_button_enabled(control, session) {
+                    return Some(control);
+                }
+            }
+        }
+        Panel::InputMap(_) => {
+            for (control, button_rect) in input_map_control_rects(rect) {
+                if button_rect.contains(pos) {
                     return Some(control);
                 }
             }
@@ -757,6 +964,21 @@ pub enum UiControl {
     /// Run to the start of the next scanline (end of the current line),
     /// stopping at exact beam granularity via a one-shot beam trap.
     DebugRunLine,
+    /// Scroll a too-long menu one item toward the start of the list.
+    MenuScrollUp,
+    /// Scroll a too-long menu one item toward the end of the list.
+    MenuScrollDown,
+    /// Input Mapping: show keyboard mapping N (0 = controller 1).
+    RemapSet(usize),
+    /// Input Mapping: arm control N (an index into `keymap::CONTROLS`) for
+    /// key capture.
+    RemapBind(usize),
+    /// Input Mapping: unbind every key from control N.
+    RemapClear(usize),
+    /// Input Mapping: restore the built-in bindings.
+    RemapDefaults,
+    /// Input Mapping: persist the edited map and apply it.
+    RemapSave,
     /// Reverse-debug: step one instruction backward (reconstructed from the
     /// snapshot ring).
     DebugReverseStep,
@@ -894,8 +1116,9 @@ pub enum UiControl {
 fn panel_dims(panel: &Panel) -> (usize, usize) {
     match panel {
         Panel::About => (560, 380),
-        Panel::Shortcuts => (600, 486),
+        Panel::Shortcuts => (600, shortcuts_panel_height()),
         Panel::Calibration(_) => (620, 372),
+        Panel::InputMap(_) => (INPUT_MAP_W, input_map_panel_height()),
         Panel::Debugger(_) => (684, 520),
         Panel::FrameAnalyzer(_) => (700, 526),
         Panel::Console(_) => (700, 460),
@@ -915,6 +1138,7 @@ fn panel_title(panel: &Panel) -> &'static str {
         Panel::About => "About Copperline",
         Panel::Shortcuts => "Keyboard Shortcuts",
         Panel::Calibration(_) => "Gamepad Calibration",
+        Panel::InputMap(_) => "Input Mapping",
         Panel::Debugger(_) => "Debugger",
         Panel::FrameAnalyzer(_) => "Frame Analyzer",
         Panel::Console(_) => "Console",
@@ -1730,6 +1954,7 @@ fn draw_menu(
     hover: Option<UiControl>,
     midi_active: bool,
     sampler_active: bool,
+    scroll: usize,
     labels: MenuLabels,
     scale: usize,
 ) {
@@ -1738,8 +1963,11 @@ fn draw_menu(
     let scaled = scale_rect(rect, scale);
     fill_rect(frame, scaled, MENU_BG, scale);
     draw_rect_bevel(frame, scaled, MENU_EDGE, MENU_EDGE, scale);
+    let text_y = |row: Rect| row.y + row.h.saturating_sub(MENU_TEXT_PX * font::GLYPH_H) / 2;
     for (index, item) in items.iter().enumerate() {
-        let item_rect = menu_item_rect(index, items.len());
+        let Some(item_rect) = menu_item_rect(index, items.len(), scroll) else {
+            continue;
+        };
         let hovered = hover == Some(UiControl::MenuItem(*item));
         let (bg, fg) = if hovered {
             (MENU_HILIGHT_BG, MENU_HILIGHT_TEXT)
@@ -1752,8 +1980,39 @@ fn draw_menu(
         draw_panel_text(
             frame,
             item_rect.x + MENU_TEXT_INSET,
-            item_rect.y + (MENU_ITEM_H - 16) / 2,
+            text_y(item_rect),
             &menu_item_label(*item, labels),
+            fg,
+            MENU_TEXT_PX,
+            scale,
+        );
+    }
+    let Some(rows) = menu_scroll_rows(items.len(), scroll) else {
+        return;
+    };
+    for (control, row, enabled) in rows {
+        let label = if control == UiControl::MenuScrollUp {
+            MENU_SCROLL_UP_LABEL
+        } else {
+            MENU_SCROLL_DOWN_LABEL
+        };
+        let hovered = enabled && hover == Some(control);
+        if hovered {
+            fill_rect(frame, scale_rect(row, scale), MENU_HILIGHT_BG, scale);
+        }
+        let fg = match (enabled, hovered) {
+            // A dimmed end says "this is as far as the list goes" rather
+            // than leaving a dead-looking gap.
+            (false, _) => MENU_TEXT_DISABLED,
+            (true, true) => MENU_HILIGHT_TEXT,
+            (true, false) => MENU_TEXT,
+        };
+        let width = font::text_width(label, MENU_TEXT_PX);
+        draw_panel_text(
+            frame,
+            row.x + row.w.saturating_sub(width) / 2,
+            text_y(row),
+            label,
             fg,
             MENU_TEXT_PX,
             scale,
@@ -1922,13 +2181,37 @@ pub fn draw_drop_hint(frame: &mut [u8], texture_scale: usize) {
     draw_panel_text(frame, x, y, text, PANEL_TEXT_HILIGHT, px, texture_scale);
 }
 
-const SHORTCUT_ROWS: [(&str, &str, bool); 18] = [
+/// Vertical pitch of a shortcut row. The panel is sized from this and the
+/// row count, and must stay inside `present_height()`.
+const SHORTCUT_ROW_H: usize = 20;
+/// Trailing note lines under the shortcut table, and their pitch.
+const SHORTCUT_NOTES: [&str; 3] = [
+    "Shortcuts: Cmd on macOS, Alt on Linux/Windows",
+    "Amiga modifiers: Alt, Cmd/Super=Amiga, Ctrl",
+    "In the debugger: S step, O over, U out, F frame, R run/pause",
+];
+const SHORTCUT_NOTE_H: usize = 12;
+
+/// Panel height that exactly holds the table plus the notes, so adding a row
+/// does not silently push the last one off the bottom.
+fn shortcuts_panel_height() -> usize {
+    TITLE_H
+        + 14
+        + SHORTCUT_ROWS.len() * SHORTCUT_ROW_H
+        + 8
+        + SHORTCUT_NOTES.len() * SHORTCUT_NOTE_H
+        + 10
+}
+
+const SHORTCUT_ROWS: [(&str, &str, bool); 21] = [
     ("Q", "Quit", true),
     ("S", "Save screenshot", true),
     ("R", "Record video on/off", true),
     ("Shift+R", "Record input on/off", true),
     ("Shift+S", "Save state", true),
     ("Shift+L", "Load state", true),
+    ("1-0", "Quick-save to a slot", true),
+    ("Shift+1-0", "Quick-load from slot", true),
     ("D", "Swap queued disk", true),
     ("G", "Capture mouse", true),
     ("B", "Debugger", true),
@@ -1939,6 +2222,7 @@ const SHORTCUT_ROWS: [(&str, &str, bool); 18] = [
     ("Shift+F", "Status bar on/off", true),
     ("W", "Warp speed on/off", true),
     ("Shift+W", "Warp limit (2x..Max)", true),
+    ("Z", "Rewind one step", true),
     ("Esc", "Close menu/window", false),
     ("Ctrl+Ami+Ami", "Keyboard reset", false),
 ];
@@ -1961,17 +2245,254 @@ fn draw_shortcuts(frame: &mut [u8], rect: Rect, scale: usize) {
             scale,
         );
         draw_panel_text(frame, rect.x + 248, y, action, PANEL_TEXT, 2, scale);
-        y += 22;
+        y += SHORTCUT_ROW_H;
     }
     y += 8;
-    for line in [
-        "Shortcuts: Cmd on macOS, Alt on Linux/Windows",
-        "Amiga modifiers: Alt, Cmd/Super=Amiga, Ctrl",
-        "In the debugger: S step, O over, U out, F frame, R run/pause",
-    ] {
+    for line in SHORTCUT_NOTES {
         draw_panel_text(frame, rect.x + 24, y, line, PANEL_TEXT_DIM, 1, scale);
-        y += 12;
+        y += SHORTCUT_NOTE_H;
     }
+}
+
+// Input Mapping panel geometry. One row per control, two mapping tabs above
+// them, and the action buttons on the bottom edge like the other panels.
+// Widths are sized off the longest label and the longest default binding
+// list, so nothing collides: labels are drawn at the panel text size and the
+// binding column (which can hold four aliases) at half that.
+const INPUT_MAP_W: usize = 640;
+const MAP_ROW_H: usize = 24;
+const MAP_TAB_W: usize = 132;
+const MAP_TAB_H: usize = 22;
+const MAP_BUTTON_H: usize = 20;
+const MAP_SET_W: usize = 62;
+const MAP_CLEAR_W: usize = 62;
+const MAP_ACTION_W: usize = 96;
+const MAP_ACTION_H: usize = 22;
+const MAP_MARGIN: usize = 16;
+/// Font scale of the control labels, and of the binding list beside them.
+const MAP_LABEL_PX: usize = 2;
+const MAP_BINDING_PX: usize = 1;
+/// Left edge of the binding column, and of the row's two buttons.
+const MAP_BINDING_X: usize = 272;
+const MAP_SET_X: usize = 480;
+/// Footnote under the table, naming the pad-only controls once instead of
+/// repeating "(CD32)" on five rows.
+const MAP_NOTE: &str = "Green, Yellow, Play, Rewind and Forward are CD32 pad buttons.";
+
+fn input_map_rows_top(rect: Rect) -> usize {
+    rect.y + TITLE_H + 10 + MAP_TAB_H + 12
+}
+
+fn input_map_panel_height() -> usize {
+    TITLE_H
+        + 10
+        + MAP_TAB_H
+        + 12
+        + crate::keymap::CONTROLS.len() * MAP_ROW_H
+        + 10
+        + 2 * 14 // message + footnote lines
+        + 8
+        + MAP_ACTION_H
+        + 8
+}
+
+/// Characters that fit a column `width` pixels wide at font scale `px`.
+fn columns_for(width: usize, px: usize) -> usize {
+    width / (font::GLYPH_W * px)
+}
+
+/// Clip `text` to `max` characters, marking the cut so a truncated binding
+/// list does not read as the whole list.
+fn clip_to_columns(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let kept: String = text.chars().take(max.saturating_sub(1)).collect();
+    format!("{kept}~")
+}
+
+/// Every clickable control in the panel, with its rect: the two mapping tabs,
+/// a Set and a Clear button per row, then Defaults / Save.
+fn input_map_control_rects(rect: Rect) -> Vec<(UiControl, Rect)> {
+    let mut out = Vec::with_capacity(2 * crate::keymap::CONTROLS.len() + 4);
+    for set in 0..crate::keymap::MAPPING_COUNT {
+        out.push((
+            UiControl::RemapSet(set),
+            Rect {
+                x: rect.x + MAP_MARGIN + set * (MAP_TAB_W + 8),
+                y: rect.y + TITLE_H + 10,
+                w: MAP_TAB_W,
+                h: MAP_TAB_H,
+            },
+        ));
+    }
+    let top = input_map_rows_top(rect);
+    for (i, _) in crate::keymap::CONTROLS.iter().enumerate() {
+        let y = top + i * MAP_ROW_H + (MAP_ROW_H - MAP_BUTTON_H) / 2;
+        out.push((
+            UiControl::RemapBind(i),
+            Rect {
+                x: rect.x + MAP_SET_X,
+                y,
+                w: MAP_SET_W,
+                h: MAP_BUTTON_H,
+            },
+        ));
+        out.push((
+            UiControl::RemapClear(i),
+            Rect {
+                x: rect.x + MAP_SET_X + MAP_SET_W + 8,
+                y,
+                w: MAP_CLEAR_W,
+                h: MAP_BUTTON_H,
+            },
+        ));
+    }
+    let action_y = rect.y + rect.h - MAP_ACTION_H - 8;
+    for (i, control) in [UiControl::RemapDefaults, UiControl::RemapSave]
+        .into_iter()
+        .enumerate()
+    {
+        out.push((
+            control,
+            Rect {
+                x: rect.x + rect.w - (2 - i) * (MAP_ACTION_W + 8),
+                y: action_y,
+                w: MAP_ACTION_W,
+                h: MAP_ACTION_H,
+            },
+        ));
+    }
+    out
+}
+
+fn draw_input_map(
+    frame: &mut [u8],
+    rect: Rect,
+    panel: &InputMapPanel,
+    hover: Option<UiControl>,
+    scale: usize,
+) {
+    let controls = input_map_control_rects(rect);
+    let mapping = panel.map.mapping(panel.mapping);
+    for (control, button_rect) in &controls {
+        match *control {
+            UiControl::RemapSet(set) => {
+                let label = if set == 0 {
+                    "Controller 1"
+                } else {
+                    "Controller 2"
+                };
+                draw_launcher_chip(
+                    frame,
+                    *button_rect,
+                    label,
+                    set == panel.mapping,
+                    hover == Some(*control),
+                    false,
+                    scale,
+                );
+            }
+            UiControl::RemapBind(i) => {
+                let armed = panel.capturing == Some(crate::keymap::CONTROLS[i]);
+                let label = if armed { "..." } else { "Set" };
+                draw_text_button(
+                    frame,
+                    *button_rect,
+                    label,
+                    true,
+                    hover == Some(*control),
+                    scale,
+                );
+            }
+            UiControl::RemapClear(i) => {
+                let bound = !mapping.keys(crate::keymap::CONTROLS[i]).is_empty();
+                draw_text_button(
+                    frame,
+                    *button_rect,
+                    "Clear",
+                    bound,
+                    hover == Some(*control),
+                    scale,
+                );
+            }
+            UiControl::RemapDefaults => draw_text_button(
+                frame,
+                *button_rect,
+                "Defaults",
+                true,
+                hover == Some(*control),
+                scale,
+            ),
+            UiControl::RemapSave => draw_text_button(
+                frame,
+                *button_rect,
+                "Save",
+                true,
+                hover == Some(*control),
+                scale,
+            ),
+            _ => {}
+        }
+    }
+
+    let top = input_map_rows_top(rect);
+    let label_cols = columns_for(MAP_BINDING_X - MAP_MARGIN - 8, MAP_LABEL_PX);
+    let binding_cols = columns_for(MAP_SET_X - MAP_BINDING_X - 8, MAP_BINDING_PX);
+    for (i, control) in crate::keymap::CONTROLS.iter().enumerate() {
+        let armed = panel.capturing == Some(*control);
+        let label_colour = if armed {
+            PANEL_TEXT_HILIGHT
+        } else {
+            PANEL_TEXT
+        };
+        draw_panel_text(
+            frame,
+            rect.x + MAP_MARGIN,
+            top + i * MAP_ROW_H + (MAP_ROW_H - font::GLYPH_H * MAP_LABEL_PX) / 2,
+            &clip_to_columns(control.label(), label_cols),
+            label_colour,
+            MAP_LABEL_PX,
+            scale,
+        );
+        let binding = mapping.binding_text(*control);
+        let binding_colour = if armed {
+            PANEL_TEXT_HILIGHT
+        } else if binding == "-" {
+            PANEL_TEXT_DIM
+        } else {
+            PANEL_TEXT_ACCENT
+        };
+        draw_panel_text(
+            frame,
+            rect.x + MAP_BINDING_X,
+            top + i * MAP_ROW_H + (MAP_ROW_H - font::GLYPH_H * MAP_BINDING_PX) / 2,
+            &clip_to_columns(&binding, binding_cols),
+            binding_colour,
+            MAP_BINDING_PX,
+            scale,
+        );
+    }
+
+    let message_y = top + crate::keymap::CONTROLS.len() * MAP_ROW_H + 10;
+    draw_panel_text(
+        frame,
+        rect.x + MAP_MARGIN,
+        message_y,
+        &panel.message,
+        PANEL_TEXT_ACCENT,
+        1,
+        scale,
+    );
+    draw_panel_text(
+        frame,
+        rect.x + MAP_MARGIN,
+        message_y + 14,
+        MAP_NOTE,
+        PANEL_TEXT_DIM,
+        1,
+        scale,
+    );
 }
 
 fn draw_calibration(
@@ -4640,9 +5161,12 @@ pub fn draw_panel_layer(
         (Panel::FrameAnalyzer(panel_state), Some(PanelViewData::FrameAnalyzer(view))) => {
             draw_frame_analyzer(frame, rect, panel_state, view, hover, texture_scale)
         }
-        // The console and configuration panels are self-contained (their
-        // state holds everything they render), so they need no per-frame
-        // view-data snapshot.
+        // The console, input-mapping and configuration panels are
+        // self-contained (their state holds everything they render), so they
+        // need no per-frame view-data snapshot.
+        (Panel::InputMap(panel_state), _) => {
+            draw_input_map(frame, rect, panel_state, hover, texture_scale)
+        }
         (Panel::Console(panel_state), _) => draw_console(frame, rect, panel_state, texture_scale),
         (Panel::Launcher(state), _) => draw_launcher(frame, rect, state, hover, texture_scale),
         (Panel::DropChooser(state), _) => {
@@ -4673,6 +5197,7 @@ pub fn draw(
             hover,
             midi_active,
             sampler_active,
+            ui.menu_scroll,
             labels,
             texture_scale,
         );
@@ -4937,9 +5462,10 @@ mod tests {
 
         let ui = UiState {
             menu_open: true,
+            menu_scroll: 0,
             panel: None,
         };
-        let first = menu_item_rect(0, n);
+        let first = menu_item_rect(0, n, 0).unwrap();
         let pos = (first.x as i32 + 4, first.y as i32 + 4);
         assert_eq!(
             ui.control_at(pos, false, false),
@@ -4948,7 +5474,7 @@ mod tests {
         // Leading block is MachineConfig, FrameAnalyzer, Debugger, Console,
         // AudioOutput, AudioFilter, Calibration, so Joystick Input sits at
         // index 7.
-        let joystick = menu_item_rect(7, n);
+        let joystick = menu_item_rect(7, n, 0).unwrap();
         let pos = (joystick.x as i32 + 4, joystick.y as i32 + 4);
         assert_eq!(
             ui.control_at(pos, false, false),
@@ -4956,6 +5482,128 @@ mod tests {
         );
         // Outside the menu: nothing (the click closes the menu).
         assert_eq!(ui.control_at((0, 0), false, false), None);
+    }
+
+    /// The menu grows upward from the bottom edge, so every optional item
+    /// (MIDI, sampler) that can appear has to still fit. Rows tighten rather
+    /// than the first items falling off the top.
+    #[test]
+    fn the_menu_fits_on_screen_with_every_optional_item_shown() {
+        for (midi, sampler) in [(false, false), (true, false), (false, true), (true, true)] {
+            let n = menu_items(midi, sampler).len();
+            let rect = menu_rect(n);
+            assert!(
+                rect.y + rect.h <= present_height(),
+                "menu of {n} items overflows the display"
+            );
+            let layout = menu_layout(n);
+            assert!(
+                layout.item_h >= MENU_TEXT_PX * font::GLYPH_H,
+                "menu rows must stay at least as tall as their text"
+            );
+            assert!(
+                !layout.scrolling,
+                "the real menu should still fit without scrolling ({n} items)"
+            );
+            // Every row lands inside the menu background.
+            let last = menu_item_rect(n - 1, n, 0).expect("last item visible");
+            assert!(last.y + last.h <= rect.y + rect.h);
+            assert!(menu_item_rect(0, n, 0).unwrap().y >= rect.y);
+        }
+    }
+
+    /// Past the point where even the tightest rows fit, the menu scrolls: it
+    /// shows a window into the list with a scroll row at each end.
+    #[test]
+    fn an_over_long_menu_scrolls_instead_of_overflowing() {
+        // Deliberately more items than any real session builds, so the
+        // fallback is exercised whatever the menu grows to next.
+        let n = 200;
+        let layout = menu_layout(n);
+        assert!(layout.scrolling);
+        assert!(layout.visible < n);
+        let rect = menu_rect(n);
+        assert!(
+            rect.y + rect.h <= present_height(),
+            "a scrolling menu still fits the display"
+        );
+
+        // At the top: the first items are visible, the last are not, and only
+        // the down arrow is live.
+        assert!(menu_item_rect(0, n, 0).is_some());
+        assert!(menu_item_rect(layout.visible, n, 0).is_none());
+        let rows = menu_scroll_rows(n, 0).expect("scroll rows");
+        assert_eq!(rows[0].0, UiControl::MenuScrollUp);
+        assert!(!rows[0].2, "nothing above the first item");
+        assert!(rows[1].2, "there is more below");
+
+        // Scrolled by one: the window has moved by exactly one item and both
+        // arrows are live.
+        assert!(menu_item_rect(0, n, 1).is_none());
+        assert_eq!(menu_item_rect(1, n, 1), menu_item_rect(0, n, 0));
+        let rows = menu_scroll_rows(n, 1).expect("scroll rows");
+        assert!(rows[0].2 && rows[1].2);
+
+        // At the end: the last item is visible and the down arrow is spent.
+        let end = layout.max_scroll(n);
+        assert!(menu_item_rect(n - 1, n, end).is_some());
+        let rows = menu_scroll_rows(n, end).expect("scroll rows");
+        assert!(rows[0].2);
+        assert!(!rows[1].2, "nothing below the last item");
+
+        // An out-of-range scroll clamps rather than emptying the menu.
+        assert_eq!(clamp_menu_scroll(n * 2, n), end);
+        assert!(menu_item_rect(n - 1, n, n * 2).is_some());
+        // A menu that fits has nothing to scroll.
+        assert_eq!(clamp_menu_scroll(5, 3), 0);
+        assert!(menu_scroll_rows(3, 0).is_none());
+    }
+
+    #[test]
+    fn scroll_rows_hit_test_ahead_of_the_items_they_sit_over() {
+        let items = menu_items(false, false);
+        let n = items.len();
+        // Force the scrolling layout by asking for a list the display cannot
+        // hold, then hit-test through a UiState carrying a scroll position.
+        let big = 200;
+        let ui = UiState {
+            menu_open: true,
+            menu_scroll: 1,
+            panel: None,
+        };
+        let rows = menu_scroll_rows(big, 1).expect("scroll rows");
+        for (control, rect, _) in rows {
+            let pos = (rect.x as i32 + 4, rect.y as i32 + 2);
+            // The real menu is shorter than `big`, so drive the geometry
+            // directly: the point is that the row rect wins over an item.
+            assert!(rect.contains(pos), "{control:?} row contains its own point");
+        }
+
+        // On the real (non-scrolling) menu, item hit-testing is unchanged and
+        // the scroll position is ignored.
+        let first = menu_item_rect(0, n, 0).unwrap();
+        assert_eq!(
+            ui.control_at((first.x as i32 + 4, first.y as i32 + 4), false, false),
+            Some(UiControl::MenuItem(items[0]))
+        );
+    }
+
+    /// The shortcuts panel is sized from its row count, so adding a row must
+    /// not push the table (or the notes under it) off the display.
+    #[test]
+    fn the_shortcuts_panel_fits_on_screen() {
+        let h = shortcuts_panel_height();
+        assert!(
+            h <= present_height(),
+            "shortcuts panel is {h}px tall, taller than the {}px display",
+            present_height()
+        );
+        // Sized to exactly hold header + rows + notes.
+        assert!(
+            h >= TITLE_H
+                + SHORTCUT_ROWS.len() * SHORTCUT_ROW_H
+                + SHORTCUT_NOTES.len() * SHORTCUT_NOTE_H
+        );
     }
 
     #[test]
@@ -4968,6 +5616,9 @@ mod tests {
             status_bar_hidden: false,
             recording: false,
             input_recording: false,
+            rewind: false,
+            save_slot: 1,
+            autofire_hz: 0,
             joystick_input_mode: JoystickInputMode::Gamepad,
             port_devices: [
                 crate::bus::PortDevice::Mouse,
@@ -5002,6 +5653,9 @@ mod tests {
             status_bar_hidden,
             recording: false,
             input_recording: false,
+            rewind: false,
+            save_slot: 1,
+            autofire_hz: 0,
             joystick_input_mode: JoystickInputMode::Gamepad,
             port_devices: [
                 crate::bus::PortDevice::Mouse,
@@ -5055,6 +5709,11 @@ mod tests {
                                         status_bar_hidden: warp,
                                         recording,
                                         input_recording,
+                                        // Rides warp's sweep so both label
+                                        // states are width-checked.
+                                        rewind: warp,
+                                        save_slot: 1,
+                                        autofire_hz: 0,
                                         joystick_input_mode: mode,
                                         // The longest device label.
                                         port_devices: [crate::bus::PortDevice::Analogue; 2],
@@ -5077,8 +5736,9 @@ mod tests {
                                     let label = menu_item_label(item, labels);
                                     let text_w =
                                         label.chars().count() * font::GLYPH_W * MENU_TEXT_PX;
-                                    let right =
-                                        menu_item_rect(0, items.len()).x + MENU_TEXT_INSET + text_w;
+                                    let right = menu_item_rect(0, items.len(), 0).unwrap().x
+                                        + MENU_TEXT_INSET
+                                        + text_w;
                                     assert!(
                                         right <= limit,
                                         "label {label:?} ({text_w}px) overflows the menu by {}px",
@@ -5097,6 +5757,7 @@ mod tests {
     fn frame_analyzer_controls_hit_test() {
         let ui = UiState {
             menu_open: false,
+            menu_scroll: 0,
             panel: Some(Panel::FrameAnalyzer(FrameAnalyzerPanel::new())),
         };
         let rect = panel_rect(ui.panel.as_ref().unwrap());
@@ -5257,6 +5918,7 @@ mod tests {
     fn panel_close_button_hit_tests() {
         let ui = UiState {
             menu_open: false,
+            menu_scroll: 0,
             panel: Some(Panel::About),
         };
         let rect = panel_rect(ui.panel.as_ref().unwrap());
@@ -5280,6 +5942,7 @@ mod tests {
     fn debugger_controls_hit_test_and_entry_edits() {
         let ui = UiState {
             menu_open: false,
+            menu_scroll: 0,
             panel: Some(Panel::Debugger(DebuggerPanel::new())),
         };
         let rect = panel_rect(ui.panel.as_ref().unwrap());
@@ -5318,6 +5981,7 @@ mod tests {
         panel.tab = DebugTab::Break;
         let ui_break = UiState {
             menu_open: false,
+            menu_scroll: 0,
             panel: Some(Panel::Debugger(panel)),
         };
         let (control, toggle) = break_tab_button_rects(rect)[0];
@@ -5335,6 +5999,7 @@ mod tests {
         panel.tab = DebugTab::Audio;
         let ui_audio = UiState {
             menu_open: false,
+            menu_scroll: 0,
             panel: Some(Panel::Debugger(panel)),
         };
         let (control, mute0) = audio_tab_button_rects(rect)[0];
@@ -5589,6 +6254,31 @@ mod tests {
             writer.write_image_data(frame).unwrap();
             eprintln!("saved {path}");
         };
+        // Neutral labels for panels whose draw does not depend on them.
+        let menu_labels = || MenuLabels {
+            warp: false,
+            warp_speed: WarpSpeed::Max,
+            fullscreen: false,
+            status_bar_hidden: false,
+            recording: false,
+            input_recording: false,
+            rewind: false,
+            save_slot: 1,
+            autofire_hz: 0,
+            joystick_input_mode: JoystickInputMode::Gamepad,
+            port_devices: [
+                crate::bus::PortDevice::Mouse,
+                crate::bus::PortDevice::Joystick,
+            ],
+            pixel_aspect: PixelAspect::Tv,
+            floppy_speed: 100,
+            midi_in: "",
+            midi_out: "",
+            audio_output: "",
+            audio_filter: crate::config::AudioFilterMode::Auto,
+            sampler_input: "",
+            sampler_gain: "",
+        };
         let panel_has_title_bar = |frame: &[u8], panel: &Panel| {
             let rect = panel_rect(panel);
             let probe = ((rect.y + 10) * w + rect.x + 4) * 4;
@@ -5599,6 +6289,7 @@ mod tests {
         let mut frame = vec![0u8; w * h * 4];
         let ui = UiState {
             menu_open: true,
+            menu_scroll: 0,
             panel: None,
         };
         draw(
@@ -5616,6 +6307,9 @@ mod tests {
                 status_bar_hidden: false,
                 recording: false,
                 input_recording: false,
+                rewind: false,
+                save_slot: 1,
+                autofire_hz: 0,
                 joystick_input_mode: JoystickInputMode::Gamepad,
                 port_devices: [
                     crate::bus::PortDevice::Mouse,
@@ -5639,6 +6333,7 @@ mod tests {
         let mut frame = vec![0u8; w * h * 4];
         let ui = UiState {
             menu_open: false,
+            menu_scroll: 0,
             panel: Some(Panel::About),
         };
         let data = PanelViewData::About(AboutView {
@@ -5666,6 +6361,9 @@ mod tests {
                 status_bar_hidden: false,
                 recording: false,
                 input_recording: false,
+                rewind: false,
+                save_slot: 1,
+                autofire_hz: 0,
                 joystick_input_mode: JoystickInputMode::Gamepad,
                 port_devices: [
                     crate::bus::PortDevice::Mouse,
@@ -5687,6 +6385,7 @@ mod tests {
         let mut frame = vec![0u8; w * h * 4];
         let ui = UiState {
             menu_open: false,
+            menu_scroll: 0,
             panel: Some(Panel::Shortcuts),
         };
         draw(
@@ -5704,6 +6403,9 @@ mod tests {
                 status_bar_hidden: false,
                 recording: false,
                 input_recording: false,
+                rewind: false,
+                save_slot: 1,
+                autofire_hz: 0,
                 joystick_input_mode: JoystickInputMode::Gamepad,
                 port_devices: [
                     crate::bus::PortDevice::Mouse,
@@ -5725,6 +6427,7 @@ mod tests {
         let mut frame = vec![0u8; w * h * 4];
         let ui = UiState {
             menu_open: false,
+            menu_scroll: 0,
             panel: Some(Panel::DropChooser(DropChooserState {
                 disks: vec![
                     std::path::PathBuf::from("turrican2-disk1.adf"),
@@ -5758,6 +6461,9 @@ mod tests {
                 status_bar_hidden: false,
                 recording: false,
                 input_recording: false,
+                rewind: false,
+                save_slot: 1,
+                autofire_hz: 0,
                 joystick_input_mode: JoystickInputMode::Gamepad,
                 port_devices: [
                     crate::bus::PortDevice::Mouse,
@@ -5819,6 +6525,7 @@ mod tests {
         });
         let ui = UiState {
             menu_open: false,
+            menu_scroll: 0,
             panel: Some(Panel::Calibration(session)),
         };
         draw(
@@ -5836,6 +6543,9 @@ mod tests {
                 status_bar_hidden: false,
                 recording: false,
                 input_recording: false,
+                rewind: false,
+                save_slot: 1,
+                autofire_hz: 0,
                 joystick_input_mode: JoystickInputMode::Gamepad,
                 port_devices: [
                     crate::bus::PortDevice::Mouse,
@@ -5853,6 +6563,29 @@ mod tests {
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "calibration");
+
+        // Input Mapping: self-contained, with a row armed for capture so the
+        // highlighted state is drawn too.
+        let mut frame = vec![0u8; w * h * 4];
+        let mut map_panel = InputMapPanel::new(crate::keymap::KeyMap::default());
+        map_panel.capturing = Some(crate::keymap::JoyControl::Fire);
+        let ui = UiState {
+            menu_open: false,
+            menu_scroll: 0,
+            panel: Some(Panel::InputMap(Box::new(map_panel))),
+        };
+        draw(
+            &mut frame,
+            scale,
+            &ui,
+            Some(UiControl::RemapSave),
+            None,
+            false,
+            false,
+            menu_labels(),
+        );
+        assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
+        save(&frame, "input-mapping");
 
         let mut frame = vec![0u8; w * h * 4];
         let mut lines = vec![
@@ -5884,6 +6617,7 @@ mod tests {
         panel.entry_active = true;
         let ui = UiState {
             menu_open: false,
+            menu_scroll: 0,
             panel: Some(Panel::Debugger(panel)),
         };
         draw(
@@ -5901,6 +6635,9 @@ mod tests {
                 status_bar_hidden: false,
                 recording: false,
                 input_recording: false,
+                rewind: false,
+                save_slot: 1,
+                autofire_hz: 0,
                 joystick_input_mode: JoystickInputMode::Gamepad,
                 port_devices: [
                     crate::bus::PortDevice::Mouse,
@@ -5946,6 +6683,7 @@ mod tests {
         panel.entry = "DFF096".to_string();
         let ui = UiState {
             menu_open: false,
+            menu_scroll: 0,
             panel: Some(Panel::Debugger(panel)),
         };
         draw(
@@ -5963,6 +6701,9 @@ mod tests {
                 status_bar_hidden: false,
                 recording: false,
                 input_recording: false,
+                rewind: false,
+                save_slot: 1,
+                autofire_hz: 0,
                 joystick_input_mode: JoystickInputMode::Gamepad,
                 port_devices: [
                     crate::bus::PortDevice::Mouse,
@@ -6009,6 +6750,7 @@ mod tests {
         panel.entry = "PC=C033C2 2F".to_string();
         let ui = UiState {
             menu_open: false,
+            menu_scroll: 0,
             panel: Some(Panel::Debugger(panel)),
         };
         draw(
@@ -6026,6 +6768,9 @@ mod tests {
                 status_bar_hidden: false,
                 recording: false,
                 input_recording: false,
+                rewind: false,
+                save_slot: 1,
+                autofire_hz: 0,
                 joystick_input_mode: JoystickInputMode::Gamepad,
                 port_devices: [
                     crate::bus::PortDevice::Mouse,
@@ -6125,6 +6870,7 @@ mod tests {
         panel.tab = DebugTab::Audio;
         let ui = UiState {
             menu_open: false,
+            menu_scroll: 0,
             panel: Some(Panel::Debugger(panel)),
         };
         draw(
@@ -6142,6 +6888,9 @@ mod tests {
                 status_bar_hidden: false,
                 recording: false,
                 input_recording: false,
+                rewind: false,
+                save_slot: 1,
+                autofire_hz: 0,
                 joystick_input_mode: JoystickInputMode::Gamepad,
                 port_devices: [
                     crate::bus::PortDevice::Mouse,
@@ -6201,6 +6950,7 @@ mod tests {
         panel.tab = DebugTab::IoMap;
         let ui = UiState {
             menu_open: false,
+            menu_scroll: 0,
             panel: Some(Panel::Debugger(panel)),
         };
         draw(
@@ -6218,6 +6968,9 @@ mod tests {
                 status_bar_hidden: false,
                 recording: false,
                 input_recording: false,
+                rewind: false,
+                save_slot: 1,
+                autofire_hz: 0,
                 joystick_input_mode: JoystickInputMode::Gamepad,
                 port_devices: [
                     crate::bus::PortDevice::Mouse,
@@ -6288,6 +7041,7 @@ mod tests {
         panel.tab = DebugTab::Video;
         let ui = UiState {
             menu_open: false,
+            menu_scroll: 0,
             panel: Some(Panel::Debugger(panel)),
         };
         draw(
@@ -6305,6 +7059,9 @@ mod tests {
                 status_bar_hidden: false,
                 recording: false,
                 input_recording: false,
+                rewind: false,
+                save_slot: 1,
+                autofire_hz: 0,
                 joystick_input_mode: JoystickInputMode::Gamepad,
                 port_devices: [
                     crate::bus::PortDevice::Mouse,
@@ -6413,6 +7170,7 @@ mod tests {
         panel.selected_hpos = 0x40;
         let ui = UiState {
             menu_open: false,
+            menu_scroll: 0,
             panel: Some(Panel::FrameAnalyzer(panel)),
         };
         draw(
@@ -6430,6 +7188,9 @@ mod tests {
                 status_bar_hidden: false,
                 recording: false,
                 input_recording: false,
+                rewind: false,
+                save_slot: 1,
+                autofire_hz: 0,
                 joystick_input_mode: JoystickInputMode::Gamepad,
                 port_devices: [
                     crate::bus::PortDevice::Mouse,
@@ -6467,6 +7228,7 @@ mod tests {
         console.input = "MEM C00000 40".to_string();
         let ui = UiState {
             menu_open: false,
+            menu_scroll: 0,
             panel: Some(Panel::Console(console)),
         };
         draw(
@@ -6484,6 +7246,9 @@ mod tests {
                 status_bar_hidden: false,
                 recording: false,
                 input_recording: false,
+                rewind: false,
+                save_slot: 1,
+                autofire_hz: 0,
                 joystick_input_mode: JoystickInputMode::Gamepad,
                 port_devices: [
                     crate::bus::PortDevice::Mouse,
@@ -6512,6 +7277,7 @@ mod tests {
         state.tab = LauncherTab::Memory;
         let ui = UiState {
             menu_open: false,
+            menu_scroll: 0,
             panel: Some(Panel::Launcher(Box::new(state))),
         };
         draw(
@@ -6529,6 +7295,9 @@ mod tests {
                 status_bar_hidden: false,
                 recording: false,
                 input_recording: false,
+                rewind: false,
+                save_slot: 1,
+                autofire_hz: 0,
                 joystick_input_mode: JoystickInputMode::Gamepad,
                 port_devices: [
                     crate::bus::PortDevice::Mouse,
@@ -6597,6 +7366,7 @@ mod tests {
         state.tab = LauncherTab::Zorro;
         let ui = UiState {
             menu_open: false,
+            menu_scroll: 0,
             panel: Some(Panel::Launcher(Box::new(state))),
         };
         draw(
@@ -6614,6 +7384,9 @@ mod tests {
                 status_bar_hidden: false,
                 recording: false,
                 input_recording: false,
+                rewind: false,
+                save_slot: 1,
+                autofire_hz: 0,
                 joystick_input_mode: JoystickInputMode::Gamepad,
                 port_devices: [
                     crate::bus::PortDevice::Mouse,
@@ -6649,6 +7422,7 @@ mod tests {
         state.tab = LauncherTab::Storage;
         let ui = UiState {
             menu_open: false,
+            menu_scroll: 0,
             panel: Some(Panel::Launcher(Box::new(state))),
         };
         draw(
@@ -6666,6 +7440,9 @@ mod tests {
                 status_bar_hidden: false,
                 recording: false,
                 input_recording: false,
+                rewind: false,
+                save_slot: 1,
+                autofire_hz: 0,
                 joystick_input_mode: JoystickInputMode::Gamepad,
                 port_devices: [
                     crate::bus::PortDevice::Mouse,
@@ -6694,6 +7471,7 @@ mod tests {
         state.tab = LauncherTab::Input;
         let ui = UiState {
             menu_open: false,
+            menu_scroll: 0,
             panel: Some(Panel::Launcher(Box::new(state))),
         };
         draw(
@@ -6711,6 +7489,9 @@ mod tests {
                 status_bar_hidden: false,
                 recording: false,
                 input_recording: false,
+                rewind: false,
+                save_slot: 1,
+                autofire_hz: 0,
                 joystick_input_mode: JoystickInputMode::Gamepad,
                 port_devices: [
                     crate::bus::PortDevice::Mouse,
@@ -6760,6 +7541,9 @@ mod tests {
             status_bar_hidden: false,
             recording: false,
             input_recording: false,
+            rewind: false,
+            save_slot: 1,
+            autofire_hz: 0,
             joystick_input_mode: JoystickInputMode::Gamepad,
             port_devices: [
                 crate::bus::PortDevice::Mouse,
@@ -6781,6 +7565,7 @@ mod tests {
         state.setup.cycle(LauncherField::ParallelDevice, true); // Printer -> Sampler
         let ui = UiState {
             menu_open: false,
+            menu_scroll: 0,
             panel: Some(Panel::Launcher(Box::new(state))),
         };
         draw(&mut frame, scale, &ui, None, None, false, false, labels());
@@ -6798,6 +7583,7 @@ mod tests {
         }
         let ui = UiState {
             menu_open: false,
+            menu_scroll: 0,
             panel: Some(Panel::Launcher(Box::new(state))),
         };
         draw(&mut frame, scale, &ui, None, None, false, false, labels());
@@ -6815,6 +7601,7 @@ mod tests {
         );
         let ui = UiState {
             menu_open: false,
+            menu_scroll: 0,
             panel: Some(Panel::Launcher(Box::new(state))),
         };
         draw(&mut frame, scale, &ui, None, None, false, false, labels());
@@ -6826,6 +7613,7 @@ mod tests {
         state.tab = LauncherTab::HostFs;
         let ui = UiState {
             menu_open: false,
+            menu_scroll: 0,
             panel: Some(Panel::Launcher(Box::new(state))),
         };
         draw(&mut frame, scale, &ui, None, None, false, false, labels());

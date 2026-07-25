@@ -57,6 +57,17 @@ pacing_budget = "cycles"
 # it live from the Warp Limit menu item or Cmd+Shift+W / Alt+Shift+W.
 # warp_speed = "max"
 
+# Record rewind history from power-on, so Cmd+Z / Alt+Z (and the Rewind menu
+# item) can step the machine back through it. Off by default because it is
+# not free: every rewind_interval_frames the whole machine is serialized, and
+# rewind_budget_mb of host memory is spent holding the results. How far back
+# that reaches depends on the machine's RAM -- a 512K A500 buys minutes, a
+# 2M+8M A1200 rather less. Each rewind step goes back one interval; the
+# oldest snapshots are dropped first once the budget is full.
+# rewind = false
+# rewind_budget_mb = 256
+# rewind_interval_frames = 25
+
 
 [cpu]
 
@@ -271,6 +282,7 @@ slow = "512K"
 # unit0 = "workbench.hdf"
 # unit1 = "data.hdf"
 # unit2 = "game.cue"
+# unit0 = { path = "workbench.hdf", bootpri = 6 }   # table form, as for [ide]
 
 
 [chipset]
@@ -302,9 +314,17 @@ video = "PAL"
 # of 256 KiB) work - the latter get a synthesized RDB on the fly. A path may
 # also name a host directory, mounted as an in-memory FFS volume (guest
 # writes are not synced back to the host).
+#
+# A drive may be given as a table instead of a bare path, to set the FFS volume
+# label of a directory mount (name) and/or the boot priority of the synthesized
+# RDB partition (bootpri, -128..127, default 0). Kickstart enters DF0: at 5, so
+# bootpri = 6 boots the hard disk ahead of a floppy; -128 mounts the volume
+# without ever offering it for boot. Neither applies to an image carrying its
+# own RDB, which keeps the label and priorities recorded inside it.
 # [ide]
 # master = "workbench.hdf"
 # slave = "data.hdf"
+# master = { path = "workbench.hdf", bootpri = 6 }
 
 
 # Host directories mounted directly as AmigaDOS volumes (HOSTFS0:,
@@ -425,6 +445,14 @@ floppy_sounds_volume = 100
 # machine or scripted --mouse-after input. Also --mouse-sensitivity N, the
 # launcher's Input tab, and Cmd/Alt+Shift+> / < (held to ramp) to adjust live.
 # mouse_sensitivity = 50
+
+# Autofire: pulse a HELD fire button this many times per second (0 = off, the
+# default; up to 30). Live input only -- the gamepad and the keyboard mapping;
+# scripted --joy-after/--script input is never gated, so a replay reproduces
+# exactly the events it was given. The phase runs on emulated time, so the rate
+# is the same under warp and on PAL or NTSC. Cycle it live from the Autofire
+# menu item; remap the keyboard controls from Input Mapping...
+# autofire_hz = 8
 
 
 # Serial port wiring. The Amiga serial port doubles as the MIDI port.

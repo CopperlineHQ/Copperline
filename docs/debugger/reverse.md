@@ -8,9 +8,11 @@ earlier point it restores the nearest snapshot at or before it and replays
 forward. The reconstruction is byte-identical as long as the determinism
 preconditions below hold.
 
-The same machinery backs two surfaces: a headless "last writer" reverse
-watchpoint for automated root-cause hunts, and **&lt; Step** /
-**&lt; Frame** / **&lt; Run** controls in the [debugger window](window).
+The same machinery backs three surfaces: a headless "last writer" reverse
+watchpoint for automated root-cause hunts, **&lt; Step** / **&lt; Frame** /
+**&lt; Run** controls in the [debugger window](window), and the plain
+**Rewind** hotkey on the running machine
+([](../guide/ui)).
 
 ## What it is good for
 
@@ -95,6 +97,23 @@ and reports the same stop message the forward run would have shown --
 Interactive debug state (beam traps, Copper breakpoints, layer masks)
 survives timeline jumps: a reverse step never silently disarms the
 debugger.
+
+Repositioning the machine into the past discards the retained history
+*after* the landing point. Those snapshots describe a timeline that will not
+happen again once new input arrives, and leaving them in the ring would let
+one be chosen as an anchor a second time. Running forward re-records from
+the landing point immediately.
+
+## Rewind, outside the debugger
+
+`[emulation] rewind = true` (or the **Rewind** menu item) arms the same ring
+for ordinary use, and `Cmd+Z` / `Alt+Z` steps the machine back through it
+without pausing or opening anything. The differences from the debugger's
+reverse controls: a rewind step lands on a capture point rather than an
+exact instruction or frame, so it costs one restore and no replay, and one
+step covers `[emulation] rewind_interval_frames` of emulated time.
+`[emulation] rewind_budget_mb` caps the retained snapshots. See
+[](../guide/configuration).
 
 ## Determinism preconditions
 
