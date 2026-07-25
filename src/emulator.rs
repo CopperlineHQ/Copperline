@@ -978,8 +978,11 @@ impl Emulator {
         end_pos: u64,
         full: bool,
     ) -> Result<Option<(u64, String)>> {
-        const PC_MASK: u32 = 0x00FF_FFFF;
-        let is_bp = |pc: u32| breakpoints.contains(&(pc & PC_MASK));
+        // A0-A23 on the 24-bit models, the full 32 bits on 020+, so a
+        // breakpoint in RAM above the 24-bit space is not aliased onto a
+        // different PC during replay.
+        let pc_mask = self.machine.ui_addr_mask();
+        let is_bp = |pc: u32| breakpoints.contains(&(pc & pc_mask));
         // Drain any stop left over from an earlier replay segment.
         let _ = self.machine.take_ui_debug_stop();
         self.tt_apply_due_input(self.retired_instructions);
@@ -987,7 +990,7 @@ impl Emulator {
         if self.retired_instructions < end_pos && is_bp(self.machine.pc()) {
             best = Some((
                 self.retired_instructions,
-                format!("Breakpoint at ${:06X}", self.machine.pc() & PC_MASK),
+                format!("Breakpoint at ${:06X}", self.machine.pc() & pc_mask),
             ));
         }
         let mut cpu_idle = false;
@@ -1006,7 +1009,7 @@ impl Emulator {
             if self.retired_instructions < end_pos && is_bp(self.machine.pc()) {
                 best = Some((
                     self.retired_instructions,
-                    format!("Breakpoint at ${:06X}", self.machine.pc() & PC_MASK),
+                    format!("Breakpoint at ${:06X}", self.machine.pc() & pc_mask),
                 ));
             }
             if self.retired_instructions == before && !cpu_idle {
@@ -1294,11 +1297,11 @@ impl Emulator {
     /// Run until the CPU reaches `target_pc` (masked to the bus width), up
     /// to `max_instructions`. Returns true when the target was hit.
     pub fn debug_run_to_pc(&mut self, target_pc: u32, max_instructions: usize) -> Result<bool> {
-        const PC_MASK: u32 = 0x00FF_FFFF;
-        let target = target_pc & PC_MASK;
+        let pc_mask = self.machine.ui_addr_mask();
+        let target = target_pc & pc_mask;
         for _ in 0..max_instructions {
             self.debug_step_one_with_idle()?;
-            if self.machine.pc() & PC_MASK == target {
+            if self.machine.pc() & pc_mask == target {
                 return Ok(true);
             }
             // A breakpoint/watch hit on the way to the target ends the

@@ -616,7 +616,8 @@ impl Session {
             // Target already met (or met exactly at the last quantum)?
             match target {
                 Some(RunTarget::Pc(pc))
-                    if self.emu.machine.pc() & 0x00FF_FFFF == pc & 0x00FF_FFFF =>
+                    if self.emu.machine.pc() & self.emu.machine.ui_addr_mask()
+                        == pc & self.emu.machine.ui_addr_mask() =>
                 {
                     return finish("target", format!("pc ${pc:06X}"), extra_ids, false);
                 }
@@ -638,7 +639,7 @@ impl Session {
                     // debug_step_for_gdb keeps reverse-debug captures
                     // happening at frame crossings. The hit itself is
                     // seen by the checks at the top of the loop.
-                    let mask = 0x00FF_FFFF;
+                    let mask = self.emu.machine.ui_addr_mask();
                     for _ in 0..PC_POLL_CHUNK {
                         self.emu.debug_step_for_gdb(&mut cpu_idle)?;
                         if self.emu.machine.pc() & mask == pc & mask
