@@ -61,6 +61,11 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.13.0" date="2026-07-25">
+      <description>
+        <p>RTG graphics through the Z3660 Zorro III board with Picasso96 high-colour Workbench screens, MMU and exception-dispatch fixes that boot Linux/m68k, a corrected 31 kHz programmable-scan display path, Ramsey motherboard fast RAM and CPU-slot accelerator RAM for the big-box profiles, A2065 Ethernet with a user-mode NAT backend, a telnet BBS serial bridge, configurable floppy drive speed with turbo mode, the Ricoh RP5C01 battery clock with persistent battery RAM, drive sounds resynthesized from real mechanisms, desktop fullscreen and status-bar hiding, a much richer browser build, and AGA display and 68020 timing accuracy fixes.</p>
+      </description>
+    </release>
     <release version="0.12.0" date="2026-07-18">
       <description>
         <p>A browser (WebAssembly) build with touch input and URL media loading, A3000 and A4000 machine profiles with onboard SCSI and IDE, writable host-directory mounts, the Copperline Control Protocol for scripted live control, SCSI CD-ROM drives with CD audio and runtime disc swap, any controller device in either game port, parallel-port printer capture and audio sampler peripherals, deterministic guest clock seeding, VCD chip-signal waveform export, and chip-bus mirroring and display accuracy fixes.</p>
