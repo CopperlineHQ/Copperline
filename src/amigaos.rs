@@ -103,8 +103,10 @@ pub fn task_state_name(state: u8) -> &'static str {
 /// moves ExecBase to fast RAM, which may be a Z3 board).
 fn plausible_ptr(addr: u32) -> bool {
     addr & 1 == 0
-        && ((0x100..0x00A0_0000).contains(&addr)          // chip + Z2 fast
-            || (0x00C0_0000..0x00D8_0000).contains(&addr) // slow
+        && ((0x100..0x00A0_0000).contains(&addr)           // chip + Z2 fast
+            || (0x00C0_0000..0x00D8_0000).contains(&addr)  // slow
+            || (0x0400_0000..0x0800_0000).contains(&addr)  // A3000/A4000 fast
+            || (0x0800_0000..0x1000_0000).contains(&addr)  // CPU-slot RAM
             || (0x1000_0000..0x8000_0000).contains(&addr)) // Zorro III
 }
 
