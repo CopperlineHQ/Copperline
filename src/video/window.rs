@@ -7713,6 +7713,21 @@ impl App {
                 return;
             }
         }
+        // Tool windows size their panel buffer from the same canvas height
+        // (window_present_height), so resize their buffers to match too, or a
+        // later tool draw could index past a now-too-small buffer. Buffer only:
+        // unlike a pixel-aspect switch, leave a tool window's own size alone.
+        for kind in [ToolPanelKind::Debugger, ToolPanelKind::FrameAnalyzer] {
+            if let Some(tool) = self.tool_window_mut(kind) {
+                if let Err(e) = tool.pixels.resize_buffer(
+                    texture_width(tool.texture_scale) as u32,
+                    texture_height(tool.texture_scale) as u32,
+                ) {
+                    warn!("resize tool texture buffer for status bar toggle failed: {e}");
+                }
+                tool.window.request_redraw();
+            }
+        }
         // Only snap an unresized window to the new canvas size; a resized window
         // keeps its dimensions and the display reflows into it.
         if was_canvas_sized {
