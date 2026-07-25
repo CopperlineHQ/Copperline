@@ -442,6 +442,13 @@ const COPPERLINE_LOGO_PNG: &[u8] = include_bytes!("../../assets/brand/copperline
 const COPPERLINE_ICON_PNG: &[u8] = include_bytes!("../../assets/brand/copperline-icon.png");
 const MOUSE_MOTION_SCALE: f64 = 1.0;
 
+/// Whether a window's logical inner size equals the presentation canvas
+/// (FB_WIDTH x `canvas_height`) within a small rounding tolerance -- i.e. the
+/// user has not manually resized it.
+fn logical_size_is_canvas(logical_w: f64, logical_h: f64, canvas_height: usize) -> bool {
+    (logical_w - FB_WIDTH as f64).abs() < 2.0 && (logical_h - canvas_height as f64).abs() < 2.0
+}
+
 /// Host mouse speed multiplier for a 0-100 sensitivity. Exponential so 50 is
 /// exactly 1:1 (2^0), 0 is a quarter speed (2^-2) and 100 quadruple (2^2),
 /// with perceptually even steps between.
@@ -7310,6 +7317,24 @@ impl App {
         let _ = window.request_inner_size(size);
     }
 
+    /// Whether the main window is still exactly the presentation canvas size in
+    /// logical points -- i.e. it has not been manually resized (fullscreen
+    /// counts as resized). Lets the status-bar toggle snap an untouched window
+    /// to the new canvas size while leaving a resized one alone.
+    fn window_is_canvas_sized(&self) -> bool {
+        let Some(window) = self.render.as_ref().map(|r| r.window.clone()) else {
+            return false;
+        };
+        if window.fullscreen().is_some() {
+            return false;
+        }
+        let scale = window.scale_factor();
+        let inner = window.inner_size();
+        let logical_w = f64::from(inner.width) / scale;
+        let logical_h = f64::from(inner.height) / scale;
+        logical_size_is_canvas(logical_w, logical_h, window_present_height())
+    }
+
     /// Menu "Pixel Aspect": flip between the 4:3 CRT presentation and
     /// square pixels for the rest of the run (the config file default is
     /// unchanged; set `[display] pixel_aspect` to make it stick).
@@ -7363,13 +7388,15 @@ impl App {
         self.request_redraw();
     }
 
-    /// Show or hide the status bar. Hidden, the emulated display scales to fill
-    /// the whole window (the canvas loses the bar's height, so the presentation
-    /// grows into it while keeping its aspect). This is the same canvas-height
-    /// change as a pixel-aspect switch, so it resizes the texture and window the
-    /// same way; the recorder captures only the display, so a recording is
-    /// unaffected. Bound to the status-bar shortcut and the menu.
+    /// Show or hide the status bar. An untouched window resizes to gain or lose
+    /// the bar's strip; a window the user has manually resized keeps its size
+    /// (and fullscreen keeps its size too), with the display reflowing to fit --
+    /// the presentation already letterboxes any window shape. Only the display
+    /// is recorded, so a recording is unaffected. Bound to the shortcut and menu.
     fn toggle_status_bar(&mut self) {
+        // Decide before the flag flips (it feeds window_present_height) whether
+        // the window is still canvas-sized, so a manual resize survives.
+        let was_canvas_sized = self.window_is_canvas_sized();
         let hidden = !super::status_bar_hidden();
         super::set_status_bar_hidden(hidden);
         if let Some(r) = self.render.as_mut() {
@@ -7386,7 +7413,11 @@ impl App {
                 return;
             }
         }
-        self.resize_for_active_panel();
+        // Only snap an unresized window to the new canvas size; a resized window
+        // keeps its dimensions and the display reflows into it.
+        if was_canvas_sized {
+            self.resize_for_active_panel();
+        }
         self.request_redraw();
         if hidden {
             self.show_osd(format!(

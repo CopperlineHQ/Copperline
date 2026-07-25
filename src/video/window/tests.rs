@@ -730,6 +730,34 @@ fn mouse_delta_integrator_keeps_fractional_remainder() {
 }
 
 #[test]
+fn canvas_sized_check_tolerates_rounding_but_not_a_resize() {
+    use super::{logical_size_is_canvas, FB_WIDTH};
+    let canvas_h = 600;
+    // Exact and sub-pixel-off both count as canvas-sized.
+    assert!(logical_size_is_canvas(
+        FB_WIDTH as f64,
+        canvas_h as f64,
+        canvas_h
+    ));
+    assert!(logical_size_is_canvas(
+        FB_WIDTH as f64 + 1.0,
+        canvas_h as f64 - 1.0,
+        canvas_h
+    ));
+    // A real resize in either dimension does not.
+    assert!(!logical_size_is_canvas(
+        FB_WIDTH as f64 + 40.0,
+        canvas_h as f64,
+        canvas_h
+    ));
+    assert!(!logical_size_is_canvas(
+        FB_WIDTH as f64,
+        canvas_h as f64 + 40.0,
+        canvas_h
+    ));
+}
+
+#[test]
 fn status_bar_draws_hdd_led_only_on_ide_machines() {
     let scale = 1;
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
