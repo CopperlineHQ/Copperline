@@ -675,6 +675,24 @@ impl Session {
         }
     }
 
+    /// Run one of the shared exec dumps against a validated ExecBase and
+    /// join it into a monitor reply, or report why the OS is not
+    /// walkable. The `!` an error line carries in the console is dropped
+    /// here: gdb prints monitor output verbatim.
+    fn monitor_os(
+        &self,
+        dump: impl FnOnce(&crate::amigaos::OsMemory, u32) -> Vec<String>,
+    ) -> String {
+        let lines = crate::amigaos::with_bus_memory(self.emu.bus(), |os| match os.exec_base() {
+            Ok(base) => dump(os, base),
+            Err(reason) => vec![reason],
+        });
+        lines
+            .iter()
+            .map(|line| format!("{}\n", line.strip_prefix('!').unwrap_or(line)))
+            .collect()
+    }
+
     fn monitor_loadseg_list(&mut self) -> String {
         // Fold in the current process so the list is useful even before
         // any load event fired. Arming the tracker here does not enable
@@ -716,6 +734,17 @@ impl Session {
             )),
             "custom" => Ok(self.monitor_custom()),
             "segments" => Ok(self.monitor_segments()),
+            "execbase" => Ok(self.monitor_os(crate::amigaos::dump::exec)),
+            "tasks" => Ok(self.monitor_os(crate::amigaos::dump::task_list)),
+            "task" => {
+                let spec = parts.collect::<Vec<_>>().join(" ");
+                let sp = crate::amigaos::dump::LiveSp {
+                    a7: self.emu.machine.a(7),
+                    usp: self.emu.machine.usp(),
+                };
+                Ok(self.monitor_os(|os, base| crate::amigaos::dump::task(os, base, &spec, sp)))
+            }
+            "memlist" => Ok(self.monitor_os(crate::amigaos::dump::memory)),
             "loadseg-break" => {
                 self.loadseg_break = !self.loadseg_break;
                 if self.loadseg_break {
@@ -1035,6 +1064,7 @@ fn monitor_help() -> String {
      copper [auto|pc|ADDR] [COUNT]\n\
      last-writer ADDR\n\
      segments\n\
+     execbase | tasks | task [ADDR|NAME] | memlist\n\
      loadseg-break | loadseg-list\n"
         .to_string()
 }
@@ -1359,6 +1389,44 @@ mod tests {
             assert_eq!(reply, "OK");
             let text = console.concat();
             assert!(text.contains("segments"), "monitor help output: {text}");
+            assert_eq!(client.request("D"), "OK");
+        });
+    }
+
+    /// The exec dumps the debugger console prints are served over the
+    /// wire too, so a headless gdb session can ask what the OS is doing.
+    #[test]
+    fn monitor_os_dumps_report_exec_state() {
+        run_session(emulator_with_loadseg_program(), |mut client| {
+            let monitor = |client: &mut GdbClient, cmd: &str| {
+                let (console, reply) =
+                    client.request_collect(&format!("qRcmd,{}", hex_encode(cmd.as_bytes())));
+                assert_eq!(reply, "OK");
+                console.concat()
+            };
+            let text = monitor(&mut client, "execbase");
+            assert!(text.contains("ExecBase $010000"), "{text}");
+            assert!(text.contains("ThisTask $012000"), "{text}");
+            assert!(text.contains("IDNestCnt"), "{text}");
+            let text = monitor(&mut client, "tasks");
+            assert!(text.contains("> $012000"), "{text}");
+            // No argument dumps ThisTask, which this fixture stages as a
+            // CLI process running "hello".
+            let text = monitor(&mut client, "task");
+            assert!(
+                text.contains("task $012000") && text.contains("(process)"),
+                "{text}"
+            );
+            assert!(text.contains("\"hello\""), "{text}");
+            // An address that cannot hold a task is refused, not read.
+            let text = monitor(&mut client, "task $DFF000");
+            assert!(
+                text.contains("not where a task structure can live"),
+                "{text}"
+            );
+            // This fixture has no MemList at all.
+            let text = monitor(&mut client, "memlist");
+            assert!(text.contains("no memory list"), "{text}");
             assert_eq!(client.request("D"), "OK");
         });
     }
