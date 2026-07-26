@@ -4935,11 +4935,16 @@ impl App {
         else {
             return;
         };
+        // Ownership follows the arming, not the window. Re-windowing an
+        // already-armed map is shared control (the last window request
+        // wins, and the map goes cold either way), but a map the control
+        // protocol armed is not the pane's to release on close just
+        // because a preset was clicked; only a click that arms an unarmed
+        // map makes the pane the owner.
+        if self.emu.bus().heat_map().is_none() {
+            self.heatmap_armed_by_panel = true;
+        }
         self.emu.bus_mut().set_heat_map(Some(window));
-        // Picking a window from the panel makes the panel the map's owner,
-        // so closing the panel releases it even if something else (the
-        // control protocol) armed it first.
-        self.heatmap_armed_by_panel = true;
         self.request_redraw();
     }
 

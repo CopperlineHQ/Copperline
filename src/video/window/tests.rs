@@ -5331,6 +5331,73 @@ mod control_drain {
     }
 
     #[test]
+    fn a_control_heatmap_request_takes_the_map_over_from_the_pane() {
+        use crate::video::ui::{AnalyzerTab, UiControl};
+
+        let (mut app, cmd_tx, reply_rx) = attached_app();
+        app.open_frame_analyzer();
+        app.activate_ui_control(UiControl::AnalyzerTab(AnalyzerTab::Memory));
+        assert!(
+            app.heatmap_armed_by_panel,
+            "entering the tab on an unarmed machine arms the map"
+        );
+
+        // A memory.heatmap request re-windows the map: the last window
+        // request wins, and the map's lifecycle goes with it, so the pane
+        // no longer releases the map when it closes.
+        push(
+            &cmd_tx,
+            1,
+            "memory.heatmap",
+            json!({"enabled": true, "base": 1048576, "span": 1048576}),
+        );
+        app.drain_control();
+        assert_eq!(reply(&reply_rx)["result"]["armed"], true);
+        assert!(
+            !app.heatmap_armed_by_panel,
+            "the protocol owns the map after any memory.heatmap request"
+        );
+        app.close_tool_panel(super::super::ToolPanelKind::FrameAnalyzer);
+        match app.emu.bus().heat_map() {
+            Some(map) => assert_eq!(map.base(), 1048576),
+            None => panic!("a protocol-owned map keeps recording after the pane closes"),
+        }
+
+        // Once the protocol disarms it, a preset click is an arming of an
+        // unarmed map, and that arming is the pane's own to release.
+        push(&cmd_tx, 2, "memory.heatmap", json!({"enabled": false}));
+        app.drain_control();
+        assert_eq!(reply(&reply_rx)["id"], 2);
+        assert!(app.emu.bus().heat_map().is_none());
+        // Entering the tab arms the map again (the pane's arming); the
+        // protocol disarms once more, leaving the Memory tab open on an
+        // unarmed map, which is the state the preset row exists to
+        // recover from.
+        app.open_frame_analyzer();
+        app.activate_ui_control(UiControl::AnalyzerTab(AnalyzerTab::Memory));
+        push(&cmd_tx, 3, "memory.heatmap", json!({"enabled": false}));
+        app.drain_control();
+        assert_eq!(reply(&reply_rx)["id"], 3);
+        assert!(app.emu.bus().heat_map().is_none());
+        assert!(!app.heatmap_armed_by_panel);
+        let chip = super::heat_preset_index(&app, "Chip");
+        app.activate_ui_control(UiControl::AnalyzerHeatPreset(chip));
+        assert!(
+            app.heatmap_armed_by_panel,
+            "arming an unarmed map from the preset row is the pane's arming"
+        );
+        assert_eq!(
+            app.emu.bus().heat_map().map(|map| map.base()),
+            Some(crate::memory::CHIP_RAM_BASE as u32)
+        );
+        app.close_tool_panel(super::super::ToolPanelKind::FrameAnalyzer);
+        assert!(
+            app.emu.bus().heat_map().is_none(),
+            "the pane releases the arming it made"
+        );
+    }
+
+    #[test]
     fn continue_completes_on_breakpoint_without_opening_the_debugger() {
         let (mut app, cmd_tx, reply_rx) = attached_app();
         let target = app.emu.machine.pc() + 16; // ahead in the NOP sled
@@ -5897,11 +5964,21 @@ fn closing_the_analyzer_releases_only_a_heat_map_it_armed() {
         !app.heatmap_armed_by_panel,
         "an already-armed map keeps its owner"
     );
+    // A preset click re-windows the protocol's map (the last window
+    // request wins) but does not steal its lifecycle: only arming an
+    // unarmed map makes the pane the owner.
+    let chip = heat_preset_index(&app, "Chip");
+    app.activate_ui_control(UiControl::AnalyzerHeatPreset(chip));
+    assert!(
+        !app.heatmap_armed_by_panel,
+        "re-windowing an armed map is not an arming"
+    );
     app.close_tool_panel(ToolPanelKind::FrameAnalyzer);
+    let chip_len = app.emu.bus().mem.chip_ram.len() as u32;
     match app.emu.bus().heat_map() {
         Some(map) => {
-            assert_eq!(map.base(), 0);
-            assert_eq!(map.span(), heatmap::rounded_span(heatmap::DEFAULT_SPAN));
+            assert_eq!(map.base(), crate::memory::CHIP_RAM_BASE as u32);
+            assert_eq!(map.span(), heatmap::rounded_span(chip_len));
         }
         None => panic!("a map the pane did not arm keeps recording after it closes"),
     }

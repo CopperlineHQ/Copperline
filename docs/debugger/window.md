@@ -394,8 +394,8 @@ running.
 The buttons under the header move the window. They are built from the fitted
 machine's decoded RAM banks -- **Chip**, **Slow**, **MB** (Ramsey
 motherboard), **CPU** (accelerator/CPU-slot), and one per Zorro RAM board
-(**Z2**/**Z3**, with the base address appended when two would otherwise share
-a name) -- plus **24-bit** for the whole $000000-$FFFFFF space (chip and slow
+(**Z2** or **Z3**, with the base address appended when two would otherwise
+share a name) -- plus **24-bit** for the whole $000000-$FFFFFF space (chip and slow
 RAM, the custom registers, the CIAs, and the Zorro II space in one view).
 Entering the tab arms the map over chip RAM: it is the bank every chip-bus
 engine works out of and usually the smallest fitted one, so its cells cover
@@ -420,5 +420,7 @@ nothing is pinned yet), clamped at the grid's edges.
 The map is the same one `memory.heatmap` arms over the
 [control protocol](control.md): there is one map per machine, so the last
 window request wins, whichever side made it. Closing the pane releases the
-map only if the pane armed it -- a map armed over the protocol keeps
-recording after the window is closed.
+map only if the pane owns it. The pane becomes the owner by arming a map
+where none was armed (entering the tab, or picking a preset while nothing
+is armed); any `memory.heatmap` request takes the ownership over, so a
+protocol-driven map keeps recording after the window is closed.
