@@ -631,16 +631,16 @@ fn group_5(cpu: &CpuCore, op: u16, cached: bool) -> Option<i32> {
     }
     if size_bits == 3 && mode == 1 {
         let condition = ((op >> 8) & 0xF) as u8;
+        // Both exits fall through with the pipeline intact; only the looping
+        // arm branches, so only it pays the refill.
         let case = if cpu.test_condition(condition) {
             Case::new(6, 7)
         } else if cpu.d(reg as usize) as u16 == 0xFFFF {
             Case::new(10, 10)
         } else {
-            Case::new(6, 9)
+            Case::new(6 + TAKEN_BRANCH_REFILL, 9 + TAKEN_BRANCH_REFILL)
         };
-        let taken = !cpu.test_condition(condition) && cpu.d(reg as usize) as u16 != 0xFFFF;
-        let refill = if taken { TAKEN_BRANCH_REFILL } else { 0 };
-        return Some(case.pick(cached) + refill);
+        return Some(case.pick(cached));
     }
     if size_bits == 3 {
         if mode == 0 {

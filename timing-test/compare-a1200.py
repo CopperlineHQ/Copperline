@@ -9,6 +9,7 @@
 # Rows 19, 20, 22 and 27 are raw VHPOSR beam positions, not tick counts, so a
 # ratio is meaningless for them; rows 0, 1, 9 and 13 probe slow RAM and read the
 # 00000000 sentinel on a machine without it.
+import os
 import subprocess
 import sys
 
@@ -35,7 +36,7 @@ RAW = {19, 20, 22, 27}
 def copperline_rows():
     out = subprocess.run(
         ["../target/release/copperline", "--config", "tt-a1200.toml",
-         "--noaudio", "--screenshot-after", "16", "/dev/null"],
+         "--noaudio", "--screenshot-after", "16", os.devnull],
         capture_output=True, text=True, cwd=sys.path[0] or ".",
     ).stdout
     words = out.replace("\0", "").split()
