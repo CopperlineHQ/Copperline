@@ -5291,8 +5291,8 @@ fn draw_launcher(
             scale,
         );
         for (i, line) in [
-            "Valid boot priorities are any value between 127 (highest) to -128",
-            "(disabled). The primary Floppy Drive (DF0:) assumes a value of 5 and",
+            "Valid boot priorities are any value between 127 (highest) and -128",
+            "(disabled). The primary Floppy Drive (DF0:) assumes a value of 5, and",
             "all subsequent Floppy Drives (DF1:, DF2:, DF3:) assume -10, -20, -30.",
         ]
         .iter()
