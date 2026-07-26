@@ -49,6 +49,7 @@ range checks as the equivalent TOML fields:
 | `--floppy-speed PERCENT` | `[floppy] speed` | `100` (real), `200`, `400`, `800`, or `0` (turbo) |
 | `--joystick MODE` | `[input] joystick` | `gamepad` (default), `keyboard` |
 | `--mouse-sensitivity N` | `[input] mouse_sensitivity` | `0`-`100` host mouse speed (`50` default = 1:1) |
+| `--mouse-capture MODE` | `[input] mouse_capture` | When the host mouse is grabbed: `click` (default), `auto`, `manual` |
 | `--port1 DEVICE` | `[input] port1` | `mouse` (default), `joystick`, `cd32`, `analogue`, `none` |
 | `--port2 DEVICE` | `[input] port2` | same devices; default `joystick` (`cd32` on the CD32 profile) |
 | `--autofire HZ` | `[input] autofire_hz` | `0` (off, the default) to `30` |
@@ -559,6 +560,7 @@ port1 = "mouse"           # mouse | joystick | cd32 | analogue | none
 port2 = "joystick"        # same values; default "cd32" on the CD32 profile
 joystick = "gamepad"      # "gamepad" (default) or "keyboard"
 mouse_sensitivity = 50    # host mouse speed 0-100 (50 default = 1:1)
+mouse_capture = "click"   # when to grab the mouse: click | auto | manual
 autofire_hz = 0           # pulse a held fire button at this rate; 0 = off
 ```
 
@@ -633,6 +635,32 @@ or scripted `--mouse-after` input, so headless and recorded runs stay
 deterministic. Set it from the launcher's *Input* tab or
 `--mouse-sensitivity N`, and adjust it live with `Cmd+Shift+>` / `Cmd+Shift+<`
 (`Alt+Shift+>` / `Alt+Shift+<` on Linux and Windows), which ramp while held.
+
+### Mouse capture
+
+Capturing the mouse confines the host pointer to the window and hides the
+host cursor, so the Amiga pointer is the only one on screen. `mouse_capture`
+decides when that grab is taken:
+
+- `click` (the default) -- clicking the display grabs it. That click is a
+  window action and is not passed to the Amiga, so the first click the guest
+  sees is the first one aimed at it.
+- `auto` -- grab as soon as the window has the focus, and again whenever it
+  regains it, so no host cursor is ever loose over the display. Entering
+  fullscreen grabs too. This suits a mouse-driven game or a fullscreen
+  session where the host desktop is not wanted.
+- `manual` -- only the shortcut grabs. Clicks on the display go straight to
+  the Amiga and the host cursor is left alone.
+
+`Cmd+G` / `Alt+G` releases and re-takes the grab by hand in every mode, and
+an explicit release is never undone automatically. Opening a panel or tool
+window borrows the cursor and hands the capture back when the last one
+closes.
+
+Uncaptured, host cursor motion over the display still drives the emulated
+mouse in every mode; this setting only decides when the grab is taken, not
+whether motion reaches the machine. Set it from the launcher's *Input* tab
+or `--mouse-capture MODE`.
 
 ### Autofire
 

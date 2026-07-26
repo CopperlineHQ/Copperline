@@ -24,9 +24,9 @@ use crate::chipset::agnus::{AgnusRevision, VideoStandard};
 use crate::chipset::denise::DeniseRevision;
 use crate::config::{
     format_size, machine_profile_defaults, AudioFilterMode, ChannelMode, Chipset, Config, CpuModel,
-    JoystickInputMode, MachineModel, Overscan, PacingBudget, ParallelDevice, PixelAspect,
-    RawConfig, RawDrive, RawFilesysMount, RawFloppyDrive, RawZorroBoard, RtgCard, ScsiController,
-    SerialMode, WarpSpeed, BOOT_PRI_NEVER,
+    JoystickInputMode, MachineModel, MouseCapture, Overscan, PacingBudget, ParallelDevice,
+    PixelAspect, RawConfig, RawDrive, RawFilesysMount, RawFloppyDrive, RawZorroBoard, RtgCard,
+    ScsiController, SerialMode, WarpSpeed, BOOT_PRI_NEVER,
 };
 use crate::net::NetConfig;
 use crate::zorro::{ConfigOption, ConfigOptionKind, LoadedZorroBoard};
@@ -354,6 +354,7 @@ pub enum LauncherField {
     // Input
     Joystick,
     MouseSensitivity,
+    MouseCapture,
     Port1Device,
     Port2Device,
 }
@@ -597,11 +598,12 @@ const AV_EMULATION_ROWS: [Row; 15] = [
     row(F::RealtimePriority, "Realtime priority", Toggle),
     row(F::Warp, "Warp speed", Cycle),
 ];
-const INPUT_ROWS: [Row; 4] = [
+const INPUT_ROWS: [Row; 5] = [
     row(F::Port1Device, "Port 1", Cycle),
     row(F::Port2Device, "Port 2", Cycle),
     row(F::Joystick, "Joystick input", Cycle),
     row(F::MouseSensitivity, "Mouse sensitivity", Cycle),
+    row(F::MouseCapture, "Mouse capture", Cycle),
 ];
 
 /// The rows shown on a tab, top to bottom. Most tabs are fixed and borrow their
@@ -806,6 +808,12 @@ const WARPS: [WarpSpeed; 5] = [
 // The stepper flips the two explicit modes, matching the runtime toggle.
 const JOYSTICK_MODES: [JoystickInputMode; 2] =
     [JoystickInputMode::Gamepad, JoystickInputMode::Keyboard];
+// When the host mouse is grabbed, in stepper order.
+const MOUSE_CAPTURES: [MouseCapture; 3] = [
+    MouseCapture::Click,
+    MouseCapture::Auto,
+    MouseCapture::Manual,
+];
 // Controller devices a game port accepts, in stepper order.
 const PORT_DEVICES: [PortDevice; 5] = [
     PortDevice::Mouse,
@@ -1006,6 +1014,7 @@ pub struct MachineSetup {
     warp: WarpSpeed,
     joystick_input_mode: JoystickInputMode,
     mouse_sensitivity: u8,
+    mouse_capture: MouseCapture,
     port_devices: [PortDevice; 2],
     // Extra Zorro boards (metadata path + plugin config schema/overrides)
     zorro_boards: Vec<ZorroBoardSetup>,
@@ -1143,6 +1152,7 @@ impl MachineSetup {
             warp: cfg.emulation.warp_speed,
             joystick_input_mode: cfg.joystick_input_mode,
             mouse_sensitivity: cfg.mouse_sensitivity,
+            mouse_capture: cfg.mouse_capture,
             port_devices: cfg.port_devices,
             zorro_boards: raw
                 .zorro
@@ -1450,6 +1460,9 @@ impl MachineSetup {
         if self.mouse_sensitivity != base.mouse_sensitivity {
             raw.input.mouse_sensitivity = Some(u16::from(self.mouse_sensitivity));
         }
+        if self.mouse_capture != base.mouse_capture {
+            raw.input.mouse_capture = Some(self.mouse_capture.label().to_string());
+        }
         // Per port against the profile baseline, so a CD32 keeps its pad
         // implicit and a stock machine emits no port keys at all.
         if self.port_devices[0] != base.port_devices[0] {
@@ -1607,6 +1620,7 @@ impl MachineSetup {
         self.warp = base.emulation.warp_speed;
         self.joystick_input_mode = base.joystick_input_mode;
         self.mouse_sensitivity = base.mouse_sensitivity;
+        self.mouse_capture = base.mouse_capture;
         self.port_devices = base.port_devices;
         if !self.has_ide() {
             self.ide_master = None;
@@ -1757,8 +1771,8 @@ impl MachineSetup {
                     reason(self.audio_channel_mode != ChannelMode::Mono, "mono")
                 }
             }
-            // Mouse sensitivity does nothing unless a port holds a mouse.
-            F::MouseSensitivity => {
+            // Neither mouse row does anything unless a port holds a mouse.
+            F::MouseSensitivity | F::MouseCapture => {
                 reason(self.port_devices.contains(&PortDevice::Mouse), "no mouse")
             }
             _ => None,
@@ -1988,6 +2002,11 @@ impl MachineSetup {
                 JoystickInputMode::Gamepad => "Gamepad".to_string(),
             },
             F::MouseSensitivity => crate::config::mouse_sensitivity_label(self.mouse_sensitivity),
+            F::MouseCapture => match self.mouse_capture {
+                MouseCapture::Click => "On click".to_string(),
+                MouseCapture::Auto => "Automatic".to_string(),
+                MouseCapture::Manual => "Shortcut only".to_string(),
+            },
             F::Port1Device => port_device_display(self.port_devices[0]).to_string(),
             F::Port2Device => port_device_display(self.port_devices[1]).to_string(),
             F::ScsiController => match self.scsi_controller {
@@ -2186,6 +2205,9 @@ impl MachineSetup {
                 } else {
                     self.mouse_sensitivity.saturating_sub(1)
                 }
+            }
+            F::MouseCapture => {
+                self.mouse_capture = cycle_slice(&MOUSE_CAPTURES, self.mouse_capture, forward)
             }
             F::Port1Device => {
                 self.port_devices[0] = cycle_slice(&PORT_DEVICES, self.port_devices[0], forward)
@@ -3474,6 +3496,39 @@ mod tests {
         s.cycle(LauncherField::MouseSensitivity, false);
         assert_eq!(s.value_label(LauncherField::MouseSensitivity), "48");
         assert_eq!(s.to_raw().input.mouse_sensitivity, Some(48));
+    }
+
+    #[test]
+    fn mouse_capture_round_trips_through_raw() {
+        let mut s = MachineSetup::default();
+        // Click-to-capture is the baseline, so nothing is written for it.
+        assert_eq!(s.value_label(LauncherField::MouseCapture), "On click");
+        assert_eq!(s.to_raw().input.mouse_capture, None);
+
+        s.cycle(LauncherField::MouseCapture, true);
+        assert_eq!(s.value_label(LauncherField::MouseCapture), "Automatic");
+        assert_eq!(s.to_raw().input.mouse_capture, Some("auto".to_string()));
+
+        s.cycle(LauncherField::MouseCapture, true);
+        assert_eq!(s.value_label(LauncherField::MouseCapture), "Shortcut only");
+        assert_eq!(s.to_raw().input.mouse_capture, Some("manual".to_string()));
+
+        // The written config has to load back into the same setting.
+        assert_eq!(
+            s.build_config().expect("valid config").mouse_capture,
+            MouseCapture::Manual
+        );
+    }
+
+    #[test]
+    fn mouse_capture_greys_out_without_a_mouse() {
+        let mut s = MachineSetup::default();
+        assert_eq!(s.disabled_reason(LauncherField::MouseCapture), None);
+        s.port_devices = [PortDevice::Joystick, PortDevice::Joystick];
+        assert_eq!(
+            s.disabled_reason(LauncherField::MouseCapture),
+            Some("no mouse")
+        );
     }
 
     #[test]

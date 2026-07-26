@@ -234,6 +234,11 @@ pub struct Config {
     /// scale only -- it does not affect the emulated machine or scripted mouse
     /// input.
     pub mouse_sensitivity: u8,
+    /// When the host mouse is grabbed (`[input] mouse_capture` /
+    /// `--mouse-capture`). Defaults to [`MouseCapture::Click`], the
+    /// historical click-the-display behaviour; `auto` grabs on focus, which
+    /// suits a fullscreen session where no host cursor is wanted.
+    pub mouse_capture: MouseCapture,
     /// `[input] autofire_hz`: how fast a held fire button is pulsed, or 0 for
     /// off (the default). A host input convenience, not machine state -- the
     /// emulated port sees an ordinary button being pressed and released.
@@ -324,6 +329,40 @@ impl JoystickInputMode {
         match self {
             Self::Gamepad => "gamepad",
             Self::Keyboard => "keyboard",
+        }
+    }
+}
+
+/// When the host mouse is grabbed: the pointer is confined to the window
+/// and the host cursor hidden, so the emulated mouse is the only one on
+/// screen (`[input] mouse_capture` / `--mouse-capture`).
+///
+/// Uncaptured, host cursor motion over the display still drives the
+/// emulated mouse; this setting only decides when the grab is taken, not
+/// whether motion reaches the machine. `Cmd+G` / `Alt+G` releases and
+/// re-takes it by hand in every mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MouseCapture {
+    /// Clicking the display takes the grab (the default). That click is a
+    /// window action and is not passed to the Amiga.
+    #[default]
+    Click,
+    /// Grab as soon as the window has the focus, and again whenever it
+    /// regains it, so there is never a host cursor loose over the display.
+    Auto,
+    /// Only the shortcut grabs. Clicks on the display go straight to the
+    /// Amiga with the host cursor left alone.
+    Manual,
+}
+
+impl MouseCapture {
+    /// Short label for menus and the config string (round-trips through
+    /// [`parse_mouse_capture`]).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Click => "click",
+            Self::Auto => "auto",
+            Self::Manual => "manual",
         }
     }
 }
@@ -1325,6 +1364,7 @@ impl Default for Config {
             status_bar: true,
             joystick_input_mode: JoystickInputMode::Gamepad,
             mouse_sensitivity: 50,
+            mouse_capture: MouseCapture::Click,
             autofire_hz: 0,
             port_devices: [PortDevice::Mouse, PortDevice::Joystick],
             serial: SerialConfig::default(),
@@ -1481,6 +1521,9 @@ pub struct ConfigOverrides {
     /// Host mouse sensitivity (`--mouse-sensitivity`), 0-100. Same as
     /// `[input] mouse_sensitivity`.
     pub mouse_sensitivity: Option<u16>,
+    /// When the host mouse is grabbed (`--mouse-capture`): "click",
+    /// "auto", or "manual". Same parser as `[input] mouse_capture`.
+    pub mouse_capture: Option<String>,
     /// Device in game port 1 (`--port1`): "mouse", "joystick", "cd32",
     /// "analogue", or "none". Same parser as `[input] port1`.
     pub port1: Option<String>,
@@ -1552,6 +1595,7 @@ impl ConfigOverrides {
             && self.floppy_speed.is_none()
             && self.joystick.is_none()
             && self.mouse_sensitivity.is_none()
+            && self.mouse_capture.is_none()
             && self.port1.is_none()
             && self.port2.is_none()
             && self.autofire_hz.is_none()
@@ -1617,6 +1661,9 @@ impl ConfigOverrides {
         }
         if let Some(sensitivity) = self.mouse_sensitivity {
             raw.input.mouse_sensitivity = Some(sensitivity);
+        }
+        if let Some(capture) = &self.mouse_capture {
+            raw.input.mouse_capture = Some(capture.clone());
         }
         if let Some(port1) = &self.port1 {
             raw.input.port1 = Some(port1.clone());
@@ -1844,6 +1891,10 @@ pub(crate) struct RawInput {
     /// Host mouse sensitivity, 0-100 (default 50).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) mouse_sensitivity: Option<u16>,
+    /// When the host mouse is grabbed: "click" (default), "auto", or
+    /// "manual".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) mouse_capture: Option<String>,
     /// Autofire rate in Hz for the fire button, or 0 (the default) for off.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) autofire_hz: Option<u8>,
@@ -2632,6 +2683,10 @@ impl TryFrom<RawConfig> for Config {
                 defaults.mouse_sensitivity
             }
         };
+        let mouse_capture = match raw.input.mouse_capture.as_deref() {
+            None => defaults.mouse_capture,
+            Some(s) => parse_mouse_capture(s)?,
+        };
         // An implausibly fast autofire is a typo, not a preference: at more
         // than ~30 Hz the pulse is shorter than the frame the guest samples
         // it on, so the button would read as noise or as never pressed.
@@ -3037,6 +3092,7 @@ impl TryFrom<RawConfig> for Config {
             status_bar,
             joystick_input_mode,
             mouse_sensitivity,
+            mouse_capture,
             autofire_hz,
             port_devices,
             serial,
@@ -3134,6 +3190,18 @@ pub(crate) fn parse_joystick_input_mode(s: &str) -> Result<JoystickInputMode> {
         "keyboard" | "kbd" | "key" => Ok(JoystickInputMode::Keyboard),
         _ => Err(anyhow!(
             "unknown [input] joystick {:?}: expected \"gamepad\" or \"keyboard\"",
+            s
+        )),
+    }
+}
+
+pub(crate) fn parse_mouse_capture(s: &str) -> Result<MouseCapture> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "click" | "on-click" => Ok(MouseCapture::Click),
+        "auto" | "focus" => Ok(MouseCapture::Auto),
+        "manual" | "off" | "none" => Ok(MouseCapture::Manual),
+        _ => Err(anyhow!(
+            "unknown [input] mouse_capture {:?}: expected \"click\", \"auto\", or \"manual\"",
             s
         )),
     }
@@ -4419,6 +4487,57 @@ mod tests {
             load_overrides(&overrides)?.joystick_input_mode,
             JoystickInputMode::Gamepad
         );
+        Ok(())
+    }
+
+    #[test]
+    fn mouse_capture_defaults_to_click_and_parses_its_modes() -> Result<()> {
+        // The default is the historical behaviour: no config, no change.
+        assert_eq!(parse_config("")?.mouse_capture, MouseCapture::Click);
+
+        for (text, expected) in [
+            ("click", MouseCapture::Click),
+            ("on-click", MouseCapture::Click),
+            ("auto", MouseCapture::Auto),
+            ("focus", MouseCapture::Auto),
+            ("manual", MouseCapture::Manual),
+            ("off", MouseCapture::Manual),
+            ("none", MouseCapture::Manual),
+            ("AUTO", MouseCapture::Auto),
+        ] {
+            let cfg = parse_config(&format!("[input]\nmouse_capture = {text:?}\n"))?;
+            assert_eq!(cfg.mouse_capture, expected, "for {text:?}");
+        }
+
+        // A typo is an error rather than a silent fallback to the default.
+        assert!(parse_config("[input]\nmouse_capture = \"grab\"\n").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn mouse_capture_cli_override_sets_the_mode() -> Result<()> {
+        let overrides = ConfigOverrides {
+            mouse_capture: Some("auto".to_string()),
+            ..ConfigOverrides::default()
+        };
+        assert_eq!(
+            load_overrides(&overrides)?.mouse_capture,
+            MouseCapture::Auto
+        );
+        Ok(())
+    }
+
+    /// Every mode's label has to parse back to the same mode: the launcher
+    /// writes the label into the config file it saves.
+    #[test]
+    fn mouse_capture_labels_round_trip_through_the_parser() -> Result<()> {
+        for mode in [
+            MouseCapture::Click,
+            MouseCapture::Auto,
+            MouseCapture::Manual,
+        ] {
+            assert_eq!(parse_mouse_capture(mode.label())?, mode);
+        }
         Ok(())
     }
 

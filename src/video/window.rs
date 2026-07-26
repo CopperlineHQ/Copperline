@@ -691,6 +691,14 @@ pub struct App {
     /// mouse button.
     analyzer_dragging: bool,
     mouse_captured: bool,
+    /// Set when a menu, overlay panel, or tool window took the mouse away
+    /// from a capture that was live, so closing the last of them can hand
+    /// it back. The Cmd/Alt+G toggle clears it: the capture is then off
+    /// because the operator asked for it, not because the UI borrowed the
+    /// cursor. Focus loss deliberately does not clear it -- opening a tool
+    /// window unfocuses the main window as a matter of course, and that
+    /// must not count as the operator letting the capture go.
+    capture_suspended_by_ui: bool,
     mouse_delta_remainder: (f64, f64),
     last_rendered_emulated_frame: Option<u64>,
     last_submitted_render_frame: Option<u64>,
@@ -737,6 +745,15 @@ pub struct App {
     /// live host mouse delta, never scripted --mouse-after input or the core.
     mouse_sensitivity: u8,
     mouse_sensitivity_factor: f64,
+    /// When the host mouse is grabbed ([input] mouse_capture): on a display
+    /// click, automatically whenever the window holds the focus, or only on
+    /// the Cmd/Alt+G shortcut.
+    mouse_capture: crate::config::MouseCapture,
+    /// Whether the "press Cmd/Alt+G to release" hint has been shown for an
+    /// automatic capture yet. Auto mode grabs on every focus gain, and a
+    /// message on each one would be noise; the operator only needs telling
+    /// how to get the cursor back the first time.
+    auto_capture_hint_shown: bool,
     /// Whether the serial port is bridged to MIDI, so the runtime menu offers
     /// the device items. Fixed for the machine's life.
     serial_is_midi: bool,
@@ -1028,6 +1045,7 @@ impl App {
         warp_speed: WarpSpeed,
         joystick_input_mode: JoystickInputMode,
         mouse_sensitivity: u8,
+        mouse_capture: crate::config::MouseCapture,
         about_machine_lines: Vec<String>,
         machine_config: RawConfig,
         // Effective live-audio state for this machine: for a real machine the
@@ -1166,6 +1184,7 @@ impl App {
             volume_dragging: false,
             analyzer_dragging: false,
             mouse_captured: false,
+            capture_suspended_by_ui: false,
             mouse_delta_remainder: (0.0, 0.0),
             last_rendered_emulated_frame: None,
             last_submitted_render_frame: None,
@@ -1184,6 +1203,8 @@ impl App {
             joystick_input_mode,
             mouse_sensitivity,
             mouse_sensitivity_factor: mouse_sensitivity_factor(mouse_sensitivity),
+            mouse_capture,
+            auto_capture_hint_shown: false,
             warp_speed,
             rewind_budget_mb,
             rewind_interval_frames,
@@ -2676,7 +2697,19 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Focused(focused) => {
                 self.main_window_focused = focused;
-                if !focused {
+                if focused {
+                    // A capture a panel borrowed can only be repaid to a
+                    // focused window, so a panel that closed while the focus
+                    // was still elsewhere left the loan outstanding for this
+                    // moment.
+                    self.restore_mouse_capture_after_ui();
+                    // In auto mode the grab follows the focus, so the
+                    // window that has the keyboard also has the pointer and
+                    // no host cursor is ever loose over the display. This is
+                    // also the start-up grab: the first Focused(true) is the
+                    // one that arrives when the window opens.
+                    self.apply_auto_mouse_capture();
+                } else {
                     self.volume_dragging = false;
                     self.analyzer_dragging = false;
                     self.set_mouse_captured(false);
@@ -2746,13 +2779,29 @@ impl ApplicationHandler for App {
                     }
                     return;
                 }
-                if pressed && !self.mouse_captured && self.cursor_pos.is_some_and(cursor_in_display)
+                if pressed
+                    && !self.mouse_captured
+                    && self.mouse_capture != crate::config::MouseCapture::Manual
+                    && self.cursor_pos.is_some_and(cursor_in_display)
                 {
                     // With no mouse on either port there is nothing to
                     // drive: grabbing and hiding the host cursor would
                     // just trap it.
                     if self.mouse_port().is_some() {
                         self.set_mouse_captured(true);
+                        // The click that takes the grab is a window-management
+                        // action, not an Amiga click. Forwarding it as well
+                        // lands a press on the guest immediately before the
+                        // first intended one, and two presses that close
+                        // together are what Intuition's double-click window is
+                        // looking for -- so a single deliberate click on a
+                        // gadget arrives as a double click. Swallow it, but
+                        // only once the grab has actually taken: if it failed
+                        // the mouse stays uncaptured and this click is the only
+                        // thing the guest is going to get.
+                        if self.mouse_captured {
+                            return;
+                        }
                     } else {
                         self.show_osd("No mouse on either port".to_string());
                     }
@@ -3392,7 +3441,90 @@ impl App {
             self.show_osd("No mouse on either port".to_string());
             return;
         }
+        // An explicit toggle settles the question either way: whatever the
+        // UI borrowed earlier is no longer owed back.
+        self.capture_suspended_by_ui = false;
         self.set_mouse_captured(!self.mouse_captured);
+    }
+
+    /// Release the mouse on behalf of a panel or tool window that needs the
+    /// host cursor, remembering a live capture so
+    /// `restore_mouse_capture_after_ui` can hand it back when the last of
+    /// them closes. Without that, opening the debugger over a captured
+    /// session left the machine uncaptured for good -- most visible in
+    /// fullscreen, where there is no desktop to reach for anyway.
+    ///
+    /// This covers the routes that can be taken *while* captured, which is
+    /// the keyboard shortcuts. The menu and status bar are not among them:
+    /// their click targets are refused while the mouse is captured, so
+    /// reaching them means releasing it by hand first, and that explicit
+    /// release is not something to undo afterwards.
+    fn suspend_mouse_capture_for_ui(&mut self) {
+        if self.mouse_captured {
+            self.capture_suspended_by_ui = true;
+            self.set_mouse_captured(false);
+        }
+    }
+
+    /// Take the grab if `[input] mouse_capture = "auto"` and the moment is
+    /// right for it: the window holds the focus, nothing modal wants the
+    /// cursor, and there is a mouse on a port to drive.
+    ///
+    /// Deliberately driven by discrete events (focus gain, entering
+    /// fullscreen, the last panel closing) rather than polled per frame --
+    /// a poll would re-take the grab the instant the operator released it
+    /// with the shortcut, leaving no way to get the cursor back at all.
+    fn apply_auto_mouse_capture(&mut self) {
+        if self.mouse_capture != crate::config::MouseCapture::Auto
+            || self.mouse_captured
+            || !self.main_window_focused
+            || self.modal_ui_active()
+            || self.mouse_port().is_none()
+        {
+            return;
+        }
+        self.set_mouse_captured(true);
+        // Auto mode hides the host cursor without the operator having done
+        // anything to ask for it, so say once how to get it back. Every
+        // later focus gain re-grabs silently.
+        if self.mouse_captured && !self.auto_capture_hint_shown {
+            self.auto_capture_hint_shown = true;
+            self.show_osd(format!(
+                "Mouse captured ({HOST_SHORTCUT_MODIFIER_LABEL}+G releases)"
+            ));
+        }
+    }
+
+    /// Re-take a capture the UI borrowed, once no modal UI still wants the
+    /// cursor. A no-op unless `suspend_mouse_capture_for_ui` recorded one,
+    /// so a session that was never captured is never surprised by a grab.
+    fn restore_mouse_capture_after_ui(&mut self) {
+        if !self.capture_suspended_by_ui || self.modal_ui_active() {
+            return;
+        }
+        // Same guard the click-to-capture path applies: with no mouse left
+        // on either port there is nothing to drive, and grabbing would only
+        // trap a hidden cursor. Cheap insurance against a port device that
+        // changed while the panel was open -- and the loan is void, not
+        // outstanding, because no later event can repay it.
+        if self.mouse_port().is_none() {
+            self.capture_suspended_by_ui = false;
+            return;
+        }
+        // A grab wants the focus. Closing a tool window hands the focus back
+        // to the main window, but the order of that against this call is the
+        // window manager's business: attempted too early the grab fails, and
+        // clearing the loan on a failed grab would lose the capture for good
+        // -- the very thing this mechanism exists to prevent. Leave it
+        // outstanding and let the Focused(true) that follows retry.
+        if !self.main_window_focused {
+            return;
+        }
+        self.set_mouse_captured(true);
+        // Only a grab that actually took discharges the loan.
+        if self.mouse_captured {
+            self.capture_suspended_by_ui = false;
+        }
     }
 
     /// COPPERLINE_DIAG_CURSOR: trace how the most recent click maps from host
@@ -3495,7 +3627,15 @@ impl App {
             let dx = pos.0 - prev.0;
             let dy = pos.1 - prev.1;
             if dx != 0 || dy != 0 {
-                self.add_mouse_delta_i32(dx, dy);
+                // Through the same scale the captured path uses, so the
+                // sensitivity setting means something on both sides of a
+                // grab instead of silently doing nothing until the mouse is
+                // captured. The units still differ -- these are texture
+                // pixels where a captured delta is a raw device count -- so
+                // this equalises the operator's knob, not the underlying
+                // ratio; at the default sensitivity the factor is 1.0 and
+                // the long-standing 1:1 tracking is unchanged.
+                self.add_host_mouse_delta(f64::from(dx), f64::from(dy));
             }
         }
         self.last_display_cursor_pos = Some(pos);
@@ -4715,8 +4855,9 @@ impl App {
     fn open_debugger(&mut self) {
         if self.debugger_panel.is_none() {
             // The debugger shortcut can arrive while the mouse is captured;
-            // release it so the window's controls are reachable.
-            self.set_mouse_captured(false);
+            // release it so the window's controls are reachable, and note
+            // it so closing the panel gives the capture back.
+            self.suspend_mouse_capture_for_ui();
             self.ui.panel = None;
             self.paused_before_debugger = self.paused;
             self.paused = true;
@@ -4754,7 +4895,7 @@ impl App {
 
     fn open_console(&mut self) {
         if self.console_panel.is_none() {
-            self.set_mouse_captured(false);
+            self.suspend_mouse_capture_for_ui();
             self.ui.panel = None;
             self.paused_before_console = self.paused;
             self.paused = true;
@@ -4873,7 +5014,7 @@ impl App {
 
     fn open_frame_analyzer(&mut self) {
         if self.frame_analyzer_panel.is_none() {
-            self.set_mouse_captured(false);
+            self.suspend_mouse_capture_for_ui();
             self.ui.panel = None;
             self.paused_before_analyzer = self.paused;
             self.paused = true;
@@ -5484,6 +5625,7 @@ impl App {
         // start-up mode (a previous live Cmd+J toggle does not carry over).
         self.joystick_input_mode = cfg.joystick_input_mode;
         self.set_mouse_sensitivity(cfg.mouse_sensitivity);
+        self.mouse_capture = cfg.mouse_capture;
         self.autofire_hz = cfg.autofire_hz;
         // Rewind history belongs to the machine that recorded it, so the new
         // machine starts a fresh ring under its own config (or none at all).
@@ -5556,6 +5698,13 @@ impl App {
         if self.debugger_panel.is_none() && self.console_panel.is_none() {
             self.emu.machine.ui_set_pc_history_enabled(false);
         }
+        // Hand the mouse back if this was the last panel holding it. With
+        // two panels open, closing one leaves the other still wanting the
+        // cursor, and the check inside declines until that one goes too.
+        self.restore_mouse_capture_after_ui();
+        // In auto mode the grab is owed to the machine regardless of
+        // whether this panel is the one that borrowed it.
+        self.apply_auto_mouse_capture();
         self.resize_for_active_panel();
         self.request_redraw();
     }
@@ -5595,6 +5744,10 @@ impl App {
             self.show_osd(format!(
                 "Fullscreen on ({HOST_SHORTCUT_MODIFIER_LABEL}+F restores)"
             ));
+            // Fullscreen leaves no desktop to reach for, so auto mode takes
+            // the grab here as well as on focus: entering fullscreen does
+            // not itself change the focus, so no Focused event follows.
+            self.apply_auto_mouse_capture();
         }
     }
 
