@@ -97,10 +97,14 @@ The machine gurus, or worse, freezes silently.
    cannot guru -- the CPU halts. Copperline surfaces it on screen, in
    the console, and on the Break tab automatically; `HISTORY` is the
    main tool from there.
-5. For OS-level context: `TASKS` shows what was scheduled, `CATCHTASK
-   NAME` stops when a suspect process next gets the CPU, and `SEGMENTS`
-   maps a process's loaded hunks so addresses in `HISTORY` can be
-   attributed to a program rather than "somewhere in RAM".
+5. For OS-level context: `TASKS` shows what was scheduled, `TASK` dumps
+   the culprit in full (stack use, signals, trap vectors, its CLI
+   command), `EXECBASE` says whether exec is still dispatching at all --
+   a stuck `IDNestCnt`/`TDNestCnt` is a `Disable()`/`Forbid()` nobody
+   paired -- `CATCHTASK NAME` stops when a suspect process next gets the
+   CPU, and `SEGMENTS` maps a process's loaded hunks so addresses in
+   `HISTORY` can be attributed to a program rather than "somewhere in
+   RAM".
 
 ## Find the lives counter (memory hunting)
 

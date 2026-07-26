@@ -113,6 +113,9 @@ garbage):
 | Command | Effect |
 |---|---|
 | `TASKS` | The scheduled task (`>`), then the ready and waiting lists, with priority, state, and name |
+| `TASK [ADDR\|NAME]` | One task in full; no argument dumps `ExecBase->ThisTask` |
+| `EXECBASE`, `EXEC` | ExecBase's own state: the scheduler counters and nesting counts, then what exec recorded about the machine |
+| `MEMLIST`, `AVAIL` | Exec's memory list: free, largest chunk, and attributes per region |
 | `LIBS`, `LIBRARIES` | Opened libraries with versions (`graphics.library v40.10`) |
 | `DEVS`, `DEVICES` | Devices with versions |
 | `RESOURCES`, `PORTS` | The resource and message-port lists |
@@ -120,6 +123,54 @@ garbage):
 | `CATCHTASK NAME` | Stop when exec schedules a task whose name contains NAME (case-insensitive); `CATCHTASK` alone clears it |
 | `CATCHALERT` | Break at exec's `Alert()` entry: fires on every guru/alert with D7 holding the code |
 | `GURU [CODE]` | Decode an alert code (default: the current D7): deadend flag, subsystem, cause, CPU-trap alerts |
+
+`EXECBASE` answers "what is the OS doing right now": `IdleCount` and
+`DispCount` say whether exec is dispatching at all, `SysFlags` shows the
+scheduler's pending attention bits, and `IDNestCnt`/`TDNestCnt` decode
+into plain English -- `-1` means enabled, anything else is live
+`Disable()`/`Forbid()` nesting, which is the usual reason a machine
+"hangs" with the display still running. `AttnFlags` is the CPU and FPU
+exec detected at boot, and the rest is what exec measured of the machine
+(memory bounds, VBlank/PSU frequency, E-clock, its own supervisor stack)
+plus the last alert code, decoded.
+
+```text
+> execbase
+ExecBase $C00B00  exec.library v40.10  SoftVer 63
+sched  IdleCount 34  DispCount 145  Quantum 4  Elapsed 2
+sched  SysFlags $0000 (none)  AttnResched $0000
+sched  IDNestCnt -1 (interrupts enabled)
+sched  TDNestCnt -1 (task switching enabled)
+cpu    AttnFlags $0000 (none)
+task   ThisTask $C03580  exec.library
+```
+
+`TASK` dumps one `struct Task`: node type and priority, `tc_Flags`,
+signal masks, trap and exception vectors, and stack bounds with the
+bytes in use. For the *running* task the stack pointer is taken live
+from the CPU (the user stack pointer, so a snapshot taken inside an
+interrupt still measures the task's own stack) rather than from the
+stale `tc_SPReg`. A `NT_PROCESS` continues into the DOS half: CLI
+number and command name, `pr_StackSize`, `IoErr()`, the directory
+locks, and the loaded hunks.
+
+```text
+> task input
+task $C07192  input.device  (task)  pri 20  state wait
+  flags  $00 (none)  IDNestCnt -1  TDNestCnt 0
+  sigs   alloc $C000FFFF  wait $C0000000  recvd $00000000
+  sigs   except $00000000  trap alloc $8000 able $0000
+  vecs   trap $F83558/$000000  except $F83558/$000000
+  vecs   switch $000000  launch $000000  userdata $000000
+  stack  $C071F0-$C081F0 (4096 bytes)  sp $C0819E (SPReg), 82 used
+```
+
+The argument is an address (`TASK $C07192`) or a case-insensitive
+substring of a task name; an ambiguous name lists the candidates instead
+of guessing. `MEMLIST` walks the memory list exec allocates from, per
+region: `mh_Free`, the largest free chunk and the chunk count (walked
+from `mh_First`, so fragmentation is visible), and the `MEMF_*`
+attributes.
 
 `CATCHTASK` is the tool for "wake me when my process actually runs": it
 baselines on the currently scheduled task and fires on the next

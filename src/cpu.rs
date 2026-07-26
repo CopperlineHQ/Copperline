@@ -1405,6 +1405,14 @@ impl M68kMachine {
         self.cpu.a(reg)
     }
 
+    /// The user stack pointer: A7 in user mode, the banked USP while the
+    /// CPU is in supervisor mode. AmigaOS tasks run in user mode, so this
+    /// is the running task's own stack pointer even when the snapshot
+    /// lands inside an interrupt.
+    pub fn usp(&self) -> u32 {
+        self.cpu.get_usp()
+    }
+
     pub fn d(&self, reg: usize) -> u32 {
         self.cpu.d(reg)
     }

@@ -214,7 +214,8 @@ const CONSOLE_HELP: &[&str] = &[
     "            copper [pc|ADDR] [N]   custom   blits   find HEX [START]",
     "            writer ADDR",
     "            history/h [N]   stack/bt",
-    "os:         tasks  libs  devs  resources  ports   segments   guru [CODE]",
+    "os:         tasks  task [ADDR|NAME]  execbase  memlist  segments",
+    "            libs  devs  resources  ports  guru [CODE]",
     "hunt:       hunt start [B|W]  hunt eq/ne/lt/gt VAL  hunt same|diff  hunt list",
     "modify:     poke ADDR VAL   setreg REG VAL   trace start [PATH]|stop",
     "waveform:   wave start [PATH] [TRIGGER] [DURATION] [SIGNALS]   wave stop   wave",
@@ -522,7 +523,16 @@ impl App {
                     if set { "set" } else { "removed" }
                 ))
             }
-            "TASKS" => ConsoleOutcome::lines(self.console_os_tasks()),
+            "TASKS" => {
+                ConsoleOutcome::lines(self.console_with_exec(crate::amigaos::dump::task_list))
+            }
+            "TASK" => ConsoleOutcome::lines(self.console_task(args)),
+            "EXECBASE" | "EXEC" => {
+                ConsoleOutcome::lines(self.console_with_exec(crate::amigaos::dump::exec))
+            }
+            "MEMLIST" | "AVAIL" => {
+                ConsoleOutcome::lines(self.console_with_exec(crate::amigaos::dump::memory))
+            }
             "LIBS" | "LIBRARIES" => {
                 ConsoleOutcome::lines(self.console_os_list(crate::amigaos::OsList::Libraries))
             }
@@ -1299,35 +1309,16 @@ impl App {
         }
     }
 
-    /// TASKS: the scheduled task plus the ready and waiting lists.
-    fn console_os_tasks(&self) -> Vec<String> {
-        self.console_with_exec(|os, base| {
-            let mut lines = Vec::new();
-            match os.this_task(base) {
-                Some(task) => lines.push(format!(
-                    "> ${:06X}  pri {:>4}  {:<7} {}",
-                    task.addr, task.pri, "run", task.name
-                )),
-                None => lines.push("!ThisTask is not plausible".to_string()),
-            }
-            for (list, label) in [
-                (crate::amigaos::OsList::TaskReady, "ready"),
-                (crate::amigaos::OsList::TaskWait, "wait"),
-            ] {
-                for node in os.walk(base, list) {
-                    let state = crate::amigaos::task_state_name(node.state);
-                    let state = if state == "?" { label } else { state };
-                    lines.push(format!(
-                        "  ${:06X}  pri {:>4}  {:<7} {}",
-                        node.addr, node.pri, state, node.name
-                    ));
-                }
-            }
-            if lines.len() == 1 {
-                lines.push("  (no other tasks)".to_string());
-            }
-            lines
-        })
+    /// TASK [ADDR|NAME]: one task or process in full, defaulting to the
+    /// scheduled one. The CPU's live stack pointers go with it, since
+    /// they are the running task's real stack pointer.
+    fn console_task(&self, args: &[&str]) -> Vec<String> {
+        let spec = args.join(" ");
+        let sp = crate::amigaos::dump::LiveSp {
+            a7: self.emu.machine.a(7),
+            usp: self.emu.machine.usp(),
+        };
+        self.console_with_exec(|os, base| crate::amigaos::dump::task(os, base, &spec, sp))
     }
 
     /// LIBS/DEVS/RESOURCES/PORTS: one line per node.

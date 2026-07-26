@@ -242,3 +242,12 @@ stop; `monitor loadseg-list` prints the same table.
 | `segments` | the current process's loaded hunks (LoadSeg addresses) |
 | `loadseg-break` | toggle a visible stop whenever a new program is loaded |
 | `loadseg-list` | tracked program loads with their hunk addresses |
+| `execbase` | ExecBase scheduler state (dispatch counters, `Disable()`/`Forbid()` nesting, `AttnFlags`) and the machine facts exec recorded at boot |
+| `tasks` | the scheduled task plus the ready and waiting lists |
+| `task [ADDR\|NAME]` | one `struct Task` in full -- flags, signals, trap/exception vectors, stack use, and the process/CLI half when it has one (no argument: `ThisTask`) |
+| `memlist` | exec's memory list with free, largest chunk, and attributes per region |
+
+These four are the same dumps the debugger console prints for `EXECBASE`,
+`TASKS`, `TASK`, and `MEMLIST` (see [](console.md)), so a headless
+`--gdb` session sees exactly what the window would show. When the OS is
+not up yet, they say so rather than printing garbage.

@@ -3616,6 +3616,211 @@ fn console_os_introspection_and_task_catch() {
 }
 
 #[test]
+fn console_execbase_dumps_the_scheduler_state() {
+    let mut app = test_app();
+    app.open_console();
+    plant_exec_world(&mut app);
+    {
+        let ram = &mut app.emu.bus_mut().mem.chip_ram;
+        let put32 = |ram: &mut [u8], addr: usize, v: u32| {
+            ram[addr..addr + 4].copy_from_slice(&v.to_be_bytes());
+        };
+        let put16 = |ram: &mut [u8], addr: usize, v: u16| {
+            ram[addr..addr + 2].copy_from_slice(&v.to_be_bytes());
+        };
+        let base = 0x1000usize;
+        put32(ram, base + 0x118, 4242); // IdleCount
+        put32(ram, base + 0x11C, 999); // DispCount
+        put16(ram, base + 0x120, 4); // Quantum
+        put16(ram, base + 0x124, 0x4000); // SysFlags: TQE
+        ram[base + 0x126] = 0xFF; // IDNestCnt -1
+        ram[base + 0x127] = 0x00; // TDNestCnt 0: one Forbid()
+        put16(ram, base + 0x128, 0x0007); // AttnFlags: 68010/20/30
+        put32(ram, base + 0x202, 0x8100_0009); // LastAlert
+    }
+    let out = console_run(&mut app, "EXECBASE");
+    assert!(out[0].contains("ExecBase $001000"), "{out:?}");
+    assert!(
+        out.iter()
+            .any(|l| l.contains("IdleCount 4242") && l.contains("DispCount 999")),
+        "{out:?}"
+    );
+    assert!(
+        out.iter().any(|l| l.contains("SysFlags $4000 (TQE)")),
+        "{out:?}"
+    );
+    assert!(
+        out.iter()
+            .any(|l| l.contains("IDNestCnt -1 (interrupts enabled)")),
+        "{out:?}"
+    );
+    assert!(
+        out.iter()
+            .any(|l| l.contains("TDNestCnt 0 (Forbid()den, nesting 1)")),
+        "{out:?}"
+    );
+    assert!(
+        out.iter()
+            .any(|l| l.contains("AttnFlags $0007 (68010 68020 68030)")),
+        "{out:?}"
+    );
+    assert!(
+        out.iter()
+            .any(|l| l.contains("ThisTask $002000  boot.task")),
+        "{out:?}"
+    );
+    // The stored alert code comes back decoded, not just in hex.
+    assert!(
+        out.iter()
+            .any(|l| l.starts_with("alert  $81000009") && l.contains("DEADEND")),
+        "{out:?}"
+    );
+
+    // Before the OS is up the command says so rather than printing junk.
+    app.emu.bus_mut().mem.chip_ram[4..8].copy_from_slice(&0u32.to_be_bytes());
+    let out = console_run(&mut app, "EXEC");
+    assert!(out[0].starts_with("!no ExecBase"), "{out:?}");
+}
+
+#[test]
+fn console_task_dumps_one_task_by_default_address_or_name() {
+    let mut app = test_app();
+    app.open_console();
+    plant_exec_world(&mut app);
+    // ThisTask ($2000) is a CLI process with a one-hunk command loaded.
+    {
+        let ram = &mut app.emu.bus_mut().mem.chip_ram;
+        let put32 = |ram: &mut [u8], addr: usize, v: u32| {
+            ram[addr..addr + 4].copy_from_slice(&v.to_be_bytes());
+        };
+        ram[0x2000 + 8] = 13; // NT_PROCESS
+        ram[0x2000 + 14] = 0x40; // tc_Flags: SWITCH
+        put32(ram, 0x2000 + 0x12, 0x0000_FFFF); // tc_SigAlloc
+        put32(ram, 0x2000 + 0x16, 0x0000_1000); // tc_SigWait
+        put32(ram, 0x2000 + 0x36, 0x0000_7F00); // tc_SPReg
+        put32(ram, 0x2000 + 0x3A, 0x0000_7000); // tc_SPLower
+        put32(ram, 0x2000 + 0x3E, 0x0000_8000); // tc_SPUpper
+        put32(ram, 0x2000 + 0x84, 4096); // pr_StackSize
+        put32(ram, 0x2000 + 0x8C, 3); // pr_TaskNum
+        put32(ram, 0x2000 + 0xAC, 0x4000 >> 2); // pr_CLI
+        put32(ram, 0x4000 + 0x10, 0x4100 >> 2); // cli_CommandName
+        ram[0x4100] = 11;
+        ram[0x4101..0x410C].copy_from_slice(b"dh0:c/hello");
+        put32(ram, 0x4000 + 0x3C, 0x8000 >> 2); // cli_Module
+        put32(ram, 0x8000 - 4, 0x100);
+        put32(ram, 0x8000, 0);
+    }
+    // Park the CPU's A7 in the task's stack: the running task's live
+    // stack pointer is what the dump must measure against.
+    app.emu.machine.debug_set_register(15, 0x0000_7C00);
+
+    let out = console_run(&mut app, "TASK");
+    assert!(
+        out[0].contains("task $002000  boot.task  (process)")
+            && out[0].contains("pri 10")
+            && out[0].contains("state run"),
+        "{out:?}"
+    );
+    assert!(out.iter().any(|l| l.contains("$40 (SWITCH)")), "{out:?}");
+    assert!(
+        out.iter()
+            .any(|l| l.contains("alloc $0000FFFF") && l.contains("wait $00001000")),
+        "{out:?}"
+    );
+    assert!(
+        out.iter()
+            .any(|l| l.contains("$007000-$008000 (4096 bytes)")
+                && l.contains("sp $007C00 (live A7), 1024 used")),
+        "{out:?}"
+    );
+    assert!(
+        out.iter().any(|l| l.contains("CLI 3")
+            && l.contains("\"hello\"")
+            && l.contains("StackSize 4096")),
+        "{out:?}"
+    );
+    assert!(
+        out.iter().any(|l| l.contains("hunk 0  $008004..$0080FC")),
+        "{out:?}"
+    );
+
+    // By name (case-insensitive) and by explicit address, and a
+    // non-process task stops after the exec half.
+    let by_name = console_run(&mut app, "TASK HELP");
+    assert!(by_name[0].contains("task $002100  helper"), "{by_name:?}");
+    assert!(
+        !by_name.iter().any(|l| l.contains("proc ")),
+        "a plain task has no process half: {by_name:?}"
+    );
+    // tc_SPReg is what a task exec has switched away from is measured by.
+    assert!(by_name.iter().any(|l| l.contains("SPReg")), "{by_name:?}");
+    let by_addr = console_run(&mut app, "TASK $2100");
+    assert_eq!(by_addr[0], by_name[0]);
+    let missing = console_run(&mut app, "TASK nosuchtask");
+    assert!(missing[0].starts_with("!no task matches"), "{missing:?}");
+
+    // An ambiguous name lists the candidates instead of guessing.
+    {
+        let ram = &mut app.emu.bus_mut().mem.chip_ram;
+        ram[0x3000..0x3007].copy_from_slice(b"helper2");
+        ram[0x3007] = 0;
+    }
+    let both = console_run(&mut app, "TASK helper");
+    assert!(both[0].contains("matches several tasks"), "{both:?}");
+    assert_eq!(both.len(), 4, "{both:?}");
+}
+
+#[test]
+fn console_memlist_summarizes_exec_memory() {
+    let mut app = test_app();
+    app.open_console();
+    plant_exec_world(&mut app);
+    {
+        let ram = &mut app.emu.bus_mut().mem.chip_ram;
+        let put32 = |ram: &mut [u8], addr: usize, v: u32| {
+            ram[addr..addr + 4].copy_from_slice(&v.to_be_bytes());
+        };
+        let put16 = |ram: &mut [u8], addr: usize, v: u16| {
+            ram[addr..addr + 2].copy_from_slice(&v.to_be_bytes());
+        };
+        // One MemHeader at $5000 covering chip RAM, two free chunks.
+        put32(ram, 0x1000 + 0x142, 0x5000); // MemList lh_Head
+        put32(ram, 0x5000, 0x1000 + 0x142 + 4); // succ -> lh_Tail
+        put32(ram, 0x1000 + 0x142 + 4, 0);
+        put32(ram, 0x5000 + 10, 0x5100); // ln_Name
+        ram[0x5100..0x5104].copy_from_slice(b"chip");
+        ram[0x5104] = 0;
+        ram[0x5000 + 9] = (-10i8) as u8; // ln_Pri
+        put16(ram, 0x5000 + 0x0E, 0x0003); // PUBLIC | CHIP
+        put32(ram, 0x5000 + 0x10, 0x6000); // mh_First
+        put32(ram, 0x5000 + 0x14, 0x0000_0400); // mh_Lower
+        put32(ram, 0x5000 + 0x18, 0x0008_0000); // mh_Upper
+        put32(ram, 0x5000 + 0x1C, 0x0004_0000); // mh_Free
+        put32(ram, 0x6000, 0x7000); // mc_Next
+        put32(ram, 0x6004, 0x0001_0000); // mc_Bytes
+        put32(ram, 0x7000, 0);
+        put32(ram, 0x7004, 0x0003_0000);
+    }
+    let out = console_run(&mut app, "MEMLIST");
+    assert!(
+        out[0].contains("$000400-$080000")
+            && out[0].contains("pri  -10")
+            && out[0].ends_with("chip"),
+        "{out:?}"
+    );
+    assert!(
+        out[1].contains("PUBLIC CHIP")
+            && out[1].contains("largest 196608")
+            && out[1].contains("chunks 2"),
+        "{out:?}"
+    );
+    assert!(
+        out.last().unwrap().contains("free of") && out.last().unwrap().contains("1 region"),
+        "{out:?}"
+    );
+}
+
+#[test]
 fn iomap_tab_navigation_and_jump() {
     let mut app = test_app();
     app.open_debugger();
