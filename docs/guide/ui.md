@@ -134,8 +134,9 @@ tool window or overlay.
   ([below](#machine-configuration-screen)) to reconfigure the machine and
   relaunch it. The same screen opens automatically on a no-machine start.
 - **Frame Analyzer...**: pauses the machine and opens a separate diagnostic
-  window showing which chip-bus owner had each Agnus colour clock across
-  the captured frame, including overscan and blanking; see
+  window with two tabs: which chip-bus owner had each Agnus colour clock
+  across the captured frame, including overscan and blanking, and a memory
+  heat map of what last touched each part of the address space; see
   [](../debugger/window.md#frame-analyzer-pane).
 - **Debugger...** (also `Cmd+B` on macOS or `Alt+B` on Linux/Windows):
   pauses the machine and opens the tabbed debugger in a tool window; see

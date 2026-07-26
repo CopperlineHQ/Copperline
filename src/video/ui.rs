@@ -16,6 +16,7 @@ use super::window::{
 use super::{font, present_height, FB_WIDTH, HOST_SHORTCUT_MODIFIER_LABEL};
 use crate::config::{MachineModel, PixelAspect, WarpSpeed};
 use crate::debugger::{BreakCond, CondOp, CondOperand};
+use crate::heatmap;
 
 // ---------------------------------------------------------------------------
 // Palette
@@ -591,9 +592,37 @@ impl Default for DebuggerPanel {
     }
 }
 
+/// Which view of the traced machine the Frame Analyzer shows: the beam
+/// (what owned the chip bus at each colour clock) or memory (what last
+/// touched each block of the address space).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AnalyzerTab {
+    Beam,
+    Memory,
+}
+
+pub const ANALYZER_TABS: [AnalyzerTab; 2] = [AnalyzerTab::Beam, AnalyzerTab::Memory];
+
+fn analyzer_tab_label(tab: AnalyzerTab) -> &'static str {
+    match tab {
+        AnalyzerTab::Beam => "Beam",
+        AnalyzerTab::Memory => "Memory",
+    }
+}
+
+/// A one-click heat map window: a named region of the address space
+/// (chip RAM, the whole 24-bit space, a RAM board) to point the map at.
+#[derive(Clone)]
+pub struct HeatPreset {
+    pub label: String,
+    pub base: u32,
+    pub span: u32,
+}
+
 /// Interactive state of the frame analyzer pane.
 #[derive(Clone)]
 pub struct FrameAnalyzerPanel {
+    pub tab: AnalyzerTab,
     pub selected_vpos: u16,
     pub selected_hpos: u16,
     /// Draw the rendered frame under the DMA heatmap so bus activity can
@@ -602,15 +631,24 @@ pub struct FrameAnalyzerPanel {
     /// Beam scrub: show the picture only up to the selected slot -- what
     /// the CRT had drawn when the beam was there. Implies the underlay.
     pub show_scrub: bool,
+    /// Memory tab: the address-space windows offered as buttons. Empty
+    /// until window.rs builds them from the machine's memory map.
+    pub heat_presets: Vec<HeatPreset>,
+    /// Memory tab: the pinned cell (an index into the 256x256 grid) whose
+    /// address range and last toucher are reported under the map.
+    pub heat_selected: Option<usize>,
 }
 
 impl FrameAnalyzerPanel {
     pub fn new() -> Self {
         Self {
+            tab: AnalyzerTab::Beam,
             selected_vpos: 0x2C,
             selected_hpos: 0x28,
             show_underlay: false,
             show_scrub: false,
+            heat_presets: Vec::new(),
+            heat_selected: None,
         }
     }
 
@@ -907,20 +945,42 @@ pub fn panel_control_at(panel: &Panel, pos: (i32, i32)) -> Option<UiControl> {
         // The console has no controls beyond the shared close button and
         // the click-swallowing body.
         Panel::Console(_) => {}
-        Panel::FrameAnalyzer(_) => {
-            if let Some(control) = analyzer_pick_control(rect, pos) {
-                return Some(control);
+        Panel::FrameAnalyzer(panel) => {
+            for (index, tab) in ANALYZER_TABS.iter().enumerate() {
+                if analyzer_tab_rect(rect, index).contains(pos) {
+                    return Some(UiControl::AnalyzerTab(*tab));
+                }
             }
-            for (control, button_rect) in analyzer_button_rects(rect) {
+            // Each tab only offers its own controls: the beam picks and
+            // checkboxes are not drawn on the Memory tab, and the map is
+            // not drawn on the Beam tab, so neither may be hit there.
+            match panel.tab {
+                AnalyzerTab::Beam => {
+                    if let Some(control) = analyzer_pick_control(rect, pos) {
+                        return Some(control);
+                    }
+                    if analyzer_underlay_rect(rect).contains(pos) {
+                        return Some(UiControl::AnalyzerUnderlay);
+                    }
+                    if analyzer_scrub_rect(rect).contains(pos) {
+                        return Some(UiControl::AnalyzerScrub);
+                    }
+                }
+                AnalyzerTab::Memory => {
+                    for (control, button_rect) in analyzer_preset_rects(rect, &panel.heat_presets) {
+                        if button_rect.contains(pos) {
+                            return Some(control);
+                        }
+                    }
+                    if let Some(control) = analyzer_heat_pick_control(rect, pos) {
+                        return Some(control);
+                    }
+                }
+            }
+            for (control, button_rect) in analyzer_tab_button_rects(rect, panel.tab) {
                 if button_rect.contains(pos) {
                     return Some(control);
                 }
-            }
-            if analyzer_underlay_rect(rect).contains(pos) {
-                return Some(UiControl::AnalyzerUnderlay);
-            }
-            if analyzer_scrub_rect(rect).contains(pos) {
-                return Some(UiControl::AnalyzerScrub);
             }
         }
         Panel::Launcher(state) => {
@@ -1054,6 +1114,17 @@ pub enum UiControl {
     /// Frame analyzer: run until the beam reaches the selected slot
     /// (a one-shot beam trap at the selected vpos/hpos).
     AnalyzerRunTo,
+    /// Frame analyzer: switch between the beam and memory views.
+    AnalyzerTab(AnalyzerTab),
+    /// Memory tab: point the heat map at preset window `n` (an index into
+    /// the panel's preset list).
+    AnalyzerHeatPreset(u8),
+    /// Memory tab: pick a heat map cell, in grid coordinates (0..=255 on
+    /// both axes, so the mapping does not depend on the map's pixel size).
+    AnalyzerHeatPick {
+        x: u8,
+        y: u8,
+    },
     /// Configuration screen: pick a machine model.
     LauncherModel(MachineModel),
     /// Configuration screen: switch the category tab.
@@ -1471,10 +1542,28 @@ fn audio_tab_button_rects(rect: Rect) -> [(UiControl, Rect); 5] {
     std::array::from_fn(|i| (UiControl::DebugAudioMute(i), audio_row_geom(rect, i).0))
 }
 
+/// A Frame Analyzer tab button, sized and placed like the debugger's tab
+/// row so the two tool windows read as the same chrome.
+fn analyzer_tab_rect(rect: Rect, index: usize) -> Rect {
+    Rect {
+        x: rect.x + 8 + index * (DEBUG_TAB_W + 4),
+        y: rect.y + TITLE_H + 4,
+        w: DEBUG_TAB_W,
+        h: DEBUG_TAB_H,
+    }
+}
+
+/// Top of a Frame Analyzer tab's content area (under the tab row). Both
+/// tabs start their header line here; the beam tab's older layout is this
+/// row and everything below it, shifted down by the tab row.
+fn analyzer_content_top(rect: Rect) -> usize {
+    rect.y + TITLE_H + 4 + DEBUG_TAB_H + 8
+}
+
 fn analyzer_raster_rect(rect: Rect) -> Rect {
     Rect {
         x: rect.x + 10,
-        y: rect.y + TITLE_H + 44,
+        y: analyzer_content_top(rect) + 34,
         w: 448,
         h: 246,
     }
@@ -1483,9 +1572,86 @@ fn analyzer_raster_rect(rect: Rect) -> Rect {
 fn analyzer_scanline_rect(rect: Rect) -> Rect {
     Rect {
         x: rect.x + 10,
-        y: rect.y + TITLE_H + 336,
+        y: analyzer_content_top(rect) + 326,
         w: 512,
         h: 34,
+    }
+}
+
+/// Height of one Memory-tab preset button.
+const ANALYZER_PRESET_H: usize = 16;
+
+/// The Memory tab's preset buttons, left to right under the hint line.
+/// Each is sized to its label; a preset that would run past the panel's
+/// right margin is dropped rather than clipped, and because the draw and
+/// the hit test share this list, a dropped one is neither drawn nor
+/// clickable.
+fn analyzer_preset_rects(rect: Rect, presets: &[HeatPreset]) -> Vec<(UiControl, Rect)> {
+    let limit = rect.x + rect.w.saturating_sub(10);
+    let mut x = rect.x + 10;
+    let mut out = Vec::with_capacity(presets.len());
+    for (index, preset) in presets.iter().enumerate().take(u8::MAX as usize + 1) {
+        let w = preset.label.chars().count() * font::GLYPH_W + 16;
+        if x + w > limit {
+            break;
+        }
+        out.push((
+            UiControl::AnalyzerHeatPreset(index as u8),
+            Rect {
+                x,
+                y: analyzer_content_top(rect) + 28,
+                w,
+                h: ANALYZER_PRESET_H,
+            },
+        ));
+        x += w + 6;
+    }
+    out
+}
+
+/// The Memory tab's map: one square pixel block per grid cell, 368 px on
+/// a side so the 256-cell grid samples up cleanly inside the panel.
+fn analyzer_heat_map_rect(rect: Rect) -> Rect {
+    Rect {
+        x: rect.x + 10,
+        y: analyzer_content_top(rect) + 50,
+        w: 368,
+        h: 368,
+    }
+}
+
+/// Left edge of the census/legend column, right of the map.
+fn analyzer_heat_census_x(rect: Rect) -> usize {
+    let map = analyzer_heat_map_rect(rect);
+    map.x + map.w + 16
+}
+
+/// Which grid cell `pos` lands on, proportionally like
+/// [`analyzer_pick_control`] but resolved all the way to grid
+/// coordinates: the grid is a fixed 256x256 whatever the map's pixel
+/// size, so nothing downstream has to re-scale.
+fn analyzer_heat_pick_control(rect: Rect, pos: (i32, i32)) -> Option<UiControl> {
+    let map = analyzer_heat_map_rect(rect);
+    if !map.contains(pos) {
+        return None;
+    }
+    let last = heatmap::GRID - 1;
+    let x = (pos.0 - map.x as i32).max(0) as usize;
+    let y = (pos.1 - map.y as i32).max(0) as usize;
+    Some(UiControl::AnalyzerHeatPick {
+        x: ((x * heatmap::GRID) / map.w.max(1)).min(last) as u8,
+        y: ((y * heatmap::GRID) / map.h.max(1)).min(last) as u8,
+    })
+}
+
+/// The transport buttons for `tab`. The Memory tab has no selected beam
+/// slot, so the To slot button (like the underlay and scrub checkboxes)
+/// is beam-only.
+fn analyzer_tab_button_rects(rect: Rect, tab: AnalyzerTab) -> Vec<(UiControl, Rect)> {
+    let all = analyzer_button_rects(rect);
+    match tab {
+        AnalyzerTab::Beam => all.to_vec(),
+        AnalyzerTab::Memory => all[..2].to_vec(),
     }
 }
 
@@ -1798,6 +1964,53 @@ pub struct AnalyzerUnderlayView {
     pub width: usize,
 }
 
+/// One line of the Memory tab's census column: how much of the window a
+/// single toucher currently holds. Every toucher gets a row, including
+/// the ones with nothing, so the column doubles as the legend and does
+/// not jump about as activity comes and goes.
+pub struct AnalyzerHeatCensusRow {
+    pub name: &'static str,
+    /// The toucher's colour as [`crate::heatmap::Toucher::colour`] gives
+    /// it (0xAARRGGBB), not in the presentation texture's byte order.
+    pub colour: u32,
+    pub cells: usize,
+    /// Bytes those cells cover (`cells * bytes_per_cell`).
+    pub bytes: u64,
+}
+
+/// The pinned cell's record, read out of the live map by window.rs.
+/// Only the pinned cell can carry one: the hovered cell is known to the
+/// drawing code alone, which can name its addresses but has no way to
+/// ask the map what touched it.
+pub struct AnalyzerHeatCell {
+    /// Index into the 256x256 grid.
+    pub cell: usize,
+    /// What last touched it, or None for a cell nothing has touched.
+    pub toucher: Option<&'static str>,
+    /// Its toucher's colour (0xAARRGGBB, as the heat map paints it).
+    pub colour: u32,
+    /// Frames since that touch; None when there is no touch to age.
+    pub age_frames: Option<u32>,
+}
+
+/// The Memory tab's view of the address space.
+pub struct AnalyzerHeatView {
+    /// [`crate::heatmap::CELLS`] pixels straight from
+    /// `HeatMap::render`: 0xAARRGGBB, already faded by age.
+    pub image: Vec<u32>,
+    /// First address the grid covers, and the span it maps.
+    pub base: u32,
+    pub span: u32,
+    pub bytes_per_cell: u32,
+    /// Frame the image was rendered for.
+    pub frame: u64,
+    /// One row per toucher, in Toucher code order, zero rows included.
+    pub census: Vec<AnalyzerHeatCensusRow>,
+    /// The pinned cell's record, when a cell is pinned and the map has
+    /// something recorded for it.
+    pub selected: Option<AnalyzerHeatCell>,
+}
+
 pub struct FrameAnalyzerView {
     pub running: bool,
     pub status: String,
@@ -1806,6 +2019,8 @@ pub struct FrameAnalyzerView {
     /// Beam scrubbing: the underlay shows only what the CRT had drawn up
     /// to the selected slot; the rest ghosts at low brightness.
     pub scrub: bool,
+    /// The Memory tab's data; None while the heat map is not armed.
+    pub heat: Option<AnalyzerHeatView>,
 }
 
 pub enum PanelViewData {
@@ -3792,9 +4007,83 @@ fn draw_frame_analyzer(
         1,
         scale,
     );
+    draw_analyzer_tabs(frame, rect, panel.tab, hover, scale);
+    // The tab dispatch comes before any "nothing captured yet" message:
+    // the memory view is built from the live map, so it has something to
+    // show whether or not a beam trace has ever been captured.
+    match panel.tab {
+        AnalyzerTab::Beam => draw_analyzer_beam_tab(frame, rect, view, hover, scale),
+        AnalyzerTab::Memory => draw_analyzer_heat_tab(frame, rect, panel, view, hover, scale),
+    }
+    // Transport buttons (and the beam tab's checkboxes) are bottom-anchored
+    // chrome under whichever tab's content sits above them.
+    for (control, button_rect) in analyzer_tab_button_rects(rect, panel.tab) {
+        let label = match control {
+            UiControl::AnalyzerRun if view.running => "Pause",
+            UiControl::AnalyzerRun => "Run",
+            UiControl::AnalyzerFrame => "Frame",
+            _ => "To slot",
+        };
+        draw_text_button(
+            frame,
+            button_rect,
+            label,
+            true,
+            hover == Some(control),
+            scale,
+        );
+    }
+    if panel.tab == AnalyzerTab::Beam {
+        draw_analyzer_checkboxes(frame, rect, panel, hover, scale);
+    }
+}
 
+/// The tab row under the title bar, drawn like the debugger's.
+fn draw_analyzer_tabs(
+    frame: &mut [u8],
+    rect: Rect,
+    selected: AnalyzerTab,
+    hover: Option<UiControl>,
+    scale: usize,
+) {
+    for (index, tab) in ANALYZER_TABS.iter().enumerate() {
+        let tab_rect = analyzer_tab_rect(rect, index);
+        let active = selected == *tab;
+        let hovered = hover == Some(UiControl::AnalyzerTab(*tab));
+        let face = if active {
+            ENTRY_BG
+        } else if hovered {
+            BUTTON_FACE_HOVER
+        } else {
+            BUTTON_FACE
+        };
+        let scaled = scale_rect(tab_rect, scale);
+        fill_rect(frame, scaled, face, scale);
+        draw_rect_bevel(frame, scaled, BUTTON_EDGE_LIGHT, BUTTON_EDGE_DARK, scale);
+        let label = analyzer_tab_label(*tab);
+        let text_w = label.chars().count() * font::GLYPH_W;
+        draw_panel_text(
+            frame,
+            tab_rect.x + tab_rect.w.saturating_sub(text_w) / 2,
+            tab_rect.y + (DEBUG_TAB_H - 8) / 2,
+            label,
+            if active { ENTRY_TEXT } else { BUTTON_TEXT },
+            1,
+            scale,
+        );
+    }
+}
+
+fn draw_analyzer_beam_tab(
+    frame: &mut [u8],
+    rect: Rect,
+    view: &FrameAnalyzerView,
+    hover: Option<UiControl>,
+    scale: usize,
+) {
+    let content_top = analyzer_content_top(rect);
     let Some(trace) = &view.trace else {
-        let mut y = rect.y + TITLE_H + 36;
+        let mut y = content_top + 26;
         for line in [
             "No chip-bus trace captured yet.",
             "Press Frame to record one full Agnus frame, or Run to collect live frames.",
@@ -3803,23 +4092,6 @@ fn draw_frame_analyzer(
             draw_panel_text(frame, rect.x + 24, y, line, PANEL_TEXT, 1, scale);
             y += 16;
         }
-        for (control, button_rect) in analyzer_button_rects(rect) {
-            let label = match control {
-                UiControl::AnalyzerRun if view.running => "Pause",
-                UiControl::AnalyzerRun => "Run",
-                UiControl::AnalyzerFrame => "Frame",
-                _ => "To slot",
-            };
-            draw_text_button(
-                frame,
-                button_rect,
-                label,
-                true,
-                hover == Some(control),
-                scale,
-            );
-        }
-        draw_analyzer_checkboxes(frame, rect, panel, hover, scale);
         return;
     };
 
@@ -3839,7 +4111,7 @@ fn draw_frame_analyzer(
     draw_panel_text(
         frame,
         rect.x + 10,
-        rect.y + TITLE_H + 10,
+        content_top,
         &header,
         PANEL_TEXT,
         1,
@@ -3848,7 +4120,7 @@ fn draw_frame_analyzer(
     draw_panel_text(
         frame,
         rect.x + 10,
-        rect.y + TITLE_H + 24,
+        content_top + 14,
         "x=hpos colour clocks, y=vpos lines; white=captured display, orange=DIW, cyan=DDF",
         PANEL_TEXT_DIM,
         1,
@@ -3985,24 +4257,287 @@ fn draw_frame_analyzer(
         1,
         scale,
     );
+}
 
-    for (control, button_rect) in analyzer_button_rects(rect) {
-        let label = match control {
-            UiControl::AnalyzerRun if view.running => "Pause",
-            UiControl::AnalyzerRun => "Run",
-            UiControl::AnalyzerFrame => "Frame",
-            _ => "To slot",
-        };
-        draw_text_button(
+/// A byte count in the units memory windows come in: powers of two, with
+/// one decimal where the figure is not a whole unit ("512", "4K", "1.5M").
+fn compact_bytes(bytes: u64) -> String {
+    for (unit, suffix) in [(1u64 << 30, 'G'), (1 << 20, 'M'), (1 << 10, 'K')] {
+        if bytes >= unit {
+            let whole = bytes / unit;
+            let tenths = (bytes % unit) * 10 / unit;
+            return if tenths == 0 {
+                format!("{whole}{suffix}")
+            } else {
+                format!("{whole}.{tenths}{suffix}")
+            };
+        }
+    }
+    format!("{bytes}")
+}
+
+/// Re-pack a heat map colour for the presentation texture. The map paints
+/// 0xAARRGGBB; the texture takes the red channel in the low byte (see
+/// [`rgba`]), so red and blue swap on the way in.
+fn heat_rgba(argb: u32) -> u32 {
+    rgba((argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF)
+}
+
+/// The address range one grid cell covers, as "$XXXXXX-$YYYYYY".
+fn heat_cell_range(base: u32, bytes_per_cell: u32, cell: usize) -> String {
+    let start = base.saturating_add((cell as u32).saturating_mul(bytes_per_cell));
+    let end = start.saturating_add(bytes_per_cell.saturating_sub(1));
+    format!("${start:06X}-${end:06X}")
+}
+
+fn draw_analyzer_heat_tab(
+    frame: &mut [u8],
+    rect: Rect,
+    panel: &FrameAnalyzerPanel,
+    view: &FrameAnalyzerView,
+    hover: Option<UiControl>,
+    scale: usize,
+) {
+    let content_top = analyzer_content_top(rect);
+    let Some(heat) = &view.heat else {
+        // Nothing to paint until the map is recording; the presets stay,
+        // because picking a window is how it gets armed.
+        draw_panel_text(
             frame,
-            button_rect,
-            label,
-            true,
-            hover == Some(control),
+            rect.x + 10,
+            content_top,
+            "The heat map is not armed.",
+            PANEL_TEXT,
+            1,
+            scale,
+        );
+        draw_analyzer_presets(frame, rect, panel, None, hover, scale);
+        return;
+    };
+
+    let per_cell = compact_bytes(u64::from(heat.bytes_per_cell));
+    let last = heat.base.saturating_add(heat.span.saturating_sub(1));
+    draw_panel_text(
+        frame,
+        rect.x + 10,
+        content_top,
+        &format!(
+            "frame {}  window ${:06X}-${:06X}  {} span  {}/cell",
+            heat.frame,
+            heat.base,
+            last,
+            compact_bytes(u64::from(heat.span)),
+            per_cell,
+        ),
+        PANEL_TEXT,
+        1,
+        scale,
+    );
+    draw_panel_text(
+        frame,
+        rect.x + 10,
+        content_top + 14,
+        &format!(
+            "one cell per {per_cell} bytes, coloured by what last touched it, \
+             fading over {} frames",
+            heatmap::DECAY_FRAMES
+        ),
+        PANEL_TEXT_DIM,
+        1,
+        scale,
+    );
+    draw_analyzer_presets(
+        frame,
+        rect,
+        panel,
+        Some((heat.base, heat.span)),
+        hover,
+        scale,
+    );
+
+    let map = analyzer_heat_map_rect(rect);
+    draw_heat_map(frame, map, &heat.image, scale);
+    draw_outline(frame, map, PANEL_TEXT_HILIGHT, scale);
+    if let Some(cell) = panel.heat_selected {
+        // One cell is under 1.5 px at this scale, so the marker is a 5x5
+        // box around it rather than its own footprint.
+        let (x, y) = heat_cell_origin(map, cell);
+        draw_outline_clipped(
+            frame,
+            Rect {
+                x: x.saturating_sub(2),
+                y: y.saturating_sub(2),
+                w: 5,
+                h: 5,
+            },
+            map,
+            rgba(238, 238, 232),
             scale,
         );
     }
-    draw_analyzer_checkboxes(frame, rect, panel, hover, scale);
+    draw_heat_census(frame, rect, map, &heat.census, scale);
+
+    // The readout describes the hovered cell while the pointer is over
+    // the map and the pinned one otherwise. Only the pinned cell can name
+    // its toucher: the view carries one record, read from the live map by
+    // the view builder, which has no way to know where the pointer is.
+    let hovered = match hover {
+        Some(UiControl::AnalyzerHeatPick { x, y }) => {
+            Some(usize::from(y) * heatmap::GRID + usize::from(x))
+        }
+        _ => None,
+    };
+    let readout_y = map.y + map.h + 10;
+    let (text, colour, swatch) = match (hovered, panel.heat_selected) {
+        (Some(cell), _) => (
+            heat_cell_range(heat.base, heat.bytes_per_cell, cell),
+            PANEL_TEXT,
+            None,
+        ),
+        (None, Some(cell)) => {
+            let range = heat_cell_range(heat.base, heat.bytes_per_cell, cell);
+            match heat.selected.as_ref().filter(|sel| sel.cell == cell) {
+                Some(sel) => {
+                    let mut text = format!("{range}  {}", sel.toucher.unwrap_or("untouched"));
+                    if let Some(age) = sel.age_frames {
+                        text.push_str(&format!("  age {age}f"));
+                    }
+                    (text, PANEL_TEXT_HILIGHT, Some(sel.colour))
+                }
+                None => (format!("{range}  untouched"), PANEL_TEXT, None),
+            }
+        }
+        (None, None) => ("click a cell to inspect".to_string(), PANEL_TEXT_DIM, None),
+    };
+    let text_x = if let Some(colour) = swatch {
+        fill_rect(
+            frame,
+            scale_rect(
+                Rect {
+                    x: map.x,
+                    y: readout_y,
+                    w: 8,
+                    h: 8,
+                },
+                scale,
+            ),
+            heat_rgba(colour),
+            scale,
+        );
+        map.x + 12
+    } else {
+        map.x
+    };
+    draw_panel_text(frame, text_x, readout_y, &text, colour, 1, scale);
+}
+
+/// The Memory tab's window presets. `window` is the live map's
+/// (base, span), so the preset naming it can read as pressed.
+fn draw_analyzer_presets(
+    frame: &mut [u8],
+    rect: Rect,
+    panel: &FrameAnalyzerPanel,
+    window: Option<(u32, u32)>,
+    hover: Option<UiControl>,
+    scale: usize,
+) {
+    // The rect list is a prefix of the presets (any that would not fit are
+    // dropped), so zipping pairs each button with its own label.
+    for ((control, button), preset) in analyzer_preset_rects(rect, &panel.heat_presets)
+        .into_iter()
+        .zip(&panel.heat_presets)
+    {
+        // A preset's span is rounded to whole cells when the map takes it,
+        // so compare what it becomes, not what it asks for.
+        let active = window == Some((preset.base, heatmap::rounded_span(preset.span)));
+        draw_text_button(
+            frame,
+            button,
+            &preset.label,
+            true,
+            active || hover == Some(control),
+            scale,
+        );
+    }
+}
+
+/// Top-left pixel of a grid cell's footprint inside the map rect.
+fn heat_cell_origin(map: Rect, cell: usize) -> (usize, usize) {
+    let cell = cell.min(heatmap::CELLS - 1);
+    (
+        map.x + (cell % heatmap::GRID) * map.w / heatmap::GRID,
+        map.y + (cell / heatmap::GRID) * map.h / heatmap::GRID,
+    )
+}
+
+/// Nearest-sample the 256x256 grid into the map rect. The image arrives
+/// already faded by age, so this only re-packs the channel order.
+fn draw_heat_map(frame: &mut [u8], map: Rect, image: &[u32], scale: usize) {
+    for y in 0..map.h {
+        let cell_y = y * heatmap::GRID / map.h.max(1);
+        for x in 0..map.w {
+            let cell_x = x * heatmap::GRID / map.w.max(1);
+            let pixel = image
+                .get(cell_y * heatmap::GRID + cell_x)
+                .copied()
+                .unwrap_or(0xFF00_0000);
+            fill_rect(
+                frame,
+                scale_rect(
+                    Rect {
+                        x: map.x + x,
+                        y: map.y + y,
+                        w: 1,
+                        h: 1,
+                    },
+                    scale,
+                ),
+                heat_rgba(pixel),
+                scale,
+            );
+        }
+    }
+}
+
+/// The census column right of the map: a swatch, the toucher's name, and
+/// how much of the window it holds. Touchers with nothing draw dim, so
+/// the column reads as the legend too and its rows never move.
+fn draw_heat_census(
+    frame: &mut [u8],
+    rect: Rect,
+    map: Rect,
+    census: &[AnalyzerHeatCensusRow],
+    scale: usize,
+) {
+    let x = analyzer_heat_census_x(rect);
+    draw_panel_text(frame, x, map.y, "Touchers", PANEL_TEXT_DIM, 1, scale);
+    for (index, row) in census.iter().enumerate() {
+        let y = map.y + 16 + index * 14;
+        fill_rect(
+            frame,
+            scale_rect(Rect { x, y, w: 8, h: 8 }, scale),
+            heat_rgba(row.colour),
+            scale,
+        );
+        draw_panel_text(
+            frame,
+            x + 12,
+            y,
+            &format!(
+                "{:<9}{:>5} cells  {}",
+                row.name,
+                row.cells,
+                compact_bytes(row.bytes)
+            ),
+            if row.cells == 0 {
+                PANEL_TEXT_DIM
+            } else {
+                PANEL_TEXT
+            },
+            1,
+            scale,
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -6051,6 +6586,414 @@ mod tests {
         }
     }
 
+    /// A Frame Analyzer panel in `tab`, with `presets` on the Memory tab.
+    fn analyzer_ui(tab: AnalyzerTab, presets: Vec<HeatPreset>) -> UiState {
+        let mut panel = FrameAnalyzerPanel::new();
+        panel.tab = tab;
+        panel.heat_presets = presets;
+        UiState {
+            menu_open: false,
+            menu_scroll: 0,
+            panel: Some(Panel::FrameAnalyzer(panel)),
+        }
+    }
+
+    fn heat_preset(label: &str, base: u32, span: u32) -> HeatPreset {
+        HeatPreset {
+            label: label.to_string(),
+            base,
+            span,
+        }
+    }
+
+    /// A synthetic Memory-tab view: a black window with `lit` cells set to
+    /// their toucher's colour, and a full census.
+    fn heat_view(lit: &[(usize, crate::heatmap::Toucher)]) -> AnalyzerHeatView {
+        use crate::heatmap::Toucher;
+        let mut image = vec![0xFF00_0000u32; heatmap::CELLS];
+        for (cell, toucher) in lit {
+            image[*cell] = toucher.colour();
+        }
+        let touchers = [
+            Toucher::CpuRead,
+            Toucher::CpuWrite,
+            Toucher::Blitter,
+            Toucher::Copper,
+            Toucher::Disk,
+            Toucher::Bitplane,
+            Toucher::Sprite,
+            Toucher::Audio,
+        ];
+        AnalyzerHeatView {
+            image,
+            base: 0,
+            span: heatmap::DEFAULT_SPAN,
+            bytes_per_cell: heatmap::DEFAULT_SPAN / heatmap::CELLS as u32,
+            frame: 4321,
+            census: touchers
+                .iter()
+                .map(|toucher| {
+                    let cells = lit.iter().filter(|(_, t)| t == toucher).count();
+                    AnalyzerHeatCensusRow {
+                        name: toucher.name(),
+                        colour: toucher.colour(),
+                        cells,
+                        bytes: cells as u64
+                            * u64::from(heatmap::DEFAULT_SPAN / heatmap::CELLS as u32),
+                    }
+                })
+                .collect(),
+            selected: None,
+        }
+    }
+
+    fn analyzer_view(
+        trace: Option<AnalyzerTraceView>,
+        heat: Option<AnalyzerHeatView>,
+    ) -> Box<FrameAnalyzerView> {
+        Box::new(FrameAnalyzerView {
+            running: false,
+            status: "paused frame 4321".to_string(),
+            trace,
+            underlay: None,
+            scrub: false,
+            heat,
+        })
+    }
+
+    #[test]
+    fn analyzer_tabs_hit_test_and_gate_their_tab_controls() {
+        for (index, tab) in ANALYZER_TABS.iter().enumerate() {
+            let ui = analyzer_ui(AnalyzerTab::Beam, Vec::new());
+            let rect = panel_rect(ui.panel.as_ref().unwrap());
+            let button = analyzer_tab_rect(rect, index);
+            assert_eq!(
+                ui.control_at((button.x as i32 + 2, button.y as i32 + 2), false, false),
+                Some(UiControl::AnalyzerTab(*tab))
+            );
+        }
+
+        // Beam tab: the beam controls hit, the map does not exist.
+        let ui = analyzer_ui(AnalyzerTab::Beam, Vec::new());
+        let rect = panel_rect(ui.panel.as_ref().unwrap());
+        let map = analyzer_heat_map_rect(rect);
+        let underlay = analyzer_underlay_rect(rect);
+        assert_eq!(
+            ui.control_at((underlay.x as i32 + 2, underlay.y as i32 + 2), false, false),
+            Some(UiControl::AnalyzerUnderlay)
+        );
+        let in_map = (map.x as i32 + map.w as i32 / 2, map.y as i32 + 4);
+        assert!(
+            !matches!(
+                ui.control_at(in_map, false, false),
+                Some(UiControl::AnalyzerHeatPick { .. })
+            ),
+            "the heat map is not drawn on the Beam tab, so it must not be clickable"
+        );
+
+        // Memory tab: the map hits, and none of the beam-only controls do.
+        let ui = analyzer_ui(AnalyzerTab::Memory, Vec::new());
+        assert!(matches!(
+            ui.control_at(in_map, false, false),
+            Some(UiControl::AnalyzerHeatPick { .. })
+        ));
+        for beam_only in [
+            (underlay.x as i32 + 2, underlay.y as i32 + 2),
+            (
+                analyzer_scrub_rect(rect).x as i32 + 2,
+                analyzer_scrub_rect(rect).y as i32 + 2,
+            ),
+            (
+                analyzer_button_rects(rect)[2].1.x as i32 + 2,
+                analyzer_button_rects(rect)[2].1.y as i32 + 2,
+            ),
+        ] {
+            assert_eq!(
+                ui.control_at(beam_only, false, false),
+                Some(UiControl::PanelBody),
+                "beam-only controls are inert on the Memory tab"
+            );
+        }
+        // Run and Frame stay on both tabs.
+        for slot in 0..2 {
+            let (control, button) = analyzer_button_rects(rect)[slot];
+            assert_eq!(
+                ui.control_at((button.x as i32 + 2, button.y as i32 + 2), false, false),
+                Some(control)
+            );
+        }
+        // The scanline strip belongs to the beam view too.
+        let scanline = analyzer_scanline_rect(rect);
+        assert!(!matches!(
+            ui.control_at((scanline.x as i32 + 4, scanline.y as i32 + 4), false, false),
+            Some(UiControl::AnalyzerPick { .. })
+        ));
+    }
+
+    #[test]
+    fn heat_map_clicks_map_to_grid_cells() {
+        let ui = analyzer_ui(AnalyzerTab::Memory, Vec::new());
+        let rect = panel_rect(ui.panel.as_ref().unwrap());
+        let map = analyzer_heat_map_rect(rect);
+        let last = (heatmap::GRID - 1) as u8;
+        let pick = |dx: usize, dy: usize| {
+            ui.control_at(
+                (map.x as i32 + dx as i32, map.y as i32 + dy as i32),
+                false,
+                false,
+            )
+        };
+        assert_eq!(pick(0, 0), Some(UiControl::AnalyzerHeatPick { x: 0, y: 0 }));
+        assert_eq!(
+            pick(map.w - 1, map.h - 1),
+            Some(UiControl::AnalyzerHeatPick { x: last, y: last }),
+            "the map's last pixel is the grid's last cell"
+        );
+        assert_eq!(
+            pick(map.w - 1, 0),
+            Some(UiControl::AnalyzerHeatPick { x: last, y: 0 })
+        );
+        assert_eq!(
+            pick(map.w / 2, map.h / 2),
+            Some(UiControl::AnalyzerHeatPick { x: 128, y: 128 })
+        );
+        // One pixel past the map is not a pick.
+        assert_ne!(
+            ui.control_at(
+                (map.x as i32 + map.w as i32, map.y as i32 + 2),
+                false,
+                false
+            ),
+            Some(UiControl::AnalyzerHeatPick { x: last, y: 0 })
+        );
+    }
+
+    #[test]
+    fn heat_presets_hit_by_index_and_vanish_when_there_are_none() {
+        let presets = vec![
+            heat_preset("Chip", 0, 0x0020_0000),
+            heat_preset("24-bit", 0, heatmap::DEFAULT_SPAN),
+        ];
+        let ui = analyzer_ui(AnalyzerTab::Memory, presets.clone());
+        let rect = panel_rect(ui.panel.as_ref().unwrap());
+        let rects = analyzer_preset_rects(rect, &presets);
+        assert_eq!(rects.len(), 2);
+        for (index, (control, button)) in rects.iter().enumerate() {
+            assert_eq!(*control, UiControl::AnalyzerHeatPreset(index as u8));
+            assert_eq!(
+                ui.control_at((button.x as i32 + 2, button.y as i32 + 2), false, false),
+                Some(*control)
+            );
+            // Presets sit above the map, never over it.
+            assert!(button.y + button.h <= analyzer_heat_map_rect(rect).y);
+        }
+        // With no presets the row is empty: the same points are panel body.
+        let empty = analyzer_ui(AnalyzerTab::Memory, Vec::new());
+        for (_, button) in rects {
+            assert_eq!(
+                empty.control_at((button.x as i32 + 2, button.y as i32 + 2), false, false),
+                Some(UiControl::PanelBody)
+            );
+        }
+        assert!(analyzer_preset_rects(rect, &[]).is_empty());
+    }
+
+    /// The tab row shifted the beam layout down; the content it pushed
+    /// down must still clear the bottom-anchored transport row.
+    #[test]
+    fn analyzer_tab_row_leaves_both_tabs_room_above_the_buttons() {
+        let ui = analyzer_ui(AnalyzerTab::Beam, Vec::new());
+        let rect = panel_rect(ui.panel.as_ref().unwrap());
+        let tabs = analyzer_tab_rect(rect, ANALYZER_TABS.len() - 1);
+        assert!(tabs.y >= rect.y + TITLE_H, "tabs sit under the title bar");
+        assert!(tabs.x + tabs.w < rect.x + rect.w);
+        let content_top = analyzer_content_top(rect);
+        assert!(content_top >= tabs.y + tabs.h);
+        let buttons_top = analyzer_button_rects(rect)[0].1.y;
+        // Beam: the legend and marker-count lines follow the scanline
+        // strip (strip bottom + 14 for the legend, + 18 for the count).
+        let scanline = analyzer_scanline_rect(rect);
+        assert!(
+            scanline.y + scanline.h + 14 + 18 + font::GLYPH_H <= buttons_top,
+            "beam tab content runs into the transport row"
+        );
+        // Memory: the map plus its readout line.
+        let map = analyzer_heat_map_rect(rect);
+        assert!(
+            map.y + map.h + 10 + font::GLYPH_H <= buttons_top,
+            "the heat map runs into the transport row"
+        );
+        assert_eq!(map.w, map.h, "the map is square");
+        // The census column fits between the map and the panel edge.
+        let census_x = analyzer_heat_census_x(rect);
+        assert!(census_x >= map.x + map.w);
+        assert!(census_x + 12 + 27 * font::GLYPH_W <= rect.x + rect.w);
+    }
+
+    #[test]
+    fn heat_map_draws_its_cells_and_leaves_the_rest_black() {
+        use super::super::window::{texture_height, texture_width};
+        use crate::heatmap::Toucher;
+
+        let scale = 1;
+        let (w, h) = (texture_width(scale), texture_height(scale));
+        let mut frame = vec![0u8; w * h * 4];
+        let mut panel = FrameAnalyzerPanel::new();
+        panel.tab = AnalyzerTab::Memory;
+        panel.heat_presets = vec![heat_preset("Chip", 0, 0x0020_0000)];
+        let rect = panel_rect(&Panel::FrameAnalyzer(panel.clone()));
+        let map = analyzer_heat_map_rect(rect);
+        // One lit cell in the middle of the grid, away from the outline.
+        let cell = 128 * heatmap::GRID + 128;
+        let view = analyzer_view(None, Some(heat_view(&[(cell, Toucher::Blitter)])));
+        draw_frame_analyzer(&mut frame, rect, &panel, &view, None, scale);
+
+        let pixel = |x: usize, y: usize| -> [u8; 4] {
+            frame[(y * w + x) * 4..(y * w + x) * 4 + 4]
+                .try_into()
+                .unwrap()
+        };
+        // Sample where the map's own nearest mapping puts that cell.
+        let lit = (0..map.w)
+            .find(|x| x * heatmap::GRID / map.w == 128)
+            .unwrap();
+        assert_eq!(
+            pixel(map.x + lit, map.y + lit),
+            heat_rgba(Toucher::Blitter.colour()).to_le_bytes(),
+            "the lit cell is painted in its toucher's colour"
+        );
+        // A cell nothing touched stays black (not the untouched-frame zero).
+        assert_eq!(
+            pixel(map.x + 40, map.y + 40),
+            rgba(0, 0, 0).to_le_bytes(),
+            "cold cells are black"
+        );
+    }
+
+    #[test]
+    fn the_beam_tab_draws_below_the_tab_row() {
+        use super::super::window::{texture_height, texture_width};
+
+        let scale = 1;
+        let (w, h) = (texture_width(scale), texture_height(scale));
+        let mut frame = vec![0u8; w * h * 4];
+        let panel = FrameAnalyzerPanel::new();
+        assert_eq!(panel.tab, AnalyzerTab::Beam, "the beam view opens first");
+        let rect = panel_rect(&Panel::FrameAnalyzer(panel.clone()));
+        let trace = AnalyzerTraceView {
+            frame: 1,
+            seconds: 0.0,
+            rows: 4,
+            cols: 4,
+            line_cck: 4,
+            visible_start_vpos: 0,
+            visible_lines: 2,
+            display_hpos_start: 0,
+            display_hpos_end: 4,
+            owner_cck: [0; 9],
+            blitter_busy_cck: 0,
+            blitter_starve_cck: [0; 9],
+            partial: false,
+            selected_vpos: 0,
+            selected_hpos: 0,
+            selected_owner: "idle",
+            selected_owner_code: b'.',
+            owners: vec![b'.'; 16],
+            markers: Vec::new(),
+            selected_blit: None,
+            diw_v: None,
+            diw_h_cck: None,
+            ddf_cck: None,
+        };
+        let view = analyzer_view(Some(trace), None);
+        draw_frame_analyzer(&mut frame, rect, &panel, &view, None, scale);
+
+        let pixel = |x: usize, y: usize| -> [u8; 4] {
+            frame[(y * w + x) * 4..(y * w + x) * 4 + 4]
+                .try_into()
+                .unwrap()
+        };
+        // The open tab reads as pressed, the other as a plain button.
+        let beam = analyzer_tab_rect(rect, 0);
+        let memory = analyzer_tab_rect(rect, 1);
+        // Sampled inside the bevel but left of the centred label.
+        assert_eq!(pixel(beam.x + 3, beam.y + 3), ENTRY_BG.to_le_bytes());
+        assert_eq!(pixel(memory.x + 3, memory.y + 3), BUTTON_FACE.to_le_bytes());
+        // The raster moved down with the rest of the content and is still
+        // painted (idle slots, not the untouched frame).
+        let raster = analyzer_raster_rect(rect);
+        assert!(raster.y > beam.y + beam.h);
+        assert_eq!(
+            pixel(raster.x + 4, raster.y + raster.h / 2),
+            owner_color(b'.').to_le_bytes()
+        );
+    }
+
+    #[test]
+    fn the_memory_tab_draws_without_a_beam_trace_or_a_map() {
+        use super::super::window::{texture_height, texture_width};
+        use crate::heatmap::Toucher;
+
+        let scale = 1;
+        let (w, h) = (texture_width(scale), texture_height(scale));
+        let mut panel = FrameAnalyzerPanel::new();
+        panel.tab = AnalyzerTab::Memory;
+        panel.heat_presets = vec![
+            heat_preset("Chip", 0, 0x0020_0000),
+            heat_preset("24-bit", 0, heatmap::DEFAULT_SPAN),
+        ];
+        panel.heat_selected = Some(7 * heatmap::GRID + 9);
+        let rect = panel_rect(&Panel::FrameAnalyzer(panel.clone()));
+        let map = analyzer_heat_map_rect(rect);
+        let pixel = |frame: &[u8], x: usize, y: usize| -> [u8; 4] {
+            frame[(y * w + x) * 4..(y * w + x) * 4 + 4]
+                .try_into()
+                .unwrap()
+        };
+
+        // No beam trace at all: the memory view still paints its map.
+        let mut frame = vec![0u8; w * h * 4];
+        let mut heat = heat_view(&[(0, Toucher::CpuWrite)]);
+        heat.selected = Some(AnalyzerHeatCell {
+            cell: 7 * heatmap::GRID + 9,
+            toucher: Some(Toucher::Sprite.name()),
+            colour: Toucher::Sprite.colour(),
+            age_frames: Some(3),
+        });
+        let view = analyzer_view(None, Some(heat));
+        draw_frame_analyzer(&mut frame, rect, &panel, &view, None, scale);
+        assert_eq!(
+            pixel(&frame, map.x + map.w / 2, map.y + map.h / 2),
+            rgba(0, 0, 0).to_le_bytes()
+        );
+        assert_ne!(
+            pixel(&frame, map.x, map.y),
+            [0, 0, 0, 0],
+            "the map is outlined even when every cell is cold"
+        );
+
+        // No map either: the not-armed line and the presets, nothing else.
+        let mut bare = vec![0u8; w * h * 4];
+        let view = analyzer_view(None, None);
+        draw_frame_analyzer(&mut bare, rect, &panel, &view, None, scale);
+        for y in map.y..map.y + map.h {
+            for x in map.x..map.x + map.w {
+                assert_eq!(
+                    pixel(&bare, x, y),
+                    [0, 0, 0, 0],
+                    "an unarmed map paints nothing at ({x}, {y})"
+                );
+            }
+        }
+        let presets = analyzer_preset_rects(rect, &panel.heat_presets);
+        assert_eq!(presets.len(), 2);
+        assert_ne!(
+            pixel(&bare, presets[0].1.x + 2, presets[0].1.y + 2),
+            [0, 0, 0, 0],
+            "the presets are how an unarmed map gets armed, so they stay"
+        );
+    }
+
     #[test]
     fn memory_entry_parsers_find_and_region() {
         let mut panel = DebuggerPanel::new();
@@ -7400,6 +8343,7 @@ mod tests {
             running: false,
             status: "paused frame 1234 24.68s".to_string(),
             scrub: true,
+            heat: None,
             trace: Some(trace),
             underlay: Some(AnalyzerUnderlayView {
                 fb: std::rc::Rc::new(under_fb),
@@ -7452,6 +8396,68 @@ mod tests {
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "frame-analyzer");
+
+        // Frame analyzer, Memory tab: the address space instead of the
+        // beam. A window with a few busy regions so the map, the census
+        // column and the selected-cell readout all have something to say.
+        let mut frame = vec![0u8; w * h * 4];
+        let mut lit = Vec::new();
+        for cell in 0..heatmap::CELLS {
+            let (cx, cy) = (cell % heatmap::GRID, cell / heatmap::GRID);
+            // A bitplane buffer as a solid block, a copper list as a
+            // column, blitter and CPU traffic scattered through the heap.
+            let toucher = if (24..56).contains(&cy) && cx < 200 {
+                Some(crate::heatmap::Toucher::Bitplane)
+            } else if cx == 12 && (8..40).contains(&cy) {
+                Some(crate::heatmap::Toucher::Copper)
+            } else if (60..70).contains(&cy) && (cx / 8) % 3 == 0 {
+                Some(crate::heatmap::Toucher::Blitter)
+            } else if cy > 200 && (cx * cy) % 97 == 0 {
+                Some(crate::heatmap::Toucher::CpuWrite)
+            } else if cy == 3 && cx % 5 == 0 {
+                Some(crate::heatmap::Toucher::Audio)
+            } else {
+                None
+            };
+            if let Some(toucher) = toucher {
+                lit.push((cell, toucher));
+            }
+        }
+        let mut heat = heat_view(&lit);
+        let selected = 40 * heatmap::GRID + 100;
+        heat.selected = Some(AnalyzerHeatCell {
+            cell: selected,
+            toucher: Some(crate::heatmap::Toucher::Bitplane.name()),
+            colour: crate::heatmap::Toucher::Bitplane.colour(),
+            age_frames: Some(1),
+        });
+        let data = PanelViewData::FrameAnalyzer(analyzer_view(None, Some(heat)));
+        let mut panel = FrameAnalyzerPanel::new();
+        panel.tab = AnalyzerTab::Memory;
+        panel.heat_selected = Some(selected);
+        panel.heat_presets = vec![
+            heat_preset("Chip", 0, 0x0020_0000),
+            heat_preset("Slow", 0x00C0_0000, 0x0010_0000),
+            heat_preset("Fast", 0x0020_0000, 0x0080_0000),
+            heat_preset("24-bit", 0, heatmap::DEFAULT_SPAN),
+        ];
+        let ui = UiState {
+            menu_open: false,
+            menu_scroll: 0,
+            panel: Some(Panel::FrameAnalyzer(panel)),
+        };
+        draw(
+            &mut frame,
+            scale,
+            &ui,
+            Some(UiControl::AnalyzerTab(AnalyzerTab::Memory)),
+            Some(&data),
+            false,
+            false,
+            menu_labels(),
+        );
+        assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
+        save(&frame, "frame-analyzer-memory");
 
         // Console: a session transcript over the prompt line.
         let mut frame = vec![0u8; w * h * 4];

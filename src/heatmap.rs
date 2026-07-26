@@ -30,8 +30,8 @@ pub const CELLS: usize = GRID * GRID;
 pub const DEFAULT_SPAN: u32 = 0x0100_0000;
 
 /// Frames a cell takes to fade from its freshest colour to black. The
-/// eye reads a two-second tail as "recent" at 50 Hz without smearing
-/// everything together.
+/// eye reads a subsecond tail (about two thirds of a second at 50 Hz) as
+/// "recent" without smearing everything together.
 pub const DECAY_FRAMES: u32 = 32;
 
 /// What last touched a cell. Kept as a small code so the grid is one
@@ -239,6 +239,19 @@ impl HeatMap {
             .filter(|(_, n)| *n > 0)
             .collect()
     }
+
+    /// What one cell records: the toucher that last claimed it and the
+    /// frame stamp of that touch (the frame counter's low 32 bits, so an
+    /// age is `frame - stamp`). `None` for a cell outside the grid or one
+    /// nothing has touched since the window was set.
+    ///
+    /// Unlike [`HeatMap::render`], the stamp is returned raw rather than
+    /// faded, so a caller can report an age past the decay window instead
+    /// of only seeing black.
+    pub fn cell(&self, cell: usize) -> Option<(Toucher, u32)> {
+        let source = Toucher::from_code(*self.source.get(cell)?);
+        (source != Toucher::None).then(|| (source, self.stamp[cell]))
+    }
 }
 
 /// Scale a colour's channels by `num`/`den`, keeping it opaque.
@@ -339,6 +352,23 @@ mod tests {
             0,
         );
         assert_eq!(map.census(0), vec![(Toucher::Blitter, 2)]);
+    }
+
+    #[test]
+    fn a_cell_reports_its_toucher_and_the_frame_it_was_touched_on() {
+        let mut map = HeatMap::new(0, DEFAULT_SPAN);
+        map.touch(0x2000, 2, Toucher::Copper, 7);
+        let cell = 0x2000 / map.bytes_per_cell() as usize;
+        assert_eq!(map.cell(cell), Some((Toucher::Copper, 7)));
+        assert_eq!(map.cell(cell + 1), None, "an untouched cell has no record");
+        assert_eq!(map.cell(CELLS), None, "past the end of the grid");
+        // The record outlives the fade: a cell that renders black still
+        // reports what touched it, so a caller can name an age past the
+        // decay window instead of only seeing black.
+        let mut image = vec![0u32; CELLS];
+        map.render(u64::from(7 + DECAY_FRAMES), &mut image);
+        assert_eq!(image[cell], 0xFF00_0000);
+        assert_eq!(map.cell(cell), Some((Toucher::Copper, 7)));
     }
 
     #[test]

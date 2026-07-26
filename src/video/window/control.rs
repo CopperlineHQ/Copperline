@@ -203,7 +203,16 @@ impl App {
                     exec::exec_core(&mut self.emu, &mut ctl.ctx, &op)
                 };
                 let line = match result {
-                    Ok(value) => proto::ok_line(&id, value),
+                    Ok(value) => {
+                        // A memory.heatmap request that took effect makes
+                        // the protocol the map's owner, whether it armed,
+                        // re-windowed, or disarmed it: the analyzer pane
+                        // must no longer release the map when it closes.
+                        if matches!(op, CoreOp::HeatMapSet { .. }) {
+                            self.heatmap_armed_by_panel = false;
+                        }
+                        proto::ok_line(&id, value)
+                    }
                     Err(err) => proto::err_line(&id, &err),
                 };
                 self.control_send(line);

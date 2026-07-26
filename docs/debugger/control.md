@@ -265,6 +265,15 @@ can be looked at too; moving it starts a cold map, since the cells would
 otherwise carry activity from addresses they no longer name. `-32003`
 while it is not armed.
 
+There is one map per machine, and the Frame Analyzer's Memory tab drives
+that same map (see [the debugger window](window.md#frame-analyzer-memory-tab)):
+its window presets are `memory.heatmap` requests by another name, so the
+last window request wins whichever side made it. The pane releases the map
+when it closes only if the pane owns it: it becomes the owner by arming a
+map where none was armed, and any `memory.heatmap` request takes the
+ownership over, so a protocol-driven map keeps recording while the pane is
+opened and closed around it.
+
 Bus faults: `fault.inject {addr, len?, on?, count?}` -> `{id}` makes CPU
 accesses inside that window take a bus error instead of reaching memory
 (`on` is `read`, `write`, or `both`, default both; `count` limits how
