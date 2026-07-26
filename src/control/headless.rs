@@ -360,6 +360,31 @@ impl Session {
                 ))?;
                 Ok(None)
             }
+            HostOp::MouseTo {
+                port,
+                x,
+                y,
+                tolerance,
+                max_frames,
+            } => {
+                let ctx = &mut self.ctx;
+                let reply = match exec::mouse_to(
+                    &mut self.emu,
+                    port,
+                    (x, y),
+                    tolerance,
+                    max_frames,
+                    |emu, action| {
+                        ctx.inject_now(emu, action);
+                    },
+                ) {
+                    Ok(value) => proto::ok_line(&id, value),
+                    Err(e) => proto::err_line(&id, &e),
+                };
+                self.write(&reply)?;
+                self.emit_events()?;
+                Ok(None)
+            }
             HostOp::FloppyInsert {
                 drive,
                 path,
@@ -821,6 +846,15 @@ impl Session {
                         &CtlError::invalid_state("pause before loading a state"),
                     ))?;
                 }
+                Request::Host(HostOp::MouseTo { .. }) => {
+                    // The servo advances the machine frame by frame to
+                    // watch what its own deltas did, so it cannot share
+                    // the timeline with an in-flight resume.
+                    self.write(&proto::err_line(
+                        &req.id,
+                        &CtlError::invalid_state("pause before servoing the pointer"),
+                    ))?;
+                }
                 Request::Host(
                     op @ (HostOp::FloppyInsert { .. }
                     | HostOp::FloppyEject { .. }
@@ -1090,6 +1124,37 @@ mod tests {
             let a = c.result("capture.digest", json!({}));
             let b = c.result("capture.digest", json!({}));
             assert_eq!(a["digest"], b["digest"]);
+        });
+    }
+
+    #[test]
+    fn mouse_to_reports_a_guest_with_no_sprite_pointer() {
+        run_session(None, |c| {
+            c.auth();
+            // The test ROM draws no sprites, so there is no pointer to
+            // observe. That must be a loud, specific failure rather than
+            // a blind guess at relative motion.
+            let refused = c.call("input.mouse_to", json!({"x": 200, "y": 100}));
+            assert_eq!(refused["error"]["code"], proto::INVALID_STATE);
+            assert!(
+                refused["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("sprite 0 is not being drawn"),
+                "{}",
+                refused["error"]["message"]
+            );
+        });
+    }
+
+    #[test]
+    fn mouse_to_is_refused_while_a_resume_is_in_flight() {
+        run_session(None, |c| {
+            c.auth();
+            c.send("continue", json!({}));
+            let refused = c.call("input.mouse_to", json!({"x": 10, "y": 10}));
+            assert_eq!(refused["error"]["code"], proto::INVALID_STATE);
+            c.result("pause", json!({}));
         });
     }
 

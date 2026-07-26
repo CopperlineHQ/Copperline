@@ -87,6 +87,13 @@ pub struct CliArgs {
     /// to 1 (carried 0-based). Emitted by the input recorder one event
     /// per frame of recorded movement.
     pub mouse_after: Vec<(f32, i32, i32, u8)>,
+    /// `--mouse-to-after SECS X Y [PORT]`: at SECS emulated seconds,
+    /// servo the guest pointer to presented-pixel (X, Y) -- the same
+    /// coordinates a screenshot is measured in -- by watching sprite 0
+    /// and correcting relative motion until it lands. PORT defaults to 1
+    /// (carried 0-based). See `src/pointer.rs` for why absolute pointer
+    /// positioning has to be closed-loop.
+    pub mouse_to_after: Vec<(f32, i32, i32, u8)>,
     /// `--pot-after SECS X Y [PORT]`: at SECS emulated seconds, set an
     /// analogue controller's stick/paddle position (each axis 0-255, the
     /// count POTxDAT latches). PORT defaults to 2 (carried 0-based).
@@ -152,13 +159,14 @@ fn parse_args() -> Result<CliArgs> {
 /// the flag names (without the leading dashes) whose effects accumulate;
 /// anything else in a script is an error so a typo cannot silently change
 /// emulator configuration.
-const SCRIPT_DIRECTIVES: [&str; 10] = [
+const SCRIPT_DIRECTIVES: [&str; 11] = [
     "press-after",
     "key-after",
     "hold-key-after",
     "click-after",
     "joy-after",
     "mouse-after",
+    "mouse-to-after",
     "pot-after",
     "insert-disk-after",
     "defer-disk-insert",
@@ -303,6 +311,7 @@ where
     let mut click_after: Vec<(f32, MouseButtonKind, u32, u8)> = Vec::new();
     let mut joy_after: Vec<(f32, JoyButtonKind, u32, u8)> = Vec::new();
     let mut mouse_after: Vec<(f32, i32, i32, u8)> = Vec::new();
+    let mut mouse_to_after: Vec<(f32, i32, i32, u8)> = Vec::new();
     let mut pot_after: Vec<(f32, u8, u8, u8)> = Vec::new();
     let mut record_input: Option<PathBuf> = None;
     let mut wave_path: Option<PathBuf> = None;
@@ -575,6 +584,15 @@ where
                     next_arg(&mut args, USAGE, "--joy-after DURATION_MS must be a number")?;
                 let port = take_port_token(&mut args, 2);
                 joy_after.push((secs, button, dur_ms, port));
+            }
+            "--mouse-to-after" => {
+                const USAGE: &str = "--mouse-to-after requires SECS X Y";
+                let secs: f32 =
+                    next_arg(&mut args, USAGE, "--mouse-to-after SECS must be a number")?;
+                let x: i32 = next_arg(&mut args, USAGE, "--mouse-to-after X must be an integer")?;
+                let y: i32 = next_arg(&mut args, USAGE, "--mouse-to-after Y must be an integer")?;
+                let port = take_port_token(&mut args, 1);
+                mouse_to_after.push((secs, x, y, port));
             }
             "--mouse-after" => {
                 const USAGE: &str = "--mouse-after requires SECS DX DY";
@@ -904,6 +922,7 @@ where
         click_after,
         joy_after,
         mouse_after,
+        mouse_to_after,
         pot_after,
         record_input,
         disk_insert_after,
@@ -1005,6 +1024,9 @@ fn print_help() {
          --mouse-after SECS DX DY [PORT]\n  \
          \x20                            apply a relative mouse motion at SECS on PORT\n  \
          \x20                            (default 1)\n  \
+         --mouse-to-after SECS X Y [PORT]\n  \
+         \x20                            from SECS, move the pointer to screen pixel\n  \
+         \x20                            (X, Y) by watching sprite 0, on PORT (default 1)\n  \
          --pot-after SECS X Y [PORT]    set an analogue controller position (0-255 per\n  \
          \x20                            axis) at SECS on PORT (default 2)\n  \
          --record-input PATH            record all machine-bound input for the whole run\n  \
@@ -1168,6 +1190,7 @@ fn validate_benchmark_args(cli: &CliArgs) -> Result<()> {
         || !cli.click_after.is_empty()
         || !cli.joy_after.is_empty()
         || !cli.mouse_after.is_empty()
+        || !cli.mouse_to_after.is_empty()
         || !cli.pot_after.is_empty()
     {
         return Err(anyhow!(
@@ -1214,6 +1237,7 @@ fn validate_gdb_args(cli: &CliArgs) -> Result<()> {
         || !cli.click_after.is_empty()
         || !cli.joy_after.is_empty()
         || !cli.mouse_after.is_empty()
+        || !cli.mouse_to_after.is_empty()
         || !cli.pot_after.is_empty()
     {
         return Err(anyhow!(
@@ -1279,6 +1303,7 @@ fn validate_control_args(cli: &CliArgs) -> Result<()> {
         || !cli.click_after.is_empty()
         || !cli.joy_after.is_empty()
         || !cli.mouse_after.is_empty()
+        || !cli.mouse_to_after.is_empty()
         || !cli.pot_after.is_empty()
     {
         return Err(anyhow!(
@@ -1646,6 +1671,7 @@ fn main() -> Result<()> {
         cli.click_after,
         cli.joy_after,
         cli.mouse_after,
+        cli.mouse_to_after,
         cli.pot_after,
         disk_insert_after,
         cli.cd_insert_after,
@@ -1760,6 +1786,7 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
         None,
         std::array::from_fn(|_| Vec::new()),
         [true; 4],
@@ -1802,6 +1829,7 @@ fn launcher_requested(cli: &CliArgs) -> bool {
         && cli.click_after.is_empty()
         && cli.joy_after.is_empty()
         && cli.mouse_after.is_empty()
+        && cli.mouse_to_after.is_empty()
         && cli.pot_after.is_empty()
         && cli.disk_insert_after.is_empty()
         && cli.record_input.is_none()
@@ -1979,6 +2007,18 @@ mod tests {
     fn mouse_after_parses_signed_deltas() -> Result<()> {
         let args = parse(&["--mouse-after", "1.5", "-3", "10"])?;
         assert_eq!(args.mouse_after, vec![(1.5, -3, 10, 0)]);
+        Ok(())
+    }
+
+    #[test]
+    fn mouse_to_after_parses_absolute_targets_on_either_port() -> Result<()> {
+        let args = parse(&["--mouse-to-after", "3.0", "320", "128"])?;
+        assert_eq!(args.mouse_to_after, vec![(3.0, 320, 128, 0)]);
+        // The same directive inside a script, with the optional port.
+        let path = temp_script("mouse-to", "mouse-to-after 4.5 100 40 2\n");
+        let args = parse(&["--script", &path.display().to_string()])?;
+        assert_eq!(args.mouse_to_after, vec![(4.5, 100, 40, 1)]);
+        std::fs::remove_file(&path).ok();
         Ok(())
     }
 

@@ -57,6 +57,7 @@ pub mod midi;
 pub mod net;
 pub mod parallel;
 pub mod paths;
+pub mod pointer;
 pub mod priority;
 pub mod ramsey;
 pub mod recorder;

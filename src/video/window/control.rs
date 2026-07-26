@@ -263,6 +263,35 @@ impl App {
                     json!({"applied_at_seconds": now, "scheduled": scheduled}),
                 ));
             }
+            HostOp::MouseTo {
+                port,
+                x,
+                y,
+                tolerance,
+                max_frames,
+            } => {
+                // The servo runs the machine for up to max_frames frames
+                // right here, like the bounded step verbs above: it needs
+                // to see each frame it caused before choosing the next
+                // delta, which a frame-boundary drain cannot do.
+                let line = match exec::mouse_to(
+                    &mut self.emu,
+                    port,
+                    (x, y),
+                    tolerance,
+                    max_frames,
+                    |emu, action| {
+                        crate::control::session::inject_input(emu, &mut None, action);
+                    },
+                ) {
+                    Ok(value) => proto::ok_line(&id, value),
+                    Err(e) => proto::err_line(&id, &e),
+                };
+                self.control_send(line);
+                self.control_emit_events();
+                self.finish_render_for_current_frame();
+                self.request_redraw();
+            }
             HostOp::FloppyInsert {
                 drive,
                 path,

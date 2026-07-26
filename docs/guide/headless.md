@@ -75,6 +75,7 @@ deterministically:
 | `--click-after SECS BUTTON MS [PORT]` | Press a mouse button (`left`/`right`/`middle`) for MS milliseconds (default port 1) |
 | `--joy-after SECS BUTTON MS [PORT]` | Press a joystick / CD32-pad control (`up`/`down`/`left`/`right`/`red` (alias `fire`)/`blue`/`green`/`yellow`/`play`/`rwd`/`ffw`) for MS milliseconds (default port 2) |
 | `--mouse-after SECS DX DY [PORT]` | Apply a relative mouse motion of (DX, DY) counter steps (default port 1) |
+| `--mouse-to-after SECS X Y [PORT]` | From SECS, steer the guest pointer to presented pixel (X, Y) by watching sprite 0 (default port 1) |
 | `--pot-after SECS X Y [PORT]` | Set an analogue controller's stick/paddle position, 0-255 per axis (default port 2) |
 | `--floppy-drives COUNT` | Connect `COUNT` floppy drives (`1` to `4`), so scheduled inserts can target empty external drives |
 | `--insert-disk-after SECS DFN PATH` | Insert a disk image into `df0`..`df3` |
@@ -90,6 +91,22 @@ on. All the flags repeat, so several inputs can be queued:
 ```sh
 ./target/release/copperline --key-after 14.0 ctrl 500 --press-after 14.1 c
 ```
+
+`--mouse-to-after` is the odd one out: it names a destination rather than
+a motion. The Amiga mouse port carries a quadrature encoder with no
+absolute position, and the guest turns counts into pointer pixels through
+its own acceleration curve, so a relative delta cannot be aimed at a
+button. Since the Amiga pointer is sprite 0, the flag instead watches
+where the hardware draws that sprite and corrects the motion once per
+frame until it lands, learning the pixels-per-count ratio as it goes.
+`X` and `Y` are presented pixels, the same coordinates a
+`--screenshot-after` PNG is measured in, so a target can be read straight
+off a capture. Targets run one at a time and in timestamp order, each
+holding the pointer until it arrives or gives up (about a second of
+emulated time); a guest that draws its pointer into a bitplane rather
+than a sprite logs a warning and is left alone. `input.mouse_to` in the
+[control protocol](../debugger/control.md) is the same mechanism with a
+reply.
 
 The controller-port flags take an optional trailing `PORT` token (`1` or
 `2`) naming the game port the event lands on, so any controller wiring set

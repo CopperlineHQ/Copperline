@@ -14,6 +14,7 @@ use super::session::{BreakSpec, InputAction, SessionCtx};
 use crate::debugger::{BreakCond, CondOp, CondOperand, DebugStop, WatchSource};
 use crate::emulator::Emulator;
 use crate::inputsched::JoyState;
+use crate::pointer::{PointerServo, ServoStep};
 use crate::timetravel::ReverseOutcome;
 use crate::video::{FB_WIDTH, MAX_CANVAS_PIXELS};
 use serde_json::{json, Map, Value};
@@ -211,6 +212,46 @@ impl FrameRect {
     }
 }
 
+/// Move the guest's pointer to an absolute presented-pixel position by
+/// servoing relative mouse deltas until sprite 0 lands there; see
+/// [`crate::pointer`] for why absolute positioning has to be closed-loop.
+///
+/// `inject` hands each delta to the caller's own input path, so the motion
+/// is journaled for reverse debugging and input recording exactly like a
+/// human's would be.
+pub fn mouse_to(
+    emu: &mut Emulator,
+    port: u8,
+    target: (i32, i32),
+    tolerance: i32,
+    max_frames: u32,
+    mut inject: impl FnMut(&mut Emulator, InputAction),
+) -> Result<Value, CtlError> {
+    let mut servo = PointerServo::new(port, target, tolerance, max_frames);
+    loop {
+        match servo.poll(emu.bus()) {
+            ServoStep::Move { port, dx, dy } => {
+                inject(emu, InputAction::MouseMove { port, dx, dy });
+                emu.step_frame()
+                    .map_err(|e| CtlError::internal(format!("stepping the mouse servo: {e:#}")))?;
+            }
+            ServoStep::Arrived { x, y, frames } => {
+                return Ok(json!({
+                    "x": x,
+                    "y": y,
+                    "target_x": target.0,
+                    "target_y": target.1,
+                    "port": u32::from(port) + 1,
+                    "frames": frames,
+                }))
+            }
+            // Not converging is an error, not an "ok, but": a script that
+            // carried on would click somewhere it did not intend to.
+            ServoStep::Failed(why) => return Err(CtlError::invalid_state(why)),
+        }
+    }
+}
+
 /// A "wait until the picture stops changing" run target: keep running
 /// until `frames` consecutive rendered frames hash identically. This is
 /// how a script waits for a GUI to finish drawing without guessing at an
@@ -346,6 +387,16 @@ pub enum HostOp {
     },
     Reset {
         warm: bool,
+    },
+    /// Servo the guest pointer to an absolute presented-pixel position;
+    /// see [`mouse_to`]. A host op because it both injects input and runs
+    /// the machine, so each driver applies it through its own boundary.
+    MouseTo {
+        port: u8,
+        x: i32,
+        y: i32,
+        tolerance: i32,
+        max_frames: u32,
     },
 }
 
@@ -728,6 +779,17 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
             dx: p.i32_or("dx", 0)?,
             dy: p.i32_or("dy", 0)?,
         })),
+        "input.mouse_to" => host(HostOp::MouseTo {
+            port: parse_port_param(&p, 1)?,
+            x: p.i32_req("x")?,
+            y: p.i32_req("y")?,
+            tolerance: p
+                .i32_or("tolerance", crate::pointer::DEFAULT_TOLERANCE)?
+                .clamp(0, crate::pointer::TOLERANCE_LIMIT),
+            max_frames: p
+                .u32_or("max_frames", crate::pointer::DEFAULT_MAX_FRAMES)?
+                .clamp(1, crate::pointer::FRAME_LIMIT),
+        }),
         "input.joy" => host(HostOp::Input(InputCmd::Joy {
             port: parse_port_param(&p, 2)?,
             state: JoyState {
@@ -1253,6 +1315,16 @@ impl<'a> ParamReader<'a> {
     fn i32_or(&self, key: &str, default: i32) -> Result<i32, CtlError> {
         match self.get(key) {
             None | Some(Value::Null) => Ok(default),
+            Some(v) => v
+                .as_i64()
+                .and_then(|n| i32::try_from(n).ok())
+                .ok_or_else(|| CtlError::invalid_params(format!("bad {key}"))),
+        }
+    }
+
+    fn i32_req(&self, key: &str) -> Result<i32, CtlError> {
+        match self.get(key) {
+            None | Some(Value::Null) => Err(CtlError::invalid_params(format!("missing {key}"))),
             Some(v) => v
                 .as_i64()
                 .and_then(|n| i32::try_from(n).ok())

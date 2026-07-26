@@ -255,6 +255,26 @@ replaced wholesale; port defaults to 2), `input.analogue {port?, x, y}`
 latches; port defaults to 2). Events drive the named port's electrical
 lines whatever device is configured there.
 
+`input.mouse_to {x, y, port?, tolerance?, max_frames?}` puts the guest's
+pointer at an absolute position instead: `x` and `y` are presented pixels
+in the same coordinate space `capture.screenshot` writes out, so a
+position read off a screenshot can be clicked directly. There is no
+absolute mouse to set -- the port carries a quadrature encoder, and the
+guest turns counts into pixels through its own acceleration curve, which
+is history-dependent and defeats aimed relative deltas. So this servos:
+it injects a delta, advances one frame, reads where the hardware drew
+sprite 0 (the Amiga pointer *is* sprite 0), and corrects, learning the
+pixels-per-count ratio it is being given. It runs the machine for up to
+`max_frames` frames (default 60) and is refused while a resume is in
+flight. `tolerance` (default 2 px) is how close counts as arrived: the
+pointer moves in lo-res pixels, which are two columns of the presented
+canvas, so not every coordinate is exactly reachable. Failing to land is
+an error (`-32003`) naming where the pointer settled, never a quiet
+near-miss -- a script that carried on would click the wrong thing. A
+guest that draws its pointer into a bitplane instead of a sprite has
+nothing to observe, and is reported as such; use `input.mouse` for
+relative motion there.
+
 Controller ports: `input.get_ports` -> `{"port1": "mouse", "port2":
 "joystick"}`; `input.set_port {port, device:
 "mouse"|"joystick"|"cd32"|"analogue"|"none"}` hot-plugs a device, as if

@@ -2255,6 +2255,7 @@ fn test_app_with_audio_and_cpu(
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
         None,
         std::array::from_fn(|_| Vec::new()),
         [true; 4],
@@ -4887,6 +4888,21 @@ mod control_drain {
         let stop = reply(&reply_rx);
         assert_eq!(stop["result"]["reason"], "target");
         assert!(stop["result"]["frame"].as_u64().unwrap() >= target);
+    }
+
+    #[test]
+    fn a_scripted_pointer_target_gives_up_when_no_sprite_pointer_exists() {
+        let (mut app, _cmd_tx, _reply_rx) = attached_app();
+        app.arm_scripted_pointer_target(0.0, 300, 120, 0);
+        // The NOP sled draws no sprites, so the first poll has nothing to
+        // observe. It must clear the servo rather than steering blind or
+        // retrying every frame for the rest of the run.
+        app.emu.step_frame().unwrap();
+        app.fire_scheduled_events();
+        assert!(
+            !app.scripted_pointer_target_active(),
+            "a pointerless guest must not leave a servo armed"
+        );
     }
 
     #[test]
