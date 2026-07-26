@@ -2698,6 +2698,11 @@ impl ApplicationHandler for App {
             WindowEvent::Focused(focused) => {
                 self.main_window_focused = focused;
                 if focused {
+                    // A capture a panel borrowed can only be repaid to a
+                    // focused window, so a panel that closed while the focus
+                    // was still elsewhere left the loan outstanding for this
+                    // moment.
+                    self.restore_mouse_capture_after_ui();
                     // In auto mode the grab follows the focus, so the
                     // window that has the keyboard also has the pointer and
                     // no host cursor is ever loose over the display. This is
@@ -3497,13 +3502,28 @@ impl App {
         if !self.capture_suspended_by_ui || self.modal_ui_active() {
             return;
         }
-        self.capture_suspended_by_ui = false;
         // Same guard the click-to-capture path applies: with no mouse left
         // on either port there is nothing to drive, and grabbing would only
         // trap a hidden cursor. Cheap insurance against a port device that
-        // changed while the panel was open.
-        if self.mouse_port().is_some() {
-            self.set_mouse_captured(true);
+        // changed while the panel was open -- and the loan is void, not
+        // outstanding, because no later event can repay it.
+        if self.mouse_port().is_none() {
+            self.capture_suspended_by_ui = false;
+            return;
+        }
+        // A grab wants the focus. Closing a tool window hands the focus back
+        // to the main window, but the order of that against this call is the
+        // window manager's business: attempted too early the grab fails, and
+        // clearing the loan on a failed grab would lose the capture for good
+        // -- the very thing this mechanism exists to prevent. Leave it
+        // outstanding and let the Focused(true) that follows retry.
+        if !self.main_window_focused {
+            return;
+        }
+        self.set_mouse_captured(true);
+        // Only a grab that actually took discharges the loan.
+        if self.mouse_captured {
+            self.capture_suspended_by_ui = false;
         }
     }
 

@@ -1807,8 +1807,8 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
         config::JoystickInputMode::default(),
         50,
         // The config screen is a UI to be clicked around; an auto grab
-        // belongs to the machine, and apply_live_config installs the real
-        // setting when one is started.
+        // belongs to the machine, and run_machine installs the real setting
+        // when one is started.
         config::MouseCapture::default(),
         vec!["Configure a machine, then press Run.".to_string()],
         raw_cfg,

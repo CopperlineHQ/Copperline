@@ -848,6 +848,7 @@ fn a_tool_panel_hands_the_mouse_capture_back_when_it_closes() {
     // state the shortcut would have found. What is under test is the
     // bookkeeping that decides whether to re-grab, not winit's grab.
     app.mouse_captured = true;
+    app.main_window_focused = true;
 
     app.open_debugger();
     assert!(
@@ -866,6 +867,7 @@ fn a_tool_panel_hands_the_mouse_capture_back_when_it_closes() {
 fn the_capture_stays_suspended_while_another_panel_wants_the_cursor() {
     let mut app = test_app();
     app.mouse_captured = true;
+    app.main_window_focused = true;
 
     app.open_debugger();
     app.open_frame_analyzer();
@@ -897,12 +899,68 @@ fn closing_a_panel_does_not_grab_a_mouse_that_was_never_captured() {
     assert!(!app.mouse_captured, "so nothing is handed back");
 }
 
+/// Closing a tool window hands the focus back to the main window, but the
+/// order of that against the close is the window manager's business. A grab
+/// attempted while the focus is still elsewhere fails, and discharging the
+/// loan on a failed grab would lose the capture for good -- the exact bug
+/// this mechanism exists to prevent. The loan stays outstanding until a
+/// focused moment can repay it.
+#[test]
+fn a_capture_loan_outlives_a_panel_that_closed_while_unfocused() {
+    let mut app = test_app();
+    app.mouse_captured = true;
+    app.main_window_focused = true;
+    app.open_debugger();
+    assert!(app.capture_suspended_by_ui);
+
+    // The tool window still holds the focus as the panel goes away.
+    app.main_window_focused = false;
+    app.close_tool_panel(ToolPanelKind::Debugger);
+    assert!(
+        app.capture_suspended_by_ui,
+        "the loan survives a close that could not repay it"
+    );
+
+    // The Focused(true) that follows is what actually repays it.
+    app.main_window_focused = true;
+    app.restore_mouse_capture_after_ui();
+    assert!(
+        !app.capture_suspended_by_ui,
+        "and is discharged once the window can take the grab"
+    );
+}
+
+/// A loan no later event could repay is void rather than outstanding: with
+/// no mouse left on a port there is nothing to capture for.
+#[test]
+fn a_capture_loan_is_dropped_when_no_port_holds_a_mouse() {
+    use crate::bus::PortDevice;
+    let mut app = test_app();
+    app.mouse_captured = true;
+    app.main_window_focused = true;
+    app.open_debugger();
+    assert!(app.capture_suspended_by_ui);
+
+    app.emu
+        .bus_mut()
+        .input
+        .set_port_device(0, PortDevice::Joystick);
+    assert_eq!(app.mouse_port(), None);
+
+    app.close_tool_panel(ToolPanelKind::Debugger);
+    assert!(
+        !app.capture_suspended_by_ui,
+        "nothing to drive, so the loan is void rather than held forever"
+    );
+}
+
 /// An explicit Cmd/Alt+G settles the question: the operator asked for the
 /// capture to be off, and a panel closing later must not overrule that.
 #[test]
 fn an_explicit_toggle_clears_a_pending_ui_suspension() {
     let mut app = test_app();
     app.mouse_captured = true;
+    app.main_window_focused = true;
     app.open_console();
     assert!(app.capture_suspended_by_ui);
 
