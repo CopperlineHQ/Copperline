@@ -7673,7 +7673,7 @@ impl App {
         // centring reads the live canvas height), so their buffers and
         // windows must follow the new size too.
         let size = LogicalSize::new(FB_WIDTH as f64, window_present_height() as f64);
-        for kind in [ToolPanelKind::Debugger, ToolPanelKind::FrameAnalyzer] {
+        for kind in ToolPanelKind::ALL {
             if let Some(tool) = self.tool_window_mut(kind) {
                 if let Err(e) = tool.pixels.resize_buffer(
                     texture_width(tool.texture_scale) as u32,
@@ -7711,6 +7711,23 @@ impl App {
                 warn!("resize texture buffer for status bar toggle failed: {e}");
                 super::set_status_bar_hidden(!hidden);
                 return;
+            }
+        }
+        // Every tool window (Debugger, Frame Analyzer, Console) draws through
+        // draw_panel_layer, which indexes its buffer by the same canvas height
+        // (window_present_height), so resize all their buffers to match too, or
+        // a later tool draw could index past a now-too-small buffer. Buffer
+        // only: unlike a pixel-aspect switch, leave a tool window's own size
+        // alone.
+        for kind in ToolPanelKind::ALL {
+            if let Some(tool) = self.tool_window_mut(kind) {
+                if let Err(e) = tool.pixels.resize_buffer(
+                    texture_width(tool.texture_scale) as u32,
+                    texture_height(tool.texture_scale) as u32,
+                ) {
+                    warn!("resize tool texture buffer for status bar toggle failed: {e}");
+                }
+                tool.window.request_redraw();
             }
         }
         // Only snap an unresized window to the new canvas size; a resized window
