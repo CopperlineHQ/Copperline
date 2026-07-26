@@ -1,0 +1,8 @@
+[fs-uae]
+amiga_model = A1200
+kickstart_file = $CONFIG/../Kickstart v3.1 r40.68 (1993)(Commodore)(A1200)[!].rom
+floppy_drive_0 = $CONFIG/timing-test.adf
+chip_memory = 2048
+slow_memory = 0
+fast_memory = 0
+serial_port = tcp://127.0.0.1:1234
