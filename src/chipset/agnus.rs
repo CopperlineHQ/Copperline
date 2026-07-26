@@ -228,9 +228,10 @@ pub struct Agnus {
     /// not emulated (BEAMCON0.DUAL logs a one-time warning), so HHPOSR reads
     /// back the last written value.
     hhpos: u16,
-    /// AGA FMODE ($1FC): bitplane/sprite fetch width. Latched only
-    /// (Alice-gated); the wide-fetch DMA interpretation lands with plan 3.3
-    /// and must keep FMODE=0 byte-identical to the OCS/ECS slot timing.
+    /// AGA FMODE ($1FC): bitplane/sprite fetch width. Alice-gated; drives
+    /// the bitplane fetch quantum/period, the sprite fetch width, and
+    /// SSCAN2 scan doubling. FMODE=0 stays byte-identical to the OCS/ECS
+    /// slot timing.
     fmode: u16,
 }
 

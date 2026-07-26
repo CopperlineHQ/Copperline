@@ -10182,9 +10182,8 @@ fn chip_revisions_split_deniseid_from_vposr_id() {
     );
 }
 
-/// Plan 3.1: AGA identification and register latches, gated on the
-/// Alice/Lisa revisions (not selectable from config until the AGA
-/// display path lands).
+/// AGA identification and register latches, gated on the Alice/Lisa
+/// revisions that `Chipset::Aga` selects.
 #[test]
 fn aga_ids_and_register_latches_gate_on_alice_lisa() {
     let mut aga = empty_bus();

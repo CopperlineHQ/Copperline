@@ -1051,9 +1051,10 @@ impl Bus {
                 }
                 false
             }
-            // AGA Lisa registers: latched only until the AGA display path
-            // lands (plan 3.3/3.4); unreachable from config today because
-            // Lisa is not selectable.
+            // AGA Lisa registers, reached whenever the configured Denise is
+            // a Lisa (`Chipset::Aga`). BPLCON4's BPLAM/OSPRM/ESPRM fields
+            // are consumed by the render replay; CLXCON2 reaches the
+            // rendered collision decode but not the beam-timed one.
             0x10C => {
                 if self.denise_is_lisa() {
                     if crate::envcfg::flag("COPPERLINE_DIAG_DISPLAY") && self.denise.bplcon4 != val
@@ -1227,8 +1228,9 @@ impl Bus {
                     if self.denise_is_lisa() {
                         // AGA: BPLCON3 BANK/LOCT route the write into the
                         // 256-entry store. Bank 0 with LOCT clear is the
-                        // OCS-compatible case. The replay renderer still
-                        // tracks bank 0 only until plan 3.3 lands.
+                        // OCS-compatible case. The replay renderer resolves
+                        // the same bank/LOCT pair from its own recorded
+                        // BPLCON3, so both stores stay in step.
                         self.denise.palette.write_banked(
                             crate::chipset::denise::Palette::bank_from_bplcon3(self.denise.bplcon3),
                             idx,

@@ -88,7 +88,7 @@ impl DiwHigh {
     }
 }
 
-/// Display palette store, generation-agnostic (plan 3.2). AGA's 256 colour
+/// Display palette store, generation-agnostic. AGA's 256 colour
 /// entries each hold 24 bits plus the genlock T bit, written as two 12-bit
 /// halves: `hi` is the OCS-layout word (bit 15 = T, low 12 bits = the high
 /// colour nibbles as $0RGB) and `lo` carries the low nibbles (written by AGA
@@ -264,11 +264,13 @@ pub struct Denise {
     pub bplcon2: u16,
     pub bplcon3: u16,
     /// AGA BPLCON4 ($10C): BPLAM bitplane XOR mask (high byte) and the
-    /// OSPRM/ESPRM sprite palette offsets. Latched only (Lisa-gated);
-    /// interpretation lands with the AGA display path (plan 3.3/3.4).
+    /// OSPRM/ESPRM sprite palette offsets (low byte). Lisa-gated; both
+    /// fields are consumed by the render replay, on the separate Lisa
+    /// timing paths described in docs/internals/chipset.md.
     pub bplcon4: u16,
     /// AGA CLXCON2 ($10E): collision enable/match bits for planes 7-8.
-    /// Latched only (Lisa-gated) until 8-bitplane collisions land.
+    /// Lisa-gated. Interpreted by the rendered collision decode; the
+    /// beam-timed live path still stops at the classic 6 planes.
     pub clxcon2: u16,
     pub clxcon: u16,
     pub clxdat: u16,
