@@ -97,16 +97,16 @@ pub fn exec(os: &OsMemory, base: u32) -> Vec<String> {
             info.cold_capture, info.cool_capture, info.warm_capture
         ),
     ];
-    // Exec parks -1 in LastAlert[0] when nothing has alerted; both
-    // Kickstart 3.1 and AROS boot with it that way.
-    lines.push(if matches!(info.last_alert[0], 0 | 0xFFFF_FFFF) {
-        "alert  none since reset".to_string()
-    } else {
-        format!(
-            "alert  ${:08X}: {}",
-            info.last_alert[0],
-            crate::debugger::guru_decode(info.last_alert[0])
-        )
+    lines.push(match info.last_alert[0] {
+        // Exec parks -1 in LastAlert[0] when nothing has alerted; both
+        // Kickstart 3.1 and AROS boot with it that way.
+        0xFFFF_FFFF => "alert  none since reset".to_string(),
+        // A zero is not that sentinel: it is the field as a cold reset
+        // left it, or (in principle) an Alert(0). Nothing distinguishes
+        // the two from the field alone and no subsystem raises code 0,
+        // so it is shown raw rather than decoded or called "none".
+        0 => "alert  LastAlert $00000000".to_string(),
+        code => format!("alert  ${code:08X}: {}", crate::debugger::guru_decode(code)),
     });
     lines
 }

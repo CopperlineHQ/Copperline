@@ -3676,6 +3676,18 @@ fn console_execbase_dumps_the_scheduler_state() {
         "{out:?}"
     );
 
+    // Exec's own "nothing has alerted" sentinel is -1, which reads as
+    // such; a zeroed field is neither that sentinel nor a decodable
+    // code, so it is reported raw.
+    for (stored, expected) in [
+        (0xFFFF_FFFFu32, "alert  none since reset"),
+        (0, "alert  LastAlert $00000000"),
+    ] {
+        app.emu.bus_mut().mem.chip_ram[0x1202..0x1206].copy_from_slice(&stored.to_be_bytes());
+        let out = console_run(&mut app, "EXECBASE");
+        assert!(out.iter().any(|l| l == expected), "{stored:08X}: {out:?}");
+    }
+
     // Before the OS is up the command says so rather than printing junk.
     app.emu.bus_mut().mem.chip_ram[4..8].copy_from_slice(&0u32.to_be_bytes());
     let out = console_run(&mut app, "EXEC");
