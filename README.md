@@ -326,7 +326,7 @@ release needs resolved first. Release steps for every channel are in
 | Fast RAM | Optional Zorro II autoconfig RAM at $00200000 and Zorro III autoconfig RAM (`[memory] z3`); runs at the CPU clock. |
 | Slow RAM | Optional A500 trapdoor/fake-fast RAM at $00C00000; arbitrated on the chip bus through Agnus like chip RAM. |
 | ROM | Kickstart at $F80000 (512 KiB); optional extended ROM for CD32 ($E00000) and CDTV ($F00000). |
-| Battery RTC | Read-only MSM6242-compatible register view at $DC0000; guest writes affect only emulated latch/control state. |
+| Battery RTC | Oki MSM6242 or Ricoh RP5C01 at $DC0000 (`rtc_chip`; Ricoh is the A3000/A4000 default), read-only wall clock -- guest writes drive latch/bank/control state and the RP5C01's battery RAM, which persists to a WinUAE/Amiberry-compatible `.nvram` file (`battmem`). A `rtc_time` seed ticks in emulated time for reproducible runs; `rtc_frozen` pins it. |
 | CIA-A / CIA-B | I/O ports, /OVL, timers, TOD, keyboard SDR/ICR, disk control/status lines, CIA-B FLAG disk index pulses, and the Centronics parallel port (data/strobe/ACK on CIA-A, BUSY/POUT/SEL on CIA-B). |
 | Paula serial | SERDAT through a one-word transmit buffer and timed shift register, out to stdout, a TCP port, a pseudo-terminal, or -- with the default `midi` feature -- bridged to host MIDI in/out; SERDATR reports TBE/TSRE/RBF, and serial receive is fed from the selected input. |
 | Paula audio | 4-channel DMA/sample playback, stereo mix, LED filter. |
