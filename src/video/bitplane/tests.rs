@@ -4842,7 +4842,10 @@ fn sprite_ctl_write_stops_dma_data_reuse_by_later_position_write() {
     // left, so only the repositioned copy could be visible.
     let fetched_hstart = 20i32;
     let reused_hstart = DIW_HSTART_FB0 as u16 + 100;
-    let (_, ctl) = sprite_control_words(beam_y as u16, beam_y as u16 + 1, 0);
+    // CTL carries the fetched line's own register-decoded HSTART, so build
+    // it from the register parts rather than the output-position helper.
+    let (_, ctl) =
+        sprite_control_words_from_parts(beam_y, beam_y + 1, fetched_hstart, false, false);
     let (reused_pos, _) = sprite_control_words(beam_y as u16, beam_y as u16 + 1, reused_hstart);
     let captured = [CapturedSpriteLine {
         sprite: 0,
@@ -4859,12 +4862,7 @@ fn sprite_ctl_write_stops_dma_data_reuse_by_later_position_write() {
         width_words: 1,
     }];
     let events = [
-        beam_event(
-            beam_y as u32,
-            COPPER_WAIT_HPOS_FB0 as u32,
-            0x0142,
-            ctl | (fetched_hstart as u16 & 1),
-        ),
+        beam_event(beam_y as u32, COPPER_WAIT_HPOS_FB0 as u32, 0x0142, ctl),
         beam_event(
             beam_y as u32,
             COPPER_WAIT_HPOS_FB0 as u32 + 4,
