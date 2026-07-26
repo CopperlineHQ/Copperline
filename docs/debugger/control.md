@@ -191,8 +191,20 @@ Session: `hello {token?}`, `auth {token}`, `status`, `shutdown`.
 
 Execution: `continue`, `step {n?}`, `step_over`, `step_out`,
 `step_copper`, `step_frame {n?}`,
-`run_until {pc | vpos[,hpos] | frame | cck | seconds}`, `pause`
-(all resume verbs accept `collect?`).
+`run_until {pc | vpos[,hpos] | frame | cck | seconds | stable_frames}`,
+`pause` (all resume verbs accept `collect?`).
+
+`run_until {stable_frames: N, max_frames?, x?, y?, w?, h?}` runs until N
+consecutive rendered frames hash identically -- how to wait for a GUI to
+finish drawing without guessing at an emulated-seconds delay, since the
+guest tells you it is done by producing the same picture twice. N must be
+at least 2. The optional region params narrow the comparison the way
+`capture.region_digest` does, which is what makes the target usable on a
+live Workbench screen: a blinking cursor never lets the whole frame
+settle, but the dialog you are waiting for does. `max_frames` bounds the
+wait; running out of it stops with reason `budget` and a detail naming
+the longest run reached, rather than hanging the client on a display
+that never settles.
 
 Reverse (time travel is armed automatically for control sessions;
 `-32006` when history is exhausted): `reverse_step {n?}`,

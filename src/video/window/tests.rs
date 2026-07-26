@@ -4890,6 +4890,37 @@ mod control_drain {
     }
 
     #[test]
+    fn run_until_stable_frames_completes_in_the_burst_check() {
+        let (mut app, cmd_tx, reply_rx) = attached_app();
+        push(&cmd_tx, 1, "run_until", json!({"stable_frames": 2}));
+        app.drain_control();
+        assert!(!app.paused);
+        let mut completed = false;
+        for _ in 0..4 {
+            app.emu.step_frame().unwrap();
+            if app.surface_debug_stop() {
+                break;
+            }
+            if app.control_run_target_reached() {
+                completed = true;
+                break;
+            }
+        }
+        assert!(completed, "the NOP sled's still display should settle");
+        assert!(app.paused);
+        let stop = reply(&reply_rx);
+        assert_eq!(stop["result"]["reason"], "target");
+        assert!(
+            stop["result"]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("stable for 2"),
+            "{}",
+            stop["result"]["detail"]
+        );
+    }
+
+    #[test]
     fn user_pause_completes_a_pending_resume() {
         let (mut app, cmd_tx, reply_rx) = attached_app();
         push(&cmd_tx, 1, "continue", json!({}));

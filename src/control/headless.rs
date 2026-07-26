@@ -14,7 +14,8 @@
 //! lands -- which is inherently wall-clock, like a GDB Ctrl-C.
 
 use super::exec::{
-    self, HostOp, Request, ResumeKind, ResumeVerb, RunTarget, CCK_FINE_WINDOW, RUN_BUDGET,
+    self, HostOp, Request, ResumeKind, ResumeVerb, RunTarget, StableStep, StableWatch,
+    CCK_FINE_WINDOW, RUN_BUDGET,
 };
 use super::proto::{self, AuthGate, CtlError, Gate, MAX_LINE_BYTES};
 use super::session::SessionCtx;
@@ -603,6 +604,10 @@ impl Session {
             }
             _ => None,
         };
+        let mut stable = match target {
+            Some(RunTarget::Stable(spec)) => Some(StableWatch::new(spec)),
+            _ => None,
+        };
         let mut extra_ids = Vec::new();
         let finish = |reason: &str, detail: String, extra_ids: Vec<Value>, kill: bool| {
             Ok(RunOutcome::Stop {
@@ -629,6 +634,19 @@ impl Session {
             if let Some(cck) = cck_target {
                 if self.emu.bus().emulated_cck() >= cck {
                     return finish("target", format!("cck {cck}"), extra_ids, false);
+                }
+            }
+            // Sampled before the quantum, so the frame already on screen
+            // when the client asked is the baseline for "unchanged".
+            if let Some(watch) = stable.as_mut() {
+                match watch.sample(&self.emu) {
+                    StableStep::Running => {}
+                    StableStep::Settled(detail) => {
+                        return finish("target", detail, extra_ids, false)
+                    }
+                    StableStep::GaveUp(detail) => {
+                        return finish("budget", detail, extra_ids, false)
+                    }
                 }
             }
 
@@ -1072,6 +1090,29 @@ mod tests {
             let a = c.result("capture.digest", json!({}));
             let b = c.result("capture.digest", json!({}));
             assert_eq!(a["digest"], b["digest"]);
+        });
+    }
+
+    #[test]
+    fn run_until_stable_frames_settles_and_respects_its_budget() {
+        run_session(None, |c| {
+            c.auth();
+            // The test ROM drives no display DMA, so the picture is
+            // already still and the second sample confirms it.
+            let stop = c.result("run_until", json!({"stable_frames": 2}));
+            assert_eq!(stop["reason"], "target");
+            assert!(
+                stop["detail"].as_str().unwrap().contains("stable for 2"),
+                "{}",
+                stop["detail"]
+            );
+            // A region of that same still frame settles too, and the
+            // stop lands without advancing to any wall-clock deadline.
+            let stop = c.result(
+                "run_until",
+                json!({"stable_frames": 2, "max_frames": 600, "x": 8, "y": 8, "w": 32, "h": 32}),
+            );
+            assert_eq!(stop["reason"], "target");
         });
     }
 

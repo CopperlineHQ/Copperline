@@ -211,6 +211,109 @@ impl FrameRect {
     }
 }
 
+/// A "wait until the picture stops changing" run target: keep running
+/// until `frames` consecutive rendered frames hash identically. This is
+/// how a script waits for a GUI to finish drawing without guessing at an
+/// emulated-seconds delay -- the guest tells you it is done by producing
+/// the same picture twice.
+///
+/// `rect` narrows the comparison to one region, which is what makes the
+/// target usable on a real Workbench screen: a blinking cursor or a
+/// clock in the title bar never lets the whole frame settle, but the
+/// dialog you are waiting for does. `max_frames` bounds the wait so a
+/// display that never settles ends the run instead of hanging the
+/// client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StableSpec {
+    pub frames: u32,
+    pub max_frames: Option<u64>,
+    pub rect: Option<FrameRect>,
+}
+
+/// What one sample of the display told the stable-frame watcher.
+pub enum StableStep {
+    /// Not settled yet, and still within budget.
+    Running,
+    /// `frames` consecutive frames hashed identically.
+    Settled(String),
+    /// The run ended without settling: out of budget, or the region
+    /// stopped fitting the frame. The string is the stop detail.
+    GaveUp(String),
+}
+
+/// Per-run state behind [`StableSpec`], shared by both server modes so
+/// the two cannot drift on what "stable" means.
+#[derive(Debug, Clone)]
+pub struct StableWatch {
+    spec: StableSpec,
+    /// Digest of the last frame sampled, and how many consecutive frames
+    /// (including it) have carried that digest.
+    last: Option<u64>,
+    run: u32,
+    /// Longest run seen, reported when the budget runs out: "it got to 3
+    /// of 8" is a much more useful failure than a bare timeout.
+    longest: u32,
+    seen: u64,
+}
+
+impl StableWatch {
+    pub fn new(spec: StableSpec) -> Self {
+        Self {
+            spec,
+            last: None,
+            run: 0,
+            longest: 0,
+            seen: 0,
+        }
+    }
+
+    /// Sample the currently rendered frame. Call exactly once per
+    /// emulated frame; the first call establishes the baseline, so a
+    /// `frames: 2` target settles on the first repeat.
+    pub fn sample(&mut self, emu: &Emulator) -> StableStep {
+        let (fb, lines, width) = render_frame(emu);
+        let digest = match self.spec.rect {
+            None => fnv1a64(&fb[..width * lines]),
+            Some(rect) => match rect.digest(&fb, width, lines) {
+                Ok(digest) => digest,
+                Err(_) => {
+                    return StableStep::GaveUp(format!(
+                        "region {}x{}+{}+{} does not fit the {width}x{lines} frame",
+                        rect.w, rect.h, rect.x, rect.y
+                    ))
+                }
+            },
+        };
+        self.note(digest)
+    }
+
+    /// Fold one frame's digest into the run, separately from rendering it
+    /// so the settle/give-up state machine is testable on its own.
+    fn note(&mut self, digest: u64) -> StableStep {
+        self.seen += 1;
+        self.run = if self.last == Some(digest) {
+            self.run + 1
+        } else {
+            1
+        };
+        self.last = Some(digest);
+        self.longest = self.longest.max(self.run);
+        if self.run >= self.spec.frames {
+            return StableStep::Settled(format!(
+                "stable for {} frame(s) after {} (digest {digest:016x})",
+                self.run, self.seen
+            ));
+        }
+        match self.spec.max_frames {
+            Some(max) if self.seen >= max => StableStep::GaveUp(format!(
+                "not stable within {max} frame(s) (longest run {} of {})",
+                self.longest, self.spec.frames
+            )),
+            _ => StableStep::Running,
+        }
+    }
+}
+
 /// Commands the drivers execute through their own boundary: run control
 /// (whose responses are deferred to the stop), input, media, state
 /// restore, and reset.
@@ -272,11 +375,13 @@ pub enum RunTarget {
     Frame(u64),
     Cck(u64),
     Seconds(f64),
+    Stable(StableSpec),
 }
 
 impl RunTarget {
     pub fn describe(&self) -> String {
         match self {
+            RunTarget::Stable(spec) => format!("{} stable frame(s)", spec.frames),
             RunTarget::Pc(pc) => format!("pc ${pc:06X}"),
             RunTarget::Beam { vpos, hpos } => format!(
                 "beam v{vpos}{}",
@@ -886,10 +991,34 @@ fn parse_run_target(p: &ParamReader) -> Result<RunTarget, CtlError> {
         }
         targets.push(RunTarget::Seconds(secs));
     }
+    if let Some(frames) = p.u32_opt("stable_frames")? {
+        if frames < 2 {
+            return Err(CtlError::invalid_params(
+                "stable_frames must be at least 2 (one frame is trivially stable)",
+            ));
+        }
+        let max_frames = p.u64_opt("max_frames")?;
+        if max_frames.is_some_and(|max| max < u64::from(frames)) {
+            return Err(CtlError::invalid_params(
+                "max_frames must not be below stable_frames",
+            ));
+        }
+        targets.push(RunTarget::Stable(StableSpec {
+            frames,
+            max_frames,
+            // The region params are optional here, unlike
+            // capture.region_digest: with none given the whole frame has
+            // to settle.
+            rect: match p.get("w").is_some() || p.get("h").is_some() {
+                true => Some(parse_frame_rect(p)?),
+                false => None,
+            },
+        }));
+    }
     match targets.len() {
         1 => Ok(targets.remove(0)),
         0 => Err(CtlError::invalid_params(
-            "run_until needs exactly one of pc, vpos[+hpos], frame, cck, seconds",
+            "run_until needs exactly one of pc, vpos[+hpos], frame, cck, seconds, stable_frames",
         )),
         _ => Err(CtlError::invalid_params(
             "run_until takes exactly one target",
@@ -2258,6 +2387,99 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code, proto::INVALID_PARAMS);
+    }
+
+    /// The parsed `run_until` target, for the stable-frame parse tests.
+    fn run_target(params: Value) -> RunTarget {
+        match parse_method("run_until", &params).expect("parse should succeed") {
+            Request::Host(HostOp::Resume(ResumeVerb {
+                kind: ResumeKind::RunUntil(target),
+                ..
+            })) => target,
+            other => panic!("expected a run_until target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_until_parses_stable_frames_with_an_optional_region() {
+        assert_eq!(
+            run_target(json!({"stable_frames": 3})),
+            RunTarget::Stable(StableSpec {
+                frames: 3,
+                max_frames: None,
+                rect: None,
+            })
+        );
+        // Region params narrow what has to hold still; a partial region
+        // is a parse error from parse_frame_rect, not a silent default.
+        assert_eq!(
+            run_target(
+                json!({"stable_frames": 2, "max_frames": 600, "x": 10, "y": 20, "w": 4, "h": 4})
+            ),
+            RunTarget::Stable(StableSpec {
+                frames: 2,
+                max_frames: Some(600),
+                rect: Some(FrameRect {
+                    x: 10,
+                    y: 20,
+                    w: 4,
+                    h: 4
+                }),
+            })
+        );
+        assert!(parse_method("run_until", &json!({"stable_frames": 2, "w": 4})).is_err());
+    }
+
+    #[test]
+    fn stable_watch_needs_consecutive_repeats_and_gives_up_on_budget() {
+        let spec = StableSpec {
+            frames: 3,
+            max_frames: Some(6),
+            rect: None,
+        };
+        let mut watch = StableWatch::new(spec);
+        // A repeat that is broken before reaching the target restarts the
+        // run: "3 consecutive" must not be satisfied by 3 frames total.
+        assert!(matches!(watch.note(1), StableStep::Running));
+        assert!(matches!(watch.note(1), StableStep::Running));
+        assert!(matches!(watch.note(2), StableStep::Running));
+        assert!(matches!(watch.note(1), StableStep::Running));
+        assert!(matches!(watch.note(1), StableStep::Running));
+        // Sixth sample: the budget expires before a third repeat, and the
+        // detail reports the longest run reached rather than the current.
+        match watch.note(3) {
+            StableStep::GaveUp(detail) => {
+                assert!(detail.contains("longest run 2 of 3"), "{detail}");
+            }
+            other => panic!("expected the budget to expire, got {}", step_name(&other)),
+        }
+
+        let mut watch = StableWatch::new(StableSpec {
+            max_frames: None,
+            ..spec
+        });
+        assert!(matches!(watch.note(7), StableStep::Running));
+        assert!(matches!(watch.note(7), StableStep::Running));
+        assert!(matches!(watch.note(7), StableStep::Settled(_)));
+    }
+
+    fn step_name(step: &StableStep) -> &'static str {
+        match step {
+            StableStep::Running => "running",
+            StableStep::Settled(_) => "settled",
+            StableStep::GaveUp(_) => "gave up",
+        }
+    }
+
+    #[test]
+    fn run_until_stable_frames_rejects_degenerate_specs() {
+        // One frame is trivially stable, so it would return instantly and
+        // tell the caller nothing.
+        assert!(parse_method("run_until", &json!({"stable_frames": 1})).is_err());
+        // A budget below the target could never be met.
+        assert!(parse_method("run_until", &json!({"stable_frames": 4, "max_frames": 3})).is_err());
+        // Targets stay mutually exclusive.
+        assert!(parse_method("run_until", &json!({"stable_frames": 2, "frame": 10})).is_err());
     }
 
     #[test]
