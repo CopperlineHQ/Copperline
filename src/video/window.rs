@@ -7602,7 +7602,9 @@ impl App {
             if r.minimized {
                 return;
             }
-            let _ = r.pixels.resize_surface(size.width, size.height);
+            if let Err(e) = r.pixels.resize_surface(size.width, size.height) {
+                warn!("resize surface failed: {e}");
+            }
         }
         // Resizing the surface discards its contents, leaving it blank (white)
         // until the next present. When the machine is powered off (or paused)
