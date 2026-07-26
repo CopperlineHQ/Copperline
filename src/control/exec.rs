@@ -1221,9 +1221,8 @@ fn parse_break_spec(p: &ParamReader) -> Result<BreakSpec, CtlError> {
             },
             ignore: p.u32_or("ignore", 0)?,
         }),
-        "watch" => Ok(BreakSpec::Watch {
-            addr: p.u32_req("addr")?,
-            source: match p.str_opt("class")? {
+        "watch" => {
+            let source = match p.str_opt("class")? {
                 None => None,
                 Some(token) => Some(WatchSource::parse(&token).ok_or_else(|| {
                     CtlError::invalid_params(
@@ -1231,9 +1230,23 @@ fn parse_break_spec(p: &ParamReader) -> Result<BreakSpec, CtlError> {
                          (bpl1..bpl8, spr0..spr7, aud0..aud3)",
                     )
                 })?),
-            },
-            pc: p.u32_opt("pc")?,
-        }),
+            };
+            let pc = p.u32_opt("pc")?;
+            // Only the CPU has an instruction behind an access, so this
+            // pair describes something that cannot happen; accepting it
+            // would install a watch that never fires.
+            if pc.is_some() && source.is_some_and(|s| !s.takes_pc_qualifier()) {
+                return Err(CtlError::invalid_params(
+                    "pc only qualifies cpu accesses; a DMA engine's access has no \
+                     instruction behind it",
+                ));
+            }
+            Ok(BreakSpec::Watch {
+                addr: p.u32_req("addr")?,
+                source,
+                pc,
+            })
+        }
         "reg_watch" => Ok(BreakSpec::RegWatch {
             off: parse_custom_reg_param(p)?,
         }),
@@ -3043,6 +3056,27 @@ mod tests {
         assert!(parse_method("run_until", &json!({"stable_frames": 4, "max_frames": 3})).is_err());
         // Targets stay mutually exclusive.
         assert!(parse_method("run_until", &json!({"stable_frames": 2, "frame": 10})).is_err());
+    }
+
+    #[test]
+    fn a_pc_qualified_watch_on_a_dma_class_is_refused() {
+        // The pair can never match, so accepting it would install a
+        // watch that silently never fires.
+        for class in ["blitter", "disk", "copper", "spr3", "bpl1", "aud0"] {
+            let bad = json!({"kind": "watch", "addr": 0x1000, "class": class, "pc": 0x2000});
+            assert!(
+                parse_method("break.add", &bad).is_err(),
+                "{class} + pc should be refused"
+            );
+        }
+        // The useful combination, and each qualifier alone, still parse.
+        for good in [
+            json!({"kind": "watch", "addr": 0x1000, "class": "cpu", "pc": 0x2000}),
+            json!({"kind": "watch", "addr": 0x1000, "pc": 0x2000}),
+            json!({"kind": "watch", "addr": 0x1000, "class": "spr3"}),
+        ] {
+            assert!(parse_method("break.add", &good).is_ok(), "{good}");
+        }
     }
 
     #[test]

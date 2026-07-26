@@ -301,7 +301,10 @@ bounded by the channels the hardware actually has). The
 channel classes also catch DMA *reads*, which a value comparison cannot
 see at all: "which sprite fetched this word" is the question a display
 bug actually poses. A watch's optional `pc` fires only when that
-instruction made the access, for a word a dozen routines all poke.
+instruction made the access, for a word a dozen routines all poke. Only
+the CPU has an instruction behind an access, so `pc` cannot be combined
+with a DMA `class` -- that pair describes something that cannot happen
+and is `-32602` rather than a watch that never fires.
 Conditions are
 `{lhs, op, rhs}` with operands `"d0"`-`"a7"`, `"pc"`, `"sr"`, a number,
 or `{"mem": addr}`, and ops `eq|ne|lt|gt|le|ge|and`. A session's own

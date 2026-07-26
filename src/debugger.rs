@@ -175,6 +175,16 @@ impl WatchSource {
     pub fn accepts(self, actual: WatchSource) -> bool {
         self == actual
     }
+
+    /// Whether a PC qualifier means anything for this access class.
+    ///
+    /// Only the CPU has an instruction behind an access. A DMA engine's
+    /// fetch or write is issued by the chip bus with no PC to compare,
+    /// so pairing a PC with a channel filter describes something that
+    /// cannot happen, and the watch would simply never fire.
+    pub fn takes_pc_qualifier(self) -> bool {
+        matches!(self, WatchSource::Cpu)
+    }
 }
 
 /// Why the interactive debugger stopped the machine.
@@ -1486,6 +1496,24 @@ mod tests {
         assert_eq!(WatchSource::parse("aud3"), Some(WatchSource::Audio(3)));
         assert_eq!(WatchSource::parse("aud4"), None);
         assert_eq!(WatchSource::parse("nonsense"), None);
+    }
+
+    #[test]
+    fn only_cpu_accesses_carry_an_instruction_to_qualify_on() {
+        assert!(WatchSource::Cpu.takes_pc_qualifier());
+        for source in [
+            WatchSource::Blitter,
+            WatchSource::Disk,
+            WatchSource::Copper,
+            WatchSource::Bitplane(0),
+            WatchSource::Sprite(3),
+            WatchSource::Audio(1),
+        ] {
+            assert!(
+                !source.takes_pc_qualifier(),
+                "{source:?} has no PC behind its accesses"
+            );
+        }
     }
 
     #[test]

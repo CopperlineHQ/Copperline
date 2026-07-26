@@ -3536,6 +3536,31 @@ fn plant_exec_world(app: &mut super::App) {
 }
 
 #[test]
+fn console_watch_refuses_a_pc_qualifier_on_a_dma_class() {
+    let mut app = test_app();
+    app.open_console();
+    // A DMA engine's access has no instruction behind it, so this pair
+    // could only ever install a watch that never fires.
+    let out = console_run(&mut app, "WATCH 20000 SPR3 PC=F80010");
+    assert!(
+        out.iter()
+            .any(|l| l.contains("only qualifies CPU accesses")),
+        "{out:?}"
+    );
+    assert!(app.emu.machine.ui_breaks().watches.is_empty());
+    // Either qualifier alone, and the CPU pairing, are accepted.
+    for cmd in [
+        "WATCH 20000 SPR3",
+        "WATCH 20002 PC=F80010",
+        "WATCH 20004 CPU PC=F80010",
+    ] {
+        let out = console_run(&mut app, cmd);
+        assert!(out.iter().any(|l| l.contains("set")), "{cmd}: {out:?}");
+    }
+    assert_eq!(app.emu.machine.ui_breaks().watches.len(), 3);
+}
+
+#[test]
 fn console_segments_walks_the_cli_module() {
     let mut app = test_app();
     app.open_console();

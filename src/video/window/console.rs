@@ -480,6 +480,15 @@ impl App {
                         }
                     }
                 }
+                // Only the CPU has an instruction behind an access, so a
+                // channel filter paired with PC= describes something that
+                // cannot happen and would never fire.
+                if pc.is_some() && filter.is_some_and(|f| !f.takes_pc_qualifier()) {
+                    return ConsoleOutcome::error(
+                        "PC= only qualifies CPU accesses; a DMA engine's access has no \
+                         instruction behind it",
+                    );
+                }
                 let set = self.emu.machine.ui_toggle_watch_qualified(addr, filter, pc);
                 ConsoleOutcome::one(format!(
                     "watchpoint ${:06X}{}{} {}",
