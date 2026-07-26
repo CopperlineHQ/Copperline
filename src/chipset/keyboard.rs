@@ -263,6 +263,12 @@ pub struct KeyboardMcu {
     /// Latched request for a machine reset (KCLK held low long
     /// enough); the Bus copies it into its pending flag.
     system_reset_request: bool,
+    /// Width, in colour clocks, of the last KDAT-low pulse too narrow for
+    /// the MCU to sample as a handshake. Drained by the Bus for the
+    /// hardware-misuse report; it is not machine state, so it is not
+    /// serialized.
+    #[serde(skip)]
+    short_handshake_cck: Option<u16>,
     /// Caps Lock LED state, owned by the keyboard: the key toggles it,
     /// sending a press code on toggle-on and a release code on
     /// toggle-off; the physical key release sends nothing.
@@ -292,6 +298,7 @@ impl KeyboardMcu {
             held: [0; 2],
             now_cck: 0,
             kdat_low_since: None,
+            short_handshake_cck: None,
             system_reset_request: false,
             caps_lock_on: false,
             overflow_pending: false,
@@ -535,6 +542,12 @@ impl KeyboardMcu {
     /// so a handshake that begins while the byte's final bit cell is
     /// still clocking out is credited with its full width -- the 6500/1
     /// samples the line level, not the protocol state.
+    /// Take the width of the last handshake pulse that was too short for
+    /// the MCU to sample, if one has happened since the last drain.
+    pub fn take_short_handshake(&mut self) -> Option<u16> {
+        self.short_handshake_cck.take()
+    }
+
     pub fn amiga_kdat_edge(&mut self, driven_low: bool) {
         if driven_low {
             self.kdat_low_since = Some(self.now_cck);
@@ -543,7 +556,12 @@ impl KeyboardMcu {
         let Some(since) = self.kdat_low_since.take() else {
             return;
         };
-        if self.now_cck.saturating_sub(since) < HANDSHAKE_MIN_CCK {
+        let width = self.now_cck.saturating_sub(since);
+        if width < HANDSHAKE_MIN_CCK {
+            // Too narrow for the MCU to sample. Latched for the
+            // hardware-misuse report, which is the only way software
+            // learns about it: the keyboard simply stops advancing.
+            self.short_handshake_cck = Some(width.min(u64::from(u16::MAX)) as u16);
             return;
         }
         let accepted = match &self.state {

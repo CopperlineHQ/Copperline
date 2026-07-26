@@ -55,6 +55,20 @@ pub enum Finding {
     /// The register was reached through an address mirror rather than at
     /// its canonical $DFFxxx address.
     MirroredAddress,
+    /// A blit was started while the previous one was still running. On
+    /// hardware the CPU stalls until the blitter frees the register file,
+    /// and with BLTPRI set it can be locked out for the whole blit.
+    BlitterBusy,
+    /// A blit was started with the DMA that runs it switched off, so it
+    /// never progresses and its completion interrupt never fires -- the
+    /// classic wait-for-BBUSY hang.
+    BlitterDmaOff,
+    /// Disk DMA was armed against a drive that cannot serve it (none
+    /// selected, motor off, or no media). Nothing arrives, and a loader
+    /// waiting on DSKBLK waits forever.
+    DiskNotReady,
+    /// A keyboard handshake pulse too short for the 6500/1 to sample.
+    KeyboardHandshakeShort,
 }
 
 impl Finding {
@@ -67,6 +81,10 @@ impl Finding {
             Finding::OddAddress => "odd-address",
             Finding::PointerOutsideChipRam => "pointer-outside-chip-ram",
             Finding::MirroredAddress => "mirrored-address",
+            Finding::BlitterBusy => "blitter-busy",
+            Finding::BlitterDmaOff => "blitter-dma-off",
+            Finding::DiskNotReady => "disk-not-ready",
+            Finding::KeyboardHandshakeShort => "keyboard-handshake-short",
         }
     }
 }
@@ -180,9 +198,23 @@ impl RegCheck {
     /// One human-readable line for a finding, in the shape the log and
     /// the debugger console both print.
     pub fn describe(report: &Report) -> String {
-        let reg = crate::debugger::custom_reg_name(report.reg);
         let who = report.writer.label();
         let at = report.writer.address();
+        let times = match report.count {
+            1 => String::new(),
+            n => format!(", {n} times"),
+        };
+        // The keyboard handshake is driven through CIA-A's serial port,
+        // not a custom register, so it does not name one.
+        if report.finding == Finding::KeyboardHandshakeShort {
+            return format!(
+                "keyboard handshake pulse of {} cck is below the {} cck the 6500/1 can \
+                 sample; the keyboard stops advancing to the next code \
+                 (by {who} at {at:#08X}, v{} h{}{times})",
+                report.value, report.detail, report.vpos, report.hpos,
+            );
+        }
+        let reg = crate::debugger::custom_reg_name(report.reg);
         let what = match report.finding {
             Finding::AbsentRegister => format!(
                 "{reg} is not present on the fitted chipset; write {:#06X} is dropped",
@@ -210,16 +242,40 @@ impl RegCheck {
                 "{reg} reached through an address mirror, not its $DFF{:03X} address",
                 report.reg
             ),
+            Finding::BlitterBusy => format!(
+                "{reg} started a blit while the previous one was still running; the CPU \
+                 stalls until the blitter frees its registers"
+            ),
+            Finding::BlitterDmaOff => format!(
+                "{reg} started a blit with DMACON BLTEN/DMAEN clear ({:#06X}); it will \
+                 never run or raise its completion interrupt",
+                report.detail
+            ),
+            Finding::DiskNotReady => {
+                format!("{reg} armed disk DMA but {}", disk_obstacle(report.detail))
+            }
+            Finding::KeyboardHandshakeShort => unreachable!("handled above"),
         };
         format!(
-            "{what} (by {who} at {at:#08X}, v{} h{}{})",
-            report.vpos,
-            report.hpos,
-            match report.count {
-                1 => String::new(),
-                n => format!(", {n} times"),
-            }
+            "{what} (by {who} at {at:#08X}, v{} h{}{times})",
+            report.vpos, report.hpos
         )
+    }
+}
+
+/// Codes for [`Finding::DiskNotReady`]'s `detail`, so the report stays a
+/// plain Copy struct rather than carrying a string per finding.
+pub const DISK_NO_DRIVE: u16 = 0;
+pub const DISK_MOTOR_OFF: u16 = 1;
+pub const DISK_EMPTY: u16 = 2;
+
+/// The reason code as the report prints it. Kept in step with
+/// `FloppyController::dma_arming_obstacle`.
+pub fn disk_obstacle(code: u16) -> &'static str {
+    match code {
+        DISK_MOTOR_OFF => "the selected drive's motor is off",
+        DISK_EMPTY => "the selected drive is empty",
+        _ => "no drive is selected",
     }
 }
 

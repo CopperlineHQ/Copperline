@@ -228,8 +228,10 @@ each finding carrying `kind`, `reg`, the `by`/`addr` of the writer, its
 `count`, the beam position, and a `detail` line naming the hardware
 behaviour. The kinds are `absent-register` (a register the fitted
 Agnus/Denise does not have), `unused-bits`, `wrong-direction`,
-`byte-access`, `odd-address`, `mirrored-address`, and
-`pointer-outside-chip-ram`. `custom.writer {reg}` answers the companion
+`byte-access`, `odd-address`, `mirrored-address`,
+`pointer-outside-chip-ram`, and the device-misuse kinds `blitter-busy`,
+`blitter-dma-off`, `disk-not-ready` and `keyboard-handshake-short` --
+the ones that hang rather than glitch. `custom.writer {reg}` answers the companion
 question -- the last value written to a register and the PC or Copper
 address that wrote it -- and is `-32003` while the validator is not armed,
 since nothing has been recorded. `dropped` counts findings lost once the

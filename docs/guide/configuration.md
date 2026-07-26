@@ -1123,7 +1123,12 @@ It flags writes to registers the fitted Agnus/Denise does not have, bits a
 register does not define, writes to read-only registers and reads of
 write-only ones, byte or odd-address access to word registers, access
 through an address mirror, and DMA pointers aimed past the chip RAM Agnus
-can address. Each finding names the PC (or Copper address) that made the
+can address. It also covers the engines behind those registers, where
+misuse hangs rather than glitches: a blit started while the previous one
+is still running or with its DMA switched off, disk DMA armed against a
+drive with no media or its motor still off (the class behind the classic
+loader dead-spins), and a keyboard handshake pulse too narrow for the
+6500/1 to sample, after which the keyboard simply stops sending. Each finding names the PC (or Copper address) that made the
 access and the beam position, is deduplicated by (kind, register, writer)
 with a repeat count, and is logged the first time it is seen. It also arms
 a per-register last-writer table, which answers "what set BPLCON3, and

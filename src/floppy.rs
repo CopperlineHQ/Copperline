@@ -406,6 +406,22 @@ impl FloppyController {
         bits
     }
 
+    /// Whether a disk-DMA arming right now would find a drive able to
+    /// serve it: a selected drive, its motor spinning, and media in it.
+    /// Returns the reason it could not, for the hardware-misuse report.
+    pub fn dma_arming_obstacle(&self) -> Option<&'static str> {
+        let Some(idx) = self.selected_drive() else {
+            return Some("no drive is selected");
+        };
+        if !self.drives[idx].motor_on {
+            return Some("the selected drive's motor is off");
+        }
+        if self.drives[idx].cached.is_empty() {
+            return Some("the selected drive is empty");
+        }
+        None
+    }
+
     pub fn activity_led_on(&self) -> bool {
         self.selected_drive()
             .is_some_and(|idx| self.drives[idx].motor_on)

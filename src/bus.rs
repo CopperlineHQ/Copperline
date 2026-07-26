@@ -2740,6 +2740,96 @@ impl Bus {
             self.note_chipset_finding(finding, off, writer, val, detail, vpos, hpos);
         }
         self.check_dma_pointer(off, val, writer, vpos, hpos);
+        self.check_device_misuse(off, val, writer, vpos, hpos);
+    }
+
+    /// Report a keyboard handshake pulse the 6500/1 could not sample.
+    /// Software gets no other signal: the keyboard simply stops sending,
+    /// and the guest sees keys go missing.
+    fn check_keyboard_handshake(&mut self) {
+        let Some(width) = self.keyboard.take_short_handshake() else {
+            return;
+        };
+        let writer = crate::regcheck::Writer::Cpu(self.cpu_pc);
+        self.note_chipset_finding(
+            crate::regcheck::Finding::KeyboardHandshakeShort,
+            // CIA-A's serial port is where the handshake is driven; there
+            // is no custom register involved, so the report is keyed on
+            // the pulse itself.
+            0,
+            writer,
+            width,
+            crate::chipset::keyboard::HANDSHAKE_MIN_CCK.min(u64::from(u16::MAX)) as u16,
+            self.agnus.vpos.min(u32::from(u16::MAX)) as u16,
+            self.agnus.hpos.min(u32::from(u16::MAX)) as u16,
+        );
+    }
+
+    /// Hardware-misuse checks for the engines behind the registers: a
+    /// blit that cannot run, and disk DMA armed against a drive that
+    /// cannot serve it.
+    ///
+    /// These are the cases that hang rather than glitch. A loader that
+    /// arms a read with the motor still off waits on DSKBLK forever, and
+    /// a blit started with its DMA off never raises BBUSY's completion --
+    /// both look like "it froze" with no other evidence.
+    fn check_device_misuse(
+        &mut self,
+        off: u16,
+        val: u16,
+        writer: crate::regcheck::Writer,
+        vpos: u16,
+        hpos: u16,
+    ) {
+        use crate::regcheck::Finding;
+        match off {
+            // BLTSIZE / BLTSIZH: the blit-start writes.
+            0x058 | 0x05E => {
+                if self.blitter.busy {
+                    self.note_chipset_finding(
+                        Finding::BlitterBusy,
+                        off,
+                        writer,
+                        val,
+                        0,
+                        vpos,
+                        hpos,
+                    );
+                }
+                let need = DMACON_DMAEN | DMACON_BLTEN;
+                if self.agnus.dmacon & need != need {
+                    self.note_chipset_finding(
+                        Finding::BlitterDmaOff,
+                        off,
+                        writer,
+                        val,
+                        self.agnus.dmacon,
+                        vpos,
+                        hpos,
+                    );
+                }
+            }
+            // DSKLEN: arming disk DMA.
+            0x024 if val & 0x8000 != 0 => {
+                if let Some(reason) = self.floppy.dma_arming_obstacle() {
+                    let code = match reason {
+                        r if r.contains("motor") => crate::regcheck::DISK_MOTOR_OFF,
+                        r if r.contains("empty") => crate::regcheck::DISK_EMPTY,
+                        _ => crate::regcheck::DISK_NO_DRIVE,
+                    };
+                    self.note_chipset_finding(
+                        Finding::DiskNotReady,
+                        off,
+                        writer,
+                        val,
+                        code,
+                        vpos,
+                        hpos,
+                    );
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Flag a DMA pointer aimed past the chip RAM Agnus can address.
@@ -5365,7 +5455,12 @@ impl Bus {
         }
         match eff.keyboard_handshake {
             Some(true) => self.keyboard.amiga_kdat_edge(true),
-            Some(false) => self.keyboard.amiga_kdat_edge(false),
+            Some(false) => {
+                self.keyboard.amiga_kdat_edge(false);
+                if self.regcheck.is_some() {
+                    self.check_keyboard_handshake();
+                }
+            }
             None => {}
         }
         if reg == REG_PRA || reg == REG_DDRA {

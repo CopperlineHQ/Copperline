@@ -2723,6 +2723,43 @@ mod tests {
     }
 
     #[test]
+    fn the_validator_flags_a_blit_that_cannot_run() {
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+        emu.bus_mut().set_chipset_validation(true);
+        // BLTSIZE with blitter DMA off: the blit never runs and never
+        // raises its completion interrupt, which is a hang, not a glitch.
+        emu.bus_mut().custom_write(0xDFF058, 2, 0x0041);
+        let report = exec_core(&mut emu, &mut ctx, &CoreOp::ChipsetReport).unwrap();
+        let dead = findings_of(&report, "blitter-dma-off");
+        assert_eq!(dead.len(), 1, "{report}");
+        assert_eq!(dead[0]["reg"], "BLTSIZE");
+        assert!(
+            dead[0]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("never run or raise its completion interrupt"),
+            "{}",
+            dead[0]["detail"]
+        );
+    }
+
+    #[test]
+    fn the_validator_flags_disk_dma_armed_against_an_empty_drive() {
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+        emu.bus_mut().set_chipset_validation(true);
+        // The test machine has no disk in df0, so arming a read waits on
+        // DSKBLK forever -- the class that produced the Gods and Shadow
+        // of the Beast dead-spins.
+        emu.bus_mut().custom_write(0xDFF024, 2, 0x8000 | 0x1000);
+        let report = exec_core(&mut emu, &mut ctx, &CoreOp::ChipsetReport).unwrap();
+        let stuck = findings_of(&report, "disk-not-ready");
+        assert_eq!(stuck.len(), 1, "{report}");
+        assert_eq!(stuck[0]["reg"], "DSKLEN");
+    }
+
+    #[test]
     fn region_digest_covers_only_its_rectangle() {
         let mut emu = test_emulator();
         let mut ctx = SessionCtx::new();
