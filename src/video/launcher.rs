@@ -189,9 +189,8 @@ pub const TABS: &[LauncherTab] = &[
     LauncherTab::Rom,
     LauncherTab::Floppy,
     LauncherTab::Storage,
-    // BootPriority and HostFs are reached as sub-pages from the Hard Disk
-    // (Storage) tab, so they are not top-level strip entries.
-    LauncherTab::Cd,
+    // Cd, HostFs, and BootPriority are reached as sub-pages from the Storage
+    // tab, so they are not top-level strip entries.
     LauncherTab::Input,
     LauncherTab::IoPorts,
     LauncherTab::Zorro,
@@ -206,7 +205,7 @@ impl LauncherTab {
             LauncherTab::Memory => "Memory",
             LauncherTab::Rom => "ROM",
             LauncherTab::Floppy => "Floppy",
-            LauncherTab::Storage => "Hard Disk",
+            LauncherTab::Storage => "Storage",
             LauncherTab::BootPriority => "Boot Priority",
             LauncherTab::HostFs => "Host Mounts",
             LauncherTab::Cd => "CD",
@@ -217,14 +216,23 @@ impl LauncherTab {
         }
     }
 
-    /// The strip entry to highlight for this (possibly sub-page) tab: the Boot
-    /// Priority and Host Mounts sub-pages keep their parent Hard Disk tab
+    /// The strip entry to highlight for this (possibly sub-page) tab: the CD,
+    /// Host Mounts, and Boot Priority sub-pages keep their parent Storage tab
     /// highlighted.
     pub fn strip_tab(self) -> LauncherTab {
         match self {
-            LauncherTab::BootPriority | LauncherTab::HostFs => LauncherTab::Storage,
+            LauncherTab::Cd | LauncherTab::HostFs | LauncherTab::BootPriority => {
+                LauncherTab::Storage
+            }
             other => other,
         }
+    }
+
+    /// The parent tab a sub-page returns to via its Back button, or `None` for a
+    /// top-level tab.
+    pub fn parent_tab(self) -> Option<LauncherTab> {
+        let parent = self.strip_tab();
+        (parent != self).then_some(parent)
     }
 }
 
@@ -283,7 +291,7 @@ pub enum LauncherField {
     ScsiUnit5,
     ScsiUnit6,
     // Boot priority sub-page: the synthesized-RDB de_BootPri for each hard-disk
-    // drive above, edited on its own page so it does not crowd the Hard Disk tab.
+    // drive above, edited on its own page so it does not crowd the Storage tab.
     IdeMasterBoot,
     IdeSlaveBoot,
     ScsiUnit0Boot,
@@ -370,13 +378,7 @@ pub enum RowKind {
     /// (e.g. the `Serial:` / `Parallel:` sections of the I/O Ports tab). Its
     /// `field` is inert.
     SectionHeader,
-    /// A button that navigates to another tab used as a sub-page (the sub-pages'
-    /// Back link to Hard Disk). Its `field` is inert; the payload is the tab.
-    SubPageLink(LauncherTab),
-    /// Two side-by-side sub-page links (the Hard Disk tab's Boot Priority and
-    /// Host Mounts buttons). Button labels come from each tab's own label.
-    SubPageLinkPair(LauncherTab, LauncherTab),
-    /// The greyed `Drive` / `Priority` / `Bootable` column titles above the Boot
+    /// The greyed `Drive` / `Priority` / `Status` column titles above the Boot
     /// Priority rows. Non-interactive; its `field` is inert.
     BootpriHeader,
 }
@@ -402,24 +404,14 @@ const fn section_header(label: &'static str) -> Row {
     }
 }
 
-/// A row whose button navigates to `target` used as a sub-page (see
-/// [`RowKind::SubPageLink`]).
-const fn sub_page_link(label: &'static str, target: LauncherTab) -> Row {
-    Row {
-        field: F::SectionHeader,
-        label,
-        kind: RowKind::SubPageLink(target),
-    }
-}
-
-/// A row of two side-by-side sub-page links (see [`RowKind::SubPageLinkPair`]).
-const fn sub_page_pair(left: LauncherTab, right: LauncherTab) -> Row {
-    Row {
-        field: F::SectionHeader,
-        label: "",
-        kind: RowKind::SubPageLinkPair(left, right),
-    }
-}
+/// The Storage tab's "Additional options" sub-pages, left to right. Drawn as a
+/// fixed footer nav (not row-grid entries), aligned with each sub-page's Back
+/// button.
+pub const ADDITIONAL_TABS: &[LauncherTab] = &[
+    LauncherTab::Cd,
+    LauncherTab::HostFs,
+    LauncherTab::BootPriority,
+];
 
 /// The greyed column-title row on the Boot Priority page (see
 /// [`RowKind::BootpriHeader`]).
@@ -544,7 +536,7 @@ const HOSTFS_ROWS: [Row; 12] = [
     row(F::Filesys3Boot, "  Boot priority", Cycle),
     row(F::Filesys3ReadOnly, "  Access", Cycle),
 ];
-// One boot-priority row per hard-disk drive, matching the Hard Disk tab's drive
+// One boot-priority row per hard-disk drive, matching the Storage tab's drive
 // rows. Greyed when the matching slot holds no image.
 const BOOTPRI_ROWS: [Row; 9] = [
     row(F::IdeMasterBoot, "IDE master", Bootpri),
@@ -613,8 +605,8 @@ const INPUT_ROWS: [Row; 4] = [
 ];
 
 /// The rows shown on a tab, top to bottom. Most tabs are fixed and borrow their
-/// static row table; only the composed tabs (Storage, its Boot Priority and Host
-/// Mounts sub-pages, and the dynamic I/O Ports tab) allocate. The I/O Ports tab is
+/// static row table; only the composed tabs (the Boot Priority page and the
+/// dynamic I/O Ports tab) allocate. The I/O Ports tab is
 /// dynamic: the MIDI endpoint rows appear only in MIDI mode and the
 /// sampler/printer rows only for those devices, so unrelated options stay hidden
 /// rather than greyed. The `Zorro` tab has no rows: it is drawn as a board list
@@ -630,32 +622,18 @@ pub fn rows(
         LauncherTab::Memory => Cow::Borrowed(&MEMORY_ROWS),
         LauncherTab::Rom => Cow::Borrowed(&ROM_ROWS),
         LauncherTab::Floppy => Cow::Borrowed(&FLOPPY_ROWS),
-        LauncherTab::Storage => {
-            // The Hard Disk tab links to its two sub-pages on one row, Boot
-            // Priority on the left and Host Mounts to its right.
-            let mut rows = vec![sub_page_pair(
-                LauncherTab::BootPriority,
-                LauncherTab::HostFs,
-            )];
-            rows.extend_from_slice(&STORAGE_ROWS);
-            Cow::Owned(rows)
-        }
+        // The Storage tab shows the IDE/SCSI options (the common case). Its
+        // "Additional options" heading and sub-page links are a fixed footer nav
+        // (see the panel code), aligned with each sub-page's Back button, so they
+        // are not part of the row grid.
+        LauncherTab::Storage => Cow::Borrowed(&STORAGE_ROWS),
         LauncherTab::BootPriority => {
-            // The Boot Priority sub-page opens with a Back link, then the greyed
-            // column titles, then one row per hard-disk drive.
-            let mut rows = vec![
-                sub_page_link("< Hard Disk", LauncherTab::Storage),
-                bootpri_header(),
-            ];
+            // The greyed column titles, then one row per hard-disk drive.
+            let mut rows = vec![bootpri_header()];
             rows.extend_from_slice(&BOOTPRI_ROWS);
             Cow::Owned(rows)
         }
-        LauncherTab::HostFs => {
-            // The Host Mounts sub-page opens with a link back to Hard Disk.
-            let mut rows = vec![sub_page_link("< Hard Disk", LauncherTab::Storage)];
-            rows.extend_from_slice(&HOSTFS_ROWS);
-            Cow::Owned(rows)
-        }
+        LauncherTab::HostFs => Cow::Borrowed(&HOSTFS_ROWS),
         LauncherTab::Cd => Cow::Borrowed(&CD_ROWS),
         LauncherTab::IoPorts => Cow::Owned(io_ports_rows(serial_mode, parallel_device)),
         LauncherTab::Input => Cow::Borrowed(&INPUT_ROWS),
@@ -2463,7 +2441,7 @@ impl MachineSetup {
     }
 
     /// The hard-disk drive field a boot-priority field belongs to (its twin on
-    /// the Hard Disk tab), or None when `field` is not a boot-priority field.
+    /// the Storage tab), or None when `field` is not a boot-priority field.
     fn boot_field_drive(field: LauncherField) -> Option<LauncherField> {
         use LauncherField as F;
         Some(match field {
@@ -2522,6 +2500,15 @@ impl MachineSetup {
         Self::boot_field_drive(field)
             .and_then(|drive| self.path(drive))
             .is_some_and(|p| !crate::config::is_cd_image_path(p))
+    }
+
+    /// Whether any Boot Priority row is editable -- a hard-disk drive is present.
+    /// The page's info text is hidden when it is not, since there is nothing to
+    /// manage.
+    pub fn has_boot_priority_rows(&self) -> bool {
+        BOOTPRI_ROWS
+            .iter()
+            .any(|r| self.boot_field_applies(r.field))
     }
 
     /// Whether a drive's Bootable box is cleared -- the config's -128 sentinel,
@@ -2829,8 +2816,8 @@ fn cycle_endpoint(
 /// field (toggle vs path) without threading the tab through every call, called
 /// per drawn row, so it scans the static row tables directly rather than
 /// composing tabs (which would allocate every frame). The composed tabs only
-/// add `SectionHeader`/`SubPageLink` rows, which carry no real field, so the raw
-/// tables cover every classifiable field.
+/// add `SectionHeader`/`BootpriHeader` rows, which carry no real field, so the
+/// raw tables cover every classifiable field.
 fn rows_contains_kind(field: LauncherField, kind: RowKind) -> bool {
     #[cfg(feature = "midi")]
     let serial: &[&[Row]] = &[&SERIAL_ROWS_MIDI];
@@ -3634,36 +3621,52 @@ mod tests {
     }
 
     #[test]
-    fn sub_pages_of_hard_disk() {
-        // Neither sub-page is a top-level strip tab.
-        assert!(!TABS.contains(&LauncherTab::BootPriority));
-        assert!(!TABS.contains(&LauncherTab::HostFs));
-        // The Hard Disk tab opens with links into both sub-pages, Boot Priority
-        // first, then Host Mounts.
+    fn sub_pages_of_hdd_cd() {
+        // The sub-pages (CD included) are not top-level strip tabs.
+        for t in [
+            LauncherTab::Cd,
+            LauncherTab::HostFs,
+            LauncherTab::BootPriority,
+        ] {
+            assert!(!TABS.contains(&t));
+            // Each keeps the Storage strip tab highlighted and returns to it.
+            assert_eq!(t.strip_tab(), LauncherTab::Storage);
+            assert_eq!(t.parent_tab(), Some(LauncherTab::Storage));
+        }
+        // A top-level tab has no parent.
+        assert_eq!(LauncherTab::Storage.parent_tab(), None);
+
+        // The Additional-options footer lists CD, Host Mounts, Boot Priority in
+        // that order (drawn as a fixed footer, not a row).
+        assert_eq!(
+            ADDITIONAL_TABS,
+            [
+                LauncherTab::Cd,
+                LauncherTab::HostFs,
+                LauncherTab::BootPriority
+            ]
+        );
+
+        // The Storage tab is just the storage rows (IDE/SCSI options).
         let storage = rows(
             LauncherTab::Storage,
             ParallelDevice::None,
             SerialMode::default(),
         );
-        let pair = storage.iter().find_map(|r| match r.kind {
-            RowKind::SubPageLinkPair(l, r) => Some((l, r)),
-            _ => None,
-        });
-        assert_eq!(pair, Some((LauncherTab::BootPriority, LauncherTab::HostFs)));
+        assert_eq!(
+            storage.first().map(|r| r.field),
+            Some(LauncherField::IdeMaster)
+        );
 
-        // Each sub-page opens with a Back link, then its own rows.
+        // Each sub-page carries its own rows (its Back button is a fixed footer,
+        // not a row).
         for (tab, marker) in [
-            (LauncherTab::BootPriority, LauncherField::IdeMasterBoot),
             (LauncherTab::HostFs, LauncherField::Filesys0Dir),
+            (LauncherTab::Cd, LauncherField::CdImage),
+            (LauncherTab::BootPriority, LauncherField::IdeMasterBoot),
         ] {
             let page = rows(tab, ParallelDevice::None, SerialMode::default());
-            assert_eq!(
-                page.first().map(|r| r.kind),
-                Some(RowKind::SubPageLink(LauncherTab::Storage))
-            );
             assert!(page.iter().any(|r| r.field == marker));
-            // The sub-page keeps the Hard Disk strip tab highlighted.
-            assert_eq!(tab.strip_tab(), LauncherTab::Storage);
         }
     }
 
@@ -3684,6 +3687,10 @@ mod tests {
         assert_eq!(setup.value_label(F::IdeMasterBoot), "5");
         assert!(!setup.drive_boot_off(F::IdeMasterBoot));
         assert_eq!(setup.disabled_reason(F::IdeMasterBoot), None);
+        // With a drive present the page has editable rows (its info text shows);
+        // a machine with no hard-disk drives has none.
+        assert!(setup.has_boot_priority_rows());
+        assert!(!MachineSetup::default().has_boot_priority_rows());
         // No slave image, so its boot row is greyed and inert.
         assert_eq!(setup.disabled_reason(F::IdeSlaveBoot), Some("no drive"));
 
