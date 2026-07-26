@@ -236,7 +236,15 @@ impl FrameRect {
     /// a region needs to know its coordinates went stale (the frame
     /// geometry changes with the beam standard and canvas scale).
     fn digest(&self, fb: &[u32], width: usize, lines: usize) -> Result<u64, CtlError> {
-        let (right, bottom) = (self.x + self.w, self.y + self.h);
+        // Checked rather than plain addition: the parser range-checks
+        // what it builds, but FrameRect is public and this is the method
+        // that indexes the framebuffer.
+        let (Some(right), Some(bottom)) = (self.x.checked_add(self.w), self.y.checked_add(self.h))
+        else {
+            return Err(CtlError::invalid_params(
+                "region overflows the address space",
+            ));
+        };
         if right > width || bottom > lines {
             return Err(CtlError::invalid_params(format!(
                 "region {}x{}+{}+{} is outside the {width}x{lines} frame",
@@ -748,8 +756,16 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
             if len == 0 {
                 return Err(CtlError::invalid_params("len must be non-zero"));
             }
+            let addr = p.u32_req("addr")?;
+            // A window whose end wraps would match nothing at all, so the
+            // fault would silently never fire.
+            if addr.checked_add(len - 1).is_none() {
+                return Err(CtlError::invalid_params(
+                    "addr + len overflows the address space",
+                ));
+            }
             core(CoreOp::FaultInject {
-                addr: p.u32_req("addr")?,
+                addr,
                 len,
                 on_read,
                 on_write,
@@ -3002,6 +3018,36 @@ mod tests {
         assert!(parse_method("run_until", &json!({"stable_frames": 4, "max_frames": 3})).is_err());
         // Targets stay mutually exclusive.
         assert!(parse_method("run_until", &json!({"stable_frames": 2, "frame": 10})).is_err());
+    }
+
+    #[test]
+    fn a_region_that_overflows_is_rejected_by_the_digest_itself() {
+        // FrameRect is public, so the bounds check cannot assume the JSON
+        // parser built it.
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+        let err = exec_core(
+            &mut emu,
+            &mut ctx,
+            &CoreOp::RegionDigest {
+                rect: FrameRect {
+                    x: usize::MAX,
+                    y: 0,
+                    w: 8,
+                    h: 8,
+                },
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.code, proto::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn a_fault_window_that_wraps_the_address_space_is_refused() {
+        // A wrapped window matches nothing, so the injected fault would
+        // silently never fire.
+        assert!(parse_method("fault.inject", &json!({"addr": 0xFFFF_FFFFu32, "len": 2})).is_err());
+        assert!(parse_method("fault.inject", &json!({"addr": 0xFFFF_FFFEu32, "len": 2})).is_ok());
     }
 
     #[test]

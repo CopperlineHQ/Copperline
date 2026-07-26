@@ -2752,9 +2752,16 @@ impl Bus {
     /// Software gets no other signal: the keyboard simply stops sending,
     /// and the guest sees keys go missing.
     fn check_keyboard_handshake(&mut self) {
+        // Drained on every handshake edge whether or not the validator is
+        // armed. The MCU latches unconditionally, so a pulse from before
+        // arming would otherwise surface at the next edge and be
+        // attributed to whatever PC happened to be running by then.
         let Some(width) = self.keyboard.take_short_handshake() else {
             return;
         };
+        if self.regcheck.is_none() {
+            return;
+        }
         let writer = crate::regcheck::Writer::Cpu(self.cpu_pc);
         self.note_chipset_finding(
             crate::regcheck::Finding::KeyboardHandshakeShort,
@@ -5498,9 +5505,7 @@ impl Bus {
             Some(true) => self.keyboard.amiga_kdat_edge(true),
             Some(false) => {
                 self.keyboard.amiga_kdat_edge(false);
-                if self.regcheck.is_some() {
-                    self.check_keyboard_handshake();
-                }
+                self.check_keyboard_handshake();
             }
             None => {}
         }

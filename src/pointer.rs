@@ -200,14 +200,26 @@ pub fn pointer_position(bus: &Bus) -> Option<(i32, i32)> {
     crate::video::bitplane::sprite_framebuffer_origin(bus, POINTER_SPRITE)
 }
 
-/// Counts to request for a pixel error at the measured gain, never
-/// deliberately overshooting and never exceeding one frame's safe step.
+/// Counts to request for a pixel error at the measured gain, bounded by
+/// one frame's safe step.
+///
+/// The gain already expresses the overshoot guard -- error/gain is the
+/// number of counts that covers exactly this error -- so there is no
+/// second clamp in pixels. Clamping counts by the pixel error would be a
+/// unit confusion, and it throttles the servo badly whenever the guest
+/// gives less than one pixel per count.
+///
+/// A non-zero error always asks for at least one count. A count is the
+/// smallest motion available, so requesting none would burn a frame
+/// injecting nothing and let the stall detector call a reachable target
+/// stuck; if one count overshoots, the tolerance and the stall detector
+/// are what resolve it.
 fn counts_for(error: i32, gain: f64) -> i32 {
     if error == 0 {
         return 0;
     }
-    let wanted = (f64::from(error) / gain).round() as i32;
-    wanted.abs().min(error.abs()).min(MAX_COUNTS) * error.signum()
+    let wanted = (f64::from(error.abs()) / gain).round() as i32;
+    wanted.clamp(1, MAX_COUNTS) * error.signum()
 }
 
 /// Blend a fresh pixels-per-count measurement into the running gain. The
@@ -310,6 +322,26 @@ mod tests {
                 frames: 0
             }
         );
+    }
+
+    #[test]
+    fn a_sub_gain_error_still_asks_for_motion() {
+        // Four pixels per count with one pixel to go: asking for zero
+        // would burn a frame injecting nothing.
+        assert_eq!(counts_for(1, 4.0), 1);
+        assert_eq!(counts_for(-1, 4.0), -1);
+        // A quarter of a pixel per count needs four counts per pixel; the
+        // request must not be throttled to the pixel error.
+        assert_eq!(counts_for(100, 0.25), MAX_COUNTS);
+        assert_eq!(counts_for(4, 0.25), 16);
+        assert_eq!(counts_for(0, 2.0), 0);
+    }
+
+    #[test]
+    fn a_guest_moving_less_than_a_pixel_per_count_still_converges() {
+        let (frames, at) = converge((0.25, 0.25), (0, 0), (200, 100), 0);
+        assert_eq!(at, (200, 100));
+        assert!(frames <= 20, "took {frames} frames");
     }
 
     #[test]
