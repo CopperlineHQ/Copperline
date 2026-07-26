@@ -18,9 +18,23 @@
 //! brief form after the instruction has retired. Indexed entries therefore
 //! use the manual's brief-form row; the host still bills every extension and
 //! indirect operand access that actually occurred.
+//!
+//! A taken branch additionally pays `TAKEN_BRANCH_REFILL`. The section-8.2
+//! entries are written for an instruction whose successor is already in the
+//! three-stage pipeline; a taken branch invalidates the decode and execute
+//! stages, so the target instruction cannot begin until the pipe refills from
+//! the cache. The manual accounts for that in the *following* instruction's
+//! head, which a per-instruction model with no overlap stage cannot express,
+//! so the cost is charged where the flush happens. Without it a `dbra` loop
+//! runs 6 clocks per iteration instead of 8 (`timing-test` rows 4, 5, 7, 14,
+//! 28, 29, 30, all 25% fast against the A1200 reference in
+//! `timing-test/README.md`).
 
 use super::cpu::CpuCore;
 use super::types::Size;
+
+/// Clocks a taken branch loses refilling the 020's instruction pipeline.
+const TAKEN_BRANCH_REFILL: i32 = 2;
 
 #[derive(Clone, Copy)]
 struct Case {
@@ -624,7 +638,9 @@ fn group_5(cpu: &CpuCore, op: u16, cached: bool) -> Option<i32> {
         } else {
             Case::new(6, 9)
         };
-        return Some(case.pick(cached));
+        let taken = !cpu.test_condition(condition) && cpu.d(reg as usize) as u16 != 0xFFFF;
+        let refill = if taken { TAKEN_BRANCH_REFILL } else { 0 };
+        return Some(case.pick(cached) + refill);
     }
     if size_bits == 3 {
         if mode == 0 {
@@ -644,10 +660,10 @@ fn group_5(cpu: &CpuCore, op: u16, cached: bool) -> Option<i32> {
 fn group_6(cpu: &CpuCore, op: u16, cached: bool) -> i32 {
     let condition = (op >> 8) & 0xF;
     if condition == 1 {
-        return Case::new(7, 13).pick(cached); // BSR
+        return Case::new(7, 13).pick(cached) + TAKEN_BRANCH_REFILL; // BSR
     }
     if condition == 0 || cpu.change_of_flow {
-        return Case::new(6, 9).pick(cached);
+        return Case::new(6, 9).pick(cached) + TAKEN_BRANCH_REFILL;
     }
     match op as u8 {
         0 => Case::new(6, 7).pick(cached),
@@ -793,11 +809,13 @@ mod tests {
     #[test]
     fn dbcc_distinguishes_loop_expiry_and_true_condition() {
         let mut cpu = CpuCore::new();
+        // Looping: the branch is taken, so it also pays the pipeline refill.
         cpu.ir = 0x51C8; // DBF D0,<disp>
         cpu.dar[0] = 7;
-        assert_eq!(cpu.cycles_020(12, true), 6);
-        assert_eq!(cpu.cycles_020(12, false), 9);
+        assert_eq!(cpu.cycles_020(12, true), 6 + TAKEN_BRANCH_REFILL);
+        assert_eq!(cpu.cycles_020(12, false), 9 + TAKEN_BRANCH_REFILL);
 
+        // Both fall-through exits leave the pipeline intact: table entry only.
         cpu.dar[0] = 0xFFFF;
         assert_eq!(cpu.cycles_020(14, true), 10);
         assert_eq!(cpu.cycles_020(14, false), 10);
@@ -805,6 +823,26 @@ mod tests {
         cpu.ir = 0x50C8; // DBT: condition true
         assert_eq!(cpu.cycles_020(12, true), 6);
         assert_eq!(cpu.cycles_020(12, false), 7);
+    }
+
+    #[test]
+    fn only_taken_branches_pay_the_pipeline_refill() {
+        let mut cpu = CpuCore::new();
+        // BRA is unconditional, so it always flushes.
+        cpu.ir = 0x6002;
+        cpu.change_of_flow = false;
+        assert_eq!(cpu.cycles_020(10, true), 6 + TAKEN_BRANCH_REFILL);
+
+        // BSR likewise.
+        cpu.ir = 0x6102;
+        assert_eq!(cpu.cycles_020(18, true), 7 + TAKEN_BRANCH_REFILL);
+
+        // A conditional branch pays it only when it is actually taken.
+        cpu.ir = 0x6702; // BEQ.B
+        cpu.change_of_flow = true;
+        assert_eq!(cpu.cycles_020(10, true), 6 + TAKEN_BRANCH_REFILL);
+        cpu.change_of_flow = false;
+        assert_eq!(cpu.cycles_020(10, true), 4);
     }
 
     #[test]

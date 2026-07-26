@@ -8701,9 +8701,11 @@ fn aga_68020_chip_reads_wait_for_data_but_writes_are_posted() {
     assert_eq!(chip_fetch_cck, 2);
     assert_eq!(bus.last_chip_bus_owner(), ChipBusOwner::Idle);
 
+    // A custom-register read crosses to Agnus/Denise/Paula and back over the
+    // 16-bit chipset bus, one colour clock beyond the chip-RAM data return.
     let _ = bus.custom_read(0x002, 2);
     let (custom_read_cck, _) = bus.take_slice_bus_advance();
-    assert_eq!(custom_read_cck, 2);
+    assert_eq!(custom_read_cck, 3);
     assert_eq!(bus.last_chip_bus_owner(), ChipBusOwner::Idle);
 }
 
@@ -8728,7 +8730,7 @@ fn ecs_68020_chip_and_custom_reads_wait_for_16_bit_data_return() {
 
     let _ = bus.custom_read(0x002, 2);
     let (custom_read_cck, _) = bus.take_slice_bus_advance();
-    assert_eq!(custom_read_cck, 2);
+    assert_eq!(custom_read_cck, 3);
     assert_eq!(bus.last_chip_bus_owner(), ChipBusOwner::Idle);
 }
 

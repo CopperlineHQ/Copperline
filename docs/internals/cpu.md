@@ -292,6 +292,19 @@ total. An A1200 chip-RAM access can therefore extend an instruction through
 Alice arbitration; selecting a smaller CPU total cannot erase a bus wait
 that already happened.
 
+A taken branch pays two clocks on top of its table entry. The section-8.2
+entries are written for an instruction whose successor is already in the
+three-stage pipeline; a taken branch invalidates the decode and execute stages,
+so the target cannot begin until the pipe refills. The manual charges that to
+the *following* instruction's head, which a per-instruction model with no
+overlap stage has nowhere to put, so Copperline charges it where the flush
+happens (`TAKEN_BRANCH_REFILL`). Without it a `dbra` loop runs at the isolated
+cache-case 6 clocks per iteration instead of 8, which makes every tight loop --
+depackers, MFM decoders, chase-the-beam poll loops -- about 10% fast. It is the
+one divergence that showed up across seven independent `timing-test` rows (4,
+5, 7, 14, 28, 29, 30) against the FS-UAE A1200 reference; see
+`timing-test/README.md`.
+
 This is intentionally a datasheet model, not a claim of cycle exactness.
 The opcode word does not retain a consumed extension word, so full-format
 indexed modes use the brief-index table row, `MOVES` uses the slower of its
@@ -311,7 +324,16 @@ CPU clocks, not the 68000's 4: after the granted colour-clock slot the access
 bills only the shorter remaining tail (one clock -- half a cck at the stock
 2-clock ratio, none at 14 MHz where the 3-clock cycle fits inside one slot).
 That is enough for a posted write. A chip-RAM read or custom-register read
-also waits one colour clock for the chipset's data-return phase. An AGA
+also waits one colour clock for the chipset's data-return phase, and a
+custom-register read waits one colour clock beyond that: chip RAM answers out of
+Agnus' DRAM controller with the row already open for the granted slot, while a
+register read has to cross to the addressed chip, be driven back onto the 16-bit
+chipset bus, and only then meet the CPU's data-return phase. A 68000 cannot see
+the difference -- its four-clock bus cycle is longer than either path -- but a
+14 MHz 020 samples early enough that the crossing costs a whole slot. This is
+what sets the rate of a VHPOSR/INTREQR polling loop, so it decides where
+chase-the-beam code lands relative to the copper: `timing-test` rows 16, 17 and
+21 fit 27% more iterations per frame without it. An AGA
 instruction-cache fill does the same for its first word; the second word from
 the already-latched 32-bit value is free. On OCS/ECS machines the 020 still
 talks to the 16-bit chip bus, so chip/slow/custom data reads likewise pay the

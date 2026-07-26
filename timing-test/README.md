@@ -48,6 +48,29 @@ trap). Every other row -- including the copper-vs-CPU row 27, which is what the
 (68EC020, ECS, 2 MB chip, no slow, KS 2.05); compare against FS-UAE/vAmiga set
 up the same way.
 
+vAmiga cannot arbitrate this machine (it is OCS/ECS and A500/A1000/A2000 only),
+so the only cross-check on file for the 020 at 14 MHz is FS-UAE.
+`tt-a1200.fs-uae` boots the same disk on FS-UAE's A1200 and serves the probe's
+serial stream on `tcp://127.0.0.1:1234`; connect to that socket and the 32 words
+arrive as ASCII hex:
+
+```sh
+fs-uae timing-test/tt-a1200.fs-uae &
+nc 127.0.0.1 1234        # or any client that holds the socket open
+python3 timing-test/compare-a1200.py    # captured reference, run from timing-test/
+```
+
+That reference column found the 020's taken-branch cost: rows 4, 5, 7, 14, 28,
+29 and 30 all differ from FS-UAE by exactly two clocks per loop iteration, and
+only in the iteration's branch (`move`, `shift`, `mul` and every chip-bus row
+agree once the branch is accounted for). Rows 16, 17 and 21 -- the per-frame
+VHPOSR-polling loops -- separately expose the extra colour clock a CPU
+custom-register read costs over a chip-RAM read. Both are modelled; see
+`docs/internals/cpu.md`. What the column still shows open is the write class:
+chip writes (rows 3, 10, 12, 18) are billed a whole colour clock where a real
+020 posts the write inside its shorter bus cycle, so they run ~10% slow (~29%
+under bitplane DMA), and row 31 (DIV during an active display) is ~27% fast.
+
 ## What each row measures
 
 Most values are the elapsed CIA E-clock ticks for the test (8192 iterations
