@@ -11,6 +11,7 @@ use crate::memory::{
 };
 use anyhow::{anyhow, Result};
 use log::{debug, trace};
+use m68k::core::memory::{BusFault, BusFaultKind};
 use m68k::{AddressBus, CpuCore, CpuType, StepResult};
 
 pub const CIA_A_BASE: u32 = 0x00BF_E000;
@@ -2614,6 +2615,28 @@ impl CpuBus {
         };
     }
 
+    /// Consume a debugger-injected bus fault covering this access, if
+    /// one is armed. The access does not reach memory when it fires, so
+    /// the guest sees exactly what an undecoded address gives it.
+    fn check_injected_fault(
+        &mut self,
+        address: u32,
+        len: u32,
+        write: bool,
+    ) -> Result<(), BusFault> {
+        if !self.bus.bus_faults_armed() {
+            return Ok(());
+        }
+        let addr = self.mask(address);
+        if self.bus.take_injected_fault(addr, len, write) {
+            return Err(BusFault {
+                kind: BusFaultKind::BusError,
+                address: addr,
+            });
+        }
+        Ok(())
+    }
+
     /// Report a CPU write that lands on memory already fetched as code.
     fn note_self_modifying_write(&mut self, addr: u32, len: u32) {
         let pc = self.diag_current_pc;
@@ -3284,6 +3307,49 @@ impl AddressBus for CpuBus {
 
     fn instruction_fetches_were_cached(&self) -> bool {
         self.instruction_fetches_cached
+    }
+
+    fn try_read_byte(&mut self, address: u32) -> Result<u8, BusFault> {
+        self.check_injected_fault(address, 1, false)?;
+        Ok(self.read_byte(address))
+    }
+
+    fn try_read_word(&mut self, address: u32) -> Result<u16, BusFault> {
+        self.check_injected_fault(address, 2, false)?;
+        Ok(self.read_word(address))
+    }
+
+    fn try_read_long(&mut self, address: u32) -> Result<u32, BusFault> {
+        self.check_injected_fault(address, 4, false)?;
+        Ok(self.read_long(address))
+    }
+
+    fn try_write_byte(&mut self, address: u32, value: u8) -> Result<(), BusFault> {
+        self.check_injected_fault(address, 1, true)?;
+        self.write_byte(address, value);
+        Ok(())
+    }
+
+    fn try_write_word(&mut self, address: u32, value: u16) -> Result<(), BusFault> {
+        self.check_injected_fault(address, 2, true)?;
+        self.write_word(address, value);
+        Ok(())
+    }
+
+    fn try_write_long(&mut self, address: u32, value: u32) -> Result<(), BusFault> {
+        self.check_injected_fault(address, 4, true)?;
+        self.write_long(address, value);
+        Ok(())
+    }
+
+    fn try_read_immediate_word(&mut self, address: u32) -> Result<u16, BusFault> {
+        self.check_injected_fault(address, 2, false)?;
+        Ok(self.read_immediate_word(address))
+    }
+
+    fn try_read_immediate_long(&mut self, address: u32) -> Result<u32, BusFault> {
+        self.check_injected_fault(address, 4, false)?;
+        Ok(self.read_immediate_long(address))
     }
 
     fn read_byte(&mut self, address: u32) -> u8 {

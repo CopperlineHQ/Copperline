@@ -87,6 +87,17 @@ pub enum CoreOp {
         clear: bool,
     },
     SmcReport,
+    /// Arm a bus fault over an address window, list the armed ones, or
+    /// clear them.
+    FaultInject {
+        addr: u32,
+        len: u32,
+        on_read: bool,
+        on_write: bool,
+        count: Option<u32>,
+    },
+    FaultList,
+    FaultClear,
     CiaGet {
         b: bool,
     },
@@ -179,6 +190,7 @@ impl CoreOp {
                 | CoreOp::CustomWriter { .. }
                 | CoreOp::ChipsetReport
                 | CoreOp::SmcReport
+                | CoreOp::FaultList
                 | CoreOp::CiaGet { .. }
                 | CoreOp::BeamGet
                 | CoreOp::DisplayGet
@@ -713,6 +725,31 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
             clear: p.bool_or("clear", false)?,
         }),
         "smc.report" => core(CoreOp::SmcReport),
+        "fault.inject" => {
+            let (on_read, on_write) = match p.str_opt("on")?.as_deref() {
+                None | Some("both") => (true, true),
+                Some("read") => (true, false),
+                Some("write") => (false, true),
+                Some(other) => {
+                    return Err(CtlError::invalid_params(format!(
+                        "on must be read|write|both, got {other}"
+                    )))
+                }
+            };
+            let len = p.u32_or("len", 2)?;
+            if len == 0 {
+                return Err(CtlError::invalid_params("len must be non-zero"));
+            }
+            core(CoreOp::FaultInject {
+                addr: p.u32_req("addr")?,
+                len,
+                on_read,
+                on_write,
+                count: p.u32_opt("count")?,
+            })
+        }
+        "fault.list" => core(CoreOp::FaultList),
+        "fault.clear" => core(CoreOp::FaultClear),
         "cia.get" => core(CoreOp::CiaGet {
             b: match p.str_req("cia")?.as_str() {
                 "a" | "A" => false,
@@ -1802,6 +1839,50 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
                 "writes": writes,
                 "dropped": dropped,
             }))
+        }
+        CoreOp::FaultInject {
+            addr,
+            len,
+            on_read,
+            on_write,
+            count,
+        } => {
+            let id = emu.bus_mut().inject_bus_fault(crate::bus::FaultInjection {
+                start: *addr,
+                end: addr.wrapping_add(len - 1),
+                on_read: *on_read,
+                on_write: *on_write,
+                remaining: *count,
+                hits: 0,
+            });
+            Ok(json!({"id": id}))
+        }
+        CoreOp::FaultList => {
+            let faults: Vec<Value> = emu
+                .bus()
+                .injected_bus_faults()
+                .iter()
+                .enumerate()
+                .map(|(id, f)| {
+                    json!({
+                        "id": id,
+                        "start": f.start,
+                        "end": f.end,
+                        "on": match (f.on_read, f.on_write) {
+                            (true, true) => "both",
+                            (true, false) => "read",
+                            _ => "write",
+                        },
+                        "remaining": f.remaining,
+                        "hits": f.hits,
+                    })
+                })
+                .collect();
+            Ok(json!({"faults": faults}))
+        }
+        CoreOp::FaultClear => {
+            emu.bus_mut().clear_injected_bus_faults();
+            Ok(json!({"faults": 0}))
         }
         CoreOp::Digest => Ok(digest_value(emu)),
         CoreOp::RegionDigest { rect } => region_digest_value(emu, *rect),

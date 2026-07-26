@@ -1024,6 +1024,11 @@ pub struct Bus {
     /// starts with a fresh, empty execution map.
     #[serde(skip)]
     pub(crate) smc: Option<Box<crate::smc::SmcTracker>>,
+    /// Debugger-injected bus faults. Transient debug state: a restore
+    /// does not resurrect them, since they describe an experiment the
+    /// operator is running, not machine state.
+    #[serde(skip)]
+    injected_faults: Vec<FaultInjection>,
     blitter_slowdown_cpu_misses: u8,
     /// Pending INTREQ.BLIT raise, in colour clocks. Real Agnus raises the
     /// blitter interrupt one clock after the sequencer's BLTDONE cycle
@@ -1220,6 +1225,25 @@ fn beam_write_source_name(source: BeamWriteSource) -> &'static str {
         BeamWriteSource::CpuCopperIrq => "cpu_copper_irq",
         BeamWriteSource::Copper => "copper",
     }
+}
+
+/// A debugger-injected bus fault: a CPU access inside this window and
+/// matching this direction takes a bus error instead of reaching memory.
+///
+/// This is a host debugger facility, not emulated hardware: it exists so
+/// a guest's own fault handler can be exercised deterministically,
+/// rather than by finding an address that happens to be undecoded on the
+/// machine under test.
+#[derive(Clone, Copy, Debug)]
+pub struct FaultInjection {
+    /// Inclusive address window.
+    pub start: u32,
+    pub end: u32,
+    pub on_read: bool,
+    pub on_write: bool,
+    /// Faults left to deliver; `None` never expires.
+    pub remaining: Option<u32>,
+    pub hits: u64,
 }
 
 /// The most recent write to one custom register, for the debugger's
@@ -2498,6 +2522,7 @@ impl Bus {
             regcheck: None,
             reg_writers: None,
             smc: None,
+            injected_faults: Vec::new(),
             ui_beam_traps: Vec::new(),
             ui_beam_hit: None,
             ui_copper_breaks: Vec::new(),
@@ -2566,6 +2591,51 @@ impl Bus {
             self.regcheck = None;
             self.reg_writers = None;
         }
+    }
+
+    /// Arm a bus fault over an address window. Returns its index, which
+    /// is stable until the list is cleared.
+    pub fn inject_bus_fault(&mut self, fault: FaultInjection) -> usize {
+        self.injected_faults.push(fault);
+        self.injected_faults.len() - 1
+    }
+
+    pub fn injected_bus_faults(&self) -> &[FaultInjection] {
+        &self.injected_faults
+    }
+
+    pub fn clear_injected_bus_faults(&mut self) {
+        self.injected_faults.clear();
+    }
+
+    /// Whether a CPU access of `len` bytes at `addr` should take an
+    /// injected bus error, consuming one of a counted injection's shots.
+    ///
+    /// Kept behind an emptiness check by every caller so an un-armed
+    /// machine pays a single branch per access.
+    pub(crate) fn take_injected_fault(&mut self, addr: u32, len: u32, write: bool) -> bool {
+        let last = addr.wrapping_add(len.max(1)).wrapping_sub(1);
+        for fault in &mut self.injected_faults {
+            if write && !fault.on_write || !write && !fault.on_read {
+                continue;
+            }
+            if last < fault.start || addr > fault.end {
+                continue;
+            }
+            if let Some(remaining) = fault.remaining.as_mut() {
+                if *remaining == 0 {
+                    continue;
+                }
+                *remaining -= 1;
+            }
+            fault.hits += 1;
+            return true;
+        }
+        false
+    }
+
+    pub(crate) fn bus_faults_armed(&self) -> bool {
+        !self.injected_faults.is_empty()
     }
 
     /// Arm or disarm the self-modifying-code detector. Disarming frees

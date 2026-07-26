@@ -2783,6 +2783,66 @@ mod tests {
         assert!(emu.bus().smc_reports().0.is_empty());
     }
 
+    #[test]
+    fn an_injected_bus_fault_takes_the_guest_into_its_own_handler() {
+        use crate::bus::FaultInjection;
+        let mut emu = emulator_with_self_modifying_program();
+        // Point the bus-error vector (2) somewhere recognisable.
+        emu.machine
+            .debug_write_memory(0x08, &0x0003_1000u32.to_be_bytes());
+        emu.machine
+            .debug_write_memory(0x31000, &0x4E71u16.to_be_bytes());
+        // One shot on the program's own store target.
+        emu.bus_mut().inject_bus_fault(FaultInjection {
+            start: 0x30000,
+            end: 0x30001,
+            on_read: false,
+            on_write: true,
+            remaining: Some(1),
+            hits: 0,
+        });
+        for _ in 0..6 {
+            emu.debug_step_instructions(1).unwrap();
+        }
+        assert_eq!(
+            emu.bus().injected_bus_faults()[0].hits,
+            1,
+            "the write should have taken the fault"
+        );
+        // The store never reached memory, so the NOP it aimed at is
+        // untouched, and the CPU is running the handler.
+        assert_eq!(emu.bus().peek_word_any(0x30000), 0x4E71);
+        assert!(
+            (0x31000..0x31010).contains(&emu.machine.pc()),
+            "expected the bus-error handler, pc = {:06X}",
+            emu.machine.pc()
+        );
+    }
+
+    #[test]
+    fn a_counted_bus_fault_stops_firing_once_it_is_spent() {
+        use crate::bus::FaultInjection;
+        let mut emu = emulator_with_call_program();
+        emu.bus_mut().mem.overlay = false;
+        emu.bus_mut().inject_bus_fault(FaultInjection {
+            start: 0x40000,
+            end: 0x40001,
+            on_read: true,
+            on_write: true,
+            remaining: Some(2),
+            hits: 0,
+        });
+        let fired: Vec<bool> = (0..4)
+            .map(|_| emu.bus_mut().take_injected_fault(0x40000, 2, false))
+            .collect();
+        assert_eq!(fired, [true, true, false, false]);
+        let fault = emu.bus().injected_bus_faults()[0];
+        assert_eq!(fault.hits, 2);
+        assert_eq!(fault.remaining, Some(0));
+        // An address outside the window is never faulted.
+        assert!(!emu.bus_mut().take_injected_fault(0x50000, 2, false));
+    }
+
     fn emulator_with_call_program() -> super::Emulator {
         let mut rom = vec![0u8; crate::memory::ROM_SIZE];
         let put = |mem: &mut [u8], off: usize, word: u16| {

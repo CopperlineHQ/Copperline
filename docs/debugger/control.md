@@ -245,6 +245,17 @@ a few bytes ahead of the writing instruction is called out as inside the
 68000's prefetch, where it may be too late to take effect on this pass.
 An address counts as code once an instruction there has retired.
 
+Bus faults: `fault.inject {addr, len?, on?, count?}` -> `{id}` makes CPU
+accesses inside that window take a bus error instead of reaching memory
+(`on` is `read`, `write`, or `both`, default both; `count` limits how
+many it delivers, default unlimited); `fault.list` reports each window
+with its `remaining` shots and `hits`; `fault.clear` removes them all.
+This is a host debugger facility, not emulated hardware -- it exists so a
+guest's own fault handler can be exercised deterministically, instead of
+hunting for an address that happens to be undecoded on the machine under
+test. A faulted access never reaches memory, so the guest sees exactly
+what an undecoded address would give it.
+
 Battery clock (the $DC0000 RTC; see `rtc_time` in
 `docs/guide/configuration.md` for the boot-time seed): `rtc.get` reports
 `{present, chip, seeded, frozen, unix, time}` (`chip` is the fitted part,
