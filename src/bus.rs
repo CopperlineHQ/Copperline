@@ -7544,8 +7544,10 @@ fn apply_live_bpldat_event(bpldat: &mut [u16; 8], offset: u16, value: u16) {
     }
 }
 
-/// Live collisions evaluate at most the classic 6 bitplanes until the AGA
-/// CLXCON2 collision extensions are interpreted (plan 3.4).
+/// Live collisions evaluate at most the classic 6 bitplanes. The rendered
+/// collision path already interprets the AGA CLXCON2 extensions for planes
+/// 7-8; extending the beam-timed path to match is an open gap (see
+/// docs/internals/chipset.md).
 const COLLISIONS_AGA_DECODE: bool = false;
 
 fn live_manual_bpl_word_collision_bits(
@@ -7575,8 +7577,8 @@ fn live_manual_bpl_word_collision_bits(
         let hires = bitplane_hires(source_control.bplcon0);
         let pixel_repeat = if hires || shres { 1 } else { 2 };
         let native_step = if shres { 2 } else { 1 };
-        // Collision sampling stays on the pre-AGA 6-plane decode until
-        // CLXCON2 / 8-plane collisions land (plan 3.4).
+        // Collision sampling stays on the pre-AGA 6-plane decode; see
+        // COLLISIONS_AGA_DECODE.
         let mode = BitplaneMode::from_bplcon0(source_control.bplcon0, COLLISIONS_AGA_DECODE);
         let nplanes = mode.display_planes().min(planes.len());
         let dual_playfield = source_control.bplcon0 & 0x0400 != 0;
@@ -7730,8 +7732,8 @@ fn live_bitplane_collision_pixel_at(
     let native_x = relative_native_x
         + live_fetch_origin_native_offset(agnus_revision, bplcon0, diwstrt, diwhigh, ddfstrt);
     let fetched_pixels = row.words_per_row * 16;
-    // Collision sampling stays on the pre-AGA 6-plane decode until CLXCON2 /
-    // 8-plane collisions land (plan 3.4).
+    // Collision sampling stays on the pre-AGA 6-plane decode; see
+    // COLLISIONS_AGA_DECODE.
     let mode = BitplaneMode::from_bplcon0(bplcon0, COLLISIONS_AGA_DECODE);
     let nplanes = mode.display_planes().min(row.nplanes).min(6);
     let dma_planes = mode.dma_planes().min(nplanes);

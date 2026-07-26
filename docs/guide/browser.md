@@ -24,8 +24,8 @@ works with no files of your own; the **Kickstart ROM** and **DF0 disk**
 pickers load local images instead. Both work before or after boot: a
 pre-boot choice is stashed and applied when the machine starts (the boot
 button relabels to show which ROM it will use), and a post-boot pick swaps
-the disk live. Disk images are recognised by content -- ADF, ADZ, DMS, IPF,
-and SCP, plain or gzip/zip packed -- and are always write-protected, since
+the disk live. Disk images are recognised by content -- ADF, ADZ, DMS, and
+SCP, plain or gzip/zip packed -- and are always write-protected, since
 the browser has no filesystem to write changes back to. On iOS the pickers
 offer every file rather than filtering by extension, because the system
 document picker greys out extensions it does not recognise, which would

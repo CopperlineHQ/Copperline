@@ -2241,7 +2241,7 @@ function updateStatusDisks() {
 // http.server) is scraped for links with a matching extension instead.
 // An empty or unreachable folder hides the select.
 
-const DISK_LIST_EXT = /\.(adf|adz|dms|ipf|scp|zip|gz)$/i;
+const DISK_LIST_EXT = /\.(adf|adz|dms|scp|zip|gz)$/i;
 // Raw ROM images only: a list pick feeds load_rom directly, which takes
 // uncompressed 256/512 KiB images.
 const KICK_LIST_EXT = /\.(rom|bin)$/i;
@@ -2356,7 +2356,7 @@ if (kickListSelect) {
 // Optional in the page shell: older shells have no URL button.
 $('df0url')?.addEventListener('click', () => {
   const url = window.prompt(
-    'Disk image URL (ADF/ADZ/DMS/IPF/SCP, gzip or zip packed):',
+    'Disk image URL (ADF/ADZ/DMS/SCP, gzip or zip packed):',
   );
   if (url && url.trim()) insertDiskFromUrl(url.trim());
 });

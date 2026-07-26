@@ -800,11 +800,10 @@ read-only SCP flux images. DMS, gzip, and SCP images are decoded at load time
 and always treated as write-protected; set `write_protected = false` on a plain
 ADF to allow write-through updates to the image file.
 
-The native loader deliberately rejects IPF/CAPS images. Useful native support
-would require either a direct IPF parser or an optional SPS/CAPS library, with
-its licensing, platform packaging, and dynamic-loading strategy settled before
-it becomes a desktop dependency. (The browser frontend has its own
-write-protected media decoder and does accept IPF.)
+The loader deliberately rejects IPF/CAPS images. Useful support would require
+either a direct IPF parser or an optional SPS/CAPS library, with its licensing,
+platform packaging, and dynamic-loading strategy settled before it becomes a
+dependency. The browser frontend shares this decoder, so it rejects IPF too.
 
 A `paths` playlist lets multi-disk software that only drives DF0: run
 without a second drive: the first entry is the boot disk and the disk-swap
