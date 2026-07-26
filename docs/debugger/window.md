@@ -265,19 +265,24 @@ the register state the beam will replay.
 Pick **Frame Analyzer...** from the status-bar menu to pause the machine and
 open the chip-bus frame analyzer in a separate tool window, leaving the
 normal emulated display visible in the main window. It can remain open next
-to the debugger window. The analyzer shows the whole captured Agnus beam
-frame, not just the TV-presented display. The trace includes vertical and
-horizontal overscan, blanking, and the visible display window.
+to the debugger window.
+
+The pane has two tabs, two views of the same paused machine. **Beam** answers
+"what owned the chip bus at each colour clock", over the whole captured Agnus
+beam frame rather than just the TV-presented display: the trace includes
+vertical and horizontal overscan, blanking, and the visible display window.
+**Memory** answers "where in the address space is anything happening" -- see
+[the Memory tab](#frame-analyzer-memory-tab) below.
 
 ```{figure} ../images/ui-preview-frame-analyzer.png
 :alt: The Frame Analyzer with the picture underlay enabled
 :width: 90%
 
-The Frame Analyzer: chip-bus owner heatmap over the picture underlay, the
-selected-scanline strip, and per-owner colour-clock counters.
+The Frame Analyzer's Beam tab: chip-bus owner heatmap over the picture
+underlay, the selected-scanline strip, and per-owner colour-clock counters.
 ```
 
-The main heatmap is indexed by beam position: X is `hpos` colour clocks and Y
+The Beam tab's heatmap is indexed by beam position: X is `hpos` colour clocks and Y
 is `vpos` lines. Each cell records the chip-bus owner for that colour clock:
 refresh, bitplane, sprite, disk, audio, Copper, blitter, CPU, or idle. The
 white outline marks the framebuffer display area that Copperline captured for
@@ -306,6 +311,11 @@ The pane has the same transport rhythm as the debugger:
 | To slot | `T` | Run until the beam reaches the selected slot |
 | Picture underlay | `U` | Draw the rendered frame beneath the heatmap |
 | Beam scrub | `B` | Show the picture only up to the selected slot |
+| Beam / Memory | `M` | Switch between the beam view and the memory heat map |
+
+**Run / Pause** and **Frame** work the same on both tabs; **To slot**, the
+underlay and the scrub belong to the beam view and are hidden on the Memory
+tab, which has no selected beam slot.
 
 Opening the pane starts a partial trace immediately; pressing **Frame**
 captures a clean full frame. Closing it restores the run/pause state selected
@@ -350,3 +360,65 @@ at their WAIT lines, sprites appear when their DMA lines pass, screen
 splits land where the pointers were rewritten. Combined with **To slot**,
 "scrub to the artefact, then run the machine to that exact colour clock"
 turns a what-is-the-beam-doing question into two clicks.
+
+(frame-analyzer-memory-tab)=
+### Memory tab: the memory heat map
+
+The Beam tab says what owned the chip bus at a colour clock. It does not say
+*where in memory* anything is happening, which is the question when a display
+is drawn from the wrong buffer, a decruncher writes somewhere unexpected, or
+a DMA channel is pointed at the wrong bank. The **Memory** tab (`M`) paints
+the address space instead of the beam.
+
+```{figure} ../images/ui-preview-frame-analyzer-memory.png
+:alt: The Frame Analyzer's Memory tab showing the memory heat map
+:width: 90%
+
+The Memory tab: the address-space heat map, the window presets built from
+the machine's fitted RAM banks, the per-toucher census, and the pinned
+cell's readout.
+```
+
+The map is a 256x256 grid of cells over a window of the address space, so a
+16 MiB window gives one cell per 256 bytes and a 512 KiB chip RAM bank one
+cell per 8. Each cell is coloured by what last touched it and fades to black
+over 32 frames, so what is lit is roughly the last half second of activity
+rather than everything since the map was armed. The touchers are CPU reads
+(dull red; instruction fetches count, so the map also shows where the CPU is
+executing), CPU writes (bright red), the blitter (orange), the Copper
+(yellow), the disk (magenta), and the bitplane (blue), sprite (green) and
+audio (cyan) DMA channels. Everything is recorded from bus activity: the map
+knows which engine touched which address, and nothing about what program is
+running.
+
+The buttons under the header move the window. They are built from the fitted
+machine's decoded RAM banks -- **Chip**, **Slow**, **MB** (Ramsey
+motherboard), **CPU** (accelerator/CPU-slot), and one per Zorro RAM board
+(**Z2**/**Z3**, with the base address appended when two would otherwise share
+a name) -- plus **24-bit** for the whole $000000-$FFFFFF space (chip and slow
+RAM, the custom registers, the CIAs, and the Zorro II space in one view).
+Entering the tab arms the map over chip RAM: it is the bank every chip-bus
+engine works out of and usually the smallest fitted one, so its cells cover
+the fewest bytes each. The list comes from the machine's decoded bank map
+rather than a fixed set of addresses, which is also why the window is movable
+at all: the motherboard, CPU-slot and Zorro III banks a 32-bit CPU sees live
+above the 24-bit space entirely, and a board sits wherever autoconfig put it.
+Moving the window starts a cold map, since the cells would otherwise carry
+activity from addresses they no longer name. Switching tabs does not: the
+recording survives a trip to the Beam tab and back.
+
+The column right of the map is the census and the legend at once: every
+toucher keeps a row -- cells held and the bytes they cover -- including the
+ones holding nothing, so the rows never move as activity comes and goes.
+
+Click a cell to pin it. The readout under the map names the pinned cell's
+address range, what last touched it, and how many frames ago; while the
+pointer is over the map it names the hovered cell's range instead. The cursor
+keys nudge the pinned cell one cell at a time (from the centre of the grid if
+nothing is pinned yet), clamped at the grid's edges.
+
+The map is the same one `memory.heatmap` arms over the
+[control protocol](control.md): there is one map per machine, so the last
+window request wins, whichever side made it. Closing the pane releases the
+map only if the pane armed it -- a map armed over the protocol keeps
+recording after the window is closed.

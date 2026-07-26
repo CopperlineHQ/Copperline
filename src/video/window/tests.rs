@@ -4,7 +4,7 @@
 //! `window.rs` for size, they are the same `window::tests` module
 //! and keep full access to the parent's private items via `super::`.
 
-use super::ui::{Panel, UiControl};
+use super::ui::{AnalyzerTab, Panel, UiControl};
 use super::{
     bar_layout, center_present_frame_for_visible_start, center_present_frame_horizontally,
     control_at, copperline_icon_image, copperline_logo_image, copy_present_frame,
@@ -30,6 +30,7 @@ use super::{
 use crate::audio::{AudioSink, NullSink};
 use crate::bus::{FrontPanelStatus, RenderRegisterSnapshot};
 use crate::config::{Overscan, WarpSpeed};
+use crate::heatmap;
 use crate::video::{FB_HEIGHT, FB_PIXELS, FB_WIDTH};
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -2199,6 +2200,17 @@ fn test_app_with_audio_and_cpu(
     audio: Box<dyn AudioSink>,
     cpu: crate::config::CpuModel,
 ) -> super::App {
+    test_app_with_audio_cpu_and_program(audio, cpu, &[])
+}
+
+/// The same fixture running a guest program: `program` (big-endian 68000
+/// words) is laid down at the reset PC, replacing the head of the NOP
+/// sled. An empty program leaves the plain sled.
+fn test_app_with_audio_cpu_and_program(
+    audio: Box<dyn AudioSink>,
+    cpu: crate::config::CpuModel,
+    program: &[u16],
+) -> super::App {
     use crate::chipset::paula::Paula;
     use crate::config::PacingBudget;
     use crate::emulator::Emulator;
@@ -2213,6 +2225,10 @@ fn test_app_with_audio_and_cpu(
     // NOP sled for the rest of the test program.
     for word in rom[8..4096].chunks_exact_mut(2) {
         word.copy_from_slice(&0x4E71u16.to_be_bytes());
+    }
+    for (idx, word) in program.iter().enumerate() {
+        let at = 8 + idx * 2;
+        rom[at..at + 2].copy_from_slice(&word.to_be_bytes());
     }
     let mem = Memory {
         chip_ram: vec![0u8; 512 * 1024],
@@ -2271,6 +2287,457 @@ fn test_app_with_audio_and_cpu(
         true,
         crate::sampler::SamplerRequest::default(),
     )
+}
+
+// ---------------------------------------------------------------------
+// A test machine that draws a hardware pointer.
+//
+// `crate::pointer` observes the guest's pointer the way a person looking
+// at the screen does: it reads where the hardware painted sprite 0. So
+// anything that servos the pointer can only be tested against a machine
+// that really runs a sprite-0 pointer, which is what the fixture below
+// builds out of the plain NOP-sled test machine.
+//
+// Two pieces of chip behaviour dictate its shape:
+//
+//   * Agnus never reloads SPRxPT. A field's sprite DMA walks the channel
+//     list from wherever the pointer was left, so after one field it
+//     sits past the list's null control word and the channel stays dark
+//     (`begin_new_beam_frame` carries that DMA frontier across the field
+//     boundary deliberately; see src/bus/frame_capture.rs). Software
+//     reloads SPRxPT once per field, essentially always from the Copper
+//     list, and so does this fixture. That Copper rewrite is the
+//     mechanism, not a workaround for one.
+//
+//   * A sprite's position is not a register the CPU can poke once:
+//     SPRxPOS/SPRxCTL are re-fetched by DMA from chip RAM every field.
+//     Moving the pointer means rewriting those control words, which the
+//     guest program does in vertical blank. VERTB is asserted at the
+//     frame wrap (vpos 0) and the channel's control-word DMA slot is
+//     ~25 lines later (PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS = $19), so the
+//     new position takes effect in the same field it was written.
+
+/// Chip-RAM address of the fixture's Copper list.
+const POINTER_COPPER_LIST: u32 = 0x0000_2000;
+/// Chip-RAM address of sprite 0's DMA list: control words, then one
+/// DATA/DATB pair per line, then the null control word.
+const POINTER_SPRITE_LIST: u32 = 0x0000_3000;
+/// Lines of sprite data in that list, and so the pointer's height.
+const POINTER_SPRITE_LINES: u16 = 8;
+
+/// Where the pointer starts, in the sprite comparators' own units:
+/// HSTART counts lo-res pixels (two columns of the presented canvas) and
+/// VSTART counts scan lines.
+const POINTER_START_HSTART: u16 = 0x0080;
+const POINTER_START_VSTART: u16 = 0x0060;
+
+/// Travel limits the guest program clamps to.
+///
+/// HSTART is nine bits (H8-H1 in SPRxPOS, H0 in SPRxCTL bit 0), so it
+/// has to stay under $200; this narrower range also keeps the painted
+/// origin inside the 716-column presented canvas at both ends.
+const POINTER_MIN_HSTART: u16 = 0x0070;
+const POINTER_MAX_HSTART: u16 = 0x0170;
+/// VSTART stays below the bottom of the scanned field and above the
+/// unprogrammed display window's first line (vpos $2C), so every fetched
+/// line lands in the field's live sprite-DMA pass; VSTART + the sprite's
+/// height stays under 256, which keeps VSTART8/VSTOP8 (SPRxCTL bits 2-1)
+/// clear so the control words the program builds are complete.
+const POINTER_MIN_VSTART: u16 = 0x0040;
+const POINTER_MAX_VSTART: u16 = 0x00D0;
+
+/// Fields between injecting quadrature counts and reading the resulting
+/// motion back. The guest samples the counters in vertical blank and the
+/// observation is of the last *completed* field's sprite DMA, so counts
+/// that land part-way through a field are consumed by the next field's
+/// blank and show up in the field after that.
+const POINTER_RESPONSE_FIELDS: u64 = 2;
+
+/// Fields the fixture needs before the pointer is observable: the frame
+/// geometry and the channel's vertical comparators settle over the first
+/// few fields, and the guest has to reach its first vertical blank.
+const POINTER_SETTLE_FIELDS: u64 = 8;
+
+/// Addresses inside a machine built by [`pointer_machine`].
+struct PointerFixture {
+    /// PC of the per-field update loop's first instruction (the INTREQR
+    /// poll). A breakpoint here fires once every frame.
+    mainloop_pc: u32,
+    /// Chip-RAM address of sprite 0's DMA control words.
+    sprite_list: u32,
+}
+
+/// Resolve a placeholder 8-bit branch at word index `slot` to word index
+/// `target`. The 68000 measures the displacement from the word after the
+/// opcode.
+fn patch_short_branch(code: &mut [u16], slot: usize, target: usize) {
+    let disp = (target as i32 - slot as i32 - 1) * 2;
+    let disp = i8::try_from(disp).expect("short branch out of range");
+    code[slot] |= u16::from(disp as u8);
+}
+
+/// The fixture's guest program, hand-assembled into 68000 words: it runs
+/// a sprite-0 pointer steered by port 1's quadrature counters. Returns
+/// the words and the word index of the per-field update loop.
+fn pointer_program() -> (Vec<u16>, usize) {
+    let mut code: Vec<u16> = Vec::new();
+
+    // Hand the low address space back to chip RAM, so the program's
+    // control-word stores reach the memory Agnus fetches from. CIA-A
+    // PRA bit 0 is /OVL and bit 1 the power LED.
+    code.extend_from_slice(&[0x13FC, 0x0003, 0x00BF, 0xE201]); // move.b #$03,$BFE201 (DDRA)
+    code.extend_from_slice(&[0x13FC, 0x0002, 0x00BF, 0xE001]); // move.b #$02,$BFE001 (PRA)
+
+    code.extend_from_slice(&[0x4BF9, 0x00DF, 0xF000]); // lea $DFF000,a5
+
+    // Point the Copper at the list that reloads SPR0PT, start it there
+    // once, then enable Copper and sprite DMA. Every later field
+    // restarts the Copper from COP1LC on its own.
+    let list_high = (POINTER_COPPER_LIST >> 16) as u16;
+    let list_low = POINTER_COPPER_LIST as u16;
+    code.extend_from_slice(&[0x3B7C, list_high, 0x0080]); // move.w #high,COP1LCH(a5)
+    code.extend_from_slice(&[0x3B7C, list_low, 0x0082]); // move.w #low,COP1LCL(a5)
+    code.extend_from_slice(&[0x3B7C, 0x0000, 0x0088]); // move.w #0,COPJMP1(a5)
+    code.extend_from_slice(&[0x3B7C, 0x82A0, 0x0096]); // move.w #SET|DMAEN|COPEN|SPREN,DMACON(a5)
+
+    // d2/d3 hold the pointer position in comparator units, d4 the
+    // previous JOY0DAT sample.
+    code.extend_from_slice(&[0x343C, POINTER_START_HSTART]); // move.w #hstart,d2
+    code.extend_from_slice(&[0x363C, POINTER_START_VSTART]); // move.w #vstart,d3
+    code.extend_from_slice(&[0x382D, 0x000A]); // move.w JOY0DAT(a5),d4
+
+    let mainloop = code.len();
+    // Wait for VERTB (INTREQ bit 5) and clear it. Writing INTREQ with
+    // bit 15 clear clears the named bits.
+    code.extend_from_slice(&[0x302D, 0x001E]); // move.w INTREQR(a5),d0
+    code.extend_from_slice(&[0x0800, 0x0005]); // btst #5,d0
+    let wait_branch = code.len();
+    code.push(0x6700); // beq.s mainloop
+    patch_short_branch(&mut code, wait_branch, mainloop);
+    code.extend_from_slice(&[0x3B7C, 0x0020, 0x009C]); // move.w #$0020,INTREQ(a5)
+
+    // The mouse is a quadrature encoder: JOY0DAT's low byte is the X
+    // counter and its high byte the Y counter, and motion is the signed
+    // 8-bit difference from the last sample. One count moves the pointer
+    // one comparator unit, so the guest applies no acceleration of its
+    // own.
+    code.extend_from_slice(&[0x302D, 0x000A]); // move.w JOY0DAT(a5),d0
+    code.push(0x3200); // move.w d0,d1
+    code.push(0x9004); // sub.b d4,d0
+    code.push(0x4880); // ext.w d0        (dx)
+    code.push(0x3A01); // move.w d1,d5
+    code.push(0xE04D); // lsr.w #8,d5     (Y counter now)
+    code.push(0x3C04); // move.w d4,d6
+    code.push(0xE04E); // lsr.w #8,d6     (Y counter last field)
+    code.push(0x9A06); // sub.b d6,d5
+    code.push(0x4885); // ext.w d5        (dy)
+    code.push(0x3801); // move.w d1,d4    (this field becomes the baseline)
+    code.push(0xD440); // add.w d0,d2
+    code.push(0xD645); // add.w d5,d3
+
+    // Clamp to the travel limits above.
+    code.extend_from_slice(&[0x0C42, POINTER_MIN_HSTART]); // cmp.w #min,d2
+    let clamp = code.len();
+    code.push(0x6C00); // bge.s +
+    code.extend_from_slice(&[0x343C, POINTER_MIN_HSTART]); // move.w #min,d2
+    let after = code.len();
+    patch_short_branch(&mut code, clamp, after);
+    code.extend_from_slice(&[0x0C42, POINTER_MAX_HSTART]); // cmp.w #max,d2
+    let clamp = code.len();
+    code.push(0x6F00); // ble.s +
+    code.extend_from_slice(&[0x343C, POINTER_MAX_HSTART]); // move.w #max,d2
+    let after = code.len();
+    patch_short_branch(&mut code, clamp, after);
+    code.extend_from_slice(&[0x0C43, POINTER_MIN_VSTART]); // cmp.w #min,d3
+    let clamp = code.len();
+    code.push(0x6C00); // bge.s +
+    code.extend_from_slice(&[0x363C, POINTER_MIN_VSTART]); // move.w #min,d3
+    let after = code.len();
+    patch_short_branch(&mut code, clamp, after);
+    code.extend_from_slice(&[0x0C43, POINTER_MAX_VSTART]); // cmp.w #max,d3
+    let clamp = code.len();
+    code.push(0x6F00); // ble.s +
+    code.extend_from_slice(&[0x363C, POINTER_MAX_VSTART]); // move.w #max,d3
+    let after = code.len();
+    patch_short_branch(&mut code, clamp, after);
+
+    // Rebuild sprite 0's control words in chip RAM. SPRxPOS carries
+    // VSTART in bits 15-8 and HSTART bits 8-1 in bits 7-0; SPRxCTL
+    // carries VSTOP in bits 15-8 and HSTART bit 0 in bit 0.
+    let pos_high = (POINTER_SPRITE_LIST >> 16) as u16;
+    let pos_low = POINTER_SPRITE_LIST as u16;
+    let ctl_high = ((POINTER_SPRITE_LIST + 2) >> 16) as u16;
+    let ctl_low = (POINTER_SPRITE_LIST + 2) as u16;
+    code.push(0x3003); // move.w d3,d0
+    code.push(0xE148); // lsl.w #8,d0
+    code.push(0x3202); // move.w d2,d1
+    code.push(0xE249); // lsr.w #1,d1
+    code.extend_from_slice(&[0x0241, 0x00FF]); // and.w #$00FF,d1
+    code.push(0x8041); // or.w d1,d0
+    code.extend_from_slice(&[0x33C0, pos_high, pos_low]); // move.w d0,SPR0POS
+    code.push(0x3003); // move.w d3,d0
+    code.push(0x5040); // addq.w #8,d0   (VSTOP = VSTART + height)
+    code.push(0xE148); // lsl.w #8,d0
+    code.push(0x3202); // move.w d2,d1
+    code.extend_from_slice(&[0x0241, 0x0001]); // and.w #$0001,d1
+    code.push(0x8041); // or.w d1,d0
+    code.extend_from_slice(&[0x33C0, ctl_high, ctl_low]); // move.w d0,SPR0CTL
+
+    // bra.w back to the vertical-blank wait. The word displacement
+    // keeps the loop free to grow past a short branch's reach.
+    let back = code.len();
+    code.push(0x6000);
+    let disp = (mainloop as i32 - back as i32 - 1) * 2;
+    let disp = i16::try_from(disp).expect("loop branch out of range");
+    code.push(disp as u16);
+
+    (code, mainloop)
+}
+
+/// Write big-endian words into chip RAM directly. Pokes are unaffected
+/// by the CPU's boot-time ROM overlay, and Agnus always fetches from
+/// chip RAM, so this seeds the DMA lists before the guest runs.
+fn poke_chip_words(chip_ram: &mut [u8], addr: u32, words: &[u16]) {
+    for (idx, word) in words.iter().enumerate() {
+        let at = addr as usize + idx * 2;
+        chip_ram[at..at + 2].copy_from_slice(&word.to_be_bytes());
+    }
+}
+
+/// A test machine running a sprite-0 pointer: a Copper list that reloads
+/// SPR0PT every field, sprite 0's DMA list in chip RAM, and a guest
+/// program that moves the pointer by the mouse counters in vertical
+/// blank. Port 1 is a mouse and port 2 a joystick, as on the stock
+/// fixture.
+fn pointer_machine() -> (super::App, PointerFixture) {
+    let (program, mainloop) = pointer_program();
+    let mut app = test_app_with_audio_cpu_and_program(
+        Box::new(NullSink),
+        crate::config::CpuModel::M68000,
+        &program,
+    );
+    app.emu
+        .bus_mut()
+        .input
+        .set_port_device(1, crate::bus::PortDevice::Joystick);
+
+    // The Copper list: reload SPR0PT for this field, then park. Without
+    // it the channel would fetch from wherever the previous field's DMA
+    // left the pointer.
+    let copper_list = [
+        0x0120, // MOVE SPR0PTH
+        (POINTER_SPRITE_LIST >> 16) as u16,
+        0x0122, // MOVE SPR0PTL
+        POINTER_SPRITE_LIST as u16,
+        0xFFFF, // WAIT for a beam position that never comes: end of list
+        0xFFFE,
+    ];
+    let mut sprite_list = vec![
+        (POINTER_START_VSTART << 8) | ((POINTER_START_HSTART >> 1) & 0x00FF),
+        ((POINTER_START_VSTART + POINTER_SPRITE_LINES) << 8) | (POINTER_START_HSTART & 1),
+    ];
+    for _ in 0..POINTER_SPRITE_LINES {
+        sprite_list.push(0xFFFF); // SPRxDATA: a solid run of colour 1
+        sprite_list.push(0x0000); // SPRxDATB
+    }
+    // The null control word an armed channel fetches on its VSTOP line:
+    // VSTART and VSTOP of 0 leave it disabled for the rest of the field.
+    sprite_list.push(0x0000);
+    sprite_list.push(0x0000);
+
+    let chip_ram = &mut app.emu.bus_mut().mem.chip_ram;
+    poke_chip_words(chip_ram, POINTER_COPPER_LIST, &copper_list);
+    poke_chip_words(chip_ram, POINTER_SPRITE_LIST, &sprite_list);
+
+    let fixture = PointerFixture {
+        mainloop_pc: crate::memory::ROM_BASE as u32 + 8 + 2 * mainloop as u32,
+        sprite_list: POINTER_SPRITE_LIST,
+    };
+    (app, fixture)
+}
+
+/// Advance the machine by `fields` complete emulated fields.
+/// `Emulator::step_frame` spends a fixed instruction budget rather than
+/// running to a beam wrap, so a guest whose instructions are cheaper than
+/// the pacing average covers less than a field per call. Anything timed
+/// against the beam counts fields off Agnus instead.
+fn step_fields(app: &mut super::App, fields: u64) {
+    let target = app.emu.bus().emulated_frames() + fields;
+    while app.emu.bus().emulated_frames() < target {
+        app.emu.step_frame().expect("the pointer machine runs");
+    }
+}
+
+/// Run the fixture until the hardware is painting sprite 0, and report
+/// where, in the presented-pixel coordinates the servo works in.
+fn settle_pointer_machine(app: &mut super::App) -> (i32, i32) {
+    step_fields(app, POINTER_SETTLE_FIELDS);
+    crate::pointer::pointer_position(app.emu.bus())
+        .expect("the fixture's Copper list re-arms sprite 0 every field")
+}
+
+/// Sprite 0's origin on the last completed field, as the servo reads it.
+fn pointer_origin(app: &super::App) -> (i32, i32) {
+    crate::pointer::pointer_position(app.emu.bus()).expect("sprite 0 is being drawn")
+}
+
+#[test]
+fn sprite_pointer_fixture_redraws_each_frame_via_copper_pointer_rewrite() {
+    let (mut app, fixture) = pointer_machine();
+    let origin = settle_pointer_machine(&mut app);
+
+    // Agnus does not reload SPRxPT at vertical blank, so a channel whose
+    // pointer is not rewritten walks off the end of its list after one
+    // field and goes dark. Thirty further fields is far past that: what
+    // keeps the pointer alive is the Copper list's per-field reload.
+    step_fields(&mut app, 30);
+    assert_eq!(
+        pointer_origin(&app),
+        origin,
+        "an idle mouse leaves the pointer where it was"
+    );
+
+    // Ten quadrature counts right and six down. A count is one
+    // comparator unit here: HSTART counts lo-res pixels, which are two
+    // columns of the presented canvas, and VSTART counts scan lines.
+    app.emu.bus_mut().input.add_mouse_delta(0, 10, 6);
+    step_fields(&mut app, POINTER_RESPONSE_FIELDS);
+    assert_eq!(
+        pointer_origin(&app),
+        (origin.0 + 20, origin.1 + 6),
+        "one count is one lo-res pixel across and one line down"
+    );
+
+    // And it moved by rewriting the DMA control words, which is the only
+    // way a sprite's position can change: SPRxPOS/SPRxCTL are re-fetched
+    // from chip RAM every field.
+    let hstart = POINTER_START_HSTART + 10;
+    let vstart = POINTER_START_VSTART + 6;
+    let chip_ram = &app.emu.bus().mem.chip_ram;
+    let at = fixture.sprite_list as usize;
+    let pos = u16::from_be_bytes([chip_ram[at], chip_ram[at + 1]]);
+    let ctl = u16::from_be_bytes([chip_ram[at + 2], chip_ram[at + 3]]);
+    assert_eq!(pos, (vstart << 8) | ((hstart >> 1) & 0x00FF), "SPR0POS");
+    assert_eq!(
+        ctl,
+        ((vstart + POINTER_SPRITE_LINES) << 8) | (hstart & 1),
+        "SPR0CTL"
+    );
+
+    // The loop address the fixture advertises really is the per-field
+    // update loop, so a breakpoint planted there stops the machine.
+    app.emu
+        .machine
+        .ui_set_breakpoint(fixture.mainloop_pc, None, 0);
+    app.emu.step_frame().expect("the pointer machine runs");
+    assert!(
+        app.emu.machine.ui_debug_stop_pending(),
+        "the guest reaches mainloop_pc every field"
+    );
+}
+
+#[test]
+fn scripted_mouse_deltas_defer_to_a_steering_pointer_servo() {
+    let (mut app, _fixture) = pointer_machine();
+    let (x0, y0) = settle_pointer_machine(&mut app);
+
+    // A --mouse-to-after target and a --mouse-after delta both due now.
+    // The servo measures the pointer's response to its own counts to
+    // learn the guest's acceleration, so the delta has to be held back
+    // until it finishes. The target is far enough out that the servo's
+    // per-field count limit makes it several corrections' work, so the
+    // deferral is observed over several fields rather than one.
+    let target = (x0 + 400, y0 + 24);
+    app.arm_scripted_pointer_target(0.0, target.0, target.1, 0);
+    app.auto_mouse.push((0.0, 20, 0, 0));
+
+    let mut corrections = 0;
+    loop {
+        // The servo has to see what its previous delta did before
+        // choosing the next, so the scheduled-event pass runs at the
+        // fixture's response cadence.
+        step_fields(&mut app, POINTER_RESPONSE_FIELDS);
+        app.fire_scheduled_events();
+        if !app.scripted_pointer_target_active() {
+            break;
+        }
+        assert!(
+            !app.auto_mouse.is_empty(),
+            "a scripted delta must stay queued while the servo is steering"
+        );
+        corrections += 1;
+        assert!(
+            corrections < crate::pointer::DEFAULT_MAX_FRAMES,
+            "the servo should finish inside its own frame budget"
+        );
+    }
+    assert!(
+        corrections > 1,
+        "the deferral should have been exercised over several corrections"
+    );
+
+    // The servo arrived rather than being knocked off course, and the
+    // pass it finished on released the deltas again.
+    let arrived = pointer_origin(&app);
+    assert!(
+        (arrived.0 - target.0).abs() <= crate::pointer::DEFAULT_TOLERANCE
+            && (arrived.1 - target.1).abs() <= crate::pointer::DEFAULT_TOLERANCE,
+        "servo stopped at {arrived:?}, wanted {target:?}"
+    );
+    assert!(
+        app.auto_mouse.is_empty(),
+        "the delta is released on the field the servo finishes"
+    );
+
+    // The held-back delta then lands intact: 20 counts is 20 lo-res
+    // pixels, 40 columns of the presented canvas.
+    step_fields(&mut app, POINTER_RESPONSE_FIELDS);
+    assert_eq!(
+        pointer_origin(&app),
+        (arrived.0 + 40, arrived.1),
+        "the deferred delta is applied, not dropped"
+    );
+}
+
+/// The CCP `input.mouse_to` servo steps frames itself, and `step_frame`
+/// reports success even when it ended early on a breakpoint. Without the
+/// check under test the servo would keep stepping and swallow the stop.
+#[cfg(feature = "control")]
+#[test]
+fn pointer_servo_yields_to_a_pending_debugger_stop() {
+    let (mut app, fixture) = pointer_machine();
+    let (x0, y0) = settle_pointer_machine(&mut app);
+    app.emu
+        .machine
+        .ui_set_breakpoint(fixture.mainloop_pc, None, 0);
+
+    let err = crate::control::exec::mouse_to(
+        &mut app.emu,
+        0,
+        (x0 + 200, y0),
+        crate::pointer::DEFAULT_TOLERANCE,
+        crate::pointer::DEFAULT_MAX_FRAMES,
+        |emu, action| {
+            if let crate::control::session::InputAction::MouseMove { port, dx, dy } = action {
+                emu.bus_mut().input.add_mouse_delta(port as usize, dx, dy);
+            }
+        },
+    )
+    .expect_err("the breakpoint must interrupt the servo");
+    assert!(
+        err.message
+            .contains("debugger stop interrupted the pointer servo"),
+        "{}",
+        err.message
+    );
+
+    // The stop was left pending, so the window's normal path still
+    // surfaces it: yielding must not consume the hit.
+    assert!(
+        app.surface_debug_stop(),
+        "the interrupted servo must leave the stop for the normal path"
+    );
+    assert!(app.paused, "surfacing a debugger stop pauses the machine");
 }
 
 #[test]
@@ -5197,4 +5664,381 @@ fn windowless_run_fires_scheduled_input_and_flushes_recording() {
 fn windowless_run_without_captures_errors_instead_of_spinning() {
     let app = test_app();
     assert!(app.run_headless().is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Frame Analyzer, Memory tab: the memory heat map
+// ---------------------------------------------------------------------------
+
+/// The Memory tab's view of the live map, as the pane would draw it.
+fn built_heat_view(app: &super::App) -> super::ui::AnalyzerHeatView {
+    let panel = app
+        .frame_analyzer_panel
+        .clone()
+        .expect("the analyzer pane is open");
+    app.build_frame_analyzer_view(&panel)
+        .heat
+        .expect("the Memory tab has an armed map to show")
+}
+
+/// Cells one named toucher holds in a built census.
+fn heat_census_cells(view: &super::ui::AnalyzerHeatView, name: &str) -> usize {
+    view.census
+        .iter()
+        .find(|row| row.name == name)
+        .map(|row| row.cells)
+        .expect("every toucher keeps a census row")
+}
+
+/// The census as (toucher, cells) pairs, for assertion messages.
+fn census_summary(view: &super::ui::AnalyzerHeatView) -> Vec<(&'static str, usize)> {
+    view.census
+        .iter()
+        .map(|row| (row.name, row.cells))
+        .collect()
+}
+
+/// Index of the preset button with this label.
+fn heat_preset_index(app: &super::App, label: &str) -> u8 {
+    let presets = &app
+        .frame_analyzer_panel
+        .as_ref()
+        .expect("the analyzer pane is open")
+        .heat_presets;
+    presets
+        .iter()
+        .position(|preset| preset.label == label)
+        .unwrap_or_else(|| panic!("no {label} preset in {:?}", preset_labels(app))) as u8
+}
+
+fn preset_labels(app: &super::App) -> Vec<String> {
+    app.frame_analyzer_panel
+        .as_ref()
+        .map(|panel| {
+            panel
+                .heat_presets
+                .iter()
+                .map(|preset| preset.label.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn frame_analyzer_memory_tab_arms_the_heat_map_over_chip_ram() {
+    let (mut app, _fixture) = pointer_machine();
+    app.open_frame_analyzer();
+    assert!(
+        app.emu.bus().heat_map().is_none(),
+        "opening the pane alone arms nothing"
+    );
+
+    app.activate_ui_control(UiControl::AnalyzerTab(AnalyzerTab::Memory));
+    let chip_len = app.emu.bus().mem.chip_ram.len() as u32;
+    match app.emu.bus().heat_map() {
+        Some(map) => {
+            assert_eq!(map.base(), crate::memory::CHIP_RAM_BASE as u32);
+            assert_eq!(map.span(), heatmap::rounded_span(chip_len));
+        }
+        None => panic!("entering the Memory tab arms the map"),
+    }
+    assert!(app.heatmap_armed_by_panel, "the pane owns this arming");
+
+    // Two fields of recording. The fixture's Copper list reloads SPR0PT
+    // every field (Copper instruction fetches from $2000) and sprite 0's
+    // DMA walks its control words and data (sprite fetches from $3000), so
+    // two engines show in two parts of the same bank.
+    //
+    // The guest's own stores to the sprite control words land in a cell the
+    // channel's DMA re-reads later in the same field, and a cell records
+    // only its *last* toucher, so those CPU writes are not what the window
+    // ends the field showing. The CPU's other traffic -- instruction fetch
+    // and the custom registers -- is outside chip RAM entirely.
+    step_fields(&mut app, 2);
+    let view = built_heat_view(&app);
+    assert_eq!(view.base, crate::memory::CHIP_RAM_BASE as u32);
+    assert_eq!(
+        view.bytes_per_cell,
+        heatmap::rounded_span(chip_len) / heatmap::CELLS as u32
+    );
+    assert!(
+        heat_census_cells(&view, "copper") > 0,
+        "the Copper list's fetches: {:?}",
+        census_summary(&view)
+    );
+    assert!(
+        heat_census_cells(&view, "sprite") > 0,
+        "sprite 0's DMA list: {:?}",
+        census_summary(&view)
+    );
+    // Every toucher keeps a row, so the column reads as the legend too.
+    assert_eq!(view.census.len(), 8);
+    for row in &view.census {
+        assert_eq!(row.bytes, row.cells as u64 * u64::from(view.bytes_per_cell));
+    }
+    assert!(
+        view.image.iter().any(|pixel| *pixel != 0xFF00_0000),
+        "recorded cells paint their toucher's colour"
+    );
+}
+
+#[test]
+fn heat_presets_name_every_fitted_ram_bank() {
+    // A machine with one of everything: chip, slow/ranger, Ramsey
+    // motherboard, CPU-slot accelerator, and two autoconfigured Zorro III
+    // RAM boards. The presets come from that decoded bank map, so the two
+    // banks above the 24-bit space and the boards wherever autoconfig put
+    // them are all reachable, which a fixed address list could not do.
+    let (mut app, _fixture) = pointer_machine();
+    {
+        let mem = &mut app.emu.bus_mut().mem;
+        mem.slow_ram = vec![0u8; 512 * 1024];
+        mem.fit_mb_ram(4 * 1024 * 1024);
+        mem.fit_accel_ram(8 * 1024 * 1024);
+        for base in [0x1000_0000u32, 0x2000_0000] {
+            mem.zorro
+                .add_board_configured_at(crate::zorro::BoardSpec::z3_ram(16 * 1024 * 1024), base)
+                .expect("Zorro III RAM board");
+        }
+    }
+    app.open_frame_analyzer();
+    app.activate_ui_control(UiControl::AnalyzerTab(AnalyzerTab::Memory));
+    // Two boards of the same kind are told apart by their base address.
+    assert_eq!(
+        preset_labels(&app),
+        vec![
+            "Chip",
+            "Slow",
+            "MB",
+            "CPU",
+            "Z3 $10000000",
+            "Z3 $20000000",
+            "24-bit"
+        ]
+    );
+
+    // A bank preset arms exactly that bank, wherever it sits.
+    let index = heat_preset_index(&app, "Z3 $20000000");
+    app.activate_ui_control(UiControl::AnalyzerHeatPreset(index));
+    match app.emu.bus().heat_map() {
+        Some(map) => {
+            assert_eq!(map.base(), 0x2000_0000);
+            assert_eq!(map.span(), heatmap::rounded_span(16 * 1024 * 1024));
+        }
+        None => panic!("a preset click arms the map"),
+    }
+}
+
+#[test]
+fn frame_analyzer_heat_preset_moves_the_window_onto_a_cold_map() {
+    let (mut app, _fixture) = pointer_machine();
+    app.open_frame_analyzer();
+    app.activate_ui_control(UiControl::AnalyzerTab(AnalyzerTab::Memory));
+    step_fields(&mut app, 2);
+
+    let index = heat_preset_index(&app, "24-bit");
+    app.activate_ui_control(UiControl::AnalyzerHeatPreset(index));
+    let frame = app.emu.bus().emulated_frames();
+    let (base, span, cold) = match app.emu.bus().heat_map() {
+        Some(map) => (map.base(), map.span(), map.census(frame).is_empty()),
+        None => panic!("a preset re-windows the map, it does not disarm it"),
+    };
+    assert_eq!(base, 0);
+    assert_eq!(span, heatmap::rounded_span(heatmap::DEFAULT_SPAN));
+    assert!(cold, "moving the window starts a cold map");
+
+    // The wider window reaches what the chip-RAM one cannot: the guest runs
+    // from the Kickstart window, so its instruction fetches (which the map
+    // counts as CPU reads -- seeing where the CPU is executing is half of
+    // what it is for) land in the 24-bit space but never in chip RAM.
+    step_fields(&mut app, 2);
+    let view = built_heat_view(&app);
+    assert!(
+        heat_census_cells(&view, "cpu-read") > 0,
+        "the guest's instruction fetches: {:?}",
+        census_summary(&view)
+    );
+    assert!(
+        heat_census_cells(&view, "copper") > 0 && heat_census_cells(&view, "sprite") > 0,
+        "chip-bus DMA is still recorded: {:?}",
+        census_summary(&view)
+    );
+
+    // A click that lands after the preset list was rebuilt shorter is
+    // ignored rather than re-windowing to something arbitrary.
+    app.activate_ui_control(UiControl::AnalyzerHeatPreset(u8::MAX));
+    match app.emu.bus().heat_map() {
+        Some(map) => assert_eq!((map.base(), map.span()), (base, span)),
+        None => panic!("an out-of-range preset leaves the map alone"),
+    }
+}
+
+#[test]
+fn closing_the_analyzer_releases_only_a_heat_map_it_armed() {
+    let (mut app, _fixture) = pointer_machine();
+    app.open_frame_analyzer();
+    app.activate_ui_control(UiControl::AnalyzerTab(AnalyzerTab::Memory));
+    assert!(app.emu.bus().heat_map().is_some());
+    app.close_tool_panel(ToolPanelKind::FrameAnalyzer);
+    assert!(
+        app.emu.bus().heat_map().is_none(),
+        "the pane releases the map it armed"
+    );
+    assert!(!app.heatmap_armed_by_panel);
+
+    // A map armed before the pane touched it (the control protocol's
+    // memory.heatmap) is not the pane's to release.
+    app.emu
+        .bus_mut()
+        .set_heat_map(Some((0, heatmap::DEFAULT_SPAN)));
+    app.open_frame_analyzer();
+    app.activate_ui_control(UiControl::AnalyzerTab(AnalyzerTab::Memory));
+    assert!(
+        !app.heatmap_armed_by_panel,
+        "an already-armed map keeps its owner"
+    );
+    app.close_tool_panel(ToolPanelKind::FrameAnalyzer);
+    match app.emu.bus().heat_map() {
+        Some(map) => {
+            assert_eq!(map.base(), 0);
+            assert_eq!(map.span(), heatmap::rounded_span(heatmap::DEFAULT_SPAN));
+        }
+        None => panic!("a map the pane did not arm keeps recording after it closes"),
+    }
+}
+
+#[test]
+fn frame_analyzer_heat_pick_names_the_copper_lists_toucher() {
+    let (mut app, _fixture) = pointer_machine();
+    app.open_frame_analyzer();
+    app.activate_ui_control(UiControl::AnalyzerTab(AnalyzerTab::Memory));
+    step_fields(&mut app, 2);
+
+    // The cell covering the fixture's Copper list. The Copper fetches its
+    // instructions from there every field, so that cell's last toucher is
+    // the Copper.
+    let bytes_per_cell = app
+        .emu
+        .bus()
+        .heat_map()
+        .expect("the Memory tab armed the map")
+        .bytes_per_cell();
+    let cell = (POINTER_COPPER_LIST / bytes_per_cell) as usize;
+    app.activate_ui_control(UiControl::AnalyzerHeatPick {
+        x: (cell % heatmap::GRID) as u8,
+        y: (cell / heatmap::GRID) as u8,
+    });
+    assert_eq!(
+        app.frame_analyzer_panel
+            .as_ref()
+            .and_then(|panel| panel.heat_selected),
+        Some(cell)
+    );
+
+    let view = built_heat_view(&app);
+    let selected = view.selected.expect("the pinned cell is read out");
+    assert_eq!(selected.cell, cell);
+    assert_eq!(selected.toucher, Some("copper"));
+    assert_eq!(selected.colour, heatmap::Toucher::Copper.colour());
+    match selected.age_frames {
+        Some(age) => assert!(age < heatmap::DECAY_FRAMES, "a live cell, aged {age}"),
+        None => panic!("a touched cell carries an age"),
+    }
+
+    // A cell nothing has touched still reads out, with no toucher and no
+    // age, so the pane can say so rather than showing a stale record.
+    // Halfway up the bank is untouched: the fixture's DMA lists sit at the
+    // bottom of chip RAM and its stack at the very top.
+    let cold = heatmap::CELLS / 2;
+    app.activate_ui_control(UiControl::AnalyzerHeatPick {
+        x: (cold % heatmap::GRID) as u8,
+        y: (cold / heatmap::GRID) as u8,
+    });
+    let selected = built_heat_view(&app)
+        .selected
+        .expect("a pinned cell always reads out");
+    assert_eq!(selected.cell, cold);
+    assert_eq!(selected.toucher, None);
+    assert_eq!(selected.age_frames, None);
+    assert_eq!(selected.colour, 0);
+}
+
+#[test]
+fn frame_analyzer_m_key_toggles_between_the_beam_and_memory_tabs() {
+    let (mut app, _fixture) = pointer_machine();
+    app.open_frame_analyzer();
+    let tab = |app: &super::App| app.frame_analyzer_panel.as_ref().map(|panel| panel.tab);
+    assert_eq!(tab(&app), Some(AnalyzerTab::Beam));
+
+    assert!(app.ui_handle_key(KeyCode::KeyM, None));
+    assert_eq!(tab(&app), Some(AnalyzerTab::Memory));
+    assert!(
+        app.emu.bus().heat_map().is_some(),
+        "arriving on the Memory tab arms the map"
+    );
+
+    assert!(app.ui_handle_key(KeyCode::KeyM, None));
+    assert_eq!(tab(&app), Some(AnalyzerTab::Beam));
+}
+
+#[test]
+fn frame_analyzer_cursor_keys_move_the_pinned_cell_on_the_memory_tab() {
+    let (mut app, _fixture) = pointer_machine();
+    app.open_frame_analyzer();
+    app.frame_analyzer_step_frame();
+    let beam_slot = |app: &super::App| {
+        app.frame_analyzer_panel
+            .as_ref()
+            .map(|panel| (panel.selected_hpos, panel.selected_vpos))
+    };
+    let pinned = |app: &super::App| {
+        app.frame_analyzer_panel
+            .as_ref()
+            .and_then(|panel| panel.heat_selected)
+    };
+    let slot_before = beam_slot(&app);
+    app.activate_ui_control(UiControl::AnalyzerTab(AnalyzerTab::Memory));
+
+    // With nothing pinned the first arrow starts from the centre cell, and
+    // the beam selection the Beam tab owns is left where it was.
+    let centre = heatmap::CELLS / 2 + heatmap::GRID / 2;
+    assert!(app.ui_handle_key(KeyCode::ArrowRight, None));
+    assert_eq!(pinned(&app), Some(centre + 1));
+    assert!(app.ui_handle_key(KeyCode::ArrowDown, None));
+    assert_eq!(pinned(&app), Some(centre + 1 + heatmap::GRID));
+    assert_eq!(beam_slot(&app), slot_before);
+
+    // The grid's edges clamp: the selection never wraps into the next row.
+    app.activate_ui_control(UiControl::AnalyzerHeatPick { x: 0, y: 0 });
+    assert!(app.ui_handle_key(KeyCode::ArrowLeft, None));
+    assert!(app.ui_handle_key(KeyCode::ArrowUp, None));
+    assert_eq!(pinned(&app), Some(0));
+    let last = (heatmap::GRID - 1) as u8;
+    app.activate_ui_control(UiControl::AnalyzerHeatPick { x: last, y: last });
+    assert!(app.ui_handle_key(KeyCode::ArrowRight, None));
+    assert!(app.ui_handle_key(KeyCode::ArrowDown, None));
+    assert_eq!(pinned(&app), Some(heatmap::CELLS - 1));
+}
+
+#[test]
+fn switching_analyzer_tabs_keeps_the_heat_map_recording() {
+    let (mut app, _fixture) = pointer_machine();
+    app.open_frame_analyzer();
+    app.activate_ui_control(UiControl::AnalyzerTab(AnalyzerTab::Memory));
+    step_fields(&mut app, 2);
+    let before = built_heat_view(&app);
+    let recorded: usize = before.census.iter().map(|row| row.cells).sum();
+    assert!(recorded > 0, "the fixture's DMA lands in the chip window");
+
+    // Leaving and re-entering the tab must not re-arm (and so wipe) the
+    // map: the recording is the point of it.
+    app.activate_ui_control(UiControl::AnalyzerTab(AnalyzerTab::Beam));
+    app.activate_ui_control(UiControl::AnalyzerTab(AnalyzerTab::Memory));
+    let after = built_heat_view(&app);
+    assert_eq!(after.base, before.base);
+    assert_eq!(after.span, before.span);
+    assert_eq!(
+        after.census.iter().map(|row| row.cells).sum::<usize>(),
+        recorded
+    );
 }

@@ -16,6 +16,7 @@ use crate::audio::{AudioSink, CpalSink};
 use crate::bus::{BeamWriteSource, FrontPanelStatus, PortDevice, VideoRenderFrameTiming};
 use crate::config::{Config, Overscan, PixelAspect, RawConfig, WarpSpeed};
 use crate::emulator::Emulator;
+use crate::heatmap;
 use crate::keymap;
 use crate::screenshot;
 
@@ -465,6 +466,94 @@ fn raw_device_qualifier_family_held(held_rawkeys: &[bool; 128], left: u8, right:
     rawkey_is_held(held_rawkeys, left) || rawkey_is_held(held_rawkeys, right)
 }
 
+/// Every heat-map toucher, in [`heatmap::Toucher`] code order. The Memory
+/// tab's census lists all of them, including the ones holding nothing, so
+/// the column doubles as the map's legend and its rows never move.
+const HEAT_TOUCHERS: [heatmap::Toucher; 8] = [
+    heatmap::Toucher::CpuRead,
+    heatmap::Toucher::CpuWrite,
+    heatmap::Toucher::Blitter,
+    heatmap::Toucher::Copper,
+    heatmap::Toucher::Disk,
+    heatmap::Toucher::Bitplane,
+    heatmap::Toucher::Sprite,
+    heatmap::Toucher::Audio,
+];
+
+/// The Memory tab's window presets: one per fitted RAM bank, then the
+/// whole 24-bit space.
+///
+/// They come from the machine's decoded bank map rather than a fixed list
+/// of addresses because that map is what the fitted machine actually has:
+/// a Zorro board sits wherever autoconfig placed it, and the motherboard,
+/// CPU-slot and Zorro III banks a 32-bit CPU sees live above the 24-bit
+/// space entirely -- which is exactly why the heat map's window is
+/// movable. A fixed list would either name banks this machine does not
+/// have or fail to reach the ones it does.
+fn analyzer_heat_presets(bus: &crate::bus::Bus) -> Vec<ui::HeatPreset> {
+    let mb_base = bus.mem.mb_ram_base() as u32;
+    let mut presets: Vec<ui::HeatPreset> = bus
+        .writable_ram_regions()
+        .into_iter()
+        .map(|(base, len)| {
+            let label = if base == crate::memory::CHIP_RAM_BASE as u32 {
+                "Chip"
+            } else if base == crate::memory::SLOW_RAM_BASE as u32 {
+                "Slow"
+            } else if base == mb_base {
+                "MB"
+            } else if base == crate::memory::ACCEL_RAM_BASE as u32 {
+                "CPU"
+            } else if base < 0x0100_0000 {
+                // What is left is a RAM board: one autoconfigured into the
+                // Zorro II space, or a Zorro III board above it.
+                "Z2"
+            } else {
+                "Z3"
+            };
+            ui::HeatPreset {
+                label: label.to_string(),
+                base,
+                // The fitted bank length, so a preset's window covers the
+                // RAM that exists rather than the select window it decodes
+                // in (a smaller bank repeats inside its window).
+                span: len,
+            }
+        })
+        .collect();
+    // Two boards of the same kind would otherwise offer two buttons with
+    // the same name; the base address tells them apart.
+    let labels: Vec<String> = presets.iter().map(|preset| preset.label.clone()).collect();
+    for (index, preset) in presets.iter_mut().enumerate() {
+        let label = preset.label.clone();
+        if labels
+            .iter()
+            .enumerate()
+            .any(|(other, other_label)| other != index && *other_label == label)
+        {
+            preset.label = format!("{label} ${:X}", preset.base);
+        }
+    }
+    presets.push(ui::HeatPreset {
+        label: "24-bit".to_string(),
+        base: 0,
+        span: heatmap::DEFAULT_SPAN,
+    });
+    presets
+}
+
+/// The window the Memory tab arms when nothing has armed the map yet: the
+/// chip RAM bank. It is the bank every chip-bus engine works out of and
+/// usually the smallest fitted one, so its cells cover the fewest bytes
+/// each -- the most legible default. A machine with no chip bank at all
+/// falls back to the 24-bit overview.
+fn analyzer_default_heat_window(bus: &crate::bus::Bus) -> (u32, u32) {
+    bus.writable_ram_regions()
+        .into_iter()
+        .find(|(base, _)| *base == crate::memory::CHIP_RAM_BASE as u32)
+        .unwrap_or((crate::memory::CHIP_RAM_BASE as u32, heatmap::DEFAULT_SPAN))
+}
+
 pub struct App {
     emu: Emulator,
     fb: Vec<u32>,
@@ -512,6 +601,10 @@ pub struct App {
     analyzer_underlay_frame: Option<u64>,
     /// Recycled snapshot buffers for the underlay's side-effect-free render.
     analyzer_underlay_input: Option<bitplane::RenderInput>,
+    /// Tracks whether the Frame Analyzer armed the bus heat map, so closing
+    /// it releases only a map it owns (a map armed over the control
+    /// protocol is left alone).
+    heatmap_armed_by_panel: bool,
     render_worker: Option<RenderWorker>,
     render_recycle_fb: Vec<u32>,
     /// Spent frame snapshot handed back by the render worker; reused by the
@@ -1025,6 +1118,7 @@ impl App {
             analyzer_underlay_width: FB_WIDTH,
             analyzer_underlay_frame: None,
             analyzer_underlay_input: None,
+            heatmap_armed_by_panel: false,
             render_worker,
             render_recycle_fb: Vec::new(),
             render_recycle_input: None,
@@ -4167,6 +4261,11 @@ impl App {
             UiControl::LauncherSave => self.launcher_save(),
             UiControl::LauncherRun => self.launcher_run(),
             UiControl::DropDrive(drive_idx) => self.drop_chooser_route(drive_idx),
+            UiControl::AnalyzerTab(_)
+            | UiControl::AnalyzerHeatPreset(_)
+            | UiControl::AnalyzerHeatPick { .. } => {
+                self.activate_tool_control(ToolPanelKind::FrameAnalyzer, control)
+            }
         }
         self.request_redraw();
     }
@@ -4271,6 +4370,15 @@ impl App {
             }
             (ToolPanelKind::FrameAnalyzer, UiControl::AnalyzerRunTo) => {
                 self.frame_analyzer_run_to_slot()
+            }
+            (ToolPanelKind::FrameAnalyzer, UiControl::AnalyzerTab(tab)) => {
+                self.frame_analyzer_set_tab(tab)
+            }
+            (ToolPanelKind::FrameAnalyzer, UiControl::AnalyzerHeatPreset(index)) => {
+                self.frame_analyzer_heat_preset(index)
+            }
+            (ToolPanelKind::FrameAnalyzer, UiControl::AnalyzerHeatPick { x, y }) => {
+                self.frame_analyzer_heat_pick(x, y)
             }
             _ => {}
         }
@@ -4514,12 +4622,22 @@ impl App {
         if self.frame_analyzer_panel.is_none() {
             return false;
         }
+        let memory_tab = self
+            .frame_analyzer_panel
+            .as_ref()
+            .is_some_and(|panel| panel.tab == ui::AnalyzerTab::Memory);
         let control = match code {
             KeyCode::KeyF => Some(UiControl::AnalyzerFrame),
             KeyCode::KeyR => Some(UiControl::AnalyzerRun),
             KeyCode::KeyU => Some(UiControl::AnalyzerUnderlay),
             KeyCode::KeyB => Some(UiControl::AnalyzerScrub),
             KeyCode::KeyT => Some(UiControl::AnalyzerRunTo),
+            // One key flips between the two views of the traced machine.
+            KeyCode::KeyM => Some(UiControl::AnalyzerTab(if memory_tab {
+                ui::AnalyzerTab::Beam
+            } else {
+                ui::AnalyzerTab::Memory
+            })),
             _ => None,
         };
         if let Some(control) = control {
@@ -4533,8 +4651,14 @@ impl App {
             KeyCode::ArrowDown => Some((0, 1)),
             _ => None,
         };
-        if let Some((dhpos, dvpos)) = delta {
-            self.frame_analyzer_move_selection(dhpos, dvpos);
+        if let Some((dx, dy)) = delta {
+            // The arrows nudge whichever selection the visible tab has: a
+            // beam slot on the Beam tab, a grid cell on the Memory tab.
+            if memory_tab {
+                self.frame_analyzer_move_heat_selection(dx, dy);
+            } else {
+                self.frame_analyzer_move_selection(dx, dy);
+            }
             return true;
         }
         false
@@ -4771,6 +4895,81 @@ impl App {
     fn frame_analyzer_step_frame(&mut self) {
         self.emu.bus_mut().set_frame_analyzer_enabled(true);
         self.debugger_step_frame();
+    }
+
+    /// Switch the analyzer to `tab`. Entering the Memory tab rebuilds the
+    /// window presets from the machine's memory map and arms the heat map
+    /// over chip RAM if nothing has armed it yet, so the tab always opens
+    /// on a map that is recording. Leaving the tab deliberately does not
+    /// disarm it: flipping tabs would otherwise wipe the recording.
+    fn frame_analyzer_set_tab(&mut self, tab: ui::AnalyzerTab) {
+        if self.frame_analyzer_panel.is_none() {
+            return;
+        }
+        let presets = (tab == ui::AnalyzerTab::Memory).then(|| {
+            if self.emu.bus().heat_map().is_none() {
+                let window = analyzer_default_heat_window(self.emu.bus());
+                self.emu.bus_mut().set_heat_map(Some(window));
+                self.heatmap_armed_by_panel = true;
+            }
+            analyzer_heat_presets(self.emu.bus())
+        });
+        if let Some(panel) = self.frame_analyzer_panel.as_mut() {
+            panel.tab = tab;
+            if let Some(presets) = presets {
+                panel.heat_presets = presets;
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// Point the heat map at preset `index`. An index past the end does
+    /// nothing: a click can land after the preset list was rebuilt from a
+    /// machine with fewer banks.
+    fn frame_analyzer_heat_preset(&mut self, index: u8) {
+        let Some(window) = self
+            .frame_analyzer_panel
+            .as_ref()
+            .and_then(|panel| panel.heat_presets.get(usize::from(index)))
+            .map(|preset| (preset.base, preset.span))
+        else {
+            return;
+        };
+        self.emu.bus_mut().set_heat_map(Some(window));
+        // Picking a window from the panel makes the panel the map's owner,
+        // so closing the panel releases it even if something else (the
+        // control protocol) armed it first.
+        self.heatmap_armed_by_panel = true;
+        self.request_redraw();
+    }
+
+    /// Pin grid cell (`x`, `y`) so the readout under the map names what
+    /// last touched it.
+    fn frame_analyzer_heat_pick(&mut self, x: u8, y: u8) {
+        if let Some(panel) = self.frame_analyzer_panel.as_mut() {
+            panel.heat_selected = Some(usize::from(y) * heatmap::GRID + usize::from(x));
+        }
+        self.request_redraw();
+    }
+
+    /// Move the Memory tab's pinned cell by one grid cell, clamped to the
+    /// grid's edges. With nothing pinned the arrow starts from the centre
+    /// cell, so the keyboard can reach the map without a click first.
+    fn frame_analyzer_move_heat_selection(&mut self, dx: i16, dy: i16) {
+        let grid = heatmap::GRID as i32;
+        let Some(panel) = self.frame_analyzer_panel.as_mut() else {
+            return;
+        };
+        let centre = heatmap::CELLS / 2 + heatmap::GRID / 2;
+        let cell = panel
+            .heat_selected
+            .unwrap_or(centre)
+            .min(heatmap::CELLS - 1);
+        let x = (cell % heatmap::GRID) as i32 + i32::from(dx);
+        let y = (cell / heatmap::GRID) as i32 + i32::from(dy);
+        panel.heat_selected =
+            Some(y.clamp(0, grid - 1) as usize * heatmap::GRID + x.clamp(0, grid - 1) as usize);
+        self.request_redraw();
     }
 
     fn frame_analyzer_toggle_underlay(&mut self) {
@@ -5236,6 +5435,10 @@ impl App {
     /// audio sink, are dropped here.
     fn run_machine(&mut self, emu: Emulator, cfg: &Config, raw: RawConfig) {
         self.emu = emu;
+        // Any heat map the analyzer pane armed went with the machine that
+        // was just replaced, so the pane owns nothing on this one until it
+        // arms a map here.
+        self.heatmap_armed_by_panel = false;
         // The real machine may bridge serial to MIDI; the config-screen
         // placeholder never does, so recompute now that the machine is live.
         #[cfg(feature = "midi")]
@@ -5330,6 +5533,13 @@ impl App {
                 self.analyzer_dragging = false;
                 self.frame_analyzer_panel = None;
                 self.frame_analyzer_tool_window = None;
+                // Release the heat map only if this pane armed it. A map
+                // armed over the control protocol belongs to that session
+                // and keeps recording after the pane closes.
+                if self.heatmap_armed_by_panel {
+                    self.emu.bus_mut().set_heat_map(None);
+                    self.heatmap_armed_by_panel = false;
+                }
                 // Release the underlay buffers (frame render + up-to-2MiB
                 // chip RAM snapshot) while the analyzer is closed.
                 self.analyzer_underlay_fb = std::rc::Rc::new(Vec::new());
@@ -6557,6 +6767,10 @@ impl App {
             bus.emulated_frames(),
             bus.emulated_seconds()
         );
+        // The heat map records bus activity, not beam slots, so it has
+        // something to show even on a frame the analyzer captured no trace
+        // for: built before the no-trace return and carried by both arms.
+        let heat = self.build_analyzer_heat_view(panel);
         let Some(trace) = bus.frame_bus_trace() else {
             return ui::FrameAnalyzerView {
                 running: !self.paused,
@@ -6564,6 +6778,7 @@ impl App {
                 trace: None,
                 underlay: None,
                 scrub: false,
+                heat,
             };
         };
         let underlay = (panel.underlay_active() && self.analyzer_underlay_rows > 0).then(|| {
@@ -6642,6 +6857,7 @@ impl App {
             status,
             underlay,
             scrub: panel.show_scrub,
+            heat,
             trace: Some(ui::AnalyzerTraceView {
                 frame: trace.frame,
                 seconds: trace.seconds,
@@ -6668,6 +6884,61 @@ impl App {
                 ddf_cck,
             }),
         }
+    }
+
+    /// The Memory tab's picture of the live heat map, or None while no map
+    /// is armed. Everything is read out here rather than in the drawing
+    /// code: the map lives on the bus, and the panel only ever sees the
+    /// rendered grid, the census, and the pinned cell's record.
+    fn build_analyzer_heat_view(
+        &self,
+        panel: &ui::FrameAnalyzerPanel,
+    ) -> Option<ui::AnalyzerHeatView> {
+        let bus = self.emu.bus();
+        let map = bus.heat_map()?;
+        let frame = bus.emulated_frames();
+        let mut image = vec![0xFF00_0000u32; heatmap::CELLS];
+        map.render(frame, &mut image);
+        let bytes_per_cell = map.bytes_per_cell();
+        // The map's census reports only the touchers holding cells; the
+        // column wants every toucher, in a fixed order, so the rows read as
+        // a legend and do not move as activity comes and goes.
+        let counts = map.census(frame);
+        let census = HEAT_TOUCHERS
+            .iter()
+            .map(|toucher| {
+                let cells = counts
+                    .iter()
+                    .find(|(recorded, _)| recorded == toucher)
+                    .map_or(0, |(_, cells)| *cells);
+                ui::AnalyzerHeatCensusRow {
+                    name: toucher.name(),
+                    colour: toucher.colour(),
+                    cells,
+                    bytes: cells as u64 * u64::from(bytes_per_cell),
+                }
+            })
+            .collect();
+        let selected = panel.heat_selected.map(|cell| {
+            let record = map.cell(cell);
+            ui::AnalyzerHeatCell {
+                cell,
+                toucher: record.map(|(toucher, _)| toucher.name()),
+                colour: record.map_or(0, |(toucher, _)| toucher.colour()),
+                // The stamp is the frame counter's low 32 bits, the same
+                // arithmetic the map's own fade uses.
+                age_frames: record.map(|(_, stamp)| (frame as u32).saturating_sub(stamp)),
+            }
+        });
+        Some(ui::AnalyzerHeatView {
+            image,
+            base: map.base(),
+            span: map.span(),
+            bytes_per_cell,
+            frame,
+            census,
+            selected,
+        })
     }
 
     /// Snapshot the machine into the debugger panel's formatted lines.
