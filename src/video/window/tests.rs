@@ -3548,6 +3548,15 @@ fn console_watch_refuses_a_pc_qualifier_on_a_dma_class() {
         "{out:?}"
     );
     assert!(app.emu.machine.ui_breaks().watches.is_empty());
+    // A repeated qualifier is a typo, not a last-one-wins override.
+    for cmd in ["WATCH 20010 CPU BLITTER", "WATCH 20010 PC=F80010 PC=F80020"] {
+        let out = console_run(&mut app, cmd);
+        assert!(
+            out.iter().any(|l| l.contains("more than once")),
+            "{cmd}: {out:?}"
+        );
+    }
+    assert!(app.emu.machine.ui_breaks().watches.is_empty());
     // Either qualifier alone, and the CPU pairing, are accepted.
     for cmd in [
         "WATCH 20000 SPR3",

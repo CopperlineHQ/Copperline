@@ -406,6 +406,17 @@ impl FloppyController {
         bits
     }
 
+    /// Whether a DSKLEN write of `val` right now would be the one that
+    /// actually starts a transfer.
+    ///
+    /// Paula requires the value written twice in succession as a safety
+    /// interlock: the first write only latches it. Asked before the
+    /// write is dispatched, so it reads the latch the previous write
+    /// left.
+    pub fn dsklen_write_starts_dma(&self, val: u16) -> bool {
+        val & DSKLEN_DMAEN != 0 && self.dma.is_none() && self.armed_dsklen == Some(val)
+    }
+
     /// Whether a disk-DMA arming right now would find a drive able to
     /// serve it: a selected drive, its motor spinning, and media in it.
     /// Returns the `regcheck::DISK_*` code for what is missing, so the

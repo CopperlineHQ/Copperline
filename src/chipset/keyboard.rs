@@ -537,17 +537,17 @@ impl KeyboardMcu {
         }
     }
 
-    /// The Amiga drove (true) or released (false) KDAT via CIA-A SPMODE.
-    /// The pulse is timed on the MCU clock from the actual drive edge,
-    /// so a handshake that begins while the byte's final bit cell is
-    /// still clocking out is credited with its full width -- the 6500/1
-    /// samples the line level, not the protocol state.
     /// Take the width of the last handshake pulse that was too short for
     /// the MCU to sample, if one has happened since the last drain.
     pub fn take_short_handshake(&mut self) -> Option<u16> {
         self.short_handshake_cck.take()
     }
 
+    /// The Amiga drove (true) or released (false) KDAT via CIA-A SPMODE.
+    /// The pulse is timed on the MCU clock from the actual drive edge,
+    /// so a handshake that begins while the byte's final bit cell is
+    /// still clocking out is credited with its full width -- the 6500/1
+    /// samples the line level, not the protocol state.
     pub fn amiga_kdat_edge(&mut self, driven_low: bool) {
         if driven_low {
             self.kdat_low_since = Some(self.now_cck);
@@ -558,10 +558,16 @@ impl KeyboardMcu {
         };
         let width = self.now_cck.saturating_sub(since);
         if width < HANDSHAKE_MIN_CCK {
-            // Too narrow for the MCU to sample. Latched for the
-            // hardware-misuse report, which is the only way software
-            // learns about it: the keyboard simply stops advancing.
-            self.short_handshake_cck = Some(width.min(u64::from(u16::MAX)) as u16);
+            // Too narrow to count as a handshake. Only worth reporting
+            // when the MCU was actually waiting for one: the floor exists
+            // to ignore incidental zero-width CRA reconfigurations, and
+            // flagging those would blame ordinary CIA setup code.
+            if matches!(
+                self.state,
+                McuState::AwaitHandshake { .. } | McuState::SyncAwaitHandshake { .. }
+            ) {
+                self.short_handshake_cck = Some(width.min(u64::from(u16::MAX)) as u16);
+            }
             return;
         }
         let accepted = match &self.state {

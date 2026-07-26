@@ -459,11 +459,17 @@ impl App {
                 // the remaining token, if any, is the access class.
                 let mut filter = None;
                 let mut pc = None;
+                // Each qualifier may appear once. Letting a later token
+                // win would make `WATCH addr CPU BLITTER` install a
+                // blitter watch with no sign that the CPU was ignored.
                 for token in args.iter().skip(1) {
                     if let Some(value) = token
                         .strip_prefix("PC=")
                         .or_else(|| token.strip_prefix("pc="))
                     {
+                        if pc.is_some() {
+                            return ConsoleOutcome::error("PC= given more than once");
+                        }
                         match hex32(value) {
                             Some(addr) => pc = Some(addr),
                             None => return ConsoleOutcome::error("PC= wants an address"),
@@ -471,6 +477,9 @@ impl App {
                         continue;
                     }
                     match crate::debugger::WatchSource::parse(token) {
+                        Some(_) if filter.is_some() => {
+                            return ConsoleOutcome::error("watch class given more than once")
+                        }
                         Some(source) => filter = Some(source),
                         None => {
                             return ConsoleOutcome::error(

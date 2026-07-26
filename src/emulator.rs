@@ -2784,6 +2784,44 @@ mod tests {
     }
 
     #[test]
+    fn armed_diagnostics_survive_a_state_restore() {
+        use crate::bus::FaultInjection;
+        let mut emu = emulator_with_call_program();
+        emu.bus_mut().set_chipset_validation(true);
+        emu.bus_mut().set_smc_detection(true);
+        emu.bus_mut()
+            .set_heat_map(Some((0, crate::heatmap::DEFAULT_SPAN)));
+        emu.bus_mut().inject_bus_fault(FaultInjection {
+            start: 0x40000,
+            end: 0x40001,
+            on_read: true,
+            on_write: true,
+            remaining: None,
+            hits: 0,
+        });
+        // Collect a finding, then round-trip the machine through a state
+        // save and load, which is the path a reverse step takes.
+        emu.bus_mut().custom_write(0xDFF104, 2, 0x8020);
+        assert_eq!(emu.bus().chipset_findings().0.len(), 1);
+        let path = std::env::temp_dir().join(format!(
+            "copperline-diag-restore-{}.clstate",
+            std::process::id()
+        ));
+        emu.save_state(&path).unwrap();
+        emu.load_state(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        // The session asked for these; a restore must not silently
+        // disarm them underneath it, and the report is still the
+        // operator's in-progress experiment.
+        assert!(emu.bus().chipset_validation_armed());
+        assert!(emu.bus().smc_detection_armed());
+        assert!(emu.bus().heat_map().is_some());
+        assert_eq!(emu.bus().injected_bus_faults().len(), 1);
+        assert_eq!(emu.bus().chipset_findings().0.len(), 1);
+    }
+
+    #[test]
     fn an_injected_bus_fault_takes_the_guest_into_its_own_handler() {
         use crate::bus::FaultInjection;
         let mut emu = emulator_with_self_modifying_program();

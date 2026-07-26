@@ -112,6 +112,20 @@ impl Toucher {
     }
 }
 
+/// The span a requested one becomes: rounded up to a whole number of
+/// bytes per cell, and clamped so the grid stays inside a u32.
+///
+/// Public because callers deciding whether a window has changed have to
+/// compare what the request *becomes*, not what was asked for. Without
+/// that, repeating a request whose span is not a multiple of the grid
+/// looks like a different window every time and silently wipes the map.
+pub fn rounded_span(span: u32) -> u32 {
+    let cells = CELLS as u32;
+    // A span shorter than the grid would give less than one byte per
+    // cell, and the window's last addresses would index past its end.
+    span.max(cells).div_ceil(cells).clamp(1, u32::MAX / cells) * cells
+}
+
 /// The live map.
 pub struct HeatMap {
     /// First address the grid covers, and how much of the address space
@@ -131,14 +145,9 @@ impl Default for HeatMap {
 
 impl HeatMap {
     pub fn new(base: u32, span: u32) -> Self {
-        // The span is rounded up to a whole number of bytes per cell.
-        // Without that, a span like CELLS + 1 gives one byte per cell and
-        // leaves the window's last addresses indexing one past the grid.
-        let cells = CELLS as u32;
-        let per_cell = span.max(cells).div_ceil(cells).clamp(1, u32::MAX / cells);
         Self {
             base,
-            span: per_cell * cells,
+            span: rounded_span(span),
             source: Box::new([0; CELLS]),
             stamp: Box::new([0; CELLS]),
         }
@@ -258,6 +267,17 @@ mod tests {
         // The largest span the grid can describe stays inside u32.
         let wide = HeatMap::new(0, u32::MAX);
         assert_eq!(wide.bytes_per_cell(), u32::MAX / CELLS as u32);
+    }
+
+    #[test]
+    fn re_requesting_the_same_window_is_recognised_after_rounding() {
+        // A span that is not a whole number of cells becomes one; a
+        // caller repeating its own request must be seen as asking for
+        // the window it already has, or the map is wiped each time.
+        let asked = DEFAULT_SPAN + 1;
+        let map = HeatMap::new(0, asked);
+        assert_eq!(map.span(), rounded_span(asked));
+        assert_eq!(rounded_span(rounded_span(asked)), rounded_span(asked));
     }
 
     #[test]

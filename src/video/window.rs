@@ -2032,7 +2032,15 @@ impl App {
         // The servo is advanced first so a target coming due this frame
         // takes ownership before the deltas are considered, and so the
         // frame it finishes on releases them again immediately.
-        self.advance_scripted_pointer_targets(emu_secs);
+        // Only while the machine is actually advancing. fire_scheduled_events
+        // runs on every event-loop pass, including while paused or powered
+        // off; polling the servo there would compare the same frame to
+        // itself, inject counts the guest never gets to act on, and then
+        // call a reachable target stuck -- with the phantom deltas landing
+        // on unpause.
+        if self.powered_on && !self.paused && !self.cpu_halted {
+            self.advance_scripted_pointer_targets(emu_secs);
+        }
         let mut mouse_deltas = Vec::new();
         if self.active_mouse_to.is_none() {
             self.auto_mouse.retain(|&(at, dx, dy, port)| {

@@ -52,9 +52,9 @@ pub enum Finding {
     /// A DMA pointer was set outside the chip RAM Agnus can address, so
     /// the channel will fetch from wrapped or unbacked addresses.
     PointerOutsideChipRam,
-    /// The register was reached through an address mirror rather than at
-    /// its canonical $DFFxxx address.
-    MirroredAddress,
+    /// An access above the $000-$1FE register bank. Nothing decodes
+    /// there: the write is dropped and the read returns the undriven bus.
+    UnmappedOffset,
     /// A blit was started while the previous one was still running. On
     /// hardware the CPU stalls until the blitter frees the register file,
     /// and with BLTPRI set it can be locked out for the whole blit.
@@ -80,7 +80,7 @@ impl Finding {
             Finding::ByteAccess => "byte-access",
             Finding::OddAddress => "odd-address",
             Finding::PointerOutsideChipRam => "pointer-outside-chip-ram",
-            Finding::MirroredAddress => "mirrored-address",
+            Finding::UnmappedOffset => "unmapped-offset",
             Finding::BlitterBusy => "blitter-busy",
             Finding::BlitterDmaOff => "blitter-dma-off",
             Finding::DiskNotReady => "disk-not-ready",
@@ -208,8 +208,10 @@ impl RegCheck {
         // not a custom register, so it does not name one.
         if report.finding == Finding::KeyboardHandshakeShort {
             return format!(
-                "keyboard handshake pulse of {} cck is below the {} cck the 6500/1 can \
-                 sample; the keyboard stops advancing to the next code \
+                "keyboard handshake pulse of {} cck is under the {} cck floor that \
+                 separates a deliberate pulse from an incidental CIA reconfiguration, \
+                 and the MCU was waiting for one; it resynchronises after 143 ms and \
+                 resends with $F9, so a key is lost and input stalls until then \
                  (by {who} at {at:#08X}, v{} h{}{times})",
                 report.value, report.detail, report.vpos, report.hpos,
             );
@@ -238,8 +240,9 @@ impl RegCheck {
                  the pointer wraps",
                 u32::from(report.detail) << 16
             ),
-            Finding::MirroredAddress => format!(
-                "{reg} reached through an address mirror, not its $DFF{:03X} address",
+            Finding::UnmappedOffset => format!(
+                "${:03X} is above the $000-$1FE custom register bank; nothing decodes \
+                 there, so the access reaches no register",
                 report.reg
             ),
             Finding::BlitterBusy => format!(
@@ -292,28 +295,45 @@ pub fn disk_obstacle(code: u16) -> &'static str {
 /// AGA machine would be wrong.
 pub fn defined_bits(reg: u16) -> Option<u16> {
     Some(match reg {
-        0x02E => 0x0002,         // COPCON: CDANG only
-        0x034 => 0xFF01,         // POTGO: OUTRY/DATRY..OUTLX/DATLX plus START
-        0x040 => 0xFFFF,         // BLTCON0: ASH, USE mask, LF
-        0x042 => 0xFF17,         // BLTCON1: BSH, DOFF, EFE/IFE, FCI, DESC, LINE
+        0x02E => 0x0002, // COPCON: CDANG only
+        0x034 => 0xFF01, // POTGO: OUTRY/DATRY..OUTLX/DATLX plus START
+        0x040 => 0xFFFF, // BLTCON0: ASH, USE mask, LF
+        // BLTCON1: LINE, DESC/SING, FCI/AUL, IFE/SUL, EFE/SUD, SIGN,
+        // DOFF (ECS), BSH/texture. Bits 5 and 8-11 have no function --
+        // 8-11 are BLTCON0's USE bits, not this register's.
+        0x042 => 0xF0DF,
         0x058 => 0xFFFF,         // BLTSIZE: h9-0, w5-0
         0x05A => 0x00FF,         // BLTCON0L (ECS): the LF byte only
         0x05C => 0x7FFF,         // BLTSIZV (ECS): 15-bit height
         0x05E => 0x07FF,         // BLTSIZH (ECS): 11-bit width
         0x08E | 0x090 => 0xFFFF, // DIWSTRT/DIWSTOP: V and H bytes
-        0x092 | 0x094 => 0x00FF, // DDFSTRT/DDFSTOP: H8-H2 (+H1 on AGA)
-        0x096 => 0xBFFF,         // DMACON: SET/CLR plus BBUSY..AUD0EN; BZERO is read-only
-        0x098 => 0xFFFF,         // CLXCON: ENSP/ENBP and their match values
-        0x09A | 0x09C => 0xFFFF, // INTENA/INTREQ: SET/CLR plus 14 sources
-        0x09E => 0xFFFF,         // ADKCON: SET/CLR plus precomp..ATPER
-        0x100 => 0xFFFF,         // BPLCON0: HIRES..ECSENA (BPU3/SHRES/UHRES on ECS/AGA)
-        0x102 => 0xFFFF,         // BPLCON1: PF1/PF2 scroll (8-bit fields on AGA)
-        0x104 => 0x7FFF,         // BPLCON2: ZDCTL..PF2P0; bit 15 undefined
-        0x106 => 0xFFFF,         // BPLCON3 (ECS/AGA): BANK/PF2OF/LOCT/SPRES/BRDRBLNK...
-        0x10C => 0xFFFF,         // BPLCON4 (AGA): BPLAM, ESPRM, OSPRM
-        0x10E => 0x0FFF,         // CLXCON2 (AGA): planes 7-8 enable/match only
-        0x1DC => 0xFFFF,         // BEAMCON0 (ECS): HARDDIS..ERSY
-        0x1FC => 0xC00F,         // FMODE (AGA): SSCAN2/BSCAN2, SPAGEM/SPR32, BPAGEM/BPL32
+        // DDFSTRT/DDFSTOP: H8-H2. OCS decodes to 4-cck granularity and
+        // ECS/AGA to 2, but neither implements bit 0.
+        0x092 | 0x094 => 0x00FE,
+        // DMACON: SET/CLR plus BLTPRI..AUD0EN. BBUSY (14) and BZERO (13)
+        // are read-only status seen through DMACONR, and 11-12 are unused;
+        // Agnus masks writes to the low 11 bits.
+        0x096 => 0x87FF,
+        0x098 => 0xFFFF, // CLXCON: ENSP/ENBP and their match values
+        0x09A => 0xFFFF, // INTENA: SET/CLR, INTEN, and the 14 sources
+        0x09C => 0xBFFF, // INTREQ: the same less INTEN, which is INTENA's alone
+        0x09E => 0xFFFF, // ADKCON: SET/CLR plus PRECOMP..USE0V1
+        0x100 => 0xFFFF, // BPLCON0: HIRES..ECSENA (BPU3/SHRES/UHRES on ECS/AGA)
+        0x102 => 0xFFFF, // BPLCON1: PF1/PF2 scroll (8-bit fields on AGA)
+        0x104 => 0x7FFF, // BPLCON2: ZDCTL..PF2P0; bit 15 undefined
+        // BPLCON3 (ECS/AGA): BANK, PF2OF, LOCT, SPRES, BRDRBLNK,
+        // BRDNTRAN, ZDCLKEN, BRDRSPRT, EXTBLKEN. Bits 3 and 8 have no
+        // function on either revision.
+        0x106 => 0xFEF7,
+        0x10C => 0xFFFF, // BPLCON4 (AGA): BPLAM, ESPRM, OSPRM
+        // CLXCON2 (AGA): ENBP7/ENBP8 (6-7) and MVBP7/MVBP8 (0-1) only,
+        // which is exactly what the renderer decodes.
+        0x10E => 0x00C3,
+        // BEAMCON0 (ECS): HARDDIS (14) down to the colour-burst enable;
+        // bit 15 has no function. (ERSY is BPLCON0 bit 1 -- a different
+        // chip's register entirely.)
+        0x1DC => 0x7FFF,
+        0x1FC => 0xC00F, // FMODE (AGA): SSCAN2/BSCAN2, SPAGEM/SPR32, BPAGEM/BPL32
         _ => return None,
     })
 }
@@ -336,6 +356,10 @@ pub fn direction(reg: u16) -> Option<Direction> {
         0x01A => Direction::ReadOnly,         // DSKBYTR
         0x01C | 0x01E => Direction::ReadOnly, // INTENAR/INTREQR
         0x07C => Direction::ReadOnly,         // DENISEID
+        // HHPOSR: the ECS UHRES counter readback, paired with HHPOSW at
+        // $1D8. It sits inside the otherwise write-only tail, and the
+        // emulator does serve guest reads of it.
+        0x1DA => Direction::ReadOnly,
         // Everything from the strobes upward is write-only; the ones with
         // a read counterpart at another offset are listed above.
         0x020..=0x03E | 0x040..=0x07A | 0x07E..=0x1BE | 0x1C0..=0x1FE => Direction::WriteOnly,

@@ -330,7 +330,7 @@ absolute mouse to set -- the port carries a quadrature encoder, and the
 guest turns counts into pixels through its own acceleration curve, which
 is history-dependent and defeats aimed relative deltas. So this servos:
 it injects a delta, advances one frame, reads where the hardware drew
-sprite 0 (the Amiga pointer *is* sprite 0), and corrects, learning the
+sprite 0 (which is what the OS draws its pointer with), and corrects, learning the
 pixels-per-count ratio it is being given. It runs the machine for up to
 `max_frames` frames (default 60) and is refused while a resume is in
 flight. `tolerance` (default 2 px) is how close counts as arrived: the

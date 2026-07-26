@@ -2698,6 +2698,13 @@ impl Bus {
     /// last-writer table. Called from the single write chokepoint, and
     /// only when armed.
     fn note_custom_write(&mut self, off: u16, val: u16, source: BeamWriteSource) {
+        // The register bank is $000-$1FE; the write path masks only to
+        // $FFE, so the rest of the custom page arrives here too and must
+        // not index the tables. Those offsets decode to nothing, which
+        // the CPU-side shape check reports separately.
+        if off > 0x1FE {
+            return;
+        }
         let writer = match source {
             BeamWriteSource::Copper => crate::regcheck::Writer::Copper(self.copper.pc()),
             BeamWriteSource::Cpu | BeamWriteSource::CpuCopperIrq => {
@@ -2820,8 +2827,11 @@ impl Bus {
                     );
                 }
             }
-            // DSKLEN: arming disk DMA.
-            0x024 if val & 0x8000 != 0 => {
+            // DSKLEN, on the write that actually starts the transfer:
+            // Paula needs the value written twice, and the first write
+            // only latches it, so reporting on that one would name a
+            // write after which DMA is by design not armed.
+            0x024 if self.floppy.dsklen_write_starts_dma(val) => {
                 if let Some(code) = self.floppy.dma_arming_obstacle() {
                     self.note_chipset_finding(
                         Finding::DiskNotReady,
@@ -2913,18 +2923,25 @@ impl Bus {
             self.agnus.vpos.min(u32::from(u16::MAX)) as u16,
             self.agnus.hpos.min(u32::from(u16::MAX)) as u16,
         );
-        if size == 1 {
+        // Byte *writes* are the misuse: the custom chips have no byte
+        // lanes, so the value lands in both halves. A byte read is
+        // perfectly well defined -- the chip drives the whole bus and the
+        // CPU takes its lane -- and `move.b $DFF006,d0` beam polling is
+        // one of the most common idioms in Amiga software.
+        if size == 1 && !read {
             let byte = (addr & 1) as u16;
             self.note_chipset_finding(Finding::ByteAccess, reg, writer, 0, byte, vpos, hpos);
         } else if addr & 1 != 0 {
             self.note_chipset_finding(Finding::OddAddress, reg, writer, 0, 0, vpos, hpos);
         }
-        // The custom bank repeats every $200 bytes inside the $DFF000
-        // page and again across the wider chip-register window; code that
-        // lands anywhere but the canonical address is relying on the
-        // decode gaps rather than the register map.
-        if off >= 0x200 {
-            self.note_chipset_finding(Finding::MirroredAddress, reg, writer, 0, 0, vpos, hpos);
+        // Offsets above the $000-$1FE register bank decode to nothing at
+        // all: the write is dropped and the read returns the undriven
+        // bus. (Accesses through the wider chip-register window are
+        // folded to this page before they reach here, so they are
+        // indistinguishable from a canonical access and are not
+        // reported.)
+        if off > 0x1FE {
+            self.note_chipset_finding(Finding::UnmappedOffset, reg, writer, 0, 0, vpos, hpos);
         }
         if read && matches!(crate::regcheck::direction(reg), Some(Direction::WriteOnly)) {
             self.note_chipset_finding(Finding::WrongDirection, reg, writer, 0, 0, vpos, hpos);
@@ -2941,8 +2958,11 @@ impl Bus {
             | 0x1CC | 0x1CE | 0x1D8 | 0x1DC | 0x1DE | 0x1E0 | 0x1E2 => {
                 self.blitter_ecs_registers_enabled()
             }
-            // ECS Denise: BPLCON3 and DIWHIGH.
-            0x106 => self.denise_ecs_registers(),
+            // ECS Denise: BPLCON3 latches only while BPLCON0.ECSENA is
+            // set, which is the gate the write dispatch applies -- so a
+            // BPLCON3 write without ECSENA is reported, which is one of
+            // the classic silent drops this validator exists to surface.
+            0x106 => self.bplcon3_write_enabled(),
             0x1E4 => self.denise_ecs_registers(),
             // AGA Lisa: BPLCON4, CLXCON2, and bitplanes 7-8.
             0x10C | 0x10E => self.denise_is_lisa(),
@@ -3062,7 +3082,12 @@ impl Bus {
         match window {
             None => self.heatmap = None,
             Some((base, span)) => match self.heatmap.as_mut() {
-                Some(map) if map.base() == base && map.span() == span => {}
+                // Compared against the span the request becomes, not the
+                // one asked for: the map rounds it up, so a caller
+                // repeating its own request would otherwise look like a
+                // new window every time and wipe what it had collected.
+                Some(map)
+                    if map.base() == base && map.span() == crate::heatmap::rounded_span(span) => {}
                 Some(map) => map.set_window(base, span),
                 None => self.heatmap = Some(Box::new(crate::heatmap::HeatMap::new(base, span))),
             },
@@ -3185,7 +3210,19 @@ impl Bus {
     /// (serde-skipped), so without this a reverse step or state load
     /// would silently disarm the debugger. Pending unpolled hits stay
     /// dropped: they describe the abandoned timeline.
-    pub(crate) fn adopt_ui_debug_state(&mut self, previous: &Bus) {
+    pub(crate) fn adopt_ui_debug_state(&mut self, previous: &mut Bus) {
+        // Armed diagnostics move across with the rest of the debug state.
+        // A reverse step or a state load replaces the Bus, and without
+        // this the validator, the SMC map, the heat map and any injected
+        // faults would silently disarm underneath a session that had
+        // asked for them -- while beam traps and watches stayed live,
+        // which is the tell that this was an omission. Their collected
+        // reports come too: the operator's experiment is still running.
+        self.regcheck = previous.regcheck.take();
+        self.reg_writers = previous.reg_writers.take();
+        self.smc = previous.smc.take();
+        self.heatmap = previous.heatmap.take();
+        self.injected_faults = std::mem::take(&mut previous.injected_faults);
         self.ui_beam_traps = previous.ui_beam_traps.clone();
         self.ui_copper_breaks = previous.ui_copper_breaks.clone();
         self.ui_copper_last_pc = previous.ui_copper_last_pc;

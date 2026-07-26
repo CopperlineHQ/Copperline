@@ -30,11 +30,22 @@
 //!
 //! Being executed is a property of the address, not of the program: this
 //! knows nothing about what is running, only what has run.
+//!
+//! Scope: the 24-bit space a 68000 and Agnus share, which is where chip
+//! RAM, slow RAM and the ROM live, and so where essentially all
+//! self-modifying Amiga code runs. Accesses above it are ignored rather
+//! than folded down, so a 32-bit machine's accelerator RAM cannot alias
+//! into chip space and manufacture reports; the trade is that
+//! self-modification up there is not detected.
 
 use std::collections::BTreeMap;
 
-/// One bit per word of the 24-bit address space Agnus and a 68000 share.
-const WORDS: usize = 0x0100_0000 / 2;
+/// The address space the detector tracks: the 24-bit space a 68000 and
+/// Agnus share, which is where chip RAM, slow RAM and the ROM live, and
+/// so where essentially all self-modifying Amiga code runs.
+const TRACKED_BYTES: u32 = 0x0100_0000;
+/// One bit per word of it.
+const WORDS: usize = TRACKED_BYTES as usize / 2;
 const BITMAP_LEN: usize = WORDS / 64;
 
 /// Distinct (address, writer) pairs retained before the report stops
@@ -81,7 +92,10 @@ impl SmcTracker {
     }
 
     pub fn is_executed(&self, addr: u32) -> bool {
-        let word = (addr as usize & 0x00FF_FFFF) / 2;
+        if addr >= TRACKED_BYTES {
+            return false;
+        }
+        let word = addr as usize / 2;
         self.executed[word / 64] & (1 << (word % 64)) != 0
     }
 
@@ -149,19 +163,44 @@ impl SmcTracker {
     }
 }
 
-/// The word indices `len` bytes at `addr` touch, inside the 24-bit space.
+/// The word indices `len` bytes at `addr` touch.
+///
+/// Addresses outside the tracked space yield nothing rather than being
+/// masked into it. Masking would alias a 32-bit machine's accelerator or
+/// motherboard RAM onto chip-space words and report code being written
+/// at addresses nothing touched -- the recurring 16 MiB-mask mistake this
+/// project keeps rediscovering. The cost is that self-modification in
+/// those banks is not detected; see the module note.
 fn words_of(addr: u32, len: u32) -> impl Iterator<Item = usize> {
-    let start = (addr & 0x00FF_FFFF) as usize / 2;
-    let end = ((addr.wrapping_add(len.max(1)).wrapping_sub(1)) & 0x00FF_FFFF) as usize / 2;
-    // A transfer that wraps the 24-bit space is reported at its start
-    // word only, rather than sweeping the whole bitmap.
-    let end = if end < start { start } else { end };
-    (start..=end).take(8)
+    let last = addr.wrapping_add(len.max(1)).wrapping_sub(1);
+    let span = if addr >= TRACKED_BYTES {
+        None
+    } else if last < TRACKED_BYTES && last >= addr {
+        Some((addr as usize / 2, last as usize / 2))
+    } else {
+        // Starts inside and runs past the end (or wraps the address
+        // space): take the part that is inside.
+        Some((addr as usize / 2, WORDS - 1))
+    };
+    span.into_iter()
+        .flat_map(|(start, end)| start..=end)
+        .take(8)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn addresses_above_the_tracked_space_are_ignored_not_folded_down() {
+        let mut smc = SmcTracker::default();
+        // A 32-bit machine's accelerator RAM. Folding it into the 24-bit
+        // space would mark chip-space words nothing executed.
+        smc.mark_executed(0x0800_0000, 2);
+        assert!(!smc.is_executed(0x0000_0000));
+        assert!(!smc.is_executed(0x0800_0000));
+        assert!(smc.note_write(0x0800_0000, 2, 0x1000).is_none());
+    }
 
     #[test]
     fn a_write_over_unexecuted_memory_is_not_a_finding() {

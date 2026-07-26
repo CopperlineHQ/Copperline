@@ -202,14 +202,8 @@ impl Bus {
         let hpos = self.agnus.hpos;
         let blitter_busy = self.blitter.busy;
         let line_cck = self.agnus.current_line_cck();
-        if allow_fetch && self.mem_watches_armed() {
-            // The Copper fetches its instruction word pair from the PC it
-            // is about to advance past, so the watch sees the list itself
-            // being read -- which is how a self-modified Copper list gets
-            // caught in the act.
-            let pc = self.copper.pc();
-            self.note_dma_read(crate::debugger::WatchSource::Copper, pc, 4);
-        }
+        // The Copper's PC before the slot, for attribution below.
+        let fetch_pc = self.mem_watches_armed().then(|| self.copper.pc());
         let mut copper = std::mem::take(&mut self.copper);
         let action = copper.step_eligible_slot(
             &self.mem.chip_ram,
@@ -223,6 +217,17 @@ impl Bus {
             copper_cycle_free,
         );
         self.copper = copper;
+        // Attributed only when the Copper actually took the slot. A
+        // WAITing or stopped Copper leaves its PC pointing at the next
+        // instruction and touches nothing, so noting the read before the
+        // step reported a fetch on every eligible colour clock of the
+        // wait -- which re-latched a watch hit as fast as the debugger
+        // could clear it.
+        if let Some(pc) = fetch_pc {
+            if !matches!(action, CopperSlotAction::Idle) {
+                self.note_dma_read(crate::debugger::WatchSource::Copper, pc, 4);
+            }
+        }
         if !self.ui_copper_breaks.is_empty() {
             self.check_ui_copper_breaks();
         }

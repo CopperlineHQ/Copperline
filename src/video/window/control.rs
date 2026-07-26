@@ -270,6 +270,18 @@ impl App {
                 tolerance,
                 max_frames,
             } => {
+                // Refused mid-resume, as the headless server does and as
+                // the protocol documents: the servo advances the machine
+                // itself, so it would step frames out from under a
+                // pending run_until -- past a pc target, or through
+                // frames a stable_frames watcher never got to sample.
+                if self.control.as_ref().is_some_and(|c| c.pending.is_some()) {
+                    self.control_send(proto::err_line(
+                        &id,
+                        &CtlError::invalid_state("pause before servoing the pointer"),
+                    ));
+                    return;
+                }
                 // The servo runs the machine for up to max_frames frames
                 // right here, like the bounded step verbs above: it needs
                 // to see each frame it caused before choosing the next

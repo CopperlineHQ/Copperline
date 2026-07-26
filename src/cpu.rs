@@ -1350,7 +1350,7 @@ impl M68kMachine {
         let mut bus: Bus = deserialize_component(r, "bus")?;
 
         bus.adopt_host_resources(&mut self.bus.bus);
-        bus.adopt_ui_debug_state(&self.bus.bus);
+        bus.adopt_ui_debug_state(&mut self.bus.bus);
         bus.reset_transient_video_after_state_load();
         bus.reset_transient_diagnostics_after_state_load();
         // The CPU model travels with the state (cpu_type, timing tables, and
@@ -1669,7 +1669,9 @@ impl M68kMachine {
     ) -> bool {
         let addr = addr & self.cpu.address_mask & !1;
         let current = self.bus.bus.peek_word_any(addr);
-        let pc = pc.map(|pc| pc & self.cpu.address_mask);
+        // Even, like every instruction address: an odd qualifier could
+        // never match a writer PC and the watch would never fire.
+        let pc = pc.map(|pc| pc & self.cpu.address_mask & !1);
         let added = self.ui_breaks.toggle_watch(addr, current, filter, pc);
         let addrs: Vec<u32> = self.ui_breaks.watches.iter().map(|w| w.addr).collect();
         self.bus.bus.set_ui_mem_watches(&addrs);

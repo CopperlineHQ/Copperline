@@ -295,7 +295,9 @@ fn normalize_spec(emu: &Emulator, spec: BreakSpec) -> BreakSpec {
         BreakSpec::Watch { addr, source, pc } => BreakSpec::Watch {
             addr: addr & addr_mask & !1,
             source,
-            pc: pc.map(|pc| pc & addr_mask),
+            // Instruction addresses are even; an odd one could never
+            // equal a writer PC, so the watch would never fire.
+            pc: pc.map(|pc| pc & addr_mask & !1),
         },
         BreakSpec::Copper { addr } => BreakSpec::Copper {
             addr: addr & 0x00FF_FFFE,

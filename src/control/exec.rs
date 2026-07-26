@@ -782,7 +782,12 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
                 len,
                 on_read,
                 on_write,
-                count: p.u32_opt("count")?,
+                count: match p.u32_opt("count")? {
+                    // A zero-shot injection is armed and inert; saying so
+                    // beats installing something that never fires.
+                    Some(0) => return Err(CtlError::invalid_params("count must be at least 1")),
+                    other => other,
+                },
             })
         }
         "memory.heatmap" => {
@@ -903,8 +908,8 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
         })),
         "input.mouse_to" => host(HostOp::MouseTo {
             port: parse_port_param(&p, 1)?,
-            x: p.i32_req("x")?,
-            y: p.i32_req("y")?,
+            x: parse_pointer_target(&p, "x")?,
+            y: parse_pointer_target(&p, "y")?,
             tolerance: p
                 .i32_or("tolerance", crate::pointer::DEFAULT_TOLERANCE)?
                 .clamp(0, crate::pointer::TOLERANCE_LIMIT),
@@ -1127,6 +1132,24 @@ fn parse_collect(p: &ParamReader) -> Result<Vec<CoreOp>, CtlError> {
         }
     }
     Ok(ops)
+}
+
+/// Largest pointer target accepted, in presented pixels. The canvas is
+/// at most 1432 wide and 626 tall; this leaves generous room around that
+/// while keeping the servo's error arithmetic away from i32's edges,
+/// where `target - at` would overflow and `abs()` of i32::MIN stays
+/// negative -- which would satisfy the arrival test at a wild position.
+const POINTER_TARGET_LIMIT: i32 = 1 << 16;
+
+/// Parse one axis of a pointer target.
+fn parse_pointer_target(p: &ParamReader, key: &str) -> Result<i32, CtlError> {
+    let value = p.i32_req(key)?;
+    if !(-POINTER_TARGET_LIMIT..=POINTER_TARGET_LIMIT).contains(&value) {
+        return Err(CtlError::invalid_params(format!(
+            "{key} must be within +/-{POINTER_TARGET_LIMIT} presented pixels"
+        )));
+    }
+    Ok(value)
 }
 
 /// Parse the `x`/`y`/`w`/`h` params of a frame region. The rectangle is
@@ -1861,7 +1884,10 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
                 .map(|r| {
                     json!({
                         "kind": r.finding.name(),
-                        "reg": crate::debugger::custom_reg_name(r.reg),
+                        // The keyboard handshake is not a register access,
+                        // so it does not name one; everything else does.
+                        "reg": (r.finding != crate::regcheck::Finding::KeyboardHandshakeShort)
+                            .then(|| crate::debugger::custom_reg_name(r.reg)),
                         "by": r.writer.label(),
                         "addr": r.writer.address(),
                         "count": r.count,
@@ -2741,6 +2767,16 @@ mod tests {
     }
 
     #[test]
+    fn a_write_above_the_register_bank_does_not_panic_the_validator() {
+        let mut emu = test_emulator();
+        emu.bus_mut().set_chipset_validation(true);
+        // $DFF200 upward is inside the custom page but past the register
+        // bank; a guest can write there and the validator must survive it.
+        emu.bus_mut().custom_write(0xDFF200, 2, 0x1234);
+        emu.bus_mut().custom_write(0xDFFFFE, 2, 0x1234);
+    }
+
+    #[test]
     fn the_validator_flags_undefined_bits_and_names_the_writer() {
         let mut emu = test_emulator();
         let mut ctx = SessionCtx::new();
@@ -2862,14 +2898,27 @@ mod tests {
         let mut emu = test_emulator();
         let mut ctx = SessionCtx::new();
         emu.bus_mut().set_chipset_validation(true);
-        // The test machine has no disk in df0, so arming a read waits on
-        // DSKBLK forever -- the class that produced the Gods and Shadow
-        // of the Beast dead-spins.
+        // The test machine has no disk in df0, so a read armed here can
+        // never be served -- the class that produced the Gods and Shadow
+        // of the Beast dead-spins. Written twice, because that is Paula's
+        // arming interlock and the first write only latches the value.
+        emu.bus_mut().custom_write(0xDFF024, 2, 0x8000 | 0x1000);
         emu.bus_mut().custom_write(0xDFF024, 2, 0x8000 | 0x1000);
         let report = exec_core(&mut emu, &mut ctx, &CoreOp::ChipsetReport).unwrap();
         let stuck = findings_of(&report, "disk-not-ready");
         assert_eq!(stuck.len(), 1, "{report}");
         assert_eq!(stuck[0]["reg"], "DSKLEN");
+
+        // A single write arms nothing, so it is not reported: saying so
+        // would name a write after which DMA is by design not running.
+        let mut emu = test_emulator();
+        emu.bus_mut().set_chipset_validation(true);
+        emu.bus_mut().custom_write(0xDFF024, 2, 0x8000 | 0x1000);
+        let report = exec_core(&mut emu, &mut ctx, &CoreOp::ChipsetReport).unwrap();
+        assert!(
+            findings_of(&report, "disk-not-ready").is_empty(),
+            "{report}"
+        );
     }
 
     #[test]

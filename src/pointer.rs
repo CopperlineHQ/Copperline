@@ -9,10 +9,11 @@
 //! deltas cannot be aimed -- the same count sequence lands somewhere
 //! different depending on what preceded it.
 //!
-//! What the machine does expose is where the pointer actually is: the
-//! Amiga pointer is sprite 0, so the sprite's on-screen position is the
-//! pointer's position, and reading it is the same observation a person
-//! makes by looking at the screen. This servo injects a delta, watches
+//! What the machine does expose is where the pointer actually is. The
+//! Amiga has no hardware pointer; Intuition draws one with sprite 0, and
+//! effectively every guest follows that convention, so the sprite's
+//! on-screen position is the pointer's position and reading it is the
+//! same observation a person makes by looking at the screen. This servo injects a delta, watches
 //! where sprite 0 moved to on the next frame, and corrects, learning the
 //! pixels-per-count ratio it is being given instead of modelling it. That
 //! keeps the whole mechanism hardware-derived: nothing here knows which
@@ -23,7 +24,9 @@
 
 use crate::bus::Bus;
 
-/// The sprite the Amiga pointer is drawn with.
+/// The sprite the OS draws its pointer with. A convention, not hardware:
+/// a guest is free to draw a pointer any way it likes, and one that does
+/// is reported as unobservable rather than guessed at.
 const POINTER_SPRITE: usize = 0;
 
 /// Largest quadrature count injected in one frame. The counters are 8-bit
