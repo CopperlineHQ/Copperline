@@ -414,7 +414,7 @@ use std::sync::{
 use std::thread::JoinHandle;
 use std::time::Instant;
 use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
+use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::{
     DeviceEvent, DeviceId, ElementState, KeyEvent, MouseButton, MouseScrollDelta, RawKeyEvent,
     WindowEvent,
@@ -2664,24 +2664,7 @@ impl ApplicationHandler for App {
                 self.request_redraw();
             }
             WindowEvent::Resized(size) => {
-                if let Some(r) = self.render.as_mut() {
-                    // A zero-sized resize is minimization (Windows reports
-                    // the minimized client area as 0x0). Leave the surface
-                    // untouched and stop rendering until the restore
-                    // delivers a nonzero size (see Render::minimized).
-                    r.minimized = size.width == 0 || size.height == 0;
-                    if r.minimized {
-                        return;
-                    }
-                    let _ = r.pixels.resize_surface(size.width, size.height);
-                }
-                // Resizing the surface discards its contents, leaving it
-                // blank (white) until the next present. When the machine is
-                // powered off (or paused) the event loop is in Wait mode and
-                // produces no frames, so without an explicit repaint here the
-                // window can sit white after the scale-factor/resize event
-                // that macOS delivers right after window creation.
-                self.request_redraw();
+                self.apply_surface_size(size);
             }
             WindowEvent::RedrawRequested => {
                 if self.render.as_ref().is_some_and(|r| r.minimized) {
@@ -3702,16 +3685,7 @@ impl App {
                 self.request_redraw();
             }
             WindowEvent::Resized(size) => {
-                if let Some(tool) = self.tool_window_mut(kind) {
-                    // Same minimized-present deadlock guard as the main
-                    // window's Resized handler.
-                    tool.minimized = size.width == 0 || size.height == 0;
-                    if tool.minimized {
-                        return;
-                    }
-                    let _ = tool.pixels.resize_surface(size.width, size.height);
-                }
-                self.request_redraw();
+                self.apply_tool_surface_size(kind, size);
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let rows = match delta {
@@ -7614,11 +7588,55 @@ impl App {
         self.emu.set_live_audio_suspended(suspended);
     }
 
+    /// Resize the presentation surface to a new window size. Shared by the
+    /// Resized event and by the synchronous path of request_inner_size (see
+    /// resize_for_active_panel), which on some backends returns the applied
+    /// size instead of delivering an event.
+    fn apply_surface_size(&mut self, size: PhysicalSize<u32>) {
+        if let Some(r) = self.render.as_mut() {
+            // A zero-sized resize is minimization (Windows reports the
+            // minimized client area as 0x0). Leave the surface untouched and
+            // stop rendering until the restore delivers a nonzero size (see
+            // Render::minimized).
+            r.minimized = size.width == 0 || size.height == 0;
+            if r.minimized {
+                return;
+            }
+            let _ = r.pixels.resize_surface(size.width, size.height);
+        }
+        // Resizing the surface discards its contents, leaving it blank (white)
+        // until the next present. When the machine is powered off (or paused)
+        // the event loop is in Wait mode and produces no frames, so without an
+        // explicit repaint here the window can sit white after the
+        // scale-factor/resize event that macOS delivers right after window
+        // creation.
+        self.request_redraw();
+    }
+
+    /// Tool-window counterpart of `apply_surface_size`, shared by that window's
+    /// Resized event and the synchronous `request_inner_size` path.
+    fn apply_tool_surface_size(&mut self, kind: ToolPanelKind, size: PhysicalSize<u32>) {
+        if let Some(tool) = self.tool_window_mut(kind) {
+            // Same minimized-present deadlock guard as the main window.
+            tool.minimized = size.width == 0 || size.height == 0;
+            if tool.minimized {
+                return;
+            }
+            let _ = tool.pixels.resize_surface(size.width, size.height);
+        }
+        self.request_redraw();
+    }
+
     /// Size the window to the presentation canvas, unless it is fullscreen: the
     /// request resizes nothing there and instead shrinks the drawable into a
     /// corner (macOS and Windows; Linux window managers ignore it), so leave the
     /// display-sized surface alone and let the presentation scale into it.
-    fn resize_for_active_panel(&self) {
+    ///
+    /// `request_inner_size` is only asynchronous when it returns `None`. Wayland
+    /// applies the resize client-side and returns the new size with no `Resized`
+    /// event to follow, so the surface must be resized here or the stale extent
+    /// misplaces every click through `cursor_texture_position`.
+    fn resize_for_active_panel(&mut self) {
         let Some(window) = self.render.as_ref().map(|r| r.window.clone()) else {
             return;
         };
@@ -7626,7 +7644,9 @@ impl App {
             return;
         }
         let size = LogicalSize::new(FB_WIDTH as f64, window_present_height() as f64);
-        let _ = window.request_inner_size(size);
+        if let Some(applied) = window.request_inner_size(size) {
+            self.apply_surface_size(applied);
+        }
     }
 
     /// Whether the main window is still exactly the presentation canvas size in
@@ -7686,6 +7706,7 @@ impl App {
         // windows must follow the new size too.
         let size = LogicalSize::new(FB_WIDTH as f64, window_present_height() as f64);
         for kind in ToolPanelKind::ALL {
+            let mut applied = None;
             if let Some(tool) = self.tool_window_mut(kind) {
                 if let Err(e) = tool.pixels.resize_buffer(
                     texture_width(tool.texture_scale) as u32,
@@ -7693,7 +7714,11 @@ impl App {
                 ) {
                     warn!("resize tool texture buffer for pixel aspect failed: {e}");
                 }
-                let _ = tool.window.request_inner_size(size);
+                applied = tool.window.request_inner_size(size);
+            }
+            // Synchronous on Wayland, with no Resized event to follow.
+            if let Some(applied) = applied {
+                self.apply_tool_surface_size(kind, applied);
             }
         }
         self.resize_for_active_panel();
