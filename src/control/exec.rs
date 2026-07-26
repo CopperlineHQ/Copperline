@@ -98,6 +98,13 @@ pub enum CoreOp {
     },
     FaultList,
     FaultClear,
+    /// Arm/disarm the memory heat map over a window, or read it.
+    HeatMapSet {
+        window: Option<(u32, u32)>,
+    },
+    HeatMapReport {
+        path: Option<PathBuf>,
+    },
     CiaGet {
         b: bool,
     },
@@ -191,6 +198,7 @@ impl CoreOp {
                 | CoreOp::ChipsetReport
                 | CoreOp::SmcReport
                 | CoreOp::FaultList
+                | CoreOp::HeatMapReport { .. }
                 | CoreOp::CiaGet { .. }
                 | CoreOp::BeamGet
                 | CoreOp::DisplayGet
@@ -748,6 +756,21 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
                 count: p.u32_opt("count")?,
             })
         }
+        "memory.heatmap" => {
+            let enabled = p.bool_or("enabled", true)?;
+            core(CoreOp::HeatMapSet {
+                window: enabled.then(|| {
+                    (
+                        p.u32_or("base", 0).unwrap_or(0),
+                        p.u32_or("span", crate::heatmap::DEFAULT_SPAN)
+                            .unwrap_or(crate::heatmap::DEFAULT_SPAN),
+                    )
+                }),
+            })
+        }
+        "memory.heatmap.report" => core(CoreOp::HeatMapReport {
+            path: p.str_opt("path")?.map(PathBuf::from),
+        }),
         "fault.list" => core(CoreOp::FaultList),
         "fault.clear" => core(CoreOp::FaultClear),
         "cia.get" => core(CoreOp::CiaGet {
@@ -1884,6 +1907,53 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
             emu.bus_mut().clear_injected_bus_faults();
             Ok(json!({"faults": 0}))
         }
+        CoreOp::HeatMapSet { window } => {
+            emu.bus_mut().set_heat_map(*window);
+            Ok(match emu.bus().heat_map() {
+                None => json!({"armed": false}),
+                Some(map) => json!({
+                    "armed": true,
+                    "base": map.base(),
+                    "span": map.span(),
+                    "bytes_per_cell": map.bytes_per_cell(),
+                    "grid": crate::heatmap::GRID,
+                }),
+            })
+        }
+        CoreOp::HeatMapReport { path } => {
+            let frame = emu.bus().emulated_frames();
+            let Some(map) = emu.bus().heat_map() else {
+                return Err(CtlError::invalid_state(
+                    "the heat map is not armed; memory.heatmap {\"enabled\": true}",
+                ));
+            };
+            let census: Vec<Value> = map
+                .census(frame)
+                .into_iter()
+                .map(|(by, cells)| json!({"by": by.name(), "cells": cells}))
+                .collect();
+            let mut reply = json!({
+                "base": map.base(),
+                "span": map.span(),
+                "bytes_per_cell": map.bytes_per_cell(),
+                "grid": crate::heatmap::GRID,
+                "frame": frame,
+                "census": census,
+            });
+            if let Some(path) = path {
+                let mut image = vec![0u32; crate::heatmap::CELLS];
+                map.render(frame, &mut image);
+                crate::screenshot::save(
+                    path,
+                    &image,
+                    crate::heatmap::GRID as u32,
+                    crate::heatmap::GRID as u32,
+                )
+                .map_err(|e| CtlError::io(format!("writing heat map: {e:#}")))?;
+                reply["path"] = json!(path.display().to_string());
+            }
+            Ok(reply)
+        }
         CoreOp::Digest => Ok(digest_value(emu)),
         CoreOp::RegionDigest { rect } => region_digest_value(emu, *rect),
         CoreOp::Screenshot { path } => {
@@ -2757,6 +2827,39 @@ mod tests {
         let stuck = findings_of(&report, "disk-not-ready");
         assert_eq!(stuck.len(), 1, "{report}");
         assert_eq!(stuck[0]["reg"], "DSKLEN");
+    }
+
+    #[test]
+    fn the_heat_map_records_what_touched_the_address_space() {
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+        let armed = exec_core(
+            &mut emu,
+            &mut ctx,
+            &core("memory.heatmap", json!({"enabled": true})),
+        )
+        .unwrap();
+        assert_eq!(armed["armed"], true);
+        assert_eq!(armed["bytes_per_cell"], 256);
+        // The test ROM loops and stores to chip RAM, so after a few
+        // instructions the map has both CPU reads (the fetches) and a
+        // CPU write.
+        for _ in 0..8 {
+            emu.debug_step_instructions(1).unwrap();
+        }
+        let report = exec_core(&mut emu, &mut ctx, &CoreOp::HeatMapReport { path: None }).unwrap();
+        let census = report["census"].as_array().unwrap();
+        let kinds: Vec<&str> = census.iter().map(|c| c["by"].as_str().unwrap()).collect();
+        assert!(kinds.contains(&"cpu-read"), "{report}");
+        assert!(kinds.contains(&"cpu-write"), "{report}");
+    }
+
+    #[test]
+    fn an_unarmed_heat_map_refuses_to_report() {
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+        let err = exec_core(&mut emu, &mut ctx, &CoreOp::HeatMapReport { path: None }).unwrap_err();
+        assert_eq!(err.code, proto::INVALID_STATE);
     }
 
     #[test]

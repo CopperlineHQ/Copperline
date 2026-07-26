@@ -2650,6 +2650,12 @@ impl CpuBus {
 
     fn read_sized(&mut self, address: u32, size: usize, kind: CpuBusAccessKind) -> u32 {
         let addr = self.mask(address);
+        if self.bus.heat_map_armed() {
+            // Instruction fetches count as reads: seeing where the CPU is
+            // executing is half of what the map is for.
+            self.bus
+                .note_heat(addr, size as u32, crate::heatmap::Toucher::CpuRead);
+        }
         if self.icache.is_some() || self.dcache.is_some() {
             // 68020/030 cache models: a hit costs no bus cycle at all; a
             // miss goes through the normal (billed) path and then fills
@@ -2998,6 +3004,10 @@ impl CpuBus {
         self.note_cpu_data_bus(addr, size, value);
         if self.bus.smc.is_some() {
             self.note_self_modifying_write(addr, size as u32);
+        }
+        if self.bus.heat_map_armed() {
+            self.bus
+                .note_heat(addr, size as u32, crate::heatmap::Toucher::CpuWrite);
         }
         if let Some(dcache) = self.dcache.as_deref_mut() {
             // Write-through with invalidate-on-hit: the write itself goes

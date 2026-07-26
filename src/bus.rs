@@ -1029,6 +1029,10 @@ pub struct Bus {
     /// operator is running, not machine state.
     #[serde(skip)]
     injected_faults: Vec<FaultInjection>,
+    /// Memory heat map, present only while armed. Transient diagnostic
+    /// state; a restore starts a fresh, cold map.
+    #[serde(skip)]
+    heatmap: Option<Box<crate::heatmap::HeatMap>>,
     blitter_slowdown_cpu_misses: u8,
     /// Pending INTREQ.BLIT raise, in colour clocks. Real Agnus raises the
     /// blitter interrupt one clock after the sequencer's BLTDONE cycle
@@ -2523,6 +2527,7 @@ impl Bus {
             reg_writers: None,
             smc: None,
             injected_faults: Vec::new(),
+            heatmap: None,
             ui_beam_traps: Vec::new(),
             ui_beam_hit: None,
             ui_copper_breaks: Vec::new(),
@@ -3045,6 +3050,38 @@ impl Bus {
         }
     }
 
+    /// Arm or disarm the memory heat map over a window of the address
+    /// space. Re-arming with a different window starts a cold map: the
+    /// cells would otherwise carry activity from addresses they no
+    /// longer name.
+    pub fn set_heat_map(&mut self, window: Option<(u32, u32)>) {
+        match window {
+            None => self.heatmap = None,
+            Some((base, span)) => match self.heatmap.as_mut() {
+                Some(map) if map.base() == base && map.span() == span => {}
+                Some(map) => map.set_window(base, span),
+                None => self.heatmap = Some(Box::new(crate::heatmap::HeatMap::new(base, span))),
+            },
+        }
+    }
+
+    pub fn heat_map(&self) -> Option<&crate::heatmap::HeatMap> {
+        self.heatmap.as_deref()
+    }
+
+    /// Record memory activity for the heat map. Kept behind an
+    /// emptiness check by every caller, like the watch hooks.
+    pub(crate) fn note_heat(&mut self, addr: u32, len: u32, by: crate::heatmap::Toucher) {
+        let frame = self.emulated_frames;
+        if let Some(map) = self.heatmap.as_mut() {
+            map.touch(addr, len, by, frame);
+        }
+    }
+
+    pub(crate) fn heat_map_armed(&self) -> bool {
+        self.heatmap.is_some()
+    }
+
     /// Note a read-side DMA fetch of `len` bytes from `addr` by `source`,
     /// latching a hit when it covers a watched word.
     ///
@@ -3058,6 +3095,13 @@ impl Bus {
         addr: u32,
         len: u32,
     ) {
+        if self.heatmap.is_some() {
+            self.note_heat(
+                addr,
+                len,
+                crate::heatmap::Toucher::from_watch_source(source),
+            );
+        }
         if self.ui_mem_watch_addrs.is_empty() || self.ui_dma_hit.is_some() {
             return;
         }
@@ -3078,8 +3122,10 @@ impl Bus {
 
     /// Whether any memory watch is armed, so the DMA fetch sites can skip
     /// the call entirely on an unwatched machine.
+    /// Whether any per-access observer wants the DMA fetch sites to
+    /// report: a memory watch, or the heat map.
     pub(crate) fn mem_watches_armed(&self) -> bool {
-        !self.ui_mem_watch_addrs.is_empty()
+        !self.ui_mem_watch_addrs.is_empty() || self.heatmap.is_some()
     }
 
     /// Take the pending DMA-read watch hit, if any.

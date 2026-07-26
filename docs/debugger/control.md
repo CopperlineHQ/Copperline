@@ -247,6 +247,22 @@ a few bytes ahead of the writing instruction is called out as inside the
 68000's prefetch, where it may be too late to take effect on this pass.
 An address counts as code once an instruction there has retired.
 
+Memory heat map: `memory.heatmap {enabled?, base?, span?}` arms a
+256x256 grid over a window of the address space (default the whole
+24-bit space, so one cell per 256 bytes) and reports the window and
+`bytes_per_cell`; `memory.heatmap.report {path?}` returns a `census` of
+how many cells each toucher currently holds and, with `path`, writes the
+grid as a 256x256 PNG. A slot map says what owned the chip bus at a
+colour clock; this says where in memory anything is happening -- which
+is the question when a display is drawn from the wrong buffer or a DMA
+channel is pointed at the wrong bank. Cells are coloured by what last
+touched them (CPU read/write, blitter, Copper, disk, and the bitplane,
+sprite and audio DMA channels) and fade to black over 32 frames. The
+window is movable, so the RAM a 32-bit CPU sees above the 24-bit space
+can be looked at too; moving it starts a cold map, since the cells would
+otherwise carry activity from addresses they no longer name. `-32003`
+while it is not armed.
+
 Bus faults: `fault.inject {addr, len?, on?, count?}` -> `{id}` makes CPU
 accesses inside that window take a bus error instead of reaching memory
 (`on` is `read`, `write`, or `both`, default both; `count` limits how
