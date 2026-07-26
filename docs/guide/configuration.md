@@ -868,7 +868,7 @@ mounts but is never offered for boot. It has **no effect on an image that
 carries its own RDB** -- those priorities live inside the image, where
 HDToolBox put them -- and Copperline logs a warning if you set it on one.
 
-The configuration screen edits `bootpri` on the *Hard Disk* tab's **Boot
+The configuration screen edits `bootpri` on the *Storage* tab's **Boot
 Priority** sub-page, one row per drive (see [](ui.md)): a Priority number and a
 Bootable box, the cleared box being this -128 sentinel. A drive left at 0 with
 no cascade default writes no `bootpri` key.
@@ -983,7 +983,7 @@ write-protected instead -- the guest sees a read-only disk and every write
 fails with the same "disk is write-protected" error a physical
 write-protected disk gives, which is worth setting on anything you would
 rather the Amiga could not damage. The launcher's Host Mounts sub-page (under
-the Hard Disk tab) exposes the same choice as its **Access** field.
+the Storage tab) exposes the same choice as its **Access** field.
 
 Amiga file attributes a host filesystem cannot hold -- protection bits
 such as script/pure/archive, file comments, and exact datestamps -- are

@@ -279,14 +279,15 @@ The layout is:
   (Kickstart and
   extended ROM), *Floppy* (drive count and speed, per-drive image and
   write-protect),
-  *Hard Disk* (IDE master/slave, the SCSI controller -- A2091, A4091, or the
-  A3000's onboard SCSI -- and its boot ROM and units, plus links to two
-  sub-pages: **Boot Priority**, which sets each hard-disk drive's synthesized-RDB
-  boot priority (see below), and **Host Mounts**, for host directories served
-  live as AmigaDOS volumes: up to four mounts, each with a boot priority and a
-  read-write/read-only **Access** field -- the config file itself takes up to
-  eight `[[filesys]]` mounts, of which the launcher edits the first four), *CD* (image,
-  insert delay, CD32 NVRAM),
+  *Storage* (IDE master/slave, the SCSI controller -- A2091, A4091, or the
+  A3000's onboard SCSI -- and its boot ROM and units; then under an *Additional
+  options:* heading, links to three sub-pages: **CD** (image, insert delay, CD32
+  NVRAM); **Host Mounts**, for host directories served live as AmigaDOS volumes
+  (up to four mounts, each with a boot priority and a read-write/read-only
+  **Access** field -- the config file itself takes up to eight `[[filesys]]`
+  mounts, of which the launcher edits the first four); and **Boot Priority**,
+  which sets each hard-disk drive's synthesized-RDB boot priority (see below).
+  Each sub-page has a **< Back** button at the bottom that returns to Storage),
   *Input* (the controller device in each game port and the joystick input
   source),
   *I/O Ports* (the serial, parallel, and Ethernet ports under **Serial:** /
@@ -303,7 +304,7 @@ The layout is:
   volume, power-on, pacing, realtime priority, warp speed).
 - **Settings rows** (right pane). `[<]`/`[>]` step through a value, On/Off
   buttons flip a toggle, and the **Browse** and **Clear** buttons set or remove
-  a file path through a native file dialog. On the *Hard Disk* tab, once an IDE
+  a file path through a native file dialog. On the *Storage* tab, once an IDE
   or SCSI drive has an image a small editable box appears next to **Browse**:
   click it and type to set the volume name for a directory mount (left blank, a
   directory mount inherits the host directory's name; the box has no effect on a
@@ -311,7 +312,7 @@ The layout is:
   shows why in place of its control -- "needs 32-bit CPU" for Zorro III RAM
   and the RTG card, "needs 68020+" for the FPU, "needs A600/A1200/A4000" for
   IDE.
-- **Boot Priority sub-page** (from *Hard Disk*). One row per hard-disk drive,
+- **Boot Priority sub-page** (from *Storage*). One row per hard-disk drive,
   under **Drive** / **Priority** / **Status** columns, setting the `de_BootPri`
   written into the partition Copperline synthesizes in front of a bare hardfile
   (it has no effect on an image carrying its own RDB). In the **Priority**
@@ -338,12 +339,12 @@ The layout is:
   shown on the status line and you stay on the screen to fix it.
 
 ```{figure} ../images/ui-preview-launcher-boot-priority.png
-:alt: The Boot Priority sub-page of the Hard Disk tab
+:alt: The Boot Priority sub-page of the Storage tab
 :width: 75%
 
 The Boot Priority sub-page: an A1200 whose IDE master boots at priority 5, its
 slave with the Bootable box cleared (priority greyed), and the empty SCSI units
-greyed "no drive". The greyed Help line notes the valid range and the floppy
+greyed "no drive". The greyed Info line notes the valid range and the floppy
 priorities the cascade defaults sort around.
 ```
 

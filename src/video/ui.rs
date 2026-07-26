@@ -4143,25 +4143,28 @@ fn launcher_toggle_rect(rect: Rect, row_y: usize) -> Rect {
     }
 }
 
-/// A sub-page navigation button (a Back link, or one of the Hard Disk tab's two
-/// sub-page links) at horizontal `slot` (0 or 1) from the pane's left edge. All
-/// are sized to match the left-hand category tabs so navigating in and out keeps
-/// the button the same size.
-fn launcher_sub_page_rect(rect: Rect, row_y: usize, slot: usize) -> Rect {
+/// A sub-page navigation button (the `slot`-th one) on the fixed footer nav row:
+/// the Storage tab's Additional-options links, or a sub-page's Back button.
+/// Sized to match the left-hand category tabs.
+fn launcher_footer_button_rect(rect: Rect, slot: usize) -> Rect {
     Rect {
         x: launcher_pane_x(rect) + slot * (LAUNCH_SIDEBAR_W + 8),
-        y: row_y + (LAUNCH_ROW_H.saturating_sub(LAUNCH_TAB_H)) / 2,
+        y: launcher_footer_y(rect),
         w: LAUNCH_SIDEBAR_W,
         h: LAUNCH_TAB_H,
     }
 }
 
-/// The two side-by-side buttons of a [`RowKind::SubPageLinkPair`] row.
-fn launcher_sub_page_pair_rects(rect: Rect, row_y: usize) -> (Rect, Rect) {
-    (
-        launcher_sub_page_rect(rect, row_y, 0),
-        launcher_sub_page_rect(rect, row_y, 1),
-    )
+/// A sub-page's Back button, on the footer nav row.
+fn launcher_back_button_rect(rect: Rect) -> Rect {
+    launcher_footer_button_rect(rect, 0)
+}
+
+/// Y of the fixed footer nav row, near the bottom of the settings pane (just
+/// above the status line). Both the Storage links and a sub-page's Back button
+/// sit here, so navigating in and out keeps the buttons at the same height.
+fn launcher_footer_y(rect: Rect) -> usize {
+    launcher_status_y(rect).saturating_sub(LAUNCH_TAB_H + 6)
 }
 
 /// The Status column's clickable area (the "Bootable" label plus its tick box),
@@ -4403,21 +4406,6 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
             match r.kind {
                 // Non-interactive rows.
                 RowKind::SectionHeader | RowKind::BootpriHeader => {}
-                // A sub-page link navigates to its target tab.
-                RowKind::SubPageLink(target) => {
-                    if launcher_sub_page_rect(rect, row_y, 0).contains(pos) {
-                        return Some(UiControl::LauncherTab(target));
-                    }
-                }
-                RowKind::SubPageLinkPair(left, right) => {
-                    let (lr, rr) = launcher_sub_page_pair_rects(rect, row_y);
-                    if lr.contains(pos) {
-                        return Some(UiControl::LauncherTab(left));
-                    }
-                    if rr.contains(pos) {
-                        return Some(UiControl::LauncherTab(right));
-                    }
-                }
                 RowKind::Cycle => {
                     let (prev, _value, next) = launcher_cycle_rects(rect, row_y);
                     if prev.contains(pos) {
@@ -4493,6 +4481,19 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                     }
                 }
             }
+        }
+    }
+    // The fixed footer nav: the Storage tab's Additional-options links, or a
+    // sub-page's Back button.
+    if state.tab == LauncherTab::Storage {
+        for (slot, &target) in launcher::ADDITIONAL_TABS.iter().enumerate() {
+            if launcher_footer_button_rect(rect, slot).contains(pos) {
+                return Some(UiControl::LauncherTab(target));
+            }
+        }
+    } else if let Some(parent) = state.tab.parent_tab() {
+        if launcher_back_button_rect(rect).contains(pos) {
+            return Some(UiControl::LauncherTab(parent));
         }
     }
     for (control, button_rect) in launcher_action_rects(rect) {
@@ -4634,39 +4635,6 @@ fn draw_launcher_row(
         );
         return;
     }
-    // A sub-page link is a navigation button carrying its own label.
-    if let RowKind::SubPageLink(target) = r.kind {
-        draw_text_button(
-            frame,
-            launcher_sub_page_rect(rect, row_y, 0),
-            r.label,
-            true,
-            hover == Some(UiControl::LauncherTab(target)),
-            scale,
-        );
-        return;
-    }
-    // Two side-by-side sub-page buttons (the Hard Disk tab's links).
-    if let RowKind::SubPageLinkPair(left, right) = r.kind {
-        let (lr, rr) = launcher_sub_page_pair_rects(rect, row_y);
-        draw_text_button(
-            frame,
-            lr,
-            left.label(),
-            true,
-            hover == Some(UiControl::LauncherTab(left)),
-            scale,
-        );
-        draw_text_button(
-            frame,
-            rr,
-            right.label(),
-            true,
-            hover == Some(UiControl::LauncherTab(right)),
-            scale,
-        );
-        return;
-    }
     // The greyed column titles above the Boot Priority rows.
     if r.kind == RowKind::BootpriHeader {
         for (x, title) in [
@@ -4720,10 +4688,7 @@ fn draw_launcher_row(
     }
     match r.kind {
         // Drawn above with an early return.
-        RowKind::SectionHeader
-        | RowKind::SubPageLink(_)
-        | RowKind::SubPageLinkPair(..)
-        | RowKind::BootpriHeader => {}
+        RowKind::SectionHeader | RowKind::BootpriHeader => {}
         RowKind::Cycle => {
             let (prev, value, next) = launcher_cycle_rects(rect, row_y);
             draw_text_button(
@@ -5234,6 +5199,39 @@ fn draw_launcher(
             draw_launcher_row(frame, rect, state, r, i, hover, scale);
         }
     }
+    // Fixed footer nav at the bottom of the pane: the Storage tab's
+    // Additional-options heading and links, or a sub-page's Back button. Both
+    // sit at the same height.
+    if state.tab == LauncherTab::Storage {
+        draw_panel_text(
+            frame,
+            launcher_pane_x(rect),
+            launcher_footer_y(rect).saturating_sub(14),
+            "Additional options:",
+            PANEL_TEXT,
+            1,
+            scale,
+        );
+        for (slot, &target) in launcher::ADDITIONAL_TABS.iter().enumerate() {
+            draw_text_button(
+                frame,
+                launcher_footer_button_rect(rect, slot),
+                target.label(),
+                true,
+                hover == Some(UiControl::LauncherTab(target)),
+                scale,
+            );
+        }
+    } else if let Some(parent) = state.tab.parent_tab() {
+        draw_text_button(
+            frame,
+            launcher_back_button_rect(rect),
+            "< Back",
+            true,
+            hover == Some(UiControl::LauncherTab(parent)),
+            scale,
+        );
+    }
     // The Input tab spells out what the chosen wiring means: which host
     // input source ends up driving each port, live as the values cycle.
     if state.tab == LauncherTab::Input {
@@ -5270,7 +5268,7 @@ fn draw_launcher(
     }
     // The Boot Priority page spells out the valid range and the floppy-drive
     // priorities its cascade defaults sort around, all greyed like a footnote.
-    if state.tab == LauncherTab::BootPriority {
+    if state.tab == LauncherTab::BootPriority && state.setup.has_boot_priority_rows() {
         let help_top = launcher_row_y(
             rect,
             launcher::rows(
@@ -5280,20 +5278,21 @@ fn draw_launcher(
             )
             .len()
                 + 1,
-        );
+        )
+        .saturating_sub(10);
         draw_panel_text(
             frame,
             launcher_pane_x(rect),
             help_top,
-            "Help:",
+            "Info:",
             PANEL_TEXT_DIM,
             1,
             scale,
         );
         for (i, line) in [
             "Valid boot priorities are any value between 127 (highest) and -128",
-            "(disabled). The primary Floppy Drive (DF0:) assumes a value of 5, and",
-            "all subsequent Floppy Drives (DF1:, DF2:, DF3:) assume -10, -20, -30.",
+            "(disabled). The Floppy Drive (DF0:) assumes a value of 5, and all",
+            "subsequent Floppy Drives (DF1:, DF2:, DF3:) assume -10, -20, -30.",
         ]
         .iter()
         .enumerate()
@@ -7849,7 +7848,7 @@ mod tests {
         draw(&mut frame, scale, &ui, None, None, false, false, labels());
         save(&frame, "launcher-printer");
 
-        // The Host Mounts sub-page reached from the Hard Disk tab.
+        // The Host Mounts sub-page reached from the Storage tab.
         let mut frame = vec![0u8; w * h * 4];
         let mut state = LauncherState::new(launcher::MachineSetup::default());
         state.tab = LauncherTab::HostFs;
