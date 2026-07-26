@@ -401,7 +401,16 @@ fetched line vanishes -- including when a later same-line SPRxPOS write
 repositions it -- while a CTL write past HSTART leaves the bar intact; the
 interventions write the channel's own control words, so the disarm is the
 only variable. The Hybris status-panel stray-dash class, issue #278;
-vAmiga-verified byte-for-byte).
+vAmiga-verified byte-for-byte), and
+`hamprobe-select` (where a mid-line BPLCON0 HAM select lands: a HAM screen
+whose every pixel is index $1F decodes as a solid blue field with HAM on
+and as a green field with white ruler marks with HAM off, and eight
+16-line bands clear HAM 16 colour clocks apart, so the blue/green
+staircase reads the landing column off the ruler. The HAM select feeds
+Denise's colour-selection stage, so it lands where a COLORxx write carried
+by the same bus slot would, not in the later generic register domain --
+the Hollywood Poker Pro HAM-photo/EHB-scoreboard split-line class;
+vAmiga-verified byte-for-byte over the whole frame).
 Excluded by design: `ddfprobe-cc5`/`-cc6` sit on deliberate
 race boundaries and would flip on any unrelated timing change, and
 `ddfprobe-cc7` replays a chip-RAM dump of a running demo that is not

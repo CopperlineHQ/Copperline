@@ -145,6 +145,25 @@ const COPPER_SPRITE_REGISTER_WRITE_PIPELINE_CCK: u32 = SPRITE_REGISTER_WRITE_PIP
 /// playfield's left edge in the deep left overscan at maximum scroll.
 const BITPLANE_CONTROL_PIPELINE_FB: usize =
     ((DIW_HSTART_FB0 - COPPER_WAIT_HPOS_FB0 * 2) * 2) as usize;
+/// Framebuffer-x offset between the generic register/beam domain
+/// ([`COPPER_WAIT_HPOS_FB0`]) and Denise's colour-selection/output phase
+/// ([`COLOR_WRITE_HPOS_FB0`]).
+///
+/// BPLCON0's HAM select does not feed the bitplane shifter: it picks how the
+/// already-serialised index is turned into a colour, the same final stage a
+/// COLORxx write feeds. A HAM select and a COLORxx write carried by the same
+/// chip-bus slot therefore change the picture at the same pixel (vAmiga
+/// `Denise::setBPLCON0` records the HAM change one colour clock after the slot
+/// and then backs it up by one colour clock -- `pos.pixel() - 4` in its
+/// quarter-CCK pixel units -- landing exactly on the `pos.pixel()` that
+/// `Denise::pokeCOLORxx` uses).
+///
+/// Sampled in the generic register domain instead, a mid-line HAM select lands
+/// this many framebuffer pixels late: Hollywood Poker Pro turns HAM off at
+/// hp $A2 to draw its EHB scoreboard beside the HAM photo, and the scoreboard's
+/// left 24 lo-res columns rendered as HAM modify-blue smears of the panel greys.
+const DENISE_HAM_SELECT_PIPELINE_FB: usize =
+    ((COLOR_WRITE_HPOS_FB0 - COPPER_WAIT_HPOS_FB0) * 4) as usize;
 /// Framebuffer x of the left edge of the standard (non-overscan) display. The
 /// columns to its left are overscan border that a real PAL display crops.
 pub(crate) const STANDARD_VISIBLE_X0: usize = ((STANDARD_DIW_HSTART - DIW_HSTART_FB0) * 2) as usize;
@@ -245,6 +264,7 @@ pub(crate) fn uses_standard_horizontal_content(snapshot: &RenderRegisterSnapshot
 }
 const BPLCON0_ECSENA: u16 = 1 << 0;
 const BPLCON0_SHRES: u16 = 1 << 6;
+const BPLCON0_HAM: u16 = 1 << 11;
 const BPLCON2_ZDBPSEL_SHIFT: u16 = 12;
 const BPLCON2_ZDBPSEL_MASK: u16 = 0x7000;
 const BPLCON2_ZDBPEN: u16 = 1 << 11;
@@ -2568,6 +2588,21 @@ fn bitplane_scroll_effect_x(segment_x: usize, visible_x_stop: usize) -> usize {
     }
 }
 
+/// Framebuffer x at which a control segment's BPLCON0 HAM select reaches
+/// Denise's colour-selection stage (see [`DENISE_HAM_SELECT_PIPELINE_FB`]).
+///
+/// Segment positions saturate at the right edge of the framebuffer, so a write
+/// recorded past the display window keeps the register-domain position: pulling
+/// a saturated position back would drag an off-screen write into the last
+/// columns of the visible line.
+fn denise_ham_select_effect_x(segment_x: usize, visible_x_stop: usize) -> usize {
+    if segment_x >= visible_x_stop {
+        segment_x
+    } else {
+        segment_x.saturating_sub(DENISE_HAM_SELECT_PIPELINE_FB)
+    }
+}
+
 fn line_control_at_x(
     base_controls: &[ControlState],
     control_segments: &[Vec<ControlSegment>],
@@ -4230,6 +4265,7 @@ pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
                 row_control_segments,
                 control_segment_idx,
                 base_controls[y].bplcon1,
+                base_controls[y].bplcon0,
                 block_start,
                 bpl_output_start_x,
                 &h_window_rows[y],
@@ -4501,6 +4537,7 @@ fn render_planned_playfield_line(
     control_segments: &[ControlSegment],
     mut control_segment_idx: usize,
     base_scroll_bplcon1: u16,
+    base_ham_bplcon0: u16,
     suppress_prefetch_scroll_fill: bool,
     bpl_output_start_x: usize,
     h_row: &HWindowRow,
@@ -4524,6 +4561,11 @@ fn render_planned_playfield_line(
     // scanlines without disturbing the current HAM tail.
     let mut scroll_bplcon1 = base_scroll_bplcon1;
     let mut scroll_segment_idx = 0usize;
+    // The HAM select rides Denise's colour-selection stage, ahead of the
+    // generic register domain the rest of the control state is sampled in
+    // ([`DENISE_HAM_SELECT_PIPELINE_FB`]).
+    let mut ham_bplcon0 = base_ham_bplcon0;
+    let mut ham_segment_idx = 0usize;
     // Playfield-collision classification (clxcon_planes_match) depends only on
     // the bitplane index and the constant control fields (CLXCON/CLXCON2, plane
     // count, dual-playfield), so memoize it per control run as a 256-entry
@@ -4554,8 +4596,24 @@ fn render_planned_playfield_line(
             scroll_bplcon1 = control_segments[scroll_segment_idx].control.bplcon1;
             scroll_segment_idx += 1;
         }
+        while ham_segment_idx < control_segments.len()
+            && denise_ham_select_effect_x(
+                control_segments[ham_segment_idx].x,
+                scroll_visible_x_stop,
+            ) <= x
+        {
+            ham_bplcon0 = control_segments[ham_segment_idx].control.bplcon0;
+            ham_segment_idx += 1;
+        }
         let mut sample_control = pixel_control;
         sample_control.bplcon1 = scroll_bplcon1;
+        // Everything Denise resolves at colour-selection time (HAM, and with
+        // it the EHB fallback the same bit selects) reads the HAM-domain
+        // BPLCON0; the plane count and resolution stay in the register domain,
+        // where they gate the fetch/serialiser side.
+        let mut output_control = pixel_control;
+        output_control.bplcon0 =
+            (pixel_control.bplcon0 & !BPLCON0_HAM) | (ham_bplcon0 & BPLCON0_HAM);
         while segment_idx < palette_segments.len() && palette_segments[segment_idx].x <= x {
             palette_segments[segment_idx].apply(&mut palette);
             segment_idx += 1;
@@ -4571,6 +4629,12 @@ fn render_planned_playfield_line(
         if scroll_segment_idx < control_segments.len() {
             run_stop = run_stop.min(bitplane_scroll_effect_x(
                 control_segments[scroll_segment_idx].x,
+                scroll_visible_x_stop,
+            ));
+        }
+        if ham_segment_idx < control_segments.len() {
+            run_stop = run_stop.min(denise_ham_select_effect_x(
+                control_segments[ham_segment_idx].x,
                 scroll_visible_x_stop,
             ));
         }
@@ -4608,7 +4672,7 @@ fn render_planned_playfield_line(
         let nplanes = sample_control.nplanes().min(plan.plane_words.len());
         let delays = std::array::from_fn(|plane| sample_control.sample_delay_for_plane(plane));
         let hold_final_fetch_sample = pixel_control.holds_final_lowres_fetch_sample_at_diwstop();
-        let ham_mode = sample_control.hold_and_modify();
+        let ham_mode = output_control.hold_and_modify();
         let ham_history_start_native_x = if ham_mode {
             pixel_control.ham_history_start_native_x(
                 pixel_diw_h_start,
@@ -4666,7 +4730,7 @@ fn render_planned_playfield_line(
                     let skipped =
                         plan.sample_prepared(nplanes, &delays, min_fetch_x, next_ham_native_x);
                     denise_playfield_output(
-                        sample_control,
+                        output_control,
                         palette,
                         skipped.idx & plane_mask,
                         &mut ham_color,
@@ -4678,7 +4742,7 @@ fn render_planned_playfield_line(
                 if ham_mode {
                     let sample = plan.sample_prepared(nplanes, &delays, min_fetch_x, native_x);
                     denise_playfield_output(
-                        sample_control,
+                        output_control,
                         palette,
                         sample.idx & plane_mask,
                         &mut ham_color,
@@ -4698,7 +4762,7 @@ fn render_planned_playfield_line(
                 let left = plan.sample_prepared(nplanes, &delays, min_fetch_x, native_x);
                 let right = plan.sample_prepared(nplanes, &delays, min_fetch_x, native_x + 1);
                 let (left_out, right_out) = denise_shres_playfield_output_pair(
-                    pixel_control,
+                    output_control,
                     palette,
                     left.idx & plane_mask,
                     right.idx & plane_mask,
@@ -4719,7 +4783,7 @@ fn render_planned_playfield_line(
                 );
                 let ham_before = ham_color;
                 let output = denise_playfield_output(
-                    pixel_control,
+                    output_control,
                     palette,
                     sample.idx & plane_mask,
                     &mut ham_color,
@@ -4742,7 +4806,7 @@ fn render_planned_playfield_line(
                             nplanes,
                             plan.fetched_pixels,
                             delays,
-                            pixel_control.bplcon0,
+                            output_control.bplcon0,
                             sample_control.bplcon1,
                             pixel_control.diwstrt,
                             pixel_control.diwstop,
