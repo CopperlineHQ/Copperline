@@ -237,6 +237,12 @@ struct MachineRuntimeState {
     cpu_clock_carry: u32,
 }
 
+/// Longest 68000-family instruction worth attributing to one PC when
+/// marking executed code: opcode plus full extension words. A larger
+/// jump between instruction boundaries is a branch or an exception, not
+/// a straight-line advance, so only the opcode word is marked.
+const MAX_INSTRUCTION_BYTES: u32 = 12;
+
 struct CpuBus {
     bus: Bus,
     address_mask: u32,
@@ -2027,6 +2033,22 @@ impl M68kMachine {
                     .step_with_hle_handler(&mut self.bus, &mut m68k::NoOpHleHandler)
                 {
                     StepResult::Ok { cycles } => {
+                        if self.bus.bus.smc.is_some() {
+                            // Mark the instruction just retired as code.
+                            // Its own span is the honest answer: the
+                            // prefetch queue also reads a word past the
+                            // stream, which the CPU may never execute.
+                            let after = self.cpu.pc & self.cpu.address_mask;
+                            let span = after.wrapping_sub(dbg_pc_before);
+                            let len = if span > 0 && span <= MAX_INSTRUCTION_BYTES {
+                                span
+                            } else {
+                                2
+                            };
+                            if let Some(smc) = self.bus.bus.smc.as_mut() {
+                                smc.mark_executed(dbg_pc_before, len);
+                            }
+                        }
                         if self.bus.icache.is_some() || self.bus.dcache.is_some() {
                             self.apply_cacr_updates();
                         }
@@ -2592,6 +2614,17 @@ impl CpuBus {
         };
     }
 
+    /// Report a CPU write that lands on memory already fetched as code.
+    fn note_self_modifying_write(&mut self, addr: u32, len: u32) {
+        let pc = self.diag_current_pc;
+        let Some(smc) = self.bus.smc.as_mut() else {
+            return;
+        };
+        if let Some(report) = smc.note_write(addr, len, pc) {
+            log::warn!("smc: {}", crate::smc::SmcTracker::describe(&report));
+        }
+    }
+
     fn read_sized(&mut self, address: u32, size: usize, kind: CpuBusAccessKind) -> u32 {
         let addr = self.mask(address);
         if self.icache.is_some() || self.dcache.is_some() {
@@ -2940,6 +2973,9 @@ impl CpuBus {
     fn write_sized(&mut self, address: u32, size: usize, value: u32) {
         let addr = self.mask(address);
         self.note_cpu_data_bus(addr, size, value);
+        if self.bus.smc.is_some() {
+            self.note_self_modifying_write(addr, size as u32);
+        }
         if let Some(dcache) = self.dcache.as_deref_mut() {
             // Write-through with invalidate-on-hit: the write itself goes
             // to memory below; later reads refill. (The instruction cache

@@ -81,6 +81,12 @@ pub enum CoreOp {
         clear: bool,
     },
     ChipsetReport,
+    /// Arm/disarm the self-modifying-code detector, or read its report.
+    SmcDetect {
+        enabled: Option<bool>,
+        clear: bool,
+    },
+    SmcReport,
     CiaGet {
         b: bool,
     },
@@ -172,6 +178,7 @@ impl CoreOp {
                 | CoreOp::CustomRead { .. }
                 | CoreOp::CustomWriter { .. }
                 | CoreOp::ChipsetReport
+                | CoreOp::SmcReport
                 | CoreOp::CiaGet { .. }
                 | CoreOp::BeamGet
                 | CoreOp::DisplayGet
@@ -701,6 +708,11 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
             clear: p.bool_or("clear", false)?,
         }),
         "chipset.report" => core(CoreOp::ChipsetReport),
+        "smc.detect" => core(CoreOp::SmcDetect {
+            enabled: p.bool_opt("enabled")?,
+            clear: p.bool_or("clear", false)?,
+        }),
+        "smc.report" => core(CoreOp::SmcReport),
         "cia.get" => core(CoreOp::CiaGet {
             b: match p.str_req("cia")?.as_str() {
                 "a" | "A" => false,
@@ -1759,6 +1771,35 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
             Ok(json!({
                 "armed": emu.bus().chipset_validation_armed(),
                 "findings": findings,
+                "dropped": dropped,
+            }))
+        }
+        CoreOp::SmcDetect { enabled, clear } => {
+            if let Some(on) = enabled {
+                emu.bus_mut().set_smc_detection(*on);
+            }
+            if *clear {
+                emu.bus_mut().clear_smc_reports();
+            }
+            Ok(json!({"armed": emu.bus().smc_detection_armed()}))
+        }
+        CoreOp::SmcReport => {
+            let (reports, dropped) = emu.bus().smc_reports();
+            let writes: Vec<Value> = reports
+                .iter()
+                .map(|r| {
+                    json!({
+                        "addr": r.addr,
+                        "writer_pc": r.writer_pc,
+                        "distance": r.distance,
+                        "count": r.count,
+                        "detail": crate::smc::SmcTracker::describe(r),
+                    })
+                })
+                .collect();
+            Ok(json!({
+                "armed": emu.bus().smc_detection_armed(),
+                "writes": writes,
                 "dropped": dropped,
             }))
         }

@@ -114,6 +114,8 @@ pub struct Config {
     /// Set by `[debug] validate_chipset`. Off by default: it is a
     /// diagnostic, and an unarmed machine pays nothing for it.
     pub validate_chipset: bool,
+    /// Report self-modifying writes. Set by `[debug] detect_smc`.
+    pub detect_smc: bool,
     /// A4000 motherboard IDE fitted (A4000 profile): the ATA task file at
     /// $DD2020, driven by Kickstart's own scsi.device. Takes its drives from
     /// `[ide]`, like Gayle's.
@@ -1290,6 +1292,7 @@ impl Default for Config {
             rom_scsi_device_disable: false,
             log_unmapped: None,
             validate_chipset: false,
+            detect_smc: false,
             ide_a4000: false,
             sdmac: false,
             akiko: false,
@@ -2246,6 +2249,10 @@ pub(crate) struct RawDebug {
     /// default; it also arms the per-register last-writer table.
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) validate_chipset: bool,
+    /// Report writes that land on memory the CPU has already executed.
+    /// Off by default; costs a 1 MiB execution map while armed.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub(crate) detect_smc: bool,
     /// Log CPU accesses that no device decodes. Either `all`, or an address
     /// range like `"DD0000-DE0000"` (hex, end exclusive) to watch one window.
     /// Reads report the floating bus value they returned; writes report the
@@ -3012,6 +3019,7 @@ impl TryFrom<RawConfig> for Config {
                 .map(parse_log_unmapped)
                 .transpose()?,
             validate_chipset: raw.debug.validate_chipset,
+            detect_smc: raw.debug.detect_smc,
             mem_controller,
             video_standard,
             audio,

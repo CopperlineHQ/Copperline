@@ -236,6 +236,15 @@ since nothing has been recorded. `dropped` counts findings lost once the
 report filled, so a truncated report is distinguishable from a complete
 one.
 
+Self-modifying code: `smc.detect {enabled?, clear?}` arms or disarms the
+detector (`[debug] detect_smc` arms it from the start) and can empty its
+report; `smc.report` -> `{armed, writes, dropped}` lists writes that
+landed on already-executed memory, each with `addr`, `writer_pc`, the
+`distance` between them, a `count`, and a `detail` line. A patch within
+a few bytes ahead of the writing instruction is called out as inside the
+68000's prefetch, where it may be too late to take effect on this pass.
+An address counts as code once an instruction there has retired.
+
 Battery clock (the $DC0000 RTC; see `rtc_time` in
 `docs/guide/configuration.md` for the boot-time seed): `rtc.get` reports
 `{present, chip, seeded, frozen, unix, time}` (`chip` is the fitted part,

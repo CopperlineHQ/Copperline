@@ -1019,6 +1019,11 @@ pub struct Bus {
     /// costs a bisect.
     #[serde(skip)]
     reg_writers: Option<Box<[Option<RegWrite>; 256]>>,
+    /// Self-modifying-code detector, present only while armed
+    /// (`[debug] detect_smc`). Transient diagnostic state; a restore
+    /// starts with a fresh, empty execution map.
+    #[serde(skip)]
+    pub(crate) smc: Option<Box<crate::smc::SmcTracker>>,
     blitter_slowdown_cpu_misses: u8,
     /// Pending INTREQ.BLIT raise, in colour clocks. Real Agnus raises the
     /// blitter interrupt one clock after the sequencer's BLTDONE cycle
@@ -2492,6 +2497,7 @@ impl Bus {
             cpu_pc: 0,
             regcheck: None,
             reg_writers: None,
+            smc: None,
             ui_beam_traps: Vec::new(),
             ui_beam_hit: None,
             ui_copper_breaks: Vec::new(),
@@ -2559,6 +2565,35 @@ impl Bus {
         } else {
             self.regcheck = None;
             self.reg_writers = None;
+        }
+    }
+
+    /// Arm or disarm the self-modifying-code detector. Disarming frees
+    /// the execution map; re-arming starts from a blank one, so a report
+    /// only ever covers the window it was armed for.
+    pub fn set_smc_detection(&mut self, on: bool) {
+        if on == self.smc.is_some() {
+            return;
+        }
+        self.smc = on.then(Box::default);
+    }
+
+    pub fn smc_detection_armed(&self) -> bool {
+        self.smc.is_some()
+    }
+
+    /// The self-modifying-code reports, most-repeated first, and how many
+    /// were dropped once the report filled.
+    pub fn smc_reports(&self) -> (Vec<crate::smc::SmcReport>, u64) {
+        match &self.smc {
+            Some(smc) => (smc.reports(), smc.dropped),
+            None => (Vec::new(), 0),
+        }
+    }
+
+    pub fn clear_smc_reports(&mut self) {
+        if let Some(smc) = self.smc.as_mut() {
+            smc.clear_reports();
         }
     }
 

@@ -1097,6 +1097,7 @@ back to the native screen. On a single-window emulator you usually want
 [debug]
 log_unmapped = "DD0000-DEFFFF"
 validate_chipset = true
+detect_smc = true
 ```
 
 `log_unmapped` logs every CPU read and write inside the given range that no
@@ -1131,3 +1132,18 @@ from where?" without a bisect. Read both over the control protocol with
 [the control protocol](../debugger/control.md)), which can also arm and
 disarm the validator live. Off by default; an unarmed machine pays nothing
 for it.
+
+`detect_smc` reports writes that land on memory the CPU has already
+executed. Self-modification is legitimate on a 68000 -- decrunchers,
+trackers and Copper-list patchers all do it -- but it is also where a
+prefetch-related bug hides, since the CPU has already fetched the word
+ahead of the one it is executing, and neither a patch applied too late
+nor one applied to the wrong address leaves a trace at the moment it
+happens. Each report names the written address, the instruction that
+wrote it, and the distance between them, calling out a patch close enough
+to sit inside the prefetch. An address counts as code once an instruction
+there has retired, so an instruction patching its own extension words on
+its only execution is not reported; every repeating pattern is caught on
+the pass after the first. Read it with `smc.report` over the control
+protocol, which can also arm and disarm the detector live. Off by
+default; it costs a 1 MiB execution map while armed.

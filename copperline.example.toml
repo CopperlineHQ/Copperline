@@ -152,6 +152,7 @@ model = "68000"
 # [debug]
 # log_unmapped = "DD0000-DEFFFF"   # hex START-END, end included; or "all"
 # validate_chipset = true          # report chipset misuse with the PC that caused it
+# detect_smc = true                # report writes landing on already-executed code
 
 
 # Extended ROM image for CDTV/CD32 machines: a 256 KiB image maps at

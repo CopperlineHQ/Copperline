@@ -71,6 +71,7 @@ pub mod screenshot;
 pub mod scsi;
 pub mod sdmac;
 pub mod serial;
+pub mod smc;
 pub mod timebase;
 pub mod timestamp;
 pub mod timetravel;

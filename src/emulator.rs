@@ -2199,6 +2199,10 @@ pub fn build_machine(
         info!("debug: chipset access validator armed");
         bus.set_chipset_validation(true);
     }
+    if cfg.detect_smc {
+        info!("debug: self-modifying-code detector armed");
+        bus.set_smc_detection(true);
+    }
     if cfg.sdmac {
         let mut sdmac = crate::sdmac::Sdmac::new();
         let mut drives = 0;
@@ -2723,6 +2727,62 @@ mod tests {
     /// SSP resets to $4000 (chip RAM), so BSR/RTS push and pop the return
     /// address through real memory. The reset vectors live in chip RAM (overlay
     /// is off, so the CPU reads them from address 0 at reset).
+    /// An emulator running a self-modifying program out of chip RAM:
+    ///
+    /// ```text
+    /// 030000  NOP                        ; the word that gets patched
+    /// 030002  MOVE.W #$4E71,($30000).L
+    /// 03000A  BRA.S  *
+    /// ```
+    ///
+    /// The NOP retires before the store lands, so $30000 is known to be
+    /// code by the time it is written over.
+    fn emulator_with_self_modifying_program() -> super::Emulator {
+        let mut emu = emulator_with_call_program();
+        emu.bus_mut().mem.overlay = false;
+        let program: [u16; 6] = [
+            0x4E71, // NOP
+            0x33FC, // MOVE.W #imm,(abs).L
+            0x4E71, // immediate: NOP
+            0x0003, // destination high
+            0x0000, // destination low
+            0x60FE, // BRA.S *
+        ];
+        let bytes: Vec<u8> = program.iter().flat_map(|w| w.to_be_bytes()).collect();
+        emu.machine.debug_write_memory(0x30000, &bytes);
+        emu.machine.debug_set_register(17, 0x30000);
+        emu
+    }
+
+    #[test]
+    fn the_smc_detector_reports_a_write_over_code_and_its_prefetch_distance() {
+        let mut emu = emulator_with_self_modifying_program();
+        emu.bus_mut().set_smc_detection(true);
+        for _ in 0..4 {
+            emu.debug_step_instructions(1).unwrap();
+        }
+        let (reports, dropped) = emu.bus().smc_reports();
+        assert_eq!(dropped, 0);
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert_eq!(reports[0].addr, 0x30000);
+        assert_eq!(reports[0].writer_pc, 0x30002);
+        let line = crate::smc::SmcTracker::describe(&reports[0]);
+        assert!(line.contains("2 bytes behind"), "{line}");
+    }
+
+    #[test]
+    fn an_unarmed_machine_records_no_self_modifying_writes() {
+        let mut emu = emulator_with_self_modifying_program();
+        for _ in 0..4 {
+            emu.debug_step_instructions(1).unwrap();
+        }
+        assert!(emu.bus().smc_reports().0.is_empty());
+        // Arming after the fact starts from a blank execution map, so it
+        // reports only what it actually watched.
+        emu.bus_mut().set_smc_detection(true);
+        assert!(emu.bus().smc_reports().0.is_empty());
+    }
+
     fn emulator_with_call_program() -> super::Emulator {
         let mut rom = vec![0u8; crate::memory::ROM_SIZE];
         let put = |mem: &mut [u8], off: usize, word: u16| {
