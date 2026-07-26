@@ -131,9 +131,14 @@ impl Default for HeatMap {
 
 impl HeatMap {
     pub fn new(base: u32, span: u32) -> Self {
+        // The span is rounded up to a whole number of bytes per cell.
+        // Without that, a span like CELLS + 1 gives one byte per cell and
+        // leaves the window's last addresses indexing one past the grid.
+        let cells = CELLS as u32;
+        let per_cell = span.max(cells).div_ceil(cells).clamp(1, u32::MAX / cells);
         Self {
             base,
-            span: span.max(CELLS as u32),
+            span: per_cell * cells,
             source: Box::new([0; CELLS]),
             stamp: Box::new([0; CELLS]),
         }
@@ -233,6 +238,21 @@ fn fade(colour: u32, num: u32, den: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_span_that_is_not_a_whole_number_of_cells_is_rounded_up() {
+        // A span one byte past the grid size would otherwise give one
+        // byte per cell and let the window's top address index off the
+        // end of the grid.
+        let mut map = HeatMap::new(0, CELLS as u32 + 1);
+        assert_eq!(map.bytes_per_cell(), 2);
+        assert_eq!(map.span(), CELLS as u32 * 2);
+        map.touch(map.span() - 1, 1, Toucher::CpuWrite, 0);
+        assert_eq!(map.census(0), vec![(Toucher::CpuWrite, 1)]);
+        // The largest span the grid can describe stays inside u32.
+        let wide = HeatMap::new(0, u32::MAX);
+        assert_eq!(wide.bytes_per_cell(), u32::MAX / CELLS as u32);
+    }
 
     #[test]
     fn a_touch_lands_in_the_cell_covering_its_address() {

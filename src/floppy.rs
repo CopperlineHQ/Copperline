@@ -408,16 +408,18 @@ impl FloppyController {
 
     /// Whether a disk-DMA arming right now would find a drive able to
     /// serve it: a selected drive, its motor spinning, and media in it.
-    /// Returns the reason it could not, for the hardware-misuse report.
-    pub fn dma_arming_obstacle(&self) -> Option<&'static str> {
+    /// Returns the `regcheck::DISK_*` code for what is missing, so the
+    /// wording of the report lives in one place rather than being
+    /// recovered from a string here.
+    pub fn dma_arming_obstacle(&self) -> Option<u16> {
         let Some(idx) = self.selected_drive() else {
-            return Some("no drive is selected");
+            return Some(crate::regcheck::DISK_NO_DRIVE);
         };
         if !self.drives[idx].motor_on {
-            return Some("the selected drive's motor is off");
+            return Some(crate::regcheck::DISK_MOTOR_OFF);
         }
         if self.drives[idx].cached.is_empty() {
-            return Some("the selected drive is empty");
+            return Some(crate::regcheck::DISK_EMPTY);
         }
         None
     }

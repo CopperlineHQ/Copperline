@@ -2023,19 +2023,30 @@ impl App {
         // Fire any scheduled --mouse-after relative motions (one-shot
         // each); these land on the named port's quadrature counters,
         // whatever device is configured there (the lines are the lines).
+        // Held back while a --mouse-to-after servo is steering: the servo
+        // measures the pointer's response to its own counts to learn the
+        // guest's acceleration, so motion from another source in the same
+        // frame is attributed to it and corrupts the estimate. The
+        // deferral is bounded by the servo's own frame budget.
+        //
+        // The servo is advanced first so a target coming due this frame
+        // takes ownership before the deltas are considered, and so the
+        // frame it finishes on releases them again immediately.
+        self.advance_scripted_pointer_targets(emu_secs);
         let mut mouse_deltas = Vec::new();
-        self.auto_mouse.retain(|&(at, dx, dy, port)| {
-            if emu_secs >= at {
-                mouse_deltas.push((dx, dy, port));
-                false
-            } else {
-                true
-            }
-        });
+        if self.active_mouse_to.is_none() {
+            self.auto_mouse.retain(|&(at, dx, dy, port)| {
+                if emu_secs >= at {
+                    mouse_deltas.push((dx, dy, port));
+                    false
+                } else {
+                    true
+                }
+            });
+        }
         for (dx, dy, port) in mouse_deltas {
             self.apply_scripted_mouse_delta(port, dx, dy);
         }
-        self.advance_scripted_pointer_targets(emu_secs);
         // Fire any scheduled --pot-after analogue positions (one-shot
         // each).
         let mut pot_sets = Vec::new();

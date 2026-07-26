@@ -130,10 +130,11 @@ impl WatchSource {
         }
     }
 
-    /// Parse a console filter token (case-insensitive). A bare channel
-    /// name filters to that engine whatever the channel number
-    /// (`sprite`), while a numbered form pins one (`spr3`, `bpl1`,
-    /// `aud0`).
+    /// Parse a console filter token (case-insensitive): an engine name
+    /// (`cpu`, `blitter`, `disk`, `copper`) or a numbered DMA channel
+    /// (`bpl1`-`bpl8`, `spr0`-`spr7`, `aud0`-`aud3`). A DMA filter names
+    /// exactly one channel; there is no "any bitplane" form, because the
+    /// question a display bug poses is which one.
     pub fn parse(token: &str) -> Option<Self> {
         for (name, make) in [
             ("bpl", (|n| WatchSource::Bitplane(n)) as fn(u8) -> Self),
@@ -165,16 +166,10 @@ impl WatchSource {
         None
     }
 
-    /// Whether a watch filtered on `self` accepts an access attributed to
-    /// `actual`. An engine name with no channel number matches every
-    /// channel of that engine.
+    /// Whether a watch filtered on `self` accepts an access attributed
+    /// to `actual`. A DMA filter matches its own channel only.
     pub fn accepts(self, actual: WatchSource) -> bool {
-        match (self, actual) {
-            (WatchSource::Bitplane(0xFF), WatchSource::Bitplane(_)) => true,
-            (WatchSource::Sprite(0xFF), WatchSource::Sprite(_)) => true,
-            (WatchSource::Audio(0xFF), WatchSource::Audio(_)) => true,
-            (a, b) => a == b,
-        }
+        self == actual
     }
 }
 

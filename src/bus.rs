@@ -2816,12 +2816,7 @@ impl Bus {
             }
             // DSKLEN: arming disk DMA.
             0x024 if val & 0x8000 != 0 => {
-                if let Some(reason) = self.floppy.dma_arming_obstacle() {
-                    let code = match reason {
-                        r if r.contains("motor") => crate::regcheck::DISK_MOTOR_OFF,
-                        r if r.contains("empty") => crate::regcheck::DISK_EMPTY,
-                        _ => crate::regcheck::DISK_NO_DRIVE,
-                    };
+                if let Some(code) = self.floppy.dma_arming_obstacle() {
                     self.note_chipset_finding(
                         Finding::DiskNotReady,
                         off,
