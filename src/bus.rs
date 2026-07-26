@@ -2724,25 +2724,27 @@ impl Bus {
             return;
         }
         use crate::regcheck::{Direction, Finding};
-        let mut findings: [Option<(Finding, u16)>; 3] = [None; 3];
-        let mut n = 0;
         if matches!(crate::regcheck::direction(off), Some(Direction::ReadOnly)) {
-            findings[n] = Some((Finding::WrongDirection, 0));
-            n += 1;
+            self.note_chipset_finding(Finding::WrongDirection, off, writer, val, 0, vpos, hpos);
         }
+        // Undefined bits are only meaningful on a register the fitted
+        // chipset actually has; on one it does not, the whole write is
+        // dropped and the bit pattern says nothing.
         if !self.custom_reg_present(off) {
-            findings[n] = Some((Finding::AbsentRegister, 0));
-            n += 1;
+            self.note_chipset_finding(Finding::AbsentRegister, off, writer, val, 0, vpos, hpos);
         } else if let Some(defined) = crate::regcheck::defined_bits(off) {
             let undefined = val & !defined;
             if undefined != 0 {
-                findings[n] = Some((Finding::UnusedBits, undefined));
-                n += 1;
+                self.note_chipset_finding(
+                    Finding::UnusedBits,
+                    off,
+                    writer,
+                    val,
+                    undefined,
+                    vpos,
+                    hpos,
+                );
             }
-        }
-        let _ = n;
-        for (finding, detail) in findings.into_iter().flatten() {
-            self.note_chipset_finding(finding, off, writer, val, detail, vpos, hpos);
         }
         self.check_dma_pointer(off, val, writer, vpos, hpos);
         self.check_device_misuse(off, val, writer, vpos, hpos);

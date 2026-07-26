@@ -774,14 +774,14 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
         }
         "memory.heatmap" => {
             let enabled = p.bool_or("enabled", true)?;
+            // Parsed outside the `then`, and whether or not the call is
+            // arming: inside a closure the error had nowhere to go and
+            // was being swallowed into the default, which turns a
+            // client's typo into a silently wrong window.
+            let base = p.u32_or("base", 0)?;
+            let span = p.u32_or("span", crate::heatmap::DEFAULT_SPAN)?;
             core(CoreOp::HeatMapSet {
-                window: enabled.then(|| {
-                    (
-                        p.u32_or("base", 0).unwrap_or(0),
-                        p.u32_or("span", crate::heatmap::DEFAULT_SPAN)
-                            .unwrap_or(crate::heatmap::DEFAULT_SPAN),
-                    )
-                }),
+                window: enabled.then_some((base, span)),
             })
         }
         "memory.heatmap.report" => core(CoreOp::HeatMapReport {
@@ -2869,6 +2869,18 @@ mod tests {
         let kinds: Vec<&str> = census.iter().map(|c| c["by"].as_str().unwrap()).collect();
         assert!(kinds.contains(&"cpu-read"), "{report}");
         assert!(kinds.contains(&"cpu-write"), "{report}");
+    }
+
+    #[test]
+    fn heat_map_parameters_are_validated_rather_than_defaulted() {
+        assert!(parse_method("memory.heatmap", &json!({"base": "nope"})).is_err());
+        assert!(parse_method("memory.heatmap", &json!({"span": {}})).is_err());
+        // A bad value is still a bad value when the call is disarming.
+        assert!(parse_method("memory.heatmap", &json!({"enabled": false, "base": []})).is_err());
+        assert_eq!(
+            parse_method("memory.heatmap", &json!({"enabled": false})).unwrap(),
+            Request::Core(CoreOp::HeatMapSet { window: None })
+        );
     }
 
     #[test]
