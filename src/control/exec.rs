@@ -70,6 +70,17 @@ pub enum CoreOp {
     CustomRead {
         off: u16,
     },
+    /// Who last wrote a custom register, from the last-writer table the
+    /// chipset validator arms.
+    CustomWriter {
+        off: u16,
+    },
+    /// Arm/disarm the chipset access validator, or read its report.
+    ChipsetValidate {
+        enabled: Option<bool>,
+        clear: bool,
+    },
+    ChipsetReport,
     CiaGet {
         b: bool,
     },
@@ -159,6 +170,8 @@ impl CoreOp {
                 | CoreOp::Disasm { .. }
                 | CoreOp::CustomDump
                 | CoreOp::CustomRead { .. }
+                | CoreOp::CustomWriter { .. }
+                | CoreOp::ChipsetReport
                 | CoreOp::CiaGet { .. }
                 | CoreOp::BeamGet
                 | CoreOp::DisplayGet
@@ -680,6 +693,14 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
         "custom.read" => core(CoreOp::CustomRead {
             off: parse_custom_reg_param(&p)?,
         }),
+        "custom.writer" => core(CoreOp::CustomWriter {
+            off: parse_custom_reg_param(&p)?,
+        }),
+        "chipset.validate" => core(CoreOp::ChipsetValidate {
+            enabled: p.bool_opt("enabled")?,
+            clear: p.bool_or("clear", false)?,
+        }),
+        "chipset.report" => core(CoreOp::ChipsetReport),
         "cia.get" => core(CoreOp::CiaGet {
             b: match p.str_req("cia")?.as_str() {
                 "a" | "A" => false,
@@ -1686,6 +1707,59 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
                 .map_err(|e| CtlError::io(format!("saving state: {e:#}")))?;
             Ok(json!({"path": path.display().to_string()}))
         }
+        CoreOp::CustomWriter { off } => {
+            if !emu.bus().chipset_validation_armed() {
+                return Err(CtlError::invalid_state(
+                    "the last-writer table is not armed; chipset.validate {\"enabled\": true}",
+                ));
+            }
+            let name = crate::debugger::custom_reg_name(*off);
+            Ok(match emu.bus().custom_reg_last_write(*off) {
+                None => json!({"reg": name, "written": false}),
+                Some(write) => json!({
+                    "reg": name,
+                    "written": true,
+                    "value": write.value,
+                    "by": write.writer.label(),
+                    "addr": write.writer.address(),
+                    "frame": write.frame,
+                    "vpos": write.vpos,
+                    "hpos": write.hpos,
+                }),
+            })
+        }
+        CoreOp::ChipsetValidate { enabled, clear } => {
+            if let Some(on) = enabled {
+                emu.bus_mut().set_chipset_validation(*on);
+            }
+            if *clear {
+                emu.bus_mut().clear_chipset_findings();
+            }
+            Ok(json!({"armed": emu.bus().chipset_validation_armed()}))
+        }
+        CoreOp::ChipsetReport => {
+            let (reports, dropped) = emu.bus().chipset_findings();
+            let findings: Vec<Value> = reports
+                .iter()
+                .map(|r| {
+                    json!({
+                        "kind": r.finding.name(),
+                        "reg": crate::debugger::custom_reg_name(r.reg),
+                        "by": r.writer.label(),
+                        "addr": r.writer.address(),
+                        "count": r.count,
+                        "vpos": r.vpos,
+                        "hpos": r.hpos,
+                        "detail": crate::regcheck::RegCheck::describe(r),
+                    })
+                })
+                .collect();
+            Ok(json!({
+                "armed": emu.bus().chipset_validation_armed(),
+                "findings": findings,
+                "dropped": dropped,
+            }))
+        }
         CoreOp::Digest => Ok(digest_value(emu)),
         CoreOp::RegionDigest { rect } => region_digest_value(emu, *rect),
         CoreOp::Screenshot { path } => {
@@ -2415,6 +2489,112 @@ mod tests {
         let b = exec_core(&mut emu, &mut ctx, &CoreOp::Digest).unwrap();
         assert_eq!(a["digest"], b["digest"]);
         assert_eq!(a["width"], FB_WIDTH);
+    }
+
+    /// Findings of one kind from a report, for the validator tests.
+    fn findings_of(report: &Value, kind: &str) -> Vec<Value> {
+        report["findings"]
+            .as_array()
+            .expect("findings array")
+            .iter()
+            .filter(|f| f["kind"] == kind)
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn the_validator_flags_undefined_bits_and_names_the_writer() {
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+        exec_core(
+            &mut emu,
+            &mut ctx,
+            &core("chipset.validate", json!({"enabled": true})),
+        )
+        .unwrap();
+        // BPLCON2 bit 15 has no function on any chipset revision.
+        emu.bus_mut().custom_write(0xDFF104, 2, 0x8020);
+        let report = exec_core(&mut emu, &mut ctx, &CoreOp::ChipsetReport).unwrap();
+        let bits = findings_of(&report, "unused-bits");
+        assert_eq!(bits.len(), 1, "{report}");
+        assert_eq!(bits[0]["reg"], "BPLCON2");
+        assert_eq!(bits[0]["by"], "cpu");
+        assert!(
+            bits[0]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("undefined bits 0x8000"),
+            "{}",
+            bits[0]["detail"]
+        );
+    }
+
+    #[test]
+    fn the_validator_flags_absent_registers_byte_access_and_stray_pointers() {
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+        emu.bus_mut().set_chipset_validation(true);
+        // FMODE exists only on AGA Alice; the test machine is an OCS
+        // A500, so this write is decoded and then dropped.
+        emu.bus_mut().custom_write(0xDFF1FC, 2, 0x0003);
+        // A byte write to a word register: no byte lanes on the custom bus.
+        emu.bus_mut().custom_write(0xDFF181, 1, 0x0F);
+        // A bitplane pointer aimed at $00200000, far past the 512 KiB of
+        // chip RAM this machine's Agnus can address.
+        emu.bus_mut().custom_write(0xDFF0E0, 2, 0x0020);
+        let report = exec_core(&mut emu, &mut ctx, &CoreOp::ChipsetReport).unwrap();
+        assert_eq!(findings_of(&report, "absent-register").len(), 1, "{report}");
+        assert_eq!(findings_of(&report, "byte-access").len(), 1, "{report}");
+        let stray = findings_of(&report, "pointer-outside-chip-ram");
+        assert_eq!(stray.len(), 1, "{report}");
+        assert_eq!(stray[0]["reg"], "BPL1PTH");
+    }
+
+    #[test]
+    fn the_validator_flags_a_write_to_a_read_only_register() {
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+        emu.bus_mut().set_chipset_validation(true);
+        // DMACONR is the read side; DMACON is $096. Writing $002 is a
+        // write that lands nowhere.
+        emu.bus_mut().custom_write(0xDFF002, 2, 0x8200);
+        let report = exec_core(&mut emu, &mut ctx, &CoreOp::ChipsetReport).unwrap();
+        let wrong = findings_of(&report, "wrong-direction");
+        assert_eq!(wrong.len(), 1, "{report}");
+        assert_eq!(wrong[0]["reg"], "DMACONR");
+    }
+
+    #[test]
+    fn an_unarmed_machine_reports_nothing_and_refuses_the_writer_query() {
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+        emu.bus_mut().custom_write(0xDFF104, 2, 0x8020);
+        let report = exec_core(&mut emu, &mut ctx, &CoreOp::ChipsetReport).unwrap();
+        assert_eq!(report["armed"], false);
+        assert!(report["findings"].as_array().unwrap().is_empty());
+        let err = exec_core(&mut emu, &mut ctx, &CoreOp::CustomWriter { off: 0x104 }).unwrap_err();
+        assert_eq!(err.code, proto::INVALID_STATE);
+    }
+
+    #[test]
+    fn the_last_writer_table_records_value_and_writer() {
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+        emu.bus_mut().set_chipset_validation(true);
+        emu.bus_mut().custom_write(0xDFF180, 2, 0x0123);
+        let who = exec_core(
+            &mut emu,
+            &mut ctx,
+            &core("custom.writer", json!({"reg": "COLOR00"})),
+        )
+        .unwrap();
+        assert_eq!(who["written"], true);
+        assert_eq!(who["value"], 0x0123);
+        assert_eq!(who["by"], "cpu");
+        // A register nothing has written says so rather than inventing a
+        // writer.
+        let never = exec_core(&mut emu, &mut ctx, &CoreOp::CustomWriter { off: 0x1BE }).unwrap();
+        assert_eq!(never["written"], false);
     }
 
     #[test]

@@ -110,6 +110,10 @@ pub struct Config {
     /// ROM probes enough empty space to make this a firehose, so it is meant
     /// to be pointed at one window (e.g. the A4000 IDE at $DD2020).
     pub log_unmapped: Option<std::ops::RangeInclusive<u32>>,
+    /// Arm the custom-register access validator and last-writer table.
+    /// Set by `[debug] validate_chipset`. Off by default: it is a
+    /// diagnostic, and an unarmed machine pays nothing for it.
+    pub validate_chipset: bool,
     /// A4000 motherboard IDE fitted (A4000 profile): the ATA task file at
     /// $DD2020, driven by Kickstart's own scsi.device. Takes its drives from
     /// `[ide]`, like Gayle's.
@@ -1285,6 +1289,7 @@ impl Default for Config {
             mem_controller: MemController::None,
             rom_scsi_device_disable: false,
             log_unmapped: None,
+            validate_chipset: false,
             ide_a4000: false,
             sdmac: false,
             akiko: false,
@@ -2234,6 +2239,13 @@ pub(crate) enum RawRtcTime {
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawDebug {
+    /// Arm the custom-register access validator: report software using the
+    /// chipset in ways the hardware ignores (absent registers, undefined
+    /// bits, wrong-direction and byte accesses, DMA pointers past Agnus's
+    /// reach), each with the PC or Copper address that did it. Off by
+    /// default; it also arms the per-register last-writer table.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub(crate) validate_chipset: bool,
     /// Log CPU accesses that no device decodes. Either `all`, or an address
     /// range like `"DD0000-DE0000"` (hex, end exclusive) to watch one window.
     /// Reads report the floating bus value they returned; writes report the
@@ -2999,6 +3011,7 @@ impl TryFrom<RawConfig> for Config {
                 .as_deref()
                 .map(parse_log_unmapped)
                 .transpose()?,
+            validate_chipset: raw.debug.validate_chipset,
             mem_controller,
             video_standard,
             audio,

@@ -2195,6 +2195,10 @@ pub fn build_machine(
         );
         bus.log_unmapped = Some(range);
     }
+    if cfg.validate_chipset {
+        info!("debug: chipset access validator armed");
+        bus.set_chipset_validation(true);
+    }
     if cfg.sdmac {
         let mut sdmac = crate::sdmac::Sdmac::new();
         let mut drives = 0;

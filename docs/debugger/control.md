@@ -220,6 +220,22 @@ not touched), `disasm {addr?, count?}`, `custom.dump`,
 `custom.read {reg}` (name or offset), `cia.get {cia: "a"|"b"}`,
 `beam.get`, `display.get`, `copper.list {addr?, max?}`, `pc_history`.
 
+Chipset validation: `chipset.validate {enabled?, clear?}` arms or disarms
+the custom-register access validator (`[debug] validate_chipset` arms it
+from the start instead) and can empty its report; `chipset.report` ->
+`{armed, findings, dropped}` lists what it has seen, most-repeated first,
+each finding carrying `kind`, `reg`, the `by`/`addr` of the writer, its
+`count`, the beam position, and a `detail` line naming the hardware
+behaviour. The kinds are `absent-register` (a register the fitted
+Agnus/Denise does not have), `unused-bits`, `wrong-direction`,
+`byte-access`, `odd-address`, `mirrored-address`, and
+`pointer-outside-chip-ram`. `custom.writer {reg}` answers the companion
+question -- the last value written to a register and the PC or Copper
+address that wrote it -- and is `-32003` while the validator is not armed,
+since nothing has been recorded. `dropped` counts findings lost once the
+report filled, so a truncated report is distinguishable from a complete
+one.
+
 Battery clock (the $DC0000 RTC; see `rtc_time` in
 `docs/guide/configuration.md` for the boot-time seed): `rtc.get` reports
 `{present, chip, seeded, frozen, unix, time}` (`chip` is the fitted part,

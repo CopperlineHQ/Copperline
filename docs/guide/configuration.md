@@ -1096,6 +1096,7 @@ back to the native screen. On a single-window emulator you usually want
 ```toml
 [debug]
 log_unmapped = "DD0000-DEFFFF"
+validate_chipset = true
 ```
 
 `log_unmapped` logs every CPU read and write inside the given range that no
@@ -1114,3 +1115,19 @@ followed by a long run of status reads that never come back ready.
 A booting Kickstart probes enough empty address space that `all` produces on
 the order of a million lines per boot, so prefer a range once you know roughly
 where to look.
+
+`validate_chipset` arms the custom-register access validator: a running
+report of software using the chipset in ways the hardware quietly ignores.
+It flags writes to registers the fitted Agnus/Denise does not have, bits a
+register does not define, writes to read-only registers and reads of
+write-only ones, byte or odd-address access to word registers, access
+through an address mirror, and DMA pointers aimed past the chip RAM Agnus
+can address. Each finding names the PC (or Copper address) that made the
+access and the beam position, is deduplicated by (kind, register, writer)
+with a repeat count, and is logged the first time it is seen. It also arms
+a per-register last-writer table, which answers "what set BPLCON3, and
+from where?" without a bisect. Read both over the control protocol with
+`chipset.report` and `custom.writer` (see
+[the control protocol](../debugger/control.md)), which can also arm and
+disarm the validator live. Off by default; an unarmed machine pays nothing
+for it.

@@ -994,6 +994,24 @@ pub struct Bus {
     /// PC rests there.
     #[serde(skip)]
     ui_copper_last_pc: u32,
+    /// Start PC of the instruction the CPU is currently executing,
+    /// republished here once per instruction by the CPU wrapper so the
+    /// chipset paths can attribute an access to the code that made it.
+    /// Transient: re-stamped on the next instruction after any restore.
+    #[serde(skip)]
+    pub(crate) cpu_pc: u32,
+    /// The custom-register access validator's report, present only while
+    /// the validator is armed (`[debug] validate_chipset`). Transient
+    /// diagnostic state; a restore starts a fresh report rather than
+    /// resurrecting findings from an abandoned timeline.
+    #[serde(skip)]
+    regcheck: Option<Box<crate::regcheck::RegCheck>>,
+    /// Last value written to each custom register and who wrote it,
+    /// indexed by word offset / 2. Armed alongside the validator; this is
+    /// the "what set BPLCON3, and from where?" question that otherwise
+    /// costs a bisect.
+    #[serde(skip)]
+    reg_writers: Option<Box<[Option<RegWrite>; 256]>>,
     blitter_slowdown_cpu_misses: u8,
     /// Pending INTREQ.BLIT raise, in colour clocks. Real Agnus raises the
     /// blitter interrupt one clock after the sequencer's BLTDONE cycle
@@ -1190,6 +1208,17 @@ fn beam_write_source_name(source: BeamWriteSource) -> &'static str {
         BeamWriteSource::CpuCopperIrq => "cpu_copper_irq",
         BeamWriteSource::Copper => "copper",
     }
+}
+
+/// The most recent write to one custom register, for the debugger's
+/// "who last touched this register?" view.
+#[derive(Clone, Copy, Debug)]
+pub struct RegWrite {
+    pub value: u16,
+    pub writer: crate::regcheck::Writer,
+    pub vpos: u16,
+    pub hpos: u16,
+    pub frame: u64,
 }
 
 /// A debugger-window custom-register watch hit: the first watched write
@@ -2452,6 +2481,9 @@ impl Bus {
             wave: None,
             ui_reg_watches: Vec::new(),
             ui_reg_hit: None,
+            cpu_pc: 0,
+            regcheck: None,
+            reg_writers: None,
             ui_beam_traps: Vec::new(),
             ui_beam_hit: None,
             ui_copper_breaks: Vec::new(),
@@ -2506,6 +2538,212 @@ impl Bus {
     /// Replace the debugger-window custom-register watch set (word
     /// offsets into $DFF000). A pending unpolled hit is dropped, so a
     /// stale hit cannot fire after its watch was removed.
+    /// Arm or disarm the custom-register access validator and the
+    /// last-writer table. Disarming drops the report: it describes a
+    /// window that is over.
+    pub fn set_chipset_validation(&mut self, on: bool) {
+        if on == self.regcheck.is_some() {
+            return;
+        }
+        if on {
+            self.regcheck = Some(Box::default());
+            self.reg_writers = Some(Box::new([None; 256]));
+        } else {
+            self.regcheck = None;
+            self.reg_writers = None;
+        }
+    }
+
+    pub fn chipset_validation_armed(&self) -> bool {
+        self.regcheck.is_some()
+    }
+
+    /// The validator's findings, most-repeated first, and how many were
+    /// dropped because the report was full.
+    pub fn chipset_findings(&self) -> (Vec<crate::regcheck::Report>, u64) {
+        match &self.regcheck {
+            Some(check) => (check.reports(), check.dropped),
+            None => (Vec::new(), 0),
+        }
+    }
+
+    pub fn clear_chipset_findings(&mut self) {
+        if let Some(check) = self.regcheck.as_mut() {
+            check.clear();
+        }
+    }
+
+    /// The last write to custom register `off`, if the last-writer table
+    /// is armed and the register has been written since.
+    pub fn custom_reg_last_write(&self, off: u16) -> Option<RegWrite> {
+        self.reg_writers.as_ref()?[usize::from((off & 0x1FE) >> 1)]
+    }
+
+    /// Note a custom-register write for the validator and the
+    /// last-writer table. Called from the single write chokepoint, and
+    /// only when armed.
+    fn note_custom_write(&mut self, off: u16, val: u16, source: BeamWriteSource) {
+        let writer = match source {
+            BeamWriteSource::Copper => crate::regcheck::Writer::Copper(self.copper.pc()),
+            BeamWriteSource::Cpu | BeamWriteSource::CpuCopperIrq => {
+                crate::regcheck::Writer::Cpu(self.cpu_pc)
+            }
+        };
+        let (vpos, hpos) = (
+            self.agnus.vpos.min(u32::from(u16::MAX)) as u16,
+            self.agnus.hpos.min(u32::from(u16::MAX)) as u16,
+        );
+        if let Some(writers) = self.reg_writers.as_mut() {
+            writers[usize::from(off >> 1)] = Some(RegWrite {
+                value: val,
+                writer,
+                vpos,
+                hpos,
+                frame: self.emulated_frames,
+            });
+        }
+        if self.regcheck.is_none() {
+            return;
+        }
+        use crate::regcheck::{Direction, Finding};
+        let mut findings: [Option<(Finding, u16)>; 3] = [None; 3];
+        let mut n = 0;
+        if matches!(crate::regcheck::direction(off), Some(Direction::ReadOnly)) {
+            findings[n] = Some((Finding::WrongDirection, 0));
+            n += 1;
+        }
+        if !self.custom_reg_present(off) {
+            findings[n] = Some((Finding::AbsentRegister, 0));
+            n += 1;
+        } else if let Some(defined) = crate::regcheck::defined_bits(off) {
+            let undefined = val & !defined;
+            if undefined != 0 {
+                findings[n] = Some((Finding::UnusedBits, undefined));
+                n += 1;
+            }
+        }
+        let _ = n;
+        for (finding, detail) in findings.into_iter().flatten() {
+            self.note_chipset_finding(finding, off, writer, val, detail, vpos, hpos);
+        }
+        self.check_dma_pointer(off, val, writer, vpos, hpos);
+    }
+
+    /// Flag a DMA pointer aimed past the chip RAM Agnus can address.
+    ///
+    /// Checked on the high half, where the intent is still visible: the
+    /// pointer setters mask the value down to `chip_dma_mask`, so by the
+    /// time the pointer is formed the excess has already become a silent
+    /// wrap -- which is exactly the bug ("it works with 2 MB chip") and
+    /// exactly why it is invisible without this.
+    fn check_dma_pointer(
+        &mut self,
+        off: u16,
+        val: u16,
+        writer: crate::regcheck::Writer,
+        vpos: u16,
+        hpos: u16,
+    ) {
+        let is_pointer_high = matches!(
+            off,
+            0x020 | 0x080 | 0x084 | 0x048 | 0x04C | 0x050 | 0x054 | 0x0A0 | 0x0B0 | 0x0C0 | 0x0D0
+        ) || (0x0E0..=0x0FF).contains(&off) && off & 3 == 0
+            || (0x120..=0x13F).contains(&off) && off & 3 == 0;
+        if !is_pointer_high {
+            return;
+        }
+        let aimed = u32::from(val) << 16;
+        if aimed & !self.chip_dma_mask == 0 {
+            return;
+        }
+        self.note_chipset_finding(
+            crate::regcheck::Finding::PointerOutsideChipRam,
+            off,
+            writer,
+            0,
+            val,
+            vpos,
+            hpos,
+        );
+    }
+
+    /// Record one validator finding and log its first occurrence.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn note_chipset_finding(
+        &mut self,
+        finding: crate::regcheck::Finding,
+        reg: u16,
+        writer: crate::regcheck::Writer,
+        value: u16,
+        detail: u16,
+        vpos: u16,
+        hpos: u16,
+    ) {
+        let Some(check) = self.regcheck.as_mut() else {
+            return;
+        };
+        if check.note(finding, reg, writer, value, detail, vpos, hpos) {
+            let report = check
+                .reports()
+                .into_iter()
+                .find(|r| r.finding == finding && r.reg == reg && r.writer == writer);
+            if let Some(report) = report {
+                log::warn!("chipset: {}", crate::regcheck::RegCheck::describe(&report));
+            }
+        }
+    }
+
+    /// Validate the *shape* of a CPU custom-register access: the things
+    /// only the CPU path can see, because the Copper can only ever issue
+    /// an aligned word write at a canonical address.
+    fn note_cpu_custom_access(&mut self, addr: u64, off: u16, size: usize, read: bool) {
+        use crate::regcheck::{Direction, Finding, Writer};
+        let reg = off & 0x1FE;
+        let writer = Writer::Cpu(self.cpu_pc);
+        let (vpos, hpos) = (
+            self.agnus.vpos.min(u32::from(u16::MAX)) as u16,
+            self.agnus.hpos.min(u32::from(u16::MAX)) as u16,
+        );
+        if size == 1 {
+            let byte = (addr & 1) as u16;
+            self.note_chipset_finding(Finding::ByteAccess, reg, writer, 0, byte, vpos, hpos);
+        } else if addr & 1 != 0 {
+            self.note_chipset_finding(Finding::OddAddress, reg, writer, 0, 0, vpos, hpos);
+        }
+        // The custom bank repeats every $200 bytes inside the $DFF000
+        // page and again across the wider chip-register window; code that
+        // lands anywhere but the canonical address is relying on the
+        // decode gaps rather than the register map.
+        if off >= 0x200 {
+            self.note_chipset_finding(Finding::MirroredAddress, reg, writer, 0, 0, vpos, hpos);
+        }
+        if read && matches!(crate::regcheck::direction(reg), Some(Direction::WriteOnly)) {
+            self.note_chipset_finding(Finding::WrongDirection, reg, writer, 0, 0, vpos, hpos);
+        }
+    }
+
+    /// Whether the fitted Agnus/Denise implements the register at `off`.
+    /// Mirrors the revision gates the write dispatch itself applies, so a
+    /// finding and a dropped write always agree.
+    fn custom_reg_present(&self, off: u16) -> bool {
+        match off {
+            // ECS Agnus: programmable sync/blank, UHRES, ECS blitter size.
+            0x05A | 0x05C | 0x05E | 0x078 | 0x1C0 | 0x1C2 | 0x1C4 | 0x1C6 | 0x1C8 | 0x1CA
+            | 0x1CC | 0x1CE | 0x1D8 | 0x1DC | 0x1DE | 0x1E0 | 0x1E2 => {
+                self.blitter_ecs_registers_enabled()
+            }
+            // ECS Denise: BPLCON3 and DIWHIGH.
+            0x106 => self.denise_ecs_registers(),
+            0x1E4 => self.denise_ecs_registers(),
+            // AGA Lisa: BPLCON4, CLXCON2, and bitplanes 7-8.
+            0x10C | 0x10E => self.denise_is_lisa(),
+            0x0F8..=0x0FF | 0x11C | 0x11E => self.aga_enabled(),
+            // AGA Alice: FMODE.
+            0x1FC => self.aga_enabled(),
+            _ => true,
+        }
+    }
+
     pub fn set_ui_reg_watches(&mut self, offsets: &[u16]) {
         self.ui_reg_watches = offsets.to_vec();
         self.ui_reg_hit = None;
@@ -5128,6 +5366,9 @@ impl Bus {
         // reading.
         self.flush_timed_devices();
         let off = (addr & 0xFFF) as u16;
+        if self.regcheck.is_some() {
+            self.note_cpu_custom_access(addr, off, size, true);
+        }
         self.poll_stats.tick_read_custom(off & 0xFFE);
         match size {
             1 => {
@@ -5234,6 +5475,9 @@ impl Bus {
         // pending IRQ is latched before an INTREQ clear).
         self.flush_timed_devices();
         let off = (addr & 0xFFF) as u16;
+        if self.regcheck.is_some() {
+            self.note_cpu_custom_access(addr, off, size, false);
+        }
         match size {
             1 => {
                 // A 68000 byte write drives the byte onto BOTH halves of

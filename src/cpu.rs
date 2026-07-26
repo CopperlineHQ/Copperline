@@ -1972,6 +1972,7 @@ impl M68kMachine {
                     None
                 };
                 self.bus.diag_current_pc = dbg_pc_before;
+                self.bus.bus.cpu_pc = dbg_pc_before;
                 // The no-op handler declines every trap, so the CPU takes the
                 // real exception -- the plain step() would surface traps as
                 // StepResults instead of raising them.
