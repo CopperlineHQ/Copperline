@@ -201,10 +201,12 @@ guest tells you it is done by producing the same picture twice. N must be
 at least 2. The optional region params narrow the comparison the way
 `capture.region_digest` does, which is what makes the target usable on a
 live Workbench screen: a blinking cursor never lets the whole frame
-settle, but the dialog you are waiting for does. `max_frames` bounds the
-wait; running out of it stops with reason `budget` and a detail naming
-the longest run reached, rather than hanging the client on a display
-that never settles.
+settle, but the dialog you are waiting for does. Naming any of the
+region params requires the rest of a valid rectangle -- an origin with
+no size is `-32602`, not a quiet whole-frame wait. `max_frames` bounds
+the wait; running out of it stops with reason `budget` and a detail
+naming the longest run reached, rather than hanging the client on a
+display that never settles.
 
 Reverse (time travel is armed automatically for control sessions;
 `-32006` when history is exhausted): `reverse_step {n?}`,
@@ -294,7 +296,8 @@ addr, cond?, ignore?}` / `{kind: "watch", addr, class?, pc?}` /
 `{kind: "copper", addr}` / `{kind: "catch", vector}` -> `{id}`;
 `break.remove {id}`; `break.list`; `break.clear`. A watch's optional
 `class` narrows it to one accessor -- `cpu`, `blitter`, `disk`, `copper`,
-or a DMA channel (`bpl1`..`bpl8`, `spr0`..`spr7`, `aud0`..`aud3`). The
+or a DMA channel (`bpl1`..`bpl8`, `spr0`..`spr7`, `aud0`..`aud3`, each
+bounded by the channels the hardware actually has). The
 channel classes also catch DMA *reads*, which a value comparison cannot
 see at all: "which sprite fetched this word" is the question a display
 bug actually poses. A watch's optional `pc` fires only when that

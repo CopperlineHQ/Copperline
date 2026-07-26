@@ -132,14 +132,18 @@ impl WatchSource {
 
     /// Parse a console filter token (case-insensitive): an engine name
     /// (`cpu`, `blitter`, `disk`, `copper`) or a numbered DMA channel
-    /// (`bpl1`-`bpl8`, `spr0`-`spr7`, `aud0`-`aud3`). A DMA filter names
+    /// (`bpl1`-`bpl8`, `spr0`-`spr7`, `aud0`-`aud3`, each bounded by the
+    /// channels the hardware has). A DMA filter names
     /// exactly one channel; there is no "any bitplane" form, because the
     /// question a display bug poses is which one.
     pub fn parse(token: &str) -> Option<Self> {
-        for (name, make) in [
-            ("bpl", (|n| WatchSource::Bitplane(n)) as fn(u8) -> Self),
-            ("spr", |n| WatchSource::Sprite(n)),
-            ("aud", |n| WatchSource::Audio(n)),
+        // Channel counts are the hardware's, not a shared bound: Paula
+        // has four audio channels where Denise has eight sprites, so
+        // `aud4` must not parse into a filter nothing can ever match.
+        for (name, make, channels) in [
+            ("bpl", (|n| WatchSource::Bitplane(n)) as fn(u8) -> Self, 8u8),
+            ("spr", |n| WatchSource::Sprite(n), 8),
+            ("aud", |n| WatchSource::Audio(n), 4),
         ] {
             if let Some(rest) = token
                 .to_ascii_lowercase()
@@ -150,7 +154,7 @@ impl WatchSource {
                 // BPL channels are named from 1 on the hardware; the
                 // others from 0.
                 let index = if name == "bpl" { n.checked_sub(1)? } else { n };
-                return (index < 8).then(|| make(index));
+                return (index < channels).then(|| make(index));
             }
         }
         for (name, source) in [
@@ -1477,6 +1481,10 @@ mod tests {
         assert_eq!(WatchSource::parse("bpl0"), None);
         assert_eq!(WatchSource::parse("bpl9"), None);
         assert_eq!(WatchSource::parse("spr8"), None);
+        // Paula has four audio channels, not eight: a filter naming a
+        // channel that does not exist could never match.
+        assert_eq!(WatchSource::parse("aud3"), Some(WatchSource::Audio(3)));
+        assert_eq!(WatchSource::parse("aud4"), None);
         assert_eq!(WatchSource::parse("nonsense"), None);
     }
 

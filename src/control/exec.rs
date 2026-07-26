@@ -1158,16 +1158,17 @@ fn parse_run_target(p: &ParamReader) -> Result<RunTarget, CtlError> {
                 "max_frames must not be below stable_frames",
             ));
         }
+        // The region is optional here, unlike capture.region_digest: with
+        // no region param at all the whole frame has to settle. But any
+        // of them means a region was intended, so an incomplete one is an
+        // error rather than a silent fall back to whole-frame -- `x` and
+        // `y` without `w`/`h` would otherwise be quietly ignored and the
+        // caller would wait on the wrong thing.
+        let region_named = ["x", "y", "w", "h"].iter().any(|k| p.get(k).is_some());
         targets.push(RunTarget::Stable(StableSpec {
             frames,
             max_frames,
-            // The region params are optional here, unlike
-            // capture.region_digest: with none given the whole frame has
-            // to settle.
-            rect: match p.get("w").is_some() || p.get("h").is_some() {
-                true => Some(parse_frame_rect(p)?),
-                false => None,
-            },
+            rect: region_named.then(|| parse_frame_rect(p)).transpose()?,
         }));
     }
     match targets.len() {
@@ -2944,7 +2945,11 @@ mod tests {
                 }),
             })
         );
+        // A partial region is an error, not a quiet whole-frame wait:
+        // that includes an origin with no size.
         assert!(parse_method("run_until", &json!({"stable_frames": 2, "w": 4})).is_err());
+        assert!(parse_method("run_until", &json!({"stable_frames": 2, "x": 10, "y": 20})).is_err());
+        assert!(parse_method("run_until", &json!({"stable_frames": 2, "h": 4})).is_err());
     }
 
     #[test]
