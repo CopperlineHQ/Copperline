@@ -75,6 +75,7 @@ repeat.
 | `--click-after SECS BUTTON MS [PORT]` | Mouse button (`left`/`right`/`middle`) for MS ms (default port 1) |
 | `--joy-after SECS BUTTON MS [PORT]` | Joystick / CD32-pad control (`up`/`down`/`left`/`right`/`red`/`blue`/...) (default port 2) |
 | `--mouse-after SECS DX DY [PORT]` | Relative mouse motion (default port 1) |
+| `--mouse-to-after SECS X Y [PORT]` | Steer the pointer to screen pixel (X, Y) via sprite 0 (default port 1) |
 | `--pot-after SECS X Y [PORT]` | Analogue stick/paddle position, 0-255 per axis (default port 2) |
 | `--insert-disk-after SECS DFN PATH` | Insert a disk image into `df0`..`df3` |
 | `--insert-cd-after SECS PATH` | Swap the CD image in the machine's CD drive (CDTV/CD32/SCSI CD-ROM) |

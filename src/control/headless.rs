@@ -14,7 +14,8 @@
 //! lands -- which is inherently wall-clock, like a GDB Ctrl-C.
 
 use super::exec::{
-    self, HostOp, Request, ResumeKind, ResumeVerb, RunTarget, CCK_FINE_WINDOW, RUN_BUDGET,
+    self, HostOp, Request, ResumeKind, ResumeVerb, RunTarget, StableStep, StableWatch,
+    CCK_FINE_WINDOW, RUN_BUDGET,
 };
 use super::proto::{self, AuthGate, CtlError, Gate, MAX_LINE_BYTES};
 use super::session::SessionCtx;
@@ -359,6 +360,31 @@ impl Session {
                 ))?;
                 Ok(None)
             }
+            HostOp::MouseTo {
+                port,
+                x,
+                y,
+                tolerance,
+                max_frames,
+            } => {
+                let ctx = &mut self.ctx;
+                let reply = match exec::mouse_to(
+                    &mut self.emu,
+                    port,
+                    (x, y),
+                    tolerance,
+                    max_frames,
+                    |emu, action| {
+                        ctx.inject_now(emu, action);
+                    },
+                ) {
+                    Ok(value) => proto::ok_line(&id, value),
+                    Err(e) => proto::err_line(&id, &e),
+                };
+                self.write(&reply)?;
+                self.emit_events()?;
+                Ok(None)
+            }
             HostOp::FloppyInsert {
                 drive,
                 path,
@@ -603,6 +629,10 @@ impl Session {
             }
             _ => None,
         };
+        let mut stable = match target {
+            Some(RunTarget::Stable(spec)) => Some(StableWatch::new(spec)),
+            _ => None,
+        };
         let mut extra_ids = Vec::new();
         let finish = |reason: &str, detail: String, extra_ids: Vec<Value>, kill: bool| {
             Ok(RunOutcome::Stop {
@@ -629,6 +659,19 @@ impl Session {
             if let Some(cck) = cck_target {
                 if self.emu.bus().emulated_cck() >= cck {
                     return finish("target", format!("cck {cck}"), extra_ids, false);
+                }
+            }
+            // Sampled before the quantum, so the frame already on screen
+            // when the client asked is the baseline for "unchanged".
+            if let Some(watch) = stable.as_mut() {
+                match watch.sample(&self.emu) {
+                    StableStep::Running => {}
+                    StableStep::Settled(detail) => {
+                        return finish("target", detail, extra_ids, false)
+                    }
+                    StableStep::GaveUp(detail) => {
+                        return finish("budget", detail, extra_ids, false)
+                    }
                 }
             }
 
@@ -801,6 +844,15 @@ impl Session {
                     self.write(&proto::err_line(
                         &req.id,
                         &CtlError::invalid_state("pause before loading a state"),
+                    ))?;
+                }
+                Request::Host(HostOp::MouseTo { .. }) => {
+                    // The servo advances the machine frame by frame to
+                    // watch what its own deltas did, so it cannot share
+                    // the timeline with an in-flight resume.
+                    self.write(&proto::err_line(
+                        &req.id,
+                        &CtlError::invalid_state("pause before servoing the pointer"),
                     ))?;
                 }
                 Request::Host(
@@ -1072,6 +1124,77 @@ mod tests {
             let a = c.result("capture.digest", json!({}));
             let b = c.result("capture.digest", json!({}));
             assert_eq!(a["digest"], b["digest"]);
+        });
+    }
+
+    #[test]
+    fn mouse_to_reports_a_guest_with_no_sprite_pointer() {
+        run_session(None, |c| {
+            c.auth();
+            // The test ROM draws no sprites, so there is no pointer to
+            // observe. That must be a loud, specific failure rather than
+            // a blind guess at relative motion.
+            let refused = c.call("input.mouse_to", json!({"x": 200, "y": 100}));
+            assert_eq!(refused["error"]["code"], proto::INVALID_STATE);
+            assert!(
+                refused["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("sprite 0 is not being drawn"),
+                "{}",
+                refused["error"]["message"]
+            );
+        });
+    }
+
+    #[test]
+    fn mouse_to_is_refused_while_a_resume_is_in_flight() {
+        run_session(None, |c| {
+            c.auth();
+            c.send("continue", json!({}));
+            let refused = c.call("input.mouse_to", json!({"x": 10, "y": 10}));
+            assert_eq!(refused["error"]["code"], proto::INVALID_STATE);
+            c.result("pause", json!({}));
+        });
+    }
+
+    #[test]
+    fn run_until_stable_frames_settles_and_respects_its_budget() {
+        run_session(None, |c| {
+            c.auth();
+            // The test ROM drives no display DMA, so the picture is
+            // already still and the second sample confirms it.
+            let stop = c.result("run_until", json!({"stable_frames": 2}));
+            assert_eq!(stop["reason"], "target");
+            assert!(
+                stop["detail"].as_str().unwrap().contains("stable for 2"),
+                "{}",
+                stop["detail"]
+            );
+            // A region of that same still frame settles too, and the
+            // stop lands without advancing to any wall-clock deadline.
+            let stop = c.result(
+                "run_until",
+                json!({"stable_frames": 2, "max_frames": 600, "x": 8, "y": 8, "w": 32, "h": 32}),
+            );
+            assert_eq!(stop["reason"], "target");
+        });
+    }
+
+    #[test]
+    fn region_digest_reports_its_rectangle_and_rejects_stale_coordinates() {
+        run_session(None, |c| {
+            c.auth();
+            let region = c.result(
+                "capture.region_digest",
+                json!({"x": 8, "y": 16, "w": 32, "h": 8}),
+            );
+            assert_eq!(region["w"], 32);
+            assert_eq!(region["width"], 716);
+            // Coordinates that outran the frame must fail loudly rather
+            // than silently digesting a clamped rectangle.
+            let stale = c.call("capture.region_digest", json!({"x": 700, "w": 64, "h": 8}));
+            assert_eq!(stale["error"]["code"], proto::INVALID_PARAMS);
         });
     }
 

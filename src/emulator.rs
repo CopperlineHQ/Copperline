@@ -2195,6 +2195,14 @@ pub fn build_machine(
         );
         bus.log_unmapped = Some(range);
     }
+    if cfg.validate_chipset {
+        info!("debug: chipset access validator armed");
+        bus.set_chipset_validation(true);
+    }
+    if cfg.detect_smc {
+        info!("debug: self-modifying-code detector armed");
+        bus.set_smc_detection(true);
+    }
     if cfg.sdmac {
         let mut sdmac = crate::sdmac::Sdmac::new();
         let mut drives = 0;
@@ -2719,6 +2727,160 @@ mod tests {
     /// SSP resets to $4000 (chip RAM), so BSR/RTS push and pop the return
     /// address through real memory. The reset vectors live in chip RAM (overlay
     /// is off, so the CPU reads them from address 0 at reset).
+    /// An emulator running a self-modifying program out of chip RAM:
+    ///
+    /// ```text
+    /// 030000  NOP                        ; the word that gets patched
+    /// 030002  MOVE.W #$4E71,($30000).L
+    /// 03000A  BRA.S  *
+    /// ```
+    ///
+    /// The NOP retires before the store lands, so $30000 is known to be
+    /// code by the time it is written over.
+    fn emulator_with_self_modifying_program() -> super::Emulator {
+        let mut emu = emulator_with_call_program();
+        emu.bus_mut().mem.overlay = false;
+        let program: [u16; 6] = [
+            0x4E71, // NOP
+            0x33FC, // MOVE.W #imm,(abs).L
+            0x4E71, // immediate: NOP
+            0x0003, // destination high
+            0x0000, // destination low
+            0x60FE, // BRA.S *
+        ];
+        let bytes: Vec<u8> = program.iter().flat_map(|w| w.to_be_bytes()).collect();
+        emu.machine.debug_write_memory(0x30000, &bytes);
+        emu.machine.debug_set_register(17, 0x30000);
+        emu
+    }
+
+    #[test]
+    fn the_smc_detector_reports_a_write_over_code_and_its_prefetch_distance() {
+        let mut emu = emulator_with_self_modifying_program();
+        emu.bus_mut().set_smc_detection(true);
+        for _ in 0..4 {
+            emu.debug_step_instructions(1).unwrap();
+        }
+        let (reports, dropped) = emu.bus().smc_reports();
+        assert_eq!(dropped, 0);
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert_eq!(reports[0].addr, 0x30000);
+        assert_eq!(reports[0].writer_pc, 0x30002);
+        let line = crate::smc::SmcTracker::describe(&reports[0]);
+        assert!(line.contains("2 bytes behind"), "{line}");
+    }
+
+    #[test]
+    fn an_unarmed_machine_records_no_self_modifying_writes() {
+        let mut emu = emulator_with_self_modifying_program();
+        for _ in 0..4 {
+            emu.debug_step_instructions(1).unwrap();
+        }
+        assert!(emu.bus().smc_reports().0.is_empty());
+        // Arming after the fact starts from a blank execution map, so it
+        // reports only what it actually watched.
+        emu.bus_mut().set_smc_detection(true);
+        assert!(emu.bus().smc_reports().0.is_empty());
+    }
+
+    #[test]
+    fn armed_diagnostics_survive_a_state_restore() {
+        use crate::bus::FaultInjection;
+        let mut emu = emulator_with_call_program();
+        emu.bus_mut().set_chipset_validation(true);
+        emu.bus_mut().set_smc_detection(true);
+        emu.bus_mut()
+            .set_heat_map(Some((0, crate::heatmap::DEFAULT_SPAN)));
+        emu.bus_mut().inject_bus_fault(FaultInjection {
+            start: 0x40000,
+            end: 0x40001,
+            on_read: true,
+            on_write: true,
+            remaining: None,
+            hits: 0,
+        });
+        // Collect a finding, then round-trip the machine through a state
+        // save and load, which is the path a reverse step takes.
+        emu.bus_mut().custom_write(0xDFF104, 2, 0x8020);
+        assert_eq!(emu.bus().chipset_findings().0.len(), 1);
+        let path = std::env::temp_dir().join(format!(
+            "copperline-diag-restore-{}.clstate",
+            std::process::id()
+        ));
+        emu.save_state(&path).unwrap();
+        emu.load_state(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        // The session asked for these; a restore must not silently
+        // disarm them underneath it, and the report is still the
+        // operator's in-progress experiment.
+        assert!(emu.bus().chipset_validation_armed());
+        assert!(emu.bus().smc_detection_armed());
+        assert!(emu.bus().heat_map().is_some());
+        assert_eq!(emu.bus().injected_bus_faults().len(), 1);
+        assert_eq!(emu.bus().chipset_findings().0.len(), 1);
+    }
+
+    #[test]
+    fn an_injected_bus_fault_takes_the_guest_into_its_own_handler() {
+        use crate::bus::FaultInjection;
+        let mut emu = emulator_with_self_modifying_program();
+        // Point the bus-error vector (2) somewhere recognisable.
+        emu.machine
+            .debug_write_memory(0x08, &0x0003_1000u32.to_be_bytes());
+        emu.machine
+            .debug_write_memory(0x31000, &0x4E71u16.to_be_bytes());
+        // One shot on the program's own store target.
+        emu.bus_mut().inject_bus_fault(FaultInjection {
+            start: 0x30000,
+            end: 0x30001,
+            on_read: false,
+            on_write: true,
+            remaining: Some(1),
+            hits: 0,
+        });
+        for _ in 0..6 {
+            emu.debug_step_instructions(1).unwrap();
+        }
+        assert_eq!(
+            emu.bus().injected_bus_faults()[0].hits,
+            1,
+            "the write should have taken the fault"
+        );
+        // The store never reached memory, so the NOP it aimed at is
+        // untouched, and the CPU is running the handler.
+        assert_eq!(emu.bus().peek_word_any(0x30000), 0x4E71);
+        assert!(
+            (0x31000..0x31010).contains(&emu.machine.pc()),
+            "expected the bus-error handler, pc = {:06X}",
+            emu.machine.pc()
+        );
+    }
+
+    #[test]
+    fn a_counted_bus_fault_stops_firing_once_it_is_spent() {
+        use crate::bus::FaultInjection;
+        let mut emu = emulator_with_call_program();
+        emu.bus_mut().mem.overlay = false;
+        emu.bus_mut().inject_bus_fault(FaultInjection {
+            start: 0x40000,
+            end: 0x40001,
+            on_read: true,
+            on_write: true,
+            remaining: Some(2),
+            hits: 0,
+        });
+        let fired: Vec<bool> = (0..4)
+            .map(|_| emu.bus_mut().take_injected_fault(0x40000, 2, false))
+            .collect();
+        assert_eq!(fired, [true, true, false, false]);
+        let fault = emu.bus().injected_bus_faults()[0];
+        assert_eq!(fault.hits, 2);
+        assert_eq!(fault.remaining, Some(0));
+        // An address outside the window is never faulted.
+        assert!(!emu.bus_mut().take_injected_fault(0x50000, 2, false));
+    }
+
     fn emulator_with_call_program() -> super::Emulator {
         let mut rom = vec![0u8; crate::memory::ROM_SIZE];
         let put = |mem: &mut [u8], off: usize, word: u16| {
@@ -2870,6 +3032,83 @@ mod tests {
         assert!(stopped, "conditional breakpoint did not fire");
         assert_eq!(emu.machine.pc(), 0x00F8_0020);
         assert!(emu.machine.take_ui_debug_stop().is_some());
+    }
+
+    #[test]
+    fn watchpoint_catches_a_bitplane_dma_fetch_of_the_watched_word() {
+        use crate::debugger::{DebugStop, WatchSource};
+        let mut emu = emulator_with_call_program();
+        emu.bus_mut().mem.overlay = false;
+        // Watch a chip-RAM word and point bitplane 1 at it, then let a
+        // frame's display DMA run. A fetch changes nothing, so only the
+        // per-channel read attribution can see this at all.
+        assert!(emu.machine.ui_toggle_watch(0x60000));
+        {
+            let bus = emu.bus_mut();
+            bus.custom_write(0x0E0, 4, 0x0006_0000); // BPL1PT = $60000
+            bus.custom_write(0x100, 2, 0x1200); // BPLCON0: 1 plane, lores
+            bus.custom_write(0x092, 2, 0x0038); // DDFSTRT
+            bus.custom_write(0x094, 2, 0x00D0); // DDFSTOP
+            bus.custom_write(0x08E, 2, 0x2C81); // DIWSTRT
+            bus.custom_write(0x090, 2, 0xF4C1); // DIWSTOP
+            bus.custom_write(0x096, 2, 0x8300); // DMACON SET DMAEN|BPLEN
+        }
+        let mut stop = None;
+        // Display DMA only runs inside the vertical window, so give it
+        // whole frames rather than an instruction budget.
+        for _ in 0..3 {
+            emu.step_frame().unwrap();
+            if let Some(s) = emu.machine.take_ui_debug_stop() {
+                stop = Some(s);
+                break;
+            }
+        }
+        match stop {
+            Some(DebugStop::Watch {
+                source, old, new, ..
+            }) => {
+                assert_eq!(source, WatchSource::Bitplane(0));
+                assert_eq!(old, new, "a fetch must not be reported as a change");
+            }
+            other => panic!("expected a bitplane-attributed watch stop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_pc_qualified_watch_ignores_writes_from_other_instructions() {
+        use crate::debugger::WatchSource;
+        let mut emu = emulator_with_call_program();
+        emu.bus_mut().mem.overlay = false;
+        // Qualify on a PC that never executes: the blitter write below
+        // still lands, but no stop belongs to that instruction.
+        assert!(emu.machine.ui_toggle_watch_qualified(
+            0x60000,
+            Some(WatchSource::Cpu),
+            Some(0x00F8_0F00)
+        ));
+        {
+            let bus = emu.bus_mut();
+            bus.custom_write(0x096, 2, 0x8240);
+            bus.custom_write(0x040, 2, 0x01F0);
+            bus.custom_write(0x042, 2, 0x0000);
+            bus.custom_write(0x044, 2, 0xFFFF);
+            bus.custom_write(0x046, 2, 0xFFFF);
+            bus.custom_write(0x074, 2, 0xBEEF);
+            bus.custom_write(0x054, 4, 0x0006_0000);
+            bus.custom_write(0x058, 2, 0x0041);
+        }
+        for _ in 0..64 {
+            emu.debug_step_instructions(1).unwrap();
+            assert!(
+                emu.machine.take_ui_debug_stop().is_none(),
+                "a PC-qualified watch must not fire for another writer"
+            );
+        }
+        assert_eq!(
+            emu.bus().peek_word_any(0x60000),
+            0xBEEF,
+            "the blit still ran"
+        );
     }
 
     #[test]

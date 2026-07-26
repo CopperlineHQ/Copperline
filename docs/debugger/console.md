@@ -60,7 +60,7 @@ Stops (each toggles: repeat the command to remove):
 | Command | Effect |
 |---|---|
 | `BREAK ADDR [COND] [IGN N]`, `B` | PC breakpoint, with the Break tab's condition grammar |
-| `WATCH ADDR [CPU\|BLITTER\|DISK]`, `W` | Memory word watchpoint; the optional filter stops only on that writer |
+| `WATCH ADDR [CLASS] [PC=ADDR]`, `W` | Memory word watchpoint. `CLASS` narrows it to one accessor: `CPU`, `BLITTER`, `DISK`, `COPPER`, or a DMA channel (`BPL1`..`BPL8`, `SPR0`..`SPR7`, `AUD0`..`AUD3`) -- the DMA channels catch *reads* too, which a value compare cannot see. `PC=ADDR` stops only when that instruction made the access, and cannot be combined with a DMA class: only the CPU has an instruction behind an access |
 | `RWATCH NAME\|OFF`, `RW` | Custom-register write watch (`RWATCH DMACON`) |
 | `BTRAP V [H]` | Beam trap (decimal position) |
 | `CBREAK ADDR` | Copper breakpoint |

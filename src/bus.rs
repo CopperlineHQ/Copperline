@@ -989,11 +989,50 @@ pub struct Bus {
     ui_mem_watch_addrs: Vec<u32>,
     #[serde(skip)]
     ui_mem_writers: Vec<UiMemWriter>,
+    /// A watched word touched by a read-side DMA channel since the
+    /// debugger last polled. Reads leave the value alone, so the
+    /// value-compare watch loop cannot see them at all; the channels
+    /// latch the access here instead and the CPU's post-step check
+    /// promotes it. Transient debug state.
+    #[serde(skip)]
+    ui_dma_hit: Option<UiMemWriter>,
     /// The Copper PC at the last breakpoint check, so arrival at an
     /// address fires once instead of on every eligible colour clock the
     /// PC rests there.
     #[serde(skip)]
     ui_copper_last_pc: u32,
+    /// Start PC of the instruction the CPU is currently executing,
+    /// republished here once per instruction by the CPU wrapper so the
+    /// chipset paths can attribute an access to the code that made it.
+    /// Transient: re-stamped on the next instruction after any restore.
+    #[serde(skip)]
+    pub(crate) cpu_pc: u32,
+    /// The custom-register access validator's report, present only while
+    /// the validator is armed (`[debug] validate_chipset`). Transient
+    /// diagnostic state; a restore starts a fresh report rather than
+    /// resurrecting findings from an abandoned timeline.
+    #[serde(skip)]
+    regcheck: Option<Box<crate::regcheck::RegCheck>>,
+    /// Last value written to each custom register and who wrote it,
+    /// indexed by word offset / 2. Armed alongside the validator; this is
+    /// the "what set BPLCON3, and from where?" question that otherwise
+    /// costs a bisect.
+    #[serde(skip)]
+    reg_writers: Option<Box<[Option<RegWrite>; 256]>>,
+    /// Self-modifying-code detector, present only while armed
+    /// (`[debug] detect_smc`). Transient diagnostic state; a restore
+    /// starts with a fresh, empty execution map.
+    #[serde(skip)]
+    pub(crate) smc: Option<Box<crate::smc::SmcTracker>>,
+    /// Debugger-injected bus faults. Transient debug state: a restore
+    /// does not resurrect them, since they describe an experiment the
+    /// operator is running, not machine state.
+    #[serde(skip)]
+    injected_faults: Vec<FaultInjection>,
+    /// Memory heat map, present only while armed. Transient diagnostic
+    /// state; a restore starts a fresh, cold map.
+    #[serde(skip)]
+    heatmap: Option<Box<crate::heatmap::HeatMap>>,
     blitter_slowdown_cpu_misses: u8,
     /// Pending INTREQ.BLIT raise, in colour clocks. Real Agnus raises the
     /// blitter interrupt one clock after the sequencer's BLTDONE cycle
@@ -1190,6 +1229,36 @@ fn beam_write_source_name(source: BeamWriteSource) -> &'static str {
         BeamWriteSource::CpuCopperIrq => "cpu_copper_irq",
         BeamWriteSource::Copper => "copper",
     }
+}
+
+/// A debugger-injected bus fault: a CPU access inside this window and
+/// matching this direction takes a bus error instead of reaching memory.
+///
+/// This is a host debugger facility, not emulated hardware: it exists so
+/// a guest's own fault handler can be exercised deterministically,
+/// rather than by finding an address that happens to be undecoded on the
+/// machine under test.
+#[derive(Clone, Copy, Debug)]
+pub struct FaultInjection {
+    /// Inclusive address window.
+    pub start: u32,
+    pub end: u32,
+    pub on_read: bool,
+    pub on_write: bool,
+    /// Faults left to deliver; `None` never expires.
+    pub remaining: Option<u32>,
+    pub hits: u64,
+}
+
+/// The most recent write to one custom register, for the debugger's
+/// "who last touched this register?" view.
+#[derive(Clone, Copy, Debug)]
+pub struct RegWrite {
+    pub value: u16,
+    pub writer: crate::regcheck::Writer,
+    pub vpos: u16,
+    pub hpos: u16,
+    pub frame: u64,
 }
 
 /// A debugger-window custom-register watch hit: the first watched write
@@ -2452,6 +2521,13 @@ impl Bus {
             wave: None,
             ui_reg_watches: Vec::new(),
             ui_reg_hit: None,
+            ui_dma_hit: None,
+            cpu_pc: 0,
+            regcheck: None,
+            reg_writers: None,
+            smc: None,
+            injected_faults: Vec::new(),
+            heatmap: None,
             ui_beam_traps: Vec::new(),
             ui_beam_hit: None,
             ui_copper_breaks: Vec::new(),
@@ -2501,6 +2577,400 @@ impl Bus {
 
     pub fn rtc_present(&self) -> bool {
         self.rtc_present
+    }
+
+    /// Arm or disarm the custom-register access validator and the
+    /// last-writer table. Disarming drops the report: it describes a
+    /// window that is over.
+    pub fn set_chipset_validation(&mut self, on: bool) {
+        if on == self.regcheck.is_some() {
+            return;
+        }
+        if on {
+            self.regcheck = Some(Box::default());
+            self.reg_writers = Some(Box::new([None; 256]));
+        } else {
+            self.regcheck = None;
+            self.reg_writers = None;
+        }
+    }
+
+    /// Arm a bus fault over an address window. Returns its index, which
+    /// is stable until the list is cleared.
+    pub fn inject_bus_fault(&mut self, fault: FaultInjection) -> usize {
+        self.injected_faults.push(fault);
+        self.injected_faults.len() - 1
+    }
+
+    pub fn injected_bus_faults(&self) -> &[FaultInjection] {
+        &self.injected_faults
+    }
+
+    pub fn clear_injected_bus_faults(&mut self) {
+        self.injected_faults.clear();
+    }
+
+    /// Whether a CPU access of `len` bytes at `addr` should take an
+    /// injected bus error, consuming one of a counted injection's shots.
+    ///
+    /// Kept behind an emptiness check by every caller so an un-armed
+    /// machine pays a single branch per access.
+    pub(crate) fn take_injected_fault(&mut self, addr: u32, len: u32, write: bool) -> bool {
+        let last = addr.wrapping_add(len.max(1)).wrapping_sub(1);
+        for fault in &mut self.injected_faults {
+            if write && !fault.on_write || !write && !fault.on_read {
+                continue;
+            }
+            if last < fault.start || addr > fault.end {
+                continue;
+            }
+            if let Some(remaining) = fault.remaining.as_mut() {
+                if *remaining == 0 {
+                    continue;
+                }
+                *remaining -= 1;
+            }
+            fault.hits += 1;
+            return true;
+        }
+        false
+    }
+
+    pub(crate) fn bus_faults_armed(&self) -> bool {
+        !self.injected_faults.is_empty()
+    }
+
+    /// Arm or disarm the self-modifying-code detector. Disarming frees
+    /// the execution map; re-arming starts from a blank one, so a report
+    /// only ever covers the window it was armed for.
+    pub fn set_smc_detection(&mut self, on: bool) {
+        if on == self.smc.is_some() {
+            return;
+        }
+        self.smc = on.then(Box::default);
+    }
+
+    pub fn smc_detection_armed(&self) -> bool {
+        self.smc.is_some()
+    }
+
+    /// The self-modifying-code reports, most-repeated first, and how many
+    /// were dropped once the report filled.
+    pub fn smc_reports(&self) -> (Vec<crate::smc::SmcReport>, u64) {
+        match &self.smc {
+            Some(smc) => (smc.reports(), smc.dropped),
+            None => (Vec::new(), 0),
+        }
+    }
+
+    pub fn clear_smc_reports(&mut self) {
+        if let Some(smc) = self.smc.as_mut() {
+            smc.clear_reports();
+        }
+    }
+
+    pub fn chipset_validation_armed(&self) -> bool {
+        self.regcheck.is_some()
+    }
+
+    /// The validator's findings, most-repeated first, and how many were
+    /// dropped because the report was full.
+    pub fn chipset_findings(&self) -> (Vec<crate::regcheck::Report>, u64) {
+        match &self.regcheck {
+            Some(check) => (check.reports(), check.dropped),
+            None => (Vec::new(), 0),
+        }
+    }
+
+    pub fn clear_chipset_findings(&mut self) {
+        if let Some(check) = self.regcheck.as_mut() {
+            check.clear();
+        }
+    }
+
+    /// The last write to custom register `off`, if the last-writer table
+    /// is armed and the register has been written since.
+    pub fn custom_reg_last_write(&self, off: u16) -> Option<RegWrite> {
+        self.reg_writers.as_ref()?[usize::from((off & 0x1FE) >> 1)]
+    }
+
+    /// Note a custom-register write for the validator and the
+    /// last-writer table. Called from the single write chokepoint, and
+    /// only when armed.
+    fn note_custom_write(&mut self, off: u16, val: u16, source: BeamWriteSource) {
+        // The register bank is $000-$1FE; the write path masks only to
+        // $FFE, so the rest of the custom page arrives here too and must
+        // not index the tables. Those offsets decode to nothing, which
+        // the CPU-side shape check reports separately.
+        if off > 0x1FE {
+            return;
+        }
+        let writer = match source {
+            BeamWriteSource::Copper => crate::regcheck::Writer::Copper(self.copper.pc()),
+            BeamWriteSource::Cpu | BeamWriteSource::CpuCopperIrq => {
+                crate::regcheck::Writer::Cpu(self.cpu_pc)
+            }
+        };
+        let (vpos, hpos) = (
+            self.agnus.vpos.min(u32::from(u16::MAX)) as u16,
+            self.agnus.hpos.min(u32::from(u16::MAX)) as u16,
+        );
+        if let Some(writers) = self.reg_writers.as_mut() {
+            writers[usize::from(off >> 1)] = Some(RegWrite {
+                value: val,
+                writer,
+                vpos,
+                hpos,
+                frame: self.emulated_frames,
+            });
+        }
+        if self.regcheck.is_none() {
+            return;
+        }
+        use crate::regcheck::{Direction, Finding};
+        if matches!(crate::regcheck::direction(off), Some(Direction::ReadOnly)) {
+            self.note_chipset_finding(Finding::WrongDirection, off, writer, val, 0, vpos, hpos);
+        }
+        // Undefined bits are only meaningful on a register the fitted
+        // chipset actually has; on one it does not, the whole write is
+        // dropped and the bit pattern says nothing.
+        if !self.custom_reg_present(off) {
+            self.note_chipset_finding(Finding::AbsentRegister, off, writer, val, 0, vpos, hpos);
+        } else if let Some(defined) = crate::regcheck::defined_bits(off) {
+            let undefined = val & !defined;
+            if undefined != 0 {
+                self.note_chipset_finding(
+                    Finding::UnusedBits,
+                    off,
+                    writer,
+                    val,
+                    undefined,
+                    vpos,
+                    hpos,
+                );
+            }
+        }
+        self.check_dma_pointer(off, val, writer, vpos, hpos);
+        self.check_device_misuse(off, val, writer, vpos, hpos);
+    }
+
+    /// Report a keyboard handshake pulse the 6500/1 could not sample.
+    /// Software gets no other signal: the keyboard simply stops sending,
+    /// and the guest sees keys go missing.
+    fn check_keyboard_handshake(&mut self) {
+        // Drained on every handshake edge whether or not the validator is
+        // armed. The MCU latches unconditionally, so a pulse from before
+        // arming would otherwise surface at the next edge and be
+        // attributed to whatever PC happened to be running by then.
+        let Some(width) = self.keyboard.take_short_handshake() else {
+            return;
+        };
+        if self.regcheck.is_none() {
+            return;
+        }
+        let writer = crate::regcheck::Writer::Cpu(self.cpu_pc);
+        self.note_chipset_finding(
+            crate::regcheck::Finding::KeyboardHandshakeShort,
+            // CIA-A's serial port is where the handshake is driven; there
+            // is no custom register involved, so the report is keyed on
+            // the pulse itself.
+            0,
+            writer,
+            width,
+            crate::chipset::keyboard::HANDSHAKE_MIN_CCK.min(u64::from(u16::MAX)) as u16,
+            self.agnus.vpos.min(u32::from(u16::MAX)) as u16,
+            self.agnus.hpos.min(u32::from(u16::MAX)) as u16,
+        );
+    }
+
+    /// Hardware-misuse checks for the engines behind the registers: a
+    /// blit that cannot run, and disk DMA armed against a drive that
+    /// cannot serve it.
+    ///
+    /// These are the cases that hang rather than glitch. A loader that
+    /// arms a read with the motor still off waits on DSKBLK forever, and
+    /// a blit started with its DMA off never raises BBUSY's completion --
+    /// both look like "it froze" with no other evidence.
+    fn check_device_misuse(
+        &mut self,
+        off: u16,
+        val: u16,
+        writer: crate::regcheck::Writer,
+        vpos: u16,
+        hpos: u16,
+    ) {
+        use crate::regcheck::Finding;
+        match off {
+            // BLTSIZE / BLTSIZH: the blit-start writes.
+            0x058 | 0x05E => {
+                if self.blitter.busy {
+                    self.note_chipset_finding(
+                        Finding::BlitterBusy,
+                        off,
+                        writer,
+                        val,
+                        0,
+                        vpos,
+                        hpos,
+                    );
+                }
+                let need = DMACON_DMAEN | DMACON_BLTEN;
+                if self.agnus.dmacon & need != need {
+                    self.note_chipset_finding(
+                        Finding::BlitterDmaOff,
+                        off,
+                        writer,
+                        val,
+                        self.agnus.dmacon,
+                        vpos,
+                        hpos,
+                    );
+                }
+            }
+            // DSKLEN, on the write that actually starts the transfer:
+            // Paula needs the value written twice, and the first write
+            // only latches it, so reporting on that one would name a
+            // write after which DMA is by design not armed.
+            0x024 if self.floppy.dsklen_write_starts_dma(val) => {
+                if let Some(code) = self.floppy.dma_arming_obstacle() {
+                    self.note_chipset_finding(
+                        Finding::DiskNotReady,
+                        off,
+                        writer,
+                        val,
+                        code,
+                        vpos,
+                        hpos,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Flag a DMA pointer aimed past the chip RAM Agnus can address.
+    ///
+    /// Checked on the high half, where the intent is still visible: the
+    /// pointer setters mask the value down to `chip_dma_mask`, so by the
+    /// time the pointer is formed the excess has already become a silent
+    /// wrap -- which is exactly the bug ("it works with 2 MB chip") and
+    /// exactly why it is invisible without this.
+    fn check_dma_pointer(
+        &mut self,
+        off: u16,
+        val: u16,
+        writer: crate::regcheck::Writer,
+        vpos: u16,
+        hpos: u16,
+    ) {
+        let is_pointer_high = matches!(
+            off,
+            0x020 | 0x080 | 0x084 | 0x048 | 0x04C | 0x050 | 0x054 | 0x0A0 | 0x0B0 | 0x0C0 | 0x0D0
+        ) || (0x0E0..=0x0FF).contains(&off) && off & 3 == 0
+            || (0x120..=0x13F).contains(&off) && off & 3 == 0;
+        if !is_pointer_high {
+            return;
+        }
+        let aimed = u32::from(val) << 16;
+        if aimed & !self.chip_dma_mask == 0 {
+            return;
+        }
+        self.note_chipset_finding(
+            crate::regcheck::Finding::PointerOutsideChipRam,
+            off,
+            writer,
+            0,
+            val,
+            vpos,
+            hpos,
+        );
+    }
+
+    /// Record one validator finding and log its first occurrence.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn note_chipset_finding(
+        &mut self,
+        finding: crate::regcheck::Finding,
+        reg: u16,
+        writer: crate::regcheck::Writer,
+        value: u16,
+        detail: u16,
+        vpos: u16,
+        hpos: u16,
+    ) {
+        let Some(check) = self.regcheck.as_mut() else {
+            return;
+        };
+        if check.note(finding, reg, writer, value, detail, vpos, hpos) {
+            let report = check
+                .reports()
+                .into_iter()
+                .find(|r| r.finding == finding && r.reg == reg && r.writer == writer);
+            if let Some(report) = report {
+                log::warn!("chipset: {}", crate::regcheck::RegCheck::describe(&report));
+            }
+        }
+    }
+
+    /// Validate the *shape* of a CPU custom-register access: the things
+    /// only the CPU path can see, because the Copper can only ever issue
+    /// an aligned word write at a canonical address.
+    fn note_cpu_custom_access(&mut self, addr: u64, off: u16, size: usize, read: bool) {
+        use crate::regcheck::{Direction, Finding, Writer};
+        let reg = off & 0x1FE;
+        let writer = Writer::Cpu(self.cpu_pc);
+        let (vpos, hpos) = (
+            self.agnus.vpos.min(u32::from(u16::MAX)) as u16,
+            self.agnus.hpos.min(u32::from(u16::MAX)) as u16,
+        );
+        // Byte *writes* are the misuse: the custom chips have no byte
+        // lanes, so the value lands in both halves. A byte read is
+        // perfectly well defined -- the chip drives the whole bus and the
+        // CPU takes its lane -- and `move.b $DFF006,d0` beam polling is
+        // one of the most common idioms in Amiga software.
+        if size == 1 && !read {
+            let byte = (addr & 1) as u16;
+            self.note_chipset_finding(Finding::ByteAccess, reg, writer, 0, byte, vpos, hpos);
+        } else if addr & 1 != 0 {
+            self.note_chipset_finding(Finding::OddAddress, reg, writer, 0, 0, vpos, hpos);
+        }
+        // Offsets above the $000-$1FE register bank decode to nothing at
+        // all: the write is dropped and the read returns the undriven
+        // bus. (Accesses through the wider chip-register window are
+        // folded to this page before they reach here, so they are
+        // indistinguishable from a canonical access and are not
+        // reported.)
+        if off > 0x1FE {
+            self.note_chipset_finding(Finding::UnmappedOffset, reg, writer, 0, 0, vpos, hpos);
+        }
+        if read && matches!(crate::regcheck::direction(reg), Some(Direction::WriteOnly)) {
+            self.note_chipset_finding(Finding::WrongDirection, reg, writer, 0, 0, vpos, hpos);
+        }
+    }
+
+    /// Whether the fitted Agnus/Denise implements the register at `off`.
+    /// Mirrors the revision gates the write dispatch itself applies, so a
+    /// finding and a dropped write always agree.
+    fn custom_reg_present(&self, off: u16) -> bool {
+        match off {
+            // ECS Agnus: programmable sync/blank, UHRES, ECS blitter size.
+            0x05A | 0x05C | 0x05E | 0x078 | 0x1C0 | 0x1C2 | 0x1C4 | 0x1C6 | 0x1C8 | 0x1CA
+            | 0x1CC | 0x1CE | 0x1D8 | 0x1DC | 0x1DE | 0x1E0 | 0x1E2 => {
+                self.blitter_ecs_registers_enabled()
+            }
+            // ECS Denise: BPLCON3 latches only while BPLCON0.ECSENA is
+            // set, which is the gate the write dispatch applies -- so a
+            // BPLCON3 write without ECSENA is reported, which is one of
+            // the classic silent drops this validator exists to surface.
+            0x106 => self.bplcon3_write_enabled(),
+            0x1E4 => self.denise_ecs_registers(),
+            // AGA Lisa: BPLCON4, CLXCON2, and bitplanes 7-8.
+            0x10C | 0x10E => self.denise_is_lisa(),
+            0x0F8..=0x0FF | 0x11C | 0x11E => self.aga_enabled(),
+            // AGA Alice: FMODE.
+            0x1FC => self.aga_enabled(),
+            _ => true,
+        }
     }
 
     /// Replace the debugger-window custom-register watch set (word
@@ -2604,6 +3074,94 @@ impl Bus {
         }
     }
 
+    /// Arm or disarm the memory heat map over a window of the address
+    /// space. Re-arming with a different window starts a cold map: the
+    /// cells would otherwise carry activity from addresses they no
+    /// longer name.
+    pub fn set_heat_map(&mut self, window: Option<(u32, u32)>) {
+        match window {
+            None => self.heatmap = None,
+            Some((base, span)) => match self.heatmap.as_mut() {
+                // Compared against the span the request becomes, not the
+                // one asked for: the map rounds it up, so a caller
+                // repeating its own request would otherwise look like a
+                // new window every time and wipe what it had collected.
+                Some(map)
+                    if map.base() == base && map.span() == crate::heatmap::rounded_span(span) => {}
+                Some(map) => map.set_window(base, span),
+                None => self.heatmap = Some(Box::new(crate::heatmap::HeatMap::new(base, span))),
+            },
+        }
+    }
+
+    pub fn heat_map(&self) -> Option<&crate::heatmap::HeatMap> {
+        self.heatmap.as_deref()
+    }
+
+    /// Record memory activity for the heat map. Kept behind an
+    /// emptiness check by every caller, like the watch hooks.
+    pub(crate) fn note_heat(&mut self, addr: u32, len: u32, by: crate::heatmap::Toucher) {
+        let frame = self.emulated_frames;
+        if let Some(map) = self.heatmap.as_mut() {
+            map.touch(addr, len, by, frame);
+        }
+    }
+
+    pub(crate) fn heat_map_armed(&self) -> bool {
+        self.heatmap.is_some()
+    }
+
+    /// Note a read-side DMA fetch of `len` bytes from `addr` by `source`,
+    /// latching a hit when it covers a watched word.
+    ///
+    /// Called from the per-channel fetch sites, which are the only places
+    /// that know *which* bitplane or sprite is fetching -- the chip-bus
+    /// arbiter above them sees only "a bitplane". "Which sprite fetched
+    /// this word" is the question a display bug actually poses.
+    pub(crate) fn note_dma_read(
+        &mut self,
+        source: crate::debugger::WatchSource,
+        addr: u32,
+        len: u32,
+    ) {
+        if self.heatmap.is_some() {
+            self.note_heat(
+                addr,
+                len,
+                crate::heatmap::Toucher::from_watch_source(source),
+            );
+        }
+        if self.ui_mem_watch_addrs.is_empty() || self.ui_dma_hit.is_some() {
+            return;
+        }
+        let start = addr & 0x00FF_FFFE;
+        let end = addr.wrapping_add(len.max(2));
+        for &watch in &self.ui_mem_watch_addrs {
+            if watch.wrapping_add(1) >= start && watch < end {
+                self.ui_dma_hit = Some(UiMemWriter {
+                    addr: watch,
+                    source,
+                    vpos: self.agnus.vpos.min(u32::from(u16::MAX)) as u16,
+                    hpos: self.agnus.hpos.min(u32::from(u16::MAX)) as u16,
+                });
+                return;
+            }
+        }
+    }
+
+    /// Whether any memory watch is armed, so the DMA fetch sites can skip
+    /// the call entirely on an unwatched machine.
+    /// Whether any per-access observer wants the DMA fetch sites to
+    /// report: a memory watch, or the heat map.
+    pub(crate) fn mem_watches_armed(&self) -> bool {
+        !self.ui_mem_watch_addrs.is_empty() || self.heatmap.is_some()
+    }
+
+    /// Take the pending DMA-read watch hit, if any.
+    pub fn take_ui_dma_hit(&mut self) -> Option<UiMemWriter> {
+        self.ui_dma_hit.take()
+    }
+
     fn push_ui_mem_writer(writers: &mut Vec<UiMemWriter>, writer: UiMemWriter) {
         // Latest write per address wins; the list stays tiny.
         writers.retain(|w| w.addr != writer.addr);
@@ -2652,7 +3210,19 @@ impl Bus {
     /// (serde-skipped), so without this a reverse step or state load
     /// would silently disarm the debugger. Pending unpolled hits stay
     /// dropped: they describe the abandoned timeline.
-    pub(crate) fn adopt_ui_debug_state(&mut self, previous: &Bus) {
+    pub(crate) fn adopt_ui_debug_state(&mut self, previous: &mut Bus) {
+        // Armed diagnostics move across with the rest of the debug state.
+        // A reverse step or a state load replaces the Bus, and without
+        // this the validator, the SMC map, the heat map and any injected
+        // faults would silently disarm underneath a session that had
+        // asked for them -- while beam traps and watches stayed live,
+        // which is the tell that this was an omission. Their collected
+        // reports come too: the operator's experiment is still running.
+        self.regcheck = previous.regcheck.take();
+        self.reg_writers = previous.reg_writers.take();
+        self.smc = previous.smc.take();
+        self.heatmap = previous.heatmap.take();
+        self.injected_faults = std::mem::take(&mut previous.injected_faults);
         self.ui_beam_traps = previous.ui_beam_traps.clone();
         self.ui_copper_breaks = previous.ui_copper_breaks.clone();
         self.ui_copper_last_pc = previous.ui_copper_last_pc;
@@ -4972,7 +5542,10 @@ impl Bus {
         }
         match eff.keyboard_handshake {
             Some(true) => self.keyboard.amiga_kdat_edge(true),
-            Some(false) => self.keyboard.amiga_kdat_edge(false),
+            Some(false) => {
+                self.keyboard.amiga_kdat_edge(false);
+                self.check_keyboard_handshake();
+            }
             None => {}
         }
         if reg == REG_PRA || reg == REG_DDRA {
@@ -5128,6 +5701,9 @@ impl Bus {
         // reading.
         self.flush_timed_devices();
         let off = (addr & 0xFFF) as u16;
+        if self.regcheck.is_some() {
+            self.note_cpu_custom_access(addr, off, size, true);
+        }
         self.poll_stats.tick_read_custom(off & 0xFFE);
         match size {
             1 => {
@@ -5234,6 +5810,9 @@ impl Bus {
         // pending IRQ is latched before an INTREQ clear).
         self.flush_timed_devices();
         let off = (addr & 0xFFF) as u16;
+        if self.regcheck.is_some() {
+            self.note_cpu_custom_access(addr, off, size, false);
+        }
         match size {
             1 => {
                 // A 68000 byte write drives the byte onto BOTH halves of

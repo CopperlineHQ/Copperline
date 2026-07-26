@@ -2255,6 +2255,7 @@ fn test_app_with_audio_and_cpu(
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
         None,
         std::array::from_fn(|_| Vec::new()),
         [true; 4],
@@ -3532,6 +3533,40 @@ fn plant_exec_world(app: &mut super::App) {
     put32(ram, 0x2200 + 10, 0x3200);
     put_str(ram, 0x3200, "exec.library");
     put32(ram, 0x2200 + 20, 0x0028_000A); // v40 r10
+}
+
+#[test]
+fn console_watch_refuses_a_pc_qualifier_on_a_dma_class() {
+    let mut app = test_app();
+    app.open_console();
+    // A DMA engine's access has no instruction behind it, so this pair
+    // could only ever install a watch that never fires.
+    let out = console_run(&mut app, "WATCH 20000 SPR3 PC=F80010");
+    assert!(
+        out.iter()
+            .any(|l| l.contains("only qualifies CPU accesses")),
+        "{out:?}"
+    );
+    assert!(app.emu.machine.ui_breaks().watches.is_empty());
+    // A repeated qualifier is a typo, not a last-one-wins override.
+    for cmd in ["WATCH 20010 CPU BLITTER", "WATCH 20010 PC=F80010 PC=F80020"] {
+        let out = console_run(&mut app, cmd);
+        assert!(
+            out.iter().any(|l| l.contains("more than once")),
+            "{cmd}: {out:?}"
+        );
+    }
+    assert!(app.emu.machine.ui_breaks().watches.is_empty());
+    // Either qualifier alone, and the CPU pairing, are accepted.
+    for cmd in [
+        "WATCH 20000 SPR3",
+        "WATCH 20002 PC=F80010",
+        "WATCH 20004 CPU PC=F80010",
+    ] {
+        let out = console_run(&mut app, cmd);
+        assert!(out.iter().any(|l| l.contains("set")), "{cmd}: {out:?}");
+    }
+    assert_eq!(app.emu.machine.ui_breaks().watches.len(), 3);
 }
 
 #[test]
@@ -4887,6 +4922,52 @@ mod control_drain {
         let stop = reply(&reply_rx);
         assert_eq!(stop["result"]["reason"], "target");
         assert!(stop["result"]["frame"].as_u64().unwrap() >= target);
+    }
+
+    #[test]
+    fn a_scripted_pointer_target_gives_up_when_no_sprite_pointer_exists() {
+        let (mut app, _cmd_tx, _reply_rx) = attached_app();
+        app.arm_scripted_pointer_target(0.0, 300, 120, 0);
+        // The NOP sled draws no sprites, so the first poll has nothing to
+        // observe. It must clear the servo rather than steering blind or
+        // retrying every frame for the rest of the run.
+        app.emu.step_frame().unwrap();
+        app.fire_scheduled_events();
+        assert!(
+            !app.scripted_pointer_target_active(),
+            "a pointerless guest must not leave a servo armed"
+        );
+    }
+
+    #[test]
+    fn run_until_stable_frames_completes_in_the_burst_check() {
+        let (mut app, cmd_tx, reply_rx) = attached_app();
+        push(&cmd_tx, 1, "run_until", json!({"stable_frames": 2}));
+        app.drain_control();
+        assert!(!app.paused);
+        let mut completed = false;
+        for _ in 0..4 {
+            app.emu.step_frame().unwrap();
+            if app.surface_debug_stop() {
+                break;
+            }
+            if app.control_run_target_reached() {
+                completed = true;
+                break;
+            }
+        }
+        assert!(completed, "the NOP sled's still display should settle");
+        assert!(app.paused);
+        let stop = reply(&reply_rx);
+        assert_eq!(stop["result"]["reason"], "target");
+        assert!(
+            stop["result"]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("stable for 2"),
+            "{}",
+            stop["result"]["detail"]
+        );
     }
 
     #[test]

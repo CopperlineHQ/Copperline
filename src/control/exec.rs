@@ -14,6 +14,7 @@ use super::session::{BreakSpec, InputAction, SessionCtx};
 use crate::debugger::{BreakCond, CondOp, CondOperand, DebugStop, WatchSource};
 use crate::emulator::Emulator;
 use crate::inputsched::JoyState;
+use crate::pointer::{PointerServo, ServoStep};
 use crate::timetravel::ReverseOutcome;
 use crate::video::{FB_WIDTH, MAX_CANVAS_PIXELS};
 use serde_json::{json, Map, Value};
@@ -69,6 +70,41 @@ pub enum CoreOp {
     CustomRead {
         off: u16,
     },
+    /// Who last wrote a custom register, from the last-writer table the
+    /// chipset validator arms.
+    CustomWriter {
+        off: u16,
+    },
+    /// Arm/disarm the chipset access validator, or read its report.
+    ChipsetValidate {
+        enabled: Option<bool>,
+        clear: bool,
+    },
+    ChipsetReport,
+    /// Arm/disarm the self-modifying-code detector, or read its report.
+    SmcDetect {
+        enabled: Option<bool>,
+        clear: bool,
+    },
+    SmcReport,
+    /// Arm a bus fault over an address window, list the armed ones, or
+    /// clear them.
+    FaultInject {
+        addr: u32,
+        len: u32,
+        on_read: bool,
+        on_write: bool,
+        count: Option<u32>,
+    },
+    FaultList,
+    FaultClear,
+    /// Arm/disarm the memory heat map over a window, or read it.
+    HeatMapSet {
+        window: Option<(u32, u32)>,
+    },
+    HeatMapReport {
+        path: Option<PathBuf>,
+    },
     CiaGet {
         b: bool,
     },
@@ -120,6 +156,9 @@ pub enum CoreOp {
         path: PathBuf,
     },
     Digest,
+    RegionDigest {
+        rect: FrameRect,
+    },
     Screenshot {
         path: Option<PathBuf>,
     },
@@ -155,6 +194,11 @@ impl CoreOp {
                 | CoreOp::Disasm { .. }
                 | CoreOp::CustomDump
                 | CoreOp::CustomRead { .. }
+                | CoreOp::CustomWriter { .. }
+                | CoreOp::ChipsetReport
+                | CoreOp::SmcReport
+                | CoreOp::FaultList
+                | CoreOp::HeatMapReport { .. }
                 | CoreOp::CiaGet { .. }
                 | CoreOp::BeamGet
                 | CoreOp::DisplayGet
@@ -168,8 +212,207 @@ impl CoreOp {
                 | CoreOp::TraceStatus
                 | CoreOp::WaveformStatus
                 | CoreOp::Digest
+                | CoreOp::RegionDigest { .. }
                 | CoreOp::Screenshot { .. }
         )
+    }
+}
+
+/// A rectangle of presented pixels, in the coordinate space
+/// `capture.screenshot` writes out: origin top-left, one unit per
+/// framebuffer pixel column/row at the frame's current canvas scale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameRect {
+    pub x: usize,
+    pub y: usize,
+    pub w: usize,
+    pub h: usize,
+}
+
+impl FrameRect {
+    /// Digest the rectangle out of a rendered frame of `width` pixels per
+    /// row and `lines` rows. A rectangle that is not wholly inside the
+    /// frame is an error rather than a silent clamp: a script asserting on
+    /// a region needs to know its coordinates went stale (the frame
+    /// geometry changes with the beam standard and canvas scale).
+    fn digest(&self, fb: &[u32], width: usize, lines: usize) -> Result<u64, CtlError> {
+        // Checked rather than plain addition: the parser range-checks
+        // what it builds, but FrameRect is public and this is the method
+        // that indexes the framebuffer.
+        let (Some(right), Some(bottom)) = (self.x.checked_add(self.w), self.y.checked_add(self.h))
+        else {
+            return Err(CtlError::invalid_params(
+                "region overflows the address space",
+            ));
+        };
+        if right > width || bottom > lines {
+            return Err(CtlError::invalid_params(format!(
+                "region {}x{}+{}+{} is outside the {width}x{lines} frame",
+                self.w, self.h, self.x, self.y
+            )));
+        }
+        let mut hash = FNV1A64_OFFSET;
+        for row in self.y..bottom {
+            let start = row * width;
+            hash = fnv1a64_from(hash, &fb[start + self.x..start + right]);
+        }
+        Ok(hash)
+    }
+}
+
+/// Move the guest's pointer to an absolute presented-pixel position by
+/// servoing relative mouse deltas until sprite 0 lands there; see
+/// [`crate::pointer`] for why absolute positioning has to be closed-loop.
+///
+/// `inject` hands each delta to the caller's own input path, so the motion
+/// is journaled for reverse debugging and input recording exactly like a
+/// human's would be.
+pub fn mouse_to(
+    emu: &mut Emulator,
+    port: u8,
+    target: (i32, i32),
+    tolerance: i32,
+    max_frames: u32,
+    mut inject: impl FnMut(&mut Emulator, InputAction),
+) -> Result<Value, CtlError> {
+    let mut servo = PointerServo::new(port, target, tolerance, max_frames);
+    loop {
+        match servo.poll(emu.bus()) {
+            ServoStep::Move { port, dx, dy } => {
+                inject(emu, InputAction::MouseMove { port, dx, dy });
+                emu.step_frame()
+                    .map_err(|e| CtlError::internal(format!("stepping the mouse servo: {e:#}")))?;
+                // step_frame reports Ok even when it ended early on a
+                // breakpoint or watch, so without this the servo would
+                // keep stepping and swallow the stop entirely. The stop
+                // stays pending for the normal path to surface.
+                if emu.machine.ui_debug_stop_pending() {
+                    return Err(CtlError::invalid_state(format!(
+                        "a debugger stop interrupted the pointer servo after {} frame(s); \
+                         the pointer is short of ({}, {})",
+                        servo.frames(),
+                        target.0,
+                        target.1,
+                    )));
+                }
+            }
+            ServoStep::Arrived { x, y, frames } => {
+                return Ok(json!({
+                    "x": x,
+                    "y": y,
+                    "target_x": target.0,
+                    "target_y": target.1,
+                    "port": u32::from(port) + 1,
+                    "frames": frames,
+                }))
+            }
+            // Not converging is an error, not an "ok, but": a script that
+            // carried on would click somewhere it did not intend to.
+            ServoStep::Failed(why) => return Err(CtlError::invalid_state(why)),
+        }
+    }
+}
+
+/// A "wait until the picture stops changing" run target: keep running
+/// until `frames` consecutive rendered frames hash identically. This is
+/// how a script waits for a GUI to finish drawing without guessing at an
+/// emulated-seconds delay -- the guest tells you it is done by producing
+/// the same picture twice.
+///
+/// `rect` narrows the comparison to one region, which is what makes the
+/// target usable on a real Workbench screen: a blinking cursor or a
+/// clock in the title bar never lets the whole frame settle, but the
+/// dialog you are waiting for does. `max_frames` bounds the wait so a
+/// display that never settles ends the run instead of hanging the
+/// client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StableSpec {
+    pub frames: u32,
+    pub max_frames: Option<u64>,
+    pub rect: Option<FrameRect>,
+}
+
+/// What one sample of the display told the stable-frame watcher.
+pub enum StableStep {
+    /// Not settled yet, and still within budget.
+    Running,
+    /// `frames` consecutive frames hashed identically.
+    Settled(String),
+    /// The run ended without settling: out of budget, or the region
+    /// stopped fitting the frame. The string is the stop detail.
+    GaveUp(String),
+}
+
+/// Per-run state behind [`StableSpec`], shared by both server modes so
+/// the two cannot drift on what "stable" means.
+#[derive(Debug, Clone)]
+pub struct StableWatch {
+    spec: StableSpec,
+    /// Digest of the last frame sampled, and how many consecutive frames
+    /// (including it) have carried that digest.
+    last: Option<u64>,
+    run: u32,
+    /// Longest run seen, reported when the budget runs out: "it got to 3
+    /// of 8" is a much more useful failure than a bare timeout.
+    longest: u32,
+    seen: u64,
+}
+
+impl StableWatch {
+    pub fn new(spec: StableSpec) -> Self {
+        Self {
+            spec,
+            last: None,
+            run: 0,
+            longest: 0,
+            seen: 0,
+        }
+    }
+
+    /// Sample the currently rendered frame. Call exactly once per
+    /// emulated frame; the first call establishes the baseline, so a
+    /// `frames: 2` target settles on the first repeat.
+    pub fn sample(&mut self, emu: &Emulator) -> StableStep {
+        let (fb, lines, width) = render_frame(emu);
+        let digest = match self.spec.rect {
+            None => fnv1a64(&fb[..width * lines]),
+            Some(rect) => match rect.digest(&fb, width, lines) {
+                Ok(digest) => digest,
+                Err(_) => {
+                    return StableStep::GaveUp(format!(
+                        "region {}x{}+{}+{} does not fit the {width}x{lines} frame",
+                        rect.w, rect.h, rect.x, rect.y
+                    ))
+                }
+            },
+        };
+        self.note(digest)
+    }
+
+    /// Fold one frame's digest into the run, separately from rendering it
+    /// so the settle/give-up state machine is testable on its own.
+    fn note(&mut self, digest: u64) -> StableStep {
+        self.seen += 1;
+        self.run = if self.last == Some(digest) {
+            self.run + 1
+        } else {
+            1
+        };
+        self.last = Some(digest);
+        self.longest = self.longest.max(self.run);
+        if self.run >= self.spec.frames {
+            return StableStep::Settled(format!(
+                "stable for {} frame(s) after {} (digest {digest:016x})",
+                self.run, self.seen
+            ));
+        }
+        match self.spec.max_frames {
+            Some(max) if self.seen >= max => StableStep::GaveUp(format!(
+                "not stable within {max} frame(s) (longest run {} of {})",
+                self.longest, self.spec.frames
+            )),
+            _ => StableStep::Running,
+        }
     }
 }
 
@@ -206,6 +449,16 @@ pub enum HostOp {
     Reset {
         warm: bool,
     },
+    /// Servo the guest pointer to an absolute presented-pixel position;
+    /// see [`mouse_to`]. A host op because it both injects input and runs
+    /// the machine, so each driver applies it through its own boundary.
+    MouseTo {
+        port: u8,
+        x: i32,
+        y: i32,
+        tolerance: i32,
+        max_frames: u32,
+    },
 }
 
 /// A resume-type command: the machine runs and the JSON-RPC response is
@@ -234,11 +487,13 @@ pub enum RunTarget {
     Frame(u64),
     Cck(u64),
     Seconds(f64),
+    Stable(StableSpec),
 }
 
 impl RunTarget {
     pub fn describe(&self) -> String {
         match self {
+            RunTarget::Stable(spec) => format!("{} stable frame(s)", spec.frames),
             RunTarget::Pc(pc) => format!("pc ${pc:06X}"),
             RunTarget::Beam { vpos, hpos } => format!(
                 "beam v{vpos}{}",
@@ -486,6 +741,72 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
         "custom.read" => core(CoreOp::CustomRead {
             off: parse_custom_reg_param(&p)?,
         }),
+        "custom.writer" => core(CoreOp::CustomWriter {
+            off: parse_custom_reg_param(&p)?,
+        }),
+        "chipset.validate" => core(CoreOp::ChipsetValidate {
+            enabled: p.bool_opt("enabled")?,
+            clear: p.bool_or("clear", false)?,
+        }),
+        "chipset.report" => core(CoreOp::ChipsetReport),
+        "smc.detect" => core(CoreOp::SmcDetect {
+            enabled: p.bool_opt("enabled")?,
+            clear: p.bool_or("clear", false)?,
+        }),
+        "smc.report" => core(CoreOp::SmcReport),
+        "fault.inject" => {
+            let (on_read, on_write) = match p.str_opt("on")?.as_deref() {
+                None | Some("both") => (true, true),
+                Some("read") => (true, false),
+                Some("write") => (false, true),
+                Some(other) => {
+                    return Err(CtlError::invalid_params(format!(
+                        "on must be read|write|both, got {other}"
+                    )))
+                }
+            };
+            let len = p.u32_or("len", 2)?;
+            if len == 0 {
+                return Err(CtlError::invalid_params("len must be non-zero"));
+            }
+            let addr = p.u32_req("addr")?;
+            // A window whose end wraps would match nothing at all, so the
+            // fault would silently never fire.
+            if addr.checked_add(len - 1).is_none() {
+                return Err(CtlError::invalid_params(
+                    "addr + len overflows the address space",
+                ));
+            }
+            core(CoreOp::FaultInject {
+                addr,
+                len,
+                on_read,
+                on_write,
+                count: match p.u32_opt("count")? {
+                    // A zero-shot injection is armed and inert; saying so
+                    // beats installing something that never fires.
+                    Some(0) => return Err(CtlError::invalid_params("count must be at least 1")),
+                    other => other,
+                },
+            })
+        }
+        "memory.heatmap" => {
+            let enabled = p.bool_or("enabled", true)?;
+            // Parsed outside the `then`, and whether or not the call is
+            // arming: inside a closure the error had nowhere to go and
+            // was being swallowed into the default, which turns a
+            // client's typo into a silently wrong window.
+            let base = p.u32_or("base", 0)?;
+            let span = p.u32_or("span", crate::heatmap::DEFAULT_SPAN)?;
+            core(CoreOp::HeatMapSet {
+                window: enabled.then_some((base, span)),
+            })
+        }
+        "memory.heatmap.report" => core(CoreOp::HeatMapReport {
+            path: p.str_opt("path")?.map(PathBuf::from),
+        }),
+        "fault.list" => core(CoreOp::FaultList),
+        "fault.clear" => core(CoreOp::FaultClear),
         "cia.get" => core(CoreOp::CiaGet {
             b: match p.str_req("cia")?.as_str() {
                 "a" | "A" => false,
@@ -585,6 +906,17 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
             dx: p.i32_or("dx", 0)?,
             dy: p.i32_or("dy", 0)?,
         })),
+        "input.mouse_to" => host(HostOp::MouseTo {
+            port: parse_port_param(&p, 1)?,
+            x: parse_pointer_target(&p, "x")?,
+            y: parse_pointer_target(&p, "y")?,
+            tolerance: p
+                .i32_or("tolerance", crate::pointer::DEFAULT_TOLERANCE)?
+                .clamp(0, crate::pointer::TOLERANCE_LIMIT),
+            max_frames: p
+                .u32_or("max_frames", crate::pointer::DEFAULT_MAX_FRAMES)?
+                .clamp(1, crate::pointer::FRAME_LIMIT),
+        }),
         "input.joy" => host(HostOp::Input(InputCmd::Joy {
             port: parse_port_param(&p, 2)?,
             state: JoyState {
@@ -713,6 +1045,9 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
             path: p.str_opt("path")?.map(PathBuf::from),
         }),
         "capture.digest" => core(CoreOp::Digest),
+        "capture.region_digest" => core(CoreOp::RegionDigest {
+            rect: parse_frame_rect(&p)?,
+        }),
         "machine.reset" => host(HostOp::Reset {
             warm: match p.str_opt("kind")?.as_deref() {
                 None | Some("warm") => true,
@@ -799,6 +1134,45 @@ fn parse_collect(p: &ParamReader) -> Result<Vec<CoreOp>, CtlError> {
     Ok(ops)
 }
 
+/// Largest pointer target accepted, in presented pixels. The canvas is
+/// at most 1432 wide and 626 tall; this leaves generous room around that
+/// while keeping the servo's error arithmetic away from i32's edges,
+/// where `target - at` would overflow and `abs()` of i32::MIN stays
+/// negative -- which would satisfy the arrival test at a wild position.
+const POINTER_TARGET_LIMIT: i32 = 1 << 16;
+
+/// Parse one axis of a pointer target.
+fn parse_pointer_target(p: &ParamReader, key: &str) -> Result<i32, CtlError> {
+    let value = p.i32_req(key)?;
+    if !(-POINTER_TARGET_LIMIT..=POINTER_TARGET_LIMIT).contains(&value) {
+        return Err(CtlError::invalid_params(format!(
+            "{key} must be within +/-{POINTER_TARGET_LIMIT} presented pixels"
+        )));
+    }
+    Ok(value)
+}
+
+/// Parse the `x`/`y`/`w`/`h` params of a frame region. The rectangle is
+/// bounds-checked against the live frame at digest time, not here: the
+/// geometry is not known until the frame is rendered.
+fn parse_frame_rect(p: &ParamReader) -> Result<FrameRect, CtlError> {
+    let rect = FrameRect {
+        x: p.usize_or("x", 0)?,
+        y: p.usize_or("y", 0)?,
+        w: p.usize_req("w")?,
+        h: p.usize_req("h")?,
+    };
+    if rect.w == 0 || rect.h == 0 {
+        return Err(CtlError::invalid_params("w and h must be non-zero"));
+    }
+    if rect.x.checked_add(rect.w).is_none() || rect.y.checked_add(rect.h).is_none() {
+        return Err(CtlError::invalid_params(
+            "region overflows the address space",
+        ));
+    }
+    Ok(rect)
+}
+
 fn parse_run_target(p: &ParamReader) -> Result<RunTarget, CtlError> {
     let mut targets = Vec::new();
     if let Some(pc) = p.u32_opt("pc")? {
@@ -824,10 +1198,35 @@ fn parse_run_target(p: &ParamReader) -> Result<RunTarget, CtlError> {
         }
         targets.push(RunTarget::Seconds(secs));
     }
+    if let Some(frames) = p.u32_opt("stable_frames")? {
+        if frames < 2 {
+            return Err(CtlError::invalid_params(
+                "stable_frames must be at least 2 (one frame is trivially stable)",
+            ));
+        }
+        let max_frames = p.u64_opt("max_frames")?;
+        if max_frames.is_some_and(|max| max < u64::from(frames)) {
+            return Err(CtlError::invalid_params(
+                "max_frames must not be below stable_frames",
+            ));
+        }
+        // The region is optional here, unlike capture.region_digest: with
+        // no region param at all the whole frame has to settle. But any
+        // of them means a region was intended, so an incomplete one is an
+        // error rather than a silent fall back to whole-frame -- `x` and
+        // `y` without `w`/`h` would otherwise be quietly ignored and the
+        // caller would wait on the wrong thing.
+        let region_named = ["x", "y", "w", "h"].iter().any(|k| p.get(k).is_some());
+        targets.push(RunTarget::Stable(StableSpec {
+            frames,
+            max_frames,
+            rect: region_named.then(|| parse_frame_rect(p)).transpose()?,
+        }));
+    }
     match targets.len() {
         1 => Ok(targets.remove(0)),
         0 => Err(CtlError::invalid_params(
-            "run_until needs exactly one of pc, vpos[+hpos], frame, cck, seconds",
+            "run_until needs exactly one of pc, vpos[+hpos], frame, cck, seconds, stable_frames",
         )),
         _ => Err(CtlError::invalid_params(
             "run_until takes exactly one target",
@@ -846,14 +1245,29 @@ fn parse_break_spec(p: &ParamReader) -> Result<BreakSpec, CtlError> {
             ignore: p.u32_or("ignore", 0)?,
         }),
         "watch" => {
+            let source = match p.str_opt("class")? {
+                None => None,
+                Some(token) => Some(WatchSource::parse(&token).ok_or_else(|| {
+                    CtlError::invalid_params(
+                        "class must be cpu|blitter|disk|copper, or a DMA channel \
+                         (bpl1..bpl8, spr0..spr7, aud0..aud3)",
+                    )
+                })?),
+            };
+            let pc = p.u32_opt("pc")?;
+            // Only the CPU has an instruction behind an access, so this
+            // pair describes something that cannot happen; accepting it
+            // would install a watch that never fires.
+            if pc.is_some() && source.is_some_and(|s| !s.takes_pc_qualifier()) {
+                return Err(CtlError::invalid_params(
+                    "pc only qualifies cpu accesses; a DMA engine's access has no \
+                     instruction behind it",
+                ));
+            }
             Ok(BreakSpec::Watch {
                 addr: p.u32_req("addr")?,
-                source: match p.str_opt("class")? {
-                    None => None,
-                    Some(token) => Some(WatchSource::parse(&token).ok_or_else(|| {
-                        CtlError::invalid_params("class must be cpu|blitter|disk")
-                    })?),
-                },
+                source,
+                pc,
             })
         }
         "reg_watch" => Ok(BreakSpec::RegWatch {
@@ -1062,6 +1476,16 @@ impl<'a> ParamReader<'a> {
     fn i32_or(&self, key: &str, default: i32) -> Result<i32, CtlError> {
         match self.get(key) {
             None | Some(Value::Null) => Ok(default),
+            Some(v) => v
+                .as_i64()
+                .and_then(|n| i32::try_from(n).ok())
+                .ok_or_else(|| CtlError::invalid_params(format!("bad {key}"))),
+        }
+    }
+
+    fn i32_req(&self, key: &str) -> Result<i32, CtlError> {
+        match self.get(key) {
+            None | Some(Value::Null) => Err(CtlError::invalid_params(format!("missing {key}"))),
             Some(v) => v
                 .as_i64()
                 .and_then(|n| i32::try_from(n).ok())
@@ -1423,7 +1847,184 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
                 .map_err(|e| CtlError::io(format!("saving state: {e:#}")))?;
             Ok(json!({"path": path.display().to_string()}))
         }
+        CoreOp::CustomWriter { off } => {
+            if !emu.bus().chipset_validation_armed() {
+                return Err(CtlError::invalid_state(
+                    "the last-writer table is not armed; chipset.validate {\"enabled\": true}",
+                ));
+            }
+            let name = crate::debugger::custom_reg_name(*off);
+            Ok(match emu.bus().custom_reg_last_write(*off) {
+                None => json!({"reg": name, "written": false}),
+                Some(write) => json!({
+                    "reg": name,
+                    "written": true,
+                    "value": write.value,
+                    "by": write.writer.label(),
+                    "addr": write.writer.address(),
+                    "frame": write.frame,
+                    "vpos": write.vpos,
+                    "hpos": write.hpos,
+                }),
+            })
+        }
+        CoreOp::ChipsetValidate { enabled, clear } => {
+            if let Some(on) = enabled {
+                emu.bus_mut().set_chipset_validation(*on);
+            }
+            if *clear {
+                emu.bus_mut().clear_chipset_findings();
+            }
+            Ok(json!({"armed": emu.bus().chipset_validation_armed()}))
+        }
+        CoreOp::ChipsetReport => {
+            let (reports, dropped) = emu.bus().chipset_findings();
+            let findings: Vec<Value> = reports
+                .iter()
+                .map(|r| {
+                    json!({
+                        "kind": r.finding.name(),
+                        // The keyboard handshake is not a register access,
+                        // so it does not name one; everything else does.
+                        "reg": (r.finding != crate::regcheck::Finding::KeyboardHandshakeShort)
+                            .then(|| crate::debugger::custom_reg_name(r.reg)),
+                        "by": r.writer.label(),
+                        "addr": r.writer.address(),
+                        "count": r.count,
+                        "vpos": r.vpos,
+                        "hpos": r.hpos,
+                        "detail": crate::regcheck::RegCheck::describe(r),
+                    })
+                })
+                .collect();
+            Ok(json!({
+                "armed": emu.bus().chipset_validation_armed(),
+                "findings": findings,
+                "dropped": dropped,
+            }))
+        }
+        CoreOp::SmcDetect { enabled, clear } => {
+            if let Some(on) = enabled {
+                emu.bus_mut().set_smc_detection(*on);
+            }
+            if *clear {
+                emu.bus_mut().clear_smc_reports();
+            }
+            Ok(json!({"armed": emu.bus().smc_detection_armed()}))
+        }
+        CoreOp::SmcReport => {
+            let (reports, dropped) = emu.bus().smc_reports();
+            let writes: Vec<Value> = reports
+                .iter()
+                .map(|r| {
+                    json!({
+                        "addr": r.addr,
+                        "writer_pc": r.writer_pc,
+                        "distance": r.distance,
+                        "count": r.count,
+                        "detail": crate::smc::SmcTracker::describe(r),
+                    })
+                })
+                .collect();
+            Ok(json!({
+                "armed": emu.bus().smc_detection_armed(),
+                "writes": writes,
+                "dropped": dropped,
+            }))
+        }
+        CoreOp::FaultInject {
+            addr,
+            len,
+            on_read,
+            on_write,
+            count,
+        } => {
+            let id = emu.bus_mut().inject_bus_fault(crate::bus::FaultInjection {
+                start: *addr,
+                end: addr.wrapping_add(len - 1),
+                on_read: *on_read,
+                on_write: *on_write,
+                remaining: *count,
+                hits: 0,
+            });
+            Ok(json!({"id": id}))
+        }
+        CoreOp::FaultList => {
+            let faults: Vec<Value> = emu
+                .bus()
+                .injected_bus_faults()
+                .iter()
+                .enumerate()
+                .map(|(id, f)| {
+                    json!({
+                        "id": id,
+                        "start": f.start,
+                        "end": f.end,
+                        "on": match (f.on_read, f.on_write) {
+                            (true, true) => "both",
+                            (true, false) => "read",
+                            _ => "write",
+                        },
+                        "remaining": f.remaining,
+                        "hits": f.hits,
+                    })
+                })
+                .collect();
+            Ok(json!({"faults": faults}))
+        }
+        CoreOp::FaultClear => {
+            emu.bus_mut().clear_injected_bus_faults();
+            Ok(json!({"faults": 0}))
+        }
+        CoreOp::HeatMapSet { window } => {
+            emu.bus_mut().set_heat_map(*window);
+            Ok(match emu.bus().heat_map() {
+                None => json!({"armed": false}),
+                Some(map) => json!({
+                    "armed": true,
+                    "base": map.base(),
+                    "span": map.span(),
+                    "bytes_per_cell": map.bytes_per_cell(),
+                    "grid": crate::heatmap::GRID,
+                }),
+            })
+        }
+        CoreOp::HeatMapReport { path } => {
+            let frame = emu.bus().emulated_frames();
+            let Some(map) = emu.bus().heat_map() else {
+                return Err(CtlError::invalid_state(
+                    "the heat map is not armed; memory.heatmap {\"enabled\": true}",
+                ));
+            };
+            let census: Vec<Value> = map
+                .census(frame)
+                .into_iter()
+                .map(|(by, cells)| json!({"by": by.name(), "cells": cells}))
+                .collect();
+            let mut reply = json!({
+                "base": map.base(),
+                "span": map.span(),
+                "bytes_per_cell": map.bytes_per_cell(),
+                "grid": crate::heatmap::GRID,
+                "frame": frame,
+                "census": census,
+            });
+            if let Some(path) = path {
+                let mut image = vec![0u32; crate::heatmap::CELLS];
+                map.render(frame, &mut image);
+                crate::screenshot::save(
+                    path,
+                    &image,
+                    crate::heatmap::GRID as u32,
+                    crate::heatmap::GRID as u32,
+                )
+                .map_err(|e| CtlError::io(format!("writing heat map: {e:#}")))?;
+                reply["path"] = json!(path.display().to_string());
+            }
+            Ok(reply)
+        }
         CoreOp::Digest => Ok(digest_value(emu)),
+        CoreOp::RegionDigest { rect } => region_digest_value(emu, *rect),
         CoreOp::Screenshot { path } => {
             let (fb, lines, width) = render_frame(emu);
             let path = path
@@ -1608,6 +2209,7 @@ fn break_list_value(emu: &Emulator, ctx: &SessionCtx) -> Value {
         let spec = BreakSpec::Watch {
             addr: w.addr,
             source: None,
+            pc: None,
         };
         let mut entry = json!({"kind": "watch", "addr": w.addr});
         push_id(&mut entry, ctx.id_for(&spec));
@@ -1726,10 +2328,17 @@ fn render_frame(emu: &Emulator) -> (Vec<u32>, usize, usize) {
     (fb, lines, width)
 }
 
+const FNV1A64_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+
 /// FNV-1a over the framebuffer words (little-endian byte order), for
 /// cheap change detection without pulling pixels over the wire.
 fn fnv1a64(words: &[u32]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    fnv1a64_from(FNV1A64_OFFSET, words)
+}
+
+/// Continue an FNV-1a digest over another run of words, so a region
+/// digest can chain its rows without materialising a copy.
+fn fnv1a64_from(mut hash: u64, words: &[u32]) -> u64 {
     for word in words {
         for byte in word.to_le_bytes() {
             hash ^= u64::from(byte);
@@ -1751,6 +2360,27 @@ pub(crate) fn digest_value(emu: &Emulator) -> Value {
         "height": lines,
         "frame": emu.bus().emulated_frames(),
     })
+}
+
+/// Digest one rectangle of the presented frame, so a script can assert on
+/// a single widget ("is this button highlighted?") without the whole
+/// frame's unrelated motion changing the answer. `width`/`height` in the
+/// reply are the frame's, not the region's, so a caller whose coordinates
+/// have gone stale can see the geometry that rejected them.
+pub(crate) fn region_digest_value(emu: &Emulator, rect: FrameRect) -> Result<Value, CtlError> {
+    let (fb, lines, width) = render_frame(emu);
+    let digest = rect.digest(&fb, width, lines)?;
+    Ok(json!({
+        "algo": "fnv1a64",
+        "digest": format!("{digest:016x}"),
+        "x": rect.x,
+        "y": rect.y,
+        "w": rect.w,
+        "h": rect.h,
+        "width": width,
+        "height": lines,
+        "frame": emu.bus().emulated_frames(),
+    }))
 }
 
 #[cfg(test)]
@@ -1832,9 +2462,10 @@ mod tests {
         let params = json!({"collect": [
             {"method": "regs.get"},
             {"method": "mem.read", "params": {"addr": 0, "len": 8}},
+            {"method": "capture.region_digest", "params": {"w": 8, "h": 8}},
         ]});
         match parse_method("continue", &params).unwrap() {
-            Request::Host(HostOp::Resume(verb)) => assert_eq!(verb.collect.len(), 2),
+            Request::Host(HostOp::Resume(verb)) => assert_eq!(verb.collect.len(), 3),
             other => panic!("expected resume, got {other:?}"),
         }
         let bad = json!({"collect": [
@@ -2122,6 +2753,426 @@ mod tests {
         let b = exec_core(&mut emu, &mut ctx, &CoreOp::Digest).unwrap();
         assert_eq!(a["digest"], b["digest"]);
         assert_eq!(a["width"], FB_WIDTH);
+    }
+
+    /// Findings of one kind from a report, for the validator tests.
+    fn findings_of(report: &Value, kind: &str) -> Vec<Value> {
+        report["findings"]
+            .as_array()
+            .expect("findings array")
+            .iter()
+            .filter(|f| f["kind"] == kind)
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn a_write_above_the_register_bank_does_not_panic_the_validator() {
+        let mut emu = test_emulator();
+        emu.bus_mut().set_chipset_validation(true);
+        // $DFF200 upward is inside the custom page but past the register
+        // bank; a guest can write there and the validator must survive it.
+        emu.bus_mut().custom_write(0xDFF200, 2, 0x1234);
+        emu.bus_mut().custom_write(0xDFFFFE, 2, 0x1234);
+    }
+
+    #[test]
+    fn the_validator_flags_undefined_bits_and_names_the_writer() {
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+        exec_core(
+            &mut emu,
+            &mut ctx,
+            &core("chipset.validate", json!({"enabled": true})),
+        )
+        .unwrap();
+        // BPLCON2 bit 15 has no function on any chipset revision.
+        emu.bus_mut().custom_write(0xDFF104, 2, 0x8020);
+        let report = exec_core(&mut emu, &mut ctx, &CoreOp::ChipsetReport).unwrap();
+        let bits = findings_of(&report, "unused-bits");
+        assert_eq!(bits.len(), 1, "{report}");
+        assert_eq!(bits[0]["reg"], "BPLCON2");
+        assert_eq!(bits[0]["by"], "cpu");
+        assert!(
+            bits[0]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("undefined bits 0x8000"),
+            "{}",
+            bits[0]["detail"]
+        );
+    }
+
+    #[test]
+    fn the_validator_flags_absent_registers_byte_access_and_stray_pointers() {
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+        emu.bus_mut().set_chipset_validation(true);
+        // FMODE exists only on AGA Alice; the test machine is an OCS
+        // A500, so this write is decoded and then dropped.
+        emu.bus_mut().custom_write(0xDFF1FC, 2, 0x0003);
+        // A byte write to a word register: no byte lanes on the custom bus.
+        emu.bus_mut().custom_write(0xDFF181, 1, 0x0F);
+        // A bitplane pointer aimed at $00200000, far past the 512 KiB of
+        // chip RAM this machine's Agnus can address.
+        emu.bus_mut().custom_write(0xDFF0E0, 2, 0x0020);
+        let report = exec_core(&mut emu, &mut ctx, &CoreOp::ChipsetReport).unwrap();
+        assert_eq!(findings_of(&report, "absent-register").len(), 1, "{report}");
+        assert_eq!(findings_of(&report, "byte-access").len(), 1, "{report}");
+        let stray = findings_of(&report, "pointer-outside-chip-ram");
+        assert_eq!(stray.len(), 1, "{report}");
+        assert_eq!(stray[0]["reg"], "BPL1PTH");
+    }
+
+    #[test]
+    fn the_validator_flags_a_write_to_a_read_only_register() {
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+        emu.bus_mut().set_chipset_validation(true);
+        // DMACONR is the read side; DMACON is $096. Writing $002 is a
+        // write that lands nowhere.
+        emu.bus_mut().custom_write(0xDFF002, 2, 0x8200);
+        let report = exec_core(&mut emu, &mut ctx, &CoreOp::ChipsetReport).unwrap();
+        let wrong = findings_of(&report, "wrong-direction");
+        assert_eq!(wrong.len(), 1, "{report}");
+        assert_eq!(wrong[0]["reg"], "DMACONR");
+    }
+
+    #[test]
+    fn an_unarmed_machine_reports_nothing_and_refuses_the_writer_query() {
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+        emu.bus_mut().custom_write(0xDFF104, 2, 0x8020);
+        let report = exec_core(&mut emu, &mut ctx, &CoreOp::ChipsetReport).unwrap();
+        assert_eq!(report["armed"], false);
+        assert!(report["findings"].as_array().unwrap().is_empty());
+        let err = exec_core(&mut emu, &mut ctx, &CoreOp::CustomWriter { off: 0x104 }).unwrap_err();
+        assert_eq!(err.code, proto::INVALID_STATE);
+    }
+
+    #[test]
+    fn the_last_writer_table_records_value_and_writer() {
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+        emu.bus_mut().set_chipset_validation(true);
+        emu.bus_mut().custom_write(0xDFF180, 2, 0x0123);
+        let who = exec_core(
+            &mut emu,
+            &mut ctx,
+            &core("custom.writer", json!({"reg": "COLOR00"})),
+        )
+        .unwrap();
+        assert_eq!(who["written"], true);
+        assert_eq!(who["value"], 0x0123);
+        assert_eq!(who["by"], "cpu");
+        // A register nothing has written says so rather than inventing a
+        // writer.
+        let never = exec_core(&mut emu, &mut ctx, &CoreOp::CustomWriter { off: 0x1BE }).unwrap();
+        assert_eq!(never["written"], false);
+    }
+
+    #[test]
+    fn the_validator_flags_a_blit_that_cannot_run() {
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+        emu.bus_mut().set_chipset_validation(true);
+        // BLTSIZE with blitter DMA off: the blit never runs and never
+        // raises its completion interrupt, which is a hang, not a glitch.
+        emu.bus_mut().custom_write(0xDFF058, 2, 0x0041);
+        let report = exec_core(&mut emu, &mut ctx, &CoreOp::ChipsetReport).unwrap();
+        let dead = findings_of(&report, "blitter-dma-off");
+        assert_eq!(dead.len(), 1, "{report}");
+        assert_eq!(dead[0]["reg"], "BLTSIZE");
+        assert!(
+            dead[0]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("never run or raise its completion interrupt"),
+            "{}",
+            dead[0]["detail"]
+        );
+    }
+
+    #[test]
+    fn the_validator_flags_disk_dma_armed_against_an_empty_drive() {
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+        emu.bus_mut().set_chipset_validation(true);
+        // The test machine has no disk in df0, so a read armed here can
+        // never be served -- the class that produced the Gods and Shadow
+        // of the Beast dead-spins. Written twice, because that is Paula's
+        // arming interlock and the first write only latches the value.
+        emu.bus_mut().custom_write(0xDFF024, 2, 0x8000 | 0x1000);
+        emu.bus_mut().custom_write(0xDFF024, 2, 0x8000 | 0x1000);
+        let report = exec_core(&mut emu, &mut ctx, &CoreOp::ChipsetReport).unwrap();
+        let stuck = findings_of(&report, "disk-not-ready");
+        assert_eq!(stuck.len(), 1, "{report}");
+        assert_eq!(stuck[0]["reg"], "DSKLEN");
+
+        // A single write arms nothing, so it is not reported: saying so
+        // would name a write after which DMA is by design not running.
+        let mut emu = test_emulator();
+        emu.bus_mut().set_chipset_validation(true);
+        emu.bus_mut().custom_write(0xDFF024, 2, 0x8000 | 0x1000);
+        let report = exec_core(&mut emu, &mut ctx, &CoreOp::ChipsetReport).unwrap();
+        assert!(
+            findings_of(&report, "disk-not-ready").is_empty(),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn the_heat_map_records_what_touched_the_address_space() {
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+        let armed = exec_core(
+            &mut emu,
+            &mut ctx,
+            &core("memory.heatmap", json!({"enabled": true})),
+        )
+        .unwrap();
+        assert_eq!(armed["armed"], true);
+        assert_eq!(armed["bytes_per_cell"], 256);
+        // The test ROM loops and stores to chip RAM, so after a few
+        // instructions the map has both CPU reads (the fetches) and a
+        // CPU write.
+        for _ in 0..8 {
+            emu.debug_step_instructions(1).unwrap();
+        }
+        let report = exec_core(&mut emu, &mut ctx, &CoreOp::HeatMapReport { path: None }).unwrap();
+        let census = report["census"].as_array().unwrap();
+        let kinds: Vec<&str> = census.iter().map(|c| c["by"].as_str().unwrap()).collect();
+        assert!(kinds.contains(&"cpu-read"), "{report}");
+        assert!(kinds.contains(&"cpu-write"), "{report}");
+    }
+
+    #[test]
+    fn heat_map_parameters_are_validated_rather_than_defaulted() {
+        assert!(parse_method("memory.heatmap", &json!({"base": "nope"})).is_err());
+        assert!(parse_method("memory.heatmap", &json!({"span": {}})).is_err());
+        // A bad value is still a bad value when the call is disarming.
+        assert!(parse_method("memory.heatmap", &json!({"enabled": false, "base": []})).is_err());
+        assert_eq!(
+            parse_method("memory.heatmap", &json!({"enabled": false})).unwrap(),
+            Request::Core(CoreOp::HeatMapSet { window: None })
+        );
+    }
+
+    #[test]
+    fn an_unarmed_heat_map_refuses_to_report() {
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+        let err = exec_core(&mut emu, &mut ctx, &CoreOp::HeatMapReport { path: None }).unwrap_err();
+        assert_eq!(err.code, proto::INVALID_STATE);
+    }
+
+    #[test]
+    fn region_digest_covers_only_its_rectangle() {
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+        let rect = FrameRect {
+            x: 4,
+            y: 8,
+            w: 16,
+            h: 4,
+        };
+        let a = exec_core(&mut emu, &mut ctx, &CoreOp::RegionDigest { rect }).unwrap();
+        let b = exec_core(&mut emu, &mut ctx, &CoreOp::RegionDigest { rect }).unwrap();
+        assert_eq!(a["digest"], b["digest"]);
+        assert_eq!(a["x"], 4);
+        assert_eq!(a["w"], 16);
+        // The reply reports the frame geometry, not the region's, so a
+        // caller can tell why stale coordinates were rejected.
+        assert_eq!(a["width"], FB_WIDTH);
+        // A different rectangle of the same frame is a different digest
+        // (the test ROM's display is not uniform across these rows).
+        let whole = exec_core(&mut emu, &mut ctx, &CoreOp::Digest).unwrap();
+        assert_ne!(a["digest"], whole["digest"]);
+    }
+
+    #[test]
+    fn region_digest_rejects_a_rectangle_off_the_frame() {
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+        let err = exec_core(
+            &mut emu,
+            &mut ctx,
+            &CoreOp::RegionDigest {
+                rect: FrameRect {
+                    x: 0,
+                    y: 0,
+                    w: FB_WIDTH + 1,
+                    h: 1,
+                },
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.code, proto::INVALID_PARAMS);
+    }
+
+    /// The parsed `run_until` target, for the stable-frame parse tests.
+    fn run_target(params: Value) -> RunTarget {
+        match parse_method("run_until", &params).expect("parse should succeed") {
+            Request::Host(HostOp::Resume(ResumeVerb {
+                kind: ResumeKind::RunUntil(target),
+                ..
+            })) => target,
+            other => panic!("expected a run_until target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_until_parses_stable_frames_with_an_optional_region() {
+        assert_eq!(
+            run_target(json!({"stable_frames": 3})),
+            RunTarget::Stable(StableSpec {
+                frames: 3,
+                max_frames: None,
+                rect: None,
+            })
+        );
+        // Region params narrow what has to hold still; a partial region
+        // is a parse error from parse_frame_rect, not a silent default.
+        assert_eq!(
+            run_target(
+                json!({"stable_frames": 2, "max_frames": 600, "x": 10, "y": 20, "w": 4, "h": 4})
+            ),
+            RunTarget::Stable(StableSpec {
+                frames: 2,
+                max_frames: Some(600),
+                rect: Some(FrameRect {
+                    x: 10,
+                    y: 20,
+                    w: 4,
+                    h: 4
+                }),
+            })
+        );
+        // A partial region is an error, not a quiet whole-frame wait:
+        // that includes an origin with no size.
+        assert!(parse_method("run_until", &json!({"stable_frames": 2, "w": 4})).is_err());
+        assert!(parse_method("run_until", &json!({"stable_frames": 2, "x": 10, "y": 20})).is_err());
+        assert!(parse_method("run_until", &json!({"stable_frames": 2, "h": 4})).is_err());
+    }
+
+    #[test]
+    fn stable_watch_needs_consecutive_repeats_and_gives_up_on_budget() {
+        let spec = StableSpec {
+            frames: 3,
+            max_frames: Some(6),
+            rect: None,
+        };
+        let mut watch = StableWatch::new(spec);
+        // A repeat that is broken before reaching the target restarts the
+        // run: "3 consecutive" must not be satisfied by 3 frames total.
+        assert!(matches!(watch.note(1), StableStep::Running));
+        assert!(matches!(watch.note(1), StableStep::Running));
+        assert!(matches!(watch.note(2), StableStep::Running));
+        assert!(matches!(watch.note(1), StableStep::Running));
+        assert!(matches!(watch.note(1), StableStep::Running));
+        // Sixth sample: the budget expires before a third repeat, and the
+        // detail reports the longest run reached rather than the current.
+        match watch.note(3) {
+            StableStep::GaveUp(detail) => {
+                assert!(detail.contains("longest run 2 of 3"), "{detail}");
+            }
+            other => panic!("expected the budget to expire, got {}", step_name(&other)),
+        }
+
+        let mut watch = StableWatch::new(StableSpec {
+            max_frames: None,
+            ..spec
+        });
+        assert!(matches!(watch.note(7), StableStep::Running));
+        assert!(matches!(watch.note(7), StableStep::Running));
+        assert!(matches!(watch.note(7), StableStep::Settled(_)));
+    }
+
+    fn step_name(step: &StableStep) -> &'static str {
+        match step {
+            StableStep::Running => "running",
+            StableStep::Settled(_) => "settled",
+            StableStep::GaveUp(_) => "gave up",
+        }
+    }
+
+    #[test]
+    fn run_until_stable_frames_rejects_degenerate_specs() {
+        // One frame is trivially stable, so it would return instantly and
+        // tell the caller nothing.
+        assert!(parse_method("run_until", &json!({"stable_frames": 1})).is_err());
+        // A budget below the target could never be met.
+        assert!(parse_method("run_until", &json!({"stable_frames": 4, "max_frames": 3})).is_err());
+        // Targets stay mutually exclusive.
+        assert!(parse_method("run_until", &json!({"stable_frames": 2, "frame": 10})).is_err());
+    }
+
+    #[test]
+    fn a_pc_qualified_watch_on_a_dma_class_is_refused() {
+        // The pair can never match, so accepting it would install a
+        // watch that silently never fires.
+        for class in ["blitter", "disk", "copper", "spr3", "bpl1", "aud0"] {
+            let bad = json!({"kind": "watch", "addr": 0x1000, "class": class, "pc": 0x2000});
+            assert!(
+                parse_method("break.add", &bad).is_err(),
+                "{class} + pc should be refused"
+            );
+        }
+        // The useful combination, and each qualifier alone, still parse.
+        for good in [
+            json!({"kind": "watch", "addr": 0x1000, "class": "cpu", "pc": 0x2000}),
+            json!({"kind": "watch", "addr": 0x1000, "pc": 0x2000}),
+            json!({"kind": "watch", "addr": 0x1000, "class": "spr3"}),
+        ] {
+            assert!(parse_method("break.add", &good).is_ok(), "{good}");
+        }
+    }
+
+    #[test]
+    fn a_region_that_overflows_is_rejected_by_the_digest_itself() {
+        // FrameRect is public, so the bounds check cannot assume the JSON
+        // parser built it.
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+        let err = exec_core(
+            &mut emu,
+            &mut ctx,
+            &CoreOp::RegionDigest {
+                rect: FrameRect {
+                    x: usize::MAX,
+                    y: 0,
+                    w: 8,
+                    h: 8,
+                },
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.code, proto::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn a_fault_window_that_wraps_the_address_space_is_refused() {
+        // A wrapped window matches nothing, so the injected fault would
+        // silently never fire.
+        assert!(parse_method("fault.inject", &json!({"addr": 0xFFFF_FFFFu32, "len": 2})).is_err());
+        assert!(parse_method("fault.inject", &json!({"addr": 0xFFFF_FFFEu32, "len": 2})).is_ok());
+    }
+
+    #[test]
+    fn region_digest_parses_defaults_and_rejects_empty_rectangles() {
+        assert_eq!(
+            core("capture.region_digest", json!({"w": 8, "h": 4})),
+            CoreOp::RegionDigest {
+                rect: FrameRect {
+                    x: 0,
+                    y: 0,
+                    w: 8,
+                    h: 4
+                }
+            }
+        );
+        assert!(parse_method("capture.region_digest", &json!({"w": 0, "h": 4})).is_err());
+        assert!(parse_method("capture.region_digest", &json!({"h": 4})).is_err());
     }
 
     #[test]

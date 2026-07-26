@@ -1096,6 +1096,8 @@ back to the native screen. On a single-window emulator you usually want
 ```toml
 [debug]
 log_unmapped = "DD0000-DEFFFF"
+validate_chipset = true
+detect_smc = true
 ```
 
 `log_unmapped` logs every CPU read and write inside the given range that no
@@ -1114,3 +1116,44 @@ followed by a long run of status reads that never come back ready.
 A booting Kickstart probes enough empty address space that `all` produces on
 the order of a million lines per boot, so prefer a range once you know roughly
 where to look.
+
+`validate_chipset` arms the custom-register access validator: a running
+report of software using the chipset in ways the hardware quietly ignores.
+It flags writes to registers the fitted Agnus/Denise does not have, bits a
+register does not define, writes to read-only registers and reads of
+write-only ones, byte or odd-address access to word registers, access
+through an address mirror, and DMA pointers aimed past the chip RAM Agnus
+can address. It also covers the engines behind those registers, where
+misuse hangs rather than glitches: a blit started while the previous one
+is still running (there is no register-file interlock, so the running
+blit is drained and the replacement starts from whatever pointer state it
+left) or with its DMA switched off (BBUSY is set and the blit stays
+pending until BLTEN and DMAEN are enabled), disk DMA armed against a
+drive that could not serve it at that moment -- no media, or the motor
+still off, the class behind the classic loader dead-spins -- and a
+keyboard handshake pulse too narrow to count as one while the MCU was
+waiting for it, which costs a key and stalls input until the keyboard
+resynchronises after 143 ms. Each finding names the PC (or Copper address) that made the
+access and the beam position, is deduplicated by (kind, register, writer)
+with a repeat count, and is logged the first time it is seen. It also arms
+a per-register last-writer table, which answers "what set BPLCON3, and
+from where?" without a bisect. Read both over the control protocol with
+`chipset.report` and `custom.writer` (see
+[the control protocol](../debugger/control.md)), which can also arm and
+disarm the validator live. Off by default; an unarmed machine pays nothing
+for it.
+
+`detect_smc` reports writes that land on memory the CPU has already
+executed. Self-modification is legitimate on a 68000 -- decrunchers,
+trackers and Copper-list patchers all do it -- but it is also where a
+prefetch-related bug hides, since the CPU has already fetched the word
+ahead of the one it is executing, and neither a patch applied too late
+nor one applied to the wrong address leaves a trace at the moment it
+happens. Each report names the written address, the instruction that
+wrote it, and the distance between them, calling out a patch close enough
+to sit inside the prefetch. An address counts as code once an instruction
+there has retired, so an instruction patching its own extension words on
+its only execution is not reported; every repeating pattern is caught on
+the pass after the first. Read it with `smc.report` over the control
+protocol, which can also arm and disarm the detector live. Off by
+default; it costs a 1 MiB execution map while armed.

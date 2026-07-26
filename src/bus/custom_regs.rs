@@ -261,6 +261,9 @@ impl Bus {
         if self.wave_on {
             self.wave_note_reg_write(off, val, source);
         }
+        if self.reg_writers.is_some() {
+            self.note_custom_write(off, val, source);
+        }
         if is_audio_timing_custom_write(off) {
             self.flush_audio();
         }

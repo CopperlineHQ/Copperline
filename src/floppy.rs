@@ -406,6 +406,35 @@ impl FloppyController {
         bits
     }
 
+    /// Whether a DSKLEN write of `val` right now would be the one that
+    /// actually starts a transfer.
+    ///
+    /// Paula requires the value written twice in succession as a safety
+    /// interlock: the first write only latches it. Asked before the
+    /// write is dispatched, so it reads the latch the previous write
+    /// left.
+    pub fn dsklen_write_starts_dma(&self, val: u16) -> bool {
+        val & DSKLEN_DMAEN != 0 && self.dma.is_none() && self.armed_dsklen == Some(val)
+    }
+
+    /// Whether a disk-DMA arming right now would find a drive able to
+    /// serve it: a selected drive, its motor spinning, and media in it.
+    /// Returns the `regcheck::DISK_*` code for what is missing, so the
+    /// wording of the report lives in one place rather than being
+    /// recovered from a string here.
+    pub fn dma_arming_obstacle(&self) -> Option<u16> {
+        let Some(idx) = self.selected_drive() else {
+            return Some(crate::regcheck::DISK_NO_DRIVE);
+        };
+        if !self.drives[idx].motor_on {
+            return Some(crate::regcheck::DISK_MOTOR_OFF);
+        }
+        if self.drives[idx].cached.is_empty() {
+            return Some(crate::regcheck::DISK_EMPTY);
+        }
+        None
+    }
+
     pub fn activity_led_on(&self) -> bool {
         self.selected_drive()
             .is_some_and(|idx| self.drives[idx].motor_on)

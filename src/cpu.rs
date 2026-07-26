@@ -11,6 +11,7 @@ use crate::memory::{
 };
 use anyhow::{anyhow, Result};
 use log::{debug, trace};
+use m68k::core::memory::{BusFault, BusFaultKind};
 use m68k::{AddressBus, CpuCore, CpuType, StepResult};
 
 pub const CIA_A_BASE: u32 = 0x00BF_E000;
@@ -236,6 +237,12 @@ struct MachineRuntimeState {
     cpu_clocks_per_cck: u32,
     cpu_clock_carry: u32,
 }
+
+/// Longest 68000-family instruction worth attributing to one PC when
+/// marking executed code: opcode plus full extension words. A larger
+/// jump between instruction boundaries is a branch or an exception, not
+/// a straight-line advance, so only the opcode word is marked.
+const MAX_INSTRUCTION_BYTES: u32 = 12;
 
 struct CpuBus {
     bus: Bus,
@@ -1343,7 +1350,7 @@ impl M68kMachine {
         let mut bus: Bus = deserialize_component(r, "bus")?;
 
         bus.adopt_host_resources(&mut self.bus.bus);
-        bus.adopt_ui_debug_state(&self.bus.bus);
+        bus.adopt_ui_debug_state(&mut self.bus.bus);
         bus.reset_transient_video_after_state_load();
         bus.reset_transient_diagnostics_after_state_load();
         // The CPU model travels with the state (cpu_type, timing tables, and
@@ -1647,9 +1654,25 @@ impl M68kMachine {
         addr: u32,
         filter: Option<crate::debugger::WatchSource>,
     ) -> bool {
+        self.ui_toggle_watch_qualified(addr, filter, None)
+    }
+
+    /// A watch further qualified by the instruction that made the
+    /// access: with `pc` set it stops only when that PC was executing.
+    /// Watching a word a dozen routines poke is otherwise a matter of
+    /// stopping repeatedly until the interesting caller comes round.
+    pub fn ui_toggle_watch_qualified(
+        &mut self,
+        addr: u32,
+        filter: Option<crate::debugger::WatchSource>,
+        pc: Option<u32>,
+    ) -> bool {
         let addr = addr & self.cpu.address_mask & !1;
         let current = self.bus.bus.peek_word_any(addr);
-        let added = self.ui_breaks.toggle_watch(addr, current, filter);
+        // Even, like every instruction address: an odd qualifier could
+        // never match a writer PC and the watch would never fire.
+        let pc = pc.map(|pc| pc & self.cpu.address_mask & !1);
+        let added = self.ui_breaks.toggle_watch(addr, current, filter, pc);
         let addrs: Vec<u32> = self.ui_breaks.watches.iter().map(|w| w.addr).collect();
         self.bus.bus.set_ui_mem_watches(&addrs);
         added
@@ -1841,6 +1864,31 @@ impl M68kMachine {
             return;
         }
         let writer_pc = self.cpu.ppc & self.cpu.address_mask;
+        // A read-side DMA channel touching a watched word leaves the
+        // value alone, so the compare loop below can never see it; the
+        // channels latch the access on the bus and it is promoted here.
+        if let Some(hit) = self.bus.bus.take_ui_dma_hit() {
+            if let Some(watch) = self
+                .ui_breaks
+                .watches
+                .iter()
+                .find(|w| w.addr == hit.addr && w.pc.is_none())
+            {
+                if watch.filter.is_none_or(|f| f.accepts(hit.source)) {
+                    let value = self.bus.bus.peek_word_any(hit.addr);
+                    self.ui_stop = Some(DebugStop::Watch {
+                        addr: hit.addr,
+                        old: value,
+                        new: value,
+                        writer_pc,
+                        source: hit.source,
+                        vpos: hit.vpos,
+                        hpos: hit.hpos,
+                    });
+                    return;
+                }
+            }
+        }
         for i in 0..self.ui_breaks.watches.len() {
             let addr = self.ui_breaks.watches[i].addr;
             let new = self.bus.bus.peek_word_any(addr);
@@ -1861,8 +1909,15 @@ impl M68kMachine {
                 ),
             };
             if let Some(filter) = self.ui_breaks.watches[i].filter {
-                if filter != source {
+                if !filter.accepts(source) {
                     // Filtered out: the baseline moved on, no stop.
+                    continue;
+                }
+            }
+            if let Some(want) = self.ui_breaks.watches[i].pc {
+                // The PC qualifier only speaks for CPU writes; a DMA
+                // engine's write has no instruction behind it.
+                if !matches!(source, crate::debugger::WatchSource::Cpu) || want != writer_pc {
                     continue;
                 }
             }
@@ -1972,6 +2027,7 @@ impl M68kMachine {
                     None
                 };
                 self.bus.diag_current_pc = dbg_pc_before;
+                self.bus.bus.cpu_pc = dbg_pc_before;
                 // The no-op handler declines every trap, so the CPU takes the
                 // real exception -- the plain step() would surface traps as
                 // StepResults instead of raising them.
@@ -1980,6 +2036,22 @@ impl M68kMachine {
                     .step_with_hle_handler(&mut self.bus, &mut m68k::NoOpHleHandler)
                 {
                     StepResult::Ok { cycles } => {
+                        if self.bus.bus.smc.is_some() {
+                            // Mark the instruction just retired as code.
+                            // Its own span is the honest answer: the
+                            // prefetch queue also reads a word past the
+                            // stream, which the CPU may never execute.
+                            let after = self.cpu.pc & self.cpu.address_mask;
+                            let span = after.wrapping_sub(dbg_pc_before);
+                            let len = if span > 0 && span <= MAX_INSTRUCTION_BYTES {
+                                span
+                            } else {
+                                2
+                            };
+                            if let Some(smc) = self.bus.bus.smc.as_mut() {
+                                smc.mark_executed(dbg_pc_before, len);
+                            }
+                        }
                         if self.bus.icache.is_some() || self.bus.dcache.is_some() {
                             self.apply_cacr_updates();
                         }
@@ -2545,8 +2617,47 @@ impl CpuBus {
         };
     }
 
+    /// Consume a debugger-injected bus fault covering this access, if
+    /// one is armed. The access does not reach memory when it fires, so
+    /// the guest sees exactly what an undecoded address gives it.
+    fn check_injected_fault(
+        &mut self,
+        address: u32,
+        len: u32,
+        write: bool,
+    ) -> Result<(), BusFault> {
+        if !self.bus.bus_faults_armed() {
+            return Ok(());
+        }
+        let addr = self.mask(address);
+        if self.bus.take_injected_fault(addr, len, write) {
+            return Err(BusFault {
+                kind: BusFaultKind::BusError,
+                address: addr,
+            });
+        }
+        Ok(())
+    }
+
+    /// Report a CPU write that lands on memory already fetched as code.
+    fn note_self_modifying_write(&mut self, addr: u32, len: u32) {
+        let pc = self.diag_current_pc;
+        let Some(smc) = self.bus.smc.as_mut() else {
+            return;
+        };
+        if let Some(report) = smc.note_write(addr, len, pc) {
+            log::warn!("smc: {}", crate::smc::SmcTracker::describe(&report));
+        }
+    }
+
     fn read_sized(&mut self, address: u32, size: usize, kind: CpuBusAccessKind) -> u32 {
         let addr = self.mask(address);
+        if self.bus.heat_map_armed() {
+            // Instruction fetches count as reads: seeing where the CPU is
+            // executing is half of what the map is for.
+            self.bus
+                .note_heat(addr, size as u32, crate::heatmap::Toucher::CpuRead);
+        }
         if self.icache.is_some() || self.dcache.is_some() {
             // 68020/030 cache models: a hit costs no bus cycle at all; a
             // miss goes through the normal (billed) path and then fills
@@ -2893,6 +3004,13 @@ impl CpuBus {
     fn write_sized(&mut self, address: u32, size: usize, value: u32) {
         let addr = self.mask(address);
         self.note_cpu_data_bus(addr, size, value);
+        if self.bus.smc.is_some() {
+            self.note_self_modifying_write(addr, size as u32);
+        }
+        if self.bus.heat_map_armed() {
+            self.bus
+                .note_heat(addr, size as u32, crate::heatmap::Toucher::CpuWrite);
+        }
         if let Some(dcache) = self.dcache.as_deref_mut() {
             // Write-through with invalidate-on-hit: the write itself goes
             // to memory below; later reads refill. (The instruction cache
@@ -3201,6 +3319,49 @@ impl AddressBus for CpuBus {
 
     fn instruction_fetches_were_cached(&self) -> bool {
         self.instruction_fetches_cached
+    }
+
+    fn try_read_byte(&mut self, address: u32) -> Result<u8, BusFault> {
+        self.check_injected_fault(address, 1, false)?;
+        Ok(self.read_byte(address))
+    }
+
+    fn try_read_word(&mut self, address: u32) -> Result<u16, BusFault> {
+        self.check_injected_fault(address, 2, false)?;
+        Ok(self.read_word(address))
+    }
+
+    fn try_read_long(&mut self, address: u32) -> Result<u32, BusFault> {
+        self.check_injected_fault(address, 4, false)?;
+        Ok(self.read_long(address))
+    }
+
+    fn try_write_byte(&mut self, address: u32, value: u8) -> Result<(), BusFault> {
+        self.check_injected_fault(address, 1, true)?;
+        self.write_byte(address, value);
+        Ok(())
+    }
+
+    fn try_write_word(&mut self, address: u32, value: u16) -> Result<(), BusFault> {
+        self.check_injected_fault(address, 2, true)?;
+        self.write_word(address, value);
+        Ok(())
+    }
+
+    fn try_write_long(&mut self, address: u32, value: u32) -> Result<(), BusFault> {
+        self.check_injected_fault(address, 4, true)?;
+        self.write_long(address, value);
+        Ok(())
+    }
+
+    fn try_read_immediate_word(&mut self, address: u32) -> Result<u16, BusFault> {
+        self.check_injected_fault(address, 2, false)?;
+        Ok(self.read_immediate_word(address))
+    }
+
+    fn try_read_immediate_long(&mut self, address: u32) -> Result<u32, BusFault> {
+        self.check_injected_fault(address, 4, false)?;
+        Ok(self.read_immediate_long(address))
     }
 
     fn read_byte(&mut self, address: u32) -> u8 {

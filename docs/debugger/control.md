@@ -191,8 +191,22 @@ Session: `hello {token?}`, `auth {token}`, `status`, `shutdown`.
 
 Execution: `continue`, `step {n?}`, `step_over`, `step_out`,
 `step_copper`, `step_frame {n?}`,
-`run_until {pc | vpos[,hpos] | frame | cck | seconds}`, `pause`
-(all resume verbs accept `collect?`).
+`run_until {pc | vpos[,hpos] | frame | cck | seconds | stable_frames}`,
+`pause` (all resume verbs accept `collect?`).
+
+`run_until {stable_frames: N, max_frames?, x?, y?, w?, h?}` runs until N
+consecutive rendered frames hash identically -- how to wait for a GUI to
+finish drawing without guessing at an emulated-seconds delay, since the
+guest tells you it is done by producing the same picture twice. N must be
+at least 2. The optional region params narrow the comparison the way
+`capture.region_digest` does, which is what makes the target usable on a
+live Workbench screen: a blinking cursor never lets the whole frame
+settle, but the dialog you are waiting for does. Naming any of the
+region params requires the rest of a valid rectangle -- an origin with
+no size is `-32602`, not a quiet whole-frame wait. `max_frames` bounds
+the wait; running out of it stops with reason `budget` and a detail
+naming the longest run reached, rather than hanging the client on a
+display that never settles.
 
 Reverse (time travel is armed automatically for control sessions;
 `-32006` when history is exhausted): `reverse_step {n?}`,
@@ -207,6 +221,60 @@ for bulk; 1 MiB cap; side-effect-free RAM/ROM view, device windows are
 not touched), `disasm {addr?, count?}`, `custom.dump`,
 `custom.read {reg}` (name or offset), `cia.get {cia: "a"|"b"}`,
 `beam.get`, `display.get`, `copper.list {addr?, max?}`, `pc_history`.
+
+Chipset validation: `chipset.validate {enabled?, clear?}` arms or disarms
+the custom-register access validator (`[debug] validate_chipset` arms it
+from the start instead) and can empty its report; `chipset.report` ->
+`{armed, findings, dropped}` lists what it has seen, most-repeated first,
+each finding carrying `kind`, `reg`, the `by`/`addr` of the writer, its
+`count`, the beam position, and a `detail` line naming the hardware
+behaviour. The kinds are `absent-register` (a register the fitted
+Agnus/Denise does not have), `unused-bits`, `wrong-direction`,
+`byte-access`, `odd-address`, `mirrored-address`,
+`pointer-outside-chip-ram`, and the device-misuse kinds `blitter-busy`,
+`blitter-dma-off`, `disk-not-ready` and `keyboard-handshake-short` --
+the ones that hang rather than glitch. `custom.writer {reg}` answers the companion
+question -- the last value written to a register and the PC or Copper
+address that wrote it -- and is `-32003` while the validator is not armed,
+since nothing has been recorded. `dropped` counts findings lost once the
+report filled, so a truncated report is distinguishable from a complete
+one.
+
+Self-modifying code: `smc.detect {enabled?, clear?}` arms or disarms the
+detector (`[debug] detect_smc` arms it from the start) and can empty its
+report; `smc.report` -> `{armed, writes, dropped}` lists writes that
+landed on already-executed memory, each with `addr`, `writer_pc`, the
+`distance` between them, a `count`, and a `detail` line. A patch within
+a few bytes ahead of the writing instruction is called out as inside the
+68000's prefetch, where it may be too late to take effect on this pass.
+An address counts as code once an instruction there has retired.
+
+Memory heat map: `memory.heatmap {enabled?, base?, span?}` arms a
+256x256 grid over a window of the address space (default the whole
+24-bit space, so one cell per 256 bytes) and reports the window and
+`bytes_per_cell`; `memory.heatmap.report {path?}` returns a `census` of
+how many cells each toucher currently holds and, with `path`, writes the
+grid as a 256x256 PNG. A slot map says what owned the chip bus at a
+colour clock; this says where in memory anything is happening -- which
+is the question when a display is drawn from the wrong buffer or a DMA
+channel is pointed at the wrong bank. Cells are coloured by what last
+touched them (CPU read/write, blitter, Copper, disk, and the bitplane,
+sprite and audio DMA channels) and fade to black over 32 frames. The
+window is movable, so the RAM a 32-bit CPU sees above the 24-bit space
+can be looked at too; moving it starts a cold map, since the cells would
+otherwise carry activity from addresses they no longer name. `-32003`
+while it is not armed.
+
+Bus faults: `fault.inject {addr, len?, on?, count?}` -> `{id}` makes CPU
+accesses inside that window take a bus error instead of reaching memory
+(`on` is `read`, `write`, or `both`, default both; `count` limits how
+many it delivers, default unlimited); `fault.list` reports each window
+with its `remaining` shots and `hits`; `fault.clear` removes them all.
+This is a host debugger facility, not emulated hardware -- it exists so a
+guest's own fault handler can be exercised deterministically, instead of
+hunting for an address that happens to be undecoded on the machine under
+test. A faulted access never reaches memory, so the guest sees exactly
+what an undecoded address would give it.
 
 Battery clock (the $DC0000 RTC; see `rtc_time` in
 `docs/guide/configuration.md` for the boot-time seed): `rtc.get` reports
@@ -223,10 +291,21 @@ re-read. `-32007` on a machine with no clock fitted.
 
 Breakpoints (shared with the debugger window's live store, so
 GUI-toggled points appear in `break.list`): `break.add {kind: "pc",
-addr, cond?, ignore?}` / `{kind: "watch", addr, class?}` /
+addr, cond?, ignore?}` / `{kind: "watch", addr, class?, pc?}` /
 `{kind: "reg_watch", reg}` / `{kind: "beam", vpos, hpos?}` /
 `{kind: "copper", addr}` / `{kind: "catch", vector}` -> `{id}`;
-`break.remove {id}`; `break.list`; `break.clear`. Conditions are
+`break.remove {id}`; `break.list`; `break.clear`. A watch's optional
+`class` narrows it to one accessor -- `cpu`, `blitter`, `disk`, `copper`,
+or a DMA channel (`bpl1`..`bpl8`, `spr0`..`spr7`, `aud0`..`aud3`, each
+bounded by the channels the hardware actually has). The
+channel classes also catch DMA *reads*, which a value comparison cannot
+see at all: "which sprite fetched this word" is the question a display
+bug actually poses. A watch's optional `pc` fires only when that
+instruction made the access, for a word a dozen routines all poke. Only
+the CPU has an instruction behind an access, so `pc` cannot be combined
+with a DMA `class` -- that pair describes something that cannot happen
+and is `-32602` rather than a watch that never fires.
+Conditions are
 `{lhs, op, rhs}` with operands `"d0"`-`"a7"`, `"pc"`, `"sr"`, a number,
 or `{"mem": addr}`, and ops `eq|ne|lt|gt|le|ge|and`. A session's own
 breakpoints are removed when it disconnects; GUI-set points are left
@@ -242,6 +321,26 @@ replaced wholesale; port defaults to 2), `input.analogue {port?, x, y}`
 (analogue stick/paddle position, 0-255 per axis, the count POTxDAT
 latches; port defaults to 2). Events drive the named port's electrical
 lines whatever device is configured there.
+
+`input.mouse_to {x, y, port?, tolerance?, max_frames?}` puts the guest's
+pointer at an absolute position instead: `x` and `y` are presented pixels
+in the same coordinate space `capture.screenshot` writes out, so a
+position read off a screenshot can be clicked directly. There is no
+absolute mouse to set -- the port carries a quadrature encoder, and the
+guest turns counts into pixels through its own acceleration curve, which
+is history-dependent and defeats aimed relative deltas. So this servos:
+it injects a delta, advances one frame, reads where the hardware drew
+sprite 0 (which is what the OS draws its pointer with), and corrects, learning the
+pixels-per-count ratio it is being given. It runs the machine for up to
+`max_frames` frames (default 60) and is refused while a resume is in
+flight. `tolerance` (default 2 px) is how close counts as arrived: the
+pointer moves in lo-res pixels, which are two columns of the presented
+canvas, so not every coordinate is exactly reachable. Failing to land is
+an error (`-32003`) naming where the pointer settled, never a quiet
+near-miss -- a script that carried on would click the wrong thing. A
+guest that draws its pointer into a bitplane instead of a sprite has
+nothing to observe, and is reported as such; use `input.mouse` for
+relative motion there.
 
 Controller ports: `input.get_ports` -> `{"port1": "mouse", "port2":
 "joystick"}`; `input.set_port {port, device:
@@ -276,8 +375,14 @@ programmable super-hi-res scan's 35 ns canvas; with an active RTG
 screen it is the board frame downsampled to 716 at the board's
 native row count; the response reports the width), `capture.digest`
 (FNV-1a hash of the rendered frame -- the cheap change-detection
-primitive, identical in both server modes), `machine.reset
-{kind: "warm"|"cold"}`.
+primitive, identical in both server modes), `capture.region_digest
+{x?, y?, w, h}` (the same hash over one rectangle of that frame, so a
+script can assert on a single widget without the rest of the screen's
+motion changing the answer; the reply echoes the rectangle and reports
+the frame's own `width`/`height`, and a rectangle that does not fit
+inside the current frame is `-32602` rather than a silent clamp --
+frame geometry moves with the beam standard and the canvas scale),
+`machine.reset {kind: "warm"|"cold"}`.
 
 Notifications have no `id`. The subscribed `event.frame`, `event.serial`,
 `event.interrupt`, and `event.media` streams work in both server modes.

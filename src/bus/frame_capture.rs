@@ -788,6 +788,13 @@ impl Bus {
         }
         let quantum = sprite_fetch_quantum(self.agnus.fmode());
         let ptr = self.display_dma_sprpt[sprite] & self.chip_dma_mask & !1;
+        if self.mem_watches_armed() {
+            self.note_dma_read(
+                crate::debugger::WatchSource::Sprite(sprite as u8),
+                ptr,
+                2 * quantum,
+            );
+        }
         let mut words = [0u16; 4];
         for (w, word) in words.iter_mut().enumerate().take(quantum as usize) {
             *word = read_chip_word_wrapping(&self.mem.chip_ram, ptr.wrapping_add(2 * w as u32));
@@ -1147,6 +1154,13 @@ impl Bus {
                     for w in 0..quantum.min(words_per_row - word_base) {
                         let word_idx = word_base + w;
                         let addr = self.display_dma_bplpt[plane] & addr_mask;
+                        if self.mem_watches_armed() {
+                            self.note_dma_read(
+                                crate::debugger::WatchSource::Bitplane(plane as u8),
+                                addr,
+                                2,
+                            );
+                        }
                         let fetched = read_chip_word_wrapping(&self.mem.chip_ram, addr);
                         self.data_bus = fetched;
                         if self.capture_bitplane_fetch_word(
@@ -1202,6 +1216,13 @@ impl Bus {
                     for w in 0..quantum.min(words_per_row - word_base) {
                         let word_idx = word_base + w;
                         let addr = self.display_dma_bplpt[plane] & addr_mask;
+                        if self.mem_watches_armed() {
+                            self.note_dma_read(
+                                crate::debugger::WatchSource::Bitplane(plane as u8),
+                                addr,
+                                2,
+                            );
+                        }
                         let fetched = read_chip_word_wrapping(&self.mem.chip_ram, addr);
                         self.data_bus = fetched;
                         if self.capture_bitplane_fetch_word(

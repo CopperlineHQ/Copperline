@@ -202,6 +202,8 @@ impl Bus {
         let hpos = self.agnus.hpos;
         let blitter_busy = self.blitter.busy;
         let line_cck = self.agnus.current_line_cck();
+        // The Copper's PC before the slot, for attribution below.
+        let fetch_pc = self.mem_watches_armed().then(|| self.copper.pc());
         let mut copper = std::mem::take(&mut self.copper);
         let action = copper.step_eligible_slot(
             &self.mem.chip_ram,
@@ -215,6 +217,17 @@ impl Bus {
             copper_cycle_free,
         );
         self.copper = copper;
+        // Attributed only when the Copper actually took the slot. A
+        // WAITing or stopped Copper leaves its PC pointing at the next
+        // instruction and touches nothing, so noting the read before the
+        // step reported a fetch on every eligible colour clock of the
+        // wait -- which re-latched a watch hit as fast as the debugger
+        // could clear it.
+        if let Some(pc) = fetch_pc {
+            if !matches!(action, CopperSlotAction::Idle) {
+                self.note_dma_read(crate::debugger::WatchSource::Copper, pc, 4);
+            }
+        }
         if !self.ui_copper_breaks.is_empty() {
             self.check_ui_copper_breaks();
         }
@@ -361,6 +374,13 @@ impl Bus {
         let Some(request) = self.paula.audio_dma_request(channel) else {
             return;
         };
+        if self.mem_watches_armed() {
+            self.note_dma_read(
+                crate::debugger::WatchSource::Audio(channel as u8),
+                request.address,
+                2,
+            );
+        }
         let word = self.read_chip_word_for_audio_dma(request.address);
         self.data_bus = word;
         let irq = self.paula.grant_audio_dma(channel, word, self.agnus.dmacon);

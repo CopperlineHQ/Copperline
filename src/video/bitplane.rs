@@ -3612,6 +3612,41 @@ pub(super) fn active_debug_sprite_mask() -> u8 {
     ACTIVE_DEBUG_MASKS.with(|masks| masks.get().1)
 }
 
+/// Where the hardware painted sprite `sprite`'s top-left pixel on the
+/// last completed frame, in the same presented-pixel coordinates
+/// `capture.screenshot` writes out, or `None` when that sprite drew
+/// nothing.
+///
+/// This observes the sprite the way a person looking at the screen does:
+/// it reads the captured sprite-DMA lines, so it follows a pointer whose
+/// position the guest updates by rewriting SPR0POS through the DMA list,
+/// not just one written straight to the register. It reuses the
+/// renderer's own comparator mapping, so a caller cannot drift out of
+/// step with where the pixels actually land.
+pub fn sprite_framebuffer_origin(bus: &Bus, sprite: usize) -> Option<(i32, i32)> {
+    let top = bus
+        .frame_captured_sprite_lines()
+        .iter()
+        .filter(|line| line.sprite == sprite)
+        .min_by_key(|line| line.beam_y)?;
+    let base = bus.frame_render_base();
+    let geometry = bus.frame_geometry();
+    // The comparator origin shift render_from_input installs for the
+    // running scan; see ACTIVE_CANVAS_SHIFT_H.
+    let shift = if geometry.programmable {
+        H_COUNTER_LINE_ORIGIN
+    } else {
+        0
+    };
+    let hstart = crate::bus::sprite_hstart_for_fmode(top.hstart, base.fmode);
+    let x = (hstart + crate::bus::SPRITE_OUTPUT_DELAY_LORES - DIW_HSTART_FB0 + shift) * 2
+        + i32::from(top.hsub_70ns && base.bplcon0 & BPLCON0_SHRES != 0);
+    // Logical sprite coordinates live in the hi-res pitch domain; the
+    // presented canvas may be double-width for a 35 ns super-hi-res scan.
+    let scale = bus.frame_canvas_scale() as i32;
+    Some((x * scale, top.beam_y - geometry.visible_start_vpos as i32))
+}
+
 pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
     let render_started = Instant::now();
     ACTIVE_DEBUG_MASKS.with(|masks| masks.set((input.debug_plane_mask, input.debug_sprite_mask)));

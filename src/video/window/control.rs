@@ -10,7 +10,8 @@
 
 use super::*;
 use crate::control::exec::{
-    self, CoreOp, HostOp, Request, ResumeKind, ResumeVerb, RunTarget, CCK_FINE_WINDOW, RUN_BUDGET,
+    self, CoreOp, HostOp, Request, ResumeKind, ResumeVerb, RunTarget, StableStep, StableWatch,
+    CCK_FINE_WINDOW, RUN_BUDGET,
 };
 use crate::control::proto::{self, CtlError};
 use crate::control::session::{InputAction, SessionCtx};
@@ -43,6 +44,9 @@ struct PendingResume {
     beam_target: Option<u16>,
     frame_target: Option<u64>,
     cck_target: Option<u64>,
+    /// A `run_until {stable_frames}` watcher, sampled once per emulated
+    /// frame by the burst loop.
+    stable: Option<StableWatch>,
     reason_on_target: &'static str,
 }
 
@@ -55,6 +59,7 @@ impl PendingResume {
             beam_target: None,
             frame_target: None,
             cck_target: None,
+            stable: None,
             reason_on_target: "target",
         }
     }
@@ -258,6 +263,47 @@ impl App {
                     json!({"applied_at_seconds": now, "scheduled": scheduled}),
                 ));
             }
+            HostOp::MouseTo {
+                port,
+                x,
+                y,
+                tolerance,
+                max_frames,
+            } => {
+                // Refused mid-resume, as the headless server does and as
+                // the protocol documents: the servo advances the machine
+                // itself, so it would step frames out from under a
+                // pending run_until -- past a pc target, or through
+                // frames a stable_frames watcher never got to sample.
+                if self.control.as_ref().is_some_and(|c| c.pending.is_some()) {
+                    self.control_send(proto::err_line(
+                        &id,
+                        &CtlError::invalid_state("pause before servoing the pointer"),
+                    ));
+                    return;
+                }
+                // The servo runs the machine for up to max_frames frames
+                // right here, like the bounded step verbs above: it needs
+                // to see each frame it caused before choosing the next
+                // delta, which a frame-boundary drain cannot do.
+                let line = match exec::mouse_to(
+                    &mut self.emu,
+                    port,
+                    (x, y),
+                    tolerance,
+                    max_frames,
+                    |emu, action| {
+                        crate::control::session::inject_input(emu, &mut None, action);
+                    },
+                ) {
+                    Ok(value) => proto::ok_line(&id, value),
+                    Err(e) => proto::err_line(&id, &e),
+                };
+                self.control_send(line);
+                self.control_emit_events();
+                self.finish_render_for_current_frame();
+                self.request_redraw();
+            }
             HostOp::FloppyInsert {
                 drive,
                 path,
@@ -415,6 +461,7 @@ impl App {
                     }
                     RunTarget::Frame(frame) => pending.frame_target = Some(frame),
                     RunTarget::Cck(cck) => pending.cck_target = Some(cck),
+                    RunTarget::Stable(spec) => pending.stable = Some(StableWatch::new(spec)),
                     RunTarget::Seconds(secs) => {
                         pending.cck_target = Some(
                             (secs * f64::from(crate::chipset::paula::PAULA_CLOCK_HZ)).ceil() as u64,
@@ -586,6 +633,34 @@ impl App {
             pending.cck_target,
             pending.reason_on_target,
         );
+        // The burst loop calls this once per emulated frame, which is the
+        // sampling cadence the stable-frame watcher is defined on. The
+        // watcher is lifted out for the sample because sampling renders
+        // the frame, which needs the emulator the pending borrow holds.
+        if let Some(mut watch) = self
+            .control
+            .as_mut()
+            .and_then(|c| c.pending.as_mut())
+            .and_then(|p| p.stable.take())
+        {
+            let (reason, detail) = match watch.sample(&self.emu) {
+                StableStep::Running => {
+                    if let Some(p) = self.control.as_mut().and_then(|c| c.pending.as_mut()) {
+                        p.stable = Some(watch);
+                    }
+                    // A stable target is exclusive, so there is no
+                    // frame/cck target left to check below.
+                    return false;
+                }
+                StableStep::Settled(detail) => (reason, detail),
+                StableStep::GaveUp(detail) => ("budget", detail),
+            };
+            self.paused = true;
+            self.sync_live_audio_suspension();
+            self.control_complete_pending(reason, &detail);
+            self.request_redraw();
+            return true;
+        }
         if let Some(frame) = frame_target {
             if self.emu.bus().emulated_frames() >= frame {
                 self.paused = true;

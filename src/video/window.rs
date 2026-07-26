@@ -559,6 +559,13 @@ pub struct App {
     /// one-shot per entry; (at_emulated_secs, dx, dy).
     auto_mouse: Vec<(f64, i32, i32, u8)>,
     pending_auto_mouse: Vec<(f32, i32, i32, u8)>,
+    /// `--mouse-to-after` requests waiting for their timestamp, and the
+    /// one servo currently steering the pointer. Only one runs at a time:
+    /// two servos fighting over the same quadrature counters would each
+    /// mis-measure the other's motion as its own.
+    auto_mouse_to: Vec<(f64, i32, i32, u8)>,
+    pending_auto_mouse_to: Vec<(f32, i32, i32, u8)>,
+    active_mouse_to: Option<crate::pointer::PointerServo>,
     /// Scheduled analogue pot positions from --pot-after (one-shot each).
     auto_pots: Vec<(f64, u8, u8, u8)>,
     pending_auto_pots: Vec<(f32, u8, u8, u8)>,
@@ -914,6 +921,7 @@ impl App {
         click_after: Vec<(f32, MouseButtonKind, u32, u8)>,
         joy_after: Vec<(f32, JoyButtonKind, u32, u8)>,
         mouse_after: Vec<(f32, i32, i32, u8)>,
+        mouse_to_after: Vec<(f32, i32, i32, u8)>,
         pot_after: Vec<(f32, u8, u8, u8)>,
         disk_insert_after: Vec<DiskInsertSpec>,
         cd_insert_after: Vec<(f32, PathBuf)>,
@@ -1041,6 +1049,9 @@ impl App {
             control: None,
             auto_mouse: Vec::new(),
             pending_auto_mouse: mouse_after,
+            auto_mouse_to: Vec::new(),
+            pending_auto_mouse_to: mouse_to_after,
+            active_mouse_to: None,
             auto_pots: Vec::new(),
             pending_auto_pots: pot_after,
             auto_disk_inserts: Vec::new(),
@@ -1868,6 +1879,19 @@ impl App {
         for (secs, dx, dy, port) in self.pending_auto_mouse.drain(..) {
             self.auto_mouse.push((secs.max(0.0) as f64, dx, dy, port));
         }
+        for (secs, x, y, port) in self.pending_auto_mouse_to.drain(..) {
+            self.auto_mouse_to.push((secs.max(0.0) as f64, x, y, port));
+        }
+        if !self.auto_mouse_to.is_empty() {
+            // Earliest first: the firing pass takes one at a time, and a
+            // servo holds the pointer until it lands or gives up.
+            self.auto_mouse_to
+                .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            info!(
+                "auto-mouse-to armed: {} scheduled pointer targets",
+                self.auto_mouse_to.len()
+            );
+        }
         if !self.auto_mouse.is_empty() {
             info!(
                 "auto-mouse armed: {} scheduled motions",
@@ -1999,15 +2023,35 @@ impl App {
         // Fire any scheduled --mouse-after relative motions (one-shot
         // each); these land on the named port's quadrature counters,
         // whatever device is configured there (the lines are the lines).
+        // Held back while a --mouse-to-after servo is steering: the servo
+        // measures the pointer's response to its own counts to learn the
+        // guest's acceleration, so motion from another source in the same
+        // frame is attributed to it and corrupts the estimate. The
+        // deferral is bounded by the servo's own frame budget.
+        //
+        // The servo is advanced first so a target coming due this frame
+        // takes ownership before the deltas are considered, and so the
+        // frame it finishes on releases them again immediately.
+        // Only while the machine is actually advancing. fire_scheduled_events
+        // runs on every event-loop pass, including while paused or powered
+        // off; polling the servo there would compare the same frame to
+        // itself, inject counts the guest never gets to act on, and then
+        // call a reachable target stuck -- with the phantom deltas landing
+        // on unpause.
+        if self.powered_on && !self.paused && !self.cpu_halted {
+            self.advance_scripted_pointer_targets(emu_secs);
+        }
         let mut mouse_deltas = Vec::new();
-        self.auto_mouse.retain(|&(at, dx, dy, port)| {
-            if emu_secs >= at {
-                mouse_deltas.push((dx, dy, port));
-                false
-            } else {
-                true
-            }
-        });
+        if self.active_mouse_to.is_none() {
+            self.auto_mouse.retain(|&(at, dx, dy, port)| {
+                if emu_secs >= at {
+                    mouse_deltas.push((dx, dy, port));
+                    false
+                } else {
+                    true
+                }
+            });
+        }
         for (dx, dy, port) in mouse_deltas {
             self.apply_scripted_mouse_delta(port, dx, dy);
         }
@@ -3424,6 +3468,65 @@ impl App {
         // Reverse-debug: note the motion so replay can reproduce it.
         self.emu
             .tt_note_input(crate::inputsched::ReplayAction::MouseMove { port, dx, dy });
+    }
+
+    /// Arm one scripted pointer target directly, for tests that do not go
+    /// through the CLI.
+    #[cfg(test)]
+    pub(super) fn arm_scripted_pointer_target(&mut self, secs: f64, x: i32, y: i32, port: u8) {
+        self.auto_mouse_to.push((secs, x, y, port));
+    }
+
+    /// Whether a scripted pointer servo is currently steering.
+    #[cfg(test)]
+    pub(super) fn scripted_pointer_target_active(&self) -> bool {
+        self.active_mouse_to.is_some()
+    }
+
+    /// Advance the scripted `--mouse-to-after` pointer targets: start the
+    /// next one that is due when nothing is steering, then give the
+    /// running servo this frame's correction.
+    ///
+    /// One correction per frame is the servo's whole contract -- it has
+    /// to see what the previous delta did before choosing the next -- and
+    /// this runs once per emulated frame, in the same pass the other
+    /// scheduled input fires from.
+    fn advance_scripted_pointer_targets(&mut self, emu_secs: f64) {
+        if self.active_mouse_to.is_none() {
+            if let Some(pos) = self
+                .auto_mouse_to
+                .iter()
+                .position(|&(at, ..)| emu_secs >= at)
+            {
+                let (_, x, y, port) = self.auto_mouse_to.remove(pos);
+                info!(
+                    "auto-mouse-to: steering the pointer to ({x}, {y}) on port {}",
+                    port + 1
+                );
+                self.active_mouse_to = Some(crate::pointer::PointerServo::new(
+                    port,
+                    (x, y),
+                    crate::pointer::DEFAULT_TOLERANCE,
+                    crate::pointer::DEFAULT_MAX_FRAMES,
+                ));
+            }
+        }
+        let Some(servo) = self.active_mouse_to.as_mut() else {
+            return;
+        };
+        match servo.poll(self.emu.bus()) {
+            crate::pointer::ServoStep::Move { port, dx, dy } => {
+                self.apply_scripted_mouse_delta(port, dx, dy);
+            }
+            crate::pointer::ServoStep::Arrived { x, y, frames } => {
+                info!("auto-mouse-to: pointer at ({x}, {y}) after {frames} frame(s)");
+                self.active_mouse_to = None;
+            }
+            crate::pointer::ServoStep::Failed(why) => {
+                warn!("auto-mouse-to: {why}");
+                self.active_mouse_to = None;
+            }
+        }
     }
 
     fn set_output_volume_from_pos(&mut self, pos: (i32, i32)) {
