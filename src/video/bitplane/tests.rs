@@ -1472,6 +1472,7 @@ fn late_lowres_ddf_stop_hold_keeps_left_origin_unadvanced() {
         &[],
         0,
         control.bplcon1,
+        control.bplcon0,
         false,
         0,
         &h_row_for(control),
@@ -5899,6 +5900,7 @@ fn planned_ham_dma_uses_current_bitplane_sample_at_fetch_edge() {
         &[],
         0,
         control.bplcon1,
+        control.bplcon0,
         false,
         0,
         &h_row_for(control),
@@ -5947,6 +5949,7 @@ fn planned_ham_dma_advances_hold_through_edge_fetch_phase() {
         &[],
         0,
         control.bplcon1,
+        control.bplcon0,
         false,
         0,
         &h_row_for(control),
@@ -5993,6 +5996,7 @@ fn planned_ham_dma_ignores_extra_early_ddf_history_before_diw() {
         &[],
         0,
         control.bplcon1,
+        control.bplcon0,
         false,
         0,
         &h_row_for(control),
@@ -6045,6 +6049,7 @@ fn bplcon1_write_at_diw_right_edge_does_not_retap_current_ham_line() {
         &control_segments,
         0,
         control.bplcon1,
+        control.bplcon0,
         false,
         0,
         &h_row_for(control),
@@ -6056,6 +6061,73 @@ fn bplcon1_write_at_diw_right_edge_does_not_retap_current_ham_line() {
     assert_eq!(control.display_window_x(), (62, 94));
     assert_eq!(fb[64], rgb12_to_rgba8(0x0123));
     assert_eq!(fb[65], rgb12_to_rgba8(0x0123));
+}
+
+/// BPLCON0's HAM select feeds Denise's colour-selection stage, the same stage
+/// a COLORxx write feeds, so a mid-line HAM change takes effect
+/// [`DENISE_HAM_SELECT_PIPELINE_FB`] framebuffer pixels left of the generic
+/// register/beam domain the rest of the control state is sampled in.
+///
+/// Hardware reference: vAmiga `Denise::setBPLCON0` records the HAM change one
+/// colour clock after the carrying bus slot and then backs it up by one colour
+/// clock, landing on the same pixel `Denise::pokeCOLORxx` uses. Cross-checked
+/// end to end by the vAmiga-verified `hamprobe-select` golden render.
+#[test]
+fn ham_select_lands_in_the_colour_write_domain() {
+    // Index $1F on every fetched pixel: HAM decodes it as modify-blue $F over
+    // the black background, the plain index path as palette entry 31.
+    let mut row_words = vec![vec![0u16; 4]; 6];
+    for plane in row_words.iter_mut().take(5) {
+        plane.fill(0xFFFF);
+    }
+    let x_start = 62;
+    let x_stop = x_start + 128;
+    let line_plan = DenisePlannedPlayfieldLine::new(0, x_start, x_stop, &row_words, 64);
+    let mut control = visible_lowres_control(0x6800); // 6 planes, lo-res, HAM
+    control.diwstrt = ((PAL_VISIBLE_LINE0 as u16) << 8) | DIW_HSTART_FETCH_REFERENCE_LORES as u16;
+    control.diwstop =
+        (((PAL_VISIBLE_LINE0 + 1) as u16) << 8) | (DIW_HSTART_FETCH_REFERENCE_LORES as u16 + 64);
+    let mut ham_off = control;
+    ham_off.bplcon0 &= !0x0800;
+    let segment_x = x_start + 100;
+    let control_segments = [ControlSegment {
+        x: segment_x,
+        control: ham_off,
+    }];
+    let mut palette = Palette::new();
+    palette.write_ocs(31, 0x00F0);
+    let mut fb = vec![0; FB_PIXELS];
+    let mut playfield_mask = vec![0; FB_PIXELS];
+    let mut collision_pixels = vec![CollisionPixel::default(); FB_PIXELS];
+    let mut clxdat = 0;
+
+    render_planned_playfield_line(
+        &line_plan,
+        &mut fb,
+        &mut playfield_mask,
+        &mut collision_pixels,
+        &mut clxdat,
+        palette,
+        &[],
+        0,
+        control,
+        &control_segments,
+        0,
+        control.bplcon1,
+        control.bplcon0,
+        false,
+        0,
+        &h_row_for(control),
+        PAL_VISIBLE_LINE0,
+        0.0,
+        0,
+    );
+
+    let effect_x = segment_x - DENISE_HAM_SELECT_PIPELINE_FB;
+    assert_eq!(fb[effect_x - 1], rgb12_to_rgba8(0x000F));
+    assert_eq!(fb[effect_x], rgb12_to_rgba8(0x00F0));
+    // The generic register domain is where the change used to land.
+    assert_eq!(fb[segment_x - 1], rgb12_to_rgba8(0x00F0));
 }
 
 #[test]
@@ -6084,6 +6156,7 @@ fn bplcon2_color_key_uses_color_register_transparency_bit() {
         &[],
         0,
         control.bplcon1,
+        control.bplcon0,
         false,
         0,
         &h_row_for(control),
@@ -6123,6 +6196,7 @@ fn bplcon2_bitplane_key_uses_selected_bitplane_sample() {
         &[],
         0,
         control.bplcon1,
+        control.bplcon0,
         false,
         0,
         &h_row_for(control),
@@ -6162,6 +6236,7 @@ fn bplcon3_zdclken_disables_internal_genlock_keys() {
         &[],
         0,
         control.bplcon1,
+        control.bplcon0,
         false,
         0,
         &h_row_for(control),
@@ -6197,6 +6272,7 @@ fn planned_playfield_line_feeds_clxdat_from_rendered_dual_playfield_sample() {
         &[],
         0,
         control.bplcon1,
+        control.bplcon0,
         false,
         0,
         &h_row_for(control),

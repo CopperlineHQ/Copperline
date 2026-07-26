@@ -408,4 +408,11 @@ probe_tests! {
     // line; a write past HSTART cannot recall it (the Hybris panel
     // stray-dash regression class, issue #278). vAmiga-verified.
     golden_sprprobe_disarm => probe("sprprobe-disarm", "sprprobe-disarm.bin", 16.0);
+    // BPLCON0's HAM select reaches Denise in the colour-selection phase, so a
+    // mid-line HAM change lands where a COLORxx write carried by the same
+    // chip-bus slot would: eight bands clear HAM 16 colour clocks apart and
+    // the blue/green staircase reads off the landing column (the Hollywood
+    // Poker Pro HAM-photo/EHB-scoreboard split-line regression class).
+    // vAmiga-verified: byte-identical over the whole frame.
+    golden_hamprobe_select => probe("hamprobe-select", "hamprobe-select.bin", 16.0);
 }

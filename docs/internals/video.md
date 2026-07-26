@@ -115,6 +115,22 @@ per-plane scroll delays) is constant and is computed once per run rather
 than per pixel. The per-pixel decisions inside a run are unchanged -- the
 chunking is a host-CPU optimisation, not a model change.
 
+BPLCON0 is itself split across two of those timelines. The plane count and
+the resolution bits gate the fetch/serialiser side and stay in the generic
+register domain, but the HAM select does not reach the shifter at all: it
+picks how the already-serialised index becomes a colour, in the same
+colour-selection phase a COLORxx write feeds. Replay therefore samples the
+HAM bit `DENISE_HAM_SELECT_PIPELINE_FB` framebuffer pixels left of the rest
+of the control state, so a HAM change and a COLORxx write carried by the same
+chip-bus slot land on the same pixel (see `docs/internals/timing.md`; vAmiga
+records the same relation in `Denise::setBPLCON0`). A game that paints a HAM
+picture and an ordinary indexed panel on the same scanlines -- Hollywood
+Poker Pro clears HAM at `WAIT hp=$A2` for its scoreboard -- otherwise decodes
+the first columns of the panel as HAM modify commands. As with the
+bitplane-scroll domain, a segment whose position has saturated past the
+display window keeps the register-domain position. `hamprobe-select` in
+timing-test/ pins the landing column against vAmiga.
+
 AGA Lisa has one known split control path in this replay: BPLCON4's
 high-byte BPLAM bitplane XOR follows the normal control timeline, but the
 low-byte ESPRM/OSPRM sprite palette-base fields are visible to sprite

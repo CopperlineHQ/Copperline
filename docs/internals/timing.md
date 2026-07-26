@@ -268,6 +268,25 @@ COLORxx replay. Tests:
 `copper_move_spends_four_color_clocks_leaving_alternate_cycles_free`,
 `color_register_writes_use_final_output_position`.
 
+BPLCON0's HAM select rides that same colour-selection phase: it does not
+feed the bitplane shifter, it picks how the already-serialised index
+becomes a colour. A HAM change and a `COLORxx` write carried by the same
+chip-bus slot therefore reach the picture at the same pixel, so the
+renderer samples the HAM bit `DENISE_HAM_SELECT_PIPELINE_FB` framebuffer
+pixels left of the generic register domain the rest of BPLCON0 (plane
+count, resolution -- the fetch/serialiser side) is sampled in. vAmiga
+models the same relation from the other end: `Denise::setBPLCON0` records
+the change one colour clock after the bus slot and then backs it up by one
+colour clock, landing on the `pos.pixel()` that `Denise::pokeCOLORxx`
+uses. A saturated segment position (a write recorded past the display
+window) keeps the register-domain position so it cannot be dragged back
+into the visible line. Regression example: Hollywood Poker Pro draws a HAM
+photo and an ordinary 6-bitplane scoreboard on the same scanlines and
+clears HAM at `WAIT hp=$A2`; in the generic domain the switch landed 26
+lo-res pixels late and the scoreboard's left 24 columns decoded as HAM
+modify-blue. Tests: `ham_select_lands_in_the_colour_write_domain`, and the
+vAmiga-verified `hamprobe-select` golden render.
+
 ### WAIT/SKIP edge cases
 
 The Copper compares its masked beam position against the Agnus beam
