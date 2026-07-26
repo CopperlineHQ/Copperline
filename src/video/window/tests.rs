@@ -794,6 +794,131 @@ fn mouse_capture_is_refused_with_no_mouse_on_either_port() {
     assert!(!app.mouse_captured, "nothing to capture for");
 }
 
+/// Uncaptured host motion used to reach the port as raw texture-space
+/// pixels, bypassing the sensitivity scale that captured motion goes
+/// through -- so the setting silently did nothing until the display was
+/// clicked, and the mouse changed feel the moment it was grabbed.
+#[test]
+fn uncaptured_cursor_motion_honours_the_sensitivity_setting() {
+    // The counters are 8-bit quadrature; read the port the host mouse
+    // drives before and after to get the applied motion.
+    fn drag_x(app: &mut super::App, from: i32, to: i32) -> u8 {
+        let port = app.mouse_port().expect("fixture has a mouse in port 1");
+        // The first sample only anchors the baseline; the second is the
+        // one that produces a delta.
+        app.track_uncaptured_cursor_motion(Some((from, 64)));
+        let before = app.emu.bus().input.ports[port].counter_x;
+        app.track_uncaptured_cursor_motion(Some((to, 64)));
+        app.emu.bus().input.ports[port]
+            .counter_x
+            .wrapping_sub(before)
+    }
+
+    // Default sensitivity is the neutral midpoint, where the factor is
+    // exactly 1.0: the historical 1:1 tracking is unchanged.
+    let mut app = test_app();
+    assert_eq!(app.mouse_sensitivity, 50);
+    assert_eq!(drag_x(&mut app, 100, 110), 10);
+
+    // Turned up, the same host travel moves the pointer further.
+    let mut app = test_app();
+    app.set_mouse_sensitivity(100);
+    assert_eq!(drag_x(&mut app, 100, 110), 40);
+
+    // Turned down, less -- and the fractional remainder is carried, not
+    // dropped, so slow motion still accumulates instead of vanishing.
+    let mut app = test_app();
+    app.set_mouse_sensitivity(0);
+    assert_eq!(drag_x(&mut app, 100, 110), 2);
+    assert!(
+        app.mouse_delta_remainder.0 > 0.0,
+        "the 0.5-count remainder is kept for the next motion"
+    );
+}
+
+/// A tool window borrows the host cursor while it is open. It used to
+/// release the capture outright and never give it back, so every trip to
+/// the debugger left the machine uncaptured for good -- worst in
+/// fullscreen, where there is no desktop to reach for anyway.
+#[test]
+fn a_tool_panel_hands_the_mouse_capture_back_when_it_closes() {
+    let mut app = test_app();
+    // The windowless fixture cannot take a real grab -- set_mouse_captured
+    // needs a window to call set_cursor_grab on -- so stage the captured
+    // state the shortcut would have found. What is under test is the
+    // bookkeeping that decides whether to re-grab, not winit's grab.
+    app.mouse_captured = true;
+
+    app.open_debugger();
+    assert!(
+        app.capture_suspended_by_ui,
+        "the panel noted that it borrowed a live capture"
+    );
+
+    app.close_tool_panel(ToolPanelKind::Debugger);
+    assert!(
+        !app.capture_suspended_by_ui,
+        "and handed it back on the way out"
+    );
+}
+
+#[test]
+fn the_capture_stays_suspended_while_another_panel_wants_the_cursor() {
+    let mut app = test_app();
+    app.mouse_captured = true;
+
+    app.open_debugger();
+    app.open_frame_analyzer();
+    app.close_tool_panel(ToolPanelKind::Debugger);
+    assert!(
+        app.capture_suspended_by_ui,
+        "the analyzer still needs the cursor"
+    );
+
+    app.close_tool_panel(ToolPanelKind::FrameAnalyzer);
+    assert!(
+        !app.capture_suspended_by_ui,
+        "the last panel out returns the capture"
+    );
+}
+
+/// The restore is owed only to a capture the UI actually took: a session
+/// that was never captured must not find the cursor grabbed because it
+/// happened to open the debugger.
+#[test]
+fn closing_a_panel_does_not_grab_a_mouse_that_was_never_captured() {
+    let mut app = test_app();
+    assert!(!app.mouse_captured);
+
+    app.open_debugger();
+    assert!(!app.capture_suspended_by_ui, "nothing was borrowed");
+
+    app.close_tool_panel(ToolPanelKind::Debugger);
+    assert!(!app.mouse_captured, "so nothing is handed back");
+}
+
+/// An explicit Cmd/Alt+G settles the question: the operator asked for the
+/// capture to be off, and a panel closing later must not overrule that.
+#[test]
+fn an_explicit_toggle_clears_a_pending_ui_suspension() {
+    let mut app = test_app();
+    app.mouse_captured = true;
+    app.open_console();
+    assert!(app.capture_suspended_by_ui);
+
+    // The console does not count as modal UI, so the shortcut still
+    // reaches the toggle while it is open.
+    app.mouse_captured = false;
+    app.toggle_mouse_capture();
+    assert!(
+        !app.capture_suspended_by_ui,
+        "the operator's own toggle wins over the borrowed capture"
+    );
+
+    app.close_tool_panel(ToolPanelKind::Console);
+    assert!(!app.mouse_captured, "closing the panel does not re-grab");
+}
+
 #[test]
 fn cycle_port_device_hot_plugs_and_releases_held_lines() {
     use crate::bus::PortDevice;
@@ -2282,6 +2407,7 @@ fn test_app_with_audio_cpu_and_program(
         crate::config::WarpSpeed::Max,
         crate::config::JoystickInputMode::Gamepad,
         50,
+        crate::config::MouseCapture::Click,
         vec!["Machine: test".to_string()],
         crate::config::RawConfig::default(),
         true,

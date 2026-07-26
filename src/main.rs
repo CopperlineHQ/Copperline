@@ -553,6 +553,12 @@ where
                         .map_err(|_| anyhow!("--mouse-sensitivity must be a number 0-100"))?,
                 );
             }
+            "--mouse-capture" => {
+                let v = args.next().ok_or_else(|| {
+                    anyhow!("--mouse-capture requires a mode (click, auto, or manual)")
+                })?;
+                overrides.mouse_capture = Some(v);
+            }
             "--click-after" => {
                 const USAGE: &str = "--click-after requires SECS BUTTON DURATION_MS";
                 let secs: f32 = next_arg(&mut args, USAGE, "--click-after SECS must be a number")?;
@@ -979,6 +985,7 @@ fn print_help() {
          --joystick MODE                initial joystick input: gamepad or keyboard\n  \
          \x20                            (gamepad lets the keyboard pass through to the Amiga)\n  \
          --mouse-sensitivity N          host mouse sensitivity 0-100 (50 default = 1:1)\n  \
+         --mouse-capture MODE           when to grab the host mouse: click (default), auto, manual\n  \
          --port1 DEVICE                 controller in port 1: mouse (default), joystick,\n  \
          \x20                            cd32, analogue, or none\n  \
          --port2 DEVICE                 controller in port 2 (default: joystick;\n  \
@@ -1685,6 +1692,7 @@ fn main() -> Result<()> {
         cfg.emulation.warp_speed,
         cfg.joystick_input_mode,
         cfg.mouse_sensitivity,
+        cfg.mouse_capture,
         config::about_machine_lines(&cfg),
         raw_cfg,
         live_audio,
@@ -1798,6 +1806,10 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
         config::WarpSpeed::default(),
         config::JoystickInputMode::default(),
         50,
+        // The config screen is a UI to be clicked around; an auto grab
+        // belongs to the machine, and apply_live_config installs the real
+        // setting when one is started.
+        config::MouseCapture::default(),
         vec!["Configure a machine, then press Run.".to_string()],
         raw_cfg,
         audio_output_enabled,

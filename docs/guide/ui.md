@@ -481,9 +481,31 @@ counters hold.
 The host mouse drives the (lowest-numbered) port with a mouse plugged in
 and feeds its JOYxDAT counters. Click the display (or press `Cmd+G` on
 macOS or `Alt+G` on Linux/Windows) to capture the host mouse; the same
-shortcut releases it. While an overlay panel is open, host cursor motion is
-not fed to the emulated mouse. Tool windows likewise keep the debugger or
-analyzer interaction separate from Amiga mouse input.
+shortcut releases it. The click that takes the capture is a window
+action and is not passed to the Amiga, so the first click that reaches
+the guest is the first one aimed at it -- otherwise a single click on a
+gadget arrives as two, close enough together to read as a double click.
+
+While an overlay panel is open, host cursor motion is not fed to the
+emulated mouse. Tool windows likewise keep the debugger or analyzer
+interaction separate from Amiga mouse input. A panel or tool window
+opened while the mouse was captured borrows the cursor and hands the
+capture back when the last of them closes, so a visit to the debugger
+does not leave the machine uncaptured -- which matters most in
+fullscreen, where there is no desktop to reach for. An explicit
+`Cmd/Alt+G` release settles it the other way: the capture stays off.
+
+Uncaptured, host cursor motion over the display still drives the
+emulated mouse, and `[input] mouse_sensitivity` scales it the same way
+it scales captured motion. At the default setting the factor is 1.0 and
+the pointer tracks the host cursor one-for-one.
+
+`[input] mouse_capture` (`--mouse-capture`, the launcher's *Input* tab)
+changes when the grab is taken: `auto` grabs whenever the window has the
+focus and on entering fullscreen, so no host cursor is ever loose over
+the display, and `manual` grabs only on the shortcut, leaving display
+clicks to go straight to the Amiga. See
+[Mouse capture](configuration.md#mouse-capture).
 
 A USB gamepad drives the emulated digital joystick on whichever port one is
 plugged into: directions through JOYxDAT, fire through /FIRx, and a second
