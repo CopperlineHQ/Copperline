@@ -4041,6 +4041,22 @@ impl Bus {
         self.record_slice_bus_advance(cck, tick);
     }
 
+    /// A 020+ CPU read of a custom register costs one colour clock more than a
+    /// chip-RAM read of the same width. Chip RAM answers out of Agnus' DRAM
+    /// controller, which has the row already open for the granted slot; a
+    /// register read has to cross to the addressed chip (Agnus, Denise or
+    /// Paula), be driven back onto the 16-bit chipset bus, and only then meet
+    /// the CPU's data-return phase. A 68000 cannot see the difference - its
+    /// four-clock bus cycle is longer than either path - but a 14 MHz 020
+    /// samples early enough that the extra chip-crossing shows up as a whole
+    /// slot. Beam-polling loops (VHPOSR/INTREQR) are what this decides:
+    /// `timing-test` rows 16, 17 and 21 fit 27% more iterations per frame
+    /// without it (A1200 reference in `timing-test/README.md`).
+    fn bill_custom_register_return(&mut self) {
+        let (cck, tick) = self.advance_one_chip_bus_quantum(None);
+        self.record_slice_bus_advance(cck, tick);
+    }
+
     fn note_cpu_missed_chip_bus_cycle(&mut self) {
         self.cpu_missed_chip_slots = self.cpu_missed_chip_slots.wrapping_add(1);
         if self.blitter_slowdown_counter_enabled() && self.blitter.current_slot_counts_for_bls() {
@@ -5105,6 +5121,7 @@ impl Bus {
         );
         if self.cpu_short_bus_cycle {
             self.bill_020_read_data_wait();
+            self.bill_custom_register_return();
         }
         // Read-only custom registers (INTREQR, DSKBYTR, SERDATR, POTxDAT, ...)
         // reflect timed-device state, so apply the deferred device clocks before
