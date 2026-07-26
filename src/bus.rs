@@ -989,6 +989,13 @@ pub struct Bus {
     ui_mem_watch_addrs: Vec<u32>,
     #[serde(skip)]
     ui_mem_writers: Vec<UiMemWriter>,
+    /// A watched word touched by a read-side DMA channel since the
+    /// debugger last polled. Reads leave the value alone, so the
+    /// value-compare watch loop cannot see them at all; the channels
+    /// latch the access here instead and the CPU's post-step check
+    /// promotes it. Transient debug state.
+    #[serde(skip)]
+    ui_dma_hit: Option<UiMemWriter>,
     /// The Copper PC at the last breakpoint check, so arrival at an
     /// address fires once instead of on every eligible colour clock the
     /// PC rests there.
@@ -2481,6 +2488,7 @@ impl Bus {
             wave: None,
             ui_reg_watches: Vec::new(),
             ui_reg_hit: None,
+            ui_dma_hit: None,
             cpu_pc: 0,
             regcheck: None,
             reg_writers: None,
@@ -2840,6 +2848,48 @@ impl Bus {
                 );
             }
         }
+    }
+
+    /// Note a read-side DMA fetch of `len` bytes from `addr` by `source`,
+    /// latching a hit when it covers a watched word.
+    ///
+    /// Called from the per-channel fetch sites, which are the only places
+    /// that know *which* bitplane or sprite is fetching -- the chip-bus
+    /// arbiter above them sees only "a bitplane". "Which sprite fetched
+    /// this word" is the question a display bug actually poses.
+    pub(crate) fn note_dma_read(
+        &mut self,
+        source: crate::debugger::WatchSource,
+        addr: u32,
+        len: u32,
+    ) {
+        if self.ui_mem_watch_addrs.is_empty() || self.ui_dma_hit.is_some() {
+            return;
+        }
+        let start = addr & 0x00FF_FFFE;
+        let end = addr.wrapping_add(len.max(2));
+        for &watch in &self.ui_mem_watch_addrs {
+            if watch.wrapping_add(1) >= start && watch < end {
+                self.ui_dma_hit = Some(UiMemWriter {
+                    addr: watch,
+                    source,
+                    vpos: self.agnus.vpos.min(u32::from(u16::MAX)) as u16,
+                    hpos: self.agnus.hpos.min(u32::from(u16::MAX)) as u16,
+                });
+                return;
+            }
+        }
+    }
+
+    /// Whether any memory watch is armed, so the DMA fetch sites can skip
+    /// the call entirely on an unwatched machine.
+    pub(crate) fn mem_watches_armed(&self) -> bool {
+        !self.ui_mem_watch_addrs.is_empty()
+    }
+
+    /// Take the pending DMA-read watch hit, if any.
+    pub fn take_ui_dma_hit(&mut self) -> Option<UiMemWriter> {
+        self.ui_dma_hit.take()
     }
 
     fn push_ui_mem_writer(writers: &mut Vec<UiMemWriter>, writer: UiMemWriter) {

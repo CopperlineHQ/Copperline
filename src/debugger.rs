@@ -78,15 +78,33 @@ pub struct UiWatch {
     pub last: u16,
     /// Only stop when the change was made by this writer; None = any.
     pub filter: Option<WatchSource>,
+    /// Only stop when the CPU was executing this instruction; None = any.
+    /// A word a dozen routines all poke is otherwise unwatchable: this is
+    /// how you ask about the one caller you care about.
+    pub pc: Option<u32>,
 }
 
-/// Who wrote a watched memory word: attributed at the write site (the
-/// CPU write path, the blitter's D/line/fill writes, disk read DMA).
+/// Who touched a watched memory word: attributed at the access site (the
+/// CPU write path, the blitter's D/line/fill writes, disk read DMA, and
+/// the read-side DMA channels that fetch through the chip bus).
+///
+/// The channel-numbered variants exist because "which bitplane fetched
+/// this word" and "which sprite" are the questions a display bug
+/// actually poses; a bare "some DMA engine" answer sends you back to the
+/// slot map to work it out by hand.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WatchSource {
     Cpu,
     Blitter,
     Disk,
+    /// Bitplane DMA fetch, plane 0-7 (BPL1DAT is plane 0).
+    Bitplane(u8),
+    /// Sprite DMA fetch, sprite 0-7.
+    Sprite(u8),
+    /// Audio sample DMA fetch, channel 0-3.
+    Audio(u8),
+    /// A Copper instruction-word fetch.
+    Copper,
 }
 
 impl WatchSource {
@@ -95,19 +113,67 @@ impl WatchSource {
             WatchSource::Cpu => "cpu",
             WatchSource::Blitter => "blitter",
             WatchSource::Disk => "disk",
+            WatchSource::Bitplane(_) => "bitplane",
+            WatchSource::Sprite(_) => "sprite",
+            WatchSource::Audio(_) => "audio",
+            WatchSource::Copper => "copper",
         }
     }
 
-    /// Parse a console filter token (case-insensitive).
+    /// The label with its channel number, as reports print it.
+    pub fn describe(self) -> String {
+        match self {
+            WatchSource::Bitplane(n) => format!("bpl{}", n + 1),
+            WatchSource::Sprite(n) => format!("spr{n}"),
+            WatchSource::Audio(n) => format!("aud{n}"),
+            other => other.label().to_string(),
+        }
+    }
+
+    /// Parse a console filter token (case-insensitive). A bare channel
+    /// name filters to that engine whatever the channel number
+    /// (`sprite`), while a numbered form pins one (`spr3`, `bpl1`,
+    /// `aud0`).
     pub fn parse(token: &str) -> Option<Self> {
-        if token.eq_ignore_ascii_case("cpu") {
-            Some(WatchSource::Cpu)
-        } else if token.eq_ignore_ascii_case("blitter") {
-            Some(WatchSource::Blitter)
-        } else if token.eq_ignore_ascii_case("disk") {
-            Some(WatchSource::Disk)
-        } else {
-            None
+        for (name, make) in [
+            ("bpl", (|n| WatchSource::Bitplane(n)) as fn(u8) -> Self),
+            ("spr", |n| WatchSource::Sprite(n)),
+            ("aud", |n| WatchSource::Audio(n)),
+        ] {
+            if let Some(rest) = token
+                .to_ascii_lowercase()
+                .strip_prefix(name)
+                .map(str::to_string)
+            {
+                let n: u8 = rest.parse().ok()?;
+                // BPL channels are named from 1 on the hardware; the
+                // others from 0.
+                let index = if name == "bpl" { n.checked_sub(1)? } else { n };
+                return (index < 8).then(|| make(index));
+            }
+        }
+        for (name, source) in [
+            ("cpu", WatchSource::Cpu),
+            ("blitter", WatchSource::Blitter),
+            ("disk", WatchSource::Disk),
+            ("copper", WatchSource::Copper),
+        ] {
+            if token.eq_ignore_ascii_case(name) {
+                return Some(source);
+            }
+        }
+        None
+    }
+
+    /// Whether a watch filtered on `self` accepts an access attributed to
+    /// `actual`. An engine name with no channel number matches every
+    /// channel of that engine.
+    pub fn accepts(self, actual: WatchSource) -> bool {
+        match (self, actual) {
+            (WatchSource::Bitplane(0xFF), WatchSource::Bitplane(_)) => true,
+            (WatchSource::Sprite(0xFF), WatchSource::Sprite(_)) => true,
+            (WatchSource::Audio(0xFF), WatchSource::Audio(_)) => true,
+            (a, b) => a == b,
         }
     }
 }
@@ -189,9 +255,16 @@ impl DebugStop {
                 WatchSource::Cpu => {
                     format!("Watch ${addr:06X}: {old:04X}->{new:04X} (pc ${writer_pc:06X})")
                 }
+                // A read-side DMA channel leaves the word alone, so an
+                // unchanged value is the tell that this was a fetch, not
+                // a write.
+                _ if old == new => format!(
+                    "Watch ${addr:06X}: {new:04X} read by {} (v{vpos} h{hpos})",
+                    source.describe()
+                ),
                 _ => format!(
                     "Watch ${addr:06X}: {old:04X}->{new:04X} ({} write, v{vpos} h{hpos})",
-                    source.label()
+                    source.describe()
                 ),
             },
             DebugStop::ChipReg {
@@ -799,8 +872,15 @@ impl InteractiveBreaks {
 
     /// Add a word watch at `addr` (recording `current` as its baseline),
     /// or remove it when already set. `filter` limits which writer stops
-    /// it (None = any). Returns true when now set.
-    pub fn toggle_watch(&mut self, addr: u32, current: u16, filter: Option<WatchSource>) -> bool {
+    /// it and `pc` limits which instruction does (None = any). Returns
+    /// true when now set.
+    pub fn toggle_watch(
+        &mut self,
+        addr: u32,
+        current: u16,
+        filter: Option<WatchSource>,
+        pc: Option<u32>,
+    ) -> bool {
         let added = match self.watches.iter().position(|w| w.addr == addr) {
             Some(pos) => {
                 self.watches.remove(pos);
@@ -811,6 +891,7 @@ impl InteractiveBreaks {
                     addr,
                     last: current,
                     filter,
+                    pc,
                 });
                 true
             }
@@ -1319,7 +1400,7 @@ mod tests {
     #[test]
     fn interactive_watches_record_baselines_and_clear() {
         let mut breaks = InteractiveBreaks::new(UI_ADDR_MASK);
-        assert!(breaks.toggle_watch(0x1000, 0xABCD, None));
+        assert!(breaks.toggle_watch(0x1000, 0xABCD, None, None));
         assert_eq!(breaks.watches[0].last, 0xABCD);
         // The register watch normalizes a full $DFFxxx address to the
         // word offset.
@@ -1386,6 +1467,49 @@ mod tests {
         assert_eq!(lines, vec!["PF1H=1 PF2H=2".to_string()]);
         // Unknown registers decode to nothing (hex is always shown).
         assert!(custom_reg_bit_decode(0x1F0, 0xFFFF).is_empty());
+    }
+
+    #[test]
+    fn watch_source_parses_engine_names_and_dma_channels() {
+        assert_eq!(WatchSource::parse("cpu"), Some(WatchSource::Cpu));
+        assert_eq!(WatchSource::parse("COPPER"), Some(WatchSource::Copper));
+        // BPL channels are named from 1 on the hardware and from 0 in the
+        // register file; the console speaks the hardware's names.
+        assert_eq!(WatchSource::parse("bpl1"), Some(WatchSource::Bitplane(0)));
+        assert_eq!(WatchSource::parse("BPL8"), Some(WatchSource::Bitplane(7)));
+        assert_eq!(WatchSource::parse("spr0"), Some(WatchSource::Sprite(0)));
+        assert_eq!(WatchSource::parse("aud3"), Some(WatchSource::Audio(3)));
+        assert_eq!(WatchSource::parse("bpl0"), None);
+        assert_eq!(WatchSource::parse("bpl9"), None);
+        assert_eq!(WatchSource::parse("spr8"), None);
+        assert_eq!(WatchSource::parse("nonsense"), None);
+    }
+
+    #[test]
+    fn a_channel_filter_accepts_only_its_own_channel() {
+        assert!(WatchSource::Sprite(3).accepts(WatchSource::Sprite(3)));
+        assert!(!WatchSource::Sprite(3).accepts(WatchSource::Sprite(4)));
+        assert!(!WatchSource::Sprite(3).accepts(WatchSource::Bitplane(3)));
+        assert!(WatchSource::Cpu.accepts(WatchSource::Cpu));
+        assert!(!WatchSource::Cpu.accepts(WatchSource::Blitter));
+    }
+
+    #[test]
+    fn a_dma_read_stop_says_read_rather_than_inventing_a_change() {
+        // A read leaves the word alone, so old == new is the tell.
+        let stop = DebugStop::Watch {
+            addr: 0x21000,
+            old: 0xBEEF,
+            new: 0xBEEF,
+            writer_pc: 0xF80010,
+            source: WatchSource::Bitplane(2),
+            vpos: 100,
+            hpos: 40,
+        };
+        assert_eq!(
+            stop.describe(),
+            "Watch $021000: BEEF read by bpl3 (v100 h40)"
+        );
     }
 
     #[test]

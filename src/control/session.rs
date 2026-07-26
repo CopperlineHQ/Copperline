@@ -26,6 +26,8 @@ pub enum BreakSpec {
     Watch {
         addr: u32,
         source: Option<WatchSource>,
+        /// Stop only when this instruction made the access.
+        pc: Option<u32>,
     },
     RegWatch {
         off: u16,
@@ -290,9 +292,10 @@ fn normalize_spec(emu: &Emulator, spec: BreakSpec) -> BreakSpec {
             cond,
             ignore,
         },
-        BreakSpec::Watch { addr, source } => BreakSpec::Watch {
+        BreakSpec::Watch { addr, source, pc } => BreakSpec::Watch {
             addr: addr & addr_mask & !1,
             source,
+            pc: pc.map(|pc| pc & addr_mask),
         },
         BreakSpec::Copper { addr } => BreakSpec::Copper {
             addr: addr & 0x00FF_FFFE,
@@ -327,7 +330,9 @@ fn toggle_spec(emu: &mut Emulator, spec: &BreakSpec) -> bool {
         BreakSpec::Pc { addr, cond, ignore } => {
             emu.machine.ui_set_breakpoint(*addr, *cond, *ignore)
         }
-        BreakSpec::Watch { addr, source } => emu.machine.ui_toggle_watch_filtered(*addr, *source),
+        BreakSpec::Watch { addr, source, pc } => {
+            emu.machine.ui_toggle_watch_qualified(*addr, *source, *pc)
+        }
         BreakSpec::RegWatch { off } => emu.machine.ui_toggle_reg_watch(*off),
         BreakSpec::Beam { vpos, hpos } => emu.bus_mut().ui_toggle_beam_trap(*vpos, *hpos),
         BreakSpec::Copper { addr } => emu.bus_mut().ui_toggle_copper_break(*addr),
@@ -349,11 +354,12 @@ pub fn describe_spec(spec: &BreakSpec) -> String {
             }
             s
         }
-        BreakSpec::Watch { addr, source } => format!(
-            "memory watch at ${addr:06X}{}",
+        BreakSpec::Watch { addr, source, pc } => format!(
+            "memory watch at ${addr:06X}{}{}",
             source
-                .map(|f| format!(" ({} writes)", f.label()))
-                .unwrap_or_default()
+                .map(|f| format!(" ({} accesses)", f.describe()))
+                .unwrap_or_default(),
+            pc.map(|pc| format!(" from ${pc:06X}")).unwrap_or_default()
         ),
         BreakSpec::RegWatch { off } => format!(
             "register watch {} (${off:03X})",
@@ -638,6 +644,7 @@ mod tests {
             BreakSpec::Watch {
                 addr: 0x3_0001,
                 source: None,
+                pc: None,
             },
         )
         .unwrap();
@@ -646,6 +653,7 @@ mod tests {
             BreakSpec::Watch {
                 addr: 0x3_0000,
                 source: None,
+                pc: None,
             },
         );
         assert!(dup.is_err());

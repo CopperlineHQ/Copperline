@@ -1119,17 +1119,19 @@ fn parse_break_spec(p: &ParamReader) -> Result<BreakSpec, CtlError> {
             },
             ignore: p.u32_or("ignore", 0)?,
         }),
-        "watch" => {
-            Ok(BreakSpec::Watch {
-                addr: p.u32_req("addr")?,
-                source: match p.str_opt("class")? {
-                    None => None,
-                    Some(token) => Some(WatchSource::parse(&token).ok_or_else(|| {
-                        CtlError::invalid_params("class must be cpu|blitter|disk")
-                    })?),
-                },
-            })
-        }
+        "watch" => Ok(BreakSpec::Watch {
+            addr: p.u32_req("addr")?,
+            source: match p.str_opt("class")? {
+                None => None,
+                Some(token) => Some(WatchSource::parse(&token).ok_or_else(|| {
+                    CtlError::invalid_params(
+                        "class must be cpu|blitter|disk|copper, or a DMA channel \
+                         (bpl1..bpl8, spr0..spr7, aud0..aud3)",
+                    )
+                })?),
+            },
+            pc: p.u32_opt("pc")?,
+        }),
         "reg_watch" => Ok(BreakSpec::RegWatch {
             off: parse_custom_reg_param(p)?,
         }),
@@ -1946,6 +1948,7 @@ fn break_list_value(emu: &Emulator, ctx: &SessionCtx) -> Value {
         let spec = BreakSpec::Watch {
             addr: w.addr,
             source: None,
+            pc: None,
         };
         let mut entry = json!({"kind": "watch", "addr": w.addr});
         push_id(&mut entry, ctx.id_for(&spec));

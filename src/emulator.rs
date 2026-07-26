@@ -2877,6 +2877,83 @@ mod tests {
     }
 
     #[test]
+    fn watchpoint_catches_a_bitplane_dma_fetch_of_the_watched_word() {
+        use crate::debugger::{DebugStop, WatchSource};
+        let mut emu = emulator_with_call_program();
+        emu.bus_mut().mem.overlay = false;
+        // Watch a chip-RAM word and point bitplane 1 at it, then let a
+        // frame's display DMA run. A fetch changes nothing, so only the
+        // per-channel read attribution can see this at all.
+        assert!(emu.machine.ui_toggle_watch(0x60000));
+        {
+            let bus = emu.bus_mut();
+            bus.custom_write(0x0E0, 4, 0x0006_0000); // BPL1PT = $60000
+            bus.custom_write(0x100, 2, 0x1200); // BPLCON0: 1 plane, lores
+            bus.custom_write(0x092, 2, 0x0038); // DDFSTRT
+            bus.custom_write(0x094, 2, 0x00D0); // DDFSTOP
+            bus.custom_write(0x08E, 2, 0x2C81); // DIWSTRT
+            bus.custom_write(0x090, 2, 0xF4C1); // DIWSTOP
+            bus.custom_write(0x096, 2, 0x8300); // DMACON SET DMAEN|BPLEN
+        }
+        let mut stop = None;
+        // Display DMA only runs inside the vertical window, so give it
+        // whole frames rather than an instruction budget.
+        for _ in 0..3 {
+            emu.step_frame().unwrap();
+            if let Some(s) = emu.machine.take_ui_debug_stop() {
+                stop = Some(s);
+                break;
+            }
+        }
+        match stop {
+            Some(DebugStop::Watch {
+                source, old, new, ..
+            }) => {
+                assert_eq!(source, WatchSource::Bitplane(0));
+                assert_eq!(old, new, "a fetch must not be reported as a change");
+            }
+            other => panic!("expected a bitplane-attributed watch stop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_pc_qualified_watch_ignores_writes_from_other_instructions() {
+        use crate::debugger::WatchSource;
+        let mut emu = emulator_with_call_program();
+        emu.bus_mut().mem.overlay = false;
+        // Qualify on a PC that never executes: the blitter write below
+        // still lands, but no stop belongs to that instruction.
+        assert!(emu.machine.ui_toggle_watch_qualified(
+            0x60000,
+            Some(WatchSource::Cpu),
+            Some(0x00F8_0F00)
+        ));
+        {
+            let bus = emu.bus_mut();
+            bus.custom_write(0x096, 2, 0x8240);
+            bus.custom_write(0x040, 2, 0x01F0);
+            bus.custom_write(0x042, 2, 0x0000);
+            bus.custom_write(0x044, 2, 0xFFFF);
+            bus.custom_write(0x046, 2, 0xFFFF);
+            bus.custom_write(0x074, 2, 0xBEEF);
+            bus.custom_write(0x054, 4, 0x0006_0000);
+            bus.custom_write(0x058, 2, 0x0041);
+        }
+        for _ in 0..64 {
+            emu.debug_step_instructions(1).unwrap();
+            assert!(
+                emu.machine.take_ui_debug_stop().is_none(),
+                "a PC-qualified watch must not fire for another writer"
+            );
+        }
+        assert_eq!(
+            emu.bus().peek_word_any(0x60000),
+            0xBEEF,
+            "the blit still ran"
+        );
+    }
+
+    #[test]
     fn watchpoint_attributes_blitter_writes_and_honours_filters() {
         use crate::debugger::{DebugStop, WatchSource};
         let mut emu = emulator_with_call_program();

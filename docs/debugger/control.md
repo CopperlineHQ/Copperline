@@ -251,10 +251,17 @@ re-read. `-32007` on a machine with no clock fitted.
 
 Breakpoints (shared with the debugger window's live store, so
 GUI-toggled points appear in `break.list`): `break.add {kind: "pc",
-addr, cond?, ignore?}` / `{kind: "watch", addr, class?}` /
+addr, cond?, ignore?}` / `{kind: "watch", addr, class?, pc?}` /
 `{kind: "reg_watch", reg}` / `{kind: "beam", vpos, hpos?}` /
 `{kind: "copper", addr}` / `{kind: "catch", vector}` -> `{id}`;
-`break.remove {id}`; `break.list`; `break.clear`. Conditions are
+`break.remove {id}`; `break.list`; `break.clear`. A watch's optional
+`class` narrows it to one accessor -- `cpu`, `blitter`, `disk`, `copper`,
+or a DMA channel (`bpl1`..`bpl8`, `spr0`..`spr7`, `aud0`..`aud3`). The
+channel classes also catch DMA *reads*, which a value comparison cannot
+see at all: "which sprite fetched this word" is the question a display
+bug actually poses. A watch's optional `pc` fires only when that
+instruction made the access, for a word a dozen routines all poke.
+Conditions are
 `{lhs, op, rhs}` with operands `"d0"`-`"a7"`, `"pc"`, `"sr"`, a number,
 or `{"mem": addr}`, and ops `eq|ne|lt|gt|le|ge|and`. A session's own
 breakpoints are removed when it disconnects; GUI-set points are left

@@ -1647,9 +1647,23 @@ impl M68kMachine {
         addr: u32,
         filter: Option<crate::debugger::WatchSource>,
     ) -> bool {
+        self.ui_toggle_watch_qualified(addr, filter, None)
+    }
+
+    /// A watch further qualified by the instruction that made the
+    /// access: with `pc` set it stops only when that PC was executing.
+    /// Watching a word a dozen routines poke is otherwise a matter of
+    /// stopping repeatedly until the interesting caller comes round.
+    pub fn ui_toggle_watch_qualified(
+        &mut self,
+        addr: u32,
+        filter: Option<crate::debugger::WatchSource>,
+        pc: Option<u32>,
+    ) -> bool {
         let addr = addr & self.cpu.address_mask & !1;
         let current = self.bus.bus.peek_word_any(addr);
-        let added = self.ui_breaks.toggle_watch(addr, current, filter);
+        let pc = pc.map(|pc| pc & self.cpu.address_mask);
+        let added = self.ui_breaks.toggle_watch(addr, current, filter, pc);
         let addrs: Vec<u32> = self.ui_breaks.watches.iter().map(|w| w.addr).collect();
         self.bus.bus.set_ui_mem_watches(&addrs);
         added
@@ -1841,6 +1855,31 @@ impl M68kMachine {
             return;
         }
         let writer_pc = self.cpu.ppc & self.cpu.address_mask;
+        // A read-side DMA channel touching a watched word leaves the
+        // value alone, so the compare loop below can never see it; the
+        // channels latch the access on the bus and it is promoted here.
+        if let Some(hit) = self.bus.bus.take_ui_dma_hit() {
+            if let Some(watch) = self
+                .ui_breaks
+                .watches
+                .iter()
+                .find(|w| w.addr == hit.addr && w.pc.is_none())
+            {
+                if watch.filter.is_none_or(|f| f.accepts(hit.source)) {
+                    let value = self.bus.bus.peek_word_any(hit.addr);
+                    self.ui_stop = Some(DebugStop::Watch {
+                        addr: hit.addr,
+                        old: value,
+                        new: value,
+                        writer_pc,
+                        source: hit.source,
+                        vpos: hit.vpos,
+                        hpos: hit.hpos,
+                    });
+                    return;
+                }
+            }
+        }
         for i in 0..self.ui_breaks.watches.len() {
             let addr = self.ui_breaks.watches[i].addr;
             let new = self.bus.bus.peek_word_any(addr);
@@ -1861,8 +1900,15 @@ impl M68kMachine {
                 ),
             };
             if let Some(filter) = self.ui_breaks.watches[i].filter {
-                if filter != source {
+                if !filter.accepts(source) {
                     // Filtered out: the baseline moved on, no stop.
+                    continue;
+                }
+            }
+            if let Some(want) = self.ui_breaks.watches[i].pc {
+                // The PC qualifier only speaks for CPU writes; a DMA
+                // engine's write has no instruction behind it.
+                if !matches!(source, crate::debugger::WatchSource::Cpu) || want != writer_pc {
                     continue;
                 }
             }

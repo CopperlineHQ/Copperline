@@ -469,6 +469,9 @@ impl Bus {
                 self.record_sprite_display_enable_for_bitplane_dma(vpos);
             }
             let addr = self.display_dma_bplpt[plane] & addr_mask;
+            if self.mem_watches_armed() {
+                self.note_dma_read(crate::debugger::WatchSource::Bitplane(plane as u8), addr, 2);
+            }
             let fetched = read_chip_word_wrapping(&self.mem.chip_ram, addr);
             self.data_bus = fetched;
             if self.capture_bitplane_fetch_word(

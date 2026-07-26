@@ -453,23 +453,41 @@ impl App {
             }
             "WATCH" | "W" => {
                 let Some(addr) = args.first().and_then(|t| hex32(t)) else {
-                    return ConsoleOutcome::error("usage: WATCH ADDR [CPU|BLITTER|DISK]");
+                    return ConsoleOutcome::error("usage: WATCH ADDR [CLASS] [PC=ADDR]");
                 };
-                let filter = match args.get(1) {
-                    Some(token) => match crate::debugger::WatchSource::parse(token) {
-                        Some(source) => Some(source),
-                        None => {
-                            return ConsoleOutcome::error("watch filter is CPU, BLITTER, or DISK")
+                // Trailing PC=ADDR qualifies the watch to one instruction;
+                // the remaining token, if any, is the access class.
+                let mut filter = None;
+                let mut pc = None;
+                for token in args.iter().skip(1) {
+                    if let Some(value) = token
+                        .strip_prefix("PC=")
+                        .or_else(|| token.strip_prefix("pc="))
+                    {
+                        match hex32(value) {
+                            Some(addr) => pc = Some(addr),
+                            None => return ConsoleOutcome::error("PC= wants an address"),
                         }
-                    },
-                    None => None,
-                };
-                let set = self.emu.machine.ui_toggle_watch_filtered(addr, filter);
+                        continue;
+                    }
+                    match crate::debugger::WatchSource::parse(token) {
+                        Some(source) => filter = Some(source),
+                        None => {
+                            return ConsoleOutcome::error(
+                                "watch class is CPU, BLITTER, DISK, COPPER, or a DMA \
+                                 channel (BPL1..BPL8, SPR0..SPR7, AUD0..AUD3)",
+                            )
+                        }
+                    }
+                }
+                let set = self.emu.machine.ui_toggle_watch_qualified(addr, filter, pc);
                 ConsoleOutcome::one(format!(
-                    "watchpoint ${:06X}{} {}",
+                    "watchpoint ${:06X}{}{} {}",
                     addr & self.emu.machine.ui_addr_mask() & !1,
                     filter
-                        .map(|f| format!(" ({} writes only)", f.label()))
+                        .map(|f| format!(" ({} accesses only)", f.describe()))
+                        .unwrap_or_default(),
+                    pc.map(|pc| format!(" from ${pc:06X} only"))
                         .unwrap_or_default(),
                     if set { "set" } else { "removed" }
                 ))
