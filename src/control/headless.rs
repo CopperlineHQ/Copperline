@@ -1076,6 +1076,23 @@ mod tests {
     }
 
     #[test]
+    fn region_digest_reports_its_rectangle_and_rejects_stale_coordinates() {
+        run_session(None, |c| {
+            c.auth();
+            let region = c.result(
+                "capture.region_digest",
+                json!({"x": 8, "y": 16, "w": 32, "h": 8}),
+            );
+            assert_eq!(region["w"], 32);
+            assert_eq!(region["width"], 716);
+            // Coordinates that outran the frame must fail loudly rather
+            // than silently digesting a clamped rectangle.
+            let stale = c.call("capture.region_digest", json!({"x": 700, "w": 64, "h": 8}));
+            assert_eq!(stale["error"]["code"], proto::INVALID_PARAMS);
+        });
+    }
+
+    #[test]
     fn frame_events_stream_before_the_resume_response() {
         run_session(None, |c| {
             c.auth();

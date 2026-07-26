@@ -276,8 +276,14 @@ programmable super-hi-res scan's 35 ns canvas; with an active RTG
 screen it is the board frame downsampled to 716 at the board's
 native row count; the response reports the width), `capture.digest`
 (FNV-1a hash of the rendered frame -- the cheap change-detection
-primitive, identical in both server modes), `machine.reset
-{kind: "warm"|"cold"}`.
+primitive, identical in both server modes), `capture.region_digest
+{x?, y?, w, h}` (the same hash over one rectangle of that frame, so a
+script can assert on a single widget without the rest of the screen's
+motion changing the answer; the reply echoes the rectangle and reports
+the frame's own `width`/`height`, and a rectangle that does not fit
+inside the current frame is `-32602` rather than a silent clamp --
+frame geometry moves with the beam standard and the canvas scale),
+`machine.reset {kind: "warm"|"cold"}`.
 
 Notifications have no `id`. The subscribed `event.frame`, `event.serial`,
 `event.interrupt`, and `event.media` streams work in both server modes.

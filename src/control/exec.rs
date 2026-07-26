@@ -120,6 +120,9 @@ pub enum CoreOp {
         path: PathBuf,
     },
     Digest,
+    RegionDigest {
+        rect: FrameRect,
+    },
     Screenshot {
         path: Option<PathBuf>,
     },
@@ -168,8 +171,43 @@ impl CoreOp {
                 | CoreOp::TraceStatus
                 | CoreOp::WaveformStatus
                 | CoreOp::Digest
+                | CoreOp::RegionDigest { .. }
                 | CoreOp::Screenshot { .. }
         )
+    }
+}
+
+/// A rectangle of presented pixels, in the coordinate space
+/// `capture.screenshot` writes out: origin top-left, one unit per
+/// framebuffer pixel column/row at the frame's current canvas scale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameRect {
+    pub x: usize,
+    pub y: usize,
+    pub w: usize,
+    pub h: usize,
+}
+
+impl FrameRect {
+    /// Digest the rectangle out of a rendered frame of `width` pixels per
+    /// row and `lines` rows. A rectangle that is not wholly inside the
+    /// frame is an error rather than a silent clamp: a script asserting on
+    /// a region needs to know its coordinates went stale (the frame
+    /// geometry changes with the beam standard and canvas scale).
+    fn digest(&self, fb: &[u32], width: usize, lines: usize) -> Result<u64, CtlError> {
+        let (right, bottom) = (self.x + self.w, self.y + self.h);
+        if right > width || bottom > lines {
+            return Err(CtlError::invalid_params(format!(
+                "region {}x{}+{}+{} is outside the {width}x{lines} frame",
+                self.w, self.h, self.x, self.y
+            )));
+        }
+        let mut hash = FNV1A64_OFFSET;
+        for row in self.y..bottom {
+            let start = row * width;
+            hash = fnv1a64_from(hash, &fb[start + self.x..start + right]);
+        }
+        Ok(hash)
     }
 }
 
@@ -713,6 +751,9 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
             path: p.str_opt("path")?.map(PathBuf::from),
         }),
         "capture.digest" => core(CoreOp::Digest),
+        "capture.region_digest" => core(CoreOp::RegionDigest {
+            rect: parse_frame_rect(&p)?,
+        }),
         "machine.reset" => host(HostOp::Reset {
             warm: match p.str_opt("kind")?.as_deref() {
                 None | Some("warm") => true,
@@ -797,6 +838,27 @@ fn parse_collect(p: &ParamReader) -> Result<Vec<CoreOp>, CtlError> {
         }
     }
     Ok(ops)
+}
+
+/// Parse the `x`/`y`/`w`/`h` params of a frame region. The rectangle is
+/// bounds-checked against the live frame at digest time, not here: the
+/// geometry is not known until the frame is rendered.
+fn parse_frame_rect(p: &ParamReader) -> Result<FrameRect, CtlError> {
+    let rect = FrameRect {
+        x: p.usize_or("x", 0)?,
+        y: p.usize_or("y", 0)?,
+        w: p.usize_req("w")?,
+        h: p.usize_req("h")?,
+    };
+    if rect.w == 0 || rect.h == 0 {
+        return Err(CtlError::invalid_params("w and h must be non-zero"));
+    }
+    if rect.x.checked_add(rect.w).is_none() || rect.y.checked_add(rect.h).is_none() {
+        return Err(CtlError::invalid_params(
+            "region overflows the address space",
+        ));
+    }
+    Ok(rect)
 }
 
 fn parse_run_target(p: &ParamReader) -> Result<RunTarget, CtlError> {
@@ -1424,6 +1486,7 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
             Ok(json!({"path": path.display().to_string()}))
         }
         CoreOp::Digest => Ok(digest_value(emu)),
+        CoreOp::RegionDigest { rect } => region_digest_value(emu, *rect),
         CoreOp::Screenshot { path } => {
             let (fb, lines, width) = render_frame(emu);
             let path = path
@@ -1726,10 +1789,17 @@ fn render_frame(emu: &Emulator) -> (Vec<u32>, usize, usize) {
     (fb, lines, width)
 }
 
+const FNV1A64_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+
 /// FNV-1a over the framebuffer words (little-endian byte order), for
 /// cheap change detection without pulling pixels over the wire.
 fn fnv1a64(words: &[u32]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    fnv1a64_from(FNV1A64_OFFSET, words)
+}
+
+/// Continue an FNV-1a digest over another run of words, so a region
+/// digest can chain its rows without materialising a copy.
+fn fnv1a64_from(mut hash: u64, words: &[u32]) -> u64 {
     for word in words {
         for byte in word.to_le_bytes() {
             hash ^= u64::from(byte);
@@ -1751,6 +1821,27 @@ pub(crate) fn digest_value(emu: &Emulator) -> Value {
         "height": lines,
         "frame": emu.bus().emulated_frames(),
     })
+}
+
+/// Digest one rectangle of the presented frame, so a script can assert on
+/// a single widget ("is this button highlighted?") without the whole
+/// frame's unrelated motion changing the answer. `width`/`height` in the
+/// reply are the frame's, not the region's, so a caller whose coordinates
+/// have gone stale can see the geometry that rejected them.
+pub(crate) fn region_digest_value(emu: &Emulator, rect: FrameRect) -> Result<Value, CtlError> {
+    let (fb, lines, width) = render_frame(emu);
+    let digest = rect.digest(&fb, width, lines)?;
+    Ok(json!({
+        "algo": "fnv1a64",
+        "digest": format!("{digest:016x}"),
+        "x": rect.x,
+        "y": rect.y,
+        "w": rect.w,
+        "h": rect.h,
+        "width": width,
+        "height": lines,
+        "frame": emu.bus().emulated_frames(),
+    }))
 }
 
 #[cfg(test)]
@@ -1832,9 +1923,10 @@ mod tests {
         let params = json!({"collect": [
             {"method": "regs.get"},
             {"method": "mem.read", "params": {"addr": 0, "len": 8}},
+            {"method": "capture.region_digest", "params": {"w": 8, "h": 8}},
         ]});
         match parse_method("continue", &params).unwrap() {
-            Request::Host(HostOp::Resume(verb)) => assert_eq!(verb.collect.len(), 2),
+            Request::Host(HostOp::Resume(verb)) => assert_eq!(verb.collect.len(), 3),
             other => panic!("expected resume, got {other:?}"),
         }
         let bad = json!({"collect": [
@@ -2122,6 +2214,67 @@ mod tests {
         let b = exec_core(&mut emu, &mut ctx, &CoreOp::Digest).unwrap();
         assert_eq!(a["digest"], b["digest"]);
         assert_eq!(a["width"], FB_WIDTH);
+    }
+
+    #[test]
+    fn region_digest_covers_only_its_rectangle() {
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+        let rect = FrameRect {
+            x: 4,
+            y: 8,
+            w: 16,
+            h: 4,
+        };
+        let a = exec_core(&mut emu, &mut ctx, &CoreOp::RegionDigest { rect }).unwrap();
+        let b = exec_core(&mut emu, &mut ctx, &CoreOp::RegionDigest { rect }).unwrap();
+        assert_eq!(a["digest"], b["digest"]);
+        assert_eq!(a["x"], 4);
+        assert_eq!(a["w"], 16);
+        // The reply reports the frame geometry, not the region's, so a
+        // caller can tell why stale coordinates were rejected.
+        assert_eq!(a["width"], FB_WIDTH);
+        // A different rectangle of the same frame is a different digest
+        // (the test ROM's display is not uniform across these rows).
+        let whole = exec_core(&mut emu, &mut ctx, &CoreOp::Digest).unwrap();
+        assert_ne!(a["digest"], whole["digest"]);
+    }
+
+    #[test]
+    fn region_digest_rejects_a_rectangle_off_the_frame() {
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+        let err = exec_core(
+            &mut emu,
+            &mut ctx,
+            &CoreOp::RegionDigest {
+                rect: FrameRect {
+                    x: 0,
+                    y: 0,
+                    w: FB_WIDTH + 1,
+                    h: 1,
+                },
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.code, proto::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn region_digest_parses_defaults_and_rejects_empty_rectangles() {
+        assert_eq!(
+            core("capture.region_digest", json!({"w": 8, "h": 4})),
+            CoreOp::RegionDigest {
+                rect: FrameRect {
+                    x: 0,
+                    y: 0,
+                    w: 8,
+                    h: 4
+                }
+            }
+        );
+        assert!(parse_method("capture.region_digest", &json!({"w": 0, "h": 4})).is_err());
+        assert!(parse_method("capture.region_digest", &json!({"h": 4})).is_err());
     }
 
     #[test]
