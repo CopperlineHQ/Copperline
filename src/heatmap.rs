@@ -168,12 +168,18 @@ impl HeatMap {
         let Some(first) = self.cell_of(addr) else {
             return;
         };
-        let last = self
-            .cell_of(addr.wrapping_add(len.max(1)).wrapping_sub(1))
-            .unwrap_or(first);
+        let end = addr.wrapping_add(len.max(1)).wrapping_sub(1);
+        let last = match self.cell_of(end) {
+            Some(cell) => cell,
+            // Past the top of the window: mark what the transfer does
+            // cover rather than only its first cell, which would
+            // under-report every access near the window's edge. A
+            // transfer that wrapped the address space (end below its own
+            // start) is recorded at its first cell instead of sweeping.
+            None if end > addr => CELLS - 1,
+            None => first,
+        };
         let stamp = frame as u32;
-        // A transfer never spans more than a handful of cells; a wrapped
-        // range is recorded at its first cell rather than sweeping.
         for cell in first..=last.max(first) {
             self.source[cell] = by.code();
             self.stamp[cell] = stamp;
@@ -299,6 +305,20 @@ mod tests {
         let mut map = HeatMap::new(0, DEFAULT_SPAN);
         map.touch(0x1000, 1024, Toucher::Disk, 5);
         assert_eq!(map.census(5), vec![(Toucher::Disk, 4)]);
+    }
+
+    #[test]
+    fn a_transfer_running_past_the_window_marks_the_part_inside_it() {
+        let mut map = HeatMap::new(0, DEFAULT_SPAN);
+        let per_cell = map.bytes_per_cell();
+        // Starts two cells from the top and runs well past the end.
+        map.touch(
+            map.span() - 2 * per_cell,
+            16 * per_cell,
+            Toucher::Blitter,
+            0,
+        );
+        assert_eq!(map.census(0), vec![(Toucher::Blitter, 2)]);
     }
 
     #[test]

@@ -282,6 +282,19 @@ pub fn mouse_to(
                 inject(emu, InputAction::MouseMove { port, dx, dy });
                 emu.step_frame()
                     .map_err(|e| CtlError::internal(format!("stepping the mouse servo: {e:#}")))?;
+                // step_frame reports Ok even when it ended early on a
+                // breakpoint or watch, so without this the servo would
+                // keep stepping and swallow the stop entirely. The stop
+                // stays pending for the normal path to surface.
+                if emu.machine.ui_debug_stop_pending() {
+                    return Err(CtlError::invalid_state(format!(
+                        "a debugger stop interrupted the pointer servo after {} frame(s); \
+                         the pointer is short of ({}, {})",
+                        servo.frames(),
+                        target.0,
+                        target.1,
+                    )));
+                }
             }
             ServoStep::Arrived { x, y, frames } => {
                 return Ok(json!({

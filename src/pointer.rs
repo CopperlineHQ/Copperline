@@ -113,6 +113,11 @@ impl PointerServo {
         self.target
     }
 
+    /// Frames this servo has spent so far.
+    pub fn frames(&self) -> u32 {
+        self.frames
+    }
+
     /// Read the pointer off the frame just completed and decide the next
     /// move.
     pub fn poll(&mut self, bus: &Bus) -> ServoStep {

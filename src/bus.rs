@@ -2579,9 +2579,6 @@ impl Bus {
         self.rtc_present
     }
 
-    /// Replace the debugger-window custom-register watch set (word
-    /// offsets into $DFF000). A pending unpolled hit is dropped, so a
-    /// stale hit cannot fire after its watch was removed.
     /// Arm or disarm the custom-register access validator and the
     /// last-writer table. Disarming drops the report: it describes a
     /// window that is over.
@@ -2956,6 +2953,9 @@ impl Bus {
         }
     }
 
+    /// Replace the debugger-window custom-register watch set (word
+    /// offsets into $DFF000). A pending unpolled hit is dropped, so a
+    /// stale hit cannot fire after its watch was removed.
     pub fn set_ui_reg_watches(&mut self, offsets: &[u16]) {
         self.ui_reg_watches = offsets.to_vec();
         self.ui_reg_hit = None;
