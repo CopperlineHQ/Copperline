@@ -324,6 +324,18 @@ To expose the fetch/render split directly, add:
 COPPERLINE_DIAG_SPRCAP=42 COPPERLINE_DIAG_SPRITE_PIXELS=42,1
 ```
 
+## Probe server (`probesrv.asm`)
+
+`./build.sh probesrv` builds `probesrv.adf`, a resident serial-driven loader
+for the hardware reference rig (`tools/hwrig/`, plan in the repo-root
+`HARDWARE-RIG-PLAN.md`). Booted once, it relocates itself to $70000 and then
+serves the serial port forever: the host uploads an assembled probe binary,
+tells it to run, and reads the probe's serial output back -- so iterating on a
+probe against a real machine (or an emulator over TCP) takes seconds instead
+of a floppy image per attempt. The committed probes upload and run
+byte-for-byte unmodified; the wire protocol and memory contract are documented
+in the `probesrv.asm` header and `tools/hwrig/README.md`.
+
 ## CI golden renders (`timing-test/golden/`)
 
 `tests/probe_golden.rs` runs the timing test and the stable display probes

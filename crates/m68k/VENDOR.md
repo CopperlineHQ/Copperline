@@ -144,9 +144,13 @@ Given back (first Copperline -> upstream contributions, 2026-07-15):
   upper-bound path), closing the residual upstream documented as unclear;
   takes their SST cycle match to 100%.
 
-A larger give-side backlog (cputest semantics batch, exception frame formats,
-STOP semantics, 68060, 80-bit FPU, MMU completion) is catalogued in the
-repo-root `m68k-rs-trio-submission.md` intro-issue draft.
+A larger give-side backlog remains portable if upstream wants it (from the
+2026-07-15 submission notes): per-generation BCD undefined-flag models, CHK.L
+(not decoded upstream), MOVE-from-SR privilege on 68010+, CHK2/CMP2 signed
+bounds, PACK adjustment order, CAS2/MULL/DIVL register-collision write orders,
+exception stack frame formats per M68020UM table 6-5, STOP semantics, and
+larger items (68060 support, the 80-bit extended-precision FPU) that would
+need a scoping discussion with upstream first.
 
 ## Fixtures (not committed -- large)
 
