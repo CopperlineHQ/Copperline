@@ -2286,6 +2286,11 @@ fn wrap_text(text: &str, first_width: usize, rest_width: usize) -> Vec<String> {
     lines
 }
 
+/// Contributors and Patreon sponsors credited in the About panel. Keep
+/// both in step with CREDITS.md and the website's Community section.
+const CONTRIBUTORS: &[&str] = &["Bernie Innocenti", "Lee Hobson", "jbl007"];
+const PATREON_SPONSORS: &[&str] = &["Lee Hobson"];
+
 fn draw_about(frame: &mut [u8], rect: Rect, view: &AboutView, scale: usize) {
     let cx = |text: &str, px: usize| rect.x + rect.w.saturating_sub(text.len() * 8 * px) / 2;
     let title = "Copperline";
@@ -2322,6 +2327,12 @@ fn draw_about(frame: &mut [u8], rect: Rect, view: &AboutView, scale: usize) {
         draw_panel_text(frame, rect.x + 24, y, line, PANEL_TEXT_DIM, 1, scale);
         y += 12;
     }
+    y += 10;
+    let contributors = format!("Contributors: {}", CONTRIBUTORS.join(", "));
+    draw_panel_text(frame, rect.x + 24, y, &contributors, PANEL_TEXT, 1, scale);
+    y += 12;
+    let sponsors = format!("Patreon sponsors: {}", PATREON_SPONSORS.join(", "));
+    draw_panel_text(frame, rect.x + 24, y, &sponsors, PANEL_TEXT, 1, scale);
 }
 
 fn draw_drop_chooser(

@@ -19,6 +19,10 @@ others are personal links covering all of Andrew "LinuxJedi" Hutchings'
 open-source work, including
 [AmigaRGBtoHDMI](https://github.com/LinuxJedi/AmigaRGBtoHDMI).
 
+Patrons whose tier includes a credit are thanked by name in
+[CREDITS.md](CREDITS.md), in the app's About window, and on
+[copperline.dev](https://copperline.dev/).
+
 ## First goal: signed binaries
 
 Today the macOS disk image is only ad-hoc signed, and the Windows build is
