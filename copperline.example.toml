@@ -355,6 +355,14 @@ video = "PAL"
 # pixel-exact comparison against square-pixel emulators). phosphor: CRT
 # persistence fraction (0.0-0.95, default 0.0): fuses field-rate
 # flicker/dither like a real tube at the cost of a slight motion trail.
+# shader: GPU shader pass over the window image. "none" (default),
+# the built-in CRT presets "scanlines", "mask" and "crt", or the path of a
+# .wgsl file to load a shader of your own (see
+# docs/guide/configuration.md). This is a window-display effect only:
+# screenshots, frame dumps, recordings and headless runs are never
+# shader-processed, so captures stay comparable whatever is set here.
+# shader_strength: how strongly the shader is mixed in, 0.0-1.0 (default
+# 1.0, the preset's full effect); 0.0 leaves the picture visually untouched.
 # full_screen: open the window fullscreen at start (default false; also
 # --full-screen / --windowed, and Cmd/Alt+F toggles it live).
 # status_bar: show the status bar at start (default true; also
@@ -363,6 +371,8 @@ video = "PAL"
 # overscan = "tv"
 # pixel_aspect = "tv"
 # phosphor = 0.4
+# shader = "none"
+# shader_strength = 1.0
 # full_screen = false
 # status_bar = true
 

@@ -214,6 +214,12 @@ pub struct Config {
     /// decay that fuses field-rate dither and interlace flicker on a
     /// real CRT.
     pub phosphor: f32,
+    /// GPU shader pass applied to the window image. See [`ShaderMode`].
+    pub shader: ShaderMode,
+    /// How strongly the shader pass is mixed in, 0.0 (invisible) to 1.0
+    /// (the preset's full effect, the default). A single knob for every
+    /// preset so the effect can be dialled back without editing shaders.
+    pub shader_strength: f32,
     /// Open the window in fullscreen at start (`[display] full_screen`, or
     /// `--full-screen` / `--windowed`). The `Cmd+F` / `Alt+F` toggle flips it
     /// live without affecting this start-up value.
@@ -297,6 +303,70 @@ pub enum PixelAspect {
     /// Slightly taller than a real 4:3 CRT picture, but every pixel is
     /// an integer square, which suits side-by-side pixel comparisons.
     Square,
+}
+
+/// The GPU shader pass the window applies to the presented image. The
+/// `COPPERLINE_SHADER` env var overrides the config for one run. A
+/// presentation stage only: screenshots, frame dumps, recordings and
+/// headless runs never see it, so captures stay comparable whatever is
+/// selected here.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ShaderMode {
+    /// Present the deinterlaced image untouched. The default. Spelled
+    /// "none" or "off" in the config.
+    #[default]
+    None,
+    /// Darken alternate output rows: the line structure a 15 kHz CRT
+    /// leaves between scanlines.
+    Scanlines,
+    /// Modulate the output through an RGB phosphor mask, like the
+    /// aperture grille of a Trinitron-class monitor.
+    Mask,
+    /// Scanlines and phosphor mask together with a tube's slight bloom:
+    /// the full CRT look.
+    Crt,
+    /// A user WGSL fragment shader loaded from this path at start-up.
+    Custom(PathBuf),
+}
+
+impl ShaderMode {
+    /// The mode without its custom path, for callers that only name the
+    /// selection (menu labels, status text).
+    pub fn kind(&self) -> ShaderKind {
+        match self {
+            ShaderMode::None => ShaderKind::None,
+            ShaderMode::Scanlines => ShaderKind::Scanlines,
+            ShaderMode::Mask => ShaderKind::Mask,
+            ShaderMode::Crt => ShaderKind::Crt,
+            ShaderMode::Custom(_) => ShaderKind::Custom,
+        }
+    }
+}
+
+/// A [`ShaderMode`] stripped of its custom-shader path, so it is `Copy`
+/// and can sit in the `Copy` label structs the menu and status bar build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShaderKind {
+    None,
+    Scanlines,
+    Mask,
+    Crt,
+    Custom,
+}
+
+impl ShaderKind {
+    /// Picker label: the config name of the preset (round-trips through
+    /// [`parse_shader`], which takes "off" as well as "none"), or
+    /// "custom" for a user shader, whose path is too long to name here.
+    pub fn label(self) -> &'static str {
+        match self {
+            ShaderKind::None => "off",
+            ShaderKind::Scanlines => "scanlines",
+            ShaderKind::Mask => "mask",
+            ShaderKind::Crt => "crt",
+            ShaderKind::Custom => "custom",
+        }
+    }
 }
 
 /// Host input source for the emulated port-2 joystick/CD32 pad. `Gamepad` (the
@@ -1360,6 +1430,8 @@ impl Default for Config {
             overscan: Overscan::Tv,
             pixel_aspect: PixelAspect::Tv,
             phosphor: 0.0,
+            shader: ShaderMode::None,
+            shader_strength: 1.0,
             full_screen: false,
             status_bar: true,
             joystick_input_mode: JoystickInputMode::Gamepad,
@@ -1841,6 +1913,13 @@ pub(crate) struct RawDisplay {
     /// CRT phosphor persistence fraction, 0.0 (off, default) to 0.95.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) phosphor: Option<f32>,
+    /// Window shader pass: "none" (default), "scanlines", "mask", "crt",
+    /// or the path of a `.wgsl` file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) shader: Option<String>,
+    /// Shader mix, 0.0 (invisible) to 1.0 (full effect, the default).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) shader_strength: Option<f32>,
     /// Open fullscreen at start (default false).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) full_screen: Option<bool>,
@@ -2669,6 +2748,20 @@ impl TryFrom<RawConfig> for Config {
                 defaults.phosphor
             }
         };
+        let shader = match raw.display.shader.as_deref() {
+            None => defaults.shader.clone(),
+            Some(s) => parse_shader(s)?,
+        };
+        let shader_strength = match raw.display.shader_strength {
+            None => defaults.shader_strength,
+            Some(p) if (0.0..=1.0).contains(&p) => p,
+            Some(p) => {
+                errors.push(anyhow!(
+                    "[display] shader_strength must be between 0.0 and 1.0, got {p}"
+                ));
+                defaults.shader_strength
+            }
+        };
         let full_screen = raw.display.full_screen.unwrap_or(defaults.full_screen);
         let status_bar = raw.display.status_bar.unwrap_or(defaults.status_bar);
         let joystick_input_mode = match raw.input.joystick.as_deref() {
@@ -3088,6 +3181,8 @@ impl TryFrom<RawConfig> for Config {
             overscan,
             pixel_aspect,
             phosphor,
+            shader,
+            shader_strength,
             full_screen,
             status_bar,
             joystick_input_mode,
@@ -3158,6 +3253,28 @@ pub(crate) fn parse_pixel_aspect(s: &str) -> Result<PixelAspect> {
         "tv" => Ok(PixelAspect::Tv),
         "square" => Ok(PixelAspect::Square),
         other => bail!("[display] pixel_aspect must be \"tv\" or \"square\", got \"{other}\""),
+    }
+}
+
+/// Parse a `[display] shader` value: a preset name ("off" is accepted for
+/// "none", so [`ShaderKind::label`] round-trips), or the path of a `.wgsl`
+/// file, which is kept verbatim since host paths are case-sensitive.
+/// Whether the file exists is the loader's business, not the parser's:
+/// a missing custom shader falls back to no shader rather than failing
+/// the whole config.
+pub(crate) fn parse_shader(s: &str) -> Result<ShaderMode> {
+    let s = s.trim();
+    match s.to_ascii_lowercase().as_str() {
+        "none" | "off" => Ok(ShaderMode::None),
+        "scanlines" => Ok(ShaderMode::Scanlines),
+        "mask" => Ok(ShaderMode::Mask),
+        "crt" => Ok(ShaderMode::Crt),
+        lower if lower.ends_with(".wgsl") => Ok(ShaderMode::Custom(PathBuf::from(s))),
+        _ => Err(anyhow!(
+            "[display] shader must be \"none\", \"scanlines\", \"mask\", \"crt\", \
+             or a \".wgsl\" file path, got {:?}",
+            s
+        )),
     }
 }
 
@@ -4006,6 +4123,40 @@ pub fn resolve_pixel_aspect(from_config: PixelAspect) -> PixelAspect {
     }
 }
 
+/// Resolve the window shader pass: the `COPPERLINE_SHADER` env var (a
+/// preset name or a `.wgsl` path) overrides the `[display] shader` config
+/// for one run.
+pub fn resolve_shader(from_config: ShaderMode) -> ShaderMode {
+    match crate::envcfg::var("COPPERLINE_SHADER") {
+        Some(v) => match parse_shader(&v) {
+            Ok(m) => m,
+            Err(e) => {
+                log::warn!("ignoring COPPERLINE_SHADER: {e}");
+                from_config
+            }
+        },
+        None => from_config,
+    }
+}
+
+/// Resolve the shader mix: the `COPPERLINE_SHADER_STRENGTH` env var
+/// (0.0..=1.0) overrides the `[display] shader_strength` config for one
+/// run.
+pub fn resolve_shader_strength(from_config: f32) -> f32 {
+    match crate::envcfg::var("COPPERLINE_SHADER_STRENGTH") {
+        Some(v) => match v.trim().parse::<f32>() {
+            Ok(p) if (0.0..=1.0).contains(&p) => p,
+            _ => {
+                log::warn!(
+                    "COPPERLINE_SHADER_STRENGTH must be between 0.0 and 1.0, got {v:?}; using config value"
+                );
+                from_config
+            }
+        },
+        None => from_config,
+    }
+}
+
 /// Substitute the bundled AROS ROM when the user named no ROM. The default
 /// `rom_path` is a sentinel ([`BUNDLED_AROS_ROM`]); any real path from
 /// `rom = "..."` or the CLI argument replaces it before this runs and is left
@@ -4784,6 +4935,123 @@ mod tests {
         assert!(parse_config("[display]\nphosphor = 1.5").is_err());
         assert!(parse_config("[display]\nphosphor = -0.1").is_err());
         Ok(())
+    }
+
+    #[test]
+    fn display_shader_parses_presets_and_defaults_to_none() -> Result<()> {
+        assert_eq!(parse_config("")?.shader, ShaderMode::None);
+        assert_eq!(parse_shader(" None ")?, ShaderMode::None);
+        // "off" is the label spelling, and must parse back to the same mode.
+        assert_eq!(parse_shader("off")?, ShaderMode::None);
+        assert_eq!(parse_shader(" OFF ")?, ShaderMode::None);
+        assert_eq!(parse_shader(ShaderKind::None.label())?, ShaderMode::None);
+        assert_eq!(parse_shader("SCANLINES")?, ShaderMode::Scanlines);
+        assert_eq!(parse_shader("Mask")?, ShaderMode::Mask);
+        assert_eq!(parse_shader("\tcrt\n")?, ShaderMode::Crt);
+        let cfg = parse_config(
+            r#"
+            [display]
+            shader = "CRT"
+            "#,
+        )?;
+        assert_eq!(cfg.shader, ShaderMode::Crt);
+        Ok(())
+    }
+
+    #[test]
+    fn display_shader_takes_a_wgsl_path_verbatim() -> Result<()> {
+        // Host paths are case-sensitive, so only the extension match is
+        // case-insensitive: the path itself must survive unchanged.
+        assert_eq!(
+            parse_shader("shaders/my.wgsl")?,
+            ShaderMode::Custom(PathBuf::from("shaders/my.wgsl"))
+        );
+        assert_eq!(
+            parse_shader(" /abs/path/My.WGSL ")?,
+            ShaderMode::Custom(PathBuf::from("/abs/path/My.WGSL"))
+        );
+        assert_eq!(parse_shader("shaders/my.wgsl")?.kind(), ShaderKind::Custom);
+        assert_eq!(ShaderKind::Custom.label(), "custom");
+
+        // The same through a whole config: a missing file is the loader's
+        // problem, so parsing keeps the path as written.
+        let cfg = parse_config(
+            r#"
+            [display]
+            shader = "shaders/Aperture.wgsl"
+            "#,
+        )?;
+        assert_eq!(
+            cfg.shader,
+            ShaderMode::Custom(PathBuf::from("shaders/Aperture.wgsl"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn display_shader_rejects_an_unknown_name() {
+        let e = parse_shader("bloom").unwrap_err().to_string();
+        assert!(
+            e.contains("scanlines") && e.contains("crt") && e.contains(".wgsl"),
+            "{e}"
+        );
+        // Quoted as written, since a rejected value is usually a mistyped
+        // path and lowercasing it would hide the typo.
+        let e = parse_shader(" Shaders/Bloom.wsgl ")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains(r#""Shaders/Bloom.wsgl""#), "{e}");
+        assert!(parse_config("[display]\nshader = \"bloom\"").is_err());
+    }
+
+    #[test]
+    fn display_shader_strength_parses_and_rejects_out_of_range() -> Result<()> {
+        assert_eq!(parse_config("")?.shader_strength, 1.0);
+        let cfg = parse_config(
+            r#"
+            [display]
+            shader_strength = 0.5
+            "#,
+        )?;
+        assert_eq!(cfg.shader_strength, 0.5);
+        assert!(parse_config("[display]\nshader_strength = 1.5").is_err());
+        assert!(parse_config("[display]\nshader_strength = -0.1").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn display_shader_keys_round_trip_through_saved_toml() {
+        let raw = RawConfig {
+            display: RawDisplay {
+                shader: Some("crt".to_string()),
+                shader_strength: Some(0.75),
+                ..RawDisplay::default()
+            },
+            ..RawConfig::default()
+        };
+        let text = raw.to_toml_string().unwrap();
+        let back: RawConfig = toml::from_str(&text).unwrap();
+        assert_eq!(raw, back, "round-trip mismatch; TOML was:\n{text}");
+    }
+
+    #[test]
+    fn display_custom_shader_path_round_trips_through_saved_toml() {
+        // A Windows path is all backslashes, which TOML escapes: the saved
+        // file must parse back to the identical path, not a mangled one.
+        let path = r"C:\Amiga\shaders\crt.wgsl";
+        let raw = RawConfig {
+            display: RawDisplay {
+                shader: Some(path.to_string()),
+                ..RawDisplay::default()
+            },
+            ..RawConfig::default()
+        };
+        let text = raw.to_toml_string().unwrap();
+        let back: RawConfig = toml::from_str(&text).unwrap();
+        assert_eq!(raw, back, "round-trip mismatch; TOML was:\n{text}");
+
+        let cfg: Config = back.try_into().unwrap();
+        assert_eq!(cfg.shader, ShaderMode::Custom(PathBuf::from(path)));
     }
 
     #[test]

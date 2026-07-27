@@ -460,6 +460,74 @@ panels_render_into_their_rects` renders every panel into
 from there -- and the `test_app()` fixture drives the debugger window
 against a real emulator instance in the unit tests.
 
+### CRT shader pass (`window/crt_shader.rs`)
+
+The optional tube emulation (`[display] shader`, off by default) is a second
+pass inside the same `pixels` `render_with` closure the RTG texture uses:
+the scaling renderer draws the composited buffer first, then `CrtShader`
+re-draws the display rectangle through a fragment shader. Its viewport is
+the display sub-rect of the letterboxed clip rect -- the clip rect scaled by
+`present_height() / window_present_height()`, the same multiply-then-divide
+the RTG display rect uses so the two land identically -- and it samples only
+the matching `src_rect` of the presentation texture, so the status bar
+below is neither read nor overdrawn. `uniforms_for` builds the uniform block
+and that viewport from pure arithmetic, with no GPU state, so the mapping is
+unit tested on its own.
+
+One 64-byte uniform block goes to the GPU per presented frame: the display
+sub-rect in UV, the viewport size in physical pixels and the source region
+in texels, the strength, the scanline count, and the per-preset mask,
+curvature and vignette knobs. Three presets (`shaders/scanlines.wgsl`,
+`mask.wgsl`, `crt.wgsl`) are `include_str!`-embedded and compiled into
+pipelines at window creation, so switching preset at runtime is a pipeline
+selection, not a compile.
+
+`sample_display` clamps the sample half a texel inside `src_rect` rather
+than to its edge. On the boundary a linear tap is a 50/50 blend with the
+texel on the far side, which along the bottom edge is the status bar's
+separator hairline; that reaches the picture whenever the display rect is
+magnified (the last fragment row lands past the last texel centre) or a
+preset's curvature warps a coordinate off the face.
+
+The scanline count is what the window actually shows, not what the
+framebuffer holds (`crt_scanline_count`). The TV-aperture present path
+copies a fixed `TV_PAL_PRESENT_HEIGHT` (540) row crop rather than the whole
+woven buffer, so its count comes from the aperture -- 270 lines, against 285
+for a standard PAL field in `"full"` overscan -- and is rescaled by the
+rect/content ratio when the square-pixel canvas pads the aperture with bezel
+rows. Interlaced content is deliberately drawn at field-line pitch over the
+woven frame: one gap per emulated line, which is what a 15 kHz set fed an
+interlaced signal looks like, rather than one per woven row.
+
+Three classes of frame skip the pass. While a menu or panel is open the CRT
+pass would re-draw the UI the compositor just wrote into the buffer, through
+a phosphor mask and a curved face, so it is suspended for the same reason
+the RTG GPU path above falls back. RTG scanout reaches the surface through
+the RTG texture, not the buffer this pass samples. And a programmable
+multisync scan (amifb's 31 kHz console, DblPAL, SHRES) has no 15 kHz line
+structure to reproduce and no woven fields, so the two-rows-per-line count
+would not hold either; `present_programmable` carries that flag out of the
+render worker.
+
+A custom shader (`[display] shader = "path.wgsl"`) is checked by naga --
+parse, full validation, and a look for the `vs_main`/`fs_main` entry points
+-- before any pipeline is built, so a mistake is reported with its WGSL
+source location instead of surfacing as a device error later; the file is
+size-capped at 1 MiB. It is loaded at window creation, at launcher machine
+start, and each time the menu cycles onto `Custom`, which re-reads it from
+disk (the live-reload path). A failed load leaves no custom pipeline, and
+the selection falls back to `None` with the full diagnostic logged and its
+first line shown as an OSD message.
+
+Every capture path bypasses the pass by construction rather than by a check:
+screenshots, frame dumps, video recording, CCP capture and the web frontend
+all read the CPU presentation buffer, and the shader only ever writes to the
+surface. Strength 0 makes every preset's arithmetic an exact identity, but
+the pass is still a resample through a plain linear sampler where the
+scaling renderer uses a texel-snapped sharp bilinear, so it is marginally
+softer at magnification than the pass-through; `ShaderKind::None` skips the
+pass entirely and is the only zero-cost path.
+
 ## Headless capture (`screenshot.rs`)
 
 `--screenshot-after` and `--dump-frames` render through the identical
