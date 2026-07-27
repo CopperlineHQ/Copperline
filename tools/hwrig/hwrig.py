@@ -171,7 +171,12 @@ class ProbeServer:
         noise or a late probe line and is echoed, not silently dropped."""
         deadline = time.monotonic() + timeout
         while True:
-            line = self.t.read_line(max(0.1, deadline - time.monotonic()))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                # A chattering server can otherwise defeat the deadline: each
+                # line resets the per-read budget and this loop never exits.
+                raise TimeoutError(f"no {want!r} from the server within {timeout:g}s")
+            line = self.t.read_line(remaining)
             if self.verbose:
                 print(f"<- {line}", file=sys.stderr)
             if line.startswith(want):
@@ -205,8 +210,11 @@ class ProbeServer:
         out = []
         deadline = time.monotonic() + timeout
         while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return out, False
             try:
-                line = self.t.read_line(max(0.1, deadline - time.monotonic()))
+                line = self.t.read_line(remaining)
             except TimeoutError:
                 return out, False
             if line == "READY":
@@ -270,6 +278,14 @@ class Mcu:
     def __init__(self, port: str, baud: int = 19200):
         self.t = SerialTransport(port, baud)
         time.sleep(2.0)  # the Uno auto-resets when the port opens
+        # Drain the firmware's reset banner ("OK hwrig-mcu ..."), otherwise
+        # the first command's reply would be the banner and every later reply
+        # would be off by one.
+        try:
+            while True:
+                self.t.read_line(0.5)
+        except TimeoutError:
+            pass
 
     def command(self, text: str, timeout: float = 15.0) -> str:
         self.t.write(text.encode("ascii") + b"\n")

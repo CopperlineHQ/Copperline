@@ -62,7 +62,11 @@ def main():
     png = os.path.join(case, stem+'.png')
     raw = os.path.join(case, stem+'.vamiga.raw')
     ref = open(raw,'rb').read()
+    if len(ref) != W*H*3:
+        sys.exit(f"error: {raw}: expected {W*H*3} bytes ({W}x{H} RGB), got {len(ref)}")
     img, w, h, ch = read_png_rgb(png)
+    if w != W or h < 2*(H - Y_SHIFT):
+        sys.exit(f"error: {png}: expected a {W}x{2*H} line-doubled CL shot, got {w}x{h}")
     # Build three panels at full H rows (va at native, cl halved), 3px gap
     gap = 4
     outH = H*3 + gap*2
@@ -89,7 +93,6 @@ def main():
             else:
                 g = va[0]//3
                 out[oi3:oi3+3] = bytes([g,g,g])
-    outpath = sys.argv[2] if len(sys.argv)>2 else '/tmp/diffview.png'
     write_png(outpath, W, outH, bytes(out))
     print(f"wrote {outpath} ({W}x{outH}) VA(top)/CL(mid)/diff(bot)")
 
