@@ -244,7 +244,9 @@ tool window or overlay.
   extended ROM). The machine then cold-resets, as if the chip had been
   swapped and the power cycled.
 - **Keyboard Shortcuts...**: the shortcut reference.
-- **About...**: app version plus a summary of the emulated machine. Builds
+- **About...**: app version plus a summary of the emulated machine, and
+  credits including Copperline's contributors and Patreon sponsors (see
+  `CREDITS.md`). Builds
   made from an untagged git commit append the short commit ID to the version
   shown in the window title and About panel.
 
