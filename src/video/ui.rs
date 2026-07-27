@@ -5228,6 +5228,7 @@ fn draw_launcher_row(
             | LauncherField::AudioStereoSeparation
             | LauncherField::MouseSensitivity
             | LauncherField::MouseCapture
+            | LauncherField::ShaderStrength
     );
     if let Some(reason) = reason {
         if !blank_when_greyed {

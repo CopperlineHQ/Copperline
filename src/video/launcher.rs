@@ -1827,6 +1827,9 @@ impl MachineSetup {
             F::Df1Image | F::Df1WriteProtect => reason(self.floppy_drives >= 2, "drive off"),
             F::Df2Image | F::Df2WriteProtect => reason(self.floppy_drives >= 3, "drive off"),
             F::Df3Image | F::Df3WriteProtect => reason(self.floppy_drives >= 4, "drive off"),
+            // Shader strength only feeds the shader pass, which does not run when
+            // the shader is off.
+            F::ShaderStrength => reason(self.shader != ShaderMode::None, "shader off"),
             // A boot priority or read-only flag is meaningless without a
             // directory to mount.
             F::Filesys0Boot | F::Filesys1Boot | F::Filesys2Boot | F::Filesys3Boot => {
@@ -3947,6 +3950,20 @@ mod tests {
         assert!(!three.row_hidden(F::Df1Image));
         assert!(!three.row_hidden(F::Df2WriteProtect));
         assert!(three.row_hidden(F::Df3Image));
+    }
+
+    #[test]
+    fn shader_strength_greys_when_shader_off() {
+        use LauncherField as F;
+        let mut s = MachineSetup::default();
+        // The shader is off by default, so its strength does nothing and greys.
+        assert_eq!(s.value_label(F::Shader), "Off");
+        assert_eq!(s.disabled_reason(F::ShaderStrength), Some("shader off"));
+        assert!(!s.applies(F::ShaderStrength));
+        // Turning a shader on makes the strength editable again.
+        s.cycle(F::Shader, true); // Off -> the first real shader
+        assert_ne!(s.value_label(F::Shader), "Off");
+        assert_eq!(s.disabled_reason(F::ShaderStrength), None);
     }
 
     #[test]
