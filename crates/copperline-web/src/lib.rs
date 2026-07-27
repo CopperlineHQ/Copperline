@@ -16,7 +16,10 @@ use std::rc::Rc;
 
 use copperline::audio::AudioSink;
 use copperline::bus::PortDevice;
-use copperline::config::{machine_profile_defaults, parse_machine_model, Config, Overscan};
+use copperline::chipset::agnus::VideoStandard;
+use copperline::config::{
+    machine_profile_defaults, parse_machine_model, parse_video_standard, Config, Overscan,
+};
 use copperline::emulator::{build_machine, Emulator};
 use copperline::serial::{ChannelSerialHandle, ChannelSerialSink};
 use copperline::video::deinterlace::Deinterlacer;
@@ -219,6 +222,10 @@ pub struct WebEmu {
     /// Host side of Paula's serial port; the page bridges it to whatever
     /// byte stream it likes (typically a WebSocket to a telnet gateway).
     serial: ChannelSerialHandle,
+    /// Presentation overscan, the desktop's `[display] overscan` knob: `Tv`
+    /// masks the deep horizontal overscan like a CRT bezel (the default),
+    /// `Full` presents everything Denise produced.
+    overscan: Overscan,
 }
 
 #[wasm_bindgen]
@@ -232,12 +239,21 @@ impl WebEmu {
     /// desktop flag takes is accepted here, but the ones outside that list
     /// may need pieces a browser page cannot supply (CDTV/CD32 want an
     /// extended ROM and a CD). An unknown name throws.
+    ///
+    /// `video` picks the video standard ("PAL" or "NTSC", the desktop's
+    /// `[chipset] video` key) on top of whatever the profile chose; omitted
+    /// or empty keeps the profile's own standard (PAL for every offered
+    /// profile). An unknown name throws, like an unknown model.
     #[wasm_bindgen(constructor)]
-    pub fn new(model: Option<String>) -> Result<WebEmu, JsValue> {
-        let cfg = match model.as_deref().map(str::trim) {
+    pub fn new(model: Option<String>, video: Option<String>) -> Result<WebEmu, JsValue> {
+        let mut cfg = match model.as_deref().map(str::trim) {
             None | Some("") => Config::default(),
             Some(name) => machine_profile_defaults(parse_machine_model(name).map_err(js_err)?),
         };
+        match video.as_deref().map(str::trim) {
+            None | Some("") => {}
+            Some(name) => cfg.video_standard = parse_video_standard(name).map_err(js_err)?,
+        }
         let audio = Rc::new(RefCell::new(Vec::new()));
         let sink = WebAudioSink { buf: audio.clone() };
         // rom_optional: the default rom_path names the bundled AROS file,
@@ -262,6 +278,7 @@ impl WebEmu {
             mouse_remainder: (0.0, 0.0),
             mouse_pending: (0, 0),
             serial,
+            overscan: Overscan::Tv,
         })
     }
 
@@ -288,6 +305,14 @@ impl WebEmu {
         vec!["A500".to_string(), "A1200".to_string()]
     }
 
+    /// The video standards the constructor's `video` argument accepts, in
+    /// menu order. Like `models`, the page builds its select from this list
+    /// and its presence doubles as the feature test: older bundles have no
+    /// `video_standards` and the control stays hidden.
+    pub fn video_standards() -> Vec<String> {
+        vec!["PAL".to_string(), "NTSC".to_string()]
+    }
+
     /// The running machine's profile name ("A500", "A1200", ...), or
     /// undefined for a machine no profile describes -- the model-less
     /// default constructor's machine, or a custom-shaped machine restored
@@ -298,6 +323,18 @@ impl WebEmu {
             .machine_descriptor()
             .machine
             .map(|model| format!("{model:?}"))
+    }
+
+    /// The running machine's video standard ("PAL" or "NTSC"). Follows
+    /// `load_state` like `machine_model`, so a page can re-point its video
+    /// select at what a state brought back. This is the machine's fitted
+    /// standard (the Agnus crystal), not the live BEAMCON0 PAL bit ECS
+    /// software can flip at runtime.
+    pub fn video_standard(&self) -> String {
+        match self.emu.machine_descriptor().video_standard {
+            VideoStandard::Pal => "PAL".to_string(),
+            VideoStandard::Ntsc => "NTSC".to_string(),
+        }
     }
 
     /// One-line description of the running machine for bug reports and
@@ -362,6 +399,12 @@ impl WebEmu {
         bitplane::render(self.emu.bus_mut(), &mut self.fb);
         let geometry = self.emu.bus().frame_geometry();
         let canvas_scale = self.emu.bus().frame_canvas_scale();
+        let base = self.emu.bus().frame_render_base();
+        // The desktop's recentring shift (window.rs render jobs): full
+        // overscan recentres a standard display whose deep left overscan
+        // would push the picture right of centre; TV mode is a fixed
+        // aperture and shifts nothing.
+        let h_shift = present_common::presentation_h_shift_for(&base, self.overscan);
         let field_rows = present_common::post_process_rendered_field(
             &mut self.fb,
             geometry,
@@ -369,10 +412,9 @@ impl WebEmu {
             self.emu.bus().frame_presentation_h_window(),
             self.emu.bus().frame_presentation_v_window(),
             visible_start_vpos,
-            0,
-            Overscan::Tv,
+            h_shift,
+            self.overscan,
         );
-        let base = self.emu.bus().frame_render_base();
         self.deinterlacer.push_field(
             &self.fb,
             field_rows,
@@ -383,7 +425,9 @@ impl WebEmu {
         );
         let woven_rows = self.deinterlacer.output_rows();
         let woven = self.deinterlacer.output();
-        if present_common::uses_standard_pal_tv_aperture(geometry, woven_rows, &base) {
+        if self.overscan == Overscan::Tv
+            && present_common::uses_standard_pal_tv_aperture(geometry, woven_rows, &base)
+        {
             // Standard PAL display: present the captured TV aperture, the
             // browser counterpart of the desktop's TV-aperture crop. Clipped
             // to real framebuffer columns so the canvas never shows the
@@ -743,6 +787,27 @@ impl WebEmu {
     /// sprints through frames until the catch-up clamp trips.
     pub fn resync_clock(&mut self) {
         self.anchor = None;
+    }
+
+    /// Presentation overscan, the desktop's `[display] overscan` knob:
+    /// "tv" (the default) masks the deep horizontal overscan margins like a
+    /// CRT bezel and presents standard PAL screens as the captured TV
+    /// aperture; "full" presents the whole overscan field the renderer
+    /// produces. Unknown names are ignored, like `set_port_device`. The
+    /// last completed frame is re-presented under the new aperture, so a
+    /// paused page repaints without stepping the machine.
+    pub fn set_overscan(&mut self, mode: &str) {
+        let overscan = match mode.trim().to_ascii_lowercase().as_str() {
+            "tv" => Overscan::Tv,
+            "full" => Overscan::Full,
+            _ => return,
+        };
+        if overscan == self.overscan {
+            return;
+        }
+        self.overscan = overscan;
+        self.last_rendered_frame = None;
+        self.render_completed_frame();
     }
 
     pub fn set_volume_percent(&mut self, percent: u8) {
