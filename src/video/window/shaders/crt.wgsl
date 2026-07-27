@@ -118,10 +118,22 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     let c = uv * 2.0 - vec2<f32>(1.0);
     let vig = max(1.0 - clamp(u.params2.x, 0.0, 1.0) * dot(c, c), 0.0);
 
+    let shaded = mix(base.rgb, base.rgb * scan * grille * vig, strength);
+
     // Anything the bow pushed off the face is the unlit inside of the
-    // tube. select() rather than an early return so the transition stays
-    // continuous in strength.
-    let outside = wuv.x < 0.0 || wuv.x > 1.0 || wuv.y < 0.0 || wuv.y > 1.0;
-    let lit = select(base.rgb * scan * grille * vig, vec3<f32>(0.0), outside);
-    return vec4<f32>(mix(base.rgb, lit, strength), 1.0);
+    // tube, and a real face ends at a hard edge: off-face pixels are
+    // opaque black whatever the strength. Only the *area* of the region
+    // scales, and it already does, through wuv above -- at strength 0 the
+    // bow is flat, nothing falls off the face, and the no-op invariant
+    // holds. Mixing the black back toward `shaded` instead would fill the
+    // region with a fraction of the edge colour the sampler smears there.
+    //
+    // d is a signed distance to the face in UV, positive outside; fwidth
+    // rescales it to pixels, so the fade covers about one pixel and the
+    // bowed edge does not staircase. Well inside, face is exactly 1 and
+    // the shaded result comes through untouched.
+    let d = max(max(-wuv.x, wuv.x - 1.0), max(-wuv.y, wuv.y - 1.0));
+    let aa = max(fwidth(d), 1e-6);
+    let face = 1.0 - clamp(d / aa + 0.5, 0.0, 1.0);
+    return vec4<f32>(shaded * face, 1.0);
 }

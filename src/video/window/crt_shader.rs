@@ -356,26 +356,44 @@ impl CrtShader {
 }
 
 /// Read a custom shader from disk, refusing anything implausibly large.
+///
+/// The path comes from a config file or the `COPPERLINE_SHADER` env var,
+/// so it is not necessarily a regular file at all. Nothing here reads an
+/// unbounded amount: a non-regular file is rejected on its type before any
+/// read (a FIFO or character device has no meaningful length and never
+/// reaches EOF, which no read bound alone would make safe), and the read
+/// that follows is itself capped.
 fn read_shader_file(path: &Path) -> Result<String, String> {
-    let too_big = |len: u64| {
+    use std::io::Read;
+
+    let io_err = |e: std::io::Error| format!("cannot read shader {}: {e}", path.display());
+    let too_big = || {
         format!(
-            "shader {} is {len} bytes, over the {MAX_CUSTOM_SHADER_BYTES} byte limit",
+            "shader {} is over the {MAX_CUSTOM_SHADER_BYTES} byte limit",
             path.display()
         )
     };
-    match std::fs::metadata(path) {
-        Ok(meta) if meta.len() > MAX_CUSTOM_SHADER_BYTES => return Err(too_big(meta.len())),
-        Ok(_) => {}
-        Err(e) => return Err(format!("cannot read shader {}: {e}", path.display())),
+    let file = std::fs::File::open(path).map_err(io_err)?;
+    // Stat the open handle, not the path: nothing can be swapped in
+    // between the check and the read.
+    let meta = file.metadata().map_err(io_err)?;
+    if !meta.file_type().is_file() {
+        return Err(format!("shader {} is not a regular file", path.display()));
     }
-    let src = std::fs::read_to_string(path)
-        .map_err(|e| format!("cannot read shader {}: {e}", path.display()))?;
-    // The metadata check can race a growing file, and is only advisory on
-    // some filesystems, so re-check what was actually read.
-    if src.len() as u64 > MAX_CUSTOM_SHADER_BYTES {
-        return Err(too_big(src.len() as u64));
+    if meta.len() > MAX_CUSTOM_SHADER_BYTES {
+        return Err(too_big());
     }
-    Ok(src)
+    // The length above is only advisory -- the file can grow between the
+    // stat and the read -- so bound the read as well, by one byte more
+    // than the cap: if that byte arrives, the file is over the limit.
+    let mut buf = Vec::new();
+    file.take(MAX_CUSTOM_SHADER_BYTES + 1)
+        .read_to_end(&mut buf)
+        .map_err(io_err)?;
+    if buf.len() as u64 > MAX_CUSTOM_SHADER_BYTES {
+        return Err(too_big());
+    }
+    String::from_utf8(buf).map_err(|e| format!("shader {} is not valid UTF-8: {e}", path.display()))
 }
 
 /// Parse and validate WGSL, and check it declares the entry points the
@@ -580,6 +598,21 @@ fn fs_main() -> @location(0) vec4<f32> {
         assert!(err.contains("cannot read shader"), "{err}");
         assert!(err.contains("absent.wgsl"), "{err}");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A shader path comes from a config file, so it can name something
+    /// that is not a regular file. Those are rejected on their type,
+    /// before any read: a character device or a FIFO has no meaningful
+    /// length and never reaches EOF, so reading one would hang or run the
+    /// process out of memory however the read is bounded. A directory
+    /// stands in for the class here because it cannot block the test.
+    #[test]
+    fn read_shader_file_rejects_a_non_regular_file() {
+        let dir = temp_dir("nonregular");
+        let err = read_shader_file(&dir).expect_err("a directory is not a shader");
+        assert!(err.contains("not a regular file"), "{err}");
+        assert!(err.contains(&dir.display().to_string()), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1227,6 +1260,55 @@ fn fs_main() -> @location(0) vec4<f32> {
                 "{name} corner ({corner:.1}) should be well below the centre ({centre:.1})"
             );
         }
+    }
+
+    /// The tube face ends at a hard edge: what the bow pushed off it is
+    /// the unlit inside of the tube, black at any strength. Mixing that
+    /// black back toward the sample left the off-face region holding a
+    /// fraction of the edge colour the clamp smears there -- 30 percent of
+    /// it at strength 0.7 -- which read as a coloured halo around the
+    /// bowed picture on every bright border.
+    #[test]
+    fn the_crt_face_edge_is_hard_at_partial_strength() {
+        let Some((device, queue)) = gpu() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        // A saturated display colour, so a fractional leak is unmistakable
+        // rather than a slightly-off grey.
+        let src = source_texture(&device, &queue, [200, 60, 200, 255]);
+        let mut shader = CrtShader::new(&device, FORMAT);
+        let frame = render_preset(
+            &device,
+            &queue,
+            &mut shader,
+            &src,
+            ShaderKind::Crt,
+            0.7,
+            16.0,
+            1,
+        );
+
+        // At 0.7 the bow carries the extreme corners about 5% of the face
+        // past its edge, far outside the one-pixel antialias band.
+        for (name, x, y) in [
+            ("top left", 0, 0),
+            ("top right", frame.dim - 1, 0),
+            ("bottom left", 0, frame.rows - 1),
+            ("bottom right", frame.dim - 1, frame.rows - 1),
+        ] {
+            let p = frame.at(x, y);
+            for (c, v) in p[..3].iter().enumerate() {
+                assert!(
+                    *v <= 4,
+                    "{name} corner is off the face and must be black, channel {c} is {v}: {p:?}"
+                );
+            }
+        }
+        // The picture itself is still lit: the edge treatment must not
+        // have taken the whole frame down with it.
+        let centre = frame.block_mean(frame.dim / 2 - 3, frame.rows / 2 - 3, 6);
+        assert!(centre > 30.0, "the picture went dark too: {centre:.1}");
     }
 
     /// `pixels` recreates its backing texture whenever the buffer is
