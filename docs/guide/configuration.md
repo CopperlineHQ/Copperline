@@ -648,9 +648,9 @@ preferences; the runtime toggles -- `Cmd+F` / `Alt+F` for fullscreen and
 `Cmd+Shift+F` / `Alt+Shift+F` for the status bar, plus their menu items --
 still flip either live without changing the saved value. On the command line
 `--full-screen` / `--windowed` set the fullscreen state and `--show-status-bar` /
-`--hide-status-bar` set the status bar; the launcher's Display page has
-*Start fullscreen* and *Status bar* toggles for the same. Left unset they keep
-the defaults: windowed, status bar shown.
+`--hide-status-bar` set the status bar; the launcher's A/V & Emu page (Video
+category) has *Start fullscreen* and *Status bar* toggles for the same. Left
+unset they keep the defaults: windowed, status bar shown.
 
 Rendering completed frames uses a worker thread by default so emulation can
 advance while the previous frame is painted. The worker is an implementation

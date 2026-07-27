@@ -178,10 +178,13 @@ pub enum LauncherTab {
     IoPorts,
     Input,
     Zorro,
-    /// How the picture is presented: overscan, aspect, and the CRT
-    /// emulation (phosphor and the shader pass).
-    Display,
-    AudioEmulation,
+    /// The "A/V & Emu" strip tab, whose default category is Audio (its rows are
+    /// the audio settings). Video and Emulation are its sibling categories,
+    /// switched between via the top nav row, with no Back button.
+    /// `AvAudio.label()` is therefore the strip's "A/V & Emu", not "Audio".
+    AvAudio,
+    AvVideo,
+    AvEmuSettings,
 }
 
 /// Tabs shown top to bottom.
@@ -197,8 +200,7 @@ pub const TABS: &[LauncherTab] = &[
     LauncherTab::Input,
     LauncherTab::IoPorts,
     LauncherTab::Zorro,
-    LauncherTab::Display,
-    LauncherTab::AudioEmulation,
+    LauncherTab::AvAudio,
 ];
 
 impl LauncherTab {
@@ -216,30 +218,69 @@ impl LauncherTab {
             LauncherTab::IoPorts => "I/O Ports",
             LauncherTab::Input => "Input",
             LauncherTab::Zorro => "Zorro",
-            LauncherTab::Display => "Display",
-            LauncherTab::AudioEmulation => "Audio & Emu",
+            LauncherTab::AvAudio => "A/V & Emu",
+            LauncherTab::AvVideo => "Video",
+            LauncherTab::AvEmuSettings => "Emulation",
         }
     }
 
-    /// The strip entry to highlight for this (possibly sub-page) tab: the CD,
-    /// Host Mounts, and Boot Priority sub-pages keep their parent Storage tab
-    /// highlighted.
+    /// The strip entry to highlight for this (possibly sub-page) tab: the Storage
+    /// sub-pages keep the Storage strip entry lit, and the A/V categories keep
+    /// the A/V & Emu one.
     pub fn strip_tab(self) -> LauncherTab {
         match self {
             LauncherTab::Cd | LauncherTab::HostFs | LauncherTab::BootPriority => {
                 LauncherTab::Storage
             }
+            LauncherTab::AvVideo | LauncherTab::AvEmuSettings => LauncherTab::AvAudio,
             other => other,
         }
     }
 
-    /// The parent tab a sub-page returns to via its Back button, or `None` for a
-    /// top-level tab.
+    /// The parent tab a sub-page returns to via its Back button, or `None` when
+    /// the page has no Back (the A/V categories switch between each other via the
+    /// top nav row instead).
     pub fn parent_tab(self) -> Option<LauncherTab> {
-        let parent = self.strip_tab();
-        (parent != self).then_some(parent)
+        match self {
+            LauncherTab::Cd | LauncherTab::HostFs | LauncherTab::BootPriority => {
+                Some(LauncherTab::Storage)
+            }
+            _ => None,
+        }
+    }
+
+    /// The top nav row's buttons -- sibling pages reachable from here as
+    /// `(label, tab)` pairs. Empty when the page shows a Back button instead.
+    /// The button whose tab is the current page is drawn highlighted.
+    pub fn nav_options(self) -> &'static [(&'static str, LauncherTab)] {
+        match self {
+            LauncherTab::Storage => STORAGE_NAV,
+            LauncherTab::AvAudio | LauncherTab::AvVideo | LauncherTab::AvEmuSettings => AV_NAV,
+            _ => &[],
+        }
+    }
+
+    /// Whether this tab shows the nav row (its sibling-page links or a Back
+    /// button) at the top of the pane, above its settings.
+    pub fn has_top_nav(self) -> bool {
+        !self.nav_options().is_empty() || self.parent_tab().is_some()
     }
 }
+
+/// The Storage tab's top nav links (its sub-pages), left to right.
+const STORAGE_NAV: &[(&str, LauncherTab)] = &[
+    ("CD", LauncherTab::Cd),
+    ("Host Mounts", LauncherTab::HostFs),
+    ("Boot Priority", LauncherTab::BootPriority),
+];
+
+/// The A/V & Emu categories, left to right (matching "A/V"). `AvAudio` is the
+/// default, so its button reads "Audio".
+const AV_NAV: &[(&str, LauncherTab)] = &[
+    ("Audio", LauncherTab::AvAudio),
+    ("Video", LauncherTab::AvVideo),
+    ("Emulation", LauncherTab::AvEmuSettings),
+];
 
 /// A single editable setting. Parameter-free variants keep the per-tab row
 /// tables and `UiControl` hit-testing simple (every control is one `Copy` enum
@@ -412,15 +453,6 @@ const fn section_header(label: &'static str) -> Row {
     }
 }
 
-/// The Storage tab's "Additional options" sub-pages, left to right. Drawn as a
-/// fixed footer nav (not row-grid entries), aligned with each sub-page's Back
-/// button.
-pub const ADDITIONAL_TABS: &[LauncherTab] = &[
-    LauncherTab::Cd,
-    LauncherTab::HostFs,
-    LauncherTab::BootPriority,
-];
-
 /// The greyed column-title row on the Boot Priority page (see
 /// [`RowKind::BootpriHeader`]).
 const fn bootpri_header() -> Row {
@@ -504,17 +536,24 @@ const ROM_ROWS: [Row; 2] = [
     row(F::Rom, "Kickstart ROM", PathRow),
     row(F::ExtendedRom, "Extended ROM", PathRow),
 ];
-const FLOPPY_ROWS: [Row; 10] = [
+// Each drive is a greyed "DFn:" heading with its settings indented under it. The
+// heading is keyed on the drive's image field so `row_hidden` drops it along
+// with the drive's rows when the drive is not wired in.
+const FLOPPY_ROWS: [Row; 14] = [
     row(F::FloppyDrives, "Drives", Cycle),
     row(F::FloppySpeed, "Drive speed", Cycle),
-    row(F::Df0Image, "DF0 image", PathRow),
-    row(F::Df0WriteProtect, "DF0 write-protect", Toggle),
-    row(F::Df1Image, "DF1 image", PathRow),
-    row(F::Df1WriteProtect, "DF1 write-protect", Toggle),
-    row(F::Df2Image, "DF2 image", PathRow),
-    row(F::Df2WriteProtect, "DF2 write-protect", Toggle),
-    row(F::Df3Image, "DF3 image", PathRow),
-    row(F::Df3WriteProtect, "DF3 write-protect", Toggle),
+    row(F::Df0Image, "DF0:", RowKind::SectionHeader),
+    row(F::Df0Image, "  Disk image", PathRow),
+    row(F::Df0WriteProtect, "  Write-protect", Toggle),
+    row(F::Df1Image, "DF1:", RowKind::SectionHeader),
+    row(F::Df1Image, "  Disk image", PathRow),
+    row(F::Df1WriteProtect, "  Write-protect", Toggle),
+    row(F::Df2Image, "DF2:", RowKind::SectionHeader),
+    row(F::Df2Image, "  Disk image", PathRow),
+    row(F::Df2WriteProtect, "  Write-protect", Toggle),
+    row(F::Df3Image, "DF3:", RowKind::SectionHeader),
+    row(F::Df3Image, "  Disk image", PathRow),
+    row(F::Df3WriteProtect, "  Write-protect", Toggle),
 ];
 const STORAGE_ROWS: [Row; 12] = [
     row(F::IdeMaster, "IDE master", Drive),
@@ -566,51 +605,54 @@ const CD_ROWS: [Row; 3] = [
 // the Serial section shows just the Device / Mode selector otherwise. The
 // selector is labelled "Device / Mode" because some choices are devices (MIDI)
 // and some are modes (stdout, PTY, TCP).
+// Rows under each I/O Ports section heading are indented two spaces so they
+// read as belonging to their `Serial:` / `Parallel:` / `Ethernet:` port.
 #[cfg(feature = "midi")]
-const SERIAL_ROWS_BASE: [Row; 1] = [row(F::SerialMode, "Device / Mode", Cycle)];
+const SERIAL_ROWS_BASE: [Row; 1] = [row(F::SerialMode, "  Device / Mode", Cycle)];
 #[cfg(feature = "midi")]
 const SERIAL_ROWS_MIDI: [Row; 3] = [
-    row(F::SerialMode, "Device / Mode", Cycle),
-    row(F::MidiIn, "MIDI input", Cycle),
-    row(F::MidiOut, "MIDI output", Cycle),
+    row(F::SerialMode, "  Device / Mode", Cycle),
+    row(F::MidiIn, "  MIDI input", Cycle),
+    row(F::MidiOut, "  MIDI output", Cycle),
 ];
 // The sampler input/gain rows appear only when the sampler is the selected
 // device, so None/Printer show just the Device selector.
-const PARALLEL_ROWS_BASE: [Row; 1] = [row(F::ParallelDevice, "Device", Cycle)];
+const PARALLEL_ROWS_BASE: [Row; 1] = [row(F::ParallelDevice, "  Device", Cycle)];
 // The printer adds a capture-file picker; the sampler adds its input/gain rows.
 const PARALLEL_ROWS_PRINTER: [Row; 2] = [
-    row(F::ParallelDevice, "Device", Cycle),
-    row(F::ParallelOutput, "Output file", PathRow),
+    row(F::ParallelDevice, "  Device", Cycle),
+    row(F::ParallelOutput, "  Output file", PathRow),
 ];
 const PARALLEL_ROWS_SAMPLER: [Row; 3] = [
-    row(F::ParallelDevice, "Device", Cycle),
-    row(F::SamplerInput, "Audio input", Cycle),
-    row(F::SamplerGain, "Input gain", Cycle),
+    row(F::ParallelDevice, "  Device", Cycle),
+    row(F::SamplerInput, "  Audio input", Cycle),
+    row(F::SamplerGain, "  Input gain", Cycle),
 ];
-const ETHERNET_ROWS: [Row; 1] = [row(F::Ethernet, "A2065 board", Cycle)];
-/// Picture settings. Split from the audio/emulation rows because the panel
-/// is a fixed 520px box with no row scrolling: the two groups together
-/// outgrow the rows that fit above the action buttons.
-const DISPLAY_ROWS: [Row; 7] = [
+const ETHERNET_ROWS: [Row; 1] = [row(F::Ethernet, "  A2065 board", Cycle)];
+// The A/V & Emu tab is split into three categories switched via the top nav row.
+// The Video category also carries the CRT-shader controls (a picture setting).
+const VIDEO_ROWS: [Row; 7] = [
+    row(F::StartFullscreen, "Start fullscreen", Toggle),
+    row(F::ShowStatusBar, "Status bar", Toggle),
     row(F::Overscan, "Overscan", Cycle),
     row(F::PixelAspect, "Pixel aspect", Cycle),
     row(F::Phosphor, "Phosphor", Cycle),
     row(F::Shader, "CRT shader", Cycle),
     row(F::ShaderStrength, "Shader strength", Cycle),
-    row(F::StartFullscreen, "Start fullscreen", Toggle),
-    row(F::ShowStatusBar, "Status bar", Toggle),
 ];
-const AUDIO_EMULATION_ROWS: [Row; 10] = [
+const AUDIO_ROWS: [Row; 6] = [
     row(F::AudioDevice, "Audio output", Cycle),
     row(F::AudioChannelMode, "Channel mode", Cycle),
     row(F::AudioStereoSeparation, "Stereo separation", Cycle),
     row(F::AudioFilter, "Audio filter", Cycle),
     row(F::FloppySounds, "Floppy sounds", Toggle),
     row(F::FloppyVolume, "Floppy volume", Cycle),
+];
+const EMULATION_ROWS: [Row; 4] = [
     row(F::PowerOn, "Power on at start", Toggle),
+    row(F::Warp, "Warp speed", Cycle),
     row(F::PacingBudget, "Pacing budget", Cycle),
     row(F::RealtimePriority, "Realtime priority", Toggle),
-    row(F::Warp, "Warp speed", Cycle),
 ];
 const INPUT_ROWS: [Row; 5] = [
     row(F::Port1Device, "Port 1", Cycle),
@@ -639,9 +681,9 @@ pub fn rows(
         LauncherTab::Rom => Cow::Borrowed(&ROM_ROWS),
         LauncherTab::Floppy => Cow::Borrowed(&FLOPPY_ROWS),
         // The Storage tab shows the IDE/SCSI options (the common case). Its
-        // "Additional options" heading and sub-page links are a fixed footer nav
-        // (see the panel code), aligned with each sub-page's Back button, so they
-        // are not part of the row grid.
+        // sub-page links are a fixed nav row at the top (see the panel code),
+        // in the same place as each sub-page's Back button, so they are not part
+        // of the row grid.
         LauncherTab::Storage => Cow::Borrowed(&STORAGE_ROWS),
         LauncherTab::BootPriority => {
             // The greyed column titles, then one row per hard-disk drive.
@@ -654,8 +696,11 @@ pub fn rows(
         LauncherTab::IoPorts => Cow::Owned(io_ports_rows(serial_mode, parallel_device)),
         LauncherTab::Input => Cow::Borrowed(&INPUT_ROWS),
         LauncherTab::Zorro => Cow::Borrowed(&[]),
-        LauncherTab::Display => Cow::Borrowed(&DISPLAY_ROWS),
-        LauncherTab::AudioEmulation => Cow::Borrowed(&AUDIO_EMULATION_ROWS),
+        // A/V & Emu defaults to the Audio category; Video and Emulation are its
+        // sibling categories, switched via the top nav row.
+        LauncherTab::AvAudio => Cow::Borrowed(&AUDIO_ROWS),
+        LauncherTab::AvVideo => Cow::Borrowed(&VIDEO_ROWS),
+        LauncherTab::AvEmuSettings => Cow::Borrowed(&EMULATION_ROWS),
     }
 }
 
@@ -1705,6 +1750,20 @@ impl MachineSetup {
     /// Whether a field is applicable to the current machine (greyed otherwise).
     pub fn applies(&self, field: LauncherField) -> bool {
         self.disabled_reason(field).is_none()
+    }
+
+    /// Whether a row is hidden entirely (not just greyed). The Floppy tab only
+    /// shows a drive's rows once it is wired in, so unused drives simply do not
+    /// appear rather than sitting greyed -- there is never a reason to touch a
+    /// drive that is not enabled.
+    pub fn row_hidden(&self, field: LauncherField) -> bool {
+        use LauncherField as F;
+        match field {
+            F::Df1Image | F::Df1WriteProtect => self.floppy_drives < 2,
+            F::Df2Image | F::Df2WriteProtect => self.floppy_drives < 3,
+            F::Df3Image | F::Df3WriteProtect => self.floppy_drives < 4,
+            _ => false,
+        }
     }
 
     /// Why a field is greyed out for the current machine, shown in place of its
@@ -2941,8 +3000,9 @@ fn rows_contains_kind(field: LauncherField, kind: RowKind) -> bool {
         &HOSTFS_ROWS,
         &CD_ROWS,
         &INPUT_ROWS,
-        &DISPLAY_ROWS,
-        &AUDIO_EMULATION_ROWS,
+        &VIDEO_ROWS,
+        &AUDIO_ROWS,
+        &EMULATION_ROWS,
         &PARALLEL_ROWS_PRINTER,
         &PARALLEL_ROWS_SAMPLER,
     ];
@@ -3791,10 +3851,15 @@ mod tests {
         // A top-level tab has no parent.
         assert_eq!(LauncherTab::Storage.parent_tab(), None);
 
-        // The Additional-options footer lists CD, Host Mounts, Boot Priority in
-        // that order (drawn as a fixed footer, not a row).
+        // The Storage nav lists CD, Host Mounts, Boot Priority in that order
+        // (drawn as a fixed top nav row, not a settings row).
+        let storage_nav: Vec<_> = LauncherTab::Storage
+            .nav_options()
+            .iter()
+            .map(|&(_, t)| t)
+            .collect();
         assert_eq!(
-            ADDITIONAL_TABS,
+            storage_nav,
             [
                 LauncherTab::Cd,
                 LauncherTab::HostFs,
@@ -3813,8 +3878,8 @@ mod tests {
             Some(LauncherField::IdeMaster)
         );
 
-        // Each sub-page carries its own rows (its Back button is a fixed footer,
-        // not a row).
+        // Each sub-page carries its own rows (its Back button is a fixed top nav
+        // element, not a settings row).
         for (tab, marker) in [
             (LauncherTab::HostFs, LauncherField::Filesys0Dir),
             (LauncherTab::Cd, LauncherField::CdImage),
@@ -3823,6 +3888,65 @@ mod tests {
             let page = rows(tab, ParallelDevice::None, SerialMode::default());
             assert!(page.iter().any(|r| r.field == marker));
         }
+    }
+
+    #[test]
+    fn av_emu_categories() {
+        use LauncherField as F;
+        // Only "A/V & Emu" (the Audio default) is a strip tab; Video and
+        // Emulation are its categories.
+        assert!(TABS.contains(&LauncherTab::AvAudio));
+        assert!(!TABS.contains(&LauncherTab::AvVideo));
+        assert!(!TABS.contains(&LauncherTab::AvEmuSettings));
+        for t in [LauncherTab::AvVideo, LauncherTab::AvEmuSettings] {
+            // They keep the A/V strip entry lit and have no Back button --
+            // categories switch between each other via the top nav row.
+            assert_eq!(t.strip_tab(), LauncherTab::AvAudio);
+            assert_eq!(t.parent_tab(), None);
+        }
+        // Every A/V page offers the same nav buttons: Audio / Video / Emulation.
+        let nav = LauncherTab::AvAudio.nav_options();
+        assert_eq!(
+            nav,
+            [
+                ("Audio", LauncherTab::AvAudio),
+                ("Video", LauncherTab::AvVideo),
+                ("Emulation", LauncherTab::AvEmuSettings),
+            ]
+        );
+        assert_eq!(LauncherTab::AvVideo.nav_options(), nav);
+        assert!(LauncherTab::AvAudio.has_top_nav());
+        assert!(LauncherTab::Storage.has_top_nav());
+        assert!(!LauncherTab::System.has_top_nav());
+
+        // Each category shows only its own settings; the default is Audio.
+        let page = |t| rows(t, ParallelDevice::None, SerialMode::default());
+        let audio = page(LauncherTab::AvAudio);
+        assert!(audio.iter().any(|r| r.field == F::AudioDevice));
+        assert!(audio.iter().all(|r| r.field != F::StartFullscreen));
+        assert!(page(LauncherTab::AvVideo)
+            .iter()
+            .any(|r| r.field == F::StartFullscreen));
+        assert!(page(LauncherTab::AvEmuSettings)
+            .iter()
+            .any(|r| r.field == F::PowerOn));
+    }
+
+    #[test]
+    fn floppy_rows_hidden_until_wired() {
+        use LauncherField as F;
+        let with_drives = |n: u8| {
+            MachineSetup::from_raw(&toml::from_str(&format!("[floppy]\ndrives = {n}")).unwrap())
+                .unwrap()
+        };
+        let one = with_drives(1);
+        assert!(!one.row_hidden(F::Df0Image)); // DF0: is always shown
+        assert!(one.row_hidden(F::Df1Image));
+        assert!(one.row_hidden(F::Df3WriteProtect));
+        let three = with_drives(3);
+        assert!(!three.row_hidden(F::Df1Image));
+        assert!(!three.row_hidden(F::Df2WriteProtect));
+        assert!(three.row_hidden(F::Df3Image));
     }
 
     #[test]

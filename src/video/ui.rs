@@ -4688,29 +4688,33 @@ fn launcher_toggle_rect(rect: Rect, row_y: usize) -> Rect {
     }
 }
 
-/// A sub-page navigation button (the `slot`-th one) on the fixed footer nav row:
-/// the Storage tab's Additional-options links, or a sub-page's Back button.
+/// A sub-page navigation button (the `slot`-th one) on the top nav row: a page's
+/// sibling links, or a sub-page's Back button.
 /// Sized to match the left-hand category tabs.
-fn launcher_footer_button_rect(rect: Rect, slot: usize) -> Rect {
+fn launcher_nav_button_rect(rect: Rect, slot: usize) -> Rect {
     Rect {
         x: launcher_pane_x(rect) + slot * (LAUNCH_SIDEBAR_W + 8),
-        y: launcher_footer_y(rect),
+        y: launcher_nav_y(rect),
         w: LAUNCH_SIDEBAR_W,
         h: LAUNCH_TAB_H,
     }
 }
 
-/// A sub-page's Back button, on the footer nav row.
+/// A sub-page's Back button, on the nav row.
 fn launcher_back_button_rect(rect: Rect) -> Rect {
-    launcher_footer_button_rect(rect, 0)
+    launcher_nav_button_rect(rect, 0)
 }
 
-/// Y of the fixed footer nav row, near the bottom of the settings pane (just
-/// above the status line). Both the Storage links and a sub-page's Back button
-/// sit here, so navigating in and out keeps the buttons at the same height.
-fn launcher_footer_y(rect: Rect) -> usize {
-    launcher_status_y(rect).saturating_sub(LAUNCH_TAB_H + 6)
+/// Y of the nav row (the sibling-page buttons and any Back button) at the top of
+/// the settings pane, in line with the first category tab. The setting rows
+/// below it are shifted down by [`LAUNCH_NAV_ROWS`] to make room.
+fn launcher_nav_y(rect: Rect) -> usize {
+    launcher_content_top(rect)
 }
+
+/// Vertical space reserved at the top of the pane for the nav button row plus a
+/// gap below it, before the settings begin, on tabs that have a nav.
+const LAUNCH_NAV_BLOCK_H: usize = LAUNCH_TAB_H + 14;
 
 /// The Status column's clickable area (the "Bootable" label plus its tick box),
 /// sitting to the right of the priority stepper on a Boot Priority row.
@@ -4813,7 +4817,9 @@ enum ZorroItem {
 /// button, pinned to the top; each board header and its option rows follow.
 fn launcher_zorro_layout(setup: &launcher::MachineSetup) -> Vec<(usize, ZorroItem)> {
     let mut items = Vec::new();
-    let mut row = 1;
+    // Row 0 is the first list row; the board list is shifted below the Add button
+    // by LAUNCH_NAV_BLOCK_H at draw/hit-test time.
+    let mut row = 0;
     for (i, board) in setup.zorro_boards().iter().enumerate() {
         items.push((row, ZorroItem::Header(i)));
         row += 1;
@@ -4829,7 +4835,7 @@ fn launcher_zorro_layout(setup: &launcher::MachineSetup) -> Vec<(usize, ZorroIte
 fn launcher_zorro_remove_rect(rect: Rect, row: usize) -> Rect {
     Rect {
         x: rect.x + rect.w - LAUNCH_MARGIN - LAUNCH_REMOVE_W,
-        y: launcher_row_y(rect, row) + 2,
+        y: launcher_row_y(rect, row) + LAUNCH_NAV_BLOCK_H + 2,
         w: LAUNCH_REMOVE_W,
         h: LAUNCH_CONTROL_H,
     }
@@ -4848,13 +4854,11 @@ fn launcher_board_value_rect(rect: Rect, row_y: usize) -> Rect {
     }
 }
 
+/// The "Add board..." button: a nav-style button at the top of the pane, the
+/// same size and position as the sibling-page buttons on other tabs, with the
+/// board list below it after the same gap.
 fn launcher_zorro_add_rect(rect: Rect) -> Rect {
-    Rect {
-        x: launcher_pane_x(rect),
-        y: launcher_row_y(rect, 0) + 2,
-        w: 130,
-        h: LAUNCH_ACTION_H,
-    }
+    launcher_nav_button_rect(rect, 0)
 }
 
 fn launcher_action_label(control: UiControl) -> &'static str {
@@ -4883,7 +4887,7 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
     if state.tab == LauncherTab::Zorro {
         use crate::zorro::ConfigOptionKind as K;
         for (row, item) in launcher_zorro_layout(&state.setup) {
-            let row_y = launcher_row_y(rect, row);
+            let row_y = launcher_row_y(rect, row) + LAUNCH_NAV_BLOCK_H;
             match item {
                 ZorroItem::Header(i) => {
                     if launcher_zorro_remove_rect(rect, row).contains(pos) {
@@ -4936,18 +4940,24 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
             return Some(UiControl::LauncherZorroAdd);
         }
     } else {
+        let row_offset = if state.tab.has_top_nav() {
+            LAUNCH_NAV_BLOCK_H
+        } else {
+            0
+        };
         for (i, r) in launcher::rows(
             state.tab,
             state.setup.parallel_device(),
             state.setup.serial_mode(),
         )
         .iter()
+        .filter(|r| !state.setup.row_hidden(r.field))
         .enumerate()
         {
             if !state.setup.applies(r.field) {
                 continue;
             }
-            let row_y = launcher_row_y(rect, i);
+            let row_y = launcher_row_y(rect, i) + row_offset;
             match r.kind {
                 // Non-interactive rows.
                 RowKind::SectionHeader | RowKind::BootpriHeader => {}
@@ -5028,17 +5038,17 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
             }
         }
     }
-    // The fixed footer nav: the Storage tab's Additional-options links, or a
-    // sub-page's Back button.
-    if state.tab == LauncherTab::Storage {
-        for (slot, &target) in launcher::ADDITIONAL_TABS.iter().enumerate() {
-            if launcher_footer_button_rect(rect, slot).contains(pos) {
-                return Some(UiControl::LauncherTab(target));
-            }
-        }
-    } else if let Some(parent) = state.tab.parent_tab() {
+    // The top nav row: a page's "Options:"/"Settings:" sibling links, or a Back
+    // button.
+    if let Some(parent) = state.tab.parent_tab() {
         if launcher_back_button_rect(rect).contains(pos) {
             return Some(UiControl::LauncherTab(parent));
+        }
+    } else {
+        for (slot, &(_, target)) in state.tab.nav_options().iter().enumerate() {
+            if launcher_nav_button_rect(rect, slot).contains(pos) {
+                return Some(UiControl::LauncherTab(target));
+            }
         }
     }
     for (control, button_rect) in launcher_action_rects(rect) {
@@ -5161,11 +5171,12 @@ fn draw_launcher_row(
     state: &LauncherState,
     r: &launcher::Row,
     i: usize,
+    y_offset: usize,
     hover: Option<UiControl>,
     scale: usize,
 ) {
     let setup = &state.setup;
-    let row_y = launcher_row_y(rect, i);
+    let row_y = launcher_row_y(rect, i) + y_offset;
     // A section heading is a greyed, non-interactive label grouping the rows
     // below it (the Serial:/Parallel: sections of the I/O Ports tab).
     if r.kind == RowKind::SectionHeader {
@@ -5216,6 +5227,7 @@ fn draw_launcher_row(
         LauncherField::AudioChannelMode
             | LauncherField::AudioStereoSeparation
             | LauncherField::MouseSensitivity
+            | LauncherField::MouseCapture
     );
     if let Some(reason) = reason {
         if !blank_when_greyed {
@@ -5497,7 +5509,7 @@ fn draw_launcher_zorro(
         draw_panel_text(
             frame,
             pane_x,
-            launcher_row_y(rect, 1) + 8,
+            launcher_row_y(rect, 0) + LAUNCH_NAV_BLOCK_H + 8,
             "No extra Zorro boards configured.",
             PANEL_TEXT_DIM,
             1,
@@ -5505,7 +5517,7 @@ fn draw_launcher_zorro(
         );
     }
     for (row, item) in launcher_zorro_layout(setup) {
-        let row_y = launcher_row_y(rect, row);
+        let row_y = launcher_row_y(rect, row) + LAUNCH_NAV_BLOCK_H;
         match item {
             ZorroItem::Header(i) => {
                 let board = &setup.zorro_boards()[i];
@@ -5729,7 +5741,13 @@ fn draw_launcher(
             scale,
         );
     }
-    // Active tab content in the settings pane.
+    // Active tab content in the settings pane, shifted down past the top nav
+    // when the tab has one.
+    let row_offset = if state.tab.has_top_nav() {
+        LAUNCH_NAV_BLOCK_H
+    } else {
+        0
+    };
     if state.tab == LauncherTab::Zorro {
         draw_launcher_zorro(frame, rect, state, hover, scale);
     } else {
@@ -5739,26 +5757,18 @@ fn draw_launcher(
             state.setup.serial_mode(),
         )
         .iter()
+        .filter(|r| !state.setup.row_hidden(r.field))
         .enumerate()
         {
-            draw_launcher_row(frame, rect, state, r, i, hover, scale);
+            draw_launcher_row(frame, rect, state, r, i, row_offset, hover, scale);
         }
     }
-    // Fixed footer nav at the bottom of the pane, under an "Additional options:"
-    // heading: the Storage tab's sub-page links, or a sub-page's Back button
-    // (the heading stays even when Back is the only choice). Both sit at the
-    // same height.
+    // Nav row at the top of the pane: a page's sibling links, or a sub-page's
+    // Back button. The A/V categories highlight the current one; Storage's
+    // sub-page links are plain (no current selection).
     let back_parent = state.tab.parent_tab();
-    if state.tab == LauncherTab::Storage || back_parent.is_some() {
-        draw_panel_text(
-            frame,
-            launcher_pane_x(rect),
-            launcher_footer_y(rect).saturating_sub(14),
-            "Additional options:",
-            PANEL_TEXT_DIM,
-            1,
-            scale,
-        );
+    let options = state.tab.nav_options();
+    if back_parent.is_some() || !options.is_empty() {
         if let Some(parent) = back_parent {
             draw_text_button(
                 frame,
@@ -5769,13 +5779,14 @@ fn draw_launcher(
                 scale,
             );
         } else {
-            for (slot, &target) in launcher::ADDITIONAL_TABS.iter().enumerate() {
-                draw_text_button(
+            for (slot, &(label, target)) in options.iter().enumerate() {
+                draw_launcher_chip(
                     frame,
-                    launcher_footer_button_rect(rect, slot),
-                    target.label(),
-                    true,
+                    launcher_nav_button_rect(rect, slot),
+                    label,
+                    target == state.tab,
                     hover == Some(UiControl::LauncherTab(target)),
+                    false,
                     scale,
                 );
             }
@@ -5793,7 +5804,7 @@ fn draw_launcher(
             )
             .len()
                 + 1,
-        );
+        ) + row_offset;
         draw_panel_text(
             frame,
             launcher_pane_x(rect),
@@ -5818,7 +5829,7 @@ fn draw_launcher(
     // The Boot Priority page spells out the valid range and the floppy-drive
     // priorities its cascade defaults sort around, all greyed like a footnote.
     if state.tab == LauncherTab::BootPriority && state.setup.has_boot_priority_rows() {
-        let help_top = launcher_row_y(
+        let help_top = (launcher_row_y(
             rect,
             launcher::rows(
                 LauncherTab::BootPriority,
@@ -5827,8 +5838,8 @@ fn draw_launcher(
             )
             .len()
                 + 1,
-        )
-        .saturating_sub(10);
+        ) + row_offset)
+            .saturating_sub(10);
         draw_panel_text(
             frame,
             launcher_pane_x(rect),
@@ -5869,7 +5880,7 @@ fn draw_launcher(
             )
             .len()
                 + 1,
-        );
+        ) + row_offset;
         draw_panel_text(
             frame,
             launcher_pane_x(rect),
@@ -6430,22 +6441,29 @@ mod tests {
             SerialMode::TcpConnect,
             SerialMode::Pty,
         ];
-        let tabs = launcher::TABS
-            .iter()
-            .chain(launcher::ADDITIONAL_TABS.iter());
-        for &tab in tabs {
-            // The row grid ends above the footer nav row on the tabs that
-            // have one, and above the status line on the rest.
-            let bound = if tab == LauncherTab::Storage || tab.parent_tab().is_some() {
-                launcher_footer_y(rect)
+        // The strip tabs, plus the sub-pages and A/V categories reached from a
+        // nav row rather than the strip.
+        let off_strip = [
+            LauncherTab::Cd,
+            LauncherTab::HostFs,
+            LauncherTab::BootPriority,
+            LauncherTab::AvVideo,
+            LauncherTab::AvEmuSettings,
+        ];
+        for &tab in launcher::TABS.iter().chain(off_strip.iter()) {
+            // The row grid always ends above the status line; on tabs with a top
+            // nav it starts a nav block lower, leaving it less room.
+            let bound = launcher_status_y(rect);
+            let row_offset = if tab.has_top_nav() {
+                LAUNCH_NAV_BLOCK_H
             } else {
-                launcher_status_y(rect)
+                0
             };
             for &device in &devices {
                 for &mode in &modes {
                     let rows = launcher::rows(tab, device, mode);
                     for (i, r) in rows.iter().enumerate() {
-                        let row_y = launcher_row_y(rect, i);
+                        let row_y = launcher_row_y(rect, i) + row_offset;
                         let (prev, value, next) = launcher_cycle_rects(rect, row_y);
                         let (browse, clear) = launcher_path_rects(rect, row_y);
                         // Every control a row can draw, whatever its kind:
@@ -9021,5 +9039,51 @@ mod tests {
         };
         draw(&mut frame, scale, &ui, None, None, false, false, labels());
         save(&frame, "launcher-boot-priority");
+
+        // A/V & Emu: the Audio category (the default landing), with the
+        // Audio / Video / Emulation nav buttons at the top, Audio highlighted.
+        let mut frame = vec![0u8; w * h * 4];
+        let mut state = LauncherState::new(launcher::MachineSetup::default());
+        state.tab = LauncherTab::AvAudio;
+        let ui = UiState {
+            menu_open: false,
+            menu_scroll: 0,
+            panel: Some(Panel::Launcher(Box::new(state))),
+        };
+        draw(&mut frame, scale, &ui, None, None, false, false, labels());
+        save(&frame, "launcher-av-audio");
+
+        // The Video category, reached from the same nav row.
+        let mut frame = vec![0u8; w * h * 4];
+        let mut state = LauncherState::new(launcher::MachineSetup::default());
+        state.tab = LauncherTab::AvVideo;
+        let ui = UiState {
+            menu_open: false,
+            menu_scroll: 0,
+            panel: Some(Panel::Launcher(Box::new(state))),
+        };
+        draw(&mut frame, scale, &ui, None, None, false, false, labels());
+        save(&frame, "launcher-av-video");
+
+        // The Floppy tab with two drives wired in: each drive is a greyed "DFn:"
+        // heading with indented settings; DF2/DF3 are hidden until enabled.
+        let mut frame = vec![0u8; w * h * 4];
+        let mut setup = launcher::MachineSetup::default();
+        while setup.value_label(LauncherField::FloppyDrives) != "2" {
+            setup.cycle(LauncherField::FloppyDrives, true);
+        }
+        setup.set_path(
+            LauncherField::Df0Image,
+            std::path::PathBuf::from("workbench.adf"),
+        );
+        let mut state = LauncherState::new(setup);
+        state.tab = LauncherTab::Floppy;
+        let ui = UiState {
+            menu_open: false,
+            menu_scroll: 0,
+            panel: Some(Panel::Launcher(Box::new(state))),
+        };
+        draw(&mut frame, scale, &ui, None, None, false, false, labels());
+        save(&frame, "launcher-floppy");
     }
 }
