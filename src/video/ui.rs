@@ -4707,7 +4707,7 @@ fn launcher_back_button_rect(rect: Rect) -> Rect {
 
 /// Y of the nav row (the sibling-page buttons and any Back button) at the top of
 /// the settings pane, in line with the first category tab. The setting rows
-/// below it are shifted down by [`LAUNCH_NAV_ROWS`] to make room.
+/// below it are shifted down by [`LAUNCH_NAV_BLOCK_H`] to make room.
 fn launcher_nav_y(rect: Rect) -> usize {
     launcher_content_top(rect)
 }
@@ -6449,7 +6449,7 @@ mod tests {
             LauncherTab::HostFs,
             LauncherTab::BootPriority,
             LauncherTab::AvVideo,
-            LauncherTab::AvEmuSettings,
+            LauncherTab::AvEmulation,
         ];
         for &tab in launcher::TABS.iter().chain(off_strip.iter()) {
             // The row grid always ends above the status line; on tabs with a top

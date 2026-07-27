@@ -184,7 +184,7 @@ pub enum LauncherTab {
     /// `AvAudio.label()` is therefore the strip's "A/V & Emu", not "Audio".
     AvAudio,
     AvVideo,
-    AvEmuSettings,
+    AvEmulation,
 }
 
 /// Tabs shown top to bottom.
@@ -220,7 +220,7 @@ impl LauncherTab {
             LauncherTab::Zorro => "Zorro",
             LauncherTab::AvAudio => "A/V & Emu",
             LauncherTab::AvVideo => "Video",
-            LauncherTab::AvEmuSettings => "Emulation",
+            LauncherTab::AvEmulation => "Emulation",
         }
     }
 
@@ -232,7 +232,7 @@ impl LauncherTab {
             LauncherTab::Cd | LauncherTab::HostFs | LauncherTab::BootPriority => {
                 LauncherTab::Storage
             }
-            LauncherTab::AvVideo | LauncherTab::AvEmuSettings => LauncherTab::AvAudio,
+            LauncherTab::AvVideo | LauncherTab::AvEmulation => LauncherTab::AvAudio,
             other => other,
         }
     }
@@ -255,7 +255,7 @@ impl LauncherTab {
     pub fn nav_options(self) -> &'static [(&'static str, LauncherTab)] {
         match self {
             LauncherTab::Storage => STORAGE_NAV,
-            LauncherTab::AvAudio | LauncherTab::AvVideo | LauncherTab::AvEmuSettings => AV_NAV,
+            LauncherTab::AvAudio | LauncherTab::AvVideo | LauncherTab::AvEmulation => AV_NAV,
             _ => &[],
         }
     }
@@ -279,7 +279,7 @@ const STORAGE_NAV: &[(&str, LauncherTab)] = &[
 const AV_NAV: &[(&str, LauncherTab)] = &[
     ("Audio", LauncherTab::AvAudio),
     ("Video", LauncherTab::AvVideo),
-    ("Emulation", LauncherTab::AvEmuSettings),
+    ("Emulation", LauncherTab::AvEmulation),
 ];
 
 /// A single editable setting. Parameter-free variants keep the per-tab row
@@ -700,7 +700,7 @@ pub fn rows(
         // sibling categories, switched via the top nav row.
         LauncherTab::AvAudio => Cow::Borrowed(&AUDIO_ROWS),
         LauncherTab::AvVideo => Cow::Borrowed(&VIDEO_ROWS),
-        LauncherTab::AvEmuSettings => Cow::Borrowed(&EMULATION_ROWS),
+        LauncherTab::AvEmulation => Cow::Borrowed(&EMULATION_ROWS),
     }
 }
 
@@ -3900,8 +3900,8 @@ mod tests {
         // Emulation are its categories.
         assert!(TABS.contains(&LauncherTab::AvAudio));
         assert!(!TABS.contains(&LauncherTab::AvVideo));
-        assert!(!TABS.contains(&LauncherTab::AvEmuSettings));
-        for t in [LauncherTab::AvVideo, LauncherTab::AvEmuSettings] {
+        assert!(!TABS.contains(&LauncherTab::AvEmulation));
+        for t in [LauncherTab::AvVideo, LauncherTab::AvEmulation] {
             // They keep the A/V strip entry lit and have no Back button --
             // categories switch between each other via the top nav row.
             assert_eq!(t.strip_tab(), LauncherTab::AvAudio);
@@ -3914,7 +3914,7 @@ mod tests {
             [
                 ("Audio", LauncherTab::AvAudio),
                 ("Video", LauncherTab::AvVideo),
-                ("Emulation", LauncherTab::AvEmuSettings),
+                ("Emulation", LauncherTab::AvEmulation),
             ]
         );
         assert_eq!(LauncherTab::AvVideo.nav_options(), nav);
@@ -3930,7 +3930,7 @@ mod tests {
         assert!(page(LauncherTab::AvVideo)
             .iter()
             .any(|r| r.field == F::StartFullscreen));
-        assert!(page(LauncherTab::AvEmuSettings)
+        assert!(page(LauncherTab::AvEmulation)
             .iter()
             .any(|r| r.field == F::PowerOn));
     }
