@@ -592,7 +592,7 @@ getline:
         cmp.b   #10,d0
         beq.s   .end
         cmp.w   #LINEMAX,d3
-        bhi.s   .ch                     ; past the limit: drop, keep draining
+        bhs.s   .ch                     ; at the limit: drop, keep draining
         move.b  d0,(a2)+
         addq.w  #1,d3
         bra.s   .ch
