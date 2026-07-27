@@ -177,6 +177,34 @@ fn window_present_height() -> usize {
     present_height() + status_bar_height()
 }
 
+/// Scanlines the CRT pass draws across the display rect: the emulated field
+/// lines the present copy actually puts on screen, rescaled when that copy
+/// letterboxes them inside the rect.
+///
+/// `tv_aperture` mirrors `copy_window_present_frame`'s own branch condition.
+/// That path shows the fixed [`TV_PAL_PRESENT_HEIGHT`]-row aperture crop
+/// instead of the whole woven buffer, so its line count comes from the
+/// aperture, not from `present_rows` -- 270 lines, not 285, in the default
+/// TV-overscan presentation. The square-pixel canvas is taller than the
+/// aperture and pads it with bezel rows (`tv_aperture_source_row`), so the
+/// count scales back up by the rect/content ratio to keep the pitch right
+/// across the whole viewport.
+fn crt_scanline_count(present_rows: usize, present_h: usize, tv_aperture: bool) -> f32 {
+    let (woven_rows, content_rows) = if tv_aperture {
+        let pad = present_h.saturating_sub(TV_PAL_PRESENT_HEIGHT) / 2;
+        (TV_PAL_PRESENT_HEIGHT, present_h - 2 * pad)
+    } else {
+        (present_rows, present_h)
+    };
+    // Two woven rows per emulated field line. The pass never runs on a
+    // programmable scan, whose fields are not woven at all.
+    let lines = (woven_rows / 2).max(1);
+    if content_rows == 0 {
+        return lines as f32;
+    }
+    (lines * present_h) as f32 / content_rows as f32
+}
+
 /// The status bar's height, or 0 while it is hidden.
 fn status_bar_height() -> usize {
     if super::status_bar_hidden() {
@@ -569,6 +597,11 @@ pub struct App {
     /// a 35 ns super-hi-res canvas.
     present_width: usize,
     present_standard_tv_aperture: bool,
+    /// Whether the presented frame came from a programmable (multisync) scan
+    /// rather than a woven 15 kHz one. Those fields reach the presentation
+    /// buffer at their native height, so neither the CRT pass nor its
+    /// two-rows-per-line count applies to them.
+    present_programmable: bool,
     /// Scratch for composing an RTG board frame (Z3660 scanout); reused
     /// across frames to avoid a per-frame allocation.
     rtg_fb: Vec<u32>,
@@ -729,6 +762,15 @@ pub struct App {
     /// Presentation-level overscan handling ([display] overscan): Tv masks
     /// the deep-overscan margins with black like a CRT bezel.
     overscan: Overscan,
+    /// Window shader pass in effect ([display] shader). Presentation only:
+    /// screenshots, frame dumps and recordings never go through it.
+    crt_shader_kind: crate::config::ShaderKind,
+    /// Source file behind `ShaderKind::Custom`, kept so the menu can cycle
+    /// back to a user shader (and re-read an edited one) after leaving it.
+    custom_shader_path: Option<std::path::PathBuf>,
+    /// How strongly the shader pass is mixed in, 0.0 to 1.0 ([display]
+    /// shader_strength).
+    shader_strength: f32,
     /// Open the window fullscreen when it is first created ([display]
     /// full_screen). Applied once in `resumed`; the runtime toggle takes over
     /// after that.
@@ -895,6 +937,11 @@ struct Render {
     /// the `pixels` render pass (see [`rtg_texture`]). Present whenever the
     /// window is (its pipeline uses the same GPU device as `pixels`).
     rtg_texture: rtg_texture::RtgTexture,
+    /// The optional CRT/scanline pass drawn over the display region in the
+    /// same `pixels` render pass (see [`crt_shader`]). Built with the
+    /// window, whatever preset is selected: the pass is skipped per frame,
+    /// not per session, so the menu can turn it on live.
+    crt_shader: crt_shader::CrtShader,
     /// True while the host window is minimized (Windows delivers a 0x0
     /// Resized). Presenting while minimized deadlocks on Windows: DWM stops
     /// consuming swapchain frames, so once the in-flight buffers fill,
@@ -953,6 +1000,7 @@ struct RenderWorkerResult {
     present_rows: usize,
     present_width: usize,
     standard_tv_aperture: bool,
+    programmable: bool,
     /// The job's frame snapshot, handed back for buffer reuse.
     input: bitplane::RenderInput,
 }
@@ -1040,6 +1088,8 @@ impl App {
         disk_write_protected: [bool; 4],
         overscan: Overscan,
         phosphor: f32,
+        shader: crate::config::ShaderMode,
+        shader_strength: f32,
         start_fullscreen: bool,
         hide_status_bar: bool,
         warp_speed: WarpSpeed,
@@ -1123,6 +1173,7 @@ impl App {
             rtg_fb: Vec::new(),
             rtg_present_dims: None,
             present_standard_tv_aperture: true,
+            present_programmable: false,
             render: None,
             debugger_tool_window: None,
             frame_analyzer_tool_window: None,
@@ -1198,6 +1249,12 @@ impl App {
             disk_playlist_index: [0; 4],
             hcenter: hcenter_enabled(),
             overscan,
+            crt_shader_kind: shader.kind(),
+            custom_shader_path: match &shader {
+                crate::config::ShaderMode::Custom(path) => Some(path.clone()),
+                _ => None,
+            },
+            shader_strength,
             start_fullscreen,
             gamepad: crate::gamepad::GamepadReader::new(),
             joystick_input_mode,
@@ -2382,13 +2439,38 @@ impl ApplicationHandler for App {
         );
         let rtg_texture =
             rtg_texture::RtgTexture::new(pixels.device(), pixels.render_texture_format());
+        let mut crt_shader =
+            crt_shader::CrtShader::new(pixels.device(), pixels.render_texture_format());
+        // A user shader can only be compiled once the device exists (too
+        // early for `reload_custom_shader`, which needs the built `Render`).
+        // A bad one drops back to no shader rather than failing the session:
+        // the log takes naga's whole multi-line diagnostic, the overlay
+        // below only its first line.
+        let shader_error = match (self.crt_shader_kind, self.custom_shader_path.as_deref()) {
+            (crate::config::ShaderKind::Custom, Some(path)) => crt_shader
+                .load_custom(pixels.device(), pixels.render_texture_format(), path)
+                .err()
+                .map(|msg| {
+                    error!("[display] shader: {msg}");
+                    msg.lines().next().unwrap_or_default().to_string()
+                }),
+            _ => None,
+        };
+        if shader_error.is_some() {
+            self.crt_shader_kind = crate::config::ShaderKind::None;
+        }
         self.render = Some(Render {
             window,
             pixels,
             texture_scale,
             rtg_texture,
+            crt_shader,
             minimized: false,
         });
+        // After the window exists, so the overlay has somewhere to be drawn.
+        if let Some(msg) = shader_error {
+            self.show_osd(format!("CRT shader: off (custom failed: {msg})"));
+        }
         // Paint at least once so the status bar (and power button) is
         // visible immediately, even when the machine starts powered off
         // and no emulated frame is being produced yet. A powered-off
@@ -2920,6 +3002,29 @@ impl ApplicationHandler for App {
                     // top as usual, at the cost of the FB_WIDTH downscale for
                     // as long as the overlay is open.
                     let rtg_gpu = self.rtg_present_dims.is_some() && !self.ui.active();
+                    // The CRT pass re-draws the display rect from the same
+                    // buffer, so it also re-draws whatever the UI composited
+                    // into it -- through curvature and a phosphor mask, which
+                    // is unreadable for menu and panel text. Suspend it while
+                    // an overlay is open, as the RTG arm above does for its
+                    // own reason.
+                    //
+                    // Off for two kinds of frame that have no 15 kHz line
+                    // structure to reproduce: RTG board scanout (which reaches
+                    // the surface through the RTG texture, not the buffer this
+                    // pass samples) and programmable multisync scans (amifb's
+                    // 31 kHz console, DblPAL, SHRES), whose fields are not
+                    // woven, so the pass's two-rows-per-line assumption would
+                    // not hold either.
+                    //
+                    // Interlaced content is drawn at field-line pitch: the
+                    // gaps land every other emulated line over the woven
+                    // frame, the look of a 15 kHz set showing an interlaced
+                    // signal, rather than one gap per woven row.
+                    let crt_active = self.crt_shader_kind != crate::config::ShaderKind::None
+                        && !self.ui.active()
+                        && self.rtg_present_dims.is_none()
+                        && !self.present_programmable;
                     if let Some((w, h)) = self.rtg_present_dims.filter(|_| rtg_gpu) {
                         r.rtg_texture.upload(
                             r.pixels.device(),
@@ -2993,6 +3098,7 @@ impl ApplicationHandler for App {
                             audio_filter: self.emu.bus().paula.led_filter_mode(),
                             sampler_input: &sampler_input_label,
                             sampler_gain: &sampler_gain_label,
+                            shader: self.crt_shader_kind,
                         },
                     );
                     // The drag hint sits on top of everything: the drop will
@@ -3013,6 +3119,48 @@ impl ApplicationHandler for App {
                             let disp_h = ch as f32 * present_height() as f32
                                 / window_present_height() as f32;
                             rtg.render(encoder, target, (cx as f32, cy as f32, cw as f32, disp_h));
+                            Ok(())
+                        })
+                    } else if crt_active {
+                        // Draw the composited buffer, then re-draw the display
+                        // rect through the shader. One CRT beam pass per
+                        // emulated field line the copy above actually shows.
+                        let scanlines = crt_scanline_count(
+                            self.present_rows,
+                            present_height(),
+                            // The same branch copy_window_present_frame took.
+                            self.overscan == Overscan::Tv
+                                && self.present_standard_tv_aperture
+                                && self.rtg_present_dims.is_none()
+                                && self.present_width == FB_WIDTH,
+                        );
+                        let kind = self.crt_shader_kind;
+                        let strength = self.shader_strength;
+                        // The closure is FnOnce and captures `r`, so the
+                        // shader has to be split out of it as a separate
+                        // borrow rather than reached through `r` inside.
+                        let crt = &mut r.crt_shader;
+                        r.pixels.render_with(|encoder, target, ctx| {
+                            ctx.scaling_renderer.render(encoder, target);
+                            let (uniforms, viewport) = crt_shader::uniforms_for(
+                                kind,
+                                strength,
+                                ctx.scaling_renderer.clip_rect(),
+                                present_height(),
+                                window_present_height(),
+                                (ctx.texture_extent.width, ctx.texture_extent.height),
+                                scanlines,
+                            );
+                            crt.render(
+                                &ctx.device,
+                                &ctx.queue,
+                                &ctx.texture,
+                                encoder,
+                                target,
+                                viewport,
+                                kind,
+                                uniforms,
+                            );
                             Ok(())
                         })
                     } else {
@@ -4147,6 +4295,7 @@ impl App {
                     ui::MenuItem::SamplerInput => self.cycle_sampler_input(),
                     ui::MenuItem::SamplerGain => self.step_sampler_gain(true),
                     ui::MenuItem::PixelAspect => self.toggle_pixel_aspect(),
+                    ui::MenuItem::CrtShader => self.cycle_crt_shader(),
                     ui::MenuItem::FloppySpeed => self.cycle_floppy_speed(),
                     ui::MenuItem::AudioOutput => self.cycle_audio_output(),
                     ui::MenuItem::AudioFilter => self.cycle_audio_filter(),
@@ -5615,6 +5764,26 @@ impl App {
         self.about_machine_lines = crate::config::about_machine_lines(cfg);
         self.deinterlacer =
             Deinterlacer::with_phosphor(crate::config::resolve_phosphor(cfg.phosphor));
+        let shader = crate::config::resolve_shader(cfg.shader.clone());
+        self.custom_shader_path = match &shader {
+            crate::config::ShaderMode::Custom(path) => Some(path.clone()),
+            _ => None,
+        };
+        self.crt_shader_kind = shader.kind();
+        // The device already exists here, so a user shader is compiled now
+        // rather than in `resumed`; a bad one falls back to no shader. With
+        // none configured, the previous machine's pipeline is dropped rather
+        // than left loaded for the CRT Shader item to cycle back to.
+        let mut shader_error = None;
+        if self.crt_shader_kind == crate::config::ShaderKind::Custom {
+            if let Err(msg) = self.reload_custom_shader() {
+                shader_error = Some(msg);
+                self.crt_shader_kind = crate::config::ShaderKind::None;
+            }
+        } else if let Some(r) = self.render.as_mut() {
+            r.crt_shader.clear_custom();
+        }
+        self.shader_strength = crate::config::resolve_shader_strength(cfg.shader_strength);
         self.ui.menu_open = false;
         self.ui.panel = None;
         self.powered_on = true;
@@ -5622,7 +5791,13 @@ impl App {
         self.paused = false;
         self.reset_render_pipeline();
         self.resize_for_active_panel();
-        self.show_osd("Machine started");
+        // The last overlay set here is the one that gets drawn, so a shader
+        // that failed to load has to travel in this message rather than in
+        // one of its own.
+        self.show_osd(match shader_error {
+            Some(msg) => format!("Machine started (CRT shader: off, custom failed: {msg})"),
+            None => "Machine started".to_string(),
+        });
         self.request_redraw();
     }
 
@@ -8212,6 +8387,64 @@ impl App {
         self.apply_pixel_aspect(next);
     }
 
+    /// Menu "CRT Shader": step through the presets for the rest of the run
+    /// (the config file default is unchanged; set `[display] shader` to make
+    /// it stick). A user shader joins the cycle only when one was configured,
+    /// and is re-read from disk each time it is selected, so editing the file
+    /// and cycling away and back shows the new version.
+    fn cycle_crt_shader(&mut self) {
+        use crate::config::ShaderKind;
+        let mut next = match self.crt_shader_kind {
+            ShaderKind::None => ShaderKind::Scanlines,
+            ShaderKind::Scanlines => ShaderKind::Mask,
+            ShaderKind::Mask => ShaderKind::Crt,
+            ShaderKind::Crt if self.custom_shader_path.is_some() => ShaderKind::Custom,
+            ShaderKind::Crt | ShaderKind::Custom => ShaderKind::None,
+        };
+        let mut failure = None;
+        if next == ShaderKind::Custom {
+            if let Err(msg) = self.reload_custom_shader() {
+                failure = Some(msg);
+                next = ShaderKind::None;
+            }
+        }
+        self.crt_shader_kind = next;
+        info!("crt shader: {}", next.label());
+        // One overlay per action, carrying the failure: a second show_osd
+        // would replace this one before either is drawn.
+        self.show_osd(match failure {
+            Some(msg) => format!("CRT shader: {} (custom failed: {msg})", next.label()),
+            None => format!("CRT shader: {}", next.label()),
+        });
+        self.request_redraw();
+    }
+
+    /// Compile the configured user shader against the live device. The full
+    /// message goes to the log; the returned one-line summary is for the
+    /// caller to fold into whatever overlay it is already showing. A failure
+    /// leaves no pipeline, so the caller falls back to no shader rather than
+    /// to a stale one.
+    fn reload_custom_shader(&mut self) -> Result<(), String> {
+        let fail = |msg: String| {
+            error!("[display] shader: {msg}");
+            Err(msg.lines().next().unwrap_or_default().to_string())
+        };
+        let Some(path) = self.custom_shader_path.clone() else {
+            return fail("no custom shader configured".to_string());
+        };
+        let Some(r) = self.render.as_mut() else {
+            return fail(format!(
+                "cannot load shader {} before the window exists",
+                path.display()
+            ));
+        };
+        let format = r.pixels.render_texture_format();
+        match r.crt_shader.load_custom(r.pixels.device(), format, &path) {
+            Ok(()) => Ok(()),
+            Err(msg) => fail(msg),
+        }
+    }
+
     /// Switch the presentation pixel aspect live: the canvas height (and
     /// with it the backing texture and the window) changes between the
     /// 4:3 and the square-pixel size, so the texture must be rebuilt like
@@ -8661,6 +8894,7 @@ impl App {
         self.present_rows = result.present_rows;
         self.present_width = result.present_width;
         self.present_standard_tv_aperture = result.standard_tv_aperture;
+        self.present_programmable = result.programmable;
         self.rtg_present_dims = None;
         self.last_rendered_emulated_frame = Some(result.emulated_frame);
         true
@@ -8787,6 +9021,7 @@ impl App {
         self.present_rows = rows;
         self.present_width = FB_WIDTH;
         self.present_standard_tv_aperture = false;
+        self.present_programmable = false;
         self.last_rendered_emulated_frame = Some(emulated_frame);
         self.last_submitted_render_frame = Some(emulated_frame);
         Some(true)
@@ -8852,6 +9087,7 @@ impl App {
         self.refresh_present_from_deinterlacer();
         self.present_standard_tv_aperture =
             uses_standard_pal_tv_aperture(geometry, self.present_rows, &base);
+        self.present_programmable = geometry.programmable;
         self.rtg_present_dims = None;
         self.last_rendered_emulated_frame = Some(emulated_frame);
         self.last_submitted_render_frame = Some(emulated_frame);
@@ -8862,6 +9098,7 @@ impl App {
 mod console;
 #[cfg(feature = "control")]
 mod control;
+mod crt_shader;
 mod host_input;
 mod present;
 mod rtg_texture;

@@ -1687,6 +1687,8 @@ fn main() -> Result<()> {
         disk_write_protected,
         config::resolve_overscan(cfg.overscan),
         config::resolve_phosphor(cfg.phosphor),
+        config::resolve_shader(cfg.shader.clone()),
+        config::resolve_shader_strength(cfg.shader_strength),
         cfg.full_screen,
         !cfg.status_bar,
         cfg.emulation.warp_speed,
@@ -1800,6 +1802,8 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
         [true; 4],
         config::resolve_overscan(config::Overscan::Tv),
         config::resolve_phosphor(0.0),
+        config::resolve_shader(config::ShaderMode::None),
+        config::resolve_shader_strength(1.0),
         // The config-screen placeholder is always a normal windowed UI.
         false,
         false,

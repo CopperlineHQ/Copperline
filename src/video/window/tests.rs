@@ -718,6 +718,79 @@ fn autofire_menu_item_cycles_the_rate() {
 }
 
 #[test]
+fn crt_shader_menu_item_cycles_the_presets() {
+    use crate::config::ShaderKind;
+    let mut app = test_app();
+    assert_eq!(app.crt_shader_kind, ShaderKind::None);
+    for expected in [
+        ShaderKind::Scanlines,
+        ShaderKind::Mask,
+        ShaderKind::Crt,
+        // No user shader is configured, so the cycle skips Custom and
+        // returns to off rather than selecting a shader it cannot load.
+        ShaderKind::None,
+    ] {
+        app.activate_ui_control(UiControl::MenuItem(super::ui::MenuItem::CrtShader));
+        assert_eq!(app.crt_shader_kind, expected);
+    }
+}
+
+#[test]
+fn a_broken_custom_shader_never_becomes_the_selected_preset() {
+    use crate::config::ShaderKind;
+    let mut app = test_app();
+    // Configured but unloadable: the fixture has no window, so there is no
+    // device to compile it against.
+    app.custom_shader_path = Some(std::path::PathBuf::from("/nonexistent/nope.wgsl"));
+    for _ in 0..3 {
+        app.activate_ui_control(UiControl::MenuItem(super::ui::MenuItem::CrtShader));
+    }
+    assert_eq!(app.crt_shader_kind, ShaderKind::Crt);
+    // Custom is offered next, fails to load, and the cycle falls through to
+    // off rather than selecting a preset that would draw nothing.
+    app.activate_ui_control(UiControl::MenuItem(super::ui::MenuItem::CrtShader));
+    assert_eq!(app.crt_shader_kind, ShaderKind::None);
+}
+
+/// The pass draws one scanline per emulated field line the present copy
+/// actually shows, which is not `present_rows / 2` in the default TV
+/// presentation: that path crops to the fixed 540-row aperture (270 lines)
+/// and stretches it over the whole 537-row rect.
+#[test]
+fn crt_scanline_count_follows_what_the_present_copy_shows() {
+    use super::crt_scanline_count;
+    use crate::video::{PRESENT_HEIGHT_SQUARE, PRESENT_HEIGHT_TV};
+    let woven = crate::video::deinterlace::OUT_HEIGHT;
+
+    // TV aspect + TV aperture (the out-of-the-box config): 540 aperture rows
+    // = 270 lines, filling the rect.
+    assert_eq!(
+        crt_scanline_count(woven, PRESENT_HEIGHT_TV, true),
+        (TV_PAL_PRESENT_HEIGHT / 2) as f32
+    );
+    // Full overscan takes the plain copy, which shows every woven row.
+    assert_eq!(
+        crt_scanline_count(woven, PRESENT_HEIGHT_TV, false),
+        (woven / 2) as f32
+    );
+    // The square canvas is taller than the aperture and pads it with bezel
+    // rows, so the same 270 lines cover only 540 of 570 rect rows: the pitch
+    // across the whole viewport scales up to match.
+    assert_eq!(
+        crt_scanline_count(woven, PRESENT_HEIGHT_SQUARE, true),
+        270.0 * PRESENT_HEIGHT_SQUARE as f32 / TV_PAL_PRESENT_HEIGHT as f32
+    );
+    assert_eq!(
+        crt_scanline_count(woven, PRESENT_HEIGHT_SQUARE, true),
+        285.0
+    );
+    assert_eq!(
+        crt_scanline_count(woven, PRESENT_HEIGHT_SQUARE, false),
+        (woven / 2) as f32
+    );
+}
+
+#[test]
 fn keyboard_mouse_drives_a_second_mouse_port() {
     use crate::bus::PortDevice;
     let mut app = test_app();
@@ -2460,6 +2533,8 @@ fn test_app_with_audio_cpu_and_program(
         [true; 4],
         crate::config::Overscan::Full,
         0.0,
+        crate::config::ShaderMode::None,
+        1.0,
         false,
         false,
         crate::config::WarpSpeed::Max,

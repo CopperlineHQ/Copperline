@@ -26,7 +26,7 @@ use crate::config::{
     format_size, machine_profile_defaults, AudioFilterMode, ChannelMode, Chipset, Config, CpuModel,
     JoystickInputMode, MachineModel, MouseCapture, Overscan, PacingBudget, ParallelDevice,
     PixelAspect, RawConfig, RawDrive, RawFilesysMount, RawFloppyDrive, RawZorroBoard, RtgCard,
-    ScsiController, SerialMode, WarpSpeed, BOOT_PRI_NEVER,
+    ScsiController, SerialMode, ShaderMode, WarpSpeed, BOOT_PRI_NEVER,
 };
 use crate::net::NetConfig;
 use crate::zorro::{ConfigOption, ConfigOptionKind, LoadedZorroBoard};
@@ -178,7 +178,10 @@ pub enum LauncherTab {
     IoPorts,
     Input,
     Zorro,
-    AvEmulation,
+    /// How the picture is presented: overscan, aspect, and the CRT
+    /// emulation (phosphor and the shader pass).
+    Display,
+    AudioEmulation,
 }
 
 /// Tabs shown top to bottom.
@@ -194,7 +197,8 @@ pub const TABS: &[LauncherTab] = &[
     LauncherTab::Input,
     LauncherTab::IoPorts,
     LauncherTab::Zorro,
-    LauncherTab::AvEmulation,
+    LauncherTab::Display,
+    LauncherTab::AudioEmulation,
 ];
 
 impl LauncherTab {
@@ -212,7 +216,8 @@ impl LauncherTab {
             LauncherTab::IoPorts => "I/O Ports",
             LauncherTab::Input => "Input",
             LauncherTab::Zorro => "Zorro",
-            LauncherTab::AvEmulation => "A/V & Emu",
+            LauncherTab::Display => "Display",
+            LauncherTab::AudioEmulation => "Audio & Emu",
         }
     }
 
@@ -343,6 +348,8 @@ pub enum LauncherField {
     Overscan,
     PixelAspect,
     Phosphor,
+    Shader,
+    ShaderStrength,
     StartFullscreen,
     ShowStatusBar,
     FloppySounds,
@@ -581,16 +588,23 @@ const PARALLEL_ROWS_SAMPLER: [Row; 3] = [
     row(F::SamplerGain, "Input gain", Cycle),
 ];
 const ETHERNET_ROWS: [Row; 1] = [row(F::Ethernet, "A2065 board", Cycle)];
-const AV_EMULATION_ROWS: [Row; 15] = [
+/// Picture settings. Split from the audio/emulation rows because the panel
+/// is a fixed 520px box with no row scrolling: the two groups together
+/// outgrow the rows that fit above the action buttons.
+const DISPLAY_ROWS: [Row; 7] = [
+    row(F::Overscan, "Overscan", Cycle),
+    row(F::PixelAspect, "Pixel aspect", Cycle),
+    row(F::Phosphor, "Phosphor", Cycle),
+    row(F::Shader, "CRT shader", Cycle),
+    row(F::ShaderStrength, "Shader strength", Cycle),
+    row(F::StartFullscreen, "Start fullscreen", Toggle),
+    row(F::ShowStatusBar, "Status bar", Toggle),
+];
+const AUDIO_EMULATION_ROWS: [Row; 10] = [
     row(F::AudioDevice, "Audio output", Cycle),
     row(F::AudioChannelMode, "Channel mode", Cycle),
     row(F::AudioStereoSeparation, "Stereo separation", Cycle),
     row(F::AudioFilter, "Audio filter", Cycle),
-    row(F::Overscan, "Overscan", Cycle),
-    row(F::PixelAspect, "Pixel aspect", Cycle),
-    row(F::Phosphor, "Phosphor", Cycle),
-    row(F::StartFullscreen, "Start fullscreen", Toggle),
-    row(F::ShowStatusBar, "Status bar", Toggle),
     row(F::FloppySounds, "Floppy sounds", Toggle),
     row(F::FloppyVolume, "Floppy volume", Cycle),
     row(F::PowerOn, "Power on at start", Toggle),
@@ -640,7 +654,8 @@ pub fn rows(
         LauncherTab::IoPorts => Cow::Owned(io_ports_rows(serial_mode, parallel_device)),
         LauncherTab::Input => Cow::Borrowed(&INPUT_ROWS),
         LauncherTab::Zorro => Cow::Borrowed(&[]),
-        LauncherTab::AvEmulation => Cow::Borrowed(&AV_EMULATION_ROWS),
+        LauncherTab::Display => Cow::Borrowed(&DISPLAY_ROWS),
+        LauncherTab::AudioEmulation => Cow::Borrowed(&AUDIO_EMULATION_ROWS),
     }
 }
 
@@ -1002,6 +1017,15 @@ pub struct MachineSetup {
     overscan: Overscan,
     pixel_aspect: PixelAspect,
     phosphor: f32,
+    /// Window shader pass ([display] shader).
+    shader: ShaderMode,
+    /// The user shader the loaded config named, kept even while another
+    /// preset is selected so the picker can offer it again. A file the
+    /// config never mentioned cannot be reached from here: the field takes
+    /// a path, and this screen has no shader browser.
+    shader_custom: Option<PathBuf>,
+    /// Shader mix, 0.0 to 1.0 ([display] shader_strength).
+    shader_strength: f32,
     /// Open fullscreen at start ([display] full_screen).
     start_fullscreen: bool,
     /// Show the status bar at start ([display] status_bar).
@@ -1142,6 +1166,12 @@ impl MachineSetup {
             overscan: cfg.overscan,
             pixel_aspect: cfg.pixel_aspect,
             phosphor: cfg.phosphor,
+            shader: cfg.shader.clone(),
+            shader_custom: match &cfg.shader {
+                ShaderMode::Custom(path) => Some(path.clone()),
+                _ => None,
+            },
+            shader_strength: cfg.shader_strength,
             start_fullscreen: cfg.full_screen,
             show_status_bar: cfg.status_bar,
             floppy_sounds: cfg.audio.floppy_sounds,
@@ -1430,6 +1460,12 @@ impl MachineSetup {
         if (self.phosphor - base.phosphor).abs() > 1e-6 {
             raw.display.phosphor = Some(self.phosphor);
         }
+        if self.shader != base.shader {
+            raw.display.shader = Some(shader_name(&self.shader));
+        }
+        if (self.shader_strength - base.shader_strength).abs() > 1e-6 {
+            raw.display.shader_strength = Some(self.shader_strength);
+        }
         if self.start_fullscreen != base.full_screen {
             raw.display.full_screen = Some(self.start_fullscreen);
         }
@@ -1610,6 +1646,11 @@ impl MachineSetup {
         self.overscan = base.overscan;
         self.pixel_aspect = base.pixel_aspect;
         self.phosphor = base.phosphor;
+        // The remembered user-shader path survives: it came from the config
+        // file, not from the profile, and the picker needs it to offer
+        // "Custom" again.
+        self.shader = base.shader.clone();
+        self.shader_strength = base.shader_strength;
         self.start_fullscreen = base.full_screen;
         self.show_status_bar = base.status_bar;
         self.floppy_sounds = base.audio.floppy_sounds;
@@ -1991,6 +2032,16 @@ impl MachineSetup {
                     format!("{:.2}", self.phosphor)
                 }
             }
+            F::Shader => match self.shader {
+                ShaderMode::None => "Off".to_string(),
+                ShaderMode::Scanlines => "Scanlines".to_string(),
+                ShaderMode::Mask => "Mask".to_string(),
+                // Named for the monitor the preset is modelled on; the path
+                // of a user shader is too long for the value column.
+                ShaderMode::Crt => "CRT (1084)".to_string(),
+                ShaderMode::Custom(_) => "Custom".to_string(),
+            },
+            F::ShaderStrength => format!("{:.2}", self.shader_strength),
             F::FloppyVolume => format!("{}%", self.floppy_volume),
             F::PacingBudget => match self.pacing_budget {
                 PacingBudget::Cycles => "Cycles".to_string(),
@@ -2127,6 +2178,35 @@ impl MachineSetup {
         }
     }
 
+    /// The shader picker's options: the built-in presets, plus the user
+    /// shader the loaded config named. There is no file browser for shaders
+    /// here, so Custom is offered only when a path came in with the config.
+    fn shader_options(&self) -> Vec<ShaderMode> {
+        let mut options = vec![
+            ShaderMode::None,
+            ShaderMode::Scanlines,
+            ShaderMode::Mask,
+            ShaderMode::Crt,
+        ];
+        if let Some(path) = &self.shader_custom {
+            options.push(ShaderMode::Custom(path.clone()));
+        }
+        options
+    }
+
+    /// Like [`cycle_slice`], but for the non-`Copy` shader options.
+    fn cycled_shader(&self, forward: bool) -> ShaderMode {
+        let options = self.shader_options();
+        let n = options.len();
+        let idx = options.iter().position(|m| *m == self.shader).unwrap_or(0);
+        let next = if forward {
+            (idx + 1) % n
+        } else {
+            (idx + n - 1) % n
+        };
+        options[next].clone()
+    }
+
     /// Step a cycle/stepper field forward (`forward`) or backward.
     pub fn cycle(&mut self, field: LauncherField, forward: bool) {
         match field {
@@ -2185,6 +2265,12 @@ impl MachineSetup {
                 let p = self.phosphor + if forward { 0.05 } else { -0.05 };
                 // Snap to the 0.05 grid to avoid float drift accumulating.
                 self.phosphor = (p.clamp(0.0, 0.95) * 20.0).round() / 20.0;
+            }
+            F::Shader => self.shader = self.cycled_shader(forward),
+            F::ShaderStrength => {
+                let s = self.shader_strength + if forward { 0.1 } else { -0.1 };
+                // Snap to the 0.1 grid to avoid float drift accumulating.
+                self.shader_strength = (s.clamp(0.0, 1.0) * 10.0).round() / 10.0;
             }
             F::FloppyVolume => self.floppy_volume = step_u8(self.floppy_volume, forward, 0, 100),
             F::Overscan => self.overscan = cycle_slice(&OVERSCANS, self.overscan, forward),
@@ -2855,7 +2941,8 @@ fn rows_contains_kind(field: LauncherField, kind: RowKind) -> bool {
         &HOSTFS_ROWS,
         &CD_ROWS,
         &INPUT_ROWS,
-        &AV_EMULATION_ROWS,
+        &DISPLAY_ROWS,
+        &AUDIO_EMULATION_ROWS,
         &PARALLEL_ROWS_PRINTER,
         &PARALLEL_ROWS_SAMPLER,
     ];
@@ -3200,6 +3287,19 @@ fn pixel_aspect_name(aspect: PixelAspect) -> &'static str {
     match aspect {
         PixelAspect::Tv => "tv",
         PixelAspect::Square => "square",
+    }
+}
+
+/// The `[display] shader` value for a mode: the canonical preset name (not
+/// the picker's "off" spelling, which only parses back), or a user shader's
+/// path as written.
+fn shader_name(shader: &ShaderMode) -> String {
+    match shader {
+        ShaderMode::None => "none".to_string(),
+        ShaderMode::Scanlines => "scanlines".to_string(),
+        ShaderMode::Mask => "mask".to_string(),
+        ShaderMode::Crt => "crt".to_string(),
+        ShaderMode::Custom(path) => path_string(path),
     }
 }
 
@@ -4241,6 +4341,136 @@ mod tests {
         let back = MachineSetup::from_raw(&raw).unwrap();
         assert_eq!(back.serial_mode, SerialMode::Midi);
         assert_eq!(back.midi_out.as_deref(), Some("USB MIDI"));
+    }
+
+    #[test]
+    fn shader_cycles_the_presets_and_round_trips_through_raw() {
+        let mut s = MachineSetup::default();
+        // Off is the baseline, so nothing is written for it.
+        assert_eq!(s.value_label(LauncherField::Shader), "Off");
+        assert_eq!(s.to_raw().display.shader, None);
+
+        // With no user shader configured the picker offers the presets only,
+        // and wraps straight back to Off.
+        for expected in ["Scanlines", "Mask", "CRT (1084)", "Off"] {
+            s.cycle(LauncherField::Shader, true);
+            assert_eq!(s.value_label(LauncherField::Shader), expected);
+        }
+        // Backwards from Off lands on the last preset, not on Custom.
+        s.cycle(LauncherField::Shader, false);
+        assert_eq!(s.shader, ShaderMode::Crt);
+
+        s.cycle(LauncherField::Shader, true);
+        s.cycle(LauncherField::Shader, true);
+        assert_eq!(s.shader, ShaderMode::Scanlines);
+        // The canonical name is written, not the menu's "off" spelling.
+        let raw = s.to_raw();
+        assert_eq!(raw.display.shader.as_deref(), Some("scanlines"));
+        assert_eq!(
+            MachineSetup::from_raw(&raw).unwrap().shader,
+            ShaderMode::Scanlines
+        );
+        assert_eq!(
+            s.build_config().expect("valid config").shader,
+            ShaderMode::Scanlines
+        );
+
+        // Switching machine profile returns it to the profile default.
+        s.select_model(Some(MachineModel::A1200));
+        assert_eq!(s.shader, ShaderMode::None);
+    }
+
+    #[test]
+    fn a_configured_user_shader_stays_in_the_shader_cycle() {
+        let raw = RawConfig {
+            display: crate::config::RawDisplay {
+                shader: Some("shaders/Aperture.wgsl".to_string()),
+                ..Default::default()
+            },
+            ..RawConfig::default()
+        };
+        let mut s = MachineSetup::from_raw(&raw).unwrap();
+        let custom = ShaderMode::Custom(PathBuf::from("shaders/Aperture.wgsl"));
+        assert_eq!(s.shader, custom);
+        assert_eq!(s.value_label(LauncherField::Shader), "Custom");
+        // The path is written back verbatim, since host paths are
+        // case-sensitive.
+        assert_eq!(
+            s.to_raw().display.shader.as_deref(),
+            Some("shaders/Aperture.wgsl")
+        );
+
+        // Custom joins the cycle after the last preset, and cycling away and
+        // back keeps its path.
+        s.cycle(LauncherField::Shader, true);
+        assert_eq!(s.shader, ShaderMode::None);
+        for _ in 0..4 {
+            s.cycle(LauncherField::Shader, true);
+        }
+        assert_eq!(s.shader, custom);
+
+        // Selecting a preset drops the custom shader from the config file,
+        // but not from the picker.
+        s.cycle(LauncherField::Shader, true);
+        s.cycle(LauncherField::Shader, true);
+        assert_eq!(s.shader, ShaderMode::Scanlines);
+        assert_eq!(s.to_raw().display.shader.as_deref(), Some("scanlines"));
+        s.cycle(LauncherField::Shader, false);
+        assert_eq!(s.shader, ShaderMode::None);
+        s.cycle(LauncherField::Shader, false);
+        assert_eq!(s.shader, custom);
+    }
+
+    /// The shader name is spelled out in six places (the parser, the picker
+    /// labels, this writer, the menu label, and the two docs tables), so pin
+    /// the one that matters: whatever `to_raw` writes has to load back as
+    /// the same mode.
+    #[test]
+    fn every_shader_name_parses_back_to_its_own_mode() {
+        for mode in [
+            ShaderMode::None,
+            ShaderMode::Scanlines,
+            ShaderMode::Mask,
+            ShaderMode::Crt,
+            ShaderMode::Custom(PathBuf::from("shaders/Aperture.wgsl")),
+        ] {
+            let name = shader_name(&mode);
+            assert_eq!(
+                crate::config::parse_shader(&name).expect("shader name must parse"),
+                mode,
+                "shader_name({mode:?}) wrote {name:?}, which does not load back"
+            );
+        }
+    }
+
+    #[test]
+    fn shader_strength_steps_in_tenths_and_clamps() {
+        let mut s = MachineSetup::default();
+        // Full effect is the baseline, so nothing is written for it.
+        assert_eq!(s.value_label(LauncherField::ShaderStrength), "1.00");
+        assert_eq!(s.to_raw().display.shader_strength, None);
+
+        s.cycle(LauncherField::ShaderStrength, false);
+        assert_eq!(s.value_label(LauncherField::ShaderStrength), "0.90");
+        assert_eq!(s.to_raw().display.shader_strength, Some(0.9));
+
+        // Both ends saturate rather than wrapping, and stepping stays on the
+        // 0.1 grid instead of drifting.
+        for _ in 0..20 {
+            s.cycle(LauncherField::ShaderStrength, false);
+        }
+        assert_eq!(s.shader_strength, 0.0);
+        for _ in 0..20 {
+            s.cycle(LauncherField::ShaderStrength, true);
+        }
+        assert_eq!(s.shader_strength, 1.0);
+        assert_eq!(s.to_raw().display.shader_strength, None);
+
+        s.cycle(LauncherField::ShaderStrength, false);
+        assert_eq!(s.build_config().expect("valid config").shader_strength, 0.9);
+        // Switching machine profile returns it to the profile default.
+        s.select_model(Some(MachineModel::A1200));
+        assert_eq!(s.shader_strength, 1.0);
     }
 
     #[test]

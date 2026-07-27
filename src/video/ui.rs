@@ -93,6 +93,7 @@ pub enum MenuItem {
     SamplerInput,
     SamplerGain,
     PixelAspect,
+    CrtShader,
     FloppySpeed,
     Fullscreen,
     StatusBar,
@@ -117,9 +118,10 @@ pub enum MenuItem {
 /// sampler is attached, so the list is built per open rather than fixed.
 pub fn menu_items(midi_active: bool, sampler_active: bool) -> Vec<MenuItem> {
     let _ = midi_active;
-    // 12 leading + up to 2 MIDI + 2 sampler + pixel aspect + floppy speed +
-    // 15 trailing items = 33, sized so appending never reallocates.
-    let mut items = Vec::with_capacity(33);
+    // 12 leading + up to 2 MIDI + 2 sampler + pixel aspect + CRT shader +
+    // floppy speed + 15 trailing items = 34, sized so appending never
+    // reallocates.
+    let mut items = Vec::with_capacity(34);
     items.extend([
         MenuItem::MachineConfig,
         MenuItem::FrameAnalyzer,
@@ -144,6 +146,7 @@ pub fn menu_items(midi_active: bool, sampler_active: bool) -> Vec<MenuItem> {
         items.push(MenuItem::SamplerGain);
     }
     items.push(MenuItem::PixelAspect);
+    items.push(MenuItem::CrtShader);
     items.push(MenuItem::FloppySpeed);
     items.extend([
         MenuItem::Fullscreen,
@@ -187,6 +190,8 @@ pub struct MenuLabels<'a> {
     /// through the Port 1/2 Device items).
     pub port_devices: [crate::bus::PortDevice; 2],
     pub pixel_aspect: PixelAspect,
+    /// Window shader pass in effect (the CRT Shader item cycles it).
+    pub shader: crate::config::ShaderKind,
     /// Current `[floppy] speed` value (a percentage, or 0 for turbo).
     pub floppy_speed: u16,
     /// Current MIDI input/output device names (empty when not applicable).
@@ -228,6 +233,11 @@ fn menu_item_label(item: MenuItem, s: MenuLabels) -> String {
                 PixelAspect::Square => "square",
             };
             format!("Pixel Aspect {:>8}", format!("[{value}]"))
+        }
+        // Right-pad like Pixel Aspect above so the closing bracket stays put
+        // as the value width changes ("off" vs "scanlines").
+        MenuItem::CrtShader => {
+            format!("CRT Shader {:>11}", format!("[{}]", s.shader.label()))
         }
         // Right-pad like Warp Limit below so the closing bracket stays put
         // as the value width changes (100% vs turbo).
@@ -6265,7 +6275,10 @@ mod tests {
 
     /// The menu grows upward from the bottom edge, so every optional item
     /// (MIDI, sampler) that can appear has to still fit. Rows tighten rather
-    /// than the first items falling off the top.
+    /// than the first items falling off the top, and only once even the
+    /// tightest rows overflow does the list scroll. The fullest session --
+    /// MIDI endpoints and a sampler both live -- reaches that point: at the
+    /// 16px floor its items want more than the display opening holds.
     #[test]
     fn the_menu_fits_on_screen_with_every_optional_item_shown() {
         for (midi, sampler) in [(false, false), (true, false), (false, true), (true, true)] {
@@ -6280,12 +6293,17 @@ mod tests {
                 layout.item_h >= MENU_TEXT_PX * font::GLYPH_H,
                 "menu rows must stay at least as tall as their text"
             );
-            assert!(
-                !layout.scrolling,
-                "the real menu should still fit without scrolling ({n} items)"
-            );
-            // Every row lands inside the menu background.
-            let last = menu_item_rect(n - 1, n, 0).expect("last item visible");
+            // Only the everything-live session is allowed to reach the
+            // scrolling fallback; every ordinary session still shows the
+            // whole list at once.
+            if !(midi && sampler) {
+                assert!(
+                    !layout.scrolling,
+                    "menu of {n} items must not scroll without both MIDI and a sampler"
+                );
+            }
+            // Every drawn row lands inside the menu background.
+            let last = menu_item_rect(layout.visible - 1, n, 0).expect("last visible item");
             assert!(last.y + last.h <= rect.y + rect.h);
             assert!(menu_item_rect(0, n, 0).unwrap().y >= rect.y);
         }
@@ -6385,6 +6403,85 @@ mod tests {
         );
     }
 
+    /// The launcher panel is a fixed box with no row scrolling, so a tab's
+    /// rows have to fit between the content top and the chrome below them:
+    /// the footer nav row on the Storage tab and its sub-pages, the status
+    /// line everywhere else. Nothing may reach the action buttons or hang
+    /// off the panel. Adding one row too many to a tab fails here rather
+    /// than silently drawing over the Save button.
+    #[test]
+    fn every_launcher_tab_row_fits_inside_the_panel() {
+        use crate::config::{ParallelDevice, SerialMode};
+        let rect = panel_rect(&Panel::Launcher(Box::new(LauncherState::new(
+            launcher::MachineSetup::default(),
+        ))));
+        let devices = [
+            ParallelDevice::None,
+            ParallelDevice::Printer,
+            ParallelDevice::Sampler,
+        ];
+        // Every serial mode, so a future one that grows its own rows is
+        // swept here the day it is added.
+        let modes = [
+            SerialMode::Off,
+            SerialMode::Stdout,
+            SerialMode::Midi,
+            SerialMode::Tcp,
+            SerialMode::TcpConnect,
+            SerialMode::Pty,
+        ];
+        let tabs = launcher::TABS
+            .iter()
+            .chain(launcher::ADDITIONAL_TABS.iter());
+        for &tab in tabs {
+            // The row grid ends above the footer nav row on the tabs that
+            // have one, and above the status line on the rest.
+            let bound = if tab == LauncherTab::Storage || tab.parent_tab().is_some() {
+                launcher_footer_y(rect)
+            } else {
+                launcher_status_y(rect)
+            };
+            for &device in &devices {
+                for &mode in &modes {
+                    let rows = launcher::rows(tab, device, mode);
+                    for (i, r) in rows.iter().enumerate() {
+                        let row_y = launcher_row_y(rect, i);
+                        let (prev, value, next) = launcher_cycle_rects(rect, row_y);
+                        let (browse, clear) = launcher_path_rects(rect, row_y);
+                        // Every control a row can draw, whatever its kind:
+                        // the widest and lowest of them must still fit.
+                        let boxes = [
+                            prev,
+                            value,
+                            next,
+                            browse,
+                            clear,
+                            launcher_toggle_rect(rect, row_y),
+                            launcher_drive_name_rect(rect, row_y),
+                            launcher_bootable_rect(rect, row_y),
+                        ];
+                        for b in boxes {
+                            let label = r.label;
+                            assert!(
+                                b.y >= launcher_content_top(rect),
+                                "{tab:?} row {i} ({label:?}) starts above the content area"
+                            );
+                            assert!(
+                                b.y + b.h <= bound,
+                                "{tab:?} row {i} ({label:?}) reaches {}, past the {bound} limit",
+                                b.y + b.h
+                            );
+                            assert!(
+                                b.x >= rect.x && b.x + b.w <= rect.x + rect.w,
+                                "{tab:?} row {i} ({label:?}) spills outside the panel"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn fullscreen_menu_item_label_tracks_window_state() {
         assert!(menu_items(false, false).contains(&MenuItem::Fullscreen));
@@ -6411,6 +6508,7 @@ mod tests {
             audio_filter: crate::config::AudioFilterMode::Auto,
             sampler_input: "",
             sampler_gain: "",
+            shader: crate::config::ShaderKind::None,
         };
         assert_eq!(
             menu_item_label(MenuItem::Fullscreen, labels(false)),
@@ -6448,6 +6546,7 @@ mod tests {
             audio_filter: crate::config::AudioFilterMode::Auto,
             sampler_input: "",
             sampler_gain: "",
+            shader: crate::config::ShaderKind::None,
         };
         // "on" means the bar is shown.
         assert_eq!(
@@ -6472,6 +6571,25 @@ mod tests {
         // A deliberately over-long device name exercises the clip path.
         let long = "Extremely Long USB MIDI Interface Name 9000";
         let aspects = [PixelAspect::Tv, PixelAspect::Square];
+        let shaders = [
+            crate::config::ShaderKind::None,
+            crate::config::ShaderKind::Scanlines,
+            crate::config::ShaderKind::Mask,
+            crate::config::ShaderKind::Crt,
+            crate::config::ShaderKind::Custom,
+        ];
+        // The width check itself, out of the sweep below: one combination per
+        // label-bearing field nests deeply enough without it.
+        let check = |item: MenuItem, labels: MenuLabels| {
+            let label = menu_item_label(item, labels);
+            let text_w = label.chars().count() * font::GLYPH_W * MENU_TEXT_PX;
+            let right = menu_item_rect(0, items.len(), 0).unwrap().x + MENU_TEXT_INSET + text_w;
+            assert!(
+                right <= limit,
+                "label {label:?} ({text_w}px) overflows the menu by {}px",
+                right.saturating_sub(limit)
+            );
+        };
         for &item in &items {
             for warp in [false, true] {
                 for recording in [false, true] {
@@ -6479,50 +6597,43 @@ mod tests {
                         for &mode in &modes {
                             for &speed in &speeds {
                                 for &aspect in &aspects {
-                                    let labels = MenuLabels {
-                                        warp,
-                                        warp_speed: speed,
-                                        // Rides warp's sweep so both label
-                                        // states are width-checked.
-                                        fullscreen: warp,
-                                        status_bar_hidden: warp,
-                                        recording,
-                                        input_recording,
-                                        // Rides warp's sweep so both label
-                                        // states are width-checked.
-                                        rewind: warp,
-                                        save_slot: 1,
-                                        autofire_hz: 0,
-                                        joystick_input_mode: mode,
-                                        // The longest device label.
-                                        port_devices: [crate::bus::PortDevice::Analogue; 2],
-                                        pixel_aspect: aspect,
-                                        // Rides warp's sweep: "turbo" is the
-                                        // widest value, "100%" the tallest
-                                        // percent form.
-                                        floppy_speed: if warp {
-                                            crate::floppy::SPEED_TURBO
-                                        } else {
-                                            100
-                                        },
-                                        midi_in: long,
-                                        midi_out: long,
-                                        audio_output: long,
-                                        audio_filter: crate::config::AudioFilterMode::Auto,
-                                        sampler_input: long,
-                                        sampler_gain: "-24 dB",
-                                    };
-                                    let label = menu_item_label(item, labels);
-                                    let text_w =
-                                        label.chars().count() * font::GLYPH_W * MENU_TEXT_PX;
-                                    let right = menu_item_rect(0, items.len(), 0).unwrap().x
-                                        + MENU_TEXT_INSET
-                                        + text_w;
-                                    assert!(
-                                        right <= limit,
-                                        "label {label:?} ({text_w}px) overflows the menu by {}px",
-                                        right.saturating_sub(limit)
-                                    );
+                                    for &shader in &shaders {
+                                        let labels = MenuLabels {
+                                            warp,
+                                            warp_speed: speed,
+                                            // Rides warp's sweep so both label
+                                            // states are width-checked.
+                                            fullscreen: warp,
+                                            status_bar_hidden: warp,
+                                            recording,
+                                            input_recording,
+                                            // Rides warp's sweep so both label
+                                            // states are width-checked.
+                                            rewind: warp,
+                                            save_slot: 1,
+                                            autofire_hz: 0,
+                                            joystick_input_mode: mode,
+                                            // The longest device label.
+                                            port_devices: [crate::bus::PortDevice::Analogue; 2],
+                                            pixel_aspect: aspect,
+                                            // Rides warp's sweep: "turbo" is the
+                                            // widest value, "100%" the tallest
+                                            // percent form.
+                                            floppy_speed: if warp {
+                                                crate::floppy::SPEED_TURBO
+                                            } else {
+                                                100
+                                            },
+                                            midi_in: long,
+                                            midi_out: long,
+                                            audio_output: long,
+                                            audio_filter: crate::config::AudioFilterMode::Auto,
+                                            sampler_input: long,
+                                            sampler_gain: "-24 dB",
+                                            shader,
+                                        };
+                                        check(item, labels);
+                                    }
                                 }
                             }
                         }
@@ -7465,6 +7576,7 @@ mod tests {
             audio_filter: crate::config::AudioFilterMode::Auto,
             sampler_input: "",
             sampler_gain: "",
+            shader: crate::config::ShaderKind::None,
         };
         let panel_has_title_bar = |frame: &[u8], panel: &Panel| {
             let rect = panel_rect(panel);
@@ -7510,6 +7622,7 @@ mod tests {
                 audio_filter: crate::config::AudioFilterMode::Auto,
                 sampler_input: "",
                 sampler_gain: "",
+                shader: crate::config::ShaderKind::None,
             },
         );
         let menu = menu_rect(menu_items(false, false).len());
@@ -7564,6 +7677,7 @@ mod tests {
                 audio_filter: crate::config::AudioFilterMode::Auto,
                 sampler_input: "",
                 sampler_gain: "",
+                shader: crate::config::ShaderKind::None,
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -7606,6 +7720,7 @@ mod tests {
                 audio_filter: crate::config::AudioFilterMode::Auto,
                 sampler_input: "",
                 sampler_gain: "",
+                shader: crate::config::ShaderKind::None,
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -7664,6 +7779,7 @@ mod tests {
                 audio_filter: crate::config::AudioFilterMode::Auto,
                 sampler_input: "",
                 sampler_gain: "",
+                shader: crate::config::ShaderKind::None,
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -7746,6 +7862,7 @@ mod tests {
                 audio_filter: crate::config::AudioFilterMode::Auto,
                 sampler_input: "",
                 sampler_gain: "",
+                shader: crate::config::ShaderKind::None,
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -7838,6 +7955,7 @@ mod tests {
                 audio_filter: crate::config::AudioFilterMode::Auto,
                 sampler_input: "",
                 sampler_gain: "",
+                shader: crate::config::ShaderKind::None,
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -7904,6 +8022,7 @@ mod tests {
                 audio_filter: crate::config::AudioFilterMode::Auto,
                 sampler_input: "",
                 sampler_gain: "",
+                shader: crate::config::ShaderKind::None,
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -7971,6 +8090,7 @@ mod tests {
                 audio_filter: crate::config::AudioFilterMode::Auto,
                 sampler_input: "",
                 sampler_gain: "",
+                shader: crate::config::ShaderKind::None,
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -8091,6 +8211,7 @@ mod tests {
                 audio_filter: crate::config::AudioFilterMode::Auto,
                 sampler_input: "",
                 sampler_gain: "",
+                shader: crate::config::ShaderKind::None,
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -8171,6 +8292,7 @@ mod tests {
                 audio_filter: crate::config::AudioFilterMode::Auto,
                 sampler_input: "",
                 sampler_gain: "",
+                shader: crate::config::ShaderKind::None,
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -8262,6 +8384,7 @@ mod tests {
                 audio_filter: crate::config::AudioFilterMode::Auto,
                 sampler_input: "",
                 sampler_gain: "",
+                shader: crate::config::ShaderKind::None,
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -8392,6 +8515,7 @@ mod tests {
                 audio_filter: crate::config::AudioFilterMode::Auto,
                 sampler_input: "",
                 sampler_gain: "",
+                shader: crate::config::ShaderKind::None,
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -8512,6 +8636,7 @@ mod tests {
                 audio_filter: crate::config::AudioFilterMode::Auto,
                 sampler_input: "",
                 sampler_gain: "",
+                shader: crate::config::ShaderKind::None,
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -8561,6 +8686,7 @@ mod tests {
                 audio_filter: crate::config::AudioFilterMode::Auto,
                 sampler_input: "",
                 sampler_gain: "",
+                shader: crate::config::ShaderKind::None,
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -8650,6 +8776,7 @@ mod tests {
                 audio_filter: crate::config::AudioFilterMode::Auto,
                 sampler_input: "",
                 sampler_gain: "",
+                shader: crate::config::ShaderKind::None,
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -8706,6 +8833,7 @@ mod tests {
                 audio_filter: crate::config::AudioFilterMode::Auto,
                 sampler_input: "",
                 sampler_gain: "",
+                shader: crate::config::ShaderKind::None,
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -8755,6 +8883,7 @@ mod tests {
                 audio_filter: crate::config::AudioFilterMode::Auto,
                 sampler_input: "",
                 sampler_gain: "",
+                shader: crate::config::ShaderKind::None,
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -8807,6 +8936,7 @@ mod tests {
             audio_filter: crate::config::AudioFilterMode::Auto,
             sampler_input: "",
             sampler_gain: "",
+            shader: crate::config::ShaderKind::None,
         };
         let mut frame = vec![0u8; w * h * 4];
         let mut state = LauncherState::new(launcher::MachineSetup::default());

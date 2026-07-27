@@ -446,11 +446,13 @@ recorded in [](../internals/chipset)).
 
 ```toml
 [display]
-overscan = "tv"      # "tv" (default) or "full"
-pixel_aspect = "tv"  # "tv" (default, 4:3 CRT) or "square" (exact 2x2 lo-res)
-phosphor = 0.0       # CRT persistence fraction, 0.0 (off) to 0.95
-full_screen = false  # open fullscreen at start (default false)
-status_bar = true    # show the status bar at start (default true)
+overscan = "tv"       # "tv" (default) or "full"
+pixel_aspect = "tv"   # "tv" (default, 4:3 CRT) or "square" (exact 2x2 lo-res)
+phosphor = 0.0        # CRT persistence fraction, 0.0 (off) to 0.95
+shader = "none"       # "none" (default), "scanlines", "mask", "crt", or a .wgsl file
+shader_strength = 1.0 # how strongly the shader is mixed in, 0.0-1.0
+full_screen = false   # open fullscreen at start (default false)
+status_bar = true     # show the status bar at start (default true)
 ```
 
 The emulated framebuffer always carries the full overscan field Denise
@@ -483,13 +485,170 @@ at the cost of a slight motion trail. Off by default so screenshots and
 frame dumps stay frame-exact. `COPPERLINE_PHOSPHOR=0.4` overrides the
 config for a single run.
 
+`shader` runs a GPU shader pass over the window's picture, for the tube
+look a phosphor trail on its own cannot give. Three presets are built in:
+
+- `"scanlines"` -- the line structure a 15 kHz set leaves between beam
+  passes: a raised-cosine gap at the pitch of the emulated lines, with the
+  brightness the gaps cost compensated back so the picture dims only
+  slightly rather than by half.
+- `"mask"` -- a shadow mask. The picture is modulated through staggered RGB
+  phosphor triads keyed to physical window pixels, so the mask keeps its
+  size whatever the Amiga resolution behind it, again
+  brightness-compensated.
+- `"crt"` -- the lot, in the spirit of the 1084 the Amiga shipped with: a
+  bowed tube face, scanlines that follow the bow, an aperture grille, and a
+  corner vignette, all faded in together.
+
+`"none"` (the default; `"off"` is accepted for the same thing) presents the
+picture untouched, and any value ending in `.wgsl` is the path of a shader
+of your own -- see [Custom WGSL shaders](#custom-wgsl-shaders) below.
+
+The scanline gaps are drawn at the pitch of the emulated field lines the
+window is actually showing: 270 in the default TV-overscan presentation and
+285 in `"full"`, so the line structure follows the picture rather than the
+window size. TV overscan with `pixel_aspect = "square"` is 285 as well --
+that canvas is taller than the TV aperture and pads it with bezel rows, so
+the same 270 lines are rescaled to keep their pitch across the whole
+window. Interlaced content is deliberately drawn at field-line pitch
+over the woven frame, which is what a 15 kHz set fed an interlaced signal
+looks like, rather than one gap per woven row.
+
+`shader_strength` (0.0 to 1.0, default 1.0) is how strongly the effect is
+mixed in, so a preset can be dialled back without editing shaders. At `0.0`
+the shader arithmetic is an exact no-op, but the pass still resamples the
+picture through a plain bilinear sampler, which is a shade softer than the
+texel-snapped pass-through the window otherwise uses at magnification.
+`"none"` skips the pass altogether and is the only truly zero-cost setting.
+
+The menu's *CRT Shader* item cycles the presets live for the rest of the
+session without touching the config file; the launcher's *Display* page has
+*CRT shader* and *Shader strength* rows that do write it.
+`COPPERLINE_SHADER=crt|scanlines|mask|none|PATH.wgsl` and
+`COPPERLINE_SHADER_STRENGTH=0.0..1.0` override the config for a single run.
+There is no command-line flag.
+
+The pass is presentation and nothing else. Screenshots
+(`--screenshot-after`), frame dumps (`--dump-frames`), video recordings, the
+[control protocol](../debugger/control.md)'s capture methods and the web
+frontend all read the CPU presentation buffer, which the shader never
+touches, so captures stay comparable whatever is selected here. Individual
+frames also skip the pass in three cases: while a menu or overlay panel is
+open (a phosphor mask and a curved face make overlay text unreadable), for
+frames coming from an RTG board's scanout (see `[rtg]` below), and for
+programmable multisync scan modes -- a 31 kHz scanout has no 15 kHz line
+structure to reproduce.
+
+### Custom WGSL shaders
+
+Pointing `shader` at a `.wgsl` file loads a fragment shader of your own into
+the same pass. The quickest start is to copy one of the presets --
+`src/video/window/shaders/scanlines.wgsl`, `mask.wgsl` or `crt.wgsl` in the
+source tree -- and edit its `fs_main`: everything above the
+`--- end shared contract ---` marker in those files is the contract, and is
+byte-identical in all three.
+
+A shader must declare exactly these bindings and both entry points:
+
+```wgsl
+struct CrtUniforms {
+    // Display sub-rect of src_tex in UV space: xy origin, zw size.
+    src_rect: vec4<f32>,
+    // xy: viewport size in physical pixels. zw: source display texels.
+    size: vec4<f32>,
+    // x: strength, 0 (no-op) to 1 (full). y: scanline count across the
+    // display height. zw: preset-internal, do not rely on them.
+    params: vec4<f32>,
+    // Preset-internal and reserved; zero for a custom shader.
+    params2: vec4<f32>,
+};
+
+@group(0) @binding(0) var src_tex: texture_2d<f32>;
+@group(0) @binding(1) var src_samp: sampler;
+@group(0) @binding(2) var<uniform> u: CrtUniforms;
+
+struct VOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) idx: u32) -> VOut {
+    // Fullscreen triangle; the viewport restricts it to the display rect.
+    let tc = vec2<f32>(f32((idx << 1u) & 2u), f32(idx & 2u));
+    var out: VOut;
+    out.uv = tc;
+    out.pos = vec4<f32>(tc * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0), 0.0, 1.0);
+    return out;
+}
+
+// Sample the display region only, clamped half a texel inside src_rect so
+// a linear tap on the bottom edge never blends in the status bar's first
+// row underneath it.
+fn sample_display(uv: vec2<f32>) -> vec4<f32> {
+    let half_texel = 0.5 * u.src_rect.zw / max(u.size.zw, vec2<f32>(1.0));
+    let lo = u.src_rect.xy + half_texel;
+    let hi = u.src_rect.xy + u.src_rect.zw - half_texel;
+    let tc = clamp(u.src_rect.xy + uv * u.src_rect.zw, lo, hi);
+    return textureSample(src_tex, src_samp, tc);
+}
+
+@fragment
+fn fs_main(in: VOut) -> @location(0) vec4<f32> {
+    let uv = clamp(in.uv, vec2<f32>(0.0), vec2<f32>(1.0));
+    let base = sample_display(uv);
+    let strength = clamp(u.params.x, 0.0, 1.0);
+
+    // Your own look goes here. This one is a green monochrome monitor with
+    // a gap between beam passes at the emulated line pitch.
+    let lines = max(u.params.y, 1.0);
+    let profile = 0.5 - 0.5 * cos(6.283185307 * uv.y * lines);
+    let luma = dot(base.rgb, vec3<f32>(0.299, 0.587, 0.114));
+    let tube = vec3<f32>(0.2, 1.0, 0.35) * luma * (0.6 + 0.4 * profile);
+
+    // Mixing back toward the untouched sample keeps strength 0 a no-op.
+    return vec4<f32>(mix(base.rgb, tube, strength), 1.0);
+}
+```
+
+Points worth knowing:
+
+- All three bindings are fragment-visibility only. `vs_main` cannot read
+  them, so all the work happens in `fs_main`.
+- Sampling goes through `src_rect`. The pass draws over the display
+  rectangle of a texture that also carries the status bar below it, and the
+  half-texel inset is what keeps the status bar's separator hairline out of
+  the bottom of a magnified picture.
+- Of the uniforms, a custom shader can count on `src_rect`, `size`,
+  `params.x` (strength) and `params.y` (scanline count). `params.z`,
+  `params.w` and `params2` carry the built-in presets' own look parameters,
+  are zero for a custom shader, and are reserved for future use.
+- Making strength `0.0` a visual no-op is a convention, not something the
+  loader enforces, but the *Shader strength* control and
+  `COPPERLINE_SHADER_STRENGTH` are only useful if you honour it.
+
+The file is read and checked when the window is created, when the launcher
+starts a machine, and every time the menu's *CRT Shader* item cycles onto
+**custom** -- which re-reads it from disk. That is the live-reload story:
+leave the emulator running, edit the shader, then cycle the menu item away
+from custom and back to see the new version.
+
+Checking is a parse, a full validation, and a look for the two entry points,
+all before any GPU pipeline is built, so a mistake is reported as WGSL with
+its line and column rather than as a driver error. Files over 1 MiB are
+refused unread, on the grounds that a shader that big is a mistyped path.
+Whatever goes wrong -- a missing file, a syntax error, a missing `fs_main` --
+the full diagnostic goes to the log, a one-line summary appears in the
+window's on-screen message, and the shader falls back to off. A bad custom
+shader never fails the config, and never stops the machine from running.
+
 `full_screen` opens the window fullscreen at start (borderless), and
 `status_bar` chooses whether the status bar starts visible. Both are start-up
 preferences; the runtime toggles -- `Cmd+F` / `Alt+F` for fullscreen and
 `Cmd+Shift+F` / `Alt+Shift+F` for the status bar, plus their menu items --
 still flip either live without changing the saved value. On the command line
 `--full-screen` / `--windowed` set the fullscreen state and `--show-status-bar` /
-`--hide-status-bar` set the status bar; the launcher's A/V & Emu page has
+`--hide-status-bar` set the status bar; the launcher's Display page has
 *Start fullscreen* and *Status bar* toggles for the same. Left unset they keep
 the defaults: windowed, status bar shown.
 

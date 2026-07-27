@@ -178,6 +178,17 @@ tool window or overlay.
   The window and its backing texture resize with the mode. The start-up
   mode comes from `[display] pixel_aspect`
   (see [Configuration](configuration.md)).
+- **CRT Shader**: cycles the GPU tube-emulation pass over the picture --
+  **off**, **scanlines** (the line structure of a 15 kHz set), **mask** (an
+  RGB phosphor shadow mask), **crt** (both, plus a bowed tube face and a
+  corner vignette), and **custom** when the config named a shader of your
+  own, which is re-read from disk each time it comes round. The change is
+  session-only: the start-up preset, the strength knob, and how to write a
+  custom shader are `[display] shader` and `shader_strength` (see
+  [Configuration](configuration.md)). The pass is a window effect only --
+  screenshots, frame dumps and recordings are never shader-processed -- and
+  it steps aside for the frames it cannot sensibly draw: while this menu or
+  any panel is open, under RTG, and in programmable multisync scan modes.
 - **Floppy Speed**: cycles the emulated drive speed through 100% (real
   speed), 200%, 400%, 800%, and turbo (disk DMA transfers complete almost
   instantly). Changes apply to the live machine immediately. The start-up
@@ -300,8 +311,10 @@ The layout is:
   recordings and save-state replays non-reproducible while it flows),
   *Zorro* (extra autoconfig boards by metadata file, with a config panel for a
   WASM plugin board's declared options),
-  and *A/V & Emu* (audio output device, channel mode, stereo
-  separation, overscan, pixel aspect, phosphor, floppy sounds and
+  *Display* (overscan, pixel aspect, phosphor, CRT shader and shader
+  strength, start fullscreen, status bar),
+  and *Audio & Emu* (audio output device, channel mode, stereo
+  separation, audio filter, floppy sounds and
   volume, power-on, pacing, realtime priority, warp speed).
 - **Settings rows** (right pane). `[<]`/`[>]` step through a value, On/Off
   buttons flip a toggle, and the **Browse** and **Clear** buttons set or remove

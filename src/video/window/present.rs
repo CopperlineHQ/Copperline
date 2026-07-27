@@ -62,6 +62,7 @@ pub(super) fn render_job_to_presentation(
         present_rows,
         present_width,
         standard_tv_aperture: uses_standard_pal_tv_aperture(geometry, present_rows, &base),
+        programmable: geometry.programmable,
         input,
     }
 }
