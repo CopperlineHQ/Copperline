@@ -289,21 +289,23 @@ The layout is:
   FPU, clock, caches), *Memory* (chip/fast/slow/motherboard/Zorro III RAM),
   *ROM*
   (Kickstart and
-  extended ROM), *Floppy* (drive count and speed, per-drive image and
-  write-protect),
+  extended ROM), *Floppy* (drive count and speed, then each wired drive as a
+  greyed **DFn:** heading with its indented disk image and write-protect;
+  drives that are not enabled are hidden rather than greyed),
   *Storage* (IDE master/slave, the SCSI controller -- A2091, A4091, or the
-  A3000's onboard SCSI -- and its boot ROM and units; then under an *Additional
-  options:* heading, links to three sub-pages: **CD** (image, insert delay, CD32
-  NVRAM); **Host Mounts**, for host directories served live as AmigaDOS volumes
-  (up to four mounts, each with a boot priority and a read-write/read-only
-  **Access** field -- the config file itself takes up to eight `[[filesys]]`
-  mounts, of which the launcher edits the first four); and **Boot Priority**,
-  which sets each hard-disk drive's synthesized-RDB boot priority (see below).
-  Each sub-page has a **< Back** button at the bottom that returns to Storage),
+  A3000's onboard SCSI -- and its boot ROM and units; a row of buttons at the top
+  links to three sub-pages: **CD** (image, insert delay, CD32 NVRAM); **Host
+  Mounts**, for host directories served live as AmigaDOS volumes (up to four
+  mounts, each with a boot priority and a read-write/read-only **Access** field
+  -- the config file itself takes up to eight `[[filesys]]` mounts, of which the
+  launcher edits the first four); and **Boot Priority**, which sets each
+  hard-disk drive's synthesized-RDB boot priority (see below). Each sub-page has
+  a **< Back** button in that top row that returns to Storage),
   *Input* (the controller device in each game port and the joystick input
   source),
   *I/O Ports* (the serial, parallel, and Ethernet ports under **Serial:** /
-  **Parallel:** / **Ethernet:** headings: serial mode and MIDI endpoints; the
+  **Parallel:** / **Ethernet:** headings, with each port's options indented
+  beneath it: serial mode and MIDI endpoints; the
   parallel device -- None, Printer, or Sampler -- with, for the printer, its
   capture output file, or for the sampler, its host audio input and input gain;
   and the A2065 Ethernet board -- Not fitted, Isolated, Loopback, or NAT, with
@@ -311,11 +313,12 @@ The layout is:
   recordings and save-state replays non-reproducible while it flows),
   *Zorro* (extra autoconfig boards by metadata file, with a config panel for a
   WASM plugin board's declared options),
-  *Display* (overscan, pixel aspect, phosphor, CRT shader and shader
-  strength, start fullscreen, status bar),
-  and *Audio & Emu* (audio output device, channel mode, stereo
-  separation, audio filter, floppy sounds and
-  volume, power-on, pacing, realtime priority, warp speed).
+  and *A/V & Emu*, split by a row of category buttons at the top into
+  **Audio** (output device, channel mode, stereo separation, filter, floppy
+  sounds and volume), **Video** (start fullscreen, status bar, overscan, pixel
+  aspect, phosphor, CRT shader and shader strength), and **Emulation**
+  (power-on, warp speed, pacing, realtime priority) -- opening on Audio, and
+  switched freely between the three.
 - **Settings rows** (right pane). `[<]`/`[>]` step through a value, On/Off
   buttons flip a toggle, and the **Browse** and **Clear** buttons set or remove
   a file path through a native file dialog. On the *Storage* tab, once an IDE
