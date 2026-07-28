@@ -10,6 +10,8 @@ Code contributions from (the full list is on
 - Bernie Innocenti
 - Lee Hobson
 - jbl007
+- Simon Dick
+- Nicolas Ramz
 
 ## Patreon sponsors
 
