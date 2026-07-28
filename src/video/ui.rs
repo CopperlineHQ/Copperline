@@ -2321,7 +2321,7 @@ fn draw_about(frame: &mut [u8], rect: Rect, view: &AboutView, scale: usize) {
     let author = "by Andrew \"LinuxJedi\" Hutchings";
     draw_panel_text(frame, cx(author, 1), y, author, PANEL_TEXT_DIM, 1, scale);
     y += 24;
-    let max_chars = (rect.w - 48) / 16;
+    let max_chars = rect.w.saturating_sub(48) / 16;
     for line in &view.machine_lines {
         for (i, part) in wrap_text(line, max_chars, max_chars.saturating_sub(1))
             .iter()
@@ -2343,7 +2343,7 @@ fn draw_about(frame: &mut [u8], rect: Rect, view: &AboutView, scale: usize) {
         y += 12;
     }
     y += 10;
-    let max_small = (rect.w - 48) / 8;
+    let max_small = rect.w.saturating_sub(48) / 8;
     let contributors = format!("Contributors: {}", CONTRIBUTORS.join(", "));
     let sponsors = format!("Patreon sponsors: {}", PATREON_SPONSORS.join(", "));
     for line in [&contributors, &sponsors] {
