@@ -22,10 +22,7 @@ one switches the select to whatever the state brings back. The **Video**
 select is the same idea for the standard: PAL (the default) or NTSC (the
 desktop's `[chipset] video` key) -- the standard is the Agnus crystal,
 so changing it rebuilds a running machine exactly like the model select,
-and `?video=NTSC` presets it per link. NTSC wants a real Kickstart: the
-bundled AROS ROM cannot open its boot screen on an NTSC chipset (it
-gurus "unknown type of system screen" and reboot-loops, which looks
-like a black screen; the page says so when it happens). The
+and `?video=NTSC` presets it per link. The
 page fetches the open-source AROS ROM while it loads, so the boot button
 works with no files of your own; the **Kickstart ROM** and **DF0 disk**
 pickers load local images instead. Both work before or after boot: a

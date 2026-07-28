@@ -506,14 +506,6 @@ async function boot() {
         : 'machine built, waiting for the state') +
         (df0Name ? ` - DF0: ${df0Name} (write-protected)` : ''),
     );
-    // The AROS ROM cannot open its boot screen on an NTSC chipset: it
-    // gurus "unknown type of system screen" to the serial port and
-    // reboot-loops, which a visitor sees as a black screen. Real
-    // Kickstarts boot NTSC fine, so say why the screen stays dark.
-    if (videoStandard === 'NTSC' && bootRom?.label === 'AROS') {
-      showOsd('the AROS ROM cannot open an NTSC screen - load a Kickstart to boot NTSC');
-    }
-
     overlay.style.display = 'none';
     showBugLink(false);
     running = true;
