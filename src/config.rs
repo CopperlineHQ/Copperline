@@ -224,6 +224,13 @@ pub struct Config {
     /// (the preset's full effect, the default). A single knob for every
     /// preset so the effect can be dialled back without editing shaders.
     pub shader_strength: f32,
+    /// Draw a monitor-style front bezel around the window picture
+    /// (`[display] bezel`): the display shrinks into the rounded opening of
+    /// a procedural plastic frame in the spirit of the 1084 the Amiga
+    /// shipped with. Independent of `shader`, and a presentation stage like
+    /// it: screenshots, frame dumps, recordings and headless runs never
+    /// include the bezel.
+    pub bezel: bool,
     /// Screen tint applied to the window image: the phosphor colour of a
     /// monochrome monitor, or a sepia treatment. See [`Tint`].
     pub tint: Tint,
@@ -1478,6 +1485,7 @@ impl Default for Config {
             phosphor: 0.0,
             shader: ShaderMode::None,
             shader_strength: 1.0,
+            bezel: false,
             tint: Tint::None,
             full_screen: false,
             status_bar: true,
@@ -1971,6 +1979,9 @@ pub(crate) struct RawDisplay {
     /// Shader mix, 0.0 (invisible) to 1.0 (full effect, the default).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) shader_strength: Option<f32>,
+    /// Monitor-style front bezel around the window picture (default false).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) bezel: Option<bool>,
     /// Screen tint: "none" (default), "bw", "green", "amber", or "sepia".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) tint: Option<String>,
@@ -2817,6 +2828,7 @@ impl TryFrom<RawConfig> for Config {
                 defaults.shader_strength
             }
         };
+        let bezel = raw.display.bezel.unwrap_or(defaults.bezel);
         let tint = match raw.display.tint.as_deref() {
             None => defaults.tint,
             Some(s) => parse_tint(s)?,
@@ -3243,6 +3255,7 @@ impl TryFrom<RawConfig> for Config {
             phosphor,
             shader,
             shader_strength,
+            bezel,
             tint,
             full_screen,
             status_bar,
@@ -4250,6 +4263,19 @@ pub fn resolve_shader_strength(from_config: f32) -> f32 {
     }
 }
 
+/// Resolve the monitor bezel: the `COPPERLINE_BEZEL` env var (0/false/off/no
+/// disables, anything else enables) overrides the `[display] bezel` config
+/// for one run.
+pub fn resolve_bezel(from_config: bool) -> bool {
+    match crate::envcfg::var("COPPERLINE_BEZEL") {
+        Some(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        ),
+        None => from_config,
+    }
+}
+
 /// Resolve the screen tint: the `COPPERLINE_TINT` env var (a tint name)
 /// overrides the `[display] tint` config for one run.
 pub fn resolve_tint(from_config: Tint) -> Tint {
@@ -5071,6 +5097,19 @@ mod tests {
             "#,
         )?;
         assert_eq!(cfg.shader, ShaderMode::Crt);
+        Ok(())
+    }
+
+    #[test]
+    fn display_bezel_parses_and_defaults_to_off() -> Result<()> {
+        assert!(!parse_config("")?.bezel);
+        let cfg = parse_config(
+            r#"
+            [display]
+            bezel = true
+            "#,
+        )?;
+        assert!(cfg.bezel);
         Ok(())
     }
 

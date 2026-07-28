@@ -788,6 +788,9 @@ pub struct App {
     /// How strongly the shader pass is mixed in, 0.0 to 1.0 ([display]
     /// shader_strength).
     shader_strength: f32,
+    /// Monitor-bezel pass in effect ([display] bezel, Cmd/Alt+M).
+    /// Presentation only, like the shader pass: captures never include it.
+    bezel: bool,
     /// Screen tint in effect ([display] tint). Presentation only, applied
     /// to the chipset display region of the window frame: captures and
     /// RTG board scanout are never tinted.
@@ -966,6 +969,10 @@ struct Render {
     /// window, whatever preset is selected: the pass is skipped per frame,
     /// not per session, so the menu can turn it on live.
     crt_shader: crt_shader::CrtShader,
+    /// The optional monitor-bezel pass drawn under the CRT pass (see
+    /// [`bezel`]). Built with the window whatever the setting, like the
+    /// CRT pass, so the Cmd/Alt+M toggle works live.
+    bezel_shader: bezel::BezelShader,
     /// True while the host window is minimized (Windows delivers a 0x0
     /// Resized). Presenting while minimized deadlocks on Windows: DWM stops
     /// consuming swapchain frames, so once the in-flight buffers fill,
@@ -1130,6 +1137,7 @@ impl App {
         phosphor: f32,
         shader: crate::config::ShaderMode,
         shader_strength: f32,
+        bezel: bool,
         tint: crate::config::Tint,
         start_fullscreen: bool,
         hide_status_bar: bool,
@@ -1298,6 +1306,7 @@ impl App {
                 _ => None,
             },
             shader_strength,
+            bezel,
             tint,
             tint_lut: tint_lut(tint),
             start_fullscreen,
@@ -2486,6 +2495,7 @@ impl ApplicationHandler for App {
             rtg_texture::RtgTexture::new(pixels.device(), pixels.render_texture_format());
         let mut crt_shader =
             crt_shader::CrtShader::new(pixels.device(), pixels.render_texture_format());
+        let bezel_shader = bezel::BezelShader::new(pixels.device(), pixels.render_texture_format());
         // A user shader can only be compiled once the device exists (too
         // early for `reload_custom_shader`, which needs the built `Render`).
         // A bad one drops back to no shader rather than failing the session:
@@ -2510,6 +2520,7 @@ impl ApplicationHandler for App {
             texture_scale,
             rtg_texture,
             crt_shader,
+            bezel_shader,
             minimized: false,
         });
         // After the window exists, so the overlay has somewhere to be drawn.
@@ -2618,6 +2629,11 @@ impl ApplicationHandler for App {
                         if host_shortcut_modifier_pressed(self.modifiers) =>
                     {
                         self.cycle_joystick_input_mode()
+                    }
+                    (KeyCode::KeyM, ElementState::Pressed)
+                        if host_shortcut_modifier_pressed(self.modifiers) =>
+                    {
+                        self.toggle_bezel()
                     }
                     (KeyCode::KeyF, ElementState::Pressed)
                         if host_shortcut_modifier_pressed(self.modifiers)
@@ -3070,6 +3086,15 @@ impl ApplicationHandler for App {
                         && !self.ui.active()
                         && self.rtg_present_dims.is_none()
                         && !self.present_programmable;
+                    // The bezel is content-agnostic (a frame has no 15 kHz
+                    // structure to get wrong), so unlike the CRT pass it
+                    // stays on for programmable multisync scans. It shares
+                    // the other two suspensions: an open overlay must not
+                    // be overdrawn, and RTG scanout reaches the surface
+                    // through its own texture, which this pass does not
+                    // sample.
+                    let bezel_active =
+                        self.bezel && !self.ui.active() && self.rtg_present_dims.is_none();
                     if let Some((w, h)) = self.rtg_present_dims.filter(|_| rtg_gpu) {
                         r.rtg_texture.upload(
                             r.pixels.device(),
@@ -3177,10 +3202,18 @@ impl ApplicationHandler for App {
                             rtg.render(encoder, target, (cx as f32, cy as f32, cw as f32, disp_h));
                             Ok(())
                         })
-                    } else if crt_active {
+                    } else if crt_active || bezel_active {
                         // Draw the composited buffer, then re-draw the display
-                        // rect through the shader. One CRT beam pass per
-                        // emulated field line the copy above actually shows.
+                        // rect. Bezel alone: one pass draws the frame with the
+                        // picture scaled into its opening. Preset alone: the
+                        // pass covers the display rect. Both: the preset paints
+                        // the picture into the opening first and the bezel
+                        // frames it on top in frame-only mode -- the plastic
+                        // overlaps the tube face, so the frame's rounded
+                        // corners and recess clip the preset's square viewport
+                        // rather than being buried under it. One CRT beam pass
+                        // per emulated field line the copy above actually
+                        // shows.
                         let scanlines = crt_scanline_count(
                             self.present_rows,
                             present_height(),
@@ -3194,9 +3227,10 @@ impl ApplicationHandler for App {
                         let kind = self.crt_shader_kind;
                         let strength = self.shader_strength;
                         // The closure is FnOnce and captures `r`, so the
-                        // shader has to be split out of it as a separate
-                        // borrow rather than reached through `r` inside.
+                        // shaders have to be split out of it as separate
+                        // borrows rather than reached through `r` inside.
                         let crt = &mut r.crt_shader;
+                        let bezel_shader = &mut r.bezel_shader;
                         r.pixels.render_with(|encoder, target, ctx| {
                             ctx.scaling_renderer.render(encoder, target);
                             let (uniforms, viewport) = crt_shader::uniforms_for(
@@ -3208,16 +3242,41 @@ impl ApplicationHandler for App {
                                 (ctx.texture_extent.width, ctx.texture_extent.height),
                                 scanlines,
                             );
-                            crt.render(
-                                &ctx.device,
-                                &ctx.queue,
-                                &ctx.texture,
-                                encoder,
-                                target,
-                                viewport,
-                                kind,
-                                uniforms,
-                            );
+                            if bezel_active {
+                                let opening = bezel::opening_rect(viewport);
+                                if crt_active {
+                                    crt.render(
+                                        &ctx.device,
+                                        &ctx.queue,
+                                        &ctx.texture,
+                                        encoder,
+                                        target,
+                                        opening,
+                                        kind,
+                                        uniforms.with_viewport(opening),
+                                    );
+                                }
+                                bezel_shader.render(
+                                    &ctx.device,
+                                    &ctx.queue,
+                                    &ctx.texture,
+                                    encoder,
+                                    target,
+                                    viewport,
+                                    bezel::uniforms_from(&uniforms, viewport, opening, crt_active),
+                                );
+                            } else {
+                                crt.render(
+                                    &ctx.device,
+                                    &ctx.queue,
+                                    &ctx.texture,
+                                    encoder,
+                                    target,
+                                    viewport,
+                                    kind,
+                                    uniforms,
+                                );
+                            }
                             Ok(())
                         })
                     } else {
@@ -5845,6 +5904,7 @@ impl App {
             r.crt_shader.clear_custom();
         }
         self.shader_strength = crate::config::resolve_shader_strength(cfg.shader_strength);
+        self.bezel = crate::config::resolve_bezel(cfg.bezel);
         self.set_tint(crate::config::resolve_tint(cfg.tint));
         self.ui.menu_open = false;
         self.ui.panel = None;
@@ -8481,6 +8541,17 @@ impl App {
         self.request_redraw();
     }
 
+    /// Cmd/Alt+M: toggle the monitor-bezel pass for the rest of the run
+    /// (the config file default is unchanged; set `[display] bezel` to
+    /// make it stick).
+    fn toggle_bezel(&mut self) {
+        self.bezel = !self.bezel;
+        let label = if self.bezel { "on" } else { "off" };
+        info!("monitor bezel: {label}");
+        self.show_osd(format!("Monitor bezel: {label}"));
+        self.request_redraw();
+    }
+
     /// Menu "Screen Tint": step through the tints for the rest of the run
     /// (the config file default is unchanged; set `[display] tint` to make
     /// it stick).
@@ -9183,6 +9254,7 @@ impl App {
     }
 }
 
+mod bezel;
 mod console;
 #[cfg(feature = "control")]
 mod control;

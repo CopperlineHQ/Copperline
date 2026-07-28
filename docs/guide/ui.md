@@ -23,6 +23,7 @@ The app shortcut modifier is `Cmd` on macOS and `Alt` on Linux/Windows.
 | `Cmd+B` | `Alt+B` | Open the [debugger window](../debugger/window) |
 | `Cmd+K` | `Alt+K` | Open the [debugger console](../debugger/console) |
 | `Cmd+J` | `Alt+J` | Toggle joystick input mode: gamepad / keyboard (also the status-bar icon) |
+| `Cmd+M` | `Alt+M` | Toggle the 1084-style monitor bezel around the picture (`[display] bezel` sets the start-up value) |
 | `Cmd+Shift+A` | `Alt+Shift+A` | Cycle the audio output: Default, each host device, then Disabled (also the menu's Audio Out item) |
 | `Cmd+A` | `Alt+A` | Cycle Paula's audio filter: auto, on, off (also the menu's Audio Filter item) |
 | `Cmd+Shift++` / `Cmd+Shift+-` | `Alt+Shift++` / `Alt+Shift+-` | Raise / lower the parallel-port sampler input gain (only when a sampler is attached; also the menu's Sampler Gain item) |
@@ -326,7 +327,8 @@ The layout is:
   and *A/V & Emu*, split by a row of category buttons at the top into
   **Audio** (output device, channel mode, stereo separation, filter, floppy
   sounds and volume), **Video** (start fullscreen, status bar, overscan, pixel
-  aspect, screen tint, deinterlace, phosphor, CRT shader and shader strength),
+  aspect, screen tint, deinterlace, phosphor, CRT shader, shader strength and
+  monitor bezel),
   and **Emulation**
   (power-on, warp speed, pacing, realtime priority) -- opening on Audio, and
   switched freely between the three.

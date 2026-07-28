@@ -393,6 +393,7 @@ pub enum LauncherField {
     Phosphor,
     Shader,
     ShaderStrength,
+    Bezel,
     StartFullscreen,
     ShowStatusBar,
     FloppySounds,
@@ -633,7 +634,7 @@ const PARALLEL_ROWS_SAMPLER: [Row; 3] = [
 const ETHERNET_ROWS: [Row; 1] = [row(F::Ethernet, "  A2065 board", Cycle)];
 // The A/V & Emu tab is split into three categories switched via the top nav row.
 // The Video category also carries the CRT-shader controls (a picture setting).
-const VIDEO_ROWS: [Row; 9] = [
+const VIDEO_ROWS: [Row; 10] = [
     row(F::StartFullscreen, "Start fullscreen", Toggle),
     row(F::ShowStatusBar, "Status bar", Toggle),
     row(F::Overscan, "Overscan", Cycle),
@@ -643,6 +644,7 @@ const VIDEO_ROWS: [Row; 9] = [
     row(F::Phosphor, "Phosphor", Cycle),
     row(F::Shader, "CRT shader", Cycle),
     row(F::ShaderStrength, "Shader strength", Cycle),
+    row(F::Bezel, "Monitor bezel", Toggle),
 ];
 const AUDIO_ROWS: [Row; 6] = [
     row(F::AudioDevice, "Audio output", Cycle),
@@ -1078,6 +1080,8 @@ pub struct MachineSetup {
     shader_custom: Option<PathBuf>,
     /// Shader mix, 0.0 to 1.0 ([display] shader_strength).
     shader_strength: f32,
+    /// Monitor-style front bezel around the picture ([display] bezel).
+    bezel: bool,
     /// Screen tint ([display] tint).
     tint: Tint,
     /// Open fullscreen at start ([display] full_screen).
@@ -1227,6 +1231,7 @@ impl MachineSetup {
                 _ => None,
             },
             shader_strength: cfg.shader_strength,
+            bezel: cfg.bezel,
             tint: cfg.tint,
             start_fullscreen: cfg.full_screen,
             show_status_bar: cfg.status_bar,
@@ -1525,6 +1530,9 @@ impl MachineSetup {
         if (self.shader_strength - base.shader_strength).abs() > 1e-6 {
             raw.display.shader_strength = Some(self.shader_strength);
         }
+        if self.bezel != base.bezel {
+            raw.display.bezel = Some(self.bezel);
+        }
         if self.tint != base.tint {
             raw.display.tint = Some(tint_name(self.tint).to_string());
         }
@@ -1714,6 +1722,7 @@ impl MachineSetup {
         // "Custom" again.
         self.shader = base.shader.clone();
         self.shader_strength = base.shader_strength;
+        self.bezel = base.bezel;
         self.tint = base.tint;
         self.start_fullscreen = base.full_screen;
         self.show_status_bar = base.status_bar;
@@ -1917,6 +1926,7 @@ impl MachineSetup {
             F::StartFullscreen => self.start_fullscreen,
             F::ShowStatusBar => self.show_status_bar,
             F::Deinterlace => self.deinterlace,
+            F::Bezel => self.bezel,
             F::PowerOn => self.power_on,
             F::RealtimePriority => self.realtime_priority,
             _ => false,
@@ -2518,6 +2528,7 @@ impl MachineSetup {
             F::StartFullscreen => self.start_fullscreen = !self.start_fullscreen,
             F::ShowStatusBar => self.show_status_bar = !self.show_status_bar,
             F::Deinterlace => self.deinterlace = !self.deinterlace,
+            F::Bezel => self.bezel = !self.bezel,
             F::PowerOn => self.power_on = !self.power_on,
             F::RealtimePriority => self.realtime_priority = !self.realtime_priority,
             _ => {}
@@ -3727,6 +3738,23 @@ mod tests {
         s.cycle(LauncherField::Tint, false);
         assert_eq!(s.value_label(LauncherField::Tint), "Sepia");
         assert_eq!(s.to_raw().display.tint, Some("sepia".to_string()));
+    }
+
+    #[test]
+    fn bezel_round_trips_through_raw() {
+        let mut s = MachineSetup::default();
+        // Off is the baseline, so nothing is written for it.
+        assert!(!s.toggle_value(LauncherField::Bezel));
+        assert_eq!(s.to_raw().display.bezel, None);
+
+        s.toggle(LauncherField::Bezel);
+        assert!(s.toggle_value(LauncherField::Bezel));
+        assert_eq!(s.to_raw().display.bezel, Some(true));
+
+        // The written config has to load back into the same setting.
+        assert!(s.build_config().expect("valid config").bezel);
+        let reloaded = MachineSetup::from_raw(&s.to_raw()).expect("valid raw");
+        assert!(reloaded.toggle_value(LauncherField::Bezel));
     }
 
     #[test]
