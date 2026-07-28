@@ -57,7 +57,8 @@ be hidden entirely with `Cmd+Shift+F` / `Alt+Shift+F` or the **Status Bar**
 menu item):
 
 - **LED block.** PWR and FDD always; a green HDD activity LED on machines
-  with a hard-disk controller (Gayle or A4000 IDE, or any SCSI adapter); a
+  with a hard-disk controller (Gayle or A4000 IDE, or any SCSI adapter) or a
+  host-folder filesystem mount (`[[filesys]]`), lit while either is accessed; a
   blue CD activity LED on CDTV/CD32 that lights while the drive reads data
   or plays CD audio (on a machine whose CD drive is a SCSI CD-ROM unit,
   the LED shows CD-DA playback; its data reads ride the HDD LED with the

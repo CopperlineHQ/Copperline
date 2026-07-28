@@ -335,6 +335,10 @@ pub struct FilesysBoard {
     /// too: writes latch into the image (with side effects for the
     /// doorbells), so the read side is plain memory at any size/alignment.
     image: Vec<u8>,
+    /// Set when a DosPacket is handled, drained by `take_activity` to blink
+    /// the HDD LED. Transient: not part of the save state.
+    #[serde(skip)]
+    activity: bool,
 }
 
 impl FilesysBoard {
@@ -347,6 +351,12 @@ impl FilesysBoard {
         };
         board.set_mounts(mounts);
         board
+    }
+
+    /// Whether the board serves at least one mount, which is what gives the
+    /// machine an HDD LED even with no real disk controller.
+    pub fn has_mounts(&self) -> bool {
+        !self.units.is_empty()
     }
 
     /// `[machine] rom_scsi_device_disable`: unlink the ROM's scsi.device at
@@ -1612,6 +1622,9 @@ impl FilesysBoard {
             return;
         };
         let port = self.units.get(unit).and_then(|u| u.port).unwrap_or(0);
+        // Any packet touching a mount is host filesystem traffic: blink the
+        // HDD LED, mirroring a real filesystem handler's disk access.
+        self.activity = true;
         let mut guest_op = None;
         let (res1, res2, dp_type) = self.with_guest_bus(host, base, |board, bus| {
             let dp_type = bus.read_long(pkt + 8) as i32;
@@ -1710,6 +1723,10 @@ impl ZorroDevice for FilesysBoard {
     }
 
     fn tick(&mut self, _cck: u32, _host: &mut DeviceHost) {}
+
+    fn take_activity(&mut self) -> bool {
+        std::mem::take(&mut self.activity)
+    }
 
     fn reset(&mut self) {
         // Power-on state: per-boot structures dropped, mounts kept. The next

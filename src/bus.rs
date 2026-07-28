@@ -3702,8 +3702,11 @@ impl Bus {
             audio_filter_on: self.paula.led_filter_enabled(),
             fdd_led_on: self.floppy.activity_led_on(),
             fdd_track: self.floppy.selected_track(),
-            hdd_led: (self.gayle.is_some() || self.ide_a4000.is_some() || self.has_scsi_device())
-                .then_some(self.emulated_cck < self.hdd_led_until_cck),
+            hdd_led: (self.gayle.is_some()
+                || self.ide_a4000.is_some()
+                || self.has_scsi_device()
+                || self.has_filesys_mount())
+            .then_some(self.emulated_cck < self.hdd_led_until_cck),
             cd_led: self
                 .cdtv
                 .as_ref()
@@ -3776,6 +3779,18 @@ impl Bus {
                         | crate::zorro_device::BoardDevice::A4091(_)
                 )
             })
+    }
+
+    /// Whether a host-folder filesystem board serves at least one mount. Such
+    /// a board has no disk controller, but its packet traffic rides the HDD
+    /// LED like any other Zorro storage device.
+    fn has_filesys_mount(&self) -> bool {
+        self.devices.iter().any(|d| {
+            matches!(
+                d,
+                crate::zorro_device::BoardDevice::Filesys(f) if f.has_mounts()
+            )
+        })
     }
 
     /// Whether an RTG board is driving the display (native chipset output
