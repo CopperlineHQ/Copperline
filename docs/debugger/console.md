@@ -124,6 +124,11 @@ garbage):
 | `CATCHALERT` | Break at exec's `Alert()` entry: fires on every guru/alert with D7 holding the code |
 | `GURU [CODE]` | Decode an alert code (default: the current D7): deadend flag, subsystem, cause, CPU-trap alerts |
 
+`TASKS` prints `ThisTask` on the `>` line with that task's own state, so on
+an idle machine it reads `wait` and appears again in the waiting list below.
+Exec leaves `ThisTask` naming the task it dispatched last, so read the `>`
+line as "last dispatched", not "running".
+
 `EXECBASE` answers "what is the OS doing right now": `IdleCount` and
 `DispCount` say whether exec is dispatching at all, `SysFlags` shows the
 scheduler's pending attention bits, and `IDNestCnt`/`TDNestCnt` decode
