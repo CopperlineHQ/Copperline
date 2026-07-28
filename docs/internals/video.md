@@ -419,21 +419,26 @@ framebuffer):
   margin). Both apertures fill the same 4:3 glass, so presentation keeps
   one shape -- a 60 Hz crop's rows are scaled onto the 50 Hz aperture's
   native row count (whole-row selection, no blending) in the saved PNG, and
-  the live window stretches it over the same display rect. The window keeps
-  its 716-pixel 4:3 texture for the status bar and scaling path, but
-  centres the TV aperture inside that texture instead of showing the raw
-  framebuffer origin. True horizontal overscan fetches are not cropped to
-  this aperture: they stay on the full-width TV path so intentional border
-  content remains visible. `COPPERLINE_SHOT_RAW=1` bypasses the PNG crop
-  and writes the raw 716x570 woven framebuffer. A second, narrower aperture
-  (`TV_CAPTURED_*`, 668 wide) clips the same rect to columns the
-  framebuffer actually captures: the reference aperture's right margin
-  reaches 12 columns past the framebuffer's right edge, which the window
-  and PNG paths pad with black bezel. Frontends whose frame should end on
-  real pixels present the captured aperture instead -- the browser canvas
-  hugs its border on every side -- with the margin mirrored from the
-  captured right-overscan width so the standard window stays exactly
-  centred. Its geometry invariants are const-evaluated beside the
+  the live window stretches it over the same display rect. True horizontal
+  overscan fetches are not cropped to this aperture: they stay on the
+  full-width TV path so intentional border content remains visible.
+  `COPPERLINE_SHOT_RAW=1` bypasses the PNG crop and writes the raw 716x570
+  woven framebuffer. A second, narrower aperture (`TV_CAPTURED_*`, 668
+  wide) clips the same rect to columns the framebuffer actually captures:
+  the reference aperture's right margin reaches 12 columns past the
+  framebuffer's right edge, which the PNG path pads with black bezel.
+  Presentation paths whose frame should end on real pixels use the
+  captured aperture instead, with the margin mirrored from the captured
+  right-overscan width so the standard window stays exactly centred: the
+  browser canvas hugs its border on every side, and the desktop's live
+  window centres the captured aperture in its 716-pixel 4:3 texture (kept
+  for the status bar and scaling path) between symmetric black side pads,
+  so the visible raster and the standard window are both dead centre --
+  the reference aperture's one-sided black margin read as an off-centre
+  picture inside the monitor bezel. The pads stay black rather than
+  replicating the crop's edge columns, which carry picture when a display
+  fetches or parks sprites in the deepest overscan. The captured
+  aperture's geometry invariants are const-evaluated beside the
   definitions.
 - **Full-overscan horizontal recentring**: in `"full"` presentation, a standard
   (non-overscan) display is recentred because the framebuffer captures a deep

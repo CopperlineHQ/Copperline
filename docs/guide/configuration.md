@@ -465,7 +465,10 @@ screenshots and `--dump-frames` crop standard TV output to a 692x540
 aperture for reference-emulator comparison; PAL and NTSC scans share the
 one shape because both apertures fill the same 4:3 glass -- an NTSC scan's
 shorter crop (the 200-line standard window plus the same overscan margin)
-is scaled onto the same output rows. `"full"` shows everything, which
+is scaled onto the same output rows. The live window shows a slightly
+narrower cut of the same aperture, clipped to the columns the framebuffer
+actually captures, so the picture sits exactly centred on screen with no
+one-sided black margin. `"full"` shows everything, which
 is useful when debugging display alignment. `COPPERLINE_OVERSCAN=full|tv`
 overrides this for a single run. In both modes the presentation geometry
 holds steady across the blank frames a screen change produces: a frame

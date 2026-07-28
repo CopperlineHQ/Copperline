@@ -24,8 +24,8 @@ use super::{
     DISK_BODY, DISK_BODY_SHADOW, DISK_LABEL, FDD_LED_OFF, FDD_LED_ON, HDD_LED_OFF, HDD_LED_ON,
     POWER_GLYPH_OFF, POWER_GLYPH_ON, POWER_LED_BRIGHT, POWER_LED_NORMAL, POWER_LED_OFF,
     STANDARD_PAL_VISIBLE_LINES, STANDARD_PAL_VISIBLE_START_VPOS, STATUS_BG, TRACK_SEGMENT_OFF,
-    TRACK_SEGMENT_ON, TV_LIVE_PAD_X, TV_PAL_PRESENT_HEIGHT, TV_PRESENT_SOURCE_X,
-    TV_PRESENT_SOURCE_Y, TV_PRESENT_WIDTH, VOLUME_FILL, VOLUME_GLYPH_X,
+    TRACK_SEGMENT_ON, TV_CAPTURED_SOURCE_X, TV_LIVE_PAD_X, TV_PAL_PRESENT_HEIGHT,
+    TV_PRESENT_SOURCE_X, TV_PRESENT_SOURCE_Y, TV_PRESENT_WIDTH, VOLUME_FILL, VOLUME_GLYPH_X,
 };
 use crate::audio::{AudioSink, NullSink};
 use crate::bus::{FrontPanelStatus, RenderRegisterSnapshot};
@@ -2114,7 +2114,7 @@ fn tint_display_rows_leave_the_status_bar_alone() {
 }
 
 #[test]
-fn tv_window_copy_centres_reference_aperture_in_live_texture() {
+fn tv_window_copy_centres_captured_aperture_in_live_texture() {
     use crate::video::deinterlace::{OUT_HEIGHT, OUT_PIXELS};
     let scale = 1;
     let mut src = vec![0u32; OUT_PIXELS];
@@ -2126,7 +2126,7 @@ fn tv_window_copy_centres_reference_aperture_in_live_texture() {
     let left_edge = 0x99AA_BBCCu32;
     let right_edge = 0xDDEE_FF00u32;
 
-    src[row_y * FB_WIDTH + TV_PRESENT_SOURCE_X] = left_edge;
+    src[row_y * FB_WIDTH + TV_CAPTURED_SOURCE_X] = left_edge;
     src[row_y * FB_WIDTH + FB_WIDTH - 1] = right_edge;
     src[row_y * FB_WIDTH + standard_left] = left_marker;
     src[row_y * FB_WIDTH + standard_right] = right_marker;
@@ -2142,9 +2142,16 @@ fn tv_window_copy_centres_reference_aperture_in_live_texture() {
         Some(TV_PAL_PRESENT_HEIGHT),
     );
 
-    let dst_standard_left = TV_LIVE_PAD_X + (standard_left - TV_PRESENT_SOURCE_X);
+    // The standard window and the visible raster are both exactly centred:
+    // the captured aperture is symmetric around the standard window and
+    // ends on the framebuffer's edges, so the crop's first and last
+    // columns land mirror-imaged around the texture centre.
+    let dst_standard_left = TV_LIVE_PAD_X + (standard_left - TV_CAPTURED_SOURCE_X);
     let dst_standard_right = dst_standard_left + 320 * 2 - 1;
     assert_eq!(dst_standard_left, FB_WIDTH - 1 - dst_standard_right);
+    let dst_crop_left = TV_LIVE_PAD_X;
+    let dst_crop_right = TV_LIVE_PAD_X + (FB_WIDTH - 1 - TV_CAPTURED_SOURCE_X);
+    assert_eq!(dst_crop_left, FB_WIDTH - 1 - dst_crop_right);
     assert_eq!(
         pixel(&frame, dst_standard_left, 0, scale),
         left_marker.to_le_bytes()
@@ -2153,28 +2160,32 @@ fn tv_window_copy_centres_reference_aperture_in_live_texture() {
         pixel(&frame, dst_standard_right, 0, scale),
         right_marker.to_le_bytes()
     );
-    assert_eq!(pixel(&frame, 0, 0, scale), left_edge.to_le_bytes());
-    let dst_fb_right = TV_LIVE_PAD_X + (FB_WIDTH - 1 - TV_PRESENT_SOURCE_X);
     assert_eq!(
-        pixel(&frame, dst_fb_right, 0, scale),
+        pixel(&frame, dst_crop_left, 0, scale),
+        left_edge.to_le_bytes()
+    );
+    assert_eq!(
+        pixel(&frame, dst_crop_right, 0, scale),
         right_edge.to_le_bytes()
     );
 }
 
 #[test]
-fn tv_window_copy_black_pads_aperture_past_framebuffer() {
+fn tv_window_copy_black_pads_never_replicate_edge_columns() {
     use crate::video::deinterlace::{OUT_HEIGHT, OUT_PIXELS};
-    // The aperture reaches a few columns past the framebuffer's right edge.
-    // A display fetching into the deepest right overscan fills the
-    // framebuffer's last column; the uncaptured aperture columns are bezel
-    // and must stay black instead of replicating that edge column into
-    // horizontal streaks (Gen-X logo slide-in).
+    // The pads beside the captured aperture are off-capture bezel. A
+    // display fetching or parking sprites in the deepest overscan fills
+    // the crop's edge columns; the pads must stay black instead of
+    // replicating those columns into horizontal streaks (Gen-X logo
+    // slide-in).
     let black = rgba(0, 0, 0).to_le_bytes();
     for scale in 1..=3 {
         let mut src = vec![0u32; OUT_PIXELS];
         let row_y = TV_PRESENT_SOURCE_Y;
-        let edge = 0xDDEE_FF00u32;
-        src[row_y * FB_WIDTH + FB_WIDTH - 1] = edge;
+        let left_edge = 0x99AA_BBCCu32;
+        let right_edge = 0xDDEE_FF00u32;
+        src[row_y * FB_WIDTH + TV_CAPTURED_SOURCE_X] = left_edge;
+        src[row_y * FB_WIDTH + FB_WIDTH - 1] = right_edge;
 
         let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
         copy_window_present_frame(
@@ -2187,17 +2198,30 @@ fn tv_window_copy_black_pads_aperture_past_framebuffer() {
             Some(TV_PAL_PRESENT_HEIGHT),
         );
 
-        let dst_fb_right = TV_LIVE_PAD_X + (FB_WIDTH - 1 - TV_PRESENT_SOURCE_X);
+        let dst_crop_left = TV_LIVE_PAD_X;
+        let dst_crop_right = TV_LIVE_PAD_X + (FB_WIDTH - 1 - TV_CAPTURED_SOURCE_X);
         assert_eq!(
-            pixel(&frame, dst_fb_right * scale, 0, scale),
-            edge.to_le_bytes(),
+            pixel(&frame, dst_crop_left * scale, 0, scale),
+            left_edge.to_le_bytes(),
+            "scale {scale}: crop's first column should stay visible"
+        );
+        assert_eq!(
+            pixel(&frame, dst_crop_right * scale, 0, scale),
+            right_edge.to_le_bytes(),
             "scale {scale}: framebuffer edge column should stay visible"
         );
-        for x in (dst_fb_right + 1) * scale..FB_WIDTH * scale {
+        for x in 0..dst_crop_left * scale {
             assert_eq!(
                 pixel(&frame, x, 0, scale),
                 black,
-                "scale {scale}: aperture past the framebuffer must be black at {x}"
+                "scale {scale}: left pad must be black at {x}"
+            );
+        }
+        for x in (dst_crop_right + 1) * scale..FB_WIDTH * scale {
+            assert_eq!(
+                pixel(&frame, x, 0, scale),
+                black,
+                "scale {scale}: right pad must be black at {x}"
             );
         }
     }
@@ -2212,7 +2236,7 @@ fn tv_window_copy_preserves_true_overscan_fetches() {
     let standard_crop_edge = 0x5566_7788u32;
 
     src[0] = left_overscan;
-    src[TV_PRESENT_SOURCE_X] = standard_crop_edge;
+    src[TV_CAPTURED_SOURCE_X] = standard_crop_edge;
 
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
     copy_window_present_frame(

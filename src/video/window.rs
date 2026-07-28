@@ -285,8 +285,15 @@ const JOY_TOGGLE_W: usize = 22;
 const JOY_TOGGLE_X: usize = VOLUME_GLYPH_X - 2 - JOY_TOGGLE_W;
 // The standard-window and TV-aperture constants live in
 // `video/present_common.rs` with the presentation helpers they anchor
-// (re-exported through `use present::*` below).
-const TV_LIVE_PAD_X: usize = (FB_WIDTH - TV_PRESENT_WIDTH) / 2;
+// (re-exported through `use present::*` below). The live window presents
+// the captured aperture -- every column a real framebuffer pixel, the
+// standard window and the visible raster both exactly centred -- unlike
+// the PNG paths, which keep the wider reference aperture with its
+// black-padded right margin for reference-emulator comparison.
+const TV_LIVE_PAD_X: usize = (FB_WIDTH - TV_CAPTURED_WIDTH) / 2;
+// Symmetric pads are what centres the raster; a change to the captured
+// aperture's width that breaks this must rethink the live layout.
+const _: () = assert!(TV_LIVE_PAD_X * 2 + TV_CAPTURED_WIDTH == FB_WIDTH);
 const STATUS_BG: u32 = rgba(28, 28, 26);
 const STATUS_TOP: u32 = rgba(78, 76, 70);
 const STATUS_BOTTOM: u32 = rgba(12, 12, 11);
