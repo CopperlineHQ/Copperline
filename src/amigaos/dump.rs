@@ -113,13 +113,23 @@ pub fn exec(os: &OsMemory, base: u32) -> Vec<String> {
 
 /// TASKS: the scheduled task (marked `>`) plus the ready and waiting
 /// lists, one line each.
+///
+/// The `>` line shows `ThisTask`'s own `tc_State`, so an idle machine reads
+/// `wait` there and lists the task again below: exec leaves `ThisTask`
+/// naming the task it dispatched last.
 pub fn task_list(os: &OsMemory, base: u32) -> Vec<String> {
     let mut lines = Vec::new();
     match os.this_task(base) {
-        Some(task) => lines.push(format!(
-            "> ${:06X}  pri {:>4}  {:<7} {}",
-            task.addr, task.pri, "run", task.name
-        )),
+        Some(task) => {
+            let state = match super::task_state_name(task.state) {
+                "?" => format!("?${:02X}", task.state),
+                name => name.to_string(),
+            };
+            lines.push(format!(
+                "> ${:06X}  pri {:>4}  {:<7} {}",
+                task.addr, task.pri, state, task.name
+            ))
+        }
         None => lines.push("!ThisTask is not plausible".to_string()),
     }
     for (list, label) in [(OsList::TaskReady, "ready"), (OsList::TaskWait, "wait")] {
