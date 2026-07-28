@@ -196,71 +196,84 @@ pub fn present_h_shift(diw_h_start: u16, diw_h_stop: u16) -> usize {
     left_border.saturating_sub(right_border) / 2
 }
 
-/// `present_h_shift`, but able to recentre a display that opens its DIW window
-/// into the overscan around a picture it only fetches at standard width.
+/// The recentring shift of the stock full-width display: the power-on
+/// default carried by `PresentationLatch`, so border-only frames before the
+/// first playfield present like the standard display they precede.
+pub(crate) fn standard_present_h_shift() -> usize {
+    present_h_shift(STANDARD_DIW_HSTART as u16, STANDARD_DIW_HSTOP as u16)
+}
+
+/// How one frame's playfield relates horizontally to the standard display
+/// window, for the presentation-geometry decisions (TV aperture crop,
+/// full-overscan recentring).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HorizontalContentClass {
+    /// The visible playfield stays inside the standard window: a TV-style
+    /// aperture can crop the borders without cutting content, and `shift`
+    /// recentres the display inside the overscan field buffer
+    /// ([`present_h_shift`]).
+    Standard { shift: usize },
+    /// Fetched content genuinely reaches into the overscan border: the
+    /// frame must present on the full framebuffer, exactly as rendered.
+    Overscan,
+    /// Border-only frame: no bitplane content intersects the window (no
+    /// valid fetch, or a fetch that misses the window entirely). Such a
+    /// frame carries no evidence about the display's horizontal layout;
+    /// presentation keeps its previous geometry across it
+    /// (`PresentationLatch`) instead of snapping to the full framebuffer,
+    /// so the blank frames a screen change emits while the copper list is
+    /// rebuilt do not make the picture jump.
+    Neutral,
+}
+
+/// Classify one frame's snapshot for presentation geometry.
 ///
 /// A demo can open DIWSTRT/DIWSTOP much wider than the playfield it draws --
-/// Virtual Dreams' "Absolute Inebriation" opens DIW $02..$1FF around a standard
-/// 320-px lo-res picture (DDF $38..$D0) -- where the extra window only reveals
-/// COLOR0 border the TV crops, not content. The bare `present_h_shift` keys off
-/// DIW alone and so declines to recentre any window that reaches into the
-/// overscan, leaving such a picture sitting right-of-centre.
-///
-/// While the DIW window stays inside the standard window, behaviour is
-/// identical to `present_h_shift(diw_h_start, diw_h_stop)` -- the window
-/// (including any COLOR0 border it legitimately shows) is centred as before.
-/// Only when the window reaches into the overscan do we fall back to centring
-/// on the *fetched content* (DDF) clamped to the window: a picture whose fetch
-/// stays within the standard window is recentred like the standard display it
-/// really is, while one that genuinely fetches bitplane data into the border is
-/// still left exactly as rendered (`present_h_shift` returns 0 for it).
-pub fn present_h_shift_for(snapshot: &RenderRegisterSnapshot) -> usize {
+/// Virtual Dreams' "Absolute Inebriation" opens DIW $02..$1FF around a
+/// standard 320-px lo-res picture (DDF $38..$D0) -- where the extra window
+/// only reveals COLOR0 border the TV crops, not content. Wide DIW alone is
+/// therefore not enough to call a frame overscan: while the window stays
+/// inside the standard window the window itself is the content (including
+/// any COLOR0 border it legitimately shows), and beyond that the *fetched
+/// content* (DDF) clamped to the window decides -- a picture whose fetch
+/// stays within the standard window is the standard display it really is,
+/// while one that genuinely fetches bitplane data into the border is true
+/// overscan.
+pub(crate) fn horizontal_content_class(
+    snapshot: &RenderRegisterSnapshot,
+) -> HorizontalContentClass {
     let control = ControlState::from_render_state(&RenderState::from_snapshot(*snapshot));
     let diw_start = control.diw_h_start() as i32;
     let mut diw_stop = control.diw_h_stop() as i32;
     if diw_stop <= diw_start {
         diw_stop += 0x100;
     }
-    // DIW within the standard window: centre on the window itself, exactly as
-    // the bare helper does, so stock and sub-standard displays are unchanged.
+    // DIW within the standard window: the window clips everything the
+    // playfield could show, so the frame is standard whatever the fetch
+    // does, and stock and sub-standard displays centre on the window.
     if diw_start >= STANDARD_DIW_HSTART && diw_stop <= STANDARD_DIW_HSTOP {
-        return present_h_shift(diw_start as u16, diw_stop as u16);
+        return HorizontalContentClass::Standard {
+            shift: present_h_shift(diw_start as u16, diw_stop as u16),
+        };
     }
-    // DIW reaches into the overscan: recentre on the fetched content if it
-    // stays standard, otherwise leave a true overscan display untouched.
+    // DIW reaches into the overscan: judge by the fetched content clamped
+    // to the window. No fetch, or a fetch the window never shows, is a
+    // border-only frame with nothing to judge.
     let Some((content_start, content_stop)) = control.bitplane_content_window_h() else {
-        return 0;
+        return HorizontalContentClass::Neutral;
     };
     let eff_start = diw_start.max(content_start);
     let eff_stop = diw_stop.min(content_stop);
     if eff_stop <= eff_start {
-        return 0;
+        return HorizontalContentClass::Neutral;
     }
-    present_h_shift(eff_start as u16, eff_stop as u16)
-}
-
-/// Whether a TV-style standard PAL aperture can crop the horizontal borders
-/// without cutting fetched playfield content. Wide DIW alone is not enough to
-/// reject the aperture: some software opens DIW into the border around a
-/// standard-width fetch and only exposes COLOR0 there. A fetch that reaches
-/// outside the standard window is true horizontal overscan and must stay on
-/// the full framebuffer.
-pub(crate) fn uses_standard_horizontal_content(snapshot: &RenderRegisterSnapshot) -> bool {
-    let control = ControlState::from_render_state(&RenderState::from_snapshot(*snapshot));
-    let diw_start = control.diw_h_start() as i32;
-    let mut diw_stop = control.diw_h_stop() as i32;
-    if diw_stop <= diw_start {
-        diw_stop += 0x100;
+    if eff_start >= STANDARD_DIW_HSTART && eff_stop <= STANDARD_DIW_HSTOP {
+        HorizontalContentClass::Standard {
+            shift: present_h_shift(eff_start as u16, eff_stop as u16),
+        }
+    } else {
+        HorizontalContentClass::Overscan
     }
-    if diw_start >= STANDARD_DIW_HSTART && diw_stop <= STANDARD_DIW_HSTOP {
-        return true;
-    }
-    let Some((content_start, content_stop)) = control.bitplane_content_window_h() else {
-        return false;
-    };
-    let eff_start = diw_start.max(content_start);
-    let eff_stop = diw_stop.min(content_stop);
-    eff_start >= STANDARD_DIW_HSTART && eff_stop <= STANDARD_DIW_HSTOP && eff_stop > eff_start
 }
 const BPLCON0_ECSENA: u16 = 1 << 0;
 const BPLCON0_SHRES: u16 = 1 << 6;

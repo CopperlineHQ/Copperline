@@ -226,6 +226,11 @@ pub struct WebEmu {
     /// masks the deep horizontal overscan like a CRT bezel (the default),
     /// `Full` presents everything Denise produced.
     overscan: Overscan,
+    /// Aperture/recentring decisions latched across border-only frames,
+    /// as on the desktop: the blank frames a screen change emits keep the
+    /// previous presentation geometry instead of snapping to the full
+    /// framebuffer, so the canvas does not jump at every mode change.
+    presentation_latch: present_common::PresentationLatch,
 }
 
 #[wasm_bindgen]
@@ -279,6 +284,7 @@ impl WebEmu {
             mouse_pending: (0, 0),
             serial,
             overscan: Overscan::Tv,
+            presentation_latch: present_common::PresentationLatch::default(),
         })
     }
 
@@ -403,8 +409,11 @@ impl WebEmu {
         // The desktop's recentring shift (window.rs render jobs): full
         // overscan recentres a standard display whose deep left overscan
         // would push the picture right of centre; TV mode is a fixed
-        // aperture and shifts nothing.
-        let h_shift = present_common::presentation_h_shift_for(&base, self.overscan);
+        // aperture and shifts nothing. Latched across border-only frames
+        // like the desktop, so screen changes do not jump.
+        let h_shift = self
+            .presentation_latch
+            .presentation_h_shift(&base, self.overscan);
         let field_rows = present_common::post_process_rendered_field(
             &mut self.fb,
             geometry,
@@ -426,7 +435,10 @@ impl WebEmu {
         let woven_rows = self.deinterlacer.output_rows();
         let woven = self.deinterlacer.output();
         let tv_aperture_rows = if self.overscan == Overscan::Tv {
-            present_common::standard_tv_aperture_rows(geometry, woven_rows, &base)
+            self.presentation_latch
+                .resolve_tv_aperture(present_common::standard_tv_aperture_frame(
+                    geometry, woven_rows, &base,
+                ))
         } else {
             None
         };
@@ -775,8 +787,10 @@ impl WebEmu {
         // The restored frame counter may match or precede the last one
         // presented; forget it so the next render is unconditional, and
         // paint the restored screen now so a paused page shows it without
-        // stepping the machine.
+        // stepping the machine. The presentation latch belongs to the old
+        // timeline, so it starts over too.
         self.last_rendered_frame = None;
+        self.presentation_latch.reset();
         self.render_completed_frame();
         Ok(())
     }
@@ -786,9 +800,10 @@ impl WebEmu {
         self.emu.power_on_reset().map_err(js_err)?;
         self.anchor = None;
         // Motion buffered against the old machine must not replay into the
-        // fresh one.
+        // fresh one, and the presentation latch starts over with it.
         self.mouse_remainder = (0.0, 0.0);
         self.mouse_pending = (0, 0);
+        self.presentation_latch.reset();
         Ok(())
     }
 
@@ -818,6 +833,9 @@ impl WebEmu {
             return;
         }
         self.overscan = overscan;
+        // Judge the new mode's geometry fresh rather than from decisions
+        // latched under the old one.
+        self.presentation_latch.reset();
         self.last_rendered_frame = None;
         self.render_completed_frame();
     }

@@ -66,7 +66,7 @@ pub(super) fn render_job_to_presentation(
         presentation_fb,
         present_rows,
         present_width,
-        tv_aperture_rows: standard_tv_aperture_rows(geometry, present_rows, &base),
+        tv_aperture: standard_tv_aperture_frame(geometry, present_rows, &base),
         programmable: geometry.programmable,
         input,
     }
@@ -468,6 +468,17 @@ pub(super) fn copy_window_present_frame(
     }
 }
 
+/// The live-window TV copy presents the captured aperture
+/// (`TV_CAPTURED_*`): the standard window plus the symmetric overscan
+/// margin the framebuffer actually captures, ending exactly on the
+/// framebuffer's edges. Every aperture column is a real pixel and the
+/// visible raster sits exactly centred in the texture -- the wider
+/// reference aperture the PNG paths keep would show its black-padded
+/// right margin as a lopsided band beside the picture (conspicuous
+/// inside the monitor bezel). The symmetric side pads are off-capture
+/// bezel and stay black rather than replicating the edge columns, which
+/// carry picture when a display fetches or parks sprites in the deepest
+/// overscan (the Gen-X logo slide-in streaks).
 pub(super) fn copy_tv_aperture_to_window(
     src_fb: &[u32],
     src_rows: usize,
@@ -483,12 +494,15 @@ pub(super) fn copy_tv_aperture_to_window(
     let dst_stride = texture_width(texture_scale) * 4;
     let present_rows = present_height();
     let out_rows = present_rows * texture_scale;
-    // The aperture reaches a few columns past the framebuffer's right edge;
-    // that uncaptured margin is bezel and must stay black rather than
-    // replicate the edge column (which carries picture when a display
-    // fetches into the deepest overscan).
     let black_px = rgba(0, 0, 0);
     let black = black_px.to_le_bytes();
+    let pixel_at = |row: &[u32], out_x: usize| -> u32 {
+        if (TV_LIVE_PAD_X..TV_LIVE_PAD_X + TV_CAPTURED_WIDTH).contains(&out_x) {
+            row[TV_CAPTURED_SOURCE_X + (out_x - TV_LIVE_PAD_X)]
+        } else {
+            black_px
+        }
+    };
     for y in 0..out_rows {
         let Some(crop_y) = tv_aperture_source_row(y, present_rows, texture_scale, aperture_rows)
         else {
@@ -505,25 +519,13 @@ pub(super) fn copy_tv_aperture_to_window(
             1 => {
                 let dst = &mut frame[dst_off..dst_off + dst_stride];
                 for x in 0..FB_WIDTH {
-                    let crop_x = x.saturating_sub(TV_LIVE_PAD_X).min(TV_PRESENT_WIDTH - 1);
-                    let src_x = TV_PRESENT_SOURCE_X + crop_x;
-                    let pixel = if src_x < FB_WIDTH {
-                        row[src_x]
-                    } else {
-                        black_px
-                    };
+                    let pixel = pixel_at(row, x);
                     dst[x * 4..x * 4 + 4].copy_from_slice(&pixel.to_le_bytes());
                 }
             }
             2 => {
                 for x in 0..FB_WIDTH {
-                    let crop_x = x.saturating_sub(TV_LIVE_PAD_X).min(TV_PRESENT_WIDTH - 1);
-                    let src_x = TV_PRESENT_SOURCE_X + crop_x;
-                    let pixel = if src_x < FB_WIDTH {
-                        row[src_x]
-                    } else {
-                        black_px
-                    };
+                    let pixel = pixel_at(row, x);
                     let pair = pixel as u64 | ((pixel as u64) << 32);
                     unsafe {
                         (frame.as_mut_ptr().add(dst_off + x * 8) as *mut u64).write_unaligned(pair);
@@ -533,16 +535,7 @@ pub(super) fn copy_tv_aperture_to_window(
             _ => {
                 let dst = &mut frame[dst_off..dst_off + dst_stride];
                 for x in 0..FB_WIDTH * texture_scale {
-                    let out_x = x / texture_scale;
-                    let crop_x = out_x
-                        .saturating_sub(TV_LIVE_PAD_X)
-                        .min(TV_PRESENT_WIDTH - 1);
-                    let src_x = TV_PRESENT_SOURCE_X + crop_x;
-                    let pixel = if src_x < FB_WIDTH {
-                        row[src_x]
-                    } else {
-                        black_px
-                    };
+                    let pixel = pixel_at(row, x / texture_scale);
                     dst[x * 4..x * 4 + 4].copy_from_slice(&pixel.to_le_bytes());
                 }
             }
@@ -554,7 +547,7 @@ pub(super) fn copy_tv_aperture_to_window(
 /// aperture crop, or None for rows that fall on the black bezel of the
 /// square-pixel presentation. The square canvas (570 rows) maps woven rows
 /// 1:1, so an aperture shorter than it is centred between black bands --
-/// the vertical counterpart of the TV_LIVE_PAD_X side bands. The 4:3
+/// the vertical counterpart of the black TV_LIVE_PAD_X side pads. The 4:3
 /// canvas (537 rows) is the glass itself, which both standards' apertures
 /// fill: all aperture rows rescale onto the whole output (540 onto 537 for
 /// a 50 Hz scan, 428 for a 60 Hz one).
