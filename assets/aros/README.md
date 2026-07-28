@@ -17,8 +17,15 @@ The two halves are consumed exactly as WinUAE and FS-UAE take them.
 
 ## Provenance
 
-Built from source on 2026-07-25 from AROS upstream master
-(https://github.com/aros-development-team/AROS) at commit f1e856cf7f.
+Built from source on 2026-07-28 from AROS upstream master
+(https://github.com/aros-development-team/AROS) at commit d0370bd757,
+plus the not-yet-merged NTSC boot fix of pull request 876
+(https://github.com/aros-development-team/AROS/pull/876, commit
+c4780bddbd): dosboot and intuition probed BestModeID for a 640x480 mode
+before opening their screens and dead-ended with alert 84000009
+("unknown type of system screen") when it was absent, which made every
+NTSC machine guru and reboot-loop at boot because an NTSC-only display
+database holds nothing taller than 400 lines.
 Master includes the boot-time optimizations of pull request 829
 (https://github.com/aros-development-team/AROS/pull/829: single-pass
 romtag scan, fast memory clearing, blitter-drawn boot animation), which cut
