@@ -2297,7 +2297,13 @@ fn wrap_text(text: &str, first_width: usize, rest_width: usize) -> Vec<String> {
 
 /// Contributors and Patreon sponsors credited in the About panel. Keep
 /// both in step with CREDITS.md and the website's Community section.
-const CONTRIBUTORS: &[&str] = &["Bernie Innocenti", "Lee Hobson", "jbl007"];
+const CONTRIBUTORS: &[&str] = &[
+    "Bernie Innocenti",
+    "Lee Hobson",
+    "jbl007",
+    "Simon Dick",
+    "Nicolas Ramz",
+];
 const PATREON_SPONSORS: &[&str] = &["Lee Hobson"];
 
 fn draw_about(frame: &mut [u8], rect: Rect, view: &AboutView, scale: usize) {
@@ -2315,7 +2321,7 @@ fn draw_about(frame: &mut [u8], rect: Rect, view: &AboutView, scale: usize) {
     let author = "by Andrew \"LinuxJedi\" Hutchings";
     draw_panel_text(frame, cx(author, 1), y, author, PANEL_TEXT_DIM, 1, scale);
     y += 24;
-    let max_chars = (rect.w - 48) / 16;
+    let max_chars = rect.w.saturating_sub(48) / 16;
     for line in &view.machine_lines {
         for (i, part) in wrap_text(line, max_chars, max_chars.saturating_sub(1))
             .iter()
@@ -2337,11 +2343,20 @@ fn draw_about(frame: &mut [u8], rect: Rect, view: &AboutView, scale: usize) {
         y += 12;
     }
     y += 10;
+    let max_small = rect.w.saturating_sub(48) / 8;
     let contributors = format!("Contributors: {}", CONTRIBUTORS.join(", "));
-    draw_panel_text(frame, rect.x + 24, y, &contributors, PANEL_TEXT, 1, scale);
-    y += 12;
     let sponsors = format!("Patreon sponsors: {}", PATREON_SPONSORS.join(", "));
-    draw_panel_text(frame, rect.x + 24, y, &sponsors, PANEL_TEXT, 1, scale);
+    for line in [&contributors, &sponsors] {
+        for (i, part) in wrap_text(line, max_small, max_small.saturating_sub(1))
+            .iter()
+            .enumerate()
+        {
+            // Continuation lines are indented by one glyph cell.
+            let x = rect.x + 24 + if i == 0 { 0 } else { 8 };
+            draw_panel_text(frame, x, y, part, PANEL_TEXT, 1, scale);
+            y += 12;
+        }
+    }
 }
 
 fn draw_drop_chooser(
