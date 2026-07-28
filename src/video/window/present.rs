@@ -62,7 +62,7 @@ pub(super) fn render_job_to_presentation(
         presentation_fb,
         present_rows,
         present_width,
-        standard_tv_aperture: uses_standard_pal_tv_aperture(geometry, present_rows, &base),
+        tv_aperture_rows: standard_tv_aperture_rows(geometry, present_rows, &base),
         programmable: geometry.programmable,
         input,
     }
@@ -452,14 +452,15 @@ pub(super) fn copy_window_present_frame(
     frame: &mut [u8],
     texture_scale: usize,
     overscan: Overscan,
-    standard_tv_aperture: bool,
+    tv_aperture_rows: Option<usize>,
 ) {
     // The TV aperture is a standard-scan crop; standard scans always render
     // the classic canvas width.
-    if overscan == Overscan::Tv && standard_tv_aperture && src_width == FB_WIDTH {
-        copy_tv_aperture_to_window(src_fb, src_rows, frame, texture_scale);
-    } else {
-        copy_present_frame(src_fb, src_rows, src_width, frame, texture_scale);
+    match tv_aperture_rows {
+        Some(aperture_rows) if overscan == Overscan::Tv && src_width == FB_WIDTH => {
+            copy_tv_aperture_to_window(src_fb, src_rows, frame, texture_scale, aperture_rows)
+        }
+        _ => copy_present_frame(src_fb, src_rows, src_width, frame, texture_scale),
     }
 }
 
@@ -468,6 +469,7 @@ pub(super) fn copy_tv_aperture_to_window(
     src_rows: usize,
     frame: &mut [u8],
     texture_scale: usize,
+    aperture_rows: usize,
 ) {
     debug_assert!(src_fb.len() >= src_rows * FB_WIDTH);
     debug_assert_eq!(
@@ -484,24 +486,23 @@ pub(super) fn copy_tv_aperture_to_window(
     let black_px = rgba(0, 0, 0);
     let black = black_px.to_le_bytes();
     for y in 0..out_rows {
-        let Some(crop_y) = tv_aperture_source_row(y, present_rows, texture_scale) else {
+        let Some(crop_y) = tv_aperture_source_row(y, present_rows, texture_scale, aperture_rows)
+        else {
             let dst = &mut frame[y * dst_stride..(y + 1) * dst_stride];
             for px in dst.chunks_exact_mut(4) {
                 px.copy_from_slice(&black);
             }
             continue;
         };
-        let src_y = (TV_PAL_PRESENT_SOURCE_Y + crop_y).min(src_rows - 1);
+        let src_y = (TV_PRESENT_SOURCE_Y + crop_y).min(src_rows - 1);
         let row = &src_fb[src_y * FB_WIDTH..(src_y + 1) * FB_WIDTH];
         let dst_off = y * dst_stride;
         match texture_scale {
             1 => {
                 let dst = &mut frame[dst_off..dst_off + dst_stride];
                 for x in 0..FB_WIDTH {
-                    let crop_x = x
-                        .saturating_sub(TV_PAL_LIVE_PAD_X)
-                        .min(TV_PAL_PRESENT_WIDTH - 1);
-                    let src_x = TV_PAL_PRESENT_SOURCE_X + crop_x;
+                    let crop_x = x.saturating_sub(TV_LIVE_PAD_X).min(TV_PRESENT_WIDTH - 1);
+                    let src_x = TV_PRESENT_SOURCE_X + crop_x;
                     let pixel = if src_x < FB_WIDTH {
                         row[src_x]
                     } else {
@@ -512,10 +513,8 @@ pub(super) fn copy_tv_aperture_to_window(
             }
             2 => {
                 for x in 0..FB_WIDTH {
-                    let crop_x = x
-                        .saturating_sub(TV_PAL_LIVE_PAD_X)
-                        .min(TV_PAL_PRESENT_WIDTH - 1);
-                    let src_x = TV_PAL_PRESENT_SOURCE_X + crop_x;
+                    let crop_x = x.saturating_sub(TV_LIVE_PAD_X).min(TV_PRESENT_WIDTH - 1);
+                    let src_x = TV_PRESENT_SOURCE_X + crop_x;
                     let pixel = if src_x < FB_WIDTH {
                         row[src_x]
                     } else {
@@ -532,9 +531,9 @@ pub(super) fn copy_tv_aperture_to_window(
                 for x in 0..FB_WIDTH * texture_scale {
                     let out_x = x / texture_scale;
                     let crop_x = out_x
-                        .saturating_sub(TV_PAL_LIVE_PAD_X)
-                        .min(TV_PAL_PRESENT_WIDTH - 1);
-                    let src_x = TV_PAL_PRESENT_SOURCE_X + crop_x;
+                        .saturating_sub(TV_LIVE_PAD_X)
+                        .min(TV_PRESENT_WIDTH - 1);
+                    let src_x = TV_PRESENT_SOURCE_X + crop_x;
                     let pixel = if src_x < FB_WIDTH {
                         row[src_x]
                     } else {
@@ -547,27 +546,33 @@ pub(super) fn copy_tv_aperture_to_window(
     }
 }
 
-/// Map an output texture row to a row of the 540-line TV aperture crop,
-/// or None for rows that fall on the black bezel of the square-pixel
-/// presentation. The square canvas (570 rows) is taller than the
-/// aperture, so the crop is centred between black bands -- the vertical
-/// counterpart of the TV_PAL_LIVE_PAD_X side bands -- and its rows map
-/// 1:1. The default 4:3 canvas (537 rows) is shorter than the aperture
-/// and keeps mapping all 540 rows onto the output, as before.
+/// Map an output texture row to a row of the `aperture_rows`-line TV
+/// aperture crop, or None for rows that fall on the black bezel of the
+/// square-pixel presentation. The square canvas (570 rows) maps woven rows
+/// 1:1, so an aperture shorter than it is centred between black bands --
+/// the vertical counterpart of the TV_LIVE_PAD_X side bands. The 4:3
+/// canvas (537 rows) is the glass itself, which both standards' apertures
+/// fill: all aperture rows rescale onto the whole output (540 onto 537 for
+/// a 50 Hz scan, 428 for a 60 Hz one).
 pub(super) fn tv_aperture_source_row(
     y: usize,
     present_rows: usize,
     texture_scale: usize,
+    aperture_rows: usize,
 ) -> Option<usize> {
     let out_rows = present_rows * texture_scale;
-    let pad_rows = present_rows.saturating_sub(TV_PAL_PRESENT_HEIGHT) / 2 * texture_scale;
+    let pad_rows = if present_rows == crate::video::PRESENT_HEIGHT_SQUARE {
+        present_rows.saturating_sub(aperture_rows) / 2 * texture_scale
+    } else {
+        0
+    };
     let content_rows = out_rows - 2 * pad_rows;
     if y < pad_rows || y >= pad_rows + content_rows {
         return None;
     }
     Some(screenshot::scaled_source_row(
         y - pad_rows,
-        TV_PAL_PRESENT_HEIGHT,
+        aperture_rows,
         content_rows,
     ))
 }
@@ -858,7 +863,7 @@ pub(super) fn save_present_frame(
     src_rows: usize,
     src_width: usize,
     overscan: Overscan,
-    standard_tv_aperture: bool,
+    tv_aperture_rows: Option<usize>,
 ) -> anyhow::Result<()> {
     if crate::envcfg::flag("COPPERLINE_SHOT_RAW") {
         return screenshot::save(
@@ -869,17 +874,23 @@ pub(super) fn save_present_frame(
         );
     }
 
-    if overscan == Overscan::Tv && standard_tv_aperture && src_width == FB_WIDTH {
-        return screenshot::save_cropped_black_padded(
-            path,
-            present_fb,
-            FB_WIDTH,
-            src_rows,
-            TV_PAL_PRESENT_SOURCE_X,
-            TV_PAL_PRESENT_SOURCE_Y,
-            TV_PAL_PRESENT_WIDTH,
-            TV_PAL_PRESENT_HEIGHT,
-        );
+    if let Some(aperture_rows) = tv_aperture_rows {
+        if overscan == Overscan::Tv && src_width == FB_WIDTH {
+            // Both standards' apertures fill the same 4:3 glass, so the
+            // saved picture keeps one shape: a 60 Hz crop's rows scale onto
+            // the 50 Hz aperture's native row count.
+            return screenshot::save_cropped_black_padded(
+                path,
+                present_fb,
+                FB_WIDTH,
+                src_rows,
+                TV_PRESENT_SOURCE_X,
+                TV_PRESENT_SOURCE_Y,
+                TV_PRESENT_WIDTH,
+                aperture_rows,
+                TV_GLASS_PRESENT_ROWS,
+            );
+        }
     }
 
     // A double-width (35 ns) canvas saves at double height too, keeping the

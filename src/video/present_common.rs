@@ -50,20 +50,39 @@ pub fn compose_rtg_present(
 
 pub const STANDARD_PAL_VISIBLE_WIDTH: usize = 320 * 2;
 pub const STANDARD_PAL_VISIBLE_LINES: usize = 256;
+pub const STANDARD_NTSC_VISIBLE_LINES: usize = 200;
 pub const STANDARD_PAL_VISIBLE_START_VPOS: u32 = 0x2C;
 // Default TV presentation keeps a small consumer-visible overscan margin while
 // still hiding the deep edge columns that often contain unfinished effects.
 pub const TV_HORIZONTAL_OVERSCAN_MARGIN: usize = 24 * 2;
+// Overscan field lines the TV aperture keeps above and below the standard
+// window.
+pub const TV_VERTICAL_OVERSCAN_MARGIN: usize = 7;
 
-// The reference TV aperture for standard PAL displays: the standard window
-// plus a symmetric 26-column overscan margin, cropped from the woven
-// presentation buffer. The desktop window and screenshot paths present this
-// rect; its right margin reaches 12 columns past the framebuffer's right
-// edge, which those paths pad with black bezel.
-pub const TV_PAL_PRESENT_WIDTH: usize = STANDARD_PAL_VISIBLE_WIDTH + 2 * 26;
-pub const TV_PAL_PRESENT_HEIGHT: usize = 540;
-pub const TV_PAL_PRESENT_SOURCE_X: usize = bitplane::STANDARD_VISIBLE_X0 - 26;
-pub const TV_PAL_PRESENT_SOURCE_Y: usize = 18;
+// The reference TV aperture for standard 15 kHz displays, cropped from the
+// woven presentation buffer. Horizontally the two video standards agree --
+// both place the standard 640-wide window at the same colour clocks -- so one
+// cutout (the standard window plus a symmetric 26-column overscan margin)
+// serves 50 Hz and 60 Hz scans alike; its right margin reaches 12 columns
+// past the framebuffer's right edge, which the presentation paths pad with
+// black bezel. Vertically the aperture follows the field line count: a
+// 312/313-line (50 Hz) scan carries the 256-line standard window, a
+// 262/263-line (60 Hz) scan the 200-line one, each cropped with the same
+// symmetric overscan margin.
+pub const TV_PRESENT_WIDTH: usize = STANDARD_PAL_VISIBLE_WIDTH + 2 * 26;
+pub const TV_PRESENT_SOURCE_X: usize = bitplane::STANDARD_VISIBLE_X0 - 26;
+pub const TV_PRESENT_SOURCE_Y: usize = 18;
+pub const TV_PAL_PRESENT_HEIGHT: usize =
+    (STANDARD_PAL_VISIBLE_LINES + 2 * TV_VERTICAL_OVERSCAN_MARGIN) * 2;
+pub const TV_NTSC_PRESENT_HEIGHT: usize =
+    (STANDARD_NTSC_VISIBLE_LINES + 2 * TV_VERTICAL_OVERSCAN_MARGIN) * 2;
+
+// Output rows a TV-aperture crop presents: both standards' apertures fill
+// the same 4:3 glass, so the crop always presents at the 50 Hz aperture's
+// native row count. A 50 Hz crop maps 1:1; a 60 Hz crop's 428 rows stretch
+// onto it, the taller picture lines of a 200-line display on the same
+// screen.
+pub const TV_GLASS_PRESENT_ROWS: usize = TV_PAL_PRESENT_HEIGHT;
 
 // The TV aperture clipped to columns the framebuffer actually captures, for
 // frontends whose frame should end on real pixels instead of black bezel
@@ -71,26 +90,26 @@ pub const TV_PAL_PRESENT_SOURCE_Y: usize = 18;
 // captured right-overscan width, mirrored to the left so the standard
 // window stays exactly centred; the right edge lands on the framebuffer's
 // edge by construction.
-pub const TV_PAL_CAPTURED_MARGIN_X: usize =
+pub const TV_CAPTURED_MARGIN_X: usize =
     FB_WIDTH - bitplane::STANDARD_VISIBLE_X0 - STANDARD_PAL_VISIBLE_WIDTH;
-pub const TV_PAL_CAPTURED_SOURCE_X: usize =
-    bitplane::STANDARD_VISIBLE_X0 - TV_PAL_CAPTURED_MARGIN_X;
-pub const TV_PAL_CAPTURED_WIDTH: usize = STANDARD_PAL_VISIBLE_WIDTH + 2 * TV_PAL_CAPTURED_MARGIN_X;
+pub const TV_CAPTURED_SOURCE_X: usize = bitplane::STANDARD_VISIBLE_X0 - TV_CAPTURED_MARGIN_X;
+pub const TV_CAPTURED_WIDTH: usize = STANDARD_PAL_VISIBLE_WIDTH + 2 * TV_CAPTURED_MARGIN_X;
 
 // The captured aperture's invariants: it ends exactly on the framebuffer
 // edge (no bezel columns), keeps symmetric margins around the standard
-// window, starts inside the reference aperture, and its vertical crop fits
-// the woven field.
+// window, starts inside the reference aperture, and both standards'
+// vertical crops fit the woven field.
 const _: () = {
-    assert!(TV_PAL_CAPTURED_SOURCE_X + TV_PAL_CAPTURED_WIDTH == FB_WIDTH);
-    assert!(bitplane::STANDARD_VISIBLE_X0 - TV_PAL_CAPTURED_SOURCE_X == TV_PAL_CAPTURED_MARGIN_X);
+    assert!(TV_CAPTURED_SOURCE_X + TV_CAPTURED_WIDTH == FB_WIDTH);
+    assert!(bitplane::STANDARD_VISIBLE_X0 - TV_CAPTURED_SOURCE_X == TV_CAPTURED_MARGIN_X);
     assert!(
-        TV_PAL_CAPTURED_SOURCE_X + TV_PAL_CAPTURED_WIDTH
+        TV_CAPTURED_SOURCE_X + TV_CAPTURED_WIDTH
             - (bitplane::STANDARD_VISIBLE_X0 + STANDARD_PAL_VISIBLE_WIDTH)
-            == TV_PAL_CAPTURED_MARGIN_X
+            == TV_CAPTURED_MARGIN_X
     );
-    assert!(TV_PAL_CAPTURED_SOURCE_X >= TV_PAL_PRESENT_SOURCE_X);
-    assert!(TV_PAL_PRESENT_SOURCE_Y + TV_PAL_PRESENT_HEIGHT <= OUT_HEIGHT);
+    assert!(TV_CAPTURED_SOURCE_X >= TV_PRESENT_SOURCE_X);
+    assert!(TV_PRESENT_SOURCE_Y + TV_PAL_PRESENT_HEIGHT <= OUT_HEIGHT);
+    assert!(TV_NTSC_PRESENT_HEIGHT < TV_PAL_PRESENT_HEIGHT);
 };
 
 pub fn post_process_rendered_field(
@@ -295,17 +314,32 @@ pub fn should_render_emulated_frame(last_rendered: Option<u64>, current: u64) ->
     last_rendered != Some(current)
 }
 
-pub fn is_standard_pal_presentation(geometry: FrameGeometry, src_rows: usize) -> bool {
-    !geometry.programmable && geometry.frame_lines >= 312 && src_rows == OUT_HEIGHT
+pub fn is_standard_presentation(geometry: FrameGeometry, src_rows: usize) -> bool {
+    !geometry.programmable && src_rows == OUT_HEIGHT
 }
 
-pub fn uses_standard_pal_tv_aperture(
+/// TV-aperture crop height in woven rows for this frame, or None when the
+/// frame is not a standard 15 kHz scan rendering the standard horizontal
+/// window (programmable scans and true horizontal-overscan fetches present
+/// on the full framebuffer instead). The height follows the scan the frame
+/// actually ran, not the configured standard: a 312/313-line (50 Hz) field
+/// carries the 256-line standard window, a 262/263-line (60 Hz) field the
+/// 200-line one.
+pub fn standard_tv_aperture_rows(
     geometry: FrameGeometry,
     src_rows: usize,
     snapshot: &RenderRegisterSnapshot,
-) -> bool {
-    is_standard_pal_presentation(geometry, src_rows)
-        && bitplane::uses_standard_horizontal_content(snapshot)
+) -> Option<usize> {
+    if !is_standard_presentation(geometry, src_rows)
+        || !bitplane::uses_standard_horizontal_content(snapshot)
+    {
+        return None;
+    }
+    Some(if geometry.frame_lines >= 312 {
+        TV_PAL_PRESENT_HEIGHT
+    } else {
+        TV_NTSC_PRESENT_HEIGHT
+    })
 }
 
 #[cfg(test)]
@@ -314,11 +348,53 @@ mod tests {
 
     #[test]
     fn captured_aperture_clears_the_tv_bezel_mask() {
-        // The const block by the TV_PAL_CAPTURED_* definitions pins the
+        // The const block by the TV_CAPTURED_* definitions pins the
         // aperture geometry at compile time; the mask bounds come from a
         // runtime helper, so check here that a captured-aperture crop never
         // shows masked black columns.
-        assert!(TV_PAL_CAPTURED_SOURCE_X >= tv_source_h_bounds().0);
+        assert!(TV_CAPTURED_SOURCE_X >= tv_source_h_bounds().0);
+    }
+
+    #[test]
+    fn tv_aperture_rows_follow_the_scans_field_line_count() {
+        // A standard scan's TV aperture is picked by the lines the frame
+        // actually ran (BEAMCON0 can retune Agnus mid-session), holding the
+        // 256-line standard window of a 50 Hz field and the 200-line window
+        // of a 60 Hz field with the same overscan margin.
+        let snapshot = RenderRegisterSnapshot {
+            diwstrt: 0x2C81,
+            diwstop: 0xF4C1,
+            ddfstrt: 0x38,
+            ddfstop: 0xD0,
+            ..Default::default()
+        };
+        let pal = FrameGeometry::standard(0x1C, 313, false);
+        let ntsc = FrameGeometry::standard(0x1C, 262, false);
+        assert_eq!(
+            standard_tv_aperture_rows(pal, OUT_HEIGHT, &snapshot),
+            Some(TV_PAL_PRESENT_HEIGHT)
+        );
+        assert_eq!(
+            standard_tv_aperture_rows(ntsc, OUT_HEIGHT, &snapshot),
+            Some(TV_NTSC_PRESENT_HEIGHT)
+        );
+        // A programmable scan or a native-height field presents in full.
+        let mut programmable = ntsc;
+        programmable.programmable = true;
+        assert_eq!(
+            standard_tv_aperture_rows(programmable, OUT_HEIGHT, &snapshot),
+            None
+        );
+        assert_eq!(standard_tv_aperture_rows(ntsc, 400, &snapshot), None);
+    }
+
+    #[test]
+    fn ntsc_aperture_stays_inside_the_rendered_field() {
+        // A 60 Hz field renders (frame_lines - visible_start) field rows;
+        // the aperture crop must end inside them so it never shows
+        // unscanned buffer rows as picture.
+        let rendered_woven_rows = 2 * (262 - 0x1C);
+        assert!(TV_PRESENT_SOURCE_Y + TV_NTSC_PRESENT_HEIGHT <= rendered_woven_rows);
     }
 
     fn v_window_fixture(field_rows: usize, total_rows: usize) -> Vec<u32> {

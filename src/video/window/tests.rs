@@ -24,8 +24,8 @@ use super::{
     DISK_BODY, DISK_BODY_SHADOW, DISK_LABEL, FDD_LED_OFF, FDD_LED_ON, HDD_LED_OFF, HDD_LED_ON,
     POWER_GLYPH_OFF, POWER_GLYPH_ON, POWER_LED_BRIGHT, POWER_LED_NORMAL, POWER_LED_OFF,
     STANDARD_PAL_VISIBLE_LINES, STANDARD_PAL_VISIBLE_START_VPOS, STATUS_BG, TRACK_SEGMENT_OFF,
-    TRACK_SEGMENT_ON, TV_PAL_LIVE_PAD_X, TV_PAL_PRESENT_HEIGHT, TV_PAL_PRESENT_SOURCE_X,
-    TV_PAL_PRESENT_SOURCE_Y, TV_PAL_PRESENT_WIDTH, VOLUME_FILL, VOLUME_GLYPH_X,
+    TRACK_SEGMENT_ON, TV_LIVE_PAD_X, TV_PAL_PRESENT_HEIGHT, TV_PRESENT_SOURCE_X,
+    TV_PRESENT_SOURCE_Y, TV_PRESENT_WIDTH, VOLUME_FILL, VOLUME_GLYPH_X,
 };
 use crate::audio::{AudioSink, NullSink};
 use crate::bus::{FrontPanelStatus, RenderRegisterSnapshot};
@@ -765,27 +765,27 @@ fn crt_scanline_count_follows_what_the_present_copy_shows() {
     // TV aspect + TV aperture (the out-of-the-box config): 540 aperture rows
     // = 270 lines, filling the rect.
     assert_eq!(
-        crt_scanline_count(woven, PRESENT_HEIGHT_TV, true),
+        crt_scanline_count(woven, PRESENT_HEIGHT_TV, Some(TV_PAL_PRESENT_HEIGHT)),
         (TV_PAL_PRESENT_HEIGHT / 2) as f32
     );
     // Full overscan takes the plain copy, which shows every woven row.
     assert_eq!(
-        crt_scanline_count(woven, PRESENT_HEIGHT_TV, false),
+        crt_scanline_count(woven, PRESENT_HEIGHT_TV, None),
         (woven / 2) as f32
     );
     // The square canvas is taller than the aperture and pads it with bezel
     // rows, so the same 270 lines cover only 540 of 570 rect rows: the pitch
     // across the whole viewport scales up to match.
     assert_eq!(
-        crt_scanline_count(woven, PRESENT_HEIGHT_SQUARE, true),
+        crt_scanline_count(woven, PRESENT_HEIGHT_SQUARE, Some(TV_PAL_PRESENT_HEIGHT)),
         270.0 * PRESENT_HEIGHT_SQUARE as f32 / TV_PAL_PRESENT_HEIGHT as f32
     );
     assert_eq!(
-        crt_scanline_count(woven, PRESENT_HEIGHT_SQUARE, true),
+        crt_scanline_count(woven, PRESENT_HEIGHT_SQUARE, Some(TV_PAL_PRESENT_HEIGHT)),
         285.0
     );
     assert_eq!(
-        crt_scanline_count(woven, PRESENT_HEIGHT_SQUARE, false),
+        crt_scanline_count(woven, PRESENT_HEIGHT_SQUARE, None),
         (woven / 2) as f32
     );
 }
@@ -2118,7 +2118,7 @@ fn tv_window_copy_centres_reference_aperture_in_live_texture() {
     use crate::video::deinterlace::{OUT_HEIGHT, OUT_PIXELS};
     let scale = 1;
     let mut src = vec![0u32; OUT_PIXELS];
-    let row_y = TV_PAL_PRESENT_SOURCE_Y;
+    let row_y = TV_PRESENT_SOURCE_Y;
     let standard_left = crate::video::bitplane::STANDARD_VISIBLE_X0;
     let standard_right = standard_left + 320 * 2 - 1;
     let left_marker = 0x1122_3344u32;
@@ -2126,7 +2126,7 @@ fn tv_window_copy_centres_reference_aperture_in_live_texture() {
     let left_edge = 0x99AA_BBCCu32;
     let right_edge = 0xDDEE_FF00u32;
 
-    src[row_y * FB_WIDTH + TV_PAL_PRESENT_SOURCE_X] = left_edge;
+    src[row_y * FB_WIDTH + TV_PRESENT_SOURCE_X] = left_edge;
     src[row_y * FB_WIDTH + FB_WIDTH - 1] = right_edge;
     src[row_y * FB_WIDTH + standard_left] = left_marker;
     src[row_y * FB_WIDTH + standard_right] = right_marker;
@@ -2139,10 +2139,10 @@ fn tv_window_copy_centres_reference_aperture_in_live_texture() {
         &mut frame,
         scale,
         Overscan::Tv,
-        true,
+        Some(TV_PAL_PRESENT_HEIGHT),
     );
 
-    let dst_standard_left = TV_PAL_LIVE_PAD_X + (standard_left - TV_PAL_PRESENT_SOURCE_X);
+    let dst_standard_left = TV_LIVE_PAD_X + (standard_left - TV_PRESENT_SOURCE_X);
     let dst_standard_right = dst_standard_left + 320 * 2 - 1;
     assert_eq!(dst_standard_left, FB_WIDTH - 1 - dst_standard_right);
     assert_eq!(
@@ -2154,7 +2154,7 @@ fn tv_window_copy_centres_reference_aperture_in_live_texture() {
         right_marker.to_le_bytes()
     );
     assert_eq!(pixel(&frame, 0, 0, scale), left_edge.to_le_bytes());
-    let dst_fb_right = TV_PAL_LIVE_PAD_X + (FB_WIDTH - 1 - TV_PAL_PRESENT_SOURCE_X);
+    let dst_fb_right = TV_LIVE_PAD_X + (FB_WIDTH - 1 - TV_PRESENT_SOURCE_X);
     assert_eq!(
         pixel(&frame, dst_fb_right, 0, scale),
         right_edge.to_le_bytes()
@@ -2172,7 +2172,7 @@ fn tv_window_copy_black_pads_aperture_past_framebuffer() {
     let black = rgba(0, 0, 0).to_le_bytes();
     for scale in 1..=3 {
         let mut src = vec![0u32; OUT_PIXELS];
-        let row_y = TV_PAL_PRESENT_SOURCE_Y;
+        let row_y = TV_PRESENT_SOURCE_Y;
         let edge = 0xDDEE_FF00u32;
         src[row_y * FB_WIDTH + FB_WIDTH - 1] = edge;
 
@@ -2184,10 +2184,10 @@ fn tv_window_copy_black_pads_aperture_past_framebuffer() {
             &mut frame,
             scale,
             Overscan::Tv,
-            true,
+            Some(TV_PAL_PRESENT_HEIGHT),
         );
 
-        let dst_fb_right = TV_PAL_LIVE_PAD_X + (FB_WIDTH - 1 - TV_PAL_PRESENT_SOURCE_X);
+        let dst_fb_right = TV_LIVE_PAD_X + (FB_WIDTH - 1 - TV_PRESENT_SOURCE_X);
         assert_eq!(
             pixel(&frame, dst_fb_right * scale, 0, scale),
             edge.to_le_bytes(),
@@ -2212,7 +2212,7 @@ fn tv_window_copy_preserves_true_overscan_fetches() {
     let standard_crop_edge = 0x5566_7788u32;
 
     src[0] = left_overscan;
-    src[TV_PAL_PRESENT_SOURCE_X] = standard_crop_edge;
+    src[TV_PRESENT_SOURCE_X] = standard_crop_edge;
 
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
     copy_window_present_frame(
@@ -2222,7 +2222,7 @@ fn tv_window_copy_preserves_true_overscan_fetches() {
         &mut frame,
         scale,
         Overscan::Tv,
-        false,
+        None,
     );
 
     assert_eq!(pixel(&frame, 0, 0, scale), left_overscan.to_le_bytes());
@@ -2250,47 +2250,141 @@ fn tv_aperture_row_mapping_pads_square_bezel_and_covers_43() {
     use crate::video::{PRESENT_HEIGHT_SQUARE, PRESENT_HEIGHT_TV};
     // 4:3 canvas: no bezel rows; the 540 aperture rows map onto all
     // 537 output rows exactly as before the square-pixel option.
-    assert_eq!(tv_aperture_source_row(0, PRESENT_HEIGHT_TV, 1), Some(0));
     assert_eq!(
-        tv_aperture_source_row(PRESENT_HEIGHT_TV - 1, PRESENT_HEIGHT_TV, 1),
+        tv_aperture_source_row(0, PRESENT_HEIGHT_TV, 1, TV_PAL_PRESENT_HEIGHT),
+        Some(0)
+    );
+    assert_eq!(
+        tv_aperture_source_row(
+            PRESENT_HEIGHT_TV - 1,
+            PRESENT_HEIGHT_TV,
+            1,
+            TV_PAL_PRESENT_HEIGHT
+        ),
         Some(TV_PAL_PRESENT_HEIGHT - 1)
     );
     // Square canvas: black bezel bands centre the aperture and its
     // rows map 1:1.
     let pad = (PRESENT_HEIGHT_SQUARE - TV_PAL_PRESENT_HEIGHT) / 2;
-    assert_eq!(tv_aperture_source_row(0, PRESENT_HEIGHT_SQUARE, 1), None);
     assert_eq!(
-        tv_aperture_source_row(pad - 1, PRESENT_HEIGHT_SQUARE, 1),
+        tv_aperture_source_row(0, PRESENT_HEIGHT_SQUARE, 1, TV_PAL_PRESENT_HEIGHT),
         None
     );
     assert_eq!(
-        tv_aperture_source_row(pad, PRESENT_HEIGHT_SQUARE, 1),
+        tv_aperture_source_row(pad - 1, PRESENT_HEIGHT_SQUARE, 1, TV_PAL_PRESENT_HEIGHT),
+        None
+    );
+    assert_eq!(
+        tv_aperture_source_row(pad, PRESENT_HEIGHT_SQUARE, 1, TV_PAL_PRESENT_HEIGHT),
         Some(0)
     );
     assert_eq!(
-        tv_aperture_source_row(pad + TV_PAL_PRESENT_HEIGHT - 1, PRESENT_HEIGHT_SQUARE, 1),
+        tv_aperture_source_row(
+            pad + TV_PAL_PRESENT_HEIGHT - 1,
+            PRESENT_HEIGHT_SQUARE,
+            1,
+            TV_PAL_PRESENT_HEIGHT
+        ),
         Some(TV_PAL_PRESENT_HEIGHT - 1)
     );
     assert_eq!(
-        tv_aperture_source_row(pad + TV_PAL_PRESENT_HEIGHT, PRESENT_HEIGHT_SQUARE, 1),
+        tv_aperture_source_row(
+            pad + TV_PAL_PRESENT_HEIGHT,
+            PRESENT_HEIGHT_SQUARE,
+            1,
+            TV_PAL_PRESENT_HEIGHT
+        ),
         None
     );
     // HiDPI: bezel and 1:1 mapping scale with the texture factor.
     assert_eq!(
-        tv_aperture_source_row(2 * pad - 1, PRESENT_HEIGHT_SQUARE, 2),
+        tv_aperture_source_row(2 * pad - 1, PRESENT_HEIGHT_SQUARE, 2, TV_PAL_PRESENT_HEIGHT),
         None
     );
     assert_eq!(
-        tv_aperture_source_row(2 * pad, PRESENT_HEIGHT_SQUARE, 2),
+        tv_aperture_source_row(2 * pad, PRESENT_HEIGHT_SQUARE, 2, TV_PAL_PRESENT_HEIGHT),
         Some(0)
     );
     assert_eq!(
-        tv_aperture_source_row(2 * pad + 1, PRESENT_HEIGHT_SQUARE, 2),
+        tv_aperture_source_row(2 * pad + 1, PRESENT_HEIGHT_SQUARE, 2, TV_PAL_PRESENT_HEIGHT),
         Some(0)
     );
     assert_eq!(
-        tv_aperture_source_row(2 * pad + 2, PRESENT_HEIGHT_SQUARE, 2),
+        tv_aperture_source_row(2 * pad + 2, PRESENT_HEIGHT_SQUARE, 2, TV_PAL_PRESENT_HEIGHT),
         Some(1)
+    );
+}
+
+#[test]
+fn ntsc_tv_aperture_row_mapping_stretches_43_and_pads_square() {
+    use crate::video::present_common::TV_NTSC_PRESENT_HEIGHT;
+    use crate::video::{PRESENT_HEIGHT_SQUARE, PRESENT_HEIGHT_TV};
+    // The 4:3 canvas is the glass, which a 60 Hz scan's aperture fills
+    // like a 50 Hz one: its 428 rows stretch onto all output rows, with
+    // no bezel bands (the lines of a 200-line display are taller on the
+    // same screen).
+    assert_eq!(
+        tv_aperture_source_row(0, PRESENT_HEIGHT_TV, 1, TV_NTSC_PRESENT_HEIGHT),
+        Some(0)
+    );
+    assert_eq!(
+        tv_aperture_source_row(
+            PRESENT_HEIGHT_TV - 1,
+            PRESENT_HEIGHT_TV,
+            1,
+            TV_NTSC_PRESENT_HEIGHT
+        ),
+        Some(TV_NTSC_PRESENT_HEIGHT - 1)
+    );
+    // The square-pixel canvas maps woven rows 1:1, so the shorter 60 Hz
+    // aperture is centred between black bezel bands.
+    let pad = (PRESENT_HEIGHT_SQUARE - TV_NTSC_PRESENT_HEIGHT) / 2;
+    assert_eq!(
+        tv_aperture_source_row(pad - 1, PRESENT_HEIGHT_SQUARE, 1, TV_NTSC_PRESENT_HEIGHT),
+        None
+    );
+    assert_eq!(
+        tv_aperture_source_row(pad, PRESENT_HEIGHT_SQUARE, 1, TV_NTSC_PRESENT_HEIGHT),
+        Some(0)
+    );
+    assert_eq!(
+        tv_aperture_source_row(
+            pad + TV_NTSC_PRESENT_HEIGHT - 1,
+            PRESENT_HEIGHT_SQUARE,
+            1,
+            TV_NTSC_PRESENT_HEIGHT
+        ),
+        Some(TV_NTSC_PRESENT_HEIGHT - 1)
+    );
+    assert_eq!(
+        tv_aperture_source_row(
+            pad + TV_NTSC_PRESENT_HEIGHT,
+            PRESENT_HEIGHT_SQUARE,
+            1,
+            TV_NTSC_PRESENT_HEIGHT
+        ),
+        None
+    );
+    // The CRT pass follows the same geometry: 214 beam lines fill the 4:3
+    // rect, and on the square canvas the bezel padding scales the pitch
+    // back to the uniform woven-row spacing.
+    use super::crt_scanline_count;
+    assert_eq!(
+        crt_scanline_count(
+            crate::video::deinterlace::OUT_HEIGHT,
+            PRESENT_HEIGHT_TV,
+            Some(TV_NTSC_PRESENT_HEIGHT)
+        ),
+        (TV_NTSC_PRESENT_HEIGHT / 2) as f32
+    );
+    assert_eq!(
+        crt_scanline_count(
+            crate::video::deinterlace::OUT_HEIGHT,
+            PRESENT_HEIGHT_SQUARE,
+            Some(TV_NTSC_PRESENT_HEIGHT)
+        ),
+        (TV_NTSC_PRESENT_HEIGHT / 2) as f32 * PRESENT_HEIGHT_SQUARE as f32
+            / TV_NTSC_PRESENT_HEIGHT as f32
     );
 }
 
@@ -2381,14 +2475,14 @@ fn tv_pal_crop_centres_standard_display_in_aperture() {
     let standard_left = crate::video::bitplane::STANDARD_VISIBLE_X0;
     let standard_right = standard_left + 640;
 
-    assert_eq!(TV_PAL_PRESENT_WIDTH, 692);
+    assert_eq!(TV_PRESENT_WIDTH, 692);
     assert_eq!(TV_PAL_PRESENT_HEIGHT, 540);
-    assert_eq!(standard_left - TV_PAL_PRESENT_SOURCE_X, 26);
+    assert_eq!(standard_left - TV_PRESENT_SOURCE_X, 26);
     assert_eq!(
-        TV_PAL_PRESENT_WIDTH - (standard_right - TV_PAL_PRESENT_SOURCE_X),
+        TV_PRESENT_WIDTH - (standard_right - TV_PRESENT_SOURCE_X),
         26
     );
-    assert_eq!(TV_PAL_PRESENT_SOURCE_Y, 18);
+    assert_eq!(TV_PRESENT_SOURCE_Y, 18);
 }
 
 #[test]
