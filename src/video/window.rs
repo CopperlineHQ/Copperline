@@ -319,6 +319,7 @@ const BUTTON_GLYPH: u32 = rgba(0, 174, 0);
 const BUTTON_GLYPH_DISABLED: u32 = rgba(96, 94, 86);
 const POWER_GLYPH_ON: u32 = rgba(0, 174, 0);
 const POWER_GLYPH_OFF: u32 = rgba(150, 36, 30);
+const RESET_GLYPH: u32 = rgba(250, 200, 40);
 const DISK_BODY: u32 = rgba(28, 82, 184);
 const DISK_BODY_HIGHLIGHT: u32 = rgba(74, 139, 238);
 const DISK_BODY_SHADOW: u32 = rgba(8, 26, 84);

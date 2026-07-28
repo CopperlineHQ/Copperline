@@ -1505,77 +1505,43 @@ pub(super) fn draw_power_glyph(
     );
 }
 
+/// The reboot symbol: a near-full ring broken at the upper left with a bold
+/// arrowhead pointing counter-clockwise.
 pub(super) fn draw_reset_glyph(frame: &mut [u8], cx: usize, cy: usize, texture_scale: usize) {
-    let svg_scale = 0.17 * texture_scale as f32;
-    let ox = cx as f32 - 8.5 * texture_scale as f32;
-    let oy = cy as f32 - 8.5 * texture_scale as f32;
-    let map = |x: f32, y: f32| (ox + x * svg_scale, oy + y * svg_scale);
-    let stroke = 1.35 * texture_scale as f32;
+    let scale = texture_scale as f32;
+    let ccx = cx as f32 + 0.5;
+    let ccy = cy as f32 + 0.5;
+    let radius = 5.5 * scale;
+    let stroke = 1.35 * scale;
 
-    let (x0, y0) = map(50.0, 10.0);
-    let (x1, y1) = map(50.0, 45.0);
-    draw_thick_line(frame, x0, y0, x1, y1, stroke, BUTTON_GLYPH, texture_scale);
-
-    draw_cubic(
-        frame,
-        [(20.0, 29.0), (4.0, 52.0), (15.0, 90.0), (50.0, 90.0)],
-        svg_scale,
-        ox,
-        oy,
-        stroke,
-        BUTTON_GLYPH,
-        texture_scale,
-    );
-    draw_cubic(
-        frame,
-        [(50.0, 90.0), (85.0, 90.0), (100.0, 47.0), (74.0, 20.0)],
-        svg_scale,
-        ox,
-        oy,
-        stroke,
-        BUTTON_GLYPH,
-        texture_scale,
-    );
-
-    let arrow = [map(2.0, 21.0), map(31.0, 19.0), map(33.0, 48.0)];
-    fill_triangle(frame, arrow, BUTTON_GLYPH, texture_scale);
-}
-
-pub(super) fn draw_cubic(
-    frame: &mut [u8],
-    p: [(f32, f32); 4],
-    scale: f32,
-    ox: f32,
-    oy: f32,
-    radius: f32,
-    color: u32,
-    texture_scale: usize,
-) {
-    let mut prev = (ox + p[0].0 * scale, oy + p[0].1 * scale);
-    for step in 1..=18 {
-        let t = step as f32 / 18.0;
-        let mt = 1.0 - t;
-        let x = mt * mt * mt * p[0].0
-            + 3.0 * mt * mt * t * p[1].0
-            + 3.0 * mt * t * t * p[2].0
-            + t * t * t * p[3].0;
-        let y = mt * mt * mt * p[0].1
-            + 3.0 * mt * mt * t * p[1].1
-            + 3.0 * mt * t * t * p[2].1
-            + t * t * t * p[3].1;
-        let next = (ox + x * scale, oy + y * scale);
+    let start = 165.0_f32.to_radians();
+    let sweep = 260.0_f32.to_radians();
+    let steps = 28;
+    let ang = |t: f32| start - sweep * t;
+    let mut prev = {
+        let a = ang(0.0);
+        (ccx + radius * a.cos(), ccy + radius * a.sin())
+    };
+    for step in 1..=steps {
+        let a = ang(step as f32 / steps as f32);
+        let next = (ccx + radius * a.cos(), ccy + radius * a.sin());
         draw_thick_line(
             frame,
             prev.0,
             prev.1,
             next.0,
             next.1,
-            radius,
-            color,
+            stroke,
+            RESET_GLYPH,
             texture_scale,
         );
         prev = next;
     }
+
+    let unit = radius / 5.5;
+    let tip = |x: f32, y: f32| (ccx + x * unit, ccy + y * unit);
+    let arrow = [tip(-3.9, -4.3), tip(1.0, -6.7), tip(1.0, -1.9)];
+    fill_triangle(frame, arrow, RESET_GLYPH, texture_scale);
 }
 
 pub(super) fn draw_thick_line(
