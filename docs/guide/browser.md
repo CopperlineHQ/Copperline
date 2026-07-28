@@ -46,8 +46,9 @@ a **Forget** button that puts the boot button back on AROS.
 Two more selects shape what the glass shows without touching the
 machine. **View** is the desktop's `[display] overscan` knob: *TV* (the
 default) masks the deep horizontal overscan like a CRT bezel and crops
-standard PAL screens to a TV aperture, *Full overscan* presents the
-whole field Denise produced -- junk pixels, border tricks and all.
+standard screens (PAL and NTSC alike) to a TV aperture, *Full overscan*
+presents the whole field Denise produced -- junk pixels, border tricks
+and all.
 **Screen** tints the picture like a monochrome monitor's phosphor --
 black & white, green, amber, or sepia -- applied as a CSS filter on the
 canvas (zero per-frame cost; screenshots bake it in). Both are viewing
@@ -246,13 +247,16 @@ through wasm-bindgen; the page's JavaScript drives everything from
 - **Video**: the core's rendered frame is post-processed and deinterlaced by
   the same code the desktop uses, then blitted to a `<canvas>` with
   `putImageData` -- the internal framebuffer is RGBA in memory order, so no
-  conversion happens. Standard PAL screens are presented as the captured TV
-  aperture, a 668x540 crop with the standard window exactly centred between
-  symmetric overscan margins, so the canvas carries none of the bezel-mask
-  black columns of the full framebuffer; non-standard frames (true
-  overscan, NTSC, programmable scans) keep the full 716-pixel width, as on
-  the desktop, and a programmable super-hi-res scan carries its double
-  (1432-pixel, 35 ns pitch) canvas straight to the browser canvas (see
+  conversion happens. Standard screens are presented as the captured TV
+  aperture, a 668x540 canvas with the standard window exactly centred
+  between symmetric overscan margins, so the canvas carries none of the
+  bezel-mask black columns of the full framebuffer. PAL and NTSC share the
+  one canvas shape -- both apertures fill the same 4:3 glass, so an NTSC
+  scan's shorter 428-row crop is scaled onto the same 540 output rows.
+  Non-standard frames (true overscan, programmable scans) keep the full
+  716-pixel width, as on the desktop, and a programmable super-hi-res scan
+  carries its double (1432-pixel, 35 ns pitch) canvas straight to the
+  browser canvas (see
   [the presentation internals](../internals/video.md)).
   There is no wgpu in the build, which keeps the wasm
   around 1.4 MiB (about 0.6 MiB over the wire).
@@ -403,7 +407,7 @@ desktop's `[floppy] speed` option (see
 [Configuration](configuration.md)); changes apply to the live machine.
 `set_overscan(mode)` picks the presentation overscan, the desktop's
 `[display] overscan` knob: `"tv"` (the default) masks the deep
-horizontal overscan like a CRT bezel and presents standard PAL screens
+horizontal overscan like a CRT bezel and presents standard screens
 as the captured TV aperture, `"full"` presents the whole overscan field;
 unknown names are ignored. The last completed frame is re-presented
 under the new aperture immediately, so a paused page only has to blit.
@@ -421,7 +425,7 @@ Paula's serial port to whatever byte stream the page likes (see
 valid until the next `run` call -- rebuild the typed-array view every frame,
 because wasm memory can grow. The presentation *size* is dynamic too:
 `present_width()` and `present_rows()` change when the guest switches
-between a standard PAL screen (presented as the captured TV aperture crop)
+between a standard screen (presented as the captured TV aperture crop)
 and anything else (presented as the full framebuffer), so size the canvas
 from both every frame rather than assuming fixed dimensions.
 

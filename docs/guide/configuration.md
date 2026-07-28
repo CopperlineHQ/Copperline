@@ -458,10 +458,13 @@ status_bar = true     # show the status bar at start (default true)
 
 The emulated framebuffer always carries the full overscan field Denise
 produces. `"tv"` masks the deep horizontal overscan margins in black like a
-CRT bezel, presenting the standard PAL window plus 24 lo-res pixels per side
+CRT bezel, presenting the standard window plus 24 lo-res pixels per side
 of TV-style overscan while preserving vertical border colour changes. PNG
-screenshots and `--dump-frames` crop standard PAL TV output to a 692x540
-aperture for reference-emulator comparison. `"full"` shows everything, which
+screenshots and `--dump-frames` crop standard TV output to a 692x540
+aperture for reference-emulator comparison; PAL and NTSC scans share the
+one shape because both apertures fill the same 4:3 glass -- an NTSC scan's
+shorter crop (the 200-line standard window plus the same overscan margin)
+is scaled onto the same output rows. `"full"` shows everything, which
 is useful when debugging display alignment. `COPPERLINE_OVERSCAN=full|tv`
 overrides this for a single run.
 
@@ -506,9 +509,9 @@ picture untouched, and any value ending in `.wgsl` is the path of a shader
 of your own -- see [Custom WGSL shaders](#custom-wgsl-shaders) below.
 
 The scanline gaps are drawn at the pitch of the emulated field lines the
-window is actually showing: 270 in the default TV-overscan presentation and
-285 in `"full"`, so the line structure follows the picture rather than the
-window size. TV overscan with `pixel_aspect = "square"` is 285 as well --
+window is actually showing: 270 in the default TV-overscan presentation
+(214 on an NTSC scan) and 285 in `"full"`, so the line structure follows
+the picture rather than the window size. TV overscan with `pixel_aspect = "square"` is 285 as well --
 that canvas is taller than the TV aperture and pads it with bezel rows, so
 the same 270 lines are rescaled to keep their pitch across the whole
 window. Interlaced content is deliberately drawn at field-line pitch

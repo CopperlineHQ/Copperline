@@ -10,7 +10,7 @@ use super::launcher::{LauncherField, LauncherState, MachineSetup, StatusMessage}
 use super::ui::{self, Panel, UiControl, UiState};
 use super::{
     bitplane, font, present_height, FB_HEIGHT, FB_PIXELS, FB_WIDTH, HOST_SHORTCUT_MODIFIER_LABEL,
-    MAX_CANVAS_PIXELS, MAX_VISIBLE_LINES,
+    MAX_CANVAS_PIXELS, MAX_VISIBLE_LINES, PRESENT_HEIGHT_SQUARE,
 };
 use crate::audio::{AudioSink, CpalSink};
 use crate::bus::{BeamWriteSource, FrontPanelStatus, PortDevice, VideoRenderFrameTiming};
@@ -181,18 +181,26 @@ fn window_present_height() -> usize {
 /// lines the present copy actually puts on screen, rescaled when that copy
 /// letterboxes them inside the rect.
 ///
-/// `tv_aperture` mirrors `copy_window_present_frame`'s own branch condition.
-/// That path shows the fixed [`TV_PAL_PRESENT_HEIGHT`]-row aperture crop
-/// instead of the whole woven buffer, so its line count comes from the
-/// aperture, not from `present_rows` -- 270 lines, not 285, in the default
-/// TV-overscan presentation. The square-pixel canvas is taller than the
-/// aperture and pads it with bezel rows (`tv_aperture_source_row`), so the
-/// count scales back up by the rect/content ratio to keep the pitch right
-/// across the whole viewport.
-fn crt_scanline_count(present_rows: usize, present_h: usize, tv_aperture: bool) -> f32 {
-    let (woven_rows, content_rows) = if tv_aperture {
-        let pad = present_h.saturating_sub(TV_PAL_PRESENT_HEIGHT) / 2;
-        (TV_PAL_PRESENT_HEIGHT, present_h - 2 * pad)
+/// `tv_aperture_rows` mirrors `copy_window_present_frame`'s own branch
+/// condition: Some when that path shows a TV-aperture crop instead of the
+/// whole woven buffer, carrying the crop's row count, so the line count
+/// comes from the aperture, not from `present_rows` -- 270 lines, not 285,
+/// in the default 50 Hz TV-overscan presentation, 214 on a 60 Hz scan. The
+/// square-pixel canvas is taller than the aperture and pads it with bezel
+/// rows (`tv_aperture_source_row`), so the count scales back up by the
+/// rect/content ratio to keep the pitch right across the whole viewport.
+fn crt_scanline_count(
+    present_rows: usize,
+    present_h: usize,
+    tv_aperture_rows: Option<usize>,
+) -> f32 {
+    let (woven_rows, content_rows) = if let Some(aperture_rows) = tv_aperture_rows {
+        let pad = if present_h == PRESENT_HEIGHT_SQUARE {
+            present_h.saturating_sub(aperture_rows) / 2
+        } else {
+            0
+        };
+        (aperture_rows, present_h - 2 * pad)
     } else {
         (present_rows, present_h)
     };
@@ -278,7 +286,7 @@ const JOY_TOGGLE_X: usize = VOLUME_GLYPH_X - 2 - JOY_TOGGLE_W;
 // The standard-window and TV-aperture constants live in
 // `video/present_common.rs` with the presentation helpers they anchor
 // (re-exported through `use present::*` below).
-const TV_PAL_LIVE_PAD_X: usize = (FB_WIDTH - TV_PAL_PRESENT_WIDTH) / 2;
+const TV_LIVE_PAD_X: usize = (FB_WIDTH - TV_PRESENT_WIDTH) / 2;
 const STATUS_BG: u32 = rgba(28, 28, 26);
 const STATUS_TOP: u32 = rgba(78, 76, 70);
 const STATUS_BOTTOM: u32 = rgba(12, 12, 11);
@@ -596,7 +604,10 @@ pub struct App {
     /// Pixels per `present_fb` row: FB_WIDTH classically, twice that for
     /// a 35 ns super-hi-res canvas.
     present_width: usize,
-    present_standard_tv_aperture: bool,
+    /// TV-aperture crop rows for the presented frame when it is a standard
+    /// 15 kHz scan with the standard horizontal window (None otherwise);
+    /// applied by the present copy under `Overscan::Tv`.
+    present_tv_aperture_rows: Option<usize>,
     /// Whether the presented frame came from a programmable (multisync) scan
     /// rather than a woven 15 kHz one. Those fields reach the presentation
     /// buffer at their native height, so neither the CRT pass nor its
@@ -1006,7 +1017,7 @@ struct RenderWorkerResult {
     presentation_fb: Vec<u32>,
     present_rows: usize,
     present_width: usize,
-    standard_tv_aperture: bool,
+    tv_aperture_rows: Option<usize>,
     programmable: bool,
     /// The job's frame snapshot, handed back for buffer reuse.
     input: bitplane::RenderInput,
@@ -1180,7 +1191,7 @@ impl App {
             present_width: FB_WIDTH,
             rtg_fb: Vec::new(),
             rtg_present_dims: None,
-            present_standard_tv_aperture: true,
+            present_tv_aperture_rows: Some(TV_PAL_PRESENT_HEIGHT),
             present_programmable: false,
             render: None,
             debugger_tool_window: None,
@@ -3063,7 +3074,8 @@ impl ApplicationHandler for App {
                             // frame fills the buffer on its own terms, so
                             // applying it here would show a sub-rect of the
                             // board's screen.
-                            self.present_standard_tv_aperture && self.rtg_present_dims.is_none(),
+                            self.present_tv_aperture_rows
+                                .filter(|_| self.rtg_present_dims.is_none()),
                         );
                         // The tint models the monitor on the Amiga's video
                         // output, so RTG board scanout stays untinted here
@@ -3149,10 +3161,11 @@ impl ApplicationHandler for App {
                             self.present_rows,
                             present_height(),
                             // The same branch copy_window_present_frame took.
-                            self.overscan == Overscan::Tv
-                                && self.present_standard_tv_aperture
-                                && self.rtg_present_dims.is_none()
-                                && self.present_width == FB_WIDTH,
+                            self.present_tv_aperture_rows.filter(|_| {
+                                self.overscan == Overscan::Tv
+                                    && self.rtg_present_dims.is_none()
+                                    && self.present_width == FB_WIDTH
+                            }),
                         );
                         let kind = self.crt_shader_kind;
                         let strength = self.shader_strength;
@@ -8719,7 +8732,7 @@ impl App {
             src_rows,
             self.present_width,
             self.overscan,
-            self.present_standard_tv_aperture,
+            self.present_tv_aperture_rows,
         );
         match result {
             Ok(()) => info!("screenshot saved: {}", path.display()),
@@ -8793,7 +8806,7 @@ impl App {
             src_rows,
             self.present_width,
             self.overscan,
-            self.present_standard_tv_aperture,
+            self.present_tv_aperture_rows,
         );
         match result {
             Ok(()) => {
@@ -8939,7 +8952,7 @@ impl App {
         self.render_recycle_fb = old;
         self.present_rows = result.present_rows;
         self.present_width = result.present_width;
-        self.present_standard_tv_aperture = result.standard_tv_aperture;
+        self.present_tv_aperture_rows = result.tv_aperture_rows;
         self.present_programmable = result.programmable;
         self.rtg_present_dims = None;
         self.last_rendered_emulated_frame = Some(result.emulated_frame);
@@ -9066,7 +9079,7 @@ impl App {
         self.rtg_present_dims = Some((native_w, native_h));
         self.present_rows = rows;
         self.present_width = FB_WIDTH;
-        self.present_standard_tv_aperture = false;
+        self.present_tv_aperture_rows = None;
         self.present_programmable = false;
         self.last_rendered_emulated_frame = Some(emulated_frame);
         self.last_submitted_render_frame = Some(emulated_frame);
@@ -9131,8 +9144,8 @@ impl App {
             !geometry.programmable,
         );
         self.refresh_present_from_deinterlacer();
-        self.present_standard_tv_aperture =
-            uses_standard_pal_tv_aperture(geometry, self.present_rows, &base);
+        self.present_tv_aperture_rows =
+            standard_tv_aperture_rows(geometry, self.present_rows, &base);
         self.present_programmable = geometry.programmable;
         self.rtg_present_dims = None;
         self.last_rendered_emulated_frame = Some(emulated_frame);

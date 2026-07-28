@@ -87,6 +87,12 @@ pub fn save_scaled_y(
 /// slightly beyond the emulated capture buffer; the uncaptured margin is
 /// bezel, not picture, so replicating edge pixels there would fabricate
 /// content whenever the display fetches into the deepest overscan.
+///
+/// The crop's `height` rows are resampled onto `out_height` output rows
+/// (centre-aligned whole-row selection, no blending; a no-op when equal).
+/// The TV-aperture screenshot path relies on this: both video standards'
+/// apertures fill the same 4:3 glass, so a 60 Hz crop's rows scale onto the
+/// 50 Hz aperture's native row count.
 pub fn save_cropped_black_padded(
     path: &Path,
     fb: &[u32],
@@ -96,9 +102,15 @@ pub fn save_cropped_black_padded(
     y: usize,
     width: usize,
     height: usize,
+    out_height: usize,
 ) -> Result<()> {
     let cropped = crop_black_padded(fb, src_width, src_height, x, y, width, height)?;
-    save(path, &cropped, width as u32, height as u32)
+    if out_height == height {
+        return save(path, &cropped, width as u32, height as u32);
+    }
+    let mut scaled = Vec::new();
+    scale_y_into(&cropped, width, height, out_height, &mut scaled);
+    save(path, &scaled, width as u32, out_height as u32)
 }
 
 fn crop_black_padded(

@@ -425,26 +425,38 @@ impl WebEmu {
         );
         let woven_rows = self.deinterlacer.output_rows();
         let woven = self.deinterlacer.output();
-        if self.overscan == Overscan::Tv
-            && present_common::uses_standard_pal_tv_aperture(geometry, woven_rows, &base)
-        {
-            // Standard PAL display: present the captured TV aperture, the
+        let tv_aperture_rows = if self.overscan == Overscan::Tv {
+            present_common::standard_tv_aperture_rows(geometry, woven_rows, &base)
+        } else {
+            None
+        };
+        if let Some(aperture_rows) = tv_aperture_rows {
+            // Standard 15 kHz display: present the captured TV aperture, the
             // browser counterpart of the desktop's TV-aperture crop. Clipped
             // to real framebuffer columns so the canvas never shows the
             // bezel-mask black stripe on the left or bezel padding on the
-            // right; the standard window sits exactly centred.
-            self.present_width = present_common::TV_PAL_CAPTURED_WIDTH;
-            self.present_rows = present_common::TV_PAL_PRESENT_HEIGHT;
+            // right; the standard window sits exactly centred. The canvas
+            // keeps one shape for both video standards -- their apertures
+            // fill the same 4:3 glass -- so a 60 Hz crop's rows scale onto
+            // the 50 Hz aperture's native row count (whole-row selection,
+            // like the desktop present copy).
+            self.present_width = present_common::TV_CAPTURED_WIDTH;
+            self.present_rows = present_common::TV_GLASS_PRESENT_ROWS;
             self.present
                 .resize(self.present_width * self.present_rows, 0);
             for (y, dst) in self
                 .present
-                .chunks_exact_mut(present_common::TV_PAL_CAPTURED_WIDTH)
+                .chunks_exact_mut(present_common::TV_CAPTURED_WIDTH)
                 .enumerate()
             {
-                let src = (present_common::TV_PAL_PRESENT_SOURCE_Y + y) * FB_WIDTH
-                    + present_common::TV_PAL_CAPTURED_SOURCE_X;
-                dst.copy_from_slice(&woven[src..src + present_common::TV_PAL_CAPTURED_WIDTH]);
+                let crop_y = copperline::screenshot::scaled_source_row(
+                    y,
+                    aperture_rows,
+                    present_common::TV_GLASS_PRESENT_ROWS,
+                );
+                let src = (present_common::TV_PRESENT_SOURCE_Y + crop_y) * FB_WIDTH
+                    + present_common::TV_CAPTURED_SOURCE_X;
+                dst.copy_from_slice(&woven[src..src + present_common::TV_CAPTURED_WIDTH]);
             }
         } else {
             self.present_width = self.deinterlacer.output_width();
@@ -470,9 +482,9 @@ impl WebEmu {
     }
 
     /// Width of the presentation buffer in pixels. The captured TV aperture
-    /// for standard PAL displays, the full framebuffer width otherwise; it
-    /// can change between frames, so JS must size the canvas from it each
-    /// frame alongside `present_rows`.
+    /// for standard 15 kHz displays (PAL and NTSC alike), the full
+    /// framebuffer width otherwise; it can change between frames, so JS must
+    /// size the canvas from it each frame alongside `present_rows`.
     pub fn present_width(&self) -> u32 {
         self.present_width as u32
     }
@@ -791,7 +803,7 @@ impl WebEmu {
 
     /// Presentation overscan, the desktop's `[display] overscan` knob:
     /// "tv" (the default) masks the deep horizontal overscan margins like a
-    /// CRT bezel and presents standard PAL screens as the captured TV
+    /// CRT bezel and presents standard screens as the captured TV
     /// aperture; "full" presents the whole overscan field the renderer
     /// produces. Unknown names are ignored, like `set_port_device`. The
     /// last completed frame is re-presented under the new aperture, so a

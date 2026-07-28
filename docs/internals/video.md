@@ -398,25 +398,35 @@ framebuffer):
   rendered source texture instead of copying the picture sideways. Vertical
   border colour changes remain visible because they are part of the Denise
   output and are often deliberate border effects.
-- **PAL TV PNG aperture**: normal screenshots and `--dump-frames` in TV mode
+- **TV PNG aperture**: normal screenshots and `--dump-frames` in TV mode
   crop standard horizontal content to a 692x540 aperture. The horizontal crop
-  keeps a 640-pixel standard display centred with 26 pixels of visible overscan
-  on both sides; vertically it keeps the PAL title-bar/top-border position
-  aligned with the reference-emulator crop. The live window keeps its 716-pixel
-  4:3 texture for the status bar and scaling path, but centres the same TV
-  aperture inside that texture instead of showing the raw framebuffer origin.
-  True horizontal overscan fetches are not cropped to this aperture: they stay
-  on the full-width TV path so intentional border content remains visible.
-  `COPPERLINE_SHOT_RAW=1` bypasses the PNG crop and writes the raw 716x570
-  woven framebuffer. A second, narrower aperture (`TV_PAL_CAPTURED_*`,
-  668x540) clips the same rect to columns the framebuffer actually
-  captures: the reference aperture's right margin reaches 12 columns past
-  the framebuffer's right edge, which the window and PNG paths pad with
-  black bezel. Frontends whose frame should end on real pixels present the
-  captured aperture instead -- the browser canvas hugs its border on every
-  side -- with the margin mirrored from the captured right-overscan width
-  so the standard window stays exactly centred. Its geometry invariants are
-  const-evaluated beside the definitions.
+  keeps a 640-pixel standard display centred with 26 pixels of visible
+  overscan on both sides and is shared by both video standards, which place
+  the standard window at the same colour clocks; vertically it keeps the
+  title-bar/top-border position aligned with the reference-emulator crop.
+  The aperture's height follows the scan the frame actually ran, not the
+  configured standard: a 312/313-line (50 Hz) field carries the 256-line
+  standard window (540 woven rows with a 7-line overscan margin each side),
+  a 262/263-line (60 Hz) field the 200-line one (428 rows with the same
+  margin). Both apertures fill the same 4:3 glass, so presentation keeps
+  one shape -- a 60 Hz crop's rows are scaled onto the 50 Hz aperture's
+  native row count (whole-row selection, no blending) in the saved PNG, and
+  the live window stretches it over the same display rect. The window keeps
+  its 716-pixel 4:3 texture for the status bar and scaling path, but
+  centres the TV aperture inside that texture instead of showing the raw
+  framebuffer origin. True horizontal overscan fetches are not cropped to
+  this aperture: they stay on the full-width TV path so intentional border
+  content remains visible. `COPPERLINE_SHOT_RAW=1` bypasses the PNG crop
+  and writes the raw 716x570 woven framebuffer. A second, narrower aperture
+  (`TV_CAPTURED_*`, 668 wide) clips the same rect to columns the
+  framebuffer actually captures: the reference aperture's right margin
+  reaches 12 columns past the framebuffer's right edge, which the window
+  and PNG paths pad with black bezel. Frontends whose frame should end on
+  real pixels present the captured aperture instead -- the browser canvas
+  hugs its border on every side -- with the margin mirrored from the
+  captured right-overscan width so the standard window stays exactly
+  centred. Its geometry invariants are const-evaluated beside the
+  definitions.
 - **Full-overscan horizontal recentring**: in `"full"` presentation, a standard
   (non-overscan) display is recentred because the framebuffer captures a deep
   slab of left overscan that would otherwise push the picture right of centre.
@@ -501,11 +511,12 @@ staircase.
 
 The scanline count is what the window actually shows, not what the
 framebuffer holds (`crt_scanline_count`). The TV-aperture present path
-copies a fixed `TV_PAL_PRESENT_HEIGHT` (540) row crop rather than the whole
-woven buffer, so its count comes from the aperture -- 270 lines, against 285
-for a standard PAL field in `"full"` overscan -- and is rescaled by the
-rect/content ratio when the square-pixel canvas pads the aperture with bezel
-rows. Interlaced content is deliberately drawn at field-line pitch over the
+copies the standard scan's aperture crop (`TV_PAL_PRESENT_HEIGHT`, 540
+rows, or `TV_NTSC_PRESENT_HEIGHT`, 428) rather than the whole woven
+buffer, so its count comes from the aperture -- 270 lines on a 50 Hz scan
+and 214 on a 60 Hz one, against 285 for a standard field in `"full"`
+overscan -- and is rescaled by the rect/content ratio when the
+square-pixel canvas pads the aperture with bezel rows. Interlaced content is deliberately drawn at field-line pitch over the
 woven frame: one gap per emulated line, which is what a 15 kHz set fed an
 interlaced signal looks like, rather than one per woven row.
 
