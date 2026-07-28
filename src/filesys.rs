@@ -1642,6 +1642,25 @@ impl FilesysBoard {
     fn latch(&mut self, off: u32, value: u32) {
         self.image[off as usize..off as usize + 4].copy_from_slice(&value.to_be_bytes());
     }
+
+    /// Read back a longword latched into the window image.
+    fn image_long(&self, off: u32) -> u32 {
+        let off = off as usize;
+        u32::from_be_bytes(self.image[off..off + 4].try_into().unwrap())
+    }
+
+    /// Whether this write is the one that completes the longword register
+    /// starting at `reg_off`: either the whole 32 bits in one access (a
+    /// 32-bit guest data bus, 68020+), or the low word of a `move.l` a
+    /// 68000/68010's 16-bit-wide bus always splits into two word bus
+    /// cycles -- high word to `reg_off`, then low word to `reg_off + 2`
+    /// (see `write_move_dest_68000` in the CPU core). Our guest ROM and
+    /// handler only ever store these registers with `move.l`/`ULONG =`, so
+    /// this covers every write shape they can produce; firing on the high
+    /// word alone would act on half a value.
+    fn completes_long_reg(off: u32, size: usize, reg_off: u32) -> bool {
+        (size == 4 && off == reg_off) || (size == 2 && off == reg_off + 2)
+    }
 }
 
 impl ZorroDevice for FilesysBoard {
@@ -1665,20 +1684,21 @@ impl ZorroDevice for FilesysBoard {
                 self.image[at + i] = (value >> (8 * (size - 1 - i))) as u8;
             }
         }
-        if off == DIAG_DOORBELL && size == 4 {
-            self.diag_entry(value, host);
+        if Self::completes_long_reg(off, size, DIAG_DOORBELL) {
+            self.diag_entry(self.image_long(DIAG_DOORBELL), host);
         } else if let Some((unit, reg)) = Self::reg_at(off) {
-            match (reg, size) {
-                (REG_DOSPKT, 4) => self.ring_doorbell(unit, value, host),
-                (REG_MSGPORT, 4) => {
-                    if let Some(u) = self.units.get_mut(unit) {
-                        u.port = (value != 0).then_some(value);
-                        if value == 0 {
-                            log::info!("filesys: {}: handler exited", device_name(unit));
-                        }
+            let reg_off = REGS_OFFSET + unit as u32 * REG_BANK_SIZE;
+            if Self::completes_long_reg(reg, size, REG_DOSPKT) {
+                let pkt = self.image_long(reg_off + REG_DOSPKT);
+                self.ring_doorbell(unit, pkt, host);
+            } else if Self::completes_long_reg(reg, size, REG_MSGPORT) {
+                let port = self.image_long(reg_off + REG_MSGPORT);
+                if let Some(u) = self.units.get_mut(unit) {
+                    u.port = (port != 0).then_some(port);
+                    if port == 0 {
+                        log::info!("filesys: {}: handler exited", device_name(unit));
                     }
                 }
-                _ => {}
             }
         }
     }
@@ -2399,6 +2419,96 @@ mod tests {
         // The handler exits: PORT goes to 0 and the unit reads as down.
         board.write(unit0 + REG_MSGPORT, 4, 0, &mut DeviceHost::new(&mut mem));
         assert_eq!(board.units[0].port, None);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A 68000/68010 guest has a 16-bit-wide external data bus, so the CPU
+    /// core splits every `move.l` destination write into two word bus
+    /// cycles -- high word first, then low word (see
+    /// `write_move_dest_68000` in the CPU core) -- rather than the single
+    /// 32-bit access a 68020+'s 32-bit bus performs. The board's doorbells
+    /// must still fire once the low word lands, using the value latched by
+    /// both writes, not just whichever half arrived in a single call.
+    /// Regression test for the boot hang this produced on A500/68000
+    /// configs: every `[[filesys]]` mount stalls forever because
+    /// DIAG_DOORBELL's `size == 4` guard never matches.
+    #[test]
+    fn doorbell_rings_a_packet_split_across_word_writes_like_a_68000() {
+        let root = std::env::temp_dir().join(format!("clfs-mmio-68000-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut board = FilesysBoard::new(vec![MountSpec {
+            path: root.clone(),
+            volume: "Test".into(),
+            boot_pri: -128,
+            readonly: false,
+        }]);
+        let mut mem = Memory {
+            chip_ram: vec![0u8; 0x1_0000],
+            slow_ram: Vec::new(),
+            mb_ram: Vec::new(),
+            accel_ram: Vec::new(),
+            rom: Vec::new(),
+            overlay: false,
+            zorro: crate::zorro::ZorroChain::default(),
+            extended_rom: Vec::new(),
+            extended_rom_base: 0,
+            wcs: Vec::new(),
+            wcs_write_protected: false,
+        };
+        // move.l a0,DIAG_DOORBELL(a0) on a 68000: high word to +0, low word
+        // to +2.
+        let base = 0x00E9_0000u32;
+        board.write(DIAG_DOORBELL, 2, base >> 16, &mut DeviceHost::new(&mut mem));
+        assert_eq!(board.board_base, None, "half a doorbell must not fire yet");
+        board.write(
+            DIAG_DOORBELL + 2,
+            2,
+            base & 0xFFFF,
+            &mut DeviceHost::new(&mut mem),
+        );
+        assert_eq!(board.board_base, Some(base));
+
+        let (dn, pkt, port) = (0x1000u32, 0x2000u32, 0x3000u32);
+        mem.chip_ram[(pkt + 20 + 8) as usize..(pkt + 20 + 12) as usize]
+            .copy_from_slice(&(dn >> 2).to_be_bytes());
+
+        let unit0 = REGS_OFFSET;
+        board.write(
+            unit0 + REG_MSGPORT,
+            2,
+            port >> 16,
+            &mut DeviceHost::new(&mut mem),
+        );
+        board.write(
+            unit0 + REG_MSGPORT + 2,
+            2,
+            port & 0xFFFF,
+            &mut DeviceHost::new(&mut mem),
+        );
+        board.write(
+            unit0 + REG_DOSPKT,
+            2,
+            pkt >> 16,
+            &mut DeviceHost::new(&mut mem),
+        );
+        board.write(
+            unit0 + REG_DOSPKT + 2,
+            2,
+            pkt & 0xFFFF,
+            &mut DeviceHost::new(&mut mem),
+        );
+
+        let mut host = DeviceHost::new(&mut mem);
+        assert_eq!(board.read(unit0 + REG_RESULT, 4, &mut host), RES_ADDVOLUME);
+        assert_eq!(
+            &mem.chip_ram[(pkt + 12) as usize..(pkt + 16) as usize],
+            &DOSTRUE.to_be_bytes()
+        );
+        assert_eq!(
+            &mem.chip_ram[(dn + DEVICENODE_TASK) as usize..(dn + DEVICENODE_TASK + 4) as usize],
+            &port.to_be_bytes()
+        );
 
         std::fs::remove_dir_all(&root).unwrap();
     }
