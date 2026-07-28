@@ -330,49 +330,35 @@ fn ocs_snapshot(diwstrt: u16, diwstop: u16, ddfstrt: u16, ddfstop: u16) -> Rende
 }
 
 #[test]
-fn present_h_shift_for_centres_wide_diw_around_standard_fetch() {
+fn horizontal_class_centres_wide_diw_around_standard_fetch() {
     // Virtual Dreams "Absolute Inebriation": DIW opened wide
     // (DIWSTRT $5702 -> H $02, DIWSTOP $FFFF -> H $1FF) around a standard
     // 320-px lo-res picture (DDF $38..$D0). The open window only reveals
-    // COLOR0 border the TV crops, so the picture must still recentre by the
-    // stock 24px instead of sitting right-of-centre.
+    // COLOR0 border the TV crops, so the frame stays standard and the
+    // picture must still recentre by the stock 24px instead of sitting
+    // right-of-centre.
     assert_eq!(
-        present_h_shift_for(&ocs_snapshot(0x5702, 0xFFFF, 0x0038, 0x00D0)),
-        24
+        horizontal_content_class(&ocs_snapshot(0x5702, 0xFFFF, 0x0038, 0x00D0)),
+        HorizontalContentClass::Standard { shift: 24 }
     );
     // A genuinely centred stock display is unchanged.
     assert_eq!(
-        present_h_shift_for(&ocs_snapshot(0x2C81, 0x2CC1, 0x0038, 0x00D0)),
-        24
+        horizontal_content_class(&ocs_snapshot(0x2C81, 0x2CC1, 0x0038, 0x00D0)),
+        HorizontalContentClass::Standard { shift: 24 }
     );
 }
 
 #[test]
-fn present_h_shift_for_leaves_true_overscan_fetch_untouched() {
+fn horizontal_class_calls_true_overscan_fetch_overscan() {
     // Wide DIW *and* a fetch that reaches into the overscan border
     // (DDFSTRT $30 starts the picture left of the standard window): a real
-    // overscan display, presented exactly as rendered.
+    // overscan display, presented exactly as rendered on the full
+    // framebuffer.
     assert_eq!(
-        present_h_shift_for(&ocs_snapshot(0x5702, 0xFFFF, 0x0030, 0x00D8)),
-        0
+        horizontal_content_class(&ocs_snapshot(0x5702, 0xFFFF, 0x0030, 0x00D8)),
+        HorizontalContentClass::Overscan
     );
-}
-
-#[test]
-fn standard_horizontal_content_accepts_standard_fetch_inside_wide_diw() {
-    // A wide display window around a standard fetch only exposes border
-    // colour in the overscan area, so the TV aperture may still crop it.
-    assert!(uses_standard_horizontal_content(&ocs_snapshot(
-        0x5702, 0xFFFF, 0x0038, 0x00D0
-    )));
-    assert!(uses_standard_horizontal_content(&ocs_snapshot(
-        0x2C81, 0x2CC1, 0x0038, 0x00D0
-    )));
-}
-
-#[test]
-fn standard_horizontal_content_rejects_true_overscan_fetch() {
-    let snapshot = RenderRegisterSnapshot {
+    let aga = RenderRegisterSnapshot {
         agnus_revision: AgnusRevision::AgaAlice,
         bplcon0: 0x8214,
         diwstrt: 0x1D61,
@@ -381,18 +367,41 @@ fn standard_horizontal_content_rejects_true_overscan_fetch() {
         ddfstop: 0x00D8,
         ..RenderRegisterSnapshot::default()
     };
-
-    assert!(!uses_standard_horizontal_content(&snapshot));
+    assert_eq!(
+        horizontal_content_class(&aga),
+        HorizontalContentClass::Overscan
+    );
 }
 
 #[test]
-fn present_h_shift_for_leaves_narrow_late_fetch_untouched() {
+fn horizontal_class_keeps_narrow_late_fetch_in_beam_position() {
     // A normal DIW can be used around a tiny one-word late-DDF object. The
     // fetched object must stay in beam position; presentation centring must
     // not copy its right edge into the deep-left overscan border.
     assert_eq!(
-        present_h_shift_for(&ocs_snapshot(0x3481, 0x24D1, 0x0050, 0x0058)),
-        0
+        horizontal_content_class(&ocs_snapshot(0x3481, 0x24D1, 0x0050, 0x0058)),
+        HorizontalContentClass::Standard { shift: 0 }
+    );
+}
+
+#[test]
+fn horizontal_class_calls_border_only_frames_neutral() {
+    // A frame with no valid fetch at all -- registers cleared, the state a
+    // machine shows for several frames during boot and for a frame or two
+    // at every screen change while the copper list is rebuilt -- carries no
+    // evidence about the display's layout. It must classify neutral so
+    // presentation keeps its previous geometry instead of snapping to the
+    // full framebuffer (the Kickstart 2.05 boot picture-jump regression).
+    assert_eq!(
+        horizontal_content_class(&RenderRegisterSnapshot::default()),
+        HorizontalContentClass::Neutral
+    );
+    // A window that opens only after the fetched content has ended (DIW
+    // H $E1..$1FF into the right overscan, content $B1..$D1) shows border
+    // only: neutral too.
+    assert_eq!(
+        horizontal_content_class(&ocs_snapshot(0x2CE1, 0xFFFF, 0x0050, 0x0058)),
+        HorizontalContentClass::Neutral
     );
 }
 

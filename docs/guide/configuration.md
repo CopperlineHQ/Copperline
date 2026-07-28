@@ -467,7 +467,11 @@ one shape because both apertures fill the same 4:3 glass -- an NTSC scan's
 shorter crop (the 200-line standard window plus the same overscan margin)
 is scaled onto the same output rows. `"full"` shows everything, which
 is useful when debugging display alignment. `COPPERLINE_OVERSCAN=full|tv`
-overrides this for a single run.
+overrides this for a single run. In both modes the presentation geometry
+holds steady across the blank frames a screen change produces: a frame
+showing only border colour keeps the previous frame's aperture and
+centring instead of snapping to the full framebuffer, so the picture does
+not jump sideways at Kickstart screen changes.
 
 `pixel_aspect` selects how emulated scanlines map to host rows. The default
 `"tv"` presents the field with the non-square pixel aspect of a 4:3 CRT:

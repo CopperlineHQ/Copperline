@@ -66,7 +66,7 @@ pub(super) fn render_job_to_presentation(
         presentation_fb,
         present_rows,
         present_width,
-        tv_aperture_rows: standard_tv_aperture_rows(geometry, present_rows, &base),
+        tv_aperture: standard_tv_aperture_frame(geometry, present_rows, &base),
         programmable: geometry.programmable,
         input,
     }

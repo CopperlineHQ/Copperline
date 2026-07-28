@@ -444,6 +444,22 @@ framebuffer):
   display that genuinely fetches bitplane data into the overscan border is left
   exactly as rendered.
 
+Both content-keyed decisions -- the TV aperture crop and the full-overscan
+recentring shift -- are latched across border-only frames
+(`PresentationLatch` in `present_common.rs`). A frame with no bitplane
+content intersecting the window (registers cleared during boot, or the
+blank frame or two Intuition emits at every screen change while it rebuilds
+the copper list) carries no evidence about the display's layout, so it
+keeps the previous frame's geometry instead of snapping to the full
+framebuffer -- the monitor does not move between screens. The power-on
+default is the stock standard display (aperture on, standard recentring
+shift); a frame that does carry content, including a true-overscan fetch or
+a programmable scan, re-latches the decision, so an overscan demo that
+blanks between parts stays on full-frame presentation throughout. The latch
+resets on presentation discontinuities (machine swap, reset, state load).
+Frame dumps and screenshots share the resolved decision, so a dump's PNG
+dimensions no longer flip between 716x537 and 692x540 across a boot.
+
 ### RTG scanout (Z3660)
 
 When a fitted `[rtg]` board's guest driver switches the display to RTG,

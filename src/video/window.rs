@@ -615,6 +615,11 @@ pub struct App {
     /// 15 kHz scan with the standard horizontal window (None otherwise);
     /// applied by the present copy under `Overscan::Tv`.
     present_tv_aperture_rows: Option<usize>,
+    /// Aperture/recentring decisions latched across border-only frames:
+    /// the blank frames a screen change emits keep the previous
+    /// presentation geometry instead of snapping to the full framebuffer,
+    /// so the picture does not jump at every Kickstart mode change.
+    presentation_latch: PresentationLatch,
     /// Whether the presented frame came from a programmable (multisync) scan
     /// rather than a woven 15 kHz one. Those fields reach the presentation
     /// buffer at their native height, so neither the CRT pass nor its
@@ -1038,7 +1043,10 @@ struct RenderWorkerResult {
     presentation_fb: Vec<u32>,
     present_rows: usize,
     present_width: usize,
-    tv_aperture_rows: Option<usize>,
+    /// The frame's aperture classification; the App resolves it through
+    /// its `PresentationLatch` when the result lands, so border-only
+    /// frames keep the previous geometry.
+    tv_aperture: TvApertureFrame,
     programmable: bool,
     /// The job's frame snapshot, handed back for buffer reuse.
     input: bitplane::RenderInput,
@@ -1225,6 +1233,7 @@ impl App {
             rtg_fb: Vec::new(),
             rtg_present_dims: None,
             present_tv_aperture_rows: Some(TV_PAL_PRESENT_HEIGHT),
+            presentation_latch: PresentationLatch::default(),
             present_programmable: false,
             render: None,
             debugger_tool_window: None,
@@ -6616,7 +6625,10 @@ impl App {
     fn rerender_after_debug_view_change(&mut self) {
         let visible_start_vpos = self.emu.bus().frame_visible_start_vpos();
         let h_shift = if self.hcenter {
-            presentation_h_shift_for(&self.emu.bus().frame_render_base(), self.overscan)
+            // Re-resolving the same frame through the latch is idempotent:
+            // the same snapshot yields the same class and the same shift.
+            self.presentation_latch
+                .presentation_h_shift(&self.emu.bus().frame_render_base(), self.overscan)
         } else {
             0
         };
@@ -9032,6 +9044,7 @@ impl App {
         self.render_generation = self.render_generation.wrapping_add(1);
         self.last_rendered_emulated_frame = None;
         self.last_submitted_render_frame = None;
+        self.presentation_latch.reset();
         let _ = self.collect_threaded_render_results(false);
     }
 
@@ -9051,7 +9064,9 @@ impl App {
         self.render_recycle_fb = old;
         self.present_rows = result.present_rows;
         self.present_width = result.present_width;
-        self.present_tv_aperture_rows = result.tv_aperture_rows;
+        self.present_tv_aperture_rows = self
+            .presentation_latch
+            .resolve_tv_aperture(result.tv_aperture);
         self.present_programmable = result.programmable;
         self.rtg_present_dims = None;
         self.last_rendered_emulated_frame = Some(result.emulated_frame);
@@ -9101,7 +9116,8 @@ impl App {
             None => bitplane::RenderInput::from_bus(self.emu.bus()),
         };
         let h_shift = if self.hcenter {
-            presentation_h_shift_for(&input.render_base(), self.overscan)
+            self.presentation_latch
+                .presentation_h_shift(&input.render_base(), self.overscan)
         } else {
             0
         };
@@ -9216,7 +9232,8 @@ impl App {
 
         let visible_start_vpos = self.emu.bus().frame_visible_start_vpos();
         let h_shift = if self.hcenter {
-            presentation_h_shift_for(&self.emu.bus().frame_render_base(), self.overscan)
+            self.presentation_latch
+                .presentation_h_shift(&self.emu.bus().frame_render_base(), self.overscan)
         } else {
             0
         };
@@ -9246,7 +9263,12 @@ impl App {
         );
         self.refresh_present_from_deinterlacer();
         self.present_tv_aperture_rows =
-            standard_tv_aperture_rows(geometry, self.present_rows, &base);
+            self.presentation_latch
+                .resolve_tv_aperture(standard_tv_aperture_frame(
+                    geometry,
+                    self.present_rows,
+                    &base,
+                ));
         self.present_programmable = geometry.programmable;
         self.rtg_present_dims = None;
         self.last_rendered_emulated_frame = Some(emulated_frame);

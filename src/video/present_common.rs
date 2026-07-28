@@ -289,14 +289,83 @@ pub fn presentation_source_y_offset(visible_start_vpos: u32) -> usize {
     standard_offset.saturating_sub(overscan_rows_already_visible)
 }
 
-pub fn presentation_h_shift_for(snapshot: &RenderRegisterSnapshot, overscan: Overscan) -> usize {
-    match overscan {
-        // TV mode is an aperture over the emulated framebuffer, matching the
-        // fixed source cutout used by reference emulators. Do not copy pixels
-        // sideways here: a standard hi-res screen already occupies the right
-        // edge of Copperline's 716-pixel cutout.
-        Overscan::Tv => 0,
-        Overscan::Full => bitplane::present_h_shift_for(snapshot),
+/// Presentation-geometry decisions carried across border-only frames.
+///
+/// The TV aperture crop and the full-overscan recentring shift are judged
+/// from each frame's playfield, but a border-only frame has no playfield to
+/// judge -- and screen changes blank the display for a frame or two while
+/// Intuition rebuilds the copper list. Deciding those frames "full
+/// framebuffer" made the whole picture lurch sideways (and rescale) at
+/// every Kickstart screen change, conspicuous inside the monitor bezel's
+/// fixed frame. A border-only frame instead keeps the previous decision --
+/// the monitor does not move between screens -- with the stock standard
+/// display as the power-on default. The two decisions latch independently:
+/// the shift resolves when a frame is submitted for rendering, the
+/// aperture when its presentation comes back, and each is only consumed by
+/// its own overscan mode.
+#[derive(Clone, Debug)]
+pub struct PresentationLatch {
+    standard_aperture: bool,
+    h_shift: usize,
+}
+
+impl Default for PresentationLatch {
+    fn default() -> Self {
+        Self {
+            standard_aperture: true,
+            h_shift: bitplane::standard_present_h_shift(),
+        }
+    }
+}
+
+impl PresentationLatch {
+    /// Back to the power-on default, for presentation discontinuities
+    /// (machine swap, reset, state load).
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// The horizontal recentring shift for one frame under `overscan`,
+    /// latching the decision of any frame that carries content.
+    pub fn presentation_h_shift(
+        &mut self,
+        snapshot: &RenderRegisterSnapshot,
+        overscan: Overscan,
+    ) -> usize {
+        match overscan {
+            // TV mode is an aperture over the emulated framebuffer, matching
+            // the fixed source cutout used by reference emulators. Do not
+            // copy pixels sideways here: a standard hi-res screen already
+            // occupies the right edge of Copperline's 716-pixel cutout.
+            Overscan::Tv => 0,
+            Overscan::Full => match bitplane::horizontal_content_class(snapshot) {
+                bitplane::HorizontalContentClass::Standard { shift } => {
+                    self.h_shift = shift;
+                    shift
+                }
+                bitplane::HorizontalContentClass::Overscan => {
+                    self.h_shift = 0;
+                    0
+                }
+                bitplane::HorizontalContentClass::Neutral => self.h_shift,
+            },
+        }
+    }
+
+    /// Resolve one frame's aperture classification into the crop to apply,
+    /// latching the decision of any frame that carries content.
+    pub fn resolve_tv_aperture(&mut self, frame: TvApertureFrame) -> Option<usize> {
+        match frame {
+            TvApertureFrame::Standard(rows) => {
+                self.standard_aperture = true;
+                Some(rows)
+            }
+            TvApertureFrame::Full => {
+                self.standard_aperture = false;
+                None
+            }
+            TvApertureFrame::Neutral(rows) => self.standard_aperture.then_some(rows),
+        }
     }
 }
 
@@ -318,28 +387,42 @@ pub fn is_standard_presentation(geometry: FrameGeometry, src_rows: usize) -> boo
     !geometry.programmable && src_rows == OUT_HEIGHT
 }
 
-/// TV-aperture crop height in woven rows for this frame, or None when the
-/// frame is not a standard 15 kHz scan rendering the standard horizontal
-/// window (programmable scans and true horizontal-overscan fetches present
-/// on the full framebuffer instead). The height follows the scan the frame
-/// actually ran, not the configured standard: a 312/313-line (50 Hz) field
-/// carries the 256-line standard window, a 262/263-line (60 Hz) field the
-/// 200-line one.
-pub fn standard_tv_aperture_rows(
+/// One frame's TV-aperture classification, resolved into a crop by
+/// [`PresentationLatch::resolve_tv_aperture`]: crop to the standard
+/// aperture (`Standard`), present the full framebuffer (`Full`), or keep
+/// the previous geometry (`Neutral`, a border-only frame with no content
+/// to judge). `Standard` and `Neutral` carry the crop height in woven
+/// rows, which follows the scan the frame actually ran rather than the
+/// configured standard: a 312/313-line (50 Hz) field carries the 256-line
+/// standard window, a 262/263-line (60 Hz) field the 200-line one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TvApertureFrame {
+    Standard(usize),
+    Full,
+    Neutral(usize),
+}
+
+/// Classify one frame for the TV aperture. Programmable scans, frames not
+/// rendered at the standard woven height, and true horizontal-overscan
+/// fetches present on the full framebuffer.
+pub fn standard_tv_aperture_frame(
     geometry: FrameGeometry,
     src_rows: usize,
     snapshot: &RenderRegisterSnapshot,
-) -> Option<usize> {
-    if !is_standard_presentation(geometry, src_rows)
-        || !bitplane::uses_standard_horizontal_content(snapshot)
-    {
-        return None;
+) -> TvApertureFrame {
+    if !is_standard_presentation(geometry, src_rows) {
+        return TvApertureFrame::Full;
     }
-    Some(if geometry.frame_lines >= 312 {
+    let rows = if geometry.frame_lines >= 312 {
         TV_PAL_PRESENT_HEIGHT
     } else {
         TV_NTSC_PRESENT_HEIGHT
-    })
+    };
+    match bitplane::horizontal_content_class(snapshot) {
+        bitplane::HorizontalContentClass::Standard { .. } => TvApertureFrame::Standard(rows),
+        bitplane::HorizontalContentClass::Overscan => TvApertureFrame::Full,
+        bitplane::HorizontalContentClass::Neutral => TvApertureFrame::Neutral(rows),
+    }
 }
 
 #[cfg(test)]
@@ -355,37 +438,147 @@ mod tests {
         assert!(TV_CAPTURED_SOURCE_X >= tv_source_h_bounds().0);
     }
 
+    /// A standard full-width display (stock Kickstart screen).
+    fn standard_snapshot() -> RenderRegisterSnapshot {
+        RenderRegisterSnapshot {
+            bplcon0: 0x5200,
+            diwstrt: 0x2C81,
+            diwstop: 0xF4C1,
+            ddfstrt: 0x38,
+            ddfstop: 0xD0,
+            ..Default::default()
+        }
+    }
+
+    /// A wide-DIW display whose fetch reaches into the overscan border.
+    fn overscan_snapshot() -> RenderRegisterSnapshot {
+        RenderRegisterSnapshot {
+            bplcon0: 0x5200,
+            diwstrt: 0x5702,
+            diwstop: 0xFFFF,
+            ddfstrt: 0x30,
+            ddfstop: 0xD8,
+            ..Default::default()
+        }
+    }
+
+    /// A border-only frame: registers cleared, no fetch (the state a screen
+    /// change or the Kickstart boot blanks present for a few frames).
+    fn blank_snapshot() -> RenderRegisterSnapshot {
+        RenderRegisterSnapshot::default()
+    }
+
     #[test]
     fn tv_aperture_rows_follow_the_scans_field_line_count() {
         // A standard scan's TV aperture is picked by the lines the frame
         // actually ran (BEAMCON0 can retune Agnus mid-session), holding the
         // 256-line standard window of a 50 Hz field and the 200-line window
         // of a 60 Hz field with the same overscan margin.
-        let snapshot = RenderRegisterSnapshot {
-            diwstrt: 0x2C81,
-            diwstop: 0xF4C1,
-            ddfstrt: 0x38,
-            ddfstop: 0xD0,
-            ..Default::default()
-        };
+        let snapshot = standard_snapshot();
         let pal = FrameGeometry::standard(0x1C, 313, false);
         let ntsc = FrameGeometry::standard(0x1C, 262, false);
         assert_eq!(
-            standard_tv_aperture_rows(pal, OUT_HEIGHT, &snapshot),
-            Some(TV_PAL_PRESENT_HEIGHT)
+            standard_tv_aperture_frame(pal, OUT_HEIGHT, &snapshot),
+            TvApertureFrame::Standard(TV_PAL_PRESENT_HEIGHT)
         );
         assert_eq!(
-            standard_tv_aperture_rows(ntsc, OUT_HEIGHT, &snapshot),
-            Some(TV_NTSC_PRESENT_HEIGHT)
+            standard_tv_aperture_frame(ntsc, OUT_HEIGHT, &snapshot),
+            TvApertureFrame::Standard(TV_NTSC_PRESENT_HEIGHT)
         );
         // A programmable scan or a native-height field presents in full.
         let mut programmable = ntsc;
         programmable.programmable = true;
         assert_eq!(
-            standard_tv_aperture_rows(programmable, OUT_HEIGHT, &snapshot),
+            standard_tv_aperture_frame(programmable, OUT_HEIGHT, &snapshot),
+            TvApertureFrame::Full
+        );
+        assert_eq!(
+            standard_tv_aperture_frame(ntsc, 400, &snapshot),
+            TvApertureFrame::Full
+        );
+        // A border-only frame on a standard scan is neutral: it carries the
+        // scan's crop height but no crop decision of its own.
+        assert_eq!(
+            standard_tv_aperture_frame(pal, OUT_HEIGHT, &blank_snapshot()),
+            TvApertureFrame::Neutral(TV_PAL_PRESENT_HEIGHT)
+        );
+    }
+
+    #[test]
+    fn border_only_frames_keep_the_previous_aperture_decision() {
+        // The Kickstart 2.05 boot regression: screen changes emit a frame
+        // or two of border-only display, and deciding those "full
+        // framebuffer" flipped the whole presentation geometry there and
+        // back, lurching the picture sideways at every mode change.
+        let mut latch = PresentationLatch::default();
+        // Power-on default: crop like the stock display the blanks precede.
+        assert_eq!(
+            latch.resolve_tv_aperture(TvApertureFrame::Neutral(TV_PAL_PRESENT_HEIGHT)),
+            Some(TV_PAL_PRESENT_HEIGHT)
+        );
+        assert_eq!(
+            latch.resolve_tv_aperture(TvApertureFrame::Standard(TV_PAL_PRESENT_HEIGHT)),
+            Some(TV_PAL_PRESENT_HEIGHT)
+        );
+        // The blank between two standard screens stays cropped...
+        assert_eq!(
+            latch.resolve_tv_aperture(TvApertureFrame::Neutral(TV_PAL_PRESENT_HEIGHT)),
+            Some(TV_PAL_PRESENT_HEIGHT)
+        );
+        // ...and a neutral frame still follows the current scan's height
+        // (the crop decision is latched, not the row count).
+        assert_eq!(
+            latch.resolve_tv_aperture(TvApertureFrame::Neutral(TV_NTSC_PRESENT_HEIGHT)),
+            Some(TV_NTSC_PRESENT_HEIGHT)
+        );
+        // An overscan demo blanking between parts must NOT snap to the
+        // aperture: full presentation latches across its blanks too.
+        assert_eq!(latch.resolve_tv_aperture(TvApertureFrame::Full), None);
+        assert_eq!(
+            latch.resolve_tv_aperture(TvApertureFrame::Neutral(TV_PAL_PRESENT_HEIGHT)),
             None
         );
-        assert_eq!(standard_tv_aperture_rows(ntsc, 400, &snapshot), None);
+        // A presentation discontinuity restores the power-on default.
+        latch.reset();
+        assert_eq!(
+            latch.resolve_tv_aperture(TvApertureFrame::Neutral(TV_PAL_PRESENT_HEIGHT)),
+            Some(TV_PAL_PRESENT_HEIGHT)
+        );
+    }
+
+    #[test]
+    fn border_only_frames_keep_the_previous_recentring_shift() {
+        let mut latch = PresentationLatch::default();
+        let standard_shift = bitplane::standard_present_h_shift();
+        // Power-on default: the stock display's shift, so the first real
+        // screen does not jump against the blanks before it.
+        assert_eq!(
+            latch.presentation_h_shift(&blank_snapshot(), Overscan::Full),
+            standard_shift
+        );
+        assert_eq!(
+            latch.presentation_h_shift(&standard_snapshot(), Overscan::Full),
+            standard_shift
+        );
+        // A true overscan display presents unshifted, and its blanks keep
+        // that.
+        assert_eq!(
+            latch.presentation_h_shift(&overscan_snapshot(), Overscan::Full),
+            0
+        );
+        assert_eq!(
+            latch.presentation_h_shift(&blank_snapshot(), Overscan::Full),
+            0
+        );
+        // TV mode is a fixed aperture: never shifted, and not latched.
+        assert_eq!(
+            latch.presentation_h_shift(&standard_snapshot(), Overscan::Tv),
+            0
+        );
+        assert_eq!(
+            latch.presentation_h_shift(&blank_snapshot(), Overscan::Full),
+            0
+        );
     }
 
     #[test]

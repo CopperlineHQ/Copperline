@@ -11,15 +11,15 @@ use super::{
     copy_window_present_frame, draw_status_bar, fdd_track_counter_rect, fdd_track_digit_rect,
     host_shortcut_modifier_pressed, host_to_amiga_rawkey, joystick_toggle_rect, led_row_rect,
     mask_present_frame_to_tv, paint_test_screen, parse_amiga_key, pause_button_rect,
-    power_button_rect, present_height, presentation_h_shift_for, presentation_source_y_offset,
+    power_button_rect, present_height, presentation_source_y_offset,
     raw_device_qualifier_family_held, raw_device_qualifier_rawkey, rawkey_is_held,
     rawkey_transition_is_duplicate, reboot_button_rect, repeated_main_key_should_drop, rgba,
     short_status_error, shorten_status_paths, shot_button_rect, should_render_emulated_frame,
     standard_window_top_row, status_with_latched_fdd_track, take_integral_mouse_delta,
     texture_height, texture_width, tint_display_rows, tint_lut, tint_rows_in_place,
     tv_aperture_source_row, tv_source_h_bounds, volume_percent_from_pos, volume_slider_track_rect,
-    BarControl, DriveBar, JoystickInputMode, MediaBar, StatusBarView, ToolPanelKind,
-    AMIGA_RAWKEY_LEFT_ALT, AMIGA_RAWKEY_LEFT_SHIFT, AMIGA_RAWKEY_RIGHT_ALT,
+    BarControl, DriveBar, JoystickInputMode, MediaBar, PresentationLatch, StatusBarView,
+    ToolPanelKind, AMIGA_RAWKEY_LEFT_ALT, AMIGA_RAWKEY_LEFT_SHIFT, AMIGA_RAWKEY_RIGHT_ALT,
     AMIGA_RAWKEY_RIGHT_SHIFT, BUTTON_GLYPH, BUTTON_GLYPH_DISABLED, CD_BODY, CD_LED_OFF, CD_LED_ON,
     DISK_BODY, DISK_BODY_SHADOW, DISK_LABEL, FDD_LED_OFF, FDD_LED_ON, HDD_LED_OFF, HDD_LED_ON,
     POWER_GLYPH_OFF, POWER_GLYPH_ON, POWER_LED_BRIGHT, POWER_LED_NORMAL, POWER_LED_OFF,
@@ -2467,7 +2467,10 @@ fn tv_presentation_keeps_standard_hires_framebuffer_origin() {
         ..RenderRegisterSnapshot::default()
     };
 
-    assert_eq!(presentation_h_shift_for(&snapshot, Overscan::Tv), 0);
+    assert_eq!(
+        PresentationLatch::default().presentation_h_shift(&snapshot, Overscan::Tv),
+        0
+    );
 }
 
 #[test]
