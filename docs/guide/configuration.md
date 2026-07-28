@@ -553,6 +553,24 @@ frames coming from an RTG board's scanout (see `[rtg]` below), and for
 programmable multisync scan modes -- a 31 kHz scanout has no 15 kHz line
 structure to reproduce.
 
+`bezel` (default `false`) frames the window's picture with a monitor-style
+front bezel, also in the spirit of the 1084: the picture scales down into
+the rounded opening of a procedurally drawn plastic face -- warm-grey
+moulding, a dark recess around the tube face, rounded case corners and the
+power LED on the wider bottom band. The frame is drawn at the window's
+resolution, so it stays sharp at any size, and the picture keeps its aspect
+inside the opening. It is independent of `shader` and composes with any
+preset: with `"crt"` the bowed tube face sits inside the opening for the
+full monitor look. Cmd+M (macOS) / Alt+M toggles it live for the rest of
+the session without touching the config; the launcher's *Monitor bezel* row
+(*A/V & Emu*, *Video*) writes it, and `COPPERLINE_BEZEL=1|0` overrides the
+config for a single run.
+
+Like the shader pass, the bezel is presentation and nothing else: captures
+never include it, and it is skipped while a menu or overlay panel is open
+and for RTG scanout frames. Unlike the shader it does stay on for
+programmable multisync scans -- a frame has no line structure to get wrong.
+
 `tint` recolours the picture like the phosphor of a monochrome monitor:
 `"bw"` (black and white), `"green"` and `"amber"` (the two classic
 monochrome phosphors), or `"sepia"`; `"none"` (the default; `"off"` is

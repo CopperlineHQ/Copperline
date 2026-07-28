@@ -366,6 +366,9 @@ video = "PAL"
 # shader-processed, so captures stay comparable whatever is set here.
 # shader_strength: how strongly the shader is mixed in, 0.0-1.0 (default
 # 1.0, the preset's full effect); 0.0 leaves the picture visually untouched.
+# bezel: frame the picture with a 1084-style monitor front bezel (default
+# false; Cmd/Alt+M toggles it live). Composes with any shader setting, and
+# like it is a window-display effect only: captures never include the frame.
 # tint: screen tint over the window image. "none" (default, full colour),
 # "bw" (black and white), "green" or "amber" (monochrome-monitor
 # phosphor), or "sepia". Like shader, a window-display effect only:
@@ -381,6 +384,7 @@ video = "PAL"
 # phosphor = 0.4
 # shader = "none"
 # shader_strength = 1.0
+# bezel = false
 # tint = "none"
 # full_screen = false
 # status_bar = true

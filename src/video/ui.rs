@@ -2452,7 +2452,7 @@ fn shortcuts_panel_height() -> usize {
         + 10
 }
 
-const SHORTCUT_ROWS: [(&str, &str, bool); 21] = [
+const SHORTCUT_ROWS: [(&str, &str, bool); 22] = [
     ("Q", "Quit", true),
     ("S", "Save screenshot", true),
     ("R", "Record video on/off", true),
@@ -2466,6 +2466,7 @@ const SHORTCUT_ROWS: [(&str, &str, bool); 21] = [
     ("B", "Debugger", true),
     ("K", "Console", true),
     ("J", "Joystick input mode", true),
+    ("M", "Monitor bezel on/off", true),
     ("Shift+A", "Cycle audio output", true),
     ("F", "Fullscreen on/off", true),
     ("Shift+F", "Status bar on/off", true),

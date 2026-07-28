@@ -58,14 +58,26 @@ const UNIFORM_BYTES: u64 = std::mem::size_of::<CrtUniforms>() as u64;
 pub(super) struct CrtUniforms {
     /// Display sub-rect of the source texture in UV space: xy origin, zw
     /// size. The status bar lives below it and is never sampled.
-    src_rect: [f32; 4],
+    pub(super) src_rect: [f32; 4],
     /// xy: viewport size in physical pixels. zw: source display region
     /// in texels.
-    size: [f32; 4],
+    pub(super) size: [f32; 4],
     /// x: strength 0..1. y: scanline count. z: mask kind. w: curvature.
-    params: [f32; 4],
+    pub(super) params: [f32; 4],
     /// x: vignette 0..1. yzw: reserved.
-    params2: [f32; 4],
+    pub(super) params2: [f32; 4],
+}
+
+impl CrtUniforms {
+    /// Re-aim a frame's uniforms at a smaller viewport (the bezel
+    /// opening): the source mapping is unchanged, but the pixel-keyed
+    /// phosphor mask and the AA arithmetic follow the pass's own
+    /// viewport size.
+    pub(super) fn with_viewport(mut self, viewport: (f32, f32, f32, f32)) -> Self {
+        self.size[0] = viewport.2;
+        self.size[1] = viewport.3;
+        self
+    }
 }
 
 /// Preset pipeline slots, in the order [`CrtShader::presets`] holds them.
@@ -88,10 +100,48 @@ pub(super) struct CrtShader {
     bound_texture: Option<wgpu::Texture>,
 }
 
+/// The binding layout every window pass shares: a display texture, a
+/// linear sampler and a 64-byte uniform block. The bezel pass declares the
+/// same bindings with its own uniform contents, so it builds against this
+/// too.
+pub(super) fn shader_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("crt_shader_bgl"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(UNIFORM_BYTES),
+                },
+                count: None,
+            },
+        ],
+    })
+}
+
 /// Build one shader pipeline against the shared bind group layout. All
-/// presets and user shaders use the same entry points and target state,
-/// so this is the only place a pipeline is created.
-fn build_pipeline(
+/// presets and user shaders (and the bezel pass) use the same entry points
+/// and target state, so this is the only place a pipeline is created.
+pub(super) fn build_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     source: &str,
@@ -139,7 +189,7 @@ fn build_pipeline(
 
 /// Poll a future exactly once on a no-op waker, for the wgpu-core futures
 /// that are already resolved when they are handed back.
-fn poll_once<F: Future>(fut: F) -> Option<F::Output> {
+pub(super) fn poll_once<F: Future>(fut: F) -> Option<F::Output> {
     let mut fut = std::pin::pin!(fut);
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
     match fut.as_mut().poll(&mut cx) {
@@ -150,37 +200,7 @@ fn poll_once<F: Future>(fut: F) -> Option<F::Output> {
 
 impl CrtShader {
     pub(super) fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("crt_shader_bgl"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(UNIFORM_BYTES),
-                    },
-                    count: None,
-                },
-            ],
-        });
+        let bind_group_layout = shader_bind_group_layout(device);
         let presets = [
             build_pipeline(
                 device,
@@ -399,7 +419,7 @@ fn read_shader_file(path: &Path) -> Result<String, String> {
 /// Parse and validate WGSL, and check it declares the entry points the
 /// pass calls. Pure CPU work: no device is needed, so a shader can be
 /// checked before any GPU resources exist.
-fn validate_wgsl_source(src: &str) -> Result<(), String> {
+pub(super) fn validate_wgsl_source(src: &str) -> Result<(), String> {
     use wgpu::naga;
     let module = naga::front::wgsl::parse_str(src).map_err(|e| e.emit_to_string(src))?;
     let mut validator = naga::valid::Validator::new(

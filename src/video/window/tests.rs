@@ -2740,6 +2740,7 @@ fn test_app_with_audio_cpu_and_program(
         0.0,
         crate::config::ShaderMode::None,
         1.0,
+        false,
         crate::config::Tint::None,
         false,
         false,
