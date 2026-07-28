@@ -6,10 +6,16 @@
 // with a dark recess between the tube face and the plastic, a bevelled
 // inner lip, a moulded outer edge and the power LED on the bottom band.
 //
-// Not a window-shader preset: it is not user-replaceable, runs before any
-// preset (which then re-draws the picture inside the opening), and its
-// uniform block is its own, so it deliberately does not carry the shared
-// contract prologue of shaders/{scanlines,mask,crt}.wgsl.
+// Two modes, selected by params.x. Alone (0), this one pass draws both
+// the frame and the picture. Under a CRT preset (1, frame-only), the
+// preset has already painted the picture into the opening's bounding box
+// and this pass runs after it, discarding the opening interior and
+// drawing just the frame on top -- the moulding overlaps the tube face,
+// so its rounded corners and recess clip the preset's square viewport.
+//
+// Not a window-shader preset: it is not user-replaceable, and its uniform
+// block is its own, so it deliberately does not carry the shared contract
+// prologue of shaders/{scanlines,mask,crt}.wgsl.
 
 struct BezelUniforms {
     // Display sub-rect of src_tex in UV space: xy origin, zw size. The

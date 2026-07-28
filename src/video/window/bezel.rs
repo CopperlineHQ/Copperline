@@ -742,6 +742,10 @@ mod tests {
                 let info = reader.next_frame(&mut buf).expect("png frame");
                 let (w, h) = (info.width, info.height);
                 let rgba: Vec<[u8; 4]> = match info.color_type {
+                    // Source alpha is deliberately forced opaque: the
+                    // texture stands in for the composited display
+                    // buffer, which has no transparency, and the pass
+                    // samples it as an opaque monitor picture.
                     png::ColorType::Rgba => buf
                         .chunks_exact(4)
                         .map(|c| [c[0], c[1], c[2], 255])
