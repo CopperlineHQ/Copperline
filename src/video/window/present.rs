@@ -7,6 +7,7 @@
 //! parent's private items.
 
 use super::*;
+use crate::config::Tint;
 
 // The pure post-render helpers live in `video/present_common.rs` so headless
 // consumers can present frames without the winit frontend; re-exported here so
@@ -647,6 +648,145 @@ pub(super) fn alpha_blit_rgba(
             };
         }
     }
+}
+
+// --- screen tint ---------------------------------------------------------
+//
+// The [display] tint knob: a monochrome-monitor look over the window's
+// picture, matching the web front-end's screen filter. Presentation only,
+// like the CRT shader pass: it runs on the composited window frame after
+// the display copy, so screenshots, frame dumps, recordings and headless
+// runs stay untinted, and the status bar and UI overlays (drawn after it)
+// stay in colour.
+//
+// Every tint is a luma ramp: the pixel collapses to its luminance, which
+// indexes a 256-entry table of pre-tinted colours. The ramps reproduce the
+// web frontend's CSS filter chains (Filter Effects Module Level 1
+// colour matrices, results clamped to [0, 1] between stages), evaluated on
+// the grey axis once at build time, so the desktop and browser tints match.
+
+/// Rec. 709-style luma weights in 8.8 fixed point, summing to exactly 256
+/// so a grey pixel maps to its own level and the b/w ramp is an identity.
+const LUMA_R: u32 = 54;
+const LUMA_G: u32 = 183;
+const LUMA_B: u32 = 19;
+
+fn clamp01(c: [f32; 3]) -> [f32; 3] {
+    c.map(|v| v.clamp(0.0, 1.0))
+}
+
+fn mat_mul(m: [[f32; 3]; 3], c: [f32; 3]) -> [f32; 3] {
+    clamp01([
+        m[0][0] * c[0] + m[0][1] * c[1] + m[0][2] * c[2],
+        m[1][0] * c[0] + m[1][1] * c[1] + m[1][2] * c[2],
+        m[2][0] * c[0] + m[2][1] * c[1] + m[2][2] * c[2],
+    ])
+}
+
+/// CSS `sepia(1)`.
+fn sepia(c: [f32; 3]) -> [f32; 3] {
+    mat_mul(
+        [
+            [0.393, 0.769, 0.189],
+            [0.349, 0.686, 0.168],
+            [0.272, 0.534, 0.131],
+        ],
+        c,
+    )
+}
+
+/// CSS `saturate(s)`.
+fn saturate(c: [f32; 3], s: f32) -> [f32; 3] {
+    mat_mul(
+        [
+            [0.213 + 0.787 * s, 0.715 - 0.715 * s, 0.072 - 0.072 * s],
+            [0.213 - 0.213 * s, 0.715 + 0.285 * s, 0.072 - 0.072 * s],
+            [0.213 - 0.213 * s, 0.715 - 0.715 * s, 0.072 + 0.928 * s],
+        ],
+        c,
+    )
+}
+
+/// CSS `hue-rotate(deg)`.
+fn hue_rotate(c: [f32; 3], degrees: f32) -> [f32; 3] {
+    let (sin, cos) = degrees.to_radians().sin_cos();
+    mat_mul(
+        [
+            [
+                0.213 + cos * 0.787 - sin * 0.213,
+                0.715 - cos * 0.715 - sin * 0.715,
+                0.072 - cos * 0.072 + sin * 0.928,
+            ],
+            [
+                0.213 - cos * 0.213 + sin * 0.143,
+                0.715 + cos * 0.285 + sin * 0.140,
+                0.072 - cos * 0.072 - sin * 0.283,
+            ],
+            [
+                0.213 - cos * 0.213 - sin * 0.787,
+                0.715 - cos * 0.715 + sin * 0.715,
+                0.072 + cos * 0.928 + sin * 0.072,
+            ],
+        ],
+        c,
+    )
+}
+
+/// CSS `brightness(b)`.
+fn brightness(c: [f32; 3], b: f32) -> [f32; 3] {
+    clamp01(c.map(|v| v * b))
+}
+
+/// The tinted colour one grey level maps to: the web frontend's CSS
+/// filter chain for the tint, evaluated on grey (its leading
+/// `grayscale(1)` is the luma collapse the per-pixel step performs).
+fn tint_ramp(tint: Tint, level: f32) -> [f32; 3] {
+    let grey = [level, level, level];
+    match tint {
+        Tint::None | Tint::Bw => grey,
+        Tint::Green => brightness(hue_rotate(saturate(sepia(grey), 4.0), 80.0), 0.92),
+        Tint::Amber => hue_rotate(saturate(sepia(grey), 4.0), -8.0),
+        Tint::Sepia => sepia(grey),
+    }
+}
+
+/// Build the luma-indexed colour table for a tint, or `None` for
+/// [`Tint::None`] so the untinted path costs nothing per frame.
+pub(super) fn tint_lut(tint: Tint) -> Option<Box<[u32; 256]>> {
+    if tint == Tint::None {
+        return None;
+    }
+    let mut lut = Box::new([0u32; 256]);
+    for (level, out) in lut.iter_mut().enumerate() {
+        let [r, g, b] = tint_ramp(tint, level as f32 / 255.0);
+        *out = rgba(
+            (r * 255.0 + 0.5) as u32,
+            (g * 255.0 + 0.5) as u32,
+            (b * 255.0 + 0.5) as u32,
+        );
+    }
+    Some(lut)
+}
+
+/// Tint a run of RGBA pixels in place through a [`tint_lut`] table.
+pub(super) fn tint_rows_in_place(px: &mut [u8], lut: &[u32; 256]) {
+    for p in px.chunks_exact_mut(4) {
+        let luma =
+            (LUMA_R * u32::from(p[0]) + LUMA_G * u32::from(p[1]) + LUMA_B * u32::from(p[2])) >> 8;
+        let tinted = lut[luma as usize].to_le_bytes();
+        p[0] = tinted[0];
+        p[1] = tinted[1];
+        p[2] = tinted[2];
+    }
+}
+
+/// Tint the display region of the composited window frame in place. Runs
+/// between the display copy and the status-bar/UI drawing, so only the
+/// emulated picture is tinted.
+pub(super) fn tint_display_rows(frame: &mut [u8], texture_scale: usize, lut: &[u32; 256]) {
+    let rows = present_height() * texture_scale;
+    let stride = texture_width(texture_scale) * 4;
+    tint_rows_in_place(&mut frame[..rows * stride], lut);
 }
 
 pub(super) fn blend_rgba_over_opaque(dst: u32, sr: u32, sg: u32, sb: u32, sa: u32) -> u32 {

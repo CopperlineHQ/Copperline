@@ -771,6 +771,13 @@ pub struct App {
     /// How strongly the shader pass is mixed in, 0.0 to 1.0 ([display]
     /// shader_strength).
     shader_strength: f32,
+    /// Screen tint in effect ([display] tint). Presentation only, applied
+    /// to the chipset display region of the window frame: captures and
+    /// RTG board scanout are never tinted.
+    tint: crate::config::Tint,
+    /// Luma-indexed colour table for `tint`; `None` when the tint is off,
+    /// which skips the pass entirely.
+    tint_lut: Option<Box<[u32; 256]>>,
     /// Open the window fullscreen when it is first created ([display]
     /// full_screen). Applied once in `resumed`; the runtime toggle takes over
     /// after that.
@@ -1090,6 +1097,7 @@ impl App {
         phosphor: f32,
         shader: crate::config::ShaderMode,
         shader_strength: f32,
+        tint: crate::config::Tint,
         start_fullscreen: bool,
         hide_status_bar: bool,
         warp_speed: WarpSpeed,
@@ -1255,6 +1263,8 @@ impl App {
                 _ => None,
             },
             shader_strength,
+            tint,
+            tint_lut: tint_lut(tint),
             start_fullscreen,
             gamepad: crate::gamepad::GamepadReader::new(),
             joystick_input_mode,
@@ -3055,6 +3065,15 @@ impl ApplicationHandler for App {
                             // board's screen.
                             self.present_standard_tv_aperture && self.rtg_present_dims.is_none(),
                         );
+                        // The tint models the monitor on the Amiga's video
+                        // output, so RTG board scanout stays untinted here
+                        // too, matching the GPU RTG path (which never sees
+                        // this buffer).
+                        if self.rtg_present_dims.is_none() {
+                            if let Some(lut) = &self.tint_lut {
+                                tint_display_rows(frame, r.texture_scale, lut);
+                            }
+                        }
                     }
                     if !super::status_bar_hidden() {
                         draw_status_bar(frame, &view, r.texture_scale);
@@ -3099,6 +3118,7 @@ impl ApplicationHandler for App {
                             sampler_input: &sampler_input_label,
                             sampler_gain: &sampler_gain_label,
                             shader: self.crt_shader_kind,
+                            tint: self.tint,
                         },
                     );
                     // The drag hint sits on top of everything: the drop will
@@ -4296,6 +4316,7 @@ impl App {
                     ui::MenuItem::SamplerGain => self.step_sampler_gain(true),
                     ui::MenuItem::PixelAspect => self.toggle_pixel_aspect(),
                     ui::MenuItem::CrtShader => self.cycle_crt_shader(),
+                    ui::MenuItem::ScreenTint => self.cycle_screen_tint(),
                     ui::MenuItem::FloppySpeed => self.cycle_floppy_speed(),
                     ui::MenuItem::AudioOutput => self.cycle_audio_output(),
                     ui::MenuItem::AudioFilter => self.cycle_audio_filter(),
@@ -5740,7 +5761,7 @@ impl App {
         if is_fullscreen == Some(!cfg.full_screen) {
             self.toggle_fullscreen();
         }
-        if super::status_bar_hidden() != !cfg.status_bar {
+        if super::status_bar_hidden() == cfg.status_bar {
             self.toggle_status_bar();
         }
         self.warp_speed = cfg.emulation.warp_speed;
@@ -5784,6 +5805,7 @@ impl App {
             r.crt_shader.clear_custom();
         }
         self.shader_strength = crate::config::resolve_shader_strength(cfg.shader_strength);
+        self.set_tint(crate::config::resolve_tint(cfg.tint));
         self.ui.menu_open = false;
         self.ui.panel = None;
         self.powered_on = true;
@@ -8417,6 +8439,30 @@ impl App {
             None => format!("CRT shader: {}", next.label()),
         });
         self.request_redraw();
+    }
+
+    /// Menu "Screen Tint": step through the tints for the rest of the run
+    /// (the config file default is unchanged; set `[display] tint` to make
+    /// it stick).
+    fn cycle_screen_tint(&mut self) {
+        use crate::config::Tint;
+        let next = match self.tint {
+            Tint::None => Tint::Bw,
+            Tint::Bw => Tint::Green,
+            Tint::Green => Tint::Amber,
+            Tint::Amber => Tint::Sepia,
+            Tint::Sepia => Tint::None,
+        };
+        self.set_tint(next);
+        info!("screen tint: {}", next.label());
+        self.show_osd(format!("Screen tint: {}", next.label()));
+        self.request_redraw();
+    }
+
+    /// Install a screen tint and its presentation table together.
+    fn set_tint(&mut self, tint: crate::config::Tint) {
+        self.tint = tint;
+        self.tint_lut = tint_lut(tint);
     }
 
     /// Compile the configured user shader against the live device. The full

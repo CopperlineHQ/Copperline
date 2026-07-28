@@ -451,6 +451,7 @@ pixel_aspect = "tv"   # "tv" (default, 4:3 CRT) or "square" (exact 2x2 lo-res)
 phosphor = 0.0        # CRT persistence fraction, 0.0 (off) to 0.95
 shader = "none"       # "none" (default), "scanlines", "mask", "crt", or a .wgsl file
 shader_strength = 1.0 # how strongly the shader is mixed in, 0.0-1.0
+tint = "none"         # "none" (default), "bw", "green", "amber", or "sepia"
 full_screen = false   # open fullscreen at start (default false)
 status_bar = true     # show the status bar at start (default true)
 ```
@@ -522,8 +523,9 @@ texel-snapped pass-through the window otherwise uses at magnification.
 `"none"` skips the pass altogether and is the only truly zero-cost setting.
 
 The menu's *CRT Shader* item cycles the presets live for the rest of the
-session without touching the config file; the launcher's *Display* page has
-*CRT shader* and *Shader strength* rows that do write it.
+session without touching the config file; the launcher's *A/V & Emu* tab
+(*Video* category) has *CRT shader* and *Shader strength* rows that do
+write it.
 `COPPERLINE_SHADER=crt|scanlines|mask|none|PATH.wgsl` and
 `COPPERLINE_SHADER_STRENGTH=0.0..1.0` override the config for a single run.
 There is no command-line flag.
@@ -538,6 +540,22 @@ open (a phosphor mask and a curved face make overlay text unreadable), for
 frames coming from an RTG board's scanout (see `[rtg]` below), and for
 programmable multisync scan modes -- a 31 kHz scanout has no 15 kHz line
 structure to reproduce.
+
+`tint` recolours the picture like the phosphor of a monochrome monitor:
+`"bw"` (black and white), `"green"` and `"amber"` (the two classic
+monochrome phosphors), or `"sepia"`; `"none"` (the default; `"off"` is
+accepted) presents full colour. The same five looks the web frontend's
+*Screen* selector offers, produced by the same colour chain, so a tint
+chosen in the browser matches the desktop. It composes with `shader` --
+green phosphor under the `crt` preset makes a convincing monochrome tube.
+Like the shader, the tint is presentation only: screenshots, frame dumps,
+recordings and headless runs stay untinted, the status bar and overlay
+menus keep their colours, and RTG board scanout (the monitor on the
+board's own output, not the Amiga's video output) is never tinted. The
+menu's *Screen Tint* item cycles the tints live for the rest of the
+session without touching the config file; the launcher's *A/V & Emu* tab
+(*Video* category) has a *Screen tint* row that does write it.
+`COPPERLINE_TINT=bw|green|...` overrides the config for a single run.
 
 ### Custom WGSL shaders
 

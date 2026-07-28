@@ -363,6 +363,10 @@ video = "PAL"
 # shader-processed, so captures stay comparable whatever is set here.
 # shader_strength: how strongly the shader is mixed in, 0.0-1.0 (default
 # 1.0, the preset's full effect); 0.0 leaves the picture visually untouched.
+# tint: screen tint over the window image. "none" (default, full colour),
+# "bw" (black and white), "green" or "amber" (monochrome-monitor
+# phosphor), or "sepia". Like shader, a window-display effect only:
+# captures are never tinted, and RTG board scanout stays untinted.
 # full_screen: open the window fullscreen at start (default false; also
 # --full-screen / --windowed, and Cmd/Alt+F toggles it live).
 # status_bar: show the status bar at start (default true; also
@@ -373,6 +377,7 @@ video = "PAL"
 # phosphor = 0.4
 # shader = "none"
 # shader_strength = 1.0
+# tint = "none"
 # full_screen = false
 # status_bar = true
 

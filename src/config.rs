@@ -220,6 +220,9 @@ pub struct Config {
     /// (the preset's full effect, the default). A single knob for every
     /// preset so the effect can be dialled back without editing shaders.
     pub shader_strength: f32,
+    /// Screen tint applied to the window image: the phosphor colour of a
+    /// monochrome monitor, or a sepia treatment. See [`Tint`].
+    pub tint: Tint,
     /// Open the window in fullscreen at start (`[display] full_screen`, or
     /// `--full-screen` / `--windowed`). The `Cmd+F` / `Alt+F` toggle flips it
     /// live without affecting this start-up value.
@@ -365,6 +368,44 @@ impl ShaderKind {
             ShaderKind::Mask => "mask",
             ShaderKind::Crt => "crt",
             ShaderKind::Custom => "custom",
+        }
+    }
+}
+
+/// Screen tint the window applies to the presented chipset display: a
+/// monochrome-monitor phosphor look or a sepia treatment, matching the web
+/// front-end's screen filter. The `COPPERLINE_TINT` env var overrides the
+/// config for one run. A presentation stage only, like [`ShaderMode`]:
+/// screenshots, frame dumps, recordings and headless runs are never
+/// tinted, so captures stay comparable whatever is selected here. RTG
+/// board scanout is presented untinted too: the tint models the monitor
+/// on the Amiga's video output.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Tint {
+    /// Full colour, untinted. The default. Spelled "none" or "off" in the
+    /// config.
+    #[default]
+    None,
+    /// Black and white: luminance only, like a mono composite feed.
+    Bw,
+    /// Green phosphor, the classic P1 monochrome monitor look.
+    Green,
+    /// Amber phosphor, the other common monochrome monitor look.
+    Amber,
+    /// Sepia-toned monochrome.
+    Sepia,
+}
+
+impl Tint {
+    /// Picker label: the config name of the tint (round-trips through
+    /// [`parse_tint`], which takes "off" as well as "none").
+    pub fn label(self) -> &'static str {
+        match self {
+            Tint::None => "off",
+            Tint::Bw => "bw",
+            Tint::Green => "green",
+            Tint::Amber => "amber",
+            Tint::Sepia => "sepia",
         }
     }
 }
@@ -1432,6 +1473,7 @@ impl Default for Config {
             phosphor: 0.0,
             shader: ShaderMode::None,
             shader_strength: 1.0,
+            tint: Tint::None,
             full_screen: false,
             status_bar: true,
             joystick_input_mode: JoystickInputMode::Gamepad,
@@ -1920,6 +1962,9 @@ pub(crate) struct RawDisplay {
     /// Shader mix, 0.0 (invisible) to 1.0 (full effect, the default).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) shader_strength: Option<f32>,
+    /// Screen tint: "none" (default), "bw", "green", "amber", or "sepia".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) tint: Option<String>,
     /// Open fullscreen at start (default false).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) full_screen: Option<bool>,
@@ -2762,6 +2807,10 @@ impl TryFrom<RawConfig> for Config {
                 defaults.shader_strength
             }
         };
+        let tint = match raw.display.tint.as_deref() {
+            None => defaults.tint,
+            Some(s) => parse_tint(s)?,
+        };
         let full_screen = raw.display.full_screen.unwrap_or(defaults.full_screen);
         let status_bar = raw.display.status_bar.unwrap_or(defaults.status_bar);
         let joystick_input_mode = match raw.input.joystick.as_deref() {
@@ -3183,6 +3232,7 @@ impl TryFrom<RawConfig> for Config {
             phosphor,
             shader,
             shader_strength,
+            tint,
             full_screen,
             status_bar,
             joystick_input_mode,
@@ -3275,6 +3325,22 @@ pub(crate) fn parse_shader(s: &str) -> Result<ShaderMode> {
              or a \".wgsl\" file path, got {:?}",
             s
         )),
+    }
+}
+
+/// Parse a `[display] tint` value ("off" is accepted for "none", so
+/// [`Tint::label`] round-trips).
+pub(crate) fn parse_tint(s: &str) -> Result<Tint> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "none" | "off" => Ok(Tint::None),
+        "bw" => Ok(Tint::Bw),
+        "green" => Ok(Tint::Green),
+        "amber" => Ok(Tint::Amber),
+        "sepia" => Ok(Tint::Sepia),
+        other => bail!(
+            "[display] tint must be \"none\", \"bw\", \"green\", \"amber\", \
+             or \"sepia\", got \"{other}\""
+        ),
     }
 }
 
@@ -4160,6 +4226,21 @@ pub fn resolve_shader_strength(from_config: f32) -> f32 {
     }
 }
 
+/// Resolve the screen tint: the `COPPERLINE_TINT` env var (a tint name)
+/// overrides the `[display] tint` config for one run.
+pub fn resolve_tint(from_config: Tint) -> Tint {
+    match crate::envcfg::var("COPPERLINE_TINT") {
+        Some(v) => match parse_tint(&v) {
+            Ok(t) => t,
+            Err(e) => {
+                log::warn!("ignoring COPPERLINE_TINT: {e}");
+                from_config
+            }
+        },
+        None => from_config,
+    }
+}
+
 /// Substitute the bundled AROS ROM when the user named no ROM. The default
 /// `rom_path` is a sentinel ([`BUNDLED_AROS_ROM`]); any real path from
 /// `rom = "..."` or the CLI argument replaces it before this runs and is left
@@ -5023,11 +5104,47 @@ mod tests {
     }
 
     #[test]
+    fn display_tint_parses_names_and_defaults_to_none() -> Result<()> {
+        assert_eq!(parse_config("")?.tint, Tint::None);
+        assert_eq!(parse_tint(" None ")?, Tint::None);
+        // "off" is the label spelling, and must parse back to the same tint.
+        assert_eq!(parse_tint("off")?, Tint::None);
+        assert_eq!(parse_tint(Tint::None.label())?, Tint::None);
+        assert_eq!(parse_tint("BW")?, Tint::Bw);
+        assert_eq!(parse_tint("Green")?, Tint::Green);
+        assert_eq!(parse_tint("\tamber\n")?, Tint::Amber);
+        assert_eq!(parse_tint("sepia")?, Tint::Sepia);
+        // Every label round-trips through the parser.
+        for tint in [Tint::Bw, Tint::Green, Tint::Amber, Tint::Sepia] {
+            assert_eq!(parse_tint(tint.label())?, tint);
+        }
+        let cfg = parse_config(
+            r#"
+            [display]
+            tint = "green"
+            "#,
+        )?;
+        assert_eq!(cfg.tint, Tint::Green);
+        Ok(())
+    }
+
+    #[test]
+    fn display_tint_rejects_an_unknown_name() {
+        let e = parse_tint("purple").unwrap_err().to_string();
+        assert!(
+            e.contains("green") && e.contains("sepia") && e.contains(r#""purple""#),
+            "{e}"
+        );
+        assert!(parse_config("[display]\ntint = \"purple\"").is_err());
+    }
+
+    #[test]
     fn display_shader_keys_round_trip_through_saved_toml() {
         let raw = RawConfig {
             display: RawDisplay {
                 shader: Some("crt".to_string()),
                 shader_strength: Some(0.75),
+                tint: Some("amber".to_string()),
                 ..RawDisplay::default()
             },
             ..RawConfig::default()

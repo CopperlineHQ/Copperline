@@ -26,7 +26,7 @@ use crate::config::{
     format_size, machine_profile_defaults, AudioFilterMode, ChannelMode, Chipset, Config, CpuModel,
     JoystickInputMode, MachineModel, MouseCapture, Overscan, PacingBudget, ParallelDevice,
     PixelAspect, RawConfig, RawDrive, RawFilesysMount, RawFloppyDrive, RawZorroBoard, RtgCard,
-    ScsiController, SerialMode, ShaderMode, WarpSpeed, BOOT_PRI_NEVER,
+    ScsiController, SerialMode, ShaderMode, Tint, WarpSpeed, BOOT_PRI_NEVER,
 };
 use crate::net::NetConfig;
 use crate::zorro::{ConfigOption, ConfigOptionKind, LoadedZorroBoard};
@@ -388,6 +388,7 @@ pub enum LauncherField {
     AudioFilter,
     Overscan,
     PixelAspect,
+    Tint,
     Phosphor,
     Shader,
     ShaderStrength,
@@ -631,11 +632,12 @@ const PARALLEL_ROWS_SAMPLER: [Row; 3] = [
 const ETHERNET_ROWS: [Row; 1] = [row(F::Ethernet, "  A2065 board", Cycle)];
 // The A/V & Emu tab is split into three categories switched via the top nav row.
 // The Video category also carries the CRT-shader controls (a picture setting).
-const VIDEO_ROWS: [Row; 7] = [
+const VIDEO_ROWS: [Row; 8] = [
     row(F::StartFullscreen, "Start fullscreen", Toggle),
     row(F::ShowStatusBar, "Status bar", Toggle),
     row(F::Overscan, "Overscan", Cycle),
     row(F::PixelAspect, "Pixel aspect", Cycle),
+    row(F::Tint, "Screen tint", Cycle),
     row(F::Phosphor, "Phosphor", Cycle),
     row(F::Shader, "CRT shader", Cycle),
     row(F::ShaderStrength, "Shader strength", Cycle),
@@ -851,6 +853,7 @@ const Z3_PRESETS: [usize; 8] = [
 ];
 const OVERSCANS: [Overscan; 2] = [Overscan::Tv, Overscan::Full];
 const PIXEL_ASPECTS: [PixelAspect; 2] = [PixelAspect::Tv, PixelAspect::Square];
+const TINTS: [Tint; 5] = [Tint::None, Tint::Bw, Tint::Green, Tint::Amber, Tint::Sepia];
 const AUDIO_FILTER_MODES: [AudioFilterMode; 3] = [
     AudioFilterMode::Auto,
     AudioFilterMode::On,
@@ -1071,6 +1074,8 @@ pub struct MachineSetup {
     shader_custom: Option<PathBuf>,
     /// Shader mix, 0.0 to 1.0 ([display] shader_strength).
     shader_strength: f32,
+    /// Screen tint ([display] tint).
+    tint: Tint,
     /// Open fullscreen at start ([display] full_screen).
     start_fullscreen: bool,
     /// Show the status bar at start ([display] status_bar).
@@ -1217,6 +1222,7 @@ impl MachineSetup {
                 _ => None,
             },
             shader_strength: cfg.shader_strength,
+            tint: cfg.tint,
             start_fullscreen: cfg.full_screen,
             show_status_bar: cfg.status_bar,
             floppy_sounds: cfg.audio.floppy_sounds,
@@ -1511,6 +1517,9 @@ impl MachineSetup {
         if (self.shader_strength - base.shader_strength).abs() > 1e-6 {
             raw.display.shader_strength = Some(self.shader_strength);
         }
+        if self.tint != base.tint {
+            raw.display.tint = Some(tint_name(self.tint).to_string());
+        }
         if self.start_fullscreen != base.full_screen {
             raw.display.full_screen = Some(self.start_fullscreen);
         }
@@ -1696,6 +1705,7 @@ impl MachineSetup {
         // "Custom" again.
         self.shader = base.shader.clone();
         self.shader_strength = base.shader_strength;
+        self.tint = base.tint;
         self.start_fullscreen = base.full_screen;
         self.show_status_bar = base.status_bar;
         self.floppy_sounds = base.audio.floppy_sounds;
@@ -2087,6 +2097,15 @@ impl MachineSetup {
                 PixelAspect::Tv => "TV (4:3)".to_string(),
                 PixelAspect::Square => "Square".to_string(),
             },
+            // "Colour" rather than "Off": the web front-end's wording for
+            // the same picker, and it says what the picture looks like.
+            F::Tint => match self.tint {
+                Tint::None => "Colour".to_string(),
+                Tint::Bw => "Black & white".to_string(),
+                Tint::Green => "Green".to_string(),
+                Tint::Amber => "Amber".to_string(),
+                Tint::Sepia => "Sepia".to_string(),
+            },
             F::Phosphor => {
                 if self.phosphor <= 0.0 {
                     "Off".to_string()
@@ -2336,6 +2355,7 @@ impl MachineSetup {
             }
             F::FloppyVolume => self.floppy_volume = step_u8(self.floppy_volume, forward, 0, 100),
             F::Overscan => self.overscan = cycle_slice(&OVERSCANS, self.overscan, forward),
+            F::Tint => self.tint = cycle_slice(&TINTS, self.tint, forward),
             F::PixelAspect => {
                 self.pixel_aspect = cycle_slice(&PIXEL_ASPECTS, self.pixel_aspect, forward)
             }
@@ -3366,6 +3386,18 @@ fn shader_name(shader: &ShaderMode) -> String {
     }
 }
 
+/// The `[display] tint` value for a tint: the canonical config name (not
+/// the picker's "off" spelling, which only parses back).
+fn tint_name(tint: Tint) -> &'static str {
+    match tint {
+        Tint::None => "none",
+        Tint::Bw => "bw",
+        Tint::Green => "green",
+        Tint::Amber => "amber",
+        Tint::Sepia => "sepia",
+    }
+}
+
 fn pacing_name(pacing: PacingBudget) -> &'static str {
     match pacing {
         PacingBudget::Cycles => "cycles",
@@ -3659,6 +3691,31 @@ mod tests {
         s.cycle(LauncherField::MouseSensitivity, false);
         assert_eq!(s.value_label(LauncherField::MouseSensitivity), "48");
         assert_eq!(s.to_raw().input.mouse_sensitivity, Some(48));
+    }
+
+    #[test]
+    fn screen_tint_round_trips_through_raw() {
+        let mut s = MachineSetup::default();
+        // Full colour is the baseline, so nothing is written for it.
+        assert_eq!(s.value_label(LauncherField::Tint), "Colour");
+        assert_eq!(s.to_raw().display.tint, None);
+
+        s.cycle(LauncherField::Tint, true);
+        assert_eq!(s.value_label(LauncherField::Tint), "Black & white");
+        assert_eq!(s.to_raw().display.tint, Some("bw".to_string()));
+
+        s.cycle(LauncherField::Tint, true);
+        assert_eq!(s.value_label(LauncherField::Tint), "Green");
+        assert_eq!(s.to_raw().display.tint, Some("green".to_string()));
+
+        // The written config has to load back into the same setting.
+        assert_eq!(s.build_config().expect("valid config").tint, Tint::Green);
+
+        // Cycling backwards from the baseline wraps to the end of the list.
+        let mut s = MachineSetup::default();
+        s.cycle(LauncherField::Tint, false);
+        assert_eq!(s.value_label(LauncherField::Tint), "Sepia");
+        assert_eq!(s.to_raw().display.tint, Some("sepia".to_string()));
     }
 
     #[test]
