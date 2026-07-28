@@ -215,10 +215,21 @@ async function forgetStoredRom() {
   // The next boot goes back to AROS; a running machine keeps the ROM that
   // is physically fitted, exactly like ejecting the box the chip came in.
   if (bootRom?.remembered) {
+    // The AROS stash can still be empty here: its download may be in
+    // flight (load() adopts the empty boot stash when it lands) or may
+    // have failed (the boot button goes back to disabled, exactly as
+    // before anything was picked).
     bootRom = arosRom;
     refreshBootButton();
   }
-  setLoadStatus('Kickstart forgotten - the boot button builds AROS again');
+  // Say what the boot button will actually build: the AROS fallback, a
+  // Kickstart picked this session (forgetting the memory does not unfit
+  // an explicit choice), or nothing yet while AROS is still downloading.
+  setLoadStatus(
+    bootRom
+      ? `Kickstart forgotten - the boot button builds ${bootRom.label}`
+      : 'Kickstart forgotten - waiting for the AROS ROM',
+  );
   refreshStatesPanel();
 }
 
@@ -631,9 +642,16 @@ async function syncWakeLock() {
     try {
       const lock = await navigator.wakeLock.request('screen');
       // The browser can release it behind our back (tab hidden, battery
-      // saver); forget the handle so the next sync re-requests.
+      // saver, OS policy). Re-sync right away: a hidden page fails the
+      // want-check and is instead re-requested on visibilitychange, and
+      // a policy that keeps refusing surfaces as a rejected request, so
+      // this cannot ping-pong. Our own release path nulls the handle
+      // before releasing, so it never re-enters here.
       lock.addEventListener('release', () => {
-        if (wakeLock === lock) wakeLock = null;
+        if (wakeLock === lock) {
+          wakeLock = null;
+          syncWakeLock();
+        }
       });
       wakeLock = lock;
     } catch {
