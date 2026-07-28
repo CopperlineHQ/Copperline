@@ -22,8 +22,10 @@
 //! line-doubled, which presents identically to the old single-field
 //! path.
 //!
-//! Set COPPERLINE_DEINTERLACE=0 to disable field merging (every field is
-//! line-doubled as it arrives, like the pre-deinterlacer presentation).
+//! Field merging is on by default; `[display] deinterlace = false` (or
+//! the COPPERLINE_DEINTERLACE env override) disables it, so every field
+//! is line-doubled as it arrives, like the pre-deinterlacer
+//! presentation.
 //!
 //! An optional CRT phosphor-persistence stage (`[display] phosphor` or
 //! COPPERLINE_PHOSPHOR, 0.0..=0.95) blends each presented frame with a
@@ -83,6 +85,12 @@ pub struct Deinterlacer {
     phosphor_alpha: u32,
     /// Phosphor-blended presentation buffer (only when phosphor is on).
     presented: Option<Vec<u32>>,
+    /// When set, the next presented frame copies the woven frame instead
+    /// of blending: the blend buffer holds no real picture yet
+    /// (construction, persistence just switched on, or the stream was
+    /// reset), so decay starts from the new frame rather than fading it
+    /// in from black.
+    seed_presented: bool,
 }
 
 impl Default for Deinterlacer {
@@ -93,12 +101,14 @@ impl Default for Deinterlacer {
 
 impl Deinterlacer {
     pub fn new() -> Self {
-        Self::with_options(deinterlace_enabled(), 0.0)
+        Self::with_options(crate::config::resolve_deinterlace(true), 0.0)
     }
 
-    /// `phosphor` is the persistence fraction in 0.0..=0.95.
-    pub fn with_phosphor(phosphor: f32) -> Self {
-        Self::with_options(deinterlace_enabled(), phosphor)
+    /// `deinterlace` enables motion-adaptive field merging (off,
+    /// laced fields are plain line-doubled); `phosphor` is the
+    /// persistence fraction in 0.0..=0.95.
+    pub fn with_settings(deinterlace: bool, phosphor: f32) -> Self {
+        Self::with_options(deinterlace, phosphor)
     }
 
     fn with_options(enabled: bool, phosphor: f32) -> Self {
@@ -117,6 +127,55 @@ impl Deinterlacer {
             enabled,
             phosphor_alpha,
             presented: (phosphor_alpha > 0).then(|| vec![0; MAX_OUT_PIXELS]),
+            // Seed so the first frame presents at full brightness; the
+            // threaded pipeline starts its worker at phosphor 0 and seeds
+            // through set_phosphor, and the synchronous path must present
+            // identically rather than fading in from black.
+            seed_presented: phosphor_alpha > 0,
+        }
+    }
+
+    /// Switch motion-adaptive field merging on or off live. A change
+    /// drops the weave history (fields either side of the switch present
+    /// differently and must not weave together); an unchanged value is a
+    /// no-op, so this is safe to call per frame.
+    pub fn set_deinterlace(&mut self, enabled: bool) {
+        if enabled == self.enabled {
+            return;
+        }
+        self.enabled = enabled;
+        self.have = [false; 2];
+        self.have2 = [false; 2];
+    }
+
+    /// Change the persistence fraction (0.0..=0.95) live. Switching
+    /// persistence on starts the trail from the next woven frame;
+    /// switching it off drops the blend buffer so [`Self::output`]
+    /// returns the woven frame directly. An unchanged value is a no-op,
+    /// so this is safe to call per frame.
+    pub fn set_phosphor(&mut self, phosphor: f32) {
+        let alpha = (phosphor.clamp(0.0, 0.95) * 256.0) as u32;
+        if alpha == self.phosphor_alpha {
+            return;
+        }
+        self.phosphor_alpha = alpha;
+        if alpha == 0 {
+            self.presented = None;
+            self.seed_presented = false;
+        } else if self.presented.is_none() {
+            self.presented = Some(vec![0; self.out.len()]);
+            self.seed_presented = true;
+        }
+    }
+
+    /// Drop the weave history and phosphor trail: the next field starts a
+    /// new picture (machine swap, reset, state load), so nothing from the
+    /// previous stream may weave or glow into it.
+    pub fn reset_history(&mut self) {
+        self.have = [false; 2];
+        self.have2 = [false; 2];
+        if self.presented.is_some() {
+            self.seed_presented = true;
         }
     }
 
@@ -147,8 +206,13 @@ impl Deinterlacer {
         let Some(presented) = &mut self.presented else {
             return;
         };
-        let a = self.phosphor_alpha;
         let active = self.out_rows * self.out_width;
+        if self.seed_presented {
+            presented[..active].copy_from_slice(&self.out[..active]);
+            self.seed_presented = false;
+            return;
+        }
+        let a = self.phosphor_alpha;
         for (shown, &new) in presented[..active]
             .iter_mut()
             .zip(self.out[..active].iter())
@@ -318,18 +382,6 @@ fn blend_rgba(new: u32, old: u32, a: u32) -> u32 {
     let ag =
         ((((new >> 8) & 0x00FF_00FF) * na + ((old >> 8) & 0x00FF_00FF) * a) >> 8) & 0x00FF_00FF;
     (ag << 8) | rb
-}
-
-/// Whether field merging is enabled. On unless COPPERLINE_DEINTERLACE is
-/// set to a falsey value (0/false/off/no).
-fn deinterlace_enabled() -> bool {
-    match crate::envcfg::var("COPPERLINE_DEINTERLACE") {
-        Some(v) => !matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "0" | "false" | "off" | "no"
-        ),
-        None => true,
-    }
 }
 
 #[cfg(test)]
@@ -510,15 +562,17 @@ mod tests {
         let mut d = Deinterlacer::with_options(true, 0.5);
         let bright = field_filled_rows(|_| 0x00FF_FFFF);
         let black = field_filled_rows(|_| 0);
+        // The first frame seeds the blend buffer and presents at full
+        // brightness, exactly as the threaded pipeline's set_phosphor
+        // switch-on does - no fade-in from black.
         d.push_field(&bright, FB_HEIGHT, FB_WIDTH, false, true, true);
-        // First frame over a black presented buffer: half brightness.
-        assert_eq!(out_row(&d, 10), 0x007F_7F7F);
-        d.push_field(&bright, FB_HEIGHT, FB_WIDTH, false, true, true);
-        // Converging towards full brightness.
-        assert_eq!(out_row(&d, 10), 0x00BF_BFBF);
+        assert_eq!(out_row(&d, 10), 0x00FF_FFFF);
+        // A black frame keeps half of the previous output as the trail,
+        // and each further frame halves it again.
         d.push_field(&black, FB_HEIGHT, FB_WIDTH, false, true, true);
-        // A black frame keeps half of the previous output as the trail.
-        assert_eq!(out_row(&d, 10), 0x005F_5F5F);
+        assert_eq!(out_row(&d, 10), 0x007F_7F7F);
+        d.push_field(&black, FB_HEIGHT, FB_WIDTH, false, true, true);
+        assert_eq!(out_row(&d, 10), 0x003F_3F3F);
     }
 
     #[test]
@@ -528,5 +582,84 @@ mod tests {
         d.push_field(&f, FB_HEIGHT, FB_WIDTH, false, true, true);
         assert_eq!(out_row(&d, 10), 0x0012_3456);
         assert!(d.presented.is_none(), "no blend buffer when disabled");
+    }
+
+    #[test]
+    fn set_phosphor_switches_persistence_live() {
+        let mut d = Deinterlacer::with_options(true, 0.0);
+        let bright = field_filled_rows(|_| 0x00FF_FFFF);
+        let black = field_filled_rows(|_| 0);
+        d.push_field(&bright, FB_HEIGHT, FB_WIDTH, false, true, true);
+        assert_eq!(out_row(&d, 10), 0x00FF_FFFF);
+        // Switching on seeds the trail from the next woven frame rather
+        // than fading the picture in from a black blend buffer.
+        d.set_phosphor(0.5);
+        d.push_field(&bright, FB_HEIGHT, FB_WIDTH, false, true, true);
+        assert_eq!(out_row(&d, 10), 0x00FF_FFFF);
+        d.push_field(&black, FB_HEIGHT, FB_WIDTH, false, true, true);
+        assert_eq!(out_row(&d, 10), 0x007F_7F7F);
+        // Switching off drops the blend buffer: the woven frame passes
+        // through untouched immediately.
+        d.set_phosphor(0.0);
+        d.push_field(&black, FB_HEIGHT, FB_WIDTH, false, true, true);
+        assert_eq!(out_row(&d, 10), 0);
+        assert!(d.presented.is_none(), "blend buffer dropped when off");
+    }
+
+    #[test]
+    fn reset_history_starts_a_fresh_phosphor_trail() {
+        let mut d = Deinterlacer::with_options(true, 0.5);
+        let bright = field_filled_rows(|_| 0x00FF_FFFF);
+        d.push_field(&bright, FB_HEIGHT, FB_WIDTH, false, true, true);
+        d.push_field(&bright, FB_HEIGHT, FB_WIDTH, false, true, true);
+        // A new presentation stream: no glow of the old picture may
+        // survive into its first frame.
+        d.reset_history();
+        let black = field_filled_rows(|_| 0);
+        d.push_field(&black, FB_HEIGHT, FB_WIDTH, false, true, true);
+        assert_eq!(out_row(&d, 10), 0);
+    }
+
+    #[test]
+    fn set_deinterlace_switches_field_merging_live() {
+        let mut d = Deinterlacer::with_options(true, 0.0);
+        let long = field_filled_rows(|_| 0x11);
+        let short = field_filled_rows(|_| 0x22);
+        d.push_field(&long, FB_HEIGHT, FB_WIDTH, true, true, true);
+        d.push_field(&short, FB_HEIGHT, FB_WIDTH, true, false, true);
+        assert_eq!(out_row(&d, 10), 0x11);
+        assert_eq!(out_row(&d, 11), 0x22);
+        // Off: the next field is plain line-doubled, no weave.
+        d.set_deinterlace(false);
+        d.push_field(&long, FB_HEIGHT, FB_WIDTH, true, true, true);
+        assert_eq!(out_row(&d, 10), 0x11);
+        assert_eq!(out_row(&d, 11), 0x11);
+        // Back on: the switch dropped the history, so the first laced
+        // field interpolates rather than weaving stale lines, and a full
+        // pair weaves again.
+        d.set_deinterlace(true);
+        d.push_field(&long, FB_HEIGHT, FB_WIDTH, true, true, true);
+        assert_eq!(out_row(&d, 11), 0x11);
+        d.push_field(&short, FB_HEIGHT, FB_WIDTH, true, false, true);
+        d.push_field(&long, FB_HEIGHT, FB_WIDTH, true, true, true);
+        d.push_field(&short, FB_HEIGHT, FB_WIDTH, true, false, true);
+        assert_eq!(out_row(&d, 10), 0x11);
+        assert_eq!(out_row(&d, 11), 0x22);
+    }
+
+    #[test]
+    fn reset_history_drops_the_weave_history() {
+        let mut d = Deinterlacer::with_options(true, 0.0);
+        let long = field_filled_rows(|_| 0x11);
+        let short = field_filled_rows(|_| 0x22);
+        d.push_field(&long, FB_HEIGHT, FB_WIDTH, true, true, true);
+        d.push_field(&short, FB_HEIGHT, FB_WIDTH, true, false, true);
+        assert_eq!(out_row(&d, 11), 0x22);
+        d.reset_history();
+        // The stale short field must not weave back in; the missing
+        // parity interpolates the fresh field until its own arrives.
+        d.push_field(&long, FB_HEIGHT, FB_WIDTH, true, true, true);
+        assert_eq!(out_row(&d, 10), 0x11);
+        assert_eq!(out_row(&d, 11), 0x11);
     }
 }

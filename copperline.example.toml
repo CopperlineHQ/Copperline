@@ -352,9 +352,12 @@ video = "PAL"
 # overscan like a CRT bezel) or "full". pixel_aspect: "tv" (default; the
 # non-square pixel aspect of a 4:3 CRT) or "square" (one host row per
 # scanline, so a 320x256 lo-res screen is an exact 640x512 -- handy for
-# pixel-exact comparison against square-pixel emulators). phosphor: CRT
-# persistence fraction (0.0-0.95, default 0.0): fuses field-rate
-# flicker/dither like a real tube at the cost of a slight motion trail.
+# pixel-exact comparison against square-pixel emulators). deinterlace:
+# motion-adaptive weaving of interlaced displays (default true); false
+# line-doubles every field, showing interlace bob/flicker like a bare TV.
+# phosphor: CRT persistence fraction (0.0-0.95, default 0.0): fuses
+# field-rate flicker/dither like a real tube at the cost of a slight
+# motion trail.
 # shader: GPU shader pass over the window image. "none" (default),
 # the built-in CRT presets "scanlines", "mask" and "crt", or the path of a
 # .wgsl file to load a shader of your own (see
@@ -374,6 +377,7 @@ video = "PAL"
 # [display]
 # overscan = "tv"
 # pixel_aspect = "tv"
+# deinterlace = true
 # phosphor = 0.4
 # shader = "none"
 # shader_strength = 1.0

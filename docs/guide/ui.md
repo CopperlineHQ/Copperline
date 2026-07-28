@@ -326,7 +326,8 @@ The layout is:
   and *A/V & Emu*, split by a row of category buttons at the top into
   **Audio** (output device, channel mode, stereo separation, filter, floppy
   sounds and volume), **Video** (start fullscreen, status bar, overscan, pixel
-  aspect, screen tint, phosphor, CRT shader and shader strength), and **Emulation**
+  aspect, screen tint, deinterlace, phosphor, CRT shader and shader strength),
+  and **Emulation**
   (power-on, warp speed, pacing, realtime priority) -- opening on Audio, and
   switched freely between the three.
 - **Settings rows** (right pane). `[<]`/`[>]` step through a value, On/Off

@@ -344,9 +344,14 @@ predecessor), and the per-pixel motion mask is dilated one pixel
 sideways so dithered moving art bobs as a region instead of weaving and
 interpolating on alternate pixels.
 Progressive content is line-doubled without history.
-`COPPERLINE_DEINTERLACE=0` falls back to plain line doubling.
+`[display] deinterlace = false` (or the `COPPERLINE_DEINTERLACE=0` env
+override) falls back to plain line doubling; like phosphor, the setting
+travels in every render job.
 In the default threaded pipeline the worker owns this history; the
-synchronous fallback keeps it on the window `App`.
+synchronous fallback keeps it on the window `App`. The worker drops its
+history whenever the render generation changes (machine swap, reset,
+state load), so nothing from the previous presentation stream weaves or
+glows into the next one.
 
 The deinterlacer also hosts the optional CRT phosphor-persistence stage
 (`[display] phosphor` / `COPPERLINE_PHOSPHOR`, off by default, clamped to
@@ -355,7 +360,10 @@ retained copy of the previous one, keeping `phosphor`/256 of the old value
 per channel for an exponential trail. This is what fuses field-rate flicker
 (alternate-field dither transparency, flicker-dithered animation) the way a
 real tube does. Like the rest of the deinterlacer it operates on the
-presentation buffer only and never touches the emulated framebuffer.
+presentation buffer only and never touches the emulated framebuffer. The
+persistence fraction travels in every render job rather than being fixed at
+worker spawn, so a machine started from the launcher applies its configured
+value.
 
 ## Known display gaps
 

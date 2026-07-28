@@ -24,8 +24,12 @@ pub(super) fn render_job_to_presentation(
         input,
         h_shift,
         overscan,
+        deinterlace,
+        phosphor,
         mut presentation_fb,
     } = job;
+    deinterlacer.set_deinterlace(deinterlace);
+    deinterlacer.set_phosphor(phosphor);
     let render_result = bitplane::render_from_input(&input, fb);
     let geometry = input.geometry();
     let canvas_scale = input.canvas_scale();
