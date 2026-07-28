@@ -86,9 +86,10 @@ pub struct Deinterlacer {
     /// Phosphor-blended presentation buffer (only when phosphor is on).
     presented: Option<Vec<u32>>,
     /// When set, the next presented frame copies the woven frame instead
-    /// of blending: the existing trail belongs to a different picture
-    /// (persistence just switched on, or the stream was reset), so decay
-    /// starts from the new frame rather than fading it in.
+    /// of blending: the blend buffer holds no real picture yet
+    /// (construction, persistence just switched on, or the stream was
+    /// reset), so decay starts from the new frame rather than fading it
+    /// in from black.
     seed_presented: bool,
 }
 
@@ -126,7 +127,11 @@ impl Deinterlacer {
             enabled,
             phosphor_alpha,
             presented: (phosphor_alpha > 0).then(|| vec![0; MAX_OUT_PIXELS]),
-            seed_presented: false,
+            // Seed so the first frame presents at full brightness; the
+            // threaded pipeline starts its worker at phosphor 0 and seeds
+            // through set_phosphor, and the synchronous path must present
+            // identically rather than fading in from black.
+            seed_presented: phosphor_alpha > 0,
         }
     }
 
@@ -557,15 +562,17 @@ mod tests {
         let mut d = Deinterlacer::with_options(true, 0.5);
         let bright = field_filled_rows(|_| 0x00FF_FFFF);
         let black = field_filled_rows(|_| 0);
+        // The first frame seeds the blend buffer and presents at full
+        // brightness, exactly as the threaded pipeline's set_phosphor
+        // switch-on does - no fade-in from black.
         d.push_field(&bright, FB_HEIGHT, FB_WIDTH, false, true, true);
-        // First frame over a black presented buffer: half brightness.
-        assert_eq!(out_row(&d, 10), 0x007F_7F7F);
-        d.push_field(&bright, FB_HEIGHT, FB_WIDTH, false, true, true);
-        // Converging towards full brightness.
-        assert_eq!(out_row(&d, 10), 0x00BF_BFBF);
+        assert_eq!(out_row(&d, 10), 0x00FF_FFFF);
+        // A black frame keeps half of the previous output as the trail,
+        // and each further frame halves it again.
         d.push_field(&black, FB_HEIGHT, FB_WIDTH, false, true, true);
-        // A black frame keeps half of the previous output as the trail.
-        assert_eq!(out_row(&d, 10), 0x005F_5F5F);
+        assert_eq!(out_row(&d, 10), 0x007F_7F7F);
+        d.push_field(&black, FB_HEIGHT, FB_WIDTH, false, true, true);
+        assert_eq!(out_row(&d, 10), 0x003F_3F3F);
     }
 
     #[test]
