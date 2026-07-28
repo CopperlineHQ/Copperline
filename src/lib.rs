@@ -36,6 +36,11 @@ pub mod emulator;
 pub mod envcfg;
 pub mod filesys;
 pub mod floppy;
+// Physical floppy drives over a DrawBridge/Greaseweazle/Supercard Pro, through
+// the vendored FloppyBridge. Gated because it compiles C++ and talks to a
+// serial port, neither of which a wasm32 browser build can do.
+#[cfg(feature = "floppybridge")]
+pub mod floppybridge;
 #[cfg(feature = "frontend")]
 pub mod gamepad;
 pub mod gary;

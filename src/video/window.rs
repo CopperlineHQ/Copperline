@@ -4041,12 +4041,29 @@ impl App {
 
     /// Removable-media status for the bar controls: which drives exist,
     /// what is inserted, and whether a CD drive is fitted this session.
+    /// Whether this drive is backed by a real one on a bridge.
+    fn drive_is_bridged(&self, idx: usize) -> bool {
+        #[cfg(feature = "floppybridge")]
+        {
+            self.emu.bus().floppy.is_bridged(idx)
+        }
+        #[cfg(not(feature = "floppybridge"))]
+        {
+            let _ = idx;
+            false
+        }
+    }
+
     fn media_bar(&self) -> MediaBar {
         let bus = self.emu.bus();
         let drives = std::array::from_fn(|idx| DriveBar {
             connected: bus.floppy.drive_connected(idx),
             inserted: bus.floppy.disk_inserted(idx),
             multi: self.disk_playlists[idx].len() > 1,
+            #[cfg(feature = "floppybridge")]
+            bridged: bus.floppy.is_bridged(idx),
+            #[cfg(not(feature = "floppybridge"))]
+            bridged: false,
         });
         let cd = bus.cd_drive_present().then(|| bus.cd_disc_inserted());
         MediaBar { drives, cd }
@@ -4379,6 +4396,12 @@ impl App {
                 self.ui.menu_scroll = 0;
                 self.request_redraw();
             }
+            // A bridged drive's media is a real disk in a real drive: it is
+            // loaded, swapped, and ejected by hand. The buttons stay drawn so
+            // the drive is visibly there and numbered, but they do nothing.
+            BarControl::DriveLoad(idx) if self.drive_is_bridged(idx) => {}
+            BarControl::DriveSwap(idx) if self.drive_is_bridged(idx) => {}
+            BarControl::DriveEject(idx) if self.drive_is_bridged(idx) => {}
             BarControl::DriveLoad(idx) => self.load_drive_disks_from_dialog(idx),
             BarControl::DriveSwap(idx) => self.swap_drive_disk(idx),
             BarControl::DriveEject(idx) => self.eject_drive_disk(idx),
@@ -4596,6 +4619,21 @@ impl App {
             UiControl::LauncherDriveBootpriEdit(field) => {
                 if let Some(state) = self.launcher_state_mut() {
                     state.begin_edit_drive_bootpri(field);
+                }
+            }
+            UiControl::LauncherDriveBridgeToggle(bay) => {
+                if let Some(state) = self.launcher_state_mut() {
+                    state.edit_cancel();
+                    let on = !state.setup.drive_bridged(bay);
+                    state.setup.set_drive_bridged(bay, on);
+                    state.status = None;
+                }
+            }
+            UiControl::LauncherBridgeConfigure(bay) => {
+                if let Some(state) = self.launcher_state_mut() {
+                    state.setup.set_bridge_edit_drive(bay);
+                    state.tab = crate::video::launcher::LauncherTab::FloppyBridge;
+                    state.status = None;
                 }
             }
             UiControl::LauncherDriveBootToggle(field) => {
@@ -5815,6 +5853,13 @@ impl App {
                     return;
                 }
             };
+        // Let go of any real floppy drive the outgoing machine holds before
+        // building the new one. The interface can only be open once, and the
+        // machine being replaced is not dropped until `run_machine` swaps it
+        // in -- so without this the new machine tries to open a device its
+        // predecessor still owns, and is told it is in use.
+        #[cfg(feature = "floppybridge")]
+        self.emu.bus_mut().floppy.release_bridges();
         // The launcher boots a fresh machine, never a save state, so a real
         // ROM is required here.
         let emu = match crate::emulator::build_machine(&cfg, audio, true, false) {
@@ -5822,6 +5867,11 @@ impl App {
             Err(e) => {
                 warn!("run failed: {e:#}");
                 self.set_launcher_status(StatusMessage::err(short_status_error(&e)));
+                // The machine that is staying put had its drives taken away
+                // above; give them back rather than leaving it with empty bays
+                // because a different configuration failed to build.
+                #[cfg(feature = "floppybridge")]
+                self.attach_configured_bridges();
                 return;
             }
         };
@@ -8971,9 +9021,36 @@ impl App {
         } else {
             self.powered_on = true;
             self.sync_live_audio_suspension();
+            #[cfg(feature = "floppybridge")]
+            self.attach_configured_bridges();
             info!("power button: machine powered on (cold boot)");
         }
         self.request_redraw();
+    }
+
+    /// Open the real floppy drives this machine's configuration asks for.
+    ///
+    /// Powering off let go of them, so powering back on has to take them
+    /// again. A drive that will not open is logged rather than refused: the
+    /// machine comes up with an empty bay, which is what an Amiga with a dead
+    /// drive does, and the alternative is a power button that does nothing.
+    #[cfg(feature = "floppybridge")]
+    fn attach_configured_bridges(&mut self) {
+        let raw = self.machine_config.clone();
+        let cfg = match crate::config::Config::try_from(raw) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                warn!("could not re-read the configuration to open the physical drives: {e:#}");
+                return;
+            }
+        };
+        if !cfg.floppy.bridges.iter().any(Option::is_some) {
+            return;
+        }
+        let floppy = &mut self.emu.bus_mut().floppy;
+        if let Err(e) = crate::emulator::attach_floppy_bridges(floppy, &cfg) {
+            warn!("physical floppy drive not available: {e:#}");
+        }
     }
 
     /// Toggle host-level pause. Pausing freezes the emulator in place
@@ -9000,6 +9077,13 @@ impl App {
         self.powered_on = false;
         self.paused = false;
         self.sync_live_audio_suspension();
+        // A real drive is powered by the machine: with the Amiga off it stops,
+        // and the interface belongs to the host again. Holding it open would
+        // leave it clicking as though the machine were still running, and
+        // nothing else -- including the next machine this window builds --
+        // could open it.
+        #[cfg(feature = "floppybridge")]
+        self.emu.bus_mut().floppy.release_bridges();
         info!("power button: machine powered off (cold boot state)");
         #[cfg(feature = "control")]
         self.control_complete_pending("pause", "power state changed");

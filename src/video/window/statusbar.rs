@@ -67,7 +67,7 @@ pub(super) fn draw_status_bar(frame: &mut [u8], view: &StatusBarView, texture_sc
             draw_swap_button(
                 frame,
                 scale_rect(rect, texture_scale),
-                drive.multi,
+                drive.multi && !drive.bridged,
                 hover == Some(BarControl::DriveSwap(idx)),
                 texture_scale,
             );
@@ -76,7 +76,9 @@ pub(super) fn draw_status_bar(frame: &mut [u8], view: &StatusBarView, texture_sc
             draw_eject_button(
                 frame,
                 scale_rect(rect, texture_scale),
-                drive.inserted,
+                // Greyed on a bridged drive: the disk is in a real drive and
+                // comes out by hand, not from here.
+                drive.inserted && !drive.bridged,
                 hover == Some(BarControl::DriveEject(idx)),
                 texture_scale,
             );
@@ -162,6 +164,10 @@ pub(super) struct DriveBar {
     pub(super) inserted: bool,
     /// More than one image is queued for this drive (enables swap).
     pub(super) multi: bool,
+    /// Backed by a real drive on a bridge. The buttons still draw, so the
+    /// drive is visibly there and numbered, but there is no media for the
+    /// emulator to load, swap, or eject -- the disk is in someone's hand.
+    pub(super) bridged: bool,
 }
 
 /// Removable-media status for the bar: the floppy drives plus the CD

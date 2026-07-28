@@ -47,6 +47,14 @@ range checks as the equivalent TOML fields:
 | `--accelerator SIZE` | `[memory] accelerator` | CPU-slot RAM at `$08000000` (32-bit CPUs): `0` to `128M` |
 | `--floppy-drives COUNT` | `[floppy] drives` | `1` to `4` wired drives (`DF0:` plus external drives) |
 | `--floppy-speed PERCENT` | `[floppy] speed` | `100` (real), `200`, `400`, `800`, or `0` (turbo) |
+| `--floppy-bridge DFN NAME` | `[floppy.dfN] bridge` | drive a physical floppy drive: `drawbridge`, `greaseweazle`, `supercardpro`, `off` |
+| `--floppy-bridge-port DFN PORT` | `[floppy.dfN] bridge_port` | that interface's serial port (default: auto-detect) |
+| `--floppy-bridge-cable DFN SEL` | `[floppy.dfN] bridge_cable` | drive select: `a`/`b` (PC cable) or `0`-`3` (Shugart) |
+| `--floppy-bridge-mode DFN MODE` | `[floppy.dfN] bridge_mode` | how tracks are captured: `normal`, `compatible`, `stalling` |
+| `--floppy-bridge-density DFN D` | `[floppy.dfN] bridge_density` | force a density: `auto`, `dd`, `hd` |
+| `--floppy-bridge-smart-speed DFN` | `[floppy.dfN] bridge_smart_speed = true` | let the interface slow the drive between accesses |
+| `--floppy-bridge-read-ahead DFN` | `[floppy.dfN] bridge_auto_cache = true` | read tracks ahead while the drive is idle |
+| `--floppy-bridge-writable DFN` | `[floppy.dfN] write_protected = false` | allow writing to the real disk |
 | `--joystick MODE` | `[input] joystick` | `gamepad` (default), `keyboard` |
 | `--mouse-sensitivity N` | `[input] mouse_sensitivity` | `0`-`100` host mouse speed (`50` default = 1:1) |
 | `--mouse-capture MODE` | `[input] mouse_capture` | When the host mouse is grabbed: `click` (default), `auto`, `manual` |
@@ -1051,6 +1059,34 @@ A `paths` playlist lets multi-disk software that only drives DF0: run
 without a second drive: the first entry is the boot disk and the disk-swap
 shortcut (`Cmd+D` on macOS, `Alt+D` on Linux/Windows) or the status-bar
 swap button cycles to the next image, wrapping around.
+
+### A real drive on a bay
+
+A bay can be given a physical 3.5" drive instead of an image, over a
+DrawBridge, Greaseweazle, or Supercard Pro:
+
+```toml
+[floppy.df0]
+bridge = "greaseweazle"      # drawbridge/greaseweazle/supercardpro/off
+write_protected = true       # emulator-level protection, on top of the tab
+# bridge_port = "/dev/ttyACM0"   # omit to auto-detect the interface
+# bridge_cable = "a"             # a/b (IBM PC) or 0..3 (Shugart)
+# bridge_density = "auto"        # auto/dd/hd
+# bridge_mode = "compatible"     # compatible/stalling
+# bridge_smart_speed = false     # driver-side variable-rate capture
+# bridge_auto_cache = false      # read tracks ahead while the drive is idle
+```
+
+A bay takes either a bridge or an image, never both: the disk in the drive
+is its media, and naming a `path` alongside is an error. `bridge = "off"`
+returns the bay to images and keeps the other bridge settings for later.
+
+Nothing needs installing -- Rob Smith's FloppyBridge is built into Copperline
+-- but it changes how the machine runs in several ways -- writes need both the disk's tab and
+`write_protected = false`, the status bar's eject and swap do nothing for
+that bay, and a machine with a physical drive is paced to wall-clock time and is
+not reproducible. [](floppybridge) covers the whole feature: installing the
+library on each platform, what each option does, and what to expect of it.
 
 ## `[ide]` -- IDE hard disks
 

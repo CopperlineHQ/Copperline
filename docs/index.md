@@ -42,6 +42,8 @@ running in Copperline.
   serial/MIDI, and CD options.
 - [](guide/ui) -- the window, status bar, keyboard shortcuts, menus, and
   gamepad calibration.
+- [](guide/floppybridge) -- reading and writing real Amiga floppies in a
+  physical drive, over a DrawBridge, Greaseweazle, or Supercard Pro.
 - [](guide/headless) -- scripted, deterministic runs: screenshots, frame
   dumps, scripted input, and WAV capture.
 - [](guide/browser) -- the same core compiled to WebAssembly, hosted at

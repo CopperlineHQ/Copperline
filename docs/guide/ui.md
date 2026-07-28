@@ -72,7 +72,10 @@ menu item):
   several images to queue a swap playlist for that drive -- plus a swap
   button that cycles to the next queued disk and an eject button. Swap and
   eject grey out when there is nothing to swap to or eject. With three or
-  four drives the clusters stack two-up.
+  four drives the clusters stack two-up. A bay driving a physical floppy drive
+  keeps its numbered disk button, so you can see the drive is there, but
+  loading, swapping and ejecting do nothing for it -- the disk is in a real
+  drive, and changing it is done by hand (see [](floppybridge)).
 - **CD controls** on machines with a CD drive (CDTV, CD32, or a SCSI
   CD-ROM unit): a CD button that loads (or swaps) a CD image
   (`.cue`/`.iso`) with the proper media-change notification, and a CD
@@ -303,7 +306,13 @@ The layout is:
   (Kickstart and
   extended ROM), *Floppy* (drive count and speed, then each wired drive as a
   greyed **DFn:** heading with its indented disk image and write-protect;
-  drives that are not enabled are hidden rather than greyed),
+  drives that are not enabled are hidden rather than greyed. Each drive also
+  carries a **Physical drive** tick box that hands the bay to a physical
+  floppy drive: its media row then names the interface -- or `None` with nothing
+  plugged in -- and a **Configure** button opens that drive's own page,
+  headed with the installed library and its version, for the serial port,
+  drive select, density, read mode, smart speed and read ahead, greying
+  whatever the chosen interface does not honour. See [](floppybridge)),
   *Storage* (IDE master/slave, the SCSI controller -- A2091, A4091, or the
   A3000's onboard SCSI -- and its boot ROM and units; a row of buttons at the top
   links to three sub-pages: **CD** (image, insert delay, CD32 NVRAM); **Host

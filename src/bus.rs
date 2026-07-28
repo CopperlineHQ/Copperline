@@ -5210,6 +5210,13 @@ impl Bus {
         // runs is interrupt RECOGNITION LATENCY, modelled separately (see
         // irq_latency_setting / arm_irq_recognition_latency), not a raise delay.
         if self.paula.intreq & INT_VERTB == 0 {
+            // Once a frame, ask any real drive whether its disk has been
+            // swapped or its write-protect tab moved. Unlike an image, the
+            // medium changes without the emulator being told, and the drive
+            // has to be asked even with the motor stopped -- otherwise a disk
+            // put in after boot is never noticed.
+            #[cfg(feature = "floppybridge")]
+            self.floppy.poll_bridge_media();
             self.paula.intreq |= INT_VERTB;
             if diag_vbi() {
                 log::info!(

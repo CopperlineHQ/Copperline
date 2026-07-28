@@ -997,9 +997,145 @@ impl Default for AudioConfig {
     }
 }
 
+/// Which FloppyBridge driver backs a bridged drive.
+///
+/// Named rather than indexed so a config file does not depend on the order the
+/// installed library happens to enumerate its drivers in; the name is resolved
+/// to an index when the drive is opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BridgeDriver {
+    /// Rob Smith's Arduino-based DrawBridge.
+    DrawBridge,
+    /// Keir Fraser's Greaseweazle.
+    #[default]
+    Greaseweazle,
+    /// Jim Drew's Supercard Pro.
+    SupercardPro,
+}
+
+impl BridgeDriver {
+    /// The substring that identifies this driver in the library's own list.
+    pub fn match_token(self) -> &'static str {
+        match self {
+            BridgeDriver::DrawBridge => "drawbridge",
+            BridgeDriver::Greaseweazle => "greaseweazle",
+            BridgeDriver::SupercardPro => "supercard",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            BridgeDriver::DrawBridge => "DrawBridge",
+            BridgeDriver::Greaseweazle => "Greaseweazle",
+            BridgeDriver::SupercardPro => "Supercard Pro",
+        }
+    }
+}
+
+/// How hard the driver works to reproduce the disk's real timing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BridgeSpeedMode {
+    /// Captures wherever the head happens to be, saving the wait for the index
+    /// -- most of a revolution per track. A revolution that begins mid-track
+    /// has its two ends a revolution apart in time, so it cannot be turned
+    /// under the head twice: once round, Copperline fetches the recording that
+    /// followed it, as the head itself would have carried on into. Reads the
+    /// same disks as `Compatible` and reaches a Workbench 1.3 desktop
+    /// appreciably sooner.
+    /// The default, as it is in Amiberry.
+    #[default]
+    Normal,
+    /// Captures each track from the index, so a revolution begins where the
+    /// real one does and its two ends meet in the gap between sectors, exactly
+    /// as a captured image's do. Waiting for the index costs most of a
+    /// revolution on every track, which is why `Normal` is the default; reach
+    /// for this one if a disk reads badly without the index to anchor it.
+    /// Amiberry calls this Compatible too.
+    Compatible,
+    /// As `Compatible`, but the driver holds the caller up until the track is
+    /// ready instead of answering "not yet". The wait lands on the emulated
+    /// machine, which stops -- pointer and all -- for as long as it takes.
+    Stalling,
+}
+
+/// Whether to force a density rather than sensing it from the disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BridgeDensity {
+    #[default]
+    Auto,
+    Dd,
+    Hd,
+}
+
+/// Which drive the interface selects on the cable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BridgeCable {
+    /// IBM PC cabling, drive A: the usual case for a PC drive on a
+    /// Greaseweazle or DrawBridge.
+    #[default]
+    DriveA,
+    DriveB,
+    /// Shugart cabling, for a real Amiga drive.
+    Shugart0,
+    Shugart1,
+    Shugart2,
+    Shugart3,
+}
+
+/// A real drive attached to one floppy bay, from `[floppy.dfN] bridge = ...`.
+///
+/// Held apart from [`FloppyDriveConfig`] because a bridged drive has no image
+/// path: whichever of the two is present for a bay supplies its media.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FloppyBridgeConfig {
+    pub driver: BridgeDriver,
+    /// Emulator-level write protection, on top of the disk's own tab.
+    /// Defaults to true, exactly as it does for an image, so writing to a real
+    /// disk takes a deliberate `write_protected = false` as well as the tab
+    /// being open -- two independent things to get wrong before anything is
+    /// laid on physical media.
+    pub write_protected: bool,
+    /// `None` auto-detects the interface, which every current driver supports.
+    pub port: Option<String>,
+    pub mode: BridgeSpeedMode,
+    pub density: BridgeDensity,
+    pub cable: BridgeCable,
+    /// Lets the driver track a disk whose data rate wanders within a track.
+    /// It changes how the driver captures, but not what Copperline does with
+    /// the result: cell timing is derived from the length of the revolution it
+    /// hands back, so the per-cell speed this makes available goes unused.
+    pub smart_speed: bool,
+    /// Read tracks ahead in the background while the drive is otherwise idle.
+    /// Off by default, as upstream and Amiberry have it. It buys little during
+    /// a boot -- the drive is never idle then -- and moves the real head about
+    /// on its own.
+    pub auto_cache: bool,
+}
+
+impl Default for FloppyBridgeConfig {
+    fn default() -> Self {
+        Self {
+            driver: BridgeDriver::default(),
+            // Protected unless told otherwise, matching both the parser and an
+            // image-backed drive. A derived `Default` would make this false and
+            // quietly hand out a writable real disk.
+            write_protected: true,
+            port: None,
+            mode: BridgeSpeedMode::default(),
+            density: BridgeDensity::default(),
+            cable: BridgeCable::default(),
+            smart_speed: false,
+            auto_cache: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FloppyConfig {
     pub drives: [Option<FloppyDriveConfig>; 4],
+    /// Real drives, by bay. A bay with a bridge here has no entry in
+    /// `drives`: the physical disk is its media.
+    pub bridges: [Option<FloppyBridgeConfig>; 4],
     /// Emulated drive speed as a data-rate percentage: 100 (real speed),
     /// 200/400/800 (that many times faster), or 0 for turbo, where DMA
     /// transfers complete almost instantly. Values above 100 keep the full
@@ -1012,6 +1148,7 @@ impl Default for FloppyConfig {
     fn default() -> Self {
         Self {
             drives: std::array::from_fn(|_| None),
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
         }
     }
@@ -1703,6 +1840,34 @@ pub struct ConfigOverrides {
     /// Show the status bar at start (`--show-status-bar` /
     /// `--hide-status-bar`). Same as `[display] status_bar`.
     pub status_bar: Option<bool>,
+    /// A real floppy drive on a bay (`--floppy-bridge DFN INTERFACE`), by bay.
+    /// Same values as `[floppy.dfN] bridge`.
+    pub floppy_bridge: [Option<String>; 4],
+    /// The interface's serial port (`--floppy-bridge-port DFN PORT`). Same as
+    /// `[floppy.dfN] bridge_port`; unset auto-detects.
+    pub floppy_bridge_port: [Option<String>; 4],
+    /// Which drive on the cable to select (`--floppy-bridge-cable DFN CABLE`).
+    /// Same as `[floppy.dfN] bridge_cable`.
+    pub floppy_bridge_cable: [Option<String>; 4],
+    /// Drop the emulator's own write protection on a bay
+    /// (`--floppy-bridge-writable DFN`), leaving only the disk's tab between
+    /// the guest and the platter. Same as `[floppy.dfN] write_protected =
+    /// false`; there is deliberately no flag the other way, because protected
+    /// is already the default.
+    pub floppy_bridge_writable: [bool; 4],
+    /// How the interface captures a track (`--floppy-bridge-mode DFN MODE`).
+    /// Same as `[floppy.dfN] bridge_mode`.
+    pub floppy_bridge_mode: [Option<String>; 4],
+    /// Force a density rather than sensing it (`--floppy-bridge-density DFN
+    /// DENSITY`). Same as `[floppy.dfN] bridge_density`.
+    pub floppy_bridge_density: [Option<String>; 4],
+    /// Let the interface slow the drive between accesses
+    /// (`--floppy-bridge-smart-speed DFN`). Same as `[floppy.dfN]
+    /// bridge_smart_speed = true`.
+    pub floppy_bridge_smart_speed: [bool; 4],
+    /// Read tracks ahead while the drive is idle (`--floppy-bridge-read-ahead
+    /// DFN`). Same as `[floppy.dfN] bridge_auto_cache = true`.
+    pub floppy_bridge_read_ahead: [bool; 4],
 }
 
 impl ConfigOverrides {
@@ -1720,6 +1885,14 @@ impl ConfigOverrides {
             && self.accelerator.is_none()
             && self.floppy_drives.is_none()
             && self.floppy_speed.is_none()
+            && self.floppy_bridge.iter().all(Option::is_none)
+            && self.floppy_bridge_port.iter().all(Option::is_none)
+            && self.floppy_bridge_cable.iter().all(Option::is_none)
+            && self.floppy_bridge_mode.iter().all(Option::is_none)
+            && self.floppy_bridge_density.iter().all(Option::is_none)
+            && !self.floppy_bridge_smart_speed.iter().any(|v| *v)
+            && !self.floppy_bridge_read_ahead.iter().any(|v| *v)
+            && !self.floppy_bridge_writable.iter().any(|w| *w)
             && self.joystick.is_none()
             && self.mouse_sensitivity.is_none()
             && self.mouse_capture.is_none()
@@ -1782,6 +1955,57 @@ impl ConfigOverrides {
         }
         if let Some(speed) = self.floppy_speed {
             raw.floppy.speed = Some(speed);
+        }
+        for idx in 0..4 {
+            if self.floppy_bridge[idx].is_none()
+                && self.floppy_bridge_port[idx].is_none()
+                && self.floppy_bridge_cable[idx].is_none()
+                && !self.floppy_bridge_writable[idx]
+                && self.floppy_bridge_mode[idx].is_none()
+                && self.floppy_bridge_density[idx].is_none()
+                && !self.floppy_bridge_smart_speed[idx]
+                && !self.floppy_bridge_read_ahead[idx]
+            {
+                continue;
+            }
+            // A bay named on the command line gets a table if it had none, so
+            // a bridge can be asked for with no config file at all.
+            let drive = match idx {
+                0 => &mut raw.floppy.df0,
+                1 => &mut raw.floppy.df1,
+                2 => &mut raw.floppy.df2,
+                _ => &mut raw.floppy.df3,
+            }
+            .get_or_insert_with(RawFloppyDrive::default);
+            if let Some(bridge) = &self.floppy_bridge[idx] {
+                drive.bridge = Some(bridge.clone());
+                // The flag says "this bay is a real drive", so an image the
+                // config file left here would otherwise be a contradiction the
+                // parser rejects. The command line wins, as it does elsewhere.
+                drive.path = None;
+                drive.paths = None;
+            }
+            if let Some(port) = &self.floppy_bridge_port[idx] {
+                drive.bridge_port = Some(port.clone());
+            }
+            if let Some(cable) = &self.floppy_bridge_cable[idx] {
+                drive.bridge_cable = Some(cable.clone());
+            }
+            if self.floppy_bridge_writable[idx] {
+                drive.write_protected = Some(false);
+            }
+            if let Some(mode) = &self.floppy_bridge_mode[idx] {
+                drive.bridge_mode = Some(mode.clone());
+            }
+            if let Some(density) = &self.floppy_bridge_density[idx] {
+                drive.bridge_density = Some(density.clone());
+            }
+            if self.floppy_bridge_smart_speed[idx] {
+                drive.bridge_smart_speed = Some(true);
+            }
+            if self.floppy_bridge_read_ahead[idx] {
+                drive.bridge_auto_cache = Some(true);
+            }
         }
         if let Some(joystick) = &self.joystick {
             raw.input.joystick = Some(joystick.clone());
@@ -2532,6 +2756,36 @@ pub(crate) struct RawFloppyDrive {
     pub(crate) paths: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) write_protected: Option<bool>,
+    /// Attach a real drive to this bay instead of an image, over a
+    /// DrawBridge/Greaseweazle/Supercard Pro: `drawbridge`, `greaseweazle`,
+    /// `supercardpro`, or `profile:N` to use one of the FloppyBridge
+    /// library's own saved profiles.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) bridge: Option<String>,
+    /// Serial port the interface is on. Omitted, the driver finds its own
+    /// device; name one when two interfaces are plugged in at once.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) bridge_port: Option<String>,
+    /// How faithfully to follow the disk's real timing: `fast`,
+    /// `compatible` (the default, and what copy protection needs),
+    /// `turbo`, or `stalling`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) bridge_mode: Option<String>,
+    /// Force a density instead of sensing it: `auto`, `dd`, or `hd`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) bridge_density: Option<String>,
+    /// Which drive on the cable to select: `a`/`b` (IBM PC cabling) or
+    /// `0`..`3` (Shugart).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) bridge_cable: Option<String>,
+    /// Let the driver switch to turbo between accesses where it judges it
+    /// safe. Off by default, as it can upset copy protection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) bridge_smart_speed: Option<bool>,
+    /// Let the driver read ahead into other cylinders while the disk is
+    /// idle. Off by default: it keeps the real drive working continuously.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) bridge_auto_cache: Option<bool>,
 }
 
 /// Convert a parsed `[ide]`/`[scsi]` drive entry into a `DriveImage`,
@@ -4031,10 +4285,43 @@ fn parse_floppy(raw: RawFloppy) -> Result<(FloppyConfig, [bool; 4], [Vec<PathBuf
         None => [true, false, false, false],
     };
     let mut playlists: [Vec<PathBuf>; 4] = std::array::from_fn(|_| Vec::new());
+    #[cfg_attr(not(feature = "floppybridge"), allow(unused_mut))]
+    let mut bridges: [Option<FloppyBridgeConfig>; 4] = std::array::from_fn(|_| None);
     for (idx, raw_drive) in raws.into_iter().enumerate() {
         let Some(raw_drive) = raw_drive else {
             continue;
         };
+
+        // A physical drive takes the bay instead of an image. A build without
+        // the feature has no way to drive one, so the keys are read and
+        // ignored rather than rejected: a config file shared between builds
+        // stays valid, it just does nothing here.
+        #[cfg(not(feature = "floppybridge"))]
+        let _ = &raw_drive.bridge;
+        #[cfg(feature = "floppybridge")]
+        if let Some(spec) = raw_drive.bridge.as_deref() {
+            let spec = spec.trim();
+            if !spec.eq_ignore_ascii_case("off") && !spec.is_empty() {
+                if raw_drive.path.is_some() || raw_drive.paths.is_some() {
+                    bail!(
+                        "floppy.df{idx} has both a bridge and a disk image; a physical drive \
+                         supplies its own media, so give one or the other"
+                    );
+                }
+                bridges[idx] = Some(parse_floppy_bridge(idx, spec, &raw_drive)?);
+                if let Some(count) = connected_count {
+                    if !connected[idx] {
+                        bail!(
+                            "[floppy] drives = {count} leaves floppy.df{idx} disconnected, \
+                             but floppy.df{idx} has a bridge configured"
+                        );
+                    }
+                } else {
+                    connected[idx] = true;
+                }
+                continue;
+            }
+        }
         // Combine `path` (single) and `paths` (playlist) into one ordered
         // list, with `path` first when both are present.
         let mut raw_images: Vec<String> = Vec::new();
@@ -4080,7 +4367,89 @@ fn parse_floppy(raw: RawFloppy) -> Result<(FloppyConfig, [bool; 4], [Vec<PathBuf
         });
         playlists[idx] = images;
     }
-    Ok((FloppyConfig { drives, speed }, connected, playlists))
+    Ok((
+        FloppyConfig {
+            drives,
+            bridges,
+            speed,
+        },
+        connected,
+        playlists,
+    ))
+}
+
+/// Parse one bay's `bridge = ...` plus its `bridge_*` settings.
+#[cfg(feature = "floppybridge")]
+fn parse_floppy_bridge(idx: usize, spec: &str, raw: &RawFloppyDrive) -> Result<FloppyBridgeConfig> {
+    let driver = match spec
+        .to_ascii_lowercase()
+        .replace([' ', '-', '_'], "")
+        .as_str()
+    {
+        "drawbridge" | "arduino" => BridgeDriver::DrawBridge,
+        "greaseweazle" | "gw" => BridgeDriver::Greaseweazle,
+        "supercardpro" | "scp" => BridgeDriver::SupercardPro,
+        _ => bail!(
+            "floppy.df{idx} bridge = \"{spec}\" is not a known interface \
+             (drawbridge, greaseweazle, supercardpro)"
+        ),
+    };
+
+    let mode = match raw.bridge_mode.as_deref().map(str::trim) {
+        None => BridgeSpeedMode::default(),
+        Some(s) if s.eq_ignore_ascii_case("compatible") => BridgeSpeedMode::Compatible,
+        Some(s) if s.eq_ignore_ascii_case("stalling") => BridgeSpeedMode::Stalling,
+        // Upstream's enum calls this one Fast; Amiberry's drive-type list, and
+        // so Copperline's, calls it Normal. Both spellings are accepted.
+        Some(s) if s.eq_ignore_ascii_case("normal") || s.eq_ignore_ascii_case("fast") => {
+            BridgeSpeedMode::Normal
+        }
+        // "turbo" is not a read mode: it intercepts AmigaDOS calls rather
+        // than reading the disk, which is not something an emulator modelling
+        // the hardware can use. Refused by name rather than quietly
+        // substituted, so a config carried over from another emulator says
+        // what happened.
+        Some(s) if s.eq_ignore_ascii_case("turbo") => bail!(
+            "floppy.df{idx} bridge_mode = \"{s}\" answers AmigaDOS calls instead of \
+             reading the disk, which Copperline has no use for: it models the drive. \
+             Use compatible, fast or stalling."
+        ),
+        Some(s) => bail!("floppy.df{idx} unknown bridge_mode {s:?}"),
+    };
+    let density = match raw.bridge_density.as_deref().map(str::trim) {
+        None => BridgeDensity::Auto,
+        Some(s) if s.eq_ignore_ascii_case("auto") => BridgeDensity::Auto,
+        Some(s) if s.eq_ignore_ascii_case("dd") => BridgeDensity::Dd,
+        Some(s) if s.eq_ignore_ascii_case("hd") => BridgeDensity::Hd,
+        Some(s) => bail!("floppy.df{idx} bridge_density = \"{s}\" is not one of auto, dd, hd"),
+    };
+    let cable = match raw.bridge_cable.as_deref().map(str::trim) {
+        None => BridgeCable::default(),
+        Some(s) if s.eq_ignore_ascii_case("a") => BridgeCable::DriveA,
+        Some(s) if s.eq_ignore_ascii_case("b") => BridgeCable::DriveB,
+        Some("0") => BridgeCable::Shugart0,
+        Some("1") => BridgeCable::Shugart1,
+        Some("2") => BridgeCable::Shugart2,
+        Some("3") => BridgeCable::Shugart3,
+        Some(s) => bail!("floppy.df{idx} bridge_cable = \"{s}\" is not one of a, b, 0, 1, 2, 3"),
+    };
+    let port = raw
+        .bridge_port
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    Ok(FloppyBridgeConfig {
+        driver,
+        write_protected: raw.write_protected.unwrap_or(true),
+        port,
+        mode,
+        density,
+        cable,
+        smart_speed: raw.bridge_smart_speed.unwrap_or(false),
+        auto_cache: raw.bridge_auto_cache.unwrap_or(false),
+    })
 }
 
 fn validate_floppy_image_path(idx: usize, path: &Path) -> Result<()> {
@@ -4613,6 +4982,7 @@ mod tests {
                     path: Some("game.adf".to_string()),
                     paths: None,
                     write_protected: Some(true),
+                    ..RawFloppyDrive::default()
                 }),
                 ..RawFloppy::default()
             },
@@ -6456,6 +6826,126 @@ mod tests {
         assert!(!text.contains("name"), "{text}");
         let parsed: RawIde = toml::from_str(&text).unwrap();
         assert_eq!(parsed, prioritised);
+    }
+
+    // A build without the feature has no bridges to configure: the keys are
+    // read and ignored, so there is nothing here to assert.
+    #[cfg(feature = "floppybridge")]
+    #[test]
+    fn floppy_bridge_parses_and_defaults() -> Result<()> {
+        let cfg = parse_config(
+            r#"
+            [floppy.df0]
+            bridge = "greaseweazle"
+            [floppy.df1]
+            bridge = "DrawBridge"
+            bridge_port = "/dev/tty.usbmodem1111301"
+            bridge_mode = "stalling"
+            bridge_density = "hd"
+            bridge_cable = "b"
+            bridge_smart_speed = true
+        "#,
+        )?;
+        let df0 = cfg.floppy.bridges[0].as_ref().expect("df0 bridged");
+        assert_eq!(df0.driver, BridgeDriver::Greaseweazle);
+        // Unset options take the defaults: auto-detect the interface, read
+        // without waiting for the index, sense the density, no read-ahead.
+        assert_eq!(df0.port, None);
+        assert_eq!(df0.mode, BridgeSpeedMode::Normal);
+        assert_eq!(df0.density, BridgeDensity::Auto);
+        assert!(!df0.smart_speed && !df0.auto_cache);
+
+        let df1 = cfg.floppy.bridges[1].as_ref().expect("df1 bridged");
+        assert_eq!(df1.driver, BridgeDriver::DrawBridge);
+        assert_eq!(df1.port.as_deref(), Some("/dev/tty.usbmodem1111301"));
+        assert_eq!(df1.mode, BridgeSpeedMode::Stalling);
+        assert_eq!(df1.density, BridgeDensity::Hd);
+        assert_eq!(df1.cable, BridgeCable::DriveB);
+        assert!(df1.smart_speed);
+
+        // Bridging a bay wires the drive in, and leaves it with no image.
+        assert!(cfg.floppy.drives[0].is_none());
+        assert!(cfg.floppy_connected[0] && cfg.floppy_connected[1]);
+        Ok(())
+    }
+
+    // A build without the feature has no bridges to configure: the keys are
+    // read and ignored, so there is nothing here to assert.
+    #[cfg(feature = "floppybridge")]
+    #[test]
+    fn floppy_bridge_rejects_conflicts_and_typos() {
+        // A real drive brings its own disk, so an image alongside it is a
+        // contradiction rather than a fallback.
+        let err = parse_config(
+            r#"
+            [floppy.df0]
+            bridge = "greaseweazle"
+            path = "game.adf"
+        "#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("bridge and a disk image"), "{err}");
+
+        let err = parse_config(
+            r#"
+            [floppy.df0]
+            bridge = "greasewheel"
+        "#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("not a known interface"), "{err}");
+
+        // `off` is how a bay keeps its bridge settings but goes back to images:
+        // the image is then parsed normally, so the only complaint left is the
+        // missing file rather than anything about bridges.
+        let err = parse_config(
+            r#"
+            [floppy.df0]
+            bridge = "off"
+            path = "game.adf"
+        "#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            !err.contains("bridge"),
+            "bridge = off is not a bridge: {err}"
+        );
+
+        // "turbo" is not a read mode at all -- it intercepts AmigaDOS calls --
+        // so it is named in the refusal rather than silently swapped for one
+        // that works, and a config brought over from another emulator
+        // explains itself.
+        // "fast" is a read mode Copperline can use now that it chains
+        // consecutive recordings, so it parses.
+        assert_eq!(
+            parse_config(
+                r#"
+                [floppy.df0]
+                bridge = "greaseweazle"
+                bridge_mode = "normal"
+            "#
+            )
+            .unwrap()
+            .floppy
+            .bridges[0]
+                .as_ref()
+                .unwrap()
+                .mode,
+            BridgeSpeedMode::Normal
+        );
+        let err = parse_config(
+            r#"
+                [floppy.df0]
+                bridge = "greaseweazle"
+                bridge_mode = "turbo"
+            "#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("instead of"), "{err}");
     }
 
     #[test]
