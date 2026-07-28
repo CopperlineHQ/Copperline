@@ -19,13 +19,25 @@ The two halves are consumed exactly as WinUAE and FS-UAE take them.
 
 Built from source on 2026-07-28 from AROS upstream master
 (https://github.com/aros-development-team/AROS) at commit d0370bd757,
-plus the not-yet-merged NTSC boot fix of pull request 876
-(https://github.com/aros-development-team/AROS/pull/876, commit
-c4780bddbd): dosboot and intuition probed BestModeID for a 640x480 mode
-before opening their screens and dead-ended with alert 84000009
-("unknown type of system screen") when it was absent, which made every
-NTSC machine guru and reboot-loop at boot because an NTSC-only display
-database holds nothing taller than 400 lines.
+plus two not-yet-merged fixes:
+
+- the NTSC boot fix of pull request 876
+  (https://github.com/aros-development-team/AROS/pull/876, commit
+  c4780bddbd): dosboot and intuition probed BestModeID for a 640x480 mode
+  before opening their screens and dead-ended with alert 84000009
+  ("unknown type of system screen") when it was absent, which made every
+  NTSC machine guru and reboot-loop at boot because an NTSC-only display
+  database holds nothing taller than 400 lines.
+- the input-event-loss fix of pull request 878
+  (https://github.com/aros-development-team/AROS/pull/878, commit
+  03a6393257): input events delivered before the first consumer
+  registered with the input subsystem were dropped, so the keyboard's
+  power-up key stream (the codes of keys held during boot, drained the
+  moment the driver starts handshaking) never reached keyboard.device's
+  matrix, KBD_READMATRIX read all zeros, and dosboot's hold-SPACE/HELP
+  Early Startup menu check could not fire (Copperline issue 317). The
+  fix buffers pre-consumer events in the input subsystem and replays
+  them to the first consumer that attaches.
 Master includes the boot-time optimizations of pull request 829
 (https://github.com/aros-development-team/AROS/pull/829: single-pass
 romtag scan, fast memory clearing, blitter-drawn boot animation), which cut
