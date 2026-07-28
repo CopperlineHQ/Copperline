@@ -94,6 +94,7 @@ pub enum MenuItem {
     SamplerGain,
     PixelAspect,
     CrtShader,
+    ScreenTint,
     FloppySpeed,
     Fullscreen,
     StatusBar,
@@ -119,9 +120,9 @@ pub enum MenuItem {
 pub fn menu_items(midi_active: bool, sampler_active: bool) -> Vec<MenuItem> {
     let _ = midi_active;
     // 12 leading + up to 2 MIDI + 2 sampler + pixel aspect + CRT shader +
-    // floppy speed + 15 trailing items = 34, sized so appending never
-    // reallocates.
-    let mut items = Vec::with_capacity(34);
+    // screen tint + floppy speed + 15 trailing items = 35, sized so
+    // appending never reallocates.
+    let mut items = Vec::with_capacity(35);
     items.extend([
         MenuItem::MachineConfig,
         MenuItem::FrameAnalyzer,
@@ -147,6 +148,7 @@ pub fn menu_items(midi_active: bool, sampler_active: bool) -> Vec<MenuItem> {
     }
     items.push(MenuItem::PixelAspect);
     items.push(MenuItem::CrtShader);
+    items.push(MenuItem::ScreenTint);
     items.push(MenuItem::FloppySpeed);
     items.extend([
         MenuItem::Fullscreen,
@@ -192,6 +194,8 @@ pub struct MenuLabels<'a> {
     pub pixel_aspect: PixelAspect,
     /// Window shader pass in effect (the CRT Shader item cycles it).
     pub shader: crate::config::ShaderKind,
+    /// Screen tint in effect (the Screen Tint item cycles it).
+    pub tint: crate::config::Tint,
     /// Current `[floppy] speed` value (a percentage, or 0 for turbo).
     pub floppy_speed: u16,
     /// Current MIDI input/output device names (empty when not applicable).
@@ -238,6 +242,11 @@ fn menu_item_label(item: MenuItem, s: MenuLabels) -> String {
         // as the value width changes ("off" vs "scanlines").
         MenuItem::CrtShader => {
             format!("CRT Shader {:>11}", format!("[{}]", s.shader.label()))
+        }
+        // Right-pad like CRT Shader above so the closing bracket stays put
+        // as the value width changes ("off" vs "green").
+        MenuItem::ScreenTint => {
+            format!("Screen Tint {:>7}", format!("[{}]", s.tint.label()))
         }
         // Right-pad like Warp Limit below so the closing bracket stays put
         // as the value width changes (100% vs turbo).
@@ -6539,6 +6548,7 @@ mod tests {
             sampler_input: "",
             sampler_gain: "",
             shader: crate::config::ShaderKind::None,
+            tint: crate::config::Tint::None,
         };
         assert_eq!(
             menu_item_label(MenuItem::Fullscreen, labels(false)),
@@ -6577,6 +6587,7 @@ mod tests {
             sampler_input: "",
             sampler_gain: "",
             shader: crate::config::ShaderKind::None,
+            tint: crate::config::Tint::None,
         };
         // "on" means the bar is shown.
         assert_eq!(
@@ -6661,6 +6672,10 @@ mod tests {
                                             sampler_input: long,
                                             sampler_gain: "-24 dB",
                                             shader,
+                                            // The widest tint value; the
+                                            // {:>7} pad makes every other
+                                            // one the same width.
+                                            tint: crate::config::Tint::Green,
                                         };
                                         check(item, labels);
                                     }
@@ -7607,6 +7622,7 @@ mod tests {
             sampler_input: "",
             sampler_gain: "",
             shader: crate::config::ShaderKind::None,
+            tint: crate::config::Tint::None,
         };
         let panel_has_title_bar = |frame: &[u8], panel: &Panel| {
             let rect = panel_rect(panel);
@@ -7653,6 +7669,7 @@ mod tests {
                 sampler_input: "",
                 sampler_gain: "",
                 shader: crate::config::ShaderKind::None,
+                tint: crate::config::Tint::None,
             },
         );
         let menu = menu_rect(menu_items(false, false).len());
@@ -7708,6 +7725,7 @@ mod tests {
                 sampler_input: "",
                 sampler_gain: "",
                 shader: crate::config::ShaderKind::None,
+                tint: crate::config::Tint::None,
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -7751,6 +7769,7 @@ mod tests {
                 sampler_input: "",
                 sampler_gain: "",
                 shader: crate::config::ShaderKind::None,
+                tint: crate::config::Tint::None,
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -7810,6 +7829,7 @@ mod tests {
                 sampler_input: "",
                 sampler_gain: "",
                 shader: crate::config::ShaderKind::None,
+                tint: crate::config::Tint::None,
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -7893,6 +7913,7 @@ mod tests {
                 sampler_input: "",
                 sampler_gain: "",
                 shader: crate::config::ShaderKind::None,
+                tint: crate::config::Tint::None,
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -7986,6 +8007,7 @@ mod tests {
                 sampler_input: "",
                 sampler_gain: "",
                 shader: crate::config::ShaderKind::None,
+                tint: crate::config::Tint::None,
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -8053,6 +8075,7 @@ mod tests {
                 sampler_input: "",
                 sampler_gain: "",
                 shader: crate::config::ShaderKind::None,
+                tint: crate::config::Tint::None,
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -8121,6 +8144,7 @@ mod tests {
                 sampler_input: "",
                 sampler_gain: "",
                 shader: crate::config::ShaderKind::None,
+                tint: crate::config::Tint::None,
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -8242,6 +8266,7 @@ mod tests {
                 sampler_input: "",
                 sampler_gain: "",
                 shader: crate::config::ShaderKind::None,
+                tint: crate::config::Tint::None,
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -8323,6 +8348,7 @@ mod tests {
                 sampler_input: "",
                 sampler_gain: "",
                 shader: crate::config::ShaderKind::None,
+                tint: crate::config::Tint::None,
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -8415,6 +8441,7 @@ mod tests {
                 sampler_input: "",
                 sampler_gain: "",
                 shader: crate::config::ShaderKind::None,
+                tint: crate::config::Tint::None,
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -8546,6 +8573,7 @@ mod tests {
                 sampler_input: "",
                 sampler_gain: "",
                 shader: crate::config::ShaderKind::None,
+                tint: crate::config::Tint::None,
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -8667,6 +8695,7 @@ mod tests {
                 sampler_input: "",
                 sampler_gain: "",
                 shader: crate::config::ShaderKind::None,
+                tint: crate::config::Tint::None,
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -8717,6 +8746,7 @@ mod tests {
                 sampler_input: "",
                 sampler_gain: "",
                 shader: crate::config::ShaderKind::None,
+                tint: crate::config::Tint::None,
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -8807,6 +8837,7 @@ mod tests {
                 sampler_input: "",
                 sampler_gain: "",
                 shader: crate::config::ShaderKind::None,
+                tint: crate::config::Tint::None,
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -8864,6 +8895,7 @@ mod tests {
                 sampler_input: "",
                 sampler_gain: "",
                 shader: crate::config::ShaderKind::None,
+                tint: crate::config::Tint::None,
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -8914,6 +8946,7 @@ mod tests {
                 sampler_input: "",
                 sampler_gain: "",
                 shader: crate::config::ShaderKind::None,
+                tint: crate::config::Tint::None,
             },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
@@ -8967,6 +9000,7 @@ mod tests {
             sampler_input: "",
             sampler_gain: "",
             shader: crate::config::ShaderKind::None,
+            tint: crate::config::Tint::None,
         };
         let mut frame = vec![0u8; w * h * 4];
         let mut state = LauncherState::new(launcher::MachineSetup::default());

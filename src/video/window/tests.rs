@@ -16,20 +16,20 @@ use super::{
     rawkey_transition_is_duplicate, reboot_button_rect, repeated_main_key_should_drop, rgba,
     short_status_error, shorten_status_paths, shot_button_rect, should_render_emulated_frame,
     standard_window_top_row, status_with_latched_fdd_track, take_integral_mouse_delta,
-    texture_height, texture_width, tv_aperture_source_row, tv_source_h_bounds,
-    volume_percent_from_pos, volume_slider_track_rect, BarControl, DriveBar, JoystickInputMode,
-    MediaBar, StatusBarView, ToolPanelKind, AMIGA_RAWKEY_LEFT_ALT, AMIGA_RAWKEY_LEFT_SHIFT,
-    AMIGA_RAWKEY_RIGHT_ALT, AMIGA_RAWKEY_RIGHT_SHIFT, BUTTON_GLYPH, BUTTON_GLYPH_DISABLED, CD_BODY,
-    CD_LED_OFF, CD_LED_ON, DISK_BODY, DISK_BODY_SHADOW, DISK_LABEL, FDD_LED_OFF, FDD_LED_ON,
-    HDD_LED_OFF, HDD_LED_ON, POWER_GLYPH_OFF, POWER_GLYPH_ON, POWER_LED_BRIGHT, POWER_LED_NORMAL,
-    POWER_LED_OFF, STANDARD_PAL_VISIBLE_LINES, STANDARD_PAL_VISIBLE_START_VPOS, STATUS_BG,
-    TRACK_SEGMENT_OFF, TRACK_SEGMENT_ON, TV_PAL_LIVE_PAD_X, TV_PAL_PRESENT_HEIGHT,
-    TV_PAL_PRESENT_SOURCE_X, TV_PAL_PRESENT_SOURCE_Y, TV_PAL_PRESENT_WIDTH, VOLUME_FILL,
-    VOLUME_GLYPH_X,
+    texture_height, texture_width, tint_display_rows, tint_lut, tint_rows_in_place,
+    tv_aperture_source_row, tv_source_h_bounds, volume_percent_from_pos, volume_slider_track_rect,
+    BarControl, DriveBar, JoystickInputMode, MediaBar, StatusBarView, ToolPanelKind,
+    AMIGA_RAWKEY_LEFT_ALT, AMIGA_RAWKEY_LEFT_SHIFT, AMIGA_RAWKEY_RIGHT_ALT,
+    AMIGA_RAWKEY_RIGHT_SHIFT, BUTTON_GLYPH, BUTTON_GLYPH_DISABLED, CD_BODY, CD_LED_OFF, CD_LED_ON,
+    DISK_BODY, DISK_BODY_SHADOW, DISK_LABEL, FDD_LED_OFF, FDD_LED_ON, HDD_LED_OFF, HDD_LED_ON,
+    POWER_GLYPH_OFF, POWER_GLYPH_ON, POWER_LED_BRIGHT, POWER_LED_NORMAL, POWER_LED_OFF,
+    STANDARD_PAL_VISIBLE_LINES, STANDARD_PAL_VISIBLE_START_VPOS, STATUS_BG, TRACK_SEGMENT_OFF,
+    TRACK_SEGMENT_ON, TV_PAL_LIVE_PAD_X, TV_PAL_PRESENT_HEIGHT, TV_PAL_PRESENT_SOURCE_X,
+    TV_PAL_PRESENT_SOURCE_Y, TV_PAL_PRESENT_WIDTH, VOLUME_FILL, VOLUME_GLYPH_X,
 };
 use crate::audio::{AudioSink, NullSink};
 use crate::bus::{FrontPanelStatus, RenderRegisterSnapshot};
-use crate::config::{Overscan, WarpSpeed};
+use crate::config::{Overscan, Tint, WarpSpeed};
 use crate::heatmap;
 use crate::video::{FB_HEIGHT, FB_PIXELS, FB_WIDTH};
 use std::cell::RefCell;
@@ -2004,6 +2004,116 @@ fn present_frame_copy_downmaps_35ns_canvas_on_single_scale_texture() {
 }
 
 #[test]
+fn tint_off_builds_no_lut() {
+    assert!(tint_lut(Tint::None).is_none());
+}
+
+#[test]
+fn bw_tint_lut_is_the_identity_on_grey() {
+    let lut = tint_lut(Tint::Bw).unwrap();
+    for level in 0..=255u32 {
+        assert_eq!(lut[level as usize], rgba(level, level, level));
+    }
+}
+
+/// Every tint is a phosphor-style ramp: black stays black, the top end is
+/// bright, alpha stays opaque, and no channel dips along the way (beyond
+/// the one-step wobble the CSS chain's inter-stage clamping can produce).
+#[test]
+fn tint_luts_ramp_from_black_to_bright() {
+    for tint in [Tint::Bw, Tint::Green, Tint::Amber, Tint::Sepia] {
+        let lut = tint_lut(tint).unwrap();
+        assert_eq!(lut[0], rgba(0, 0, 0), "{tint:?} must map black to black");
+        let mut prev = [0u8; 4];
+        for (level, px) in lut.iter().enumerate() {
+            let cur = px.to_le_bytes();
+            assert_eq!(cur[3], 0xFF, "{tint:?} level {level} must stay opaque");
+            for c in 0..3 {
+                assert!(
+                    cur[c].saturating_add(2) >= prev[c],
+                    "{tint:?} channel {c} dips at level {level}: {} -> {}",
+                    prev[c],
+                    cur[c]
+                );
+            }
+            prev = cur;
+        }
+        let top = lut[255].to_le_bytes();
+        assert!(
+            top[..3].iter().any(|&v| v >= 200),
+            "{tint:?} top of the ramp is dim: {top:?}"
+        );
+    }
+}
+
+/// Each tint's mid-grey lands on its nominal hue: green phosphor is
+/// green-dominant, amber and sepia run warm (r > g > b).
+#[test]
+fn tint_luts_favour_their_phosphor_colour() {
+    let mid = |tint| tint_lut(tint).unwrap()[128].to_le_bytes();
+
+    let [r, g, b, _] = mid(Tint::Green);
+    assert!(
+        g > r.saturating_add(50) && g > b.saturating_add(50),
+        "green mid: {r} {g} {b}"
+    );
+
+    let [r, g, b, _] = mid(Tint::Amber);
+    assert!(
+        r > g.saturating_add(50) && g > b.saturating_add(50),
+        "amber mid: {r} {g} {b}"
+    );
+
+    let [r, g, b, _] = mid(Tint::Sepia);
+    assert!(r > g && g > b, "sepia mid: {r} {g} {b}");
+}
+
+/// The per-pixel step collapses a colour to its luma and takes the ramp
+/// entry: a pure-green pixel and the grey of its luma tint identically,
+/// and the alpha byte passes through.
+#[test]
+fn tint_rows_collapse_colour_to_luma() {
+    let lut = tint_lut(Tint::Green).unwrap();
+    let luma_of_green = 182u8; // (183 * 255) >> 8: the green weight on a full channel
+    let mut px = [
+        rgba(0, 255, 0).to_le_bytes(),
+        rgba(
+            u32::from(luma_of_green),
+            u32::from(luma_of_green),
+            u32::from(luma_of_green),
+        )
+        .to_le_bytes(),
+    ]
+    .concat();
+    tint_rows_in_place(&mut px, &lut);
+    let expected = lut[usize::from(luma_of_green)].to_le_bytes();
+    assert_eq!(&px[0..4], &expected);
+    assert_eq!(&px[4..8], &expected);
+}
+
+/// The in-place pass covers exactly the display region of the composited
+/// frame: the status-bar rows below it keep their pixels.
+#[test]
+fn tint_display_rows_leave_the_status_bar_alone() {
+    let scale = 1;
+    let lut = tint_lut(Tint::Bw).unwrap();
+    let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+    let saturated = rgba(255, 0, 0).to_le_bytes();
+    for px in frame.chunks_exact_mut(4) {
+        px.copy_from_slice(&saturated);
+    }
+    tint_display_rows(&mut frame, scale, &lut);
+    let display_bytes = present_height() * scale * texture_width(scale) * 4;
+    let grey_red = lut[usize::from(53u8)].to_le_bytes(); // (54 * 255) >> 8
+    for px in frame[..display_bytes].chunks_exact(4) {
+        assert_eq!(px, grey_red, "display pixel left untinted");
+    }
+    for px in frame[display_bytes..].chunks_exact(4) {
+        assert_eq!(px, saturated, "status-bar pixel was tinted");
+    }
+}
+
+#[test]
 fn tv_window_copy_centres_reference_aperture_in_live_texture() {
     use crate::video::deinterlace::{OUT_HEIGHT, OUT_PIXELS};
     let scale = 1;
@@ -2535,6 +2645,7 @@ fn test_app_with_audio_cpu_and_program(
         0.0,
         crate::config::ShaderMode::None,
         1.0,
+        crate::config::Tint::None,
         false,
         false,
         crate::config::WarpSpeed::Max,

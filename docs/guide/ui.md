@@ -189,6 +189,14 @@ tool window or overlay.
   screenshots, frame dumps and recordings are never shader-processed -- and
   it steps aside for the frames it cannot sensibly draw: while this menu or
   any panel is open, under RTG, and in programmable multisync scan modes.
+- **Screen Tint**: cycles the monochrome-monitor tint over the picture --
+  **off** (full colour), **bw**, **green** and **amber** (the two classic
+  monochrome phosphors), and **sepia** -- the same looks as the web
+  frontend's *Screen* selector. Session-only, like the shader; the
+  start-up tint is `[display] tint` (see
+  [Configuration](configuration.md)). A window effect only: captures stay
+  untinted, this menu and the status bar keep their colours, and RTG
+  scanout is never tinted.
 - **Floppy Speed**: cycles the emulated drive speed through 100% (real
   speed), 200%, 400%, 800%, and turbo (disk DMA transfers complete almost
   instantly). Changes apply to the live machine immediately. The start-up
@@ -318,7 +326,7 @@ The layout is:
   and *A/V & Emu*, split by a row of category buttons at the top into
   **Audio** (output device, channel mode, stereo separation, filter, floppy
   sounds and volume), **Video** (start fullscreen, status bar, overscan, pixel
-  aspect, phosphor, CRT shader and shader strength), and **Emulation**
+  aspect, screen tint, phosphor, CRT shader and shader strength), and **Emulation**
   (power-on, warp speed, pacing, realtime priority) -- opening on Audio, and
   switched freely between the three.
 - **Settings rows** (right pane). `[<]`/`[>]` step through a value, On/Off
