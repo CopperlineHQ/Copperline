@@ -209,6 +209,10 @@ pub struct Config {
     /// Presentation pixel aspect: how emulated scanlines map to host
     /// rows in the window and in screenshots. See [`PixelAspect`].
     pub pixel_aspect: PixelAspect,
+    /// Motion-adaptive deinterlacing of LACE content (on by default).
+    /// Off, every field is plain line-doubled as it arrives, which shows
+    /// interlace bob/flicker like a real TV without persistence.
+    pub deinterlace: bool,
     /// CRT phosphor persistence: the fraction of the previous presented
     /// frame each new frame keeps (0.0 = off). Approximates the phosphor
     /// decay that fuses field-rate dither and interlace flicker on a
@@ -1470,6 +1474,7 @@ impl Default for Config {
             floppy_playlists: std::array::from_fn(|_| Vec::new()),
             overscan: Overscan::Tv,
             pixel_aspect: PixelAspect::Tv,
+            deinterlace: true,
             phosphor: 0.0,
             shader: ShaderMode::None,
             shader_strength: 1.0,
@@ -1952,6 +1957,10 @@ pub(crate) struct RawDisplay {
     /// pixels; a lo-res display is an exact 2x2 of its bitmap).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) pixel_aspect: Option<String>,
+    /// Motion-adaptive deinterlacing of interlaced content (default
+    /// true); false line-doubles every field as it arrives.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) deinterlace: Option<bool>,
     /// CRT phosphor persistence fraction, 0.0 (off, default) to 0.95.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) phosphor: Option<f32>,
@@ -2783,6 +2792,7 @@ impl TryFrom<RawConfig> for Config {
             None => defaults.pixel_aspect,
             Some(s) => parse_pixel_aspect(s)?,
         };
+        let deinterlace = raw.display.deinterlace.unwrap_or(defaults.deinterlace);
         let phosphor = match raw.display.phosphor {
             None => defaults.phosphor,
             Some(p) if (0.0..=0.95).contains(&p) => p,
@@ -3229,6 +3239,7 @@ impl TryFrom<RawConfig> for Config {
             floppy_playlists,
             overscan,
             pixel_aspect,
+            deinterlace,
             phosphor,
             shader,
             shader_strength,
@@ -4158,6 +4169,19 @@ pub fn resolve_phosphor(from_config: f32) -> f32 {
     }
 }
 
+/// Resolve deinterlacing: the `COPPERLINE_DEINTERLACE` env var overrides
+/// the `[display] deinterlace` config for one run (any value other than
+/// 0/false/off/no enables it).
+pub fn resolve_deinterlace(from_config: bool) -> bool {
+    match crate::envcfg::var("COPPERLINE_DEINTERLACE") {
+        Some(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        ),
+        None => from_config,
+    }
+}
+
 /// Resolve the presented overscan mode: the `COPPERLINE_OVERSCAN` env var
 /// (full/tv) overrides the `[display] overscan` config for one run. The
 /// image-regression harness pins "full" so its baselines always carry the
@@ -5018,6 +5042,14 @@ mod tests {
         assert_eq!(cfg.phosphor, 0.4);
         assert!(parse_config("[display]\nphosphor = 1.5").is_err());
         assert!(parse_config("[display]\nphosphor = -0.1").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn display_deinterlace_parses_and_defaults_on() -> Result<()> {
+        assert!(parse_config("")?.deinterlace);
+        assert!(!parse_config("[display]\ndeinterlace = false")?.deinterlace);
+        assert!(parse_config("[display]\ndeinterlace = true")?.deinterlace);
         Ok(())
     }
 

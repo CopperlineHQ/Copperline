@@ -448,6 +448,7 @@ recorded in [](../internals/chipset)).
 [display]
 overscan = "tv"       # "tv" (default) or "full"
 pixel_aspect = "tv"   # "tv" (default, 4:3 CRT) or "square" (exact 2x2 lo-res)
+deinterlace = true    # motion-adaptive interlace weaving (default true)
 phosphor = 0.0        # CRT persistence fraction, 0.0 (off) to 0.95
 shader = "none"       # "none" (default), "scanlines", "mask", "crt", or a .wgsl file
 shader_strength = 1.0 # how strongly the shader is mixed in, 0.0-1.0
@@ -476,6 +477,14 @@ slightly taller than a real CRT picture, but exact for side-by-side pixel
 comparison with square-pixel emulators. The menu's *Pixel Aspect* item
 flips the mode live without touching the config, and
 `COPPERLINE_PIXEL_ASPECT=tv|square` overrides it for a single run.
+
+`deinterlace` controls how interlaced (LACE) displays are presented. On
+(the default), a motion-adaptive deinterlacer weaves the two fields into a
+full-height picture where the content is static and interpolates where it
+moves, recovering the full vertical resolution without combing. Off, every
+field is simply line-doubled as it arrives, which shows interlace bob and
+flicker much as a TV without persistence would. `COPPERLINE_DEINTERLACE=0`
+overrides the config for a single run.
 
 `phosphor` blends each presented frame with a fraction of the previous
 one, approximating the exponential decay of CRT phosphor. Software that

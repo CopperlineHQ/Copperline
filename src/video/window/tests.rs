@@ -2642,6 +2642,7 @@ fn test_app_with_audio_cpu_and_program(
         std::array::from_fn(|_| Vec::new()),
         [true; 4],
         crate::config::Overscan::Full,
+        true,
         0.0,
         crate::config::ShaderMode::None,
         1.0,

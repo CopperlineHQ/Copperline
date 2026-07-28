@@ -589,6 +589,12 @@ pub struct App {
     /// buffer that the window texture, screenshots, and frame dumps
     /// read (see [`deinterlace`](super::deinterlace)).
     deinterlacer: Deinterlacer,
+    /// The machine's resolved deinterlace and phosphor settings. Carried
+    /// in every render job so the worker's own deinterlacer follows
+    /// them; also applied to `deinterlacer` for the synchronous fallback
+    /// path.
+    deinterlace: bool,
+    phosphor: f32,
     /// Active presentation buffer, already deinterlaced/line-doubled and
     /// post-processed. The first `present_rows * FB_WIDTH` pixels are valid.
     present_fb: Vec<u32>,
@@ -996,6 +1002,13 @@ struct RenderJob {
     input: bitplane::RenderInput,
     h_shift: usize,
     overscan: Overscan,
+    /// Deinterlacing and phosphor persistence for this frame. They travel
+    /// per job (like `h_shift`/`overscan`) so the worker's deinterlacer
+    /// always follows the App's current settings; a value captured at
+    /// worker spawn would go stale when the launcher starts a machine
+    /// with a different config.
+    deinterlace: bool,
+    phosphor: f32,
     presentation_fb: Vec<u32>,
 }
 
@@ -1019,15 +1032,23 @@ struct RenderWorker {
 }
 
 impl RenderWorker {
-    fn new(phosphor: f32) -> Self {
+    fn new() -> Self {
         let (job_tx, job_rx) = mpsc::sync_channel::<RenderJob>(1);
         let (result_tx, result_rx) = mpsc::channel::<RenderWorkerResult>();
         let handle = std::thread::Builder::new()
             .name("copperline-render".to_string())
             .spawn(move || {
                 let mut fb = vec![0u32; MAX_CANVAS_PIXELS];
-                let mut deinterlacer = Deinterlacer::with_phosphor(phosphor);
+                let mut deinterlacer = Deinterlacer::new();
+                let mut last_generation = None;
                 while let Ok(job) = job_rx.recv() {
+                    // A generation bump marks a presentation discontinuity
+                    // (machine swap, reset, state load): nothing from the
+                    // previous stream may weave or glow into this frame.
+                    if last_generation != Some(job.generation) {
+                        deinterlacer.reset_history();
+                        last_generation = Some(job.generation);
+                    }
                     let result = render_job_to_presentation(job, &mut fb, &mut deinterlacer);
                     if result_tx.send(result).is_err() {
                         break;
@@ -1094,6 +1115,7 @@ impl App {
         disk_playlists: [Vec<PathBuf>; 4],
         disk_write_protected: [bool; 4],
         overscan: Overscan,
+        deinterlace: bool,
         phosphor: f32,
         shader: crate::config::ShaderMode,
         shader_strength: f32,
@@ -1126,7 +1148,7 @@ impl App {
             || frame_dump.is_some();
         let render_worker = threaded_render_enabled().then(|| {
             info!("threaded render pipeline enabled");
-            RenderWorker::new(phosphor)
+            RenderWorker::new()
         });
         // MIDI needs a &mut to probe the sink; rebind so the parameter is not
         // needlessly `mut` in a build without the feature.
@@ -1174,7 +1196,9 @@ impl App {
             sampler,
             sampler_stream: None,
             fb: vec![0u32; MAX_CANVAS_PIXELS],
-            deinterlacer: Deinterlacer::with_phosphor(phosphor),
+            deinterlacer: Deinterlacer::with_settings(deinterlace, phosphor),
+            deinterlace,
+            phosphor,
             present_fb: vec![0u32; FB_WIDTH * OUT_HEIGHT],
             present_rows: OUT_HEIGHT,
             present_width: FB_WIDTH,
@@ -5783,8 +5807,11 @@ impl App {
         }
         self.keyboard_joy_held = [keymap::HeldKeys::default(); keymap::MAPPING_COUNT];
         self.about_machine_lines = crate::config::about_machine_lines(cfg);
-        self.deinterlacer =
-            Deinterlacer::with_phosphor(crate::config::resolve_phosphor(cfg.phosphor));
+        // The threaded path picks the new settings up from the next render
+        // job; the recreated deinterlacer covers the synchronous fallback.
+        self.deinterlace = crate::config::resolve_deinterlace(cfg.deinterlace);
+        self.phosphor = crate::config::resolve_phosphor(cfg.phosphor);
+        self.deinterlacer = Deinterlacer::with_settings(self.deinterlace, self.phosphor);
         let shader = crate::config::resolve_shader(cfg.shader.clone());
         self.custom_shader_path = match &shader {
             crate::config::ShaderMode::Custom(path) => Some(path.clone()),
@@ -8998,6 +9025,8 @@ impl App {
             input,
             h_shift,
             overscan: self.overscan,
+            deinterlace: self.deinterlace,
+            phosphor: self.phosphor,
             presentation_fb: std::mem::take(&mut self.render_recycle_fb),
         };
         let send_result = self

@@ -389,6 +389,7 @@ pub enum LauncherField {
     Overscan,
     PixelAspect,
     Tint,
+    Deinterlace,
     Phosphor,
     Shader,
     ShaderStrength,
@@ -632,12 +633,13 @@ const PARALLEL_ROWS_SAMPLER: [Row; 3] = [
 const ETHERNET_ROWS: [Row; 1] = [row(F::Ethernet, "  A2065 board", Cycle)];
 // The A/V & Emu tab is split into three categories switched via the top nav row.
 // The Video category also carries the CRT-shader controls (a picture setting).
-const VIDEO_ROWS: [Row; 8] = [
+const VIDEO_ROWS: [Row; 9] = [
     row(F::StartFullscreen, "Start fullscreen", Toggle),
     row(F::ShowStatusBar, "Status bar", Toggle),
     row(F::Overscan, "Overscan", Cycle),
     row(F::PixelAspect, "Pixel aspect", Cycle),
     row(F::Tint, "Screen tint", Cycle),
+    row(F::Deinterlace, "Deinterlace", Toggle),
     row(F::Phosphor, "Phosphor", Cycle),
     row(F::Shader, "CRT shader", Cycle),
     row(F::ShaderStrength, "Shader strength", Cycle),
@@ -1064,6 +1066,8 @@ pub struct MachineSetup {
     audio_filter: AudioFilterMode,
     overscan: Overscan,
     pixel_aspect: PixelAspect,
+    /// Motion-adaptive interlace weaving ([display] deinterlace).
+    deinterlace: bool,
     phosphor: f32,
     /// Window shader pass ([display] shader).
     shader: ShaderMode,
@@ -1215,6 +1219,7 @@ impl MachineSetup {
             audio_filter: cfg.audio.filter,
             overscan: cfg.overscan,
             pixel_aspect: cfg.pixel_aspect,
+            deinterlace: cfg.deinterlace,
             phosphor: cfg.phosphor,
             shader: cfg.shader.clone(),
             shader_custom: match &cfg.shader {
@@ -1508,6 +1513,9 @@ impl MachineSetup {
         if self.pixel_aspect != base.pixel_aspect {
             raw.display.pixel_aspect = Some(pixel_aspect_name(self.pixel_aspect).to_string());
         }
+        if self.deinterlace != base.deinterlace {
+            raw.display.deinterlace = Some(self.deinterlace);
+        }
         if (self.phosphor - base.phosphor).abs() > 1e-6 {
             raw.display.phosphor = Some(self.phosphor);
         }
@@ -1699,6 +1707,7 @@ impl MachineSetup {
         self.z3_ram = base.z3_ram_bytes;
         self.overscan = base.overscan;
         self.pixel_aspect = base.pixel_aspect;
+        self.deinterlace = base.deinterlace;
         self.phosphor = base.phosphor;
         // The remembered user-shader path survives: it came from the config
         // file, not from the profile, and the picker needs it to offer
@@ -1907,6 +1916,7 @@ impl MachineSetup {
             F::FloppySounds => self.floppy_sounds,
             F::StartFullscreen => self.start_fullscreen,
             F::ShowStatusBar => self.show_status_bar,
+            F::Deinterlace => self.deinterlace,
             F::PowerOn => self.power_on,
             F::RealtimePriority => self.realtime_priority,
             _ => false,
@@ -2507,6 +2517,7 @@ impl MachineSetup {
             F::FloppySounds => self.floppy_sounds = !self.floppy_sounds,
             F::StartFullscreen => self.start_fullscreen = !self.start_fullscreen,
             F::ShowStatusBar => self.show_status_bar = !self.show_status_bar,
+            F::Deinterlace => self.deinterlace = !self.deinterlace,
             F::PowerOn => self.power_on = !self.power_on,
             F::RealtimePriority => self.realtime_priority = !self.realtime_priority,
             _ => {}
@@ -3716,6 +3727,23 @@ mod tests {
         s.cycle(LauncherField::Tint, false);
         assert_eq!(s.value_label(LauncherField::Tint), "Sepia");
         assert_eq!(s.to_raw().display.tint, Some("sepia".to_string()));
+    }
+
+    #[test]
+    fn deinterlace_round_trips_through_raw() {
+        let mut s = MachineSetup::default();
+        // On is the baseline, so nothing is written for it.
+        assert!(s.toggle_value(LauncherField::Deinterlace));
+        assert_eq!(s.to_raw().display.deinterlace, None);
+
+        s.toggle(LauncherField::Deinterlace);
+        assert!(!s.toggle_value(LauncherField::Deinterlace));
+        assert_eq!(s.to_raw().display.deinterlace, Some(false));
+
+        // The written config has to load back into the same setting.
+        assert!(!s.build_config().expect("valid config").deinterlace);
+        let reloaded = MachineSetup::from_raw(&s.to_raw()).expect("valid raw");
+        assert!(!reloaded.toggle_value(LauncherField::Deinterlace));
     }
 
     #[test]
