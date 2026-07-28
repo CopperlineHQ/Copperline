@@ -126,17 +126,111 @@ function refreshBootButton() {
   updateStateButtons();
 }
 
+// The AROS ROMs the page fetched, kept beyond the boot stash: forgetting a
+// remembered Kickstart falls back to these without another download.
+let arosRom = null; // { rom, ext, label: 'AROS' }
+// Whether a Kickstart was explicitly chosen this session (picker, drop,
+// URL, list). The remembered ROM only ever fills in when nothing was: an
+// explicit pick always wins, whichever of the two resolves first.
+let romChosenExplicitly = false;
+
 // Route picked or dropped Kickstart bytes: live-swap a running machine, or
 // stash them for the boot button. The stash is updated on a live swap too,
 // so a reboot fits the ROM chosen last, not the one from the original boot;
 // a rejected image throws before the stash is touched and changes nothing.
+// A ROM that fits is remembered in the browser (IndexedDB), so the next
+// visit boots it without the picker; see the saved-states panel to forget.
 function fitRom(bytes, label) {
   if (emu) emu.load_rom(bytes, undefined);
   bootRom = { rom: bytes, ext: null, label };
+  romChosenExplicitly = true;
   refreshBootButton();
   setLoadStatus(
     emu ? `Kickstart loaded: ${label} - machine power-cycled` : `will boot ${label}`,
   );
+  persistRom(bytes, label);
+}
+
+// --- remembered Kickstart ----------------------------------------------
+// The loaded ROM sticks in browser storage so a returning visitor's page
+// boots their Kickstart with no picker round trip, the way the quick state
+// does for a whole session. Only an explicitly chosen ROM is stored (AROS
+// is bundled and never needs remembering), and only after the core
+// accepted it. Everything stays in this browser; nothing is uploaded.
+
+let storedRomInfo = null; // { label, size } of the remembered ROM, when any
+
+async function persistRom(bytes, label) {
+  let failure = null;
+  try {
+    await withDb(ROM_STORE, 'readwrite', (store) =>
+      store.put({ rom: bytes, label, saved: new Date() }, ROM_SLOT),
+    );
+  } catch (e) {
+    failure = e;
+  }
+  if (failure) {
+    // The fit itself succeeded; only the remembering did not. Say so once
+    // rather than failing silently - a visitor counting on it would
+    // otherwise discover the gap a session too late.
+    const hint =
+      failure.name === 'QuotaExceededError' ? ' - browser storage is full' : '';
+    showOsd(`could not remember the Kickstart: ${failure.message ?? failure}${hint}`);
+    return;
+  }
+  storedRomInfo = { label, size: bytes.length };
+  refreshStatesPanel();
+}
+
+// Startup probe: put the remembered ROM in the boot stash unless something
+// explicit (picker, ?kick=, config) already claimed it. Racing the AROS
+// fetch is fine either way: whoever lands second sees the other's choice
+// (load() only installs AROS into an empty stash, and this only replaces
+// nothing or AROS).
+async function probeStoredRom() {
+  let record;
+  try {
+    record = await withDb(ROM_STORE, 'readonly', (store) => store.get(ROM_SLOT));
+  } catch {
+    return;
+  }
+  if (!record?.rom) return;
+  storedRomInfo = { label: record.label ?? 'Kickstart', size: record.rom.length };
+  if (romChosenExplicitly || (bootRom && bootRom.label !== 'AROS')) return;
+  bootRom = { rom: record.rom, ext: null, label: storedRomInfo.label, remembered: true };
+  refreshBootButton();
+  if (wasm) {
+    setLoadStatus(`ready - boots ${storedRomInfo.label} (remembered in this browser)`);
+  }
+}
+
+async function forgetStoredRom() {
+  try {
+    await withDb(ROM_STORE, 'readwrite', (store) => store.delete(ROM_SLOT));
+  } catch (e) {
+    setLoadStatus(`could not forget the Kickstart: ${e.message ?? e}`);
+    return;
+  }
+  storedRomInfo = null;
+  // The next boot goes back to AROS; a running machine keeps the ROM that
+  // is physically fitted, exactly like ejecting the box the chip came in.
+  if (bootRom?.remembered) {
+    // The AROS stash can still be empty here: its download may be in
+    // flight (load() adopts the empty boot stash when it lands) or may
+    // have failed (the boot button goes back to disabled, exactly as
+    // before anything was picked).
+    bootRom = arosRom;
+    refreshBootButton();
+  }
+  // Say what the boot button will actually build: the AROS fallback, a
+  // Kickstart picked this session (forgetting the memory does not unfit
+  // an explicit choice), or nothing yet while AROS is still downloading.
+  setLoadStatus(
+    bootRom
+      ? `Kickstart forgotten - the boot button builds ${bootRom.label}`
+      : 'Kickstart forgotten - waiting for the AROS ROM',
+  );
+  refreshStatesPanel();
 }
 
 // Route disk bytes from any source (picker, URL, drop): insert into a
@@ -290,6 +384,7 @@ async function load() {
     wasm = await init();
     buildInfo = WebEmu.build_info?.() ?? null;
     populateMachineSelect();
+    populateVideoSelect();
   } catch (e) {
     setLoadStatus(`failed to load the emulator: ${e.message ?? e}`);
     console.error(e);
@@ -301,16 +396,27 @@ async function load() {
       fetchBytes('./aros/aros-amiga-m68k-rom.bin', 'AROS ROM'),
       fetchBytes('./aros/aros-amiga-m68k-ext.bin', 'AROS extended ROM'),
     ]);
-    // A Kickstart picked while the ROMs were downloading wins.
+    // Kept beyond the stash: forgetting a remembered Kickstart falls back
+    // to AROS without re-downloading it.
+    arosRom = { rom, ext, label: 'AROS' };
+    // A Kickstart picked (or remembered) while the ROMs were downloading
+    // wins; a ?kick= failure rides along either way.
+    const problem = romUrlProblem ? ` (${romUrlProblem})` : '';
     if (!bootRom) {
-      bootRom = { rom, ext, label: 'AROS' };
+      bootRom = arosRom;
       // A disk that landed first (file picker or ?df0= fetch) keeps its
-      // place in the status line, and a ?kick= failure rides along.
-      const problem = romUrlProblem ? ` (${romUrlProblem})` : '';
+      // place in the status line.
       setLoadStatus(
         (pendingDisk
           ? `ready - DF0: ${pendingDisk.name} inserts at boot`
           : 'ready - boots the open-source AROS ROM') + problem,
+      );
+    } else {
+      setLoadStatus(
+        `ready - boots ${bootRom.label}` +
+          (bootRom.remembered ? ' (remembered in this browser)' : '') +
+          (pendingDisk ? ` - DF0: ${pendingDisk.name} inserts at boot` : '') +
+          problem,
       );
     }
   } catch (e) {
@@ -336,8 +442,10 @@ async function boot() {
     // until a ROM exists), but a save state carries its own ROM and
     // replaces the whole machine, so a restore can start from one.
     // The model argument picks the machine profile; undefined (an older
-    // shell, or the list not knowing better) builds the default A500.
-    const machine = new WebEmu(machineModel ?? undefined);
+    // shell, or the list not knowing better) builds the default A500. The
+    // video argument picks PAL/NTSC the same way; a bundle older than both
+    // ignores the extra arguments.
+    const machine = new WebEmu(machineModel ?? undefined, videoStandard ?? undefined);
     if (bootRom) machine.load_rom(bootRom.rom, bootRom.ext ?? undefined);
 
     // A reboot after an emulator error builds a new audio stack; close the
@@ -381,6 +489,7 @@ async function boot() {
     if (monoAudioToggle) machine.set_mono_audio(monoAudioToggle.checked);
     else if (configMonoAudio !== null) machine.set_mono_audio(configMonoAudio);
     if (floppySpeed !== null) machine.set_floppy_speed(floppySpeed);
+    if (overscanMode !== null) machine.set_overscan?.(overscanMode);
     emu = machine;
     window.__emu = emu; // for debugging/automation
     lastFddTrack = null; // a new machine starts the track latch over
@@ -397,6 +506,13 @@ async function boot() {
         : 'machine built, waiting for the state') +
         (df0Name ? ` - DF0: ${df0Name} (write-protected)` : ''),
     );
+    // The AROS ROM cannot open its boot screen on an NTSC chipset: it
+    // gurus "unknown type of system screen" to the serial port and
+    // reboot-loops, which a visitor sees as a black screen. Real
+    // Kickstarts boot NTSC fine, so say why the screen stays dark.
+    if (videoStandard === 'NTSC' && bootRom?.label === 'AROS') {
+      showOsd('the AROS ROM cannot open an NTSC screen - load a Kickstart to boot NTSC');
+    }
 
     overlay.style.display = 'none';
     showBugLink(false);
@@ -405,6 +521,7 @@ async function boot() {
     paused = false;
     setPauseLabel();
     updateStateButtons();
+    syncWakeLock();
     // Port fittings live on the machine, so a fresh one needs the pads
     // that are still plugged into the host put back.
     for (const port of padAssignments.values()) fitCd32Pad(port);
@@ -472,6 +589,7 @@ function tick(nowMs) {
     emu = null;
     refreshBootButton();
     showBugLink(true);
+    syncWakeLock();
     console.error(e);
     return;
   }
@@ -499,10 +617,57 @@ function tick(nowMs) {
 }
 
 document.addEventListener('visibilitychange', () => {
+  // The browser drops a screen wake lock when the page hides; re-request
+  // it when a still-running machine comes back into view.
+  syncWakeLock();
   if (!audioCtx) return;
   if (document.hidden) audioCtx.suspend();
   else audioCtx.resume();
 });
+
+// --- screen wake lock --------------------------------------------------
+// A running machine keeps the screen awake, the way a video player does:
+// demos and long loading sequences are exactly the hands-off viewing that
+// trips a host's idle timeout. Released while paused, stopped, or hidden,
+// so an idle page never pins the display; browsers without the API (or a
+// battery saver refusing it) simply keep their usual timeout.
+
+let wakeLock = null;
+let wakeLockPending = false;
+
+async function syncWakeLock() {
+  const want = running && !paused && !document.hidden;
+  if (want && !wakeLock && !wakeLockPending && navigator.wakeLock?.request) {
+    wakeLockPending = true;
+    try {
+      const lock = await navigator.wakeLock.request('screen');
+      // The browser can release it behind our back (tab hidden, battery
+      // saver, OS policy). Re-sync right away: a hidden page fails the
+      // want-check and is instead re-requested on visibilitychange, and
+      // a policy that keeps refusing surfaces as a rejected request, so
+      // this cannot ping-pong. Our own release path nulls the handle
+      // before releasing, so it never re-enters here.
+      lock.addEventListener('release', () => {
+        if (wakeLock === lock) {
+          wakeLock = null;
+          syncWakeLock();
+        }
+      });
+      wakeLock = lock;
+    } catch {
+      // Refused: nothing to hold, nothing to report.
+    } finally {
+      wakeLockPending = false;
+    }
+    // The machine can have paused or stopped while the request was in
+    // flight; settle on the state that is true now.
+    if (wakeLock && !(running && !paused && !document.hidden)) syncWakeLock();
+  } else if (!want && wakeLock) {
+    const lock = wakeLock;
+    wakeLock = null;
+    lock.release().catch(() => {});
+  }
+}
 
 // --- serial / BBS bridge ---------------------------------------------------
 // Optional page feature: a shell that provides #serial-url (text input) and
@@ -1527,6 +1692,7 @@ function setPaused(next) {
   if (!emu || !running || next === paused) return;
   paused = next;
   setPauseLabel();
+  syncWakeLock();
   if (paused) {
     audioCtx?.suspend().catch(() => {});
     setLoadStatus('paused');
@@ -1553,7 +1719,24 @@ async function copyScreenshot() {
   if (!emu || !running) return;
   const blobOf = () =>
     new Promise((resolve, reject) => {
-      canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('canvas capture failed'))), 'image/png');
+      // The screen tint is a CSS filter on the canvas element, which
+      // toBlob never sees; bake it in through a filtered copy so the
+      // screenshot shows what the visitor is looking at. Browsers without
+      // canvas-context filters capture the untinted picture.
+      let source = canvas;
+      const filter = tintFilter();
+      if (filter) {
+        const copy = document.createElement('canvas');
+        copy.width = canvas.width;
+        copy.height = canvas.height;
+        const copyCtx = copy.getContext('2d');
+        if (copyCtx && typeof copyCtx.filter === 'string') {
+          copyCtx.filter = filter;
+          copyCtx.drawImage(canvas, 0, 0);
+          source = copy;
+        }
+      }
+      source.toBlob((b) => (b ? resolve(b) : reject(new Error('canvas capture failed'))), 'image/png');
     });
   try {
     if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
@@ -1598,10 +1781,19 @@ async function copyScreenshot() {
 // Amiga key), so these are buttons only.
 
 const STATE_DB_NAME = 'copperline';
+// Version 2 adds the 'roms' store (the remembered Kickstart); version 1
+// databases upgrade in place, keeping their quick state.
+const STATE_DB_VERSION = 2;
 const STATE_STORE = 'states';
-// One quick slot. A visitor wants "where I left off", not a slot manager;
-// named slots can key off the same store later without a format change.
+const ROM_STORE = 'roms';
+// One quick slot, still what a visitor resuming a game wants first; named
+// slots live in the same store under a prefix (see the saved-states panel).
 const QUICK_SLOT = 'quick';
+// Named slots are keyed 'named:<name>', so a state literally named "quick"
+// can never shadow the quick slot.
+const NAMED_SLOT_PREFIX = 'named:';
+// The remembered Kickstart's key in the roms store.
+const ROM_SLOT = 'kick';
 
 let quickStateInfo = null; // metadata of the stored quick state, when there is one
 
@@ -1611,10 +1803,11 @@ function openStateDb() {
       reject(new Error('this browser has no IndexedDB'));
       return;
     }
-    const req = indexedDB.open(STATE_DB_NAME, 1);
+    const req = indexedDB.open(STATE_DB_NAME, STATE_DB_VERSION);
     req.onupgradeneeded = () => {
       const db = req.result;
       if (!db.objectStoreNames.contains(STATE_STORE)) db.createObjectStore(STATE_STORE);
+      if (!db.objectStoreNames.contains(ROM_STORE)) db.createObjectStore(ROM_STORE);
     };
     req.onsuccess = () => resolve(req.result);
     // Private-browsing modes and blocked storage reject the open itself.
@@ -1626,23 +1819,27 @@ function openStateDb() {
 // Resolve on commit, not on the request: a put that succeeds can still lose
 // its transaction to the storage quota, and a quick save that quietly did
 // not persist is exactly the failure a visitor would discover too late.
-function stateTx(db, mode, run) {
+function dbTx(db, storeName, mode, run) {
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(STATE_STORE, mode);
-    const req = run(tx.objectStore(STATE_STORE));
+    const tx = db.transaction(storeName, mode);
+    const req = run(tx.objectStore(storeName));
     tx.oncomplete = () => resolve(req?.result);
     tx.onerror = () => reject(tx.error ?? new Error('IndexedDB transaction failed'));
     tx.onabort = () => reject(tx.error ?? new Error('IndexedDB transaction aborted'));
   });
 }
 
-async function withStateDb(mode, run) {
+async function withDb(storeName, mode, run) {
   const db = await openStateDb();
   try {
-    return await stateTx(db, mode, run);
+    return await dbTx(db, storeName, mode, run);
   } finally {
     db.close();
   }
+}
+
+async function withStateDb(mode, run) {
+  return withDb(STATE_STORE, mode, run);
 }
 
 // Everything a state needs to describe itself in the UI. Uint8Array and Date
@@ -1654,13 +1851,15 @@ function stateRecord(bytes) {
     emulated: emu.emulated_seconds(),
     rom: bootRom?.label ?? 'unknown',
     df0: df0Name,
+    machine: emu.machine_model?.() ?? machineModel ?? null,
   };
 }
 
 function describeState(info) {
   if (!info) return '';
   const when = info.saved instanceof Date ? info.saved.toLocaleString() : 'unknown time';
-  return `${when} - ${info.df0 ?? 'no disk'} (${Math.round(info.emulated ?? 0)}s emulated)`;
+  const machine = info.machine ? `${info.machine}, ` : '';
+  return `${when} - ${info.df0 ?? 'no disk'} (${machine}${Math.round(info.emulated ?? 0)}s emulated)`;
 }
 
 // Enablement follows what each control can actually do right now: saving
@@ -1708,6 +1907,7 @@ function unbootAfterFailedStateLoad() {
   running = false;
   paused = false;
   setPauseLabel();
+  syncWakeLock();
   overlay.style.display = '';
   refreshBootButton();
   setLoadStatus(failure);
@@ -1732,6 +1932,7 @@ function restoreState(bytes, source) {
   if (monoAudioToggle) emu.set_mono_audio(monoAudioToggle.checked);
   else if (configMonoAudio !== null) emu.set_mono_audio(configMonoAudio);
   if (floppySpeed !== null) emu.set_floppy_speed(floppySpeed);
+  if (overscanMode !== null) emu.set_overscan?.(overscanMode);
   // Port fittings live on the machine, so the pads plugged into the host go
   // back into the restored one, exactly as after a boot. Port 1 is the
   // mouse socket first: a state saved while a pad occupied it would
@@ -1744,8 +1945,9 @@ function restoreState(bytes, source) {
   df0Name = emu.disk_name(0) ?? null;
   lastFddTrack = null;
   updateStatusDisks();
-  // So did the machine itself, model and all.
+  // So did the machine itself, model, video standard and all.
   syncMachineSelect();
+  syncVideoSelect();
   // Paint the restored screen now: a load into a paused machine steps no
   // frames, so nothing else would.
   presentFrame();
@@ -1810,6 +2012,7 @@ async function quickSaveState() {
   quickStateInfo = info;
   updateStateButtons();
   setLoadStatus(`quick state saved in this browser (${Math.round(bytes.length / 1024)} KB)`);
+  refreshStatesPanel();
 }
 
 async function quickLoadState() {
@@ -1860,6 +2063,7 @@ function buildMachineControls() {
     ['loadstate', 'Load state...'],
     ['quicksave', 'Quick save'],
     ['quickload', 'Quick load'],
+    ['savedstates', 'Saved states...'],
   ].filter(([id]) => !$(id));
   if (missing.length === 0) return;
   const row = document.createElement('div');
@@ -1908,6 +2112,269 @@ if (loadStateBtn) {
 }
 updateStateButtons();
 probeQuickState();
+
+// --- saved-states panel ------------------------------------------------
+// One place to see everything this browser remembers: the Kickstart the
+// pickers stored, the quick slot, and named save states - the browser's
+// version of a desktop save-state folder. The panel is glue-built (a
+// shell only needs the #savedstates button, self-inserted like the other
+// state controls) and lists each state with Load / Export / Delete, plus
+// a name box that saves the running machine under a named slot. Export
+// downloads the stored blob as the same .clstate file "Save state"
+// writes, so a browser-kept state can still move to a desktop build.
+
+let statesPanel = null; // { root, list, name, save } - built lazily
+let statesPanelOpen = false;
+// Refresh generation: an await inside a stale refresh must not rebuild
+// the list a newer refresh already built.
+let statesPanelRefresh = 0;
+
+const PANEL_BTN_CSS =
+  'padding:0.15rem 0.55rem;border-radius:6px;cursor:pointer;' +
+  'border:1px solid rgba(255,255,255,0.35);' +
+  'background:rgba(10,13,22,0.6);color:rgba(255,255,255,0.85);' +
+  'font:600 0.75rem "IBM Plex Mono",ui-monospace,monospace;';
+
+function ensureStatesPanel() {
+  if (statesPanel) return statesPanel;
+  const root = document.createElement('div');
+  root.id = 'savedstates-panel';
+  root.style.cssText =
+    'display:none;margin:0.6rem 0;padding:0.55rem 0.75rem;' +
+    'border:1px solid rgba(255,255,255,0.25);border-radius:8px;' +
+    'background:rgba(10,13,22,0.55);color:rgba(255,255,255,0.85);' +
+    'font:600 0.8rem "IBM Plex Mono",ui-monospace,monospace;';
+  const list = document.createElement('div');
+  const saveRow = document.createElement('div');
+  saveRow.style.cssText =
+    'display:flex;flex-wrap:wrap;gap:0.45rem;align-items:center;margin-top:0.55rem;';
+  const name = document.createElement('input');
+  name.type = 'text';
+  name.placeholder = 'name this state';
+  name.maxLength = 60;
+  name.style.cssText =
+    'flex:1;min-width:10rem;padding:0.25rem 0.5rem;border-radius:6px;' +
+    'border:1px solid rgba(255,255,255,0.35);background:rgba(10,13,22,0.6);' +
+    'color:rgba(255,255,255,0.85);font:inherit;';
+  const save = document.createElement('button');
+  save.textContent = 'Save new';
+  save.style.cssText = PANEL_BTN_CSS;
+  save.addEventListener('click', () => saveNamedState(name.value));
+  // Typing a name must reach neither the guest's keyboard nor the page's
+  // joystick mapping; Enter saves, like the button.
+  const fence = (e) => {
+    e.stopPropagation();
+    if (e.type === 'keydown' && e.key === 'Enter') saveNamedState(name.value);
+  };
+  name.addEventListener('keydown', fence);
+  name.addEventListener('keyup', fence);
+  root.appendChild(list);
+  saveRow.appendChild(name);
+  saveRow.appendChild(save);
+  root.appendChild(saveRow);
+  shell.insertAdjacentElement('afterend', root);
+  statesPanel = { root, list, name, save };
+  return statesPanel;
+}
+
+function toggleStatesPanel() {
+  statesPanelOpen = !statesPanelOpen;
+  const panel = ensureStatesPanel();
+  panel.root.style.display = statesPanelOpen ? '' : 'none';
+  if (statesPanelOpen) refreshStatesPanel();
+}
+
+function stateKeyName(key) {
+  return key === QUICK_SLOT ? 'Quick slot' : key.slice(NAMED_SLOT_PREFIX.length);
+}
+
+// Everything the states store holds, bytes left behind: the panel only
+// needs each state's metadata and size, not megabytes of machine.
+async function listStoredStates() {
+  const rows = [];
+  await withStateDb('readonly', (store) => {
+    const req = store.openCursor();
+    req.onsuccess = () => {
+      const cursor = req.result;
+      if (!cursor) return;
+      const key = String(cursor.key);
+      if (key === QUICK_SLOT || key.startsWith(NAMED_SLOT_PREFIX)) {
+        const { bytes, ...info } = cursor.value ?? {};
+        rows.push({ key, size: bytes?.length ?? 0, info });
+      }
+      cursor.continue();
+    };
+    return req;
+  });
+  rows.sort((a, b) => {
+    // The quick slot first (it has its own buttons and its own meaning),
+    // then named states newest first.
+    if (a.key === QUICK_SLOT) return -1;
+    if (b.key === QUICK_SLOT) return 1;
+    return (b.info.saved?.getTime?.() ?? 0) - (a.info.saved?.getTime?.() ?? 0);
+  });
+  return rows;
+}
+
+// Rebuild the panel from storage. Called whenever stored content changes;
+// a closed (or never-built) panel skips the storage round trip.
+async function refreshStatesPanel() {
+  if (!statesPanel || !statesPanelOpen) return;
+  const token = ++statesPanelRefresh;
+  let rows = null;
+  let storageError = null;
+  try {
+    rows = await listStoredStates();
+  } catch (e) {
+    storageError = e;
+  }
+  if (token !== statesPanelRefresh || !statesPanelOpen) return;
+  const { list } = statesPanel;
+  statesPanel.save.disabled = !(emu && running);
+  statesPanel.save.title = emu && running ? '' : 'boot a machine first';
+  list.textContent = '';
+  const mkRow = () => {
+    const row = document.createElement('div');
+    row.style.cssText =
+      'display:flex;flex-wrap:wrap;align-items:center;gap:0.45rem;padding:0.18rem 0;';
+    list.appendChild(row);
+    return row;
+  };
+  const mkText = (row, text, muted) => {
+    const s = document.createElement('span');
+    s.textContent = text;
+    s.style.cssText = `flex:1;min-width:12rem;${muted ? 'color:rgba(255,255,255,0.55);' : ''}`;
+    row.appendChild(s);
+    return s;
+  };
+  const mkBtn = (row, label, fn) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.style.cssText = PANEL_BTN_CSS;
+    b.addEventListener('click', fn);
+    row.appendChild(b);
+    return b;
+  };
+  const romRow = mkRow();
+  if (storedRomInfo) {
+    mkText(
+      romRow,
+      `Kickstart: ${storedRomInfo.label} (${Math.round(storedRomInfo.size / 1024)} KB) - remembered for your next visit`,
+    );
+    mkBtn(romRow, 'Forget', forgetStoredRom);
+  } else {
+    mkText(romRow, 'Kickstart: none remembered - load one and it sticks', true);
+  }
+  if (storageError) {
+    mkText(mkRow(), `browser storage unavailable: ${storageError.message ?? storageError}`, true);
+    return;
+  }
+  if (!rows.length) {
+    mkText(mkRow(), 'no states saved in this browser yet', true);
+    return;
+  }
+  for (const { key, size, info } of rows) {
+    const row = mkRow();
+    mkText(row, `${stateKeyName(key)} - ${describeState(info)}, ${Math.round(size / 1024)} KB`);
+    mkBtn(row, 'Load', () => loadStoredState(key));
+    mkBtn(row, 'Export', () => exportStoredState(key));
+    mkBtn(row, 'Delete', () => deleteStoredState(key));
+  }
+}
+
+async function saveNamedState(rawName) {
+  if (!emu || !running) return;
+  const name = String(rawName ?? '').trim();
+  if (!name) {
+    setLoadStatus('give the state a name first');
+    return;
+  }
+  let record;
+  try {
+    record = stateRecord(emu.save_state());
+  } catch (e) {
+    setLoadStatus(`save failed: ${e.message ?? e}`);
+    return;
+  }
+  try {
+    // put() replaces an existing state of the same name, which is what
+    // re-saving under a name means.
+    await withStateDb('readwrite', (store) => store.put(record, NAMED_SLOT_PREFIX + name));
+  } catch (e) {
+    const hint = e.name === 'QuotaExceededError' ? ' - browser storage is full' : '';
+    setLoadStatus(`save failed: ${e.message ?? e}${hint}`);
+    return;
+  }
+  if (statesPanel) statesPanel.name.value = '';
+  setLoadStatus(`state "${name}" saved in this browser (${Math.round(record.bytes.length / 1024)} KB)`);
+  refreshStatesPanel();
+}
+
+async function getStoredState(key) {
+  return withStateDb('readonly', (store) => store.get(key));
+}
+
+async function loadStoredState(key) {
+  let record;
+  try {
+    record = await getStoredState(key);
+  } catch (e) {
+    setLoadStatus(`load failed: ${e.message ?? e}`);
+    return;
+  }
+  if (!record?.bytes) {
+    setLoadStatus('that state is no longer in browser storage');
+    refreshStatesPanel();
+    return;
+  }
+  const machine = await machineForStateLoad();
+  if (!machine.ready) return;
+  if (!restoreState(record.bytes, `"${stateKeyName(key)}"`) && machine.booted) {
+    unbootAfterFailedStateLoad();
+  }
+}
+
+async function exportStoredState(key) {
+  let record;
+  try {
+    record = await getStoredState(key);
+  } catch (e) {
+    setLoadStatus(`export failed: ${e.message ?? e}`);
+    return;
+  }
+  if (!record?.bytes) {
+    setLoadStatus('that state is no longer in browser storage');
+    refreshStatesPanel();
+    return;
+  }
+  const blob = new Blob([record.bytes], { type: 'application/octet-stream' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${stateKeyName(key).replace(/[^\w.-]+/g, '_')}.clstate`;
+  a.click();
+  // Revoking synchronously can cancel the download that click just
+  // started; let the current task finish first (as for screenshots).
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  setLoadStatus(`state "${stateKeyName(key)}" downloaded`);
+}
+
+async function deleteStoredState(key) {
+  try {
+    await withStateDb('readwrite', (store) => store.delete(key));
+  } catch (e) {
+    setLoadStatus(`delete failed: ${e.message ?? e}`);
+    return;
+  }
+  if (key === QUICK_SLOT) {
+    quickStateInfo = null;
+    updateStateButtons();
+  }
+  setLoadStatus(`state "${stateKeyName(key)}" deleted`);
+  refreshStatesPanel();
+}
+
+$('savedstates')?.addEventListener('click', toggleStatesPanel);
 
 // Optional in the page shell: a checkbox #floppy-sounds toggles the
 // synthesized drive sounds (motor hum, head-step clicks, read hiss).
@@ -1995,17 +2462,19 @@ floppySpeedSel.addEventListener('change', () => {
 
 const MACHINE_LABELS = { A500: 'A500', A1200: 'A1200 (AGA)' };
 
-function buildMachineControl() {
+// A labelled select below the canvas shell, the machine control's pattern,
+// shared by every self-inserted setting. Carries the hook id even when
+// self-built (like the self-inserted buttons), so page-side scripts can
+// drive the control either way.
+function buildSettingControl(id, labelText) {
   const row = document.createElement('label');
   row.style.cssText =
     'display:inline-flex;align-items:center;gap:0.45rem;margin:0.4rem 0.6rem 0.4rem 0;' +
     'font:600 0.8rem "IBM Plex Mono",ui-monospace,monospace;' +
     'color:rgba(255,255,255,0.75);';
-  row.appendChild(document.createTextNode('Machine'));
+  row.appendChild(document.createTextNode(labelText));
   const sel = document.createElement('select');
-  // Carry the hook id even when self-built (like the self-inserted
-  // buttons), so page-side scripts can drive the control either way.
-  sel.id = 'machine';
+  sel.id = id;
   sel.style.cssText =
     'padding:0.15rem 0.4rem;border-radius:6px;cursor:pointer;' +
     'border:1px solid rgba(255,255,255,0.35);' +
@@ -2016,7 +2485,7 @@ function buildMachineControl() {
   return sel;
 }
 const machineShellSel = $('machine');
-const machineSel = machineShellSel ?? buildMachineControl();
+const machineSel = machineShellSel ?? buildSettingControl('machine', 'Machine');
 // null = the wasm default machine (the A500); boot() passes it through.
 let machineModel = null;
 // A ?machine=/config/data-default choice that arrived before the model
@@ -2101,6 +2570,199 @@ machineSel.addEventListener('change', () => {
     setLoadStatus(`machine: ${model} - applies at boot`);
   }
 });
+
+// --- video standard ----------------------------------------------------
+// PAL or NTSC, the desktop's `[chipset] video` key. Like the machine
+// model this is the board itself - the Agnus crystal - not a knob on it,
+// so it follows the machine select's pattern exactly: always visible
+// (self-inserting without a shell `#video` select), rebuilding a running
+// machine on change with the ROM and disk carried over, preset by the
+// config file's "video" or `?video=NTSC` in the URL, synced to whatever a
+// save state brings back, and hidden on a wasm bundle too old to take a
+// standard (`WebEmu.video_standards` is the feature test).
+
+const videoShellSel = $('video');
+const videoSel = videoShellSel ?? buildSettingControl('video', 'Video');
+// null = the profile's own standard (PAL); boot() passes it through.
+let videoStandard = null;
+// A ?video=/config/data-default choice that arrived before the standards
+// list did; applied once both exist.
+let requestedVideo = null;
+
+function matchVideoOption(name) {
+  const norm = (s) => String(s).trim().toUpperCase();
+  return [...videoSel.options].map((o) => o.value).find((v) => v && norm(v) === norm(name));
+}
+
+function tryApplyRequestedVideo() {
+  if (requestedVideo === null || !videoSel.options.length) return;
+  const name = String(requestedVideo).trim();
+  requestedVideo = null;
+  if (!name) return;
+  const std = matchVideoOption(name);
+  if (std) {
+    videoStandard = std;
+    videoSel.value = std;
+  } else {
+    console.warn(`unknown video standard ${name}; keeping ${videoSel.value}`);
+  }
+}
+
+// Called once the wasm module is ready (load()), like the machine select.
+function populateVideoSelect() {
+  let standards = null;
+  try {
+    standards = WebEmu.video_standards?.();
+  } catch {
+    standards = null;
+  }
+  if (!standards?.length) {
+    (videoShellSel ?? videoSel.parentElement).hidden = true;
+    return;
+  }
+  if (!videoSel.options.length) {
+    for (const name of standards) {
+      const option = document.createElement('option');
+      option.value = name;
+      option.textContent = name;
+      videoSel.appendChild(option);
+    }
+  }
+  // From here on every boot names its standard explicitly, like the model.
+  if (videoStandard === null) videoStandard = videoSel.value || null;
+  tryApplyRequestedVideo();
+}
+
+// A restored state carries its machine's standard; point the select at
+// what is actually running (the getter follows load_state).
+function syncVideoSelect() {
+  const std = emu?.video_standard?.();
+  if (!std) return;
+  const match = matchVideoOption(std);
+  if (match) {
+    videoStandard = match;
+    videoSel.value = match;
+  }
+}
+
+videoSel.addEventListener('change', () => {
+  const std = videoSel.value;
+  if (!std || std === videoStandard) return;
+  videoStandard = std;
+  if (emu && running) {
+    // The machine select's rebuild, for the same reason: the standard is
+    // soldered in. ROM and disk carry over the same way.
+    if (df0Name && lastDisk?.name === df0Name) pendingDisk = lastDisk;
+    boot();
+  } else if (!emu) {
+    setLoadStatus(`video: ${std} - applies at boot`);
+  }
+});
+
+// --- display: overscan and screen tint -----------------------------------
+// Presentation-only choices, so unlike the machine and video standard they
+// are remembered per browser (localStorage) and re-applied on the next
+// visit: nothing the guest can observe changes, only what the glass shows.
+//
+// Overscan is the desktop's `[display] overscan` knob: "tv" (default)
+// masks the deep horizontal overscan like a CRT bezel and crops standard
+// PAL screens to the TV aperture; "full" shows everything Denise produced.
+// The tint is a monitor phosphor choice rendered as a CSS filter on the
+// canvas - pure presentation, zero per-frame cost, and baked into
+// screenshots via a filtered copy (see copyScreenshot).
+
+function storedPref(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function storePref(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Private browsing or blocked storage: the choice just does not stick.
+  }
+}
+
+const OVERSCAN_STORAGE_KEY = 'copperline-overscan';
+const OVERSCAN_MODES = ['tv', 'full'];
+const OVERSCAN_LABELS = { tv: 'TV', full: 'Full overscan' };
+
+const overscanShellSel = $('overscan');
+const overscanSel = overscanShellSel ?? buildSettingControl('overscan', 'View');
+if (!overscanSel.options.length) {
+  for (const mode of OVERSCAN_MODES) {
+    const option = document.createElement('option');
+    option.value = mode;
+    option.textContent = OVERSCAN_LABELS[mode];
+    overscanSel.appendChild(option);
+  }
+}
+// Hidden on a bundle that cannot switch (the class methods exist as soon
+// as the module is imported, so no need to wait for init()).
+if (typeof WebEmu.prototype?.set_overscan !== 'function') {
+  (overscanShellSel ?? overscanSel.parentElement).hidden = true;
+}
+let overscanMode = null; // null = leave the emulator at its default (tv)
+
+function setOverscanMode(mode, remember) {
+  if (!OVERSCAN_MODES.includes(mode)) return;
+  overscanMode = mode;
+  overscanSel.value = mode;
+  if (remember) storePref(OVERSCAN_STORAGE_KEY, mode);
+  if (emu) {
+    emu.set_overscan?.(mode);
+    // The wasm re-presents the last frame under the new aperture, but a
+    // paused page has no ticking loop to blit it.
+    if (running && paused) presentFrame();
+  }
+}
+overscanSel.addEventListener('change', () => setOverscanMode(overscanSel.value, true));
+
+const TINT_STORAGE_KEY = 'copperline-tint';
+// Phosphor approximations: grayscale first so the sepia+hue chain works
+// from luminance, saturate to pull the single-hue look together.
+const TINTS = {
+  none: { label: 'Colour', filter: '' },
+  bw: { label: 'Black & white', filter: 'grayscale(1)' },
+  green: {
+    label: 'Green phosphor',
+    filter: 'grayscale(1) sepia(1) saturate(4) hue-rotate(80deg) brightness(0.92)',
+  },
+  amber: {
+    label: 'Amber phosphor',
+    filter: 'grayscale(1) sepia(1) saturate(4) hue-rotate(-8deg)',
+  },
+  sepia: { label: 'Sepia', filter: 'sepia(1)' },
+};
+
+const tintShellSel = $('tint');
+const tintSel = tintShellSel ?? buildSettingControl('tint', 'Screen');
+if (!tintSel.options.length) {
+  for (const [value, { label }] of Object.entries(TINTS)) {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = label;
+    tintSel.appendChild(option);
+  }
+}
+let tintMode = 'none';
+
+function tintFilter() {
+  return TINTS[tintMode]?.filter ?? '';
+}
+
+function setTintMode(mode, remember) {
+  if (!TINTS[mode]) return;
+  tintMode = mode;
+  tintSel.value = mode;
+  if (remember) storePref(TINT_STORAGE_KEY, mode);
+  canvas.style.filter = tintFilter();
+}
+tintSel.addEventListener('change', () => setTintMode(tintSel.value, true));
 
 // --- status bar --------------------------------------------------------
 // Front-panel status strip mirroring the desktop status bar's LED block:
@@ -2517,11 +3179,16 @@ const pageParams = new URLSearchParams(location.search);
 //
 //   {
 //     "machine": "A1200",            machine model (WebEmu.models() lists them)
+//     "video": "NTSC",               video standard, like ?video= (PAL|NTSC)
 //     "kick": "roms/kick31.rom",     same-origin path, like ?kick=
 //     "df0": "adf/demo.adf",         URL, like ?df0=
 //     "floppy_sounds": false,        preset the drive-sounds toggle
 //     "mono_audio": true,            preset the mono-audio toggle
 //     "floppy_speed": 800,           100|200|400|800|0 (0 = turbo)
+//     "overscan": "full",            starting view (tv|full); a visitor's
+//                                    own remembered choice wins
+//     "tint": "green",               starting screen tint (none|bw|green|
+//                                    amber|sepia); same visitor rule
 //     "joy": "keys",                 off|keys|cd32|touch
 //     "serial_url": "wss://...",     preset the BBS gateway input
 //     "serial_raw": true,            preset the raw checkbox
@@ -2541,8 +3208,11 @@ async function fetchPageConfig() {
 async function startup() {
   // The wasm + AROS download starts immediately; the config fetch rides
   // alongside and its choices land before anything needs them (a config
-  // Kickstart simply replaces the stashed boot ROM when it arrives).
+  // Kickstart simply replaces the stashed boot ROM when it arrives). The
+  // remembered-Kickstart probe rides along too: it only ever fills an
+  // empty or AROS boot stash, so it cannot beat an explicit choice.
   const loaded = load();
+  probeStoredRom();
   const cfg = await fetchPageConfig();
 
   if (serialUrlInput && typeof cfg.serial_url === 'string') {
@@ -2579,6 +3249,28 @@ async function startup() {
     machineSel.dataset.default ??
     null;
   tryApplyRequestedMachine();
+
+  // Starting video standard, the machine pattern: shell data-default or
+  // config "video", overridden per link by ?video=NTSC (names compare
+  // case-insensitively). Applied once the wasm module has supplied the
+  // standards list.
+  requestedVideo =
+    pageParams.get('video') ??
+    (typeof cfg.video === 'string' ? cfg.video : null) ??
+    videoSel.dataset.default ??
+    null;
+  tryApplyRequestedVideo();
+
+  // Starting view and tint: the visitor's own remembered choice first
+  // (these are per-browser viewing preferences), then the config file's
+  // starting point for first-time visitors.
+  const overscanPref =
+    storedPref(OVERSCAN_STORAGE_KEY) ??
+    (typeof cfg.overscan === 'string' ? cfg.overscan.trim() : null);
+  if (overscanPref) setOverscanMode(overscanPref, false);
+  const tintPref =
+    storedPref(TINT_STORAGE_KEY) ?? (typeof cfg.tint === 'string' ? cfg.tint.trim() : null);
+  if (tintPref) setTintMode(tintPref, false);
 
   // Starting joystick mode: the page shell's default (data-default on the
   // toggle or the config file), overridden per link by

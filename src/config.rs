@@ -3664,7 +3664,10 @@ fn parse_denise_revision(s: &str) -> Result<DeniseRevision> {
     }
 }
 
-fn parse_video_standard(s: &str) -> Result<VideoStandard> {
+/// Public for the browser frontend (crates/copperline-web), whose `WebEmu`
+/// constructor takes the same PAL/NTSC names as the `[chipset] video` key,
+/// like `parse_machine_model`.
+pub fn parse_video_standard(s: &str) -> Result<VideoStandard> {
     match s.trim().to_ascii_uppercase().as_str() {
         "PAL" => Ok(VideoStandard::Pal),
         "NTSC" => Ok(VideoStandard::Ntsc),

@@ -18,7 +18,14 @@ machine and powers it up again -- the model is the board itself, not a
 knob on it -- keeping the chosen ROM and the inserted disk. A link can
 preset the model with `?machine=A1200`, and a
 [save state](#browser-save-states) carries its own machine, so loading
-one switches the select to whatever the state brings back. The
+one switches the select to whatever the state brings back. The **Video**
+select is the same idea for the standard: PAL (the default) or NTSC (the
+desktop's `[chipset] video` key) -- the standard is the Agnus crystal,
+so changing it rebuilds a running machine exactly like the model select,
+and `?video=NTSC` presets it per link. NTSC wants a real Kickstart: the
+bundled AROS ROM cannot open its boot screen on an NTSC chipset (it
+gurus "unknown type of system screen" and reboot-loops, which looks
+like a black screen; the page says so when it happens). The
 page fetches the open-source AROS ROM while it loads, so the boot button
 works with no files of your own; the **Kickstart ROM** and **DF0 disk**
 pickers load local images instead. Both work before or after boot: a
@@ -30,6 +37,32 @@ the browser has no filesystem to write changes back to. On iOS the pickers
 offer every file rather than filtering by extension, because the system
 document picker greys out extensions it does not recognise, which would
 lock out `.adf` and friends.
+
+A Kickstart that fits is also *remembered*: the image goes into the
+browser's own storage (IndexedDB, never uploaded anywhere), and the next
+visit boots it with no picker round trip -- the boot button simply reads
+"Boot Kickstart" again. An explicit choice always wins over the memory
+(the picker, a drop, `?kick=`), and the
+[saved-states panel](#browser-save-states) shows what is remembered with
+a **Forget** button that puts the boot button back on AROS.
+
+Two more selects shape what the glass shows without touching the
+machine. **View** is the desktop's `[display] overscan` knob: *TV* (the
+default) masks the deep horizontal overscan like a CRT bezel and crops
+standard PAL screens to a TV aperture, *Full overscan* presents the
+whole field Denise produced -- junk pixels, border tricks and all.
+**Screen** tints the picture like a monochrome monitor's phosphor --
+black & white, green, amber, or sepia -- applied as a CSS filter on the
+canvas (zero per-frame cost; screenshots bake it in). Both are viewing
+preferences rather than machine state, so the page remembers them in the
+browser and restores them on the next visit; the machine and video
+selects deliberately reset instead, because a shared `?df0=` link should
+boot the same machine for everyone.
+
+While a machine runs (and is not paused), the page holds a screen wake
+lock where the browser supports one, the way a video player does: a demo
+or a long loading sequence is exactly the hands-off viewing that trips a
+host's idle timeout. Pausing or stopping releases it.
 
 Files can also be dragged onto the page: a `.rom` file loads (or, before
 boot, queues) a Kickstart exactly like the ROM picker, a `.clstate` file
@@ -155,6 +188,15 @@ does not place them:
 - **Quick load** restores that slot. It is enabled only when the browser
   holds a quick state, and its tooltip says when the state was taken,
   what was in DF0, and how far the machine had run.
+- **Saved states...** opens the panel over everything the browser
+  remembers: the stored Kickstart (with its **Forget** button), the quick
+  slot, and *named* states -- type a name and **Save new** keeps the
+  running machine under it, as many as browser storage will hold, so one
+  browser can park several games at once rather than fighting over the
+  quick slot. Each row has **Load**, **Export** (downloads the stored
+  state as the same `.clstate` file Save state writes, so a browser-kept
+  state can still move to a desktop build), and **Delete**; saving under
+  an existing name replaces it.
 
 Loading works from a cold page: with no machine booted, a load boots one
 and restores over it, so a visitor returning to a game lands straight back
@@ -297,21 +339,28 @@ function tick(nowMs) {
 }
 ```
 
-The constructor's optional argument picks the machine profile by name,
-exactly as the desktop's `--model` flag does ("A500", "A1200", ...);
+The constructor's first optional argument picks the machine profile by
+name, exactly as the desktop's `--model` flag does ("A500", "A1200", ...);
 omitted, it builds the default A500, so pages written against the
 model-less constructor keep booting what they always did. The static
 `WebEmu.models()` lists the vetted profiles a page can offer
 unconditionally (currently `A500` and `A1200` -- both boot AROS or a
 plain Kickstart with nothing but a floppy; other names the desktop flag
 takes are accepted too, but CDTV/CD32 want pieces a browser page cannot
-supply), and its absence on an older bundle is the feature test.
-`machine_model()` returns the running machine's profile name
+supply), and its absence on an older bundle is the feature test. The
+second optional argument picks the video standard on top of the profile
+(`new WebEmu('A500', 'NTSC')`), the desktop's `[chipset] video` key;
+omitted, the profile keeps its own (PAL for every offered profile).
+`WebEmu.video_standards()` lists the accepted names and is the matching
+feature test. `machine_model()` returns the running machine's profile name
 (`undefined` for a shape no profile describes, such as a state saved
 from a custom desktop config) and follows `load_state`, so a page can
 re-point its machine select at what a state brought back;
+`video_standard()` does the same for the standard ("PAL"/"NTSC" -- the
+fitted Agnus crystal, not the live BEAMCON0 bit ECS software can flip);
 `machine_summary()` is a one-line description of the machine -- profile,
-CPU, chipset, RAM, ROM fingerprint -- for bug reports and diagnostics.
+CPU, chipset, video standard, RAM, ROM fingerprint -- for bug reports
+and diagnostics.
 
 Input goes through `key_event(event.code, pressed)` (returns whether the key
 mapped, for `preventDefault`), `mouse_delta(dx, dy)` and
@@ -355,6 +404,12 @@ default, leaving Paula's hardware stereo panning.
 drive speed -- 100/200/400/800 percent, or 0 for turbo -- like the
 desktop's `[floppy] speed` option (see
 [Configuration](configuration.md)); changes apply to the live machine.
+`set_overscan(mode)` picks the presentation overscan, the desktop's
+`[display] overscan` knob: `"tv"` (the default) masks the deep
+horizontal overscan like a CRT bezel and presents standard PAL screens
+as the captured TV aperture, `"full"` presents the whole overscan field;
+unknown names are ignored. The last completed frame is re-presented
+under the new aperture immediately, so a paused page only has to blit.
 Front-panel status getters mirror the desktop status bar's LED block and
 are cheap enough to poll every frame: `power_led()` and `fdd_led()` return
 booleans, `hdd_led()` and `cd_led()` return `undefined` on machines
@@ -404,6 +459,25 @@ elements, and pages without them are untouched:
   rebuilds a running machine as described above; `?machine=` in the URL
   overrides the initial choice (model names match the way the core parses
   them, so `?machine=a1200` works).
+- `#video` (a `<select>`): hosts the PAL/NTSC video standard control,
+  the machine select's pattern exactly -- always on (self-inserting
+  without the element, carrying the `video` id), filled from
+  `WebEmu.video_standards()` unless the shell ships its own options,
+  preset by `data-default="NTSC"`, hidden on a wasm bundle too old to
+  take a standard, and rebuilding a running machine on change with the
+  ROM and disk carried over. `?video=` in the URL overrides the initial
+  choice (names compare case-insensitively, so `?video=ntsc` works).
+- `#overscan` (a `<select>` with option values `tv` and `full`): hosts
+  the presentation overscan control (**View** on the hosted page), always
+  on and self-inserting like `#video`. Changes apply live, including to a
+  paused machine; the choice is a viewing preference, so the glue
+  remembers it in the browser (localStorage) and restores it next visit.
+  Hidden on a wasm bundle without `set_overscan`.
+- `#tint` (a `<select>`): the screen tint (**Screen** on the hosted
+  page) -- `none`, `bw`, `green`, `amber`, `sepia` -- rendered as a CSS
+  filter on the canvas and baked into screenshots. Always on,
+  self-inserting, and remembered in the browser like `#overscan`; it
+  never touches the wasm, so it works with any bundle.
 - `#floppy-speed` (a `<select>` with option values `100`, `200`, `400`,
   `800`, and `0` for turbo): hosts the floppy drive speed control, letting
   the page place and style it. Unlike the other hooks this one is always
@@ -450,13 +524,16 @@ elements, and pages without them are untouched:
   write (an unfocused document, an insecure origin); the caption over the
   screen says which happened, since a clipboard copy has nothing else to
   show for itself.
-- `#savestate`, `#loadstate`, `#quicksave`, `#quickload` (buttons): the
-  [save-state controls](#browser-save-states) -- download a state, pick a
-  state file, and the browser-resident quick slot. Always on like
-  `#pause`: without the elements they insert themselves below the canvas
-  shell. `#loadstate` is a plain button wherever the shell puts it; the
-  file picker behind it is built by the glue, so no `<input type="file">`
-  is needed in the shell.
+- `#savestate`, `#loadstate`, `#quicksave`, `#quickload`, `#savedstates`
+  (buttons): the [save-state controls](#browser-save-states) -- download
+  a state, pick a state file, the browser-resident quick slot, and the
+  saved-states panel (named states, the quick slot, and the remembered
+  Kickstart with its Forget button; the panel itself is glue-built, the
+  shell only places the button). Always on like `#pause`: without the
+  elements they insert themselves below the canvas shell. `#loadstate`
+  is a plain button wherever the shell puts it; the file picker behind
+  it is built by the glue, so no `<input type="file">` is needed in the
+  shell.
 - `#ledbar` (a container): hosts the front-panel status strip (LEDs,
   track counter, disk names), letting the page own its placement and
   outer styling. Without it the strip inserts itself directly below the
@@ -480,11 +557,14 @@ per URL, and anything the visitor changes by hand wins as usual:
 ```json
 {
   "machine": "A1200",
+  "video": "NTSC",
   "kick": "roms/kick31.rom",
   "df0": "adf/demo.adf",
   "floppy_sounds": false,
   "mono_audio": true,
   "floppy_speed": 800,
+  "overscan": "full",
+  "tint": "green",
   "joy": "keys",
   "serial_url": "wss://bbs.example.com:8443/",
   "serial_raw": false,
@@ -492,14 +572,17 @@ per URL, and anything the visitor changes by hand wins as usual:
 }
 ```
 
-`machine` picks the machine model, like `?machine=`; `kick` follows the
+`machine` picks the machine model, like `?machine=`; `video` the PAL/NTSC
+standard, like `?video=`; `kick` follows the
 same-origin rule as `?kick=` (the file can only name a ROM the site
 already serves); `df0` is any URL the visitor's browser may fetch, like
 `?df0=`. `floppy_sounds`, `mono_audio`, and
 `floppy_speed` reach the machine whether or not the shell has their
 controls -- the speed select inserts itself, and a configured
 `floppy_sounds` or `mono_audio` is applied at boot even with no checkbox
-to show it. `serial_url` and `serial_raw` preset the
+to show it. `overscan` and `tint` are starting points for first-time
+visitors only: both are per-browser viewing preferences the glue
+remembers, and a visitor's own remembered choice wins over the file. `serial_url` and `serial_raw` preset the
 serial bridge's inputs and therefore need those elements: a shell
 without them has no connect button to dial with either. `joy` picks the
 starting joystick mode. `autoboot: true` powers the machine on by itself once the
