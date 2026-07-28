@@ -9513,6 +9513,29 @@ fn front_panel_hdd_led_follows_gayle_activity_with_hold() {
 }
 
 #[test]
+fn front_panel_hdd_led_present_for_filesys_mount() {
+    let mut bus = empty_bus();
+    // No storage controller and no filesys mount: no HDD LED at all.
+    assert_eq!(bus.front_panel_status().hdd_led, None);
+
+    // A host-folder filesystem board with a mount lights the HDD LED like
+    // any other storage device, even without a real disk controller.
+    let mount = crate::filesys::MountSpec {
+        path: std::env::temp_dir(),
+        volume: "Work".to_string(),
+        boot_pri: 0,
+        readonly: true,
+    };
+    bus.attach_devices(vec![crate::zorro_device::BoardDevice::Filesys(
+        crate::filesys::FilesysBoard::new(vec![mount]),
+    )]);
+    assert_eq!(bus.front_panel_status().hdd_led, Some(false));
+
+    bus.note_hdd_activity();
+    assert_eq!(bus.front_panel_status().hdd_led, Some(true));
+}
+
+#[test]
 fn front_panel_reports_host_output_volume() {
     let mut bus = empty_bus();
 
