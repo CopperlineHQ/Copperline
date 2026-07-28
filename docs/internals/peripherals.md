@@ -210,6 +210,15 @@ DiagPoint culls the ROM's `scsi.device` resident tag (`romtags.rs`),
 which is why setting the flag instantiates the services board even with
 no `[[filesys]]` mounts configured.
 
+These longword registers are written with a single `move.l` in the guest
+ROM/handler, but on a 68000/68010 that compiles to two word-sized bus
+cycles (high word, then low word -- a real 16-bit-bus artifact the CPU
+core reproduces). The board fires each doorbell (`DIAG_DOORBELL`,
+`REG_DOSPKT`, `REG_MSGPORT`) on whichever write actually completes the
+value -- a single 4-byte access on a 32-bit bus, or the low word of a
+split pair on a 16-bit one -- reading the result back out of the already-
+latched window image rather than trusting the write that triggered it.
+
 Amiga attributes a host filesystem cannot hold live in UAE-style `.uaem`
 sidecar files (read when present, written back on change, hidden from
 guest listings); the delete-protection bit is honoured on
