@@ -355,20 +355,21 @@ pub(super) struct LedRowSpec {
 pub(super) fn led_rows(status: &FrontPanelStatus, powered_on: bool) -> Vec<LedRowSpec> {
     let mut rows = vec![
         LedRowSpec {
-            // Lit whenever powered, like a real Amiga; brighter when Paula's
-            // analogue filter is engaged.
+            // Lit whenever powered, like a real Amiga: full brightness
+            // while the guest holds /LED engaged, dimmed -- never off --
+            // once it releases it, as on A500 rev 6 and later boards.
             label: "PWR",
             on: powered_on,
-            on_color: if status.audio_filter_on {
+            on_color: if status.power_led_bright {
                 POWER_LED_BRIGHT
             } else {
-                POWER_LED_NORMAL
+                POWER_LED_DIM
             },
             off_color: POWER_LED_OFF,
-            highlight_on: if status.audio_filter_on {
+            highlight_on: if status.power_led_bright {
                 rgba(255, 120, 108)
             } else {
-                rgba(255, 91, 82)
+                rgba(196, 62, 54)
             },
             highlight_off: rgba(90, 27, 24),
         },

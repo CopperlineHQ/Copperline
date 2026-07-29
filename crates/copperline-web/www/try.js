@@ -2767,7 +2767,10 @@ tintSel.addEventListener('change', () => setTintMode(tintSel.value, true));
 
 // The desktop status bar's LED and track-counter palette (window.rs).
 const LED_COLORS = {
-  pwr: ['rgb(232,31,24)', 'rgb(66,12,10)'],
+  // PWR is never dark on a running machine: the pair is the bright
+  // (/LED engaged) and dimmed (released) levels of an A500 rev 6+
+  // board, which dims the LED rather than switching it off.
+  pwr: ['rgb(255,38,28)', 'rgb(150,24,18)'],
   fdd: ['rgb(236,142,28)', 'rgb(72,38,10)'],
   hdd: ['rgb(44,200,80)', 'rgb(14,56,24)'],
   cd: ['rgb(64,170,234)', 'rgb(16,46,70)'],

@@ -332,8 +332,9 @@ mod tests {
     const GREY: u8 = 128;
     /// Magnification of the render target over the source, as a real
     /// window magnifies the composited buffer. Big enough that the frame's
-    /// trim zones (recess, bevel, plastic band) are pixels wide.
-    const SCALE: u32 = 4;
+    /// trim zones (recess, bevel, plastic band) are pixels wide and the
+    /// bottom band is deep enough for the badge lettering to draw.
+    const SCALE: u32 = 6;
     const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
     /// Target clear colour; pure blue survives the sRGB encode exactly,
     /// so any surviving sentinel pixel inside the viewport means the pass
@@ -664,6 +665,55 @@ mod tests {
             })
         });
         assert!(found, "no green power LED near ({led_x}, {led_y})");
+    }
+
+    #[test]
+    fn the_badge_prints_on_the_left_of_the_bottom_band() {
+        let Some((device, queue)) = gpu() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        let grey = |_x: u32, _y: u32| [GREY, GREY, GREY, 255];
+        let src = source_texture(&device, &queue, TEX, TEX, DISPLAY_ROWS, &grey);
+        let (px, dim, rows) = render_bezel(&device, &queue, &src, None);
+
+        // The badge rect as the shader lays it out: left-aligned with the
+        // opening, vertically centred in the bottom band, 59x8 font pixels
+        // at 0.34 of the band height.
+        let (ox, oy, ow, oh) = opening_rect((0.0, 0.0, dim as f32, rows as f32));
+        let recess = (0.016 * ow.min(oh)).max(2.0);
+        let band_top = oy + oh + recess;
+        let badge_h = 0.34 * (rows as f32 - band_top);
+        assert!(
+            badge_h >= 5.0,
+            "test target too small for the badge lettering: {badge_h}"
+        );
+        let badge_w = 59.0 * badge_h / 8.0;
+        let band_mid = (band_top + rows as f32) * 0.5;
+        let dark = |x0: u32, x1: u32| {
+            let mut n = 0;
+            for y in (band_mid - 0.5 * badge_h) as u32..=(band_mid + 0.5 * badge_h) as u32 {
+                for x in x0..=x1 {
+                    let p = at(&px, dim, x, y);
+                    if p[0] < 150 && p[1] < 150 && p[2] < 150 {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+        let ink = dark(ox as u32, (ox + badge_w).ceil() as u32);
+        assert!(
+            ink >= 15,
+            "badge lettering missing from the bottom band: {ink} dark pixels"
+        );
+        // The stretch between the badge and the power LED stays plain
+        // plastic: the lettering must not smear across the band.
+        let plain = dark(
+            (ox + badge_w).ceil() as u32 + 10,
+            (0.85 * dim as f32) as u32,
+        );
+        assert_eq!(plain, 0, "ink east of the badge: {plain} dark pixels");
     }
 
     /// The window pairs the bezel with a preset by re-aiming the preset at
