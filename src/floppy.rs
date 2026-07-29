@@ -505,6 +505,18 @@ impl FloppyController {
             "invalid floppy drive df{}",
             drive_idx
         );
+        // A bay is either a real drive or an image, never both: the bridge
+        // keeps supplying the track under the head, so an image mounted on top
+        // would be reported as inserted and then never read. The status bar
+        // greys its own buttons, but scheduled inserts, drag-and-drop and the
+        // control protocol all arrive here instead, so the invariant belongs
+        // where every route passes.
+        #[cfg(feature = "floppybridge")]
+        ensure!(
+            !self.drives[drive_idx].is_bridged(),
+            "floppy.df{drive_idx} is a physical drive; take the drive off the bay before \
+             using a disk image in it"
+        );
         let config = FloppyDriveConfig {
             path,
             write_protected,
@@ -535,6 +547,18 @@ impl FloppyController {
             "invalid floppy drive df{}",
             drive_idx
         );
+        // A bay is either a real drive or an image, never both: the bridge
+        // keeps supplying the track under the head, so an image mounted on top
+        // would be reported as inserted and then never read. The status bar
+        // greys its own buttons, but scheduled inserts, drag-and-drop and the
+        // control protocol all arrive here instead, so the invariant belongs
+        // where every route passes.
+        #[cfg(feature = "floppybridge")]
+        ensure!(
+            !self.drives[drive_idx].is_bridged(),
+            "floppy.df{drive_idx} is a physical drive; take the drive off the bay before \
+             using a disk image in it"
+        );
         let image = FloppyImage::from_bytes(bytes, label, write_protected)
             .with_context(|| format!("loading floppy.df{} image", drive_idx))?;
         self.idle_cache = false;
@@ -550,6 +574,18 @@ impl FloppyController {
             drive_idx < self.drives.len(),
             "invalid floppy drive df{}",
             drive_idx
+        );
+        // A bay is either a real drive or an image, never both: the bridge
+        // keeps supplying the track under the head, so an image mounted on top
+        // would be reported as inserted and then never read. The status bar
+        // greys its own buttons, but scheduled inserts, drag-and-drop and the
+        // control protocol all arrive here instead, so the invariant belongs
+        // where every route passes.
+        #[cfg(feature = "floppybridge")]
+        ensure!(
+            !self.drives[drive_idx].is_bridged(),
+            "floppy.df{drive_idx} is a physical drive; take the drive off the bay before \
+             using a disk image in it"
         );
         self.idle_cache = false;
         self.drives[drive_idx].eject_image();
@@ -583,6 +619,14 @@ impl FloppyController {
         // whatever it last saw in this drive.
         drive.set_disk_change(true);
         Ok(())
+    }
+
+    /// Whether any bay is a physical drive. Such a machine cannot be run
+    /// faster than real time: the platter turns at its own speed and nothing
+    /// the emulator does will hurry it.
+    #[cfg(feature = "floppybridge")]
+    pub fn has_bridged_drive(&self) -> bool {
+        self.drives.iter().any(|d| d.bridge.is_some())
     }
 
     /// Let go of every real drive, closing the device and handing the port
@@ -1911,21 +1955,21 @@ impl FloppyController {
                 drive.bridge_attempts = 0;
             }
             drive.bridge_attempts = drive.bridge_attempts.saturating_add(1);
-            let bridge = drive.bridge.as_mut().expect("checked above");
+            // Retire the spent recording so the driver promotes the capture
+            // that followed it, if one has finished. When none has, it hands
+            // the same revolution back, and Copperline uses it: the guest gets
+            // a splice at the join and retries the sector that straddles it,
+            // which costs a revolution. Refusing it instead was tried and is
+            // worse -- the drive cannot finish a capture every revolution, so
+            // the guest is handed filler and starves. Ten good sectors beat
+            // none. `compatible` is the mode that has no seam to begin with.
             if spent {
-                bridge.switch_buffer(side);
+                if let Some(bridge) = drive.bridge.as_mut() {
+                    bridge.switch_buffer(side);
+                }
             }
-            let previous = spent.then(|| drive.cached.revs.first().map(|r| r.words.clone()));
             let bridge = drive.bridge.as_mut().expect("checked above");
-            if let Some((words, bits)) = bridge
-                .read_track(cylinder, side)
-                // Retiring a recording only promotes the next one if the driver
-                // has finished capturing it. Ask too soon and the same
-                // revolution comes back, and running the head into it again is
-                // the splice the whole exercise is meant to avoid -- a sector
-                // the guest has to retry. Wait for one that is genuinely new.
-                .filter(|(words, _)| previous.flatten().is_none_or(|p| p != *words))
-            {
+            if let Some((words, bits)) = bridge.read_track(cylinder, side) {
                 // The bridge hands back one whole revolution as a packed MFM
                 // stream plus the bit it wrapped at, which is what TrackRev
                 // holds. Because it is a real revolution, fitting it to one
@@ -2263,10 +2307,6 @@ impl FloppyDrive {
         self.cached = CachedTrack::default();
     }
 
-    /// Whether there is anything under the head: a mounted image, or a real
-    /// disk in a bridged drive. The drive's status lines key off this, so a
-    /// bridge reports empty until a disk is actually inserted, exactly as an
-    /// empty drive does.
     /// Whether this drive is a real one on a bridge.
     fn is_bridged(&self) -> bool {
         #[cfg(feature = "floppybridge")]
@@ -2279,6 +2319,10 @@ impl FloppyDrive {
         }
     }
 
+    /// Whether there is anything under the head: a mounted image, or a real
+    /// disk in a bridged drive. The drive's status lines key off this, so a
+    /// bridge reports empty until a disk is actually inserted, exactly as an
+    /// empty drive does.
     fn has_media(&self) -> bool {
         #[cfg(feature = "floppybridge")]
         if self.bridge.is_some() {

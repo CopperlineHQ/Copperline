@@ -1100,7 +1100,9 @@ pub struct FloppyBridgeConfig {
     pub mode: BridgeSpeedMode,
     pub density: BridgeDensity,
     pub cable: BridgeCable,
-    /// Lets the driver track a disk whose data rate wanders within a track.
+    /// Lets the driver time each track and, where the data rate is uniform --
+    /// so nothing is leaning on the timing for copy protection -- offer it at
+    /// a higher speed. Amiberry calls this "dynamically switch on Turbo".
     /// It changes how the driver captures, but not what Copperline does with
     /// the result: cell timing is derived from the length of the revolution it
     /// hands back, so the per-cell speed this makes available goes unused.
@@ -1861,7 +1863,7 @@ pub struct ConfigOverrides {
     /// Force a density rather than sensing it (`--floppy-bridge-density DFN
     /// DENSITY`). Same as `[floppy.dfN] bridge_density`.
     pub floppy_bridge_density: [Option<String>; 4],
-    /// Let the interface slow the drive between accesses
+    /// Let the interface offer uniformly-timed tracks at a higher speed
     /// (`--floppy-bridge-smart-speed DFN`). Same as `[floppy.dfN]
     /// bridge_smart_speed = true`.
     pub floppy_bridge_smart_speed: [bool; 4],
@@ -1982,8 +1984,13 @@ impl ConfigOverrides {
                 // The flag says "this bay is a real drive", so an image the
                 // config file left here would otherwise be a contradiction the
                 // parser rejects. The command line wins, as it does elsewhere.
-                drive.path = None;
-                drive.paths = None;
+                // Except for `off`, whose whole point is to hand the bay back
+                // to images: clearing the path there would take away the very
+                // disk the config file asked for.
+                if !bridge.trim().eq_ignore_ascii_case("off") {
+                    drive.path = None;
+                    drive.paths = None;
+                }
             }
             if let Some(port) = &self.floppy_bridge_port[idx] {
                 drive.bridge_port = Some(port.clone());
@@ -2766,9 +2773,10 @@ pub(crate) struct RawFloppyDrive {
     /// device; name one when two interfaces are plugged in at once.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) bridge_port: Option<String>,
-    /// How faithfully to follow the disk's real timing: `fast`,
-    /// `compatible` (the default, and what copy protection needs),
-    /// `turbo`, or `stalling`.
+    /// How each track is captured: `normal` (the default; `fast` is accepted
+    /// as upstream's own name for it), `compatible`, or `stalling`. `turbo` is
+    /// refused by name -- it answers AmigaDOS calls rather than reading the
+    /// disk.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) bridge_mode: Option<String>,
     /// Force a density instead of sensing it: `auto`, `dd`, or `hd`.
@@ -2778,8 +2786,8 @@ pub(crate) struct RawFloppyDrive {
     /// `0`..`3` (Shugart).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) bridge_cable: Option<String>,
-    /// Let the driver switch to turbo between accesses where it judges it
-    /// safe. Off by default, as it can upset copy protection.
+    /// Let the driver offer tracks whose data rate is uniform at a higher
+    /// speed. Off by default, as it can upset copy protection.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) bridge_smart_speed: Option<bool>,
     /// Let the driver read ahead into other cylinders while the disk is

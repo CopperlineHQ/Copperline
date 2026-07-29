@@ -154,6 +154,14 @@ every join between them is real data.
 Booting Workbench 1.3 off a Greaseweazle, that takes the time spent waiting on
 the drive from around 25 seconds to around 14.
 
+The drive cannot always finish a capture in the revolution the guest takes to
+read the last one. When it has nothing newer, the recording just read is used
+again, and the guest meets a splice at the join: the sector straddling it fails
+and is retried, costing a revolution. Ten good sectors out of eleven beat none,
+which is what refusing the stale recording gives -- the guest is handed filler
+and starves. If a disk reads badly this way, `compatible` is the mode with no
+seam to begin with.
+
 `compatible` captures each track from the index pulse, so a revolution
 begins where the real one does and its two ends meet in the sector gap,
 exactly as a captured image's do. Slower, for the reason above; reach for it
@@ -174,8 +182,10 @@ idle. It is off by default, as it is upstream and in Amiberry: during a boot
 the drive is never idle, so it buys very little (measurably nothing on a
 Workbench 1.3 boot), and it moves the real head about on its own.
 
-`bridge_smart_speed` lets the driver track a disk whose data rate wanders
-within a track. It changes how the driver captures but not what Copperline
+`bridge_smart_speed` lets the driver time each track and, where the data rate
+is uniform -- so nothing is leaning on the timing for copy protection -- offer
+it at a higher speed. Amiberry calls the same setting "dynamically switch on
+Turbo". It changes how the driver captures but not what Copperline
 does with the result: cell timing is derived from the length of the
 revolution handed back, so the per-cell speed it makes available goes unused.
 
@@ -203,6 +213,24 @@ the configured protection applies.
 
 In the launcher the same **Write protect** box covers a bay whether it holds
 an image or a physical drive, and it starts ticked.
+
+### What cannot be written
+
+Two writes are refused rather than attempted, and both say so in the log.
+
+A **partial write that does not start at the index** cannot be placed. The
+interface takes a whole track and one bit of positional information: start at
+the index pulse, or start wherever the head happens to be. There is no way to
+say "start 3,000 bits in", so a partial write asking for that would land on
+whichever sector was passing at the time. AmigaDOS writes all eleven sectors
+at once, which is a whole revolution and lands correctly wherever it begins,
+so this refusal should never be seen in ordinary use.
+
+A **drive select the interface does not support** fails the open instead of
+being ignored. Every interface advertises the cable conventions it can drive
+-- a Supercard Pro offers only the IBM PC `a`/`b` pair, for instance -- and a
+rejected selection would otherwise leave it quietly on Drive A, reading and
+writing a different physical drive than the one asked for.
 
 ## What behaves differently
 
@@ -257,7 +285,7 @@ is holding it open. Starting with `--floppy-bridge df0 greaseweazle` reports
 what it found and refuses to run if it found nothing, which is the quickest
 check.
 
-**"the installed FloppyBridge has no *X* driver"** -- the vendored bridge is
+**"the built-in FloppyBridge has no *X* driver"** -- the vendored bridge is
 older than the interface you asked for; a maintainer needs to update it.
 
 **The launcher shows `None` with the interface plugged in** -- the check runs
@@ -268,7 +296,7 @@ when the launcher opens and when a bay is switched over, so untick and re-tick
 the same footing as an image being inserted:
 
 ```text
-floppy.df0 real drive attached: Greaseweazle on /dev/ttyACM0, 3.5" DD drive, FloppyDriveBridge v1.6
+floppy.df0 physical drive attached: Greaseweazle on /dev/ttyACM0, 3.5" DD drive, FloppyDriveBridge v1.6
 floppy.df0 disk in the real drive
 floppy.df0 write-protected by the configuration; set write_protected = false to write to the disk
 ```

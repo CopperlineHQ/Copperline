@@ -3185,9 +3185,9 @@ impl MachineSetup {
             return false;
         };
         let token = cfg.driver.match_token();
-        // With no library there is nothing to ask, so leave every row live
-        // rather than greying the page out on a machine that simply has not
-        // installed it yet.
+        // The bridge is linked in, so it always has drivers to describe. If it
+        // ever answers with none there is nothing to ask, and leaving every row
+        // live is better than greying out a page the user cannot then fix.
         let drivers = crate::floppybridge::drivers();
         if drivers.is_empty() {
             return true;

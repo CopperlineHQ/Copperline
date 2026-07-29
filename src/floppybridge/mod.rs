@@ -80,6 +80,10 @@ const STRING_MAX: usize = 255;
 /// buffers at `MFM_BUFFER_MAX_TRACK_LENGTH` (0x3A00 * 2), so nothing longer
 /// than this can come back: a DD revolution is around 12.7K of MFM and an HD
 /// one twice that, leaving plenty of room for a drive running off-speed.
+/// How close to the index a write has to start for the driver to place it
+/// there. Upstream's own figure, from `commitWriteBuffer`.
+const INDEX_WRITE_SLACK_BITS: usize = 30;
+
 const MAX_TRACK_BYTES: usize = 0x3A00 * 2;
 
 /// Serialises calls into the library itself.
@@ -167,7 +171,8 @@ impl DriverInfo {
 }
 
 /// Every driver the loaded library offers (DrawBridge, Greaseweazle, ...).
-/// Empty when no library is loaded.
+/// Empty only if the bridge reports no drivers at all, which should not
+/// happen: the library is linked in, not looked for.
 pub fn drivers() -> Vec<DriverInfo> {
     let _guard = lib_lock();
     let count = unsafe { ffi::BRIDGE_NumDrivers() };
@@ -284,7 +289,23 @@ impl Bridge {
         }
 
         // Settings have to be in place before the device is opened.
-        apply(handle, config);
+        // The drive select decides which physical drive on the cable is
+        // spoken to, so a driver that will not take it must not be opened
+        // anyway -- it would quietly use Drive A instead.
+        let refused = apply(handle, config);
+        if refused.contains(&"drive select") {
+            unsafe { ffi::BRIDGE_FreeDriver(handle) };
+            return Err(format!(
+                "this interface does not support the {:?} drive select",
+                config.drive
+            ));
+        }
+        if !refused.is_empty() {
+            warn!(
+                "floppybridge: the interface would not take {}; its own default stands instead",
+                refused.join(", "),
+            );
+        }
 
         let mut err: *mut c_char = std::ptr::null_mut();
         if !unsafe { ffi::BRIDGE_Open(handle, &mut err) } {
@@ -464,6 +485,32 @@ impl Bridge {
             return false;
         }
         let cylinder = self.clamp_cylinder(cylinder);
+        // The driver takes a rotational position per word, but only the first
+        // survives: `commitWriteBuffer` reduces it to a `writeFromIndex`
+        // boolean -- true within 30 bits of the index -- and the worker lays
+        // the cells down either from the index pulse or from wherever the head
+        // happens to be when it runs. There is no third option, so a write
+        // that has to start anywhere else cannot be placed, and letting it go
+        // would put the guest's sector on top of an unrelated one.
+        //
+        // Two shapes are safe. A write from the index is placed exactly. A
+        // whole revolution overwrites the track entire, so where it begins
+        // does not matter -- which is what AmigaDOS does, writing all eleven
+        // sectors at once. Anything else is refused rather than gambled with:
+        // this is somebody's real disk.
+        let track_bits = unsafe { ffi::DRIVER_maxMFMBitPosition(self.handle) }.max(0) as usize;
+        let from_index =
+            start_bit <= INDEX_WRITE_SLACK_BITS || start_bit + INDEX_WRITE_SLACK_BITS >= track_bits;
+        let whole_revolution = track_bits > 0 && words.len() * 16 + 16 >= track_bits;
+        if !from_index && !whole_revolution {
+            warn!(
+                "floppybridge: refusing a partial write of {} words at bit {start_bit} of \
+                 {track_bits} on cylinder {cylinder}: the interface can only start a write at \
+                 the index or wherever the head is, so this one would land on another sector",
+                words.len(),
+            );
+            return false;
+        }
         unsafe {
             ffi::DRIVER_setSurface(self.handle, side);
             for (i, word) in words.iter().enumerate() {
@@ -494,13 +541,32 @@ impl Bridge {
 
 /// Push the settings onto a driver that has been created but not yet opened. A free function because it runs before
 /// there is a [`Bridge`] to call it on.
-fn apply(handle: ffi::BridgeDriverHandle, config: &BridgeConfig) {
+///
+/// Returns the settings the driver would not take. Most of these are
+/// preferences, and a driver that cannot honour one carries on sensibly with
+/// its default -- but the drive select is not a preference. Every driver
+/// advertises the cable conventions it supports, and one that refuses the
+/// requested selection silently keeps Drive A: the open then succeeds against
+/// a different physical drive than the one asked for, which is the sort of
+/// thing that is only noticed after writing to the wrong disk.
+fn apply(handle: ffi::BridgeDriverHandle, config: &BridgeConfig) -> Vec<&'static str> {
+    let mut refused = Vec::new();
     unsafe {
-        ffi::BRIDGE_DriverSetMode(handle, config.mode as u8);
-        ffi::BRIDGE_DriverSetDensityMode(handle, config.density as u8);
-        ffi::BRIDGE_DriverSetCable2(handle, config.drive as u8);
-        ffi::BRIDGE_DriverSetSmartSpeedEnabled(handle, config.smart_speed);
-        ffi::BRIDGE_DriverSetAutoCache(handle, config.auto_cache);
+        if !ffi::BRIDGE_DriverSetMode(handle, config.mode as u8) {
+            refused.push("read mode");
+        }
+        if !ffi::BRIDGE_DriverSetDensityMode(handle, config.density as u8) {
+            refused.push("density");
+        }
+        if !ffi::BRIDGE_DriverSetCable2(handle, config.drive as u8) {
+            refused.push("drive select");
+        }
+        if !ffi::BRIDGE_DriverSetSmartSpeedEnabled(handle, config.smart_speed) {
+            refused.push("smart speed");
+        }
+        if !ffi::BRIDGE_DriverSetAutoCache(handle, config.auto_cache) {
+            refused.push("read ahead");
+        }
         // Auto-detect unless a port is named, so the common case is
         // plug-in-and-go and an explicit port always wins.
         ffi::BRIDGE_DriverSetAutoDetectComPort(handle, config.port.is_none());
@@ -510,6 +576,7 @@ fn apply(handle: ffi::BridgeDriverHandle, config: &BridgeConfig) {
             }
         }
     }
+    refused
 }
 
 impl Drop for Bridge {
@@ -560,7 +627,7 @@ mod tests {
     /// one installed; run it to check a setup:
     ///     cargo test --release floppybridge_inventory -- --ignored --nocapture
     #[test]
-    #[ignore = "needs a FloppyBridge library installed"]
+    #[ignore = "lists what the built-in bridge offers; run it to see the drivers"]
     fn floppybridge_inventory() {
         println!("bridge: compiled in from vendor/floppybridge");
         if let Some((major, minor)) = version() {
@@ -747,8 +814,6 @@ mod tests {
         }
     }
 
-    /// Every driver the library reports is usable: it has a name and an index
-    /// we can hand back to `Source::Driver`.
     /// Powering the machine off drops the bridge and powering it back on
     /// opens a new one, so the device has to be genuinely released by the
     /// drop -- not merely forgotten about -- or the second open is refused

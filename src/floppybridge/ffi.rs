@@ -190,6 +190,10 @@ extern "C" {
     /// successive recordings rather than the same one over again.
     pub(super) fn DRIVER_mfmSwitchBuffer(handle: BridgeDriverHandle, side: bool);
 
+    /// The current track's length in bits -- the wrap point, and the largest
+    /// position `getMFMBit` or a write may name.
+    pub(super) fn DRIVER_maxMFMBitPosition(handle: BridgeDriverHandle) -> c_int;
+
     /// Hand one MFM word to the drive at the rotational position the head
     /// would be passing over, mirroring how a real write lays cells down as
     /// the platter turns.

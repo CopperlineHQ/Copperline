@@ -1288,6 +1288,17 @@ impl Emulator {
     /// Re-enabling re-anchors the pacing clock so the emulator does not
     /// sprint to catch up the time spent in warp.
     pub fn set_paced(&mut self, paced: bool) {
+        // A physical drive's platter turns in wall-clock time and cannot be
+        // hurried, so a bridged machine stays paced whatever asks otherwise --
+        // warp, the benchmark runner, the GDB stub, the control server. Left
+        // unthrottled the guest outruns the drive: the motor is spun up and
+        // down faster than it can reach speed, and tracks are stepped past
+        // before the drive has captured them. Enforced here rather than at
+        // each caller so no future runner can quietly opt out of it.
+        #[cfg(feature = "floppybridge")]
+        if !paced && self.bus().floppy.has_bridged_drive() {
+            return;
+        }
         if self.paced == paced {
             return;
         }
@@ -1957,8 +1968,6 @@ pub(crate) fn attach_floppy_bridges(floppy: &mut FloppyController, cfg: &Config)
                  misconfigured; please report it."
             );
         }
-        // Resolve the driver by name against what this library actually
-        // offers, so the config does not depend on enumeration order.
         // Resolve the driver by name against what the bridge actually
         // offers, so the config does not depend on enumeration order.
         let token = bridge_cfg.driver.match_token();

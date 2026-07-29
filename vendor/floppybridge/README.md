@@ -19,9 +19,11 @@ into them directly.
 
 Copy `floppybridge/*` and `windows/FloppyBridge.{cpp,h}` plus `windows/resource.h`
 from a newer upstream checkout into `src/`, then re-apply the changes below and
-update the commit recorded above. They are small, confined to four files, and
-every one is a Windows build-configuration difference rather than a change in
-behaviour.
+update the commit recorded above. They are small, confined to five files --
+`ArduinoFloppyBridge.cpp`, `FloppyBridge.cpp`, `GreaseWeazleBridge.cpp`,
+`SerialIO.cpp` and `ftdi.cpp` -- and every one is a build or platform
+difference rather than a change in behaviour. Every other vendored file is
+byte-identical to the commit above.
 
 `build.rs` picks the files it compiles by name; a release that adds or renames
 a source file needs that list updated too, and will say so by failing to link.

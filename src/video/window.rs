@@ -4039,8 +4039,6 @@ impl App {
         self.request_redraw();
     }
 
-    /// Removable-media status for the bar controls: which drives exist,
-    /// what is inserted, and whether a CD drive is fitted this session.
     /// Whether this drive is backed by a real one on a bridge.
     fn drive_is_bridged(&self, idx: usize) -> bool {
         #[cfg(feature = "floppybridge")]
@@ -4054,6 +4052,8 @@ impl App {
         }
     }
 
+    /// Removable-media status for the bar controls: which drives exist,
+    /// what is inserted, and whether a CD drive is fitted this session.
     fn media_bar(&self) -> MediaBar {
         let bus = self.emu.bus();
         let drives = std::array::from_fn(|idx| DriveBar {
