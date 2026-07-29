@@ -242,13 +242,17 @@ slow = "512K"
 # A2065 Ethernet board (Am7990 LANCE, driven by the SANA-II a2065.device).
 # net picks the host network backend: "nat" is a slirp-style userspace NAT
 # giving the guest outbound IPv4 with no host privileges (guest 10.0.2.15/24,
-# gateway 10.0.2.2, DNS 10.0.2.3, DHCP built in); "loopback" echoes
-# transmitted frames back (self-contained); "none" leaves the NIC isolated.
+# gateway 10.0.2.2, DNS 10.0.2.3, DHCP built in); "bridge" attaches complete
+# Ethernet frames directly to the named host adapter (LAN DHCP/static config
+# in the guest; Wi-Fi best-effort); "loopback" echoes transmitted frames back
+# (self-contained); "none" leaves the NIC isolated.
 # Omit the section for no board. Host networking is non-deterministic, so a
 # fitted NIC breaks byte-identical replay/save-state determinism while
 # traffic flows.
 # [a2065]
 # net = "nat"
+# interface = "en0"       # required only for net = "bridge"; list with
+#                         # copperline --list-net-interfaces
 
 
 # RTG graphics card: high-resolution, high-colour screens via Picasso96.

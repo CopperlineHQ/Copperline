@@ -1,0 +1,109 @@
+#!/bin/sh
+# Install/remove the Linux bridge capability helper. This script is shipped
+# beside copperline-net-helper in AppImages and companion release archives.
+set -eu
+
+helper_group=copperline-net
+install_dir=/usr/libexec/copperline
+helper_target="$install_dir/copperline-net-helper"
+unit_dir=/usr/lib/systemd/user
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+helper_source="$script_dir/copperline-net-helper"
+service_source="$script_dir/copperline-net-helper.service"
+socket_source="$script_dir/copperline-net-helper.socket"
+
+usage() {
+    echo "usage: $0 install|uninstall|status" >&2
+    exit 2
+}
+
+root_install() {
+    source=$1
+    service=$2
+    socket=$3
+    user=$4
+    if ! getent group "$helper_group" >/dev/null; then
+        groupadd --system "$helper_group"
+    fi
+    usermod -a -G "$helper_group" "$user"
+    install -d -o root -g root -m 0755 "$install_dir" "$unit_dir"
+    install -o root -g root -m 0755 "$source" "$helper_target"
+    install -o root -g root -m 0644 "$service" \
+        "$unit_dir/copperline-net-helper.service"
+    install -o root -g root -m 0644 "$socket" \
+        "$unit_dir/copperline-net-helper.socket"
+    setcap cap_net_raw=ep "$helper_target"
+}
+
+root_uninstall() {
+    rm -f "$helper_target" \
+        "$unit_dir/copperline-net-helper.service" \
+        "$unit_dir/copperline-net-helper.socket"
+    rmdir "$install_dir" 2>/dev/null || true
+}
+
+case "${1:-}" in
+    --root-install)
+        [ "$(id -u)" -eq 0 ] || exit 1
+        [ "$#" -eq 5 ] || usage
+        root_install "$2" "$3" "$4" "$5"
+        ;;
+    --root-uninstall)
+        [ "$(id -u)" -eq 0 ] || exit 1
+        root_uninstall
+        ;;
+    install)
+        [ "$#" -eq 1 ] || usage
+        [ -x "$helper_source" ] || {
+            echo "missing helper binary beside setup script: $helper_source" >&2
+            exit 1
+        }
+        command -v pkexec >/dev/null || {
+            echo "pkexec is required to install the capability helper" >&2
+            exit 1
+        }
+        command -v setcap >/dev/null || {
+            echo "setcap is required (normally provided by libcap)" >&2
+            exit 1
+        }
+        login_user=$(id -un)
+        pkexec "$0" --root-install "$helper_source" "$service_source" \
+            "$socket_source" "$login_user"
+        systemctl --user daemon-reload
+        systemctl --user enable --now copperline-net-helper.socket
+        echo "Installed $helper_target with cap_net_raw only."
+        echo "Added $login_user to $helper_group."
+        if ! id -nG | tr ' ' '\n' | grep -qx "$helper_group"; then
+            echo "Log out and back in before using bridged networking."
+        fi
+        ;;
+    uninstall)
+        [ "$#" -eq 1 ] || usage
+        systemctl --user disable --now copperline-net-helper.socket 2>/dev/null || true
+        systemctl --user stop copperline-net-helper.service 2>/dev/null || true
+        pkexec "$0" --root-uninstall
+        systemctl --user daemon-reload
+        echo "Removed the Copperline network helper (the $helper_group group was retained)."
+        ;;
+    status)
+        [ "$#" -eq 1 ] || usage
+        if [ -x "$helper_target" ]; then
+            echo "helper: installed at $helper_target"
+            getcap "$helper_target" 2>/dev/null || true
+        else
+            echo "helper: not installed"
+        fi
+        if id -nG | tr ' ' '\n' | grep -qx "$helper_group"; then
+            echo "group: current user is a member of $helper_group"
+        else
+            echo "group: current user is not an active member of $helper_group"
+        fi
+        systemctl --user is-enabled copperline-net-helper.socket 2>/dev/null \
+            || echo "socket: not enabled"
+        systemctl --user is-active copperline-net-helper.socket 2>/dev/null \
+            || echo "socket: not active"
+        ;;
+    *)
+        usage
+        ;;
+esac

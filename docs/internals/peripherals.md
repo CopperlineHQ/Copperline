@@ -230,7 +230,7 @@ guest could construct on its own (`..`, embedded separators) are
 blocked. A `readonly`
 mount refuses writes with the standard write-protection error.
 
-## A2065 Ethernet (`a2065.rs`, `net.rs`)
+## A2065 Ethernet (`a2065.rs`, `net/`)
 
 The `[a2065]` option fits a Commodore A2065: a Zorro II board carrying an
 Am7990 LANCE and 32 KiB of on-board RAM, driven by the AmigaOS SANA-II
@@ -258,6 +258,17 @@ breaks byte-identical replay while traffic flows; save states record only
 the chosen backend and bring up a fresh one on load (flows die; the
 guest's TCP retransmits). The board and backend story, including the WASM
 plugin `net` capability, is covered in [](../zorro).
+
+The `bridge` backend (`net/bridge/`, `net-bridge` build feature) uses the
+same bounded worker boundary but carries unmodified Ethernet frames to a
+selected physical adapter: AF_PACKET on Linux, system libpcap/BPF on macOS,
+and runtime-loaded Npcap on Windows. A platform filter and a second software
+guard admit only the guest station address and multicast/broadcast, while
+guest-source capture echo is discarded. The LANCE's init-block PADR updates
+that filter. Linux's companion process owns only `CAP_NET_RAW`, validates an
+interface request, and passes a bound descriptor with `SCM_RIGHTS`; it never
+handles a frame. Backend construction is fallible so bridge errors abort
+machine startup or state restoration rather than changing connectivity.
 
 ## CDTV (`cdtv.rs`, `cdrom.rs`)
 

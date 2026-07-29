@@ -38,6 +38,13 @@ flatpak run org.flatpak.Builder --force-clean --user --install \
 flatpak run dev.copperline.Copperline
 ```
 
+Bridged Ethernet is deliberately split across the sandbox boundary. Install
+the `Copperline-*-net-helper.tar.gz` companion from the same release on the
+host, run `./copperline-net-helper-setup install`, then log out and back in.
+The Flatpak has network namespace access and can see only the helper's exact
+per-user runtime socket; it is never granted raw host devices or capabilities.
+User-mode NAT needs no companion.
+
 The manifest's source is `type: dir path: ../..`, so it builds the checked-out
 tree (this is also what CI validates). Build from a clean checkout: a `dir`
 source copies the whole tree, including any large uncommitted ROM/disk images

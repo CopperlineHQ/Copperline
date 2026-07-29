@@ -1,0 +1,20 @@
+[Unit]
+Description=Copperline per-user raw Ethernet descriptor helper
+Documentation=https://copperlinehq.github.io/Copperline/guide/configuration.html
+Requires=copperline-net-helper.socket
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/copperline/copperline-net-helper --serve
+StandardInput=null
+NoNewPrivileges=no
+CapabilityBoundingSet=CAP_NET_RAW
+RestrictAddressFamilies=AF_UNIX AF_PACKET
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+Also=copperline-net-helper.socket

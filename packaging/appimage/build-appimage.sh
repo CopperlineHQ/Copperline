@@ -36,6 +36,19 @@ cargo build --release --locked
 echo "==> Staging AppDir"
 rm -rf "$appdir"
 install -Dm755 target/release/copperline "$appdir/usr/bin/copperline"
+# The AppImage cannot retain file capabilities itself. Ship the narrowly
+# privileged Linux bridge helper and its setup/unit files inside the image;
+# `copperline --install-net-helper` copies the helper to /usr/libexec and gives
+# only that copy CAP_NET_RAW.
+net_helper_dir="$appdir/usr/libexec/copperline"
+install -Dm755 target/release/copperline-net-helper \
+  "$net_helper_dir/copperline-net-helper"
+install -Dm755 packaging/linux/copperline-net-helper-setup \
+  "$net_helper_dir/copperline-net-helper-setup"
+install -Dm644 packaging/linux/copperline-net-helper.service \
+  "$net_helper_dir/copperline-net-helper.service"
+install -Dm644 packaging/linux/copperline-net-helper.socket \
+  "$net_helper_dir/copperline-net-helper.socket"
 
 # Bundled AROS open-source Kickstart replacement (default boot ROM).
 # romsearch.rs looks under <prefix>/share/copperline/aros relative to the
@@ -76,4 +89,20 @@ export OUTPUT="${OUTPUT:-Copperline-$VERSION-$arch.AppImage}"
   --icon-file "$appdir/usr/share/icons/hicolor/256x256/apps/dev.copperline.Copperline.png" \
   --output appimage
 
-echo "==> Built $OUTPUT"
+# Standalone host-helper companion for Flatpak users (and native installs
+# that do not use the AppImage). It contains no emulator or ROM assets.
+helper_bundle="Copperline-$VERSION-$arch-net-helper"
+helper_stage="$repo_root/target/$helper_bundle"
+rm -rf "$helper_stage"
+mkdir -p "$helper_stage"
+install -m755 target/release/copperline-net-helper \
+  "$helper_stage/copperline-net-helper"
+install -m755 packaging/linux/copperline-net-helper-setup \
+  "$helper_stage/copperline-net-helper-setup"
+install -m644 packaging/linux/copperline-net-helper.service \
+  "$helper_stage/copperline-net-helper.service"
+install -m644 packaging/linux/copperline-net-helper.socket \
+  "$helper_stage/copperline-net-helper.socket"
+tar -C "$repo_root/target" -czf "$repo_root/$helper_bundle.tar.gz" "$helper_bundle"
+
+echo "==> Built $OUTPUT and $helper_bundle.tar.gz"

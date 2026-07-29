@@ -94,6 +94,9 @@ dma  = true             # capabilities, all default false:
 int2 = true             #   dma  -> the dma_read/dma_write host imports
 int6 = false            #   int2 -> may assert INT2 (PORTS)
                         #   int6 -> may assert INT6 (EXTER)
+# A NIC plugin may also request the shared host networking capability:
+# net = "bridge"         # none / loopback / nat / bridge
+# net_interface = "en0" # required for bridge
 ```
 
 WASM is chosen because a module's entire mutable state lives in its linear
@@ -183,19 +186,21 @@ config:
 
 ```toml
 [a2065]
-net = "nat"   # host network backend; "loopback", or "none" for isolation
+net = "nat"   # "bridge", "loopback", or "none" for isolation
+# interface = "en0"  # required for "bridge"
 ```
 
 (`--a2065-net BACKEND` is the matching per-run flag, and the launcher's
-**I/O Ports** tab has the same picker under its **Ethernet:** heading, with a
-warning shown when the non-deterministic NAT backend is selected.)
+**I/O Ports** tab has the same picker under its **Ethernet:** heading. Bridged
+mode adds a live host-adapter picker. `--list-net-interfaces` prints the stable
+names accepted by `[a2065] interface` and `--a2065-interface`.)
 
 Unlike the DMAC boards, the LANCE does not master the Amiga bus: its init
 block, descriptor rings, and packet buffers live in the board's own 32 KiB RAM
 (which the CPU reaches through the board window), so the board is self-contained
 and owns its host network backend directly.
 
-Host network backends live in `src/net/` behind the `NetBackend` trait. Two are
+Host network backends live in `src/net/` behind the `NetBackend` trait. Three are
 built in:
 
 - **`nat`** -- userspace NAT (`src/net/nat/`, behind the default-on `net-nat`
@@ -219,10 +224,34 @@ built in:
   NAT is up, not that the target is reachable.
 - **`loopback`** -- transmitted frames are queued straight back; useful for a
   self-contained demo, driver bring-up, and tests.
+- **`bridge`** -- direct layer-2 attachment to one host adapter. The guest's
+  frames go to the adapter unchanged (destination through payload, no FCS), and
+  receive filters admit its station MAC plus broadcast/multicast. There is no
+  protocol translation and no managed TAP device: LAN DHCP, ARP, IPv4, and IPv6
+  work as they do for a physical station. LAN peers and the router can reach
+  the guest; the host's own IP is not guaranteed to be reachable through the
+  same adapter. Wi-Fi is explicitly best-effort because many access points do
+  not accept the guest's additional source MAC.
 
-A host TAP bridge would slot in behind `make_backend` the same way but is not
-implemented; TAP would require host privileges and per-OS interface setup,
-which is exactly what `nat` avoids.
+  - **Windows:** install [Npcap](https://npcap.com/). Copperline loads it from
+    the Windows system directory only when a bridge is selected; NAT-only
+    installs do not depend on Npcap.
+  - **macOS:** Copperline uses the system packet-capture interface. The account
+    must be allowed to open `/dev/bpf` (commonly through the machine's
+    `access_bpf` setup).
+  - **Linux:** Copperline first tries AF_PACKET directly. Normal desktop users
+    install the companion with `copperline --install-net-helper`, log out and
+    back in once to activate membership in `copperline-net`, then use the
+    per-user systemd socket. Only the root-owned helper binary receives
+    `CAP_NET_RAW`; it opens/binds/filters a socket and passes the descriptor to
+    Copperline, never pumps frames and never runs as root. `--net-helper-status`
+    and `--uninstall-net-helper` inspect/remove it. Flatpak users install the
+    published Linux helper companion on the host; the sandbox can access only
+    `$XDG_RUNTIME_DIR/copperline-net-helper/control.sock`.
+
+Bridge open failures are fatal to startup and save-state restoration; Copperline
+never silently substitutes NAT or isolation. If an adapter disappears while
+running, the worker logs link loss and disconnects the guest.
 
 **Networking is non-deterministic.** Inbound frames arrive on the host's
 schedule, not the emulated clock, so a fitted A2065 (or any `net`-capable WASM

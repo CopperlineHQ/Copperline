@@ -122,7 +122,8 @@ impl WasmRuntime {
             HostCtx {
                 mem: 0,
                 name: manifest.name.clone(),
-                net: make_backend(manifest.net),
+                net: make_backend(&manifest.net, None)
+                    .with_context(|| format!("opening network backend for {}", manifest.name))?,
                 config: manifest.config.clone(),
                 resources: resources.clone(),
             },

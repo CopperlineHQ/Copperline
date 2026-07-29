@@ -1831,9 +1831,12 @@ pub struct ConfigOverrides {
     /// Freeze the seeded RTC (`--rtc-frozen`). Same as
     /// `[machine] rtc_frozen`.
     pub rtc_frozen: Option<bool>,
-    /// A2065 Ethernet backend (`--a2065-net`): "none", "loopback", or "nat".
+    /// A2065 Ethernet backend (`--a2065-net`): "none", "loopback", "nat", or
+    /// "bridge".
     /// Same parser as `[a2065] net`; setting it fits the board.
     pub a2065_net: Option<String>,
+    /// Host adapter for bridged A2065 networking (`--a2065-interface`).
+    pub a2065_interface: Option<String>,
     /// Open fullscreen at start (`--full-screen` / `--windowed`). Same as
     /// `[display] full_screen`.
     pub full_screen: Option<bool>,
@@ -1913,6 +1916,7 @@ impl ConfigOverrides {
             && self.rtc_time.is_none()
             && self.rtc_frozen.is_none()
             && self.a2065_net.is_none()
+            && self.a2065_interface.is_none()
             && self.full_screen.is_none()
             && self.status_bar.is_none()
     }
@@ -2091,6 +2095,18 @@ impl ConfigOverrides {
         }
         if let Some(net) = &self.a2065_net {
             raw.a2065.net = Some(net.clone());
+            if !matches!(
+                net.trim().to_ascii_lowercase().as_str(),
+                "bridge" | "bridged"
+            ) {
+                raw.a2065.interface = None;
+            }
+        }
+        if let Some(interface) = &self.a2065_interface {
+            raw.a2065.interface = Some(interface.clone());
+            if self.a2065_net.is_none() {
+                raw.a2065.net = Some("bridge".to_string());
+            }
         }
         if let Some(full_screen) = self.full_screen {
             raw.display.full_screen = Some(full_screen);
@@ -2474,10 +2490,13 @@ pub(crate) struct RawScsi {
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawA2065 {
-    /// Host network backend: "loopback" (self-contained), or "none" for an
+    /// Host network backend: "loopback", "nat", "bridge", or "none" for an
     /// isolated NIC. Absent means no A2065 board is fitted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) net: Option<String>,
+    /// Host adapter identifier used by `net = "bridge"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) interface: Option<String>,
 }
 
 /// `[rtg]` graphics card: an RTG board on the Zorro chain.
@@ -3257,14 +3276,23 @@ impl TryFrom<RawConfig> for Config {
             errors.push(anyhow!("[scsi] rom_odd needs rom (the even EPROM half)"));
         }
 
-        let a2065_net = match &raw.a2065.net {
-            None => None,
-            Some(s) => Some(crate::net::parse_net_config(s).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "[a2065] net = {:?} is not a known backend (expected \"none\", \"loopback\", or \"nat\")",
-                    s
-                )
-            })?),
+        let a2065_net = match (&raw.a2065.net, &raw.a2065.interface) {
+            (None, None) => None,
+            (None, Some(_)) => {
+                return Err(anyhow!(
+                    "[a2065] interface needs net = \"bridge\" (or use --a2065-interface)"
+                ));
+            }
+            (Some(s), interface) => {
+                let config = crate::net::parse_net_config(s, interface.as_deref())
+                    .map_err(|error| anyhow::anyhow!("[a2065] {error}"))?;
+                if interface.is_some() && !matches!(&config, crate::net::NetConfig::Bridge { .. }) {
+                    return Err(anyhow!(
+                        "[a2065] interface applies only to net = \"bridge\""
+                    ));
+                }
+                Some(config)
+            }
         };
 
         // The A500 Rev 6A is both the "A500" profile and the no-profile
@@ -7805,6 +7833,64 @@ mod tests {
         };
         let cfg = load_overrides(&overrides)?;
         assert_eq!(cfg.serial.mode, SerialMode::Stdout);
+        Ok(())
+    }
+
+    #[test]
+    fn a2065_bridge_requires_and_preserves_interface() -> Result<()> {
+        let cfg = parse_config(
+            r#"
+            [a2065]
+            net = "bridge"
+            interface = "en-test"
+            "#,
+        )?;
+        assert_eq!(
+            cfg.a2065_net,
+            Some(crate::net::NetConfig::Bridge {
+                interface: "en-test".to_string()
+            })
+        );
+
+        let missing = parse_config("[a2065]\nnet = \"bridge\"\n").unwrap_err();
+        assert!(
+            missing.to_string().contains("needs an interface"),
+            "{missing:#}"
+        );
+        let stray = parse_config("[a2065]\ninterface = \"en-test\"\n").unwrap_err();
+        assert!(stray.to_string().contains("needs net"), "{stray:#}");
+        let conflict =
+            parse_config("[a2065]\nnet = \"nat\"\ninterface = \"en-test\"\n").unwrap_err();
+        assert!(
+            conflict.to_string().contains("applies only"),
+            "{conflict:#}"
+        );
+
+        let overrides = ConfigOverrides {
+            a2065_interface: Some("eth-test".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            load_overrides(&overrides)?.a2065_net,
+            Some(crate::net::NetConfig::Bridge {
+                interface: "eth-test".to_string()
+            })
+        );
+
+        // Replacing a file's bridge backend from the CLI also clears the
+        // now-inapplicable carried interface.
+        let mut raw: RawConfig =
+            toml::from_str("[a2065]\nnet = \"bridge\"\ninterface = \"en-test\"\n")?;
+        ConfigOverrides {
+            a2065_net: Some("nat".to_string()),
+            ..Default::default()
+        }
+        .apply_to(&mut raw);
+        assert!(raw.a2065.interface.is_none());
+        assert_eq!(
+            Config::try_from(raw)?.a2065_net,
+            Some(crate::net::NetConfig::Nat)
+        );
         Ok(())
     }
 

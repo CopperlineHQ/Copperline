@@ -132,6 +132,10 @@ pub struct CliArgs {
     pub list_midi: bool,
     /// `--list-audio-devices`: print the host audio output devices and exit.
     pub list_audio_devices: bool,
+    /// `--list-net-interfaces`: print adapters usable for bridging and exit.
+    pub list_net_interfaces: bool,
+    /// Linux companion helper setup action: install, uninstall, or status.
+    pub net_helper_action: Option<String>,
     /// `--sampler-list-audio-inputs`: print the host audio input devices (for
     /// `--sampler-audio-input`) and exit.
     pub list_sampler_inputs: bool,
@@ -328,6 +332,8 @@ where
     let mut calibrate_gamepad = false;
     let mut list_midi = false;
     let mut list_audio_devices = false;
+    let mut list_net_interfaces = false;
+    let mut net_helper_action: Option<String> = None;
     let mut list_sampler_inputs = false;
     let mut overrides = ConfigOverrides::default();
     let mut args = args.into_iter().peekable();
@@ -341,6 +347,27 @@ where
             }
             "--list-audio-devices" => {
                 list_audio_devices = true;
+            }
+            "--list-net-interfaces" => {
+                list_net_interfaces = true;
+            }
+            "--install-net-helper" => {
+                if net_helper_action.is_some() {
+                    return Err(anyhow!("only one network-helper action may be requested"));
+                }
+                net_helper_action = Some("install".to_string());
+            }
+            "--uninstall-net-helper" => {
+                if net_helper_action.is_some() {
+                    return Err(anyhow!("only one network-helper action may be requested"));
+                }
+                net_helper_action = Some("uninstall".to_string());
+            }
+            "--net-helper-status" => {
+                if net_helper_action.is_some() {
+                    return Err(anyhow!("only one network-helper action may be requested"));
+                }
+                net_helper_action = Some("status".to_string());
             }
             "--sampler-list-audio-inputs" => {
                 list_sampler_inputs = true;
@@ -550,8 +577,14 @@ where
             }
             "--a2065-net" => {
                 overrides.a2065_net = Some(args.next().ok_or_else(|| {
-                    anyhow!("--a2065-net requires a backend (none/loopback/nat)")
+                    anyhow!("--a2065-net requires a backend (none/loopback/nat/bridge)")
                 })?);
+            }
+            "--a2065-interface" => {
+                overrides.a2065_interface = Some(
+                    args.next()
+                        .ok_or_else(|| anyhow!("--a2065-interface requires an adapter name"))?,
+                );
             }
             "--midi-out" => {
                 overrides.midi_out = Some(
@@ -977,6 +1010,16 @@ where
             "--control-token/--control-info require --control or --control-gui"
         ));
     }
+    if overrides.a2065_interface.is_some()
+        && overrides
+            .a2065_net
+            .as_deref()
+            .is_some_and(|net| !matches!(net.to_ascii_lowercase().as_str(), "bridge" | "bridged"))
+    {
+        return Err(anyhow!(
+            "--a2065-interface conflicts with an explicit non-bridge --a2065-net"
+        ));
+    }
     Ok(CliArgs {
         config_path,
         rom_path,
@@ -1007,6 +1050,8 @@ where
         calibrate_gamepad,
         list_midi,
         list_audio_devices,
+        list_net_interfaces,
+        net_helper_action,
         list_sampler_inputs,
         overrides,
     })
@@ -1138,6 +1183,10 @@ fn print_help() {
          --audio-filter MODE            Paula filter: auto (default), on, or off\n  \
          --audio-stereo-separation PCT  stereo width 0-100 (100 default, 0 = mono)\n  \
          --list-audio-devices           list host audio output devices and exit\n  \
+         --list-net-interfaces          list adapters usable for bridged Ethernet and exit\n  \
+         --install-net-helper           install Linux bridge helper (CAP_NET_RAW only)\n  \
+         --uninstall-net-helper         remove the Linux bridge helper\n  \
+         --net-helper-status            report Linux bridge-helper status\n  \
          --audio-wav PATH               dump mixed stereo audio to a 32-bit float WAV file\n  \
          \x20                            instead of live output\n  \
          --profile-live-audio SECS      run a no-window Paula-to-cpal profile workload;\n  \
@@ -1148,8 +1197,9 @@ fn print_help() {
          \x20                            tcp-connect, or pty\n  \
          --serial-connect HOST:PORT     dial a remote TCP service (a telnet BBS) with the\n  \
          \x20                            serial port (implies --serial tcp-connect)\n  \
-         --a2065-net BACKEND            fit an A2065 Ethernet board: none, loopback, or\n  \
-         \x20                            nat (user-mode NAT, no host privileges)\n  \
+         --a2065-net BACKEND            fit an A2065 Ethernet board: none, loopback, nat,\n  \
+         \x20                            or bridge (direct attachment to a host adapter)\n  \
+         --a2065-interface NAME         bridge adapter; implies --a2065-net bridge\n  \
          --parallel DEVICE              parallel port: none, printer, or sampler\n  \
          --sampler-audio-input NAME     sampler host capture device (implies --parallel sampler)\n  \
          --sampler-input-gain DB        sampler input gain in dB (implies --parallel sampler)\n  \
@@ -1519,6 +1569,111 @@ fn print_audio_output_devices() -> Result<()> {
     Ok(())
 }
 
+/// Print exact adapter identifiers accepted by bridged networking.
+fn print_net_interfaces() -> Result<()> {
+    #[cfg(all(feature = "net-bridge", not(target_arch = "wasm32")))]
+    {
+        println!("Network interfaces (for --a2065-interface / [a2065] interface):");
+        let interfaces = copperline::net::bridge::list_interfaces()?;
+        if interfaces.is_empty() {
+            println!("  (none found)");
+        }
+        for interface in interfaces {
+            let mut state = Vec::new();
+            if interface.up {
+                state.push("up");
+            } else {
+                state.push("down");
+            }
+            if interface.running {
+                state.push("running");
+            }
+            if interface.loopback {
+                state.push("loopback");
+            }
+            if interface.wireless {
+                state.push("wireless; bridging is best-effort");
+            }
+            println!("  {}\t[{}]", interface.label(), state.join(", "));
+        }
+        Ok(())
+    }
+    #[cfg(not(all(feature = "net-bridge", not(target_arch = "wasm32"))))]
+    {
+        anyhow::bail!("this build has no native bridged-networking support")
+    }
+}
+
+fn run_net_helper_setup(action: &str) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var_os("FLATPAK_ID").is_some() {
+            if action == "status" {
+                #[cfg(feature = "net-bridge")]
+                {
+                    let socket = copperline::net::bridge::linux::helper_socket_path()?;
+                    if socket.exists() {
+                        println!("host helper socket is visible at {}", socket.display());
+                        return Ok(());
+                    }
+                    anyhow::bail!(
+                        "host helper socket is not visible at {}; install and enable \
+                         the Linux network-helper companion on the host",
+                        socket.display()
+                    );
+                }
+                #[cfg(not(feature = "net-bridge"))]
+                anyhow::bail!("this build has no bridged-networking support");
+            }
+            anyhow::bail!(
+                "the Flatpak cannot install a host capability binary from \
+                 inside its sandbox; download the Copperline Linux network-helper \
+                 companion archive, then run its copperline-net-helper-setup {action}"
+            );
+        }
+        let executable = std::env::current_exe()?;
+        let mut candidates = vec![
+            executable.with_file_name("copperline-net-helper-setup"),
+            executable
+                .parent()
+                .and_then(Path::parent)
+                .map(|prefix| {
+                    prefix
+                        .join("libexec")
+                        .join("copperline")
+                        .join("copperline-net-helper-setup")
+                })
+                .unwrap_or_default(),
+            PathBuf::from("packaging/linux/copperline-net-helper-setup"),
+        ];
+        if let Some(appdir) = std::env::var_os("APPDIR") {
+            candidates.insert(
+                0,
+                PathBuf::from(appdir).join("usr/libexec/copperline/copperline-net-helper-setup"),
+            );
+        }
+        let setup = candidates
+            .into_iter()
+            .find(|path| path.is_file())
+            .ok_or_else(|| {
+                anyhow!(
+                    "copperline-net-helper-setup was not found; use the Linux \
+                     network-helper companion archive from the Copperline release"
+                )
+            })?;
+        let status = std::process::Command::new(&setup).arg(action).status()?;
+        if !status.success() {
+            anyhow::bail!("{} {action} failed with {status}", setup.display());
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = action;
+        anyhow::bail!("the capability helper is only used for bridged networking on Linux")
+    }
+}
+
 /// Print the host audio input devices for `--sampler-list-audio-inputs`. These
 /// are the names `--sampler-audio-input` and `[parallel] sampler_input` match
 /// against.
@@ -1592,6 +1747,12 @@ fn main() -> Result<()> {
     }
     if cli.list_audio_devices {
         return print_audio_output_devices();
+    }
+    if cli.list_net_interfaces {
+        return print_net_interfaces();
+    }
+    if let Some(action) = cli.net_helper_action.as_deref() {
+        return run_net_helper_setup(action);
     }
     if cli.list_sampler_inputs {
         return print_sampler_input_devices();
@@ -2105,6 +2266,19 @@ mod tests {
             &parse(&["--screenshot-after", "5", "out.png"]).unwrap()
         ));
         assert!(!launcher_requested(&parse(&["--noaudio"]).unwrap()));
+    }
+
+    #[test]
+    fn bridge_cli_interface_implies_bridge_and_rejects_conflicts() {
+        let args = parse(&["--a2065-interface", "en-test"]).unwrap();
+        assert_eq!(args.overrides.a2065_interface.as_deref(), Some("en-test"));
+        assert!(args.overrides.a2065_net.is_none());
+
+        let args = parse(&["--a2065-net", "bridge", "--a2065-interface", "en-test"]).unwrap();
+        assert_eq!(args.overrides.a2065_net.as_deref(), Some("bridge"));
+
+        let error = parse(&["--a2065-net", "nat", "--a2065-interface", "en-test"]).unwrap_err();
+        assert!(error.to_string().contains("conflicts"), "{error:#}");
     }
 
     fn temp_script(name: &str, contents: &str) -> PathBuf {

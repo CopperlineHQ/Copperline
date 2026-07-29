@@ -52,7 +52,7 @@ src/
   dirfs.rs          # host directory -> in-memory FFS partition image
   filesys.rs        # host directories mounted live as AmigaDOS volumes
   a2065.rs          # A2065 Zorro II Ethernet board (Am7990 LANCE)
-  net.rs            # host networking backends for emulated Ethernet
+  net/              # loopback, userspace NAT, and host-adapter bridge backends
   cdrom.rs          # CD image (BIN/CUE) parsing
   cdtv.rs           # CDTV DMAC + Matshita drive model
   akiko.rs          # CD32 Akiko (C2P, NVRAM, Chinon drive)
