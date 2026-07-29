@@ -1545,9 +1545,22 @@ pub(super) fn draw_reset_glyph(frame: &mut [u8], cx: usize, cy: usize, texture_s
         prev = next;
     }
 
-    let unit = radius / 5.5;
-    let tip = |x: f32, y: f32| (ccx + x * unit, ccy + y * unit);
-    let arrow = [tip(-3.9, -4.3), tip(1.0, -6.7), tip(1.0, -1.9)];
+    // Arrowhead anchored to the arc end: base centred on the ring path and
+    // perpendicular to the tangent, tip continuing the direction of travel.
+    // The arc's rounded end cap lands entirely inside the triangle, so the
+    // stroke reads as one arc ending in an arrow.
+    let end = ang(1.0);
+    let ex = ccx + radius * end.cos();
+    let ey = ccy + radius * end.sin();
+    let (tx, ty) = (end.sin(), -end.cos());
+    let (nx, ny) = (end.cos(), end.sin());
+    let half_w = 2.4 * scale;
+    let len = 3.6 * scale;
+    let arrow = [
+        (ex + half_w * nx, ey + half_w * ny),
+        (ex - half_w * nx, ey - half_w * ny),
+        (ex + len * tx, ey + len * ty),
+    ];
     fill_triangle(frame, arrow, RESET_GLYPH, texture_scale);
 }
 
