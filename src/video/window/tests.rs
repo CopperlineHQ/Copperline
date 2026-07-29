@@ -45,6 +45,7 @@ fn single_drive_media() -> MediaBar {
         connected: true,
         inserted: true,
         multi: false,
+        bridged: false,
     };
     MediaBar { drives, cd: None }
 }
@@ -56,6 +57,7 @@ fn media(connected: usize, cd: Option<bool>) -> MediaBar {
             connected: true,
             inserted: true,
             multi: false,
+            bridged: false,
         };
     }
     MediaBar { drives, cd }
@@ -1629,6 +1631,40 @@ fn status_bar_draws_disk_image_button_next_to_track_counter() {
     assert_eq!(
         pixel(&frame, button.x + 12, button.y + 12, scale),
         DISK_BODY_SHADOW.to_le_bytes()
+    );
+}
+
+#[test]
+fn status_bar_greys_swap_and_eject_on_a_bridged_drive() {
+    // A real drive's disk is loaded and ejected by hand, so the buttons stay
+    // drawn -- the drive is still visibly there, and numbered -- but dim,
+    // because there is nothing here for them to do.
+    let scale = 1;
+    let mut bar = single_drive_media();
+    bar.drives[0].multi = true;
+    bar.drives[0].inserted = true;
+    bar.drives[0].bridged = true;
+    let layout = bar_layout(&bar);
+    let swap = layout.drive_swap[0].expect("a bridged drive still shows its buttons");
+    let eject = layout.drive_eject[0].expect("a bridged drive still shows its buttons");
+    assert!(
+        layout.drive_load[0].is_some(),
+        "the disk icon stays, so the drive reads as present"
+    );
+
+    let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+    let mut v = view(FrontPanelStatus::default(), true, false);
+    v.media = bar;
+    draw_status_bar(&mut frame, &v, scale);
+    assert_eq!(
+        pixel(&frame, swap.x + 5, swap.y + 8, scale),
+        BUTTON_GLYPH_DISABLED.to_le_bytes(),
+        "swap is dim on a bridged drive even with a playlist"
+    );
+    assert_eq!(
+        pixel(&frame, eject.x + 5, eject.y + 15, scale),
+        BUTTON_GLYPH_DISABLED.to_le_bytes(),
+        "eject is dim on a bridged drive even with a disk in"
     );
 }
 

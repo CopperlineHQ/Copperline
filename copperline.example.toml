@@ -569,3 +569,29 @@ floppy_sounds_volume = 100
 # [floppy.df0]
 # path = "Workbench.adf"
 # write_protected = true
+#
+# A bay can drive a real 3.5" floppy drive instead, over a DrawBridge,
+# Greaseweazle, or Supercard Pro, reading and writing genuine Amiga disks.
+# Rob Smith's FloppyBridge is built into Copperline, so there is nothing to
+# install. A bay takes either a bridge or an image, never both: the disk in
+# the drive is its media.
+#
+# Writing to a real disk needs the disk's own tab open *and*
+# write_protected = false -- two independent things to get wrong before
+# anything is laid on physical media. The status bar's eject and swap do
+# nothing for a bridged bay, a machine with one is paced to wall-clock time
+# even headless, and such a run is not reproducible. See the "Real floppy
+# drives" chapter of the guide.
+#
+# [floppy.df0]
+# bridge = "greaseweazle"        # drawbridge/greaseweazle/supercardpro/off
+# write_protected = true
+# bridge_port = "/dev/ttyACM0"   # omit to auto-detect the interface
+# bridge_cable = "a"             # a/b (IBM PC) or 0..3 (Shugart)
+# bridge_density = "auto"        # auto/dd/hd
+# bridge_mode = "normal"         # normal/compatible/stalling. normal, the
+#                                # default, skips the wait for the index and is
+#                                # appreciably quicker; stalling blocks the
+#                                # emulated machine until each track is ready
+# bridge_smart_speed = false
+# bridge_auto_cache = false      # cache disk data while the drive is idle

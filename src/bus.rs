@@ -5211,6 +5211,18 @@ impl Bus {
         // it at vpos 0). The ~70 cck that real hardware adds before the handler
         // runs is interrupt RECOGNITION LATENCY, modelled separately (see
         // irq_latency_setting / arm_irq_recognition_latency), not a raise delay.
+        // Once a frame, ask any real drive whether its disk has been swapped or
+        // its write-protect tab moved. Unlike an image, the medium changes
+        // without the emulator being told, and the drive has to be asked even
+        // with the motor stopped -- otherwise a disk put in after boot is never
+        // noticed. Outside the INTREQ test on purpose: that only passes when
+        // VERTB goes from acknowledged to raised, and software which disables
+        // interrupts and polls the beam instead -- trackloaders and demos,
+        // exactly what a real disk gets pointed at -- leaves the bit set for
+        // good. Gated on it, the drive would be asked once and never again.
+        // `pending_vbi` already paces this to once per frame wrap.
+        #[cfg(feature = "floppybridge")]
+        self.floppy.poll_bridge_media();
         if self.paula.intreq & INT_VERTB == 0 {
             self.paula.intreq |= INT_VERTB;
             if diag_vbi() {

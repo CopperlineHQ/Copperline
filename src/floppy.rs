@@ -14,6 +14,10 @@ use anyhow::{bail, ensure, Context, Result};
 use flate2::read::{DeflateDecoder, GzDecoder};
 use flate2::CrcReader;
 use log::{debug, warn};
+// The bridge's retry path traces, and its media reporting is worth an info
+// line; both are compiled out with the feature.
+#[cfg(feature = "floppybridge")]
+use log::{info, trace};
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
@@ -53,6 +57,19 @@ const DMACON_DISK: u16 = 1 << 4;
 const DMACON_DMAEN: u16 = 1 << 9;
 
 const MOTOR_READY_CCK: u32 = PAULA_CLOCK_HZ / 4;
+/// Whether `COPPERLINE_DIAG_FLOPPYBRIDGE` asked for the physical drive's own
+/// running commentary. Snapshotted, like every other diagnostic switch.
+#[cfg(feature = "floppybridge")]
+fn bridge_diag() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| crate::envcfg::flag("COPPERLINE_DIAG_FLOPPYBRIDGE"))
+}
+
+/// How long to leave a bridged drive alone after it says a track is not ready
+/// yet. The physical capture takes a revolution either way, so this only
+/// decides how often we ask -- see `ensure_track`.
+#[cfg(feature = "floppybridge")]
+const BRIDGE_POLL_INTERVAL_CCK: u64 = (PAULA_CLOCK_HZ / 1_000) as u64;
 const DISK_STATUS_SETTLE_CCK: u32 = PAULA_CLOCK_HZ / 1_000;
 const INDEX_PULSE_CCK: u32 = PAULA_CLOCK_HZ / 250;
 const INDEX_FLAG_SYNC_CCK: u32 = 1;
@@ -488,6 +505,18 @@ impl FloppyController {
             "invalid floppy drive df{}",
             drive_idx
         );
+        // A bay is either a real drive or an image, never both: the bridge
+        // keeps supplying the track under the head, so an image mounted on top
+        // would be reported as inserted and then never read. The status bar
+        // greys its own buttons, but scheduled inserts, drag-and-drop and the
+        // control protocol all arrive here instead, so the invariant belongs
+        // where every route passes.
+        #[cfg(feature = "floppybridge")]
+        ensure!(
+            !self.drives[drive_idx].is_bridged(),
+            "floppy.df{drive_idx} is a physical drive; take the drive off the bay before \
+             using a disk image in it"
+        );
         let config = FloppyDriveConfig {
             path,
             write_protected,
@@ -518,6 +547,18 @@ impl FloppyController {
             "invalid floppy drive df{}",
             drive_idx
         );
+        // A bay is either a real drive or an image, never both: the bridge
+        // keeps supplying the track under the head, so an image mounted on top
+        // would be reported as inserted and then never read. The status bar
+        // greys its own buttons, but scheduled inserts, drag-and-drop and the
+        // control protocol all arrive here instead, so the invariant belongs
+        // where every route passes.
+        #[cfg(feature = "floppybridge")]
+        ensure!(
+            !self.drives[drive_idx].is_bridged(),
+            "floppy.df{drive_idx} is a physical drive; take the drive off the bay before \
+             using a disk image in it"
+        );
         let image = FloppyImage::from_bytes(bytes, label, write_protected)
             .with_context(|| format!("loading floppy.df{} image", drive_idx))?;
         self.idle_cache = false;
@@ -534,9 +575,196 @@ impl FloppyController {
             "invalid floppy drive df{}",
             drive_idx
         );
+        // A bay is either a real drive or an image, never both: the bridge
+        // keeps supplying the track under the head, so an image mounted on top
+        // would be reported as inserted and then never read. The status bar
+        // greys its own buttons, but scheduled inserts, drag-and-drop and the
+        // control protocol all arrive here instead, so the invariant belongs
+        // where every route passes.
+        #[cfg(feature = "floppybridge")]
+        ensure!(
+            !self.drives[drive_idx].is_bridged(),
+            "floppy.df{drive_idx} is a physical drive; take the drive off the bay before \
+             using a disk image in it"
+        );
         self.idle_cache = false;
         self.drives[drive_idx].eject_image();
         Ok(())
+    }
+
+    /// Put a real drive on `drive_idx`, replacing any mounted image. The
+    /// bridge supplies the track under the head from then on.
+    #[cfg(feature = "floppybridge")]
+    pub fn attach_bridge(
+        &mut self,
+        drive_idx: usize,
+        bridge: crate::floppybridge::Bridge,
+        write_protected: bool,
+    ) -> Result<()> {
+        ensure!(
+            drive_idx < self.drives.len(),
+            "invalid floppy drive df{drive_idx}"
+        );
+        self.idle_cache = false;
+        let drive = &mut self.drives[drive_idx];
+        drive.eject_image();
+        // Either protection is enough to keep the disk read-only.
+        drive.bridge_write_protected = write_protected;
+        drive.bridge_tab_write_protected = bridge.write_protected();
+        drive.bridge_media = bridge.disk_in_drive();
+        drive.write_protected_target =
+            write_protected || (drive.bridge_media && drive.bridge_tab_write_protected);
+        drive.bridge = Some(bridge);
+        // Announce the swap so the guest re-reads rather than trusting
+        // whatever it last saw in this drive.
+        drive.set_disk_change(true);
+        Ok(())
+    }
+
+    /// Whether any bay is a physical drive. Such a machine cannot be run
+    /// faster than real time: the platter turns at its own speed and nothing
+    /// the emulator does will hurry it.
+    #[cfg(feature = "floppybridge")]
+    pub fn has_bridged_drive(&self) -> bool {
+        self.drives.iter().any(|d| d.bridge.is_some())
+    }
+
+    /// Let go of every real drive, closing the device and handing the port
+    /// back to the host.
+    ///
+    /// This is what powering the machine off has to do. A `Bridge` holds the
+    /// interface open for as long as it exists, and the library keeps its
+    /// worker running behind it -- so a machine that merely stopped stepping
+    /// would leave the real drive clicking away as though the Amiga were still
+    /// on, and nothing else could open the device. Dropping the bridge closes
+    /// it, exactly as cutting the power to a real drive would.
+    ///
+    /// The bays revert to empty image-backed drives, so a machine that carries
+    /// on running simply has nothing in them.
+    #[cfg(feature = "floppybridge")]
+    pub fn release_bridges(&mut self) {
+        for (idx, drive) in self.drives.iter_mut().enumerate() {
+            if drive.bridge.take().is_none() {
+                continue;
+            }
+            info!("floppy.df{idx} physical drive released (interface handed back to the host)");
+            drive.bridge_media = false;
+            drive.cached_track = None;
+            drive.cached = CachedTrack::default();
+            drive.bridge_filler_track = None;
+            drive.bridge_tracks.clear();
+            drive.eject_image();
+            self.idle_cache = false;
+        }
+    }
+
+    /// Whether this drive is backed by a real drive.
+    #[cfg(feature = "floppybridge")]
+    pub fn is_bridged(&self, drive_idx: usize) -> bool {
+        self.drives
+            .get(drive_idx)
+            .is_some_and(|d| d.bridge.is_some())
+    }
+
+    /// Point a bridged drive's real head where the emulated one is.
+    ///
+    /// A real drive's head follows the stepper, so a bridged one does too. It
+    /// also buys back most of the wait for a track: the driver starts capturing
+    /// the moment the head arrives, so by the time the guest gets round to
+    /// reading, the revolution is often already in hand. The library coalesces
+    /// queued moves, so a trackloader sweeping across the disk does not pile up
+    /// a seek per cylinder.
+    #[cfg(feature = "floppybridge")]
+    fn sync_bridge_head(&mut self, idx: usize) {
+        let side = self.side != 0;
+        let Some(drive) = self.drives.get_mut(idx) else {
+            return;
+        };
+        let cylinder = drive.cylinder;
+        if let Some(bridge) = drive.bridge.as_mut() {
+            if bridge_diag() {
+                info!(
+                    "floppybridge.df{idx} head to cylinder {cylinder} side {} (drive at {})",
+                    u8::from(side),
+                    bridge.current_cylinder(),
+                );
+            }
+            bridge.seek(cylinder, side);
+        }
+    }
+
+    /// Notice a disk swapped by hand in a bridged drive. Unlike an image, the
+    /// medium can change without the emulator being told, so the frontend
+    /// polls this (once a frame is ample) to raise the change line.
+    #[cfg(feature = "floppybridge")]
+    pub fn poll_bridge_media(&mut self) {
+        for (idx, drive) in self.drives.iter_mut().enumerate() {
+            let Some(bridge) = drive.bridge.as_mut() else {
+                continue;
+            };
+            // An interface pulled out mid-session stops answering rather than
+            // reporting anything useful, and the guest just sees a drive that
+            // has gone quiet. Say it once, so the reason is in the log.
+            let working = bridge.is_working();
+            if !working && !drive.bridge_reported_failed {
+                warn!(
+                    "floppy.df{idx} the physical drive's interface has stopped responding \
+                     (unplugged?); this drive will not read or write until it is \
+                     reconnected and the machine restarted"
+                );
+            }
+            drive.bridge_reported_failed = !working;
+            let changed = bridge.take_disk_changed();
+            let had_media = drive.bridge_media;
+            drive.bridge_media = bridge.disk_in_drive();
+            // A disk going in or coming out of a real drive is the one media
+            // change nothing in the emulator asked for, so it is worth saying
+            // as plainly as an image being inserted.
+            if drive.bridge_media != had_media {
+                if drive.bridge_media {
+                    info!("floppy.df{idx} disk inserted (physical drive)");
+                } else {
+                    info!("floppy.df{idx} disk ejected (physical drive)");
+                }
+            }
+            // Sample the drive before the borrow is needed elsewhere. The
+            // driver keeps the tab's last reading and hands it back whatever
+            // the motor is doing, so this is good with the platter stopped --
+            // which is just as well, because a drive the guest is not actively
+            // reading is stopped nearly all the time.
+            let sensed_tab = bridge.write_protected();
+            if changed {
+                drive.cached_track = None;
+                drive.cached = CachedTrack::default();
+                drive.bridge_filler_track = None;
+                drive.bridge_tracks.clear();
+                drive.set_disk_change(true);
+                self.idle_cache = false;
+            }
+            drive.bridge_tab_write_protected = sensed_tab;
+            // With no disk in the drive there is no tab to have an opinion,
+            // and announcing one reads as though something were in there.
+            // The configured protection still stands on its own.
+            let write_protected = drive.bridge_write_protected
+                || (drive.bridge_media && drive.bridge_tab_write_protected);
+            if write_protected != drive.write_protected_target {
+                // Which of the two protections is in force decides whether
+                // opening the tab will help, so name it rather than just
+                // reporting the outcome.
+                if write_protected {
+                    let reason = if drive.bridge_write_protected {
+                        "the configuration"
+                    } else {
+                        "the disk's tab"
+                    };
+                    info!("floppy.df{idx} disk is write-protected by {reason} (physical drive)");
+                } else {
+                    info!("floppy.df{idx} disk is writable (physical drive)");
+                }
+                drive.set_write_protected(write_protected);
+                self.idle_cache = false;
+            }
+        }
     }
 
     pub fn reset_external_drives(&mut self) {
@@ -558,6 +786,7 @@ impl FloppyController {
         // DSKSIDE is active-low on Amiga drives: 0 selects the upper
         // head, which maps to odd ADF tracks. Lower/even is selected
         // when the bit is high.
+        let side_changed = self.side != if val & CIAB_DSKSIDE == 0 { 1 } else { 0 };
         self.side = if val & CIAB_DSKSIDE == 0 { 1 } else { 0 };
 
         for idx in 0..self.drives.len() {
@@ -595,8 +824,16 @@ impl FloppyController {
                 // outward pulses with the /TRK0 sensor at cylinder 0
                 // (a silent poll, which NoClick patches rely on), and
                 // pulses faster than the mechanism move nothing.
-                if stepper_fired {
+                // A real drive on a bridge makes its own noise across the
+                // room; synthesizing a second click on top would be a drive
+                // heard twice. Per drive, so an image in the next bay still
+                // clicks as it should.
+                if stepper_fired && !self.drives[idx].is_bridged() {
                     self.sound_steps = self.sound_steps.saturating_add(1);
+                }
+                #[cfg(feature = "floppybridge")]
+                if stepper_fired {
+                    self.sync_bridge_head(idx);
                 }
             }
 
@@ -605,8 +842,14 @@ impl FloppyController {
             }
         }
         if let Some(idx) = self.selected_drive() {
+            #[cfg(feature = "floppybridge")]
+            if side_changed {
+                self.sync_bridge_head(idx);
+            }
             self.ensure_track(idx, self.track_for_drive(idx));
         }
+        #[cfg(not(feature = "floppybridge"))]
+        let _ = side_changed;
     }
 
     pub fn set_dskpt_high(&mut self, val: u16) {
@@ -1231,7 +1474,7 @@ impl FloppyController {
         }
         let idx = self.selected_drive()?;
         let drive = &self.drives[idx];
-        if drive.image.is_none() || !drive.motor_on {
+        if !drive.has_media() || !drive.motor_on {
             return None;
         }
         let rev = drive.cur_rev()?;
@@ -1266,6 +1509,11 @@ impl FloppyController {
     /// ramp instead of switching.
     pub fn motor_spin_levels(&self) -> [f32; 4] {
         std::array::from_fn(|idx| {
+            // Silent for a bridged drive: the real platter is spinning in the
+            // room, so a synthesized motor on top would double it.
+            if self.drives[idx].is_bridged() {
+                return 0.0;
+            }
             self.drives[idx].motor_cck.min(MOTOR_READY_CCK) as f32 / MOTOR_READY_CCK as f32
         })
     }
@@ -1301,11 +1549,11 @@ impl FloppyController {
         // TODO: media-less and motor-off drives should also arm and idle
         // (real Paula would wait for sync forever); they keep the instant
         // completion until the software relying on it is characterized.
-        if self.drives[idx].image.is_none() || !self.drives[idx].motor_on {
+        if !self.drives[idx].has_media() || !self.drives[idx].motor_on {
             if crate::envcfg::flag("COPPERLINE_DIAG_DISK") {
                 log::info!(
-                    "disk-dma refused: df{idx} image={} motor_on={} motor_cck={}",
-                    self.drives[idx].image.is_some(),
+                    "disk-dma refused: df{idx} media={} motor_on={} motor_cck={}",
+                    self.drives[idx].has_media(),
                     self.drives[idx].motor_on,
                     self.drives[idx].motor_cck,
                 );
@@ -1455,6 +1703,72 @@ impl FloppyController {
             return;
         }
         let drive = &mut self.drives[drive_idx];
+
+        // A bridged drive writes the MFM straight back to the real disk, laid
+        // down from the head position the guest started writing at -- the same
+        // place a real drive would have begun putting cells on the platter.
+        // Read before the drive is borrowed to write through, so the guard
+        // below and the /WPRO line the guest was given are the same two facts.
+        #[cfg(feature = "floppybridge")]
+        let (config_protected, tab_protected) = (
+            drive.bridge_write_protected,
+            drive.bridge_tab_write_protected,
+        );
+        #[cfg(feature = "floppybridge")]
+        if let Some(bridge) = drive.bridge.as_mut() {
+            // Two separate protections, and this is the last point either can
+            // stop physical media being written. The emulated /WPRO line has
+            // already told the guest not to try -- but a program that writes
+            // anyway, or a guest that ignores the line, must not reach the
+            // platter, so both are checked here rather than trusted to the
+            // machine above.
+            //
+            // Deliberately the same two the /WPRO line is built from, rather
+            // than asking the drive again: a second reading taken here can
+            // disagree with the one the guest was given, and then a disk the
+            // machine calls protected is the one being written to.
+            if config_protected {
+                warn!(
+                    "floppy.df{drive_idx} write ignored: this drive is write-protected in the \
+                     configuration (write_protected = false to allow writing to a real disk)"
+                );
+                return;
+            }
+            if tab_protected {
+                warn!("floppy.df{drive_idx} write ignored: the disk's own tab is closed");
+                return;
+            }
+            let cylinder = (track / SIDES) as u8;
+            let side = !track.is_multiple_of(SIDES);
+            let start_bit = write_start_word * 16 + write_start_bit as usize;
+            if bridge.write_track(cylinder, side, write_words, start_bit) {
+                if bridge_diag() {
+                    info!(
+                        "floppybridge.df{drive_idx} track {track} (cyl {cylinder} side {}) \
+                         written: {} words from bit {start_bit}, queued to the platter",
+                        u8::from(side),
+                        write_words.len(),
+                    );
+                } else {
+                    debug!(
+                        "floppy.df{drive_idx} bridge wrote {} words to track {track} \
+                         at bit {start_bit}",
+                        write_words.len()
+                    );
+                }
+            } else {
+                warn!("floppy.df{drive_idx} bridge write of track {track} was rejected");
+            }
+            // Re-read on the next access: what is on the platter now is
+            // whatever the drive actually managed to lay down, which is not
+            // necessarily what was asked for.
+            drive.cached_track = None;
+            if let Some(known) = drive.bridge_tracks.get_mut(track) {
+                *known = None;
+            }
+            return;
+        }
+
         let Some(image) = drive.image.as_mut() else {
             return;
         };
@@ -1555,11 +1869,198 @@ impl FloppyController {
     }
 
     fn ensure_track(&mut self, idx: usize, track: usize) {
-        let drive = &mut self.drives[idx];
-        if drive.cached_track == Some(track) {
+        // A physical drive has one head, and it is where the guest's stepper
+        // put it. `tick` asks for the DMA's track as well as the head's, and
+        // when a transfer outlives a step those two disagree -- so asking for
+        // both drags the real head between them, tick after tick, reading
+        // nothing useful either way. Only fetch what the head is over; the
+        // transfer gets what is passing under it, as it would on hardware.
+        #[cfg(feature = "floppybridge")]
+        if self.drives[idx].is_bridged() && track != self.track_for_drive(idx) {
             return;
         }
-        drive.cached = CachedTrack::default();
+        let drive = &mut self.drives[idx];
+        // A revolution the head has already been all the way round is spent:
+        // a physical one that did not start at the index cannot be turned
+        // again, because its two ends are a revolution apart in time and the
+        // join between them falls inside a sector. Fall through and fetch the
+        // recording that followed it instead.
+        #[cfg(feature = "floppybridge")]
+        let spent = drive.bridge_rev_spent;
+        #[cfg(not(feature = "floppybridge"))]
+        let spent = false;
+        if drive.cached_track == Some(track) && !spent {
+            return;
+        }
+        // Filler already turning under the head for this very track stays: it
+        // is what keeps the platter moving while the capture finishes, and
+        // rebuilding it every tick would be the opposite of cheap.
+        #[cfg(feature = "floppybridge")]
+        let keep_filler = drive.bridge_filler_track == Some(track);
+        #[cfg(not(feature = "floppybridge"))]
+        let keep_filler = false;
+        if !keep_filler {
+            drive.cached = CachedTrack::default();
+        }
+
+        // A bridged drive reads the track off the real disk instead. The head
+        // is already on its way: it followed the emulated stepper when the
+        // guest moved it (see `sync_bridge_head`), and the driver names the
+        // track it wants again here in case nothing stepped at all.
+        #[cfg(feature = "floppybridge")]
+        if drive.bridge.is_some() {
+            // A real drive only reads while the platter is turning, and drive
+            // select alone gets us here with the motor still off. Leave the
+            // track uncached until it is up to speed, which retries.
+            if !drive.motor_on || drive.motor_cck < MOTOR_READY_CCK {
+                return;
+            }
+            // Read off this disk before? Hand back what it said then. The
+            // platter cannot have changed underneath without the change line
+            // saying so or a write going through, and both empty this, so
+            // another rotation would only fetch the same bits again. A spent
+            // revolution is the exception: handing that back is precisely the
+            // same recording over again, which is what it may not be.
+            if let Some(known) = drive
+                .bridge_tracks
+                .get(track)
+                .filter(|_| !spent)
+                .and_then(Option::as_ref)
+            {
+                drive.cached = known.clone();
+                drive.cached_track = Some(track);
+                drive.bridge_filler_track = None;
+                drive.bridge_wait_since_cck = 0;
+                drive.bridge_attempts = 0;
+                drive.clamp_head();
+                return;
+            }
+            // This runs from `tick`, so a track that is not ready would
+            // otherwise be asked for millions of times a second. The driver
+            // needs a whole revolution -- around 200ms -- to capture one, so
+            // pausing a millisecond between attempts costs nothing measurable
+            // and leaves the emulated machine to get on with it.
+            if drive.elapsed_cck < drive.bridge_poll_cck {
+                return;
+            }
+            let cylinder = (track / SIDES) as u8;
+            let side = !track.is_multiple_of(SIDES);
+            // Time this track, not "everything since the last success". A seek
+            // walks through every cylinder on the way and asks for each in
+            // turn, so a timer that only reset on a completed read counted the
+            // whole journey against whichever track happened to end it.
+            if drive.bridge_wait_since_cck == 0 || drive.bridge_wait_track != Some(track) {
+                drive.bridge_wait_since_cck = drive.elapsed_cck.max(1);
+                drive.bridge_wait_track = Some(track);
+                drive.bridge_attempts = 0;
+            }
+            drive.bridge_attempts = drive.bridge_attempts.saturating_add(1);
+            // Retire the spent recording so the driver promotes the capture
+            // that followed it, if one has finished. When none has, it hands
+            // the same revolution back, and Copperline uses it: the guest gets
+            // a splice at the join and retries the sector that straddles it,
+            // which costs a revolution. Refusing it instead was tried and is
+            // worse -- the drive cannot finish a capture every revolution, so
+            // the guest is handed filler and starves. Ten good sectors beat
+            // none. `compatible` is the mode that has no seam to begin with.
+            if spent {
+                if let Some(bridge) = drive.bridge.as_mut() {
+                    bridge.switch_buffer(side);
+                }
+            }
+            let bridge = drive.bridge.as_mut().expect("checked above");
+            if let Some((words, bits)) = bridge.read_track(cylinder, side) {
+                // The bridge hands back one whole revolution as a packed MFM
+                // stream plus the bit it wrapped at, which is what TrackRev
+                // holds. Because it is a real revolution, fitting it to one
+                // rotation gives the disk's own data rate: a slightly long or
+                // short track -- a drive running off-speed -- stays
+                // self-consistent, exactly as a captured image does.
+                let word_cck = Self::word_cck_for_track_words(words.len());
+                // How long the drive took, and how many times it had to be
+                // asked, is what separates a disk the head cannot read from an
+                // interface that is slow: a healthy DD track is one revolution,
+                // so about 200ms. Worth an info line when diagnosing a drive,
+                // and debug otherwise.
+                let waited_ms = drive
+                    .elapsed_cck
+                    .saturating_sub(drive.bridge_wait_since_cck)
+                    * 1000
+                    / PAULA_CLOCK_HZ as u64;
+                log::log!(
+                    if bridge_diag() {
+                        log::Level::Info
+                    } else {
+                        log::Level::Debug
+                    },
+                    "floppybridge.df{idx} track {track} (cyl {cylinder} side {}) read: \
+                     {bits} bits, {} words, {waited_ms}ms over {} attempt{}, \
+                     {word_cck} cck/word",
+                    u8::from(side),
+                    words.len(),
+                    drive.bridge_attempts,
+                    if drive.bridge_attempts == 1 { "" } else { "s" },
+                );
+                drive.bridge_wait_since_cck = 0;
+                drive.bridge_attempts = 0;
+                drive.cached.revs = vec![TrackRev::new(words, bits, word_cck)];
+                drive.bridge_rev_spent = false;
+                drive.cached_track = Some(track);
+                drive.bridge_filler_track = None;
+                if drive.bridge_tracks.len() <= track {
+                    drive.bridge_tracks.resize(track + 1, None);
+                }
+                drive.bridge_tracks[track] = Some(drive.cached.clone());
+                // A track that read is proof of a disk, whatever the sense line
+                // says a moment later.
+                drive.bridge_media = true;
+                drive.clamp_head();
+            } else {
+                // Leave the track uncached so the next access tries again. A
+                // read comes back empty while the platter is still coming up to
+                // speed, or before the driver has captured a revolution --
+                // transient states a real drive simply retries through.
+                // Caching that would wedge the drive on a disk that is there.
+                drive.bridge_poll_cck = drive.elapsed_cck + BRIDGE_POLL_INTERVAL_CCK;
+                if bridge_diag() && drive.bridge_attempts == 1 {
+                    info!(
+                        "floppybridge.df{idx} waiting for track {track} (cyl {cylinder} side {}) \
+                         [ready={} disk={} motor={} at_cyl={}]",
+                        u8::from(side),
+                        bridge.is_ready(),
+                        bridge.disk_in_drive(),
+                        bridge.motor_running(),
+                        bridge.current_cylinder(),
+                    );
+                }
+                trace!(
+                    "floppy.df{idx} bridge: track {track} not ready, will retry \
+                     (ready={} disk={} motor={} at_cyl={} want_cyl={} working={})",
+                    bridge.is_ready(),
+                    bridge.disk_in_drive(),
+                    bridge.motor_running(),
+                    bridge.current_cylinder(),
+                    cylinder,
+                    bridge.is_working(),
+                );
+                // Keep the head over something. Stopping the platter until the
+                // capture lands makes the guest pay the capture and then its
+                // own rotational wait one after the other; turning over filler
+                // means the two overlap, which is how a drive that has data
+                // the moment it arrives behaves.
+                if drive.bridge_filler_track != Some(track) {
+                    let nominal = encoded_track_words();
+                    drive.cached.revs = vec![TrackRev::filler(
+                        nominal * 16,
+                        Self::word_cck_for_track_words(nominal),
+                    )];
+                    drive.bridge_filler_track = Some(track);
+                    drive.clamp_head();
+                }
+            }
+            return;
+        }
+
         if let Some(image) = drive.image.as_ref() {
             if let Some(stream) = image.track_stream(track) {
                 drive.cached.revs = stream.revs;
@@ -1603,6 +2104,84 @@ impl FloppyController {
 #[derive(serde::Serialize, serde::Deserialize)]
 struct FloppyDrive {
     image: Option<FloppyImage>,
+    /// A real drive standing in for the image, over a DrawBridge/Greaseweazle/
+    /// Supercard Pro. Mutually exclusive with `image`: whichever is present
+    /// supplies the track under the head.
+    ///
+    /// Skipped by the save-state serialiser because a physical disk cannot be
+    /// snapshotted -- a state saved with a bridge attached reloads as an empty
+    /// drive, which is also why a bridged run is not reproducible.
+    #[cfg(feature = "floppybridge")]
+    #[serde(skip)]
+    bridge: Option<crate::floppybridge::Bridge>,
+    /// Last known answer to "is there a disk in the real drive", refreshed
+    /// deliberately rather than polled per status read (see `has_media`).
+    #[cfg(feature = "floppybridge")]
+    #[serde(skip)]
+    bridge_media: bool,
+    /// The config's own write protection for a bridged drive, held so the
+    /// live tab state can be re-combined with it as the drive is polled.
+    #[cfg(feature = "floppybridge")]
+    #[serde(skip)]
+    bridge_write_protected: bool,
+    /// The disk's own write-protect tab, refreshed each time the drive is
+    /// polled. The driver keeps the last reading and hands it back whatever
+    /// the motor is doing, so this is good with the platter stopped -- which
+    /// is most of the time. Both the /WPRO line the guest sees and the guard
+    /// on the write itself come from here, so the two cannot disagree.
+    #[cfg(feature = "floppybridge")]
+    #[serde(skip)]
+    bridge_tab_write_protected: bool,
+    /// `elapsed_cck` before which not to ask the bridge for a track again,
+    /// after it said it had none ready.
+    #[cfg(feature = "floppybridge")]
+    #[serde(skip)]
+    bridge_poll_cck: u64,
+    /// Whether the interface going quiet has already been reported, so an
+    /// unplugged drive says so once rather than once a frame.
+    #[cfg(feature = "floppybridge")]
+    #[serde(skip)]
+    bridge_reported_failed: bool,
+    /// The track `cached` is holding filler for, while the interface captures
+    /// it. `None` once the real revolution lands, so it is never mistaken for
+    /// data and the cache is not rebuilt on every tick.
+    #[cfg(feature = "floppybridge")]
+    #[serde(skip)]
+    bridge_filler_track: Option<usize>,
+    /// Revolutions already captured from the disk in a physical drive, by
+    /// track.
+    ///
+    /// Capturing one costs a rotation of the platter -- about 200ms -- and the
+    /// guest revisits tracks constantly: booting Workbench 1.3 reads 63
+    /// distinct tracks 189 times, one of them fourteen times over. Keeping
+    /// what has already been read turns every return trip into a memory copy.
+    /// The whole disk is only a couple of megabytes, so nothing is evicted;
+    /// what does empty it is the disk changing or a track being written, since
+    /// those are the only ways what is on the platter stops matching. A drive
+    /// whose captures are not index-aligned reads past this once its
+    /// revolution is spent -- see [`Self::bridge_rev_spent`].
+    #[cfg(feature = "floppybridge")]
+    #[serde(skip)]
+    bridge_tracks: Vec<Option<CachedTrack>>,
+    /// Which track [`Self::bridge_wait_since_cck`] is timing.
+    #[cfg(feature = "floppybridge")]
+    #[serde(skip)]
+    bridge_wait_track: Option<usize>,
+    /// The revolution in hand has been turned all the way round. Only ever set
+    /// for a physical drive whose captures do not start at the index: those
+    /// cannot be turned twice, so the next one has to be fetched.
+    #[cfg(feature = "floppybridge")]
+    #[serde(skip)]
+    bridge_rev_spent: bool,
+    /// `elapsed_cck` when the drive was first asked for the track it is
+    /// currently working on, and how many times it has been asked since. Only
+    /// read to report how long a track took; 0 means "not waiting".
+    #[cfg(feature = "floppybridge")]
+    #[serde(skip)]
+    bridge_wait_since_cck: u64,
+    #[cfg(feature = "floppybridge")]
+    #[serde(skip)]
+    bridge_attempts: u32,
     cylinder: u8,
     motor_on: bool,
     motor_cck: u32,
@@ -1641,7 +2220,31 @@ struct FloppyDrive {
 impl Default for FloppyDrive {
     fn default() -> Self {
         Self {
+            #[cfg(feature = "floppybridge")]
+            bridge_wait_track: None,
+            #[cfg(feature = "floppybridge")]
+            bridge_rev_spent: false,
             image: None,
+            #[cfg(feature = "floppybridge")]
+            bridge: None,
+            #[cfg(feature = "floppybridge")]
+            bridge_media: false,
+            #[cfg(feature = "floppybridge")]
+            bridge_write_protected: true,
+            #[cfg(feature = "floppybridge")]
+            bridge_tab_write_protected: true,
+            #[cfg(feature = "floppybridge")]
+            bridge_poll_cck: 0,
+            #[cfg(feature = "floppybridge")]
+            bridge_reported_failed: false,
+            #[cfg(feature = "floppybridge")]
+            bridge_filler_track: None,
+            #[cfg(feature = "floppybridge")]
+            bridge_tracks: Vec::new(),
+            #[cfg(feature = "floppybridge")]
+            bridge_wait_since_cck: 0,
+            #[cfg(feature = "floppybridge")]
+            bridge_attempts: 0,
             cylinder: 0,
             motor_on: false,
             motor_cck: 0,
@@ -1704,8 +2307,37 @@ impl FloppyDrive {
         self.cached = CachedTrack::default();
     }
 
+    /// Whether this drive is a real one on a bridge.
+    fn is_bridged(&self) -> bool {
+        #[cfg(feature = "floppybridge")]
+        {
+            self.bridge.is_some()
+        }
+        #[cfg(not(feature = "floppybridge"))]
+        {
+            false
+        }
+    }
+
+    /// Whether there is anything under the head: a mounted image, or a real
+    /// disk in a bridged drive. The drive's status lines key off this, so a
+    /// bridge reports empty until a disk is actually inserted, exactly as an
+    /// empty drive does.
+    fn has_media(&self) -> bool {
+        #[cfg(feature = "floppybridge")]
+        if self.bridge.is_some() {
+            // Deliberately the cached answer, not a fresh query. This is read
+            // from the drive's status lines constantly, and asking the device
+            // each time lets a momentary false during a seek drop /RDY
+            // mid-transfer, which the guest sees as the disk being yanked out
+            // from under it. Refreshed by poll_bridge_media.
+            return self.bridge_media;
+        }
+        self.image.is_some()
+    }
+
     fn ready(&self) -> bool {
-        self.image.is_some() && self.motor_on && self.motor_cck >= MOTOR_READY_CCK
+        self.has_media() && self.motor_on && self.motor_cck >= MOTOR_READY_CCK
     }
 
     fn rdy_line_asserted(&self) -> bool {
@@ -1766,6 +2398,22 @@ impl FloppyDrive {
         if self.motor_on == on {
             return;
         }
+        // Follow the motor line on the real drive: it has to be spinning
+        // before a track can be read, and parking it when the guest drops
+        // the line keeps the physical drive from running continuously.
+        #[cfg(feature = "floppybridge")]
+        if let Some(bridge) = self.bridge.as_mut() {
+            // The library takes a surface here as well, which it would switch
+            // to. Which one is passed does not matter: every read and write
+            // names the side it wants, so the next track operation sets it
+            // regardless, and the drive itself only has one motor.
+            bridge.set_motor(false, on);
+            // The cached track is deliberately kept across a motor stop. Every
+            // fresh capture starts at a different point of the revolution, so
+            // re-reading shifts the whole track under a guest that is part way
+            // through it; the disk has not changed, so the copy in hand is
+            // still what is on the platter.
+        }
         self.motor_on = on;
         // Disk rotational inertia: a motor-off does not stop the platter
         // instantly. The spin-up accumulator is preserved here and decays
@@ -1780,7 +2428,7 @@ impl FloppyDrive {
     fn step(&mut self, inward: bool) -> bool {
         // The change latch clears on the step PULSE itself (an electrical
         // edge), whether or not the mechanism accepts it.
-        if self.image.is_some() {
+        if self.has_media() {
             self.set_disk_change(false);
         }
         // The stepper ignores pulses spaced closer than the mechanism can
@@ -1980,6 +2628,13 @@ impl FloppyDrive {
         if self.rotation_bit >= bit_len {
             self.rotation_bit = 0;
             self.rotation_rev = (self.rotation_rev + 1) % self.rev_count();
+            // A capture that did not begin at the index is good for exactly one
+            // pass under the head. Mark it done; `ensure_track` replaces it
+            // with the recording that followed rather than turning it again.
+            #[cfg(feature = "floppybridge")]
+            if self.bridge.as_ref().is_some_and(|b| !b.index_aligned()) {
+                self.bridge_rev_spent = true;
+            }
             // A single-word (or shorter) track is too short to raise an index.
             bit_len > 16
         } else {
@@ -2042,6 +2697,24 @@ struct TrackRev {
 }
 
 impl TrackRev {
+    /// A revolution of cells that carry no data, for a physical drive that has
+    /// arrived at a track the interface has not finished capturing.
+    ///
+    /// Solid ones, which is what the hardware reads off unwritten media and
+    /// what the FloppyBridge library itself hands back before a buffer is
+    /// ready. It cannot match a sync word, so nothing is recovered from it --
+    /// the point is only that the platter keeps turning while the capture
+    /// completes, so the guest's own rotational wait overlaps it rather than
+    /// starting afterwards.
+    #[cfg(feature = "floppybridge")]
+    fn filler(bit_len: usize, word_cck: u32) -> Self {
+        Self {
+            words: vec![0xFFFF; bit_len.div_ceil(16)],
+            bit_len,
+            word_cck: word_cck.max(1),
+        }
+    }
+
     fn new(words: Vec<u16>, bit_len: usize, word_cck: u32) -> Self {
         let bit_len = bit_len.min(words.len() * 16);
         Self {
@@ -4000,6 +4673,7 @@ mod tests {
         }
         let path = temp_adz(&adf)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -4031,6 +4705,7 @@ mod tests {
         let ext_image = fs::read(&ext_path)?;
         let path = temp_gzip("test.ext.adf.gz", &ext_image)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -4069,6 +4744,7 @@ mod tests {
         image.extend_from_slice(&0u32.to_be_bytes());
         fs::write(&path, image)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -4098,6 +4774,7 @@ mod tests {
         let first = temp_adf()?;
         let second = temp_adf()?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -4138,6 +4815,7 @@ mod tests {
         let first = temp_adf()?;
         let second = temp_adf()?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -4231,6 +4909,7 @@ mod tests {
         let protected = temp_adf()?;
         let writable = temp_adf()?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -4265,6 +4944,7 @@ mod tests {
     fn cia_status_reflects_write_protect_track0_and_ready() -> Result<()> {
         let path = temp_adf()?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -4291,6 +4971,7 @@ mod tests {
     fn cia_status_ready_line_tracks_motor_spinup_and_off() -> Result<()> {
         let path = temp_adf()?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -4357,6 +5038,7 @@ mod tests {
     fn side_select_maps_lower_head_to_even_adf_tracks() -> Result<()> {
         let path = temp_adf()?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -4544,6 +5226,7 @@ mod tests {
     fn track_zero_line_follows_head_position() -> Result<()> {
         let path = temp_adf()?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -4797,6 +5480,7 @@ mod tests {
     fn dskbytr_byte_valid_tracks_new_rotation_words() -> Result<()> {
         let path = temp_adf()?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -4837,6 +5521,7 @@ mod tests {
         let raw_words = [0x1234, 0xABCD];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -5040,6 +5725,7 @@ mod tests {
         let raw_words = [0x1234, 0x5678];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -5082,6 +5768,7 @@ mod tests {
         let raw_words = [DEFAULT_DSKSYNC, 0x5678];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -5115,6 +5802,7 @@ mod tests {
         let raw_words = [DEFAULT_DSKSYNC, 0x5678];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -5155,6 +5843,7 @@ mod tests {
         let raw_words = [0x1234, DEFAULT_DSKSYNC];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -5204,6 +5893,7 @@ mod tests {
         let raw_words = [0x1234, 0x5678];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -5238,6 +5928,7 @@ mod tests {
         let raw_words = [0x1234, 0x5678];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -5270,6 +5961,7 @@ mod tests {
         let raw_words = [0x1234, 0x5678];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -5315,6 +6007,7 @@ mod tests {
     ) -> Result<(FloppyController, PathBuf)> {
         let path = temp_ext2_raw(raw_words)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed,
             drives: [
                 Some(FloppyDriveConfig {
@@ -5481,6 +6174,7 @@ mod tests {
         let raw_words = [0x1111, 0x2222, 0x3333, 0x4444];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: SPEED_TURBO,
             drives: [
                 Some(FloppyDriveConfig {
@@ -5517,6 +6211,7 @@ mod tests {
         let raw_words = [0x1111, 0x2222, 0x3333, 0x4444];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: SPEED_TURBO,
             drives: [
                 Some(FloppyDriveConfig {
@@ -5553,6 +6248,7 @@ mod tests {
             let raw_words = [0x1234, 0x5678];
             let path = temp_ext2_raw(&raw_words)?;
             let cfg = FloppyConfig {
+                bridges: std::array::from_fn(|_| None),
                 speed,
                 drives: [
                     Some(FloppyDriveConfig {
@@ -5584,6 +6280,7 @@ mod tests {
         let raw_words = [0x1234, 0x5678];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -5636,6 +6333,7 @@ mod tests {
     fn dsksync_write_latches_current_word_match() -> Result<()> {
         let path = temp_adf()?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -5665,6 +6363,7 @@ mod tests {
         let raw_words = [DEFAULT_DSKSYNC, 0x2222];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -5696,6 +6395,7 @@ mod tests {
     fn read_dma_sync_irq_does_not_require_wordsync() -> Result<()> {
         let path = temp_adf()?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -5738,6 +6438,7 @@ mod tests {
     fn wordsync_skips_initial_sync_then_transfers_repeated_sync_word() -> Result<()> {
         let path = temp_adf()?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -5789,6 +6490,7 @@ mod tests {
         let raw_words = [0xAA44u16, 0x8955, 0x1234, 0x5678, 0x0000];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -5835,6 +6537,7 @@ mod tests {
         let raw_words = [0x1111, DEFAULT_DSKSYNC, 0x2222];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -5885,6 +6588,7 @@ mod tests {
         let raw_words = [0x1111, 0x2222, 0x3333];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -5931,6 +6635,7 @@ mod tests {
         let raw_words = [0x1111, 0x2222, 0x3333, 0x4444];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -5977,6 +6682,7 @@ mod tests {
         let raw_words = [0x1111, 0x2222, 0x3333, 0x4444];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -6018,6 +6724,7 @@ mod tests {
         let track2 = [0xAAAA, 0xBBBB];
         let path = temp_ext2_raw_tracks(&[(0, &track0), (2, &track2)])?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -6071,6 +6778,7 @@ mod tests {
         let track0 = [0x1111u16, 0x2222, 0x3333, 0x4444];
         let path = temp_ext2_raw_tracks(&[(0, &track0)])?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -6123,6 +6831,7 @@ mod tests {
         let raw_words = [0x1111, DEFAULT_DSKSYNC, 0x2222];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -6166,6 +6875,7 @@ mod tests {
         let raw_words = [0x1111, DEFAULT_DSKSYNC, 0x2222];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -6204,6 +6914,7 @@ mod tests {
         let raw_words = [0x1111, DEFAULT_DSKSYNC, 0x2222];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -6249,6 +6960,7 @@ mod tests {
         let raw_words = [DEFAULT_DSKSYNC, 0x2222];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -6292,6 +7004,7 @@ mod tests {
         let raw_words = [0x1111, 0x2222];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -6332,6 +7045,7 @@ mod tests {
     fn selected_drive_index_pulse_latches_once_per_wrap() -> Result<()> {
         let path = temp_adf()?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -6366,6 +7080,7 @@ mod tests {
     fn selected_drive_index_pulse_has_fixed_width() -> Result<()> {
         let path = temp_adf()?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -6404,6 +7119,7 @@ mod tests {
     fn motor_off_drive_does_not_emit_index_pulse() -> Result<()> {
         let path = temp_adf()?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -6434,6 +7150,7 @@ mod tests {
     fn next_index_pulse_reports_selected_drive_time() -> Result<()> {
         let path = temp_adf()?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -6468,6 +7185,7 @@ mod tests {
         let raw_words = [0x4489, 0x2AAA, 0x5555, 0xA144];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -6499,6 +7217,7 @@ mod tests {
     fn uae_extended_adf_raw_track_preserves_odd_byte_payload() -> Result<()> {
         let path = temp_ext2_track(1, 20, &[0x12, 0x34, 0xA0])?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -6584,6 +7303,7 @@ mod tests {
         let raw_words: [u16; 4] = [0x1111, 0x2222, 0x3333, 0x4444];
         let path = temp_ext2_raw_revolutions(&raw_words, 32, 2)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -6633,6 +7353,7 @@ mod tests {
         let raw_words = [0x4489, 0x2AAA];
         let path = temp_scp_raw_revolutions(&[&raw_words], 32)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -6665,6 +7386,7 @@ mod tests {
     fn scp_flux_decode_resolves_variable_intervals_to_cells() -> Result<()> {
         let path = temp_scp_flux_entries(&[60, 100, 80], 3)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -6701,6 +7423,7 @@ mod tests {
         let rev1 = [0x5555, 0xA144];
         let path = temp_scp_raw_revolutions(&[&rev0, &rev1], 32)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -6753,6 +7476,7 @@ mod tests {
             SCP_FLAG_INDEX | SCP_FLAG_EXTENDED_MODE,
         )?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -6787,6 +7511,7 @@ mod tests {
         fs::write(&path, &image)?;
 
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -6819,6 +7544,7 @@ mod tests {
         let raw_words = [0x4489, 0x2AAA];
         let path = temp_scp_raw_revolutions_with_flags(&[&raw_words], 32, 0)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -6859,6 +7585,7 @@ mod tests {
         fs::write(&path, &image)?;
 
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -6960,6 +7687,7 @@ mod tests {
         let raw_words = [0x1111, 0x2222, 0x3333, 0x4444];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -7000,6 +7728,7 @@ mod tests {
         let raw_words = [0x4489];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -7032,6 +7761,7 @@ mod tests {
         let raw_words = [0x1111, 0x2222, 0x3333, 0x4444];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -7074,6 +7804,7 @@ mod tests {
         let raw_words = [0x1111, 0x2222, 0x3333, 0x4444];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -7119,6 +7850,7 @@ mod tests {
         track_data[0..BYTES_PER_SECTOR].fill(0x5A);
         let path = temp_ext2_amigados(&track_data)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -7153,6 +7885,7 @@ mod tests {
         payload.resize(0x31f0, 0);
         let path = temp_ext2_track(0, (track_data.len() * 8) as u32, &payload)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -7212,6 +7945,7 @@ mod tests {
     fn writable_extended_adf_amigados_track_persists_sector_updates() -> Result<()> {
         let path = temp_ext2_amigados(&vec![0u8; SECTORS_PER_TRACK * BYTES_PER_SECTOR])?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -7278,6 +8012,7 @@ mod tests {
             2,
         )?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -7337,6 +8072,7 @@ mod tests {
         let raw_words = [0x4489, 0x2AAA, 0x5555, 0xA144];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -7404,6 +8140,7 @@ mod tests {
         let raw_words = [0x0000, 0x0000, 0x0000, 0x0000];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -7450,6 +8187,7 @@ mod tests {
         let raw_words = [0x0000, 0x0000];
         let path = temp_ext2_raw_revolutions(&raw_words, 20, 1)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -7500,6 +8238,7 @@ mod tests {
     fn writable_extended_adf_raw_track_preserves_partial_word_tail() -> Result<()> {
         let path = temp_ext2_track(1, 20, &[0xFF, 0xFF, 0xF0])?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -7554,6 +8293,7 @@ mod tests {
         let raw_words = [0xFFFF];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -7599,6 +8339,7 @@ mod tests {
         let raw_words = [0x1111, 0x2222];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -7644,6 +8385,7 @@ mod tests {
         let raw_words = [0x1111, 0x2222, 0x3333, 0x4444];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -7691,6 +8433,7 @@ mod tests {
         let raw_words = [0x1111, 0x2222, 0x3333, 0x4444];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -7748,6 +8491,7 @@ mod tests {
         let raw_words = [0x1111, 0x2222, 0x3333, 0x4444];
         let path = temp_ext2_raw(&raw_words)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -7800,6 +8544,7 @@ mod tests {
         let track2 = [0xFFFF, 0xFFFF];
         let path = temp_ext2_raw_tracks(&[(0, &track0), (2, &track2)])?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -7852,6 +8597,7 @@ mod tests {
     fn writable_legacy_extended_adf_raw_track_persists_word_stream() -> Result<()> {
         let path = temp_ext1_raw(&[0x4489, 0x1111, 0x2222])?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -7908,6 +8654,7 @@ mod tests {
     fn writable_legacy_extended_adf_raw_track_overwrites_sync_boundary() -> Result<()> {
         let path = temp_ext1_raw(&[0x4489, 0x1111, 0x2222])?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -7958,6 +8705,7 @@ mod tests {
     fn writable_legacy_extended_adf_raw_track_preserves_odd_payload_length() -> Result<()> {
         let path = temp_ext1_raw_payload(0x4489, &[0x12, 0x34, 0xA0])?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -8007,6 +8755,7 @@ mod tests {
     fn write_dma_decodes_and_persists_track() -> Result<()> {
         let path = temp_adf()?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -8048,6 +8797,7 @@ mod tests {
     fn floppy_turbo_bursts_write_dma_and_persists_track() -> Result<()> {
         let path = temp_adf()?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: SPEED_TURBO,
             drives: [
                 Some(FloppyDriveConfig {
@@ -8188,6 +8938,7 @@ mod tests {
         let path = temp_path("full-track-dma-checksum.adf");
         fs::write(&path, &adf)?;
         let cfg = FloppyConfig {
+            bridges: std::array::from_fn(|_| None),
             speed: 100,
             drives: [
                 Some(FloppyDriveConfig {
@@ -8268,7 +9019,11 @@ mod tests {
             path: adf.clone(),
             write_protected: true,
         });
-        let ctrl = FloppyController::from_config(&FloppyConfig { drives, speed: 100 })?;
+        let ctrl = FloppyController::from_config(&FloppyConfig {
+            drives,
+            bridges: std::array::from_fn(|_| None),
+            speed: 100,
+        })?;
         assert!(ctrl.drive_connected(1));
         assert!(ctrl.disk_inserted(1));
         let _ = fs::remove_file(&adf);

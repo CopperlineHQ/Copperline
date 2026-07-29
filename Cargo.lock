@@ -486,6 +486,7 @@ dependencies = [
  "anyhow",
  "arboard",
  "bincode",
+ "cc",
  "copperline-m68k",
  "cpal",
  "env_logger",

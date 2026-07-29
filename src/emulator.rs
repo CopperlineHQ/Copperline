@@ -1288,6 +1288,17 @@ impl Emulator {
     /// Re-enabling re-anchors the pacing clock so the emulator does not
     /// sprint to catch up the time spent in warp.
     pub fn set_paced(&mut self, paced: bool) {
+        // A physical drive's platter turns in wall-clock time and cannot be
+        // hurried, so a bridged machine stays paced whatever asks otherwise --
+        // warp, the benchmark runner, the GDB stub, the control server. Left
+        // unthrottled the guest outruns the drive: the motor is spun up and
+        // down faster than it can reach speed, and tracks are stepped past
+        // before the drive has captured them. Enforced here rather than at
+        // each caller so no future runner can quietly opt out of it.
+        #[cfg(feature = "floppybridge")]
+        if !paced && self.bus().floppy.has_bridged_drive() {
+            return;
+        }
         if self.paced == paced {
             return;
         }
@@ -1930,6 +1941,121 @@ fn open_scsi_target(
     }
 }
 
+/// Open every drive the config bridges to real hardware.
+///
+/// Failing to open one is fatal rather than a warning: a bay configured as a
+/// real drive has no image to fall back on, so carrying on would silently boot
+/// a machine with an empty drive where the user asked for their disk.
+#[cfg(feature = "floppybridge")]
+pub(crate) fn attach_floppy_bridges(floppy: &mut FloppyController, cfg: &Config) -> Result<()> {
+    use crate::config::{BridgeCable, BridgeDensity, BridgeSpeedMode};
+    use crate::floppybridge::{
+        self, Bridge, BridgeConfig, BridgeDensityMode, BridgeMode, DriveSelection,
+    };
+
+    for (idx, bridge_cfg) in cfg.floppy.bridges.iter().enumerate() {
+        let Some(bridge_cfg) = bridge_cfg else {
+            continue;
+        };
+        // The bridge is compiled into this binary, so it cannot be missing --
+        // the link would have failed. This is a failsafe against it being
+        // present but not working: a vendored build that produced stubs, or a
+        // future upstream that drops a driver Copperline still offers.
+        if floppybridge::drivers().is_empty() {
+            anyhow::bail!(
+                "floppy.df{idx} asks for a physical drive, but the built-in FloppyBridge \
+                 reports no interfaces at all. This build is broken rather than \
+                 misconfigured; please report it."
+            );
+        }
+        // Resolve the driver by name against what the bridge actually
+        // offers, so the config does not depend on enumeration order.
+        let token = bridge_cfg.driver.match_token();
+        let driver = floppybridge::drivers()
+            .into_iter()
+            .find(|d| {
+                d.name
+                    .to_ascii_lowercase()
+                    .replace([' ', '-', '_'], "")
+                    .contains(token)
+            })
+            .ok_or_else(|| {
+                anyhow!(
+                    "floppy.df{idx}: the built-in FloppyBridge has no {} driver",
+                    bridge_cfg.driver.label()
+                )
+            })?;
+        let open = BridgeConfig {
+            driver: driver.index,
+            mode: match bridge_cfg.mode {
+                BridgeSpeedMode::Compatible => BridgeMode::Compatible,
+                BridgeSpeedMode::Normal => BridgeMode::Fast,
+                BridgeSpeedMode::Stalling => BridgeMode::Stalling,
+            },
+            density: match bridge_cfg.density {
+                BridgeDensity::Auto => BridgeDensityMode::Auto,
+                BridgeDensity::Dd => BridgeDensityMode::DdOnly,
+                BridgeDensity::Hd => BridgeDensityMode::HdOnly,
+            },
+            drive: match bridge_cfg.cable {
+                BridgeCable::DriveA => DriveSelection::DriveA,
+                BridgeCable::DriveB => DriveSelection::DriveB,
+                BridgeCable::Shugart0 => DriveSelection::Drive0,
+                BridgeCable::Shugart1 => DriveSelection::Drive1,
+                BridgeCable::Shugart2 => DriveSelection::Drive2,
+                BridgeCable::Shugart3 => DriveSelection::Drive3,
+            },
+            port: bridge_cfg.port.clone(),
+            smart_speed: bridge_cfg.smart_speed,
+            auto_cache: bridge_cfg.auto_cache,
+        };
+        let bridge = Bridge::open(&open)
+            .map_err(|e| anyhow!("floppy.df{idx}: could not open the physical drive: {e}"))?;
+        // Name the port as well as the interface: with auto-detect on, the
+        // library does not report back which one it took, so say so from the
+        // ports it can see -- unambiguous when there is only one, and honest
+        // rather than guessing when there is not.
+        let port = match bridge_cfg.port.as_deref() {
+            Some(port) => port.to_string(),
+            None => {
+                let seen = floppybridge::com_ports();
+                match seen.len() {
+                    1 => format!("{} (auto-detected)", seen[0]),
+                    _ => "auto-detected".to_string(),
+                }
+            }
+        };
+        let drive_type = match bridge.drive_type() {
+            floppybridge::DriveType::Dd35 => "3.5\" DD",
+            floppybridge::DriveType::Dd35Hd => "3.5\" HD",
+            floppybridge::DriveType::Sd525 => "5.25\" SD",
+        };
+        let version = match floppybridge::version() {
+            Some((major, minor)) => format!("FloppyDriveBridge v{major}.{minor}"),
+            None => "FloppyDriveBridge".to_string(),
+        };
+        log::info!(
+            "floppy.df{idx} physical drive attached: {} on {port}, {drive_type} drive, {version}",
+            bridge_cfg.driver.label(),
+        );
+        // Whether there is anything in it is the next thing anyone wants to
+        // know, and unlike an image nobody told us either way.
+        if bridge.disk_in_drive() {
+            log::info!("floppy.df{idx} disk in the physical drive");
+        } else {
+            log::info!("floppy.df{idx} no disk in the physical drive");
+        }
+        if bridge_cfg.write_protected {
+            log::info!(
+                "floppy.df{idx} write-protected by the configuration; \
+                 set write_protected = false to write to the disk"
+            );
+        }
+        floppy.attach_bridge(idx, bridge, bridge_cfg.write_protected)?;
+    }
+    Ok(())
+}
+
 pub fn build_machine(
     cfg: &Config,
     audio: Box<dyn AudioSink>,
@@ -2107,6 +2233,8 @@ pub fn build_machine(
     };
     let mut floppy = FloppyController::from_config(&cfg.floppy)?;
     floppy.set_connected_drives(cfg.floppy_connected);
+    #[cfg(feature = "floppybridge")]
+    attach_floppy_bridges(&mut floppy, cfg)?;
     let serial = build_serial_sink(cfg)?;
     let mut paula = Paula::new(serial, audio);
     paula
