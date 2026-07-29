@@ -4,7 +4,9 @@
 // the 1084 the Amiga shipped with. The pass covers the whole display rect;
 // the picture is re-sampled to fill the rounded opening the frame leaves,
 // with a dark recess between the tube face and the plastic, a bevelled
-// inner lip, a moulded outer edge and the power LED on the bottom band.
+// inner lip, a moulded outer edge, the power LED on the bottom band and
+// the Copperline logotype printed on its left, where the 1084 wears its
+// Commodore badge.
 //
 // Two modes, selected by params.x. Alone (0), this one pass draws both
 // the frame and the picture. Under a CRT preset (1, frame-only), the
@@ -80,6 +82,63 @@ fn grain(p: vec2<f32>) -> f32 {
 // The front-face plastic, a warm Commodore grey (linear light).
 const PLASTIC: vec3<f32> = vec3<f32>(0.585, 0.560, 0.500);
 
+// "Copperline" logotype for the bottom band: 5x8-pixel glyphs one column
+// apart (baseline row 6, the p descenders on row 7), 59x8 bits in all.
+// Each row packs LSB-first from the left into a (low, high) word pair:
+// column c sets bit c of x (c < 32) or bit c - 32 of y.
+//
+// .###.................................##....................
+// #...#.................................#.....#..............
+// #......###..####..####...###..#.##....#.........#.##...###.
+// #.....#...#.#...#.#...#.#...#.##..#...#....##...##..#.#...#
+// #.....#...#.#...#.#...#.#####.#.......#.....#...#...#.#####
+// #...#.#...#.#...#.#...#.#.....#.......#.....#...#...#.#....
+// .###...###..####..####...###..#......###...###..#...#..###.
+// ............#.....#........................................
+const BADGE_COLS: i32 = 59;
+const BADGE_ROWS: i32 = 8;
+const BADGE: array<vec2<u32>, 8> = array<vec2<u32>, 8>(
+    vec2<u32>(0x0000000eu, 0x00000060u),
+    vec2<u32>(0x00000011u, 0x00001040u),
+    vec2<u32>(0x4e3cf381u, 0x038d0043u),
+    vec2<u32>(0xd1451441u, 0x04531844u),
+    vec2<u32>(0x5f451441u, 0x07d11040u),
+    vec2<u32>(0x41451451u, 0x00511040u),
+    vec2<u32>(0x4e3cf38eu, 0x039138e0u),
+    vec2<u32>(0x00041000u, 0x00000000u),
+);
+
+// The badge ink, near-black with the printed badge's blue cast.
+const BADGE_INK: vec3<f32> = vec3<f32>(0.030, 0.036, 0.060);
+
+// One bit of the badge bitmap, 0.0 outside it.
+fn badge_bit(c: i32, r: i32) -> f32 {
+    if c < 0 || c >= BADGE_COLS || r < 0 || r >= BADGE_ROWS {
+        return 0.0;
+    }
+    var rows = BADGE;
+    let bits = rows[r];
+    if c < 32 {
+        return f32((bits.x >> u32(c)) & 1u);
+    }
+    return f32((bits.y >> u32(c - 32)) & 1u);
+}
+
+// The bitmap sampled bilinearly at a continuous position in font pixels,
+// so the lettering stays smooth at any window scale.
+fn badge_sample(q: vec2<f32>) -> f32 {
+    let f = q - vec2<f32>(0.5);
+    let base = floor(f);
+    let t = f - base;
+    let c = i32(base.x);
+    let r = i32(base.y);
+    let s00 = badge_bit(c, r);
+    let s10 = badge_bit(c + 1, r);
+    let s01 = badge_bit(c, r + 1);
+    let s11 = badge_bit(c + 1, r + 1);
+    return mix(mix(s00, s10, t.x), mix(s01, s11, t.x), t.y);
+}
+
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     let vp = u.size.xy;
@@ -144,7 +203,8 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     plastic *= 1.0 - 0.35 * smoothstep(-6.0, 0.0, d_case);
 
     // Power LED on the right of the bottom band, in a small dark well.
-    let band_mid_y = (o_org.y + o_size.y + recess + vp.y) * 0.5;
+    let band_top = o_org.y + o_size.y + recess;
+    let band_mid_y = (band_top + vp.y) * 0.5;
     let led_pos = vec2<f32>(0.91 * vp.x, band_mid_y);
     let led_d = length(px - led_pos);
     let led_r = max(0.007 * unit, 1.5);
@@ -152,6 +212,20 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     let led = 1.0 - smoothstep(led_r - 1.0, led_r + 1.0, led_d);
     plastic = mix(plastic, vec3<f32>(0.03, 0.03, 0.03), well);
     plastic = mix(plastic, vec3<f32>(0.06, 0.55, 0.10), led);
+
+    // The printed logotype on the left of the bottom band, where the 1084
+    // wears its Commodore badge: left-aligned with the opening, vertically
+    // centred in the band, scaling with the frame. Skipped when the band
+    // is too shallow for the lettering to resolve.
+    let badge_h = 0.34 * (vp.y - band_top);
+    if badge_h >= 5.0 {
+        let badge_org = vec2<f32>(o_org.x, band_mid_y - 0.5 * badge_h);
+        let q = (px - badge_org) * (f32(BADGE_ROWS) / badge_h);
+        let hi = vec2<f32>(f32(BADGE_COLS) + 1.0, f32(BADGE_ROWS) + 1.0);
+        if all(q > vec2<f32>(-1.0)) && all(q < hi) {
+            plastic = mix(plastic, BADGE_INK, 0.92 * badge_sample(q));
+        }
+    }
 
     // Compose by signed distance: picture, recess gap, then plastic, each
     // join antialiased over about a pixel.

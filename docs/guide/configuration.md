@@ -563,8 +563,9 @@ structure to reproduce.
 `bezel` (default `false`) frames the window's picture with a monitor-style
 front bezel, also in the spirit of the 1084: the picture scales down into
 the rounded opening of a procedurally drawn plastic face -- warm-grey
-moulding, a dark recess around the tube face, rounded case corners and the
-power LED on the wider bottom band. The frame is drawn at the window's
+moulding, a dark recess around the tube face, rounded case corners, and the
+wider bottom band carrying the power LED and a printed Copperline logotype
+in the spot the 1084 kept its Commodore badge. The frame is drawn at the window's
 resolution, so it stays sharp at any size, and the picture keeps its aspect
 inside the opening. It is independent of `shader` and composes with any
 preset: with `"crt"` the bowed tube face sits inside the opening for the
