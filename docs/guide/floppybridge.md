@@ -1,10 +1,9 @@
 # Physical floppy drives
 
 Copperline can give any of its four floppy bays a *physical* 3.5" drive instead
-of a disk image, reading and writing genuine Amiga floppies. The drive is
-attached to the host over one of three interfaces, and Rob Smith's
-[FloppyBridge](https://amiga.robsmithdev.co.uk/winuae) library does the
-talking:
+of a disk image. The drive is attached to the host over one of three interfaces, 
+and Rob Smith's [FloppyBridge](https://amiga.robsmithdev.co.uk/winuae) library 
+does the talking:
 
 | Interface | What it is |
 |---|---|
@@ -14,13 +13,13 @@ talking:
 
 The emulated machine is not changed by any of this. The bridge supplies the
 MFM the head would be passing over, so Paula, the disk DMA, and
-`trackdisk.device` behave exactly as they do with an ADF -- a real Workbench
-disk boots to the same screen, pixel for pixel, as an image of it.
+`trackdisk.device` behave exactly as they do with an ADF.
 
 ## What you need
 
-Nothing but the emulator. FloppyBridge is compiled into Copperline from
-`vendor/floppybridge`, so a build that offers a physical drive can actually
+You need a [DrawBridge](https://amiga.robsmithdev.co.uk/drawbridge), [Greaseweazle](https://github.com/keirf/Greaseweazle), or [Supercard Pro](https://github.com/jimdrew/SupercardPro) interface, a 3.5" floppy drive, and some disks. 
+
+FloppyBridge is compiled into Copperline from `vendor/floppybridge`, so a build that offers a physical drive can actually
 drive one -- there is no library to fetch, install, or keep beside the binary.
 
 ```sh
@@ -30,44 +29,21 @@ cargo build --release
 The `floppybridge` Cargo feature, on by default, is what includes it. Built
 without it (`--no-default-features`), none of this exists: no **Physical
 drive** tick box in the launcher, no `--floppy-bridge` flags, and a config
-file's `bridge` keys are read and ignored, so the same file stays valid across
-builds.
+file's `bridge` keys are read and ignored.
 
-Keeping upstream current is a maintainer's job, not a user's:
 `vendor/floppybridge/README.md` records the commit vendored and how to move to
 a newer one.
 
-On Linux, install the interface's own udev rules before plugging it in. They
-grant access without root and keep ModemManager from probing the device;
-Greaseweazle ships a `49-greaseweazle.rules` with its
-[host tools](https://github.com/keirf/greaseweazle/wiki/Software-Installation#linux),
-and DrawBridge and Supercard Pro have equivalents.
 
-```sh
-sudo cp 49-greaseweazle.rules /etc/udev/rules.d/
-sudo udevadm control --reload-rules
-```
-
-Failing that, the serial device is usually owned by a group rather than by you
--- `dialout` on Debian and Ubuntu, `uucp` on Arch -- so an interface the
-launcher lists but refuses to open is nearly always a permissions problem
-rather than a hardware one:
-
-```sh
-sudo usermod -aG dialout "$USER"
-```
-
-## Turning a bay over to a physical drive
+## Using a physical drive
 
 From the launcher, the Floppy tab carries a **Physical drive** tick box for
 each bay. Tick it and the bay's media row stops offering a disk image and
 names the interface instead, with a **Configure** button leading to its
 settings. With nothing plugged in the row reads `None`; plug the interface in
-and re-tick the box to pick it up. The Configure page is headed with the
-library it found and its version, which is the quickest way to check which
-build is installed.
+and re-tick the box to pick it up.
 
-From the config file, `bridge` on a bay does the same thing:
+You can also define this in your .TOML file;
 
 ```toml
 [floppy.df0]
@@ -119,10 +95,8 @@ where you asked for your disk.
 
 Every current interface connects over a serial port, and every one of them
 can be found automatically, which is the default. Name `bridge_port`
-explicitly to pin a particular device when more than one is attached. The
-names are the host's own: `/dev/cu.usbmodem101` on macOS, `/dev/ttyACM0` or
-`/dev/ttyUSB0` on Linux, `COM3` on Windows. The launcher offers the ports the
-library reports.
+explicitly to pin a particular device when more than one is attached.The 
+launcher offers the ports the library enumerates.
 
 ### Drive select
 
@@ -141,18 +115,6 @@ config file too.
 wait for the index -- most of a revolution on every track it has not read
 before.
 
-A revolution captured that way does not meet its own tail in the gap between
-two sectors: its two ends are a revolution apart in time, so turning it under
-the head a second time would splice mid-sector and the guest would see a read
-error it could never retry its way out of. So it is good for exactly one pass.
-Once the head has been all the way round, Copperline retires that recording
-and takes the one after it, which is where the head itself would have carried
-on. Successive revolutions are then successive passes of the real head, and
-every join between them is real data.
-
-Booting Workbench 1.3 off a Greaseweazle, that takes the time spent waiting on
-the drive from around 25 seconds to around 14.
-
 The drive cannot always finish a capture in the revolution the guest takes to
 read the last one. When it has nothing newer, the recording just read is used
 again, and the guest meets a splice at the join: the sector straddling it fails
@@ -170,17 +132,11 @@ if a disk reads badly without the index to anchor it.
 until a track is ready instead of answering "not yet". The wait lands on the
 emulated machine, which stops -- pointer and all -- for as long as it takes.
 
-The driver's fourth mode, `turbo`, is refused by name and is absent from the
-launcher's list. It is not a read mode at all -- it answers AmigaDOS calls
-instead of reading the disk, which is no use to an emulator that models the
-drive.
-
 ### Auto-cache and smart speed
 
 `bridge_auto_cache` caches disk data in the background while the drive is
-idle. It is off by default, as it is in the driver: during a boot the drive is
-never idle, so there is little for it to do, and it moves the real head about
-on its own.
+idle. It is off by default: during a boot the drive is never idle, so there 
+is little for it to do, and it moves the real head about on its own.
 
 `bridge_smart_speed` lets the driver time each track and, where the data rate
 is uniform -- so nothing is leaning on the timing for copy protection -- offer
@@ -233,15 +189,12 @@ writing a different physical drive than the one asked for.
 
 ## What behaves differently
 
-**The disk is not yours to swap from the emulator.** The status bar keeps a
+**The disk eject button is disabled for a bridged drive.** The status bar keeps a
 bridged drive's numbered icon, so you can see the drive is there, but its
-eject and swap buttons do nothing: the disk is in a real drive across the
-room. Swapping it by hand is noticed -- the change line is raised as it would
-be on real hardware -- and the guest re-reads.
+eject and swap buttons do nothing: Eject/insert disks as you would with an Amiga!
 
-**No synthesized drive sounds.** The real drive makes its own noise, so
-Copperline does not add stepper clicks or motor hum on top for that bay. A
-bay in the same machine running an ADF still sounds as it should.
+**No synthesized drive sounds.** The real drive makes its own noise. A bay in the 
+same machine running an ADF still sounds as it should when enabled.
 
 **Powering off releases the drive.** A real drive takes its power from the
 machine, and a bridged one behaves the same way: the power button hands the
