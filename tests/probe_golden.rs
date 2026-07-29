@@ -138,6 +138,8 @@ fn build_adf(boot: &[u8], program: &[u8]) -> Vec<u8> {
     image
 }
 
+// The ADF path is written as a TOML literal (single-quoted) string so a
+// Windows temp path's backslashes are not parsed as escape sequences.
 fn probe_config(adf: &Path, machine: Machine) -> String {
     let chipset = match machine {
         Machine::Ocs => "revision = \"OCS\"\n",
@@ -160,7 +162,7 @@ fn probe_config(adf: &Path, machine: Machine) -> String {
          {chipset}\
          video = \"PAL\"\n\
          [floppy.df0]\n\
-         path = \"{}\"\n\
+         path = '{}'\n\
          write_protected = true\n",
         adf.display()
     )
