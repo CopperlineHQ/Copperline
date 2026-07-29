@@ -606,7 +606,7 @@ const FLOPPY_BRIDGE_ROWS: [Row; 8] = [
     row(F::BridgeDensity, "Density", Cycle),
     row(F::BridgeSpeed, "Read mode", Cycle),
     row(F::BridgeSmartSpeed, "Smart speed", Toggle),
-    row(F::BridgeAutoCache, "Read ahead", Toggle),
+    row(F::BridgeAutoCache, "Auto-cache", Toggle),
 ];
 const STORAGE_ROWS: [Row; 12] = [
     row(F::IdeMaster, "IDE master", Drive),
@@ -3900,7 +3900,7 @@ mod tests {
                 cable_greyed,
                 "drive select on {driver:?}"
             );
-            // Every interface here talks over a serial port and can read ahead.
+            // Every interface here talks over a serial port and can auto-cache.
             assert!(setup.disabled_reason(F::BridgePort).is_none());
             assert!(setup.disabled_reason(F::BridgeAutoCache).is_none());
         }

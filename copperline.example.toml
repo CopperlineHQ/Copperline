@@ -594,4 +594,4 @@ floppy_sounds_volume = 100
 #                                # wait for the index and is appreciably
 #                                # quicker; stalling blocks the emulated machine
 # bridge_smart_speed = false
-# bridge_auto_cache = false      # read ahead while the drive is idle
+# bridge_auto_cache = false      # cache disk data while the drive is idle

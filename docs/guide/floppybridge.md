@@ -100,7 +100,7 @@ copperline --model A500 --floppy-bridge df0 greaseweazle kickstart.rom
 | `--floppy-bridge-mode DFN MODE` | `bridge_mode` |
 | `--floppy-bridge-density DFN D` | `bridge_density` |
 | `--floppy-bridge-smart-speed DFN` | `bridge_smart_speed = true` |
-| `--floppy-bridge-read-ahead DFN` | `bridge_auto_cache = true` |
+| `--floppy-bridge-auto-cache DFN` | `bridge_auto_cache = true` |
 | `--floppy-bridge-writable DFN` | `write_protected = false` |
 
 These layer on top of a config file as every other flag does, so
@@ -108,7 +108,7 @@ These layer on top of a config file as every other flag does, so
 the file gives it an image -- the flag says the bay *is* a physical drive, so the
 image it displaces is not a conflict. There is deliberately no flag for
 protecting a drive, because that is already the default. The remaining
-options -- density, read mode, smart speed, read ahead, and profiles -- are
+options -- density, read mode, smart speed, auto-cache, and profiles -- are
 config-file only; they describe a rig rather than a run.
 
 If a bay asks for a physical drive and it cannot be opened, Copperline
@@ -175,10 +175,10 @@ Amiberry's `turbo` is refused by name and is absent from the launcher's
 list. It is not a read mode at all -- it answers AmigaDOS calls instead of
 reading the disk, which is no use to an emulator that models the drive.
 
-### Read ahead and smart speed
+### Auto-cache and smart speed
 
-`bridge_auto_cache` reads tracks ahead in the background while the drive is
-idle. It is off by default, as it is upstream and in Amiberry: during a boot
+`bridge_auto_cache` caches disk data in the background while the drive is
+idle -- Amiberry calls the same setting "Auto-Cache". It is off by default, as it is upstream and in Amiberry: during a boot
 the drive is never idle, so it buys very little (measurably nothing on a
 Workbench 1.3 boot), and it moves the real head about on its own.
 

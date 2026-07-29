@@ -484,11 +484,11 @@ where
                 overrides.floppy_bridge_smart_speed[idx] = true;
             }
             #[cfg(feature = "floppybridge")]
-            "--floppy-bridge-read-ahead" => {
-                const USAGE: &str = "--floppy-bridge-read-ahead requires DFN";
+            "--floppy-bridge-auto-cache" => {
+                const USAGE: &str = "--floppy-bridge-auto-cache requires DFN";
                 let drive_s = args.next().ok_or_else(|| anyhow!(USAGE))?;
-                let idx = parse_floppy_drive_idx(&drive_s, "--floppy-bridge-read-ahead")?;
-                overrides.floppy_bridge_read_ahead[idx] = true;
+                let idx = parse_floppy_drive_idx(&drive_s, "--floppy-bridge-auto-cache")?;
+                overrides.floppy_bridge_auto_cache[idx] = true;
             }
             #[cfg(feature = "floppybridge")]
             "--floppy-bridge-writable" => {
@@ -1034,7 +1034,7 @@ fn print_help() {
          --floppy-bridge-mode DFN MODE  how tracks are captured: normal, compatible, stalling\n  \
          --floppy-bridge-density DFN D  force a density: auto, dd, or hd\n  \
          --floppy-bridge-smart-speed DFN  let the interface slow the drive between accesses\n  \
-         --floppy-bridge-read-ahead DFN   read tracks ahead while the drive is idle\n  \
+         --floppy-bridge-auto-cache DFN   cache disk data while the drive is idle\n  \
          --floppy-bridge-writable DFN   let the guest write to the physical disk (which is\n  \
          \x20                            write-protected unless asked otherwise)\n  ";
     #[cfg(not(feature = "floppybridge"))]
@@ -2440,7 +2440,7 @@ mod tests {
             "dd",
             "--floppy-bridge-smart-speed",
             "df1",
-            "--floppy-bridge-read-ahead",
+            "--floppy-bridge-auto-cache",
             "df1",
         ])?;
 

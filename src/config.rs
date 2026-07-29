@@ -1867,9 +1867,9 @@ pub struct ConfigOverrides {
     /// (`--floppy-bridge-smart-speed DFN`). Same as `[floppy.dfN]
     /// bridge_smart_speed = true`.
     pub floppy_bridge_smart_speed: [bool; 4],
-    /// Read tracks ahead while the drive is idle (`--floppy-bridge-read-ahead
+    /// Cache disk data while the drive is idle (`--floppy-bridge-auto-cache
     /// DFN`). Same as `[floppy.dfN] bridge_auto_cache = true`.
-    pub floppy_bridge_read_ahead: [bool; 4],
+    pub floppy_bridge_auto_cache: [bool; 4],
 }
 
 impl ConfigOverrides {
@@ -1893,7 +1893,7 @@ impl ConfigOverrides {
             && self.floppy_bridge_mode.iter().all(Option::is_none)
             && self.floppy_bridge_density.iter().all(Option::is_none)
             && !self.floppy_bridge_smart_speed.iter().any(|v| *v)
-            && !self.floppy_bridge_read_ahead.iter().any(|v| *v)
+            && !self.floppy_bridge_auto_cache.iter().any(|v| *v)
             && !self.floppy_bridge_writable.iter().any(|w| *w)
             && self.joystick.is_none()
             && self.mouse_sensitivity.is_none()
@@ -1966,7 +1966,7 @@ impl ConfigOverrides {
                 && self.floppy_bridge_mode[idx].is_none()
                 && self.floppy_bridge_density[idx].is_none()
                 && !self.floppy_bridge_smart_speed[idx]
-                && !self.floppy_bridge_read_ahead[idx]
+                && !self.floppy_bridge_auto_cache[idx]
             {
                 continue;
             }
@@ -2010,7 +2010,7 @@ impl ConfigOverrides {
             if self.floppy_bridge_smart_speed[idx] {
                 drive.bridge_smart_speed = Some(true);
             }
-            if self.floppy_bridge_read_ahead[idx] {
+            if self.floppy_bridge_auto_cache[idx] {
                 drive.bridge_auto_cache = Some(true);
             }
         }
@@ -2790,7 +2790,7 @@ pub(crate) struct RawFloppyDrive {
     /// speed. Off by default, as it can upset copy protection.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) bridge_smart_speed: Option<bool>,
-    /// Let the driver read ahead into other cylinders while the disk is
+    /// Let the driver cache other cylinders while the disk is
     /// idle. Off by default: it keeps the real drive working continuously.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) bridge_auto_cache: Option<bool>,
@@ -6857,7 +6857,7 @@ mod tests {
         let df0 = cfg.floppy.bridges[0].as_ref().expect("df0 bridged");
         assert_eq!(df0.driver, BridgeDriver::Greaseweazle);
         // Unset options take the defaults: auto-detect the interface, read
-        // without waiting for the index, sense the density, no read-ahead.
+        // without waiting for the index, sense the density, no auto-cache.
         assert_eq!(df0.port, None);
         assert_eq!(df0.mode, BridgeSpeedMode::Normal);
         assert_eq!(df0.density, BridgeDensity::Auto);

@@ -565,7 +565,7 @@ fn apply(handle: ffi::BridgeDriverHandle, config: &BridgeConfig) -> Vec<&'static
             refused.push("smart speed");
         }
         if !ffi::BRIDGE_DriverSetAutoCache(handle, config.auto_cache) {
-            refused.push("read ahead");
+            refused.push("auto-cache");
         }
         // Auto-detect unless a port is named, so the common case is
         // plug-in-and-go and an explicit port always wins.

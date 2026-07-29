@@ -311,7 +311,7 @@ The layout is:
   floppy drive: its media row then names the interface -- or `None` with nothing
   plugged in -- and a **Configure** button opens that drive's own page,
   headed with the installed library and its version, for the serial port,
-  drive select, density, read mode, smart speed and read ahead, greying
+  drive select, density, read mode, smart speed and auto-cache, greying
   whatever the chosen interface does not honour. See [](floppybridge)),
   *Storage* (IDE master/slave, the SCSI controller -- A2091, A4091, or the
   A3000's onboard SCSI -- and its boot ROM and units; a row of buttons at the top

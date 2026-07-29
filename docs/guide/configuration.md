@@ -53,7 +53,7 @@ range checks as the equivalent TOML fields:
 | `--floppy-bridge-mode DFN MODE` | `[floppy.dfN] bridge_mode` | how tracks are captured: `normal`, `compatible`, `stalling` |
 | `--floppy-bridge-density DFN D` | `[floppy.dfN] bridge_density` | force a density: `auto`, `dd`, `hd` |
 | `--floppy-bridge-smart-speed DFN` | `[floppy.dfN] bridge_smart_speed = true` | let the interface slow the drive between accesses |
-| `--floppy-bridge-read-ahead DFN` | `[floppy.dfN] bridge_auto_cache = true` | read tracks ahead while the drive is idle |
+| `--floppy-bridge-auto-cache DFN` | `[floppy.dfN] bridge_auto_cache = true` | cache disk data while the drive is idle |
 | `--floppy-bridge-writable DFN` | `[floppy.dfN] write_protected = false` | allow writing to the real disk |
 | `--joystick MODE` | `[input] joystick` | `gamepad` (default), `keyboard` |
 | `--mouse-sensitivity N` | `[input] mouse_sensitivity` | `0`-`100` host mouse speed (`50` default = 1:1) |
