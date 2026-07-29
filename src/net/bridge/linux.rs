@@ -15,6 +15,7 @@ use std::time::Duration;
 const ETH_P_ALL: u16 = 0x0003;
 const HELPER_MAGIC: &[u8; 8] = b"CLNETFD1";
 const MAX_INTERFACE_LEN: usize = libc::IFNAMSIZ - 1;
+const MAX_FRAME_LEN: usize = 65_535;
 
 pub(super) fn list_interfaces() -> Result<Vec<HostInterface>> {
     let mut out = Vec::new();
@@ -71,7 +72,7 @@ fn interface_flags(name: &str) -> Result<i32> {
 
 pub(super) fn open(interface: &str, guest_mac: Option<[u8; 6]>) -> Result<LinuxAdapter> {
     match open_packet_socket(interface, guest_mac) {
-        Ok(fd) => Ok(LinuxAdapter { fd }),
+        Ok(fd) => Ok(LinuxAdapter::new(fd)),
         Err(direct_error)
             if matches!(
                 direct_error
@@ -86,7 +87,7 @@ pub(super) fn open(interface: &str, guest_mac: Option<[u8; 6]>) -> Result<LinuxA
                      install/start copperline-net-helper"
                 )
             })?;
-            Ok(LinuxAdapter { fd })
+            Ok(LinuxAdapter::new(fd))
         }
         Err(error) => Err(error),
     }
@@ -94,6 +95,16 @@ pub(super) fn open(interface: &str, guest_mac: Option<[u8; 6]>) -> Result<LinuxA
 
 pub(super) struct LinuxAdapter {
     fd: OwnedFd,
+    receive_buffer: Box<[u8]>,
+}
+
+impl LinuxAdapter {
+    fn new(fd: OwnedFd) -> Self {
+        Self {
+            fd,
+            receive_buffer: vec![0; MAX_FRAME_LEN].into_boxed_slice(),
+        }
+    }
 }
 
 impl AdapterIo for LinuxAdapter {
@@ -107,7 +118,17 @@ impl AdapterIo for LinuxAdapter {
             )
         };
         if sent < 0 {
-            return Err(std::io::Error::last_os_error()).context("AF_PACKET send");
+            let error = std::io::Error::last_os_error();
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+            ) {
+                // The worker is deliberately non-blocking. A saturated socket
+                // or interrupted send is ordinary Ethernet loss, just like a
+                // full bounded TX channel, rather than a link failure.
+                return Ok(());
+            }
+            return Err(error).context("AF_PACKET send");
         }
         if sent as usize != frame.len() {
             bail!("AF_PACKET short send ({sent} of {} bytes)", frame.len());
@@ -116,12 +137,11 @@ impl AdapterIo for LinuxAdapter {
     }
 
     fn receive(&mut self) -> Result<Option<Vec<u8>>> {
-        let mut frame = vec![0u8; 65_535];
         let received = unsafe {
             libc::recv(
                 self.fd.as_raw_fd(),
-                frame.as_mut_ptr().cast(),
-                frame.len(),
+                self.receive_buffer.as_mut_ptr().cast(),
+                self.receive_buffer.len(),
                 0,
             )
         };
@@ -135,8 +155,7 @@ impl AdapterIo for LinuxAdapter {
             }
             return Err(error).context("AF_PACKET receive");
         }
-        frame.truncate(received as usize);
-        Ok(Some(frame))
+        Ok(Some(self.receive_buffer[..received as usize].to_vec()))
     }
 
     fn set_guest_mac(&mut self, mac: [u8; 6]) -> Result<()> {
