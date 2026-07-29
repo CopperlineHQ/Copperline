@@ -5846,12 +5846,14 @@ mod tests {
         // ...but drives on the cable need it: scsi.device is their boot path.
         let img = std::env::temp_dir().join(format!("clfs-ide-{}.img", std::process::id()));
         std::fs::write(&img, vec![0u8; 512 * 16]).unwrap();
+        // TOML literal (single-quoted) strings so a Windows temp path's
+        // backslashes are not parsed as escape sequences.
         let cfg = parse_config(&format!(
             r#"
             [machine]
             profile = "A4000"
             [ide]
-            master = "{}"
+            master = '{}'
             "#,
             img.display()
         ))?;
@@ -5862,7 +5864,7 @@ mod tests {
         let cfg = parse_config("[machine]\nprofile = \"A1200\"")?;
         assert!(cfg.rom_scsi_device_disable);
         let cfg = parse_config(&format!(
-            "[machine]\nprofile = \"A1200\"\n[ide]\nmaster = \"{}\"",
+            "[machine]\nprofile = \"A1200\"\n[ide]\nmaster = '{}'",
             img.display()
         ))?;
         assert!(!cfg.rom_scsi_device_disable);
@@ -5882,7 +5884,7 @@ mod tests {
         // the driver back, exactly like the IDE machines.
         assert!(cfg.rom_scsi_device_disable);
         let cfg = parse_config(&format!(
-            "[machine]\nprofile = \"A3000\"\n[scsi]\nunit0 = \"{}\"",
+            "[machine]\nprofile = \"A3000\"\n[scsi]\nunit0 = '{}'",
             img.display()
         ))?;
         assert!(!cfg.rom_scsi_device_disable);

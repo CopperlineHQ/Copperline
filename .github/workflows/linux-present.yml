@@ -78,11 +78,16 @@ jobs:
             ./target/release/copperline --noaudio \
               --control-gui 127.0.0.1:0 --control-info /tmp/ccp.json &
             emu=$!
+            # A failure anywhere below must not leave the emulator running
+            # until the job timeout; the trap is cleared on the clean path
+            # once the process has exited.
+            trap "kill $emu 2>/dev/null || true" EXIT
             for _ in $(seq 1 60); do
               [ -s /tmp/ccp.json ] && break
               kill -0 "$emu"
               sleep 1
             done
+            [ -s /tmp/ccp.json ] || { echo "control endpoint never appeared"; exit 1; }
             # Let the machine run a few wall-clock seconds of frames before
             # sampling, so the screenshot comes from a live presenting loop.
             sleep 5
@@ -91,6 +96,7 @@ jobs:
             test -s /tmp/present.png
             ./target/release/copperline-ctl --info /tmp/ccp.json shutdown
             wait "$emu"
+            trap - EXIT
           '
           echo "present path OK ($(stat -c %s /tmp/present.png) bytes)"
       - name: Upload present screenshot

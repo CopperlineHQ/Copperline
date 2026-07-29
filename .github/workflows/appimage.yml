@@ -66,6 +66,9 @@ jobs:
         # (libfuse2 for the AppImage runtime is installed above).
         run: |
           appimage="$PWD/${{ steps.artifact.outputs.path }}"
+          # linuxdeploy marks the image executable; do not rely on that
+          # staying true across tooling changes.
+          chmod +x "$appimage"
           smoke="$RUNNER_TEMP/appimage-smoke"
           mkdir -p "$smoke"
           cd "$smoke"

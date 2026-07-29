@@ -84,6 +84,9 @@ jobs:
           mnt="$RUNNER_TEMP/dmg-mount"
           hdiutil attach -nobrowse -readonly -mountpoint "$mnt" \
             "${{ steps.artifact.outputs.path }}"
+          # Never leave the image mounted for the rest of the job if a
+          # check below fails; the clean path detaches explicitly.
+          trap 'hdiutil detach "$mnt" -force 2>/dev/null || true' EXIT
           app="$mnt/Copperline.app"
           bin="$app/Contents/MacOS/copperline"
           # Both slices present, and the ad-hoc signature survived the
@@ -102,6 +105,7 @@ jobs:
           sudo softwareupdate --install-rosetta --agree-to-license
           arch -x86_64 "$bin" --noaudio --screenshot-after 10 smoke-x86_64.png
           test -s smoke-x86_64.png
+          trap - EXIT
           hdiutil detach "$mnt"
       - name: Upload smoke screenshots
         if: always()

@@ -85,6 +85,8 @@ jobs:
         # capture), so a clean exit plus a non-empty PNG proves the shipped
         # bundle boots on a bare Windows host.
         run: |
+          $ErrorActionPreference = "Stop"
+          Set-StrictMode -Version Latest
           $stage = Join-Path $env:RUNNER_TEMP "zip-smoke"
           Expand-Archive -Path "${{ steps.artifact.outputs.path }}" -DestinationPath $stage
           $exe = Get-ChildItem -Path $stage -Recurse -Filter copperline.exe | Select-Object -First 1
