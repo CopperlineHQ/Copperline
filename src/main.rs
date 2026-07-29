@@ -457,6 +457,73 @@ where
                     .ok_or_else(|| anyhow!("--floppy-drives requires COUNT (1-4)"))?;
                 overrides.floppy_drives = Some(parse_floppy_drive_count(&value)?);
             }
+            // Absent from a build without the feature, so an unknown-argument
+            // error names it rather than the flag quietly doing nothing.
+            #[cfg(feature = "floppybridge")]
+            "--floppy-bridge" => {
+                const USAGE: &str = "--floppy-bridge requires DFN INTERFACE \
+                                     (drawbridge, greaseweazle, supercardpro, or off)";
+                let drive_s = args.next().ok_or_else(|| anyhow!(USAGE))?;
+                let idx = parse_floppy_drive_idx(&drive_s, "--floppy-bridge")?;
+                let interface = args.next().ok_or_else(|| anyhow!(USAGE))?;
+                overrides.floppy_bridge[idx] = Some(interface);
+            }
+            #[cfg(feature = "floppybridge")]
+            "--floppy-bridge-port" => {
+                const USAGE: &str = "--floppy-bridge-port requires DFN PORT";
+                let drive_s = args.next().ok_or_else(|| anyhow!(USAGE))?;
+                let idx = parse_floppy_drive_idx(&drive_s, "--floppy-bridge-port")?;
+                overrides.floppy_bridge_port[idx] =
+                    Some(args.next().ok_or_else(|| anyhow!(USAGE))?);
+            }
+            #[cfg(feature = "floppybridge")]
+            "--floppy-bridge-cable" => {
+                const USAGE: &str = "--floppy-bridge-cable requires DFN CABLE \
+                                     (a or b for a PC cable, 0-3 for Shugart)";
+                let drive_s = args.next().ok_or_else(|| anyhow!(USAGE))?;
+                let idx = parse_floppy_drive_idx(&drive_s, "--floppy-bridge-cable")?;
+                overrides.floppy_bridge_cable[idx] =
+                    Some(args.next().ok_or_else(|| anyhow!(USAGE))?);
+            }
+            #[cfg(feature = "floppybridge")]
+            "--floppy-bridge-mode" => {
+                const USAGE: &str = "--floppy-bridge-mode requires DFN MODE \
+                                     (normal, compatible, or stalling)";
+                let drive_s = args.next().ok_or_else(|| anyhow!(USAGE))?;
+                let idx = parse_floppy_drive_idx(&drive_s, "--floppy-bridge-mode")?;
+                overrides.floppy_bridge_mode[idx] =
+                    Some(args.next().ok_or_else(|| anyhow!(USAGE))?);
+            }
+            #[cfg(feature = "floppybridge")]
+            "--floppy-bridge-density" => {
+                const USAGE: &str = "--floppy-bridge-density requires DFN DENSITY \
+                                     (auto, dd, or hd)";
+                let drive_s = args.next().ok_or_else(|| anyhow!(USAGE))?;
+                let idx = parse_floppy_drive_idx(&drive_s, "--floppy-bridge-density")?;
+                overrides.floppy_bridge_density[idx] =
+                    Some(args.next().ok_or_else(|| anyhow!(USAGE))?);
+            }
+            #[cfg(feature = "floppybridge")]
+            "--floppy-bridge-smart-speed" => {
+                const USAGE: &str = "--floppy-bridge-smart-speed requires DFN";
+                let drive_s = args.next().ok_or_else(|| anyhow!(USAGE))?;
+                let idx = parse_floppy_drive_idx(&drive_s, "--floppy-bridge-smart-speed")?;
+                overrides.floppy_bridge_smart_speed[idx] = true;
+            }
+            #[cfg(feature = "floppybridge")]
+            "--floppy-bridge-auto-cache" => {
+                const USAGE: &str = "--floppy-bridge-auto-cache requires DFN";
+                let drive_s = args.next().ok_or_else(|| anyhow!(USAGE))?;
+                let idx = parse_floppy_drive_idx(&drive_s, "--floppy-bridge-auto-cache")?;
+                overrides.floppy_bridge_auto_cache[idx] = true;
+            }
+            #[cfg(feature = "floppybridge")]
+            "--floppy-bridge-writable" => {
+                const USAGE: &str = "--floppy-bridge-writable requires DFN";
+                let drive_s = args.next().ok_or_else(|| anyhow!(USAGE))?;
+                let idx = parse_floppy_drive_idx(&drive_s, "--floppy-bridge-writable")?;
+                overrides.floppy_bridge_writable[idx] = true;
+            }
             "--floppy-speed" | "--fdd-speed" => {
                 let value = args.next().ok_or_else(|| {
                     anyhow!("--floppy-speed requires PERCENT (100, 200, 400, 800, or 0 for turbo)")
@@ -1001,6 +1068,22 @@ fn print_help() {
                 --list-midi                    list host MIDI endpoints and exit\n  ";
     #[cfg(not(feature = "midi"))]
     let midi = "";
+    // A build without the feature cannot attach a physical drive at all, so
+    // the flags are not listed and not accepted.
+    #[cfg(feature = "floppybridge")]
+    let floppy_bridge =
+        "--floppy-bridge DFN NAME       drive a physical floppy drive on DFN over NAME:\n  \
+         \x20                            drawbridge, greaseweazle, supercardpro, or off\n  \
+         --floppy-bridge-port DFN PORT  serial port of that interface (default: auto-detect)\n  \
+         --floppy-bridge-cable DFN SEL  drive select on the cable: a/b (PC) or 0-3 (Shugart)\n  \
+         --floppy-bridge-mode DFN MODE  how tracks are captured: normal, compatible, stalling\n  \
+         --floppy-bridge-density DFN D  force a density: auto, dd, or hd\n  \
+         --floppy-bridge-smart-speed DFN  let the interface slow the drive between accesses\n  \
+         --floppy-bridge-auto-cache DFN   cache disk data while the drive is idle\n  \
+         --floppy-bridge-writable DFN   let the guest write to the physical disk (which is\n  \
+         \x20                            write-protected unless asked otherwise)\n  ";
+    #[cfg(not(feature = "floppybridge"))]
+    let floppy_bridge = "";
     eprintln!(
         "copperline - Amiga emulator\n\
          \n\
@@ -1023,7 +1106,7 @@ fn print_help() {
          \x20                            CPUs), e.g. 0, 32M, 128M\n  \
          --floppy-drives COUNT          wired floppy drives, 1-4 (DF0 plus externals)\n  \
          --floppy-speed PERCENT         drive speed: 100, 200, 400, 800, or 0 (turbo)\n  \
-         --rtc-time TIME                seed the battery clock (implies fitting one) with\n  \
+         {floppy_bridge}--rtc-time TIME                seed the battery clock (implies fitting one) with\n  \
          \x20                            Unix seconds or \"YYYY-MM-DD HH:MM[:SS]\"; it then\n  \
          \x20                            ticks in emulated time, so runs are deterministic\n  \
          --rtc-frozen                   stop the seeded clock at --rtc-time exactly\n  \
@@ -1766,7 +1849,17 @@ fn main() -> Result<()> {
         || cli.benchmark_until.is_some()
         || cli.gdb.is_some()
         || cli.control.is_some();
-    let paced = !headless_capture;
+    // A real drive on a bridge is the exception: its platter turns in
+    // wall-clock time and cannot be hurried. Left unthrottled, the emulated
+    // machine outruns it -- spinning the motor up and down faster than it can
+    // reach speed, and stepping past tracks before the drive has captured
+    // them -- so the guest sees a drive that answers almost nothing. Pace a
+    // bridged machine like a real Amiga, whatever else was asked for.
+    let bridged = cfg.floppy.bridges.iter().any(Option::is_some);
+    let paced = !headless_capture || bridged;
+    if bridged && headless_capture {
+        info!("emulation timing: paced to wall-clock because a physical floppy drive is attached");
+    }
     info!("emulation timing: deterministic core, paced={paced}");
     let mut emu = emulator::build_machine(&cfg, audio, paced, cli.load_state.is_some())?;
     if let Some(path) = &cli.load_state {
@@ -2491,6 +2584,86 @@ mod tests {
         ])?;
         let err = validate_gdb_args(&args).unwrap_err();
         assert!(err.to_string().contains("--screenshot-after"), "{err:#}");
+        Ok(())
+    }
+
+    /// A real drive can be asked for entirely from the command line, with no
+    /// config file: the flags have to create the bay's table, not just fill
+    /// one in.
+    // The flags only exist in a build that can attach a physical drive.
+    #[cfg(feature = "floppybridge")]
+    #[test]
+    fn floppy_bridge_flags_configure_a_bay_with_no_config_file() -> Result<()> {
+        let args = parse(&[
+            "--floppy-bridge",
+            "df1",
+            "greaseweazle",
+            "--floppy-bridge-port",
+            "df1",
+            "/dev/ttyACM0",
+            "--floppy-bridge-cable",
+            "df1",
+            "b",
+            "--floppy-bridge-writable",
+            "df1",
+            "--floppy-bridge-mode",
+            "df1",
+            "compatible",
+            "--floppy-bridge-density",
+            "df1",
+            "dd",
+            "--floppy-bridge-smart-speed",
+            "df1",
+            "--floppy-bridge-auto-cache",
+            "df1",
+        ])?;
+
+        let raw = Config::load_raw(None, &args.overrides)?;
+        let cfg = Config::try_from(raw)?;
+        let bridge = cfg.floppy.bridges[1].as_ref().expect("df1 bridged");
+        assert_eq!(
+            bridge.driver,
+            copperline::config::BridgeDriver::Greaseweazle
+        );
+        assert_eq!(bridge.port.as_deref(), Some("/dev/ttyACM0"));
+        assert_eq!(bridge.cable, copperline::config::BridgeCable::DriveB);
+        assert!(!bridge.write_protected);
+        assert_eq!(bridge.mode, copperline::config::BridgeSpeedMode::Compatible);
+        assert_eq!(bridge.density, copperline::config::BridgeDensity::Dd);
+        assert!(bridge.smart_speed);
+        assert!(bridge.auto_cache);
+        // Untouched bays stay as they were.
+        assert!(cfg.floppy.bridges[0].is_none());
+        Ok(())
+    }
+
+    /// The flag means "this bay is a real drive", so it displaces an image the
+    /// config file put there rather than colliding with it -- a bay cannot
+    /// hold both, and the command line wins.
+    // The flags only exist in a build that can attach a physical drive.
+    #[cfg(feature = "floppybridge")]
+    #[test]
+    fn floppy_bridge_flag_replaces_a_configured_image() -> Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "copperline-bridge-cli-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &path,
+            "[floppy.df0]\npath = \"workbench.adf\"\nwrite_protected = true\n",
+        )?;
+
+        let args = parse(&["--floppy-bridge", "df0", "greaseweazle"])?;
+        let raw = Config::load_raw(Some(&path), &args.overrides)?;
+        let cfg = Config::try_from(raw)?;
+        let _ = std::fs::remove_file(&path);
+
+        assert!(cfg.floppy.bridges[0].is_some(), "the bay is a real drive");
+        assert!(cfg.floppy.drives[0].is_none(), "and has no image left");
         Ok(())
     }
 

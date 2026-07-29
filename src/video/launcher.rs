@@ -23,7 +23,8 @@ use crate::bus::PortDevice;
 use crate::chipset::agnus::{AgnusRevision, VideoStandard};
 use crate::chipset::denise::DeniseRevision;
 use crate::config::{
-    format_size, machine_profile_defaults, AudioFilterMode, ChannelMode, Chipset, Config, CpuModel,
+    format_size, machine_profile_defaults, AudioFilterMode, BridgeCable, BridgeDensity,
+    BridgeDriver, BridgeSpeedMode, ChannelMode, Chipset, Config, CpuModel, FloppyBridgeConfig,
     JoystickInputMode, MachineModel, MouseCapture, Overscan, PacingBudget, ParallelDevice,
     PixelAspect, RawConfig, RawDrive, RawFilesysMount, RawFloppyDrive, RawZorroBoard, RtgCard,
     ScsiController, SerialMode, ShaderMode, Tint, WarpSpeed, BOOT_PRI_NEVER,
@@ -170,6 +171,8 @@ pub enum LauncherTab {
     Rom,
     Floppy,
     Storage,
+    /// FloppyBridge settings for one bay, reached from its Configure button.
+    FloppyBridge,
     BootPriority,
     HostFs,
     Cd,
@@ -211,6 +214,7 @@ impl LauncherTab {
             LauncherTab::Memory => "Memory",
             LauncherTab::Rom => "ROM",
             LauncherTab::Floppy => "Floppy",
+            LauncherTab::FloppyBridge => "FloppyBridge",
             LauncherTab::Storage => "Storage",
             LauncherTab::BootPriority => "Boot Priority",
             LauncherTab::HostFs => "Host Mounts",
@@ -232,6 +236,7 @@ impl LauncherTab {
             LauncherTab::Cd | LauncherTab::HostFs | LauncherTab::BootPriority => {
                 LauncherTab::Storage
             }
+            LauncherTab::FloppyBridge => LauncherTab::Floppy,
             LauncherTab::AvVideo | LauncherTab::AvEmulation => LauncherTab::AvAudio,
             other => other,
         }
@@ -245,6 +250,7 @@ impl LauncherTab {
             LauncherTab::Cd | LauncherTab::HostFs | LauncherTab::BootPriority => {
                 Some(LauncherTab::Storage)
             }
+            LauncherTab::FloppyBridge => Some(LauncherTab::Floppy),
             _ => None,
         }
     }
@@ -323,6 +329,26 @@ pub enum LauncherField {
     Df2WriteProtect,
     Df3Image,
     Df3WriteProtect,
+    // The per-drive "use a real drive" tick boxes, and the settings behind the
+    // Configure button they reveal. The settings are one set of rows shown for
+    // whichever bay is being configured, rather than four copies.
+    Df0Bridge,
+    Df1Bridge,
+    Df2Bridge,
+    Df3Bridge,
+    /// The greyed heading naming the installed library and its version. Inert:
+    /// it labels the page rather than editing anything.
+    BridgeLibrary,
+    /// A line of the explanation shown in place of the settings when there is
+    /// no library to apply them to. Inert, and shared by every such line.
+    BridgeLibraryHelp,
+    BridgeDevice,
+    BridgePort,
+    BridgeCable,
+    BridgeDensity,
+    BridgeSpeed,
+    BridgeSmartSpeed,
+    BridgeAutoCache,
     // Hard disk
     IdeMaster,
     IdeSlave,
@@ -435,6 +461,12 @@ pub enum RowKind {
     /// The greyed `Drive` / `Priority` / `Status` column titles above the Boot
     /// Priority rows. Non-interactive; its `field` is inert.
     BootpriHeader,
+    /// A floppy drive's media row: an image path with Browse/Clear, or the
+    /// real interface in use with a Configure button once bridged.
+    FloppyMedia,
+    /// The pair of tick boxes under a drive: write protect, and whether the
+    /// bay uses a real drive. Its `field` is the drive's write-protect field.
+    FloppyFlags,
 }
 
 /// One settings row: a label, the field it edits, and how to edit it.
@@ -544,21 +576,39 @@ const ROM_ROWS: [Row; 2] = [
 // Each drive is a greyed "DFn:" heading with its settings indented under it. The
 // heading is keyed on the drive's image field so `row_hidden` drops it along
 // with the drive's rows when the drive is not wired in.
+// Each wired drive is a greyed "DFn:" heading, its media row, then the two
+// tick boxes that share a line beneath. The media row shows an image path with
+// Browse/Clear, or -- once FloppyBridge is ticked -- the real interface in use
+// with a Configure button onto its settings.
 const FLOPPY_ROWS: [Row; 14] = [
     row(F::FloppyDrives, "Drives", Cycle),
     row(F::FloppySpeed, "Drive speed", Cycle),
     row(F::Df0Image, "DF0:", RowKind::SectionHeader),
-    row(F::Df0Image, "  Disk image", PathRow),
-    row(F::Df0WriteProtect, "  Write-protect", Toggle),
+    row(F::Df0Image, "  Disk image", RowKind::FloppyMedia),
+    row(F::Df0WriteProtect, "", RowKind::FloppyFlags),
     row(F::Df1Image, "DF1:", RowKind::SectionHeader),
-    row(F::Df1Image, "  Disk image", PathRow),
-    row(F::Df1WriteProtect, "  Write-protect", Toggle),
+    row(F::Df1Image, "  Disk image", RowKind::FloppyMedia),
+    row(F::Df1WriteProtect, "", RowKind::FloppyFlags),
     row(F::Df2Image, "DF2:", RowKind::SectionHeader),
-    row(F::Df2Image, "  Disk image", PathRow),
-    row(F::Df2WriteProtect, "  Write-protect", Toggle),
+    row(F::Df2Image, "  Disk image", RowKind::FloppyMedia),
+    row(F::Df2WriteProtect, "", RowKind::FloppyFlags),
     row(F::Df3Image, "DF3:", RowKind::SectionHeader),
-    row(F::Df3Image, "  Disk image", PathRow),
-    row(F::Df3WriteProtect, "  Write-protect", Toggle),
+    row(F::Df3Image, "  Disk image", RowKind::FloppyMedia),
+    row(F::Df3WriteProtect, "", RowKind::FloppyFlags),
+];
+/// The FloppyBridge settings page, shown for whichever bay was configured.
+#[cfg(feature = "floppybridge")]
+const FLOPPY_BRIDGE_ROWS: [Row; 8] = [
+    // Inert: the label is built from the loaded library's version (see
+    // `bridge_library_heading`), so the text here is never drawn.
+    row(F::BridgeLibrary, "", RowKind::SectionHeader),
+    row(F::BridgeDevice, "Interface", Cycle),
+    row(F::BridgePort, "Serial port", Cycle),
+    row(F::BridgeCable, "Drive select", Cycle),
+    row(F::BridgeDensity, "Density", Cycle),
+    row(F::BridgeSpeed, "Read mode", Cycle),
+    row(F::BridgeSmartSpeed, "Smart speed", Toggle),
+    row(F::BridgeAutoCache, "Auto-cache", Toggle),
 ];
 const STORAGE_ROWS: [Row; 12] = [
     row(F::IdeMaster, "IDE master", Drive),
@@ -691,6 +741,12 @@ pub fn rows(
         LauncherTab::Memory => Cow::Borrowed(&MEMORY_ROWS),
         LauncherTab::Rom => Cow::Borrowed(&ROM_ROWS),
         LauncherTab::Floppy => Cow::Borrowed(&FLOPPY_ROWS),
+        // Unreachable without the feature: nothing offers a way in, since the
+        // tick box that turns a bay over is not drawn either.
+        #[cfg(not(feature = "floppybridge"))]
+        LauncherTab::FloppyBridge => Cow::Borrowed(&[]),
+        #[cfg(feature = "floppybridge")]
+        LauncherTab::FloppyBridge => Cow::Borrowed(&FLOPPY_BRIDGE_ROWS),
         // The Storage tab shows the IDE/SCSI options (the common case). Its
         // sub-page links are a fixed nav row at the top (see the panel code),
         // in the same place as each sub-page's Back button, so they are not part
@@ -863,6 +919,90 @@ const Z3_PRESETS: [usize; 8] = [
 const OVERSCANS: [Overscan; 2] = [Overscan::Tv, Overscan::Full];
 const PIXEL_ASPECTS: [PixelAspect; 2] = [PixelAspect::Tv, PixelAspect::Square];
 const TINTS: [Tint; 5] = [Tint::None, Tint::Bw, Tint::Green, Tint::Amber, Tint::Sepia];
+/// How close a bay is to actually having a physical drive behind it.
+///
+/// The two ways it can fail look identical from the outside but need opposite
+/// fixes -- install the library, or plug the interface in -- so the launcher
+/// keeps them apart rather than saying "None" to both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BridgeStatus {
+    /// Nothing the bridge recognises is plugged in. The bridge itself is
+    /// always there in a build with the feature, and a build without one never
+    /// shows a bay that could ask.
+    NoInterface,
+    /// An interface the bridge recognises is attached.
+    Attached,
+}
+
+/// What the bridge can see of the host right now.
+fn bridge_status() -> BridgeStatus {
+    #[cfg(feature = "floppybridge")]
+    if crate::floppybridge::interface_connected() {
+        return BridgeStatus::Attached;
+    }
+    BridgeStatus::NoInterface
+}
+
+/// Config-file spellings for the bridge settings, matching what the parser
+/// accepts.
+fn bridge_driver_name(d: BridgeDriver) -> &'static str {
+    match d {
+        BridgeDriver::DrawBridge => "drawbridge",
+        BridgeDriver::Greaseweazle => "greaseweazle",
+        BridgeDriver::SupercardPro => "supercardpro",
+    }
+}
+
+fn bridge_cable_name(c: BridgeCable) -> &'static str {
+    match c {
+        BridgeCable::DriveA => "a",
+        BridgeCable::DriveB => "b",
+        BridgeCable::Shugart0 => "0",
+        BridgeCable::Shugart1 => "1",
+        BridgeCable::Shugart2 => "2",
+        BridgeCable::Shugart3 => "3",
+    }
+}
+
+fn bridge_density_name(d: BridgeDensity) -> &'static str {
+    match d {
+        BridgeDensity::Auto => "auto",
+        BridgeDensity::Dd => "dd",
+        BridgeDensity::Hd => "hd",
+    }
+}
+
+fn bridge_mode_name(m: BridgeSpeedMode) -> &'static str {
+    match m {
+        BridgeSpeedMode::Compatible => "compatible",
+        BridgeSpeedMode::Normal => "normal",
+        BridgeSpeedMode::Stalling => "stalling",
+    }
+}
+
+const BRIDGE_DRIVERS: [BridgeDriver; 3] = [
+    BridgeDriver::DrawBridge,
+    BridgeDriver::Greaseweazle,
+    BridgeDriver::SupercardPro,
+];
+const BRIDGE_CABLES: [BridgeCable; 6] = [
+    BridgeCable::DriveA,
+    BridgeCable::DriveB,
+    BridgeCable::Shugart0,
+    BridgeCable::Shugart1,
+    BridgeCable::Shugart2,
+    BridgeCable::Shugart3,
+];
+const BRIDGE_DENSITIES: [BridgeDensity; 3] =
+    [BridgeDensity::Auto, BridgeDensity::Dd, BridgeDensity::Hd];
+// The driver's fourth mode, Turbo, is absent: it answers AmigaDOS calls
+// instead of reading the disk, so there is nothing for a drive model to do
+// with it.
+const BRIDGE_SPEEDS: [BridgeSpeedMode; 3] = [
+    BridgeSpeedMode::Normal,
+    BridgeSpeedMode::Compatible,
+    BridgeSpeedMode::Stalling,
+];
 const AUDIO_FILTER_MODES: [AudioFilterMode; 3] = [
     AudioFilterMode::Auto,
     AudioFilterMode::On,
@@ -976,6 +1116,17 @@ pub struct MachineSetup {
     /// image is a one-element list.
     df_playlists: [Vec<PathBuf>; 4],
     df_write_protected: [bool; 4],
+    /// A real drive on this bay instead of an image. `None` is the ordinary
+    /// image-backed drive.
+    df_bridge: [Option<FloppyBridgeConfig>; 4],
+    /// Which bay the FloppyBridge settings page is showing. The page itself is
+    /// one set of rows; this says whose values they are.
+    bridge_edit_drive: usize,
+    /// What the library could see the last time we looked. Sampled when the
+    /// launcher opens and whenever a bay is switched over to a physical drive,
+    /// so a board plugged in mid-session is picked up by unticking and
+    /// re-ticking the box rather than by a scan every frame.
+    bridge_status: BridgeStatus,
     // Hard disk. Each drive's optional volume-name override (directory mounts
     // only) sits in the matching `*_name` slot, paralleling the path slot. Boot
     // priority is edited on the Boot Priority sub-page and split across two
@@ -1115,10 +1266,13 @@ impl MachineSetup {
     /// "no boot ROM = AROS" distinction, and the `[[zorro]]` board paths.
     pub fn from_raw(raw: &RawConfig) -> Result<Self> {
         let cfg: Config = raw.clone().try_into()?;
+        // One tick box governs both kinds of bay, so read it from whichever
+        // of the two a bay actually has.
         let df_write_protected = std::array::from_fn(|i| {
             cfg.floppy.drives[i]
                 .as_ref()
                 .map(|d| d.write_protected)
+                .or_else(|| cfg.floppy.bridges[i].as_ref().map(|b| b.write_protected))
                 .unwrap_or(true)
         });
         let connected = cfg.floppy_connected.iter().filter(|&&c| c).count().max(1) as u8;
@@ -1148,6 +1302,9 @@ impl MachineSetup {
             floppy_speed: cfg.floppy.speed,
             df_playlists: cfg.floppy_playlists.clone(),
             df_write_protected,
+            df_bridge: std::array::from_fn(|i| cfg.floppy.bridges[i].clone()),
+            bridge_edit_drive: 0,
+            bridge_status: bridge_status(),
             ide_master: cfg.ide.master.as_ref().map(|d| d.path.clone()),
             ide_master_name: cfg.ide.master.as_ref().and_then(|d| d.volume_name.clone()),
             ide_master_bootpri: boot_priority_of(raw.ide.master.as_ref().and_then(|d| d.bootpri)),
@@ -1673,6 +1830,28 @@ impl MachineSetup {
     }
 
     fn floppy_drive_raw(&self, idx: usize) -> Option<RawFloppyDrive> {
+        // A bay using a real drive writes its interface and settings instead
+        // of an image; only the settings that differ from the cautious
+        // defaults are emitted, so a saved config stays readable.
+        if let Some(bridge) = self.df_bridge[idx].as_ref() {
+            let default = FloppyBridgeConfig::default();
+            return Some(RawFloppyDrive {
+                bridge: Some(bridge_driver_name(bridge.driver).to_string()),
+                bridge_port: bridge.port.clone(),
+                bridge_cable: (bridge.cable != default.cable)
+                    .then(|| bridge_cable_name(bridge.cable).to_string()),
+                bridge_density: (bridge.density != default.density)
+                    .then(|| bridge_density_name(bridge.density).to_string()),
+                bridge_mode: (bridge.mode != default.mode)
+                    .then(|| bridge_mode_name(bridge.mode).to_string()),
+                bridge_smart_speed: bridge.smart_speed.then_some(true),
+                bridge_auto_cache: bridge.auto_cache.then_some(true),
+                // Same rule, and the same tick box, as an image: only an
+                // unprotected drive says so.
+                write_protected: (!self.df_write_protected[idx]).then_some(false),
+                ..RawFloppyDrive::default()
+            });
+        }
         let playlist = &self.df_playlists[idx];
         if playlist.is_empty() {
             // A write-protect flag on an empty drive is meaningless, so an
@@ -1687,6 +1866,8 @@ impl MachineSetup {
             // write_protected defaults to true; only an unprotected drive is
             // written explicitly.
             write_protected: (!self.df_write_protected[idx]).then_some(false),
+            // Bridges are emitted by the FloppyBridge page, not the image rows.
+            ..RawFloppyDrive::default()
         })
     }
 
@@ -1920,6 +2101,29 @@ impl MachineSetup {
             // when inactive (see `rows`), so they never need a greyed state.
             // Channel mode and separation shape the output, so they do nothing
             // once audio is disabled; separation also does nothing in mono.
+            #[cfg(feature = "floppybridge")]
+            F::BridgePort => reason(
+                self.bridge_driver_supports(crate::floppybridge::config_option::COM_PORT),
+                "not on this interface",
+            ),
+            #[cfg(feature = "floppybridge")]
+            F::BridgeCable => reason(
+                self.bridge_driver_supports(crate::floppybridge::config_option::DRIVE_AB_CABLE)
+                    || self.bridge_driver_supports(
+                        crate::floppybridge::config_option::SUPPORTS_SHUGART,
+                    ),
+                "not on this interface",
+            ),
+            #[cfg(feature = "floppybridge")]
+            F::BridgeSmartSpeed => reason(
+                self.bridge_driver_supports(crate::floppybridge::config_option::SMART_SPEED),
+                "not on this interface",
+            ),
+            #[cfg(feature = "floppybridge")]
+            F::BridgeAutoCache => reason(
+                self.bridge_driver_supports(crate::floppybridge::config_option::AUTO_CACHE),
+                "not on this interface",
+            ),
             F::AudioChannelMode => reason(self.audio_output.is_enabled(), "off"),
             F::AudioFilter => reason(self.audio_output.is_enabled(), "off"),
             F::AudioStereoSeparation => {
@@ -1951,6 +2155,8 @@ impl MachineSetup {
             F::Df3WriteProtect => self.df_write_protected[3],
             F::FloppySounds => self.floppy_sounds,
             F::StartFullscreen => self.start_fullscreen,
+            F::BridgeSmartSpeed => self.bridge_edit().is_some_and(|c| c.smart_speed),
+            F::BridgeAutoCache => self.bridge_edit().is_some_and(|c| c.auto_cache),
             F::ShowStatusBar => self.show_status_bar,
             F::Deinterlace => self.deinterlace,
             F::Bezel => self.bezel,
@@ -2160,6 +2366,34 @@ impl MachineSetup {
                     format!("{:.2}", self.phosphor)
                 }
             }
+            F::BridgeDevice => self
+                .bridge_edit()
+                .map_or_else(|| "(none)".to_string(), |c| c.driver.label().to_string()),
+            F::BridgePort => match self.bridge_edit().and_then(|c| c.port.clone()) {
+                None => "Automatic".to_string(),
+                Some(p) => p,
+            },
+            F::BridgeCable => match self.bridge_edit().map(|c| c.cable) {
+                Some(BridgeCable::DriveA) => "PC drive A".to_string(),
+                Some(BridgeCable::DriveB) => "PC drive B".to_string(),
+                Some(BridgeCable::Shugart0) => "Shugart 0".to_string(),
+                Some(BridgeCable::Shugart1) => "Shugart 1".to_string(),
+                Some(BridgeCable::Shugart2) => "Shugart 2".to_string(),
+                Some(BridgeCable::Shugart3) => "Shugart 3".to_string(),
+                None => "(none)".to_string(),
+            },
+            F::BridgeDensity => match self.bridge_edit().map(|c| c.density) {
+                Some(BridgeDensity::Auto) => "Automatic".to_string(),
+                Some(BridgeDensity::Dd) => "DD only".to_string(),
+                Some(BridgeDensity::Hd) => "HD only".to_string(),
+                None => "(none)".to_string(),
+            },
+            F::BridgeSpeed => match self.bridge_edit().map(|c| c.mode) {
+                Some(BridgeSpeedMode::Compatible) => "Compatible".to_string(),
+                Some(BridgeSpeedMode::Normal) => "Normal".to_string(),
+                Some(BridgeSpeedMode::Stalling) => "Stalling".to_string(),
+                None => "(none)".to_string(),
+            },
             F::Shader => match self.shader {
                 ShaderMode::None => "Off".to_string(),
                 ShaderMode::Scanlines => "Scanlines".to_string(),
@@ -2291,7 +2525,8 @@ impl MachineSetup {
             // Path/drive fields: the file name, or a placeholder.
             F::Rom => self.path_label(field, "(bundled AROS)"),
             _ if rows_contains_kind(field, RowKind::Path)
-                || rows_contains_kind(field, RowKind::Drive) =>
+                || rows_contains_kind(field, RowKind::Drive)
+                || rows_contains_kind(field, RowKind::FloppyMedia) =>
             {
                 self.path_label(field, "(none)")
             }
@@ -2391,6 +2626,14 @@ impl MachineSetup {
             F::Z3Ram => self.z3_ram = cycle_nearest(&Z3_PRESETS, self.z3_ram, forward),
             F::FloppyDrives => {
                 self.floppy_drives = step_u8(self.floppy_drives, forward, 1, 4);
+                // A bay that is no longer fitted has no business holding a
+                // physical drive open: the row is gone from the page, so
+                // nothing would say why the interface was busy the next time
+                // it was asked for.
+                #[cfg(feature = "floppybridge")]
+                for bay in self.df_bridge.iter_mut().skip(self.floppy_drives as usize) {
+                    *bay = None;
+                }
             }
             F::FloppySpeed => {
                 self.floppy_speed = cycle_slice(&FLOPPY_SPEEDS, self.floppy_speed, forward)
@@ -2548,6 +2791,39 @@ impl MachineSetup {
             F::AudioFilter => {
                 self.audio_filter = cycle_slice(&AUDIO_FILTER_MODES, self.audio_filter, forward)
             }
+            F::BridgeDevice => {
+                if let Some(c) = self.bridge_edit_mut() {
+                    c.driver = cycle_slice(&BRIDGE_DRIVERS, c.driver, forward);
+                }
+            }
+            F::BridgePort => {
+                let options = self.bridge_port_options();
+                if let Some(c) = self.bridge_edit_mut() {
+                    let idx = options.iter().position(|p| *p == c.port).unwrap_or(0);
+                    let n = options.len();
+                    let next = if forward {
+                        (idx + 1) % n
+                    } else {
+                        (idx + n - 1) % n
+                    };
+                    c.port = options[next].clone();
+                }
+            }
+            F::BridgeCable => {
+                if let Some(c) = self.bridge_edit_mut() {
+                    c.cable = cycle_slice(&BRIDGE_CABLES, c.cable, forward);
+                }
+            }
+            F::BridgeDensity => {
+                if let Some(c) = self.bridge_edit_mut() {
+                    c.density = cycle_slice(&BRIDGE_DENSITIES, c.density, forward);
+                }
+            }
+            F::BridgeSpeed => {
+                if let Some(c) = self.bridge_edit_mut() {
+                    c.mode = cycle_slice(&BRIDGE_SPEEDS, c.mode, forward);
+                }
+            }
             F::AudioStereoSeparation => {
                 self.audio_stereo_separation = cycle_nearest(
                     &STEREO_SEPARATION_STEPS,
@@ -2592,6 +2868,15 @@ impl MachineSetup {
             F::Fpu => self.fpu = !self.fpu,
             F::Icache => self.icache = !self.icache,
             F::Dcache => self.dcache = !self.dcache,
+            F::Df0WriteProtect | F::Df1WriteProtect | F::Df2WriteProtect | F::Df3WriteProtect
+                if Self::drive_protect_bay(field).is_some() =>
+            {
+                let bay = Self::drive_protect_bay(field).expect("checked above");
+                self.df_write_protected[bay] = !self.df_write_protected[bay];
+                if let Some(bridge) = self.df_bridge[bay].as_mut() {
+                    bridge.write_protected = self.df_write_protected[bay];
+                }
+            }
             F::Df0WriteProtect => self.df_write_protected[0] = !self.df_write_protected[0],
             F::Df1WriteProtect => self.df_write_protected[1] = !self.df_write_protected[1],
             F::Df2WriteProtect => self.df_write_protected[2] = !self.df_write_protected[2],
@@ -2602,6 +2887,16 @@ impl MachineSetup {
             F::Deinterlace => self.deinterlace = !self.deinterlace,
             F::Bezel => self.bezel = !self.bezel,
             F::PowerOn => self.power_on = !self.power_on,
+            F::BridgeSmartSpeed => {
+                if let Some(c) = self.bridge_edit_mut() {
+                    c.smart_speed = !c.smart_speed;
+                }
+            }
+            F::BridgeAutoCache => {
+                if let Some(c) = self.bridge_edit_mut() {
+                    c.auto_cache = !c.auto_cache;
+                }
+            }
             F::RealtimePriority => self.realtime_priority = !self.realtime_priority,
             _ => {}
         }
@@ -2845,6 +3140,156 @@ impl MachineSetup {
             .take_while(|r| r.field != field)
             .filter(|r| self.boot_field_applies(r.field))
             .count()
+    }
+
+    /// The bay a `DfNImage` field belongs to.
+    pub fn drive_image_bay(field: LauncherField) -> Option<usize> {
+        Some(match field {
+            F::Df0Image => 0,
+            F::Df1Image => 1,
+            F::Df2Image => 2,
+            F::Df3Image => 3,
+            _ => return None,
+        })
+    }
+
+    /// The bay a `DfNWriteProtect` field belongs to.
+    pub fn drive_protect_bay(field: LauncherField) -> Option<usize> {
+        Some(match field {
+            F::Df0WriteProtect => 0,
+            F::Df1WriteProtect => 1,
+            F::Df2WriteProtect => 2,
+            F::Df3WriteProtect => 3,
+            _ => return None,
+        })
+    }
+
+    /// The `DfNBridge` tick box for a bay.
+    pub fn drive_bridge_field(idx: usize) -> LauncherField {
+        match idx {
+            0 => F::Df0Bridge,
+            1 => F::Df1Bridge,
+            2 => F::Df2Bridge,
+            _ => F::Df3Bridge,
+        }
+    }
+
+    /// Whether this bay uses a real drive rather than an image.
+    pub fn drive_bridged(&self, idx: usize) -> bool {
+        self.df_bridge.get(idx).is_some_and(Option::is_some)
+    }
+
+    /// Turn a bay over to a physical drive, or back to images. Switching to a
+    /// bridge clears the image: the disk in the drive is the media now.
+    ///
+    /// Without the feature there is no such thing as a bridged bay -- no tick
+    /// box offers one, the config file's keys are ignored -- and this refuses
+    /// as well, so no path can leave a bay in a state the build cannot honour.
+    #[cfg(feature = "floppybridge")]
+    pub fn set_drive_bridged(&mut self, idx: usize, on: bool) {
+        if idx >= self.df_bridge.len() || self.drive_bridged(idx) == on {
+            return;
+        }
+        if on {
+            self.df_playlists[idx].clear();
+            self.df_bridge[idx] = Some(FloppyBridgeConfig::default());
+            // Look again now: this is the moment the user expects to be told
+            // whether there is anything on the other end.
+            self.bridge_status = bridge_status();
+            // Wire the bay in, as choosing an image would.
+            self.floppy_drives = self.floppy_drives.max(idx as u8 + 1);
+        } else {
+            self.df_bridge[idx] = None;
+        }
+    }
+
+    #[cfg(not(feature = "floppybridge"))]
+    pub fn set_drive_bridged(&mut self, _idx: usize, _on: bool) {}
+
+    /// The interface a bridged bay is set to use, for its media row. Naming one
+    /// that is not there would suggest the bay is ready to run when it is not,
+    /// so what is missing is named instead -- and which of the two it is
+    /// decides whether the fix is installing software or plugging in hardware.
+    pub fn drive_bridge_label(&self, idx: usize) -> String {
+        let Some(cfg) = self.df_bridge.get(idx).and_then(Option::as_ref) else {
+            return "(none)".to_string();
+        };
+        match self.bridge_status {
+            BridgeStatus::NoInterface => "None".to_string(),
+            BridgeStatus::Attached => cfg.driver.label().to_string(),
+        }
+    }
+
+    /// What the library can see, for the FloppyBridge page's heading.
+    pub fn bridge_status(&self) -> BridgeStatus {
+        self.bridge_status
+    }
+
+    /// Which bay the settings page is editing.
+    pub fn bridge_edit_drive(&self) -> usize {
+        self.bridge_edit_drive
+    }
+
+    pub fn set_bridge_edit_drive(&mut self, idx: usize) {
+        self.bridge_edit_drive = idx.min(3);
+    }
+
+    /// The settings being shown on the FloppyBridge page.
+    fn bridge_edit(&self) -> Option<&FloppyBridgeConfig> {
+        self.df_bridge[self.bridge_edit_drive].as_ref()
+    }
+
+    fn bridge_edit_mut(&mut self) -> Option<&mut FloppyBridgeConfig> {
+        self.df_bridge[self.bridge_edit_drive].as_mut()
+    }
+
+    /// Whether the interface this page is editing honours one of the library's
+    /// optional settings, as that driver itself reports.
+    ///
+    /// Each driver advertises what it supports, and they differ: a Greaseweazle
+    /// takes a drive-select cable and smart speed, a DrawBridge answers to a
+    /// different set. Offering a switch the hardware ignores is how a user ends
+    /// up believing they changed something, so the ones it does not honour are
+    /// greyed with the interface's name against them.
+    #[cfg(feature = "floppybridge")]
+    fn bridge_driver_supports(&self, option: u32) -> bool {
+        let Some(cfg) = self.bridge_edit() else {
+            return false;
+        };
+        let token = cfg.driver.match_token();
+        // The bridge is linked in, so it always has drivers to describe. If it
+        // ever answers with none there is nothing to ask, and leaving every row
+        // live is better than greying out a page the user cannot then fix.
+        let drivers = crate::floppybridge::drivers();
+        if drivers.is_empty() {
+            return true;
+        }
+        drivers
+            .iter()
+            .find(|d| {
+                d.name
+                    .to_ascii_lowercase()
+                    .replace([' ', '-', '_'], "")
+                    .contains(token)
+            })
+            .is_none_or(|d| d.supports(option))
+    }
+
+    /// Serial ports the installed library can see, with "Automatic" first --
+    /// the default, and what every current interface supports. The names are
+    /// the host's own, so `/dev/cu.usbmodem101` on macOS, `/dev/ttyACM0` on
+    /// Linux, `COM3` on Windows.
+    fn bridge_port_options(&self) -> Vec<Option<String>> {
+        #[cfg(feature = "floppybridge")]
+        {
+            std::iter::once(None)
+                .chain(crate::floppybridge::com_ports().into_iter().map(Some))
+                .collect()
+        }
+        #[cfg(not(feature = "floppybridge"))]
+        {
+            vec![None]
+        }
     }
 
     pub fn zorro_boards(&self) -> &[ZorroBoardSetup] {
@@ -3502,6 +3947,131 @@ fn pacing_name(pacing: PacingBudget) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The interfaces genuinely differ in what they honour, and the page says
+    /// so: a DrawBridge has no drive-select line on its cable, a Greaseweazle
+    /// does. Only meaningful with the library installed -- without it there is
+    /// nothing to ask, and every row deliberately stays live.
+    #[cfg(feature = "floppybridge")]
+    #[test]
+    fn bridge_rows_grey_what_the_interface_does_not_support() {
+        if crate::floppybridge::drivers().is_empty() {
+            return;
+        }
+        let mut setup = MachineSetup::default();
+        setup.set_drive_bridged(0, true);
+        setup.set_bridge_edit_drive(0);
+
+        for (driver, cable_greyed) in [
+            (crate::config::BridgeDriver::Greaseweazle, false),
+            (crate::config::BridgeDriver::DrawBridge, true),
+        ] {
+            setup.df_bridge[0].as_mut().expect("bridged").driver = driver;
+            assert_eq!(
+                setup.disabled_reason(F::BridgeCable).is_some(),
+                cable_greyed,
+                "drive select on {driver:?}"
+            );
+            // Every interface here talks over a serial port and can auto-cache.
+            assert!(setup.disabled_reason(F::BridgePort).is_none());
+            assert!(setup.disabled_reason(F::BridgeAutoCache).is_none());
+        }
+    }
+
+    /// A bridged bay only names its interface when one is actually attached:
+    /// with nothing plugged in the media row says so, whatever the bay is
+    /// configured for.
+    // A build without the feature has no bridges to configure: the keys are
+    // read and ignored, so there is nothing here to assert.
+    #[cfg(feature = "floppybridge")]
+    #[test]
+    fn a_bridged_bay_names_its_interface_only_when_one_is_attached() {
+        let mut setup = MachineSetup::default();
+        setup.set_drive_bridged(0, true);
+
+        setup.bridge_status = BridgeStatus::Attached;
+        assert_eq!(
+            setup.drive_bridge_label(0),
+            crate::config::BridgeDriver::default().label()
+        );
+
+        setup.bridge_status = BridgeStatus::NoInterface;
+        assert_eq!(setup.drive_bridge_label(0), "None");
+
+        // An image-backed bay is not a bridge at all, connected or not.
+        assert_eq!(setup.drive_bridge_label(1), "(none)");
+    }
+
+    /// The write-protect box governs a real drive as well as an image, and it
+    /// starts ticked: a bay handed a physical disk must not come up writable
+    /// because nobody said otherwise.
+    #[cfg(feature = "floppybridge")]
+    #[test]
+    fn dropping_a_drive_releases_the_physical_one_it_was_holding() {
+        let mut setup = MachineSetup {
+            floppy_drives: 2,
+            ..Default::default()
+        };
+        setup.set_drive_bridged(1, true);
+        assert!(setup.df_bridge[1].is_some(), "df1 bridged");
+
+        // Take the machine back to one drive. df1's row goes off the page, so
+        // if it kept the bridge nothing would explain why the interface was
+        // busy the next time a bay asked for it.
+        setup.cycle(F::FloppyDrives, false);
+        assert_eq!(setup.floppy_drives, 1);
+        assert!(setup.df_bridge[1].is_none(), "df1 released the drive");
+
+        // df0 is still fitted, so anything set on it stays put.
+        setup.set_drive_bridged(0, true);
+        setup.floppy_drives = 2;
+        setup.cycle(F::FloppyDrives, false);
+        assert!(setup.df_bridge[0].is_some(), "df0 kept its bridge");
+    }
+
+    // A build without the feature has no bridges to configure: the keys are
+    // read and ignored, so there is nothing here to assert.
+    #[cfg(feature = "floppybridge")]
+    #[test]
+    fn write_protect_governs_a_bridged_bay_and_survives_a_round_trip() {
+        let mut setup = MachineSetup::default();
+        setup.set_drive_bridged(0, true);
+        assert!(
+            setup.toggle_value(F::Df0WriteProtect),
+            "protected by default"
+        );
+
+        let cfg = setup.build_config().expect("valid");
+        let bridge = cfg.floppy.bridges[0].as_ref().expect("bridged");
+        assert!(bridge.write_protected);
+
+        // Untick it, and both the emitted config and the bay's own copy follow.
+        setup.toggle(F::Df0WriteProtect);
+        assert!(!setup.toggle_value(F::Df0WriteProtect));
+        assert!(
+            !setup.df_bridge[0]
+                .as_ref()
+                .expect("bridged")
+                .write_protected
+        );
+        let cfg = setup.build_config().expect("valid");
+        assert!(
+            !cfg.floppy.bridges[0]
+                .as_ref()
+                .expect("bridged")
+                .write_protected
+        );
+
+        // And it comes back the same way, rather than reverting to protected.
+        let reloaded = MachineSetup::from_raw(&setup.to_raw()).expect("round trip");
+        assert!(!reloaded.toggle_value(F::Df0WriteProtect));
+        assert!(
+            !reloaded.df_bridge[0]
+                .as_ref()
+                .expect("bridged")
+                .write_protected
+        );
+    }
 
     fn write_board_manifest() -> PathBuf {
         let path = std::env::temp_dir().join(format!(

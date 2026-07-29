@@ -1165,6 +1165,10 @@ pub enum UiControl {
     LauncherDriveBootpriEdit(LauncherField),
     /// Boot Priority page: toggle a drive's Bootable box.
     LauncherDriveBootToggle(LauncherField),
+    /// Floppy tab: turn a bay over to a real drive, or back to images.
+    LauncherDriveBridgeToggle(usize),
+    /// Floppy tab: open the FloppyBridge settings for a bay.
+    LauncherBridgeConfigure(usize),
     /// Configuration screen: add a Zorro metadata board file.
     LauncherZorroAdd,
     /// Configuration screen: remove the Zorro board at this index.
@@ -4776,6 +4780,65 @@ fn launcher_bootable_box(cell: Rect) -> Rect {
 
 const BOOTABLE_LABEL: &str = "Bootable";
 
+/// The heading above the FloppyBridge settings: upstream's own name for the
+/// library, and which version of it is installed. Nothing else in the launcher
+/// says which build is in use, and it is the first thing worth knowing when a
+/// drive misbehaves.
+fn bridge_library_heading() -> String {
+    #[cfg(feature = "floppybridge")]
+    if let Some((major, minor)) = crate::floppybridge::version() {
+        return format!("FloppyDriveBridge v{major}.{minor}:");
+    }
+    "FloppyDriveBridge:".to_string()
+}
+
+const WRITE_PROTECT_LABEL: &str = "Write protect:";
+const PHYSICAL_DRIVE_LABEL: &str = "Physical drive:";
+
+/// The two tick-box cells under a floppy drive: write protect on the left,
+/// the real-drive switch level with the value column so the eye can run down
+/// the tab.
+fn launcher_floppy_flag_rects(rect: Rect, row_y: usize) -> (Rect, Rect) {
+    let y = row_y + 2;
+    let protect = Rect {
+        // Indented to sit under the media row's label, which carries its own
+        // two leading spaces, so the drive's two lines start together.
+        x: launcher_pane_x(rect) + 2 * font::GLYPH_W,
+        y,
+        w: WRITE_PROTECT_LABEL.len() * font::GLYPH_W + 8 + 12,
+        h: LAUNCH_CONTROL_H,
+    };
+    let bridge = Rect {
+        x: launcher_control_x(rect) + LAUNCH_ARROW_W,
+        y,
+        w: PHYSICAL_DRIVE_LABEL.len() * font::GLYPH_W + 8 + 12,
+        h: LAUNCH_CONTROL_H,
+    };
+    (protect, bridge)
+}
+
+/// The tick box inside one of those cells, after its label.
+fn launcher_flag_box(cell: Rect, label: &str) -> Rect {
+    Rect {
+        x: cell.x + label.len() * font::GLYPH_W + 8,
+        y: cell.y + (cell.h.saturating_sub(12)) / 2,
+        w: 12,
+        h: 12,
+    }
+}
+
+/// The Configure button on a bridged drive's media row, where Browse sits on
+/// an image-backed one.
+fn launcher_bridge_configure_rect(rect: Rect, row_y: usize) -> Rect {
+    let (browse, clear) = launcher_path_rects(rect, row_y);
+    Rect {
+        x: browse.x,
+        y: browse.y,
+        w: browse.w + 4 + clear.w,
+        h: browse.h,
+    }
+}
+
 /// (Browse, Clear) buttons for a path row, just after the fixed-width value
 /// column ([`LAUNCH_PATH_VALUE_W`]) rather than out at the panel's right edge.
 fn launcher_path_rects(rect: Rect, row_y: usize) -> (Rect, Rect) {
@@ -5054,6 +5117,40 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                         return Some(UiControl::LauncherClear(r.field));
                     }
                 }
+                RowKind::FloppyMedia => {
+                    let drive = launcher::MachineSetup::drive_image_bay(r.field);
+                    if let Some(bay) = drive {
+                        if state.setup.drive_bridged(bay) {
+                            // Bridged: one Configure button where Browse and
+                            // Clear would be. There is no image to pick.
+                            if launcher_bridge_configure_rect(rect, row_y).contains(pos) {
+                                return Some(UiControl::LauncherBridgeConfigure(bay));
+                            }
+                            continue;
+                        }
+                    }
+                    let (browse, clear) = launcher_path_rects(rect, row_y);
+                    if browse.contains(pos) {
+                        return Some(UiControl::LauncherBrowse(r.field));
+                    }
+                    if clear.contains(pos) {
+                        return Some(UiControl::LauncherClear(r.field));
+                    }
+                }
+                RowKind::FloppyFlags => {
+                    let (protect, _bridge) = launcher_floppy_flag_rects(rect, row_y);
+                    if protect.contains(pos) {
+                        return Some(UiControl::LauncherToggle(r.field));
+                    }
+                    // A build without the feature has no physical-drive box to
+                    // hit: the whole thing is absent rather than inert.
+                    #[cfg(feature = "floppybridge")]
+                    if _bridge.contains(pos) {
+                        if let Some(bay) = launcher::MachineSetup::drive_protect_bay(r.field) {
+                            return Some(UiControl::LauncherDriveBridgeToggle(bay));
+                        }
+                    }
+                }
                 RowKind::Drive => {
                     let (browse, clear) = launcher_path_rects(rect, row_y);
                     if browse.contains(pos) {
@@ -5216,11 +5313,20 @@ fn draw_launcher_row(
     // A section heading is a greyed, non-interactive label grouping the rows
     // below it (the Serial:/Parallel: sections of the I/O Ports tab).
     if r.kind == RowKind::SectionHeader {
+        // The FloppyBridge page's heading names the installed library, so its
+        // text is not the one in the row table.
+        let heading;
+        let text = if r.field == LauncherField::BridgeLibrary {
+            heading = bridge_library_heading();
+            &heading
+        } else {
+            r.label
+        };
         draw_panel_text(
             frame,
             launcher_pane_x(rect),
             row_y + 8,
-            r.label,
+            text,
             PANEL_TEXT_DIM,
             1,
             scale,
@@ -5244,20 +5350,36 @@ fn draw_launcher_row(
     } else {
         PANEL_TEXT_DIM
     };
+    // A bay on a real drive says so in place of "Disk image": there is no
+    // image, and the row's value is the interface rather than a file.
+    let label = if r.kind == RowKind::FloppyMedia
+        && launcher::MachineSetup::drive_image_bay(r.field)
+            .is_some_and(|bay| setup.drive_bridged(bay))
+    {
+        // Matches the tick box that turned it on, and fits the label column
+        // where the full "FloppyDriveBridge" would run into the value. Which
+        // version of the library is installed is named on the Configure page,
+        // where there is room for it.
+        "  FloppyBridge"
+    } else {
+        r.label
+    };
     draw_panel_text(
         frame,
         launcher_pane_x(rect),
         row_y + 8,
-        r.label,
+        label,
         label_color,
         1,
         scale,
     );
     // Greyed: explain why instead of drawing controls (e.g. "needs 32-bit CPU").
-    // The shaping rows are the exception -- channel mode, separation and mouse
-    // sensitivity are merely inapplicable (audio disabled, separation in mono,
-    // or no mouse in either port), so the greyed label alone says enough and
-    // column 2 is left blank.
+    // Some rows are the exception. The shaping rows -- channel mode,
+    // separation, mouse sensitivity -- are merely inapplicable (audio
+    // disabled, separation in mono, no mouse in either port), and a bridge
+    // setting the chosen interface does not implement is not a thing to
+    // explain either: the greyed label alone says enough, so column 2 is left
+    // blank rather than repeating "not on this interface" down the page.
     let blank_when_greyed = matches!(
         r.field,
         LauncherField::AudioChannelMode
@@ -5265,6 +5387,10 @@ fn draw_launcher_row(
             | LauncherField::MouseSensitivity
             | LauncherField::MouseCapture
             | LauncherField::ShaderStrength
+            | LauncherField::BridgePort
+            | LauncherField::BridgeCable
+            | LauncherField::BridgeSmartSpeed
+            | LauncherField::BridgeAutoCache
     );
     if let Some(reason) = reason {
         if !blank_when_greyed {
@@ -5405,6 +5531,97 @@ fn draw_launcher_row(
                     ),
                     PANEL_TEXT_HILIGHT,
                     scale,
+                );
+            }
+        }
+        RowKind::FloppyMedia => {
+            let bay = launcher::MachineSetup::drive_image_bay(r.field);
+            let bridged = bay.is_some_and(|b| setup.drive_bridged(b));
+            let value_x = launcher_control_x(rect);
+            let (browse, clear) = launcher_path_rects(rect, row_y);
+            if bridged {
+                let bay = bay.expect("bridged implies a bay");
+                let text = setup.drive_bridge_label(bay);
+                draw_panel_text(frame, value_x, browse.y + 6, &text, PANEL_TEXT, 1, scale);
+                let button = launcher_bridge_configure_rect(rect, row_y);
+                draw_text_button(
+                    frame,
+                    button,
+                    "Configure",
+                    true,
+                    hover == Some(UiControl::LauncherBridgeConfigure(bay)),
+                    scale,
+                );
+            } else {
+                let avail = browse.x.saturating_sub(value_x + 8);
+                let text = truncate_to_width(&setup.value_label(r.field), avail);
+                draw_panel_text(frame, value_x, browse.y + 6, &text, PANEL_TEXT, 1, scale);
+                draw_text_button(
+                    frame,
+                    browse,
+                    "Browse",
+                    true,
+                    hover == Some(UiControl::LauncherBrowse(r.field)),
+                    scale,
+                );
+                draw_text_button(
+                    frame,
+                    clear,
+                    "Clear",
+                    true,
+                    hover == Some(UiControl::LauncherClear(r.field)),
+                    scale,
+                );
+            }
+        }
+        RowKind::FloppyFlags => {
+            #[cfg_attr(not(feature = "floppybridge"), allow(unused_variables))]
+            let bay = launcher::MachineSetup::drive_protect_bay(r.field);
+            #[cfg_attr(not(feature = "floppybridge"), allow(unused_variables))]
+            let (protect_cell, bridge_cell) = launcher_floppy_flag_rects(rect, row_y);
+            let mut tick = |cell: Rect, label: &str, on: bool, hot: bool| {
+                draw_panel_text(frame, cell.x, cell.y + 6, label, PANEL_TEXT, 1, scale);
+                let box_rect = launcher_flag_box(cell, label);
+                fill_rect(
+                    frame,
+                    scale_rect(box_rect, scale),
+                    if hot { BUTTON_FACE_HOVER } else { ENTRY_BG },
+                    scale,
+                );
+                draw_outline(frame, box_rect, BUTTON_EDGE_LIGHT, scale);
+                if on {
+                    fill_rect(
+                        frame,
+                        scale_rect(
+                            Rect {
+                                x: box_rect.x + 3,
+                                y: box_rect.y + 3,
+                                w: 6,
+                                h: 6,
+                            },
+                            scale,
+                        ),
+                        PANEL_TEXT_HILIGHT,
+                        scale,
+                    );
+                }
+            };
+            tick(
+                protect_cell,
+                WRITE_PROTECT_LABEL,
+                setup.toggle_value(r.field),
+                hover == Some(UiControl::LauncherToggle(r.field)),
+            );
+            // Only drawn where a physical drive can actually be attached; a
+            // build without the feature leaves the write-protect box alone on
+            // the row rather than offering a switch that does nothing.
+            #[cfg(feature = "floppybridge")]
+            if let Some(bay) = bay {
+                tick(
+                    bridge_cell,
+                    PHYSICAL_DRIVE_LABEL,
+                    setup.drive_bridged(bay),
+                    hover == Some(UiControl::LauncherDriveBridgeToggle(bay)),
                 );
             }
         }
@@ -9147,5 +9364,62 @@ mod tests {
         };
         draw(&mut frame, scale, &ui, None, None, false, false, labels());
         save(&frame, "launcher-floppy");
+
+        // The Floppy tab with DF1 turned over to a real drive: its media row
+        // shows the interface and a Configure button, and its Physical drive box
+        // is ticked while DF0 stays an ordinary image drive.
+        let mut frame = vec![0u8; w * h * 4];
+        let mut setup = launcher::MachineSetup::default();
+        while setup.value_label(LauncherField::FloppyDrives) != "2" {
+            setup.cycle(LauncherField::FloppyDrives, true);
+        }
+        setup.set_path(
+            LauncherField::Df0Image,
+            std::path::PathBuf::from("workbench.adf"),
+        );
+        setup.set_drive_bridged(1, true);
+        let mut state = LauncherState::new(setup);
+        state.tab = LauncherTab::Floppy;
+        let ui = UiState {
+            menu_open: false,
+            menu_scroll: 0,
+            panel: Some(Panel::Launcher(Box::new(state))),
+        };
+        draw(&mut frame, scale, &ui, None, None, false, false, labels());
+        save(&frame, "launcher-floppy-bridge");
+
+        // The FloppyBridge settings page reached from Configure, on an
+        // interface with no drive-select line: that row greys, and its value
+        // column stays empty rather than explaining itself. Only exists in a
+        // build with the feature -- without it no bay can be bridged, so there
+        // is no such page to draw.
+        #[cfg(feature = "floppybridge")]
+        {
+            let mut frame = vec![0u8; w * h * 4];
+            let mut setup = launcher::MachineSetup::default();
+            setup.set_drive_bridged(0, true);
+            setup.set_bridge_edit_drive(0);
+            // Bounded: cycling is a fixed-length ring, so a value that never
+            // arrives is a bug to report, not a reason to spin forever.
+            let interfaces = 8;
+            let mut found = false;
+            for _ in 0..interfaces {
+                if setup.value_label(LauncherField::BridgeDevice) == "DrawBridge" {
+                    found = true;
+                    break;
+                }
+                setup.cycle(LauncherField::BridgeDevice, true);
+            }
+            assert!(found, "the DrawBridge interface is one of the choices");
+            let mut state = LauncherState::new(setup);
+            state.tab = LauncherTab::FloppyBridge;
+            let ui = UiState {
+                menu_open: false,
+                menu_scroll: 0,
+                panel: Some(Panel::Launcher(Box::new(state))),
+            };
+            draw(&mut frame, scale, &ui, None, None, false, false, labels());
+            save(&frame, "launcher-floppybridge-page");
+        }
     }
 }
