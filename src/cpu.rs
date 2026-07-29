@@ -1349,7 +1349,7 @@ impl M68kMachine {
         let dcache: Option<Box<crate::cache::CpuCache>> = deserialize_component(r, "dcache")?;
         let mut bus: Bus = deserialize_component(r, "bus")?;
 
-        bus.adopt_host_resources(&mut self.bus.bus);
+        bus.adopt_host_resources(&mut self.bus.bus)?;
         bus.adopt_ui_debug_state(&mut self.bus.bus);
         bus.reset_transient_video_after_state_load();
         bus.reset_transient_diagnostics_after_state_load();

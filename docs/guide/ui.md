@@ -324,9 +324,10 @@ The layout is:
   beneath it: serial mode and MIDI endpoints; the
   parallel device -- None, Printer, or Sampler -- with, for the printer, its
   capture output file, or for the sampler, its host audio input and input gain;
-  and the A2065 Ethernet board -- Not fitted, Isolated, Loopback, or NAT, with
-  a warning when NAT is selected, since its host-clocked traffic makes input
-  recordings and save-state replays non-reproducible while it flows),
+  and the A2065 Ethernet board -- Not fitted, Isolated, Loopback, NAT, or
+  Bridged; Bridged adds a host-adapter row. NAT and Bridged show a warning
+  because host-clocked traffic makes input recordings and save-state replays
+  non-reproducible while it flows),
   *Zorro* (extra autoconfig boards by metadata file, with a config panel for a
   WASM plugin board's declared options),
   and *A/V & Emu*, split by a row of category buttons at the top into

@@ -71,7 +71,8 @@ profile in a config file.
 The audio, serial, parallel, and network surface has matching per-run flags
 too -- `--audio-device`, `--audio-channel-mode`, `--audio-filter`,
 `--audio-stereo-separation`, `--serial`, `--midi-in`, `--midi-out`,
-`--parallel`, `--sampler-audio-input`, `--sampler-input-gain`, `--a2065-net` --
+`--parallel`, `--sampler-audio-input`, `--sampler-input-gain`, `--a2065-net`,
+`--a2065-interface` --
 described with their `[audio]`, `[serial]`, `[parallel]`, and `[a2065]` keys
 below.
 
@@ -1290,7 +1291,8 @@ assigns addresses.
 
 ```toml
 [a2065]
-net = "nat"   # or "loopback"; "none" for an isolated NIC
+net = "nat"   # or "bridge", "loopback"; "none" for an isolated NIC
+# interface = "en0"  # required for "bridge"
 ```
 
 Fits a Commodore A2065 Ethernet board (Am7990 LANCE) on the Zorro chain;
@@ -1303,6 +1305,16 @@ host network backend:
   macOS, and Windows. Configure the guest's TCP/IP stack with IP
   `10.0.2.15`, netmask `255.255.255.0`, gateway `10.0.2.2`, DNS `10.0.2.3`
   (or let it BOOTP/DHCP). Outbound only, IPv4 only.
+- `"bridge"` -- attaches complete Ethernet frames directly to `interface`, so
+  the Amiga is a separate station on the physical LAN and can accept inbound
+  connections from LAN peers. Use `copperline --list-net-interfaces` for exact
+  identifiers, or `--a2065-interface NAME` (which implies the bridge backend).
+  Configure the guest by DHCP from the real LAN or with an address appropriate
+  to that LAN. The guest can reach peers and the router; communication with the
+  host's own IP is adapter/OS-dependent and is not guaranteed. Frames keep the
+  Amiga's source MAC, so Wi-Fi is best-effort: many access points reject a
+  second source MAC behind one wireless station. Copperline reports adapter,
+  driver, and permission failures at startup instead of falling back to NAT.
 - `"loopback"` -- echoes transmitted frames back (self-contained, useful
   for driver bring-up).
 - `"none"` -- the NIC is fitted but isolated.
@@ -1310,8 +1322,10 @@ host network backend:
 Omit the section entirely for no board. Note that host networking is
 inherently non-deterministic: inbound frames arrive on the host's
 schedule, not the emulated clock, so a NIC board breaks byte-identical
-replay and save-state determinism while traffic flows. See [](../zorro)
-for the board details and the NAT's limitations.
+replay and save-state determinism while traffic flows. A save state stores the
+bridge adapter identifier and must be restored on a host where that adapter can
+be opened. See [](../zorro) for board details, platform bridge setup, and the
+NAT's limitations.
 
 ## `[rtg]` -- RTG graphics card
 

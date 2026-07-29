@@ -37,6 +37,11 @@ finish-args:
   - --socket=wayland
   - --socket=fallback-x11
   - --share=ipc
+  # Bridged Ethernet uses only a host-created, per-user AF_PACKET descriptor
+  # passed over this exact runtime socket. The sandbox gets no raw device and
+  # no broad /run access; --share=network lets it use the passed descriptor.
+  - --share=network
+  - --filesystem=xdg-run/copperline-net-helper
   # GPU acceleration for the wgpu/pixels render path.
   - --device=dri
   # Game controllers (gilrs reads /dev/input via udev).

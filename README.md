@@ -334,7 +334,7 @@ release needs resolved first. Release steps for every channel are in
 | Floppy / ADF / DMS / SCP | DF0-DF3 standard DD ADF read/write, read-only ADZ/DMS, UAE extended ADF, initial read-only SCP flux import, track-timed disk DMA, CIA drive lines, index FLAG, DSKLEN/DSKBYTR/DSKSYNC/DSKDAT, per-drive multi-disk playlists with a swap key. |
 | Hard disks | Gayle IDE (A600/A1200) and A4000 motherboard IDE; SCSI via the A2091 (Zorro II DMAC + WD33C93A), A4091 (Zorro III 53C710 with SCRIPTS), or A3000 Super DMAC; RDB HDFs, bare partition hardfiles, and host-directory volumes. |
 | Host filesystem | `[[filesys]]` mounts serve host directories live as AmigaDOS volumes (read/write, `.uaem` attribute sidecars, Latin-1 name mapping). |
-| Expansion | Zorro II/III autoconfig chain, TOML-described RAM boards, WASM plugin boards (registers/interrupts/DMA in a sandboxed module), A2065 Ethernet (Am7990 LANCE) with host network backends. |
+| Expansion | Zorro II/III autoconfig chain, TOML-described RAM boards, WASM plugin boards (registers/interrupts/DMA in a sandboxed module), A2065 Ethernet (Am7990 LANCE) with loopback, userspace NAT, and direct host-adapter bridge backends. |
 | Agnus VPOSR / VHPOSR | Beam counters advanced per colour clock; PAL and NTSC timing (including NTSC long/short lines). |
 | Agnus Copper | Beam-scheduled OCS Copper with COP1/COP2 jumps, WAIT, SKIP, DMAEN/COPEN gating, and chip-bus grants. |
 | Agnus blitter | Scheduled per-slot engine: normal/line/fill modes, hardware per-word channel bus sequences (including the area-fill idle C slot), BBUSY/BZERO, BLTPRI "nasty" vs CPU starvation-yield arbitration, blit-done IRQ. |

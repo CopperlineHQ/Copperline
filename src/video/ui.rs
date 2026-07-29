@@ -5904,9 +5904,9 @@ fn draw_launcher(
             );
         }
     }
-    // The NAT backend delivers inbound traffic on the host's schedule, not
-    // the emulated clock, so warn that runs stop being reproducible the
-    // moment packets flow (loopback and an isolated NIC stay deterministic).
+    // NAT and bridged backends deliver inbound traffic on the host's schedule,
+    // so warn that runs stop being reproducible the moment packets flow
+    // (loopback and an isolated NIC stay deterministic).
     if state.tab == LauncherTab::IoPorts && setup.ethernet_breaks_determinism() {
         let note_top = launcher_row_y(
             rect,
@@ -5922,7 +5922,7 @@ fn draw_launcher(
             frame,
             launcher_pane_x(rect),
             note_top,
-            "Warning: NAT networking is non-deterministic.",
+            "Warning: host networking is non-deterministic.",
             PANEL_TEXT_ACCENT,
             1,
             scale,

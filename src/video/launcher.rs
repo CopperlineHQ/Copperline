@@ -379,6 +379,8 @@ pub enum LauncherField {
     /// The A2065 Ethernet board: absent, or fitted with a chosen host
     /// backend (isolated / loopback / NAT).
     Ethernet,
+    /// Host adapter used while the A2065 backend is bridged.
+    EthernetInterface,
     /// Inert field for a non-interactive [`RowKind::SectionHeader`] row.
     SectionHeader,
     // A/V and emulation
@@ -631,7 +633,10 @@ const PARALLEL_ROWS_SAMPLER: [Row; 3] = [
     row(F::SamplerInput, "  Audio input", Cycle),
     row(F::SamplerGain, "  Input gain", Cycle),
 ];
-const ETHERNET_ROWS: [Row; 1] = [row(F::Ethernet, "  A2065 board", Cycle)];
+const ETHERNET_ROWS: [Row; 2] = [
+    row(F::Ethernet, "  A2065 board", Cycle),
+    row(F::EthernetInterface, "  Host adapter", Cycle),
+];
 // The A/V & Emu tab is split into three categories switched via the top nav row.
 // The Video category also carries the CRT-shader controls (a picture setting).
 const VIDEO_ROWS: [Row; 10] = [
@@ -906,15 +911,6 @@ const SERIAL_MODES: [SerialMode; 6] = [
     SerialMode::TcpConnect,
     SerialMode::Pty,
 ];
-// `None` = no A2065 fitted; `Some(NetConfig::None)` fits the board with an
-// isolated NIC (the guest sees the hardware but no traffic ever arrives).
-const ETHERNET_CHOICES: [Option<NetConfig>; 4] = [
-    None,
-    Some(NetConfig::None),
-    Some(NetConfig::Loopback),
-    Some(NetConfig::Nat),
-];
-
 /// Stereo-separation presets the picker steps through (percent), ascending so
 /// the right arrow steps up (wrapping 100 -> 0) and the left arrow steps down.
 /// The config/CLI accept any 0-100; an off-grid value snaps to the nearest here.
@@ -1045,6 +1041,8 @@ pub struct MachineSetup {
     /// section: `None` = not fitted, `Some(backend)` fits the board with that
     /// host backend (`NetConfig::None` = fitted but isolated).
     a2065_net: Option<NetConfig>,
+    /// Currently visible host bridge adapters: stable identifier + label.
+    bridge_interfaces: Vec<(String, String)>,
     /// Input device names for the sampler picker: filled when the screen opens
     /// and re-read each time the field is cycled, so a reconnected device
     /// appears.
@@ -1205,7 +1203,8 @@ impl MachineSetup {
             parallel_output: cfg.parallel.printer_output.clone(),
             sampler_input: cfg.parallel.sampler_input.clone(),
             sampler_gain_db: cfg.parallel.sampler_gain_db,
-            a2065_net: cfg.a2065_net,
+            a2065_net: cfg.a2065_net.clone(),
+            bridge_interfaces: Vec::new(),
             // Filled by refresh_sampler_inputs on open, like the audio devices.
             sampler_input_devices: Vec::new(),
             // Left empty here so config construction stays side-effect free; the
@@ -1298,11 +1297,15 @@ impl MachineSetup {
     /// schedule rather than the emulated clock, breaking byte-identical
     /// replay (the I/O Ports tab shows a warning). The loopback backend
     /// echoes frames deterministically and an isolated or absent NIC never
-    /// sees traffic, so only NAT qualifies -- and only in a build that can
-    /// actually bring the NAT up (a loaded config can still name it in one
-    /// that cannot, where `make_backend` leaves the NIC isolated).
+    /// sees traffic, so NAT and a direct adapter bridge qualify.
     pub fn ethernet_breaks_determinism(&self) -> bool {
-        self.a2065_net == Some(NetConfig::Nat) && crate::net::NAT_AVAILABLE
+        matches!(
+            self.a2065_net.as_ref(),
+            Some(NetConfig::Nat) if crate::net::NAT_AVAILABLE
+        ) || matches!(
+            self.a2065_net.as_ref(),
+            Some(NetConfig::Bridge { .. }) if crate::net::BRIDGE_AVAILABLE
+        )
     }
 
     /// Re-read every host device list (MIDI endpoints + audio outputs + sampler
@@ -1314,6 +1317,22 @@ impl MachineSetup {
         self.refresh_midi_endpoints();
         self.refresh_audio_devices();
         self.refresh_sampler_inputs();
+        self.refresh_bridge_interfaces();
+    }
+
+    fn refresh_bridge_interfaces(&mut self) {
+        self.bridge_interfaces.clear();
+        #[cfg(all(feature = "net-bridge", not(target_arch = "wasm32")))]
+        match crate::net::bridge::list_interfaces() {
+            Ok(interfaces) => {
+                self.bridge_interfaces = interfaces
+                    .into_iter()
+                    .filter(|interface| !interface.loopback)
+                    .map(|interface| (interface.name.clone(), interface.label()))
+                    .collect();
+            }
+            Err(error) => log::warn!("launcher: cannot enumerate bridge adapters: {error:#}"),
+        }
     }
 
     /// The bare-profile config this setup is compared against when emitting
@@ -1613,7 +1632,12 @@ impl MachineSetup {
         // emitted whenever it is on (absent key = not fitted).
         raw.a2065.net = self
             .a2065_net
+            .as_ref()
             .map(|n| crate::net::net_config_name(n).to_string());
+        raw.a2065.interface = match self.a2065_net.as_ref() {
+            Some(NetConfig::Bridge { interface }) => Some(interface.clone()),
+            _ => None,
+        };
         // The Audio output picker is one of default / a named device / Disabled.
         // A named device sets output_device; Disabled sets output_enabled=false
         // (the resolved default is true, so it is omitted otherwise).
@@ -1790,6 +1814,9 @@ impl MachineSetup {
             F::Df1Image | F::Df1WriteProtect => self.floppy_drives < 2,
             F::Df2Image | F::Df2WriteProtect => self.floppy_drives < 3,
             F::Df3Image | F::Df3WriteProtect => self.floppy_drives < 4,
+            F::EthernetInterface => {
+                !matches!(self.a2065_net.as_ref(), Some(NetConfig::Bridge { .. }))
+            }
             _ => false,
         }
     }
@@ -2192,11 +2219,21 @@ impl MachineSetup {
                 .clone()
                 .unwrap_or_else(|| "Default".to_string()),
             F::SamplerGain => sampler_gain_label(self.sampler_gain_db),
-            F::Ethernet => match self.a2065_net {
+            F::Ethernet => match self.a2065_net.as_ref() {
                 None => "Not fitted".to_string(),
                 Some(NetConfig::None) => "Isolated".to_string(),
                 Some(NetConfig::Loopback) => "Loopback".to_string(),
                 Some(NetConfig::Nat) => "NAT".to_string(),
+                Some(NetConfig::Bridge { .. }) => "Bridged".to_string(),
+            },
+            F::EthernetInterface => match self.a2065_net.as_ref() {
+                Some(NetConfig::Bridge { interface }) => self
+                    .bridge_interfaces
+                    .iter()
+                    .find(|(name, _)| name == interface)
+                    .map(|(_, label)| label.clone())
+                    .unwrap_or_else(|| format!("{interface} (unavailable)")),
+                _ => "—".to_string(),
             },
             F::AudioDevice => self.audio_output.label().to_string(),
             F::AudioChannelMode => match self.audio_channel_mode {
@@ -2453,13 +2490,48 @@ impl MachineSetup {
                     cycle_floats(&SAMPLER_GAIN_STEPS, self.sampler_gain_db as f64, forward) as f32;
             }
             F::Ethernet => {
-                // NAT is only on offer when this build can bring it up;
-                // otherwise the choice would fit a board that never connects.
-                let choices: Vec<Option<NetConfig>> = ETHERNET_CHOICES
-                    .into_iter()
-                    .filter(|c| crate::net::NAT_AVAILABLE || *c != Some(NetConfig::Nat))
-                    .collect();
-                self.a2065_net = cycle_slice(&choices, self.a2065_net, forward);
+                let mut choices = vec![None, Some(NetConfig::None), Some(NetConfig::Loopback)];
+                if crate::net::NAT_AVAILABLE {
+                    choices.push(Some(NetConfig::Nat));
+                }
+                if crate::net::BRIDGE_AVAILABLE {
+                    let interface = match self.a2065_net.as_ref() {
+                        Some(NetConfig::Bridge { interface }) => Some(interface.clone()),
+                        _ => self.bridge_interfaces.first().map(|(name, _)| name.clone()),
+                    };
+                    if let Some(interface) = interface {
+                        choices.push(Some(NetConfig::Bridge { interface }));
+                    }
+                }
+                let current = self.a2065_net.clone();
+                let index = choices
+                    .iter()
+                    .position(|item| *item == current)
+                    .unwrap_or(0);
+                let next = if forward {
+                    (index + 1) % choices.len()
+                } else {
+                    (index + choices.len() - 1) % choices.len()
+                };
+                self.a2065_net = choices[next].clone();
+            }
+            F::EthernetInterface => {
+                if let Some(NetConfig::Bridge { interface }) = self.a2065_net.as_mut() {
+                    if !self.bridge_interfaces.is_empty() {
+                        let index = self
+                            .bridge_interfaces
+                            .iter()
+                            .position(|(name, _)| name == interface)
+                            .unwrap_or(0);
+                        let next = if forward {
+                            (index + 1) % self.bridge_interfaces.len()
+                        } else {
+                            (index + self.bridge_interfaces.len() - 1)
+                                % self.bridge_interfaces.len()
+                        };
+                        *interface = self.bridge_interfaces[next].0.clone();
+                    }
+                }
             }
             F::AudioDevice => {
                 // Re-read on each step so a device connected since the screen
@@ -4229,7 +4301,7 @@ mod tests {
         if crate::net::NAT_AVAILABLE {
             s.cycle(LauncherField::Ethernet, true);
             assert_eq!(s.value_label(LauncherField::Ethernet), "NAT");
-            // Only NAT carries traffic on the host's schedule.
+            // NAT carries traffic on the host's schedule.
             assert!(s.ethernet_breaks_determinism());
             assert_eq!(s.to_raw().a2065.net.as_deref(), Some("nat"));
             s.cycle(LauncherField::Ethernet, true);
@@ -4250,6 +4322,40 @@ mod tests {
         let s = MachineSetup::from_raw(&raw).unwrap();
         assert_eq!(s.value_label(LauncherField::Ethernet), "NAT");
         assert_eq!(s.ethernet_breaks_determinism(), crate::net::NAT_AVAILABLE);
+    }
+
+    #[test]
+    fn a2065_bridge_interface_picker_round_trips() {
+        let mut raw = RawConfig::default();
+        raw.a2065.net = Some("bridge".to_string());
+        raw.a2065.interface = Some("en-test".to_string());
+        let mut setup = MachineSetup::from_raw(&raw).unwrap();
+        setup.bridge_interfaces = vec![
+            ("en-test".to_string(), "Ethernet A (en-test)".to_string()),
+            ("en-next".to_string(), "Ethernet B (en-next)".to_string()),
+        ];
+        assert_eq!(setup.value_label(F::Ethernet), "Bridged");
+        assert_eq!(
+            setup.value_label(F::EthernetInterface),
+            "Ethernet A (en-test)"
+        );
+        assert!(!setup.row_hidden(F::EthernetInterface));
+        assert_eq!(
+            setup.ethernet_breaks_determinism(),
+            crate::net::BRIDGE_AVAILABLE
+        );
+
+        setup.cycle(F::EthernetInterface, true);
+        let saved = setup.to_raw();
+        assert_eq!(saved.a2065.net.as_deref(), Some("bridge"));
+        assert_eq!(saved.a2065.interface.as_deref(), Some("en-next"));
+        let restored = MachineSetup::from_raw(&saved).unwrap();
+        assert_eq!(
+            restored.a2065_net,
+            Some(NetConfig::Bridge {
+                interface: "en-next".to_string()
+            })
+        );
     }
 
     #[test]

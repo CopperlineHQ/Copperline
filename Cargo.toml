@@ -15,7 +15,15 @@ publish = false
 default-run = "copperline"
 
 [features]
-default = ["midi", "frontend", "wasm-boards", "control", "ctl-bin", "net-nat"]
+default = [
+    "midi",
+    "frontend",
+    "wasm-boards",
+    "control",
+    "ctl-bin",
+    "net-nat",
+    "net-bridge",
+]
 display-plan-trace = []
 # Local investigation switches that deliberately alter timing or rendering.
 # Normal builds keep these environment-variable overrides inert so release
@@ -58,6 +66,11 @@ control = ["dep:serde_json"]
 # a slirp-style virtual gateway giving the guest outbound IPv4 with no host
 # privileges. Uses std::net + threads, so browser builds compile it out.
 net-nat = ["dep:smoltcp"]
+# Direct attachment of an emulated NIC to a host Ethernet adapter
+# (`net = "bridge"`). Linux uses AF_PACKET (with the narrowly privileged
+# copperline-net-helper when an unprivileged open is denied), macOS uses the
+# system libpcap, and Windows loads an installed Npcap at runtime.
+net-bridge = ["dep:pcap", "dep:libloading"]
 # The `copperline-ctl` command-line client for the control protocol.
 ctl-bin = ["dep:serde_json"]
 
@@ -122,6 +135,13 @@ zerocopy = { version = "0.8", features = ["derive"] }
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSImage"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["NSData"] }
+pcap = { version = "2.4", optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Npcap is deliberately not linked at build time: the bridge backend loads it
+# from a trusted system directory only when selected, so NAT-only installs do
+# not acquire a runtime DLL dependency.
+libloading = { version = "0.8", optional = true }
 
 # Optional realtime-priority feature: cross-platform thread scheduling control.
 # Only used off macOS -- the macOS path uses the libc pthread QoS API directly
@@ -151,6 +171,11 @@ required-features = ["bench-bin"]
 name = "copperline-ctl"
 path = "src/bin/copperline-ctl.rs"
 required-features = ["ctl-bin"]
+
+[[bin]]
+name = "copperline-net-helper"
+path = "src/bin/copperline-net-helper.rs"
+required-features = ["net-bridge"]
 
 [dev-dependencies]
 # Compile WAT to wasm bytes in the WASM-plugin-host tests, so golden test

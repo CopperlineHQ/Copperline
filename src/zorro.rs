@@ -678,9 +678,11 @@ struct RawBoardMeta {
     dma: Option<bool>,
     int2: Option<bool>,
     int6: Option<bool>,
-    /// Host network backend ("none"/"loopback"/"nat"); presence grants the
+    /// Host network backend ("none"/"loopback"/"nat"/"bridge"); presence grants the
     /// `net` capability (the net_send/net_recv imports).
     net: Option<String>,
+    /// Host adapter identifier for `net = "bridge"`.
+    net_interface: Option<String>,
     /// Default plugin settings (free-form key/value).
     config: Option<toml::Table>,
     /// Config option schema, for the launcher's config panel.
@@ -822,15 +824,17 @@ pub fn load_board_metadata(path: &Path) -> Result<LoadedZorroBoard> {
             spec.validate()
                 .with_context(|| format!("{}: invalid board", path.display()))?;
             let net = match &raw.net {
-                Some(s) => crate::net::parse_net_config(s).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "{}: net = {:?} is not a known backend (expected \"none\", \"loopback\", or \"nat\")",
-                        path.display(),
-                        s
-                    )
-                })?,
-                None => NetConfig::None,
+                Some(s) => crate::net::parse_net_config(s, raw.net_interface.as_deref())
+                    .with_context(|| format!("{}: invalid network backend", path.display()))?,
+                None if raw.net_interface.is_none() => NetConfig::None,
+                None => bail!("{}: net_interface needs net = \"bridge\"", path.display()),
             };
+            if raw.net_interface.is_some() && !matches!(&net, NetConfig::Bridge { .. }) {
+                bail!(
+                    "{}: net_interface applies only to net = \"bridge\"",
+                    path.display()
+                );
+            }
             let options = parse_options(&raw.option, path)?;
             let default_config = build_default_config(raw.config.as_ref(), &options, path);
             let manifest = WasmManifest {

@@ -3871,7 +3871,14 @@ impl Bus {
     /// audio/serial sinks, serial observer, and the open blitter trace file. The realtime
     /// device-clock anchor needs no carry-over -- it deserializes as None
     /// and `realtime_cck_due` re-anchors to the host clock on first use.
-    pub(crate) fn adopt_host_resources(&mut self, live: &mut Bus) {
+    pub(crate) fn adopt_host_resources(&mut self, live: &mut Bus) -> anyhow::Result<()> {
+        // Open fallible resources before moving anything out of the live bus,
+        // preserving apply_state's all-or-nothing contract on bridge failure.
+        for device in &mut self.devices {
+            if let crate::zorro_device::BoardDevice::A2065(board) = device {
+                board.reattach_backend()?;
+            }
+        }
         std::mem::swap(&mut self.paula.serial, &mut live.paula.serial);
         std::mem::swap(
             &mut self.paula.serial_observer,
@@ -3883,6 +3890,7 @@ impl Bus {
         // Drive speed is host configuration, not machine state: a loaded
         // state keeps the running session's setting.
         self.floppy.set_speed_percent(live.floppy.speed_percent());
+        Ok(())
     }
 
     pub(crate) fn reset_transient_video_after_state_load(&mut self) {

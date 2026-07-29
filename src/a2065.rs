@@ -35,6 +35,7 @@
 
 use crate::net::{make_backend, NetBackend, NetConfig};
 use crate::zorro_device::{DeviceHost, ZorroDevice};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 const REG_RDP: u32 = 0x4000;
@@ -123,11 +124,16 @@ pub struct A2065 {
 }
 
 impl A2065 {
-    pub fn new(net_config: NetConfig) -> Self {
+    pub fn new(net_config: NetConfig) -> Result<Self> {
         // A locally-administered MAC (02:..) derived from a fixed prefix; a
         // real board reads this from a PROM.
         let mac = [0x02, 0x00, 0x10, 0x00, 0x00, 0x01];
-        Self {
+        let mut net =
+            make_backend(&net_config, Some(mac)).context("bringing up A2065 network backend")?;
+        if let Some(backend) = net.as_mut() {
+            backend.set_guest_mac(mac);
+        }
+        Ok(Self {
             mac,
             ram: vec![0u8; RAM_SIZE],
             net_config,
@@ -147,16 +153,20 @@ impl A2065 {
             tx_cur: 0,
             running: false,
             activity: false,
-            net: make_backend(net_config),
-        }
+            net,
+        })
     }
 
     /// Reattach the live network backend after a save-state load (the backend
     /// is a host resource and is brought up fresh, like an audio sink).
-    fn ensure_backend(&mut self) {
-        if self.net.is_none() {
-            self.net = make_backend(self.net_config);
+    pub(crate) fn reattach_backend(&mut self) -> Result<()> {
+        let mut backend = make_backend(&self.net_config, Some(self.mac))
+            .context("restoring A2065 network backend")?;
+        if let Some(backend) = backend.as_mut() {
+            backend.set_guest_mac(self.mac);
         }
+        self.net = backend;
+        Ok(())
     }
 
     // ----- board RAM word access (big-endian) ----------------------------
@@ -194,6 +204,9 @@ impl A2065 {
             // PADR is stored low-byte-first per word in LANCE order.
             self.mac[i as usize * 2] = w as u8;
             self.mac[i as usize * 2 + 1] = (w >> 8) as u8;
+        }
+        if let Some(net) = self.net.as_mut() {
+            net.set_guest_mac(self.mac);
         }
         // +$10 RDRA[15:0], +$12 (RLEN<<13) | RDRA[23:16].
         let rdra_lo = self.ram_word(iadr + 0x10);
@@ -464,7 +477,6 @@ impl ZorroDevice for A2065 {
 
     fn tick(&mut self, _cck: u32, _host: &mut DeviceHost) {
         // Pull any inbound frames the backend has queued into the RX ring.
-        self.ensure_backend();
         while self.running {
             let frame = match self.net.as_mut().and_then(|n| n.poll()) {
                 Some(f) => f,
@@ -498,7 +510,15 @@ impl ZorroDevice for A2065 {
         self.mode = 0;
         self.running = false;
         self.ram.fill(0);
-        self.net = make_backend(self.net_config);
+        if let Err(error) = self.reattach_backend() {
+            // reattach_backend constructs the replacement before touching
+            // self.net, so a failed bridge reopen can retain the existing
+            // connection instead of silently changing to an isolated NIC.
+            log::error!(
+                "a2065: reset could not reopen network backend; keeping the existing backend: \
+                 {error:#}"
+            );
+        }
     }
 
     fn kind(&self) -> &'static str {
@@ -634,7 +654,7 @@ mod tests {
 
     #[test]
     fn rap_selects_csr_and_init_done_sets_idon() {
-        let mut board = A2065::new(NetConfig::Loopback);
+        let mut board = A2065::new(NetConfig::Loopback).unwrap();
         let mut mem = host_mem();
         set_up_rings(&mut board, &mut mem);
 
@@ -647,7 +667,7 @@ mod tests {
 
     #[test]
     fn transmit_descriptor_is_sent_to_the_backend() {
-        let mut board = A2065::new(NetConfig::Loopback);
+        let mut board = A2065::new(NetConfig::Loopback).unwrap();
         let mut mem = host_mem();
         let (tx_buf, _rx) = set_up_rings(&mut board, &mut mem);
         write_csr(&mut board, &mut mem, 0, CSR0_INIT);
@@ -700,7 +720,7 @@ mod tests {
 
     #[test]
     fn inbound_frame_lands_in_rx_ring_and_raises_int() {
-        let mut board = A2065::new(NetConfig::Loopback);
+        let mut board = A2065::new(NetConfig::Loopback).unwrap();
         let mut mem = host_mem();
         set_up_rings(&mut board, &mut mem);
         write_csr(&mut board, &mut mem, 0, CSR0_INIT);
@@ -725,7 +745,7 @@ mod tests {
 
     #[test]
     fn stop_clears_running_and_int() {
-        let mut board = A2065::new(NetConfig::Loopback);
+        let mut board = A2065::new(NetConfig::Loopback).unwrap();
         let mut mem = host_mem();
         set_up_rings(&mut board, &mut mem);
         write_csr(&mut board, &mut mem, 0, CSR0_INIT);
@@ -849,7 +869,7 @@ mod tests {
 
     #[test]
     fn tx_frame_chains_across_descriptors() {
-        let mut board = A2065::new(NetConfig::Loopback);
+        let mut board = A2065::new(NetConfig::Loopback).unwrap();
         let mut mem = host_mem();
         set_up_rings_geom(&mut board, &mut mem, 0, 0, 256, 1);
         write_csr(&mut board, &mut mem, 0, CSR0_INIT);
@@ -881,7 +901,7 @@ mod tests {
 
     #[test]
     fn rx_frame_chains_across_buffers() {
-        let mut board = A2065::new(NetConfig::Loopback);
+        let mut board = A2065::new(NetConfig::Loopback).unwrap();
         let mut mem = host_mem();
         set_up_rings_geom(&mut board, &mut mem, 0, 2, 128, 0);
         write_csr(&mut board, &mut mem, 0, CSR0_INIT);
@@ -922,7 +942,7 @@ mod tests {
 
     #[test]
     fn rx_without_free_descriptor_sets_miss() {
-        let mut board = A2065::new(NetConfig::Loopback);
+        let mut board = A2065::new(NetConfig::Loopback).unwrap();
         let mut mem = host_mem();
         set_up_rings_geom(&mut board, &mut mem, 0, 0, 256, 0);
         write_csr(&mut board, &mut mem, 0, CSR0_INIT);
@@ -945,7 +965,7 @@ mod tests {
 
     #[test]
     fn rx_out_of_chained_buffers_sets_buff() {
-        let mut board = A2065::new(NetConfig::Loopback);
+        let mut board = A2065::new(NetConfig::Loopback).unwrap();
         let mut mem = host_mem();
         set_up_rings_geom(&mut board, &mut mem, 0, 0, 128, 0);
         write_csr(&mut board, &mut mem, 0, CSR0_INIT);
@@ -967,7 +987,7 @@ mod tests {
     #[test]
     fn mode_loop_returns_tx_frames_to_own_receiver() {
         // No backend at all: internal loopback never reaches the wire.
-        let mut board = A2065::new(NetConfig::None);
+        let mut board = A2065::new(NetConfig::None).unwrap();
         let mut mem = host_mem();
         set_up_rings_geom(&mut board, &mut mem, MODE_LOOP, 0, 256, 0);
         write_csr(&mut board, &mut mem, 0, CSR0_INIT);
@@ -988,7 +1008,7 @@ mod tests {
 
     #[test]
     fn mode_dtx_drx_disable_the_engines() {
-        let mut board = A2065::new(NetConfig::Loopback);
+        let mut board = A2065::new(NetConfig::Loopback).unwrap();
         let mut mem = host_mem();
         set_up_rings_geom(&mut board, &mut mem, MODE_DTX | MODE_DRX, 0, 256, 0);
         write_csr(&mut board, &mut mem, 0, CSR0_INIT);
@@ -1011,7 +1031,7 @@ mod tests {
 
     #[test]
     fn rx_appends_fcs_to_short_frame() {
-        let mut board = A2065::new(NetConfig::Loopback);
+        let mut board = A2065::new(NetConfig::Loopback).unwrap();
         let mut mem = host_mem();
         set_up_rings_geom(&mut board, &mut mem, 0, 0, 256, 0);
         write_csr(&mut board, &mut mem, 0, CSR0_INIT);
@@ -1032,7 +1052,7 @@ mod tests {
 
     #[test]
     fn mac_prom_is_readable_at_even_bytes() {
-        let mut board = A2065::new(NetConfig::None);
+        let mut board = A2065::new(NetConfig::None).unwrap();
         let mut mem = host_mem();
         let mut host = DeviceHost::new(&mut mem);
         assert_eq!(board.read(0, 1, &mut host), 0x02);

@@ -30,6 +30,14 @@ own Kickstart ROM and disk/hard-disk images, and launch with:
 
 Run "copperline.exe --help" for the full command-line surface.
 
+Bridged Ethernet
+----------------
+User-mode NAT works with no additional software. Direct bridged Ethernet
+requires Npcap from https://npcap.com/; Copperline loads it only when a bridge
+backend is selected. Use "copperline.exe --list-net-interfaces" to find the
+exact adapter identifier. Wi-Fi bridging is best-effort because many access
+points reject frames carrying the Amiga's separate source MAC address.
+
 Troubleshooting
 ---------------
 If Copperline crashes, it writes the crash details to copperline-crash.txt

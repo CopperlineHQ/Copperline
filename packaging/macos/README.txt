@@ -39,4 +39,13 @@ own Kickstart ROM and disk/hard-disk images, and launch from a terminal with:
 
 Run that binary with --help for the full command-line surface.
 
+Bridged Ethernet
+----------------
+User-mode NAT needs no setup. Direct bridged Ethernet uses macOS's system
+packet-capture devices. If Copperline reports that it cannot open /dev/bpf,
+grant your account BPF access using your organisation's normal packet-capture
+setup (commonly the access_bpf group), then log out and back in. Run
+"copperline --list-net-interfaces" for adapter names. Wi-Fi bridging is
+best-effort because many access points reject the Amiga's separate source MAC.
+
 Copperline is licensed under GPL-3.0-or-later; see LICENSE.txt.

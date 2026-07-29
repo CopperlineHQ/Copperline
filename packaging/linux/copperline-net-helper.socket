@@ -1,0 +1,11 @@
+[Unit]
+Description=Copperline per-user network helper socket
+
+[Socket]
+ListenStream=%t/copperline-net-helper/control.sock
+SocketMode=0600
+DirectoryMode=0700
+RemoveOnStop=true
+
+[Install]
+WantedBy=sockets.target

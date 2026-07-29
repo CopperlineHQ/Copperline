@@ -148,7 +148,8 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //  41: Paula records the guest /LED bit (led_filter_guest_on) apart from the
 //      effective filter state, for the [audio] audio_filter override; the
 //      override mode itself is a host preference and is not serialized
-pub const STATE_VERSION: u32 = 41;
+//  42: NetConfig gained the Bridge variant and its host interface identifier
+pub const STATE_VERSION: u32 = 42;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

@@ -2020,15 +2020,26 @@ pub fn build_machine(
         devices.push(crate::zorro_device::BoardDevice::Filesys(board));
     }
     // A2065 Ethernet board (in-tree LANCE NIC): networking is non-deterministic.
-    if let Some(net_config) = cfg.a2065_net {
+    if let Some(net_config) = &cfg.a2065_net {
         let slot = devices.len();
         zorro.add_board(crate::zorro::BoardSpec::a2065(slot))?;
-        info!(
-            "a2065: Ethernet board on the Zorro chain (slot {slot}), net backend {net_config:?} \
-             -- networking is non-deterministic, replay/save-state reproducibility not guaranteed"
-        );
+        if matches!(
+            net_config,
+            crate::net::NetConfig::Nat | crate::net::NetConfig::Bridge { .. }
+        ) {
+            info!(
+                "a2065: Ethernet board on the Zorro chain (slot {slot}), net backend \
+                 {net_config:?} -- host networking is non-deterministic, replay/save-state \
+                 reproducibility not guaranteed"
+            );
+        } else {
+            info!(
+                "a2065: Ethernet board on the Zorro chain (slot {slot}), net backend \
+                 {net_config:?}"
+            );
+        }
         devices.push(crate::zorro_device::BoardDevice::A2065(
-            crate::a2065::A2065::new(net_config),
+            crate::a2065::A2065::new(net_config.clone())?,
         ));
     }
     // RTG board (`[rtg] card`): the Z3660.card P96 driver drives RTG screens
