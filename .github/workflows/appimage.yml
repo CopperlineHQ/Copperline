@@ -56,6 +56,21 @@ jobs:
         run: |
           echo "path=$(ls Copperline-*.AppImage | head -n1)" >> "$GITHUB_OUTPUT"
           echo "helper=$(ls Copperline-*-net-helper.tar.gz | head -n1)" >> "$GITHUB_OUTPUT"
+      - name: Smoke test the AppImage
+        # Boot the finished AppImage from an empty directory: the run must
+        # find the bundled AROS ROM through the AppDir's
+        # usr/share/copperline/aros lookup (romsearch.rs), not the source
+        # tree's assets/aros fallback that a repo-root cwd would satisfy.
+        # A capture run opens no window or audio device, so a clean exit
+        # plus a non-empty PNG proves the packaged image actually runs
+        # (libfuse2 for the AppImage runtime is installed above).
+        run: |
+          appimage="$PWD/${{ steps.artifact.outputs.path }}"
+          smoke="$RUNNER_TEMP/appimage-smoke"
+          mkdir -p "$smoke"
+          cd "$smoke"
+          "$appimage" --noaudio --screenshot-after 10 smoke.png
+          test -s smoke.png
       - uses: actions/upload-artifact@v7
         with:
           name: copperline-appimage

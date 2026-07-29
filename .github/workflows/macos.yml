@@ -3,8 +3,10 @@ name: macOS
 # Builds the macOS disk image (a universal Copperline.app in a .dmg) and
 # uploads it as a workflow artifact on every qualifying change, and attaches it
 # to the GitHub Release when a v* tag is pushed. The main CI already builds and
-# tests on macOS; this workflow only adds the packaging path, so it is scoped to
-# the code and packaging surface that affects the bundle.
+# tests on macOS; this workflow adds the packaging path plus a smoke test of
+# the packaged bundle itself (both architectures, including the x86_64 slice
+# under Rosetta, which no other job executes), so it is scoped to the code and
+# packaging surface that affects the bundle.
 #
 # The image is intentionally unsigned (no Developer ID, no notarization), so it
 # trips Gatekeeper on first launch; the bundled README.txt documents the
@@ -66,6 +68,48 @@ jobs:
       - name: Locate artifact
         id: artifact
         run: echo "path=$(ls Copperline-*-macos-universal.dmg | head -n1)" >> "$GITHUB_OUTPUT"
+      - name: Smoke test the packaged app
+        # The main CI already runs the full suites against the working tree
+        # on macOS; what it never touches is the artifact users download.
+        # Mount the freshly built image and boot the app binary straight off
+        # the read-only volume, working from an empty directory so the
+        # bundled AROS ROM must be found through the .app's
+        # Contents/Resources/aros lookup (romsearch.rs), not the source
+        # tree's assets/aros fallback. Runs the arm64 slice natively and the
+        # x86_64 slice under Rosetta -- the only place the Intel half of the
+        # universal binary is ever executed. A capture run opens no window
+        # or audio device, so a clean exit plus a non-empty PNG proves the
+        # shipped bundle boots.
+        run: |
+          mnt="$RUNNER_TEMP/dmg-mount"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mnt" \
+            "${{ steps.artifact.outputs.path }}"
+          app="$mnt/Copperline.app"
+          bin="$app/Contents/MacOS/copperline"
+          # Both slices present, and the ad-hoc signature survived the
+          # lipo/dmg round-trip (an unsigned arm64 binary will not launch).
+          lipo -archs "$bin"
+          lipo -archs "$bin" | grep -q arm64
+          lipo -archs "$bin" | grep -q x86_64
+          codesign --verify --deep --strict "$app"
+          smoke="$RUNNER_TEMP/dmg-smoke"
+          mkdir -p "$smoke"
+          cd "$smoke"
+          "$bin" --noaudio --screenshot-after 10 smoke-arm64.png
+          test -s smoke-arm64.png
+          # Rosetta is preinstalled on some runner images; this is a fast
+          # no-op there and installs it where it is not.
+          sudo softwareupdate --install-rosetta --agree-to-license
+          arch -x86_64 "$bin" --noaudio --screenshot-after 10 smoke-x86_64.png
+          test -s smoke-x86_64.png
+          hdiutil detach "$mnt"
+      - name: Upload smoke screenshots
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-smoke-screenshots
+          path: ${{ runner.temp }}/dmg-smoke/
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v7
         with:
           name: copperline-macos

@@ -1,6 +1,6 @@
 name: Linux present
 
-# Verifies Copperline's presentation path initializes and renders a frame on
+# Verifies Copperline's presentation path initializes and renders frames on
 # Linux using software Vulkan (Mesa lavapipe) under a headless X server. Guards
 # the "Vulkan required on Linux" policy in src/video/window.rs: wgpu's GL
 # fallback drops to an unusable surfaceless EGL platform, so a Vulkan adapter
@@ -8,6 +8,12 @@ name: Linux present
 # GitHub runners have no GPU, so this exercises the lavapipe path -- the same
 # one a Vulkan-less host uses after installing a software ICD. The local
 # equivalent for an Apple Silicon dev host is packaging/test-linux-vulkan/.
+#
+# A plain --screenshot-after run cannot test this: capture runs deliberately
+# skip the window and event loop entirely (the windowless capture path in
+# src/main.rs), so the smoke below starts a real windowed session with a
+# control server attached (--control-gui keeps the windowed path) and drives
+# a screenshot and a clean shutdown over the Copperline Control Protocol.
 on:
   push:
     branches: [main]
@@ -33,6 +39,9 @@ jobs:
   present-smoke:
     name: Vulkan present smoke test
     runs-on: ubuntu-latest
+    # The smoke waits on the emulator process; cap the job so a shutdown
+    # that never lands fails fast instead of idling for the default 6h.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -56,13 +65,38 @@ jobs:
       - name: Show Vulkan driver
         run: vulkaninfo --summary | head -n 25
       - name: Build
-        run: cargo build --release --locked --bin copperline
-      - name: Headless screenshot (exercises Vulkan present init)
-        # A hidden window + present surface are still created in screenshot
-        # mode, so a non-empty PNG proves the wgpu instance/adapter/surface
-        # came up on Vulkan. Boots the bundled AROS ROM, so no assets needed.
+        run: cargo build --release --locked --bin copperline --bin copperline-ctl
+      - name: Windowed present smoke (Vulkan surface + CCP screenshot)
+        # Boots the bundled AROS ROM in a real window on the virtual X
+        # server, which forces the wgpu instance/adapter/surface up on the
+        # lavapipe Vulkan ICD (the app aborts if no Vulkan adapter is
+        # reachable), then drives it over the control connection: a
+        # capture.screenshot proves the session is alive and rendering
+        # frames, and shutdown proves the event loop exits cleanly.
         run: |
-          xvfb-run -a -s "-screen 0 1280x720x24" \
-            ./target/release/copperline --noaudio --screenshot-after 3 /tmp/present.png
-          test -s /tmp/present.png
+          xvfb-run -a -s "-screen 0 1280x720x24" bash -euxo pipefail -c '
+            ./target/release/copperline --noaudio \
+              --control-gui 127.0.0.1:0 --control-info /tmp/ccp.json &
+            emu=$!
+            for _ in $(seq 1 60); do
+              [ -s /tmp/ccp.json ] && break
+              kill -0 "$emu"
+              sleep 1
+            done
+            # Let the machine run a few wall-clock seconds of frames before
+            # sampling, so the screenshot comes from a live presenting loop.
+            sleep 5
+            ./target/release/copperline-ctl --info /tmp/ccp.json \
+              capture.screenshot "{\"path\": \"/tmp/present.png\"}"
+            test -s /tmp/present.png
+            ./target/release/copperline-ctl --info /tmp/ccp.json shutdown
+            wait "$emu"
+          '
           echo "present path OK ($(stat -c %s /tmp/present.png) bytes)"
+      - name: Upload present screenshot
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-present-screenshot
+          path: /tmp/present.png
+          if-no-files-found: ignore
