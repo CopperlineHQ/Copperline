@@ -22,7 +22,7 @@ use super::{
     ToolPanelKind, AMIGA_RAWKEY_LEFT_ALT, AMIGA_RAWKEY_LEFT_SHIFT, AMIGA_RAWKEY_RIGHT_ALT,
     AMIGA_RAWKEY_RIGHT_SHIFT, BUTTON_GLYPH, BUTTON_GLYPH_DISABLED, CD_BODY, CD_LED_OFF, CD_LED_ON,
     DISK_BODY, DISK_BODY_SHADOW, DISK_LABEL, FDD_LED_OFF, FDD_LED_ON, HDD_LED_OFF, HDD_LED_ON,
-    POWER_GLYPH_OFF, POWER_GLYPH_ON, POWER_LED_BRIGHT, POWER_LED_NORMAL, POWER_LED_OFF,
+    POWER_GLYPH_OFF, POWER_GLYPH_ON, POWER_LED_BRIGHT, POWER_LED_DIM, POWER_LED_OFF,
     STANDARD_PAL_VISIBLE_LINES, STANDARD_PAL_VISIBLE_START_VPOS, STATUS_BG, TRACK_SEGMENT_OFF,
     TRACK_SEGMENT_ON, TV_CAPTURED_SOURCE_X, TV_LIVE_PAD_X, TV_PAL_PRESENT_HEIGHT,
     TV_PRESENT_SOURCE_X, TV_PRESENT_SOURCE_Y, TV_PRESENT_WIDTH, VOLUME_FILL, VOLUME_GLYPH_X,
@@ -1300,7 +1300,7 @@ fn status_bar_draws_power_and_fdd_led_states() {
         &mut frame,
         &view(
             FrontPanelStatus {
-                audio_filter_on: true,
+                power_led_bright: true,
                 fdd_led_on: false,
                 fdd_track: Some(5),
                 hdd_led: None,
@@ -1343,7 +1343,7 @@ fn status_bar_draws_power_and_fdd_led_states() {
         &mut frame,
         &view(
             FrontPanelStatus {
-                audio_filter_on: false,
+                power_led_bright: false,
                 fdd_led_on: true,
                 fdd_track: Some(42),
                 hdd_led: None,
@@ -1362,17 +1362,17 @@ fn status_bar_draws_power_and_fdd_led_states() {
 }
 
 #[test]
-fn power_led_is_lit_normal_or_bright_by_the_audio_filter() {
+fn power_led_is_bright_dim_or_off_by_the_led_line() {
     let scale = 1;
     let power = led_row_rect(0, 2);
     let center = |frame: &[u8]| pixel(frame, power.x + power.w / 2, power.y + power.h / 2, scale);
-    let render = |filter_on: bool, powered: bool| {
+    let render = |led_engaged: bool, powered: bool| {
         let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
         draw_status_bar(
             &mut frame,
             &view(
                 FrontPanelStatus {
-                    audio_filter_on: filter_on,
+                    power_led_bright: led_engaged,
                     fdd_led_on: false,
                     fdd_track: Some(0),
                     hdd_led: None,
@@ -1386,11 +1386,11 @@ fn power_led_is_lit_normal_or_bright_by_the_audio_filter() {
         );
         center(&frame)
     };
-    // Powered: lit at the normal red when bypassed, a more intense red when
-    // the filter is engaged.
+    // Powered: full brightness while the guest holds /LED engaged, dimmed
+    // -- still lit -- once it releases it, as on A500 rev 6+ boards.
     assert_eq!(render(true, true), POWER_LED_BRIGHT.to_le_bytes());
-    assert_eq!(render(false, true), POWER_LED_NORMAL.to_le_bytes());
-    // Unpowered: dark regardless of the filter state.
+    assert_eq!(render(false, true), POWER_LED_DIM.to_le_bytes());
+    // Unpowered: dark regardless of the /LED line.
     assert_eq!(render(true, false), POWER_LED_OFF.to_le_bytes());
 }
 
@@ -1402,7 +1402,7 @@ fn status_bar_extinguishes_power_led_when_host_power_is_off() {
         &mut frame,
         &view(
             FrontPanelStatus {
-                audio_filter_on: true,
+                power_led_bright: true,
                 fdd_led_on: false,
                 fdd_track: Some(0),
                 hdd_led: None,
@@ -1451,7 +1451,7 @@ fn status_bar_power_button_glyph_tracks_power_state() {
             &mut frame,
             &view(
                 FrontPanelStatus {
-                    audio_filter_on: powered_on,
+                    power_led_bright: powered_on,
                     fdd_led_on: false,
                     fdd_track: Some(0),
                     hdd_led: None,
@@ -1555,7 +1555,7 @@ fn status_bar_pause_button_glyph_tracks_pause_state() {
         &mut frame,
         &view(
             FrontPanelStatus {
-                audio_filter_on: true,
+                power_led_bright: true,
                 fdd_led_on: false,
                 fdd_track: Some(0),
                 hdd_led: None,
@@ -1576,7 +1576,7 @@ fn status_bar_pause_button_glyph_tracks_pause_state() {
         &mut frame,
         &view(
             FrontPanelStatus {
-                audio_filter_on: true,
+                power_led_bright: true,
                 fdd_led_on: false,
                 fdd_track: Some(0),
                 hdd_led: None,
@@ -1599,7 +1599,7 @@ fn status_bar_draws_disk_image_button_next_to_track_counter() {
         &mut frame,
         &view(
             FrontPanelStatus {
-                audio_filter_on: true,
+                power_led_bright: true,
                 fdd_led_on: true,
                 fdd_track: Some(5),
                 hdd_led: None,
@@ -1842,7 +1842,7 @@ fn status_bar_draws_volume_control_and_maps_pointer_position() {
         &mut frame,
         &view(
             FrontPanelStatus {
-                audio_filter_on: true,
+                power_led_bright: true,
                 fdd_led_on: true,
                 fdd_track: Some(5),
                 hdd_led: None,
@@ -1872,7 +1872,7 @@ fn status_bar_latches_fdd_track_when_no_drive_is_selected() {
     let mut last_fdd_track = None;
     let status = status_with_latched_fdd_track(
         FrontPanelStatus {
-            audio_filter_on: true,
+            power_led_bright: true,
             fdd_led_on: true,
             fdd_track: Some(42),
             hdd_led: None,
@@ -1886,7 +1886,7 @@ fn status_bar_latches_fdd_track_when_no_drive_is_selected() {
 
     let status = status_with_latched_fdd_track(
         FrontPanelStatus {
-            audio_filter_on: true,
+            power_led_bright: true,
             fdd_led_on: false,
             fdd_track: None,
             hdd_led: None,
@@ -1907,7 +1907,7 @@ fn status_bar_draws_at_hidpi_texture_scale() {
         &mut frame,
         &view(
             FrontPanelStatus {
-                audio_filter_on: true,
+                power_led_bright: true,
                 fdd_led_on: true,
                 fdd_track: Some(159),
                 hdd_led: None,

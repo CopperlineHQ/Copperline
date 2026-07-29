@@ -681,6 +681,13 @@ impl Paula {
         self.led_filter_enabled
     }
 
+    /// The guest's /LED line itself (CIA-A PRA bit 1: true = engaged).
+    /// What the machine's power LED shows: the user's filter override
+    /// changes the mix, not the pin.
+    pub fn led_filter_guest_on(&self) -> bool {
+        self.led_filter_guest_on
+    }
+
     pub fn set_output_volume_percent(&mut self, percent: u8) {
         self.output_volume = f32::from(percent.min(100)) / 100.0;
     }

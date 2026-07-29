@@ -299,12 +299,15 @@ const STATUS_TOP: u32 = rgba(78, 76, 70);
 const STATUS_BOTTOM: u32 = rgba(12, 12, 11);
 const LED_BEZEL_DARK: u32 = rgba(8, 8, 7);
 const LED_BEZEL_LIGHT: u32 = rgba(78, 76, 68);
-// The power LED is lit whenever the machine is powered. POWER_LED_NORMAL is the
-// resting lit red (the filter bypassed, its usual state); it burns to a more
-// intense POWER_LED_BRIGHT while Paula's analogue filter is engaged, as the real
-// /LED line drives it. POWER_LED_OFF is the unpowered bezel.
+// The power LED is lit whenever the machine is powered, driven by CIA-A's
+// /LED line the way it drives the LED on an A500 rev 6 or later board:
+// POWER_LED_BRIGHT while the guest holds /LED engaged (Paula's filter on),
+// falling to the clearly dimmer -- but still lit -- POWER_LED_DIM once it
+// releases the line. Earlier boards extinguished the LED instead; the
+// panel models the common two-level behaviour. POWER_LED_OFF is the
+// unpowered bezel.
 const POWER_LED_BRIGHT: u32 = rgba(255, 38, 28);
-const POWER_LED_NORMAL: u32 = rgba(232, 31, 24);
+const POWER_LED_DIM: u32 = rgba(150, 24, 18);
 const POWER_LED_OFF: u32 = rgba(66, 12, 10);
 const FDD_LED_ON: u32 = rgba(236, 142, 28);
 const FDD_LED_OFF: u32 = rgba(72, 38, 10);

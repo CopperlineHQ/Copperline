@@ -149,7 +149,10 @@ goes, and the same letterbox applies.
 Once a machine boots, a status strip appears below the screen with the
 same front-panel readouts as the desktop [status bar](ui.md): the PWR and
 FDD LEDs (plus HDD/CD on machines fitted with those drives), the floppy
-track counter, and the name of the disk in each connected drive.
+track counter, and the name of the disk in each connected drive. The PWR
+LED shows the desktop bar's two lit levels -- bright with the guest's
+/LED line engaged, dimmed when released -- and is never dark, as a
+running machine is always powered.
 
 What the page has to say -- a screenshot copied, a state saved, a disk
 inserted, something refused -- appears as a caption across the bottom of

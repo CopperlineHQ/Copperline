@@ -1701,10 +1701,12 @@ impl BusAccounting {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrontPanelStatus {
-    /// The Paula analogue low-pass filter is engaged. The PWR LED is lit
-    /// whenever the machine is powered; it burns brighter when this is set, as
-    /// the real /LED line does.
-    pub audio_filter_on: bool,
+    /// The guest holds CIA-A's /LED line engaged: the PWR LED burns at
+    /// full brightness, dimmed -- not extinguished -- when released, as
+    /// on an A500 rev 6 or later board. The raw pin state, not the
+    /// effective audio filter: the user's filter override changes the
+    /// mix, never the LED.
+    pub power_led_bright: bool,
     pub fdd_led_on: bool,
     pub fdd_track: Option<u8>,
     /// HDD activity LED: None on machines without an IDE port (no Gayle),
@@ -1719,7 +1721,7 @@ pub struct FrontPanelStatus {
 impl Default for FrontPanelStatus {
     fn default() -> Self {
         Self {
-            audio_filter_on: false,
+            power_led_bright: true,
             fdd_led_on: false,
             fdd_track: None,
             hdd_led: None,
@@ -3699,7 +3701,7 @@ impl Bus {
 
     pub fn front_panel_status(&self) -> FrontPanelStatus {
         FrontPanelStatus {
-            audio_filter_on: self.paula.led_filter_enabled(),
+            power_led_bright: self.paula.led_filter_guest_on(),
             fdd_led_on: self.floppy.activity_led_on(),
             fdd_track: self.floppy.selected_track(),
             hdd_led: (self.gayle.is_some()

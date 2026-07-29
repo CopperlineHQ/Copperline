@@ -758,9 +758,11 @@ LED. `"auto"` (the default) lets the guest engage or bypass it as the
 software asks, matching real hardware; `"on"` and `"off"` force it either
 way as a listener override. Unlike the host-output settings above it is
 part of the emulated audio path, so it also affects WAV capture. Also on
-`--audio-filter`, the runtime **Audio Filter** menu item, and Cmd/Alt+A;
-the status-bar PWR LED is lit whenever the machine is powered and burns
-brighter while the filter is engaged.
+`--audio-filter`, the runtime **Audio Filter** menu item, and Cmd/Alt+A.
+The status-bar PWR LED is lit whenever the machine is powered and follows
+the guest's /LED line itself -- full brightness while engaged, dimmed like
+an A500 rev 6+ board while released -- so this override changes what you
+hear, never the LED.
 
 On Linux with PipeWire/PulseAudio, individual sinks are not ALSA devices, so
 only the `default`/`pipewire` route is offered; pick the output in the desktop

@@ -64,9 +64,12 @@ menu item):
   or plays CD audio (on a machine whose CD drive is a SCSI CD-ROM unit,
   the LED shows CD-DA playback; its data reads ride the HDD LED with the
   rest of the SCSI bus). A small digital counter shows the current floppy
-  track. The PWR LED is lit whenever the machine is powered and burns
-  brighter while Paula's analogue filter is engaged, as the real /LED line
-  drives it (see the **Audio Filter** menu item).
+  track. The PWR LED is lit whenever the machine is powered, driven by the
+  guest's /LED line the way it drives the LED on an A500 rev 6 or later
+  board: full brightness while the line is engaged (Paula's analogue
+  filter on), dimmed -- not extinguished -- once the software releases it.
+  It follows the pin itself, so the **Audio Filter** menu override changes
+  what you hear, never the LED.
 - **Per-drive floppy controls.** Every connected drive gets a disk button
   (marked with the drive number) that opens a file dialog -- multi-select
   several images to queue a swap playlist for that drive -- plus a swap
@@ -152,7 +155,8 @@ tool window or overlay.
 - **Audio Filter** (also `Cmd+A` / `Alt+A`): cycles Paula's analogue
   low-pass filter through **auto** (guest-driven, the default), **on**, and
   **off**. `on`/`off` force it regardless of what the software asks; `auto`
-  restores hardware behaviour. The PWR LED brightens while it is engaged.
+  restores hardware behaviour. The PWR LED keeps following the guest's
+  /LED line whatever is forced here.
 - **Calibrate Gamepad...**: the guided calibration flow, described below.
 - **Joystick Input** (also `Cmd+J` / `Alt+J`, or the status-bar icon):
   toggles between gamepad-only and keyboard joystick emulation.

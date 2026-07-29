@@ -9217,21 +9217,43 @@ fn bltpri_line_blit_bresenham_cycles_stay_cpu_available_after_warmup() {
 #[test]
 fn front_panel_power_led_follows_cia_a_led_bit() {
     let mut bus = empty_bus();
-    // Filter engaged at power-on (the default /LED state).
-    assert!(bus.front_panel_status().audio_filter_on);
+    // /LED engaged at power-on: the LED starts at full brightness.
+    assert!(bus.front_panel_status().power_led_bright);
 
     // Drive PA1 (/LED) as an output, as the OS does, so the written level
-    // reaches the pin the filter follows.
+    // reaches the pin the LED and the filter follow.
     let ddra = (REG_DDRA as u64) << 8;
     let _ = bus.cia_a_write(ddra, 1, 0x02);
 
     let pra = (REG_PRA as u64) << 8;
-    // Bit 1 high = /LED released = filter bypassed.
+    // Bit 1 high = /LED released = LED dimmed, filter bypassed.
     let _ = bus.cia_a_write(pra, 1, 0x02);
-    assert!(!bus.front_panel_status().audio_filter_on);
-    // Bit 1 low = /LED asserted = filter engaged.
+    assert!(!bus.front_panel_status().power_led_bright);
+    // Bit 1 low = /LED asserted = LED bright, filter engaged.
     let _ = bus.cia_a_write(pra, 1, 0x00);
-    assert!(bus.front_panel_status().audio_filter_on);
+    assert!(bus.front_panel_status().power_led_bright);
+}
+
+#[test]
+fn front_panel_power_led_ignores_the_host_filter_override() {
+    use crate::config::AudioFilterMode;
+    let mut bus = empty_bus();
+    let ddra = (REG_DDRA as u64) << 8;
+    let pra = (REG_PRA as u64) << 8;
+    let _ = bus.cia_a_write(ddra, 1, 0x02);
+    let _ = bus.cia_a_write(pra, 1, 0x02); // /LED released: LED dimmed
+
+    // Forcing the filter on is a host mix preference; the LED stays on
+    // the pin, dimmed, while the effective filter engages.
+    bus.paula.set_led_filter_mode(AudioFilterMode::On);
+    assert!(bus.paula.led_filter_enabled());
+    assert!(!bus.front_panel_status().power_led_bright);
+
+    // And forcing it off never dims a bright LED.
+    let _ = bus.cia_a_write(pra, 1, 0x00); // /LED engaged
+    bus.paula.set_led_filter_mode(AudioFilterMode::Off);
+    assert!(!bus.paula.led_filter_enabled());
+    assert!(bus.front_panel_status().power_led_bright);
 }
 
 #[test]
@@ -9252,12 +9274,14 @@ fn a1000_led_line_does_not_switch_the_audio_filter() {
     assert!(normal.paula.led_filter_enabled());
 
     // The A1000 (identified by its WCS) lacks that circuit: its fixed
-    // filter stays engaged no matter what the LED line does.
+    // filter stays engaged no matter what the LED line does, and its
+    // power LED -- fed straight from the supply -- stays bright.
     let mut a1000 = empty_bus();
     a1000.mem.wcs = vec![0u8; crate::memory::WCS_SIZE];
     let _ = a1000.cia_a_write(ddra, 1, 0x03);
     let _ = a1000.cia_a_write(pra, 1, 0x03); // /LED high: no effect on the filter
     assert!(a1000.paula.led_filter_enabled());
+    assert!(a1000.front_panel_status().power_led_bright);
 }
 
 #[test]
