@@ -17,7 +17,7 @@ MFM the head would be passing over, so Paula, the disk DMA, and
 
 ## What you need
 
-You need a [DrawBridge](https://amiga.robsmithdev.co.uk/drawbridge), [Greaseweazle](https://github.com/keirf/Greaseweazle), or [Supercard Pro](https://github.com/jimdrew/SupercardPro) interface, a 3.5" floppy drive, and some disks. 
+You need a [DrawBridge](https://amiga.robsmithdev.co.uk), [Greaseweazle](https://github.com/keirf/Greaseweazle), or [Supercard Pro](https://www.cbmstuff.com/index.php?route=product/product&product_id=52) interface, a 3.5" floppy drive, and some disks. 
 
 FloppyBridge is compiled into Copperline from `vendor/floppybridge`, so a build that offers a physical drive can actually
 drive one -- there is no library to fetch, install, or keep beside the binary.
