@@ -990,9 +990,9 @@ const BRIDGE_CABLES: [BridgeCable; 6] = [
 ];
 const BRIDGE_DENSITIES: [BridgeDensity; 3] =
     [BridgeDensity::Auto, BridgeDensity::Dd, BridgeDensity::Hd];
-// Ordered as Amiberry's drive-type list has them, so the two read the same.
-// Its Turbo is absent: that one answers AmigaDOS calls instead of reading the
-// disk, so there is nothing for a drive model to do with it.
+// The driver's fourth mode, Turbo, is absent: it answers AmigaDOS calls
+// instead of reading the disk, so there is nothing for a drive model to do
+// with it.
 const BRIDGE_SPEEDS: [BridgeSpeedMode; 3] = [
     BridgeSpeedMode::Normal,
     BridgeSpeedMode::Compatible,

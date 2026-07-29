@@ -44,8 +44,10 @@ warns that any exception would terminate. The one project setting deliberately
 not matched is its Unicode character set -- see below.
 
 `FLOPPYBRIDGE_NO_GUI`, defined by `build.rs`, excludes what Copperline does not
-use. Amiberry excludes the same code the same way, keyed on `AMIBERRY`; its
-Windows builds are what give confidence this is the right seam to cut.
+use: the Windows-only configuration dialogs and the update check, which belong
+to upstream's DLL front-end and which Copperline never calls. Bridges are
+configured through Copperline's own launcher and config file on every
+platform.
 
 ### `FloppyBridge.cpp` -- the DLL front-end
 
@@ -87,7 +89,7 @@ Upstream's project builds with `CharacterSet: Unicode`, so its `L""` literals
 match the `*W` variants these calls resolve to. Copperline does not define
 `UNICODE`, which would make the opposite mismatch possible wherever the sources
 pass narrow strings, so each of these becomes an explicit `*A` call with a
-narrow literal instead -- exactly as Amiberry does:
+narrow literal instead:
 
 - `ArduinoFloppyBridge.cpp`: `RegQueryValueEx` / `RegSetValueEx` (2 calls)
 - `GreaseWeazleBridge.cpp`: the same pair, twice over (4 calls)

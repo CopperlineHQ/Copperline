@@ -27,8 +27,8 @@ pub(super) type BridgeDriverHandle = *mut c_void;
 /// How hard the driver works to stay faithful to the disk's real timing.
 ///
 /// `Fast`, `Compatible` and `Stalling` are all read modes and Copperline
-/// offers all three -- as Normal, Compatible and Stalling, which is what
-/// Amiberry's drive-type list calls them. The first two differ only in whether
+/// offers all three, the first under the name `normal`. The first two differ
+/// only in whether
 /// the capture waits for the index: `Compatible` does, so a revolution begins
 /// where the real one does; `Fast` does not, which is quicker but leaves the
 /// revolution's two ends meeting mid-sector -- handled by reading the following

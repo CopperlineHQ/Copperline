@@ -134,9 +134,8 @@ as reported by the driver itself.
 
 ### Read mode
 
-The three modes are named and ordered as Amiberry's drive-type list has
-them, so a setting means the same thing in either emulator. Upstream's own
-enum calls `normal` "Fast"; that spelling is accepted in the config file too.
+The driver's own enum calls `normal` "Fast"; that spelling is accepted in the
+config file too.
 
 `normal`, the default, captures wherever the head happens to be, saving the
 wait for the index -- most of a revolution on every track it has not read
@@ -171,22 +170,22 @@ if a disk reads badly without the index to anchor it.
 until a track is ready instead of answering "not yet". The wait lands on the
 emulated machine, which stops -- pointer and all -- for as long as it takes.
 
-Amiberry's `turbo` is refused by name and is absent from the launcher's
-list. It is not a read mode at all -- it answers AmigaDOS calls instead of
-reading the disk, which is no use to an emulator that models the drive.
+The driver's fourth mode, `turbo`, is refused by name and is absent from the
+launcher's list. It is not a read mode at all -- it answers AmigaDOS calls
+instead of reading the disk, which is no use to an emulator that models the
+drive.
 
 ### Auto-cache and smart speed
 
 `bridge_auto_cache` caches disk data in the background while the drive is
-idle -- Amiberry calls the same setting "Auto-Cache". It is off by default, as it is upstream and in Amiberry: during a boot
-the drive is never idle, so it buys very little (measurably nothing on a
-Workbench 1.3 boot), and it moves the real head about on its own.
+idle. It is off by default, as it is in the driver: during a boot the drive is
+never idle, so there is little for it to do, and it moves the real head about
+on its own.
 
 `bridge_smart_speed` lets the driver time each track and, where the data rate
 is uniform -- so nothing is leaning on the timing for copy protection -- offer
-it at a higher speed. Amiberry calls the same setting "dynamically switch on
-Turbo". It changes how the driver captures but not what Copperline
-does with the result: cell timing is derived from the length of the
+it at a higher speed. It changes how the driver captures but not what
+Copperline does with the result: cell timing is derived from the length of the
 revolution handed back, so the per-cell speed it makes available goes unused.
 
 ## Write protection

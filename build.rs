@@ -50,8 +50,7 @@ fn build_floppybridge() {
     // Upstream's own source list, minus two files: `floppybridge_lib.cpp` is
     // the client-side loader for the shared build, which linking directly
     // replaces, and `ADFBridge.cpp` backs a bridge onto an ADF file, which is
-    // what Copperline's own image path already does. Amiberry compiles the
-    // same twelve.
+    // what Copperline's own image path already does.
     const SOURCES: [&str; 12] = [
         "ArduinoFloppyBridge.cpp",
         "ArduinoInterface.cpp",

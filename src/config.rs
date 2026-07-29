@@ -1042,7 +1042,7 @@ pub enum BridgeSpeedMode {
     /// followed it, as the head itself would have carried on into. Reads the
     /// same disks as `Compatible` and reaches a Workbench 1.3 desktop
     /// appreciably sooner.
-    /// The default, as it is in Amiberry.
+    /// The default.
     #[default]
     Normal,
     /// Captures each track from the index, so a revolution begins where the
@@ -1050,7 +1050,6 @@ pub enum BridgeSpeedMode {
     /// as a captured image's do. Waiting for the index costs most of a
     /// revolution on every track, which is why `Normal` is the default; reach
     /// for this one if a disk reads badly without the index to anchor it.
-    /// Amiberry calls this Compatible too.
     Compatible,
     /// As `Compatible`, but the driver holds the caller up until the track is
     /// ready instead of answering "not yet". The wait lands on the emulated
@@ -1102,13 +1101,12 @@ pub struct FloppyBridgeConfig {
     pub cable: BridgeCable,
     /// Lets the driver time each track and, where the data rate is uniform --
     /// so nothing is leaning on the timing for copy protection -- offer it at
-    /// a higher speed. Amiberry calls this "dynamically switch on Turbo".
-    /// It changes how the driver captures, but not what Copperline does with
+    /// a higher speed. It changes how the driver captures, but not what Copperline does with
     /// the result: cell timing is derived from the length of the revolution it
     /// hands back, so the per-cell speed this makes available goes unused.
     pub smart_speed: bool,
     /// Read tracks ahead in the background while the drive is otherwise idle.
-    /// Off by default, as upstream and Amiberry have it. It buys little during
+    /// Off by default, as the driver has it. It buys little during
     /// a boot -- the drive is never idle then -- and moves the real head about
     /// on its own.
     pub auto_cache: bool,
@@ -4407,8 +4405,8 @@ fn parse_floppy_bridge(idx: usize, spec: &str, raw: &RawFloppyDrive) -> Result<F
         None => BridgeSpeedMode::default(),
         Some(s) if s.eq_ignore_ascii_case("compatible") => BridgeSpeedMode::Compatible,
         Some(s) if s.eq_ignore_ascii_case("stalling") => BridgeSpeedMode::Stalling,
-        // Upstream's enum calls this one Fast; Amiberry's drive-type list, and
-        // so Copperline's, calls it Normal. Both spellings are accepted.
+        // The driver's own enum calls this one Fast. Copperline calls it
+        // normal; both spellings are accepted.
         Some(s) if s.eq_ignore_ascii_case("normal") || s.eq_ignore_ascii_case("fast") => {
             BridgeSpeedMode::Normal
         }

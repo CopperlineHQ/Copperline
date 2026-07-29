@@ -589,9 +589,9 @@ floppy_sounds_volume = 100
 # bridge_port = "/dev/ttyACM0"   # omit to auto-detect the interface
 # bridge_cable = "a"             # a/b (IBM PC) or 0..3 (Shugart)
 # bridge_density = "auto"        # auto/dd/hd
-# bridge_mode = "normal"         # normal/compatible/stalling, named as Amiberry
-#                                # names them. normal, the default, skips the
-#                                # wait for the index and is appreciably
-#                                # quicker; stalling blocks the emulated machine
+# bridge_mode = "normal"         # normal/compatible/stalling. normal, the
+#                                # default, skips the wait for the index and is
+#                                # appreciably quicker; stalling blocks the
+#                                # emulated machine until each track is ready
 # bridge_smart_speed = false
 # bridge_auto_cache = false      # cache disk data while the drive is idle
