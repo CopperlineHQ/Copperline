@@ -1547,8 +1547,9 @@ pub(super) fn draw_reset_glyph(frame: &mut [u8], cx: usize, cy: usize, texture_s
 
     // Arrowhead anchored to the arc end: base centred on the ring path and
     // perpendicular to the tangent, tip continuing the direction of travel.
-    // The arc's rounded end cap lands entirely inside the triangle, so the
-    // stroke reads as one arc ending in an arrow.
+    // The forward half of the stroke's rounded end cap falls inside the
+    // triangle and the rear half coincides with the final arc segment's own
+    // stroke, so the glyph reads as one arc ending in an arrowhead.
     let end = ang(1.0);
     let ex = ccx + radius * end.cos();
     let ey = ccy + radius * end.sin();
