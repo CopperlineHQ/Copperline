@@ -17,6 +17,61 @@ fn h_row_for(control: ControlState) -> HWindowRow {
 }
 
 #[test]
+fn static_h_window_transition_solver_matches_counter_replay() {
+    let mut random = 0xC0_77_E2_11u32;
+    let beam_lines = [0, 1, 8, 9, PAL_VISIBLE_LINE0, 255, 311];
+
+    for case in 0..4096 {
+        random = random.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let hstart = ((random >> 3) & 0x1FF) as u16;
+        random = random.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let hstop = ((random >> 7) & 0x1FF) as u16;
+        let control = ControlState {
+            diwstrt: hstart & 0x00FF,
+            diwstop: hstop & 0x00FF,
+            diwhigh: DiwHigh::ecs_explicit(((hstart >> 8) << 5) | ((hstop >> 8) << 13)),
+            ..ControlState::default()
+        };
+        let beam_line = beam_lines[case % beam_lines.len()];
+        let is_ecs = case & 1 != 0;
+        // A segment whose effect lies beyond the line selects the original
+        // per-tick implementation without changing its comparator values.
+        let inert_segment = [ControlSegment { x: 2000, control }];
+
+        for initial_flop in [false, true] {
+            let mut solved_flop = initial_flop;
+            let mut solved = HWindowRow::default();
+            scan_h_window_line(
+                &mut solved_flop,
+                beam_line,
+                is_ecs,
+                control,
+                &[],
+                Some(&mut solved),
+            );
+
+            let mut replayed_flop = initial_flop;
+            let mut replayed = HWindowRow::default();
+            scan_h_window_line(
+                &mut replayed_flop,
+                beam_line,
+                is_ecs,
+                control,
+                &inert_segment,
+                Some(&mut replayed),
+            );
+
+            assert_eq!(solved_flop, replayed_flop, "case {case}");
+            assert_eq!(solved.open_runs, replayed.open_runs, "case {case}");
+            assert_eq!(
+                solved.comparator_anchor, replayed.comparator_anchor,
+                "case {case}"
+            );
+        }
+    }
+}
+
+#[test]
 fn h_window_flop_carries_open_past_line_with_unreachable_hstart() {
     // Standard window rows, then a late-line DIWSTOP rewrite to $2C00
     // before the standard stop matched: the flip-flop stays open across
@@ -1542,6 +1597,7 @@ fn late_lowres_ddf_stop_hold_keeps_left_origin_unadvanced() {
         &mut playfield_mask,
         &mut collision_pixels,
         &mut CollisionLookup::new(),
+        &mut IndexedOutputCache::default(),
         &mut clxdat,
         palette,
         &[],
@@ -5969,6 +6025,7 @@ fn planned_ham_dma_uses_current_bitplane_sample_at_fetch_edge() {
         &mut playfield_mask,
         &mut collision_pixels,
         &mut CollisionLookup::new(),
+        &mut IndexedOutputCache::default(),
         &mut clxdat,
         palette,
         &[],
@@ -6019,6 +6076,7 @@ fn planned_ham_dma_advances_hold_through_edge_fetch_phase() {
         &mut playfield_mask,
         &mut collision_pixels,
         &mut CollisionLookup::new(),
+        &mut IndexedOutputCache::default(),
         &mut clxdat,
         palette,
         &[],
@@ -6067,6 +6125,7 @@ fn planned_ham_dma_ignores_extra_early_ddf_history_before_diw() {
         &mut playfield_mask,
         &mut collision_pixels,
         &mut CollisionLookup::new(),
+        &mut IndexedOutputCache::default(),
         &mut clxdat,
         palette,
         &[],
@@ -6121,6 +6180,7 @@ fn bplcon1_write_at_diw_right_edge_does_not_retap_current_ham_line() {
         &mut playfield_mask,
         &mut collision_pixels,
         &mut CollisionLookup::new(),
+        &mut IndexedOutputCache::default(),
         &mut clxdat,
         palette,
         &[],
@@ -6187,6 +6247,7 @@ fn ham_select_lands_in_the_colour_write_domain() {
         &mut playfield_mask,
         &mut collision_pixels,
         &mut CollisionLookup::new(),
+        &mut IndexedOutputCache::default(),
         &mut clxdat,
         palette,
         &[],
@@ -6230,6 +6291,7 @@ fn bplcon2_color_key_uses_color_register_transparency_bit() {
         &mut playfield_mask,
         &mut collision_pixels,
         &mut CollisionLookup::new(),
+        &mut IndexedOutputCache::default(),
         &mut clxdat,
         palette,
         &[],
@@ -6271,6 +6333,7 @@ fn bplcon2_bitplane_key_uses_selected_bitplane_sample() {
         &mut playfield_mask,
         &mut collision_pixels,
         &mut CollisionLookup::new(),
+        &mut IndexedOutputCache::default(),
         &mut clxdat,
         palette,
         &[],
@@ -6312,6 +6375,7 @@ fn bplcon3_zdclken_disables_internal_genlock_keys() {
         &mut playfield_mask,
         &mut collision_pixels,
         &mut CollisionLookup::new(),
+        &mut IndexedOutputCache::default(),
         &mut clxdat,
         palette,
         &[],
@@ -6349,6 +6413,7 @@ fn planned_playfield_line_feeds_clxdat_from_rendered_dual_playfield_sample() {
         &mut playfield_mask,
         &mut collision_pixels,
         &mut CollisionLookup::new(),
+        &mut IndexedOutputCache::default(),
         &mut clxdat,
         Palette::new(),
         &[],
@@ -6480,6 +6545,56 @@ fn denise_playfield_output_selects_ehb_ham_and_dual_playfield_colors() {
             pf_mask: 2,
         }
     );
+}
+
+#[test]
+fn indexed_output_cache_matches_history_independent_color_resolution() {
+    let mut palette = Palette::new();
+    for idx in 0..palette.len() {
+        let hi = (((idx * 7) as u16) & 0x0F00)
+            | (((idx * 11) as u16) & 0x00F0)
+            | ((idx * 13) as u16 & 0x000F);
+        let lo = (((idx * 3) as u16) & 0x0F00)
+            | (((idx * 5) as u16) & 0x00F0)
+            | ((idx * 9) as u16 & 0x000F);
+        palette.write_entry(idx, false, hi);
+        palette.write_entry(idx, true, lo);
+    }
+    let controls = [
+        ControlState {
+            bplcon0: 0x6000, // OCS EHB
+            ..ControlState::default()
+        },
+        ControlState {
+            bplcon0: 0x2400, // OCS dual playfield
+            bplcon3: BPLCON3_PF2OF_DEFAULT,
+            ..ControlState::default()
+        },
+        ControlState {
+            agnus_revision: AgnusRevision::AgaAlice,
+            bplcon0: 0x0010, // AGA 8-plane indexed
+            bplcon4: 0x5A00, // BPLAM
+            ..ControlState::default()
+        },
+        ControlState {
+            agnus_revision: AgnusRevision::AgaAlice,
+            bplcon0: 0x6000, // AGA EHB
+            ..ControlState::default()
+        },
+    ];
+    let mut cache = IndexedOutputCache::default();
+
+    for control in controls {
+        let outputs = cache.outputs(control, &palette);
+        for idx in u8::MIN..=u8::MAX {
+            let mut expected_history = 0x0012_3456;
+            let expected = denise_playfield_output(control, &palette, idx, &mut expected_history);
+            let mut cached_history = 0x0065_4321;
+            let cached = cached_indexed_output(outputs, idx, &mut cached_history);
+            assert_eq!(cached, expected, "index {idx:#04x}, control {control:?}");
+            assert_eq!(cached_history, expected.color);
+        }
+    }
 }
 
 #[test]

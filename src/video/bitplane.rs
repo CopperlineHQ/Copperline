@@ -512,6 +512,113 @@ fn diw_segment_effect_tick(seg_x: usize) -> i32 {
         + H_COUNTER_FB_START_TICK
 }
 
+fn h_counter_match_tick(start: i32, target: i32, free_run: bool) -> Option<i32> {
+    if free_run {
+        let tick = (target - start) & 0x1FF;
+        return (tick < H_COUNTER_TICKS_PER_LINE).then_some(tick);
+    }
+
+    let mut best = None;
+    if (start..H_COUNTER_WRAP).contains(&target) {
+        best = Some(target - start);
+    }
+    if (H_COUNTER_WRAP_TARGET..H_COUNTER_WRAP).contains(&target) {
+        let tick = H_COUNTER_WRAP - start + target - H_COUNTER_WRAP_TARGET;
+        if tick < H_COUNTER_TICKS_PER_LINE && best.is_none_or(|previous| tick < previous) {
+            best = Some(tick);
+        }
+    }
+    best.filter(|&tick| tick < H_COUNTER_TICKS_PER_LINE)
+}
+
+/// Constant-register horizontal-window scan. There are at most two comparator
+/// matches on a line, so solve their ticks directly instead of stepping all
+/// 454 Denise counter positions. Rows with a mid-line DIW write retain the
+/// per-tick replay below.
+fn scan_static_h_window_line(
+    flop: &mut bool,
+    beam_line: i32,
+    is_ecs: bool,
+    hstrt: i32,
+    hstop: i32,
+    mut record: Option<&mut HWindowRow>,
+) {
+    let free_run = beam_line < 9 && !is_ecs;
+    let counter_start = if free_run {
+        (H_COUNTER_LINE_ORIGIN + beam_line * 0x1C6) & 0x1FF
+    } else {
+        H_COUNTER_LINE_ORIGIN - active_canvas_shift_h()
+    };
+    let start_tick = h_counter_match_tick(counter_start, hstrt, free_run);
+    let stop_tick = h_counter_match_tick(counter_start, hstop, free_run);
+    let mut event_ticks = [
+        start_tick.unwrap_or(i32::MAX),
+        stop_tick.unwrap_or(i32::MAX),
+    ];
+    event_ticks.sort_unstable();
+
+    let mut framebuffer_started = false;
+    let mut open_from = None;
+    let mut event_idx = 0;
+    while event_idx < event_ticks.len() {
+        let tick = event_ticks[event_idx];
+        if tick == i32::MAX {
+            break;
+        }
+        while event_idx + 1 < event_ticks.len() && event_ticks[event_idx + 1] == tick {
+            event_idx += 1;
+        }
+        if !framebuffer_started && tick >= H_COUNTER_FB_START_TICK {
+            framebuffer_started = true;
+            if record.is_some() && *flop {
+                open_from = Some(0);
+            }
+        }
+
+        let was_open = *flop;
+        if start_tick == Some(tick) {
+            *flop = true;
+        }
+        if stop_tick == Some(tick) {
+            *flop = false;
+        }
+        if *flop != was_open {
+            if let Some(row) = record.as_deref_mut() {
+                let fb_tick = tick - H_COUNTER_FB_START_TICK;
+                if (0..FB_WIDTH as i32 / 2).contains(&fb_tick) {
+                    let x = (fb_tick * 2) as usize;
+                    if *flop {
+                        open_from = Some(x);
+                        if row.comparator_anchor.is_none() {
+                            row.comparator_anchor = Some(x);
+                        }
+                    } else if let Some(start) = open_from.take() {
+                        if x > start {
+                            row.open_runs.push((start, x));
+                        }
+                    }
+                } else if fb_tick >= FB_WIDTH as i32 / 2 && !*flop {
+                    if let Some(start) = open_from.take() {
+                        row.open_runs.push((start, FB_WIDTH));
+                    }
+                }
+            }
+        }
+        event_idx += 1;
+    }
+
+    if !framebuffer_started && record.is_some() && *flop {
+        open_from = Some(0);
+    }
+    if let Some(row) = record {
+        if let Some(start) = open_from {
+            if FB_WIDTH > start {
+                row.open_runs.push((start, FB_WIDTH));
+            }
+        }
+    }
+}
+
 /// Run the window flip-flop over one beam line, updating `flop` in place.
 /// When `record` is given, [start, end) open spans clipped to the
 /// framebuffer are appended to it.
@@ -523,6 +630,16 @@ fn scan_h_window_line(
     segs: &[ControlSegment],
     mut record: Option<&mut HWindowRow>,
 ) {
+    if segs.is_empty() {
+        return scan_static_h_window_line(
+            flop,
+            beam_line,
+            is_ecs,
+            control.diw_h_start() as i32,
+            control.diw_h_stop() as i32,
+            record,
+        );
+    }
     let free_run = beam_line < 9 && !is_ecs;
     let fb_start_tick = H_COUNTER_FB_START_TICK;
     // On a programmable (VARBEAMEN) scan Denise's counter restarts with
@@ -4224,6 +4341,7 @@ pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
         // predecessor was border can suppress BPLCON1 scroll pulling leading
         // same-line pre-fetch samples into view.
         let mut last_playfield_line: Option<usize> = None;
+        let mut indexed_output_cache = IndexedOutputCache::default();
         for y in 0..rows {
             let row_control_segments = &control_segments[y];
             let Some((x_start, x_stop)) = line_display_window_bounds(
@@ -4517,6 +4635,7 @@ pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
                 &mut playfield_mask,
                 &mut collision_pixels,
                 &mut collision_lookup,
+                &mut indexed_output_cache,
                 &mut clxdat,
                 palette,
                 segments,
@@ -4790,6 +4909,7 @@ fn render_planned_playfield_line(
     playfield_mask: &mut [u8],
     collision_pixels: &mut [CollisionPixel],
     collision_lookup: &mut CollisionLookup,
+    indexed_output_cache: &mut IndexedOutputCache,
     clxdat: &mut u16,
     mut palette: Palette,
     palette_segments: &[PaletteSegment],
@@ -4926,6 +5046,11 @@ fn render_planned_playfield_line(
         let delays = std::array::from_fn(|plane| sample_control.sample_delay_for_plane(plane));
         let hold_final_fetch_sample = pixel_control.holds_final_lowres_fetch_sample_at_diwstop();
         let ham_mode = output_control.hold_and_modify();
+        let indexed_outputs = if ham_mode {
+            None
+        } else {
+            Some(indexed_output_cache.outputs(output_control, &palette))
+        };
         let ham_history_start_native_x = if ham_mode {
             pixel_control.ham_history_start_native_x(
                 pixel_diw_h_start,
@@ -4999,13 +5124,21 @@ fn render_planned_playfield_line(
             let (sample, output, shres_pair) = if shres {
                 let left = plan.sample_prepared(nplanes, &delays, min_fetch_x, native_x);
                 let right = plan.sample_prepared(nplanes, &delays, min_fetch_x, native_x + 1);
-                let (left_out, right_out) = denise_shres_playfield_output_pair(
-                    output_control,
-                    &palette,
-                    left.idx & plane_mask,
-                    right.idx & plane_mask,
-                    &mut ham_color,
-                );
+                let (left_out, right_out) = if let Some(outputs) = indexed_outputs {
+                    let left_out =
+                        cached_indexed_output(outputs, left.idx & plane_mask, &mut ham_color);
+                    let right_out =
+                        cached_indexed_output(outputs, right.idx & plane_mask, &mut ham_color);
+                    (left_out, right_out)
+                } else {
+                    denise_shres_playfield_output_pair(
+                        output_control,
+                        &palette,
+                        left.idx & plane_mask,
+                        right.idx & plane_mask,
+                        &mut ham_color,
+                    )
+                };
                 (
                     shres_composite_sample(left, right),
                     blend_shres_outputs(left_out, right_out),
@@ -5020,12 +5153,16 @@ fn render_planned_playfield_line(
                     hold_final_fetch_sample,
                 );
                 let ham_before = ham_color;
-                let output = denise_playfield_output(
-                    output_control,
-                    &palette,
-                    sample.idx & plane_mask,
-                    &mut ham_color,
-                );
+                let output = if let Some(outputs) = indexed_outputs {
+                    cached_indexed_output(outputs, sample.idx & plane_mask, &mut ham_color)
+                } else {
+                    denise_playfield_output(
+                        output_control,
+                        &palette,
+                        sample.idx & plane_mask,
+                        &mut ham_color,
+                    )
+                };
                 if let Some(spec) = ham_diag {
                     if x >= spec.x_start
                         && x < spec.x_stop

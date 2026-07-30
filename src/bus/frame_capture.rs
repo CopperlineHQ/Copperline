@@ -81,11 +81,17 @@ impl Bus {
             &mut self.current_frame_bitplane_rows,
             empty_captured_bitplane_rows(),
         );
-        self.last_frame_bitplane_rows = if promote_render_frame {
+        let next_bitplane_rows = if promote_render_frame {
             std::sync::Arc::new(current_bitplane_rows)
         } else {
+            self.recycle_captured_bitplane_rows(current_bitplane_rows);
             std::sync::Arc::new(empty_captured_bitplane_rows())
         };
+        let old_bitplane_rows =
+            std::mem::replace(&mut self.last_frame_bitplane_rows, next_bitplane_rows);
+        if let Ok(rows) = std::sync::Arc::try_unwrap(old_bitplane_rows) {
+            self.recycle_captured_bitplane_rows(rows);
+        }
         self.last_frame_sprite_lines = if promote_render_frame {
             std::mem::take(&mut self.current_frame_sprite_lines)
         } else {
@@ -1284,16 +1290,26 @@ impl Bus {
         };
         if row_needs_init {
             let old_row = self.current_frame_bitplane_rows[fb_y].take();
-            let mut row = CapturedBitplaneRow {
-                nplanes: display_planes,
-                words_per_row,
-                planes: std::array::from_fn(|_| vec![0; words_per_row]),
-                fetch_origin_cck: None,
-            };
+            let mut row = self
+                .bitplane_row_pool
+                .pop()
+                .unwrap_or_else(|| CapturedBitplaneRow {
+                    nplanes: 0,
+                    words_per_row: 0,
+                    planes: std::array::from_fn(|_| Vec::new()),
+                    fetch_origin_cck: None,
+                });
+            row.nplanes = display_planes;
+            row.words_per_row = words_per_row;
+            row.fetch_origin_cck = None;
+            for plane in &mut row.planes {
+                plane.resize(words_per_row, 0);
+                plane.fill(0);
+            }
             for plane in dma_planes..display_planes {
                 row.planes[plane].fill(self.denise.bpldat[plane]);
             }
-            if let Some(old_row) = old_row {
+            if let Some(old_row) = old_row.as_ref() {
                 let copy_planes = old_row.nplanes.min(display_planes).min(8);
                 let copy_words = old_row.words_per_row.min(words_per_row);
                 for plane in 0..copy_planes {
@@ -1302,11 +1318,25 @@ impl Bus {
                 }
             }
             self.current_frame_bitplane_rows[fb_y] = Some(row);
+            if let Some(old_row) =
+                old_row.filter(|_| self.bitplane_row_pool.len() < MAX_VISIBLE_LINES)
+            {
+                self.bitplane_row_pool.push(old_row);
+            }
         }
         if let Some(row) = self.current_frame_bitplane_rows[fb_y].as_mut() {
             row.planes[plane][word_idx] = fetched;
         }
         row_needs_init
+    }
+
+    fn recycle_captured_bitplane_rows(&mut self, rows: Vec<Option<CapturedBitplaneRow>>) {
+        for row in rows.into_iter().flatten() {
+            if self.bitplane_row_pool.len() == MAX_VISIBLE_LINES {
+                break;
+            }
+            self.bitplane_row_pool.push(row);
+        }
     }
 
     pub(super) fn advance_display_dma_ptrs(

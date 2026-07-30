@@ -173,6 +173,42 @@ fn bitplane_slot_plan_cache_keeps_recent_fetch_shapes() {
     }
 }
 
+#[test]
+fn wide_bitplane_hot_line_matches_dynamic_slot_arbitration() {
+    let mut bus = empty_bus();
+    bus.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+    bus.agnus.write_fmode(0x0003);
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
+    bus.agnus.vpos = 0x2C;
+    bus.denise.diwstrt = 0x2C81;
+    bus.denise.diwstop = 0x2DC1;
+    bus.denise.ddfstrt = 0x0030;
+    bus.denise.ddfstop = 0x00D0;
+    bus.denise.bplcon0 = 0x5000;
+
+    for hpos in 0..bus.agnus.current_line_cck() {
+        assert_eq!(
+            bus.bitplane_slot_active_at(bus.agnus.vpos, hpos),
+            bus.dynamic_bitplane_slot_active_at(bus.agnus.vpos, hpos),
+            "wide-FMODE slot mismatch at hpos {hpos:#04x}"
+        );
+    }
+    assert!(bus.wide_bitplane_hot_line.is_current(bus.agnus.vpos));
+
+    bus.ddf_seq_invalidate_line();
+    assert_eq!(
+        bus.wide_bitplane_dynamic_vpos.get(),
+        Some(bus.agnus.vpos),
+        "a mid-line fetch-register change must select the dynamic fallback"
+    );
+    for hpos in 0..bus.agnus.current_line_cck() {
+        assert_eq!(
+            bus.bitplane_slot_active_at(bus.agnus.vpos, hpos),
+            bus.dynamic_bitplane_slot_active_at(bus.agnus.vpos, hpos)
+        );
+    }
+}
+
 fn render_color_write_x(hpos: u32) -> usize {
     hpos.saturating_sub(RENDER_COLOR_WRITE_HPOS_FB0)
         .saturating_mul(4)

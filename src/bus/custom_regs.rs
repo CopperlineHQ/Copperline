@@ -1083,6 +1083,7 @@ impl Bus {
             // AGA Alice FMODE (write_fmode gates on the revision itself).
             0x1FC => {
                 self.agnus.write_fmode(val);
+                self.ddf_seq_invalidate_line();
                 if crate::envcfg::flag("COPPERLINE_DIAG_DISPLAY") {
                     log::info!(
                         "disp f={} v={} h={} FMODE={:#06X}",

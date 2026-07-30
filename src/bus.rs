@@ -592,6 +592,48 @@ impl Default for BitplaneSlotPlanCache {
     }
 }
 
+/// Read-mostly wide-FMODE bitplane ownership for one scanline. Lines without
+/// a fetch-affecting register write reuse the plan's complete slot mask
+/// directly; dynamic lines fall back to the block-delay-aware calculation.
+struct WideBitplaneHotLine {
+    valid: std::cell::Cell<bool>,
+    vpos: std::cell::Cell<u32>,
+    slot_mask: [std::cell::Cell<u64>; 4],
+}
+
+impl WideBitplaneHotLine {
+    fn new() -> Self {
+        Self {
+            valid: std::cell::Cell::new(false),
+            vpos: std::cell::Cell::new(0),
+            slot_mask: std::array::from_fn(|_| std::cell::Cell::new(0)),
+        }
+    }
+
+    fn is_current(&self, vpos: u32) -> bool {
+        self.valid.get() && self.vpos.get() == vpos
+    }
+
+    fn publish(&self, vpos: u32, slot_mask: [u64; 4]) {
+        self.valid.set(false);
+        for (destination, source) in self.slot_mask.iter().zip(slot_mask) {
+            destination.set(source);
+        }
+        self.vpos.set(vpos);
+        self.valid.set(true);
+    }
+
+    fn invalidate(&self) {
+        self.valid.set(false);
+    }
+}
+
+impl Default for WideBitplaneHotLine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 struct DisplaySpriteLineData {
     hstart: i32,
@@ -828,6 +870,11 @@ pub struct Bus {
     last_frame_chip_ram_writes: Vec<BeamChipRamWrite>,
     current_frame_bitplane_rows: Vec<Option<CapturedBitplaneRow>>,
     last_frame_bitplane_rows: std::sync::Arc<Vec<Option<CapturedBitplaneRow>>>,
+    /// Released completed-frame rows retained for their eight plane
+    /// allocations. Transient: captured contents are never reused, only the
+    /// backing capacities.
+    #[serde(skip)]
+    bitplane_row_pool: Vec<CapturedBitplaneRow>,
     current_frame_sprite_lines: Vec<CapturedSpriteLine>,
     current_frame_sprite_lines_by_y: Vec<Vec<CapturedSpriteLine>>,
     current_frame_sprite_collision_sources: Vec<Option<Vec<LiveSpriteCollisionSource>>>,
@@ -1104,6 +1151,13 @@ pub struct Bus {
     /// on each hit while keeping the `&self` owner-selection call graph intact.
     #[serde(skip)]
     bitplane_slot_plan_cache: BitplaneSlotPlanCache,
+    /// Complete slot mask for an unchanged wide-FMODE scanline.
+    #[serde(skip)]
+    wide_bitplane_hot_line: WideBitplaneHotLine,
+    /// Current line once a fetch-affecting register write makes the static
+    /// wide-FMODE mask ineligible.
+    #[serde(skip)]
+    wide_bitplane_dynamic_vpos: std::cell::Cell<Option<u32>>,
     /// Bitplane DDF sequencer flop state at the start of the current line
     /// (see src/bus/ddf_line.rs); carried across lines by the flop walk.
     ddf_seq_line_initial: std::cell::Cell<crate::chipset::ddf_sequencer::DdfState>,
@@ -2480,6 +2534,7 @@ impl Bus {
             last_frame_chip_ram_writes: Vec::new(),
             current_frame_bitplane_rows: empty_captured_bitplane_rows(),
             last_frame_bitplane_rows: std::sync::Arc::new(empty_captured_bitplane_rows()),
+            bitplane_row_pool: Vec::with_capacity(MAX_VISIBLE_LINES),
             current_frame_sprite_lines: Vec::new(),
             current_frame_sprite_lines_by_y: empty_captured_sprite_lines_by_y(),
             current_frame_sprite_collision_sources: empty_sprite_collision_sources(),
@@ -2572,6 +2627,8 @@ impl Bus {
             bitplane_bplcon0_delay: None,
             bitplane_ddfstart_miss: None,
             bitplane_slot_plan_cache: BitplaneSlotPlanCache::new(),
+            wide_bitplane_hot_line: WideBitplaneHotLine::new(),
+            wide_bitplane_dynamic_vpos: std::cell::Cell::new(None),
             ddf_seq_line_initial: std::cell::Cell::new(Default::default()),
             ddf_seq_line_start_regs: std::cell::Cell::new((0, 0)),
             ddf_seq_line_start_ctl: std::cell::Cell::new((false, 0)),
@@ -3566,6 +3623,7 @@ impl Bus {
         self.last_frame_chip_ram_writes.clear();
         self.current_frame_bitplane_rows = empty_captured_bitplane_rows();
         self.last_frame_bitplane_rows = std::sync::Arc::new(empty_captured_bitplane_rows());
+        self.bitplane_row_pool.clear();
         self.current_frame_sprite_lines.clear();
         clear_captured_sprite_lines_by_y(&mut self.current_frame_sprite_lines_by_y);
         self.current_frame_sprite_collision_sources = empty_sprite_collision_sources();
@@ -3694,6 +3752,8 @@ impl Bus {
         self.bitplane_dmacon_delay = None;
         self.bitplane_bplcon0_delay = None;
         self.bitplane_ddfstart_miss = None;
+        self.wide_bitplane_hot_line.invalidate();
+        self.wide_bitplane_dynamic_vpos.set(None);
         self.mem.overlay = true;
         // A 68000 RESET returns the A1000 WCS latch to boot mode (boot ROM at
         // $F80000, WCS writable) without clearing the WCS, so the boot ROM can

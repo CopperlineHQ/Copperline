@@ -853,6 +853,35 @@ impl Bus {
             let _ = vpos;
             return self.ddf_seq_slot_active_at(hpos);
         }
+        if hpos < SLOT_MASK_BITS && self.wide_bitplane_dynamic_vpos.get() != Some(vpos) {
+            if !self.wide_bitplane_hot_line.is_current(vpos) {
+                let mut slot_mask = [0; 4];
+                if display_window_contains_vpos(
+                    self.denise.diwstrt,
+                    self.denise.diwstop,
+                    self.effective_diwhigh(),
+                    vpos,
+                ) {
+                    let bplcon0 = self.effective_bitplane_bplcon0();
+                    if let Some(plan) = self.bitplane_slot_plan_for_bplcon0(bplcon0) {
+                        if !self.bitplane_ddfstart_missed_on_line(vpos, plan.start) {
+                            slot_mask = plan.slot_mask;
+                        }
+                    }
+                }
+                self.wide_bitplane_hot_line.publish(vpos, slot_mask);
+            }
+            return self.wide_bitplane_hot_line.slot_mask[(hpos / 64) as usize].get()
+                & (1u64 << (hpos % 64))
+                != 0;
+        }
+        self.dynamic_bitplane_slot_active_at(vpos, hpos)
+    }
+
+    /// Block-delay-aware fallback for a wide-FMODE line changed by a
+    /// fetch-affecting register write, and for programmable lines beyond the
+    /// precomputed 256-colour-clock mask.
+    pub(super) fn dynamic_bitplane_slot_active_at(&self, vpos: u32, hpos: u32) -> bool {
         // Bitplane DMA only runs inside the vertical display window (set at
         // DIWSTRT.V, cleared at DIWSTOP.V), so the top-border and vertical-
         // blank lines are free for the blitter/CPU. Rejecting this before the

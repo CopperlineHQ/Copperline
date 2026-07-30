@@ -482,6 +482,8 @@ impl Bus {
     pub(super) fn ddf_seq_invalidate_line(&self) {
         self.ddf_seq_hot_line.invalidate();
         *self.ddf_seq_line.borrow_mut() = None;
+        self.wide_bitplane_hot_line.invalidate();
+        self.wide_bitplane_dynamic_vpos.set(Some(self.agnus.vpos));
     }
 
     /// Record a register write reaching the sequencer this line.
@@ -694,6 +696,8 @@ impl Bus {
             self.denise.bplcon0,
         ));
         self.ddf_seq_writes.borrow_mut().clear();
+        self.wide_bitplane_dynamic_vpos.set(None);
+        self.wide_bitplane_hot_line.invalidate();
         // Keep the completed line as the candidate for static-plan reuse.
         // Only its vpos publication becomes stale at the rollover.
         self.ddf_seq_hot_line.invalidate();
