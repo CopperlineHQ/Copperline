@@ -94,8 +94,19 @@ impl BridgeBackend {
     /// Opening before the thread starts is intentional: configuration,
     /// permission, and missing-driver errors reach the startup caller.
     pub fn new(interface: &str, guest_mac: Option<[u8; 6]>) -> Result<Self> {
-        let mut adapter = platform::open(interface, guest_mac)
+        let adapter = platform::open(interface, guest_mac)
             .with_context(|| format!("opening bridge interface {interface:?}"))?;
+        Self::from_adapter(interface, adapter, guest_mac)
+    }
+
+    /// Finish backend construction around an already-open adapter. Keeping
+    /// the worker boundary independent of the platform opener lets tests use
+    /// an in-memory Ethernet peer while production still opens synchronously.
+    fn from_adapter(
+        interface: &str,
+        mut adapter: impl AdapterIo + 'static,
+        guest_mac: Option<[u8; 6]>,
+    ) -> Result<Self> {
         if let Some(mac) = guest_mac {
             adapter
                 .set_guest_mac(mac)
@@ -277,6 +288,9 @@ fn mac_filter(mac: [u8; 6]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
 
     const MAC: [u8; 6] = [0x02, 0, 0x10, 0, 0, 1];
 
@@ -285,6 +299,75 @@ mod tests {
         frame[..6].copy_from_slice(&dst);
         frame[6..12].copy_from_slice(&src);
         frame
+    }
+
+    #[derive(Default)]
+    struct FakeAdapterState {
+        sent: Vec<Vec<u8>>,
+        received: VecDeque<Vec<u8>>,
+        guest_macs: Vec<[u8; 6]>,
+    }
+
+    struct FakeAdapter {
+        state: Arc<Mutex<FakeAdapterState>>,
+    }
+
+    impl AdapterIo for FakeAdapter {
+        fn send(&mut self, frame: &[u8]) -> Result<()> {
+            self.state.lock().unwrap().sent.push(frame.to_vec());
+            Ok(())
+        }
+
+        fn receive(&mut self) -> Result<Option<Vec<u8>>> {
+            Ok(self.state.lock().unwrap().received.pop_front())
+        }
+
+        fn set_guest_mac(&mut self, mac: [u8; 6]) -> Result<()> {
+            self.state.lock().unwrap().guest_macs.push(mac);
+            Ok(())
+        }
+    }
+
+    fn wait_until(mut ready: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !ready() {
+            assert!(Instant::now() < deadline, "bridge worker timed out");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn worker_exchanges_frames_with_a_synthetic_adapter() {
+        let state = Arc::new(Mutex::new(FakeAdapterState::default()));
+        let adapter = FakeAdapter {
+            state: Arc::clone(&state),
+        };
+        let mut backend = BridgeBackend::from_adapter("synthetic", adapter, Some(MAC)).unwrap();
+        assert_eq!(state.lock().unwrap().guest_macs, vec![MAC]);
+
+        let outbound = frame([0xff; 6], MAC);
+        backend.send(&outbound);
+        wait_until(|| !state.lock().unwrap().sent.is_empty());
+        assert_eq!(state.lock().unwrap().sent, vec![outbound]);
+
+        let captured_echo = frame([0xff; 6], MAC);
+        let inbound = frame(MAC, [0x02, 0, 0, 0, 0, 2]);
+        {
+            let mut state = state.lock().unwrap();
+            state.received.push_back(captured_echo);
+            state.received.push_back(inbound.clone());
+        }
+        let mut delivered = None;
+        wait_until(|| {
+            delivered = backend.poll();
+            delivered.is_some()
+        });
+        assert_eq!(delivered, Some(inbound));
+        assert!(backend.poll().is_none(), "capture echo must be suppressed");
+
+        let replacement = [0x02, 0, 0x20, 0, 0, 1];
+        backend.set_guest_mac(replacement);
+        wait_until(|| state.lock().unwrap().guest_macs.contains(&replacement));
     }
 
     #[test]

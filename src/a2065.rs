@@ -571,6 +571,12 @@ impl A2065 {
 mod tests {
     use super::*;
 
+    #[cfg(any(
+        all(feature = "net-nat", not(target_arch = "wasm32")),
+        all(feature = "net-bridge", target_os = "linux")
+    ))]
+    const TEST_MAC: [u8; 6] = [0x02, 0x00, 0x10, 0x00, 0x00, 0x01];
+
     fn host_mem() -> crate::memory::Memory {
         crate::memory::Memory {
             chip_ram: vec![0u8; 0x100],
@@ -621,9 +627,9 @@ mod tests {
 
         // Init block: MODE=0, PADR (MAC), LADRF=0, RDRA/RLEN, TDRA/TLEN.
         put(board, mem, iadr, 0); // mode
-        put(board, mem, iadr + 2, 0x0201); // PADR word0 (low-first): 02,01? test only
-        put(board, mem, iadr + 4, 0x0403);
-        put(board, mem, iadr + 6, 0x0605);
+        put(board, mem, iadr + 2, 0x0002);
+        put(board, mem, iadr + 4, 0x0010);
+        put(board, mem, iadr + 6, 0x0100);
         // RX ring: RLEN log2 = 0 (1 entry) in bits 13-15.
         put(board, mem, iadr + 0x10, rx_ring as u16);
         // High word: RLEN log2 = 0 (1 entry) in bits 13-15, RDRA[23:16] in 0-7.
@@ -650,6 +656,95 @@ mod tests {
         write_csr(board, mem, 1, iadr as u16);
         write_csr(board, mem, 2, (iadr >> 16) as u16);
         (tx_buf, rx_buf)
+    }
+
+    #[cfg(any(
+        all(feature = "net-nat", not(target_arch = "wasm32")),
+        all(feature = "net-bridge", target_os = "linux")
+    ))]
+    fn transmit_single_frame(
+        board: &mut A2065,
+        mem: &mut crate::memory::Memory,
+        tx_buf: u32,
+        frame: &[u8],
+    ) {
+        assert!(frame.len() <= 0x0FFF);
+        {
+            let mut host = DeviceHost::new(mem);
+            for (i, byte) in frame.iter().enumerate() {
+                board.write(RAM_BASE + tx_buf + i as u32, 1, u32::from(*byte), &mut host);
+            }
+            board.write(
+                RAM_BASE + 0x204,
+                2,
+                u32::from(
+                    0xF000 | ((!u16::try_from(frame.len()).unwrap()).wrapping_add(1) & 0x0FFF),
+                ),
+                &mut host,
+            );
+            board.write(
+                RAM_BASE + 0x202,
+                2,
+                u32::from(u16::from(DESC_OWN | DESC_STP | DESC_ENP) << 8),
+                &mut host,
+            );
+        }
+        write_csr(board, mem, 0, CSR0_TDMD | CSR0_INEA);
+    }
+
+    #[cfg(any(
+        all(feature = "net-nat", not(target_arch = "wasm32")),
+        all(feature = "net-bridge", target_os = "linux")
+    ))]
+    fn wait_for_single_frame(
+        board: &mut A2065,
+        mem: &mut crate::memory::Memory,
+        rx_buf: u32,
+    ) -> Vec<u8> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            {
+                let mut host = DeviceHost::new(mem);
+                board.tick(1, &mut host);
+            }
+            if read_csr(board, mem, 0) & CSR0_RINT != 0 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "network reply did not reach the A2065 RX ring"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        let length = {
+            let mut host = DeviceHost::new(mem);
+            let count = board.read(RAM_BASE + 0x106, 2, &mut host) as usize & 0x0FFF;
+            count.checked_sub(FCS_LEN).expect("RX count includes FCS")
+        };
+        let mut frame = Vec::with_capacity(length);
+        let mut host = DeviceHost::new(mem);
+        for i in 0..length {
+            frame.push(board.read(RAM_BASE + rx_buf + i as u32, 1, &mut host) as u8);
+        }
+        frame
+    }
+
+    #[cfg(all(feature = "net-bridge", target_os = "linux"))]
+    fn arp_request(sender_ip: [u8; 4], target_ip: [u8; 4]) -> Vec<u8> {
+        let mut frame = vec![0u8; 60];
+        frame[..6].fill(0xFF);
+        frame[6..12].copy_from_slice(&TEST_MAC);
+        frame[12..14].copy_from_slice(&[0x08, 0x06]); // ARP
+        frame[14..16].copy_from_slice(&[0x00, 0x01]); // Ethernet
+        frame[16..18].copy_from_slice(&[0x08, 0x00]); // IPv4
+        frame[18] = 6;
+        frame[19] = 4;
+        frame[20..22].copy_from_slice(&[0x00, 0x01]); // request
+        frame[22..28].copy_from_slice(&TEST_MAC);
+        frame[28..32].copy_from_slice(&sender_ip);
+        frame[38..42].copy_from_slice(&target_ip);
+        frame
     }
 
     #[test]
@@ -782,9 +877,9 @@ mod tests {
             board.write(RAM_BASE + addr, 2, u32::from(w), &mut host);
         };
         put(board, mem, iadr, mode);
-        put(board, mem, iadr + 2, 0x0201);
-        put(board, mem, iadr + 4, 0x0403);
-        put(board, mem, iadr + 6, 0x0605);
+        put(board, mem, iadr + 2, 0x0002);
+        put(board, mem, iadr + 4, 0x0010);
+        put(board, mem, iadr + 6, 0x0100);
         put(board, mem, iadr + 0x10, rx_ring as u16);
         put(
             board,
@@ -1048,6 +1143,102 @@ mod tests {
         assert_eq!(board.read(RAM_BASE + 0x1000 + 7, 1, &mut host), 0);
         let d0 = rx_desc_status(&mut board, &mut mem, 0);
         assert_eq!(d0 & (DESC_STP | DESC_ENP), DESC_STP | DESC_ENP);
+    }
+
+    #[cfg(all(feature = "net-nat", not(target_arch = "wasm32")))]
+    #[test]
+    fn a2065_nat_udp_round_trip_reaches_the_rx_ring() {
+        use smoltcp::phy::ChecksumCapabilities;
+        use smoltcp::wire::{
+            EthernetAddress, EthernetFrame, EthernetProtocol, IpProtocol, Ipv4Packet, Ipv4Repr,
+            UdpPacket, UdpRepr,
+        };
+
+        let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let peer_port = peer.local_addr().unwrap().port();
+        let guest_port = 49_152;
+        let payload = b"marco";
+        let checksum = ChecksumCapabilities::default();
+        let mut outbound = vec![0u8; 14 + 20 + 8 + payload.len()];
+        let mut eth = EthernetFrame::new_unchecked(&mut outbound[..]);
+        eth.set_src_addr(EthernetAddress(TEST_MAC));
+        eth.set_dst_addr(crate::net::nat::GATEWAY_MAC);
+        eth.set_ethertype(EthernetProtocol::Ipv4);
+        let ip_repr = Ipv4Repr {
+            src_addr: crate::net::nat::GUEST_IP,
+            dst_addr: crate::net::nat::GATEWAY_IP,
+            next_header: IpProtocol::Udp,
+            payload_len: 8 + payload.len(),
+            hop_limit: 64,
+        };
+        let mut ip = Ipv4Packet::new_unchecked(eth.payload_mut());
+        ip_repr.emit(&mut ip, &checksum);
+        let udp_repr = UdpRepr {
+            src_port: guest_port,
+            dst_port: peer_port,
+        };
+        udp_repr.emit(
+            &mut UdpPacket::new_unchecked(ip.payload_mut()),
+            &crate::net::nat::GUEST_IP.into(),
+            &crate::net::nat::GATEWAY_IP.into(),
+            payload.len(),
+            |buffer| buffer.copy_from_slice(payload),
+            &checksum,
+        );
+
+        let mut board = A2065::new(NetConfig::Nat).unwrap();
+        let mut mem = host_mem();
+        let (tx_buf, rx_buf) = set_up_rings(&mut board, &mut mem);
+        write_csr(&mut board, &mut mem, 0, CSR0_INIT);
+        write_csr(&mut board, &mut mem, 0, CSR0_STRT | CSR0_INEA);
+        transmit_single_frame(&mut board, &mut mem, tx_buf, &outbound);
+
+        let mut host_buffer = [0u8; 64];
+        let (received, from) = peer.recv_from(&mut host_buffer).unwrap();
+        assert_eq!(&host_buffer[..received], payload);
+        peer.send_to(b"polo", from).unwrap();
+
+        let inbound = wait_for_single_frame(&mut board, &mut mem, rx_buf);
+        let eth = EthernetFrame::new_checked(&inbound[..]).unwrap();
+        assert_eq!(eth.src_addr(), crate::net::nat::GATEWAY_MAC);
+        assert_eq!(eth.dst_addr(), EthernetAddress(TEST_MAC));
+        let ip = Ipv4Packet::new_checked(eth.payload()).unwrap();
+        assert_eq!(ip.src_addr(), crate::net::nat::GATEWAY_IP);
+        assert_eq!(ip.dst_addr(), crate::net::nat::GUEST_IP);
+        let udp = UdpPacket::new_checked(ip.payload()).unwrap();
+        assert_eq!(udp.src_port(), peer_port);
+        assert_eq!(udp.dst_port(), guest_port);
+        assert_eq!(udp.payload(), b"polo");
+        assert!(board.int2_line());
+    }
+
+    #[cfg(all(feature = "net-bridge", target_os = "linux"))]
+    #[test]
+    #[ignore = "needs the cl-a2065/cl-peer veth pair and CAP_NET_RAW"]
+    fn a2065_bridge_veth_round_trip_reaches_the_rx_ring() {
+        let mut board = A2065::new(NetConfig::Bridge {
+            interface: "cl-a2065".into(),
+        })
+        .unwrap();
+        let mut mem = host_mem();
+        let (tx_buf, rx_buf) = set_up_rings(&mut board, &mut mem);
+        write_csr(&mut board, &mut mem, 0, CSR0_INIT);
+        write_csr(&mut board, &mut mem, 0, CSR0_STRT | CSR0_INEA);
+        let request = arp_request([192, 0, 2, 2], [192, 0, 2, 1]);
+        transmit_single_frame(&mut board, &mut mem, tx_buf, &request);
+
+        let reply = wait_for_single_frame(&mut board, &mut mem, rx_buf);
+        assert!(reply.len() >= 42);
+        assert_eq!(&reply[..6], &TEST_MAC);
+        assert_eq!(&reply[12..14], &[0x08, 0x06]); // ARP
+        assert_eq!(&reply[20..22], &[0x00, 0x02]); // reply
+        assert_eq!(&reply[28..32], &[192, 0, 2, 1]); // sender IP
+        assert_eq!(&reply[32..38], &TEST_MAC); // target MAC
+        assert_eq!(&reply[38..42], &[192, 0, 2, 2]); // target IP
+        assert_eq!(&reply[6..12], &reply[22..28]); // Ethernet source = ARP SHA
+        assert!(board.int2_line());
     }
 
     #[test]
