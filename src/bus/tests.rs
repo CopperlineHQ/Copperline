@@ -209,6 +209,27 @@ fn wide_bitplane_hot_line_matches_dynamic_slot_arbitration() {
     }
 }
 
+#[test]
+fn wide_bitplane_line_stays_dynamic_when_control_delay_crosses_wrap() {
+    let mut bus = empty_bus();
+    bus.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+    bus.agnus.write_fmode(0x0003);
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
+    bus.agnus.vpos = 0x2C;
+    bus.agnus.hpos = bus.agnus.current_line_cck() - 1;
+    bus.denise.bplcon0 = 0x1000;
+
+    assert!(!bus.write_custom_word_from(0x100, 0x5000, BeamWriteSource::Cpu));
+    bus.advance_chipset(1);
+
+    assert_eq!(bus.agnus.vpos, 0x2D);
+    assert_eq!(
+        bus.wide_bitplane_dynamic_vpos.get(),
+        Some(0x2D),
+        "the next line must follow the delayed BPLCON0 transition dynamically"
+    );
+}
+
 fn render_color_write_x(hpos: u32) -> usize {
     hpos.saturating_sub(RENDER_COLOR_WRITE_HPOS_FB0)
         .saturating_mul(4)

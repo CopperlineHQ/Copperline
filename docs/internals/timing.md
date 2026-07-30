@@ -69,7 +69,15 @@ word positions and earlier words stay zero.
 Wide-FMODE (quantum > 1) fetches keep the memoized value-window plan: the
 effective DDF window, fetch cadence, and per-plane fetch-order mask live in
 a `BitplaneSlotPlan` keyed on the register inputs (`BitplaneSlotKey`,
-`src/bus.rs`).
+`src/bus.rs`). On a line without a fetch-affecting write, that plan is
+published as a complete per-line slot mask and is also shared with the DMA
+capture path for its stable cadence and row width. The colour-clock arbiter
+therefore performs a bit test, while capture does not re-derive the same DDF
+geometry on every quantum. A mid-line DDF, BPLCON0, DMACON, DIW or FMODE write
+invalidates the publication and selects the existing block-delay-aware
+calculation for the rest of that line. If a delayed BPLCON0 or DMACON change
+crosses the line boundary, the following line also remains dynamic until the
+delayed value has taken effect.
 Wide-FMODE lo-res slots are packed into the first eight CCKs of each
 16/32-CCK fetch unit; the rest of the unit remains available to later
 arbitration priorities.

@@ -855,21 +855,19 @@ impl Bus {
         }
         if hpos < SLOT_MASK_BITS && self.wide_bitplane_dynamic_vpos.get() != Some(vpos) {
             if !self.wide_bitplane_hot_line.is_current(vpos) {
-                let mut slot_mask = [0; 4];
-                if display_window_contains_vpos(
+                let plan = if display_window_contains_vpos(
                     self.denise.diwstrt,
                     self.denise.diwstop,
                     self.effective_diwhigh(),
                     vpos,
                 ) {
                     let bplcon0 = self.effective_bitplane_bplcon0();
-                    if let Some(plan) = self.bitplane_slot_plan_for_bplcon0(bplcon0) {
-                        if !self.bitplane_ddfstart_missed_on_line(vpos, plan.start) {
-                            slot_mask = plan.slot_mask;
-                        }
-                    }
-                }
-                self.wide_bitplane_hot_line.publish(vpos, slot_mask);
+                    self.bitplane_slot_plan_for_bplcon0(bplcon0)
+                        .filter(|plan| !self.bitplane_ddfstart_missed_on_line(vpos, plan.start))
+                } else {
+                    None
+                };
+                self.wide_bitplane_hot_line.publish(vpos, plan);
             }
             return self.wide_bitplane_hot_line.slot_mask[(hpos / 64) as usize].get()
                 & (1u64 << (hpos % 64))

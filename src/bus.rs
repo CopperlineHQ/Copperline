@@ -599,6 +599,7 @@ struct WideBitplaneHotLine {
     valid: std::cell::Cell<bool>,
     vpos: std::cell::Cell<u32>,
     slot_mask: [std::cell::Cell<u64>; 4],
+    plan: std::cell::Cell<Option<BitplaneSlotPlan>>,
 }
 
 impl WideBitplaneHotLine {
@@ -607,6 +608,7 @@ impl WideBitplaneHotLine {
             valid: std::cell::Cell::new(false),
             vpos: std::cell::Cell::new(0),
             slot_mask: std::array::from_fn(|_| std::cell::Cell::new(0)),
+            plan: std::cell::Cell::new(None),
         }
     }
 
@@ -614,11 +616,13 @@ impl WideBitplaneHotLine {
         self.valid.get() && self.vpos.get() == vpos
     }
 
-    fn publish(&self, vpos: u32, slot_mask: [u64; 4]) {
+    fn publish(&self, vpos: u32, plan: Option<BitplaneSlotPlan>) {
         self.valid.set(false);
+        let slot_mask = plan.map_or([0; 4], |plan| plan.slot_mask);
         for (destination, source) in self.slot_mask.iter().zip(slot_mask) {
             destination.set(source);
         }
+        self.plan.set(plan);
         self.vpos.set(vpos);
         self.valid.set(true);
     }

@@ -1777,6 +1777,23 @@ impl<'a> DenisePlannedPlayfieldLine<'a> {
         } else {
             (false, None)
         };
+        let plane_mask = if available_planes == 8 {
+            u8::MAX
+        } else {
+            ((1u16 << available_planes) - 1) as u8
+        };
+        // The usual single-playfield display programs both BPLCON1 scroll
+        // nibbles alike. Every prepared pixel already contains all eight
+        // interleaved plane bits, so the two playfield taps then address the
+        // same byte: do not repeat the range checks and load just to mask its
+        // even and odd bits back together.
+        if available_planes >= 2 && delays[0] == delays[1] {
+            return DeniseBitplaneSample {
+                idx: pf1_fetch_x.map_or(0, |fetch_x| pixels[fetch_x] & plane_mask),
+                nplanes,
+                active: pf1_active,
+            };
+        }
         let (pf2_active, pf2_fetch_x) = if available_planes >= 2 {
             self.sample_fetch_x(delays[1], min_fetch_x, native_x, hold_final_fetch_sample)
         } else {
@@ -1790,11 +1807,6 @@ impl<'a> DenisePlannedPlayfieldLine<'a> {
         if let Some(fetch_x) = pf2_fetch_x {
             idx |= pixels[fetch_x] & 0xAA;
         }
-        let plane_mask = if available_planes == 8 {
-            u8::MAX
-        } else {
-            ((1u16 << available_planes) - 1) as u8
-        };
         DeniseBitplaneSample {
             idx: idx & plane_mask,
             nplanes,
