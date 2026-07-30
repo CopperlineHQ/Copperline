@@ -1936,6 +1936,14 @@ impl FloppyController {
                 drive.clamp_head();
                 return;
             }
+            // While the head is still travelling (or ringing after the last
+            // step) the guest cannot recover data anyway -- `head_bit` holds
+            // read-data back for exactly this window -- so asking the real
+            // drive for anything mid-seek only makes it abort a capture it
+            // will immediately restart. Stay quiet until the head settles.
+            if drive.seek_settle_cck > 0 {
+                return;
+            }
             // This runs from `tick`, so a track that is not ready would
             // otherwise be asked for millions of times a second. The driver
             // needs a whole revolution -- around 200ms -- to capture one, so
