@@ -689,8 +689,10 @@ node tools/wasi-bench.mjs \
 
 `--render` includes the full per-frame presentation pipeline (render,
 post-process, deinterlace), which is what an interactive frontend pays; the
-report shows the realtime factor and the frame-time distribution against the
-20 ms PAL budget. The same binary builds natively for a
+report shows the realtime factor, the frame-time distribution against the
+20 ms PAL budget, how many final presentation buffers were unchanged, and
+how many conservative input matches skipped rendering entirely. The same
+binary builds natively for a
 direct wasm-versus-native comparison on identical workloads -- the render
 checksums match between the two, which is the determinism contract doing its
 job. As a reference point, on an Apple-Silicon laptop the wasm build ran the

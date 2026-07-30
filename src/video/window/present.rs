@@ -14,10 +14,87 @@ use crate::config::Tint;
 // the rest of the window module family keeps its unqualified names.
 pub(super) use crate::video::present_common::*;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct RepeatedPresentationSettings {
+    h_shift: usize,
+    overscan: Overscan,
+    deinterlace: bool,
+}
+
+#[derive(Clone, Copy)]
+struct RepeatedPresentationMetadata {
+    present_rows: usize,
+    present_width: usize,
+    tv_aperture: TvApertureFrame,
+    programmable: bool,
+}
+
+/// Exact previous-frame detector owned by the render worker. The bitplane
+/// detector compares every pixel-affecting captured input; this wrapper also
+/// covers the frontend presentation settings and retains the dimensions that
+/// accompany a reused buffer.
+#[derive(Default)]
+pub(super) struct RepeatedPresentationCache {
+    detector: bitplane::RepeatedFrameDetector,
+    settings: Option<RepeatedPresentationSettings>,
+    metadata: Option<RepeatedPresentationMetadata>,
+}
+
+impl RepeatedPresentationCache {
+    fn can_reuse(
+        &self,
+        input: &bitplane::RenderInput,
+        settings: RepeatedPresentationSettings,
+        phosphor: f32,
+    ) -> Option<RepeatedPresentationMetadata> {
+        // Phosphor deliberately changes the presented pixels on every field
+        // while its trail converges. Interlace is rejected by the bitplane
+        // detector because the deinterlacer's opposite field is history.
+        (phosphor == 0.0 && self.settings == Some(settings) && self.detector.can_reuse(input))
+            .then_some(self.metadata)
+            .flatten()
+    }
+
+    fn note_rendered(
+        &mut self,
+        input: &bitplane::RenderInput,
+        result: &mut bitplane::RenderResult,
+        settings: RepeatedPresentationSettings,
+        phosphor: f32,
+        metadata: RepeatedPresentationMetadata,
+    ) {
+        if phosphor == 0.0 {
+            self.detector.note_rendered(input, result);
+            self.settings = Some(settings);
+            self.metadata = Some(metadata);
+        } else {
+            self.clear();
+        }
+    }
+
+    fn should_track_read_dependencies(
+        &self,
+        input: &bitplane::RenderInput,
+        settings: RepeatedPresentationSettings,
+        phosphor: f32,
+    ) -> bool {
+        phosphor == 0.0
+            && self.settings == Some(settings)
+            && self.detector.should_track_read_dependencies(input)
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.detector.clear();
+        self.settings = None;
+        self.metadata = None;
+    }
+}
+
 pub(super) fn render_job_to_presentation(
     job: RenderJob,
     fb: &mut [u32],
     deinterlacer: &mut Deinterlacer,
+    repeated_frame_cache: &mut RepeatedPresentationCache,
 ) -> RenderWorkerResult {
     let RenderJob {
         generation,
@@ -30,7 +107,32 @@ pub(super) fn render_job_to_presentation(
     } = job;
     deinterlacer.set_deinterlace(deinterlace);
     deinterlacer.set_phosphor(phosphor);
-    let render_result = bitplane::render_from_input(&input, fb);
+    let settings = RepeatedPresentationSettings {
+        h_shift,
+        overscan,
+        deinterlace,
+    };
+    if let Some(metadata) = repeated_frame_cache.can_reuse(&input, settings, phosphor) {
+        return RenderWorkerResult {
+            generation,
+            emulated_frame: input.emulated_frames(),
+            timing: VideoRenderFrameTiming::default(),
+            reused_previous: true,
+            presentation_fb,
+            present_rows: metadata.present_rows,
+            present_width: metadata.present_width,
+            tv_aperture: metadata.tv_aperture,
+            programmable: metadata.programmable,
+            input,
+        };
+    }
+
+    let mut render_result =
+        if repeated_frame_cache.should_track_read_dependencies(&input, settings, phosphor) {
+            bitplane::render_from_input_tracking_reuse(&input, fb)
+        } else {
+            bitplane::render_from_input(&input, fb)
+        };
     let geometry = input.geometry();
     let canvas_scale = input.canvas_scale();
     let canvas_width = FB_WIDTH * canvas_scale;
@@ -55,16 +157,44 @@ pub(super) fn render_job_to_presentation(
         !geometry.programmable,
         &mut presentation_fb,
     );
-    RenderWorkerResult {
-        generation,
-        emulated_frame: input.emulated_frames(),
-        timing: render_result.timing,
-        presentation_fb,
+    let metadata = RepeatedPresentationMetadata {
         present_rows,
         present_width,
         tv_aperture: standard_tv_aperture_frame(geometry, present_rows, &base),
         programmable: geometry.programmable,
+    };
+    repeated_frame_cache.note_rendered(&input, &mut render_result, settings, phosphor, metadata);
+    RenderWorkerResult {
+        generation,
+        emulated_frame: input.emulated_frames(),
+        timing: render_result.timing,
+        reused_previous: false,
+        presentation_fb,
+        present_rows,
+        present_width,
+        tv_aperture: metadata.tv_aperture,
+        programmable: metadata.programmable,
         input,
+    }
+}
+
+pub(super) fn presentation_pixels_equal(
+    current: &[u32],
+    current_rows: usize,
+    current_width: usize,
+    next: &[u32],
+    next_rows: usize,
+    next_width: usize,
+) -> bool {
+    if current_rows != next_rows || current_width != next_width {
+        return false;
+    }
+    let Some(active) = next_rows.checked_mul(next_width) else {
+        return false;
+    };
+    match (current.get(..active), next.get(..active)) {
+        (Some(current), Some(next)) => current == next,
+        _ => false,
     }
 }
 

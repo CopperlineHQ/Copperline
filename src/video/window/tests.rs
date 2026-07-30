@@ -11,7 +11,7 @@ use super::{
     copy_window_present_frame, draw_status_bar, fdd_track_counter_rect, fdd_track_digit_rect,
     host_shortcut_modifier_pressed, host_to_amiga_rawkey, joystick_toggle_rect, led_row_rect,
     mask_present_frame_to_tv, paint_test_screen, parse_amiga_key, pause_button_rect,
-    power_button_rect, present_height, presentation_source_y_offset,
+    power_button_rect, present_height, presentation_pixels_equal, presentation_source_y_offset,
     raw_device_qualifier_family_held, raw_device_qualifier_rawkey, rawkey_is_held,
     rawkey_transition_is_duplicate, reboot_button_rect, repeated_main_key_should_drop, rgba,
     short_status_error, shorten_status_paths, shot_button_rect, should_render_emulated_frame,
@@ -2001,6 +2001,26 @@ fn present_frame_copy_scales_texture_rows_at_hidpi() {
         pixel(&frame, 0, present_height() * scale - 1, scale),
         src[(OUT_HEIGHT - 1) * FB_WIDTH].to_le_bytes()
     );
+}
+
+#[test]
+fn exact_presentation_repeat_ignores_unused_capacity_but_not_pixels_or_geometry() {
+    let current = vec![1, 2, 3, 4, 0xAAAA, 0xBBBB];
+    let mut next = vec![1, 2, 3, 4, 0xCCCC, 0xDDDD];
+    assert!(presentation_pixels_equal(&current, 2, 2, &next, 2, 2));
+
+    next[3] ^= 1;
+    assert!(!presentation_pixels_equal(&current, 2, 2, &next, 2, 2));
+    assert!(!presentation_pixels_equal(&current, 2, 2, &current, 1, 4));
+    assert!(!presentation_pixels_equal(&current, 2, 2, &current, 2, 3));
+    assert!(!presentation_pixels_equal(
+        &current[..3],
+        2,
+        2,
+        &next[..3],
+        2,
+        2
+    ));
 }
 
 #[test]

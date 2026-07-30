@@ -124,8 +124,14 @@ fn main() -> Result<()> {
     let mut fb = vec![0u32; MAX_CANVAS_PIXELS];
     let mut deinterlacer = Deinterlacer::new();
     let mut presentation_fb = Vec::new();
+    let mut next_presentation_fb = Vec::new();
+    let mut present_rows = 0usize;
+    let mut present_width = 0usize;
+    let mut repeated_frame_detector = bitplane::RepeatedFrameDetector::default();
     let mut last_rendered: Option<u64> = None;
     let mut rendered_frames: u64 = 0;
+    let mut reused_frames: u64 = 0;
+    let mut render_skipped_frames: u64 = 0;
 
     let start_emulated = emu.bus().emulated_seconds();
     let target = start_emulated + args.seconds;
@@ -140,29 +146,55 @@ fn main() -> Result<()> {
             let emulated_frame = emu.bus().emulated_frames();
             if present_common::should_render_emulated_frame(last_rendered, emulated_frame) {
                 let visible_start_vpos = emu.bus().frame_visible_start_vpos();
-                bitplane::render(emu.bus_mut(), &mut fb);
-                let geometry = emu.bus().frame_geometry();
-                let canvas_scale = emu.bus().frame_canvas_scale();
-                let field_rows = present_common::post_process_rendered_field(
+                let reused = bitplane::render_reusing_previous(
+                    emu.bus_mut(),
                     &mut fb,
-                    geometry,
-                    canvas_scale,
-                    emu.bus().frame_presentation_h_window(),
-                    emu.bus().frame_presentation_v_window(),
-                    visible_start_vpos,
-                    0,
-                    Overscan::Tv,
+                    &mut repeated_frame_detector,
                 );
-                let base = emu.bus().frame_render_base();
-                deinterlacer.present_field_into(
-                    &fb,
-                    field_rows,
-                    FB_WIDTH * canvas_scale,
-                    base.bplcon0 & 0x0004 != 0,
-                    base.long_field,
-                    !geometry.programmable,
-                    &mut presentation_fb,
-                );
+                if reused {
+                    reused_frames += 1;
+                    render_skipped_frames += 1;
+                } else {
+                    let geometry = emu.bus().frame_geometry();
+                    let canvas_scale = emu.bus().frame_canvas_scale();
+                    let field_rows = present_common::post_process_rendered_field(
+                        &mut fb,
+                        geometry,
+                        canvas_scale,
+                        emu.bus().frame_presentation_h_window(),
+                        emu.bus().frame_presentation_v_window(),
+                        visible_start_vpos,
+                        0,
+                        Overscan::Tv,
+                    );
+                    let base = emu.bus().frame_render_base();
+                    let (next_rows, next_width) = deinterlacer.present_field_into(
+                        &fb,
+                        field_rows,
+                        FB_WIDTH * canvas_scale,
+                        base.bplcon0 & 0x0004 != 0,
+                        base.long_field,
+                        !geometry.programmable,
+                        &mut next_presentation_fb,
+                    );
+                    let active = next_rows * next_width;
+                    let unchanged = present_rows == next_rows
+                        && present_width == next_width
+                        && matches!(
+                            (
+                                presentation_fb.get(..active),
+                                next_presentation_fb.get(..active)
+                            ),
+                            (Some(current), Some(next)) if current == next
+                        );
+                    if unchanged {
+                        reused_frames += 1;
+                    } else {
+                        std::mem::swap(&mut presentation_fb, &mut next_presentation_fb);
+                        present_rows = next_rows;
+                        present_width = next_width;
+                    }
+                }
                 last_rendered = Some(emulated_frame);
                 rendered_frames += 1;
             }
@@ -187,7 +219,10 @@ fn main() -> Result<()> {
         frames as f64 / elapsed.max(f64::EPSILON),
         emulated / elapsed.max(f64::EPSILON),
         if args.render {
-            format!(", {rendered_frames} rendered")
+            format!(
+                ", {rendered_frames} presented ({reused_frames} unchanged, \
+                 {render_skipped_frames} renders skipped)"
+            )
         } else {
             String::new()
         }

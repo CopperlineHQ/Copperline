@@ -30,6 +30,21 @@ impl Bus {
         forced_owner: Option<ChipBusOwner>,
         max_cck: u32,
     ) -> (u32, AgnusTick) {
+        self.advance_one_chip_bus_quantum_limited_inner(forced_owner, max_cck, false)
+    }
+
+    /// Shared quantum step. `sleeping_copper_before_deadline` means the
+    /// Copper is in the steady WAIT phase and the exact beam/blitter deadline
+    /// is still strictly ahead of this quantum. The comparator cannot change
+    /// state before that point, so the slot remains free without calling into
+    /// the Copper state machine; instruction tails and wake-up cycles never
+    /// select this path.
+    pub(super) fn advance_one_chip_bus_quantum_limited_inner(
+        &mut self,
+        forced_owner: Option<ChipBusOwner>,
+        max_cck: u32,
+        sleeping_copper_before_deadline: bool,
+    ) -> (u32, AgnusTick) {
         let cck = self.next_chip_bus_quantum().min(max_cck).max(1);
         self.flush_audio_before_audio_dma_slot();
 
@@ -48,9 +63,10 @@ impl Bus {
         };
         let copper_runs = cck >= CHIP_BUS_SLOT_CCK && self.copper_comparator_runs_at(hpos);
         let eligible = copper_runs && fixed_dma_owner.is_none();
-        let copper_took_bus =
-            eligible && self.step_copper_eligible_slot(forced_owner.is_none(), true);
-        if !eligible && copper_runs {
+        let copper_took_bus = eligible
+            && !sleeping_copper_before_deadline
+            && self.step_copper_eligible_slot(forced_owner.is_none(), true);
+        if !eligible && copper_runs && !sleeping_copper_before_deadline {
             // A fixed DMA owner (bitplane/sprite/disk/audio/refresh) holds
             // this color clock, but the Copper's WAIT/SKIP comparator is
             // combinational and keeps running: only instruction fetches need

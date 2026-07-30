@@ -1692,6 +1692,112 @@ fn next_copper_wakeup_cck_tracks_wait_beam_position() {
     assert_eq!(bus.next_copper_wakeup_cck(), None);
 }
 
+fn advance_chipset_quantum_reference(bus: &mut Bus, target_cck: u32) -> AgnusTick {
+    let mut total = AgnusTick::default();
+    let mut remaining = target_cck;
+    while remaining != 0 {
+        let (cck, tick) = bus.advance_one_chip_bus_quantum_limited(None, remaining);
+        remaining = remaining.saturating_sub(cck);
+        super::add_agnus_tick(&mut total, tick);
+    }
+    total
+}
+
+fn assert_wait_deadline_bus_equivalent(actual: &Bus, expected: &Bus) {
+    assert_eq!(
+        (actual.agnus.vpos, actual.agnus.hpos),
+        (expected.agnus.vpos, expected.agnus.hpos)
+    );
+    assert_eq!(actual.copper.state_label(), expected.copper.state_label());
+    assert_eq!(actual.copper.waiting(), expected.copper.waiting());
+    assert_eq!(actual.copper.pc(), expected.copper.pc());
+    assert_eq!(actual.denise.palette, expected.denise.palette);
+    assert_eq!(actual.data_bus, expected.data_bus);
+    assert_eq!(actual.last_chip_bus_owner, expected.last_chip_bus_owner);
+    assert_eq!(actual.display_dma_bplpt, expected.display_dma_bplpt);
+    assert_eq!(
+        actual.frame_captured_bitplane_rows(),
+        expected.frame_captured_bitplane_rows()
+    );
+    assert_eq!(actual.frame_render_events(), expected.frame_render_events());
+    assert_eq!(actual.paula.intreq, expected.paula.intreq);
+    assert_eq!(actual.emulated_cck, expected.emulated_cck);
+    assert_eq!(actual.emulated_frames, expected.emulated_frames);
+}
+
+fn sleeping_copper_with_display_dma() -> Bus {
+    let mut bus = empty_bus();
+    assert!(!bus.custom_write(0x08E, 2, 0x2C90));
+    assert!(!bus.custom_write(0x090, 2, 0xF4B0));
+    assert!(!bus.custom_write(0x092, 2, 0x0038));
+    assert!(!bus.custom_write(0x094, 2, 0x00D0));
+    assert!(!bus.custom_write(0x100, 2, 0x6600));
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_COPEN | DMACON_BPLEN;
+    bus.agnus.vpos = 0x64;
+    bus.agnus.hpos = 0x20;
+    bus.copper.jump(0x0100);
+    write_chip_word(&mut bus, 0x0100, 0x0180);
+    write_chip_word(&mut bus, 0x0102, 0x0456);
+    bus.copper.wait(CopperWait::new(0x6441, 0xFFFE));
+    bus
+}
+
+#[test]
+fn sleeping_copper_deadline_matches_per_quantum_comparator_under_display_dma() {
+    let mut optimized = sleeping_copper_with_display_dma();
+    let mut reference = sleeping_copper_with_display_dma();
+
+    let optimized_tick = optimized.advance_chipset_cpu_idle(0x40);
+    let reference_tick = advance_chipset_quantum_reference(&mut reference, 0x40);
+
+    assert_eq!(
+        (optimized_tick.new_lines, optimized_tick.new_frames),
+        (reference_tick.new_lines, reference_tick.new_frames)
+    );
+    assert_wait_deadline_bus_equivalent(&optimized, &reference);
+    assert_eq!(optimized.denise.palette[0], 0x0456);
+}
+
+#[test]
+fn sleeping_copper_deadline_matches_reference_across_random_beam_spans() {
+    let mut random = 0xC0_77_E2_55u32;
+    for case in 0..512 {
+        random = random.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let vpos = (random >> 12) % PAL_LINES;
+        let hpos = (random & 0xFF) % COLORCLOCKS_PER_LINE;
+        random = random.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let target_vpos = (random >> 16) as u16;
+        let target_hpos = ((random >> 7) & 0xFE) as u16;
+        let wait = CopperWait::new((target_vpos << 8) | target_hpos | 1, 0xFFFE);
+        let span = 1 + (random & 0x7FF);
+
+        let make_bus = || {
+            let mut bus = empty_bus();
+            bus.agnus.dmacon = DMACON_DMAEN | DMACON_COPEN;
+            bus.agnus.vpos = vpos;
+            bus.agnus.hpos = hpos;
+            bus.copper.wait(wait);
+            bus
+        };
+        let mut optimized = make_bus();
+        let mut reference = make_bus();
+        let optimized_tick = optimized.advance_chipset_cpu_idle(span);
+        let reference_tick = advance_chipset_quantum_reference(&mut reference, span);
+
+        assert_eq!(
+            (optimized_tick.new_lines, optimized_tick.new_frames),
+            (reference_tick.new_lines, reference_tick.new_frames),
+            "case {case}"
+        );
+        assert_eq!(
+            optimized.copper.state_label(),
+            reference.copper.state_label(),
+            "case {case}: start ({vpos:#x}, {hpos:#x}), wait ({target_vpos:#x}, {target_hpos:#x}), span {span:#x}"
+        );
+        assert_wait_deadline_bus_equivalent(&optimized, &reference);
+    }
+}
+
 #[test]
 fn next_copper_wakeup_cck_waits_for_vertical_low_byte_rollover_after_line_255() {
     let mut bus = empty_bus();

@@ -240,6 +240,17 @@ check is applied by `Copper::step_eligible_slot`, the single primitive
 shared by the live bus path and the blitter-deadline predictor's cloned
 simulation, so prediction and execution cannot drift apart.
 
+When the 68k is halted in STOP, its idle fast-forward path may encounter a
+Copper in the steady comparator phase of WAIT. It computes that WAIT's exact
+beam/blitter deadline once and leaves the comparator dormant strictly before
+the deadline while the ordinary DMA arbiter continues to own every colour
+clock. The shortcut is capped at the field wrap because the vertical-blank
+COP1LC strobe supersedes a wait that would otherwise extend into the next
+field. Instruction-tail and wake-up cycles remain individually stepped.
+Ordinary CPU-driven advances do not calculate this deadline: their spans are
+only a few colour clocks, so doing the prediction repeatedly would cost more
+than the comparator calls it replaces.
+
 Register writes take effect a fixed number of colour clocks after the
 chip-bus slot that carried them, and the delay is a property of the
 register pipeline, not of the bus master. Denise-boundary registers apply

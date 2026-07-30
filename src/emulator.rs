@@ -1365,7 +1365,7 @@ impl Emulator {
             );
             if run.cpu_stopped {
                 let idle_cck = accounting.slice_cck.saturating_sub(run.bus_advanced_cck);
-                self.bus_mut().advance_devices(idle_cck);
+                self.bus_mut().advance_cpu_idle_devices(idle_cck);
             }
             self.machine.refresh_irq_line();
         }
@@ -1565,7 +1565,7 @@ impl Emulator {
             // needs nothing here: the cycle-exact core already advanced
             // its full device time through sync/grant as it executed.)
             let idle_cck = accounting.slice_cck.saturating_sub(run.bus_advanced_cck);
-            self.bus_mut().advance_devices(idle_cck);
+            self.bus_mut().advance_cpu_idle_devices(idle_cck);
         }
         // `refresh_irq_line` applies any deferred timed-device color clocks
         // before sampling the interrupt line (see its body), so a device
