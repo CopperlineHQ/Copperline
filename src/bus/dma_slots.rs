@@ -83,42 +83,8 @@ impl Bus {
             );
         }
         self.last_chip_bus_owner = owner;
-        if self.bus_accounting.enabled {
-            self.bus_accounting
-                .record_cck(owner, cck, self.blitter.busy);
-            if matches!(owner, ChipBusOwner::Bitplane) {
-                let v = self.agnus.vpos as usize;
-                if v < self.dbg_bpl_cck.len() {
-                    self.dbg_bpl_cck[v] += cck;
-                }
-            }
-        }
-        if self.dbg_slotmap_on {
-            let v = self.agnus.vpos as usize;
-            let h = self.agnus.hpos as usize;
-            if self.dbg_slotmap.is_empty() {
-                self.dbg_slotmap = vec![vec![b'.'; 256]; 320];
-            }
-            if v < self.dbg_slotmap.len() {
-                let code = chip_bus_owner_code(owner);
-                let row = &mut self.dbg_slotmap[v];
-                let end = (h + cck as usize).min(row.len());
-                for slot in row.iter_mut().take(end).skip(h) {
-                    *slot = code;
-                }
-            }
-        }
-        if self.frame_analyzer_enabled {
-            self.current_frame_bus_trace.record(
-                self.agnus.vpos,
-                hpos,
-                cck,
-                owner,
-                self.blitter.busy,
-            );
-        }
-        if self.wave_on {
-            self.wave_tap_quantum(owner);
+        if self.chip_bus_observers_on {
+            self.observe_chip_bus_quantum(owner, cck, hpos);
         }
         // The Copper was already stepped above (or is held without fetching at
         // the end-of-line lockout); only drive the other owners here.
@@ -185,6 +151,57 @@ impl Bus {
             }
         }
         (cck, tick)
+    }
+
+    pub(super) fn refresh_chip_bus_observers(&mut self) {
+        self.chip_bus_observers_on = self.bus_accounting.enabled
+            || self.dbg_slotmap_on
+            || self.frame_analyzer_enabled
+            || self.wave_on;
+    }
+
+    /// Observer fan-out is outlined from the ordinary arbitration path. It is
+    /// deliberately cold relative to emulation: even an interactive debugger
+    /// spends most of its lifetime with no bus trace or waveform armed.
+    #[cold]
+    fn observe_chip_bus_quantum(&mut self, owner: ChipBusOwner, cck: u32, hpos: u32) {
+        if self.bus_accounting.enabled {
+            self.bus_accounting
+                .record_cck(owner, cck, self.blitter.busy);
+            if matches!(owner, ChipBusOwner::Bitplane) {
+                let v = self.agnus.vpos as usize;
+                if v < self.dbg_bpl_cck.len() {
+                    self.dbg_bpl_cck[v] += cck;
+                }
+            }
+        }
+        if self.dbg_slotmap_on {
+            let v = self.agnus.vpos as usize;
+            let h = self.agnus.hpos as usize;
+            if self.dbg_slotmap.is_empty() {
+                self.dbg_slotmap = vec![vec![b'.'; 256]; 320];
+            }
+            if v < self.dbg_slotmap.len() {
+                let code = chip_bus_owner_code(owner);
+                let row = &mut self.dbg_slotmap[v];
+                let end = (h + cck as usize).min(row.len());
+                for slot in row.iter_mut().take(end).skip(h) {
+                    *slot = code;
+                }
+            }
+        }
+        if self.frame_analyzer_enabled {
+            self.current_frame_bus_trace.record(
+                self.agnus.vpos,
+                hpos,
+                cck,
+                owner,
+                self.blitter.busy,
+            );
+        }
+        if self.wave_on {
+            self.wave_tap_quantum(owner);
+        }
     }
 
     /// Step the Copper through one eligible color clock and apply any register

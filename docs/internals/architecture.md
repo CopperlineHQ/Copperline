@@ -134,8 +134,10 @@ The flow of a frame:
 4. Render-relevant register writes (by Copper or CPU) are recorded as
    beam-position events. At the frame boundary, the bus turns the completed
    frame's events, chip-RAM snapshot, display geometry, and Agnus blanking
-   latches into an owned `RenderInput`; the renderer replays that snapshot,
-   never the live chipset state ([](video)).
+   latches into an owned `RenderInput` envelope. Large immutable RAM and
+   bitplane-row snapshots are reference-counted across the handoff; the
+   renderer replays that frozen data, never the live chipset state
+   ([](video)).
 5. In the default path `window.rs` sends `RenderInput` to the
    `copperline-render` worker while the main thread advances the next frame.
    The worker paints into a CPU framebuffer, owns the deinterlacer history,
@@ -152,9 +154,10 @@ The flow of a frame:
 So an interactive run uses three host threads: the **main thread** (event
 loop, core, and pacer), the **`copperline-render` worker**, and the
 **cpal audio callback** that cpal owns. Only the last two cross a thread
-boundary with the main thread, and both do so through owned data (a
-`RenderInput`/presentation buffer over a channel, and a lock-free sample ring
-buffer) rather than shared mutable state. The pacer and the audio callback are
+boundary with the main thread, and both do so through an owned
+`RenderInput`/presentation-buffer envelope (with immutable shared frame
+snapshots) and a lock-free sample ring buffer rather than shared mutable
+state. The pacer and the audio callback are
 latency-critical and can optionally be given above-normal scheduling priority
 (`[emulation] realtime_priority`, `src/priority.rs`); see
 [](timing) for what that does per platform.

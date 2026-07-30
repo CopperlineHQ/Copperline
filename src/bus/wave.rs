@@ -31,6 +31,7 @@ impl Bus {
         self.wave_pc_trigger = matches!(capture.trigger(), Trigger::Pc(_));
         let immediate = matches!(capture.trigger(), Trigger::Now);
         self.wave_on = true;
+        self.refresh_chip_bus_observers();
         self.wave = Some(Box::new(capture));
         if immediate {
             self.wave_fire();
@@ -42,6 +43,7 @@ impl Bus {
     /// final status. None when no capture exists.
     pub fn wave_stop(&mut self) -> Option<WaveStatus> {
         self.wave_on = false;
+        self.refresh_chip_bus_observers();
         self.wave_pc_trigger = false;
         let mut wave = self.wave.take()?;
         wave.finish();
@@ -74,6 +76,7 @@ impl Bus {
     /// zero-cost path. The finished capture stays around for status queries.
     fn wave_finish(&mut self) {
         self.wave_on = false;
+        self.refresh_chip_bus_observers();
         self.wave_pc_trigger = false;
         if let Some(wave) = self.wave.as_deref_mut() {
             wave.finish();

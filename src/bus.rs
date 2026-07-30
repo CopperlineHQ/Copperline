@@ -823,11 +823,11 @@ pub struct Bus {
     last_frame_beam_bottom_palette: Palette,
     last_frame_beam_bottom_palette_valid: bool,
     current_frame_chip_ram: Vec<u8>,
-    last_frame_chip_ram: Vec<u8>,
+    last_frame_chip_ram: std::sync::Arc<Vec<u8>>,
     current_frame_chip_ram_writes: Vec<BeamChipRamWrite>,
     last_frame_chip_ram_writes: Vec<BeamChipRamWrite>,
     current_frame_bitplane_rows: Vec<Option<CapturedBitplaneRow>>,
-    last_frame_bitplane_rows: Vec<Option<CapturedBitplaneRow>>,
+    last_frame_bitplane_rows: std::sync::Arc<Vec<Option<CapturedBitplaneRow>>>,
     current_frame_sprite_lines: Vec<CapturedSpriteLine>,
     current_frame_sprite_lines_by_y: Vec<Vec<CapturedSpriteLine>>,
     current_frame_sprite_collision_sources: Vec<Option<Vec<LiveSpriteCollisionSource>>>,
@@ -947,6 +947,11 @@ pub struct Bus {
     /// state, never serialized.
     #[serde(skip)]
     wave_on: bool,
+    /// Combined zero-observer gate for the per-colour-clock arbitration path.
+    /// The individual diagnostics remain independently controlled; this folds
+    /// their four normally-false branches into one.
+    #[serde(skip)]
+    chip_bus_observers_on: bool,
     #[serde(skip)]
     pub(crate) wave_pc_trigger: bool,
     #[serde(skip)]
@@ -2470,11 +2475,11 @@ impl Bus {
             last_frame_beam_bottom_palette: Palette::new(),
             last_frame_beam_bottom_palette_valid: false,
             current_frame_chip_ram,
-            last_frame_chip_ram: Vec::new(),
+            last_frame_chip_ram: std::sync::Arc::new(Vec::new()),
             current_frame_chip_ram_writes: Vec::new(),
             last_frame_chip_ram_writes: Vec::new(),
             current_frame_bitplane_rows: empty_captured_bitplane_rows(),
-            last_frame_bitplane_rows: empty_captured_bitplane_rows(),
+            last_frame_bitplane_rows: std::sync::Arc::new(empty_captured_bitplane_rows()),
             current_frame_sprite_lines: Vec::new(),
             current_frame_sprite_lines_by_y: empty_captured_sprite_lines_by_y(),
             current_frame_sprite_collision_sources: empty_sprite_collision_sources(),
@@ -2525,6 +2530,7 @@ impl Bus {
             current_frame_bus_trace: FrameBusTrace::default(),
             last_frame_bus_trace: None,
             wave_on: false,
+            chip_bus_observers_on: false,
             wave_pc_trigger: false,
             wave: None,
             ui_reg_watches: Vec::new(),
@@ -2576,6 +2582,7 @@ impl Bus {
             uhres_dual_warned: false,
             dbg_ext_cck_x100: external_access_cck_x100_setting(),
         };
+        bus.refresh_chip_bus_observers();
         bus.configure_chip_dma_masks();
         // Re-derive the per-frame capture buffers from the same helper the
         // reset paths use, rather than trusting the struct literal above to
@@ -3554,11 +3561,11 @@ impl Bus {
         self.current_frame_chip_ram.clear();
         self.current_frame_chip_ram
             .extend_from_slice(&self.mem.chip_ram);
-        self.last_frame_chip_ram.clear();
+        self.last_frame_chip_ram = std::sync::Arc::new(Vec::new());
         self.current_frame_chip_ram_writes.clear();
         self.last_frame_chip_ram_writes.clear();
         self.current_frame_bitplane_rows = empty_captured_bitplane_rows();
-        self.last_frame_bitplane_rows = empty_captured_bitplane_rows();
+        self.last_frame_bitplane_rows = std::sync::Arc::new(empty_captured_bitplane_rows());
         self.current_frame_sprite_lines.clear();
         clear_captured_sprite_lines_by_y(&mut self.current_frame_sprite_lines_by_y);
         self.current_frame_sprite_collision_sources = empty_sprite_collision_sources();
@@ -3935,6 +3942,7 @@ impl Bus {
         self.dbg_slotmap_on = crate::envcfg::flag("COPPERLINE_DIAG_SLOTMAP");
         self.dbg_slotmap_dumped = false;
         self.bus_accounting = BusAccounting::from_env();
+        self.refresh_chip_bus_observers();
     }
 
     pub fn emulated_seconds(&self) -> f64 {
@@ -5389,6 +5397,7 @@ impl Bus {
             return;
         }
         self.frame_analyzer_enabled = enabled;
+        self.refresh_chip_bus_observers();
         if enabled {
             self.reset_current_frame_bus_trace(true);
         } else {
@@ -5461,6 +5470,20 @@ impl Bus {
         }
     }
 
+    /// Shared ownership of the immutable completed-frame RAM snapshot. The
+    /// render worker keeps this allocation alive while the next frame runs,
+    /// avoiding a second full chip-RAM copy when a [`RenderInput`] is queued.
+    pub(crate) fn frame_chip_ram_shared(&self) -> std::sync::Arc<Vec<u8>> {
+        if !crate::envcfg::flag("COPPERLINE_RENDER_LIVE_CHIP_RAM")
+            && self.last_frame_render_base.is_some()
+            && self.last_frame_chip_ram.len() == self.mem.chip_ram.len()
+        {
+            std::sync::Arc::clone(&self.last_frame_chip_ram)
+        } else {
+            std::sync::Arc::new(self.frame_chip_ram().to_vec())
+        }
+    }
+
     pub fn frame_chip_ram_writes(&self) -> &[BeamChipRamWrite] {
         if crate::envcfg::flag("COPPERLINE_RENDER_LIVE_CHIP_RAM") {
             return &[];
@@ -5482,6 +5505,22 @@ impl Bus {
             &self.last_frame_bitplane_rows
         } else {
             &self.current_frame_bitplane_rows
+        }
+    }
+
+    /// Shared ownership of the completed frame's captured DMA rows. Each row
+    /// owns up to eight plane vectors, so sharing the immutable bundle avoids
+    /// thousands of small deep-clone allocations per queued render.
+    pub(crate) fn frame_captured_bitplane_rows_shared(
+        &self,
+    ) -> std::sync::Arc<Vec<Option<CapturedBitplaneRow>>> {
+        if !crate::envcfg::flag("COPPERLINE_RENDER_LIVE_CHIP_RAM")
+            && self.last_frame_render_base.is_some()
+            && self.last_frame_bitplane_rows.len() == MAX_VISIBLE_LINES
+        {
+            std::sync::Arc::clone(&self.last_frame_bitplane_rows)
+        } else {
+            std::sync::Arc::new(self.frame_captured_bitplane_rows().to_vec())
         }
     }
 

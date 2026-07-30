@@ -309,7 +309,7 @@ fn walk_span(
     stop: u16,
     state: &mut DdfState,
     unit_ord: &mut Option<u16>,
-    fetches: &mut Vec<DdfFetch>,
+    emit: &mut impl FnMut(DdfFetch),
 ) {
     for j in start..stop {
         let counter = (state.cnt << 1) | (j & 1) as u8;
@@ -337,7 +337,7 @@ fn walk_span(
 
         if state.bprun {
             if let Some(plane) = unit_slot(state.bplcon0, aga, counter) {
-                fetches.push(DdfFetch {
+                emit(DdfFetch {
                     cck: j,
                     plane,
                     unit_ord: unit_ord.unwrap_or(0),
@@ -413,25 +413,77 @@ pub fn walk_line(
     state: &mut DdfState,
 ) -> Vec<DdfFetch> {
     let mut fetches = Vec::new();
+    walk_line_into(aga, ecs, signals, state, |fetch| fetches.push(fetch));
+    fetches
+}
+
+/// Allocation-free form of [`walk_line`]. The caller consumes each fetch
+/// while the sequencer walks the line, which lets hot users build their
+/// fixed-size slot tables without first materializing a temporary vector.
+pub fn walk_line_into(
+    aga: bool,
+    ecs: bool,
+    signals: &[DdfSignal],
+    state: &mut DdfState,
+    mut emit: impl FnMut(DdfFetch),
+) {
     let mut cycle = 0u16;
     let mut unit_ord: Option<u16> = None;
     for signal in signals {
-        walk_span(
-            aga,
-            ecs,
-            cycle,
-            signal.cck,
-            state,
-            &mut unit_ord,
-            &mut fetches,
-        );
+        walk_span(aga, ecs, cycle, signal.cck, state, &mut unit_ord, &mut emit);
         process_signal(ecs, signal, state);
         if signal.bits & sig::DONE != 0 {
             break;
         }
         cycle = signal.cck;
     }
-    fetches
+}
+
+/// Walk a line whose DDF/control registers do not change mid-line.
+///
+/// The five possible strobes fit on the stack. Coincident strobes are merged
+/// before the walk exactly as in [`line_signals_with_hard_stop`], avoiding
+/// both the signal-list and fetch-list allocations on ordinary scanlines.
+pub fn walk_static_line_into(
+    aga: bool,
+    ecs: bool,
+    ddfstrt: u16,
+    ddfstop: u16,
+    hard_stop_cck: u16,
+    line_ccks: u16,
+    state: &mut DdfState,
+    emit: impl FnMut(DdfFetch),
+) {
+    const EMPTY: DdfSignal = DdfSignal {
+        cck: 0,
+        bits: 0,
+        bplcon0: 0,
+    };
+    let mut signals = [EMPTY; 5];
+    let mut len = 0usize;
+    let mut push = |cck: u16, bits: u32| {
+        if let Some(existing) = signals[..len].iter_mut().find(|signal| signal.cck == cck) {
+            existing.bits |= bits;
+        } else {
+            signals[len] = DdfSignal {
+                cck,
+                bits,
+                bplcon0: 0,
+            };
+            len += 1;
+        }
+    };
+    push(DDF_HARD_START_CCK, sig::SHW);
+    if ddfstrt < line_ccks {
+        push(ddfstrt, sig::BPHSTART);
+    }
+    if ddfstop < line_ccks {
+        push(ddfstop, sig::BPHSTOP);
+    }
+    push(hard_stop_cck, sig::RHW);
+    push(line_ccks, sig::DONE);
+    signals[..len].sort_unstable_by_key(|signal| signal.cck);
+    walk_line_into(aga, ecs, &signals[..len], state, emit);
 }
 
 #[cfg(test)]

@@ -46,19 +46,15 @@ pub(super) fn render_job_to_presentation(
         overscan,
     );
     let base = input.render_base();
-    deinterlacer.push_field(
+    let (present_rows, present_width) = deinterlacer.present_field_into(
         fb,
         field_rows,
         canvas_width,
         base.bplcon0 & 0x0004 != 0,
         base.long_field,
         !geometry.programmable,
+        &mut presentation_fb,
     );
-    let present_rows = deinterlacer.output_rows();
-    let present_width = deinterlacer.output_width();
-    let active = present_rows * present_width;
-    presentation_fb.resize(active, 0);
-    presentation_fb.copy_from_slice(&deinterlacer.output()[..active]);
     RenderWorkerResult {
         generation,
         emulated_frame: input.emulated_frames(),

@@ -1541,6 +1541,7 @@ fn late_lowres_ddf_stop_hold_keeps_left_origin_unadvanced() {
         &mut fb,
         &mut playfield_mask,
         &mut collision_pixels,
+        &mut CollisionLookup::new(),
         &mut clxdat,
         palette,
         &[],
@@ -5785,23 +5786,23 @@ fn sprite_dma_reuse_stops_at_null_control_block() {
 #[test]
 fn collision_pixel_honors_clxcon_match_bits() {
     let collision = collision_pixel(0b000011, 0x00C3, 0, false);
-    assert!(collision.pf1_match);
-    assert!(collision.pf2_match);
+    assert!(collision.pf1_match());
+    assert!(collision.pf2_match());
 
     let mismatch = collision_pixel(0b000010, 0x00C3, 0, false);
-    assert!(!mismatch.pf1_match);
-    assert!(mismatch.pf2_match);
+    assert!(!mismatch.pf1_match());
+    assert!(mismatch.pf2_match());
 }
 
 #[test]
 fn collision_pixel_single_playfield_odd_match_requires_even_match() {
     let single = collision_pixel(0b000001, 0x0083, 0, false);
-    assert!(!single.pf1_match);
-    assert!(!single.pf2_match);
+    assert!(!single.pf1_match());
+    assert!(!single.pf2_match());
 
     let dual = collision_pixel(0b000001, 0x0083, 0, true);
-    assert!(dual.pf1_match);
-    assert!(!dual.pf2_match);
+    assert!(dual.pf1_match());
+    assert!(!dual.pf2_match());
 }
 
 /// Plan 3.4: AGA planes 7-8 collision control comes from CLXCON2
@@ -5810,27 +5811,27 @@ fn collision_pixel_single_playfield_odd_match_requires_even_match() {
 fn collision_pixel_planes_7_and_8_use_clxcon2() {
     // Plane 7 (bit 6) enabled, must be set: pixel with bit 6 matches.
     let hit = collision_pixel(0b0100_0000, 0, 0x0041, false);
-    assert!(hit.pf1_match);
+    assert!(hit.pf1_match());
     let miss = collision_pixel(0, 0, 0x0041, false);
-    assert!(!miss.pf1_match);
+    assert!(!miss.pf1_match());
 
     // Plane 8 (bit 7) enabled, must be clear: a set bit 7 mismatches.
     let even_hit = collision_pixel(0, 0, 0x0080, false);
-    assert!(even_hit.pf2_match);
+    assert!(even_hit.pf2_match());
     let even_miss = collision_pixel(0b1000_0000, 0, 0x0080, false);
-    assert!(!even_miss.pf2_match);
+    assert!(!even_miss.pf2_match());
 
     // With CLXCON2 clear, planes 7-8 never gate the match (and the
     // sprite-enable bits of CLXCON are not misread for them).
     let ignore = collision_pixel(0b1100_0000, 0xF000, 0, false);
-    assert!(ignore.pf1_match && ignore.pf2_match);
+    assert!(ignore.pf1_match() && ignore.pf2_match());
 }
 
 #[test]
 fn collision_pixel_disabled_planes_match_continuously() {
     let collision = collision_pixel(0, 0, 0, false);
-    assert!(collision.pf1_match);
-    assert!(collision.pf2_match);
+    assert!(collision.pf1_match());
+    assert!(collision.pf2_match());
     assert_eq!(collision.clxdat_bits(), 1);
 }
 
@@ -5843,14 +5844,14 @@ fn collision_match_gates_on_enabled_planes_beyond_the_bpu_count() {
     // `(dBuffer & enbp) == (mvbp & enbp)`). Copperline previously only checked
     // planes up to the fetched count and so spuriously matched.
     let all_planes_match_one = collision_pixel(0b000001, 0x0FFF, 0, false);
-    assert!(!all_planes_match_one.pf1_match);
-    assert!(!all_planes_match_one.pf2_match);
+    assert!(!all_planes_match_one.pf1_match());
+    assert!(!all_planes_match_one.pf2_match());
 
     // Setting the absent planes' match value to 0 (CLXCON 0x0FC1) lets the
     // zero-read absent planes match, so the one-plane pixel collides.
     let only_plane1_match = collision_pixel(0b000001, 0x0FC1, 0, false);
-    assert!(only_plane1_match.pf1_match);
-    assert!(only_plane1_match.pf2_match);
+    assert!(only_plane1_match.pf1_match());
+    assert!(only_plane1_match.pf2_match());
 }
 
 #[test]
@@ -5967,6 +5968,7 @@ fn planned_ham_dma_uses_current_bitplane_sample_at_fetch_edge() {
         &mut fb,
         &mut playfield_mask,
         &mut collision_pixels,
+        &mut CollisionLookup::new(),
         &mut clxdat,
         palette,
         &[],
@@ -6016,6 +6018,7 @@ fn planned_ham_dma_advances_hold_through_edge_fetch_phase() {
         &mut fb,
         &mut playfield_mask,
         &mut collision_pixels,
+        &mut CollisionLookup::new(),
         &mut clxdat,
         palette,
         &[],
@@ -6063,6 +6066,7 @@ fn planned_ham_dma_ignores_extra_early_ddf_history_before_diw() {
         &mut fb,
         &mut playfield_mask,
         &mut collision_pixels,
+        &mut CollisionLookup::new(),
         &mut clxdat,
         palette,
         &[],
@@ -6116,6 +6120,7 @@ fn bplcon1_write_at_diw_right_edge_does_not_retap_current_ham_line() {
         &mut fb,
         &mut playfield_mask,
         &mut collision_pixels,
+        &mut CollisionLookup::new(),
         &mut clxdat,
         palette,
         &[],
@@ -6181,6 +6186,7 @@ fn ham_select_lands_in_the_colour_write_domain() {
         &mut fb,
         &mut playfield_mask,
         &mut collision_pixels,
+        &mut CollisionLookup::new(),
         &mut clxdat,
         palette,
         &[],
@@ -6223,6 +6229,7 @@ fn bplcon2_color_key_uses_color_register_transparency_bit() {
         &mut fb,
         &mut playfield_mask,
         &mut collision_pixels,
+        &mut CollisionLookup::new(),
         &mut clxdat,
         palette,
         &[],
@@ -6263,6 +6270,7 @@ fn bplcon2_bitplane_key_uses_selected_bitplane_sample() {
         &mut fb,
         &mut playfield_mask,
         &mut collision_pixels,
+        &mut CollisionLookup::new(),
         &mut clxdat,
         palette,
         &[],
@@ -6303,6 +6311,7 @@ fn bplcon3_zdclken_disables_internal_genlock_keys() {
         &mut fb,
         &mut playfield_mask,
         &mut collision_pixels,
+        &mut CollisionLookup::new(),
         &mut clxdat,
         palette,
         &[],
@@ -6339,6 +6348,7 @@ fn planned_playfield_line_feeds_clxdat_from_rendered_dual_playfield_sample() {
         &mut fb,
         &mut playfield_mask,
         &mut collision_pixels,
+        &mut CollisionLookup::new(),
         &mut clxdat,
         Palette::new(),
         &[],
@@ -6358,8 +6368,7 @@ fn planned_playfield_line_feeds_clxdat_from_rendered_dual_playfield_sample() {
 
     assert_eq!(clxdat & 0x0001, 0x0001);
     assert_eq!(&playfield_mask[68..70], &[0x03, 0x03]);
-    assert!(collision_pixels[68].pf1);
-    assert!(collision_pixels[68].pf2);
+    assert_eq!(collision_pixels[68].playfield_mask(), 0b11);
 }
 
 #[test]
@@ -7705,12 +7714,7 @@ fn sprite_collisions_use_beam_timed_clxcon_control() {
     playfield_mask[0] = 0x02;
     playfield_mask[1] = 0x02;
     let mut collision_pixels = vec![CollisionPixel::default(); FB_PIXELS];
-    collision_pixels[0] = CollisionPixel {
-        pf1: false,
-        pf2: true,
-        pf1_match: false,
-        pf2_match: true,
-    };
+    collision_pixels[0] = CollisionPixel::new(false, true, false, true);
     collision_pixels[1] = collision_pixels[0];
     let mut fb = vec![rgb12_to_rgba8(0); FB_PIXELS];
     let captured = [CapturedSpriteLine {

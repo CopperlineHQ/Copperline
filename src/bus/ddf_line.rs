@@ -35,10 +35,29 @@ pub(super) enum DdfSeqWriteKind {
     BmapenClr,
 }
 
+/// Complete input identity for a scanline with no mid-line sequencer writes.
+///
+/// The carried flop state is part of the key: lines only share a plan once
+/// the sequencer itself has reached the same state, including unusual runs
+/// carried through horizontal blanking. Vertical-window changes are folded
+/// into `state.bpv`, so entering or leaving the display cannot reuse an
+/// interior line by accident.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DdfSeqStaticKey {
+    state: DdfState,
+    line_ccks: u16,
+    ddfstrt: u16,
+    ddfstop: u16,
+    hard_stop: u16,
+    aga: bool,
+    ecs: bool,
+}
+
 /// One line's walked bitplane fetch table.
 #[derive(Clone)]
 pub(super) struct DdfSeqLine {
     pub vpos: u32,
+    static_key: Option<DdfSeqStaticKey>,
     /// Plane index + 1 fetching at each colour clock; 0 = no bitplane slot.
     pub plane_at: [u8; DDF_SEQ_MAX_LINE_CCKS],
     /// The plane's modulo applies after the fetch at this colour clock
@@ -68,6 +87,57 @@ pub(super) struct DdfSeqLine {
     pub end_state: DdfState,
 }
 
+impl DdfSeqLine {
+    fn empty(vpos: u32, state: DdfState, static_key: Option<DdfSeqStaticKey>) -> Self {
+        Self {
+            vpos,
+            static_key,
+            plane_at: [0; DDF_SEQ_MAX_LINE_CCKS],
+            modulo_at: [false; DDF_SEQ_MAX_LINE_CCKS],
+            words_per_plane: [0; 8],
+            words_per_row: 0,
+            dma_planes: 0,
+            word_idx_at: [0; DDF_SEQ_MAX_LINE_CCKS],
+            first_fetch_cck: None,
+            run_origin_cck: None,
+            end_state: state,
+        }
+    }
+
+    fn record_fetch(&mut self, fetch: seq::DdfFetch, shres: bool, hires: bool, carried: bool) {
+        let idx = usize::from(fetch.cck);
+        if idx >= DDF_SEQ_MAX_LINE_CCKS {
+            return;
+        }
+        let plane = usize::from(fetch.plane).min(7);
+        self.plane_at[idx] = fetch.plane + 1;
+        self.modulo_at[idx] = fetch.apply_modulo;
+        // Word addressing is unit-based: a plane enabled mid-line keeps
+        // fetching into its unit's word position, leaving earlier words
+        // zero (matching the hardware's per-unit pointer cadence).
+        self.word_idx_at[idx] = if shres {
+            fetch.unit_ord * 4 + u16::from(fetch.counter >> 1)
+        } else if hires {
+            fetch.unit_ord * 2 + u16::from(fetch.counter >= 4)
+        } else {
+            fetch.unit_ord
+        };
+        self.words_per_plane[plane] = self.words_per_plane[plane].max(self.word_idx_at[idx] + 1);
+        if self.first_fetch_cck.is_none() {
+            self.first_fetch_cck = Some(fetch.cck);
+            if !carried {
+                self.run_origin_cck = Some(fetch.cck.saturating_sub(u16::from(fetch.counter)));
+            }
+        }
+    }
+
+    fn finish(&mut self, state: DdfState) {
+        self.end_state = state;
+        self.words_per_row = self.words_per_plane.iter().copied().max().unwrap_or(0);
+        self.dma_planes = self.plane_at.iter().copied().max().unwrap_or(0);
+    }
+}
+
 /// Read-mostly projection of `DdfSeqLine` for the per-colour-clock paths.
 ///
 /// A packed slot holds the plane number plus one in bits 0..3, the modulo
@@ -81,6 +151,11 @@ pub(super) struct DdfSeqHotLine {
     words_per_row: std::cell::Cell<u16>,
     dma_planes: std::cell::Cell<u8>,
     run_origin_cck: std::cell::Cell<Option<u16>>,
+    /// Identity of the slot array currently stored in `slot_at`. A line
+    /// rollover invalidates the vpos but deliberately retains this identity,
+    /// allowing an identical static plan to publish the new line without
+    /// rewriting all 232 cells.
+    static_key: std::cell::Cell<Option<DdfSeqStaticKey>>,
 }
 
 impl DdfSeqHotLine {
@@ -92,6 +167,7 @@ impl DdfSeqHotLine {
             words_per_row: std::cell::Cell::new(0),
             dma_planes: std::cell::Cell::new(0),
             run_origin_cck: std::cell::Cell::new(None),
+            static_key: std::cell::Cell::new(None),
         }
     }
 
@@ -101,17 +177,21 @@ impl DdfSeqHotLine {
 
     fn refresh(&self, line: &DdfSeqLine) {
         self.valid.set(false);
-        for (cck, slot) in self.slot_at.iter().enumerate() {
-            let mut packed = u16::from(line.plane_at[cck]);
-            if line.modulo_at[cck] {
-                packed |= DDF_SEQ_SLOT_MODULO;
+        let slots_unchanged = line.static_key.is_some() && self.static_key.get() == line.static_key;
+        if !slots_unchanged {
+            for (cck, slot) in self.slot_at.iter().enumerate() {
+                let mut packed = u16::from(line.plane_at[cck]);
+                if line.modulo_at[cck] {
+                    packed |= DDF_SEQ_SLOT_MODULO;
+                }
+                packed |= line.word_idx_at[cck] << DDF_SEQ_SLOT_WORD_SHIFT;
+                slot.set(packed);
             }
-            packed |= line.word_idx_at[cck] << DDF_SEQ_SLOT_WORD_SHIFT;
-            slot.set(packed);
         }
         self.words_per_row.set(line.words_per_row);
         self.dma_planes.set(line.dma_planes);
         self.run_origin_cck.set(line.run_origin_cck);
+        self.static_key.set(line.static_key);
         self.vpos.set(line.vpos);
         self.valid.set(true);
     }
@@ -216,6 +296,55 @@ impl Bus {
         } else {
             self.denise.bplcon0
         };
+        // BEAMCON0.HARDDIS relaxes the hardwired stop position.
+        let (_, hard_stop) = crate::chipset::agnus::ddf_hard_bounds(self.harddis_active());
+
+        if writes.is_empty() {
+            let aga = self.aga_enabled();
+            let ecs = self.ddf_seq_ecs_rules();
+            let ddfstrt = self.denise.ddfstrt & mask;
+            let ddfstop = self.denise.ddfstop & mask;
+            let key = DdfSeqStaticKey {
+                state,
+                line_ccks,
+                ddfstrt,
+                ddfstop,
+                hard_stop,
+                aga,
+                ecs,
+            };
+
+            // Stable display bands commonly repeat this exact state for
+            // hundreds of lines. The walk's slots and end state are pure
+            // functions of the key, so carry the previous line's fixed
+            // arrays forward and only retag its beam row.
+            if let Ok(cached) = self.ddf_seq_line.try_borrow() {
+                if let Some(cached) = cached.as_ref().filter(|line| line.static_key == Some(key)) {
+                    let mut line = cached.clone();
+                    line.vpos = vpos;
+                    return line;
+                }
+            }
+
+            drop(writes);
+            let carried = state.bprun;
+            let shres = crate::chipset::agnus::bitplane_shres(state.bplcon0);
+            let hires = crate::chipset::agnus::bitplane_hires(state.bplcon0);
+            let mut line = DdfSeqLine::empty(vpos, state, Some(key));
+            seq::walk_static_line_into(
+                aga,
+                ecs,
+                ddfstrt,
+                ddfstop,
+                hard_stop,
+                line_ccks,
+                &mut state,
+                |fetch| line.record_fetch(fetch, shres, hires, carried),
+            );
+            line.finish(state);
+            return line;
+        }
+
         let mut strt_writes: Vec<(u16, u16)> = Vec::new();
         let mut stop_writes: Vec<(u16, u16)> = Vec::new();
         let mut extra: Vec<DdfSignal> = Vec::new();
@@ -292,9 +421,7 @@ impl Bus {
 
         // The static strt/stop strobes are already covered by the log-based
         // reconstruction above, so pass never-matching values to the default
-        // list builder and merge everything through `extra`. BEAMCON0.HARDDIS
-        // relaxes the hardwired stop position.
-        let (_, hard_stop) = crate::chipset::agnus::ddf_hard_bounds(self.harddis_active());
+        // list builder and merge everything through `extra`.
         let signals =
             seq::line_signals_with_hard_stop(0xFFFF, 0xFFFF, hard_stop, line_ccks, &extra);
         // A line that begins with BPRUN already up continues a run carried
@@ -308,49 +435,13 @@ impl Bus {
             &mut state,
         );
 
-        let mut line = DdfSeqLine {
-            vpos,
-            plane_at: [0; DDF_SEQ_MAX_LINE_CCKS],
-            modulo_at: [false; DDF_SEQ_MAX_LINE_CCKS],
-            words_per_plane: [0; 8],
-            words_per_row: 0,
-            dma_planes: 0,
-            word_idx_at: [0; DDF_SEQ_MAX_LINE_CCKS],
-            first_fetch_cck: None,
-            run_origin_cck: None,
-            end_state: state,
-        };
+        let mut line = DdfSeqLine::empty(vpos, state, None);
         let shres = crate::chipset::agnus::bitplane_shres(state.bplcon0);
         let hires = crate::chipset::agnus::bitplane_hires(state.bplcon0);
-        for f in &fetches {
-            let idx = usize::from(f.cck);
-            if idx >= DDF_SEQ_MAX_LINE_CCKS {
-                continue;
-            }
-            let plane = usize::from(f.plane).min(7);
-            line.plane_at[idx] = f.plane + 1;
-            line.modulo_at[idx] = f.apply_modulo;
-            // Word addressing is unit-based: a plane enabled mid-line keeps
-            // fetching into its unit's word position, leaving earlier words
-            // zero (matching the hardware's per-unit pointer cadence).
-            line.word_idx_at[idx] = if shres {
-                f.unit_ord * 4 + u16::from(f.counter >> 1)
-            } else if hires {
-                f.unit_ord * 2 + u16::from(f.counter >= 4)
-            } else {
-                f.unit_ord
-            };
-            line.words_per_plane[plane] =
-                line.words_per_plane[plane].max(line.word_idx_at[idx] + 1);
-            if line.first_fetch_cck.is_none() {
-                line.first_fetch_cck = Some(f.cck);
-                if !run_carried_in {
-                    line.run_origin_cck = Some(f.cck.saturating_sub(u16::from(f.counter)));
-                }
-            }
+        for fetch in fetches {
+            line.record_fetch(fetch, shres, hires, run_carried_in);
         }
-        line.words_per_row = line.words_per_plane.iter().copied().max().unwrap_or(0);
-        line.dma_planes = line.plane_at.iter().copied().max().unwrap_or(0);
+        line.finish(state);
         line
     }
 
@@ -603,7 +694,9 @@ impl Bus {
             self.denise.bplcon0,
         ));
         self.ddf_seq_writes.borrow_mut().clear();
-        self.ddf_seq_invalidate_line();
+        // Keep the completed line as the candidate for static-plan reuse.
+        // Only its vpos publication becomes stale at the rollover.
+        self.ddf_seq_hot_line.invalidate();
     }
 }
 
@@ -632,6 +725,30 @@ mod tests {
         // Plane 1 fetches at the end of each unit ($3F, $47, ...).
         assert_eq!(table.plane_at[0x3F], 1);
         assert_eq!(table.plane_at[0x38], 0);
+    }
+
+    #[test]
+    fn identical_static_scanline_reuses_the_complete_plan_key() {
+        let mut bus = empty_bus();
+        bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
+        bus.denise.diwstrt = 0x2C81;
+        bus.denise.diwstop = 0xF4C1;
+        bus.denise.ddfstrt = 0x0038;
+        bus.denise.ddfstop = 0x00D0;
+        bus.denise.bplcon0 = 0x4200;
+        bus.agnus.vpos = 0x50;
+        bus.ddf_seq_on_line_rollover(0x4F);
+
+        let first = (*bus.ddf_seq_line_table()).clone();
+        let first_key = first.static_key.expect("ordinary line has a static key");
+        bus.ddf_seq_on_line_rollover(0x50);
+        bus.agnus.vpos = 0x51;
+        let second = bus.ddf_seq_line_table();
+
+        assert_eq!(second.static_key, Some(first_key));
+        assert_eq!(second.plane_at, first.plane_at);
+        assert_eq!(second.word_idx_at, first.word_idx_at);
+        assert_eq!(second.end_state, first.end_state);
     }
 
     #[test]

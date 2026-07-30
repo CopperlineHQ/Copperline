@@ -97,7 +97,7 @@ winit = { version = "0.30", optional = true }
 anyhow = "1"
 log = "0.4"
 env_logger = { version = "0.11", optional = true }
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", optional = true }
 serde-big-array = "0.5"
 bincode = "1"
@@ -205,4 +205,9 @@ needless_range_loop = "allow"
 
 [profile.release]
 opt-level = 3
-lto = "thin"
+# Copperline's hottest paths cross the CPU/bus/chipset/render module
+# boundaries. Whole-program optimization is measurably worthwhile here:
+# the AROS benchmark is about 10% faster core-only and 7% faster with
+# rendering than thin LTO, and the resulting executable is smaller.
+lto = "fat"
+codegen-units = 1

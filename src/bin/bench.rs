@@ -123,6 +123,7 @@ fn main() -> Result<()> {
 
     let mut fb = vec![0u32; MAX_CANVAS_PIXELS];
     let mut deinterlacer = Deinterlacer::new();
+    let mut presentation_fb = Vec::new();
     let mut last_rendered: Option<u64> = None;
     let mut rendered_frames: u64 = 0;
 
@@ -153,13 +154,14 @@ fn main() -> Result<()> {
                     Overscan::Tv,
                 );
                 let base = emu.bus().frame_render_base();
-                deinterlacer.push_field(
+                deinterlacer.present_field_into(
                     &fb,
                     field_rows,
                     FB_WIDTH * canvas_scale,
                     base.bplcon0 & 0x0004 != 0,
                     base.long_field,
                     !geometry.programmable,
+                    &mut presentation_fb,
                 );
                 last_rendered = Some(emulated_frame);
                 rendered_frames += 1;
@@ -204,11 +206,12 @@ fn main() -> Result<()> {
         over_budget,
         sorted.len()
     );
-    // Keep the deinterlacer's output observable so the render path cannot be
-    // optimized out entirely.
+    // Keep the actual presentation buffer observable so the direct render
+    // path cannot be optimized out entirely.
     if args.render {
-        let checksum: u64 = deinterlacer.output()[..FB_WIDTH]
+        let checksum: u64 = presentation_fb
             .iter()
+            .take(FB_WIDTH)
             .map(|&px| px as u64)
             .sum();
         println!("bench render checksum: {checksum:#x}");

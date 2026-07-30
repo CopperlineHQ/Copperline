@@ -1635,10 +1635,10 @@ pub(super) fn generated_sprite_collision_bits(
         }
     }
     let collision = collision_pixels[fb_idx];
-    if collision.pf1_match {
+    if collision.pf1_match() {
         clxdat |= 1 << (group + 1);
     }
-    if collision.pf2_match {
+    if collision.pf2_match() {
         clxdat |= 1 << (group + 5);
     }
     sprite_group_mask[fb_idx] |= bit;
@@ -1673,10 +1673,10 @@ pub(super) fn generated_sprite_pair_collision_bits(
         }
     }
     let collision = collision_pixels[fb_idx];
-    if collision.pf1_match {
+    if collision.pf1_match() {
         clxdat |= 1 << (group + 1);
     }
-    if collision.pf2_match {
+    if collision.pf2_match() {
         clxdat |= 1 << (group + 5);
     }
     sprite_group_mask[fb_idx] |= bit;
