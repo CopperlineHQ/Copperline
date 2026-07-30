@@ -3526,9 +3526,9 @@ pub struct RenderInput {
     current_render_events: Vec<BeamRegisterWrite>,
     bottom_palette_events: Vec<BeamRegisterWrite>,
     top_palette_end: Palette,
-    chip_ram: Vec<u8>,
+    chip_ram: std::sync::Arc<Vec<u8>>,
     chip_ram_writes: Vec<BeamChipRamWrite>,
-    captured_bitplane_rows: Vec<Option<CapturedBitplaneRow>>,
+    captured_bitplane_rows: std::sync::Arc<Vec<Option<CapturedBitplaneRow>>>,
     captured_sprite_lines: Vec<CapturedSpriteLine>,
     held_sprites: [Option<HeldSpriteLine>; 8],
     sprite_display_enable_x_by_y: Vec<Option<usize>>,
@@ -3563,9 +3563,9 @@ impl RenderInput {
             current_render_events: bus.current_render_events().to_vec(),
             bottom_palette_events: bus.frame_bottom_palette_events().to_vec(),
             top_palette_end: bus.frame_top_palette_end(),
-            chip_ram: bus.frame_chip_ram().to_vec(),
+            chip_ram: bus.frame_chip_ram_shared(),
             chip_ram_writes: bus.frame_chip_ram_writes().to_vec(),
-            captured_bitplane_rows: bus.frame_captured_bitplane_rows().to_vec(),
+            captured_bitplane_rows: bus.frame_captured_bitplane_rows_shared(),
             captured_sprite_lines: bus.frame_captured_sprite_lines().to_vec(),
             held_sprites: bus.frame_held_sprites(),
             sprite_display_enable_x_by_y: bus.frame_sprite_display_enable_x_by_y().to_vec(),
@@ -3603,12 +3603,9 @@ impl RenderInput {
             bus.frame_bottom_palette_events(),
         );
         self.top_palette_end = bus.frame_top_palette_end();
-        copy_into(&mut self.chip_ram, bus.frame_chip_ram());
+        self.chip_ram = bus.frame_chip_ram_shared();
         copy_into(&mut self.chip_ram_writes, bus.frame_chip_ram_writes());
-        copy_into(
-            &mut self.captured_bitplane_rows,
-            bus.frame_captured_bitplane_rows(),
-        );
+        self.captured_bitplane_rows = bus.frame_captured_bitplane_rows_shared();
         copy_into(
             &mut self.captured_sprite_lines,
             bus.frame_captured_sprite_lines(),
@@ -3671,6 +3668,22 @@ impl RenderInput {
             &self.frame_render_events,
         )
     }
+
+    /// Drop large shared frame snapshots once a render has completed while
+    /// keeping this bundle's reusable event/sprite allocations. Releasing the
+    /// RAM reference before the next beam-frame wrap lets the capture side
+    /// reclaim its Vec instead of allocating another chip-RAM-sized buffer.
+    pub(crate) fn release_shared_frame_data(&mut self) {
+        static EMPTY_CHIP_RAM: OnceLock<std::sync::Arc<Vec<u8>>> = OnceLock::new();
+        static EMPTY_BITPLANE_ROWS: OnceLock<std::sync::Arc<Vec<Option<CapturedBitplaneRow>>>> =
+            OnceLock::new();
+
+        self.chip_ram =
+            std::sync::Arc::clone(EMPTY_CHIP_RAM.get_or_init(|| std::sync::Arc::new(Vec::new())));
+        self.captured_bitplane_rows = std::sync::Arc::clone(
+            EMPTY_BITPLANE_ROWS.get_or_init(|| std::sync::Arc::new(Vec::new())),
+        );
+    }
 }
 
 /// Outputs of `render_from_input`. Render timing is always recorded back on
@@ -3698,10 +3711,16 @@ pub fn render(bus: &mut Bus, fb: &mut [u32]) {
             Some(input) => input.refill_from_bus(bus),
             None => *scratch = Some(RenderInput::from_bus(bus)),
         }
-        let input = scratch.as_ref().expect("scratch render input present");
-        let result = render_from_input(input, fb);
+        let result = {
+            let input = scratch.as_ref().expect("scratch render input present");
+            render_from_input(input, fb)
+        };
         bus.denise.or_clxdat(result.clxdat);
         bus.record_video_render_frame(result.timing);
+        scratch
+            .as_mut()
+            .expect("scratch render input present")
+            .release_shared_frame_data();
     });
 }
 
@@ -3720,8 +3739,14 @@ pub fn render_display_only(bus: &Bus, fb: &mut [u32]) {
             Some(input) => input.refill_from_bus(bus),
             None => *scratch = Some(RenderInput::from_bus(bus)),
         }
-        let input = scratch.as_ref().expect("scratch render input present");
-        let _ = render_from_input(input, fb);
+        {
+            let input = scratch.as_ref().expect("scratch render input present");
+            let _ = render_from_input(input, fb);
+        }
+        scratch
+            .as_mut()
+            .expect("scratch render input present")
+            .release_shared_frame_data();
     });
 }
 
@@ -4082,6 +4107,7 @@ pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
     let mut next_bitplane_data_event = 0usize;
     let mut playfield_mask = vec![0u8; FB_WIDTH * rows];
     let mut collision_pixels = vec![CollisionPixel::default(); FB_WIDTH * rows];
+    let mut collision_lookup = CollisionLookup::new();
     let mut clxdat = 0u16;
     let mut dma_output_start_x_by_line = vec![None; rows];
 
@@ -4490,6 +4516,7 @@ pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
                 fb,
                 &mut playfield_mask,
                 &mut collision_pixels,
+                &mut collision_lookup,
                 &mut clxdat,
                 palette,
                 segments,
@@ -4762,6 +4789,7 @@ fn render_planned_playfield_line(
     fb: &mut [u32],
     playfield_mask: &mut [u8],
     collision_pixels: &mut [CollisionPixel],
+    collision_lookup: &mut CollisionLookup,
     clxdat: &mut u16,
     mut palette: Palette,
     palette_segments: &[PaletteSegment],
@@ -4799,14 +4827,6 @@ fn render_planned_playfield_line(
     // ([`DENISE_HAM_SELECT_PIPELINE_FB`]).
     let mut ham_bplcon0 = base_ham_bplcon0;
     let mut ham_segment_idx = 0usize;
-    // Playfield-collision classification (clxcon_planes_match) depends only on
-    // the bitplane index and the constant control fields (CLXCON/CLXCON2, plane
-    // count, dual-playfield), so memoize it per control run as a 256-entry
-    // table indexed by the sample index. This lifts a per-plane matching loop
-    // out of the per-pixel path; the table is rebuilt only when those control
-    // inputs change.
-    let mut collision_key: Option<(u16, u16, bool, usize)> = None;
-    let mut collision_table = [CollisionPixel::default(); 256];
     // The loop runs in segment-bounded chunks: control, scroll, and palette
     // segments apply at pixel boundaries (x stepping by pixel_repeat), so
     // between two boundaries every control-derived value is constant and is
@@ -4917,23 +4937,8 @@ fn render_planned_playfield_line(
         };
 
         let collision_dual = pixel_control.dual_playfield();
-        let collision_key_now = (
-            pixel_control.clxcon,
-            pixel_control.clxcon2,
-            collision_dual,
-            nplanes,
-        );
-        if collision_key != Some(collision_key_now) {
-            collision_table = std::array::from_fn(|idx| {
-                collision_pixel(
-                    idx as u8,
-                    pixel_control.clxcon,
-                    pixel_control.clxcon2,
-                    collision_dual,
-                )
-            });
-            collision_key = Some(collision_key_now);
-        }
+        let collision_table =
+            collision_lookup.table(pixel_control.clxcon, pixel_control.clxcon2, collision_dual);
 
         loop {
             let output_native_x = ((x - plan.x_start) / pixel_repeat) * native_per_pixel;
@@ -5061,7 +5066,7 @@ fn render_planned_playfield_line(
             // written pixel) is equivalent: a visible sample writes at least
             // one in-window pixel.
             let collision = collision_table[sample.idx as usize];
-            let pf_mask = u8::from(collision.pf1) | (u8::from(collision.pf2) << 1);
+            let pf_mask = collision.playfield_mask();
             *clxdat |= collision.clxdat_bits();
             for dx in 0..pixel_repeat {
                 let pixel_x = x + dx;
@@ -5129,16 +5134,70 @@ fn left_edge_blank_pixels(control: ControlState) -> usize {
 }
 
 #[derive(Clone, Copy, Default)]
-struct CollisionPixel {
-    pf1: bool,
-    pf2: bool,
-    pf1_match: bool,
-    pf2_match: bool,
-}
+#[repr(transparent)]
+struct CollisionPixel(u8);
 
 impl CollisionPixel {
+    const PF1: u8 = 1 << 0;
+    const PF2: u8 = 1 << 1;
+    const PF1_MATCH: u8 = 1 << 2;
+    const PF2_MATCH: u8 = 1 << 3;
+
+    fn new(pf1: bool, pf2: bool, pf1_match: bool, pf2_match: bool) -> Self {
+        Self(
+            u8::from(pf1) * Self::PF1
+                + u8::from(pf2) * Self::PF2
+                + u8::from(pf1_match) * Self::PF1_MATCH
+                + u8::from(pf2_match) * Self::PF2_MATCH,
+        )
+    }
+
+    fn playfield_mask(self) -> u8 {
+        self.0 & (Self::PF1 | Self::PF2)
+    }
+
+    fn pf1_match(self) -> bool {
+        self.0 & Self::PF1_MATCH != 0
+    }
+
+    fn pf2_match(self) -> bool {
+        self.0 & Self::PF2_MATCH != 0
+    }
+
     fn clxdat_bits(self) -> u16 {
-        u16::from(self.pf1_match && self.pf2_match)
+        u16::from(
+            self.0 & (Self::PF1_MATCH | Self::PF2_MATCH) == (Self::PF1_MATCH | Self::PF2_MATCH),
+        )
+    }
+}
+
+/// Frame-local collision truth table. CLXCON normally remains unchanged for
+/// the whole display, so retaining the table across scanlines replaces tens
+/// of thousands of repeated per-plane comparisons with byte lookups. A
+/// mid-frame CLXCON change updates the key and rebuilds before its first
+/// affected sample.
+struct CollisionLookup {
+    key: Option<(u16, u16, bool)>,
+    table: [CollisionPixel; 256],
+}
+
+impl CollisionLookup {
+    fn new() -> Self {
+        Self {
+            key: None,
+            table: [CollisionPixel::default(); 256],
+        }
+    }
+
+    fn table(&mut self, clxcon: u16, clxcon2: u16, dual_playfield: bool) -> &[CollisionPixel; 256] {
+        let key = (clxcon, clxcon2, dual_playfield);
+        if self.key != Some(key) {
+            self.table = std::array::from_fn(|idx| {
+                collision_pixel(idx as u8, clxcon, clxcon2, dual_playfield)
+            });
+            self.key = Some(key);
+        }
+        &self.table
     }
 }
 
@@ -5146,16 +5205,16 @@ fn collision_pixel(idx: u8, clxcon: u16, clxcon2: u16, dual_playfield: bool) -> 
     let even_match = clxcon_planes_match(idx, clxcon, clxcon2, 1);
     let odd_match_raw = clxcon_planes_match(idx, clxcon, clxcon2, 0);
     let odd_match = odd_match_raw && (dual_playfield || even_match);
-    CollisionPixel {
-        pf1: dual_playfield && idx & 0b010101 != 0,
-        pf2: if dual_playfield {
+    CollisionPixel::new(
+        dual_playfield && idx & 0b010101 != 0,
+        if dual_playfield {
             idx & 0b101010 != 0
         } else {
             idx != 0
         },
-        pf1_match: odd_match,
-        pf2_match: even_match,
-    }
+        odd_match,
+        even_match,
+    )
 }
 
 fn clxcon_planes_match(idx: u8, clxcon: u16, clxcon2: u16, first_plane: usize) -> bool {
@@ -5201,7 +5260,7 @@ fn record_generated_playfield_collision_pixel(
         control.clxcon2,
         control.dual_playfield(),
     );
-    let pf_mask = u8::from(collision.pf1) | (u8::from(collision.pf2) << 1);
+    let pf_mask = collision.playfield_mask();
     if pf_mask != 0 {
         playfield_mask[fb_idx] = pf_mask;
     }

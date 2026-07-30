@@ -50,12 +50,19 @@ lines fetch on alternating rasters with the picture sitting linearly left
 of the standard grid (its early words run through the left border). The
 renderer honours this through the captured run geometry: a below-$18 run
 origin keeps its raw fetch grid, and a line without a captured fetch
-paints nothing (vAmigaTS Agnus/DDF/DDF/oldhwstop3/4 A500 photos). The
-per-line fetch table is rebuilt when DDFSTRT/DDFSTOP/BPLCON0/DMACON/DIW
-writes land (DDF writes commit to the comparators four colour clocks after
-the write slot; an old DDFSTOP still fires on its commit clock, an old
-DDFSTRT does not - vAmiga's sequencer semantics, hardware-verified in
-aggregate by the vAmigaTS Agnus/DDF/DDF/oldhwstop1-4 A500 photos). A
+paints nothing (vAmigaTS Agnus/DDF/DDF/oldhwstop3/4 A500 photos). For a
+line with no mid-line sequencer writes, the walked fetch plan is keyed on
+the complete carried flop state, masked DDF registers, line geometry,
+chip revision and hard-stop mode. An identical key reuses the preceding
+line's immutable slots and end state; the ordinary static walk is
+allocation-free. DDFSTRT/DDFSTOP/BPLCON0/DMACON/DIW writes invalidate that
+plan and rebuild the affected line (DDF writes commit to the comparators
+four colour clocks after the write slot; an old DDFSTOP still fires on its
+commit clock, an old DDFSTRT does not - vAmiga's sequencer semantics,
+hardware-verified in aggregate by the vAmigaTS
+Agnus/DDF/DDF/oldhwstop1-4 A500 photos). Because the complete initial state
+is in the key, a run carried across horizontal blanking or a vertical-window
+transition cannot accidentally reuse an ordinary interior line. A
 mid-row BPLCON0 change switches the fetch-unit slot layout from its commit
 clock; word addressing is unit-based, so late-enabled planes keep their
 word positions and earlier words stay zero.

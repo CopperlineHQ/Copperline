@@ -123,6 +123,7 @@ fn main() -> Result<()> {
 
     let mut fb = vec![0u32; MAX_CANVAS_PIXELS];
     let mut deinterlacer = Deinterlacer::new();
+    let mut presentation_fb = Vec::new();
     let mut last_rendered: Option<u64> = None;
     let mut rendered_frames: u64 = 0;
 
@@ -153,13 +154,14 @@ fn main() -> Result<()> {
                     Overscan::Tv,
                 );
                 let base = emu.bus().frame_render_base();
-                deinterlacer.push_field(
+                deinterlacer.present_field_into(
                     &fb,
                     field_rows,
                     FB_WIDTH * canvas_scale,
                     base.bplcon0 & 0x0004 != 0,
                     base.long_field,
                     !geometry.programmable,
+                    &mut presentation_fb,
                 );
                 last_rendered = Some(emulated_frame);
                 rendered_frames += 1;

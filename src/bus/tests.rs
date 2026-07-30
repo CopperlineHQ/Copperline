@@ -4893,7 +4893,7 @@ fn lowres_fallback_fetches_ignore_chip_ram_writes_after_plane_slot() {
     snapshot.bplpt[0] = 0x0100;
     snapshot.bplpt[1] = 0x0200;
     bus.last_frame_render_base = Some(snapshot);
-    bus.last_frame_chip_ram = vec![0; bus.mem.chip_ram.len()];
+    bus.last_frame_chip_ram = std::sync::Arc::new(vec![0; bus.mem.chip_ram.len()]);
     bus.last_frame_chip_ram_writes
         .push(BeamChipRamWrite::from_bytes(
             RENDER_VISIBLE_START_VPOS,
@@ -4925,8 +4925,8 @@ fn lowres_fallback_fetches_ignore_pointer_writes_after_plane_slot() {
     snapshot.bplpt[0] = 0x0100;
     snapshot.bplpt[1] = 0x0200;
     bus.last_frame_render_base = Some(snapshot);
-    bus.last_frame_chip_ram = vec![0; bus.mem.chip_ram.len()];
-    bus.last_frame_chip_ram[0x0300] = 0x80;
+    bus.last_frame_chip_ram = std::sync::Arc::new(vec![0; bus.mem.chip_ram.len()]);
+    std::sync::Arc::make_mut(&mut bus.last_frame_chip_ram)[0x0300] = 0x80;
     bus.last_frame_render_events.push(BeamRegisterWrite {
         vpos: RENDER_VISIBLE_START_VPOS,
         hpos: 0x40,
@@ -5932,13 +5932,13 @@ fn state_load_resets_transient_video_latches() {
         value: 0x0FFF,
         source: BeamWriteSource::Copper,
     });
-    bus.last_frame_chip_ram = vec![0xA5; bus.mem.chip_ram.len()];
+    bus.last_frame_chip_ram = std::sync::Arc::new(vec![0xA5; bus.mem.chip_ram.len()]);
     bus.last_frame_chip_ram_writes
         .push(BeamChipRamWrite::from_bytes(0x2C, 0x40, 0x0100, &[0x12]));
     bus.current_frame_chip_ram.clear();
     bus.current_frame_chip_ram_writes
         .push(BeamChipRamWrite::from_bytes(0x2C, 0x40, 0x0100, &[0x34]));
-    bus.last_frame_bitplane_rows[0] = Some(CapturedBitplaneRow {
+    std::sync::Arc::make_mut(&mut bus.last_frame_bitplane_rows)[0] = Some(CapturedBitplaneRow {
         nplanes: 1,
         words_per_row: 1,
         fetch_origin_cck: None,

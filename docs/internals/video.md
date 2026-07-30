@@ -29,6 +29,11 @@ decoded through EHB / HAM / HAM8 / dual-playfield rules (the pixel
 pipeline carries 24-bit colour end to end; OCS/ECS paths keep their exact
 12-bit maths and expand by nibble), composited with the eight sprites
 under playfield priority, and CLXDAT collisions are accumulated.
+The CLXCON/CLXCON2 playfield classification is a frame-local 256-entry
+truth table retained across scanlines and rebuilt when its control key
+changes. Each framebuffer collision entry is packed into one byte; this
+is only a representation change, and the same playfield-presence and
+match bits feed sprite priority and CLXDAT.
 For DMA-fetched HAM playfields, the display window gates framebuffer output
 and collision recording, but the low-res Denise phase can still seed the HAM
 component history just before DIW: when the window opens to the right of the
@@ -303,9 +308,13 @@ At frame end, `Bus::begin_new_beam_frame` freezes the just-finished frame:
 the render-event journal, chip-RAM snapshot, captured bitplane/sprite DMA
 rows, palette split, display geometry, frame line count, framebuffer start
 line, and Agnus programmable blanking latches become the source for
-`RenderInput::from_bus`. `render_from_input` consumes only that owned
-bundle, so the main thread can start emulating frame N+1 while the worker
-renders frame N.
+`RenderInput::from_bus`. The large immutable chip-RAM and captured-bitplane
+bundles use shared ownership between the bus and `RenderInput`; queueing a
+worker job therefore does not copy the full RAM image or deep-clone every
+plane row. A completed job releases those references before the next frame
+wrap so the RAM allocation normally returns to the capture side.
+`render_from_input` consumes only this frozen bundle, so the main thread can
+start emulating frame N+1 while the worker renders frame N.
 
 `window.rs` starts a persistent `copperline-render` worker by default.
 `COPPERLINE_THREADED_RENDER=0` (also `false`, `off`, or `no`) disables the
@@ -343,7 +352,11 @@ field of its own parity, and the woven line against its own
 predecessor), and the per-pixel motion mask is dilated one pixel
 sideways so dithered moving art bobs as a region instead of weaving and
 interpolating on alternate pixels.
-Progressive content is line-doubled without history.
+Progressive content is line-doubled without history. With phosphor
+persistence off, the common progressive path writes those doubled rows
+directly into the frontend-owned presentation buffer instead of filling
+the deinterlacer's intermediate output and then copying the complete
+frame. Interlaced and phosphor-blended frames retain the history buffer.
 `[display] deinterlace = false` (or the `COPPERLINE_DEINTERLACE=0` env
 override) falls back to plain line doubling; like phosphor, the setting
 travels in every render job.

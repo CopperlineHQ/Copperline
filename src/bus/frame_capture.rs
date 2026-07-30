@@ -52,36 +52,39 @@ impl Bus {
             self.current_frame_chip_ram_writes.clear();
             self.last_frame_beam_bottom_palette_events.clear();
         }
-        // Promote the just-finished frame's chip-RAM snapshot to `last` by
-        // swapping buffers instead of copying 2 MB. `capture_current_frame_
+        // Promote the just-finished frame's chip-RAM snapshot to immutable
+        // shared ownership without copying 2 MB. `capture_current_frame_
         // display_start` already filled `current_frame_chip_ram` for any frame
-        // that reached its display window, so move that buffer across and
-        // recycle the old `last` buffer as the next `current`. A frame that
-        // never displayed (no capture taken) has no meaningful snapshot, so
-        // fall back to a live copy for the renderer's blank/border output.
-        if promote_render_frame
+        // that reached its display window. The old shared buffer becomes the
+        // next mutable capture buffer once the renderer has released it. A
+        // frame that never displayed has no meaningful snapshot, so fall back
+        // to a live copy for the renderer's blank/border output.
+        let completed_chip_ram = if promote_render_frame
             && self.current_frame_display_snapshot_taken
             && self.current_frame_chip_ram.len() == self.mem.chip_ram.len()
         {
-            std::mem::swap(
-                &mut self.last_frame_chip_ram,
-                &mut self.current_frame_chip_ram,
-            );
+            std::mem::take(&mut self.current_frame_chip_ram)
         } else if promote_render_frame {
-            self.last_frame_chip_ram.clear();
-            self.last_frame_chip_ram
-                .extend_from_slice(&self.mem.chip_ram);
+            self.mem.chip_ram.clone()
         } else {
-            self.last_frame_chip_ram.clear();
-        }
+            Vec::new()
+        };
+        let old_chip_ram = std::mem::replace(
+            &mut self.last_frame_chip_ram,
+            std::sync::Arc::new(completed_chip_ram),
+        );
+        // The renderer normally drops its shared reference before the next
+        // frame wrap, letting the old allocation return to the capture side.
+        // If it is still in flight, correctness wins: start with a fresh Vec.
+        self.current_frame_chip_ram = std::sync::Arc::try_unwrap(old_chip_ram).unwrap_or_default();
         let current_bitplane_rows = std::mem::replace(
             &mut self.current_frame_bitplane_rows,
             empty_captured_bitplane_rows(),
         );
         self.last_frame_bitplane_rows = if promote_render_frame {
-            current_bitplane_rows
+            std::sync::Arc::new(current_bitplane_rows)
         } else {
-            empty_captured_bitplane_rows()
+            std::sync::Arc::new(empty_captured_bitplane_rows())
         };
         self.last_frame_sprite_lines = if promote_render_frame {
             std::mem::take(&mut self.current_frame_sprite_lines)

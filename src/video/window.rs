@@ -6706,15 +6706,17 @@ impl App {
             self.overscan,
         );
         let base = self.emu.bus().frame_render_base();
-        self.deinterlacer.push_field(
+        let (rows, width) = self.deinterlacer.present_field_into(
             &self.fb,
             field_rows,
             FB_WIDTH * canvas_scale,
             base.bplcon0 & 0x0004 != 0,
             base.long_field,
             !geometry.programmable,
+            &mut self.present_fb,
         );
-        self.refresh_present_from_deinterlacer();
+        self.present_rows = rows;
+        self.present_width = width;
         self.request_redraw();
     }
 
@@ -9145,7 +9147,9 @@ impl App {
     fn apply_threaded_render_result(&mut self, result: RenderWorkerResult) -> bool {
         // Only one job is in flight at a time, so the returned snapshot is
         // always the freshest one to recycle.
-        self.render_recycle_input = Some(result.input);
+        let mut input = result.input;
+        input.release_shared_frame_data();
+        self.render_recycle_input = Some(input);
         if result.generation != self.render_generation {
             if self.render_recycle_fb.is_empty() {
                 self.render_recycle_fb = result.presentation_fb;
@@ -9347,15 +9351,17 @@ impl App {
         let base = self.emu.bus().frame_render_base();
         // Standard 15 kHz fields line-double / weave to 2x rows; a
         // programmable progressive scan already carries every line.
-        self.deinterlacer.push_field(
+        let (rows, width) = self.deinterlacer.present_field_into(
             &self.fb,
             field_rows,
             FB_WIDTH * canvas_scale,
             base.bplcon0 & 0x0004 != 0,
             base.long_field,
             !geometry.programmable,
+            &mut self.present_fb,
         );
-        self.refresh_present_from_deinterlacer();
+        self.present_rows = rows;
+        self.present_width = width;
         self.present_tv_aperture_rows =
             self.presentation_latch
                 .resolve_tv_aperture(standard_tv_aperture_frame(

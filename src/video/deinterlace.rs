@@ -365,6 +365,61 @@ impl Deinterlacer {
         self.have[parity] = true;
         self.present_with_phosphor();
     }
+
+    /// Present a field directly into an owned frontend buffer.
+    ///
+    /// The overwhelmingly common standard progressive path needs neither
+    /// weave history nor phosphor history. Writing its doubled rows straight
+    /// to the frontend buffer avoids first filling `self.out` and then copying
+    /// the whole 570-line image once more. Interlaced or phosphor-blended
+    /// frames retain the history-dependent [`Self::push_field`] path and copy
+    /// its result, so their output is unchanged.
+    #[doc(hidden)]
+    pub fn present_field_into(
+        &mut self,
+        field: &[u32],
+        rows: usize,
+        width: usize,
+        lace: bool,
+        long_field: bool,
+        double_rows: bool,
+        destination: &mut Vec<u32>,
+    ) -> (usize, usize) {
+        debug_assert!(field.len() >= rows * width);
+        let rows = rows.clamp(1, MAX_VISIBLE_LINES);
+        let direct = self.phosphor_alpha == 0 && (!lace || !self.enabled);
+        if direct {
+            if rows != self.field_rows || width != self.field_width {
+                self.field_rows = rows;
+                self.field_width = width;
+            }
+            self.have = [false; 2];
+            self.have2 = [false; 2];
+            self.out_width = width;
+            if !lace && !double_rows {
+                let active = rows * width;
+                destination.resize(active, 0);
+                destination.copy_from_slice(&field[..active]);
+                self.out_rows = rows;
+            } else {
+                let active = rows * width * 2;
+                destination.resize(active, 0);
+                for y in 0..rows {
+                    let row = &field[y * width..(y + 1) * width];
+                    destination[2 * y * width..(2 * y + 1) * width].copy_from_slice(row);
+                    destination[(2 * y + 1) * width..(2 * y + 2) * width].copy_from_slice(row);
+                }
+                self.out_rows = rows * 2;
+            }
+            return (self.out_rows, self.out_width);
+        }
+
+        self.push_field(field, rows, width, lace, long_field, double_rows);
+        let active = self.out_rows * self.out_width;
+        destination.resize(active, 0);
+        destination.copy_from_slice(&self.output()[..active]);
+        (self.out_rows, self.out_width)
+    }
 }
 
 /// Channel-wise average of two packed RGBA pixels.
@@ -411,6 +466,31 @@ mod tests {
             assert_eq!(out_row(&d, 2 * y), y as u32 + 1);
             assert_eq!(out_row(&d, 2 * y + 1), y as u32 + 1);
         }
+    }
+
+    #[test]
+    fn direct_progressive_presentation_matches_deinterlacer_output() {
+        let field: Vec<u32> = (0..FB_PIXELS).map(|idx| 0xFF00_0000 | idx as u32).collect();
+        let mut reference = Deinterlacer::with_options(true, 0.0);
+        reference.push_field(&field, FB_HEIGHT, FB_WIDTH, false, true, true);
+
+        let mut direct = Deinterlacer::with_options(true, 0.0);
+        let mut destination = Vec::new();
+        let dims = direct.present_field_into(
+            &field,
+            FB_HEIGHT,
+            FB_WIDTH,
+            false,
+            true,
+            true,
+            &mut destination,
+        );
+
+        assert_eq!(dims, (reference.output_rows(), reference.output_width()));
+        assert_eq!(
+            destination,
+            reference.output()[..reference.output_rows() * reference.output_width()]
+        );
     }
 
     #[test]
