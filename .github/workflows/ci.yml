@@ -273,14 +273,39 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install build dependencies
-        # ALSA (cpal) + udev (gilrs) headers; winit needs no X headers at
-        # build time (it dlopens the client libraries at runtime, and no
-        # test opens a window).
+        # ALSA (cpal) + udev (gilrs) headers, plus iproute2 for the A2065
+        # veth probe below. Winit needs no X headers at build time (it dlopens
+        # the client libraries at runtime, and no test opens a window).
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev
+          sudo apt-get install -y --no-install-recommends iproute2 libasound2-dev libudev-dev
       - name: Unit tests and probe golden renders
         run: cargo test --release --locked
+      - name: A2065 bridge round trip over a veth pair
+        # The ordinary suite covers the platform-independent bridge worker
+        # with an in-memory Ethernet adapter. This privileged Linux-only
+        # probe adds the real AF_PACKET socket and kernel BPF filter: the
+        # emulated A2065 sends an ARP request through cl-a2065, and the kernel
+        # on cl-peer answers as 192.0.2.1. Run only the one ignored lib test
+        # as root; the normal suite above remains entirely unprivileged.
+        run: |
+          sudo ip link add cl-a2065 type veth peer name cl-peer
+          trap 'sudo ip link delete cl-a2065 2>/dev/null || true' EXIT
+          sudo sysctl -q -w net.ipv6.conf.cl-a2065.disable_ipv6=1
+          sudo sysctl -q -w net.ipv6.conf.cl-peer.disable_ipv6=1
+          sudo ip addr add 192.0.2.1/24 dev cl-peer
+          sudo ip link set cl-a2065 up
+          sudo ip link set cl-peer up
+          libtest="$(
+            cargo test --release --locked --lib --no-run --message-format=json |
+              jq -r 'select(.reason == "compiler-artifact" and .target.name == "copperline"
+                and .target.kind[0] == "lib" and .profile.test == true
+                and .executable != null) | .executable' |
+              tail -n1
+          )"
+          test -x "$libtest"
+          sudo "$libtest" a2065_bridge_veth_round_trip_reaches_the_rx_ring \
+            --ignored --nocapture
       - name: Upload probe render diffs
         # On a golden mismatch the test writes the actual renders and diff
         # masks; surface them so the regression is reviewable from the run.
