@@ -1249,6 +1249,22 @@ void CommonBridgeTemplate::processCommand(const QueueInfo& info) {
 		}
 		// Is there data to write?
 		if (track.floppyBufferSizeBits) {
+			/* COPPERLINE: background caching moves the physical head and
+			   surface without updating m_actualCurrentCylinder or
+			   m_actualFloppySide, raising m_autocacheModifiedCurrentCylinder
+			   for the next reader to restore from. handleBackgroundDiskRead
+			   does; this path did not, so the bookkeeping comparisons below
+			   could match while the real head sat wherever the cacher left
+			   it, and the write landed on that cylinder and side instead --
+			   corrupting an unrelated track of a real disk. Restore the head
+			   explicitly whenever the cacher has moved it. */
+			if (m_autocacheModifiedCurrentCylinder) {
+				m_actualCurrentCylinder = track.trackNumber;
+				setCurrentCylinder(track.trackNumber);
+				m_actualFloppySide = track.side;
+				setActiveSurface(track.side);
+				m_autocacheModifiedCurrentCylinder = false;
+			}
 			if (m_actualCurrentCylinder != track.trackNumber) {
 				m_actualCurrentCylinder = track.trackNumber;
 				setCurrentCylinder(track.trackNumber);

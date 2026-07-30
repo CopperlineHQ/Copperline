@@ -157,6 +157,12 @@ tolerate it, but software that times its own loading can notice.
 idle. It is off by default: during a boot the drive is never idle, so there 
 is little for it to do, and it moves the real head about on its own.
 
+Every track the guest reads is kept in memory regardless -- re-reads never
+touch the platter twice. What auto-cache adds is the tracks the guest has
+*not* asked for: once the guest goes quiet, the drive carries on for up to a
+minute or so, reading the rest of the disk once, then spins down. Later
+reads of anything it reached are served instantly.
+
 ## Write protection
 
 A real disk is protected twice over, and both have to be open before anything
