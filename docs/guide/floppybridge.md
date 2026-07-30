@@ -163,6 +163,11 @@ touch the platter twice. What auto-cache adds is the tracks the guest has
 minute or so, reading the rest of the disk once, then spins down. Later
 reads of anything it reached are served instantly.
 
+It stays out of the guest's way: while the guest is actively using the drive
+the cacher holds off, resuming a couple of seconds after the last access, so
+a loading game sounds -- and loads -- exactly as it does with auto-cache
+off.
+
 ## Write protection
 
 A real disk is protected twice over, and both have to be open before anything
