@@ -81,11 +81,17 @@ impl Bus {
             &mut self.current_frame_bitplane_rows,
             empty_captured_bitplane_rows(),
         );
-        self.last_frame_bitplane_rows = if promote_render_frame {
+        let next_bitplane_rows = if promote_render_frame {
             std::sync::Arc::new(current_bitplane_rows)
         } else {
+            self.recycle_captured_bitplane_rows(current_bitplane_rows);
             std::sync::Arc::new(empty_captured_bitplane_rows())
         };
+        let old_bitplane_rows =
+            std::mem::replace(&mut self.last_frame_bitplane_rows, next_bitplane_rows);
+        if let Ok(rows) = std::sync::Arc::try_unwrap(old_bitplane_rows) {
+            self.recycle_captured_bitplane_rows(rows);
+        }
         self.last_frame_sprite_lines = if promote_render_frame {
             std::mem::take(&mut self.current_frame_sprite_lines)
         } else {
@@ -1033,7 +1039,14 @@ impl Bus {
         // plane; the per-plane cadence stretches to `period` colour clocks
         // and the lores slot sequence spreads across the `unit`-cck block.
         let fmode = self.agnus.fmode();
-        let quantum = bitplane_fetch_quantum(fmode) as usize;
+        let static_plan = (self.wide_bitplane_dynamic_vpos.get() != Some(vpos)
+            && self.wide_bitplane_hot_line.is_current(vpos))
+        .then(|| self.wide_bitplane_hot_line.plan.get())
+        .flatten();
+        let quantum = static_plan.map_or_else(
+            || bitplane_fetch_quantum(fmode) as usize,
+            |plan| plan.quantum as usize,
+        );
         // Wide-FMODE units lengthen the gap between groups of fetched words,
         // but the sequencer is still armed by the DDFSTRT comparator itself.
         // Lores plane-order slots are packed into the first eight cycles of
@@ -1059,26 +1072,40 @@ impl Bus {
             .unwrap_or(display_bplcon0);
         let anchor_mode = BitplaneMode::from_bplcon0(anchor_bplcon0, self.aga_enabled());
         let anchor_dma_planes = anchor_mode.dma_planes();
-        let period = bitplane_fetch_period(anchor_bplcon0, fmode);
-        let unit = bitplane_fetch_unit(anchor_bplcon0, fmode);
+        let period = static_plan.map_or_else(
+            || bitplane_fetch_period(anchor_bplcon0, fmode),
+            |plan| plan.period,
+        );
+        let unit = static_plan.map_or_else(
+            || bitplane_fetch_unit(anchor_bplcon0, fmode),
+            |plan| plan.unit,
+        );
         let started = VideoPipelineStats::probe_timing_sample(
             &mut self.video_pipeline_stats.bitplane_fetch_probes,
             VIDEO_FETCH_TIMING_SAMPLE_RATE,
         );
-        let words_per_row = bitplane_words_per_row(
-            self.agnus.revision(),
-            anchor_bplcon0,
-            self.agnus.fmode(),
-            self.denise.ddfstrt,
-            self.denise.ddfstop,
-            self.harddis_active(),
+        let words_per_row = static_plan.map_or_else(
+            || {
+                bitplane_words_per_row(
+                    self.agnus.revision(),
+                    anchor_bplcon0,
+                    self.agnus.fmode(),
+                    self.denise.ddfstrt,
+                    self.denise.ddfstop,
+                    self.harddis_active(),
+                )
+            },
+            |plan| plan.words_per_row as usize,
         );
         let mut rows_started = 0usize;
         let mut slots = 0usize;
         let mut line_complete = false;
         let mut line_complete_plane_mask = 0u16;
         let addr_mask = self.chip_dma_mask;
-        let hires_like = bitplane_hires(anchor_bplcon0) || bitplane_shres(anchor_bplcon0);
+        let hires_like = static_plan.map_or_else(
+            || bitplane_hires(anchor_bplcon0) || bitplane_shres(anchor_bplcon0),
+            |plan| plan.hires_like,
+        );
         let last_word_idx = words_per_row.saturating_sub(1);
         if diag_caprow().is_some_and(|spec| spec.contains(vpos))
             && old_hpos <= ddfstart
@@ -1284,16 +1311,26 @@ impl Bus {
         };
         if row_needs_init {
             let old_row = self.current_frame_bitplane_rows[fb_y].take();
-            let mut row = CapturedBitplaneRow {
-                nplanes: display_planes,
-                words_per_row,
-                planes: std::array::from_fn(|_| vec![0; words_per_row]),
-                fetch_origin_cck: None,
-            };
+            let mut row = self
+                .bitplane_row_pool
+                .pop()
+                .unwrap_or_else(|| CapturedBitplaneRow {
+                    nplanes: 0,
+                    words_per_row: 0,
+                    planes: std::array::from_fn(|_| Vec::new()),
+                    fetch_origin_cck: None,
+                });
+            row.nplanes = display_planes;
+            row.words_per_row = words_per_row;
+            row.fetch_origin_cck = None;
+            for plane in &mut row.planes {
+                plane.resize(words_per_row, 0);
+                plane.fill(0);
+            }
             for plane in dma_planes..display_planes {
                 row.planes[plane].fill(self.denise.bpldat[plane]);
             }
-            if let Some(old_row) = old_row {
+            if let Some(old_row) = old_row.as_ref() {
                 let copy_planes = old_row.nplanes.min(display_planes).min(8);
                 let copy_words = old_row.words_per_row.min(words_per_row);
                 for plane in 0..copy_planes {
@@ -1302,11 +1339,25 @@ impl Bus {
                 }
             }
             self.current_frame_bitplane_rows[fb_y] = Some(row);
+            if let Some(old_row) =
+                old_row.filter(|_| self.bitplane_row_pool.len() < MAX_VISIBLE_LINES)
+            {
+                self.bitplane_row_pool.push(old_row);
+            }
         }
         if let Some(row) = self.current_frame_bitplane_rows[fb_y].as_mut() {
             row.planes[plane][word_idx] = fetched;
         }
         row_needs_init
+    }
+
+    fn recycle_captured_bitplane_rows(&mut self, rows: Vec<Option<CapturedBitplaneRow>>) {
+        for row in rows.into_iter().flatten() {
+            if self.bitplane_row_pool.len() == MAX_VISIBLE_LINES {
+                break;
+            }
+            self.bitplane_row_pool.push(row);
+        }
     }
 
     pub(super) fn advance_display_dma_ptrs(

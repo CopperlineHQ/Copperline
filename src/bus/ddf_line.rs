@@ -482,6 +482,8 @@ impl Bus {
     pub(super) fn ddf_seq_invalidate_line(&self) {
         self.ddf_seq_hot_line.invalidate();
         *self.ddf_seq_line.borrow_mut() = None;
+        self.wide_bitplane_hot_line.invalidate();
+        self.wide_bitplane_dynamic_vpos.set(Some(self.agnus.vpos));
     }
 
     /// Record a register write reaching the sequencer this line.
@@ -694,6 +696,19 @@ impl Bus {
             self.denise.bplcon0,
         ));
         self.ddf_seq_writes.borrow_mut().clear();
+        // A fetch-control write in the last colour clocks can keep Agnus's
+        // delayed BPLCON0/DMACON view live across the line boundary. Do not
+        // publish one whole-line wide-FMODE plan from that transient value;
+        // the dynamic path follows the delayed transition exactly.
+        let delayed_control_crosses_line = self
+            .bitplane_bplcon0_delay
+            .is_some_and(|delay| self.emulated_cck.saturating_sub(delay.changed_at_cck) < 3)
+            || self
+                .bitplane_dmacon_delay
+                .is_some_and(|delay| self.emulated_cck.saturating_sub(delay.changed_at_cck) < 2);
+        self.wide_bitplane_dynamic_vpos
+            .set(delayed_control_crosses_line.then_some(self.agnus.vpos));
+        self.wide_bitplane_hot_line.invalidate();
         // Keep the completed line as the candidate for static-plan reuse.
         // Only its vpos publication becomes stale at the rollover.
         self.ddf_seq_hot_line.invalidate();

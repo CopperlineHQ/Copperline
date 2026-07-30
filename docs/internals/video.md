@@ -119,6 +119,19 @@ BPLCON0 mode decode, display-window edges, fetch-origin quantization,
 per-plane scroll delays) is constant and is computed once per run rather
 than per pixel. The per-pixel decisions inside a run are unchanged -- the
 chunking is a host-CPU optimisation, not a model change.
+History-independent colour modes also resolve their complete 256-entry
+Denise/Lisa index table once for each distinct control-and-palette state in
+the frame. HAM remains on the sequential path because every output depends
+on the preceding colour. Prepared planar rows similarly share a single byte
+lookup when the odd and even BPLCON1 taps have the same delay; the exhaustive
+prepared-pixel/word-sampler comparison covers both that common path and
+separate dual-playfield taps.
+
+The horizontal display-window flip-flop is still the same 9-bit Denise
+counter model. Lines without a mid-line DIW write solve its exact comparator
+transition ticks directly; a changed line replays all 454 ticks. A randomized
+equivalence test compares both paths across counter starts, wrap behaviour,
+window bounds and carried flip-flop state.
 
 BPLCON0 is itself split across two of those timelines. The plane count and
 the resolution bits gate the fetch/serialiser side and stay in the generic
@@ -312,7 +325,10 @@ line, and Agnus programmable blanking latches become the source for
 bundles use shared ownership between the bus and `RenderInput`; queueing a
 worker job therefore does not copy the full RAM image or deep-clone every
 plane row. A completed job releases those references before the next frame
-wrap so the RAM allocation normally returns to the capture side.
+wrap so the RAM allocation normally returns to the capture side. Released
+bitplane rows are kept in a bounded capture-side pool, preserving the eight
+plane-vector allocations across frames while clearing their contents before
+reuse.
 `render_from_input` consumes only this frozen bundle, so the main thread can
 start emulating frame N+1 while the worker renders frame N.
 

@@ -7,6 +7,69 @@
 
 use super::*;
 
+const INDEXED_OUTPUT_CACHE_LEN: usize = 8;
+
+struct IndexedOutputCacheEntry {
+    control: ControlState,
+    palette: Palette,
+    outputs: Box<[DenisePlayfieldOutput; 256]>,
+}
+
+/// Small frame-local cache for the indexed (non-HAM) Denise/Lisa colour
+/// resolver. A normal screen reuses one control/palette pair for hundreds of
+/// rows; resolving all possible indices once turns the per-pixel mode,
+/// priority, EHB, BPLAM, and palette branches into one indexed load. Copper
+/// palette/control changes naturally produce another entry, while HAM stays
+/// on the history-dependent resolver.
+#[derive(Default)]
+pub(super) struct IndexedOutputCache {
+    entries: Vec<IndexedOutputCacheEntry>,
+}
+
+impl IndexedOutputCache {
+    pub(super) fn outputs(
+        &mut self,
+        control: ControlState,
+        palette: &Palette,
+    ) -> &[DenisePlayfieldOutput; 256] {
+        debug_assert!(!control.hold_and_modify());
+        if let Some(idx) = self
+            .entries
+            .iter()
+            .position(|entry| entry.control == control && entry.palette == *palette)
+        {
+            return &self.entries[idx].outputs;
+        }
+
+        let outputs = Box::new(std::array::from_fn(|idx| {
+            let mut ignored_history = 0;
+            denise_playfield_output(control, palette, idx as u8, &mut ignored_history)
+        }));
+        if self.entries.len() == INDEXED_OUTPUT_CACHE_LEN {
+            self.entries.remove(0);
+        }
+        self.entries.push(IndexedOutputCacheEntry {
+            control,
+            palette: *palette,
+            outputs,
+        });
+        &self.entries.last().expect("just inserted").outputs
+    }
+}
+
+#[inline(always)]
+pub(super) fn cached_indexed_output(
+    outputs: &[DenisePlayfieldOutput; 256],
+    idx: u8,
+    ham_color: &mut u32,
+) -> DenisePlayfieldOutput {
+    let output = outputs[idx as usize];
+    // The indexed resolver seeds the held colour for a later mid-line switch
+    // into HAM, even though its own output is history-independent.
+    *ham_color = output.color;
+    output
+}
+
 pub(super) fn palette_at_x(mut palette: Palette, segments: &[PaletteSegment], x: usize) -> Palette {
     for seg in segments {
         if seg.x > x {
