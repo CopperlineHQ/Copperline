@@ -1469,15 +1469,81 @@ struct DeniseBitplaneSample {
     active: bool,
 }
 
+const fn build_planar_byte_lanes() -> [u64; 256] {
+    let mut table = [0u64; 256];
+    let mut byte = 0usize;
+    while byte < table.len() {
+        let mut bit = 0usize;
+        while bit < 8 {
+            if byte & (0x80 >> bit) != 0 {
+                table[byte] |= 1u64 << (bit * 8);
+            }
+            bit += 1;
+        }
+        byte += 1;
+    }
+    table
+}
+
+/// Each source bit becomes the low bit of its corresponding output-byte lane.
+/// Multiplying by a plane mask moves those lane bits into the requested colour
+/// index bit without carries between lanes.
+const PLANAR_BYTE_LANES: [u64; 256] = build_planar_byte_lanes();
+
+fn prepare_planar_row_pixels(
+    plane_words: &[Vec<u16>],
+    fetched_pixels: usize,
+    pixels: &mut Vec<u8>,
+) {
+    pixels.clear();
+    pixels.resize(fetched_pixels, 0);
+    let full_words = fetched_pixels / 16;
+    for word_idx in 0..full_words {
+        let mut high_pixels = 0u64;
+        let mut low_pixels = 0u64;
+        for (plane, words) in plane_words.iter().enumerate().take(8) {
+            let Some(&word) = words.get(word_idx) else {
+                continue;
+            };
+            let plane_bit = u64::from(1u8 << plane);
+            high_pixels |= PLANAR_BYTE_LANES[usize::from((word >> 8) as u8)] * plane_bit;
+            low_pixels |= PLANAR_BYTE_LANES[usize::from(word as u8)] * plane_bit;
+        }
+        let pixel_base = word_idx * 16;
+        pixels[pixel_base..pixel_base + 8].copy_from_slice(&high_pixels.to_le_bytes());
+        pixels[pixel_base + 8..pixel_base + 16].copy_from_slice(&low_pixels.to_le_bytes());
+    }
+
+    // Production fetches are whole words. Keep the partial-word path for
+    // bounded diagnostic inputs and the differential regression oracle.
+    let tail_base = full_words * 16;
+    if tail_base < fetched_pixels {
+        let word_pixels = fetched_pixels - tail_base;
+        for (plane, words) in plane_words.iter().enumerate().take(8) {
+            let Some(&word) = words.get(full_words) else {
+                continue;
+            };
+            let plane_bit = 1u8 << plane;
+            for bit in 0..word_pixels {
+                if word & (1 << (15 - bit)) != 0 {
+                    pixels[tail_base + bit] |= plane_bit;
+                }
+            }
+        }
+    }
+}
+
 struct DenisePlannedPlayfieldLine<'a> {
     y: usize,
     x_start: usize,
     x_stop: usize,
     plane_words: &'a [Vec<u16>],
+    pixels: Option<&'a [u8]>,
     fetched_pixels: usize,
 }
 
 impl<'a> DenisePlannedPlayfieldLine<'a> {
+    #[cfg(test)]
     fn new(
         y: usize,
         x_start: usize,
@@ -1490,6 +1556,26 @@ impl<'a> DenisePlannedPlayfieldLine<'a> {
             x_start,
             x_stop,
             plane_words,
+            pixels: None,
+            fetched_pixels,
+        }
+    }
+
+    fn with_prepared_pixels(
+        y: usize,
+        x_start: usize,
+        x_stop: usize,
+        plane_words: &'a [Vec<u16>],
+        pixels: &'a [u8],
+        fetched_pixels: usize,
+    ) -> Self {
+        debug_assert_eq!(pixels.len(), fetched_pixels);
+        Self {
+            y,
+            x_start,
+            x_stop,
+            plane_words,
+            pixels: Some(pixels),
             fetched_pixels,
         }
     }
@@ -1527,6 +1613,102 @@ impl<'a> DenisePlannedPlayfieldLine<'a> {
     }
 
     fn sample_prepared_with_final_fetch_hold(
+        &self,
+        nplanes: usize,
+        delays: &[i32; 8],
+        min_fetch_x: usize,
+        native_x: usize,
+        hold_final_fetch_sample: bool,
+    ) -> DeniseBitplaneSample {
+        if let Some(pixels) = self.pixels {
+            return self.sample_pixels_with_final_fetch_hold(
+                pixels,
+                nplanes,
+                delays,
+                min_fetch_x,
+                native_x,
+                hold_final_fetch_sample,
+            );
+        }
+        self.sample_plane_words_with_final_fetch_hold(
+            nplanes,
+            delays,
+            min_fetch_x,
+            native_x,
+            hold_final_fetch_sample,
+        )
+    }
+
+    fn sample_pixels_with_final_fetch_hold(
+        &self,
+        pixels: &[u8],
+        nplanes: usize,
+        delays: &[i32; 8],
+        min_fetch_x: usize,
+        native_x: usize,
+        hold_final_fetch_sample: bool,
+    ) -> DeniseBitplaneSample {
+        let available_planes = nplanes.min(self.plane_words.len()).min(8);
+        debug_assert_eq!(pixels.len(), self.fetched_pixels);
+        debug_assert!(
+            (2..available_planes).all(|plane| delays[plane] == delays[plane & 1]),
+            "all planes in a playfield must share its BPLCON1 delay"
+        );
+
+        let (pf1_active, pf1_fetch_x) = if available_planes != 0 {
+            self.sample_fetch_x(delays[0], min_fetch_x, native_x, hold_final_fetch_sample)
+        } else {
+            (false, None)
+        };
+        let (pf2_active, pf2_fetch_x) = if available_planes >= 2 {
+            self.sample_fetch_x(delays[1], min_fetch_x, native_x, hold_final_fetch_sample)
+        } else {
+            (false, None)
+        };
+
+        let mut idx = 0u8;
+        if let Some(fetch_x) = pf1_fetch_x {
+            idx |= pixels[fetch_x] & 0x55;
+        }
+        if let Some(fetch_x) = pf2_fetch_x {
+            idx |= pixels[fetch_x] & 0xAA;
+        }
+        let plane_mask = if available_planes == 8 {
+            u8::MAX
+        } else {
+            ((1u16 << available_planes) - 1) as u8
+        };
+        DeniseBitplaneSample {
+            idx: idx & plane_mask,
+            nplanes,
+            active: pf1_active || pf2_active,
+        }
+    }
+
+    fn sample_fetch_x(
+        &self,
+        delay: i32,
+        min_fetch_x: usize,
+        native_x: usize,
+        hold_final_fetch_sample: bool,
+    ) -> (bool, Option<usize>) {
+        if (native_x as i32) < delay {
+            return (true, None);
+        }
+        let fetch_x = (native_x as i32 - delay) as usize;
+        if fetch_x < min_fetch_x {
+            return (true, None);
+        }
+        if fetch_x < self.fetched_pixels {
+            return (true, Some(fetch_x));
+        }
+        if hold_final_fetch_sample && self.fetched_pixels > 0 && fetch_x == self.fetched_pixels {
+            return (true, Some(self.fetched_pixels - 1));
+        }
+        (false, None)
+    }
+
+    fn sample_plane_words_with_final_fetch_hold(
         &self,
         nplanes: usize,
         delays: &[i32; 8],
@@ -3993,6 +4175,7 @@ pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
             }
         }
         let mut row_words: [Vec<u16>; 8] = std::array::from_fn(|_| Vec::new());
+        let mut row_pixels = Vec::new();
         // COPPERLINE_DBG_EXPORT_PLANES exports each bitplane and a composite
         // color-index image for every rendered frame in the requested
         // emulated-seconds window. It uses the exact per-line plane words the
@@ -4290,11 +4473,13 @@ pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
                 words_per_row,
                 dma_planes.min(nplanes),
             );
-            let line_plan = DenisePlannedPlayfieldLine::new(
+            prepare_planar_row_pixels(&row_words[..nplanes], fetched_pixels, &mut row_pixels);
+            let line_plan = DenisePlannedPlayfieldLine::with_prepared_pixels(
                 y,
                 x_start,
                 x_stop,
                 &row_words[..nplanes],
+                &row_pixels,
                 fetched_pixels,
             );
             let bpl_output_start_x = dma_output_start_x.unwrap_or(0);
@@ -4779,7 +4964,7 @@ fn render_planned_playfield_line(
                         plan.sample_prepared(nplanes, &delays, min_fetch_x, next_ham_native_x);
                     denise_playfield_output(
                         output_control,
-                        palette,
+                        &palette,
                         skipped.idx & plane_mask,
                         &mut ham_color,
                     );
@@ -4791,7 +4976,7 @@ fn render_planned_playfield_line(
                     let sample = plan.sample_prepared(nplanes, &delays, min_fetch_x, native_x);
                     denise_playfield_output(
                         output_control,
-                        palette,
+                        &palette,
                         sample.idx & plane_mask,
                         &mut ham_color,
                     );
@@ -4811,7 +4996,7 @@ fn render_planned_playfield_line(
                 let right = plan.sample_prepared(nplanes, &delays, min_fetch_x, native_x + 1);
                 let (left_out, right_out) = denise_shres_playfield_output_pair(
                     output_control,
-                    palette,
+                    &palette,
                     left.idx & plane_mask,
                     right.idx & plane_mask,
                     &mut ham_color,
@@ -4832,7 +5017,7 @@ fn render_planned_playfield_line(
                 let ham_before = ham_color;
                 let output = denise_playfield_output(
                     output_control,
-                    palette,
+                    &palette,
                     sample.idx & plane_mask,
                     &mut ham_color,
                 );
@@ -5251,7 +5436,7 @@ fn draw_manual_bpl_word(
                 .unwrap_or_default();
             let (left_out, right_out) = denise_shres_playfield_output_pair(
                 source_control,
-                source_palette,
+                &source_palette,
                 left_sample.idx & plane_mask,
                 right_sample.idx & plane_mask,
                 ham_color,
@@ -5262,7 +5447,7 @@ fn draw_manual_bpl_word(
             )
         } else {
             let output =
-                denise_playfield_output(source_control, source_palette, output_idx, ham_color);
+                denise_playfield_output(source_control, &source_palette, output_idx, ham_color);
             *ham_select = masked_idx;
             (output, None)
         };
@@ -5331,7 +5516,7 @@ fn draw_manual_bpl_word(
                     let mut pixel_ham = *ham_color;
                     let output = denise_aga_playfield_output(
                         source_control,
-                        pixel_palette,
+                        &pixel_palette,
                         masked_idx,
                         &mut pixel_ham,
                     );
@@ -5348,7 +5533,7 @@ fn draw_manual_bpl_word(
                 } else {
                     (
                         rgb12_to_rgb24(palette_index_to_rgb12(
-                            pixel_palette,
+                            &pixel_palette,
                             masked_idx,
                             source_control.extra_half_brite(),
                         )),

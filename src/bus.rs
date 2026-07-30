@@ -1113,6 +1113,12 @@ pub struct Bus {
     /// The current line's walked fetch table (rebuilt on demand).
     #[serde(skip)]
     ddf_seq_line: std::cell::RefCell<Option<ddf_line::DdfSeqLine>>,
+    /// Compact mirror of the current DDF table's slot data. The arbiter and
+    /// capture loop query this on every colour clock; keeping the immutable
+    /// per-slot values in Cells avoids a dynamic RefCell borrow on that path
+    /// while `ddf_seq_line` remains the authoritative lazy table.
+    #[serde(skip)]
+    ddf_seq_hot_line: ddf_line::DdfSeqHotLine,
     bus_accounting: BusAccounting,
     /// Latches once BEAMCON0.DUAL (A2024/UHRES) is first seen set, so the
     /// "not emulated" warning is logged a single time, not per write.
@@ -2565,6 +2571,7 @@ impl Bus {
             ddf_seq_line_start_ctl: std::cell::Cell::new((false, 0)),
             ddf_seq_writes: std::cell::RefCell::new(Vec::new()),
             ddf_seq_line: std::cell::RefCell::new(None),
+            ddf_seq_hot_line: ddf_line::DdfSeqHotLine::new(),
             bus_accounting: BusAccounting::from_env(),
             uhres_dual_warned: false,
             dbg_ext_cck_x100: external_access_cck_x100_setting(),

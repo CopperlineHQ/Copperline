@@ -204,7 +204,7 @@ pub(super) fn color_rgb12(color_latch: u16) -> u16 {
     color_latch & COLOR_RGB_MASK
 }
 
-pub(super) fn palette_index_to_rgb12(palette: Palette, idx: u8, extra_half_brite: bool) -> u16 {
+pub(super) fn palette_index_to_rgb12(palette: &Palette, idx: u8, extra_half_brite: bool) -> u16 {
     let color = color_rgb12(palette[(idx as usize) & 0x1F]);
     if extra_half_brite && idx & 0x20 != 0 {
         half_brite_rgb12(color)
@@ -237,7 +237,7 @@ pub(super) fn rgb24_blend_halves(a: u32, b: u32) -> u32 {
 /// [`denise_shres_playfield_output`].
 pub(super) fn denise_shres_playfield_output_pair(
     control: ControlState,
-    palette: Palette,
+    palette: &Palette,
     left_idx: u8,
     right_idx: u8,
     ham_color: &mut u32,
@@ -263,7 +263,7 @@ pub(super) fn blend_shres_outputs(
 
 pub(super) fn denise_playfield_output(
     control: ControlState,
-    palette: Palette,
+    palette: &Palette,
     idx: u8,
     ham_color: &mut u32,
 ) -> DenisePlayfieldOutput {
@@ -346,7 +346,7 @@ pub(super) fn denise_playfield_output(
 /// nibbles), and EHB halving in 8-bit component space.
 pub(super) fn denise_aga_playfield_output(
     control: ControlState,
-    palette: Palette,
+    palette: &Palette,
     idx: u8,
     ham_color: &mut u32,
 ) -> DenisePlayfieldOutput {
@@ -401,7 +401,7 @@ pub(super) fn denise_aga_playfield_output(
 /// (the low two bits hold their previous value). The set operation looks
 /// up base palette entry `idx >> 2` (0-63). Hires HAM8 content is the
 /// regression example for the bit assignment.
-pub(super) fn ham8_rgb24(palette: Palette, idx: u8, previous: u32) -> u32 {
+pub(super) fn ham8_rgb24(palette: &Palette, idx: u8, previous: u32) -> u32 {
     let value = u32::from(idx & 0xFC);
     match idx & 0x03 {
         0 => palette.rgb24(usize::from(idx >> 2)) & 0x00FF_FFFF,
@@ -456,7 +456,7 @@ pub(super) fn half_brite_rgb12(color: u16) -> u16 {
     (r << 8) | (g << 4) | b
 }
 
-pub(super) fn ham6_rgb12(palette: Palette, idx: u8, previous: u16) -> u16 {
+pub(super) fn ham6_rgb12(palette: &Palette, idx: u8, previous: u16) -> u16 {
     let data = (idx & 0x0F) as u16;
     match idx >> 4 {
         0 => color_rgb12(palette[data as usize]),
