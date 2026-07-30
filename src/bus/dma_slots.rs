@@ -834,9 +834,7 @@ impl Bus {
             // FMODE=0: the walked DDF sequencer table owns the decision
             // (vertical window, comparator flops, stop drains, carried runs).
             let _ = vpos;
-            let table = self.ddf_seq_line_table();
-            return (hpos as usize) < super::ddf_line::DDF_SEQ_MAX_LINE_CCKS
-                && table.plane_at[hpos as usize] != 0;
+            return self.ddf_seq_slot_active_at(hpos);
         }
         // Bitplane DMA only runs inside the vertical display window (set at
         // DIWSTRT.V, cleared at DIWSTOP.V), so the top-border and vertical-

@@ -14,6 +14,9 @@ use crate::chipset::ddf_sequencer::{self as seq, DdfSignal, DdfState};
 
 /// Widest line the fetch table covers (PAL 227, NTSC long 228).
 pub(super) const DDF_SEQ_MAX_LINE_CCKS: usize = 232;
+const DDF_SEQ_SLOT_PLANE_MASK: u16 = 0x000F;
+const DDF_SEQ_SLOT_MODULO: u16 = 0x0010;
+const DDF_SEQ_SLOT_WORD_SHIFT: u32 = 5;
 
 /// A DDFSTRT/DDFSTOP/BPLCON0/DMACON write that reached the sequencer during
 /// the current line, at the colour clock where it takes effect.
@@ -63,6 +66,65 @@ pub(super) struct DdfSeqLine {
     /// Sequencer state after the line's walk (becomes the next line's
     /// initial state).
     pub end_state: DdfState,
+}
+
+/// Read-mostly projection of `DdfSeqLine` for the per-colour-clock paths.
+///
+/// A packed slot holds the plane number plus one in bits 0..3, the modulo
+/// flag in bit 4, and the word index above it. The line walk bounds the word
+/// index far below the remaining eleven bits. `valid` is published last so a
+/// reader never observes a partially refreshed projection.
+pub(super) struct DdfSeqHotLine {
+    valid: std::cell::Cell<bool>,
+    vpos: std::cell::Cell<u32>,
+    slot_at: [std::cell::Cell<u16>; DDF_SEQ_MAX_LINE_CCKS],
+    words_per_row: std::cell::Cell<u16>,
+    dma_planes: std::cell::Cell<u8>,
+    run_origin_cck: std::cell::Cell<Option<u16>>,
+}
+
+impl DdfSeqHotLine {
+    pub(super) fn new() -> Self {
+        Self {
+            valid: std::cell::Cell::new(false),
+            vpos: std::cell::Cell::new(0),
+            slot_at: std::array::from_fn(|_| std::cell::Cell::new(0)),
+            words_per_row: std::cell::Cell::new(0),
+            dma_planes: std::cell::Cell::new(0),
+            run_origin_cck: std::cell::Cell::new(None),
+        }
+    }
+
+    fn is_current(&self, vpos: u32) -> bool {
+        self.valid.get() && self.vpos.get() == vpos
+    }
+
+    fn refresh(&self, line: &DdfSeqLine) {
+        self.valid.set(false);
+        for (cck, slot) in self.slot_at.iter().enumerate() {
+            let mut packed = u16::from(line.plane_at[cck]);
+            if line.modulo_at[cck] {
+                packed |= DDF_SEQ_SLOT_MODULO;
+            }
+            packed |= line.word_idx_at[cck] << DDF_SEQ_SLOT_WORD_SHIFT;
+            slot.set(packed);
+        }
+        self.words_per_row.set(line.words_per_row);
+        self.dma_planes.set(line.dma_planes);
+        self.run_origin_cck.set(line.run_origin_cck);
+        self.vpos.set(line.vpos);
+        self.valid.set(true);
+    }
+
+    fn invalidate(&self) {
+        self.valid.set(false);
+    }
+}
+
+impl Default for DdfSeqHotLine {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Bus {
@@ -296,22 +358,38 @@ impl Bus {
     pub(super) fn ddf_seq_line_table(&self) -> std::cell::Ref<'_, DdfSeqLine> {
         {
             let cached = self.ddf_seq_line.borrow();
-            if cached
-                .as_ref()
-                .is_some_and(|line| line.vpos == self.agnus.vpos)
-            {
+            if let Some(line) = cached.as_ref().filter(|line| line.vpos == self.agnus.vpos) {
+                if !self.ddf_seq_hot_line.is_current(line.vpos) {
+                    self.ddf_seq_hot_line.refresh(line);
+                }
                 return std::cell::Ref::map(cached, |line| line.as_ref().unwrap());
             }
         }
         let built = self.ddf_seq_build_line();
+        self.ddf_seq_hot_line.refresh(&built);
         *self.ddf_seq_line.borrow_mut() = Some(built);
         std::cell::Ref::map(self.ddf_seq_line.borrow(), |line| line.as_ref().unwrap())
+    }
+
+    fn ddf_seq_ensure_hot_line(&self) {
+        if !self.ddf_seq_hot_line.is_current(self.agnus.vpos) {
+            drop(self.ddf_seq_line_table());
+        }
+    }
+
+    pub(super) fn ddf_seq_slot_active_at(&self, hpos: u32) -> bool {
+        let Some(slot) = self.ddf_seq_hot_line.slot_at.get(hpos as usize) else {
+            return false;
+        };
+        self.ddf_seq_ensure_hot_line();
+        slot.get() & DDF_SEQ_SLOT_PLANE_MASK != 0
     }
 
     /// Invalidate the current line's table (a register write changed the
     /// remaining signals). Already-consumed word counters are preserved by
     /// the capture loop keying on colour clocks, not indices.
     pub(super) fn ddf_seq_invalidate_line(&self) {
+        self.ddf_seq_hot_line.invalidate();
         *self.ddf_seq_line.borrow_mut() = None;
     }
 
@@ -428,24 +506,20 @@ impl Bus {
             // must not skew the visible rows' pointer progression).
             return;
         };
-        // This runs on every chip-bus quantum (a single colour clock), so the
-        // table stays behind its borrow: copying the ~1KB slot arrays out per
-        // quantum was a measured hot spot, dominated by blank lines that then
-        // fetched nothing. The line-constant aggregates are precomputed at
-        // build time; a mid-loop re-borrow rebuilds from unchanged inputs, so
-        // it yields the same table.
+        // This runs on every chip-bus quantum (a single colour clock). Use the
+        // compact hot-line projection: the authoritative table is still built
+        // lazily, but steady-state slot reads need neither a dynamic borrow nor
+        // a copy of its ~1KB arrays.
         let end = new_hpos.min(DDF_SEQ_MAX_LINE_CCKS as u32);
-        let (words_per_row, dma_planes, run_origin) = {
-            let table = self.ddf_seq_line_table();
-            if !(old_hpos..end).any(|hpos| table.plane_at[hpos as usize] != 0) {
-                return;
-            }
-            (
-                usize::from(table.words_per_row),
-                usize::from(table.dma_planes),
-                table.run_origin_cck,
-            )
-        };
+        self.ddf_seq_ensure_hot_line();
+        if !(old_hpos..end).any(|hpos| {
+            self.ddf_seq_hot_line.slot_at[hpos as usize].get() & DDF_SEQ_SLOT_PLANE_MASK != 0
+        }) {
+            return;
+        }
+        let words_per_row = usize::from(self.ddf_seq_hot_line.words_per_row.get());
+        let dma_planes = usize::from(self.ddf_seq_hot_line.dma_planes.get());
+        let run_origin = self.ddf_seq_hot_line.run_origin_cck.get();
         if words_per_row == 0 {
             return;
         }
@@ -453,18 +527,14 @@ impl Bus {
         let mut slots = 0usize;
         let mut rows_started = 0usize;
         for hpos in old_hpos..end {
-            let (plane, word_idx, apply_modulo) = {
-                let table = self.ddf_seq_line_table();
-                let slot = table.plane_at[hpos as usize];
-                if slot == 0 {
-                    continue;
-                }
-                (
-                    usize::from(slot - 1),
-                    usize::from(table.word_idx_at[hpos as usize]),
-                    table.modulo_at[hpos as usize],
-                )
-            };
+            let packed = self.ddf_seq_hot_line.slot_at[hpos as usize].get();
+            let slot = packed & DDF_SEQ_SLOT_PLANE_MASK;
+            if slot == 0 {
+                continue;
+            }
+            let plane = usize::from(slot - 1);
+            let word_idx = usize::from(packed >> DDF_SEQ_SLOT_WORD_SHIFT);
+            let apply_modulo = packed & DDF_SEQ_SLOT_MODULO != 0;
             if plane == 0 {
                 self.record_sprite_display_enable_for_bitplane_dma(vpos);
             }

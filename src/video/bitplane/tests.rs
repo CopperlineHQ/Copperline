@@ -1389,6 +1389,66 @@ fn ddfstrt_positions_first_lowres_bitplane_word_relative_to_diwstrt() {
 }
 
 #[test]
+fn prepared_planar_pixels_match_word_sampler_for_all_playfield_taps() {
+    let plane_words = (0..8)
+        .map(|plane| {
+            (0..3)
+                .map(|word| 0x8421u16.rotate_left((plane * 3 + word * 5) as u32))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    // Use a partial final word as well as full words so the prepared row's
+    // explicit fetched-pixel bound is covered by the comparison.
+    let fetched_pixels = 43;
+    let mut pixels = Vec::new();
+    prepare_planar_row_pixels(&plane_words, fetched_pixels, &mut pixels);
+    let word_plan = DenisePlannedPlayfieldLine::new(0, 0, 128, &plane_words, fetched_pixels);
+    let pixel_plan = DenisePlannedPlayfieldLine::with_prepared_pixels(
+        0,
+        0,
+        128,
+        &plane_words,
+        &pixels,
+        fetched_pixels,
+    );
+    let delay_sets: [[i32; 8]; 3] = [
+        [0; 8],
+        std::array::from_fn(|plane| if plane & 1 == 0 { 3 } else { 11 }),
+        std::array::from_fn(|plane| if plane & 1 == 0 { -16 } else { 5 }),
+    ];
+
+    for nplanes in 0..=8 {
+        for delays in &delay_sets {
+            for min_fetch_x in [0, 7, 47] {
+                for native_x in 0..=64 {
+                    for hold_final_fetch_sample in [false, true] {
+                        let expected = word_plan.sample_prepared_with_final_fetch_hold(
+                            nplanes,
+                            delays,
+                            min_fetch_x,
+                            native_x,
+                            hold_final_fetch_sample,
+                        );
+                        let actual = pixel_plan.sample_prepared_with_final_fetch_hold(
+                            nplanes,
+                            delays,
+                            min_fetch_x,
+                            native_x,
+                            hold_final_fetch_sample,
+                        );
+                        assert_eq!(
+                            actual, expected,
+                            "nplanes={nplanes} delays={delays:?} min_fetch_x={min_fetch_x} \
+                             native_x={native_x} hold={hold_final_fetch_sample}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn late_lowres_ddf_reaches_diwstop_with_undelayed_planes_active() {
     // Low-res FMODE=0 with DDFSTRT=$50 and DDFSTOP=$D0 fetches 17 words.
     // When DIWSTOP is placed exactly at the completed DDF row's right edge,
@@ -2058,8 +2118,8 @@ fn ehb_palette_indexes_use_half_bright_base_color() {
     palette.write_ocs(3, 0x0E86);
 
     assert_eq!(half_brite_rgb12(0x0E86), 0x0743);
-    assert_eq!(palette_index_to_rgb12(palette, 0x23, true), 0x0743);
-    assert_eq!(palette_index_to_rgb12(palette, 0x23, false), 0x0E86);
+    assert_eq!(palette_index_to_rgb12(&palette, 0x23, true), 0x0743);
+    assert_eq!(palette_index_to_rgb12(&palette, 0x23, false), 0x0E86);
 }
 
 fn render_sprite_dma_test_frame(
@@ -5148,11 +5208,11 @@ fn single_playfield_out_of_range_priority_eliminates_low_bitplanes() {
     // Planes 1,2,5 set: the invalid priority eliminates planes 1-2, leaving
     // the plane-5-only index, so the pixel matches a valid render of 0x10.
     let mut h = 0u32;
-    let invalid_13 = denise_playfield_output(invalid, palette, 0x13, &mut h);
+    let invalid_13 = denise_playfield_output(invalid, &palette, 0x13, &mut h);
     let mut h = 0u32;
-    let valid_10 = denise_playfield_output(valid, palette, 0x10, &mut h);
+    let valid_10 = denise_playfield_output(valid, &palette, 0x10, &mut h);
     let mut h = 0u32;
-    let valid_13 = denise_playfield_output(valid, palette, 0x13, &mut h);
+    let valid_13 = denise_playfield_output(valid, &palette, 0x13, &mut h);
     assert_eq!(invalid_13.color, valid_10.color);
     assert_ne!(invalid_13.color, valid_13.color);
     assert_eq!(invalid_13.pf_mask, 0);
@@ -6346,17 +6406,17 @@ fn ham8_control_bits_are_the_two_lowest_planes() {
     palette.write_entry(5, true, 0x0456); // 24-bit entry 5 = 0x142536
                                           // Set: control bits (pixel bits 0-1) = 00, palette index in the
                                           // top six bits.
-    let set = ham8_rgb24(palette, 5 << 2, 0);
+    let set = ham8_rgb24(&palette, 5 << 2, 0);
     assert_eq!(set, 0x0014_2536);
     // Modify blue (01): value bits replace the top six bits of the
     // component, the low two bits hold.
-    let blue = ham8_rgb24(palette, 0b1010_1001, set);
+    let blue = ham8_rgb24(&palette, 0b1010_1001, set);
     assert_eq!(blue, 0x0014_25AA); // 0xA8 | (0x36 & 0x03)
                                    // Modify red (10).
-    let red = ham8_rgb24(palette, 0b1111_1110, blue);
+    let red = ham8_rgb24(&palette, 0b1111_1110, blue);
     assert_eq!(red, 0x00FC_25AA);
     // Modify green (11).
-    let green = ham8_rgb24(palette, 0b0100_0111, red);
+    let green = ham8_rgb24(&palette, 0b0100_0111, red);
     assert_eq!(green, 0x00FC_45AA); // 0x44 | (0x25 & 0x03)
 }
 
@@ -6373,7 +6433,7 @@ fn denise_playfield_output_selects_ehb_ham_and_dual_playfield_colors() {
         ..ControlState::default()
     };
     assert_eq!(
-        denise_playfield_output(ehb, palette, 0x21, &mut ham_color),
+        denise_playfield_output(ehb, &palette, 0x21, &mut ham_color),
         DenisePlayfieldOutput {
             color: rgb12_to_rgb24(0x0743),
             color_latch: 0x0E86,
@@ -6386,7 +6446,7 @@ fn denise_playfield_output_selects_ehb_ham_and_dual_playfield_colors() {
         ..ControlState::default()
     };
     assert_eq!(
-        denise_playfield_output(ham, palette, 0x2F, &mut ham_color).color,
+        denise_playfield_output(ham, &palette, 0x2F, &mut ham_color).color,
         rgb12_to_rgb24(0x0F43)
     );
 
@@ -6396,7 +6456,7 @@ fn denise_playfield_output_selects_ehb_ham_and_dual_playfield_colors() {
         ..ControlState::default()
     };
     assert_eq!(
-        denise_playfield_output(dual, palette, 0x02, &mut ham_color),
+        denise_playfield_output(dual, &palette, 0x02, &mut ham_color),
         DenisePlayfieldOutput {
             color: rgb12_to_rgb24(0x0456),
             color_latch: 0x0456,
@@ -6428,7 +6488,7 @@ fn ham_dual_playfield_runs_the_resolved_index_through_ham() {
     // the plain dual-playfield path would.
     let mut ham_color = rgb12_to_rgb24(0x0ABC);
     assert_eq!(
-        denise_playfield_output(control, palette, 0x02, &mut ham_color),
+        denise_playfield_output(control, &palette, 0x02, &mut ham_color),
         DenisePlayfieldOutput {
             color: rgb12_to_rgb24(0x0456),
             color_latch: 0x0456,
@@ -6441,7 +6501,7 @@ fn ham_dual_playfield_runs_the_resolved_index_through_ham() {
     // so only the blue nibble of the held colour changes.
     let mut ham_color = rgb12_to_rgb24(0x0ABC);
     assert_eq!(
-        denise_playfield_output(control, palette, 0x12, &mut ham_color).color,
+        denise_playfield_output(control, &palette, 0x12, &mut ham_color).color,
         rgb12_to_rgb24(0x0AB4),
     );
 }
@@ -6462,7 +6522,7 @@ fn aga_playfield_output_resolves_ham8_ehb_and_bplam() {
     let mut ham = 0u32;
 
     // Plain palette lookup composes high and low nibbles.
-    let out = denise_playfield_output(aga, palette, 0x01, &mut ham);
+    let out = denise_playfield_output(aga, &palette, 0x01, &mut ham);
     assert_eq!(out.color, 0x0014_2536);
 
     // HAM8 with 8 planes: control bits live in the two lowest planes,
@@ -6472,9 +6532,9 @@ fn aga_playfield_output_resolves_ham8_ehb_and_bplam() {
         ..aga
     };
     ham = 0x00AA_BBCC;
-    let out = denise_playfield_output(ham8, palette, (0x3F << 2) | 0x01, &mut ham);
+    let out = denise_playfield_output(ham8, &palette, (0x3F << 2) | 0x01, &mut ham);
     assert_eq!(out.color, 0x00AA_BBFC, "blue := 111111<<2 | old low bits");
-    let out = denise_playfield_output(ham8, palette, (0x15 << 2) | 0x02, &mut ham);
+    let out = denise_playfield_output(ham8, &palette, (0x15 << 2) | 0x02, &mut ham);
     assert_eq!(
         out.color, 0x0056_BBFC,
         "red := 010101<<2 | old low-bit pair"
@@ -6486,7 +6546,7 @@ fn aga_playfield_output_resolves_ham8_ehb_and_bplam() {
         ..aga
     };
     let mut ham2 = 0u32;
-    let out = denise_playfield_output(masked, palette, 0x00, &mut ham2);
+    let out = denise_playfield_output(masked, &palette, 0x00, &mut ham2);
     assert_eq!(out.color, 0x0014_2536);
 
     // AGA EHB: entry halved per 8-bit component.
@@ -6499,7 +6559,7 @@ fn aga_playfield_output_resolves_ham8_ehb_and_bplam() {
         ..ControlState::default()
     };
     let mut ham3 = 0u32;
-    let out = denise_playfield_output(ehb, ehb_palette, 0x21, &mut ham3);
+    let out = denise_playfield_output(ehb, &ehb_palette, 0x21, &mut ham3);
     assert_eq!(out.color, (0x00FE_FEFE >> 1) & 0x007F_7F7F);
 }
 
@@ -6514,7 +6574,7 @@ fn shres_playfield_output_resolves_each_35ns_sample_through_the_palette() {
 
     // A solid run of colour 1 keeps colour 1: each 35 ns half resolves
     // palette[1], never a pair-encoded entry.
-    let (left, right) = denise_shres_playfield_output_pair(control, palette, 1, 1, &mut ham_color);
+    let (left, right) = denise_shres_playfield_output_pair(control, &palette, 1, 1, &mut ham_color);
     assert_eq!(
         blend_shres_outputs(left, right),
         DenisePlayfieldOutput {
@@ -6526,7 +6586,7 @@ fn shres_playfield_output_resolves_each_35ns_sample_through_the_palette() {
     // A background/colour-1 pair blends the two resolved colours into the
     // 70 ns framebuffer pixel (the classic-pitch canvas path); a 35 ns
     // canvas emits the halves separately.
-    let (left, right) = denise_shres_playfield_output_pair(control, palette, 0, 1, &mut ham_color);
+    let (left, right) = denise_shres_playfield_output_pair(control, &palette, 0, 1, &mut ham_color);
     assert_eq!(left.color, rgb12_to_rgb24(0x0000));
     assert_eq!(right.color, rgb12_to_rgb24(0x00F0));
     assert_eq!(
@@ -6581,12 +6641,12 @@ fn aga_shres_playfield_output_keeps_four_plane_indices() {
     let mut ham_color = 0;
 
     let (left, right) =
-        denise_shres_playfield_output_pair(control, palette, 14, 14, &mut ham_color);
+        denise_shres_playfield_output_pair(control, &palette, 14, 14, &mut ham_color);
     assert_eq!(
         blend_shres_outputs(left, right).color,
         palette.rgb24(14) & 0x00FF_FFFF
     );
-    let (left, right) = denise_shres_playfield_output_pair(control, palette, 7, 7, &mut ham_color);
+    let (left, right) = denise_shres_playfield_output_pair(control, &palette, 7, 7, &mut ham_color);
     assert_eq!(
         blend_shres_outputs(left, right).color,
         palette.rgb24(7) & 0x00FF_FFFF
@@ -6694,11 +6754,11 @@ fn ham6_pixels_modify_previous_rgb_components() {
     let mut palette = Palette::new();
     palette.write_ocs(3, 0x0123);
 
-    let direct = ham6_rgb12(palette, 0x03, 0x0FFF);
+    let direct = ham6_rgb12(&palette, 0x03, 0x0FFF);
     assert_eq!(direct, 0x0123);
-    assert_eq!(ham6_rgb12(palette, 0x14, direct), 0x0124);
-    assert_eq!(ham6_rgb12(palette, 0x25, direct), 0x0523);
-    assert_eq!(ham6_rgb12(palette, 0x36, direct), 0x0163);
+    assert_eq!(ham6_rgb12(&palette, 0x14, direct), 0x0124);
+    assert_eq!(ham6_rgb12(&palette, 0x25, direct), 0x0523);
+    assert_eq!(ham6_rgb12(&palette, 0x36, direct), 0x0163);
 }
 
 #[test]
