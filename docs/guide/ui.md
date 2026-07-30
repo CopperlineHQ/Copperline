@@ -316,7 +316,9 @@ The layout is:
   plugged in -- and a **Configure** button opens that drive's own page,
   headed with the installed library and its version, for the serial port,
   drive select, density, read mode, bridge speed and auto-cache, greying
-  whatever the chosen interface does not honour. See [](floppybridge)),
+  whatever the chosen interface does not honour. With no interface attached
+  at all, everything on the page greys except the Interface row itself.
+  See [](floppybridge)),
   *Storage* (IDE master/slave, the SCSI controller -- A2091, A4091, or the
   A3000's onboard SCSI -- and its boot ROM and units; a row of buttons at the top
   links to three sub-pages: **CD** (image, insert delay, CD32 NVRAM); **Host

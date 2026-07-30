@@ -2112,6 +2112,27 @@ impl MachineSetup {
             // when inactive (see `rows`), so they never need a greyed state.
             // Channel mode and separation shape the output, so they do nothing
             // once audio is disabled; separation also does nothing in mono.
+            // The bridge page follows what is actually there. A loaded config
+            // can pull the bay out from under the page, leaving nothing to
+            // edit: every row greys, the Interface one included. With the bay
+            // bridged but no interface attached (the media row's "None"),
+            // only the Interface row is worth touching -- the rest describe
+            // hardware that is not present, the serial port included, since
+            // its list is empty and "Automatic" alone is not a choice.
+            #[cfg(feature = "floppybridge")]
+            F::BridgeDevice => reason(self.bridge_edit().is_some(), "no drive"),
+            #[cfg(feature = "floppybridge")]
+            F::BridgePort
+            | F::BridgeCable
+            | F::BridgeDensity
+            | F::BridgeSpeed
+            | F::BridgeServeSpeed
+            | F::BridgeAutoCache
+                if self.bridge_edit().is_none()
+                    || self.bridge_status == BridgeStatus::NoInterface =>
+            {
+                Some("no interface")
+            }
             #[cfg(feature = "floppybridge")]
             F::BridgePort => reason(
                 self.bridge_driver_supports(crate::floppybridge::config_option::COM_PORT),
@@ -3969,6 +3990,10 @@ mod tests {
         let mut setup = MachineSetup::default();
         setup.set_drive_bridged(0, true);
         setup.set_bridge_edit_drive(0);
+        // Capability greying is only reachable with an interface attached;
+        // without one the whole page greys first (see
+        // `bridge_page_greys_without_an_interface`).
+        setup.bridge_status = BridgeStatus::Attached;
 
         for (driver, cable_greyed) in [
             (crate::config::BridgeDriver::Greaseweazle, false),
@@ -4015,6 +4040,48 @@ mod tests {
             None,
             "df2 is a fitted image bay again"
         );
+    }
+
+    /// The bridge page follows what is there: with nothing attached only the
+    /// Interface row stays live, and with the bay pulled out from under the
+    /// page (a loaded config can do that) every row greys, Interface included.
+    /// With an interface attached the rows answer to the driver as before.
+    #[cfg(feature = "floppybridge")]
+    #[test]
+    fn bridge_page_greys_without_an_interface() {
+        let mut setup = MachineSetup::default();
+        setup.set_drive_bridged(0, true);
+        setup.set_bridge_edit_drive(0);
+        let all = [
+            F::BridgePort,
+            F::BridgeCable,
+            F::BridgeDensity,
+            F::BridgeSpeed,
+            F::BridgeServeSpeed,
+            F::BridgeAutoCache,
+        ];
+
+        setup.bridge_status = BridgeStatus::NoInterface;
+        assert_eq!(setup.disabled_reason(F::BridgeDevice), None);
+        for f in all {
+            assert!(
+                setup.disabled_reason(f).is_some(),
+                "{f:?} live with no interface"
+            );
+        }
+
+        setup.bridge_status = BridgeStatus::Attached;
+        assert_eq!(setup.disabled_reason(F::BridgeDevice), None);
+        for f in [F::BridgeDensity, F::BridgeSpeed, F::BridgeServeSpeed] {
+            assert_eq!(setup.disabled_reason(f), None, "{f:?} greyed with one");
+        }
+
+        // The bay un-bridged underneath the page: nothing left to edit.
+        setup.set_drive_bridged(0, false);
+        assert!(setup.disabled_reason(F::BridgeDevice).is_some());
+        for f in all {
+            assert!(setup.disabled_reason(f).is_some(), "{f:?} live with no bay");
+        }
     }
 
     /// A bridged bay only names its interface when one is actually attached:
