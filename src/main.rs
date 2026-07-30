@@ -504,11 +504,13 @@ where
                     Some(args.next().ok_or_else(|| anyhow!(USAGE))?);
             }
             #[cfg(feature = "floppybridge")]
-            "--floppy-bridge-smart-speed" => {
-                const USAGE: &str = "--floppy-bridge-smart-speed requires DFN";
+            "--floppy-bridge-speed" => {
+                const USAGE: &str = "--floppy-bridge-speed requires DFN PERCENT (100, 125, or 150)";
                 let drive_s = args.next().ok_or_else(|| anyhow!(USAGE))?;
-                let idx = parse_floppy_drive_idx(&drive_s, "--floppy-bridge-smart-speed")?;
-                overrides.floppy_bridge_smart_speed[idx] = true;
+                let percent_s = args.next().ok_or_else(|| anyhow!(USAGE))?;
+                let idx = parse_floppy_drive_idx(&drive_s, "--floppy-bridge-speed")?;
+                let percent: u16 = percent_s.parse().map_err(|_| anyhow!(USAGE))?;
+                overrides.floppy_bridge_speed[idx] = Some(percent);
             }
             #[cfg(feature = "floppybridge")]
             "--floppy-bridge-auto-cache" => {
@@ -1078,7 +1080,7 @@ fn print_help() {
          --floppy-bridge-cable DFN SEL  drive select on the cable: a/b (PC) or 0-3 (Shugart)\n  \
          --floppy-bridge-mode DFN MODE  how tracks are captured: normal, compatible, stalling\n  \
          --floppy-bridge-density DFN D  force a density: auto, dd, or hd\n  \
-         --floppy-bridge-smart-speed DFN  let the interface slow the drive between accesses\n  \
+         --floppy-bridge-speed DFN PCT  serve captured tracks at 100/125/150% of real speed\n  \
          --floppy-bridge-auto-cache DFN   cache disk data while the drive is idle\n  \
          --floppy-bridge-writable DFN   let the guest write to the physical disk (which is\n  \
          \x20                            write-protected unless asked otherwise)\n  ";
@@ -2612,8 +2614,9 @@ mod tests {
             "--floppy-bridge-density",
             "df1",
             "dd",
-            "--floppy-bridge-smart-speed",
+            "--floppy-bridge-speed",
             "df1",
+            "125",
             "--floppy-bridge-auto-cache",
             "df1",
         ])?;
@@ -2630,7 +2633,7 @@ mod tests {
         assert!(!bridge.write_protected);
         assert_eq!(bridge.mode, copperline::config::BridgeSpeedMode::Compatible);
         assert_eq!(bridge.density, copperline::config::BridgeDensity::Dd);
-        assert!(bridge.smart_speed);
+        assert_eq!(bridge.speed, 125);
         assert!(bridge.auto_cache);
         // Untouched bays stay as they were.
         assert!(cfg.floppy.bridges[0].is_none());

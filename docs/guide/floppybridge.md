@@ -53,7 +53,7 @@ write_protected = true       # emulator-level protection; default true
 # bridge_cable = "a"             # a/b (IBM PC) or 0..3 (Shugart)
 # bridge_density = "auto"        # auto/dd/hd
 # bridge_mode = "normal"         # normal/compatible/stalling
-# bridge_smart_speed = false
+# bridge_speed = 100             # serve captured tracks at 100/125/150%
 # bridge_auto_cache = false
 ```
 
@@ -75,7 +75,7 @@ copperline --model A500 --floppy-bridge df0 greaseweazle kickstart.rom
 | `--floppy-bridge-cable DFN SEL` | `bridge_cable` |
 | `--floppy-bridge-mode DFN MODE` | `bridge_mode` |
 | `--floppy-bridge-density DFN D` | `bridge_density` |
-| `--floppy-bridge-smart-speed DFN` | `bridge_smart_speed = true` |
+| `--floppy-bridge-speed DFN PCT` | `bridge_speed = PCT` |
 | `--floppy-bridge-auto-cache DFN` | `bridge_auto_cache = true` |
 | `--floppy-bridge-writable DFN` | `write_protected = false` |
 
@@ -84,7 +84,7 @@ These layer on top of a config file as every other flag does, so
 the file gives it an image -- the flag says the bay *is* a physical drive, so the
 image it displaces is not a conflict. There is deliberately no flag for
 protecting a drive, because that is already the default. The remaining
-options -- density, read mode, smart speed, auto-cache, and profiles -- are
+options -- density, read mode, bridge speed, auto-cache, and profiles -- are
 config-file only; they describe a rig rather than a run.
 
 If a bay asks for a physical drive and it cannot be opened, Copperline
@@ -143,17 +143,19 @@ if a disk reads badly without the index to anchor it.
 until a track is ready instead of answering "not yet". The wait lands on the
 emulated machine, which stops -- pointer and all -- for as long as it takes.
 
-### Auto-cache and smart speed
+### Bridge speed and auto-cache
+
+`bridge_speed` serves each captured revolution at `100` (real, the default),
+`125`, or `150` percent of the platter's real speed. The capture itself is
+untouched -- reading a track off the disk still takes as long as a revolution
+takes -- but the recovered cells reach the guest proportionally faster, so
+rotational waits on tracks already in hand shrink. The trade is the same as
+the image drives' `[floppy] speed`: the operating system and most loaders
+tolerate it, but software that times its own loading can notice.
 
 `bridge_auto_cache` caches disk data in the background while the drive is
 idle. It is off by default: during a boot the drive is never idle, so there 
 is little for it to do, and it moves the real head about on its own.
-
-`bridge_smart_speed` lets the driver time each track and, where the data rate
-is uniform -- so nothing is leaning on the timing for copy protection -- offer
-it at a higher speed. It changes how the driver captures but not what
-Copperline does with the result: cell timing is derived from the length of the
-revolution handed back, so the per-cell speed it makes available goes unused.
 
 ## Write protection
 

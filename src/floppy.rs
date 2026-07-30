@@ -117,6 +117,11 @@ pub const SUPPORTED_SPEED_PERCENTS: [u16; 4] = [100, 200, 400, 800];
 /// `[floppy] speed` value selecting turbo mode.
 pub const SPEED_TURBO: u16 = 0;
 
+#[cfg(feature = "floppybridge")]
+fn default_bridge_speed_percent() -> u16 {
+    100
+}
+
 fn default_speed_percent() -> u16 {
     100
 }
@@ -612,13 +617,16 @@ impl FloppyController {
     }
 
     /// Put a real drive on `drive_idx`, replacing any mounted image. The
-    /// bridge supplies the track under the head from then on.
+    /// bridge supplies the track under the head from then on. `speed_percent`
+    /// is the serving speed from `[floppy.dfN] bridge_speed`, already
+    /// validated to 100, 125, or 150.
     #[cfg(feature = "floppybridge")]
     pub fn attach_bridge(
         &mut self,
         drive_idx: usize,
         bridge: crate::floppybridge::Bridge,
         write_protected: bool,
+        speed_percent: u16,
     ) -> Result<()> {
         ensure!(
             drive_idx < self.drives.len(),
@@ -633,6 +641,7 @@ impl FloppyController {
         drive.bridge_media = bridge.disk_in_drive();
         drive.write_protected_target =
             write_protected || (drive.bridge_media && drive.bridge_tab_write_protected);
+        drive.bridge_speed_percent = speed_percent.max(100);
         drive.bridge = Some(bridge);
         // Announce the swap so the guest re-reads rather than trusting
         // whatever it last saw in this drive.
@@ -2016,6 +2025,9 @@ impl FloppyController {
                     bridge.switch_buffer(side);
                 }
             }
+            // Read before the bridge is borrowed: the serving fit below needs
+            // it in both the capture and filler paths.
+            let serve_percent = u32::from(drive.bridge_speed_percent.max(100));
             let bridge = drive.bridge.as_mut().expect("checked above");
             if let Some((words, bits)) = bridge.read_track(cylinder, side) {
                 // The bridge hands back one whole revolution as a packed MFM
@@ -2024,7 +2036,10 @@ impl FloppyController {
                 // rotation gives the disk's own data rate: a slightly long or
                 // short track -- a drive running off-speed -- stays
                 // self-consistent, exactly as a captured image does.
-                let word_cck = Self::word_cck_for_track_words(words.len());
+                // `bridge_speed` compresses that fit, serving the same cells
+                // in proportionally less time.
+                let word_cck =
+                    (Self::word_cck_for_track_words(words.len()) * 100 / serve_percent).max(1);
                 // Whether this recording can be trusted beyond a single pass.
                 // An index-aligned capture can by construction. An index-less
                 // one is assembled by pattern-matching where the revolution
@@ -2125,7 +2140,7 @@ impl FloppyController {
                     let nominal = encoded_track_words();
                     drive.cached.revs = vec![TrackRev::filler(
                         nominal * 16,
-                        Self::word_cck_for_track_words(nominal),
+                        (Self::word_cck_for_track_words(nominal) * 100 / serve_percent).max(1),
                     )];
                     drive.bridge_filler_track = Some(track);
                     drive.bridge_rev_seamless = false;
@@ -2254,6 +2269,13 @@ struct FloppyDrive {
     #[cfg(feature = "floppybridge")]
     #[serde(skip)]
     bridge_rev_seamless: bool,
+    /// Serving speed for this bay, a percentage of the platter's real speed
+    /// (`bridge_speed`: 100, 125, or 150). Compresses the cck-per-word fit
+    /// when a captured revolution is served; the physical capture itself is
+    /// untouched, so only rotational waits shrink.
+    #[cfg(feature = "floppybridge")]
+    #[serde(skip, default = "default_bridge_speed_percent")]
+    bridge_speed_percent: u16,
     /// `elapsed_cck` when the drive was first asked for the track it is
     /// currently working on, and how many times it has been asked since. Only
     /// read to report how long a track took; 0 means "not waiting".
@@ -2307,6 +2329,8 @@ impl Default for FloppyDrive {
             bridge_rev_spent: false,
             #[cfg(feature = "floppybridge")]
             bridge_rev_seamless: true,
+            #[cfg(feature = "floppybridge")]
+            bridge_speed_percent: 100,
             image: None,
             #[cfg(feature = "floppybridge")]
             bridge: None,

@@ -1099,12 +1099,13 @@ pub struct FloppyBridgeConfig {
     pub mode: BridgeSpeedMode,
     pub density: BridgeDensity,
     pub cable: BridgeCable,
-    /// Lets the driver time each track and, where the data rate is uniform --
-    /// so nothing is leaning on the timing for copy protection -- offer it at
-    /// a higher speed. It changes how the driver captures, but not what Copperline does with
-    /// the result: cell timing is derived from the length of the revolution it
-    /// hands back, so the per-cell speed this makes available goes unused.
-    pub smart_speed: bool,
+    /// How fast a captured revolution is served to the guest, as a
+    /// percentage of the platter's real speed: `100` (real, the default),
+    /// `125`, or `150`. Serving faster shortens rotational waits on tracks
+    /// already in hand; the physical capture itself still takes as long as a
+    /// revolution takes, and the same caveat applies as to `[floppy] speed`
+    /// -- software that times its own loading can notice.
+    pub speed: u16,
     /// Read tracks ahead in the background while the drive is otherwise idle.
     /// Off by default, as the driver has it. It buys little during
     /// a boot -- the drive is never idle then -- and moves the real head about
@@ -1124,7 +1125,7 @@ impl Default for FloppyBridgeConfig {
             mode: BridgeSpeedMode::default(),
             density: BridgeDensity::default(),
             cable: BridgeCable::default(),
-            smart_speed: false,
+            speed: 100,
             auto_cache: false,
         }
     }
@@ -1864,10 +1865,10 @@ pub struct ConfigOverrides {
     /// Force a density rather than sensing it (`--floppy-bridge-density DFN
     /// DENSITY`). Same as `[floppy.dfN] bridge_density`.
     pub floppy_bridge_density: [Option<String>; 4],
-    /// Let the interface offer uniformly-timed tracks at a higher speed
-    /// (`--floppy-bridge-smart-speed DFN`). Same as `[floppy.dfN]
-    /// bridge_smart_speed = true`.
-    pub floppy_bridge_smart_speed: [bool; 4],
+    /// Serve captured tracks at a percentage of real speed
+    /// (`--floppy-bridge-speed DFN PERCENT`). Same as `[floppy.dfN]
+    /// bridge_speed`.
+    pub floppy_bridge_speed: [Option<u16>; 4],
     /// Cache disk data while the drive is idle (`--floppy-bridge-auto-cache
     /// DFN`). Same as `[floppy.dfN] bridge_auto_cache = true`.
     pub floppy_bridge_auto_cache: [bool; 4],
@@ -1893,7 +1894,7 @@ impl ConfigOverrides {
             && self.floppy_bridge_cable.iter().all(Option::is_none)
             && self.floppy_bridge_mode.iter().all(Option::is_none)
             && self.floppy_bridge_density.iter().all(Option::is_none)
-            && !self.floppy_bridge_smart_speed.iter().any(|v| *v)
+            && self.floppy_bridge_speed.iter().all(Option::is_none)
             && !self.floppy_bridge_auto_cache.iter().any(|v| *v)
             && !self.floppy_bridge_writable.iter().any(|w| *w)
             && self.joystick.is_none()
@@ -1967,7 +1968,7 @@ impl ConfigOverrides {
                 && !self.floppy_bridge_writable[idx]
                 && self.floppy_bridge_mode[idx].is_none()
                 && self.floppy_bridge_density[idx].is_none()
-                && !self.floppy_bridge_smart_speed[idx]
+                && self.floppy_bridge_speed[idx].is_none()
                 && !self.floppy_bridge_auto_cache[idx]
             {
                 continue;
@@ -2009,8 +2010,8 @@ impl ConfigOverrides {
             if let Some(density) = &self.floppy_bridge_density[idx] {
                 drive.bridge_density = Some(density.clone());
             }
-            if self.floppy_bridge_smart_speed[idx] {
-                drive.bridge_smart_speed = Some(true);
+            if let Some(speed) = self.floppy_bridge_speed[idx] {
+                drive.bridge_speed = Some(speed);
             }
             if self.floppy_bridge_auto_cache[idx] {
                 drive.bridge_auto_cache = Some(true);
@@ -2803,10 +2804,10 @@ pub(crate) struct RawFloppyDrive {
     /// `0`..`3` (Shugart).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) bridge_cable: Option<String>,
-    /// Let the driver offer tracks whose data rate is uniform at a higher
-    /// speed. Off by default, as it can upset copy protection.
+    /// Serve captured tracks at this percentage of real speed: 100 (the
+    /// default), 125, or 150.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) bridge_smart_speed: Option<bool>,
+    pub(crate) bridge_speed: Option<u16>,
     /// Let the driver cache other cylinders while the disk is
     /// idle. Off by default: it keeps the real drive working continuously.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -4474,6 +4475,15 @@ fn parse_floppy_bridge(idx: usize, spec: &str, raw: &RawFloppyDrive) -> Result<F
         .filter(|s| !s.is_empty())
         .map(str::to_string);
 
+    let speed = match raw.bridge_speed {
+        None => 100,
+        Some(p @ (100 | 125 | 150)) => p,
+        Some(other) => bail!(
+            "floppy.df{idx} bridge_speed = {other} is not a supported serving \
+             speed (100, 125, or 150)"
+        ),
+    };
+
     Ok(FloppyBridgeConfig {
         driver,
         write_protected: raw.write_protected.unwrap_or(true),
@@ -4481,7 +4491,7 @@ fn parse_floppy_bridge(idx: usize, spec: &str, raw: &RawFloppyDrive) -> Result<F
         mode,
         density,
         cable,
-        smart_speed: raw.bridge_smart_speed.unwrap_or(false),
+        speed,
         auto_cache: raw.bridge_auto_cache.unwrap_or(false),
     })
 }
@@ -6879,7 +6889,7 @@ mod tests {
             bridge_mode = "stalling"
             bridge_density = "hd"
             bridge_cable = "b"
-            bridge_smart_speed = true
+            bridge_speed = 125
         "#,
         )?;
         let df0 = cfg.floppy.bridges[0].as_ref().expect("df0 bridged");
@@ -6889,7 +6899,8 @@ mod tests {
         assert_eq!(df0.port, None);
         assert_eq!(df0.mode, BridgeSpeedMode::Normal);
         assert_eq!(df0.density, BridgeDensity::Auto);
-        assert!(!df0.smart_speed && !df0.auto_cache);
+        assert_eq!(df0.speed, 100);
+        assert!(!df0.auto_cache);
 
         let df1 = cfg.floppy.bridges[1].as_ref().expect("df1 bridged");
         assert_eq!(df1.driver, BridgeDriver::DrawBridge);
@@ -6897,12 +6908,30 @@ mod tests {
         assert_eq!(df1.mode, BridgeSpeedMode::Stalling);
         assert_eq!(df1.density, BridgeDensity::Hd);
         assert_eq!(df1.cable, BridgeCable::DriveB);
-        assert!(df1.smart_speed);
+        assert_eq!(df1.speed, 125);
 
         // Bridging a bay wires the drive in, and leaves it with no image.
         assert!(cfg.floppy.drives[0].is_none());
         assert!(cfg.floppy_connected[0] && cfg.floppy_connected[1]);
         Ok(())
+    }
+
+    /// Only the three supported serving speeds are accepted, by name in the
+    /// error so a typo explains itself.
+    #[cfg(feature = "floppybridge")]
+    #[test]
+    fn floppy_bridge_speed_rejects_unsupported_values() {
+        let err = parse_config(
+            r#"
+            [floppy.df0]
+            bridge = "greaseweazle"
+            bridge_speed = 120
+        "#,
+        )
+        .expect_err("120 is not a supported serving speed");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("bridge_speed"), "unexpected error: {msg}");
+        assert!(msg.contains("125"), "names the accepted values: {msg}");
     }
 
     // A build without the feature has no bridges to configure: the keys are

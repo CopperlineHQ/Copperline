@@ -247,7 +247,6 @@ pub struct BridgeConfig {
     /// ([`config_option::AUTO_DETECT_COMPORT`]); name one to pin it, which
     /// matters when two interfaces are plugged in at once.
     pub port: Option<String>,
-    pub smart_speed: bool,
     pub auto_cache: bool,
 }
 
@@ -562,9 +561,6 @@ fn apply(handle: ffi::BridgeDriverHandle, config: &BridgeConfig) -> Vec<&'static
         }
         if !ffi::BRIDGE_DriverSetCable2(handle, config.drive as u8) {
             refused.push("drive select");
-        }
-        if !ffi::BRIDGE_DriverSetSmartSpeedEnabled(handle, config.smart_speed) {
-            refused.push("smart speed");
         }
         if !ffi::BRIDGE_DriverSetAutoCache(handle, config.auto_cache) {
             refused.push("auto-cache");

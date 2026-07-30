@@ -347,7 +347,7 @@ pub enum LauncherField {
     BridgeCable,
     BridgeDensity,
     BridgeSpeed,
-    BridgeSmartSpeed,
+    BridgeServeSpeed,
     BridgeAutoCache,
     // Hard disk
     IdeMaster,
@@ -607,7 +607,7 @@ const FLOPPY_BRIDGE_ROWS: [Row; 8] = [
     row(F::BridgeCable, "Drive select", Cycle),
     row(F::BridgeDensity, "Density", Cycle),
     row(F::BridgeSpeed, "Read mode", Cycle),
-    row(F::BridgeSmartSpeed, "Smart speed", Toggle),
+    row(F::BridgeServeSpeed, "Bridge speed", Cycle),
     row(F::BridgeAutoCache, "Auto-cache", Toggle),
 ];
 const STORAGE_ROWS: [Row; 12] = [
@@ -1009,6 +1009,9 @@ const AUDIO_FILTER_MODES: [AudioFilterMode; 3] = [
     AudioFilterMode::Off,
 ];
 const FLOPPY_SPEEDS: [u16; 5] = [100, 200, 400, 800, crate::floppy::SPEED_TURBO];
+/// Serving speeds a bridged bay offers: real, and two faster-than-real
+/// steps. Percentages of the platter's real speed.
+const BRIDGE_SERVE_SPEEDS: [u16; 3] = [100, 125, 150];
 const PACINGS: [PacingBudget; 2] = [PacingBudget::Cycles, PacingBudget::Instructions];
 const WARPS: [WarpSpeed; 5] = [
     WarpSpeed::X2,
@@ -1844,7 +1847,7 @@ impl MachineSetup {
                     .then(|| bridge_density_name(bridge.density).to_string()),
                 bridge_mode: (bridge.mode != default.mode)
                     .then(|| bridge_mode_name(bridge.mode).to_string()),
-                bridge_smart_speed: bridge.smart_speed.then_some(true),
+                bridge_speed: (bridge.speed != 100).then_some(bridge.speed),
                 bridge_auto_cache: bridge.auto_cache.then_some(true),
                 // Same rule, and the same tick box, as an image: only an
                 // unprotected drive says so.
@@ -2123,11 +2126,6 @@ impl MachineSetup {
                 "not on this interface",
             ),
             #[cfg(feature = "floppybridge")]
-            F::BridgeSmartSpeed => reason(
-                self.bridge_driver_supports(crate::floppybridge::config_option::SMART_SPEED),
-                "not on this interface",
-            ),
-            #[cfg(feature = "floppybridge")]
             F::BridgeAutoCache => reason(
                 self.bridge_driver_supports(crate::floppybridge::config_option::AUTO_CACHE),
                 "not on this interface",
@@ -2163,7 +2161,6 @@ impl MachineSetup {
             F::Df3WriteProtect => self.df_write_protected[3],
             F::FloppySounds => self.floppy_sounds,
             F::StartFullscreen => self.start_fullscreen,
-            F::BridgeSmartSpeed => self.bridge_edit().is_some_and(|c| c.smart_speed),
             F::BridgeAutoCache => self.bridge_edit().is_some_and(|c| c.auto_cache),
             F::ShowStatusBar => self.show_status_bar,
             F::Deinterlace => self.deinterlace,
@@ -2402,6 +2399,9 @@ impl MachineSetup {
                 Some(BridgeSpeedMode::Stalling) => "Stalling".to_string(),
                 None => "(none)".to_string(),
             },
+            F::BridgeServeSpeed => {
+                format!("{}%", self.bridge_edit().map_or(100, |c| c.speed))
+            }
             F::Shader => match self.shader {
                 ShaderMode::None => "Off".to_string(),
                 ShaderMode::Scanlines => "Scanlines".to_string(),
@@ -2832,6 +2832,11 @@ impl MachineSetup {
                     c.mode = cycle_slice(&BRIDGE_SPEEDS, c.mode, forward);
                 }
             }
+            F::BridgeServeSpeed => {
+                if let Some(c) = self.bridge_edit_mut() {
+                    c.speed = cycle_slice(&BRIDGE_SERVE_SPEEDS, c.speed, forward);
+                }
+            }
             F::AudioStereoSeparation => {
                 self.audio_stereo_separation = cycle_nearest(
                     &STEREO_SEPARATION_STEPS,
@@ -2895,11 +2900,6 @@ impl MachineSetup {
             F::Deinterlace => self.deinterlace = !self.deinterlace,
             F::Bezel => self.bezel = !self.bezel,
             F::PowerOn => self.power_on = !self.power_on,
-            F::BridgeSmartSpeed => {
-                if let Some(c) = self.bridge_edit_mut() {
-                    c.smart_speed = !c.smart_speed;
-                }
-            }
             F::BridgeAutoCache => {
                 if let Some(c) = self.bridge_edit_mut() {
                     c.auto_cache = !c.auto_cache;
@@ -3255,10 +3255,10 @@ impl MachineSetup {
     /// optional settings, as that driver itself reports.
     ///
     /// Each driver advertises what it supports, and they differ: a Greaseweazle
-    /// takes a drive-select cable and smart speed, a DrawBridge answers to a
-    /// different set. Offering a switch the hardware ignores is how a user ends
-    /// up believing they changed something, so the ones it does not honour are
-    /// greyed with the interface's name against them.
+    /// takes a drive-select cable, a DrawBridge answers to a different set.
+    /// Offering a switch the hardware ignores is how a user ends up believing
+    /// they changed something, so the ones it does not honour are greyed with
+    /// the interface's name against them.
     #[cfg(feature = "floppybridge")]
     fn bridge_driver_supports(&self, option: u32) -> bool {
         let Some(cfg) = self.bridge_edit() else {

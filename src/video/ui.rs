@@ -5389,8 +5389,8 @@ fn draw_launcher_row(
             | LauncherField::ShaderStrength
             | LauncherField::BridgePort
             | LauncherField::BridgeCable
-            | LauncherField::BridgeSmartSpeed
             | LauncherField::BridgeAutoCache
+            | LauncherField::FloppySpeed
     );
     if let Some(reason) = reason {
         if !blank_when_greyed {
