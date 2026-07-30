@@ -565,6 +565,8 @@ floppy_sounds_volume = 100
 # for turbo (disk DMA transfers complete almost instantly). Mechanics
 # (motor spin-up, stepping) always run at real speed. Faster-than-real
 # loading is a compatibility trade-off; some software times its loading.
+# Applies to image-backed bays only: a physical drive's data rate is the
+# disk's own, so bridged bays always run at real speed.
 #
 # [floppy]
 # drives = 2

@@ -395,6 +395,25 @@ impl FloppyController {
         self.speed_percent == SPEED_TURBO
     }
 
+    /// The data-rate multiple `drive_idx` actually runs at. `[floppy] speed`
+    /// shapes how fast a track is served from an image; a physical drive's
+    /// data rate is the disk's own, and accelerating the emulated side of it
+    /// only makes the guest outrun the cells the drive is delivering. A
+    /// bridged bay therefore always runs at real speed.
+    fn drive_speed_multiplier(&self, drive_idx: usize) -> u32 {
+        if self.drives[drive_idx].is_bridged() {
+            1
+        } else {
+            self.speed_multiplier()
+        }
+    }
+
+    /// Whether turbo applies to `drive_idx`: never to a bridged bay, whose
+    /// platter cannot be spun forward in zero time.
+    fn drive_turbo(&self, drive_idx: usize) -> bool {
+        self.turbo() && !self.drives[drive_idx].is_bridged()
+    }
+
     pub fn cia_a_status_bits(&self) -> u8 {
         let Some(idx) = self.selected_drive() else {
             return CIAA_DSKCHANGE | CIAA_DSKPROT | CIAA_DSKTRACK0 | CIAA_DSKRDY;
@@ -1127,8 +1146,9 @@ impl FloppyController {
         // shifter, sync detection, DSKBYTR, and DMA pacing) sees a whole
         // multiple of the elapsed time, leaving every per-cell decision
         // bit-identical to real speed. Mechanics (motor, seek, settle, index
-        // pulse width) above tick at real time regardless.
-        let data_cck = cck.saturating_mul(self.speed_multiplier());
+        // pulse width) above tick at real time regardless. A bridged bay is
+        // excluded: its data rate belongs to the real disk.
+        let data_cck = cck.saturating_mul(self.drive_speed_multiplier(idx));
         let mut irq = match active_dma {
             Some((dma_idx, _, true)) if dma_idx == idx => {
                 self.tick_write_dma(idx, data_cck, is_selected, chip_ram)
@@ -1168,6 +1188,12 @@ impl FloppyController {
             return false;
         }
         let (idx, write) = (dma.drive, dma.write);
+        // A physical platter cannot be spun forward in zero time: a burst
+        // against a bridged bay would hand the guest cells the drive has not
+        // delivered. That transfer stays on real-time pacing.
+        if self.drives[idx].is_bridged() {
+            return false;
+        }
         // Mechanics stay honest: a drive that is still spinning up or whose
         // head is settling after a step delivers no stable cells, so the
         // burst waits for it like real-time pacing would.
@@ -1409,7 +1435,7 @@ impl FloppyController {
     /// already spent) would pin STOP-state fast-forward to single steps for
     /// the whole spin-up, so those cases keep the normal-paced deadline.
     fn scale_prediction(&self, drive_idx: usize, cck: u32) -> u32 {
-        if self.turbo() {
+        if self.drive_turbo(drive_idx) {
             if self.turbo_grace_cck > 0 {
                 return cck.min(self.turbo_grace_cck).max(1);
             }
@@ -1419,7 +1445,7 @@ impl FloppyController {
             }
             return cck.max(1);
         }
-        (cck / self.speed_multiplier()).max(1)
+        (cck / self.drive_speed_multiplier(drive_idx)).max(1)
     }
 
     pub fn next_completion_cck(&self, dmacon: u16) -> Option<u32> {
@@ -1490,7 +1516,7 @@ impl FloppyController {
         // The platter spins at the data-rate multiple; turbo bursts do not
         // move the index prediction (they are bounded by the completion
         // prediction above, which already caps the fast-forward).
-        Some((raw / self.speed_multiplier()).max(1))
+        Some((raw / self.drive_speed_multiplier(idx)).max(1))
     }
 
     pub fn dma_active(&self, dmacon: u16) -> bool {

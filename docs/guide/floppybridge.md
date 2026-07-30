@@ -207,6 +207,12 @@ eject and swap buttons do nothing: Eject/insert disks as you would with an Amiga
 **No synthesized drive sounds.** The real drive makes its own noise. A bay in the 
 same machine running an ADF still sounds as it should when enabled.
 
+**The `[floppy] speed` option does not apply.** It shapes how fast a track is
+served from an image; a physical drive's data rate is the disk's own, and
+turbo cannot spin a real platter forward in zero time. Image bays in the same
+machine still honour it, and the launcher greys the Drive speed row when every
+fitted bay is physical.
+
 **Powering off releases the drive.** A real drive takes its power from the
 machine, and a bridged one behaves the same way: the power button hands the
 interface back to the host, so it stops turning and another program -- or the

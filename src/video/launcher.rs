@@ -2063,6 +2063,14 @@ impl MachineSetup {
             F::Df1Image | F::Df1WriteProtect => reason(self.floppy_drives >= 2, "drive off"),
             F::Df2Image | F::Df2WriteProtect => reason(self.floppy_drives >= 3, "drive off"),
             F::Df3Image | F::Df3WriteProtect => reason(self.floppy_drives >= 4, "drive off"),
+            // Drive speed shapes how fast a track is served from an image; a
+            // real drive's data rate is the disk's own. With every fitted bay
+            // physical there is nothing for it to act on.
+            F::FloppySpeed => {
+                let any_image = self.floppy_drives == 0
+                    || (0..self.floppy_drives as usize).any(|i| self.df_bridge[i].is_none());
+                reason(any_image, "no image drives")
+            }
             // Shader strength only feeds the shader pass, which does not run when
             // the shader is off.
             F::ShaderStrength => reason(self.shader != ShaderMode::None, "shader off"),
@@ -3976,6 +3984,37 @@ mod tests {
             assert!(setup.disabled_reason(F::BridgePort).is_none());
             assert!(setup.disabled_reason(F::BridgeAutoCache).is_none());
         }
+    }
+
+    /// Drive speed acts on image bays only, so the row greys exactly when
+    /// every fitted bay is physical: one image bay anywhere keeps it live.
+    #[cfg(feature = "floppybridge")]
+    #[test]
+    fn drive_speed_greys_when_every_fitted_bay_is_physical() {
+        let mut setup = MachineSetup::default();
+        setup.floppy_drives = 2;
+        assert_eq!(setup.disabled_reason(F::FloppySpeed), None);
+
+        setup.set_drive_bridged(0, true);
+        assert_eq!(
+            setup.disabled_reason(F::FloppySpeed),
+            None,
+            "df1 is still an image bay"
+        );
+
+        setup.set_drive_bridged(1, true);
+        assert!(
+            setup.disabled_reason(F::FloppySpeed).is_some(),
+            "every fitted bay is physical"
+        );
+
+        // An unfitted bay's state does not count: df2 is not wired in.
+        setup.floppy_drives = 3;
+        assert_eq!(
+            setup.disabled_reason(F::FloppySpeed),
+            None,
+            "df2 is a fitted image bay again"
+        );
     }
 
     /// A bridged bay only names its interface when one is actually attached:
