@@ -99,22 +99,6 @@ cylinder and surface whenever the flag is up, exactly as the read path does.
 This is a behavioural fix, not a build difference, and is worth carrying
 upstream.
 
-### `CommonBridgeTemplate.cpp` -- auto-cache fighting an active guest
-
-The cacher's only scheduling guard was an empty command queue, checked as
-each excursion starts. The moment the track the host is on has its buffers
-full, the cacher seeks away to its next target -- while the guest is still
-consuming that track and about to ask for the next one, whose demand then
-aborts the cacher's capture and drags the head back. During a load, every
-guest track cost two extra seeks and an aborted capture, audibly thrashing
-the drive and slowing the very reads the cache exists to serve. The
-host-facing entry points (seek, motor, surface, buffer switch, track read,
-the write calls) now stamp `m_lastHostActivity`, and `handleBackgroundCaching`
-waits until that is `AUTOCACHE_HOLDOFF_TIME` (2 s) old before moving the
-head. Status queries deliberately do not stamp it, and the cacher's own
-internal calls bypass the host-facing entry points, so it does not hold
-itself off. Also behavioural, also worth carrying upstream.
-
 ### Wide literals passed to TCHAR-generic Win32 calls
 
 Upstream's project builds with `CharacterSet: Unicode`, so its `L""` literals

@@ -65,10 +65,6 @@ OUTPUT_TIME_IN_NS should not be set(revolution extractor)
 #define DRIVE_GARBAGE_VALUE							1
 
 // Auto-sense the disk, just like Amiga OS will, be do this if it hasn't 
-/* COPPERLINE: how long the host must leave the drive alone before
-   background caching may move the head, in milliseconds. */
-#define AUTOCACHE_HOLDOFF_TIME						2000
-
 #define DISKCHANGE_BEFORE_INSERTED_CHECK_INTERVAL	3000
 
 // We need to poll the drive once theres a disk in there to know when it's been removed.  This is the poll interval
@@ -104,9 +100,7 @@ CommonBridgeTemplate::CommonBridgeTemplate(FloppyBridge::BridgeMode bridgeMode, 
 	m_control(nullptr), m_currentTrack(0), m_actualCurrentCylinder(0), m_writeProtected(false), m_diskInDrive(false), m_firstTrackMode(false), m_autocacheModifiedCurrentCylinder(false),
 	m_bridgeMode(bridgeMode), m_bridgeDensity(bridgeDensity), m_motorSpinningUp(false), m_motorIsReady(false), m_isMotorRunning(false), m_autoCacheMotorStatus(false), m_useSmartSpeed(useSmartSpeed),
 	m_readBufferAvailable(false), m_floppySide(DiskSurface::dsLower), m_actualFloppySide(DiskSurface::dsLower), m_shouldAutoCache(shouldAutoCache), m_pll(true, true), m_readLoops(0),
-	m_lastSeek(std::chrono::steady_clock::now()),
-	/* COPPERLINE: aged so an idle guest at open does not delay caching */
-	m_lastHostActivity(std::chrono::steady_clock::now() - std::chrono::milliseconds(AUTOCACHE_HOLDOFF_TIME)) {
+	m_lastSeek(std::chrono::steady_clock::now()) {
 
 	memset(&m_mfmRead, 0, sizeof(m_mfmRead));;
 	m_pll.setRotationExtractor(&m_extractor);
@@ -124,8 +118,6 @@ void CommonBridgeTemplate::changeBridgeDensity(FloppyBridge::BridgeDensityMode b
 
 // Quick confirmation from UAE that we're actually on the same side
 void CommonBridgeTemplate::setSurface(bool side) {
-	/* COPPERLINE: the host is using the drive -- hold background caching off */
-	m_lastHostActivity = std::chrono::steady_clock::now();
 	switchDiskSide(side);
 }
 
@@ -727,8 +719,6 @@ int CommonBridgeTemplate::maxMFMBitPosition() {
 
 // This is called to switch to a different copy of the track so multiple revolutions can be read
 void CommonBridgeTemplate::mfmSwitchBuffer(bool side) {
-	/* COPPERLINE: the host is using the drive -- hold background caching off */
-	m_lastHostActivity = std::chrono::steady_clock::now();
 	if (m_directMode) return;
 
 	switchDiskSide(side);
@@ -816,8 +806,6 @@ bool CommonBridgeTemplate::isMFMDataAvailable() {
 // The return value is the wrap point in bits (last byte is shifted to MSB) or in Direct mode, just the number of bits received
 // resyncRotation is ignored in direct mode
 int CommonBridgeTemplate::getMFMTrack(bool side, unsigned int track, bool resyncRotation, const int bufferSizeInBytes, void* output) {
-	/* COPPERLINE: the host is using the drive -- hold background caching off */
-	m_lastHostActivity = std::chrono::steady_clock::now();
 	if (m_directMode) {
 		threadLockControl(true);
 
@@ -980,11 +968,6 @@ void CommonBridgeTemplate::handleBackgroundCaching() {
 	if (m_directMode) return;
 	if (!m_queue.empty()) return;
 	if (m_lastWroteTo >= 0) return;  // don't do this if a write is happening
-	/* COPPERLINE: while the host is actively using the drive, caching a
-	   different cylinder just steals the head from it -- every excursion
-	   costs two seeks and an aborted capture. Wait for the guest to go
-	   quiet before reading ahead on its behalf. */
-	if (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - m_lastHostActivity).count() < AUTOCACHE_HOLDOFF_TIME) return;
 	if (!m_diskInDrive) {
 		// Turn off the motor if its not needed and we started it
 		if (m_motorIsReady || m_motorSpinningUp) return;
@@ -1468,8 +1451,6 @@ bool CommonBridgeTemplate::resetDrive(int trackNumber) {
 
 // Set the status of the motor. 
 void CommonBridgeTemplate::setMotorStatus(bool side, bool turnOn) {
-	/* COPPERLINE: the host is using the drive -- hold background caching off */
-	m_lastHostActivity = std::chrono::steady_clock::now();
 	switchDiskSide(side);
 
 	if (m_isMotorRunning == turnOn) return;
@@ -1510,8 +1491,6 @@ void CommonBridgeTemplate::handleNoClickStep(bool side) {
 
 // Seek to a specific track
 void CommonBridgeTemplate::gotoCylinder(int trackNumber, bool side) {
-	/* COPPERLINE: the host is using the drive -- hold background caching off */
-	m_lastHostActivity = std::chrono::steady_clock::now();
 	if (m_currentTrack == trackNumber) {
 		switchDiskSide(side);
 		return;
@@ -1654,8 +1633,6 @@ bool CommonBridgeTemplate::writeMFMTrackToBuffer(bool side, unsigned int track, 
 // Submits a single WORD of data received during a DMA transfer to the disk buffer.  This needs to be saved.  It is usually flushed when commitWriteBuffer is called
 // You should reset this buffer if side or track changes
 void CommonBridgeTemplate::writeShortToBuffer(bool side, unsigned int track, unsigned short mfmData, int mfmPosition) {
-	/* COPPERLINE: the host is using the drive -- hold background caching off */
-	m_lastHostActivity = std::chrono::steady_clock::now();
 	gotoCylinder(track, side);
 
 	// Prevent background reading while we're busy
@@ -1688,8 +1665,6 @@ bool CommonBridgeTemplate::isReadyToWrite() {
 // Requests that any data received via writeShortToBuffer be saved to disk. The side and track should match against what you have been collected
 // and the buffer should be reset upon completion.  You should return the new track length (maxMFMBitPosition) with optional padding if needed
 unsigned int CommonBridgeTemplate::commitWriteBuffer(bool side, unsigned int track) {
-	/* COPPERLINE: the host is using the drive -- hold background caching off */
-	m_lastHostActivity = std::chrono::steady_clock::now();
 	gotoCylinder(track, side);
 
 	// Prevent background reading while we're busy

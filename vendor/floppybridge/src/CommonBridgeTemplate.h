@@ -253,12 +253,6 @@ private:
 	// When the last seek operation occured
 	std::chrono::time_point<std::chrono::steady_clock> m_lastSeek;
 
-	/* COPPERLINE: when the host last used the drive (seek, motor, surface,
-	   buffer switch, track read, write). Background caching holds off until
-	   this is a couple of seconds old, so it never fights an actively loading
-	   guest for the head -- see handleBackgroundCaching. */
-	std::chrono::time_point<std::chrono::steady_clock> m_lastHostActivity;
-
 	// Number of reads since step or head change
 	uint32_t m_readLoops;
 
