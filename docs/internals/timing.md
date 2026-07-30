@@ -77,7 +77,9 @@ geometry on every quantum. A mid-line DDF, BPLCON0, DMACON, DIW or FMODE write
 invalidates the publication and selects the existing block-delay-aware
 calculation for the rest of that line. If a delayed BPLCON0 or DMACON change
 crosses the line boundary, the following line also remains dynamic until the
-delayed value has taken effect.
+delayed value has taken effect. A restored save state likewise keeps the
+remainder of its partial line dynamic, then republishes from the next
+unchanged line.
 Wide-FMODE lo-res slots are packed into the first eight CCKs of each
 16/32-CCK fetch unit; the rest of the unit remains available to later
 arbitration priorities.

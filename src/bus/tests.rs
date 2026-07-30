@@ -10,16 +10,16 @@ use super::{
     framebuffer_x_for_live_collision_hpos, live_bitplane_collision_bits, live_display_window_x,
     live_manual_sprite_collision_sources, live_sprite_playfield_collision_bits_in_range,
     live_sprite_sprite_collision_bits, sprite_hstart_for_fmode, visible_start_vpos_for_diw,
-    BeamChipRamWrite, BeamRegisterWrite, BeamWriteSource, Bus, CapturedBitplaneRow,
-    CapturedSpriteLine, ChipBusOwner, CpuBusAccessKind, DeviceClock, DisplaySpriteDmaState,
-    DisplaySpriteLineData, FrameBusTrace, LiveCollisionControl, LiveCollisionLineReplay,
-    LiveSpriteCollisionSource, PortDevice, RenderRegisterSnapshot, BLITTER_SLOWDOWN_CPU_MISS_LIMIT,
-    BLTCON0_USE_A, BLTCON0_USE_C, BLTCON0_USE_D, BLTCON1_DOFF, BLTCON1_LINE, BPLCON0_ECSENA,
-    BPLCON3_BRDRBLNK, BPLCON3_BRDSPRT, BPLCON3_SPRES_HIRES, DENISE_HPOS_LAG_CCK, DMACON_BLTEN,
-    DMACON_BLTPRI, DMACON_BPLEN, DMACON_SPREN, PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS,
-    RENDER_COPPER_WAIT_HPOS_FB0, RENDER_DIW_HSTART_FB0, RENDER_MIN_OVERSCAN_START_VPOS,
-    RENDER_VISIBLE_LINES, RENDER_VISIBLE_START_VPOS, SPRITE_DMA_SLOT1_HPOS,
-    SPRITE_OUTPUT_DELAY_LORES,
+    BeamChipRamWrite, BeamRegisterWrite, BeamWriteSource, BitplaneBplcon0Delay, Bus,
+    CapturedBitplaneRow, CapturedSpriteLine, ChipBusOwner, CpuBusAccessKind, DeviceClock,
+    DisplaySpriteDmaState, DisplaySpriteLineData, FrameBusTrace, LiveCollisionControl,
+    LiveCollisionLineReplay, LiveSpriteCollisionSource, PortDevice, RenderRegisterSnapshot,
+    BLITTER_SLOWDOWN_CPU_MISS_LIMIT, BLTCON0_USE_A, BLTCON0_USE_C, BLTCON0_USE_D, BLTCON1_DOFF,
+    BLTCON1_LINE, BPLCON0_ECSENA, BPLCON3_BRDRBLNK, BPLCON3_BRDSPRT, BPLCON3_SPRES_HIRES,
+    DENISE_HPOS_LAG_CCK, DMACON_BLTEN, DMACON_BLTPRI, DMACON_BPLEN, DMACON_SPREN,
+    PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS, RENDER_COPPER_WAIT_HPOS_FB0, RENDER_DIW_HSTART_FB0,
+    RENDER_MIN_OVERSCAN_START_VPOS, RENDER_VISIBLE_LINES, RENDER_VISIBLE_START_VPOS,
+    SPRITE_DMA_SLOT1_HPOS, SPRITE_OUTPUT_DELAY_LORES,
 };
 use crate::audio::AudioSink;
 use crate::chipset::agnus::{
@@ -228,6 +228,51 @@ fn wide_bitplane_line_stays_dynamic_when_control_delay_crosses_wrap() {
         Some(0x2D),
         "the next line must follow the delayed BPLCON0 transition dynamically"
     );
+}
+
+#[test]
+fn restored_wide_bitplane_line_reenters_dynamic_arbitration() {
+    let mut bus = empty_bus();
+    bus.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+    bus.agnus.write_fmode(0x0003);
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
+    bus.agnus.vpos = 0x2C;
+    bus.agnus.hpos = 0x35;
+    bus.emulated_cck = u64::from(bus.agnus.hpos);
+    bus.denise.diwstrt = 0x2C81;
+    bus.denise.diwstop = 0x2DC1;
+    bus.denise.ddfstrt = 0x0030;
+    bus.denise.ddfstop = 0x00D0;
+    bus.denise.bplcon0 = 0;
+    bus.bitplane_bplcon0_delay = Some(BitplaneBplcon0Delay {
+        previous: 0x5000,
+        changed_at_cck: bus.emulated_cck - 3,
+    });
+
+    // Serde-skipped cache state defaults to an apparently static line. At
+    // this point the coarse delay has expired, but the current fetch block
+    // still owns the previous BPLCON0 shape.
+    assert!(bus.bitplane_slot_plan_for_bplcon0(0).is_none());
+    assert!(
+        (bus.agnus.hpos..bus.agnus.current_line_cck())
+            .any(|hpos| bus.dynamic_bitplane_slot_active_at(bus.agnus.vpos, hpos)),
+        "the delayed previous-value fallback should own a remaining slot"
+    );
+
+    bus.reset_transient_video_after_state_load();
+
+    assert_eq!(
+        bus.wide_bitplane_dynamic_vpos.get(),
+        Some(bus.agnus.vpos),
+        "the restored partial line must not publish one static fetch shape"
+    );
+    assert!(!bus.wide_bitplane_hot_line.is_current(bus.agnus.vpos));
+    for hpos in bus.agnus.hpos..bus.agnus.current_line_cck() {
+        assert_eq!(
+            bus.bitplane_slot_active_at(bus.agnus.vpos, hpos),
+            bus.dynamic_bitplane_slot_active_at(bus.agnus.vpos, hpos)
+        );
+    }
 }
 
 fn render_color_write_x(hpos: u32) -> usize {

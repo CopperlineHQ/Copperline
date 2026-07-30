@@ -3992,6 +3992,15 @@ impl Bus {
         self.last_frame_presentation_v_window = self.current_frame_presentation_v_window;
         self.lazy_collision_vpos = self.current_frame_visible_start_vpos;
         self.ocs_same_line_diw_start_blocked_vpos = None;
+        // Per-line wide-FMODE cache eligibility is deliberately not part of
+        // the save-state schema. A restored line may contain a DDF, FMODE or
+        // delayed BPLCON0/DMACON transition, so rebuilding one whole-line mask
+        // from the register value at the restore point could skip the dynamic
+        // path's previous-value/block-boundary handling. Keep the remainder of
+        // this line dynamic; rollover makes an unchanged following line
+        // eligible for publication again.
+        self.wide_bitplane_hot_line.invalidate();
+        self.wide_bitplane_dynamic_vpos.set(Some(self.agnus.vpos));
         self.reset_frame_capture_buffers();
         self.current_frame_render_blocked = self.agnus.vpos != 0 || self.agnus.hpos != 0;
     }
