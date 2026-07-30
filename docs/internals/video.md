@@ -357,6 +357,27 @@ capture paths call `finish_render_for_current_frame` so screenshots, frame
 dumps, recordings, debugger step, and run-to-PC output use the requested
 emulated frame.
 
+Progressive frames have two exact reuse checks. First, two consecutive
+renders with identical lightweight inputs arm a pre-render key containing
+every captured bitplane row, sprite line/latch, register/event stream,
+geometry and blanking input. If replay fetched words from the chip-RAM
+snapshot, the key also retains each timed address/value dependency and
+replays those reads against the next snapshot; unrelated guest RAM therefore
+does not defeat reuse. A match skips replay and keeps the prior collision and
+presentation result. The two-frame arming step avoids deep-copying captured
+plane data on changing displays. Interlace, phosphor history, and
+time-dependent render diagnostics do not take this shortcut.
+
+After post-processing and deinterlacing, the frontend compares the complete
+active presentation buffer and its geometry with the current one. This is a
+word-for-word comparison, not a hash. An exact repeat keeps the current
+buffer and, when the status LEDs/media state and overlays are also unchanged,
+does not request a main-window redraw; that avoids the CPU copy, texture
+upload, and GPU present even when harmless differences in the raw event log
+made the conservative pre-render key reject the frame. Recording still emits
+the duplicate video frame, and status/UI changes still redraw over a held
+Amiga picture.
+
 ## Interlace (`video/deinterlace.rs`)
 
 Interlaced (LACE) content is presented through a motion-adaptive

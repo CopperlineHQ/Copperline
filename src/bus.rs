@@ -312,7 +312,7 @@ const NANOS_PER_SECOND: u128 = 1_000_000_000;
 const VIDEO_FETCH_TIMING_SAMPLE_RATE: u128 = 128;
 const VIDEO_COLLISION_TIMING_SAMPLE_RATE: u128 = 16;
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CapturedBitplaneRow {
     pub nplanes: usize,
     pub words_per_row: usize,
@@ -324,7 +324,7 @@ pub struct CapturedBitplaneRow {
     pub fetch_origin_cck: Option<u16>,
 }
 
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CapturedSpriteLine {
     pub sprite: usize,
     pub hstart: i32,
@@ -342,7 +342,7 @@ pub struct CapturedSpriteLine {
     pub attached: bool,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HeldSpriteLine {
     pub line: CapturedSpriteLine,
     pub vstart: i32,
@@ -4845,6 +4845,53 @@ impl Bus {
         total
     }
 
+    /// Long stopped-CPU advance that keeps a steady Copper WAIT dormant up
+    /// to its exact comparator deadline. Ordinary CPU-driven advances are
+    /// deliberately left on [`Self::advance_chipset`]: their spans are only a
+    /// few colour clocks, so calculating a far-future deadline would cost
+    /// more than the comparator calls it replaces.
+    fn advance_chipset_cpu_idle(&mut self, target_cck: u32) -> AgnusTick {
+        let mut total = AgnusTick::default();
+
+        let mut remaining = target_cck;
+        let mut invariant_copper_deadline = self
+            .invariant_copper_deadline_cck()
+            .filter(|&deadline| deadline != 0);
+        while remaining > 0 {
+            let before_deadline = invariant_copper_deadline.is_some();
+            let quantum_limit = invariant_copper_deadline
+                .map(|deadline| remaining.min(deadline))
+                .unwrap_or(remaining);
+            let (cck, tick) = self.advance_one_chip_bus_quantum_limited_inner(
+                None,
+                quantum_limit,
+                before_deadline,
+            );
+            remaining = remaining.saturating_sub(cck);
+            add_agnus_tick(&mut total, tick);
+            invariant_copper_deadline = invariant_copper_deadline
+                .and_then(|deadline| deadline.checked_sub(cck))
+                .filter(|&deadline| deadline != 0);
+            if invariant_copper_deadline.is_none() {
+                invariant_copper_deadline = self
+                    .invariant_copper_deadline_cck()
+                    .filter(|&deadline| deadline != 0);
+            }
+        }
+
+        total
+    }
+
+    /// Advance devices while the CPU is halted in STOP. This is the only
+    /// caller that presents spans long enough for the sleeping-Copper
+    /// deadline optimization to pay for itself.
+    pub fn advance_cpu_idle_devices(&mut self, cck: u32) -> AgnusTick {
+        self.flush_timed_devices();
+        let tick = self.advance_chipset_cpu_idle(cck);
+        self.tick_timed_devices(cck, tick);
+        tick
+    }
+
     pub fn advance_devices(&mut self, cck: u32) -> AgnusTick {
         // Apply any color clocks deferred by the CPU access path before ticking
         // this (idle/stopped-CPU or test-driven) span, so device time stays
@@ -5041,6 +5088,30 @@ impl Bus {
             }
             return Some(2);
         };
+        self.copper_wait_wakeup_cck(wait)
+    }
+
+    /// Exact deadline before which the Copper state is invariant: either a
+    /// pending vertical-blank COP1LC restart or the steady comparator phase of
+    /// a WAIT. Before this point `advance_chipset` may leave the per-quantum
+    /// Copper step dormant. Instruction-tail and wake-up phases return `None`
+    /// and retain their exact cycle steps.
+    fn invariant_copper_deadline_cck(&self) -> Option<u32> {
+        if !self.copper_dma_enabled() {
+            return None;
+        }
+        if let Some(cck) = self.cck_until_pending_copper_frame_start() {
+            return Some(cck);
+        }
+        let wait_deadline = self.copper_wait_wakeup_cck(self.copper.sleeping_wait()?)?;
+        // A field wrap stops the current Copper and schedules the vertical-
+        // blank COP1LC strobe. That state transition can precede a wait whose
+        // low-byte vertical target lies in the next field, so never carry a
+        // sleeping-WAIT deadline across the wrap.
+        Some(wait_deadline.min(self.agnus.cck_until_next_frame()))
+    }
+
+    fn copper_wait_wakeup_cck(&self, wait: CopperWait) -> Option<u32> {
         let position_cck = self.cck_until_copper_wait_position(wait)?;
         if position_cck == 0 && wait.blitter_wait_enabled() && self.blitter.busy {
             return self.next_blitter_completion_cck();

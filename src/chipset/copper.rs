@@ -466,6 +466,20 @@ impl Copper {
         }
     }
 
+    /// The WAIT comparator's steady sleeping phase. Instruction-tail and
+    /// wake-up phases also carry a `CopperWait`, but still need their
+    /// individual free-cycle transitions; only this phase may be advanced
+    /// directly to the exact comparator deadline.
+    pub fn sleeping_wait(&self) -> Option<CopperWait> {
+        match self.state {
+            CopperState::Waiting {
+                wait,
+                phase: CopperWaitPhase::Waiting,
+            } => Some(wait),
+            _ => None,
+        }
+    }
+
     /// Whether the Copper has halted (illegal register write): it fetches
     /// nothing further until a COPJMP strobe or vertical blank restarts it.
     pub fn is_stopped(&self) -> bool {

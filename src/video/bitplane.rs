@@ -3329,18 +3329,37 @@ fn seed_manual_bpl_segments_from_latches(
     }
 }
 
+// A fallback-rendered PAL frame can read roughly 36,000 bitplane words. Keep
+// enough exact dependencies for wide AGA fetches too, while bounding a
+// malformed display's retained previous-frame state to about 2 MiB.
+const RENDER_REUSE_MAX_RAM_READS: usize = 131_072;
+
+#[derive(Clone, Copy)]
+pub(crate) struct ChipRamReadDependency {
+    addr: u32,
+    vpos: u32,
+    hpos: u32,
+    value: u16,
+}
+
 struct TimedChipRam<'a> {
     ram: Cow<'a, [u8]>,
     writes: &'a [BeamChipRamWrite],
     next_write: usize,
+    track_read_dependencies: bool,
+    read_dependencies: Vec<ChipRamReadDependency>,
+    read_dependencies_overflowed: bool,
 }
 
 impl<'a> TimedChipRam<'a> {
-    fn new(ram: &'a [u8], writes: &'a [BeamChipRamWrite]) -> Self {
+    fn new(ram: &'a [u8], writes: &'a [BeamChipRamWrite], track_read_dependencies: bool) -> Self {
         Self {
             ram: Cow::Borrowed(ram),
             writes,
             next_write: 0,
+            track_read_dependencies,
+            read_dependencies: Vec::new(),
+            read_dependencies_overflowed: false,
         }
     }
 
@@ -3366,7 +3385,24 @@ impl<'a> TimedChipRam<'a> {
 
     fn read_word_wrapping(&mut self, addr: u32, vpos: u32, hpos: u32) -> u16 {
         self.replay_through(vpos, hpos);
-        read_chip_word_wrapping(&self.ram, addr)
+        let value = read_chip_word_wrapping(&self.ram, addr);
+        if self.track_read_dependencies && self.read_dependencies.len() < RENDER_REUSE_MAX_RAM_READS
+        {
+            self.read_dependencies.push(ChipRamReadDependency {
+                addr,
+                vpos,
+                hpos,
+                value,
+            });
+        } else if self.track_read_dependencies {
+            self.read_dependencies_overflowed = true;
+        }
+        value
+    }
+
+    fn into_read_dependencies(self) -> Option<Vec<ChipRamReadDependency>> {
+        (self.track_read_dependencies && !self.read_dependencies_overflowed)
+            .then_some(self.read_dependencies)
     }
 }
 
@@ -3677,6 +3713,225 @@ pub struct RenderInput {
     debug_sprite_mask: u8,
 }
 
+/// Exact, compact ownership of every frame-snapshot field that can affect
+/// [`render_from_input`].
+///
+/// The frame capture owns large `Arc` buffers that must be released after the
+/// worker finishes. Keeping an old `RenderInput` alive just to compare the
+/// next frame would pin those buffers and force another chip-RAM-sized
+/// allocation every frame, so this key deep-copies only the captured display
+/// data. Emulated time/frame counters are deliberately absent: they feed
+/// diagnostics, not pixels, and repeated-frame reuse is disabled while any
+/// per-frame render diagnostic is active.
+#[doc(hidden)]
+struct RenderContentPrefix {
+    geometry: FrameGeometry,
+    presentation_h_window: Option<(i32, u32)>,
+    presentation_v_window: Option<(i32, u32)>,
+    visible_start_vpos: u32,
+    palette_split: (Palette, Palette, bool),
+    render_base: RenderRegisterSnapshot,
+    frame_render_events: Vec<BeamRegisterWrite>,
+    current_render_base: RenderRegisterSnapshot,
+    current_render_events: Vec<BeamRegisterWrite>,
+    bottom_palette_events: Vec<BeamRegisterWrite>,
+    top_palette_end: Palette,
+    chip_ram_len: usize,
+    sprite_dma_observed: bool,
+    frame_lines: u32,
+    programmable_vertical_blank: Option<(u32, u32)>,
+    programmable_horizontal_blank: Option<(u32, u32)>,
+    debug_plane_mask: u8,
+    debug_sprite_mask: u8,
+}
+
+impl RenderContentPrefix {
+    fn from_input(input: &RenderInput) -> Self {
+        Self {
+            geometry: input.geometry,
+            presentation_h_window: input.presentation_h_window,
+            presentation_v_window: input.presentation_v_window,
+            visible_start_vpos: input.visible_start_vpos,
+            palette_split: input.palette_split,
+            render_base: input.render_base,
+            frame_render_events: input.frame_render_events.clone(),
+            current_render_base: input.current_render_base,
+            current_render_events: input.current_render_events.clone(),
+            bottom_palette_events: input.bottom_palette_events.clone(),
+            top_palette_end: input.top_palette_end,
+            chip_ram_len: input.chip_ram.len(),
+            sprite_dma_observed: input.sprite_dma_observed,
+            frame_lines: input.frame_lines,
+            programmable_vertical_blank: input.programmable_vertical_blank,
+            programmable_horizontal_blank: input.programmable_horizontal_blank,
+            debug_plane_mask: input.debug_plane_mask,
+            debug_sprite_mask: input.debug_sprite_mask,
+        }
+    }
+
+    fn first_mismatch(&self, input: &RenderInput) -> Option<&'static str> {
+        macro_rules! different {
+            ($field:ident) => {
+                if self.$field != input.$field {
+                    return Some(stringify!($field));
+                }
+            };
+        }
+        different!(geometry);
+        different!(presentation_h_window);
+        different!(presentation_v_window);
+        different!(visible_start_vpos);
+        different!(palette_split);
+        different!(render_base);
+        different!(frame_render_events);
+        different!(current_render_base);
+        different!(current_render_events);
+        different!(bottom_palette_events);
+        different!(top_palette_end);
+        if self.chip_ram_len != input.chip_ram.len() {
+            return Some("chip_ram_len");
+        }
+        different!(sprite_dma_observed);
+        different!(frame_lines);
+        different!(programmable_vertical_blank);
+        different!(programmable_horizontal_blank);
+        different!(debug_plane_mask);
+        different!(debug_sprite_mask);
+        None
+    }
+}
+
+#[doc(hidden)]
+pub struct RenderContentKey {
+    captured_bitplane_rows: Vec<Option<CapturedBitplaneRow>>,
+    captured_sprite_lines: Vec<CapturedSpriteLine>,
+    held_sprites: [Option<HeldSpriteLine>; 8],
+    sprite_display_enable_x_by_y: Vec<Option<usize>>,
+    chip_ram_reads: Vec<ChipRamReadDependency>,
+}
+
+impl RenderContentKey {
+    fn from_input(input: &RenderInput, chip_ram_reads: Vec<ChipRamReadDependency>) -> Self {
+        Self {
+            captured_bitplane_rows: input.captured_bitplane_rows.as_ref().clone(),
+            captured_sprite_lines: input.captured_sprite_lines.clone(),
+            held_sprites: input.held_sprites,
+            sprite_display_enable_x_by_y: input.sprite_display_enable_x_by_y.clone(),
+            chip_ram_reads,
+        }
+    }
+
+    fn first_mismatch(&self, input: &RenderInput) -> Option<&'static str> {
+        macro_rules! different {
+            ($field:ident) => {
+                if self.$field != input.$field {
+                    return Some(stringify!($field));
+                }
+            };
+        }
+        if self.captured_bitplane_rows.as_slice() != input.captured_bitplane_rows.as_slice() {
+            return Some("captured_bitplane_rows");
+        }
+        different!(captured_sprite_lines);
+        different!(held_sprites);
+        different!(sprite_display_enable_x_by_y);
+        let mut ram = TimedChipRam::new(input.chip_ram.as_slice(), &input.chip_ram_writes, false);
+        for dependency in &self.chip_ram_reads {
+            if ram.read_word_wrapping(dependency.addr, dependency.vpos, dependency.hpos)
+                != dependency.value
+            {
+                return Some("chip_ram_read");
+            }
+        }
+        None
+    }
+}
+
+/// Previous-frame detector for exact render reuse. Live chip-RAM fetches are
+/// retained as timed address/value dependencies and replayed against the next
+/// snapshot. Interlaced output carries field history, phosphor is handled by
+/// the presentation caller, and diagnostics can be time-dependent, so those
+/// cases never enter this cache.
+#[derive(Default)]
+#[doc(hidden)]
+pub struct RepeatedFrameDetector {
+    key: Option<RenderContentKey>,
+    previous_prefix: Option<RenderContentPrefix>,
+    clxdat: u16,
+}
+
+impl RepeatedFrameDetector {
+    fn eligible(input: &RenderInput) -> bool {
+        input.render_base.bplcon0 & 0x0004 == 0 && !per_frame_render_diagnostics_active()
+    }
+
+    pub fn can_reuse(&self, input: &RenderInput) -> bool {
+        if !Self::eligible(input) {
+            return false;
+        }
+        let Some(key) = self.key.as_ref() else {
+            return false;
+        };
+        self.previous_prefix
+            .as_ref()
+            .is_some_and(|prefix| prefix.first_mismatch(input).is_none())
+            && key.first_mismatch(input).is_none()
+    }
+
+    pub fn should_track_read_dependencies(&self, input: &RenderInput) -> bool {
+        Self::eligible(input)
+            && self
+                .previous_prefix
+                .as_ref()
+                .is_some_and(|prefix| prefix.first_mismatch(input).is_none())
+    }
+
+    pub fn note_rendered(&mut self, input: &RenderInput, result: &mut RenderResult) {
+        self.clxdat = result.clxdat;
+        let eligible = Self::eligible(input);
+        let prefix_repeated = self.should_track_read_dependencies(input);
+        let prefix = eligible.then(|| RenderContentPrefix::from_input(input));
+        self.key = if prefix_repeated {
+            result
+                .chip_ram_reads
+                .take()
+                .map(|reads| RenderContentKey::from_input(input, reads))
+        } else {
+            None
+        };
+        self.previous_prefix = prefix;
+    }
+
+    pub fn reused_clxdat(&self) -> u16 {
+        self.clxdat
+    }
+
+    pub fn clear(&mut self) {
+        self.key = None;
+        self.previous_prefix = None;
+        self.clxdat = 0;
+    }
+}
+
+fn per_frame_render_diagnostics_active() -> bool {
+    static ACTIVE: OnceLock<bool> = OnceLock::new();
+    *ACTIVE.get_or_init(|| {
+        [
+            "COPPERLINE_DBG_FRAMESTATE",
+            "COPPERLINE_DBG_EXPORT_PLANES",
+            "COPPERLINE_TRACE_DISPLAY_PLAN",
+            "COPPERLINE_DIAG_PALETTE_ROW",
+            "COPPERLINE_DIAG_MANUAL_SPRITES",
+            "COPPERLINE_DIAG_SPRITE_PIXELS",
+            "COPPERLINE_DIAG_HAM_PIXELS",
+            "COPPERLINE_DIAG_MANUAL_BPL_PIXELS",
+            "COPPERLINE_DIAG_FRAME_PIXELS",
+        ]
+        .iter()
+        .any(|name| crate::envcfg::var_os(name).is_some())
+    })
+}
+
 impl RenderInput {
     /// Snapshot the just-finished frame from the bus into an owned bundle.
     pub fn from_bus(bus: &Bus) -> Self {
@@ -3822,6 +4077,7 @@ impl RenderInput {
 pub struct RenderResult {
     pub timing: VideoRenderFrameTiming,
     pub clxdat: u16,
+    pub(crate) chip_ram_reads: Option<Vec<ChipRamReadDependency>>,
 }
 
 /// Paint the just-finished frame through the synchronous compatibility path.
@@ -3851,6 +4107,51 @@ pub fn render(bus: &mut Bus, fb: &mut [u32]) {
             .expect("scratch render input present")
             .release_shared_frame_data();
     });
+}
+
+/// Synchronous render wrapper with exact previous-frame reuse. Returns true
+/// when `fb` already contains the identical progressive frame and no render
+/// was needed. This is primarily the frontend-free benchmark companion to the
+/// threaded window cache; [`render`] preserves its always-render contract.
+#[doc(hidden)]
+pub fn render_reusing_previous(
+    bus: &mut Bus,
+    fb: &mut [u32],
+    detector: &mut RepeatedFrameDetector,
+) -> bool {
+    thread_local! {
+        static REUSED_RENDER_INPUT_SCRATCH: std::cell::RefCell<Option<RenderInput>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    REUSED_RENDER_INPUT_SCRATCH.with(|scratch| {
+        let mut scratch = scratch.borrow_mut();
+        match scratch.as_mut() {
+            Some(input) => input.refill_from_bus(bus),
+            None => *scratch = Some(RenderInput::from_bus(bus)),
+        }
+        let input = scratch.as_ref().expect("scratch render input present");
+        if detector.can_reuse(input) {
+            bus.denise.or_clxdat(detector.reused_clxdat());
+            scratch
+                .as_mut()
+                .expect("scratch render input present")
+                .release_shared_frame_data();
+            return true;
+        }
+        let mut result = if detector.should_track_read_dependencies(input) {
+            render_from_input_tracking_reuse(input, fb)
+        } else {
+            render_from_input(input, fb)
+        };
+        detector.note_rendered(input, &mut result);
+        bus.denise.or_clxdat(result.clxdat);
+        bus.record_video_render_frame(result.timing);
+        scratch
+            .as_mut()
+            .expect("scratch render input present")
+            .release_shared_frame_data();
+        false
+    })
 }
 
 /// Render the just-finished frame without the bus feedback of [`render`]:
@@ -3997,6 +4298,19 @@ pub fn sprite_framebuffer_origin(bus: &Bus, sprite: usize) -> Option<(i32, i32)>
 }
 
 pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
+    render_from_input_impl(input, fb, false)
+}
+
+#[doc(hidden)]
+pub fn render_from_input_tracking_reuse(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
+    render_from_input_impl(input, fb, true)
+}
+
+fn render_from_input_impl(
+    input: &RenderInput,
+    fb: &mut [u32],
+    track_read_dependencies: bool,
+) -> RenderResult {
     let render_started = Instant::now();
     ACTIVE_DEBUG_MASKS.with(|masks| masks.set((input.debug_plane_mask, input.debug_sprite_mask)));
     ACTIVE_CANVAS_SHIFT_H.with(|shift| {
@@ -4193,7 +4507,11 @@ pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
         .map(|segments| segments.len() as u64)
         .sum();
     let frame_ram = input.chip_ram.as_slice();
-    let mut ram = TimedChipRam::new(frame_ram, input.chip_ram_writes.as_slice());
+    let mut ram = TimedChipRam::new(
+        frame_ram,
+        input.chip_ram_writes.as_slice(),
+        track_read_dependencies,
+    );
     let captured_bitplane_rows = input.captured_bitplane_rows.as_slice();
     // Rows whose DMA capture recorded a fetch run diverging from the
     // register-derived DDF window (the sequencer's missed-stop drains and
@@ -4829,9 +5147,11 @@ pub fn render_from_input(input: &RenderInput, fb: &mut [u32]) -> RenderResult {
         visible_line0,
     );
     render_timing.total_nanos = render_started.elapsed().as_nanos();
+    let chip_ram_reads = ram.into_read_dependencies();
     RenderResult {
         timing: render_timing,
         clxdat,
+        chip_ram_reads,
     }
 }
 

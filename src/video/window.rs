@@ -770,6 +770,15 @@ pub struct App {
     last_submitted_render_frame: Option<u64>,
     render_generation: u64,
     last_fdd_track: Option<u8>,
+    /// Last status/UI state paired with a requested main-window redraw.
+    /// When both this and the exact presentation pixels are unchanged, the
+    /// existing GPU texture can be held instead of uploaded and presented at
+    /// the emulated field rate.
+    last_main_redraw_state: Option<MainRedrawState>,
+    /// A newly processed frame changed the active presentation buffer. Kept
+    /// separate from the render methods' boolean ("a frame was processed") so
+    /// recordings still receive exact duplicate frames.
+    main_presentation_dirty: bool,
     /// Transient on-screen overlay message (screenshot saved, disk
     /// swapped), or None when nothing is being shown.
     osd: Option<Osd>,
@@ -1050,6 +1059,11 @@ struct RenderWorkerResult {
     generation: u64,
     emulated_frame: u64,
     timing: VideoRenderFrameTiming,
+    /// The worker proved this frame's complete render/presentation inputs
+    /// identical to the previous progressive frame. `presentation_fb` is then
+    /// merely the unused recycle buffer from the job; the main thread keeps
+    /// presenting its current buffer without copying it.
+    reused_previous: bool,
     presentation_fb: Vec<u32>,
     present_rows: usize,
     present_width: usize,
@@ -1060,6 +1074,19 @@ struct RenderWorkerResult {
     programmable: bool,
     /// The job's frame snapshot, handed back for buffer reuse.
     input: bitplane::RenderInput,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct MainRedrawState {
+    status: FrontPanelStatus,
+    media: MediaBar,
+    powered_on: bool,
+    paused: bool,
+    joystick_input_mode: JoystickInputMode,
+    control_connected: bool,
+    recording: bool,
+    input_recording: bool,
+    warp: bool,
 }
 
 struct RenderWorker {
@@ -1077,6 +1104,7 @@ impl RenderWorker {
             .spawn(move || {
                 let mut fb = vec![0u32; MAX_CANVAS_PIXELS];
                 let mut deinterlacer = Deinterlacer::new();
+                let mut repeated_frame_cache = RepeatedPresentationCache::default();
                 let mut last_generation = None;
                 while let Ok(job) = job_rx.recv() {
                     // A generation bump marks a presentation discontinuity
@@ -1084,9 +1112,15 @@ impl RenderWorker {
                     // previous stream may weave or glow into this frame.
                     if last_generation != Some(job.generation) {
                         deinterlacer.reset_history();
+                        repeated_frame_cache.clear();
                         last_generation = Some(job.generation);
                     }
-                    let result = render_job_to_presentation(job, &mut fb, &mut deinterlacer);
+                    let result = render_job_to_presentation(
+                        job,
+                        &mut fb,
+                        &mut deinterlacer,
+                        &mut repeated_frame_cache,
+                    );
                     if result_tx.send(result).is_err() {
                         break;
                     }
@@ -1312,6 +1346,8 @@ impl App {
             last_submitted_render_frame: None,
             render_generation: 0,
             last_fdd_track: None,
+            last_main_redraw_state: None,
+            main_presentation_dirty: true,
             osd: None,
             drop_hover: false,
             pending_dropped_files: Vec::new(),
@@ -3460,10 +3496,23 @@ impl ApplicationHandler for App {
         // Skipping request_redraw for headless capture avoids the vsync gate so
         // the run advances as fast as the host allows; emulated state is
         // identical either way. (`headless_capture` was resolved above, before
-        // the step, to decide the warp burst.) Only the emulator window tracks
-        // every presented frame; tool windows were paced above.
-        if rendered && !headless_capture {
-            self.request_main_redraw();
+        // the step, to decide the warp burst.) When the exact presentation and
+        // the window chrome are both unchanged, retain the existing GPU texture
+        // instead of uploading/presenting it again at the field rate.
+        if !headless_capture {
+            let redraw_state = self.main_redraw_state();
+            let chrome_changed = self.last_main_redraw_state != Some(redraw_state);
+            if self.main_presentation_dirty
+                || chrome_changed
+                || self.ui.active()
+                || self.drop_hover
+                || osd_active
+                || calibrating
+            {
+                self.last_main_redraw_state = Some(redraw_state);
+                self.main_presentation_dirty = false;
+                self.request_main_redraw();
+            }
         }
 
         if self.dump_frame_if_due() {
@@ -4070,6 +4119,34 @@ impl App {
         });
         let cd = bus.cd_drive_present().then(|| bus.cd_disc_inserted());
         MediaBar { drives, cd }
+    }
+
+    fn main_redraw_state(&self) -> MainRedrawState {
+        let mut status = self.emu.bus().front_panel_status();
+        if status.fdd_track.is_none() {
+            status.fdd_track = self.last_fdd_track;
+        }
+        let control_connected = {
+            #[cfg(feature = "control")]
+            {
+                self.control.as_ref().is_some_and(|c| c.handle.connected())
+            }
+            #[cfg(not(feature = "control"))]
+            {
+                false
+            }
+        };
+        MainRedrawState {
+            status,
+            media: self.media_bar(),
+            powered_on: self.powered_on,
+            paused: self.paused,
+            joystick_input_mode: self.joystick_input_mode,
+            control_connected,
+            recording: self.recorder.is_some(),
+            input_recording: self.input_recorder.is_some(),
+            warp: !self.emu.paced(),
+        }
     }
 
     fn main_ui_control_at(&self, pos: (i32, i32)) -> Option<UiControl> {
@@ -9141,6 +9218,8 @@ impl App {
         self.last_rendered_emulated_frame = None;
         self.last_submitted_render_frame = None;
         self.presentation_latch.reset();
+        self.last_main_redraw_state = None;
+        self.main_presentation_dirty = true;
         let _ = self.collect_threaded_render_results(false);
     }
 
@@ -9157,14 +9236,39 @@ impl App {
             return false;
         }
 
+        if result.reused_previous {
+            self.render_recycle_fb = result.presentation_fb;
+            self.last_rendered_emulated_frame = Some(result.emulated_frame);
+            return true;
+        }
+
         self.emu.bus_mut().record_video_render_frame(result.timing);
+        let next_tv_aperture_rows = self
+            .presentation_latch
+            .resolve_tv_aperture(result.tv_aperture);
+        let unchanged = self.rtg_present_dims.is_none()
+            && self.present_tv_aperture_rows == next_tv_aperture_rows
+            && self.present_programmable == result.programmable
+            && presentation_pixels_equal(
+                &self.present_fb,
+                self.present_rows,
+                self.present_width,
+                &result.presentation_fb,
+                result.present_rows,
+                result.present_width,
+            );
+        if unchanged {
+            self.render_recycle_fb = result.presentation_fb;
+            self.last_rendered_emulated_frame = Some(result.emulated_frame);
+            return true;
+        }
+
+        self.main_presentation_dirty = true;
         let old = std::mem::replace(&mut self.present_fb, result.presentation_fb);
         self.render_recycle_fb = old;
         self.present_rows = result.present_rows;
         self.present_width = result.present_width;
-        self.present_tv_aperture_rows = self
-            .presentation_latch
-            .resolve_tv_aperture(result.tv_aperture);
+        self.present_tv_aperture_rows = next_tv_aperture_rows;
         self.present_programmable = result.programmable;
         self.rtg_present_dims = None;
         self.last_rendered_emulated_frame = Some(result.emulated_frame);
@@ -9291,7 +9395,17 @@ impl App {
         // The native frame stays in `rtg_fb`; the window presents it at full
         // resolution through the RTG texture, while `present_fb` keeps the
         // FB_WIDTH version the screenshot path reads.
+        if self.rtg_present_dims.is_none() {
+            // Entering RTG is a presentation discontinuity. Advance the
+            // generation so the render worker clears its chipset repeated-
+            // frame and deinterlace history before native output resumes;
+            // otherwise an exact pre-RTG input match could retain this RTG
+            // buffer instead of producing the first returning chipset frame.
+            self.render_generation = self.render_generation.wrapping_add(1);
+            self.presentation_latch.reset();
+        }
         self.rtg_present_dims = Some((native_w, native_h));
+        self.main_presentation_dirty = true;
         self.present_rows = rows;
         self.present_width = FB_WIDTH;
         self.present_tv_aperture_rows = None;
@@ -9351,6 +9465,7 @@ impl App {
         let base = self.emu.bus().frame_render_base();
         // Standard 15 kHz fields line-double / weave to 2x rows; a
         // programmable progressive scan already carries every line.
+        let mut next_present_fb = std::mem::take(&mut self.render_recycle_fb);
         let (rows, width) = self.deinterlacer.present_field_into(
             &self.fb,
             field_rows,
@@ -9358,18 +9473,33 @@ impl App {
             base.bplcon0 & 0x0004 != 0,
             base.long_field,
             !geometry.programmable,
-            &mut self.present_fb,
+            &mut next_present_fb,
         );
-        self.present_rows = rows;
-        self.present_width = width;
-        self.present_tv_aperture_rows =
-            self.presentation_latch
-                .resolve_tv_aperture(standard_tv_aperture_frame(
-                    geometry,
-                    self.present_rows,
-                    &base,
-                ));
-        self.present_programmable = geometry.programmable;
+        let next_tv_aperture_rows = self
+            .presentation_latch
+            .resolve_tv_aperture(standard_tv_aperture_frame(geometry, rows, &base));
+        let unchanged = self.rtg_present_dims.is_none()
+            && self.present_tv_aperture_rows == next_tv_aperture_rows
+            && self.present_programmable == geometry.programmable
+            && presentation_pixels_equal(
+                &self.present_fb,
+                self.present_rows,
+                self.present_width,
+                &next_present_fb,
+                rows,
+                width,
+            );
+        if unchanged {
+            self.render_recycle_fb = next_present_fb;
+        } else {
+            self.main_presentation_dirty = true;
+            let old = std::mem::replace(&mut self.present_fb, next_present_fb);
+            self.render_recycle_fb = old;
+            self.present_rows = rows;
+            self.present_width = width;
+            self.present_tv_aperture_rows = next_tv_aperture_rows;
+            self.present_programmable = geometry.programmable;
+        }
         self.rtg_present_dims = None;
         self.last_rendered_emulated_frame = Some(emulated_frame);
         self.last_submitted_render_frame = Some(emulated_frame);

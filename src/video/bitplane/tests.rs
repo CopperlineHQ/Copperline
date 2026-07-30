@@ -16,6 +16,113 @@ fn h_row_for(control: ControlState) -> HWindowRow {
     }
 }
 
+fn repeated_frame_test_input() -> RenderInput {
+    let mut row = CapturedBitplaneRow {
+        nplanes: 1,
+        words_per_row: 1,
+        planes: std::array::from_fn(|_| Vec::new()),
+        fetch_origin_cck: None,
+    };
+    row.planes[0].push(0xA55A);
+    RenderInput {
+        geometry: FrameGeometry::standard(PAL_VISIBLE_LINE0 as u32, 312, false),
+        presentation_h_window: None,
+        presentation_v_window: None,
+        visible_start_vpos: PAL_VISIBLE_LINE0 as u32,
+        palette_split: (Palette::default(), Palette::default(), false),
+        render_base: RenderRegisterSnapshot::default(),
+        frame_render_events: Vec::new(),
+        current_render_base: RenderRegisterSnapshot::default(),
+        current_render_events: Vec::new(),
+        bottom_palette_events: Vec::new(),
+        top_palette_end: Palette::default(),
+        chip_ram: std::sync::Arc::new(vec![0; 1024]),
+        chip_ram_writes: Vec::new(),
+        captured_bitplane_rows: std::sync::Arc::new(vec![Some(row)]),
+        captured_sprite_lines: Vec::new(),
+        held_sprites: [None; 8],
+        sprite_display_enable_x_by_y: Vec::new(),
+        sprite_dma_observed: false,
+        frame_lines: 312,
+        programmable_vertical_blank: None,
+        programmable_horizontal_blank: None,
+        emulated_seconds: 1.0,
+        emulated_frames: 50,
+        debug_plane_mask: 0xFF,
+        debug_sprite_mask: 0xFF,
+    }
+}
+
+fn repeated_frame_test_result(chip_ram_reads: Option<Vec<ChipRamReadDependency>>) -> RenderResult {
+    RenderResult {
+        timing: VideoRenderFrameTiming::default(),
+        clxdat: 0x1234,
+        chip_ram_reads,
+    }
+}
+
+#[test]
+fn repeated_frame_detector_ignores_time_but_matches_captured_content_exactly() {
+    let first = repeated_frame_test_input();
+    let mut detector = RepeatedFrameDetector::default();
+    let mut result = repeated_frame_test_result(Some(Vec::new()));
+    detector.note_rendered(&first, &mut result);
+    assert!(!detector.can_reuse(&first));
+    let mut repeated_result = repeated_frame_test_result(Some(Vec::new()));
+    detector.note_rendered(&first, &mut repeated_result);
+
+    let mut same_pixels = repeated_frame_test_input();
+    same_pixels.emulated_seconds = 99.0;
+    same_pixels.emulated_frames = 4_950;
+    // Unobserved RAM is intentionally outside the key: the prior render
+    // proved that all visible words came from exact DMA/register capture.
+    same_pixels.chip_ram = std::sync::Arc::new(vec![0xCC; 1024]);
+    assert!(detector.can_reuse(&same_pixels));
+    assert_eq!(detector.reused_clxdat(), 0x1234);
+
+    std::sync::Arc::make_mut(&mut same_pixels.captured_bitplane_rows)[0]
+        .as_mut()
+        .unwrap()
+        .planes[0][0] ^= 1;
+    assert!(!detector.can_reuse(&same_pixels));
+}
+
+#[test]
+fn repeated_frame_detector_matches_ram_dependencies_and_rejects_incomplete_or_interlaced_keys() {
+    let progressive = repeated_frame_test_input();
+    let mut detector = RepeatedFrameDetector::default();
+    let mut result = repeated_frame_test_result(Some(vec![ChipRamReadDependency {
+        addr: 0,
+        vpos: 44,
+        hpos: 0x38,
+        value: 0,
+    }]));
+    detector.note_rendered(&progressive, &mut result);
+    assert!(!detector.can_reuse(&progressive));
+    let mut repeated_result = repeated_frame_test_result(Some(vec![ChipRamReadDependency {
+        addr: 0,
+        vpos: 44,
+        hpos: 0x38,
+        value: 0,
+    }]));
+    detector.note_rendered(&progressive, &mut repeated_result);
+    assert!(detector.can_reuse(&progressive));
+
+    let mut changed_dependency = repeated_frame_test_input();
+    std::sync::Arc::make_mut(&mut changed_dependency.chip_ram)[0] = 1;
+    assert!(!detector.can_reuse(&changed_dependency));
+
+    let mut incomplete = repeated_frame_test_result(None);
+    detector.note_rendered(&progressive, &mut incomplete);
+    assert!(!detector.can_reuse(&progressive));
+
+    let mut interlaced = repeated_frame_test_input();
+    interlaced.render_base.bplcon0 |= 0x0004;
+    let mut interlaced_result = repeated_frame_test_result(Some(Vec::new()));
+    detector.note_rendered(&interlaced, &mut interlaced_result);
+    assert!(!detector.can_reuse(&interlaced));
+}
+
 #[test]
 fn static_h_window_transition_solver_matches_counter_replay() {
     let mut random = 0xC0_77_E2_11u32;
