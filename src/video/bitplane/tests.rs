@@ -1389,6 +1389,14 @@ fn ddfstrt_positions_first_lowres_bitplane_word_relative_to_diwstrt() {
 }
 
 #[test]
+fn planar_byte_lane_table_expands_every_byte_msb_first() {
+    for byte in u8::MIN..=u8::MAX {
+        let expected = std::array::from_fn(|bit| u8::from(byte & (0x80 >> bit) != 0));
+        assert_eq!(PLANAR_BYTE_LANES[usize::from(byte)].to_le_bytes(), expected);
+    }
+}
+
+#[test]
 fn prepared_planar_pixels_match_word_sampler_for_all_playfield_taps() {
     let plane_words = (0..8)
         .map(|plane| {

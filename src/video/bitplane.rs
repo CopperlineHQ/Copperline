@@ -1469,6 +1469,27 @@ struct DeniseBitplaneSample {
     active: bool,
 }
 
+const fn build_planar_byte_lanes() -> [u64; 256] {
+    let mut table = [0u64; 256];
+    let mut byte = 0usize;
+    while byte < table.len() {
+        let mut bit = 0usize;
+        while bit < 8 {
+            if byte & (0x80 >> bit) != 0 {
+                table[byte] |= 1u64 << (bit * 8);
+            }
+            bit += 1;
+        }
+        byte += 1;
+    }
+    table
+}
+
+/// Each source bit becomes the low bit of its corresponding output-byte lane.
+/// Multiplying by a plane mask moves those lane bits into the requested colour
+/// index bit without carries between lanes.
+const PLANAR_BYTE_LANES: [u64; 256] = build_planar_byte_lanes();
+
 fn prepare_planar_row_pixels(
     plane_words: &[Vec<u16>],
     fetched_pixels: usize,
@@ -1476,17 +1497,36 @@ fn prepare_planar_row_pixels(
 ) {
     pixels.clear();
     pixels.resize(fetched_pixels, 0);
-    for (plane, words) in plane_words.iter().enumerate().take(8) {
-        let plane_bit = 1u8 << plane;
-        for (word_idx, word) in words.iter().copied().enumerate() {
-            let pixel_base = word_idx * 16;
-            if pixel_base >= fetched_pixels {
-                break;
-            }
-            let word_pixels = (fetched_pixels - pixel_base).min(16);
+    let full_words = fetched_pixels / 16;
+    for word_idx in 0..full_words {
+        let mut high_pixels = 0u64;
+        let mut low_pixels = 0u64;
+        for (plane, words) in plane_words.iter().enumerate().take(8) {
+            let Some(&word) = words.get(word_idx) else {
+                continue;
+            };
+            let plane_bit = u64::from(1u8 << plane);
+            high_pixels |= PLANAR_BYTE_LANES[usize::from((word >> 8) as u8)] * plane_bit;
+            low_pixels |= PLANAR_BYTE_LANES[usize::from(word as u8)] * plane_bit;
+        }
+        let pixel_base = word_idx * 16;
+        pixels[pixel_base..pixel_base + 8].copy_from_slice(&high_pixels.to_le_bytes());
+        pixels[pixel_base + 8..pixel_base + 16].copy_from_slice(&low_pixels.to_le_bytes());
+    }
+
+    // Production fetches are whole words. Keep the partial-word path for
+    // bounded diagnostic inputs and the differential regression oracle.
+    let tail_base = full_words * 16;
+    if tail_base < fetched_pixels {
+        let word_pixels = fetched_pixels - tail_base;
+        for (plane, words) in plane_words.iter().enumerate().take(8) {
+            let Some(&word) = words.get(full_words) else {
+                continue;
+            };
+            let plane_bit = 1u8 << plane;
             for bit in 0..word_pixels {
                 if word & (1 << (15 - bit)) != 0 {
-                    pixels[pixel_base + bit] |= plane_bit;
+                    pixels[tail_base + bit] |= plane_bit;
                 }
             }
         }
