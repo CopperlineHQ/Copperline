@@ -15,10 +15,11 @@ env:
 jobs:
   build:
     name: Build (release)
-    # Copperline is developed and tested on macOS; the Linux and Windows
-    # paths are not yet verified, so CI runs on macOS to match. The runner's
-    # Metal stack also makes the headless render path (the smoke job below)
-    # reliable. Linux/Windows jobs can be added once those paths are verified.
+    # Copperline is developed on macOS, so the main fan-out runs there. The
+    # other platforms have their own functional coverage: the linux-tests
+    # job below runs the unit suites and probe goldens on Linux, and the
+    # Windows workflow (.github/workflows/windows.yml) does the same on
+    # Windows alongside its packaged-zip smoke test.
     #
     # This job compiles everything once and hands the finished binaries to
     # the test jobs below (needs: build) as a workflow artifact. Binaries,
@@ -254,6 +255,40 @@ jobs:
           path: |
             diag.png
             serial.log
+          if-no-files-found: ignore
+
+  linux-tests:
+    name: Linux tests (release)
+    # Functional coverage on Linux: the inline unit suites and
+    # tests/probe_golden.rs, whose pixel-exact golden comparisons prove the
+    # deterministic core renders identically on Linux. Runs the whole thing
+    # through cargo on an ubuntu runner rather than joining the macOS
+    # binary fan-out above (the prebuilt binaries are mach-o). No display
+    # or GPU stack is needed: capture runs use the windowless path, so only
+    # the ALSA/udev build dependencies are installed. The asset-gated
+    # integration tests skip themselves (#[ignore]).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install build dependencies
+        # ALSA (cpal) + udev (gilrs) headers; winit needs no X headers at
+        # build time (it dlopens the client libraries at runtime, and no
+        # test opens a window).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev
+      - name: Unit tests and probe golden renders
+        run: cargo test --release --locked
+      - name: Upload probe render diffs
+        # On a golden mismatch the test writes the actual renders and diff
+        # masks; surface them so the regression is reviewable from the run.
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: probe-golden-diffs-linux
+          path: target/probe-golden/
           if-no-files-found: ignore
 
   wasm:

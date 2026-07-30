@@ -2,9 +2,12 @@ name: Windows
 
 # Builds the portable Windows zip and uploads it as a workflow artifact on
 # every qualifying change, and attaches it to the GitHub Release when a v* tag
-# is pushed. Building the zip also doubles as the Windows build check: there is
-# no other Windows coverage (the main CI runs on macOS), so the code-path
-# triggers below run the full release build on pull requests too.
+# is pushed. This is also the only Windows coverage (the main CI runs on
+# macOS and Linux), so the code-path triggers below run the full release
+# build on pull requests too, and the job then runs the functional suites on
+# the Windows build: the packaged zip is booted from a clean directory, and
+# the unit tests plus the probe golden renders (pixel-exact deterministic
+# boots on the bundled AROS ROM) run against the same release target.
 on:
   push:
     branches: [main]
@@ -52,6 +55,12 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Force LF checkout
+        # The runner's git converts detected-text files to CRLF on checkout
+        # by default. The repo carries no .gitattributes, and tests that
+        # embed or read committed fixtures expect the bytes as committed, so
+        # keep the working tree identical to the macOS/Linux jobs.
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -66,6 +75,44 @@ jobs:
         run: |
           $zip = Get-ChildItem Copperline-*-win-x64.zip | Select-Object -First 1
           "path=$($zip.Name)" >> $env:GITHUB_OUTPUT
+      - name: Smoke test the packaged zip
+        shell: pwsh
+        # Expand the freshly built zip outside the checkout and boot it from
+        # there: the run must find the bundled AROS ROM through the sibling
+        # aros\ lookup next to the exe (romsearch.rs), not the source tree's
+        # assets/aros fallback that a repo-root cwd would satisfy. A capture
+        # run opens no window or audio device (src/main.rs windowless
+        # capture), so a clean exit plus a non-empty PNG proves the shipped
+        # bundle boots on a bare Windows host.
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-StrictMode -Version Latest
+          $stage = Join-Path $env:RUNNER_TEMP "zip-smoke"
+          Expand-Archive -Path "${{ steps.artifact.outputs.path }}" -DestinationPath $stage
+          $exe = Get-ChildItem -Path $stage -Recurse -Filter copperline.exe | Select-Object -First 1
+          Set-Location $exe.DirectoryName
+          & $exe.FullName --noaudio --screenshot-after 10 smoke.png
+          if ($LASTEXITCODE -ne 0) { throw "packaged emulator exited with $LASTEXITCODE" }
+          if ((Get-Item smoke.png).Length -eq 0) { throw "screenshot is empty" }
+      - name: Unit tests and probe golden renders
+        shell: pwsh
+        # Everything a root `cargo test` runs: the inline unit suites and
+        # tests/probe_golden.rs, which boots each committed timing probe on
+        # the bundled AROS ROM and compares the render pixel-for-pixel
+        # against timing-test/golden/ -- proving the emulation core behaves
+        # identically on Windows, not merely that it compiles. Reuses the
+        # dependency build from the zip step via the same --target; the
+        # asset-gated integration tests skip themselves (#[ignore]).
+        run: cargo test --release --locked --target x86_64-pc-windows-msvc
+      - name: Upload probe render diffs
+        # On a golden mismatch the test writes the actual renders and diff
+        # masks; surface them so the regression is reviewable from the run.
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: probe-golden-diffs-windows
+          path: target/probe-golden/
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v7
         with:
           name: copperline-windows

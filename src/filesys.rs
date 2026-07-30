@@ -2227,7 +2227,31 @@ fn host_fs_usage(path: &Path) -> Option<(u64, u64)> {
     Some((st.f_blocks as u64 * frsize, st.f_bavail as u64 * frsize))
 }
 
-#[cfg(not(unix))]
+/// Total and available bytes of the host filesystem containing `path`.
+/// `lpFreeBytesAvailableToCaller` is the quota-aware figure, matching what
+/// the statvfs `f_bavail` reports on Unix.
+#[cfg(windows)]
+fn host_fs_usage(path: &Path) -> Option<(u64, u64)> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetDiskFreeSpaceExW(
+            directory: *const u16,
+            free_to_caller: *mut u64,
+            total: *mut u64,
+            free: *mut u64,
+        ) -> i32;
+    }
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    wide.push(0);
+    let (mut avail, mut total, mut free) = (0u64, 0u64, 0u64);
+    if unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut avail, &mut total, &mut free) } == 0 {
+        return None;
+    }
+    Some((total, avail))
+}
+
+#[cfg(not(any(unix, windows)))]
 fn host_fs_usage(_path: &Path) -> Option<(u64, u64)> {
     None
 }
@@ -2721,10 +2745,10 @@ mod tests {
         // only the case-folded path is portable to assert.
         let rec = unit.resolve_for_create(0, b"SUB/other.txt").unwrap();
         assert!(rec.rel.file_name().unwrap() == "other.txt");
-        assert!(rec
-            .rel
-            .to_string_lossy()
-            .eq_ignore_ascii_case("Sub/other.txt"));
+        // Fold the host separator too: the joined rel path uses `\` on
+        // Windows.
+        let rel = rec.rel.to_string_lossy().replace('\\', "/");
+        assert!(rel.eq_ignore_ascii_case("Sub/other.txt"), "{rel}");
         assert!(unit.resolve_for_create(0, b"Nope/file.txt").is_none());
 
         // None of these may resolve: each would escape the mount or collide
@@ -3213,8 +3237,11 @@ mod tests {
     }
 
     #[test]
-    fn host_fs_usage_of_root_is_sane() {
-        let (total, avail) = host_fs_usage(Path::new("/")).expect("statvfs /");
+    fn host_fs_usage_of_temp_dir_is_sane() {
+        // temp_dir exists on every host and names a real volume portably
+        // ("/" is not a Windows path).
+        let dir = std::env::temp_dir();
+        let (total, avail) = host_fs_usage(&dir).expect("host fs usage");
         assert!(total > 0 && avail <= total);
     }
 }
