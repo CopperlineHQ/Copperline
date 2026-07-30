@@ -258,16 +258,16 @@ deterministic as ever; it is the disk under it that is not.
 ## Speed
 
 Reading a track means waiting for the drive to capture a whole revolution,
-which takes as long as a revolution takes -- about 200 ms. A track already in
-hand is served from Copperline's own copy with no drive involvement at all,
-so software that re-reads a track it just read pays nothing.
+which takes as long as a revolution takes -- about 200 ms. A faithful
+recording -- index-aligned, or verified clean -- is kept and served from
+Copperline's own copy with no drive involvement at all, so software that
+re-reads such a track pays nothing, and `bridge_speed` can serve the
+recovered cells faster than the platter turns.
 
-Booting Workbench 1.3 from a real disk reads about 3.6 tracks a second
-against a physical ceiling of five, and reaches the CLI prompt in the same
-45 seconds the ADF takes. The head follows the emulated stepper, so the
-driver starts capturing while the guest is still settling, and nothing waits
-on the drive with the machine held still: the pointer keeps moving while a
-disk loads, as it does on a real Amiga.
+The head follows the emulated stepper, so the driver starts capturing while
+the guest is still settling, and nothing waits on the drive with the machine
+held still: the pointer keeps moving while a disk loads, as it does on a
+real Amiga.
 
 ## Troubleshooting
 

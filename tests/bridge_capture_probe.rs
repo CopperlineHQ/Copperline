@@ -19,7 +19,8 @@
 //! - `PROBE_MODE`: `normal` (default) or `compatible`
 //! - `PROBE_CAPTURES`: total captures to take (default 120)
 //! - `PROBE_TARGETS`: comma-separated `cyl:side` list to cycle through
-//!   (default `54:0,57:0,58:1`, the tracks that failed during scored boots)
+//!   (default `54:0,57:0,58:1`, tracks that read marginally on the
+//!   reference disk)
 //! - `PROBE_AWAY`: how many cylinders to seek away between captures (default 20)
 //! - `PROBE_SEEK`: `pulse` (default; one-cylinder seeks 3 ms apart, as the
 //!   emulated stepper drives the bridge) or `direct` (one seek to the target)

@@ -196,19 +196,22 @@ pub fn drivers() -> Vec<DriverInfo> {
         .collect()
 }
 
-/// Whether an interface the library recognises is plugged in right now.
+/// Whether anything that could be an interface is plugged in right now.
 ///
-/// The port scan below only reports ports the library believes carry a
-/// supported board, so an empty list means there is nothing to drive a real
-/// disk with. Scanning walks the host's serial bus, so this is sampled at
-/// deliberate moments -- a bay being switched over to a real drive -- rather
-/// than every frame.
+/// The port scan below reports the host's USB serial devices, not boards it
+/// has identified -- no current interface can be told apart without opening
+/// it -- so a non-empty list means "possibly", and an empty one means there
+/// is nothing to drive a real disk with. Scanning walks the host's serial
+/// bus, so this is sampled at deliberate moments -- a bay being switched
+/// over to a real drive -- rather than every frame.
 pub fn interface_connected() -> bool {
     let _guard = lib_lock();
     !com_ports_locked().is_empty()
 }
 
-/// Serial ports the library can see, for the drivers that need one named.
+/// Serial ports the library can see -- the host's USB serial devices, which
+/// on macOS means the `tty.usb*`-prefixed ones only. The launcher widens
+/// this with the host's own list for the chips that convention misses.
 pub fn com_ports() -> Vec<String> {
     let _guard = lib_lock();
     com_ports_locked()

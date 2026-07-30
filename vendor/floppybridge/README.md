@@ -94,7 +94,7 @@ next reader restores the head first. `handleBackgroundDiskRead` checks the
 flag; the `writeMFMData` handler did not, so with auto-cache enabled a queued
 write could find the bookkeeping already "on" its target cylinder, skip the
 seek, and lay the track down wherever the cacher had left the head --
-corrupting an unrelated track of a real disk. The handler now restores the
+corrupting an unrelated track of a real disk. The handler restores the
 cylinder and surface whenever the flag is up, exactly as the read path does.
 This is a behavioural fix, not a build difference, and is worth carrying
 upstream.
