@@ -385,8 +385,8 @@ impl Deinterlacer {
         double_rows: bool,
         destination: &mut Vec<u32>,
     ) -> (usize, usize) {
-        debug_assert!(field.len() >= rows * width);
         let rows = rows.clamp(1, MAX_VISIBLE_LINES);
+        debug_assert!(field.len() >= rows * width);
         let direct = self.phosphor_alpha == 0 && (!lace || !self.enabled);
         if direct {
             if rows != self.field_rows || width != self.field_width {
@@ -491,6 +491,27 @@ mod tests {
             destination,
             reference.output()[..reference.output_rows() * reference.output_width()]
         );
+    }
+
+    #[test]
+    fn direct_presentation_clamps_rows_before_validating_input() {
+        let width = 4;
+        let field = vec![0xFF12_3456; MAX_VISIBLE_LINES * width];
+        let mut direct = Deinterlacer::with_options(true, 0.0);
+        let mut destination = Vec::new();
+
+        let dims = direct.present_field_into(
+            &field,
+            MAX_VISIBLE_LINES + 1,
+            width,
+            false,
+            true,
+            false,
+            &mut destination,
+        );
+
+        assert_eq!(dims, (MAX_VISIBLE_LINES, width));
+        assert_eq!(destination, field);
     }
 
     #[test]

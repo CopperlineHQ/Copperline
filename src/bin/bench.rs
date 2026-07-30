@@ -206,11 +206,12 @@ fn main() -> Result<()> {
         over_budget,
         sorted.len()
     );
-    // Keep the deinterlacer's output observable so the render path cannot be
-    // optimized out entirely.
+    // Keep the actual presentation buffer observable so the direct render
+    // path cannot be optimized out entirely.
     if args.render {
-        let checksum: u64 = deinterlacer.output()[..FB_WIDTH]
+        let checksum: u64 = presentation_fb
             .iter()
+            .take(FB_WIDTH)
             .map(|&px| px as u64)
             .sum();
         println!("bench render checksum: {checksum:#x}");
