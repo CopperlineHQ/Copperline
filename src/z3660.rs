@@ -98,6 +98,16 @@ fn colormode_bpp(colormode: u32) -> Option<u32> {
     }
 }
 
+/// Apply a planar-blit function bitwise. `func` is the low nibble of the minterm
+/// the P96 BlitPlanar hooks pass down: a truth table indexed by
+/// (src << 1) | dst, so 12 is SRC, 3 is NOTSRC, 8 is AND, 14 is OR, 6 is EOR
+/// and 10 is DST.
+fn minterm_apply(func: u8, s: u32, d: u32) -> u32 {
+    let sel = |bit: u8| if func & bit != 0 { u32::MAX } else { 0 };
+
+    (sel(8) & s & d) | (sel(4) & s & !d) | (sel(2) & !s & d) | (sel(1) & !s & !d)
+}
+
 /// Upper bound on a blit rect / framebuffer dimension. The mailbox fields
 /// are guest-controlled, so clamping them keeps a bogus op from sizing a
 /// huge allocation or a multi-billion-iteration loop; no real screen or
@@ -374,7 +384,6 @@ impl Z3660 {
         const OP_P2D: u32 = 8;
         const OP_INVERTRECT: u32 = 9;
         const OP_SPRITE_XY: u32 = 11;
-        const MINTERM_NOTSRC: u8 = 3;
         const MINTERM_SRC_IDX: u8 = 12;
         const COMPLEMENT: u8 = 2;
         const OP_SPRITE_COLOR: u32 = 12;
@@ -668,35 +677,65 @@ impl Z3660 {
                 // BlitPlanar2Chunky leaves the mailbox colormode from a prior
                 // op, so it cannot be used for the destination stride here.
                 let dbpp = if op == OP_P2C { 1 } else { bpp };
-                if minterm != MINTERM_SRC_IDX && minterm != MINTERM_NOTSRC {
-                    log::debug!("z3660: p2c/p2d minterm {minterm} treated as SRC");
-                }
-                let inv = if minterm == MINTERM_NOTSRC { 0xFF } else { 0 };
-                for y in 0..h {
-                    for i in 0..w {
-                        let bitpos = phase + i;
-                        let bit = 0x80u8 >> (bitpos & 7);
-                        let mut pen = 0usize;
-                        for p in 0..planes {
-                            if layer_mask & (1 << p) == 0 {
-                                continue;
-                            }
-                            let at = data + plane_size * p + y * sp + bitpos / 8;
-                            let b = if at < self.vram.len() {
-                                self.vram[at] ^ inv
-                            } else {
-                                0
-                            };
-                            if b & bit != 0 {
-                                pen |= 1 << p;
+                // The planar hooks carry the blit function in the low nibble of
+                // the minterm, a truth table indexed by (src << 1) | dst, so
+                // AND/OR/EOR/DST all arrive here and not just SRC and NOTSRC.
+                let func = minterm & 0x0F;
+                // One source pen, decoded from the staged planes.
+                let pen_of = |z: &Self, y: usize, x: usize| -> usize {
+                    let bitpos = phase + x;
+                    let bit = 0x80u8 >> (bitpos & 7);
+                    let mut pen = 0usize;
+                    for p in 0..planes {
+                        if layer_mask & (1 << p) == 0 {
+                            continue;
+                        }
+                        let at = data + plane_size * p + y * sp + bitpos / 8;
+                        let b = if at < z.vram.len() { z.vram[at] } else { 0 };
+                        if b & bit != 0 {
+                            pen |= 1 << p;
+                        }
+                    }
+                    pen
+                };
+                let at_of = |y: usize, x: usize| dst + (dyr + y) * dpitch + (dxr + x) * dbpp;
+
+                // Both the op and the blit function are fixed for the whole
+                // blit. SRC is the only function we currently special-case to
+                // skip the destination read, so each combination gets its own
+                // loop rather than two loop-invariant tests per pixel.
+                if op == OP_P2C {
+                    if func == MINTERM_SRC_IDX {
+                        for y in 0..h {
+                            for x in 0..w {
+                                let (pen, at) = (pen_of(self, y, x), at_of(y, x));
+                                self.px_put_masked(at, 1, pen as u32, mask);
                             }
                         }
-                        let at = dst + (dyr + y) * dpitch + (dxr + i) * dbpp;
-                        if op == OP_P2C {
-                            self.px_put_masked(at, 1, pen as u32, mask);
-                        } else {
+                    } else {
+                        for y in 0..h {
+                            for x in 0..w {
+                                let (pen, at) = (pen_of(self, y, x), at_of(y, x));
+                                let v = minterm_apply(func, pen as u32, self.px_get(at, 1));
+                                self.px_put_masked(at, 1, v, mask);
+                            }
+                        }
+                    }
+                } else if func == MINTERM_SRC_IDX {
+                    for y in 0..h {
+                        for x in 0..w {
+                            let (pen, at) = (pen_of(self, y, x), at_of(y, x));
                             let col = self.px_get(pal + 4 * pen, 4);
                             self.px_put(at, bpp, col);
+                        }
+                    }
+                } else {
+                    for y in 0..h {
+                        for x in 0..w {
+                            let (pen, at) = (pen_of(self, y, x), at_of(y, x));
+                            let col = self.px_get(pal + 4 * pen, 4);
+                            let v = minterm_apply(func, col, self.px_get(at, bpp));
+                            self.px_put(at, bpp, v);
                         }
                     }
                 }
@@ -1652,6 +1691,47 @@ mod exec_tests {
         ring(&mut z, &mut m, 8);
         // Pixel 0 = pen 1 (CLUT entry 0), pixel 1 = pen 3 = 0xB67D.
         assert_eq!(&z.vram[v + 0x100..v + 0x104], &[0x00, 0x00, 0xB6, 0x7D]);
+    }
+
+    /// P2C combines the decoded pens with the destination through the minterm,
+    /// not just SRC: BltBitMap's AND, EOR and DST all reach the planar hook.
+    #[test]
+    fn p2c_honours_the_minterm() {
+        let v = VRAM_OFFSET as usize;
+        let g = GFXDATA_OFFSET;
+        // Source planes give pens 1, 3, 0, 0 as above; the destination row
+        // already holds 3, 1, 5, 5.
+        for (minterm, want) in [
+            (12u8, [1u8, 3, 0, 0]),        // SRC
+            (3, [0xFE, 0xFC, 0xFF, 0xFF]), // NOTSRC
+            (8, [1, 1, 0, 0]),             // AND
+            (14, [3, 3, 5, 5]),            // OR
+            (6, [2, 2, 5, 5]),             // EOR
+            (10, [3, 1, 5, 5]),            // DST: destination untouched
+        ] {
+            let (mut z, mut m) = (Z3660::new(), mem());
+            z.vram[v + 0x1000] = 0xC0;
+            z.vram[v + 0x1001] = 0x40;
+            z.vram[v..v + 4].copy_from_slice(&[3, 1, 5, 5]);
+            gfxdata(
+                &mut z,
+                0,
+                0x1000,
+                0,
+                0,
+                [0, 0, 4],
+                [0, 0, 1],
+                0xFF,
+                [4, 1],
+                1,
+                0,
+                0xFF,
+                minterm,
+            );
+            z.vram[g + 0x22..g + 0x24].copy_from_slice(&2u16.to_be_bytes());
+            ring(&mut z, &mut m, 7);
+            assert_eq!(&z.vram[v..v + 4], &want, "minterm {minterm}");
+        }
     }
 }
 
