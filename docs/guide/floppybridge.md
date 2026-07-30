@@ -40,8 +40,13 @@ a newer one.
 From the launcher, the Floppy tab carries a **Physical drive** tick box for
 each bay. Tick it and the bay's media row stops offering a disk image and
 names the interface instead, with a **Configure** button leading to its
-settings. With nothing plugged in the row reads `None`; plug the interface in
-and re-tick the box to pick it up.
+settings. With nothing plugged in the row reads `Not connected`; plug the
+interface in and re-tick the box to pick it up.
+
+The Configure page's Interface row also offers **None** -- selected
+automatically when a bay is bridged with nothing attached. A bay whose
+interface is None keeps its tick box and its settings, but runs (and saves)
+as an ordinary unbridged bay until an interface is chosen.
 
 You can also define this in your .TOML file;
 
@@ -95,8 +100,13 @@ where you asked for your disk.
 
 Every current interface connects over a serial port, and every one of them
 can be found automatically, which is the default. Name `bridge_port`
-explicitly to pin a particular device when more than one is attached.The 
-launcher offers the ports the library enumerates.
+explicitly to pin a particular device when more than one is attached.
+
+The launcher's list starts with **Automatic**, then the ports the library's
+own scan names, then every other serial device the host has. The long tail
+matters: an interface on a serial chip the scan does not recognise -- a
+DrawBridge built on an Arduino clone, say -- can still be pointed at by
+hand.
 
 ### Drive select
 
