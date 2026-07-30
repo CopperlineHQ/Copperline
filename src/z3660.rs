@@ -701,9 +701,9 @@ impl Z3660 {
                 let at_of = |y: usize, x: usize| dst + (dyr + y) * dpitch + (dxr + x) * dbpp;
 
                 // Both the op and the blit function are fixed for the whole
-                // blit, and SRC is the only function needing no destination
-                // read, so each combination gets its own loop rather than two
-                // loop-invariant tests per pixel.
+                // blit. SRC is the only function we currently special-case to
+                // skip the destination read, so each combination gets its own
+                // loop rather than two loop-invariant tests per pixel.
                 if op == OP_P2C {
                     if func == MINTERM_SRC_IDX {
                         for y in 0..h {
