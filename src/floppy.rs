@@ -1764,7 +1764,7 @@ impl FloppyController {
             // necessarily what was asked for.
             drive.cached_track = None;
             if let Some(known) = drive.bridge_tracks.get_mut(track) {
-                *known = None;
+                *known = BridgeTrack::Unknown;
             }
             return;
         }
@@ -1915,20 +1915,21 @@ impl FloppyController {
             if !drive.motor_on || drive.motor_cck < MOTOR_READY_CCK {
                 return;
             }
-            // Read off this disk before? Hand back what it said then. The
-            // platter cannot have changed underneath without the change line
-            // saying so or a write going through, and both empty this, so
-            // another rotation would only fetch the same bits again. A spent
-            // revolution is the exception: handing that back is precisely the
-            // same recording over again, which is what it may not be.
-            if let Some(known) = drive
-                .bridge_tracks
-                .get(track)
-                .filter(|_| !spent)
-                .and_then(Option::as_ref)
+            // Read off this disk before, and proven faithful? Hand back what
+            // it said then. The platter cannot have changed underneath
+            // without the change line saying so or a write going through, and
+            // both empty this, so another rotation would only fetch the same
+            // bits again. Only a kept recording qualifies: one that is
+            // index-aligned or verified clean, so its two ends genuinely meet
+            // and it can turn under the head like an image's track. A spent
+            // revolution is the exception even then: handing that back is
+            // precisely the same recording over again.
+            if let Some(BridgeTrack::Kept(known)) =
+                drive.bridge_tracks.get(track).filter(|_| !spent)
             {
                 drive.cached = known.clone();
                 drive.cached_track = Some(track);
+                drive.bridge_rev_seamless = true;
                 drive.bridge_filler_track = None;
                 drive.bridge_wait_since_cck = 0;
                 drive.bridge_attempts = 0;
@@ -1963,7 +1964,20 @@ impl FloppyController {
             // worse -- the drive cannot finish a capture every revolution, so
             // the guest is handed filler and starves. Ten good sectors beat
             // none. `compatible` is the mode that has no seam to begin with.
-            if spent {
+            //
+            // A return visit to a track whose recording was served but not
+            // kept is the same situation: what the driver still holds is the
+            // recording the guest already saw (and may have rejected), so
+            // retire it too -- the retry deserves the recording that
+            // followed, not the one that failed it.
+            // Once per wait, not once per poll: repeated switching while the
+            // drive is still capturing just cycles the two stale recordings.
+            let revisit_unverified = drive.cached_track != Some(track)
+                && matches!(
+                    drive.bridge_tracks.get(track),
+                    Some(BridgeTrack::Unverified)
+                );
+            if (spent || revisit_unverified) && drive.bridge_attempts == 1 {
                 if let Some(bridge) = drive.bridge.as_mut() {
                     bridge.switch_buffer(side);
                 }
@@ -1977,6 +1991,25 @@ impl FloppyController {
                 // short track -- a drive running off-speed -- stays
                 // self-consistent, exactly as a captured image does.
                 let word_cck = Self::word_cck_for_track_words(words.len());
+                // Whether this recording can be trusted beyond a single pass.
+                // An index-aligned capture can by construction. An index-less
+                // one is assembled by pattern-matching where the revolution
+                // repeats, and on a small fraction of captures that match is
+                // ambiguous and splices duplicated flux mid-track -- damage
+                // that is the capture's, not the disk's. A capture that
+                // decodes as a complete AmigaDOS track with every checksum
+                // passing (read as the ring it will be served as) is proven
+                // faithful, join included; anything else is served once and
+                // fetched afresh next time, so a retry always reaches new
+                // flux. Formats the scan does not recognise are simply never
+                // kept in index-less mode, which costs a re-read on revisit
+                // and never costs correctness.
+                let scan = crate::floppybridge::scan::scan_revolution(&words, bits);
+                let keep = bridge.index_aligned()
+                    || matches!(
+                        scan,
+                        crate::floppybridge::scan::RevolutionScan::CleanAmigaDos { .. }
+                    );
                 // How long the drive took, and how many times it had to be
                 // asked, is what separates a disk the head cannot read from an
                 // interface that is slow: a healthy DD track is one revolution,
@@ -1995,22 +2028,28 @@ impl FloppyController {
                     },
                     "floppybridge.df{idx} track {track} (cyl {cylinder} side {}) read: \
                      {bits} bits, {} words, {waited_ms}ms over {} attempt{}, \
-                     {word_cck} cck/word",
+                     {word_cck} cck/word, {scan:?}{}",
                     u8::from(side),
                     words.len(),
                     drive.bridge_attempts,
                     if drive.bridge_attempts == 1 { "" } else { "s" },
+                    if keep { "" } else { ", serving once" },
                 );
                 drive.bridge_wait_since_cck = 0;
                 drive.bridge_attempts = 0;
                 drive.cached.revs = vec![TrackRev::new(words, bits, word_cck)];
                 drive.bridge_rev_spent = false;
+                drive.bridge_rev_seamless = keep;
                 drive.cached_track = Some(track);
                 drive.bridge_filler_track = None;
                 if drive.bridge_tracks.len() <= track {
-                    drive.bridge_tracks.resize(track + 1, None);
+                    drive.bridge_tracks.resize(track + 1, BridgeTrack::Unknown);
                 }
-                drive.bridge_tracks[track] = Some(drive.cached.clone());
+                drive.bridge_tracks[track] = if keep {
+                    BridgeTrack::Kept(drive.cached.clone())
+                } else {
+                    BridgeTrack::Unverified
+                };
                 // A track that read is proof of a disk, whatever the sense line
                 // says a moment later.
                 drive.bridge_media = true;
@@ -2055,6 +2094,7 @@ impl FloppyController {
                         Self::word_cck_for_track_words(nominal),
                     )];
                     drive.bridge_filler_track = Some(track);
+                    drive.bridge_rev_seamless = false;
                     drive.clamp_head();
                 }
             }
@@ -2148,31 +2188,38 @@ struct FloppyDrive {
     #[cfg(feature = "floppybridge")]
     #[serde(skip)]
     bridge_filler_track: Option<usize>,
-    /// Revolutions already captured from the disk in a physical drive, by
-    /// track.
+    /// What is known about each track of the disk in a physical drive.
     ///
-    /// Capturing one costs a rotation of the platter -- about 200ms -- and the
-    /// guest revisits tracks constantly: booting Workbench 1.3 reads 63
-    /// distinct tracks 189 times, one of them fourteen times over. Keeping
-    /// what has already been read turns every return trip into a memory copy.
-    /// The whole disk is only a couple of megabytes, so nothing is evicted;
-    /// what does empty it is the disk changing or a track being written, since
-    /// those are the only ways what is on the platter stops matching. A drive
-    /// whose captures are not index-aligned reads past this once its
-    /// revolution is spent -- see [`Self::bridge_rev_spent`].
+    /// Capturing a revolution costs a rotation of the platter -- about 200ms
+    /// -- and the guest revisits tracks constantly: booting Workbench 1.3
+    /// reads 63 distinct tracks 189 times, one of them fourteen times over.
+    /// Keeping what has already been read turns every return trip into a
+    /// memory copy. The whole disk is only a couple of megabytes, so nothing
+    /// is evicted; what does empty it is the disk changing or a track being
+    /// written, since those are the only ways what is on the platter stops
+    /// matching. Only faithful recordings are kept, though -- see
+    /// [`BridgeTrack`] for what qualifies and why.
     #[cfg(feature = "floppybridge")]
     #[serde(skip)]
-    bridge_tracks: Vec<Option<CachedTrack>>,
+    bridge_tracks: Vec<BridgeTrack>,
     /// Which track [`Self::bridge_wait_since_cck`] is timing.
     #[cfg(feature = "floppybridge")]
     #[serde(skip)]
     bridge_wait_track: Option<usize>,
     /// The revolution in hand has been turned all the way round. Only ever set
-    /// for a physical drive whose captures do not start at the index: those
-    /// cannot be turned twice, so the next one has to be fetched.
+    /// for a physical drive serving a recording that cannot be trusted twice
+    /// -- see [`Self::bridge_rev_seamless`] -- so the next one is fetched.
     #[cfg(feature = "floppybridge")]
     #[serde(skip)]
     bridge_rev_spent: bool,
+    /// Whether the revolution under the head closes on itself: index-aligned,
+    /// verified clean, or restored from a kept recording. A revolution that
+    /// does not is good for exactly one pass -- its ends were read a rotation
+    /// apart, and any imperfection in how they were joined must not be shown
+    /// to the guest twice.
+    #[cfg(feature = "floppybridge")]
+    #[serde(skip)]
+    bridge_rev_seamless: bool,
     /// `elapsed_cck` when the drive was first asked for the track it is
     /// currently working on, and how many times it has been asked since. Only
     /// read to report how long a track took; 0 means "not waiting".
@@ -2224,6 +2271,8 @@ impl Default for FloppyDrive {
             bridge_wait_track: None,
             #[cfg(feature = "floppybridge")]
             bridge_rev_spent: false,
+            #[cfg(feature = "floppybridge")]
+            bridge_rev_seamless: true,
             image: None,
             #[cfg(feature = "floppybridge")]
             bridge: None,
@@ -2628,11 +2677,12 @@ impl FloppyDrive {
         if self.rotation_bit >= bit_len {
             self.rotation_bit = 0;
             self.rotation_rev = (self.rotation_rev + 1) % self.rev_count();
-            // A capture that did not begin at the index is good for exactly one
+            // A revolution that does not close on itself -- neither
+            // index-aligned nor verified clean -- is good for exactly one
             // pass under the head. Mark it done; `ensure_track` replaces it
             // with the recording that followed rather than turning it again.
             #[cfg(feature = "floppybridge")]
-            if self.bridge.as_ref().is_some_and(|b| !b.index_aligned()) {
+            if self.bridge.is_some() && !self.bridge_rev_seamless {
                 self.bridge_rev_spent = true;
             }
             // A single-word (or shorter) track is too short to raise an index.
@@ -2793,6 +2843,25 @@ impl TrackRev {
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 struct CachedTrack {
     revs: Vec<TrackRev>,
+}
+
+/// What a physical drive's track is known to hold. Only a faithful recording
+/// -- one whose two ends genuinely meet, so it can turn under the head like an
+/// image's track -- is worth remembering: an index-aligned capture is faithful
+/// by construction, and an index-less one only once it has been verified
+/// clean. An index-less capture that cannot be verified is served exactly once
+/// and marked, so a return visit asks the drive for the recording that
+/// followed it rather than being shown the same one again.
+#[cfg(feature = "floppybridge")]
+#[derive(Clone, Default)]
+enum BridgeTrack {
+    /// Never read since the disk went in.
+    #[default]
+    Unknown,
+    /// Served once, but not a recording to be trusted twice.
+    Unverified,
+    /// A faithful recording, replayable indefinitely.
+    Kept(CachedTrack),
 }
 
 impl CachedTrack {

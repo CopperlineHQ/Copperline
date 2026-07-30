@@ -115,6 +115,17 @@ config file too.
 wait for the index -- most of a revolution on every track it has not read
 before.
 
+A capture that begins away from the index has its two ends joined by the
+driver where the recording repeats, and that join is not always perfect.
+Copperline therefore verifies each capture before trusting it: one that
+decodes as a complete AmigaDOS track with every checksum passing -- join
+included -- is kept and replayed like an image's track, and anything less is
+served to the guest exactly once. A damaged or unrecognised recording is never
+shown twice: the retry the guest makes reaches the recording that followed,
+which is what recovering on a real drive means. The cost falls only where the
+verdict is less than clean -- a format the scan does not recognise is re-read
+from the disk when the guest returns to it, rather than answered from memory.
+
 The drive cannot always finish a capture in the revolution the guest takes to
 read the last one. When it has nothing newer, the recording just read is used
 again, and the guest meets a splice at the join: the sector straddling it fails

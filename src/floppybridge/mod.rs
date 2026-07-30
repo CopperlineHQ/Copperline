@@ -23,12 +23,13 @@
 //! CPU, sprites, pointer and all -- every time the head moved, which is the
 //! one thing a real drive never does to a real Amiga.
 //!
-//! Because a revolution is served whole, it has to start where the real one
-//! does. That is why the bridge is opened in the library's `Compatible` mode,
-//! which captures from the index: a stream anchored anywhere else would wrap
-//! in the middle of a sector rather than in the gap between two, and the guest
-//! would see disk errors. Upstream's faster index-less modes suit an emulator
-//! that streams cells continuously off the drive, which this is not.
+//! Because a revolution is served whole, its two ends matter. A capture made
+//! in the library's `Compatible` mode starts at the index, so its ends meet in
+//! the gap between sectors and it can turn under the head indefinitely. The
+//! default `normal` mode captures wherever the head happens to be and the
+//! driver joins the ends where the recording repeats -- a join that is not
+//! always perfect, which is why [`scan`] verifies each such capture before the
+//! emulator trusts it beyond a single pass.
 //!
 //! Writing goes the same way round: [`Bridge::write_track`] hands the MFM over
 //! a word at a time at the rotational position the head would be passing, as a
@@ -64,6 +65,7 @@
 //! deterministic as ever, it is the disk under it that is not.
 
 mod ffi;
+pub mod scan;
 
 use std::ffi::{c_char, c_int, c_uint, c_void, CStr, CString};
 use std::sync::{Mutex, OnceLock};
