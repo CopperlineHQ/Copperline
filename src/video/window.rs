@@ -9395,6 +9395,15 @@ impl App {
         // The native frame stays in `rtg_fb`; the window presents it at full
         // resolution through the RTG texture, while `present_fb` keeps the
         // FB_WIDTH version the screenshot path reads.
+        if self.rtg_present_dims.is_none() {
+            // Entering RTG is a presentation discontinuity. Advance the
+            // generation so the render worker clears its chipset repeated-
+            // frame and deinterlace history before native output resumes;
+            // otherwise an exact pre-RTG input match could retain this RTG
+            // buffer instead of producing the first returning chipset frame.
+            self.render_generation = self.render_generation.wrapping_add(1);
+            self.presentation_latch.reset();
+        }
         self.rtg_present_dims = Some((native_w, native_h));
         self.main_presentation_dirty = true;
         self.present_rows = rows;

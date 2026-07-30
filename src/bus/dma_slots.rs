@@ -33,17 +33,17 @@ impl Bus {
         self.advance_one_chip_bus_quantum_limited_inner(forced_owner, max_cck, false)
     }
 
-    /// Shared quantum step. `sleeping_copper_before_deadline` means the
-    /// Copper is in the steady WAIT phase and the exact beam/blitter deadline
-    /// is still strictly ahead of this quantum. The comparator cannot change
-    /// state before that point, so the slot remains free without calling into
-    /// the Copper state machine; instruction tails and wake-up cycles never
-    /// select this path.
+    /// Shared quantum step. `copper_invariant_before_deadline` means either a
+    /// steady WAIT comparator or a pending vertical-blank COP1LC restart has
+    /// an exact deadline still strictly ahead of this quantum. The Copper
+    /// state cannot change before that point, so the slot remains free without
+    /// calling into its state machine; instruction tails and wake-up cycles
+    /// never select this path.
     pub(super) fn advance_one_chip_bus_quantum_limited_inner(
         &mut self,
         forced_owner: Option<ChipBusOwner>,
         max_cck: u32,
-        sleeping_copper_before_deadline: bool,
+        copper_invariant_before_deadline: bool,
     ) -> (u32, AgnusTick) {
         let cck = self.next_chip_bus_quantum().min(max_cck).max(1);
         self.flush_audio_before_audio_dma_slot();
@@ -64,9 +64,9 @@ impl Bus {
         let copper_runs = cck >= CHIP_BUS_SLOT_CCK && self.copper_comparator_runs_at(hpos);
         let eligible = copper_runs && fixed_dma_owner.is_none();
         let copper_took_bus = eligible
-            && !sleeping_copper_before_deadline
+            && !copper_invariant_before_deadline
             && self.step_copper_eligible_slot(forced_owner.is_none(), true);
-        if !eligible && copper_runs && !sleeping_copper_before_deadline {
+        if !eligible && copper_runs && !copper_invariant_before_deadline {
             // A fixed DMA owner (bitplane/sprite/disk/audio/refresh) holds
             // this color clock, but the Copper's WAIT/SKIP comparator is
             // combinational and keeps running: only instruction fetches need

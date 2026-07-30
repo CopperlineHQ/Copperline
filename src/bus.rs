@@ -4854,12 +4854,12 @@ impl Bus {
         let mut total = AgnusTick::default();
 
         let mut remaining = target_cck;
-        let mut sleeping_copper_deadline = self
-            .sleeping_copper_wakeup_cck()
+        let mut invariant_copper_deadline = self
+            .invariant_copper_deadline_cck()
             .filter(|&deadline| deadline != 0);
         while remaining > 0 {
-            let before_deadline = sleeping_copper_deadline.is_some();
-            let quantum_limit = sleeping_copper_deadline
+            let before_deadline = invariant_copper_deadline.is_some();
+            let quantum_limit = invariant_copper_deadline
                 .map(|deadline| remaining.min(deadline))
                 .unwrap_or(remaining);
             let (cck, tick) = self.advance_one_chip_bus_quantum_limited_inner(
@@ -4869,12 +4869,12 @@ impl Bus {
             );
             remaining = remaining.saturating_sub(cck);
             add_agnus_tick(&mut total, tick);
-            sleeping_copper_deadline = sleeping_copper_deadline
+            invariant_copper_deadline = invariant_copper_deadline
                 .and_then(|deadline| deadline.checked_sub(cck))
                 .filter(|&deadline| deadline != 0);
-            if sleeping_copper_deadline.is_none() {
-                sleeping_copper_deadline = self
-                    .sleeping_copper_wakeup_cck()
+            if invariant_copper_deadline.is_none() {
+                invariant_copper_deadline = self
+                    .invariant_copper_deadline_cck()
                     .filter(|&deadline| deadline != 0);
             }
         }
@@ -5091,11 +5091,12 @@ impl Bus {
         self.copper_wait_wakeup_cck(wait)
     }
 
-    /// Exact deadline for the steady comparator phase of a Copper WAIT.
-    /// Before this point the WAIT state is invariant, so `advance_chipset`
-    /// may leave the per-quantum comparator dormant. The instruction-tail
-    /// and wake-up phases return `None` and retain their exact cycle steps.
-    fn sleeping_copper_wakeup_cck(&self) -> Option<u32> {
+    /// Exact deadline before which the Copper state is invariant: either a
+    /// pending vertical-blank COP1LC restart or the steady comparator phase of
+    /// a WAIT. Before this point `advance_chipset` may leave the per-quantum
+    /// Copper step dormant. Instruction-tail and wake-up phases return `None`
+    /// and retain their exact cycle steps.
+    fn invariant_copper_deadline_cck(&self) -> Option<u32> {
         if !self.copper_dma_enabled() {
             return None;
         }
