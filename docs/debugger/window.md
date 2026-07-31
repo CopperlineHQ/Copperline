@@ -385,11 +385,13 @@ cell per 8. Each cell is coloured by what last touched it and fades to black
 over 32 frames, so what is lit is roughly the last half second of activity
 rather than everything since the map was armed. The touchers are CPU reads
 (dull red; instruction fetches count, so the map also shows where the CPU is
-executing), CPU writes (bright red), the blitter (orange), the Copper
-(yellow), the disk (magenta), and the bitplane (blue), sprite (green) and
-audio (cyan) DMA channels. Everything is recorded from bus activity: the map
-knows which engine touched which address, and nothing about what program is
-running.
+executing), CPU writes (bright red), the Copper (yellow), and the bitplane
+(blue), sprite (green) and audio (cyan) DMA channels. The legend reserves
+orange for the blitter and magenta for the disk, but those two engines are
+not yet wired into the map: their accesses go unrecorded, and a blit's
+destination stays cold unless the CPU or Copper also touches it. What is
+recorded comes from bus activity -- the map knows which engine touched
+which address, and nothing about what program is running.
 
 The buttons under the header move the window. They are built from the fitted
 machine's decoded RAM banks -- **Chip**, **Slow**, **MB** (Ramsey

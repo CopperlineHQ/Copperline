@@ -3806,13 +3806,13 @@ fn raw_scsi_unit(scsi: &crate::config::RawScsi, unit: usize) -> Option<&RawDrive
 const BOOTPRI_STEPS: [i8; 8] = [-128, -10, -5, 0, 5, 6, 10, 20];
 
 /// Display form of a hard-disk boot priority in the Priority column: the number,
-/// with unset shown as 0 (its effective value). The -128 "never" sentinel lives
-/// in the Bootable box instead, so it is never a value here.
+/// with unset shown as 0 (its effective value). A cleared Bootable box arrives
+/// as the -128 "never" sentinel and displays as -128.
 fn drive_bootpri_label(pri: Option<i8>) -> String {
     pri.unwrap_or(0).to_string()
 }
 
-/// Highest priority the arrows/typing may hold while Bootable is ticked; -128 is
+/// Lowest priority the arrows/typing may reach while Bootable is ticked; -128 is
 /// reserved for the cleared box, so an enabled priority stops at -127.
 const BOOT_PRI_MIN_ENABLED: i8 = BOOT_PRI_NEVER + 1;
 

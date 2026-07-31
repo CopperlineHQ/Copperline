@@ -336,14 +336,15 @@ pub enum ShaderMode {
     /// "none" or "off" in the config.
     #[default]
     None,
-    /// Darken alternate output rows: the line structure a 15 kHz CRT
-    /// leaves between scanlines.
+    /// Darken between the emulated scan lines -- one dark band per
+    /// emulated line whatever the window scale, the line structure a
+    /// 15 kHz CRT leaves.
     Scanlines,
-    /// Modulate the output through an RGB phosphor mask, like the
-    /// aperture grille of a Trinitron-class monitor.
+    /// Modulate the output through a staggered RGB dot/shadow mask,
+    /// like a slot-mask consumer tube.
     Mask,
-    /// Scanlines and phosphor mask together with a tube's slight bloom:
-    /// the full CRT look.
+    /// Scanlines and an aperture-grille phosphor mask together with
+    /// tube curvature and a corner vignette: the full CRT look.
     Crt,
     /// A user WGSL fragment shader loaded from this path at start-up.
     Custom(PathBuf),
@@ -1087,10 +1088,6 @@ pub enum BridgeCable {
     Shugart3,
 }
 
-/// A real drive attached to one floppy bay, from `[floppy.dfN] bridge = ...`.
-///
-/// Held apart from [`FloppyDriveConfig`] because a bridged drive has no image
-/// path: whichever of the two is present for a bay supplies its media.
 /// Serving speeds a bridged bay accepts, as percentages of the platter's
 /// real speed. Shared by the config parser, the CLI, and the launcher's
 /// cycle row so all three offer the same set.
@@ -1099,6 +1096,10 @@ pub const SUPPORTED_BRIDGE_SPEED_PERCENTS: [u16; 5] = [100, 125, 150, 175, 200];
 /// The serving speed a bridged bay uses unless told otherwise.
 pub const DEFAULT_BRIDGE_SPEED_PERCENT: u16 = 125;
 
+/// A real drive attached to one floppy bay, from `[floppy.dfN] bridge = ...`.
+///
+/// Held apart from [`FloppyDriveConfig`] because a bridged drive has no image
+/// path: whichever of the two is present for a bay supplies its media.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FloppyBridgeConfig {
     pub driver: BridgeDriver,
@@ -2810,8 +2811,7 @@ pub(crate) struct RawFloppyDrive {
     pub(crate) write_protected: Option<bool>,
     /// Attach a real drive to this bay instead of an image, over a
     /// DrawBridge/Greaseweazle/Supercard Pro: `drawbridge`, `greaseweazle`,
-    /// `supercardpro`, or `profile:N` to use one of the FloppyBridge
-    /// library's own saved profiles.
+    /// or `supercardpro` (aliases `arduino`, `gw`, `scp`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) bridge: Option<String>,
     /// Serial port the interface is on. Omitted, the driver finds its own

@@ -2208,10 +2208,16 @@ fn break_list_value(emu: &Emulator, ctx: &SessionCtx) -> Value {
     for w in &breaks.watches {
         let spec = BreakSpec::Watch {
             addr: w.addr,
-            source: None,
-            pc: None,
+            source: w.filter,
+            pc: w.pc,
         };
         let mut entry = json!({"kind": "watch", "addr": w.addr});
+        if let Some(class) = w.filter {
+            entry["class"] = Value::from(class.describe());
+        }
+        if let Some(pc) = w.pc {
+            entry["pc"] = Value::from(pc);
+        }
         push_id(&mut entry, ctx.id_for(&spec));
         entries.push(entry);
     }
@@ -2733,6 +2739,38 @@ mod tests {
         assert!(!emu.machine.ui_breaks().is_breakpoint(0xF8001A));
         let err = exec_core(&mut emu, &mut ctx, &CoreOp::BreakRemove { id }).unwrap_err();
         assert_eq!(err.code, proto::NOT_FOUND);
+    }
+
+    #[test]
+    fn break_list_reports_watch_qualifiers() {
+        let mut emu = test_emulator();
+        let mut ctx = SessionCtx::new();
+        let add = core(
+            "break.add",
+            json!({"kind": "watch", "addr": "$2000", "class": "spr3"}),
+        );
+        let id = exec_core(&mut emu, &mut ctx, &add).unwrap()["id"]
+            .as_u64()
+            .unwrap() as u32;
+        let add = core(
+            "break.add",
+            json!({"kind": "watch", "addr": "$3000", "class": "cpu", "pc": "$F80010"}),
+        );
+        let pc_id = exec_core(&mut emu, &mut ctx, &add).unwrap()["id"]
+            .as_u64()
+            .unwrap() as u32;
+
+        let list = exec_core(&mut emu, &mut ctx, &CoreOp::BreakList).unwrap();
+        let entries = list["breaks"].as_array().unwrap();
+        let spr = entries.iter().find(|e| e["addr"] == 0x2000).unwrap();
+        assert_eq!(spr["kind"], "watch");
+        assert_eq!(spr["class"], "spr3");
+        assert!(spr.get("pc").is_none());
+        assert_eq!(spr["id"], id);
+        let cpu = entries.iter().find(|e| e["addr"] == 0x3000).unwrap();
+        assert_eq!(cpu["class"], "cpu");
+        assert_eq!(cpu["pc"], 0xF80010);
+        assert_eq!(cpu["id"], pc_id);
     }
 
     #[test]

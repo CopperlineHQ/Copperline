@@ -54,7 +54,9 @@ against real hardware.
   uncached execution totals from the MC68020 User's Manual per instruction.
 - **Peripherals**: a bit-timed keyboard (6500/1 MCU), mouse, USB gamepad
   (via the pure-Rust `gilrs`, no SDL2), 4-channel Paula audio, floppy
-  (ADF / ADZ / ZIP / DMS, read-only SCP), Gayle and A4000 IDE, SCSI (A2091,
+  (ADF / ADZ / ZIP / DMS, read-only SCP, or a real 3.5" drive over
+  DrawBridge / Greaseweazle / Supercard Pro via the bundled FloppyBridge,
+  `docs/guide/floppybridge.md`), Gayle and A4000 IDE, SCSI (A2091,
   A4091, or the A3000's onboard Super DMAC), CDTV/CD32 CD, A2065 Ethernet,
   a Z3660 RTG card (high-colour Picasso96 screens), the serial port bridged
   to host stdout/TCP/PTY/MIDI, a parallel-port printer capture and audio
@@ -79,9 +81,13 @@ against real hardware.
 ## Requirements
 
 - Rust 1.93+ (stable). Tested with Rust 1.96.
-- Fedora build dependencies: `sudo dnf install alsa-lib-devel systemd-devel`.
-- No SDL2 dependency. Developed and tested on **macOS**; the Linux and
-  Windows paths are expected to work but are currently untested.
+- A host C++ compiler for the vendored FloppyBridge library (built by the
+  default `floppybridge` feature): the Xcode command-line tools on macOS,
+  `g++` on Linux, or the MSVC Build Tools on Windows.
+- Fedora build dependencies:
+  `sudo dnf install alsa-lib-devel systemd-devel gcc-c++`.
+- No SDL2 dependency. Developed on **macOS**; CI builds and runs the test
+  suite on macOS, Linux, and Windows.
 - **Linux requires a Vulkan driver.** The display is presented with wgpu via
   the Vulkan backend; the OpenGL fallback is not usable (see "Linux: Vulkan
   required" below). Any GPU from roughly Intel Skylake / 2015 onward has a
@@ -331,7 +337,7 @@ channel are in
 | Paula serial | SERDAT through a one-word transmit buffer and timed shift register, out to stdout, a TCP port, a pseudo-terminal, or -- with the default `midi` feature -- bridged to host MIDI in/out; SERDATR reports TBE/TSRE/RBF, and serial receive is fed from the selected input. |
 | Paula audio | 4-channel DMA/sample playback, stereo mix, LED filter. |
 | Paula DMACON / INTENA / INTREQ | IRQ bits are stored and delivered through manual M68K autovectors with modelled 68000 interrupt-recognition latency; audio and disk DMA raise completion IRQs. |
-| Floppy / ADF / DMS / SCP | DF0-DF3 standard DD ADF read/write, read-only ADZ/DMS, UAE extended ADF, initial read-only SCP flux import, track-timed disk DMA, CIA drive lines, index FLAG, DSKLEN/DSKBYTR/DSKSYNC/DSKDAT, per-drive multi-disk playlists with a swap key. |
+| Floppy / ADF / DMS / SCP | DF0-DF3 standard DD ADF read/write, read-only ADZ/DMS, UAE extended ADF, initial read-only SCP flux import, track-timed disk DMA, CIA drive lines, index FLAG, DSKLEN/DSKBYTR/DSKSYNC/DSKDAT, per-drive multi-disk playlists with a swap key, and real 3.5" drives through FloppyBridge (DrawBridge / Greaseweazle / Supercard Pro). |
 | Hard disks | Gayle IDE (A600/A1200) and A4000 motherboard IDE; SCSI via the A2091 (Zorro II DMAC + WD33C93A), A4091 (Zorro III 53C710 with SCRIPTS), or A3000 Super DMAC; RDB HDFs, bare partition hardfiles, and host-directory volumes. |
 | Host filesystem | `[[filesys]]` mounts serve host directories live as AmigaDOS volumes (read/write, `.uaem` attribute sidecars, Latin-1 name mapping). |
 | Expansion | Zorro II/III autoconfig chain, TOML-described RAM boards, WASM plugin boards (registers/interrupts/DMA in a sandboxed module), A2065 Ethernet (Am7990 LANCE) with loopback, userspace NAT, and direct host-adapter bridge backends. |

@@ -78,14 +78,14 @@ pub use ffi::{config_option, BridgeDensityMode, BridgeMode, DriveSelection};
 /// Upstream's own `BRIDGE_STRING_MAX_LENGTH`.
 const STRING_MAX: usize = 255;
 
-/// Bytes to allow for one captured revolution. Upstream sizes its own track
-/// buffers at `MFM_BUFFER_MAX_TRACK_LENGTH` (0x3A00 * 2), so nothing longer
-/// than this can come back: a DD revolution is around 12.7K of MFM and an HD
-/// one twice that, leaving plenty of room for a drive running off-speed.
 /// How close to the index a write has to start for the driver to place it
 /// there. Upstream's own figure, from `commitWriteBuffer`.
 const INDEX_WRITE_SLACK_BITS: usize = 30;
 
+/// Bytes to allow for one captured revolution. Upstream sizes its own track
+/// buffers at `MFM_BUFFER_MAX_TRACK_LENGTH` (0x3A00 * 2), so nothing longer
+/// than this can come back: a DD revolution is around 12.7K of MFM and an HD
+/// one twice that, leaving plenty of room for a drive running off-speed.
 const MAX_TRACK_BYTES: usize = 0x3A00 * 2;
 
 /// Serialises calls into the library itself.

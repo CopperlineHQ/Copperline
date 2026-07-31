@@ -1632,8 +1632,8 @@ fn analyzer_preset_rects(rect: Rect, presets: &[HeatPreset]) -> Vec<(UiControl, 
     out
 }
 
-/// The Memory tab's map: one square pixel block per grid cell, 368 px on
-/// a side so the 256-cell grid samples up cleanly inside the panel.
+/// The Memory tab's map: a 368 px square nearest-sampled from the 256x256
+/// grid (not an integral scale, so a cell lands on 1-2 px).
 fn analyzer_heat_map_rect(rect: Rect) -> Rect {
     Rect {
         x: rect.x + 10,
@@ -4601,8 +4601,8 @@ const LAUNCH_MARGIN: usize = 8;
 const LAUNCH_MODEL_H: usize = 22;
 const LAUNCH_MODEL_GAP: usize = 4;
 /// Machines per row in the selector grid before it wraps; the grid rebalances
-/// so the buttons fill the width (eight models fit one row today, more wrap to
-/// two balanced rows -- room for the A3000/A4000 and beyond).
+/// so the buttons fill the width (eight fit one row; the current ten models
+/// wrap to two balanced rows).
 const LAUNCH_MODEL_MAX_PER_ROW: usize = 8;
 /// Width of the left-hand vertical category-tab column.
 const LAUNCH_SIDEBAR_W: usize = 116;
@@ -4927,8 +4927,9 @@ enum ZorroItem {
     Option { board: usize, opt: usize },
 }
 
-/// Flatten the Zorro boards into (content-row, item) pairs. Row 0 is the Add
-/// button, pinned to the top; each board header and its option rows follow.
+/// Flatten the Zorro boards into (content-row, item) pairs: each board header
+/// and its option rows, with row 0 the first board header. The Add button is
+/// drawn above the list, outside these rows.
 fn launcher_zorro_layout(setup: &launcher::MachineSetup) -> Vec<(usize, ZorroItem)> {
     let mut items = Vec::new();
     // Row 0 is the first list row; the board list is shifted below the Add button
@@ -5186,8 +5187,8 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
             }
         }
     }
-    // The top nav row: a page's "Options:"/"Settings:" sibling links, or a Back
-    // button.
+    // The top nav row: a page's sibling links (the Storage and A/V sub-pages),
+    // or a Back button.
     if let Some(parent) = state.tab.parent_tab() {
         if launcher_back_button_rect(rect).contains(pos) {
             return Some(UiControl::LauncherTab(parent));
@@ -6156,8 +6157,8 @@ fn draw_launcher(
             );
         }
     }
-    // The Boot Priority page spells out the valid range and the floppy-drive
-    // priorities its cascade defaults sort around, all greyed like a footnote.
+    // The Boot Priority page spells out the valid priority range below the
+    // rows, under a dimmed "Info:" heading.
     if state.tab == LauncherTab::BootPriority && state.setup.has_boot_priority_rows() {
         let help_top = (launcher_row_y(
             rect,
@@ -6745,11 +6746,10 @@ mod tests {
     }
 
     /// The launcher panel is a fixed box with no row scrolling, so a tab's
-    /// rows have to fit between the content top and the chrome below them:
-    /// the footer nav row on the Storage tab and its sub-pages, the status
-    /// line everywhere else. Nothing may reach the action buttons or hang
-    /// off the panel. Adding one row too many to a tab fails here rather
-    /// than silently drawing over the Save button.
+    /// rows have to fit between the content top (below the nav row on pages
+    /// that have one) and the status line at the bottom. Nothing may reach
+    /// the action buttons or hang off the panel. Adding one row too many to
+    /// a tab fails here rather than silently drawing over the Save button.
     #[test]
     fn every_launcher_tab_row_fits_inside_the_panel() {
         use crate::config::{ParallelDevice, SerialMode};

@@ -183,8 +183,8 @@ const DENISE_HAM_SELECT_PIPELINE_FB: usize =
 ///
 /// The grid, in framebuffer x: slots repeat every shifter word (32 px lores,
 /// 16 px hires, 8 px shres by extrapolation -- no shres reference exists) and
-/// sit at x = 30 (mod 32) lores / 14 (mod 16) hires, i.e. two pixels left of
-/// the DIW HSTART $81 column (x 62). Snapping compares the slot against the
+/// sit at x = 30 (mod 32) lores / 14 (mod 16) hires, i.e. the grid passes
+/// exactly through the DIW HSTART $81 column (x 62). Snapping compares the slot against the
 /// write's bus landing; recorded event positions carry the Denise
 /// write-effect offset, backed out here as this probe-calibrated constant
 /// (bands @35/@37 bracket it to 6..14 framebuffer pixels; 8 = 2 ccks).

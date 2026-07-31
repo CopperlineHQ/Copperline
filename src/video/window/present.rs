@@ -832,7 +832,9 @@ pub(super) fn alpha_blit_rgba(
 // indexes a 256-entry table of pre-tinted colours. The ramps reproduce the
 // web frontend's CSS filter chains (Filter Effects Module Level 1
 // colour matrices, results clamped to [0, 1] between stages), evaluated on
-// the grey axis once at build time, so the desktop and browser tints match.
+// the grey axis once at build time, so the desktop and browser tints match
+// on grey input (the browser's sepia chain has no leading grayscale, so
+// saturated pixels can differ slightly there).
 
 /// Rec. 709-style luma weights in 8.8 fixed point, summing to exactly 256
 /// so a grey pixel maps to its own level and the b/w ramp is an identity.
@@ -907,8 +909,10 @@ fn brightness(c: [f32; 3], b: f32) -> [f32; 3] {
 }
 
 /// The tinted colour one grey level maps to: the web frontend's CSS
-/// filter chain for the tint, evaluated on grey (its leading
-/// `grayscale(1)` is the luma collapse the per-pixel step performs).
+/// filter chain for the tint, evaluated on grey. For most tints the
+/// chain's leading `grayscale(1)` is the luma collapse the per-pixel
+/// step performs; the sepia chain has no grayscale term, so the browser
+/// feeds it colour where this path feeds it luma.
 fn tint_ramp(tint: Tint, level: f32) -> [f32; 3] {
     let grey = [level, level, level];
     match tint {

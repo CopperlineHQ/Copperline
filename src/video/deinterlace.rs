@@ -51,7 +51,8 @@ const MAX_FIELD_PIXELS: usize = FB_WIDTH * MAX_VISIBLE_LINES;
 const MAX_OUT_PIXELS: usize = MAX_FIELD_PIXELS * 2;
 
 pub struct Deinterlacer {
-    /// Woven presentation buffer (active rows = `out_rows`).
+    /// Woven presentation buffer for the history-dependent path; the
+    /// direct [`Self::present_field_into`] path bypasses it.
     out: Vec<u32>,
     /// Most recent field of each parity (0 = long, 1 = short), kept to
     /// detect motion between same-parity fields.
@@ -69,7 +70,8 @@ pub struct Deinterlacer {
     /// pitch change (a 35 ns super-hi-res scan arriving) drops the history
     /// like a row-count change.
     field_width: usize,
-    /// Active rows in `out` after the last push.
+    /// Active output rows after the last push (the direct path sets this
+    /// without writing `out`).
     out_rows: usize,
     /// Pixels per row of `out` after the last push.
     out_width: usize,
@@ -371,9 +373,10 @@ impl Deinterlacer {
     /// The overwhelmingly common standard progressive path needs neither
     /// weave history nor phosphor history. Writing its doubled rows straight
     /// to the frontend buffer avoids first filling `self.out` and then copying
-    /// the whole 570-line image once more. Interlaced or phosphor-blended
-    /// frames retain the history-dependent [`Self::push_field`] path and copy
-    /// its result, so their output is unchanged.
+    /// the whole 570-line image once more. Phosphor-blended frames, and
+    /// interlaced frames with deinterlacing enabled, retain the
+    /// history-dependent [`Self::push_field`] path and copy its result, so
+    /// their output is unchanged.
     #[doc(hidden)]
     pub fn present_field_into(
         &mut self,
