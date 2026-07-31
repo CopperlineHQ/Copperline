@@ -52,12 +52,10 @@ _diag_point:
 	rts
 _boot_point:
 	| Called by strap (with A6 = ExecBase) when one of our BootNodes has
-	| the highest boot priority -- on 2.0+ via AddBootNode, on 1.3 via
-	| the BootNode mount_boards enqueues by hand. The standard autoboot
-	| boot code, same as real autoboot ROMs and both strap generations:
-	| fire up dos.library, whose init then mounts the highest-priority
-	| BootNode -- ours -- as SYS:. Returns (boot failed, strap tries the
-	| next candidate) only if dos.library is missing.
+	| the highest boot priority. The standard autoboot boot code, same as
+	| real autoboot ROMs: fire up dos.library, whose init then mounts the
+	| highest-priority BootNode -- ours -- as SYS:. Returns (boot failed,
+	| strap tries the next candidate) only if dos.library is missing.
 	lea	_dos_name(pc),a1
 	jsr	-96(a6)		| FindResident("dos.library")
 	tst.l	d0
