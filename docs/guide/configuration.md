@@ -1047,9 +1047,7 @@ emulators: the operating system and most loaders tolerate them, but
 software that times its own loading against the beam, CIA timers, or music
 playback can break. The setting can be changed live from the runtime menu
 ("Floppy Speed") without restarting the machine. It applies to image-backed
-bays only: a physical drive on a bridge delivers cells at the disk's own
-rate, so bridged bays always run at real speed, and the launcher greys the
-Drive speed row when every fitted bay is physical.
+bays only; a physical drive has its own `bridge_speed`.
 
 Supported image formats: standard 901120-byte DD ADF, gzip-compressed
 images (ADZ), single file ZIP archives, DMS archives, UAE extended ADF, and

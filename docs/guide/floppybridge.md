@@ -43,11 +43,6 @@ names the interface instead, with a **Configure** button leading to its
 settings. With nothing plugged in the row reads `Not connected`; plug the
 interface in and re-tick the box to pick it up.
 
-The Configure page's Interface row also offers **None** -- selected
-automatically when a bay is bridged with nothing attached. A bay whose
-interface is None keeps its tick box and its settings, but runs (and saves)
-as an ordinary unbridged bay until an interface is chosen.
-
 You can also define this in your .TOML file;
 
 ```toml
@@ -102,11 +97,7 @@ Every current interface connects over a serial port, and every one of them
 can be found automatically, which is the default. Name `bridge_port`
 explicitly to pin a particular device when more than one is attached.
 
-The launcher's list starts with **Automatic**, then the ports the library's
-own scan names, then every other serial device the host has. The long tail
-matters: an interface on a serial chip the scan does not recognise -- a
-DrawBridge built on an Arduino clone, say -- can still be pointed at by
-hand.
+The launcher lists **Automatic**, then every serial device the host has.
 
 ### Drive select
 
@@ -127,14 +118,11 @@ before.
 
 A capture that begins away from the index has its two ends joined by the
 driver where the recording repeats, and that join is not always perfect.
-Copperline therefore verifies each capture before trusting it: one that
-decodes as a complete AmigaDOS track with every checksum passing -- join
-included -- is kept and replayed like an image's track, and anything less is
-served to the guest exactly once. A damaged or unrecognised recording is never
-shown twice: the retry the guest makes reaches the recording that followed,
-which is what recovering on a real drive means. The cost falls only where the
-verdict is less than clean -- a format the scan does not recognise is re-read
-from the disk when the guest returns to it, rather than answered from memory.
+Copperline verifies each capture: one that decodes as a complete AmigaDOS
+track with every checksum passing is kept and replayed like an image's
+track; anything less -- damaged, or a format the scan does not recognise --
+is served once and fetched afresh on the next visit, so a retry always
+reads new data.
 
 The drive cannot always finish a capture in the revolution the guest takes to
 read the last one. When it has nothing newer, the recording just read is used
@@ -155,13 +143,10 @@ emulated machine, which stops -- pointer and all -- for as long as it takes.
 
 ### Bridge speed and auto-cache
 
-`bridge_speed` serves each captured revolution at `100` (real, the default),
-`125`, or `150` percent of the platter's real speed. The capture itself is
-untouched -- reading a track off the disk still takes as long as a revolution
-takes -- but the recovered cells reach the guest proportionally faster, so
-rotational waits on tracks already in hand shrink. The trade is the same as
-the image drives' `[floppy] speed`: the operating system and most loaders
-tolerate it, but software that times its own loading can notice.
+`bridge_speed` serves captured tracks at `100` (real, the default), `125`,
+or `150` percent of real speed. Capturing still takes a full revolution;
+only the serving is faster. The trade is the same as `[floppy] speed`:
+software that times its own loading can notice.
 
 `bridge_auto_cache` caches disk data in the background while the drive is
 idle. It is off by default: during a boot the drive is never idle, so there 
@@ -174,10 +159,8 @@ minute or so, reading the rest of the disk once, then spins down. Later
 reads of anything it reached are served instantly.
 
 While the guest is actively loading, the cacher contends with it for the
-head -- each of its excursions costs a seek away and back -- so loading is
-audibly busier and somewhat slower than with auto-cache off. It pays for
-itself on what comes after: revisits, browsing, and a re-boot from the same
-disk.
+head, so loading is audibly busier and somewhat slower than with auto-cache
+off.
 
 ## Write protection
 
@@ -231,11 +214,8 @@ eject and swap buttons do nothing: Eject/insert disks as you would with an Amiga
 **No synthesized drive sounds.** The real drive makes its own noise. A bay in the 
 same machine running an ADF still sounds as it should when enabled.
 
-**The `[floppy] speed` option does not apply.** It shapes how fast a track is
-served from an image; a physical drive's data rate is the disk's own, and
-turbo cannot spin a real platter forward in zero time. Image bays in the same
-machine still honour it, and the launcher greys the Drive speed row when every
-fitted bay is physical.
+**The `[floppy] speed` option does not apply.** A physical drive is served
+at the disk's own rate; `bridge_speed` is its speed option.
 
 **Powering off releases the drive.** A real drive takes its power from the
 machine, and a bridged one behaves the same way: the power button hands the

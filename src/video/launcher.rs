@@ -1194,8 +1194,7 @@ pub struct MachineSetup {
     /// The bay's interface is set to "None": still a physical-drive bay in
     /// the launcher, but with no interface to drive it -- the run and the
     /// written config treat it as unbridged. Selected automatically when a
-    /// bay is bridged with nothing attached, so the page tells the truth
-    /// from the first look.
+    /// bay is bridged with nothing attached.
     df_bridge_none: [bool; 4],
     /// Which bay the FloppyBridge settings page is showing. The page itself is
     /// one set of rows; this says whose values they are.
@@ -1207,9 +1206,8 @@ pub struct MachineSetup {
     bridge_status: BridgeStatus,
     /// The serial ports on offer -- "Automatic", the library's scan, then
     /// every host serial device the scan did not name. Sampled with
-    /// `bridge_status` at deliberate moments (opening the launcher, bridging
-    /// a bay, entering the configure page): the scan walks the serial bus,
-    /// which is not a per-frame activity.
+    /// `bridge_status` (launcher open, a bay switched to a physical drive):
+    /// the scan walks the serial bus, which is not a per-frame activity.
     bridge_ports: Vec<Option<String>>,
     // Hard disk. Each drive's optional volume-name override (directory mounts
     // only) sits in the matching `*_name` slot, paralleling the path slot. Boot
@@ -2200,13 +2198,11 @@ impl MachineSetup {
             // when inactive (see `rows`), so they never need a greyed state.
             // Channel mode and separation shape the output, so they do nothing
             // once audio is disabled; separation also does nothing in mono.
-            // The bridge page follows what is actually there. A loaded config
-            // can pull the bay out from under the page, leaving nothing to
-            // edit: every row greys, the Interface one included. With the bay
-            // bridged but no interface attached (the media row's "None"),
-            // only the Interface row is worth touching -- the rest describe
-            // hardware that is not present, the serial port included, since
-            // its list is empty and "Automatic" alone is not a choice.
+            // The bridge page follows what is there. A loaded config can
+            // pull the bay out from under the page: every row greys, the
+            // Interface one included. With the bay bridged but no interface
+            // attached or selected, only the Interface row stays live -- the
+            // rest describe hardware that is not present.
             #[cfg(feature = "floppybridge")]
             F::BridgeDevice => reason(self.bridge_edit().is_some(), "no drive"),
             #[cfg(feature = "floppybridge")]
@@ -2221,11 +2217,11 @@ impl MachineSetup {
             {
                 Some("no interface")
             }
-            // The port row outlives the attachment check the rest answer to:
-            // an interface on a chip the library's scan does not name still
-            // has to be pointable-at by hand. It greys when the interface is
-            // "None", and when there is genuinely nothing to point at --
-            // the list holding only "Automatic".
+            // The port row stays live while there is a port to pick, even
+            // with nothing recognised as attached: an interface on a serial
+            // chip the scan does not name is selected by hand. It greys with
+            // the interface set to None, and with nothing to pick (a list of
+            // just "Automatic").
             #[cfg(feature = "floppybridge")]
             F::BridgePort => {
                 if self.bridge_edit().is_none() || self.df_bridge_none[self.bridge_edit_drive] {
