@@ -4123,10 +4123,13 @@ mod tests {
         setup.set_drive_bridged(0, true);
         setup.set_bridge_edit_drive(0);
         // Capability greying is only reachable with an interface attached and
-        // selected; without one the whole page greys first (see
-        // `bridge_page_greys_without_an_interface`).
+        // selected, and with a port to pick; without either the page greys
+        // first (see `bridge_page_greys_without_an_interface`). Pinned rather
+        // than sampled: what a test machine has attached is not this test's
+        // subject.
         setup.bridge_status = BridgeStatus::Attached;
         setup.df_bridge_none[0] = false;
+        setup.bridge_ports = vec![None, Some("/dev/ttyACM0".to_string())];
 
         for (driver, cable_greyed) in [
             (crate::config::BridgeDriver::Greaseweazle, false),
