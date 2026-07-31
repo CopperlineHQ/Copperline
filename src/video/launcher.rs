@@ -1932,7 +1932,8 @@ impl MachineSetup {
                     .then(|| bridge_density_name(bridge.density).to_string()),
                 bridge_mode: (bridge.mode != default.mode)
                     .then(|| bridge_mode_name(bridge.mode).to_string()),
-                bridge_speed: (bridge.speed != 100).then_some(bridge.speed),
+                bridge_speed: (bridge.speed != crate::config::DEFAULT_BRIDGE_SPEED_PERCENT)
+                    .then_some(bridge.speed),
                 bridge_auto_cache: bridge.auto_cache.then_some(true),
                 // Same rule, and the same tick box, as an image: only an
                 // unprotected drive says so.

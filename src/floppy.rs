@@ -619,7 +619,7 @@ impl FloppyController {
     /// Put a real drive on `drive_idx`, replacing any mounted image. The
     /// bridge supplies the track under the head from then on. `speed_percent`
     /// is the serving speed from `[floppy.dfN] bridge_speed`, already
-    /// validated to 100, 125, or 150.
+    /// validated against `SUPPORTED_BRIDGE_SPEED_PERCENTS`.
     #[cfg(feature = "floppybridge")]
     pub fn attach_bridge(
         &mut self,
@@ -745,22 +745,36 @@ impl FloppyController {
             let changed = bridge.take_disk_changed();
             let had_media = drive.bridge_media;
             drive.bridge_media = bridge.disk_in_drive();
-            // A disk going in or coming out of a real drive is the one media
-            // change nothing in the emulator asked for, so it is worth saying
-            // as plainly as an image being inserted.
-            if drive.bridge_media != had_media {
-                if drive.bridge_media {
-                    info!("floppy.df{idx} disk inserted (physical drive)");
-                } else {
-                    info!("floppy.df{idx} disk ejected (physical drive)");
-                }
-            }
             // Sample the drive before the borrow is needed elsewhere. The
             // driver keeps the tab's last reading and hands it back whatever
             // the motor is doing, so this is good with the platter stopped --
             // which is just as well, because a drive the guest is not actively
             // reading is stopped nearly all the time.
             let sensed_tab = bridge.write_protected();
+            // A disk going in or coming out of a real drive is the one media
+            // change nothing in the emulator asked for, so it is worth saying
+            // as plainly as an image being inserted. A drive the
+            // configuration protects cannot be written to whatever the tab
+            // says, so the tab is only worth reporting on a drive that could
+            // otherwise take a write.
+            if drive.bridge_media != had_media {
+                if drive.bridge_media {
+                    if drive.bridge_write_protected {
+                        info!("floppy.df{idx} disk inserted (physical drive)");
+                    } else {
+                        info!(
+                            "floppy.df{idx} disk inserted (physical drive), {}",
+                            if sensed_tab {
+                                "write-protected by the disk's tab"
+                            } else {
+                                "writable"
+                            }
+                        );
+                    }
+                } else {
+                    info!("floppy.df{idx} disk ejected (physical drive)");
+                }
+            }
             if changed {
                 drive.cached_track = None;
                 drive.cached = CachedTrack::default();
@@ -778,16 +792,21 @@ impl FloppyController {
             if write_protected != drive.write_protected_target {
                 // Which of the two protections is in force decides whether
                 // opening the tab will help, so name it rather than just
-                // reporting the outcome.
-                if write_protected {
-                    let reason = if drive.bridge_write_protected {
-                        "the configuration"
+                // reporting the outcome. An insertion has already said this,
+                // and an empty drive has no disk to say it about.
+                if drive.bridge_media && drive.bridge_media == had_media {
+                    if write_protected {
+                        let reason = if drive.bridge_write_protected {
+                            "the configuration"
+                        } else {
+                            "the disk's tab"
+                        };
+                        info!(
+                            "floppy.df{idx} disk is write-protected by {reason} (physical drive)"
+                        );
                     } else {
-                        "the disk's tab"
-                    };
-                    info!("floppy.df{idx} disk is write-protected by {reason} (physical drive)");
-                } else {
-                    info!("floppy.df{idx} disk is writable (physical drive)");
+                        info!("floppy.df{idx} disk is writable (physical drive)");
+                    }
                 }
                 drive.set_write_protected(write_protected);
                 self.idle_cache = false;

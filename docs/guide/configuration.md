@@ -52,7 +52,7 @@ range checks as the equivalent TOML fields:
 | `--floppy-bridge-cable DFN SEL` | `[floppy.dfN] bridge_cable` | drive select: `a`/`b` (PC cable) or `0`-`3` (Shugart) |
 | `--floppy-bridge-mode DFN MODE` | `[floppy.dfN] bridge_mode` | how tracks are captured: `normal`, `compatible`, `stalling` |
 | `--floppy-bridge-density DFN D` | `[floppy.dfN] bridge_density` | force a density: `auto`, `dd`, `hd` |
-| `--floppy-bridge-speed DFN PCT` | `[floppy.dfN] bridge_speed` | serve captured tracks at `100`, `125`, or `150` percent of real speed |
+| `--floppy-bridge-speed DFN PCT` | `[floppy.dfN] bridge_speed` | serve captured tracks at `100`, `125`, `150`, `175`, or `200` percent of real speed |
 | `--floppy-bridge-auto-cache DFN` | `[floppy.dfN] bridge_auto_cache = true` | cache disk data while the drive is idle |
 | `--floppy-bridge-writable DFN` | `[floppy.dfN] write_protected = false` | allow writing to the real disk |
 | `--joystick MODE` | `[input] joystick` | `gamepad` (default), `keyboard` |
@@ -1078,7 +1078,7 @@ write_protected = true       # emulator-level protection, on top of the tab
 # bridge_cable = "a"             # a/b (IBM PC) or 0..3 (Shugart)
 # bridge_density = "auto"        # auto/dd/hd
 # bridge_mode = "compatible"     # compatible/stalling
-# bridge_speed = 100             # serve captured tracks at 100/125/150% of real speed
+# bridge_speed = 125             # 100, 125, 150, 175, or 200 percent of real speed
 # bridge_auto_cache = false      # read tracks ahead while the drive is idle
 ```
 

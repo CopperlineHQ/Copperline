@@ -53,7 +53,7 @@ write_protected = true       # emulator-level protection; default true
 # bridge_cable = "a"             # a/b (IBM PC) or 0..3 (Shugart)
 # bridge_density = "auto"        # auto/dd/hd
 # bridge_mode = "normal"         # normal/compatible/stalling
-# bridge_speed = 100             # serve captured tracks at 100/125/150%
+# bridge_speed = 125             # 100, 125, 150, 175, or 200 percent
 # bridge_auto_cache = false
 ```
 
@@ -143,10 +143,11 @@ emulated machine, which stops -- pointer and all -- for as long as it takes.
 
 ### Bridge speed and auto-cache
 
-`bridge_speed` serves captured tracks at `100` (real, the default), `125`,
-or `150` percent of real speed. Capturing still takes a full revolution;
-only the serving is faster. The trade is the same as `[floppy] speed`:
-software that times its own loading can notice.
+`bridge_speed` serves captured tracks at `100`, `125` (the default), `150`,
+`175`, or `200` percent of real speed. Capturing still takes a full
+revolution; only the serving is faster, so the gain lands on tracks already
+in hand. As with `[floppy] speed`, software that times its own loading can
+notice.
 
 `bridge_auto_cache` caches disk data in the background while the drive is
 idle. It is off by default: during a boot the drive is never idle, so there 

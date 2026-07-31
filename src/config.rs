@@ -1088,7 +1088,10 @@ pub enum BridgeCable {
 /// Serving speeds a bridged bay accepts, as percentages of the platter's
 /// real speed. Shared by the config parser, the CLI, and the launcher's
 /// cycle row so all three offer the same set.
-pub const SUPPORTED_BRIDGE_SPEED_PERCENTS: [u16; 3] = [100, 125, 150];
+pub const SUPPORTED_BRIDGE_SPEED_PERCENTS: [u16; 5] = [100, 125, 150, 175, 200];
+
+/// The serving speed a bridged bay uses unless told otherwise.
+pub const DEFAULT_BRIDGE_SPEED_PERCENT: u16 = 125;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FloppyBridgeConfig {
@@ -1105,11 +1108,11 @@ pub struct FloppyBridgeConfig {
     pub density: BridgeDensity,
     pub cable: BridgeCable,
     /// How fast a captured revolution is served to the guest, as a
-    /// percentage of the platter's real speed: `100` (real, the default),
-    /// `125`, or `150`. Serving faster shortens rotational waits on tracks
-    /// already in hand; the physical capture itself still takes as long as a
-    /// revolution takes, and the same caveat applies as to `[floppy] speed`
-    /// -- software that times its own loading can notice.
+    /// percentage of the platter's real speed: `100`, `125` (the default),
+    /// `150`, `175`, or `200`. Serving faster shortens rotational waits on
+    /// tracks already in hand; capturing one still takes a full revolution.
+    /// As with `[floppy] speed`, software that times its own loading can
+    /// notice.
     pub speed: u16,
     /// Read tracks ahead in the background while the drive is otherwise idle.
     /// Off by default, as the driver has it. It buys little during
@@ -1130,7 +1133,7 @@ impl Default for FloppyBridgeConfig {
             mode: BridgeSpeedMode::default(),
             density: BridgeDensity::default(),
             cable: BridgeCable::default(),
-            speed: 100,
+            speed: DEFAULT_BRIDGE_SPEED_PERCENT,
             auto_cache: false,
         }
     }
@@ -2809,8 +2812,8 @@ pub(crate) struct RawFloppyDrive {
     /// `0`..`3` (Shugart).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) bridge_cable: Option<String>,
-    /// Serve captured tracks at this percentage of real speed: 100 (the
-    /// default), 125, or 150.
+    /// Serve captured tracks at this percentage of real speed: 100,
+    /// 125 (the default), 150, 175, or 200.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) bridge_speed: Option<u16>,
     /// Let the driver cache other cylinders while the disk is
@@ -4481,11 +4484,11 @@ fn parse_floppy_bridge(idx: usize, spec: &str, raw: &RawFloppyDrive) -> Result<F
         .map(str::to_string);
 
     let speed = match raw.bridge_speed {
-        None => 100,
+        None => DEFAULT_BRIDGE_SPEED_PERCENT,
         Some(p) if SUPPORTED_BRIDGE_SPEED_PERCENTS.contains(&p) => p,
         Some(other) => bail!(
             "floppy.df{idx} bridge_speed = {other} is not a supported serving \
-             speed (100, 125, or 150)"
+             speed (100, 125, 150, 175, or 200)"
         ),
     };
 
@@ -6904,7 +6907,7 @@ mod tests {
         assert_eq!(df0.port, None);
         assert_eq!(df0.mode, BridgeSpeedMode::Normal);
         assert_eq!(df0.density, BridgeDensity::Auto);
-        assert_eq!(df0.speed, 100);
+        assert_eq!(df0.speed, DEFAULT_BRIDGE_SPEED_PERCENT);
         assert!(!df0.auto_cache);
 
         let df1 = cfg.floppy.bridges[1].as_ref().expect("df1 bridged");
@@ -6921,22 +6924,42 @@ mod tests {
         Ok(())
     }
 
-    /// Only the three supported serving speeds are accepted, by name in the
-    /// error so a typo explains itself.
+    /// Only the listed serving speeds are accepted, by name in the error so
+    /// a typo explains itself. A value between two of them is still refused.
     #[cfg(feature = "floppybridge")]
     #[test]
     fn floppy_bridge_speed_rejects_unsupported_values() {
-        let err = parse_config(
-            r#"
-            [floppy.df0]
-            bridge = "greaseweazle"
-            bridge_speed = 120
-        "#,
-        )
-        .expect_err("120 is not a supported serving speed");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("bridge_speed"), "unexpected error: {msg}");
-        assert!(msg.contains("125"), "names the accepted values: {msg}");
+        for bad in [120, 160, 250] {
+            let err = parse_config(&format!(
+                r#"
+                [floppy.df0]
+                bridge = "greaseweazle"
+                bridge_speed = {bad}
+            "#
+            ))
+            .expect_err("not a supported serving speed");
+            let msg = format!("{err:#}");
+            assert!(msg.contains("bridge_speed"), "unexpected error: {msg}");
+            assert!(msg.contains("125"), "names the accepted values: {msg}");
+        }
+    }
+
+    /// Every listed speed parses back as itself, the fastest included.
+    #[cfg(feature = "floppybridge")]
+    #[test]
+    fn floppy_bridge_speed_accepts_every_listed_value() -> Result<()> {
+        for want in SUPPORTED_BRIDGE_SPEED_PERCENTS {
+            let cfg = parse_config(&format!(
+                r#"
+                [floppy.df0]
+                bridge = "greaseweazle"
+                bridge_speed = {want}
+            "#
+            ))?;
+            let df0 = cfg.floppy.bridges[0].as_ref().expect("df0 bridged");
+            assert_eq!(df0.speed, want);
+        }
+        Ok(())
     }
 
     // A build without the feature has no bridges to configure: the keys are
