@@ -11,6 +11,13 @@
 //    adds it to the mount list. DOS mounts the nodes at boot; the handler
 //    process is started on first reference.
 //
+// Kickstart 1.3 (V34) is supported for mounting: both entry points probe
+// the library versions at runtime and fall back from the V36+ calls
+// (AddBootNode, AddDosEntry/RemDosEntry/LockDosList) to their 1.3-era
+// equivalents (AddDosNode, a Forbid-protected splice of the DosInfo
+// device chain). Booting *from* a hostfs volume still needs 2.0+: the
+// bootpri vote rides on the V36 BootNode strap.
+//
 //  - handler_main(): the DOS handler process. A pure packet pump: every
 //    DosPacket is rung in through this unit's doorbell register in the
 //    board window; the emulator implements the ACTION_* semantics against
@@ -74,10 +81,49 @@ struct HostRegs {
 _Static_assert(sizeof(struct HostRegs) == REG_BANK_SIZE,
                "HostRegs must cover exactly one register bank");
 
+// The 1.3 DosList: dos.library V34 has no AddDosEntry/RemDosEntry, and its
+// list has no semaphore -- the convention is Forbid() around a splice of
+// the BPTR-linked di_DevInfo chain hanging off the RootNode.
+static LONG *devinfo_head(struct Library *dosbase)
+{
+    struct RootNode *root = ((struct DosLibrary *)dosbase)->dl_Root;
+    struct DosInfo *info = BADDR(root->rn_Info);
+    return (LONG *)&info->di_DevInfo;
+}
+
+static void add_dos_entry_v34(struct ExecBase *_sysbase,
+                              struct Library *dosbase, struct DosList *vol)
+{
+    LONG *head = devinfo_head(dosbase);
+    Forbid();
+    vol->dol_Next = *head;
+    *head = MKBADDR(vol);
+    Permit();
+}
+
+static void rem_dos_entry_v34(struct ExecBase *_sysbase,
+                              struct Library *dosbase, struct DosList *vol)
+{
+    LONG *prev = devinfo_head(dosbase);
+    Forbid();
+    while (*prev != 0) {
+        struct DosList *node = BADDR(*prev);
+        if (node == vol) {
+            *prev = node->dol_Next;
+            break;
+        }
+        prev = (LONG *)&node->dol_Next;
+    }
+    Permit();
+}
+
 void handler_main(void)
 {
     struct ExecBase *_sysbase = sysbase();
-    struct Library *_dosbase = OpenLibrary((STRPTR) "dos.library", 36);
+    // V34 (Kickstart 1.3) is the supported floor: below 36 the volume
+    // add/remove falls back to the V34 conventions, and 1.2's V33 never
+    // reaches us anyway (no expansion diag-ROM hook to mount with).
+    struct Library *_dosbase = OpenLibrary((STRPTR) "dos.library", 34);
     struct Process *me = (struct Process *)FindTask(NULL);
     struct MsgPort *port = &me->pr_MsgPort;
     struct HostRegs *regs = NULL;
@@ -111,19 +157,26 @@ void handler_main(void)
                 PutMsg(reply, pkt->dp_Link);
             }
             // After replying, so DOS is not blocked on us while we take
-            // the DosList semaphore.
-            if (res == RES_ADDVOLUME && _dosbase != NULL)
-                AddDosEntry(vol);
-            else if (res == RES_DIE) {
+            // the DosList semaphore (V36+) or Forbid (V34).
+            if (res == RES_ADDVOLUME && _dosbase != NULL) {
+                if (_dosbase->lib_Version >= 36)
+                    AddDosEntry(vol);
+                else
+                    add_dos_entry_v34(_sysbase, _dosbase, vol);
+            } else if (res == RES_DIE) {
                 // ACTION_DIE: the emulator already cleared dn_Task and
                 // dropped this unit's state. Take the volume off the
                 // DosList (AddDosEntry locks internally, RemDosEntry
                 // does not), tell the host the unit is going dark, and
                 // end the process.
                 if (vol != NULL && _dosbase != NULL) {
-                    LockDosList(LDF_VOLUMES | LDF_WRITE);
-                    RemDosEntry(vol);
-                    UnLockDosList(LDF_VOLUMES | LDF_WRITE);
+                    if (_dosbase->lib_Version >= 36) {
+                        LockDosList(LDF_VOLUMES | LDF_WRITE);
+                        RemDosEntry(vol);
+                        UnLockDosList(LDF_VOLUMES | LDF_WRITE);
+                    } else {
+                        rem_dos_entry_v34(_sysbase, _dosbase, vol);
+                    }
                 }
                 regs->msgport = 0;
                 if (_dosbase != NULL)
@@ -173,8 +226,15 @@ void mount_boards(UBYTE *board, struct Library *_expbase, struct ConfigDev *cd)
         // -128 mounts at DOS init but is never a boot candidate.
         // ADNF_STARTPROC: start the handler process at mount time rather
         // than on first reference, so problems surface at boot.
+        // AddBootNode is V36+; on 1.3's V34 expansion.library the same
+        // AddDosNode call (V33+) queues the node on eb_MountList, which
+        // V34 dos.library binds at init -- mounted, but outside the boot
+        // vote, so bootpri is inert under 1.3.
         struct FileSysStartupMsg *fssm = BADDR(dn->dn_Startup);
         struct DosEnvec *env = BADDR(fssm->fssm_Environ);
-        AddBootNode((BYTE)env->de_BootPri, ADNF_STARTPROC, dn, cd);
+        if (_expbase->lib_Version >= 36)
+            AddBootNode((BYTE)env->de_BootPri, ADNF_STARTPROC, dn, cd);
+        else
+            AddDosNode((BYTE)env->de_BootPri, ADNF_STARTPROC, dn);
     }
 }

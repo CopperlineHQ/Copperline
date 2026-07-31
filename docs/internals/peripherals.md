@@ -186,7 +186,11 @@ in-memory FFS volume behind a virtual drive. The guest side is a tiny
 handler (see `guest/services/`) mapped into the Copperline services board
 with a mount table and a hand-built DiagArea; at expansion init it builds
 one DeviceNode per mount and `AddBootNode`s it (at the mount's configured
-boot priority), so DOS mounts the devices at boot. The handler forwards
+boot priority), so DOS mounts the devices at boot. The handler probes the
+library versions at runtime and falls back to the 1.3-era calls
+(`AddDosNode`, a Forbid-protected DosList splice) on Kickstart 1.3, which
+mounts but cannot boot from the volumes -- the bootpri vote needs the
+2.0+ BootNode strap. The handler forwards
 every DosPacket to the host through a doorbell register in the board's
 MMIO window: writing the packet APTR to `REG_DOSPKT` services the packet
 synchronously inside the register write, so `dp_Res1`/`dp_Res2` and the
