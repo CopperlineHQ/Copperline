@@ -1,13 +1,16 @@
 name: Windows
 
-# Builds the portable Windows zip and uploads it as a workflow artifact on
-# every qualifying change, and attaches it to the GitHub Release when a v* tag
-# is pushed. This is also the only Windows coverage (the main CI runs on
-# macOS and Linux), so the code-path triggers below run the full release
-# build on pull requests too, and the job then runs the functional suites on
-# the Windows build: the packaged zip is booted from a clean directory, and
-# the unit tests plus the probe golden renders (pixel-exact deterministic
-# boots on the bundled AROS ROM) run against the same release target.
+# Two parallel builder jobs produce the portable Windows zip and the prebuilt
+# test executables (both are full release compiles and roughly equally
+# expensive, so splitting them halves the critical path), then the checks fan
+# out in parallel against those artifacts, mirroring ci.yml: the packaged zip
+# is booted from a clean directory, and the unit suites plus the probe golden
+# renders (pixel-exact deterministic boots on the bundled AROS ROM) run
+# against the same release binaries. This is also the only Windows coverage
+# (the main CI runs on macOS and Linux), so the code-path triggers below run
+# the full release build on pull requests too. On a v* tag push (or a manual
+# run with release_tag) the zip is attached to the GitHub Release by the
+# release job, which runs only after every check passes.
 on:
   push:
     branches: [main]
@@ -50,10 +53,10 @@ concurrency:
 jobs:
   build:
     name: Build Windows zip
+    # Compiles the release binary and packages the portable zip; the sibling
+    # test-bins job compiles the test executables in parallel on its own
+    # runner.
     runs-on: windows-latest
-    # Needed only by the release-attach step on v* tags.
-    permissions:
-      contents: write
     steps:
       - name: Force LF checkout
         # The runner's git converts detected-text files to CRLF on checkout
@@ -75,9 +78,83 @@ jobs:
         run: |
           $zip = Get-ChildItem Copperline-*-win-x64.zip | Select-Object -First 1
           "path=$($zip.Name)" >> $env:GITHUB_OUTPUT
+      - name: Upload zip
+        # Consumed by the zip-smoke and release jobs, and kept as the
+        # workflow artifact. Uploading here (before the checks run) also
+        # means a failing check still leaves the zip downloadable for
+        # debugging.
+        uses: actions/upload-artifact@v7
+        with:
+          name: copperline-windows
+          path: ${{ steps.artifact.outputs.path }}
+          if-no-files-found: error
+
+  test-bins:
+    name: Build test binaries
+    # Compiles the #[test] targets once and hands the finished executables
+    # to the test jobs below (needs: test-bins) as a workflow artifact.
+    # Binaries, not a shared cargo cache: the test executables are plain
+    # libtest binaries and run fine without cargo. cargo builds the emulator
+    # binary here too (the integration tests spawn it through the
+    # compile-time CARGO_BIN_EXE_copperline path), so the staged
+    # copperline.exe pairs with the probe_golden harness compiled alongside
+    # it and this job needs nothing from the zip build. Swatinem/rust-cache
+    # keys per job, so each builder keeps its own warm cache.
+    runs-on: windows-latest
+    steps:
+      - name: Force LF checkout
+        # Keep committed fixture bytes identical to the build job (see the
+        # comment there).
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      - name: Compile test binaries
+        shell: pwsh
+        # The JSON build plan maps each test target to its hash-suffixed
+        # executable so the binaries can be staged under stable names for
+        # the fan-out jobs. The asset-gated integration tests under tests/
+        # keep compiling here too (they are #[ignore]d at run time, not
+        # excluded from the build).
+        run: |
+          $ErrorActionPreference = "Stop"
+          cargo test --release --locked --target x86_64-pc-windows-msvc --no-run --message-format=json > cargo-test-build.json
+          if ($LASTEXITCODE -ne 0) { throw "cargo test --no-run exited with $LASTEXITCODE" }
+          New-Item -ItemType Directory -Force -Path ci-bins | Out-Null
+          Copy-Item target\x86_64-pc-windows-msvc\release\copperline.exe ci-bins\
+          Get-Content cargo-test-build.json | ForEach-Object {
+            $msg = $_ | ConvertFrom-Json
+            if ($msg.reason -eq "compiler-artifact" -and $msg.profile.test -and $msg.executable) {
+              switch ("$($msg.target.kind[0]):$($msg.target.name)") {
+                "lib:copperline"     { Copy-Item $msg.executable ci-bins\unit-lib.exe }
+                "bin:copperline"     { Copy-Item $msg.executable ci-bins\unit-bin-copperline.exe }
+                "bin:copperline-ctl" { Copy-Item $msg.executable ci-bins\unit-bin-copperline-ctl.exe }
+                "test:probe_golden"  { Copy-Item $msg.executable ci-bins\probe_golden.exe }
+              }
+            }
+          }
+          Get-ChildItem ci-bins
+      - name: Upload binaries for the test jobs
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-test-bins
+          path: ci-bins/
+
+  zip-smoke:
+    name: Packaged zip boot smoke
+    needs: build
+    runs-on: windows-latest
+    # No checkout: the zip must stand on its own, which is the point of the
+    # test.
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: copperline-windows
       - name: Smoke test the packaged zip
         shell: pwsh
-        # Expand the freshly built zip outside the checkout and boot it from
+        # Expand the freshly built zip outside the workspace and boot it from
         # there: the run must find the bundled AROS ROM through the sibling
         # aros\ lookup next to the exe (romsearch.rs), not the source tree's
         # assets/aros fallback that a repo-root cwd would satisfy. A capture
@@ -87,23 +164,79 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           Set-StrictMode -Version Latest
+          $zip = Get-ChildItem Copperline-*-win-x64.zip | Select-Object -First 1
           $stage = Join-Path $env:RUNNER_TEMP "zip-smoke"
-          Expand-Archive -Path "${{ steps.artifact.outputs.path }}" -DestinationPath $stage
+          Expand-Archive -Path $zip.FullName -DestinationPath $stage
           $exe = Get-ChildItem -Path $stage -Recurse -Filter copperline.exe | Select-Object -First 1
           Set-Location $exe.DirectoryName
           & $exe.FullName --noaudio --screenshot-after 10 smoke.png
           if ($LASTEXITCODE -ne 0) { throw "packaged emulator exited with $LASTEXITCODE" }
           if ((Get-Item smoke.png).Length -eq 0) { throw "screenshot is empty" }
-      - name: Unit tests and probe golden renders
+
+  unit-tests:
+    name: Unit tests
+    needs: test-bins
+    runs-on: windows-latest
+    steps:
+      - name: Force LF checkout
+        # Keep committed fixture bytes identical to the build job (see the
+        # comment there); some unit tests read fixtures at run time.
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: windows-test-bins
+          path: ci-bins
+      - name: Unit tests
         shell: pwsh
-        # Everything a root `cargo test` runs: the inline unit suites and
-        # tests/probe_golden.rs, which boots each committed timing probe on
-        # the bundled AROS ROM and compares the render pixel-for-pixel
-        # against timing-test/golden/ -- proving the emulation core behaves
-        # identically on Windows, not merely that it compiles. Reuses the
-        # dependency build from the zip step via the same --target; the
-        # asset-gated integration tests skip themselves (#[ignore]).
-        run: cargo test --release --locked --target x86_64-pc-windows-msvc
+        # The inline #[cfg(test)] suites in the lib and binaries, prebuilt
+        # by the test-bins job (this is everything a root `cargo test` runs
+        # besides tests/probe_golden.rs, which has its own job below; the
+        # crate has no doctests).
+        run: |
+          $ErrorActionPreference = "Stop"
+          ./ci-bins/unit-lib.exe
+          if ($LASTEXITCODE -ne 0) { throw "unit-lib exited with $LASTEXITCODE" }
+          ./ci-bins/unit-bin-copperline.exe
+          if ($LASTEXITCODE -ne 0) { throw "unit-bin-copperline exited with $LASTEXITCODE" }
+          ./ci-bins/unit-bin-copperline-ctl.exe
+          if ($LASTEXITCODE -ne 0) { throw "unit-bin-copperline-ctl exited with $LASTEXITCODE" }
+
+  probe-golden:
+    name: Probe golden renders
+    needs: test-bins
+    runs-on: windows-latest
+    steps:
+      - name: Force LF checkout
+        # Keep committed fixture bytes identical to the build job (see the
+        # comment there); the golden comparison reads committed renders.
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: windows-test-bins
+          path: ci-bins
+      - name: Probe golden renders
+        shell: pwsh
+        # tests/probe_golden.rs is fully self-contained (committed probe
+        # binaries booted on the bundled AROS ROM) and compares each probe's
+        # deterministic render pixel-for-pixel against the references in
+        # timing-test/golden/ -- proving the emulation core behaves
+        # identically on Windows, not merely that it compiles. Each probe is
+        # its own #[test], so the boots run in parallel on the runner's
+        # cores. See timing-test/README.md "CI golden renders" for the
+        # re-bless workflow.
+        #
+        # The test harness spawns the emulator through the compile-time
+        # CARGO_BIN_EXE_copperline path, which on hosted runners is the same
+        # absolute path in every job of this repo -- hence the copy into the
+        # --target build directory before running.
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path target\x86_64-pc-windows-msvc\release | Out-Null
+          Copy-Item ci-bins\copperline.exe target\x86_64-pc-windows-msvc\release\copperline.exe
+          ./ci-bins/probe_golden.exe
+          if ($LASTEXITCODE -ne 0) { throw "probe_golden exited with $LASTEXITCODE" }
       - name: Upload probe render diffs
         # On a golden mismatch the test writes the actual renders and diff
         # masks; surface them so the regression is reviewable from the run.
@@ -113,11 +246,33 @@ jobs:
           name: probe-golden-diffs-windows
           path: target/probe-golden/
           if-no-files-found: ignore
-      - uses: actions/upload-artifact@v7
+
+  release:
+    name: Attach zip to release
+    # Runs only once every Windows check has passed, preserving the old
+    # single-job ordering where the tests gated the release attach. Plain
+    # ubuntu: this job only moves the already-built artifact.
+    needs: [zip-smoke, unit-tests, probe-golden]
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
         with:
           name: copperline-windows
-          path: ${{ steps.artifact.outputs.path }}
-          if-no-files-found: error
+      - name: Locate artifact
+        id: artifact
+        # Fail fast if the downloaded zip is not where this job expects it;
+        # an unmatched glob would otherwise pass the literal pattern to the
+        # upload steps below.
+        run: |
+          zip=(Copperline-*-win-x64.zip)
+          if [ ! -f "${zip[0]}" ]; then
+            echo "no Copperline-*-win-x64.zip in $PWD" >&2
+            exit 1
+          fi
+          echo "path=${zip[0]}" >> "$GITHUB_OUTPUT"
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
@@ -127,7 +282,6 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
-        shell: pwsh
         # --clobber so a re-run replaces the asset instead of failing on a
-        # name clash.
-        run: gh release upload "${{ inputs.release_tag }}" "${{ steps.artifact.outputs.path }}" --clobber
+        # name clash; --repo because this job runs without a checkout.
+        run: gh release upload "${{ inputs.release_tag }}" "${{ steps.artifact.outputs.path }}" --clobber --repo "${{ github.repository }}"
