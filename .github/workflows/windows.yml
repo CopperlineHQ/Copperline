@@ -1,14 +1,16 @@
 name: Windows
 
-# Builds the portable Windows zip once, then fans the checks out in parallel
-# (needs: build), mirroring ci.yml: the packaged zip is booted from a clean
-# directory, and the unit suites plus the probe golden renders (pixel-exact
-# deterministic boots on the bundled AROS ROM) run against the same release
-# binaries. This is also the only Windows coverage (the main CI runs on macOS
-# and Linux), so the code-path triggers below run the full release build on
-# pull requests too. On a v* tag push (or a manual run with release_tag) the
-# zip is attached to the GitHub Release by the release job, which runs only
-# after every check passes.
+# Two parallel builder jobs produce the portable Windows zip and the prebuilt
+# test executables (both are full release compiles and roughly equally
+# expensive, so splitting them halves the critical path), then the checks fan
+# out in parallel against those artifacts, mirroring ci.yml: the packaged zip
+# is booted from a clean directory, and the unit suites plus the probe golden
+# renders (pixel-exact deterministic boots on the bundled AROS ROM) run
+# against the same release binaries. This is also the only Windows coverage
+# (the main CI runs on macOS and Linux), so the code-path triggers below run
+# the full release build on pull requests too. On a v* tag push (or a manual
+# run with release_tag) the zip is attached to the GitHub Release by the
+# release job, which runs only after every check passes.
 on:
   push:
     branches: [main]
@@ -51,10 +53,9 @@ concurrency:
 jobs:
   build:
     name: Build Windows zip
-    # Compiles everything once and hands the finished binaries to the test
-    # jobs below (needs: build) as workflow artifacts. Binaries, not a shared
-    # cargo cache: the test executables are plain libtest binaries and run
-    # fine without cargo.
+    # Compiles the release binary and packages the portable zip; the sibling
+    # test-bins job compiles the test executables in parallel on its own
+    # runner.
     runs-on: windows-latest
     steps:
       - name: Force LF checkout
@@ -77,10 +78,41 @@ jobs:
         run: |
           $zip = Get-ChildItem Copperline-*-win-x64.zip | Select-Object -First 1
           "path=$($zip.Name)" >> $env:GITHUB_OUTPUT
+      - name: Upload zip
+        # Consumed by the zip-smoke and release jobs, and kept as the
+        # workflow artifact. Uploading here (before the checks run) also
+        # means a failing check still leaves the zip downloadable for
+        # debugging.
+        uses: actions/upload-artifact@v7
+        with:
+          name: copperline-windows
+          path: ${{ steps.artifact.outputs.path }}
+          if-no-files-found: error
+
+  test-bins:
+    name: Build test binaries
+    # Compiles the #[test] targets once and hands the finished executables
+    # to the test jobs below (needs: test-bins) as a workflow artifact.
+    # Binaries, not a shared cargo cache: the test executables are plain
+    # libtest binaries and run fine without cargo. cargo builds the emulator
+    # binary here too (the integration tests spawn it through the
+    # compile-time CARGO_BIN_EXE_copperline path), so the staged
+    # copperline.exe pairs with the probe_golden harness compiled alongside
+    # it and this job needs nothing from the zip build. Swatinem/rust-cache
+    # keys per job, so each builder keeps its own warm cache.
+    runs-on: windows-latest
+    steps:
+      - name: Force LF checkout
+        # Keep committed fixture bytes identical to the build job (see the
+        # comment there).
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
       - name: Compile test binaries
         shell: pwsh
-        # cargo build (inside build-zip.ps1) does not compile #[test]
-        # targets; this reuses its dependency build via the same --target.
         # The JSON build plan maps each test target to its hash-suffixed
         # executable so the binaries can be staged under stable names for
         # the fan-out jobs. The asset-gated integration tests under tests/
@@ -109,16 +141,6 @@ jobs:
         with:
           name: windows-test-bins
           path: ci-bins/
-      - name: Upload zip
-        # Consumed by the zip-smoke and release jobs, and kept as the
-        # workflow artifact. Uploading here (before the checks run) also
-        # means a failing check still leaves the zip downloadable for
-        # debugging.
-        uses: actions/upload-artifact@v7
-        with:
-          name: copperline-windows
-          path: ${{ steps.artifact.outputs.path }}
-          if-no-files-found: error
 
   zip-smoke:
     name: Packaged zip boot smoke
@@ -153,7 +175,7 @@ jobs:
 
   unit-tests:
     name: Unit tests
-    needs: build
+    needs: test-bins
     runs-on: windows-latest
     steps:
       - name: Force LF checkout
@@ -168,7 +190,7 @@ jobs:
       - name: Unit tests
         shell: pwsh
         # The inline #[cfg(test)] suites in the lib and binaries, prebuilt
-        # by the build job (this is everything a root `cargo test` runs
+        # by the test-bins job (this is everything a root `cargo test` runs
         # besides tests/probe_golden.rs, which has its own job below; the
         # crate has no doctests).
         run: |
@@ -182,7 +204,7 @@ jobs:
 
   probe-golden:
     name: Probe golden renders
-    needs: build
+    needs: test-bins
     runs-on: windows-latest
     steps:
       - name: Force LF checkout
@@ -241,8 +263,15 @@ jobs:
           name: copperline-windows
       - name: Locate artifact
         id: artifact
+        # Fail fast if the downloaded zip is not where this job expects it;
+        # an unmatched glob would otherwise pass the literal pattern to the
+        # upload steps below.
         run: |
           zip=(Copperline-*-win-x64.zip)
+          if [ ! -f "${zip[0]}" ]; then
+            echo "no Copperline-*-win-x64.zip in $PWD" >&2
+            exit 1
+          fi
           echo "path=${zip[0]}" >> "$GITHUB_OUTPUT"
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/v')
