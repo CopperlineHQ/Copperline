@@ -3848,7 +3848,7 @@ impl App {
     }
 
     /// COPPERLINE_DIAG_CURSOR: trace how the most recent click maps from host
-    /// physical coordinates through pixels' window_pos_to_pixel into a
+    /// physical coordinates through the scaling renderer's clip rect into a
     /// texture/region hit. The tool for diagnosing mouse capture on DPI scale
     /// changes and mixed-scale monitors (see the ScaleFactorChanged handler):
     /// if a status-bar click logs region=display(->capture), the surface and
@@ -3863,7 +3863,9 @@ impl App {
         let scale_factor = r.window.scale_factor();
         let inner = r.window.inner_size();
         let phys = self.last_cursor_phys;
-        let mapped = phys.map(|p| r.pixels.window_pos_to_pixel((p.x as f32, p.y as f32)));
+        let context = r.pixels.context();
+        let clip = context.scaling_renderer.clip_rect();
+        let texture = (context.texture_extent.width, context.texture_extent.height);
         let pos = phys.and_then(|p| cursor_texture_position(&r.pixels, p, r.texture_scale));
         let region = match pos {
             Some(p) if cursor_in_status_bar(p) => "status_bar",
@@ -3873,11 +3875,13 @@ impl App {
         };
         info!(
             "[DIAG_CURSOR] button={button:?} phys={phys:?} scale_factor={scale_factor:.4} \
-             inner={}x{} texture_scale={} window_pos_to_pixel={mapped:?} mapped_pos={pos:?} \
+             inner={}x{} texture_scale={} clip_rect={clip:?} texture={}x{} mapped_pos={pos:?} \
              region={region} (present_h={} window_present_h={} fb_w={FB_WIDTH})",
             inner.width,
             inner.height,
             r.texture_scale,
+            texture.0,
+            texture.1,
             present_height(),
             window_present_height(),
         );
