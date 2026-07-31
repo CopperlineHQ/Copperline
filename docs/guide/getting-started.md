@@ -7,7 +7,7 @@ native desktop build.
 
 ## Requirements
 
-- Rust 1.87+ (stable). Tested with Rust 1.96.
+- Rust 1.93+ (stable). Tested with Rust 1.96.
 - macOS, Linux, or Windows. There is no SDL2 dependency: video uses
   `winit` + `pixels`, audio uses `cpal`, and gamepads use the pure-Rust
   `gilrs` crate.

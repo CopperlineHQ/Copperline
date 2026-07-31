@@ -1,5 +1,5 @@
 //! Drives WinUAE cputest-generated instruction test sets against the
-//! in-tree m68k core.
+//! published m68k core.
 //!
 //! The vendored (MIT) runner from emoon's m68k_cpu_tester_api parses the
 //! `.dat` sets that Toni Wilen's cputest generator produces -- every opcode

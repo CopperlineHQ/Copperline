@@ -4,8 +4,8 @@ Website: [copperline.dev](https://copperline.dev/) |
 Chat: [Discord](https://discord.gg/HDTjt3tYAC) |
 Support: [Patreon](https://www.patreon.com/cw/Copperline)
 
-An Amiga emulator written in Rust, built around a vendored copy of
-the pure-Rust [m68k](crates/m68k) CPU core, with a
+An Amiga emulator written in Rust, built around the pure-Rust
+[m68k](https://crates.io/crates/m68k) CPU core, with a
 [pixels](https://crates.io/crates/pixels) + [winit](https://crates.io/crates/winit)
 window for video and stdout for serial. It started life with the modest
 goal of booting [DiagROM](https://www.diagrom.com/) far enough to show a
@@ -78,7 +78,7 @@ against real hardware.
 
 ## Requirements
 
-- Rust 1.87+ (stable). Tested with Rust 1.96.
+- Rust 1.93+ (stable). Tested with Rust 1.96.
 - Fedora build dependencies: `sudo dnf install alsa-lib-devel systemd-devel`.
 - No SDL2 dependency. Developed and tested on **macOS**; the Linux and
   Windows paths are expected to work but are currently untested.
@@ -312,16 +312,16 @@ See `docs/README.md` for conventions and PDF output.
 Copperline is distributed from source. On macOS this repository doubles as a
 Homebrew tap (`Formula/`); on Linux it builds as a Flatpak for Flathub
 (`packaging/flatpak/`) and as a portable AppImage (`packaging/appimage/`). It
-is not on crates.io: `Cargo.toml` sets `publish = false` because the emulator
-depends on a patched vendored copy of the `m68k` CPU core, which a crates.io
-release needs resolved first. Release steps for every channel are in
+is not on crates.io: `Cargo.toml` sets `publish = false` because Copperline is
+distributed as an application rather than a library. Release steps for every
+channel are in
 [`RELEASE.md`](RELEASE.md).
 
 ## What gets emulated
 
 | Subsystem | Notes |
 | --- | --- |
-| M68K CPU | Via a vendored pure-Rust m68k crate; model selectable through 68060, accurate 68000 cycle counts, datasheet-based 68020 integer timing, 020+ caches, 6888x FPU, 68030/68040 MMUs. |
+| M68K CPU | Via the published pure-Rust m68k crate; model selectable through 68060, accurate 68000 cycle counts, datasheet-based 68020 integer timing, 020+ caches, 6888x FPU, 68030/68040 MMUs. |
 | Chip RAM | mem_map'd; reset starts with ROM overlaid at $0 until CIA-A releases /OVL. |
 | Fast RAM | Optional Zorro II autoconfig RAM at $00200000 and Zorro III autoconfig RAM (`[memory] z3`); runs at the CPU clock. |
 | Slow RAM | Optional A500 trapdoor/fake-fast RAM at $00C00000; arbitrated on the chip bus through Agnus like chip RAM. |
@@ -395,7 +395,7 @@ open without a Gatekeeper or SmartScreen warning.
   m68k nightly build (see [assets/aros/README.md](assets/aros/README.md)).
 - [DiagROM](https://www.diagrom.com/) by John "Chucky" Hertell,
   licensed for free use.
-- The [m68k](crates/m68k) CPU core vendored under `crates/m68k`.
+- The MIT-licensed [m68k](https://crates.io/crates/m68k) CPU core.
 - The public-domain `font8x8` glyphs by Daniel Hepper / Marcel Sondaar
   for the on-screen overlay font.
 - The Amiga Hardware Reference Manual for register-level documentation.
@@ -407,9 +407,8 @@ open without a Gatekeeper or SmartScreen warning.
 
 Copperline is free software, released under the GNU General Public
 License version 3 or (at your option) any later version. See
-[LICENSE](LICENSE) for the full text. The vendored
-[m68k](crates/m68k) CPU core under `crates/m68k`
-retains its own MIT license.
+[LICENSE](LICENSE) for the full text. Its
+[m68k](https://crates.io/crates/m68k) dependency is MIT licensed.
 
 ## Trademarks
 

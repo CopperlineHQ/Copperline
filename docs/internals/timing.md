@@ -618,7 +618,7 @@ mechanisms sit between the two events, and Copperline models both:
 Together these reproduce the raise-to-handler-entry positions measured
 against vAmiga (and the vAmigaTS real-A500 photos) across VERTB and
 copper-poked INTREQ sources under a range of foreground loops; the residual
-is 0..+7 CCK of per-instruction IPL poll-point detail the vendored core does
+is 0..+7 CCK of per-instruction IPL poll-point detail the m68k core does
 not model. An earlier revision used a blanket 65 CCK "recognition latency"
 calibrated against timing-test row 19 with a mis-decoded VHPOSR (the low
 byte is the CCK position, not CCK/2); that delivered every interrupt ~50 CCK
@@ -649,9 +649,8 @@ debits a per-frame instruction budget one of two ways, selected by
   through every CPU cycle as it executes -- internal cycles, bus-cycle
   tails, chip-bus grants and contention waits -- so the slice's elapsed bus
   CCK is the true hardware cost (`real_slice_accounting` in
-  `src/emulator.rs`). Because the vendored core's 68000 cycle totals are
-  exact across the SingleStepTests corpus
-  (`crates/m68k/CYCLE_TIMING_GAP.md`),
+  `src/emulator.rs`). Because the m68k core's 68000 cycle totals are exact
+  across its [SingleStepTests validation corpus](https://github.com/benletchford/m68k-rs/tree/m68k-v0.3.1#validation--testing),
   this matches a stock PAL 68000.
 - `instructions`: a flat cycles-per-instruction quota
   (`COPPERLINE_REAL_CPU_CPI`, default 4.0), debited by retired

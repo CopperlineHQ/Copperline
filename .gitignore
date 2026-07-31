@@ -21,13 +21,8 @@
 # Local asset directory for the ignored integration tests.
 /test-assets/
 
-# Vendored m68k crate: ignore build output and the large SingleStepTests /
-# Musashi fixture submodules (fetched separately, never committed).
-/crates/m68k/target
+# Standalone cputest runner build output.
 /crates/cputest-runner/target
-/crates/m68k/Cargo.lock
-/crates/m68k/tests/fixtures/m68000
-/crates/m68k/tests/fixtures/Musashi
 # CD images (cue/bin) are local assets, never committed.
 *.[Cc][Uu][Ee]
 *.[Bb][Ii][Nn]

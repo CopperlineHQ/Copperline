@@ -92,7 +92,6 @@ src/
     ui.rs           # pop-up menu, overlay panels, and debugger/analyzer panel drawing
     launcher.rs     # machine-configuration (launcher) screen
     font.rs         # 8x8 overlay font
-crates/m68k/        # vendored m68k CPU core
 crates/copperline-web/   # standalone wasm-bindgen browser frontend (WebEmu + page glue)
 crates/cputest-runner/   # WinUAE cputest instruction-suite runner for the m68k core
 tests/              # ignored integration tests (need local ROM assets)
@@ -121,7 +120,7 @@ CI-enforced portability invariant.
 The flow of a frame:
 
 1. The frame loop hands the CPU an instruction budget. The CPU executes
-   one instruction at a time through the vendored m68k core; every memory
+   one instruction at a time through the published `m68k` core; every memory
    access the instruction makes is routed through the bus adapter and
    *billed in colour clocks* (CCK, 3.546895 MHz -- the chip bus clock).
 2. Advancing the clock for a CPU access also advances everything else:

@@ -2,7 +2,7 @@
 name = "copperline"
 version = "0.13.0"
 edition = "2021"
-rust-version = "1.87"
+rust-version = "1.93"
 license = "GPL-3.0-or-later"
 description = "A cycle-driven Amiga emulator written in Rust"
 readme = "README.md"
@@ -87,11 +87,7 @@ ctl-bin = ["dep:serde_json"]
 floppybridge = []
 
 [dependencies]
-# Path-only dependency on the in-tree fork (crates/m68k). No version requirement
-# and a non-crates.io package name (copperline-m68k) guarantee the local copy is
-# always used and the upstream `m68k` crate can never be pulled in; aliased back
-# to `m68k` so source keeps `use m68k::...`. See crates/m68k/Cargo.toml.
-m68k = { package = "copperline-m68k", path = "crates/m68k" }
+m68k = { version = "0.3.1", features = ["serde"] }
 pixels = { version = "0.17", optional = true }
 winit = { version = "0.30", optional = true }
 anyhow = "1"

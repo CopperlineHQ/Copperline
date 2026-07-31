@@ -84,11 +84,11 @@ dependencies = [
  "anyhow",
  "bincode",
  "cc",
- "copperline-m68k",
  "flate2",
  "hound",
  "libc",
  "log",
+ "m68k",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
@@ -100,13 +100,6 @@ dependencies = [
  "toml",
  "web-time",
  "zerocopy",
-]
-
-[[package]]
-name = "copperline-m68k"
-version = "0.1.5"
-dependencies = [
- "serde",
 ]
 
 [[package]]
@@ -245,6 +238,15 @@ name = "log"
 version = "0.4.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
+
+[[package]]
+name = "m68k"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5a27246c9d8514907e1fa813761e649d69ba14ba2fd9e9b7747fcf5812f7830"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "memchr"

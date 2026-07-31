@@ -1,8 +1,7 @@
 # Release Checklist
 
-Copperline is currently released from source. The crate is marked
-`publish = false` because it depends on a patched vendored copy of `m68k`;
-resolve that dependency story before attempting a crates.io release.
+Copperline is currently released as a source application rather than a
+crates.io library, so the root package remains marked `publish = false`.
 
 ## Before Creating the Public Repository
 
@@ -29,9 +28,6 @@ resolve that dependency story before attempting a crates.io release.
      `sprprobe-*` bootblocks), each built from its adjacent `.asm`
    - `timing-test/golden/*.png`, the blessed golden renders for
      `tests/probe_golden.rs`
-   - `crates/m68k/tests/fixtures/extra/**/bin/*.bin`, built from the
-     adjacent assembly sources under sibling `src/` directories
-
 3. Confirm local assets are still ignored:
 
    ```sh
@@ -42,21 +38,20 @@ resolve that dependency story before attempting a crates.io release.
 
 `crates/copperline-web` and `crates/cputest-runner` are separate workspaces
 with their own committed `Cargo.lock` files, so a root build never refreshes
-them (`crates/m68k` is also its own workspace, but its lock is deliberately
-gitignored, so it cannot drift). Both pin sibling crates by path:
-`copperline-web` locks the root `copperline` version and `cputest-runner`
-locks the `copperline-m68k` version. If either version is bumped without
-regenerating the matching nested lock, every `cargo build --locked` in that
-crate fails at the release tag, and tags are immutable so the breakage
-cannot be fixed after the fact (issue #219: the `v0.12.0` tag shipped
-`crates/copperline-web/Cargo.lock` still pinning `copperline 0.11.0`).
+them. The web crate pins the root `copperline` version by path, while the
+cputest runner independently pins the published `m68k` dependency. If a
+manifest changes without regenerating its matching nested lock, every
+`cargo build --locked` in that crate fails at the release tag, and tags are
+immutable so the breakage cannot be fixed after the fact (issue #219: the
+`v0.12.0` tag shipped `crates/copperline-web/Cargo.lock` still pinning
+`copperline 0.11.0`).
 
 In the same commit as any version bump, resync the affected nested locks
 and commit them:
 
 ```sh
-(cd crates/copperline-web && cargo update -p copperline)      # root version bump
-(cd crates/cputest-runner && cargo update -p copperline-m68k) # crates/m68k bump
+(cd crates/copperline-web && cargo update -p copperline) # root version bump
+(cd crates/cputest-runner && cargo update -p m68k)       # m68k requirement change
 ```
 
 The `Lockfile sync` workflow (`.github/workflows/locks.yml`) runs these
@@ -199,7 +194,6 @@ build one by hand on a macOS host:
 
 ## Crate packaging
 
-`cargo package --no-verify --offline` can be used to inspect the source
-archive layout after the dependencies are cached. Do not use full package
-verification as a release gate until the vendored `m68k` path dependency has
-a crates.io-compatible replacement.
+`cargo package --offline` can be used to inspect and verify the source archive
+layout after the dependencies are cached. The published `m68k` dependency is
+crates.io-compatible and needs no path-dependency exception.

@@ -8,8 +8,7 @@
 # Flathub requires the build to run offline: cargo cannot reach crates.io,
 # so the dependency crates are vendored through cargo-sources.json (generated
 # from the committed Cargo.lock by generate-cargo-sources.sh) and Cargo is
-# pointed at that offline registry. The vendored m68k core is a path
-# dependency already inside the source tree, so it needs no special handling.
+# pointed at that offline registry.
 #
 # Local build and test:
 #   flatpak install flathub org.freedesktop.Platform//25.08 \
@@ -67,8 +66,8 @@ modules:
         CARGO_HOME: /run/build/copperline/cargo
         CARGO_NET_OFFLINE: "1"
     build-commands:
-      # Cargo.lock is committed and the crates are vendored, so --locked +
-      # --offline reproduce the pinned graph (including the vendored m68k).
+      # Cargo.lock is committed and the crate archives are vendored, so
+      # --locked + --offline reproduce the pinned graph.
       - cargo --offline build --release --locked
       - install -Dm755 target/release/copperline -t ${FLATPAK_DEST}/bin/
       # Bundled AROS open-source Kickstart replacement (the default boot ROM).

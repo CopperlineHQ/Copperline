@@ -4,13 +4,11 @@ name: Lockfile sync
 # in sync with its workspace's manifests. The root lock is already exercised
 # by the --locked builds in ci.yml, but the nested workspaces mostly are not:
 # crates/copperline-web and crates/cputest-runner carry their own committed
-# locks that pin sibling path crates (copperline and copperline-m68k) by
-# version, and a version bump in the sibling silently invalidates them
-# (issue #219: the v0.12.0 tag shipped crates/copperline-web/Cargo.lock
-# still pinning copperline 0.11.0, so `cargo build --locked` failed for
-# anyone building the web crate from the tag). crates/m68k is also its own
-# workspace but deliberately gitignores its lock, so there is nothing to
-# check there.
+# locks. The web lock pins the sibling `copperline` path package by version;
+# the cputest-runner lock pins its published `m68k` dependency. A manifest
+# update without a lock refresh breaks `cargo build --locked` (issue #219:
+# the v0.12.0 tag shipped crates/copperline-web/Cargo.lock still pinning
+# copperline 0.11.0).
 #
 # The v* tag trigger is the part that closes issue #219: the drift reached
 # the 0.12.0 release because the tag was cut directly from a fresh bump

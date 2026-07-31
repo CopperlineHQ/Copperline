@@ -18,11 +18,12 @@ This chapter is the implementation and format reference.
 The state is produced by `serde` derives on the live state structs
 themselves -- there is no hand-maintained parallel "snapshot" schema.
 `Bus` and everything it owns derive `Serialize`/`Deserialize`, as does
-the vendored CPU core (`crates/m68k`'s `CpuCore` is one flat struct of
-plain registers and configuration; it has no lazily built decode tables,
-so the whole struct round-trips). New fields are picked up by the
-derives automatically; the cost of that convenience is the versioning
-rule below.
+the published `m68k` core with its `serde` feature enabled. `CpuCore`
+serializes architectural state, prefetch state, MMU state, and timing
+configuration; runtime-only decoded-op, FastMem, and trace-JIT caches are
+skipped and rebuilt after deserialization. New fields are picked up by the
+derives automatically; the cost of that convenience is the versioning rule
+below.
 
 What is captured:
 

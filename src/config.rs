@@ -798,9 +798,9 @@ pub fn autofire_asserted(hz: u8, emulated_seconds: f64) -> bool {
 pub enum PacingBudget {
     /// Debit the budget by each instruction's actual returned m68k cycle
     /// count plus the chip-bus waits it incurred, clocking the CPU at its
-    /// true cycles-per-instruction. The vendored core's 68000 cycle counts
-    /// are now accurate (see `crates/m68k/CYCLE_TIMING_GAP.md`), so this is
-    /// the correct hardware-rate model and the default. (A separate
+    /// true cycles-per-instruction. The m68k core's 68000 cycle counts are
+    /// validated against the SingleStepTests corpus, so this is the correct
+    /// hardware-rate model and the default. (A separate
     /// blitter/raster-sync timing issue can make some area fills flicker
     /// under cycle pacing; tracked independently.)
     Cycles,

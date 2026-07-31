@@ -140,10 +140,6 @@ The tracked `.bin` files are generated test programs, not ROM or disk images:
   `timing-test/README.md` "CI golden renders").
 - `assets/services/services_rom.bin` is the guest-side host-filesystem
   handler built from `guest/services/`.
-- `crates/m68k/tests/fixtures/extra/**/bin/*.bin` files are built from the
-  adjacent assembly sources under sibling `src/` directories and are used by
-  the vendored CPU core's tests.
-
 Run the tracked-file audit in `RELEASE.md` before publishing a rewritten
 public repository.
 
