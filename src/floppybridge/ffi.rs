@@ -77,6 +77,10 @@ pub mod config_option {
     pub const COM_PORT: u32 = 0x02;
     pub const AUTO_DETECT_COMPORT: u32 = 0x04;
     pub const DRIVE_AB_CABLE: u32 = 0x08;
+    /// Upstream's smart-speed capability bit, mirrored so the bitmask stays
+    /// documented position for position. Copperline has no smart-speed
+    /// setting: its only effect upstream is on a speed channel
+    /// (`getMFMSpeed`) that Copperline never reads.
     pub const SMART_SPEED: u32 = 0x10;
     pub const SUPPORTS_SHUGART: u32 = 0x20;
 }
@@ -145,10 +149,6 @@ extern "C" {
         auto_detect: bool,
     ) -> bool;
     pub(super) fn BRIDGE_DriverSetCable2(handle: BridgeDriverHandle, drive: u8) -> bool;
-    pub(super) fn BRIDGE_DriverSetSmartSpeedEnabled(
-        handle: BridgeDriverHandle,
-        enabled: bool,
-    ) -> bool;
     pub(super) fn BRIDGE_DriverSetAutoCache(handle: BridgeDriverHandle, enabled: bool) -> bool;
 
     // --- drive state ---

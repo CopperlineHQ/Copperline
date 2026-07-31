@@ -19,11 +19,13 @@ into them directly.
 
 Copy `floppybridge/*` and `windows/FloppyBridge.{cpp,h}` plus `windows/resource.h`
 from a newer upstream checkout into `src/`, then re-apply the changes below and
-update the commit recorded above. They are small, confined to five files --
-`ArduinoFloppyBridge.cpp`, `FloppyBridge.cpp`, `GreaseWeazleBridge.cpp`,
-`SerialIO.cpp` and `ftdi.cpp` -- and every one is a build or platform
-difference rather than a change in behaviour. Every other vendored file is
-byte-identical to the commit above.
+update the commit recorded above. They are small, confined to six files --
+`ArduinoFloppyBridge.cpp`, `CommonBridgeTemplate.cpp`, `FloppyBridge.cpp`,
+`GreaseWeazleBridge.cpp`, `SerialIO.cpp` and `ftdi.cpp`. All but one are build
+or platform differences rather than changes in behaviour; the exception is the
+auto-cache write fix in `CommonBridgeTemplate.cpp` below, which corrects a
+real-disk corruption bug and should be dropped once upstream carries an
+equivalent. Every other vendored file is byte-identical to the commit above.
 
 `build.rs` picks the files it compiles by name; a release that adds or renames
 a source file needs that list updated too, and will say so by failing to link.
@@ -82,6 +84,20 @@ the interfaces call only *after* the open returns. In between, a blocking
 descriptor carries the default `VMIN=1`/`VTIME=0`: wait for a byte, forever. The
 handshake reads in that window, so a device that answers slowly wedges the open
 instead of failing it.
+
+### `CommonBridgeTemplate.cpp` -- a write while auto-cache holds the head
+
+Background caching (`handleBackgroundCaching`) seeks the physical head and
+selects surfaces without updating `m_actualCurrentCylinder` or
+`m_actualFloppySide`; it raises `m_autocacheModifiedCurrentCylinder` so the
+next reader restores the head first. `handleBackgroundDiskRead` checks the
+flag; the `writeMFMData` handler did not, so with auto-cache enabled a queued
+write could find the bookkeeping already "on" its target cylinder, skip the
+seek, and lay the track down wherever the cacher had left the head --
+corrupting an unrelated track of a real disk. The handler restores the
+cylinder and surface whenever the flag is up, exactly as the read path does.
+This is a behavioural fix, not a build difference, and is worth carrying
+upstream.
 
 ### Wide literals passed to TCHAR-generic Win32 calls
 

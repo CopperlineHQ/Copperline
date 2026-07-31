@@ -40,8 +40,8 @@ a newer one.
 From the launcher, the Floppy tab carries a **Physical drive** tick box for
 each bay. Tick it and the bay's media row stops offering a disk image and
 names the interface instead, with a **Configure** button leading to its
-settings. With nothing plugged in the row reads `None`; plug the interface in
-and re-tick the box to pick it up.
+settings. With nothing plugged in the row reads `Not connected`; plug the
+interface in and re-tick the box to pick it up.
 
 You can also define this in your .TOML file;
 
@@ -53,7 +53,7 @@ write_protected = true       # emulator-level protection; default true
 # bridge_cable = "a"             # a/b (IBM PC) or 0..3 (Shugart)
 # bridge_density = "auto"        # auto/dd/hd
 # bridge_mode = "normal"         # normal/compatible/stalling
-# bridge_smart_speed = false
+# bridge_speed = 100             # serve captured tracks at 100/125/150%
 # bridge_auto_cache = false
 ```
 
@@ -75,7 +75,7 @@ copperline --model A500 --floppy-bridge df0 greaseweazle kickstart.rom
 | `--floppy-bridge-cable DFN SEL` | `bridge_cable` |
 | `--floppy-bridge-mode DFN MODE` | `bridge_mode` |
 | `--floppy-bridge-density DFN D` | `bridge_density` |
-| `--floppy-bridge-smart-speed DFN` | `bridge_smart_speed = true` |
+| `--floppy-bridge-speed DFN PCT` | `bridge_speed = PCT` |
 | `--floppy-bridge-auto-cache DFN` | `bridge_auto_cache = true` |
 | `--floppy-bridge-writable DFN` | `write_protected = false` |
 
@@ -84,7 +84,7 @@ These layer on top of a config file as every other flag does, so
 the file gives it an image -- the flag says the bay *is* a physical drive, so the
 image it displaces is not a conflict. There is deliberately no flag for
 protecting a drive, because that is already the default. The remaining
-options -- density, read mode, smart speed, auto-cache, and profiles -- are
+options -- density, read mode, bridge speed, auto-cache, and profiles -- are
 config-file only; they describe a rig rather than a run.
 
 If a bay asks for a physical drive and it cannot be opened, Copperline
@@ -95,8 +95,9 @@ where you asked for your disk.
 
 Every current interface connects over a serial port, and every one of them
 can be found automatically, which is the default. Name `bridge_port`
-explicitly to pin a particular device when more than one is attached.The 
-launcher offers the ports the library enumerates.
+explicitly to pin a particular device when more than one is attached.
+
+The launcher lists **Automatic**, then every serial device the host has.
 
 ### Drive select
 
@@ -115,6 +116,14 @@ config file too.
 wait for the index -- most of a revolution on every track it has not read
 before.
 
+A capture that begins away from the index has its two ends joined by the
+driver where the recording repeats, and that join is not always perfect.
+Copperline verifies each capture: one that decodes as a complete AmigaDOS
+track with every checksum passing is kept and replayed like an image's
+track; anything less -- damaged, or a format the scan does not recognise --
+is served once and fetched afresh on the next visit, so a retry always
+reads new data.
+
 The drive cannot always finish a capture in the revolution the guest takes to
 read the last one. When it has nothing newer, the recording just read is used
 again, and the guest meets a splice at the join: the sector straddling it fails
@@ -132,17 +141,26 @@ if a disk reads badly without the index to anchor it.
 until a track is ready instead of answering "not yet". The wait lands on the
 emulated machine, which stops -- pointer and all -- for as long as it takes.
 
-### Auto-cache and smart speed
+### Bridge speed and auto-cache
+
+`bridge_speed` serves captured tracks at `100` (real, the default), `125`,
+or `150` percent of real speed. Capturing still takes a full revolution;
+only the serving is faster. The trade is the same as `[floppy] speed`:
+software that times its own loading can notice.
 
 `bridge_auto_cache` caches disk data in the background while the drive is
 idle. It is off by default: during a boot the drive is never idle, so there 
 is little for it to do, and it moves the real head about on its own.
 
-`bridge_smart_speed` lets the driver time each track and, where the data rate
-is uniform -- so nothing is leaning on the timing for copy protection -- offer
-it at a higher speed. It changes how the driver captures but not what
-Copperline does with the result: cell timing is derived from the length of the
-revolution handed back, so the per-cell speed it makes available goes unused.
+Every track the guest reads is kept in memory regardless -- re-reads never
+touch the platter twice. What auto-cache adds is the tracks the guest has
+*not* asked for: once the guest goes quiet, the drive carries on for up to a
+minute or so, reading the rest of the disk once, then spins down. Later
+reads of anything it reached are served instantly.
+
+While the guest is actively loading, the cacher contends with it for the
+head, so loading is audibly busier and somewhat slower than with auto-cache
+off.
 
 ## Write protection
 
@@ -196,6 +214,9 @@ eject and swap buttons do nothing: Eject/insert disks as you would with an Amiga
 **No synthesized drive sounds.** The real drive makes its own noise. A bay in the 
 same machine running an ADF still sounds as it should when enabled.
 
+**The `[floppy] speed` option does not apply.** A physical drive is served
+at the disk's own rate; `bridge_speed` is its speed option.
+
 **Powering off releases the drive.** A real drive takes its power from the
 machine, and a bridged one behaves the same way: the power button hands the
 interface back to the host, so it stops turning and another program -- or the
@@ -217,16 +238,16 @@ deterministic as ever; it is the disk under it that is not.
 ## Speed
 
 Reading a track means waiting for the drive to capture a whole revolution,
-which takes as long as a revolution takes -- about 200 ms. A track already in
-hand is served from Copperline's own copy with no drive involvement at all,
-so software that re-reads a track it just read pays nothing.
+which takes as long as a revolution takes -- about 200 ms. A faithful
+recording -- index-aligned, or verified clean -- is kept and served from
+Copperline's own copy with no drive involvement at all, so software that
+re-reads such a track pays nothing, and `bridge_speed` can serve the
+recovered cells faster than the platter turns.
 
-Booting Workbench 1.3 from a real disk reads about 3.6 tracks a second
-against a physical ceiling of five, and reaches the CLI prompt in the same
-45 seconds the ADF takes. The head follows the emulated stepper, so the
-driver starts capturing while the guest is still settling, and nothing waits
-on the drive with the machine held still: the pointer keeps moving while a
-disk loads, as it does on a real Amiga.
+The head follows the emulated stepper, so the driver starts capturing while
+the guest is still settling, and nothing waits on the drive with the machine
+held still: the pointer keeps moving while a disk loads, as it does on a
+real Amiga.
 
 ## Troubleshooting
 

@@ -2006,7 +2006,6 @@ pub(crate) fn attach_floppy_bridges(floppy: &mut FloppyController, cfg: &Config)
                 BridgeCable::Shugart3 => DriveSelection::Drive3,
             },
             port: bridge_cfg.port.clone(),
-            smart_speed: bridge_cfg.smart_speed,
             auto_cache: bridge_cfg.auto_cache,
         };
         let bridge = Bridge::open(&open)
@@ -2051,7 +2050,7 @@ pub(crate) fn attach_floppy_bridges(floppy: &mut FloppyController, cfg: &Config)
                  set write_protected = false to write to the disk"
             );
         }
-        floppy.attach_bridge(idx, bridge, bridge_cfg.write_protected)?;
+        floppy.attach_bridge(idx, bridge, bridge_cfg.write_protected, bridge_cfg.speed)?;
     }
     Ok(())
 }

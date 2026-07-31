@@ -23,12 +23,13 @@
 //! CPU, sprites, pointer and all -- every time the head moved, which is the
 //! one thing a real drive never does to a real Amiga.
 //!
-//! Because a revolution is served whole, it has to start where the real one
-//! does. That is why the bridge is opened in the library's `Compatible` mode,
-//! which captures from the index: a stream anchored anywhere else would wrap
-//! in the middle of a sector rather than in the gap between two, and the guest
-//! would see disk errors. Upstream's faster index-less modes suit an emulator
-//! that streams cells continuously off the drive, which this is not.
+//! Because a revolution is served whole, its two ends matter. A capture made
+//! in the library's `Compatible` mode starts at the index, so its ends meet in
+//! the gap between sectors and it can turn under the head indefinitely. The
+//! default `normal` mode captures wherever the head happens to be and the
+//! driver joins the ends where the recording repeats -- a join that is not
+//! always perfect, which is why [`scan`] verifies each such capture before the
+//! emulator trusts it beyond a single pass.
 //!
 //! Writing goes the same way round: [`Bridge::write_track`] hands the MFM over
 //! a word at a time at the rotational position the head would be passing, as a
@@ -64,6 +65,7 @@
 //! deterministic as ever, it is the disk under it that is not.
 
 mod ffi;
+pub mod scan;
 
 use std::ffi::{c_char, c_int, c_uint, c_void, CStr, CString};
 use std::sync::{Mutex, OnceLock};
@@ -194,19 +196,22 @@ pub fn drivers() -> Vec<DriverInfo> {
         .collect()
 }
 
-/// Whether an interface the library recognises is plugged in right now.
+/// Whether anything that could be an interface is plugged in right now.
 ///
-/// The port scan below only reports ports the library believes carry a
-/// supported board, so an empty list means there is nothing to drive a real
-/// disk with. Scanning walks the host's serial bus, so this is sampled at
-/// deliberate moments -- a bay being switched over to a real drive -- rather
-/// than every frame.
+/// The port scan below reports the host's USB serial devices, not boards it
+/// has identified -- no current interface can be told apart without opening
+/// it -- so a non-empty list means "possibly", and an empty one means there
+/// is nothing to drive a real disk with. Scanning walks the host's serial
+/// bus, so this is sampled at deliberate moments -- a bay being switched
+/// over to a real drive -- rather than every frame.
 pub fn interface_connected() -> bool {
     let _guard = lib_lock();
     !com_ports_locked().is_empty()
 }
 
-/// Serial ports the library can see, for the drivers that need one named.
+/// Serial ports the library can see -- the host's USB serial devices, which
+/// on macOS means the `tty.usb*`-prefixed ones only. The launcher widens
+/// this with the host's own list for the chips that convention misses.
 pub fn com_ports() -> Vec<String> {
     let _guard = lib_lock();
     com_ports_locked()
@@ -245,7 +250,6 @@ pub struct BridgeConfig {
     /// ([`config_option::AUTO_DETECT_COMPORT`]); name one to pin it, which
     /// matters when two interfaces are plugged in at once.
     pub port: Option<String>,
-    pub smart_speed: bool,
     pub auto_cache: bool,
 }
 
@@ -560,9 +564,6 @@ fn apply(handle: ffi::BridgeDriverHandle, config: &BridgeConfig) -> Vec<&'static
         }
         if !ffi::BRIDGE_DriverSetCable2(handle, config.drive as u8) {
             refused.push("drive select");
-        }
-        if !ffi::BRIDGE_DriverSetSmartSpeedEnabled(handle, config.smart_speed) {
-            refused.push("smart speed");
         }
         if !ffi::BRIDGE_DriverSetAutoCache(handle, config.auto_cache) {
             refused.push("auto-cache");

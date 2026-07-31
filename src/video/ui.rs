@@ -5387,10 +5387,14 @@ fn draw_launcher_row(
             | LauncherField::MouseSensitivity
             | LauncherField::MouseCapture
             | LauncherField::ShaderStrength
+            | LauncherField::BridgeDevice
             | LauncherField::BridgePort
             | LauncherField::BridgeCable
-            | LauncherField::BridgeSmartSpeed
+            | LauncherField::BridgeDensity
+            | LauncherField::BridgeSpeed
+            | LauncherField::BridgeServeSpeed
             | LauncherField::BridgeAutoCache
+            | LauncherField::FloppySpeed
     );
     if let Some(reason) = reason {
         if !blank_when_greyed {
