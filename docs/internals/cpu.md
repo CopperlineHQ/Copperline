@@ -2,8 +2,8 @@
 
 ## The wrapper and the bus adapter
 
-`M68kMachine` (`src/cpu.rs`) wraps the vendored pure-Rust `m68k` core
-(`crates/m68k/`). The core sees
+`M68kMachine` (`src/cpu.rs`) wraps the published pure-Rust
+[`m68k` 0.3 core](https://docs.rs/crate/m68k/0.3.0). The core sees
 the machine through an adapter implementing its `AddressBus` trait, so
 every CPU-visible access -- RAM, ROM, custom registers, CIA, RTC,
 autoconfig, Gayle, Akiko -- routes into the shared `Bus` and is billed in
@@ -20,9 +20,11 @@ colour clocks:
 Selectable models: 68000, 68010, 68EC020, 68020, 68030, 68040, 68060.
 `[cpu] fpu`
 fits a 68881/68882 to any 020/030 (and is on by default for the 68040,
-whose FPU is on-die): the vendored core executes the 6888x instruction
+whose FPU is on-die): the `m68k` core executes the 6888x instruction
 set in true 80-bit extended precision via a pure-Rust software floating-
-point engine (`crates/m68k/src/fpu/softfloat.rs`). Arithmetic (add, sub,
+point engine
+([`softfloat.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.3.0/src/fpu/softfloat.rs)).
+Arithmetic (add, sub,
 mul, div, sqrt, and the single-accuracy FSGLMUL/FSGLDIV, which round the
 mantissa to 24 bits but keep the extended exponent range -- gcc -m68040
 emits them for `float` arithmetic and the Linux/m68k kernel FPSP has no
@@ -39,26 +41,32 @@ whose saved FPU frame carries a foreign size) are all modelled. The transcendent
 FASIN/FACOS/FATAN, the hyperbolics, FETOX/FETOXM1/FTWOTOX/FTENTOX,
 FLOGN/FLOGNP1/FLOG2/FLOG10) and FSINCOS run in extended precision too: a
 double-`FloatX80` ("double-double", ~128-bit) layer
-(`crates/m68k/src/fpu/dd.rs`) evaluates Taylor/atanh series over reduced
+([`dd.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.3.0/src/fpu/dd.rs))
+evaluates Taylor/atanh series over reduced
 ranges and rounds the result to extended under the FPCR mode, setting INEX
 and the domain flags (OPERR/DZ). Accuracy is validated against an
 arbitrary-precision oracle (the pure-Rust `astro-float`, a dev-only
-dependency; `crates/m68k/tests/fpu_accuracy.rs`): every function is within
+dependency;
+[`fpu_accuracy.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.3.0/tests/fpu_accuracy.rs)):
+every function is within
 1 ULP across a wide sweep and all four rounding modes, and round-to-nearest
 is correctly rounded in practice. They are not chip-bit-exact -- the real
 6888x uses its own CORDIC/polynomial microcode, and on a bare 68040 these
 trap to a software FPSP. FMOD/FREM compute the exact remainder and the FPSR
 quotient byte. This covers Kickstart's
 detection and per-task FPU context switching. The
-68000's per-instruction cycle counts in the vendored core have been
+68000's per-instruction cycle counts in the `m68k` core have been
 corrected to exact totals across the SingleStepTests 68000 cycle corpus
-(see `crates/m68k/CYCLE_TIMING_GAP.md`), which is what makes
+([validation details](https://github.com/benletchford/m68k-rs/tree/m68k-v0.3.0#validation--testing)),
+which is what makes
 cycle-budgeted pacing trustworthy.
 
 ## Prefetch
 
 The 68000's two-word instruction prefetch queue (IRD/IRC) is modelled in
-the vendored core (`prefetch_queue` in `crates/m68k/src/core/cpu.rs`): the
+the `m68k` core
+([`prefetch_queue`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.3.0/src/core/cpu.rs)):
+the
 next opcode is fetched before the current instruction finishes, so
 self-modifying code that overwrites the *next* instruction executes the
 stale pre-write word (real MC68000 Class 1 SMC behaviour), while a taken
@@ -119,11 +127,14 @@ DBcc loop mode: a DBcc that branches -4 back to a loopable one-word
 instruction holds the body/DBcc pair in the prefetch queue and re-executes
 it with no instruction fetches until the condition turns true, the counter
 expires, or an exception intervenes (`loop_mode` in
-`crates/m68k/src/core/cpu.rs`; the loopable set and the DBcc entry/exit
-arms live in `core/decode.rs`). A looping DBcc iteration costs 6 internal
+[`core/cpu.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.3.0/src/core/cpu.rs);
+the loopable set and the DBcc entry/exit arms live in
+[`core/decode.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.3.0/src/core/decode.rs)).
+A looping DBcc iteration costs 6 internal
 clocks and touches the bus only for the body's operands, which is what
 makes tight copy/clear loops measurably faster on a real 68010.
-`crates/m68k/tests/loop_mode_timing_tests.rs` pins engagement, the
+[`loop_mode_timing_tests.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.3.0/tests/loop_mode_timing_tests.rs)
+pins engagement, the
 68000's non-engagement, and the no-fetch iteration cost.
 
 The 68010's own cycle costs where they differ from the 68000 are
@@ -145,8 +156,9 @@ stopped state's supervisor check raises a privilege violation stacking
 the STOP itself, so the handler's RTE re-executes it; a pending trace
 (T set in the SR the instruction started with) has priority and recovers
 from the stop, while a T bit loaded *by* STOP does not fire while
-stopped. `crates/m68k/tests/stop_and_68010_timing_tests.rs` pins all of
-these.
+stopped.
+[`stop_and_68010_timing_tests.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.3.0/tests/stop_and_68010_timing_tests.rs)
+pins all of these.
 
 ## Caches
 
@@ -228,7 +240,9 @@ shares the 040's three-level walker and TC[15] enable; PTEST is gone
 (undefined F-line) and PLPAR/PLPAW translate an address into An,
 faulting with the format $4 frame.
 
-**Timing.** `crates/m68k/src/core/timing_060.rs` replaces the 020+
+**Timing.**
+[`timing_060.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.3.0/src/core/timing_060.rs)
+replaces the 020+
 scaling formula for the 060: every opcode word classifies (a build-once
 64K table over a pure function) into the MC68060UM Chapter 10 dispatch
 classes with a pOEP cycle cost - most ALU/move instructions one clock,
@@ -269,7 +283,8 @@ instruction cache, a three-stage pipeline, execution overlap, dynamic bus
 sizing, and alignment-dependent transfers, so an opcode does not have one
 context-free cycle count.
 
-`crates/m68k/src/core/timing_020.rs` transcribes the integer timing tables
+[`timing_020.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.3.0/src/core/timing_020.rs)
+transcribes the integer timing tables
 from section 8.2 of the
 [MC68020 User's Manual](https://www.nxp.com/docs/en/data-sheet/MC68020UM.pdf).
 The manual publishes Best Case (cached with maximum execution overlap),

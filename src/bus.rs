@@ -144,7 +144,7 @@ fn external_access_cck_x100_setting() -> u32 {
 /// INTREQ takes before the level encoder sees it (folded into one constant;
 /// an IRQ-latency probe against vAmiga across seven source/loop geometries
 /// lands within 0..+7 cck, the residual being per-instruction IPL poll-point
-/// detail the vendored core does not model).
+/// detail the m68k core does not model).
 const DEFAULT_IRQ_LATENCY_CCK: u32 = 5;
 
 /// Read the COPPERLINE_IRQ_LATENCY_CCK setting once, at bus construction (stored in

@@ -23,12 +23,8 @@ jobs:
     #
     # This job compiles everything once and hands the finished binaries to
     # the test jobs below (needs: build) as a workflow artifact. Binaries,
-    # not a shared cargo cache: cargo fingerprints local path crates by
-    # source mtime, and every job's fresh checkout is newer than any cached
-    # artifact, so a downstream cargo invocation always recompiles the
-    # copperline and vendored m68k crates no matter how complete the cache
-    # is. The test executables are plain libtest binaries and run fine
-    # without cargo.
+    # not a shared cargo cache: the test executables are plain libtest
+    # binaries and run fine without cargo.
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
@@ -77,8 +73,6 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Formatting
-        # Not --all: that would reach into the vendored MIT m68k crate, which
-        # keeps its own formatting.
         run: cargo fmt --check
       - name: Clippy
         # Hold the binary, tests, examples, and diagnostic feature gates to
@@ -148,37 +142,6 @@ jobs:
           name: probe-golden-diffs
           path: target/probe-golden/
           if-no-files-found: ignore
-
-  m68k-core:
-    name: m68k core tests
-    # Gated on the build job like the other test jobs, but shares no
-    # artifacts with it: the vendored CPU core (crates/m68k) is a path
-    # dependency, not a workspace member, so it builds standalone into its
-    # own target directory, cached here under its own key.
-    needs: build
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: crates/m68k
-      - name: m68k core tests
-        # The root cargo test never reaches the vendored core's own suites
-        # -- including the MMU walker, access-fault frame, exception, and
-        # per-model architecture tests. Two suites are excluded because they
-        # include_bytes! gitignored fixture binaries and do not compile on a
-        # clean checkout (cross_cpu, musashi); the SingleStepTests suite
-        # compiles and skips itself here, and runs for real in the
-        # m68k-singlestep job below. No --locked: the crate's own Cargo.lock
-        # is deliberately gitignored (the root lockfile pins it when built
-        # as a dependency).
-        working-directory: crates/m68k
-        run: |
-          ls tests/*.rs | xargs -n1 basename | sed 's/\.rs$//' \
-            | grep -v -e '^cross_cpu_tests$' -e '^musashi_tests$' \
-            | sed 's/^/--test /' \
-            | xargs cargo test --release --lib
 
   diagrom-smoke:
     name: DiagROM boot smoke
@@ -343,31 +306,6 @@ jobs:
         # step never reaches it.
         working-directory: crates/copperline-web
         run: cargo fmt --check
-
-  m68k-singlestep:
-    name: m68k SingleStepTests (68000 fixtures)
-    # Runs the per-instruction 68000 fixture suite against the real
-    # SingleStepTests data (MIT, generated from MAME's microcoded core):
-    # every opcode's final register/memory state, plus address-error
-    # behavior. The fixture clone is ~1 GB, so it lives in its own job and
-    # does not gate the main build.
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: crates/m68k
-      - name: Fetch SingleStepTests m68000 fixtures
-        uses: actions/checkout@v7
-        with:
-          repository: SingleStepTests/m68000
-          path: sst-m68000
-      - name: Run fixture suite
-        working-directory: crates/m68k
-        env:
-          M68K_SST_FIXTURES: ${{ github.workspace }}/sst-m68000/v1
-        run: cargo test --release --test singlestep_m68000_v1_tests
 
   docs:
     name: Docs build (HTML + PDF)

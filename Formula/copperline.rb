@@ -28,7 +28,7 @@ class Copperline < Formula
 
   def install
     # Cargo.lock is committed; std_cargo_args passes --locked so the build
-    # uses the pinned dependency graph (including the vendored m68k core).
+    # uses the pinned dependency graph.
     system "cargo", "install", *std_cargo_args
 
     # Install the bundled AROS open-source Kickstart replacement (the default
