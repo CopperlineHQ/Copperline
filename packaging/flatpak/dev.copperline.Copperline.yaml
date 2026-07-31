@@ -12,8 +12,8 @@
 # dependency already inside the source tree, so it needs no special handling.
 #
 # Local build and test:
-#   flatpak install flathub org.freedesktop.Platform//24.08 \
-#       org.freedesktop.Sdk//24.08 org.freedesktop.Sdk.Extension.rust-stable//24.08
+#   flatpak install flathub org.freedesktop.Platform//25.08 \
+#       org.freedesktop.Sdk//25.08 org.freedesktop.Sdk.Extension.rust-stable//25.08
 #   flatpak run org.flatpak.Builder --force-clean --user --install \
 #       --install-deps-from=flathub --repo=repo builddir \
 #       packaging/flatpak/dev.copperline.Copperline.yaml
@@ -26,7 +26,7 @@
 #       repo repo
 id: dev.copperline.Copperline
 runtime: org.freedesktop.Platform
-runtime-version: "24.08"
+runtime-version: "25.08"
 sdk: org.freedesktop.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable

@@ -28,8 +28,8 @@ CI (`.github/workflows/flatpak.yml`) fails if the committed file is stale.
 ## Build and test locally (on Linux)
 
 ```sh
-flatpak install flathub org.freedesktop.Platform//24.08 \
-    org.freedesktop.Sdk//24.08 org.freedesktop.Sdk.Extension.rust-stable//24.08
+flatpak install flathub org.freedesktop.Platform//25.08 \
+    org.freedesktop.Sdk//25.08 org.freedesktop.Sdk.Extension.rust-stable//25.08
 
 flatpak run org.flatpak.Builder --force-clean --user --install \
     --install-deps-from=flathub --repo=repo builddir \
