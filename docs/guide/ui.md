@@ -335,7 +335,7 @@ The layout is:
   beneath it: serial mode and MIDI endpoints; the
   parallel device -- None, Printer, or Sampler -- with, for the printer, its
   capture output file, or for the sampler, its host audio input and input gain;
-  and the A2065 Ethernet board -- Not fitted, Isolated, Loopback, NAT, or
+  and the A2065 Ethernet board -- None, Isolated, Loopback, NAT, or
   Bridged; Bridged adds a host-adapter row. NAT and Bridged show a warning
   because host-clocked traffic makes input recordings and save-state replays
   non-reproducible while it flows),
@@ -343,11 +343,11 @@ The layout is:
   WASM plugin board's declared options),
   and *A/V & Emu*, split by a row of category buttons at the top into
   **Audio** (output device, channel mode, stereo separation, filter, floppy
-  sounds and volume), **Video** (start fullscreen, status bar, overscan, pixel
-  aspect, screen tint, deinterlace, phosphor, CRT shader, shader strength and
-  monitor bezel),
+  sounds and volume), **Video** (start fullscreen, status bar, monitor bezel,
+  overscan, pixel aspect, deinterlace, screen tint, phosphor, CRT shader and
+  shader strength),
   and **Emulation**
-  (power-on, warp speed, pacing, realtime priority) -- opening on Audio, and
+  (power-on, realtime priority, pacing, warp speed) -- opening on Audio, and
   switched freely between the three.
 - **Settings rows** (right pane). `[<]`/`[>]` step through a value, On/Off
   buttons flip a toggle, and the **Browse** and **Clear** buttons set or remove
@@ -368,7 +368,7 @@ The layout is:
   column's **Bootable** box is ticked by default; clearing it greys that row's
   priority and writes the -128 "disabled" sentinel, so the volume mounts but
   never boots.
-  A drive with no image, or a CD image, is greyed ("no drive" / "CD-ROM").
+  A drive with no image, or a CD image, is greyed ("No drive" / "CD-ROM").
   Drives you add here with no priority of their own cascade so they do not tie:
   the first is 0 (just under DF0:'s 5), and each later one drops below the
   floppies -- -35, -40, -45. A drive already carrying a priority in the config
@@ -391,7 +391,7 @@ The layout is:
 
 The Boot Priority sub-page: an A1200 whose IDE master boots at priority 5, its
 slave with the Bootable box cleared (priority greyed), and the empty SCSI units
-greyed "no drive". A greyed **Info:** label heads a note on the valid priority
+greyed "No drive". A greyed **Info:** label heads a note on the valid priority
 range.
 ```
 

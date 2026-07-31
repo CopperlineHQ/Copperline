@@ -1083,7 +1083,7 @@ fn print_help() {
         "--floppy-bridge DFN NAME       drive a physical floppy drive on DFN over NAME:\n  \
          \x20                            drawbridge, greaseweazle, supercardpro, or off\n  \
          --floppy-bridge-port DFN PORT  serial port of that interface (default: auto-detect)\n  \
-         --floppy-bridge-cable DFN SEL  drive select on the cable: a/b (PC) or 0-3 (Shugart)\n  \
+         --floppy-bridge-cable DFN SEL  drive select on the cable: a/b (IBM PC) or 0-3 (Shugart)\n  \
          --floppy-bridge-mode DFN MODE  how tracks are captured: normal, compatible, stalling\n  \
          --floppy-bridge-density DFN D  force a density: auto, dd, or hd\n  \
          --floppy-bridge-speed DFN PCT  serve captured tracks at 100, 125, 150, 175, or 200%\n  \

@@ -694,14 +694,14 @@ const ETHERNET_ROWS: [Row; 2] = [
 const VIDEO_ROWS: [Row; 10] = [
     row(F::StartFullscreen, "Start fullscreen", Toggle),
     row(F::ShowStatusBar, "Status bar", Toggle),
+    row(F::Bezel, "Monitor bezel", Toggle),
     row(F::Overscan, "Overscan", Cycle),
     row(F::PixelAspect, "Pixel aspect", Cycle),
-    row(F::Tint, "Screen tint", Cycle),
     row(F::Deinterlace, "Deinterlace", Toggle),
+    row(F::Tint, "Screen tint", Cycle),
     row(F::Phosphor, "Phosphor", Cycle),
     row(F::Shader, "CRT shader", Cycle),
     row(F::ShaderStrength, "Shader strength", Cycle),
-    row(F::Bezel, "Monitor bezel", Toggle),
 ];
 const AUDIO_ROWS: [Row; 6] = [
     row(F::AudioDevice, "Audio output", Cycle),
@@ -712,10 +712,10 @@ const AUDIO_ROWS: [Row; 6] = [
     row(F::FloppyVolume, "Floppy volume", Cycle),
 ];
 const EMULATION_ROWS: [Row; 4] = [
-    row(F::PowerOn, "Power on at start", Toggle),
-    row(F::Warp, "Warp speed", Cycle),
-    row(F::PacingBudget, "Pacing budget", Cycle),
+    row(F::PowerOn, "Power on startup", Toggle),
     row(F::RealtimePriority, "Realtime priority", Toggle),
+    row(F::PacingBudget, "Pacing budget", Cycle),
+    row(F::Warp, "Warp speed", Cycle),
 ];
 const INPUT_ROWS: [Row; 5] = [
     row(F::Port1Device, "Port 1", Cycle),
@@ -2179,7 +2179,7 @@ impl MachineSetup {
             }
             // Shader strength only feeds the shader pass, which does not run when
             // the shader is off.
-            F::ShaderStrength => reason(self.shader != ShaderMode::None, "shader off"),
+            F::ShaderStrength => reason(self.shader != ShaderMode::None, "Disabled"),
             // A boot priority or read-only flag is meaningless without a
             // directory to mount.
             F::Filesys0Boot | F::Filesys1Boot | F::Filesys2Boot | F::Filesys3Boot => {
@@ -2199,7 +2199,7 @@ impl MachineSetup {
             | F::ScsiUnit6Boot => {
                 let drive = Self::boot_field_drive(field).expect("boot field");
                 match self.path(drive) {
-                    None => Some("no drive"),
+                    None => Some("No drive"),
                     Some(p) if crate::config::is_cd_image_path(p) => Some("CD-ROM"),
                     Some(_) => None,
                 }
@@ -2221,7 +2221,7 @@ impl MachineSetup {
             // attached or selected, only the Interface row stays live -- the
             // rest describe hardware that is not present.
             #[cfg(feature = "floppybridge")]
-            F::BridgeDevice => reason(self.bridge_edit().is_some(), "no drive"),
+            F::BridgeDevice => reason(self.bridge_edit().is_some(), "No drive"),
             #[cfg(feature = "floppybridge")]
             F::BridgeCable
             | F::BridgeDensity
@@ -2276,7 +2276,7 @@ impl MachineSetup {
             }
             // Neither mouse row does anything unless a port holds a mouse.
             F::MouseSensitivity | F::MouseCapture => {
-                reason(self.port_devices.contains(&PortDevice::Mouse), "no mouse")
+                reason(self.port_devices.contains(&PortDevice::Mouse), "No mouse")
             }
             _ => None,
         }
@@ -2502,7 +2502,7 @@ impl MachineSetup {
             },
             F::Phosphor => {
                 if self.phosphor <= 0.0 {
-                    "Off".to_string()
+                    "Disabled".to_string()
                 } else {
                     format!("{:.2}", self.phosphor)
                 }
@@ -2516,13 +2516,15 @@ impl MachineSetup {
                 None => "Automatic".to_string(),
                 Some(p) => p,
             },
+            // Named as the drive's own jumpers are: A/B on an IBM PC cable,
+            // DS0..DS3 on a Shugart one.
             F::BridgeCable => match self.bridge_edit().map(|c| c.cable) {
-                Some(BridgeCable::DriveA) => "PC drive A".to_string(),
-                Some(BridgeCable::DriveB) => "PC drive B".to_string(),
-                Some(BridgeCable::Shugart0) => "Shugart 0".to_string(),
-                Some(BridgeCable::Shugart1) => "Shugart 1".to_string(),
-                Some(BridgeCable::Shugart2) => "Shugart 2".to_string(),
-                Some(BridgeCable::Shugart3) => "Shugart 3".to_string(),
+                Some(BridgeCable::DriveA) => "Drive A (IBM)".to_string(),
+                Some(BridgeCable::DriveB) => "Drive B (IBM)".to_string(),
+                Some(BridgeCable::Shugart0) => "DS0 (Shugart)".to_string(),
+                Some(BridgeCable::Shugart1) => "DS1 (Shugart)".to_string(),
+                Some(BridgeCable::Shugart2) => "DS2 (Shugart)".to_string(),
+                Some(BridgeCable::Shugart3) => "DS3 (Shugart)".to_string(),
                 None => "(none)".to_string(),
             },
             F::BridgeDensity => match self.bridge_edit().map(|c| c.density) {
@@ -2541,7 +2543,7 @@ impl MachineSetup {
                 format!("{}%", self.bridge_edit().map_or(100, |c| c.speed))
             }
             F::Shader => match self.shader {
-                ShaderMode::None => "Off".to_string(),
+                ShaderMode::None => "Disabled".to_string(),
                 ShaderMode::Scanlines => "Scanlines".to_string(),
                 ShaderMode::Mask => "Mask".to_string(),
                 // Named for the monitor the preset is modelled on; the path
@@ -2600,7 +2602,7 @@ impl MachineSetup {
                 .unwrap_or_else(|| "Default".to_string()),
             F::SamplerGain => sampler_gain_label(self.sampler_gain_db),
             F::Ethernet => match self.a2065_net.as_ref() {
-                None => "Not fitted".to_string(),
+                None => "None".to_string(),
                 Some(NetConfig::None) => "Isolated".to_string(),
                 Some(NetConfig::Loopback) => "Loopback".to_string(),
                 Some(NetConfig::Nat) => "NAT".to_string(),
@@ -2641,7 +2643,7 @@ impl MachineSetup {
             | F::ScsiUnit3Boot
             | F::ScsiUnit4Boot
             | F::ScsiUnit5Boot
-            | F::ScsiUnit6Boot => drive_bootpri_label(self.drive_bootpri(field)),
+            | F::ScsiUnit6Boot => drive_bootpri_label(self.effective_bootpri(field)),
             F::Filesys0ReadOnly
             | F::Filesys1ReadOnly
             | F::Filesys2ReadOnly
@@ -3282,8 +3284,9 @@ impl MachineSetup {
         }
     }
 
-    /// Flip a drive's Bootable box. Clearing it keeps the priority number (shown
-    /// greyed) so re-ticking restores it within the session.
+    /// Flip a drive's Bootable box. Clearing it shows the -128 sentinel the
+    /// config will store, while keeping the priority underneath so re-ticking
+    /// restores it within the session.
     pub fn toggle_drive_boot(&mut self, field: LauncherField) {
         let off = self.drive_boot_off(field);
         self.set_drive_boot_off(field, !off);
@@ -3411,6 +3414,16 @@ impl MachineSetup {
 
     pub fn set_bridge_edit_drive(&mut self, idx: usize) {
         self.bridge_edit_drive = idx.min(3);
+    }
+
+    /// Whether the bridge page is editing a bay with an interface actually
+    /// selected and attached. Only then does that interface's own set of
+    /// capabilities decide anything: with none there is nothing to have an
+    /// opinion, and the rows it would shape have nothing to show.
+    pub fn bridge_interface_selected(&self) -> bool {
+        self.bridge_edit().is_some()
+            && !self.df_bridge_none[self.bridge_edit_drive]
+            && self.bridge_status == BridgeStatus::Attached
     }
 
     /// The settings being shown on the FloppyBridge page.
@@ -4264,6 +4277,32 @@ mod tests {
         }
     }
 
+    /// Drive select is shaped by the interface, so it only answers to one
+    /// when there is one: attached and chosen. That is what separates a row
+    /// greyed with its steppers (this interface has no drive-select line)
+    /// from one blanked entirely (there is no interface to ask).
+    #[cfg(feature = "floppybridge")]
+    #[test]
+    fn drive_select_answers_to_an_interface_only_when_there_is_one() {
+        let mut setup = MachineSetup::default();
+        setup.set_drive_bridged(0, true);
+        setup.set_bridge_edit_drive(0);
+
+        setup.bridge_status = BridgeStatus::NoInterface;
+        setup.df_bridge_none[0] = false;
+        assert!(!setup.bridge_interface_selected(), "nothing attached");
+
+        setup.bridge_status = BridgeStatus::Attached;
+        setup.df_bridge_none[0] = true;
+        assert!(!setup.bridge_interface_selected(), "interface set to None");
+
+        setup.df_bridge_none[0] = false;
+        assert!(setup.bridge_interface_selected(), "attached and chosen");
+
+        setup.set_drive_bridged(0, false);
+        assert!(!setup.bridge_interface_selected(), "no bay at all");
+    }
+
     /// A bridged bay only names its interface when one is actually attached:
     /// with nothing plugged in the media row says so, whatever the bay is
     /// configured for.
@@ -4785,7 +4824,7 @@ mod tests {
         s.port_devices = [PortDevice::Joystick, PortDevice::Joystick];
         assert_eq!(
             s.disabled_reason(LauncherField::MouseCapture),
-            Some("no mouse")
+            Some("No mouse")
         );
     }
 
@@ -4799,7 +4838,7 @@ mod tests {
         s.port_devices = [PortDevice::Joystick, PortDevice::Joystick];
         assert_eq!(
             s.disabled_reason(LauncherField::MouseSensitivity),
-            Some("no mouse")
+            Some("No mouse")
         );
 
         // A mouse in either port re-enables it.
@@ -5052,12 +5091,12 @@ mod tests {
         use LauncherField as F;
         let mut s = MachineSetup::default();
         // The shader is off by default, so its strength does nothing and greys.
-        assert_eq!(s.value_label(F::Shader), "Off");
-        assert_eq!(s.disabled_reason(F::ShaderStrength), Some("shader off"));
+        assert_eq!(s.value_label(F::Shader), "Disabled");
+        assert_eq!(s.disabled_reason(F::ShaderStrength), Some("Disabled"));
         assert!(!s.applies(F::ShaderStrength));
         // Turning a shader on makes the strength editable again.
         s.cycle(F::Shader, true); // Off -> the first real shader
-        assert_ne!(s.value_label(F::Shader), "Off");
+        assert_ne!(s.value_label(F::Shader), "Disabled");
         assert_eq!(s.disabled_reason(F::ShaderStrength), None);
     }
 
@@ -5083,7 +5122,7 @@ mod tests {
         assert!(setup.has_boot_priority_rows());
         assert!(!MachineSetup::default().has_boot_priority_rows());
         // No slave image, so its boot row is greyed and inert.
-        assert_eq!(setup.disabled_reason(F::IdeSlaveBoot), Some("no drive"));
+        assert_eq!(setup.disabled_reason(F::IdeSlaveBoot), Some("No drive"));
 
         // The arrows step the live priority and re-emit it.
         setup.cycle(F::IdeMasterBoot, true); // 5 -> 6
@@ -5095,17 +5134,19 @@ mod tests {
         assert_eq!(setup.value_label(F::IdeMasterBoot), "0");
         assert_eq!(setup.to_raw().ide.master.as_ref().unwrap().bootpri, None);
 
-        // Clearing the Bootable box writes the -128 sentinel but keeps the
-        // priority number for the greyed display; re-ticking restores it.
+        // Clearing the Bootable box writes the -128 sentinel and shows it, so
+        // the greyed row says what the config will hold; the priority is kept
+        // underneath, and re-ticking restores it.
         setup.set_drive_bootpri(F::IdeMasterBoot, Some(6));
         setup.toggle_drive_boot(F::IdeMasterBoot);
         assert!(setup.drive_boot_off(F::IdeMasterBoot));
-        assert_eq!(setup.value_label(F::IdeMasterBoot), "6");
+        assert_eq!(setup.value_label(F::IdeMasterBoot), "-128");
         assert_eq!(
             setup.to_raw().ide.master.as_ref().unwrap().bootpri,
             Some(-128)
         );
         setup.toggle_drive_boot(F::IdeMasterBoot);
+        assert_eq!(setup.value_label(F::IdeMasterBoot), "6");
         assert_eq!(setup.to_raw().ide.master.as_ref().unwrap().bootpri, Some(6));
     }
 
@@ -5191,7 +5232,7 @@ mod tests {
     #[test]
     fn a2065_board_cycles_and_round_trips() {
         let mut s = MachineSetup::default();
-        assert_eq!(s.value_label(LauncherField::Ethernet), "Not fitted");
+        assert_eq!(s.value_label(LauncherField::Ethernet), "None");
         assert!(s.to_raw().a2065.net.is_none());
         assert!(!s.ethernet_breaks_determinism());
 
@@ -5219,7 +5260,7 @@ mod tests {
             // Where the NAT cannot come up the picker skips straight past it.
             s.cycle(LauncherField::Ethernet, true);
         }
-        assert_eq!(s.value_label(LauncherField::Ethernet), "Not fitted");
+        assert_eq!(s.value_label(LauncherField::Ethernet), "None");
     }
 
     #[test]
@@ -5617,12 +5658,12 @@ mod tests {
     fn shader_cycles_the_presets_and_round_trips_through_raw() {
         let mut s = MachineSetup::default();
         // Off is the baseline, so nothing is written for it.
-        assert_eq!(s.value_label(LauncherField::Shader), "Off");
+        assert_eq!(s.value_label(LauncherField::Shader), "Disabled");
         assert_eq!(s.to_raw().display.shader, None);
 
         // With no user shader configured the picker offers the presets only,
         // and wraps straight back to Off.
-        for expected in ["Scanlines", "Mask", "CRT (1084)", "Off"] {
+        for expected in ["Scanlines", "Mask", "CRT (1084)", "Disabled"] {
             s.cycle(LauncherField::Shader, true);
             assert_eq!(s.value_label(LauncherField::Shader), expected);
         }
