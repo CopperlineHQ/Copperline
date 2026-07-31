@@ -2307,6 +2307,7 @@ const CONTRIBUTORS: &[&str] = &[
     "jbl007",
     "Simon Dick",
     "Nicolas Ramz",
+    "Ben Letchford",
 ];
 const PATREON_SPONSORS: &[&str] = &["Lee Hobson"];
 

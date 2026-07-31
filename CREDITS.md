@@ -12,6 +12,7 @@ Code contributions from (the full list is on
 - jbl007
 - Simon Dick
 - Nicolas Ramz
+- Ben Letchford
 
 ## Patreon sponsors
 
