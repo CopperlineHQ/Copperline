@@ -305,7 +305,9 @@ The layout is:
   on a machine with no CD drive) are dropped so they cannot block a launch.
 - **Category tabs** (left sidebar). *System* (chipset and Agnus/Denise
   overrides, video standard, RTC, identify board, RTG card), *CPU* (model,
-  FPU, clock, caches), *Memory* (chip/fast/slow/motherboard/Zorro III RAM),
+  FPU, clock, caches, and the experimental not-cycle-exact JIT mode --
+  see `[cpu] jit` in [](configuration)),
+  *Memory* (chip/fast/slow/motherboard/Zorro III RAM),
   *ROM*
   (Kickstart and
   extended ROM), *Floppy* (drive count and speed, then each wired drive as a

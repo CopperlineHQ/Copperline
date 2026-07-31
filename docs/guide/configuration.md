@@ -40,6 +40,7 @@ range checks as the equivalent TOML fields:
 | `--cpu MODEL` | `[cpu] model` | `68000`, `68010`, `68EC020`, `68020`, `68030`, `68040`, `68060` |
 | `--cpu-clock MHZ` | `[cpu] clock_mhz` | a number of MHz |
 | `--fpu` / `--no-fpu` | `[cpu] fpu` | fit / omit a 68881/68882 |
+| `--jit` / `--no-jit` | `[cpu] jit` | experimental fast batch/trace-JIT CPU execution (68020+; not cycle-exact) |
 | `--chip SIZE` | `[memory] chip` | `512K`, `1M`, `2M`, ... |
 | `--fast SIZE` | `[memory] fast` | `0`, `1M`, `4M`, `8M`, ... |
 | `--slow SIZE` | `[memory] slow` | `0`, up to `512K` |
@@ -344,6 +345,8 @@ clock_mhz = 14.0    # optional; defaults to the model's stock speed
 # unimplemented = "trap"  # 68060 only: "trap" (faithful; the OS needs
 #                   # 68060.library) or "native" (execute the removed
 #                   # instructions directly)
+# jit = true        # experimental: fast batch/trace-JIT CPU execution
+#                   # (68020+; not cycle-exact)
 ```
 
 - `model`: the 68010 models the vector base register, the format-stacking
@@ -380,6 +383,25 @@ clock_mhz = 14.0    # optional; defaults to the model's stock speed
   animation may pace correctly only with the cache modelled. The data cache
   caches expansion RAM/ROM only, since chip and slow RAM are DMA-visible and
   cache-inhibited as on real Amigas.
+- `jit` (experimental, also `--jit`/`--no-jit`) runs the CPU through the
+  m68k core's batch/trace-JIT path instead of the cycle-exact
+  per-instruction model: hot code compiles to native traces and fast-RAM
+  accesses run through a zero-cost direct-memory window. The machine
+  behaves like an ideal accelerator running at `clock_mhz`: one
+  instruction per CPU clock with zero-wait fast RAM and ROM, so a 50 MHz
+  68040 delivers on the order of 50 MIPS (raise `clock_mhz` for more).
+  Interrupts are recognized at batch boundaries, so chip-level races and
+  cycle-counted effects no longer line up; leave it off for anything
+  timing-sensitive (games, demos). Chip and slow RAM still arbitrate onto
+  the shared chip bus in order, and the on-chip cache models stay active
+  (as on a real accelerator, they are what lets chip-RAM-resident code
+  run at CPU speed), so displays, blits, and device I/O work normally. Requires a 68020
+  or later: the 68000/68010 share one bus with the chipset and their
+  floating-bus and prefetch semantics need the precise core, so
+  `jit = true` on those models logs a note and stays precise (the
+  launcher greys the toggle). Known issue: the bundled AROS ROM's boot
+  screen may stay grey under JIT on some 020+ configurations (the guest
+  still runs; Kickstart ROMs are unaffected).
 
 ## `[memory]`
 

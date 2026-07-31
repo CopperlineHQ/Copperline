@@ -28,6 +28,7 @@ default = [
     "net-nat",
     "net-bridge",
     "floppybridge",
+    "cpu-jit",
 ]
 display-plan-trace = []
 # Local investigation switches that deliberately alter timing or rendering.
@@ -58,6 +59,12 @@ frontend = [
 # from `frontend` because it is a core-machine feature, but Cranelift cannot
 # be compiled FOR wasm32, so browser builds turn it off.
 wasm-boards = ["dep:wasmtime"]
+# Native-code compilation of hot CPU traces (the m68k crate's Cranelift trace
+# JIT), used by the `[cpu] jit` fast execution mode. Cranelift cannot be
+# compiled FOR wasm32, so browser builds (--no-default-features) leave it off;
+# `[cpu] jit` still works there through the crate's interpreted trace loop,
+# just without native code generation.
+cpu-jit = ["m68k/jit"]
 # The headless `copperline-bench` benchmark binary (core-only; also builds
 # for wasm32-wasip1). Off by default so native release artifacts are
 # unchanged.

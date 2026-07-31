@@ -61,6 +61,68 @@ corrected to exact totals across the SingleStepTests 68000 cycle corpus
 which is what makes
 cycle-budgeted pacing trustworthy.
 
+## The batch/JIT execution mode
+
+`[cpu] jit` (experimental, 68020+) swaps the per-instruction precise loop
+for the core's instruction-budgeted batch path
+(`CpuCore::run_batch`): hot straight-line runs and self-loops execute as
+compiled Cranelift traces (the `cpu-jit` cargo feature; without it, wasm
+builds included, the same trace machinery runs interpreted), and the
+largest fast-RAM bank is offered to the core as a zero-cost direct-memory
+window (`AddressBus::fast_mem`). The timing contract is deliberately
+approximate (`M68kMachine::step_slice_jit`):
+
+- every retired instruction is billed a flat single CPU clock, converted
+  to colour clocks at the configured clock ratio, and fast-RAM/ROM
+  accesses bill nothing (an ideal zero-wait external bus) -- the machine
+  behaves like a perfect pipelined accelerator whose throughput tracks
+  `[cpu] clock_mhz` directly, e.g. ~50 MIPS for a 50 MHz 68040 in fast
+  RAM. This is the deterministic equivalent of a "fastest possible"
+  mode: a truly host-speed CPU would make emulated results depend on the
+  host, which Copperline never allows;
+- chip and slow RAM accesses still arbitrate into DMA slots through the
+  normal `CpuBus` paths and advance the beam as they land (that bus is
+  shared silicon), and CIA/RTC accesses keep their E-clock costs, keeping
+  chipset side effects ordered against display DMA;
+- interrupts are recognized only at batch boundaries (64 instructions),
+  from the live INTENA/INTREQ state; a level the boundary cannot deliver
+  is never left in the core, since the batch would take it as soon as the
+  mask drops without recomputing INTREQ (a spurious handler re-entry);
+- a slice that runs and then executes STOP is billed only its executed
+  time -- the idle period is the next slice's event-bounded fast-forward,
+  exactly like the precise path's STOP handling;
+- traps surfaced by the batch (A-line/F-line/TRAP/BKPT/illegal) are taken
+  as their real hardware exceptions, mirroring the precise loop's no-op
+  HLE policy.
+
+The on-chip cache models stay active under JIT: on a real accelerator it
+is exactly the caches that let chip-RAM-resident code run at CPU speed
+instead of paying chip-bus arbitration on every fetch, so bypassing them
+made a fast-RAM-less Workbench measure 3x slower under JIT than precise.
+A cache hit serves the access with no bus cycle; a miss pays the real
+chip-bus (or zero-wait external) cost. CACR writes inside a batch are
+synced to the models at the batch boundary.
+
+The fastmem window is only offered when nothing intercepts plain fast-RAM
+accesses: cache models, memory-write debug hooks, the heat map, SMC
+detection, and injected bus faults all force every access back onto the
+bus (so on default 020+ configs, whose caches are modelled, the window
+engages only when the user opts the caches off -- and the core also
+declines it whenever the guest enables the MMU, since fastmem addresses
+are physical). Arming any per-instruction debug or diagnostic hook
+(breakpoints, watches, traces, `COPPERLINE_DBG_*`) drops the whole slice
+back to the precise loop, so the debugger always sees every instruction.
+
+The 68000 and 68010 never take the batch path. On the small-box machines
+every CPU cycle drives the one bus shared with Agnus, and the floating-bus
+model is prefetch-order dependent: Kickstart's diagnostic-ROM probe
+(`CMPI.W #$1111,(A1)` against unmapped `$F00000`) relies on the prefetch
+queue having fetched the following words so the undriven bus does NOT
+float to the immediate just read. The batch contract runs without
+prefetch, which lands the float on the immediate and false-detects a
+diagnostic ROM. `[cpu] jit` on these models logs a note and stays
+precise.
+
 ## Prefetch
 
 The 68000's two-word instruction prefetch queue (IRD/IRC) is modelled in

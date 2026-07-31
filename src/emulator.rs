@@ -67,6 +67,10 @@ pub struct Emulator {
     paced: bool,
     cpu_cycles_per_instruction: f64,
     real_pacing_budget_mode: RealPacingBudgetMode,
+    /// Fast batch/trace-JIT CPU execution (`[cpu] jit`). The run loop then
+    /// hands the machine multi-instruction slices instead of cycle-stepping
+    /// one instruction at a time; see `M68kMachine::step_slice_jit`.
+    cpu_jit: bool,
     audio_profile: AudioRuntimeProfile,
     real_pacing_profile: RealPacingProfile,
     /// Monotonic count of retired CPU instructions since power-on -- the
@@ -423,6 +427,7 @@ impl Emulator {
             paced,
             cpu_cycles_per_instruction,
             real_pacing_budget_mode,
+            cpu_jit: false,
             audio_profile: AudioRuntimeProfile::new(),
             real_pacing_profile: RealPacingProfile::new(),
             retired_instructions: 0,
@@ -436,6 +441,24 @@ impl Emulator {
     /// Install the opt-in 68020/030 CACR-controlled cache models.
     pub fn set_cache_emulation(&mut self, icache: bool, dcache: bool) {
         self.machine.set_cache_emulation(icache, dcache);
+    }
+
+    /// Enable the fast batch/trace-JIT CPU mode (`[cpu] jit`). Not
+    /// cycle-exact: the CPU runs like an accelerator card. Forces the
+    /// cycles pacing budget, whose per-slice debit is derived from the
+    /// device time that actually elapsed -- the instruction-count budget
+    /// assumes the calibrated interpreter cost per instruction, which the
+    /// JIT's flat billing deliberately undercuts.
+    pub fn set_cpu_jit(&mut self, on: bool) {
+        self.cpu_jit = on;
+        self.machine.set_jit_enabled(on);
+        if on {
+            self.real_pacing_budget_mode = RealPacingBudgetMode::M68kCycles;
+            log::info!(
+                "cpu jit: batch/trace execution enabled (not cycle-exact, \
+                 accelerator-style timing)"
+            );
+        }
     }
 
     /// Record the shape of the running machine (from the boot `Config`) and
@@ -1549,6 +1572,14 @@ impl Emulator {
     ) -> Result<RealSliceAccounting> {
         let chunk = if *cpu_idle {
             self.idle_fast_forward_chunk(idle_cap)
+        } else if self.cpu_jit {
+            // JIT mode hands the machine a fixed multi-instruction slice;
+            // batching (and interrupt recognition) inside it is handled by
+            // `step_slice_jit`. A fixed size -- never derived from the
+            // caller's budget remainder -- keeps the batch boundaries, and
+            // therefore interrupt delivery, identical for every caller that
+            // replays the same machine state.
+            INSTRUCTIONS_PER_REALTIME_SLICE
         } else {
             1
         };
@@ -1574,8 +1605,14 @@ impl Emulator {
         self.real_pacing_profile.record_slice(&run, accounting);
         // Only a single-instruction slice that came back stopped tells us the
         // CPU is genuinely idle; never batch on the slice right after a
-        // fast-forward, so a wake-up is always stepped.
-        *cpu_idle = run.cpu_stopped && chunk == 1;
+        // fast-forward, so a wake-up is always stepped. The JIT path runs
+        // multi-instruction slices, so there a stopped slice that retired
+        // nothing at all is the equivalent evidence -- without it the idle
+        // fast-forward (whose nap is bounded to the next device event) never
+        // engages and a STOPped guest free-runs past fine-grained device
+        // timing in whole-slice blind naps.
+        *cpu_idle =
+            run.cpu_stopped && (chunk == 1 || (self.cpu_jit && run.actual_instructions == 0));
         Ok(accounting)
     }
 
@@ -1797,14 +1834,29 @@ fn real_slice_accounting(
         // not a whole instruction's worth of time.
         let device_cck = if run.actual_instructions == 0 && requested_instructions == 1 {
             run.actual_cpu_cck.max(1)
+        } else if run.actual_instructions > 0 {
+            // A multi-instruction (JIT) slice that ran and then hit STOP:
+            // its billed time is the device time. Flooring at the requested
+            // span would nap blindly past every device event by the rest of
+            // the slice (thousands of instructions), inflating each Wait()'s
+            // wake-up latency; the idle period belongs to the NEXT slice,
+            // whose fast-forward is bounded to the next device event. The
+            // precise path never reaches here (its stopping slice is a
+            // single-instruction slice, accounted as running).
+            run.actual_cpu_cck
         } else {
             run.actual_cpu_cck.max(cck_for_instructions(
                 requested_instructions,
                 cpu_cycles_per_instruction,
             ))
         };
+        let budget_debit = if run.actual_instructions > 0 {
+            run.actual_instructions
+        } else {
+            requested_instructions.max(1)
+        };
         return RealSliceAccounting {
-            budget_debit: requested_instructions.max(run.actual_instructions).max(1),
+            budget_debit,
             device_cck,
             chip_bus_wait_cck: 0,
             slice_cck: device_cck.max(run.bus_advanced_cck),
@@ -2439,7 +2491,15 @@ pub fn build_machine(
         cpu_clocks_per_cck,
         paced,
     )?;
+    // The cache models stay active under JIT: on a real accelerator it is
+    // exactly the caches that let chip-RAM-resident code run at CPU speed
+    // instead of paying chip-bus arbitration per fetch (SysInfo's
+    // Dhrystone on a fast-RAM-less Workbench regressed 3x without them).
+    // There is no coherence hazard with the fastmem window: the window is
+    // only offered while both cache models are absent (CpuBus::jit_fast_mem),
+    // so cached configs simply run every access through the modelled bus.
     emu.set_cache_emulation(cfg.cpu_icache, cfg.cpu_dcache);
+    emu.set_cpu_jit(cfg.cpu_jit);
     emu.set_machine_descriptor(cfg.descriptor());
     Ok(emu)
 }

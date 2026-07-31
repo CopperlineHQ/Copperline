@@ -57,6 +57,12 @@ pub struct Config {
     pub cpu_dcache: bool,
     /// 68060 unimplemented-instruction policy (faithful traps by default).
     pub cpu_unimplemented: UnimplementedPolicy,
+    /// Fast CPU execution through the m68k core's batch/trace-JIT path
+    /// (`[cpu] jit`). Trades the cycle-exact CPU timing model for host
+    /// speed: instructions retire in batches at an approximate cost, so
+    /// the machine behaves like one with an accelerator card fitted.
+    /// Defaults off.
+    pub cpu_jit: bool,
     pub emulation: Emulation,
     pub chip_ram_bytes: usize,
     pub fast_ram_bytes: usize,
@@ -1567,6 +1573,7 @@ impl Default for Config {
             cpu_icache: false,
             cpu_dcache: false,
             cpu_unimplemented: UnimplementedPolicy::Trap,
+            cpu_jit: false,
             emulation: Emulation {
                 power_on: true,
                 pacing_budget: PacingBudget::Cycles,
@@ -1774,6 +1781,9 @@ pub struct ConfigOverrides {
     pub cpu: Option<String>,
     pub fpu: Option<bool>,
     pub cpu_clock_mhz: Option<f64>,
+    /// Fast CPU execution via the batch/trace-JIT path (`--jit`/`--no-jit`).
+    /// Same semantics as `[cpu] jit`.
+    pub cpu_jit: Option<bool>,
     pub chip: Option<String>,
     pub fast: Option<String>,
     pub slow: Option<String>,
@@ -1890,6 +1900,7 @@ impl ConfigOverrides {
             && self.cpu.is_none()
             && self.fpu.is_none()
             && self.cpu_clock_mhz.is_none()
+            && self.cpu_jit.is_none()
             && self.chip.is_none()
             && self.fast.is_none()
             && self.slow.is_none()
@@ -1947,6 +1958,9 @@ impl ConfigOverrides {
         }
         if let Some(mhz) = self.cpu_clock_mhz {
             raw.cpu.clock_mhz = Some(mhz);
+        }
+        if let Some(jit) = self.cpu_jit {
+            raw.cpu.jit = Some(jit);
         }
         if let Some(chip) = &self.chip {
             raw.memory.chip = Some(chip.clone());
@@ -2560,6 +2574,11 @@ pub(crate) struct RawCpu {
     /// for systems without the library.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) unimplemented: Option<String>,
+    /// Fast CPU execution through the m68k core's batch/trace-JIT path.
+    /// Not cycle-exact: the CPU behaves like an accelerator card. Defaults
+    /// off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) jit: Option<bool>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -2930,6 +2949,7 @@ impl TryFrom<RawConfig> for Config {
                  (the 68000/68020 have no data cache)"
             ));
         }
+        let cpu_jit = raw.cpu.jit.unwrap_or(false);
         if let Some(speed) = raw.emulation.speed.as_deref() {
             log::warn!(
                 "[emulation] speed = {speed:?} is deprecated and ignored: the \
@@ -3465,6 +3485,7 @@ impl TryFrom<RawConfig> for Config {
             cpu_icache,
             cpu_dcache,
             cpu_unimplemented,
+            cpu_jit,
             emulation,
             chip_ram_bytes,
             fast_ram_bytes,
@@ -5008,6 +5029,7 @@ mod tests {
                 icache: Some(true),
                 dcache: None,
                 unimplemented: None,
+                jit: None,
             },
             memory: RawMemory {
                 chip: Some("2M".to_string()),
@@ -7252,6 +7274,20 @@ mod tests {
         assert!(cfg.fpu, "the full 68060 has its FPU on-die");
         assert!(cfg.cpu_icache && cfg.cpu_dcache, "8 KB caches default on");
         assert_eq!(cfg.cpu_unimplemented, UnimplementedPolicy::Trap);
+        Ok(())
+    }
+
+    #[test]
+    fn cpu_jit_parses_and_defaults_off() -> Result<()> {
+        let cfg = parse_config("")?;
+        assert!(!cfg.cpu_jit, "JIT must be opt-in");
+        let cfg = parse_config(
+            r#"
+            [cpu]
+            jit = true
+            "#,
+        )?;
+        assert!(cfg.cpu_jit);
         Ok(())
     }
 

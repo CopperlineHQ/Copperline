@@ -9253,6 +9253,19 @@ mod tests {
         draw(&mut frame, scale, &ui, None, None, false, false, labels());
         save(&frame, "launcher-io-ports");
 
+        // The CPU tab on the default (68000) machine: the JIT accelerator
+        // row is greyed with its "needs 68020+" reason instead of a toggle.
+        let mut frame = vec![0u8; w * h * 4];
+        let mut state = LauncherState::new(launcher::MachineSetup::default());
+        state.tab = LauncherTab::Cpu;
+        let ui = UiState {
+            menu_open: false,
+            menu_scroll: 0,
+            panel: Some(Panel::Launcher(Box::new(state))),
+        };
+        draw(&mut frame, scale, &ui, None, None, false, false, labels());
+        save(&frame, "launcher-cpu");
+
         // I/O Ports with the A2065 on the NAT backend, to check the
         // non-determinism warning under the rows.
         let mut frame = vec![0u8; w * h * 4];
