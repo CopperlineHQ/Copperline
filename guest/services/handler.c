@@ -11,12 +11,14 @@
 //    adds it to the mount list. DOS mounts the nodes at boot; the handler
 //    process is started on first reference.
 //
-// Kickstart 1.3 (V34) is supported for mounting: both entry points probe
-// the library versions at runtime and fall back from the V36+ calls
-// (AddBootNode, AddDosEntry/RemDosEntry/LockDosList) to their 1.3-era
-// equivalents (AddDosNode, a Forbid-protected splice of the DosInfo
-// device chain). Booting *from* a hostfs volume still needs 2.0+: the
-// bootpri vote rides on the V36 BootNode strap.
+// Kickstart 1.3 (V34) is supported: both entry points probe the library
+// versions at runtime and fall back from the V36+ calls (AddBootNode,
+// AddDosEntry/RemDosEntry/LockDosList) to their 1.3-era equivalents. On
+// V34 a non-boot mount (bootpri -128) uses AddDosNode; a bootable mount
+// hand-builds the BootNode that V36's AddBootNode would have built and
+// Enqueue()s it on eb_MountList with ln_Name pointing at the ConfigDev --
+// the linkage V34 AddDosNode cannot make (it takes no ConfigDev), and the
+// one strap needs to find the DiagArea whose da_BootPoint boots us.
 //
 //  - handler_main(): the DOS handler process. A pure packet pump: every
 //    DosPacket is rung in through this unit's doorbell register in the
@@ -40,6 +42,7 @@
 
 #include <libraries/configvars.h>
 #include <libraries/expansion.h>
+#include <libraries/expansionbase.h>
 
 #define EXEC_BASE_NAME _sysbase
 #define EXPANSION_BASE_NAME _expbase
@@ -226,15 +229,43 @@ void mount_boards(UBYTE *board, struct Library *_expbase, struct ConfigDev *cd)
         // -128 mounts at DOS init but is never a boot candidate.
         // ADNF_STARTPROC: start the handler process at mount time rather
         // than on first reference, so problems surface at boot.
-        // AddBootNode is V36+; on 1.3's V34 expansion.library the same
-        // AddDosNode call (V33+) queues the node on eb_MountList, which
-        // V34 dos.library binds at init -- mounted, but outside the boot
-        // vote, so bootpri is inert under 1.3.
         struct FileSysStartupMsg *fssm = BADDR(dn->dn_Startup);
         struct DosEnvec *env = BADDR(fssm->fssm_Environ);
-        if (_expbase->lib_Version >= 36)
-            AddBootNode((BYTE)env->de_BootPri, ADNF_STARTPROC, dn, cd);
-        else
-            AddDosNode((BYTE)env->de_BootPri, ADNF_STARTPROC, dn);
+        BYTE pri = (BYTE)env->de_BootPri;
+        if (_expbase->lib_Version >= 36) {
+            AddBootNode(pri, ADNF_STARTPROC, dn, cd);
+        } else if (pri == -128) {
+            // AddBootNode is V36+. V34's AddDosNode (V33+) queues the
+            // node on eb_MountList too, so V34 dos.library mounts it at
+            // init, but takes no ConfigDev -- strap cannot trace such a
+            // node back to a boot ROM, which is exactly right for the
+            // never-boot priority.
+            AddDosNode(pri, ADNF_STARTPROC, dn);
+        } else {
+            // Bootable mount on V34: hand-build the BootNode AddBootNode
+            // would have built (the documented 1.3 autoboot recipe, per
+            // the A2091's V34 ROM). ln_Name carries the ConfigDev; strap
+            // takes the highest-priority valid BootNode, follows the
+            // ConfigDev to our DiagArea, and calls its da_BootPoint
+            // (entry.s), which fires dos.library's init; DOS then mounts
+            // the eb_MountList nodes and roots SYS: on the boot winner.
+            // A bootable floppy competes as a strap-enqueued BootNode at
+            // priority 5, so bootpri composes with DF0: as on V36+.
+            struct BootNode *bn =
+                AllocMem(sizeof(*bn), MEMF_PUBLIC | MEMF_CLEAR);
+            if (bn == NULL) {
+                AddDosNode(pri, ADNF_STARTPROC, dn);
+                continue;
+            }
+            bn->bn_Node.ln_Type = NT_BOOTNODE;
+            bn->bn_Node.ln_Pri = pri;
+            bn->bn_Node.ln_Name = (char *)cd;
+            bn->bn_Flags = ADNF_STARTPROC;
+            bn->bn_DeviceNode = dn;
+            Forbid();
+            Enqueue(&((struct ExpansionBase *)_expbase)->MountList,
+                    &bn->bn_Node);
+            Permit();
+        }
     }
 }

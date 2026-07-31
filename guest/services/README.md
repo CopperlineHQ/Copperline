@@ -15,10 +15,13 @@ Two entry points (see `entry.s` and `copperline_board.h`):
   the mount table the emulator wrote into the board window and adds it with
   `AddBootNode` at the priority from the mount's `bootpri` config (default
   -128: mounted at DOS init, never a boot candidate). On Kickstart 1.3
-  (expansion.library V34) it falls back to `AddDosNode`, which still mounts
-  every entry at DOS init but leaves it out of the boot vote, so `bootpri`
-  is inert under 1.3; the handler likewise falls back from the V36 DosList
-  calls to a Forbid-protected splice when dos.library is V34.
+  (expansion.library V34) it speaks the 1.3-era conventions instead:
+  `AddDosNode` for never-boot mounts, and for bootable ones the hand-built
+  BootNode `AddBootNode` would have made, `Enqueue`d on `eb_MountList` with
+  `ln_Name` pointing at the ConfigDev so strap can trace the winner to the
+  DiagArea's BootPoint (`entry.s`). The handler likewise falls back from
+  the V36 DosList calls to a Forbid-protected splice when dos.library is
+  V34.
 - `handler_main()` -- the DOS handler process, started by DOS at mount time
   (`ADNF_STARTPROC`). `WaitPort`/`GetMsg`, ring the packet in through the
   unit's doorbell register (the emulator fills `dp_Res1`/`dp_Res2` within

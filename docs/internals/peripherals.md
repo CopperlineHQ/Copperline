@@ -187,10 +187,11 @@ handler (see `guest/services/`) mapped into the Copperline services board
 with a mount table and a hand-built DiagArea; at expansion init it builds
 one DeviceNode per mount and `AddBootNode`s it (at the mount's configured
 boot priority), so DOS mounts the devices at boot. The handler probes the
-library versions at runtime and falls back to the 1.3-era calls
-(`AddDosNode`, a Forbid-protected DosList splice) on Kickstart 1.3, which
-mounts but cannot boot from the volumes -- the bootpri vote needs the
-2.0+ BootNode strap. The handler forwards
+library versions at runtime and falls back to the 1.3-era conventions on
+Kickstart 1.3: `AddDosNode` for never-boot mounts, a hand-built BootNode
+`Enqueue`d on `eb_MountList` (with `ln_Name` carrying the ConfigDev, the
+linkage strap follows to the DiagArea's BootPoint) for bootable ones, and
+a Forbid-protected DosList splice in place of the V36 volume calls. The handler forwards
 every DosPacket to the host through a doorbell register in the board's
 MMIO window: writing the packet APTR to `REG_DOSPKT` services the packet
 synchronously inside the register write, so `dp_Res1`/`dp_Res2` and the
