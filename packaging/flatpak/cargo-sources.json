@@ -795,6 +795,19 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/cranelift-assembler-x64/cranelift-assembler-x64-0.132.3.crate",
+        "sha256": "3d521bdbc6098937af83ef4ab6d5c07398126bc71878f7ef4ea9499977978ef5",
+        "dest": "cargo/vendor/cranelift-assembler-x64-0.132.3"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"3d521bdbc6098937af83ef4ab6d5c07398126bc71878f7ef4ea9499977978ef5\", \"files\": {}}",
+        "dest": "cargo/vendor/cranelift-assembler-x64-0.132.3",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
         "url": "https://static.crates.io/crates/cranelift-assembler-x64-meta/cranelift-assembler-x64-meta-0.123.12.crate",
         "sha256": "ccabe4636007296721080e02d7dab46d4319638ec4e3f6f7402fcb46dc5122c6",
         "dest": "cargo/vendor/cranelift-assembler-x64-meta-0.123.12"
@@ -803,6 +816,19 @@
         "type": "inline",
         "contents": "{\"package\": \"ccabe4636007296721080e02d7dab46d4319638ec4e3f6f7402fcb46dc5122c6\", \"files\": {}}",
         "dest": "cargo/vendor/cranelift-assembler-x64-meta-0.123.12",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/cranelift-assembler-x64-meta/cranelift-assembler-x64-meta-0.132.3.crate",
+        "sha256": "3dde0b83164d4a497860af4236271178bc640512b067101e0853e4f74eaa4df5",
+        "dest": "cargo/vendor/cranelift-assembler-x64-meta-0.132.3"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"3dde0b83164d4a497860af4236271178bc640512b067101e0853e4f74eaa4df5\", \"files\": {}}",
+        "dest": "cargo/vendor/cranelift-assembler-x64-meta-0.132.3",
         "dest-filename": ".cargo-checksum.json"
     },
     {
@@ -821,6 +847,19 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/cranelift-bforest/cranelift-bforest-0.132.3.crate",
+        "sha256": "0111d110b72b4efad69a372e29e21628652fd0bcab66967e5c8350ab679affd5",
+        "dest": "cargo/vendor/cranelift-bforest-0.132.3"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"0111d110b72b4efad69a372e29e21628652fd0bcab66967e5c8350ab679affd5\", \"files\": {}}",
+        "dest": "cargo/vendor/cranelift-bforest-0.132.3",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
         "url": "https://static.crates.io/crates/cranelift-bitset/cranelift-bitset-0.123.12.crate",
         "sha256": "800cc586df98b12c502e76707c96565e40629a5322eaa15aaa34ba05f5721e31",
         "dest": "cargo/vendor/cranelift-bitset-0.123.12"
@@ -829,6 +868,19 @@
         "type": "inline",
         "contents": "{\"package\": \"800cc586df98b12c502e76707c96565e40629a5322eaa15aaa34ba05f5721e31\", \"files\": {}}",
         "dest": "cargo/vendor/cranelift-bitset-0.123.12",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/cranelift-bitset/cranelift-bitset-0.132.3.crate",
+        "sha256": "cf01ecc92fc5499789d79c3b817299d5a8ddd828d31dcf0f9cc3cc66f38dbb36",
+        "dest": "cargo/vendor/cranelift-bitset-0.132.3"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"cf01ecc92fc5499789d79c3b817299d5a8ddd828d31dcf0f9cc3cc66f38dbb36\", \"files\": {}}",
+        "dest": "cargo/vendor/cranelift-bitset-0.132.3",
         "dest-filename": ".cargo-checksum.json"
     },
     {
@@ -847,6 +899,19 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/cranelift-codegen/cranelift-codegen-0.132.3.crate",
+        "sha256": "6cd2563bead0090c3879a7ff7327f7550c9d59bb5d05ecc8cd7886977aa3125a",
+        "dest": "cargo/vendor/cranelift-codegen-0.132.3"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"6cd2563bead0090c3879a7ff7327f7550c9d59bb5d05ecc8cd7886977aa3125a\", \"files\": {}}",
+        "dest": "cargo/vendor/cranelift-codegen-0.132.3",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
         "url": "https://static.crates.io/crates/cranelift-codegen-meta/cranelift-codegen-meta-0.123.12.crate",
         "sha256": "38c505162bcf77dcb859905b3eac56a1917fc3cf326424fb06e7732031e3a8ae",
         "dest": "cargo/vendor/cranelift-codegen-meta-0.123.12"
@@ -855,6 +920,19 @@
         "type": "inline",
         "contents": "{\"package\": \"38c505162bcf77dcb859905b3eac56a1917fc3cf326424fb06e7732031e3a8ae\", \"files\": {}}",
         "dest": "cargo/vendor/cranelift-codegen-meta-0.123.12",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/cranelift-codegen-meta/cranelift-codegen-meta-0.132.3.crate",
+        "sha256": "9640d250d26f9381a73dc7f9862b27928d4809119aec73be0e556612e67b6a99",
+        "dest": "cargo/vendor/cranelift-codegen-meta-0.132.3"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"9640d250d26f9381a73dc7f9862b27928d4809119aec73be0e556612e67b6a99\", \"files\": {}}",
+        "dest": "cargo/vendor/cranelift-codegen-meta-0.132.3",
         "dest-filename": ".cargo-checksum.json"
     },
     {
@@ -873,6 +951,19 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/cranelift-codegen-shared/cranelift-codegen-shared-0.132.3.crate",
+        "sha256": "a07f156b90efc94371ddb3536f76e4ab671ad2e093bfa5511e10198cadbb0c47",
+        "dest": "cargo/vendor/cranelift-codegen-shared-0.132.3"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"a07f156b90efc94371ddb3536f76e4ab671ad2e093bfa5511e10198cadbb0c47\", \"files\": {}}",
+        "dest": "cargo/vendor/cranelift-codegen-shared-0.132.3",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
         "url": "https://static.crates.io/crates/cranelift-control/cranelift-control-0.123.12.crate",
         "sha256": "2faf9a5009bce7f725ce2af7a08c4883ebac6af933e7e0aa7d84f976f4e6deb5",
         "dest": "cargo/vendor/cranelift-control-0.123.12"
@@ -881,6 +972,19 @@
         "type": "inline",
         "contents": "{\"package\": \"2faf9a5009bce7f725ce2af7a08c4883ebac6af933e7e0aa7d84f976f4e6deb5\", \"files\": {}}",
         "dest": "cargo/vendor/cranelift-control-0.123.12",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/cranelift-control/cranelift-control-0.132.3.crate",
+        "sha256": "d75a76fd9dd37dcbc3d2d2e00abe3281a7e88adc035fba3b8114cc69981576ec",
+        "dest": "cargo/vendor/cranelift-control-0.132.3"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"d75a76fd9dd37dcbc3d2d2e00abe3281a7e88adc035fba3b8114cc69981576ec\", \"files\": {}}",
+        "dest": "cargo/vendor/cranelift-control-0.132.3",
         "dest-filename": ".cargo-checksum.json"
     },
     {
@@ -899,6 +1003,19 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/cranelift-entity/cranelift-entity-0.132.3.crate",
+        "sha256": "2eea22522144ba08c7e7ef94bfc25d474ef016c2771974b8ab1986734ac85965",
+        "dest": "cargo/vendor/cranelift-entity-0.132.3"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"2eea22522144ba08c7e7ef94bfc25d474ef016c2771974b8ab1986734ac85965\", \"files\": {}}",
+        "dest": "cargo/vendor/cranelift-entity-0.132.3",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
         "url": "https://static.crates.io/crates/cranelift-frontend/cranelift-frontend-0.123.12.crate",
         "sha256": "f80847f0929967f0cec82f9e0543b3901e0f0063690405891f22107b5a130fd8",
         "dest": "cargo/vendor/cranelift-frontend-0.123.12"
@@ -907,6 +1024,19 @@
         "type": "inline",
         "contents": "{\"package\": \"f80847f0929967f0cec82f9e0543b3901e0f0063690405891f22107b5a130fd8\", \"files\": {}}",
         "dest": "cargo/vendor/cranelift-frontend-0.123.12",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/cranelift-frontend/cranelift-frontend-0.132.3.crate",
+        "sha256": "efa2826c80dff1d93b19b3cfbcaf9fae44c78d739a98d146dd5bd89c51e14367",
+        "dest": "cargo/vendor/cranelift-frontend-0.132.3"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"efa2826c80dff1d93b19b3cfbcaf9fae44c78d739a98d146dd5bd89c51e14367\", \"files\": {}}",
+        "dest": "cargo/vendor/cranelift-frontend-0.132.3",
         "dest-filename": ".cargo-checksum.json"
     },
     {
@@ -925,6 +1055,45 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/cranelift-isle/cranelift-isle-0.132.3.crate",
+        "sha256": "e238a69b95c5415456f22189494a12db94f313bb72b6ec9cc88ddf2f1056e28e",
+        "dest": "cargo/vendor/cranelift-isle-0.132.3"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"e238a69b95c5415456f22189494a12db94f313bb72b6ec9cc88ddf2f1056e28e\", \"files\": {}}",
+        "dest": "cargo/vendor/cranelift-isle-0.132.3",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/cranelift-jit/cranelift-jit-0.132.3.crate",
+        "sha256": "a7def01f2b14f97421558d1db33e396b97b97ab2ed40dedc8165ba00d13088e6",
+        "dest": "cargo/vendor/cranelift-jit-0.132.3"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"a7def01f2b14f97421558d1db33e396b97b97ab2ed40dedc8165ba00d13088e6\", \"files\": {}}",
+        "dest": "cargo/vendor/cranelift-jit-0.132.3",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/cranelift-module/cranelift-module-0.132.3.crate",
+        "sha256": "985df7eceefc91cb75bf7f51b32b7f1739d0fc0e25ddf023b1de407cb3c93d77",
+        "dest": "cargo/vendor/cranelift-module-0.132.3"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"985df7eceefc91cb75bf7f51b32b7f1739d0fc0e25ddf023b1de407cb3c93d77\", \"files\": {}}",
+        "dest": "cargo/vendor/cranelift-module-0.132.3",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
         "url": "https://static.crates.io/crates/cranelift-native/cranelift-native-0.123.12.crate",
         "sha256": "6e0135923540574362e16f01bf40000664263840991039ff3041ba717de6cf3a",
         "dest": "cargo/vendor/cranelift-native-0.123.12"
@@ -938,6 +1107,19 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/cranelift-native/cranelift-native-0.132.3.crate",
+        "sha256": "eceb0ebd8d6aef6bb287e8d532a164b0db1c0062961211e9c22a91f67521c098",
+        "dest": "cargo/vendor/cranelift-native-0.132.3"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"eceb0ebd8d6aef6bb287e8d532a164b0db1c0062961211e9c22a91f67521c098\", \"files\": {}}",
+        "dest": "cargo/vendor/cranelift-native-0.132.3",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
         "url": "https://static.crates.io/crates/cranelift-srcgen/cranelift-srcgen-0.123.12.crate",
         "sha256": "93fb12f76c482e034f6ebefa843c914e74112f088215d8d36d33a649f9fab99b",
         "dest": "cargo/vendor/cranelift-srcgen-0.123.12"
@@ -946,6 +1128,19 @@
         "type": "inline",
         "contents": "{\"package\": \"93fb12f76c482e034f6ebefa843c914e74112f088215d8d36d33a649f9fab99b\", \"files\": {}}",
         "dest": "cargo/vendor/cranelift-srcgen-0.123.12",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/cranelift-srcgen/cranelift-srcgen-0.132.3.crate",
+        "sha256": "004643f39a7bec553de5263d650db30e5b9caec1d5cbe065fd732b7ec9ae40d0",
+        "dest": "cargo/vendor/cranelift-srcgen-0.132.3"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"004643f39a7bec553de5263d650db30e5b9caec1d5cbe065fd732b7ec9ae40d0\", \"files\": {}}",
+        "dest": "cargo/vendor/cranelift-srcgen-0.132.3",
         "dest-filename": ".cargo-checksum.json"
     },
     {
@@ -1518,6 +1713,19 @@
         "type": "inline",
         "contents": "{\"package\": \"e629b9b98ef3dd8afe6ca2bd0f89306cec16d43d907889945bc5d6687f2f13c7\", \"files\": {}}",
         "dest": "cargo/vendor/gimli-0.32.3",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/gimli/gimli-0.33.0.crate",
+        "sha256": "0bf7f043f89559805f8c7cacc432749b2fa0d0a0a9ee46ce47164ed5ba7f126c",
+        "dest": "cargo/vendor/gimli-0.33.0"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"0bf7f043f89559805f8c7cacc432749b2fa0d0a0a9ee46ce47164ed5ba7f126c\", \"files\": {}}",
+        "dest": "cargo/vendor/gimli-0.33.0",
         "dest-filename": ".cargo-checksum.json"
     },
     {
@@ -2194,6 +2402,19 @@
         "type": "inline",
         "contents": "{\"package\": \"ad38eb12aea514a0466ea40a80fd8cc83637065948eb4a426e4aa46261175227\", \"files\": {}}",
         "dest": "cargo/vendor/memfd-0.6.5",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/memmap2/memmap2-0.2.3.crate",
+        "sha256": "723e3ebdcdc5c023db1df315364573789f8857c11b631a2fdfad7c00f5c046b4",
+        "dest": "cargo/vendor/memmap2-0.2.3"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"723e3ebdcdc5c023db1df315364573789f8857c11b631a2fdfad7c00f5c046b4\", \"files\": {}}",
+        "dest": "cargo/vendor/memmap2-0.2.3",
         "dest-filename": ".cargo-checksum.json"
     },
     {
@@ -3291,6 +3512,19 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/regalloc2/regalloc2-0.15.2.crate",
+        "sha256": "757712e8e61590d6d4f5d563483755538b5aa13467837a3b41cd9832509a7f85",
+        "dest": "cargo/vendor/regalloc2-0.15.2"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"757712e8e61590d6d4f5d563483755538b5aa13467837a3b41cd9832509a7f85\", \"files\": {}}",
+        "dest": "cargo/vendor/regalloc2-0.15.2",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
         "url": "https://static.crates.io/crates/regex/regex-1.12.3.crate",
         "sha256": "e10754a14b9137dd7b1e3e5b0493cc9171fdd105e0ab477f51b72e7f3ac0e276",
         "dest": "cargo/vendor/regex-1.12.3"
@@ -3325,6 +3559,19 @@
         "type": "inline",
         "contents": "{\"package\": \"dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a\", \"files\": {}}",
         "dest": "cargo/vendor/regex-syntax-0.8.10",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/region/region-3.0.2.crate",
+        "sha256": "e6b6ebd13bc009aef9cd476c1310d49ac354d36e240cf1bd753290f3dc7199a7",
+        "dest": "cargo/vendor/region-3.0.2"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"e6b6ebd13bc009aef9cd476c1310d49ac354d36e240cf1bd753290f3dc7199a7\", \"files\": {}}",
+        "dest": "cargo/vendor/region-3.0.2",
         "dest-filename": ".cargo-checksum.json"
     },
     {
@@ -4370,6 +4617,19 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/wasmtime-internal-core/wasmtime-internal-core-45.0.3.crate",
+        "sha256": "3073c03f97f871fe6400e68621c863b93ba79296f8e570285231952d23fcc804",
+        "dest": "cargo/vendor/wasmtime-internal-core-45.0.3"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"3073c03f97f871fe6400e68621c863b93ba79296f8e570285231952d23fcc804\", \"files\": {}}",
+        "dest": "cargo/vendor/wasmtime-internal-core-45.0.3",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
         "url": "https://static.crates.io/crates/wasmtime-internal-cranelift/wasmtime-internal-cranelift-36.0.12.crate",
         "sha256": "ab3495aa8300e4ca6b53f81a53ce5eff6621fd5ff8378ef9ae552d1479d57371",
         "dest": "cargo/vendor/wasmtime-internal-cranelift-36.0.12"
@@ -4417,6 +4677,19 @@
         "type": "inline",
         "contents": "{\"package\": \"627d8f57909a4f9bb1dbe57a96229a54b89d5995353d0b321f3cb9a1a118977a\", \"files\": {}}",
         "dest": "cargo/vendor/wasmtime-internal-jit-icache-coherence-36.0.12",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/wasmtime-internal-jit-icache-coherence/wasmtime-internal-jit-icache-coherence-45.0.3.crate",
+        "sha256": "37dee05e8c35759826f6b926cd949c51f771b6a58619d8e60c63c3f3d3e5e59b",
+        "dest": "cargo/vendor/wasmtime-internal-jit-icache-coherence-45.0.3"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"37dee05e8c35759826f6b926cd949c51f771b6a58619d8e60c63c3f3d3e5e59b\", \"files\": {}}",
+        "dest": "cargo/vendor/wasmtime-internal-jit-icache-coherence-45.0.3",
         "dest-filename": ".cargo-checksum.json"
     },
     {

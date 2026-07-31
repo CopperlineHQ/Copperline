@@ -252,18 +252,21 @@ const MAX_INSTRUCTION_BYTES: u32 = 12;
 
 /// Instruction budget per `run_batch` call in the JIT slice. Interrupts are
 /// only recognized between batches (plus once inside each batch entry), so
-/// this bounds interrupt latency in JIT mode: 64 instructions at the flat
-/// 4-clock bill is 256 CPU clocks, roughly half a scanline at stock clock.
-/// Larger batches let compiled traces run longer between host round-trips
-/// but delay interrupt delivery; AROS boot at accelerated clock ratios
-/// proved sensitive to latencies beyond about a scanline.
+/// this bounds interrupt latency in JIT mode to a small fraction of a
+/// scanline of billed time. Larger batches let compiled traces run longer
+/// between host round-trips but delay interrupt delivery; AROS boot at
+/// accelerated clock ratios proved sensitive to latencies beyond about a
+/// scanline.
 const JIT_BATCH_INSTRUCTIONS: usize = 64;
 
-/// Flat CPU-clock cost billed per instruction retired by the JIT slice: one
-/// 4-clock 68000 bus cycle. The batch path reports no cycle counts, so this
-/// constant sets the JIT machine's nominal speed -- a stock-clocked 68000
-/// runs at ~1.8 MIPS, and `[cpu] clock_mhz` scales it like any accelerator.
-const JIT_CPU_CLOCKS_PER_INSTRUCTION: u32 = 4;
+/// Flat CPU-clock cost billed per instruction retired by the JIT slice.
+/// The batch path reports no cycle counts, so this constant sets the JIT
+/// machine's nominal speed: one instruction per clock models an ideal
+/// pipelined accelerator, making guest throughput track `[cpu] clock_mhz`
+/// directly (a 50 MHz 68040 runs ~50 MIPS in fast RAM). Deterministic by
+/// construction -- a truly host-speed "fastest possible" mode would make
+/// emulated results depend on the host, which Copperline never allows.
+const JIT_CPU_CLOCKS_PER_INSTRUCTION: u32 = 1;
 
 struct CpuBus {
     bus: Bus,
@@ -2006,17 +2009,21 @@ impl M68kMachine {
         debug!("overlay disabled (chip RAM mapped at $0)");
     }
 
-    /// Enable the fast batch/trace-JIT execution mode (`[cpu] jit`).
+    /// Enable the fast batch/trace-JIT execution mode (`[cpu] jit`). Inert
+    /// on the 68000/68010: their shared-bus float model needs the precise
+    /// core (see `jit_fast_path_ok`), so neither the batch path nor the
+    /// JIT's zero-wait external billing may engage there.
     pub fn set_jit_enabled(&mut self, on: bool) {
-        self.jit_enabled = on;
-        self.bus.jit_enabled = on;
         if on && matches!(self.cpu.cpu_type, CpuType::M68000 | CpuType::M68010) {
             log::info!(
                 "cpu jit: the 68000/68010 shared-bus float model needs the \
                  precise per-instruction core; [cpu] jit has no effect on \
                  this CPU (use a 68020 or later)"
             );
+            return;
         }
+        self.jit_enabled = on;
+        self.bus.jit_enabled = on;
     }
 
     pub fn jit_enabled(&self) -> bool {
@@ -2821,6 +2828,18 @@ impl CpuBus {
         size.max(1).div_ceil(2) as u32
     }
 
+    /// Bill an external-bus (fast RAM/ROM/WCS) access. In JIT mode the CPU
+    /// models an ideal accelerator with zero-wait external memory -- the
+    /// batch path bills one flat clock per instruction instead -- so these
+    /// accesses cost nothing; chip/slow RAM (shared silicon, arbitrated)
+    /// and the E-clock devices keep their real costs either way.
+    fn bill_external_access(&mut self, size: usize) {
+        if self.jit_enabled {
+            return;
+        }
+        self.bus.cpu_external_access(Self::access_words(size));
+    }
+
     /// Latch the last word the CPU drove onto (or sampled from) the shared
     /// data bus: undriven (unmapped) reads float to this value. A byte
     /// cycle drives one lane while the other keeps its previous charge.
@@ -3017,7 +3036,7 @@ impl CpuBus {
         let addr = self.mask(address);
         match self.classify_plain_memory(addr, size) {
             Some(PlainMemRegion::OverlayRom(off)) => {
-                self.bus.cpu_external_access(Self::access_words(size));
+                self.bill_external_access(size);
                 return read_be(&self.bus.mem.rom, off, size);
             }
             Some(PlainMemRegion::ChipRam(off)) => {
@@ -3027,20 +3046,20 @@ impl CpuBus {
             Some(PlainMemRegion::ZorroRam(board, off)) => {
                 // Expansion (Zorro) RAM runs at external-bus speed, off the
                 // chip bus, exactly like the old fixed fast RAM mapping.
-                self.bus.cpu_external_access(Self::access_words(size));
+                self.bill_external_access(size);
                 return read_be(self.bus.mem.zorro.board_ram(board), off, size);
             }
             Some(PlainMemRegion::MbRam(off)) => {
                 // Ramsey-controlled motherboard RAM (A3000/A4000): 32-bit
                 // local RAM off the chip bus, at uncontended external speed
                 // like expansion RAM.
-                self.bus.cpu_external_access(Self::access_words(size));
+                self.bill_external_access(size);
                 return read_be(&self.bus.mem.mb_ram, off, size);
             }
             Some(PlainMemRegion::AccelRam(off)) => {
                 // CPU-slot (accelerator) fast RAM: local RAM on the CPU
                 // board, off the chip bus, at uncontended external speed.
-                self.bus.cpu_external_access(Self::access_words(size));
+                self.bill_external_access(size);
                 return read_be(&self.bus.mem.accel_ram, off, size);
             }
             Some(PlainMemRegion::SlowRam(off)) => {
@@ -3053,17 +3072,17 @@ impl CpuBus {
                 return read_be(&self.bus.mem.slow_ram, off, size);
             }
             Some(PlainMemRegion::Rom(off)) => {
-                self.bus.cpu_external_access(Self::access_words(size));
+                self.bill_external_access(size);
                 return read_be(&self.bus.mem.rom, off, size);
             }
             // A1000 WCS at $FC0000 (empty -> no match on other machines): the
             // 256 KiB writable control store the boot ROM loads Kickstart into.
             Some(PlainMemRegion::Wcs(off)) => {
-                self.bus.cpu_external_access(Self::access_words(size));
+                self.bill_external_access(size);
                 return read_be(&self.bus.mem.wcs, off, size);
             }
             Some(PlainMemRegion::ExtendedRom(off)) => {
-                self.bus.cpu_external_access(Self::access_words(size));
+                self.bill_external_access(size);
                 return read_be(&self.bus.mem.extended_rom, off, size);
             }
             None => {}
@@ -3250,7 +3269,7 @@ impl CpuBus {
         }
         match self.classify_plain_memory(addr, size) {
             Some(PlainMemRegion::OverlayRom(_)) => {
-                self.bus.cpu_external_access(Self::access_words(size));
+                self.bill_external_access(size);
                 return;
             }
             Some(PlainMemRegion::ChipRam(off)) => {
@@ -3271,17 +3290,17 @@ impl CpuBus {
                 return;
             }
             Some(PlainMemRegion::ZorroRam(board, off)) => {
-                self.bus.cpu_external_access(Self::access_words(size));
+                self.bill_external_access(size);
                 write_be(self.bus.mem.zorro.board_ram_mut(board), off, size, value);
                 return;
             }
             Some(PlainMemRegion::MbRam(off)) => {
-                self.bus.cpu_external_access(Self::access_words(size));
+                self.bill_external_access(size);
                 write_be(&mut self.bus.mem.mb_ram, off, size, value);
                 return;
             }
             Some(PlainMemRegion::AccelRam(off)) => {
-                self.bus.cpu_external_access(Self::access_words(size));
+                self.bill_external_access(size);
                 write_be(&mut self.bus.mem.accel_ram, off, size, value);
                 return;
             }
@@ -3297,7 +3316,7 @@ impl CpuBus {
                 return;
             }
             Some(PlainMemRegion::Rom(_)) => {
-                self.bus.cpu_external_access(Self::access_words(size));
+                self.bill_external_access(size);
                 // A1000: a CPU write anywhere in the boot-ROM window ($F80000-
                 // $FBFFFF) flips the latch to write-protect the WCS. The boot code
                 // does this once the Kickstart image is in place at $FC0000.
@@ -3308,7 +3327,7 @@ impl CpuBus {
             }
             // A1000 WCS at $FC0000: writable until the boot ROM locks the latch.
             Some(PlainMemRegion::Wcs(off)) => {
-                self.bus.cpu_external_access(Self::access_words(size));
+                self.bill_external_access(size);
                 if !self.bus.mem.wcs_write_protected {
                     write_be(&mut self.bus.mem.wcs, off, size, value);
                     self.dbg_note_memw(addr, size);
@@ -3316,7 +3335,7 @@ impl CpuBus {
                 return;
             }
             Some(PlainMemRegion::ExtendedRom(_)) => {
-                self.bus.cpu_external_access(Self::access_words(size));
+                self.bill_external_access(size);
                 return;
             }
             None => {}

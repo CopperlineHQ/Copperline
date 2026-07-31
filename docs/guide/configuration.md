@@ -387,18 +387,21 @@ clock_mhz = 14.0    # optional; defaults to the model's stock speed
   m68k core's batch/trace-JIT path instead of the cycle-exact
   per-instruction model: hot code compiles to native traces and fast-RAM
   accesses run through a zero-cost direct-memory window. The machine
-  behaves like one with an accelerator card fitted -- instructions retire
-  at a flat approximate cost, interrupts are recognized at batch
-  boundaries, and the on-chip cache models are bypassed -- so chip-level
-  races and cycle-counted effects no longer line up; leave it off for
-  anything timing-sensitive (games, demos). Chipset-touching accesses
-  still arbitrate onto the chip bus in order, so displays, blits, and
-  device I/O work normally. Requires a 68020 or later: the 68000/68010
-  share one bus with the chipset and their floating-bus and prefetch
-  semantics need the precise core, so `jit = true` on those models logs a
-  note and stays precise. Known issue: the bundled AROS ROM's boot screen
-  may stay grey under JIT on some 020+ configurations (the guest still
-  runs; Kickstart ROMs are unaffected).
+  behaves like an ideal accelerator running at `clock_mhz`: one
+  instruction per CPU clock with zero-wait fast RAM and ROM, so a 50 MHz
+  68040 delivers on the order of 50 MIPS (raise `clock_mhz` for more).
+  Interrupts are recognized at batch boundaries and the on-chip cache
+  models are bypassed, so chip-level races and cycle-counted effects no
+  longer line up; leave it off for anything timing-sensitive (games,
+  demos). Chip and slow RAM still arbitrate onto the shared chip bus in
+  order -- code that lives entirely in chip RAM sees little JIT benefit
+  -- so displays, blits, and device I/O work normally. Requires a 68020
+  or later: the 68000/68010 share one bus with the chipset and their
+  floating-bus and prefetch semantics need the precise core, so
+  `jit = true` on those models logs a note and stays precise (the
+  launcher greys the toggle). Known issue: the bundled AROS ROM's boot
+  screen may stay grey under JIT on some 020+ configurations (the guest
+  still runs; Kickstart ROMs are unaffected).
 
 ## `[memory]`
 

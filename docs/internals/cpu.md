@@ -72,13 +72,18 @@ largest fast-RAM bank is offered to the core as a zero-cost direct-memory
 window (`AddressBus::fast_mem`). The timing contract is deliberately
 approximate (`M68kMachine::step_slice_jit`):
 
-- every retired instruction is billed a flat 4 CPU clocks, converted to
-  colour clocks at the configured clock ratio, and the chipset is advanced
-  through the excess over the batch's actual bus time -- so the machine
-  behaves like one with an accelerator card fitted;
-- chip-bus accesses still arbitrate into DMA slots through the normal
-  `CpuBus` paths and advance the beam as they land, keeping chipset side
-  effects ordered against display DMA;
+- every retired instruction is billed a flat single CPU clock, converted
+  to colour clocks at the configured clock ratio, and fast-RAM/ROM
+  accesses bill nothing (an ideal zero-wait external bus) -- the machine
+  behaves like a perfect pipelined accelerator whose throughput tracks
+  `[cpu] clock_mhz` directly, e.g. ~50 MIPS for a 50 MHz 68040 in fast
+  RAM. This is the deterministic equivalent of a "fastest possible"
+  mode: a truly host-speed CPU would make emulated results depend on the
+  host, which Copperline never allows;
+- chip and slow RAM accesses still arbitrate into DMA slots through the
+  normal `CpuBus` paths and advance the beam as they land (that bus is
+  shared silicon), and CIA/RTC accesses keep their E-clock costs, keeping
+  chipset side effects ordered against display DMA;
 - interrupts are recognized only at batch boundaries (64 instructions),
   from the live INTENA/INTREQ state; a level the boundary cannot deliver
   is never left in the core, since the batch would take it as soon as the

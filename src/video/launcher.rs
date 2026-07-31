@@ -561,7 +561,7 @@ const CPU_ROWS: [Row; 6] = [
     row(F::Clock, "Clock", Cycle),
     row(F::Icache, "Instruction cache", Toggle),
     row(F::Dcache, "Data cache", Toggle),
-    row(F::Jit, "JIT (not cycle-exact)", Toggle),
+    row(F::Jit, "JIT accelerator", Toggle),
 ];
 const MEMORY_ROWS: [Row; 6] = [
     row(F::ChipRam, "Chip RAM", Cycle),
@@ -2112,6 +2112,12 @@ impl MachineSetup {
             // both caches; only the 68000 has neither).
             F::Icache => reason(self.cpu.has_instruction_cache(), "needs 68020+"),
             F::Dcache => reason(self.cpu.has_data_cache(), "needs 68030/040"),
+            // The 68000/68010 shared-bus float model needs the precise
+            // core, so the JIT never engages there (see cpu.rs).
+            F::Jit => reason(
+                !matches!(self.cpu, CpuModel::M68000 | CpuModel::M68010),
+                "needs 68020+",
+            ),
             F::Z3Ram => reason(cpu_is_32bit(self.cpu), "needs 32-bit CPU"),
             // The CPU-slot space at $08000000 is beyond a 24-bit bus too.
             F::AccelRam => reason(cpu_is_32bit(self.cpu), "needs 32-bit CPU"),

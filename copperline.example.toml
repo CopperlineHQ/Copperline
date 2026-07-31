@@ -101,13 +101,14 @@ model = "68000"
 # dcache = false
 
 # Experimental: fast CPU execution through the m68k core's batch/trace-JIT
-# path. The CPU retires instructions in batches at an approximate cost
-# instead of the cycle-exact timing model, so the machine behaves like one
-# with an accelerator card fitted: much faster, but chip-level races and
-# cycle-counted effects no longer line up. The on-chip cache models are
-# bypassed while it is active. Needs a 68020 or later (the 68000/68010
-# shared-bus float and prefetch semantics require the precise core, so it
-# is ignored there). Off by default.
+# path. The machine behaves like an ideal accelerator at clock_mhz: one
+# instruction per CPU clock with zero-wait fast RAM/ROM (a 50 MHz 68040
+# runs on the order of 50 MIPS; raise clock_mhz for more), but chip-level
+# races and cycle-counted effects no longer line up and the on-chip cache
+# models are bypassed. Chip/slow RAM keep their shared-bus arbitration.
+# Needs a 68020 or later (the 68000/68010 shared-bus float and prefetch
+# semantics require the precise core, so it is ignored there). Off by
+# default.
 # jit = true
 
 # 68060 only: the 68060 dropped MOVEP, CHK2/CMP2, CAS2, misaligned CAS,
