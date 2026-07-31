@@ -424,6 +424,16 @@ impl ZorroChain {
         None
     }
 
+    /// The largest configured RAM window as (base, len, board index), for
+    /// the CPU's JIT fastmem window. None until autoconfig has placed a
+    /// RAM board.
+    pub fn largest_ram_region(&self) -> Option<(u32, u32, usize)> {
+        self.regions
+            .iter()
+            .max_by_key(|(_, len, _)| *len)
+            .map(|&(base, len, idx)| (base, len, idx))
+    }
+
     /// Configured RAM windows as (base, len) pairs, for the debugger's
     /// memory hunt.
     pub fn ram_regions(&self) -> Vec<(u32, u32)> {

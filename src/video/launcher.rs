@@ -308,6 +308,7 @@ pub enum LauncherField {
     Clock,
     Icache,
     Dcache,
+    Jit,
     // Memory
     ChipRam,
     FastRam,
@@ -554,12 +555,13 @@ const SYSTEM_ROWS: [Row; 7] = [
     row(F::Identify, "Identify board", Toggle),
     row(F::Rtg, "RTG card", Cycle),
 ];
-const CPU_ROWS: [Row; 5] = [
+const CPU_ROWS: [Row; 6] = [
     row(F::Cpu, "CPU", Cycle),
     row(F::Fpu, "FPU (68881/2)", Toggle),
     row(F::Clock, "Clock", Cycle),
     row(F::Icache, "Instruction cache", Toggle),
     row(F::Dcache, "Data cache", Toggle),
+    row(F::Jit, "JIT (not cycle-exact)", Toggle),
 ];
 const MEMORY_ROWS: [Row; 6] = [
     row(F::ChipRam, "Chip RAM", Cycle),
@@ -1169,6 +1171,8 @@ pub struct MachineSetup {
     clock_mhz: f64,
     icache: bool,
     dcache: bool,
+    /// Fast batch/trace-JIT CPU execution (`[cpu] jit`); not cycle-exact.
+    jit: bool,
     // Memory (bytes)
     chip_ram: usize,
     fast_ram: usize,
@@ -1371,6 +1375,7 @@ impl MachineSetup {
             clock_mhz: cfg.cpu_clock_mhz,
             icache: cfg.cpu_icache,
             dcache: cfg.cpu_dcache,
+            jit: cfg.cpu_jit,
             chip_ram: cfg.chip_ram_bytes,
             fast_ram: cfg.fast_ram_bytes,
             slow_ram: cfg.slow_ram_bytes,
@@ -1635,6 +1640,9 @@ impl MachineSetup {
         }
         if self.dcache != base.cpu_dcache {
             raw.cpu.dcache = Some(self.dcache);
+        }
+        if self.jit != base.cpu_jit {
+            raw.cpu.jit = Some(self.jit);
         }
         // Memory
         if self.chip_ram != base.chip_ram_bytes {
@@ -2000,6 +2008,7 @@ impl MachineSetup {
         self.clock_mhz = base.cpu_clock_mhz;
         self.icache = base.cpu_icache;
         self.dcache = base.cpu_dcache;
+        self.jit = base.cpu_jit;
         self.chip_ram = base.chip_ram_bytes;
         self.fast_ram = base.fast_ram_bytes;
         self.slow_ram = base.slow_ram_bytes;
@@ -2272,6 +2281,7 @@ impl MachineSetup {
             F::Fpu => self.fpu,
             F::Icache => self.icache,
             F::Dcache => self.dcache,
+            F::Jit => self.jit,
             F::Df0WriteProtect => self.df_write_protected[0],
             F::Df1WriteProtect => self.df_write_protected[1],
             F::Df2WriteProtect => self.df_write_protected[2],
@@ -3024,6 +3034,7 @@ impl MachineSetup {
             F::Fpu => self.fpu = !self.fpu,
             F::Icache => self.icache = !self.icache,
             F::Dcache => self.dcache = !self.dcache,
+            F::Jit => self.jit = !self.jit,
             F::Df0WriteProtect | F::Df1WriteProtect | F::Df2WriteProtect | F::Df3WriteProtect
                 if Self::drive_protect_bay(field).is_some() =>
             {

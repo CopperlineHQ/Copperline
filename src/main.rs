@@ -421,6 +421,12 @@ where
                 )?;
                 overrides.cpu_clock_mhz = Some(mhz);
             }
+            "--jit" => {
+                overrides.cpu_jit = Some(true);
+            }
+            "--no-jit" => {
+                overrides.cpu_jit = Some(false);
+            }
             "--chip" => {
                 overrides.chip = Some(
                     args.next()
@@ -1098,6 +1104,8 @@ fn print_help() {
          --cpu MODEL                    CPU: 68000, 68010, 68EC020, 68020, 68030, 68040, or 68060\n  \
          --cpu-clock MHZ                CPU clock in MHz (default: the model's stock speed)\n  \
          --fpu / --no-fpu               fit / omit a 68881/68882 (68040/68060 on-die)\n  \
+         --jit / --no-jit               fast batch/trace-JIT CPU execution (not cycle-exact,\n  \
+         \x20                            like an accelerator card; default: off)\n  \
          --chip SIZE                    chip RAM size, e.g. 512K, 1M, 2M\n  \
          --fast SIZE                    Zorro II fast RAM size, e.g. 0, 1M, 4M, 8M\n  \
          --slow SIZE                    trapdoor slow RAM at $C00000, e.g. 0, 512K\n  \
@@ -1741,6 +1749,11 @@ fn main() -> Result<()> {
     // its logs via RUST_LOG.
     if std::env::var_os("RUST_LOG").is_none() {
         log_builder.filter_module("gilrs", log::LevelFilter::Error);
+        // The Cranelift JIT backend logs every compiled trace's full IR
+        // listing at info level; with `[cpu] jit` that floods the log.
+        // RUST_LOG still opts back in for JIT debugging.
+        log_builder.filter_module("cranelift_jit", log::LevelFilter::Warn);
+        log_builder.filter_module("cranelift_codegen", log::LevelFilter::Warn);
     }
     log_builder.init();
 
@@ -2898,11 +2911,13 @@ mod tests {
             "3",
             "--chipset",
             "AGA",
+            "--jit",
         ])?;
         assert_eq!(args.overrides.model.as_deref(), Some("A1200"));
         assert_eq!(args.overrides.cpu.as_deref(), Some("68030"));
         assert_eq!(args.overrides.cpu_clock_mhz, Some(50.0));
         assert_eq!(args.overrides.fpu, Some(true));
+        assert_eq!(args.overrides.cpu_jit, Some(true));
         assert_eq!(args.overrides.chip.as_deref(), Some("2M"));
         assert_eq!(args.overrides.fast.as_deref(), Some("8M"));
         assert_eq!(args.overrides.slow.as_deref(), Some("512K"));
