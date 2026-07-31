@@ -363,8 +363,9 @@ mod tests {
         }
     }
 
-    /// The `pixels` backing texture in miniature: `DISPLAY_ROWS` rows of
-    /// the given texels (or flat grey) with a magenta "status bar" below.
+    /// The `pixels` backing texture in miniature: `display_rows` rows of
+    /// the given texels, any remaining rows filled as a magenta "status
+    /// bar" (a full-height `display_rows` leaves no bar).
     fn source_texture(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -771,7 +772,8 @@ mod tests {
     /// COPPERLINE_BEZEL_PREVIEW_OUT names the output file; with
     /// COPPERLINE_BEZEL_PREVIEW_SRC set, that PNG becomes the picture
     /// (its full height, no status bar), otherwise a test card is used.
-    /// COPPERLINE_BEZEL_PREVIEW_SHADER=crt adds the preset pass.
+    /// Setting COPPERLINE_BEZEL_PREVIEW_SHADER (to any value) adds the
+    /// preset pass.
     #[test]
     #[ignore = "preview dump; set COPPERLINE_BEZEL_PREVIEW_OUT"]
     fn dump_bezel_preview_png() {
