@@ -385,6 +385,7 @@ impl Z3660 {
         const OP_INVERTRECT: u32 = 9;
         const OP_SPRITE_XY: u32 = 11;
         const MINTERM_SRC_IDX: u8 = 12;
+        const MINTERM_NOTSRC_IDX: u8 = 3;
         const COMPLEMENT: u8 = 2;
         const OP_SPRITE_COLOR: u32 = 12;
         const OP_SPRITE_BITMAP: u32 = 13;
@@ -701,9 +702,11 @@ impl Z3660 {
                 let at_of = |y: usize, x: usize| dst + (dyr + y) * dpitch + (dxr + x) * dbpp;
 
                 // Both the op and the blit function are fixed for the whole
-                // blit. SRC is the only function we currently special-case to
-                // skip the destination read, so each combination gets its own
-                // loop rather than two loop-invariant tests per pixel.
+                // blit, so each combination we special-case gets its own loop
+                // rather than a loop-invariant test per pixel. The cases worth
+                // one are the functions of the source alone, which need no
+                // destination read: SRC everywhere, and NOTSRC on the direct
+                // path, where it is a lookup like SRC and not a bitwise op.
                 if op == OP_P2C {
                     if func == MINTERM_SRC_IDX {
                         for y in 0..h {
@@ -726,6 +729,18 @@ impl Z3660 {
                         for x in 0..w {
                             let (pen, at) = (pen_of(self, y, x), at_of(y, x));
                             let col = self.px_get(pal + 4 * pen, 4);
+                            self.px_put(at, bpp, col);
+                        }
+                    }
+                } else if func == MINTERM_NOTSRC_IDX {
+                    // A function of the source alone acts on the pen, not on
+                    // the color the pen maps to: P96 expects ~pen to select
+                    // another entry of the ColorIndexMapping, while inverting
+                    // the color it mapped to lands outside the palette.
+                    for y in 0..h {
+                        for x in 0..w {
+                            let (pen, at) = (pen_of(self, y, x), at_of(y, x));
+                            let col = self.px_get(pal + 4 * (pen ^ 0xFF), 4);
                             self.px_put(at, bpp, col);
                         }
                     }
@@ -1732,6 +1747,43 @@ mod exec_tests {
             ring(&mut z, &mut m, 7);
             assert_eq!(&z.vram[v..v + 4], &want, "minterm {minterm}");
         }
+    }
+
+    /// NOTSRC on a direct screen complements the pen and looks that entry up in
+    /// the ColorIndexMapping. Complementing the color the pen maps to instead
+    /// lands on a color the mapping never contains, which is what P96's own
+    /// reference rendering shows up.
+    #[test]
+    fn p2d_notsrc_inverts_the_pen() {
+        let (mut z, mut m) = (Z3660::new(), mem());
+        let v = VRAM_OFFSET as usize;
+        let g = GFXDATA_OFFSET;
+
+        // CLUT at 0x2000 with the planes at +1024, decoding to pens 1 and 3.
+        // Only the entries the complemented pens select are filled in, so a
+        // lookup by the pen itself reads zero.
+        z.vram[v + 0x2000 + 4 * 0xFE + 2..v + 0x2000 + 4 * 0xFE + 4].copy_from_slice(&[0x12, 0x34]);
+        z.vram[v + 0x2000 + 4 * 0xFC + 2..v + 0x2000 + 4 * 0xFC + 4].copy_from_slice(&[0x56, 0x78]);
+        z.vram[v + 0x2400] = 0xC0;
+        z.vram[v + 0x2401] = 0x40;
+        gfxdata(
+            &mut z,
+            0x100,
+            0x2000,
+            0,
+            0,
+            [0, 0, 2],
+            [0, 0, 1],
+            0xFF,
+            [4, 1],
+            1,
+            0,
+            0xFF,
+            3,
+        );
+        z.vram[g + 0x22..g + 0x24].copy_from_slice(&2u16.to_be_bytes());
+        ring(&mut z, &mut m, 8);
+        assert_eq!(&z.vram[v + 0x100..v + 0x104], &[0x12, 0x34, 0x56, 0x78]);
     }
 }
 
