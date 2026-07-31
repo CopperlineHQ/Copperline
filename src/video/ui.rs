@@ -4613,6 +4613,11 @@ const LAUNCH_ROW_H: usize = 26;
 const LAUNCH_LABEL_W: usize = 150;
 const LAUNCH_ARROW_W: usize = 24;
 const LAUNCH_VALUE_W: usize = 132;
+/// The priority column's value box. Narrower than the general one, which is
+/// sized for device names: the widest thing here is "No drive", against a
+/// priority otherwise (down to the "-128" that a cleared Bootable box
+/// stores), and this leaves a clear margin either side.
+const LAUNCH_BOOTPRI_VALUE_W: usize = 96;
 const LAUNCH_TOGGLE_W: usize = 64;
 const LAUNCH_ACTION_W: usize = 84;
 const LAUNCH_ACTION_H: usize = 22;
@@ -4697,6 +4702,15 @@ fn launcher_status_y(rect: Rect) -> usize {
 
 /// (prev arrow, value field, next arrow) for a cycle row.
 fn launcher_cycle_rects(rect: Rect, row_y: usize) -> (Rect, Rect, Rect) {
+    launcher_stepper_rects(rect, row_y, LAUNCH_VALUE_W)
+}
+
+/// The priority column's `< value >`, on its own narrower value box.
+fn launcher_bootpri_rects(rect: Rect, row_y: usize) -> (Rect, Rect, Rect) {
+    launcher_stepper_rects(rect, row_y, LAUNCH_BOOTPRI_VALUE_W)
+}
+
+fn launcher_stepper_rects(rect: Rect, row_y: usize, value_w: usize) -> (Rect, Rect, Rect) {
     let y = row_y + 2;
     let cx = launcher_control_x(rect);
     let prev = Rect {
@@ -4708,11 +4722,11 @@ fn launcher_cycle_rects(rect: Rect, row_y: usize) -> (Rect, Rect, Rect) {
     let value = Rect {
         x: prev.x + LAUNCH_ARROW_W,
         y,
-        w: LAUNCH_VALUE_W,
+        w: value_w,
         h: LAUNCH_CONTROL_H,
     };
     let next = Rect {
-        x: value.x + LAUNCH_VALUE_W,
+        x: value.x + value_w,
         y,
         w: LAUNCH_ARROW_W,
         h: LAUNCH_CONTROL_H,
@@ -4760,7 +4774,7 @@ const LAUNCH_NAV_BLOCK_H: usize = LAUNCH_TAB_H + 14;
 /// The Status column's clickable area (the "Bootable" label plus its tick box),
 /// sitting to the right of the priority stepper on a Boot Priority row.
 fn launcher_bootable_rect(rect: Rect, row_y: usize) -> Rect {
-    let (_, _, next) = launcher_cycle_rects(rect, row_y);
+    let (_, _, next) = launcher_bootpri_rects(rect, row_y);
     Rect {
         x: next.x + next.w + 24,
         y: row_y + 2,
@@ -5087,7 +5101,7 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
                     if state.setup.drive_boot_off(r.field) {
                         continue;
                     }
-                    let (prev, value, next) = launcher_cycle_rects(rect, row_y);
+                    let (prev, value, next) = launcher_bootpri_rects(rect, row_y);
                     if prev.contains(pos) {
                         return Some(UiControl::LauncherCycle {
                             field: r.field,
@@ -5299,6 +5313,61 @@ fn draw_launcher_chip(
     draw_panel_text(frame, x, y, label, color, 1, scale);
 }
 
+/// How a row's second column presents when the setting does not apply.
+///
+/// Greying is the signal that a row cannot be reached; what stands in its
+/// place is a per-row judgement, so it is made once, here, rather than spread
+/// across the drawing code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GreyedAs {
+    /// Say why, as text where the control would be: the machine-shaped
+    /// constraints worth explaining ("needs 32-bit CPU").
+    Reason,
+    /// Nothing. The greyed label says enough, and one phrase repeated down a
+    /// page of drive bays or bridge settings says less than silence.
+    Blank,
+    /// The control, dimmed, still showing the setting's own value -- which
+    /// still means something, and will be used again once the row applies.
+    DimmedValue,
+    /// The control, dimmed, with the reason in its value box: there is no
+    /// mouse to be sensitive, and no shader to be strong.
+    DimmedReason,
+}
+
+fn greyed_presentation(r: &launcher::Row, setup: &launcher::MachineSetup) -> GreyedAs {
+    use LauncherField as F;
+    // A priority the machine has no drive to apply.
+    if r.kind == RowKind::Bootpri {
+        return GreyedAs::DimmedReason;
+    }
+    match r.field {
+        F::MouseSensitivity | F::MouseCapture | F::ShaderStrength => GreyedAs::DimmedReason,
+        F::FloppySpeed | F::AudioChannelMode | F::AudioFilter | F::AudioStereoSeparation => {
+            GreyedAs::DimmedValue
+        }
+        // Drive select is shaped by the interface, so it only shows a
+        // selection while there is one to shape it: an attached DrawBridge
+        // has no drive-select line, but with no interface at all there is
+        // nothing to say.
+        F::BridgeCable if setup.bridge_interface_selected() => GreyedAs::DimmedValue,
+        F::ScsiUnit0
+        | F::ScsiUnit1
+        | F::ScsiUnit2
+        | F::ScsiUnit3
+        | F::ScsiUnit4
+        | F::ScsiUnit5
+        | F::ScsiUnit6
+        | F::BridgeDevice
+        | F::BridgePort
+        | F::BridgeCable
+        | F::BridgeDensity
+        | F::BridgeSpeed
+        | F::BridgeServeSpeed
+        | F::BridgeAutoCache => GreyedAs::Blank,
+        _ => GreyedAs::Reason,
+    }
+}
+
 fn draw_launcher_row(
     frame: &mut [u8],
     rect: Rect,
@@ -5374,42 +5443,27 @@ fn draw_launcher_row(
         1,
         scale,
     );
-    // Greyed: explain why instead of drawing controls (e.g. "needs 32-bit CPU").
-    // Some rows are the exception. The shaping rows -- channel mode,
-    // separation, mouse sensitivity -- are merely inapplicable (audio
-    // disabled, separation in mono, no mouse in either port), and a bridge
-    // setting the chosen interface does not implement is not a thing to
-    // explain either: the greyed label alone says enough, so column 2 is left
-    // blank rather than repeating "not on this interface" down the page.
-    let blank_when_greyed = matches!(
-        r.field,
-        LauncherField::AudioChannelMode
-            | LauncherField::AudioStereoSeparation
-            | LauncherField::MouseSensitivity
-            | LauncherField::MouseCapture
-            | LauncherField::ShaderStrength
-            | LauncherField::BridgeDevice
-            | LauncherField::BridgePort
-            | LauncherField::BridgeCable
-            | LauncherField::BridgeDensity
-            | LauncherField::BridgeSpeed
-            | LauncherField::BridgeServeSpeed
-            | LauncherField::BridgeAutoCache
-            | LauncherField::FloppySpeed
-    );
+    let greyed_as = reason.map(|_| greyed_presentation(r, setup));
+    let greyed_shows_reason = greyed_as == Some(GreyedAs::DimmedReason);
+    let disabled = reason.is_some();
     if let Some(reason) = reason {
-        if !blank_when_greyed {
-            draw_panel_text(
-                frame,
-                launcher_control_x(rect),
-                row_y + 8,
-                reason,
-                PANEL_TEXT_DIM,
-                1,
-                scale,
-            );
+        if !matches!(
+            greyed_as,
+            Some(GreyedAs::DimmedValue | GreyedAs::DimmedReason)
+        ) {
+            if greyed_as != Some(GreyedAs::Blank) {
+                draw_panel_text(
+                    frame,
+                    launcher_control_x(rect),
+                    row_y + 8,
+                    reason,
+                    PANEL_TEXT_DIM,
+                    1,
+                    scale,
+                );
+            }
+            return;
         }
-        return;
     }
     match r.kind {
         // Drawn above with an early return.
@@ -5420,7 +5474,7 @@ fn draw_launcher_row(
                 frame,
                 prev,
                 "<",
-                true,
+                !disabled,
                 hover
                     == Some(UiControl::LauncherCycle {
                         field: r.field,
@@ -5432,7 +5486,7 @@ fn draw_launcher_row(
                 frame,
                 next,
                 ">",
-                true,
+                !disabled,
                 hover
                     == Some(UiControl::LauncherCycle {
                         field: r.field,
@@ -5442,17 +5496,28 @@ fn draw_launcher_row(
             );
             // Clip a long value (e.g. a wordy MIDI device name) to the box so
             // it cannot spill over the ">" stepper.
-            let text = truncate_to_width(&setup.value_label(r.field), value.w);
+            let shown = match reason {
+                Some(reason) if greyed_shows_reason => reason.to_string(),
+                _ => setup.value_label(r.field),
+            };
+            let text = truncate_to_width(&shown, value.w);
             let tw = text.chars().count() * font::GLYPH_W;
             let tx = value.x + value.w.saturating_sub(tw) / 2;
-            draw_panel_text(frame, tx, value.y + 6, &text, PANEL_TEXT_HILIGHT, 1, scale);
+            let color = if disabled {
+                PANEL_TEXT_DIM
+            } else {
+                PANEL_TEXT_HILIGHT
+            };
+            draw_panel_text(frame, tx, value.y + 6, &text, color, 1, scale);
         }
         RowKind::Bootpri => {
             // Priority column: a `< value >` stepper whose value is also a text
             // field. Greyed and inert while the Bootable box (drawn last) is
-            // cleared -- the number stays visible so re-ticking restores it.
-            let disabled = setup.drive_boot_off(r.field);
-            let (prev, value, next) = launcher_cycle_rects(rect, row_y);
+            // cleared, where it shows the -128 the config will store, and
+            // greyed as a whole on a row with no drive to boot, where the box
+            // says so in place of a priority.
+            let disabled = disabled || setup.drive_boot_off(r.field);
+            let (prev, value, next) = launcher_bootpri_rects(rect, row_y);
             draw_text_button(
                 frame,
                 prev,
@@ -5485,7 +5550,9 @@ fn draw_launcher_row(
                 scale,
             );
             let editing = state.editing() == Some(EditTarget::DriveBootpri(r.field));
-            let text = if editing {
+            let text = if let Some(reason) = reason.filter(|_| greyed_shows_reason) {
+                reason.to_string()
+            } else if editing {
                 format!("{}_", state.edit_buffer())
             } else {
                 setup.value_label(r.field)
@@ -5509,7 +5576,11 @@ fn draw_launcher_row(
                 cell.x,
                 cell.y + 6,
                 BOOTABLE_LABEL,
-                PANEL_TEXT,
+                if reason.is_some() {
+                    PANEL_TEXT_DIM
+                } else {
+                    PANEL_TEXT
+                },
                 1,
                 scale,
             );
