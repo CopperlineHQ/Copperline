@@ -72,6 +72,20 @@ plane-by-plane according to each plane's individual DMA slot.
 If a manual BPL1DAT write starts a word before a later DMA BPL1DAT load
 point, replay stops the manual word where that DMA word replaces Denise's
 shifter.
+A manual BPLxDAT write (Copper or CPU, typically with bitplane DMA off --
+the "chunky copper" display technique) loads Denise's holding register, and
+the serialiser parallel-loads the held word on its free-running word
+cadence, not at the write position: the 16-pixel batch snaps to the next
+word-grid slot after the write's bus landing (slots every 32 framebuffer
+pixels in lo-res and 16 in hi-res, anchored two pixels left of the DIW
+`$81` column) and is DIW-clipped there like any fetched pixel. Writes four
+colour clocks apart can land in the same slot, and re-arming before the
+load strobe replaces the held word instead of starting a second batch, so
+a per-line raced (COLORxx, BPL1DAT) stream renders as a continuous field
+with a straight window-edge clip. Pinned by the `bplprobe-dat` golden
+probe (WAIT-position sweeps against the DIW border plus double-write,
+bit-order, scroll, and hi-res bands; vAmiga-verified byte-identical) --
+the Desire "Hamazing" Hexagon left-edge regression class.
 The OCS/ECS BPLCON1 scroll nibbles count lo-res pixels regardless of
 resolution: one step shifts a hi-res playfield two hi-res samples and a
 super-hi-res playfield four, and the comparison narrows with the word
