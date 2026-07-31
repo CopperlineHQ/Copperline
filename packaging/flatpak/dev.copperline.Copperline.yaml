@@ -8,7 +8,7 @@
 # Flathub requires the build to run offline: cargo cannot reach crates.io,
 # so the dependency crates are vendored through cargo-sources.json (generated
 # from the committed Cargo.lock by generate-cargo-sources.sh) and Cargo is
-# pointed at that offline registry. This includes the published m68k crate.
+# pointed at that offline registry.
 #
 # Local build and test:
 #   flatpak install flathub org.freedesktop.Platform//25.08 \

@@ -1,7 +1,7 @@
 # Standalone driver that runs WinUAE cputest-generated instruction test
-# sets against the same published m68k core as Copperline. Not part of the
-# emulator build; see tools/cputest-gen.sh for generating the data and
-# README in vendor/ for provenance.
+# sets against m68k. Not part of the emulator build; see
+# tools/cputest-gen.sh for generating the data and README in vendor/ for
+# provenance.
 [package]
 name = "copperline-cputest-runner"
 version = "0.1.0"

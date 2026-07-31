@@ -87,8 +87,6 @@ ctl-bin = ["dep:serde_json"]
 floppybridge = []
 
 [dependencies]
-# Upstream 0.3 includes Copperline's transaction-accurate timing, prefetch,
-# FPU, MMU, and M68060 work. Serde preserves deterministic save states.
 m68k = { version = "0.3", features = ["serde"] }
 pixels = { version = "0.17", optional = true }
 winit = { version = "0.30", optional = true }
