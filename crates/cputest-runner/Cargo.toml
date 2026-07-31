@@ -6,6 +6,7 @@
 name = "copperline-cputest-runner"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.93"
 license = "GPL-3.0-or-later"
 publish = false
 
@@ -14,7 +15,7 @@ name = "cputest-runner"
 path = "src/main.rs"
 
 [dependencies]
-m68k = "0.3"
+m68k = "0.3.1"
 
 [build-dependencies]
 cc = "1"
