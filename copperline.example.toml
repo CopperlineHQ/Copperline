@@ -598,5 +598,5 @@ floppy_sounds_volume = 100
 #                                # default, skips the wait for the index and is
 #                                # appreciably quicker; stalling blocks the
 #                                # emulated machine until each track is ready
-# bridge_speed = 100             # serve captured tracks at 100/125/150%
+# bridge_speed = 125             # 100, 125, 150, 175, or 200 percent
 # bridge_auto_cache = false      # cache disk data while the drive is idle
