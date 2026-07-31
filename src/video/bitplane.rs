@@ -164,6 +164,34 @@ const BITPLANE_CONTROL_PIPELINE_FB: usize =
 /// left 24 lo-res columns rendered as HAM modify-blue smears of the panel greys.
 const DENISE_HAM_SELECT_PIPELINE_FB: usize =
     ((COLOR_WRITE_HPOS_FB0 - COPPER_WAIT_HPOS_FB0) * 4) as usize;
+/// Manual BPLxDAT display placement (the "chunky copper" technique: BPL1DAT
+/// written by the copper or CPU with bitplane DMA off, e.g. the Desire
+/// "Hamazing" Hexagon scene).
+///
+/// A manual BPL1DAT write loads Denise's holding register, but the serialiser
+/// does not start shifting at the write position: it parallel-loads the held
+/// word on its free-running word cadence -- the same load strobe DMA-fetched
+/// words use -- so the batch snaps to the next word-grid slot after the write
+/// lands and is DIW-clipped there like any fetched pixel. Measured on vAmiga
+/// with `timing-test/bplprobe-dat.asm` (WAIT-position sweeps against the DIW
+/// border, lores and hires): bars from writes 4 ccks apart land in the same
+/// 8-cck slot in lores pairs, hires bars move per 4-cck slot, a batch whose
+/// slot starts left of DIW HSTART shows only its in-window tail, and
+/// re-arming before the next load strobe replaces the held word (back-to-back
+/// MOVEs produce one batch, not two -- the second segment overdraws the first
+/// at the same slot x).
+///
+/// The grid, in framebuffer x: slots repeat every shifter word (32 px lores,
+/// 16 px hires, 8 px shres by extrapolation -- no shres reference exists) and
+/// sit at x = 30 (mod 32) lores / 14 (mod 16) hires, i.e. two pixels left of
+/// the DIW HSTART $81 column (x 62). Snapping compares the slot against the
+/// write's bus landing; recorded event positions carry the Denise
+/// write-effect offset, backed out here as this probe-calibrated constant
+/// (bands @35/@37 bracket it to 6..14 framebuffer pixels; 8 = 2 ccks).
+const MANUAL_BPL_LOAD_LOOKBACK_FB: i32 = 8;
+/// Lores manual-batch load-grid anchor: framebuffer x of a slot, mod 32
+/// ([`MANUAL_BPL_LOAD_LOOKBACK_FB`] has the calibration story).
+const MANUAL_BPL_LOAD_GRID_ANCHOR_FB: i32 = 30;
 /// Framebuffer x of the left edge of the standard (non-overscan) display. The
 /// columns to its left are overscan border that a real PAL display crops.
 pub(crate) const STANDARD_VISIBLE_X0: usize = ((STANDARD_DIW_HSTART - DIW_HSTART_FB0) * 2) as usize;
@@ -2740,7 +2768,7 @@ fn apply_render_events_and_collect_display_plan_events_with_visible_line0(
                         x: if before_visible_lines {
                             0
                         } else {
-                            beam_to_framebuffer_x_unclamped(event.hpos)
+                            manual_bpl_serializer_load_x(event.hpos, &control)
                         },
                         plane: ((off - 0x110) / 2) as usize,
                         value: event.value,
@@ -2753,7 +2781,7 @@ fn apply_render_events_and_collect_display_plan_events_with_visible_line0(
             manual_bpl_segments.push(ManualBplSegment {
                 line,
                 hpos: event.hpos,
-                x: beam_to_framebuffer_x_unclamped(event.hpos),
+                x: manual_bpl_serializer_load_x(event.hpos, &control),
                 planes: state.bpldat,
                 palette,
             });
@@ -2800,6 +2828,23 @@ fn beam_to_framebuffer_pos_with_visible_line0(
 
 fn beam_to_framebuffer_x_unclamped(hpos: u32) -> i32 {
     (hpos as i32 - COPPER_WAIT_HPOS_FB0) * 4
+}
+
+/// Framebuffer x where a manual BPLxDAT write's 16-pixel batch starts: the
+/// serialiser's next word-grid load slot at or after the write's bus landing
+/// (see [`MANUAL_BPL_LOAD_LOOKBACK_FB`] for the model and its calibration).
+/// The slot cadence follows the resolution in force at the write.
+fn manual_bpl_serializer_load_x(hpos: u32, control: &ControlState) -> i32 {
+    let landing_x = hpos as i32 * 4 - DIW_HSTART_FB0 * 2 - MANUAL_BPL_LOAD_LOOKBACK_FB;
+    let word_px: i32 = if control.shres() {
+        8
+    } else if control.hires() {
+        16
+    } else {
+        32
+    };
+    let anchor = MANUAL_BPL_LOAD_GRID_ANCHOR_FB % word_px;
+    landing_x + (anchor - landing_x).rem_euclid(word_px)
 }
 
 fn color_write_framebuffer_x(hpos: u32) -> usize {

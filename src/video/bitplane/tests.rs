@@ -7433,10 +7433,12 @@ fn display_plan_events_record_beam_timed_palette_control_and_bpldat_writes() {
             control,
         } if control.bpl1mod == 0x0002
     )));
+    // The write's batch snaps to the serialiser word grid: lores slots sit at
+    // x = 30 (mod 32), and the first slot at/after this write's landing is 94.
     assert!(
         display_line_events[line].contains(&DisplayLinePlanEvent::BpldatWrite {
             hpos: 0x0046,
-            x: beam_to_framebuffer_x_unclamped(0x0046),
+            x: 94,
             plane: 3,
             value: 0x8000,
         })

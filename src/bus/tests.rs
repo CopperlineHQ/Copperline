@@ -4345,16 +4345,19 @@ fn manual_bitplane_data_respects_display_window_clip() {
     bus.denise.palette.write_ocs(0, 0x0000);
     bus.denise.palette.write_ocs(1, 0x0F00);
     bus.current_frame_render_base = bus.capture_render_snapshot();
+    // First write: its serialiser grid slot (-2..30) sits entirely left of
+    // the DIW edge at x 62, so the whole batch is border-clipped.
     bus.current_frame_render_events.push(BeamRegisterWrite {
         vpos: RENDER_VISIBLE_START_VPOS,
-        hpos: RENDER_COPPER_WAIT_HPOS_FB0,
+        hpos: 0x30,
         offset: 0x0110,
         value: 0xFFFF,
         source: BeamWriteSource::Copper,
     });
+    // Second write: slot 62..94, opening exactly at the window edge.
     bus.current_frame_render_events.push(BeamRegisterWrite {
         vpos: RENDER_VISIBLE_START_VPOS,
-        hpos: RENDER_COPPER_WAIT_HPOS_FB0 + 16,
+        hpos: 0x40,
         offset: 0x0110,
         value: 0x8000,
         source: BeamWriteSource::Copper,
@@ -4365,7 +4368,129 @@ fn manual_bitplane_data_respects_display_window_clip() {
 
     assert_eq!(fb[0], rgb12_to_rgba8(0x0000));
     assert_eq!(fb[31], rgb12_to_rgba8(0x0000));
-    assert_eq!(fb[64], rgb12_to_rgba8(0x0F00));
+    assert_eq!(fb[61], rgb12_to_rgba8(0x0000));
+    assert_eq!(fb[62], rgb12_to_rgba8(0x0F00));
+    assert_eq!(fb[63], rgb12_to_rgba8(0x0F00));
+    assert_eq!(fb[64], rgb12_to_rgba8(0x0000));
+}
+
+/// The serialiser parallel-loads a manually written word on its free-running
+/// word cadence, not at the write position: writes 4 ccks apart can land in
+/// the same 32-pixel lores slot, and a per-line raced stream clips to a
+/// straight DIW edge (the Hamazing Hexagon field's left edge; grid calibrated
+/// against vAmiga by timing-test/bplprobe-dat.asm).
+#[test]
+fn manual_bpl1dat_batches_snap_to_serializer_word_grid() {
+    let mut bus = empty_bus();
+    bus.denise.diwstrt = 0x2C81;
+    bus.denise.diwstop = 0x2DD1;
+    bus.denise.bplcon0 = 0x1000;
+    bus.denise.palette.write_ocs(0, 0x0000);
+    bus.denise.palette.write_ocs(1, 0x0F00);
+    bus.current_frame_render_base = bus.capture_render_snapshot();
+    for (line, hpos) in [(0, 0x3C), (1, 0x40), (2, 0x44)] {
+        bus.current_frame_render_events.push(BeamRegisterWrite {
+            vpos: RENDER_VISIBLE_START_VPOS + line,
+            hpos,
+            offset: 0x0110,
+            value: 0xFFFF,
+            source: BeamWriteSource::Copper,
+        });
+    }
+
+    let mut fb = vec![0; FB_PIXELS];
+    bitplane::render(&mut bus, &mut fb);
+
+    // Lines 0 and 1: writes 4 ccks apart, same slot 62..94, flush with the
+    // window edge.
+    for line in [0usize, 1] {
+        assert_eq!(fb[line * FB_WIDTH + 61], rgb12_to_rgba8(0x0000));
+        assert_eq!(fb[line * FB_WIDTH + 62], rgb12_to_rgba8(0x0F00));
+        assert_eq!(fb[line * FB_WIDTH + 93], rgb12_to_rgba8(0x0F00));
+        assert_eq!(fb[line * FB_WIDTH + 94], rgb12_to_rgba8(0x0000));
+    }
+    // Line 2: 4 ccks later again, next slot 94..126.
+    assert_eq!(fb[2 * FB_WIDTH + 93], rgb12_to_rgba8(0x0000));
+    assert_eq!(fb[2 * FB_WIDTH + 94], rgb12_to_rgba8(0x0F00));
+    assert_eq!(fb[2 * FB_WIDTH + 125], rgb12_to_rgba8(0x0F00));
+    assert_eq!(fb[2 * FB_WIDTH + 126], rgb12_to_rgba8(0x0000));
+}
+
+/// Re-arming BPL1DAT before the next serialiser load strobe replaces the held
+/// word: back-to-back writes in one slot display the second value once, with
+/// no second batch in the following slot (bplprobe-dat's double-write band).
+#[test]
+fn manual_bpl1dat_rearm_before_load_replaces_held_word() {
+    let mut bus = empty_bus();
+    bus.denise.diwstrt = 0x2C81;
+    bus.denise.diwstop = 0x2DD1;
+    bus.denise.bplcon0 = 0x1000;
+    bus.denise.palette.write_ocs(0, 0x0000);
+    bus.denise.palette.write_ocs(1, 0x0F00);
+    bus.current_frame_render_base = bus.capture_render_snapshot();
+    bus.current_frame_render_events.push(BeamRegisterWrite {
+        vpos: RENDER_VISIBLE_START_VPOS,
+        hpos: 0x3C,
+        offset: 0x0110,
+        value: 0xFFFF,
+        source: BeamWriteSource::Copper,
+    });
+    bus.current_frame_render_events.push(BeamRegisterWrite {
+        vpos: RENDER_VISIBLE_START_VPOS,
+        hpos: 0x40,
+        offset: 0x0110,
+        value: 0xF0F0,
+        source: BeamWriteSource::Copper,
+    });
+
+    let mut fb = vec![0; FB_PIXELS];
+    bitplane::render(&mut bus, &mut fb);
+
+    // Slot 62..94 shows the second word's comb, not the first's solid bar.
+    assert_eq!(fb[62], rgb12_to_rgba8(0x0F00));
+    assert_eq!(fb[69], rgb12_to_rgba8(0x0F00));
+    assert_eq!(fb[70], rgb12_to_rgba8(0x0000));
+    assert_eq!(fb[78], rgb12_to_rgba8(0x0F00));
+    assert_eq!(fb[86], rgb12_to_rgba8(0x0000));
+    // And no second batch in the next slot.
+    assert_eq!(fb[94], rgb12_to_rgba8(0x0000));
+}
+
+/// Hires manual batches load on the 16-pixel hires word cadence (probe bands
+/// @51/@53: a 2-cck WAIT step moves the bar one hires slot).
+#[test]
+fn manual_bpl1dat_hires_batches_snap_to_hires_word_grid() {
+    let mut bus = empty_bus();
+    bus.denise.diwstrt = 0x2C81;
+    bus.denise.diwstop = 0x2DD1;
+    bus.denise.bplcon0 = 0x9200;
+    bus.denise.palette.write_ocs(0, 0x0000);
+    bus.denise.palette.write_ocs(1, 0x0F00);
+    bus.current_frame_render_base = bus.capture_render_snapshot();
+    for (line, hpos) in [(0, 0x40), (1, 0x42), (2, 0x44)] {
+        bus.current_frame_render_events.push(BeamRegisterWrite {
+            vpos: RENDER_VISIBLE_START_VPOS + line,
+            hpos,
+            offset: 0x0110,
+            value: 0xFFFF,
+            source: BeamWriteSource::Copper,
+        });
+    }
+
+    let mut fb = vec![0; FB_PIXELS];
+    bitplane::render(&mut bus, &mut fb);
+
+    // Lines 0 and 1: slot 62..78; line 2: one hires slot later, 78..94.
+    for line in [0usize, 1] {
+        assert_eq!(fb[line * FB_WIDTH + 61], rgb12_to_rgba8(0x0000));
+        assert_eq!(fb[line * FB_WIDTH + 62], rgb12_to_rgba8(0x0F00));
+        assert_eq!(fb[line * FB_WIDTH + 77], rgb12_to_rgba8(0x0F00));
+        assert_eq!(fb[line * FB_WIDTH + 78], rgb12_to_rgba8(0x0000));
+    }
+    assert_eq!(fb[2 * FB_WIDTH + 77], rgb12_to_rgba8(0x0000));
+    assert_eq!(fb[2 * FB_WIDTH + 78], rgb12_to_rgba8(0x0F00));
+    assert_eq!(fb[2 * FB_WIDTH + 93], rgb12_to_rgba8(0x0F00));
+    assert_eq!(fb[2 * FB_WIDTH + 94], rgb12_to_rgba8(0x0000));
 }
 
 #[test]
@@ -4406,9 +4531,12 @@ fn bpl1dat_write_triggers_output_while_bitplane_dma_enabled() {
     let mut fb = vec![0; FB_PIXELS];
     bitplane::render(&mut bus, &mut fb);
 
-    assert_eq!(fb[94], rgb12_to_rgba8(0x0000));
-    assert_eq!(fb[96], rgb12_to_rgba8(0x0F00));
-    assert_eq!(fb[97], rgb12_to_rgba8(0x0F00));
+    // The write's batch snaps to serialiser slot 62..94; its set bit is the
+    // first lores pixel of the slot.
+    assert_eq!(fb[61], rgb12_to_rgba8(0x0000));
+    assert_eq!(fb[62], rgb12_to_rgba8(0x0F00));
+    assert_eq!(fb[63], rgb12_to_rgba8(0x0F00));
+    assert_eq!(fb[64], rgb12_to_rgba8(0x0000));
 }
 
 #[test]
@@ -4443,18 +4571,22 @@ fn same_line_diwstrt_extension_clips_later_manual_bitplane_pixels() {
     bus.denise.palette.write_ocs(0, 0x0000);
     bus.denise.palette.write_ocs(1, 0x0F00);
     bus.current_frame_render_base = bus.capture_render_snapshot();
-    bus.current_frame_render_events.push(BeamRegisterWrite {
-        vpos: RENDER_VISIBLE_START_VPOS,
-        hpos: 0x38,
-        offset: 0x0110,
-        value: 0x00FF,
-        source: BeamWriteSource::Copper,
-    });
+    // The DIWSTRT rewrite lands at beam x 80, mid-way through the batch in
+    // serialiser slot 62..94: pixels left of it stay under the original
+    // narrow window (start x 98, invisible), pixels from 80 see the extended
+    // window (start x 66) and show.
     bus.current_frame_render_events.push(BeamRegisterWrite {
         vpos: RENDER_VISIBLE_START_VPOS,
         hpos: 0x3C,
         offset: 0x008E,
         value: 0x2C83,
+        source: BeamWriteSource::Copper,
+    });
+    bus.current_frame_render_events.push(BeamRegisterWrite {
+        vpos: RENDER_VISIBLE_START_VPOS,
+        hpos: 0x40,
+        offset: 0x0110,
+        value: 0xFFFF,
         source: BeamWriteSource::Copper,
     });
 
@@ -4464,6 +4596,8 @@ fn same_line_diwstrt_extension_clips_later_manual_bitplane_pixels() {
     assert_eq!(fb[68], rgb12_to_rgba8(0x0000));
     assert_eq!(fb[79], rgb12_to_rgba8(0x0000));
     assert_eq!(fb[80], rgb12_to_rgba8(0x0F00));
+    assert_eq!(fb[93], rgb12_to_rgba8(0x0F00));
+    assert_eq!(fb[94], rgb12_to_rgba8(0x0000));
 }
 
 #[test]
@@ -4477,7 +4611,7 @@ fn same_line_palette_write_colors_later_manual_bitplane_pixels() {
     bus.current_frame_render_base = bus.capture_render_snapshot();
     bus.current_frame_render_events.push(BeamRegisterWrite {
         vpos: RENDER_VISIBLE_START_VPOS,
-        hpos: 0x38,
+        hpos: 0x40,
         offset: 0x0110,
         value: 0xFFFF,
         source: BeamWriteSource::Copper,
@@ -4507,26 +4641,30 @@ fn same_line_bplcon0_plane_count_clips_later_manual_bitplane_pixels() {
     bus.denise.palette.write_ocs(0, 0x0000);
     bus.denise.palette.write_ocs(1, 0x0F00);
     bus.current_frame_render_base = bus.capture_render_snapshot();
+    // A CPU BPLCON0 write just before the copper arm: its output-stage
+    // effect lands at beam x 88, mid-way through the batch in serialiser
+    // slot 62..94. (An ordered copper stream cannot cut its own batch: the
+    // earliest post-arm MOVE's beam effect always lands past the slot end.)
     bus.current_frame_render_events.push(BeamRegisterWrite {
         vpos: RENDER_VISIBLE_START_VPOS,
-        hpos: 0x38,
-        offset: 0x0110,
-        value: 0xFFFF,
-        source: BeamWriteSource::Copper,
+        hpos: 0x3E,
+        offset: 0x0100,
+        value: 0x0000,
+        source: BeamWriteSource::Cpu,
     });
     bus.current_frame_render_events.push(BeamRegisterWrite {
         vpos: RENDER_VISIBLE_START_VPOS,
-        hpos: 0x3C,
-        offset: 0x0100,
-        value: 0x0000,
+        hpos: 0x40,
+        offset: 0x0110,
+        value: 0xFFFF,
         source: BeamWriteSource::Copper,
     });
 
     let mut fb = vec![0; FB_PIXELS];
     bitplane::render(&mut bus, &mut fb);
 
-    assert_eq!(fb[79], rgb12_to_rgba8(0x0F00));
-    assert_eq!(fb[80], rgb12_to_rgba8(0x0000));
+    assert_eq!(fb[87], rgb12_to_rgba8(0x0F00));
+    assert_eq!(fb[88], rgb12_to_rgba8(0x0000));
 }
 
 #[test]
@@ -4538,27 +4676,33 @@ fn same_line_bplcon0_hires_changes_later_manual_bitplane_pixel_repeat() {
     bus.denise.palette.write_ocs(0, 0x0000);
     bus.denise.palette.write_ocs(1, 0x0F00);
     bus.current_frame_render_base = bus.capture_render_snapshot();
+    // CPU hires switch effective at beam x 88, mid-way through the batch in
+    // slot 62..94: word bit 10 shifts out lores-wide before it (x 72..74),
+    // bit 2 shifts out one hires pixel wide after it (x 88..89).
     bus.current_frame_render_events.push(BeamRegisterWrite {
         vpos: RENDER_VISIBLE_START_VPOS,
-        hpos: 0x38,
-        offset: 0x0110,
-        value: 0x0080,
-        source: BeamWriteSource::Copper,
+        hpos: 0x3E,
+        offset: 0x0100,
+        value: 0x9000,
+        source: BeamWriteSource::Cpu,
     });
     bus.current_frame_render_events.push(BeamRegisterWrite {
         vpos: RENDER_VISIBLE_START_VPOS,
-        hpos: 0x3C,
-        offset: 0x0100,
-        value: 0x9000,
+        hpos: 0x40,
+        offset: 0x0110,
+        value: 0x0404,
         source: BeamWriteSource::Copper,
     });
 
     let mut fb = vec![0; FB_PIXELS];
     bitplane::render(&mut bus, &mut fb);
 
-    assert_eq!(fb[79], rgb12_to_rgba8(0x0000));
-    assert_eq!(fb[80], rgb12_to_rgba8(0x0F00));
-    assert_eq!(fb[81], rgb12_to_rgba8(0x0000));
+    assert_eq!(fb[71], rgb12_to_rgba8(0x0000));
+    assert_eq!(fb[72], rgb12_to_rgba8(0x0F00));
+    assert_eq!(fb[73], rgb12_to_rgba8(0x0F00));
+    assert_eq!(fb[74], rgb12_to_rgba8(0x0000));
+    assert_eq!(fb[88], rgb12_to_rgba8(0x0F00));
+    assert_eq!(fb[89], rgb12_to_rgba8(0x0000));
 }
 
 #[test]
@@ -4570,30 +4714,33 @@ fn manual_ham_bitplane_words_carry_previous_pixel_color() {
     bus.denise.palette.write_ocs(0, 0x0000);
     bus.denise.palette.write_ocs(1, 0x0123);
     bus.current_frame_render_base = bus.capture_render_snapshot();
+    // Two batches in adjacent serialiser slots (62..94 and 94..126): the
+    // first sets the base colour, the second's HAM modify starts from the
+    // first batch's last pixel.
     bus.current_frame_render_events.push(BeamRegisterWrite {
         vpos: RENDER_VISIBLE_START_VPOS,
-        hpos: 0x38,
+        hpos: 0x40,
         offset: 0x0110,
         value: 0xFFFF,
         source: BeamWriteSource::Copper,
     });
     bus.current_frame_render_events.push(BeamRegisterWrite {
         vpos: RENDER_VISIBLE_START_VPOS,
-        hpos: 0x3B,
+        hpos: 0x44,
         offset: 0x0114,
         value: 0xFFFF,
         source: BeamWriteSource::Copper,
     });
     bus.current_frame_render_events.push(BeamRegisterWrite {
         vpos: RENDER_VISIBLE_START_VPOS,
-        hpos: 0x3B,
+        hpos: 0x44,
         offset: 0x011A,
         value: 0xFFFF,
         source: BeamWriteSource::Copper,
     });
     bus.current_frame_render_events.push(BeamRegisterWrite {
         vpos: RENDER_VISIBLE_START_VPOS,
-        hpos: 0x3C,
+        hpos: 0x48,
         offset: 0x0110,
         value: 0xFFFF,
         source: BeamWriteSource::Copper,
@@ -4604,7 +4751,11 @@ fn manual_ham_bitplane_words_carry_previous_pixel_color() {
 
     assert_eq!(fb[79], rgb12_to_rgba8(0x0123));
     assert_eq!(fb[80], rgb12_to_rgba8(0x0123));
-    assert_eq!(fb[82], rgb12_to_rgba8(0x0523));
+    assert_eq!(fb[93], rgb12_to_rgba8(0x0123));
+    // The second batch's first lores pixel carries the held colour; the
+    // modify shows from the next lores pixel on.
+    assert_eq!(fb[94], rgb12_to_rgba8(0x0123));
+    assert_eq!(fb[96], rgb12_to_rgba8(0x0523));
 }
 
 #[test]
@@ -4658,37 +4809,41 @@ fn same_line_ham_enable_modifies_previous_manual_bitplane_color() {
     bus.denise.palette.write_ocs(0, 0x0000);
     bus.denise.palette.write_ocs(1, 0x0123);
     bus.current_frame_render_base = bus.capture_render_snapshot();
+    // CPU HAM enable effective at beam x 88, inside the first batch (slot
+    // 62..94, index 1: HAM set = the same palette colour on both sides of
+    // the switch); the second batch (slot 94..126, index 20) then modifies
+    // blue from the first batch's last pixel.
     bus.current_frame_render_events.push(BeamRegisterWrite {
         vpos: RENDER_VISIBLE_START_VPOS,
-        hpos: 0x38,
+        hpos: 0x3E,
+        offset: 0x0100,
+        value: 0x6800,
+        source: BeamWriteSource::Cpu,
+    });
+    bus.current_frame_render_events.push(BeamRegisterWrite {
+        vpos: RENDER_VISIBLE_START_VPOS,
+        hpos: 0x40,
         offset: 0x0110,
         value: 0xFFFF,
         source: BeamWriteSource::Copper,
     });
     bus.current_frame_render_events.push(BeamRegisterWrite {
         vpos: RENDER_VISIBLE_START_VPOS,
-        hpos: 0x40,
-        offset: 0x0100,
-        value: 0x6800,
-        source: BeamWriteSource::Copper,
-    });
-    bus.current_frame_render_events.push(BeamRegisterWrite {
-        vpos: RENDER_VISIBLE_START_VPOS,
-        hpos: 0x40,
+        hpos: 0x44,
         offset: 0x0114,
         value: 0xFFFF,
         source: BeamWriteSource::Copper,
     });
     bus.current_frame_render_events.push(BeamRegisterWrite {
         vpos: RENDER_VISIBLE_START_VPOS,
-        hpos: 0x40,
+        hpos: 0x44,
         offset: 0x0118,
         value: 0xFFFF,
         source: BeamWriteSource::Copper,
     });
     bus.current_frame_render_events.push(BeamRegisterWrite {
         vpos: RENDER_VISIBLE_START_VPOS,
-        hpos: 0x40,
+        hpos: 0x48,
         offset: 0x0110,
         value: 0x0000,
         source: BeamWriteSource::Copper,
@@ -4697,9 +4852,12 @@ fn same_line_ham_enable_modifies_previous_manual_bitplane_color() {
     let mut fb = vec![0; FB_PIXELS];
     bitplane::render(&mut bus, &mut fb);
 
-    assert_eq!(fb[95], rgb12_to_rgba8(0x0123));
-    assert_eq!(fb[96], rgb12_to_rgba8(0x0123));
-    assert_eq!(fb[98], rgb12_to_rgba8(0x0124));
+    assert_eq!(fb[80], rgb12_to_rgba8(0x0123));
+    assert_eq!(fb[93], rgb12_to_rgba8(0x0123));
+    // The second batch's first lores pixel carries the held colour; the
+    // modify shows from the next lores pixel on.
+    assert_eq!(fb[94], rgb12_to_rgba8(0x0123));
+    assert_eq!(fb[96], rgb12_to_rgba8(0x0124));
 }
 
 #[test]

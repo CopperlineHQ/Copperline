@@ -417,4 +417,11 @@ probe_tests! {
     // Poker Pro HAM-photo/EHB-scoreboard split-line regression class).
     // vAmiga-verified: byte-identical over the whole frame.
     golden_hamprobe_select => probe("hamprobe-select", "hamprobe-select.bin", 16.0);
+    // Manual BPL1DAT writes (bitplane DMA off) load the serialiser on its
+    // free-running word cadence, not at the write position: WAIT-sweep bars
+    // snap to the word grid and DIW-clip to a straight edge, a re-arm before
+    // the load strobe replaces the held word, and hires bars move per 4-cck
+    // slot (the Hamazing Hexagon left-edge regression class).
+    // vAmiga-verified: byte-identical over the whole frame.
+    golden_bplprobe_dat => probe("bplprobe-dat", "bplprobe-dat.bin", 16.0);
 }
