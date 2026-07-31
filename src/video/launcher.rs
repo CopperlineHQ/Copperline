@@ -836,7 +836,12 @@ pub const MODELS: [MachineModel; 10] = [
 // --- value preset lists for the cycle/stepper controls -------------------
 
 const CHIPSETS: [Chipset; 3] = [Chipset::Ocs, Chipset::Ecs, Chipset::Aga];
-const RTG_CARDS: [RtgCard; 2] = [RtgCard::None, RtgCard::Z3660];
+const RTG_CARDS: [RtgCard; 4] = [
+    RtgCard::None,
+    RtgCard::Picasso2,
+    RtgCard::Picasso2Plus,
+    RtgCard::Z3660,
+];
 const AGNUS_CHOICES: [Option<AgnusRevision>; 5] = [
     None,
     Some(AgnusRevision::Ocs),
@@ -1167,6 +1172,10 @@ pub struct MachineSetup {
     rtc: bool,
     identify: bool,
     rtg: RtgCard,
+    /// Memory fitted to a configurable RTG board. The launcher currently
+    /// preserves this value from loaded configs; the card selector does not
+    /// need a separate control for the two period-correct Picasso II/II+ sizes.
+    rtg_vram_bytes: usize,
     // CPU
     cpu: CpuModel,
     fpu: bool,
@@ -1372,6 +1381,7 @@ impl MachineSetup {
             rtc: cfg.rtc_present,
             identify: cfg.identify_board,
             rtg: cfg.rtg,
+            rtg_vram_bytes: cfg.rtg_vram_bytes,
             cpu: cfg.cpu,
             fpu: cfg.fpu,
             clock_mhz: cfg.cpu_clock_mhz,
@@ -1625,7 +1635,10 @@ impl MachineSetup {
             raw.identify = Some(self.identify);
         }
         if self.rtg != base.rtg {
-            raw.rtg.card = Some(rtg_card_name(self.rtg).to_ascii_lowercase());
+            raw.rtg.card = Some(rtg_card_value(self.rtg).to_string());
+        }
+        if self.rtg_vram_bytes != base.rtg_vram_bytes {
+            raw.rtg.vram = Some(format_size(self.rtg_vram_bytes));
         }
         // CPU
         if self.cpu != base.cpu {
@@ -2006,6 +2019,7 @@ impl MachineSetup {
         self.rtc = base.rtc_present;
         self.identify = base.identify_board;
         self.rtg = base.rtg;
+        self.rtg_vram_bytes = base.rtg_vram_bytes;
         self.cpu = base.cpu;
         self.fpu = base.fpu;
         self.clock_mhz = base.cpu_clock_mhz;
@@ -2124,8 +2138,9 @@ impl MachineSetup {
             F::Z3Ram => reason(cpu_is_32bit(self.cpu), "needs 32-bit CPU"),
             // The CPU-slot space at $08000000 is beyond a 24-bit bus too.
             F::AccelRam => reason(cpu_is_32bit(self.cpu), "needs 32-bit CPU"),
-            // The Z3660 is a Zorro III board: same address-reach gate.
-            F::Rtg => reason(cpu_is_32bit(self.cpu), "needs 32-bit CPU"),
+            // Picasso II/II+ remain available on a 24-bit CPU. The stepper's
+            // choice list omits the Zorro III-only Z3660 in that case.
+            F::Rtg => None,
             // Motherboard fast RAM hangs off Ramsey, which only the big-box
             // profiles fit, and its bank ends beyond a 24-bit address bus.
             F::MbRam => {
@@ -2732,7 +2747,14 @@ impl MachineSetup {
     pub fn cycle(&mut self, field: LauncherField, forward: bool) {
         match field {
             F::Chipset => self.chipset = cycle_slice(&CHIPSETS, self.chipset, forward),
-            F::Rtg => self.rtg = cycle_slice(&RTG_CARDS, self.rtg, forward),
+            F::Rtg => {
+                let cards = if cpu_is_32bit(self.cpu) {
+                    &RTG_CARDS[..]
+                } else {
+                    &RTG_CARDS[..3]
+                };
+                self.rtg = cycle_slice(cards, self.rtg, forward);
+            }
             F::Agnus => self.agnus = cycle_slice(&AGNUS_CHOICES, self.agnus, forward),
             F::Denise => self.denise = cycle_slice(&DENISE_CHOICES, self.denise, forward),
             F::Video => self.video = cycle_slice(&VIDEO_CHOICES, self.video, forward),
@@ -2749,11 +2771,14 @@ impl MachineSetup {
                     // Zorro III RAM, motherboard RAM, accelerator RAM, and
                     // the Zorro III RTG card all sit beyond a 24-bit bus;
                     // dropping them (rather than just greying their rows)
-                    // keeps the emitted config launchable.
+                    // keeps the emitted config launchable. Picasso II/II+ are
+                    // Zorro II cards and remain fitted.
                     self.z3_ram = 0;
                     self.mb_ram = 0;
                     self.accel_ram = 0;
-                    self.rtg = RtgCard::None;
+                    if self.rtg == RtgCard::Z3660 {
+                        self.rtg = RtgCard::None;
+                    }
                 }
             }
             F::Clock => self.clock_mhz = cycle_floats(&CLOCK_PRESETS, self.clock_mhz, forward),
@@ -4043,7 +4068,18 @@ pub fn model_label(model: MachineModel) -> &'static str {
 fn rtg_card_name(card: RtgCard) -> &'static str {
     match card {
         RtgCard::None => "None",
+        RtgCard::Picasso2 => "Picasso II",
+        RtgCard::Picasso2Plus => "Picasso II+",
         RtgCard::Z3660 => "Z3660",
+    }
+}
+
+fn rtg_card_value(card: RtgCard) -> &'static str {
+    match card {
+        RtgCard::None => "none",
+        RtgCard::Picasso2 => "picasso2",
+        RtgCard::Picasso2Plus => "picasso2plus",
+        RtgCard::Z3660 => "z3660",
     }
 }
 
@@ -4869,10 +4905,38 @@ mod tests {
         assert_eq!(back.rtg, RtgCard::None);
         assert!(s.build_config().is_ok());
 
-        // A 68000 machine cannot host the board, so it has none and the row
-        // still cycles without producing an unbuildable config.
+        // A 68000 machine cannot host Z3660, but its Zorro II bus can host a
+        // Picasso II family. The selector therefore remains live and round-trips the
+        // parser spelling rather than its friendlier display name.
         s.select_model(Some(MachineModel::A500));
         assert_eq!(s.rtg, RtgCard::None);
+        assert_eq!(s.disabled_reason(LauncherField::Rtg), None);
+        s.cycle(LauncherField::Rtg, true);
+        assert_eq!(s.rtg, RtgCard::Picasso2);
+        assert_eq!(s.value_label(LauncherField::Rtg), "Picasso II");
+        let raw = s.to_raw();
+        assert_eq!(raw.rtg.card.as_deref(), Some("picasso2"));
+        assert_eq!(MachineSetup::from_raw(&raw).unwrap().rtg, RtgCard::Picasso2);
+        assert!(s.build_config().is_ok());
+
+        s.cycle(LauncherField::Rtg, true);
+        assert_eq!(s.rtg, RtgCard::Picasso2Plus);
+        assert_eq!(s.value_label(LauncherField::Rtg), "Picasso II+");
+        let raw = s.to_raw();
+        assert_eq!(raw.rtg.card.as_deref(), Some("picasso2plus"));
+        assert_eq!(
+            MachineSetup::from_raw(&raw).unwrap().rtg,
+            RtgCard::Picasso2Plus
+        );
+        assert!(s.build_config().is_ok());
+
+        // A loaded 1 MB board preserves its fitted VRAM when saved.
+        let mut raw = RawConfig::default();
+        raw.rtg.card = Some("picasso2".to_string());
+        raw.rtg.vram = Some("1M".to_string());
+        let s = MachineSetup::from_raw(&raw).unwrap();
+        assert_eq!(s.rtg_vram_bytes, 1024 * 1024);
+        assert_eq!(s.to_raw().rtg.vram.as_deref(), Some("1M"));
     }
 
     #[test]
@@ -5526,12 +5590,10 @@ mod tests {
             s.disabled_reason(LauncherField::MbRam),
             Some("needs 32-bit CPU")
         );
-        // The profile's Zorro III RTG card is beyond a 24-bit bus too.
+        // The profile's Zorro III RTG card is beyond a 24-bit bus too. The RTG
+        // selector remains live because Picasso II/II+ are still valid choices.
         assert_eq!(s.rtg, RtgCard::None);
-        assert_eq!(
-            s.disabled_reason(LauncherField::Rtg),
-            Some("needs 32-bit CPU")
-        );
+        assert_eq!(s.disabled_reason(LauncherField::Rtg), None);
         // The raw config overrides the profile default back to zero, so
         // this machine still launches.
         assert_eq!(s.to_raw().memory.motherboard.as_deref(), Some("0"));

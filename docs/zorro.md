@@ -260,7 +260,13 @@ while traffic flows -- the emulator logs this when the board is attached. Save
 states record only the chosen backend and bring up a fresh one on load
 (in-flight frames are dropped; the guest's TCP retransmits).
 
-## Graphics: the Z3660 RTG board
+## Graphics: RTG boards
+
+Copperline fits at most one RTG board through `[rtg]`. Both are functional
+device-backed boards whose guest drivers program real hardware interfaces;
+there is no software-aware virtual framebuffer.
+
+### Z3660
 
 `[rtg] card = "z3660"` fits an in-tree RTG (retargetable graphics) board
 (`src/z3660.rs`) modelled on the Z3660 accelerator's FPGA graphics core,
@@ -280,6 +286,50 @@ stays honest without carrying all 128 MB.
 Like the A2065 it is a device-backed board, not a `[[zorro]]` metadata
 board; the scanout and blitter model live in `z3660.rs` and the
 presentation path is described in [](internals/video).
+
+### Village Tronic Picasso II and II+
+
+`[rtg] card = "picasso2"` fits the 1993 Zorro II card with its CL-GD5426;
+`card = "picasso2plus"` selects the CL-GD5428-based Picasso II+. Both take 1
+or 2 MB of VRAM (`[rtg] vram`). One physical board enumerates as two consecutive
+autoconfig identities under Village Tronic manufacturer 2167 (`$0877`). The
+original reports serial `$00020000`; the II+ reports `$00100000` on both
+identities:
+
+| product | size | autoconfig space | purpose |
+| --- | ---: | --- | --- |
+| 11 | 1 or 2 MB | Zorro II memory | linear VRAM aperture |
+| 12 | 64 KB | Zorro II I/O | VGA registers and monitor switch |
+
+Product 11 has `ERTF_CHAINEDCONFIG` set and is not added to the system free
+memory list; product 12 follows it. Both windows route to one `Picasso2`
+device. Copperline tags the VRAM mapping internally so the shared device can
+distinguish it without changing the common Zorro device interface. Product 13,
+the physical board's jumper-selected segmented mode, is intentionally not
+implemented because Picasso96 does not support it.
+
+The product-12 register window decodes as follows:
+
+| offset | function |
+| --- | --- |
+| `$0000-$0FFF` | VGA I/O ports at the same numeric port address |
+| `$1000-$1FFF` | the same ports with address + 1, for odd ISA byte lanes |
+| `$2000-$7FFF` | unused, reads as open bus and drops writes |
+| `$8xxx`, `$Axxx` | even-address write selects the RTG output |
+| `$9xxx`, `$Bxxx` | even-address write selects native Amiga pass-through |
+
+A 68k word write to `$3C4` therefore supplies the sequencer index in its high
+byte and the `$3C5` data in its low byte. The linear memory aperture preserves
+byte order exactly. Both Cirrus revisions interpret 15/16-bit pixels as
+little-endian words and 24-bit pixels as B, G, R bytes, matching the `*PC` and
+BGR formats advertised by the Picasso96 driver. CRTC part ID `$27` reads `$90`
+on the CL-GD5426 and `$98` on the CL-GD5428.
+
+Only the II+ drives an interrupt line. A write to register-window offset
+`$1001` enables its INT2 output and `$1000` disables it. An enabled VGA
+vertical interrupt latches at the CRTC-programmed retrace edge in emulated
+time; writing CRTC `$11` with bit 4 clear acknowledges it. The original card
+stores the board-enable bit for register compatibility but never asserts INT2.
 
 ## How autoconfig works in Copperline
 
@@ -329,8 +379,9 @@ ways:
   `ZorroChain::device_region_at` and accesses route to the device model on
   the bus (the A2091's registers, boot ROM, and DMA strobes) rather than
   into board RAM;
-- they do not claim the autoconfig memory-space flag (`er_Flags`
-  `ERFF_MEMSPACE` stays clear, as on real I/O boards);
+- ordinary I/O boards do not claim the autoconfig memory-space flag
+  (`ERFF_MEMSPACE`), while a device-backed framebuffer such as Picasso II
+  product 11 can request memory-space placement explicitly;
 - a board may carry a `diag_vec`, which sets `ERTF_DIAGVALID` in
   `er_Type` and emits `er_InitDiagVec` so Kickstart autoboots from the
   DiagArea inside the board window. The A2091 points it at `$2000`, where

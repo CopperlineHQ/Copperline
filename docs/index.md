@@ -58,6 +58,7 @@ running in Copperline.
   emulator from scripts, CI, and AI agents (`--control`, `copperline-ctl`).
 - [](internals/architecture) -- how the emulator works inside, for
   contributors.
+- [](internals/picasso2) -- the Picasso II/II+ and CL-GD5426/5428 RTG model.
 
 ## Design principles
 

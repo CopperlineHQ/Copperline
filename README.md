@@ -58,9 +58,9 @@ against real hardware.
   DrawBridge / Greaseweazle / Supercard Pro via the bundled FloppyBridge,
   `docs/guide/floppybridge.md`), Gayle and A4000 IDE, SCSI (A2091,
   A4091, or the A3000's onboard Super DMAC), CDTV/CD32 CD, A2065 Ethernet,
-  a Z3660 RTG card (high-colour Picasso96 screens), the serial port bridged
-  to host stdout/TCP/PTY/MIDI, a parallel-port printer capture and audio
-  sampler, host directories served live as AmigaDOS volumes, and Zorro
+  Z3660 and Picasso II/II+ RTG cards (high-colour Picasso96 screens), the serial
+  port bridged to host stdout/TCP/PTY/MIDI, a parallel-port printer capture and
+  audio sampler, host directories served live as AmigaDOS volumes, and Zorro
   boards loadable as WASM plugins.
 - **Tooling**: an in-window debugger that can step backwards, an
   interactive chip-bus frame analyzer, a trigger-based VCD waveform export

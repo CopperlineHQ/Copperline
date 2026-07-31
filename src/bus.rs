@@ -3878,16 +3878,18 @@ impl Bus {
     pub fn rtg_active(&self) -> bool {
         self.devices.iter().any(|d| match d {
             crate::zorro_device::BoardDevice::Z3660(z) => z.rtg_active(),
+            crate::zorro_device::BoardDevice::Picasso2(p) => p.rtg_active(),
             _ => false,
         })
     }
 
-    /// Compose the active RTG board frame (Z3660 scanout) into `out` as
+    /// Compose the active RTG board frame into `out` as
     /// presentation pixels, returning its dimensions; `None` while no RTG
     /// board is driving the display (native chipset output shown).
     pub fn rtg_frame(&self, out: &mut Vec<u32>) -> Option<(u32, u32)> {
         self.devices.iter().find_map(|d| match d {
             crate::zorro_device::BoardDevice::Z3660(z) => z.rtg_frame(out),
+            crate::zorro_device::BoardDevice::Picasso2(p) => p.rtg_frame(out),
             _ => None,
         })
     }

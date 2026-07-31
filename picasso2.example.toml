@@ -1,0 +1,20 @@
+# Picasso II/II+ / Picasso96 Workbench example. Place a licensed Kickstart 3.1 ROM
+# and a bootable RDB HDF with Picasso96's PicassoII.card driver beside this
+# file, or adjust the paths. Headless capture is then deterministic, for example:
+#
+#   copperline --config picasso2.example.toml --noaudio \
+#     --screenshot-after 60 /tmp/picasso2.png
+
+rom = "KICK31.ROM"
+
+[machine]
+profile = "A3000"
+
+[rtg]
+card = "picasso2"
+# Use "picasso2plus" for the CL-GD5428 revision with INT2 vertical blank.
+vram = "2M"
+
+[scsi]
+controller = "a3000"
+unit0 = "p96-picasso2.hdf"
