@@ -1078,9 +1078,8 @@ const AUDIO_FILTER_MODES: [AudioFilterMode; 3] = [
     AudioFilterMode::Off,
 ];
 const FLOPPY_SPEEDS: [u16; 5] = [100, 200, 400, 800, crate::floppy::SPEED_TURBO];
-/// Serving speeds a bridged bay offers: real, and two faster-than-real
-/// steps. Percentages of the platter's real speed.
-const BRIDGE_SERVE_SPEEDS: [u16; 3] = [100, 125, 150];
+// The bridge speed row cycles the same set the config and CLI accept.
+use crate::config::SUPPORTED_BRIDGE_SPEED_PERCENTS as BRIDGE_SERVE_SPEEDS;
 const PACINGS: [PacingBudget; 2] = [PacingBudget::Cycles, PacingBudget::Instructions];
 const WARPS: [WarpSpeed; 5] = [
     WarpSpeed::X2,

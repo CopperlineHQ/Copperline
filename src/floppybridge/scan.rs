@@ -30,6 +30,12 @@ const MASK: u32 = 0x5555_5555;
 const DD_SECTORS: usize = 11;
 const HD_SECTORS: usize = 22;
 
+/// Above this many bits, a revolution came off HD media. HD packs cells at
+/// twice the DD rate, so a DD revolution measures around 100,000 bits and an
+/// HD one around 200,000: the gap is wide enough that a drive running well
+/// off speed still lands on the right side of it.
+const HD_BIT_THRESHOLD: usize = 150_000;
+
 /// What a captured revolution decoded as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RevolutionScan {
@@ -146,9 +152,11 @@ pub fn scan_revolution(words: &[u16], bit_len: usize) -> RevolutionScan {
         }
     }
 
-    // The density decides the expected count: a DD capture cannot hold 22
-    // sectors, and an HD capture with only 11 intact is missing half.
-    let expected = if headers_valid > DD_SECTORS {
+    // The density decides the expected count, and it is read from the
+    // revolution's own length rather than from how many headers survived:
+    // an HD track holding exactly eleven readable sectors is half missing,
+    // which counting headers would report as a whole DD track.
+    let expected = if bit_len > HD_BIT_THRESHOLD {
         HD_SECTORS
     } else {
         DD_SECTORS
@@ -237,15 +245,21 @@ mod tests {
 
     /// A full synthetic DD track, with a trailing gap, packed into words.
     fn encode_track(track: u8) -> (Vec<u16>, usize) {
+        encode_track_of(track, 11, 700)
+    }
+
+    /// `sectors` encoded sectors, then a gap of `gap_cells` cells -- enough
+    /// of a knob to build an HD-length revolution as well as a DD one.
+    fn encode_track_of(track: u8, sectors: u8, gap_cells: usize) -> (Vec<u16>, usize) {
         let mut bits = Vec::new();
-        for sector in 0..11u8 {
+        for sector in 0..sectors {
             let mut payload = [0u8; 512];
             payload[0] = sector;
             payload[511] = track;
             bits.extend(encode_sector(track, sector, &payload));
         }
         // Track gap.
-        for _ in 0..700 {
+        for _ in 0..gap_cells {
             bits.push(false);
             bits.push(true);
         }
@@ -347,6 +361,31 @@ mod tests {
         assert!(
             matches!(scan, RevolutionScan::DamagedAmigaDos { .. }),
             "expected damage, got {scan:?}"
+        );
+    }
+
+    /// An HD revolution carrying only eleven readable sectors is half
+    /// missing, not a whole DD track: the density comes from the
+    /// revolution's length, which damage does not change.
+    #[test]
+    fn a_half_lost_hd_track_is_not_a_clean_dd_one() {
+        // Eleven good sectors, padded out to an HD-length revolution.
+        let (words, bit_len) = encode_track_of(40, 11, 60_000);
+        assert!(bit_len > HD_BIT_THRESHOLD, "an HD-length capture");
+        assert!(
+            !matches!(
+                scan_revolution(&words, bit_len),
+                RevolutionScan::CleanAmigaDos { .. }
+            ),
+            "half a track must never scan clean"
+        );
+
+        // And a genuine HD track still does.
+        let (words, bit_len) = encode_track_of(40, 22, 8_000);
+        assert!(bit_len > HD_BIT_THRESHOLD, "an HD-length capture");
+        assert_eq!(
+            scan_revolution(&words, bit_len),
+            RevolutionScan::CleanAmigaDos { sectors: 22 }
         );
     }
 

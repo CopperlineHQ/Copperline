@@ -509,8 +509,7 @@ where
                 let drive_s = args.next().ok_or_else(|| anyhow!(USAGE))?;
                 let percent_s = args.next().ok_or_else(|| anyhow!(USAGE))?;
                 let idx = parse_floppy_drive_idx(&drive_s, "--floppy-bridge-speed")?;
-                let percent: u16 = percent_s.parse().map_err(|_| anyhow!(USAGE))?;
-                overrides.floppy_bridge_speed[idx] = Some(percent);
+                overrides.floppy_bridge_speed[idx] = Some(parse_floppy_bridge_speed(&percent_s)?);
             }
             #[cfg(feature = "floppybridge")]
             "--floppy-bridge-auto-cache" => {
@@ -1247,6 +1246,16 @@ fn parse_floppy_speed(s: &str) -> Result<u16> {
     if speed != copperline::floppy::SPEED_TURBO
         && !copperline::floppy::SUPPORTED_SPEED_PERCENTS.contains(&speed)
     {
+        return Err(anyhow!(MSG));
+    }
+    Ok(speed)
+}
+
+#[cfg(feature = "floppybridge")]
+fn parse_floppy_bridge_speed(s: &str) -> Result<u16> {
+    const MSG: &str = "--floppy-bridge-speed PERCENT must be 100, 125, or 150";
+    let speed: u16 = s.trim().parse().map_err(|_| anyhow!(MSG))?;
+    if !copperline::config::SUPPORTED_BRIDGE_SPEED_PERCENTS.contains(&speed) {
         return Err(anyhow!(MSG));
     }
     Ok(speed)
@@ -2587,6 +2596,17 @@ mod tests {
         let err = validate_gdb_args(&args).unwrap_err();
         assert!(err.to_string().contains("--screenshot-after"), "{err:#}");
         Ok(())
+    }
+
+    /// An unsupported serving speed is refused where it is typed, naming
+    /// the values that work, rather than surfacing later from config parsing.
+    #[cfg(feature = "floppybridge")]
+    #[test]
+    fn floppy_bridge_speed_flag_refuses_an_unsupported_percentage() {
+        let err = parse(&["--floppy-bridge-speed", "df0", "120"])
+            .expect_err("120 is not a supported serving speed");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("100, 125, or 150"), "unexpected error: {msg}");
     }
 
     /// A real drive can be asked for entirely from the command line, with no

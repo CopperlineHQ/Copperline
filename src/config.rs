@@ -1085,6 +1085,11 @@ pub enum BridgeCable {
 ///
 /// Held apart from [`FloppyDriveConfig`] because a bridged drive has no image
 /// path: whichever of the two is present for a bay supplies its media.
+/// Serving speeds a bridged bay accepts, as percentages of the platter's
+/// real speed. Shared by the config parser, the CLI, and the launcher's
+/// cycle row so all three offer the same set.
+pub const SUPPORTED_BRIDGE_SPEED_PERCENTS: [u16; 3] = [100, 125, 150];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FloppyBridgeConfig {
     pub driver: BridgeDriver,
@@ -4477,7 +4482,7 @@ fn parse_floppy_bridge(idx: usize, spec: &str, raw: &RawFloppyDrive) -> Result<F
 
     let speed = match raw.bridge_speed {
         None => 100,
-        Some(p @ (100 | 125 | 150)) => p,
+        Some(p) if SUPPORTED_BRIDGE_SPEED_PERCENTS.contains(&p) => p,
         Some(other) => bail!(
             "floppy.df{idx} bridge_speed = {other} is not a supported serving \
              speed (100, 125, or 150)"
