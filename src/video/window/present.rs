@@ -380,7 +380,7 @@ pub(super) fn texture_scale_for_factor(scale_factor: f64) -> usize {
 
 /// React to a host DPI scale-factor change for one window's pixel surface.
 ///
-/// pixels' `window_pos_to_pixel` maps a host click into texture space using
+/// `cursor_texture_position` maps a host click into texture space using
 /// both the surface size (which the following Resized event updates) and the
 /// texture extent (which nothing updated before this). When the supersample
 /// factor changes -- e.g. dragging between a 1x and a 2x monitor -- the texture
@@ -429,6 +429,11 @@ pub(super) fn build_pixels_for_window(
     };
     let mut pixels = builder.build()?;
     pixels.set_scaling_mode(ScalingMode::Fill);
+    // set_scaling_mode only stores the mode; the scaling matrix and clip rect
+    // stay the builder's PixelPerfect ones until a resize recomputes them.
+    // Re-apply the surface size so the cursor mapping and the render scissor
+    // agree with the Fill pass from the first frame, not the first resize.
+    pixels.resize_surface(inner.width.max(1), inner.height.max(1))?;
     Ok(pixels)
 }
 
@@ -449,15 +454,51 @@ pub(in crate::video) fn scale_rect(rect: Rect, scale: usize) -> Rect {
     }
 }
 
+/// Map a host cursor position (surface physical pixels) into a logical canvas
+/// position, or None outside the presented picture.
+///
+/// Deliberately not pixels' `window_pos_to_pixel`: that helper re-centres
+/// through `min(texture, surface) / 2`, which is only correct while the
+/// texture fits inside the surface. The supersampled texture is *larger* than
+/// the surface whenever the rounded texture scale exceeds a fractional host
+/// scale factor (a 2x texture over a 1.5x surface on a 150% desktop), and the
+/// shifted mapping it produces there lands every status-bar click in the
+/// display region, where it takes the mouse capture instead of the control.
+/// Mapping through the scaling renderer's clip rect -- the surface rect the
+/// Fill pass draws the picture into -- holds on both sides of that boundary,
+/// and agrees with the render by construction: the rect derives from the same
+/// surface and texture extents the render pass scissors with.
 pub(super) fn cursor_texture_position(
     pixels: &Pixels<'_>,
     position: winit::dpi::PhysicalPosition<f64>,
     texture_scale: usize,
 ) -> Option<(i32, i32)> {
-    let (x, y) = pixels
-        .window_pos_to_pixel((position.x as f32, position.y as f32))
-        .ok()?;
+    let context = pixels.context();
+    let (x, y) = cursor_position_in_texture(
+        (position.x, position.y),
+        context.scaling_renderer.clip_rect(),
+        (context.texture_extent.width, context.texture_extent.height),
+    )?;
     Some(((x / texture_scale) as i32, (y / texture_scale) as i32))
+}
+
+/// The pure half of [`cursor_texture_position`]: position and clip rect in
+/// surface physical pixels to supersampled-texture pixels.
+pub(super) fn cursor_position_in_texture(
+    position: (f64, f64),
+    clip: (u32, u32, u32, u32),
+    texture: (u32, u32),
+) -> Option<(usize, usize)> {
+    let (clip_x, clip_y, clip_w, clip_h) = clip;
+    if clip_w == 0 || clip_h == 0 {
+        return None;
+    }
+    let x = (position.0 - f64::from(clip_x)) * f64::from(texture.0) / f64::from(clip_w);
+    let y = (position.1 - f64::from(clip_y)) * f64::from(texture.1) / f64::from(clip_h);
+    if x < 0.0 || x >= f64::from(texture.0) || y < 0.0 || y >= f64::from(texture.1) {
+        return None;
+    }
+    Some((x as usize, y as usize))
 }
 
 pub(super) fn cursor_in_status_bar(pos: (i32, i32)) -> bool {

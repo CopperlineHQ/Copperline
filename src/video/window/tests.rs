@@ -8,24 +8,25 @@ use super::ui::{AnalyzerTab, Panel, UiControl};
 use super::{
     bar_layout, center_present_frame_for_visible_start, center_present_frame_horizontally,
     control_at, copperline_icon_image, copperline_logo_image, copy_present_frame,
-    copy_window_present_frame, draw_status_bar, fdd_track_counter_rect, fdd_track_digit_rect,
-    host_shortcut_modifier_pressed, host_to_amiga_rawkey, joystick_toggle_rect, led_row_rect,
-    mask_present_frame_to_tv, paint_test_screen, parse_amiga_key, pause_button_rect,
-    power_button_rect, present_height, presentation_pixels_equal, presentation_source_y_offset,
-    raw_device_qualifier_family_held, raw_device_qualifier_rawkey, rawkey_is_held,
-    rawkey_transition_is_duplicate, reboot_button_rect, repeated_main_key_should_drop, rgba,
-    short_status_error, shorten_status_paths, shot_button_rect, should_render_emulated_frame,
-    standard_window_top_row, status_with_latched_fdd_track, take_integral_mouse_delta,
-    texture_height, texture_width, tint_display_rows, tint_lut, tint_rows_in_place,
-    tv_aperture_source_row, tv_source_h_bounds, volume_percent_from_pos, volume_slider_track_rect,
-    BarControl, DriveBar, JoystickInputMode, MediaBar, PresentationLatch, StatusBarView,
-    ToolPanelKind, AMIGA_RAWKEY_LEFT_ALT, AMIGA_RAWKEY_LEFT_SHIFT, AMIGA_RAWKEY_RIGHT_ALT,
-    AMIGA_RAWKEY_RIGHT_SHIFT, BUTTON_GLYPH, BUTTON_GLYPH_DISABLED, CD_BODY, CD_LED_OFF, CD_LED_ON,
-    DISK_BODY, DISK_BODY_SHADOW, DISK_LABEL, FDD_LED_OFF, FDD_LED_ON, HDD_LED_OFF, HDD_LED_ON,
-    POWER_GLYPH_OFF, POWER_GLYPH_ON, POWER_LED_BRIGHT, POWER_LED_DIM, POWER_LED_OFF,
-    STANDARD_PAL_VISIBLE_LINES, STANDARD_PAL_VISIBLE_START_VPOS, STATUS_BG, TRACK_SEGMENT_OFF,
-    TRACK_SEGMENT_ON, TV_CAPTURED_SOURCE_X, TV_LIVE_PAD_X, TV_PAL_PRESENT_HEIGHT,
-    TV_PRESENT_SOURCE_X, TV_PRESENT_SOURCE_Y, TV_PRESENT_WIDTH, VOLUME_FILL, VOLUME_GLYPH_X,
+    copy_window_present_frame, cursor_position_in_texture, draw_status_bar, fdd_track_counter_rect,
+    fdd_track_digit_rect, host_shortcut_modifier_pressed, host_to_amiga_rawkey,
+    joystick_toggle_rect, led_row_rect, mask_present_frame_to_tv, paint_test_screen,
+    parse_amiga_key, pause_button_rect, power_button_rect, present_height,
+    presentation_pixels_equal, presentation_source_y_offset, raw_device_qualifier_family_held,
+    raw_device_qualifier_rawkey, rawkey_is_held, rawkey_transition_is_duplicate,
+    reboot_button_rect, repeated_main_key_should_drop, rgba, short_status_error,
+    shorten_status_paths, shot_button_rect, should_render_emulated_frame, standard_window_top_row,
+    status_with_latched_fdd_track, take_integral_mouse_delta, texture_height, texture_width,
+    tint_display_rows, tint_lut, tint_rows_in_place, tv_aperture_source_row, tv_source_h_bounds,
+    volume_percent_from_pos, volume_slider_track_rect, BarControl, DriveBar, JoystickInputMode,
+    MediaBar, PresentationLatch, StatusBarView, ToolPanelKind, AMIGA_RAWKEY_LEFT_ALT,
+    AMIGA_RAWKEY_LEFT_SHIFT, AMIGA_RAWKEY_RIGHT_ALT, AMIGA_RAWKEY_RIGHT_SHIFT, BUTTON_GLYPH,
+    BUTTON_GLYPH_DISABLED, CD_BODY, CD_LED_OFF, CD_LED_ON, DISK_BODY, DISK_BODY_SHADOW, DISK_LABEL,
+    FDD_LED_OFF, FDD_LED_ON, HDD_LED_OFF, HDD_LED_ON, POWER_GLYPH_OFF, POWER_GLYPH_ON,
+    POWER_LED_BRIGHT, POWER_LED_DIM, POWER_LED_OFF, STANDARD_PAL_VISIBLE_LINES,
+    STANDARD_PAL_VISIBLE_START_VPOS, STATUS_BG, TRACK_SEGMENT_OFF, TRACK_SEGMENT_ON,
+    TV_CAPTURED_SOURCE_X, TV_LIVE_PAD_X, TV_PAL_PRESENT_HEIGHT, TV_PRESENT_SOURCE_X,
+    TV_PRESENT_SOURCE_Y, TV_PRESENT_WIDTH, VOLUME_FILL, VOLUME_GLYPH_X,
 };
 use crate::audio::{AudioSink, NullSink};
 use crate::bus::{FrontPanelStatus, RenderRegisterSnapshot};
@@ -6666,5 +6667,79 @@ fn switching_analyzer_tabs_keeps_the_heat_map_recording() {
     assert_eq!(
         after.census.iter().map(|row| row.cells).sum::<usize>(),
         recorded
+    );
+}
+
+/// At a 150% fractional host scale the supersampled texture (2x logical) is
+/// larger than the surface (1.5x logical): 1432x1162 over 1074x872 for the
+/// default TV canvas, for which the Fill scaler computes a clip rect of
+/// (0, 0, 1074, 871). pixels' own `window_pos_to_pixel` re-centres through
+/// `min(texture, surface) / 2` and shifted every hit 72 logical pixels
+/// up-left in that state -- the whole 44-pixel status bar mapped into the
+/// display region, so bar clicks took the mouse capture instead.
+#[test]
+fn cursor_mapping_reaches_status_bar_at_fractional_scale() {
+    let clip = (0, 0, 1074, 871);
+    let texture = (1432, 1162);
+    let texture_scale = 2;
+
+    // Mid-height of the visible status-bar strip (the bottom 44/581 of the
+    // window): logical y 559 sits inside the bar's 537..581 band.
+    let (x, y) = cursor_position_in_texture((537.0, 839.0), clip, texture).unwrap();
+    assert_eq!((x / texture_scale, y / texture_scale), (358, 559));
+
+    // Near the left edge of the bar: the old mapping pushed this off the
+    // texture's left edge and returned an error (click swallowed).
+    let (x, y) = cursor_position_in_texture((53.7, 839.0), clip, texture).unwrap();
+    assert_eq!((x / texture_scale, y / texture_scale), (35, 559));
+
+    // Top-left of the display: also unmapped before.
+    let (x, y) = cursor_position_in_texture((10.0, 10.0), clip, texture).unwrap();
+    assert_eq!((x / texture_scale, y / texture_scale), (6, 6));
+
+    // The sub-pixel letterbox row under the picture stays outside.
+    assert_eq!(
+        cursor_position_in_texture((537.0, 871.9), clip, texture),
+        None
+    );
+}
+
+/// A texture that fits inside the surface (a 125% host scale rounds to a 1x
+/// texture) is the case pixels' helper handled correctly; the clip-rect
+/// mapping must reproduce it. 716x581 texture in an 895x726 surface: Fill
+/// scales by 726/581 and clips to (0, 0, 894, 726).
+#[test]
+fn cursor_mapping_unchanged_when_texture_fits_surface() {
+    let clip = (0, 0, 894, 726);
+    let texture = (716, 581);
+    assert_eq!(
+        cursor_position_in_texture((447.5, 363.0), clip, texture),
+        Some((358, 290))
+    );
+    // Mid-height of the visible status-bar strip maps into the bar band.
+    assert_eq!(
+        cursor_position_in_texture((447.5, 698.5), clip, texture),
+        Some((358, 558))
+    );
+}
+
+/// A manually resized wide window pillarboxes the picture; clicks in the
+/// side bars are outside the presentation and stay unmapped, while clicks
+/// on the picture land as if the bars were not there. 1432x1162 texture in
+/// a 2000x600 surface: Fill clips to (630, 0, 739, 600).
+#[test]
+fn cursor_mapping_rejects_pillarbox_clicks() {
+    let clip = (630, 0, 739, 600);
+    let texture = (1432, 1162);
+    assert_eq!(
+        cursor_position_in_texture((300.0, 300.0), clip, texture),
+        None
+    );
+    let (x, _) = cursor_position_in_texture((1000.0, 300.0), clip, texture).unwrap();
+    assert_eq!(x, 716);
+    // A zero-area clip (minimized surface) maps nothing.
+    assert_eq!(
+        cursor_position_in_texture((0.0, 0.0), (0, 0, 0, 0), texture),
+        None
     );
 }
