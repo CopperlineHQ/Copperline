@@ -104,11 +104,11 @@ model = "68000"
 # path. The machine behaves like an ideal accelerator at clock_mhz: one
 # instruction per CPU clock with zero-wait fast RAM/ROM (a 50 MHz 68040
 # runs on the order of 50 MIPS; raise clock_mhz for more), but chip-level
-# races and cycle-counted effects no longer line up and the on-chip cache
-# models are bypassed. Chip/slow RAM keep their shared-bus arbitration.
-# Needs a 68020 or later (the 68000/68010 shared-bus float and prefetch
-# semantics require the precise core, so it is ignored there). Off by
-# default.
+# races and cycle-counted effects no longer line up. Chip/slow RAM keep
+# their shared-bus arbitration, served through the still-active on-chip
+# cache models as on a real accelerator. Needs a 68020 or later (the
+# 68000/68010 shared-bus float and prefetch semantics require the precise
+# core, so it is ignored there). Off by default.
 # jit = true
 
 # 68060 only: the 68060 dropped MOVEP, CHK2/CMP2, CAS2, misaligned CAS,

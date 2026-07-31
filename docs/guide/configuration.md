@@ -390,12 +390,12 @@ clock_mhz = 14.0    # optional; defaults to the model's stock speed
   behaves like an ideal accelerator running at `clock_mhz`: one
   instruction per CPU clock with zero-wait fast RAM and ROM, so a 50 MHz
   68040 delivers on the order of 50 MIPS (raise `clock_mhz` for more).
-  Interrupts are recognized at batch boundaries and the on-chip cache
-  models are bypassed, so chip-level races and cycle-counted effects no
-  longer line up; leave it off for anything timing-sensitive (games,
-  demos). Chip and slow RAM still arbitrate onto the shared chip bus in
-  order -- code that lives entirely in chip RAM sees little JIT benefit
-  -- so displays, blits, and device I/O work normally. Requires a 68020
+  Interrupts are recognized at batch boundaries, so chip-level races and
+  cycle-counted effects no longer line up; leave it off for anything
+  timing-sensitive (games, demos). Chip and slow RAM still arbitrate onto
+  the shared chip bus in order, and the on-chip cache models stay active
+  (as on a real accelerator, they are what lets chip-RAM-resident code
+  run at CPU speed), so displays, blits, and device I/O work normally. Requires a 68020
   or later: the 68000/68010 share one bus with the chipset and their
   floating-bus and prefetch semantics need the precise core, so
   `jit = true` on those models logs a note and stays precise (the

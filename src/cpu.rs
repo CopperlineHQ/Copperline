@@ -2307,6 +2307,12 @@ impl M68kMachine {
             self.bus.diag_current_pc = self.cpu.pc;
             self.bus.bus.cpu_pc = self.cpu.pc;
             let result = self.cpu.run_batch(&mut self.bus, budget, &[]);
+            if self.bus.icache.is_some() || self.bus.dcache.is_some() {
+                // A CACR write inside the batch (MOVEC) must reach the
+                // cache models -- enables, disables, and flushes -- just
+                // as the precise loop syncs it per instruction.
+                self.apply_cacr_updates();
+            }
             instructions = instructions.saturating_add(result.instructions as usize);
             let mut batch_clocks = result
                 .instructions
@@ -5656,6 +5662,47 @@ mod tests {
         machine.bus_mut().paula.intreq = INT_VERTB;
         machine.step_slice(64)?;
         assert_eq!(machine.d(0), 42, "handler must have run");
+        Ok(())
+    }
+
+    /// A chip-RAM-resident loop under JIT must run at CPU speed once the
+    /// instruction-cache model holds it, not pay chip-bus arbitration on
+    /// every fetch: bypassing the cache models made a fast-RAM-less
+    /// Workbench measure 3x SLOWER under JIT than under the precise core
+    /// (SysInfo Dhrystones 1667 vs 5503 on a 50 MHz 68040).
+    #[test]
+    fn jit_chip_resident_loop_runs_at_cpu_speed_with_icache() -> Result<()> {
+        let program = [
+            0x7001u16, // moveq #1,d0 (CACR.EI, as the OS sets at boot)
+            0x4E7B, 0x0002, // movec d0,cacr
+            0x7263, // moveq #99,d1
+            0x4E71, // nop
+            0x51C9, 0xFFFC, // dbra d1,<nop>
+            0x60FE, // bra.s *
+        ];
+        let run = |icache: bool| -> Result<u32> {
+            let mut machine = machine_with_program_model(0x1000, &program, CpuModel::M68020)?;
+            machine.set_cache_emulation(icache, false);
+            machine.set_jit_enabled(true);
+            let mut retired = 0usize;
+            let mut device_cck = 0u32;
+            while retired < 220 {
+                let slice = machine.step_slice(220 - retired)?;
+                retired += slice.instructions;
+                device_cck += slice.bus_advanced_cck;
+            }
+            Ok(device_cck)
+        };
+        let cached = run(true)?;
+        let cacheless = run(false)?;
+        assert!(
+            cached < 300,
+            "cached chip-resident loop took {cached} cck for 220 instructions"
+        );
+        assert!(
+            cacheless > cached * 2,
+            "cache model should dominate chip-loop speed: cacheless {cacheless} vs cached {cached}"
+        );
         Ok(())
     }
 

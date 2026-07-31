@@ -95,12 +95,23 @@ approximate (`M68kMachine::step_slice_jit`):
   as their real hardware exceptions, mirroring the precise loop's no-op
   HLE policy.
 
+The on-chip cache models stay active under JIT: on a real accelerator it
+is exactly the caches that let chip-RAM-resident code run at CPU speed
+instead of paying chip-bus arbitration on every fetch, so bypassing them
+made a fast-RAM-less Workbench measure 3x slower under JIT than precise.
+A cache hit serves the access with no bus cycle; a miss pays the real
+chip-bus (or zero-wait external) cost. CACR writes inside a batch are
+synced to the models at the batch boundary.
+
 The fastmem window is only offered when nothing intercepts plain fast-RAM
 accesses: cache models, memory-write debug hooks, the heat map, SMC
 detection, and injected bus faults all force every access back onto the
-bus. Arming any per-instruction debug or diagnostic hook (breakpoints,
-watches, traces, `COPPERLINE_DBG_*`) drops the whole slice back to the
-precise loop, so the debugger always sees every instruction.
+bus (so on default 020+ configs, whose caches are modelled, the window
+engages only when the user opts the caches off -- and the core also
+declines it whenever the guest enables the MMU, since fastmem addresses
+are physical). Arming any per-instruction debug or diagnostic hook
+(breakpoints, watches, traces, `COPPERLINE_DBG_*`) drops the whole slice
+back to the precise loop, so the debugger always sees every instruction.
 
 The 68000 and 68010 never take the batch path. On the small-box machines
 every CPU cycle drives the one bus shared with Agnus, and the floating-bus

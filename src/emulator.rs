@@ -2491,14 +2491,14 @@ pub fn build_machine(
         cpu_clocks_per_cck,
         paced,
     )?;
-    // JIT mode bypasses the cache models: its fastmem window writes would
-    // not reach a data-cache model's invalidate path, and cache timing is
-    // meaningless under the JIT's flat instruction billing.
-    let caches_on = !cfg.cpu_jit;
-    emu.set_cache_emulation(cfg.cpu_icache && caches_on, cfg.cpu_dcache && caches_on);
-    if cfg.cpu_jit && (cfg.cpu_icache || cfg.cpu_dcache) {
-        log::info!("cpu jit: on-chip cache models bypassed");
-    }
+    // The cache models stay active under JIT: on a real accelerator it is
+    // exactly the caches that let chip-RAM-resident code run at CPU speed
+    // instead of paying chip-bus arbitration per fetch (SysInfo's
+    // Dhrystone on a fast-RAM-less Workbench regressed 3x without them).
+    // There is no coherence hazard with the fastmem window: the window is
+    // only offered while both cache models are absent (CpuBus::jit_fast_mem),
+    // so cached configs simply run every access through the modelled bus.
+    emu.set_cache_emulation(cfg.cpu_icache, cfg.cpu_dcache);
     emu.set_cpu_jit(cfg.cpu_jit);
     emu.set_machine_descriptor(cfg.descriptor());
     Ok(emu)
