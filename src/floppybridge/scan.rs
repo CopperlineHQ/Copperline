@@ -176,7 +176,7 @@ mod tests {
     /// the literal sync words, which is all the scan looks at.
     fn encode_sector(track: u8, sector: u8, payload: &[u8; 512]) -> Vec<bool> {
         let mut bits = Vec::new();
-        let mut push_word = |bits: &mut Vec<bool>, w: u16| {
+        let push_word = |bits: &mut Vec<bool>, w: u16| {
             for k in (0..16).rev() {
                 bits.push(w & (1 << k) != 0);
             }
@@ -194,7 +194,7 @@ mod tests {
         let info = u32::from_be_bytes([0xFF, track, sector, 1]);
         let info_odd = (info >> 1) & MASK;
         let info_even = info & MASK;
-        let label = [0u32; 4];
+        // An empty label area, as AmigaDOS leaves it.
         let label_odd = [0u32; 4];
         let label_even = [0u32; 4];
 

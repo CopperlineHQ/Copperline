@@ -4149,8 +4149,10 @@ mod tests {
     #[cfg(feature = "floppybridge")]
     #[test]
     fn drive_speed_greys_when_every_fitted_bay_is_physical() {
-        let mut setup = MachineSetup::default();
-        setup.floppy_drives = 2;
+        let mut setup = MachineSetup {
+            floppy_drives: 2,
+            ..Default::default()
+        };
         assert_eq!(setup.disabled_reason(F::FloppySpeed), None);
 
         setup.set_drive_bridged(0, true);
