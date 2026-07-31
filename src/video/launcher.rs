@@ -860,7 +860,9 @@ const CPUS: [CpuModel; 7] = [
     CpuModel::M68040,
     CpuModel::M68060,
 ];
-const CLOCK_PRESETS: [f64; 8] = [7.09, 14.0, 14.18, 25.0, 28.0, 33.0, 40.0, 50.0];
+const CLOCK_PRESETS: [f64; 10] = [
+    7.09, 14.0, 14.18, 25.0, 28.0, 33.0, 40.0, 50.0, 100.0, 200.0,
+];
 const CHIP_PRESETS: [usize; 4] = [256 * 1024, 512 * 1024, 1024 * 1024, 2 * 1024 * 1024];
 const FAST_PRESETS: [usize; 9] = [
     0,
