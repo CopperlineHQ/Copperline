@@ -88,6 +88,13 @@ fn host_mapping_includes_amiga_modifiers() {
 }
 
 #[test]
+fn powered_off_ui_does_not_continuously_redraw() {
+    assert!(!super::ui_needs_continuous_redraw(false, true));
+    assert!(super::ui_needs_continuous_redraw(true, true));
+    assert!(!super::ui_needs_continuous_redraw(true, false));
+}
+
+#[test]
 fn host_repeat_filter_accepts_unheld_amiga_qualifier_press() {
     let mut held = [false; 128];
 

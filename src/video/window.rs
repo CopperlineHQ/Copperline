@@ -499,6 +499,10 @@ fn repeated_main_key_should_drop(
     }
 }
 
+fn ui_needs_continuous_redraw(running: bool, active: bool) -> bool {
+    running && active
+}
+
 fn raw_device_qualifier_rawkey(code: KeyCode) -> Option<u8> {
     match code {
         KeyCode::ShiftLeft => Some(AMIGA_RAWKEY_LEFT_SHIFT),
@@ -3504,7 +3508,7 @@ impl ApplicationHandler for App {
             let chrome_changed = self.last_main_redraw_state != Some(redraw_state);
             if self.main_presentation_dirty
                 || chrome_changed
-                || self.ui.active()
+                || ui_needs_continuous_redraw(running, self.ui.active())
                 || self.drop_hover
                 || osd_active
                 || calibrating
