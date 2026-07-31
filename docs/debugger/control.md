@@ -75,8 +75,8 @@ natural flow is "resume, block, inspect the reply". At most one resume
 may be outstanding (`-32002` otherwise); inspection commands are still
 serviced while the machine runs, at a frame boundary. `pause` ends a
 pending resume (both requests receive the stop position). `run_until`
-takes exactly one of `pc`, `vpos` (optional `hpos`), `frame`, `cck`, or
-`seconds`.
+takes exactly one of `pc`, `vpos` (optional `hpos`), `frame`, `cck`,
+`seconds`, or `stable_frames`.
 
 Every stop event carries a consistent position on the emulated timeline:
 
@@ -248,6 +248,11 @@ landed on already-executed memory, each with `addr`, `writer_pc`, the
 a few bytes ahead of the writing instruction is called out as inside the
 68000's prefetch, where it may be too late to take effect on this pass.
 An address counts as code once an instruction there has retired.
+Two limits worth knowing: only the 24-bit address space is tracked, so
+self-modification in accelerator RAM above it goes unseen; and the
+bytes a short forward branch skips are marked as code along with the
+instructions around them, so the stock `bra.s`-over-inline-data idiom
+reports writes to that data as self-modification.
 
 Memory heat map: `memory.heatmap {enabled?, base?, span?}` arms a
 256x256 grid over a window of the address space (default the whole
@@ -256,10 +261,12 @@ Memory heat map: `memory.heatmap {enabled?, base?, span?}` arms a
 how many cells each toucher currently holds and, with `path`, writes the
 grid as a 256x256 PNG. A slot map says what owned the chip bus at a
 colour clock; this says where in memory anything is happening -- which
-is the question when a display is drawn from the wrong buffer or a DMA
-channel is pointed at the wrong bank. Cells are coloured by what last
-touched them (CPU read/write, blitter, Copper, disk, and the bitplane,
-sprite and audio DMA channels) and fade to black over 32 frames. The
+is the question when a DMA channel is pointed at the wrong bank. Cells
+are coloured by what last touched them (CPU read/write, Copper, and the
+bitplane, sprite and audio DMA channels) and fade to black over 32
+frames. Blitter and disk DMA are not yet attributed: those engines
+write through their own paths and leave the map cold, so a blit
+destination shows only the CPU or Copper pokes that set it up. The
 window is movable, so the RAM a 32-bit CPU sees above the 24-bit space
 can be looked at too; moving it starts a cold map, since the cells would
 otherwise carry activity from addresses they no longer name. `-32003`
