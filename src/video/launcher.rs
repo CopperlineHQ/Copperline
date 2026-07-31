@@ -2098,6 +2098,21 @@ impl MachineSetup {
             F::EthernetInterface => {
                 !matches!(self.a2065_net.as_ref(), Some(NetConfig::Bridge { .. }))
             }
+            // A controller is not a disk: only the units carrying one have a
+            // place in the boot order, so the empty six or seven go rather
+            // than standing in a column saying so.
+            F::ScsiUnit0Boot
+            | F::ScsiUnit1Boot
+            | F::ScsiUnit2Boot
+            | F::ScsiUnit3Boot
+            | F::ScsiUnit4Boot
+            | F::ScsiUnit5Boot
+            | F::ScsiUnit6Boot => {
+                self.scsi_controller.is_none()
+                    || Self::boot_field_drive(field)
+                        .and_then(|drive| self.path(drive))
+                        .is_none()
+            }
             _ => false,
         }
     }
