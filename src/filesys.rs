@@ -5,8 +5,11 @@
 //! Copperline services board together with a mount table and a hand-built
 //! DiagArea. At expansion init the DiagArea's DiagPoint calls the handler's
 //! expansion-init entry with the DiagPoint context; the handler builds one
-//! DeviceNode per mount table entry and `AddBootNode`s it, so DOS mounts the
-//! devices at boot and starts the handler process on first reference.
+//! DeviceNode per mount table entry and `AddBootNode`s it (`AddDosNode` on
+//! Kickstart 1.3's V34 expansion.library), so DOS mounts the devices at boot
+//! and starts the handler process on first reference. Kickstart 1.3 mounts
+//! the volumes but cannot boot from them; the bootpri vote needs the 2.0+
+//! BootNode strap.
 //! The handler forwards every DosPacket to [`FilesysBoard`] by writing its
 //! address to the unit's doorbell register in the board window (the board is
 //! a [`crate::zorro_device::ZorroDevice`], like the A4091); all ACTION_*
