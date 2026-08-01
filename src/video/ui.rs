@@ -443,8 +443,6 @@ pub enum Panel {
 #[derive(Default)]
 pub struct UiState {
     pub menu_open: bool,
-    /// First visible menu item when the list is too long for the display.
-    /// Always 0 for a menu that fits; reset each time the menu opens.
     /// The menu as it stood when it was opened, and how far into it the
     /// cursor has gone. Built once per open, from the machine at that
     /// moment, so nothing it offers can change under the pointer.
@@ -459,14 +457,13 @@ impl UiState {
         self.menu_open || self.panel.is_some()
     }
 
-    /// The UI control under `pos`, if any. `midi_active`/`sampler_active` select
-    /// the same menu item list the draw uses. `PanelBody` swallows clicks on a
+    /// The UI control under `pos`, if any. `PanelBody` swallows clicks on a
     /// panel's background so they never reach the emulated display.
     pub fn control_at(&self, pos: (i32, i32)) -> Option<UiControl> {
         if self.menu_open {
             // The menu answers for itself: a level, and a row in it.
             let pos = (pos.0.max(0) as usize, pos.1.max(0) as usize);
-            return tree_menu_hit(&self.menu_rows, &self.menu_nav, pos)
+            return menu_hit(&self.menu_rows, &self.menu_nav, pos)
                 .map(|(depth, row)| UiControl::MenuRow { depth, row });
         }
         self.panel
@@ -610,7 +607,7 @@ pub fn panel_control_at(panel: &Panel, pos: (i32, i32)) -> Option<UiControl> {
 /// A clickable UI control, used for hit-testing and hover highlights.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiControl {
-    /// A row of the tree menu: which open level, and which row of it.
+    /// A row of the menu: which open level, and which row of it.
     MenuRow {
         depth: usize,
         row: usize,
@@ -635,8 +632,6 @@ pub enum UiControl {
     /// Run to the start of the next scanline (end of the current line),
     /// stopping at exact beam granularity via a one-shot beam trap.
     DebugRunLine,
-    /// Scroll a too-long menu one item toward the start of the list.
-    /// Scroll a too-long menu one item toward the end of the list.
     /// Input Mapping: show keyboard mapping N (0 = controller 1).
     RemapSet(usize),
     /// Input Mapping: arm control N (an index into `keymap::CONTROLS`) for
@@ -5856,7 +5851,7 @@ pub fn draw(
         draw_panel_layer(frame, texture_scale, panel, hover, data);
     }
     if ui.menu_open {
-        draw_tree_menu(frame, &ui.menu_rows, &ui.menu_nav, texture_scale);
+        draw_menu(frame, &ui.menu_rows, &ui.menu_nav, texture_scale);
     }
 }
 
@@ -5900,7 +5895,7 @@ fn draw_check(frame: &mut [u8], x: usize, y: usize, color: u32, px: usize, scale
 
 /// Draw the menu: a veil over everything behind, then one column per open
 /// level from the hamburger button upward.
-fn draw_tree_menu(frame: &mut [u8], rows: &[menu::MenuRow], nav: &menu::MenuNav, scale: usize) {
+fn draw_menu(frame: &mut [u8], rows: &[menu::MenuRow], nav: &menu::MenuNav, scale: usize) {
     // The veil goes over the whole presentation, panels included: the menu
     // takes precedence over anything it is opened on top of. It is painted
     // into the presentation texture, so it never reaches a recording.
@@ -5919,7 +5914,7 @@ fn draw_tree_menu(frame: &mut [u8], rows: &[menu::MenuRow], nav: &menu::MenuNav,
 
     let px = super::menu_scale().factor();
     let levels = nav.levels(rows);
-    let columns = tree_menu_columns(&levels, nav);
+    let columns = menu_columns(&levels, nav);
     let deepest = columns.len().saturating_sub(1);
     let inset = menu::MENU_TEXT_INSET * px;
     let glyph_w = font::GLYPH_W * px;
@@ -6013,10 +6008,7 @@ fn draw_tree_menu(frame: &mut [u8], rows: &[menu::MenuRow], nav: &menu::MenuNav,
 
 /// Where each open level sits. Drawing and hit-testing both come through
 /// here, so the menu cannot be clicked anywhere but where it is drawn.
-fn tree_menu_columns(
-    levels: &[&[menu::MenuRow]],
-    nav: &menu::MenuNav,
-) -> Vec<menu::layout::Column> {
+fn menu_columns(levels: &[&[menu::MenuRow]], nav: &menu::MenuNav) -> Vec<menu::layout::Column> {
     let opened: Vec<Option<usize>> = (0..levels.len()).map(|d| nav.open_at(d)).collect();
     menu::layout::columns(
         levels,
@@ -6028,13 +6020,13 @@ fn tree_menu_columns(
 }
 
 /// Which level and row the pointer is over, if any.
-pub fn tree_menu_hit(
+pub fn menu_hit(
     rows: &[menu::MenuRow],
     nav: &menu::MenuNav,
     pos: (usize, usize),
 ) -> Option<(usize, usize)> {
     let levels = nav.levels(rows);
-    let columns = tree_menu_columns(&levels, nav);
+    let columns = menu_columns(&levels, nav);
     // Innermost first: a child overlapping its parent takes the pointer.
     for (depth, column) in columns.iter().enumerate().rev() {
         if let Some(row) = column.row_at(pos.0, pos.1) {
@@ -8239,7 +8231,7 @@ mod tests {
         crate::video::set_menu_scale(crate::config::MenuScale::Large);
         draw(&mut frame, scale, &ui, None, None);
         let levels = ui.menu_nav.levels(&ui.menu_rows);
-        for column in tree_menu_columns(&levels, &ui.menu_nav) {
+        for column in menu_columns(&levels, &ui.menu_nav) {
             assert!(
                 column.x + column.w <= texture_width(1) && column.y + column.h <= present_height(),
                 "2x menu column {column:?} leaves the display"

@@ -534,8 +534,8 @@ fn video_rows(s: &MenuState) -> Vec<MenuRow> {
     .map(|(label, a)| MenuRow::choice(label, MenuAction::SetPixelAspect(a), s.pixel_aspect == a))
     .collect();
 
-    // Custom is listed whether or not a shader file is configured: greyed,
-    // it says the feature exists, where a cycle that skipped it said nothing.
+    // Custom is listed whether or not a shader file is configured. Greyed,
+    // it says the feature is there and wants a file; absent, it says nothing.
     let shaders = ShaderKind::MENU_ORDER
         .iter()
         .map(|k| {

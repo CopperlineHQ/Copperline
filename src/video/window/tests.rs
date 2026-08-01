@@ -1098,7 +1098,7 @@ fn an_explicit_toggle_clears_a_pending_ui_suspension() {
 }
 
 #[test]
-fn cycle_port_device_hot_plugs_and_releases_held_lines() {
+fn swapping_a_port_device_releases_the_lines_it_was_holding() {
     use crate::bus::PortDevice;
     let mut app = test_app();
     app.emu

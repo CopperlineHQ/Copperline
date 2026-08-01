@@ -64,6 +64,7 @@ range checks as the equivalent TOML fields:
 | `--autofire HZ` | `[input] autofire_hz` | `0` (off, the default) to `30` |
 | `--full-screen` / `--windowed` | `[display] full_screen` | open fullscreen or windowed at start (default windowed) |
 | `--show-status-bar` / `--hide-status-bar` | `[display] status_bar` | status bar at start (default shown) |
+| `--menu-scale SIZE` | `[display] menu_scale` | size of the pop-up menu: `1x` (default) or `2x` |
 
 For example, to boot a stock A1200 profile but with 8 MB of fast RAM and a
 faster CPU, with no config file at all:
@@ -484,6 +485,7 @@ phosphor = 0.0        # CRT persistence fraction, 0.0 (off) to 0.95
 shader = "none"       # "none" (default), "scanlines", "mask", "crt", or a .wgsl file
 shader_strength = 1.0 # how strongly the shader is mixed in, 0.0-1.0
 tint = "none"         # "none" (default), "bw", "green", "amber", or "sepia"
+menu_scale = "1x"     # size of the pop-up menu: "1x" (default) or "2x"
 full_screen = false   # open fullscreen at start (default false)
 status_bar = true     # show the status bar at start (default true)
 ```
@@ -715,10 +717,10 @@ Points worth knowing:
   `COPPERLINE_SHADER_STRENGTH` are only useful if you honour it.
 
 The file is read and checked when the window is created, when the launcher
-starts a machine, and every time the menu's *CRT Shader* item cycles onto
-**custom** -- which re-reads it from disk. That is the live-reload story:
-leave the emulator running, edit the shader, then cycle the menu item away
-from custom and back to see the new version.
+starts a machine, and every time *Video Settings > CRT Shader > Custom* is
+chosen -- which re-reads it from disk. That is the live-reload story: leave
+the emulator running, edit the shader, then pick **Custom** again to see the
+new version.
 
 Checking is a parse, a full validation, and a look for the two entry points,
 all before any GPU pipeline is built, so a mistake is reported as WGSL with
@@ -728,6 +730,12 @@ Whatever goes wrong -- a missing file, a syntax error, a missing `fs_main` --
 the full diagnostic goes to the log, a one-line summary appears in the
 window's on-screen message, and the shader falls back to off. A bad custom
 shader never fails the config, and never stops the machine from running.
+
+`menu_scale` draws the pop-up menu at `"1x"` (the default) or `"2x"` -- the
+whole menu, rows and text together. It is a start-up preference:
+*Video Settings > Menu Size* changes it live without altering the saved
+value, `--menu-scale` sets it on the command line, and the launcher's A/V &
+Emu page (Video category) has a *Menu size* picker for the same.
 
 `full_screen` opens the window fullscreen at start (borderless), and
 `status_bar` chooses whether the status bar starts visible. Both are start-up
@@ -789,7 +797,8 @@ LED. `"auto"` (the default) lets the guest engage or bypass it as the
 software asks, matching real hardware; `"on"` and `"off"` force it either
 way as a listener override. Unlike the host-output settings above it is
 part of the emulated audio path, so it also affects WAV capture. Also on
-`--audio-filter`, the runtime **Audio Filter** menu item, and Cmd/Alt+A.
+`--audio-filter`, *Audio Settings > Audio Filter* in the menu, and
+Cmd/Alt+A.
 The status-bar PWR LED is lit whenever the machine is powered and follows
 the guest's /LED line itself -- full brightness while engaged, dimmed like
 an A500 rev 6+ board while released -- so this override changes what you

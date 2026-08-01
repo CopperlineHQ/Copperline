@@ -11,6 +11,7 @@ The app shortcut modifier is `Cmd` on macOS and `Alt` on Linux/Windows.
 | macOS | Linux/Windows | Action |
 |---|---|---|
 | `Cmd+Q` | `Alt+Q` | Quit |
+| `Cmd+E` | `Alt+E` | Open / close the menu (also the status bar's hamburger button); releases a captured mouse |
 | `Cmd+S` | `Alt+S` | Save a screenshot (`copperline-screenshot-<YYYYMMDDHHmmSS>.png` in the working directory; the on-screen confirmation overlay is not part of the saved image) |
 | `Cmd+R` | `Alt+R` | Start / stop a video-with-audio recording (below) |
 | `Cmd+Shift+R` | `Alt+Shift+R` | Start / stop an input recording (below) |
@@ -24,15 +25,15 @@ The app shortcut modifier is `Cmd` on macOS and `Alt` on Linux/Windows.
 | `Cmd+K` | `Alt+K` | Open the [debugger console](../debugger/console) |
 | `Cmd+J` | `Alt+J` | Toggle joystick input mode: gamepad / keyboard (also the status-bar icon) |
 | `Cmd+M` | `Alt+M` | Toggle the 1084-style monitor bezel around the picture (`[display] bezel` sets the start-up value) |
-| `Cmd+Shift+A` | `Alt+Shift+A` | Cycle the audio output: Default, each host device, then Disabled (also the menu's Audio Out item) |
-| `Cmd+A` | `Alt+A` | Cycle Paula's audio filter: auto, on, off (also the menu's Audio Filter item) |
-| `Cmd+Shift++` / `Cmd+Shift+-` | `Alt+Shift++` / `Alt+Shift+-` | Raise / lower the parallel-port sampler input gain (only when a sampler is attached; also the menu's Sampler Gain item) |
+| `Cmd+Shift+A` | `Alt+Shift+A` | Cycle the audio output: Default, each host device, then Disabled (also *Audio Settings > Audio Output*) |
+| `Cmd+A` | `Alt+A` | Cycle Paula's audio filter: auto, on, off (also *Audio Settings > Audio Filter*) |
+| `Cmd+Shift++` / `Cmd+Shift+-` | `Alt+Shift++` / `Alt+Shift+-` | Raise / lower the parallel-port sampler input gain (only when a sampler is attached; also *Parallel Port > Sampler Gain*) |
 | `Cmd+Shift+>` / `Cmd+Shift+<` | `Alt+Shift+>` / `Alt+Shift+<` | Raise / lower the host mouse sensitivity (also the launcher's Input tab) |
 | `Cmd+F` | `Alt+F` | Toggle fullscreen on / off |
 | `Cmd+Shift+F` | `Alt+Shift+F` | Show / hide the status bar |
 | `Cmd+W` | `Alt+W` | Toggle Warp Speed (turbo) on / off |
 | `Cmd+Shift+W` | `Alt+Shift+W` | Cycle the Warp Speed limit: 2x, 4x, 8x, 16x, Max |
-| `Cmd+Z` | `Alt+Z` | Rewind the machine one step (needs `[emulation] rewind` or the Rewind menu item) |
+| `Cmd+Z` | `Alt+Z` | Rewind the machine one step (needs `[emulation] rewind` or *Emulation Settings > Rewind*) |
 | `Esc` | `Esc` | Close an open menu, tool window, or overlay panel; otherwise passed through to the Amiga |
 | `Ctrl+Amiga+Amiga` | `Ctrl+Amiga+Amiga` | Keyboard reset (warm reboot) |
 
@@ -54,8 +55,8 @@ reboot lands a fraction of a second after the chord, as on real hardware.
 ## Status bar
 
 The status bar (44 pixels below the display) holds, left to right (it can
-be hidden entirely with `Cmd+Shift+F` / `Alt+Shift+F` or the **Status Bar**
-menu item):
+be hidden entirely with `Cmd+Shift+F` / `Alt+Shift+F` or *Video Settings >
+Status Bar*):
 
 - **LED block.** PWR and FDD always; a green HDD activity LED on machines
   with a hard-disk controller (Gayle or A4000 IDE, or any SCSI adapter) or a
@@ -118,25 +119,49 @@ position. For the same reason drops are unavailable under native Wayland
 
 ## Menu, tool windows, and overlay panels
 
-```{figure} ../images/ui-preview-menu.png
-:alt: The pop-up menu
+```{figure} ../images/ui-preview-menu-open.png
+:alt: The pop-up menu with a category open
 :width: 75%
 
-The pop-up menu opened from the status bar.
+The menu, with a category open beside it.
 ```
 
-The menu opens debugger-style tool windows and smaller overlay panels. It
-grows upward from the status bar, and adapts when the list is long (the MIDI
-and sampler items only appear in some sessions): the rows tighten first, and
-past that the list scrolls, showing `^ more ^` / `v more v` rows at the ends.
-Scroll with the mouse wheel over the menu or by clicking those rows; neither
-dismisses the menu, and it always reopens at the top.
+The hamburger button at the right of the status bar opens the menu, as does
+`Cmd+E` / `Alt+E`. It grows upward from the status bar and dims the picture
+behind it, so what it covers stays readable without competing for attention.
+The dimming is a window effect: it never appears in a screenshot, a frame
+dump, or a recording.
+
+The top level holds the tools, then a category per area of the machine, then
+the ROM, the shortcut reference and **About...** last. A category is marked
+`>` and opens a list of its own beside it; a setting with more than two
+values opens a further list of those values with the one in force ticked, and
+a setting that is simply on or off is ticked in place. Categories with
+nothing to offer -- the serial and parallel ports on a machine with nothing
+on them -- are not shown at all.
+
+Point at a category and it opens; point at one of its rows and that row is
+where the keyboard is. The cursor keys walk the same path -- up and down
+within a list, right into a category, left back out -- and Return picks the
+row under the cursor. `Esc` steps back one level, and closes the menu from
+the top.
+
+Picking a row that opens something else -- a window, a panel, a file dialog
+-- closes the menu behind it. Changing a setting leaves the menu up with the
+new value marked, so a run of changes costs one open rather than one each.
+Opening the menu also releases a captured mouse.
+
+**Menu Size** under *Video Settings* draws the whole menu at 1x or 2x. The
+start-up size is `[display] menu_scale`, `--menu-scale`, or *Menu size* on
+the launcher's A/V & Emu page (Video category).
 
 Tool windows are separate native windows so the emulated display remains visible;
 the debugger and frame analyzer can be open at the same time. Overlay panels
 are drawn over the display. While either kind is open, key presses and display
 clicks stay in the UI instead of reaching the Amiga; `Esc` closes the focused
 tool window or overlay.
+
+### Tools
 
 - **Machine Configuration...**: opens the configuration screen
   ([below](#machine-configuration-screen)) to reconfigure the machine and
@@ -146,115 +171,137 @@ tool window or overlay.
   across the captured frame, including overscan and blanking, and a memory
   heat map of what last touched each part of the address space; see
   [](../debugger/window.md#frame-analyzer-pane).
-- **Debugger...** (also `Cmd+B` on macOS or `Alt+B` on Linux/Windows):
-  pauses the machine and opens the tabbed debugger in a tool window; see
-  [](../debugger/window).
+- **Debugger...** (also `Cmd+B` / `Alt+B`): pauses the machine and opens the
+  tabbed debugger in a tool window; see [](../debugger/window).
 - **Console...** (also `Cmd+K` / `Alt+K`): a GDB-flavoured debugger
   command line in its own tool window; see [](../debugger/console).
-- **Audio Out** (also `Cmd+Shift+A` / `Alt+Shift+A`): cycles the audio
-  output through the system default, each host output device, and
-  **Disabled** (sound off entirely, equivalent to `--noaudio`). The
-  device switches live without a restart.
-- **Audio Filter** (also `Cmd+A` / `Alt+A`): cycles Paula's analogue
-  low-pass filter through **auto** (guest-driven, the default), **on**, and
-  **off**. `on`/`off` force it regardless of what the software asks; `auto`
-  restores hardware behaviour. The PWR LED keeps following the guest's
-  /LED line whatever is forced here.
-- **Calibrate Gamepad...**: the guided calibration flow, described below.
-- **Joystick Input** (also `Cmd+J` / `Alt+J`, or the status-bar icon):
-  toggles between gamepad-only and keyboard joystick emulation.
-- **Port 1 Device / Port 2 Device**: hot-plug the controller in a game
-  port, cycling mouse, joystick, CD32 pad, analogue, and empty; see
-  [](#controller-ports).
-- **Autofire**: cycles the autofire rate (off, 3, 5, 8, 12, 16 Hz), which
-  pulses a *held* fire button on live gamepad and keyboard input. Scripted
-  input is never gated; see the `[input]` section of
-  [Configuration](configuration.md).
-- **Input Mapping...**: edits which host keys drive the controller controls,
-  for both keyboard mappings; see [](#input-mapping).
-- **MIDI In / MIDI Out** (shown when the serial port is in MIDI mode):
-  cycle Paula's serial bridge through the host's MIDI sources and
-  destinations; see the `[serial]` section of
-  [Configuration](configuration.md).
-- **Sampler In / Sampler Gain** (shown when a parallel-port sampler is
-  attached): cycle the sampler's host capture device, and step its input
-  gain (also `Cmd/Alt+Shift +/-`). Both change live. See the `[parallel]`
-  section of [Configuration](configuration.md).
-- **Pixel Aspect**: flips the presentation between the 4:3 CRT pixel
-  aspect (the default; PAL lo-res pixels slightly wider than tall, as a
-  real TV shows them) and square pixels (a 320x256 screen is an exact
-  640x512, handy for pixel-exact comparison with square-pixel emulators).
-  The window and its backing texture resize with the mode. The start-up
-  mode comes from `[display] pixel_aspect`
+
+### Audio Settings
+
+- **Audio Output** (also `Cmd+Shift+A` / `Alt+Shift+A`): the system default,
+  any host output device, or **Disabled** (sound off entirely, equivalent to
+  `--noaudio`). The device switches live without a restart.
+- **Audio Filter** (also `Cmd+A` / `Alt+A`): Paula's analogue low-pass
+  filter -- **Auto** (guest-driven, the default), **Enabled**, or
+  **Disabled**. The forced settings apply regardless of what the software
+  asks; auto restores hardware behaviour. The PWR LED keeps following the
+  guest's /LED line whatever is forced here.
+
+### Video Settings
+
+- **Menu Size**: 1x or 2x, described above.
+- **Pixel Aspect**: the 4:3 CRT pixel aspect (the default; PAL lo-res pixels
+  slightly wider than tall, as a real TV shows them) or square pixels (a
+  320x256 screen is an exact 640x512, handy for pixel-exact comparison with
+  square-pixel emulators). The window and its backing texture resize with the
+  mode. The start-up mode comes from `[display] pixel_aspect`
   (see [Configuration](configuration.md)).
-- **CRT Shader**: cycles the GPU tube-emulation pass over the picture --
-  **off**, **scanlines** (the line structure of a 15 kHz set), **mask** (an
-  RGB phosphor shadow mask), **crt** (both, plus a bowed tube face and a
-  corner vignette), and **custom** when the config named a shader of your
-  own, which is re-read from disk each time it comes round. The change is
+- **CRT Shader**: the GPU tube-emulation pass over the picture --
+  **Disabled**, **Scanlines** (the line structure of a 15 kHz set), **Mask**
+  (an RGB phosphor shadow mask), **CRT (1084)** (both, plus a bowed tube face
+  and a corner vignette), and **Custom** when the config named a shader of
+  your own, which is re-read from disk each time it is chosen. The change is
   session-only: the start-up preset, the strength knob, and how to write a
   custom shader are `[display] shader` and `shader_strength` (see
   [Configuration](configuration.md)). The pass is a window effect only --
   screenshots, frame dumps and recordings are never shader-processed -- and
-  it steps aside for the frames it cannot sensibly draw: while this menu or
+  it steps aside for the frames it cannot sensibly draw: while the menu or
   any panel is open, under RTG, and in programmable multisync scan modes.
-- **Screen Tint**: cycles the monochrome-monitor tint over the picture --
-  **off** (full colour), **bw**, **green** and **amber** (the two classic
-  monochrome phosphors), and **sepia** -- the same looks as the web
-  frontend's *Screen* selector. Session-only, like the shader; the
-  start-up tint is `[display] tint` (see
-  [Configuration](configuration.md)). A window effect only: captures stay
-  untinted, this menu and the status bar keep their colours, and RTG
-  scanout is never tinted.
-- **Floppy Speed**: cycles the emulated drive speed through 100% (real
-  speed), 200%, 400%, 800%, and turbo (disk DMA transfers complete almost
-  instantly). Changes apply to the live machine immediately. The start-up
-  value comes from `[floppy] speed`; see
-  [Configuration](configuration.md) for what each level preserves and the
-  compatibility trade-off.
+- **Screen Tint**: the monochrome-monitor tint over the picture --
+  **Colour** (full colour), **Black & white**, **Green** and **Amber** (the
+  two classic monochrome phosphors), and **Sepia** -- the same looks as the
+  web frontend's *Screen* selector. Session-only, like the shader; the
+  start-up tint is `[display] tint` (see [Configuration](configuration.md)).
+  A window effect only: captures stay untinted, the menu and the status bar
+  keep their colours, and RTG scanout is never tinted.
 - **Fullscreen** (also `Cmd+F` / `Alt+F`): borderless fullscreen on the
-  window's current monitor. The picture keeps its aspect and letterboxes
-  as needed, exactly as when resizing the window; the same shortcut (or
-  menu item) restores the window.
+  window's current monitor. The picture keeps its aspect and letterboxes as
+  needed, exactly as when resizing the window.
 - **Status Bar** (also `Cmd+Shift+F` / `Alt+Shift+F`): show or hide the
-  status bar. Handy alongside fullscreen for a clean, chrome-free picture;
-  the same shortcut or menu item brings it back.
-- **Warp Speed** (also `Cmd+W` / `Alt+W`): runs the emulator unpaced for
-  fast-forward. Toggling back re-anchors real-time pacing cleanly.
-- **Warp Limit** (also `Cmd+Shift+W` / `Alt+Shift+W`): cycles how fast warp
-  runs. Because the window presents with vsync, emulating one frame per
-  presented frame would cap warp at the host monitor's refresh rate (about
-  1.2x for 50 Hz PAL on a 60 Hz display). The limit sets an output frame
-  skip -- 2x, 4x, 8x, 16x, or **Max** -- so warp retires that many emulated
-  frames per presented frame, making the effective speed roughly the limit
-  times the refresh rate (host CPU permitting). `Max` runs flat out and
-  still presents at vsync. The default is set by `[emulation] warp_speed`
-  (see [Configuration](configuration.md)).
-- **Rewind** (the hotkey is `Cmd+Z` / `Alt+Z`): toggles recording of rewind
-  history. While it is on, the emulator keeps a ring of whole-machine
-  snapshots and the hotkey steps the machine back through them -- the whole
-  machine, not just the picture: CPU, chips, RAM and all. One press goes back
-  one capture interval (half a second of emulated time by default). Turning
-  the item off releases the snapshots, which is where the memory goes; the
-  budget and interval are `[emulation] rewind_budget_mb` and
-  `rewind_interval_frames`, and `rewind = true` starts recording at launch
-  (see [Configuration](configuration.md)). It shares its substrate with the
+  status bar. Handy alongside fullscreen for a clean, chrome-free picture.
+
+### Input Settings
+
+- **Port 1 Device / Port 2 Device**: hot-plug the controller in a game
+  port -- Mouse, Joystick, CD32 pad, Analogue, or None; see
+  [](#controller-ports).
+- **Joystick Input** (also `Cmd+J` / `Alt+J`, or the status-bar icon):
+  Gamepad-only or Keyboard joystick emulation.
+- **Autofire**: the autofire rate (off, 3, 5, 8, 12, 16 Hz), which pulses a
+  *held* fire button on live gamepad and keyboard input. Scripted input is
+  never gated; see the `[input]` section of
+  [Configuration](configuration.md).
+- **Calibrate Gamepad...**: the guided calibration flow, described below.
+- **Input Mapping...**: edits which host keys drive the controller controls,
+  for both keyboard mappings; see [](#input-mapping).
+
+### Serial Port and Parallel Port
+
+Shown only when something is on the port.
+
+- **MIDI In / MIDI Out** (serial port in MIDI mode): Paula's serial bridge
+  onto the host's MIDI sources and destinations; see the `[serial]` section
+  of [Configuration](configuration.md).
+- **Sampler Input / Sampler Gain** (parallel-port sampler attached): the
+  sampler's host capture device, and its input gain, which the *Increase* and
+  *Decrease* rows step (also `Cmd/Alt+Shift +/-`). Both change live. See the
+  `[parallel]` section of [Configuration](configuration.md).
+
+### Emulation Settings
+
+- **Floppy Speed**: the emulated drive speed -- 100% (real speed), 200%,
+  400%, 800%, or turbo (disk DMA transfers complete almost instantly).
+  Changes apply to the live machine immediately. The start-up value comes
+  from `[floppy] speed`; see [Configuration](configuration.md) for what each
+  level preserves and the compatibility trade-off.
+- **Rewind** (the hotkey is `Cmd+Z` / `Alt+Z`): records rewind history. While
+  it is on, the emulator keeps a ring of whole-machine snapshots and the
+  hotkey steps the machine back through them -- the whole machine, not just
+  the picture: CPU, chips, RAM and all. One press goes back one capture
+  interval (half a second of emulated time by default). Turning it off
+  releases the snapshots, which is where the memory goes; the budget and
+  interval are `[emulation] rewind_budget_mb` and `rewind_interval_frames`,
+  and `rewind = true` starts recording at launch (see
+  [Configuration](configuration.md)). It shares its substrate with the
   debugger's reverse controls, so the same determinism caveats apply -- see
   [](../debugger/reverse).
+
+### Warp Settings
+
+- **Warp Speed** (also `Cmd+W` / `Alt+W`): runs the emulator unpaced for
+  fast-forward. Toggling back re-anchors real-time pacing cleanly.
+- **Warp Limit** (also `Cmd+Shift+W` / `Alt+Shift+W`): how fast warp runs.
+  Because the window presents with vsync, emulating one frame per presented
+  frame would cap warp at the host monitor's refresh rate (about 1.2x for
+  50 Hz PAL on a 60 Hz display). The limit sets an output frame skip -- 2x,
+  4x, 8x, 16x, or **Max** -- so warp retires that many emulated frames per
+  presented frame, making the effective speed roughly the limit times the
+  refresh rate (host CPU permitting). `Max` runs flat out and still presents
+  at vsync. The default is set by `[emulation] warp_speed` (see
+  [Configuration](configuration.md)).
+
+### Recording
+
 - **Record Video** (also `Cmd+R` / `Alt+R`): starts a video-with-audio
-  recording; the same item (or shortcut again) stops it. See below.
+  recording; the same row (or shortcut again) stops it. See below.
 - **Record Input** (also `Cmd+Shift+R` / `Alt+Shift+R`): records every
   input event that reaches the emulated machine; stopping writes a script
   file that `--script` replays deterministically. See below.
-- **Save State** (also `Cmd+Shift+S` / `Alt+Shift+S`) and **Load State...**
-  (also `Cmd+Shift+L` / `Alt+Shift+L`): snapshot the whole emulated machine
-  to a file, or restore one and continue from exactly that point. See below.
-- **Quick Save** and **Quick Load** write and read one of ten numbered
-  slots, with no dialog and no file to name. **Save Slot** picks which slot
-  those two items use; the hotkeys reach any slot directly --
-  `Cmd/Alt+<digit>` saves to it and `Cmd/Alt+Shift+<digit>` loads it, with
-  `0` as the tenth. Addressing a slot from the keyboard also makes it the
-  current one. See below.
+
+### Save State
+
+- **Quick Save** and **Quick Load** each list all ten numbered slots, naming
+  when the slot was written or showing it as empty, so an overwrite is
+  visible before it is chosen. No dialog, and no file to name. The hotkeys
+  reach the same slots -- `Cmd/Alt+<digit>` saves and
+  `Cmd/Alt+Shift+<digit>` loads, with `0` as the tenth. See below.
+- **Save State...** (also `Cmd+Shift+S` / `Alt+Shift+S`) and
+  **Load State...** (also `Cmd+Shift+L` / `Alt+Shift+L`): snapshot the whole
+  emulated machine to a file of your choosing, or restore one and continue
+  from exactly that point. See below.
+
+### And last
+
 - **Load Kickstart ROM...**: fit a different boot ROM. Pick a 512 KiB
   Kickstart, then optionally a second file for the extended ROM (512 KiB at
   $E00000 or 256 KiB at $F00000; Cancel to skip and remove any fitted
@@ -487,9 +534,9 @@ not silently mixed in. Two caveats:
 Naming a file is the wrong interaction for the "before this jump" save you
 take twenty times an hour, so there are ten numbered slots as well.
 `Cmd/Alt+<digit>` saves to that slot and `Cmd/Alt+Shift+<digit>` loads it,
-with `0` as the tenth; the **Quick Save** and **Quick Load** menu items do
-the same for whichever slot **Save Slot** currently names (addressing a slot
-from the keyboard also makes it the current one).
+with `0` as the tenth. The menu's **Quick Save** and **Quick Load** lists
+reach the same ten, each row naming when that slot was written or showing it
+as empty.
 
 A quick save overwrites its slot without asking -- that is the point of it --
 and loading a slot that has never been written reports "Slot N is empty"

@@ -886,8 +886,6 @@ pub struct App {
     rewind_budget_mb: usize,
     rewind_interval_frames: u64,
     rewind_armed: bool,
-    /// Numbered save-state slot the Quick Save / Quick Load menu items act
-    /// on, 1-based. The `Cmd/Alt+<digit>` hotkeys address any slot directly
     /// Mapped host keys currently held for keyboard joystick emulation.
     keyboard_joy_held: [keymap::HeldKeys; keymap::MAPPING_COUNT],
     /// Host-key to controller-control bindings, loaded from the per-user
@@ -4657,8 +4655,7 @@ impl App {
             return false;
         };
         let pos = (pos.0.max(0) as usize, pos.1.max(0) as usize);
-        let Some((depth, row)) = ui::tree_menu_hit(&self.ui.menu_rows, &self.ui.menu_nav, pos)
-        else {
+        let Some((depth, row)) = ui::menu_hit(&self.ui.menu_rows, &self.ui.menu_nav, pos) else {
             return false;
         };
         // The pointer is resting on the row this level is already open to.
