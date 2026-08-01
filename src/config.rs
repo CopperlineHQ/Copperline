@@ -876,12 +876,6 @@ pub fn autofire_label(hz: u8) -> String {
     }
 }
 
-/// The next rate in the menu's cycle.
-pub fn next_autofire_rate(hz: u8) -> u8 {
-    let idx = AUTOFIRE_RATES.iter().position(|&r| r == hz).unwrap_or(0);
-    AUTOFIRE_RATES[(idx + 1) % AUTOFIRE_RATES.len()]
-}
-
 /// Whether a held fire button should be *asserted* right now, given the
 /// autofire rate and how much emulated time has passed.
 ///
@@ -5489,18 +5483,15 @@ mod tests {
     }
 
     #[test]
-    fn autofire_rate_cycles_through_the_menu_list_and_wraps() {
-        let mut hz = 0;
-        let mut seen = vec![hz];
-        for _ in 0..AUTOFIRE_RATES.len() {
-            hz = next_autofire_rate(hz);
-            seen.push(hz);
-        }
-        assert_eq!(seen.first(), seen.last(), "the cycle returns to off");
+    fn autofire_rates_are_labelled_and_stay_within_the_usable_range() {
+        assert_eq!(AUTOFIRE_RATES[0], 0, "the list opens with off");
         assert_eq!(autofire_label(0), "off");
         assert_eq!(autofire_label(8), "8 Hz");
-        // An off-list value (hand-edited config) rejoins the cycle.
-        assert_eq!(next_autofire_rate(99), AUTOFIRE_RATES[1]);
+        // Above the cap the assert window is shorter than the frame the guest
+        // samples on, so no rate the menu offers may exceed it.
+        for hz in AUTOFIRE_RATES {
+            assert!(hz <= AUTOFIRE_MAX_HZ, "{hz} Hz is past the usable range");
+        }
     }
 
     #[test]

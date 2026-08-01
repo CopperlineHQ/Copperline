@@ -888,8 +888,6 @@ pub struct App {
     rewind_armed: bool,
     /// Numbered save-state slot the Quick Save / Quick Load menu items act
     /// on, 1-based. The `Cmd/Alt+<digit>` hotkeys address any slot directly
-    /// and set this as a side effect.
-    save_slot: usize,
     /// Mapped host keys currently held for keyboard joystick emulation.
     keyboard_joy_held: [keymap::HeldKeys; keymap::MAPPING_COUNT],
     /// Host-key to controller-control bindings, loaded from the per-user
@@ -1380,7 +1378,6 @@ impl App {
             rewind_budget_mb,
             rewind_interval_frames,
             rewind_armed,
-            save_slot: 1,
             keyboard_joy_held: [keymap::HeldKeys::default(); keymap::MAPPING_COUNT],
             keymap: keymap::KeyMap::load(),
             autofire_hz,
@@ -1680,22 +1677,6 @@ impl App {
         self.emu.bus_mut().input.set_port_device(port, device);
     }
 
-    /// The menu items' stepper: hot-plug the next device in the cycle.
-    fn cycle_port_device(&mut self, port: usize) {
-        const CYCLE: [PortDevice; 5] = [
-            PortDevice::Mouse,
-            PortDevice::Joystick,
-            PortDevice::Cd32Pad,
-            PortDevice::Analogue,
-            PortDevice::None,
-        ];
-        let current = self.emu.bus().input.device(port);
-        let idx = CYCLE.iter().position(|&d| d == current).unwrap_or(0);
-        let next = CYCLE[(idx + 1) % CYCLE.len()];
-        self.hot_plug_port_device(port, next);
-        self.show_osd(format!("Port {}: {}", port + 1, next.label()));
-    }
-
     fn cycle_joystick_input_mode(&mut self) {
         self.set_joystick_input_mode(self.joystick_input_mode.next());
     }
@@ -1713,28 +1694,6 @@ impl App {
     #[cfg(not(feature = "midi"))]
     fn midi_menu_labels(&mut self) -> (String, String) {
         (String::new(), String::new())
-    }
-
-    #[cfg(feature = "midi")]
-    fn cycle_midi_input(&mut self) {
-        let label = self.emu.bus_mut().midi_serial_mut().map(|sink| {
-            sink.cycle_input(true);
-            sink.input_label()
-        });
-        if let Some(label) = label {
-            self.show_osd(format!("MIDI input: {label}"));
-        }
-    }
-
-    #[cfg(feature = "midi")]
-    fn cycle_midi_output(&mut self) {
-        let label = self.emu.bus_mut().midi_serial_mut().map(|sink| {
-            sink.cycle_output(true);
-            sink.output_label()
-        });
-        if let Some(label) = label {
-            self.show_osd(format!("MIDI output: {label}"));
-        }
     }
 
     /// Step the live audio output through "Default", the host devices, then
@@ -1776,26 +1735,6 @@ impl App {
         };
         self.show_osd(format!("Audio filter: {label}"));
         self.request_redraw();
-    }
-
-    /// Step the live sampler input through "Default" then the host capture
-    /// devices, rebuilding the capture so the change takes effect at once.
-    /// Re-reads the device list so a just-connected device appears. A no-op when
-    /// no sampler is attached.
-    fn cycle_sampler_input(&mut self) {
-        if !self.sampler.enabled {
-            return;
-        }
-        let devices = crate::sampler::picker_input_devices();
-        self.sampler.input_device =
-            crate::sampler::next_input_device(self.sampler.input_device.as_deref(), &devices, true);
-        self.attach_session_sampler();
-        let label = self
-            .sampler
-            .input_device
-            .clone()
-            .unwrap_or_else(|| "Default".to_string());
-        self.show_osd(format!("Sampler input: {label}"));
     }
 
     /// Raise (`forward`) or lower the live sampler input gain by one
@@ -1844,28 +1783,6 @@ impl App {
             _ => format!("Joystick input: {}", mode.label()),
         };
         self.show_osd(osd);
-    }
-
-    /// Move an over-long menu's window into the item list by `delta` items.
-    /// A menu that fits has nothing to scroll and clamps to 0.
-    fn scroll_menu(&mut self, delta: isize) {
-        let items = ui::menu_items(self.serial_is_midi, self.sampler_stream.is_some()).len();
-        let next = self.ui.menu_scroll.saturating_add_signed(delta);
-        let clamped = ui::clamp_menu_scroll(next, items);
-        if clamped != self.ui.menu_scroll {
-            self.ui.menu_scroll = clamped;
-            self.request_redraw();
-        }
-    }
-
-    /// Cycle the autofire rate (off -> 3 -> 5 -> 8 -> 12 -> 16 Hz -> off).
-    /// Applies immediately to whichever host source is driving fire.
-    fn cycle_autofire(&mut self) {
-        self.autofire_hz = crate::config::next_autofire_rate(self.autofire_hz);
-        let label = crate::config::autofire_label(self.autofire_hz);
-        info!("autofire: {label}");
-        self.show_osd(format!("Autofire: {label}"));
-        self.request_redraw();
     }
 
     /// Open the Input Mapping panel on a working copy of the live map, so
@@ -3038,13 +2955,9 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                // An open menu claims the wheel: a too-long list scrolls with
-                // it, and over a menu that fits the wheel simply does nothing
-                // rather than reaching the volume slider underneath.
+                // An open menu claims the wheel and does nothing with it,
+                // rather than letting it reach the volume slider underneath.
                 if self.ui.menu_open {
-                    if let Some(steps) = volume_scroll_steps(delta) {
-                        self.scroll_menu(isize::from(-steps));
-                    }
                 } else if !self.mouse_captured
                     && self
                         .cursor_pos
@@ -3107,28 +3020,7 @@ impl ApplicationHandler for App {
                 };
                 let osd = self.active_osd_text();
                 let ui_hover = self.cursor_pos.and_then(|p| self.main_ui_control_at(p));
-                let warp = !self.emu.paced();
-                let warp_speed = self.warp_speed;
                 let recording = self.recorder.is_some();
-                let input_recording = self.input_recorder.is_some();
-                // Only the open runtime menu shows the device labels, and
-                // querying them allocates and touches the bus; skip that work on
-                // every other frame.
-                let (midi_in_label, midi_out_label) = if self.ui.menu_open {
-                    self.midi_menu_labels()
-                } else {
-                    (String::new(), String::new())
-                };
-                let sampler_active = self.sampler_stream.is_some();
-                let (sampler_input_label, sampler_gain_label) =
-                    if self.ui.menu_open && sampler_active {
-                        (
-                            self.sampler.input_device.clone().unwrap_or_default(),
-                            sampler_gain_osd(self.sampler.gain_db),
-                        )
-                    } else {
-                        (String::new(), String::new())
-                    };
                 let ui_data = self.build_panel_view_data();
                 if let Some(r) = self.render.as_mut() {
                     // RTG with a working GPU pipeline presents the native frame
@@ -3225,41 +3117,7 @@ impl ApplicationHandler for App {
                     if let Some(text) = &osd {
                         draw_osd(frame, text, r.texture_scale);
                     }
-                    ui::draw(
-                        frame,
-                        r.texture_scale,
-                        &self.ui,
-                        ui_hover,
-                        ui_data.as_ref(),
-                        self.serial_is_midi,
-                        sampler_active,
-                        ui::MenuLabels {
-                            warp,
-                            warp_speed,
-                            fullscreen: r.window.fullscreen().is_some(),
-                            status_bar_hidden: super::status_bar_hidden(),
-                            recording,
-                            input_recording,
-                            rewind: self.rewind_armed,
-                            save_slot: self.save_slot,
-                            autofire_hz: self.autofire_hz,
-                            joystick_input_mode: self.joystick_input_mode,
-                            port_devices: [
-                                self.emu.bus().input.device(0),
-                                self.emu.bus().input.device(1),
-                            ],
-                            pixel_aspect: super::pixel_aspect(),
-                            floppy_speed: self.emu.bus().floppy.speed_percent(),
-                            midi_in: &midi_in_label,
-                            midi_out: &midi_out_label,
-                            audio_output: self.audio_output.label(),
-                            audio_filter: self.emu.bus().paula.led_filter_mode(),
-                            sampler_input: &sampler_input_label,
-                            sampler_gain: &sampler_gain_label,
-                            shader: self.crt_shader_kind,
-                            tint: self.tint,
-                        },
-                    );
+                    ui::draw(frame, r.texture_scale, &self.ui, ui_hover, ui_data.as_ref());
                     // The drag hint sits on top of everything: the drop will
                     // land wherever the drag is released, panels or not. The
                     // launcher refuses drops, so no hint over it.
@@ -4179,8 +4037,7 @@ impl App {
         if self.ui.panel.is_none() && self.tool_panel_open() && !self.ui.menu_open {
             return None;
         }
-        self.ui
-            .control_at(pos, self.serial_is_midi, self.sampler_stream.is_some())
+        self.ui.control_at(pos)
     }
 
     fn main_ui_hover_changed(
@@ -4936,53 +4793,6 @@ impl App {
                 self.ui.menu_nav.open_path(path, Some(row));
                 self.activate_menu_row(event_loop);
             }
-            UiControl::MenuItem(item) => {
-                self.ui.menu_open = false;
-                match item {
-                    ui::MenuItem::FrameAnalyzer => self.open_frame_analyzer(),
-                    ui::MenuItem::About => self.ui.panel = Some(Panel::About),
-                    ui::MenuItem::Shortcuts => self.ui.panel = Some(Panel::Shortcuts),
-                    ui::MenuItem::Calibration => {
-                        self.ui.panel =
-                            Some(Panel::Calibration(crate::gamepad::CalibrationSession::new()));
-                    }
-                    ui::MenuItem::Debugger => self.open_debugger(),
-                    ui::MenuItem::Console => self.open_console(),
-                    ui::MenuItem::JoystickInput => self.cycle_joystick_input_mode(),
-                    ui::MenuItem::Port1Device => self.cycle_port_device(0),
-                    ui::MenuItem::Port2Device => self.cycle_port_device(1),
-                    ui::MenuItem::Autofire => self.cycle_autofire(),
-                    ui::MenuItem::InputMapping => self.open_input_mapping(),
-                    #[cfg(feature = "midi")]
-                    ui::MenuItem::MidiInput => self.cycle_midi_input(),
-                    #[cfg(feature = "midi")]
-                    ui::MenuItem::MidiOutput => self.cycle_midi_output(),
-                    ui::MenuItem::SamplerInput => self.cycle_sampler_input(),
-                    ui::MenuItem::SamplerGain => self.step_sampler_gain(true),
-                    ui::MenuItem::PixelAspect => self.toggle_pixel_aspect(),
-                    ui::MenuItem::CrtShader => self.cycle_crt_shader(),
-                    ui::MenuItem::ScreenTint => self.cycle_screen_tint(),
-                    ui::MenuItem::FloppySpeed => self.cycle_floppy_speed(),
-                    ui::MenuItem::AudioOutput => self.cycle_audio_output(),
-                    ui::MenuItem::AudioFilter => self.cycle_audio_filter(),
-                    ui::MenuItem::Fullscreen => self.toggle_fullscreen(),
-                    ui::MenuItem::StatusBar => self.toggle_status_bar(),
-                    ui::MenuItem::Warp => self.toggle_warp(),
-                    ui::MenuItem::WarpLimit => self.cycle_warp_speed(),
-                    ui::MenuItem::Rewind => self.toggle_rewind(),
-                    ui::MenuItem::Record => self.toggle_recording(),
-                    ui::MenuItem::RecordInput => self.toggle_input_recording(),
-                    ui::MenuItem::SaveState => self.save_state_interactive(),
-                    ui::MenuItem::LoadState => self.load_state_from_dialog(event_loop),
-                    ui::MenuItem::QuickSave => self.quick_save_state(self.save_slot),
-                    ui::MenuItem::QuickLoad => self.quick_load_state(self.save_slot, event_loop),
-                    ui::MenuItem::SaveSlot => self.cycle_save_slot(),
-                    ui::MenuItem::LoadRom => self.load_rom_from_dialog(),
-                    ui::MenuItem::MachineConfig => self.open_launcher(),
-                }
-            }
-            UiControl::MenuScrollUp => self.scroll_menu(-1),
-            UiControl::MenuScrollDown => self.scroll_menu(1),
             UiControl::RemapSet(set) => self.input_map_select_mapping(set),
             UiControl::RemapBind(index) => self.input_map_arm_capture(index),
             UiControl::RemapClear(index) => self.input_map_clear(index),
@@ -6066,7 +5876,6 @@ impl App {
         self.ui.menu_open = !self.ui.menu_open;
         // Each open starts at the top of the list; a position left over from
         // the last time would be a small mystery.
-        self.ui.menu_scroll = 0;
         self.ui.menu_nav.reset();
         if self.ui.menu_open {
             self.set_mouse_captured(false);
@@ -6671,20 +6480,6 @@ impl App {
         self.request_redraw();
     }
 
-    /// Cycle the emulated floppy drive speed (100% -> 200% -> 400% -> 800%
-    /// -> turbo). Applies to the live machine immediately.
-    fn cycle_floppy_speed(&mut self) {
-        const CYCLE: [u16; 5] = [100, 200, 400, 800, crate::floppy::SPEED_TURBO];
-        let current = self.emu.bus().floppy.speed_percent();
-        let idx = CYCLE.iter().position(|&s| s == current).unwrap_or(0);
-        let next = CYCLE[(idx + 1) % CYCLE.len()];
-        self.emu.bus_mut().floppy.set_speed_percent(next);
-        let label = crate::floppy::speed_label(next);
-        info!("floppy speed: {label}");
-        self.show_osd(format!("Floppy speed: {label}"));
-        self.request_redraw();
-    }
-
     /// Interactive shortcut / menu state save: write the whole
     /// emulated machine to an auto-named file in the working directory and
     /// flash the filename on screen. Runs between frames by construction
@@ -6705,12 +6500,10 @@ impl App {
         self.finish_host_io_pause();
     }
 
-    /// Save to numbered slot `slot` (1-based), which also becomes the slot
-    /// the Quick Save / Quick Load menu items act on. Overwrites silently:
-    /// a quick save is expected to be instant, and the previous contents of
-    /// the slot are what the user is replacing.
+    /// Save to numbered slot `slot` (1-based). Overwrites silently: a quick
+    /// save is expected to be instant, and the previous contents of the slot
+    /// are what the user is replacing.
     fn quick_save_state(&mut self, slot: usize) {
-        self.save_slot = slot;
         let Some(path) = crate::savestate::slot_path(slot) else {
             self.show_osd("No per-user directory for save slots");
             return;
@@ -6732,11 +6525,10 @@ impl App {
         self.finish_host_io_pause();
     }
 
-    /// Restore numbered slot `slot` (1-based), which also becomes the current
-    /// slot. An empty slot is reported rather than treated as an error: the
-    /// hotkeys cover all ten, and most of them are usually unused.
+    /// Restore numbered slot `slot` (1-based). An empty slot is reported
+    /// rather than treated as an error: the menu and the hotkeys cover all
+    /// ten, and most of them are usually unused.
     fn quick_load_state(&mut self, slot: usize, event_loop: Option<&ActiveEventLoop>) {
-        self.save_slot = slot;
         let Some(path) = crate::savestate::slot_path(slot) else {
             self.show_osd("No per-user directory for save slots");
             return;
@@ -6753,14 +6545,6 @@ impl App {
             }
         }
         self.finish_host_io_pause();
-    }
-
-    /// Step the slot the Quick Save / Quick Load menu items act on. The
-    /// hotkeys address all ten directly; this is the menu's way in.
-    fn cycle_save_slot(&mut self) {
-        self.save_slot = self.save_slot % crate::savestate::SLOT_COUNT + 1;
-        self.show_osd(format!("Save slot {}", self.save_slot));
-        self.request_redraw();
     }
 
     /// Pick a save-state file and restore it (shortcut / menu). On
@@ -9106,49 +8890,6 @@ impl App {
         logical_size_is_canvas(logical_w, logical_h, window_present_height())
     }
 
-    /// Menu "Pixel Aspect": flip between the 4:3 CRT presentation and
-    /// square pixels for the rest of the run (the config file default is
-    /// unchanged; set `[display] pixel_aspect` to make it stick).
-    fn toggle_pixel_aspect(&mut self) {
-        let next = match super::pixel_aspect() {
-            PixelAspect::Tv => PixelAspect::Square,
-            PixelAspect::Square => PixelAspect::Tv,
-        };
-        self.apply_pixel_aspect(next);
-    }
-
-    /// Menu "CRT Shader": step through the presets for the rest of the run
-    /// (the config file default is unchanged; set `[display] shader` to make
-    /// it stick). A user shader joins the cycle only when one was configured,
-    /// and is re-read from disk each time it is selected, so editing the file
-    /// and cycling away and back shows the new version.
-    fn cycle_crt_shader(&mut self) {
-        use crate::config::ShaderKind;
-        let mut next = match self.crt_shader_kind {
-            ShaderKind::None => ShaderKind::Scanlines,
-            ShaderKind::Scanlines => ShaderKind::Mask,
-            ShaderKind::Mask => ShaderKind::Crt,
-            ShaderKind::Crt if self.custom_shader_path.is_some() => ShaderKind::Custom,
-            ShaderKind::Crt | ShaderKind::Custom => ShaderKind::None,
-        };
-        let mut failure = None;
-        if next == ShaderKind::Custom {
-            if let Err(msg) = self.reload_custom_shader() {
-                failure = Some(msg);
-                next = ShaderKind::None;
-            }
-        }
-        self.crt_shader_kind = next;
-        info!("crt shader: {}", next.label());
-        // One overlay per action, carrying the failure: a second show_osd
-        // would replace this one before either is drawn.
-        self.show_osd(match failure {
-            Some(msg) => format!("CRT shader: {} (custom failed: {msg})", next.label()),
-            None => format!("CRT shader: {}", next.label()),
-        });
-        self.request_redraw();
-    }
-
     /// Cmd/Alt+M: toggle the monitor-bezel pass for the rest of the run
     /// (the config file default is unchanged; set `[display] bezel` to
     /// make it stick).
@@ -9157,24 +8898,6 @@ impl App {
         let label = if self.bezel { "on" } else { "off" };
         info!("monitor bezel: {label}");
         self.show_osd(format!("Monitor bezel: {label}"));
-        self.request_redraw();
-    }
-
-    /// Menu "Screen Tint": step through the tints for the rest of the run
-    /// (the config file default is unchanged; set `[display] tint` to make
-    /// it stick).
-    fn cycle_screen_tint(&mut self) {
-        use crate::config::Tint;
-        let next = match self.tint {
-            Tint::None => Tint::Bw,
-            Tint::Bw => Tint::Green,
-            Tint::Green => Tint::Amber,
-            Tint::Amber => Tint::Sepia,
-            Tint::Sepia => Tint::None,
-        };
-        self.set_tint(next);
-        info!("screen tint: {}", next.label());
-        self.show_osd(format!("Screen tint: {}", next.label()));
         self.request_redraw();
     }
 

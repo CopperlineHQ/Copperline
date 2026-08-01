@@ -12,10 +12,10 @@ use super::launcher::{self, EditTarget, LauncherField, LauncherState, LauncherTa
 use super::menu;
 use super::window::{
     draw_rect_bevel, fill_rect, fill_rect_blend, rgba, scale_rect, texture_height, texture_width,
-    JoystickInputMode, Rect, BUTTON_EDGE_DARK, BUTTON_EDGE_LIGHT, BUTTON_FACE, BUTTON_FACE_HOVER,
+    Rect, BUTTON_EDGE_DARK, BUTTON_EDGE_LIGHT, BUTTON_FACE, BUTTON_FACE_HOVER,
 };
 use super::{font, present_height, FB_WIDTH, HOST_SHORTCUT_MODIFIER_LABEL};
-use crate::config::{MachineModel, PixelAspect, WarpSpeed};
+use crate::config::MachineModel;
 use crate::debugger::{BreakCond, CondOp, CondOperand};
 use crate::heatmap;
 
@@ -23,13 +23,8 @@ use crate::heatmap;
 // Palette
 // ---------------------------------------------------------------------------
 
-const MENU_BG: u32 = rgba(238, 238, 232);
-const MENU_TEXT: u32 = rgba(12, 12, 14);
 const MENU_HILIGHT_BG: u32 = rgba(0, 85, 170);
 const MENU_HILIGHT_TEXT: u32 = rgba(255, 255, 255);
-/// A scroll row that has run out of list in its direction.
-const MENU_TEXT_DISABLED: u32 = rgba(150, 150, 146);
-const MENU_EDGE: u32 = rgba(12, 12, 14);
 const PANEL_BG: u32 = rgba(30, 32, 36);
 const PANEL_TITLE_BG: u32 = rgba(0, 85, 170);
 const PANEL_TITLE_TEXT: u32 = rgba(255, 255, 255);
@@ -62,393 +57,6 @@ const AUDIO_MUTE_FACE: u32 = rgba(96, 44, 44);
 /// Status-bar anchor for the menu button; the pop-up opens above it.
 pub const MENU_BUTTON_X: usize = FB_WIDTH - 220;
 pub const MENU_BUTTON_W: usize = 22;
-
-const MENU_ITEM_H: usize = 20;
-const MENU_PAD: usize = 3;
-/// Font pixel scale labels are drawn at, and the text inset from each side of
-/// the popup. The widest label is "Joystick Input  [keyboard]" (26 chars);
-/// sizing the popup to it keeps every item's text (and its trailing "...")
-/// inside the menu background instead of spilling past the right edge.
-const MENU_TEXT_PX: usize = 2;
-const MENU_TEXT_INSET: usize = 8;
-const MENU_MAX_LABEL_CHARS: usize = 26;
-const MENU_W: usize = 2 * MENU_TEXT_INSET + MENU_MAX_LABEL_CHARS * font::GLYPH_W * MENU_TEXT_PX;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MenuItem {
-    FrameAnalyzer,
-    About,
-    Shortcuts,
-    Calibration,
-    Debugger,
-    Console,
-    JoystickInput,
-    Port1Device,
-    Port2Device,
-    Autofire,
-    InputMapping,
-    #[cfg(feature = "midi")]
-    MidiInput,
-    #[cfg(feature = "midi")]
-    MidiOutput,
-    SamplerInput,
-    SamplerGain,
-    PixelAspect,
-    CrtShader,
-    ScreenTint,
-    FloppySpeed,
-    Fullscreen,
-    StatusBar,
-    AudioOutput,
-    AudioFilter,
-    Warp,
-    WarpLimit,
-    Rewind,
-    Record,
-    RecordInput,
-    SaveState,
-    LoadState,
-    QuickSave,
-    QuickLoad,
-    SaveSlot,
-    LoadRom,
-    MachineConfig,
-}
-
-/// The menu items, top to bottom. The MIDI device items appear only when the
-/// serial port is in MIDI mode, and the sampler items only when a parallel-port
-/// sampler is attached, so the list is built per open rather than fixed.
-pub fn menu_items(midi_active: bool, sampler_active: bool) -> Vec<MenuItem> {
-    let _ = midi_active;
-    // 12 leading + up to 2 MIDI + 2 sampler + pixel aspect + CRT shader +
-    // screen tint + floppy speed + 15 trailing items = 35, sized so
-    // appending never reallocates.
-    let mut items = Vec::with_capacity(35);
-    items.extend([
-        MenuItem::MachineConfig,
-        MenuItem::FrameAnalyzer,
-        MenuItem::Debugger,
-        MenuItem::Console,
-        MenuItem::AudioOutput,
-        MenuItem::AudioFilter,
-        MenuItem::Calibration,
-        MenuItem::JoystickInput,
-        MenuItem::Port1Device,
-        MenuItem::Port2Device,
-        MenuItem::Autofire,
-        MenuItem::InputMapping,
-    ]);
-    #[cfg(feature = "midi")]
-    if midi_active {
-        items.push(MenuItem::MidiInput);
-        items.push(MenuItem::MidiOutput);
-    }
-    if sampler_active {
-        items.push(MenuItem::SamplerInput);
-        items.push(MenuItem::SamplerGain);
-    }
-    items.push(MenuItem::PixelAspect);
-    items.push(MenuItem::CrtShader);
-    items.push(MenuItem::ScreenTint);
-    items.push(MenuItem::FloppySpeed);
-    items.extend([
-        MenuItem::Fullscreen,
-        MenuItem::StatusBar,
-        MenuItem::Warp,
-        MenuItem::WarpLimit,
-        MenuItem::Rewind,
-        MenuItem::Record,
-        MenuItem::RecordInput,
-        MenuItem::SaveState,
-        MenuItem::LoadState,
-        MenuItem::QuickSave,
-        MenuItem::QuickLoad,
-        MenuItem::SaveSlot,
-        MenuItem::LoadRom,
-        MenuItem::Shortcuts,
-        MenuItem::About,
-    ]);
-    items
-}
-
-/// Bundled state a menu label may show, so the label helper takes one argument.
-#[derive(Clone, Copy)]
-pub struct MenuLabels<'a> {
-    pub warp: bool,
-    pub warp_speed: WarpSpeed,
-    /// True while the host window is fullscreen (the menu item toggles it).
-    pub fullscreen: bool,
-    /// True while the status bar is hidden (the menu item toggles it).
-    pub status_bar_hidden: bool,
-    pub recording: bool,
-    pub input_recording: bool,
-    /// Whether rewind history is being recorded (the Rewind item toggles it).
-    pub rewind: bool,
-    /// Numbered save-state slot the Quick Save / Quick Load items act on.
-    pub save_slot: usize,
-    /// Autofire rate in Hz shown on the Autofire item; 0 is "off".
-    pub autofire_hz: u8,
-    pub joystick_input_mode: JoystickInputMode,
-    /// Devices currently plugged into the two game ports (hot-pluggable
-    /// through the Port 1/2 Device items).
-    pub port_devices: [crate::bus::PortDevice; 2],
-    pub pixel_aspect: PixelAspect,
-    /// Window shader pass in effect (the CRT Shader item cycles it).
-    pub shader: crate::config::ShaderKind,
-    /// Screen tint in effect (the Screen Tint item cycles it).
-    pub tint: crate::config::Tint,
-    /// Current `[floppy] speed` value (a percentage, or 0 for turbo).
-    pub floppy_speed: u16,
-    /// Current MIDI input/output device names (empty when not applicable).
-    #[cfg_attr(not(feature = "midi"), allow(dead_code))]
-    pub midi_in: &'a str,
-    #[cfg_attr(not(feature = "midi"), allow(dead_code))]
-    pub midi_out: &'a str,
-    /// Current audio output label: "Default", a device name, or "Disabled"
-    /// (empty is treated as "Default").
-    pub audio_output: &'a str,
-    /// Current Paula filter override (Auto/On/Off), shown on the Audio Filter
-    /// item.
-    pub audio_filter: crate::config::AudioFilterMode,
-    /// Current sampler input device name (empty is treated as "Default") and
-    /// gain label (e.g. "2x"); only shown when a sampler is attached.
-    pub sampler_input: &'a str,
-    pub sampler_gain: &'a str,
-}
-
-fn menu_item_label(item: MenuItem, s: MenuLabels) -> String {
-    match item {
-        MenuItem::FrameAnalyzer => "Frame Analyzer...".to_string(),
-        MenuItem::About => "About...".to_string(),
-        MenuItem::Shortcuts => "Keyboard Shortcuts...".to_string(),
-        MenuItem::Calibration => "Calibrate Gamepad...".to_string(),
-        MenuItem::Debugger => "Debugger...".to_string(),
-        MenuItem::Console => "Console...".to_string(),
-        MenuItem::JoystickInput => format!("Joystick Input  [{}]", s.joystick_input_mode.label()),
-        MenuItem::Port1Device => format!("Port 1 Device  [{}]", s.port_devices[0].label()),
-        MenuItem::Port2Device => format!("Port 2 Device  [{}]", s.port_devices[1].label()),
-        MenuItem::Autofire => format!(
-            "Autofire {:>13}",
-            format!("[{}]", crate::config::autofire_label(s.autofire_hz))
-        ),
-        MenuItem::InputMapping => "Input Mapping...".to_string(),
-        MenuItem::PixelAspect => {
-            let value = match s.pixel_aspect {
-                PixelAspect::Tv => "tv",
-                PixelAspect::Square => "square",
-            };
-            format!("Pixel Aspect {:>8}", format!("[{value}]"))
-        }
-        // Right-pad like Pixel Aspect above so the closing bracket stays put
-        // as the value width changes ("off" vs "scanlines").
-        MenuItem::CrtShader => {
-            format!("CRT Shader {:>11}", format!("[{}]", s.shader.label()))
-        }
-        // Right-pad like CRT Shader above so the closing bracket stays put
-        // as the value width changes ("off" vs "green").
-        MenuItem::ScreenTint => {
-            format!("Screen Tint {:>7}", format!("[{}]", s.tint.label()))
-        }
-        // Right-pad like Warp Limit below so the closing bracket stays put
-        // as the value width changes (100% vs turbo).
-        MenuItem::FloppySpeed => {
-            format!(
-                "Floppy Speed {:>7}",
-                format!("[{}]", crate::floppy::speed_label(s.floppy_speed))
-            )
-        }
-        #[cfg(feature = "midi")]
-        MenuItem::MidiInput => format!("MIDI In  [{}]", clip_menu_value(s.midi_in)),
-        #[cfg(feature = "midi")]
-        MenuItem::MidiOutput => format!("MIDI Out [{}]", clip_menu_value(s.midi_out)),
-        MenuItem::AudioOutput => {
-            let name = if s.audio_output.is_empty() {
-                "Default"
-            } else {
-                s.audio_output
-            };
-            format!("Audio Out [{}]", clip_menu_value(name))
-        }
-        MenuItem::AudioFilter => {
-            let value = match s.audio_filter {
-                crate::config::AudioFilterMode::Auto => "auto",
-                crate::config::AudioFilterMode::On => "on",
-                crate::config::AudioFilterMode::Off => "off",
-            };
-            format!("Audio Filter {:>7}", format!("[{value}]"))
-        }
-        MenuItem::SamplerInput => {
-            let name = if s.sampler_input.is_empty() {
-                "Default"
-            } else {
-                s.sampler_input
-            };
-            format!("Sampler In [{}]", clip_menu_value(name))
-        }
-        MenuItem::SamplerGain => format!("Sampler Gain {:>5}", format!("[{}]", s.sampler_gain)),
-        MenuItem::Fullscreen if s.fullscreen => "Fullscreen      [on]".to_string(),
-        MenuItem::Fullscreen => "Fullscreen     [off]".to_string(),
-        MenuItem::StatusBar if s.status_bar_hidden => "Status Bar     [off]".to_string(),
-        MenuItem::StatusBar => "Status Bar      [on]".to_string(),
-        MenuItem::Warp if s.warp => "Warp Speed      [on]".to_string(),
-        MenuItem::Warp => "Warp Speed     [off]".to_string(),
-        // Right-pad so the closing bracket stays put as the value width
-        // changes (2x/8x vs 16x/Max), aligning with the Warp Speed row above.
-        MenuItem::WarpLimit => {
-            format!(
-                "Warp Limit     {:>5}",
-                format!("[{}]", s.warp_speed.label())
-            )
-        }
-        MenuItem::Rewind if s.rewind => "Rewind          [on]".to_string(),
-        MenuItem::Rewind => "Rewind         [off]".to_string(),
-        MenuItem::Record if s.recording => "Stop Video Recording".to_string(),
-        MenuItem::Record => "Record Video".to_string(),
-        MenuItem::RecordInput if s.input_recording => "Stop Input Recording".to_string(),
-        MenuItem::RecordInput => "Record Input".to_string(),
-        MenuItem::SaveState => "Save State".to_string(),
-        MenuItem::LoadState => "Load State...".to_string(),
-        MenuItem::QuickSave => format!("Quick Save {:>9}", format!("[slot {}]", s.save_slot)),
-        MenuItem::QuickLoad => format!("Quick Load {:>9}", format!("[slot {}]", s.save_slot)),
-        MenuItem::SaveSlot => format!("Save Slot {:>10}", format!("[{}]", s.save_slot)),
-        MenuItem::LoadRom => "Load Kickstart ROM...".to_string(),
-        MenuItem::MachineConfig => "Machine Configuration...".to_string(),
-    }
-}
-
-/// Clip a device name so a "MIDI Out [name]" / "Audio Out [name]" /
-/// "Sampler In [name]" label stays within the popup.
-fn clip_menu_value(name: &str) -> String {
-    const MAX: usize = MENU_MAX_LABEL_CHARS - 13; // widest prefix "Sampler In [" plus "]"
-    if name.chars().count() <= MAX {
-        return name.to_string();
-    }
-    let kept: String = name.chars().take(MAX.saturating_sub(1)).collect();
-    format!("{kept}~")
-}
-
-/// Labels of the two scroll rows a scrolling menu grows at its ends. Centred,
-/// so they read as chrome rather than as another item.
-const MENU_SCROLL_UP_LABEL: &str = "^ more ^";
-const MENU_SCROLL_DOWN_LABEL: &str = "v more v";
-
-/// How a menu of `item_count` items is laid out.
-///
-/// The menu is anchored to the bottom of the display and grows upward, so a
-/// long list (the MIDI and sampler items appear only in some sessions) can
-/// reach the top edge. It degrades in two stages: first the rows tighten
-/// toward the height of the label font itself, and only when even that does
-/// not fit does the list scroll, giving up a row at each end to the scroll
-/// controls.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct MenuLayout {
-    item_h: usize,
-    /// Items on screen at once. Equal to `item_count` when not scrolling.
-    visible: usize,
-    scrolling: bool,
-}
-
-impl MenuLayout {
-    /// Total rows drawn, counting the two scroll rows.
-    fn rows(&self) -> usize {
-        self.visible + if self.scrolling { 2 } else { 0 }
-    }
-
-    /// Largest first-visible index, i.e. the scroll position that puts the
-    /// last item at the bottom.
-    fn max_scroll(&self, item_count: usize) -> usize {
-        item_count.saturating_sub(self.visible)
-    }
-}
-
-fn menu_layout(item_count: usize) -> MenuLayout {
-    let avail = present_height().saturating_sub(2 + 2 * MENU_PAD);
-    let floor = MENU_TEXT_PX * font::GLYPH_H;
-    let item_h = (avail / item_count.max(1)).clamp(floor, MENU_ITEM_H);
-    if item_count * item_h <= avail {
-        return MenuLayout {
-            item_h,
-            visible: item_count,
-            scrolling: false,
-        };
-    }
-    // Too many items for the display even at the tightest row height: show a
-    // window into the list, with a scroll row above and below it.
-    let rows = avail / floor;
-    MenuLayout {
-        item_h: floor,
-        visible: rows.saturating_sub(2).max(1),
-        scrolling: true,
-    }
-}
-
-/// Clamp a scroll position to the range this item count allows.
-pub fn clamp_menu_scroll(scroll: usize, item_count: usize) -> usize {
-    scroll.min(menu_layout(item_count).max_scroll(item_count))
-}
-
-fn menu_rect(item_count: usize) -> Rect {
-    let layout = menu_layout(item_count);
-    let h = layout.rows() * layout.item_h + 2 * MENU_PAD;
-    let right = MENU_BUTTON_X + MENU_BUTTON_W;
-    Rect {
-        x: right.saturating_sub(MENU_W),
-        y: present_height().saturating_sub(h + 2),
-        w: MENU_W,
-        h,
-    }
-}
-
-/// The rect of the `row`-th drawn row (scroll rows included), regardless of
-/// what occupies it.
-fn menu_row_rect(row: usize, item_count: usize) -> Rect {
-    let menu = menu_rect(item_count);
-    let layout = menu_layout(item_count);
-    Rect {
-        x: menu.x + 1,
-        y: menu.y + MENU_PAD + row * layout.item_h,
-        w: menu.w - 2,
-        h: layout.item_h,
-    }
-}
-
-/// The rect of menu item `index` (an index into the whole list) at scroll
-/// position `scroll`, or `None` when it is scrolled out of view.
-fn menu_item_rect(index: usize, item_count: usize, scroll: usize) -> Option<Rect> {
-    let layout = menu_layout(item_count);
-    let scroll = scroll.min(layout.max_scroll(item_count));
-    let offset = index.checked_sub(scroll)?;
-    if offset >= layout.visible {
-        return None;
-    }
-    Some(menu_row_rect(
-        offset + usize::from(layout.scrolling),
-        item_count,
-    ))
-}
-
-/// The two scroll rows, when the menu is scrolling: the first and last drawn
-/// rows. Each is reported with whether it can still move in its direction, so
-/// the draw can grey out an exhausted end and the hit test can ignore it.
-fn menu_scroll_rows(item_count: usize, scroll: usize) -> Option<[(UiControl, Rect, bool); 2]> {
-    let layout = menu_layout(item_count);
-    if !layout.scrolling {
-        return None;
-    }
-    let scroll = scroll.min(layout.max_scroll(item_count));
-    Some([
-        (
-            UiControl::MenuScrollUp,
-            menu_row_rect(0, item_count),
-            scroll > 0,
-        ),
-        (
-            UiControl::MenuScrollDown,
-            menu_row_rect(layout.rows() - 1, item_count),
-            scroll < layout.max_scroll(item_count),
-        ),
-    ])
-}
 
 // ---------------------------------------------------------------------------
 // Panels (overlay sub-windows)
@@ -837,7 +445,6 @@ pub struct UiState {
     pub menu_open: bool,
     /// First visible menu item when the list is too long for the display.
     /// Always 0 for a menu that fits; reset each time the menu opens.
-    pub menu_scroll: usize,
     /// The menu as it stood when it was opened, and how far into it the
     /// cursor has gone. Built once per open, from the machine at that
     /// moment, so nothing it offers can change under the pointer.
@@ -855,43 +462,12 @@ impl UiState {
     /// The UI control under `pos`, if any. `midi_active`/`sampler_active` select
     /// the same menu item list the draw uses. `PanelBody` swallows clicks on a
     /// panel's background so they never reach the emulated display.
-    pub fn control_at(
-        &self,
-        pos: (i32, i32),
-        midi_active: bool,
-        sampler_active: bool,
-    ) -> Option<UiControl> {
-        if self.menu_open && !self.menu_rows.is_empty() {
-            // The tree menu answers for itself: a level, and a row in it.
+    pub fn control_at(&self, pos: (i32, i32)) -> Option<UiControl> {
+        if self.menu_open {
+            // The menu answers for itself: a level, and a row in it.
             let pos = (pos.0.max(0) as usize, pos.1.max(0) as usize);
             return tree_menu_hit(&self.menu_rows, &self.menu_nav, pos)
                 .map(|(depth, row)| UiControl::MenuRow { depth, row });
-        }
-        if self.menu_open {
-            let items = menu_items(midi_active, sampler_active);
-            // The scroll rows sit where items would otherwise be, so they are
-            // tested first; an exhausted end swallows the click as chrome.
-            if let Some(rows) = menu_scroll_rows(items.len(), self.menu_scroll) {
-                for (control, rect, enabled) in rows {
-                    if rect.contains(pos) {
-                        return Some(if enabled {
-                            control
-                        } else {
-                            UiControl::PanelBody
-                        });
-                    }
-                }
-            }
-            for (index, item) in items.iter().enumerate() {
-                if menu_item_rect(index, items.len(), self.menu_scroll)
-                    .is_some_and(|rect| rect.contains(pos))
-                {
-                    return Some(UiControl::MenuItem(*item));
-                }
-            }
-            return menu_rect(items.len())
-                .contains(pos)
-                .then_some(UiControl::PanelBody);
         }
         self.panel
             .as_ref()
@@ -1034,7 +610,6 @@ pub fn panel_control_at(panel: &Panel, pos: (i32, i32)) -> Option<UiControl> {
 /// A clickable UI control, used for hit-testing and hover highlights.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiControl {
-    MenuItem(MenuItem),
     /// A row of the tree menu: which open level, and which row of it.
     MenuRow {
         depth: usize,
@@ -1061,9 +636,7 @@ pub enum UiControl {
     /// stopping at exact beam granularity via a one-shot beam trap.
     DebugRunLine,
     /// Scroll a too-long menu one item toward the start of the list.
-    MenuScrollUp,
     /// Scroll a too-long menu one item toward the end of the list.
-    MenuScrollDown,
     /// Input Mapping: show keyboard mapping N (0 = controller 1).
     RemapSet(usize),
     /// Input Mapping: arm control N (an index into `keymap::CONTROLS`) for
@@ -2206,77 +1779,6 @@ fn draw_panel_chrome(frame: &mut [u8], panel: &Panel, hover: Option<UiControl>, 
         h: 4,
     };
     fill_rect(frame, scale_rect(hole, scale), face, scale);
-}
-
-fn draw_menu(
-    frame: &mut [u8],
-    hover: Option<UiControl>,
-    midi_active: bool,
-    sampler_active: bool,
-    scroll: usize,
-    labels: MenuLabels,
-    scale: usize,
-) {
-    let items = menu_items(midi_active, sampler_active);
-    let rect = menu_rect(items.len());
-    let scaled = scale_rect(rect, scale);
-    fill_rect(frame, scaled, MENU_BG, scale);
-    draw_rect_bevel(frame, scaled, MENU_EDGE, MENU_EDGE, scale);
-    let text_y = |row: Rect| row.y + row.h.saturating_sub(MENU_TEXT_PX * font::GLYPH_H) / 2;
-    for (index, item) in items.iter().enumerate() {
-        let Some(item_rect) = menu_item_rect(index, items.len(), scroll) else {
-            continue;
-        };
-        let hovered = hover == Some(UiControl::MenuItem(*item));
-        let (bg, fg) = if hovered {
-            (MENU_HILIGHT_BG, MENU_HILIGHT_TEXT)
-        } else {
-            (MENU_BG, MENU_TEXT)
-        };
-        if hovered {
-            fill_rect(frame, scale_rect(item_rect, scale), bg, scale);
-        }
-        draw_panel_text(
-            frame,
-            item_rect.x + MENU_TEXT_INSET,
-            text_y(item_rect),
-            &menu_item_label(*item, labels),
-            fg,
-            MENU_TEXT_PX,
-            scale,
-        );
-    }
-    let Some(rows) = menu_scroll_rows(items.len(), scroll) else {
-        return;
-    };
-    for (control, row, enabled) in rows {
-        let label = if control == UiControl::MenuScrollUp {
-            MENU_SCROLL_UP_LABEL
-        } else {
-            MENU_SCROLL_DOWN_LABEL
-        };
-        let hovered = enabled && hover == Some(control);
-        if hovered {
-            fill_rect(frame, scale_rect(row, scale), MENU_HILIGHT_BG, scale);
-        }
-        let fg = match (enabled, hovered) {
-            // A dimmed end says "this is as far as the list goes" rather
-            // than leaving a dead-looking gap.
-            (false, _) => MENU_TEXT_DISABLED,
-            (true, true) => MENU_HILIGHT_TEXT,
-            (true, false) => MENU_TEXT,
-        };
-        let width = font::text_width(label, MENU_TEXT_PX);
-        draw_panel_text(
-            frame,
-            row.x + row.w.saturating_sub(width) / 2,
-            text_y(row),
-            label,
-            fg,
-            MENU_TEXT_PX,
-            scale,
-        );
-    }
 }
 
 /// Word-wrap `text` so no panel line is cropped: the first line holds up to
@@ -6349,27 +5851,12 @@ pub fn draw(
     ui: &UiState,
     hover: Option<UiControl>,
     data: Option<&PanelViewData>,
-    midi_active: bool,
-    sampler_active: bool,
-    labels: MenuLabels,
 ) {
     if let Some(panel) = &ui.panel {
         draw_panel_layer(frame, texture_scale, panel, hover, data);
     }
     if ui.menu_open {
-        if ui.menu_rows.is_empty() {
-            draw_menu(
-                frame,
-                hover,
-                midi_active,
-                sampler_active,
-                ui.menu_scroll,
-                labels,
-                texture_scale,
-            );
-        } else {
-            draw_tree_menu(frame, &ui.menu_rows, &ui.menu_nav, texture_scale);
-        }
+        draw_tree_menu(frame, &ui.menu_rows, &ui.menu_nav, texture_scale);
     }
 }
 
@@ -6784,6 +6271,7 @@ pub fn hex_dump_row(addr: u32, bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{JoystickInputMode, PixelAspect, WarpSpeed};
 
     #[test]
     fn clip_path_keeps_the_file_name() {
@@ -6804,151 +6292,6 @@ mod tests {
         assert!(out.contains('\\'), "{out}");
         assert!(out.ends_with("printer-output.txt"), "{out}");
         assert!(out.chars().count() <= 24, "{out}");
-    }
-
-    #[test]
-    fn menu_sits_above_the_status_bar_and_hit_tests_items() {
-        let n = menu_items(false, false).len();
-        let rect = menu_rect(n);
-        assert!(rect.y + rect.h <= present_height());
-        assert!(rect.x + rect.w <= FB_WIDTH);
-
-        let ui = UiState {
-            menu_open: true,
-            menu_scroll: 0,
-            menu_rows: Vec::new(),
-            menu_nav: menu::MenuNav::default(),
-            panel: None,
-        };
-        let first = menu_item_rect(0, n, 0).unwrap();
-        let pos = (first.x as i32 + 4, first.y as i32 + 4);
-        assert_eq!(
-            ui.control_at(pos, false, false),
-            Some(UiControl::MenuItem(MenuItem::MachineConfig))
-        );
-        // Leading block is MachineConfig, FrameAnalyzer, Debugger, Console,
-        // AudioOutput, AudioFilter, Calibration, so Joystick Input sits at
-        // index 7.
-        let joystick = menu_item_rect(7, n, 0).unwrap();
-        let pos = (joystick.x as i32 + 4, joystick.y as i32 + 4);
-        assert_eq!(
-            ui.control_at(pos, false, false),
-            Some(UiControl::MenuItem(MenuItem::JoystickInput))
-        );
-        // Outside the menu: nothing (the click closes the menu).
-        assert_eq!(ui.control_at((0, 0), false, false), None);
-    }
-
-    /// The menu grows upward from the bottom edge, so every optional item
-    /// (MIDI, sampler) that can appear has to still fit. Rows tighten rather
-    /// than the first items falling off the top, and only once even the
-    /// tightest rows overflow does the list scroll. The fullest session --
-    /// MIDI endpoints and a sampler both live -- reaches that point: at the
-    /// 16px floor its items want more than the display opening holds.
-    #[test]
-    fn the_menu_fits_on_screen_with_every_optional_item_shown() {
-        for (midi, sampler) in [(false, false), (true, false), (false, true), (true, true)] {
-            let n = menu_items(midi, sampler).len();
-            let rect = menu_rect(n);
-            assert!(
-                rect.y + rect.h <= present_height(),
-                "menu of {n} items overflows the display"
-            );
-            let layout = menu_layout(n);
-            assert!(
-                layout.item_h >= MENU_TEXT_PX * font::GLYPH_H,
-                "menu rows must stay at least as tall as their text"
-            );
-            // Only the everything-live session is allowed to reach the
-            // scrolling fallback; every ordinary session still shows the
-            // whole list at once.
-            if !(midi && sampler) {
-                assert!(
-                    !layout.scrolling,
-                    "menu of {n} items must not scroll without both MIDI and a sampler"
-                );
-            }
-            // Every drawn row lands inside the menu background.
-            let last = menu_item_rect(layout.visible - 1, n, 0).expect("last visible item");
-            assert!(last.y + last.h <= rect.y + rect.h);
-            assert!(menu_item_rect(0, n, 0).unwrap().y >= rect.y);
-        }
-    }
-
-    /// Past the point where even the tightest rows fit, the menu scrolls: it
-    /// shows a window into the list with a scroll row at each end.
-    #[test]
-    fn an_over_long_menu_scrolls_instead_of_overflowing() {
-        // Deliberately more items than any real session builds, so the
-        // fallback is exercised whatever the menu grows to next.
-        let n = 200;
-        let layout = menu_layout(n);
-        assert!(layout.scrolling);
-        assert!(layout.visible < n);
-        let rect = menu_rect(n);
-        assert!(
-            rect.y + rect.h <= present_height(),
-            "a scrolling menu still fits the display"
-        );
-
-        // At the top: the first items are visible, the last are not, and only
-        // the down arrow is live.
-        assert!(menu_item_rect(0, n, 0).is_some());
-        assert!(menu_item_rect(layout.visible, n, 0).is_none());
-        let rows = menu_scroll_rows(n, 0).expect("scroll rows");
-        assert_eq!(rows[0].0, UiControl::MenuScrollUp);
-        assert!(!rows[0].2, "nothing above the first item");
-        assert!(rows[1].2, "there is more below");
-
-        // Scrolled by one: the window has moved by exactly one item and both
-        // arrows are live.
-        assert!(menu_item_rect(0, n, 1).is_none());
-        assert_eq!(menu_item_rect(1, n, 1), menu_item_rect(0, n, 0));
-        let rows = menu_scroll_rows(n, 1).expect("scroll rows");
-        assert!(rows[0].2 && rows[1].2);
-
-        // At the end: the last item is visible and the down arrow is spent.
-        let end = layout.max_scroll(n);
-        assert!(menu_item_rect(n - 1, n, end).is_some());
-        let rows = menu_scroll_rows(n, end).expect("scroll rows");
-        assert!(rows[0].2);
-        assert!(!rows[1].2, "nothing below the last item");
-
-        // An out-of-range scroll clamps rather than emptying the menu.
-        assert_eq!(clamp_menu_scroll(n * 2, n), end);
-        assert!(menu_item_rect(n - 1, n, n * 2).is_some());
-        // A menu that fits has nothing to scroll.
-        assert_eq!(clamp_menu_scroll(5, 3), 0);
-        assert!(menu_scroll_rows(3, 0).is_none());
-    }
-
-    #[test]
-    fn scroll_rows_hit_test_ahead_of_the_items_they_sit_over() {
-        let items = menu_items(false, false);
-        let n = items.len();
-        // Force the scrolling layout by asking for a list the display cannot
-        // hold, then hit-test through a UiState carrying a scroll position.
-        let big = 200;
-        let ui = UiState {
-            menu_open: true,
-            menu_scroll: 1,
-            ..Default::default()
-        };
-        let rows = menu_scroll_rows(big, 1).expect("scroll rows");
-        for (control, rect, _) in rows {
-            let pos = (rect.x as i32 + 4, rect.y as i32 + 2);
-            // The real menu is shorter than `big`, so drive the geometry
-            // directly: the point is that the row rect wins over an item.
-            assert!(rect.contains(pos), "{control:?} row contains its own point");
-        }
-
-        // On the real (non-scrolling) menu, item hit-testing is unchanged and
-        // the scroll position is ignored.
-        let first = menu_item_rect(0, n, 0).unwrap();
-        assert_eq!(
-            ui.control_at((first.x as i32 + 4, first.y as i32 + 4), false, false),
-            Some(UiControl::MenuItem(items[0]))
-        );
     }
 
     /// The shortcuts panel is sized from its row count, so adding a row must
@@ -7055,177 +6398,9 @@ mod tests {
     }
 
     #[test]
-    fn fullscreen_menu_item_label_tracks_window_state() {
-        assert!(menu_items(false, false).contains(&MenuItem::Fullscreen));
-        let labels = |fullscreen| MenuLabels {
-            warp: false,
-            warp_speed: WarpSpeed::Max,
-            fullscreen,
-            status_bar_hidden: false,
-            recording: false,
-            input_recording: false,
-            rewind: false,
-            save_slot: 1,
-            autofire_hz: 0,
-            joystick_input_mode: JoystickInputMode::Gamepad,
-            port_devices: [
-                crate::bus::PortDevice::Mouse,
-                crate::bus::PortDevice::Joystick,
-            ],
-            pixel_aspect: PixelAspect::Tv,
-            floppy_speed: 100,
-            midi_in: "",
-            midi_out: "",
-            audio_output: "",
-            audio_filter: crate::config::AudioFilterMode::Auto,
-            sampler_input: "",
-            sampler_gain: "",
-            shader: crate::config::ShaderKind::None,
-            tint: crate::config::Tint::None,
-        };
-        assert_eq!(
-            menu_item_label(MenuItem::Fullscreen, labels(false)),
-            "Fullscreen     [off]"
-        );
-        assert_eq!(
-            menu_item_label(MenuItem::Fullscreen, labels(true)),
-            "Fullscreen      [on]"
-        );
-    }
-
-    #[test]
-    fn status_bar_menu_item_label_tracks_state() {
-        assert!(menu_items(false, false).contains(&MenuItem::StatusBar));
-        let labels = |status_bar_hidden| MenuLabels {
-            warp: false,
-            warp_speed: WarpSpeed::Max,
-            fullscreen: false,
-            status_bar_hidden,
-            recording: false,
-            input_recording: false,
-            rewind: false,
-            save_slot: 1,
-            autofire_hz: 0,
-            joystick_input_mode: JoystickInputMode::Gamepad,
-            port_devices: [
-                crate::bus::PortDevice::Mouse,
-                crate::bus::PortDevice::Joystick,
-            ],
-            pixel_aspect: PixelAspect::Tv,
-            floppy_speed: 100,
-            midi_in: "",
-            midi_out: "",
-            audio_output: "",
-            audio_filter: crate::config::AudioFilterMode::Auto,
-            sampler_input: "",
-            sampler_gain: "",
-            shader: crate::config::ShaderKind::None,
-            tint: crate::config::Tint::None,
-        };
-        // "on" means the bar is shown.
-        assert_eq!(
-            menu_item_label(MenuItem::StatusBar, labels(false)),
-            "Status Bar      [on]"
-        );
-        assert_eq!(
-            menu_item_label(MenuItem::StatusBar, labels(true)),
-            "Status Bar     [off]"
-        );
-    }
-
-    #[test]
-    fn every_menu_label_fits_inside_the_popup() {
-        // The label is drawn at `item_rect.x + MENU_TEXT_INSET`; its glyphs
-        // must end before the popup's right edge or the trailing "~" clips.
-        let items = menu_items(true, true);
-        let menu = menu_rect(items.len());
-        let limit = menu.x + menu.w;
-        let modes = [JoystickInputMode::Gamepad, JoystickInputMode::Keyboard];
-        let speeds = [WarpSpeed::X2, WarpSpeed::X8, WarpSpeed::X16, WarpSpeed::Max];
-        // A deliberately over-long device name exercises the clip path.
-        let long = "Extremely Long USB MIDI Interface Name 9000";
-        let aspects = [PixelAspect::Tv, PixelAspect::Square];
-        let shaders = [
-            crate::config::ShaderKind::None,
-            crate::config::ShaderKind::Scanlines,
-            crate::config::ShaderKind::Mask,
-            crate::config::ShaderKind::Crt,
-            crate::config::ShaderKind::Custom,
-        ];
-        // The width check itself, out of the sweep below: one combination per
-        // label-bearing field nests deeply enough without it.
-        let check = |item: MenuItem, labels: MenuLabels| {
-            let label = menu_item_label(item, labels);
-            let text_w = label.chars().count() * font::GLYPH_W * MENU_TEXT_PX;
-            let right = menu_item_rect(0, items.len(), 0).unwrap().x + MENU_TEXT_INSET + text_w;
-            assert!(
-                right <= limit,
-                "label {label:?} ({text_w}px) overflows the menu by {}px",
-                right.saturating_sub(limit)
-            );
-        };
-        for &item in &items {
-            for warp in [false, true] {
-                for recording in [false, true] {
-                    for input_recording in [false, true] {
-                        for &mode in &modes {
-                            for &speed in &speeds {
-                                for &aspect in &aspects {
-                                    for &shader in &shaders {
-                                        let labels = MenuLabels {
-                                            warp,
-                                            warp_speed: speed,
-                                            // Rides warp's sweep so both label
-                                            // states are width-checked.
-                                            fullscreen: warp,
-                                            status_bar_hidden: warp,
-                                            recording,
-                                            input_recording,
-                                            // Rides warp's sweep so both label
-                                            // states are width-checked.
-                                            rewind: warp,
-                                            save_slot: 1,
-                                            autofire_hz: 0,
-                                            joystick_input_mode: mode,
-                                            // The longest device label.
-                                            port_devices: [crate::bus::PortDevice::Analogue; 2],
-                                            pixel_aspect: aspect,
-                                            // Rides warp's sweep: "turbo" is the
-                                            // widest value, "100%" the tallest
-                                            // percent form.
-                                            floppy_speed: if warp {
-                                                crate::floppy::SPEED_TURBO
-                                            } else {
-                                                100
-                                            },
-                                            midi_in: long,
-                                            midi_out: long,
-                                            audio_output: long,
-                                            audio_filter: crate::config::AudioFilterMode::Auto,
-                                            sampler_input: long,
-                                            sampler_gain: "-24 dB",
-                                            shader,
-                                            // The widest tint value; the
-                                            // {:>7} pad makes every other
-                                            // one the same width.
-                                            tint: crate::config::Tint::Green,
-                                        };
-                                        check(item, labels);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
     fn frame_analyzer_controls_hit_test() {
         let ui = UiState {
             menu_open: false,
-            menu_scroll: 0,
             menu_rows: Vec::new(),
             menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::FrameAnalyzer(FrameAnalyzerPanel::new())),
@@ -7233,11 +6408,7 @@ mod tests {
         let rect = panel_rect(ui.panel.as_ref().unwrap());
         let raster = analyzer_raster_rect(rect);
         assert_eq!(
-            ui.control_at(
-                (raster.x as i32 + raster.w as i32 / 2, raster.y as i32 + 2),
-                false,
-                false
-            ),
+            ui.control_at((raster.x as i32 + raster.w as i32 / 2, raster.y as i32 + 2)),
             Some(UiControl::AnalyzerPick {
                 x: 511,
                 y: 8,
@@ -7246,14 +6417,10 @@ mod tests {
         );
         let scanline = analyzer_scanline_rect(rect);
         assert_eq!(
-            ui.control_at(
-                (
-                    scanline.x as i32 + scanline.w as i32 / 2,
-                    scanline.y as i32 + 2
-                ),
-                false,
-                false
-            ),
+            ui.control_at((
+                scanline.x as i32 + scanline.w as i32 / 2,
+                scanline.y as i32 + 2
+            )),
             Some(UiControl::AnalyzerPick {
                 x: 511,
                 y: 60,
@@ -7263,12 +6430,12 @@ mod tests {
         let (control, button) = analyzer_button_rects(rect)[1];
         assert_eq!(control, UiControl::AnalyzerFrame);
         assert_eq!(
-            ui.control_at((button.x as i32 + 2, button.y as i32 + 2), false, false),
+            ui.control_at((button.x as i32 + 2, button.y as i32 + 2)),
             Some(UiControl::AnalyzerFrame)
         );
         let underlay = analyzer_underlay_rect(rect);
         assert_eq!(
-            ui.control_at((underlay.x as i32 + 2, underlay.y as i32 + 2), false, false),
+            ui.control_at((underlay.x as i32 + 2, underlay.y as i32 + 2)),
             Some(UiControl::AnalyzerUnderlay)
         );
         // The checkbox must not overlap the transport buttons.
@@ -7284,7 +6451,6 @@ mod tests {
         panel.heat_presets = presets;
         UiState {
             menu_open: false,
-            menu_scroll: 0,
             menu_rows: Vec::new(),
             menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::FrameAnalyzer(panel)),
@@ -7361,7 +6527,7 @@ mod tests {
             let rect = panel_rect(ui.panel.as_ref().unwrap());
             let button = analyzer_tab_rect(rect, index);
             assert_eq!(
-                ui.control_at((button.x as i32 + 2, button.y as i32 + 2), false, false),
+                ui.control_at((button.x as i32 + 2, button.y as i32 + 2)),
                 Some(UiControl::AnalyzerTab(*tab))
             );
         }
@@ -7372,13 +6538,13 @@ mod tests {
         let map = analyzer_heat_map_rect(rect);
         let underlay = analyzer_underlay_rect(rect);
         assert_eq!(
-            ui.control_at((underlay.x as i32 + 2, underlay.y as i32 + 2), false, false),
+            ui.control_at((underlay.x as i32 + 2, underlay.y as i32 + 2)),
             Some(UiControl::AnalyzerUnderlay)
         );
         let in_map = (map.x as i32 + map.w as i32 / 2, map.y as i32 + 4);
         assert!(
             !matches!(
-                ui.control_at(in_map, false, false),
+                ui.control_at(in_map),
                 Some(UiControl::AnalyzerHeatPick { .. })
             ),
             "the heat map is not drawn on the Beam tab, so it must not be clickable"
@@ -7387,7 +6553,7 @@ mod tests {
         // Memory tab: the map hits, and none of the beam-only controls do.
         let ui = analyzer_ui(AnalyzerTab::Memory, Vec::new());
         assert!(matches!(
-            ui.control_at(in_map, false, false),
+            ui.control_at(in_map),
             Some(UiControl::AnalyzerHeatPick { .. })
         ));
         for beam_only in [
@@ -7402,7 +6568,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                ui.control_at(beam_only, false, false),
+                ui.control_at(beam_only),
                 Some(UiControl::PanelBody),
                 "beam-only controls are inert on the Memory tab"
             );
@@ -7411,14 +6577,14 @@ mod tests {
         for slot in 0..2 {
             let (control, button) = analyzer_button_rects(rect)[slot];
             assert_eq!(
-                ui.control_at((button.x as i32 + 2, button.y as i32 + 2), false, false),
+                ui.control_at((button.x as i32 + 2, button.y as i32 + 2)),
                 Some(control)
             );
         }
         // The scanline strip belongs to the beam view too.
         let scanline = analyzer_scanline_rect(rect);
         assert!(!matches!(
-            ui.control_at((scanline.x as i32 + 4, scanline.y as i32 + 4), false, false),
+            ui.control_at((scanline.x as i32 + 4, scanline.y as i32 + 4)),
             Some(UiControl::AnalyzerPick { .. })
         ));
     }
@@ -7430,11 +6596,7 @@ mod tests {
         let map = analyzer_heat_map_rect(rect);
         let last = (heatmap::GRID - 1) as u8;
         let pick = |dx: usize, dy: usize| {
-            ui.control_at(
-                (map.x as i32 + dx as i32, map.y as i32 + dy as i32),
-                false,
-                false,
-            )
+            ui.control_at((map.x as i32 + dx as i32, map.y as i32 + dy as i32))
         };
         assert_eq!(pick(0, 0), Some(UiControl::AnalyzerHeatPick { x: 0, y: 0 }));
         assert_eq!(
@@ -7452,11 +6614,7 @@ mod tests {
         );
         // One pixel past the map is not a pick.
         assert_ne!(
-            ui.control_at(
-                (map.x as i32 + map.w as i32, map.y as i32 + 2),
-                false,
-                false
-            ),
+            ui.control_at((map.x as i32 + map.w as i32, map.y as i32 + 2)),
             Some(UiControl::AnalyzerHeatPick { x: last, y: 0 })
         );
     }
@@ -7474,7 +6632,7 @@ mod tests {
         for (index, (control, button)) in rects.iter().enumerate() {
             assert_eq!(*control, UiControl::AnalyzerHeatPreset(index as u8));
             assert_eq!(
-                ui.control_at((button.x as i32 + 2, button.y as i32 + 2), false, false),
+                ui.control_at((button.x as i32 + 2, button.y as i32 + 2)),
                 Some(*control)
             );
             // Presets sit above the map, never over it.
@@ -7484,7 +6642,7 @@ mod tests {
         let empty = analyzer_ui(AnalyzerTab::Memory, Vec::new());
         for (_, button) in rects {
             assert_eq!(
-                empty.control_at((button.x as i32 + 2, button.y as i32 + 2), false, false),
+                empty.control_at((button.x as i32 + 2, button.y as i32 + 2)),
                 Some(UiControl::PanelBody)
             );
         }
@@ -7798,7 +6956,6 @@ mod tests {
     fn panel_close_button_hit_tests() {
         let ui = UiState {
             menu_open: false,
-            menu_scroll: 0,
             menu_rows: Vec::new(),
             menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::About),
@@ -7806,25 +6963,18 @@ mod tests {
         let rect = panel_rect(ui.panel.as_ref().unwrap());
         let close = close_button_rect(rect);
         let pos = (close.x as i32 + 2, close.y as i32 + 2);
-        assert_eq!(
-            ui.control_at(pos, false, false),
-            Some(UiControl::PanelClose)
-        );
+        assert_eq!(ui.control_at(pos), Some(UiControl::PanelClose));
         // Panel body swallows clicks.
         let body = (rect.x as i32 + 5, (rect.y + TITLE_H + 5) as i32);
-        assert_eq!(
-            ui.control_at(body, false, false),
-            Some(UiControl::PanelBody)
-        );
+        assert_eq!(ui.control_at(body), Some(UiControl::PanelBody));
         // Outside the panel: nothing.
-        assert_eq!(ui.control_at((0, 0), false, false), None);
+        assert_eq!(ui.control_at((0, 0)), None);
     }
 
     #[test]
     fn debugger_controls_hit_test_and_entry_edits() {
         let ui = UiState {
             menu_open: false,
-            menu_scroll: 0,
             menu_rows: Vec::new(),
             menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Debugger(DebuggerPanel::new())),
@@ -7832,22 +6982,22 @@ mod tests {
         let rect = panel_rect(ui.panel.as_ref().unwrap());
         let tab = debug_tab_rect(rect, 3);
         assert_eq!(
-            ui.control_at((tab.x as i32 + 2, tab.y as i32 + 2), false, false),
+            ui.control_at((tab.x as i32 + 2, tab.y as i32 + 2)),
             Some(UiControl::DebugTab(DebugTab::Video))
         );
         let tab = debug_tab_rect(rect, 4);
         assert_eq!(
-            ui.control_at((tab.x as i32 + 2, tab.y as i32 + 2), false, false),
+            ui.control_at((tab.x as i32 + 2, tab.y as i32 + 2)),
             Some(UiControl::DebugTab(DebugTab::Audio))
         );
         let tab = debug_tab_rect(rect, 6);
         assert_eq!(
-            ui.control_at((tab.x as i32 + 2, tab.y as i32 + 2), false, false),
+            ui.control_at((tab.x as i32 + 2, tab.y as i32 + 2)),
             Some(UiControl::DebugTab(DebugTab::IoMap))
         );
         let tab = debug_tab_rect(rect, 7);
         assert_eq!(
-            ui.control_at((tab.x as i32 + 2, tab.y as i32 + 2), false, false),
+            ui.control_at((tab.x as i32 + 2, tab.y as i32 + 2)),
             Some(UiControl::DebugTab(DebugTab::Break))
         );
         // All eight tabs fit inside the panel.
@@ -7856,7 +7006,7 @@ mod tests {
         let (control, step) = debug_button_rects(rect)[1];
         assert_eq!(control, UiControl::DebugStep);
         assert_eq!(
-            ui.control_at((step.x as i32 + 2, step.y as i32 + 2), false, false),
+            ui.control_at((step.x as i32 + 2, step.y as i32 + 2)),
             Some(UiControl::DebugStep)
         );
 
@@ -7865,7 +7015,6 @@ mod tests {
         panel.tab = DebugTab::Break;
         let ui_break = UiState {
             menu_open: false,
-            menu_scroll: 0,
             menu_rows: Vec::new(),
             menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Debugger(panel)),
@@ -7873,19 +7022,15 @@ mod tests {
         let (control, toggle) = break_tab_button_rects(rect)[0];
         assert_eq!(control, UiControl::DebugBreakToggle);
         let pos = (toggle.x as i32 + 2, toggle.y as i32 + 2);
-        assert_eq!(
-            ui_break.control_at(pos, false, false),
-            Some(UiControl::DebugBreakToggle)
-        );
+        assert_eq!(ui_break.control_at(pos), Some(UiControl::DebugBreakToggle));
         // On another tab the same position is just panel body.
-        assert_eq!(ui.control_at(pos, false, false), Some(UiControl::PanelBody));
+        assert_eq!(ui.control_at(pos), Some(UiControl::PanelBody));
 
         // Audio-tab mute buttons hit-test only while the Audio tab is active.
         let mut panel = DebuggerPanel::new();
         panel.tab = DebugTab::Audio;
         let ui_audio = UiState {
             menu_open: false,
-            menu_scroll: 0,
             menu_rows: Vec::new(),
             menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Debugger(panel)),
@@ -7893,20 +7038,17 @@ mod tests {
         let (control, mute0) = audio_tab_button_rects(rect)[0];
         assert_eq!(control, UiControl::DebugAudioMute(0));
         let pos = (mute0.x as i32 + 2, mute0.y as i32 + 2);
-        assert_eq!(
-            ui_audio.control_at(pos, false, false),
-            Some(UiControl::DebugAudioMute(0))
-        );
+        assert_eq!(ui_audio.control_at(pos), Some(UiControl::DebugAudioMute(0)));
         // The CD mute is the fifth (index 4) button.
         let (cd_control, cd_mute) = audio_tab_button_rects(rect)[4];
         assert_eq!(cd_control, UiControl::DebugAudioMute(4));
         let cd_pos = (cd_mute.x as i32 + 2, cd_mute.y as i32 + 2);
         assert_eq!(
-            ui_audio.control_at(cd_pos, false, false),
+            ui_audio.control_at(cd_pos),
             Some(UiControl::DebugAudioMute(4))
         );
         // On another tab that position does not resolve to a mute.
-        assert_eq!(ui.control_at(pos, false, false), Some(UiControl::PanelBody));
+        assert_eq!(ui.control_at(pos), Some(UiControl::PanelBody));
 
         let mut panel = DebuggerPanel::new();
         for ch in ['c', '0', '0', '3', 'C'] {
@@ -8142,33 +7284,6 @@ mod tests {
             writer.write_image_data(frame).unwrap();
             eprintln!("saved {path}");
         };
-        // Neutral labels for panels whose draw does not depend on them.
-        let menu_labels = || MenuLabels {
-            warp: false,
-            warp_speed: WarpSpeed::Max,
-            fullscreen: false,
-            status_bar_hidden: false,
-            recording: false,
-            input_recording: false,
-            rewind: false,
-            save_slot: 1,
-            autofire_hz: 0,
-            joystick_input_mode: JoystickInputMode::Gamepad,
-            port_devices: [
-                crate::bus::PortDevice::Mouse,
-                crate::bus::PortDevice::Joystick,
-            ],
-            pixel_aspect: PixelAspect::Tv,
-            floppy_speed: 100,
-            midi_in: "",
-            midi_out: "",
-            audio_output: "",
-            audio_filter: crate::config::AudioFilterMode::Auto,
-            sampler_input: "",
-            sampler_gain: "",
-            shader: crate::config::ShaderKind::None,
-            tint: crate::config::Tint::None,
-        };
         let panel_has_title_bar = |frame: &[u8], panel: &Panel| {
             let rect = panel_rect(panel);
             let probe = ((rect.y + 10) * w + rect.x + 4) * 4;
@@ -8178,56 +7293,7 @@ mod tests {
 
         let mut frame = vec![0u8; w * h * 4];
         let ui = UiState {
-            menu_open: true,
-            menu_scroll: 0,
-            menu_rows: Vec::new(),
-            menu_nav: menu::MenuNav::default(),
-            panel: None,
-        };
-        draw(
-            &mut frame,
-            scale,
-            &ui,
-            None,
-            None,
-            false,
-            false,
-            MenuLabels {
-                warp: true,
-                warp_speed: WarpSpeed::Max,
-                fullscreen: false,
-                status_bar_hidden: false,
-                recording: false,
-                input_recording: false,
-                rewind: false,
-                save_slot: 1,
-                autofire_hz: 0,
-                joystick_input_mode: JoystickInputMode::Gamepad,
-                port_devices: [
-                    crate::bus::PortDevice::Mouse,
-                    crate::bus::PortDevice::Joystick,
-                ],
-                pixel_aspect: PixelAspect::Tv,
-                floppy_speed: 100,
-                midi_in: "",
-                midi_out: "",
-                audio_output: "",
-                audio_filter: crate::config::AudioFilterMode::Auto,
-                sampler_input: "",
-                sampler_gain: "",
-                shader: crate::config::ShaderKind::None,
-                tint: crate::config::Tint::None,
-            },
-        );
-        let menu = menu_rect(menu_items(false, false).len());
-        let probe = ((menu.y + MENU_PAD + 2) * w + menu.x + 4) * 4;
-        assert_eq!(&frame[probe..probe + 4], &MENU_BG.to_le_bytes());
-        save(&frame, "menu");
-
-        let mut frame = vec![0u8; w * h * 4];
-        let ui = UiState {
             menu_open: false,
-            menu_scroll: 0,
             menu_rows: Vec::new(),
             menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::About),
@@ -8242,48 +7308,13 @@ mod tests {
                 "Floppy drives: 1".to_string(),
             ],
         });
-        draw(
-            &mut frame,
-            scale,
-            &ui,
-            None,
-            Some(&data),
-            false,
-            false,
-            MenuLabels {
-                warp: false,
-                warp_speed: WarpSpeed::Max,
-                fullscreen: false,
-                status_bar_hidden: false,
-                recording: false,
-                input_recording: false,
-                rewind: false,
-                save_slot: 1,
-                autofire_hz: 0,
-                joystick_input_mode: JoystickInputMode::Gamepad,
-                port_devices: [
-                    crate::bus::PortDevice::Mouse,
-                    crate::bus::PortDevice::Joystick,
-                ],
-                pixel_aspect: PixelAspect::Tv,
-                floppy_speed: 100,
-                midi_in: "",
-                midi_out: "",
-                audio_output: "",
-                audio_filter: crate::config::AudioFilterMode::Auto,
-                sampler_input: "",
-                sampler_gain: "",
-                shader: crate::config::ShaderKind::None,
-                tint: crate::config::Tint::None,
-            },
-        );
+        draw(&mut frame, scale, &ui, None, Some(&data));
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "about");
 
         let mut frame = vec![0u8; w * h * 4];
         let ui = UiState {
             menu_open: false,
-            menu_scroll: 0,
             menu_rows: Vec::new(),
             menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Shortcuts),
@@ -8294,34 +7325,6 @@ mod tests {
             &ui,
             None,
             Some(&PanelViewData::Shortcuts),
-            false,
-            false,
-            MenuLabels {
-                warp: false,
-                warp_speed: WarpSpeed::Max,
-                fullscreen: false,
-                status_bar_hidden: false,
-                recording: false,
-                input_recording: false,
-                rewind: false,
-                save_slot: 1,
-                autofire_hz: 0,
-                joystick_input_mode: JoystickInputMode::Gamepad,
-                port_devices: [
-                    crate::bus::PortDevice::Mouse,
-                    crate::bus::PortDevice::Joystick,
-                ],
-                pixel_aspect: PixelAspect::Tv,
-                floppy_speed: 100,
-                midi_in: "",
-                midi_out: "",
-                audio_output: "",
-                audio_filter: crate::config::AudioFilterMode::Auto,
-                sampler_input: "",
-                sampler_gain: "",
-                shader: crate::config::ShaderKind::None,
-                tint: crate::config::Tint::None,
-            },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "shortcuts");
@@ -8329,7 +7332,6 @@ mod tests {
         let mut frame = vec![0u8; w * h * 4];
         let ui = UiState {
             menu_open: false,
-            menu_scroll: 0,
             menu_rows: Vec::new(),
             menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::DropChooser(DropChooserState {
@@ -8350,41 +7352,7 @@ mod tests {
                 ],
             })),
         };
-        draw(
-            &mut frame,
-            scale,
-            &ui,
-            Some(UiControl::DropDrive(1)),
-            None,
-            false,
-            false,
-            MenuLabels {
-                warp: false,
-                warp_speed: WarpSpeed::Max,
-                fullscreen: false,
-                status_bar_hidden: false,
-                recording: false,
-                input_recording: false,
-                rewind: false,
-                save_slot: 1,
-                autofire_hz: 0,
-                joystick_input_mode: JoystickInputMode::Gamepad,
-                port_devices: [
-                    crate::bus::PortDevice::Mouse,
-                    crate::bus::PortDevice::Joystick,
-                ],
-                pixel_aspect: PixelAspect::Tv,
-                floppy_speed: 100,
-                midi_in: "",
-                midi_out: "",
-                audio_output: "",
-                audio_filter: crate::config::AudioFilterMode::Auto,
-                sampler_input: "",
-                sampler_gain: "",
-                shader: crate::config::ShaderKind::None,
-                tint: crate::config::Tint::None,
-            },
-        );
+        draw(&mut frame, scale, &ui, Some(UiControl::DropDrive(1)), None);
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         // The hovered drive button renders inside the panel rect.
         let panel = ui.panel.as_ref().unwrap();
@@ -8431,7 +7399,6 @@ mod tests {
         });
         let ui = UiState {
             menu_open: false,
-            menu_scroll: 0,
             menu_rows: Vec::new(),
             menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Calibration(session)),
@@ -8442,34 +7409,6 @@ mod tests {
             &ui,
             Some(UiControl::CalCancel),
             Some(&data),
-            false,
-            false,
-            MenuLabels {
-                warp: false,
-                warp_speed: WarpSpeed::Max,
-                fullscreen: false,
-                status_bar_hidden: false,
-                recording: false,
-                input_recording: false,
-                rewind: false,
-                save_slot: 1,
-                autofire_hz: 0,
-                joystick_input_mode: JoystickInputMode::Gamepad,
-                port_devices: [
-                    crate::bus::PortDevice::Mouse,
-                    crate::bus::PortDevice::Joystick,
-                ],
-                pixel_aspect: PixelAspect::Tv,
-                floppy_speed: 100,
-                midi_in: "",
-                midi_out: "",
-                audio_output: "",
-                audio_filter: crate::config::AudioFilterMode::Auto,
-                sampler_input: "",
-                sampler_gain: "",
-                shader: crate::config::ShaderKind::None,
-                tint: crate::config::Tint::None,
-            },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "calibration");
@@ -8481,24 +7420,13 @@ mod tests {
         map_panel.capturing = Some(crate::keymap::JoyControl::Fire);
         let ui = UiState {
             menu_open: false,
-            menu_scroll: 0,
             menu_rows: Vec::new(),
             menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::InputMap(Box::new(map_panel))),
         };
-        draw(
-            &mut frame,
-            scale,
-            &ui,
-            Some(UiControl::RemapSave),
-            None,
-            false,
-            false,
-            menu_labels(),
-        );
+        draw(&mut frame, scale, &ui, Some(UiControl::RemapSave), None);
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "input-mapping");
-
         let mut frame = vec![0u8; w * h * 4];
         let mut lines = vec![
             DbgLine::plain("PC 00FC0E44   SR 2700 [S IPL7 xnzvc]"),
@@ -8529,7 +7457,6 @@ mod tests {
         panel.entry_active = true;
         let ui = UiState {
             menu_open: false,
-            menu_scroll: 0,
             menu_rows: Vec::new(),
             menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Debugger(panel)),
@@ -8540,34 +7467,6 @@ mod tests {
             &ui,
             Some(UiControl::DebugStep),
             Some(&data),
-            false,
-            false,
-            MenuLabels {
-                warp: false,
-                warp_speed: WarpSpeed::Max,
-                fullscreen: false,
-                status_bar_hidden: false,
-                recording: false,
-                input_recording: false,
-                rewind: false,
-                save_slot: 1,
-                autofire_hz: 0,
-                joystick_input_mode: JoystickInputMode::Gamepad,
-                port_devices: [
-                    crate::bus::PortDevice::Mouse,
-                    crate::bus::PortDevice::Joystick,
-                ],
-                pixel_aspect: PixelAspect::Tv,
-                floppy_speed: 100,
-                midi_in: "",
-                midi_out: "",
-                audio_output: "",
-                audio_filter: crate::config::AudioFilterMode::Auto,
-                sampler_input: "",
-                sampler_gain: "",
-                shader: crate::config::ShaderKind::None,
-                tint: crate::config::Tint::None,
-            },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "debugger");
@@ -8599,7 +7498,6 @@ mod tests {
         panel.entry = "DFF096".to_string();
         let ui = UiState {
             menu_open: false,
-            menu_scroll: 0,
             menu_rows: Vec::new(),
             menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Debugger(panel)),
@@ -8610,34 +7508,6 @@ mod tests {
             &ui,
             Some(UiControl::DebugRegToggle),
             Some(&data),
-            false,
-            false,
-            MenuLabels {
-                warp: false,
-                warp_speed: WarpSpeed::Max,
-                fullscreen: false,
-                status_bar_hidden: false,
-                recording: false,
-                input_recording: false,
-                rewind: false,
-                save_slot: 1,
-                autofire_hz: 0,
-                joystick_input_mode: JoystickInputMode::Gamepad,
-                port_devices: [
-                    crate::bus::PortDevice::Mouse,
-                    crate::bus::PortDevice::Joystick,
-                ],
-                pixel_aspect: PixelAspect::Tv,
-                floppy_speed: 100,
-                midi_in: "",
-                midi_out: "",
-                audio_output: "",
-                audio_filter: crate::config::AudioFilterMode::Auto,
-                sampler_input: "",
-                sampler_gain: "",
-                shader: crate::config::ShaderKind::None,
-                tint: crate::config::Tint::None,
-            },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "debugger-break");
@@ -8670,7 +7540,6 @@ mod tests {
         panel.entry = "PC=C033C2 2F".to_string();
         let ui = UiState {
             menu_open: false,
-            menu_scroll: 0,
             menu_rows: Vec::new(),
             menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Debugger(panel)),
@@ -8681,34 +7550,6 @@ mod tests {
             &ui,
             Some(UiControl::DebugWaveArm),
             Some(&data),
-            false,
-            false,
-            MenuLabels {
-                warp: false,
-                warp_speed: WarpSpeed::Max,
-                fullscreen: false,
-                status_bar_hidden: false,
-                recording: false,
-                input_recording: false,
-                rewind: false,
-                save_slot: 1,
-                autofire_hz: 0,
-                joystick_input_mode: JoystickInputMode::Gamepad,
-                port_devices: [
-                    crate::bus::PortDevice::Mouse,
-                    crate::bus::PortDevice::Joystick,
-                ],
-                pixel_aspect: PixelAspect::Tv,
-                floppy_speed: 100,
-                midi_in: "",
-                midi_out: "",
-                audio_output: "",
-                audio_filter: crate::config::AudioFilterMode::Auto,
-                sampler_input: "",
-                sampler_gain: "",
-                shader: crate::config::ShaderKind::None,
-                tint: crate::config::Tint::None,
-            },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         // The Arm button must be enabled: its entry spec parses.
@@ -8794,7 +7635,6 @@ mod tests {
         panel.tab = DebugTab::Audio;
         let ui = UiState {
             menu_open: false,
-            menu_scroll: 0,
             menu_rows: Vec::new(),
             menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Debugger(panel)),
@@ -8805,34 +7645,6 @@ mod tests {
             &ui,
             Some(UiControl::DebugAudioMute(0)),
             Some(&data),
-            false,
-            false,
-            MenuLabels {
-                warp: false,
-                warp_speed: WarpSpeed::Max,
-                fullscreen: false,
-                status_bar_hidden: false,
-                recording: false,
-                input_recording: false,
-                rewind: false,
-                save_slot: 1,
-                autofire_hz: 0,
-                joystick_input_mode: JoystickInputMode::Gamepad,
-                port_devices: [
-                    crate::bus::PortDevice::Mouse,
-                    crate::bus::PortDevice::Joystick,
-                ],
-                pixel_aspect: PixelAspect::Tv,
-                floppy_speed: 100,
-                midi_in: "",
-                midi_out: "",
-                audio_output: "",
-                audio_filter: crate::config::AudioFilterMode::Auto,
-                sampler_input: "",
-                sampler_gain: "",
-                shader: crate::config::ShaderKind::None,
-                tint: crate::config::Tint::None,
-            },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "debugger-audio");
@@ -8878,46 +7690,11 @@ mod tests {
         panel.tab = DebugTab::IoMap;
         let ui = UiState {
             menu_open: false,
-            menu_scroll: 0,
             menu_rows: Vec::new(),
             menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Debugger(panel)),
         };
-        draw(
-            &mut frame,
-            scale,
-            &ui,
-            None,
-            Some(&data),
-            false,
-            false,
-            MenuLabels {
-                warp: false,
-                warp_speed: WarpSpeed::Max,
-                fullscreen: false,
-                status_bar_hidden: false,
-                recording: false,
-                input_recording: false,
-                rewind: false,
-                save_slot: 1,
-                autofire_hz: 0,
-                joystick_input_mode: JoystickInputMode::Gamepad,
-                port_devices: [
-                    crate::bus::PortDevice::Mouse,
-                    crate::bus::PortDevice::Joystick,
-                ],
-                pixel_aspect: PixelAspect::Tv,
-                floppy_speed: 100,
-                midi_in: "",
-                midi_out: "",
-                audio_output: "",
-                audio_filter: crate::config::AudioFilterMode::Auto,
-                sampler_input: "",
-                sampler_gain: "",
-                shader: crate::config::ShaderKind::None,
-                tint: crate::config::Tint::None,
-            },
-        );
+        draw(&mut frame, scale, &ui, None, Some(&data));
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "debugger-iomap");
 
@@ -8973,7 +7750,6 @@ mod tests {
         panel.tab = DebugTab::Video;
         let ui = UiState {
             menu_open: false,
-            menu_scroll: 0,
             menu_rows: Vec::new(),
             menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Debugger(panel)),
@@ -8984,34 +7760,6 @@ mod tests {
             &ui,
             Some(UiControl::DebugPlaneToggle(0)),
             Some(&data),
-            false,
-            false,
-            MenuLabels {
-                warp: false,
-                warp_speed: WarpSpeed::Max,
-                fullscreen: false,
-                status_bar_hidden: false,
-                recording: false,
-                input_recording: false,
-                rewind: false,
-                save_slot: 1,
-                autofire_hz: 0,
-                joystick_input_mode: JoystickInputMode::Gamepad,
-                port_devices: [
-                    crate::bus::PortDevice::Mouse,
-                    crate::bus::PortDevice::Joystick,
-                ],
-                pixel_aspect: PixelAspect::Tv,
-                floppy_speed: 100,
-                midi_in: "",
-                midi_out: "",
-                audio_output: "",
-                audio_filter: crate::config::AudioFilterMode::Auto,
-                sampler_input: "",
-                sampler_gain: "",
-                shader: crate::config::ShaderKind::None,
-                tint: crate::config::Tint::None,
-            },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "debugger-video");
@@ -9107,7 +7855,6 @@ mod tests {
         panel.selected_hpos = 0x40;
         let ui = UiState {
             menu_open: false,
-            menu_scroll: 0,
             menu_rows: Vec::new(),
             menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::FrameAnalyzer(panel)),
@@ -9118,34 +7865,6 @@ mod tests {
             &ui,
             Some(UiControl::AnalyzerUnderlay),
             Some(&data),
-            false,
-            false,
-            MenuLabels {
-                warp: false,
-                warp_speed: WarpSpeed::Max,
-                fullscreen: false,
-                status_bar_hidden: false,
-                recording: false,
-                input_recording: false,
-                rewind: false,
-                save_slot: 1,
-                autofire_hz: 0,
-                joystick_input_mode: JoystickInputMode::Gamepad,
-                port_devices: [
-                    crate::bus::PortDevice::Mouse,
-                    crate::bus::PortDevice::Joystick,
-                ],
-                pixel_aspect: PixelAspect::Tv,
-                floppy_speed: 100,
-                midi_in: "",
-                midi_out: "",
-                audio_output: "",
-                audio_filter: crate::config::AudioFilterMode::Auto,
-                sampler_input: "",
-                sampler_gain: "",
-                shader: crate::config::ShaderKind::None,
-                tint: crate::config::Tint::None,
-            },
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "frame-analyzer");
@@ -9196,7 +7915,6 @@ mod tests {
         ];
         let ui = UiState {
             menu_open: false,
-            menu_scroll: 0,
             menu_rows: Vec::new(),
             menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::FrameAnalyzer(panel)),
@@ -9207,72 +7925,9 @@ mod tests {
             &ui,
             Some(UiControl::AnalyzerTab(AnalyzerTab::Memory)),
             Some(&data),
-            false,
-            false,
-            menu_labels(),
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
-        save(&frame, "frame-analyzer-memory");
-
-        // Console: a session transcript over the prompt line.
-        let mut frame = vec![0u8; w * h * 4];
-        let mut console = ConsolePanel::default();
-        console.push_output("Copperline debugger console. Type HELP for commands.");
-        console.push_output("> B C033C2");
-        console.push_output("breakpoint $C033C2 set");
-        console.push_output("> RUN");
-        console.push_output("running (PAUSE stops; breakpoints report here or on stop)");
-        console.push_output("> PAUSE");
-        console.push_output("!Breakpoint at $C033C2");
-        console.push_output(
-            "pc $C033C2  MOVE.W #$4000,$00DFF09A   sr 2300  beam v44 h101  frame 1234",
-        );
-        console.push_output("> D");
-        console.push_output("C033C2  MOVE.W #$4000,$00DFF09A");
-        console.push_output("C033C8  RTS");
-        console.input = "MEM C00000 40".to_string();
-        let ui = UiState {
-            menu_open: false,
-            menu_scroll: 0,
-            menu_rows: Vec::new(),
-            menu_nav: menu::MenuNav::default(),
-            panel: Some(Panel::Console(console)),
-        };
-        draw(
-            &mut frame,
-            scale,
-            &ui,
-            None,
-            None,
-            false,
-            false,
-            MenuLabels {
-                warp: false,
-                warp_speed: WarpSpeed::Max,
-                fullscreen: false,
-                status_bar_hidden: false,
-                recording: false,
-                input_recording: false,
-                rewind: false,
-                save_slot: 1,
-                autofire_hz: 0,
-                joystick_input_mode: JoystickInputMode::Gamepad,
-                port_devices: [
-                    crate::bus::PortDevice::Mouse,
-                    crate::bus::PortDevice::Joystick,
-                ],
-                pixel_aspect: PixelAspect::Tv,
-                floppy_speed: 100,
-                midi_in: "",
-                midi_out: "",
-                audio_output: "",
-                audio_filter: crate::config::AudioFilterMode::Auto,
-                sampler_input: "",
-                sampler_gain: "",
-                shader: crate::config::ShaderKind::None,
-                tint: crate::config::Tint::None,
-            },
-        );
+        save(&frame, "frame-analyzer-memory"); // Console: a session transcript over the prompt line.        let mut frame = vec![0u8; w * h * 4];        let mut console = ConsolePanel::default();        console.push_output("Copperline debugger console. Type HELP for commands.");        console.push_output("> B C033C2");        console.push_output("breakpoint $C033C2 set");        console.push_output("> RUN");        console.push_output("running (PAUSE stops; breakpoints report here or on stop)");        console.push_output("> PAUSE");        console.push_output("!Breakpoint at $C033C2");        console.push_output( "pc $C033C2  MOVE.W #$4000,$00DFF09A   sr 2300  beam v44 h101  frame 1234",        );        console.push_output("> D");        console.push_output("C033C2  MOVE.W #$4000,$00DFF09A");        console.push_output("C033C8  RTS");        console.input = "MEM C00000 40".to_string();        let ui = UiState { menu_open: false, menu_rows: Vec::new(), menu_nav: menu::MenuNav::default(), panel: Some(Panel::Console(console)),        };        draw( &mut frame, scale, &ui, None, None,);
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "console");
 
@@ -9286,46 +7941,11 @@ mod tests {
         state.tab = LauncherTab::Memory;
         let ui = UiState {
             menu_open: false,
-            menu_scroll: 0,
             menu_rows: Vec::new(),
             menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Launcher(Box::new(state))),
         };
-        draw(
-            &mut frame,
-            scale,
-            &ui,
-            Some(UiControl::LauncherRun),
-            None,
-            false,
-            false,
-            MenuLabels {
-                warp: false,
-                warp_speed: WarpSpeed::Max,
-                fullscreen: false,
-                status_bar_hidden: false,
-                recording: false,
-                input_recording: false,
-                rewind: false,
-                save_slot: 1,
-                autofire_hz: 0,
-                joystick_input_mode: JoystickInputMode::Gamepad,
-                port_devices: [
-                    crate::bus::PortDevice::Mouse,
-                    crate::bus::PortDevice::Joystick,
-                ],
-                pixel_aspect: PixelAspect::Tv,
-                floppy_speed: 100,
-                midi_in: "",
-                midi_out: "",
-                audio_output: "",
-                audio_filter: crate::config::AudioFilterMode::Auto,
-                sampler_input: "",
-                sampler_gain: "",
-                shader: crate::config::ShaderKind::None,
-                tint: crate::config::Tint::None,
-            },
-        );
+        draw(&mut frame, scale, &ui, Some(UiControl::LauncherRun), None);
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "launcher");
 
@@ -9379,46 +7999,11 @@ mod tests {
         state.tab = LauncherTab::Zorro;
         let ui = UiState {
             menu_open: false,
-            menu_scroll: 0,
             menu_rows: Vec::new(),
             menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Launcher(Box::new(state))),
         };
-        draw(
-            &mut frame,
-            scale,
-            &ui,
-            None,
-            None,
-            false,
-            false,
-            MenuLabels {
-                warp: false,
-                warp_speed: WarpSpeed::Max,
-                fullscreen: false,
-                status_bar_hidden: false,
-                recording: false,
-                input_recording: false,
-                rewind: false,
-                save_slot: 1,
-                autofire_hz: 0,
-                joystick_input_mode: JoystickInputMode::Gamepad,
-                port_devices: [
-                    crate::bus::PortDevice::Mouse,
-                    crate::bus::PortDevice::Joystick,
-                ],
-                pixel_aspect: PixelAspect::Tv,
-                floppy_speed: 100,
-                midi_in: "",
-                midi_out: "",
-                audio_output: "",
-                audio_filter: crate::config::AudioFilterMode::Auto,
-                sampler_input: "",
-                sampler_gain: "",
-                shader: crate::config::ShaderKind::None,
-                tint: crate::config::Tint::None,
-            },
-        );
+        draw(&mut frame, scale, &ui, None, None);
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "launcher-zorro");
         let _ = std::fs::remove_file(&manifest_path);
@@ -9439,46 +8024,11 @@ mod tests {
         state.tab = LauncherTab::Storage;
         let ui = UiState {
             menu_open: false,
-            menu_scroll: 0,
             menu_rows: Vec::new(),
             menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Launcher(Box::new(state))),
         };
-        draw(
-            &mut frame,
-            scale,
-            &ui,
-            None,
-            None,
-            false,
-            false,
-            MenuLabels {
-                warp: false,
-                warp_speed: WarpSpeed::Max,
-                fullscreen: false,
-                status_bar_hidden: false,
-                recording: false,
-                input_recording: false,
-                rewind: false,
-                save_slot: 1,
-                autofire_hz: 0,
-                joystick_input_mode: JoystickInputMode::Gamepad,
-                port_devices: [
-                    crate::bus::PortDevice::Mouse,
-                    crate::bus::PortDevice::Joystick,
-                ],
-                pixel_aspect: PixelAspect::Tv,
-                floppy_speed: 100,
-                midi_in: "",
-                midi_out: "",
-                audio_output: "",
-                audio_filter: crate::config::AudioFilterMode::Auto,
-                sampler_input: "",
-                sampler_gain: "",
-                shader: crate::config::ShaderKind::None,
-                tint: crate::config::Tint::None,
-            },
-        );
+        draw(&mut frame, scale, &ui, None, None);
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "launcher-storage");
 
@@ -9492,46 +8042,11 @@ mod tests {
         state.tab = LauncherTab::Input;
         let ui = UiState {
             menu_open: false,
-            menu_scroll: 0,
             menu_rows: Vec::new(),
             menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Launcher(Box::new(state))),
         };
-        draw(
-            &mut frame,
-            scale,
-            &ui,
-            None,
-            None,
-            false,
-            false,
-            MenuLabels {
-                warp: false,
-                warp_speed: WarpSpeed::Max,
-                fullscreen: false,
-                status_bar_hidden: false,
-                recording: false,
-                input_recording: false,
-                rewind: false,
-                save_slot: 1,
-                autofire_hz: 0,
-                joystick_input_mode: JoystickInputMode::Gamepad,
-                port_devices: [
-                    crate::bus::PortDevice::Mouse,
-                    crate::bus::PortDevice::Joystick,
-                ],
-                pixel_aspect: PixelAspect::Tv,
-                floppy_speed: 100,
-                midi_in: "",
-                midi_out: "",
-                audio_output: "",
-                audio_filter: crate::config::AudioFilterMode::Auto,
-                sampler_input: "",
-                sampler_gain: "",
-                shader: crate::config::ShaderKind::None,
-                tint: crate::config::Tint::None,
-            },
-        );
+        draw(&mut frame, scale, &ui, None, None);
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         // The summary header landed below the rows: some text pixel is lit
         // on its line inside the settings pane.
@@ -9557,34 +8072,6 @@ mod tests {
         );
         save(&frame, "launcher-input");
 
-        // Configuration screen: the I/O Ports tab, with the sampler selected so
-        // both the Serial: and Parallel: sections and the sampler rows show.
-        let labels = || MenuLabels {
-            warp: false,
-            warp_speed: WarpSpeed::Max,
-            fullscreen: false,
-            status_bar_hidden: false,
-            recording: false,
-            input_recording: false,
-            rewind: false,
-            save_slot: 1,
-            autofire_hz: 0,
-            joystick_input_mode: JoystickInputMode::Gamepad,
-            port_devices: [
-                crate::bus::PortDevice::Mouse,
-                crate::bus::PortDevice::Joystick,
-            ],
-            pixel_aspect: PixelAspect::Tv,
-            floppy_speed: 100,
-            midi_in: "",
-            midi_out: "",
-            audio_output: "",
-            audio_filter: crate::config::AudioFilterMode::Auto,
-            sampler_input: "",
-            sampler_gain: "",
-            shader: crate::config::ShaderKind::None,
-            tint: crate::config::Tint::None,
-        };
         let mut frame = vec![0u8; w * h * 4];
         let mut state = LauncherState::new(launcher::MachineSetup::default());
         state.tab = LauncherTab::IoPorts;
@@ -9592,12 +8079,11 @@ mod tests {
         state.setup.cycle(LauncherField::ParallelDevice, true); // Printer -> Sampler
         let ui = UiState {
             menu_open: false,
-            menu_scroll: 0,
             menu_rows: Vec::new(),
             menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Launcher(Box::new(state))),
         };
-        draw(&mut frame, scale, &ui, None, None, false, false, labels());
+        draw(&mut frame, scale, &ui, None, None);
         save(&frame, "launcher-io-ports");
 
         // The CPU tab on the default (68000) machine: the JIT accelerator
@@ -9607,12 +8093,11 @@ mod tests {
         state.tab = LauncherTab::Cpu;
         let ui = UiState {
             menu_open: false,
-            menu_scroll: 0,
             menu_rows: Vec::new(),
             menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Launcher(Box::new(state))),
         };
-        draw(&mut frame, scale, &ui, None, None, false, false, labels());
+        draw(&mut frame, scale, &ui, None, None);
         save(&frame, "launcher-cpu");
 
         // I/O Ports with the A2065 on the NAT backend, to check the
@@ -9627,12 +8112,11 @@ mod tests {
         }
         let ui = UiState {
             menu_open: false,
-            menu_scroll: 0,
             menu_rows: Vec::new(),
             menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Launcher(Box::new(state))),
         };
-        draw(&mut frame, scale, &ui, None, None, false, false, labels());
+        draw(&mut frame, scale, &ui, None, None);
         save(&frame, "launcher-ethernet-warning");
 
         // I/O Ports with the printer selected and a long output path set, to
@@ -9647,12 +8131,11 @@ mod tests {
         );
         let ui = UiState {
             menu_open: false,
-            menu_scroll: 0,
             menu_rows: Vec::new(),
             menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Launcher(Box::new(state))),
         };
-        draw(&mut frame, scale, &ui, None, None, false, false, labels());
+        draw(&mut frame, scale, &ui, None, None);
         save(&frame, "launcher-printer");
 
         // The Host Mounts sub-page reached from the Storage tab.
@@ -9661,12 +8144,11 @@ mod tests {
         state.tab = LauncherTab::HostFs;
         let ui = UiState {
             menu_open: false,
-            menu_scroll: 0,
             menu_rows: Vec::new(),
             menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Launcher(Box::new(state))),
         };
-        draw(&mut frame, scale, &ui, None, None, false, false, labels());
+        draw(&mut frame, scale, &ui, None, None);
         save(&frame, "launcher-host-mounts");
 
         // The Boot Priority sub-page: an A1200 with two IDE drives -- the master
@@ -9693,12 +8175,11 @@ mod tests {
         state.tab = LauncherTab::BootPriority;
         let ui = UiState {
             menu_open: false,
-            menu_scroll: 0,
             menu_rows: Vec::new(),
             menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Launcher(Box::new(state))),
         };
-        draw(&mut frame, scale, &ui, None, None, false, false, labels());
+        draw(&mut frame, scale, &ui, None, None);
         save(&frame, "launcher-boot-priority");
 
         // The runtime menu, opened over a running machine: the top level,
@@ -9750,13 +8231,13 @@ mod tests {
             menu_nav: nav,
             ..Default::default()
         };
-        draw(&mut frame, scale, &ui, None, None, false, false, labels());
+        draw(&mut frame, scale, &ui, None, None);
         save(&frame, "menu-open");
 
         // The same menu at 2x, which has to stay inside the display.
         let mut frame = vec![0u8; w * h * 4];
         crate::video::set_menu_scale(crate::config::MenuScale::Large);
-        draw(&mut frame, scale, &ui, None, None, false, false, labels());
+        draw(&mut frame, scale, &ui, None, None);
         let levels = ui.menu_nav.levels(&ui.menu_rows);
         for column in tree_menu_columns(&levels, &ui.menu_nav) {
             assert!(
@@ -9774,12 +8255,11 @@ mod tests {
         state.tab = LauncherTab::AvAudio;
         let ui = UiState {
             menu_open: false,
-            menu_scroll: 0,
             menu_rows: Vec::new(),
             menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Launcher(Box::new(state))),
         };
-        draw(&mut frame, scale, &ui, None, None, false, false, labels());
+        draw(&mut frame, scale, &ui, None, None);
         save(&frame, "launcher-av-audio");
 
         // The Video category, reached from the same nav row.
@@ -9788,12 +8268,11 @@ mod tests {
         state.tab = LauncherTab::AvVideo;
         let ui = UiState {
             menu_open: false,
-            menu_scroll: 0,
             menu_rows: Vec::new(),
             menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Launcher(Box::new(state))),
         };
-        draw(&mut frame, scale, &ui, None, None, false, false, labels());
+        draw(&mut frame, scale, &ui, None, None);
         save(&frame, "launcher-av-video");
 
         // The Floppy tab with two drives wired in: each drive is a greyed "DFn:"
@@ -9811,12 +8290,11 @@ mod tests {
         state.tab = LauncherTab::Floppy;
         let ui = UiState {
             menu_open: false,
-            menu_scroll: 0,
             menu_rows: Vec::new(),
             menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Launcher(Box::new(state))),
         };
-        draw(&mut frame, scale, &ui, None, None, false, false, labels());
+        draw(&mut frame, scale, &ui, None, None);
         save(&frame, "launcher-floppy");
 
         // The Floppy tab with DF1 turned over to a real drive: its media row
@@ -9836,12 +8314,11 @@ mod tests {
         state.tab = LauncherTab::Floppy;
         let ui = UiState {
             menu_open: false,
-            menu_scroll: 0,
             menu_rows: Vec::new(),
             menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Launcher(Box::new(state))),
         };
-        draw(&mut frame, scale, &ui, None, None, false, false, labels());
+        draw(&mut frame, scale, &ui, None, None);
         save(&frame, "launcher-floppy-bridge");
 
         // The FloppyBridge settings page reached from Configure, on an
@@ -9871,11 +8348,10 @@ mod tests {
             state.tab = LauncherTab::FloppyBridge;
             let ui = UiState {
                 menu_open: false,
-                menu_scroll: 0,
                 panel: Some(Panel::Launcher(Box::new(state))),
                 ..Default::default()
             };
-            draw(&mut frame, scale, &ui, None, None, false, false, labels());
+            draw(&mut frame, scale, &ui, None, None);
             save(&frame, "launcher-floppybridge-page");
         }
     }

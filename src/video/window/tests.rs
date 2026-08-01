@@ -688,61 +688,99 @@ fn input_mapping_panel_clears_and_switches_mappings() {
     );
 }
 
+/// Walk the open menu by label and pick the row at the end of the path.
+fn pick_menu(app: &mut super::App, path: &[&str]) {
+    let mut rows: &[crate::video::menu::MenuRow] = &app.ui.menu_rows;
+    let mut nav_path = Vec::new();
+    for (depth, label) in path.iter().enumerate() {
+        let index = rows
+            .iter()
+            .position(|r| r.label == *label)
+            .unwrap_or_else(|| panic!("no row {label:?} at depth {depth}"));
+        if depth + 1 == path.len() {
+            app.ui.menu_nav.open_path(nav_path, Some(index));
+            app.activate_menu_row(None);
+            return;
+        }
+        rows = rows[index].children().expect("a level to descend into");
+        nav_path.push(index);
+    }
+}
+
 #[test]
-fn menu_scroll_controls_move_the_list_without_closing_the_menu() {
+fn opening_the_menu_builds_it_and_closing_puts_it_away() {
     let mut app = test_app();
+    app.set_mouse_captured(true);
+
     app.activate_bar_control(super::BarControl::Menu);
     assert!(app.ui.menu_open);
-    assert_eq!(app.ui.menu_scroll, 0, "each open starts at the top");
+    assert!(
+        !app.ui.menu_rows.is_empty(),
+        "the menu is built as it opens"
+    );
+    assert_eq!(app.ui.menu_nav.depth(), 0, "each open starts at the top");
+    assert!(
+        !app.mouse_captured,
+        "the pointer has to be able to reach the menu it just opened"
+    );
 
-    // The real menu fits, so there is nothing to scroll -- but the controls
-    // must be inert rather than wrong, and must never close the menu.
-    app.activate_ui_control(UiControl::MenuScrollDown);
-    assert_eq!(app.ui.menu_scroll, 0);
-    app.activate_ui_control(UiControl::MenuScrollUp);
-    assert_eq!(app.ui.menu_scroll, 0);
-    assert!(app.ui.menu_open, "scrolling never dismisses the menu");
-
-    // A scroll position left over from a previous open is cleared, so the
-    // list never reappears part-way down.
-    app.ui.menu_scroll = 3;
-    app.activate_bar_control(super::BarControl::Menu); // close
-    app.activate_bar_control(super::BarControl::Menu); // open again
-    assert_eq!(app.ui.menu_scroll, 0);
-
-    // Choosing an item still closes the menu.
-    app.activate_ui_control(UiControl::MenuItem(super::ui::MenuItem::Autofire));
-    assert!(!app.ui.menu_open);
+    // Somewhere down a submenu, then closed and opened again: no trace of
+    // where it was left.
+    app.ui.menu_nav.open_path(vec![4], Some(1));
+    app.activate_bar_control(super::BarControl::Menu);
+    assert!(!app.ui.menu_open && app.ui.menu_rows.is_empty());
+    app.activate_bar_control(super::BarControl::Menu);
+    assert_eq!(app.ui.menu_nav.depth(), 0);
+    assert_eq!(app.ui.menu_nav.cursor(), None);
 }
 
 #[test]
-fn autofire_menu_item_cycles_the_rate() {
+fn choosing_a_setting_leaves_the_menu_open_and_shows_it_took() {
     let mut app = test_app();
-    assert_eq!(app.autofire_hz, 0);
-    app.activate_ui_control(UiControl::MenuItem(super::ui::MenuItem::Autofire));
-    assert_eq!(app.autofire_hz, crate::config::AUTOFIRE_RATES[1]);
-    for _ in 0..crate::config::AUTOFIRE_RATES.len() - 1 {
-        app.activate_ui_control(UiControl::MenuItem(super::ui::MenuItem::Autofire));
-    }
-    assert_eq!(app.autofire_hz, 0, "the cycle returns to off");
+    app.activate_bar_control(super::BarControl::Menu);
+
+    let rate = crate::config::AUTOFIRE_RATES[1];
+    pick_menu(
+        &mut app,
+        &[
+            "Input Settings",
+            "Autofire",
+            &crate::config::autofire_label(rate),
+        ],
+    );
+    assert_eq!(app.autofire_hz, rate);
+    assert!(app.ui.menu_open, "a setting does not dismiss the menu");
+
+    // The rebuilt tree marks the rate that is now in force.
+    let input = app
+        .ui
+        .menu_rows
+        .iter()
+        .find(|r| r.label == "Input Settings")
+        .expect("input settings");
+    let autofire = input
+        .children()
+        .expect("children")
+        .iter()
+        .find(|r| r.label == "Autofire")
+        .expect("autofire");
+    let marked: Vec<&str> = autofire
+        .children()
+        .expect("rates")
+        .iter()
+        .filter(|r| r.marked())
+        .map(|r| r.label.as_str())
+        .collect();
+    assert_eq!(marked, vec![crate::config::autofire_label(rate)]);
 }
 
 #[test]
-fn crt_shader_menu_item_cycles_the_presets() {
-    use crate::config::ShaderKind;
+fn choosing_a_window_closes_the_menu_behind_it() {
     let mut app = test_app();
-    assert_eq!(app.crt_shader_kind, ShaderKind::None);
-    for expected in [
-        ShaderKind::Scanlines,
-        ShaderKind::Mask,
-        ShaderKind::Crt,
-        // No user shader is configured, so the cycle skips Custom and
-        // returns to off rather than selecting a shader it cannot load.
-        ShaderKind::None,
-    ] {
-        app.activate_ui_control(UiControl::MenuItem(super::ui::MenuItem::CrtShader));
-        assert_eq!(app.crt_shader_kind, expected);
-    }
+    app.activate_bar_control(super::BarControl::Menu);
+    pick_menu(&mut app, &["Keyboard Shortcuts..."]);
+    assert!(!app.ui.menu_open && app.ui.menu_rows.is_empty());
+    assert!(matches!(app.ui.panel, Some(super::Panel::Shortcuts)));
 }
 
 #[test]
@@ -752,13 +790,12 @@ fn a_broken_custom_shader_never_becomes_the_selected_preset() {
     // Configured but unloadable: the fixture has no window, so there is no
     // device to compile it against.
     app.custom_shader_path = Some(std::path::PathBuf::from("/nonexistent/nope.wgsl"));
-    for _ in 0..3 {
-        app.activate_ui_control(UiControl::MenuItem(super::ui::MenuItem::CrtShader));
-    }
+    app.activate_bar_control(super::BarControl::Menu);
+    pick_menu(&mut app, &["Video Settings", "CRT Shader", "CRT (1084)"]);
     assert_eq!(app.crt_shader_kind, ShaderKind::Crt);
-    // Custom is offered next, fails to load, and the cycle falls through to
-    // off rather than selecting a preset that would draw nothing.
-    app.activate_ui_control(UiControl::MenuItem(super::ui::MenuItem::CrtShader));
+    // Custom is offered, fails to load, and leaves nothing selected that
+    // would draw nothing.
+    pick_menu(&mut app, &["Video Settings", "CRT Shader", "Custom"]);
     assert_eq!(app.crt_shader_kind, ShaderKind::None);
 }
 
@@ -1073,18 +1110,17 @@ fn cycle_port_device_hot_plugs_and_releases_held_lines() {
         .input
         .set_joystick(1, true, false, false, false, true, false);
 
-    // Joystick -> Cd32Pad -> Analogue -> None -> Mouse, releasing the
-    // held fire/direction lines at the first swap.
-    app.cycle_port_device(1);
+    // Swapping the device releases the lines the old one was holding: a
+    // fire button held as the plug comes out must not stay down forever.
+    app.hot_plug_port_device(1, PortDevice::Cd32Pad);
     assert_eq!(app.emu.bus().input.device(1), PortDevice::Cd32Pad);
     assert!(!app.emu.bus().input.ports[1].fire, "hot-plug released fire");
     assert!(!app.emu.bus().input.ports[1].up);
-    app.cycle_port_device(1);
-    assert_eq!(app.emu.bus().input.device(1), PortDevice::Analogue);
-    app.cycle_port_device(1);
-    assert_eq!(app.emu.bus().input.device(1), PortDevice::None);
-    app.cycle_port_device(1);
-    assert_eq!(app.emu.bus().input.device(1), PortDevice::Mouse);
+
+    for device in [PortDevice::Analogue, PortDevice::None, PortDevice::Mouse] {
+        app.hot_plug_port_device(1, device);
+        assert_eq!(app.emu.bus().input.device(1), device);
+    }
 }
 
 #[test]
@@ -3990,7 +4026,6 @@ fn quick_save_slots_round_trip_and_report_empty_slots() {
     let mut app = test_app();
     // An unwritten slot reports rather than failing the load.
     app.quick_load_state(7, None);
-    assert_eq!(app.save_slot, 7, "addressing a slot selects it");
     assert_eq!(app.emu.bus().emulated_frames(), 0, "nothing was restored");
 
     for _ in 0..6 {
@@ -4017,23 +4052,9 @@ fn quick_save_slots_round_trip_and_report_empty_slots() {
 }
 
 #[test]
-fn save_slot_selection_wraps_through_every_slot() {
-    let mut app = test_app();
-    assert_eq!(app.save_slot, 1);
-    let mut seen = Vec::new();
-    for _ in 0..crate::savestate::SLOT_COUNT {
-        app.cycle_save_slot();
-        seen.push(app.save_slot);
-    }
-    assert_eq!(seen.last(), Some(&1), "wraps back to the first slot");
-    let mut sorted = seen.clone();
-    sorted.sort_unstable();
-    assert_eq!(
-        sorted,
-        (1..=crate::savestate::SLOT_COUNT).collect::<Vec<_>>(),
-        "every slot is reachable from the menu"
-    );
-    // Every slot the hotkeys address has a distinct file.
+fn every_slot_addresses_a_file_of_its_own() {
+    // The menu and the hotkeys both name a slot outright, so all ten have to
+    // resolve, and to ten different files.
     let paths: Vec<_> = (1..=crate::savestate::SLOT_COUNT)
         .map(crate::savestate::slot_path)
         .collect();

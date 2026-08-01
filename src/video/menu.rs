@@ -452,9 +452,6 @@ fn gain_label(db: f32) -> String {
     }
 }
 
-/// Autofire rates the menu offers, in Hz. 0 is off.
-const AUTOFIRE_RATES: [u8; 6] = [0, 5, 10, 15, 20, 30];
-
 /// Build the menu as it stands for this machine.
 pub fn build(s: &MenuState) -> Vec<MenuRow> {
     let mut rows = vec![
@@ -603,7 +600,7 @@ fn input_rows(s: &MenuState) -> Vec<MenuRow> {
         })
         .collect();
 
-    let autofire = AUTOFIRE_RATES
+    let autofire = crate::config::AUTOFIRE_RATES
         .iter()
         .map(|hz| {
             MenuRow::choice(
