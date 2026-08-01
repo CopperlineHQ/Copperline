@@ -1010,7 +1010,10 @@ tread:
         not.w   d0             ; elapsed = $ffff - remaining
         rts
 
-;------------------------------------------------ render 10 results as hex rows
+;------------------------------------------------ render all 32 results
+; One row per test: two-digit decimal row ID, a blank column, then the value
+; as 8 hex digits, at a 7-scanline pitch so the whole table sits inside the
+; CRT-safe area.
 render:
         lea     SCREEN,a1       ; clear the bitplane: with a 7-line pitch the
         move.w  #40*256/4-1,d0  ; rows no longer cover every visible line

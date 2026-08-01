@@ -67,24 +67,31 @@ if len(rows) < 32:
     print(f"only {len(rows)} rows: {rows}")
     sys.exit(1)
 
-# The ratio compares Copperline against REAL where a real-hardware reading
-# exists, otherwise against FS-UAE.
-print(f"{'row':>3} {'desc':13} {'CL':>7} {'FS-UAE':>7} {'REAL':>7} {'ratio':>6}")
+# Values print as hex, matching the disk's on-screen table and the README;
+# the ratio compares Copperline against REAL where a real-hardware reading
+# exists, otherwise against FS-UAE. "beam" rows are raw beam positions and
+# "sentinel" rows the slow-RAM-absent zeros; both compare by equality.
+def hx(v):
+    return f"{v:04X}"
+
+
+print(f"{'row':>3} {'desc':13} {'CL':>8} {'FS-UAE':>8} {'REAL':>8} {'ratio':>8}")
 worst = []
 for i in range(32):
     ref, got, real = FS[i], rows[i], REAL.get(i)
-    shown = str(real) if real is not None else "-"
+    shown = hx(real) if real is not None else "-"
     base = real if real is not None else ref
     if i in RAW or base == 0:
+        kind = "beam" if i in RAW else "sentinel"
         state = "ok" if got == base else "DIFF"
-        print(f"{i:>3} {DESC[i]:13} {got:>7} {ref:>7} {shown:>7} {'(raw)':>6} {state}")
+        print(f"{i:>3} {DESC[i]:13} {hx(got):>8} {hx(ref):>8} {shown:>8} {kind:>8} {state}")
         continue
     ratio = got / base
     off = abs(ratio - 1)
     flag = "<<<" if off > 0.15 else ("<<" if off > 0.05 else "")
     if off > 0.05:
         worst.append((off, i))
-    print(f"{i:>3} {DESC[i]:13} {got:>7} {ref:>7} {shown:>7} {ratio:>6.2f} {flag}")
+    print(f"{i:>3} {DESC[i]:13} {hx(got):>8} {hx(ref):>8} {shown:>8} {ratio:>8.2f} {flag}")
 
 worst.sort(reverse=True)
 print("worst:", [f"r{i}({DESC[i]} {o * 100:.0f}%)" for o, i in worst[:10]])
