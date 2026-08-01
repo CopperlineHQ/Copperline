@@ -2,9 +2,12 @@
 
 A tiny bootable Amiga disk that measures how long a fixed amount of CPU and
 memory work takes, using the CIA-A timer (E-clock) as the reference, and shows
-the raw results on screen as hex (and streams them out the serial port). Run the
-same disk on Copperline, vAmiga and FS-UAE and compare: any number that differs
-tells you exactly which operation an emulator times differently.
+the raw results on screen (and streams them out the serial port): one line per
+test, a two-digit decimal row number followed by the value as 8-digit hex. All
+32 rows fit inside the CRT-safe area, so the display is photographable on real
+hardware. Run the same disk on Copperline, vAmiga, FS-UAE and real machines and
+compare: any number that differs tells you exactly which operation an emulator
+times differently.
 
 A small boot block (`boot.asm`) loads the main program (`test.asm`) to a fixed
 address ($30000) and jumps to it; the main program takes over the machine
@@ -61,15 +64,35 @@ python3 timing-test/compare-a1200.py    # captured reference, run from timing-te
 ```
 
 That reference column found the 020's taken-branch cost: rows 4, 5, 7, 14, 28,
-29 and 30 all differ from FS-UAE by exactly two clocks per loop iteration, and
-only in the iteration's branch (`move`, `shift`, `mul` and every chip-bus row
-agree once the branch is accounted for). Rows 16, 17 and 21 -- the per-frame
-VHPOSR-polling loops -- separately expose the extra colour clock a CPU
-custom-register read costs over a chip-RAM read. Both are modelled; see
-`docs/internals/cpu.md`. What the column still shows open is the write class:
-chip writes (rows 3, 10, 12, 18) are billed a whole colour clock where a real
-020 posts the write inside its shorter bus cycle, so they run ~10% slow (~29%
-under bitplane DMA), and row 31 (DIV during an active display) is ~27% fast.
+29 and 30 all differ per loop iteration only in the iteration's branch
+(`move`, `shift`, `mul` and every chip-bus row agree once the branch is
+accounted for). Rows 16, 17 and 21 -- the per-frame VHPOSR-polling loops --
+separately expose the extra colour clock a CPU custom-register read costs over
+a chip-RAM read. Both are modelled; see `docs/internals/cpu.md`.
+
+### Real A1200 column (2026-08)
+
+A stock A1200 (68EC020 at 14.19 MHz, AGA, 2 MB chip, KS 3.2.3 -- the ROM
+version does not matter, the test takes over the machine) booted the disk from
+floppy and its on-screen table was read from CRT photos. The rows whose digits
+were unambiguous are recorded as the `REAL` column in `compare-a1200.py`, and
+where real hardware and FS-UAE disagree, real hardware wins:
+
+- A cached taken `dbra` is **7 clocks** (rows 7, 14, 30 agree within two
+  E-ticks), one less than FS-UAE bills, and the `move`, shift, `mulu`,
+  paired-op and DIV rows all land once that clock is accounted for. The m68k
+  core's `TAKEN_BRANCH_REFILL` is calibrated to this (one clock, not the
+  FS-UAE-derived two).
+- Row 31 (beam advance across a DIVU loop inside a 6-bitplane display): real
+  `0378`, Copperline `0376`, FS-UAE `04D2` -- FS-UAE over-bills that phase by
+  ~39%; Copperline is within 2 colour clocks of the silicon.
+- Still open, now measured against real hardware: the posted-write class
+  (rows 3, 10, 12, 18: a real write+dbra iteration is ~8 clocks against the
+  11 billed; FS-UAE also over-bills, by less), the chip-read loop (row 2: one
+  clock per iteration short now that the branch over-bill no longer cancels a
+  read under-bill), and row 29 (a register-only pair pipelines to 10 clocks
+  on real silicon -- 020 execution-stage overlap, not expressible in a
+  per-instruction model).
 
 ## What each row measures
 

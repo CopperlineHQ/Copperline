@@ -369,17 +369,22 @@ total. An A1200 chip-RAM access can therefore extend an instruction through
 Alice arbitration; selecting a smaller CPU total cannot erase a bus wait
 that already happened.
 
-A taken branch pays two clocks on top of its table entry. The section-8.2
-entries are written for an instruction whose successor is already in the
-three-stage pipeline; a taken branch invalidates the decode and execute stages,
-so the target cannot begin until the pipe refills. The manual charges that to
-the *following* instruction's head, which a per-instruction model with no
-overlap stage has nowhere to put, so Copperline charges it where the flush
-happens (`TAKEN_BRANCH_REFILL`). Without it a `dbra` loop runs at the isolated
-cache-case 6 clocks per iteration instead of 8, which makes every tight loop --
-depackers, MFM decoders, chase-the-beam poll loops -- about 10% fast. It is the
-one divergence that showed up across seven independent `timing-test` rows (4,
-5, 7, 14, 28, 29, 30) against the FS-UAE A1200 reference; see
+A taken branch pays a pipeline-refill charge on top of its table entry. The
+section-8.2 entries are written for an instruction whose successor is already
+in the three-stage pipeline; a taken branch invalidates the decode and execute
+stages, so the target cannot begin until the pipe refills. The manual charges
+that to the *following* instruction's head, which a per-instruction model with
+no overlap stage has nowhere to put, so the m68k core charges it where the
+flush happens (`TAKEN_BRANCH_REFILL`). Without it a `dbra` loop runs at the
+isolated cache-case 6 clocks per iteration, which makes every tight loop --
+depackers, MFM decoders, chase-the-beam poll loops -- fast; it showed up
+across seven independent `timing-test` rows (4, 5, 7, 14, 28, 29, 30). The
+charge was first calibrated to two clocks against the FS-UAE A1200 reference;
+a real A1200 (stock 68EC020 at 14.19 MHz, 2026-08) measures a cached taken
+`dbra` at 7 clocks -- cache-case 6 plus one -- in three independent loop rows,
+with the `move`, shift, `mulu`, paired-op and DIV-under-display rows agreeing
+once that one clock is accounted for. The refill is therefore one clock, and
+FS-UAE itself over-bills every taken branch by one; see
 `timing-test/README.md`.
 
 This is intentionally a datasheet model, not a claim of cycle exactness.
@@ -423,6 +428,20 @@ fills like posted writes made the A1200 profile report 5.52x A600 chip speed
 and 1.61x A1200 CPU speed after the instruction-table update. Billing the
 data-return phase changes those figures to 3.55x and 1.10x respectively,
 without altering register-only timing-test rows.
+
+With the branch refill recalibrated to the real machine, the real-A1200
+column leaves two known CPU-side gaps, both needing sub-cck bus-cycle work
+rather than table adjustments. The posted-write class: a real write-plus-dbra
+chip-RAM iteration measures ~8 clocks against the 11 billed (`timing-test`
+rows 3, 10, 12, 18) -- the real 020 drains the posted write while the loop
+branch executes, which billing a whole colour clock per write cannot express;
+FS-UAE over-bills these too, by less. And the chip-RAM read loop (row 2): the
+real machine needs one more clock per iteration than is now billed. The old
+exact match on that row was two errors cancelling -- the branch over-bill
+hiding a read under-bill -- and correcting the branch exposed it. Row 29
+(the register-only instruction pair) also runs one clock faster per iteration
+on real silicon than the per-instruction model can express: that is
+execution-stage overlap, listed above as not modelled.
 
 ## MMU
 
