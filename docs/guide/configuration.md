@@ -1397,21 +1397,32 @@ NAT's limitations.
 
 ```toml
 [rtg]
-card = "z3660"
+card = "picasso2"
+vram = "2M"
 ```
 
-`card` is `"z3660"` or `"none"`; a machine takes at most one. The Z3660 is a
-Zorro III board, so it comes fitted by default on machines whose CPU has a
-32-bit address bus (the A3000 and A4000) and is unavailable on the rest --
-asking for it there is an error, as it is for Zorro III RAM. It gives the
-guest high-resolution,
-high-colour screens through Picasso96. It needs the
-open-source Z3660.card driver installed in the guest (with its monitor in
-`DEVS:Monitors`); with that in place, Z3660 screen modes appear in
-ScreenMode, and the window shows the board's output when a screen is
-opened, switching back to the native Amiga display when it closes.
+`card` is `"picasso2"`, `"picasso2plus"`, `"z3660"`, or `"none"`; a machine
+takes at most one. All three boards give the guest high-resolution,
+high-colour screens through Picasso96.
 
-The board's stock monitor ships with the `DISPLAYCHAIN=NO` tooltype, which
+`"picasso2"` fits a Village Tronic Picasso II with a CL-GD5426 graphics
+controller. `"picasso2plus"` fits the later CL-GD5428 revision, reports its
+distinct autoconfig serial number, and wires vertical blank to INT2. Both are
+Zorro II boards, so they work with 68000/68010 and 24-bit 68EC020 machines as
+well as 32-bit CPUs. `vram` selects either real board's `"1M"` or `"2M"`
+memory configuration and defaults to `"2M"`; it is ignored for other cards.
+Install the Picasso96 `PicassoII.card` driver and its monitor file in the
+guest. The board starts on native Amiga pass-through and switches the
+Copperline display to RTG only while the guest enables a valid Picasso screen.
+
+`"z3660"` is a Zorro III board. It comes fitted by default on machines whose
+CPU has a 32-bit address bus (the A3000 and A4000) and is unavailable on the
+rest; asking for it there is an error, as it is for Zorro III RAM. It needs the
+open-source Z3660.card driver installed in the guest (with its monitor in
+`DEVS:Monitors`). With that in place, Z3660 screen modes appear in ScreenMode,
+and the window shows the board's output when a screen is opened.
+
+The Z3660 board's stock monitor ships with the `DISPLAYCHAIN=NO` tooltype, which
 models the real hardware's separate RTG monitor and never hands the display
 back to the native screen. On a single-window emulator you usually want
 `DISPLAYCHAIN=YES`, so the one window follows whichever screen is active.

@@ -8984,14 +8984,26 @@ impl App {
         // modes): the presentation resampler blends adjacent lines, so
         // per-scanline forensics need the unscaled field.
         let src_rows = self.present_rows;
-        let result = save_present_frame(
-            path,
-            &self.present_fb,
-            src_rows,
-            self.present_width,
-            self.overscan,
-            self.present_tv_aperture_rows,
-        );
+        let result = if self.rtg_present_dims.is_some() {
+            // An RTG board's frame already has one presentation row per
+            // board row: save it at that height, matching the control
+            // protocol's capture, instead of scaling to the chipset glass.
+            screenshot::save(
+                path,
+                &self.present_fb[..src_rows * self.present_width],
+                self.present_width as u32,
+                src_rows as u32,
+            )
+        } else {
+            save_present_frame(
+                path,
+                &self.present_fb,
+                src_rows,
+                self.present_width,
+                self.overscan,
+                self.present_tv_aperture_rows,
+            )
+        };
         match result {
             Ok(()) => info!("screenshot saved: {}", path.display()),
             Err(e) => warn!("screenshot save failed ({}): {e:#}", path.display()),

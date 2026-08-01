@@ -197,6 +197,8 @@ pub struct Config {
     /// the Zorro chain and presents RTG screens (all pixel formats, core
     /// blitter ops, hardware mouse sprite) to its Picasso96 driver.
     pub rtg: RtgCard,
+    /// Picasso II/II+ display memory. Ignored by other RTG cards.
+    pub rtg_vram_bytes: usize,
     pub floppy: FloppyConfig,
     /// Which floppy drive slots are electrically present. DF0 is the
     /// internal drive and is always present; DF1-DF3 are external drives
@@ -663,6 +665,11 @@ pub enum RtgCard {
     /// The Z3660 accelerator's FPGA RTG core, driven by the open-source
     /// Z3660.card Picasso96 driver.
     Z3660,
+    /// Village Tronic Picasso II: Zorro II, CL-GD5426, 1 or 2 MB VRAM.
+    Picasso2,
+    /// Village Tronic Picasso II+: Zorro II, CL-GD5428, 1 or 2 MB VRAM,
+    /// with vertical blank wired to INT2.
+    Picasso2Plus,
 }
 
 /// Which SCSI host adapter the `[scsi]` section fits: one of the two Zorro
@@ -1630,6 +1637,7 @@ impl Default for Config {
             scsi: ScsiConfig::default(),
             a2065_net: None,
             rtg: RtgCard::None,
+            rtg_vram_bytes: 2 * 1024 * 1024,
             floppy: FloppyConfig::default(),
             floppy_connected: [true, false, false, false],
             floppy_playlists: std::array::from_fn(|_| Vec::new()),
@@ -2527,10 +2535,12 @@ pub(crate) struct RawA2065 {
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawRtg {
-    /// Card to fit: "z3660" (the Z3660's FPGA RTG core, driven by
-    /// Z3660.card) or "none" (the default).
+    /// Card to fit: "z3660", "picasso2", "picasso2plus", or "none".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) card: Option<String>,
+    /// Picasso II/II+ display memory: "1M" or "2M" (default).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) vram: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -3245,14 +3255,27 @@ impl TryFrom<RawConfig> for Config {
             Some(raw_card) => match raw_card.trim().to_ascii_lowercase().as_str() {
                 "none" => RtgCard::None,
                 "z3660" => RtgCard::Z3660,
+                "picasso2" => RtgCard::Picasso2,
+                "picasso2plus" | "picasso2+" => RtgCard::Picasso2Plus,
                 _ => {
                     errors.push(anyhow!(
                         "[rtg] card = {raw_card:?} is not known \
-                         (expected \"z3660\" or \"none\")"
+                         (expected \"z3660\", \"picasso2\", \"picasso2plus\", or \"none\")"
                     ));
                     RtgCard::None
                 }
             },
+        };
+        // Only the Picasso II cards have configurable display memory; other
+        // cards ignore [rtg] vram entirely, so a leftover value must not
+        // fail an unrelated configuration.
+        let rtg_vram_bytes = if matches!(rtg, RtgCard::Picasso2 | RtgCard::Picasso2Plus) {
+            match raw.rtg.vram.as_deref() {
+                None => defaults.rtg_vram_bytes,
+                Some(value) => parse_size(value, "RTG VRAM")?,
+            }
+        } else {
+            defaults.rtg_vram_bytes
         };
 
         let scsi = ScsiConfig {
@@ -3376,7 +3399,7 @@ impl TryFrom<RawConfig> for Config {
         errors.extend(validate_mb_ram(mb_ram_bytes, mem_controller, cpu).err());
         errors.extend(validate_accel_ram(accel_ram_bytes, cpu).err());
         errors.extend(validate_z3_ram(z3_ram_bytes, cpu).err());
-        errors.extend(validate_rtg_card(rtg, cpu).err());
+        errors.extend(validate_rtg_card(rtg, rtg_vram_bytes, cpu).err());
         let board_specs = zorro_boards
             .iter()
             .chain(wasm_boards.iter().map(|w| &w.spec));
@@ -3564,6 +3587,7 @@ impl TryFrom<RawConfig> for Config {
             scsi,
             a2065_net,
             rtg,
+            rtg_vram_bytes,
             floppy,
             floppy_connected,
             floppy_playlists,
@@ -4281,13 +4305,21 @@ fn cpu_has_32bit_bus(cpu: CpuModel) -> bool {
     )
 }
 
-fn validate_rtg_card(rtg: RtgCard, cpu: CpuModel) -> Result<()> {
+fn validate_rtg_card(rtg: RtgCard, vram_bytes: usize, cpu: CpuModel) -> Result<()> {
     if rtg == RtgCard::Z3660 && !cpu_has_32bit_bus(cpu) {
         bail!(
             "[rtg] card = \"z3660\" is a Zorro III board and needs a CPU \
              with a 32-bit address bus (68020/68030/68040/68060); {:?} has \
              a 24-bit bus",
             cpu
+        );
+    }
+    if matches!(rtg, RtgCard::Picasso2 | RtgCard::Picasso2Plus)
+        && !matches!(vram_bytes, 0x10_0000 | 0x20_0000)
+    {
+        bail!(
+            "[rtg] vram for Picasso II cards must be \"1M\" or \"2M\", got {} bytes",
+            vram_bytes
         );
     }
     Ok(())
@@ -5753,6 +5785,10 @@ mod tests {
             assert_eq!(piped.rtc_present, direct.rtc_present, "{model:?} rtc");
             assert_eq!(piped.rtc_chip, direct.rtc_chip, "{model:?} rtc chip");
             assert_eq!(piped.rtg, direct.rtg, "{model:?} rtg");
+            assert_eq!(
+                piped.rtg_vram_bytes, direct.rtg_vram_bytes,
+                "{model:?} RTG VRAM"
+            );
         }
         Ok(())
     }
@@ -7529,7 +7565,46 @@ mod tests {
         // A bare config is a 68000 machine, which cannot host a Zorro III
         // board, so nothing is fitted.
         assert_eq!(parse_config("")?.rtg, RtgCard::None);
+
+        // Picasso II is a Zorro II card and remains valid on the default
+        // 68000 machine. Its fitted memory is part of the resolved config.
+        let picasso = parse_config("[rtg]\ncard = \" Picasso2 \"\nvram = \"1M\"\n")?;
+        assert_eq!(picasso.rtg, RtgCard::Picasso2);
+        assert_eq!(picasso.rtg_vram_bytes, 1024 * 1024);
+        let picasso = parse_config("[rtg]\ncard = \"picasso2\"\n")?;
+        assert_eq!(picasso.rtg_vram_bytes, 2 * 1024 * 1024);
+        let plus = parse_config("[rtg]\ncard = \" Picasso2Plus \"\nvram = \"1M\"\n")?;
+        assert_eq!(plus.rtg, RtgCard::Picasso2Plus);
+        assert_eq!(plus.rtg_vram_bytes, 1024 * 1024);
+        let plus_alias = parse_config("[rtg]\ncard = \"picasso2+\"\n")?;
+        assert_eq!(plus_alias.rtg, RtgCard::Picasso2Plus);
         Ok(())
+    }
+
+    #[test]
+    fn picasso2_rejects_non_hardware_vram_sizes() {
+        let err = parse_config("[rtg]\ncard = \"picasso2\"\nvram = \"3M\"\n").unwrap_err();
+        assert!(
+            err.to_string().contains("must be \"1M\" or \"2M\""),
+            "{err:#}"
+        );
+        let err = parse_config("[rtg]\ncard = \"picasso2plus\"\nvram = \"3M\"\n").unwrap_err();
+        assert!(
+            err.to_string().contains("must be \"1M\" or \"2M\""),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn rtg_vram_is_ignored_by_non_picasso_cards() {
+        let cfg = parse_config("[rtg]\ncard = \"none\"\nvram = \"oops\"\n").unwrap();
+        assert_eq!(cfg.rtg, RtgCard::None);
+        assert_eq!(cfg.rtg_vram_bytes, 2 * 1024 * 1024);
+        let cfg =
+            parse_config("[cpu]\nmodel = \"68030\"\n\n[rtg]\ncard = \"z3660\"\nvram = \"3M\"\n")
+                .unwrap();
+        assert_eq!(cfg.rtg, RtgCard::Z3660);
+        assert_eq!(cfg.rtg_vram_bytes, 2 * 1024 * 1024);
     }
 
     /// A machine that can host a Zorro III board gets one fitted by default,

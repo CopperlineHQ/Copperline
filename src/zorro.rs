@@ -13,9 +13,9 @@
 //! Boards are described by a [`BoardSpec`]; built-in RAM boards come from
 //! `[memory] fast`/`z3` in the config, and additional boards can be loaded
 //! from TOML metadata files via `[[zorro]]` sections (the "plugin" path:
-//! the autoconfig identity lives in data, not code). Only RAM-backed
-//! boards are implemented today; other backings plug in via
-//! [`BoardBacking`].
+//! the autoconfig identity lives in data, not code). RAM-backed storage and
+//! functional device apertures share the same placement and dispatch path
+//! through [`BoardBacking`].
 
 use crate::net::NetConfig;
 use crate::wasm_manifest::{WasmCaps, WasmManifest};
@@ -35,6 +35,7 @@ const ERT_ZORROII: u8 = 0xC0;
 const ERT_ZORROIII: u8 = 0x80;
 const ERTF_MEMLIST: u8 = 1 << 5;
 const ERTF_DIAGVALID: u8 = 1 << 4;
+const ERTF_CHAINEDCONFIG: u8 = 1 << 3;
 
 // er_Flags fields.
 const ERFF_MEMSPACE: u8 = 1 << 7;
@@ -62,6 +63,27 @@ const PRODUCT_FAST_RAM: u8 = 0x03;
 const PRODUCT_Z3_RAM: u8 = 0x04;
 /// The services board (host filesystem and, later, other guest services).
 const PRODUCT_SERVICES: u8 = 0x05;
+
+/// Village Tronic's registered expansion manufacturer ID.
+pub const PICASSO2_MANUFACTURER_ID: u16 = 2167;
+/// Picasso II linear VRAM aperture. Product 13 is the unsupported segmented
+/// configuration selected by the physical board's jumper.
+pub const PICASSO2_PRODUCT_VRAM: u8 = 11;
+/// Picasso II VGA-register and monitor-switch window.
+pub const PICASSO2_PRODUCT_REGS: u8 = 12;
+#[allow(dead_code)]
+pub const PICASSO2_PRODUCT_SEGMENTED: u8 = 13;
+/// The original Picasso II serial number.
+pub const PICASSO2_SERIAL: u32 = 0x0002_0000;
+/// Picasso II+ serial number. The products stay 11 and 12; Picasso96 uses
+/// this serial to distinguish the CL-GD5428 revision from the original card.
+pub const PICASSO2PLUS_SERIAL: u32 = 0x0010_0000;
+
+/// Device-window offsets carry this tag to distinguish multiple autoconfig
+/// apertures owned by one [`crate::zorro_device::ZorroDevice`]. Physical
+/// in-tree device windows are at most 128 MB, so bits 31:28 are otherwise
+/// clear.
+pub const DEVICE_WINDOW_SHIFT: u32 = 28;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 // "II"/"III" are the bus generations' proper names (roman numerals), not
@@ -97,6 +119,14 @@ pub struct BoardSpec {
     pub backing: BoardBacking,
     /// Link the board space into the system free memory list (ERTF_MEMLIST).
     pub memlist: bool,
+    /// Request placement in autoconfig memory space (ERFF_MEMSPACE). Most
+    /// functional boards are I/O windows, but framebuffer apertures can be
+    /// device-backed memory windows.
+    pub memory_space: bool,
+    /// Another autoconfig identity belonging to this physical board follows.
+    pub chained: bool,
+    /// Logical aperture number passed to a shared device in offset bits 31:28.
+    pub window: u8,
     /// Autoboot: ERTF_DIAGVALID with er_InitDiagVec pointing at the
     /// DiagArea inside the configured board space.
     pub diag_vec: Option<u16>,
@@ -114,6 +144,9 @@ impl BoardSpec {
             size_bytes,
             backing: BoardBacking::Ram,
             memlist: true,
+            memory_space: true,
+            chained: false,
+            window: 0,
             diag_vec: None,
         }
     }
@@ -129,6 +162,9 @@ impl BoardSpec {
             size_bytes,
             backing: BoardBacking::Ram,
             memlist: true,
+            memory_space: true,
+            chained: false,
+            window: 0,
             diag_vec: None,
         }
     }
@@ -152,6 +188,9 @@ impl BoardSpec {
             size_bytes: 0x1_0000,
             backing: BoardBacking::Ram,
             memlist: false,
+            memory_space: true,
+            chained: false,
+            window: 0,
             diag_vec: None,
         }
     }
@@ -169,6 +208,9 @@ impl BoardSpec {
             size_bytes: 0x1_0000,
             backing: BoardBacking::Device(slot),
             memlist: false,
+            memory_space: false,
+            chained: false,
+            window: 0,
             diag_vec: None,
         }
     }
@@ -188,6 +230,9 @@ impl BoardSpec {
             size_bytes: 0x1_0000,
             backing: BoardBacking::Device(slot),
             memlist: false,
+            memory_space: false,
+            chained: false,
+            window: 0,
             diag_vec: Some(0x2000),
         }
     }
@@ -208,6 +253,9 @@ impl BoardSpec {
             size_bytes: 0x0100_0000,
             backing: BoardBacking::Device(slot),
             memlist: false,
+            memory_space: false,
+            chained: false,
+            window: 0,
             diag_vec: Some(0x0200),
         }
     }
@@ -231,6 +279,9 @@ impl BoardSpec {
             size_bytes: 0x1_0000,
             backing: BoardBacking::Device(slot),
             memlist: false,
+            memory_space: false,
+            chained: false,
+            window: 0,
             diag_vec: Some(crate::filesys::DIAG_OFFSET),
         }
     }
@@ -250,11 +301,95 @@ impl BoardSpec {
             size_bytes: crate::z3660::Z3660_WINDOW_BYTES,
             backing: BoardBacking::Device(slot),
             memlist: false,
+            memory_space: false,
+            chained: false,
+            window: 0,
+            diag_vec: None,
+        }
+    }
+
+    /// Picasso II linear framebuffer aperture (product 11). It is a
+    /// device-backed Zorro II memory-space board and is deliberately not
+    /// linked into Exec's free-memory list: Picasso96 owns the VRAM.
+    pub fn picasso2_vram(slot: usize, size_bytes: usize) -> Self {
+        Self::picasso2_vram_with_serial(slot, size_bytes, PICASSO2_SERIAL, "Picasso II VRAM")
+    }
+
+    /// Picasso II+ linear framebuffer aperture. Its product identity and
+    /// layout match the original board; the serial selects the revision.
+    pub fn picasso2plus_vram(slot: usize, size_bytes: usize) -> Self {
+        Self::picasso2_vram_with_serial(slot, size_bytes, PICASSO2PLUS_SERIAL, "Picasso II+ VRAM")
+    }
+
+    fn picasso2_vram_with_serial(slot: usize, size_bytes: usize, serial: u32, name: &str) -> Self {
+        Self {
+            name: name.into(),
+            version: ZorroVersion::II,
+            manufacturer: PICASSO2_MANUFACTURER_ID,
+            product: PICASSO2_PRODUCT_VRAM,
+            serial,
+            size_bytes,
+            backing: BoardBacking::Device(slot),
+            memlist: false,
+            memory_space: true,
+            chained: true,
+            window: 1,
+            diag_vec: None,
+        }
+    }
+
+    /// Picasso II VGA I/O and monitor-switch aperture (product 12).
+    pub fn picasso2_regs(slot: usize) -> Self {
+        Self::picasso2_regs_with_serial(slot, PICASSO2_SERIAL, "Picasso II registers")
+    }
+
+    /// Picasso II+ VGA I/O and monitor-switch aperture (product 12).
+    pub fn picasso2plus_regs(slot: usize) -> Self {
+        Self::picasso2_regs_with_serial(slot, PICASSO2PLUS_SERIAL, "Picasso II+ registers")
+    }
+
+    fn picasso2_regs_with_serial(slot: usize, serial: u32, name: &str) -> Self {
+        Self {
+            name: name.into(),
+            version: ZorroVersion::II,
+            manufacturer: PICASSO2_MANUFACTURER_ID,
+            product: PICASSO2_PRODUCT_REGS,
+            serial,
+            size_bytes: 0x1_0000,
+            backing: BoardBacking::Device(slot),
+            memlist: false,
+            memory_space: false,
+            chained: false,
+            window: 0,
             diag_vec: None,
         }
     }
 
     fn validate(&self) -> Result<()> {
+        if self.window > 0x0f {
+            bail!(
+                "board {:?}: device window tag must fit in four bits",
+                self.name
+            );
+        }
+        if self.window != 0 && !matches!(self.backing, BoardBacking::Device(_)) {
+            bail!(
+                "board {:?}: only device-backed boards may use a window tag",
+                self.name
+            );
+        }
+        // A tagged offset carries the aperture number in bits 31:28, so the
+        // aperture itself must decode entirely below the tag; a larger one
+        // would silently alias into a neighbouring window.
+        if self.window != 0 && self.size_bytes > 1 << DEVICE_WINDOW_SHIFT {
+            bail!(
+                "board {:?}: a window-tagged aperture must fit below the tag bits \
+                 ({} bytes exceeds the {} MiB window)",
+                self.name,
+                self.size_bytes,
+                (1usize << DEVICE_WINDOW_SHIFT) >> 20,
+            );
+        }
         match self.version {
             ZorroVersion::II => {
                 if zorro_ii_size_code(self.size_bytes).is_none() {
@@ -458,7 +593,8 @@ impl ZorroChain {
         for &(base, len, idx) in &self.device_regions {
             let off = addr.wrapping_sub(base);
             if u64::from(off) + size as u64 <= u64::from(len) {
-                return Some((self.boards[idx].spec.backing, off));
+                let window = u32::from(self.boards[idx].spec.window) << DEVICE_WINDOW_SHIFT;
+                return Some((self.boards[idx].spec.backing, off | window));
             }
         }
         None
@@ -566,20 +702,16 @@ impl ZorroChain {
         let spec = &self.boards[idx].spec;
         let mut rom = [0u8; AUTOCONFIG_ROM_BYTES];
         let memlist = if spec.memlist { ERTF_MEMLIST } else { 0 };
-        // I/O-style device boards do not claim the memory space flag.
-        let memspace = if spec.backing == BoardBacking::Ram {
-            ERFF_MEMSPACE
-        } else {
-            0
-        };
+        let chained = if spec.chained { ERTF_CHAINEDCONFIG } else { 0 };
+        let memspace = if spec.memory_space { ERFF_MEMSPACE } else { 0 };
         match spec.version {
             ZorroVersion::II => {
-                rom[0] = ERT_ZORROII | memlist | zorro_ii_size_code(spec.size_bytes)?;
+                rom[0] = ERT_ZORROII | memlist | chained | zorro_ii_size_code(spec.size_bytes)?;
                 rom[2] = memspace;
             }
             ZorroVersion::III => {
                 let (code, extended) = zorro_iii_size_bits(spec.size_bytes)?;
-                rom[0] = ERT_ZORROIII | memlist | code;
+                rom[0] = ERT_ZORROIII | memlist | chained | code;
                 rom[2] = memspace | ERFF_ZORRO_III | if extended { ERFF_EXTENDED } else { 0 };
             }
         }
@@ -801,6 +933,9 @@ pub fn load_board_metadata(path: &Path) -> Result<LoadedZorroBoard> {
                 size_bytes,
                 backing: BoardBacking::Ram,
                 memlist: raw.memlist.unwrap_or(true),
+                memory_space: true,
+                chained: false,
+                window: 0,
                 diag_vec: None,
             };
             spec.validate()
@@ -829,6 +964,9 @@ pub fn load_board_metadata(path: &Path) -> Result<LoadedZorroBoard> {
                 size_bytes,
                 backing: BoardBacking::Device(0),
                 memlist: raw.memlist.unwrap_or(false),
+                memory_space: false,
+                chained: false,
+                window: 0,
                 diag_vec: None,
             };
             spec.validate()
@@ -1347,5 +1485,76 @@ mod tests {
 
         // The chain is exhausted: the config window floats.
         assert_eq!(chain.config_read(AUTOCONFIG_BASE, 1), 0xFF);
+    }
+
+    #[test]
+    fn picasso2_chained_identities_share_one_tagged_device() {
+        let mut chain = chain_with(vec![
+            BoardSpec::picasso2_vram(3, 2 * 1024 * 1024),
+            BoardSpec::picasso2_regs(3),
+        ]);
+
+        // Product 11 is a 2 MB Zorro II memory-space aperture and announces
+        // that another identity belonging to this physical board follows.
+        assert_eq!(chain.config_logical_byte(0, 0), Some(0xce));
+        assert_eq!(chain.config_logical_byte(0, 1), Some(PICASSO2_PRODUCT_VRAM));
+        assert_eq!(chain.config_logical_byte(0, 2), Some(ERFF_MEMSPACE));
+        assert_eq!(chain.config_logical_byte(0, 4), Some(0x08));
+        assert_eq!(chain.config_logical_byte(0, 5), Some(0x77));
+        assert_eq!(chain.config_logical_byte(0, 6), Some(0x00));
+        assert_eq!(chain.config_logical_byte(0, 7), Some(0x02));
+
+        chain.config_write(AUTOCONFIG_BASE + EC_BASEADDRESS_PHYS, 1, 0x20);
+        assert_eq!(
+            chain.device_region_at(0x0020_0123, 1),
+            Some((BoardBacking::Device(3), 1 << DEVICE_WINDOW_SHIFT | 0x123))
+        );
+
+        // Product 12 follows as a normal 64 KB I/O aperture with no tag.
+        assert_eq!(chain.config_logical_byte(1, 0), Some(0xc1));
+        assert_eq!(chain.config_logical_byte(1, 1), Some(PICASSO2_PRODUCT_REGS));
+        assert_eq!(chain.config_logical_byte(1, 2), Some(0));
+        chain.config_write(AUTOCONFIG_BASE + EC_BASEADDRESS_PHYS, 1, 0xe9);
+        assert_eq!(
+            chain.device_region_at(0x00e9_03c4, 2),
+            Some((BoardBacking::Device(3), 0x3c4))
+        );
+    }
+
+    #[test]
+    fn picasso2plus_keeps_products_and_uses_revision_serial() {
+        let specs = [
+            BoardSpec::picasso2plus_vram(4, 1024 * 1024),
+            BoardSpec::picasso2plus_regs(4),
+        ];
+        for (spec, product) in specs
+            .iter()
+            .zip([PICASSO2_PRODUCT_VRAM, PICASSO2_PRODUCT_REGS])
+        {
+            assert_eq!(spec.manufacturer, PICASSO2_MANUFACTURER_ID);
+            assert_eq!(spec.product, product);
+            assert_eq!(spec.serial, PICASSO2PLUS_SERIAL);
+            assert_eq!(spec.backing, BoardBacking::Device(4));
+        }
+
+        let chain = chain_with(specs.into());
+        assert_eq!(chain.config_logical_byte(0, 6), Some(0x00));
+        assert_eq!(chain.config_logical_byte(0, 7), Some(0x10));
+        assert_eq!(chain.config_logical_byte(0, 8), Some(0x00));
+        assert_eq!(chain.config_logical_byte(0, 9), Some(0x00));
+        assert_eq!(chain.config_logical_byte(1, 6), Some(0x00));
+        assert_eq!(chain.config_logical_byte(1, 7), Some(0x10));
+    }
+
+    #[test]
+    fn window_tagged_apertures_must_fit_below_the_tag_bits() {
+        let mut spec = BoardSpec::picasso2_vram(0, 2 * 1024 * 1024);
+        spec.version = ZorroVersion::III;
+        spec.size_bytes = 2 << DEVICE_WINDOW_SHIFT;
+        let err = ZorroChain::default().add_board(spec).unwrap_err();
+        assert!(
+            err.to_string().contains("window-tagged aperture"),
+            "{err:#}"
+        );
     }
 }

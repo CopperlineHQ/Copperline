@@ -149,7 +149,12 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      effective filter state, for the [audio] audio_filter override; the
 //      override mode itself is a host preference and is not serialized
 //  42: NetConfig gained the Bridge variant and its host interface identifier
-pub const STATE_VERSION: u32 = 42;
+//  43: Zorro BoardSpec gained explicit memory-space, chained-configuration,
+//      and tagged device-window fields; BoardDevice gained Picasso2 and its
+//      complete CL-GD5426/VRAM state
+//  44: Picasso2 and its Cirrus core gained the II+ revision identity and
+//      serializable vertical-blank interrupt latch
+pub const STATE_VERSION: u32 = 44;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {
