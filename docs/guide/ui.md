@@ -368,7 +368,9 @@ The layout is:
   column's **Bootable** box is ticked by default; clearing it greys that row's
   priority and writes the -128 "disabled" sentinel, so the volume mounts but
   never boots.
-  A drive with no image, or a CD image, is greyed ("No drive" / "CD-ROM").
+  A drive with no image, or a CD image, is greyed ("No drive" / "CD-ROM"),
+  with no stepper to reach for. A SCSI unit appears only once it carries a
+  disk, so the page lists what the machine can actually boot from.
   Drives you add here with no priority of their own cascade so they do not tie:
   the first is 0 (just under DF0:'s 5), and each later one drops below the
   floppies -- -35, -40, -45. A drive already carrying a priority in the config
@@ -389,10 +391,10 @@ The layout is:
 :alt: The Boot Priority sub-page of the Storage tab
 :width: 75%
 
-The Boot Priority sub-page: an A1200 whose IDE master boots at priority 5, its
-slave with the Bootable box cleared (priority greyed), and the empty SCSI units
-greyed "No drive". A greyed **Info:** label heads a note on the valid priority
-range.
+The Boot Priority sub-page: an A1200 whose IDE master boots at priority 0, its
+slave with the Bootable box cleared (showing the -128 that stores), and one
+SCSI unit of a fitted A2091 carrying a disk of its own. A greyed **Info:**
+label heads a note on the valid priority range.
 ```
 
 Saved files use the same schema as a hand-written `copperline.toml`

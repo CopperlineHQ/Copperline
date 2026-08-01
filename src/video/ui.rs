@@ -5514,42 +5514,48 @@ fn draw_launcher_row(
         RowKind::Bootpri => {
             // Priority column: a `< value >` stepper whose value is also a text
             // field. Greyed and inert while the Bootable box (drawn last) is
-            // cleared, where it shows the -128 the config will store, and
-            // greyed as a whole on a row with no drive to boot, where the box
-            // says so in place of a priority.
+            // cleared, where it shows the -128 the config will store.
+            //
+            // A row with no drive to order has no priority to step through, so
+            // the stepper goes entirely and only the reason is left, sitting
+            // where the value would: a priority that could be changed, and one
+            // that does not exist, should not look alike.
+            let no_drive = reason.is_some();
             let disabled = disabled || setup.drive_boot_off(r.field);
             let (prev, value, next) = launcher_bootpri_rects(rect, row_y);
-            draw_text_button(
-                frame,
-                prev,
-                "<",
-                !disabled,
-                hover
-                    == Some(UiControl::LauncherCycle {
-                        field: r.field,
-                        forward: false,
-                    }),
-                scale,
-            );
-            draw_text_button(
-                frame,
-                next,
-                ">",
-                !disabled,
-                hover
-                    == Some(UiControl::LauncherCycle {
-                        field: r.field,
-                        forward: true,
-                    }),
-                scale,
-            );
-            draw_rect_bevel(
-                frame,
-                scale_rect(value, scale),
-                BUTTON_EDGE_DARK,
-                BUTTON_EDGE_LIGHT,
-                scale,
-            );
+            if !no_drive {
+                draw_text_button(
+                    frame,
+                    prev,
+                    "<",
+                    !disabled,
+                    hover
+                        == Some(UiControl::LauncherCycle {
+                            field: r.field,
+                            forward: false,
+                        }),
+                    scale,
+                );
+                draw_text_button(
+                    frame,
+                    next,
+                    ">",
+                    !disabled,
+                    hover
+                        == Some(UiControl::LauncherCycle {
+                            field: r.field,
+                            forward: true,
+                        }),
+                    scale,
+                );
+                draw_rect_bevel(
+                    frame,
+                    scale_rect(value, scale),
+                    BUTTON_EDGE_DARK,
+                    BUTTON_EDGE_LIGHT,
+                    scale,
+                );
+            }
             let editing = state.editing() == Some(EditTarget::DriveBootpri(r.field));
             let text = if let Some(reason) = reason.filter(|_| greyed_shows_reason) {
                 reason.to_string()
@@ -5558,9 +5564,19 @@ fn draw_launcher_row(
             } else {
                 setup.value_label(r.field)
             };
-            let text = truncate_to_width(&text, value.w.saturating_sub(8));
-            let tw = text.chars().count() * font::GLYPH_W;
-            let tx = value.x + value.w.saturating_sub(tw) / 2;
+            // A priority sits centred in its box; a row with no drive has no
+            // box, so its reason starts where the column does -- under the
+            // "Priority" heading, like every other greyed row on the page.
+            let (text, tx) = if no_drive {
+                (
+                    truncate_to_width(&text, next.x + next.w - launcher_control_x(rect)),
+                    launcher_control_x(rect),
+                )
+            } else {
+                let text = truncate_to_width(&text, value.w.saturating_sub(8));
+                let tw = text.chars().count() * font::GLYPH_W;
+                (text, value.x + value.w.saturating_sub(tw) / 2)
+            };
             let color = if disabled {
                 PANEL_TEXT_DIM
             } else if editing {
@@ -9386,18 +9402,25 @@ mod tests {
         save(&frame, "launcher-host-mounts");
 
         // The Boot Priority sub-page: an A1200 with two IDE drives -- the master
-        // bootable at 5, the slave with its Bootable box cleared (priority
-        // greyed) -- and the empty SCSI slots greyed "no drive".
+        // bootable at 0, the slave with its Bootable box cleared -- and one
+        // SCSI unit carrying a disk of its own.
         let mut frame = vec![0u8; w * h * 4];
         let mut setup = launcher::MachineSetup::default();
         setup.select_model(Some(MachineModel::A1200));
+        // A controller with one unit filled: the page lists that unit and
+        // leaves the empty six out.
+        setup.cycle(LauncherField::ScsiController, true);
         setup.set_path(LauncherField::IdeMaster, std::path::PathBuf::from("wb.hdf"));
-        setup.set_drive_bootpri(LauncherField::IdeMasterBoot, Some(5));
+        setup.set_drive_bootpri(LauncherField::IdeMasterBoot, Some(0));
         setup.set_path(
             LauncherField::IdeSlave,
             std::path::PathBuf::from("games.hdf"),
         );
         setup.toggle_drive_boot(LauncherField::IdeSlaveBoot);
+        setup.set_path(
+            LauncherField::ScsiUnit0,
+            std::path::PathBuf::from("work.hdf"),
+        );
         let mut state = LauncherState::new(setup);
         state.tab = LauncherTab::BootPriority;
         let ui = UiState {
