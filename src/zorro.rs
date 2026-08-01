@@ -378,6 +378,18 @@ impl BoardSpec {
                 self.name
             );
         }
+        // A tagged offset carries the aperture number in bits 31:28, so the
+        // aperture itself must decode entirely below the tag; a larger one
+        // would silently alias into a neighbouring window.
+        if self.window != 0 && self.size_bytes > 1 << DEVICE_WINDOW_SHIFT {
+            bail!(
+                "board {:?}: a window-tagged aperture must fit below the tag bits \
+                 ({} bytes exceeds the {} MiB window)",
+                self.name,
+                self.size_bytes,
+                (1usize << DEVICE_WINDOW_SHIFT) >> 20,
+            );
+        }
         match self.version {
             ZorroVersion::II => {
                 if zorro_ii_size_code(self.size_bytes).is_none() {
@@ -1532,5 +1544,17 @@ mod tests {
         assert_eq!(chain.config_logical_byte(0, 9), Some(0x00));
         assert_eq!(chain.config_logical_byte(1, 6), Some(0x00));
         assert_eq!(chain.config_logical_byte(1, 7), Some(0x10));
+    }
+
+    #[test]
+    fn window_tagged_apertures_must_fit_below_the_tag_bits() {
+        let mut spec = BoardSpec::picasso2_vram(0, 2 * 1024 * 1024);
+        spec.version = ZorroVersion::III;
+        spec.size_bytes = 2 << DEVICE_WINDOW_SHIFT;
+        let err = ZorroChain::default().add_board(spec).unwrap_err();
+        assert!(
+            err.to_string().contains("window-tagged aperture"),
+            "{err:#}"
+        );
     }
 }
