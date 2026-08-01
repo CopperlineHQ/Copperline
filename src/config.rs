@@ -402,6 +402,22 @@ impl ShaderKind {
             ShaderKind::Custom => "custom",
         }
     }
+
+    /// What a picker shows the user, as against the config name [`label`]
+    /// round-trips. Both pickers read this, so they cannot drift apart.
+    ///
+    /// [`label`]: ShaderKind::label
+    pub fn menu_label(self) -> &'static str {
+        match self {
+            ShaderKind::None => "Disabled",
+            ShaderKind::Scanlines => "Scanlines",
+            ShaderKind::Mask => "Mask",
+            // Named for the monitor the preset is modelled on; the path of a
+            // user shader is too long for a value column.
+            ShaderKind::Crt => "CRT (1084)",
+            ShaderKind::Custom => "Custom",
+        }
+    }
 }
 
 /// Screen tint the window applies to the presented chipset display: a
@@ -452,6 +468,17 @@ impl MenuScale {
         }
     }
 
+    /// What a picker with room shows: the name and the figure together. The
+    /// menu itself shows [`label`] alone, having no width to spare.
+    ///
+    /// [`label`]: MenuScale::label
+    pub fn menu_label(self) -> &'static str {
+        match self {
+            MenuScale::Normal => "Normal (1x)",
+            MenuScale::Large => "Large (2x)",
+        }
+    }
+
     /// What every length in the menu is multiplied by.
     pub fn factor(self) -> usize {
         match self {
@@ -474,6 +501,21 @@ impl Tint {
             Tint::Green => "green",
             Tint::Amber => "amber",
             Tint::Sepia => "sepia",
+        }
+    }
+
+    /// What a picker shows the user, as against the config name [`label`]
+    /// round-trips. "Colour" rather than "Off": it says what the picture
+    /// looks like, and it is the web front-end's wording for the same picker.
+    ///
+    /// [`label`]: Tint::label
+    pub fn menu_label(self) -> &'static str {
+        match self {
+            Tint::None => "Colour",
+            Tint::Bw => "Black & white",
+            Tint::Green => "Green",
+            Tint::Amber => "Amber",
+            Tint::Sepia => "Sepia",
         }
     }
 }
@@ -1929,6 +1971,9 @@ pub struct ConfigOverrides {
     /// Show the status bar at start (`--show-status-bar` /
     /// `--hide-status-bar`). Same as `[display] status_bar`.
     pub status_bar: Option<bool>,
+    /// How large the pop-up menu is drawn (`--menu-scale`). Same values as
+    /// `[display] menu_scale`.
+    pub menu_scale: Option<String>,
     /// A real floppy drive on a bay (`--floppy-bridge DFN INTERFACE`), by bay.
     /// Same values as `[floppy.dfN] bridge`.
     pub floppy_bridge: [Option<String>; 4],
@@ -2006,6 +2051,7 @@ impl ConfigOverrides {
             && self.a2065_interface.is_none()
             && self.full_screen.is_none()
             && self.status_bar.is_none()
+            && self.menu_scale.is_none()
     }
 
     /// Inject the set overrides into the raw config, replacing the values
@@ -2203,6 +2249,9 @@ impl ConfigOverrides {
         }
         if let Some(status_bar) = self.status_bar {
             raw.display.status_bar = Some(status_bar);
+        }
+        if let Some(menu_scale) = &self.menu_scale {
+            raw.display.menu_scale = Some(menu_scale.clone());
         }
     }
 }

@@ -410,6 +410,12 @@ where
             "--show-status-bar" => {
                 overrides.status_bar = Some(true);
             }
+            "--menu-scale" => {
+                overrides.menu_scale = Some(
+                    args.next()
+                        .ok_or_else(|| anyhow!("--menu-scale requires 1x or 2x"))?,
+                );
+            }
             "--hide-status-bar" => {
                 overrides.status_bar = Some(false);
             }
@@ -1203,6 +1209,7 @@ fn print_help() {
          \x20                            combine with COPPERLINE_AUDIO_PROFILE=1 for counters\n  \
          --full-screen / --windowed     open fullscreen / windowed at start (default: windowed)\n  \
          --show-status-bar / --hide-status-bar  status bar at start (default: shown)\n  \
+         --menu-scale SIZE              size of the pop-up menu: 1x (default) or 2x\n  \
          --serial MODE                  Paula serial port: off, stdout, midi, tcp,\n  \
          \x20                            tcp-connect, or pty\n  \
          --serial-connect HOST:PORT     dial a remote TCP service (a telnet BBS) with the\n  \

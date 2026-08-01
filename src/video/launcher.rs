@@ -2531,16 +2531,8 @@ impl MachineSetup {
                 PixelAspect::Tv => "TV (4:3)".to_string(),
                 PixelAspect::Square => "Square".to_string(),
             },
-            // "Colour" rather than "Off": the web front-end's wording for
-            // the same picker, and it says what the picture looks like.
-            F::Tint => match self.tint {
-                Tint::None => "Colour".to_string(),
-                Tint::Bw => "Black & white".to_string(),
-                Tint::Green => "Green".to_string(),
-                Tint::Amber => "Amber".to_string(),
-                Tint::Sepia => "Sepia".to_string(),
-            },
-            F::MenuScale => self.menu_scale.label().to_string(),
+            F::Tint => self.tint.menu_label().to_string(),
+            F::MenuScale => self.menu_scale.menu_label().to_string(),
             F::Phosphor => {
                 if self.phosphor <= 0.0 {
                     "Disabled".to_string()
@@ -2583,15 +2575,7 @@ impl MachineSetup {
             F::BridgeServeSpeed => {
                 format!("{}%", self.bridge_edit().map_or(100, |c| c.speed))
             }
-            F::Shader => match self.shader {
-                ShaderMode::None => "Disabled".to_string(),
-                ShaderMode::Scanlines => "Scanlines".to_string(),
-                ShaderMode::Mask => "Mask".to_string(),
-                // Named for the monitor the preset is modelled on; the path
-                // of a user shader is too long for the value column.
-                ShaderMode::Crt => "CRT (1084)".to_string(),
-                ShaderMode::Custom(_) => "Custom".to_string(),
-            },
+            F::Shader => self.shader.kind().menu_label().to_string(),
             F::ShaderStrength => format!("{:.2}", self.shader_strength),
             F::FloppyVolume => format!("{}%", self.floppy_volume),
             F::PacingBudget => match self.pacing_budget {
@@ -4829,12 +4813,13 @@ mod tests {
     #[test]
     fn menu_scale_round_trips_through_raw() {
         let mut s = MachineSetup::default();
-        // 1x is the baseline, so nothing is written for it.
-        assert_eq!(s.value_label(LauncherField::MenuScale), "1x");
+        // 1x is the baseline, so nothing is written for it. The launcher has
+        // the width to name the size as well as give the figure.
+        assert_eq!(s.value_label(LauncherField::MenuScale), "Normal (1x)");
         assert_eq!(s.to_raw().display.menu_scale, None);
 
         s.cycle(LauncherField::MenuScale, true);
-        assert_eq!(s.value_label(LauncherField::MenuScale), "2x");
+        assert_eq!(s.value_label(LauncherField::MenuScale), "Large (2x)");
         assert_eq!(s.to_raw().display.menu_scale, Some("2x".to_string()));
 
         // The written config has to load back into the same setting.
@@ -4843,7 +4828,7 @@ mod tests {
             MenuScale::Large
         );
         let reloaded = MachineSetup::from_raw(&s.to_raw()).expect("valid raw");
-        assert_eq!(reloaded.value_label(LauncherField::MenuScale), "2x");
+        assert_eq!(reloaded.value_label(LauncherField::MenuScale), "Large (2x)");
     }
 
     #[test]

@@ -2469,7 +2469,7 @@ pub fn draw_drop_hint(frame: &mut [u8], texture_scale: usize) {
 
 /// Vertical pitch of a shortcut row. The panel is sized from this and the
 /// row count, and must stay inside `present_height()`.
-const SHORTCUT_ROW_H: usize = 20;
+const SHORTCUT_ROW_H: usize = 18;
 /// Trailing note lines under the shortcut table, and their pitch.
 const SHORTCUT_NOTES: [&str; 3] = [
     "Shortcuts: Cmd on macOS, Alt on Linux/Windows",
@@ -2489,7 +2489,8 @@ fn shortcuts_panel_height() -> usize {
         + 10
 }
 
-const SHORTCUT_ROWS: [(&str, &str, bool); 22] = [
+const SHORTCUT_ROWS: [(&str, &str, bool); 23] = [
+    ("E", "Open the menu", true),
     ("Q", "Quit", true),
     ("S", "Save screenshot", true),
     ("R", "Record video on/off", true),
@@ -6486,7 +6487,11 @@ fn draw_tree_menu(frame: &mut [u8], rows: &[menu::MenuRow], nav: &menu::MenuNav,
                 );
             }
             let text_y = ry + rh.saturating_sub(font::GLYPH_H * px) / 2;
-            let color = if !row.enabled {
+            let color = if matches!(row.kind, menu::MenuRowKind::Caption) {
+                // A caption is not a row that has been taken away, so it does
+                // not read as one: it takes the colour a value carries.
+                PANEL_TEXT_HILIGHT
+            } else if !row.enabled {
                 PANEL_TEXT_DIM
             } else if lit {
                 MENU_HILIGHT_TEXT
@@ -9723,6 +9728,7 @@ mod tests {
             tint: crate::config::Tint::None,
             menu_scale: crate::config::MenuScale::Normal,
             floppy_speed: 100,
+            floppy_speed_applies: true,
             audio_filter: crate::config::AudioFilterMode::Auto,
             audio_output: menu::AudioOutputChoice::Default,
             audio_devices: &devices,

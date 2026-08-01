@@ -2681,6 +2681,11 @@ impl ApplicationHandler for App {
                             self.toggle_mouse_capture()
                         }
                     }
+                    (KeyCode::KeyE, ElementState::Pressed)
+                        if host_shortcut_modifier_pressed(self.modifiers) =>
+                    {
+                        self.toggle_menu();
+                    }
                     (KeyCode::KeyB, ElementState::Pressed)
                         if host_shortcut_modifier_pressed(self.modifiers) =>
                     {
@@ -4543,6 +4548,7 @@ impl App {
             tint: self.tint,
             menu_scale: crate::video::menu_scale(),
             floppy_speed: self.emu.bus().floppy.speed_percent(),
+            floppy_speed_applies: self.emu.bus().floppy.has_image_drive(),
             audio_filter: self.emu.bus().paula.led_filter_mode(),
             audio_output,
             audio_devices: &crate::audio::picker_output_devices(),
@@ -4700,7 +4706,7 @@ impl App {
             }
             A::SetMenuScale(scale) => {
                 crate::video::set_menu_scale(scale);
-                self.show_osd(format!("Menu size: {}", scale.label()));
+                self.show_osd(format!("Menu size: {}", scale.menu_label()));
                 self.request_redraw();
             }
             A::SetTint(tint) => {
@@ -4890,23 +4896,7 @@ impl App {
             BarControl::Pause => self.toggle_pause(),
             BarControl::Reboot => self.reset_emulator(true),
             BarControl::Screenshot => self.take_screenshot(),
-            BarControl::Menu => {
-                self.ui.menu_open = !self.ui.menu_open;
-                // Each open starts at the top of the list; a scroll position
-                // left over from the last time would be a small mystery.
-                self.ui.menu_scroll = 0;
-                self.ui.menu_nav.reset();
-                self.ui.menu_rows = if self.ui.menu_open {
-                    let fullscreen = self
-                        .render
-                        .as_ref()
-                        .is_some_and(|r| r.window.fullscreen().is_some());
-                    self.build_menu(fullscreen)
-                } else {
-                    Vec::new()
-                };
-                self.request_redraw();
-            }
+            BarControl::Menu => self.toggle_menu(),
             // A bridged drive's media is a real disk in a real drive: it is
             // loaded, swapped, and ejected by hand. The buttons stay drawn so
             // the drive is visibly there and numbered, but they do nothing.
@@ -6063,6 +6053,33 @@ impl App {
                 self.request_redraw();
             }
         }
+    }
+
+    /// Open or close the pop-up menu, from the hamburger button or the
+    /// keyboard.
+    ///
+    /// Opening hands the mouse back: the menu is worked with the host
+    /// pointer, and a captured one is inside the machine where it cannot
+    /// reach it. Closing asks for the grab again, which auto mode takes and
+    /// the other modes decline, exactly as closing a panel does.
+    fn toggle_menu(&mut self) {
+        self.ui.menu_open = !self.ui.menu_open;
+        // Each open starts at the top of the list; a position left over from
+        // the last time would be a small mystery.
+        self.ui.menu_scroll = 0;
+        self.ui.menu_nav.reset();
+        if self.ui.menu_open {
+            self.set_mouse_captured(false);
+            let fullscreen = self
+                .render
+                .as_ref()
+                .is_some_and(|r| r.window.fullscreen().is_some());
+            self.ui.menu_rows = self.build_menu(fullscreen);
+        } else {
+            self.ui.menu_rows = Vec::new();
+            self.apply_auto_mouse_capture();
+        }
+        self.request_redraw();
     }
 
     /// Close the open main-window overlay panel.

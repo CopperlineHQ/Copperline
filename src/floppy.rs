@@ -659,6 +659,20 @@ impl FloppyController {
         self.drives.iter().any(|d| d.bridge.is_some())
     }
 
+    /// Whether any fitted bay serves from an image. Drive speed only shapes
+    /// how fast a track is served from one: a real drive's data rate is the
+    /// disk's own, so with every fitted bay physical there is nothing for the
+    /// setting to act on.
+    pub fn has_image_drive(&self) -> bool {
+        (0..self.drives.len()).any(|idx| {
+            #[cfg(feature = "floppybridge")]
+            let bridged = self.is_bridged(idx);
+            #[cfg(not(feature = "floppybridge"))]
+            let bridged = false;
+            self.drive_connected(idx) && !bridged
+        })
+    }
+
     /// Let go of every real drive, closing the device and handing the port
     /// back to the host.
     ///

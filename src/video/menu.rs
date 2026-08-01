@@ -137,6 +137,9 @@ pub enum MenuRowKind {
     Toggle { action: MenuAction, on: bool },
     /// One value of a setting, marked when it is the one in force.
     Choice { action: MenuAction, selected: bool },
+    /// Says what a level is and does nothing. Two levels of numbered slots
+    /// look alike until one of them says which it is.
+    Caption,
 }
 
 impl MenuRow {
@@ -155,6 +158,13 @@ impl MenuRow {
 
     fn action(label: &str, action: MenuAction) -> Self {
         Self::new(label, MenuRowKind::Action(action))
+    }
+
+    fn caption(label: &str) -> Self {
+        Self {
+            enabled: false,
+            ..Self::new(label, MenuRowKind::Caption)
+        }
     }
 
     fn toggle(label: &str, action: MenuAction, on: bool) -> Self {
@@ -188,7 +198,7 @@ impl MenuRow {
         match &self.kind {
             MenuRowKind::Action(a) => Some(a),
             MenuRowKind::Toggle { action, .. } | MenuRowKind::Choice { action, .. } => Some(action),
-            MenuRowKind::Submenu(_) => None,
+            MenuRowKind::Submenu(_) | MenuRowKind::Caption => None,
         }
     }
 
@@ -396,6 +406,9 @@ pub struct MenuState<'a> {
     /// How large the menu itself is drawn.
     pub menu_scale: MenuScale,
     pub floppy_speed: u16,
+    /// Whether any fitted bay serves from an image. Drive speed shapes how
+    /// fast a track is served from one; a real drive's rate is the disk's own.
+    pub floppy_speed_applies: bool,
     pub audio_filter: AudioFilterMode,
     /// The output in force, and every output the host offers.
     pub audio_output: AudioOutputChoice,
@@ -516,26 +529,27 @@ fn audio_rows(s: &MenuState) -> Vec<MenuRow> {
 }
 
 fn video_rows(s: &MenuState) -> Vec<MenuRow> {
-    let aspects = [("TV", PixelAspect::Tv), ("Square", PixelAspect::Square)]
-        .into_iter()
-        .map(|(label, a)| {
-            MenuRow::choice(label, MenuAction::SetPixelAspect(a), s.pixel_aspect == a)
-        })
-        .collect();
+    let aspects = [
+        ("TV (4:3)", PixelAspect::Tv),
+        ("Square", PixelAspect::Square),
+    ]
+    .into_iter()
+    .map(|(label, a)| MenuRow::choice(label, MenuAction::SetPixelAspect(a), s.pixel_aspect == a))
+    .collect();
 
     // Custom is listed whether or not a shader file is configured: greyed,
     // it says the feature exists, where a cycle that skipped it said nothing.
     let shaders = ShaderKind::MENU_ORDER
         .iter()
         .map(|k| {
-            MenuRow::choice(k.label(), MenuAction::SetShader(*k), s.shader == *k)
+            MenuRow::choice(k.menu_label(), MenuAction::SetShader(*k), s.shader == *k)
                 .available(*k != ShaderKind::Custom || s.custom_shader_available)
         })
         .collect();
 
     let tints = Tint::MENU_ORDER
         .iter()
-        .map(|t| MenuRow::choice(t.label(), MenuAction::SetTint(*t), s.tint == *t))
+        .map(|t| MenuRow::choice(t.menu_label(), MenuAction::SetTint(*t), s.tint == *t))
         .collect();
 
     let sizes = MenuScale::MENU_ORDER
@@ -544,10 +558,10 @@ fn video_rows(s: &MenuState) -> Vec<MenuRow> {
         .collect();
 
     vec![
+        MenuRow::submenu("Menu Size", sizes).with_value(s.menu_scale.label()),
         MenuRow::submenu("Pixel Aspect", aspects),
         MenuRow::submenu("CRT Shader", shaders),
         MenuRow::submenu("Screen Tint", tints),
-        MenuRow::submenu("Menu Size", sizes).with_value(s.menu_scale.label()),
         MenuRow::toggle("Fullscreen", MenuAction::ToggleFullscreen, s.fullscreen),
         MenuRow::toggle(
             "Status Bar",
@@ -636,7 +650,7 @@ fn serial_rows(s: &MenuState) -> Vec<MenuRow> {
 fn parallel_rows(s: &MenuState) -> Vec<MenuRow> {
     vec![
         MenuRow::submenu(
-            "Sampler In",
+            "Sampler Input",
             s.sampler_inputs
                 .iter()
                 .map(|n| {
@@ -676,7 +690,7 @@ fn emulation_rows(s: &MenuState) -> Vec<MenuRow> {
         })
         .collect();
     vec![
-        MenuRow::submenu("Floppy Speed", speeds),
+        MenuRow::submenu("Floppy Speed", speeds).available(s.floppy_speed_applies),
         MenuRow::toggle("Rewind", MenuAction::ToggleRewind, s.rewind),
     ]
 }
@@ -717,8 +731,13 @@ fn save_state_rows(s: &MenuState) -> Vec<MenuRow> {
     // A slot names what is in it, so a save that would overwrite something
     // says so before it is chosen rather than after.
     let slots = |save: bool| -> Vec<MenuRow> {
-        (0..SAVE_SLOTS)
-            .map(|i| {
+        let caption = if save {
+            "Quick Save..."
+        } else {
+            "Quick Load..."
+        };
+        std::iter::once(MenuRow::caption(caption))
+            .chain((0..SAVE_SLOTS).map(|i| {
                 let held = s.save_slots[i].as_deref().unwrap_or("empty");
                 let label = format!("{}: {held}", i + 1);
                 let action = if save {
@@ -727,7 +746,7 @@ fn save_state_rows(s: &MenuState) -> Vec<MenuRow> {
                     MenuAction::QuickLoad(i)
                 };
                 MenuRow::action(&label, action)
-            })
+            }))
             .collect()
     };
     vec![
@@ -914,6 +933,7 @@ mod tests {
             tint: Tint::None,
             menu_scale: MenuScale::Normal,
             floppy_speed: 100,
+            floppy_speed_applies: true,
             audio_filter: AudioFilterMode::Auto,
             audio_output: AudioOutputChoice::Default,
             audio_devices: audio,
@@ -1114,15 +1134,18 @@ mod tests {
         let rows = build(&state(&none, &none, &none, &none, &slots));
         let save = find(&rows, "Save State").expect("save state");
         let quick = find(save.children().expect("children"), "Quick Save").expect("quick save");
-        let labels: Vec<&str> = quick
-            .children()
-            .expect("slots")
-            .iter()
-            .map(|r| r.label.as_str())
-            .collect();
-        assert_eq!(labels[0], "1: empty");
-        assert_eq!(labels[2], "3: 2026/07/31 14:05");
-        assert_eq!(labels.len(), SAVE_SLOTS);
+        let rows = quick.children().expect("slots");
+        let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
+        // The caption says which of the two identical-looking levels this is,
+        // and cannot be picked.
+        assert_eq!(labels[0], "Quick Save...");
+        assert!(!rows[0].enabled && rows[0].menu_action().is_none());
+        assert_eq!(labels[1], "1: empty");
+        assert_eq!(labels[3], "3: 2026/07/31 14:05");
+        assert_eq!(labels.len(), SAVE_SLOTS + 1);
+
+        let load = find(save.children().expect("children"), "Quick Load").expect("quick load");
+        assert_eq!(load.children().expect("slots")[0].label, "Quick Load...");
     }
 
     /// The menu scale multiplies every length, so the whole thing grows
