@@ -2,8 +2,9 @@
 ;
 ; Loaded by boot.asm to $30000, this program takes over the machine (interrupts
 ; and DMA off), runs a battery of timing tests measured with the CIA-A timer A
-; (E-clock, = CPU clock / 10), and renders the raw results on screen as 8-digit
-; hex numbers (also streamed out the serial port), one test per row.
+; (E-clock, = CPU clock / 10), and renders the raw results on screen, one test
+; per row: a two-digit decimal row number, then the value as 8-digit hex. The
+; same values are streamed out the serial port.
 ;
 ; Because the only clock is the CIA E-clock, every emulator that models the
 ; CPU-cycle / E-clock ratio correctly should report identical numbers. A
@@ -1011,35 +1012,54 @@ tread:
 
 ;------------------------------------------------ render 10 results as hex rows
 render:
+        lea     SCREEN,a1       ; clear the bitplane: with a 7-line pitch the
+        move.w  #40*256/4-1,d0  ; rows no longer cover every visible line
+.rc:
+        clr.l   (a1)+
+        dbra    d0,.rc
         lea     RESULTS,a2
         moveq   #0,d4           ; row index
 .rr:
         move.l  (a2)+,d3        ; value
         move.w  d4,d0
-        mulu    #320,d0         ; 8 scanlines * 40 bytes per row (31 rows fit)
-        lea     SCREEN,a5
+        mulu    #280,d0         ; 7 scanlines * 40 bytes per row: all 32 rows
+        lea     SCREEN,a5       ; (224 lines) stay inside the CRT-safe area
         adda.l  d0,a5           ; row top in bitplane
-        moveq   #7,d6           ; 8 hex digits
+        move.w  d4,d0           ; two-digit decimal row ID in columns 0-1
+        ext.l   d0
+        divu    #10,d0          ; low word = tens, high word = ones
         moveq   #0,d2           ; column (byte) index
+        bsr     .glyph
+        swap    d0              ; ones digit
+        bsr     .glyph
+        addq.w  #1,d2           ; blank column between row ID and value
+        moveq   #7,d6           ; 8 hex digits
 .rd:
         rol.l   #4,d3           ; next nibble (high first) into low 4 bits
         move.l  d3,d0
+        bsr     .glyph
+        dbra    d6,.rd
+        addq.w  #1,d4
+        cmp.w   #32,d4
+        bne     .rr
+        rts
+
+; Draw the glyph for digit d0.w (low 4 bits) at column d2 of the row at a5;
+; advances d2. Draws 7 glyph lines -- the font's 8th line is blank, so the
+; 7-scanline row pitch loses nothing.
+.glyph:
         and.w   #$f,d0
         lsl.w   #3,d0           ; * 8 bytes per glyph
         lea     font(pc),a4
         adda.w  d0,a4
         move.l  a5,a1
         adda.w  d2,a1           ; + column byte
-        moveq   #7,d5           ; 8 glyph rows
+        moveq   #6,d5           ; 7 glyph lines
 .rg:
         move.b  (a4)+,(a1)
         adda.w  #40,a1
         dbra    d5,.rg
         addq.w  #1,d2
-        dbra    d6,.rd
-        addq.w  #1,d4
-        cmp.w   #31,d4
-        bne     .rr
         rts
 
 ;------------------------------------------------ 8x8 hex font, glyphs 0..F
