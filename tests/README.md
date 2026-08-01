@@ -105,10 +105,10 @@ baselines to maintain.
 | `dblpal_boot_presents_full_programmable_scan` | `KICK31.ROM`, `wb31-dblpal.adf` |
 | `diagrom_menu_preserves_left_margin_text_columns` | `diagrom.rom` |
 | `mmu_library_boot_and_muforce_hits_*` | `Kickstart v3.1 r40.68 (1993)(Commodore)(A1200)[!].rom`, `mmu-test.adf`, `mmu-libs.adf` |
-| `picasso2_workbench_opens_640x480x8` | `KICK31.ROM`, `p96-picasso2.hdf` (WB3.1 + Picasso96, default 640x480x8 screen) |
-| `picasso2_workbench_opens_640x480x16` | `KICK31.ROM`, `p96-picasso2-16.hdf` (same, default 640x480x16 screen) |
-| `picasso2plus_workbench_opens_with_gd5428_revision` | `KICK31.ROM`, `p96-picasso2.hdf` (same installation booted against the Picasso II+ identity) |
-| `picasso2_p96cts_reports_all_modes_clean` | `KICK31.ROM`, `p96-picasso2-cts.hdf` (startup runs p96cts at 8/16/24 bpp and writes `P96OUT:p96cts.result`) |
+| `picasso2_workbench_opens_640x480x8` | `Kickstart v3.1 r40.68 (1993)(Commodore)(A4000).rom`, `p96-picasso2.hdf` (WB3.1 + Picasso96, default 640x480x8 screen) |
+| `picasso2_workbench_opens_640x480x16` | `Kickstart v3.1 r40.68 (1993)(Commodore)(A4000).rom`, `p96-picasso2-16.hdf` (same, default 640x480x16 screen) |
+| `picasso2plus_workbench_opens_with_gd5428_revision` | `Kickstart v3.1 r40.68 (1993)(Commodore)(A4000).rom`, `p96-picasso2.hdf` (same installation booted against the Picasso II+ identity) |
+| `picasso2_p96cts_reports_all_modes_clean` | `Kickstart v3.1 r40.68 (1993)(Commodore)(A4000).rom`, `p96-picasso2-cts.hdf` (startup runs p96cts at 8/16/24 bpp and writes `P96OUT:p96cts.result`) |
 
 ## Obtaining the assets legally
 
@@ -129,7 +129,10 @@ baselines to maintain.
   translation trees on the 030/040, lazy faults through the resumable
   bus-fault frames, and MuForce hit reporting.
 - **Picasso II/II+ HDFs** are local Workbench 3.1 installations with Picasso96's
-  `PicassoII.card` driver. The `-cts` image's startup sequence runs p96cts for
+  `PicassoII.card` driver (Picasso96 is freeware, from Aminet
+  `driver/gfx/Picasso96.lha`). The boots use an A4000 over motherboard IDE
+  because the generic `KICK31.ROM` has no big-box SCSI/IDE driver. The
+  `-cts` image's startup sequence runs p96cts for
   its 8-, 16-, and 24-bit mode set and writes `PASS` to
   `P96OUT:p96cts.result`; on failure it leaves the suite's diff images in that
   host-mounted output directory.

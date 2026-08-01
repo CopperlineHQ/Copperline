@@ -1,20 +1,21 @@
-# Picasso II/II+ / Picasso96 Workbench example. Place a licensed Kickstart 3.1 ROM
-# and a bootable RDB HDF with Picasso96's PicassoII.card driver beside this
-# file, or adjust the paths. Headless capture is then deterministic, for example:
+# Picasso II/II+ / Picasso96 Workbench example. Place a licensed A4000
+# Kickstart 3.1 ROM and a bootable HDF with Picasso96's PicassoII.card driver
+# beside this file, or adjust the paths. (The generic A500/A2000 Kickstart 3.1
+# has no big-box SCSI/IDE driver, so a Zorro-slot machine needs its own ROM.)
+# Headless capture is then deterministic, for example:
 #
 #   copperline --config picasso2.example.toml --noaudio \
 #     --screenshot-after 60 /tmp/picasso2.png
 
-rom = "KICK31.ROM"
+rom = "Kickstart v3.1 r40.68 (1993)(Commodore)(A4000).rom"
 
 [machine]
-profile = "A3000"
+profile = "A4000"
 
 [rtg]
 card = "picasso2"
 # Use "picasso2plus" for the CL-GD5428 revision with INT2 vertical blank.
 vram = "2M"
 
-[scsi]
-controller = "a3000"
-unit0 = "p96-picasso2.hdf"
+[ide]
+master = "p96-picasso2.hdf"

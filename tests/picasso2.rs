@@ -58,13 +58,18 @@ fn asset_dir() -> PathBuf {
     }
 }
 
+/// The generic A500/A2000 Kickstart 3.1 has no A3000/A4000 SCSI driver, so
+/// these boots use an A4000 (a big-box machine with Zorro slots) with its own
+/// ROM and the motherboard IDE port the HDF images were installed against.
+const KICK31_A4000: &str = "Kickstart v3.1 r40.68 (1993)(Commodore)(A4000).rom";
+
 fn run_picasso_hdf(
     name: &str,
     hdf: &str,
     card: &str,
 ) -> Result<Option<(Image, String)>, Box<dyn std::error::Error>> {
     let assets = asset_dir();
-    let missing: Vec<_> = ["KICK31.ROM", hdf]
+    let missing: Vec<_> = [KICK31_A4000, hdf]
         .into_iter()
         .filter(|file| !assets.join(file).is_file())
         .collect();
@@ -79,18 +84,17 @@ fn run_picasso_hdf(
     std::fs::write(
         &config,
         format!(
-            r#"rom = "KICK31.ROM"
+            r#"rom = "{KICK31_A4000}"
 
 [machine]
-profile = "A3000"
+profile = "A4000"
 
 [rtg]
 card = "{card}"
 vram = "2M"
 
-[scsi]
-controller = "a3000"
-unit0 = "{hdf}"
+[ide]
+master = "{hdf}"
 "#,
         ),
     )?;
@@ -183,7 +187,7 @@ fn picasso2plus_workbench_opens_with_gd5428_revision() -> Result<(), Box<dyn std
 fn picasso2_p96cts_reports_all_modes_clean() -> Result<(), Box<dyn std::error::Error>> {
     let assets = asset_dir();
     let hdf = "p96-picasso2-cts.hdf";
-    let missing: Vec<_> = ["KICK31.ROM", hdf]
+    let missing: Vec<_> = [KICK31_A4000, hdf]
         .into_iter()
         .filter(|file| !assets.join(file).is_file())
         .collect();
@@ -201,18 +205,17 @@ fn picasso2_p96cts_reports_all_modes_clean() -> Result<(), Box<dyn std::error::E
     std::fs::write(
         &config,
         format!(
-            r#"rom = "KICK31.ROM"
+            r#"rom = "{KICK31_A4000}"
 
 [machine]
-profile = "A3000"
+profile = "A4000"
 
 [rtg]
 card = "picasso2"
 vram = "2M"
 
-[scsi]
-controller = "a3000"
-unit0 = "{hdf}"
+[ide]
+master = "{hdf}"
 
 [[filesys]]
 path = {output_toml}
