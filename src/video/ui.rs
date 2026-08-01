@@ -9,9 +9,10 @@
 //! (register snapshots, disassembly text) the panels render.
 
 use super::launcher::{self, EditTarget, LauncherField, LauncherState, LauncherTab, RowKind};
+use super::menu;
 use super::window::{
-    draw_rect_bevel, fill_rect, fill_rect_blend, rgba, scale_rect, JoystickInputMode, Rect,
-    BUTTON_EDGE_DARK, BUTTON_EDGE_LIGHT, BUTTON_FACE, BUTTON_FACE_HOVER,
+    draw_rect_bevel, fill_rect, fill_rect_blend, rgba, scale_rect, texture_height, texture_width,
+    JoystickInputMode, Rect, BUTTON_EDGE_DARK, BUTTON_EDGE_LIGHT, BUTTON_FACE, BUTTON_FACE_HOVER,
 };
 use super::{font, present_height, FB_WIDTH, HOST_SHORTCUT_MODIFIER_LABEL};
 use crate::config::{MachineModel, PixelAspect, WarpSpeed};
@@ -837,6 +838,11 @@ pub struct UiState {
     /// First visible menu item when the list is too long for the display.
     /// Always 0 for a menu that fits; reset each time the menu opens.
     pub menu_scroll: usize,
+    /// The menu as it stood when it was opened, and how far into it the
+    /// cursor has gone. Built once per open, from the machine at that
+    /// moment, so nothing it offers can change under the pointer.
+    pub menu_rows: Vec<menu::MenuRow>,
+    pub menu_nav: menu::MenuNav,
     pub panel: Option<Panel>,
 }
 
@@ -6339,16 +6345,181 @@ pub fn draw(
         draw_panel_layer(frame, texture_scale, panel, hover, data);
     }
     if ui.menu_open {
-        draw_menu(
-            frame,
-            hover,
-            midi_active,
-            sampler_active,
-            ui.menu_scroll,
-            labels,
-            texture_scale,
-        );
+        if ui.menu_rows.is_empty() {
+            draw_menu(
+                frame,
+                hover,
+                midi_active,
+                sampler_active,
+                ui.menu_scroll,
+                labels,
+                texture_scale,
+            );
+        } else {
+            draw_tree_menu(frame, &ui.menu_rows, &ui.menu_nav, texture_scale);
+        }
     }
+}
+
+// ---------------------------------------------------------------------------
+// The pop-up menu
+// ---------------------------------------------------------------------------
+
+/// How much of the picture the open menu veils. Enough to throw the menu
+/// forward and to say the machine is not listening, while leaving what is
+/// behind readable.
+const MENU_VEIL: u32 = rgba(8, 9, 11);
+const MENU_VEIL_ALPHA: f32 = 0.45;
+
+/// A tick, drawn rather than typed: the font stops at ASCII, and a mark built
+/// from the text scale grows with it.
+fn draw_check(frame: &mut [u8], x: usize, y: usize, color: u32, px: usize, scale: usize) {
+    // Two strokes of a check: a short one down-right, a long one up-right.
+    let dot = |frame: &mut [u8], cx: usize, cy: usize| {
+        fill_rect(
+            frame,
+            scale_rect(
+                Rect {
+                    x: cx,
+                    y: cy,
+                    w: px,
+                    h: px,
+                },
+                scale,
+            ),
+            color,
+            scale,
+        );
+    };
+    for i in 0..3 {
+        dot(frame, x + i * px, y + (2 + i) * px);
+    }
+    for i in 0..4 {
+        dot(frame, x + (2 + i) * px, y + (4 - i) * px);
+    }
+}
+
+/// Draw the menu: a veil over everything behind, then one column per open
+/// level from the hamburger button upward.
+fn draw_tree_menu(frame: &mut [u8], rows: &[menu::MenuRow], nav: &menu::MenuNav, scale: usize) {
+    // The veil goes over the whole presentation, panels included: the menu
+    // takes precedence over anything it is opened on top of. It is painted
+    // into the presentation texture, so it never reaches a recording.
+    fill_rect_blend(
+        frame,
+        Rect {
+            x: 0,
+            y: 0,
+            w: texture_width(scale),
+            h: texture_height(scale),
+        },
+        MENU_VEIL,
+        MENU_VEIL_ALPHA,
+        scale,
+    );
+
+    let levels = nav.levels(rows);
+    let columns = menu::layout::columns(&levels, MENU_BUTTON_X + MENU_BUTTON_W, present_height());
+    let deepest = columns.len().saturating_sub(1);
+    for (depth, (column, level)) in columns.iter().zip(levels.iter()).enumerate() {
+        let panel = Rect {
+            x: column.x,
+            y: column.y,
+            w: column.w,
+            h: column.h,
+        };
+        fill_rect(frame, scale_rect(panel, scale), PANEL_BG, scale);
+        draw_rect_bevel(
+            frame,
+            scale_rect(panel, scale),
+            BUTTON_EDGE_LIGHT,
+            BUTTON_EDGE_DARK,
+            scale,
+        );
+
+        // A level that marks one of its rows indents them all, so the labels
+        // stay in a line whether or not they carry the tick.
+        let ticked = level.iter().any(menu::MenuRow::is_choice);
+        let indent = MENU_TEXT_INSET + usize::from(ticked) * 2 * font::GLYPH_W;
+
+        for n in 0..column.visible {
+            let index = column.first + n;
+            let Some(row) = level.get(index) else {
+                continue;
+            };
+            let (rx, ry, rw, rh) = column.row_rect(n);
+            // The cursor marks the deepest level; above it, the row that was
+            // opened stays lit so the trail back is visible.
+            let lit = if depth == deepest {
+                nav.cursor() == Some(index)
+            } else {
+                nav.open_at(depth) == Some(index)
+            };
+            if lit && row.enabled {
+                fill_rect(
+                    frame,
+                    scale_rect(
+                        Rect {
+                            x: rx,
+                            y: ry,
+                            w: rw,
+                            h: rh,
+                        },
+                        scale,
+                    ),
+                    MENU_HILIGHT_BG,
+                    scale,
+                );
+            }
+            let text_y = ry + rh.saturating_sub(font::GLYPH_H) / 2;
+            let color = if !row.enabled {
+                PANEL_TEXT_DIM
+            } else if lit {
+                MENU_HILIGHT_TEXT
+            } else {
+                PANEL_TEXT
+            };
+            if let menu::MenuRowKind::Choice { selected: true, .. } = row.kind {
+                draw_check(frame, rx + MENU_TEXT_INSET, text_y, color, 1, scale);
+            }
+            draw_panel_text(frame, rx + indent, text_y, &row.label, color, 1, scale);
+
+            // The value sits against the right edge, before the marker a
+            // submenu ends with.
+            let marker_w = usize::from(row.is_submenu()) * 2 * font::GLYPH_W;
+            if let Some(value) = &row.value {
+                let vw = value.chars().count() * font::GLYPH_W;
+                let vx = rx + rw.saturating_sub(MENU_TEXT_INSET + marker_w + vw);
+                let vcolor = if lit {
+                    MENU_HILIGHT_TEXT
+                } else {
+                    PANEL_TEXT_HILIGHT
+                };
+                draw_panel_text(frame, vx, text_y, value, vcolor, 1, scale);
+            }
+            if row.is_submenu() {
+                let mx = rx + rw.saturating_sub(MENU_TEXT_INSET + font::GLYPH_W);
+                draw_panel_text(frame, mx, text_y, ">", color, 1, scale);
+            }
+        }
+    }
+}
+
+/// Which level and row the pointer is over, if any.
+pub fn tree_menu_hit(
+    rows: &[menu::MenuRow],
+    nav: &menu::MenuNav,
+    pos: (usize, usize),
+) -> Option<(usize, usize)> {
+    let levels = nav.levels(rows);
+    let columns = menu::layout::columns(&levels, MENU_BUTTON_X + MENU_BUTTON_W, present_height());
+    // Innermost first: a child overlapping its parent takes the pointer.
+    for (depth, column) in columns.iter().enumerate().rev() {
+        if let Some(row) = column.row_at(pos.0, pos.1) {
+            return Some((depth, row));
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -6610,6 +6781,8 @@ mod tests {
         let ui = UiState {
             menu_open: true,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: None,
         };
         let first = menu_item_rect(0, n, 0).unwrap();
@@ -6724,7 +6897,7 @@ mod tests {
         let ui = UiState {
             menu_open: true,
             menu_scroll: 1,
-            panel: None,
+            ..Default::default()
         };
         let rows = menu_scroll_rows(big, 1).expect("scroll rows");
         for (control, rect, _) in rows {
@@ -7018,6 +7191,8 @@ mod tests {
         let ui = UiState {
             menu_open: false,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::FrameAnalyzer(FrameAnalyzerPanel::new())),
         };
         let rect = panel_rect(ui.panel.as_ref().unwrap());
@@ -7075,6 +7250,8 @@ mod tests {
         UiState {
             menu_open: false,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::FrameAnalyzer(panel)),
         }
     }
@@ -7587,6 +7764,8 @@ mod tests {
         let ui = UiState {
             menu_open: false,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::About),
         };
         let rect = panel_rect(ui.panel.as_ref().unwrap());
@@ -7611,6 +7790,8 @@ mod tests {
         let ui = UiState {
             menu_open: false,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Debugger(DebuggerPanel::new())),
         };
         let rect = panel_rect(ui.panel.as_ref().unwrap());
@@ -7650,6 +7831,8 @@ mod tests {
         let ui_break = UiState {
             menu_open: false,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Debugger(panel)),
         };
         let (control, toggle) = break_tab_button_rects(rect)[0];
@@ -7668,6 +7851,8 @@ mod tests {
         let ui_audio = UiState {
             menu_open: false,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Debugger(panel)),
         };
         let (control, mute0) = audio_tab_button_rects(rect)[0];
@@ -7960,6 +8145,8 @@ mod tests {
         let ui = UiState {
             menu_open: true,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: None,
         };
         draw(
@@ -8006,6 +8193,8 @@ mod tests {
         let ui = UiState {
             menu_open: false,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::About),
         };
         let data = PanelViewData::About(AboutView {
@@ -8060,6 +8249,8 @@ mod tests {
         let ui = UiState {
             menu_open: false,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Shortcuts),
         };
         draw(
@@ -8104,6 +8295,8 @@ mod tests {
         let ui = UiState {
             menu_open: false,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::DropChooser(DropChooserState {
                 disks: vec![
                     std::path::PathBuf::from("turrican2-disk1.adf"),
@@ -8204,6 +8397,8 @@ mod tests {
         let ui = UiState {
             menu_open: false,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Calibration(session)),
         };
         draw(
@@ -8252,6 +8447,8 @@ mod tests {
         let ui = UiState {
             menu_open: false,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::InputMap(Box::new(map_panel))),
         };
         draw(
@@ -8298,6 +8495,8 @@ mod tests {
         let ui = UiState {
             menu_open: false,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Debugger(panel)),
         };
         draw(
@@ -8366,6 +8565,8 @@ mod tests {
         let ui = UiState {
             menu_open: false,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Debugger(panel)),
         };
         draw(
@@ -8435,6 +8636,8 @@ mod tests {
         let ui = UiState {
             menu_open: false,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Debugger(panel)),
         };
         draw(
@@ -8557,6 +8760,8 @@ mod tests {
         let ui = UiState {
             menu_open: false,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Debugger(panel)),
         };
         draw(
@@ -8639,6 +8844,8 @@ mod tests {
         let ui = UiState {
             menu_open: false,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Debugger(panel)),
         };
         draw(
@@ -8732,6 +8939,8 @@ mod tests {
         let ui = UiState {
             menu_open: false,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Debugger(panel)),
         };
         draw(
@@ -8864,6 +9073,8 @@ mod tests {
         let ui = UiState {
             menu_open: false,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::FrameAnalyzer(panel)),
         };
         draw(
@@ -8951,6 +9162,8 @@ mod tests {
         let ui = UiState {
             menu_open: false,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::FrameAnalyzer(panel)),
         };
         draw(
@@ -8986,6 +9199,8 @@ mod tests {
         let ui = UiState {
             menu_open: false,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Console(console)),
         };
         draw(
@@ -9037,6 +9252,8 @@ mod tests {
         let ui = UiState {
             menu_open: false,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Launcher(Box::new(state))),
         };
         draw(
@@ -9128,6 +9345,8 @@ mod tests {
         let ui = UiState {
             menu_open: false,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Launcher(Box::new(state))),
         };
         draw(
@@ -9186,6 +9405,8 @@ mod tests {
         let ui = UiState {
             menu_open: false,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Launcher(Box::new(state))),
         };
         draw(
@@ -9237,6 +9458,8 @@ mod tests {
         let ui = UiState {
             menu_open: false,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Launcher(Box::new(state))),
         };
         draw(
@@ -9335,6 +9558,8 @@ mod tests {
         let ui = UiState {
             menu_open: false,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Launcher(Box::new(state))),
         };
         draw(&mut frame, scale, &ui, None, None, false, false, labels());
@@ -9348,6 +9573,8 @@ mod tests {
         let ui = UiState {
             menu_open: false,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Launcher(Box::new(state))),
         };
         draw(&mut frame, scale, &ui, None, None, false, false, labels());
@@ -9366,6 +9593,8 @@ mod tests {
         let ui = UiState {
             menu_open: false,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Launcher(Box::new(state))),
         };
         draw(&mut frame, scale, &ui, None, None, false, false, labels());
@@ -9384,6 +9613,8 @@ mod tests {
         let ui = UiState {
             menu_open: false,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Launcher(Box::new(state))),
         };
         draw(&mut frame, scale, &ui, None, None, false, false, labels());
@@ -9396,6 +9627,8 @@ mod tests {
         let ui = UiState {
             menu_open: false,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Launcher(Box::new(state))),
         };
         draw(&mut frame, scale, &ui, None, None, false, false, labels());
@@ -9426,6 +9659,8 @@ mod tests {
         let ui = UiState {
             menu_open: false,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Launcher(Box::new(state))),
         };
         draw(&mut frame, scale, &ui, None, None, false, false, labels());
@@ -9439,6 +9674,8 @@ mod tests {
         let ui = UiState {
             menu_open: false,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Launcher(Box::new(state))),
         };
         draw(&mut frame, scale, &ui, None, None, false, false, labels());
@@ -9451,6 +9688,8 @@ mod tests {
         let ui = UiState {
             menu_open: false,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Launcher(Box::new(state))),
         };
         draw(&mut frame, scale, &ui, None, None, false, false, labels());
@@ -9472,6 +9711,8 @@ mod tests {
         let ui = UiState {
             menu_open: false,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Launcher(Box::new(state))),
         };
         draw(&mut frame, scale, &ui, None, None, false, false, labels());
@@ -9495,6 +9736,8 @@ mod tests {
         let ui = UiState {
             menu_open: false,
             menu_scroll: 0,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
             panel: Some(Panel::Launcher(Box::new(state))),
         };
         draw(&mut frame, scale, &ui, None, None, false, false, labels());
@@ -9529,6 +9772,7 @@ mod tests {
                 menu_open: false,
                 menu_scroll: 0,
                 panel: Some(Panel::Launcher(Box::new(state))),
+                ..Default::default()
             };
             draw(&mut frame, scale, &ui, None, None, false, false, labels());
             save(&frame, "launcher-floppybridge-page");
