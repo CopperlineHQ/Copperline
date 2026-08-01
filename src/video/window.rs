@@ -4793,14 +4793,47 @@ impl App {
         else {
             return false;
         };
+        // The pointer is resting on the row this level is already open to.
+        // Leave it alone: the pointer sits on that row for as long as it takes
+        // to set off towards the level it opened, and rebuilding the path here
+        // would take that level away before it could be reached.
+        if self.ui.menu_nav.open_at(depth) == Some(row) {
+            return false;
+        }
         if self.ui.menu_nav.depth() == depth && self.ui.menu_nav.cursor() == Some(row) {
             return false;
         }
-        let path: Vec<usize> = (0..depth)
-            .filter_map(|d| self.ui.menu_nav.open_at(d))
-            .collect();
-        self.ui.menu_nav.open_path(path, Some(row));
+        let mut path = self.menu_path_to(depth);
+        // A category opens as the pointer reaches it, so submenus are walked
+        // into rather than clicked into. The cursor stays off the level that
+        // opens until the pointer is actually over one of its rows; the
+        // category itself stays lit as the way back.
+        let opens = self
+            .menu_row_at(depth, row)
+            .is_some_and(|r| r.enabled && r.is_submenu());
+        let cursor = if opens {
+            path.push(row);
+            None
+        } else {
+            Some(row)
+        };
+        self.ui.menu_nav.open_path(path, cursor);
         true
+    }
+
+    /// The open path down to `depth`, for a pointer that has landed on a level
+    /// without stepping through its parents.
+    fn menu_path_to(&self, depth: usize) -> Vec<usize> {
+        (0..depth)
+            .filter_map(|d| self.ui.menu_nav.open_at(d))
+            .collect()
+    }
+
+    /// The row at `row` on level `depth` of the open menu.
+    fn menu_row_at(&self, depth: usize, row: usize) -> Option<&crate::video::menu::MenuRow> {
+        let levels = self.ui.menu_nav.levels(&self.ui.menu_rows);
+        let level: &[crate::video::menu::MenuRow] = levels.get(depth)?;
+        level.get(row)
     }
 
     /// Walk the open menu with the keyboard. Returns true when the key was
@@ -4904,9 +4937,7 @@ impl App {
             // pointer can land on any level, so the path is set to where it
             // landed rather than stepped into.
             UiControl::MenuRow { depth, row } => {
-                let path: Vec<usize> = (0..depth)
-                    .filter_map(|d| self.ui.menu_nav.open_at(d))
-                    .collect();
+                let path = self.menu_path_to(depth);
                 self.ui.menu_nav.open_path(path, Some(row));
                 self.activate_menu_row(event_loop);
             }

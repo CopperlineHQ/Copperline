@@ -21,7 +21,7 @@ use crate::config::{AudioFilterMode, PixelAspect, ShaderKind, Tint, WarpSpeed};
 /// window's handler is a single match and the tree carries no behaviour.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MenuAction {
-    // Tools. Each opens its own window and closes the menu.
+    // Tools.
     OpenMachineConfig,
     OpenFrameAnalyzer,
     OpenDebugger,
@@ -74,6 +74,28 @@ pub enum MenuAction {
     QuickLoad(usize),
 }
 
+impl MenuAction {
+    /// Whether this takes the eye somewhere else -- a window, a panel, a file
+    /// dialogue. Those close the menu behind them; changing a setting leaves
+    /// it up, so a run of changes costs one open rather than one each.
+    pub fn opens_context(&self) -> bool {
+        matches!(
+            self,
+            MenuAction::OpenMachineConfig
+                | MenuAction::OpenFrameAnalyzer
+                | MenuAction::OpenDebugger
+                | MenuAction::OpenConsole
+                | MenuAction::OpenInputMapping
+                | MenuAction::OpenCalibration
+                | MenuAction::OpenShortcuts
+                | MenuAction::OpenAbout
+                | MenuAction::LoadRom
+                | MenuAction::SaveState
+                | MenuAction::LoadState
+        )
+    }
+}
+
 /// Which audio output a row selects. The host's device list is dynamic, so a
 /// row names one rather than holding an index that could go stale between the
 /// menu being built and a row being chosen.
@@ -107,13 +129,10 @@ pub struct MenuRow {
 pub enum MenuRowKind {
     /// Opens a child list. Drawn with a trailing marker.
     Submenu(Vec<MenuRow>),
-    /// Does something and closes the menu.
+    /// Does something. Whether the menu closes behind it is the action's
+    /// own business -- see [`MenuAction::opens_context`].
     Action(MenuAction),
-    /// Does something and leaves the menu open, for the rows meant to be
-    /// used more than once in a row: a toggle, or a step up or down.
-    Live(MenuAction),
-    /// Flips something in place. The menu stays open so a run of toggles can
-    /// be set without reopening it.
+    /// Flips something in place, drawn as on or off.
     Toggle { action: MenuAction, on: bool },
     /// One value of a setting, marked when it is the one in force.
     Choice { action: MenuAction, selected: bool },
@@ -137,10 +156,6 @@ impl MenuRow {
         Self::new(label, MenuRowKind::Action(action))
     }
 
-    fn live(label: &str, action: MenuAction) -> Self {
-        Self::new(label, MenuRowKind::Live(action))
-    }
-
     fn toggle(label: &str, action: MenuAction, on: bool) -> Self {
         Self::new(label, MenuRowKind::Toggle { action, on })
     }
@@ -161,19 +176,16 @@ impl MenuRow {
         self
     }
 
-    /// Whether picking this row closes the menu. Rows meant to be used
-    /// repeatedly leave it open.
+    /// Whether picking this row closes the menu: only the rows that open
+    /// something else do.
     pub fn closes_menu(&self) -> bool {
-        matches!(
-            self.kind,
-            MenuRowKind::Action(_) | MenuRowKind::Choice { .. }
-        )
+        self.menu_action().is_some_and(MenuAction::opens_context)
     }
 
     /// The action this row carries, if it does anything itself.
     pub fn menu_action(&self) -> Option<&MenuAction> {
         match &self.kind {
-            MenuRowKind::Action(a) | MenuRowKind::Live(a) => Some(a),
+            MenuRowKind::Action(a) => Some(a),
             MenuRowKind::Toggle { action, .. } | MenuRowKind::Choice { action, .. } => Some(action),
             MenuRowKind::Submenu(_) => None,
         }
@@ -239,6 +251,11 @@ impl MenuNav {
 
     pub fn depth(&self) -> usize {
         self.path.len()
+    }
+
+    /// The rows open at each level, outermost first.
+    pub fn path(&self) -> &[usize] {
+        &self.path
     }
 
     pub fn cursor(&self) -> Option<usize> {
@@ -614,9 +631,9 @@ fn parallel_rows(s: &MenuState) -> Vec<MenuRow> {
         MenuRow::submenu(
             "Sampler Gain",
             vec![
-                MenuRow::live("Increase", MenuAction::StepSamplerGain(1))
+                MenuRow::action("Increase", MenuAction::StepSamplerGain(1))
                     .available(s.sampler_gain < crate::sampler::MAX_SAMPLER_GAIN_DB),
-                MenuRow::live("Decrease", MenuAction::StepSamplerGain(-1))
+                MenuRow::action("Decrease", MenuAction::StepSamplerGain(-1))
                     .available(s.sampler_gain > crate::sampler::MIN_SAMPLER_GAIN_DB),
             ],
         )
@@ -691,7 +708,7 @@ fn save_state_rows(s: &MenuState) -> Vec<MenuRow> {
             .collect()
     };
     vec![
-        MenuRow::action("Save State", MenuAction::SaveState),
+        MenuRow::action("Save State...", MenuAction::SaveState),
         MenuRow::action("Load State...", MenuAction::LoadState),
         MenuRow::submenu("Quick Save", slots(true)),
         MenuRow::submenu("Quick Load", slots(false)),
@@ -1069,5 +1086,34 @@ mod tests {
         assert_eq!(labels[0], "1: empty");
         assert_eq!(labels[2], "3: 2026/07/31 14:05");
         assert_eq!(labels.len(), SAVE_SLOTS);
+    }
+
+    /// Only the rows that put something else on the screen close the menu.
+    /// Changing a setting leaves it up, so several can be changed in one go
+    /// and the row just picked can be seen to have taken.
+    #[test]
+    fn only_the_rows_that_open_something_close_the_menu() {
+        let none: [String; 0] = [];
+        let rows = build(&state(&none, &none, &none, &none, &empty_slots()));
+
+        assert!(find(&rows, "Machine Configuration...")
+            .expect("config")
+            .closes_menu());
+        assert!(find(&rows, "About...").expect("about").closes_menu());
+
+        let video = find(&rows, "Video Settings").expect("video");
+        let video = video.children().expect("children");
+        assert!(!find(video, "Fullscreen").expect("fullscreen").closes_menu());
+        let tint = find(video, "Screen Tint").expect("tint");
+        for row in tint.children().expect("tints") {
+            assert!(!row.closes_menu(), "picking {} closed the menu", row.label);
+        }
+
+        let save = find(&rows, "Save State").expect("save state");
+        let save = save.children().expect("children");
+        // Both of these put a file dialogue up; a quick slot does not.
+        assert!(find(save, "Save State...").expect("save").closes_menu());
+        let quick = find(save, "Quick Save").expect("quick save");
+        assert!(!quick.children().expect("slots")[0].closes_menu());
     }
 }
