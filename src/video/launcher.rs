@@ -24,11 +24,11 @@ use crate::chipset::agnus::{AgnusRevision, VideoStandard};
 use crate::chipset::denise::DeniseRevision;
 use crate::config::{
     format_size, machine_profile_defaults, AudioFilterMode, BridgeCable, BridgeDensity,
-    BridgeDriver, BridgeSpeedMode, ChannelMode, Chipset, Config, CpuModel, FloppyBridgeConfig,
-    JoystickInputMode, MachineModel, MenuScale, MouseCapture, Overscan, PacingBudget,
-    ParallelDevice, PixelAspect, RawConfig, RawDrive, RawFilesysMount, RawFloppyDrive,
-    RawZorroBoard, RtgCard, ScsiController, SerialMode, ShaderMode, Tint, WarpSpeed,
-    BOOT_PRI_NEVER,
+    BridgeDriver, BridgeSpeedMode, ChannelMode, Chipset, Config, CpuModel, DisplayScaling,
+    FloppyBridgeConfig, JoystickInputMode, MachineModel, MenuScale, MouseCapture, Overscan,
+    PacingBudget, ParallelDevice, PixelAspect, RawConfig, RawDrive, RawFilesysMount,
+    RawFloppyDrive, RawZorroBoard, RtgCard, ScsiController, SerialMode, ShaderMode, Tint,
+    WarpSpeed, BOOT_PRI_NEVER,
 };
 use crate::net::NetConfig;
 use crate::zorro::{ConfigOption, ConfigOptionKind, LoadedZorroBoard};
@@ -418,6 +418,7 @@ pub enum LauncherField {
     AudioFilter,
     Overscan,
     PixelAspect,
+    Scaling,
     Tint,
     Deinterlace,
     Phosphor,
@@ -693,13 +694,14 @@ const ETHERNET_ROWS: [Row; 2] = [
 ];
 // The A/V & Emu tab is split into three categories switched via the top nav row.
 // The Video category also carries the CRT-shader controls (a picture setting).
-const VIDEO_ROWS: [Row; 11] = [
+const VIDEO_ROWS: [Row; 12] = [
     row(F::StartFullscreen, "Start fullscreen", Toggle),
     row(F::ShowStatusBar, "Status bar", Toggle),
     row(F::Bezel, "Monitor bezel", Toggle),
     row(F::MenuScale, "Menu size", Cycle),
     row(F::Overscan, "Overscan", Cycle),
     row(F::PixelAspect, "Pixel aspect", Cycle),
+    row(F::Scaling, "Scaling", Cycle),
     row(F::Deinterlace, "Deinterlace", Toggle),
     row(F::Tint, "Screen tint", Cycle),
     row(F::Phosphor, "Phosphor", Cycle),
@@ -1316,6 +1318,8 @@ pub struct MachineSetup {
     audio_filter: AudioFilterMode,
     overscan: Overscan,
     pixel_aspect: PixelAspect,
+    /// How the canvas is scaled into the window ([display] scaling).
+    scaling: DisplayScaling,
     /// Motion-adaptive interlace weaving ([display] deinterlace).
     deinterlace: bool,
     phosphor: f32,
@@ -1486,6 +1490,7 @@ impl MachineSetup {
             audio_filter: cfg.audio.filter,
             overscan: cfg.overscan,
             pixel_aspect: cfg.pixel_aspect,
+            scaling: cfg.scaling,
             deinterlace: cfg.deinterlace,
             phosphor: cfg.phosphor,
             shader: cfg.shader.clone(),
@@ -1808,6 +1813,9 @@ impl MachineSetup {
         if self.pixel_aspect != base.pixel_aspect {
             raw.display.pixel_aspect = Some(pixel_aspect_name(self.pixel_aspect).to_string());
         }
+        if self.scaling != base.scaling {
+            raw.display.scaling = Some(display_scaling_name(self.scaling).to_string());
+        }
         if self.deinterlace != base.deinterlace {
             raw.display.deinterlace = Some(self.deinterlace);
         }
@@ -2043,6 +2051,7 @@ impl MachineSetup {
         self.z3_ram = base.z3_ram_bytes;
         self.overscan = base.overscan;
         self.pixel_aspect = base.pixel_aspect;
+        self.scaling = base.scaling;
         self.deinterlace = base.deinterlace;
         self.phosphor = base.phosphor;
         // The remembered user-shader path survives: it came from the config
@@ -2531,6 +2540,7 @@ impl MachineSetup {
                 PixelAspect::Tv => "TV (4:3)".to_string(),
                 PixelAspect::Square => "Square".to_string(),
             },
+            F::Scaling => self.scaling.label().to_string(),
             F::Tint => self.tint.menu_label().to_string(),
             F::MenuScale => self.menu_scale.menu_label().to_string(),
             F::Phosphor => {
@@ -2841,6 +2851,9 @@ impl MachineSetup {
             }
             F::PixelAspect => {
                 self.pixel_aspect = cycle_slice(&PIXEL_ASPECTS, self.pixel_aspect, forward)
+            }
+            F::Scaling => {
+                self.scaling = cycle_slice(&DisplayScaling::MENU_ORDER, self.scaling, forward)
             }
             F::PacingBudget => {
                 self.pacing_budget = cycle_slice(&PACINGS, self.pacing_budget, forward)
@@ -4139,6 +4152,13 @@ fn pixel_aspect_name(aspect: PixelAspect) -> &'static str {
     }
 }
 
+fn display_scaling_name(scaling: DisplayScaling) -> &'static str {
+    match scaling {
+        DisplayScaling::Smooth => "smooth",
+        DisplayScaling::Integer => "integer",
+    }
+}
+
 /// The `[display] shader` value for a mode: the canonical preset name (not
 /// the picker's "off" spelling, which only parses back), or a user shader's
 /// path as written.
@@ -4956,6 +4976,32 @@ mod tests {
         let s = MachineSetup::from_raw(&raw).unwrap();
         assert_eq!(s.rtg_vram_bytes, 1024 * 1024);
         assert_eq!(s.to_raw().rtg.vram.as_deref(), Some("1M"));
+    }
+
+    /// The Video page's Scaling picker writes the `[display] scaling` key
+    /// its parser reads back, and stays out of the file while it matches
+    /// the default.
+    #[test]
+    fn display_scaling_round_trips_through_raw() {
+        let mut s = MachineSetup::default();
+        assert_eq!(s.scaling, DisplayScaling::Smooth);
+        assert_eq!(s.value_label(LauncherField::Scaling), "Smooth");
+        assert!(s.to_raw().display.scaling.is_none());
+
+        s.cycle(LauncherField::Scaling, true);
+        assert_eq!(s.scaling, DisplayScaling::Integer);
+        assert_eq!(s.value_label(LauncherField::Scaling), "Integer");
+        let raw = s.to_raw();
+        assert_eq!(raw.display.scaling.as_deref(), Some("integer"));
+        assert_eq!(
+            MachineSetup::from_raw(&raw).unwrap().scaling,
+            DisplayScaling::Integer
+        );
+        assert!(s.build_config().is_ok());
+
+        // Two modes, so cycling on returns to the default.
+        s.cycle(LauncherField::Scaling, true);
+        assert_eq!(s.scaling, DisplayScaling::Smooth);
     }
 
     #[test]

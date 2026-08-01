@@ -114,6 +114,28 @@ pub fn set_pixel_aspect(aspect: crate::config::PixelAspect) {
     );
 }
 
+/// How the presentation canvas is scaled into the window
+/// (`[display] scaling`, runtime-toggled by the menu's Scaling item).
+/// Main thread only, like [`SQUARE_PIXEL_ASPECT`]; the atomic only
+/// satisfies `static` safety. Independent of the pixel aspect: that
+/// decides what the canvas is, this decides how it reaches the window.
+static INTEGER_SCALING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_display_scaling(scaling: crate::config::DisplayScaling) {
+    INTEGER_SCALING.store(
+        scaling == crate::config::DisplayScaling::Integer,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+pub fn display_scaling() -> crate::config::DisplayScaling {
+    if INTEGER_SCALING.load(std::sync::atomic::Ordering::Relaxed) {
+        crate::config::DisplayScaling::Integer
+    } else {
+        crate::config::DisplayScaling::Smooth
+    }
+}
+
 /// Whether the status bar is hidden, so the emulated display scales to fill the
 /// whole window. Toggled live from the window/menu (main thread only, like
 /// [`SQUARE_PIXEL_ASPECT`]); the atomic only satisfies `static` safety.

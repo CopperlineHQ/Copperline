@@ -196,6 +196,17 @@ tool window or overlay.
   square-pixel emulators). The window and its backing texture resize with the
   mode. The start-up mode comes from `[display] pixel_aspect`
   (see [Configuration](configuration.md)).
+- **Scaling**: how that canvas is drawn into the window -- **Smooth** (the
+  default: fit to the window preserving aspect ratio, interpolated) or
+  **Integer** (the largest whole-number multiple of the canvas that fits,
+  centred in black borders and point-sampled, so every canvas pixel is the
+  same square block of host pixels). Integer scaling applies to RTG board
+  modes too, at multiples of their own native resolution, and gives way to
+  the smooth fit when the window cannot hold even a 1:1 copy rather than
+  cropping the picture. Nothing resizes when it changes, so a video
+  recording carries on underneath. The start-up mode is
+  `[display] scaling`, which also notes which pixel-aspect pairing is
+  fully pixel-exact (see [Configuration](configuration.md)).
 - **CRT Shader**: the GPU tube-emulation pass over the picture --
   **Disabled**, **Scanlines** (the line structure of a 15 kHz set), **Mask**
   (an RGB phosphor shadow mask), **CRT (1084)** (both, plus a bowed tube face
@@ -391,8 +402,8 @@ The layout is:
   and *A/V & Emu*, split by a row of category buttons at the top into
   **Audio** (output device, channel mode, stereo separation, filter, floppy
   sounds and volume), **Video** (start fullscreen, status bar, monitor bezel,
-  overscan, pixel aspect, deinterlace, screen tint, phosphor, CRT shader and
-  shader strength),
+  menu size, overscan, pixel aspect, scaling, deinterlace, screen tint,
+  phosphor, CRT shader and shader strength),
   and **Emulation**
   (power-on, realtime priority, pacing, warp speed) -- opening on Audio, and
   switched freely between the three.

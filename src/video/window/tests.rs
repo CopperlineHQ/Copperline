@@ -5,13 +5,14 @@
 //! and keep full access to the parent's private items via `super::`.
 
 use super::ui::{AnalyzerTab, Panel, UiControl};
+use super::ScalingMode;
 use super::{
     bar_layout, center_present_frame_for_visible_start, center_present_frame_horizontally,
     control_at, copperline_icon_image, copperline_logo_image, copy_present_frame,
-    copy_window_present_frame, cursor_position_in_texture, draw_status_bar, fdd_track_counter_rect,
-    fdd_track_digit_rect, host_shortcut_modifier_pressed, host_to_amiga_rawkey,
-    joystick_toggle_rect, led_row_rect, mask_present_frame_to_tv, paint_test_screen,
-    parse_amiga_key, pause_button_rect, power_button_rect, present_height,
+    copy_window_present_frame, cursor_position_in_texture, draw_status_bar, effective_scaling_mode,
+    fdd_track_counter_rect, fdd_track_digit_rect, host_shortcut_modifier_pressed,
+    host_to_amiga_rawkey, joystick_toggle_rect, led_row_rect, mask_present_frame_to_tv,
+    paint_test_screen, parse_amiga_key, pause_button_rect, power_button_rect, present_height,
     presentation_pixels_equal, presentation_source_y_offset, raw_device_qualifier_family_held,
     raw_device_qualifier_rawkey, rawkey_is_held, rawkey_transition_is_duplicate,
     reboot_button_rect, repeated_main_key_should_drop, rgba, short_status_error,
@@ -6868,4 +6869,36 @@ fn cursor_mapping_rejects_pillarbox_clicks() {
         cursor_position_in_texture((0.0, 0.0), (0, 0, 0, 0), texture),
         None
     );
+}
+
+/// `[display] scaling = "integer"` presents through pixels' PixelPerfect
+/// mode, but only while the surface can hold the whole texture: that mode
+/// floors its scale at 1x and crops what does not fit, so a surface smaller
+/// in either dimension falls back to the aspect-preserving Fill.
+#[test]
+fn integer_scaling_gives_way_when_the_surface_cannot_hold_the_texture() {
+    // ScalingMode is not PartialEq, so ask whether the integer mode was
+    // chosen rather than comparing the values.
+    let integer = |requested, surface, texture| {
+        matches!(
+            effective_scaling_mode(requested, surface, texture),
+            ScalingMode::PixelPerfect
+        )
+    };
+    let texture = (716, 581);
+
+    // Room for 2x, and the exact-fit boundary: both integer-scaled.
+    assert!(integer(true, (1432, 1162), texture));
+    assert!(integer(true, (716, 581), texture));
+
+    // One pixel short in either dimension crops under PixelPerfect.
+    assert!(!integer(true, (715, 581), texture));
+    assert!(!integer(true, (716, 580), texture));
+
+    // The 150% fractional-DPI case: a 2x supersampled texture inside a 1.5x
+    // surface is smaller in both dimensions even at the canvas window size.
+    assert!(!integer(true, (1074, 872), (1432, 1162)));
+
+    // Smooth never leaves Fill, however much room there is.
+    assert!(!integer(false, (1432, 1162), texture));
 }

@@ -378,6 +378,71 @@ pub(super) fn texture_scale_for_factor(scale_factor: f64) -> usize {
     (scale_factor.round() as usize).clamp(1, MAX_TEXTURE_SCALE)
 }
 
+/// The `pixels` scaling mode to present with, for a surface and backing
+/// texture of the given sizes (both in physical pixels).
+///
+/// `ScalingMode::PixelPerfect` is exactly the integer mode: it draws the
+/// texture at `floor(min(surface / texture))` and point-samples it. But its
+/// scale is floored at 1, so with a surface *smaller* than the texture it
+/// still draws at 1x and the picture is cropped to the surface rather than
+/// shrunk into it. That is a real configuration, not a corner case: the
+/// backing texture is supersampled by `texture_scale` = the rounded host DPI
+/// factor, so a 150% desktop has a 2x texture inside a 1.5x surface, and any
+/// window dragged smaller than the canvas gets there too. Integer scaling
+/// gives way to the aspect-preserving fit whenever it would crop -- losing
+/// picture is worse than losing the pixel grid.
+pub(super) fn effective_scaling_mode(
+    integer_requested: bool,
+    surface: (u32, u32),
+    texture: (u32, u32),
+) -> ScalingMode {
+    if integer_requested && surface.0 >= texture.0 && surface.1 >= texture.1 {
+        ScalingMode::PixelPerfect
+    } else {
+        ScalingMode::Fill
+    }
+}
+
+/// Whether the emulator window presents at whole-number scale
+/// (`[display] scaling = "integer"`, or the menu's Scaling item). Only the
+/// machine's own display follows it; the tool windows are always fitted.
+pub(super) fn integer_scaling_requested() -> bool {
+    crate::video::display_scaling() == crate::config::DisplayScaling::Integer
+}
+
+/// Set the scaling mode for the extents the surface and texture are *about
+/// to* have, so a caller can decide before the resize that establishes them.
+///
+/// `set_scaling_mode` only stores the mode: the scaling matrix and the clip
+/// rect are recomputed by the next `resize_surface`/`resize_buffer`, so every
+/// call site pairs this with one (a runtime toggle that resizes nothing has
+/// to re-apply the current surface size itself).
+pub(super) fn sync_scaling_mode(
+    pixels: &mut Pixels<'static>,
+    integer_requested: bool,
+    surface: (u32, u32),
+    texture: (u32, u32),
+) {
+    pixels.set_scaling_mode(effective_scaling_mode(integer_requested, surface, texture));
+}
+
+/// Re-decide the emulator window's scaling mode for the canvas it is about
+/// to present: the texture at its current supersample factor, against the
+/// window's live surface size. The caller follows with the resize that
+/// recomputes the scaling matrix and clip rect from the mode.
+pub(super) fn sync_main_scaling_mode(r: &mut Render) {
+    let surface = r.window.inner_size();
+    sync_scaling_mode(
+        &mut r.pixels,
+        integer_scaling_requested(),
+        (surface.width.max(1), surface.height.max(1)),
+        (
+            texture_width(r.texture_scale) as u32,
+            texture_height(r.texture_scale) as u32,
+        ),
+    );
+}
+
 /// React to a host DPI scale-factor change for one window's pixel surface.
 ///
 /// `cursor_texture_position` maps a host click into texture space using
@@ -393,15 +458,21 @@ pub(super) fn resync_render_scale(
     pixels: &mut Pixels<'static>,
     texture_scale: &mut usize,
     scale_factor: f64,
+    surface: (u32, u32),
+    integer_scaling: bool,
 ) {
     let new_scale = texture_scale_for_factor(scale_factor);
     if new_scale == *texture_scale {
         return;
     }
-    match pixels.resize_buffer(
+    let texture = (
         texture_width(new_scale) as u32,
         texture_height(new_scale) as u32,
-    ) {
+    );
+    // The new texture size decides whether integer scaling still fits the
+    // surface, so choose the mode for it before the resize applies it.
+    sync_scaling_mode(pixels, integer_scaling, surface, texture);
+    match pixels.resize_buffer(texture.0, texture.1) {
         Ok(()) => *texture_scale = new_scale,
         Err(e) => warn!("resize texture buffer for scale {scale_factor} failed: {e}"),
     }
@@ -411,15 +482,16 @@ pub(super) fn build_pixels_for_window(
     window: Arc<Window>,
     texture_scale: usize,
     vsync: bool,
+    integer_scaling: bool,
 ) -> std::result::Result<Pixels<'static>, pixels::Error> {
     let inner = window.inner_size();
-    let surface = SurfaceTexture::new(inner.width.max(1), inner.height.max(1), window);
-    let builder = PixelsBuilder::new(
+    let surface = (inner.width.max(1), inner.height.max(1));
+    let texture = (
         texture_width(texture_scale) as u32,
         texture_height(texture_scale) as u32,
-        surface,
-    )
-    .enable_vsync(vsync);
+    );
+    let surface_texture = SurfaceTexture::new(surface.0, surface.1, window);
+    let builder = PixelsBuilder::new(texture.0, texture.1, surface_texture).enable_vsync(vsync);
     let builder = if cfg!(target_os = "linux") {
         builder.wgpu_backend(
             pixels::wgpu::Backends::from_env().unwrap_or(pixels::wgpu::Backends::VULKAN),
@@ -428,12 +500,12 @@ pub(super) fn build_pixels_for_window(
         builder
     };
     let mut pixels = builder.build()?;
-    pixels.set_scaling_mode(ScalingMode::Fill);
-    // set_scaling_mode only stores the mode; the scaling matrix and clip rect
-    // stay the builder's PixelPerfect ones until a resize recomputes them.
-    // Re-apply the surface size so the cursor mapping and the render scissor
-    // agree with the Fill pass from the first frame, not the first resize.
-    pixels.resize_surface(inner.width.max(1), inner.height.max(1))?;
+    sync_scaling_mode(&mut pixels, integer_scaling, surface, texture);
+    // The scaling matrix and clip rect stay the builder's PixelPerfect ones
+    // until a resize recomputes them. Re-apply the surface size so the cursor
+    // mapping and the render scissor agree with the mode just set from the
+    // first frame, not the first resize.
+    pixels.resize_surface(surface.0, surface.1)?;
     Ok(pixels)
 }
 
