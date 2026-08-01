@@ -1966,6 +1966,20 @@ impl PortDevice {
         }
     }
 
+    /// What a picker shows the user, as against the config name [`label`]
+    /// round-trips. Both pickers read this, so they cannot drift apart.
+    ///
+    /// [`label`]: PortDevice::label
+    pub fn menu_label(self) -> &'static str {
+        match self {
+            PortDevice::Mouse => "Mouse",
+            PortDevice::Joystick => "Joystick",
+            PortDevice::Cd32Pad => "CD32 pad",
+            PortDevice::Analogue => "Analogue",
+            PortDevice::None => "None",
+        }
+    }
+
     /// Parse a configuration name (canonical or alias, case-insensitive).
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {

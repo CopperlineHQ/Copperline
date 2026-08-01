@@ -552,6 +552,17 @@ impl JoystickInputMode {
             Self::Keyboard => "keyboard",
         }
     }
+
+    /// What a picker shows the user, as against the config name [`label`]
+    /// round-trips.
+    ///
+    /// [`label`]: JoystickInputMode::label
+    pub fn menu_label(self) -> &'static str {
+        match self {
+            Self::Gamepad => "Gamepad",
+            Self::Keyboard => "Keyboard",
+        }
+    }
 }
 
 /// When the host mouse is grabbed: the pointer is confined to the window

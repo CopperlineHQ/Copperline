@@ -2583,18 +2583,15 @@ impl MachineSetup {
                 PacingBudget::Instructions => "Instructions".to_string(),
             },
             F::Warp => self.warp.label().to_string(),
-            F::Joystick => match self.joystick_input_mode {
-                JoystickInputMode::Keyboard => "Keyboard".to_string(),
-                JoystickInputMode::Gamepad => "Gamepad".to_string(),
-            },
+            F::Joystick => self.joystick_input_mode.menu_label().to_string(),
             F::MouseSensitivity => crate::config::mouse_sensitivity_label(self.mouse_sensitivity),
             F::MouseCapture => match self.mouse_capture {
                 MouseCapture::Click => "On click".to_string(),
                 MouseCapture::Auto => "Automatic".to_string(),
                 MouseCapture::Manual => "Shortcut only".to_string(),
             },
-            F::Port1Device => port_device_display(self.port_devices[0]).to_string(),
-            F::Port2Device => port_device_display(self.port_devices[1]).to_string(),
+            F::Port1Device => PortDevice::menu_label(self.port_devices[0]).to_string(),
+            F::Port2Device => PortDevice::menu_label(self.port_devices[1]).to_string(),
             F::ScsiController => match self.scsi_controller {
                 None => "None".to_string(),
                 Some(ScsiController::A2091) => "A2091 (Z2)".to_string(),
@@ -3951,18 +3948,6 @@ fn cycle_bootpri(current: i8, forward: bool) -> i8 {
         (idx + n - 1) % n
     };
     BOOTPRI_STEPS[next]
-}
-
-/// Human form of a port device for the picker rows (the config strings
-/// stay lowercase).
-fn port_device_display(device: PortDevice) -> &'static str {
-    match device {
-        PortDevice::Mouse => "Mouse",
-        PortDevice::Joystick => "Joystick",
-        PortDevice::Cd32Pad => "CD32 pad",
-        PortDevice::Analogue => "Analogue",
-        PortDevice::None => "None",
-    }
 }
 
 fn cycle_slice<T: Copy + PartialEq>(items: &[T], current: T, forward: bool) -> T {

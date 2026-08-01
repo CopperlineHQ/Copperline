@@ -4576,7 +4576,7 @@ impl App {
 
             A::SetPortDevice(port, device) => {
                 self.hot_plug_port_device(port, device);
-                self.show_osd(format!("Port {}: {}", port + 1, device.label()));
+                self.show_osd(format!("Port {}: {}", port + 1, device.menu_label()));
             }
             A::SetJoystickInput(mode) => self.set_joystick_input_mode(mode),
             A::SetAutofire(hz) => {

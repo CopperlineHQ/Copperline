@@ -581,7 +581,7 @@ fn input_rows(s: &MenuState) -> Vec<MenuRow> {
             .iter()
             .map(|d| {
                 MenuRow::choice(
-                    d.label(),
+                    d.menu_label(),
                     MenuAction::SetPortDevice(n, *d),
                     s.port_devices[n] == *d,
                 )
@@ -593,7 +593,7 @@ fn input_rows(s: &MenuState) -> Vec<MenuRow> {
         .into_iter()
         .map(|m| {
             MenuRow::choice(
-                m.label(),
+                m.menu_label(),
                 MenuAction::SetJoystickInput(m),
                 s.joystick_input_mode == m,
             )
@@ -990,7 +990,7 @@ mod tests {
             .filter(|r| matches!(r.kind, MenuRowKind::Choice { selected: true, .. }))
             .map(|r| r.label.as_str())
             .collect();
-        assert_eq!(marked, [PortDevice::Cd32Pad.label()]);
+        assert_eq!(marked, [PortDevice::Cd32Pad.menu_label()]);
     }
 
     fn nav_rows() -> Vec<MenuRow> {
