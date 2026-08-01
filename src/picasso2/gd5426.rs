@@ -833,46 +833,6 @@ impl CirrusGd5426 {
         src.and_then(|at| self.vram.get(at).copied()).unwrap_or(0)
     }
 
-    fn color_expand_bit(
-        &self,
-        system: Option<&[u8]>,
-        system_pitch: usize,
-        pattern: bool,
-        backwards: bool,
-        src_line: usize,
-        src_start: usize,
-        y: usize,
-        pixel: usize,
-    ) -> u8 {
-        let (byte, bit) = if pattern {
-            (
-                self.vram
-                    .get(src_start.saturating_add(y & 7))
-                    .copied()
-                    .unwrap_or(0),
-                pixel & 7,
-            )
-        } else if let Some(data) = system {
-            (
-                data.get(y * system_pitch + pixel / 8).copied().unwrap_or(0),
-                pixel & 7,
-            )
-        } else {
-            let byte_at = if backwards {
-                src_line.checked_sub(pixel / 8)
-            } else {
-                src_line.checked_add(pixel / 8)
-            };
-            (
-                byte_at
-                    .and_then(|at| self.vram.get(at).copied())
-                    .unwrap_or(0),
-                pixel & 7,
-            )
-        };
-        byte >> (7 - bit) & 1
-    }
-
     fn execute_blit(&mut self, system: Option<&[u8]>) {
         let width = self.blit_width().min(self.vram.len());
         let height = self.blit_height().min(MAX_DIM);
@@ -891,6 +851,13 @@ impl CirrusGd5426 {
             && color_expand
             && mode & BLIT_MODE_TRANSPARENT == 0
             && modeext & BLIT_MODEEXT_SOLID_FILL != 0;
+        // Video-source colour expansion consumes one continuous bit stream:
+        // a row that ends mid-byte rounds up to the next source byte and the
+        // source pitch register is never consulted. Pattern and system-source
+        // expansion address their sources per row instead.
+        let mut expand_addr = src_start;
+        let mut expand_count = 0usize;
+        let expand_span = 8 * pixel_bytes;
 
         for y in 0..height {
             let dst_line = if backwards {
@@ -904,6 +871,34 @@ impl CirrusGd5426 {
                 src_start.saturating_add(y.saturating_mul(src_pitch))
             };
             for x in 0..width {
+                let expand_bit = color_expand.then(|| {
+                    let pixel = x / pixel_bytes;
+                    if pattern {
+                        let byte = self
+                            .vram
+                            .get(src_start.saturating_add(y & 7))
+                            .copied()
+                            .unwrap_or(0);
+                        byte >> (7 - (pixel & 7)) & 1
+                    } else if let Some(data) = system {
+                        let byte = data.get(y * system_pitch + pixel / 8).copied().unwrap_or(0);
+                        byte >> (7 - (pixel & 7)) & 1
+                    } else {
+                        let byte = self.vram.get(expand_addr).copied().unwrap_or(0);
+                        byte >> (7 - expand_count / pixel_bytes) & 1
+                    }
+                });
+                if color_expand && !pattern && system.is_none() {
+                    expand_count += 1;
+                    if expand_count == expand_span {
+                        expand_count = 0;
+                        expand_addr = if backwards {
+                            expand_addr.wrapping_sub(1)
+                        } else {
+                            expand_addr.wrapping_add(1)
+                        };
+                    }
+                }
                 let dst = if backwards {
                     dst_line.checked_sub(x)
                 } else {
@@ -913,19 +908,6 @@ impl CirrusGd5426 {
                     continue;
                 };
                 let component = x % pixel_bytes;
-                let expand_bit = color_expand.then(|| {
-                    let pixel = x / pixel_bytes;
-                    self.color_expand_bit(
-                        system,
-                        system_pitch,
-                        pattern,
-                        backwards,
-                        src_line,
-                        src_start,
-                        y,
-                        pixel,
-                    )
-                });
                 let source = if solid_fill {
                     self.blit_fg_component(component)
                 } else if let Some(bit) = expand_bit {
@@ -982,6 +964,14 @@ impl CirrusGd5426 {
                 let dest = self.vram[dst];
                 let result = apply_rop(self.gfx[0x32], source, dest);
                 self.vram[dst] = result;
+            }
+            if color_expand && !pattern && system.is_none() && expand_count != 0 {
+                expand_count = 0;
+                expand_addr = if backwards {
+                    expand_addr.wrapping_sub(1)
+                } else {
+                    expand_addr.wrapping_add(1)
+                };
             }
         }
     }

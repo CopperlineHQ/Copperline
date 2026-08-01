@@ -28,7 +28,10 @@ The register model covers the packed-pixel driver path:
 - CL-GD5426/5428 BitBLT video/video and system/video sources, forward and backward
   overlap-safe copy, 8x8 pattern and solid fill, colour expansion, source
   transparency, 8/16/24-bit pixel widths, and all sixteen documented Cirrus
-  raster operations.
+  raster operations. A video-source colour expansion consumes its source as
+  one continuous bit stream -- each row rounds up to the next source byte
+  and the source pitch register is not consulted -- which is what Picasso96
+  relies on for text and its blitter-drawn mouse pointer.
 
 VGA text rendering is intentionally absent. The card powers up behind native
 Amiga pass-through, and Amiga RTG drivers program a packed-pixel mode before
@@ -68,8 +71,8 @@ introduce wall-clock or dynamic environment state.
 The 1 MB configuration advertises and maps a 1 MB memory-space aperture, so
 there is no guest-visible upper-half alias or hole. The II+ model supplies its
 CL-GD5428 part ID, different autoconfig serial, and INT2 vertical blank. The
-physical product-13 segmented configuration, Pablo encoder, VGA text modes,
-and native-resolution headless RTG screenshots remain outside the model.
+physical product-13 segmented configuration, Pablo encoder, and VGA text
+modes remain outside the model.
 
 The implementation was checked against the Cirrus Logic CL-GD542X Technical
 Reference Manual and the independent Cirrus models in 86Box and QEMU. Those
