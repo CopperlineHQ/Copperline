@@ -164,7 +164,10 @@ impl MenuRow {
     /// Whether picking this row closes the menu. Rows meant to be used
     /// repeatedly leave it open.
     pub fn closes_menu(&self) -> bool {
-        matches!(self.kind, MenuRowKind::Action(_) | MenuRowKind::Choice { .. })
+        matches!(
+            self.kind,
+            MenuRowKind::Action(_) | MenuRowKind::Choice { .. }
+        )
     }
 
     /// The action this row carries, if it does anything itself.
@@ -186,6 +189,152 @@ impl MenuRow {
             MenuRowKind::Submenu(rows) => Some(rows),
             _ => None,
         }
+    }
+}
+
+/// Where the menu is open to, and which row the cursor is on.
+///
+/// One structure drives both pointers and keys: the mouse moves the cursor by
+/// hovering and the keys move it by stepping, and everything downstream --
+/// what is drawn, what Return picks -- reads the same place. Levels are held
+/// as the row index taken at each depth, so the open path survives the tree
+/// being rebuilt under it (a device appearing on a port, a slot being
+/// written) as long as the shape has not changed.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MenuNav {
+    /// Row index chosen at each open level, outermost first. Empty means only
+    /// the top level is open.
+    path: Vec<usize>,
+    /// Cursor position within the deepest open level. `None` before the
+    /// keyboard or pointer has picked a row.
+    cursor: Option<usize>,
+}
+
+impl MenuNav {
+    /// The rows of the deepest open level, and the levels above it.
+    pub fn levels<'a>(&self, root: &'a [MenuRow]) -> Vec<&'a [MenuRow]> {
+        let mut levels = vec![root];
+        let mut rows = root;
+        for &i in &self.path {
+            match rows.get(i).and_then(MenuRow::children) {
+                Some(children) => {
+                    levels.push(children);
+                    rows = children;
+                }
+                None => break,
+            }
+        }
+        levels
+    }
+
+    /// The rows the cursor is moving within.
+    pub fn current<'a>(&self, root: &'a [MenuRow]) -> &'a [MenuRow] {
+        self.levels(root).pop().unwrap_or(root)
+    }
+
+    pub fn depth(&self) -> usize {
+        self.path.len()
+    }
+
+    pub fn cursor(&self) -> Option<usize> {
+        self.cursor
+    }
+
+    /// Which row is open at `depth`, so the drawing code can mark the parent
+    /// of the level beside it.
+    pub fn open_at(&self, depth: usize) -> Option<usize> {
+        self.path.get(depth).copied()
+    }
+
+    /// Put the cursor on a row of the current level, as hovering does.
+    pub fn point_at(&mut self, index: usize) {
+        self.cursor = Some(index);
+    }
+
+    pub fn clear_cursor(&mut self) {
+        self.cursor = None;
+    }
+
+    /// Step the cursor, skipping rows that cannot be picked and wrapping at
+    /// both ends. Starting with no cursor, down lands on the first row and up
+    /// on the last, so a menu just opened answers either key sensibly.
+    pub fn step(&mut self, root: &[MenuRow], forward: bool) {
+        let rows = self.current(root);
+        if rows.is_empty() {
+            self.cursor = None;
+            return;
+        }
+        let n = rows.len();
+        let start = match self.cursor {
+            Some(c) => c,
+            None => {
+                if forward {
+                    n - 1
+                } else {
+                    0
+                }
+            }
+        };
+        for hop in 1..=n {
+            let i = if forward {
+                (start + hop) % n
+            } else {
+                (start + n - hop % n) % n
+            };
+            if rows[i].enabled {
+                self.cursor = Some(i);
+                return;
+            }
+        }
+        // Nothing on this level can be picked; leave the cursor alone rather
+        // than parking it on a row that would refuse.
+    }
+
+    /// Open the submenu under the cursor. Returns false when there is none,
+    /// so the caller can treat Right on a leaf as "no move" rather than a
+    /// selection.
+    pub fn descend(&mut self, root: &[MenuRow]) -> bool {
+        let Some(cursor) = self.cursor else {
+            return false;
+        };
+        let rows = self.current(root);
+        let Some(row) = rows.get(cursor) else {
+            return false;
+        };
+        if !row.enabled || !row.is_submenu() {
+            return false;
+        }
+        self.path.push(cursor);
+        self.cursor = None;
+        // Land on the first pickable row of the level just opened.
+        self.step(root, true);
+        true
+    }
+
+    /// Close the deepest level, putting the cursor back on the row that
+    /// opened it. Returns false at the top level, where the caller closes the
+    /// menu instead.
+    pub fn ascend(&mut self) -> bool {
+        match self.path.pop() {
+            Some(parent) => {
+                self.cursor = Some(parent);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Open exactly `path`, cursor on its last row. Used by the pointer,
+    /// which can enter a level without stepping through its parents.
+    pub fn open_path(&mut self, path: Vec<usize>, cursor: Option<usize>) {
+        self.path = path;
+        self.cursor = cursor;
+    }
+
+    /// Forget any open submenu, as closing and reopening the menu does.
+    pub fn reset(&mut self) {
+        self.path.clear();
+        self.cursor = None;
     }
 }
 
@@ -628,6 +777,70 @@ mod tests {
             .map(|r| r.label.as_str())
             .collect();
         assert_eq!(marked, [PortDevice::Cd32Pad.label()]);
+    }
+
+    fn nav_rows() -> Vec<MenuRow> {
+        vec![
+            MenuRow::action("First", MenuAction::OpenAbout),
+            MenuRow::action("Blocked", MenuAction::OpenAbout).available(false),
+            MenuRow::submenu(
+                "Deeper",
+                vec![
+                    MenuRow::action("Inner one", MenuAction::OpenAbout),
+                    MenuRow::action("Inner two", MenuAction::OpenAbout),
+                ],
+            ),
+        ]
+    }
+
+    /// Stepping skips what cannot be picked and wraps, and the first step
+    /// into a fresh menu lands sensibly whichever key was pressed.
+    #[test]
+    fn stepping_skips_unpickable_rows_and_wraps() {
+        let rows = nav_rows();
+        let mut nav = MenuNav::default();
+        nav.step(&rows, true);
+        assert_eq!(nav.cursor(), Some(0), "down lands on the first row");
+        nav.step(&rows, true);
+        assert_eq!(nav.cursor(), Some(2), "the blocked row is skipped");
+        nav.step(&rows, true);
+        assert_eq!(nav.cursor(), Some(0), "and it wraps");
+
+        let mut nav = MenuNav::default();
+        nav.step(&rows, false);
+        assert_eq!(nav.cursor(), Some(2), "up lands on the last row");
+        nav.step(&rows, false);
+        assert_eq!(nav.cursor(), Some(0), "skipping the blocked row again");
+    }
+
+    /// Descending opens the level and lands on its first row; ascending puts
+    /// the cursor back on the row that opened it.
+    #[test]
+    fn descending_and_ascending_keep_their_place() {
+        let rows = nav_rows();
+        let mut nav = MenuNav::default();
+        nav.point_at(2);
+        assert!(nav.descend(&rows));
+        assert_eq!(nav.depth(), 1);
+        assert_eq!(nav.cursor(), Some(0));
+        assert_eq!(nav.current(&rows).len(), 2, "the inner level");
+
+        assert!(nav.ascend());
+        assert_eq!(nav.depth(), 0);
+        assert_eq!(nav.cursor(), Some(2), "back on the row that opened it");
+        assert!(!nav.ascend(), "the top level has nowhere to go");
+    }
+
+    /// A leaf, and a row that cannot be picked, do not open anything.
+    #[test]
+    fn only_a_pickable_submenu_opens() {
+        let rows = nav_rows();
+        let mut nav = MenuNav::default();
+        nav.point_at(0);
+        assert!(!nav.descend(&rows), "a leaf has nothing to open");
+        nav.point_at(1);
+        assert!(!nav.descend(&rows), "nor does a blocked row");
+        assert_eq!(nav.depth(), 0);
     }
 
     /// A quick-save slot says what it holds, so an overwrite is visible
