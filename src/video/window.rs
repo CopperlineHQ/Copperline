@@ -2870,6 +2870,11 @@ impl ApplicationHandler for App {
                         }
                     }
                 }
+                // The pointer moves the same cursor the keys do, so hovering
+                // a row lights it and Return would take it.
+                if self.follow_menu_hover() {
+                    self.request_redraw();
+                }
                 let layout = bar_layout(&self.media_bar());
                 if bar_hover_changed(&layout, previous_cursor_pos, self.cursor_pos)
                     || self.main_ui_hover_changed(previous_cursor_pos, self.cursor_pos)
@@ -4769,6 +4774,33 @@ impl App {
             A::QuickSave(slot) => self.quick_save_state(slot + 1),
             A::QuickLoad(slot) => self.quick_load_state(slot + 1, event_loop),
         }
+    }
+
+    /// Put the menu cursor under the pointer. Returns true when it moved.
+    ///
+    /// Hovering a row of a level closes anything opened deeper from it: the
+    /// lit row and the open trail are then always the same thing, whether the
+    /// pointer or the keys put it there.
+    fn follow_menu_hover(&mut self) -> bool {
+        if !self.ui.menu_open || self.ui.menu_rows.is_empty() {
+            return false;
+        }
+        let Some(pos) = self.cursor_pos else {
+            return false;
+        };
+        let pos = (pos.0.max(0) as usize, pos.1.max(0) as usize);
+        let Some((depth, row)) = ui::tree_menu_hit(&self.ui.menu_rows, &self.ui.menu_nav, pos)
+        else {
+            return false;
+        };
+        if self.ui.menu_nav.depth() == depth && self.ui.menu_nav.cursor() == Some(row) {
+            return false;
+        }
+        let path: Vec<usize> = (0..depth)
+            .filter_map(|d| self.ui.menu_nav.open_at(d))
+            .collect();
+        self.ui.menu_nav.open_path(path, Some(row));
+        true
     }
 
     /// Walk the open menu with the keyboard. Returns true when the key was

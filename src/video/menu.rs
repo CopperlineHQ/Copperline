@@ -386,7 +386,10 @@ pub struct MenuState<'a> {
 /// a list is long enough to need it.
 pub const MENU_ROW_H: usize = 14;
 pub const MENU_TEXT_INSET: usize = 8;
-pub const MENU_COL_GAP: usize = 2;
+/// How far a child column sits over its parent. A hair of overlap, with
+/// every column bevelled, reads as one stack of panels rather than a row of
+/// separate boxes -- the same trick the desktop menus use.
+pub const MENU_COL_OVERLAP: usize = 2;
 pub const MENU_SLACK_H: usize = 28;
 
 /// Numbered quick-save slots, matching the 1-10 keyboard shortcuts.
@@ -703,7 +706,7 @@ fn save_state_rows(s: &MenuState) -> Vec<MenuRow> {
 /// menu is anchored at the bottom, grows upward, and keeps a margin of empty
 /// column beneath the rows until a list is long enough to need it.
 pub mod layout {
-    use super::{MenuRow, MENU_COL_GAP, MENU_ROW_H, MENU_SLACK_H, MENU_TEXT_INSET};
+    use super::{MenuRow, MENU_COL_OVERLAP, MENU_ROW_H, MENU_SLACK_H, MENU_TEXT_INSET};
     use crate::video::font;
 
     /// One open level's column.
@@ -757,46 +760,65 @@ pub mod layout {
     /// Lay the open levels out, innermost last.
     ///
     /// `anchor_right` is where the first column's right edge sits (the
-    /// hamburger button's right edge) and `bottom` the display height the
-    /// menu is anchored to.
-    pub fn columns(levels: &[&[MenuRow]], anchor_right: usize, bottom: usize) -> Vec<Column> {
+    /// hamburger button's right edge), `bottom` the display height the menu
+    /// is anchored to, and `opened_at` the row of each level that opened the
+    /// one after it, so a child can start beside the row it belongs to.
+    pub fn columns(
+        levels: &[&[MenuRow]],
+        opened_at: &[Option<usize>],
+        anchor_right: usize,
+        bottom: usize,
+    ) -> Vec<Column> {
         let mut out: Vec<Column> = Vec::with_capacity(levels.len());
-        for rows in levels.iter() {
+        for (depth, rows) in levels.iter().enumerate() {
             let w = column_width(rows);
-            // The first column hangs from the button; each child sits beside
-            // its parent, and falls back to the left when there is no room.
+            // The first column hangs from the button. Each child sits to the
+            // right of its parent, overlapping it by a hair, and falls back
+            // to the parent's left when the display runs out.
             let x = match out.last() {
                 None => anchor_right.saturating_sub(w),
                 Some(prev) => {
-                    let right = prev.x + prev.w + MENU_COL_GAP;
+                    let right = (prev.x + prev.w).saturating_sub(MENU_COL_OVERLAP);
                     if right + w <= super::super::FB_WIDTH {
                         right
                     } else {
-                        prev.x.saturating_sub(w + MENU_COL_GAP)
+                        (prev.x + MENU_COL_OVERLAP).saturating_sub(w)
                     }
                 }
             };
-            // Every column shares one bottom edge, above the slack the menu
-            // keeps for looks, so a child reads as part of the same block
-            // rather than hanging below its parent. A level too tall for the
-            // display gives the slack up first and is then trimmed to fit.
-            let wanted_h = rows.len() * MENU_ROW_H;
-            let slack = if wanted_h + MENU_SLACK_H <= bottom {
+            // The menu meets the status bar: its slack is empty panel below
+            // the last row, not a gap under the panel. A level long enough to
+            // need that room gives it up, and one longer still is trimmed.
+            let wanted = rows.len() * MENU_ROW_H;
+            let slack = if depth == 0 && wanted + MENU_SLACK_H <= bottom {
                 MENU_SLACK_H
             } else {
                 0
             };
             let room = bottom.saturating_sub(slack);
-            let wanted = wanted_h;
-            let (visible, h) = if wanted <= room {
+            let (visible, rows_h) = if wanted <= room {
                 (rows.len(), wanted)
             } else {
                 let fits = room / MENU_ROW_H;
                 (fits, fits * MENU_ROW_H)
             };
+            let h = rows_h + slack;
+            // A child starts level with the row that opened it, so the eye
+            // follows the row across rather than dropping back to a shared
+            // edge. It slides up when that would push it off the bottom.
+            let y = match (
+                out.last(),
+                opened_at.get(depth.wrapping_sub(1)).copied().flatten(),
+            ) {
+                (Some(prev), Some(parent_row)) => {
+                    let (_, row_y, _, _) = prev.row_rect(parent_row.saturating_sub(prev.first));
+                    row_y.min(bottom.saturating_sub(h))
+                }
+                _ => bottom.saturating_sub(h),
+            };
             out.push(Column {
                 x,
-                y: bottom.saturating_sub(slack + h),
+                y,
                 w,
                 h,
                 visible,
@@ -974,21 +996,29 @@ mod tests {
     fn columns_stack_from_the_bottom_and_cascade_sideways() {
         let root = nav_rows();
         let inner = root[2].children().expect("children").to_vec();
-        let cols = layout::columns(&[&root, &inner], 600, 400);
+        let cols = layout::columns(&[&root, &inner], &[Some(2)], 600, 400);
         assert_eq!(cols.len(), 2);
 
         assert_eq!(
             cols[0].y + cols[0].h,
-            400 - MENU_SLACK_H,
-            "the menu keeps its slack"
+            400,
+            "the panel meets the bottom, with its slack inside"
+        );
+        assert_eq!(
+            cols[0].h,
+            root.len() * MENU_ROW_H + MENU_SLACK_H,
+            "which is empty panel below the last row"
         );
         assert_eq!(cols[0].x + cols[0].w, 600, "hangs from the anchor");
-        assert_eq!(
-            cols[1].y + cols[1].h,
-            cols[0].y + cols[0].h,
-            "a child shares the same bottom edge"
+
+        // The child starts level with the row that opened it (index 2).
+        let (_, parent_row_y, _, _) = cols[0].row_rect(2);
+        assert_eq!(cols[1].y, parent_row_y, "level with its parent row");
+        assert!(
+            cols[1].x < cols[0].x + cols[0].w,
+            "overlapping its parent by a hair"
         );
-        assert!(cols[1].x >= cols[0].x + cols[0].w, "and sits beside it");
+        assert!(cols[1].x > cols[0].x, "to the right of it");
     }
 
     /// A level too tall for the display is trimmed to what fits, keeping its
@@ -998,7 +1028,7 @@ mod tests {
         let rows: Vec<MenuRow> = (0..40)
             .map(|i| MenuRow::action(&format!("Row {i}"), MenuAction::OpenAbout))
             .collect();
-        let cols = layout::columns(&[&rows], 600, 200);
+        let cols = layout::columns(&[&rows], &[], 600, 200);
         assert!(cols[0].visible < rows.len(), "trimmed");
         assert_eq!(
             cols[0].first + cols[0].visible,
@@ -1012,7 +1042,7 @@ mod tests {
     #[test]
     fn a_column_reports_the_row_under_the_pointer() {
         let rows = nav_rows();
-        let cols = layout::columns(&[&rows], 600, 400);
+        let cols = layout::columns(&[&rows], &[], 600, 400);
         let c = cols[0];
         let (x, y, _, _) = c.row_rect(1);
         assert_eq!(c.row_at(x + 4, y + 2), Some(1));

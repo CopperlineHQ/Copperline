@@ -6430,7 +6430,13 @@ fn draw_tree_menu(frame: &mut [u8], rows: &[menu::MenuRow], nav: &menu::MenuNav,
     );
 
     let levels = nav.levels(rows);
-    let columns = menu::layout::columns(&levels, MENU_BUTTON_X + MENU_BUTTON_W, present_height());
+    let opened: Vec<Option<usize>> = (0..levels.len()).map(|d| nav.open_at(d)).collect();
+    let columns = menu::layout::columns(
+        &levels,
+        &opened,
+        MENU_BUTTON_X + MENU_BUTTON_W,
+        present_height(),
+    );
     let deepest = columns.len().saturating_sub(1);
     for (depth, (column, level)) in columns.iter().zip(levels.iter()).enumerate() {
         let panel = Rect {
@@ -6523,7 +6529,13 @@ pub fn tree_menu_hit(
     pos: (usize, usize),
 ) -> Option<(usize, usize)> {
     let levels = nav.levels(rows);
-    let columns = menu::layout::columns(&levels, MENU_BUTTON_X + MENU_BUTTON_W, present_height());
+    let opened: Vec<Option<usize>> = (0..levels.len()).map(|d| nav.open_at(d)).collect();
+    let columns = menu::layout::columns(
+        &levels,
+        &opened,
+        MENU_BUTTON_X + MENU_BUTTON_W,
+        present_height(),
+    );
     // Innermost first: a child overlapping its parent takes the pointer.
     for (depth, column) in columns.iter().enumerate().rev() {
         if let Some(row) = column.row_at(pos.0, pos.1) {
