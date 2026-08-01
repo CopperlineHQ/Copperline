@@ -3266,9 +3266,16 @@ impl TryFrom<RawConfig> for Config {
                 }
             },
         };
-        let rtg_vram_bytes = match raw.rtg.vram.as_deref() {
-            None => defaults.rtg_vram_bytes,
-            Some(value) => parse_size(value, "RTG VRAM")?,
+        // Only the Picasso II cards have configurable display memory; other
+        // cards ignore [rtg] vram entirely, so a leftover value must not
+        // fail an unrelated configuration.
+        let rtg_vram_bytes = if matches!(rtg, RtgCard::Picasso2 | RtgCard::Picasso2Plus) {
+            match raw.rtg.vram.as_deref() {
+                None => defaults.rtg_vram_bytes,
+                Some(value) => parse_size(value, "RTG VRAM")?,
+            }
+        } else {
+            defaults.rtg_vram_bytes
         };
 
         let scsi = ScsiConfig {
@@ -7586,6 +7593,18 @@ mod tests {
             err.to_string().contains("must be \"1M\" or \"2M\""),
             "{err:#}"
         );
+    }
+
+    #[test]
+    fn rtg_vram_is_ignored_by_non_picasso_cards() {
+        let cfg = parse_config("[rtg]\ncard = \"none\"\nvram = \"oops\"\n").unwrap();
+        assert_eq!(cfg.rtg, RtgCard::None);
+        assert_eq!(cfg.rtg_vram_bytes, 2 * 1024 * 1024);
+        let cfg =
+            parse_config("[cpu]\nmodel = \"68030\"\n\n[rtg]\ncard = \"z3660\"\nvram = \"3M\"\n")
+                .unwrap();
+        assert_eq!(cfg.rtg, RtgCard::Z3660);
+        assert_eq!(cfg.rtg_vram_bytes, 2 * 1024 * 1024);
     }
 
     /// A machine that can host a Zorro III board gets one fitted by default,
