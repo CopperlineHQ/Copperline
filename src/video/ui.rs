@@ -7919,7 +7919,32 @@ mod tests {
             Some(&data),
         );
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
-        save(&frame, "frame-analyzer-memory"); // Console: a session transcript over the prompt line.        let mut frame = vec![0u8; w * h * 4];        let mut console = ConsolePanel::default();        console.push_output("Copperline debugger console. Type HELP for commands.");        console.push_output("> B C033C2");        console.push_output("breakpoint $C033C2 set");        console.push_output("> RUN");        console.push_output("running (PAUSE stops; breakpoints report here or on stop)");        console.push_output("> PAUSE");        console.push_output("!Breakpoint at $C033C2");        console.push_output( "pc $C033C2  MOVE.W #$4000,$00DFF09A   sr 2300  beam v44 h101  frame 1234",        );        console.push_output("> D");        console.push_output("C033C2  MOVE.W #$4000,$00DFF09A");        console.push_output("C033C8  RTS");        console.input = "MEM C00000 40".to_string();        let ui = UiState { menu_open: false, menu_rows: Vec::new(), menu_nav: menu::MenuNav::default(), panel: Some(Panel::Console(console)),        };        draw( &mut frame, scale, &ui, None, None,);
+        save(&frame, "frame-analyzer-memory");
+
+        // Console: a session transcript over the prompt line.
+        let mut frame = vec![0u8; w * h * 4];
+        let mut console = ConsolePanel::default();
+        console.push_output("Copperline debugger console. Type HELP for commands.");
+        console.push_output("> B C033C2");
+        console.push_output("breakpoint $C033C2 set");
+        console.push_output("> RUN");
+        console.push_output("running (PAUSE stops; breakpoints report here or on stop)");
+        console.push_output("> PAUSE");
+        console.push_output("!Breakpoint at $C033C2");
+        console.push_output(
+            "pc $C033C2  MOVE.W #$4000,$00DFF09A   sr 2300  beam v44 h101  frame 1234",
+        );
+        console.push_output("> D");
+        console.push_output("C033C2  MOVE.W #$4000,$00DFF09A");
+        console.push_output("C033C8  RTS");
+        console.input = "MEM C00000 40".to_string();
+        let ui = UiState {
+            menu_open: false,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
+            panel: Some(Panel::Console(console)),
+        };
+        draw(&mut frame, scale, &ui, None, None);
         assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
         save(&frame, "console");
 

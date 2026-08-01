@@ -4455,7 +4455,8 @@ impl App {
             return;
         }
         if row.is_submenu() {
-            self.ui.menu_nav.descend(&self.ui.menu_rows.clone());
+            let ui = &mut self.ui;
+            ui.menu_nav.descend(&ui.menu_rows);
             self.request_redraw();
             return;
         }
@@ -4709,15 +4710,15 @@ impl App {
     /// closing the menu from the top, which is where Escape has nothing left
     /// to close.
     fn handle_menu_key(&mut self, code: KeyCode, event_loop: &ActiveEventLoop) -> bool {
-        let rows = self.ui.menu_rows.clone();
+        let ui = &mut self.ui;
         match code {
-            KeyCode::ArrowUp => self.ui.menu_nav.step(&rows, false),
-            KeyCode::ArrowDown => self.ui.menu_nav.step(&rows, true),
+            KeyCode::ArrowUp => ui.menu_nav.step(&ui.menu_rows, false),
+            KeyCode::ArrowDown => ui.menu_nav.step(&ui.menu_rows, true),
             KeyCode::ArrowRight => {
-                self.ui.menu_nav.descend(&rows);
+                ui.menu_nav.descend(&ui.menu_rows);
             }
             KeyCode::ArrowLeft => {
-                self.ui.menu_nav.ascend();
+                ui.menu_nav.ascend();
             }
             KeyCode::Enter | KeyCode::NumpadEnter => {
                 self.activate_menu_row(Some(event_loop));
@@ -4725,7 +4726,7 @@ impl App {
                 return true;
             }
             KeyCode::Escape => {
-                if !self.ui.menu_nav.ascend() {
+                if !ui.menu_nav.ascend() {
                     self.close_menu();
                 }
             }

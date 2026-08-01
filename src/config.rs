@@ -2336,9 +2336,6 @@ impl RawConfig {
         toml::to_string_pretty(self).context("serializing configuration to TOML")
     }
 
-    /// The configured live-audio state (`[audio] output_enabled`), defaulting to
-    /// on when unset -- matching [`AudioConfig`]'s default. Lets the binary seed
-    /// the config-screen session audio without reaching into private raw fields.
     /// The configured menu size, for the paths that put a window up before a
     /// whole [`Config`] has been built.
     pub fn menu_scale(&self) -> MenuScale {
@@ -2349,6 +2346,9 @@ impl RawConfig {
             .unwrap_or_default()
     }
 
+    /// The configured live-audio state (`[audio] output_enabled`), defaulting to
+    /// on when unset -- matching [`AudioConfig`]'s default. Lets the binary seed
+    /// the config-screen session audio without reaching into private raw fields.
     pub fn audio_output_enabled(&self) -> bool {
         self.audio.output_enabled.unwrap_or(true)
     }
