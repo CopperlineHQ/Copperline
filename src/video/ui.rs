@@ -1992,8 +1992,8 @@ fn shortcuts_panel_height() -> usize {
 }
 
 const SHORTCUT_ROWS: [(&str, &str, bool); 23] = [
-    ("E", "Open the menu", true),
     ("Q", "Quit", true),
+    ("E", "Open the menu", true),
     ("S", "Save screenshot", true),
     ("R", "Record video on/off", true),
     ("Shift+R", "Record input on/off", true),

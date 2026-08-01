@@ -728,11 +728,7 @@ fn save_state_rows(s: &MenuState) -> Vec<MenuRow> {
     // A slot names what is in it, so a save that would overwrite something
     // says so before it is chosen rather than after.
     let slots = |save: bool| -> Vec<MenuRow> {
-        let caption = if save {
-            "Quick Save..."
-        } else {
-            "Quick Load..."
-        };
+        let caption = if save { "Quick Save" } else { "Quick Load" };
         std::iter::once(MenuRow::caption(caption))
             .chain((0..SAVE_SLOTS).map(|i| {
                 let held = s.save_slots[i].as_deref().unwrap_or("empty");
@@ -747,10 +743,10 @@ fn save_state_rows(s: &MenuState) -> Vec<MenuRow> {
             .collect()
     };
     vec![
-        MenuRow::action("Save State...", MenuAction::SaveState),
-        MenuRow::action("Load State...", MenuAction::LoadState),
         MenuRow::submenu("Quick Save", slots(true)),
         MenuRow::submenu("Quick Load", slots(false)),
+        MenuRow::action("Save State...", MenuAction::SaveState),
+        MenuRow::action("Load State...", MenuAction::LoadState),
     ]
 }
 
@@ -1135,14 +1131,14 @@ mod tests {
         let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
         // The caption says which of the two identical-looking levels this is,
         // and cannot be picked.
-        assert_eq!(labels[0], "Quick Save...");
+        assert_eq!(labels[0], "Quick Save");
         assert!(!rows[0].enabled && rows[0].menu_action().is_none());
         assert_eq!(labels[1], "1: empty");
         assert_eq!(labels[3], "3: 2026/07/31 14:05");
         assert_eq!(labels.len(), SAVE_SLOTS + 1);
 
         let load = find(save.children().expect("children"), "Quick Load").expect("quick load");
-        assert_eq!(load.children().expect("slots")[0].label, "Quick Load...");
+        assert_eq!(load.children().expect("slots")[0].label, "Quick Load");
     }
 
     /// The menu scale multiplies every length, so the whole thing grows
