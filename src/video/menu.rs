@@ -297,10 +297,6 @@ impl MenuNav {
         self.cursor = Some(index);
     }
 
-    pub fn clear_cursor(&mut self) {
-        self.cursor = None;
-    }
-
     /// Step the cursor, skipping rows that cannot be picked and wrapping at
     /// both ends. Starting with no cursor, down lands on the first row and up
     /// on the last, so a menu just opened answers either key sensibly.
@@ -795,7 +791,7 @@ pub mod layout {
 
     /// The width a level needs: its widest row, plus room for the value and
     /// the submenu marker, within the inset either side.
-    pub fn column_width(rows: &[MenuRow], px: usize) -> usize {
+    fn column_width(rows: &[MenuRow], px: usize) -> usize {
         let widest = rows
             .iter()
             .map(|r| {
