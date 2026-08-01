@@ -6095,6 +6095,104 @@ mod control_drain {
     }
 
     #[test]
+    fn scheduled_tap_survives_windowed_connection_turnover() {
+        let (mut app, cmd_tx, reply_rx) = attached_app();
+        cmd_tx.send(CtlMsg::Connected).unwrap();
+        app.drain_control();
+        push(
+            &cmd_tx,
+            1,
+            "input.key",
+            json!({"rawkey": 0x12, "action": "tap", "hold_ms": 80}),
+        );
+        app.drain_control();
+        assert_eq!(reply(&reply_rx)["result"]["scheduled"], 1);
+        assert!(app.emu.bus().keyboard.is_held(0x12));
+
+        cmd_tx.send(CtlMsg::Disconnected).unwrap();
+        app.drain_control();
+        cmd_tx.send(CtlMsg::Connected).unwrap();
+        app.drain_control();
+
+        for _ in 0..6 {
+            app.emu.step_frame().unwrap();
+            app.drain_control();
+        }
+        assert!(
+            !app.emu.bus().keyboard.is_held(0x12),
+            "the replacement connection must deliver the deferred release"
+        );
+    }
+
+    #[test]
+    fn windowed_reset_clears_future_input() {
+        let (mut app, cmd_tx, reply_rx) = attached_app();
+        push(
+            &cmd_tx,
+            1,
+            "input.key",
+            json!({"rawkey": 0x23, "action": "press", "at_seconds": 0.04}),
+        );
+        app.drain_control();
+        assert_eq!(reply(&reply_rx)["result"]["scheduled"], 1);
+        push(&cmd_tx, 2, "machine.reset", json!({"kind": "warm"}));
+        app.drain_control();
+        assert_eq!(reply(&reply_rx)["id"], 2);
+
+        for _ in 0..6 {
+            app.emu.step_frame().unwrap();
+            app.drain_control();
+        }
+        assert!(
+            !app.emu.bus().keyboard.is_held(0x23),
+            "reset must discard input aimed at the old timeline"
+        );
+    }
+
+    #[test]
+    fn windowed_state_load_clears_future_input() {
+        let (mut app, cmd_tx, reply_rx) = attached_app();
+        let path = std::env::temp_dir().join(format!(
+            "copperline-control-scheduled-{}.clstate",
+            std::process::id()
+        ));
+        push(
+            &cmd_tx,
+            1,
+            "state.save",
+            json!({"path": path.display().to_string()}),
+        );
+        app.drain_control();
+        assert_eq!(reply(&reply_rx)["id"], 1);
+        push(
+            &cmd_tx,
+            2,
+            "input.key",
+            json!({"rawkey": 0x24, "action": "press", "at_seconds": 0.04}),
+        );
+        app.drain_control();
+        assert_eq!(reply(&reply_rx)["result"]["scheduled"], 1);
+        push(
+            &cmd_tx,
+            3,
+            "state.load",
+            json!({"path": path.display().to_string()}),
+        );
+        app.drain_control();
+        assert_eq!(reply(&reply_rx)["id"], 3);
+
+        for _ in 0..6 {
+            app.emu.step_frame().unwrap();
+            app.drain_control();
+        }
+        std::fs::remove_file(path).ok();
+        assert!(
+            !app.emu.bus().keyboard.is_held(0x24),
+            "state load must discard input aimed at the old timeline"
+        );
+    }
+
+    #[test]
     fn connected_arms_time_travel_and_shutdown_requests_exit() {
         let (mut app, cmd_tx, reply_rx) = attached_app();
         assert!(!app.emu.time_travel_enabled());

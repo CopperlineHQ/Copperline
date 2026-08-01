@@ -336,7 +336,14 @@ red/fire1, blue/fire2, green, yellow, play, rwd, ffw}` (held state,
 replaced wholesale; port defaults to 2), `input.analogue {port?, x, y}`
 (analogue stick/paddle position, 0-255 per axis, the count POTxDAT
 latches; port defaults to 2). Events drive the named port's electrical
-lines whatever device is configured there.
+lines whatever device is configured there. Scheduled input belongs to
+the emulated machine, not to the TCP connection that submitted it: it
+survives client disconnects and fires when a later connection (or the
+windowed emulator) advances past its timestamp. A timestamp already in
+the past is accepted and fires at the next input drain. A successful
+`state.load`, or either warm or cold `machine.reset`, clears all pending
+scheduled input because those operations replace the timeline it was
+aimed at.
 
 `input.mouse_to {x, y, port?, tolerance?, max_frames?}` puts the guest's
 pointer at an absolute position instead: `x` and `y` are presented pixels
@@ -385,7 +392,8 @@ Diagnostic captures: `trace.start {path?, max_lines?}`, `trace.status`,
 `waveform.status`, `waveform.stop`.
 
 State and capture: `state.save {path}`, `state.load {path}` (re-arms
-the reverse-debug ring on the loaded timeline), `capture.screenshot
+the reverse-debug ring on the loaded timeline and clears pending
+scheduled input), `capture.screenshot
 {path?}` (raw framebuffer PNG, 716 pixels wide -- 1432 for a
 programmable super-hi-res scan's 35 ns canvas; with an active RTG
 screen it is the board frame downsampled to 716 at the board's
@@ -398,7 +406,8 @@ motion changing the answer; the reply echoes the rectangle and reports
 the frame's own `width`/`height`, and a rectangle that does not fit
 inside the current frame is `-32602` rather than a silent clamp --
 frame geometry moves with the beam standard and the canvas scale),
-`machine.reset {kind: "warm"|"cold"}`.
+`machine.reset {kind: "warm"|"cold"}` (also clears pending scheduled
+input).
 
 Notifications have no `id`. The subscribed `event.frame`, `event.serial`,
 `event.interrupt`, and `event.media` streams work in both server modes.
