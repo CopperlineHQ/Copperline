@@ -15,7 +15,7 @@
 
 use crate::bus::PortDevice;
 use crate::config::JoystickInputMode;
-use crate::config::{AudioFilterMode, PixelAspect, ShaderKind, Tint, WarpSpeed};
+use crate::config::{AudioFilterMode, MenuScale, PixelAspect, ShaderKind, Tint, WarpSpeed};
 
 /// What choosing a leaf does. Everything the menu can do is here, so the
 /// window's handler is a single match and the tree carries no behaviour.
@@ -40,6 +40,7 @@ pub enum MenuAction {
     SetPixelAspect(PixelAspect),
     SetShader(ShaderKind),
     SetTint(Tint),
+    SetMenuScale(MenuScale),
     ToggleFullscreen,
     ToggleStatusBar,
 
@@ -191,9 +192,22 @@ impl MenuRow {
         }
     }
 
-    /// Whether this row is one value of a setting.
-    pub fn is_choice(&self) -> bool {
-        matches!(self.kind, MenuRowKind::Choice { .. })
+    /// Whether this row shows the state of a setting: one value of it, or
+    /// whether it is on. Those rows carry a tick when the state holds, and a
+    /// level holding any of them indents them all to keep the labels in line.
+    pub fn marks_state(&self) -> bool {
+        matches!(
+            self.kind,
+            MenuRowKind::Toggle { .. } | MenuRowKind::Choice { .. }
+        )
+    }
+
+    /// Whether the state this row marks is the one in force.
+    pub fn marked(&self) -> bool {
+        matches!(
+            self.kind,
+            MenuRowKind::Toggle { on: true, .. } | MenuRowKind::Choice { selected: true, .. }
+        )
     }
 
     /// Whether this row leads somewhere rather than doing something.
@@ -379,6 +393,8 @@ pub struct MenuState<'a> {
     /// row is shown but cannot be chosen.
     pub custom_shader_available: bool,
     pub tint: Tint,
+    /// How large the menu itself is drawn.
+    pub menu_scale: MenuScale,
     pub floppy_speed: u16,
     pub audio_filter: AudioFilterMode,
     /// The output in force, and every output the host offers.
@@ -400,7 +416,8 @@ pub struct MenuState<'a> {
 
 /// Row pitch, the inset text keeps from each edge, the gap between a column
 /// and its child, and the empty column the menu keeps beneath its rows until
-/// a list is long enough to need it.
+/// a list is long enough to need it. Every one is multiplied by the menu
+/// scale, so the whole menu grows together with the font.
 pub const MENU_ROW_H: usize = 14;
 pub const MENU_TEXT_INSET: usize = 8;
 /// How far a child column sits over its parent. A hair of overlap, with
@@ -521,10 +538,16 @@ fn video_rows(s: &MenuState) -> Vec<MenuRow> {
         .map(|t| MenuRow::choice(t.label(), MenuAction::SetTint(*t), s.tint == *t))
         .collect();
 
+    let sizes = MenuScale::MENU_ORDER
+        .iter()
+        .map(|m| MenuRow::choice(m.label(), MenuAction::SetMenuScale(*m), s.menu_scale == *m))
+        .collect();
+
     vec![
         MenuRow::submenu("Pixel Aspect", aspects),
         MenuRow::submenu("CRT Shader", shaders),
         MenuRow::submenu("Screen Tint", tints),
+        MenuRow::submenu("Menu Size", sizes).with_value(s.menu_scale.label()),
         MenuRow::toggle("Fullscreen", MenuAction::ToggleFullscreen, s.fullscreen),
         MenuRow::toggle(
             "Status Bar",
@@ -738,12 +761,14 @@ pub mod layout {
         pub visible: usize,
         /// Index of the first drawn row.
         pub first: usize,
+        /// Row pitch at the scale this column was laid out for.
+        pub row_h: usize,
     }
 
     impl Column {
         /// The rect of the `n`-th drawn row.
         pub fn row_rect(&self, n: usize) -> (usize, usize, usize, usize) {
-            (self.x, self.y + n * MENU_ROW_H, self.w, MENU_ROW_H)
+            (self.x, self.y + n * self.row_h, self.w, self.row_h)
         }
 
         /// Which drawn row, if any, contains `(px, py)`.
@@ -751,14 +776,14 @@ pub mod layout {
             if px < self.x || px >= self.x + self.w || py < self.y {
                 return None;
             }
-            let n = (py - self.y) / MENU_ROW_H;
+            let n = (py - self.y) / self.row_h;
             (n < self.visible).then_some(self.first + n)
         }
     }
 
     /// The width a level needs: its widest row, plus room for the value and
     /// the submenu marker, within the inset either side.
-    pub fn column_width(rows: &[MenuRow]) -> usize {
+    pub fn column_width(rows: &[MenuRow], px: usize) -> usize {
         let widest = rows
             .iter()
             .map(|r| {
@@ -770,45 +795,55 @@ pub mod layout {
             .unwrap_or(0);
         // A tick sits before the label on a level that marks one, so every
         // row on it is indented to keep the labels in a line.
-        let tick = usize::from(rows.iter().any(super::MenuRow::is_choice)) * 2;
-        2 * MENU_TEXT_INSET + (widest + tick) * font::GLYPH_W
+        let tick = usize::from(rows.iter().any(super::MenuRow::marks_state)) * 2;
+        (2 * MENU_TEXT_INSET + (widest + tick) * font::GLYPH_W) * px
     }
 
     /// Lay the open levels out, innermost last.
     ///
     /// `anchor_right` is where the first column's right edge sits (the
     /// hamburger button's right edge), `bottom` the display height the menu
-    /// is anchored to, and `opened_at` the row of each level that opened the
-    /// one after it, so a child can start beside the row it belongs to.
+    /// is anchored to, `opened_at` the row of each level that opened the one
+    /// after it, so a child can start beside the row it belongs to, and `px`
+    /// the menu scale every length is multiplied by.
     pub fn columns(
         levels: &[&[MenuRow]],
         opened_at: &[Option<usize>],
         anchor_right: usize,
         bottom: usize,
+        px: usize,
     ) -> Vec<Column> {
+        let px = px.max(1);
+        let (row_h, overlap, slack_h) = (MENU_ROW_H * px, MENU_COL_OVERLAP * px, MENU_SLACK_H * px);
         let mut out: Vec<Column> = Vec::with_capacity(levels.len());
         for (depth, rows) in levels.iter().enumerate() {
-            let w = column_width(rows);
+            let w = column_width(rows, px);
             // The first column hangs from the button. Each child sits to the
             // right of its parent, overlapping it by a hair, and falls back
             // to the parent's left when the display runs out.
             let x = match out.last() {
                 None => anchor_right.saturating_sub(w),
                 Some(prev) => {
-                    let right = (prev.x + prev.w).saturating_sub(MENU_COL_OVERLAP);
+                    let right = (prev.x + prev.w).saturating_sub(overlap);
                     if right + w <= super::super::FB_WIDTH {
                         right
+                    } else if let Some(left) = (prev.x + overlap).checked_sub(w) {
+                        left
                     } else {
-                        (prev.x + MENU_COL_OVERLAP).saturating_sub(w)
+                        // Neither side has the room. Sit against the display
+                        // edge rather than sliding back across the parent:
+                        // the eye keeps travelling the way it set off, and
+                        // less of the level behind is buried.
+                        super::super::FB_WIDTH.saturating_sub(w)
                     }
                 }
             };
             // The menu meets the status bar: its slack is empty panel below
             // the last row, not a gap under the panel. A level long enough to
             // need that room gives it up, and one longer still is trimmed.
-            let wanted = rows.len() * MENU_ROW_H;
-            let slack = if depth == 0 && wanted + MENU_SLACK_H <= bottom {
-                MENU_SLACK_H
+            let wanted = rows.len() * row_h;
+            let slack = if depth == 0 && wanted + slack_h <= bottom {
+                slack_h
             } else {
                 0
             };
@@ -816,8 +851,8 @@ pub mod layout {
             let (visible, rows_h) = if wanted <= room {
                 (rows.len(), wanted)
             } else {
-                let fits = room / MENU_ROW_H;
-                (fits, fits * MENU_ROW_H)
+                let fits = room / row_h;
+                (fits, fits * row_h)
             };
             let h = rows_h + slack;
             // A child starts level with the row that opened it, so the eye
@@ -840,6 +875,7 @@ pub mod layout {
                 h,
                 visible,
                 first: rows.len().saturating_sub(visible),
+                row_h,
             });
         }
         out
@@ -876,6 +912,7 @@ mod tests {
             shader: ShaderKind::None,
             custom_shader_available: false,
             tint: Tint::None,
+            menu_scale: MenuScale::Normal,
             floppy_speed: 100,
             audio_filter: AudioFilterMode::Auto,
             audio_output: AudioOutputChoice::Default,
@@ -1013,7 +1050,7 @@ mod tests {
     fn columns_stack_from_the_bottom_and_cascade_sideways() {
         let root = nav_rows();
         let inner = root[2].children().expect("children").to_vec();
-        let cols = layout::columns(&[&root, &inner], &[Some(2)], 600, 400);
+        let cols = layout::columns(&[&root, &inner], &[Some(2)], 600, 400, 1);
         assert_eq!(cols.len(), 2);
 
         assert_eq!(
@@ -1045,7 +1082,7 @@ mod tests {
         let rows: Vec<MenuRow> = (0..40)
             .map(|i| MenuRow::action(&format!("Row {i}"), MenuAction::OpenAbout))
             .collect();
-        let cols = layout::columns(&[&rows], &[], 600, 200);
+        let cols = layout::columns(&[&rows], &[], 600, 200, 1);
         assert!(cols[0].visible < rows.len(), "trimmed");
         assert_eq!(
             cols[0].first + cols[0].visible,
@@ -1059,7 +1096,7 @@ mod tests {
     #[test]
     fn a_column_reports_the_row_under_the_pointer() {
         let rows = nav_rows();
-        let cols = layout::columns(&[&rows], &[], 600, 400);
+        let cols = layout::columns(&[&rows], &[], 600, 400, 1);
         let c = cols[0];
         let (x, y, _, _) = c.row_rect(1);
         assert_eq!(c.row_at(x + 4, y + 2), Some(1));
@@ -1086,6 +1123,50 @@ mod tests {
         assert_eq!(labels[0], "1: empty");
         assert_eq!(labels[2], "3: 2026/07/31 14:05");
         assert_eq!(labels.len(), SAVE_SLOTS);
+    }
+
+    /// The menu scale multiplies every length, so the whole thing grows
+    /// together: a row twice as tall under a font twice as large.
+    #[test]
+    fn the_menu_scale_multiplies_every_length() {
+        let none: [String; 0] = [];
+        let rows = build(&state(&none, &none, &none, &none, &empty_slots()));
+        let levels: Vec<&[MenuRow]> = vec![&rows];
+
+        let small = layout::columns(&levels, &[], 600, 800, 1);
+        let large = layout::columns(&levels, &[], 600, 800, 2);
+        assert_eq!(large[0].w, small[0].w * 2);
+        assert_eq!(large[0].h, small[0].h * 2);
+        assert_eq!(large[0].row_h, small[0].row_h * 2);
+        // Both fill the same bottom edge, and neither drops a row.
+        assert_eq!(small[0].y + small[0].h, large[0].y + large[0].h);
+        assert_eq!(small[0].visible, large[0].visible);
+
+        // A row is hit where it is drawn, at either size.
+        for cols in [&small, &large] {
+            let (x, y, _, h) = cols[0].row_rect(1);
+            assert_eq!(cols[0].row_at(x + 2, y + h / 2), Some(1));
+        }
+    }
+
+    /// A setting that is on is ticked, not just labelled -- the same mark a
+    /// chosen value carries, so "on" reads the same way everywhere.
+    #[test]
+    fn a_setting_that_is_on_is_ticked() {
+        let none: [String; 0] = [];
+        let slots = empty_slots();
+        let mut st = state(&none, &none, &none, &none, &slots);
+        st.rewind = true;
+        st.warp = false;
+        let rows = build(&st);
+
+        let emulation = find(&rows, "Emulation Settings").expect("emulation");
+        let rewind = find(emulation.children().expect("children"), "Rewind").expect("rewind");
+        assert!(rewind.marks_state() && rewind.marked());
+
+        let warp = find(&rows, "Warp Settings").expect("warp");
+        let warp = find(warp.children().expect("children"), "Warp Speed").expect("warp speed");
+        assert!(warp.marks_state() && !warp.marked());
     }
 
     /// Only the rows that put something else on the screen close the menu.

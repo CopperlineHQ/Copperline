@@ -6429,15 +6429,12 @@ fn draw_tree_menu(frame: &mut [u8], rows: &[menu::MenuRow], nav: &menu::MenuNav,
         scale,
     );
 
+    let px = super::menu_scale().factor();
     let levels = nav.levels(rows);
-    let opened: Vec<Option<usize>> = (0..levels.len()).map(|d| nav.open_at(d)).collect();
-    let columns = menu::layout::columns(
-        &levels,
-        &opened,
-        MENU_BUTTON_X + MENU_BUTTON_W,
-        present_height(),
-    );
+    let columns = tree_menu_columns(&levels, nav);
     let deepest = columns.len().saturating_sub(1);
+    let inset = menu::MENU_TEXT_INSET * px;
+    let glyph_w = font::GLYPH_W * px;
     for (depth, (column, level)) in columns.iter().zip(levels.iter()).enumerate() {
         let panel = Rect {
             x: column.x,
@@ -6456,8 +6453,8 @@ fn draw_tree_menu(frame: &mut [u8], rows: &[menu::MenuRow], nav: &menu::MenuNav,
 
         // A level that marks one of its rows indents them all, so the labels
         // stay in a line whether or not they carry the tick.
-        let ticked = level.iter().any(menu::MenuRow::is_choice);
-        let indent = MENU_TEXT_INSET + usize::from(ticked) * 2 * font::GLYPH_W;
+        let ticked = level.iter().any(menu::MenuRow::marks_state);
+        let indent = inset + usize::from(ticked) * 2 * glyph_w;
 
         for n in 0..column.visible {
             let index = column.first + n;
@@ -6488,7 +6485,7 @@ fn draw_tree_menu(frame: &mut [u8], rows: &[menu::MenuRow], nav: &menu::MenuNav,
                     scale,
                 );
             }
-            let text_y = ry + rh.saturating_sub(font::GLYPH_H) / 2;
+            let text_y = ry + rh.saturating_sub(font::GLYPH_H * px) / 2;
             let color = if !row.enabled {
                 PANEL_TEXT_DIM
             } else if lit {
@@ -6496,30 +6493,46 @@ fn draw_tree_menu(frame: &mut [u8], rows: &[menu::MenuRow], nav: &menu::MenuNav,
             } else {
                 PANEL_TEXT
             };
-            if let menu::MenuRowKind::Choice { selected: true, .. } = row.kind {
-                draw_check(frame, rx + MENU_TEXT_INSET, text_y, color, 1, scale);
+            if row.marked() {
+                draw_check(frame, rx + inset, text_y, color, px, scale);
             }
-            draw_panel_text(frame, rx + indent, text_y, &row.label, color, 1, scale);
+            draw_panel_text(frame, rx + indent, text_y, &row.label, color, px, scale);
 
             // The value sits against the right edge, before the marker a
             // submenu ends with.
-            let marker_w = usize::from(row.is_submenu()) * 2 * font::GLYPH_W;
+            let marker_w = usize::from(row.is_submenu()) * 2 * glyph_w;
             if let Some(value) = &row.value {
-                let vw = value.chars().count() * font::GLYPH_W;
-                let vx = rx + rw.saturating_sub(MENU_TEXT_INSET + marker_w + vw);
+                let vw = value.chars().count() * glyph_w;
+                let vx = rx + rw.saturating_sub(inset + marker_w + vw);
                 let vcolor = if lit {
                     MENU_HILIGHT_TEXT
                 } else {
                     PANEL_TEXT_HILIGHT
                 };
-                draw_panel_text(frame, vx, text_y, value, vcolor, 1, scale);
+                draw_panel_text(frame, vx, text_y, value, vcolor, px, scale);
             }
             if row.is_submenu() {
-                let mx = rx + rw.saturating_sub(MENU_TEXT_INSET + font::GLYPH_W);
-                draw_panel_text(frame, mx, text_y, ">", color, 1, scale);
+                let mx = rx + rw.saturating_sub(inset + glyph_w);
+                draw_panel_text(frame, mx, text_y, ">", color, px, scale);
             }
         }
     }
+}
+
+/// Where each open level sits. Drawing and hit-testing both come through
+/// here, so the menu cannot be clicked anywhere but where it is drawn.
+fn tree_menu_columns(
+    levels: &[&[menu::MenuRow]],
+    nav: &menu::MenuNav,
+) -> Vec<menu::layout::Column> {
+    let opened: Vec<Option<usize>> = (0..levels.len()).map(|d| nav.open_at(d)).collect();
+    menu::layout::columns(
+        levels,
+        &opened,
+        MENU_BUTTON_X + MENU_BUTTON_W,
+        present_height(),
+        super::menu_scale().factor(),
+    )
 }
 
 /// Which level and row the pointer is over, if any.
@@ -6529,13 +6542,7 @@ pub fn tree_menu_hit(
     pos: (usize, usize),
 ) -> Option<(usize, usize)> {
     let levels = nav.levels(rows);
-    let opened: Vec<Option<usize>> = (0..levels.len()).map(|d| nav.open_at(d)).collect();
-    let columns = menu::layout::columns(
-        &levels,
-        &opened,
-        MENU_BUTTON_X + MENU_BUTTON_W,
-        present_height(),
-    );
+    let columns = tree_menu_columns(&levels, nav);
     // Innermost first: a child overlapping its parent takes the pointer.
     for (depth, column) in columns.iter().enumerate().rev() {
         if let Some(row) = column.row_at(pos.0, pos.1) {
@@ -9714,6 +9721,7 @@ mod tests {
             shader: crate::config::ShaderKind::None,
             custom_shader_available: false,
             tint: crate::config::Tint::None,
+            menu_scale: crate::config::MenuScale::Normal,
             floppy_speed: 100,
             audio_filter: crate::config::AudioFilterMode::Auto,
             audio_output: menu::AudioOutputChoice::Default,
@@ -9738,6 +9746,20 @@ mod tests {
         };
         draw(&mut frame, scale, &ui, None, None, false, false, labels());
         save(&frame, "menu-open");
+
+        // The same menu at 2x, which has to stay inside the display.
+        let mut frame = vec![0u8; w * h * 4];
+        crate::video::set_menu_scale(crate::config::MenuScale::Large);
+        draw(&mut frame, scale, &ui, None, None, false, false, labels());
+        let levels = ui.menu_nav.levels(&ui.menu_rows);
+        for column in tree_menu_columns(&levels, &ui.menu_nav) {
+            assert!(
+                column.x + column.w <= texture_width(1) && column.y + column.h <= present_height(),
+                "2x menu column {column:?} leaves the display"
+            );
+        }
+        crate::video::set_menu_scale(crate::config::MenuScale::Normal);
+        save(&frame, "menu-open-2x");
 
         // A/V & Emu: the Audio category (the default landing), with the
         // Audio / Video / Emulation nav buttons at the top, Audio highlighted.

@@ -1937,6 +1937,7 @@ fn main() -> Result<()> {
             .unwrap_or(true)
     });
     video::set_pixel_aspect(config::resolve_pixel_aspect(cfg.pixel_aspect));
+    video::set_menu_scale(cfg.menu_scale);
     // Capture runs (--screenshot-after / --dump-frames) never present a
     // frame, so they skip the host window and event loop entirely: winit's
     // event-loop setup registers with the display server, which aborts or
@@ -2062,6 +2063,9 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
     info!("no machine specified; opening the configuration screen");
     let emu = build_placeholder_machine()?;
     video::set_pixel_aspect(config::resolve_pixel_aspect(config::PixelAspect::Tv));
+    // The launcher opens before a machine config is built, so the menu size
+    // comes straight off the raw file.
+    video::set_menu_scale(raw_cfg.menu_scale());
     // The placeholder is always silent; seed the session's audio from the config
     // intent so a state loaded over the launcher gets the configured output.
     let audio_output_enabled = raw_cfg.audio_output_enabled();

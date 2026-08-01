@@ -242,6 +242,8 @@ pub struct Config {
     /// Screen tint applied to the window image: the phosphor colour of a
     /// monochrome monitor, or a sepia treatment. See [`Tint`].
     pub tint: Tint,
+    /// How large the pop-up menu is drawn (`[display] menu_scale`).
+    pub menu_scale: MenuScale,
     /// Open the window in fullscreen at start (`[display] full_screen`, or
     /// `--full-screen` / `--windowed`). The `Cmd+F` / `Alt+F` toggle flips it
     /// live without affecting this start-up value.
@@ -424,6 +426,39 @@ pub enum Tint {
     Amber,
     /// Sepia-toned monochrome.
     Sepia,
+}
+
+/// How large the pop-up menu is drawn. The panel font is a bitmap, so the
+/// sizes are whole multiples of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MenuScale {
+    /// The font at its own size. The default.
+    #[default]
+    Normal,
+    /// Twice up, for a large display or a distant seat.
+    Large,
+}
+
+impl MenuScale {
+    /// Every size, in the order a picker offers them.
+    pub const MENU_ORDER: [MenuScale; 2] = [MenuScale::Normal, MenuScale::Large];
+
+    /// Picker label: the config name of the size (round-trips through
+    /// [`parse_menu_scale`]).
+    pub fn label(self) -> &'static str {
+        match self {
+            MenuScale::Normal => "1x",
+            MenuScale::Large => "2x",
+        }
+    }
+
+    /// What every length in the menu is multiplied by.
+    pub fn factor(self) -> usize {
+        match self {
+            MenuScale::Normal => 1,
+            MenuScale::Large => 2,
+        }
+    }
 }
 
 impl Tint {
@@ -1671,6 +1706,7 @@ impl Default for Config {
             shader_strength: 1.0,
             bezel: false,
             tint: Tint::None,
+            menu_scale: MenuScale::Normal,
             full_screen: false,
             status_bar: true,
             joystick_input_mode: JoystickInputMode::Gamepad,
@@ -2249,6 +2285,16 @@ impl RawConfig {
     /// The configured live-audio state (`[audio] output_enabled`), defaulting to
     /// on when unset -- matching [`AudioConfig`]'s default. Lets the binary seed
     /// the config-screen session audio without reaching into private raw fields.
+    /// The configured menu size, for the paths that put a window up before a
+    /// whole [`Config`] has been built.
+    pub fn menu_scale(&self) -> MenuScale {
+        self.display
+            .menu_scale
+            .as_deref()
+            .and_then(|s| parse_menu_scale(s).ok())
+            .unwrap_or_default()
+    }
+
     pub fn audio_output_enabled(&self) -> bool {
         self.audio.output_enabled.unwrap_or(true)
     }
@@ -2284,6 +2330,9 @@ pub(crate) struct RawDisplay {
     /// Screen tint: "none" (default), "bw", "green", "amber", or "sepia".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) tint: Option<String>,
+    /// Size of the pop-up menu: "1x" (default) or "2x".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) menu_scale: Option<String>,
     /// Open fullscreen at start (default false).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) full_screen: Option<bool>,
@@ -3173,6 +3222,10 @@ impl TryFrom<RawConfig> for Config {
             None => defaults.tint,
             Some(s) => parse_tint(s)?,
         };
+        let menu_scale = match raw.display.menu_scale.as_deref() {
+            None => defaults.menu_scale,
+            Some(s) => parse_menu_scale(s)?,
+        };
         let full_screen = raw.display.full_screen.unwrap_or(defaults.full_screen);
         let status_bar = raw.display.status_bar.unwrap_or(defaults.status_bar);
         let joystick_input_mode = match raw.input.joystick.as_deref() {
@@ -3621,6 +3674,7 @@ impl TryFrom<RawConfig> for Config {
             shader_strength,
             bezel,
             tint,
+            menu_scale,
             full_screen,
             status_bar,
             joystick_input_mode,
@@ -3729,6 +3783,15 @@ pub(crate) fn parse_tint(s: &str) -> Result<Tint> {
             "[display] tint must be \"none\", \"bw\", \"green\", \"amber\", \
              or \"sepia\", got \"{other}\""
         ),
+    }
+}
+
+/// Parse a `[display] menu_scale` value.
+pub(crate) fn parse_menu_scale(s: &str) -> Result<MenuScale> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "1x" | "1" | "normal" => Ok(MenuScale::Normal),
+        "2x" | "2" | "large" => Ok(MenuScale::Large),
+        other => bail!("[display] menu_scale must be \"1x\" or \"2x\", got \"{other}\""),
     }
 }
 
@@ -5670,6 +5733,38 @@ mod tests {
         assert!(parse_config("[display]\nshader_strength = 1.5").is_err());
         assert!(parse_config("[display]\nshader_strength = -0.1").is_err());
         Ok(())
+    }
+
+    #[test]
+    fn display_menu_scale_parses_and_defaults_to_1x() -> Result<()> {
+        assert_eq!(parse_config("")?.menu_scale, MenuScale::Normal);
+        let cfg = parse_config(
+            r#"
+            [display]
+            menu_scale = "2x"
+        "#,
+        )?;
+        assert_eq!(cfg.menu_scale, MenuScale::Large);
+        // Every label round-trips through the parser.
+        for scale in MenuScale::MENU_ORDER {
+            assert_eq!(
+                parse_menu_scale(scale.label()).expect("label parses"),
+                scale
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn display_menu_scale_rejects_an_unknown_size() {
+        let err = parse_config(
+            r#"
+            [display]
+            menu_scale = "3x"
+        "#,
+        )
+        .expect_err("unknown size");
+        assert!(err.to_string().contains("menu_scale"), "{err}");
     }
 
     #[test]

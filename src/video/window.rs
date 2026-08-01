@@ -1874,7 +1874,6 @@ impl App {
         self.ui.panel = Some(Panel::InputMap(Box::new(ui::InputMapPanel::new(
             self.keymap.clone(),
         ))));
-        self.resize_for_active_panel();
         self.request_redraw();
     }
 
@@ -4542,6 +4541,7 @@ impl App {
             shader: self.crt_shader_kind,
             custom_shader_available: self.custom_shader_path.is_some(),
             tint: self.tint,
+            menu_scale: crate::video::menu_scale(),
             floppy_speed: self.emu.bus().floppy.speed_percent(),
             audio_filter: self.emu.bus().paula.led_filter_mode(),
             audio_output,
@@ -4696,6 +4696,11 @@ impl App {
                     }
                     None => format!("CRT shader: {}", applied.label()),
                 });
+                self.request_redraw();
+            }
+            A::SetMenuScale(scale) => {
+                crate::video::set_menu_scale(scale);
+                self.show_osd(format!("Menu size: {}", scale.label()));
                 self.request_redraw();
             }
             A::SetTint(tint) => {
@@ -6064,7 +6069,6 @@ impl App {
     fn close_panel(&mut self) {
         self.analyzer_dragging = false;
         self.ui.panel = None;
-        self.resize_for_active_panel();
         self.request_redraw();
     }
 
@@ -6075,7 +6079,6 @@ impl App {
         self.ui.panel = Some(Panel::Launcher(Box::new(LauncherState::from_raw(
             &self.machine_config,
         ))));
-        self.resize_for_active_panel();
         self.request_redraw();
     }
 
@@ -6487,13 +6490,13 @@ impl App {
         self.shader_strength = crate::config::resolve_shader_strength(cfg.shader_strength);
         self.bezel = crate::config::resolve_bezel(cfg.bezel);
         self.set_tint(crate::config::resolve_tint(cfg.tint));
+        crate::video::set_menu_scale(cfg.menu_scale);
         self.ui.menu_open = false;
         self.ui.panel = None;
         self.powered_on = true;
         self.cpu_halted = false;
         self.paused = false;
         self.reset_render_pipeline();
-        self.resize_for_active_panel();
         // The last overlay set here is the one that gets drawn, so a shader
         // that failed to load has to travel in this message rather than in
         // one of its own.
@@ -6557,7 +6560,6 @@ impl App {
         // In auto mode the grab is owed to the machine regardless of
         // whether this panel is the one that borrowed it.
         self.apply_auto_mouse_capture();
-        self.resize_for_active_panel();
         self.request_redraw();
     }
 
@@ -6791,7 +6793,6 @@ impl App {
                 self.reset_render_pipeline();
                 if matches!(self.ui.panel, Some(Panel::Launcher(_))) {
                     self.ui.panel = None;
-                    self.resize_for_active_panel();
                 }
                 if restoring_over_placeholder {
                     self.install_live_audio_after_placeholder_load();
@@ -9005,7 +9006,7 @@ impl App {
 
     /// Resize the presentation surface to a new window size. Shared by the
     /// Resized event and by the synchronous path of request_inner_size (see
-    /// resize_for_active_panel), which on some backends returns the applied
+    /// snap_window_to_canvas), which on some backends returns the applied
     /// size instead of delivering an event.
     fn apply_surface_size(&mut self, size: PhysicalSize<u32>) {
         if let Some(r) = self.render.as_mut() {
@@ -9049,11 +9050,15 @@ impl App {
     /// corner (macOS and Windows; Linux window managers ignore it), so leave the
     /// display-sized surface alone and let the presentation scale into it.
     ///
+    /// Only the two things that change the canvas height -- the pixel aspect
+    /// and the status bar -- call this, and only for a window still at the old
+    /// canvas size. Nothing else may take a window the user has sized.
+    ///
     /// `request_inner_size` is only asynchronous when it returns `None`. Wayland
     /// applies the resize client-side and returns the new size with no `Resized`
     /// event to follow, so the surface must be resized here or the stale extent
     /// misplaces every click through `cursor_texture_position`.
-    fn resize_for_active_panel(&mut self) {
+    fn snap_window_to_canvas(&mut self) {
         let Some(window) = self.render.as_ref().map(|r| r.window.clone()) else {
             return;
         };
@@ -9202,6 +9207,9 @@ impl App {
             self.show_osd("Stop the video recording before changing pixel aspect");
             return;
         }
+        // Decide before the change (it feeds window_present_height) whether the
+        // window is still canvas-sized, so a manual resize survives.
+        let was_canvas_sized = self.window_is_canvas_sized();
         super::set_pixel_aspect(aspect);
         if let Some(r) = self.render.as_mut() {
             if let Err(e) = r.pixels.resize_buffer(
@@ -9231,7 +9239,9 @@ impl App {
                 self.apply_tool_surface_size(kind, applied);
             }
         }
-        self.resize_for_active_panel();
+        if was_canvas_sized {
+            self.snap_window_to_canvas();
+        }
         self.request_redraw();
     }
 
@@ -9280,7 +9290,7 @@ impl App {
         // Only snap an unresized window to the new canvas size; a resized window
         // keeps its dimensions and the display reflows into it.
         if was_canvas_sized {
-            self.resize_for_active_panel();
+            self.snap_window_to_canvas();
         }
         self.request_redraw();
         if hidden {

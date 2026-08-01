@@ -25,9 +25,10 @@ use crate::chipset::denise::DeniseRevision;
 use crate::config::{
     format_size, machine_profile_defaults, AudioFilterMode, BridgeCable, BridgeDensity,
     BridgeDriver, BridgeSpeedMode, ChannelMode, Chipset, Config, CpuModel, FloppyBridgeConfig,
-    JoystickInputMode, MachineModel, MouseCapture, Overscan, PacingBudget, ParallelDevice,
-    PixelAspect, RawConfig, RawDrive, RawFilesysMount, RawFloppyDrive, RawZorroBoard, RtgCard,
-    ScsiController, SerialMode, ShaderMode, Tint, WarpSpeed, BOOT_PRI_NEVER,
+    JoystickInputMode, MachineModel, MenuScale, MouseCapture, Overscan, PacingBudget,
+    ParallelDevice, PixelAspect, RawConfig, RawDrive, RawFilesysMount, RawFloppyDrive,
+    RawZorroBoard, RtgCard, ScsiController, SerialMode, ShaderMode, Tint, WarpSpeed,
+    BOOT_PRI_NEVER,
 };
 use crate::net::NetConfig;
 use crate::zorro::{ConfigOption, ConfigOptionKind, LoadedZorroBoard};
@@ -423,6 +424,7 @@ pub enum LauncherField {
     Shader,
     ShaderStrength,
     Bezel,
+    MenuScale,
     StartFullscreen,
     ShowStatusBar,
     FloppySounds,
@@ -691,10 +693,11 @@ const ETHERNET_ROWS: [Row; 2] = [
 ];
 // The A/V & Emu tab is split into three categories switched via the top nav row.
 // The Video category also carries the CRT-shader controls (a picture setting).
-const VIDEO_ROWS: [Row; 10] = [
+const VIDEO_ROWS: [Row; 11] = [
     row(F::StartFullscreen, "Start fullscreen", Toggle),
     row(F::ShowStatusBar, "Status bar", Toggle),
     row(F::Bezel, "Monitor bezel", Toggle),
+    row(F::MenuScale, "Menu size", Cycle),
     row(F::Overscan, "Overscan", Cycle),
     row(F::PixelAspect, "Pixel aspect", Cycle),
     row(F::Deinterlace, "Deinterlace", Toggle),
@@ -1327,6 +1330,8 @@ pub struct MachineSetup {
     shader_strength: f32,
     /// Monitor-style front bezel around the picture ([display] bezel).
     bezel: bool,
+    /// How large the pop-up menu is drawn ([display] menu_scale).
+    menu_scale: MenuScale,
     /// Screen tint ([display] tint).
     tint: Tint,
     /// Open fullscreen at start ([display] full_screen).
@@ -1490,6 +1495,7 @@ impl MachineSetup {
             },
             shader_strength: cfg.shader_strength,
             bezel: cfg.bezel,
+            menu_scale: cfg.menu_scale,
             tint: cfg.tint,
             start_fullscreen: cfg.full_screen,
             show_status_bar: cfg.status_bar,
@@ -1820,6 +1826,9 @@ impl MachineSetup {
         if self.tint != base.tint {
             raw.display.tint = Some(tint_name(self.tint).to_string());
         }
+        if self.menu_scale != base.menu_scale {
+            raw.display.menu_scale = Some(self.menu_scale.label().to_string());
+        }
         if self.start_fullscreen != base.full_screen {
             raw.display.full_screen = Some(self.start_fullscreen);
         }
@@ -2043,6 +2052,7 @@ impl MachineSetup {
         self.shader_strength = base.shader_strength;
         self.bezel = base.bezel;
         self.tint = base.tint;
+        self.menu_scale = base.menu_scale;
         self.start_fullscreen = base.full_screen;
         self.show_status_bar = base.status_bar;
         self.floppy_sounds = base.audio.floppy_sounds;
@@ -2530,6 +2540,7 @@ impl MachineSetup {
                 Tint::Amber => "Amber".to_string(),
                 Tint::Sepia => "Sepia".to_string(),
             },
+            F::MenuScale => self.menu_scale.label().to_string(),
             F::Phosphor => {
                 if self.phosphor <= 0.0 {
                     "Disabled".to_string()
@@ -2844,6 +2855,9 @@ impl MachineSetup {
             F::FloppyVolume => self.floppy_volume = step_u8(self.floppy_volume, forward, 0, 100),
             F::Overscan => self.overscan = cycle_slice(&OVERSCANS, self.overscan, forward),
             F::Tint => self.tint = cycle_slice(&TINTS, self.tint, forward),
+            F::MenuScale => {
+                self.menu_scale = cycle_slice(&MenuScale::MENU_ORDER, self.menu_scale, forward);
+            }
             F::PixelAspect => {
                 self.pixel_aspect = cycle_slice(&PIXEL_ASPECTS, self.pixel_aspect, forward)
             }
@@ -4810,6 +4824,26 @@ mod tests {
         s.cycle(LauncherField::Tint, false);
         assert_eq!(s.value_label(LauncherField::Tint), "Sepia");
         assert_eq!(s.to_raw().display.tint, Some("sepia".to_string()));
+    }
+
+    #[test]
+    fn menu_scale_round_trips_through_raw() {
+        let mut s = MachineSetup::default();
+        // 1x is the baseline, so nothing is written for it.
+        assert_eq!(s.value_label(LauncherField::MenuScale), "1x");
+        assert_eq!(s.to_raw().display.menu_scale, None);
+
+        s.cycle(LauncherField::MenuScale, true);
+        assert_eq!(s.value_label(LauncherField::MenuScale), "2x");
+        assert_eq!(s.to_raw().display.menu_scale, Some("2x".to_string()));
+
+        // The written config has to load back into the same setting.
+        assert_eq!(
+            s.build_config().expect("valid config").menu_scale,
+            MenuScale::Large
+        );
+        let reloaded = MachineSetup::from_raw(&s.to_raw()).expect("valid raw");
+        assert_eq!(reloaded.value_label(LauncherField::MenuScale), "2x");
     }
 
     #[test]
