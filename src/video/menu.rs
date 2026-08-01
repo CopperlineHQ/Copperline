@@ -179,6 +179,11 @@ impl MenuRow {
         }
     }
 
+    /// Whether this row is one value of a setting.
+    pub fn is_choice(&self) -> bool {
+        matches!(self.kind, MenuRowKind::Choice { .. })
+    }
+
     /// Whether this row leads somewhere rather than doing something.
     pub fn is_submenu(&self) -> bool {
         matches!(self.kind, MenuRowKind::Submenu(_))
@@ -375,6 +380,14 @@ pub struct MenuState<'a> {
     /// the slot is free.
     pub save_slots: &'a [Option<String>; SAVE_SLOTS],
 }
+
+/// Row pitch, the inset text keeps from each edge, the gap between a column
+/// and its child, and the empty column the menu keeps beneath its rows until
+/// a list is long enough to need it.
+pub const MENU_ROW_H: usize = 14;
+pub const MENU_TEXT_INSET: usize = 8;
+pub const MENU_COL_GAP: usize = 2;
+pub const MENU_SLACK_H: usize = 28;
 
 /// Numbered quick-save slots, matching the 1-10 keyboard shortcuts.
 pub const SAVE_SLOTS: usize = 10;
@@ -682,6 +695,112 @@ fn save_state_rows(s: &MenuState) -> Vec<MenuRow> {
     ]
 }
 
+/// Geometry for the open menu: one column per open level, laid out from the
+/// hamburger button upward.
+///
+/// The panel palette is drawn at the launcher's own text scale, which is
+/// small enough that a column of a dozen rows costs little height -- so the
+/// menu is anchored at the bottom, grows upward, and keeps a margin of empty
+/// column beneath the rows until a list is long enough to need it.
+pub mod layout {
+    use super::{MenuRow, MENU_COL_GAP, MENU_ROW_H, MENU_SLACK_H, MENU_TEXT_INSET};
+    use crate::video::font;
+
+    /// One open level's column.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Column {
+        pub x: usize,
+        pub y: usize,
+        pub w: usize,
+        pub h: usize,
+        /// Rows drawn in this column. Fewer than the level holds when it has
+        /// been trimmed to fit the display.
+        pub visible: usize,
+        /// Index of the first drawn row.
+        pub first: usize,
+    }
+
+    impl Column {
+        /// The rect of the `n`-th drawn row.
+        pub fn row_rect(&self, n: usize) -> (usize, usize, usize, usize) {
+            (self.x, self.y + n * MENU_ROW_H, self.w, MENU_ROW_H)
+        }
+
+        /// Which drawn row, if any, contains `(px, py)`.
+        pub fn row_at(&self, px: usize, py: usize) -> Option<usize> {
+            if px < self.x || px >= self.x + self.w || py < self.y {
+                return None;
+            }
+            let n = (py - self.y) / MENU_ROW_H;
+            (n < self.visible).then_some(self.first + n)
+        }
+    }
+
+    /// The width a level needs: its widest row, plus room for the value and
+    /// the submenu marker, within the inset either side.
+    pub fn column_width(rows: &[MenuRow]) -> usize {
+        let widest = rows
+            .iter()
+            .map(|r| {
+                let value = r.value.as_ref().map_or(0, |v| v.chars().count() + 2);
+                let marker = usize::from(r.is_submenu()) * 2;
+                r.label.chars().count() + value + marker
+            })
+            .max()
+            .unwrap_or(0);
+        // A tick sits before the label on a level that marks one, so every
+        // row on it is indented to keep the labels in a line.
+        let tick = usize::from(rows.iter().any(super::MenuRow::is_choice)) * 2;
+        2 * MENU_TEXT_INSET + (widest + tick) * font::GLYPH_W
+    }
+
+    /// Lay the open levels out, innermost last.
+    ///
+    /// `anchor_right` is where the first column's right edge sits (the
+    /// hamburger button's right edge) and `bottom` the display height the
+    /// menu is anchored to.
+    pub fn columns(levels: &[&[MenuRow]], anchor_right: usize, bottom: usize) -> Vec<Column> {
+        let mut out: Vec<Column> = Vec::with_capacity(levels.len());
+        for (depth, rows) in levels.iter().enumerate() {
+            let w = column_width(rows);
+            // The first column hangs from the button; each child sits beside
+            // its parent, and falls back to the left when there is no room.
+            let x = match out.last() {
+                None => anchor_right.saturating_sub(w),
+                Some(prev) => {
+                    let right = prev.x + prev.w + MENU_COL_GAP;
+                    if right + w <= super::super::FB_WIDTH {
+                        right
+                    } else {
+                        prev.x.saturating_sub(w + MENU_COL_GAP)
+                    }
+                }
+            };
+            // Every column shares the bottom edge, less the slack the top
+            // level keeps for looks; a level too tall for the display gives
+            // the slack up first and is then trimmed to what fits.
+            let slack = if depth == 0 { MENU_SLACK_H } else { 0 };
+            let room = bottom.saturating_sub(slack);
+            let wanted = rows.len() * MENU_ROW_H;
+            let (visible, h) = if wanted <= room {
+                (rows.len(), wanted)
+            } else {
+                let fits = room / MENU_ROW_H;
+                (fits, fits * MENU_ROW_H)
+            };
+            out.push(Column {
+                x,
+                y: bottom.saturating_sub(slack + h),
+                w,
+                h,
+                visible,
+                first: rows.len().saturating_sub(visible),
+            });
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -841,6 +960,54 @@ mod tests {
         nav.point_at(1);
         assert!(!nav.descend(&rows), "nor does a blocked row");
         assert_eq!(nav.depth(), 0);
+    }
+
+    /// Columns share a bottom edge, the first keeping its slack, and a child
+    /// sits beside its parent.
+    #[test]
+    fn columns_stack_from_the_bottom_and_cascade_sideways() {
+        let root = nav_rows();
+        let inner = root[2].children().expect("children").to_vec();
+        let cols = layout::columns(&[&root, &inner], 600, 400);
+        assert_eq!(cols.len(), 2);
+
+        assert_eq!(
+            cols[0].y + cols[0].h,
+            400 - MENU_SLACK_H,
+            "the top level keeps its slack"
+        );
+        assert_eq!(cols[0].x + cols[0].w, 600, "hangs from the anchor");
+        assert_eq!(cols[1].y + cols[1].h, 400, "a child uses the full height");
+        assert!(cols[1].x >= cols[0].x + cols[0].w, "and sits beside it");
+    }
+
+    /// A level too tall for the display is trimmed to what fits, keeping its
+    /// end -- the rows nearest the button.
+    #[test]
+    fn a_long_level_is_trimmed_to_the_display() {
+        let rows: Vec<MenuRow> = (0..40)
+            .map(|i| MenuRow::action(&format!("Row {i}"), MenuAction::OpenAbout))
+            .collect();
+        let cols = layout::columns(&[&rows], 600, 200);
+        assert!(cols[0].visible < rows.len(), "trimmed");
+        assert_eq!(
+            cols[0].first + cols[0].visible,
+            rows.len(),
+            "keeping the end of the list"
+        );
+        assert!(cols[0].y + cols[0].h <= 200);
+    }
+
+    /// A pointer lands on the row it is over, and on nothing outside.
+    #[test]
+    fn a_column_reports_the_row_under_the_pointer() {
+        let rows = nav_rows();
+        let cols = layout::columns(&[&rows], 600, 400);
+        let c = cols[0];
+        let (x, y, _, _) = c.row_rect(1);
+        assert_eq!(c.row_at(x + 4, y + 2), Some(1));
+        assert_eq!(c.row_at(c.x.saturating_sub(4), y + 2), None, "left of it");
+        assert_eq!(c.row_at(x + 4, c.y + c.h + 8), None, "below it");
     }
 
     /// A quick-save slot says what it holds, so an overwrite is visible
