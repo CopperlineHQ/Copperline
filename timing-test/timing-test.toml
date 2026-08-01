@@ -1,6 +1,6 @@
 # Copperline config for the cross-emulator timing test ADF.
 # OCS PAL, 512K chip + 512K slow (trapdoor) RAM.
-rom = "../kickstart205.rom"
+rom = "../test-assets/kickstart205.rom"
 
 [emulation]
 speed = "real"
