@@ -9677,6 +9677,56 @@ mod tests {
         draw(&mut frame, scale, &ui, None, None, false, false, labels());
         save(&frame, "launcher-boot-priority");
 
+        // The runtime menu, opened over a running machine: the top level,
+        // with a category open beside it.
+        let mut frame = vec![0u8; w * h * 4];
+        let slots: [Option<String>; menu::SAVE_SLOTS] =
+            std::array::from_fn(|i| (i == 2).then(|| "2026/07/31 14:05".to_string()));
+        let devices = ["Built-in Output".to_string()];
+        let none: [String; 0] = [];
+        let rows = menu::build(&menu::MenuState {
+            fullscreen: false,
+            status_bar_hidden: false,
+            warp: false,
+            warp_speed: WarpSpeed::Max,
+            rewind: false,
+            recording: false,
+            input_recording: false,
+            autofire_hz: 0,
+            joystick_input_mode: JoystickInputMode::Gamepad,
+            port_devices: [
+                crate::bus::PortDevice::Mouse,
+                crate::bus::PortDevice::Joystick,
+            ],
+            pixel_aspect: PixelAspect::Tv,
+            shader: crate::config::ShaderKind::None,
+            custom_shader_available: false,
+            tint: crate::config::Tint::None,
+            floppy_speed: 100,
+            audio_filter: crate::config::AudioFilterMode::Auto,
+            audio_output: menu::AudioOutputChoice::Default,
+            audio_devices: &devices,
+            midi_in: "",
+            midi_out: "",
+            midi_inputs: &none,
+            midi_outputs: &none,
+            sampler_input: "",
+            sampler_inputs: &none,
+            sampler_gain: 0.0,
+            save_slots: &slots,
+        });
+        let mut nav = menu::MenuNav::default();
+        nav.point_at(5);
+        nav.descend(&rows);
+        let ui = UiState {
+            menu_open: true,
+            menu_rows: rows,
+            menu_nav: nav,
+            ..Default::default()
+        };
+        draw(&mut frame, scale, &ui, None, None, false, false, labels());
+        save(&frame, "menu-open");
+
         // A/V & Emu: the Audio category (the default landing), with the
         // Audio / Video / Emulation nav buttons at the top, Audio highlighted.
         let mut frame = vec![0u8; w * h * 4];

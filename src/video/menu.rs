@@ -761,7 +761,7 @@ pub mod layout {
     /// menu is anchored to.
     pub fn columns(levels: &[&[MenuRow]], anchor_right: usize, bottom: usize) -> Vec<Column> {
         let mut out: Vec<Column> = Vec::with_capacity(levels.len());
-        for (depth, rows) in levels.iter().enumerate() {
+        for rows in levels.iter() {
             let w = column_width(rows);
             // The first column hangs from the button; each child sits beside
             // its parent, and falls back to the left when there is no room.
@@ -776,12 +776,18 @@ pub mod layout {
                     }
                 }
             };
-            // Every column shares the bottom edge, less the slack the top
-            // level keeps for looks; a level too tall for the display gives
-            // the slack up first and is then trimmed to what fits.
-            let slack = if depth == 0 { MENU_SLACK_H } else { 0 };
+            // Every column shares one bottom edge, above the slack the menu
+            // keeps for looks, so a child reads as part of the same block
+            // rather than hanging below its parent. A level too tall for the
+            // display gives the slack up first and is then trimmed to fit.
+            let wanted_h = rows.len() * MENU_ROW_H;
+            let slack = if wanted_h + MENU_SLACK_H <= bottom {
+                MENU_SLACK_H
+            } else {
+                0
+            };
             let room = bottom.saturating_sub(slack);
-            let wanted = rows.len() * MENU_ROW_H;
+            let wanted = wanted_h;
             let (visible, h) = if wanted <= room {
                 (rows.len(), wanted)
             } else {
@@ -974,10 +980,14 @@ mod tests {
         assert_eq!(
             cols[0].y + cols[0].h,
             400 - MENU_SLACK_H,
-            "the top level keeps its slack"
+            "the menu keeps its slack"
         );
         assert_eq!(cols[0].x + cols[0].w, 600, "hangs from the anchor");
-        assert_eq!(cols[1].y + cols[1].h, 400, "a child uses the full height");
+        assert_eq!(
+            cols[1].y + cols[1].h,
+            cols[0].y + cols[0].h,
+            "a child shares the same bottom edge"
+        );
         assert!(cols[1].x >= cols[0].x + cols[0].w, "and sits beside it");
     }
 
