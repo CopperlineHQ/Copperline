@@ -25,9 +25,10 @@ use crate::chipset::denise::DeniseRevision;
 use crate::config::{
     format_size, machine_profile_defaults, AudioFilterMode, BridgeCable, BridgeDensity,
     BridgeDriver, BridgeSpeedMode, ChannelMode, Chipset, Config, CpuModel, FloppyBridgeConfig,
-    JoystickInputMode, MachineModel, MouseCapture, Overscan, PacingBudget, ParallelDevice,
-    PixelAspect, RawConfig, RawDrive, RawFilesysMount, RawFloppyDrive, RawZorroBoard, RtgCard,
-    ScsiController, SerialMode, ShaderMode, Tint, WarpSpeed, BOOT_PRI_NEVER,
+    JoystickInputMode, MachineModel, MenuScale, MouseCapture, Overscan, PacingBudget,
+    ParallelDevice, PixelAspect, RawConfig, RawDrive, RawFilesysMount, RawFloppyDrive,
+    RawZorroBoard, RtgCard, ScsiController, SerialMode, ShaderMode, Tint, WarpSpeed,
+    BOOT_PRI_NEVER,
 };
 use crate::net::NetConfig;
 use crate::zorro::{ConfigOption, ConfigOptionKind, LoadedZorroBoard};
@@ -423,6 +424,7 @@ pub enum LauncherField {
     Shader,
     ShaderStrength,
     Bezel,
+    MenuScale,
     StartFullscreen,
     ShowStatusBar,
     FloppySounds,
@@ -691,10 +693,11 @@ const ETHERNET_ROWS: [Row; 2] = [
 ];
 // The A/V & Emu tab is split into three categories switched via the top nav row.
 // The Video category also carries the CRT-shader controls (a picture setting).
-const VIDEO_ROWS: [Row; 10] = [
+const VIDEO_ROWS: [Row; 11] = [
     row(F::StartFullscreen, "Start fullscreen", Toggle),
     row(F::ShowStatusBar, "Status bar", Toggle),
     row(F::Bezel, "Monitor bezel", Toggle),
+    row(F::MenuScale, "Menu size", Cycle),
     row(F::Overscan, "Overscan", Cycle),
     row(F::PixelAspect, "Pixel aspect", Cycle),
     row(F::Deinterlace, "Deinterlace", Toggle),
@@ -1327,6 +1330,8 @@ pub struct MachineSetup {
     shader_strength: f32,
     /// Monitor-style front bezel around the picture ([display] bezel).
     bezel: bool,
+    /// How large the pop-up menu is drawn ([display] menu_scale).
+    menu_scale: MenuScale,
     /// Screen tint ([display] tint).
     tint: Tint,
     /// Open fullscreen at start ([display] full_screen).
@@ -1490,6 +1495,7 @@ impl MachineSetup {
             },
             shader_strength: cfg.shader_strength,
             bezel: cfg.bezel,
+            menu_scale: cfg.menu_scale,
             tint: cfg.tint,
             start_fullscreen: cfg.full_screen,
             show_status_bar: cfg.status_bar,
@@ -1820,6 +1826,9 @@ impl MachineSetup {
         if self.tint != base.tint {
             raw.display.tint = Some(tint_name(self.tint).to_string());
         }
+        if self.menu_scale != base.menu_scale {
+            raw.display.menu_scale = Some(self.menu_scale.label().to_string());
+        }
         if self.start_fullscreen != base.full_screen {
             raw.display.full_screen = Some(self.start_fullscreen);
         }
@@ -2043,6 +2052,7 @@ impl MachineSetup {
         self.shader_strength = base.shader_strength;
         self.bezel = base.bezel;
         self.tint = base.tint;
+        self.menu_scale = base.menu_scale;
         self.start_fullscreen = base.full_screen;
         self.show_status_bar = base.status_bar;
         self.floppy_sounds = base.audio.floppy_sounds;
@@ -2521,15 +2531,8 @@ impl MachineSetup {
                 PixelAspect::Tv => "TV (4:3)".to_string(),
                 PixelAspect::Square => "Square".to_string(),
             },
-            // "Colour" rather than "Off": the web front-end's wording for
-            // the same picker, and it says what the picture looks like.
-            F::Tint => match self.tint {
-                Tint::None => "Colour".to_string(),
-                Tint::Bw => "Black & white".to_string(),
-                Tint::Green => "Green".to_string(),
-                Tint::Amber => "Amber".to_string(),
-                Tint::Sepia => "Sepia".to_string(),
-            },
+            F::Tint => self.tint.menu_label().to_string(),
+            F::MenuScale => self.menu_scale.menu_label().to_string(),
             F::Phosphor => {
                 if self.phosphor <= 0.0 {
                     "Disabled".to_string()
@@ -2572,15 +2575,7 @@ impl MachineSetup {
             F::BridgeServeSpeed => {
                 format!("{}%", self.bridge_edit().map_or(100, |c| c.speed))
             }
-            F::Shader => match self.shader {
-                ShaderMode::None => "Disabled".to_string(),
-                ShaderMode::Scanlines => "Scanlines".to_string(),
-                ShaderMode::Mask => "Mask".to_string(),
-                // Named for the monitor the preset is modelled on; the path
-                // of a user shader is too long for the value column.
-                ShaderMode::Crt => "CRT (1084)".to_string(),
-                ShaderMode::Custom(_) => "Custom".to_string(),
-            },
+            F::Shader => self.shader.kind().menu_label().to_string(),
             F::ShaderStrength => format!("{:.2}", self.shader_strength),
             F::FloppyVolume => format!("{}%", self.floppy_volume),
             F::PacingBudget => match self.pacing_budget {
@@ -2588,18 +2583,15 @@ impl MachineSetup {
                 PacingBudget::Instructions => "Instructions".to_string(),
             },
             F::Warp => self.warp.label().to_string(),
-            F::Joystick => match self.joystick_input_mode {
-                JoystickInputMode::Keyboard => "Keyboard".to_string(),
-                JoystickInputMode::Gamepad => "Gamepad".to_string(),
-            },
+            F::Joystick => self.joystick_input_mode.menu_label().to_string(),
             F::MouseSensitivity => crate::config::mouse_sensitivity_label(self.mouse_sensitivity),
             F::MouseCapture => match self.mouse_capture {
                 MouseCapture::Click => "On click".to_string(),
                 MouseCapture::Auto => "Automatic".to_string(),
                 MouseCapture::Manual => "Shortcut only".to_string(),
             },
-            F::Port1Device => port_device_display(self.port_devices[0]).to_string(),
-            F::Port2Device => port_device_display(self.port_devices[1]).to_string(),
+            F::Port1Device => PortDevice::menu_label(self.port_devices[0]).to_string(),
+            F::Port2Device => PortDevice::menu_label(self.port_devices[1]).to_string(),
             F::ScsiController => match self.scsi_controller {
                 None => "None".to_string(),
                 Some(ScsiController::A2091) => "A2091 (Z2)".to_string(),
@@ -2844,6 +2836,9 @@ impl MachineSetup {
             F::FloppyVolume => self.floppy_volume = step_u8(self.floppy_volume, forward, 0, 100),
             F::Overscan => self.overscan = cycle_slice(&OVERSCANS, self.overscan, forward),
             F::Tint => self.tint = cycle_slice(&TINTS, self.tint, forward),
+            F::MenuScale => {
+                self.menu_scale = cycle_slice(&MenuScale::MENU_ORDER, self.menu_scale, forward);
+            }
             F::PixelAspect => {
                 self.pixel_aspect = cycle_slice(&PIXEL_ASPECTS, self.pixel_aspect, forward)
             }
@@ -3955,18 +3950,6 @@ fn cycle_bootpri(current: i8, forward: bool) -> i8 {
     BOOTPRI_STEPS[next]
 }
 
-/// Human form of a port device for the picker rows (the config strings
-/// stay lowercase).
-fn port_device_display(device: PortDevice) -> &'static str {
-    match device {
-        PortDevice::Mouse => "Mouse",
-        PortDevice::Joystick => "Joystick",
-        PortDevice::Cd32Pad => "CD32 pad",
-        PortDevice::Analogue => "Analogue",
-        PortDevice::None => "None",
-    }
-}
-
 fn cycle_slice<T: Copy + PartialEq>(items: &[T], current: T, forward: bool) -> T {
     let n = items.len();
     let idx = items.iter().position(|&x| x == current).unwrap_or(0);
@@ -4810,6 +4793,27 @@ mod tests {
         s.cycle(LauncherField::Tint, false);
         assert_eq!(s.value_label(LauncherField::Tint), "Sepia");
         assert_eq!(s.to_raw().display.tint, Some("sepia".to_string()));
+    }
+
+    #[test]
+    fn menu_scale_round_trips_through_raw() {
+        let mut s = MachineSetup::default();
+        // 1x is the baseline, so nothing is written for it. The launcher has
+        // the width to name the size as well as give the figure.
+        assert_eq!(s.value_label(LauncherField::MenuScale), "Normal (1x)");
+        assert_eq!(s.to_raw().display.menu_scale, None);
+
+        s.cycle(LauncherField::MenuScale, true);
+        assert_eq!(s.value_label(LauncherField::MenuScale), "Large (2x)");
+        assert_eq!(s.to_raw().display.menu_scale, Some("2x".to_string()));
+
+        // The written config has to load back into the same setting.
+        assert_eq!(
+            s.build_config().expect("valid config").menu_scale,
+            MenuScale::Large
+        );
+        let reloaded = MachineSetup::from_raw(&s.to_raw()).expect("valid raw");
+        assert_eq!(reloaded.value_label(LauncherField::MenuScale), "Large (2x)");
     }
 
     #[test]

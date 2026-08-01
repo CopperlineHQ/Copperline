@@ -6,6 +6,8 @@ pub mod deinterlace;
 pub mod font;
 #[cfg(feature = "frontend")]
 pub mod launcher;
+#[cfg(feature = "frontend")]
+pub mod menu;
 pub mod present_common;
 #[cfg(feature = "frontend")]
 pub mod ui;
@@ -123,6 +125,27 @@ pub fn set_status_bar_hidden(hidden: bool) {
 
 pub fn status_bar_hidden() -> bool {
     STATUS_BAR_HIDDEN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// How large the pop-up menu is drawn (`[display] menu_scale`, changed live
+/// from the menu itself). Held as an index into [`MenuScale::MENU_ORDER`];
+/// main thread only, like [`SQUARE_PIXEL_ASPECT`].
+static MENU_SCALE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn set_menu_scale(scale: crate::config::MenuScale) {
+    let index = crate::config::MenuScale::MENU_ORDER
+        .iter()
+        .position(|s| *s == scale)
+        .unwrap_or(0);
+    MENU_SCALE.store(index as u8, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn menu_scale() -> crate::config::MenuScale {
+    let index = usize::from(MENU_SCALE.load(std::sync::atomic::Ordering::Relaxed));
+    crate::config::MenuScale::MENU_ORDER
+        .get(index)
+        .copied()
+        .unwrap_or_default()
 }
 
 pub fn pixel_aspect() -> crate::config::PixelAspect {

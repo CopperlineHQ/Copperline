@@ -242,6 +242,8 @@ pub struct Config {
     /// Screen tint applied to the window image: the phosphor colour of a
     /// monochrome monitor, or a sepia treatment. See [`Tint`].
     pub tint: Tint,
+    /// How large the pop-up menu is drawn (`[display] menu_scale`).
+    pub menu_scale: MenuScale,
     /// Open the window in fullscreen at start (`[display] full_screen`, or
     /// `--full-screen` / `--windowed`). The `Cmd+F` / `Alt+F` toggle flips it
     /// live without affecting this start-up value.
@@ -378,6 +380,16 @@ pub enum ShaderKind {
 }
 
 impl ShaderKind {
+    /// Every shader, in the order a picker offers them. `Custom` is last
+    /// because it is the one that depends on a file being configured.
+    pub const MENU_ORDER: [ShaderKind; 5] = [
+        ShaderKind::None,
+        ShaderKind::Scanlines,
+        ShaderKind::Mask,
+        ShaderKind::Crt,
+        ShaderKind::Custom,
+    ];
+
     /// Picker label: the config name of the preset (round-trips through
     /// [`parse_shader`], which takes "off" as well as "none"), or
     /// "custom" for a user shader, whose path is too long to name here.
@@ -388,6 +400,22 @@ impl ShaderKind {
             ShaderKind::Mask => "mask",
             ShaderKind::Crt => "crt",
             ShaderKind::Custom => "custom",
+        }
+    }
+
+    /// What a picker shows the user, as against the config name [`label`]
+    /// round-trips. Both pickers read this, so they cannot drift apart.
+    ///
+    /// [`label`]: ShaderKind::label
+    pub fn menu_label(self) -> &'static str {
+        match self {
+            ShaderKind::None => "Disabled",
+            ShaderKind::Scanlines => "Scanlines",
+            ShaderKind::Mask => "Mask",
+            // Named for the monitor the preset is modelled on; the path of a
+            // user shader is too long for a value column.
+            ShaderKind::Crt => "CRT (1084)",
+            ShaderKind::Custom => "Custom",
         }
     }
 }
@@ -416,7 +444,54 @@ pub enum Tint {
     Sepia,
 }
 
+/// How large the pop-up menu is drawn. The panel font is a bitmap, so the
+/// sizes are whole multiples of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MenuScale {
+    /// The font at its own size. The default.
+    #[default]
+    Normal,
+    /// Twice up, for a large display or a distant seat.
+    Large,
+}
+
+impl MenuScale {
+    /// Every size, in the order a picker offers them.
+    pub const MENU_ORDER: [MenuScale; 2] = [MenuScale::Normal, MenuScale::Large];
+
+    /// Picker label: the config name of the size (round-trips through
+    /// [`parse_menu_scale`]).
+    pub fn label(self) -> &'static str {
+        match self {
+            MenuScale::Normal => "1x",
+            MenuScale::Large => "2x",
+        }
+    }
+
+    /// What a picker with room shows: the name and the figure together. The
+    /// menu itself shows [`label`] alone, having no width to spare.
+    ///
+    /// [`label`]: MenuScale::label
+    pub fn menu_label(self) -> &'static str {
+        match self {
+            MenuScale::Normal => "Normal (1x)",
+            MenuScale::Large => "Large (2x)",
+        }
+    }
+
+    /// What every length in the menu is multiplied by.
+    pub fn factor(self) -> usize {
+        match self {
+            MenuScale::Normal => 1,
+            MenuScale::Large => 2,
+        }
+    }
+}
+
 impl Tint {
+    /// Every tint, in the order a picker offers them.
+    pub const MENU_ORDER: [Tint; 5] = [Tint::None, Tint::Bw, Tint::Green, Tint::Amber, Tint::Sepia];
+
     /// Picker label: the config name of the tint (round-trips through
     /// [`parse_tint`], which takes "off" as well as "none").
     pub fn label(self) -> &'static str {
@@ -426,6 +501,21 @@ impl Tint {
             Tint::Green => "green",
             Tint::Amber => "amber",
             Tint::Sepia => "sepia",
+        }
+    }
+
+    /// What a picker shows the user, as against the config name [`label`]
+    /// round-trips. "Colour" rather than "Off": it says what the picture
+    /// looks like, and it is the web front-end's wording for the same picker.
+    ///
+    /// [`label`]: Tint::label
+    pub fn menu_label(self) -> &'static str {
+        match self {
+            Tint::None => "Colour",
+            Tint::Bw => "Black & white",
+            Tint::Green => "Green",
+            Tint::Amber => "Amber",
+            Tint::Sepia => "Sepia",
         }
     }
 }
@@ -460,6 +550,17 @@ impl JoystickInputMode {
         match self {
             Self::Gamepad => "gamepad",
             Self::Keyboard => "keyboard",
+        }
+    }
+
+    /// What a picker shows the user, as against the config name [`label`]
+    /// round-trips.
+    ///
+    /// [`label`]: JoystickInputMode::label
+    pub fn menu_label(self) -> &'static str {
+        match self {
+            Self::Gamepad => "Gamepad",
+            Self::Keyboard => "Keyboard",
         }
     }
 }
@@ -786,12 +887,6 @@ pub fn autofire_label(hz: u8) -> String {
     }
 }
 
-/// The next rate in the menu's cycle.
-pub fn next_autofire_rate(hz: u8) -> u8 {
-    let idx = AUTOFIRE_RATES.iter().position(|&r| r == hz).unwrap_or(0);
-    AUTOFIRE_RATES[(idx + 1) % AUTOFIRE_RATES.len()]
-}
-
 /// Whether a held fire button should be *asserted* right now, given the
 /// autofire rate and how much emulated time has passed.
 ///
@@ -866,6 +961,15 @@ pub enum WarpSpeed {
 }
 
 impl WarpSpeed {
+    /// Every limit, in the order a picker offers them.
+    pub const MENU_ORDER: [WarpSpeed; 5] = [
+        WarpSpeed::X2,
+        WarpSpeed::X4,
+        WarpSpeed::X8,
+        WarpSpeed::X16,
+        WarpSpeed::Max,
+    ];
+
     /// Cycle to the next level for the menu/keyboard "cycle" control:
     /// 2x -> 4x -> 8x -> 16x -> Max -> 2x.
     pub fn next(self) -> Self {
@@ -1649,6 +1753,7 @@ impl Default for Config {
             shader_strength: 1.0,
             bezel: false,
             tint: Tint::None,
+            menu_scale: MenuScale::Normal,
             full_screen: false,
             status_bar: true,
             joystick_input_mode: JoystickInputMode::Gamepad,
@@ -1871,6 +1976,9 @@ pub struct ConfigOverrides {
     /// Show the status bar at start (`--show-status-bar` /
     /// `--hide-status-bar`). Same as `[display] status_bar`.
     pub status_bar: Option<bool>,
+    /// How large the pop-up menu is drawn (`--menu-scale`). Same values as
+    /// `[display] menu_scale`.
+    pub menu_scale: Option<String>,
     /// A real floppy drive on a bay (`--floppy-bridge DFN INTERFACE`), by bay.
     /// Same values as `[floppy.dfN] bridge`.
     pub floppy_bridge: [Option<String>; 4],
@@ -1948,6 +2056,7 @@ impl ConfigOverrides {
             && self.a2065_interface.is_none()
             && self.full_screen.is_none()
             && self.status_bar.is_none()
+            && self.menu_scale.is_none()
     }
 
     /// Inject the set overrides into the raw config, replacing the values
@@ -2146,6 +2255,9 @@ impl ConfigOverrides {
         if let Some(status_bar) = self.status_bar {
             raw.display.status_bar = Some(status_bar);
         }
+        if let Some(menu_scale) = &self.menu_scale {
+            raw.display.menu_scale = Some(menu_scale.clone());
+        }
     }
 }
 
@@ -2224,6 +2336,16 @@ impl RawConfig {
         toml::to_string_pretty(self).context("serializing configuration to TOML")
     }
 
+    /// The configured menu size, for the paths that put a window up before a
+    /// whole [`Config`] has been built.
+    pub fn menu_scale(&self) -> MenuScale {
+        self.display
+            .menu_scale
+            .as_deref()
+            .and_then(|s| parse_menu_scale(s).ok())
+            .unwrap_or_default()
+    }
+
     /// The configured live-audio state (`[audio] output_enabled`), defaulting to
     /// on when unset -- matching [`AudioConfig`]'s default. Lets the binary seed
     /// the config-screen session audio without reaching into private raw fields.
@@ -2262,6 +2384,9 @@ pub(crate) struct RawDisplay {
     /// Screen tint: "none" (default), "bw", "green", "amber", or "sepia".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) tint: Option<String>,
+    /// Size of the pop-up menu: "1x" (default) or "2x".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) menu_scale: Option<String>,
     /// Open fullscreen at start (default false).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) full_screen: Option<bool>,
@@ -3151,6 +3276,10 @@ impl TryFrom<RawConfig> for Config {
             None => defaults.tint,
             Some(s) => parse_tint(s)?,
         };
+        let menu_scale = match raw.display.menu_scale.as_deref() {
+            None => defaults.menu_scale,
+            Some(s) => parse_menu_scale(s)?,
+        };
         let full_screen = raw.display.full_screen.unwrap_or(defaults.full_screen);
         let status_bar = raw.display.status_bar.unwrap_or(defaults.status_bar);
         let joystick_input_mode = match raw.input.joystick.as_deref() {
@@ -3599,6 +3728,7 @@ impl TryFrom<RawConfig> for Config {
             shader_strength,
             bezel,
             tint,
+            menu_scale,
             full_screen,
             status_bar,
             joystick_input_mode,
@@ -3707,6 +3837,15 @@ pub(crate) fn parse_tint(s: &str) -> Result<Tint> {
             "[display] tint must be \"none\", \"bw\", \"green\", \"amber\", \
              or \"sepia\", got \"{other}\""
         ),
+    }
+}
+
+/// Parse a `[display] menu_scale` value.
+pub(crate) fn parse_menu_scale(s: &str) -> Result<MenuScale> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "1x" | "1" | "normal" => Ok(MenuScale::Normal),
+        "2x" | "2" | "large" => Ok(MenuScale::Large),
+        other => bail!("[display] menu_scale must be \"1x\" or \"2x\", got \"{other}\""),
     }
 }
 
@@ -5355,18 +5494,15 @@ mod tests {
     }
 
     #[test]
-    fn autofire_rate_cycles_through_the_menu_list_and_wraps() {
-        let mut hz = 0;
-        let mut seen = vec![hz];
-        for _ in 0..AUTOFIRE_RATES.len() {
-            hz = next_autofire_rate(hz);
-            seen.push(hz);
-        }
-        assert_eq!(seen.first(), seen.last(), "the cycle returns to off");
+    fn autofire_rates_are_labelled_and_stay_within_the_usable_range() {
+        assert_eq!(AUTOFIRE_RATES[0], 0, "the list opens with off");
         assert_eq!(autofire_label(0), "off");
         assert_eq!(autofire_label(8), "8 Hz");
-        // An off-list value (hand-edited config) rejoins the cycle.
-        assert_eq!(next_autofire_rate(99), AUTOFIRE_RATES[1]);
+        // Above the cap the assert window is shorter than the frame the guest
+        // samples on, so no rate the menu offers may exceed it.
+        for hz in AUTOFIRE_RATES {
+            assert!(hz <= AUTOFIRE_MAX_HZ, "{hz} Hz is past the usable range");
+        }
     }
 
     #[test]
@@ -5648,6 +5784,38 @@ mod tests {
         assert!(parse_config("[display]\nshader_strength = 1.5").is_err());
         assert!(parse_config("[display]\nshader_strength = -0.1").is_err());
         Ok(())
+    }
+
+    #[test]
+    fn display_menu_scale_parses_and_defaults_to_1x() -> Result<()> {
+        assert_eq!(parse_config("")?.menu_scale, MenuScale::Normal);
+        let cfg = parse_config(
+            r#"
+            [display]
+            menu_scale = "2x"
+        "#,
+        )?;
+        assert_eq!(cfg.menu_scale, MenuScale::Large);
+        // Every label round-trips through the parser.
+        for scale in MenuScale::MENU_ORDER {
+            assert_eq!(
+                parse_menu_scale(scale.label()).expect("label parses"),
+                scale
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn display_menu_scale_rejects_an_unknown_size() {
+        let err = parse_config(
+            r#"
+            [display]
+            menu_scale = "3x"
+        "#,
+        )
+        .expect_err("unknown size");
+        assert!(err.to_string().contains("menu_scale"), "{err}");
     }
 
     #[test]

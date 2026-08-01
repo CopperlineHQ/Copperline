@@ -21,6 +21,24 @@ pub fn compact_now() -> String {
     local_compact(secs).unwrap_or_else(|| utc_compact(secs))
 }
 
+/// A Unix-seconds value as `yyyy/mm/dd HH:MM`, in local time where
+/// available. Written for the save-slot rows of the menu, which need a
+/// stamp a person can read rather than one a filename can sort.
+pub fn readable(secs: u64) -> String {
+    let compact = local_compact(secs).unwrap_or_else(|| utc_compact(secs));
+    // `YYYYMMDDHHmmSS`, sliced back apart: one formatter, so local time and
+    // the UTC fallback cannot drift from each other.
+    let at = |a: usize, b: usize| &compact[a..b];
+    format!(
+        "{}/{}/{} {}:{}",
+        at(0, 4),
+        at(4, 6),
+        at(6, 8),
+        at(8, 10),
+        at(10, 12)
+    )
+}
+
 /// Format a Unix-seconds value as a local-time `YYYYMMDDHHmmSS` string.
 /// Returns `None` if the platform exposes no thread-safe local-time
 /// conversion (then the caller falls back to UTC).

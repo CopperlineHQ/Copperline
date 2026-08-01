@@ -369,6 +369,18 @@ impl MidiSerialSink {
         log::info!("midi: input -> {}", self.input_label());
     }
 
+    /// Point the output at a named host endpoint, or at nothing.
+    pub fn set_output_endpoint(&mut self, endpoint: Option<&str>) {
+        self.backend.set_output(endpoint);
+        log::info!("midi: output -> {}", self.output_label());
+    }
+
+    /// Point the input at a named host endpoint, or at nothing.
+    pub fn set_input_endpoint(&mut self, endpoint: Option<&str>) {
+        self.backend.set_input(endpoint);
+        log::info!("midi: input -> {}", self.input_label());
+    }
+
     /// Current output device name, or "None".
     pub fn output_label(&self) -> String {
         self.backend
