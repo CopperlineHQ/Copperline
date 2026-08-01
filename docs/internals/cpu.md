@@ -429,19 +429,40 @@ and 1.61x A1200 CPU speed after the instruction-table update. Billing the
 data-return phase changes those figures to 3.55x and 1.10x respectively,
 without altering register-only timing-test rows.
 
-With the branch refill recalibrated to the real machine, the real-A1200
-column leaves two known CPU-side gaps, both needing sub-cck bus-cycle work
-rather than table adjustments. The posted-write class: a real write-plus-dbra
-chip-RAM iteration measures ~8 clocks against the 11 billed (`timing-test`
-rows 3, 10, 12, 18) -- the real 020 drains the posted write while the loop
-branch executes, which billing a whole colour clock per write cannot express;
-FS-UAE over-bills these too, by less. And the chip-RAM read loop (row 2): the
-real machine needs one more clock per iteration than is now billed. The old
-exact match on that row was two errors cancelling -- the branch over-bill
-hiding a read under-bill -- and correcting the branch exposed it. Row 29
-(the register-only instruction pair) also runs one clock faster per iteration
-on real silicon than the per-instruction model can express: that is
-execution-stage overlap, listed above as not modelled.
+The real-A1200 column drove two further sub-cck mechanisms, both gated to the
+020+ short-cycle path (the 68000's four-clock cycle spans the whole port
+sequence, so it cannot see either).
+
+Chip writes are posted. The 020's bus unit runs decoupled from its execution
+unit: a chip write is accepted at the end of its 3-clock cycle and the
+transfer overlaps the following instructions, retiring into a later free chip
+slot. Copperline models this by crediting the transfer's clocks back against
+the instruction's charge (`take_cpu_bus_overlap_clocks`) and letting the
+pending write drain into the next free slot during subsequent beam
+advancement (`cpu_posted_write_debt`), at the port's 2-cck turnaround
+cadence. Only one bus cycle can be in flight, so a second chip access stalls
+until the pending write retires -- which is what paces a chip write+dbra loop
+to ~8 clocks per iteration on the real machine (`timing-test` rows 3, 10,
+12, 18) where a synchronous whole-slot bill gave 11-12. A DMA reader of the
+same address inside the drain window (at most two colour clocks) would see
+the write early; that race is unobservable in practice and accepted.
+
+Reads pay one further CPU clock synchronizing the returned data back into
+the CPU clock domain, accumulated into whole colour clocks
+(`bill_020_read_return_sync_clock`). The real chip-read loop measures 16.1
+clocks per iteration (row 2) where grant plus data-return bill 15; the old
+exact match on that row was the branch over-bill cancelling this missing
+clock. The same synchronizer clock on custom-register reads is what lands
+the copper-vs-CPU poll row (row 27) exactly on the real machine's beam
+position.
+
+What remains against real silicon: the composite write-plus-poll rows (16,
+17, 21) run 3-7% under the real machine's (photo-uncertain) readings, and
+row 29's register-only pair runs one clock faster per iteration on real
+silicon than the per-instruction model can express -- that is
+execution-stage overlap, listed above as not modelled. Exact serial-captured
+values for rows 9-22 would firm up both. The SysInfo figures in the previous
+paragraph predate posted writes and will read higher on the A1200 profile.
 
 ## MMU
 

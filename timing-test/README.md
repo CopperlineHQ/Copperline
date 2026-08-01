@@ -86,13 +86,18 @@ where real hardware and FS-UAE disagree, real hardware wins:
 - Row 31 (beam advance across a DIVU loop inside a 6-bitplane display): real
   `0378`, Copperline `0376`, FS-UAE `04D2` -- FS-UAE over-bills that phase by
   ~39%; Copperline is within 2 colour clocks of the silicon.
-- Still open, now measured against real hardware: the posted-write class
-  (rows 3, 10, 12, 18: a real write+dbra iteration is ~8 clocks against the
-  11 billed; FS-UAE also over-bills, by less), the chip-read loop (row 2: one
-  clock per iteration short now that the branch over-bill no longer cancels a
-  read under-bill), and row 29 (a register-only pair pipelines to 10 clocks
-  on real silicon -- 020 execution-stage overlap, not expressible in a
-  per-instruction model).
+- The write class and the read return are now modelled from this column
+  (posted chip writes draining at the port's 2-cck cadence, plus a one-clock
+  read-return synchronizer; see `docs/internals/cpu.md`): the write rows
+  land on the real machine's digits to the tick (row 3 = `0CE1`, rows
+  10/12 = `019F`), the chip-read loop (row 2) and the copper-vs-CPU beam row
+  (27) are exact, and every confidently-read row sits within 1% of real
+  hardware.
+- Still open against real silicon: the composite write-plus-poll rows (16,
+  17, 21) read 3-7% low against photo-uncertain targets, and row 29 (a
+  register-only pair pipelines to 10 clocks on real silicon -- 020
+  execution-stage overlap, not expressible in a per-instruction model). A
+  serial capture of rows 9-22 would pin both down.
 
 ## What each row measures
 

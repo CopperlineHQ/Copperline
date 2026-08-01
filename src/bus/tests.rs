@@ -9057,14 +9057,19 @@ fn aga_68020_chip_reads_wait_for_data_but_writes_are_posted() {
     assert_eq!(chip_read_cck, 2);
     assert_eq!(bus.last_chip_bus_owner(), ChipBusOwner::Idle);
 
+    // The write posts: no beam advance at issue, and the transfer's 3 clocks
+    // are credited back against the instruction's CPU charge.
     bus.grant_cpu_bus_access_at(Some(0x0002_0000), 2, CpuBusAccessKind::Write);
     let (chip_write_cck, _) = bus.take_slice_bus_advance();
-    assert_eq!(chip_write_cck, 1);
-    assert_eq!(bus.last_chip_bus_owner(), ChipBusOwner::Cpu);
+    assert_eq!(chip_write_cck, 0);
+    assert_eq!(bus.take_cpu_bus_overlap_clocks(), 3);
 
+    // The next access first retires the posted write into a free slot, then
+    // waits out the port's 2-cck turnaround before its own grant: drain +
+    // turnaround wait + grant + fetch data return.
     bus.grant_cpu_bus_access_at(Some(0x0002_0004), 2, CpuBusAccessKind::Fetch);
     let (chip_fetch_cck, _) = bus.take_slice_bus_advance();
-    assert_eq!(chip_fetch_cck, 2);
+    assert_eq!(chip_fetch_cck, 4);
     assert_eq!(bus.last_chip_bus_owner(), ChipBusOwner::Idle);
 
     // A custom-register read crosses to Agnus/Denise/Paula and back over the
@@ -9073,6 +9078,74 @@ fn aga_68020_chip_reads_wait_for_data_but_writes_are_posted() {
     let (custom_read_cck, _) = bus.take_slice_bus_advance();
     assert_eq!(custom_read_cck, 3);
     assert_eq!(bus.last_chip_bus_owner(), ChipBusOwner::Idle);
+}
+
+#[test]
+fn aga_68020_read_return_sync_clock_accumulates_to_a_slot() {
+    let mut bus = empty_bus();
+    bus.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+    bus.set_cpu_clocks_per_cck(4);
+    bus.set_cpu_short_bus_cycle(true);
+    bus.set_cpu_bus_arbitration_enabled(true);
+
+    // Each read bills grant + data return (2 cck) plus one CPU clock of
+    // domain-crossing synchronizer; at 4 clocks per cck the fourth read's
+    // accumulated clock crosses a slot boundary (timing-test row 2: the real
+    // A1200 chip-read loop averages 16.1 clocks per iteration).
+    bus.agnus.hpos = 0x20;
+    let mut total = 0;
+    for _ in 0..4 {
+        bus.grant_cpu_bus_access_at(Some(0x0002_0000), 2, CpuBusAccessKind::Read);
+        let (cck, _) = bus.take_slice_bus_advance();
+        total += cck;
+    }
+    assert_eq!(total, 9);
+}
+
+#[test]
+fn aga_68020_posted_write_drains_during_internal_advance() {
+    let mut bus = empty_bus();
+    bus.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+    bus.set_cpu_clocks_per_cck(4);
+    bus.set_cpu_short_bus_cycle(true);
+    bus.set_cpu_bus_arbitration_enabled(true);
+
+    bus.agnus.hpos = 0x20;
+    bus.grant_cpu_bus_access_at(Some(0x0002_0000), 2, CpuBusAccessKind::Write);
+    let (issue_cck, _) = bus.take_slice_bus_advance();
+    assert_eq!(issue_cck, 0);
+
+    // Execution time passing on the CPU retires the write into a free slot
+    // behind the execution unit's back...
+    bus.advance_cpu_internal_cycles(2);
+    let _ = bus.take_slice_bus_advance();
+
+    // ...so a following write posts again without stalling.
+    bus.grant_cpu_bus_access_at(Some(0x0002_0000), 2, CpuBusAccessKind::Write);
+    let (second_issue_cck, _) = bus.take_slice_bus_advance();
+    assert_eq!(second_issue_cck, 0);
+}
+
+#[test]
+fn aga_68020_back_to_back_chip_writes_pace_to_port_cadence() {
+    let mut bus = empty_bus();
+    bus.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+    bus.set_cpu_clocks_per_cck(4);
+    bus.set_cpu_short_bus_cycle(true);
+    bus.set_cpu_bus_arbitration_enabled(true);
+
+    // With no execution time between them, each write after the first stalls
+    // until the previous one retires, settling to the port's one-slot-every-
+    // other-cck cadence (timing-test rows 3/10: ~8 CPU clocks per write on a
+    // real A1200): 0 + 1 + 2 + 2.
+    bus.agnus.hpos = 0x20;
+    let mut total = 0;
+    for _ in 0..4 {
+        bus.grant_cpu_bus_access_at(Some(0x0002_0000), 2, CpuBusAccessKind::Write);
+        let (cck, _) = bus.take_slice_bus_advance();
+        total += cck;
+    }
+    assert_eq!(total, 5);
 }
 
 #[test]
@@ -9089,14 +9162,18 @@ fn ecs_68020_chip_and_custom_reads_wait_for_16_bit_data_return() {
     assert_eq!(chip_read_cck, 2);
     assert_eq!(bus.last_chip_bus_owner(), ChipBusOwner::Idle);
 
+    // Writes post on the 16-bit chip bus too: the ECS 020's bus unit is the
+    // same silicon, only the data path is narrower.
     bus.grant_cpu_bus_access_at(Some(0x0002_0000), 2, CpuBusAccessKind::Write);
     let (chip_write_cck, _) = bus.take_slice_bus_advance();
-    assert_eq!(chip_write_cck, 1);
-    assert_eq!(bus.last_chip_bus_owner(), ChipBusOwner::Cpu);
+    assert_eq!(chip_write_cck, 0);
+    assert_eq!(bus.take_cpu_bus_overlap_clocks(), 3);
 
+    // The custom read first retires the posted write (drain + the port's
+    // 2-cck turnaround), then pays grant + data return + register crossing.
     let _ = bus.custom_read(0x002, 2);
     let (custom_read_cck, _) = bus.take_slice_bus_advance();
-    assert_eq!(custom_read_cck, 3);
+    assert_eq!(custom_read_cck, 5);
     assert_eq!(bus.last_chip_bus_owner(), ChipBusOwner::Idle);
 }
 

@@ -154,7 +154,7 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      complete CL-GD5426/VRAM state
 //  44: Picasso2 and its Cirrus core gained the II+ revision identity and
 //      serializable vertical-blank interrupt latch
-pub const STATE_VERSION: u32 = 44;
+pub const STATE_VERSION: u32 = 45;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {
