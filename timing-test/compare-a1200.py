@@ -22,15 +22,20 @@ FS = [
 ]
 
 # Real-hardware readings (stock A1200: 68EC020 at 14.19 MHz, AGA, 2 MB chip,
-# KS 3.2.3), read off CRT photos of the disk's on-screen table, 2026-08-01.
-# Only rows whose digits were unambiguous in the photos are recorded. Where
-# REAL and FS-UAE disagree, REAL wins: FS-UAE over-bills every taken branch by
-# one clock (the dbra rows 7/14/30 and every loop row with them) and the
-# DIV-under-display beam advance (row 31) by ~39%.
+# KS 3.2.3), read off the disk's on-screen table across two runs, 2026-08-01.
+# Where REAL and FS-UAE disagree, REAL wins: FS-UAE over-bills every taken
+# branch by one clock (the dbra rows 7/14/30 and every loop row with them),
+# the whole chip-write class (rows 3/10/12/18), and the DIV-under-display
+# beam advance (row 31) by ~39%. Rows that vary by a couple of ticks between
+# runs record the second run's value (12: 1A0/19F, 17: 11A4/11A3). The raw
+# interrupt-phase rows 19/20/22 are NOT recorded: they moved between the two
+# real runs (19: 1E/21, 20: 8F/92, 22: 11/0E), so they are soft targets only.
 REAL = {
     0: 0x00000000, 1: 0x00000000, 2: 0x19BC, 4: 0x0E6A, 5: 0x119D,
-    7: 0x0B38, 9: 0x00000000, 13: 0x00000000, 14: 0x0B3A, 27: 0x641B,
-    28: 0x119F, 29: 0x1004, 30: 0x0B36, 31: 0x0378,
+    7: 0x0B38, 9: 0x00000000, 10: 0x019F, 11: 0x0284, 12: 0x01A0,
+    13: 0x00000000, 14: 0x0B3A, 15: 0x0284, 16: 0x11A1, 17: 0x11A4,
+    18: 0x01A2, 21: 0x1196, 27: 0x641B, 28: 0x119F, 29: 0x1004,
+    30: 0x0B36, 31: 0x0378,
 }
 
 DESC = {

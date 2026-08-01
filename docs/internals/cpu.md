@@ -456,13 +456,24 @@ clock. The same synchronizer clock on custom-register reads is what lands
 the copper-vs-CPU poll row (row 27) exactly on the real machine's beam
 position.
 
-What remains against real silicon: the composite write-plus-poll rows (16,
-17, 21) run 3-7% under the real machine's (photo-uncertain) readings, and
-row 29's register-only pair runs one clock faster per iteration on real
-silicon than the per-instruction model can express -- that is
-execution-stage overlap, listed above as not modelled. Exact serial-captured
-values for rows 9-22 would firm up both. The SysInfo figures in the previous
-paragraph predate posted writes and will read higher on the A1200 profile.
+The same column also pinned down 020 result forwarding, modelled in the m68k
+crate: a register-to-register MOVE whose source is the register the
+immediately preceding register-to-register MOVE wrote runs one clock faster
+(the value is still in the execution unit's result latch, skipping the
+register-file read). The real machine runs the RAW-dependent pair one clock
+per iteration faster than the independent pair (`timing-test` rows 29 and
+28: 10 against 11 clocks including the loop dbra), which only a forwarding
+path can produce; wider forwarding is deliberately not modelled without
+hardware data.
+
+What remains against real silicon, with the middle rows now read off the
+CRT across two runs: the composite write-plus-poll rows (16, 17, 21) run
+3-7% under the real readings, and the raw interrupt-phase rows (19, 20, 22)
+sit a few colour clocks early of readings that themselves move a few clocks
+between real runs. Both are composite effects (posted-write drain against
+the poll read, interrupt entry against the beam) rather than single-constant
+gaps. The SysInfo figures in the previous paragraph predate posted writes
+and will read higher on the A1200 profile.
 
 ## MMU
 

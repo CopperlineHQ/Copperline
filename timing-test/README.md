@@ -93,11 +93,15 @@ where real hardware and FS-UAE disagree, real hardware wins:
   10/12 = `019F`), the chip-read loop (row 2) and the copper-vs-CPU beam row
   (27) are exact, and every confidently-read row sits within 1% of real
   hardware.
-- Still open against real silicon: the composite write-plus-poll rows (16,
-  17, 21) read 3-7% low against photo-uncertain targets, and row 29 (a
-  register-only pair pipelines to 10 clocks on real silicon -- 020
-  execution-stage overlap, not expressible in a per-instruction model). A
-  serial capture of rows 9-22 would pin both down.
+- Rows 28/29 (the independent and RAW-dependent register pairs) exposed 020
+  result forwarding -- the dependent pair runs one clock faster per
+  iteration on real silicon -- now modelled in the m68k core as a one-clock
+  refund on a register-to-register MOVE sourcing the register the previous
+  register-to-register MOVE wrote.
+- Still open against real silicon (middle rows read off the CRT across two
+  runs): the composite write-plus-poll rows (16, 17, 21) read 3-7% low, and
+  the raw interrupt-phase rows (19, 20, 22) sit a few colour clocks early of
+  readings that themselves move a few clocks between real runs.
 
 ## What each row measures
 
