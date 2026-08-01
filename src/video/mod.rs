@@ -6,6 +6,8 @@ pub mod deinterlace;
 pub mod font;
 #[cfg(feature = "frontend")]
 pub mod launcher;
+#[cfg(feature = "frontend")]
+pub mod menu;
 pub mod present_common;
 #[cfg(feature = "frontend")]
 pub mod ui;

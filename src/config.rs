@@ -378,6 +378,16 @@ pub enum ShaderKind {
 }
 
 impl ShaderKind {
+    /// Every shader, in the order a picker offers them. `Custom` is last
+    /// because it is the one that depends on a file being configured.
+    pub const MENU_ORDER: [ShaderKind; 5] = [
+        ShaderKind::None,
+        ShaderKind::Scanlines,
+        ShaderKind::Mask,
+        ShaderKind::Crt,
+        ShaderKind::Custom,
+    ];
+
     /// Picker label: the config name of the preset (round-trips through
     /// [`parse_shader`], which takes "off" as well as "none"), or
     /// "custom" for a user shader, whose path is too long to name here.
@@ -417,6 +427,9 @@ pub enum Tint {
 }
 
 impl Tint {
+    /// Every tint, in the order a picker offers them.
+    pub const MENU_ORDER: [Tint; 5] = [Tint::None, Tint::Bw, Tint::Green, Tint::Amber, Tint::Sepia];
+
     /// Picker label: the config name of the tint (round-trips through
     /// [`parse_tint`], which takes "off" as well as "none").
     pub fn label(self) -> &'static str {
@@ -866,6 +879,15 @@ pub enum WarpSpeed {
 }
 
 impl WarpSpeed {
+    /// Every limit, in the order a picker offers them.
+    pub const MENU_ORDER: [WarpSpeed; 5] = [
+        WarpSpeed::X2,
+        WarpSpeed::X4,
+        WarpSpeed::X8,
+        WarpSpeed::X16,
+        WarpSpeed::Max,
+    ];
+
     /// Cycle to the next level for the menu/keyboard "cycle" control:
     /// 2x -> 4x -> 8x -> 16x -> Max -> 2x.
     pub fn next(self) -> Self {
