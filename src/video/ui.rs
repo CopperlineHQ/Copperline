@@ -861,6 +861,12 @@ impl UiState {
         midi_active: bool,
         sampler_active: bool,
     ) -> Option<UiControl> {
+        if self.menu_open && !self.menu_rows.is_empty() {
+            // The tree menu answers for itself: a level, and a row in it.
+            let pos = (pos.0.max(0) as usize, pos.1.max(0) as usize);
+            return tree_menu_hit(&self.menu_rows, &self.menu_nav, pos)
+                .map(|(depth, row)| UiControl::MenuRow { depth, row });
+        }
         if self.menu_open {
             let items = menu_items(midi_active, sampler_active);
             // The scroll rows sit where items would otherwise be, so they are
@@ -1029,6 +1035,11 @@ pub fn panel_control_at(panel: &Panel, pos: (i32, i32)) -> Option<UiControl> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiControl {
     MenuItem(MenuItem),
+    /// A row of the tree menu: which open level, and which row of it.
+    MenuRow {
+        depth: usize,
+        row: usize,
+    },
     PanelClose,
     /// Anywhere on a panel that is not a specific control (swallows the
     /// click so it does not fall through to the display).

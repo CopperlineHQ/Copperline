@@ -2636,6 +2636,15 @@ impl ApplicationHandler for App {
                 if self.should_drop_repeated_main_key(code, state, repeat) {
                     return;
                 }
+                // An open menu takes the keyboard first: while it is up the
+                // cursor keys walk it rather than reaching the Amiga.
+                if self.ui.menu_open
+                    && !self.ui.menu_rows.is_empty()
+                    && state == ElementState::Pressed
+                    && self.handle_menu_key(code, event_loop)
+                {
+                    return;
+                }
                 match (code, state) {
                     (KeyCode::KeyQ, ElementState::Pressed)
                         if host_shortcut_modifier_pressed(self.modifiers) =>
@@ -2952,7 +2961,7 @@ impl ApplicationHandler for App {
                             .cursor_pos
                             .is_some_and(|p| menu_button_rect().contains(p))
                         {
-                            self.ui.menu_open = false;
+                            self.close_menu();
                             self.request_redraw();
                         }
                     }
@@ -4469,6 +4478,340 @@ impl App {
         }
     }
 
+    /// The menu as it stands for this machine, built when it is opened.
+    ///
+    /// Everything the tree needs is read here, once: the tree is then a plain
+    /// value, so nothing it offers can shift under the pointer while it is
+    /// up, and the drawing code never reaches into the machine.
+    fn build_menu(&mut self, fullscreen: bool) -> Vec<crate::video::menu::MenuRow> {
+        use crate::video::menu::{AudioOutputChoice, MenuState};
+
+        let midi_active = self.serial_is_midi;
+        let (midi_in, midi_out) = if midi_active {
+            self.midi_menu_labels()
+        } else {
+            (String::new(), String::new())
+        };
+        #[cfg(feature = "midi")]
+        let (midi_inputs, midi_outputs) = if midi_active {
+            let ends = crate::midi::enumerate();
+            (
+                ends.inputs.into_iter().map(|e| e.name).collect::<Vec<_>>(),
+                ends.outputs.into_iter().map(|e| e.name).collect::<Vec<_>>(),
+            )
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        #[cfg(not(feature = "midi"))]
+        let (midi_inputs, midi_outputs): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
+
+        let sampler_active = self.sampler_stream.is_some();
+        let sampler_inputs = if sampler_active {
+            crate::sampler::picker_input_devices()
+        } else {
+            Vec::new()
+        };
+
+        let audio_output = match &self.audio_output {
+            crate::audio::AudioOutput::Disabled => AudioOutputChoice::Disabled,
+            crate::audio::AudioOutput::Device(name) => AudioOutputChoice::Named(name.clone()),
+            crate::audio::AudioOutput::Default => AudioOutputChoice::Default,
+        };
+
+        let save_slots = self.save_slot_stamps();
+        let state = MenuState {
+            fullscreen,
+            status_bar_hidden: crate::video::status_bar_hidden(),
+            warp: !self.emu.paced(),
+            warp_speed: self.warp_speed,
+            rewind: self.rewind_armed,
+            recording: self.recorder.is_some(),
+            input_recording: self.input_recorder.is_some(),
+            autofire_hz: self.autofire_hz,
+            joystick_input_mode: self.joystick_input_mode,
+            port_devices: [
+                self.emu.bus().input.device(0),
+                self.emu.bus().input.device(1),
+            ],
+            pixel_aspect: crate::video::pixel_aspect(),
+            shader: self.crt_shader_kind,
+            custom_shader_available: self.custom_shader_path.is_some(),
+            tint: self.tint,
+            floppy_speed: self.emu.bus().floppy.speed_percent(),
+            audio_filter: self.emu.bus().paula.led_filter_mode(),
+            audio_output,
+            audio_devices: &crate::audio::picker_output_devices(),
+            midi_in: &midi_in,
+            midi_out: &midi_out,
+            midi_inputs: &midi_inputs,
+            midi_outputs: &midi_outputs,
+            sampler_input: self.sampler.input_device.as_deref().unwrap_or(""),
+            sampler_inputs: &sampler_inputs,
+            sampler_gain: self.sampler.gain_db,
+            save_slots: &save_slots,
+        };
+        crate::video::menu::build(&state)
+    }
+
+    /// When each numbered save slot was written, for the Quick Save/Load
+    /// rows. A slot that cannot be read is treated as free: the menu is
+    /// describing what is there, not diagnosing the disk.
+    fn save_slot_stamps(&self) -> [Option<String>; crate::video::menu::SAVE_SLOTS] {
+        std::array::from_fn(|i| {
+            let path = crate::savestate::slot_path(i + 1)?;
+            let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
+            Some(crate::timestamp::readable(
+                modified
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+            ))
+        })
+    }
+
+    /// Act on the row the cursor is on: open a category, or run its action.
+    ///
+    /// Rows meant to be used more than once -- a toggle, a step -- leave the
+    /// menu up and rebuild it, so what it shows keeps pace with what it just
+    /// changed.
+    fn activate_menu_row(&mut self, event_loop: Option<&ActiveEventLoop>) {
+        let rows = std::mem::take(&mut self.ui.menu_rows);
+        let Some(cursor) = self.ui.menu_nav.cursor() else {
+            self.ui.menu_rows = rows;
+            return;
+        };
+        let Some(row) = self.ui.menu_nav.current(&rows).get(cursor).cloned() else {
+            self.ui.menu_rows = rows;
+            return;
+        };
+        self.ui.menu_rows = rows;
+        if !row.enabled {
+            return;
+        }
+        if row.is_submenu() {
+            self.ui.menu_nav.descend(&self.ui.menu_rows.clone());
+            self.request_redraw();
+            return;
+        }
+        let Some(action) = row.menu_action().cloned() else {
+            return;
+        };
+        let closes = row.closes_menu();
+        if closes {
+            self.close_menu();
+        }
+        self.run_menu_action(action, event_loop);
+        if !closes {
+            // The menu stays up, so rebuild it: a toggle that has just been
+            // flipped should read as flipped.
+            let fullscreen = self
+                .render
+                .as_ref()
+                .is_some_and(|r| r.window.fullscreen().is_some());
+            self.ui.menu_rows = self.build_menu(fullscreen);
+        }
+        self.request_redraw();
+    }
+
+    /// Carry out a menu action.
+    ///
+    /// Every row of the tree ends here, so the menu's shape and its effects
+    /// stay separable: the tree says what is offered, this says what happens.
+    fn run_menu_action(
+        &mut self,
+        action: crate::video::menu::MenuAction,
+        event_loop: Option<&ActiveEventLoop>,
+    ) {
+        use crate::video::menu::{AudioOutputChoice, MenuAction as A};
+        match action {
+            A::OpenMachineConfig => self.open_launcher(),
+            A::OpenFrameAnalyzer => self.open_frame_analyzer(),
+            A::OpenDebugger => self.open_debugger(),
+            A::OpenConsole => self.open_console(),
+            A::OpenInputMapping => self.open_input_mapping(),
+            A::OpenCalibration => {
+                self.ui.panel = Some(Panel::Calibration(crate::gamepad::CalibrationSession::new()));
+            }
+            A::OpenShortcuts => self.ui.panel = Some(Panel::Shortcuts),
+            A::OpenAbout => self.ui.panel = Some(Panel::About),
+            A::LoadRom => self.load_rom_from_dialog(),
+
+            A::SetAudioOutput(choice) => {
+                let want = match choice {
+                    AudioOutputChoice::Default => crate::audio::AudioOutput::Default,
+                    AudioOutputChoice::Named(name) => crate::audio::AudioOutput::Device(name),
+                    AudioOutputChoice::Disabled => crate::audio::AudioOutput::Disabled,
+                };
+                self.audio_output = want;
+                let realtime = crate::priority::requested(self.realtime_priority);
+                match crate::audio::open_output_sink(realtime, &self.audio_output) {
+                    Ok(sink) => {
+                        self.emu.bus_mut().paula.audio = sink;
+                        self.sync_live_audio_suspension();
+                    }
+                    Err(e) => {
+                        warn!("audio: could not open the selected device; keeping silence: {e:#}");
+                        self.emu.bus_mut().paula.audio = Box::new(crate::audio::NullSink);
+                    }
+                }
+                self.show_osd(format!("Audio output: {}", self.audio_output.label()));
+            }
+            A::SetAudioFilter(mode) => {
+                use crate::config::AudioFilterMode;
+                self.emu.bus_mut().paula.set_led_filter_mode(mode);
+                let label = match mode {
+                    AudioFilterMode::Auto => "Auto",
+                    AudioFilterMode::On => "Enabled",
+                    AudioFilterMode::Off => "Disabled",
+                };
+                self.show_osd(format!("Audio filter: {label}"));
+                self.request_redraw();
+            }
+
+            A::SetPixelAspect(aspect) => self.apply_pixel_aspect(aspect),
+            A::SetShader(kind) => {
+                use crate::config::ShaderKind;
+                // A user shader is re-read from disk each time it is chosen,
+                // so editing the file and picking it again shows the new
+                // version; one that will not compile falls back to off and
+                // says why.
+                let mut failure = None;
+                let mut applied = kind;
+                if kind == ShaderKind::Custom {
+                    if let Err(msg) = self.reload_custom_shader() {
+                        failure = Some(msg);
+                        applied = ShaderKind::None;
+                    }
+                }
+                self.crt_shader_kind = applied;
+                info!("crt shader: {}", applied.label());
+                self.show_osd(match failure {
+                    Some(msg) => {
+                        format!("CRT shader: {} (custom failed: {msg})", applied.label())
+                    }
+                    None => format!("CRT shader: {}", applied.label()),
+                });
+                self.request_redraw();
+            }
+            A::SetTint(tint) => {
+                self.set_tint(tint);
+                self.show_osd(format!("Screen tint: {}", tint.label()));
+                self.request_redraw();
+            }
+            A::ToggleFullscreen => self.toggle_fullscreen(),
+            A::ToggleStatusBar => self.toggle_status_bar(),
+
+            A::SetPortDevice(port, device) => {
+                self.hot_plug_port_device(port, device);
+                self.show_osd(format!("Port {}: {}", port + 1, device.label()));
+            }
+            A::SetJoystickInput(mode) => self.set_joystick_input_mode(mode),
+            A::SetAutofire(hz) => {
+                self.autofire_hz = hz;
+                let label = crate::config::autofire_label(hz);
+                info!("autofire: {label}");
+                self.show_osd(format!("Autofire: {label}"));
+                self.request_redraw();
+            }
+
+            #[cfg(feature = "midi")]
+            A::SetMidiInput(name) => {
+                if let Some(sink) = self.emu.bus_mut().midi_serial_mut() {
+                    sink.set_input_endpoint(Some(&name));
+                }
+                self.show_osd(format!("MIDI input: {name}"));
+            }
+            #[cfg(feature = "midi")]
+            A::SetMidiOutput(name) => {
+                if let Some(sink) = self.emu.bus_mut().midi_serial_mut() {
+                    sink.set_output_endpoint(Some(&name));
+                }
+                self.show_osd(format!("MIDI output: {name}"));
+            }
+            #[cfg(not(feature = "midi"))]
+            A::SetMidiInput(_) | A::SetMidiOutput(_) => {}
+            A::SetSamplerInput(name) => {
+                if self.sampler.enabled {
+                    self.sampler.input_device = Some(name.clone());
+                    self.attach_session_sampler();
+                    self.show_osd(format!("Sampler input: {name}"));
+                }
+            }
+            A::StepSamplerGain(dir) => self.step_sampler_gain(dir > 0),
+
+            A::SetFloppySpeed(percent) => {
+                self.emu.bus_mut().floppy.set_speed_percent(percent);
+                let label = crate::floppy::speed_label(percent);
+                info!("floppy speed: {label}");
+                self.show_osd(format!("Floppy speed: {label}"));
+                self.request_redraw();
+            }
+            A::ToggleRewind => self.toggle_rewind(),
+
+            A::ToggleWarp => self.toggle_warp(),
+            A::SetWarpLimit(limit) => {
+                self.warp_speed = limit;
+                let label = limit.label();
+                info!("warp limit: {label}");
+                if self.emu.paced() {
+                    self.show_osd(format!("Warp limit: {label} (warp off)"));
+                } else {
+                    self.show_osd(format!("Warp limit: {label}"));
+                }
+                self.request_redraw();
+            }
+
+            A::ToggleRecord => self.toggle_recording(),
+            A::ToggleRecordInput => self.toggle_input_recording(),
+
+            A::SaveState => self.save_state_interactive(),
+            A::LoadState => self.load_state_from_dialog(event_loop),
+            A::QuickSave(slot) => self.quick_save_state(slot + 1),
+            A::QuickLoad(slot) => self.quick_load_state(slot + 1, event_loop),
+        }
+    }
+
+    /// Walk the open menu with the keyboard. Returns true when the key was
+    /// the menu's, so the caller stops before the machine sees it.
+    ///
+    /// Up and down step the current level, right opens a category and left
+    /// leaves one, Return picks, and Escape backs out a level at a time --
+    /// closing the menu from the top, which is where Escape has nothing left
+    /// to close.
+    fn handle_menu_key(&mut self, code: KeyCode, event_loop: &ActiveEventLoop) -> bool {
+        let rows = self.ui.menu_rows.clone();
+        match code {
+            KeyCode::ArrowUp => self.ui.menu_nav.step(&rows, false),
+            KeyCode::ArrowDown => self.ui.menu_nav.step(&rows, true),
+            KeyCode::ArrowRight => {
+                self.ui.menu_nav.descend(&rows);
+            }
+            KeyCode::ArrowLeft => {
+                self.ui.menu_nav.ascend();
+            }
+            KeyCode::Enter | KeyCode::NumpadEnter => {
+                self.activate_menu_row(Some(event_loop));
+                self.ensure_tool_windows_for_open_panels(event_loop);
+                return true;
+            }
+            KeyCode::Escape => {
+                if !self.ui.menu_nav.ascend() {
+                    self.close_menu();
+                }
+            }
+            _ => return false,
+        }
+        self.request_redraw();
+        true
+    }
+
+    /// Close the menu and forget where it was open to.
+    fn close_menu(&mut self) {
+        self.ui.menu_open = false;
+        self.ui.menu_rows = Vec::new();
+        self.ui.menu_nav.reset();
+    }
+
     /// Run the action behind a clicked status-bar control (volume is
     /// handled separately because it starts a drag).
     fn activate_bar_control(&mut self, control: BarControl) {
@@ -4482,6 +4825,16 @@ impl App {
                 // Each open starts at the top of the list; a scroll position
                 // left over from the last time would be a small mystery.
                 self.ui.menu_scroll = 0;
+                self.ui.menu_nav.reset();
+                self.ui.menu_rows = if self.ui.menu_open {
+                    let fullscreen = self
+                        .render
+                        .as_ref()
+                        .is_some_and(|r| r.window.fullscreen().is_some());
+                    self.build_menu(fullscreen)
+                } else {
+                    Vec::new()
+                };
                 self.request_redraw();
             }
             // A bridged drive's media is a real disk in a real drive: it is
@@ -4515,6 +4868,16 @@ impl App {
         event_loop: Option<&ActiveEventLoop>,
     ) {
         match control {
+            // A row of the tree menu: a category opens, a leaf acts. The
+            // pointer can land on any level, so the path is set to where it
+            // landed rather than stepped into.
+            UiControl::MenuRow { depth, row } => {
+                let path: Vec<usize> = (0..depth)
+                    .filter_map(|d| self.ui.menu_nav.open_at(d))
+                    .collect();
+                self.ui.menu_nav.open_path(path, Some(row));
+                self.activate_menu_row(event_loop);
+            }
             UiControl::MenuItem(item) => {
                 self.ui.menu_open = false;
                 match item {
