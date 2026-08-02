@@ -169,6 +169,13 @@ pub const DEFAULT_KEY_HOLD_MS: u32 = 100;
 /// default to keep the per-snapshot serialize off the interactive path.
 const DEBUGGER_REVERSE_INTERVAL_FRAMES: u64 = 10;
 const MAX_TEXTURE_SCALE: usize = 2;
+/// Cap on the integer-scaling supersample factor, which follows the window
+/// fit rather than the host DPI (see `plan_present_scaling`). Bounds the
+/// backing texture and the per-frame present copy on very large displays;
+/// at 4x the canvas the picture is already 2864 physical pixels wide, and
+/// beyond it PixelPerfect's own whole multiples of the capped texture keep
+/// the fit integer.
+const MAX_INTEGER_TEXTURE_SCALE: usize = 4;
 const STATUS_BAR_HEIGHT: usize = 44;
 /// Logical window height: the presentation canvas for the active pixel aspect,
 /// plus the status bar below it unless it is hidden (in which case the display
@@ -2428,7 +2435,11 @@ impl ApplicationHandler for App {
         #[cfg(target_os = "macos")]
         set_macos_dock_icon();
         let inner = window.inner_size();
-        let texture_scale = texture_scale_for_window(&window);
+        let (texture_scale, scaling_mode) = plan_present_scaling(
+            integer_scaling_requested(),
+            window.scale_factor(),
+            (inner.width.max(1), inner.height.max(1)),
+        );
         // On Linux, restrict wgpu to the Vulkan backend. wgpu's GL fallback
         // initializes its EGL instance without a display handle (pixels uses
         // InstanceDescriptor::new_without_display_handle), so EGL drops to the
@@ -2442,27 +2453,23 @@ impl ApplicationHandler for App {
         // Other platforms keep wgpu's default backend set (Metal on macOS,
         // DX12/Vulkan on Windows). cfg!() (not #[cfg]) keeps the Linux branch
         // type-checked on every host.
-        let pixels = match build_pixels_for_window(
-            window.clone(),
-            texture_scale,
-            true,
-            integer_scaling_requested(),
-        ) {
-            Ok(p) => p,
-            Err(e) => {
-                error!("pixels init failed: {e}");
-                if cfg!(target_os = "linux") {
-                    error!(
-                        "Copperline requires a Vulkan driver on Linux. Update your GPU \
+        let pixels =
+            match build_pixels_for_window(window.clone(), texture_scale, true, scaling_mode) {
+                Ok(p) => p,
+                Err(e) => {
+                    error!("pixels init failed: {e}");
+                    if cfg!(target_os = "linux") {
+                        error!(
+                            "Copperline requires a Vulkan driver on Linux. Update your GPU \
                          drivers, or install a software Vulkan ICD (lavapipe): \
                          'vulkan-swrast' on Arch, 'mesa-vulkan-drivers' on Debian/Ubuntu, \
                          'mesa-vulkan-drivers' (or 'vulkan-loader') on Fedora."
-                    );
+                        );
+                    }
+                    event_loop.exit();
+                    return;
                 }
-                event_loop.exit();
-                return;
-            }
-        };
+            };
         info!(
             "window + pixels surface ready ({}x{}, texture {}x{})",
             inner.width,
@@ -2981,16 +2988,15 @@ impl ApplicationHandler for App {
                 // creation. Left stale, cursor_texture_position maps clicks
                 // against a texture extent that no longer matches the surface,
                 // so a status-bar click is mis-classified as a display click
-                // and grabs the mouse. Rebuild the texture for the new scale.
+                // and grabs the mouse. Re-plan for the new scale (which also
+                // re-fits integer scaling, whose factor tracks the surface
+                // rather than the DPI); the Resized event that follows
+                // recomputes the scaling matrix from it.
                 if let Some(r) = self.render.as_mut() {
                     let surface = r.window.inner_size();
-                    resync_render_scale(
-                        &mut r.pixels,
-                        &mut r.texture_scale,
-                        scale_factor,
-                        (surface.width.max(1), surface.height.max(1)),
-                        integer_scaling_requested(),
-                    );
+                    if let Err(e) = sync_main_present_scaling(r, (surface.width, surface.height)) {
+                        warn!("resize texture buffer for scale {scale_factor} failed: {e}");
+                    }
                 }
                 self.request_redraw();
             }
@@ -4299,15 +4305,7 @@ impl App {
                 // window's texture for the new scale so its own hit-testing
                 // stays aligned after a DPI change or monitor move.
                 if let Some(tool) = self.tool_window_mut(kind) {
-                    let surface = tool.window.inner_size();
-                    resync_render_scale(
-                        &mut tool.pixels,
-                        &mut tool.texture_scale,
-                        scale_factor,
-                        (surface.width.max(1), surface.height.max(1)),
-                        // Tool windows are always fitted, never integer-scaled.
-                        false,
-                    );
+                    resync_render_scale(&mut tool.pixels, &mut tool.texture_scale, scale_factor);
                 }
                 self.request_redraw();
             }
@@ -5639,7 +5637,12 @@ impl App {
         // A tool window shows panel text, not the emulated picture, so it
         // always takes the aspect-preserving fit -- integer scaling is a
         // setting for the machine's display.
-        let pixels = match build_pixels_for_window(window.clone(), texture_scale, false, false) {
+        let pixels = match build_pixels_for_window(
+            window.clone(),
+            texture_scale,
+            false,
+            ScalingMode::Fill,
+        ) {
             Ok(p) => p,
             Err(e) => {
                 warn!("tool window pixels init failed: {e}");
@@ -8855,16 +8858,13 @@ impl App {
             if r.minimized {
                 return;
             }
-            // Whether integer scaling still fits depends on the new surface
-            // size, so choose the mode for it; the resize below is what
-            // recomputes the scaling matrix and clip rect from it.
-            let texture = r.pixels.context().texture_extent;
-            sync_scaling_mode(
-                &mut r.pixels,
-                integer_scaling_requested(),
-                (size.width, size.height),
-                (texture.width, texture.height),
-            );
+            // The integer fit (and with it the supersample factor) follows
+            // the surface size, so re-plan for the new one; the surface
+            // resize below is what recomputes the scaling matrix and clip
+            // rect from it.
+            if let Err(e) = sync_main_present_scaling(r, (size.width, size.height)) {
+                warn!("resize texture buffer for new surface size failed: {e}");
+            }
             if let Err(e) = r.pixels.resize_surface(size.width, size.height) {
                 warn!("resize surface failed: {e}");
             }
@@ -8998,14 +8998,11 @@ impl App {
         let was_canvas_sized = self.window_is_canvas_sized();
         super::set_pixel_aspect(aspect);
         if let Some(r) = self.render.as_mut() {
-            // The canvas height changes with the aspect, so re-decide
-            // whether the new texture still fits the surface at whole
-            // scale before the resize recomputes the matrix from it.
-            sync_main_scaling_mode(r);
-            if let Err(e) = r.pixels.resize_buffer(
-                texture_width(r.texture_scale) as u32,
-                texture_height(r.texture_scale) as u32,
-            ) {
+            // The canvas height changes with the aspect, so re-plan: the
+            // integer fit (and its supersample factor) is re-decided for the
+            // new canvas, and the texture resized to it.
+            let surface = r.window.inner_size();
+            if let Err(e) = sync_main_present_scaling(r, (surface.width, surface.height)) {
                 warn!("resize texture buffer for pixel aspect failed: {e}");
             }
         }
@@ -9037,26 +9034,28 @@ impl App {
 
     /// Switch how the presentation canvas is scaled into the window live.
     ///
-    /// Nothing about the canvas changes -- only the matrix and clip rect the
-    /// `pixels` pass draws it through -- so unlike a pixel-aspect switch
-    /// there is no buffer to rebuild, no window to re-size, and a video
-    /// recording (whose frames are the canvas, never the window) can carry
-    /// on underneath.
+    /// The canvas itself never changes -- integer mode may re-render it at a
+    /// different supersample factor, but its pixel content, the window size
+    /// and a video recording (whose frames are the 1x canvas, averaged down
+    /// like any supersample) all carry on -- so unlike a pixel-aspect switch
+    /// there is no recording to refuse and no window to re-size.
     fn apply_display_scaling(&mut self, scaling: DisplayScaling) {
         if scaling == super::display_scaling() {
             return;
         }
         super::set_display_scaling(scaling);
         if let Some(r) = self.render.as_mut() {
-            // A minimized window has no surface to re-apply the mode to; the
-            // Resized event that restores it syncs the mode itself.
+            // A minimized window has no surface to re-plan against; the
+            // Resized event that restores it re-plans itself.
             if !r.minimized {
-                sync_main_scaling_mode(r);
-                // set_scaling_mode only stores the mode, so re-apply the
-                // current surface size: that is what recomputes the scaling
-                // matrix and the clip rect the cursor mapping, the shader
-                // passes and the RTG pass all read.
                 let size = r.window.inner_size();
+                if let Err(e) = sync_main_present_scaling(r, (size.width, size.height)) {
+                    warn!("resize texture buffer for display scaling failed: {e}");
+                }
+                // The sync only stores the mode (and resizes the texture), so
+                // re-apply the current surface size: that is what recomputes
+                // the scaling matrix and the clip rect the cursor mapping,
+                // the shader passes and the RTG pass all read.
                 if let Err(e) = r
                     .pixels
                     .resize_surface(size.width.max(1), size.height.max(1))
@@ -9081,22 +9080,20 @@ impl App {
         let hidden = !super::status_bar_hidden();
         super::set_status_bar_hidden(hidden);
         if let Some(r) = self.render.as_mut() {
-            // The canvas gains or loses the bar's strip, so the integer fit
-            // is re-decided for the new texture height (see apply_pixel_aspect).
-            sync_main_scaling_mode(r);
-            if let Err(e) = r.pixels.resize_buffer(
-                texture_width(r.texture_scale) as u32,
-                texture_height(r.texture_scale) as u32,
-            ) {
+            // The canvas gains or loses the bar's strip, so re-plan: the
+            // integer fit is re-decided for the new canvas height and the
+            // texture resized to it (see apply_pixel_aspect).
+            let surface = r.window.inner_size();
+            if let Err(e) = sync_main_present_scaling(r, (surface.width, surface.height)) {
                 // The draw helpers size themselves from the hidden flag, so a
                 // failed resize must not commit the toggle: a taller canvas over
                 // an unchanged, shorter buffer would index past it. Revert and
                 // leave the flag and buffer consistent.
                 warn!("resize texture buffer for status bar toggle failed: {e}");
                 super::set_status_bar_hidden(!hidden);
-                // The mode above was chosen for a canvas that never
-                // materialised; put it back with the flag.
-                sync_main_scaling_mode(r);
+                // The plan above was made for a canvas that never
+                // materialised; re-plan for the one the flag went back to.
+                let _ = sync_main_present_scaling(r, (surface.width, surface.height));
                 return;
             }
         }

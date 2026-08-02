@@ -200,11 +200,13 @@ tool window or overlay.
   default: fit to the window preserving aspect ratio, interpolated) or
   **Integer** (the largest whole-number multiple of the canvas that fits,
   centred in black borders and point-sampled, so every canvas pixel is the
-  same square block of host pixels). Integer scaling applies to RTG board
-  modes too, at multiples of their own native resolution, and gives way to
-  the smooth fit when the window cannot hold even a 1:1 copy rather than
-  cropping the picture. Nothing resizes when it changes, so a video
-  recording carries on underneath. The start-up mode is
+  same square block of host pixels). The fit is taken in whole canvas
+  pixels, so every step exists on high-DPI and fractional-scale displays
+  alike. Integer scaling applies to RTG board modes too, at multiples of
+  their own native resolution, and gives way to the smooth fit when the
+  window cannot hold even a 1:1 copy rather than cropping the picture. The
+  window never resizes when it changes, and a video recording carries on
+  underneath. The start-up mode is
   `[display] scaling`, which also notes which pixel-aspect pairing is
   fully pixel-exact (see [Configuration](configuration.md)).
 - **CRT Shader**: the GPU tube-emulation pass over the picture --

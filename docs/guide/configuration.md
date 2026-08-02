@@ -531,11 +531,18 @@ whole-number multiple of itself that fits the window, measured in physical
 device pixels, centred in black borders and point-sampled: every canvas
 pixel becomes the same square block of host pixels, with no row or column
 sampled twice, which is the look WinUAE and Amiberry call integer scaling.
-When the window is too small for even a 1:1 copy -- a window dragged
-smaller than the canvas, or a fractional desktop scale such as 150%, where
-the backing texture is supersampled to the next whole factor above the
-surface -- the picture falls back to the smooth fit rather than cropping to
-what fits. RTG board modes follow the setting too: their frame is scaled
+The fit is taken in whole canvas pixels against the physical surface --
+the canvas is re-rendered at whatever factor fits, rather than drawn at
+whole multiples of a fixed high-DPI texture -- so every step exists on
+every display: a 2x-DPI laptop whose screen holds three physical pixels
+per canvas pixel but not four gets the 3x picture, and fractional desktop
+scales such as 150% take their whole physical multiples the same way. The
+status bar and menus are rendered at the fitted factor too, so they stay
+sharp at any step (the factor is capped at 4x; larger fits continue as
+whole multiples of the 4x canvas). Only when the window is too small for
+even a 1:1 copy -- smaller than the canvas itself in physical pixels --
+does the picture fall back to the smooth fit rather than cropping to what
+fits. RTG board modes follow the setting too: their frame is scaled
 from its own native resolution, so a 640x480 board screen is drawn at 1x,
 2x, 3x of *those* pixels inside the display area.
 
