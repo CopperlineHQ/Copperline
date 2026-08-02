@@ -51,29 +51,29 @@
 ; rows 1 and 5 by a tick). Rows 4 and 5 reproduce main-disk row 4 and
 ; fwdprobe row 25 exactly, so the run is good:
 ;
-;   row 0  1 read   dbra%4=2   19BC = 16.09 clk =  8.04 cck
-;   row 1  1 read   dbra%4=0   204B = 20.19 clk = 10.09 cck
-;   row 2  1 write  dbra%4=2   0CDF =  8.05 clk =  4.02 cck
-;   row 3  1 write  dbra%4=0   0CDF =  8.05 clk =  4.02 cck
-;   row 4  reg move dbra%4=0   0E6A =  9.01 clk =  4.51 cck   (anchor, ok)
-;   row 5  reg move dbra%4=2   0CD0 =  8.01 clk =  4.01 cck   (anchor, ok)
-;   row 6  2 reads  dbra%4=2   2D10 = 28.17 clk = 14.09 cck
-;   row 7  2 reads  dbra%4=0   3388 = 32.22 clk = 16.11 cck
-;   row 8  rd+write dbra%4=2   204C = 20.19 clk = 10.09 cck
-;   row 9  rd+write dbra%4=0   204E = 20.20 clk = 10.10 cck
+;   row 0  1 read   dbra%4=2   19BC = 16.09 clk = 4.02 cck
+;   row 1  1 read   dbra%4=0   204B = 20.19 clk = 5.05 cck
+;   row 2  1 write  dbra%4=2   0CDF =  8.05 clk = 2.01 cck
+;   row 3  1 write  dbra%4=0   0CDF =  8.05 clk = 2.01 cck
+;   row 4  reg move dbra%4=0   0E6A =  9.01 clk = 2.25 cck   (anchor, ok)
+;   row 5  reg move dbra%4=2   0CD0 =  8.01 clk = 2.00 cck   (anchor, ok)
+;   row 6  2 reads  dbra%4=2   2D10 = 28.17 clk = 7.04 cck
+;   row 7  2 reads  dbra%4=0   3388 = 32.22 clk = 8.06 cck
+;   row 8  rd+write dbra%4=2   204C = 20.19 clk = 5.05 cck
+;   row 9  rd+write dbra%4=0   204E = 20.20 clk = 5.05 cck
 ;
 ; What it says:
 ;
-; 1. Every loop containing a chip access runs a whole EVEN number of colour
-;    clocks -- 8, 10, 4, 4, 14, 16, 10, 10 -- i.e. a multiple of 2 cck, or 4
-;    CPU clocks. The two rows with no chip access do not (4.51, 4.01). The
-;    CPU's chip access is granted on a two-colour-clock cadence and the wait
-;    absorbs whatever the rest of the loop left over.
+; 1. Every loop containing a chip access runs a whole number of colour clocks
+;    -- 4, 5, 2, 2, 7, 8, 5, 5. The two rows with no chip access do not
+;    (2.25, 2.00). The CPU's chip access cannot begin part way through a
+;    colour clock, so the wait absorbs whatever the rest of the loop left
+;    over and the period lands on the grid.
 ;
-; 2. Reads carry the branch-alignment clock through to a whole extra slot:
-;    one read costs 8 cck at dbra%4=2 but 10 at %4=0, and two reads 14 and
-;    16. Writes do not (4 cck at both) because they post, and read+write
-;    does not either (10 at both).
+; 2. Reads carry the branch-alignment clock through to a whole extra colour
+;    clock: one read costs 4 cck at dbra%4=2 but 5 at %4=0, and two reads 7
+;    and 8. Writes do not (2 cck at both) because they post, and read+write
+;    does not either (5 at both).
 ;
 ; 3. Copperline reproduces all ten rows once the CPU and the chip bus share
 ;    one clock timeline: a chip read synchronises the CPU to the colour clock

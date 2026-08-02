@@ -99,14 +99,16 @@ where real hardware and FS-UAE disagree, real hardware wins:
   hardware.
 - Rows 28/29 (the independent and RAW-dependent register pairs) looked like
   020 result forwarding, the dependent pair running one clock faster per
-  iteration, and m68k 0.5.0 models it that way. `fwdprobe.adf` disproved it:
-  running the same two loops at the opposite branch alignments reverses the
-  ordering, so the register dependency contributes nothing and the pair rows
-  were measuring their loop branch's alignment. A cached taken `dbra` costs
-  7 clocks when its opcode word is longword-aligned and 6 otherwise; all
-  thirty measured loops across the two disks fit
-  `6 + 2 * body_instructions + aligned`. The forwarding model is pending
-  removal upstream -- see `fwdprobe.asm` and `docs/internals/cpu.md`.
+  iteration, and m68k modelled it that way up to 0.5.0. `fwdprobe.adf`
+  disproved it: running the same two loops at the opposite branch alignments
+  reverses the ordering, so the register dependency contributes nothing and
+  the pair rows were measuring their loop branch's alignment. A cached taken
+  `dbra` costs 7 clocks when its opcode word is longword-aligned and 6
+  otherwise; 28 of the 30 measured loops across the two disks fit
+  `6 + 2 * body_instructions + aligned` to within a tick, the exceptions
+  being the two `NOP`-bodied rows (a real `NOP` costs nearer 2.07 clocks).
+  The forwarding model was removed upstream in m68k 0.5.1 -- see
+  `fwdprobe.asm` and `docs/internals/cpu.md`.
 - Still open against real silicon (middle rows read off the CRT across two
   runs): the composite write-plus-poll rows (16, 17, 21) read 3-7% low, and
   the raw interrupt-phase rows (19, 20, 22) sit a few colour clocks early of

@@ -22,8 +22,8 @@
 ; the 2x2 -- independent/dbra%4==0 = 11.02 (main row 28), independent/2 =
 ; 10.01 (these controls), RAW/0 = 11.01 (these RAW rows), RAW/2 = 10.01 (main
 ; row 29): the register dependency has no effect whatsoever, and the whole
-; difference tracks where the DBcc lands. All thirty measured loops across the
-; two disks fit, with no exception,
+; difference tracks where the DBcc lands. Twenty-eight of the thirty measured
+; loops across the two disks fit to within a tick,
 ;
 ;   clk/iter = 6 + 2 * (2-byte body instructions)
 ;                + 1 if the DBcc opcode word is longword-aligned
@@ -34,8 +34,16 @@
 ; the longword granularity of 020 instruction fetch (a dbra straddling two
 ; longwords has already had the second fetched when it retires). Every body
 ; instruction costs a flat 2 clocks regardless of shape -- .b/.w/.l MOVE,
-; MOVEA either side, An-source MOVE, ADD, CMP, MOVEQ and NOP are identical --
-; so nothing here distinguishes a dependent operand from an independent one.
+; MOVEA either side, An-source MOVE, ADD, CMP and MOVEQ are identical -- so
+; nothing here distinguishes a dependent operand from an independent one.
+;
+; The exceptions are rows 20/21, the NOP-gap couple: they measure 13.08 where
+; the rule says 13.01, while rows 22/23 (three MOVEs, the same body count and
+; the same dbra%4==0) sit exactly on 13.01. So a NOP is not quite a 2-clock
+; body instruction on real silicon -- nearer 2.07 -- which is what a
+; pipeline-synchronising instruction should look like. It is a 0.5% effect on
+; one instruction, measured on one couple, so it is recorded here rather than
+; modelled; Copperline emits the rule value 13.01 for both rows.
 ;
 ; Only DBcc loop branches were measured; Bcc/BSR are untested.
 ;
@@ -114,9 +122,9 @@ boot:
 .clrs   clr.l   (a0)+
         dbra    d0,.clrs
 
-        ; deterministic register file for the measured pairs: d2/d3 and a2/a3
+        ; deterministic register file for the measured pairs: d2/d3 and a2/a4
         ; are the (even, never-dereferenced) sources, d0/d1/d4 and a0/a1 the
-        ; destinations.
+        ; destinations. a3 is the result write pointer, never a source.
         move.l  #$00040000,d2
         move.l  #$00050000,d3
         moveq   #0,d0
