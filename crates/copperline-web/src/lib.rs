@@ -526,6 +526,24 @@ impl WebEmu {
         }
     }
 
+    /// Forward an Amiga raw key transition straight to the keyboard MCU.
+    /// The page's on-screen keyboard draws Amiga keys, so its keys already
+    /// are rawkeys and a `KeyboardEvent.code` round trip would be a lossy
+    /// detour: $2B, the key beside Return on an ISO Amiga keyboard, has no
+    /// positional code a browser reports on every host layout, and the
+    /// reverse table would have to be duplicated in the page glue.
+    pub fn key_raw(&mut self, rawkey: u8, pressed: bool) {
+        self.emu.bus_mut().enqueue_key_event(rawkey & 0x7F, pressed);
+    }
+
+    /// The Caps Lock LED, owned by the keyboard MCU: pressing the key
+    /// toggles it, and the up code is what unlocking sends. A page lighting
+    /// a virtual Caps Lock key must read this rather than mirror its own
+    /// taps, or a save-state load leaves the two disagreeing.
+    pub fn caps_lock_led(&self) -> bool {
+        self.emu.bus().keyboard.caps_lock_led()
+    }
+
     /// Relative mouse motion in emulated hi-res pixels (pointer-lock
     /// movementX/Y, or scaled cursor deltas when unlocked).
     pub fn mouse_delta(&mut self, dx: f64, dy: f64) {
