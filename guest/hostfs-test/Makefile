@@ -1,13 +1,10 @@
 # Builds the mkfile guest probe for the hostfs integration tests with the
-# dockerized m68k-amigaos cross-GCC (see guest/services/Makefile). The
-# committed artifact is a normal relocatable hunk executable -- LoadSeg
-# relocates it -- so unlike the services ROM it needs no PC-relative or
-# no-data checks.
+# dockerized m68k-amigaos cross-GCC (see guest/toolchain.mk). The committed
+# artifact is a normal relocatable hunk executable -- LoadSeg relocates it --
+# so unlike the services ROM it needs no PC-relative or no-data checks.
 
-IMAGE   = stefanreinauer/amiga-gcc:gcc-v16.1
-DOCKER  = docker run --rm --user $(shell id -u):$(shell id -g) \
-          -v "$(CURDIR):/src" -w /src $(IMAGE)
-CC      = $(DOCKER) m68k-amigaos-gcc
+include ../toolchain.mk
+
 CFLAGS  = -Os -m68000 -fomit-frame-pointer -Wall -Wextra \
           -nostdlib -nostartfiles
 

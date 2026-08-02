@@ -3,13 +3,14 @@
 //!
 //! The guest side is a tiny handler (see `guest/services/`) mapped into the
 //! Copperline services board together with a mount table and a hand-built
-//! DiagArea. At expansion init the DiagArea's DiagPoint calls the handler's
-//! expansion-init entry with the DiagPoint context; the handler builds one
-//! DeviceNode per mount table entry and `AddBootNode`s it (`AddDosNode` on
-//! Kickstart 1.3's V34 expansion.library), so DOS mounts the devices at boot
-//! and starts the handler process on first reference. Kickstart 1.3 mounts
-//! the volumes but cannot boot from them; the bootpri vote needs the 2.0+
-//! BootNode strap.
+//! DiagArea. DiagPoint only patches a Romtag into the retained diag copy;
+//! Kickstart's cold-start resident scan calls its rt_Init once DOS-list
+//! surgery is actually safe, and rt_Init builds one DeviceNode per mount
+//! table entry and `AddBootNode`s it (a hand-built BootNode `Enqueue()`d on
+//! `eb_MountList` on Kickstart 1.3's V34 expansion.library, which has no
+//! `AddBootNode`), so DOS mounts the devices at boot and starts the handler
+//! process on first reference -- or, for the winning boot candidate, at
+//! boot time itself, on Kickstart 1.3 same as 2.0+.
 //! The handler forwards every DosPacket to [`FilesysBoard`] by writing its
 //! address to the unit's doorbell register in the board window (the board is
 //! a [`crate::zorro_device::ZorroDevice`], like the A4091); all ACTION_*
@@ -2485,6 +2486,16 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    // Every register write below goes through this: high word first, then
+    // low, exactly like a 68000's move.l destination split. Shared by every
+    // test in this module that drives the board through the MMIO path a
+    // real 68000/68010 guest takes, so the split-word convention can't
+    // silently drift between them.
+    fn split_write(board: &mut FilesysBoard, off: u32, value: u32, mem: &mut Memory) {
+        board.write(off, 2, value >> 16, &mut DeviceHost::new(mem));
+        board.write(off + 2, 2, value & 0xFFFF, &mut DeviceHost::new(mem));
+    }
+
     /// A 68000/68010 guest has a 16-bit-wide external data bus, so the CPU
     /// core splits every `move.l` destination write into two word bus
     /// cycles -- high word first, then low word (see
@@ -2536,30 +2547,8 @@ mod tests {
             .copy_from_slice(&(dn >> 2).to_be_bytes());
 
         let unit0 = REGS_OFFSET;
-        board.write(
-            unit0 + REG_MSGPORT,
-            2,
-            port >> 16,
-            &mut DeviceHost::new(&mut mem),
-        );
-        board.write(
-            unit0 + REG_MSGPORT + 2,
-            2,
-            port & 0xFFFF,
-            &mut DeviceHost::new(&mut mem),
-        );
-        board.write(
-            unit0 + REG_DOSPKT,
-            2,
-            pkt >> 16,
-            &mut DeviceHost::new(&mut mem),
-        );
-        board.write(
-            unit0 + REG_DOSPKT + 2,
-            2,
-            pkt & 0xFFFF,
-            &mut DeviceHost::new(&mut mem),
-        );
+        split_write(&mut board, unit0 + REG_MSGPORT, port, &mut mem);
+        split_write(&mut board, unit0 + REG_DOSPKT, pkt, &mut mem);
 
         let mut host = DeviceHost::new(&mut mem);
         assert_eq!(board.read(unit0 + REG_RESULT, 4, &mut host), RES_ADDVOLUME);
@@ -2604,13 +2593,6 @@ mod tests {
             wcs: Vec::new(),
             wcs_write_protected: false,
         };
-
-        // Every register write below goes through this: high word first,
-        // then low, exactly like a 68000's move.l destination split.
-        fn split_write(board: &mut FilesysBoard, off: u32, value: u32, mem: &mut Memory) {
-            board.write(off, 2, value >> 16, &mut DeviceHost::new(mem));
-            board.write(off + 2, 2, value & 0xFFFF, &mut DeviceHost::new(mem));
-        }
 
         let base = 0x00E9_0000u32;
         split_write(&mut board, DIAG_DOORBELL, base, &mut mem);

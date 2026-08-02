@@ -10,12 +10,8 @@
 
 ROM     = ../../assets/services/services_rom.bin
 
-IMAGE   = stefanreinauer/amiga-gcc:gcc-v16.1
-DOCKER  = docker run --rm --user $(shell id -u):$(shell id -g) \
-          -v "$(CURDIR):/src" -w /src $(IMAGE)
-CC      = $(DOCKER) m68k-amigaos-gcc
-OBJDUMP = $(DOCKER) m68k-amigaos-objdump
-OBJCOPY = $(DOCKER) m68k-amigaos-objcopy
+include ../toolchain.mk
+
 CFLAGS  = -Os -m68000 -mpcrel -fomit-frame-pointer -fno-jump-tables \
           -Wall -Wextra -nostdlib -nostartfiles
 
