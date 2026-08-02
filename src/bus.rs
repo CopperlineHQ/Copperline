@@ -965,6 +965,30 @@ pub struct Bus {
     /// here so the fractional cck are not lost.
     #[serde(skip)]
     cpu_bus_tail_carry: u32,
+    /// Posted CPU chip-bus writes not yet retired to a slot (0 or 1). The
+    /// 020+ bus unit runs decoupled from the execution unit: a chip write is
+    /// accepted at the end of its 3-clock cycle and retires into a later free
+    /// chip slot while execution continues (the drain in
+    /// `advance_one_chip_bus_quantum`). Only one bus cycle can be in flight,
+    /// so a second chip access stalls until the pending write retires. A real
+    /// A1200 runs a chip write+dbra loop at the 2-cck port cadence (~8 CPU
+    /// clocks per iteration -- `timing-test` rows 3, 10, 12, 18), which a
+    /// synchronous whole-slot write bill cannot express.
+    cpu_posted_write_debt: u32,
+    /// `emulated_cck` time when the chip bus' CPU port is free again after a
+    /// granted CPU slot: the port turns around in 2 colour clocks, which is
+    /// what paces back-to-back CPU chip accesses (and posted-write drains) to
+    /// every other colour clock.
+    cpu_chip_port_free_at: u64,
+    /// Sub-cck remainder (in CPU clocks) of the one-clock synchronizer cost a
+    /// 020+ read pays when chip data crosses back into the CPU clock domain
+    /// (`timing-test` row 2: a real A1200 chip-read loop measures 16.1 clocks
+    /// per iteration where grant plus data-return alone bill 15).
+    cpu_read_return_carry: u32,
+    /// CPU clocks of posted-write transfer time that overlapped execution on
+    /// the decoupled 020+ bus unit during the current instruction; the
+    /// CPU-side charge subtracts them (`take_cpu_bus_overlap_clocks`).
+    cpu_bus_overlap_clocks: u32,
     /// Chip-bus slot of the most recently granted CPU access to custom
     /// register space. A CPU register write is applied to chip state once
     /// its whole bus cycle has been billed (the beam sits past the granted
@@ -2591,6 +2615,10 @@ impl Bus {
             ext_clock_carry_x100: 0,
             cpu_short_bus_cycle: false,
             cpu_bus_tail_carry: 0,
+            cpu_posted_write_debt: 0,
+            cpu_chip_port_free_at: 0,
+            cpu_read_return_carry: 0,
+            cpu_bus_overlap_clocks: 0,
             cpu_custom_access_slot: None,
             cpu_custom_request_slot: None,
             cpu_granted_chip_slots: 0,
@@ -3763,6 +3791,10 @@ impl Bus {
         self.device_clock.reset();
         self.emulated_cck = 0;
         self.emulated_frames = 0;
+        self.cpu_posted_write_debt = 0;
+        self.cpu_chip_port_free_at = 0;
+        self.cpu_read_return_carry = 0;
+        self.cpu_bus_overlap_clocks = 0;
         self.display_dma_bplpt = [0; 8];
         self.display_dma_sprpt = [0; 8];
         self.sprite_dma_frame_start_ptr = [0; 8];
@@ -4617,6 +4649,27 @@ impl Bus {
         } else {
             bus_slots_for_cpu_access(size)
         };
+        // The chip bus' CPU port is single-ported: a new access finds it free
+        // only after any posted write has retired, so reads cannot pass a
+        // pending write and a second write stalls on the one in-flight cycle.
+        self.settle_cpu_posted_writes();
+        if self.cpu_short_bus_cycle && matches!(kind, CpuBusAccessKind::Write) {
+            // Post the write instead of stalling for its slot: the 020+ bus
+            // unit accepts it at the end of its 3-clock cycle and the
+            // transfer overlaps the following execution, so those clocks are
+            // credited back against the instruction's CPU charge instead of
+            // advancing the beam here. The write retires into a later free
+            // chip slot (the drain in `advance_one_chip_bus_quantum`) at the
+            // port's 2-cck cadence; see `cpu_posted_write_debt`.
+            for slot in 0..slots {
+                if slot > 0 {
+                    self.settle_cpu_posted_writes();
+                }
+                self.cpu_posted_write_debt = 1;
+                self.cpu_bus_overlap_clocks = self.cpu_bus_overlap_clocks.saturating_add(3);
+            }
+            return;
+        }
         let trace_cpu_bus = diag_cpu_bus_on() && diag_cpu_bus_addr_matches(addr, size);
         for slot in 0..slots {
             self.flush_audio_before_audio_dma_slot();
@@ -4625,7 +4678,9 @@ impl Bus {
                 self.cpu_custom_request_slot = Some(request_slot);
             }
             let mut wait_cck = 0;
-            while !self.cpu_can_use_current_slot() {
+            while !self.cpu_can_use_current_slot()
+                || (self.cpu_short_bus_cycle && self.emulated_cck < self.cpu_chip_port_free_at)
+            {
                 let (cck, tick) = self.advance_one_chip_bus_quantum(None);
                 wait_cck += cck;
                 self.note_cpu_missed_chip_bus_cycle();
@@ -4644,9 +4699,13 @@ impl Bus {
             if self.wave_on {
                 self.wave_note_cpu_access(addr, kind, wait_cck);
             }
+            let slot_start_cck = self.emulated_cck;
             let (cck, tick) = self.advance_one_chip_bus_quantum(Some(ChipBusOwner::Cpu));
             self.note_cpu_granted_chip_bus_cycle();
             self.record_slice_bus_advance(cck, tick);
+            if self.cpu_short_bus_cycle {
+                self.cpu_chip_port_free_at = slot_start_cck + 2;
+            }
             // After the granted slot (one cck), the CPU's bus cycle runs out
             // its remaining clocks with the chip bus free for DMA. The 68000's
             // 4-clock cycle leaves one whole cck (2 clocks at the stock ratio).
@@ -4683,6 +4742,9 @@ impl Bus {
                 || wide_bus && matches!(kind, CpuBusAccessKind::Fetch))
         {
             self.bill_020_read_data_wait();
+            if matches!(kind, CpuBusAccessKind::Read) {
+                self.bill_020_read_return_sync_clock();
+            }
         }
     }
 
@@ -4738,6 +4800,45 @@ impl Bus {
     fn bill_020_read_data_wait(&mut self) {
         let (cck, tick) = self.advance_one_chip_bus_quantum(None);
         self.record_slice_bus_advance(cck, tick);
+    }
+
+    /// The one extra CPU clock a 020+ read pays synchronizing chip data back
+    /// into the CPU clock domain after the data-return colour clock.
+    /// Accumulated in CPU clocks and advanced as whole colour clocks so the
+    /// fraction is not lost: at 14 MHz every fourth read crosses a slot
+    /// boundary, which is what makes a real A1200 chip-read loop average
+    /// 16.1 clocks per iteration (`timing-test` row 2) where the grant and
+    /// data-return alone would bill 15.
+    fn bill_020_read_return_sync_clock(&mut self) {
+        self.cpu_read_return_carry += 1;
+        if self.cpu_read_return_carry >= self.cpu_clocks_per_cck {
+            self.cpu_read_return_carry -= self.cpu_clocks_per_cck;
+            let (cck, tick) = self.advance_one_chip_bus_quantum(None);
+            self.record_slice_bus_advance(cck, tick);
+        }
+    }
+
+    /// Advance the chipset until a posted CPU chip write has retired into a
+    /// free chip slot (the drain in `advance_one_chip_bus_quantum`). Quanta
+    /// that could not retire it count as missed CPU slots, like the grant
+    /// wait loop's.
+    fn settle_cpu_posted_writes(&mut self) {
+        while self.cpu_posted_write_debt > 0 {
+            let debt_before = self.cpu_posted_write_debt;
+            let (cck, tick) = self.advance_one_chip_bus_quantum(None);
+            if self.cpu_posted_write_debt == debt_before {
+                self.note_cpu_missed_chip_bus_cycle();
+            }
+            self.record_slice_bus_advance(cck, tick);
+        }
+    }
+
+    /// CPU clocks of posted-write transfer time that overlapped execution on
+    /// the decoupled 020+ bus unit during the current instruction. The
+    /// CPU-side charge subtracts them from the instruction's clock total so
+    /// the beam does not advance for time the bus unit hid.
+    pub fn take_cpu_bus_overlap_clocks(&mut self) -> u32 {
+        std::mem::take(&mut self.cpu_bus_overlap_clocks)
     }
 
     /// A 020+ CPU read of a custom register costs one colour clock more than a
@@ -5938,6 +6039,7 @@ impl Bus {
         if self.cpu_short_bus_cycle {
             self.bill_020_read_data_wait();
             self.bill_custom_register_return();
+            self.bill_020_read_return_sync_clock();
         }
         // Read-only custom registers (INTREQR, DSKBYTR, SERDATR, POTxDAT, ...)
         // reflect timed-device state, so apply the deferred device clocks before

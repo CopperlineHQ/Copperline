@@ -3,7 +3,7 @@
 ## The wrapper and the bus adapter
 
 `M68kMachine` (`src/cpu.rs`) wraps the published pure-Rust
-[`m68k` 0.3 core](https://docs.rs/crate/m68k/0.3.0). The core sees
+[`m68k` 0.5 core](https://docs.rs/crate/m68k/0.5.0). The core sees
 the machine through an adapter implementing its `AddressBus` trait, so
 every CPU-visible access -- RAM, ROM, custom registers, CIA, RTC,
 autoconfig, Gayle, Akiko -- routes into the shared `Bus` and is billed in
@@ -23,7 +23,7 @@ fits a 68881/68882 to any 020/030 (and is on by default for the 68040,
 whose FPU is on-die): the `m68k` core executes the 6888x instruction
 set in true 80-bit extended precision via a pure-Rust software floating-
 point engine
-([`softfloat.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.3.1/src/fpu/softfloat.rs)).
+([`softfloat.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.5.0/src/fpu/softfloat.rs)).
 Arithmetic (add, sub,
 mul, div, sqrt, and the single-accuracy FSGLMUL/FSGLDIV, which round the
 mantissa to 24 bits but keep the extended exponent range -- gcc -m68040
@@ -41,13 +41,13 @@ whose saved FPU frame carries a foreign size) are all modelled. The transcendent
 FASIN/FACOS/FATAN, the hyperbolics, FETOX/FETOXM1/FTWOTOX/FTENTOX,
 FLOGN/FLOGNP1/FLOG2/FLOG10) and FSINCOS run in extended precision too: a
 double-`FloatX80` ("double-double", ~128-bit) layer
-([`dd.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.3.1/src/fpu/dd.rs))
+([`dd.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.5.0/src/fpu/dd.rs))
 evaluates Taylor/atanh series over reduced
 ranges and rounds the result to extended under the FPCR mode, setting INEX
 and the domain flags (OPERR/DZ). Accuracy is validated against an
 arbitrary-precision oracle (the pure-Rust `astro-float`, a dev-only
 dependency;
-[`fpu_accuracy.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.3.1/tests/fpu_accuracy.rs)):
+[`fpu_accuracy.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.5.0/tests/fpu_accuracy.rs)):
 every function is within
 1 ULP across a wide sweep and all four rounding modes, and round-to-nearest
 is correctly rounded in practice. They are not chip-bit-exact -- the real
@@ -57,7 +57,7 @@ quotient byte. This covers Kickstart's
 detection and per-task FPU context switching. The
 68000's per-instruction cycle counts in the `m68k` core have been
 corrected to exact totals across the SingleStepTests 68000 cycle corpus
-([validation details](https://github.com/benletchford/m68k-rs/tree/m68k-v0.3.1#validation--testing)),
+([validation details](https://github.com/benletchford/m68k-rs/tree/m68k-v0.5.0#validation--testing)),
 which is what makes
 cycle-budgeted pacing trustworthy.
 
@@ -127,7 +127,7 @@ precise.
 
 The 68000's two-word instruction prefetch queue (IRD/IRC) is modelled in
 the `m68k` core
-([`prefetch_queue`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.3.1/src/core/cpu.rs)):
+([`prefetch_queue`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.5.0/src/core/cpu.rs)):
 the
 next opcode is fetched before the current instruction finishes, so
 self-modifying code that overwrites the *next* instruction executes the
@@ -189,13 +189,13 @@ DBcc loop mode: a DBcc that branches -4 back to a loopable one-word
 instruction holds the body/DBcc pair in the prefetch queue and re-executes
 it with no instruction fetches until the condition turns true, the counter
 expires, or an exception intervenes (`loop_mode` in
-[`core/cpu.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.3.1/src/core/cpu.rs);
+[`core/cpu.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.5.0/src/core/cpu.rs);
 the loopable set and the DBcc entry/exit arms live in
-[`core/decode.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.3.1/src/core/decode.rs)).
+[`core/decode.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.5.0/src/core/decode.rs)).
 A looping DBcc iteration costs 6 internal
 clocks and touches the bus only for the body's operands, which is what
 makes tight copy/clear loops measurably faster on a real 68010.
-[`loop_mode_timing_tests.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.3.1/tests/loop_mode_timing_tests.rs)
+[`loop_mode_timing_tests.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.5.0/tests/loop_mode_timing_tests.rs)
 pins engagement, the
 68000's non-engagement, and the no-fetch iteration cost.
 
@@ -219,7 +219,7 @@ the STOP itself, so the handler's RTE re-executes it; a pending trace
 (T set in the SR the instruction started with) has priority and recovers
 from the stop, while a T bit loaded *by* STOP does not fire while
 stopped.
-[`stop_and_68010_timing_tests.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.3.1/tests/stop_and_68010_timing_tests.rs)
+[`stop_and_68010_timing_tests.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.5.0/tests/stop_and_68010_timing_tests.rs)
 pins all of these.
 
 ## Caches
@@ -303,7 +303,7 @@ shares the 040's three-level walker and TC[15] enable; PTEST is gone
 faulting with the format $4 frame.
 
 **Timing.**
-[`timing_060.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.3.1/src/core/timing_060.rs)
+[`timing_060.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.5.0/src/core/timing_060.rs)
 replaces the 020+
 scaling formula for the 060: every opcode word classifies (a build-once
 64K table over a pure function) into the MC68060UM Chapter 10 dispatch
@@ -345,7 +345,7 @@ instruction cache, a three-stage pipeline, execution overlap, dynamic bus
 sizing, and alignment-dependent transfers, so an opcode does not have one
 context-free cycle count.
 
-[`timing_020.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.3.1/src/core/timing_020.rs)
+[`timing_020.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.5.0/src/core/timing_020.rs)
 transcribes the integer timing tables
 from section 8.2 of the
 [MC68020 User's Manual](https://www.nxp.com/docs/en/data-sheet/MC68020UM.pdf).
@@ -369,17 +369,22 @@ total. An A1200 chip-RAM access can therefore extend an instruction through
 Alice arbitration; selecting a smaller CPU total cannot erase a bus wait
 that already happened.
 
-A taken branch pays two clocks on top of its table entry. The section-8.2
-entries are written for an instruction whose successor is already in the
-three-stage pipeline; a taken branch invalidates the decode and execute stages,
-so the target cannot begin until the pipe refills. The manual charges that to
-the *following* instruction's head, which a per-instruction model with no
-overlap stage has nowhere to put, so Copperline charges it where the flush
-happens (`TAKEN_BRANCH_REFILL`). Without it a `dbra` loop runs at the isolated
-cache-case 6 clocks per iteration instead of 8, which makes every tight loop --
-depackers, MFM decoders, chase-the-beam poll loops -- about 10% fast. It is the
-one divergence that showed up across seven independent `timing-test` rows (4,
-5, 7, 14, 28, 29, 30) against the FS-UAE A1200 reference; see
+A taken branch pays a pipeline-refill charge on top of its table entry. The
+section-8.2 entries are written for an instruction whose successor is already
+in the three-stage pipeline; a taken branch invalidates the decode and execute
+stages, so the target cannot begin until the pipe refills. The manual charges
+that to the *following* instruction's head, which a per-instruction model with
+no overlap stage has nowhere to put, so the m68k core charges it where the
+flush happens (`TAKEN_BRANCH_REFILL`). Without it a `dbra` loop runs at the
+isolated cache-case 6 clocks per iteration, which makes every tight loop --
+depackers, MFM decoders, chase-the-beam poll loops -- fast; it showed up
+across seven independent `timing-test` rows (4, 5, 7, 14, 28, 29, 30). The
+charge was first calibrated to two clocks against the FS-UAE A1200 reference;
+a real A1200 (stock 68EC020 at 14.19 MHz, 2026-08) measures a cached taken
+`dbra` at 7 clocks -- cache-case 6 plus one -- in three independent loop rows,
+with the `move`, shift, `mulu`, paired-op and DIV-under-display rows agreeing
+once that one clock is accounted for. The refill is therefore one clock, and
+FS-UAE itself over-bills every taken branch by one; see
 `timing-test/README.md`.
 
 This is intentionally a datasheet model, not a claim of cycle exactness.
@@ -423,6 +428,52 @@ fills like posted writes made the A1200 profile report 5.52x A600 chip speed
 and 1.61x A1200 CPU speed after the instruction-table update. Billing the
 data-return phase changes those figures to 3.55x and 1.10x respectively,
 without altering register-only timing-test rows.
+
+The real-A1200 column drove two further sub-cck mechanisms, both gated to the
+020+ short-cycle path (the 68000's four-clock cycle spans the whole port
+sequence, so it cannot see either).
+
+Chip writes are posted. The 020's bus unit runs decoupled from its execution
+unit: a chip write is accepted at the end of its 3-clock cycle and the
+transfer overlaps the following instructions, retiring into a later free chip
+slot. Copperline models this by crediting the transfer's clocks back against
+the instruction's charge (`take_cpu_bus_overlap_clocks`) and letting the
+pending write drain into the next free slot during subsequent beam
+advancement (`cpu_posted_write_debt`), at the port's 2-cck turnaround
+cadence. Only one bus cycle can be in flight, so a second chip access stalls
+until the pending write retires -- which is what paces a chip write+dbra loop
+to ~8 clocks per iteration on the real machine (`timing-test` rows 3, 10,
+12, 18) where a synchronous whole-slot bill gave 11-12. A DMA reader of the
+same address inside the drain window (at most two colour clocks) would see
+the write early; that race is unobservable in practice and accepted.
+
+Reads pay one further CPU clock synchronizing the returned data back into
+the CPU clock domain, accumulated into whole colour clocks
+(`bill_020_read_return_sync_clock`). The real chip-read loop measures 16.1
+clocks per iteration (row 2) where grant plus data-return bill 15; the old
+exact match on that row was the branch over-bill cancelling this missing
+clock. The same synchronizer clock on custom-register reads is what lands
+the copper-vs-CPU poll row (row 27) exactly on the real machine's beam
+position.
+
+The same column also pinned down 020 result forwarding, modelled in the m68k
+crate: a register-to-register MOVE whose source is the register the
+immediately preceding register-to-register MOVE wrote runs one clock faster
+(the value is still in the execution unit's result latch, skipping the
+register-file read). The real machine runs the RAW-dependent pair one clock
+per iteration faster than the independent pair (`timing-test` rows 29 and
+28: 10 against 11 clocks including the loop dbra), which only a forwarding
+path can produce; wider forwarding is deliberately not modelled without
+hardware data.
+
+What remains against real silicon, with the middle rows now read off the
+CRT across two runs: the composite write-plus-poll rows (16, 17, 21) run
+3-7% under the real readings, and the raw interrupt-phase rows (19, 20, 22)
+sit a few colour clocks early of readings that themselves move a few clocks
+between real runs. Both are composite effects (posted-write drain against
+the poll read, interrupt entry against the beam) rather than single-constant
+gaps. The SysInfo figures in the previous paragraph predate posted writes
+and will read higher on the A1200 profile.
 
 ## MMU
 
