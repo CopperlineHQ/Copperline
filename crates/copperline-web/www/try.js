@@ -437,7 +437,10 @@ async function load() {
     console.error(e);
   }
   refreshBootButton();
-  if (!bootBtn.disabled) bootBtn.focus();
+  // The ROMs land without any user gesture, so a plain focus() would scroll
+  // the button into view and yank an embedding page (retro32.com) to its
+  // middle. preventScroll keeps the keyboard affordance without the jump.
+  if (!bootBtn.disabled) bootBtn.focus({ preventScroll: true });
 }
 
 // --- boot ----------------------------------------------------------------
