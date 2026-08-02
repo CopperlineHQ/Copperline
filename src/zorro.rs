@@ -787,6 +787,8 @@ fn floating_bus(size: usize) -> u64 {
 /// wasm = "board.wasm"  # module path, relative to this metadata file
 /// dma = true           # optional capabilities (default false)
 /// int2 = true
+/// # diag_vec = 0x40     # DiagArea offset in the board window, for a plugin
+///                        # that ships its own autoboot ROM (see docs/zorro.md)
 /// int6 = false
 ///
 /// # Plugin settings passed to the module (defaults; the user overrides them
@@ -830,6 +832,11 @@ struct RawBoardMeta {
     /// Config option schema, for the launcher's config panel.
     #[serde(default)]
     option: Vec<RawOption>,
+    /// Offset of the plugin's DiagArea within its board window, for a WASM
+    /// board that ships its own autoboot ROM (mirrors the in-tree A2091's
+    /// `diag_vec`; see docs/zorro.md's "Plugin settings, files, and the
+    /// config panel"). Only meaningful for `type = "wasm"`.
+    diag_vec: Option<u16>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -922,6 +929,12 @@ pub fn load_board_metadata(path: &Path) -> Result<LoadedZorroBoard> {
     let size_bytes = parse_board_size(&raw.size)
         .with_context(|| format!("{}: bad size {:?}", path.display(), raw.size))?;
     let kind = raw.backing.trim().to_ascii_lowercase();
+    if kind != "wasm" && raw.diag_vec.is_some() {
+        bail!(
+            "{}: diag_vec is only valid for type = \"wasm\" boards",
+            path.display()
+        );
+    }
     match kind.as_str() {
         "ram" => {
             let spec = BoardSpec {
@@ -967,7 +980,7 @@ pub fn load_board_metadata(path: &Path) -> Result<LoadedZorroBoard> {
                 memory_space: false,
                 chained: false,
                 window: 0,
-                diag_vec: None,
+                diag_vec: raw.diag_vec,
             };
             spec.validate()
                 .with_context(|| format!("{}: invalid board", path.display()))?;
@@ -1340,6 +1353,7 @@ mod tests {
             wasm = "nic.wasm"
             dma = true
             int2 = true
+            diag_vec = 0x40
             "#,
         )
         .unwrap();
@@ -1359,12 +1373,42 @@ mod tests {
         assert_eq!(spec.version, ZorroVersion::II);
         assert!(matches!(spec.backing, BoardBacking::Device(_)));
         assert!(!spec.memlist);
+        assert_eq!(spec.diag_vec, Some(0x40));
         // Module path is resolved next to the metadata file.
         assert_eq!(wasm_path, dir.join("nic.wasm"));
         assert_eq!(manifest.name, "Test NIC");
         assert!(manifest.caps.dma);
         assert!(manifest.caps.int2);
         assert!(!manifest.caps.int6);
+    }
+
+    #[test]
+    fn diag_vec_rejected_for_ram_board() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "copperline-zorro-ram-diagvec-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &path,
+            r#"
+            name = "MegaRAM"
+            zorro = 3
+            type = "ram"
+            size = "64M"
+            manufacturer = 2011
+            product = 32
+            diag_vec = 0x40
+            "#,
+        )
+        .unwrap();
+        let err = load_board_metadata(&path).unwrap_err();
+        let _ = std::fs::remove_file(&path);
+        assert!(err.to_string().contains("diag_vec"), "{err:#}");
     }
 
     #[test]
