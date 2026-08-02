@@ -1012,6 +1012,25 @@ struct Render {
     /// the window can never be restored (which is what would unblock the
     /// present). Skip all rendering until a nonzero resize restores it.
     minimized: bool,
+    /// The physical surface size `pixels` was last configured with, so a
+    /// redraw can tell that the host window has outgrown it (see
+    /// `resync_surface_size`).
+    surface_size: (u32, u32),
+}
+
+impl Render {
+    /// Resize the presentation surface, recording the size it was configured
+    /// with. Every resize goes through here (the first configure is
+    /// `build_pixels_for_window`'s, whose size this struct is built with):
+    /// `pixels` reconfigures its swapchain from its own copy of this size and
+    /// nothing else can correct it, so the record must never lag behind what
+    /// `pixels` holds.
+    fn resize_surface(&mut self, size: PhysicalSize<u32>) -> Result<(), pixels::TextureError> {
+        let (width, height) = (size.width.max(1), size.height.max(1));
+        self.pixels.resize_surface(width, height)?;
+        self.surface_size = (width, height);
+        Ok(())
+    }
 }
 
 struct ToolWindow {
@@ -1021,6 +1040,18 @@ struct ToolWindow {
     cursor_pos: Option<(i32, i32)>,
     /// Same Windows minimized-present deadlock hazard as Render::minimized.
     minimized: bool,
+    /// Same configured-surface-size record as Render::surface_size.
+    surface_size: (u32, u32),
+}
+
+impl ToolWindow {
+    /// Tool-window counterpart of `Render::resize_surface`.
+    fn resize_surface(&mut self, size: PhysicalSize<u32>) -> Result<(), pixels::TextureError> {
+        let (width, height) = (size.width.max(1), size.height.max(1));
+        self.pixels.resize_surface(width, height)?;
+        self.surface_size = (width, height);
+        Ok(())
+    }
 }
 
 /// Frame-loop repaints of the tool windows (debugger, frame analyzer) are
@@ -2508,6 +2539,7 @@ impl ApplicationHandler for App {
             crt_shader,
             bezel_shader,
             minimized: false,
+            surface_size: (inner.width.max(1), inner.height.max(1)),
         });
         // After the window exists, so the overlay has somewhere to be drawn.
         if let Some(msg) = shader_error {
@@ -3004,6 +3036,7 @@ impl ApplicationHandler for App {
                 self.apply_surface_size(size);
             }
             WindowEvent::RedrawRequested => {
+                self.resync_surface_size();
                 if self.render.as_ref().is_some_and(|r| r.minimized) {
                     return;
                 }
@@ -4350,6 +4383,7 @@ impl App {
             *self.tool_window_slot(kind) = None;
             return;
         };
+        self.resync_tool_surface_size(kind);
         if kind == ToolPanelKind::FrameAnalyzer {
             self.ensure_analyzer_underlay();
         }
@@ -5654,12 +5688,14 @@ impl App {
             texture_width(texture_scale),
             texture_height(texture_scale)
         );
+        let inner = window.inner_size();
         *self.tool_window_slot(kind) = Some(ToolWindow {
             window,
             pixels,
             texture_scale,
             cursor_pos: None,
             minimized: false,
+            surface_size: (inner.width.max(1), inner.height.max(1)),
         });
         self.request_redraw();
     }
@@ -8865,7 +8901,7 @@ impl App {
             if let Err(e) = sync_main_present_scaling(r, (size.width, size.height)) {
                 warn!("resize texture buffer for new surface size failed: {e}");
             }
-            if let Err(e) = r.pixels.resize_surface(size.width, size.height) {
+            if let Err(e) = r.resize_surface(size) {
                 warn!("resize surface failed: {e}");
             }
         }
@@ -8878,6 +8914,44 @@ impl App {
         self.request_redraw();
     }
 
+    /// Bring the surface up to the host window's current size before drawing,
+    /// when a resize has not reached us as a Resized event yet.
+    ///
+    /// `pixels` reconfigures its swapchain from the size the last
+    /// `resize_surface` gave it, and its render retries the acquire in an
+    /// unbounded loop: on a driver that rejects a swapchain whose extent
+    /// disagrees with the window (Mesa's X11 Vulkan WSI returns
+    /// VK_ERROR_OUT_OF_DATE_KHR), a stale size makes that loop rebuild the
+    /// swapchain forever instead of hanging on to a wrongly-scaled frame.
+    /// Rendering runs inside the event callback, so the loop also starves the
+    /// Resized event that would have corrected the size: the window never
+    /// comes back, and the churn goes on until the display server runs the
+    /// client out of resource ids. Entering or leaving fullscreen is the
+    /// common way in, the window manager resizing the window a moment before
+    /// the event reaches us (issue #362, upstream parasyte/pixels#460).
+    fn resync_surface_size(&mut self) {
+        let Some(r) = self.render.as_ref() else {
+            return;
+        };
+        let Some(size) = surface_resize_for_draw(r.surface_size, r.window.inner_size()) else {
+            return;
+        };
+        self.apply_surface_size(size);
+    }
+
+    /// Tool-window counterpart of `resync_surface_size`, for the same reason:
+    /// these windows are freely resizable too.
+    fn resync_tool_surface_size(&mut self, kind: ToolPanelKind) {
+        let Some(tool) = self.tool_window(kind) else {
+            return;
+        };
+        let Some(size) = surface_resize_for_draw(tool.surface_size, tool.window.inner_size())
+        else {
+            return;
+        };
+        self.apply_tool_surface_size(kind, size);
+    }
+
     /// Tool-window counterpart of `apply_surface_size`, shared by that window's
     /// Resized event and the synchronous `request_inner_size` path.
     fn apply_tool_surface_size(&mut self, kind: ToolPanelKind, size: PhysicalSize<u32>) {
@@ -8887,7 +8961,7 @@ impl App {
             if tool.minimized {
                 return;
             }
-            let _ = tool.pixels.resize_surface(size.width, size.height);
+            let _ = tool.resize_surface(size);
         }
         self.request_redraw();
     }
@@ -9056,10 +9130,7 @@ impl App {
                 // re-apply the current surface size: that is what recomputes
                 // the scaling matrix and the clip rect the cursor mapping,
                 // the shader passes and the RTG pass all read.
-                if let Err(e) = r
-                    .pixels
-                    .resize_surface(size.width.max(1), size.height.max(1))
-                {
+                if let Err(e) = r.resize_surface(size) {
                     warn!("resize surface for display scaling failed: {e}");
                 }
             }
