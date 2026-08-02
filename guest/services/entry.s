@@ -3,6 +3,19 @@
 | Entry table and DiagArea of the handler ROM. Linked first, so this sits at
 | ROM_OFFSET in the board window (see copperline_board.h). Everything must
 | stay PC-relative: the ROM runs at whatever base autoconfig assigns.
+|
+| HARD-WON: never reference a symbol from another object file (handler.c)
+| in a data directive here. Under -mpcrel the toolchain resolves
+| `.long _external_sym-...` PC-relative to the field's own address, not as
+| the intended section offset, silently storing a pointer that lands ~0x92
+| bytes short of the target. That bug shipped in this ROM's Romtag rt_Init:
+| on every Kickstart (1.3, 2.0, 3.1), InitResident faithfully jumped into
+| the middle of handler_main's packet loop, corrupting the boot -- a Guru
+| on 1.3, a reset loop on 3.1 -- while looking exactly like "the resident
+| scan never calls us". External code is only ever reached through real
+| PC-relative branches (bra.w below); data directives only ever encode
+| differences of entry.s-local labels, which are plain assembly-time
+| constants.
 
 	.text
 	.globl	_entry_table
@@ -12,9 +25,14 @@
 _entry_table:
 	| +0: handler process entry (DOS RunHandler jumps here via dn_SegList)
 	bra.w	_handler_main
+	| +4: rt_Init entry: the Romtag's rt_Init points here (patched with
+	| the board base by _diag_entry). A local trampoline, per the header
+	| comment -- rt_Init must not name _resident_init in a .long directly.
+_rt_init_entry:
+	bra.w	_resident_init
 
-	| +4: expansion-init entry. The DiagArea's DiagPoint jsr's here from
-	| the diag copy with the documented DiagPoint registers still live:
+	| Expansion-init entry. The DiagArea's DiagPoint jsr's here from the
+	| diag copy with the documented DiagPoint registers still live:
 	| A0 = board base, A2 = base of the RAM diag copy Kickstart just made.
 	| Ring the board's DIAG_DOORBELL with the base as the value (the host
 	| captures it and resets per-boot state), patch our Romtag in the diag
@@ -25,11 +43,6 @@ _entry_table:
 	| da_BootPoint from it if one of our mounts wins the boot vote, and
 	| Kickstart's cold-start resident scan calls rt_Init once dos-list
 	| mounting is actually safe.
-	|
-	| KNOWN ISSUE: this avoids the DiagPoint-time corruption, but the
-	| resident-scan timing empirically runs too late for the boot vote
-	| on every Kickstart version tested (1.3, 2.0, 3.1) -- see the
-	| resident_init() comment in handler.c.
 _diag_entry:
 	move.l	a0,0x7E00(a0)	| DIAG_DOORBELL = board base
 	| rt_Match/rt_End/rt_Name/rt_Id were coded as DiagArea-relative offsets
@@ -107,7 +120,7 @@ _romtag:
 _rt_match:
 	.long	_romtag-_diag_area		| rt_MatchTag (patched: +diag copy)
 _rt_end:
-	.long	_romtag_end-_diag_area		| rt_EndSkip (patched: +diag copy)
+	.long	_diag_area_end-_diag_area	| rt_EndSkip (patched: +diag copy)
 	.byte	1				| rt_Flags = RTF_COLDSTART
 	.byte	0				| rt_Version
 	.byte	3				| rt_Type = NT_DEVICE
@@ -117,8 +130,7 @@ _rt_name:
 _rt_id:
 	.long	_diag_name-_diag_area		| rt_IdString (patched: +diag copy)
 _rt_init:
-	.long	_resident_init-_entry_table+8	| rt_Init (patched: +board base)
-_romtag_end:
+	.long	_rt_init_entry-_entry_table+8	| rt_Init (patched: +board base)
 _diag_name:
 	.asciz	"Copperline"
 	.balign	2

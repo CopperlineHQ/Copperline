@@ -12,29 +12,26 @@
 //    deferral the A590 SCSI boot ROM's own Romtag uses). Doing this from
 //    raw DiagPoint context instead -- this ROM's original approach -- mounts
 //    fine but corrupts Kickstart 1.3's own boot shortly after, since DOS and
-//    much of exec's cold-start state is not yet ready that early: strap has
-//    not even chosen a boot device, let alone started dos.library.
+//    much of exec's cold-start state is not yet ready that early.
+//
+//    The Romtag deferral long appeared not to work at all -- on Kickstart
+//    1.3, 2.0, and 3.1 alike, resident_init() never executed and the boot
+//    crashed or reset-looped, which read as "the resident scan never picks
+//    up a DiagPoint-patched Romtag". The actual cause (found with
+//    Copperline's headless CPU trace, then confirmed statically in the
+//    shipped ROM bytes) was the -mpcrel external-symbol pitfall documented
+//    at the top of entry.s: rt_Init was stored 0x92 bytes short, so every
+//    Kickstart's InitResident faithfully jumped into the middle of
+//    handler_main() and wrecked the boot from there. The scan mechanism
+//    itself works on every version, exactly as the RKRM describes; rt_Init
+//    now routes through a local trampoline in entry.s instead of naming
+//    this function in a data directive.
+//
 //    resident_init() re-opens expansion.library and calls
 //    GetCurrentBinding() for its ConfigDev (system-set as the current
 //    binding for this call, per the RKRM), since none of DiagPoint's
 //    registers are handed to a Romtag's rt_Init. It then hands
 //    (board, ExpansionBase, ConfigDev) to mount_boards(), unchanged.
-//
-//    KNOWN ISSUE (unresolved as of this commit): this timing avoids the
-//    corruption above, but empirically now runs too late for the boot
-//    vote on EVERY Kickstart version tested (1.3, 2.0, 3.1), not just
-//    1.3 -- with a bootable mount configured, the machine repeatedly
-//    autoconfigures/resets ("filesys: expansion init" logs more than
-//    once per run) instead of booting from HOSTFS or falling through to
-//    a floppy-insert prompt. So this is currently a regression for the
-//    Kickstart versions that boot from hostfs today, traded for turning
-//    1.3's crash into an equally non-functional reset loop. Left here for
-//    whoever picks the boot-vote timing question back up: the corruption
-//    fix (moving DOS-list surgery out of raw DiagPoint context) looks
-//    right per the RKRM and the A590 reference, but the resident-scan
-//    point it's deferred to is evidently too late across the board --
-//    something earlier than that, yet later than raw DiagPoint, is
-//    still needed.
 //
 //  - mount_boards(): for each entry in the mount table the emulator wrote
 //    into the board window, builds a DeviceNode whose dn_SegList points
@@ -305,7 +302,8 @@ static void mount_boards(UBYTE *board, struct Library *_expbase,
     }
 }
 
-// rt_Init of the Romtag entry.s's DiagPoint patches into the diag copy.
+// rt_Init of the Romtag entry.s's DiagPoint patches into the diag copy,
+// reached through entry.s's local trampoline (see the -mpcrel note there).
 // Kickstart's cold-start resident scan calls this with D0=0, A0=NULL
 // segList, A6=ExecBase -- none of DiagPoint's own registers, so the
 // ConfigDev has to be re-obtained via GetCurrentBinding(), which the

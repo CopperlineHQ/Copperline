@@ -2789,12 +2789,15 @@ mod tests {
             FILESYS_HANDLER
         );
         // The handler ROM's entry table: process entry (bra.w) at +0, the
-        // expansion-init entry at +4 starting with the DIAG_DOORBELL ring:
+        // rt_Init trampoline (bra.w resident_init) at +4, then the
+        // expansion-init entry at +8 starting with the DIAG_DOORBELL ring:
         // move.l a0,DIAG_DOORBELL(a0) (see guest/services/entry.s).
         assert_eq!(img[ROM_OFFSET], 0x60);
         assert_eq!(img[ROM_OFFSET + 1], 0x00);
+        assert_eq!(img[ROM_OFFSET + 4], 0x60);
+        assert_eq!(img[ROM_OFFSET + 5], 0x00);
         assert_eq!(
-            &img[ROM_OFFSET + 4..ROM_OFFSET + 8],
+            &img[ROM_OFFSET + 8..ROM_OFFSET + 12],
             &[0x21, 0x48, (DIAG_DOORBELL >> 8) as u8, DIAG_DOORBELL as u8]
         );
 
@@ -2819,12 +2822,13 @@ mod tests {
         assert!(da_name != 0 && da_name < da_size);
         assert!(d + da_size <= ROM_OFFSET + FILESYS_HANDLER.len());
         // The DiagPoint stub reaches the ROM's expansion-init entry through
-        // the board base: jsr 12(a0) (12 = ROM_OFFSET + 4), then rts.
+        // the board base: jsr 16(a0) (16 = ROM_OFFSET + 8, past the process
+        // entry and the rt_Init trampoline), then rts.
         assert_eq!(
             &img[d + da_diag..d + da_diag + 6],
-            &[0x4E, 0xA8, 0x00, 0x0C, 0x4E, 0x75]
+            &[0x4E, 0xA8, 0x00, 0x10, 0x4E, 0x75]
         );
-        assert_eq!((ROM_OFFSET + 4) as u16, 0x000C);
+        assert_eq!((ROM_OFFSET + 8) as u16, 0x0010);
         assert_eq!(&img[d + da_name..d + da_name + 11], b"Copperline\0");
         // The register banks must not collide with their neighbours: the
         // DosEnvec array below, the DIAG_DOORBELL and lock pool above.
