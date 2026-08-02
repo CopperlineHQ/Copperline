@@ -2557,6 +2557,158 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    /// `ACTION_WRITE`/`ACTION_READ` ride the exact same `REG_DOSPKT`
+    /// doorbell as the mount's `ACTION_STARTUP` above, so the split-word fix
+    /// must hold for every packet a 68000 guest posts, not just the first
+    /// one. Drives a full open/write/close, then open/read/close round trip
+    /// entirely through 68000-style split-word MMIO writes, and checks both
+    /// the bytes that land on the host disk and the bytes read back.
+    #[test]
+    fn doorbell_write_and_read_round_trip_through_split_word_68000_packets() {
+        let root = std::env::temp_dir().join(format!("clfs-mmio-68000-rw-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut board = FilesysBoard::new(vec![MountSpec {
+            path: root.clone(),
+            volume: "Test".into(),
+            boot_pri: -128,
+            readonly: false,
+        }]);
+        let mut mem = Memory {
+            chip_ram: vec![0u8; 0x1_0000],
+            slow_ram: Vec::new(),
+            mb_ram: Vec::new(),
+            accel_ram: Vec::new(),
+            rom: Vec::new(),
+            overlay: false,
+            zorro: crate::zorro::ZorroChain::default(),
+            extended_rom: Vec::new(),
+            extended_rom_base: 0,
+            wcs: Vec::new(),
+            wcs_write_protected: false,
+        };
+
+        // Every register write below goes through this: high word first,
+        // then low, exactly like a 68000's move.l destination split.
+        fn split_write(board: &mut FilesysBoard, off: u32, value: u32, mem: &mut Memory) {
+            board.write(off, 2, value >> 16, &mut DeviceHost::new(mem));
+            board.write(off + 2, 2, value & 0xFFFF, &mut DeviceHost::new(mem));
+        }
+
+        let base = 0x00E9_0000u32;
+        split_write(&mut board, DIAG_DOORBELL, base, &mut mem);
+        assert_eq!(board.board_base, Some(base));
+
+        let (dn, pkt, port) = (0x1000u32, 0x2000u32, 0x3000u32);
+        let unit0 = REGS_OFFSET;
+
+        // Mount: ACTION_STARTUP (dp_Type 0) with the DeviceNode as Arg3.
+        mem.chip_ram[(pkt + 20 + 8) as usize..(pkt + 20 + 12) as usize]
+            .copy_from_slice(&(dn >> 2).to_be_bytes());
+        split_write(&mut board, unit0 + REG_MSGPORT, port, &mut mem);
+        split_write(&mut board, unit0 + REG_DOSPKT, pkt, &mut mem);
+        assert_eq!(
+            board.read(unit0 + REG_RESULT, 4, &mut DeviceHost::new(&mut mem)),
+            RES_ADDVOLUME,
+            "mount"
+        );
+
+        // Post one DosPacket (dp_Type + up to 3 args) and ring the doorbell
+        // through a split word pair, like the real handler's move.l does.
+        let post = |board: &mut FilesysBoard, mem: &mut Memory, ty: i32, args: [u32; 3]| {
+            mem.chip_ram[(pkt + 8) as usize..(pkt + 12) as usize]
+                .copy_from_slice(&(ty as u32).to_be_bytes());
+            for (i, a) in args.iter().enumerate() {
+                let at = (pkt + 20 + 4 * i as u32) as usize;
+                mem.chip_ram[at..at + 4].copy_from_slice(&a.to_be_bytes());
+            }
+            split_write(board, unit0 + REG_DOSPKT, pkt, mem);
+            let res1 = u32::from_be_bytes(
+                mem.chip_ram[(pkt + 12) as usize..(pkt + 16) as usize]
+                    .try_into()
+                    .unwrap(),
+            );
+            let res2 = u32::from_be_bytes(
+                mem.chip_ram[(pkt + 16) as usize..(pkt + 20) as usize]
+                    .try_into()
+                    .unwrap(),
+            );
+            (res1, res2)
+        };
+
+        // Open("round-trip.txt", MODE_NEWFILE), write through a split
+        // doorbell, close.
+        let (fh, name, wbuf) = (0x4000u32, 0x5000u32, 0x6000u32);
+        let text = b"written via a split-word 68000 doorbell";
+        let fname = b"round-trip.txt";
+        mem.chip_ram[name as usize] = fname.len() as u8;
+        mem.chip_ram[name as usize + 1..name as usize + 1 + fname.len()].copy_from_slice(fname);
+        mem.chip_ram[wbuf as usize..wbuf as usize + text.len()].copy_from_slice(text);
+
+        assert_eq!(
+            post(
+                &mut board,
+                &mut mem,
+                ACTION_FINDOUTPUT,
+                [fh >> 2, 0, name >> 2]
+            ),
+            (DOSTRUE, 0),
+            "open for write"
+        );
+        let cookie = u32::from_be_bytes(
+            mem.chip_ram[(fh + FILEHANDLE_ARG1) as usize..(fh + FILEHANDLE_ARG1 + 4) as usize]
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(
+            post(
+                &mut board,
+                &mut mem,
+                ACTION_WRITE,
+                [cookie, wbuf, text.len() as u32]
+            ),
+            (text.len() as u32, 0),
+            "write"
+        );
+        post(&mut board, &mut mem, ACTION_END, [cookie, 0, 0]);
+        assert_eq!(std::fs::read(root.join("round-trip.txt")).unwrap(), text);
+
+        // Open the same file for input and read it back through another
+        // split doorbell, into a buffer the write never touched.
+        let rbuf = 0x6100u32;
+        assert_eq!(
+            post(
+                &mut board,
+                &mut mem,
+                ACTION_FINDINPUT,
+                [fh >> 2, 0, name >> 2]
+            ),
+            (DOSTRUE, 0),
+            "open for read"
+        );
+        let cookie = u32::from_be_bytes(
+            mem.chip_ram[(fh + FILEHANDLE_ARG1) as usize..(fh + FILEHANDLE_ARG1 + 4) as usize]
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(
+            post(
+                &mut board,
+                &mut mem,
+                ACTION_READ,
+                [cookie, rbuf, text.len() as u32]
+            ),
+            (text.len() as u32, 0),
+            "read"
+        );
+        assert_eq!(
+            &mem.chip_ram[rbuf as usize..rbuf as usize + text.len()],
+            text
+        );
+        post(&mut board, &mut mem, ACTION_END, [cookie, 0, 0]);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     /// The romtags cull walks ExecBase's ResModules list through the
     /// GuestBus, and on an A3000/A4000 exec builds that list in the best RAM
     /// it has: Ramsey motherboard fast RAM. The bus must reach the
