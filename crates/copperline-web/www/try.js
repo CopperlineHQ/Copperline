@@ -2520,8 +2520,10 @@ function buildHostCharMap() {
   const map = new Map();
   // First cap wins, which is what a keyboard does: the A600 has two keys
   // printed \ and |, and either types the same character on the guest.
-  const add = (ch, raw, shift) => {
-    if (ch.length === 1 && !map.has(ch)) map.set(ch, { raw, shift });
+  // `caps` marks the keys the guest's Caps Lock applies to -- the letters,
+  // and only the letters, as a keymap's capsable flag has it.
+  const add = (ch, raw, shift, caps = false) => {
+    if (ch.length === 1 && !map.has(ch)) map.set(ch, { raw, shift, caps });
   };
   const us = kbdLegends === 'us';
   for (const row of KB_ROWS) {
@@ -2536,8 +2538,8 @@ function buildHostCharMap() {
       // them; a US machine's two blank caps come through as empty and go
       // the same way.
       if (/^[A-Za-z]$/.test(main)) {
-        add(main.toLowerCase(), spec.r, false);
-        add(main.toUpperCase(), spec.r, true);
+        add(main.toLowerCase(), spec.r, false, true);
+        add(main.toUpperCase(), spec.r, true, true);
       } else {
         add(main, spec.r, false);
       }
@@ -2591,10 +2593,13 @@ function pumpHostKeys() {
 // A whole keystroke, queued as one: nothing is ever left half-typed, so a
 // Shift can never be stranded down over the rest of a session.
 function hostTapKey(raw, shift = false) {
-  // Only the frame loop drains this, and it does not run without a
-  // machine, so a keyboard raised over the boot overlay would fill the
-  // queue rather than move it.
-  if (!emu || !running) return;
+  // Only the frame loop drains this, and it runs for neither a machine
+  // that does not exist nor one whose clock is stopped -- so a keyboard
+  // raised over the boot overlay, or typed at while paused, would fill the
+  // queue rather than move it, and a paragraph would land in one burst on
+  // the resume. Nothing is typed into a paused machine, which is what
+  // pausing means.
+  if (!emu || !running || paused) return;
   if (shift) hostKeyQueue.push([HOST_RAW_LSHIFT, true]);
   hostKeyQueue.push([raw, true], [raw, false]);
   if (shift) hostKeyQueue.push([HOST_RAW_LSHIFT, false]);
@@ -2604,9 +2609,22 @@ function hostTypeText(text) {
   // Iterates code points, so an emoji is one unmappable character rather
   // than two halves of one. CRLF is folded first, or pasted Windows text
   // would type every line ending twice.
+  //
+  // The guest's Caps Lock is taken into account, which the drawn keyboard
+  // deliberately does not do. That one sends key positions and the visitor
+  // can see the lamp on the cap; this one is handed characters, by a
+  // keyboard whose own shift state has nothing to do with the Amiga's, and
+  // there is no lamp anywhere in sight -- so a locked guest would answer
+  // every typed word in the case the visitor did not ask for. A keymap
+  // treats Caps Lock as a shift its capsable keys exclusive-or with (only
+  // the letters are capsable), so inverting the Shift for those while the
+  // lamp is lit types what was actually typed. On the other reading, where
+  // the lock forces upper case whatever Shift does, lower case is
+  // unreachable while it is on and this changes nothing either way.
+  const caps = emu?.caps_lock_led?.() ?? false;
   for (const ch of text.replace(/\r\n?/g, '\n')) {
     const key = hostCharKey(ch);
-    if (key) hostTapKey(key.raw, key.shift);
+    if (key) hostTapKey(key.raw, key.shift !== (caps && key.caps));
     else showOsd(`no Amiga key types "${ch}"`);
   }
 }
