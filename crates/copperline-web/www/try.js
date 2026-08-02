@@ -1902,14 +1902,19 @@ function kbdSend(rawkey, pressed) {
 // not a mural. The safe-area insets come out of the budget rather than
 // being added on top of it, so a home indicator shrinks the keys instead of
 // pushing the strip taller.
+// The strip's padding, written once: the budget below subtracts exactly
+// these, so the row can never be sized for more room than the padding
+// leaves it. A safe-area inset replaces the default margin rather than
+// adding to it, which is why these are max() and not sums.
+const KB_PAD_L = `max(${KB_PAD_X}px, env(safe-area-inset-left, 0px))`;
+const KB_PAD_R = `max(${KB_PAD_X}px, env(safe-area-inset-right, 0px))`;
+const KB_PAD_B = `calc(${KB_PAD_Y}px + env(safe-area-inset-bottom, 0px))`;
+
 function kbdUnitCss() {
-  const insetX =
-    'env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)';
   return (
     `min(` +
-    `(100dvw - ${2 * KB_PAD_X}px - ${insetX}) / ${KB_U_WIDE},` +
-    `(100dvh * ${KB_VH} - ${2 * KB_PAD_Y}px - env(safe-area-inset-bottom, 0px))` +
-    ` / ${KB_U_TALL},` +
+    `(100dvw - ${KB_PAD_L} - ${KB_PAD_R}) / ${KB_U_WIDE},` +
+    `(100dvh * ${KB_VH} - ${KB_PAD_Y}px - ${KB_PAD_B}) / ${KB_U_TALL},` +
     `${KB_U_MAX}px)`
   );
 }
@@ -1928,9 +1933,7 @@ function ensureKeyboard() {
   root.style.cssText =
     'position:fixed;left:0;right:0;bottom:0;z-index:9998;display:none;' +
     'box-sizing:border-box;overflow:hidden;background:rgba(12,15,24,0.94);' +
-    `padding:${KB_PAD_Y}px max(${KB_PAD_X}px, env(safe-area-inset-right, 0px)) ` +
-    `calc(${KB_PAD_Y}px + env(safe-area-inset-bottom, 0px)) ` +
-    `max(${KB_PAD_X}px, env(safe-area-inset-left, 0px));` +
+    `padding:${KB_PAD_Y}px ${KB_PAD_R} ${KB_PAD_B} ${KB_PAD_L};` +
     // Every touch here is a keystroke, never a page gesture: no scrolling,
     // no double-tap zoom, no long-press callout, no selection, no flash.
     'touch-action:none;user-select:none;-webkit-user-select:none;' +
@@ -1938,6 +1941,8 @@ function ensureKeyboard() {
   root.style.setProperty('--cl-u', kbdUnitCss());
 
   const grid = document.createElement('div');
+  grid.setAttribute('role', 'group');
+  grid.setAttribute('aria-label', 'Amiga 600 on-screen keyboard');
   grid.style.cssText =
     'position:relative;margin-inline:auto;' +
     `width:calc(${KB_U_WIDE} * var(--cl-u));` +
@@ -1965,9 +1970,14 @@ function ensureKeyboard() {
   // which only CSS can resolve, and a phone changes them on rotation and
   // whenever the browser chrome collapses. The fullscreen letterbox reads
   // the result, so it has to be the real height.
-  new ResizeObserver((entries) => {
-    const h = entries[0]?.borderBoxSize?.[0]?.blockSize ?? 0;
-    if (kbdOpen) publishKbdHeight(Math.round(h));
+  // The observer is only the trigger; the height comes off the element,
+  // because it has to be the border box. `borderBoxSize` is missing on
+  // Safari before 15.4 -- the browser this feature exists for -- and
+  // `contentRect` is the wrong box anyway: it excludes the padding that
+  // carries env(safe-area-inset-bottom), so the letterbox would sit that
+  // far into the keys.
+  new ResizeObserver(() => {
+    if (kbdOpen) publishKbdHeight(Math.round(root.getBoundingClientRect().height));
   }).observe(root);
 
   shell.appendChild(root);
@@ -1996,6 +2006,13 @@ function buildKeyCap(grid, spec, x, y) {
     `width:calc(${w} * var(--cl-u));height:var(--cl-u);`;
   cell.setAttribute('role', 'button');
   cell.setAttribute('aria-label', spec.aria ?? spec.t ?? '');
+  // Focusable, so the button role is not a promise the element breaks, but
+  // deliberately not tabbable: 78 tab stops in front of the page's own
+  // controls would be hostile to the very people who have a real keyboard,
+  // and a tabbable button also activates on Space and Enter -- both Amiga
+  // keys, which the window listener is already sending, so every press
+  // would reach the guest twice.
+  cell.tabIndex = -1;
 
   const cap = document.createElement('div');
   cap.style.cssText =
@@ -2121,6 +2138,7 @@ function buildLegendChip() {
     'font:600 calc(0.3 * var(--cl-u)) "IBM Plex Mono",ui-monospace,monospace;';
   chip.dataset.legendChip = '1';
   chip.setAttribute('role', 'button');
+  chip.tabIndex = -1;
   kbdLegendChip = chip;
   return chip;
 }
