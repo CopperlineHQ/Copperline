@@ -717,6 +717,106 @@ revision = "OCS"
     Ok(())
 }
 
+/// Boot from a `[[filesys]]` hostfs mount with the committed guest probe
+/// (guest/hostfs-test/mkfile) as the volume's only content, type `mkfile`
+/// into the boot shell at `type_at` seconds, and verify the file the probe
+/// creates lands on the host side -- exercising the whole chain: autoboot,
+/// handler startup, LoadSeg of the binary off the volume, and
+/// Open/Write/Close back through it.
+fn hostfs_boot_write_round_trip(
+    name: &str,
+    rom_line: &str,
+    type_at: f64,
+    screenshot_at: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mount =
+        std::env::temp_dir().join(format!("copperline-hostfs-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&mount);
+    std::fs::create_dir_all(&mount)?;
+    std::fs::copy(
+        repo_root().join("guest/hostfs-test/mkfile"),
+        mount.join("mkfile"),
+    )?;
+
+    // TOML literal string: no escape processing, so the path survives
+    // Windows backslashes.
+    let cfg_path = write_temp_config(
+        name,
+        &format!(
+            r#"
+{rom_line}
+
+[cpu]
+model = "68000"
+
+[memory]
+chip = "512K"
+fast = "0"
+
+[chipset]
+revision = "OCS"
+
+[[filesys]]
+path = '{}'
+volume = "HOSTFS0"
+bootpri = 0
+"#,
+            mount.display()
+        ),
+    )?;
+    let cfg_arg = cfg_path.to_string_lossy().into_owned();
+
+    // Type `mkfile` + return into the shell, one key every 0.3 emulated
+    // seconds.
+    let mut args: Vec<String> = vec!["--config".into(), cfg_arg];
+    for (i, key) in ["m", "k", "f", "i", "l", "e", "return"].iter().enumerate() {
+        args.push("--press-after".into());
+        args.push(format!("{:.1}", type_at + 0.3 * i as f64));
+        args.push((*key).into());
+    }
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    run_screenshot(name, screenshot_at, &arg_refs)?;
+    let _ = std::fs::remove_file(cfg_path);
+
+    let written = std::fs::read(mount.join("FROM-GUEST"))?;
+    assert_eq!(
+        written,
+        b"hello from the guest
+",
+        "guest-written file content mismatch"
+    );
+    let _ = std::fs::remove_dir_all(&mount);
+    Ok(())
+}
+
+/// Needs no local assets at all: the bundled AROS ROM boots the hostfs
+/// mount, so this covers the full boot/read/write chain on any checkout.
+#[test]
+#[ignore = "runs the emulator"]
+fn hostfs_boot_aros_runs_a_guest_binary_and_writes_to_the_host(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = lock_emulator_tests();
+    // The emulator runs with the asset directory as its cwd, so the
+    // source-tree assets/aros fallback misses; point it home explicitly.
+    std::env::set_var("COPPERLINE_AROS_DIR", repo_root().join("assets/aros"));
+    let result = hostfs_boot_write_round_trip("hostfs-aros", "", 40.0, "50.0");
+    std::env::remove_var("COPPERLINE_AROS_DIR");
+    result
+}
+
+/// The V34 boot path: Kickstart 1.3 starts the boot handler with its BCPL
+/// startup-packet conventions, historically the fragile leg of hostfs boot.
+#[test]
+#[ignore = "runs the emulator and requires a local Kickstart 1.3 ROM asset"]
+fn hostfs_boot_kick13_runs_a_guest_binary_and_writes_to_the_host(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = lock_emulator_tests();
+    if !have_required_files(&["KICK13.ROM"]) {
+        return Ok(());
+    }
+    hostfs_boot_write_round_trip("hostfs-kick13", "rom = \"KICK13.ROM\"", 12.0, "20.0")
+}
+
 #[test]
 #[ignore = "runs long OCS HAM captures and requires local Kickstart/disk assets"]
 fn ocs_bpu7_ham_captures_avoid_isolated_vertical_rectangle_frames(

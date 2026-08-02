@@ -39,6 +39,17 @@ Promote a repeated manual smoke path into a focused unit test, an ignored
 image regression, or a deterministic input script. Completed investigations
 belong in commits and PR descriptions rather than a permanent done-log.
 
+### Hostfs boot round trips
+
+`hostfs_boot_aros_runs_a_guest_binary_and_writes_to_the_host` needs **no
+local assets at all** (the bundled AROS ROM boots the mount), so it runs on
+any checkout; `hostfs_boot_kick13_runs_a_guest_binary_and_writes_to_the_host` additionally
+covers Kickstart 1.3's V34 boot path when a local `KICK13.ROM` is present.
+Both boot a shell from a `[[filesys]]` host-directory mount, type `mkfile`
+into it (the committed guest probe from `guest/hostfs-test/`), and assert
+the file the probe creates arrives on the host side -- autoboot, handler
+startup, LoadSeg off the volume, and a write back through it, end to end.
+
 ### DiagROM smoke
 
 DiagROM is the first asset-backed boot smoke before a Kickstart OS check:
@@ -101,6 +112,8 @@ baselines to maintain.
 | --- | --- |
 | `kickstart_boot_screen_has_expected_structure` | `kickstart205.rom` |
 | `reset_dsksync_boot_regression_reaches_boot_display` | `KICK13.ROM` |
+| `hostfs_boot_aros_runs_a_guest_binary_and_writes_to_the_host` | *(none)* |
+| `hostfs_boot_kick13_runs_a_guest_binary_and_writes_to_the_host` | `KICK13.ROM` |
 | `ocs_bpu7_ham_captures_*` (incl. live-audio variant) | `kickstart205.rom`, `DESiRE-InsideTheMachine.adf` |
 | `dblpal_boot_presents_full_programmable_scan` | `KICK31.ROM`, `wb31-dblpal.adf` |
 | `diagrom_menu_preserves_left_margin_text_columns` | `diagrom.rom` |

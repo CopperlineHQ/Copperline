@@ -9,10 +9,13 @@
 //   0x0004  u32: 0 (seglist next pointer); dn_SegList = MKBADDR(board + 4)
 //   0x0008  handler code (services_rom.bin). Entry table:
 //             +0     process entry (DOS RunHandler starts the handler here)
-//             +4     expansion-init entry (jsr-ed by the DiagArea stub
-//                    with the DiagPoint registers; mounts the volumes)
+//             +4     rt_Init trampoline (a real PC-relative branch to the
+//                    mounting code; the Romtag's rt_Init field must not
+//                    name it via a data-directive extern -- see entry.s)
+//             +8     expansion-init entry (jsr-ed by the DiagArea stub
+//                    with the DiagPoint registers; patches the Romtag)
 //             +0x40  struct DiagArea (er_InitDiagVec points here; the
-//                    DiagPoint stub reaches the ROM via jsr 12(a0))
+//                    DiagPoint stub reaches the ROM via jsr 16(a0))
 //   0x3800  mount table, written by the emulator:
 //             u16 count, then count fixed-size entries of the DOS device name
 //             as a NUL-terminated string ("HOSTFS0", ...)
@@ -39,8 +42,9 @@
 // device name, unit, and dostype instead of dereferencing garbage. Each
 // FSSM references a per-unit DosEnvec whose de_BootPri carries the
 // configured AddBootNode priority.
-#define FSSM_OFFSET        0x7800
-#define FSSM_SLOT_SIZE     16
+#define FSSM_OFFSET         0x7800
+#define FSSM_SLOT_SIZE      16
+#define FSSM_DEVNAME_OFFSET 0x7900
 
 // Host registers (see the ZorroDevice impl in src/filesys.rs). One bank of
 // longword registers per mount unit, so each handler process talks to its

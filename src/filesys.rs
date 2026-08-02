@@ -3,13 +3,14 @@
 //!
 //! The guest side is a tiny handler (see `guest/services/`) mapped into the
 //! Copperline services board together with a mount table and a hand-built
-//! DiagArea. At expansion init the DiagArea's DiagPoint calls the handler's
-//! expansion-init entry with the DiagPoint context; the handler builds one
-//! DeviceNode per mount table entry and `AddBootNode`s it (`AddDosNode` on
-//! Kickstart 1.3's V34 expansion.library), so DOS mounts the devices at boot
-//! and starts the handler process on first reference. Kickstart 1.3 mounts
-//! the volumes but cannot boot from them; the bootpri vote needs the 2.0+
-//! BootNode strap.
+//! DiagArea. DiagPoint only patches a Romtag into the retained diag copy;
+//! Kickstart's cold-start resident scan calls its rt_Init once DOS-list
+//! surgery is actually safe, and rt_Init builds one DeviceNode per mount
+//! table entry and `AddBootNode`s it (a hand-built BootNode `Enqueue()`d on
+//! `eb_MountList` on Kickstart 1.3's V34 expansion.library, which has no
+//! `AddBootNode`), so DOS mounts the devices at boot and starts the handler
+//! process on first reference -- or, for the winning boot candidate, at
+//! boot time itself, on Kickstart 1.3 same as 2.0+.
 //! The handler forwards every DosPacket to [`FilesysBoard`] by writing its
 //! address to the unit's doorbell register in the board window (the board is
 //! a [`crate::zorro_device::ZorroDevice`], like the A4091); all ACTION_*
@@ -604,24 +605,32 @@ impl FilesysBoard {
         for (unit, u) in self.units.iter().enumerate() {
             let mount = &u.mount;
             let unit = unit as u32;
+            // Fake-but-sane geometry and a stock de_DosType, mirroring the
+            // envec WinUAE's directory harddrives boot Kickstart 1.3 with:
+            // 1.3's BCPL boot init inspects the boot node's environment
+            // before it starts the handler, and a degenerate volume (1
+            // block, unknown DosType) is rejected up front -- the boot
+            // then dies composing the "is not validated" requester. The
+            // handler never reads this geometry; the volume node keeps
+            // ID_CLFS_DISK as its honest runtime identity.
             let envec = DosEnvec {
                 table_size: long(16),  // entries after this one, through dos_type
                 size_block: long(128), // longwords = 512-byte blocks
                 sec_org: long(0),
                 surfaces: long(1),
                 sectors_per_block: long(1),
-                blocks_per_track: long(1),
+                blocks_per_track: long(127),
                 reserved: long(2),
                 pre_alloc: long(0),
                 interleave: long(0),
-                low_cyl: long(0),
-                high_cyl: long(0),
-                num_buffers: long(1),
+                low_cyl: long(1),
+                high_cyl: long(511),
+                num_buffers: long(50),
                 buf_mem_type: long(1), // MEMF_PUBLIC
                 max_transfer: long(0x7FFF_FFFF),
                 mask: long(0xFFFF_FFFE),
                 boot_pri: long(mount.boot_pri as i32 as u32),
-                dos_type: long(ID_CLFS_DISK),
+                dos_type: long(0x444F_5300), // 'DOS\0'
             };
             let envec_at = base + FSSM_ENVEC_OFFSET + unit * ENVEC_SLOT_SIZE;
             write_bytes(bus, envec_at, envec.as_bytes());
@@ -688,10 +697,17 @@ impl FilesysUnit {
         // packet, so the first one we see is the one DOS sent to start this
         // unit's process. dp_Arg3 is the DeviceNode; capture the handler
         // MsgPort, wire dn_Task to it, and hand the guest the volume node to
-        // AddDosEntry.
+        // AddDosEntry. Kickstart 1.3's boot-path startup instead carries
+        // V34's BCPL process parameters (dp_Type = the handler's seglist,
+        // dp_Res1 = the stack size) with dp_Arg3 NULL -- the same shape
+        // WinUAE's filesys documents -- and V34 dos init has already wired
+        // dn_Task itself before sending it, so there is nothing to patch
+        // (and no DeviceNode to find it from).
         if self.device_node.is_none() {
-            let dn = arg(bus, 3) << 2; // dp_Arg3: BPTR DeviceNode
-            bus.write_long(dn + DEVICENODE_TASK, port);
+            let dn = arg(bus, 3) << 2; // dp_Arg3: BPTR DeviceNode (0 on V34 boot)
+            if dn != 0 {
+                bus.write_long(dn + DEVICENODE_TASK, port);
+            }
             self.device_node = Some(dn);
             self.port = Some(port);
             let vol = self.build_volume_node(bus, board_base);
@@ -1187,9 +1203,12 @@ impl FilesysUnit {
                 }
                 // Clear dn_Task so the next reference to the device simply
                 // restarts the handler (and re-adds the volume). Dropping
-                // device_node/port marks the unit un-started again.
+                // device_node/port marks the unit un-started again. (0 =
+                // started by V34's boot path, which never told us the node.)
                 if let Some(dn) = self.device_node.take() {
-                    bus.write_long(dn + DEVICENODE_TASK, 0);
+                    if dn != 0 {
+                        bus.write_long(dn + DEVICENODE_TASK, 0);
+                    }
                 }
                 self.port = None;
                 let vol = self.volume.take().unwrap_or(0);
@@ -2467,6 +2486,16 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    // Every register write below goes through this: high word first, then
+    // low, exactly like a 68000's move.l destination split. Shared by every
+    // test in this module that drives the board through the MMIO path a
+    // real 68000/68010 guest takes, so the split-word convention can't
+    // silently drift between them.
+    fn split_write(board: &mut FilesysBoard, off: u32, value: u32, mem: &mut Memory) {
+        board.write(off, 2, value >> 16, &mut DeviceHost::new(mem));
+        board.write(off + 2, 2, value & 0xFFFF, &mut DeviceHost::new(mem));
+    }
+
     /// A 68000/68010 guest has a 16-bit-wide external data bus, so the CPU
     /// core splits every `move.l` destination write into two word bus
     /// cycles -- high word first, then low word (see
@@ -2518,30 +2547,8 @@ mod tests {
             .copy_from_slice(&(dn >> 2).to_be_bytes());
 
         let unit0 = REGS_OFFSET;
-        board.write(
-            unit0 + REG_MSGPORT,
-            2,
-            port >> 16,
-            &mut DeviceHost::new(&mut mem),
-        );
-        board.write(
-            unit0 + REG_MSGPORT + 2,
-            2,
-            port & 0xFFFF,
-            &mut DeviceHost::new(&mut mem),
-        );
-        board.write(
-            unit0 + REG_DOSPKT,
-            2,
-            pkt >> 16,
-            &mut DeviceHost::new(&mut mem),
-        );
-        board.write(
-            unit0 + REG_DOSPKT + 2,
-            2,
-            pkt & 0xFFFF,
-            &mut DeviceHost::new(&mut mem),
-        );
+        split_write(&mut board, unit0 + REG_MSGPORT, port, &mut mem);
+        split_write(&mut board, unit0 + REG_DOSPKT, pkt, &mut mem);
 
         let mut host = DeviceHost::new(&mut mem);
         assert_eq!(board.read(unit0 + REG_RESULT, 4, &mut host), RES_ADDVOLUME);
@@ -2553,6 +2560,151 @@ mod tests {
             &mem.chip_ram[(dn + DEVICENODE_TASK) as usize..(dn + DEVICENODE_TASK + 4) as usize],
             &port.to_be_bytes()
         );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// `ACTION_WRITE`/`ACTION_READ` ride the exact same `REG_DOSPKT`
+    /// doorbell as the mount's `ACTION_STARTUP` above, so the split-word fix
+    /// must hold for every packet a 68000 guest posts, not just the first
+    /// one. Drives a full open/write/close, then open/read/close round trip
+    /// entirely through 68000-style split-word MMIO writes, and checks both
+    /// the bytes that land on the host disk and the bytes read back.
+    #[test]
+    fn doorbell_write_and_read_round_trip_through_split_word_68000_packets() {
+        let root = std::env::temp_dir().join(format!("clfs-mmio-68000-rw-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut board = FilesysBoard::new(vec![MountSpec {
+            path: root.clone(),
+            volume: "Test".into(),
+            boot_pri: -128,
+            readonly: false,
+        }]);
+        let mut mem = Memory {
+            chip_ram: vec![0u8; 0x1_0000],
+            slow_ram: Vec::new(),
+            mb_ram: Vec::new(),
+            accel_ram: Vec::new(),
+            rom: Vec::new(),
+            overlay: false,
+            zorro: crate::zorro::ZorroChain::default(),
+            extended_rom: Vec::new(),
+            extended_rom_base: 0,
+            wcs: Vec::new(),
+            wcs_write_protected: false,
+        };
+
+        let base = 0x00E9_0000u32;
+        split_write(&mut board, DIAG_DOORBELL, base, &mut mem);
+        assert_eq!(board.board_base, Some(base));
+
+        let (dn, pkt, port) = (0x1000u32, 0x2000u32, 0x3000u32);
+        let unit0 = REGS_OFFSET;
+
+        // Mount: ACTION_STARTUP (dp_Type 0) with the DeviceNode as Arg3.
+        mem.chip_ram[(pkt + 20 + 8) as usize..(pkt + 20 + 12) as usize]
+            .copy_from_slice(&(dn >> 2).to_be_bytes());
+        split_write(&mut board, unit0 + REG_MSGPORT, port, &mut mem);
+        split_write(&mut board, unit0 + REG_DOSPKT, pkt, &mut mem);
+        assert_eq!(
+            board.read(unit0 + REG_RESULT, 4, &mut DeviceHost::new(&mut mem)),
+            RES_ADDVOLUME,
+            "mount"
+        );
+
+        // Post one DosPacket (dp_Type + up to 3 args) and ring the doorbell
+        // through a split word pair, like the real handler's move.l does.
+        let post = |board: &mut FilesysBoard, mem: &mut Memory, ty: i32, args: [u32; 3]| {
+            mem.chip_ram[(pkt + 8) as usize..(pkt + 12) as usize]
+                .copy_from_slice(&(ty as u32).to_be_bytes());
+            for (i, a) in args.iter().enumerate() {
+                let at = (pkt + 20 + 4 * i as u32) as usize;
+                mem.chip_ram[at..at + 4].copy_from_slice(&a.to_be_bytes());
+            }
+            split_write(board, unit0 + REG_DOSPKT, pkt, mem);
+            let res1 = u32::from_be_bytes(
+                mem.chip_ram[(pkt + 12) as usize..(pkt + 16) as usize]
+                    .try_into()
+                    .unwrap(),
+            );
+            let res2 = u32::from_be_bytes(
+                mem.chip_ram[(pkt + 16) as usize..(pkt + 20) as usize]
+                    .try_into()
+                    .unwrap(),
+            );
+            (res1, res2)
+        };
+
+        // Open("round-trip.txt", MODE_NEWFILE), write through a split
+        // doorbell, close.
+        let (fh, name, wbuf) = (0x4000u32, 0x5000u32, 0x6000u32);
+        let text = b"written via a split-word 68000 doorbell";
+        let fname = b"round-trip.txt";
+        mem.chip_ram[name as usize] = fname.len() as u8;
+        mem.chip_ram[name as usize + 1..name as usize + 1 + fname.len()].copy_from_slice(fname);
+        mem.chip_ram[wbuf as usize..wbuf as usize + text.len()].copy_from_slice(text);
+
+        assert_eq!(
+            post(
+                &mut board,
+                &mut mem,
+                ACTION_FINDOUTPUT,
+                [fh >> 2, 0, name >> 2]
+            ),
+            (DOSTRUE, 0),
+            "open for write"
+        );
+        let cookie = u32::from_be_bytes(
+            mem.chip_ram[(fh + FILEHANDLE_ARG1) as usize..(fh + FILEHANDLE_ARG1 + 4) as usize]
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(
+            post(
+                &mut board,
+                &mut mem,
+                ACTION_WRITE,
+                [cookie, wbuf, text.len() as u32]
+            ),
+            (text.len() as u32, 0),
+            "write"
+        );
+        post(&mut board, &mut mem, ACTION_END, [cookie, 0, 0]);
+        assert_eq!(std::fs::read(root.join("round-trip.txt")).unwrap(), text);
+
+        // Open the same file for input and read it back through another
+        // split doorbell, into a buffer the write never touched.
+        let rbuf = 0x6100u32;
+        assert_eq!(
+            post(
+                &mut board,
+                &mut mem,
+                ACTION_FINDINPUT,
+                [fh >> 2, 0, name >> 2]
+            ),
+            (DOSTRUE, 0),
+            "open for read"
+        );
+        let cookie = u32::from_be_bytes(
+            mem.chip_ram[(fh + FILEHANDLE_ARG1) as usize..(fh + FILEHANDLE_ARG1 + 4) as usize]
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(
+            post(
+                &mut board,
+                &mut mem,
+                ACTION_READ,
+                [cookie, rbuf, text.len() as u32]
+            ),
+            (text.len() as u32, 0),
+            "read"
+        );
+        assert_eq!(
+            &mem.chip_ram[rbuf as usize..rbuf as usize + text.len()],
+            text
+        );
+        post(&mut board, &mut mem, ACTION_END, [cookie, 0, 0]);
 
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -2637,12 +2789,15 @@ mod tests {
             FILESYS_HANDLER
         );
         // The handler ROM's entry table: process entry (bra.w) at +0, the
-        // expansion-init entry at +4 starting with the DIAG_DOORBELL ring:
+        // rt_Init trampoline (bra.w resident_init) at +4, then the
+        // expansion-init entry at +8 starting with the DIAG_DOORBELL ring:
         // move.l a0,DIAG_DOORBELL(a0) (see guest/services/entry.s).
         assert_eq!(img[ROM_OFFSET], 0x60);
         assert_eq!(img[ROM_OFFSET + 1], 0x00);
+        assert_eq!(img[ROM_OFFSET + 4], 0x60);
+        assert_eq!(img[ROM_OFFSET + 5], 0x00);
         assert_eq!(
-            &img[ROM_OFFSET + 4..ROM_OFFSET + 8],
+            &img[ROM_OFFSET + 8..ROM_OFFSET + 12],
             &[0x21, 0x48, (DIAG_DOORBELL >> 8) as u8, DIAG_DOORBELL as u8]
         );
 
@@ -2667,12 +2822,13 @@ mod tests {
         assert!(da_name != 0 && da_name < da_size);
         assert!(d + da_size <= ROM_OFFSET + FILESYS_HANDLER.len());
         // The DiagPoint stub reaches the ROM's expansion-init entry through
-        // the board base: jsr 12(a0) (12 = ROM_OFFSET + 4), then rts.
+        // the board base: jsr 16(a0) (16 = ROM_OFFSET + 8, past the process
+        // entry and the rt_Init trampoline), then rts.
         assert_eq!(
             &img[d + da_diag..d + da_diag + 6],
-            &[0x4E, 0xA8, 0x00, 0x0C, 0x4E, 0x75]
+            &[0x4E, 0xA8, 0x00, 0x10, 0x4E, 0x75]
         );
-        assert_eq!((ROM_OFFSET + 4) as u16, 0x000C);
+        assert_eq!((ROM_OFFSET + 8) as u16, 0x0010);
         assert_eq!(&img[d + da_name..d + da_name + 11], b"Copperline\0");
         // The register banks must not collide with their neighbours: the
         // DosEnvec array below, the DIAG_DOORBELL and lock pool above.
