@@ -1,29 +1,24 @@
 ; Chip-bus access-phase probe for the 020.
 ;
-; The real A1200 shows that a loop containing a chip-RAM access runs a WHOLE
-; number of colour clocks per iteration, while a loop with no chip access
-; runs any number at all. From the main timing-test disk and fwdprobe
-; (clocks = ticks * 20.006 / 8192; 1 cck = 2 CPU clocks at 14.19 MHz):
+; The real A1200 runs a loop containing a chip-RAM access in a WHOLE number of
+; colour clocks, while a loop with no chip access runs any number at all. From
+; the main timing-test disk and fwdprobe (clocks = ticks * 20.006 / 8192; the
+; A1200 runs 4 CPU clocks per colour clock, 14.19 MHz against 3.546 MHz):
 ;
-;   with a chip access   main row 2  chip read   16.09 clk = 8.04 cck
-;                        main row 10 chip write   8.11 clk = 4.05 cck
-;                        main row 3  chip write   8.05 clk = 4.02 cck
-;   without one          main row 4  reg move     9.01 clk = 4.51 cck
-;                        fwd row 25  reg move     8.01 clk = 4.01 cck
-;                        fwd row 24  bare dbra    6.01 clk = 3.01 cck
-;                        fwd row 1   reg pair    11.01 clk = 5.51 cck
+;   with a chip access   main row 2  chip read   16.09 clk = 4.02 cck
+;                        main row 10 chip write   8.11 clk = 2.03 cck
+;                        main row 3  chip write   8.05 clk = 2.01 cck
+;   without one          main row 4  reg move     9.01 clk = 2.25 cck
+;                        fwd row 25  reg move     8.01 clk = 2.00 cck
+;                        fwd row 24  bare dbra    6.01 clk = 1.50 cck
+;                        fwd row 1   reg pair    11.01 clk = 2.75 cck
 ;
-; The chip rows land on 8.04, 4.05 and 4.02; the others sit on halves as
-; readily as wholes. That is the CPU synchronising to the chip clock: the
-; access cannot start part way through a colour clock, so the wait absorbs
-; the remainder and the loop period quantises.
-;
-; Copperline does not reproduce this. Its chip-read loop drifts instead of
-; locking, and the SAME loop measures differently depending on where in the
-; frame it starts -- 13.08 clocks here against 17.04 on the main disk, a 30%
-; spread for identical code with all DMA off, where the real machine is
-; stable at 16.09. This disk exists so that recalibration has real numbers
-; to work from instead of the single row-2 datapoint.
+; The chip rows land on whole colour clocks; the others sit on quarters. That
+; is the CPU synchronising to the chip clock: an access cannot start part way
+; through a colour clock, so the wait absorbs the remainder and the loop
+; period quantises. It also makes the period independent of the phase the loop
+; was entered with, which is why the same loop measures the same wherever in
+; the frame it starts.
 ;
 ; Rows (8192 iterations each; every loop's DBcc alignment is fixed by
 ; padding and listed as measured from the assembled binary):
@@ -80,20 +75,12 @@
 ;    16. Writes do not (4 cck at both) because they post, and read+write
 ;    does not either (10 at both).
 ;
-; 3. Copperline (m68k 0.5.0 plus the DBcc-alignment fix) reports
-;    13.08 / 16.04 / 8.05 / 8.05 / 9.01 / 8.01 / 22.16 / 24.12 / 17.04 /
-;    17.04 clocks. Writes, register loops and the anchors are exact; every
-;    read row is short by a flat 3.01 clocks per read (4.05 at %4=0, the
-;    difference being the rounding in 1 above).
-;
-; 4. Worse than the constant, the model is phase-unstable: this disk's row 0
-;    and the main disk's row 2 are the same loop at the same alignment, and
-;    real hardware returns 19BC for both, but Copperline returns 16.09 here
-;    and 20.19 there depending on where in the frame the loop starts, with
-;    all DMA off. Billing the missing 3 clocks per read lands this disk
-;    exactly and pushes the main disk's row 2 to 26% high, so the phase
-;    instability has to be fixed before the constant means anything. That is
-;    open work; see docs/internals/cpu.md.
+; 3. Copperline reproduces all ten rows once the CPU and the chip bus share
+;    one clock timeline: a chip read synchronises the CPU to the colour clock
+;    and the instruction charge is no longer reconciled away against the bus
+;    time (see docs/internals/cpu.md). Before that it was short by a flat 3.01
+;    clocks per read AND phase-unstable, returning 13.08 clocks here against
+;    17.04 for the same loop on the main disk.
 ;
 ; Loaded by boot.asm to $30000. Same CIA-A timer A harness, renderer and
 ; serial output as the other probe disks: a two-digit decimal row ID then
@@ -120,7 +107,7 @@ boot:
         move.l  #$00050000,d3
         lea     RESULTS,a3
 
-        ; row 0: chip read, dbra longword aligned
+        ; row 0: chip read, dbra at %4==2
         cnop    0,4
         lea     CHIPT,a0
         bsr     tstart
@@ -131,7 +118,7 @@ boot:
         bsr     tread
         move.l  d0,(a3)+
 
-        ; row 1: chip read, dbra at %4==2
+        ; row 1: chip read, dbra longword aligned
         cnop    0,4
         lea     CHIPT,a0
         bsr     tstart
@@ -141,7 +128,7 @@ boot:
         bsr     tread
         move.l  d0,(a3)+
 
-        ; row 2: chip write, dbra longword aligned
+        ; row 2: chip write, dbra at %4==2
         cnop    0,4
         lea     CHIPT,a0
         bsr     tstart
@@ -152,7 +139,7 @@ boot:
         bsr     tread
         move.l  d0,(a3)+
 
-        ; row 3: chip write, dbra at %4==2
+        ; row 3: chip write, dbra longword aligned
         cnop    0,4
         lea     CHIPT,a0
         bsr     tstart
@@ -181,7 +168,7 @@ boot:
         bsr     tread
         move.l  d0,(a3)+
 
-        ; row 6: two chip reads, dbra longword aligned
+        ; row 6: two chip reads, dbra at %4==2
         cnop    0,4
         lea     CHIPT,a0
         bsr     tstart
@@ -192,7 +179,7 @@ boot:
         bsr     tread
         move.l  d0,(a3)+
 
-        ; row 7: two chip reads, dbra at %4==2
+        ; row 7: two chip reads, dbra longword aligned
         cnop    0,4
         lea     CHIPT,a0
         bsr     tstart
@@ -204,7 +191,7 @@ boot:
         bsr     tread
         move.l  d0,(a3)+
 
-        ; row 8: read then write, dbra longword aligned
+        ; row 8: read then write, dbra at %4==2
         cnop    0,4
         lea     CHIPT,a0
         bsr     tstart
@@ -215,7 +202,7 @@ boot:
         bsr     tread
         move.l  d0,(a3)+
 
-        ; row 9: read then write, dbra at %4==2
+        ; row 9: read then write, dbra longword aligned
         cnop    0,4
         lea     CHIPT,a0
         bsr     tstart

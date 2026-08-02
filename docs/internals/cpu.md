@@ -495,48 +495,68 @@ position) by a few percent: those loops' accesses re-phase against the
 chip-bus slot grid when the loop shortens by a clock, so their previous
 agreement was partly compensation for the branch over-bill.
 
-### The chip-access phase (open)
+### The chip-access phase
 
-`timing-test/rdprobe.asm` measured the chip side on the same machine, and
-its two no-access anchors reproduce the other disks exactly, so the column
-is trustworthy. It shows two defects.
+`timing-test/rdprobe.asm` measured the chip side on the same machine, and its
+two no-access anchors reproduce the other disks exactly, so the column is
+trustworthy. It showed the CPU and the chip bus needed one clock timeline
+rather than two.
 
-**Reads are under-billed by a flat 3.01 CPU clocks each.** Writes, register
-loops and the anchors are exact; all six read rows are short by the same
-amount (4.05 at the alignment that rounds up, see below). The shortfall sits
-in the data-return path, after the granted slot and the data-return colour
-clock.
+**Every real loop containing a chip access runs a whole number of colour
+clocks** -- the chip-read loop 4.02, the chip-write loops 2.03 and 2.01, two
+reads 7.04, a read plus a posted write 5.05 -- while the two loops with no
+chip access sit on quarters (2.25, 2.00). An A1200 runs four CPU clocks per
+colour clock, so that is the CPU synchronising to the chip clock: a chip read
+cannot begin part way through a colour clock, and the wait absorbs whatever
+the rest of the loop left over. Reads carry the branch-alignment clock through
+into a whole extra colour clock (one read costs 4 cck at `dbra%4==2` and 5 at
+`%4==0`); posted writes do not, because the bus unit takes them behind the
+execution unit.
 
-**Every real loop containing a chip access runs an even number of colour
-clocks** -- 8, 10, 4, 4, 14, 16, 10, 10 -- while the two loops with no chip
-access do not (4.51, 4.01). The CPU's access is granted on a two-colour-clock
-cadence and the wait absorbs whatever the rest of the loop left over. Reads
-carry the branch-alignment clock through to a whole extra slot (one read
-costs 8 cck at `dbra%4==2` and 10 at `%4==0`); posted writes do not.
+Copperline used to model neither, and the second omission was the blocking
+one: two independent sub-colour-clock carries existed, the CPU's on
+`M68kMachine` where the bus could not see it at access time, and a dead one on
+`Bus`. Nothing made an access begin on a colour-clock boundary, so nothing
+quantised; and the per-instruction reconciliation
+`advance_cpu_internal_cycles(cpu_cck.saturating_sub(bus_cck))` could only add
+time, so an instruction whose accesses cost more colour clocks than its
+charged execution time -- routine for chip-bound 020 code -- had the surplus
+discarded. Together those turned a phase into a rate: the read loop had two
+stable orbits and returned 13.08 clocks per iteration on one disk and 17.04 on
+the other for identical code.
 
-Copperline reproduces neither, and the second is the blocking one: the model
-is phase-unstable where the machine is not. `rdprobe` row 0 and main-disk row
-2 are the same loop at the same branch alignment, real hardware returns
-`19BC` for both, and Copperline returns 16.09 clocks for one and 20.19 for
-the other depending on where in the frame the loop starts, with all DMA off.
-Billing the missing three clocks per read lands `rdprobe` exactly and pushes
-main-disk row 2 to 26% high, so the constant cannot be calibrated until the
-access is quantised to the slot cadence. Three attempts at that quantisation
-(snapping on the bus-side clock carry, rounding the instruction charge when
-it touched the chip bus, and forcing an absolute two-colour-clock grant grid)
-all failed, the first two because the CPU's sub-colour-clock phase lives on
-`M68kMachine` and is invisible to the bus at access time, and the third
-because it over-constrains the grant. A real fix has to unify the two clock
-timelines so an access can begin on a colour-clock boundary.
+The CPU's position is now `emulated_cck * cpu_clocks_per_cck +
+Bus::cpu_chip_clock_phase`. Execution clocks accumulate into that phase and
+turn into beam time a whole colour clock at a time
+(`Bus::charge_cpu_clocks_to_cck`); a chip read stalls out the remainder and
+resets the phase (`Bus::sync_cpu_to_chip_clock`); and every access the CPU
+waits for credits its own clocks back against the instruction charge, because
+the m68k timing table already allots the instruction the time for its memory
+reference. Nothing is reconciled afterwards and nothing is discarded. The
+per-iteration map on the phase is therefore the constant map for any loop
+containing a read, which is what makes the period independent of the phase the
+loop was entered with.
 
-What remains against real silicon, with the middle rows now read off the
-CRT across two runs: the composite write-plus-poll rows (16, 17, 21) run
-3-7% under the real readings, and the raw interrupt-phase rows (19, 20, 22)
-sit a few colour clocks early of readings that themselves move a few clocks
-between real runs. Both are composite effects (posted-write drain against
-the poll read, interrupt entry against the beam) rather than single-constant
-gaps. The SysInfo figures in the previous paragraph predate posted writes
-and will read higher on the A1200 profile.
+One derived constant remains: a chip read spends
+`CPU_020_CHIP_READ_RETURN_CLOCKS` = 2 CPU clocks returning data past the
+data-return colour clock. Rows 0 and 1 of the probe force it -- a read loop
+measures 16 clocks per iteration with a 6-clock branch and 20 with a 7-clock
+one, and since the period is a whole number of 4-clock colour clocks those
+pin the un-rounded cost at exactly 16, so a read occupies 10 clocks from the
+boundary it starts on.
+
+This is gated to the 68020 and later (`cpu_short_bus_cycle`). The 68000 and
+68010 keep the two timelines and the reconciliation: their four-clock bus
+cycle is exactly two colour clocks and synchronous with the chip clock by
+construction, and their intra-instruction time is already placed correctly by
+the core's `sync` callback. The JIT batch path also keeps the older
+accounting, since it charges one lump per batch and would see a stale phase at
+every access after the first.
+
+Still open: chip-write-plus-poll composite rows (16, 17, 21) read about 9%
+low, and custom-register accesses are deliberately left unsynchronised because
+the copper-poll beam row (27) is exact as they stand. Both want a probe that
+isolates custom-register timing the way `rdprobe` isolated chip RAM.
 
 ## MMU
 
