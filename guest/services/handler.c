@@ -2,21 +2,51 @@
 //
 // Guest-side handler for Copperline's services board.
 //
-// Two entry points (see entry.s and copperline_board.h):
+// Three entry points (see entry.s and copperline_board.h):
 //
-//  - mount_boards(): called at expansion init from the board's DiagArea with
-//    the documented DiagPoint context (ExpansionBase, ConfigDev). For each
-//    entry in the mount table the emulator wrote into the board window, it
-//    builds a DeviceNode whose dn_SegList points back into this ROM and
-//    adds it to the mount list. DOS mounts the nodes at boot; the handler
-//    process is started on first reference.
+//  - resident_init(): rt_Init of the Romtag entry.s's DiagPoint patches into
+//    the diag copy. Kickstart's cold-start resident scan calls this once
+//    expansion has DiagPoint-ed every board -- the documented, hardware-
+//    proven place for an autoboot driver to touch the DOS list (RKRM
+//    Libraries, "Expansion Library", "Events At ROMTAG INIT Time"; the same
+//    deferral the A590 SCSI boot ROM's own Romtag uses). Doing this from
+//    raw DiagPoint context instead -- this ROM's original approach -- mounts
+//    fine but corrupts Kickstart 1.3's own boot shortly after, since DOS and
+//    much of exec's cold-start state is not yet ready that early.
 //
-// Kickstart 1.3 (V34) is supported for mounting: both entry points probe
-// the library versions at runtime and fall back from the V36+ calls
-// (AddBootNode, AddDosEntry/RemDosEntry/LockDosList) to their 1.3-era
-// equivalents (AddDosNode, a Forbid-protected splice of the DosInfo
-// device chain). Booting *from* a hostfs volume still needs 2.0+: the
-// bootpri vote rides on the V36 BootNode strap.
+//    The Romtag deferral long appeared not to work at all -- on Kickstart
+//    1.3, 2.0, and 3.1 alike, resident_init() never executed and the boot
+//    crashed or reset-looped, which read as "the resident scan never picks
+//    up a DiagPoint-patched Romtag". The actual cause (found with
+//    Copperline's headless CPU trace, then confirmed statically in the
+//    shipped ROM bytes) was the -mpcrel external-symbol pitfall documented
+//    at the top of entry.s: rt_Init was stored 0x92 bytes short, so every
+//    Kickstart's InitResident faithfully jumped into the middle of
+//    handler_main() and wrecked the boot from there. The scan mechanism
+//    itself works on every version, exactly as the RKRM describes; rt_Init
+//    now routes through a local trampoline in entry.s instead of naming
+//    this function in a data directive.
+//
+//    resident_init() re-opens expansion.library and calls
+//    GetCurrentBinding() for its ConfigDev (system-set as the current
+//    binding for this call, per the RKRM), since none of DiagPoint's
+//    registers are handed to a Romtag's rt_Init. It then hands
+//    (board, ExpansionBase, ConfigDev) to mount_boards(), unchanged.
+//
+//  - mount_boards(): for each entry in the mount table the emulator wrote
+//    into the board window, builds a DeviceNode whose dn_SegList points
+//    back into this ROM and adds it to the mount list. DOS mounts the
+//    nodes at resident-init time; the handler process is started on first
+//    reference.
+//
+// Kickstart 1.3 (V34) is supported: both entry points probe the library
+// versions at runtime and fall back from the V36+ calls (AddBootNode,
+// AddDosEntry/RemDosEntry/LockDosList) to their 1.3-era equivalents. On
+// V34 a non-boot mount (bootpri -128) uses AddDosNode; a bootable mount
+// hand-builds the BootNode that V36's AddBootNode would have built and
+// Enqueue()s it on eb_MountList with ln_Name pointing at the ConfigDev --
+// the linkage V34 AddDosNode cannot make (it takes no ConfigDev), and the
+// one strap needs to find the DiagArea whose da_BootPoint boots us.
 //
 //  - handler_main(): the DOS handler process. A pure packet pump: every
 //    DosPacket is rung in through this unit's doorbell register in the
@@ -40,6 +70,7 @@
 
 #include <libraries/configvars.h>
 #include <libraries/expansion.h>
+#include <libraries/expansionbase.h>
 
 #define EXEC_BASE_NAME _sysbase
 #define EXPANSION_BASE_NAME _expbase
@@ -50,9 +81,14 @@
 
 #include "copperline_board.h"
 
-// The pump itself needs well under 200 bytes; 2K leaves headroom for the
-// OS calls and a future printf().
-#define HANDLER_STACK 2048
+// The pump itself needs well under 200 bytes, but this is dn_StackSize for
+// the whole handler process, and V34 dos.library burns ~1500 bytes of BCPL
+// environment at the stack bottom per DOS call -- the 1.3 *boot*-time
+// process bootstrap runs enough BCPL frames that a 2K stack overflows
+// before the handler's first instruction, crashing through a wild pointer.
+// 6000 is the WinUAE boot ROM's proven value for C-style handlers booting
+// under 1.3.
+#define HANDLER_STACK 6000
 
 // AbsExecBase. A plain *(struct ExecBase **)4 works too (a constant address
 // needs no relocation) but trips GCC's array-bounds warning, which treats any
@@ -133,15 +169,32 @@ void handler_main(void)
         struct Message *msg;
         while ((msg = GetMsg(port)) != NULL) {
             struct DosPacket *pkt = (struct DosPacket *)msg->mn_Node.ln_Name;
-            // The first packet is ACTION_STARTUP (== ACTION_NIL == 0): dp_Arg3
-            // is our DeviceNode. dn_SegList points back into the board window
-            // (board + 4), locating the board; dn_Startup's FileSysStartupMsg
-            // holds our mount unit, selecting our register bank. Introduce
+            // The first packet is the startup packet. On V36+ and on every
+            // deferred (first-reference) start it is ACTION_STARTUP
+            // (== ACTION_NIL == 0) with dp_Arg3 = our DeviceNode: dn_SegList
+            // points back into the board window (board + 4), locating the
+            // board; dn_Startup's FileSysStartupMsg holds our mount unit,
+            // selecting our register bank. Kickstart 1.3's *boot*-path
+            // startup is different: V34 dos init reuses the packet for its
+            // BCPL process parameters (dp_Type = our seglist, dp_Res1 = the
+            // stack size), dp_Arg1 is garbage and dp_Arg3 is NULL -- only
+            // dp_Arg2, the FileSysStartupMsg, "works as documented" (the
+            // same shape WinUAE's filesys handles, with the same words).
+            // The FSSM lives inside the board window at a fixed offset, so
+            // it alone locates both the board and the unit. Introduce
             // ourselves to the host by writing our MsgPort, once.
             if (regs == NULL) {
                 struct DeviceNode *dn = BADDR(pkt->dp_Arg3);
-                struct FileSysStartupMsg *fssm = BADDR(dn->dn_Startup);
-                UBYTE *board = (UBYTE *)BADDR(dn->dn_SegList) - 4;
+                struct FileSysStartupMsg *fssm;
+                UBYTE *board;
+                if (dn != NULL) {
+                    fssm = BADDR(dn->dn_Startup);
+                    board = (UBYTE *)BADDR(dn->dn_SegList) - 4;
+                } else {
+                    fssm = BADDR(pkt->dp_Arg2);
+                    board = (UBYTE *)fssm - FSSM_OFFSET -
+                            fssm->fssm_Unit * FSSM_SLOT_SIZE;
+                }
                 regs = (struct HostRegs *)(board + REGS_OFFSET) +
                        fssm->fssm_Unit;
                 regs->msgport = (ULONG)port;
@@ -187,7 +240,8 @@ void handler_main(void)
     }
 }
 
-void mount_boards(UBYTE *board, struct Library *_expbase, struct ConfigDev *cd)
+static void mount_boards(UBYTE *board, struct Library *_expbase,
+                         struct ConfigDev *cd)
 {
     struct ExecBase *_sysbase = sysbase();
     // The host writes count into the mount table and bounds it (board_image).
@@ -220,21 +274,81 @@ void mount_boards(UBYTE *board, struct Library *_expbase, struct ConfigDev *cd)
         dn->dn_Startup = MKBADDR(board + FSSM_OFFSET + i * FSSM_SLOT_SIZE);
         dn->dn_SegList = MKBADDR(board + 4);
         dn->dn_GlobalVec = -1; // C handler: no BCPL global vector
+        // A valid BSTR handler name: normally cosmetic (the handler is
+        // seglist-resident, nothing LoadSegs this), but WinUAE's boot ROM
+        // sets it for its Kickstart-1.3-bootable virtual drives, and 1.3's
+        // BCPL boot init dereferences DeviceNode fields it finds along the
+        // way -- a NULL BPTR walks address 0.
+        dn->dn_Handler = MKBADDR(board + FSSM_DEVNAME_OFFSET);
         dn->dn_Name = MKBADDR(bname);
 
         // Boot priority comes from the config via de_BootPri; the default
         // -128 mounts at DOS init but is never a boot candidate.
         // ADNF_STARTPROC: start the handler process at mount time rather
         // than on first reference, so problems surface at boot.
-        // AddBootNode is V36+; on 1.3's V34 expansion.library the same
-        // AddDosNode call (V33+) queues the node on eb_MountList, which
-        // V34 dos.library binds at init -- mounted, but outside the boot
-        // vote, so bootpri is inert under 1.3.
         struct FileSysStartupMsg *fssm = BADDR(dn->dn_Startup);
         struct DosEnvec *env = BADDR(fssm->fssm_Environ);
-        if (_expbase->lib_Version >= 36)
-            AddBootNode((BYTE)env->de_BootPri, ADNF_STARTPROC, dn, cd);
-        else
-            AddDosNode((BYTE)env->de_BootPri, ADNF_STARTPROC, dn);
+        BYTE pri = (BYTE)env->de_BootPri;
+        if (_expbase->lib_Version >= 36) {
+            AddBootNode(pri, ADNF_STARTPROC, dn, cd);
+        } else if (pri == -128) {
+            // AddBootNode is V36+. V34's AddDosNode (V33+) queues the
+            // node on eb_MountList too, so V34 dos.library mounts it at
+            // init, but takes no ConfigDev -- strap cannot trace such a
+            // node back to a boot ROM, which is exactly right for the
+            // never-boot priority.
+            AddDosNode(pri, ADNF_STARTPROC, dn);
+        } else {
+            // Bootable mount on V34: hand-build the BootNode AddBootNode
+            // would have built (the documented 1.3 autoboot recipe, per
+            // the A2091's V34 ROM). ln_Name carries the ConfigDev; strap
+            // takes the highest-priority valid BootNode, follows the
+            // ConfigDev to our DiagArea, and calls its da_BootPoint
+            // (entry.s), which fires dos.library's init; DOS then mounts
+            // the eb_MountList nodes and roots SYS: on the boot winner.
+            // A bootable floppy competes as a strap-enqueued BootNode at
+            // priority 5, so bootpri composes with DF0: as on V36+.
+            struct BootNode *bn =
+                AllocMem(sizeof(*bn), MEMF_PUBLIC | MEMF_CLEAR);
+            if (bn == NULL) {
+                AddDosNode(pri, ADNF_STARTPROC, dn);
+                continue;
+            }
+            bn->bn_Node.ln_Type = NT_BOOTNODE;
+            bn->bn_Node.ln_Pri = pri;
+            bn->bn_Node.ln_Name = (char *)cd;
+            // bn_Flags stays 0 (MEMF_CLEAR): the RKRM documents it as
+            // unused and expected NULL, and both UAE's equivalent
+            // hand-built BootNode (filesys.asm) and the A590 SCSI boot
+            // ROM's real firmware leave it untouched too.
+            bn->bn_DeviceNode = dn;
+            Forbid();
+            Enqueue(&((struct ExpansionBase *)_expbase)->MountList,
+                    &bn->bn_Node);
+            Permit();
+        }
     }
+}
+
+// rt_Init of the Romtag entry.s's DiagPoint patches into the diag copy,
+// reached through entry.s's local trampoline (see the -mpcrel note there).
+// Kickstart's cold-start resident scan calls this with D0=0, A0=NULL
+// segList, A6=ExecBase -- none of DiagPoint's own registers, so the
+// ConfigDev has to be re-obtained via GetCurrentBinding(), which the
+// resident-scan machinery sets as the current binding for exactly this
+// call (RKRM Libraries, "Events At ROMTAG INIT Time").
+void resident_init(void)
+{
+    struct ExecBase *_sysbase = sysbase();
+    struct Library *_expbase = OpenLibrary((STRPTR) "expansion.library", 0);
+    if (_expbase == NULL)
+        return;
+
+    struct CurrentBinding cb;
+    GetCurrentBinding(&cb, sizeof(cb));
+    struct ConfigDev *cd = cb.cb_ConfigDev;
+    if (cd != NULL)
+        mount_boards((UBYTE *)cd->cd_BoardAddr, _expbase, cd);
+
+    CloseLibrary(_expbase);
 }

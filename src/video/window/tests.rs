@@ -6916,3 +6916,29 @@ fn integer_scaling_fits_in_whole_canvas_pixels() {
     assert_eq!(plan(false, 2.0, (3024, 1964)), (2, false));
     assert_eq!(plan(false, 1.0, (3024, 1964)), (1, false));
 }
+
+/// A redraw that finds the host window at a size the surface was not
+/// configured for re-applies it before drawing, whether the window grew or
+/// shrank. A window manager resizing the window a moment before the Resized
+/// event reaches us -- the fullscreen toggle's ordinary case -- otherwise
+/// leaves `pixels` rebuilding a swapchain the driver rejects, in a retry loop
+/// that never ends and never lets the corrective event through (issue #362).
+#[test]
+fn draw_re_applies_a_surface_size_the_window_has_moved_past() {
+    let resize = |configured, (w, h)| {
+        super::surface_resize_for_draw(configured, winit::dpi::PhysicalSize::new(w, h))
+            .map(|size| (size.width, size.height))
+    };
+
+    // Matching sizes draw as they stand: no swapchain rebuild per frame.
+    assert_eq!(resize((1432, 1162), (1432, 1162)), None);
+    // Fullscreen entered (and left again) ahead of the event.
+    assert_eq!(resize((1432, 1162), (3024, 1964)), Some((3024, 1964)));
+    assert_eq!(resize((3024, 1964), (1432, 1162)), Some((1432, 1162)));
+    // One axis alone is a mismatch too.
+    assert_eq!(resize((1432, 1162), (1432, 900)), Some((1432, 900)));
+    // A minimized window is reported like any other mismatch, so the caller's
+    // minimized guard sees the 0x0 rather than the surface keeping its old
+    // size unnoticed.
+    assert_eq!(resize((1432, 1162), (0, 0)), Some((0, 0)));
+}

@@ -2072,6 +2072,9 @@ impl M68kMachine {
         self.bus.bus.begin_cpu_slice();
         self.bus.bus.slice_preempted = false;
         self.bus.bus.set_cpu_bus_arbitration_enabled(true);
+        // This slice charges every instruction as it retires, so the shared
+        // chip clock phase is current at each access.
+        self.bus.bus.set_cpu_access_phase_sync(true);
 
         let mut instructions = 0usize;
         let mut cpu_cycles = 0u32;
@@ -2083,7 +2086,8 @@ impl M68kMachine {
             let cpu_cck_before = cpu_cck;
             if let Some(irq_cycles) = self.service_pending_irq_cycles() {
                 cpu_cycles = cpu_cycles.saturating_add(positive_cpu_cycles(irq_cycles));
-                cpu_cck = cpu_cck.saturating_add(self.charge_cpu_clocks(irq_cycles));
+                cpu_cck =
+                    cpu_cck.saturating_add(self.charge_cpu_clocks_less_bus_overlap(irq_cycles));
                 // An interrupt dispatch can land the PC on a breakpoint or
                 // a caught vector; stop before the handler's first
                 // instruction executes.
@@ -2201,7 +2205,13 @@ impl M68kMachine {
                 }
             }
 
-            if self.sync_cck_on {
+            // A 020+ shares one clock timeline with the chip bus: the charge
+            // above already advanced the chipset through the execution time
+            // that did not overlap an access, and each access credited its own
+            // clocks back, so there is nothing left to reconcile. The 68000
+            // keeps its two timelines and the reconciliation below, which can
+            // only ever add time.
+            if self.sync_cck_on && !self.bus.bus.cpu_short_bus_cycle() {
                 // Advance the chipset through this instruction's CPU-internal
                 // cycles (cpu_cck minus the cycles already spent on the bus) so
                 // the beam and DMA track the CPU's full instruction time.
@@ -2284,6 +2294,10 @@ impl M68kMachine {
         self.bus.bus.begin_cpu_slice();
         self.bus.bus.slice_preempted = false;
         self.bus.bus.set_cpu_bus_arbitration_enabled(true);
+        // A batch is charged as one lump, so the shared chip clock phase would
+        // be stale at every access after the first. This slice keeps the older
+        // per-slice accounting, matching the batch model's stated coarseness.
+        self.bus.bus.set_cpu_access_phase_sync(false);
 
         let mut instructions = 0usize;
         let mut cpu_cycles = 0u32;
@@ -2426,6 +2440,12 @@ impl M68kMachine {
     }
 
     fn charge_cpu_clock_value(&mut self, clocks: u32) -> u32 {
+        if self.bus.bus.cpu_short_bus_cycle() && self.bus.bus.cpu_access_phase_sync() {
+            // The 020+ shares one clock timeline with the chip bus, so the
+            // sub-colour-clock phase lives there and an access can see where
+            // in the colour clock the CPU is; see `Bus::cpu_chip_clock_phase`.
+            return self.bus.bus.charge_cpu_clocks_to_cck(clocks);
+        }
         let total = clocks + self.cpu_clock_carry;
         let cck = total / self.cpu_clocks_per_cck;
         self.cpu_clock_carry = total % self.cpu_clocks_per_cck;

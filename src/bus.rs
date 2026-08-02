@@ -147,6 +147,17 @@ fn external_access_cck_x100_setting() -> u32 {
 /// detail the m68k core does not model).
 const DEFAULT_IRQ_LATENCY_CCK: u32 = 5;
 
+/// CPU clocks a 020+ chip read spends returning data past the data-return
+/// colour clock, before the execution unit can use it.
+///
+/// Derived, not fitted, from `timing-test/rdprobe.asm` on a real A1200: a
+/// chip-read loop measures 16 CPU clocks per iteration with a 6-clock loop
+/// branch and 20 with a 7-clock one. Since the loop period is a whole number
+/// of colour clocks (4 CPU clocks each), those force the un-rounded cost to be
+/// exactly 16, so a read occupies 10 clocks from the colour-clock boundary it
+/// starts on: two colour clocks of grant and data return, then these two.
+const CPU_020_CHIP_READ_RETURN_CLOCKS: u32 = 2;
+
 /// Read the COPPERLINE_IRQ_LATENCY_CCK setting once, at bus construction (stored in
 /// `irq_latency_setting`). Unset uses DEFAULT_IRQ_LATENCY_CCK; 0 disables.
 fn irq_latency_setting_from_env() -> u32 {
@@ -960,11 +971,12 @@ pub struct Bus {
     /// CPU model and re-set on construction / state load; not serialized.
     #[serde(skip)]
     cpu_short_bus_cycle: bool,
-    /// Sub-cck remainder (in CPU clocks) for the 020+ short-bus-cycle tail:
-    /// the 1-clock tail at the stock 2-clock ratio is half a cck, accumulated
-    /// here so the fractional cck are not lost.
+    /// Whether the current CPU slice charges per instruction, so the chip
+    /// clock phase below is fresh at every access. The JIT slice charges one
+    /// lump per batch, which would leave the phase stale for every access
+    /// after the first; it opts out and keeps the older accounting.
     #[serde(skip)]
-    cpu_bus_tail_carry: u32,
+    cpu_access_phase_sync: bool,
     /// Posted CPU chip-bus writes not yet retired to a slot (0 or 1). The
     /// 020+ bus unit runs decoupled from the execution unit: a chip write is
     /// accepted at the end of its 3-clock cycle and retires into a later free
@@ -980,11 +992,18 @@ pub struct Bus {
     /// what paces back-to-back CPU chip accesses (and posted-write drains) to
     /// every other colour clock.
     cpu_chip_port_free_at: u64,
-    /// Sub-cck remainder (in CPU clocks) of the one-clock synchronizer cost a
-    /// 020+ read pays when chip data crosses back into the CPU clock domain
-    /// (`timing-test` row 2: a real A1200 chip-read loop measures 16.1 clocks
-    /// per iteration where grant plus data-return alone bill 15).
-    cpu_read_return_carry: u32,
+    /// Where the 020+ CPU sits inside the current colour clock, in CPU clocks.
+    ///
+    /// The CPU and the chip bus run one timeline: the CPU's position is
+    /// `emulated_cck * cpu_clocks_per_cck + cpu_chip_clock_phase`. Execution
+    /// clocks accumulate here and turn into beam time a whole colour clock at
+    /// a time; a chip read, which cannot begin part way through a colour
+    /// clock, stalls out the remainder and resets it to zero. That
+    /// synchronisation is what makes a real 68EC020 run a loop containing a
+    /// chip access a whole number of colour clocks per iteration
+    /// (`timing-test/rdprobe.asm`), and what keeps the same loop costing the
+    /// same wherever in the frame it starts.
+    cpu_chip_clock_phase: u32,
     /// CPU clocks of posted-write transfer time that overlapped execution on
     /// the decoupled 020+ bus unit during the current instruction; the
     /// CPU-side charge subtracts them (`take_cpu_bus_overlap_clocks`).
@@ -2614,10 +2633,10 @@ impl Bus {
             cpu_clocks_per_cck: 2,
             ext_clock_carry_x100: 0,
             cpu_short_bus_cycle: false,
-            cpu_bus_tail_carry: 0,
+            cpu_access_phase_sync: false,
             cpu_posted_write_debt: 0,
             cpu_chip_port_free_at: 0,
-            cpu_read_return_carry: 0,
+            cpu_chip_clock_phase: 0,
             cpu_bus_overlap_clocks: 0,
             cpu_custom_access_slot: None,
             cpu_custom_request_slot: None,
@@ -3793,7 +3812,7 @@ impl Bus {
         self.emulated_frames = 0;
         self.cpu_posted_write_debt = 0;
         self.cpu_chip_port_free_at = 0;
-        self.cpu_read_return_carry = 0;
+        self.cpu_chip_clock_phase = 0;
         self.cpu_bus_overlap_clocks = 0;
         self.display_dma_bplpt = [0; 8];
         self.display_dma_sprpt = [0; 8];
@@ -4504,6 +4523,7 @@ impl Bus {
         }
         let tick = self.advance_chipset(cck);
         self.record_slice_bus_advance(cck, tick);
+        self.credit_cpu_off_chip_access(cck);
     }
 
     /// Advance the chipset for a CPU access to a motherboard peripheral (CIA,
@@ -4530,6 +4550,7 @@ impl Bus {
         let cck = delay + words * 2;
         let tick = self.advance_chipset(cck);
         self.record_slice_bus_advance(cck, tick);
+        self.credit_cpu_off_chip_access(cck);
         self.flush_timed_devices();
     }
 
@@ -4540,6 +4561,7 @@ impl Bus {
         let cck = words * 2;
         let tick = self.advance_chipset(cck);
         self.record_slice_bus_advance(cck, tick);
+        self.credit_cpu_off_chip_access(cck);
         // This access targets a motherboard peripheral (CIA, RTC, Akiko, Gayle,
         // A2091, autoconfig). The caller reads/writes the device immediately
         // after, so apply the deferred device clocks now -- including this
@@ -4567,6 +4589,54 @@ impl Bus {
         }
         let tick = self.advance_chipset(cck);
         self.record_slice_bus_advance(cck, tick);
+    }
+
+    /// Charge an instruction's execution clocks against the shared 020+ chip
+    /// clock phase, advancing the chipset by the whole colour clocks that
+    /// completes and leaving the remainder in `cpu_chip_clock_phase`.
+    ///
+    /// The CPU and the chip bus keep one timeline, so nothing here is
+    /// reconciled against the bus time an access already advanced: the access
+    /// credits its own clocks back (`take_cpu_bus_overlap_clocks`) and what
+    /// arrives here is the execution time that did not overlap it.
+    pub fn charge_cpu_clocks_to_cck(&mut self, clocks: u32) -> u32 {
+        if !self.cpu_bus_arbitration_enabled {
+            return 0;
+        }
+        let total = clocks + self.cpu_chip_clock_phase;
+        let cck = total / self.cpu_clocks_per_cck;
+        self.cpu_chip_clock_phase = total % self.cpu_clocks_per_cck;
+        self.advance_cpu_internal_cycles(cck);
+        cck
+    }
+
+    /// Bill CPU clocks that elapsed on the chip bus into the same phase.
+    /// Unlike an instruction charge these have already happened, so whole
+    /// colour clocks advance the beam here rather than at the next boundary.
+    fn bill_cpu_bus_clocks(&mut self, clocks: u32) {
+        let total = clocks + self.cpu_chip_clock_phase;
+        self.cpu_chip_clock_phase = total % self.cpu_clocks_per_cck;
+        for _ in 0..(total / self.cpu_clocks_per_cck) {
+            let (cck, tick) = self.advance_one_chip_bus_quantum(None);
+            self.record_slice_bus_advance(cck, tick);
+        }
+    }
+
+    /// Select the per-instruction charging path for the current CPU slice.
+    /// See `cpu_access_phase_sync`.
+    pub fn set_cpu_access_phase_sync(&mut self, enabled: bool) {
+        self.cpu_access_phase_sync = enabled;
+    }
+
+    /// Whether the current slice charges per instruction, so the chip clock
+    /// phase is fresh at every access.
+    pub fn cpu_access_phase_sync(&self) -> bool {
+        self.cpu_access_phase_sync
+    }
+
+    /// The CPU's position inside the current colour clock, in CPU clocks.
+    pub fn cpu_chip_clock_phase(&self) -> u32 {
+        self.cpu_chip_clock_phase
     }
 
     pub fn set_realtime_devices_enabled(&mut self, enabled: bool) {
@@ -4670,6 +4740,18 @@ impl Bus {
             }
             return;
         }
+        // Every access the CPU waits for credits its clocks back against the
+        // instruction charge, because the m68k timing table already allots the
+        // instruction the time for its own access.
+        let credit = self.cpu_short_bus_cycle && self.cpu_access_phase_sync;
+        // Only a chip-RAM read is known to synchronise the CPU to the chip
+        // clock; see `sync_cpu_to_chip_clock`. Fetches and custom-register
+        // accesses are left unsynchronised until a probe measures them.
+        let phase_sync = credit && matches!(kind, CpuBusAccessKind::Read);
+        if phase_sync {
+            self.sync_cpu_to_chip_clock();
+        }
+        let bus_clocks_start = self.cpu_bus_clock_position();
         let trace_cpu_bus = diag_cpu_bus_on() && diag_cpu_bus_addr_matches(addr, size);
         for slot in 0..slots {
             self.flush_audio_before_audio_dma_slot();
@@ -4709,18 +4791,10 @@ impl Bus {
             // After the granted slot (one cck), the CPU's bus cycle runs out
             // its remaining clocks with the chip bus free for DMA. The 68000's
             // 4-clock cycle leaves one whole cck (2 clocks at the stock ratio).
-            // A 020+ write can be posted after its shorter cycle; reads need
-            // the chipset's data-return phase, billed below. Bill the residual
-            // 020 write tail in CPU clocks through a carry so fractional cck
-            // are not lost on slower CPU ratios.
-            if self.cpu_short_bus_cycle {
-                self.cpu_bus_tail_carry += 3u32.saturating_sub(self.cpu_clocks_per_cck);
-                while self.cpu_bus_tail_carry >= self.cpu_clocks_per_cck {
-                    self.cpu_bus_tail_carry -= self.cpu_clocks_per_cck;
-                    let (cck, tick) = self.advance_one_chip_bus_quantum(None);
-                    self.record_slice_bus_advance(cck, tick);
-                }
-            } else {
+            // The 020+ has no separate tail: its shorter cycle ends on the
+            // data-return colour clock billed below, and where the CPU resumes
+            // inside that clock is carried by `cpu_chip_clock_phase`.
+            if !self.cpu_short_bus_cycle {
                 let (cck, tick) = self.advance_one_chip_bus_quantum(None);
                 self.record_slice_bus_advance(cck, tick);
             }
@@ -4743,9 +4817,49 @@ impl Bus {
         {
             self.bill_020_read_data_wait();
             if matches!(kind, CpuBusAccessKind::Read) {
-                self.bill_020_read_return_sync_clock();
+                // Without the shared phase (the JIT slice) the read return
+                // keeps its older single-clock accumulation.
+                let clocks = if phase_sync {
+                    CPU_020_CHIP_READ_RETURN_CLOCKS
+                } else {
+                    1
+                };
+                self.bill_cpu_bus_clocks(clocks);
             }
         }
+        if credit {
+            self.credit_cpu_bus_clocks_since(bus_clocks_start);
+        }
+    }
+
+    /// The CPU's absolute position on the shared timeline, in CPU clocks.
+    fn cpu_bus_clock_position(&self) -> u64 {
+        self.emulated_cck * u64::from(self.cpu_clocks_per_cck)
+            + u64::from(self.cpu_chip_clock_phase)
+    }
+
+    /// Credit the clocks an access spent on the chip bus back against the
+    /// instruction's own charge. The m68k timing table already allots a
+    /// memory-source instruction the time for its access, so without this the
+    /// access would be billed twice; what survives the credit is the wait the
+    /// table did not know about.
+    /// Credit an access that ran off the chip bus (fast RAM, ROM, CIA, slow
+    /// motherboard space) back against the instruction charge, on the same
+    /// terms as a chip access: the timing table already allots the memory
+    /// reference, so only the wait beyond it should stretch the instruction.
+    fn credit_cpu_off_chip_access(&mut self, cck: u32) {
+        if !self.cpu_short_bus_cycle || !self.cpu_access_phase_sync {
+            return;
+        }
+        let clocks = cck.saturating_mul(self.cpu_clocks_per_cck);
+        self.cpu_bus_overlap_clocks = self.cpu_bus_overlap_clocks.saturating_add(clocks);
+    }
+
+    fn credit_cpu_bus_clocks_since(&mut self, start: u64) {
+        let spent = self.cpu_bus_clock_position().saturating_sub(start);
+        self.cpu_bus_overlap_clocks = self
+            .cpu_bus_overlap_clocks
+            .saturating_add(spent.min(u64::from(u32::MAX)) as u32);
     }
 
     /// CPU chip-bus access trace (`COPPERLINE_DIAG_CPU_BUS=1`): logs each
@@ -4802,20 +4916,30 @@ impl Bus {
         self.record_slice_bus_advance(cck, tick);
     }
 
-    /// The one extra CPU clock a 020+ read pays synchronizing chip data back
-    /// into the CPU clock domain after the data-return colour clock.
-    /// Accumulated in CPU clocks and advanced as whole colour clocks so the
-    /// fraction is not lost: at 14 MHz every fourth read crosses a slot
-    /// boundary, which is what makes a real A1200 chip-read loop average
-    /// 16.1 clocks per iteration (`timing-test` row 2) where the grant and
-    /// data-return alone would bill 15.
-    fn bill_020_read_return_sync_clock(&mut self) {
-        self.cpu_read_return_carry += 1;
-        if self.cpu_read_return_carry >= self.cpu_clocks_per_cck {
-            self.cpu_read_return_carry -= self.cpu_clocks_per_cck;
-            let (cck, tick) = self.advance_one_chip_bus_quantum(None);
-            self.record_slice_bus_advance(cck, tick);
+    /// Synchronise the CPU to the chip clock before a chip access it has to
+    /// wait for. The 020's chip bus cycle cannot begin part way through a
+    /// colour clock, so a CPU sitting mid-clock stalls out the remainder.
+    ///
+    /// The phase is a debt of clocks already charged but not yet turned into
+    /// beam time, so advancing one whole colour clock bills those pending
+    /// clocks plus the stall, exactly and with nothing double counted. This is
+    /// what makes a chip-access loop run a whole number of colour clocks per
+    /// iteration on real hardware, and what makes the period independent of
+    /// the phase the loop happened to be entered with. A posted write does not
+    /// synchronise (the bus unit takes it behind the execution unit), which is
+    /// why a real A1200 write loop measures the same at both loop-branch
+    /// alignments while a read loop carries the branch clock into a whole
+    /// extra colour clock (`timing-test/rdprobe.asm` rows 2/3 against 0/1).
+    fn sync_cpu_to_chip_clock(&mut self) {
+        if self.cpu_chip_clock_phase == 0 {
+            return;
         }
+        self.cpu_chip_clock_phase = 0;
+        // Not a missed CPU slot: the CPU is synchronising to the chip clock,
+        // not being denied the bus, so this must not feed the blitter
+        // starvation counter.
+        let (cck, tick) = self.advance_one_chip_bus_quantum(None);
+        self.record_slice_bus_advance(cck, tick);
     }
 
     /// Advance the chipset until a posted CPU chip write has retired into a
@@ -6039,7 +6163,13 @@ impl Bus {
         if self.cpu_short_bus_cycle {
             self.bill_020_read_data_wait();
             self.bill_custom_register_return();
-            self.bill_020_read_return_sync_clock();
+            // A custom read crosses the chipset's own 16-bit bus, so it keeps
+            // the single synchroniser clock rather than the chip-RAM figure;
+            // it feeds the shared phase like any other bus time. Custom
+            // accesses are deliberately not synchronised to the chip clock
+            // until a probe measures them (the copper-poll beam row is exact
+            // today and would move).
+            self.bill_cpu_bus_clocks(1);
         }
         // Read-only custom registers (INTREQR, DSKBYTR, SERDATR, POTxDAT, ...)
         // reflect timed-device state, so apply the deferred device clocks before

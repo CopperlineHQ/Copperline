@@ -449,6 +449,20 @@ surface: the field is presented at a TV-like 4:3 aspect plus the
 is fed from `present_fb`, the post-processed presentation buffer produced by
 either the render worker or the synchronous fallback.
 
+Every redraw first re-syncs the surface to the host window's current size
+(`resync_surface_size`), rather than trusting the Resized event to have
+arrived first. `pixels` rebuilds its swapchain from the size the last
+`resize_surface` gave it, and retries the acquire in a loop with no bound,
+so a surface left behind by a resize the app has not seen yet is a hang and
+not a misdraw: a driver that rejects the mismatched extent (Mesa's X11
+Vulkan WSI answers `VK_ERROR_OUT_OF_DATE_KHR`) sends that loop round
+forever, and because it runs inside the event callback it also starves the
+Resized event that would have corrected the size. Entering or leaving
+fullscreen is the common way in, the window manager resizing the window a
+moment before the event is delivered. Both window kinds record the size
+their surface was configured with, and all resizes go through the wrappers
+that keep that record in step.
+
 The frontend-independent half of this pass lives in
 `video/present_common.rs`: the post-render pipeline (vertical/horizontal
 recentring, the TV bezel mask, programmable-scan presentation) plus the
