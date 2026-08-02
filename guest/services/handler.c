@@ -169,15 +169,32 @@ void handler_main(void)
         struct Message *msg;
         while ((msg = GetMsg(port)) != NULL) {
             struct DosPacket *pkt = (struct DosPacket *)msg->mn_Node.ln_Name;
-            // The first packet is ACTION_STARTUP (== ACTION_NIL == 0): dp_Arg3
-            // is our DeviceNode. dn_SegList points back into the board window
-            // (board + 4), locating the board; dn_Startup's FileSysStartupMsg
-            // holds our mount unit, selecting our register bank. Introduce
+            // The first packet is the startup packet. On V36+ and on every
+            // deferred (first-reference) start it is ACTION_STARTUP
+            // (== ACTION_NIL == 0) with dp_Arg3 = our DeviceNode: dn_SegList
+            // points back into the board window (board + 4), locating the
+            // board; dn_Startup's FileSysStartupMsg holds our mount unit,
+            // selecting our register bank. Kickstart 1.3's *boot*-path
+            // startup is different: V34 dos init reuses the packet for its
+            // BCPL process parameters (dp_Type = our seglist, dp_Res1 = the
+            // stack size), dp_Arg1 is garbage and dp_Arg3 is NULL -- only
+            // dp_Arg2, the FileSysStartupMsg, "works as documented" (the
+            // same shape WinUAE's filesys handles, with the same words).
+            // The FSSM lives inside the board window at a fixed offset, so
+            // it alone locates both the board and the unit. Introduce
             // ourselves to the host by writing our MsgPort, once.
             if (regs == NULL) {
                 struct DeviceNode *dn = BADDR(pkt->dp_Arg3);
-                struct FileSysStartupMsg *fssm = BADDR(dn->dn_Startup);
-                UBYTE *board = (UBYTE *)BADDR(dn->dn_SegList) - 4;
+                struct FileSysStartupMsg *fssm;
+                UBYTE *board;
+                if (dn != NULL) {
+                    fssm = BADDR(dn->dn_Startup);
+                    board = (UBYTE *)BADDR(dn->dn_SegList) - 4;
+                } else {
+                    fssm = BADDR(pkt->dp_Arg2);
+                    board = (UBYTE *)fssm - FSSM_OFFSET -
+                            fssm->fssm_Unit * FSSM_SLOT_SIZE;
+                }
                 regs = (struct HostRegs *)(board + REGS_OFFSET) +
                        fssm->fssm_Unit;
                 regs->msgport = (ULONG)port;

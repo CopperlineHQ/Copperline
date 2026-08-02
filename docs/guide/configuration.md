@@ -1353,12 +1353,12 @@ the default -128 means mounted but never booted from): hard-disk boot
 partitions typically sit at priority 0 and DF0: at 5, so a bootable
 Workbench directory with `bootpri = 6` boots ahead of both.
 
-Kickstart 2.0 or newer gets the full feature set. Kickstart 1.3 mounts
-and serves the volumes too (1.3 introduced the expansion-ROM init the
-service rides on), but cannot boot from them: the `bootpri` vote rides
-on the 2.0 boot-node mechanism, so under 1.3 the setting is ignored and
-the machine boots from floppy or another device. Kickstart 1.2 and older
-lack the expansion-ROM hook entirely and never see the mounts.
+Kickstart 1.3 and newer get the full feature set, booting included: a
+`bootpri` above the competition boots the machine from the host
+directory as `SYS:` under 1.3 exactly as under 3.1 (the service speaks
+both the V36 boot-node protocol and V34's own autoboot and handler
+startup conventions). Kickstart 1.2 and older lack the expansion-ROM
+hook entirely and never see the mounts.
 
 ## `[cd]` -- CDTV and CD32
 

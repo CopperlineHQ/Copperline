@@ -696,10 +696,17 @@ impl FilesysUnit {
         // packet, so the first one we see is the one DOS sent to start this
         // unit's process. dp_Arg3 is the DeviceNode; capture the handler
         // MsgPort, wire dn_Task to it, and hand the guest the volume node to
-        // AddDosEntry.
+        // AddDosEntry. Kickstart 1.3's boot-path startup instead carries
+        // V34's BCPL process parameters (dp_Type = the handler's seglist,
+        // dp_Res1 = the stack size) with dp_Arg3 NULL -- the same shape
+        // WinUAE's filesys documents -- and V34 dos init has already wired
+        // dn_Task itself before sending it, so there is nothing to patch
+        // (and no DeviceNode to find it from).
         if self.device_node.is_none() {
-            let dn = arg(bus, 3) << 2; // dp_Arg3: BPTR DeviceNode
-            bus.write_long(dn + DEVICENODE_TASK, port);
+            let dn = arg(bus, 3) << 2; // dp_Arg3: BPTR DeviceNode (0 on V34 boot)
+            if dn != 0 {
+                bus.write_long(dn + DEVICENODE_TASK, port);
+            }
             self.device_node = Some(dn);
             self.port = Some(port);
             let vol = self.build_volume_node(bus, board_base);
@@ -1195,9 +1202,12 @@ impl FilesysUnit {
                 }
                 // Clear dn_Task so the next reference to the device simply
                 // restarts the handler (and re-adds the volume). Dropping
-                // device_node/port marks the unit un-started again.
+                // device_node/port marks the unit un-started again. (0 =
+                // started by V34's boot path, which never told us the node.)
                 if let Some(dn) = self.device_node.take() {
-                    bus.write_long(dn + DEVICENODE_TASK, 0);
+                    if dn != 0 {
+                        bus.write_long(dn + DEVICENODE_TASK, 0);
+                    }
                 }
                 self.port = None;
                 let vol = self.volume.take().unwrap_or(0);
