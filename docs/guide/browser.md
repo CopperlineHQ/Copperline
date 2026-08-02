@@ -122,6 +122,25 @@ Controls:
   and the cap lights with it. Unlike the physical keyboard, the on-screen
   keys are never captured by the joystick modes below: an on-screen Amiga
   keyboard always types.
+- **Device keyboard**: the **Device keys** button raises the phone or
+  tablet's own keyboard instead, for when typing matters more than reaching
+  every Amiga key -- a BBS session, a filename, a high-score name -- and
+  swipe typing, predictions and a familiar layout are worth more than the
+  drawn caps. What such a keyboard reports is typed text rather than key
+  positions, so each character is translated back into the key that types
+  it, using the same UK/US legends the drawn keyboard is set to (which is a
+  statement about the guest's keymap, and out of the box that is `usa0`).
+  Return, Backspace, Delete and Tab come through; predictive text and
+  suggestions come through as the corrections they are, backspacing over
+  what was staged. Everything with no character to send -- Ctrl, Alt, both
+  Amiga keys, the function keys, Help, the cursor keys -- is unreachable
+  this way and stays the drawn keyboard's job, which is why the two are a
+  choice rather than a replacement. Only one is ever up: raising either puts
+  the other away. The two buttons are independent switches, so either
+  keyboard can be dismissed on its own. The drawn keyboard is remembered
+  between visits and the device one is not, because a browser only raises a
+  soft keyboard inside the tap that asked for it. The button appears on
+  touch screens alone: a desktop already has the real thing.
 - **Joystick**: the toggle cycles off -> keys -> cd32 (-> touch on touch
   screens). Keys is a two-button stick, the desktop frontend's
   FS-UAE-compatible mapping -- cursor keys for directions, Right Ctrl /
@@ -162,10 +181,13 @@ and is letterboxed against the monitor's own aspect ratio, so an
 ultrawide gets pillarbox bars instead of a stretched screen. The
 letterbox is applied by the page glue itself, not the page's stylesheet,
 so it holds on any shell that embeds the emulator. While fullscreen,
-small Joystick, Keys, Pause and Exit buttons sit in the top-right corner.
-Raising the on-screen keyboard there does not cover the picture: the
-letterbox recomputes into the space above the keyboard, so the display
-shrinks and stays whole. On iPhones, where Safari has no element
+small Joystick, Keys, Type, Pause and Exit buttons sit in the top-right
+corner (Type, the device keyboard, on touch screens only).
+Raising either keyboard there does not cover the picture: the letterbox
+recomputes into the space above the keys, so the display shrinks and stays
+whole. The drawn keyboard reports its own measured height for that; the
+device keyboard is measured from how much of the viewport it covers, which
+is what a browser offers instead of leaving room. On iPhones, where Safari has no element
 fullscreen, the button pins the shell over the page instead -- Safari's
 chrome stays, the page furniture goes, and the same letterbox applies.
 
@@ -573,6 +595,16 @@ elements, and pages without them are untouched:
   glue publishes the strip's measured height as `--cl-kbd-h` on `<html>`
   (`0px` while it is closed), so a shell that wants to reserve room for it
   in its own layout can read it.
+- `#devkeyboard` (a button): raises and dismisses the device's own keyboard,
+  the other half of the keyboard choice above. Like `#pause` it inserts
+  itself below the canvas shell when the element is absent, and the
+  fullscreen overlay carries a copy of it labelled Type -- but only where
+  there is a keyboard to raise. On a screen without touch, or a wasm bundle
+  without `key_raw`, neither is built at all and a shell that provided the
+  button has it hidden. It shares `--cl-kbd-h` with `#keyboard`,
+  publishing how much of the viewport the device keyboard covers. The
+  off-screen field it focuses is built by the glue and lives inside
+  `#shell`, so no input element is needed in the shell.
 - `#savestate`, `#loadstate`, `#quicksave`, `#quickload`, `#savedstates`
   (buttons): the [save-state controls](#browser-save-states) -- download
   a state, pick a state file, the browser-resident quick slot, and the

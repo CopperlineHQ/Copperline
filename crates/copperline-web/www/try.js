@@ -437,7 +437,10 @@ async function load() {
     console.error(e);
   }
   refreshBootButton();
-  if (!bootBtn.disabled) bootBtn.focus();
+  // The ROMs land without any user gesture, so a plain focus() would scroll
+  // the button into view and yank an embedding page (retro32.com) to its
+  // middle. preventScroll keeps the keyboard affordance without the jump.
+  if (!bootBtn.disabled) bootBtn.focus({ preventScroll: true });
 }
 
 // --- boot ----------------------------------------------------------------
@@ -588,6 +591,7 @@ function tick(nowMs) {
   // when asked, so this is where a controller reaches the machine.
   pumpGamepads();
   syncCapsLed();
+  pumpHostKeys();
   try {
     framesThisSecond += emu.run(nowMs, maxFramesForQueue());
   } catch (e) {
@@ -1598,12 +1602,18 @@ function ensureFsUi() {
   const kbd = mk('Keys');
   kbd.addEventListener('click', toggleKeyboard);
   kbd.hidden = !HAS_KEY_RAW;
+  // The device's own keyboard, the other half of the keyboard choice.
+  // Built only where there is one to raise (see the control-bar button)
+  // rather than built and hidden: this bar is glue, so there is no reason
+  // for it to carry a button no tap on this device can ever want.
+  const dev = HAS_KEY_RAW && hasTouch ? mk('Type') : null;
+  dev?.addEventListener('click', toggleHostKeyboard);
   const pause = mk(paused ? 'Resume' : 'Pause');
   pause.addEventListener('click', togglePause);
   const exit = mk('Exit');
   exit.addEventListener('click', exitFullscreen);
   shell.appendChild(bar);
-  fsUi = { bar, joy, kbd, pause };
+  fsUi = { bar, joy, kbd, dev, pause };
   return fsUi;
 }
 
@@ -1616,6 +1626,7 @@ function updateFsUi() {
   const ui = ensureFsUi();
   ui.joy.textContent = `Joystick: ${joyMode}`;
   ui.kbd.textContent = kbdOpen ? 'Keys off' : 'Keys';
+  if (ui.dev) ui.dev.textContent = hostKbdOpen ? 'Type off' : 'Type';
   ui.pause.textContent = paused ? 'Resume' : 'Pause';
   ui.bar.style.display = 'flex';
 }
@@ -2172,6 +2183,9 @@ function setKbdLegends(next) {
   kbdLegends = next === 'us' ? 'us' : 'uk';
   storePref(KB_LEGENDS_STORAGE_KEY, kbdLegends);
   if (kbdRoot) applyKbdLegends();
+  // The device keyboard reads the same legends to work out which key types
+  // a character, so its table is rebuilt from the new ones on demand.
+  hostCharMap = null;
 }
 
 // --- key painting ----------------------------------------------------------
@@ -2335,6 +2349,9 @@ function releaseAllVirtualKeys() {
 // still down across a rebuild sends no phantom release to the new machine.
 function forgetVirtualKeys() {
   kbdPointers.clear();
+  // Keystrokes still queued were typed at a machine that is not there any
+  // more; the new one must not inherit half a word.
+  hostKeyQueue.length = 0;
   for (const key of kbdKeys) key.down = false;
   for (const mod of kbdMods.values()) {
     mod.down = false;
@@ -2389,13 +2406,22 @@ function wireKeyboardPointers(root) {
 // --- keyboard open / close -------------------------------------------------
 
 function setKeyboardLabel() {
-  const label = kbdOpen ? 'Hide keys' : 'Keyboard';
-  if (keyboardBtn) keyboardBtn.textContent = label;
-  if (fsUi) fsUi.kbd.textContent = kbdOpen ? 'Keys off' : 'Keys';
+  if (keyboardBtn) keyboardBtn.textContent = kbdOpen ? 'Hide keys' : 'Keyboard';
+  if (devKeyboardBtn) {
+    devKeyboardBtn.textContent = hostKbdOpen ? 'Hide device keys' : 'Device keys';
+  }
+  if (fsUi) {
+    fsUi.kbd.textContent = kbdOpen ? 'Keys off' : 'Keys';
+    if (fsUi.dev) fsUi.dev.textContent = hostKbdOpen ? 'Type off' : 'Type';
+  }
 }
 
 function openKeyboard() {
   if (kbdOpen) return;
+  // One Amiga keyboard at a time: both write to the same machine, both
+  // want the same strip of screen, and the device keyboard's field would
+  // go on holding focus behind the drawn keys.
+  closeHostKeyboard();
   const root = ensureKeyboard();
   // With the pointer locked the cursor is gone, and a mouse cannot reach
   // the keys at all.
@@ -2439,6 +2465,385 @@ function syncCapsLed() {
   if (lit === kbdCapsLit) return;
   kbdCapsLit = lit;
   for (const key of kbdKeys) if (key.caps) paintKey(key);
+}
+
+// --- device keyboard -------------------------------------------------------
+// The drawn A600 is the keyboard an Amiga guest needs: qualifiers, function
+// keys, Help, both Amiga keys, all as key positions. What it is not is the
+// keyboard the visitor can already type on without looking -- their own,
+// with its swipe typing, its predictions, its languages and its muscle
+// memory. So the page offers that one too, and the two are exclusive: a
+// machine has one keyboard plugged into it.
+//
+// This path runs the opposite way round to the drawn one. A soft keyboard
+// reports typed *text* rather than key positions (which is why the A600
+// exists at all), so an invisible field is focused to raise it, its
+// `beforeinput` events say what was typed, and each character is looked up
+// in the keycap table above to find the key -- and the Shift -- that types
+// it. Everything with no character to send is unreachable here by
+// construction: Ctrl, Alt, both Amiga keys, the function keys and Help stay
+// the drawn keyboard's job, which is why the button offers a choice rather
+// than replacing it.
+//
+// Which cap prints which character is exactly what the drawn keyboard's
+// UK/US legend switch says, so the two share it: that switch is a statement
+// about the guest's keymap, and a keymap is what this translation needs.
+
+const HOST_RAW_SPACE = 0x40;
+const HOST_RAW_BACKSPACE = 0x41;
+const HOST_RAW_TAB = 0x42;
+const HOST_RAW_RETURN = 0x44;
+const HOST_RAW_DELETE = 0x46;
+const HOST_RAW_LSHIFT = 0x60;
+// The field is never left empty. An Android keyboard asked to delete from
+// an empty field has historically reported nothing at all -- no key event
+// and no editing intent -- so it always holds something to aim a backspace
+// at. Nothing ever reads the value back: every edit is cancelled before it
+// lands, which is also why the padding stays put.
+const HOST_PAD = '  ';
+// A dismissal that has only just happened is what a tap on the toggle
+// meant; see toggleHostKeyboard.
+const HOST_DISMISS_GRACE_MS = 400;
+
+let hostField = null;
+let hostKbdOpen = false;
+let hostHintShown = false;
+let hostImeActive = false; // an IME composition is on screen
+let hostComposed = ''; // how much of it has already gone to the guest
+let hostDismissedAt = 0;
+let hostViewportWatched = false;
+let hostCharMap = null;
+
+// Character -> the cap that types it, derived from the keycap table so the
+// two can never drift apart. Only caps that print something take part:
+// qualifiers type nothing, and the keys the table names with `aria` are
+// legends rather than characters (space is added by hand, the cursor keys
+// and the Amiga keys have no character at all).
+function buildHostCharMap() {
+  const map = new Map();
+  // First cap wins, which is what a keyboard does: the A600 has two keys
+  // printed \ and |, and either types the same character on the guest.
+  // `caps` marks the keys the guest's Caps Lock applies to -- the letters,
+  // and only the letters, as a keymap's capsable flag has it.
+  const add = (ch, raw, shift, caps = false) => {
+    if (ch.length === 1 && !map.has(ch)) map.set(ch, { raw, shift, caps });
+  };
+  const us = kbdLegends === 'us';
+  for (const row of KB_ROWS) {
+    for (const spec of row.k) {
+      if (spec.m || spec.caps || spec.aria) continue;
+      const swap = us ? KB_US_LEGENDS[spec.r] : null;
+      const main = swap ? swap[0] : (spec.t ?? '');
+      const shifted = swap ? swap[1] : (spec.s ?? '');
+      // Letters are printed on the cap in upper case and typed in either,
+      // so they are the one legend that maps to two characters. Word
+      // legends (Esc, Bksp) are longer than a character and `add` drops
+      // them; a US machine's two blank caps come through as empty and go
+      // the same way.
+      if (/^[A-Za-z]$/.test(main)) {
+        add(main.toLowerCase(), spec.r, false, true);
+        add(main.toUpperCase(), spec.r, true, true);
+      } else {
+        add(main, spec.r, false);
+      }
+      add(shifted, spec.r, true);
+    }
+  }
+  map.set(' ', { raw: HOST_RAW_SPACE, shift: false });
+  // Keys that can arrive as text inside an insertion rather than as an
+  // editing intent of their own -- a line break in a swipe-typed phrase, a
+  // tab in something pasted.
+  map.set('\n', { raw: HOST_RAW_RETURN, shift: false });
+  map.set('\t', { raw: HOST_RAW_TAB, shift: false });
+  // Phone keyboards insert typographic punctuation where the Amiga has
+  // only the typewriter forms, and a visitor who types an apostrophe means
+  // the apostrophe key whatever their keyboard sent.
+  for (const [fancy, plain] of [
+    ['\u2018', "'"], // left single quote
+    ['\u2019', "'"], // right single quote, an iPhone's apostrophe
+    ['\u201c', '"'], // left double quote
+    ['\u201d', '"'], // right double quote
+    ['\u2013', '-'], // en dash
+    ['\u2014', '-'], // em dash
+  ]) {
+    const key = map.get(plain);
+    if (key) map.set(fancy, key);
+  }
+  return map;
+}
+
+function hostCharKey(ch) {
+  if (!hostCharMap) hostCharMap = buildHostCharMap();
+  return hostCharMap.get(ch) ?? null;
+}
+
+// The MCU's type-ahead buffer is ten events deep and drops whatever
+// overflows, exactly as the 6500/1 does (chipset/keyboard.rs
+// TYPEAHEAD_CAPACITY). A swipe-typed word arrives as one insertion of a
+// dozen characters, which is fifty-odd key events: posted in one go, the
+// guest would hear about a fifth of them. They queue here instead and the
+// frame loop feeds them in at a rate a keyboard could plausibly send.
+const hostKeyQueue = [];
+const HOST_KEYS_PER_FRAME = 2;
+
+function pumpHostKeys() {
+  for (let i = 0; i < HOST_KEYS_PER_FRAME && hostKeyQueue.length; i++) {
+    const [raw, pressed] = hostKeyQueue.shift();
+    kbdSend(raw, pressed);
+  }
+}
+
+// A whole keystroke, queued as one: nothing is ever left half-typed, so a
+// Shift can never be stranded down over the rest of a session.
+function hostTapKey(raw, shift = false) {
+  // Only the frame loop drains this, and it runs for neither a machine
+  // that does not exist nor one whose clock is stopped -- so a keyboard
+  // raised over the boot overlay, or typed at while paused, would fill the
+  // queue rather than move it, and a paragraph would land in one burst on
+  // the resume. Nothing is typed into a paused machine, which is what
+  // pausing means.
+  if (!emu || !running || paused) return;
+  if (shift) hostKeyQueue.push([HOST_RAW_LSHIFT, true]);
+  hostKeyQueue.push([raw, true], [raw, false]);
+  if (shift) hostKeyQueue.push([HOST_RAW_LSHIFT, false]);
+}
+
+function hostTypeText(text) {
+  // Iterates code points, so an emoji is one unmappable character rather
+  // than two halves of one. CRLF is folded first, or pasted Windows text
+  // would type every line ending twice.
+  //
+  // The guest's Caps Lock is taken into account, which the drawn keyboard
+  // deliberately does not do. That one sends key positions and the visitor
+  // can see the lamp on the cap; this one is handed characters, by a
+  // keyboard whose own shift state has nothing to do with the Amiga's, and
+  // there is no lamp anywhere in sight -- so a locked guest would answer
+  // every typed word in the case the visitor did not ask for. A keymap
+  // treats Caps Lock as a shift its capsable keys exclusive-or with (only
+  // the letters are capsable), so inverting the Shift for those while the
+  // lamp is lit types what was actually typed. On the other reading, where
+  // the lock forces upper case whatever Shift does, lower case is
+  // unreachable while it is on and this changes nothing either way.
+  const caps = emu?.caps_lock_led?.() ?? false;
+  for (const ch of text.replace(/\r\n?/g, '\n')) {
+    const key = hostCharKey(ch);
+    if (key) hostTapKey(key.raw, key.shift !== (caps && key.caps));
+    else showOsd(`no Amiga key types "${ch}"`);
+  }
+}
+
+// A predictive keyboard rewrites its whole staged word on every keystroke,
+// so what goes to the guest is the difference from what it staged last
+// time: appending a letter types one letter, and accepting a suggestion
+// backspaces over what was staged and types the replacement -- which is
+// exactly what the visitor watches happen in their own candidate bar.
+function hostComposeTo(next) {
+  let same = 0;
+  while (same < hostComposed.length && same < next.length && hostComposed[same] === next[same]) {
+    same++;
+  }
+  for (let i = hostComposed.length; i > same; i--) hostTapKey(HOST_RAW_BACKSPACE);
+  hostComposed = next;
+  hostTypeText(next.slice(same));
+}
+
+function onHostBeforeInput(e) {
+  // The field is a listening post, never a text box: the edit is cancelled
+  // and only its description is used. (A composition is not always
+  // cancellable, which is what resetHostField cleans up after.)
+  e.preventDefault();
+  if (!hostKbdOpen) return;
+  const type = e.inputType ?? '';
+  const data = e.data ?? e.dataTransfer?.getData('text') ?? '';
+  if (type === 'insertCompositionText') {
+    hostComposeTo(data);
+    return;
+  }
+  if (type.startsWith('delete')) {
+    // A word delete sends one backspace rather than guessing how much of
+    // the guest's line the word was: the field cannot see what is on the
+    // Amiga's screen, and erasing too much is not recoverable.
+    if (hostComposed) hostComposeTo(hostComposed.slice(0, -1));
+    else hostTapKey(type.endsWith('Forward') ? HOST_RAW_DELETE : HOST_RAW_BACKSPACE);
+    return;
+  }
+  if (!type.startsWith('insert')) return;
+  if (type === 'insertLineBreak' || type === 'insertParagraph') {
+    hostComposed = '';
+    hostTapKey(HOST_RAW_RETURN);
+    return;
+  }
+  // Some browsers commit a finished composition a second time, as plain
+  // text; it has already been typed, so only what is new is sent on.
+  let text = data;
+  if (hostComposed && text.startsWith(hostComposed)) text = text.slice(hostComposed.length);
+  hostComposed = '';
+  hostTypeText(text);
+}
+
+// Nothing may accumulate in the field. Every edit is cancelled, but an
+// IME's composition can refuse to be, so whatever landed is wiped once it
+// has been read and the caret goes back behind the padding.
+function resetHostField() {
+  if (!hostField) return;
+  if (hostField.value !== HOST_PAD) hostField.value = HOST_PAD;
+  const end = HOST_PAD.length;
+  if (hostField.selectionStart !== end || hostField.selectionEnd !== end) {
+    hostField.setSelectionRange(end, end);
+  }
+}
+
+function ensureHostField() {
+  if (hostField) return hostField;
+  // A textarea rather than a text input, for one key: Return. A single-line
+  // input has nowhere to put a line break, so its Return submits a form
+  // that does not exist and reports no editing intent at all -- and the
+  // keydown a soft keyboard sends alongside carries no `code` to fall back
+  // on. In a textarea the same key is an insertLineBreak, which is a
+  // Return the guest can hear.
+  const field = document.createElement('textarea');
+  field.rows = 1;
+  // Every writing aid off: the field is a wire to a machine that has never
+  // heard of autocorrect, and a browser rewriting what was typed on the way
+  // through would be rewriting the guest's input.
+  field.setAttribute('autocomplete', 'off');
+  field.setAttribute('autocorrect', 'off');
+  field.setAttribute('autocapitalize', 'off');
+  field.setAttribute('spellcheck', 'false');
+  field.setAttribute('inputmode', 'text');
+  field.setAttribute('enterkeyhint', 'enter');
+  field.setAttribute('aria-label', 'Type into the Amiga');
+  // Out of the tab order for the same reason the drawn keys are: a page's
+  // own controls come first for whoever is tabbing through them.
+  field.tabIndex = -1;
+  // Invisible, but genuinely rendered: neither display:none nor
+  // visibility:hidden can hold focus, and focus is the entire mechanism.
+  // Not fully transparent either -- iOS has refused the keyboard to a field
+  // at opacity 0 -- so it is one 1px corner at 1% of a transparent colour.
+  // It sits at the top of the viewport, the one part no soft keyboard ever
+  // covers, so no browser scrolls the page to bring it into view; 16px is
+  // the font size below which iOS zooms the page in on a focused field.
+  field.style.cssText =
+    'position:fixed;left:0;top:0;width:1px;height:1px;padding:0;border:0;' +
+    'outline:none;resize:none;overflow:hidden;opacity:0.01;z-index:-1;' +
+    'font-size:16px;background:transparent;color:transparent;' +
+    'caret-color:transparent;';
+  field.addEventListener('beforeinput', onHostBeforeInput);
+  field.addEventListener('compositionstart', () => {
+    hostImeActive = true;
+    hostComposed = '';
+  });
+  field.addEventListener('compositionend', () => {
+    hostImeActive = false;
+    // What was staged is deliberately still remembered here. Browsers
+    // disagree about whether the commit arrives as the last composition
+    // update or as a plain insertion after this event, and in the second
+    // ordering that insertion is the whole word again -- already typed.
+    // The insert branch strips it and clears this, so the guard only ever
+    // covers the one insertion that follows a composition.
+    resetHostField();
+  });
+  field.addEventListener('input', () => {
+    if (!hostImeActive) resetHostField();
+  });
+  // The visitor can put this keyboard away without touching the button --
+  // the phone's own hide key, a tap on a page control -- and a button that
+  // then still says the keyboard is up is lying about the screen.
+  field.addEventListener('blur', () => {
+    if (!hostKbdOpen) return;
+    hostDismissedAt = performance.now();
+    closeHostKeyboard();
+  });
+  // Inside the shell, which is what goes fullscreen: a focused element
+  // outside the fullscreen subtree is not being displayed, and a browser
+  // owes it no keyboard.
+  shell.appendChild(field);
+  hostField = field;
+  return field;
+}
+
+// How much of the viewport the device keyboard is standing on. No browser
+// reports that directly, and the two of them do opposite things: one
+// shrinks the page under the keyboard (where the letterbox's dvh units have
+// already accounted for it and this measures nothing), the other leaves the
+// page alone and shrinks the visual viewport over it, which is the
+// difference this reads. Either way the answer goes out as the --cl-kbd-h
+// the drawn keyboard publishes, so the fullscreen letterbox reserves room
+// for this keyboard without knowing which one is up.
+function hostViewportOcclusion() {
+  const vv = window.visualViewport;
+  if (!vv) return 0;
+  const hidden = window.innerHeight - (vv.height + vv.offsetTop);
+  return hidden > 1 ? Math.round(hidden) : 0;
+}
+
+function onHostViewportChange() {
+  if (!hostKbdOpen) return;
+  publishKbdHeight(hostViewportOcclusion());
+  updateTouchJoyUi();
+}
+
+function watchHostViewport(on) {
+  const vv = window.visualViewport;
+  if (!vv || on === hostViewportWatched) return;
+  hostViewportWatched = on;
+  const how = on ? 'addEventListener' : 'removeEventListener';
+  // scroll as well as resize: iOS moves the visual viewport over a page it
+  // did not resize, so the keyboard's arrival can be a shift rather than a
+  // size change.
+  vv[how]('resize', onHostViewportChange);
+  vv[how]('scroll', onHostViewportChange);
+  if (on) onHostViewportChange();
+}
+
+function openHostKeyboard() {
+  if (hostKbdOpen) return;
+  closeKeyboard();
+  // With the pointer locked there is no cursor, and a locked page cannot
+  // reach the field either.
+  if (document.pointerLockElement) document.exitPointerLock?.();
+  const field = ensureHostField();
+  hostKbdOpen = true;
+  hostComposed = '';
+  resetHostField();
+  // Raising a soft keyboard is focus, and a browser only grants it inside
+  // the gesture that asked for it -- which is why this one, unlike the
+  // drawn keyboard, is not put back up on its own at boot.
+  field.focus({ preventScroll: true });
+  resetHostField(); // focus puts the caret where the browser likes
+  watchHostViewport(true);
+  setKeyboardLabel();
+  if (!hostHintShown) {
+    hostHintShown = true;
+    showOsd('your keyboard types text - the Amiga keyboard has Ctrl, Alt and the F keys');
+  }
+}
+
+function closeHostKeyboard() {
+  if (!hostKbdOpen) return;
+  hostKbdOpen = false;
+  hostComposed = '';
+  hostField?.blur();
+  // Keystrokes already queued are deliberately left to drain: they are
+  // press/release pairs the guest is halfway through hearing, and cutting
+  // one in half would leave a key held down in it.
+  watchHostViewport(false);
+  publishKbdHeight(0);
+  updateTouchJoyUi();
+  setKeyboardLabel();
+}
+
+function toggleHostKeyboard() {
+  // A tap on the toggle blurs the field before the click arrives, and that
+  // blur is what puts the keyboard away -- so by the time the click lands
+  // the keyboard is already down and a plain toggle would raise it straight
+  // back. A dismissal that has only just happened is what this tap meant.
+  if (hostKbdOpen || performance.now() - hostDismissedAt < HOST_DISMISS_GRACE_MS) {
+    hostDismissedAt = 0;
+    closeHostKeyboard();
+    return;
+  }
+  openHostKeyboard();
 }
 
 $('vol').addEventListener('input', (e) => {
@@ -2837,6 +3242,10 @@ function buildMachineControls() {
   const missing = [
     ['pause', 'Pause'],
     ['keyboard', 'Keyboard'],
+    // Only where a device keyboard exists to raise. Left out of the row
+    // rather than inserted and hidden, so no shell's own `button` rule can
+    // out-rank the `hidden` attribute and put it back on a desktop.
+    ...(hasTouch && HAS_KEY_RAW ? [['devkeyboard', 'Device keys']] : []),
     ['screenshot', 'Screenshot'],
     ['savestate', 'Save state'],
     ['loadstate', 'Load state...'],
@@ -2864,12 +3273,27 @@ buildMachineControls();
 const pauseBtn = $('pause');
 const screenshotBtn = $('screenshot');
 const keyboardBtn = $('keyboard');
+const devKeyboardBtn = $('devkeyboard');
 pauseBtn?.addEventListener('click', togglePause);
 screenshotBtn?.addEventListener('click', copyScreenshot);
 // Hidden rather than degraded on a bundle that predates key_raw: the keys
 // are rawkeys, and there is no half of this that still works.
 if (HAS_KEY_RAW) keyboardBtn?.addEventListener('click', toggleKeyboard);
 else if (keyboardBtn) keyboardBtn.hidden = true;
+// The device keyboard is offered where there is one to offer. A screen
+// without touch already has the real thing plugged in, and routing it
+// through a text field would only lose every key the field cannot
+// describe -- which is most of an Amiga keyboard.
+if (HAS_KEY_RAW && hasTouch) devKeyboardBtn?.addEventListener('click', toggleHostKeyboard);
+else if (devKeyboardBtn) {
+  // Only a shell-provided button can reach here (the self-inserted one is
+  // not built at all off a touch screen), and it goes away inline as well
+  // as by the attribute: `[hidden]` is a user-agent rule, so a shell whose
+  // stylesheet gives its buttons a `display` would out-rank it and leave a
+  // dead control on the page.
+  devKeyboardBtn.hidden = true;
+  devKeyboardBtn.style.display = 'none';
+}
 
 const saveStateBtn = $('savestate');
 const loadStateBtn = $('loadstate');
