@@ -506,6 +506,22 @@ pub(super) fn resync_render_scale(
     }
 }
 
+/// The size a redraw has to apply to the presentation surface before it draws,
+/// or `None` when the surface already matches the host window and the frame can
+/// go out as it stands.
+///
+/// A resize that has not reached the app as a Resized event yet leaves `pixels`
+/// configured for the old size, and it rebuilds the swapchain from that stored
+/// size alone, in a retry loop with no bound -- see `App::resync_surface_size`
+/// for what that costs. A 0x0 window is reported like any other mismatch, so
+/// the caller's minimized guard gets to see it.
+pub(super) fn surface_resize_for_draw(
+    configured: (u32, u32),
+    inner: PhysicalSize<u32>,
+) -> Option<PhysicalSize<u32>> {
+    ((inner.width, inner.height) != configured).then_some(inner)
+}
+
 pub(super) fn build_pixels_for_window(
     window: Arc<Window>,
     texture_scale: usize,
