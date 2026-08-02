@@ -1944,6 +1944,7 @@ fn main() -> Result<()> {
             .unwrap_or(true)
     });
     video::set_pixel_aspect(config::resolve_pixel_aspect(cfg.pixel_aspect));
+    video::set_display_scaling(cfg.scaling);
     video::set_menu_scale(cfg.menu_scale);
     // Capture runs (--screenshot-after / --dump-frames) never present a
     // frame, so they skip the host window and event loop entirely: winit's
@@ -2070,6 +2071,10 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
     info!("no machine specified; opening the configuration screen");
     let emu = build_placeholder_machine()?;
     video::set_pixel_aspect(config::resolve_pixel_aspect(config::PixelAspect::Tv));
+    // The launcher opens before a machine config is built, so it presents at
+    // the default aspect and scaling; the machine it starts applies its own
+    // (see start_configured_machine).
+    video::set_display_scaling(config::DisplayScaling::Smooth);
     // The launcher opens before a machine config is built, so the menu size
     // comes straight off the raw file.
     video::set_menu_scale(raw_cfg.menu_scale());

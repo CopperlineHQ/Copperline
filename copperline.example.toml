@@ -369,9 +369,17 @@ video = "PAL"
 # overscan like a CRT bezel) or "full". pixel_aspect: "tv" (default; the
 # non-square pixel aspect of a 4:3 CRT) or "square" (one host row per
 # scanline, so a 320x256 lo-res screen is an exact 640x512 -- handy for
-# pixel-exact comparison against square-pixel emulators). deinterlace:
-# motion-adaptive weaving of interlaced displays (default true); false
-# line-doubles every field, showing interlace bob/flicker like a bare TV.
+# pixel-exact comparison against square-pixel emulators). scaling: how that
+# canvas reaches the window. "smooth" (default; fit to the window preserving
+# aspect ratio, interpolated) or "integer" (the largest whole-number multiple
+# of the canvas that fits, centred in black borders and point-sampled, in the
+# spirit of WinUAE/Amiberry integer scaling). Integer covers RTG modes too,
+# at multiples of their own native resolution, and falls back to the smooth
+# fit when the window is too small for even 1x rather than cropping.
+# Pair it with pixel_aspect = "square" for a fully pixel-exact picture.
+# deinterlace: motion-adaptive weaving of interlaced displays (default
+# true); false line-doubles every field, showing interlace bob/flicker like
+# a bare TV.
 # phosphor: CRT persistence fraction (0.0-0.95, default 0.0): fuses
 # field-rate flicker/dither like a real tube at the cost of a slight
 # motion trail.
@@ -399,6 +407,7 @@ video = "PAL"
 # [display]
 # overscan = "tv"
 # pixel_aspect = "tv"
+# scaling = "smooth"
 # deinterlace = true
 # phosphor = 0.4
 # shader = "none"

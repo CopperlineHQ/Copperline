@@ -15,7 +15,9 @@
 
 use crate::bus::PortDevice;
 use crate::config::JoystickInputMode;
-use crate::config::{AudioFilterMode, MenuScale, PixelAspect, ShaderKind, Tint, WarpSpeed};
+use crate::config::{
+    AudioFilterMode, DisplayScaling, MenuScale, PixelAspect, ShaderKind, Tint, WarpSpeed,
+};
 
 /// What choosing a leaf does. Everything the menu can do is here, so the
 /// window's handler is a single match and the tree carries no behaviour.
@@ -38,6 +40,7 @@ pub enum MenuAction {
 
     // Video.
     SetPixelAspect(PixelAspect),
+    SetDisplayScaling(DisplayScaling),
     SetShader(ShaderKind),
     SetTint(Tint),
     SetMenuScale(MenuScale),
@@ -394,6 +397,7 @@ pub struct MenuState<'a> {
     pub joystick_input_mode: JoystickInputMode,
     pub port_devices: [PortDevice; 2],
     pub pixel_aspect: PixelAspect,
+    pub scaling: DisplayScaling,
     pub shader: ShaderKind,
     /// Whether a custom shader file is configured. Without one the Custom
     /// row is shown but cannot be chosen.
@@ -530,6 +534,17 @@ fn video_rows(s: &MenuState) -> Vec<MenuRow> {
     .map(|(label, a)| MenuRow::choice(label, MenuAction::SetPixelAspect(a), s.pixel_aspect == a))
     .collect();
 
+    let scalings = DisplayScaling::MENU_ORDER
+        .iter()
+        .map(|m| {
+            MenuRow::choice(
+                m.label(),
+                MenuAction::SetDisplayScaling(*m),
+                s.scaling == *m,
+            )
+        })
+        .collect();
+
     // Custom is listed whether or not a shader file is configured. Greyed,
     // it says the feature is there and wants a file; absent, it says nothing.
     let shaders = ShaderKind::MENU_ORDER
@@ -553,6 +568,7 @@ fn video_rows(s: &MenuState) -> Vec<MenuRow> {
     vec![
         MenuRow::submenu("Menu Size", sizes).with_value(s.menu_scale.label()),
         MenuRow::submenu("Pixel Aspect", aspects),
+        MenuRow::submenu("Scaling", scalings),
         MenuRow::submenu("CRT Shader", shaders),
         MenuRow::submenu("Screen Tint", tints),
         MenuRow::toggle("Fullscreen", MenuAction::ToggleFullscreen, s.fullscreen),
@@ -917,6 +933,7 @@ mod tests {
             joystick_input_mode: JoystickInputMode::Gamepad,
             port_devices: [PortDevice::Mouse, PortDevice::Joystick],
             pixel_aspect: PixelAspect::Tv,
+            scaling: DisplayScaling::Smooth,
             shader: ShaderKind::None,
             custom_shader_available: false,
             tint: Tint::None,

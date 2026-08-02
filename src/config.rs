@@ -217,6 +217,11 @@ pub struct Config {
     /// Presentation pixel aspect: how emulated scanlines map to host
     /// rows in the window and in screenshots. See [`PixelAspect`].
     pub pixel_aspect: PixelAspect,
+    /// How the presentation canvas is scaled into the window: aspect-fit
+    /// with filtering, or whole-number multiples only. See
+    /// [`DisplayScaling`]. Orthogonal to `pixel_aspect`, which decides what
+    /// the canvas itself is.
+    pub scaling: DisplayScaling,
     /// Motion-adaptive deinterlacing of LACE content (on by default).
     /// Off, every field is plain line-doubled as it arrives, which shows
     /// interlace bob/flicker like a real TV without persistence.
@@ -327,6 +332,39 @@ pub enum PixelAspect {
     /// Slightly taller than a real 4:3 CRT picture, but every pixel is
     /// an integer square, which suits side-by-side pixel comparisons.
     Square,
+}
+
+/// How the presentation canvas is scaled into the host window
+/// (`[display] scaling`). A window-presentation setting only: the
+/// framebuffer, screenshots, frame dumps and recordings are the canvas
+/// itself and never see it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DisplayScaling {
+    /// Fit the canvas to the window preserving its aspect ratio, with
+    /// linear filtering -- the whole window height (or width) is used
+    /// whatever the ratio works out to. The default.
+    #[default]
+    Smooth,
+    /// Draw the canvas at the largest whole-number multiple of itself that
+    /// fits the window, centred in black borders and point-sampled, so
+    /// every canvas pixel is the same square block of host pixels. Falls
+    /// back to the smooth fit when the window is too small for even 1x,
+    /// which crops rather than shrinks.
+    Integer,
+}
+
+impl DisplayScaling {
+    /// Every mode, in the order a picker offers them.
+    pub const MENU_ORDER: [DisplayScaling; 2] = [DisplayScaling::Smooth, DisplayScaling::Integer];
+
+    /// Picker label: the config name of the mode (round-trips through
+    /// [`parse_display_scaling`]).
+    pub fn label(self) -> &'static str {
+        match self {
+            DisplayScaling::Smooth => "Smooth",
+            DisplayScaling::Integer => "Integer",
+        }
+    }
 }
 
 /// The GPU shader pass the window applies to the presented image. The
@@ -1747,6 +1785,7 @@ impl Default for Config {
             floppy_playlists: std::array::from_fn(|_| Vec::new()),
             overscan: Overscan::Tv,
             pixel_aspect: PixelAspect::Tv,
+            scaling: DisplayScaling::Smooth,
             deinterlace: true,
             phosphor: 0.0,
             shader: ShaderMode::None,
@@ -2364,6 +2403,10 @@ pub(crate) struct RawDisplay {
     /// pixels; a lo-res display is an exact 2x2 of its bitmap).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) pixel_aspect: Option<String>,
+    /// "smooth" (default, aspect-fit with filtering) or "integer" (whole
+    /// -number multiples of the canvas, centred, point-sampled).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) scaling: Option<String>,
     /// Motion-adaptive deinterlacing of interlaced content (default
     /// true); false line-doubles every field as it arrives.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3246,6 +3289,10 @@ impl TryFrom<RawConfig> for Config {
             None => defaults.pixel_aspect,
             Some(s) => parse_pixel_aspect(s)?,
         };
+        let scaling = match raw.display.scaling.as_deref() {
+            None => defaults.scaling,
+            Some(s) => parse_display_scaling(s)?,
+        };
         let deinterlace = raw.display.deinterlace.unwrap_or(defaults.deinterlace);
         let phosphor = match raw.display.phosphor {
             None => defaults.phosphor,
@@ -3722,6 +3769,7 @@ impl TryFrom<RawConfig> for Config {
             floppy_playlists,
             overscan,
             pixel_aspect,
+            scaling,
             deinterlace,
             phosphor,
             shader,
@@ -3799,6 +3847,14 @@ pub(crate) fn parse_pixel_aspect(s: &str) -> Result<PixelAspect> {
         "tv" => Ok(PixelAspect::Tv),
         "square" => Ok(PixelAspect::Square),
         other => bail!("[display] pixel_aspect must be \"tv\" or \"square\", got \"{other}\""),
+    }
+}
+
+pub(crate) fn parse_display_scaling(s: &str) -> Result<DisplayScaling> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "smooth" => Ok(DisplayScaling::Smooth),
+        "integer" => Ok(DisplayScaling::Integer),
+        other => bail!("[display] scaling must be \"smooth\" or \"integer\", got \"{other}\""),
     }
 }
 
@@ -5665,6 +5721,20 @@ mod tests {
         )?;
         assert_eq!(cfg.pixel_aspect, PixelAspect::Square);
         assert!(parse_config("[display]\npixel_aspect = \"1:1\"").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn display_scaling_parses_and_defaults_to_smooth() -> Result<()> {
+        assert_eq!(parse_config("")?.scaling, DisplayScaling::Smooth);
+        let cfg = parse_config(
+            r#"
+            [display]
+            scaling = "Integer"
+            "#,
+        )?;
+        assert_eq!(cfg.scaling, DisplayScaling::Integer);
+        assert!(parse_config("[display]\nscaling = \"2x\"").is_err());
         Ok(())
     }
 

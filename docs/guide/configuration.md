@@ -480,6 +480,7 @@ recorded in [](../internals/chipset)).
 [display]
 overscan = "tv"       # "tv" (default) or "full"
 pixel_aspect = "tv"   # "tv" (default, 4:3 CRT) or "square" (exact 2x2 lo-res)
+scaling = "smooth"    # "smooth" (default, aspect fit) or "integer" (whole multiples)
 deinterlace = true    # motion-adaptive interlace weaving (default true)
 phosphor = 0.0        # CRT persistence fraction, 0.0 (off) to 0.95
 shader = "none"       # "none" (default), "scanlines", "mask", "crt", or a .wgsl file
@@ -520,6 +521,41 @@ slightly taller than a real CRT picture, but exact for side-by-side pixel
 comparison with square-pixel emulators. The menu's *Pixel Aspect* item
 flips the mode live without touching the config, and
 `COPPERLINE_PIXEL_ASPECT=tv|square` overrides it for a single run.
+
+`scaling` selects how that presentation canvas reaches the window, which is
+a separate question from what the canvas is. The default `"smooth"` fits the
+canvas to the window preserving its aspect ratio and interpolates, so the
+picture always uses the full window height (or width) whatever fraction the
+scale works out to. `"integer"` instead draws the canvas at the largest
+whole-number multiple of itself that fits the window, measured in physical
+device pixels, centred in black borders and point-sampled: every canvas
+pixel becomes the same square block of host pixels, with no row or column
+sampled twice, which is the look WinUAE and Amiberry call integer scaling.
+The fit is taken in whole canvas pixels against the physical surface --
+the canvas is re-rendered at whatever factor fits, rather than drawn at
+whole multiples of a fixed high-DPI texture -- so every step exists on
+every display: a 2x-DPI laptop whose screen holds three physical pixels
+per canvas pixel but not four gets the 3x picture, and fractional desktop
+scales such as 150% take their whole physical multiples the same way. The
+status bar and menus are rendered at the fitted factor too, so they stay
+sharp at any step (the factor is capped at 4x; larger fits continue as
+whole multiples of the 4x canvas). Only when the window is too small for
+even a 1:1 copy -- smaller than the canvas itself in physical pixels --
+does the picture fall back to the smooth fit rather than cropping to what
+fits. RTG board modes follow the setting too: their frame is scaled
+from its own native resolution, so a 640x480 board screen is drawn at 1x,
+2x, 3x of *those* pixels inside the display area.
+
+`pixel_aspect = "square"` with `scaling = "integer"` is the fully
+pixel-exact combination: the square-pixel canvas is one host row per woven
+scanline, so a whole-number window scale carries the emulated bitmap to the
+screen untouched. Integer scaling of the default TV aspect is still crisp,
+but crisp pixels of an already-resampled image -- that canvas fits the scan
+onto 537 rows for the 4:3 shape before presentation. The monitor-bezel mode
+(`bezel`) composes with either, but its picture opening is a fraction of
+the window by design and is not itself integer-exact. The menu's *Video
+Settings > Scaling* item switches modes live without touching the config;
+there is no environment-variable override.
 
 `deinterlace` controls how interlaced (LACE) displays are presented. On
 (the default), a motion-adaptive deinterlacer weaves the two fields into a

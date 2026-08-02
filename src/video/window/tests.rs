@@ -5,28 +5,29 @@
 //! and keep full access to the parent's private items via `super::`.
 
 use super::ui::{AnalyzerTab, Panel, UiControl};
+use super::ScalingMode;
 use super::{
     bar_layout, center_present_frame_for_visible_start, center_present_frame_horizontally,
     control_at, copperline_icon_image, copperline_logo_image, copy_present_frame,
     copy_window_present_frame, cursor_position_in_texture, draw_status_bar, fdd_track_counter_rect,
     fdd_track_digit_rect, host_shortcut_modifier_pressed, host_to_amiga_rawkey,
     joystick_toggle_rect, led_row_rect, mask_present_frame_to_tv, paint_test_screen,
-    parse_amiga_key, pause_button_rect, power_button_rect, present_height,
-    presentation_pixels_equal, presentation_source_y_offset, raw_device_qualifier_family_held,
-    raw_device_qualifier_rawkey, rawkey_is_held, rawkey_transition_is_duplicate,
-    reboot_button_rect, repeated_main_key_should_drop, rgba, short_status_error,
-    shorten_status_paths, shot_button_rect, should_render_emulated_frame, standard_window_top_row,
-    status_with_latched_fdd_track, take_integral_mouse_delta, texture_height, texture_width,
-    tint_display_rows, tint_lut, tint_rows_in_place, tv_aperture_source_row, tv_source_h_bounds,
-    volume_percent_from_pos, volume_slider_track_rect, BarControl, DriveBar, JoystickInputMode,
-    MediaBar, PresentationLatch, StatusBarView, ToolPanelKind, AMIGA_RAWKEY_LEFT_ALT,
-    AMIGA_RAWKEY_LEFT_SHIFT, AMIGA_RAWKEY_RIGHT_ALT, AMIGA_RAWKEY_RIGHT_SHIFT, BUTTON_GLYPH,
-    BUTTON_GLYPH_DISABLED, CD_BODY, CD_LED_OFF, CD_LED_ON, DISK_BODY, DISK_BODY_SHADOW, DISK_LABEL,
-    FDD_LED_OFF, FDD_LED_ON, HDD_LED_OFF, HDD_LED_ON, POWER_GLYPH_OFF, POWER_GLYPH_ON,
-    POWER_LED_BRIGHT, POWER_LED_DIM, POWER_LED_OFF, STANDARD_PAL_VISIBLE_LINES,
-    STANDARD_PAL_VISIBLE_START_VPOS, STATUS_BG, TRACK_SEGMENT_OFF, TRACK_SEGMENT_ON,
-    TV_CAPTURED_SOURCE_X, TV_LIVE_PAD_X, TV_PAL_PRESENT_HEIGHT, TV_PRESENT_SOURCE_X,
-    TV_PRESENT_SOURCE_Y, TV_PRESENT_WIDTH, VOLUME_FILL, VOLUME_GLYPH_X,
+    parse_amiga_key, pause_button_rect, plan_present_scaling_for, power_button_rect,
+    present_height, presentation_pixels_equal, presentation_source_y_offset,
+    raw_device_qualifier_family_held, raw_device_qualifier_rawkey, rawkey_is_held,
+    rawkey_transition_is_duplicate, reboot_button_rect, repeated_main_key_should_drop, rgba,
+    short_status_error, shorten_status_paths, shot_button_rect, should_render_emulated_frame,
+    standard_window_top_row, status_with_latched_fdd_track, take_integral_mouse_delta,
+    texture_height, texture_width, tint_display_rows, tint_lut, tint_rows_in_place,
+    tv_aperture_source_row, tv_source_h_bounds, volume_percent_from_pos, volume_slider_track_rect,
+    BarControl, DriveBar, JoystickInputMode, MediaBar, PresentationLatch, StatusBarView,
+    ToolPanelKind, AMIGA_RAWKEY_LEFT_ALT, AMIGA_RAWKEY_LEFT_SHIFT, AMIGA_RAWKEY_RIGHT_ALT,
+    AMIGA_RAWKEY_RIGHT_SHIFT, BUTTON_GLYPH, BUTTON_GLYPH_DISABLED, CD_BODY, CD_LED_OFF, CD_LED_ON,
+    DISK_BODY, DISK_BODY_SHADOW, DISK_LABEL, FDD_LED_OFF, FDD_LED_ON, HDD_LED_OFF, HDD_LED_ON,
+    POWER_GLYPH_OFF, POWER_GLYPH_ON, POWER_LED_BRIGHT, POWER_LED_DIM, POWER_LED_OFF,
+    STANDARD_PAL_VISIBLE_LINES, STANDARD_PAL_VISIBLE_START_VPOS, STATUS_BG, TRACK_SEGMENT_OFF,
+    TRACK_SEGMENT_ON, TV_CAPTURED_SOURCE_X, TV_LIVE_PAD_X, TV_PAL_PRESENT_HEIGHT,
+    TV_PRESENT_SOURCE_X, TV_PRESENT_SOURCE_Y, TV_PRESENT_WIDTH, VOLUME_FILL, VOLUME_GLYPH_X,
 };
 use crate::audio::{AudioSink, NullSink};
 use crate::bus::{FrontPanelStatus, RenderRegisterSnapshot};
@@ -6868,4 +6869,50 @@ fn cursor_mapping_rejects_pillarbox_clicks() {
         cursor_position_in_texture((0.0, 0.0), (0, 0, 0, 0), texture),
         None
     );
+}
+
+/// `[display] scaling = "integer"` fits in whole *canvas* pixels against
+/// the physical surface, and the supersample factor follows that fit: the
+/// canvas is rendered at the fitted factor and PixelPerfect draws it 1:1.
+/// Deriving the factor from the fit rather than the host DPI is what makes
+/// odd physical multiples reachable -- a DPI-supersampled texture can only
+/// be drawn at whole multiples of itself, which on a 2x display skips 1x
+/// and 3x physical pixels per canvas pixel. Only a surface smaller than the
+/// canvas (no whole multiple at all; PixelPerfect would crop) falls back to
+/// the smooth DPI-supersampled Fill plan.
+#[test]
+fn integer_scaling_fits_in_whole_canvas_pixels() {
+    // ScalingMode is not PartialEq, so extract the planned factor and
+    // whether the integer mode was chosen rather than comparing values.
+    let plan = |requested, dpi, surface| {
+        let (scale, mode) = plan_present_scaling_for(requested, dpi, surface, (716, 581));
+        (scale, matches!(mode, ScalingMode::PixelPerfect))
+    };
+
+    // A 2x-DPI laptop panel (3024x1964) holds three whole canvas pixels per
+    // axis but not four: an odd multiple a 2x texture could never reach.
+    assert_eq!(plan(true, 2.0, (3024, 1964)), (3, true));
+    // The canvas-sized window on the same panel: exactly 2x physical.
+    assert_eq!(plan(true, 2.0, (1432, 1162)), (2, true));
+    // A window shrunk below the default still holds one physical pixel per
+    // canvas pixel, so it stays integer (small and crisp) instead of
+    // falling back to smooth.
+    assert_eq!(plan(true, 2.0, (1000, 840)), (1, true));
+    // The 150% fractional-DPI desktop's canvas-sized window (1.5x physical)
+    // holds a whole 1x too -- under the old texture-multiple fit this was a
+    // forced smooth fallback.
+    assert_eq!(plan(true, 1.5, (1074, 872)), (1, true));
+    // The exact-fit boundary, and one pixel short in either dimension:
+    // below the canvas there is no whole multiple, and PixelPerfect would
+    // crop, so the plan is the smooth one (DPI-supersampled Fill).
+    assert_eq!(plan(true, 2.0, (716, 581)), (1, true));
+    assert_eq!(plan(true, 2.0, (715, 581)), (2, false));
+    assert_eq!(plan(true, 2.0, (716, 580)), (2, false));
+    // A huge surface caps the supersample; PixelPerfect's own whole
+    // multiples of the capped texture carry on above it.
+    assert_eq!(plan(true, 2.0, (8000, 5000)), (4, true));
+
+    // Smooth never leaves Fill or the DPI factor, whatever the room.
+    assert_eq!(plan(false, 2.0, (3024, 1964)), (2, false));
+    assert_eq!(plan(false, 1.0, (3024, 1964)), (1, false));
 }

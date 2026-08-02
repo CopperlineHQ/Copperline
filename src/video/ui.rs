@@ -8221,6 +8221,7 @@ mod tests {
                 crate::bus::PortDevice::Joystick,
             ],
             pixel_aspect: PixelAspect::Tv,
+            scaling: crate::config::DisplayScaling::Smooth,
             shader: crate::config::ShaderKind::None,
             custom_shader_available: false,
             tint: crate::config::Tint::None,
