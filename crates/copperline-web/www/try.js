@@ -79,8 +79,19 @@ function ensureOsd() {
   return osd;
 }
 
+// Lift the caption clear of the on-screen keyboard. Only in fullscreen:
+// there the shell is the whole viewport, so the shell's bottom really is
+// behind the keyboard strip and a message would land under it -- the exact
+// invisibility the caption exists to avoid. In the page the shell is just
+// the picture and the offset would mean nothing.
+function placeOsd() {
+  if (!osd) return;
+  osd.style.bottom = isFullscreen() ? 'var(--cl-kbd-h, 0px)' : '0';
+}
+
 function showOsd(text) {
   const el = ensureOsd();
+  placeOsd();
   el.textContent = text;
   el.style.opacity = '1';
   clearTimeout(osdHideTimer);
@@ -493,6 +504,9 @@ async function boot() {
     emu = machine;
     window.__emu = emu; // for debugging/automation
     lastFddTrack = null; // a new machine starts the track latch over
+    // Nothing is held down in a machine that has just been built, so the
+    // on-screen keyboard forgets rather than sending release codes into it.
+    forgetVirtualKeys();
     updateStatusDisks();
 
     // Leave a fresh status behind: the old line ("inserts at boot", an
@@ -518,6 +532,10 @@ async function boot() {
     // that are still plugged into the host put back.
     for (const port of padAssignments.values()) fitCd32Pad(port);
     if (joyMode === 'cd32') fitCd32Pad(2);
+    // A visitor who left the keyboard up gets it back, but not until there
+    // is a machine to type into: raised at page load it would cover half
+    // the boot overlay with nothing behind it to receive the keys.
+    if (HAS_KEY_RAW && storedPref(KB_OPEN_STORAGE_KEY) === 'on') openKeyboard();
     requestAnimationFrame(tick);
   } catch (e) {
     setLoadStatus(`boot failed: ${e.message ?? e}`);
@@ -569,6 +587,7 @@ function tick(nowMs) {
   // Polled, not event-driven: the Gamepad API reports button state only
   // when asked, so this is where a controller reaches the machine.
   pumpGamepads();
+  syncCapsLed();
   try {
     framesThisSecond += emu.run(nowMs, maxFramesForQueue());
   } catch (e) {
@@ -579,6 +598,7 @@ function tick(nowMs) {
     // back to stashing (never a live swap into a crashed instance, which
     // may have panicked) and a fresh boot rebuilds from the stash.
     emu = null;
+    forgetVirtualKeys();
     refreshBootButton();
     showBugLink(true);
     syncWakeLock();
@@ -1384,14 +1404,21 @@ function ensureTouchJoyUi() {
   return touchJoyUi;
 }
 
-// Rest positions while no finger is down, as fractions of the shell.
+// Rest positions while no finger is down, as fractions of the picture --
+// not of the shell. In the page layout the two are the same box, but
+// fullscreen letterboxes the canvas inside a shell that is the whole
+// screen, and an open on-screen keyboard shortens it further; against the
+// shell the stick would drift into the pillarbox and then behind the keys.
 function placeTouchJoyAtRest(ui) {
-  ui.base.style.left = '22%';
-  ui.base.style.top = '72%';
-  ui.knob.style.left = '22%';
-  ui.knob.style.top = '72%';
-  ui.fire.style.left = '80%';
-  ui.fire.style.top = '72%';
+  const s = $('shell').getBoundingClientRect();
+  const c = canvas.getBoundingClientRect();
+  const put = (el, fx, fy) => {
+    el.style.left = `${c.left - s.left + c.width * fx}px`;
+    el.style.top = `${c.top - s.top + c.height * fy}px`;
+  };
+  put(ui.base, 0.22, 0.72);
+  put(ui.knob, 0.22, 0.72);
+  put(ui.fire, 0.8, 0.72);
 }
 
 function updateTouchJoyUi() {
@@ -1546,8 +1573,12 @@ function ensureFsUi() {
   const bar = document.createElement('div');
   // The top-right corner sits in the letterbox in any orientation; the
   // safe-area offsets keep the buttons clear of notches and rounded corners.
+  // Four buttons do not fit a phone's width on one line, so the bar wraps
+  // rather than running off the side of the screen.
   bar.style.cssText =
     'position:absolute;z-index:3;display:none;gap:0.5rem;' +
+    'flex-wrap:wrap;justify-content:flex-end;' +
+    'max-width:calc(100dvw - 1.2rem);' +
     'top:calc(0.6rem + env(safe-area-inset-top));' +
     'right:calc(0.6rem + env(safe-area-inset-right));';
   const mk = (label) => {
@@ -1564,22 +1595,27 @@ function ensureFsUi() {
   };
   const joy = mk(`Joystick: ${joyMode}`);
   joy.addEventListener('click', cycleJoyMode);
+  const kbd = mk('Keys');
+  kbd.addEventListener('click', toggleKeyboard);
+  kbd.hidden = !HAS_KEY_RAW;
   const pause = mk(paused ? 'Resume' : 'Pause');
   pause.addEventListener('click', togglePause);
   const exit = mk('Exit');
   exit.addEventListener('click', exitFullscreen);
   shell.appendChild(bar);
-  fsUi = { bar, joy, pause };
+  fsUi = { bar, joy, kbd, pause };
   return fsUi;
 }
 
 function updateFsUi() {
+  placeOsd();
   if (!isFullscreen()) {
     if (fsUi) fsUi.bar.style.display = 'none';
     return;
   }
   const ui = ensureFsUi();
   ui.joy.textContent = `Joystick: ${joyMode}`;
+  ui.kbd.textContent = kbdOpen ? 'Keys off' : 'Keys';
   ui.pause.textContent = paused ? 'Resume' : 'Pause';
   ui.bar.style.display = 'flex';
 }
@@ -1605,12 +1641,16 @@ const CSS_FS_SHELL = {
 // the monitor exactly in real fullscreen, and in the pinned fallback
 // (iPhone, where Safari's chrome stays) they track the visible area
 // where plain vh would reach under the browser chrome.
+// The bottom inset is the on-screen keyboard's strip: the picture is
+// centred in what is left above it rather than standing behind it.
+// --cl-kbd-h is 0px whenever the keyboard is closed, which computes to
+// exactly the geometry this had before the keyboard existed.
 const CSS_FS_CANVAS = {
   position: 'absolute',
-  inset: '0',
+  inset: '0 0 var(--cl-kbd-h, 0px) 0',
   margin: 'auto',
-  width: 'min(100dvw, calc(100dvh * 4 / 3))',
-  height: 'min(100dvh, calc(100dvw * 3 / 4))',
+  width: 'min(100dvw, calc((100dvh - var(--cl-kbd-h, 0px)) * 4 / 3))',
+  height: 'min(calc(100dvh - var(--cl-kbd-h, 0px)), calc(100dvw * 3 / 4))',
   // The bitmap fills the box, as in the page layout: the presentation
   // buffer is not itself 4:3 (the PAL capture is 668x540), and a shell's
   // own :fullscreen object-fit rule would re-letterbox it inside the box
@@ -1658,6 +1698,730 @@ document.addEventListener('fullscreenchange', () => {
   setStyles(canvas, CSS_FS_CANVAS, document.fullscreenElement !== null);
   updateFsUi();
 });
+
+// --- on-screen keyboard ----------------------------------------------------
+// A phone cannot type into the Amiga. A mobile browser only raises its
+// keyboard for a focused text field, and what that field then delivers is
+// typed text (an `input` event carrying a character), never the key
+// positions the emulator reads - so modifiers, the function keys, Help and
+// both Amiga keys are unreachable, which is most of what a guest wants
+// (Ctrl+C to a BBS, Ctrl+Amiga+Amiga to reboot). The page therefore draws
+// the keyboard itself.
+//
+// It is an A600: the one Amiga keyboard with no numeric keypad, so the
+// whole machine fits a phone's width instead of wasting a third of it on
+// keys a touch screen has no room for. Geometry is off the A600 R1.5
+// schematic on the Key Layout Editor's 1u grid; rawkeys are RKM Libraries
+// table 34-6. Keys go straight to the keyboard MCU as rawkeys (key_raw),
+// not as `KeyboardEvent.code` strings: $2B, the key beside Return, has no
+// code a browser reports on every host layout, and routing synthetic events
+// through the window listener above would hand the cursor keys and Return
+// to joystickKey in keys/cd32 mode. An on-screen Amiga keyboard types.
+
+// The on-screen keys ARE rawkeys, so there is no useful degraded mode on a
+// bundle that predates key_raw; the button hides itself, exactly as the
+// overscan control does. (Class methods exist as soon as the module is
+// imported, so this needs no init().)
+const HAS_KEY_RAW = typeof WebEmu.prototype?.key_raw === 'function';
+
+const KB_U_WIDE = 16.5; // an A600 is 16.5 keys wide, every row
+const KB_U_TALL = 6.5; // six rows plus the 0.5u float under the F row
+const KB_U_MAX = 44; // px: the touch-target guideline, ~half a real 19mm cap
+const KB_VH = 0.45; // most of the screen the keyboard may ever take
+const KB_PAD_X = 10; // px each side; also clears a desktop scrollbar
+const KB_PAD_Y = 6;
+
+// Rows lay out left to right and x accumulates, so a key carries only what
+// differs from the default 1u cap: `g` is a gap in u before it, `w` the cap
+// width, `r` the Amiga rawkey, `t` the main legend, `s` the shifted legend
+// printed above it, `m` a latching qualifier's id, `x2` the Return stem.
+// Writing 78 x values by hand would be 78 chances to mistype one; the
+// accumulation is checked against KB_U_WIDE when the keyboard is built.
+//
+// Rows 2, 3 and 4 stop at 15.5u rather than 16.5u. That is not a missing
+// key: it is the notch the A600's inverted-T cursor cluster sits in.
+const KB_ROWS = [
+  {
+    y: 0,
+    k: [
+      { r: 0x45, w: 1.25, t: 'Esc' },
+      { g: 0.5, r: 0x50, w: 1.25, t: 'F1' },
+      { r: 0x51, w: 1.25, t: 'F2' },
+      { r: 0x52, w: 1.25, t: 'F3' },
+      { r: 0x53, w: 1.25, t: 'F4' },
+      { r: 0x54, w: 1.25, t: 'F5' },
+      { g: 0.5, r: 0x55, w: 1.25, t: 'F6' },
+      { r: 0x56, w: 1.25, t: 'F7' },
+      { r: 0x57, w: 1.25, t: 'F8' },
+      { r: 0x58, w: 1.25, t: 'F9' },
+      { r: 0x59, w: 1.25, t: 'F10' },
+      { g: 0.5, r: 0x5f, w: 1.25, t: 'Help' },
+    ],
+  },
+  {
+    y: 1.5,
+    k: [
+      { r: 0x00, w: 1.5, t: '`', s: '~' },
+      { r: 0x01, t: '1', s: '!' },
+      { r: 0x02, t: '2', s: '"' },
+      { r: 0x03, t: '3', s: '\u00a3' }, // pound; the US cap prints 3 #
+      { r: 0x04, t: '4', s: '$' },
+      { r: 0x05, t: '5', s: '%' },
+      { r: 0x06, t: '6', s: '^' },
+      { r: 0x07, t: '7', s: '&' },
+      { r: 0x08, t: '8', s: '*' },
+      { r: 0x09, t: '9', s: '(' },
+      { r: 0x0a, t: '0', s: ')' },
+      { r: 0x0b, t: '-', s: '_' },
+      { r: 0x0c, t: '=', s: '+' },
+      { r: 0x0d, t: '\\', s: '|' },
+      { r: 0x41, t: 'Bksp' },
+      { r: 0x46, t: 'Del' },
+    ],
+  },
+  {
+    y: 2.5,
+    k: [
+      { r: 0x42, w: 2, t: 'Tab' },
+      { r: 0x10, t: 'Q' },
+      { r: 0x11, t: 'W' },
+      { r: 0x12, t: 'E' },
+      { r: 0x13, t: 'R' },
+      { r: 0x14, t: 'T' },
+      { r: 0x15, t: 'Y' },
+      { r: 0x16, t: 'U' },
+      { r: 0x17, t: 'I' },
+      { r: 0x18, t: 'O' },
+      { r: 0x19, t: 'P' },
+      { r: 0x1a, t: '[', s: '{' },
+      { r: 0x1b, t: ']', s: '}' },
+      // The ISO reverse-L Return: this is the wide top arm, and `x2` hangs
+      // the narrower stem off its bottom edge, inset from the left so the
+      // two right edges line up and the notch is bottom-left. Both stop at
+      // 15.5u, where the cursor cluster's notch begins.
+      { r: 0x44, w: 1.5, t: 'Ret', x2: { dx: 0.25, w: 1.25 } },
+    ],
+  },
+  {
+    y: 3.5,
+    k: [
+      { r: 0x63, w: 1.25, t: 'Ctrl', m: 'ctrl' },
+      { r: 0x62, t: 'Caps', caps: true },
+      { r: 0x20, t: 'A' },
+      { r: 0x21, t: 'S' },
+      { r: 0x22, t: 'D' },
+      { r: 0x23, t: 'F' },
+      { r: 0x24, t: 'G' },
+      { r: 0x25, t: 'H' },
+      { r: 0x26, t: 'J' },
+      { r: 0x27, t: 'K' },
+      { r: 0x28, t: 'L' },
+      { r: 0x29, t: ';', s: ':' },
+      { r: 0x2a, t: "'", s: '@' },
+      { r: 0x2b, t: '#', s: '~' },
+    ],
+  },
+  {
+    y: 4.5,
+    k: [
+      { r: 0x60, w: 1.75, t: 'Shift', m: 'lshift' },
+      { r: 0x30, t: '\\', s: '|' },
+      { r: 0x31, t: 'Z' },
+      { r: 0x32, t: 'X' },
+      { r: 0x33, t: 'C' },
+      { r: 0x34, t: 'V' },
+      { r: 0x35, t: 'B' },
+      { r: 0x36, t: 'N' },
+      { r: 0x37, t: 'M' },
+      { r: 0x38, t: ',', s: '<' },
+      { r: 0x39, t: '.', s: '>' },
+      { r: 0x3a, t: '/', s: '?' },
+      { r: 0x61, w: 1.75, t: 'Shift', m: 'rshift' },
+      { r: 0x4c, t: '\u2191', aria: 'Cursor up' },
+    ],
+  },
+  {
+    y: 5.5,
+    k: [
+      { g: 0.5, r: 0x64, w: 1.25, t: 'Alt', m: 'lalt' },
+      { r: 0x66, w: 1.25, t: 'A', m: 'lamiga', amiga: true, hollow: true, aria: 'Left Amiga' },
+      { r: 0x40, w: 8, aria: 'Space' },
+      { r: 0x67, w: 1.25, t: 'A', m: 'ramiga', amiga: true, aria: 'Right Amiga' },
+      { r: 0x65, w: 1.25, t: 'Alt', m: 'ralt' },
+      { r: 0x4f, t: '\u2190', aria: 'Cursor left' },
+      { r: 0x4d, t: '\u2193', aria: 'Cursor down' },
+      { r: 0x4e, t: '\u2192', aria: 'Cursor right' },
+    ],
+  },
+];
+
+// The only caps a US A600 prints differently; the shell is the same ISO
+// 78-key case either way, which is why US machines ship blank keycaps in
+// the $2B and $30 positions rather than omitting the switches.
+const KB_US_LEGENDS = {
+  0x02: ['2', '@'],
+  0x03: ['3', '#'],
+  0x2a: ["'", '"'],
+  0x2b: ['', ''],
+  0x30: ['', ''],
+};
+
+const KB_LEGENDS_STORAGE_KEY = 'copperline-keyboard-legends';
+const KB_OPEN_STORAGE_KEY = 'copperline-keyboard';
+// A qualifier tap under this counts as a tap rather than a hold, and two
+// taps inside the double window lock it. Matched to the canvas trackpad's
+// own tap window so the whole page agrees on what a tap is.
+const KB_TAP_MS = 250;
+const KB_DOUBLE_MS = 500;
+
+let kbdRoot = null; // built lazily; a desktop session that never opens it
+let kbdKeys = []; //   pays nothing but the table above
+let kbdOpen = false;
+let kbdLegends = 'uk';
+let kbdCapsLit = false;
+let kbdHintShown = false;
+let kbdLegendChip = null;
+// pointerId -> key, so a release always reaches the key the finger started
+// on even after sliding off it, and several fingers can hold several keys.
+const kbdPointers = new Map();
+// The seven latching qualifiers. Caps Lock is deliberately not among them:
+// the MCU owns that latch (chipset/keyboard.rs key_transition), where a
+// press toggles the LED and sends the down code on lock or the up code on
+// unlock, and the physical release sends nothing at all.
+const kbdMods = new Map();
+
+function kbdSend(rawkey, pressed) {
+  if (!emu || !running || !HAS_KEY_RAW) return;
+  emu.key_raw(rawkey, pressed);
+}
+
+// Key size is whichever of three limits bites first. The row has to fit the
+// width; the six rows must not eat more than KB_VH of the height (a phone
+// in landscape has almost none to give - a purely width-derived unit would
+// put a 290px keyboard in a 390px viewport); and a desktop gets a keyboard,
+// not a mural. The safe-area insets come out of the budget rather than
+// being added on top of it, so a home indicator shrinks the keys instead of
+// pushing the strip taller.
+function kbdUnitCss() {
+  const insetX =
+    'env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)';
+  return (
+    `min(` +
+    `(100dvw - ${2 * KB_PAD_X}px - ${insetX}) / ${KB_U_WIDE},` +
+    `(100dvh * ${KB_VH} - ${2 * KB_PAD_Y}px - env(safe-area-inset-bottom, 0px))` +
+    ` / ${KB_U_TALL},` +
+    `${KB_U_MAX}px)`
+  );
+}
+
+function ensureKeyboard() {
+  if (kbdRoot) return kbdRoot;
+  const root = document.createElement('div');
+  // Fixed, not absolute: the shell is only the picture, and the keyboard
+  // wants the whole viewport width. `position: fixed` resolves against the
+  // viewport in the page, against the fullscreen area in real fullscreen,
+  // and against the visible area under the pinned CSS fallback - one
+  // placement for all three - and it escapes the shell's overflow:hidden.
+  // Above the sticky page furniture but below the site's cosmetic scanline
+  // layer (9999, pointer-events:none), so the keys wear the same CRT
+  // texture as everything else.
+  root.style.cssText =
+    'position:fixed;left:0;right:0;bottom:0;z-index:9998;display:none;' +
+    'box-sizing:border-box;overflow:hidden;background:rgba(12,15,24,0.94);' +
+    `padding:${KB_PAD_Y}px max(${KB_PAD_X}px, env(safe-area-inset-right, 0px)) ` +
+    `calc(${KB_PAD_Y}px + env(safe-area-inset-bottom, 0px)) ` +
+    `max(${KB_PAD_X}px, env(safe-area-inset-left, 0px));` +
+    // Every touch here is a keystroke, never a page gesture: no scrolling,
+    // no double-tap zoom, no long-press callout, no selection, no flash.
+    'touch-action:none;user-select:none;-webkit-user-select:none;' +
+    '-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent;';
+  root.style.setProperty('--cl-u', kbdUnitCss());
+
+  const grid = document.createElement('div');
+  grid.style.cssText =
+    'position:relative;margin-inline:auto;' +
+    `width:calc(${KB_U_WIDE} * var(--cl-u));` +
+    `height:calc(${KB_U_TALL} * var(--cl-u));`;
+  root.appendChild(grid);
+
+  kbdKeys = [];
+  for (const row of KB_ROWS) {
+    let x = 0;
+    for (const spec of row.k) {
+      x += spec.g ?? 0;
+      kbdKeys.push(buildKeyCap(grid, spec, x, row.y));
+      x += spec.w ?? 1;
+    }
+    if (x > KB_U_WIDE + 1e-6) {
+      console.warn(`keyboard row at y=${row.y} is ${x}u wide, over ${KB_U_WIDE}u`);
+    }
+  }
+
+  grid.appendChild(buildLegendChip());
+  wireKeyboardPointers(root);
+  applyKbdLegends();
+  // Measured rather than derived: the padding carries
+  // env(safe-area-inset-bottom) and the height term is in dvh, both of
+  // which only CSS can resolve, and a phone changes them on rotation and
+  // whenever the browser chrome collapses. The fullscreen letterbox reads
+  // the result, so it has to be the real height.
+  new ResizeObserver((entries) => {
+    const h = entries[0]?.borderBoxSize?.[0]?.blockSize ?? 0;
+    if (kbdOpen) publishKbdHeight(Math.round(h));
+  }).observe(root);
+
+  shell.appendChild(root);
+  kbdRoot = root;
+  return root;
+}
+
+// The letterbox and the OSD both need to know how much of the screen the
+// keyboard is standing on. 0px is the closed state and computes to exactly
+// the pre-keyboard geometry, so nothing has to branch on whether it is open.
+function publishKbdHeight(px) {
+  document.documentElement.style.setProperty('--cl-kbd-h', `${px}px`);
+  placeOsd();
+}
+
+function buildKeyCap(grid, spec, x, y) {
+  const w = spec.w ?? 1;
+  // The hit area is the whole grid cell and the visible cap sits inside its
+  // padding, so the gaps between keys are still live. On a phone at 22px
+  // caps that is about 4px per key back, which is the difference between
+  // fumbling and typing.
+  const cell = document.createElement('div');
+  cell.style.cssText =
+    'position:absolute;box-sizing:border-box;padding:2px;' +
+    `left:calc(${x} * var(--cl-u));top:calc(${y} * var(--cl-u));` +
+    `width:calc(${w} * var(--cl-u));height:var(--cl-u);`;
+  cell.setAttribute('role', 'button');
+  cell.setAttribute('aria-label', spec.aria ?? spec.t ?? '');
+
+  const cap = document.createElement('div');
+  cap.style.cssText =
+    'width:100%;height:100%;box-sizing:border-box;display:flex;' +
+    'flex-direction:column;align-items:center;justify-content:center;' +
+    'line-height:1.05;border-radius:4px;overflow:hidden;' +
+    'font-family:"IBM Plex Mono",ui-monospace,monospace;font-weight:600;';
+  cell.appendChild(cap);
+
+  const key = {
+    raw: spec.r,
+    mod: spec.m ?? null,
+    caps: spec.caps === true,
+    cell,
+    cap,
+    stem: null,
+    mainEl: null,
+    shiftEl: null,
+    down: false,
+  };
+
+  if (spec.s !== undefined) {
+    // Two legends, printed the way the cap is: shifted glyph above the
+    // unshifted one, smaller and dimmer.
+    key.shiftEl = document.createElement('div');
+    key.shiftEl.style.cssText = 'font-size:calc(0.34 * var(--cl-u));opacity:0.55;';
+    key.shiftEl.textContent = spec.s;
+    cap.appendChild(key.shiftEl);
+    key.mainEl = document.createElement('div');
+    key.mainEl.style.cssText = 'font-size:calc(0.42 * var(--cl-u));';
+    key.mainEl.textContent = spec.t;
+    cap.appendChild(key.mainEl);
+  } else if (spec.t !== undefined) {
+    key.mainEl = document.createElement('div');
+    // Word legends shrink again on the 1u caps that carry them (Caps,
+    // Bksp), or they spill out of a 22px key on a phone.
+    const size = spec.t.length > 3 && w <= 1.25 ? 0.3 : 0.36;
+    key.mainEl.style.cssText = `font-size:calc(${size} * var(--cl-u));`;
+    key.mainEl.textContent = spec.t;
+    if (spec.amiga) {
+      // The Amiga key logo is a leaning A, and the left one is outlined
+      // where the right one is filled, as the case prints them.
+      key.mainEl.style.fontStyle = 'italic';
+    }
+    if (spec.hollow) {
+      key.mainEl.style.webkitTextStroke = '1px #15171c';
+      key.mainEl.style.color = 'transparent';
+    }
+    cap.appendChild(key.mainEl);
+  }
+
+  if (spec.caps) {
+    // The keycap LED, driven from the MCU's own lamp rather than our taps.
+    key.led = document.createElement('div');
+    key.led.style.cssText =
+      'position:absolute;top:15%;right:12%;border-radius:50%;' +
+      'width:calc(0.16 * var(--cl-u));height:calc(0.16 * var(--cl-u));';
+    cell.appendChild(key.led);
+  }
+
+  if (spec.x2) {
+    // The stem of the ISO Return, a second box hanging off the bottom of
+    // the arm. Drawn as a real L rather than clipped, because a clip-path
+    // would cut the cap's own outline along exactly the two edges that make
+    // the shape; the caps have no borders, so two touching fills read as
+    // one key.
+    //
+    // Making them read as one key needs both halves of this: the fills are
+    // fully opaque (two overlapping translucent fills composite to a denser
+    // band, which is a seam drawn in the one place it must not be), and the
+    // stem starts above the arm's bottom edge rather than at the cell's, so
+    // the arm's own 2px padding cannot open a hairline gap. The overlap
+    // absorbs the sub-pixel rounding a fractional unit produces.
+    cap.style.borderRadius = '4px 4px 0 4px';
+    const stem = document.createElement('div');
+    stem.style.cssText =
+      'position:absolute;box-sizing:border-box;padding:0 2px 2px 2px;' +
+      `left:calc(${spec.x2.dx} * var(--cl-u));` +
+      'top:calc(var(--cl-u) - 4px);' +
+      `width:calc(${spec.x2.w} * var(--cl-u));` +
+      'height:calc(var(--cl-u) + 4px);';
+    const stemCap = document.createElement('div');
+    stemCap.style.cssText = 'width:100%;height:100%;border-radius:0 0 4px 4px;';
+    stem.appendChild(stemCap);
+    // No data-k on the stem: the delegated handler resolves it by walking
+    // up to the Return cell, so the whole L is one key.
+    cell.appendChild(stem);
+    key.stem = stemCap;
+  }
+
+  if (key.mod) {
+    kbdMods.set(key.mod, {
+      key,
+      raw: spec.r,
+      down: false,
+      latch: 'none',
+      pointer: null,
+      downAt: 0,
+      usedWhileDown: false,
+      lastTapAt: 0,
+    });
+  }
+
+  cell.dataset.k = String(kbdKeys.length);
+  grid.appendChild(cell);
+  paintKey(key);
+  return key;
+}
+
+// The legend switch sits on the keyboard itself rather than in the page's
+// settings row, which is off the screen in fullscreen - exactly where a
+// phone visitor spends the session. It goes in the notch beside the cursor
+// cluster, the one part of an A600's outline with no keys in it.
+function buildLegendChip() {
+  const chip = document.createElement('div');
+  chip.style.cssText =
+    'position:absolute;box-sizing:border-box;cursor:pointer;' +
+    'left:calc(15.5 * var(--cl-u));top:calc(3.6 * var(--cl-u));' +
+    'width:calc(var(--cl-u) - 4px);height:calc(0.8 * var(--cl-u));' +
+    'display:flex;align-items:center;justify-content:center;' +
+    'border-radius:4px;border:1px solid rgba(255,255,255,0.3);' +
+    'color:rgba(255,255,255,0.75);' +
+    'font:600 calc(0.3 * var(--cl-u)) "IBM Plex Mono",ui-monospace,monospace;';
+  chip.dataset.legendChip = '1';
+  chip.setAttribute('role', 'button');
+  kbdLegendChip = chip;
+  return chip;
+}
+
+// Only the handful of caps a US machine prints differently ever change;
+// every other legend was set once when the cap was built.
+function applyKbdLegends() {
+  const us = kbdLegends === 'us';
+  for (const key of kbdKeys) {
+    const swap = KB_US_LEGENDS[key.raw];
+    if (!swap) continue;
+    const spec = kbdSpecFor(key.raw);
+    const [main, shift] = us ? swap : [spec.t ?? '', spec.s ?? ''];
+    if (key.mainEl) key.mainEl.textContent = main;
+    if (key.shiftEl) key.shiftEl.textContent = shift;
+  }
+  if (kbdLegendChip) {
+    kbdLegendChip.textContent = us ? 'US' : 'UK';
+    kbdLegendChip.setAttribute('aria-label', `Keycap legends: ${us ? 'US' : 'UK'}`);
+  }
+}
+
+function kbdSpecFor(raw) {
+  for (const row of KB_ROWS) {
+    for (const spec of row.k) if (spec.r === raw) return spec;
+  }
+  return {};
+}
+
+function setKbdLegends(next) {
+  kbdLegends = next === 'us' ? 'us' : 'uk';
+  storePref(KB_LEGENDS_STORAGE_KEY, kbdLegends);
+  if (kbdRoot) applyKbdLegends();
+}
+
+// --- key painting ----------------------------------------------------------
+// Flat fills only, and press feedback is a background swap rather than a
+// transform: the canvas underneath is doing a full putImageData at 50Hz, and
+// a blurred or shadowed layer over it costs a whole-screen readback every
+// frame on a phone GPU.
+// Opaque, not translucent: the ISO Return is two overlapping boxes, and
+// two translucent fills composite to a denser band right along the join.
+const KB_CAP_IDLE = 'rgb(226,223,214)';
+const KB_CAP_MOD = 'rgb(196,193,184)';
+const KB_CAP_DOWN = 'rgb(168,164,152)';
+const KB_CAP_LOCKED = 'rgb(232,145,84)';
+const KB_INK = '#15171c';
+
+function paintKey(key) {
+  const mod = key.mod ? kbdMods.get(key.mod) : null;
+  let fill = key.mod ? KB_CAP_MOD : KB_CAP_IDLE;
+  let ring = 'none';
+  if (mod?.latch === 'locked') {
+    fill = KB_CAP_LOCKED;
+  } else if (mod?.latch === 'oneshot') {
+    // A ring rather than a fill: armed for one keystroke, not held down.
+    ring = `inset 0 0 0 2px ${KB_CAP_LOCKED}`;
+  }
+  if (key.down || (mod?.down && mod.latch === 'none')) fill = KB_CAP_DOWN;
+  if (key.caps && kbdCapsLit) fill = KB_CAP_LOCKED;
+  key.cap.style.background = fill;
+  key.cap.style.boxShadow = ring;
+  key.cap.style.color = KB_INK;
+  if (key.mainEl?.style.webkitTextStroke) key.mainEl.style.color = 'transparent';
+  if (key.stem) {
+    key.stem.style.background = fill;
+    key.stem.style.boxShadow = ring;
+  }
+  if (key.led) {
+    key.led.style.background = kbdCapsLit ? 'rgb(44,200,80)' : 'rgba(0,0,0,0.25)';
+  }
+}
+
+function repaintKeyboard() {
+  for (const key of kbdKeys) paintKey(key);
+}
+
+// --- key press / release ---------------------------------------------------
+
+function pressVirtualKey(key, pointerId) {
+  if (key.caps) {
+    // One send per tap, and only the press. The MCU owns this latch: a
+    // press flips the lamp and emits the down code on lock or the up code
+    // on unlock, and it discards the release entirely. Sending both would
+    // still toggle once, but mirroring the toggle here as well would
+    // double-toggle it.
+    kbdSend(key.raw, true);
+    key.down = true;
+    paintKey(key);
+    return;
+  }
+  const mod = key.mod ? kbdMods.get(key.mod) : null;
+  if (mod) {
+    mod.pointer = pointerId;
+    mod.downAt = performance.now();
+    mod.usedWhileDown = false;
+    if (!mod.down) {
+      kbdSend(mod.raw, true);
+      mod.down = true;
+    }
+    paintKey(key);
+    // Checked here as well as on an ordinary key: Ctrl+Amiga+Amiga is made
+    // of nothing but qualifiers, so the press that completes it is always
+    // this one.
+    maybeResetChord();
+    return;
+  }
+  key.down = true;
+  kbdSend(key.raw, true);
+  // Any qualifier now held is being used, which is what tells its own
+  // release apart from a bare tap that should latch.
+  for (const m of kbdMods.values()) if (m.down) m.usedWhileDown = true;
+  paintKey(key);
+  maybeResetChord();
+}
+
+function releaseVirtualKey(key) {
+  if (key.caps) {
+    key.down = false;
+    paintKey(key);
+    return;
+  }
+  const mod = key.mod ? kbdMods.get(key.mod) : null;
+  if (mod) {
+    releaseModifier(mod, key);
+    return;
+  }
+  key.down = false;
+  kbdSend(key.raw, false);
+  // One-shots clear on the release, not the press, so the guest sees the
+  // qualifier held across the whole keystroke.
+  for (const m of kbdMods.values()) {
+    if (m.latch === 'oneshot' && m.pointer === null) {
+      kbdSend(m.raw, false);
+      m.down = false;
+      m.latch = 'none';
+      paintKey(m.key);
+    }
+  }
+  paintKey(key);
+}
+
+// A phone has one finger to spare, not two, so a qualifier tapped on its
+// own stays down for the next keystroke; tapped twice it locks until tapped
+// again; held down with a second finger it behaves like the real key, which
+// is what a chord such as Ctrl+Amiga+Amiga wants.
+function releaseModifier(mod, key) {
+  const now = performance.now();
+  mod.pointer = null;
+  const tapped = now - mod.downAt < KB_TAP_MS && !mod.usedWhileDown;
+  const clear = () => {
+    kbdSend(mod.raw, false);
+    mod.down = false;
+    mod.latch = 'none';
+  };
+  if (!tapped) {
+    clear(); // a real hold, released
+  } else if (mod.latch === 'locked') {
+    clear(); // tapping a locked qualifier unlocks it
+  } else if (mod.latch === 'oneshot') {
+    if (now - mod.lastTapAt < KB_DOUBLE_MS) mod.latch = 'locked';
+    else clear(); // a second lone tap cancels the arm
+  } else {
+    mod.latch = 'oneshot'; // stays down for the next key
+  }
+  mod.lastTapAt = now;
+  paintKey(key);
+}
+
+// The MCU has just latched Ctrl+Amiga+Amiga and is starting the reset flow;
+// a human would now let go. Leaving the qualifiers latched would have
+// begin_power_up() report them as still held (set_held runs before the
+// in_reset_flow early return), and the next keystroke would reset the
+// machine all over again.
+function maybeResetChord() {
+  const ctrl = kbdMods.get('ctrl');
+  const la = kbdMods.get('lamiga');
+  const ra = kbdMods.get('ramiga');
+  if (ctrl?.down && la?.down && ra?.down) releaseAllVirtualKeys();
+}
+
+// Two clean-ups, because the situations differ: this one tells the machine
+// the keys came up...
+function releaseAllVirtualKeys() {
+  for (const key of kbdKeys) {
+    if (key.down && !key.mod && !key.caps) kbdSend(key.raw, false);
+  }
+  for (const mod of kbdMods.values()) if (mod.down) kbdSend(mod.raw, false);
+  forgetVirtualKeys();
+}
+
+// ...and this one just forgets, for when the machine those keys were
+// pressed on no longer exists. Clearing the pointer map too means a finger
+// still down across a rebuild sends no phantom release to the new machine.
+function forgetVirtualKeys() {
+  kbdPointers.clear();
+  for (const key of kbdKeys) key.down = false;
+  for (const mod of kbdMods.values()) {
+    mod.down = false;
+    mod.latch = 'none';
+    mod.pointer = null;
+    mod.usedWhileDown = false;
+  }
+  if (kbdRoot) repaintKeyboard();
+}
+
+function wireKeyboardPointers(root) {
+  root.addEventListener('pointerdown', (e) => {
+    if (e.target.closest('[data-legend-chip]')) {
+      e.preventDefault();
+      setKbdLegends(kbdLegends === 'uk' ? 'us' : 'uk');
+      return;
+    }
+    const cell = e.target.closest('[data-k]');
+    if (!cell) return;
+    // Kills the focus steal, the text selection and the compatibility
+    // mouse events in one call. The canvas handlers are on the canvas, and
+    // the keyboard covers it, so a tap here never reaches the trackpad.
+    e.preventDefault();
+    // Captured on the root, not the key: one element can hold several
+    // pointer ids at once (so multi-touch still works), and a finger
+    // dragged off the strip still delivers its release here instead of
+    // leaving the key stuck down in the guest. Capture is an optimisation,
+    // not the mechanism -- the pointer map is -- so a pointer the browser
+    // has already forgotten must not cost us the keystroke.
+    try {
+      root.setPointerCapture(e.pointerId);
+    } catch {
+      // No active pointer with that id; the release still finds its key.
+    }
+    const key = kbdKeys[Number(cell.dataset.k)];
+    if (!key) return;
+    kbdPointers.set(e.pointerId, key);
+    pressVirtualKey(key, e.pointerId);
+    navigator.vibrate?.(8);
+  });
+  const up = (e) => {
+    const key = kbdPointers.get(e.pointerId);
+    if (!key) return;
+    kbdPointers.delete(e.pointerId);
+    releaseVirtualKey(key);
+  };
+  root.addEventListener('pointerup', up);
+  root.addEventListener('pointercancel', up);
+  root.addEventListener('lostpointercapture', up);
+}
+
+// --- keyboard open / close -------------------------------------------------
+
+function setKeyboardLabel() {
+  const label = kbdOpen ? 'Hide keys' : 'Keyboard';
+  if (keyboardBtn) keyboardBtn.textContent = label;
+  if (fsUi) fsUi.kbd.textContent = kbdOpen ? 'Keys off' : 'Keys';
+}
+
+function openKeyboard() {
+  if (kbdOpen) return;
+  const root = ensureKeyboard();
+  // With the pointer locked the cursor is gone, and a mouse cannot reach
+  // the keys at all.
+  if (document.pointerLockElement) document.exitPointerLock?.();
+  kbdOpen = true;
+  root.style.display = 'block';
+  publishKbdHeight(Math.round(root.getBoundingClientRect().height));
+  updateTouchJoyUi();
+  setKeyboardLabel();
+  storePref(KB_OPEN_STORAGE_KEY, 'on');
+  if (!kbdHintShown && innerHeight > innerWidth) {
+    kbdHintShown = true;
+    showOsd('turn the phone sideways for bigger keys');
+  }
+}
+
+function closeKeyboard() {
+  if (!kbdOpen) return;
+  releaseAllVirtualKeys();
+  kbdOpen = false;
+  kbdRoot.style.display = 'none';
+  // Set explicitly rather than waiting for a display:none resize
+  // notification, which browsers have disagreed about firing.
+  publishKbdHeight(0);
+  updateTouchJoyUi();
+  setKeyboardLabel();
+  storePref(KB_OPEN_STORAGE_KEY, 'off');
+}
+
+function toggleKeyboard() {
+  if (kbdOpen) closeKeyboard();
+  else openKeyboard();
+}
+
+// The lamp belongs to the MCU, so it is polled from the frame loop rather
+// than mirrored from the taps: a save-state load or a machine rebuild
+// changes it without any key being pressed.
+function syncCapsLed() {
+  if (!kbdOpen || !emu) return;
+  const lit = emu.caps_lock_led?.() ?? false;
+  if (lit === kbdCapsLit) return;
+  kbdCapsLit = lit;
+  for (const key of kbdKeys) if (key.caps) paintKey(key);
+}
 
 $('vol').addEventListener('input', (e) => {
   if (emu) emu.set_volume_percent(Number(e.target.value));
@@ -1896,6 +2660,7 @@ function unbootAfterFailedStateLoad() {
   const failure = loadStatus.textContent;
   emu = null;
   window.__emu = null;
+  forgetVirtualKeys();
   running = false;
   paused = false;
   setPauseLabel();
@@ -1933,6 +2698,9 @@ function restoreState(bytes, source) {
   if (!new Set(padAssignments.values()).has(1)) emu.set_port_device(1, 'mouse');
   for (const port of padAssignments.values()) fitCd32Pad(port);
   if (joyMode === 'cd32') fitCd32Pad(2);
+  // A restored state carries its own idea of which keys are held, so the
+  // on-screen keyboard's latches are stale: believe the machine.
+  forgetVirtualKeys();
   // The disk came back inside the state; believe the machine, not the page.
   df0Name = emu.disk_name(0) ?? null;
   lastFddTrack = null;
@@ -2050,6 +2818,7 @@ async function probeQuickState() {
 function buildMachineControls() {
   const missing = [
     ['pause', 'Pause'],
+    ['keyboard', 'Keyboard'],
     ['screenshot', 'Screenshot'],
     ['savestate', 'Save state'],
     ['loadstate', 'Load state...'],
@@ -2076,8 +2845,13 @@ function buildMachineControls() {
 buildMachineControls();
 const pauseBtn = $('pause');
 const screenshotBtn = $('screenshot');
+const keyboardBtn = $('keyboard');
 pauseBtn?.addEventListener('click', togglePause);
 screenshotBtn?.addEventListener('click', copyScreenshot);
+// Hidden rather than degraded on a bundle that predates key_raw: the keys
+// are rawkeys, and there is no half of this that still works.
+if (HAS_KEY_RAW) keyboardBtn?.addEventListener('click', toggleKeyboard);
+else if (keyboardBtn) keyboardBtn.hidden = true;
 
 const saveStateBtn = $('savestate');
 const loadStateBtn = $('loadstate');
@@ -3266,6 +4040,10 @@ async function startup() {
   const tintPref =
     storedPref(TINT_STORAGE_KEY) ?? (typeof cfg.tint === 'string' ? cfg.tint.trim() : null);
   if (tintPref) setTintMode(tintPref, false);
+  // Which A600 the visitor owns, for the keycap legends. Nothing the guest
+  // can observe changes - the rawkeys are the same either way, only what is
+  // printed on the caps.
+  kbdLegends = storedPref(KB_LEGENDS_STORAGE_KEY) === 'us' ? 'us' : 'uk';
 
   // Starting joystick mode: the page shell's default (data-default on the
   // toggle or the config file), overridden per link by

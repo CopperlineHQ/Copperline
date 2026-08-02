@@ -100,7 +100,28 @@ Controls:
   through position deltas (Workbench-friendly); clicking the canvas
   requests pointer lock for relative motion (games), and Esc releases it.
 - **Keyboard**: physical keys map to Amiga raw keycodes with the same table
-  as the desktop frontend.
+  as the desktop frontend. The mapping is positional, and the browser does
+  not report the host's layout, so the one Amiga key it cannot reach is
+  `$2B` (beside Return on an ISO keyboard, `#`/`~` on a UK machine): a UK
+  host board reports that position as the code the table reads as the
+  number row's backslash. The on-screen keyboard below can type it.
+- **On-screen keyboard**: the **Keyboard** button raises an A600 -- the one
+  Amiga keyboard with no numeric keypad, so the whole machine fits a
+  phone's width. All 78 keys of the ISO case are there, including both
+  national keys, Help and the two Amiga keys, and they go to the keyboard
+  MCU as raw keycodes. Keycaps carry UK legends by default with a UK/US
+  switch on the keyboard itself, remembered per browser; the legends are
+  all that changes, since the raw keycodes a machine sends are the same
+  either way (what they *print* is the guest's keymap, which out of the
+  box is `usa0` -- so a stock boot disagrees with the UK caps on about six
+  keys). Qualifiers latch, because a touch screen has no spare finger:
+  tapping Shift, Ctrl, Alt or Amiga holds it for the next keystroke,
+  double-tapping locks it until tapped again, and holding it with a second
+  finger behaves like the real key, so Ctrl+Amiga+Amiga reboots. Caps Lock
+  latches the way the hardware does -- the keyboard MCU owns that lamp --
+  and the cap lights with it. Unlike the physical keyboard, the on-screen
+  keys are never captured by the joystick modes below: an on-screen Amiga
+  keyboard always types.
 - **Joystick**: the toggle cycles off -> keys -> cd32 (-> touch on touch
   screens). Keys is a two-button stick, the desktop frontend's
   FS-UAE-compatible mapping -- cursor keys for directions, Right Ctrl /
@@ -141,10 +162,12 @@ and is letterboxed against the monitor's own aspect ratio, so an
 ultrawide gets pillarbox bars instead of a stretched screen. The
 letterbox is applied by the page glue itself, not the page's stylesheet,
 so it holds on any shell that embeds the emulator. While fullscreen,
-small Joystick, Pause and Exit buttons sit in the top-right corner. On
-iPhones, where Safari has no element fullscreen, the button pins the
-shell over the page instead -- Safari's chrome stays, the page furniture
-goes, and the same letterbox applies.
+small Joystick, Keys, Pause and Exit buttons sit in the top-right corner.
+Raising the on-screen keyboard there does not cover the picture: the
+letterbox recomputes into the space above the keyboard, so the display
+shrinks and stays whole. On iPhones, where Safari has no element
+fullscreen, the button pins the shell over the page instead -- Safari's
+chrome stays, the page furniture goes, and the same letterbox applies.
 
 Once a machine boots, a status strip appears below the screen with the
 same front-panel readouts as the desktop [status bar](ui.md): the PWR and
@@ -370,7 +393,11 @@ and diagnostics.
 
 Input goes through `key_event(event.code, pressed)` (returns whether the key
 mapped, for `preventDefault`), `mouse_delta(dx, dy)` and
-`mouse_button(button, pressed)`. Mouse motion is pooled and fed to the
+`mouse_button(button, pressed)`. `key_raw(rawkey, pressed)` is the same
+path one step lower down, taking an Amiga raw keycode instead of a
+`KeyboardEvent.code`: it is what an on-screen keyboard wants, whose keys
+already are Amiga keys, and it reaches the codes no positional `code`
+expresses on every host layout. Mouse motion is pooled and fed to the
 hardware counters at a physically plausible rate (at most 100 counts per
 emulated frame): browsers coalesce pointer events, and a fast flick
 delivered as one huge delta would wrap the 8-bit JOYxDAT counters and
@@ -418,7 +445,9 @@ unknown names are ignored. The last completed frame is re-presented
 under the new aperture immediately, so a paused page only has to blit.
 Front-panel status getters mirror the desktop status bar's LED block and
 are cheap enough to poll every frame: `power_led()` and `fdd_led()` return
-booleans, `hdd_led()` and `cd_led()` return `undefined` on machines
+booleans, `caps_lock_led()` returns the keyboard MCU's own Caps Lock lamp
+(read it rather than tracking key presses, or a state load leaves the two
+disagreeing), `hdd_led()` and `cd_led()` return `undefined` on machines
 without the drive (hide the LED), `fdd_track()` returns the cylinder under
 the selected drive's head or `undefined` when no drive is selected (latch
 the last value so a counter does not flicker), and `drive_connected(n)` /
@@ -530,6 +559,20 @@ elements, and pages without them are untouched:
   write (an unfocused document, an insecure origin); the caption over the
   screen says which happened, since a clipboard copy has nothing else to
   show for itself.
+- `#keyboard` (a button): raises and dismisses the on-screen A600 keyboard
+  described under [Using the hosted page](#using-the-hosted-page). Always
+  on like `#pause`:
+  without the element the button inserts itself below the canvas shell,
+  and the fullscreen overlay carries a copy of it. It hides itself on a
+  wasm bundle without `key_raw`, since the on-screen keys are raw keycodes
+  and there is no half of this that still works. Two notes for a shell
+  hosting it: the keyboard strip is `position: fixed` so that it spans the
+  viewport in the page and the screen in fullscreen alike, which means no
+  ancestor of `#shell` may carry a `transform`, `filter` or `contain` (any
+  of those would make the strip resolve against that box instead); and the
+  glue publishes the strip's measured height as `--cl-kbd-h` on `<html>`
+  (`0px` while it is closed), so a shell that wants to reserve room for it
+  in its own layout can read it.
 - `#savestate`, `#loadstate`, `#quicksave`, `#quickload`, `#savedstates`
   (buttons): the [save-state controls](#browser-save-states) -- download
   a state, pick a state file, the browser-resident quick slot, and the
