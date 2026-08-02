@@ -50,7 +50,7 @@ range checks as the equivalent TOML fields:
 | `--floppy-speed PERCENT` | `[floppy] speed` | `100` (real), `200`, `400`, `800`, or `0` (turbo) |
 | `--floppy-bridge DFN NAME` | `[floppy.dfN] bridge` | drive a physical floppy drive: `drawbridge`, `greaseweazle`, `supercardpro`, `off` |
 | `--floppy-bridge-port DFN PORT` | `[floppy.dfN] bridge_port` | that interface's serial port (default: auto-detect) |
-| `--floppy-bridge-cable DFN SEL` | `[floppy.dfN] bridge_cable` | drive select: `a`/`b` (PC cable) or `0`-`3` (Shugart) |
+| `--floppy-bridge-cable DFN SEL` | `[floppy.dfN] bridge_cable` | drive select: `a`/`b` (IBM PC cable) or `0`-`3` (Shugart) |
 | `--floppy-bridge-mode DFN MODE` | `[floppy.dfN] bridge_mode` | how tracks are captured: `normal`, `compatible`, `stalling` |
 | `--floppy-bridge-density DFN D` | `[floppy.dfN] bridge_density` | force a density: `auto`, `dd`, `hd` |
 | `--floppy-bridge-speed DFN PCT` | `[floppy.dfN] bridge_speed` | serve captured tracks at `100`, `125`, `150`, `175`, or `200` percent of real speed |
@@ -64,6 +64,7 @@ range checks as the equivalent TOML fields:
 | `--autofire HZ` | `[input] autofire_hz` | `0` (off, the default) to `30` |
 | `--full-screen` / `--windowed` | `[display] full_screen` | open fullscreen or windowed at start (default windowed) |
 | `--show-status-bar` / `--hide-status-bar` | `[display] status_bar` | status bar at start (default shown) |
+| `--menu-scale SIZE` | `[display] menu_scale` | size of the pop-up menu: `1x` (default) or `2x` |
 
 For example, to boot a stock A1200 profile but with 8 MB of fast RAM and a
 faster CPU, with no config file at all:
@@ -479,11 +480,13 @@ recorded in [](../internals/chipset)).
 [display]
 overscan = "tv"       # "tv" (default) or "full"
 pixel_aspect = "tv"   # "tv" (default, 4:3 CRT) or "square" (exact 2x2 lo-res)
+scaling = "smooth"    # "smooth" (default, aspect fit) or "integer" (whole multiples)
 deinterlace = true    # motion-adaptive interlace weaving (default true)
 phosphor = 0.0        # CRT persistence fraction, 0.0 (off) to 0.95
 shader = "none"       # "none" (default), "scanlines", "mask", "crt", or a .wgsl file
 shader_strength = 1.0 # how strongly the shader is mixed in, 0.0-1.0
 tint = "none"         # "none" (default), "bw", "green", "amber", or "sepia"
+menu_scale = "1x"     # size of the pop-up menu: "1x" (default) or "2x"
 full_screen = false   # open fullscreen at start (default false)
 status_bar = true     # show the status bar at start (default true)
 ```
@@ -518,6 +521,41 @@ slightly taller than a real CRT picture, but exact for side-by-side pixel
 comparison with square-pixel emulators. The menu's *Pixel Aspect* item
 flips the mode live without touching the config, and
 `COPPERLINE_PIXEL_ASPECT=tv|square` overrides it for a single run.
+
+`scaling` selects how that presentation canvas reaches the window, which is
+a separate question from what the canvas is. The default `"smooth"` fits the
+canvas to the window preserving its aspect ratio and interpolates, so the
+picture always uses the full window height (or width) whatever fraction the
+scale works out to. `"integer"` instead draws the canvas at the largest
+whole-number multiple of itself that fits the window, measured in physical
+device pixels, centred in black borders and point-sampled: every canvas
+pixel becomes the same square block of host pixels, with no row or column
+sampled twice, which is the look WinUAE and Amiberry call integer scaling.
+The fit is taken in whole canvas pixels against the physical surface --
+the canvas is re-rendered at whatever factor fits, rather than drawn at
+whole multiples of a fixed high-DPI texture -- so every step exists on
+every display: a 2x-DPI laptop whose screen holds three physical pixels
+per canvas pixel but not four gets the 3x picture, and fractional desktop
+scales such as 150% take their whole physical multiples the same way. The
+status bar and menus are rendered at the fitted factor too, so they stay
+sharp at any step (the factor is capped at 4x; larger fits continue as
+whole multiples of the 4x canvas). Only when the window is too small for
+even a 1:1 copy -- smaller than the canvas itself in physical pixels --
+does the picture fall back to the smooth fit rather than cropping to what
+fits. RTG board modes follow the setting too: their frame is scaled
+from its own native resolution, so a 640x480 board screen is drawn at 1x,
+2x, 3x of *those* pixels inside the display area.
+
+`pixel_aspect = "square"` with `scaling = "integer"` is the fully
+pixel-exact combination: the square-pixel canvas is one host row per woven
+scanline, so a whole-number window scale carries the emulated bitmap to the
+screen untouched. Integer scaling of the default TV aspect is still crisp,
+but crisp pixels of an already-resampled image -- that canvas fits the scan
+onto 537 rows for the 4:3 shape before presentation. The monitor-bezel mode
+(`bezel`) composes with either, but its picture opening is a fraction of
+the window by design and is not itself integer-exact. The menu's *Video
+Settings > Scaling* item switches modes live without touching the config;
+there is no environment-variable override.
 
 `deinterlace` controls how interlaced (LACE) displays are presented. On
 (the default), a motion-adaptive deinterlacer weaves the two fields into a
@@ -715,10 +753,10 @@ Points worth knowing:
   `COPPERLINE_SHADER_STRENGTH` are only useful if you honour it.
 
 The file is read and checked when the window is created, when the launcher
-starts a machine, and every time the menu's *CRT Shader* item cycles onto
-**custom** -- which re-reads it from disk. That is the live-reload story:
-leave the emulator running, edit the shader, then cycle the menu item away
-from custom and back to see the new version.
+starts a machine, and every time *Video Settings > CRT Shader > Custom* is
+chosen -- which re-reads it from disk. That is the live-reload story: leave
+the emulator running, edit the shader, then pick **Custom** again to see the
+new version.
 
 Checking is a parse, a full validation, and a look for the two entry points,
 all before any GPU pipeline is built, so a mistake is reported as WGSL with
@@ -728,6 +766,12 @@ Whatever goes wrong -- a missing file, a syntax error, a missing `fs_main` --
 the full diagnostic goes to the log, a one-line summary appears in the
 window's on-screen message, and the shader falls back to off. A bad custom
 shader never fails the config, and never stops the machine from running.
+
+`menu_scale` draws the pop-up menu at `"1x"` (the default) or `"2x"` -- the
+whole menu, rows and text together. It is a start-up preference:
+*Video Settings > Menu Size* changes it live without altering the saved
+value, `--menu-scale` sets it on the command line, and the launcher's A/V &
+Emu page (Video category) has a *Menu size* picker for the same.
 
 `full_screen` opens the window fullscreen at start (borderless), and
 `status_bar` chooses whether the status bar starts visible. Both are start-up
@@ -789,7 +833,8 @@ LED. `"auto"` (the default) lets the guest engage or bypass it as the
 software asks, matching real hardware; `"on"` and `"off"` force it either
 way as a listener override. Unlike the host-output settings above it is
 part of the emulated audio path, so it also affects WAV capture. Also on
-`--audio-filter`, the runtime **Audio Filter** menu item, and Cmd/Alt+A.
+`--audio-filter`, *Audio Settings > Audio Filter* in the menu, and
+Cmd/Alt+A.
 The status-bar PWR LED is lit whenever the machine is powered and follows
 the guest's /LED line itself -- full brightness while engaged, dimmed like
 an A500 rev 6+ board while released -- so this override changes what you
@@ -1397,21 +1442,32 @@ NAT's limitations.
 
 ```toml
 [rtg]
-card = "z3660"
+card = "picasso2"
+vram = "2M"
 ```
 
-`card` is `"z3660"` or `"none"`; a machine takes at most one. The Z3660 is a
-Zorro III board, so it comes fitted by default on machines whose CPU has a
-32-bit address bus (the A3000 and A4000) and is unavailable on the rest --
-asking for it there is an error, as it is for Zorro III RAM. It gives the
-guest high-resolution,
-high-colour screens through Picasso96. It needs the
-open-source Z3660.card driver installed in the guest (with its monitor in
-`DEVS:Monitors`); with that in place, Z3660 screen modes appear in
-ScreenMode, and the window shows the board's output when a screen is
-opened, switching back to the native Amiga display when it closes.
+`card` is `"picasso2"`, `"picasso2plus"`, `"z3660"`, or `"none"`; a machine
+takes at most one. All three boards give the guest high-resolution,
+high-colour screens through Picasso96.
 
-The board's stock monitor ships with the `DISPLAYCHAIN=NO` tooltype, which
+`"picasso2"` fits a Village Tronic Picasso II with a CL-GD5426 graphics
+controller. `"picasso2plus"` fits the later CL-GD5428 revision, reports its
+distinct autoconfig serial number, and wires vertical blank to INT2. Both are
+Zorro II boards, so they work with 68000/68010 and 24-bit 68EC020 machines as
+well as 32-bit CPUs. `vram` selects either real board's `"1M"` or `"2M"`
+memory configuration and defaults to `"2M"`; it is ignored for other cards.
+Install the Picasso96 `PicassoII.card` driver and its monitor file in the
+guest. The board starts on native Amiga pass-through and switches the
+Copperline display to RTG only while the guest enables a valid Picasso screen.
+
+`"z3660"` is a Zorro III board. It comes fitted by default on machines whose
+CPU has a 32-bit address bus (the A3000 and A4000) and is unavailable on the
+rest; asking for it there is an error, as it is for Zorro III RAM. It needs the
+open-source Z3660.card driver installed in the guest (with its monitor in
+`DEVS:Monitors`). With that in place, Z3660 screen modes appear in ScreenMode,
+and the window shows the board's output when a screen is opened.
+
+The Z3660 board's stock monitor ships with the `DISPLAYCHAIN=NO` tooltype, which
 models the real hardware's separate RTG monitor and never hands the display
 back to the native screen. On a single-window emulator you usually want
 `DISPLAYCHAIN=YES`, so the one window follows whichever screen is active.

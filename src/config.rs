@@ -197,6 +197,8 @@ pub struct Config {
     /// the Zorro chain and presents RTG screens (all pixel formats, core
     /// blitter ops, hardware mouse sprite) to its Picasso96 driver.
     pub rtg: RtgCard,
+    /// Picasso II/II+ display memory. Ignored by other RTG cards.
+    pub rtg_vram_bytes: usize,
     pub floppy: FloppyConfig,
     /// Which floppy drive slots are electrically present. DF0 is the
     /// internal drive and is always present; DF1-DF3 are external drives
@@ -215,6 +217,11 @@ pub struct Config {
     /// Presentation pixel aspect: how emulated scanlines map to host
     /// rows in the window and in screenshots. See [`PixelAspect`].
     pub pixel_aspect: PixelAspect,
+    /// How the presentation canvas is scaled into the window: aspect-fit
+    /// with filtering, or whole-number multiples only. See
+    /// [`DisplayScaling`]. Orthogonal to `pixel_aspect`, which decides what
+    /// the canvas itself is.
+    pub scaling: DisplayScaling,
     /// Motion-adaptive deinterlacing of LACE content (on by default).
     /// Off, every field is plain line-doubled as it arrives, which shows
     /// interlace bob/flicker like a real TV without persistence.
@@ -240,6 +247,8 @@ pub struct Config {
     /// Screen tint applied to the window image: the phosphor colour of a
     /// monochrome monitor, or a sepia treatment. See [`Tint`].
     pub tint: Tint,
+    /// How large the pop-up menu is drawn (`[display] menu_scale`).
+    pub menu_scale: MenuScale,
     /// Open the window in fullscreen at start (`[display] full_screen`, or
     /// `--full-screen` / `--windowed`). The `Cmd+F` / `Alt+F` toggle flips it
     /// live without affecting this start-up value.
@@ -325,6 +334,39 @@ pub enum PixelAspect {
     Square,
 }
 
+/// How the presentation canvas is scaled into the host window
+/// (`[display] scaling`). A window-presentation setting only: the
+/// framebuffer, screenshots, frame dumps and recordings are the canvas
+/// itself and never see it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DisplayScaling {
+    /// Fit the canvas to the window preserving its aspect ratio, with
+    /// linear filtering -- the whole window height (or width) is used
+    /// whatever the ratio works out to. The default.
+    #[default]
+    Smooth,
+    /// Draw the canvas at the largest whole-number multiple of itself that
+    /// fits the window, centred in black borders and point-sampled, so
+    /// every canvas pixel is the same square block of host pixels. Falls
+    /// back to the smooth fit when the window is too small for even 1x,
+    /// which crops rather than shrinks.
+    Integer,
+}
+
+impl DisplayScaling {
+    /// Every mode, in the order a picker offers them.
+    pub const MENU_ORDER: [DisplayScaling; 2] = [DisplayScaling::Smooth, DisplayScaling::Integer];
+
+    /// Picker label: the config name of the mode (round-trips through
+    /// [`parse_display_scaling`]).
+    pub fn label(self) -> &'static str {
+        match self {
+            DisplayScaling::Smooth => "Smooth",
+            DisplayScaling::Integer => "Integer",
+        }
+    }
+}
+
 /// The GPU shader pass the window applies to the presented image. The
 /// `COPPERLINE_SHADER` env var overrides the config for one run. A
 /// presentation stage only: screenshots, frame dumps, recordings and
@@ -336,14 +378,15 @@ pub enum ShaderMode {
     /// "none" or "off" in the config.
     #[default]
     None,
-    /// Darken alternate output rows: the line structure a 15 kHz CRT
-    /// leaves between scanlines.
+    /// Darken between the emulated scan lines -- one dark band per
+    /// emulated line whatever the window scale, the line structure a
+    /// 15 kHz CRT leaves.
     Scanlines,
-    /// Modulate the output through an RGB phosphor mask, like the
-    /// aperture grille of a Trinitron-class monitor.
+    /// Modulate the output through a staggered RGB dot/shadow mask,
+    /// like a slot-mask consumer tube.
     Mask,
-    /// Scanlines and phosphor mask together with a tube's slight bloom:
-    /// the full CRT look.
+    /// Scanlines and an aperture-grille phosphor mask together with
+    /// tube curvature and a corner vignette: the full CRT look.
     Crt,
     /// A user WGSL fragment shader loaded from this path at start-up.
     Custom(PathBuf),
@@ -375,6 +418,16 @@ pub enum ShaderKind {
 }
 
 impl ShaderKind {
+    /// Every shader, in the order a picker offers them. `Custom` is last
+    /// because it is the one that depends on a file being configured.
+    pub const MENU_ORDER: [ShaderKind; 5] = [
+        ShaderKind::None,
+        ShaderKind::Scanlines,
+        ShaderKind::Mask,
+        ShaderKind::Crt,
+        ShaderKind::Custom,
+    ];
+
     /// Picker label: the config name of the preset (round-trips through
     /// [`parse_shader`], which takes "off" as well as "none"), or
     /// "custom" for a user shader, whose path is too long to name here.
@@ -385,6 +438,22 @@ impl ShaderKind {
             ShaderKind::Mask => "mask",
             ShaderKind::Crt => "crt",
             ShaderKind::Custom => "custom",
+        }
+    }
+
+    /// What a picker shows the user, as against the config name [`label`]
+    /// round-trips. Both pickers read this, so they cannot drift apart.
+    ///
+    /// [`label`]: ShaderKind::label
+    pub fn menu_label(self) -> &'static str {
+        match self {
+            ShaderKind::None => "Disabled",
+            ShaderKind::Scanlines => "Scanlines",
+            ShaderKind::Mask => "Mask",
+            // Named for the monitor the preset is modelled on; the path of a
+            // user shader is too long for a value column.
+            ShaderKind::Crt => "CRT (1084)",
+            ShaderKind::Custom => "Custom",
         }
     }
 }
@@ -413,7 +482,54 @@ pub enum Tint {
     Sepia,
 }
 
+/// How large the pop-up menu is drawn. The panel font is a bitmap, so the
+/// sizes are whole multiples of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MenuScale {
+    /// The font at its own size. The default.
+    #[default]
+    Normal,
+    /// Twice up, for a large display or a distant seat.
+    Large,
+}
+
+impl MenuScale {
+    /// Every size, in the order a picker offers them.
+    pub const MENU_ORDER: [MenuScale; 2] = [MenuScale::Normal, MenuScale::Large];
+
+    /// Picker label: the config name of the size (round-trips through
+    /// [`parse_menu_scale`]).
+    pub fn label(self) -> &'static str {
+        match self {
+            MenuScale::Normal => "1x",
+            MenuScale::Large => "2x",
+        }
+    }
+
+    /// What a picker with room shows: the name and the figure together. The
+    /// menu itself shows [`label`] alone, having no width to spare.
+    ///
+    /// [`label`]: MenuScale::label
+    pub fn menu_label(self) -> &'static str {
+        match self {
+            MenuScale::Normal => "Normal (1x)",
+            MenuScale::Large => "Large (2x)",
+        }
+    }
+
+    /// What every length in the menu is multiplied by.
+    pub fn factor(self) -> usize {
+        match self {
+            MenuScale::Normal => 1,
+            MenuScale::Large => 2,
+        }
+    }
+}
+
 impl Tint {
+    /// Every tint, in the order a picker offers them.
+    pub const MENU_ORDER: [Tint; 5] = [Tint::None, Tint::Bw, Tint::Green, Tint::Amber, Tint::Sepia];
+
     /// Picker label: the config name of the tint (round-trips through
     /// [`parse_tint`], which takes "off" as well as "none").
     pub fn label(self) -> &'static str {
@@ -423,6 +539,21 @@ impl Tint {
             Tint::Green => "green",
             Tint::Amber => "amber",
             Tint::Sepia => "sepia",
+        }
+    }
+
+    /// What a picker shows the user, as against the config name [`label`]
+    /// round-trips. "Colour" rather than "Off": it says what the picture
+    /// looks like, and it is the web front-end's wording for the same picker.
+    ///
+    /// [`label`]: Tint::label
+    pub fn menu_label(self) -> &'static str {
+        match self {
+            Tint::None => "Colour",
+            Tint::Bw => "Black & white",
+            Tint::Green => "Green",
+            Tint::Amber => "Amber",
+            Tint::Sepia => "Sepia",
         }
     }
 }
@@ -457,6 +588,17 @@ impl JoystickInputMode {
         match self {
             Self::Gamepad => "gamepad",
             Self::Keyboard => "keyboard",
+        }
+    }
+
+    /// What a picker shows the user, as against the config name [`label`]
+    /// round-trips.
+    ///
+    /// [`label`]: JoystickInputMode::label
+    pub fn menu_label(self) -> &'static str {
+        match self {
+            Self::Gamepad => "Gamepad",
+            Self::Keyboard => "Keyboard",
         }
     }
 }
@@ -662,6 +804,11 @@ pub enum RtgCard {
     /// The Z3660 accelerator's FPGA RTG core, driven by the open-source
     /// Z3660.card Picasso96 driver.
     Z3660,
+    /// Village Tronic Picasso II: Zorro II, CL-GD5426, 1 or 2 MB VRAM.
+    Picasso2,
+    /// Village Tronic Picasso II+: Zorro II, CL-GD5428, 1 or 2 MB VRAM,
+    /// with vertical blank wired to INT2.
+    Picasso2Plus,
 }
 
 /// Which SCSI host adapter the `[scsi]` section fits: one of the two Zorro
@@ -778,12 +925,6 @@ pub fn autofire_label(hz: u8) -> String {
     }
 }
 
-/// The next rate in the menu's cycle.
-pub fn next_autofire_rate(hz: u8) -> u8 {
-    let idx = AUTOFIRE_RATES.iter().position(|&r| r == hz).unwrap_or(0);
-    AUTOFIRE_RATES[(idx + 1) % AUTOFIRE_RATES.len()]
-}
-
 /// Whether a held fire button should be *asserted* right now, given the
 /// autofire rate and how much emulated time has passed.
 ///
@@ -858,6 +999,15 @@ pub enum WarpSpeed {
 }
 
 impl WarpSpeed {
+    /// Every limit, in the order a picker offers them.
+    pub const MENU_ORDER: [WarpSpeed; 5] = [
+        WarpSpeed::X2,
+        WarpSpeed::X4,
+        WarpSpeed::X8,
+        WarpSpeed::X16,
+        WarpSpeed::Max,
+    ];
+
     /// Cycle to the next level for the menu/keyboard "cycle" control:
     /// 2x -> 4x -> 8x -> 16x -> Max -> 2x.
     pub fn next(self) -> Self {
@@ -1087,10 +1237,6 @@ pub enum BridgeCable {
     Shugart3,
 }
 
-/// A real drive attached to one floppy bay, from `[floppy.dfN] bridge = ...`.
-///
-/// Held apart from [`FloppyDriveConfig`] because a bridged drive has no image
-/// path: whichever of the two is present for a bay supplies its media.
 /// Serving speeds a bridged bay accepts, as percentages of the platter's
 /// real speed. Shared by the config parser, the CLI, and the launcher's
 /// cycle row so all three offer the same set.
@@ -1099,6 +1245,10 @@ pub const SUPPORTED_BRIDGE_SPEED_PERCENTS: [u16; 5] = [100, 125, 150, 175, 200];
 /// The serving speed a bridged bay uses unless told otherwise.
 pub const DEFAULT_BRIDGE_SPEED_PERCENT: u16 = 125;
 
+/// A real drive attached to one floppy bay, from `[floppy.dfN] bridge = ...`.
+///
+/// Held apart from [`FloppyDriveConfig`] because a bridged drive has no image
+/// path: whichever of the two is present for a bay supplies its media.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FloppyBridgeConfig {
     pub driver: BridgeDriver,
@@ -1629,17 +1779,20 @@ impl Default for Config {
             scsi: ScsiConfig::default(),
             a2065_net: None,
             rtg: RtgCard::None,
+            rtg_vram_bytes: 2 * 1024 * 1024,
             floppy: FloppyConfig::default(),
             floppy_connected: [true, false, false, false],
             floppy_playlists: std::array::from_fn(|_| Vec::new()),
             overscan: Overscan::Tv,
             pixel_aspect: PixelAspect::Tv,
+            scaling: DisplayScaling::Smooth,
             deinterlace: true,
             phosphor: 0.0,
             shader: ShaderMode::None,
             shader_strength: 1.0,
             bezel: false,
             tint: Tint::None,
+            menu_scale: MenuScale::Normal,
             full_screen: false,
             status_bar: true,
             joystick_input_mode: JoystickInputMode::Gamepad,
@@ -1862,6 +2015,9 @@ pub struct ConfigOverrides {
     /// Show the status bar at start (`--show-status-bar` /
     /// `--hide-status-bar`). Same as `[display] status_bar`.
     pub status_bar: Option<bool>,
+    /// How large the pop-up menu is drawn (`--menu-scale`). Same values as
+    /// `[display] menu_scale`.
+    pub menu_scale: Option<String>,
     /// A real floppy drive on a bay (`--floppy-bridge DFN INTERFACE`), by bay.
     /// Same values as `[floppy.dfN] bridge`.
     pub floppy_bridge: [Option<String>; 4],
@@ -1939,6 +2095,7 @@ impl ConfigOverrides {
             && self.a2065_interface.is_none()
             && self.full_screen.is_none()
             && self.status_bar.is_none()
+            && self.menu_scale.is_none()
     }
 
     /// Inject the set overrides into the raw config, replacing the values
@@ -2137,6 +2294,9 @@ impl ConfigOverrides {
         if let Some(status_bar) = self.status_bar {
             raw.display.status_bar = Some(status_bar);
         }
+        if let Some(menu_scale) = &self.menu_scale {
+            raw.display.menu_scale = Some(menu_scale.clone());
+        }
     }
 }
 
@@ -2215,6 +2375,16 @@ impl RawConfig {
         toml::to_string_pretty(self).context("serializing configuration to TOML")
     }
 
+    /// The configured menu size, for the paths that put a window up before a
+    /// whole [`Config`] has been built.
+    pub fn menu_scale(&self) -> MenuScale {
+        self.display
+            .menu_scale
+            .as_deref()
+            .and_then(|s| parse_menu_scale(s).ok())
+            .unwrap_or_default()
+    }
+
     /// The configured live-audio state (`[audio] output_enabled`), defaulting to
     /// on when unset -- matching [`AudioConfig`]'s default. Lets the binary seed
     /// the config-screen session audio without reaching into private raw fields.
@@ -2233,6 +2403,10 @@ pub(crate) struct RawDisplay {
     /// pixels; a lo-res display is an exact 2x2 of its bitmap).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) pixel_aspect: Option<String>,
+    /// "smooth" (default, aspect-fit with filtering) or "integer" (whole
+    /// -number multiples of the canvas, centred, point-sampled).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) scaling: Option<String>,
     /// Motion-adaptive deinterlacing of interlaced content (default
     /// true); false line-doubles every field as it arrives.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2253,6 +2427,9 @@ pub(crate) struct RawDisplay {
     /// Screen tint: "none" (default), "bw", "green", "amber", or "sepia".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) tint: Option<String>,
+    /// Size of the pop-up menu: "1x" (default) or "2x".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) menu_scale: Option<String>,
     /// Open fullscreen at start (default false).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) full_screen: Option<bool>,
@@ -2526,10 +2703,12 @@ pub(crate) struct RawA2065 {
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawRtg {
-    /// Card to fit: "z3660" (the Z3660's FPGA RTG core, driven by
-    /// Z3660.card) or "none" (the default).
+    /// Card to fit: "z3660", "picasso2", "picasso2plus", or "none".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) card: Option<String>,
+    /// Picasso II/II+ display memory: "1M" or "2M" (default).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) vram: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -2810,8 +2989,7 @@ pub(crate) struct RawFloppyDrive {
     pub(crate) write_protected: Option<bool>,
     /// Attach a real drive to this bay instead of an image, over a
     /// DrawBridge/Greaseweazle/Supercard Pro: `drawbridge`, `greaseweazle`,
-    /// `supercardpro`, or `profile:N` to use one of the FloppyBridge
-    /// library's own saved profiles.
+    /// or `supercardpro` (aliases `arduino`, `gw`, `scp`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) bridge: Option<String>,
     /// Serial port the interface is on. Omitted, the driver finds its own
@@ -3111,6 +3289,10 @@ impl TryFrom<RawConfig> for Config {
             None => defaults.pixel_aspect,
             Some(s) => parse_pixel_aspect(s)?,
         };
+        let scaling = match raw.display.scaling.as_deref() {
+            None => defaults.scaling,
+            Some(s) => parse_display_scaling(s)?,
+        };
         let deinterlace = raw.display.deinterlace.unwrap_or(defaults.deinterlace);
         let phosphor = match raw.display.phosphor {
             None => defaults.phosphor,
@@ -3140,6 +3322,10 @@ impl TryFrom<RawConfig> for Config {
         let tint = match raw.display.tint.as_deref() {
             None => defaults.tint,
             Some(s) => parse_tint(s)?,
+        };
+        let menu_scale = match raw.display.menu_scale.as_deref() {
+            None => defaults.menu_scale,
+            Some(s) => parse_menu_scale(s)?,
         };
         let full_screen = raw.display.full_screen.unwrap_or(defaults.full_screen);
         let status_bar = raw.display.status_bar.unwrap_or(defaults.status_bar);
@@ -3245,14 +3431,27 @@ impl TryFrom<RawConfig> for Config {
             Some(raw_card) => match raw_card.trim().to_ascii_lowercase().as_str() {
                 "none" => RtgCard::None,
                 "z3660" => RtgCard::Z3660,
+                "picasso2" => RtgCard::Picasso2,
+                "picasso2plus" | "picasso2+" => RtgCard::Picasso2Plus,
                 _ => {
                     errors.push(anyhow!(
                         "[rtg] card = {raw_card:?} is not known \
-                         (expected \"z3660\" or \"none\")"
+                         (expected \"z3660\", \"picasso2\", \"picasso2plus\", or \"none\")"
                     ));
                     RtgCard::None
                 }
             },
+        };
+        // Only the Picasso II cards have configurable display memory; other
+        // cards ignore [rtg] vram entirely, so a leftover value must not
+        // fail an unrelated configuration.
+        let rtg_vram_bytes = if matches!(rtg, RtgCard::Picasso2 | RtgCard::Picasso2Plus) {
+            match raw.rtg.vram.as_deref() {
+                None => defaults.rtg_vram_bytes,
+                Some(value) => parse_size(value, "RTG VRAM")?,
+            }
+        } else {
+            defaults.rtg_vram_bytes
         };
 
         let scsi = ScsiConfig {
@@ -3376,7 +3575,7 @@ impl TryFrom<RawConfig> for Config {
         errors.extend(validate_mb_ram(mb_ram_bytes, mem_controller, cpu).err());
         errors.extend(validate_accel_ram(accel_ram_bytes, cpu).err());
         errors.extend(validate_z3_ram(z3_ram_bytes, cpu).err());
-        errors.extend(validate_rtg_card(rtg, cpu).err());
+        errors.extend(validate_rtg_card(rtg, rtg_vram_bytes, cpu).err());
         let board_specs = zorro_boards
             .iter()
             .chain(wasm_boards.iter().map(|w| &w.spec));
@@ -3564,17 +3763,20 @@ impl TryFrom<RawConfig> for Config {
             scsi,
             a2065_net,
             rtg,
+            rtg_vram_bytes,
             floppy,
             floppy_connected,
             floppy_playlists,
             overscan,
             pixel_aspect,
+            scaling,
             deinterlace,
             phosphor,
             shader,
             shader_strength,
             bezel,
             tint,
+            menu_scale,
             full_screen,
             status_bar,
             joystick_input_mode,
@@ -3648,6 +3850,14 @@ pub(crate) fn parse_pixel_aspect(s: &str) -> Result<PixelAspect> {
     }
 }
 
+pub(crate) fn parse_display_scaling(s: &str) -> Result<DisplayScaling> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "smooth" => Ok(DisplayScaling::Smooth),
+        "integer" => Ok(DisplayScaling::Integer),
+        other => bail!("[display] scaling must be \"smooth\" or \"integer\", got \"{other}\""),
+    }
+}
+
 /// Parse a `[display] shader` value: a preset name ("off" is accepted for
 /// "none", so [`ShaderKind::label`] round-trips), or the path of a `.wgsl`
 /// file, which is kept verbatim since host paths are case-sensitive.
@@ -3683,6 +3893,15 @@ pub(crate) fn parse_tint(s: &str) -> Result<Tint> {
             "[display] tint must be \"none\", \"bw\", \"green\", \"amber\", \
              or \"sepia\", got \"{other}\""
         ),
+    }
+}
+
+/// Parse a `[display] menu_scale` value.
+pub(crate) fn parse_menu_scale(s: &str) -> Result<MenuScale> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "1x" | "1" | "normal" => Ok(MenuScale::Normal),
+        "2x" | "2" | "large" => Ok(MenuScale::Large),
+        other => bail!("[display] menu_scale must be \"1x\" or \"2x\", got \"{other}\""),
     }
 }
 
@@ -4281,13 +4500,21 @@ fn cpu_has_32bit_bus(cpu: CpuModel) -> bool {
     )
 }
 
-fn validate_rtg_card(rtg: RtgCard, cpu: CpuModel) -> Result<()> {
+fn validate_rtg_card(rtg: RtgCard, vram_bytes: usize, cpu: CpuModel) -> Result<()> {
     if rtg == RtgCard::Z3660 && !cpu_has_32bit_bus(cpu) {
         bail!(
             "[rtg] card = \"z3660\" is a Zorro III board and needs a CPU \
              with a 32-bit address bus (68020/68030/68040/68060); {:?} has \
              a 24-bit bus",
             cpu
+        );
+    }
+    if matches!(rtg, RtgCard::Picasso2 | RtgCard::Picasso2Plus)
+        && !matches!(vram_bytes, 0x10_0000 | 0x20_0000)
+    {
+        bail!(
+            "[rtg] vram for Picasso II cards must be \"1M\" or \"2M\", got {} bytes",
+            vram_bytes
         );
     }
     Ok(())
@@ -5323,18 +5550,15 @@ mod tests {
     }
 
     #[test]
-    fn autofire_rate_cycles_through_the_menu_list_and_wraps() {
-        let mut hz = 0;
-        let mut seen = vec![hz];
-        for _ in 0..AUTOFIRE_RATES.len() {
-            hz = next_autofire_rate(hz);
-            seen.push(hz);
-        }
-        assert_eq!(seen.first(), seen.last(), "the cycle returns to off");
+    fn autofire_rates_are_labelled_and_stay_within_the_usable_range() {
+        assert_eq!(AUTOFIRE_RATES[0], 0, "the list opens with off");
         assert_eq!(autofire_label(0), "off");
         assert_eq!(autofire_label(8), "8 Hz");
-        // An off-list value (hand-edited config) rejoins the cycle.
-        assert_eq!(next_autofire_rate(99), AUTOFIRE_RATES[1]);
+        // Above the cap the assert window is shorter than the frame the guest
+        // samples on, so no rate the menu offers may exceed it.
+        for hz in AUTOFIRE_RATES {
+            assert!(hz <= AUTOFIRE_MAX_HZ, "{hz} Hz is past the usable range");
+        }
     }
 
     #[test]
@@ -5501,6 +5725,20 @@ mod tests {
     }
 
     #[test]
+    fn display_scaling_parses_and_defaults_to_smooth() -> Result<()> {
+        assert_eq!(parse_config("")?.scaling, DisplayScaling::Smooth);
+        let cfg = parse_config(
+            r#"
+            [display]
+            scaling = "Integer"
+            "#,
+        )?;
+        assert_eq!(cfg.scaling, DisplayScaling::Integer);
+        assert!(parse_config("[display]\nscaling = \"2x\"").is_err());
+        Ok(())
+    }
+
+    #[test]
     fn display_phosphor_parses_and_rejects_out_of_range() -> Result<()> {
         assert_eq!(parse_config("")?.phosphor, 0.0);
         let cfg = parse_config(
@@ -5616,6 +5854,38 @@ mod tests {
         assert!(parse_config("[display]\nshader_strength = 1.5").is_err());
         assert!(parse_config("[display]\nshader_strength = -0.1").is_err());
         Ok(())
+    }
+
+    #[test]
+    fn display_menu_scale_parses_and_defaults_to_1x() -> Result<()> {
+        assert_eq!(parse_config("")?.menu_scale, MenuScale::Normal);
+        let cfg = parse_config(
+            r#"
+            [display]
+            menu_scale = "2x"
+        "#,
+        )?;
+        assert_eq!(cfg.menu_scale, MenuScale::Large);
+        // Every label round-trips through the parser.
+        for scale in MenuScale::MENU_ORDER {
+            assert_eq!(
+                parse_menu_scale(scale.label()).expect("label parses"),
+                scale
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn display_menu_scale_rejects_an_unknown_size() {
+        let err = parse_config(
+            r#"
+            [display]
+            menu_scale = "3x"
+        "#,
+        )
+        .expect_err("unknown size");
+        assert!(err.to_string().contains("menu_scale"), "{err}");
     }
 
     #[test]
@@ -5753,6 +6023,10 @@ mod tests {
             assert_eq!(piped.rtc_present, direct.rtc_present, "{model:?} rtc");
             assert_eq!(piped.rtc_chip, direct.rtc_chip, "{model:?} rtc chip");
             assert_eq!(piped.rtg, direct.rtg, "{model:?} rtg");
+            assert_eq!(
+                piped.rtg_vram_bytes, direct.rtg_vram_bytes,
+                "{model:?} RTG VRAM"
+            );
         }
         Ok(())
     }
@@ -7529,7 +7803,46 @@ mod tests {
         // A bare config is a 68000 machine, which cannot host a Zorro III
         // board, so nothing is fitted.
         assert_eq!(parse_config("")?.rtg, RtgCard::None);
+
+        // Picasso II is a Zorro II card and remains valid on the default
+        // 68000 machine. Its fitted memory is part of the resolved config.
+        let picasso = parse_config("[rtg]\ncard = \" Picasso2 \"\nvram = \"1M\"\n")?;
+        assert_eq!(picasso.rtg, RtgCard::Picasso2);
+        assert_eq!(picasso.rtg_vram_bytes, 1024 * 1024);
+        let picasso = parse_config("[rtg]\ncard = \"picasso2\"\n")?;
+        assert_eq!(picasso.rtg_vram_bytes, 2 * 1024 * 1024);
+        let plus = parse_config("[rtg]\ncard = \" Picasso2Plus \"\nvram = \"1M\"\n")?;
+        assert_eq!(plus.rtg, RtgCard::Picasso2Plus);
+        assert_eq!(plus.rtg_vram_bytes, 1024 * 1024);
+        let plus_alias = parse_config("[rtg]\ncard = \"picasso2+\"\n")?;
+        assert_eq!(plus_alias.rtg, RtgCard::Picasso2Plus);
         Ok(())
+    }
+
+    #[test]
+    fn picasso2_rejects_non_hardware_vram_sizes() {
+        let err = parse_config("[rtg]\ncard = \"picasso2\"\nvram = \"3M\"\n").unwrap_err();
+        assert!(
+            err.to_string().contains("must be \"1M\" or \"2M\""),
+            "{err:#}"
+        );
+        let err = parse_config("[rtg]\ncard = \"picasso2plus\"\nvram = \"3M\"\n").unwrap_err();
+        assert!(
+            err.to_string().contains("must be \"1M\" or \"2M\""),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn rtg_vram_is_ignored_by_non_picasso_cards() {
+        let cfg = parse_config("[rtg]\ncard = \"none\"\nvram = \"oops\"\n").unwrap();
+        assert_eq!(cfg.rtg, RtgCard::None);
+        assert_eq!(cfg.rtg_vram_bytes, 2 * 1024 * 1024);
+        let cfg =
+            parse_config("[cpu]\nmodel = \"68030\"\n\n[rtg]\ncard = \"z3660\"\nvram = \"3M\"\n")
+                .unwrap();
+        assert_eq!(cfg.rtg, RtgCard::Z3660);
+        assert_eq!(cfg.rtg_vram_bytes, 2 * 1024 * 1024);
     }
 
     /// A machine that can host a Zorro III board gets one fitted by default,

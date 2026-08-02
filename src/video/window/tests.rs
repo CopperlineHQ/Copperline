@@ -5,28 +5,29 @@
 //! and keep full access to the parent's private items via `super::`.
 
 use super::ui::{AnalyzerTab, Panel, UiControl};
+use super::ScalingMode;
 use super::{
     bar_layout, center_present_frame_for_visible_start, center_present_frame_horizontally,
     control_at, copperline_icon_image, copperline_logo_image, copy_present_frame,
     copy_window_present_frame, cursor_position_in_texture, draw_status_bar, fdd_track_counter_rect,
     fdd_track_digit_rect, host_shortcut_modifier_pressed, host_to_amiga_rawkey,
     joystick_toggle_rect, led_row_rect, mask_present_frame_to_tv, paint_test_screen,
-    parse_amiga_key, pause_button_rect, power_button_rect, present_height,
-    presentation_pixels_equal, presentation_source_y_offset, raw_device_qualifier_family_held,
-    raw_device_qualifier_rawkey, rawkey_is_held, rawkey_transition_is_duplicate,
-    reboot_button_rect, repeated_main_key_should_drop, rgba, short_status_error,
-    shorten_status_paths, shot_button_rect, should_render_emulated_frame, standard_window_top_row,
-    status_with_latched_fdd_track, take_integral_mouse_delta, texture_height, texture_width,
-    tint_display_rows, tint_lut, tint_rows_in_place, tv_aperture_source_row, tv_source_h_bounds,
-    volume_percent_from_pos, volume_slider_track_rect, BarControl, DriveBar, JoystickInputMode,
-    MediaBar, PresentationLatch, StatusBarView, ToolPanelKind, AMIGA_RAWKEY_LEFT_ALT,
-    AMIGA_RAWKEY_LEFT_SHIFT, AMIGA_RAWKEY_RIGHT_ALT, AMIGA_RAWKEY_RIGHT_SHIFT, BUTTON_GLYPH,
-    BUTTON_GLYPH_DISABLED, CD_BODY, CD_LED_OFF, CD_LED_ON, DISK_BODY, DISK_BODY_SHADOW, DISK_LABEL,
-    FDD_LED_OFF, FDD_LED_ON, HDD_LED_OFF, HDD_LED_ON, POWER_GLYPH_OFF, POWER_GLYPH_ON,
-    POWER_LED_BRIGHT, POWER_LED_DIM, POWER_LED_OFF, STANDARD_PAL_VISIBLE_LINES,
-    STANDARD_PAL_VISIBLE_START_VPOS, STATUS_BG, TRACK_SEGMENT_OFF, TRACK_SEGMENT_ON,
-    TV_CAPTURED_SOURCE_X, TV_LIVE_PAD_X, TV_PAL_PRESENT_HEIGHT, TV_PRESENT_SOURCE_X,
-    TV_PRESENT_SOURCE_Y, TV_PRESENT_WIDTH, VOLUME_FILL, VOLUME_GLYPH_X,
+    parse_amiga_key, pause_button_rect, plan_present_scaling_for, power_button_rect,
+    present_height, presentation_pixels_equal, presentation_source_y_offset,
+    raw_device_qualifier_family_held, raw_device_qualifier_rawkey, rawkey_is_held,
+    rawkey_transition_is_duplicate, reboot_button_rect, repeated_main_key_should_drop, rgba,
+    short_status_error, shorten_status_paths, shot_button_rect, should_render_emulated_frame,
+    standard_window_top_row, status_with_latched_fdd_track, take_integral_mouse_delta,
+    texture_height, texture_width, tint_display_rows, tint_lut, tint_rows_in_place,
+    tv_aperture_source_row, tv_source_h_bounds, volume_percent_from_pos, volume_slider_track_rect,
+    BarControl, DriveBar, JoystickInputMode, MediaBar, PresentationLatch, StatusBarView,
+    ToolPanelKind, AMIGA_RAWKEY_LEFT_ALT, AMIGA_RAWKEY_LEFT_SHIFT, AMIGA_RAWKEY_RIGHT_ALT,
+    AMIGA_RAWKEY_RIGHT_SHIFT, BUTTON_GLYPH, BUTTON_GLYPH_DISABLED, CD_BODY, CD_LED_OFF, CD_LED_ON,
+    DISK_BODY, DISK_BODY_SHADOW, DISK_LABEL, FDD_LED_OFF, FDD_LED_ON, HDD_LED_OFF, HDD_LED_ON,
+    POWER_GLYPH_OFF, POWER_GLYPH_ON, POWER_LED_BRIGHT, POWER_LED_DIM, POWER_LED_OFF,
+    STANDARD_PAL_VISIBLE_LINES, STANDARD_PAL_VISIBLE_START_VPOS, STATUS_BG, TRACK_SEGMENT_OFF,
+    TRACK_SEGMENT_ON, TV_CAPTURED_SOURCE_X, TV_LIVE_PAD_X, TV_PAL_PRESENT_HEIGHT,
+    TV_PRESENT_SOURCE_X, TV_PRESENT_SOURCE_Y, TV_PRESENT_WIDTH, VOLUME_FILL, VOLUME_GLYPH_X,
 };
 use crate::audio::{AudioSink, NullSink};
 use crate::bus::{FrontPanelStatus, RenderRegisterSnapshot};
@@ -688,61 +689,99 @@ fn input_mapping_panel_clears_and_switches_mappings() {
     );
 }
 
+/// Walk the open menu by label and pick the row at the end of the path.
+fn pick_menu(app: &mut super::App, path: &[&str]) {
+    let mut rows: &[crate::video::menu::MenuRow] = &app.ui.menu_rows;
+    let mut nav_path = Vec::new();
+    for (depth, label) in path.iter().enumerate() {
+        let index = rows
+            .iter()
+            .position(|r| r.label == *label)
+            .unwrap_or_else(|| panic!("no row {label:?} at depth {depth}"));
+        if depth + 1 == path.len() {
+            app.ui.menu_nav.open_path(nav_path, Some(index));
+            app.activate_menu_row(None);
+            return;
+        }
+        rows = rows[index].children().expect("a level to descend into");
+        nav_path.push(index);
+    }
+}
+
 #[test]
-fn menu_scroll_controls_move_the_list_without_closing_the_menu() {
+fn opening_the_menu_builds_it_and_closing_puts_it_away() {
     let mut app = test_app();
+    app.set_mouse_captured(true);
+
     app.activate_bar_control(super::BarControl::Menu);
     assert!(app.ui.menu_open);
-    assert_eq!(app.ui.menu_scroll, 0, "each open starts at the top");
+    assert!(
+        !app.ui.menu_rows.is_empty(),
+        "the menu is built as it opens"
+    );
+    assert_eq!(app.ui.menu_nav.depth(), 0, "each open starts at the top");
+    assert!(
+        !app.mouse_captured,
+        "the pointer has to be able to reach the menu it just opened"
+    );
 
-    // The real menu fits, so there is nothing to scroll -- but the controls
-    // must be inert rather than wrong, and must never close the menu.
-    app.activate_ui_control(UiControl::MenuScrollDown);
-    assert_eq!(app.ui.menu_scroll, 0);
-    app.activate_ui_control(UiControl::MenuScrollUp);
-    assert_eq!(app.ui.menu_scroll, 0);
-    assert!(app.ui.menu_open, "scrolling never dismisses the menu");
-
-    // A scroll position left over from a previous open is cleared, so the
-    // list never reappears part-way down.
-    app.ui.menu_scroll = 3;
-    app.activate_bar_control(super::BarControl::Menu); // close
-    app.activate_bar_control(super::BarControl::Menu); // open again
-    assert_eq!(app.ui.menu_scroll, 0);
-
-    // Choosing an item still closes the menu.
-    app.activate_ui_control(UiControl::MenuItem(super::ui::MenuItem::Autofire));
-    assert!(!app.ui.menu_open);
+    // Somewhere down a submenu, then closed and opened again: no trace of
+    // where it was left.
+    app.ui.menu_nav.open_path(vec![4], Some(1));
+    app.activate_bar_control(super::BarControl::Menu);
+    assert!(!app.ui.menu_open && app.ui.menu_rows.is_empty());
+    app.activate_bar_control(super::BarControl::Menu);
+    assert_eq!(app.ui.menu_nav.depth(), 0);
+    assert_eq!(app.ui.menu_nav.cursor(), None);
 }
 
 #[test]
-fn autofire_menu_item_cycles_the_rate() {
+fn choosing_a_setting_leaves_the_menu_open_and_shows_it_took() {
     let mut app = test_app();
-    assert_eq!(app.autofire_hz, 0);
-    app.activate_ui_control(UiControl::MenuItem(super::ui::MenuItem::Autofire));
-    assert_eq!(app.autofire_hz, crate::config::AUTOFIRE_RATES[1]);
-    for _ in 0..crate::config::AUTOFIRE_RATES.len() - 1 {
-        app.activate_ui_control(UiControl::MenuItem(super::ui::MenuItem::Autofire));
-    }
-    assert_eq!(app.autofire_hz, 0, "the cycle returns to off");
+    app.activate_bar_control(super::BarControl::Menu);
+
+    let rate = crate::config::AUTOFIRE_RATES[1];
+    pick_menu(
+        &mut app,
+        &[
+            "Input Settings",
+            "Autofire",
+            &crate::config::autofire_label(rate),
+        ],
+    );
+    assert_eq!(app.autofire_hz, rate);
+    assert!(app.ui.menu_open, "a setting does not dismiss the menu");
+
+    // The rebuilt tree marks the rate that is now in force.
+    let input = app
+        .ui
+        .menu_rows
+        .iter()
+        .find(|r| r.label == "Input Settings")
+        .expect("input settings");
+    let autofire = input
+        .children()
+        .expect("children")
+        .iter()
+        .find(|r| r.label == "Autofire")
+        .expect("autofire");
+    let marked: Vec<&str> = autofire
+        .children()
+        .expect("rates")
+        .iter()
+        .filter(|r| r.marked())
+        .map(|r| r.label.as_str())
+        .collect();
+    assert_eq!(marked, vec![crate::config::autofire_label(rate)]);
 }
 
 #[test]
-fn crt_shader_menu_item_cycles_the_presets() {
-    use crate::config::ShaderKind;
+fn choosing_a_window_closes_the_menu_behind_it() {
     let mut app = test_app();
-    assert_eq!(app.crt_shader_kind, ShaderKind::None);
-    for expected in [
-        ShaderKind::Scanlines,
-        ShaderKind::Mask,
-        ShaderKind::Crt,
-        // No user shader is configured, so the cycle skips Custom and
-        // returns to off rather than selecting a shader it cannot load.
-        ShaderKind::None,
-    ] {
-        app.activate_ui_control(UiControl::MenuItem(super::ui::MenuItem::CrtShader));
-        assert_eq!(app.crt_shader_kind, expected);
-    }
+    app.activate_bar_control(super::BarControl::Menu);
+    pick_menu(&mut app, &["Keyboard Shortcuts..."]);
+    assert!(!app.ui.menu_open && app.ui.menu_rows.is_empty());
+    assert!(matches!(app.ui.panel, Some(super::Panel::Shortcuts)));
 }
 
 #[test]
@@ -752,13 +791,12 @@ fn a_broken_custom_shader_never_becomes_the_selected_preset() {
     // Configured but unloadable: the fixture has no window, so there is no
     // device to compile it against.
     app.custom_shader_path = Some(std::path::PathBuf::from("/nonexistent/nope.wgsl"));
-    for _ in 0..3 {
-        app.activate_ui_control(UiControl::MenuItem(super::ui::MenuItem::CrtShader));
-    }
+    app.activate_bar_control(super::BarControl::Menu);
+    pick_menu(&mut app, &["Video Settings", "CRT Shader", "CRT (1084)"]);
     assert_eq!(app.crt_shader_kind, ShaderKind::Crt);
-    // Custom is offered next, fails to load, and the cycle falls through to
-    // off rather than selecting a preset that would draw nothing.
-    app.activate_ui_control(UiControl::MenuItem(super::ui::MenuItem::CrtShader));
+    // Custom is offered, fails to load, and leaves nothing selected that
+    // would draw nothing.
+    pick_menu(&mut app, &["Video Settings", "CRT Shader", "Custom"]);
     assert_eq!(app.crt_shader_kind, ShaderKind::None);
 }
 
@@ -1061,7 +1099,7 @@ fn an_explicit_toggle_clears_a_pending_ui_suspension() {
 }
 
 #[test]
-fn cycle_port_device_hot_plugs_and_releases_held_lines() {
+fn swapping_a_port_device_releases_the_lines_it_was_holding() {
     use crate::bus::PortDevice;
     let mut app = test_app();
     app.emu
@@ -1073,18 +1111,17 @@ fn cycle_port_device_hot_plugs_and_releases_held_lines() {
         .input
         .set_joystick(1, true, false, false, false, true, false);
 
-    // Joystick -> Cd32Pad -> Analogue -> None -> Mouse, releasing the
-    // held fire/direction lines at the first swap.
-    app.cycle_port_device(1);
+    // Swapping the device releases the lines the old one was holding: a
+    // fire button held as the plug comes out must not stay down forever.
+    app.hot_plug_port_device(1, PortDevice::Cd32Pad);
     assert_eq!(app.emu.bus().input.device(1), PortDevice::Cd32Pad);
     assert!(!app.emu.bus().input.ports[1].fire, "hot-plug released fire");
     assert!(!app.emu.bus().input.ports[1].up);
-    app.cycle_port_device(1);
-    assert_eq!(app.emu.bus().input.device(1), PortDevice::Analogue);
-    app.cycle_port_device(1);
-    assert_eq!(app.emu.bus().input.device(1), PortDevice::None);
-    app.cycle_port_device(1);
-    assert_eq!(app.emu.bus().input.device(1), PortDevice::Mouse);
+
+    for device in [PortDevice::Analogue, PortDevice::None, PortDevice::Mouse] {
+        app.hot_plug_port_device(1, device);
+        assert_eq!(app.emu.bus().input.device(1), device);
+    }
 }
 
 #[test]
@@ -3990,7 +4027,6 @@ fn quick_save_slots_round_trip_and_report_empty_slots() {
     let mut app = test_app();
     // An unwritten slot reports rather than failing the load.
     app.quick_load_state(7, None);
-    assert_eq!(app.save_slot, 7, "addressing a slot selects it");
     assert_eq!(app.emu.bus().emulated_frames(), 0, "nothing was restored");
 
     for _ in 0..6 {
@@ -4017,23 +4053,9 @@ fn quick_save_slots_round_trip_and_report_empty_slots() {
 }
 
 #[test]
-fn save_slot_selection_wraps_through_every_slot() {
-    let mut app = test_app();
-    assert_eq!(app.save_slot, 1);
-    let mut seen = Vec::new();
-    for _ in 0..crate::savestate::SLOT_COUNT {
-        app.cycle_save_slot();
-        seen.push(app.save_slot);
-    }
-    assert_eq!(seen.last(), Some(&1), "wraps back to the first slot");
-    let mut sorted = seen.clone();
-    sorted.sort_unstable();
-    assert_eq!(
-        sorted,
-        (1..=crate::savestate::SLOT_COUNT).collect::<Vec<_>>(),
-        "every slot is reachable from the menu"
-    );
-    // Every slot the hotkeys address has a distinct file.
+fn every_slot_addresses_a_file_of_its_own() {
+    // The menu and the hotkeys both name a slot outright, so all ten have to
+    // resolve, and to ten different files.
     let paths: Vec<_> = (1..=crate::savestate::SLOT_COUNT)
         .map(crate::savestate::slot_path)
         .collect();
@@ -6095,6 +6117,104 @@ mod control_drain {
     }
 
     #[test]
+    fn scheduled_tap_survives_windowed_connection_turnover() {
+        let (mut app, cmd_tx, reply_rx) = attached_app();
+        cmd_tx.send(CtlMsg::Connected).unwrap();
+        app.drain_control();
+        push(
+            &cmd_tx,
+            1,
+            "input.key",
+            json!({"rawkey": 0x12, "action": "tap", "hold_ms": 80}),
+        );
+        app.drain_control();
+        assert_eq!(reply(&reply_rx)["result"]["scheduled"], 1);
+        assert!(app.emu.bus().keyboard.is_held(0x12));
+
+        cmd_tx.send(CtlMsg::Disconnected).unwrap();
+        app.drain_control();
+        cmd_tx.send(CtlMsg::Connected).unwrap();
+        app.drain_control();
+
+        for _ in 0..6 {
+            app.emu.step_frame().unwrap();
+            app.drain_control();
+        }
+        assert!(
+            !app.emu.bus().keyboard.is_held(0x12),
+            "the replacement connection must deliver the deferred release"
+        );
+    }
+
+    #[test]
+    fn windowed_reset_clears_future_input() {
+        let (mut app, cmd_tx, reply_rx) = attached_app();
+        push(
+            &cmd_tx,
+            1,
+            "input.key",
+            json!({"rawkey": 0x23, "action": "press", "at_seconds": 0.04}),
+        );
+        app.drain_control();
+        assert_eq!(reply(&reply_rx)["result"]["scheduled"], 1);
+        push(&cmd_tx, 2, "machine.reset", json!({"kind": "warm"}));
+        app.drain_control();
+        assert_eq!(reply(&reply_rx)["id"], 2);
+
+        for _ in 0..6 {
+            app.emu.step_frame().unwrap();
+            app.drain_control();
+        }
+        assert!(
+            !app.emu.bus().keyboard.is_held(0x23),
+            "reset must discard input aimed at the old timeline"
+        );
+    }
+
+    #[test]
+    fn windowed_state_load_clears_future_input() {
+        let (mut app, cmd_tx, reply_rx) = attached_app();
+        let path = std::env::temp_dir().join(format!(
+            "copperline-control-scheduled-{}.clstate",
+            std::process::id()
+        ));
+        push(
+            &cmd_tx,
+            1,
+            "state.save",
+            json!({"path": path.display().to_string()}),
+        );
+        app.drain_control();
+        assert_eq!(reply(&reply_rx)["id"], 1);
+        push(
+            &cmd_tx,
+            2,
+            "input.key",
+            json!({"rawkey": 0x24, "action": "press", "at_seconds": 0.04}),
+        );
+        app.drain_control();
+        assert_eq!(reply(&reply_rx)["result"]["scheduled"], 1);
+        push(
+            &cmd_tx,
+            3,
+            "state.load",
+            json!({"path": path.display().to_string()}),
+        );
+        app.drain_control();
+        assert_eq!(reply(&reply_rx)["id"], 3);
+
+        for _ in 0..6 {
+            app.emu.step_frame().unwrap();
+            app.drain_control();
+        }
+        std::fs::remove_file(path).ok();
+        assert!(
+            !app.emu.bus().keyboard.is_held(0x24),
+            "state load must discard input aimed at the old timeline"
+        );
+    }
+
+    #[test]
     fn connected_arms_time_travel_and_shutdown_requests_exit() {
         let (mut app, cmd_tx, reply_rx) = attached_app();
         assert!(!app.emu.time_travel_enabled());
@@ -6749,4 +6869,50 @@ fn cursor_mapping_rejects_pillarbox_clicks() {
         cursor_position_in_texture((0.0, 0.0), (0, 0, 0, 0), texture),
         None
     );
+}
+
+/// `[display] scaling = "integer"` fits in whole *canvas* pixels against
+/// the physical surface, and the supersample factor follows that fit: the
+/// canvas is rendered at the fitted factor and PixelPerfect draws it 1:1.
+/// Deriving the factor from the fit rather than the host DPI is what makes
+/// odd physical multiples reachable -- a DPI-supersampled texture can only
+/// be drawn at whole multiples of itself, which on a 2x display skips 1x
+/// and 3x physical pixels per canvas pixel. Only a surface smaller than the
+/// canvas (no whole multiple at all; PixelPerfect would crop) falls back to
+/// the smooth DPI-supersampled Fill plan.
+#[test]
+fn integer_scaling_fits_in_whole_canvas_pixels() {
+    // ScalingMode is not PartialEq, so extract the planned factor and
+    // whether the integer mode was chosen rather than comparing values.
+    let plan = |requested, dpi, surface| {
+        let (scale, mode) = plan_present_scaling_for(requested, dpi, surface, (716, 581));
+        (scale, matches!(mode, ScalingMode::PixelPerfect))
+    };
+
+    // A 2x-DPI laptop panel (3024x1964) holds three whole canvas pixels per
+    // axis but not four: an odd multiple a 2x texture could never reach.
+    assert_eq!(plan(true, 2.0, (3024, 1964)), (3, true));
+    // The canvas-sized window on the same panel: exactly 2x physical.
+    assert_eq!(plan(true, 2.0, (1432, 1162)), (2, true));
+    // A window shrunk below the default still holds one physical pixel per
+    // canvas pixel, so it stays integer (small and crisp) instead of
+    // falling back to smooth.
+    assert_eq!(plan(true, 2.0, (1000, 840)), (1, true));
+    // The 150% fractional-DPI desktop's canvas-sized window (1.5x physical)
+    // holds a whole 1x too -- under the old texture-multiple fit this was a
+    // forced smooth fallback.
+    assert_eq!(plan(true, 1.5, (1074, 872)), (1, true));
+    // The exact-fit boundary, and one pixel short in either dimension:
+    // below the canvas there is no whole multiple, and PixelPerfect would
+    // crop, so the plan is the smooth one (DPI-supersampled Fill).
+    assert_eq!(plan(true, 2.0, (716, 581)), (1, true));
+    assert_eq!(plan(true, 2.0, (715, 581)), (2, false));
+    assert_eq!(plan(true, 2.0, (716, 580)), (2, false));
+    // A huge surface caps the supersample; PixelPerfect's own whole
+    // multiples of the capped texture carry on above it.
+    assert_eq!(plan(true, 2.0, (8000, 5000)), (4, true));
+
+    // Smooth never leaves Fill or the DPI factor, whatever the room.
+    assert_eq!(plan(false, 2.0, (3024, 1964)), (2, false));
+    assert_eq!(plan(false, 1.0, (3024, 1964)), (1, false));
 }

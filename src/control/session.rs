@@ -1,11 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Per-connection session state shared by both control-server modes:
-//! server-assigned breakpoint ids over the machine's interactive break
-//! store, input scheduled on the emulated timeline, and the journaling
-//! hooks that keep a control-driven session deterministically
-//! replayable (`tt_note_input` for reverse replay, `InputRecorder` for
-//! `--record-input`).
+//! Control-server state shared by both server modes. [`SessionCtx`] is
+//! per connection (breakpoint ids and observations), while
+//! [`MachineInputState`] follows the emulated machine across connection
+//! turnover and owns deferred input plus the headless recording hook.
 
 use crate::debugger::{BreakCond, WatchSource};
 use crate::emulator::Emulator;
@@ -85,19 +83,85 @@ pub struct ScheduledInput {
     pub action: InputAction,
 }
 
+/// Input state whose lifetime follows the emulated machine rather than
+/// any one control connection.
+pub struct MachineInputState {
+    /// Input waiting for its emulated time, sorted earliest first.
+    scheduled: Vec<ScheduledInput>,
+    /// Journaling recorder owned by the headless driver
+    /// (`--record-input`). The windowed path journals through the App's
+    /// recorder instead and leaves this `None`.
+    pub recorder: Option<InputRecorder>,
+}
+
+impl MachineInputState {
+    pub fn new(recorder: Option<InputRecorder>) -> Self {
+        Self {
+            scheduled: Vec::new(),
+            recorder,
+        }
+    }
+
+    /// Queue `action` for `at_seconds` on the emulated clock, keeping
+    /// the queue sorted by time.
+    pub fn schedule(&mut self, at_seconds: f64, action: InputAction) {
+        self.scheduled.push(ScheduledInput { at_seconds, action });
+        self.scheduled
+            .sort_by(|a, b| a.at_seconds.total_cmp(&b.at_seconds));
+    }
+
+    /// Remove and return every action due at `now`. An action whose
+    /// timestamp is already past remains valid and is returned by the
+    /// next drain.
+    pub fn take_due(&mut self, now: f64) -> Vec<InputAction> {
+        let due_len = self
+            .scheduled
+            .partition_point(|entry| entry.at_seconds <= now);
+        self.scheduled
+            .drain(..due_len)
+            .map(|entry| entry.action)
+            .collect()
+    }
+
+    /// Apply every scheduled action whose time has arrived. Called by
+    /// the headless driver at each quantum boundary.
+    pub fn apply_due_scheduled(&mut self, emu: &mut Emulator) {
+        let now = emu.bus().emulated_seconds();
+        for action in self.take_due(now) {
+            inject_input(emu, &mut self.recorder, action);
+        }
+    }
+
+    /// Apply `action` now, journaled. Returns the emulated time it
+    /// landed at.
+    pub fn inject_now(&mut self, emu: &mut Emulator, action: InputAction) -> f64 {
+        inject_input(emu, &mut self.recorder, action)
+    }
+
+    /// Discard input aimed at the current emulated timeline. Used when
+    /// a reset or state load replaces that timeline.
+    pub fn clear_scheduled(&mut self) {
+        self.scheduled.clear();
+    }
+
+    #[cfg(test)]
+    pub fn pending_count(&self) -> usize {
+        self.scheduled.len()
+    }
+}
+
+impl Default for MachineInputState {
+    fn default() -> Self {
+        Self::new(None)
+    }
+}
+
 /// Session state carried across requests on one connection.
 pub struct SessionCtx {
     /// Server-assigned id -> installed break. Ordered so `break.list`
     /// output is stable.
     breaks: BTreeMap<u32, BreakSpec>,
     next_break_id: u32,
-    /// Input waiting for its emulated time; drained by the driver at
-    /// its command boundary.
-    pub scheduled: Vec<ScheduledInput>,
-    /// Journaling recorder owned by the headless driver
-    /// (`--record-input`); the windowed drain journals through the
-    /// App's recorder instead and leaves this `None`.
-    pub recorder: Option<InputRecorder>,
     /// Host-state flags the driver keeps updated for `status`.
     pub running: bool,
     /// A resume verb's response is still outstanding.
@@ -111,8 +175,6 @@ impl SessionCtx {
         Self {
             breaks: BTreeMap::new(),
             next_break_id: 1,
-            scheduled: Vec::new(),
-            recorder: None,
             running: false,
             pending: false,
             powered_on: true,
@@ -205,35 +267,6 @@ impl SessionCtx {
             BreakSpec::Copper { addr } => emu.bus().ui_copper_breaks().contains(addr),
             BreakSpec::Catch { vector } => emu.machine.ui_breaks().catches.contains(vector),
         }
-    }
-
-    /// Queue `action` for `at_seconds` on the emulated clock, keeping
-    /// the queue sorted by time.
-    pub fn schedule(&mut self, at_seconds: f64, action: InputAction) {
-        self.scheduled.push(ScheduledInput { at_seconds, action });
-        self.scheduled
-            .sort_by(|a, b| a.at_seconds.total_cmp(&b.at_seconds));
-    }
-
-    /// Apply every scheduled action whose time has arrived. Called by
-    /// the headless driver at each quantum boundary (the windowed drain
-    /// maps scheduling onto the App's own scheduled-input lists
-    /// instead).
-    pub fn apply_due_scheduled(&mut self, emu: &mut Emulator) {
-        let now = emu.bus().emulated_seconds();
-        while let Some(first) = self.scheduled.first() {
-            if first.at_seconds > now {
-                break;
-            }
-            let entry = self.scheduled.remove(0);
-            inject_input(emu, &mut self.recorder, entry.action);
-        }
-    }
-
-    /// Apply `action` now, journaled. Returns the emulated time it
-    /// landed at.
-    pub fn inject_now(&mut self, emu: &mut Emulator, action: InputAction) -> f64 {
-        inject_input(emu, &mut self.recorder, action)
     }
 
     pub fn subscribe_events(
@@ -452,46 +485,89 @@ mod tests {
     #[test]
     fn scheduled_input_applies_in_time_order_on_the_emulated_clock() {
         let mut emu = test_emulator();
-        let mut ctx = SessionCtx::new();
+        let mut input = MachineInputState::default();
         // Push out of order; the queue must sort by emulated time.
-        ctx.schedule(
+        input.schedule(
             0.030,
             InputAction::Key {
                 rawkey: 0x22,
                 pressed: false,
             },
         );
-        ctx.schedule(
+        input.schedule(
             0.001,
             InputAction::Key {
                 rawkey: 0x22,
                 pressed: true,
             },
         );
-        assert!(ctx.scheduled[0].at_seconds < ctx.scheduled[1].at_seconds);
+        assert_eq!(input.pending_count(), 2);
 
         // Nothing due at power-on.
-        ctx.apply_due_scheduled(&mut emu);
-        assert_eq!(ctx.scheduled.len(), 2);
+        input.apply_due_scheduled(&mut emu);
+        assert_eq!(input.pending_count(), 2);
 
         // One frame (~0.02s PAL) passes the press but not the release.
         emu.step_frame().unwrap();
-        ctx.apply_due_scheduled(&mut emu);
-        assert_eq!(ctx.scheduled.len(), 1);
+        input.apply_due_scheduled(&mut emu);
+        assert_eq!(input.pending_count(), 1);
 
         emu.step_frame().unwrap();
-        ctx.apply_due_scheduled(&mut emu);
-        assert!(ctx.scheduled.is_empty());
+        input.apply_due_scheduled(&mut emu);
+        assert_eq!(input.pending_count(), 0);
+        assert!(
+            !emu.bus().keyboard.is_held(0x22),
+            "the keyboard MCU observes the final up transition"
+        );
+    }
+
+    #[test]
+    fn already_past_scheduled_input_applies_on_the_next_drain() {
+        let mut emu = test_emulator();
+        emu.step_frame().unwrap();
+        let mut input = MachineInputState::default();
+        input.schedule(
+            0.0,
+            InputAction::Key {
+                rawkey: 0x22,
+                pressed: true,
+            },
+        );
+
+        input.apply_due_scheduled(&mut emu);
+
+        assert!(emu.bus().keyboard.is_held(0x22));
+        assert_eq!(input.pending_count(), 0);
+    }
+
+    #[test]
+    fn scheduled_non_key_action_uses_the_machine_queue() {
+        let mut emu = test_emulator();
+        let mut input = MachineInputState::default();
+        input.schedule(
+            0.001,
+            InputAction::MouseButton {
+                port: 0,
+                index: 0,
+                pressed: true,
+            },
+        );
+
+        emu.step_frame().unwrap();
+        input.apply_due_scheduled(&mut emu);
+
+        assert!(emu.bus().input.ports[0].fire);
+        assert_eq!(input.pending_count(), 0);
     }
 
     #[test]
     fn injected_input_routes_to_the_named_port() {
         use crate::bus::PortDevice;
         let mut emu = test_emulator();
-        let mut ctx = SessionCtx::new();
+        let mut input = MachineInputState::default();
 
         // Mouse motion and buttons land on the named port's lines.
-        ctx.inject_now(
+        input.inject_now(
             &mut emu,
             InputAction::MouseMove {
                 port: 1,
@@ -499,7 +575,7 @@ mod tests {
                 dy: -2,
             },
         );
-        ctx.inject_now(
+        input.inject_now(
             &mut emu,
             InputAction::MouseButton {
                 port: 1,
@@ -513,7 +589,7 @@ mod tests {
         assert_eq!(emu.bus().input.ports[0].counter_x, 0);
 
         // A joystick state on port 1 engages the device there.
-        ctx.inject_now(
+        input.inject_now(
             &mut emu,
             InputAction::Joy {
                 port: 0,
@@ -529,7 +605,7 @@ mod tests {
         assert!(emu.bus().input.ports[0].fire);
 
         // Analogue positions engage the Analogue device and set the pots.
-        ctx.inject_now(
+        input.inject_now(
             &mut emu,
             InputAction::Pot {
                 port: 1,
@@ -544,23 +620,22 @@ mod tests {
     #[test]
     fn injected_input_is_journaled_in_the_recorder() {
         let mut emu = test_emulator();
-        let mut ctx = SessionCtx::new();
-        ctx.recorder = Some(InputRecorder::new(0.0));
-        ctx.inject_now(
+        let mut input = MachineInputState::new(Some(InputRecorder::new(0.0)));
+        input.inject_now(
             &mut emu,
             InputAction::Key {
                 rawkey: 0x45,
                 pressed: true,
             },
         );
-        ctx.inject_now(
+        input.inject_now(
             &mut emu,
             InputAction::Key {
                 rawkey: 0x45,
                 pressed: false,
             },
         );
-        let script = ctx.recorder.take().unwrap().finish();
+        let script = input.recorder.take().unwrap().finish();
         assert!(
             script.contains("key-after") && script.contains("0x45"),
             "recording should carry the injected key: {script}"

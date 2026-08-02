@@ -14,7 +14,7 @@ use crate::control::exec::{
     CCK_FINE_WINDOW, RUN_BUDGET,
 };
 use crate::control::proto::{self, CtlError};
-use crate::control::session::{InputAction, SessionCtx};
+use crate::control::session::{InputAction, MachineInputState, SessionCtx};
 use crate::control::windowed::{ControlHandle, CtlMsg};
 use crate::debugger::DebugStop;
 use serde_json::{json, Value};
@@ -23,6 +23,8 @@ use serde_json::{json, Value};
 pub(super) struct ControlState {
     pub(super) handle: ControlHandle,
     ctx: SessionCtx,
+    /// Deferred input follows the machine across connection turnover.
+    input: MachineInputState,
     pending: Option<PendingResume>,
     /// A `run_until pc` target breakpoint this session planted (and must
     /// remove on completion); `None` when the target address already had
@@ -72,6 +74,7 @@ impl App {
         self.control = Some(ControlState {
             handle,
             ctx: SessionCtx::new(),
+            input: MachineInputState::default(),
             pending: None,
             temp_pc_break: None,
             exit_requested: false,
@@ -264,7 +267,7 @@ impl App {
                 let scheduled = later.len();
                 if let Some(ctl) = self.control.as_mut() {
                     for entry in later {
-                        ctl.ctx.schedule(entry.at_seconds, entry.action);
+                        ctl.input.schedule(entry.at_seconds, entry.action);
                     }
                 }
                 self.control_send(proto::ok_line(
@@ -369,6 +372,9 @@ impl App {
                     return;
                 }
                 let line = if self.load_state_from_path(&path) {
+                    if let Some(ctl) = self.control.as_mut() {
+                        ctl.input.clear_scheduled();
+                    }
                     // The snapshot ring's positions belong to the old
                     // timeline; re-arm on the loaded one.
                     let (budget, interval) = self
@@ -399,6 +405,9 @@ impl App {
                     self.powered_on = true;
                     self.sync_live_audio_suspension();
                     self.request_redraw();
+                }
+                if let Some(ctl) = self.control.as_mut() {
+                    ctl.input.clear_scheduled();
                 }
                 self.control_send(proto::ok_line(&id, json!({})));
             }
@@ -715,16 +724,7 @@ impl App {
             let Some(ctl) = self.control.as_mut() else {
                 return;
             };
-            let mut due = Vec::new();
-            while ctl
-                .ctx
-                .scheduled
-                .first()
-                .is_some_and(|entry| entry.at_seconds <= now)
-            {
-                due.push(ctl.ctx.scheduled.remove(0).action);
-            }
-            due
+            ctl.input.take_due(now)
         };
         for action in due {
             self.control_apply_input(action);

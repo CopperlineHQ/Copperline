@@ -75,8 +75,8 @@ natural flow is "resume, block, inspect the reply". At most one resume
 may be outstanding (`-32002` otherwise); inspection commands are still
 serviced while the machine runs, at a frame boundary. `pause` ends a
 pending resume (both requests receive the stop position). `run_until`
-takes exactly one of `pc`, `vpos` (optional `hpos`), `frame`, `cck`, or
-`seconds`.
+takes exactly one of `pc`, `vpos` (optional `hpos`), `frame`, `cck`,
+`seconds`, or `stable_frames`.
 
 Every stop event carries a consistent position on the emulated timeline:
 
@@ -248,6 +248,11 @@ landed on already-executed memory, each with `addr`, `writer_pc`, the
 a few bytes ahead of the writing instruction is called out as inside the
 68000's prefetch, where it may be too late to take effect on this pass.
 An address counts as code once an instruction there has retired.
+Two limits worth knowing: only the 24-bit address space is tracked, so
+self-modification in accelerator RAM above it goes unseen; and the
+bytes a short forward branch skips are marked as code along with the
+instructions around them, so the stock `bra.s`-over-inline-data idiom
+reports writes to that data as self-modification.
 
 Memory heat map: `memory.heatmap {enabled?, base?, span?}` arms a
 256x256 grid over a window of the address space (default the whole
@@ -256,10 +261,12 @@ Memory heat map: `memory.heatmap {enabled?, base?, span?}` arms a
 how many cells each toucher currently holds and, with `path`, writes the
 grid as a 256x256 PNG. A slot map says what owned the chip bus at a
 colour clock; this says where in memory anything is happening -- which
-is the question when a display is drawn from the wrong buffer or a DMA
-channel is pointed at the wrong bank. Cells are coloured by what last
-touched them (CPU read/write, blitter, Copper, disk, and the bitplane,
-sprite and audio DMA channels) and fade to black over 32 frames. The
+is the question when a DMA channel is pointed at the wrong bank. Cells
+are coloured by what last touched them (CPU read/write, Copper, and the
+bitplane, sprite and audio DMA channels) and fade to black over 32
+frames. Blitter and disk DMA are not yet attributed: those engines
+write through their own paths and leave the map cold, so a blit
+destination shows only the CPU or Copper pokes that set it up. The
 window is movable, so the RAM a 32-bit CPU sees above the 24-bit space
 can be looked at too; moving it starts a cold map, since the cells would
 otherwise carry activity from addresses they no longer name. `-32003`
@@ -329,7 +336,14 @@ red/fire1, blue/fire2, green, yellow, play, rwd, ffw}` (held state,
 replaced wholesale; port defaults to 2), `input.analogue {port?, x, y}`
 (analogue stick/paddle position, 0-255 per axis, the count POTxDAT
 latches; port defaults to 2). Events drive the named port's electrical
-lines whatever device is configured there.
+lines whatever device is configured there. Scheduled input belongs to
+the emulated machine, not to the TCP connection that submitted it: it
+survives client disconnects and fires when a later connection (or the
+windowed emulator) advances past its timestamp. A timestamp already in
+the past is accepted and fires at the next input drain. A successful
+`state.load`, or either warm or cold `machine.reset`, clears all pending
+scheduled input because those operations replace the timeline it was
+aimed at.
 
 `input.mouse_to {x, y, port?, tolerance?, max_frames?}` puts the guest's
 pointer at an absolute position instead: `x` and `y` are presented pixels
@@ -378,7 +392,8 @@ Diagnostic captures: `trace.start {path?, max_lines?}`, `trace.status`,
 `waveform.status`, `waveform.stop`.
 
 State and capture: `state.save {path}`, `state.load {path}` (re-arms
-the reverse-debug ring on the loaded timeline), `capture.screenshot
+the reverse-debug ring on the loaded timeline and clears pending
+scheduled input), `capture.screenshot
 {path?}` (raw framebuffer PNG, 716 pixels wide -- 1432 for a
 programmable super-hi-res scan's 35 ns canvas; with an active RTG
 screen it is the board frame downsampled to 716 at the board's
@@ -391,7 +406,8 @@ motion changing the answer; the reply echoes the rectangle and reports
 the frame's own `width`/`height`, and a rectangle that does not fit
 inside the current frame is `-32602` rather than a silent clamp --
 frame geometry moves with the beam standard and the canvas scale),
-`machine.reset {kind: "warm"|"cold"}`.
+`machine.reset {kind: "warm"|"cold"}` (also clears pending scheduled
+input).
 
 Notifications have no `id`. The subscribed `event.frame`, `event.serial`,
 `event.interrupt`, and `event.media` streams work in both server modes.

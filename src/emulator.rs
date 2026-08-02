@@ -2229,6 +2229,41 @@ pub fn build_machine(
             crate::z3660::Z3660::new(),
         ));
     }
+    // Village Tronic Picasso II/II+: one physical CL-GD542x device appears as
+    // two consecutive Zorro II identities, linear VRAM first and the 64K VGA
+    // register window second. Both resolve to the same device slot.
+    if matches!(
+        cfg.rtg,
+        crate::config::RtgCard::Picasso2 | crate::config::RtgCard::Picasso2Plus
+    ) {
+        let plus = cfg.rtg == crate::config::RtgCard::Picasso2Plus;
+        let slot = devices.len();
+        let vram_spec = if plus {
+            crate::zorro::BoardSpec::picasso2plus_vram(slot, cfg.rtg_vram_bytes)
+        } else {
+            crate::zorro::BoardSpec::picasso2_vram(slot, cfg.rtg_vram_bytes)
+        };
+        let regs_spec = if plus {
+            crate::zorro::BoardSpec::picasso2plus_regs(slot)
+        } else {
+            crate::zorro::BoardSpec::picasso2_regs(slot)
+        };
+        zorro.add_board(vram_spec)?;
+        zorro.add_board(regs_spec)?;
+        info!(
+            "{}: {} RTG board with {} MB VRAM on the Zorro chain (slot {slot})",
+            if plus { "picasso2plus" } else { "picasso2" },
+            if plus { "CL-GD5428" } else { "CL-GD5426" },
+            cfg.rtg_vram_bytes / (1024 * 1024)
+        );
+        devices.push(crate::zorro_device::BoardDevice::Picasso2(Box::new(
+            if plus {
+                crate::picasso2::Picasso2::new_plus(cfg.rtg_vram_bytes)
+            } else {
+                crate::picasso2::Picasso2::new(cfg.rtg_vram_bytes)
+            },
+        )));
+    }
     // The A1000 has no Kickstart ROM: cfg.rom_path is its 64 KiB bootstrap
     // ROM, and a 256 KiB WCS is allocated for it to load Kickstart into from
     // the Kickstart disk in DF0.

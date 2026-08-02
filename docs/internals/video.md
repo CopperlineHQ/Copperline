@@ -529,13 +529,16 @@ resets on presentation discontinuities (machine swap, reset, state load).
 Frame dumps and screenshots share the resolved decision, so a dump's PNG
 dimensions no longer flip between 716x537 and 692x540 across a boot.
 
-### RTG scanout (Z3660)
+### RTG scanout (Z3660 and Picasso II/II+)
 
 When a fitted `[rtg]` board's guest driver switches the display to RTG,
 the presentation path swaps sources: the board's panned framebuffer
-(decoded from VRAM in the scanout's pixel format, with the board's
-hardware mouse sprite -- including wide and doubled sprites -- composited
-over it in `z3660.rs`) replaces the chipset render. The window presents
+(decoded from VRAM in the scanout's pixel format, with its hardware cursor
+composited over it) replaces the chipset render. Z3660 implements its FPGA
+scanout and sprite in `z3660.rs`; Picasso II/II+ implement the CL-GD5426/5428
+scanout, two-plane cursor, and physical pass-through switch in
+`picasso2/gd5426.rs`.
+The window presents
 that frame at its native resolution through a dedicated GPU texture
 rather than the 716-wide chipset buffer, and the TV aperture crop is
 suppressed -- it is a chipset crop rect, and applying it would show a
@@ -553,6 +556,12 @@ per board row at the board's native height, downsampled horizontally by
 sampling each output pixel's source-span centre so the rightmost source
 columns survive. Screenshots under RTG are therefore 716 wide at the
 board's native row count.
+
+Picasso II and II+ remain on native pass-through after reset. Even after the guest
+writes its VGA-output switch, `rtg_active` requires a running, unblanked
+sequencer and a plausible CRTC mode whose visible rows fit in VRAM. During
+driver mode changes this makes presentation fall back to the native chipset
+frame instead of exposing stale or out-of-bounds VRAM.
 
 `ui.rs` implements the status bar widgets, the pop-up menu, the smaller
 overlay panels (About, Shortcuts, Calibration), and the shared debugger/tool

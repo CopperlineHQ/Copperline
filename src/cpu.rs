@@ -2155,7 +2155,8 @@ impl M68kMachine {
                         }
                         instructions = instructions.saturating_add(1);
                         cpu_cycles = cpu_cycles.saturating_add(positive_cpu_cycles(cycles));
-                        cpu_cck = cpu_cck.saturating_add(self.charge_cpu_clocks(cycles));
+                        cpu_cck =
+                            cpu_cck.saturating_add(self.charge_cpu_clocks_less_bus_overlap(cycles));
                         if let Some(snapshot) = dbg_watch_snapshot {
                             self.debug_after_step(snapshot);
                         }
@@ -2362,7 +2363,8 @@ impl M68kMachine {
                 }
             }
             cpu_cycles = cpu_cycles.saturating_add(batch_clocks);
-            cpu_cck = cpu_cck.saturating_add(self.charge_cpu_clocks(batch_clocks as i32));
+            cpu_cck = cpu_cck
+                .saturating_add(self.charge_cpu_clocks_less_bus_overlap(batch_clocks as i32));
 
             if self.sync_cck_on {
                 // Advance the chipset through the batch's billed CPU time
@@ -2412,7 +2414,19 @@ impl M68kMachine {
     /// accelerated CPU (many clocks per cck) accumulates fractional cck
     /// instead of being rounded up to a whole cck per instruction.
     fn charge_cpu_clocks(&mut self, cycles: i32) -> u32 {
-        let total = positive_cpu_cycles(cycles) + self.cpu_clock_carry;
+        self.charge_cpu_clock_value(positive_cpu_cycles(cycles))
+    }
+
+    /// Charge instruction clocks less the transfer clocks a posted chip write
+    /// overlapped with execution on the decoupled 020+ bus unit -- the beam
+    /// must not advance for time the bus unit hid under the instruction.
+    fn charge_cpu_clocks_less_bus_overlap(&mut self, cycles: i32) -> u32 {
+        let overlap = self.bus.bus.take_cpu_bus_overlap_clocks();
+        self.charge_cpu_clock_value(positive_cpu_cycles(cycles).saturating_sub(overlap))
+    }
+
+    fn charge_cpu_clock_value(&mut self, clocks: u32) -> u32 {
+        let total = clocks + self.cpu_clock_carry;
         let cck = total / self.cpu_clocks_per_cck;
         self.cpu_clock_carry = total % self.cpu_clocks_per_cck;
         cck

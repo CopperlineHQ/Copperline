@@ -340,7 +340,8 @@ impl KeyboardMcu {
         std::mem::take(&mut self.system_reset_request)
     }
 
-    fn is_held(&self, rawkey: u8) -> bool {
+    /// Whether the keyboard matrix currently sees `rawkey` held down.
+    pub(crate) fn is_held(&self, rawkey: u8) -> bool {
         let idx = (rawkey & 0x7F) as usize;
         self.held[idx / 64] & (1 << (idx % 64)) != 0
     }

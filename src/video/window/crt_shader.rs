@@ -100,7 +100,7 @@ pub(super) struct CrtShader {
     bound_texture: Option<wgpu::Texture>,
 }
 
-/// The binding layout every window pass shares: a display texture, a
+/// The binding layout every shader-preset pass shares: a display texture, a
 /// linear sampler and a 64-byte uniform block. The bezel pass declares the
 /// same bindings with its own uniform contents, so it builds against this
 /// too.
@@ -140,7 +140,8 @@ pub(super) fn shader_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroup
 
 /// Build one shader pipeline against the shared bind group layout. All
 /// presets and user shaders (and the bezel pass) use the same entry points
-/// and target state, so this is the only place a pipeline is created.
+/// and target state, so this is the only place a preset pipeline is
+/// created (the RTG texture pass builds its own).
 pub(super) fn build_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,

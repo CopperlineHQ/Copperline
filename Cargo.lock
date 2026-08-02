@@ -481,7 +481,7 @@ dependencies = [
 
 [[package]]
 name = "copperline"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1737,9 +1737,9 @@ checksum = "953f07c43838f8e6f9758cab68bf5bed85465e7587ebe0b823f1bcd81978ad3a"
 
 [[package]]
 name = "m68k"
-version = "0.3.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5a27246c9d8514907e1fa813761e649d69ba14ba2fd9e9b7747fcf5812f7830"
+checksum = "b964a3a31f948df94996699ac97c6e5e24735af60751711ddd0373760da79d19"
 dependencies = [
  "cranelift-codegen 0.132.3",
  "cranelift-frontend 0.132.3",

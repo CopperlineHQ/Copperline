@@ -18,7 +18,7 @@ use super::exec::{
     CCK_FINE_WINDOW, RUN_BUDGET,
 };
 use super::proto::{self, AuthGate, CtlError, Gate, MAX_LINE_BYTES};
-use super::session::SessionCtx;
+use super::session::{MachineInputState, SessionCtx};
 use super::Config;
 use crate::debugger::DebugStop;
 use crate::emulator::Emulator;
@@ -49,16 +49,17 @@ pub fn run(mut emu: Emulator, config: Config) -> Result<()> {
     emu.debug_ensure_time_travel_anchor()?;
     emu.machine.ui_set_pc_history_enabled(true);
 
-    let mut recorder = config
+    let recorder = config
         .record_input
         .as_ref()
         .map(|_| InputRecorder::new(emu.bus().emulated_seconds()));
+    let mut input = MachineInputState::new(recorder);
 
     loop {
         let (stream, peer) = listener.accept().context("accepting control connection")?;
         log::info!("control: connection from {peer}");
         stream.set_nodelay(true).ok();
-        let mut session = Session::new(emu, stream, &token, &config, recorder.take());
+        let mut session = Session::new(emu, stream, &token, &config, input);
         let end = match session.serve() {
             Ok(end) => end,
             Err(e) => {
@@ -67,8 +68,8 @@ pub fn run(mut emu: Emulator, config: Config) -> Result<()> {
             }
         };
         session.teardown();
-        recorder = session.ctx.recorder.take();
         emu = session.emu;
+        input = session.input;
         match end {
             SessionEnd::Detached => {
                 log::info!("control: client detached; machine paused, listening again");
@@ -76,7 +77,7 @@ pub fn run(mut emu: Emulator, config: Config) -> Result<()> {
             SessionEnd::Killed => break,
         }
     }
-    if let (Some(rec), Some(path)) = (recorder, config.record_input.as_ref()) {
+    if let (Some(rec), Some(path)) = (input.recorder, config.record_input.as_ref()) {
         let events = rec.events_recorded();
         std::fs::write(path, rec.finish())
             .with_context(|| format!("writing input recording {}", path.display()))?;
@@ -218,6 +219,7 @@ struct Session {
     writer: TcpStream,
     gate: AuthGate,
     ctx: SessionCtx,
+    input: MachineInputState,
     reverse_budget_mb: usize,
     reverse_interval_frames: u64,
 }
@@ -228,20 +230,19 @@ impl Session {
         stream: TcpStream,
         token: &str,
         config: &Config,
-        recorder: Option<InputRecorder>,
+        input: MachineInputState,
     ) -> Self {
         let reader = LineReader::new(stream.try_clone().expect("cloning control stream"));
         stream
             .set_write_timeout(Some(Duration::from_millis(250)))
             .ok();
-        let mut ctx = SessionCtx::new();
-        ctx.recorder = recorder;
         Self {
             emu,
             reader,
             writer: stream,
             gate: AuthGate::new(token.to_string()),
-            ctx,
+            ctx: SessionCtx::new(),
+            input,
             reverse_budget_mb: config.reverse_budget_mb,
             reverse_interval_frames: config.reverse_interval_frames,
         }
@@ -348,11 +349,11 @@ impl Session {
                 let now = self.emu.bus().emulated_seconds();
                 let (immediate, later) = cmd.expand(now);
                 for action in immediate {
-                    self.ctx.inject_now(&mut self.emu, action);
+                    self.input.inject_now(&mut self.emu, action);
                 }
                 let scheduled = later.len();
                 for entry in later {
-                    self.ctx.schedule(entry.at_seconds, entry.action);
+                    self.input.schedule(entry.at_seconds, entry.action);
                 }
                 self.write(&proto::ok_line(
                     &id,
@@ -367,7 +368,7 @@ impl Session {
                 tolerance,
                 max_frames,
             } => {
-                let ctx = &mut self.ctx;
+                let input = &mut self.input;
                 let reply = match exec::mouse_to(
                     &mut self.emu,
                     port,
@@ -375,7 +376,7 @@ impl Session {
                     tolerance,
                     max_frames,
                     |emu, action| {
-                        ctx.inject_now(emu, action);
+                        input.inject_now(emu, action);
                     },
                 ) {
                     Ok(value) => proto::ok_line(&id, value),
@@ -457,6 +458,7 @@ impl Session {
             HostOp::StateLoad { path } => {
                 let reply = match self.emu.load_state(&path) {
                     Ok(outcome) => {
+                        self.input.clear_scheduled();
                         // The snapshot ring's positions belong to the old
                         // timeline; re-arm on the loaded one.
                         self.emu.enable_time_travel(
@@ -485,7 +487,10 @@ impl Session {
                     self.emu.power_on_reset()
                 };
                 let reply = match result {
-                    Ok(()) => proto::ok_line(&id, json!({})),
+                    Ok(()) => {
+                        self.input.clear_scheduled();
+                        proto::ok_line(&id, json!({}))
+                    }
                     Err(e) => proto::err_line(&id, &CtlError::internal(format!("{e:#}"))),
                 };
                 self.write(&reply)?;
@@ -498,7 +503,7 @@ impl Session {
     /// reverse replay and record it in the input recording.
     fn note_media_change(&mut self, drive: usize, inserted: Option<&std::path::Path>) {
         self.emu.tt_note_input(ReplayAction::DiskChange);
-        if let (Some(rec), Some(path)) = (self.ctx.recorder.as_mut(), inserted) {
+        if let (Some(rec), Some(path)) = (self.input.recorder.as_mut(), inserted) {
             let secs = self.emu.bus().emulated_seconds();
             rec.record_disk_insert(drive, path, secs);
         }
@@ -565,7 +570,7 @@ impl Session {
             ResumeKind::Step { n } => {
                 for _ in 0..*n {
                     self.emu.debug_step_for_gdb(&mut cpu_idle)?;
-                    self.ctx.apply_due_scheduled(&mut self.emu);
+                    self.input.apply_due_scheduled(&mut self.emu);
                     self.emit_events()?;
                     if let Some((reason, detail)) = self.take_stop() {
                         return stop(reason, detail);
@@ -601,7 +606,7 @@ impl Session {
             ResumeKind::StepFrame { n } => {
                 for _ in 0..*n {
                     self.emu.step_frame()?;
-                    self.ctx.apply_due_scheduled(&mut self.emu);
+                    self.input.apply_due_scheduled(&mut self.emu);
                     self.emit_events()?;
                     if let Some((reason, detail)) = self.take_stop() {
                         return stop(reason, detail);
@@ -711,7 +716,7 @@ impl Session {
                     self.emu.step_frame()?;
                 }
             }
-            self.ctx.apply_due_scheduled(&mut self.emu);
+            self.input.apply_due_scheduled(&mut self.emu);
             self.emit_events()?;
 
             if self.emu.machine.cpu_double_faulted() {
@@ -829,11 +834,11 @@ impl Session {
                     let now = self.emu.bus().emulated_seconds();
                     let (immediate, later) = cmd.expand(now);
                     for action in immediate {
-                        self.ctx.inject_now(&mut self.emu, action);
+                        self.input.inject_now(&mut self.emu, action);
                     }
                     let scheduled = later.len();
                     for entry in later {
-                        self.ctx.schedule(entry.at_seconds, entry.action);
+                        self.input.schedule(entry.at_seconds, entry.action);
                     }
                     self.write(&proto::ok_line(
                         &req.id,
@@ -970,23 +975,22 @@ mod tests {
         }
     }
 
-    /// Run one session against the test emulator: the client closure
-    /// drives it from a spawned thread while the session runs on the
-    /// test thread (the gdbstub `run_session` pattern). Time travel is
-    /// armed like `run()` arms it. Returns the session context and how
-    /// it ended, for post-conditions. The session (and its sockets) is
-    /// dropped before joining the client, exactly as `run()`'s serve
-    /// loop drops it per iteration -- a client waiting for EOF after a
-    /// server-side close would otherwise deadlock the harness.
-    fn run_session(
-        recorder: Option<InputRecorder>,
-        client_fn: impl FnOnce(&mut Client) + Send + 'static,
-    ) -> (SessionCtx, SessionEnd) {
+    fn control_test_emulator() -> Emulator {
         let mut emu = test_emulator();
         emu.enable_time_travel(64, 1);
         emu.debug_ensure_time_travel_anchor().unwrap();
         emu.machine.ui_set_pc_history_enabled(true);
+        emu
+    }
 
+    /// Run one connection against an existing machine and its
+    /// machine-lifetime input state. This is the ownership hand-off the
+    /// real accept loop performs after every disconnect.
+    fn run_machine_session(
+        emu: Emulator,
+        input: MachineInputState,
+        client_fn: impl FnOnce(&mut Client) + Send + 'static,
+    ) -> (Emulator, MachineInputState, SessionCtx, SessionEnd) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = std::thread::spawn(move || {
@@ -995,14 +999,16 @@ mod tests {
         });
         let (stream, _) = listener.accept().unwrap();
         let config = Config::new(":0".into());
-        let mut session = Session::new(emu, stream, TOKEN, &config, recorder);
+        let mut session = Session::new(emu, stream, TOKEN, &config, input);
         let end = session.serve().expect("session should not error");
         session.teardown();
         // Close the session's stream handles NOW: fields matched by
         // `..` in a partial-move destructure live until end of scope,
         // which would be after the join below.
         let Session {
+            emu,
             ctx,
+            input,
             reader,
             writer,
             ..
@@ -1010,7 +1016,21 @@ mod tests {
         drop(reader);
         drop(writer);
         handle.join().expect("client assertions failed");
-        (ctx, end)
+        (emu, input, ctx, end)
+    }
+
+    /// Run one session against a fresh test machine. Time travel is
+    /// armed like `run()` arms it.
+    fn run_session(
+        recorder: Option<InputRecorder>,
+        client_fn: impl FnOnce(&mut Client) + Send + 'static,
+    ) -> (SessionCtx, MachineInputState, SessionEnd) {
+        let (_, input, ctx, end) = run_machine_session(
+            control_test_emulator(),
+            MachineInputState::new(recorder),
+            client_fn,
+        );
+        (ctx, input, end)
     }
 
     fn scratch_path(name: &str) -> std::path::PathBuf {
@@ -1041,7 +1061,7 @@ mod tests {
 
     #[test]
     fn wrong_token_gets_one_error_then_close() {
-        let (_, end) = run_session(None, |c| {
+        let (_, _, end) = run_session(None, |c| {
             let refused = c.call("auth", json!({"token": "wrong"}));
             assert_eq!(refused["error"]["code"], proto::AUTH_FAILED);
             // The server drops the connection after the reply.
@@ -1251,7 +1271,7 @@ mod tests {
 
     #[test]
     fn input_key_is_journaled_and_stamped() {
-        let (ctx, _) = run_session(Some(InputRecorder::new(0.0)), |c| {
+        let (_, mut input, _) = run_session(Some(InputRecorder::new(0.0)), |c| {
             c.auth();
             c.result("step_frame", json!({"n": 1}));
             let applied = c.result("input.key", json!({"rawkey": 0x45, "action": "press"}));
@@ -1261,10 +1281,156 @@ mod tests {
             let tap = c.result("input.key", json!({"rawkey": 0x20, "hold_ms": 50}));
             assert_eq!(tap["scheduled"], 1);
         });
-        let script = ctx.recorder.map(|r| r.finish()).unwrap_or_default();
+        let script = input
+            .recorder
+            .take()
+            .map(|r| r.finish())
+            .unwrap_or_default();
         assert!(
             script.contains("0x45"),
             "recording carries the injected key: {script}"
+        );
+    }
+
+    #[test]
+    fn tap_release_survives_connection_turnover() {
+        let emu = control_test_emulator();
+        let input = MachineInputState::new(Some(InputRecorder::new(0.0)));
+        let (emu, input, _, _) = run_machine_session(emu, input, |c| {
+            c.auth();
+            let tap = c.result(
+                "input.key",
+                json!({"rawkey": 0x12, "action": "tap", "hold_ms": 80}),
+            );
+            assert_eq!(tap["scheduled"], 1);
+        });
+        assert!(
+            emu.bus().keyboard.is_held(0x12),
+            "the first connection applied the down transition"
+        );
+
+        let (emu, mut input, _, _) = run_machine_session(emu, input, |c| {
+            c.auth();
+            c.result("run_until", json!({"seconds": 0.12}));
+        });
+
+        assert!(
+            !emu.bus().keyboard.is_held(0x12),
+            "the next connection must deliver the deferred up transition"
+        );
+        let script = input.recorder.take().unwrap().finish();
+        let tap_line = script
+            .lines()
+            .find(|line| line.contains("0x12"))
+            .expect("the completed tap should be journaled");
+        let recorded_hold: u32 = tap_line.split_whitespace().last().unwrap().parse().unwrap();
+        assert!(
+            (80..=100).contains(&recorded_hold),
+            "the release should land within one PAL frame of 80 ms: {script}"
+        );
+    }
+
+    #[test]
+    fn future_input_from_a_closed_session_fires_under_run_until() {
+        let emu = control_test_emulator();
+        let input = MachineInputState::default();
+        let (emu, input, _, _) = run_machine_session(emu, input, |c| {
+            c.auth();
+            let scheduled = c.result(
+                "input.key",
+                json!({"rawkey": 0x21, "action": "press", "at_seconds": 0.03}),
+            );
+            assert_eq!(scheduled["scheduled"], 1);
+        });
+
+        let (emu, _, _, _) = run_machine_session(emu, input, |c| {
+            c.auth();
+            c.result("run_until", json!({"seconds": 0.04}));
+        });
+
+        assert!(emu.bus().keyboard.is_held(0x21));
+        assert!(
+            emu.bus().emulated_seconds() <= 0.051,
+            "scheduled input should land within one PAL frame of its target: {}",
+            emu.bus().emulated_seconds()
+        );
+    }
+
+    #[test]
+    fn future_input_from_a_closed_session_fires_under_continue() {
+        let emu = control_test_emulator();
+        let input = MachineInputState::default();
+        let (emu, input, _, _) = run_machine_session(emu, input, |c| {
+            c.auth();
+            let scheduled = c.result(
+                "input.key",
+                json!({"rawkey": 0x22, "action": "press", "at_seconds": 0.001}),
+            );
+            assert_eq!(scheduled["scheduled"], 1);
+        });
+
+        let (emu, _, _, _) = run_machine_session(emu, input, |c| {
+            c.auth();
+            c.result("break.add", json!({"kind": "beam", "vpos": 150}));
+            let stop = c.result("continue", json!({}));
+            assert_eq!(stop["reason"], "beam_trap");
+        });
+
+        assert!(emu.bus().keyboard.is_held(0x22));
+        assert!(
+            emu.bus().emulated_frames() <= 1,
+            "the event should be applied in the first continue quantum"
+        );
+    }
+
+    #[test]
+    fn machine_reset_clears_future_input() {
+        let (emu, input, _, _) =
+            run_machine_session(control_test_emulator(), MachineInputState::default(), |c| {
+                c.auth();
+                c.result(
+                    "input.key",
+                    json!({"rawkey": 0x23, "action": "press", "at_seconds": 0.04}),
+                );
+                c.result("machine.reset", json!({"kind": "warm"}));
+                c.result("run_until", json!({"seconds": 0.10}));
+            });
+        assert_eq!(input.pending_count(), 0);
+        assert!(
+            !emu.bus().keyboard.is_held(0x23),
+            "reset must discard input aimed at the replaced timeline"
+        );
+    }
+
+    #[test]
+    fn state_load_clears_future_input() {
+        let path = scratch_path("scheduled-input-load.clstate");
+        let path_for_client = path.clone();
+        let (emu, input, _, _) = run_machine_session(
+            control_test_emulator(),
+            MachineInputState::default(),
+            move |c| {
+                c.auth();
+                c.result(
+                    "state.save",
+                    json!({"path": path_for_client.display().to_string()}),
+                );
+                c.result(
+                    "input.key",
+                    json!({"rawkey": 0x24, "action": "press", "at_seconds": 0.04}),
+                );
+                c.result(
+                    "state.load",
+                    json!({"path": path_for_client.display().to_string()}),
+                );
+                c.result("run_until", json!({"seconds": 0.10}));
+            },
+        );
+        std::fs::remove_file(path).ok();
+        assert_eq!(input.pending_count(), 0);
+        assert!(
+            !emu.bus().keyboard.is_held(0x24),
+            "state load must discard input aimed at the replaced timeline"
         );
     }
 
@@ -1358,7 +1524,7 @@ mod tests {
 
     #[test]
     fn shutdown_ends_the_server() {
-        let (_, end) = run_session(None, |c| {
+        let (_, _, end) = run_session(None, |c| {
             c.auth();
             c.result("shutdown", json!({}));
         });

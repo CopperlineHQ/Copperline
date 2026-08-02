@@ -24,10 +24,11 @@ use crate::chipset::agnus::{AgnusRevision, VideoStandard};
 use crate::chipset::denise::DeniseRevision;
 use crate::config::{
     format_size, machine_profile_defaults, AudioFilterMode, BridgeCable, BridgeDensity,
-    BridgeDriver, BridgeSpeedMode, ChannelMode, Chipset, Config, CpuModel, FloppyBridgeConfig,
-    JoystickInputMode, MachineModel, MouseCapture, Overscan, PacingBudget, ParallelDevice,
-    PixelAspect, RawConfig, RawDrive, RawFilesysMount, RawFloppyDrive, RawZorroBoard, RtgCard,
-    ScsiController, SerialMode, ShaderMode, Tint, WarpSpeed, BOOT_PRI_NEVER,
+    BridgeDriver, BridgeSpeedMode, ChannelMode, Chipset, Config, CpuModel, DisplayScaling,
+    FloppyBridgeConfig, JoystickInputMode, MachineModel, MenuScale, MouseCapture, Overscan,
+    PacingBudget, ParallelDevice, PixelAspect, RawConfig, RawDrive, RawFilesysMount,
+    RawFloppyDrive, RawZorroBoard, RtgCard, ScsiController, SerialMode, ShaderMode, Tint,
+    WarpSpeed, BOOT_PRI_NEVER,
 };
 use crate::net::NetConfig;
 use crate::zorro::{ConfigOption, ConfigOptionKind, LoadedZorroBoard};
@@ -417,12 +418,14 @@ pub enum LauncherField {
     AudioFilter,
     Overscan,
     PixelAspect,
+    Scaling,
     Tint,
     Deinterlace,
     Phosphor,
     Shader,
     ShaderStrength,
     Bezel,
+    MenuScale,
     StartFullscreen,
     ShowStatusBar,
     FloppySounds,
@@ -691,17 +694,19 @@ const ETHERNET_ROWS: [Row; 2] = [
 ];
 // The A/V & Emu tab is split into three categories switched via the top nav row.
 // The Video category also carries the CRT-shader controls (a picture setting).
-const VIDEO_ROWS: [Row; 10] = [
+const VIDEO_ROWS: [Row; 12] = [
     row(F::StartFullscreen, "Start fullscreen", Toggle),
     row(F::ShowStatusBar, "Status bar", Toggle),
+    row(F::Bezel, "Monitor bezel", Toggle),
+    row(F::MenuScale, "Menu size", Cycle),
     row(F::Overscan, "Overscan", Cycle),
     row(F::PixelAspect, "Pixel aspect", Cycle),
-    row(F::Tint, "Screen tint", Cycle),
+    row(F::Scaling, "Scaling", Cycle),
     row(F::Deinterlace, "Deinterlace", Toggle),
+    row(F::Tint, "Screen tint", Cycle),
     row(F::Phosphor, "Phosphor", Cycle),
     row(F::Shader, "CRT shader", Cycle),
     row(F::ShaderStrength, "Shader strength", Cycle),
-    row(F::Bezel, "Monitor bezel", Toggle),
 ];
 const AUDIO_ROWS: [Row; 6] = [
     row(F::AudioDevice, "Audio output", Cycle),
@@ -712,10 +717,10 @@ const AUDIO_ROWS: [Row; 6] = [
     row(F::FloppyVolume, "Floppy volume", Cycle),
 ];
 const EMULATION_ROWS: [Row; 4] = [
-    row(F::PowerOn, "Power on at start", Toggle),
-    row(F::Warp, "Warp speed", Cycle),
-    row(F::PacingBudget, "Pacing budget", Cycle),
+    row(F::PowerOn, "Power on startup", Toggle),
     row(F::RealtimePriority, "Realtime priority", Toggle),
+    row(F::PacingBudget, "Pacing budget", Cycle),
+    row(F::Warp, "Warp speed", Cycle),
 ];
 const INPUT_ROWS: [Row; 5] = [
     row(F::Port1Device, "Port 1", Cycle),
@@ -836,7 +841,12 @@ pub const MODELS: [MachineModel; 10] = [
 // --- value preset lists for the cycle/stepper controls -------------------
 
 const CHIPSETS: [Chipset; 3] = [Chipset::Ocs, Chipset::Ecs, Chipset::Aga];
-const RTG_CARDS: [RtgCard; 2] = [RtgCard::None, RtgCard::Z3660];
+const RTG_CARDS: [RtgCard; 4] = [
+    RtgCard::None,
+    RtgCard::Picasso2,
+    RtgCard::Picasso2Plus,
+    RtgCard::Z3660,
+];
 const AGNUS_CHOICES: [Option<AgnusRevision>; 5] = [
     None,
     Some(AgnusRevision::Ocs),
@@ -1167,6 +1177,10 @@ pub struct MachineSetup {
     rtc: bool,
     identify: bool,
     rtg: RtgCard,
+    /// Memory fitted to a configurable RTG board. The launcher currently
+    /// preserves this value from loaded configs; the card selector does not
+    /// need a separate control for the two period-correct Picasso II/II+ sizes.
+    rtg_vram_bytes: usize,
     // CPU
     cpu: CpuModel,
     fpu: bool,
@@ -1304,6 +1318,8 @@ pub struct MachineSetup {
     audio_filter: AudioFilterMode,
     overscan: Overscan,
     pixel_aspect: PixelAspect,
+    /// How the canvas is scaled into the window ([display] scaling).
+    scaling: DisplayScaling,
     /// Motion-adaptive interlace weaving ([display] deinterlace).
     deinterlace: bool,
     phosphor: f32,
@@ -1318,6 +1334,8 @@ pub struct MachineSetup {
     shader_strength: f32,
     /// Monitor-style front bezel around the picture ([display] bezel).
     bezel: bool,
+    /// How large the pop-up menu is drawn ([display] menu_scale).
+    menu_scale: MenuScale,
     /// Screen tint ([display] tint).
     tint: Tint,
     /// Open fullscreen at start ([display] full_screen).
@@ -1372,6 +1390,7 @@ impl MachineSetup {
             rtc: cfg.rtc_present,
             identify: cfg.identify_board,
             rtg: cfg.rtg,
+            rtg_vram_bytes: cfg.rtg_vram_bytes,
             cpu: cfg.cpu,
             fpu: cfg.fpu,
             clock_mhz: cfg.cpu_clock_mhz,
@@ -1471,6 +1490,7 @@ impl MachineSetup {
             audio_filter: cfg.audio.filter,
             overscan: cfg.overscan,
             pixel_aspect: cfg.pixel_aspect,
+            scaling: cfg.scaling,
             deinterlace: cfg.deinterlace,
             phosphor: cfg.phosphor,
             shader: cfg.shader.clone(),
@@ -1480,6 +1500,7 @@ impl MachineSetup {
             },
             shader_strength: cfg.shader_strength,
             bezel: cfg.bezel,
+            menu_scale: cfg.menu_scale,
             tint: cfg.tint,
             start_fullscreen: cfg.full_screen,
             show_status_bar: cfg.status_bar,
@@ -1625,7 +1646,10 @@ impl MachineSetup {
             raw.identify = Some(self.identify);
         }
         if self.rtg != base.rtg {
-            raw.rtg.card = Some(rtg_card_name(self.rtg).to_ascii_lowercase());
+            raw.rtg.card = Some(rtg_card_value(self.rtg).to_string());
+        }
+        if self.rtg_vram_bytes != base.rtg_vram_bytes {
+            raw.rtg.vram = Some(format_size(self.rtg_vram_bytes));
         }
         // CPU
         if self.cpu != base.cpu {
@@ -1789,6 +1813,9 @@ impl MachineSetup {
         if self.pixel_aspect != base.pixel_aspect {
             raw.display.pixel_aspect = Some(pixel_aspect_name(self.pixel_aspect).to_string());
         }
+        if self.scaling != base.scaling {
+            raw.display.scaling = Some(display_scaling_name(self.scaling).to_string());
+        }
         if self.deinterlace != base.deinterlace {
             raw.display.deinterlace = Some(self.deinterlace);
         }
@@ -1806,6 +1833,9 @@ impl MachineSetup {
         }
         if self.tint != base.tint {
             raw.display.tint = Some(tint_name(self.tint).to_string());
+        }
+        if self.menu_scale != base.menu_scale {
+            raw.display.menu_scale = Some(self.menu_scale.label().to_string());
         }
         if self.start_fullscreen != base.full_screen {
             raw.display.full_screen = Some(self.start_fullscreen);
@@ -2006,6 +2036,7 @@ impl MachineSetup {
         self.rtc = base.rtc_present;
         self.identify = base.identify_board;
         self.rtg = base.rtg;
+        self.rtg_vram_bytes = base.rtg_vram_bytes;
         self.cpu = base.cpu;
         self.fpu = base.fpu;
         self.clock_mhz = base.cpu_clock_mhz;
@@ -2020,6 +2051,7 @@ impl MachineSetup {
         self.z3_ram = base.z3_ram_bytes;
         self.overscan = base.overscan;
         self.pixel_aspect = base.pixel_aspect;
+        self.scaling = base.scaling;
         self.deinterlace = base.deinterlace;
         self.phosphor = base.phosphor;
         // The remembered user-shader path survives: it came from the config
@@ -2029,6 +2061,7 @@ impl MachineSetup {
         self.shader_strength = base.shader_strength;
         self.bezel = base.bezel;
         self.tint = base.tint;
+        self.menu_scale = base.menu_scale;
         self.start_fullscreen = base.full_screen;
         self.show_status_bar = base.status_bar;
         self.floppy_sounds = base.audio.floppy_sounds;
@@ -2098,6 +2131,21 @@ impl MachineSetup {
             F::EthernetInterface => {
                 !matches!(self.a2065_net.as_ref(), Some(NetConfig::Bridge { .. }))
             }
+            // A controller is not a disk: only the units carrying one have a
+            // place in the boot order, so the empty six or seven go rather
+            // than standing in a column saying so.
+            F::ScsiUnit0Boot
+            | F::ScsiUnit1Boot
+            | F::ScsiUnit2Boot
+            | F::ScsiUnit3Boot
+            | F::ScsiUnit4Boot
+            | F::ScsiUnit5Boot
+            | F::ScsiUnit6Boot => {
+                self.scsi_controller.is_none()
+                    || Self::boot_field_drive(field)
+                        .and_then(|drive| self.path(drive))
+                        .is_none()
+            }
             _ => false,
         }
     }
@@ -2124,8 +2172,9 @@ impl MachineSetup {
             F::Z3Ram => reason(cpu_is_32bit(self.cpu), "needs 32-bit CPU"),
             // The CPU-slot space at $08000000 is beyond a 24-bit bus too.
             F::AccelRam => reason(cpu_is_32bit(self.cpu), "needs 32-bit CPU"),
-            // The Z3660 is a Zorro III board: same address-reach gate.
-            F::Rtg => reason(cpu_is_32bit(self.cpu), "needs 32-bit CPU"),
+            // Picasso II/II+ remain available on a 24-bit CPU. The stepper's
+            // choice list omits the Zorro III-only Z3660 in that case.
+            F::Rtg => None,
             // Motherboard fast RAM hangs off Ramsey, which only the big-box
             // profiles fit, and its bank ends beyond a 24-bit address bus.
             F::MbRam => {
@@ -2179,7 +2228,7 @@ impl MachineSetup {
             }
             // Shader strength only feeds the shader pass, which does not run when
             // the shader is off.
-            F::ShaderStrength => reason(self.shader != ShaderMode::None, "shader off"),
+            F::ShaderStrength => reason(self.shader != ShaderMode::None, "Disabled"),
             // A boot priority or read-only flag is meaningless without a
             // directory to mount.
             F::Filesys0Boot | F::Filesys1Boot | F::Filesys2Boot | F::Filesys3Boot => {
@@ -2199,7 +2248,7 @@ impl MachineSetup {
             | F::ScsiUnit6Boot => {
                 let drive = Self::boot_field_drive(field).expect("boot field");
                 match self.path(drive) {
-                    None => Some("no drive"),
+                    None => Some("No drive"),
                     Some(p) if crate::config::is_cd_image_path(p) => Some("CD-ROM"),
                     Some(_) => None,
                 }
@@ -2221,7 +2270,7 @@ impl MachineSetup {
             // attached or selected, only the Interface row stays live -- the
             // rest describe hardware that is not present.
             #[cfg(feature = "floppybridge")]
-            F::BridgeDevice => reason(self.bridge_edit().is_some(), "no drive"),
+            F::BridgeDevice => reason(self.bridge_edit().is_some(), "No drive"),
             #[cfg(feature = "floppybridge")]
             F::BridgeCable
             | F::BridgeDensity
@@ -2276,7 +2325,7 @@ impl MachineSetup {
             }
             // Neither mouse row does anything unless a port holds a mouse.
             F::MouseSensitivity | F::MouseCapture => {
-                reason(self.port_devices.contains(&PortDevice::Mouse), "no mouse")
+                reason(self.port_devices.contains(&PortDevice::Mouse), "No mouse")
             }
             _ => None,
         }
@@ -2491,18 +2540,12 @@ impl MachineSetup {
                 PixelAspect::Tv => "TV (4:3)".to_string(),
                 PixelAspect::Square => "Square".to_string(),
             },
-            // "Colour" rather than "Off": the web front-end's wording for
-            // the same picker, and it says what the picture looks like.
-            F::Tint => match self.tint {
-                Tint::None => "Colour".to_string(),
-                Tint::Bw => "Black & white".to_string(),
-                Tint::Green => "Green".to_string(),
-                Tint::Amber => "Amber".to_string(),
-                Tint::Sepia => "Sepia".to_string(),
-            },
+            F::Scaling => self.scaling.label().to_string(),
+            F::Tint => self.tint.menu_label().to_string(),
+            F::MenuScale => self.menu_scale.menu_label().to_string(),
             F::Phosphor => {
                 if self.phosphor <= 0.0 {
-                    "Off".to_string()
+                    "Disabled".to_string()
                 } else {
                     format!("{:.2}", self.phosphor)
                 }
@@ -2516,13 +2559,15 @@ impl MachineSetup {
                 None => "Automatic".to_string(),
                 Some(p) => p,
             },
+            // Named as the drive's own jumpers are: A/B on an IBM PC cable,
+            // DS0..DS3 on a Shugart one.
             F::BridgeCable => match self.bridge_edit().map(|c| c.cable) {
-                Some(BridgeCable::DriveA) => "PC drive A".to_string(),
-                Some(BridgeCable::DriveB) => "PC drive B".to_string(),
-                Some(BridgeCable::Shugart0) => "Shugart 0".to_string(),
-                Some(BridgeCable::Shugart1) => "Shugart 1".to_string(),
-                Some(BridgeCable::Shugart2) => "Shugart 2".to_string(),
-                Some(BridgeCable::Shugart3) => "Shugart 3".to_string(),
+                Some(BridgeCable::DriveA) => "Drive A (IBM)".to_string(),
+                Some(BridgeCable::DriveB) => "Drive B (IBM)".to_string(),
+                Some(BridgeCable::Shugart0) => "DS0 (Shugart)".to_string(),
+                Some(BridgeCable::Shugart1) => "DS1 (Shugart)".to_string(),
+                Some(BridgeCable::Shugart2) => "DS2 (Shugart)".to_string(),
+                Some(BridgeCable::Shugart3) => "DS3 (Shugart)".to_string(),
                 None => "(none)".to_string(),
             },
             F::BridgeDensity => match self.bridge_edit().map(|c| c.density) {
@@ -2540,15 +2585,7 @@ impl MachineSetup {
             F::BridgeServeSpeed => {
                 format!("{}%", self.bridge_edit().map_or(100, |c| c.speed))
             }
-            F::Shader => match self.shader {
-                ShaderMode::None => "Off".to_string(),
-                ShaderMode::Scanlines => "Scanlines".to_string(),
-                ShaderMode::Mask => "Mask".to_string(),
-                // Named for the monitor the preset is modelled on; the path
-                // of a user shader is too long for the value column.
-                ShaderMode::Crt => "CRT (1084)".to_string(),
-                ShaderMode::Custom(_) => "Custom".to_string(),
-            },
+            F::Shader => self.shader.kind().menu_label().to_string(),
             F::ShaderStrength => format!("{:.2}", self.shader_strength),
             F::FloppyVolume => format!("{}%", self.floppy_volume),
             F::PacingBudget => match self.pacing_budget {
@@ -2556,18 +2593,15 @@ impl MachineSetup {
                 PacingBudget::Instructions => "Instructions".to_string(),
             },
             F::Warp => self.warp.label().to_string(),
-            F::Joystick => match self.joystick_input_mode {
-                JoystickInputMode::Keyboard => "Keyboard".to_string(),
-                JoystickInputMode::Gamepad => "Gamepad".to_string(),
-            },
+            F::Joystick => self.joystick_input_mode.menu_label().to_string(),
             F::MouseSensitivity => crate::config::mouse_sensitivity_label(self.mouse_sensitivity),
             F::MouseCapture => match self.mouse_capture {
                 MouseCapture::Click => "On click".to_string(),
                 MouseCapture::Auto => "Automatic".to_string(),
                 MouseCapture::Manual => "Shortcut only".to_string(),
             },
-            F::Port1Device => port_device_display(self.port_devices[0]).to_string(),
-            F::Port2Device => port_device_display(self.port_devices[1]).to_string(),
+            F::Port1Device => PortDevice::menu_label(self.port_devices[0]).to_string(),
+            F::Port2Device => PortDevice::menu_label(self.port_devices[1]).to_string(),
             F::ScsiController => match self.scsi_controller {
                 None => "None".to_string(),
                 Some(ScsiController::A2091) => "A2091 (Z2)".to_string(),
@@ -2600,7 +2634,7 @@ impl MachineSetup {
                 .unwrap_or_else(|| "Default".to_string()),
             F::SamplerGain => sampler_gain_label(self.sampler_gain_db),
             F::Ethernet => match self.a2065_net.as_ref() {
-                None => "Not fitted".to_string(),
+                None => "None".to_string(),
                 Some(NetConfig::None) => "Isolated".to_string(),
                 Some(NetConfig::Loopback) => "Loopback".to_string(),
                 Some(NetConfig::Nat) => "NAT".to_string(),
@@ -2641,7 +2675,7 @@ impl MachineSetup {
             | F::ScsiUnit3Boot
             | F::ScsiUnit4Boot
             | F::ScsiUnit5Boot
-            | F::ScsiUnit6Boot => drive_bootpri_label(self.drive_bootpri(field)),
+            | F::ScsiUnit6Boot => drive_bootpri_label(self.effective_bootpri(field)),
             F::Filesys0ReadOnly
             | F::Filesys1ReadOnly
             | F::Filesys2ReadOnly
@@ -2730,7 +2764,14 @@ impl MachineSetup {
     pub fn cycle(&mut self, field: LauncherField, forward: bool) {
         match field {
             F::Chipset => self.chipset = cycle_slice(&CHIPSETS, self.chipset, forward),
-            F::Rtg => self.rtg = cycle_slice(&RTG_CARDS, self.rtg, forward),
+            F::Rtg => {
+                let cards = if cpu_is_32bit(self.cpu) {
+                    &RTG_CARDS[..]
+                } else {
+                    &RTG_CARDS[..3]
+                };
+                self.rtg = cycle_slice(cards, self.rtg, forward);
+            }
             F::Agnus => self.agnus = cycle_slice(&AGNUS_CHOICES, self.agnus, forward),
             F::Denise => self.denise = cycle_slice(&DENISE_CHOICES, self.denise, forward),
             F::Video => self.video = cycle_slice(&VIDEO_CHOICES, self.video, forward),
@@ -2747,11 +2788,14 @@ impl MachineSetup {
                     // Zorro III RAM, motherboard RAM, accelerator RAM, and
                     // the Zorro III RTG card all sit beyond a 24-bit bus;
                     // dropping them (rather than just greying their rows)
-                    // keeps the emitted config launchable.
+                    // keeps the emitted config launchable. Picasso II/II+ are
+                    // Zorro II cards and remain fitted.
                     self.z3_ram = 0;
                     self.mb_ram = 0;
                     self.accel_ram = 0;
-                    self.rtg = RtgCard::None;
+                    if self.rtg == RtgCard::Z3660 {
+                        self.rtg = RtgCard::None;
+                    }
                 }
             }
             F::Clock => self.clock_mhz = cycle_floats(&CLOCK_PRESETS, self.clock_mhz, forward),
@@ -2802,8 +2846,14 @@ impl MachineSetup {
             F::FloppyVolume => self.floppy_volume = step_u8(self.floppy_volume, forward, 0, 100),
             F::Overscan => self.overscan = cycle_slice(&OVERSCANS, self.overscan, forward),
             F::Tint => self.tint = cycle_slice(&TINTS, self.tint, forward),
+            F::MenuScale => {
+                self.menu_scale = cycle_slice(&MenuScale::MENU_ORDER, self.menu_scale, forward);
+            }
             F::PixelAspect => {
                 self.pixel_aspect = cycle_slice(&PIXEL_ASPECTS, self.pixel_aspect, forward)
+            }
+            F::Scaling => {
+                self.scaling = cycle_slice(&DisplayScaling::MENU_ORDER, self.scaling, forward)
             }
             F::PacingBudget => {
                 self.pacing_budget = cycle_slice(&PACINGS, self.pacing_budget, forward)
@@ -3282,8 +3332,9 @@ impl MachineSetup {
         }
     }
 
-    /// Flip a drive's Bootable box. Clearing it keeps the priority number (shown
-    /// greyed) so re-ticking restores it within the session.
+    /// Flip a drive's Bootable box. Clearing it shows the -128 sentinel the
+    /// config will store, while keeping the priority underneath so re-ticking
+    /// restores it within the session.
     pub fn toggle_drive_boot(&mut self, field: LauncherField) {
         let off = self.drive_boot_off(field);
         self.set_drive_boot_off(field, !off);
@@ -3411,6 +3462,16 @@ impl MachineSetup {
 
     pub fn set_bridge_edit_drive(&mut self, idx: usize) {
         self.bridge_edit_drive = idx.min(3);
+    }
+
+    /// Whether the bridge page is editing a bay with an interface actually
+    /// selected and attached. Only then does that interface's own set of
+    /// capabilities decide anything: with none there is nothing to have an
+    /// opinion, and the rows it would shape have nothing to show.
+    pub fn bridge_interface_selected(&self) -> bool {
+        self.bridge_edit().is_some()
+            && !self.df_bridge_none[self.bridge_edit_drive]
+            && self.bridge_status == BridgeStatus::Attached
     }
 
     /// The settings being shown on the FloppyBridge page.
@@ -3793,13 +3854,13 @@ fn raw_scsi_unit(scsi: &crate::config::RawScsi, unit: usize) -> Option<&RawDrive
 const BOOTPRI_STEPS: [i8; 8] = [-128, -10, -5, 0, 5, 6, 10, 20];
 
 /// Display form of a hard-disk boot priority in the Priority column: the number,
-/// with unset shown as 0 (its effective value). The -128 "never" sentinel lives
-/// in the Bootable box instead, so it is never a value here.
+/// with unset shown as 0 (its effective value). A cleared Bootable box arrives
+/// as the -128 "never" sentinel and displays as -128.
 fn drive_bootpri_label(pri: Option<i8>) -> String {
     pri.unwrap_or(0).to_string()
 }
 
-/// Highest priority the arrows/typing may hold while Bootable is ticked; -128 is
+/// Lowest priority the arrows/typing may reach while Bootable is ticked; -128 is
 /// reserved for the cleared box, so an enabled priority stops at -127.
 const BOOT_PRI_MIN_ENABLED: i8 = BOOT_PRI_NEVER + 1;
 
@@ -3900,18 +3961,6 @@ fn cycle_bootpri(current: i8, forward: bool) -> i8 {
         (idx + n - 1) % n
     };
     BOOTPRI_STEPS[next]
-}
-
-/// Human form of a port device for the picker rows (the config strings
-/// stay lowercase).
-fn port_device_display(device: PortDevice) -> &'static str {
-    match device {
-        PortDevice::Mouse => "Mouse",
-        PortDevice::Joystick => "Joystick",
-        PortDevice::Cd32Pad => "CD32 pad",
-        PortDevice::Analogue => "Analogue",
-        PortDevice::None => "None",
-    }
 }
 
 fn cycle_slice<T: Copy + PartialEq>(items: &[T], current: T, forward: bool) -> T {
@@ -4030,7 +4079,18 @@ pub fn model_label(model: MachineModel) -> &'static str {
 fn rtg_card_name(card: RtgCard) -> &'static str {
     match card {
         RtgCard::None => "None",
+        RtgCard::Picasso2 => "Picasso II",
+        RtgCard::Picasso2Plus => "Picasso II+",
         RtgCard::Z3660 => "Z3660",
+    }
+}
+
+fn rtg_card_value(card: RtgCard) -> &'static str {
+    match card {
+        RtgCard::None => "none",
+        RtgCard::Picasso2 => "picasso2",
+        RtgCard::Picasso2Plus => "picasso2plus",
+        RtgCard::Z3660 => "z3660",
     }
 }
 
@@ -4089,6 +4149,13 @@ fn pixel_aspect_name(aspect: PixelAspect) -> &'static str {
     match aspect {
         PixelAspect::Tv => "tv",
         PixelAspect::Square => "square",
+    }
+}
+
+fn display_scaling_name(scaling: DisplayScaling) -> &'static str {
+    match scaling {
+        DisplayScaling::Smooth => "smooth",
+        DisplayScaling::Integer => "integer",
     }
 }
 
@@ -4262,6 +4329,32 @@ mod tests {
         for f in all {
             assert!(setup.disabled_reason(f).is_some(), "{f:?} live with no bay");
         }
+    }
+
+    /// Drive select is shaped by the interface, so it only answers to one
+    /// when there is one: attached and chosen. That is what separates a row
+    /// greyed with its steppers (this interface has no drive-select line)
+    /// from one blanked entirely (there is no interface to ask).
+    #[cfg(feature = "floppybridge")]
+    #[test]
+    fn drive_select_answers_to_an_interface_only_when_there_is_one() {
+        let mut setup = MachineSetup::default();
+        setup.set_drive_bridged(0, true);
+        setup.set_bridge_edit_drive(0);
+
+        setup.bridge_status = BridgeStatus::NoInterface;
+        setup.df_bridge_none[0] = false;
+        assert!(!setup.bridge_interface_selected(), "nothing attached");
+
+        setup.bridge_status = BridgeStatus::Attached;
+        setup.df_bridge_none[0] = true;
+        assert!(!setup.bridge_interface_selected(), "interface set to None");
+
+        setup.df_bridge_none[0] = false;
+        assert!(setup.bridge_interface_selected(), "attached and chosen");
+
+        setup.set_drive_bridged(0, false);
+        assert!(!setup.bridge_interface_selected(), "no bay at all");
     }
 
     /// A bridged bay only names its interface when one is actually attached:
@@ -4723,6 +4816,27 @@ mod tests {
     }
 
     #[test]
+    fn menu_scale_round_trips_through_raw() {
+        let mut s = MachineSetup::default();
+        // 1x is the baseline, so nothing is written for it. The launcher has
+        // the width to name the size as well as give the figure.
+        assert_eq!(s.value_label(LauncherField::MenuScale), "Normal (1x)");
+        assert_eq!(s.to_raw().display.menu_scale, None);
+
+        s.cycle(LauncherField::MenuScale, true);
+        assert_eq!(s.value_label(LauncherField::MenuScale), "Large (2x)");
+        assert_eq!(s.to_raw().display.menu_scale, Some("2x".to_string()));
+
+        // The written config has to load back into the same setting.
+        assert_eq!(
+            s.build_config().expect("valid config").menu_scale,
+            MenuScale::Large
+        );
+        let reloaded = MachineSetup::from_raw(&s.to_raw()).expect("valid raw");
+        assert_eq!(reloaded.value_label(LauncherField::MenuScale), "Large (2x)");
+    }
+
+    #[test]
     fn bezel_round_trips_through_raw() {
         let mut s = MachineSetup::default();
         // Off is the baseline, so nothing is written for it.
@@ -4785,7 +4899,7 @@ mod tests {
         s.port_devices = [PortDevice::Joystick, PortDevice::Joystick];
         assert_eq!(
             s.disabled_reason(LauncherField::MouseCapture),
-            Some("no mouse")
+            Some("No mouse")
         );
     }
 
@@ -4799,7 +4913,7 @@ mod tests {
         s.port_devices = [PortDevice::Joystick, PortDevice::Joystick];
         assert_eq!(
             s.disabled_reason(LauncherField::MouseSensitivity),
-            Some("no mouse")
+            Some("No mouse")
         );
 
         // A mouse in either port re-enables it.
@@ -4830,10 +4944,64 @@ mod tests {
         assert_eq!(back.rtg, RtgCard::None);
         assert!(s.build_config().is_ok());
 
-        // A 68000 machine cannot host the board, so it has none and the row
-        // still cycles without producing an unbuildable config.
+        // A 68000 machine cannot host Z3660, but its Zorro II bus can host a
+        // Picasso II family. The selector therefore remains live and round-trips the
+        // parser spelling rather than its friendlier display name.
         s.select_model(Some(MachineModel::A500));
         assert_eq!(s.rtg, RtgCard::None);
+        assert_eq!(s.disabled_reason(LauncherField::Rtg), None);
+        s.cycle(LauncherField::Rtg, true);
+        assert_eq!(s.rtg, RtgCard::Picasso2);
+        assert_eq!(s.value_label(LauncherField::Rtg), "Picasso II");
+        let raw = s.to_raw();
+        assert_eq!(raw.rtg.card.as_deref(), Some("picasso2"));
+        assert_eq!(MachineSetup::from_raw(&raw).unwrap().rtg, RtgCard::Picasso2);
+        assert!(s.build_config().is_ok());
+
+        s.cycle(LauncherField::Rtg, true);
+        assert_eq!(s.rtg, RtgCard::Picasso2Plus);
+        assert_eq!(s.value_label(LauncherField::Rtg), "Picasso II+");
+        let raw = s.to_raw();
+        assert_eq!(raw.rtg.card.as_deref(), Some("picasso2plus"));
+        assert_eq!(
+            MachineSetup::from_raw(&raw).unwrap().rtg,
+            RtgCard::Picasso2Plus
+        );
+        assert!(s.build_config().is_ok());
+
+        // A loaded 1 MB board preserves its fitted VRAM when saved.
+        let mut raw = RawConfig::default();
+        raw.rtg.card = Some("picasso2".to_string());
+        raw.rtg.vram = Some("1M".to_string());
+        let s = MachineSetup::from_raw(&raw).unwrap();
+        assert_eq!(s.rtg_vram_bytes, 1024 * 1024);
+        assert_eq!(s.to_raw().rtg.vram.as_deref(), Some("1M"));
+    }
+
+    /// The Video page's Scaling picker writes the `[display] scaling` key
+    /// its parser reads back, and stays out of the file while it matches
+    /// the default.
+    #[test]
+    fn display_scaling_round_trips_through_raw() {
+        let mut s = MachineSetup::default();
+        assert_eq!(s.scaling, DisplayScaling::Smooth);
+        assert_eq!(s.value_label(LauncherField::Scaling), "Smooth");
+        assert!(s.to_raw().display.scaling.is_none());
+
+        s.cycle(LauncherField::Scaling, true);
+        assert_eq!(s.scaling, DisplayScaling::Integer);
+        assert_eq!(s.value_label(LauncherField::Scaling), "Integer");
+        let raw = s.to_raw();
+        assert_eq!(raw.display.scaling.as_deref(), Some("integer"));
+        assert_eq!(
+            MachineSetup::from_raw(&raw).unwrap().scaling,
+            DisplayScaling::Integer
+        );
+        assert!(s.build_config().is_ok());
+
+        // Two modes, so cycling on returns to the default.
+        s.cycle(LauncherField::Scaling, true);
+        assert_eq!(s.scaling, DisplayScaling::Smooth);
     }
 
     #[test]
@@ -5052,12 +5220,12 @@ mod tests {
         use LauncherField as F;
         let mut s = MachineSetup::default();
         // The shader is off by default, so its strength does nothing and greys.
-        assert_eq!(s.value_label(F::Shader), "Off");
-        assert_eq!(s.disabled_reason(F::ShaderStrength), Some("shader off"));
+        assert_eq!(s.value_label(F::Shader), "Disabled");
+        assert_eq!(s.disabled_reason(F::ShaderStrength), Some("Disabled"));
         assert!(!s.applies(F::ShaderStrength));
         // Turning a shader on makes the strength editable again.
         s.cycle(F::Shader, true); // Off -> the first real shader
-        assert_ne!(s.value_label(F::Shader), "Off");
+        assert_ne!(s.value_label(F::Shader), "Disabled");
         assert_eq!(s.disabled_reason(F::ShaderStrength), None);
     }
 
@@ -5083,7 +5251,7 @@ mod tests {
         assert!(setup.has_boot_priority_rows());
         assert!(!MachineSetup::default().has_boot_priority_rows());
         // No slave image, so its boot row is greyed and inert.
-        assert_eq!(setup.disabled_reason(F::IdeSlaveBoot), Some("no drive"));
+        assert_eq!(setup.disabled_reason(F::IdeSlaveBoot), Some("No drive"));
 
         // The arrows step the live priority and re-emit it.
         setup.cycle(F::IdeMasterBoot, true); // 5 -> 6
@@ -5095,17 +5263,19 @@ mod tests {
         assert_eq!(setup.value_label(F::IdeMasterBoot), "0");
         assert_eq!(setup.to_raw().ide.master.as_ref().unwrap().bootpri, None);
 
-        // Clearing the Bootable box writes the -128 sentinel but keeps the
-        // priority number for the greyed display; re-ticking restores it.
+        // Clearing the Bootable box writes the -128 sentinel and shows it, so
+        // the greyed row says what the config will hold; the priority is kept
+        // underneath, and re-ticking restores it.
         setup.set_drive_bootpri(F::IdeMasterBoot, Some(6));
         setup.toggle_drive_boot(F::IdeMasterBoot);
         assert!(setup.drive_boot_off(F::IdeMasterBoot));
-        assert_eq!(setup.value_label(F::IdeMasterBoot), "6");
+        assert_eq!(setup.value_label(F::IdeMasterBoot), "-128");
         assert_eq!(
             setup.to_raw().ide.master.as_ref().unwrap().bootpri,
             Some(-128)
         );
         setup.toggle_drive_boot(F::IdeMasterBoot);
+        assert_eq!(setup.value_label(F::IdeMasterBoot), "6");
         assert_eq!(setup.to_raw().ide.master.as_ref().unwrap().bootpri, Some(6));
     }
 
@@ -5191,7 +5361,7 @@ mod tests {
     #[test]
     fn a2065_board_cycles_and_round_trips() {
         let mut s = MachineSetup::default();
-        assert_eq!(s.value_label(LauncherField::Ethernet), "Not fitted");
+        assert_eq!(s.value_label(LauncherField::Ethernet), "None");
         assert!(s.to_raw().a2065.net.is_none());
         assert!(!s.ethernet_breaks_determinism());
 
@@ -5219,7 +5389,7 @@ mod tests {
             // Where the NAT cannot come up the picker skips straight past it.
             s.cycle(LauncherField::Ethernet, true);
         }
-        assert_eq!(s.value_label(LauncherField::Ethernet), "Not fitted");
+        assert_eq!(s.value_label(LauncherField::Ethernet), "None");
     }
 
     #[test]
@@ -5485,12 +5655,10 @@ mod tests {
             s.disabled_reason(LauncherField::MbRam),
             Some("needs 32-bit CPU")
         );
-        // The profile's Zorro III RTG card is beyond a 24-bit bus too.
+        // The profile's Zorro III RTG card is beyond a 24-bit bus too. The RTG
+        // selector remains live because Picasso II/II+ are still valid choices.
         assert_eq!(s.rtg, RtgCard::None);
-        assert_eq!(
-            s.disabled_reason(LauncherField::Rtg),
-            Some("needs 32-bit CPU")
-        );
+        assert_eq!(s.disabled_reason(LauncherField::Rtg), None);
         // The raw config overrides the profile default back to zero, so
         // this machine still launches.
         assert_eq!(s.to_raw().memory.motherboard.as_deref(), Some("0"));
@@ -5617,12 +5785,12 @@ mod tests {
     fn shader_cycles_the_presets_and_round_trips_through_raw() {
         let mut s = MachineSetup::default();
         // Off is the baseline, so nothing is written for it.
-        assert_eq!(s.value_label(LauncherField::Shader), "Off");
+        assert_eq!(s.value_label(LauncherField::Shader), "Disabled");
         assert_eq!(s.to_raw().display.shader, None);
 
         // With no user shader configured the picker offers the presets only,
         // and wraps straight back to Off.
-        for expected in ["Scanlines", "Mask", "CRT (1084)", "Off"] {
+        for expected in ["Scanlines", "Mask", "CRT (1084)", "Disabled"] {
             s.cycle(LauncherField::Shader, true);
             assert_eq!(s.value_label(LauncherField::Shader), expected);
         }

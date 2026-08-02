@@ -410,6 +410,12 @@ where
             "--show-status-bar" => {
                 overrides.status_bar = Some(true);
             }
+            "--menu-scale" => {
+                overrides.menu_scale = Some(
+                    args.next()
+                        .ok_or_else(|| anyhow!("--menu-scale requires 1x or 2x"))?,
+                );
+            }
             "--hide-status-bar" => {
                 overrides.status_bar = Some(false);
             }
@@ -1083,7 +1089,7 @@ fn print_help() {
         "--floppy-bridge DFN NAME       drive a physical floppy drive on DFN over NAME:\n  \
          \x20                            drawbridge, greaseweazle, supercardpro, or off\n  \
          --floppy-bridge-port DFN PORT  serial port of that interface (default: auto-detect)\n  \
-         --floppy-bridge-cable DFN SEL  drive select on the cable: a/b (PC) or 0-3 (Shugart)\n  \
+         --floppy-bridge-cable DFN SEL  drive select on the cable: a/b (IBM PC) or 0-3 (Shugart)\n  \
          --floppy-bridge-mode DFN MODE  how tracks are captured: normal, compatible, stalling\n  \
          --floppy-bridge-density DFN D  force a density: auto, dd, or hd\n  \
          --floppy-bridge-speed DFN PCT  serve captured tracks at 100, 125, 150, 175, or 200%\n  \
@@ -1203,6 +1209,7 @@ fn print_help() {
          \x20                            combine with COPPERLINE_AUDIO_PROFILE=1 for counters\n  \
          --full-screen / --windowed     open fullscreen / windowed at start (default: windowed)\n  \
          --show-status-bar / --hide-status-bar  status bar at start (default: shown)\n  \
+         --menu-scale SIZE              size of the pop-up menu: 1x (default) or 2x\n  \
          --serial MODE                  Paula serial port: off, stdout, midi, tcp,\n  \
          \x20                            tcp-connect, or pty\n  \
          --serial-connect HOST:PORT     dial a remote TCP service (a telnet BBS) with the\n  \
@@ -1937,6 +1944,8 @@ fn main() -> Result<()> {
             .unwrap_or(true)
     });
     video::set_pixel_aspect(config::resolve_pixel_aspect(cfg.pixel_aspect));
+    video::set_display_scaling(cfg.scaling);
+    video::set_menu_scale(cfg.menu_scale);
     // Capture runs (--screenshot-after / --dump-frames) never present a
     // frame, so they skip the host window and event loop entirely: winit's
     // event-loop setup registers with the display server, which aborts or
@@ -2062,6 +2071,13 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
     info!("no machine specified; opening the configuration screen");
     let emu = build_placeholder_machine()?;
     video::set_pixel_aspect(config::resolve_pixel_aspect(config::PixelAspect::Tv));
+    // The launcher opens before a machine config is built, so it presents at
+    // the default aspect and scaling; the machine it starts applies its own
+    // (see start_configured_machine).
+    video::set_display_scaling(config::DisplayScaling::Smooth);
+    // The launcher opens before a machine config is built, so the menu size
+    // comes straight off the raw file.
+    video::set_menu_scale(raw_cfg.menu_scale());
     // The placeholder is always silent; seed the session's audio from the config
     // intent so a state loaded over the launcher gets the configured output.
     let audio_output_enabled = raw_cfg.audio_output_enabled();

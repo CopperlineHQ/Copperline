@@ -1,6 +1,6 @@
 [package]
 name = "copperline"
-version = "0.13.0"
+version = "0.14.0"
 edition = "2021"
 rust-version = "1.93"
 license = "GPL-3.0-or-later"
@@ -94,7 +94,7 @@ ctl-bin = ["dep:serde_json"]
 floppybridge = []
 
 [dependencies]
-m68k = { version = "0.3.1", features = ["serde"] }
+m68k = { version = "0.5.0", features = ["serde"] }
 pixels = { version = "0.17", optional = true }
 winit = { version = "0.30", optional = true }
 anyhow = "1"

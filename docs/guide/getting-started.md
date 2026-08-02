@@ -13,7 +13,11 @@ native desktop build.
   `gilrs` crate.
 - A GPU backend for presentation: Metal on macOS, DX12 on Windows, and
   **Vulkan on Linux** (see [](#vulkan-is-required-on-linux)).
-- Fedora build dependencies: `sudo dnf install alsa-lib-devel systemd-devel`.
+- A host C++ compiler for the vendored FloppyBridge library (built by the
+  default `floppybridge` feature): the Xcode command-line tools on macOS,
+  `g++` on Linux, or the MSVC Build Tools on Windows.
+- Fedora build dependencies:
+  `sudo dnf install alsa-lib-devel systemd-devel gcc-c++`.
 - A boot ROM. Copperline ships with the [AROS](http://www.aros.org/)
   open-source Kickstart replacement and boots it by default, so it runs out
   of the box with no ROM of your own. It also boots Kickstart 1.3, 2.05, and

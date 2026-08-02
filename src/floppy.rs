@@ -404,7 +404,9 @@ impl FloppyController {
     /// shapes how fast a track is served from an image; a physical drive's
     /// data rate is the disk's own, and accelerating the emulated side of it
     /// only makes the guest outrun the cells the drive is delivering. A
-    /// bridged bay therefore always runs at real speed.
+    /// bridged bay therefore takes no multiplier here; its own
+    /// `bridge_speed` instead compresses how fast the captured revolution
+    /// is served.
     fn drive_speed_multiplier(&self, drive_idx: usize) -> u32 {
         if self.drives[drive_idx].is_bridged() {
             1
@@ -655,6 +657,20 @@ impl FloppyController {
     #[cfg(feature = "floppybridge")]
     pub fn has_bridged_drive(&self) -> bool {
         self.drives.iter().any(|d| d.bridge.is_some())
+    }
+
+    /// Whether any fitted bay serves from an image. Drive speed only shapes
+    /// how fast a track is served from one: a real drive's data rate is the
+    /// disk's own, so with every fitted bay physical there is nothing for the
+    /// setting to act on.
+    pub fn has_image_drive(&self) -> bool {
+        (0..self.drives.len()).any(|idx| {
+            #[cfg(feature = "floppybridge")]
+            let bridged = self.is_bridged(idx);
+            #[cfg(not(feature = "floppybridge"))]
+            let bridged = false;
+            self.drive_connected(idx) && !bridged
+        })
     }
 
     /// Let go of every real drive, closing the device and handing the port

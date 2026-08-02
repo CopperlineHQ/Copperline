@@ -63,6 +63,7 @@ pub mod midi;
 pub mod net;
 pub mod parallel;
 pub mod paths;
+pub mod picasso2;
 pub mod pointer;
 pub mod priority;
 pub mod ramsey;

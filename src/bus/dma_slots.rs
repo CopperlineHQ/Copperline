@@ -82,12 +82,27 @@ impl Bus {
             let _ = self.step_copper_eligible_slot(false, false);
         }
 
-        let owner = match forced_owner {
+        let mut owner = match forced_owner {
             Some(owner) => owner,
             None if copper_took_bus => ChipBusOwner::Copper,
             None if eligible => self.free_chip_bus_slot_owner(),
             None => self.scheduled_dma_owner_after_fixed(false, fixed_dma_owner),
         };
+        if self.cpu_posted_write_debt > 0
+            && forced_owner.is_none()
+            && matches!(owner, ChipBusOwner::Idle)
+            && cck >= CHIP_BUS_SLOT_CCK
+            && self.emulated_cck >= self.cpu_chip_port_free_at
+        {
+            // A posted CPU chip write retires into this otherwise-idle slot.
+            // The port turns around in 2 colour clocks, so drains (and any
+            // following CPU chip access) pace to every other colour clock;
+            // see `cpu_posted_write_debt`.
+            owner = ChipBusOwner::Cpu;
+            self.cpu_posted_write_debt -= 1;
+            self.cpu_chip_port_free_at = self.emulated_cck + 2;
+            self.note_cpu_granted_chip_bus_cycle();
+        }
         if diag_blt_slots() && self.blitter.busy {
             eprintln!(
                 "BLTP {} {} {} OWNER {owner:?} pending={} needs_bus={}",

@@ -17,9 +17,10 @@ The two halves are consumed exactly as WinUAE and FS-UAE take them.
 
 ## Provenance
 
-Built from source on 2026-07-28 from AROS upstream master
-(https://github.com/aros-development-team/AROS) at commit d0370bd757,
-plus two not-yet-merged fixes:
+Built from source on 2026-07-31 from AROS upstream master
+(https://github.com/aros-development-team/AROS) at commit c04970801d,
+with no local patches. Fixes Copperline contributed or depends on, all
+in master:
 
 - the NTSC boot fix of pull request 876
   (https://github.com/aros-development-team/AROS/pull/876, commit
@@ -38,7 +39,20 @@ plus two not-yet-merged fixes:
   Early Startup menu check could not fire (Copperline issue 317). The
   fix buffers pre-consumer events in the input subsystem and replays
   them to the first consumer that attaches.
-Master includes the boot-time optimizations of pull request 829
+- the EnableAGA low-memory fix (commit 7df15c66cb): SetChipRev rebuilt
+  every composited screen's copper list in place with AGA-sized content,
+  overrunning the pre-AGA-sized chip RAM allocation and trampling low
+  memory including AbsExecBase, so the first program run after
+  C:SetPatch on an AGA machine jumped through a garbage ExecBase.
+- the amigavideo / graphics.library correctness batch merged 2026-07-29
+  to 2026-07-31 (pull requests 879, 886, 895, 896, 902, 903 and 906):
+  AGA palette writes through NULL copper pointers, RectFill drawmode
+  handling, `rp->Mask` reaching the drivers, plane counts in the HIDD
+  BltBitMap path, pattern/template fill masks, blitter edge- and
+  write-mask handling in the Amiga driver, and a blitter-matching line
+  tie-break.
+
+Master also includes the boot-time optimizations of pull request 829
 (https://github.com/aros-development-team/AROS/pull/829: single-pass
 romtag scan, fast memory clearing, blitter-drawn boot animation), which cut
 the m68k boot to the insert-disk screen from roughly 25-30 s to under 10 s

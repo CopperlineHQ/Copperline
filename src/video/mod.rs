@@ -6,6 +6,8 @@ pub mod deinterlace;
 pub mod font;
 #[cfg(feature = "frontend")]
 pub mod launcher;
+#[cfg(feature = "frontend")]
+pub mod menu;
 pub mod present_common;
 #[cfg(feature = "frontend")]
 pub mod ui;
@@ -112,6 +114,28 @@ pub fn set_pixel_aspect(aspect: crate::config::PixelAspect) {
     );
 }
 
+/// How the presentation canvas is scaled into the window
+/// (`[display] scaling`, runtime-toggled by the menu's Scaling item).
+/// Main thread only, like [`SQUARE_PIXEL_ASPECT`]; the atomic only
+/// satisfies `static` safety. Independent of the pixel aspect: that
+/// decides what the canvas is, this decides how it reaches the window.
+static INTEGER_SCALING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_display_scaling(scaling: crate::config::DisplayScaling) {
+    INTEGER_SCALING.store(
+        scaling == crate::config::DisplayScaling::Integer,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+pub fn display_scaling() -> crate::config::DisplayScaling {
+    if INTEGER_SCALING.load(std::sync::atomic::Ordering::Relaxed) {
+        crate::config::DisplayScaling::Integer
+    } else {
+        crate::config::DisplayScaling::Smooth
+    }
+}
+
 /// Whether the status bar is hidden, so the emulated display scales to fill the
 /// whole window. Toggled live from the window/menu (main thread only, like
 /// [`SQUARE_PIXEL_ASPECT`]); the atomic only satisfies `static` safety.
@@ -123,6 +147,27 @@ pub fn set_status_bar_hidden(hidden: bool) {
 
 pub fn status_bar_hidden() -> bool {
     STATUS_BAR_HIDDEN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// How large the pop-up menu is drawn (`[display] menu_scale`, changed live
+/// from the menu itself). Held as an index into [`MenuScale::MENU_ORDER`];
+/// main thread only, like [`SQUARE_PIXEL_ASPECT`].
+static MENU_SCALE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn set_menu_scale(scale: crate::config::MenuScale) {
+    let index = crate::config::MenuScale::MENU_ORDER
+        .iter()
+        .position(|s| *s == scale)
+        .unwrap_or(0);
+    MENU_SCALE.store(index as u8, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn menu_scale() -> crate::config::MenuScale {
+    let index = usize::from(MENU_SCALE.load(std::sync::atomic::Ordering::Relaxed));
+    crate::config::MenuScale::MENU_ORDER
+        .get(index)
+        .copied()
+        .unwrap_or_default()
 }
 
 pub fn pixel_aspect() -> crate::config::PixelAspect {
