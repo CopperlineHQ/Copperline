@@ -787,6 +787,8 @@ fn floating_bus(size: usize) -> u64 {
 /// wasm = "board.wasm"  # module path, relative to this metadata file
 /// dma = true           # optional capabilities (default false)
 /// int2 = true
+/// # diag_vec = 0x40     # DiagArea offset in the board window, for a plugin
+///                        # that ships its own autoboot ROM (see docs/zorro.md)
 /// int6 = false
 ///
 /// # Plugin settings passed to the module (defaults; the user overrides them
@@ -830,6 +832,11 @@ struct RawBoardMeta {
     /// Config option schema, for the launcher's config panel.
     #[serde(default)]
     option: Vec<RawOption>,
+    /// Offset of the plugin's DiagArea within its board window, for a WASM
+    /// board that ships its own autoboot ROM (mirrors the in-tree A2091's
+    /// `diag_vec`; see docs/zorro.md's "Plugin settings, files, and the
+    /// config panel"). Only meaningful for `type = "wasm"`.
+    diag_vec: Option<u16>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -967,7 +974,7 @@ pub fn load_board_metadata(path: &Path) -> Result<LoadedZorroBoard> {
                 memory_space: false,
                 chained: false,
                 window: 0,
-                diag_vec: None,
+                diag_vec: raw.diag_vec,
             };
             spec.validate()
                 .with_context(|| format!("{}: invalid board", path.display()))?;
