@@ -383,9 +383,14 @@ charge was first calibrated to two clocks against the FS-UAE A1200 reference;
 a real A1200 (stock 68EC020 at 14.19 MHz, 2026-08) measures a cached taken
 `dbra` at 7 clocks -- cache-case 6 plus one -- in three independent loop rows,
 with the `move`, shift, `mulu`, paired-op and DIV-under-display rows agreeing
-once that one clock is accounted for. The refill is therefore one clock, and
-FS-UAE itself over-bills every taken branch by one; see
-`timing-test/README.md`.
+once that one clock is accounted for. FS-UAE itself over-bills every taken
+branch by one; see `timing-test/README.md`.
+
+A second probe disk then showed the charge is *conditional*: every one of
+those rows happens to place its `dbra` at a longword-aligned address, and a
+`dbra` at `pc % 4 == 2` costs the bare cache-case 6 instead. The refill is
+therefore one clock when the branch opcode is longword-aligned and none
+otherwise, as derived above under the real-A1200 column.
 
 This is intentionally a datasheet model, not a claim of cycle exactness.
 The opcode word does not retain a consumed extension word, so full-format
@@ -456,15 +461,40 @@ clock. The same synchronizer clock on custom-register reads is what lands
 the copper-vs-CPU poll row (row 27) exactly on the real machine's beam
 position.
 
-The same column also pinned down 020 result forwarding, modelled in the m68k
-crate: a register-to-register MOVE whose source is the register the
-immediately preceding register-to-register MOVE wrote runs one clock faster
-(the value is still in the execution unit's result latch, skipping the
-register-file read). The real machine runs the RAW-dependent pair one clock
-per iteration faster than the independent pair (`timing-test` rows 29 and
-28: 10 against 11 clocks including the loop dbra), which only a forwarding
-path can produce; wider forwarding is deliberately not modelled without
-hardware data.
+The same column appeared to show 020 result forwarding -- the RAW-dependent
+MOVE pair of `timing-test` row 29 runs one clock per iteration faster than
+the independent pair of row 28 -- and m68k 0.5.0, the release this tree
+depends on, models it as such. **That model is wrong and is pending removal
+upstream.** A second probe disk (`timing-test/fwdprobe.asm`) ran the same two
+loops at the opposite alignments on the same machine and reversed the
+ordering, which closes the 2x2: with the register dependency and the branch
+alignment separated, the dependency has no effect at all. What the pair rows
+actually measured is where the loop branch sits.
+
+Thirty cached loops across the two disks fit one rule with no exception:
+
+```text
+clk/iter = 6 + 2 * (2-byte body instructions)
+             + 1 if the DBcc opcode word is longword-aligned
+```
+
+A cached taken `dbra` costs 7 clocks at `pc % 4 == 0` and 6 -- the manual's
+cache case -- at `pc % 4 == 2`. The loop *head* alignment varies freely
+within each refill class, so it is the branch's own alignment that decides
+and not the target's; the presumed cause is the longword granularity of 020
+instruction fetch, a branch straddling two longwords having already had the
+second fetched by the time it retires. Body instructions cost a flat two
+clocks whatever their shape (`.b`/`.w`/`.l` MOVE, MOVEA on either side,
+An-source MOVE, ADD, CMP, MOVEQ, NOP). Only `DBcc` was measured; `Bcc` and
+`BSR` are untested and should keep the flat refill until a probe covers them.
+
+Modelling the alignment rule reproduces all 26 `fwdprobe` rows and leaves the
+main disk's pure-CPU rows exact, but moves several of its chip-bus rows (the
+chip-read loop, the write-plus-poll composites, the copper-poll beam
+position) by a few percent: those loops' accesses re-phase against the
+chip-bus slot grid when the loop shortens by a clock, so their previous
+agreement was partly compensation for the branch over-bill. Re-calibrating
+the chip-access phase against real hardware is open work.
 
 What remains against real silicon, with the middle rows now read off the
 CRT across two runs: the composite write-plus-poll rows (16, 17, 21) run
