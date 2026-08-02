@@ -39,8 +39,9 @@
 // device name, unit, and dostype instead of dereferencing garbage. Each
 // FSSM references a per-unit DosEnvec whose de_BootPri carries the
 // configured AddBootNode priority.
-#define FSSM_OFFSET        0x7800
-#define FSSM_SLOT_SIZE     16
+#define FSSM_OFFSET         0x7800
+#define FSSM_SLOT_SIZE      16
+#define FSSM_DEVNAME_OFFSET 0x7900
 
 // Host registers (see the ZorroDevice impl in src/filesys.rs). One bank of
 // longword registers per mount unit, so each handler process talks to its

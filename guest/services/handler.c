@@ -81,9 +81,14 @@
 
 #include "copperline_board.h"
 
-// The pump itself needs well under 200 bytes; 2K leaves headroom for the
-// OS calls and a future printf().
-#define HANDLER_STACK 2048
+// The pump itself needs well under 200 bytes, but this is dn_StackSize for
+// the whole handler process, and V34 dos.library burns ~1500 bytes of BCPL
+// environment at the stack bottom per DOS call -- the 1.3 *boot*-time
+// process bootstrap runs enough BCPL frames that a 2K stack overflows
+// before the handler's first instruction, crashing through a wild pointer.
+// 6000 is the WinUAE boot ROM's proven value for C-style handlers booting
+// under 1.3.
+#define HANDLER_STACK 6000
 
 // AbsExecBase. A plain *(struct ExecBase **)4 works too (a constant address
 // needs no relocation) but trips GCC's array-bounds warning, which treats any
@@ -252,6 +257,12 @@ static void mount_boards(UBYTE *board, struct Library *_expbase,
         dn->dn_Startup = MKBADDR(board + FSSM_OFFSET + i * FSSM_SLOT_SIZE);
         dn->dn_SegList = MKBADDR(board + 4);
         dn->dn_GlobalVec = -1; // C handler: no BCPL global vector
+        // A valid BSTR handler name: normally cosmetic (the handler is
+        // seglist-resident, nothing LoadSegs this), but WinUAE's boot ROM
+        // sets it for its Kickstart-1.3-bootable virtual drives, and 1.3's
+        // BCPL boot init dereferences DeviceNode fields it finds along the
+        // way -- a NULL BPTR walks address 0.
+        dn->dn_Handler = MKBADDR(board + FSSM_DEVNAME_OFFSET);
         dn->dn_Name = MKBADDR(bname);
 
         // Boot priority comes from the config via de_BootPri; the default

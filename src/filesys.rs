@@ -604,24 +604,32 @@ impl FilesysBoard {
         for (unit, u) in self.units.iter().enumerate() {
             let mount = &u.mount;
             let unit = unit as u32;
+            // Fake-but-sane geometry and a stock de_DosType, mirroring the
+            // envec WinUAE's directory harddrives boot Kickstart 1.3 with:
+            // 1.3's BCPL boot init inspects the boot node's environment
+            // before it starts the handler, and a degenerate volume (1
+            // block, unknown DosType) is rejected up front -- the boot
+            // then dies composing the "is not validated" requester. The
+            // handler never reads this geometry; the volume node keeps
+            // ID_CLFS_DISK as its honest runtime identity.
             let envec = DosEnvec {
                 table_size: long(16),  // entries after this one, through dos_type
                 size_block: long(128), // longwords = 512-byte blocks
                 sec_org: long(0),
                 surfaces: long(1),
                 sectors_per_block: long(1),
-                blocks_per_track: long(1),
+                blocks_per_track: long(127),
                 reserved: long(2),
                 pre_alloc: long(0),
                 interleave: long(0),
-                low_cyl: long(0),
-                high_cyl: long(0),
-                num_buffers: long(1),
+                low_cyl: long(1),
+                high_cyl: long(511),
+                num_buffers: long(50),
                 buf_mem_type: long(1), // MEMF_PUBLIC
                 max_transfer: long(0x7FFF_FFFF),
                 mask: long(0xFFFF_FFFE),
                 boot_pri: long(mount.boot_pri as i32 as u32),
-                dos_type: long(ID_CLFS_DISK),
+                dos_type: long(0x444F_5300), // 'DOS\0'
             };
             let envec_at = base + FSSM_ENVEC_OFFSET + unit * ENVEC_SLOT_SIZE;
             write_bytes(bus, envec_at, envec.as_bytes());
