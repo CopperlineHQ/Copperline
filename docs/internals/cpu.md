@@ -493,8 +493,41 @@ main disk's pure-CPU rows exact, but moves several of its chip-bus rows (the
 chip-read loop, the write-plus-poll composites, the copper-poll beam
 position) by a few percent: those loops' accesses re-phase against the
 chip-bus slot grid when the loop shortens by a clock, so their previous
-agreement was partly compensation for the branch over-bill. Re-calibrating
-the chip-access phase against real hardware is open work.
+agreement was partly compensation for the branch over-bill.
+
+### The chip-access phase (open)
+
+`timing-test/rdprobe.asm` measured the chip side on the same machine, and
+its two no-access anchors reproduce the other disks exactly, so the column
+is trustworthy. It shows two defects.
+
+**Reads are under-billed by a flat 3.01 CPU clocks each.** Writes, register
+loops and the anchors are exact; all six read rows are short by the same
+amount (4.05 at the alignment that rounds up, see below). The shortfall sits
+in the data-return path, after the granted slot and the data-return colour
+clock.
+
+**Every real loop containing a chip access runs an even number of colour
+clocks** -- 8, 10, 4, 4, 14, 16, 10, 10 -- while the two loops with no chip
+access do not (4.51, 4.01). The CPU's access is granted on a two-colour-clock
+cadence and the wait absorbs whatever the rest of the loop left over. Reads
+carry the branch-alignment clock through to a whole extra slot (one read
+costs 8 cck at `dbra%4==2` and 10 at `%4==0`); posted writes do not.
+
+Copperline reproduces neither, and the second is the blocking one: the model
+is phase-unstable where the machine is not. `rdprobe` row 0 and main-disk row
+2 are the same loop at the same branch alignment, real hardware returns
+`19BC` for both, and Copperline returns 16.09 clocks for one and 20.19 for
+the other depending on where in the frame the loop starts, with all DMA off.
+Billing the missing three clocks per read lands `rdprobe` exactly and pushes
+main-disk row 2 to 26% high, so the constant cannot be calibrated until the
+access is quantised to the slot cadence. Three attempts at that quantisation
+(snapping on the bus-side clock carry, rounding the instruction charge when
+it touched the chip bus, and forcing an absolute two-colour-clock grant grid)
+all failed, the first two because the CPU's sub-colour-clock phase lives on
+`M68kMachine` and is invisible to the bus at access time, and the third
+because it over-constrains the grant. A real fix has to unify the two clock
+timelines so an access can begin on a colour-clock boundary.
 
 What remains against real silicon, with the middle rows now read off the
 CRT across two runs: the composite write-plus-poll rows (16, 17, 21) run

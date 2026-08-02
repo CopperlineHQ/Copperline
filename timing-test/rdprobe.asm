@@ -52,10 +52,48 @@
 ;   - rows 8/9: does a read following a posted write stall on that write
 ;     retiring, as Copperline models it?
 ;
-; Copperline (m68k 0.5.0 plus the DBcc-alignment fix) currently reports
-; 13.08 / 16.04 / 8.05 / 8.05 / 9.01 / 8.01 / 22.16 / 24.12 / 17.04 / 17.04
-; clocks for rows 0-9. Any row where the real machine disagrees is a
-; chip-bus modelling error; the anchors (4, 5) already agree.
+; Measured on the real A1200 2026-08-02 (two runs; run 2 differs only in
+; rows 1 and 5 by a tick). Rows 4 and 5 reproduce main-disk row 4 and
+; fwdprobe row 25 exactly, so the run is good:
+;
+;   row 0  1 read   dbra%4=2   19BC = 16.09 clk =  8.04 cck
+;   row 1  1 read   dbra%4=0   204B = 20.19 clk = 10.09 cck
+;   row 2  1 write  dbra%4=2   0CDF =  8.05 clk =  4.02 cck
+;   row 3  1 write  dbra%4=0   0CDF =  8.05 clk =  4.02 cck
+;   row 4  reg move dbra%4=0   0E6A =  9.01 clk =  4.51 cck   (anchor, ok)
+;   row 5  reg move dbra%4=2   0CD0 =  8.01 clk =  4.01 cck   (anchor, ok)
+;   row 6  2 reads  dbra%4=2   2D10 = 28.17 clk = 14.09 cck
+;   row 7  2 reads  dbra%4=0   3388 = 32.22 clk = 16.11 cck
+;   row 8  rd+write dbra%4=2   204C = 20.19 clk = 10.09 cck
+;   row 9  rd+write dbra%4=0   204E = 20.20 clk = 10.10 cck
+;
+; What it says:
+;
+; 1. Every loop containing a chip access runs a whole EVEN number of colour
+;    clocks -- 8, 10, 4, 4, 14, 16, 10, 10 -- i.e. a multiple of 2 cck, or 4
+;    CPU clocks. The two rows with no chip access do not (4.51, 4.01). The
+;    CPU's chip access is granted on a two-colour-clock cadence and the wait
+;    absorbs whatever the rest of the loop left over.
+;
+; 2. Reads carry the branch-alignment clock through to a whole extra slot:
+;    one read costs 8 cck at dbra%4=2 but 10 at %4=0, and two reads 14 and
+;    16. Writes do not (4 cck at both) because they post, and read+write
+;    does not either (10 at both).
+;
+; 3. Copperline (m68k 0.5.0 plus the DBcc-alignment fix) reports
+;    13.08 / 16.04 / 8.05 / 8.05 / 9.01 / 8.01 / 22.16 / 24.12 / 17.04 /
+;    17.04 clocks. Writes, register loops and the anchors are exact; every
+;    read row is short by a flat 3.01 clocks per read (4.05 at %4=0, the
+;    difference being the rounding in 1 above).
+;
+; 4. Worse than the constant, the model is phase-unstable: this disk's row 0
+;    and the main disk's row 2 are the same loop at the same alignment, and
+;    real hardware returns 19BC for both, but Copperline returns 16.09 here
+;    and 20.19 there depending on where in the frame the loop starts, with
+;    all DMA off. Billing the missing 3 clocks per read lands this disk
+;    exactly and pushes the main disk's row 2 to 26% high, so the phase
+;    instability has to be fixed before the constant means anything. That is
+;    open work; see docs/internals/cpu.md.
 ;
 ; Loaded by boot.asm to $30000. Same CIA-A timer A harness, renderer and
 ; serial output as the other probe disks: a two-digit decimal row ID then
