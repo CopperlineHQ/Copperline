@@ -3,7 +3,7 @@
 ## The wrapper and the bus adapter
 
 `M68kMachine` (`src/cpu.rs`) wraps the published pure-Rust
-[`m68k` 0.5 core](https://docs.rs/crate/m68k/0.5.0). The core sees
+[`m68k` 0.5 core](https://docs.rs/crate/m68k/0.5.2). The core sees
 the machine through an adapter implementing its `AddressBus` trait, so
 every CPU-visible access -- RAM, ROM, custom registers, CIA, RTC,
 autoconfig, Gayle, Akiko -- routes into the shared `Bus` and is billed in
@@ -23,7 +23,7 @@ fits a 68881/68882 to any 020/030 (and is on by default for the 68040,
 whose FPU is on-die): the `m68k` core executes the 6888x instruction
 set in true 80-bit extended precision via a pure-Rust software floating-
 point engine
-([`softfloat.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.5.0/src/fpu/softfloat.rs)).
+([`softfloat.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.5.2/src/fpu/softfloat.rs)).
 Arithmetic (add, sub,
 mul, div, sqrt, and the single-accuracy FSGLMUL/FSGLDIV, which round the
 mantissa to 24 bits but keep the extended exponent range -- gcc -m68040
@@ -41,13 +41,13 @@ whose saved FPU frame carries a foreign size) are all modelled. The transcendent
 FASIN/FACOS/FATAN, the hyperbolics, FETOX/FETOXM1/FTWOTOX/FTENTOX,
 FLOGN/FLOGNP1/FLOG2/FLOG10) and FSINCOS run in extended precision too: a
 double-`FloatX80` ("double-double", ~128-bit) layer
-([`dd.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.5.0/src/fpu/dd.rs))
+([`dd.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.5.2/src/fpu/dd.rs))
 evaluates Taylor/atanh series over reduced
 ranges and rounds the result to extended under the FPCR mode, setting INEX
 and the domain flags (OPERR/DZ). Accuracy is validated against an
 arbitrary-precision oracle (the pure-Rust `astro-float`, a dev-only
 dependency;
-[`fpu_accuracy.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.5.0/tests/fpu_accuracy.rs)):
+[`fpu_accuracy.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.5.2/tests/fpu_accuracy.rs)):
 every function is within
 1 ULP across a wide sweep and all four rounding modes, and round-to-nearest
 is correctly rounded in practice. They are not chip-bit-exact -- the real
@@ -57,7 +57,7 @@ quotient byte. This covers Kickstart's
 detection and per-task FPU context switching. The
 68000's per-instruction cycle counts in the `m68k` core have been
 corrected to exact totals across the SingleStepTests 68000 cycle corpus
-([validation details](https://github.com/benletchford/m68k-rs/tree/m68k-v0.5.0#validation--testing)),
+([validation details](https://github.com/benletchford/m68k-rs/tree/m68k-v0.5.2#validation--testing)),
 which is what makes
 cycle-budgeted pacing trustworthy.
 
@@ -127,7 +127,7 @@ precise.
 
 The 68000's two-word instruction prefetch queue (IRD/IRC) is modelled in
 the `m68k` core
-([`prefetch_queue`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.5.0/src/core/cpu.rs)):
+([`prefetch_queue`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.5.2/src/core/cpu.rs)):
 the
 next opcode is fetched before the current instruction finishes, so
 self-modifying code that overwrites the *next* instruction executes the
@@ -189,13 +189,13 @@ DBcc loop mode: a DBcc that branches -4 back to a loopable one-word
 instruction holds the body/DBcc pair in the prefetch queue and re-executes
 it with no instruction fetches until the condition turns true, the counter
 expires, or an exception intervenes (`loop_mode` in
-[`core/cpu.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.5.0/src/core/cpu.rs);
+[`core/cpu.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.5.2/src/core/cpu.rs);
 the loopable set and the DBcc entry/exit arms live in
-[`core/decode.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.5.0/src/core/decode.rs)).
+[`core/decode.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.5.2/src/core/decode.rs)).
 A looping DBcc iteration costs 6 internal
 clocks and touches the bus only for the body's operands, which is what
 makes tight copy/clear loops measurably faster on a real 68010.
-[`loop_mode_timing_tests.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.5.0/tests/loop_mode_timing_tests.rs)
+[`loop_mode_timing_tests.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.5.2/tests/loop_mode_timing_tests.rs)
 pins engagement, the
 68000's non-engagement, and the no-fetch iteration cost.
 
@@ -219,7 +219,7 @@ the STOP itself, so the handler's RTE re-executes it; a pending trace
 (T set in the SR the instruction started with) has priority and recovers
 from the stop, while a T bit loaded *by* STOP does not fire while
 stopped.
-[`stop_and_68010_timing_tests.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.5.0/tests/stop_and_68010_timing_tests.rs)
+[`stop_and_68010_timing_tests.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.5.2/tests/stop_and_68010_timing_tests.rs)
 pins all of these.
 
 ## Caches
@@ -303,7 +303,7 @@ shares the 040's three-level walker and TC[15] enable; PTEST is gone
 faulting with the format $4 frame.
 
 **Timing.**
-[`timing_060.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.5.0/src/core/timing_060.rs)
+[`timing_060.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.5.2/src/core/timing_060.rs)
 replaces the 020+
 scaling formula for the 060: every opcode word classifies (a build-once
 64K table over a pure function) into the MC68060UM Chapter 10 dispatch
@@ -345,7 +345,7 @@ instruction cache, a three-stage pipeline, execution overlap, dynamic bus
 sizing, and alignment-dependent transfers, so an opcode does not have one
 context-free cycle count.
 
-[`timing_020.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.5.0/src/core/timing_020.rs)
+[`timing_020.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.5.2/src/core/timing_020.rs)
 transcribes the integer timing tables
 from section 8.2 of the
 [MC68020 User's Manual](https://www.nxp.com/docs/en/data-sheet/MC68020UM.pdf).
@@ -383,9 +383,14 @@ charge was first calibrated to two clocks against the FS-UAE A1200 reference;
 a real A1200 (stock 68EC020 at 14.19 MHz, 2026-08) measures a cached taken
 `dbra` at 7 clocks -- cache-case 6 plus one -- in three independent loop rows,
 with the `move`, shift, `mulu`, paired-op and DIV-under-display rows agreeing
-once that one clock is accounted for. The refill is therefore one clock, and
-FS-UAE itself over-bills every taken branch by one; see
-`timing-test/README.md`.
+once that one clock is accounted for. FS-UAE itself over-bills every taken
+branch by one; see `timing-test/README.md`.
+
+A second probe disk then showed the charge is *conditional*: every one of
+those rows happens to place its `dbra` at a longword-aligned address, and a
+`dbra` at `pc % 4 == 2` costs the bare cache-case 6 instead. The refill is
+therefore one clock when the branch opcode is longword-aligned and none
+otherwise, as derived above under the real-A1200 column.
 
 This is intentionally a datasheet model, not a claim of cycle exactness.
 The opcode word does not retain a consumed extension word, so full-format
@@ -456,24 +461,113 @@ clock. The same synchronizer clock on custom-register reads is what lands
 the copper-vs-CPU poll row (row 27) exactly on the real machine's beam
 position.
 
-The same column also pinned down 020 result forwarding, modelled in the m68k
-crate: a register-to-register MOVE whose source is the register the
-immediately preceding register-to-register MOVE wrote runs one clock faster
-(the value is still in the execution unit's result latch, skipping the
-register-file read). The real machine runs the RAW-dependent pair one clock
-per iteration faster than the independent pair (`timing-test` rows 29 and
-28: 10 against 11 clocks including the loop dbra), which only a forwarding
-path can produce; wider forwarding is deliberately not modelled without
-hardware data.
+The same column appeared to show 020 result forwarding -- the RAW-dependent
+MOVE pair of `timing-test` row 29 runs one clock per iteration faster than
+the independent pair of row 28 -- and m68k modelled it as such up to and
+including 0.5.0. **That model was wrong; it was removed upstream in m68k
+0.5.1, which this tree depends on.** A second probe disk
+(`timing-test/fwdprobe.asm`) ran the same two
+loops at the opposite alignments on the same machine and reversed the
+ordering, which closes the 2x2: with the register dependency and the branch
+alignment separated, the dependency has no effect at all. What the pair rows
+actually measured is where the loop branch sits.
 
-What remains against real silicon, with the middle rows now read off the
-CRT across two runs: the composite write-plus-poll rows (16, 17, 21) run
-3-7% under the real readings, and the raw interrupt-phase rows (19, 20, 22)
-sit a few colour clocks early of readings that themselves move a few clocks
-between real runs. Both are composite effects (posted-write drain against
-the poll read, interrupt entry against the beam) rather than single-constant
-gaps. The SysInfo figures in the previous paragraph predate posted writes
-and will read higher on the A1200 profile.
+Twenty-eight of the thirty cached loops across the two disks fit one rule to
+within a tick:
+
+```text
+clk/iter = 6 + 2 * (2-byte body instructions)
+             + 1 if the DBcc opcode word is longword-aligned
+```
+
+A cached taken `dbra` costs 7 clocks at `pc % 4 == 0` and 6 -- the manual's
+cache case -- at `pc % 4 == 2`. The loop *head* alignment varies freely
+within each refill class, so it is the branch's own alignment that decides
+and not the target's; the presumed cause is the longword granularity of 020
+instruction fetch, a branch straddling two longwords having already had the
+second fetched by the time it retires. Body instructions cost a flat two
+clocks whatever their shape (`.b`/`.w`/`.l` MOVE, MOVEA on either side,
+An-source MOVE, ADD, CMP, MOVEQ). Only `DBcc` was measured; `Bcc` and
+`BSR` are untested and should keep the flat refill until a probe covers them.
+
+The two loops that do not fit are `fwdprobe` rows 20/21, whose body carries a
+`NOP`: they measure 13.08 clocks where the rule says 13.01, while rows 22/23
+at the same body count and the same `dbra % 4 == 0` sit exactly on 13.01. A
+real `NOP` therefore costs nearer 2.07 clocks than 2 -- which is what a
+pipeline-synchronising instruction should look like. It is a 0.5% effect on
+one instruction measured on one couple, so it is recorded rather than
+modelled, and Copperline emits the rule value for both rows.
+
+Modelling the alignment rule reproduces 24 of the 26 `fwdprobe` rows exactly
+(the two `NOP` rows above being 0.5% low) and leaves the
+main disk's pure-CPU rows exact, but moves several of its chip-bus rows (the
+chip-read loop, the write-plus-poll composites, the copper-poll beam
+position) by a few percent: those loops' accesses re-phase against the
+chip-bus slot grid when the loop shortens by a clock, so their previous
+agreement was partly compensation for the branch over-bill.
+
+### The chip-access phase
+
+`timing-test/rdprobe.asm` measured the chip side on the same machine, and its
+two no-access anchors reproduce the other disks exactly, so the column is
+trustworthy. It showed the CPU and the chip bus needed one clock timeline
+rather than two.
+
+**Every real loop containing a chip access runs a whole number of colour
+clocks** -- the chip-read loop 4.02, the chip-write loops 2.03 and 2.01, two
+reads 7.04, a read plus a posted write 5.05 -- while the two loops with no
+chip access sit on quarters (2.25, 2.00). An A1200 runs four CPU clocks per
+colour clock, so that is the CPU synchronising to the chip clock: a chip read
+cannot begin part way through a colour clock, and the wait absorbs whatever
+the rest of the loop left over. Reads carry the branch-alignment clock through
+into a whole extra colour clock (one read costs 4 cck at `dbra%4==2` and 5 at
+`%4==0`); posted writes do not, because the bus unit takes them behind the
+execution unit.
+
+Copperline used to model neither, and the second omission was the blocking
+one: two independent sub-colour-clock carries existed, the CPU's on
+`M68kMachine` where the bus could not see it at access time, and a dead one on
+`Bus`. Nothing made an access begin on a colour-clock boundary, so nothing
+quantised; and the per-instruction reconciliation
+`advance_cpu_internal_cycles(cpu_cck.saturating_sub(bus_cck))` could only add
+time, so an instruction whose accesses cost more colour clocks than its
+charged execution time -- routine for chip-bound 020 code -- had the surplus
+discarded. Together those turned a phase into a rate: the read loop had two
+stable orbits and returned 13.08 clocks per iteration on one disk and 17.04 on
+the other for identical code.
+
+The CPU's position is now `emulated_cck * cpu_clocks_per_cck +
+Bus::cpu_chip_clock_phase`. Execution clocks accumulate into that phase and
+turn into beam time a whole colour clock at a time
+(`Bus::charge_cpu_clocks_to_cck`); a chip read stalls out the remainder and
+resets the phase (`Bus::sync_cpu_to_chip_clock`); and every access the CPU
+waits for credits its own clocks back against the instruction charge, because
+the m68k timing table already allots the instruction the time for its memory
+reference. Nothing is reconciled afterwards and nothing is discarded. The
+per-iteration map on the phase is therefore the constant map for any loop
+containing a read, which is what makes the period independent of the phase the
+loop was entered with.
+
+One derived constant remains: a chip read spends
+`CPU_020_CHIP_READ_RETURN_CLOCKS` = 2 CPU clocks returning data past the
+data-return colour clock. Rows 0 and 1 of the probe force it -- a read loop
+measures 16 clocks per iteration with a 6-clock branch and 20 with a 7-clock
+one, and since the period is a whole number of 4-clock colour clocks those
+pin the un-rounded cost at exactly 16, so a read occupies 10 clocks from the
+boundary it starts on.
+
+This is gated to the 68020 and later (`cpu_short_bus_cycle`). The 68000 and
+68010 keep the two timelines and the reconciliation: their four-clock bus
+cycle is exactly two colour clocks and synchronous with the chip clock by
+construction, and their intra-instruction time is already placed correctly by
+the core's `sync` callback. The JIT batch path also keeps the older
+accounting, since it charges one lump per batch and would see a stale phase at
+every access after the first.
+
+Still open: chip-write-plus-poll composite rows (16, 17, 21) read about 9%
+low, and custom-register accesses are deliberately left unsynchronised because
+the copper-poll beam row (27) is exact as they stand. Both want a probe that
+isolates custom-register timing the way `rdprobe` isolated chip RAM.
 
 ## MMU
 

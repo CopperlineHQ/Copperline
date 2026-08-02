@@ -9080,6 +9080,20 @@ fn aga_68020_chip_reads_wait_for_data_but_writes_are_posted() {
     assert_eq!(bus.last_chip_bus_owner(), ChipBusOwner::Idle);
 }
 
+/// An AGA 68020 bus at the A1200's 4 CPU clocks per colour clock, with the
+/// per-instruction charging that keeps the shared chip clock phase current.
+fn phase_synced_020_bus() -> Bus {
+    let mut bus = empty_bus();
+    bus.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+    bus.set_cpu_clocks_per_cck(4);
+    bus.set_cpu_short_bus_cycle(true);
+    bus.set_cpu_bus_arbitration_enabled(true);
+    bus.set_cpu_access_phase_sync(true);
+    bus.agnus.hpos = 0x20;
+    let _ = bus.take_slice_bus_advance();
+    bus
+}
+
 #[test]
 fn aga_68020_read_return_sync_clock_accumulates_to_a_slot() {
     let mut bus = empty_bus();
@@ -9088,10 +9102,10 @@ fn aga_68020_read_return_sync_clock_accumulates_to_a_slot() {
     bus.set_cpu_short_bus_cycle(true);
     bus.set_cpu_bus_arbitration_enabled(true);
 
-    // Each read bills grant + data return (2 cck) plus one CPU clock of
-    // domain-crossing synchronizer; at 4 clocks per cck the fourth read's
-    // accumulated clock crosses a slot boundary (timing-test row 2: the real
-    // A1200 chip-read loop averages 16.1 clocks per iteration).
+    // Without the shared chip clock phase (the JIT slice, and any caller that
+    // has not opted in) each read bills grant + data return (2 cck) plus one
+    // CPU clock of domain-crossing synchronizer, so at 4 clocks per cck the
+    // fourth read's accumulated clock crosses a slot boundary.
     bus.agnus.hpos = 0x20;
     let mut total = 0;
     for _ in 0..4 {
@@ -9100,6 +9114,86 @@ fn aga_68020_read_return_sync_clock_accumulates_to_a_slot() {
         total += cck;
     }
     assert_eq!(total, 9);
+}
+
+/// A 68020 chip read cannot begin part way through a colour clock: it stalls
+/// out the remainder first. Real-hardware basis in `timing-test/rdprobe.asm`.
+#[test]
+fn aga_68020_chip_read_synchronises_to_the_colour_clock() {
+    let mut bus = phase_synced_020_bus();
+
+    // On a boundary the read costs grant + data return and leaves the CPU two
+    // clocks into the following colour clock.
+    bus.grant_cpu_bus_access_at(Some(0x0002_0000), 2, CpuBusAccessKind::Read);
+    assert_eq!(bus.take_slice_bus_advance().0, 2);
+    assert_eq!(bus.cpu_chip_clock_phase(), 2);
+
+    // Mid-colour-clock the next read stalls out the remainder first.
+    bus.grant_cpu_bus_access_at(Some(0x0002_0000), 2, CpuBusAccessKind::Read);
+    assert_eq!(bus.take_slice_bus_advance().0, 3);
+    assert_eq!(bus.cpu_chip_clock_phase(), 2);
+}
+
+/// A chip-read loop runs a whole number of colour clocks per iteration, and
+/// the same loop costs the same whatever phase it was entered with. This is
+/// the property the two probe disks disagreed on before the CPU and the chip
+/// bus shared one timeline (`rdprobe` row 0 against `timing-test` row 2).
+#[test]
+fn aga_68020_chip_read_loop_period_is_phase_independent() {
+    // `move.w (a0),d0` = 6 clocks, taken `dbra` = 6 at pc%4==2 (rdprobe row 0)
+    // and 7 at pc%4==0 (row 1).
+    for (branch_clocks, want_cck) in [(6u32, 4u32), (7, 5)] {
+        let mut periods = Vec::new();
+        for entry_phase in 0..4u32 {
+            let mut bus = phase_synced_020_bus();
+            // Enter the loop at each possible sub-colour-clock phase.
+            bus.charge_cpu_clocks_to_cck(entry_phase);
+            let _ = bus.take_slice_bus_advance();
+            // Two warm-up iterations, then measure the next four.
+            let mut measured = 0;
+            for iteration in 0..6 {
+                bus.grant_cpu_bus_access_at(Some(0x0002_0000), 2, CpuBusAccessKind::Read);
+                let overlap = bus.take_cpu_bus_overlap_clocks();
+                bus.charge_cpu_clocks_to_cck(6u32.saturating_sub(overlap));
+                bus.charge_cpu_clocks_to_cck(branch_clocks);
+                let (cck, _) = bus.take_slice_bus_advance();
+                if iteration >= 2 {
+                    measured += cck;
+                }
+            }
+            periods.push(measured);
+        }
+        assert!(
+            periods.iter().all(|p| *p == want_cck * 4),
+            "branch {branch_clocks} clocks: want {} cck per iteration from every entry phase, got {periods:?}",
+            want_cck
+        );
+    }
+}
+
+/// Execution that never touches the chip bus is not synchronised, so its loop
+/// period stays fractional (`rdprobe` rows 4 and 5).
+#[test]
+fn aga_68020_execution_only_loop_is_not_quantised() {
+    let mut bus = phase_synced_020_bus();
+    // 2-clock register move plus a 7-clock branch = 9 clocks = 2.25 cck.
+    for _ in 0..4 {
+        bus.charge_cpu_clocks_to_cck(2);
+        bus.charge_cpu_clocks_to_cck(7);
+    }
+    assert_eq!(bus.take_slice_bus_advance().0, 9);
+}
+
+/// The phase is machine state, not slice state: it must survive the
+/// arbitration toggle that brackets every CPU slice.
+#[test]
+fn cpu_chip_clock_phase_survives_a_slice_boundary() {
+    let mut bus = phase_synced_020_bus();
+    bus.charge_cpu_clocks_to_cck(2);
+    assert_eq!(bus.cpu_chip_clock_phase(), 2);
+    bus.set_cpu_bus_arbitration_enabled(false);
+    bus.set_cpu_bus_arbitration_enabled(true);
+    assert_eq!(bus.cpu_chip_clock_phase(), 2);
 }
 
 #[test]

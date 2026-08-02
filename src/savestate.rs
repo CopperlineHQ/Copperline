@@ -154,7 +154,13 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      complete CL-GD5426/VRAM state
 //  44: Picasso2 and its Cirrus core gained the II+ revision identity and
 //      serializable vertical-blank interrupt latch
-pub const STATE_VERSION: u32 = 45;
+//  45: Bus gained the 020+ posted-write debt, chip-port turnaround and
+//      read-return carry
+//  46: the 020+ read-return carry became the shared CPU/chip-bus clock phase
+//      (Bus::cpu_chip_clock_phase). The layout is unchanged, but the field
+//      now feeds chip-access synchronisation, so a state written before the
+//      change would resume with a stale phase
+pub const STATE_VERSION: u32 = 46;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {
