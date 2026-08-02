@@ -43,7 +43,7 @@ belong in commits and PR descriptions rather than a permanent done-log.
 
 `hostfs_boot_aros_runs_a_guest_binary_and_writes_to_the_host` needs **no
 local assets at all** (the bundled AROS ROM boots the mount), so it runs on
-any checkout; `hostfs_boot_kick13_..._writes_to_the_host` additionally
+any checkout; `hostfs_boot_kick13_runs_a_guest_binary_and_writes_to_the_host` additionally
 covers Kickstart 1.3's V34 boot path when a local `KICK13.ROM` is present.
 Both boot a shell from a `[[filesys]]` host-directory mount, type `mkfile`
 into it (the committed guest probe from `guest/hostfs-test/`), and assert
