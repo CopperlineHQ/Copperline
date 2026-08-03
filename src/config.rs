@@ -697,12 +697,87 @@ pub struct SerialConfig {
     pub mode: SerialMode,
     pub midi_out: Option<String>,
     pub midi_in: Option<String>,
+    /// The MT-32's two ROM images. Not Copperline's to ship, so the user
+    /// supplies them; without both, `midi_out = "mt32"` has nothing to fit
+    /// and says so.
+    pub mt32_control_rom: Option<PathBuf>,
+    pub mt32_pcm_rom: Option<PathBuf>,
+    /// Show the MT-32's front panel under the status bar (default false).
+    pub mt32_panel: bool,
+    /// How that panel's display is lit.
+    pub mt32_lcd: Mt32Lcd,
     /// TCP listen address for [`SerialMode::Tcp`]; `None` means the
     /// default `127.0.0.1:1234` (the port UAE's `TCP:` serial uses).
     pub listen: Option<String>,
     /// Remote `host:port` for [`SerialMode::TcpConnect`]. Required in that
     /// mode (there is no sensible default host to dial).
     pub connect: Option<String>,
+}
+
+/// How the MT-32's front-panel display is lit.
+///
+/// The engine draws the same twenty characters whichever this is; only the
+/// glass and the characters on it change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mt32Lcd {
+    /// The unit's own: a dark green backlight under lighter green
+    /// characters. The default, since this is an MT-32. Unlit it goes to
+    /// bare glass, a shade off the surround around it.
+    #[default]
+    Mt32,
+    /// A JV-1080's: deep blue under pale green characters. Unlit the blue
+    /// stays, a shade darker, as that panel does.
+    Jv1080,
+    /// Black glass under the green the status bar's track counter uses, as
+    /// one of the OLED panels sold to replace a tired original looks.
+    Oled,
+}
+
+impl Mt32Lcd {
+    /// Every style, in the order a picker offers them.
+    pub const MENU_ORDER: [Mt32Lcd; 3] = [Mt32Lcd::Mt32, Mt32Lcd::Jv1080, Mt32Lcd::Oled];
+
+    /// Config name, which round-trips through [`parse_mt32_lcd`].
+    pub fn label(self) -> &'static str {
+        match self {
+            Mt32Lcd::Oled => "oled",
+            Mt32Lcd::Mt32 => "mt32",
+            Mt32Lcd::Jv1080 => "jv1080",
+        }
+    }
+
+    /// What a picker shows.
+    pub fn menu_label(self) -> &'static str {
+        match self {
+            Mt32Lcd::Oled => "OLED",
+            Mt32Lcd::Mt32 => "MT-32",
+            Mt32Lcd::Jv1080 => "JV-1080",
+        }
+    }
+}
+
+/// Parse a `[serial] mt32_lcd` value. The numbers are taken as well as the
+/// names, since the styles are as often thought of as first, second, third.
+pub(crate) fn parse_mt32_lcd(s: &str) -> Result<Mt32Lcd> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "mt32" | "mt-32" | "1" => Ok(Mt32Lcd::Mt32),
+        "jv1080" | "jv-1080" | "2" => Ok(Mt32Lcd::Jv1080),
+        "oled" | "3" => Ok(Mt32Lcd::Oled),
+        other => bail!(
+            "[serial] mt32_lcd must be \"mt32\", \"jv1080\" or \"oled\" \
+             (or 1, 2, 3), got \"{other}\""
+        ),
+    }
+}
+
+/// The `[serial] midi_out` value that means the built-in MT-32 rather
+/// than a host endpoint. Matched whole and case-insensitively, so a host
+/// device whose name merely contains it is still reachable.
+pub const MIDI_OUT_MT32: &str = "mt32";
+
+/// Whether a `midi_out` value asks for the built-in MT-32.
+pub fn midi_out_is_mt32(midi_out: Option<&str>) -> bool {
+    midi_out.is_some_and(|name| name.trim().eq_ignore_ascii_case(MIDI_OUT_MT32))
 }
 
 /// Which peripheral is plugged into the Amiga's Centronics parallel port. The
@@ -2029,6 +2104,13 @@ pub struct ConfigOverrides {
     /// How large the pop-up menu is drawn (`--menu-scale`). Same values as
     /// `[display] menu_scale`.
     pub menu_scale: Option<String>,
+    /// MT-32 control and PCM ROM images (`--mt32-control-rom`,
+    /// `--mt32-pcm-rom`). Same as `[serial] mt32_control_rom`/`mt32_pcm_rom`.
+    pub mt32_control_rom: Option<String>,
+    pub mt32_pcm_rom: Option<String>,
+    /// Show the MT-32's front panel (`--mt32-panel`). Same as
+    /// `[serial] mt32_panel`.
+    pub mt32_panel: Option<bool>,
     /// A real floppy drive on a bay (`--floppy-bridge DFN INTERFACE`), by bay.
     /// Same values as `[floppy.dfN] bridge`.
     pub floppy_bridge: [Option<String>; 4],
@@ -2108,6 +2190,9 @@ impl ConfigOverrides {
             && self.status_bar.is_none()
             && self.perf_overlay.is_none()
             && self.menu_scale.is_none()
+            && self.mt32_control_rom.is_none()
+            && self.mt32_pcm_rom.is_none()
+            && self.mt32_panel.is_none()
     }
 
     /// Inject the set overrides into the raw config, replacing the values
@@ -2311,6 +2396,15 @@ impl ConfigOverrides {
         }
         if let Some(menu_scale) = &self.menu_scale {
             raw.display.menu_scale = Some(menu_scale.clone());
+        }
+        if let Some(rom) = &self.mt32_control_rom {
+            raw.serial.mt32_control_rom = Some(rom.clone());
+        }
+        if let Some(rom) = &self.mt32_pcm_rom {
+            raw.serial.mt32_pcm_rom = Some(rom.clone());
+        }
+        if let Some(panel) = self.mt32_panel {
+            raw.serial.mt32_panel = Some(panel);
         }
     }
 }
@@ -2520,6 +2614,18 @@ pub(crate) struct RawSerial {
     /// Host MIDI input endpoint name (substring match); MIDI mode only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) midi_in: Option<String>,
+    /// MT-32 control ROM image; needed when midi_out = "mt32".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) mt32_control_rom: Option<String>,
+    /// MT-32 PCM ROM image; needed when midi_out = "mt32".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) mt32_pcm_rom: Option<String>,
+    /// Show the MT-32's front panel under the status bar (default false).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) mt32_panel: Option<bool>,
+    /// Its display: "mt32" (default), "jv1080", or "oled".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) mt32_lcd: Option<String>,
     /// TCP listen address; tcp mode only. Defaults to 127.0.0.1:1234.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) listen: Option<String>,
@@ -3397,6 +3503,13 @@ impl TryFrom<RawConfig> for Config {
             },
             midi_out: raw.serial.midi_out.clone(),
             midi_in: raw.serial.midi_in.clone(),
+            mt32_control_rom: raw.serial.mt32_control_rom.as_ref().map(PathBuf::from),
+            mt32_lcd: match raw.serial.mt32_lcd.as_deref() {
+                None => defaults.serial.mt32_lcd,
+                Some(s) => parse_mt32_lcd(s)?,
+            },
+            mt32_pcm_rom: raw.serial.mt32_pcm_rom.as_ref().map(PathBuf::from),
+            mt32_panel: raw.serial.mt32_panel.unwrap_or(defaults.serial.mt32_panel),
             listen: raw.serial.listen.clone(),
             connect: raw.serial.connect.clone(),
         };

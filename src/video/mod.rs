@@ -149,6 +149,39 @@ pub fn status_bar_hidden() -> bool {
     STATUS_BAR_HIDDEN.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Whether the MT-32's front panel is shown under the display
+/// (`[serial] mt32_panel`, toggled live from the menu). Main thread only,
+/// like [`SQUARE_PIXEL_ASPECT`]; the atomic only satisfies `static` safety.
+static MT32_PANEL_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_mt32_panel_shown(shown: bool) {
+    MT32_PANEL_SHOWN.store(shown, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// How the MT-32's display is lit (`[serial] mt32_lcd`). Held as an index
+/// into [`Mt32Lcd::MENU_ORDER`]; main thread only, like the flags above.
+static MT32_LCD: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn set_mt32_lcd(style: crate::config::Mt32Lcd) {
+    let index = crate::config::Mt32Lcd::MENU_ORDER
+        .iter()
+        .position(|s| *s == style)
+        .unwrap_or(0);
+    MT32_LCD.store(index as u8, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn mt32_lcd() -> crate::config::Mt32Lcd {
+    let index = usize::from(MT32_LCD.load(std::sync::atomic::Ordering::Relaxed));
+    crate::config::Mt32Lcd::MENU_ORDER
+        .get(index)
+        .copied()
+        .unwrap_or_default()
+}
+
+pub fn mt32_panel_shown() -> bool {
+    MT32_PANEL_SHOWN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// How large the pop-up menu is drawn (`[display] menu_scale`, changed live
 /// from the menu itself). Held as an index into [`MenuScale::MENU_ORDER`];
 /// main thread only, like [`SQUARE_PIXEL_ASPECT`].
