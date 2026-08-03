@@ -381,6 +381,23 @@ pub struct EmuStats {
     pub slices: u64,
     pub instructions: u64,
     pub started_at: Option<crate::timebase::Instant>,
+    /// Host time spent emulating in `step_real`, real-time pacing sleeps
+    /// excluded. Cleared with the rest of the stats on a guest reset.
+    pub busy: Duration,
+    /// Times the real-time pacer fell beyond the catch-up limit and dropped
+    /// emulated time by re-anchoring instead of chasing the deficit (the
+    /// self-heal in `sleep_until_realtime_device_time`).
+    pub pacer_slips: u32,
+}
+
+/// Snapshot of the always-on performance counters behind the window's
+/// performance overlay and the control protocol's `status` report:
+/// cumulative host emulation time (pacing sleeps excluded) and pacer slip
+/// events, both since the last guest reset.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PerfCounters {
+    pub busy: Duration,
+    pub pacer_slips: u32,
 }
 
 impl Emulator {
@@ -1336,6 +1353,15 @@ impl Emulator {
         self.bus_mut().reset_profile_stats();
     }
 
+    /// The always-on performance counters (see [`PerfCounters`]). Cleared,
+    /// like the rest of the stats, by a guest reset.
+    pub fn perf_counters(&self) -> PerfCounters {
+        PerfCounters {
+            busy: self.stats.busy,
+            pacer_slips: self.stats.pacer_slips,
+        }
+    }
+
     /// Execute exactly `count` CPU instructions (interactive debugger
     /// single-step). The cycle-exact core advances the chipset in lockstep,
     /// so device state stays consistent; no wall-clock pacing is applied.
@@ -1528,6 +1554,9 @@ impl Emulator {
     }
 
     fn step_real(&mut self) -> Result<()> {
+        // Host cost of this frame for the performance overlay: everything
+        // in this call except the real-time pacing sleep.
+        let busy_started = Instant::now();
         let mut remaining = self.instruction_budget();
         // Cycle-step while the CPU is actively executing so every chip
         // register write lands at the correct beam position (one
@@ -1551,9 +1580,12 @@ impl Emulator {
         }
         // Pace presentation to wall-clock only for the interactive window;
         // headless runs advance the deterministic core unthrottled.
-        if self.paced {
-            self.sleep_until_realtime_device_time();
-        }
+        let slept = if self.paced {
+            self.sleep_until_realtime_device_time()
+        } else {
+            Duration::ZERO
+        };
+        self.stats.busy += busy_started.elapsed().saturating_sub(slept);
         Ok(())
     }
 
@@ -1722,10 +1754,13 @@ impl Emulator {
         instructions_for_cck_value(cck, self.cpu_cycles_per_instruction)
     }
 
-    fn sleep_until_realtime_device_time(&mut self) {
+    /// Returns the host time actually slept, so the caller can subtract it
+    /// from the frame's busy-time accounting.
+    fn sleep_until_realtime_device_time(&mut self) -> Duration {
         let Some(started_at) = self.stats.started_at else {
-            return;
+            return Duration::ZERO;
         };
+        let mut slept = Duration::ZERO;
         let now = Instant::now();
         let live_audio_lead_seconds = self.bus().live_audio_output_lead_seconds();
         let target = realtime_device_time_target(
@@ -1739,6 +1774,7 @@ impl Emulator {
             let elapsed = sleep_started.elapsed();
             self.audio_profile.record_sleep(elapsed);
             self.real_pacing_profile.record_sleep(elapsed);
+            slept = elapsed;
         } else {
             if let Some(lag) = target.and_then(|target| now.checked_duration_since(target)) {
                 if lag > Duration::ZERO {
@@ -1753,6 +1789,7 @@ impl Emulator {
                     // resume pacing from "now" instead of sprinting to catch
                     // up. The overrun telemetry above is still recorded.
                     if lag > realtime_catchup_limit(live_audio_lead_seconds) {
+                        self.stats.pacer_slips = self.stats.pacer_slips.saturating_add(1);
                         if let Some(anchor) = self.stats.started_at {
                             self.stats.started_at = Some(anchor + lag);
                         }
@@ -1765,6 +1802,7 @@ impl Emulator {
         let cpu_chip_slots = self.bus().cpu_granted_chip_slots();
         self.real_pacing_profile
             .log_if_due(audio_status, cpu_chip_slots);
+        slept
     }
 
     fn execute_cpu_slice(&mut self, chunk: usize) -> Result<ExecutedSlice> {

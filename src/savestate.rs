@@ -160,7 +160,9 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      (Bus::cpu_chip_clock_phase). The layout is unchanged, but the field
 //      now feeds chip-access synchronisation, so a state written before the
 //      change would resume with a stale phase
-pub const STATE_VERSION: u32 = 46;
+//  47: CdImage's serde shadow became a backend enum (plain image files vs
+//      CHD) to carry the new CHD CD image support
+pub const STATE_VERSION: u32 = 47;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

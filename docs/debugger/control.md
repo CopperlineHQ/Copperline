@@ -189,6 +189,16 @@ file rather than being pushed through the bounded notification stream.
 
 Session: `hello {token?}`, `auth {token}`, `status`, `shutdown`.
 
+Besides the run state and timeline position, `status` reports the
+always-on performance counters: `host_busy_ms` (cumulative host
+milliseconds of emulation work, pacing sleeps excluded), `pacer_slips`
+(times the real-time pacer dropped emulated time after falling past its
+catch-up limit), `audio_lead_ms`, and `audio_underrun_frames`. The busy
+and slip counters reset with a guest reset. They are cumulative, so a
+client derives rates the way the window's performance overlay does: call
+`status` twice and divide the deltas by the wall time between the calls
+(emulated fps from `frame`, host utilisation from `host_busy_ms`).
+
 Execution: `continue`, `step {n?}`, `step_over`, `step_out`,
 `step_copper`, `step_frame {n?}`,
 `run_until {pc | vpos[,hpos] | frame | cck | seconds | stable_frames}`,

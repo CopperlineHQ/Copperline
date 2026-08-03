@@ -244,6 +244,11 @@ pub struct Config {
     /// it: screenshots, frame dumps, recordings and headless runs never
     /// include the bezel.
     pub bezel: bool,
+    /// Show the performance overlay at start (`[display] perf_overlay`, or
+    /// `--perf-overlay`): a live emulation-performance readout in the
+    /// top-right of the display. The `Cmd+P` / `Alt+P` toggle flips it live
+    /// without affecting this start-up value.
+    pub perf_overlay: bool,
     /// Screen tint applied to the window image: the phosphor colour of a
     /// monochrome monitor, or a sepia treatment. See [`Tint`].
     pub tint: Tint,
@@ -777,14 +782,16 @@ pub const HARDFILE_DEFAULT_BOOT_PRI: i8 = 0;
 /// the same sentinel `[[filesys]] bootpri` uses.
 pub const BOOT_PRI_NEVER: i8 = -128;
 
-/// Whether a drive-image path names a CD image (a cue sheet or a bare ISO).
-/// On the SCSI bus such an entry attaches a CD-ROM drive instead of a hard
-/// disk; the file extension is the format signal, exactly as it is for the
-/// hard-drive back ends (HDF vs. directory).
+/// Whether a drive-image path names a CD image (a cue sheet, a bare ISO,
+/// or a CHD). On the SCSI bus such an entry attaches a CD-ROM drive
+/// instead of a hard disk; the file extension is the format signal,
+/// exactly as it is for the hard-drive back ends (HDF vs. directory).
 pub fn is_cd_image_path(path: &std::path::Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("cue") || e.eq_ignore_ascii_case("iso"))
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+        e.eq_ignore_ascii_case("cue")
+            || e.eq_ignore_ascii_case("iso")
+            || e.eq_ignore_ascii_case("chd")
+    })
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1791,6 +1798,7 @@ impl Default for Config {
             shader: ShaderMode::None,
             shader_strength: 1.0,
             bezel: false,
+            perf_overlay: false,
             tint: Tint::None,
             menu_scale: MenuScale::Normal,
             full_screen: false,
@@ -2015,6 +2023,9 @@ pub struct ConfigOverrides {
     /// Show the status bar at start (`--show-status-bar` /
     /// `--hide-status-bar`). Same as `[display] status_bar`.
     pub status_bar: Option<bool>,
+    /// Show the performance overlay at start (`--perf-overlay`). Same as
+    /// `[display] perf_overlay`.
+    pub perf_overlay: Option<bool>,
     /// How large the pop-up menu is drawn (`--menu-scale`). Same values as
     /// `[display] menu_scale`.
     pub menu_scale: Option<String>,
@@ -2095,6 +2106,7 @@ impl ConfigOverrides {
             && self.a2065_interface.is_none()
             && self.full_screen.is_none()
             && self.status_bar.is_none()
+            && self.perf_overlay.is_none()
             && self.menu_scale.is_none()
     }
 
@@ -2294,6 +2306,9 @@ impl ConfigOverrides {
         if let Some(status_bar) = self.status_bar {
             raw.display.status_bar = Some(status_bar);
         }
+        if let Some(perf_overlay) = self.perf_overlay {
+            raw.display.perf_overlay = Some(perf_overlay);
+        }
         if let Some(menu_scale) = &self.menu_scale {
             raw.display.menu_scale = Some(menu_scale.clone());
         }
@@ -2424,6 +2439,9 @@ pub(crate) struct RawDisplay {
     /// Monitor-style front bezel around the window picture (default false).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) bezel: Option<bool>,
+    /// Performance overlay in the top-right of the display (default false).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) perf_overlay: Option<bool>,
     /// Screen tint: "none" (default), "bw", "green", "amber", or "sepia".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) tint: Option<String>,
@@ -3319,6 +3337,7 @@ impl TryFrom<RawConfig> for Config {
             }
         };
         let bezel = raw.display.bezel.unwrap_or(defaults.bezel);
+        let perf_overlay = raw.display.perf_overlay.unwrap_or(defaults.perf_overlay);
         let tint = match raw.display.tint.as_deref() {
             None => defaults.tint,
             Some(s) => parse_tint(s)?,
@@ -3775,6 +3794,7 @@ impl TryFrom<RawConfig> for Config {
             shader,
             shader_strength,
             bezel,
+            perf_overlay,
             tint,
             menu_scale,
             full_screen,
@@ -4945,6 +4965,19 @@ pub fn resolve_bezel(from_config: bool) -> bool {
     }
 }
 
+/// Resolve the performance overlay: the `COPPERLINE_PERF_OVERLAY` env var
+/// (0/false/off/no disables, anything else enables) overrides the
+/// `[display] perf_overlay` config for one run.
+pub fn resolve_perf_overlay(from_config: bool) -> bool {
+    match crate::envcfg::var("COPPERLINE_PERF_OVERLAY") {
+        Some(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        ),
+        None => from_config,
+    }
+}
+
 /// Resolve the screen tint: the `COPPERLINE_TINT` env var (a tint name)
 /// overrides the `[display] tint` config for one run.
 pub fn resolve_tint(from_config: Tint) -> Tint {
@@ -5792,6 +5825,27 @@ mod tests {
             "#,
         )?;
         assert!(cfg.bezel);
+        Ok(())
+    }
+
+    #[test]
+    fn display_perf_overlay_parses_and_defaults_to_off() -> Result<()> {
+        assert!(!parse_config("")?.perf_overlay);
+        let cfg = parse_config(
+            r#"
+            [display]
+            perf_overlay = true
+            "#,
+        )?;
+        assert!(cfg.perf_overlay);
+
+        let mut raw = RawConfig::default();
+        ConfigOverrides {
+            perf_overlay: Some(true),
+            ..Default::default()
+        }
+        .apply_to(&mut raw);
+        assert_eq!(raw.display.perf_overlay, Some(true));
         Ok(())
     }
 

@@ -425,6 +425,7 @@ pub enum LauncherField {
     Shader,
     ShaderStrength,
     Bezel,
+    PerfOverlay,
     MenuScale,
     StartFullscreen,
     ShowStatusBar,
@@ -694,10 +695,11 @@ const ETHERNET_ROWS: [Row; 2] = [
 ];
 // The A/V & Emu tab is split into three categories switched via the top nav row.
 // The Video category also carries the CRT-shader controls (a picture setting).
-const VIDEO_ROWS: [Row; 12] = [
+const VIDEO_ROWS: [Row; 13] = [
     row(F::StartFullscreen, "Start fullscreen", Toggle),
     row(F::ShowStatusBar, "Status bar", Toggle),
     row(F::Bezel, "Monitor bezel", Toggle),
+    row(F::PerfOverlay, "Perf overlay", Toggle),
     row(F::MenuScale, "Menu size", Cycle),
     row(F::Overscan, "Overscan", Cycle),
     row(F::PixelAspect, "Pixel aspect", Cycle),
@@ -1334,6 +1336,8 @@ pub struct MachineSetup {
     shader_strength: f32,
     /// Monitor-style front bezel around the picture ([display] bezel).
     bezel: bool,
+    /// Performance overlay in the top-right ([display] perf_overlay).
+    perf_overlay: bool,
     /// How large the pop-up menu is drawn ([display] menu_scale).
     menu_scale: MenuScale,
     /// Screen tint ([display] tint).
@@ -1500,6 +1504,7 @@ impl MachineSetup {
             },
             shader_strength: cfg.shader_strength,
             bezel: cfg.bezel,
+            perf_overlay: cfg.perf_overlay,
             menu_scale: cfg.menu_scale,
             tint: cfg.tint,
             start_fullscreen: cfg.full_screen,
@@ -1831,6 +1836,9 @@ impl MachineSetup {
         if self.bezel != base.bezel {
             raw.display.bezel = Some(self.bezel);
         }
+        if self.perf_overlay != base.perf_overlay {
+            raw.display.perf_overlay = Some(self.perf_overlay);
+        }
         if self.tint != base.tint {
             raw.display.tint = Some(tint_name(self.tint).to_string());
         }
@@ -2060,6 +2068,7 @@ impl MachineSetup {
         self.shader = base.shader.clone();
         self.shader_strength = base.shader_strength;
         self.bezel = base.bezel;
+        self.perf_overlay = base.perf_overlay;
         self.tint = base.tint;
         self.menu_scale = base.menu_scale;
         self.start_fullscreen = base.full_screen;
@@ -2350,6 +2359,7 @@ impl MachineSetup {
             F::ShowStatusBar => self.show_status_bar,
             F::Deinterlace => self.deinterlace,
             F::Bezel => self.bezel,
+            F::PerfOverlay => self.perf_overlay,
             F::PowerOn => self.power_on,
             F::RealtimePriority => self.realtime_priority,
             _ => false,
@@ -3112,6 +3122,7 @@ impl MachineSetup {
             F::ShowStatusBar => self.show_status_bar = !self.show_status_bar,
             F::Deinterlace => self.deinterlace = !self.deinterlace,
             F::Bezel => self.bezel = !self.bezel,
+            F::PerfOverlay => self.perf_overlay = !self.perf_overlay,
             F::PowerOn => self.power_on = !self.power_on,
             F::BridgeAutoCache => {
                 if let Some(c) = self.bridge_edit_mut() {

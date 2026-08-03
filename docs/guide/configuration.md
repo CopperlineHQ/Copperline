@@ -648,6 +648,18 @@ never include it, and it is skipped while a menu or overlay panel is open
 and for RTG scanout frames. Unlike the shader it does stay on for
 programmable multisync scans -- a frame has no line structure to get wrong.
 
+`perf_overlay` (default `false`) shows the performance overlay at start: a
+live readout of emulated fps, speed factor, per-frame emulation cost, host
+utilisation, audio health, and pacer slips in the top-right corner of the
+display, one line per data point (see
+[the window chapter](ui.md#performance-overlay) for what each line means).
+Cmd+P (macOS) / Alt+P toggles it live for the rest of the session without
+touching the config, `--perf-overlay` shows it for one run, and
+`COPPERLINE_PERF_OVERLAY=1|0` overrides the config for a single run; the
+launcher's *Perf overlay* row (*A/V & Emu*, *Video*) writes it. Like the
+transient message overlay it is presentation only: screenshots, frame
+dumps, and recordings never include it.
+
 `tint` recolours the picture like the phosphor of a monochrome monitor:
 `"bw"` (black and white), `"green"` and `"amber"` (the two classic
 monochrome phosphors), or `"sepia"`; `"none"` (the default; `"off"` is
@@ -1230,9 +1242,9 @@ appears in the status bar on IDE machines. On the `A4000` profile the same
 `$DD2020` (no Gayle involved; Kickstart's `scsi.device` drives it the same
 way).
 
-CD images (`.cue`/`.iso`) are rejected here: the emulated IDE port speaks
-plain ATA, not ATAPI. Attach CD-ROM drives as `[scsi]` units instead (see
-below).
+CD images (`.cue`/`.iso`/`.chd`) are rejected here: the emulated IDE port
+speaks plain ATA, not ATAPI. Attach CD-ROM drives as `[scsi]` units instead
+(see below).
 
 ## `[scsi]` -- SCSI controllers
 
@@ -1243,7 +1255,7 @@ rom = "a2091-v6.6.rom"       # boot ROM image (a2091/a4091; the a3000 needs none
 # rom_odd = "a2091-odd.rom"  # a2091 only: split even/odd EPROM dumps
 unit0 = "workbench.hdf"      # SCSI IDs 0-6
 unit1 = "data.hdf"
-unit2 = "game.cue"           # a .cue or .iso attaches a CD-ROM drive
+unit2 = "game.cue"           # a .cue, .iso, or .chd attaches a CD-ROM drive
 # unit3..unit6 = ...
 ```
 
@@ -1283,12 +1295,12 @@ in-memory FFS volumes -- including the
 directory mount's volume name and the synthesized partition's boot
 priority. The HDD activity LED covers SCSI traffic too.
 
-A `unitN` path ending in `.cue` or `.iso` attaches a **SCSI CD-ROM
-drive** at that ID instead of a hard disk: a read-only removable SCSI-2
-target (INQUIRY device type 5) serving 2048-byte blocks, with the full
-READ TOC / READ CD / mode-page surface CD filesystems expect. Cue/bin
-images may mix data and audio tracks; a bare `.iso` is a single data
-track. The drive answers on the host adapter's `scsi.device` like any
+A `unitN` path ending in `.cue`, `.iso`, or `.chd` attaches a **SCSI
+CD-ROM drive** at that ID instead of a hard disk: a read-only removable
+SCSI-2 target (INQUIRY device type 5) serving 2048-byte blocks, with the
+full READ TOC / READ CD / mode-page surface CD filesystems expect.
+Cue/bin and CHD images may mix data and audio tracks; a bare `.iso` is a
+single data track. The drive answers on the host adapter's `scsi.device` like any
 other unit, so mount it the way you would on real hardware: a
 `DOSDrivers` mount entry (or MountList) pointing `CDFileSystem` --
 CacheCDFS, AsimCDFS, and AmiCDROM work the same way -- at the controller's
@@ -1300,10 +1312,10 @@ emulated time (as if the drive's analogue output were cabled to the
 machine), the sub-channel reports the live playback position, and the
 debugger's Audio tab shows the stream on its CD-DA row with the play
 state, track, and position. Discs swap at runtime like CDTV/CD32 media:
-the status bar's CD load/eject buttons, dropping a `.cue`/`.iso` on the
-window, the scheduled `--insert-cd-after SECS PATH` flag, or the control
-protocol's `media.cd.insert` all eject the current disc, run the tray
-for a second of emulated time, and mount the new one with a
+the status bar's CD load/eject buttons, dropping a `.cue`/`.iso`/`.chd`
+on the window, the scheduled `--insert-cd-after SECS PATH` flag, or the
+control protocol's `media.cd.insert` all eject the current disc, run the
+tray for a second of emulated time, and mount the new one with a
 medium-change unit attention for the guest's filesystem to notice.
 
 ## `[[filesys]]` -- host directories as live volumes
@@ -1372,6 +1384,9 @@ insert_delay = 0.0        # emulated seconds after power-on to insert
 # nvram = "cd32-nvram.bin" # CD32 save-game EEPROM backing file (default)
 ```
 
+`image` takes a BIN/CUE cue sheet, a bare `.iso` (single data track), or
+a `.chd` -- MAME's compressed CHD CD format (v5, as chdman's `createcd`
+writes: LZMA/Deflate/FLAC-compressed hunks with data and audio tracks).
 The disc mounts on the machine's CD controller: Akiko on CD32, the DMAC on
 CDTV. `insert_delay` inserts the disc some emulated seconds after power-on
 with the proper media-change notification; some CDTV discs only boot when

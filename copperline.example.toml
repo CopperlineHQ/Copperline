@@ -174,9 +174,9 @@ model = "68000"
 # extended_rom = "cdtv-extended.rom"
 
 
-# CD image (BIN/CUE, single- or multi-file; MODE1/2048, MODE1/2352,
-# and AUDIO tracks), mounted on the machine's CD controller (CD32
-# Akiko or CDTV DMAC). insert_delay inserts the disc that many
+# CD image (BIN/CUE, single- or multi-file, with MODE1/2048, MODE1/2352,
+# and AUDIO tracks; a bare .iso; or a chdman v5 .chd), mounted on the
+# machine's CD controller (CD32 Akiko or CDTV DMAC). insert_delay inserts the disc that many
 # emulated seconds after power-on instead of at boot: some CDTV discs
 # (e.g. Xenon II) only boot when inserted after the boot screen, on
 # real hardware too.
@@ -280,8 +280,8 @@ slow = "512K"
 # autoboots on Kickstart 1.3+, so it does not depend on the Kickstart IDE
 # driver (which only probes the master on stock 3.1). Drive paths accept the
 # same images as [ide]: RDB HDFs, bare partition hardfiles, or host
-# directories. A path ending in .cue or .iso attaches a SCSI CD-ROM drive
-# at that ID instead (read-only; mount it in the guest with a CD filesystem
+# directories. A path ending in .cue, .iso, or .chd attaches a SCSI CD-ROM
+# drive at that ID instead (read-only; mount it in the guest with a CD filesystem
 # pointed at the controller's scsi.device and that unit number). CD audio
 # tracks play through the machine's audio output, and discs swap at runtime
 # (status-bar CD buttons, drag-and-drop, --insert-cd-after).
@@ -394,6 +394,10 @@ video = "PAL"
 # bezel: frame the picture with a 1084-style monitor front bezel (default
 # false; Cmd/Alt+M toggles it live). Composes with any shader setting, and
 # like it is a window-display effect only: captures never include the frame.
+# perf_overlay: show the performance overlay at start (default false; also
+# --perf-overlay, and Cmd/Alt+P toggles it live): emulated fps, speed
+# factor, per-frame emulation cost, host utilisation, audio health, and
+# pacer slips in the top-right of the display. Captures never include it.
 # tint: screen tint over the window image. "none" (default, full colour),
 # "bw" (black and white), "green" or "amber" (monochrome-monitor
 # phosphor), or "sepia". Like shader, a window-display effect only:
@@ -413,6 +417,7 @@ video = "PAL"
 # shader = "none"
 # shader_strength = 1.0
 # bezel = false
+# perf_overlay = false
 # tint = "none"
 # menu_scale = "1x"
 # full_screen = false
