@@ -317,6 +317,94 @@ fn the_engine_reports_through_the_log() {
     );
 }
 
+/// The round trip a patch editor depends on: it asks for a stretch of the
+/// module's memory and gets it back, with what it wrote in it.
+///
+/// The engine itself never answers a request -- its `readSysex` is
+/// unimplemented -- so this is the whole of the module's MIDI OUT.
+#[test]
+#[ignore = "needs an MT-32 ROM pair in COPPERLINE_MT32_ROMS"]
+fn the_module_answers_a_request_for_its_memory() {
+    let Some(mut synth) = open_synth() else {
+        return;
+    };
+    // Turn the volume down to something no default would land on.
+    synth.write_memory(addr::MASTER_VOLUME, &[42]);
+
+    let request = {
+        let mut body = vec![0x10, 0x00, 0x16, 0x00, 0x00, 0x01];
+        let sum: u32 = body.iter().map(|&b| u32::from(b)).sum();
+        let mut msg = vec![0xF0, 0x41, 0x10, 0x16, 0x11];
+        msg.append(&mut body);
+        msg.push(((128 - (sum % 128)) % 128) as u8);
+        msg.push(0xF7);
+        msg
+    };
+
+    let mut responder = reply::Responder::default();
+    let mut answered = None;
+    for b in request {
+        if let Some(r) = responder.write_byte(b) {
+            answered = Some(reply::answer(&synth, r));
+        }
+    }
+    let reply = answered.expect("the request was recognised");
+
+    // F0 41 10 16 12 <10 00 16> <volume> <checksum> F7
+    assert_eq!(reply.len(), 11, "one block: {reply:02X?}");
+    assert_eq!(reply[..5], [0xF0, 0x41, 0x10, 0x16, 0x12]);
+    assert_eq!(reply[5..8], [0x10, 0x00, 0x16], "the address it asked for");
+    assert_eq!(reply[8], 42, "the volume that was written");
+    assert_eq!(*reply.last().unwrap(), 0xF7);
+    let sum: u32 = reply[5..reply.len() - 1]
+        .iter()
+        .map(|&b| u32::from(b))
+        .sum();
+    assert_eq!(sum % 128, 0, "the checksum");
+}
+
+/// A dump longer than one block comes back as several, each carrying its own
+/// address, the way the hardware splits one.
+#[test]
+#[ignore = "needs an MT-32 ROM pair in COPPERLINE_MT32_ROMS"]
+fn a_long_dump_comes_back_in_blocks() {
+    let Some(synth) = open_synth() else {
+        return;
+    };
+    // The whole patch temporary area: eight parts of sixteen bytes each,
+    // asked for in one go.
+    let want = 8 * 16;
+    let request = {
+        let addr = [0x03, 0x00, 0x00];
+        let size = [0x00, 0x01, 0x00];
+        let mut body = addr.to_vec();
+        body.extend_from_slice(&size);
+        let sum: u32 = body.iter().map(|&b| u32::from(b)).sum();
+        let mut msg = vec![0xF0, 0x41, 0x10, 0x16, 0x11];
+        msg.append(&mut body);
+        msg.push(((128 - (sum % 128)) % 128) as u8);
+        msg.push(0xF7);
+        msg
+    };
+    assert_eq!(want, 128, "the size bytes above ask for 0x80");
+
+    let mut responder = reply::Responder::default();
+    let mut reply = Vec::new();
+    for b in request {
+        if let Some(r) = responder.write_byte(b) {
+            reply = reply::answer(&synth, r);
+        }
+    }
+    assert!(!reply.is_empty(), "the area answered");
+    // Every message is well formed and every data byte fits in seven bits,
+    // so nothing in the dump can read as the end of a message.
+    assert_eq!(reply[0], 0xF0);
+    assert_eq!(*reply.last().unwrap(), 0xF7);
+    let ends = reply.iter().filter(|&&b| b == 0xF7).count();
+    let starts = reply.iter().filter(|&&b| b == 0xF0).count();
+    assert_eq!(starts, ends, "every message is closed: {starts} vs {ends}");
+}
+
 /// The MIDI MESSAGE lamp answers exclusive messages, not just notes.
 ///
 /// A librarian talks to the module entirely in SysEx, so a lamp that only

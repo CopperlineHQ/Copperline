@@ -93,5 +93,6 @@ unsafe extern "C" {
         narrow_lcd: u8,
     ) -> u8;
     pub fn mt32emu_set_main_display_mode(context: Context);
+    pub fn mt32emu_read_memory(context: Context, addr: u32, len: u32, data: *mut u8);
     pub fn mt32emu_play_sysex_now(context: Context, sysex: *const u8, len: u32);
 }
