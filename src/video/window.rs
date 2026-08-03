@@ -865,6 +865,15 @@ pub struct App {
     held_rawkeys: [bool; 128],
     raw_device_held_rawkeys: [bool; 128],
     main_window_focused: bool,
+    /// Whether the user has sized the main window themselves, in which case
+    /// the canvas reflows into it instead of the window snapping to the
+    /// canvas. Tracked from the resizes that arrive rather than measured
+    /// from the current size: a snap the platform clamped or rounded reads
+    /// as the user's own drag, and the window would never snap again.
+    window_manually_sized: bool,
+    /// The logical size the last snap asked for, so the resize it causes is
+    /// not counted as the user's.
+    snap_request: Option<(f64, f64)>,
     cursor_pos: Option<(i32, i32)>,
     last_display_cursor_pos: Option<(i32, i32)>,
     /// Most recent raw host cursor position (physical pixels) from the last
@@ -1490,6 +1499,8 @@ impl App {
             held_rawkeys: [false; 128],
             raw_device_held_rawkeys: [false; 128],
             main_window_focused: false,
+            window_manually_sized: false,
+            snap_request: None,
             cursor_pos: None,
             last_display_cursor_pos: None,
             last_cursor_phys: None,
@@ -3158,6 +3169,7 @@ impl ApplicationHandler for App {
                 self.request_redraw();
             }
             WindowEvent::Resized(size) => {
+                self.note_window_resize(size);
                 self.apply_surface_size(size);
             }
             WindowEvent::RedrawRequested => {
@@ -9128,6 +9140,7 @@ impl App {
             return;
         }
         let size = LogicalSize::new(FB_WIDTH as f64, window_present_height() as f64);
+        self.snap_request = Some((size.width, size.height));
         if let Some(applied) = window.request_inner_size(size) {
             self.apply_surface_size(applied);
         }
@@ -9144,11 +9157,41 @@ impl App {
         if window.fullscreen().is_some() {
             return false;
         }
-        let scale = window.scale_factor();
-        let inner = window.inner_size();
-        let logical_w = f64::from(inner.width) / scale;
-        let logical_h = f64::from(inner.height) / scale;
-        logical_size_is_canvas(logical_w, logical_h, window_present_height())
+        !self.window_manually_sized
+    }
+
+    /// Classify a resize of the main window: the user's own drag, or the
+    /// window following a canvas change.
+    ///
+    /// A snap asks for the canvas size; what comes back may be clamped by
+    /// the platform or rounded by the scale factor, and that near miss must
+    /// not read as a drag or the window stops following the canvas for the
+    /// rest of the run. A drag onto the canvas size hands it back.
+    fn note_window_resize(&mut self, size: PhysicalSize<u32>) {
+        // Read what is needed and let the borrow go: a drag delivers these
+        // continuously, so this takes nothing it has to hold on to.
+        let Some((fullscreen, scale)) = self
+            .render
+            .as_ref()
+            .map(|r| (r.window.fullscreen().is_some(), r.window.scale_factor()))
+        else {
+            return;
+        };
+        // Fullscreen sizes the window itself; leave the standing verdict.
+        if fullscreen {
+            return;
+        }
+        let logical_w = f64::from(size.width) / scale;
+        let logical_h = f64::from(size.height) / scale;
+        let asked_for = self
+            .snap_request
+            .is_some_and(|(w, h)| (logical_w - w).abs() < 2.0 && (logical_h - h).abs() < 2.0);
+        if asked_for || logical_size_is_canvas(logical_w, logical_h, window_present_height()) {
+            self.snap_request = None;
+            self.window_manually_sized = false;
+            return;
+        }
+        self.window_manually_sized = true;
     }
 
     /// Cmd/Alt+M: toggle the monitor-bezel pass for the rest of the run
