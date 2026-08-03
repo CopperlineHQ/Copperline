@@ -1983,9 +1983,15 @@ fn build_serial_sink(cfg: &Config) -> Result<Box<dyn crate::serial::SerialSink>>
             let host_out = (!wants_mt32)
                 .then_some(cfg.serial.midi_out.as_deref())
                 .flatten();
+            // Likewise on the way in: "mt32" is the module's own MIDI OUT,
+            // and it only has one while it is also the output.
+            let wants_mt32_in =
+                wants_mt32 && crate::config::midi_out_is_mt32(cfg.serial.midi_in.as_deref());
+            let host_in = (!wants_mt32_in)
+                .then_some(cfg.serial.midi_in.as_deref())
+                .flatten();
             #[allow(unused_mut)]
-            let mut sink =
-                crate::midi::MidiSerialSink::open(host_out, cfg.serial.midi_in.as_deref())?;
+            let mut sink = crate::midi::MidiSerialSink::open(host_out, host_in)?;
             #[cfg(feature = "mt32")]
             {
                 sink.set_mt32_roms(crate::mt32::Mt32Roms {
@@ -1995,12 +2001,24 @@ fn build_serial_sink(cfg: &Config) -> Result<Box<dyn crate::serial::SerialSink>>
                 if wants_mt32 {
                     sink.set_output_endpoint(Some(crate::config::MIDI_OUT_MT32));
                 }
+                if wants_mt32_in {
+                    sink.set_input_endpoint(Some(crate::config::MIDI_OUT_MT32));
+                }
             }
+            #[cfg(not(feature = "mt32"))]
+            let _ = wants_mt32_in;
             #[cfg(not(feature = "mt32"))]
             if wants_mt32 {
                 log::warn!(
                     "[serial] midi_out = \"mt32\" needs a build with --features mt32; \
                      the MIDI output is unset"
+                );
+            }
+            if crate::config::midi_out_is_mt32(cfg.serial.midi_in.as_deref()) && !wants_mt32_in {
+                log::warn!(
+                    "[serial] midi_in = \"mt32\" needs midi_out = \"mt32\" as well: \
+                     the module answers what it is sent, so with nothing going \
+                     to it there is nothing to hear back; the MIDI input is unset"
                 );
             }
             sink.report_wiring();

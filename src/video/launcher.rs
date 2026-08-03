@@ -2749,7 +2749,13 @@ impl MachineSetup {
                 self.midi_out.clone().unwrap_or_else(|| "None".to_string())
             }
             #[cfg(feature = "midi")]
-            F::MidiIn => self.midi_in.clone().unwrap_or_else(|| "None".to_string()),
+            F::MidiIn => {
+                #[cfg(feature = "mt32")]
+                if crate::config::midi_out_is_mt32(self.midi_in.as_deref()) {
+                    return crate::midi::MIDI_OUT_MT32_LABEL.to_string();
+                }
+                self.midi_in.clone().unwrap_or_else(|| "None".to_string())
+            }
             F::ParallelDevice => match self.parallel_device {
                 ParallelDevice::None => "None".to_string(),
                 ParallelDevice::Printer => "Printer".to_string(),
@@ -3059,15 +3065,31 @@ impl MachineSetup {
                 names.push(crate::config::MIDI_OUT_MT32.to_string());
                 self.midi_out =
                     crate::midi::next_endpoint(self.midi_out.as_deref(), &names, forward);
+                // The MT-32 is only a source while it is the destination,
+                // so moving the output elsewhere takes the input with it.
+                #[cfg(feature = "mt32")]
+                if !self.midi_out_is_mt32()
+                    && crate::config::midi_out_is_mt32(self.midi_in.as_deref())
+                {
+                    self.midi_in = None;
+                }
             }
             #[cfg(feature = "midi")]
             F::MidiIn => {
-                let names: Vec<String> = self
+                let mut names: Vec<String> = self
                     .midi_endpoints
                     .inputs
                     .iter()
                     .map(|e| e.name.clone())
                     .collect();
+                // The module is a sound module: it has no keyboard, and
+                // what it sends is an answer to what it was sent. So it is
+                // offered as a source only while it is the destination,
+                // which is also the wiring a patch editor needs.
+                #[cfg(feature = "mt32")]
+                if self.midi_out_is_mt32() {
+                    names.push(crate::config::MIDI_OUT_MT32.to_string());
+                }
                 self.midi_in = crate::midi::next_endpoint(self.midi_in.as_deref(), &names, forward);
             }
             F::ParallelDevice => {
@@ -4999,6 +5021,36 @@ mod tests {
         s.cycle(LauncherField::Tint, false);
         assert_eq!(s.value_label(LauncherField::Tint), "Sepia");
         assert_eq!(s.to_raw().display.tint, Some("sepia".to_string()));
+    }
+
+    /// The module is offered as a source only while it is the destination,
+    /// and stops being one the moment the output moves elsewhere.
+    #[test]
+    #[cfg(all(feature = "midi", feature = "mt32"))]
+    fn the_mt32_is_a_midi_source_only_while_it_is_the_destination() {
+        let mut s = MachineSetup {
+            midi_out: Some(crate::config::MIDI_OUT_MT32.to_string()),
+            ..MachineSetup::default()
+        };
+        assert!(s.midi_out_is_mt32());
+
+        // With no host sources at all, the module is still there to pick.
+        s.cycle(LauncherField::MidiIn, true);
+        assert_eq!(
+            s.value_label(LauncherField::MidiIn),
+            crate::midi::MIDI_OUT_MT32_LABEL
+        );
+
+        // Moving the output off the module takes the input with it:
+        // nothing reaches it, so it has nothing left to answer. The module
+        // rides at the end of the output list, so one step wraps to None.
+        s.cycle(LauncherField::MidiOut, true);
+        assert!(!s.midi_out_is_mt32());
+        assert_eq!(s.value_label(LauncherField::MidiIn), "None");
+
+        // And it is no longer among the sources to cycle onto.
+        s.cycle(LauncherField::MidiIn, true);
+        assert_eq!(s.value_label(LauncherField::MidiIn), "None");
     }
 
     #[test]

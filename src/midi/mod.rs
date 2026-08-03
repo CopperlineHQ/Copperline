@@ -138,6 +138,20 @@ pub struct MidiSerialSink {
     /// window can say so rather than leaving a silent blank panel.
     #[cfg(feature = "mt32")]
     mt32_fault: Option<String>,
+    /// Whether the MT-32's own MIDI OUT is wired back to the machine, which
+    /// is what a patch editor on the Amiga needs to read the module back.
+    /// Only meaningful while the MT-32 is also the output: it answers what
+    /// it was sent, so with nothing going to it there is nothing to answer.
+    #[cfg(feature = "mt32")]
+    mt32_input: bool,
+    /// Assembles the requests the guest sends to the module.
+    #[cfg(feature = "mt32")]
+    mt32_responder: crate::mt32::reply::Responder,
+    /// The reply waiting to go back to the guest. Paula's receiver drains it
+    /// at the emulated baud rate exactly as it drains the host ring, so a
+    /// dump arrives over the wire at MIDI speed rather than all at once.
+    #[cfg(feature = "mt32")]
+    mt32_reply: std::collections::VecDeque<u8>,
 }
 
 /// The output-device name that means the built-in MT-32 rather than a host
@@ -369,6 +383,12 @@ impl MidiSerialSink {
             mt32_selected: false,
             #[cfg(feature = "mt32")]
             mt32_fault: None,
+            #[cfg(feature = "mt32")]
+            mt32_input: false,
+            #[cfg(feature = "mt32")]
+            mt32_responder: crate::mt32::reply::Responder::default(),
+            #[cfg(feature = "mt32")]
+            mt32_reply: std::collections::VecDeque::new(),
         })
     }
 
@@ -419,7 +439,12 @@ impl MidiSerialSink {
         {
             self.mt32 = None;
             self.mt32_selected = false;
+            // Nothing reaches the module any more, so it has nothing left
+            // to answer: its MIDI OUT goes with its MIDI IN.
+            self.mt32_input = false;
         }
+        #[cfg(feature = "mt32")]
+        self.stop_answering();
         self.backend.set_output(endpoint);
         log::info!("midi: output -> {}", self.output_label());
     }
@@ -468,8 +493,21 @@ impl MidiSerialSink {
             self.attach_mt32();
         } else {
             self.mt32 = None;
+            // A module with no power answers nothing.
+            self.stop_answering();
             log::info!("midi: {MIDI_OUT_MT32_LABEL} switched off");
         }
+    }
+
+    /// Stop answering the machine: nothing half-gathered, nothing half-sent.
+    ///
+    /// Called wherever the module stops being what the guest is talking to,
+    /// so a request begun against the old one cannot finish against the new,
+    /// and a dump cut off partway cannot arrive as a broken message.
+    #[cfg(feature = "mt32")]
+    fn stop_answering(&mut self) {
+        self.mt32_reply.clear();
+        self.mt32_responder = crate::mt32::reply::Responder::default();
     }
 
     /// Why the MT-32 could not be fitted, if it could not. Taken rather than
@@ -509,10 +547,31 @@ impl MidiSerialSink {
         self.mt32_roms = roms;
     }
 
-    /// Point the input at a named host endpoint, or at nothing.
+    /// Point the input at a named host endpoint, at the MT-32's own MIDI
+    /// OUT, or at nothing.
     pub fn set_input_endpoint(&mut self, endpoint: Option<&str>) {
+        #[cfg(feature = "mt32")]
+        if crate::config::midi_out_is_mt32(endpoint) {
+            // Its MIDI OUT and its MIDI IN are the same cable pair to the
+            // same module, so taking the input silences the host source.
+            self.backend.set_input(None);
+            self.mt32_input = true;
+            log::info!("midi: input -> {}", self.input_label());
+            return;
+        }
+        #[cfg(feature = "mt32")]
+        {
+            self.mt32_input = false;
+            self.stop_answering();
+        }
         self.backend.set_input(endpoint);
         log::info!("midi: input -> {}", self.input_label());
+    }
+
+    /// Whether the module's MIDI OUT is the machine's MIDI IN.
+    #[cfg(feature = "mt32")]
+    pub fn mt32_input(&self) -> bool {
+        self.mt32_input
     }
 
     /// Say what the port ended up wired to, once the output is settled.
@@ -542,6 +601,10 @@ impl MidiSerialSink {
 
     /// Current input device name, or "None".
     pub fn input_label(&self) -> String {
+        #[cfg(feature = "mt32")]
+        if self.mt32_input {
+            return MIDI_OUT_MT32_LABEL.to_string();
+        }
         self.backend
             .current_input()
             .unwrap_or_else(|| "None".to_string())
@@ -572,6 +635,14 @@ impl SerialSink for MidiSerialSink {
                 dbg.tx_bytes += 1;
             }
             mt32.write_byte(b);
+            // With its MIDI OUT wired back, a request the guest just
+            // finished is answered from the module's own memory.
+            if self.mt32_input {
+                if let Some(request) = self.mt32_responder.write_byte(b) {
+                    let reply = crate::mt32::reply::answer(mt32.synth(), request);
+                    self.mt32_reply.extend(reply);
+                }
+            }
             return;
         }
         // Map the emit clock onto host time so the byte is scheduled rather
@@ -601,6 +672,15 @@ impl SerialSink for MidiSerialSink {
     }
 
     fn read_byte(&mut self) -> Option<u8> {
+        // The module's own reply comes first: it is answering something the
+        // guest asked for, and a host source is a separate cable anyway.
+        #[cfg(feature = "mt32")]
+        if let Some(b) = self.mt32_reply.pop_front() {
+            if let Some(dbg) = &mut self.debug {
+                dbg.rx_bytes += 1;
+            }
+            return Some(b);
+        }
         let b = self.input.try_pop();
         if let Some(byte) = b {
             if let Some(dbg) = &mut self.debug {
@@ -616,6 +696,10 @@ impl SerialSink for MidiSerialSink {
     }
 
     fn has_pending_input(&self) -> bool {
+        #[cfg(feature = "mt32")]
+        if !self.mt32_reply.is_empty() {
+            return true;
+        }
         !self.input.is_empty()
     }
 
