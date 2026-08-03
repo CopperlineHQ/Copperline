@@ -121,7 +121,9 @@ Controls:
   latches the way the hardware does -- the keyboard MCU owns that lamp --
   and the cap lights with it. Unlike the physical keyboard, the on-screen
   keys are never captured by the joystick modes below: an on-screen Amiga
-  keyboard always types.
+  keyboard always types. The keyboard carries its own dismiss button -- the
+  small x in the cursor notch, above the UK/US switch -- so it can be put
+  away in fullscreen without reaching for the page's toggle.
 - **Device keyboard**: the **Device keys** button raises the phone or
   tablet's own keyboard instead, for when typing matters more than reaching
   every Amiga key -- a BBS session, a filename, a high-score name -- and
