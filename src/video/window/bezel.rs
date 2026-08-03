@@ -341,26 +341,10 @@ mod tests {
     /// left a hole, and any outside means it overdrew its viewport.
     const SENTINEL: [u8; 4] = [0, 0, 255, 255];
 
-    /// A device, or `None` on a machine with no usable adapter (headless
-    /// CI): the render tests then pass without asserting anything.
-    fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let adapter =
-            match crt_shader::poll_once(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::LowPower,
-                force_fallback_adapter: false,
-                compatible_surface: None,
-            })) {
-                Some(Ok(adapter)) => adapter,
-                _ => return None,
-            };
-        match crt_shader::poll_once(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("bezel_shader_test"),
-            ..Default::default()
-        })) {
-            Some(Ok(pair)) => Some(pair),
-            _ => None,
-        }
+    /// A serialized device, or `None` without a usable hardware adapter:
+    /// see `crt_shader::test_gpu`.
+    fn gpu() -> Option<(crt_shader::GpuTestGuard, wgpu::Device, wgpu::Queue)> {
+        crt_shader::test_gpu("bezel_shader_test")
     }
 
     /// The `pixels` backing texture in miniature: `display_rows` rows of
@@ -586,7 +570,7 @@ mod tests {
 
     #[test]
     fn the_bezel_covers_the_display_rect_and_nothing_below() {
-        let Some((device, queue)) = gpu() else {
+        let Some((_gpu, device, queue)) = gpu() else {
             eprintln!("skipping: no GPU adapter");
             return;
         };
@@ -616,7 +600,7 @@ mod tests {
 
     #[test]
     fn the_picture_fills_the_opening_and_the_frame_is_plastic() {
-        let Some((device, queue)) = gpu() else {
+        let Some((_gpu, device, queue)) = gpu() else {
             eprintln!("skipping: no GPU adapter");
             return;
         };
@@ -670,7 +654,7 @@ mod tests {
 
     #[test]
     fn the_badge_prints_on_the_left_of_the_bottom_band() {
-        let Some((device, queue)) = gpu() else {
+        let Some((_gpu, device, queue)) = gpu() else {
             eprintln!("skipping: no GPU adapter");
             return;
         };
@@ -722,7 +706,7 @@ mod tests {
     /// intact) with the preset's scanline structure inside the opening.
     #[test]
     fn a_crt_preset_lands_inside_the_opening() {
-        let Some((device, queue)) = gpu() else {
+        let Some((_gpu, device, queue)) = gpu() else {
             eprintln!("skipping: no GPU adapter");
             return;
         };
@@ -781,7 +765,7 @@ mod tests {
             eprintln!("skipping: COPPERLINE_BEZEL_PREVIEW_OUT not set");
             return;
         };
-        let Some((device, queue)) = gpu() else {
+        let Some((_gpu, device, queue)) = gpu() else {
             eprintln!("skipping: no GPU adapter");
             return;
         };

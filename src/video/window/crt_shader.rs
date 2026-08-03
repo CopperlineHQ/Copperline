@@ -199,6 +199,58 @@ pub(super) fn poll_once<F: Future>(fut: F) -> Option<F::Output> {
     }
 }
 
+/// A guard on the process-wide GPU-test lock: the offscreen render tests
+/// hold one for the life of their device.
+#[cfg(test)]
+pub(super) type GpuTestGuard = std::sync::MutexGuard<'static, ()>;
+
+/// A device for an offscreen render test, or `None` on a machine with no
+/// usable adapter (headless CI) or only a software rasterizer: the render
+/// tests then pass without asserting anything.
+///
+/// The guard serializes GPU use across the window shader suites (this
+/// module, bezel, rtg_texture): the harness runs tests on parallel
+/// threads, and concurrent D3D12 device create/render/teardown cycles
+/// against the Windows CI runners' WARP rasterizer have taken the whole
+/// test process down with STATUS_ACCESS_VIOLATION (issue #366).
+#[cfg(test)]
+pub(super) fn test_gpu(label: &str) -> Option<(GpuTestGuard, wgpu::Device, wgpu::Queue)> {
+    static GPU_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let guard = GPU_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let adapter = match poll_once(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::LowPower,
+        force_fallback_adapter: false,
+        compatible_surface: None,
+    })) {
+        Some(Ok(adapter)) => adapter,
+        _ => return None,
+    };
+    // Software rasterizers do not render these passes the way real
+    // hardware does: DX12 WARP on the Windows CI runners puts flat-grey
+    // pixels up to 14 8-bit steps off the source, far beyond the
+    // tolerances real adapters need, so pixel asserts against it test
+    // WARP, not the shaders. Skip them like a missing adapter; the
+    // render tests run for real on the macOS CI runners' Metal GPU and
+    // on developer machines.
+    if adapter.get_info().device_type == wgpu::DeviceType::Cpu {
+        eprintln!(
+            "skipping: software rasterizer ({})",
+            adapter.get_info().name
+        );
+        return None;
+    }
+    match poll_once(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some(label),
+        ..Default::default()
+    })) {
+        Some(Ok((device, queue))) => Some((guard, device, queue)),
+        _ => None,
+    }
+}
+
 impl CrtShader {
     pub(super) fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
         let bind_group_layout = shader_bind_group_layout(device);
@@ -821,39 +873,10 @@ fn fs_main() -> @location(0) vec4<f32> {
         }
     }
 
-    /// A device, or `None` on a machine with no usable adapter (headless
-    /// CI): the render tests then pass without asserting anything.
-    fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let adapter = match poll_once(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            force_fallback_adapter: false,
-            compatible_surface: None,
-        })) {
-            Some(Ok(adapter)) => adapter,
-            _ => return None,
-        };
-        // Software rasterizers do not render these passes the way real
-        // hardware does: DX12 WARP on the Windows CI runners puts flat-grey
-        // pixels up to 14 8-bit steps off the source, far beyond the
-        // tolerances real adapters need, so pixel asserts against it test
-        // WARP, not the shaders. Skip them like a missing adapter; the
-        // render tests run for real on the macOS CI runners' Metal GPU and
-        // on developer machines.
-        if adapter.get_info().device_type == wgpu::DeviceType::Cpu {
-            eprintln!(
-                "skipping: software rasterizer ({})",
-                adapter.get_info().name
-            );
-            return None;
-        }
-        match poll_once(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("crt_shader_test"),
-            ..Default::default()
-        })) {
-            Some(Ok(pair)) => Some(pair),
-            _ => None,
-        }
+    /// A serialized device, or `None` without a usable hardware adapter:
+    /// see `test_gpu`.
+    fn gpu() -> Option<(GpuTestGuard, wgpu::Device, wgpu::Queue)> {
+        test_gpu("crt_shader_test")
     }
 
     /// The `pixels` backing texture, in miniature: `DISPLAY_ROWS` of flat
@@ -1069,7 +1092,7 @@ fn fs_main() -> @location(0) vec4<f32> {
 
     #[test]
     fn presets_render_the_display_region_only() {
-        let Some((device, queue)) = gpu() else {
+        let Some((_gpu, device, queue)) = gpu() else {
             eprintln!("skipping: no GPU adapter");
             return;
         };
@@ -1096,7 +1119,7 @@ fn fs_main() -> @location(0) vec4<f32> {
     /// whole bottom of the picture.
     #[test]
     fn a_magnified_display_never_blends_in_the_status_bar() {
-        let Some((device, queue)) = gpu() else {
+        let Some((_gpu, device, queue)) = gpu() else {
             eprintln!("skipping: no GPU adapter");
             return;
         };
@@ -1120,7 +1143,7 @@ fn fs_main() -> @location(0) vec4<f32> {
     /// partly dimmed, so anything the clamp picked up shows through.
     #[test]
     fn the_crt_warp_never_reaches_the_status_bar() {
-        let Some((device, queue)) = gpu() else {
+        let Some((_gpu, device, queue)) = gpu() else {
             eprintln!("skipping: no GPU adapter");
             return;
         };
@@ -1155,7 +1178,7 @@ fn fs_main() -> @location(0) vec4<f32> {
 
     #[test]
     fn scanlines_modulate_rows_periodically() {
-        let Some((device, queue)) = gpu() else {
+        let Some((_gpu, device, queue)) = gpu() else {
             eprintln!("skipping: no GPU adapter");
             return;
         };
@@ -1218,7 +1241,7 @@ fn fs_main() -> @location(0) vec4<f32> {
 
     #[test]
     fn the_mask_preset_colours_pixels_into_triads() {
-        let Some((device, queue)) = gpu() else {
+        let Some((_gpu, device, queue)) = gpu() else {
             eprintln!("skipping: no GPU adapter");
             return;
         };
@@ -1271,7 +1294,7 @@ fn fs_main() -> @location(0) vec4<f32> {
 
     #[test]
     fn the_crt_preset_darkens_the_corners() {
-        let Some((device, queue)) = gpu() else {
+        let Some((_gpu, device, queue)) = gpu() else {
             eprintln!("skipping: no GPU adapter");
             return;
         };
@@ -1311,7 +1334,7 @@ fn fs_main() -> @location(0) vec4<f32> {
     /// bowed picture on every bright border.
     #[test]
     fn the_crt_face_edge_is_hard_at_partial_strength() {
-        let Some((device, queue)) = gpu() else {
+        let Some((_gpu, device, queue)) = gpu() else {
             eprintln!("skipping: no GPU adapter");
             return;
         };
@@ -1357,7 +1380,7 @@ fn fs_main() -> @location(0) vec4<f32> {
     /// instead of holding a view of the old one.
     #[test]
     fn a_new_source_texture_rebuilds_the_bind_group() {
-        let Some((device, queue)) = gpu() else {
+        let Some((_gpu, device, queue)) = gpu() else {
             eprintln!("skipping: no GPU adapter");
             return;
         };
@@ -1402,7 +1425,7 @@ fn fs_main() -> @location(0) vec4<f32> {
     /// the target keeps whatever the scaling renderer put there.
     #[test]
     fn a_disabled_pass_leaves_the_target_untouched() {
-        let Some((device, queue)) = gpu() else {
+        let Some((_gpu, device, queue)) = gpu() else {
             eprintln!("skipping: no GPU adapter");
             return;
         };
@@ -1426,7 +1449,7 @@ fn fs_main() -> @location(0) vec4<f32> {
 
     #[test]
     fn a_custom_shader_loads_and_a_broken_one_does_not() {
-        let Some((device, _queue)) = gpu() else {
+        let Some((_gpu, device, _queue)) = gpu() else {
             eprintln!("skipping: no GPU adapter");
             return;
         };
