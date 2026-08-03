@@ -116,6 +116,12 @@ pub trait SerialSink: Send {
         None
     }
 
+    /// The same sink shared, for reads that only look.
+    #[cfg(feature = "midi")]
+    fn as_midi_ref(&self) -> Option<&crate::midi::MidiSerialSink> {
+        None
+    }
+
     /// One stereo frame of what the device on the far end is sounding, at
     /// the mixer's rate, or `None` from a device that makes no sound here.
     ///
