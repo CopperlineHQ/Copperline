@@ -1204,7 +1204,7 @@ mod tests {
         let rect = panel_rect(500);
         let master = Mt32Control::Function(Function::MasterVolume);
         let group = Mt32Control::Function(Function::SoundGroup);
-        let press = |p: &mut Mt32Panel, c, left| p.press(c, left, (0, 0), rect, None);
+        let press = |p: &mut Mt32Panel, c, left| p.press(c, left, (0, 0), rect, true, None);
 
         // Right, then right: the pair, with both buttons lit and nothing
         // else.
@@ -1262,6 +1262,7 @@ mod tests {
             true,
             (0, 0),
             rect,
+            true,
             None,
         );
         assert_ne!(
@@ -1277,6 +1278,76 @@ mod tests {
             ([false; 6], [false; 4]),
             "after a power cycle"
         );
+    }
+
+    /// Holding buttons on a unit that is off, then switching it on, is how
+    /// its start-up screens are reached -- and holding the wrong ones just
+    /// starts it normally.
+    #[test]
+    fn buttons_held_through_a_power_on_ask_for_a_screen() {
+        let rect = panel_rect(500);
+        let master = Mt32Control::Function(Function::MasterVolume);
+        // The unit is off: right-clicking holds, and any number at once.
+        let start = |held: &[Mt32Control]| {
+            let mut panel = Mt32Panel::default();
+            panel.set_version("MT-32 v2.07 90-05-23".to_string());
+            for (i, &b) in held.iter().enumerate() {
+                // Either button holds one down on a unit that is off.
+                panel.press(b, i % 2 == 0, (0, 0), rect, false, None);
+            }
+            assert_eq!(panel.holding().len(), held.len(), "all of them are down");
+            // And they light while they are held, so the chord can be seen
+            // being made rather than felt for.
+            let (parts, functions) = (panel.parts_lit(), panel.functions_lit());
+            for &b in held {
+                match b {
+                    Mt32Control::Part(n) => assert!(parts[n], "PART {} is lit", n + 1),
+                    Mt32Control::Function(f) => assert!(functions[f.index()], "{f:?} is lit"),
+                    _ => {}
+                }
+            }
+            // The switch takes what is held and lets go of it.
+            let action = panel.press(Mt32Control::Power, true, (0, 0), rect, false, None);
+            assert!(matches!(action, PanelAction::Power(true)), "it switches on");
+            assert!(panel.holding().is_empty(), "the hand came off the panel");
+            panel.reset();
+            panel
+        };
+
+        // PART 1 + PART 3 + MASTER VOLUME: what the ROM calls itself.
+        let version = start(&[Mt32Control::Part(0), Mt32Control::Part(2), master]);
+        assert_eq!(version.lcd().as_deref(), Some("MT-32 v2.07 90-05-23"));
+        assert_eq!(
+            (version.parts_lit(), version.functions_lit()),
+            ([false; 6], [false; 4]),
+            "nothing is lit on it"
+        );
+
+        // Nothing held, or the wrong set: it just starts.
+        for held in [vec![], vec![master], vec![Mt32Control::Part(0)]] {
+            assert_eq!(start(&held).lcd(), None, "starts normally for {held:?}");
+        }
+    }
+
+    /// A start-up screen holds until the unit is asked for something else.
+    #[test]
+    fn the_next_press_puts_the_start_up_screen_away() {
+        let rect = panel_rect(500);
+        let mut panel = Mt32Panel::default();
+        panel.set_version("MT-32 v2.07 90-05-23".to_string());
+        for b in [
+            Mt32Control::Part(0),
+            Mt32Control::Part(2),
+            Mt32Control::Function(Function::MasterVolume),
+        ] {
+            panel.press(b, false, (0, 0), rect, false, None);
+        }
+        panel.press(Mt32Control::Power, true, (0, 0), rect, false, None);
+        panel.reset();
+        assert!(panel.lcd().is_some(), "showing the version");
+
+        panel.press(Mt32Control::Part(1), true, (0, 0), rect, true, None);
+        assert_eq!(panel.lcd(), None, "back to the engine's own display");
     }
 
     /// The pointer finds each control where it is drawn.
@@ -1347,6 +1418,42 @@ enum Mode {
     /// A pair that wants a further press before it does anything, as the
     /// manual's three-button procedures do.
     Confirm(Chord),
+    /// A screen the unit was started into, holding buttons down while it
+    /// was switched on. It stays until something is pressed.
+    Started(StartMode),
+}
+
+/// What holding buttons down through a power-on reaches.
+///
+/// The unit reads its front panel as it starts and takes what it finds
+/// there as an instruction, which is how its service screens are got at
+/// without a menu to hide them behind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartMode {
+    /// PART 1 + PART 3 + MASTER VOLUME: what the control ROM calls itself.
+    Version,
+}
+
+impl StartMode {
+    /// The buttons held through the power-on that reach it. Order does not
+    /// matter; holding exactly this set and no more is what counts.
+    fn buttons(self) -> &'static [Mt32Control] {
+        match self {
+            StartMode::Version => &[
+                Mt32Control::Part(0),
+                Mt32Control::Part(2),
+                Mt32Control::Function(Function::MasterVolume),
+            ],
+        }
+    }
+
+    /// Which screen a set of held buttons asks for, if any.
+    fn from_held(held: &[Mt32Control]) -> Option<Self> {
+        [StartMode::Version].into_iter().find(|m| {
+            let want = m.buttons();
+            want.len() == held.len() && want.iter().all(|b| held.contains(b))
+        })
+    }
 }
 
 /// A button held on the Select/Volume dial.
@@ -1389,6 +1496,16 @@ pub struct Mt32Panel {
     /// the unit's other channel arrangement.
     channels_shifted: bool,
     dial: Option<DialGrab>,
+    /// Buttons being held while the unit is off. Held through a power-on
+    /// they ask for a start-up screen, so they are kept apart from `held`,
+    /// which is the one-at-a-time business of a running unit.
+    holding: Vec<Mt32Control>,
+    /// What the control ROM calls itself, for the screen that shows it.
+    /// Empty until the window has read the image.
+    version: String,
+    /// The screen the buttons held through a power-on asked for, waiting
+    /// for the unit to come up and take it.
+    pending_start: Option<StartMode>,
 }
 
 impl Default for Mt32Panel {
@@ -1406,6 +1523,9 @@ impl Default for Mt32Panel {
             reverb_mode: 0,
             channels_shifted: false,
             dial: None,
+            holding: Vec::new(),
+            version: String::new(),
+            pending_start: None,
         }
     }
 }
@@ -1413,7 +1533,31 @@ impl Default for Mt32Panel {
 impl Mt32Panel {
     /// Start over, as a unit just switched on is.
     pub fn reset(&mut self) {
-        *self = Self::default();
+        // The version outlives a power cycle: it is what the ROM says, not
+        // anything the unit is doing. A screen asked for on the way up is
+        // what the unit comes up showing.
+        let version = std::mem::take(&mut self.version);
+        let started = self.pending_start.take();
+        *self = Self {
+            version,
+            ..Self::default()
+        };
+        if let Some(mode) = started {
+            self.mode = Mode::Started(mode);
+        }
+    }
+
+    /// Tell the panel what the control ROM calls itself, for the screen
+    /// that shows it. Read from the image by the window, since the engine
+    /// keeps its copy to itself.
+    pub fn set_version(&mut self, version: String) {
+        self.version = version;
+    }
+
+    /// Which buttons are being held on a unit that is switched off.
+    #[cfg(test)]
+    fn holding(&self) -> &[Mt32Control] {
+        &self.holding
     }
 
     /// Let the pointer go, ending any turn of the dial.
@@ -1438,8 +1582,16 @@ impl Mt32Panel {
         left: bool,
         pos: (i32, i32),
         rect: Rect,
+        powered: bool,
         synth: Option<&mut crate::mt32::Mt32Synth>,
     ) -> PanelAction {
+        // A unit that is off does nothing except take note of what is being
+        // held on it, and come up into whatever that asks for. This is how
+        // its start-up screens are reached on the hardware: hold the
+        // buttons, then switch it on.
+        if !powered {
+            return self.press_while_off(control);
+        }
         // The dial is not a button: its two clicks step it either way.
         if control == Mt32Control::Dial {
             self.grab_dial(left, pos, rect, synth);
@@ -1447,6 +1599,12 @@ impl Mt32Panel {
         }
         if control == Mt32Control::Power {
             return PanelAction::Power(true);
+        }
+        // A start-up screen stays until the unit is asked for something
+        // else, which is any press at all.
+        if matches!(self.mode, Mode::Started(_)) {
+            self.release(synth);
+            return PanelAction::None;
         }
 
         // A pair is two buttons held down together, so both presses are
@@ -1496,6 +1654,32 @@ impl Mt32Panel {
             Mt32Control::Dial | Mt32Control::Power => {}
         }
         PanelAction::None
+    }
+
+    /// A press on a unit that is switched off.
+    ///
+    /// Either button holds one down, and any number can be held at once:
+    /// a unit that is off has no other use for a press, so there is nothing
+    /// for a plain one to mean instead. They light while they are held, the
+    /// way a hand on the panel can be seen. The power switch takes what is
+    /// held and lets go of it, as the hand comes off to reach it.
+    fn press_while_off(&mut self, control: Mt32Control) -> PanelAction {
+        match control {
+            Mt32Control::Power => {
+                self.pending_start = StartMode::from_held(&self.holding);
+                self.holding.clear();
+                PanelAction::Power(true)
+            }
+            Mt32Control::Dial => PanelAction::None,
+            button => {
+                if let Some(i) = self.holding.iter().position(|&h| h == button) {
+                    self.holding.remove(i);
+                } else {
+                    self.holding.push(button);
+                }
+                PanelAction::None
+            }
+        }
     }
 
     /// Let the display go back to the engine, as the unit does when it
@@ -1766,11 +1950,21 @@ impl Mt32Panel {
     /// reached through. Nothing at rest -- the unit has no lamps.
     fn parts_lit(&self) -> [bool; 6] {
         let mut lit = [false; 6];
+        // Held down on a unit that is off, so a start-up chord can be seen
+        // as it is made rather than felt for.
+        for &down in &self.holding {
+            if let Mt32Control::Part(n) = down {
+                lit[n] = true;
+            }
+        }
         if let Some(Mt32Control::Part(n)) = self.held {
             lit[n] = true;
         }
         match self.mode {
-            Mode::Home => {}
+            // Nothing is lit at rest, nor on a screen the unit came up
+            // into: the buttons that asked for it were let go of to reach
+            // the switch.
+            Mode::Home | Mode::Started(_) => {}
             // A pair or a prompt lights the button it was reached through.
             Mode::Chord(chord) | Mode::Confirm(chord) => {
                 if let Mt32Control::Part(n) = chord.partner() {
@@ -1795,11 +1989,16 @@ impl Mt32Panel {
     /// as its partner, so all of the buttons that reached it are shown.
     fn functions_lit(&self) -> [bool; 4] {
         let mut lit = [false; 4];
+        for &down in &self.holding {
+            if let Mt32Control::Function(f) = down {
+                lit[f.index()] = true;
+            }
+        }
         if let Some(Mt32Control::Function(f)) = self.held {
             lit[f.index()] = true;
         }
         match self.mode {
-            Mode::Home => {}
+            Mode::Home | Mode::Started(_) => {}
             Mode::Function(f) => lit[f.index()] = true,
             Mode::Chord(chord) | Mode::Confirm(chord) => {
                 lit[Function::MasterVolume.index()] = true;
@@ -1817,6 +2016,9 @@ impl Mt32Panel {
     fn lcd(&self) -> Option<String> {
         let function = match self.mode {
             Mode::Home => return None,
+            // What the unit came up showing, held until it is asked for
+            // something else.
+            Mode::Started(StartMode::Version) => return Some(self.version.clone()),
             // The unit's own wording, and its own units: the tune reads in
             // hertz across 427.5 to 452.6.
             Mode::Chord(Chord::MasterTune) => {

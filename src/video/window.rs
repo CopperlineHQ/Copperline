@@ -5159,8 +5159,15 @@ impl App {
         let Some(rect) = mt32panel::shown_panel_rect(present_height()) else {
             return;
         };
+        // A unit that is switched off still takes note of what is held on
+        // it, so the panel is told which it is.
+        let powered = self
+            .emu
+            .bus_mut()
+            .midi_serial_mut()
+            .is_some_and(|sink| sink.mt32().is_some());
         let mut panel = std::mem::take(&mut self.mt32_panel);
-        let action = panel.press(control, left, pos, rect, self.mt32_synth_mut());
+        let action = panel.press(control, left, pos, rect, powered, self.mt32_synth_mut());
         self.mt32_panel = panel;
         self.apply_mt32_action(action);
         self.request_redraw();
@@ -5204,6 +5211,7 @@ impl App {
         // its greeting.
         self.emu.bus_mut().paula.rearm_synth_audio();
         self.mt32_panel.reset();
+        self.tell_panel_the_rom_version();
         let came_up = self
             .emu
             .bus_mut()
@@ -5278,8 +5286,25 @@ impl App {
             .midi_serial_mut()
             .is_some_and(|sink| sink.mt32_selected());
         self.mt32_panel.reset();
+        self.tell_panel_the_rom_version();
         if !selected {
             self.set_mt32_panel_shown(false);
+        }
+    }
+
+    /// Hand the panel what the control ROM calls itself, for its version
+    /// screen. The engine keeps its copy of the image to itself, so this
+    /// comes from the sink, which read it off disk when the pair was
+    /// configured.
+    #[cfg(feature = "mt32")]
+    fn tell_panel_the_rom_version(&mut self) {
+        if let Some(version) = self
+            .emu
+            .bus_mut()
+            .midi_serial_mut()
+            .and_then(|sink| sink.mt32_version().map(str::to_string))
+        {
+            self.mt32_panel.set_version(version);
         }
     }
 

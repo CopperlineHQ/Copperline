@@ -16,6 +16,7 @@ use std::path::Path;
 
 mod ffi;
 pub mod reply;
+pub mod rom;
 mod sink;
 
 pub use sink::{Mt32Device, Mt32Roms};
