@@ -88,11 +88,15 @@ impl ChdImage {
         }
         let unit_bytes = chd.header().unit_bytes();
         let hunk_bytes = chd.header().hunk_size();
-        if unit_bytes as usize != FRAME_BYTES || !(hunk_bytes as usize).is_multiple_of(FRAME_BYTES)
+        // The zero-hunk check guards the frames_per_hunk divisions below;
+        // the chd crate also rejects such headers, but do not rely on it.
+        if unit_bytes as usize != FRAME_BYTES
+            || hunk_bytes == 0
+            || !(hunk_bytes as usize).is_multiple_of(FRAME_BYTES)
         {
             bail!(
-                "{}: not a CD-ROM CHD (unit size {unit_bytes}, expected {FRAME_BYTES}-byte \
-                 CD frames)",
+                "{}: not a CD-ROM CHD (unit {unit_bytes} bytes, hunk {hunk_bytes} bytes; \
+                 expected hunks of whole {FRAME_BYTES}-byte CD frames)",
                 path.display()
             );
         }
@@ -356,12 +360,19 @@ mod tests {
         data: &[u8],
         metas: &[([u8; 4], Vec<u8>)],
     ) {
-        let hunk_count = data.len().div_ceil(hunk_bytes as usize);
+        // hunk_bytes == 0 writes a (broken) header that loading must
+        // reject; avoid dividing by it here.
+        let hunk_count = match hunk_bytes {
+            0 => 0,
+            _ => data.len().div_ceil(hunk_bytes as usize),
+        };
         let map_offset = 124u64;
         let meta_offset = map_offset + 4 * hunk_count as u64;
         let metas_len: u64 = metas.iter().map(|(_, v)| 16 + v.len() as u64).sum();
-        let data_start =
-            (meta_offset + metas_len).div_ceil(u64::from(hunk_bytes)) * u64::from(hunk_bytes);
+        let data_start = match hunk_bytes {
+            0 => meta_offset + metas_len,
+            _ => (meta_offset + metas_len).div_ceil(u64::from(hunk_bytes)) * u64::from(hunk_bytes),
+        };
 
         let mut out = Vec::new();
         out.extend_from_slice(b"MComprHD");
@@ -607,6 +618,18 @@ mod tests {
         write_chd_v5(&path, 4096, 512, &[0u8; 8192], &[]);
         let err = CdImage::load(&path).unwrap_err();
         assert!(err.to_string().contains("not a CD-ROM CHD"), "{err:#}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn zero_hunk_size_is_rejected_not_divided_by() {
+        let path = temp_path("zerohunk.chd");
+        // The unit size claims CD frames but the hunk size is zero:
+        // without the load-time guard, reading a sector would divide by
+        // frames_per_hunk == 0.
+        write_chd_v5(&path, 0, FRAME_BYTES as u32, &[], &[]);
+        let err = CdImage::load(&path).unwrap_err();
+        assert!(format!("{err:#}").contains("CHD"), "{err:#}");
         let _ = std::fs::remove_file(&path);
     }
 
