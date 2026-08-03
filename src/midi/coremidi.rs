@@ -477,9 +477,6 @@ pub fn open(
         backend.source = src;
         log::info!("midi: input connected to {:?}", backend.input_name());
     }
-    if backend.dest == 0 && backend.source == 0 {
-        log::warn!("[serial] mode = midi but no midi_out/midi_in endpoint selected; MIDI is inert");
-    }
 
     Ok(Box::new(backend))
 }

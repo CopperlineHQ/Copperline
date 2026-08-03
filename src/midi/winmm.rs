@@ -799,9 +799,6 @@ pub fn open(
         backend.open_input(id, name.clone())?;
         log::info!("midi: input connected to {name:?}");
     }
-    if backend.out.lock().unwrap().handle == 0 && backend.in_handle.is_null() {
-        log::warn!("[serial] mode = midi but no midi_out/midi_in endpoint selected; MIDI is inert");
-    }
 
     Ok(Box::new(backend))
 }

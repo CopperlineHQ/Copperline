@@ -416,6 +416,12 @@ pub struct Paula {
     // CD audio samples streamed by the CD controller (CD32 Akiko), mixed
     // into the host output at the shared 44.1 kHz mixer rate.
     cd_audio: CdAudioRing,
+    // Set once the device on the serial port has said it makes no sound
+    // here, which is the usual answer: a machine with nothing on its MIDI
+    // port then costs one predictable branch a sample and nothing else.
+    // Not emulated state -- it is a fact about the host wiring.
+    #[serde(skip)]
+    synth_silent: bool,
     // Synthesized floppy-drive noises (motor/seek/read), mixed into the
     // host frames after the LED filter: the drive is an acoustic source
     // beside the machine, not part of Paula's filtered audio path.
@@ -487,6 +493,7 @@ impl Paula {
             mono_output: false,
             stereo_separation: 1.0,
             cd_audio: CdAudioRing::default(),
+            synth_silent: false,
             drive_sounds: DriveSounds::new(),
             dma_addr_mask: 0x001F_FFFF,
             capture: None,
@@ -715,6 +722,13 @@ impl Paula {
 
     pub fn drive_sounds_mut(&mut self) -> &mut DriveSounds {
         &mut self.drive_sounds
+    }
+
+    /// Ask the serial sink for audio again. The mixer latches "this device
+    /// makes no sound here" so it is not asking once a sample; changing the
+    /// device on the port clears that.
+    pub fn rearm_synth_audio(&mut self) {
+        self.synth_silent = false;
     }
 
     pub fn cd_audio_mut(&mut self) -> &mut CdAudioRing {
@@ -1791,6 +1805,18 @@ impl Paula {
         }
         left += cd_left;
         right += cd_right;
+        // A MIDI device emulated in-process (an MT-32) is line-mixed the same
+        // way, so the Amiga's own voices keep playing under it exactly as
+        // they would beside a real one on the desk.
+        if !self.synth_silent {
+            match self.serial.next_audio_frame() {
+                Some((synth_left, synth_right)) => {
+                    left += synth_left;
+                    right += synth_right;
+                }
+                None => self.synth_silent = true,
+            }
+        }
         if let Some(capture) = &mut self.capture {
             capture.push((left, right));
         }

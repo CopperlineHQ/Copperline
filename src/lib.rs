@@ -62,6 +62,8 @@ pub mod keymap;
 pub mod memory;
 #[cfg(feature = "midi")]
 pub mod midi;
+#[cfg(feature = "mt32")]
+pub mod mt32;
 pub mod net;
 pub mod parallel;
 pub mod paths;
