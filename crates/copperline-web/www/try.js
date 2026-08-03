@@ -1974,6 +1974,7 @@ function ensureKeyboard() {
   }
 
   grid.appendChild(buildLegendChip());
+  grid.appendChild(buildCloseChip());
   wireKeyboardPointers(root);
   applyKbdLegends();
   // Measured rather than derived: the padding carries
@@ -2151,6 +2152,30 @@ function buildLegendChip() {
   chip.setAttribute('role', 'button');
   chip.tabIndex = -1;
   kbdLegendChip = chip;
+  return chip;
+}
+
+// Putting the keyboard away has to work from the keyboard: in fullscreen
+// the page's toggle is gone and the bar needs a tap to summon, which is the
+// moment a visitor most wants the picture back. It shares the notch with
+// the legend switch, in the slot above it - the one farthest from the
+// cursor keys a game is hammering, so a missed arrow cannot fold the
+// keyboard away mid-play.
+function buildCloseChip() {
+  const chip = document.createElement('div');
+  chip.style.cssText =
+    'position:absolute;box-sizing:border-box;cursor:pointer;' +
+    'left:calc(15.5 * var(--cl-u));top:calc(2.6 * var(--cl-u));' +
+    'width:calc(var(--cl-u) - 4px);height:calc(0.8 * var(--cl-u));' +
+    'display:flex;align-items:center;justify-content:center;' +
+    'border-radius:4px;border:1px solid rgba(255,255,255,0.3);' +
+    'color:rgba(255,255,255,0.75);' +
+    'font:600 calc(0.4 * var(--cl-u)) "IBM Plex Mono",ui-monospace,monospace;';
+  chip.textContent = '\u00d7'; // multiplication sign: the X every font draws
+  chip.dataset.closeChip = '1';
+  chip.setAttribute('role', 'button');
+  chip.setAttribute('aria-label', 'Hide keyboard');
+  chip.tabIndex = -1;
   return chip;
 }
 
@@ -2367,6 +2392,14 @@ function wireKeyboardPointers(root) {
     if (e.target.closest('[data-legend-chip]')) {
       e.preventDefault();
       setKbdLegends(kbdLegends === 'uk' ? 'us' : 'uk');
+      return;
+    }
+    if (e.target.closest('[data-close-chip]')) {
+      // Acting on the down, like every key here, means the strip is gone
+      // before the finger lifts; closeKeyboard releases anything still
+      // held, and this pointer was never in the map, so nothing dangles.
+      e.preventDefault();
+      closeKeyboard();
       return;
     }
     const cell = e.target.closest('[data-k]');
