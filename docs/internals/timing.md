@@ -66,6 +66,13 @@ transition cannot accidentally reuse an ordinary interior line. A
 mid-row BPLCON0 change switches the fetch-unit slot layout from its commit
 clock; word addressing is unit-based, so late-enabled planes keep their
 word positions and earlier words stay zero.
+The lo-res fetch unit is eight colour clocks with eight usable DMA slots.
+OCS/ECS Agnus drives six of them (slot order 4,6,2,3,5,1 at unit offsets
+1,2,3,5,6,7), leaving offsets 0 and 4 free for the Copper/blitter/CPU --
+which is why lo-res tops out at six bitplanes there. Alice drives those two
+remaining slots once BPLCON0 asks for more than six planes (plane 8 at
+offset 0, plane 7 at offset 4, giving the full order 8,4,6,2,7,3,5,1), so an
+eight-bitplane AGA lo-res screen leaves no spare bitplane slot in the unit.
 Wide-FMODE (quantum > 1) fetches keep the memoized value-window plan: the
 effective DDF window, fetch cadence, and per-plane fetch-order mask live in
 a `BitplaneSlotPlan` keyed on the register inputs (`BitplaneSlotKey`,
