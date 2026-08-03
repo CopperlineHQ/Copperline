@@ -113,12 +113,12 @@ from the pipeline alone (taps at or past 16 lo-res px).
 Pinned by two golden probes, both FS-UAE-verified band by band (vAmiga
 is OCS/ECS-only and cannot arbitrate AGA): `ddfprobe-agafold` on the
 Alien Breed II AGA playfield constellation (issue #248: lo-res BPL32,
-DDFSTRT $24 -> earliness 8 px, boundary 24), whose scroller pairs the
+DDFSTRT `$24` -> earliness 8 px, boundary 24), whose scroller pairs the
 folded taps with a one-gulp pointer step and jumps 32 px for 4 of every
 16 pan frames without the fold, and `ddfprobe-agafold2`, which sweeps
 the DDFSTRT phase on the 64-bit fetch across the SANITY Roots II AGA
 swirl/kaleidoscope constellation (issue #371: lo-res BPL64, DDFSTRT
-$58/$38 -> earliness 48 px, boundary past the 0..63 tap range), whose
+`$58`/`$38` -> earliness 48 px, boundary past the 0..63 tap range), whose
 taps 16..43 must render linearly -- the earlier last-earliness-window
 rule (`fold at gulp - earliness`) reproduced AB2's map but folded every
 Roots tap >= 16, pulling the swirl a gulp left and shearing the
