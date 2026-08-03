@@ -6948,23 +6948,23 @@ fn draw_re_applies_a_surface_size_the_window_has_moved_past() {
 
 #[test]
 fn perf_readout_derives_rates_from_counter_deltas() {
-    let t0 = std::time::Instant::now();
+    let t0 = crate::timebase::Instant::now();
     let base = super::PerfBaseline {
         at: t0,
         running: true,
         emulated_frames: 1000,
         emulated_seconds: 20.0,
-        busy: std::time::Duration::from_millis(100),
+        busy: crate::timebase::Duration::from_millis(100),
         audio_underrun_frames: 0,
     };
     let current = super::PerfBaseline {
-        at: t0 + std::time::Duration::from_secs(2),
+        at: t0 + crate::timebase::Duration::from_secs(2),
         running: true,
         // 100 frames and 2.0 emulated seconds in 2 s host: 50 fps, x1.00.
         emulated_frames: 1100,
         emulated_seconds: 22.0,
         // 800 ms of busy time over 100 frames: 8 ms/frame, 40% of the host.
-        busy: std::time::Duration::from_millis(900),
+        busy: crate::timebase::Duration::from_millis(900),
         // 10 underrun frames over the window: 5 per second.
         audio_underrun_frames: 10,
     };
@@ -6982,21 +6982,21 @@ fn perf_readout_derives_rates_from_counter_deltas() {
 fn perf_readout_saturates_counters_that_moved_backwards() {
     // A guest reset cleared the cumulative stats mid-window; the readout
     // reports an empty window instead of going negative.
-    let t0 = std::time::Instant::now();
+    let t0 = crate::timebase::Instant::now();
     let base = super::PerfBaseline {
         at: t0,
         running: true,
         emulated_frames: 1000,
         emulated_seconds: 20.0,
-        busy: std::time::Duration::from_millis(500),
+        busy: crate::timebase::Duration::from_millis(500),
         audio_underrun_frames: 10,
     };
     let current = super::PerfBaseline {
-        at: t0 + std::time::Duration::from_secs(1),
+        at: t0 + crate::timebase::Duration::from_secs(1),
         running: true,
         emulated_frames: 5,
         emulated_seconds: 0.1,
-        busy: std::time::Duration::from_millis(2),
+        busy: crate::timebase::Duration::from_millis(2),
         audio_underrun_frames: 0,
     };
     let r = super::perf_readout(&base, &current, 0.0, 0);
@@ -7063,12 +7063,12 @@ fn perf_counters_accrue_busy_time_and_reset_with_the_guest() {
     let mut app = test_app();
     app.emu.step_frame().expect("step");
     let counters = app.emu.perf_counters();
-    assert!(counters.busy > std::time::Duration::ZERO);
+    assert!(counters.busy > crate::timebase::Duration::ZERO);
     assert_eq!(counters.pacer_slips, 0);
     // A guest reset clears the counters with the rest of the stats.
     app.emu.keyboard_reset().expect("reset");
     let counters = app.emu.perf_counters();
-    assert_eq!(counters.busy, std::time::Duration::ZERO);
+    assert_eq!(counters.busy, crate::timebase::Duration::ZERO);
     assert_eq!(counters.pacer_slips, 0);
 }
 
@@ -7078,7 +7078,8 @@ fn pacer_counts_a_slip_when_it_reanchors_past_the_catchup_limit() {
     app.emu.set_paced(true);
     // Pretend the run started long ago: the pacer sees a hopeless lag,
     // re-anchors instead of sleeping, and counts the dropped time.
-    app.emu.stats.started_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(10));
+    app.emu.stats.started_at =
+        Some(crate::timebase::Instant::now() - crate::timebase::Duration::from_secs(10));
     app.emu.step_frame().expect("step");
     assert_eq!(app.emu.perf_counters().pacer_slips, 1);
 }

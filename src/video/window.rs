@@ -3192,7 +3192,6 @@ impl ApplicationHandler for App {
                 let osd = self.active_osd_text();
                 let ui_hover = self.cursor_pos.and_then(|p| self.main_ui_control_at(p));
                 let recording = self.recorder.is_some();
-                let perf_lines = self.perf_overlay.then(|| self.perf.lines.clone());
                 let ui_data = self.build_panel_view_data();
                 if let Some(r) = self.render.as_mut() {
                     // RTG with a working GPU pipeline presents the native frame
@@ -3286,8 +3285,8 @@ impl ApplicationHandler for App {
                         // the badge never appears in the recorded file.
                         draw_record_badge(frame, r.texture_scale);
                     }
-                    if let Some(lines) = &perf_lines {
-                        draw_perf_overlay(frame, lines, r.texture_scale, recording);
+                    if self.perf_overlay {
+                        draw_perf_overlay(frame, &self.perf.lines, r.texture_scale, recording);
                     }
                     if let Some(text) = &osd {
                         draw_osd(frame, text, r.texture_scale);
