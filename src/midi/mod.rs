@@ -125,6 +125,12 @@ pub struct MidiSerialSink {
     /// keeps [`MIDI_OUT_MT32`] out of the picker.
     #[cfg(feature = "mt32")]
     mt32_roms: crate::mt32::Mt32Roms,
+    /// What the control ROM calls itself, read from the image once when the
+    /// pair is configured. The engine keeps its copy of the ROM private, so
+    /// this is read from the file, and read once: it cannot change while
+    /// the machine runs.
+    #[cfg(feature = "mt32")]
+    mt32_version: Option<String>,
     /// The fitted MT-32. Absent costs nothing: no ROMs read, no engine, and
     /// no rendering asked for. Absent while it is switched off, too -- an
     /// unpowered synth is not a quieter synth, it is no synth.
@@ -378,6 +384,8 @@ impl MidiSerialSink {
             #[cfg(feature = "mt32")]
             mt32_roms: crate::mt32::Mt32Roms::default(),
             #[cfg(feature = "mt32")]
+            mt32_version: None,
+            #[cfg(feature = "mt32")]
             mt32: None,
             #[cfg(feature = "mt32")]
             mt32_selected: false,
@@ -544,7 +552,18 @@ impl MidiSerialSink {
     /// the runtime switch both read it.
     #[cfg(feature = "mt32")]
     pub fn set_mt32_roms(&mut self, roms: crate::mt32::Mt32Roms) {
+        self.mt32_version = roms
+            .control
+            .as_deref()
+            .and_then(|path| std::fs::read(path).ok())
+            .and_then(|image| crate::mt32::rom::version_line(&image));
         self.mt32_roms = roms;
+    }
+
+    /// What the control ROM calls itself, for the panel's version screen.
+    #[cfg(feature = "mt32")]
+    pub fn mt32_version(&self) -> Option<&str> {
+        self.mt32_version.as_deref()
     }
 
     /// Point the input at a named host endpoint, at the MT-32's own MIDI
