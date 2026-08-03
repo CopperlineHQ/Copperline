@@ -4580,6 +4580,7 @@ fn launcher_control_at(rect: Rect, state: &LauncherState, pos: (i32, i32)) -> Op
             state.tab,
             state.setup.parallel_device(),
             state.setup.serial_mode(),
+            state.setup.midi_out_is_mt32(),
         )
         .iter()
         .filter(|r| !state.setup.row_hidden(r.field))
@@ -5618,6 +5619,7 @@ fn draw_launcher(
             state.tab,
             state.setup.parallel_device(),
             state.setup.serial_mode(),
+            state.setup.midi_out_is_mt32(),
         )
         .iter()
         .filter(|r| !state.setup.row_hidden(r.field))
@@ -5664,6 +5666,7 @@ fn draw_launcher(
                 LauncherTab::Input,
                 state.setup.parallel_device(),
                 state.setup.serial_mode(),
+                state.setup.midi_out_is_mt32(),
             )
             .len()
                 + 1,
@@ -5698,6 +5701,7 @@ fn draw_launcher(
                 LauncherTab::BootPriority,
                 state.setup.parallel_device(),
                 state.setup.serial_mode(),
+                state.setup.midi_out_is_mt32(),
             )
             .len()
                 + 1,
@@ -5740,6 +5744,7 @@ fn draw_launcher(
                 LauncherTab::IoPorts,
                 state.setup.parallel_device(),
                 state.setup.serial_mode(),
+                state.setup.midi_out_is_mt32(),
             )
             .len()
                 + 1,
@@ -6351,7 +6356,7 @@ mod tests {
             };
             for &device in &devices {
                 for &mode in &modes {
-                    let rows = launcher::rows(tab, device, mode);
+                    let rows = launcher::rows(tab, device, mode, false);
                     for (i, r) in rows.iter().enumerate() {
                         let row_y = launcher_row_y(rect, i) + row_offset;
                         let (prev, value, next) = launcher_cycle_rects(rect, row_y);
@@ -8077,6 +8082,7 @@ mod tests {
                 LauncherTab::Input,
                 crate::config::ParallelDevice::None,
                 crate::config::SerialMode::default(),
+                false,
             )
             .len()
                 + 1,
@@ -8237,6 +8243,11 @@ mod tests {
             midi_out: "",
             midi_inputs: &none,
             midi_outputs: &none,
+            mt32_available: false,
+            mt32_attached: false,
+            mt32_input: false,
+            mt32_panel: false,
+            mt32_lcd: crate::config::Mt32Lcd::Oled,
             sampler_input: "",
             sampler_inputs: &none,
             sampler_gain: 0.0,

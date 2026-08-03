@@ -435,7 +435,8 @@ impl MidiSerialSink {
         self.mt32_fault = None;
         let Some((control, pcm)) = self.mt32_roms.pair() else {
             log::warn!(
-                "midi: {MIDI_OUT_MT32_LABEL} needs both ROM images;                  set [serial] mt32_control_rom and mt32_pcm_rom"
+                "midi: {MIDI_OUT_MT32_LABEL} needs both ROM images; \
+                 set [serial] mt32_control_rom and mt32_pcm_rom"
             );
             self.mt32_fault = Some("missing ROM(s)".to_string());
             return;
@@ -444,7 +445,6 @@ impl MidiSerialSink {
             Ok(device) => {
                 self.backend.set_output(None);
                 self.mt32 = Some(device);
-                self.mt32_selected = true;
             }
             Err(e) => {
                 log::warn!("midi: {MIDI_OUT_MT32_LABEL} could not be fitted: {e:#}");
@@ -624,6 +624,10 @@ impl SerialSink for MidiSerialSink {
     }
 
     fn as_midi(&mut self) -> Option<&mut MidiSerialSink> {
+        Some(self)
+    }
+
+    fn as_midi_ref(&self) -> Option<&MidiSerialSink> {
         Some(self)
     }
 
