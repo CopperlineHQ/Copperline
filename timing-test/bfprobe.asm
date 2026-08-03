@@ -40,31 +40,47 @@
 ; The bit-field opcodes are hand-encoded (dc.w) so the disk keeps
 ; assembling with vasm -m68000 like every other probe.
 ;
-; No real-A1200 column exists yet. Emulator columns 2026-08-03 (E-clock
-; ticks; clk/iter = ticks * 20.006 / 8192), after the m68k crate's
-; bit-field access-width and 020 timing fix:
+; Columns 2026-08-03 (E-clock ticks; clk/iter = ticks * 20.006 / 8192).
+; REAL = a stock A1200 (68EC020 14.19 MHz, AGA, 2 MB chip), rows typed
+; from a photo of the on-screen table; the anchors reproduce the main
+; disk and fwdprobe exactly, validating the run. The emulator columns
+; predate the real-column recalibration.
 ;
-;              Copperline           FS-UAE (WinUAE core)
-;   row  0     0E6C  9.02 clk       1006  10.02 clk   (anchor)
-;   row  1     0CD0  8.01           1004  10.01       (anchor)
-;   row  2     19BC 16.09           204C  20.19
-;   row  3     204C 20.19           204D  20.19
-;   row  4     1CD0 18.02           1337  12.01
-;   row  5     3A22 36.35           204C  20.19
-;   row  6     7A38 76.42           204D  20.19
-;   row  7     9A94 96.66           3A22  36.35
-;   row  8     19BC 16.09           204C  20.19
-;   row  9     19BB 16.09           1337  12.01
-;   row 10     4096 40.38           204C  20.19
-;   row 11     19BB 16.09           204C  20.19
-;   row 12     66FB 64.39           6D42  68.31
-;   row 13     60E1 60.57           6D43  68.31
+;              REAL A1200           Copperline           FS-UAE
+;   row  0     0E6B  9.01 clk       0E6C  9.02 clk       1006 10.02 clk
+;   row  1     0CD0  8.01           0CD0  8.01           1004 10.01
+;   row  2     2CF3 28.10           19BC 16.09           204C 20.19
+;   row  3     2CF2 28.10           204C 20.19           204D 20.19
+;   row  4     2004 20.02           1CD0 18.02           1337 12.01
+;   row  5     2CF2 28.10           3A22 36.35           204C 20.19
+;   row  6     2CF3 28.10           7A38 76.42           204D 20.19
+;   row  7     46E4 44.32           9A94 96.66           3A22 36.35
+;   row  8     2CF3 28.10           19BC 16.09           204C 20.19
+;   row  9     2696 24.12           19BB 16.09           1337 12.01
+;   row 10     2CF2 28.10           4096 40.38           204C 20.19
+;   row 11     2CF2 28.10           19BB 16.09           204C 20.19
+;   row 12     872A 84.51           66FB 64.39           6D42 68.31
+;   row 13     872C 84.51           60E1 60.57           6D43 68.31
 ;
-; The columns already disagree structurally: FS-UAE bills spans 1, 2 and
-; 4 identically (rows 2/5/6 - the UM's one-long-operand model) where
-; Copperline's byte-granular accesses grow with the span, and FS-UAE's
-; demo-loop rows (12/13) are SLOWER than Copperline's yet FS-UAE meets
-; the demo's frame deadline. Only a real-A1200 column can arbitrate.
+; What the real column says (the first hardware measurement of the 020
+; bit-field class we know of):
+; 1. Field spans of 1, 2 and 4 bytes cost EXACTLY the same (rows
+;    2/5/6/8/10/11 all 2CF2-2CF3): the operand is one long access, the
+;    MC68020UM note's model, which FS-UAE shares in shape. Byte-granular
+;    accesses (Copperline's pre-recalibration column) are wrong for
+;    multi-byte spans.
+; 2. The magnitude is higher than both emulators: a span-1..4 BFSET
+;    loop is 28.10 clk (7.03 cck) against Copperline's 16.09 and
+;    FS-UAE's 20.19. The five-byte span adds 16.2 clk (row 7), BFTST
+;    runs 4 clk under the modify forms (row 9), BFEXTU and BFINS match
+;    the modify forms (rows 10/11), and the dynamic offset is free
+;    (row 8 = row 2).
+; 3. No DBcc-alignment sensitivity in any memory row (2/3 and 12/13
+;    pairs are a tick apart): the operand access absorbs the branch
+;    clock, as rdprobe's write rows do.
+; 4. The demo's plot loop is 84.51 clk = 21.1 cck per pixel pair
+;    (rows 12/13): 3527 tracers cost ~74.5k cck, just over one PAL
+;    frame, inside the effect's two-frame deadline.
 ;
 ; Loaded by boot.asm to $30000. Same CIA-A timer A harness, renderer and
 ; serial output as rdprobe: a two-digit decimal row ID then the value as
