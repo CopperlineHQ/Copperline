@@ -142,6 +142,9 @@ smoltcp = { version = "0.12", default-features = false, features = [
 # optional realtime-priority feature (see src/priority.rs).
 libc = "0.2"
 zerocopy = { version = "0.8", features = ["derive"] }
+# CHD (MAME "Compressed Hunks of Data") CD images (src/cdrom/chd.rs). Pure
+# Rust, so it builds for wasm32 browser targets like the rest of the core.
+chd = "0.3"
 
 # macOS dock icon: winit's with_window_icon is a no-op on macOS, so the dock
 # icon must be set at runtime via NSApplication. These objc2 versions match the

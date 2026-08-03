@@ -83,8 +83,8 @@ Status Bar*):
   drive, and changing it is done by hand (see [](floppybridge)).
 - **CD controls** on machines with a CD drive (CDTV, CD32, or a SCSI
   CD-ROM unit): a CD button that loads (or swaps) a CD image
-  (`.cue`/`.iso`) with the proper media-change notification, and a CD
-  eject button. These do not appear on machines without a CD drive.
+  (`.cue`/`.iso`/`.chd`) with the proper media-change notification, and a
+  CD eject button. These do not appear on machines without a CD drive.
 - **Joystick toggle** (just left of the volume control): a gamepad or
   keyboard icon showing which source drives the joystick port. Click it to
   flip between gamepad-only and keyboard joystick emulation; see
@@ -140,8 +140,8 @@ Disk images can be dropped anywhere on the emulator window:
   (`1`-`4`), or press `Esc` to cancel. Dropping several floppies at once
   queues them all as the target drive's swap playlist, exactly like a
   multi-selection in the disk dialog.
-- **CD images** (`.cue`/`.iso`) mount in the machine's CD drive (CDTV,
-  CD32, or a SCSI CD-ROM unit), with the media-change notification.
+- **CD images** (`.cue`/`.iso`/`.chd`) mount in the machine's CD drive
+  (CDTV, CD32, or a SCSI CD-ROM unit), with the media-change notification.
 - **Hard disk images and Kickstart ROMs** cannot be swapped at runtime; a
   notice points at the machine-configuration screen, which also refuses
   drops while it is open.
@@ -578,7 +578,8 @@ not silently mixed in. Two caveats:
   hard drive *after* the snapshot are still visible after restoring --
   treat a state as a CPU/chipset snapshot, not a disk backup. In-memory
   volumes (directory-as-HDD) and floppy images are embedded whole.
-- CD images are likewise reopened by path; keep the cue/bin where it was.
+- CD images are likewise reopened by path; keep the cue/bin (or CHD)
+  where it was.
 
 ### Quick-save slots
 

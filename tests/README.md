@@ -122,6 +122,7 @@ baselines to maintain.
 | `picasso2_workbench_opens_640x480x16` | `Kickstart v3.1 r40.68 (1993)(Commodore)(A4000).rom`, `p96-picasso2-16.hdf` (same, default 640x480x16 screen) |
 | `picasso2plus_workbench_opens_with_gd5428_revision` | `Kickstart v3.1 r40.68 (1993)(Commodore)(A4000).rom`, `p96-picasso2.hdf` (same installation booted against the Picasso II+ identity) |
 | `picasso2_p96cts_reports_all_modes_clean` | `Kickstart v3.1 r40.68 (1993)(Commodore)(A4000).rom`, `p96-picasso2-cts.hdf` (startup runs p96cts at 8/16/24 bpp and writes `P96OUT:p96cts.result`) |
+| `chd_cd32_disc_serves_iso9660_data_and_smooth_audio` | `Pinball Fantasies (EU).chd` (a chdman v5 CD32 disc with a MODE1_RAW data track and CD audio tracks) |
 
 ## Obtaining the assets legally
 
