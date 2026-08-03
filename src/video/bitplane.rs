@@ -1238,10 +1238,11 @@ impl ControlState {
     /// One-gulp reload advance (in native px) for a playfield whose BPLCON1
     /// scroll interacts with the fetch's off-grid phase. Two cases, by
     /// FMODE: an FMODE=0 fetch placement rounds UP (data late; scroll
-    /// covering the lateness catches the floor slot), a wide-FMODE
-    /// placement rounds DOWN via the Agnus DDFSTRT unit mask (data early;
-    /// scroll taps folding into the last `earliness` px of the gulp window
-    /// see the next gulp). Both cases sit one gulp left of the base origin.
+    /// covering the lateness catches the floor slot), a wide-FMODE fetch
+    /// arrives at an off-grid phase of Denise's absolute reload grid, and
+    /// taps at or past the arrival phase fold one gulp left of taps below
+    /// it (see the wide branch below). Both cases sit one gulp left of the
+    /// base origin.
     ///
     /// The row's placement (`fetch_origin_native_shift`) quantizes an
     /// FMODE=0 fetch that starts off the shifter reload grid UP to the next
@@ -1266,9 +1267,6 @@ impl ControlState {
             self.ddfstrt,
         ) as i32;
         let phase = start.rem_euclid(gulp);
-        if phase == 0 {
-            return 0;
-        }
         let native_per_cck = if self.shres() {
             8
         } else if self.hires() {
@@ -1277,31 +1275,42 @@ impl ControlState {
             2
         };
         if self.fetch_quantum() != 1 {
-            // Wide-FMODE counterpart of the FMODE=0 rule below, with the
-            // opposite sense: Agnus masks an off-grid DDFSTRT DOWN to the
-            // fetch-unit grid (see `align`), so the data arrives
-            // phase*native px EARLY relative to the programmed start
-            // instead of late. Denise's reload comparator window is
-            // anchored at that early fetch start, so scroll taps in the
-            // last `earliness` px of the gulp window already see the NEXT
-            // gulp's data: the playfield sits one full gulp left, i.e. the
-            // display delay folds as ((scroll + earliness) mod gulp) -
-            // earliness. On-grid starts (every calibrated KS/CD32/Pinball
-            // case) keep phase 0 and are unchanged. Calibrated against
-            // Alien Breed II AGA's playfield (lo-res, FMODE BPL32,
-            // DDFSTRT $24 -> phase 4 cck, earliness 8 px): its scroller
-            // pairs AGA BPLCON1 values $CC99..$CCFF (folded taps 25..31)
-            // with a one-gulp pointer step, which jumps 32 px for 4 of
-            // every 16 frames without the fold. FS-UAE (WinUAE core)
-            // renders the ddfprobe-agafold band map identically, band by
-            // band, corroborating the rule and the fold boundary. TODO:
-            // verify the hi-res/SHRES scaling on real hardware or FS-UAE;
-            // only the lo-res BPL32 case is pinned.
+            // Wide-FMODE scroll fold. Denise's reload comparator does not
+            // know where the fetch started: it matches the BPLCON1 tap
+            // against a free-running per-line pixel counter, i.e. an
+            // ABSOLUTE gulp grid anchored at hpos 0 (the WinUAE
+            // cycle-exact `delay_cycles` model). A gulp's data becomes
+            // reloadable when its fetch lands, `earliness` px past the
+            // unit grid (Agnus masks an off-grid DDFSTRT DOWN to the
+            // grid, see `align`) plus the 8-cck fetch-to-comparator
+            // pipeline, so taps at or past `earliness + pipeline` catch
+            // the reload one grid cell early and sit one full gulp left
+            // of taps below it. The boundary does NOT wrap at the gulp:
+            // the arrival slides monotonically later as the phase grows,
+            // so once the boundary passes the top of the tap range
+            // (earliness >= gulp - pipeline) every tap catches the next
+            // cell and nothing folds. On-grid starts fold from the
+            // pipeline alone (taps at or past 16 lo-res px). The whole
+            // map is FS-UAE-verified band by band on the ddfprobe-agafold
+            // (issue #248, Alien Breed II AGA: lo-res BPL32, earliness
+            // 8 px -> boundary 24, folded taps pair with a one-gulp
+            // pointer step) and ddfprobe-agafold2 (issue #371, SANITY
+            // Roots II AGA: lo-res BPL64, DDFSTRT $58/$38, earliness
+            // 48 px -> boundary past the range, taps 16..43 render
+            // linearly, which the previous last-earliness-window rule
+            // folded; phases 0..28 swept) golden probes. TODO: verify
+            // the hi-res/SHRES pipeline scaling on FS-UAE or real
+            // hardware; only lo-res is pinned.
             let gulp_native = gulp * native_per_cck;
             let earliness = phase * native_per_cck;
-            if scroll as i32 >= gulp_native - earliness {
+            let pipeline = 8 * native_per_cck;
+            let boundary = earliness + pipeline;
+            if scroll as i32 >= boundary {
                 return gulp_native;
             }
+            return 0;
+        }
+        if phase == 0 {
             return 0;
         }
         let lateness = phase * native_per_cck;

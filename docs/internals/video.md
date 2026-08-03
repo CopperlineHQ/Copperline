@@ -98,20 +98,32 @@ fetch-unit width (32-bit fetches scroll within 32 lo-res px, 64-bit within
 An off-grid DDFSTRT interacts with the scroll in both fetch regimes. An
 FMODE=0 fetch placed off the shifter reload grid rounds UP (the data is
 late for its own slot), and a scroll that covers the lateness catches the
-floor slot one gulp earlier (vAmiga-verified, `ddfprobe-phase`). A wide
-FMODE fetch has the opposite sense: Agnus masks DDFSTRT DOWN to the
-fetch-unit grid, the data arrives early, and Denise's reload comparator
-window is anchored at that early fetch start, so scroll taps folding into
-the last `earliness` px of the gulp window already see the next gulp's
-data and the playfield sits one full gulp left -- the display delay is
-`((tap + earliness) mod gulp) - earliness`. On-grid starts never fold.
-Pinned by the `ddfprobe-agafold` golden probe on the Alien Breed II AGA
-playfield constellation (lo-res BPL32, DDFSTRT $24 -> earliness 8 px),
-whose scroller pairs the folded taps with a one-gulp pointer step and
-jumps 32 px for 4 of every 16 pan frames without the fold. FS-UAE
-(WinUAE core) renders the probe's 16-band map identically, band by band
-(vAmiga is OCS/ECS-only and cannot arbitrate AGA); the hi-res/SHRES
-scaling of the fold is not yet externally verified.
+floor slot one gulp earlier (vAmiga-verified, `ddfprobe-phase`). On a wide
+FMODE fetch, Agnus masks DDFSTRT DOWN to the fetch-unit grid, so the data
+arrives `earliness` px early relative to the programmed start, and
+Denise's reload comparator runs on the absolute hpos gulp grid (it never
+sees where the fetch started), so the fold boundary is the data-arrival
+distance past the grid point: `earliness + pipeline`, with an 8-cck
+fetch-to-comparator pipeline. Scroll taps at or past the boundary see the
+next gulp's data and sit one full gulp left of taps below it. The
+boundary saturates rather than wrapping at the gulp: arrivals slide
+monotonically later as the phase grows, so once the boundary passes the
+top of the tap range nothing folds, and an exactly on-grid start folds
+from the pipeline alone (taps at or past 16 lo-res px).
+Pinned by two golden probes, both FS-UAE-verified band by band (vAmiga
+is OCS/ECS-only and cannot arbitrate AGA): `ddfprobe-agafold` on the
+Alien Breed II AGA playfield constellation (issue #248: lo-res BPL32,
+DDFSTRT $24 -> earliness 8 px, boundary 24), whose scroller pairs the
+folded taps with a one-gulp pointer step and jumps 32 px for 4 of every
+16 pan frames without the fold, and `ddfprobe-agafold2`, which sweeps
+the DDFSTRT phase on the 64-bit fetch across the SANITY Roots II AGA
+swirl/kaleidoscope constellation (issue #371: lo-res BPL64, DDFSTRT
+$58/$38 -> earliness 48 px, boundary past the 0..63 tap range), whose
+taps 16..43 must render linearly -- the earlier last-earliness-window
+rule (`fold at gulp - earliness`) reproduced AB2's map but folded every
+Roots tap >= 16, pulling the swirl a gulp left and shearing the
+kaleidoscope line by line. The hi-res/SHRES scaling of the pipeline is
+not yet externally verified; only lo-res is pinned.
 BPLCON1-delayed samples at the left edge of a scanline do not reuse the
 previous line's final bitplane word. Before the current line's shifter has a
 sample for a delayed tap, replay marks playfield output active but returns
