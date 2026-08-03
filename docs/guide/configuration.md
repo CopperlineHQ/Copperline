@@ -81,7 +81,8 @@ profile in a config file.
 The audio, serial, parallel, and network surface has matching per-run flags
 too -- `--audio-device`, `--audio-channel-mode`, `--audio-filter`,
 `--audio-stereo-separation`, `--serial`, `--midi-in`, `--midi-out`,
-`--parallel`, `--sampler-audio-input`, `--sampler-input-gain`, `--a2065-net`,
+`--mt32-control-rom`, `--mt32-pcm-rom`, `--mt32-panel`, `--parallel`,
+`--sampler-audio-input`, `--sampler-input-gain`, `--a2065-net`,
 `--a2065-interface`, `--hostsocket-net`, `--hostsocket-interface` --
 described with their `[audio]`, `[serial]`, `[parallel]`, `[a2065]`, and
 `[hostsocket]` keys below.
@@ -1011,8 +1012,8 @@ button.
 ```toml
 [serial]
 mode = "stdout"          # off, stdout, midi, tcp, tcp-connect, or pty
-# midi_out = "FluidSynth"  # midi mode: host destination, substring match
-# midi_in = "Keystation"   # midi mode: host source, substring match
+# midi_out = "FluidSynth"  # midi mode: host destination, or "mt32"
+# midi_in = "Keystation"   # midi mode: host source, or "mt32"
 # listen = "127.0.0.1:1234"  # tcp mode: bind address
 # connect = "bbs.example.com:1337"  # tcp-connect mode: remote to dial
 ```
@@ -1026,7 +1027,10 @@ Paula's serial in/out is connected:
 - `midi` -- serial in/out is bridged to host MIDI endpoints. Needs a build
   with the `midi` feature (the default); `midi_out`/`midi_in` name the
   endpoints by case-insensitive substring (a USB interface or a virtual
-  port). `--list-midi` prints the host endpoints.
+  port). `--list-midi` prints the host endpoints. Either may instead be
+  `"mt32"`, which is Copperline's own emulated MT-32 rather than anything
+  on the host, and brings its own `mt32_*` keys with it; see
+  [the MT-32 chapter](mt32.md).
 - `tcp` -- serial in/out is bridged to a host TCP port, like UAE's `TCP:`
   device. `listen` sets the bind address (default `127.0.0.1:1234`);
   connect with e.g. `nc`, `socat`, or a raw-mode telnet client.
