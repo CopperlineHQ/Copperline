@@ -36,10 +36,12 @@ its header records the real-A1200 column and the rule derived from it.
 bit-field instructions (the SANITY Roots II AGA "DIE" dissolve class,
 issue #371): register vs memory forms, the memory RMW cost by field span
 (1/2/4/5 bytes), dynamic offsets, the read-only forms, and the demo's
-exact nine-instruction plot loop at both DBcc alignments. No real-A1200
-column exists yet for the bit-field class on any emulator's calibration;
-the header records the Copperline and FS-UAE columns and what each row
-decides.
+exact nine-instruction plot loop at both DBcc alignments. The header
+records a real-A1200 column - the first hardware measurement of the
+bit-field class we know of - alongside the Copperline and FS-UAE
+columns: field spans within four bytes all cost the same (one long
+operand access, the MC68020UM model), a five-byte span adds one access,
+and the memory rows absorb the DBcc alignment clock.
 
 ## Running
 
@@ -408,7 +410,7 @@ refreshed (or a count sitting on an 8-iteration display-bucket edge flips a
 whole bar word). Re-bless and review the diff after a ROM refresh.
 
 Each probe is its own `#[test]`, so the harness runs the emulator boots in
-parallel on the available cores (the full suite of 27 takes ~20 s on an
+parallel on the available cores (the full suite of 26 takes ~20 s on an
 8-core host vs ~90 s sequentially).
 
 Covered: `timing-test` (all 32 timing rows as rendered hex), `ddfprobe`

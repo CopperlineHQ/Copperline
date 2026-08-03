@@ -1288,8 +1288,10 @@ impl ControlState {
             // of taps below it. The boundary does NOT wrap at the gulp:
             // the arrival slides monotonically later as the phase grows,
             // so once the boundary passes the top of the tap range
-            // (earliness >= gulp - pipeline) every tap catches the next
-            // cell and nothing folds. On-grid starts fold from the
+            // (earliness >= gulp - pipeline) no tap can reach it - every
+            // tap catches the same following grid cell, the whole
+            // playfield shares one alignment and no fold discontinuity
+            // exists. On-grid starts fold from the
             // pipeline alone (taps at or past 16 lo-res px). The whole
             // map is FS-UAE-verified band by band on the ddfprobe-agafold
             // (issue #248, Alien Breed II AGA: lo-res BPL32, earliness
