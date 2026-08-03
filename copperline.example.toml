@@ -536,6 +536,8 @@ floppy_sounds_volume = 100
 #   "midi"    serial in/out is bridged to host MIDI endpoints. Needs a build
 #             with the `midi` feature; midi_out/midi_in name the endpoints
 #             (substring match, e.g. a USB interface or a virtual port).
+#             Either may instead be "mt32", the emulated MT-32 built in
+#             rather than anything on the host - see docs/guide/mt32.md.
 #   "tcp"     serial in/out is bridged to a host TCP port, like UAE's "TCP:"
 #             device. listen sets the bind address (default 127.0.0.1:1234);
 #             connect with e.g. `nc`, `socat`, or a raw-mode telnet client.
@@ -554,6 +556,18 @@ floppy_sounds_volume = 100
 # midi_out = "USB MIDI Interface"
 # midi_in = "USB MIDI Interface"
 # listen = "127.0.0.1:1234"
+#
+# The emulated MT-32 (docs/guide/mt32.md). midi_out = "mt32" plays to it
+# instead of a host endpoint; both ROM images are needed, and are yours to
+# supply. midi_in = "mt32" wires its own MIDI OUT back to the machine, which
+# is what a patch editor or librarian needs to read it; that is offered only
+# while it is also the output, since it answers only what it is sent.
+# midi_out = "mt32"
+# midi_in = "mt32"
+# mt32_control_rom = "~/Amiga/MT32_CONTROL.ROM"
+# mt32_pcm_rom = "~/Amiga/MT32_PCM.ROM"
+# mt32_panel = true          # the module's front panel, under the display
+# mt32_lcd = "mt32"          # mt32 (default), jv1080, or oled
 
 
 # Parallel (Centronics) port peripheral. With no section the connector is
