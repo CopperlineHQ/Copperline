@@ -8,12 +8,15 @@
 //! per second regardless of each track's sector size; the disc address
 //! space is the concatenation of all files in cue order. A bare `.iso`
 //! image (2048-byte cooked data sectors, no cue sheet) loads as a
-//! single-track data disc.
+//! single-track data disc, and a `.chd` loads through the compressed
+//! CHD backend in the `chd` child module.
 
 use anyhow::{bail, Context, Result};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+
+mod chd;
 
 pub const SECTORS_PER_SECOND: u32 = 75;
 pub const DATA_SECTOR_BYTES: usize = 2048;
@@ -69,32 +72,57 @@ struct Extent {
 
 #[derive(Debug)]
 pub struct CdImage {
+    tracks: Vec<CdTrack>,
+    total_sectors: u32,
+    backend: Backend,
+}
+
+/// Sector storage behind a `CdImage`: plain image files addressed by
+/// extent (BIN/CUE, bare ISO), or a compressed CHD hunk store.
+#[derive(Debug)]
+enum Backend {
+    Bin(BinBackend),
+    Chd(Box<chd::ChdImage>),
+}
+
+/// The plain-file backend shared by BIN/CUE and bare ISO images.
+#[derive(Debug)]
+struct BinBackend {
     files: Vec<File>,
     /// Host path of each entry in `files`, kept so a save state can
     /// reattach the (read-only) image files on load.
     paths: Vec<PathBuf>,
-    tracks: Vec<CdTrack>,
     extents: Vec<Extent>,
-    total_sectors: u32,
 }
 
-/// Serde shadow of `CdImage`: the image files are read-only, so only their
-/// paths are stored and deserialization reopens them.
+/// Serde shadow of `CdImage`: the image files are read-only, so only
+/// their paths are stored and deserialization reopens them (a CHD also
+/// re-reads its header and track metadata).
 #[derive(serde::Serialize, serde::Deserialize)]
-struct CdImageState {
-    paths: Vec<PathBuf>,
-    tracks: Vec<CdTrack>,
-    extents: Vec<Extent>,
-    total_sectors: u32,
+enum CdImageState {
+    Bin {
+        paths: Vec<PathBuf>,
+        tracks: Vec<CdTrack>,
+        extents: Vec<Extent>,
+        total_sectors: u32,
+    },
+    Chd {
+        path: PathBuf,
+    },
 }
 
 impl serde::Serialize for CdImage {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        CdImageState {
-            paths: self.paths.clone(),
-            tracks: self.tracks.clone(),
-            extents: self.extents.clone(),
-            total_sectors: self.total_sectors,
+        match &self.backend {
+            Backend::Bin(bin) => CdImageState::Bin {
+                paths: bin.paths.clone(),
+                tracks: self.tracks.clone(),
+                extents: bin.extents.clone(),
+                total_sectors: self.total_sectors,
+            },
+            Backend::Chd(chd) => CdImageState::Chd {
+                path: chd.path().to_path_buf(),
+            },
         }
         .serialize(serializer)
     }
@@ -102,20 +130,36 @@ impl serde::Serialize for CdImage {
 
 impl<'de> serde::Deserialize<'de> for CdImage {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let state = CdImageState::deserialize(deserializer)?;
-        let mut files = Vec::with_capacity(state.paths.len());
-        for path in &state.paths {
-            files.push(File::open(path).map_err(|e| {
-                serde::de::Error::custom(format!("reopening CD image {}: {e}", path.display()))
-            })?);
+        match CdImageState::deserialize(deserializer)? {
+            CdImageState::Bin {
+                paths,
+                tracks,
+                extents,
+                total_sectors,
+            } => {
+                let mut files = Vec::with_capacity(paths.len());
+                for path in &paths {
+                    files.push(File::open(path).map_err(|e| {
+                        serde::de::Error::custom(format!(
+                            "reopening CD image {}: {e}",
+                            path.display()
+                        ))
+                    })?);
+                }
+                Ok(Self {
+                    tracks,
+                    total_sectors,
+                    backend: Backend::Bin(BinBackend {
+                        files,
+                        paths,
+                        extents,
+                    }),
+                })
+            }
+            CdImageState::Chd { path } => Self::load_chd(&path).map_err(|e| {
+                serde::de::Error::custom(format!("reopening CD image {}: {e:#}", path.display()))
+            }),
         }
-        Ok(Self {
-            files,
-            paths: state.paths,
-            tracks: state.tracks,
-            extents: state.extents,
-            total_sectors: state.total_sectors,
-        })
     }
 }
 
@@ -131,18 +175,27 @@ struct RawTrack {
 }
 
 impl CdImage {
-    /// Load a CD image: a cue sheet (with its BINARY file(s)), or a bare
-    /// `.iso` data image.
+    /// Load a CD image: a cue sheet (with its BINARY file(s)), a bare
+    /// `.iso` data image, or a `.chd`.
     pub fn load(path: &Path) -> Result<Self> {
-        let is_iso = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("iso"));
-        if is_iso {
+        let ext = path.extension().and_then(|e| e.to_str());
+        if ext.is_some_and(|e| e.eq_ignore_ascii_case("chd")) {
+            Self::load_chd(path)
+        } else if ext.is_some_and(|e| e.eq_ignore_ascii_case("iso")) {
             Self::load_iso(path)
         } else {
             Self::load_cue(path)
         }
+    }
+
+    /// Load a CHD (MAME "Compressed Hunks of Data") CD image.
+    fn load_chd(path: &Path) -> Result<Self> {
+        let (backend, tracks, total_sectors) = chd::ChdImage::load(path)?;
+        Ok(Self {
+            tracks,
+            total_sectors,
+            backend: Backend::Chd(Box::new(backend)),
+        })
     }
 
     /// Load a bare data image as one MODE1/2048 track.
@@ -161,23 +214,25 @@ impl CdImage {
         }
         let sectors = (len / DATA_SECTOR_BYTES as u64) as u32;
         Ok(Self {
-            files: vec![file],
-            paths: vec![path.to_path_buf()],
             tracks: vec![CdTrack {
                 number: 1,
                 kind: TrackKind::Mode1_2048,
                 start_sector: 0,
                 sector_count: sectors,
             }],
-            extents: vec![Extent {
-                disc_start: 0,
-                sector_count: sectors,
-                sector_bytes: DATA_SECTOR_BYTES,
-                file_index: 0,
-                byte_offset: 0,
-                kind: TrackKind::Mode1_2048,
-            }],
             total_sectors: sectors,
+            backend: Backend::Bin(BinBackend {
+                files: vec![file],
+                paths: vec![path.to_path_buf()],
+                extents: vec![Extent {
+                    disc_start: 0,
+                    sector_count: sectors,
+                    sector_bytes: DATA_SECTOR_BYTES,
+                    file_index: 0,
+                    byte_offset: 0,
+                    kind: TrackKind::Mode1_2048,
+                }],
+            }),
         })
     }
 
@@ -373,11 +428,13 @@ impl CdImage {
         }
 
         Ok(Self {
-            files,
-            paths,
             tracks,
-            extents,
             total_sectors: disc,
+            backend: Backend::Bin(BinBackend {
+                files,
+                paths,
+                extents,
+            }),
         })
     }
 
@@ -390,20 +447,21 @@ impl CdImage {
         self.total_sectors
     }
 
-    fn extent_for_sector(&self, sector: u32) -> Option<&Extent> {
-        self.extents
-            .iter()
-            .find(|e| sector >= e.disc_start && sector < e.disc_start + e.sector_count)
+    /// The track kind covering `sector`, if it is on the disc.
+    fn sector_kind(&self, sector: u32) -> Option<TrackKind> {
+        match &self.backend {
+            Backend::Bin(bin) => bin.extent_for_sector(sector).map(|e| e.kind),
+            Backend::Chd(chd) => chd.sector_kind(sector),
+        }
     }
 
-    fn read_raw(&mut self, extent_index: usize, sector: u32, buf: &mut [u8]) -> Result<()> {
-        let extent = &self.extents[extent_index];
-        let in_extent = u64::from(sector - extent.disc_start);
-        let offset = extent.byte_offset + in_extent * extent.sector_bytes as u64;
-        let file = &mut self.files[extent.file_index];
-        file.seek(SeekFrom::Start(offset))?;
-        file.read_exact(buf)?;
-        Ok(())
+    /// Read the stored payload of `sector`: `buf` must be the track
+    /// kind's `sector_bytes()` long, and comes back in disc byte order.
+    fn read_payload(&mut self, sector: u32, buf: &mut [u8]) -> Result<()> {
+        match &mut self.backend {
+            Backend::Bin(bin) => bin.read_payload(sector, buf),
+            Backend::Chd(chd) => chd.read_payload(sector, buf),
+        }
     }
 
     /// Read the 2048 bytes of user data in a data sector. Fails on audio
@@ -413,30 +471,18 @@ impl CdImage {
         sector: u32,
         buf: &mut [u8; DATA_SECTOR_BYTES],
     ) -> Result<()> {
-        let (index, kind) = {
-            let extent = self
-                .extent_for_sector(sector)
-                .with_context(|| format!("sector {sector} beyond end of disc"))?;
-            if !extent.kind.is_data() {
-                bail!("sector {sector} is in an audio track");
-            }
-            (
-                self.extents
-                    .iter()
-                    .position(|e| std::ptr::eq(e, extent))
-                    .unwrap(),
-                extent.kind,
-            )
-        };
+        let kind = self
+            .sector_kind(sector)
+            .with_context(|| format!("sector {sector} beyond end of disc"))?;
         match kind {
-            TrackKind::Mode1_2048 => self.read_raw(index, sector, buf),
+            TrackKind::Mode1_2048 => self.read_payload(sector, buf),
             TrackKind::Mode1_2352 => {
                 let mut raw = [0u8; RAW_SECTOR_BYTES];
-                self.read_raw(index, sector, &mut raw)?;
+                self.read_payload(sector, &mut raw)?;
                 buf.copy_from_slice(&raw[16..16 + DATA_SECTOR_BYTES]);
                 Ok(())
             }
-            TrackKind::Audio => unreachable!(),
+            TrackKind::Audio => bail!("sector {sector} is in an audio track"),
         }
     }
 
@@ -446,42 +492,27 @@ impl CdImage {
         sector: u32,
         buf: &mut [u8; RAW_SECTOR_BYTES],
     ) -> Result<()> {
-        let index = {
-            let extent = self
-                .extent_for_sector(sector)
-                .with_context(|| format!("sector {sector} beyond end of disc"))?;
-            if extent.kind.is_data() {
-                bail!("sector {sector} is in a data track");
-            }
-            self.extents
-                .iter()
-                .position(|e| std::ptr::eq(e, extent))
-                .unwrap()
-        };
-        self.read_raw(index, sector, buf)
+        let kind = self
+            .sector_kind(sector)
+            .with_context(|| format!("sector {sector} beyond end of disc"))?;
+        if kind.is_data() {
+            bail!("sector {sector} is in a data track");
+        }
+        self.read_payload(sector, buf)
     }
 
     /// Read one full 2352-byte raw frame at `sector`, whatever the track
     /// type: raw images are copied through; cooked (2048-byte) data
     /// sectors get a synthesized sync + BCD MSF header (zero EDC/ECC).
     pub fn read_raw_sector(&mut self, sector: u32, buf: &mut [u8; RAW_SECTOR_BYTES]) -> Result<()> {
-        let (index, kind) = {
-            let extent = self
-                .extent_for_sector(sector)
-                .with_context(|| format!("sector {sector} beyond end of disc"))?;
-            (
-                self.extents
-                    .iter()
-                    .position(|e| std::ptr::eq(e, extent))
-                    .unwrap(),
-                extent.kind,
-            )
-        };
+        let kind = self
+            .sector_kind(sector)
+            .with_context(|| format!("sector {sector} beyond end of disc"))?;
         match kind {
-            TrackKind::Mode1_2352 | TrackKind::Audio => self.read_raw(index, sector, buf),
+            TrackKind::Mode1_2352 | TrackKind::Audio => self.read_payload(sector, buf),
             TrackKind::Mode1_2048 => {
                 let mut data = [0u8; DATA_SECTOR_BYTES];
-                self.read_raw(index, sector, &mut data)?;
+                self.read_payload(sector, &mut data)?;
                 buf.fill(0);
                 buf[1..11].fill(0xFF);
                 let msf = sector + LEADIN_SECTORS;
@@ -497,8 +528,7 @@ impl CdImage {
 
     /// Whether `sector` falls inside an audio track region.
     pub fn is_audio_sector(&self, sector: u32) -> bool {
-        self.extent_for_sector(sector)
-            .is_some_and(|e| !e.kind.is_data())
+        self.sector_kind(sector).is_some_and(|k| !k.is_data())
     }
 
     /// One-line TOC summary for the log.
@@ -512,6 +542,29 @@ impl CdImage {
             audio,
             self.total_sectors()
         )
+    }
+}
+
+impl BinBackend {
+    fn extent_for_sector(&self, sector: u32) -> Option<&Extent> {
+        self.extents
+            .iter()
+            .find(|e| sector >= e.disc_start && sector < e.disc_start + e.sector_count)
+    }
+
+    fn read_payload(&mut self, sector: u32, buf: &mut [u8]) -> Result<()> {
+        let index = self
+            .extents
+            .iter()
+            .position(|e| sector >= e.disc_start && sector < e.disc_start + e.sector_count)
+            .with_context(|| format!("sector {sector} beyond end of disc"))?;
+        let extent = &self.extents[index];
+        let in_extent = u64::from(sector - extent.disc_start);
+        let offset = extent.byte_offset + in_extent * extent.sector_bytes as u64;
+        let file = &mut self.files[extent.file_index];
+        file.seek(SeekFrom::Start(offset))?;
+        file.read_exact(buf)?;
+        Ok(())
     }
 }
 

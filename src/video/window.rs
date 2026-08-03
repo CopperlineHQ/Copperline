@@ -3613,7 +3613,7 @@ enum DroppedMediaKind {
     /// unknown extensions): FloppyImage::from_bytes sniffs the content and
     /// rejects what it cannot read, surfacing a clean OSD failure.
     Floppy,
-    /// A CD image (cue sheet or bare ISO) for the CD drive.
+    /// A CD image (cue sheet, bare ISO, or CHD) for the CD drive.
     Cd,
     /// Hard disk images cannot be hot-attached; point at the config screen.
     HardDisk,
@@ -3626,7 +3626,7 @@ fn classify_dropped_media(path: &std::path::Path) -> DroppedMediaKind {
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase());
     match ext.as_deref() {
-        Some("cue") | Some("iso") => DroppedMediaKind::Cd,
+        Some("cue") | Some("iso") | Some("chd") => DroppedMediaKind::Cd,
         Some("hdf") | Some("img") => DroppedMediaKind::HardDisk,
         Some("rom") => DroppedMediaKind::Rom,
         _ => DroppedMediaKind::Floppy,
@@ -6170,12 +6170,13 @@ impl App {
                 "Floppy images",
                 &["adf", "adz", "dms", "scp", "gz", "ipf", "zip"],
             ),
-            // Only formats CdImage::load takes: a cue sheet or a bare ISO
-            // (a raw .bin is a cue sheet's payload, not loadable alone).
-            LauncherField::CdImage => dialog.add_filter("CD images", &["cue", "iso"]),
+            // Only formats CdImage::load takes: a cue sheet, a bare ISO,
+            // or a CHD (a raw .bin is a cue sheet's payload, not loadable
+            // alone).
+            LauncherField::CdImage => dialog.add_filter("CD images", &["cue", "iso", "chd"]),
             LauncherField::Cd32Nvram => dialog.add_filter("NVRAM images", &["bin", "nv", "sav"]),
-            // SCSI units take hard disks or CD images (a cue/iso attaches a
-            // CD-ROM drive at that ID).
+            // SCSI units take hard disks or CD images (a cue/iso/chd
+            // attaches a CD-ROM drive at that ID).
             LauncherField::ScsiUnit0
             | LauncherField::ScsiUnit1
             | LauncherField::ScsiUnit2
@@ -6184,7 +6185,7 @@ impl App {
             | LauncherField::ScsiUnit5
             | LauncherField::ScsiUnit6 => dialog
                 .add_filter("Hard disk images", &["hdf", "img", "bin"])
-                .add_filter("CD images", &["cue", "iso"]),
+                .add_filter("CD images", &["cue", "iso", "chd"]),
             _ => dialog.add_filter("Hard disk images", &["hdf", "img", "bin"]),
         };
         if let Some(dir) = start_dir {
@@ -8760,7 +8761,7 @@ impl App {
         self.suspend_live_audio_for_host_io();
         let picked = rfd::FileDialog::new()
             .set_title("Load CD image")
-            .add_filter("CD images", &["cue", "iso"])
+            .add_filter("CD images", &["cue", "iso", "chd"])
             .pick_file();
 
         // Re-baseline pacing after the modal dialog, as for floppies.
@@ -8800,7 +8801,7 @@ impl App {
 
     /// Route files dropped on the window: floppy images to a drive
     /// (directly, or via the chooser panel when several drives could take
-    /// them), a CD image (cue/iso) to the CD drive, and everything else to
+    /// them), a CD image (cue/iso/chd) to the CD drive, and everything else to
     /// an explanatory notice. winit reports drops with no cursor position,
     /// so the target drive can only be picked after the fact.
     fn handle_dropped_files(&mut self, files: Vec<PathBuf>) {
