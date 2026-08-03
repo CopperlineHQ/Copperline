@@ -2008,6 +2008,92 @@ fn cpu_palette_writes_before_visible_area_update_frame_base() {
 }
 
 #[test]
+fn cpu_banked_palette_load_lands_each_write_in_its_bplcon3_bank() {
+    // Lisa resolves a COLORxx write against the BPLCON3 latch standing at
+    // that write: BANK (bits 15-13) selects the block of 32 colour-table
+    // entries and LOCT (bit 9) the nibble half (LOCT=0 writes both halves,
+    // LOCT=1 the low nibbles only). A CPU load of the 256-entry table walks
+    // BANK across the blocks and toggles LOCT between writes, all inside
+    // vertical blank before the display starts, so each write has to be
+    // resolved against the BPLCON3 value in force when it happened. Resolving
+    // the whole load against the value the frame opened with collapses every
+    // bank onto that one and destroys the entries it aliases over.
+    const LOCT: u16 = 0x0200;
+    let mut state = blank_state();
+    state.agnus_revision = AgnusRevision::AgaAlice;
+    let mut base_palettes = [state.palette; FB_HEIGHT];
+    let mut palette_segments = vec![Vec::new(); FB_HEIGHT];
+    let mut base_controls = [ControlState::from_render_state(&state); FB_HEIGHT];
+    let mut control_segments = vec![Vec::new(); FB_HEIGHT];
+    let mut manual_bpl_segments = Vec::new();
+
+    // (BANK, COLORxx index, high-nibble word, low-nibble word). BANK 0, the
+    // bank the frame opens in, is deliberately never selected.
+    let loads = [
+        (1usize, 0usize, 0x0123u16, 0x0456u16),
+        (2, 15, 0x0789, 0x0ABC),
+        (7, 31, 0x0FED, 0x0CBA),
+    ];
+    let vblank_line = (PAL_VISIBLE_LINE0 - 20) as u32;
+    let hpos = COPPER_WAIT_HPOS_FB0 as u32;
+    let mut events = Vec::new();
+    for (bank, idx, hi, lo) in loads {
+        let bank_bits = BPLCON3_PF2OF_DEFAULT | ((bank as u16) << 13);
+        let color = 0x180 + (idx as u16) * 2;
+        events.push(cpu_event(vblank_line, hpos, 0x106, bank_bits));
+        events.push(cpu_event(vblank_line, hpos, color, hi));
+        events.push(cpu_event(vblank_line, hpos, 0x106, bank_bits | LOCT));
+        events.push(cpu_event(vblank_line, hpos, color, lo));
+    }
+
+    apply_render_events(
+        &mut state,
+        &events,
+        &mut base_palettes,
+        &mut palette_segments,
+        &mut base_controls,
+        &mut control_segments,
+        &mut manual_bpl_segments,
+    );
+
+    assert!(palette_segments.iter().all(Vec::is_empty));
+    for (bank, idx, hi, lo) in loads {
+        let entry = bank * 32 + idx;
+        // The 8-bit components are the high nibble from the LOCT=0 write and
+        // the low nibble from the LOCT=1 write.
+        let expected_rgb24 = (u32::from(hi >> 8 & 0xF) << 20)
+            | (u32::from(lo >> 8 & 0xF) << 16)
+            | (u32::from(hi >> 4 & 0xF) << 12)
+            | (u32::from(lo >> 4 & 0xF) << 8)
+            | (u32::from(hi & 0xF) << 4)
+            | u32::from(lo & 0xF);
+        assert_eq!(
+            state.palette.entry(entry).latch(),
+            hi,
+            "bank {bank} COLOR{idx:02} latch"
+        );
+        assert_eq!(
+            state.palette.entry(entry).rgb24(),
+            expected_rgb24,
+            "bank {bank} COLOR{idx:02} merged 24-bit value"
+        );
+        assert_eq!(
+            base_palettes[0].entry(entry).rgb24(),
+            expected_rgb24,
+            "bank {bank} COLOR{idx:02} in the frame base palette"
+        );
+    }
+    // Bank 0 was never selected, so none of the load may land there.
+    for (_, idx, _, _) in loads {
+        assert_eq!(
+            state.palette.entry(idx).latch(),
+            0x0103,
+            "bank 0 COLOR{idx:02} untouched"
+        );
+    }
+}
+
+#[test]
 fn ddf_overscan_fetches_still_advance_bitplane_pointers() {
     let state = RenderState {
         ddfstrt: 0x0038,

@@ -3196,6 +3196,52 @@ fn ocs_bitplane_dma_capture_extends_equal_ddf_window_to_hard_stop() {
 }
 
 #[test]
+fn aga_lores_eight_plane_dma_capture_fetches_all_eight_streams() {
+    // FMODE=0 lo-res with BPLCON0 BPU3 set: Alice schedules all eight
+    // plane streams inside the eight-colour-clock fetch unit (plane 8 in
+    // the slot OCS/ECS leaves free at unit offset 0, plane 7 at offset 4),
+    // so every plane's words reach Denise. A screen whose colours come
+    // from the upper half of the 256-entry palette needs plane 8's bit.
+    let mut bus = empty_bus();
+    bus.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
+    bus.agnus.vpos = 0x2C;
+    bus.agnus.hpos = 0x30;
+    bus.denise.diwstrt = 0x2C81;
+    bus.denise.diwstop = 0x2DC1;
+    bus.denise.ddfstrt = 0x0038;
+    bus.denise.ddfstop = 0x0040;
+    bus.denise.bplcon0 = 0x0210; // BPU3 | COLOR: eight lo-res bitplanes
+    for plane in 0..8 {
+        let ptr = 0x0200 + plane as u32 * 0x0100;
+        bus.denise.bplpt[plane] = ptr;
+        bus.display_dma_bplpt[plane] = ptr;
+        write_chip_word(&mut bus, ptr as usize, 0x1000 | plane as u16);
+        write_chip_word(&mut bus, ptr as usize + 2, 0x2000 | plane as u16);
+    }
+
+    bus.advance_chipset(0x0050 - 0x0030);
+
+    let row = bus.frame_captured_bitplane_rows()[0].as_ref().unwrap();
+    assert_eq!(row.nplanes, 8);
+    assert_eq!(row.words_per_row, 2);
+    for plane in 0..8 {
+        assert_eq!(
+            row.planes[plane],
+            vec![0x1000 | plane as u16, 0x2000 | plane as u16],
+            "plane {} fetched both words",
+            plane + 1
+        );
+        assert_eq!(
+            bus.display_dma_bplpt[plane],
+            0x0200 + plane as u32 * 0x0100 + 4,
+            "plane {} pointer advanced twice",
+            plane + 1
+        );
+    }
+}
+
+#[test]
 fn wide_fmode_dma_capture_packs_lores_slots_in_fetch_units() {
     // Lores FMODE=3 (32-cck fetch units) with DDFSTRT $30 / DDFSTOP
     // $D0: Agnus runs six 32-cck units from the DDFSTRT comparator and

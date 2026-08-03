@@ -2578,13 +2578,26 @@ fn apply_render_events_and_collect_display_plan_events_with_visible_line0(
     let cpu_palette_beam_timed = cpu_palette_writes_are_beam_timed(events, visible_line0);
 
     if !cpu_palette_beam_timed {
+        // Lisa decodes each COLORxx write against the BPLCON3 latch standing
+        // at that write: BANK (bits 15-13) selects the block of 32 colour-table
+        // entries and LOCT (bit 9) the nibble half. A palette load that
+        // switches banks between writes therefore has to be resolved write by
+        // write, so carry BPLCON3 through the recorded (beam-ordered) events
+        // rather than resolving the whole frame against its opening value --
+        // otherwise every bank of a CPU-loaded 256-colour table collapses onto
+        // the bank that happened to be selected when the frame began. The
+        // register is a single latch, so a Copper write to it moves the
+        // decode for the CPU's next colour write just as the CPU's own does.
+        let mut bplcon3 = state.bplcon3;
         for event in events {
             let off = event.offset & 0x01FE;
-            if matches!(event.source, BeamWriteSource::Cpu) && matches!(off, 0x180..=0x1BE) {
+            if off == 0x106 {
+                bplcon3 = event.value;
+            } else if matches!(event.source, BeamWriteSource::Cpu) && matches!(off, 0x180..=0x1BE) {
                 let idx = ((off - 0x180) / 2) as usize;
                 if idx < 32 {
                     let value = color_register_value(event.value);
-                    let (entry, loct) = palette_entry_for_write(state.bplcon3, control.aga(), idx);
+                    let (entry, loct) = palette_entry_for_write(bplcon3, control.aga(), idx);
                     palette.write_entry(usize::from(entry), loct, value);
                     state.palette.write_entry(usize::from(entry), loct, value);
                 }
