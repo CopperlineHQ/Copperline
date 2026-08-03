@@ -419,6 +419,9 @@ where
             "--hide-status-bar" => {
                 overrides.status_bar = Some(false);
             }
+            "--perf-overlay" => {
+                overrides.perf_overlay = Some(true);
+            }
             "--cpu-clock" => {
                 let mhz: f64 = next_arg(
                     &mut args,
@@ -1209,6 +1212,8 @@ fn print_help() {
          \x20                            combine with COPPERLINE_AUDIO_PROFILE=1 for counters\n  \
          --full-screen / --windowed     open fullscreen / windowed at start (default: windowed)\n  \
          --show-status-bar / --hide-status-bar  status bar at start (default: shown)\n  \
+         --perf-overlay                 show the performance overlay at start\n  \
+         \x20                            (Cmd/Alt+P toggles it live)\n  \
          --menu-scale SIZE              size of the pop-up menu: 1x (default) or 2x\n  \
          --serial MODE                  Paula serial port: off, stdout, midi, tcp,\n  \
          \x20                            tcp-connect, or pty\n  \
@@ -1979,6 +1984,7 @@ fn main() -> Result<()> {
         config::resolve_shader(cfg.shader.clone()),
         config::resolve_shader_strength(cfg.shader_strength),
         config::resolve_bezel(cfg.bezel),
+        config::resolve_perf_overlay(cfg.perf_overlay),
         config::resolve_tint(cfg.tint),
         cfg.full_screen,
         !cfg.status_bar,
@@ -2104,6 +2110,7 @@ fn run_configuration_screen(raw_cfg: config::RawConfig) -> Result<()> {
         config::resolve_shader(config::ShaderMode::None),
         config::resolve_shader_strength(1.0),
         config::resolve_bezel(false),
+        config::resolve_perf_overlay(false),
         config::resolve_tint(config::Tint::None),
         // The config-screen placeholder is always a normal windowed UI.
         false,

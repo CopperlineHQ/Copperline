@@ -394,6 +394,10 @@ video = "PAL"
 # bezel: frame the picture with a 1084-style monitor front bezel (default
 # false; Cmd/Alt+M toggles it live). Composes with any shader setting, and
 # like it is a window-display effect only: captures never include the frame.
+# perf_overlay: show the performance overlay at start (default false; also
+# --perf-overlay, and Cmd/Alt+P toggles it live): emulated fps, speed
+# factor, per-frame emulation cost, host utilisation, audio health, and
+# pacer slips in the top-right of the display. Captures never include it.
 # tint: screen tint over the window image. "none" (default, full colour),
 # "bw" (black and white), "green" or "amber" (monochrome-monitor
 # phosphor), or "sepia". Like shader, a window-display effect only:
@@ -413,6 +417,7 @@ video = "PAL"
 # shader = "none"
 # shader_strength = 1.0
 # bezel = false
+# perf_overlay = false
 # tint = "none"
 # menu_scale = "1x"
 # full_screen = false

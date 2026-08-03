@@ -46,6 +46,7 @@ pub enum MenuAction {
     SetMenuScale(MenuScale),
     ToggleFullscreen,
     ToggleStatusBar,
+    TogglePerfOverlay,
 
     // Input.
     SetPortDevice(usize, PortDevice),
@@ -388,6 +389,7 @@ impl MenuNav {
 pub struct MenuState<'a> {
     pub fullscreen: bool,
     pub status_bar_hidden: bool,
+    pub perf_overlay: bool,
     pub warp: bool,
     pub warp_speed: WarpSpeed,
     pub rewind: bool,
@@ -577,6 +579,7 @@ fn video_rows(s: &MenuState) -> Vec<MenuRow> {
             MenuAction::ToggleStatusBar,
             !s.status_bar_hidden,
         ),
+        MenuRow::toggle("Performance", MenuAction::TogglePerfOverlay, s.perf_overlay),
     ]
 }
 
@@ -924,6 +927,7 @@ mod tests {
         MenuState {
             fullscreen: false,
             status_bar_hidden: false,
+            perf_overlay: false,
             warp: false,
             warp_speed: WarpSpeed::Max,
             rewind: false,

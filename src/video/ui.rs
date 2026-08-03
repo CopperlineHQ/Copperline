@@ -1986,7 +1986,7 @@ fn shortcuts_panel_height() -> usize {
         + 10
 }
 
-const SHORTCUT_ROWS: [(&str, &str, bool); 23] = [
+const SHORTCUT_ROWS: [(&str, &str, bool); 24] = [
     ("Q", "Quit", true),
     ("E", "Open the menu", true),
     ("S", "Save screenshot", true),
@@ -2005,6 +2005,7 @@ const SHORTCUT_ROWS: [(&str, &str, bool); 23] = [
     ("Shift+A", "Cycle audio output", true),
     ("F", "Fullscreen on/off", true),
     ("Shift+F", "Status bar on/off", true),
+    ("P", "Performance overlay on/off", true),
     ("W", "Warp speed on/off", true),
     ("Shift+W", "Warp limit (2x..Max)", true),
     ("Z", "Rewind one step", true),
@@ -8209,6 +8210,7 @@ mod tests {
         let rows = menu::build(&menu::MenuState {
             fullscreen: false,
             status_bar_hidden: false,
+            perf_overlay: false,
             warp: false,
             warp_speed: WarpSpeed::Max,
             rewind: false,

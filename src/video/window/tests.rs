@@ -2869,6 +2869,7 @@ fn test_app_with_audio_cpu_and_program(
         crate::config::ShaderMode::None,
         1.0,
         false,
+        false,
         crate::config::Tint::None,
         false,
         false,
@@ -6941,4 +6942,143 @@ fn draw_re_applies_a_surface_size_the_window_has_moved_past() {
     // minimized guard sees the 0x0 rather than the surface keeping its old
     // size unnoticed.
     assert_eq!(resize((1432, 1162), (0, 0)), Some((0, 0)));
+}
+
+// --- Performance overlay (issue #370) ---
+
+#[test]
+fn perf_readout_derives_rates_from_counter_deltas() {
+    let t0 = std::time::Instant::now();
+    let base = super::PerfBaseline {
+        at: t0,
+        running: true,
+        emulated_frames: 1000,
+        emulated_seconds: 20.0,
+        busy: std::time::Duration::from_millis(100),
+        audio_underrun_frames: 0,
+    };
+    let current = super::PerfBaseline {
+        at: t0 + std::time::Duration::from_secs(2),
+        running: true,
+        // 100 frames and 2.0 emulated seconds in 2 s host: 50 fps, x1.00.
+        emulated_frames: 1100,
+        emulated_seconds: 22.0,
+        // 800 ms of busy time over 100 frames: 8 ms/frame, 40% of the host.
+        busy: std::time::Duration::from_millis(900),
+        // 10 underrun frames over the window: 5 per second.
+        audio_underrun_frames: 10,
+    };
+    let r = super::perf_readout(&base, &current, 150.0, 3);
+    assert!((r.fps - 50.0).abs() < 1e-9);
+    assert!((r.speed - 1.0).abs() < 1e-9);
+    assert!((r.emu_frame_ms - 8.0).abs() < 1e-9);
+    assert!((r.host_percent - 40.0).abs() < 1e-9);
+    assert!((r.audio_lead_ms - 150.0).abs() < 1e-9);
+    assert!((r.audio_underruns_per_s - 5.0).abs() < 1e-9);
+    assert_eq!(r.pacer_slips, 3);
+}
+
+#[test]
+fn perf_readout_saturates_counters_that_moved_backwards() {
+    // A guest reset cleared the cumulative stats mid-window; the readout
+    // reports an empty window instead of going negative.
+    let t0 = std::time::Instant::now();
+    let base = super::PerfBaseline {
+        at: t0,
+        running: true,
+        emulated_frames: 1000,
+        emulated_seconds: 20.0,
+        busy: std::time::Duration::from_millis(500),
+        audio_underrun_frames: 10,
+    };
+    let current = super::PerfBaseline {
+        at: t0 + std::time::Duration::from_secs(1),
+        running: true,
+        emulated_frames: 5,
+        emulated_seconds: 0.1,
+        busy: std::time::Duration::from_millis(2),
+        audio_underrun_frames: 0,
+    };
+    let r = super::perf_readout(&base, &current, 0.0, 0);
+    assert!(r.fps >= 0.0 && r.fps <= 5.0);
+    assert!(r.speed >= 0.0);
+    assert_eq!(r.host_percent, 0.0);
+    assert_eq!(r.audio_underruns_per_s, 0.0);
+}
+
+#[test]
+fn perf_overlay_lines_format_one_data_point_per_line() {
+    let r = super::PerfReadout {
+        fps: 49.96,
+        speed: 0.999,
+        emu_frame_ms: 3.21,
+        host_percent: 16.4,
+        audio_lead_ms: 148.3,
+        audio_underruns_per_s: 0.0,
+        pacer_slips: 2,
+    };
+    assert_eq!(
+        super::perf_overlay_lines(&r),
+        vec![
+            "50.0 fps",
+            "x1.00",
+            "emu 3.2 ms",
+            "host 16%",
+            "audio 148 ms",
+            "xrun 0",
+            "slip 2",
+        ]
+    );
+}
+
+#[test]
+fn perf_overlay_draws_top_right_and_steps_below_the_record_badge() {
+    let scale = 1;
+    let lines = vec!["50.0 fps".to_string(), "slip 0".to_string()];
+    let margin = 8;
+    let probe_x = crate::video::FB_WIDTH - margin - 1;
+    let probe_y = margin + 2;
+
+    let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+    super::draw_perf_overlay(&mut frame, &lines, scale, false);
+    // The backing box reaches the top-right margin corner...
+    assert_ne!(pixel(&frame, probe_x, probe_y, scale), [0, 0, 0, 0]);
+    // ...and the top-left of the display is untouched.
+    assert_eq!(pixel(&frame, margin, probe_y, scale), [0, 0, 0, 0]);
+
+    // With the record badge up the block starts below it, leaving the
+    // badge's corner rows alone.
+    let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+    super::draw_perf_overlay(&mut frame, &lines, scale, true);
+    assert_eq!(pixel(&frame, probe_x, probe_y, scale), [0, 0, 0, 0]);
+
+    // Nothing to draw is a no-op, not a stray empty box.
+    let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+    super::draw_perf_overlay(&mut frame, &[], scale, false);
+    assert!(frame.iter().all(|&b| b == 0));
+}
+
+#[test]
+fn perf_counters_accrue_busy_time_and_reset_with_the_guest() {
+    let mut app = test_app();
+    app.emu.step_frame().expect("step");
+    let counters = app.emu.perf_counters();
+    assert!(counters.busy > std::time::Duration::ZERO);
+    assert_eq!(counters.pacer_slips, 0);
+    // A guest reset clears the counters with the rest of the stats.
+    app.emu.keyboard_reset().expect("reset");
+    let counters = app.emu.perf_counters();
+    assert_eq!(counters.busy, std::time::Duration::ZERO);
+    assert_eq!(counters.pacer_slips, 0);
+}
+
+#[test]
+fn pacer_counts_a_slip_when_it_reanchors_past_the_catchup_limit() {
+    let mut app = test_app();
+    app.emu.set_paced(true);
+    // Pretend the run started long ago: the pacer sees a hopeless lag,
+    // re-anchors instead of sleeping, and counts the dropped time.
+    app.emu.stats.started_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(10));
+    app.emu.step_frame().expect("step");
+    assert_eq!(app.emu.perf_counters().pacer_slips, 1);
 }
