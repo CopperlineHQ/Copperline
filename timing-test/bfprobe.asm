@@ -43,24 +43,26 @@
 ; Columns 2026-08-03 (E-clock ticks; clk/iter = ticks * 20.006 / 8192).
 ; REAL = a stock A1200 (68EC020 14.19 MHz, AGA, 2 MB chip), rows typed
 ; from a photo of the on-screen table; the anchors reproduce the main
-; disk and fwdprobe exactly, validating the run. The emulator columns
-; predate the real-column recalibration.
+; disk and fwdprobe exactly, validating the run. Copperline = with the
+; m68k crate's bit-field operand and timing model calibrated to this
+; column (m68k-rs PR #60; an unfixed crate reads far off on the memory
+; rows). FS-UAE 3.2.35 for reference.
 ;
 ;              REAL A1200           Copperline           FS-UAE
 ;   row  0     0E6B  9.01 clk       0E6C  9.02 clk       1006 10.02 clk
 ;   row  1     0CD0  8.01           0CD0  8.01           1004 10.01
-;   row  2     2CF3 28.10           19BC 16.09           204C 20.19
-;   row  3     2CF2 28.10           204C 20.19           204D 20.19
-;   row  4     2004 20.02           1CD0 18.02           1337 12.01
-;   row  5     2CF2 28.10           3A22 36.35           204C 20.19
-;   row  6     2CF3 28.10           7A38 76.42           204D 20.19
-;   row  7     46E4 44.32           9A94 96.66           3A22 36.35
-;   row  8     2CF3 28.10           19BC 16.09           204C 20.19
-;   row  9     2696 24.12           19BB 16.09           1337 12.01
-;   row 10     2CF2 28.10           4096 40.38           204C 20.19
-;   row 11     2CF2 28.10           19BB 16.09           204C 20.19
-;   row 12     872A 84.51           66FB 64.39           6D42 68.31
-;   row 13     872C 84.51           60E1 60.57           6D43 68.31
+;   row  2     2CF3 28.10           2CD1 28.02           204C 20.19
+;   row  3     2CF2 28.10           2CD1 28.02           204D 20.19
+;   row  4     2004 20.02           2004 20.02           1337 12.01
+;   row  5     2CF2 28.10           2CD1 28.02           204C 20.19
+;   row  6     2CF3 28.10           2CD1 28.02           204D 20.19
+;   row  7     46E4 44.32           4677 44.05           3A22 36.35
+;   row  8     2CF3 28.10           2CD1 28.02           204C 20.19
+;   row  9     2696 24.12           266A 24.02           1337 12.01
+;   row 10     2CF2 28.10           2CD1 28.02           204C 20.19
+;   row 11     2CF2 28.10           2CD1 28.02           204C 20.19
+;   row 12     872A 84.51           86D1 84.29           6D42 68.31
+;   row 13     872C 84.51           86D3 84.29           6D43 68.31
 ;
 ; What the real column says (the first hardware measurement of the 020
 ; bit-field class we know of):
