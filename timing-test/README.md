@@ -32,6 +32,15 @@ gitignored; rebuild it locally before running the checks.
 that isolates register dependencies from loop-branch alignment on the 020;
 its header records the real-A1200 column and the rule derived from it.
 
+`./build.sh bfprobe` builds `bfprobe.adf`, a 14-row probe for the 68020
+bit-field instructions (the SANITY Roots II AGA "DIE" dissolve class,
+issue #371): register vs memory forms, the memory RMW cost by field span
+(1/2/4/5 bytes), dynamic offsets, the read-only forms, and the demo's
+exact nine-instruction plot loop at both DBcc alignments. No real-A1200
+column exists yet for the bit-field class on any emulator's calibration;
+the header records the Copperline and FS-UAE columns and what each row
+decides.
+
 ## Running
 
 - **Copperline:** `copperline --config timing-test.toml --screenshot-after 12 out.png`
