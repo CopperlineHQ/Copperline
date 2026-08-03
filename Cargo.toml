@@ -28,8 +28,12 @@ default = [
     "net-nat",
     "net-bridge",
     "floppybridge",
+    "mt32",
     "cpu-jit",
 ]
+# MT-32 emulation through Munt's mt32emu (vendor/munt), reachable as a
+# MIDI-Out target. Off builds carry none of it.
+mt32 = []
 display-plan-trace = []
 # Local investigation switches that deliberately alter timing or rendering.
 # Normal builds keep these environment-variable overrides inert so release
