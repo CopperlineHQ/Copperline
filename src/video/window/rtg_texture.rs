@@ -467,11 +467,7 @@ mod tests {
 
     /// A serialized device, or `None` without a usable hardware adapter:
     /// see `crt_shader::test_gpu`.
-    fn gpu() -> Option<(
-        super::super::crt_shader::GpuTestGuard,
-        wgpu::Device,
-        wgpu::Queue,
-    )> {
+    fn gpu() -> Option<super::super::crt_shader::TestGpu> {
         super::super::crt_shader::test_gpu("rtg_texture_test")
     }
 
@@ -599,14 +595,14 @@ mod tests {
     /// smooth scaling must still stretch the frame across the whole rect.
     #[test]
     fn integer_scaling_lands_the_board_frame_on_whole_pixel_blocks() {
-        let Some((_gpu, device, queue)) = gpu() else {
-            eprintln!("skipping: no GPU adapter");
+        let Some(gpu) = gpu() else {
             return;
         };
+        let (device, queue) = (gpu.device(), gpu.queue());
         let (w, h) = (12u32, 8u32);
         let at = |px: &[[u8; 4]], x: u32, y: u32| px[(y * w + x) as usize];
 
-        let px = render_frame(&device, &queue, (w, h), true);
+        let px = render_frame(device, queue, (w, h), true);
         // The margins the picture does not reach are painted black by the
         // pass itself -- the window buffer underneath must not show.
         for y in 0..h {
@@ -640,7 +636,7 @@ mod tests {
         // Smooth scaling is unchanged: the frame is stretched over the
         // whole rect, so the corners hold the corner texels and there is
         // no border at all.
-        let px = render_frame(&device, &queue, (w, h), false);
+        let px = render_frame(device, queue, (w, h), false);
         assert_eq!(at(&px, 0, 0), RED.to_le_bytes());
         assert_eq!(at(&px, 11, 0), GREEN.to_le_bytes());
         assert_eq!(at(&px, 0, 7), BLUE.to_le_bytes());
