@@ -648,6 +648,18 @@ never include it, and it is skipped while a menu or overlay panel is open
 and for RTG scanout frames. Unlike the shader it does stay on for
 programmable multisync scans -- a frame has no line structure to get wrong.
 
+`perf_overlay` (default `false`) shows the performance overlay at start: a
+live readout of emulated fps, speed factor, per-frame emulation cost, host
+utilisation, audio health, and pacer slips in the top-right corner of the
+display, one line per data point (see
+[the window chapter](ui.md#performance-overlay) for what each line means).
+Cmd+P (macOS) / Alt+P toggles it live for the rest of the session without
+touching the config, `--perf-overlay` shows it for one run, and
+`COPPERLINE_PERF_OVERLAY=1|0` overrides the config for a single run; the
+launcher's *Perf overlay* row (*A/V & Emu*, *Video*) writes it. Like the
+transient message overlay it is presentation only: screenshots, frame
+dumps, and recordings never include it.
+
 `tint` recolours the picture like the phosphor of a monochrome monitor:
 `"bw"` (black and white), `"green"` and `"amber"` (the two classic
 monochrome phosphors), or `"sepia"`; `"none"` (the default; `"off"` is

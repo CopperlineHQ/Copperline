@@ -1744,6 +1744,67 @@ pub(super) fn draw_record_badge(frame: &mut [u8], texture_scale: usize) {
     );
 }
 
+/// Right-aligned performance readout in the top-right of the display
+/// (Cmd/Alt+P, `[display] perf_overlay`): one line per data point, same
+/// font size as the menus (it follows the Menu Size setting, so it stays
+/// small at the default 1x rather than taking the larger OSD size).
+/// Painted into the presentation texture only, like the record badge, so
+/// captures never include it; while a recording badge is up the block
+/// starts below it instead of fighting for the corner.
+pub(super) fn draw_perf_overlay(
+    frame: &mut [u8],
+    lines: &[String],
+    texture_scale: usize,
+    below_record_badge: bool,
+) {
+    let s = texture_scale;
+    let px = crate::video::menu_scale().factor() * s;
+    let pad = 4 * s;
+    let margin = 8 * s;
+    let line_gap = 2 * s;
+
+    let text_h = font::text_height(px);
+    let text_w = lines
+        .iter()
+        .map(|line| font::text_width(line, px))
+        .max()
+        .unwrap_or(0);
+    if text_w == 0 {
+        return;
+    }
+    let box_w = text_w + 2 * pad;
+    let box_h = lines.len() * text_h + lines.len().saturating_sub(1) * line_gap + 2 * pad;
+    let box_x = (FB_WIDTH * s).saturating_sub(margin + box_w);
+    let record_badge_h = font::text_height(2 * s) + 2 * (4 * s);
+    let box_y = if below_record_badge {
+        margin + record_badge_h + 4 * s
+    } else {
+        margin
+    };
+
+    fill_rect_blend(
+        frame,
+        Rect {
+            x: box_x,
+            y: box_y,
+            w: box_w,
+            h: box_h,
+        },
+        OSD_BG,
+        0.68,
+        s,
+    );
+    let fw = texture_width(s);
+    let fh = texture_height(s);
+    let mut y = box_y + pad;
+    for line in lines {
+        let x = box_x + pad + text_w - font::text_width(line, px);
+        font::draw_text(frame, fw, fh, x + s, y + s, line, OSD_SHADOW, px);
+        font::draw_text(frame, fw, fh, x, y, line, OSD_TEXT, px);
+        y += text_h + line_gap;
+    }
+}
+
 pub(super) fn draw_osd(frame: &mut [u8], text: &str, texture_scale: usize) {
     let s = texture_scale;
     let px = 2 * s; // font pixel -> device pixels

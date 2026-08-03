@@ -31,6 +31,7 @@ The app shortcut modifier is `Cmd` on macOS and `Alt` on Linux/Windows.
 | `Cmd+Shift+>` / `Cmd+Shift+<` | `Alt+Shift+>` / `Alt+Shift+<` | Raise / lower the host mouse sensitivity (also the launcher's Input tab) |
 | `Cmd+F` | `Alt+F` | Toggle fullscreen on / off |
 | `Cmd+Shift+F` | `Alt+Shift+F` | Show / hide the status bar |
+| `Cmd+P` | `Alt+P` | Toggle the [performance overlay](#performance-overlay) (`[display] perf_overlay` sets the start-up value) |
 | `Cmd+W` | `Alt+W` | Toggle Warp Speed (turbo) on / off |
 | `Cmd+Shift+W` | `Alt+Shift+W` | Cycle the Warp Speed limit: 2x, 4x, 8x, 16x, Max |
 | `Cmd+Z` | `Alt+Z` | Rewind the machine one step (needs `[emulation] rewind` or *Emulation Settings > Rewind*) |
@@ -95,6 +96,39 @@ Status Bar*):
 - **Pause / power / reboot buttons.** Pause freezes emulation while staying
   powered; power cold-boots (clears RAM) or powers off back to the test
   screen; reboot is a warm reset.
+
+## Performance overlay
+
+`Cmd+P` (macOS) / `Alt+P`, *Video Settings > Performance*, or
+`[display] perf_overlay = true` shows a live emulation-performance readout
+in the top-right corner of the display, one line per data point at the
+menu's font size (it follows *Menu Size*), refreshed twice a second:
+
+| Line | Meaning |
+|---|---|
+| `50.0 fps` | Emulated video frames retired per host second: 50 (PAL) or 60 (NTSC) when the machine holds real time, lower when the host cannot keep up, far higher under Warp Speed |
+| `x1.00` | Speed factor: emulated seconds advanced per host second (the effective multiplier under Warp Speed) |
+| `emu 3.2 ms` | Host milliseconds of emulation work per emulated frame, pacing sleeps excluded |
+| `host 16%` | Share of host wall time spent emulating. In real-time mode this is the share of the frame budget (20.0 ms PAL, 16.7 ms NTSC) used per frame |
+| `audio 148 ms` | Live audio output lead -- the cushion that absorbs host scheduling hiccups (steady state is about 150 ms) |
+| `xrun 0` | Audio underrun frames per second: the audible symptom of the host falling behind |
+| `slip 0` | Times the pacer fell hopelessly behind real time (over ~100 ms, e.g. a host stall) and dropped emulated time instead of chasing it, since the last guest reset |
+
+Copperline never skips frames to keep pace: when the host cannot sustain
+real time the machine slows down (fps and the speed factor fall below
+nominal while `host` sits near 100%), and only a stall beyond the pacer's
+catch-up limit drops emulated time, counted by `slip`. Under Warp Speed
+the presentation shows one frame per burst, but every emulated frame is
+still computed.
+
+Like the transient message overlay, the readout is painted into the
+presentation only: screenshots, frame dumps, and recordings never include
+it. While a video recording is running the block steps below the `REC`
+badge. `COPPERLINE_PERF_OVERLAY=1|0` overrides the config for a single
+run, and `--perf-overlay` shows it from the command line; the launcher's
+*Perf overlay* row (*A/V & Emu*, *Video*) makes it stick. The same
+counters are exported through the control protocol's `status` reply for
+headless runs (see [](../debugger/control)).
 
 ## Drag and drop
 
@@ -232,6 +266,10 @@ tool window or overlay.
   needed, exactly as when resizing the window.
 - **Status Bar** (also `Cmd+Shift+F` / `Alt+Shift+F`): show or hide the
   status bar. Handy alongside fullscreen for a clean, chrome-free picture.
+- **Performance** (also `Cmd+P` / `Alt+P`): show or hide the
+  [performance overlay](#performance-overlay). Session-only; the start-up
+  value is `[display] perf_overlay` (see
+  [Configuration](configuration.md)).
 
 ### Input Settings
 
@@ -404,8 +442,8 @@ The layout is:
   and *A/V & Emu*, split by a row of category buttons at the top into
   **Audio** (output device, channel mode, stereo separation, filter, floppy
   sounds and volume), **Video** (start fullscreen, status bar, monitor bezel,
-  menu size, overscan, pixel aspect, scaling, deinterlace, screen tint,
-  phosphor, CRT shader and shader strength),
+  perf overlay, menu size, overscan, pixel aspect, scaling, deinterlace,
+  screen tint, phosphor, CRT shader and shader strength),
   and **Emulation**
   (power-on, realtime priority, pacing, warp speed) -- opening on Audio, and
   switched freely between the three.

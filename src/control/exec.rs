@@ -2153,6 +2153,10 @@ fn reverse_result(emu: &Emulator, outcome: ReverseOutcome<String>) -> Result<Val
 
 fn status_value(emu: &Emulator, ctx: &SessionCtx) -> Value {
     let bus = emu.bus();
+    // Cumulative counters: a client derives rates (emulated fps, host
+    // utilisation) from the deltas between two status calls.
+    let perf = emu.perf_counters();
+    let audio = bus.live_audio_status();
     json!({
         "state": if ctx.running { "running" } else { "paused" },
         "pending_resume": ctx.pending,
@@ -2168,6 +2172,10 @@ fn status_value(emu: &Emulator, ctx: &SessionCtx) -> Value {
         "cck": bus.emulated_cck(),
         "seconds": bus.emulated_seconds(),
         "retired_instructions": emu.retired_instructions(),
+        "host_busy_ms": perf.busy.as_secs_f64() * 1000.0,
+        "pacer_slips": perf.pacer_slips,
+        "audio_lead_ms": audio.output_lead_seconds * 1000.0,
+        "audio_underrun_frames": audio.callback_underrun_frames,
     })
 }
 

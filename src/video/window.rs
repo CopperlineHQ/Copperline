@@ -435,6 +435,111 @@ struct Osd {
     expires_at: Instant,
 }
 
+/// How often the performance overlay resamples its counters. Twice a
+/// second keeps the numbers readable; per-frame updates flicker.
+const PERF_SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Live readout state behind the performance overlay (Cmd/Alt+P,
+/// `[display] perf_overlay`): the formatted lines drawn each frame plus
+/// the counter baseline the next sample's deltas are taken against.
+#[derive(Default)]
+struct PerfOverlay {
+    lines: Vec<String>,
+    /// Bumped whenever `lines` changes so `MainRedrawState` repaints.
+    revision: u64,
+    baseline: Option<PerfBaseline>,
+}
+
+/// One sample of the cumulative counters the overlay derives rates from.
+struct PerfBaseline {
+    at: Instant,
+    /// Whether the machine was advancing when this sample was taken. Rates
+    /// across a pause/resume boundary would mix running and idle time, so a
+    /// flip publishes the idle readout and re-baselines instead.
+    running: bool,
+    emulated_frames: u64,
+    emulated_seconds: f64,
+    busy: std::time::Duration,
+    audio_underrun_frames: u64,
+}
+
+/// The numbers behind one refresh of the performance overlay, derived from
+/// counter deltas by `perf_readout` and formatted by `perf_overlay_lines`.
+/// Kept as plain values so both steps are testable.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct PerfReadout {
+    /// Emulated video frames retired per host second.
+    fps: f64,
+    /// Emulated seconds advanced per host second (1.0 = locked to real time).
+    speed: f64,
+    /// Host milliseconds of emulation work per emulated frame (pacing
+    /// sleeps excluded).
+    emu_frame_ms: f64,
+    /// Share of host wall time spent emulating, in percent. In paced mode
+    /// this equals `emu_frame_ms` over the frame period (20.0 ms PAL,
+    /// 16.7 ms NTSC): the share of the host frame budget used.
+    host_percent: f64,
+    /// Live audio output lead in milliseconds (the underrun cushion).
+    audio_lead_ms: f64,
+    /// Audio underrun frames per host second.
+    audio_underruns_per_s: f64,
+    /// Pacer catch-up events since the last guest reset: the machine fell
+    /// hopelessly behind real time and dropped emulated time. Frames are
+    /// never skipped in paced mode; this counts the only case where time is.
+    pacer_slips: u32,
+}
+
+fn perf_readout(
+    base: &PerfBaseline,
+    current: &PerfBaseline,
+    audio_lead_ms: f64,
+    pacer_slips: u32,
+) -> PerfReadout {
+    let dt = current.at.duration_since(base.at).as_secs_f64();
+    if dt <= 0.0 {
+        return PerfReadout {
+            audio_lead_ms,
+            pacer_slips,
+            ..Default::default()
+        };
+    }
+    // Counters that moved backwards (a guest reset cleared the stats, a
+    // timeline jump rewound the machine) saturate to an empty window; the
+    // next sample is taken against the fresh values.
+    let frames = current.emulated_frames.saturating_sub(base.emulated_frames) as f64;
+    let busy = current.busy.saturating_sub(base.busy).as_secs_f64();
+    let emulated = (current.emulated_seconds - base.emulated_seconds).max(0.0);
+    let underruns = current
+        .audio_underrun_frames
+        .saturating_sub(base.audio_underrun_frames) as f64;
+    PerfReadout {
+        fps: frames / dt,
+        speed: emulated / dt,
+        emu_frame_ms: if frames > 0.0 {
+            busy * 1000.0 / frames
+        } else {
+            0.0
+        },
+        host_percent: busy / dt * 100.0,
+        audio_lead_ms,
+        audio_underruns_per_s: underruns / dt,
+        pacer_slips,
+    }
+}
+
+/// One line per data point, top to bottom as drawn.
+fn perf_overlay_lines(r: &PerfReadout) -> Vec<String> {
+    vec![
+        format!("{:.1} fps", r.fps),
+        format!("x{:.2}", r.speed),
+        format!("emu {:.1} ms", r.emu_frame_ms),
+        format!("host {:.0}%", r.host_percent),
+        format!("audio {:.0} ms", r.audio_lead_ms),
+        format!("xrun {:.0}", r.audio_underruns_per_s),
+        format!("slip {}", r.pacer_slips),
+    ]
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct KeyPressSpec {
     pub secs: f32,
@@ -827,6 +932,12 @@ pub struct App {
     /// Monitor-bezel pass in effect ([display] bezel, Cmd/Alt+M).
     /// Presentation only, like the shader pass: captures never include it.
     bezel: bool,
+    /// Performance overlay in effect ([display] perf_overlay, Cmd/Alt+P):
+    /// a live emulation-performance readout in the top-right of the
+    /// display. Presentation only, like the OSD: captures never include it.
+    perf_overlay: bool,
+    /// The overlay's formatted lines and sampling baseline.
+    perf: PerfOverlay,
     /// Screen tint in effect ([display] tint). Presentation only, applied
     /// to the chipset display region of the window frame: captures and
     /// RTG board scanout are never tinted.
@@ -1125,6 +1236,9 @@ struct MainRedrawState {
     recording: bool,
     input_recording: bool,
     warp: bool,
+    /// The performance overlay's line revision (0 while hidden), so a
+    /// resample repaints an otherwise static frame.
+    perf_revision: u64,
 }
 
 struct RenderWorker {
@@ -1229,6 +1343,7 @@ impl App {
         shader: crate::config::ShaderMode,
         shader_strength: f32,
         bezel: bool,
+        perf_overlay: bool,
         tint: crate::config::Tint,
         start_fullscreen: bool,
         hide_status_bar: bool,
@@ -1401,6 +1516,8 @@ impl App {
             },
             shader_strength,
             bezel,
+            perf_overlay,
+            perf: PerfOverlay::default(),
             tint,
             tint_lut: tint_lut(tint),
             start_fullscreen,
@@ -2667,6 +2784,11 @@ impl ApplicationHandler for App {
                     {
                         self.toggle_bezel()
                     }
+                    (KeyCode::KeyP, ElementState::Pressed)
+                        if host_shortcut_modifier_pressed(self.modifiers) =>
+                    {
+                        self.toggle_perf_overlay()
+                    }
                     (KeyCode::KeyF, ElementState::Pressed)
                         if host_shortcut_modifier_pressed(self.modifiers)
                             && self.modifiers.shift_key() =>
@@ -3163,6 +3285,9 @@ impl ApplicationHandler for App {
                         // the badge never appears in the recorded file.
                         draw_record_badge(frame, r.texture_scale);
                     }
+                    if self.perf_overlay {
+                        draw_perf_overlay(frame, &self.perf.lines, r.texture_scale, recording);
+                    }
                     if let Some(text) = &osd {
                         draw_osd(frame, text, r.texture_scale);
                     }
@@ -3426,6 +3551,9 @@ impl ApplicationHandler for App {
             }
             self.refresh_tool_windows_paced(event_loop);
         }
+        // Resample the performance overlay after the step so its revision
+        // is current when the redraw decision below is taken.
+        self.update_perf_overlay(running);
         // While powered off, leave the parked test screen in place; the
         // emulator is not advancing, so there is no new frame to show.
         let mut rendered = self.powered_on && self.render_emulated_frame_if_needed();
@@ -4090,6 +4218,11 @@ impl App {
             recording: self.recorder.is_some(),
             input_recording: self.input_recorder.is_some(),
             warp: !self.emu.paced(),
+            perf_revision: if self.perf_overlay {
+                self.perf.revision
+            } else {
+                0
+            },
         }
     }
 
@@ -4449,6 +4582,7 @@ impl App {
         let state = MenuState {
             fullscreen,
             status_bar_hidden: crate::video::status_bar_hidden(),
+            perf_overlay: self.perf_overlay,
             warp: !self.emu.paced(),
             warp_speed: self.warp_speed,
             rewind: self.rewind_armed,
@@ -4637,6 +4771,7 @@ impl App {
             }
             A::ToggleFullscreen => self.toggle_fullscreen(),
             A::ToggleStatusBar => self.toggle_status_bar(),
+            A::TogglePerfOverlay => self.toggle_perf_overlay(),
 
             A::SetPortDevice(port, device) => {
                 self.hot_plug_port_device(port, device);
@@ -6390,6 +6525,8 @@ impl App {
         }
         self.shader_strength = crate::config::resolve_shader_strength(cfg.shader_strength);
         self.bezel = crate::config::resolve_bezel(cfg.bezel);
+        self.perf_overlay = crate::config::resolve_perf_overlay(cfg.perf_overlay);
+        self.perf = PerfOverlay::default();
         self.set_tint(crate::config::resolve_tint(cfg.tint));
         crate::video::set_menu_scale(cfg.menu_scale);
         self.ui.menu_open = false;
@@ -9019,6 +9156,63 @@ impl App {
         info!("monitor bezel: {label}");
         self.show_osd(format!("Monitor bezel: {label}"));
         self.request_redraw();
+    }
+
+    /// Cmd/Alt+P: toggle the performance overlay for the rest of the run
+    /// (the config file default is unchanged; set `[display] perf_overlay`
+    /// to make it stick).
+    fn toggle_perf_overlay(&mut self) {
+        self.perf_overlay = !self.perf_overlay;
+        self.perf = PerfOverlay::default();
+        let label = if self.perf_overlay { "on" } else { "off" };
+        info!("performance overlay: {label}");
+        self.show_osd(format!("Performance overlay: {label}"));
+        self.request_redraw();
+    }
+
+    /// Resample the performance overlay counters and reformat its lines
+    /// when the interval has elapsed. A run-state flip (pause, power-off,
+    /// halt) publishes the idle readout immediately and re-baselines, so
+    /// rates are never computed across the boundary.
+    fn update_perf_overlay(&mut self, running: bool) {
+        if !self.perf_overlay {
+            return;
+        }
+        let now = Instant::now();
+        if let Some(base) = &self.perf.baseline {
+            if base.running == running && now.duration_since(base.at) < PERF_SAMPLE_INTERVAL {
+                return;
+            }
+        }
+        let audio = self.emu.bus().live_audio_status();
+        let counters = self.emu.perf_counters();
+        let current = PerfBaseline {
+            at: now,
+            running,
+            emulated_frames: self.emu.bus().emulated_frames(),
+            emulated_seconds: self.emu.bus().emulated_seconds(),
+            busy: counters.busy,
+            audio_underrun_frames: audio.callback_underrun_frames,
+        };
+        let audio_lead_ms = audio.output_lead_seconds * 1000.0;
+        let readout = match &self.perf.baseline {
+            Some(base) if base.running == running && running => {
+                perf_readout(base, &current, audio_lead_ms, counters.pacer_slips)
+            }
+            // First sample after enabling, a run-state flip, or an idle
+            // machine: rates are zero by definition, only the levels show.
+            _ => PerfReadout {
+                audio_lead_ms,
+                pacer_slips: counters.pacer_slips,
+                ..Default::default()
+            },
+        };
+        self.perf.baseline = Some(current);
+        let lines = perf_overlay_lines(&readout);
+        if lines != self.perf.lines {
+            self.perf.lines = lines;
+            self.perf.revision = self.perf.revision.wrapping_add(1);
+        }
     }
 
     /// Install a screen tint and its presentation table together.
