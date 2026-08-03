@@ -2434,6 +2434,20 @@ function wireKeyboardPointers(root) {
   root.addEventListener('pointerup', up);
   root.addEventListener('pointercancel', up);
   root.addEventListener('lostpointercapture', up);
+  // Assistive tech activates a button with a synthesized click, never a
+  // pointer sequence, so without this the chips' button role would be a
+  // promise the pointerdown handler breaks. Only the chips: they are taps,
+  // where the keys need a press and a release. Real pointers are filtered
+  // by detail - a hardware click counts its presses, a simulated one
+  // reports 0 - so a mouse click cannot run a chip twice.
+  root.addEventListener('click', (e) => {
+    if (e.detail !== 0) return;
+    if (e.target.closest('[data-legend-chip]')) {
+      setKbdLegends(kbdLegends === 'uk' ? 'us' : 'uk');
+    } else if (e.target.closest('[data-close-chip]')) {
+      closeKeyboard();
+    }
+  });
 }
 
 // --- keyboard open / close -------------------------------------------------
