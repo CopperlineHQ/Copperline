@@ -3132,6 +3132,10 @@ impl ApplicationHandler for App {
                 #[cfg(feature = "mt32")]
                 if !pressed {
                     self.mt32_panel.release_dial();
+                    // The buttons are momentary: one lights while the mouse
+                    // is down on it and comes back out when it lifts.
+                    self.mt32_panel.release_press();
+                    self.request_redraw();
                 }
                 #[cfg(feature = "mt32")]
                 if pressed
@@ -5170,6 +5174,7 @@ impl App {
         let action = panel.press(control, left, pos, rect, powered, self.mt32_synth_mut());
         self.mt32_panel = panel;
         self.apply_mt32_action(action);
+        self.serve_mt32_demo();
         self.request_redraw();
     }
 
@@ -5212,6 +5217,7 @@ impl App {
         self.emu.bus_mut().paula.rearm_synth_audio();
         self.mt32_panel.reset();
         self.tell_panel_the_rom_version();
+        self.serve_mt32_demo();
         let came_up = self
             .emu
             .bus_mut()
@@ -5292,6 +5298,46 @@ impl App {
         }
     }
 
+    /// Start whichever of the ROM's own songs the panel is asking for, and
+    /// tell it what that one is called.
+    #[cfg(feature = "mt32")]
+    fn serve_mt32_demo(&mut self) {
+        // A song that has run out hands on to the next, which is what makes
+        // it a chain.
+        if self.mt32_panel.chain_ran_out(
+            self.emu
+                .bus_mut()
+                .midi_serial_mut()
+                .is_some_and(|sink| sink.mt32_demo_playing()),
+        ) {
+            self.request_redraw();
+        }
+        let Some(want) = self.mt32_panel.demo_want() else {
+            return;
+        };
+        let track = match want {
+            mt32panel::DemoWant::Play(track) => Some(track),
+            mt32panel::DemoWant::Stop => None,
+        };
+        let title = self
+            .emu
+            .bus_mut()
+            .midi_serial_mut()
+            .map(|sink| match track {
+                Some(track) => sink
+                    .play_mt32_demo(track)
+                    // Only the later ROMs carry them; the earlier units had
+                    // no demonstration to play.
+                    .unwrap_or_else(|| "Needs v2.0x ROM".to_string()),
+                None => {
+                    sink.stop_mt32_demo();
+                    String::new()
+                }
+            })
+            .unwrap_or_default();
+        self.mt32_panel.set_track_title(title);
+    }
+
     /// Hand the panel what the control ROM calls itself, for its version
     /// screen. The engine keeps its copy of the image to itself, so this
     /// comes from the sink, which read it off disk when the pair was
@@ -5311,6 +5357,10 @@ impl App {
     /// What the MT-32's panel should show, when one is attached.
     #[cfg(feature = "mt32")]
     fn mt32_panel_view(&mut self) -> Option<mt32panel::Mt32PanelView> {
+        // A song that runs out hands on to the next, which only happens
+        // while frames are being rendered -- so it is looked at here, as
+        // the panel is drawn, rather than only when something is clicked.
+        self.serve_mt32_demo();
         let sink = self.emu.bus_mut().midi_serial_mut()?;
         if !sink.mt32_selected() {
             return None;
