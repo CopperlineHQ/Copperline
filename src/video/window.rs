@@ -10087,17 +10087,20 @@ impl App {
         self.request_redraw();
     }
 
-    /// The overlay text to draw this frame, or None when nothing is
-    /// active. Expired overlays are dropped as a side effect.
-    /// Say something that did not go as asked, in amber.
+    /// Say something that did not go as asked, in amber. Otherwise as
+    /// [`Self::show_osd`].
+    #[cfg(feature = "mt32")]
     fn warn_osd(&mut self, text: impl Into<String>) {
         self.osd = Some(Osd {
             text: text.into(),
             expires_at: Instant::now() + OSD_DURATION,
             warning: true,
         });
+        self.request_redraw();
     }
 
+    /// The overlay text to draw this frame, or None when nothing is
+    /// active. Expired overlays are dropped as a side effect.
     fn active_osd_text(&mut self) -> Option<(String, bool)> {
         match &self.osd {
             Some(osd) if Instant::now() < osd.expires_at => Some((osd.text.clone(), osd.warning)),
