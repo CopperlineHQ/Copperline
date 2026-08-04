@@ -3,11 +3,12 @@
 // Monitor-bezel pass: a procedural plastic front frame in the spirit of
 // the 1084 the Amiga shipped with. The pass covers the whole display rect;
 // the picture is re-sampled to fill the rounded opening the frame leaves,
-// seated by a moulded insert -- a thin glass-seat shadow and a plastic
-// chamfer sloping up to the case front -- inside a bevelled case edge,
-// with a moulded outer edge, the power LED on the bottom band and the
-// Copperline logotype printed on its left, where the 1084 wears its
-// Commodore badge.
+// seated by a moulded insert -- a plastic chamfer sloping from the glass
+// up to the case front, meeting the picture directly, as the real
+// moulding overlaps the tube face and hides its unlit rim -- inside a
+// bevelled case edge, with a moulded outer edge, the power LED on the
+// bottom band and the Copperline logotype printed on its left, where the
+// 1084 wears its Commodore badge.
 //
 // Two modes, selected by params.x. Alone (0), this one pass draws both
 // the frame and the picture. Under a CRT preset (1, frame-only), the
@@ -162,13 +163,14 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     // Trim widths scale with the opening so the frame keeps its
     // proportions at any window size, with pixel floors so nothing
     // vanishes in a tiny window. The ring between the glass and the case
-    // face is the moulded insert that seats the tube: a thin shadow slot
-    // where the glass sits, then a plastic chamfer sloping up to the
-    // case front; `recess` is where the case face takes over.
+    // face is the moulded insert that seats the tube: a plastic chamfer
+    // sloping from the glass up to the case front, whose inner edge meets
+    // the picture directly -- the real moulding overlaps the tube face,
+    // so no unlit rim shows around the glass; `recess` is where the case
+    // face takes over.
     let unit = min(o_size.x, o_size.y);
-    let seat = max(0.007 * unit, 1.5);
     let chamfer = max(0.030 * unit, 4.0);
-    let recess = seat + chamfer;
+    let recess = chamfer;
     let bevel = max(0.022 * unit, 2.0);
 
     // The contour the insert follows is the glass: the active preset's
@@ -212,16 +214,12 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
                        vec2<f32>(0.0), vec2<f32>(1.0));
     let picture = sample_display(pic_uv).rgb;
 
-    // The glass seat: the thin unlit slot where the tube face meets the
-    // insert, catching a little room light along its lower run.
-    let seat_col = vec3<f32>(0.012) * (1.0 + 0.8 * dir_y) + vec3<f32>(0.004);
-
     // The insert chamfer: moulded plastic a step darker than the case
-    // face, sloping up from the glass seat. Deeper is darker, and the
+    // face, sloping up from the glass edge. Deeper is darker, and the
     // slope faces the room light, so its top run sits in its own shadow
     // while its bottom run catches the light -- the cues that read as a
     // part holding the glass in rather than a void behind the case.
-    let slope = clamp((d - seat) / chamfer, 0.0, 1.0);
+    let slope = clamp(d / chamfer, 0.0, 1.0);
     var insert =
         PLASTIC * 0.88 * (0.45 + 0.40 * slope) * (1.0 + 0.30 * dir_y * (1.0 - 0.5 * slope));
     insert *= 1.0 + 0.03 * grain(floor(px));
@@ -269,16 +267,15 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
         }
     }
 
-    // Compose by signed distance: picture, glass seat, insert chamfer,
-    // then case plastic, each join antialiased over about a pixel. In the
+    // Compose by signed distance: picture, insert chamfer, then case
+    // plastic, each join antialiased over about a pixel. In the
     // frame-only pass the inner side of the opening join belongs to the
     // preset underneath, whose face edge there is its off-face black:
     // blending from the raw picture instead smears a picture-coloured
     // hairline around the opening, on top of the preset the pass
     // discarded for.
     let inner = select(picture, vec3<f32>(0.0), u.params.x > 0.5);
-    let ring = mix(seat_col, insert, smoothstep(seat - aa, seat + aa, d));
-    var col = mix(inner, ring, clamp(d / aa + 0.5, 0.0, 1.0));
+    var col = mix(inner, insert, clamp(d / aa + 0.5, 0.0, 1.0));
     col = mix(col, plastic, smoothstep(recess - aa, recess + aa, d));
     col = mix(col, vec3<f32>(0.0), clamp(d_case / aa_case + 0.5, 0.0, 1.0));
     return vec4<f32>(col, 1.0);
