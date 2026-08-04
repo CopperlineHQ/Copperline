@@ -4490,7 +4490,13 @@ void main() {
       build();
     } catch (e) {
       console.error('monitor renderer lost:', e);
+      return;
     }
+    // The restore starts from a cleared drawing buffer, and a paused page
+    // has no ticking loop to repaint it; a running one would also show a
+    // blank canvas until its next tick. The rebuild reset the cached
+    // texture size, so this re-uploads the frame it re-presents.
+    if (emu && running) presentFrame();
   });
   return renderer;
 }
