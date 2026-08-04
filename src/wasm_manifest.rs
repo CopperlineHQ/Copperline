@@ -23,6 +23,12 @@ pub struct WasmCaps {
     /// Host networking (`net_send`/`net_recv` imports). A net board is
     /// non-deterministic; see [`crate::net`].
     pub net: bool,
+    /// Host-resolver DNS lookups (`resolve_start`/`resolve_poll` imports):
+    /// asks Copperline's own process to resolve a hostname via the host
+    /// OS resolver on a background thread, rather than the plugin having
+    /// to speak DNS wire format itself over its own `net` traffic. Like
+    /// `net`, using it makes a board non-deterministic.
+    pub resolve: bool,
 }
 
 /// A plugin's non-autoconfig metadata: its display name, capabilities, and (for

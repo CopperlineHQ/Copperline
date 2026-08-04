@@ -3,9 +3,11 @@ name: Lockfile sync
 # Verifies every committed Cargo.lock still resolves with --locked, i.e. is
 # in sync with its workspace's manifests. The root lock is already exercised
 # by the --locked builds in ci.yml, but the nested workspaces mostly are not:
-# crates/copperline-web and crates/cputest-runner carry their own committed
-# locks. The web lock pins the sibling `copperline` path package by version;
-# the cputest-runner lock pins its published `m68k` dependency. A manifest
+# crates/copperline-web, crates/cputest-runner, and crates/hostsocket-plugin
+# carry their own committed locks. The web lock pins the sibling `copperline`
+# path package by version; the cputest-runner lock pins its published `m68k`
+# dependency; the hostsocket-plugin lock pins its `smoltcp` dependency (the
+# committed assets/hostsocket/hostsocket_plugin.wasm is built from it). A manifest
 # update without a lock refresh breaks `cargo build --locked` (issue #219:
 # the v0.12.0 tag shipped crates/copperline-web/Cargo.lock still pinning
 # copperline 0.11.0).
@@ -43,4 +45,7 @@ jobs:
         run: cargo tree --locked > /dev/null
       - name: crates/cputest-runner
         working-directory: crates/cputest-runner
+        run: cargo tree --locked > /dev/null
+      - name: crates/hostsocket-plugin
+        working-directory: crates/hostsocket-plugin
         run: cargo tree --locked > /dev/null

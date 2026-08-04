@@ -1,0 +1,52 @@
+[package]
+name = "hostsocket-plugin"
+version = "0.1.0"
+edition = "2021"
+description = "Bundled Copperline WASM board: bsdsocket.library backed by an embedded smoltcp stack"
+license = "GPL-3.0-or-later"
+publish = false
+
+[lib]
+# "cdylib" is what actually ships (the wasm32-unknown-unknown board). "rlib"
+# is added so `cargo test` (native target) can link a normal test harness
+# against this crate at all -- without it, the native test binary silently
+# exits (status 101, no output) before running anything, since a cdylib-only
+# artifact isn't something a native binary can link against as a library.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# default-features disabled: smoltcp's std feature pulls in libc-backed
+# device backends (raw sockets, tuntap) that don't exist on
+# wasm32-unknown-unknown -- we drive it purely through net_send/net_recv
+# instead. socket-udp backs sendto/recvfrom; socket-dns backs gethostbyname
+# (see src/lib.rs's module doc comment for why gethostbyaddr/reverse lookup
+# stays out even with this feature on). socket-icmp + auto-icmp-echo-reply
+# back SOCK_RAW/IPPROTO_ICMP support (do_socket's own comment): socket-icmp
+# is the userspace raw-ICMP socket type a guest ping implementation opens
+# and reads/writes directly; auto-icmp-echo-reply makes the *interface
+# itself* answer incoming echo requests automatically (the same thing a
+# real OS kernel's IP stack does, independent of any userspace ping socket)
+# -- without it, pinging the board's own INTERFACE_ADDR (or 127.0.0.1 under
+# net = "loopback", which bounces the request straight back to this same
+# interface) would never get a reply at all, since nothing else in this
+# plugin ever answers on the stack's behalf.
+smoltcp = { version = "0.13", default-features = false, features = [
+    "alloc",
+    "medium-ethernet",
+    "proto-ipv4",
+    "socket-tcp",
+    "socket-udp",
+    "socket-dns",
+    "socket-icmp",
+    "auto-icmp-echo-reply",
+] }
+
+# The shipped artifact (assets/hostsocket/hostsocket_plugin.wasm) is built
+# with this profile; size matters because the module is embedded in the
+# copperline binary. Mirrors the standalone upstream repo's workspace
+# profile.
+[profile.release]
+opt-level = "z"
+lto = true
+panic = "abort"
+strip = true

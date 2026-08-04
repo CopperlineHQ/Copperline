@@ -23,6 +23,9 @@
 
 # Standalone cputest runner build output.
 /crates/cputest-runner/target
+# Standalone HostSocket plugin build output (the committed artifact is
+# assets/hostsocket/hostsocket_plugin.wasm).
+/crates/hostsocket-plugin/target
 # CD images (cue/bin) are local assets, never committed.
 *.[Cc][Uu][Ee]
 *.[Bb][Ii][Nn]
@@ -34,6 +37,7 @@
 !/assets/aros/aros-amiga-m68k-rom.bin
 !/assets/aros/aros-amiga-m68k-ext.bin
 !/assets/services/services_rom.bin
+!/assets/hostsocket/hostsocket_rom.bin
 
 # Local run artifacts (screenshots, recordings, save states, input scripts,
 # RTC battery-RAM backing files).

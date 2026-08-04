@@ -143,6 +143,32 @@ jobs:
           path: target/probe-golden/
           if-no-files-found: ignore
 
+  hostsocket-plugin:
+    name: HostSocket plugin (wasm32)
+    # The bundled bsdsocket.library board (crates/hostsocket-plugin) ships
+    # as a committed artifact (assets/hostsocket/hostsocket_plugin.wasm, the
+    # blob a plain cargo build embeds), so nothing else in CI compiles this
+    # crate at all. This job keeps the source buildable for its real target
+    # and runs its native unit suite. It deliberately does not byte-compare
+    # the artifact against a fresh build: rustc upgrades change wasm output,
+    # and the artifact is only expected to be refreshed when the crate
+    # itself changes (like the guest ROMs under assets/).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/hostsocket-plugin
+      - name: Build (wasm32-unknown-unknown)
+        working-directory: crates/hostsocket-plugin
+        run: cargo build --release --locked --target wasm32-unknown-unknown
+      - name: Native unit tests
+        working-directory: crates/hostsocket-plugin
+        run: cargo test --locked
+
   diagrom-smoke:
     name: DiagROM boot smoke
     needs: build

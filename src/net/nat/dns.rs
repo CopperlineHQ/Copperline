@@ -227,7 +227,7 @@ fn encode_name(name: &str) -> Vec<u8> {
     out
 }
 
-fn resolve_a(name: &str) -> Option<std::net::Ipv4Addr> {
+pub(crate) fn resolve_a(name: &str) -> Option<std::net::Ipv4Addr> {
     // Only hostname-shaped strings reach getaddrinfo.
     let ok = !name.is_empty()
         && name
