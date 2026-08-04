@@ -97,6 +97,7 @@ int6 = false            #   int2 -> may assert INT2 (PORTS)
 # A NIC plugin may also request the shared host networking capability:
 # net = "bridge"         # none / loopback / nat / bridge
 # net_interface = "en0" # required for bridge
+# resolve = true         # host-OS-resolver DNS lookups (resolve_start/resolve_poll)
 ```
 
 WASM is chosen because a module's entire mutable state lives in its linear
@@ -127,13 +128,32 @@ manifest capabilities; importing one that was not granted fails to load):
 | Import | Signature | Capability |
 |--------|-----------|------------|
 | `log` | `(ptr i32, len i32)` | always available |
+| `config_get` / `resource_len` / `resource_read` | see below | always available |
 | `dma_read` | `(addr i32, ptr i32, len i32)` | `dma`: Amiga `addr` -> plugin memory `ptr` |
 | `dma_write` | `(addr i32, ptr i32, len i32)` | `dma`: plugin memory `ptr` -> Amiga `addr` |
+| `net_send` | `(ptr i32, len i32)` | `net`: transmit the Ethernet frame at plugin memory `ptr` |
+| `net_recv` | `(ptr i32, cap i32) -> i32` | `net`: copy the next inbound frame into `ptr` (truncated to `cap`), or 0 |
+| `resolve_start` | `(name_ptr i32, name_len i32) -> i32` | `resolve`: start a host-OS-resolver lookup, returns a request id or -1 |
+| `resolve_poll` | `(id i32, out_ptr i32) -> i32` | `resolve`: poll it -- -2 pending, -1 failed, or 0 with the address at `out_ptr` |
 
 Interrupt lines are level-sensitive and polled, exactly like the in-tree
 boards: a plugin holds `int2`/`int6` non-zero while the line is asserted, and
 the bus applies the interrupt-delivery pipeline automatically -- the
 plugin never pulses INTREQ.
+
+`resolve_start`/`resolve_poll` ask Copperline's own process to resolve a
+hostname via its OS resolver (`getaddrinfo`) on a short-lived background
+thread, rather than the plugin having to speak DNS wire format itself over
+its own `net` traffic -- the only way a plugin can get "whatever the host's
+resolver is configured for" name resolution under a backend (like a direct
+LAN bridge) with no virtual DNS forwarder of its own. `resolve_start` reads
+the name from the plugin's own linear memory and returns a request id;
+`resolve_poll` is a non-blocking poll of that id, writing the resolved IPv4
+address (4 bytes, big-endian) into the plugin's own linear memory at
+`out_ptr` on success (0). Like `net`, using it makes a board
+non-deterministic -- see [](guide/configuration)'s `[hostsocket]` section for
+the concrete example (its `resolver` key, which defaults to using this
+capability under `net = "nat"`/`"bridge"`).
 
 Plugins can be written in any language that targets `wasm32` (Rust, C, Zig,
 ...). An inert example module and its manifest can be generated with the
@@ -259,6 +279,44 @@ plugin) breaks Copperline's byte-identical replay and save-state reproducibility
 while traffic flows -- the emulator logs this when the board is attached. Save
 states record only the chosen backend and bring up a fresh one on load
 (in-flight frames are dropped; the guest's TCP retransmits).
+
+## Networking: the bundled HostSocket board
+
+`[hostsocket]` fits the bundled HostSocket board: guest-facing
+`bsdsocket.library` backed by a host-side smoltcp TCP/IP stack, so
+socket-using applications run with no guest network stack to boot -- see the
+[configuration guide](guide/configuration.md) for the user-facing knobs and
+caveats. Where the A2065 answers "does this driver/stack work," HostSocket
+answers "does this application use sockets correctly," and serves it as the
+real, everyday `bsdsocket.library` for software running under Copperline.
+
+Architecturally it is not a native board like the A2065 but a WASM plugin
+board (previous section) whose module and guest autoboot ROM ship inside the
+`copperline` binary:
+
+- `crates/hostsocket-plugin/` is the plugin source; the committed artifact it
+  builds (`assets/hostsocket/hostsocket_plugin.wasm`) is what a plain
+  `cargo build` embeds, so building Copperline needs no wasm toolchain.
+  Refresh it with `make` in that crate when the plugin changes -- the
+  install step copies the wasm32 build output into `assets/`, same as the
+  guest ROM Makefiles.
+- `guest/hostsocket/` is the m68k stub -- LVO trampolines and the
+  `rt_Init`-deferred library install, staged through a register-window RPC
+  the same way the services board's hostfs handler works. Its committed ROM
+  (`assets/hostsocket/hostsocket_rom.bin`) is served to the plugin as its
+  `rom` resource and boots via the board's DiagArea on Kickstart 1.3-3.x
+  and AROS.
+- Config resolution (`src/hostsocket.rs`) expands `[hostsocket]` into an
+  ordinary plugin-board entry whose module path is the sentinel
+  `<bundled-hostsocket>`; the plugin host and save-state restore resolve the
+  sentinel to the embedded bytes, so states taken with the board fitted load
+  anywhere the same Copperline build runs. Because it is a plugin board, the
+  whole TCP/IP stack lives in the module's linear memory and rides in save
+  states like any other plugin state.
+
+The board autoconfigs under the Copperline manufacturer ID with product 6
+(see below). Its conformance record against the external bsdsocktest suite
+is `crates/hostsocket-plugin/docs/bsdsocktest-status.md`.
 
 ## Graphics: RTG boards
 
@@ -403,6 +461,7 @@ makes the real ROMulus flash-ROM board. The product numbers under it are:
 | 3 | Built-in fast RAM (`[memory] fast`) |
 | 4 | Built-in Zorro III RAM (`[memory] z3`) |
 | 5 | Copperline services board (host `[[filesys]]` mounts; `filesys.rs`) |
+| 6 | HostSocket bsdsocket.library board (`[hostsocket]`; `hostsocket.rs`) |
 
 The **identification board** (`BoardSpec::copperline_id`) is always added to
 the chain (unless disabled, below) so guest software can detect that it is

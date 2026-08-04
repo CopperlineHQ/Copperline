@@ -58,6 +58,8 @@ against real hardware.
   DrawBridge / Greaseweazle / Supercard Pro via the bundled FloppyBridge,
   `docs/guide/floppybridge.md`), Gayle and A4000 IDE, SCSI (A2091,
   A4091, or the A3000's onboard Super DMAC), CDTV/CD32 CD, A2065 Ethernet,
+  a bundled host-backed `bsdsocket.library` (socket networking for guest
+  applications with no guest TCP/IP stack to boot),
   Z3660 and Picasso II/II+ RTG cards (high-colour Picasso96 screens), the serial
   port bridged to host stdout/TCP/PTY/MIDI, a parallel-port printer capture and
   audio sampler, host directories served live as AmigaDOS volumes, and Zorro
@@ -340,7 +342,7 @@ channel are in
 | Floppy / ADF / DMS / SCP | DF0-DF3 standard DD ADF read/write, read-only ADZ/DMS, UAE extended ADF, initial read-only SCP flux import, track-timed disk DMA, CIA drive lines, index FLAG, DSKLEN/DSKBYTR/DSKSYNC/DSKDAT, per-drive multi-disk playlists with a swap key, and real 3.5" drives through FloppyBridge (DrawBridge / Greaseweazle / Supercard Pro). |
 | Hard disks | Gayle IDE (A600/A1200) and A4000 motherboard IDE; SCSI via the A2091 (Zorro II DMAC + WD33C93A), A4091 (Zorro III 53C710 with SCRIPTS), or A3000 Super DMAC; RDB HDFs, bare partition hardfiles, and host-directory volumes. |
 | Host filesystem | `[[filesys]]` mounts serve host directories live as AmigaDOS volumes (read/write, `.uaem` attribute sidecars, Latin-1 name mapping). |
-| Expansion | Zorro II/III autoconfig chain, TOML-described RAM boards, WASM plugin boards (registers/interrupts/DMA in a sandboxed module), A2065 Ethernet (Am7990 LANCE) with loopback, userspace NAT, and direct host-adapter bridge backends. |
+| Expansion | Zorro II/III autoconfig chain, TOML-described RAM boards, WASM plugin boards (registers/interrupts/DMA in a sandboxed module), A2065 Ethernet (Am7990 LANCE) with loopback, userspace NAT, and direct host-adapter bridge backends, and the bundled HostSocket board (`bsdsocket.library` backed by a host-side TCP/IP stack over the same backends). |
 | Agnus VPOSR / VHPOSR | Beam counters advanced per colour clock; PAL and NTSC timing (including NTSC long/short lines). |
 | Agnus Copper | Beam-scheduled OCS Copper with COP1/COP2 jumps, WAIT, SKIP, DMAEN/COPEN gating, and chip-bus grants. |
 | Agnus blitter | Scheduled per-slot engine: normal/line/fill modes, hardware per-word channel bus sequences (including the area-fill idle C slot), BBUSY/BZERO, BLTPRI "nasty" vs CPU starvation-yield arbitration, blit-done IRQ. |

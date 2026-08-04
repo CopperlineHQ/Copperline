@@ -82,9 +82,9 @@ The audio, serial, parallel, and network surface has matching per-run flags
 too -- `--audio-device`, `--audio-channel-mode`, `--audio-filter`,
 `--audio-stereo-separation`, `--serial`, `--midi-in`, `--midi-out`,
 `--parallel`, `--sampler-audio-input`, `--sampler-input-gain`, `--a2065-net`,
-`--a2065-interface` --
-described with their `[audio]`, `[serial]`, `[parallel]`, and `[a2065]` keys
-below.
+`--a2065-interface`, `--hostsocket-net`, `--hostsocket-interface` --
+described with their `[audio]`, `[serial]`, `[parallel]`, `[a2065]`, and
+`[hostsocket]` keys below.
 
 ## Top level
 
@@ -1460,6 +1460,91 @@ replay and save-state determinism while traffic flows. A save state stores the
 bridge adapter identifier and must be restored on a host where that adapter can
 be opened. See [](../zorro) for board details, platform bridge setup, and the
 NAT's limitations.
+
+## `[hostsocket]` -- bsdsocket.library without a guest TCP/IP stack
+
+```toml
+[hostsocket]
+net = "nat"   # or "bridge", "loopback"; "none" for a dead wire
+# interface = "en0"       # required for "bridge"
+# dns_server = "10.0.2.3" # only used when resolver = "dns" (see below)
+# hostname = "amiga"      # gethostname() return value (cosmetic)
+# address = "192.168.1.50/24" # interface address; only for "bridge" (see below)
+# gateway = "192.168.1.1"     # default gateway; only for "bridge" (see below)
+# resolver = "dns"            # gethostbyname() via dns_server directly instead
+#                             # of the host's own resolver (the default under
+#                             # "nat"/"bridge"); see below
+```
+
+Fits the bundled HostSocket board: `bsdsocket.library` for the guest, backed
+by a TCP/IP stack that runs on the host instead of inside the emulated CPU.
+Any bsdsocket-consuming application (an Aminet tool, an MQTT client, a game
+with an online mode) opens `bsdsocket.library` and calls
+`socket()`/`connect()`/`send()`/`recv()` exactly as it would against AmiTCP or
+Roadshow -- but there is no guest-side stack to install, configure, or boot:
+the library autoboots from the board's ROM on Kickstart 1.3 through 3.x and
+on the bundled AROS ROM. `--hostsocket-net BACKEND` is the matching per-run
+flag, and the launcher's **I/O Ports** tab (Ethernet section) has the same
+picker.
+
+`net` selects the same host network backends as the A2065 (see above for
+`"nat"`/`"bridge"` details and caveats), with one important difference in
+what they mean here. The guest never configures an IP address -- the
+host-side stack owns addressing -- so under `"nat"` sockets simply reach the
+outside world, and under `"loopback"` the guest can talk to itself
+(`127.0.0.1`) with fully deterministic behavior, which also makes
+`"loopback"` the right backend for reproducible headless test runs of
+socket-using software. `gethostbyname()` just works under `"nat"`/`"bridge"`
+with no further configuration (see `resolver` below for why); under
+`"loopback"` lookups return failure (nothing is listening, and nothing
+should be -- see `resolver`'s own note on why loopback never routes through
+a real resolver).
+
+`address` and `gateway` matter only under `"bridge"`. The default interface
+address/gateway (`10.0.2.15/24` and `10.0.2.2`) are Copperline NAT's own
+virtual addresses, hardcoded on the NAT side too -- correct and required
+under `"nat"`/`"loopback"`, but meaningless on a real physical LAN, where
+nothing answers ARP for a `10.0.2.2` gateway that doesn't exist there. Set
+both to match the LAN `interface` is bridged to (e.g. `address =
+"192.168.1.50/24"`, `gateway = "192.168.1.1"`) -- there is no DHCP client,
+so the address is always static, picked the same way you would pick one for
+any other statically-configured device on that network. Leave both unset
+for `"nat"` and `"loopback"`.
+
+`resolver` picks how `gethostbyname()` itself works, independent of the
+addressing above. Left unset, it defaults to `"host"` under `"nat"`/
+`"bridge"`: Copperline's own process resolves the name via the host OS's
+resolver on a background thread -- the same mechanism `[a2065]`'s NAT
+backend already uses internally for its own DNS forwarding, now available
+directly to this board -- which is why `gethostbyname()` just works out of
+the box under both backends with no `dns_server` to hand-configure, on
+`"bridge"` in particular where nothing else would know which resolver the
+LAN actually offers. Set `resolver = "dns"` explicitly to opt back into
+the board's own DNS query: its own smoltcp stack sends a real DNS request
+to `dns_server` over whichever backend is fitted, which is the one way to
+target a *specific* resolver rather than whatever the host happens to be
+configured to use (a corporate/internal-only DNS server on a bridged LAN,
+for instance). Explicit `resolver = "host"` is rejected under `"loopback"`/
+`"none"` (there is no sane default there either, so those backends simply
+get no resolver at all): routing through a real host resolver would
+silently defeat loopback's whole reason for existing, byte-identical
+deterministic replay. Reverse lookups (`gethostbyaddr()`) are unaffected by
+this setting -- they always use the `"dns"` path's PTR query against
+`dns_server`.
+
+Do not fit this board and also boot a real guest TCP/IP stack (AmiTCP,
+Roadshow, ...) in the same session -- both would add a `bsdsocket.library`,
+and which one an application opens is undefined. Use `[a2065]` for testing
+real stacks and SANA-II drivers; use `[hostsocket]` for running or testing
+the applications above them. The determinism note on `[a2065]` applies here
+too: `"nat"` and `"bridge"` traffic arrives on the host's schedule and
+breaks byte-identical replay, while `"loopback"` and `"none"` stay
+deterministic. The board state (open sockets included) rides in save
+states, but live TCP peers do not survive a restore on the host side.
+
+Implemented as a bundled WASM plugin board (see [](../zorro)); its
+verification record against the external bsdsocktest conformance suite
+lives in `crates/hostsocket-plugin/docs/bsdsocktest-status.md`.
 
 ## `[rtg]` -- RTG graphics card
 

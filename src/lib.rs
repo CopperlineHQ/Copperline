@@ -48,6 +48,7 @@ pub mod gayle;
 pub mod gdbstub;
 pub mod harddrive;
 pub mod heatmap;
+pub mod hostsocket;
 pub mod ide_a4000;
 pub mod inputrec;
 pub mod inputsched;

@@ -409,6 +409,11 @@ pub enum LauncherField {
     Ethernet,
     /// Host adapter used while the A2065 backend is bridged.
     EthernetInterface,
+    /// The bundled HostSocket bsdsocket.library board: absent, or fitted
+    /// with a chosen host backend.
+    HostSocket,
+    /// Host adapter used while the HostSocket backend is bridged.
+    HostSocketInterface,
     /// Inert field for a non-interactive [`RowKind::SectionHeader`] row.
     SectionHeader,
     // A/V and emulation
@@ -689,9 +694,11 @@ const PARALLEL_ROWS_SAMPLER: [Row; 3] = [
     row(F::SamplerInput, "  Audio input", Cycle),
     row(F::SamplerGain, "  Input gain", Cycle),
 ];
-const ETHERNET_ROWS: [Row; 2] = [
+const ETHERNET_ROWS: [Row; 4] = [
     row(F::Ethernet, "  A2065 board", Cycle),
     row(F::EthernetInterface, "  Host adapter", Cycle),
+    row(F::HostSocket, "  HostSocket board", Cycle),
+    row(F::HostSocketInterface, "  Host adapter", Cycle),
 ];
 // The A/V & Emu tab is split into three categories switched via the top nav row.
 // The Video category also carries the CRT-shader controls (a picture setting).
@@ -1295,6 +1302,17 @@ pub struct MachineSetup {
     /// section: `None` = not fitted, `Some(backend)` fits the board with that
     /// host backend (`NetConfig::None` = fitted but isolated).
     a2065_net: Option<NetConfig>,
+    /// The bundled HostSocket bsdsocket.library board, edited in the same
+    /// Ethernet section: `None` = not fitted, `Some(backend)` fits it.
+    hostsocket_net: Option<NetConfig>,
+    /// `[hostsocket]` keys the launcher does not edit (DNS resolver
+    /// address/strategy, guest hostname, and the bridge-only interface
+    /// address/gateway), carried through so saving a config keeps them.
+    hostsocket_dns_server: Option<String>,
+    hostsocket_hostname: Option<String>,
+    hostsocket_address: Option<String>,
+    hostsocket_gateway: Option<String>,
+    hostsocket_resolver: Option<String>,
     /// Currently visible host bridge adapters: stable identifier + label.
     bridge_interfaces: Vec<(String, String)>,
     /// Input device names for the sampler picker: filled when the screen opens
@@ -1476,6 +1494,12 @@ impl MachineSetup {
             sampler_input: cfg.parallel.sampler_input.clone(),
             sampler_gain_db: cfg.parallel.sampler_gain_db,
             a2065_net: cfg.a2065_net.clone(),
+            hostsocket_net: cfg.hostsocket_net.clone(),
+            hostsocket_dns_server: raw.hostsocket.dns_server.clone(),
+            hostsocket_hostname: raw.hostsocket.hostname.clone(),
+            hostsocket_address: raw.hostsocket.address.clone(),
+            hostsocket_gateway: raw.hostsocket.gateway.clone(),
+            hostsocket_resolver: raw.hostsocket.resolver.clone(),
             bridge_interfaces: Vec::new(),
             // Filled by refresh_sampler_inputs on open, like the audio devices.
             sampler_input_devices: Vec::new(),
@@ -1574,13 +1598,15 @@ impl MachineSetup {
     /// echoes frames deterministically and an isolated or absent NIC never
     /// sees traffic, so NAT and a direct adapter bridge qualify.
     pub fn ethernet_breaks_determinism(&self) -> bool {
-        matches!(
-            self.a2065_net.as_ref(),
-            Some(NetConfig::Nat) if crate::net::NAT_AVAILABLE
-        ) || matches!(
-            self.a2065_net.as_ref(),
-            Some(NetConfig::Bridge { .. }) if crate::net::BRIDGE_AVAILABLE
-        )
+        [&self.a2065_net, &self.hostsocket_net].iter().any(|net| {
+            matches!(
+                net.as_ref(),
+                Some(NetConfig::Nat) if crate::net::NAT_AVAILABLE
+            ) || matches!(
+                net.as_ref(),
+                Some(NetConfig::Bridge { .. }) if crate::net::BRIDGE_AVAILABLE
+            )
+        })
     }
 
     /// Re-read every host device list (MIDI endpoints + audio outputs + sampler
@@ -1928,6 +1954,21 @@ impl MachineSetup {
             Some(NetConfig::Bridge { interface }) => Some(interface.clone()),
             _ => None,
         };
+        // HostSocket: same shape as the A2065 (absent key = not fitted),
+        // plus the pass-through keys this screen does not edit.
+        raw.hostsocket.net = self
+            .hostsocket_net
+            .as_ref()
+            .map(|n| crate::net::net_config_name(n).to_string());
+        raw.hostsocket.interface = match self.hostsocket_net.as_ref() {
+            Some(NetConfig::Bridge { interface }) => Some(interface.clone()),
+            _ => None,
+        };
+        raw.hostsocket.dns_server = self.hostsocket_dns_server.clone();
+        raw.hostsocket.hostname = self.hostsocket_hostname.clone();
+        raw.hostsocket.address = self.hostsocket_address.clone();
+        raw.hostsocket.gateway = self.hostsocket_gateway.clone();
+        raw.hostsocket.resolver = self.hostsocket_resolver.clone();
         // The Audio output picker is one of default / a named device / Disabled.
         // A named device sets output_device; Disabled sets output_enabled=false
         // (the resolved default is true, so it is omitted otherwise).
@@ -2139,6 +2180,9 @@ impl MachineSetup {
             F::Df3Image | F::Df3WriteProtect => self.floppy_drives < 4,
             F::EthernetInterface => {
                 !matches!(self.a2065_net.as_ref(), Some(NetConfig::Bridge { .. }))
+            }
+            F::HostSocketInterface => {
+                !matches!(self.hostsocket_net.as_ref(), Some(NetConfig::Bridge { .. }))
             }
             // A controller is not a disk: only the units carrying one have a
             // place in the boot order, so the empty six or seven go rather
@@ -2659,6 +2703,22 @@ impl MachineSetup {
                     .unwrap_or_else(|| format!("{interface} (unavailable)")),
                 _ => "—".to_string(),
             },
+            F::HostSocket => match self.hostsocket_net.as_ref() {
+                None => "None".to_string(),
+                Some(NetConfig::None) => "Isolated".to_string(),
+                Some(NetConfig::Loopback) => "Loopback".to_string(),
+                Some(NetConfig::Nat) => "NAT".to_string(),
+                Some(NetConfig::Bridge { .. }) => "Bridged".to_string(),
+            },
+            F::HostSocketInterface => match self.hostsocket_net.as_ref() {
+                Some(NetConfig::Bridge { interface }) => self
+                    .bridge_interfaces
+                    .iter()
+                    .find(|(name, _)| name == interface)
+                    .map(|(_, label)| label.clone())
+                    .unwrap_or_else(|| format!("{interface} (unavailable)")),
+                _ => "—".to_string(),
+            },
             F::AudioDevice => self.audio_output.label().to_string(),
             F::AudioChannelMode => match self.audio_channel_mode {
                 ChannelMode::Stereo => "Stereo".to_string(),
@@ -2939,48 +2999,16 @@ impl MachineSetup {
                     cycle_floats(&SAMPLER_GAIN_STEPS, self.sampler_gain_db as f64, forward) as f32;
             }
             F::Ethernet => {
-                let mut choices = vec![None, Some(NetConfig::None), Some(NetConfig::Loopback)];
-                if crate::net::NAT_AVAILABLE {
-                    choices.push(Some(NetConfig::Nat));
-                }
-                if crate::net::BRIDGE_AVAILABLE {
-                    let interface = match self.a2065_net.as_ref() {
-                        Some(NetConfig::Bridge { interface }) => Some(interface.clone()),
-                        _ => self.bridge_interfaces.first().map(|(name, _)| name.clone()),
-                    };
-                    if let Some(interface) = interface {
-                        choices.push(Some(NetConfig::Bridge { interface }));
-                    }
-                }
-                let current = self.a2065_net.clone();
-                let index = choices
-                    .iter()
-                    .position(|item| *item == current)
-                    .unwrap_or(0);
-                let next = if forward {
-                    (index + 1) % choices.len()
-                } else {
-                    (index + choices.len() - 1) % choices.len()
-                };
-                self.a2065_net = choices[next].clone();
+                cycle_net_board(&mut self.a2065_net, &self.bridge_interfaces, forward);
             }
             F::EthernetInterface => {
-                if let Some(NetConfig::Bridge { interface }) = self.a2065_net.as_mut() {
-                    if !self.bridge_interfaces.is_empty() {
-                        let index = self
-                            .bridge_interfaces
-                            .iter()
-                            .position(|(name, _)| name == interface)
-                            .unwrap_or(0);
-                        let next = if forward {
-                            (index + 1) % self.bridge_interfaces.len()
-                        } else {
-                            (index + self.bridge_interfaces.len() - 1)
-                                % self.bridge_interfaces.len()
-                        };
-                        *interface = self.bridge_interfaces[next].0.clone();
-                    }
-                }
+                cycle_bridge_interface(&mut self.a2065_net, &self.bridge_interfaces, forward);
+            }
+            F::HostSocket => {
+                cycle_net_board(&mut self.hostsocket_net, &self.bridge_interfaces, forward);
+            }
+            F::HostSocketInterface => {
+                cycle_bridge_interface(&mut self.hostsocket_net, &self.bridge_interfaces, forward);
             }
             F::AudioDevice => {
                 // Re-read on each step so a device connected since the screen
@@ -3983,6 +4011,61 @@ fn cycle_slice<T: Copy + PartialEq>(items: &[T], current: T, forward: bool) -> T
         (idx + n - 1) % n
     };
     items[next]
+}
+
+/// Cycle a network board's fitted/backend state (`None` = not fitted)
+/// through the backends this build can actually bring up: NAT only where
+/// available, a bridge choice only when an adapter exists to name (keeping
+/// the current adapter if the board is already bridged). Shared by the
+/// A2065 and HostSocket pickers in the Ethernet section.
+fn cycle_net_board(
+    net: &mut Option<NetConfig>,
+    bridge_interfaces: &[(String, String)],
+    forward: bool,
+) {
+    let mut choices = vec![None, Some(NetConfig::None), Some(NetConfig::Loopback)];
+    if crate::net::NAT_AVAILABLE {
+        choices.push(Some(NetConfig::Nat));
+    }
+    if crate::net::BRIDGE_AVAILABLE {
+        let interface = match net.as_ref() {
+            Some(NetConfig::Bridge { interface }) => Some(interface.clone()),
+            _ => bridge_interfaces.first().map(|(name, _)| name.clone()),
+        };
+        if let Some(interface) = interface {
+            choices.push(Some(NetConfig::Bridge { interface }));
+        }
+    }
+    let index = choices.iter().position(|item| item == net).unwrap_or(0);
+    let next = if forward {
+        (index + 1) % choices.len()
+    } else {
+        (index + choices.len() - 1) % choices.len()
+    };
+    *net = choices[next].clone();
+}
+
+/// Cycle a bridged network board's host adapter through the visible ones;
+/// inert unless the board's backend is currently a bridge.
+fn cycle_bridge_interface(
+    net: &mut Option<NetConfig>,
+    bridge_interfaces: &[(String, String)],
+    forward: bool,
+) {
+    if let Some(NetConfig::Bridge { interface }) = net.as_mut() {
+        if !bridge_interfaces.is_empty() {
+            let index = bridge_interfaces
+                .iter()
+                .position(|(name, _)| name == interface)
+                .unwrap_or(0);
+            let next = if forward {
+                (index + 1) % bridge_interfaces.len()
+            } else {
+                (index + bridge_interfaces.len() - 1) % bridge_interfaces.len()
+            };
+            *interface = bridge_interfaces[next].0.clone();
+        }
+    }
 }
 
 /// Cycle through float presets, snapping to the nearest preset first so a
@@ -5401,6 +5484,60 @@ mod tests {
             s.cycle(LauncherField::Ethernet, true);
         }
         assert_eq!(s.value_label(LauncherField::Ethernet), "None");
+    }
+
+    #[test]
+    fn hostsocket_board_cycles_and_round_trips() {
+        let mut s = MachineSetup::default();
+        assert_eq!(s.value_label(LauncherField::HostSocket), "None");
+        assert!(s.to_raw().hostsocket.net.is_none());
+        assert!(!s.ethernet_breaks_determinism());
+
+        s.cycle(LauncherField::HostSocket, true);
+        assert_eq!(s.value_label(LauncherField::HostSocket), "Isolated");
+        s.cycle(LauncherField::HostSocket, true);
+        assert_eq!(s.value_label(LauncherField::HostSocket), "Loopback");
+        // HostSocket over loopback is fully deterministic: no warning.
+        assert!(!s.ethernet_breaks_determinism());
+
+        // The fitted board and its backend survive a save/load round trip,
+        // resolving to the bundled wasm board on the way through Config.
+        let raw = s.to_raw();
+        assert_eq!(raw.hostsocket.net.as_deref(), Some("loopback"));
+        let back = MachineSetup::from_raw(&raw).unwrap();
+        assert_eq!(back.hostsocket_net, Some(NetConfig::Loopback));
+
+        if crate::net::NAT_AVAILABLE {
+            s.cycle(LauncherField::HostSocket, true);
+            assert_eq!(s.value_label(LauncherField::HostSocket), "NAT");
+            assert!(s.ethernet_breaks_determinism());
+            assert_eq!(s.to_raw().hostsocket.net.as_deref(), Some("nat"));
+            s.cycle(LauncherField::HostSocket, true);
+        } else {
+            s.cycle(LauncherField::HostSocket, true);
+        }
+        assert_eq!(s.value_label(LauncherField::HostSocket), "None");
+    }
+
+    #[test]
+    fn hostsocket_keeps_uneditable_keys_across_a_launcher_save() {
+        // dns_server/hostname/address/gateway/resolver have no launcher
+        // row; a load-edit-save cycle must carry them through untouched.
+        let mut raw = RawConfig::default();
+        raw.hostsocket.net = Some("nat".to_string());
+        raw.hostsocket.dns_server = Some("192.0.2.53".to_string());
+        raw.hostsocket.hostname = Some("boing".to_string());
+        raw.hostsocket.address = Some("192.168.1.50/24".to_string());
+        raw.hostsocket.gateway = Some("192.168.1.1".to_string());
+        raw.hostsocket.resolver = Some("host".to_string());
+        let s = MachineSetup::from_raw(&raw).unwrap();
+        let saved = s.to_raw();
+        assert_eq!(saved.hostsocket.net.as_deref(), Some("nat"));
+        assert_eq!(saved.hostsocket.dns_server.as_deref(), Some("192.0.2.53"));
+        assert_eq!(saved.hostsocket.hostname.as_deref(), Some("boing"));
+        assert_eq!(saved.hostsocket.address.as_deref(), Some("192.168.1.50/24"));
+        assert_eq!(saved.hostsocket.gateway.as_deref(), Some("192.168.1.1"));
+        assert_eq!(saved.hostsocket.resolver.as_deref(), Some("host"));
     }
 
     #[test]
