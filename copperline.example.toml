@@ -567,7 +567,7 @@ floppy_sounds_volume = 100
 # mt32_control_rom = "~/Amiga/MT32_CONTROL.ROM"
 # mt32_pcm_rom = "~/Amiga/MT32_PCM.ROM"
 # mt32_panel = true          # the module's front panel, under the display
-# mt32_lcd = "mt32"          # mt32 (default), jv1080, or oled
+# mt32_lcd = "mt32"          # mt32 (default), superjv, sseries, or oled
 
 
 # Parallel (Centronics) port peripheral. With no section the connector is
