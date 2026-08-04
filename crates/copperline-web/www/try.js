@@ -12,8 +12,14 @@ import init, { WebEmu } from './pkg/copperline_web.js';
 import { TelnetSession } from './serial-telnet.js';
 
 const $ = (id) => document.getElementById(id);
-const canvas = $('screen');
-const ctx2d = canvas.getContext('2d');
+let canvas = $('screen');
+// The monitor presentation - the 1084 CRT shader pass and bezel of the
+// desktop window, on by default (see the display settings section) -
+// renders through WebGL2; without it the page keeps the plain 2D blit it
+// always had. Decided once here, before anything else touches the canvas:
+// a canvas can only ever hold one kind of context.
+const monitorGl = initMonitorGl();
+const ctx2d = monitorGl ? null : canvas.getContext('2d');
 const overlay = $('overlay');
 const bootBtn = $('boot');
 const loadStatus = $('load-status');
@@ -49,6 +55,10 @@ let running = false;
 let paused = false;
 let framesThisSecond = 0;
 let lastStatUpdate = 0;
+// Size of the last presented frame in emulated pixels. Under the monitor
+// path the canvas backing store is display-resolution, so pointer scaling
+// reads the emulated size from here rather than from the canvas.
+let presentSize = { width: 0, rows: 0 };
 
 // Transient caption over the screen, the page's version of the desktop's
 // on-screen display. It exists because the shell's status line lives inside
@@ -570,6 +580,11 @@ function presentFrame() {
   // aperture for a standard PAL screen, the full overscan framebuffer
   // otherwise), so track both dimensions every frame.
   const width = emu.present_width();
+  presentSize = { width, rows };
+  if (monitorGl) {
+    presentFrameMonitor(width, rows);
+    return;
+  }
   if (canvas.width !== width || canvas.height !== rows) {
     canvas.width = width;
     canvas.height = rows;
@@ -1211,15 +1226,22 @@ window.addEventListener('keyup', (e) => {
 // Esc releases the lock, as the browser enforces.
 
 let lastPos = null;
-// Emulator pixels per CSS pixel, one scale per axis. The bitmap fills the
+// Emulator pixels per CSS pixel, one scale per axis. The picture fills the
 // canvas element in every mode - fullscreen letterboxes the element
 // itself, keeping the display's shape - but the bitmap is not the
 // element's shape (the PAL capture is 668x540 shown as 4:3), so the two
 // axis ratios differ and sharing one would skew vertical pointer speed.
-const cssToEmu = () => ({
-  x: canvas.width / canvas.clientWidth,
-  y: canvas.height / canvas.clientHeight,
-});
+// The emulated size comes from the tracked presentation, not the canvas:
+// under the monitor path the backing store is display-resolution, and
+// with the bezel on the picture fills only the frame's opening, so a CSS
+// pixel of the element covers proportionally more of the picture.
+const cssToEmu = () => {
+  const scale = monitorPictureScale();
+  return {
+    x: (presentSize.width || canvas.width) / (canvas.clientWidth * scale),
+    y: (presentSize.rows || canvas.height) / (canvas.clientHeight * scale),
+  };
+};
 
 canvas.addEventListener('mousedown', (e) => {
   if (!emu || !running) return;
@@ -2935,30 +2957,56 @@ function togglePause() {
   setPaused(!paused);
 }
 
-// The canvas already holds exactly what the screen shows, so a screenshot
-// is the canvas itself. Clipboard first (what was asked for), with a file
-// download as the fallback: clipboard image writes need a secure context
-// and browser support, and Firefox has neither for ClipboardItem in all
-// versions. Both paths are driven from a click, which is the user gesture
-// the clipboard API requires.
+// A screenshot captures the presentation buffer, not the canvas: under
+// the monitor path the canvas carries the CRT pass and the bezel, and
+// captures stay comparable without them, exactly as on the desktop
+// (whose screenshots never include its presentation passes). Clipboard
+// first (what was asked for), with a file download as the fallback:
+// clipboard image writes need a secure context and browser support, and
+// Firefox has neither for ClipboardItem in all versions. Both paths are
+// driven from a click, which is the user gesture the clipboard API
+// requires.
 async function copyScreenshot() {
   if (!emu || !running) return;
   const blobOf = () =>
     new Promise((resolve, reject) => {
-      // The screen tint is a CSS filter on the canvas element, which
-      // toBlob never sees; bake it in through a filtered copy so the
-      // screenshot shows what the visitor is looking at. Browsers without
-      // canvas-context filters capture the untinted picture.
-      let source = canvas;
+      const rows = emu.present_rows();
+      const width = emu.present_width();
+      if (rows === 0 || width === 0) {
+        reject(new Error('no frame to capture'));
+        return;
+      }
+      const raw = document.createElement('canvas');
+      raw.width = width;
+      raw.height = rows;
+      const rawCtx = raw.getContext('2d');
+      if (!rawCtx) {
+        reject(new Error('canvas capture failed'));
+        return;
+      }
+      rawCtx.putImageData(
+        new ImageData(
+          new Uint8ClampedArray(wasm.memory.buffer, emu.present_ptr(), width * rows * 4),
+          width,
+          rows,
+        ),
+        0,
+        0,
+      );
+      // The screen tint is baked in through a filtered copy so the
+      // screenshot shows the phosphor the visitor is looking at, like the
+      // desktop's captures (which tint the buffer before presentation).
+      // Browsers without canvas-context filters capture untinted.
+      let source = raw;
       const filter = tintFilter();
       if (filter) {
         const copy = document.createElement('canvas');
-        copy.width = canvas.width;
-        copy.height = canvas.height;
+        copy.width = width;
+        copy.height = rows;
         const copyCtx = copy.getContext('2d');
         if (copyCtx && typeof copyCtx.filter === 'string') {
           copyCtx.filter = filter;
-          copyCtx.drawImage(canvas, 0, 0);
+          copyCtx.drawImage(raw, 0, 0);
           source = copy;
         }
       }
@@ -4015,9 +4063,557 @@ function setTintMode(mode, remember) {
   tintMode = mode;
   tintSel.value = mode;
   if (remember) storePref(TINT_STORAGE_KEY, mode);
-  canvas.style.filter = tintFilter();
+  // Under the monitor path the tint is applied in the shader, to the
+  // picture alone - the desktop tints its buffer before the presentation
+  // passes too, so the bezel plastic never turns phosphor-green. A CSS
+  // filter on the element would tint frame and all.
+  canvas.style.filter = monitorGl ? '' : tintFilter();
+  // A running page picks the shader tint up next tick; a paused one has
+  // no ticking loop to repaint, so repaint here.
+  if (monitorGl && emu && running && paused) presentFrame();
 }
 tintSel.addEventListener('change', () => setTintMode(tintSel.value, true));
+
+// --- display: monitor (CRT shader + bezel) -------------------------------
+// The desktop window's 1084 monitor look, ported to WebGL2: the CRT preset
+// (bowed tube face, scanlines, aperture grille, corner vignette - the
+// window's `[display] shader = "crt"`) and the procedural plastic bezel
+// (`[display] bezel`), composed exactly as the desktop composes them: the
+// preset paints the picture into the bezel opening's bounding box first
+// and the bezel frames it on top in frame-only mode, so the moulding's
+// rounded corners and recess clip the preset's square viewport. The GLSL
+// sources in initMonitorGl are line-for-line ports of the desktop's WGSL
+// (src/video/window/shaders/{crt,bezel}.wgsl); keep them in step.
+//
+// On by default, like nothing else here, because it is the page's face: a
+// visitor's first frame looks like the monitor the Amiga shipped with.
+// A presentation-only choice like overscan and tint, so it is remembered
+// per browser and never observable by the guest; screenshots capture the
+// picture without it (see copyScreenshot). Without WebGL2 the control
+// hides and the page blits as it always did.
+
+const MONITOR_STORAGE_KEY = 'copperline-monitor';
+const MONITOR_MODES = ['1084', 'crt', 'bezel', 'plain'];
+const MONITOR_LABELS = {
+  1084: '1084 (CRT + bezel)',
+  crt: 'CRT filter',
+  bezel: 'Bezel',
+  plain: 'Plain',
+};
+let monitorMode = '1084';
+
+// The bezel opening geometry, the desktop's bezel.rs constants: the
+// picture keeps this fraction of the canvas on both axes (so its aspect
+// holds), centred horizontally, sitting high by the top share so the
+// bottom band comes out wider than the top like the 1084's face.
+const MONITOR_OPENING_SCALE = 0.85;
+const MONITOR_OPENING_TOP_SHARE = 0.42;
+// The CRT preset's look parameters, the desktop's uniforms_for table for
+// ShaderKind::Crt: the tube curvature of the 1084's Philips M34EAQ10X
+// datasheet arcs, and the corner falloff.
+const MONITOR_CRT_CURVATURE = 0.3;
+const MONITOR_CRT_VIGNETTE = 0.15;
+
+// Screen-tint selector for the shaders' in-picture tint chains, keyed by
+// the tint select's values.
+const MONITOR_TINT_INDEX = { none: 0, bw: 1, green: 2, amber: 3, sepia: 4 };
+
+// The fraction of the canvas element the picture occupies: the bezel
+// opening when a bezel mode is on, the whole element otherwise. Pointer
+// scaling divides by this so mouse speed does not change with the frame.
+function monitorPictureScale() {
+  return monitorGl && (monitorMode === '1084' || monitorMode === 'bezel')
+    ? MONITOR_OPENING_SCALE
+    : 1;
+}
+
+// Build the WebGL2 monitor renderer, or return null to keep the 2D path
+// (no WebGL2, or - defensively - a shader that does not compile, in which
+// case the canvas node is replaced so a fresh 2D context is possible).
+// Called from the top of the module, before any other canvas access, so
+// everything it needs lives in this function.
+function initMonitorGl() {
+  const gl = canvas.getContext('webgl2', {
+    alpha: false,
+    antialias: false,
+    depth: false,
+    stencil: false,
+  });
+  if (!gl) return null;
+
+  // One fullscreen triangle, restricted by the viewport; uv (0,0) is the
+  // top-left like the texture's first row.
+  const VS = `#version 300 es
+out vec2 v_uv;
+void main() {
+  vec2 tc = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+  v_uv = tc;
+  gl_Position = vec4(tc * vec2(2.0, -2.0) + vec2(-1.0, 1.0), 0.0, 1.0);
+}
+`;
+
+  // Shared fragment prologue: bindings, sRGB transfer, the screen-tint
+  // chains and picture sampling. The passes work in linear light like the
+  // desktop's sRGB surface: the SRGB8_ALPHA8 source decodes on sampling
+  // and the result is encoded back at the end of each shader. The tint
+  // chains are the CSS filter-function matrices of the tint select's
+  // presets (Filter Effects spec), applied in sRGB space with every step
+  // clamped as a browser applies them, so the shader tint matches the
+  // tinted raw-frame screenshots. mat3 constructors are column-major, so
+  // each matrix below is written as its rows and applied as `c * M`.
+  const FS_COMMON = `precision highp float;
+precision highp int;
+uniform sampler2D u_tex;
+uniform vec4 u_size;   // xy: viewport size in px, zw: source size in texels
+uniform int u_tint;    // 0 none, 1 bw, 2 green, 3 amber, 4 sepia
+in vec2 v_uv;
+out vec4 fragColor;
+
+vec3 srgb_encode(vec3 c) {
+  c = clamp(c, 0.0, 1.0);
+  bvec3 lo = lessThanEqual(c, vec3(0.0031308));
+  return mix(1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, c * 12.92, vec3(lo));
+}
+
+vec3 srgb_decode(vec3 c) {
+  bvec3 lo = lessThanEqual(c, vec3(0.04045));
+  return mix(pow((c + 0.055) / 1.055, vec3(2.4)), c / 12.92, vec3(lo));
+}
+
+const mat3 TINT_GRAY = mat3(
+  0.2126, 0.7152, 0.0722,
+  0.2126, 0.7152, 0.0722,
+  0.2126, 0.7152, 0.0722);
+const mat3 TINT_SEPIA = mat3(
+  0.393, 0.769, 0.189,
+  0.349, 0.686, 0.168,
+  0.272, 0.534, 0.131);
+const mat3 TINT_SAT4 = mat3(
+  3.361, -2.145, -0.216,
+  -0.639, 1.855, -0.216,
+  -0.639, -2.145, 3.784);
+const mat3 TINT_HUE80 = mat3(
+  0.1399, -0.1133, 0.9734,
+  0.3168, 0.9024, -0.2192,
+  -0.5990, 1.2950, 0.3041);
+const mat3 TINT_HUE_M8 = mat3(
+  1.0220, 0.1065, -0.1284,
+  -0.0178, 0.9777, 0.0401,
+  0.1116, -0.0925, 0.9810);
+
+vec3 apply_tint(vec3 c) {
+  if (u_tint == 1) return clamp(c * TINT_GRAY, 0.0, 1.0);
+  if (u_tint == 4) return clamp(c * TINT_SEPIA, 0.0, 1.0);
+  c = clamp(c * TINT_GRAY, 0.0, 1.0);
+  c = clamp(c * TINT_SEPIA, 0.0, 1.0);
+  c = clamp(c * TINT_SAT4, 0.0, 1.0);
+  if (u_tint == 2) return clamp(c * TINT_HUE80, 0.0, 1.0) * 0.92;
+  return clamp(c * TINT_HUE_M8, 0.0, 1.0);
+}
+
+// Sample the picture. Unlike the desktop's backing texture the source
+// carries no status bar, so the desktop's src_rect collapses to the whole
+// texture and the edge clamp is the sampler's. The tint applies in sRGB
+// before the pass's own arithmetic, like the desktop's tint LUT on the
+// present buffer.
+vec3 sample_display(vec2 uv) {
+  vec3 c = texture(u_tex, clamp(uv, 0.0, 1.0)).rgb;
+  if (u_tint != 0) c = srgb_decode(apply_tint(srgb_encode(c)));
+  return c;
+}
+`;
+
+  // Pass-through blit, the "plain" monitor mode: the 2D path's look on
+  // the GL context (sampled NEAREST, set per-frame).
+  const FS_PLAIN = `#version 300 es
+${FS_COMMON}
+void main() {
+  fragColor = vec4(srgb_encode(sample_display(v_uv)), 1.0);
+}
+`;
+
+  // The CRT preset, ported from shaders/crt.wgsl: a bowed tube face,
+  // scanlines that bow with it, an aperture grille and a corner vignette,
+  // faded in together by the strength knob. See the WGSL source for the
+  // derivations (tube geometry from the 1084's Philips M34EAQ10X
+  // datasheet); comments here mark web-port differences only.
+  const FS_CRT = `#version 300 es
+${FS_COMMON}
+uniform vec4 u_params;  // x: strength, y: scanline count, z: mask kind, w: curvature
+uniform vec4 u_params2; // x: vignette
+
+const float TAU = 6.283185307179586;
+const float FLOOR = 0.55;
+const float SCAN_BOOST = 1.15;
+const float GRILLE_DIM = 0.55;
+const float GRILLE_BOOST = 1.25;
+const float CORNER_RADIUS = 0.0826;
+const float GLASS_GLOW = 0.01;
+
+vec2 warp(vec2 uv, float k, float aspect) {
+  vec2 c = uv * 2.0 - 1.0;
+  float r2 = c.x * c.x + c.y * c.y * aspect * aspect;
+  vec2 bowed = c * (1.0 + k * r2 * 0.25);
+  vec2 m = vec2(1.0 + k * 0.25, 1.0 + k * 0.25 * aspect * aspect);
+  return (bowed / m) * 0.5 + 0.5;
+}
+
+void main() {
+  float strength = clamp(u_params.x, 0.0, 1.0);
+  vec2 uv = clamp(v_uv, 0.0, 1.0);
+  float aspect = u_size.y / max(u_size.x, 1.0);
+  vec2 wuv = mix(uv, warp(uv, u_params.w, aspect), strength);
+  vec3 base = sample_display(wuv);
+
+  float lines = max(u_params.y, 1.0);
+  float profile = 0.5 - 0.5 * cos(TAU * wuv.y * lines);
+  float scan = (FLOOR + (1.0 - FLOOR) * profile) * SCAN_BOOST;
+
+  vec2 px = uv * u_size.xy;
+  int col = int(floor(px.x)) % 3;
+  vec3 grille = vec3(
+    col == 0 ? 1.0 : GRILLE_DIM,
+    col == 1 ? 1.0 : GRILLE_DIM,
+    col == 2 ? 1.0 : GRILLE_DIM) * GRILLE_BOOST;
+
+  vec2 c = uv * 2.0 - 1.0;
+  float vig = max(1.0 - clamp(u_params2.x, 0.0, 1.0) * dot(c, c), 0.0);
+
+  vec3 shaded = mix(base, base * scan * grille * vig, strength);
+
+  vec2 fh = vec2(1.0, aspect);
+  float rc = CORNER_RADIUS * strength;
+  vec2 q = abs((wuv * 2.0 - 1.0) * fh) - fh + vec2(rc);
+  float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - rc;
+  float aa = max(fwidth(d), 1e-6);
+  float face = 1.0 - clamp(d / aa + 0.5, 0.0, 1.0);
+  vec3 glow = vec3(GLASS_GLOW * strength);
+  fragColor = vec4(srgb_encode((shaded + glow) * face), 1.0);
+}
+`;
+
+  // The bezel, ported from shaders/bezel.wgsl: the 1084-style plastic
+  // front frame, with the picture seated in a rounded opening by a
+  // moulded insert, the power LED on the bottom band and the Copperline
+  // logotype printed on its left. Two modes via u_params.x, exactly as on
+  // the desktop: alone (0) the pass draws frame and picture; under the
+  // CRT preset (1, frame-only) it discards the opening interior and
+  // frames what the preset painted.
+  const FS_BEZEL = `#version 300 es
+${FS_COMMON}
+uniform vec4 u_opening; // picture opening in viewport UV: xy origin, zw size
+uniform vec4 u_params;  // x: 1 = frame-only, y: the preset's face curvature
+
+const vec3 PLASTIC = vec3(0.585, 0.560, 0.500);
+const float CORNER_RADIUS = 0.0826;
+
+const int BADGE_COLS = 59;
+const int BADGE_ROWS = 8;
+const uvec2 BADGE[8] = uvec2[8](
+  uvec2(0x0000000eu, 0x00000060u),
+  uvec2(0x00000011u, 0x00001040u),
+  uvec2(0x4e3cf381u, 0x038d0043u),
+  uvec2(0xd1451441u, 0x04531844u),
+  uvec2(0x5f451441u, 0x07d11040u),
+  uvec2(0x41451451u, 0x00511040u),
+  uvec2(0x4e3cf38eu, 0x039138e0u),
+  uvec2(0x00041000u, 0x00000000u));
+const vec3 BADGE_INK = vec3(0.030, 0.036, 0.060);
+
+float rounded_rect(vec2 p, vec2 half_size, float r) {
+  vec2 q = abs(p) - half_size + vec2(r);
+  return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+
+float grain(vec2 p) {
+  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453) - 0.5;
+}
+
+float badge_bit(int c, int r) {
+  if (c < 0 || c >= BADGE_COLS || r < 0 || r >= BADGE_ROWS) return 0.0;
+  uvec2 bits = BADGE[r];
+  if (c < 32) return float((bits.x >> uint(c)) & 1u);
+  return float((bits.y >> uint(c - 32)) & 1u);
+}
+
+float badge_sample(vec2 q) {
+  vec2 f = q - 0.5;
+  vec2 base = floor(f);
+  vec2 t = f - base;
+  int c = int(base.x);
+  int r = int(base.y);
+  float s00 = badge_bit(c, r);
+  float s10 = badge_bit(c + 1, r);
+  float s01 = badge_bit(c, r + 1);
+  float s11 = badge_bit(c + 1, r + 1);
+  return mix(mix(s00, s10, t.x), mix(s01, s11, t.x), t.y);
+}
+
+void main() {
+  vec2 vp = u_size.xy;
+  vec2 px = v_uv * vp;
+
+  vec2 o_org = u_opening.xy * vp;
+  vec2 o_size = u_opening.zw * vp;
+  vec2 o_half = max(o_size * 0.5, vec2(1.0));
+  vec2 centre = o_org + o_half;
+  vec2 p = px - centre;
+  float unit = min(o_size.x, o_size.y);
+  float seat = max(0.007 * unit, 1.5);
+  float chamfer = max(0.030 * unit, 4.0);
+  float recess = seat + chamfer;
+  float bevel = max(0.022 * unit, 2.0);
+
+  float k = u_params.y;
+  float fa = o_half.y / max(o_half.x, 1.0);
+  vec2 cn = p / o_half;
+  float q = k * 0.25;
+  float r2 = cn.x * cn.x + cn.y * cn.y * fa * fa;
+  vec2 m = vec2(1.0 + q, 1.0 + q * fa * fa);
+  vec2 wc = cn * (1.0 + q * r2) / m;
+  vec2 fh = vec2(1.0, fa);
+  float d = rounded_rect(wc * fh, fh, CORNER_RADIUS) * o_half.x;
+  float aa = max(fwidth(d), 1e-4);
+
+  if (u_params.x > 0.5 && d < 0.0) discard;
+
+  float dir_y = clamp(p.y / o_half.y, -1.0, 1.0);
+
+  vec2 pic_uv = clamp((v_uv - u_opening.xy) / max(u_opening.zw, vec2(1e-4)),
+                      0.0, 1.0);
+  vec3 picture = sample_display(pic_uv);
+
+  vec3 seat_col = vec3(0.012) * (1.0 + 0.8 * dir_y) + vec3(0.004);
+
+  float slope = clamp((d - seat) / chamfer, 0.0, 1.0);
+  vec3 insert =
+    PLASTIC * 0.88 * (0.45 + 0.40 * slope) * (1.0 + 0.30 * dir_y * (1.0 - 0.5 * slope));
+  insert *= 1.0 + 0.03 * grain(floor(px));
+
+  vec3 plastic = PLASTIC * (1.0 - 0.10 * v_uv.y);
+  plastic *= 1.0 + 0.03 * grain(floor(px));
+
+  float lip = smoothstep(recess, recess + bevel, d);
+  plastic *= mix(1.0 + 0.22 * dir_y, 1.0, lip);
+
+  vec2 v_half = vp * 0.5;
+  float d_case = rounded_rect(px - v_half, v_half, 0.05 * min(vp.x, vp.y));
+  float aa_case = max(fwidth(d_case), 1e-4);
+  plastic *= 1.0 - 0.35 * smoothstep(-6.0, 0.0, d_case);
+
+  float band_top = o_org.y + o_size.y + recess;
+  float band_mid_y = (band_top + vp.y) * 0.5;
+  vec2 led_pos = vec2(0.91 * vp.x, band_mid_y);
+  float led_d = length(px - led_pos);
+  float led_r = max(0.007 * unit, 1.5);
+  float well = 1.0 - smoothstep(led_r + 1.0, led_r + 3.0, led_d);
+  float led = 1.0 - smoothstep(led_r - 1.0, led_r + 1.0, led_d);
+  plastic = mix(plastic, vec3(0.03), well);
+  plastic = mix(plastic, vec3(0.06, 0.55, 0.10), led);
+
+  float badge_h = 0.34 * (vp.y - band_top);
+  if (badge_h >= 5.0) {
+    vec2 badge_org = vec2(o_org.x, band_mid_y - 0.5 * badge_h);
+    vec2 bq = (px - badge_org) * (float(BADGE_ROWS) / badge_h);
+    vec2 hi = vec2(float(BADGE_COLS) + 1.0, float(BADGE_ROWS) + 1.0);
+    if (all(greaterThan(bq, vec2(-1.0))) && all(lessThan(bq, hi))) {
+      plastic = mix(plastic, BADGE_INK, 0.92 * badge_sample(bq));
+    }
+  }
+
+  vec3 inner = u_params.x > 0.5 ? vec3(0.0) : picture;
+  vec3 ring = mix(seat_col, insert, smoothstep(seat - aa, seat + aa, d));
+  vec3 col = mix(inner, ring, clamp(d / aa + 0.5, 0.0, 1.0));
+  col = mix(col, plastic, smoothstep(recess - aa, recess + aa, d));
+  col = mix(col, vec3(0.0), clamp(d_case / aa_case + 0.5, 0.0, 1.0));
+  fragColor = vec4(srgb_encode(col), 1.0);
+}
+`;
+
+  const program = (fsSrc, label) => {
+    const compile = (type, src) => {
+      const sh = gl.createShader(type);
+      gl.shaderSource(sh, src);
+      gl.compileShader(sh);
+      if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+        throw new Error(`${label}: ${gl.getShaderInfoLog(sh) ?? 'shader compile failed'}`);
+      }
+      return sh;
+    };
+    const prog = gl.createProgram();
+    gl.attachShader(prog, compile(gl.VERTEX_SHADER, VS));
+    gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fsSrc));
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+      throw new Error(`${label}: ${gl.getProgramInfoLog(prog) ?? 'shader link failed'}`);
+    }
+    const u = {};
+    const count = gl.getProgramParameter(prog, gl.ACTIVE_UNIFORMS);
+    for (let i = 0; i < count; i++) {
+      const info = gl.getActiveUniform(prog, i);
+      u[info.name] = gl.getUniformLocation(prog, info.name);
+    }
+    return { prog, u };
+  };
+
+  const renderer = { gl, tex: null, texW: 0, texH: 0, plain: null, crt: null, bezel: null };
+  const build = () => {
+    renderer.plain = program(FS_PLAIN, 'monitor plain');
+    renderer.crt = program(FS_CRT, 'monitor crt');
+    renderer.bezel = program(FS_BEZEL, 'monitor bezel');
+    renderer.tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, renderer.tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    renderer.texW = 0;
+    renderer.texH = 0;
+  };
+  try {
+    build();
+  } catch (e) {
+    // Should not happen where WebGL2 exists at all; fall back to the 2D
+    // path. The canvas already holds a WebGL2 context, which is the only
+    // kind it can now produce, so a fresh node takes its place for the
+    // 2D context the fallback needs.
+    console.error('monitor renderer unavailable, falling back to plain 2D:', e);
+    const fresh = canvas.cloneNode(false);
+    canvas.replaceWith(fresh);
+    canvas = fresh;
+    return null;
+  }
+  // A lost context (GPU reset, driver update) kills every object; without
+  // preventDefault the restored event never fires. Rebuilt on restore, and
+  // draws in between are ignored by the dead context.
+  canvas.addEventListener('webglcontextlost', (e) => e.preventDefault());
+  canvas.addEventListener('webglcontextrestored', () => {
+    try {
+      build();
+    } catch (e) {
+      console.error('monitor renderer lost:', e);
+      return;
+    }
+    // The restore starts from a cleared drawing buffer, and a paused page
+    // has no ticking loop to repaint it; a running one would also show a
+    // blank canvas until its next tick. The rebuild reset the cached
+    // texture size, so this re-uploads the frame it re-presents.
+    if (emu && running) presentFrame();
+  });
+  return renderer;
+}
+
+// Present one frame through the monitor renderer. The backing store
+// follows the element (physical pixels), not the emulated buffer: the CRT
+// pass's scanlines and grille are keyed to output pixels, and at the
+// emulated resolution - two rows per scanline - the raised-cosine beam
+// profile would cancel entirely (its Nyquist point, see the desktop's
+// scanline tests).
+function presentFrameMonitor(width, rows) {
+  const gl = monitorGl.gl;
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, Math.round(canvas.clientWidth * dpr));
+  const h = Math.max(1, Math.round(canvas.clientHeight * dpr));
+  if (canvas.clientWidth === 0 || canvas.clientHeight === 0) return;
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+  }
+
+  // The view must be rebuilt every frame (wasm memory may grow); the
+  // texture reallocates only when the presentation size changes.
+  const view = new Uint8Array(wasm.memory.buffer, emu.present_ptr(), width * rows * 4);
+  gl.bindTexture(gl.TEXTURE_2D, monitorGl.tex);
+  if (monitorGl.texW !== width || monitorGl.texH !== rows) {
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.SRGB8_ALPHA8, width, rows, 0, gl.RGBA, gl.UNSIGNED_BYTE, view);
+    monitorGl.texW = width;
+    monitorGl.texH = rows;
+  } else {
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, rows, gl.RGBA, gl.UNSIGNED_BYTE, view);
+  }
+
+  // The CRT pass suspends when the scan has no 15 kHz line structure to
+  // draw (a programmable scan; 0 from the getter), like the desktop's
+  // preset, leaving the bezel - which frames any scan - or the plain
+  // blit. An older wasm bundle has no getter; half the presented rows is
+  // the standard-scan line count.
+  const crtLines = emu.present_crt_lines?.() ?? rows / 2;
+  const crtOn = (monitorMode === '1084' || monitorMode === 'crt') && crtLines > 0;
+  const bezelOn = monitorMode === '1084' || monitorMode === 'bezel';
+  // The effect passes resample through a linear filter like the desktop's
+  // shader sampler (part of the tube look); the plain blit keeps the 2D
+  // path's crisp nearest scale.
+  const filter = crtOn || bezelOn ? gl.LINEAR : gl.NEAREST;
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+  const tint = MONITOR_TINT_INDEX[tintMode] ?? 0;
+
+  // Draw a pass over a viewport rect given in canvas coordinates (origin
+  // top-left, like everything else on the page); GL viewports measure
+  // from the bottom-left.
+  const draw = (p, vx, vy, vw, vh, setUniforms) => {
+    gl.useProgram(p.prog);
+    gl.viewport(vx, canvas.height - vy - vh, vw, vh);
+    gl.uniform1i(p.u.u_tex, 0);
+    gl.uniform1i(p.u.u_tint, tint);
+    gl.uniform4f(p.u.u_size, vw, vh, width, rows);
+    setUniforms?.(p);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  };
+  const crtUniforms = (p) => {
+    gl.uniform4f(p.u.u_params, 1.0, crtLines, 1.0, MONITOR_CRT_CURVATURE);
+    gl.uniform4f(p.u.u_params2, MONITOR_CRT_VIGNETTE, 0, 0, 0);
+  };
+
+  if (bezelOn) {
+    // The desktop composition (window.rs): with the preset on it paints
+    // the picture into the opening's bounding box first, and the bezel
+    // follows in frame-only mode, clipping the preset's square viewport
+    // with its rounded moulding; alone, the one bezel pass draws both
+    // frame and picture.
+    const ow = Math.round(w * MONITOR_OPENING_SCALE);
+    const oh = Math.round(h * MONITOR_OPENING_SCALE);
+    const ox = Math.round((w - ow) * 0.5);
+    const oy = Math.round((h - oh) * MONITOR_OPENING_TOP_SHARE);
+    if (crtOn) draw(monitorGl.crt, ox, oy, ow, oh, crtUniforms);
+    draw(monitorGl.bezel, 0, 0, w, h, (p) => {
+      gl.uniform4f(p.u.u_opening, ox / w, oy / h, ow / w, oh / h);
+      gl.uniform4f(p.u.u_params, crtOn ? 1.0 : 0.0, crtOn ? MONITOR_CRT_CURVATURE : 0.0, 0, 0);
+    });
+  } else if (crtOn) {
+    draw(monitorGl.crt, 0, 0, w, h, crtUniforms);
+  } else {
+    draw(monitorGl.plain, 0, 0, w, h);
+  }
+}
+
+// The monitor select, the display-settings pattern: hostable by the page
+// shell as #monitor, self-inserting below the canvas without one, and
+// remembered per browser. Hidden without WebGL2, like the overscan select
+// on a bundle that cannot switch.
+const monitorShellSel = $('monitor');
+const monitorSel = monitorShellSel ?? buildSettingControl('monitor', 'Monitor');
+if (!monitorSel.options.length) {
+  for (const mode of MONITOR_MODES) {
+    const option = document.createElement('option');
+    option.value = mode;
+    option.textContent = MONITOR_LABELS[mode];
+    monitorSel.appendChild(option);
+  }
+}
+monitorSel.value = monitorMode;
+if (!monitorGl) {
+  (monitorShellSel ?? monitorSel.parentElement).hidden = true;
+}
+
+function setMonitorMode(mode, remember) {
+  if (!MONITOR_MODES.includes(mode) || !monitorGl) return;
+  monitorMode = mode;
+  monitorSel.value = mode;
+  if (remember) storePref(MONITOR_STORAGE_KEY, mode);
+  // A running page picks the mode up next tick; a paused one has no
+  // ticking loop to repaint, so repaint here.
+  if (emu && running && paused) presentFrame();
+}
+monitorSel.addEventListener('change', () => setMonitorMode(monitorSel.value, true));
 
 // --- status bar --------------------------------------------------------
 // Front-panel status strip mirroring the desktop status bar's LED block:
@@ -4316,7 +4912,12 @@ function bugReportHref() {
       `kickstart = ${toml(bootRom?.label ?? 'none')}`,
       `df0 = ${toml(df0Name ?? 'empty')}`,
       `joystick = ${toml(joyMode)}`,
+      // The emulated presentation and the canvas backing store; under
+      // the monitor path the latter is display-resolution, so a size
+      // mismatch in a report needs both to make sense.
+      `present = "${presentSize.width}x${presentSize.rows}"`,
       `canvas = "${canvas.width}x${canvas.height}"`,
+      `monitor = ${toml(monitorGl ? monitorMode : '2d fallback')}`,
       `running = ${running}`,
     ].join('\n'),
     logs: `status: ${loadStatus.textContent}\nstats: ${statLine.textContent || '-'}`,
@@ -4447,6 +5048,9 @@ const pageParams = new URLSearchParams(location.search);
 //                                    own remembered choice wins
 //     "tint": "green",               starting screen tint (none|bw|green|
 //                                    amber|sepia); same visitor rule
+//     "monitor": "plain",            starting monitor presentation
+//                                    (1084|crt|bezel|plain, default 1084);
+//                                    same visitor rule
 //     "joy": "keys",                 off|keys|cd32|touch
 //     "serial_url": "wss://...",     preset the BBS gateway input
 //     "serial_raw": true,            preset the raw checkbox
@@ -4529,6 +5133,13 @@ async function startup() {
   const tintPref =
     storedPref(TINT_STORAGE_KEY) ?? (typeof cfg.tint === 'string' ? cfg.tint.trim() : null);
   if (tintPref) setTintMode(tintPref, false);
+  // Starting monitor mode (the CRT + bezel presentation), the same rule:
+  // the visitor's remembered choice, then the config file, then the 1084
+  // default the page ships with.
+  const monitorPref =
+    storedPref(MONITOR_STORAGE_KEY) ??
+    (typeof cfg.monitor === 'string' ? cfg.monitor.trim() : null);
+  if (monitorPref) setMonitorMode(monitorPref, false);
   // Which A600 the visitor owns, for the keycap legends. Nothing the guest
   // can observe changes - the rawkeys are the same either way, only what is
   // printed on the caps.
