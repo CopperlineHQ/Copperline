@@ -82,9 +82,9 @@ The audio, serial, parallel, and network surface has matching per-run flags
 too -- `--audio-device`, `--audio-channel-mode`, `--audio-filter`,
 `--audio-stereo-separation`, `--serial`, `--midi-in`, `--midi-out`,
 `--parallel`, `--sampler-audio-input`, `--sampler-input-gain`, `--a2065-net`,
-`--a2065-interface` --
-described with their `[audio]`, `[serial]`, `[parallel]`, and `[a2065]` keys
-below.
+`--a2065-interface`, `--hostsocket-net`, `--hostsocket-interface` --
+described with their `[audio]`, `[serial]`, `[parallel]`, `[a2065]`, and
+`[hostsocket]` keys below.
 
 ## Top level
 
@@ -1452,6 +1452,67 @@ replay and save-state determinism while traffic flows. A save state stores the
 bridge adapter identifier and must be restored on a host where that adapter can
 be opened. See [](../zorro) for board details, platform bridge setup, and the
 NAT's limitations.
+
+## `[hostsocket]` -- bsdsocket.library without a guest TCP/IP stack
+
+```toml
+[hostsocket]
+net = "nat"   # or "bridge", "loopback"; "none" for a dead wire
+# interface = "en0"       # required for "bridge"
+# dns_server = "10.0.2.3" # gethostbyname() resolver (default: the NAT DNS forwarder)
+# hostname = "amiga"      # gethostname() return value (cosmetic)
+# address = "192.168.1.50/24" # interface address; only for "bridge" (see below)
+# gateway = "192.168.1.1"     # default gateway; only for "bridge" (see below)
+```
+
+Fits the bundled HostSocket board: `bsdsocket.library` for the guest, backed
+by a TCP/IP stack that runs on the host instead of inside the emulated CPU.
+Any bsdsocket-consuming application (an Aminet tool, an MQTT client, a game
+with an online mode) opens `bsdsocket.library` and calls
+`socket()`/`connect()`/`send()`/`recv()` exactly as it would against AmiTCP or
+Roadshow -- but there is no guest-side stack to install, configure, or boot:
+the library autoboots from the board's ROM on Kickstart 1.3 through 3.x and
+on the bundled AROS ROM. `--hostsocket-net BACKEND` is the matching per-run
+flag, and the launcher's **I/O Ports** tab (Ethernet section) has the same
+picker.
+
+`net` selects the same host network backends as the A2065 (see above for
+`"nat"`/`"bridge"` details and caveats), with one important difference in
+what they mean here. The guest never configures an IP address -- the
+host-side stack owns addressing -- so under `"nat"` sockets simply reach the
+outside world, and under `"loopback"` the guest can talk to itself
+(`127.0.0.1`) with fully deterministic behavior, which also makes
+`"loopback"` the right backend for reproducible headless test runs of
+socket-using software. `gethostbyname()` needs a reachable DNS server:
+under `"nat"` the default `dns_server` (the NAT's own forwarder at
+`10.0.2.3`, which answers via the host's resolver) just works; under
+`"loopback"` lookups return failure (nothing is listening); under
+`"bridge"` set `dns_server` to a real resolver on that LAN.
+
+`address` and `gateway` matter only under `"bridge"`. The default interface
+address/gateway (`10.0.2.15/24` and `10.0.2.2`) are Copperline NAT's own
+virtual addresses, hardcoded on the NAT side too -- correct and required
+under `"nat"`/`"loopback"`, but meaningless on a real physical LAN, where
+nothing answers ARP for a `10.0.2.2` gateway that doesn't exist there. Set
+both to match the LAN `interface` is bridged to (e.g. `address =
+"192.168.1.50/24"`, `gateway = "192.168.1.1"`) -- there is no DHCP client,
+so the address is always static, picked the same way you would pick one for
+any other statically-configured device on that network. Leave both unset
+for `"nat"` and `"loopback"`.
+
+Do not fit this board and also boot a real guest TCP/IP stack (AmiTCP,
+Roadshow, ...) in the same session -- both would add a `bsdsocket.library`,
+and which one an application opens is undefined. Use `[a2065]` for testing
+real stacks and SANA-II drivers; use `[hostsocket]` for running or testing
+the applications above them. The determinism note on `[a2065]` applies here
+too: `"nat"` and `"bridge"` traffic arrives on the host's schedule and
+breaks byte-identical replay, while `"loopback"` and `"none"` stay
+deterministic. The board state (open sockets included) rides in save
+states, but live TCP peers do not survive a restore on the host side.
+
+Implemented as a bundled WASM plugin board (see [](../zorro)); its
+verification record against the external bsdsocktest conformance suite
+lives in `crates/hostsocket-plugin/docs/bsdsocktest-status.md`.
 
 ## `[rtg]` -- RTG graphics card
 

@@ -260,6 +260,44 @@ while traffic flows -- the emulator logs this when the board is attached. Save
 states record only the chosen backend and bring up a fresh one on load
 (in-flight frames are dropped; the guest's TCP retransmits).
 
+## Networking: the bundled HostSocket board
+
+`[hostsocket]` fits the bundled HostSocket board: guest-facing
+`bsdsocket.library` backed by a host-side smoltcp TCP/IP stack, so
+socket-using applications run with no guest network stack to boot -- see the
+[configuration guide](guide/configuration.md) for the user-facing knobs and
+caveats. Where the A2065 answers "does this driver/stack work," HostSocket
+answers "does this application use sockets correctly," and serves it as the
+real, everyday `bsdsocket.library` for software running under Copperline.
+
+Architecturally it is not a native board like the A2065 but a WASM plugin
+board (previous section) whose module and guest autoboot ROM ship inside the
+`copperline` binary:
+
+- `crates/hostsocket-plugin/` is the plugin source; the committed artifact it
+  builds (`assets/hostsocket/hostsocket_plugin.wasm`) is what a plain
+  `cargo build` embeds, so building Copperline needs no wasm toolchain.
+  Refresh it with `make` in that crate when the plugin changes -- the
+  install step copies the wasm32 build output into `assets/`, same as the
+  guest ROM Makefiles.
+- `guest/hostsocket/` is the m68k stub -- LVO trampolines and the
+  `rt_Init`-deferred library install, staged through a register-window RPC
+  the same way the services board's hostfs handler works. Its committed ROM
+  (`assets/hostsocket/hostsocket_rom.bin`) is served to the plugin as its
+  `rom` resource and boots via the board's DiagArea on Kickstart 1.3-3.x
+  and AROS.
+- Config resolution (`src/hostsocket.rs`) expands `[hostsocket]` into an
+  ordinary plugin-board entry whose module path is the sentinel
+  `<bundled-hostsocket>`; the plugin host and save-state restore resolve the
+  sentinel to the embedded bytes, so states taken with the board fitted load
+  anywhere the same Copperline build runs. Because it is a plugin board, the
+  whole TCP/IP stack lives in the module's linear memory and rides in save
+  states like any other plugin state.
+
+The board autoconfigs under the Copperline manufacturer ID with product 6
+(see below). Its conformance record against the external bsdsocktest suite
+is `crates/hostsocket-plugin/docs/bsdsocktest-status.md`.
+
 ## Graphics: RTG boards
 
 Copperline fits at most one RTG board through `[rtg]`. Both are functional
@@ -403,6 +441,7 @@ makes the real ROMulus flash-ROM board. The product numbers under it are:
 | 3 | Built-in fast RAM (`[memory] fast`) |
 | 4 | Built-in Zorro III RAM (`[memory] z3`) |
 | 5 | Copperline services board (host `[[filesys]]` mounts; `filesys.rs`) |
+| 6 | HostSocket bsdsocket.library board (`[hostsocket]`; `hostsocket.rs`) |
 
 The **identification board** (`BoardSpec::copperline_id`) is always added to
 the chain (unless disabled, below) so guest software can detect that it is

@@ -266,6 +266,28 @@ slow = "512K"
 #                         # copperline --list-net-interfaces
 
 
+# HostSocket: bsdsocket.library backed by a host-side TCP/IP stack -- socket
+# networking for guest applications with no guest TCP/IP stack to install or
+# boot (the library autoboots from the board's ROM). Same net backends as
+# [a2065], but the guest needs no IP configuration at all: "nat" gives
+# applications outbound internet, "loopback" gives deterministic self-talk
+# (127.0.0.1), "none" a dead wire. Don't fit this alongside a real guest
+# TCP/IP stack -- both would add a bsdsocket.library.
+# [hostsocket]
+# net = "nat"
+# interface = "en0"       # required only for net = "bridge"
+# dns_server = "10.0.2.3" # gethostbyname() resolver; the default reaches the
+#                         # host's own resolver under net = "nat"
+# hostname = "amiga"      # gethostname() return value (cosmetic)
+# address = "192.168.1.50/24" # interface address; net = "bridge" only -- the
+#                             # 10.0.2.15/24 default is NAT's own virtual
+#                             # address, meaningless on a real LAN. No DHCP,
+#                             # so pick a static address the same way you
+#                             # would for any other device on that network.
+# gateway = "192.168.1.1"     # default gateway; net = "bridge" only, same
+#                             # reasoning as address above
+
+
 # RTG graphics card: high-resolution, high-colour screens via Picasso96.
 # Z3660 is fitted by default on any machine whose CPU has a 32-bit address bus
 # (stock A3000/A4000, or any profile given a 68020+ full-bus CPU). Picasso II

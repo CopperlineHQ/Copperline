@@ -2214,7 +2214,9 @@ pub fn build_machine(
     }
     #[cfg(not(feature = "wasm-boards"))]
     if !cfg.wasm_boards.is_empty() {
-        anyhow::bail!("[[zorro]] wasm boards require a build with the wasm-boards feature");
+        anyhow::bail!(
+            "[[zorro]] wasm boards and [hostsocket] require a build with the wasm-boards feature"
+        );
     }
     // Copperline services board (`[[filesys]]`): the guest-side handler ROM,
     // mount table, and per-unit host register banks in one 64K window; see

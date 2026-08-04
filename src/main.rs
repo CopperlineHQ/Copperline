@@ -603,6 +603,17 @@ where
                         .ok_or_else(|| anyhow!("--a2065-interface requires an adapter name"))?,
                 );
             }
+            "--hostsocket-net" => {
+                overrides.hostsocket_net = Some(args.next().ok_or_else(|| {
+                    anyhow!("--hostsocket-net requires a backend (none/loopback/nat/bridge)")
+                })?);
+            }
+            "--hostsocket-interface" => {
+                overrides.hostsocket_interface =
+                    Some(args.next().ok_or_else(|| {
+                        anyhow!("--hostsocket-interface requires an adapter name")
+                    })?);
+            }
             "--midi-out" => {
                 overrides.midi_out = Some(
                     args.next()
@@ -1037,6 +1048,16 @@ where
             "--a2065-interface conflicts with an explicit non-bridge --a2065-net"
         ));
     }
+    if overrides.hostsocket_interface.is_some()
+        && overrides
+            .hostsocket_net
+            .as_deref()
+            .is_some_and(|net| !matches!(net.to_ascii_lowercase().as_str(), "bridge" | "bridged"))
+    {
+        return Err(anyhow!(
+            "--hostsocket-interface conflicts with an explicit non-bridge --hostsocket-net"
+        ));
+    }
     Ok(CliArgs {
         config_path,
         rom_path,
@@ -1222,6 +1243,9 @@ fn print_help() {
          --a2065-net BACKEND            fit an A2065 Ethernet board: none, loopback, nat,\n  \
          \x20                            or bridge (direct attachment to a host adapter)\n  \
          --a2065-interface NAME         bridge adapter; implies --a2065-net bridge\n  \
+         --hostsocket-net BACKEND       fit the HostSocket bsdsocket.library board: none,\n  \
+         \x20                            loopback, nat, or bridge\n  \
+         --hostsocket-interface NAME    bridge adapter; implies --hostsocket-net bridge\n  \
          --parallel DEVICE              parallel port: none, printer, or sampler\n  \
          --sampler-audio-input NAME     sampler host capture device (implies --parallel sampler)\n  \
          --sampler-input-gain DB        sampler input gain in dB (implies --parallel sampler)\n  \

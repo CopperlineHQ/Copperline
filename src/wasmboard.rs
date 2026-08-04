@@ -201,6 +201,9 @@ fn load_resources(manifest: &WasmManifest) -> Result<HashMap<String, Vec<u8>>> {
     let mut map = HashMap::new();
     for key in &manifest.file_keys {
         match manifest.config.get(key) {
+            Some(path) if path == crate::hostsocket::BUNDLED_HOSTSOCKET_ROM => {
+                map.insert(key.clone(), crate::hostsocket::HOSTSOCKET_ROM.to_vec());
+            }
             Some(path) if !path.is_empty() => {
                 let bytes = std::fs::read(path)
                     .with_context(|| format!("loading WASM plugin resource {key:?} from {path}"))?;
@@ -481,8 +484,16 @@ impl WasmBoard {
             );
         }
         let engine = make_engine()?;
-        let module = Module::from_file(&engine, path)
-            .with_context(|| format!("compiling WASM plugin {}", path.display()))?;
+        // The bundled HostSocket board's module is embedded in the binary;
+        // its path is a sentinel, not a file (and stays one through a
+        // save-state round trip, which reopens modules by path).
+        let module = if path == Path::new(crate::hostsocket::BUNDLED_HOSTSOCKET_WASM) {
+            Module::new(&engine, crate::hostsocket::HOSTSOCKET_WASM)
+                .context("compiling the bundled HostSocket plugin")?
+        } else {
+            Module::from_file(&engine, path)
+                .with_context(|| format!("compiling WASM plugin {}", path.display()))?
+        };
         let rt = WasmRuntime::new(engine, module, manifest)?;
         Ok(Self {
             module_path: path.to_path_buf(),
@@ -864,6 +875,34 @@ mod tests {
         assert_eq!(restored.read(0, 0, &mut rhost), 12345);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn bundled_hostsocket_board_resolves_embedded_module_and_rom() {
+        // The [hostsocket] board's module path and rom resource are
+        // sentinels for embedded bytes; instantiation and a save-state
+        // round trip (which reopens both by path) must resolve them
+        // without touching the filesystem. Reading the stub ROM's first
+        // byte back out of the board window proves the `rom` resource
+        // actually reached the plugin, not just that the module compiled.
+        let cfg = crate::hostsocket::board_config(
+            crate::net::NetConfig::Loopback,
+            None,
+            None,
+            None,
+            None,
+        );
+        let mut board = WasmBoard::from_file(&cfg.wasm_path, cfg.manifest).unwrap();
+        let mut mem = empty_memory();
+        let mut host = DeviceHost::new(&mut mem);
+        let rom_first = u32::from(crate::hostsocket::HOSTSOCKET_ROM[0]);
+        assert_eq!(board.read(0x08, 1, &mut host), rom_first);
+
+        let blob = bincode::serialize(&board).unwrap();
+        let mut restored: WasmBoard = bincode::deserialize(&blob).unwrap();
+        let mut rmem = empty_memory();
+        let mut rhost = DeviceHost::new(&mut rmem);
+        assert_eq!(restored.read(0x08, 1, &mut rhost), rom_first);
     }
 
     #[test]

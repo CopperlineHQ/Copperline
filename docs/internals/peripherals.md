@@ -282,6 +282,28 @@ interface request, and passes a bound descriptor with `SCM_RIGHTS`; it never
 handles a frame. Backend construction is fallible so bridge errors abort
 machine startup or state restoration rather than changing connectivity.
 
+## HostSocket (`hostsocket.rs`, `crates/hostsocket-plugin/`, `guest/hostsocket/`)
+
+The `[hostsocket]` option fits the bundled HostSocket board: guest-facing
+`bsdsocket.library` backed by a smoltcp TCP/IP stack on the host, so socket
+applications run with no guest network stack at all. It is deliberately
+*not* a native device like the A2065 but a WASM plugin board hosted by
+`wasmboard.rs`, with its module and guest stub ROM embedded in the binary
+(`hostsocket.rs` holds the bytes and expands the config section into an
+ordinary plugin-board entry whose module path is a sentinel the plugin host
+and save-state restore resolve). The plugin boundary is what makes the
+board save-state-clean: the entire TCP/IP stack -- smoltcp interface,
+socket set, fd table, DNS state -- lives in the module's linear memory,
+which snapshots and restores byte-for-byte like Amiga RAM; a native port
+would have to hand-serialize live smoltcp state, which smoltcp does not
+support. The guest side (`guest/hostsocket/`) installs the library via an
+`rt_Init`-deferred Romtag (safe on real Kickstart 1.3/3.1 and AROS) and
+stages each LVO through a Forbid-bracketed register-window RPC, with a
+wake-queue interrupt path for blocking calls -- the same host-does-the-work
+pattern as the services board's hostfs handler. The board reuses the shared
+`NetBackend`s above through the plugin `net` capability; `loopback` is
+deterministic, `nat`/`bridge` are not.
+
 ## CDTV (`cdtv.rs`, `cdrom.rs`)
 
 The CDTV model pairs the DMAC (which autoconfigs ahead of the Zorro chain,

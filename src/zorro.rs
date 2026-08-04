@@ -63,6 +63,9 @@ const PRODUCT_FAST_RAM: u8 = 0x03;
 const PRODUCT_Z3_RAM: u8 = 0x04;
 /// The services board (host filesystem and, later, other guest services).
 const PRODUCT_SERVICES: u8 = 0x05;
+/// The bundled HostSocket board (`bsdsocket.library` backed by a host-side
+/// TCP/IP stack; see `crate::hostsocket`).
+const PRODUCT_HOSTSOCKET: u8 = 0x06;
 
 /// Village Tronic's registered expansion manufacturer ID.
 pub const PICASSO2_MANUFACTURER_ID: u16 = 2167;
@@ -283,6 +286,30 @@ impl BoardSpec {
             chained: false,
             window: 0,
             diag_vec: Some(crate::filesys::DIAG_OFFSET),
+        }
+    }
+
+    /// The bundled HostSocket board (`[hostsocket]`): guest-facing
+    /// `bsdsocket.library` backed by a host-side smoltcp stack, implemented
+    /// as the embedded WASM plugin in `crate::hostsocket`. A 64K Zorro II
+    /// window holding the RPC register bank and the stub ROM the DiagArea
+    /// (`diag_vec` points at [`crate::hostsocket::DIAG_OFFSET`]) boots from.
+    /// The placeholder device slot is reassigned when the plugin board is
+    /// attached, same as any `[[zorro]]` metadata board.
+    pub fn hostsocket() -> Self {
+        Self {
+            name: "HostSocket bsdsocket.library".into(),
+            version: ZorroVersion::II,
+            manufacturer: COPPERLINE_MANUFACTURER_ID,
+            product: PRODUCT_HOSTSOCKET,
+            serial: 0,
+            size_bytes: 0x1_0000,
+            backing: BoardBacking::Device(0),
+            memlist: false,
+            memory_space: false,
+            chained: false,
+            window: 0,
+            diag_vec: Some(crate::hostsocket::DIAG_OFFSET),
         }
     }
 
@@ -962,6 +989,18 @@ pub fn load_board_metadata(path: &Path) -> Result<LoadedZorroBoard> {
                     path.display()
                 );
             };
+            // The bundled-artifact sentinel is reserved for the board
+            // [hostsocket] expands to; a metadata board naming it must fail
+            // fast here (before the directory join below can obscure it), or
+            // the plugin host would silently hand this board the embedded
+            // HostSocket module under its own autoconfig identity.
+            if wasm == crate::hostsocket::BUNDLED_HOSTSOCKET_WASM {
+                bail!(
+                    "{}: wasm = {:?} is reserved for the bundled [hostsocket] board",
+                    path.display(),
+                    wasm
+                );
+            }
             // Module path resolves relative to the metadata file's directory.
             let wasm_path = match path.parent() {
                 Some(dir) => dir.join(&wasm),
