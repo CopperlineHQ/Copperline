@@ -32,6 +32,17 @@ gitignored; rebuild it locally before running the checks.
 that isolates register dependencies from loop-branch alignment on the 020;
 its header records the real-A1200 column and the rule derived from it.
 
+`./build.sh bfprobe` builds `bfprobe.adf`, a 14-row probe for the 68020
+bit-field instructions (the SANITY Roots II AGA "DIE" dissolve class,
+issue #371): register vs memory forms, the memory RMW cost by field span
+(1/2/4/5 bytes), dynamic offsets, the read-only forms, and the demo's
+exact nine-instruction plot loop at both DBcc alignments. The header
+records a real-A1200 column - the first hardware measurement of the
+bit-field class we know of - alongside the Copperline and FS-UAE
+columns: field spans within four bytes all cost the same (one long
+operand access, the MC68020UM model), a five-byte span adds one access,
+and the memory rows absorb the DBcc alignment clock.
+
 ## Running
 
 - **Copperline:** `copperline --config timing-test.toml --screenshot-after 12 out.png`
@@ -399,7 +410,7 @@ refreshed (or a count sitting on an 8-iteration display-bucket edge flips a
 whole bar word). Re-bless and review the diff after a ROM refresh.
 
 Each probe is its own `#[test]`, so the harness runs the emulator boots in
-parallel on the available cores (the full suite of 23 takes ~20 s on an
+parallel on the available cores (the full suite of 26 takes ~20 s on an
 8-core host vs ~90 s sequentially).
 
 Covered: `timing-test` (all 32 timing rows as rendered hex), `ddfprobe`
@@ -419,12 +430,19 @@ step, nibble bit 3 ignored, and the row-end overlap words exactly
 clipped at the DIW stop; the KS 2.05 first-text-column wrap regression
 class, vAmiga-verified band by band),
 `ddfprobe-agafold` (the AGA wide-FMODE scroll fold: an off-grid DDFSTRT
-is masked down to the fetch-unit grid, so scroll taps in the last
-`earliness` px of the gulp window show the next gulp one full gulp left,
-swept against bitplane-pointer byte offsets on the Alien Breed II AGA
-playfield constellation -- the issue #248 horizontal scroll-jump
-regression class; boots the A1200/AGA machine shape, FS-UAE-verified
-band by band since vAmiga cannot arbitrate AGA),
+is masked down to the fetch-unit grid and the data arrives early, so
+scroll taps at or past the arrival distance on Denise's absolute reload
+grid -- earliness plus the 8-cck pipeline -- show the next gulp one full
+gulp left, swept against bitplane-pointer byte offsets on the Alien
+Breed II AGA playfield constellation -- the issue #248 horizontal
+scroll-jump regression class; boots the A1200/AGA machine shape,
+FS-UAE-verified band by band since vAmiga cannot arbitrate AGA),
+`ddfprobe-agafold2` (the fold boundary as a function of the DDFSTRT
+phase on the 64-bit fetch: the boundary saturates past the top of the
+tap range instead of wrapping, so the SANITY Roots II AGA
+swirl/kaleidoscope taps render linearly -- the issue #371 regression
+class -- while an on-grid start folds from the pipeline alone;
+FS-UAE-verified band by band),
 `dblpal-hires-lace` (the DblPAL High Res Laced sprite-horizontal
 comparator alias: with FMODE SSCAN2 enabled, HSTART `$165` must compare
 as `$065`, while `$080` remains distinct -- the issue #270 invisible
