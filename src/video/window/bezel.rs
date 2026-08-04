@@ -60,7 +60,9 @@ pub(super) struct BezelUniforms {
     /// zw size.
     opening: [f32; 4],
     /// x: 1 = frame-only (leave the opening interior to the preset that
-    /// painted it), 0 = full. yzw: reserved.
+    /// painted it), 0 = full. y: the active preset's face curvature --
+    /// the insert follows the bowed glass contour it implies, 0 = flat
+    /// rounded opening. zw: reserved.
     params: [f32; 4],
 }
 
@@ -94,7 +96,10 @@ pub(super) fn uniforms_from(
         src_rect: crt.src_rect,
         size: crt.size,
         opening: [(ox - vx) / w, (oy - vy) / h, ow / w, oh / h],
-        params: [if frame_only { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+        // The preset's curvature rides along so the insert can follow
+        // the bowed glass; a flat preset (or none) carries 0 there and
+        // keeps the straight-edged opening.
+        params: [if frame_only { 1.0 } else { 0.0 }, crt.params[3], 0.0, 0.0],
     }
 }
 
@@ -765,30 +770,54 @@ mod tests {
         let src = source_texture(device, queue, TEX, TEX, DISPLAY_ROWS, &white);
         let (px, dim, rows) = render_bezel(device, queue, &src, Some(ShaderKind::Crt));
 
-        // The shader's rounded-rect distance to the opening, at a pixel
-        // centre.
+        // The shader's glass-contour distance at a pixel centre: the same
+        // warp and rounded rectangle the preset's face uses, driven by
+        // the preset's own curvature so the replica tracks the shader
+        // whatever value the preset table carries.
         let (ox, oy, ow, oh) = opening_rect((0.0, 0.0, dim as f32, rows as f32));
-        let r_open = 0.055 * ow.min(oh);
+        let k = crt_shader::uniforms_for(
+            ShaderKind::Crt,
+            1.0,
+            (0, 0, dim, rows),
+            rows as usize,
+            rows as usize,
+            (dim, rows),
+            1.0,
+        )
+        .0
+        .params[3];
+        let (hx, hy) = (ow * 0.5, oh * 0.5);
+        let fa = hy / hx;
+        let rc = 0.0826f32;
         let opening_d = |x: u32, y: u32| {
-            let qx = (x as f32 + 0.5 - ox - ow * 0.5).abs() - ow * 0.5 + r_open;
-            let qy = (y as f32 + 0.5 - oy - oh * 0.5).abs() - oh * 0.5 + r_open;
+            let cx = (x as f32 + 0.5 - ox - hx) / hx;
+            let cy = (y as f32 + 0.5 - oy - hy) / hy;
+            let q = k * 0.25;
+            let r2 = cx * cx + cy * cy * fa * fa;
+            let bow = 1.0 + q * r2;
+            let wx = cx * bow / (1.0 + q);
+            let wy = cy * bow / (1.0 + q * fa * fa) * fa;
+            let qx = wx.abs() - 1.0 + rc;
+            let qy = wy.abs() - fa + rc;
             let outside = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt();
-            outside + qx.max(qy).min(0.0) - r_open
+            (outside + qx.max(qy).min(0.0) - rc) * hx
         };
 
-        // The face's bow keeps the preset's own picture well inside the
-        // opening, so the ring of frame pixels hugging the opening edge
-        // holds only recess gap and off-face black -- all dark. Any
-        // bright pixel is the source leaking through the join. Whether a
-        // straight edge drops a pixel centre inside the leaking
-        // fraction-of-a-pixel band depends on the window size, but along
-        // the corner arcs the centres sweep every alignment, so the ring
-        // as a whole always catches it.
+        // The ring of frame pixels hugging the opening edge is the glass
+        // seat: unlit shadow, always dark (the insert chamfer beyond it
+        // is lit plastic, so the scan stops inside the seat). Any bright
+        // pixel there is the source leaking through the join, which lives
+        // in the first half pixel outside the opening. Whether a straight
+        // edge drops a pixel centre inside that fraction-of-a-pixel band
+        // depends on the window size, but along the corner arcs the
+        // centres sweep every alignment, so the ring as a whole always
+        // catches it.
+        let seat = (0.007 * ow.min(oh)).max(1.5);
         let mut checked = 0;
         for y in 0..rows {
             for x in 0..dim {
                 let d = opening_d(x, y);
-                if (0.0..=2.0).contains(&d) {
+                if (0.0..=(seat - 1.0).max(0.6)).contains(&d) {
                     checked += 1;
                     let p = at(&px, dim, x, y);
                     assert!(
@@ -801,6 +830,22 @@ mod tests {
         assert!(
             checked > 100,
             "opening ring barely sampled: {checked} pixels"
+        );
+    }
+
+    /// The insert must seat the preset's face exactly: both shaders
+    /// derive the glass contour from the same corner radius, so the two
+    /// sources must carry the same constant.
+    #[test]
+    fn the_bezel_and_the_crt_preset_agree_on_the_corner_radius() {
+        let needle = "const CORNER_RADIUS: f32 = 0.0826;";
+        assert!(
+            BEZEL_WGSL.contains(needle),
+            "bezel.wgsl corner radius drifted"
+        );
+        assert!(
+            include_str!("shaders/crt.wgsl").contains(needle),
+            "crt.wgsl corner radius drifted"
         );
     }
 
