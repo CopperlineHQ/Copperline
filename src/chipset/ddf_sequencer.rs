@@ -123,10 +123,22 @@ fn unit_slot(bplcon0: u16, aga: bool, counter: u8) -> Option<u8> {
             _ => has(1),
         }
     } else {
+        // Lo-res: the fetch unit is eight colour clocks with eight usable
+        // DMA slots. OCS/ECS Agnus drives six of them (planes 1-6) and
+        // leaves unit offsets 0 and 4 free for the CPU/Copper/blitter,
+        // which is why a lo-res screen tops out at six bitplanes there.
+        // Alice drives those two remaining slots as well once BPLCON0's
+        // BPU3 (or BPU=7) asks for more than six planes: plane 8 takes
+        // offset 0 and plane 7 offset 4, giving the full lo-res order
+        // 8,4,6,2,7,3,5,1 and leaving no spare bitplane slot in the unit.
+        // `bitplane_dma_planes` caps OCS/ECS at six planes, so `has(7)` and
+        // `has(8)` can only fire on Alice.
         match counter {
+            0 => has(8),
             1 => has(4),
             2 => has(6),
             3 => has(2),
+            4 => has(7),
             5 => has(3),
             6 => has(5),
             7 => has(1),
@@ -718,6 +730,85 @@ mod tests {
             );
             assert_eq!(fetches.last().map(|f| f.cck), Some(0xA7), "line {line}");
         }
+    }
+
+    /// Unit offset (0..7) of every slot in the first complete fetch unit,
+    /// paired with the 1-based plane number Agnus drives there.
+    fn first_unit_slot_order(fetches: &[DdfFetch], unit_ord: u16) -> Vec<(u8, u8)> {
+        fetches
+            .iter()
+            .filter(|f| f.unit_ord == unit_ord)
+            .map(|f| (f.counter, f.plane + 1))
+            .collect()
+    }
+
+    #[test]
+    fn ocs_lores_leaves_two_free_slots_in_every_fetch_unit() {
+        // OCS/ECS Agnus drives six of the eight lo-res unit slots; offsets
+        // 0 and 4 stay free for the CPU/Copper/blitter, which is why lo-res
+        // tops out at six bitplanes there. BPU=6, lo-res, COLOR on.
+        for ecs in [false, true] {
+            let mut state = ready_state(0x6200);
+            let fetches = walk_static(ecs, 0x38, 0xD0, &mut state);
+            assert_eq!(
+                first_unit_slot_order(&fetches, 1),
+                vec![(1, 4), (2, 6), (3, 2), (5, 3), (6, 5), (7, 1)],
+                "ecs={ecs}"
+            );
+            for plane in 0..6 {
+                assert_eq!(words_for_plane(&fetches, plane), 20, "ecs={ecs}");
+            }
+        }
+    }
+
+    #[test]
+    fn aga_lores_eight_planes_drive_every_slot_of_the_fetch_unit() {
+        // Alice fills the two slots OCS/ECS leaves free: plane 8 at unit
+        // offset 0 and plane 7 at offset 4, completing the lo-res order
+        // 8,4,6,2,7,3,5,1. An eight-bitplane lo-res screen therefore leaves
+        // no spare bitplane slot in the eight-colour-clock unit.
+        // BPLCON0 BPU3 (bit 4) selects eight planes with BPU2-0 clear.
+        let mut state = ready_state(0x0210);
+        let signals = line_signals(0x38, 0xD0, LINE, &[]);
+        let fetches = walk_line(true, true, &signals, &mut state);
+        assert_eq!(
+            first_unit_slot_order(&fetches, 1),
+            vec![
+                (0, 8),
+                (1, 4),
+                (2, 6),
+                (3, 2),
+                (4, 7),
+                (5, 3),
+                (6, 5),
+                (7, 1)
+            ]
+        );
+        for plane in 0..8 {
+            assert_eq!(
+                words_for_plane(&fetches, plane),
+                20,
+                "plane {} fetches a full row",
+                plane + 1
+            );
+        }
+        // Every plane takes its modulo exactly once, in the final unit.
+        assert_eq!(fetches.iter().filter(|f| f.apply_modulo).count(), 8);
+    }
+
+    #[test]
+    fn aga_lores_seven_planes_keep_the_first_unit_slot_free() {
+        // BPU=7 with BPU3 clear is seven planes: plane 7 takes unit offset
+        // 4, offset 0 stays free because there is no plane 8 to drive it.
+        let mut state = ready_state(0x7200);
+        let signals = line_signals(0x38, 0xD0, LINE, &[]);
+        let fetches = walk_line(true, true, &signals, &mut state);
+        assert_eq!(
+            first_unit_slot_order(&fetches, 1),
+            vec![(1, 4), (2, 6), (3, 2), (4, 7), (5, 3), (6, 5), (7, 1)]
+        );
+        assert_eq!(words_for_plane(&fetches, 6), 20, "plane 7 fetches");
+        assert_eq!(words_for_plane(&fetches, 7), 0, "no plane 8 stream");
     }
 
     #[test]

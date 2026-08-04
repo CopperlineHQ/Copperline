@@ -341,26 +341,10 @@ mod tests {
     /// left a hole, and any outside means it overdrew its viewport.
     const SENTINEL: [u8; 4] = [0, 0, 255, 255];
 
-    /// A device, or `None` on a machine with no usable adapter (headless
-    /// CI): the render tests then pass without asserting anything.
-    fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let adapter =
-            match crt_shader::poll_once(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::LowPower,
-                force_fallback_adapter: false,
-                compatible_surface: None,
-            })) {
-                Some(Ok(adapter)) => adapter,
-                _ => return None,
-            };
-        match crt_shader::poll_once(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("bezel_shader_test"),
-            ..Default::default()
-        })) {
-            Some(Ok(pair)) => Some(pair),
-            _ => None,
-        }
+    /// A serialized device, or `None` without a usable hardware adapter:
+    /// see `crt_shader::test_gpu`.
+    fn gpu() -> Option<crt_shader::TestGpu> {
+        crt_shader::test_gpu("bezel_shader_test")
     }
 
     /// The `pixels` backing texture in miniature: `display_rows` rows of
@@ -586,13 +570,13 @@ mod tests {
 
     #[test]
     fn the_bezel_covers_the_display_rect_and_nothing_below() {
-        let Some((device, queue)) = gpu() else {
-            eprintln!("skipping: no GPU adapter");
+        let Some(gpu) = gpu() else {
             return;
         };
+        let (device, queue) = (gpu.device(), gpu.queue());
         let grey = |_x: u32, _y: u32| [GREY, GREY, GREY, 255];
-        let src = source_texture(&device, &queue, TEX, TEX, DISPLAY_ROWS, &grey);
-        let (px, dim, rows) = render_bezel(&device, &queue, &src, None);
+        let src = source_texture(device, queue, TEX, TEX, DISPLAY_ROWS, &grey);
+        let (px, dim, rows) = render_bezel(device, queue, &src, None);
         for y in 0..rows {
             for x in 0..dim {
                 let p = at(&px, dim, x, y);
@@ -616,13 +600,13 @@ mod tests {
 
     #[test]
     fn the_picture_fills_the_opening_and_the_frame_is_plastic() {
-        let Some((device, queue)) = gpu() else {
-            eprintln!("skipping: no GPU adapter");
+        let Some(gpu) = gpu() else {
             return;
         };
+        let (device, queue) = (gpu.device(), gpu.queue());
         let grey = |_x: u32, _y: u32| [GREY, GREY, GREY, 255];
-        let src = source_texture(&device, &queue, TEX, TEX, DISPLAY_ROWS, &grey);
-        let (px, dim, rows) = render_bezel(&device, &queue, &src, None);
+        let src = source_texture(device, queue, TEX, TEX, DISPLAY_ROWS, &grey);
+        let (px, dim, rows) = render_bezel(device, queue, &src, None);
 
         // Centre of the opening: the flat grey source, resampled 1:1 in
         // colour terms.
@@ -670,13 +654,13 @@ mod tests {
 
     #[test]
     fn the_badge_prints_on_the_left_of_the_bottom_band() {
-        let Some((device, queue)) = gpu() else {
-            eprintln!("skipping: no GPU adapter");
+        let Some(gpu) = gpu() else {
             return;
         };
+        let (device, queue) = (gpu.device(), gpu.queue());
         let grey = |_x: u32, _y: u32| [GREY, GREY, GREY, 255];
-        let src = source_texture(&device, &queue, TEX, TEX, DISPLAY_ROWS, &grey);
-        let (px, dim, rows) = render_bezel(&device, &queue, &src, None);
+        let src = source_texture(device, queue, TEX, TEX, DISPLAY_ROWS, &grey);
+        let (px, dim, rows) = render_bezel(device, queue, &src, None);
 
         // The badge rect as the shader lays it out: left-aligned with the
         // opening, vertically centred in the bottom band, 59x8 font pixels
@@ -722,13 +706,13 @@ mod tests {
     /// intact) with the preset's scanline structure inside the opening.
     #[test]
     fn a_crt_preset_lands_inside_the_opening() {
-        let Some((device, queue)) = gpu() else {
-            eprintln!("skipping: no GPU adapter");
+        let Some(gpu) = gpu() else {
             return;
         };
+        let (device, queue) = (gpu.device(), gpu.queue());
         let grey = |_x: u32, _y: u32| [GREY, GREY, GREY, 255];
-        let src = source_texture(&device, &queue, TEX, TEX, DISPLAY_ROWS, &grey);
-        let (px, dim, rows) = render_bezel(&device, &queue, &src, Some(ShaderKind::Scanlines));
+        let src = source_texture(device, queue, TEX, TEX, DISPLAY_ROWS, &grey);
+        let (px, dim, rows) = render_bezel(device, queue, &src, Some(ShaderKind::Scanlines));
 
         let (ox, oy, ow, oh) = opening_rect((0.0, 0.0, dim as f32, rows as f32));
         // Scanlines modulate the opening interior: one column of it must
@@ -781,10 +765,10 @@ mod tests {
             eprintln!("skipping: COPPERLINE_BEZEL_PREVIEW_OUT not set");
             return;
         };
-        let Some((device, queue)) = gpu() else {
-            eprintln!("skipping: no GPU adapter");
+        let Some(gpu) = gpu() else {
             return;
         };
+        let (device, queue) = (gpu.device(), gpu.queue());
         let with_crt = std::env::var("COPPERLINE_BEZEL_PREVIEW_SHADER").is_ok();
         let (src, w, h) = match std::env::var("COPPERLINE_BEZEL_PREVIEW_SRC") {
             Ok(path) => {
@@ -808,7 +792,7 @@ mod tests {
                         .collect(),
                     other => panic!("unsupported source colour type {other:?}"),
                 };
-                let tex = source_texture(&device, &queue, w, h, h, &move |x, y| {
+                let tex = source_texture(device, queue, w, h, h, &move |x, y| {
                     rgba[(y * w + x) as usize]
                 });
                 (tex, w, h)
@@ -819,7 +803,7 @@ mod tests {
                     [bar * 32, 255 - bar * 32, (y * 4) as u8, 255]
                 };
                 (
-                    source_texture(&device, &queue, TEX, TEX, TEX, &card),
+                    source_texture(device, queue, TEX, TEX, TEX, &card),
                     TEX,
                     TEX,
                 )
@@ -857,10 +841,10 @@ mod tests {
         );
         let opening = opening_rect(viewport);
         if with_crt {
-            let mut crt = crt_shader::CrtShader::new(&device, FORMAT);
+            let mut crt = crt_shader::CrtShader::new(device, FORMAT);
             crt.render(
-                &device,
-                &queue,
+                device,
+                queue,
                 &src,
                 &mut encoder,
                 &view,
@@ -869,17 +853,17 @@ mod tests {
                 crt_uniforms.with_viewport(opening),
             );
         }
-        let mut shader = BezelShader::new(&device, FORMAT);
+        let mut shader = BezelShader::new(device, FORMAT);
         shader.render(
-            &device,
-            &queue,
+            device,
+            queue,
             &src,
             &mut encoder,
             &view,
             viewport,
             uniforms_from(&crt_uniforms, viewport, opening, with_crt),
         );
-        let px = read_back(&device, &queue, encoder, &target, (w, h));
+        let px = read_back(device, queue, encoder, &target, (w, h));
         let file = std::fs::File::create(&out).expect("create preview");
         let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
         enc.set_color(png::ColorType::Rgba);
