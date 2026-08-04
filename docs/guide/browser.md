@@ -43,19 +43,42 @@ visit boots it with no picker round trip -- the boot button simply reads
 [saved-states panel](#browser-save-states) shows what is remembered with
 a **Forget** button that puts the boot button back on AROS.
 
-Two more selects shape what the glass shows without touching the
-machine. **View** is the desktop's `[display] overscan` knob: *TV* (the
+Three more selects shape what the glass shows without touching the
+machine. **Monitor** is the desktop window's 1084 presentation, on by
+default: the CRT shader preset (bowed tube face, scanlines, aperture
+grille, corner vignette -- the desktop's `[display] shader = "crt"`) with
+the picture seated in the moulded plastic bezel of `[display] bezel`,
+rendered through WebGL2 at display resolution. *CRT filter* and *Bezel*
+select either half alone, and *Plain* is the undecorated blit the page
+always had -- also what a browser without WebGL2 falls back to (the
+select hides there). As on the desktop, the CRT pass suspends itself on
+programmable scans, which have no 15 kHz line structure to draw; the
+bezel stays. The selected monitor fronts the page before anything boots
+too -- the powered-off tube, dark glass in the moulded frame, rather
+than a bare black rectangle -- and while a bezel mode is up the page
+shell's own thin border around the canvas hides, since the moulded case
+is the frame.
+**View** is the desktop's `[display] overscan` knob: *TV* (the
 default) masks the deep horizontal overscan like a CRT bezel and crops
 standard screens (PAL and NTSC alike) to a TV aperture, *Full overscan*
 presents the whole field Denise produced -- junk pixels, border tricks
 and all.
 **Screen** tints the picture like a monochrome monitor's phosphor --
-black & white, green, amber, or sepia -- applied as a CSS filter on the
-canvas (zero per-frame cost; screenshots bake it in). Both are viewing
+black & white, green, amber, or sepia. Under the monitor path the tint is
+applied in the shader to the picture alone, so the bezel's plastic never
+turns phosphor-green (the desktop tints its buffer before the
+presentation passes too); on the 2D fallback it is a CSS filter on the
+canvas. All three are viewing
 preferences rather than machine state, so the page remembers them in the
 browser and restores them on the next visit; the machine and video
 selects deliberately reset instead, because a shared `?df0=` link should
 boot the same machine for everyone.
+
+Screenshots capture the presentation buffer, not the canvas: the CRT
+pass and the bezel never appear in them, exactly as on the desktop,
+whose captures skip its presentation passes so they stay comparable
+whatever the monitor setting. The screen tint is the one exception,
+baked in as it always was.
 
 While a machine runs (and is not paused), the page holds a screen wake
 lock where the browser supports one, the way a video player does: a demo
@@ -486,6 +509,12 @@ because wasm memory can grow. The presentation *size* is dynamic too:
 between a standard screen (presented as the captured TV aperture crop)
 and anything else (presented as the full framebuffer), so size the canvas
 from both every frame rather than assuming fixed dimensions.
+`present_crt_lines()` describes the same presentation for a page-side CRT
+shader pass: the emulated field lines it shows (270 on the standard 50 Hz
+TV aperture, 214 on a 60 Hz scan, half the presented rows in full
+overscan), and 0 when a scanline effect has nothing honest to draw -- no
+frame yet, or a programmable scan, where the desktop suspends its CRT
+preset too.
 
 `www/try.js` and `www/audio-worklet.js` are the reference implementation of
 all of the above, including the audio drift control.
@@ -533,10 +562,22 @@ elements, and pages without them are untouched:
   remembers it in the browser (localStorage) and restores it next visit.
   Hidden on a wasm bundle without `set_overscan`.
 - `#tint` (a `<select>`): the screen tint (**Screen** on the hosted
-  page) -- `none`, `bw`, `green`, `amber`, `sepia` -- rendered as a CSS
-  filter on the canvas and baked into screenshots. Always on,
+  page) -- `none`, `bw`, `green`, `amber`, `sepia` -- applied in the
+  monitor path's shaders to the picture alone (a CSS filter on the
+  canvas under the 2D fallback) and baked into screenshots. Always on,
   self-inserting, and remembered in the browser like `#overscan`; it
   never touches the wasm, so it works with any bundle.
+- `#monitor` (a `<select>` with option values `1084`, `crt`, `bezel`,
+  and `plain`): the monitor presentation (**Monitor** on the hosted
+  page), the desktop window's CRT shader preset and 1084 bezel rendered
+  through WebGL2. Defaults to `1084` (both together), self-inserting,
+  applied live including to a paused machine -- and to the powered-off
+  monitor a page shows before boot -- and remembered in the browser like
+  `#overscan`. While a bezel mode is up the glue makes the shell's
+  border transparent (the moulded case is the frame), restoring it on
+  the other modes; a shell that wants no part of that can simply not
+  style a border. It hides itself -- and the page keeps its
+  plain 2D blit -- in a browser without WebGL2.
 - `#floppy-speed` (a `<select>` with option values `100`, `200`, `400`,
   `800`, and `0` for turbo): hosts the floppy drive speed control, letting
   the page place and style it. Unlike the other hooks this one is always
@@ -577,8 +618,10 @@ elements, and pages without them are untouched:
   stops stepping, audio is suspended, and resuming resyncs the pacer so
   the guest carries on from where it was rather than racing to catch up;
   the button relabels itself Resume, and the fullscreen overlay carries
-  a copy of it. Screenshot writes a PNG of the canvas -- exactly what
-  the screen shows -- to the clipboard, falling back to downloading the
+  a copy of it. Screenshot writes a PNG of the presentation buffer --
+  the picture with the screen tint baked in, without the monitor
+  effect's CRT pass or bezel, like the desktop's captures -- to the
+  clipboard, falling back to downloading the
   file when the browser has no clipboard image support or refuses the
   write (an unfocused document, an insecure origin); the caption over the
   screen says which happened, since a clipboard copy has nothing else to
@@ -648,6 +691,7 @@ per URL, and anything the visitor changes by hand wins as usual:
   "floppy_speed": 800,
   "overscan": "full",
   "tint": "green",
+  "monitor": "plain",
   "joy": "keys",
   "serial_url": "wss://bbs.example.com:8443/",
   "serial_raw": false,
@@ -663,9 +707,11 @@ already serves); `df0` is any URL the visitor's browser may fetch, like
 `floppy_speed` reach the machine whether or not the shell has their
 controls -- the speed select inserts itself, and a configured
 `floppy_sounds` or `mono_audio` is applied at boot even with no checkbox
-to show it. `overscan` and `tint` are starting points for first-time
-visitors only: both are per-browser viewing preferences the glue
-remembers, and a visitor's own remembered choice wins over the file. `serial_url` and `serial_raw` preset the
+to show it. `overscan`, `tint`, and `monitor` (the CRT + bezel
+presentation: `1084`, `crt`, `bezel`, or `plain`) are starting points for
+first-time visitors only: all three are per-browser viewing preferences
+the glue remembers, and a visitor's own remembered choice wins over the
+file. `serial_url` and `serial_raw` preset the
 serial bridge's inputs and therefore need those elements: a shell
 without them has no connect button to dial with either. `joy` picks the
 starting joystick mode. `autoboot: true` powers the machine on by itself once the

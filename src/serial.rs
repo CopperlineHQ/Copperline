@@ -442,7 +442,28 @@ impl PtySerialSink {
 #[cfg(unix)]
 impl SerialSink for PtySerialSink {
     fn write_byte(&mut self, b: u8, _at_cck: u64) {
-        let _ = self.master.write_all(&[b]);
+        use std::os::fd::AsRawFd;
+        // Drop output the receiver is not draining rather than block the
+        // emulation thread, mirroring TcpSerialSink dropping output with no
+        // client connected -- like an unplugged serial cable. With no terminal
+        // attached, only our keepalive slave holds the pts open and nothing
+        // reads it, so the pty buffer fills and a blocking master write would
+        // wedge the emulator forever. Poll for room first (0 ms) and drop the
+        // byte if there is none.
+        let mut pfd = libc::pollfd {
+            fd: self.master.as_raw_fd(),
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        // SAFETY: polling a single valid fd owned by `self.master`, 0 ms.
+        let ready = unsafe { libc::poll(&mut pfd, 1, 0) };
+        // Write only when poll positively reports room. A rare EINTR (or any
+        // poll error) leaves `ready < 0` and simply drops the byte -- correct
+        // for a lossy serial line, and deliberately not an EINTR retry loop
+        // (the pattern that makes programs stop responding to ^C).
+        if ready == 1 && pfd.revents & libc::POLLOUT != 0 {
+            let _ = self.master.write_all(&[b]);
+        }
     }
 
     fn read_byte(&mut self) -> Option<u8> {

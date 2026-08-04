@@ -9,11 +9,11 @@ use super::ScalingMode;
 use super::{
     bar_layout, center_present_frame_for_visible_start, center_present_frame_horizontally,
     control_at, copperline_icon_image, copperline_logo_image, copy_present_frame,
-    copy_window_present_frame, cursor_position_in_texture, draw_status_bar, fdd_track_counter_rect,
-    fdd_track_digit_rect, host_shortcut_modifier_pressed, host_to_amiga_rawkey,
-    joystick_toggle_rect, led_row_rect, mask_present_frame_to_tv, paint_test_screen,
-    parse_amiga_key, pause_button_rect, plan_present_scaling_for, power_button_rect,
-    present_height, presentation_pixels_equal, presentation_source_y_offset,
+    copy_tv_aperture_to_window, copy_window_present_frame, cursor_position_in_texture,
+    draw_status_bar, fdd_track_counter_rect, fdd_track_digit_rect, host_shortcut_modifier_pressed,
+    host_to_amiga_rawkey, joystick_toggle_rect, led_row_rect, mask_present_frame_to_tv,
+    paint_test_screen, parse_amiga_key, pause_button_rect, plan_present_scaling_for,
+    power_button_rect, present_height, presentation_pixels_equal, presentation_source_y_offset,
     raw_device_qualifier_family_held, raw_device_qualifier_rawkey, rawkey_is_held,
     rawkey_transition_is_duplicate, reboot_button_rect, repeated_main_key_should_drop, rgba,
     short_status_error, shorten_status_paths, shot_button_rect, should_render_emulated_frame,
@@ -26,14 +26,14 @@ use super::{
     DISK_BODY, DISK_BODY_SHADOW, DISK_LABEL, FDD_LED_OFF, FDD_LED_ON, HDD_LED_OFF, HDD_LED_ON,
     POWER_GLYPH_OFF, POWER_GLYPH_ON, POWER_LED_BRIGHT, POWER_LED_DIM, POWER_LED_OFF,
     STANDARD_PAL_VISIBLE_LINES, STANDARD_PAL_VISIBLE_START_VPOS, STATUS_BG, TRACK_SEGMENT_OFF,
-    TRACK_SEGMENT_ON, TV_CAPTURED_SOURCE_X, TV_LIVE_PAD_X, TV_PAL_PRESENT_HEIGHT,
-    TV_PRESENT_SOURCE_X, TV_PRESENT_SOURCE_Y, TV_PRESENT_WIDTH, VOLUME_FILL, VOLUME_GLYPH_X,
+    TRACK_SEGMENT_ON, TV_CAPTURED_SOURCE_X, TV_CAPTURED_WIDTH, TV_LIVE_PAD_X,
+    TV_PAL_PRESENT_HEIGHT, TV_PRESENT_SOURCE_Y, VOLUME_FILL, VOLUME_GLYPH_X,
 };
 use crate::audio::{AudioSink, NullSink};
 use crate::bus::{FrontPanelStatus, RenderRegisterSnapshot};
 use crate::config::{Overscan, Tint, WarpSpeed};
 use crate::heatmap;
-use crate::video::{FB_HEIGHT, FB_PIXELS, FB_WIDTH};
+use crate::video::{FB_PIXELS, FB_WIDTH};
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -1520,9 +1520,27 @@ fn test_screen_paints_colour_bars_over_a_grey_wedge() {
     let mut fb = vec![0u32; FB_PIXELS];
     paint_test_screen(&mut fb);
 
-    // Top region: leftmost bar is grey, rightmost is blue.
+    // Top region: leftmost bar is grey, rightmost is blue, and the
+    // pattern extends to the capture edges (the region left of the
+    // glass keeps the first bar's colour).
     assert_eq!(fb[0], rgba(192, 192, 192));
+    assert_eq!(fb[TV_CAPTURED_SOURCE_X - 1], rgba(192, 192, 192));
     assert_eq!(fb[FB_WIDTH - 1], rgba(0, 0, 192));
+
+    // The bars are laid out on the glass: the first bar boundary sits a
+    // seventh of the captured aperture in from its start, so the card
+    // reads centred through the TV presentation.
+    let bar_w = TV_CAPTURED_WIDTH.div_ceil(7);
+    assert_eq!(
+        fb[TV_CAPTURED_SOURCE_X + bar_w - 1],
+        rgba(192, 192, 192),
+        "last column of the first bar"
+    );
+    assert_eq!(
+        fb[TV_CAPTURED_SOURCE_X + bar_w],
+        rgba(192, 192, 0),
+        "first column of the second bar"
+    );
 
     // Bottom region: grey wedge runs from black at the left to white
     // at the right.
@@ -1556,8 +1574,13 @@ fn test_screen_blits_copperline_logo_over_colour_bars() {
         .enumerate()
         .find(|(_, px)| px[3] == 0xFF)
         .expect("opaque logo pixel");
-    let x = FB_WIDTH.saturating_sub(logo.width) / 2 + idx % logo.width;
-    let y = (FB_HEIGHT * 4 / 5).saturating_sub(logo.height) / 2 + idx / logo.width;
+    // Centred on the glass: the captured aperture's columns, and the
+    // aperture's field-row window above the wedge.
+    let glass_top = TV_PRESENT_SOURCE_Y / 2;
+    let bars_h = glass_top + TV_PAL_PRESENT_HEIGHT / 2 * 4 / 5;
+    let x =
+        TV_CAPTURED_SOURCE_X + TV_CAPTURED_WIDTH.saturating_sub(logo.width) / 2 + idx % logo.width;
+    let y = glass_top + (bars_h - glass_top).saturating_sub(logo.height) / 2 + idx / logo.width;
 
     assert_eq!(
         fb[y * FB_WIDTH + x],
@@ -2215,68 +2238,72 @@ fn tint_display_rows_leave_the_status_bar_alone() {
 }
 
 #[test]
-fn tv_window_copy_centres_captured_aperture_in_live_texture() {
+fn tv_window_copy_fills_the_glass_from_the_captured_aperture() {
     use crate::video::deinterlace::{OUT_HEIGHT, OUT_PIXELS};
     let scale = 1;
     let mut src = vec![0u32; OUT_PIXELS];
     let row_y = TV_PRESENT_SOURCE_Y;
     let standard_left = crate::video::bitplane::STANDARD_VISIBLE_X0;
-    let standard_right = standard_left + 320 * 2 - 1;
-    let left_marker = 0x1122_3344u32;
-    let right_marker = 0x5566_7788u32;
-    let left_edge = 0x99AA_BBCCu32;
-    let right_edge = 0xDDEE_FF00u32;
+    let standard_right = standard_left + 320 * 2;
+    let margin = rgba(40, 40, 40);
+    let window = rgba(200, 120, 40);
 
-    src[row_y * FB_WIDTH + TV_CAPTURED_SOURCE_X] = left_edge;
-    src[row_y * FB_WIDTH + FB_WIDTH - 1] = right_edge;
-    src[row_y * FB_WIDTH + standard_left] = left_marker;
-    src[row_y * FB_WIDTH + standard_right] = right_marker;
+    // Border colour across the captured aperture and its neighbouring
+    // rendered overscan (the resample's first sample reaches one column
+    // left of the aperture, which holds rendered border in production),
+    // with the standard window painted a second colour on top.
+    for x in TV_CAPTURED_SOURCE_X - 1..FB_WIDTH {
+        src[row_y * FB_WIDTH + x] = margin;
+    }
+    for x in standard_left..standard_right {
+        src[row_y * FB_WIDTH + x] = window;
+    }
 
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
-    copy_window_present_frame(
+    copy_tv_aperture_to_window(
         &src,
         OUT_HEIGHT,
-        FB_WIDTH,
         &mut frame,
         scale,
-        Overscan::Tv,
-        Some(TV_PAL_PRESENT_HEIGHT),
+        TV_PAL_PRESENT_HEIGHT,
+        crate::video::PRESENT_HEIGHT_TV,
     );
 
-    // The standard window and the visible raster are both exactly centred:
-    // the captured aperture is symmetric around the standard window and
-    // ends on the framebuffer's edges, so the crop's first and last
-    // columns land mirror-imaged around the texture centre.
-    let dst_standard_left = TV_LIVE_PAD_X + (standard_left - TV_CAPTURED_SOURCE_X);
-    let dst_standard_right = dst_standard_left + 320 * 2 - 1;
-    assert_eq!(dst_standard_left, FB_WIDTH - 1 - dst_standard_right);
-    let dst_crop_left = TV_LIVE_PAD_X;
-    let dst_crop_right = TV_LIVE_PAD_X + (FB_WIDTH - 1 - TV_CAPTURED_SOURCE_X);
-    assert_eq!(dst_crop_left, FB_WIDTH - 1 - dst_crop_right);
-    assert_eq!(
-        pixel(&frame, dst_standard_left, 0, scale),
-        left_marker.to_le_bytes()
-    );
-    assert_eq!(
-        pixel(&frame, dst_standard_right, 0, scale),
-        right_marker.to_le_bytes()
-    );
-    assert_eq!(
-        pixel(&frame, dst_crop_left, 0, scale),
-        left_edge.to_le_bytes()
-    );
-    assert_eq!(
-        pixel(&frame, dst_crop_right, 0, scale),
-        right_edge.to_le_bytes()
+    // On the 4:3 glass the aperture fills the full texture width: the
+    // border colour reaches both glass edges and no column is padded
+    // black -- the raster meets the glass edge like a real overscanned
+    // picture.
+    assert_eq!(pixel(&frame, 0, 0, scale), margin.to_le_bytes());
+    assert_eq!(pixel(&frame, FB_WIDTH - 1, 0, scale), margin.to_le_bytes());
+    let black = rgba(0, 0, 0).to_le_bytes();
+    for x in 0..FB_WIDTH {
+        assert_ne!(
+            pixel(&frame, x, 0, scale),
+            black,
+            "glass column {x} padded black"
+        );
+    }
+
+    // The standard window stays exactly centred: its first and last
+    // purely-window-coloured glass columns mirror around the centre
+    // (boundary columns blend with the border and are neither colour).
+    let is_window = |x: usize| pixel(&frame, x, 0, scale) == window.to_le_bytes();
+    let first = (0..FB_WIDTH).find(|&x| is_window(x)).expect("window");
+    let last = (0..FB_WIDTH).rev().find(|&x| is_window(x)).expect("window");
+    let mirror = FB_WIDTH - 1 - last;
+    assert!(
+        first.abs_diff(mirror) <= 1,
+        "standard window off-centre on the glass: first {first}, last {last}"
     );
 }
 
 #[test]
 fn tv_window_copy_black_pads_never_replicate_edge_columns() {
     use crate::video::deinterlace::{OUT_HEIGHT, OUT_PIXELS};
-    // The pads beside the captured aperture are off-capture bezel. A
-    // display fetching or parking sprites in the deepest overscan fills
-    // the crop's edge columns; the pads must stay black instead of
+    // Square-pixel presentation keeps unit columns, so there the pads
+    // beside the captured aperture are off-capture bezel. A display
+    // fetching or parking sprites in the deepest overscan fills the
+    // crop's edge columns; the pads must stay black instead of
     // replicating those columns into horizontal streaks (Gen-X logo
     // slide-in).
     let black = rgba(0, 0, 0).to_le_bytes();
@@ -2288,39 +2315,42 @@ fn tv_window_copy_black_pads_never_replicate_edge_columns() {
         src[row_y * FB_WIDTH + TV_CAPTURED_SOURCE_X] = left_edge;
         src[row_y * FB_WIDTH + FB_WIDTH - 1] = right_edge;
 
-        let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
-        copy_window_present_frame(
+        let rows = crate::video::PRESENT_HEIGHT_SQUARE;
+        let mut frame = vec![0u8; texture_width(scale) * rows * scale * 4];
+        copy_tv_aperture_to_window(
             &src,
             OUT_HEIGHT,
-            FB_WIDTH,
             &mut frame,
             scale,
-            Overscan::Tv,
-            Some(TV_PAL_PRESENT_HEIGHT),
+            TV_PAL_PRESENT_HEIGHT,
+            rows,
         );
 
+        // The square canvas centres the aperture rows between vertical
+        // bands: the marker row is the first content row.
+        let y = (rows - TV_PAL_PRESENT_HEIGHT) / 2 * scale;
         let dst_crop_left = TV_LIVE_PAD_X;
         let dst_crop_right = TV_LIVE_PAD_X + (FB_WIDTH - 1 - TV_CAPTURED_SOURCE_X);
         assert_eq!(
-            pixel(&frame, dst_crop_left * scale, 0, scale),
+            pixel(&frame, dst_crop_left * scale, y, scale),
             left_edge.to_le_bytes(),
             "scale {scale}: crop's first column should stay visible"
         );
         assert_eq!(
-            pixel(&frame, dst_crop_right * scale, 0, scale),
+            pixel(&frame, dst_crop_right * scale, y, scale),
             right_edge.to_le_bytes(),
             "scale {scale}: framebuffer edge column should stay visible"
         );
         for x in 0..dst_crop_left * scale {
             assert_eq!(
-                pixel(&frame, x, 0, scale),
+                pixel(&frame, x, y, scale),
                 black,
                 "scale {scale}: left pad must be black at {x}"
             );
         }
         for x in (dst_crop_right + 1) * scale..FB_WIDTH * scale {
             assert_eq!(
-                pixel(&frame, x, 0, scale),
+                pixel(&frame, x, y, scale),
                 black,
                 "scale {scale}: right pad must be black at {x}"
             );
@@ -2603,14 +2633,23 @@ fn tv_pal_crop_centres_standard_display_in_aperture() {
     let standard_left = crate::video::bitplane::STANDARD_VISIBLE_X0;
     let standard_right = standard_left + 640;
 
-    assert_eq!(TV_PRESENT_WIDTH, 692);
+    assert_eq!(TV_CAPTURED_WIDTH, 668);
     assert_eq!(TV_PAL_PRESENT_HEIGHT, 540);
-    assert_eq!(standard_left - TV_PRESENT_SOURCE_X, 26);
+    assert_eq!(standard_left - TV_CAPTURED_SOURCE_X, 14);
     assert_eq!(
-        TV_PRESENT_WIDTH - (standard_right - TV_PRESENT_SOURCE_X),
-        26
+        TV_CAPTURED_WIDTH - (standard_right - TV_CAPTURED_SOURCE_X),
+        14
     );
     assert_eq!(TV_PRESENT_SOURCE_Y, 18);
+
+    // The glass resample keeps the centring: the symmetric captured
+    // margins place the standard window's edges at exactly mirrored
+    // positions, so their glass mappings mirror too (scaled by the same
+    // FB_WIDTH / TV_CAPTURED_WIDTH factor about the same centre).
+    assert_eq!(
+        standard_left - TV_CAPTURED_SOURCE_X,
+        TV_CAPTURED_SOURCE_X + TV_CAPTURED_WIDTH - standard_right
+    );
 }
 
 #[test]

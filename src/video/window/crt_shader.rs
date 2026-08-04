@@ -561,8 +561,11 @@ pub(super) fn uniforms_for(
         ShaderKind::Scanlines => (0.0, 0.0, 0.0),
         // 2: staggered dot/shadow mask.
         ShaderKind::Mask => (2.0, 0.0, 0.0),
-        // 1: aperture grille, with a bowed face and corner falloff.
-        ShaderKind::Crt => (1.0, 0.35, 0.15),
+        // 1: aperture grille, with a bowed face and corner falloff. The
+        // curvature reproduces the screen-edge arcs of the 1084's tube
+        // datasheet (Philips M34EAQ10X) under crt.wgsl's aspect-weighted
+        // warp; the derivation is with the warp function.
+        ShaderKind::Crt => (1.0, 0.30, 0.15),
         // A user shader gets the frame geometry and the two knobs it can
         // sensibly honour; the preset look table means nothing to it.
         ShaderKind::None | ShaderKind::Custom => (0.0, 0.0, 0.0),
@@ -818,7 +821,7 @@ fn fs_main() -> @location(0) vec4<f32> {
         assert_eq!(mask.params2, [0.0; 4]);
 
         let crt = get(ShaderKind::Crt);
-        assert_eq!(crt.params, [0.5, 537.0, 1.0, 0.35]);
+        assert_eq!(crt.params, [0.5, 537.0, 1.0, 0.30]);
         assert_eq!(crt.params2, [0.15, 0.0, 0.0, 0.0]);
 
         let custom = get(ShaderKind::Custom);

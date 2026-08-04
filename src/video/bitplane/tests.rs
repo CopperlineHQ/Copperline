@@ -514,8 +514,8 @@ fn horizontal_class_centres_wide_diw_around_standard_fetch() {
 fn horizontal_class_calls_true_overscan_fetch_overscan() {
     // Wide DIW *and* a fetch that reaches into the overscan border
     // (DDFSTRT $30 starts the picture left of the standard window): a real
-    // overscan display, presented exactly as rendered on the full
-    // framebuffer.
+    // overscan display. Full-overscan mode presents it without recentring;
+    // the TV glass crops it like a real set.
     assert_eq!(
         horizontal_content_class(&ocs_snapshot(0x5702, 0xFFFF, 0x0030, 0x00D8)),
         HorizontalContentClass::Overscan
@@ -5593,12 +5593,11 @@ fn covered_scroll_catches_floor_reload_slot_for_off_grid_ddfstrt() {
 fn wide_fmode_scroll_folds_into_the_early_masked_fetch_start() {
     // Lo-res 32-bit fetch (FMODE BPL32) with DDFSTRT $24: Agnus masks the
     // start down to the 16-cck fetch-unit grid ($20), so the data arrives
-    // 4 cck (8 lo-res px) EARLY relative to the programmed start - the
-    // opposite sense of the FMODE=0 round-up above. Denise's reload
-    // comparator window is anchored at that early fetch start, so scroll
-    // taps in the last 8 px of the 32-px gulp window already see the NEXT
-    // gulp's data and the playfield sits one full gulp left: the display
-    // delay folds as ((scroll + earliness) mod gulp) - earliness.
+    // 4 cck (8 lo-res px) EARLY relative to the programmed start. Denise's
+    // reload comparator runs on the absolute hpos gulp grid, so the fold
+    // boundary is the data-arrival phase: earliness (8 px) plus the 8-cck
+    // fetch-to-comparator pipeline (16 px) = 24. Scroll taps at or past
+    // the boundary sit one full gulp left of taps below it.
     // Calibrated against Alien Breed II AGA's playfield scroller, which
     // pairs the folded BPLCON1 taps ($CC99..$CCFF, taps 25..31) with a
     // one-gulp bitplane-pointer step; without the fold the pan jumps 32 px
@@ -5623,14 +5622,71 @@ fn wide_fmode_scroll_folds_into_the_early_masked_fetch_start() {
     // $CCFF: raw 63 -> tap 31 folds; past the wrap, raw 1 does not.
     assert_eq!(control(0xCCFF).row_reload_advance(), 32);
     assert_eq!(control(0x0011).row_reload_advance(), 0);
-    // On the unit grid the comparator window starts with the programmed
-    // fetch: no fold at any scroll.
+    // An on-grid start still folds from the pipeline alone: the data
+    // arrives 16 px past the comparator grid point, so taps 16..31 catch
+    // the reload one cell early (FS-UAE-verified, ddfprobe-agafold2
+    // band 13).
     let on_grid = ControlState {
         ddfstrt: 0x0020,
         ..control(0xCC99)
     };
-    assert_eq!(on_grid.row_reload_advance(), 0);
+    assert_eq!(on_grid.row_reload_advance(), 32);
     assert_eq!(on_grid.sample_delay_for_plane(0), 25);
+    let on_grid_low = ControlState {
+        ddfstrt: 0x0020,
+        ..control(0x00FF)
+    };
+    assert_eq!(on_grid_low.row_reload_advance(), 0);
+}
+
+#[test]
+fn wide_fmode_fold_boundary_saturates_past_the_tap_range() {
+    // SANITY Roots II AGA's swirl and kaleidoscope screens (issue #371):
+    // lo-res 64-bit fetch (FMODE=3, 32-cck unit, 64-px gulps) with DDFSTRT
+    // $58 or $38, both 24 cck past the unit grid. The 48 px of earliness
+    // plus the 16-px fetch-to-comparator pipeline puts the fold boundary
+    // past the top of the 0..63 tap range, so no tap folds and the demo's
+    // AGA scrolls (pf1 17 / pf2 16 on the swirl, per-line copper taps up
+    // to 43 on the kaleidoscope) render linearly. The previous
+    // last-earliness-window rule folded every tap >= 16 here, pulling the
+    // swirl a full gulp left and shearing the kaleidoscope line by line.
+    // FS-UAE-verified band by band (ddfprobe-agafold2).
+    let control = |ddfstrt: u16, bplcon1: u16| ControlState {
+        agnus_revision: AgnusRevision::AgaAlice,
+        bplcon0: 0x0210, // 8 planes, lo-res
+        ddfstrt,
+        ddfstop: 0x0090,
+        fmode: 0x0003, // BPL64
+        bplcon1,
+        ..ControlState::default()
+    };
+
+    // The swirl screen's live BPLCON1 $4401: pf1 tap 17, pf2 tap 16.
+    assert_eq!(control(0x0058, 0x4401).row_reload_advance(), 0);
+    assert_eq!(control(0x0058, 0x4401).sample_delay_for_plane(0), 17);
+    assert_eq!(control(0x0058, 0x4401).sample_delay_for_plane(1), 16);
+    // The kaleidoscope's per-line extremes ($48EB: pf1 43, pf2 30) and the
+    // top of the tap range stay linear too.
+    assert_eq!(control(0x0038, 0x48EB).row_reload_advance(), 0);
+    assert_eq!(control(0x0038, 0x48EB).sample_delay_for_plane(0), 43);
+    assert_eq!(control(0x0038, 0x48EB).sample_delay_for_plane(1), 30);
+    assert_eq!(control(0x0058, 0xCCFF).row_reload_advance(), 0);
+    // The boundary saturates instead of wrapping: a start 28 cck past the
+    // grid ($5C) has boundary 56 + 16 = 72, also past the range, so even
+    // the top taps stay linear (FS-UAE bands 7..9, which the wrapped
+    // model folded).
+    assert_eq!(control(0x005C, 0x8877).row_reload_advance(), 0);
+    assert_eq!(control(0x005C, 0xCC88).row_reload_advance(), 0);
+    // An on-grid start folds from the 16-px pipeline alone: tap 8 stays,
+    // tap 56 sits one gulp left (FS-UAE bands 10/13).
+    assert_eq!(control(0x0040, 0x0088).row_reload_advance(), 0);
+    assert_eq!(control(0x0040, 0xCC88).row_reload_advance(), 64);
+    // Mid phases keep their folds: $48 (earliness 16, boundary 32) and
+    // $50 (earliness 32, boundary 48) fold tap 56 and 48, and $44
+    // (earliness 8, boundary 24) folds tap 55 (FS-UAE bands 11/12/15).
+    assert_eq!(control(0x0048, 0xCC88).row_reload_advance(), 64);
+    assert_eq!(control(0x0050, 0xCC00).row_reload_advance(), 64);
+    assert_eq!(control(0x0044, 0xCC77).row_reload_advance(), 64);
 }
 
 #[test]

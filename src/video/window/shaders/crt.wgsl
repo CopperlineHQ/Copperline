@@ -80,22 +80,57 @@ const SCAN_BOOST: f32 = 1.15;
 const GRILLE_DIM: f32 = 0.55;
 const GRILLE_BOOST: f32 = 1.25;
 
-// Barrel distortion about the centre of the display rect: the tube face is
-// a section of a sphere, so the picture bows outwards and the corners fall
-// outside the visible rect.
-fn warp(uv: vec2<f32>, k: f32) -> vec2<f32> {
+// Rounded screen corners, as a fraction of the display half-width: the
+// 1084's tube has R 11,6 mm corner arcs on a 280,8 mm wide screen
+// (11,6 / 140,4).
+const CORNER_RADIUS: f32 = 0.0826;
+
+// The glass is never black: room light reflects off the face and the
+// phosphor layer behind it, so a lit-room CRT shows black at roughly a
+// hundredth of full white (linear). Lifting on-face black by that much
+// keeps the face silhouette -- bow, rounded corners -- visible against
+// the true black beyond the glass even when the picture itself is dark.
+const GLASS_GLOW: f32 = 0.01;
+
+// Barrel distortion about the centre of the display rect, matched to the
+// 1084's tube (Philips M34EAQ10X, 1986 Philips T08 databook): the face is
+// a section of a sphere (R 640 mm centre blending to R 530 mm at the
+// edge), and the datasheet draws the useful screen (280,8 x 210,6 mm)
+// with barrel-arced edges, R 1545 mm top and bottom, R 1173 mm at the
+// sides. Depth on the face grows with *physical* distance from the
+// centre, so in display-normalised coordinates the y term is weighted by
+// the viewport aspect squared (aspect = height/width, so the weight is
+// *below* one). The bow of an edge comes from how r2 varies while
+// travelling along it: the top edge sweeps the full unweighted x term
+// while a side edge sweeps only the down-weighted y term, so weighting y
+// down bows the top/bottom edges roughly (w/h)^2 as far as the sides --
+// exactly the relation of the datasheet arcs -- and k = 0.30 reproduces
+// the arcs' curvature.
+//
+// The raster overscans the face, as on the real monitor: the per-axis
+// normalisation rescales the bowed field so the source edge lands exactly
+// on the face's mid-edges. The picture therefore fills the whole face --
+// no black ring between picture and face edge -- and the bow shows as the
+// crop deepening toward the corners, where the source content falls into
+// the rounded-corner clip instead of the visible glass.
+fn warp(uv: vec2<f32>, k: f32, aspect: f32) -> vec2<f32> {
     let c = uv * 2.0 - vec2<f32>(1.0);
-    let r2 = dot(c, c);
-    return (c * (1.0 + k * r2 * 0.25)) * 0.5 + vec2<f32>(0.5);
+    let r2 = c.x * c.x + c.y * c.y * aspect * aspect;
+    let bowed = c * (1.0 + k * r2 * 0.25);
+    let m = vec2<f32>(1.0 + k * 0.25, 1.0 + k * 0.25 * aspect * aspect);
+    return (bowed / m) * 0.5 + vec2<f32>(0.5);
 }
 
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     let strength = clamp(u.params.x, 0.0, 1.0);
     let uv = clamp(in.uv, vec2<f32>(0.0), vec2<f32>(1.0));
+    // Height over width of the display rect on screen, for warp and
+    // corner geometry that must be circular in physical pixels.
+    let aspect = u.size.y / max(u.size.x, 1.0);
     // Curvature fades in with strength, so strength 0 samples straight
     // through and every later term collapses to the plain sample.
-    let wuv = mix(uv, warp(uv, u.params.w), strength);
+    let wuv = mix(uv, warp(uv, u.params.w, aspect), strength);
     let base = sample_display(wuv);
 
     // Scanlines follow the bowed geometry.
@@ -128,12 +163,30 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     // holds. Mixing the black back toward `shaded` instead would fill the
     // region with a fraction of the edge colour the sampler smears there.
     //
-    // d is a signed distance to the face in UV, positive outside; fwidth
+    // The face is a rounded rectangle, not a sharp one: the corner arcs
+    // are CORNER_RADIUS of the half-width, like the tube's R 11,6 mm
+    // screen corners. The distance is measured in the warped source frame
+    // (the corner is a property of the screen surface, seen through the
+    // same projection as the picture) and in half-width units on both
+    // axes, so the arc stays circular on screen instead of stretching
+    // with the display aspect. The radius fades with strength like the
+    // bow does, keeping the strength-0 no-op; at radius 0 the expression
+    // reduces to the plain rectangle distance.
+    //
+    // d is a signed distance to the face, positive outside; fwidth
     // rescales it to pixels, so the fade covers about one pixel and the
     // bowed edge does not staircase. Well inside, face is exactly 1 and
     // the shaded result comes through untouched.
-    let d = max(max(-wuv.x, wuv.x - 1.0), max(-wuv.y, wuv.y - 1.0));
+    let half = vec2<f32>(1.0, aspect);
+    let rc = CORNER_RADIUS * strength;
+    let q = abs((wuv * 2.0 - vec2<f32>(1.0)) * half) - half + vec2<f32>(rc);
+    let d = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - rc;
     let aa = max(fwidth(d), 1e-6);
     let face = 1.0 - clamp(d / aa + 0.5, 0.0, 1.0);
-    return vec4<f32>(shaded * face, 1.0);
+    // The reflection glow is flat -- ambient light, not beam emission --
+    // so it rides on top of the shaded picture untouched by scanlines,
+    // grille or vignette, and fades in with strength like every other
+    // term so strength 0 stays a no-op.
+    let glow = vec3<f32>(GLASS_GLOW * strength);
+    return vec4<f32>((shaded + glow) * face, 1.0);
 }

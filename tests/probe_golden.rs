@@ -374,11 +374,18 @@ probe_tests! {
     // at the DIW stop (the KS 2.05 first-text-column regression class);
     // vAmiga-verified band by band.
     golden_ddfprobe_hscroll => probe_ecs("ddfprobe-hscroll", "ddfprobe-hscroll.bin", 16.0);
-    // AGA wide-FMODE off-grid DDFSTRT scroll fold: taps in the last
-    // `earliness` px of the gulp window show the next gulp, one gulp left
-    // (the Alien Breed II AGA horizontal-scroll regression class, issue
-    // #248); FS-UAE-verified band by band.
+    // AGA wide-FMODE off-grid DDFSTRT scroll fold: taps at or past the
+    // data-arrival distance (earliness + the 8-cck fetch-to-comparator
+    // pipeline) show the next gulp, one gulp left (the Alien Breed II
+    // AGA horizontal-scroll regression class, issue #248);
+    // FS-UAE-verified band by band.
     golden_ddfprobe_agafold => probe_aga("ddfprobe-agafold", "ddfprobe-agafold.bin", 16.0);
+    // The fold boundary as a function of the DDFSTRT phase on the 64-bit
+    // fetch: the boundary saturates past the top of the tap range instead
+    // of wrapping (the SANITY Roots II AGA swirl/kaleidoscope regression
+    // class, issue #371), and an on-grid start folds from the pipeline
+    // alone; FS-UAE-verified band by band.
+    golden_ddfprobe_agafold2 => probe_aga("ddfprobe-agafold2", "ddfprobe-agafold2.bin", 16.0);
     // FMODE.SSCAN2 masks the sprite horizontal comparator's high bit:
     // HSTART $165 aliases $065 while $080 remains distinct (the DblPAL
     // High Res Laced invisible-pointer regression class, issue #270);

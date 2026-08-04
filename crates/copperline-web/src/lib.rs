@@ -3,12 +3,13 @@
 //! Browser frontend for Copperline: a thin wasm-bindgen wrapper around the
 //! headless core. The page's JS drives everything: it fetches ROM bytes,
 //! constructs a [`WebEmu`], calls [`WebEmu::run`] from requestAnimationFrame,
-//! blits the presentation buffer to a canvas via ImageData, forwards
-//! keyboard/mouse events, and ships each frame's mixed audio to an
-//! AudioWorklet. No winit, wgpu, or cpal: the canvas is the display and the
-//! Web Audio API is the sound device, so the wasm stays small and
-//! single-threaded (GitHub Pages cannot serve the COOP/COEP headers that
-//! SharedArrayBuffer builds need).
+//! draws the presentation buffer to a canvas (a WebGL2 monitor pass with
+//! the desktop's CRT shader and 1084 bezel, or a plain ImageData blit
+//! without WebGL2), forwards keyboard/mouse events, and ships each frame's
+//! mixed audio to an AudioWorklet. No winit, wgpu, or cpal: the canvas is
+//! the display and the Web Audio API is the sound device, so the wasm
+//! stays small and single-threaded (GitHub Pages cannot serve the
+//! COOP/COEP headers that SharedArrayBuffer builds need).
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -207,6 +208,11 @@ pub struct WebEmu {
     present: Vec<u32>,
     present_width: usize,
     present_rows: usize,
+    /// Emulated field lines the presentation buffer shows, for the page's
+    /// CRT shader pass; 0 while no frame has rendered or the scan carries
+    /// no 15 kHz line structure (a programmable scan). See
+    /// [`Self::present_crt_lines`].
+    present_crt_lines: f32,
     last_rendered_frame: Option<u64>,
     /// Wall-clock/emulated-time pair the pacer chases from; None until the
     /// first `run` call after (re)boot.
@@ -278,6 +284,7 @@ impl WebEmu {
             present: Vec::new(),
             present_width: FB_WIDTH,
             present_rows: 0,
+            present_crt_lines: 0.0,
             last_rendered_frame: None,
             anchor: None,
             mouse_remainder: (0.0, 0.0),
@@ -454,6 +461,11 @@ impl WebEmu {
             // like the desktop present copy).
             self.present_width = present_common::TV_CAPTURED_WIDTH;
             self.present_rows = present_common::TV_GLASS_PRESENT_ROWS;
+            // Two woven rows per emulated field line, and the aperture's
+            // rows fill the glass exactly, so the aperture is the line
+            // count whatever row count it was scaled onto (the desktop's
+            // crt_scanline_count, without its bezel-padding rescale).
+            self.present_crt_lines = (aperture_rows / 2).max(1) as f32;
             self.present
                 .resize(self.present_width * self.present_rows, 0);
             for (y, dst) in self
@@ -476,6 +488,14 @@ impl WebEmu {
             let active = woven_rows * self.present_width;
             self.present.resize(active, 0);
             self.present.copy_from_slice(&woven[..active]);
+            // A programmable scan has no 15 kHz line structure for a CRT
+            // pass to draw (the desktop suspends its pass there too);
+            // standard scans count two woven rows per emulated field line.
+            self.present_crt_lines = if geometry.programmable {
+                0.0
+            } else {
+                (woven_rows / 2).max(1) as f32
+            };
         }
         self.last_rendered_frame = Some(emulated_frame);
     }
@@ -499,6 +519,17 @@ impl WebEmu {
     /// size the canvas from it each frame alongside `present_rows`.
     pub fn present_width(&self) -> u32 {
         self.present_width as u32
+    }
+
+    /// Emulated field lines the presentation buffer shows, for a page-side
+    /// CRT shader pass to key its scanline pitch: 270 on the standard 50 Hz
+    /// TV aperture, 214 on a 60 Hz scan, half the presented rows in full
+    /// overscan. 0 means the pass has nothing to draw -- no frame yet, or a
+    /// programmable scan, whose lines are not a 15 kHz raster (the desktop
+    /// suspends its CRT preset there too). Tracks the presentation, so it
+    /// can change between frames like `present_width`.
+    pub fn present_crt_lines(&self) -> f32 {
+        self.present_crt_lines
     }
 
     /// Drain the mixed audio: interleaved stereo f32 at 44.1 kHz, one PAL
