@@ -872,6 +872,13 @@ pub(super) fn tv_aperture_source_row(
 /// shown while the machine is powered off. SMPTE-style colour bars over
 /// a grayscale step wedge: instantly readable as "no signal", and handy
 /// for setting up video capture levels before the machine boots.
+///
+/// The layout is calibrated to the TV glass -- the captured aperture the
+/// presentation shows -- so the bars, wedge and logo sit centred on
+/// screen; the outermost bars and steps extend to the capture edges the
+/// way a signal generator fills the active line around its calibrated
+/// area, so the full-overscan view shows the same card with slightly
+/// wider outer bars.
 pub(super) fn paint_test_screen(fb: &mut [u32]) {
     debug_assert!(fb.len() >= FB_PIXELS);
     const BARS: [u32; 7] = [
@@ -884,29 +891,40 @@ pub(super) fn paint_test_screen(fb: &mut [u32]) {
         rgba(0, 0, 192),     // blue
     ];
     const STEPS: usize = 8;
-    let bars_h = FB_HEIGHT * 4 / 5;
+    // The glass box in field coordinates: the captured aperture's
+    // columns, and its woven row window halved back to field rows.
+    let x0 = TV_CAPTURED_SOURCE_X;
+    let glass_w = TV_CAPTURED_WIDTH;
+    let glass_top = TV_PRESENT_SOURCE_Y / 2;
+    let glass_h = TV_PAL_PRESENT_HEIGHT / 2;
+    let bars_h = glass_top + glass_h * 4 / 5;
     for y in 0..FB_HEIGHT {
         let row = &mut fb[y * FB_WIDTH..(y + 1) * FB_WIDTH];
         if y < bars_h {
             for (x, px) in row.iter_mut().enumerate() {
-                *px = BARS[x * BARS.len() / FB_WIDTH];
+                let xa = x.clamp(x0, x0 + glass_w - 1) - x0;
+                *px = BARS[xa * BARS.len() / glass_w];
             }
         } else {
             for (x, px) in row.iter_mut().enumerate() {
-                let level = (x * STEPS / FB_WIDTH) as u32 * 255 / (STEPS as u32 - 1);
+                let xa = x.clamp(x0, x0 + glass_w - 1) - x0;
+                let level = (xa * STEPS / glass_w) as u32 * 255 / (STEPS as u32 - 1);
                 *px = rgba(level, level, level);
             }
         }
     }
-    draw_test_screen_logo(fb, bars_h);
+    draw_test_screen_logo(fb, glass_top, bars_h);
 }
 
-pub(super) fn draw_test_screen_logo(fb: &mut [u32], bars_h: usize) {
+pub(super) fn draw_test_screen_logo(fb: &mut [u32], glass_top: usize, bars_h: usize) {
     let Some(image) = copperline_logo_image() else {
         return;
     };
-    let x = FB_WIDTH.saturating_sub(image.width) / 2;
-    let y = bars_h.saturating_sub(image.height) / 2;
+    // Centred on the glass, not the capture: the aperture the
+    // presentation shows starts TV_CAPTURED_SOURCE_X columns in and
+    // TV_PRESENT_SOURCE_Y woven rows down.
+    let x = TV_CAPTURED_SOURCE_X + TV_CAPTURED_WIDTH.saturating_sub(image.width) / 2;
+    let y = glass_top + (bars_h - glass_top).saturating_sub(image.height) / 2;
     alpha_blit_rgba(fb, FB_WIDTH, FB_HEIGHT, x, y, image);
 }
 

@@ -514,8 +514,8 @@ fn horizontal_class_centres_wide_diw_around_standard_fetch() {
 fn horizontal_class_calls_true_overscan_fetch_overscan() {
     // Wide DIW *and* a fetch that reaches into the overscan border
     // (DDFSTRT $30 starts the picture left of the standard window): a real
-    // overscan display, presented exactly as rendered on the full
-    // framebuffer.
+    // overscan display. Full-overscan mode presents it without recentring;
+    // the TV glass crops it like a real set.
     assert_eq!(
         horizontal_content_class(&ocs_snapshot(0x5702, 0xFFFF, 0x0030, 0x00D8)),
         HorizontalContentClass::Overscan

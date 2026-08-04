@@ -1520,9 +1520,27 @@ fn test_screen_paints_colour_bars_over_a_grey_wedge() {
     let mut fb = vec![0u32; FB_PIXELS];
     paint_test_screen(&mut fb);
 
-    // Top region: leftmost bar is grey, rightmost is blue.
+    // Top region: leftmost bar is grey, rightmost is blue, and the
+    // pattern extends to the capture edges (the region left of the
+    // glass keeps the first bar's colour).
     assert_eq!(fb[0], rgba(192, 192, 192));
+    assert_eq!(fb[TV_CAPTURED_SOURCE_X - 1], rgba(192, 192, 192));
     assert_eq!(fb[FB_WIDTH - 1], rgba(0, 0, 192));
+
+    // The bars are laid out on the glass: the first bar boundary sits a
+    // seventh of the captured aperture in from its start, so the card
+    // reads centred through the TV presentation.
+    let bar_w = TV_CAPTURED_WIDTH.div_ceil(7);
+    assert_eq!(
+        fb[TV_CAPTURED_SOURCE_X + bar_w - 1],
+        rgba(192, 192, 192),
+        "last column of the first bar"
+    );
+    assert_eq!(
+        fb[TV_CAPTURED_SOURCE_X + bar_w],
+        rgba(192, 192, 0),
+        "first column of the second bar"
+    );
 
     // Bottom region: grey wedge runs from black at the left to white
     // at the right.
@@ -1556,8 +1574,13 @@ fn test_screen_blits_copperline_logo_over_colour_bars() {
         .enumerate()
         .find(|(_, px)| px[3] == 0xFF)
         .expect("opaque logo pixel");
-    let x = FB_WIDTH.saturating_sub(logo.width) / 2 + idx % logo.width;
-    let y = (FB_HEIGHT * 4 / 5).saturating_sub(logo.height) / 2 + idx / logo.width;
+    // Centred on the glass: the captured aperture's columns, and the
+    // aperture's field-row window above the wedge.
+    let glass_top = TV_PRESENT_SOURCE_Y / 2;
+    let bars_h = glass_top + TV_PAL_PRESENT_HEIGHT / 2 * 4 / 5;
+    let x =
+        TV_CAPTURED_SOURCE_X + TV_CAPTURED_WIDTH.saturating_sub(logo.width) / 2 + idx % logo.width;
+    let y = glass_top + (bars_h - glass_top).saturating_sub(logo.height) / 2 + idx / logo.width;
 
     assert_eq!(
         fb[y * FB_WIDTH + x],

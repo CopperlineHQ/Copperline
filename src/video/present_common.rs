@@ -435,8 +435,14 @@ pub fn standard_tv_aperture_frame(
         TV_NTSC_PRESENT_HEIGHT
     };
     match bitplane::horizontal_content_class(snapshot) {
-        bitplane::HorizontalContentClass::Standard { .. } => TvApertureFrame::Standard(rows),
-        bitplane::HorizontalContentClass::Overscan => TvApertureFrame::Full,
+        // The glass does not move for the content: a display fetching
+        // into the overscan extends past the aperture and the monitor
+        // crops it, exactly as a real set does (overscan = "full" is the
+        // mode for seeing all of it). Only the scan's shape -- the
+        // programmable geometry and native-height fields handled above --
+        // changes what the presentation shows.
+        bitplane::HorizontalContentClass::Standard { .. }
+        | bitplane::HorizontalContentClass::Overscan => TvApertureFrame::Standard(rows),
         bitplane::HorizontalContentClass::Neutral => TvApertureFrame::Neutral(rows),
     }
 }
@@ -550,6 +556,35 @@ mod tests {
         assert_eq!(
             standard_tv_aperture_frame(pal, OUT_HEIGHT, &blank_snapshot()),
             TvApertureFrame::Neutral(TV_PAL_PRESENT_HEIGHT)
+        );
+    }
+
+    #[test]
+    fn overscan_content_keeps_the_glass_aperture() {
+        // A display fetching into the overscan (the CD32 boot screen, demo
+        // loaders) extends past the aperture; the monitor's glass crops it
+        // rather than zooming out to show it -- the glass does not move
+        // for the content. Falling back to the full framebuffer here used
+        // to expose the unpainted capture margins as black bands beside
+        // the picture.
+        let overscan = RenderRegisterSnapshot {
+            agnus_revision: crate::chipset::agnus::AgnusRevision::AgaAlice,
+            bplcon0: 0x8214,
+            diwstrt: 0x1D61,
+            diwstop: 0x37C7,
+            ddfstrt: 0x0028,
+            ddfstop: 0x00D8,
+            ..RenderRegisterSnapshot::default()
+        };
+        assert_eq!(
+            bitplane::horizontal_content_class(&overscan),
+            bitplane::HorizontalContentClass::Overscan,
+            "snapshot must classify as overscan for the assertion to bite"
+        );
+        let pal = FrameGeometry::standard(0x1C, 313, false);
+        assert_eq!(
+            standard_tv_aperture_frame(pal, OUT_HEIGHT, &overscan),
+            TvApertureFrame::Standard(TV_PAL_PRESENT_HEIGHT)
         );
     }
 
