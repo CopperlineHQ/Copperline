@@ -162,7 +162,11 @@ const STATE_MAGIC: &[u8; 8] = b"CLSSTATE";
 //      change would resume with a stale phase
 //  47: CdImage's serde shadow became a backend enum (plain image files vs
 //      CHD) to carry the new CHD CD image support
-pub const STATE_VERSION: u32 = 47;
+//  48: WasmCaps gained the resolve capability (host-OS-resolver lookups for
+//      plugin boards -- the bundled HostSocket board's default resolver),
+//      changing the bincode layout of every serialized WASM board's
+//      manifest (same class of change as 42's NetConfig::Bridge)
+pub const STATE_VERSION: u32 = 48;
 
 /// Default state file name, timestamped like the screenshot/recorder names.
 pub fn auto_filename() -> std::path::PathBuf {

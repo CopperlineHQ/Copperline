@@ -585,6 +585,19 @@ impl WasmBoard {
                 manifest.name,
                 manifest.net
             );
+        } else if manifest.caps.resolve {
+            // The resolve capability is just as non-deterministic as a net
+            // backend (host-resolver answers arrive on the host's schedule
+            // and vary with its DNS state), and a board can hold it without
+            // any net backend at all -- warn for that shape too rather than
+            // letting it break replay silently. One warning suffices when
+            // both apply, hence the else-if.
+            log::warn!(
+                "wasm[{}]: host-resolver capability active -- deterministic \
+                 replay and save-state reproducibility are not guaranteed \
+                 while lookups run",
+                manifest.name
+            );
         }
         let engine = make_engine()?;
         // The bundled HostSocket board's module is embedded in the binary;
