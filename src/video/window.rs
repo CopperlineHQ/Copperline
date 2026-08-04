@@ -4940,17 +4940,19 @@ impl App {
 
             #[cfg(feature = "midi")]
             A::SetMidiInput(name) => {
-                let mut shown = name.clone();
+                let mut shown = "None".to_string();
                 if let Some(sink) = self.emu.bus_mut().midi_serial_mut() {
-                    sink.set_input_endpoint(Some(&name));
+                    sink.set_input_endpoint(name.as_deref());
                     shown = sink.input_label();
                 }
                 self.show_osd(format!("MIDI input: {shown}"));
             }
             #[cfg(feature = "midi")]
             A::SetMidiOutput(name) => {
+                let mut shown = "None".to_string();
                 if let Some(sink) = self.emu.bus_mut().midi_serial_mut() {
-                    sink.set_output_endpoint(Some(&name));
+                    sink.set_output_endpoint(name.as_deref());
+                    shown = sink.output_label();
                 }
                 // The device on the port changed, so the mixer has to ask it
                 // for audio again -- an MT-32 just attached, or just left.
@@ -4960,7 +4962,7 @@ impl App {
                     self.sync_mt32_panel();
                     self.report_mt32_fault();
                 }
-                self.show_osd(format!("MIDI output: {name}"));
+                self.show_osd(format!("MIDI output: {shown}"));
             }
             #[cfg(not(feature = "midi"))]
             A::SetMidiInput(_) | A::SetMidiOutput(_) => {}
