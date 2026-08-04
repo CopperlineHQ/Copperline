@@ -35,13 +35,16 @@ its header records the real-A1200 column and the rule derived from it.
 `./build.sh bfprobe` builds `bfprobe.adf`, a 14-row probe for the 68020
 bit-field instructions (the SANITY Roots II AGA "DIE" dissolve class,
 issue #371): register vs memory forms, the memory RMW cost by field span
-(1/2/4/5 bytes), dynamic offsets, the read-only forms, and the demo's
+(1/2/3/4/5 bytes), dynamic offsets, the read-only forms, and the demo's
 exact nine-instruction plot loop at both DBcc alignments. The header
 records a real-A1200 column - the first hardware measurement of the
 bit-field class we know of - alongside the Copperline and FS-UAE
-columns: field spans within four bytes all cost the same (one long
-operand access, the MC68020UM model), a five-byte span adds one access,
-and the memory rows absorb the DBcc alignment clock.
+columns: field spans within four bytes all cost the same (one operand
+cycle, the MC68020UM 8.2.14 model), a five-byte span adds one, and the
+memory rows absorb the DBcc alignment clock. The rows do not pin the
+operand's transfer width, since the A1200 moves any span up to four
+bytes across its 32-bit chip bus in one cycle; the header says what
+would be needed to settle that.
 
 ## Running
 
