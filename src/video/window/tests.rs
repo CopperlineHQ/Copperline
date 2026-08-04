@@ -33,7 +33,7 @@ use crate::audio::{AudioSink, NullSink};
 use crate::bus::{FrontPanelStatus, RenderRegisterSnapshot};
 use crate::config::{Overscan, Tint, WarpSpeed};
 use crate::heatmap;
-use crate::video::{FB_HEIGHT, FB_PIXELS, FB_WIDTH};
+use crate::video::{FB_PIXELS, FB_WIDTH};
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;

@@ -459,8 +459,8 @@ mod tests {
         // shows masked black columns. The glass resample blends one column
         // left of the aperture start (its first sample centre sits half an
         // output pixel before the first source centre), so that column must
-        // clear the mask too.
-        assert!(TV_CAPTURED_SOURCE_X - 1 >= tv_source_h_bounds().0);
+        // clear the mask too: the aperture must start strictly inside it.
+        assert!(TV_CAPTURED_SOURCE_X > tv_source_h_bounds().0);
     }
 
     #[test]

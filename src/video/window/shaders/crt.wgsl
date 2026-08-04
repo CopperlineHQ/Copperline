@@ -99,9 +99,13 @@ const GLASS_GLOW: f32 = 0.01;
 // with barrel-arced edges, R 1545 mm top and bottom, R 1173 mm at the
 // sides. Depth on the face grows with *physical* distance from the
 // centre, so in display-normalised coordinates the y term is weighted by
-// the viewport aspect squared; the top/bottom edges then bow roughly
-// (w/h)^2 as far as the sides, as the datasheet arcs do, and k = 0.30
-// reproduces the arcs' curvature.
+// the viewport aspect squared (aspect = height/width, so the weight is
+// *below* one). The bow of an edge comes from how r2 varies while
+// travelling along it: the top edge sweeps the full unweighted x term
+// while a side edge sweeps only the down-weighted y term, so weighting y
+// down bows the top/bottom edges roughly (w/h)^2 as far as the sides --
+// exactly the relation of the datasheet arcs -- and k = 0.30 reproduces
+// the arcs' curvature.
 //
 // The raster overscans the face, as on the real monitor: the per-axis
 // normalisation rescales the bowed field so the source edge lands exactly

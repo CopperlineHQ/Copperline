@@ -838,15 +838,23 @@ mod tests {
     /// sources must carry the same constant.
     #[test]
     fn the_bezel_and_the_crt_preset_agree_on_the_corner_radius() {
-        let needle = "const CORNER_RADIUS: f32 = 0.0826;";
-        assert!(
-            BEZEL_WGSL.contains(needle),
-            "bezel.wgsl corner radius drifted"
-        );
-        assert!(
-            include_str!("shaders/crt.wgsl").contains(needle),
-            "crt.wgsl corner radius drifted"
-        );
+        // Parse the value rather than pinning an exact source substring,
+        // so only semantic drift fails the test, not formatting.
+        fn corner_radius_of(src: &str, what: &str) -> f32 {
+            let key = "const CORNER_RADIUS: f32 =";
+            let at = src
+                .find(key)
+                .unwrap_or_else(|| panic!("{what}: no CORNER_RADIUS constant"));
+            let rest = &src[at + key.len()..];
+            let end = rest.find(';').expect("terminated constant");
+            rest[..end]
+                .trim()
+                .parse()
+                .unwrap_or_else(|e| panic!("{what}: unparsable CORNER_RADIUS: {e}"))
+        }
+        let bezel = corner_radius_of(BEZEL_WGSL, "bezel.wgsl");
+        let crt = corner_radius_of(include_str!("shaders/crt.wgsl"), "crt.wgsl");
+        assert_eq!(bezel, crt, "insert and face corner radii drifted apart");
     }
 
     /// Not a check: renders the bezel (optionally with the CRT preset the
