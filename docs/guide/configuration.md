@@ -1459,12 +1459,13 @@ NAT's limitations.
 [hostsocket]
 net = "nat"   # or "bridge", "loopback"; "none" for a dead wire
 # interface = "en0"       # required for "bridge"
-# dns_server = "10.0.2.3" # gethostbyname() resolver (default: the NAT DNS forwarder)
+# dns_server = "10.0.2.3" # only used when resolver = "dns" (see below)
 # hostname = "amiga"      # gethostname() return value (cosmetic)
 # address = "192.168.1.50/24" # interface address; only for "bridge" (see below)
 # gateway = "192.168.1.1"     # default gateway; only for "bridge" (see below)
-# resolver = "host"           # gethostbyname() via the host's own resolver
-#                             # instead of dns_server; only for "nat"/"bridge"
+# resolver = "dns"            # gethostbyname() via dns_server directly instead
+#                             # of the host's own resolver (the default under
+#                             # "nat"/"bridge"); see below
 ```
 
 Fits the bundled HostSocket board: `bsdsocket.library` for the guest, backed
@@ -1485,11 +1486,11 @@ host-side stack owns addressing -- so under `"nat"` sockets simply reach the
 outside world, and under `"loopback"` the guest can talk to itself
 (`127.0.0.1`) with fully deterministic behavior, which also makes
 `"loopback"` the right backend for reproducible headless test runs of
-socket-using software. `gethostbyname()` needs a reachable DNS server:
-under `"nat"` the default `dns_server` (the NAT's own forwarder at
-`10.0.2.3`, which answers via the host's resolver) just works; under
-`"loopback"` lookups return failure (nothing is listening); under
-`"bridge"` set `dns_server` to a real resolver on that LAN.
+socket-using software. `gethostbyname()` just works under `"nat"`/`"bridge"`
+with no further configuration (see `resolver` below for why); under
+`"loopback"` lookups return failure (nothing is listening, and nothing
+should be -- see `resolver`'s own note on why loopback never routes through
+a real resolver).
 
 `address` and `gateway` matter only under `"bridge"`. The default interface
 address/gateway (`10.0.2.15/24` and `10.0.2.2`) are Copperline NAT's own
@@ -1503,17 +1504,21 @@ any other statically-configured device on that network. Leave both unset
 for `"nat"` and `"loopback"`.
 
 `resolver` picks how `gethostbyname()` itself works, independent of the
-addressing above. The default, `"dns"`, is what's described two paragraphs
-up: the board's own smoltcp stack sends a real DNS query to `dns_server`
-over whichever backend is fitted. `"host"` instead asks Copperline's own
-process to resolve via the host OS's resolver on a background thread --
-the same mechanism `[a2065]`'s NAT backend already uses internally for its
-own DNS forwarding, now available directly to this board. This is the
-practical way to get working `gethostbyname()` under `"bridge"` without
-hand-configuring a `dns_server` that matches whatever resolver the LAN
-actually offers (it also works under `"nat"`, though NAT's own DNS
-forwarder already gives equivalent behavior there for free). Rejected
-under `"loopback"`/`"none"`: routing through a real host resolver would
+addressing above. Left unset, it defaults to `"host"` under `"nat"`/
+`"bridge"`: Copperline's own process resolves the name via the host OS's
+resolver on a background thread -- the same mechanism `[a2065]`'s NAT
+backend already uses internally for its own DNS forwarding, now available
+directly to this board -- which is why `gethostbyname()` just works out of
+the box under both backends with no `dns_server` to hand-configure, on
+`"bridge"` in particular where nothing else would know which resolver the
+LAN actually offers. Set `resolver = "dns"` explicitly to opt back into
+the board's own DNS query: its own smoltcp stack sends a real DNS request
+to `dns_server` over whichever backend is fitted, which is the one way to
+target a *specific* resolver rather than whatever the host happens to be
+configured to use (a corporate/internal-only DNS server on a bridged LAN,
+for instance). Explicit `resolver = "host"` is rejected under `"loopback"`/
+`"none"` (there is no sane default there either, so those backends simply
+get no resolver at all): routing through a real host resolver would
 silently defeat loopback's whole reason for existing, byte-identical
 deterministic replay. Reverse lookups (`gethostbyaddr()`) are unaffected by
 this setting -- they always use the `"dns"` path's PTR query against

@@ -2782,14 +2782,17 @@ pub(crate) struct RawHostSocket {
     /// reasoning as `address` above.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) gateway: Option<String>,
-    /// `gethostbyname()`'s resolver strategy: "dns" (default) queries
-    /// `dns_server` directly over the board's own network backend; "host"
-    /// asks Copperline's own process to resolve via the host OS resolver
-    /// on a background thread instead, ignoring `dns_server` entirely --
-    /// the only way forward DNS works under `net = "bridge"` without a
-    /// real DNS server reachable on that LAN. Requires `net = "nat"` or
-    /// `"bridge"` (rejected under `"loopback"`/`"none"`, where it would
-    /// silently break the backend's own determinism guarantee).
+    /// `gethostbyname()`'s resolver strategy: "host" asks Copperline's own
+    /// process to resolve via the host OS resolver on a background
+    /// thread, ignoring `dns_server` entirely; "dns" queries `dns_server`
+    /// directly over the board's own network backend instead. Defaults to
+    /// "host" under `net = "nat"`/`"bridge"` when left unset -- the thing
+    /// that works without a `dns_server` hand-matched to the backend; set
+    /// "dns" explicitly (with `dns_server`) to opt back into a specific
+    /// resolver. Explicit "host" is rejected under `"loopback"`/`"none"`,
+    /// where it would silently break the backend's own determinism
+    /// guarantee (there is no sane default there either, so those
+    /// backends simply get no resolver key at all).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) resolver: Option<String>,
 }
@@ -3659,7 +3662,22 @@ impl TryFrom<RawConfig> for Config {
             }
         };
         let hostsocket_resolver = match raw.hostsocket.resolver.as_deref() {
-            None => None,
+            // No explicit choice: default to the host OS resolver under
+            // net = "nat"/"bridge" -- the thing that works without any
+            // dns_server hand-configured to match the backend (bridge's
+            // own default dns_server is NAT's virtual forwarder address,
+            // unreachable on a real LAN). Set resolver = "dns" explicitly
+            // (with dns_server, if a specific one is wanted) to opt back
+            // into the board's own DNS-over-net query. Loopback/none have
+            // no sane default here ("host" is rejected there below), so
+            // they get no resolver key at all -- gethostbyname() stays
+            // whatever it already was for those backends.
+            None => match &hostsocket_net {
+                Some(crate::net::NetConfig::Nat) | Some(crate::net::NetConfig::Bridge { .. }) => {
+                    Some("host".to_string())
+                }
+                _ => None,
+            },
             Some(s) => {
                 let normalized = s.trim().to_ascii_lowercase();
                 if normalized != "dns" && normalized != "host" {
@@ -8670,6 +8688,65 @@ mod tests {
                 .get("resolver")
                 .map(String::as_str),
             Some("host")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn hostsocket_resolver_defaults_to_host_under_nat_and_bridge_only() -> Result<()> {
+        // No explicit `resolver` key anywhere below: nat/bridge should
+        // still get "host" (the thing that works without a hand-matched
+        // dns_server), while loopback -- where "host" would be rejected
+        // outright -- gets no resolver key at all, not a default value
+        // that would have failed validation.
+        let cfg = parse_config("[hostsocket]\nnet = \"nat\"\n")?;
+        assert_eq!(
+            cfg.wasm_boards[0]
+                .manifest
+                .config
+                .get("resolver")
+                .map(String::as_str),
+            Some("host")
+        );
+
+        let cfg = parse_config("[hostsocket]\nnet = \"bridge\"\ninterface = \"en0\"\n")?;
+        assert_eq!(
+            cfg.wasm_boards[0]
+                .manifest
+                .config
+                .get("resolver")
+                .map(String::as_str),
+            Some("host")
+        );
+
+        let cfg = parse_config("[hostsocket]\nnet = \"loopback\"\n")?;
+        assert!(!cfg.wasm_boards[0].manifest.config.contains_key("resolver"));
+
+        // An explicit "dns" still opts back out under a backend that would
+        // otherwise default to "host" -- e.g. to use a specific dns_server.
+        let cfg = parse_config(
+            r#"
+            [hostsocket]
+            net = "nat"
+            resolver = "dns"
+            dns_server = "1.2.3.4"
+            "#,
+        )?;
+        assert_eq!(
+            cfg.wasm_boards[0]
+                .manifest
+                .config
+                .get("resolver")
+                .map(String::as_str),
+            Some("dns")
+        );
+        assert_eq!(
+            cfg.wasm_boards[0]
+                .manifest
+                .config
+                .get("dns_server")
+                .map(String::as_str),
+            Some("1.2.3.4")
         );
         Ok(())
     }

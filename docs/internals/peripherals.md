@@ -302,15 +302,16 @@ stages each LVO through a Forbid-bracketed register-window RPC, with a
 wake-queue interrupt path for blocking calls -- the same host-does-the-work
 pattern as the services board's hostfs handler. The board reuses the shared
 `NetBackend`s above through the plugin `net` capability; `loopback` is
-deterministic, `nat`/`bridge` are not. `gethostbyname()` normally speaks DNS
-itself over that same `net` traffic; `[hostsocket] resolver = "host"` routes
-it instead through the plugin ABI's `resolve` capability
+deterministic, `nat`/`bridge` are not. `gethostbyname()` defaults to the
+plugin ABI's `resolve` capability under `net = "nat"`/`"bridge"`
 (`resolve_start`/`resolve_poll` in `wasmboard.rs`, `register_host_fns`),
-which resolves via the host's own OS resolver on a short-lived background
+resolving via the host's own OS resolver on a short-lived background
 thread -- the same `getaddrinfo`-on-a-thread shape the NAT DNS forwarder
 above already uses, reused directly (`net::nat::dns::resolve_a`) rather than
-reimplemented, and the practical way to get working forward lookups under
-`net = "bridge"` with no `dns_server` hand-configured to match the LAN.
+reimplemented -- so it works out of the box under `net = "bridge"` with no
+`dns_server` hand-configured to match the LAN. `[hostsocket] resolver =
+"dns"` opts back into the board speaking DNS itself over that same `net`
+traffic, to target a specific server instead of the host's own resolver.
 
 ## CDTV (`cdtv.rs`, `cdrom.rs`)
 

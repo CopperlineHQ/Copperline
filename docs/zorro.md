@@ -152,7 +152,8 @@ the name from the plugin's own linear memory and returns a request id;
 address (4 bytes, big-endian) into the plugin's own linear memory at
 `out_ptr` on success (0). Like `net`, using it makes a board
 non-deterministic -- see [](guide/configuration)'s `[hostsocket]` section for
-the concrete example (its `resolver = "host"` key).
+the concrete example (its `resolver` key, which defaults to using this
+capability under `net = "nat"`/`"bridge"`).
 
 Plugins can be written in any language that targets `wasm32` (Rust, C, Zig,
 ...). An inert example module and its manifest can be generated with the
