@@ -14,6 +14,7 @@ use anyhow::{anyhow, bail, Result};
 use std::ffi::{c_char, CString};
 use std::path::Path;
 
+pub mod demo;
 mod ffi;
 pub mod reply;
 pub mod rom;
