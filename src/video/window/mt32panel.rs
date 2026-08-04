@@ -113,6 +113,26 @@ const DIAL_SHOULDER: f32 = 34.0;
 /// Positions printed on the fascia around the dial, the first at seven
 /// o'clock and the last at five, as the unit marks its travel.
 const DIAL_MARKS: usize = 24;
+/// How many songs the dial cycles in demo mode. The later ROMs all carry
+/// this many; a shorter list simply repeats sooner.
+const DEMO_TRACKS: usize = 5;
+/// How many buttons can be latched at once. The unit's combinations are two
+/// or three; a fourth is a change of mind.
+const HOLD_LIMIT: usize = 3;
+/// Where the rhythm part sits among the nine. Its button is the sixth, but
+/// the part itself comes after the eight melodic ones -- and parts 6, 7 and
+/// 8 have no buttons at all, being reached by holding MASTER VOLUME with
+/// buttons 1, 2 and 3 (manual page 18).
+const RHYTHM_PART: usize = 8;
+
+/// The part a part button selects.
+fn part_for_button(button: usize) -> usize {
+    if button == 5 {
+        RHYTHM_PART
+    } else {
+        button
+    }
+}
 /// How far outside the rim they sit, and what they are printed in: dimmer
 /// than the captions, so they read as marks on the moulding rather than as
 /// another row of labels.
@@ -207,16 +227,10 @@ enum Chord {
 }
 
 impl Chord {
-    /// Whether this one waits for a further press before it takes effect,
-    /// as the manual's three-button procedures do.
-    fn needs_confirming(self) -> bool {
-        matches!(
-            self,
-            Chord::OverflowAssign | Chord::MidiChannels | Chord::AllReset
-        )
-    }
-
-    /// The button held with MASTER VOLUME to reach it.
+    /// The button held with MASTER VOLUME to reach it. Only the test that
+    /// checks the pairs against the manual needs to go this way round; the
+    /// panel itself reads the buttons and asks what they name.
+    #[cfg(test)]
     fn partner(self) -> Mt32Control {
         match self {
             Chord::MasterTune => Mt32Control::Function(Function::SoundGroup),
@@ -227,6 +241,15 @@ impl Chord {
             Chord::MidiChannels => Mt32Control::Part(4),
             Chord::AllReset => Mt32Control::Part(5),
         }
+    }
+
+    /// Whether this one waits for a further press before it takes effect,
+    /// as the manual's three-button procedures do.
+    fn needs_confirming(self) -> bool {
+        matches!(
+            self,
+            Chord::OverflowAssign | Chord::MidiChannels | Chord::AllReset
+        )
     }
 }
 
@@ -618,8 +641,12 @@ fn draw_lcd(frame: &mut [u8], panel: Rect, view: &Mt32PanelView, scale: usize) {
     let matrix_h = CELL_ROWS * LCD_PX + CELL_FOOT_GAP + CELL_FOOT_H;
     let tx = lcd.x + LCD_BEZEL + glass_w.saturating_sub(matrix_w) / 2;
     let ty = lcd.y + LCD_BEZEL + glass_h.saturating_sub(matrix_h) / 2;
-    // The engine gives 20 characters; anything longer is its own business.
-    for (i, ch) in view.lcd.chars().take(crate::mt32::LCD_WIDTH).enumerate() {
+    // Every cell of the matrix is there whether anything is written in it
+    // or not, so the line is padded out to the width of the glass rather
+    // than drawn only as far as it happens to reach.
+    let mut line = view.lcd.chars().take(crate::mt32::LCD_WIDTH);
+    for i in 0..crate::mt32::LCD_WIDTH {
+        let ch = line.next().unwrap_or(' ');
         let x = tx + i * font::GLYPH_W * LCD_PX;
         let cell = Rect {
             x,
@@ -1198,86 +1225,54 @@ mod tests {
     }
 
     /// A pair is two buttons held together, so it takes two right clicks
-    /// and starts with MASTER VOLUME. Nothing else can stumble into one.
+    /// The unit's buttons are momentary micro-switches: a plain click
+    /// presses one and it comes straight back out. Only right-clicking
+    /// latches one down, which is how its combinations are made.
     #[test]
-    fn a_pair_takes_two_right_clicks_from_master_volume() {
+    fn the_buttons_are_momentary_and_only_a_right_click_latches_one() {
         let rect = panel_rect(500);
         let master = Mt32Control::Function(Function::MasterVolume);
         let group = Mt32Control::Function(Function::SoundGroup);
         let press = |p: &mut Mt32Panel, c, left| p.press(c, left, (0, 0), rect, true, None);
 
-        // Right, then right: the pair, with both buttons lit and nothing
-        // else.
+        // Right, then right: the pair, and reaching it lets go of both.
         let mut panel = Mt32Panel::default();
         press(&mut panel, master, false);
         press(&mut panel, group, false);
         assert_eq!(panel.mode, Mode::Chord(Chord::MasterTune));
-        assert_eq!(
-            panel.functions_lit(),
-            [true, false, false, true],
-            "only the two that made the pair"
-        );
+        assert!(panel.holding.is_empty(), "reaching it let go of them");
+        assert_eq!(panel.functions_lit(), [false; 4], "nothing left down");
 
-        // Left first: a plain press of MASTER VOLUME, and the next right
-        // click cannot turn it into a pair.
+        // A plain click lights its button only while the mouse is on it,
+        // and the display is what says where the unit got to.
         let mut panel = Mt32Panel::default();
-        press(&mut panel, master, true);
-        press(&mut panel, group, false);
-        assert_eq!(panel.mode, Mode::Function(Function::MasterVolume));
+        press(&mut panel, group, true);
+        assert_eq!(panel.functions_lit(), [true, false, false, false], "down");
+        panel.release_press();
+        assert_eq!(panel.functions_lit(), [false; 4], "and back out again");
+        assert_eq!(panel.mode, Mode::Function(Function::SoundGroup), "it acted");
 
-        // Right first, left second: the second is a press, not a hold.
+        // A plain click mid-combination drops what was latched.
         let mut panel = Mt32Panel::default();
         press(&mut panel, master, false);
+        assert_eq!(panel.holding.len(), 1, "latched");
         press(&mut panel, group, true);
-        assert_eq!(panel.mode, Mode::Function(Function::SoundGroup));
+        assert!(panel.holding.is_empty(), "the plain click let it go");
 
-        // Holding anything but MASTER VOLUME lights nothing: no pair
-        // begins with it.
+        // Right-clicking a latched button lets it go again.
         let mut panel = Mt32Panel::default();
         press(&mut panel, group, false);
-        assert_eq!(panel.mode, Mode::Home);
-        assert_eq!(panel.functions_lit(), [false; 4]);
-        assert_eq!(panel.parts_lit(), [false; 6]);
-    }
+        press(&mut panel, group, false);
+        assert!(panel.holding.is_empty(), "the second let it go");
 
-    /// Nothing is standing on anything until someone presses something,
-    /// and switching the unit off puts it back there.
-    #[test]
-    fn a_panel_at_rest_has_nothing_held_down() {
+        // Three is the most; a fourth is a change of mind.
         let mut panel = Mt32Panel::default();
-        let at_rest = |p: &Mt32Panel| {
-            let view = p.view(String::new(), false, true, None);
-            (view.parts_lit, view.functions_lit)
-        };
-        assert_eq!(
-            at_rest(&panel),
-            ([false; 6], [false; 4]),
-            "just switched on"
-        );
-
-        // Stand on something, and it shows.
-        let rect = panel_rect(500);
-        panel.press(
-            Mt32Control::Function(Function::Volume),
-            true,
-            (0, 0),
-            rect,
-            true,
-            None,
-        );
-        assert_ne!(
-            at_rest(&panel),
-            ([false; 6], [false; 4]),
-            "a button is down"
-        );
-
-        // Off and on again is a fresh unit, whatever was held before.
-        panel.reset();
-        assert_eq!(
-            at_rest(&panel),
-            ([false; 6], [false; 4]),
-            "after a power cycle"
-        );
+        for n in 0..HOLD_LIMIT {
+            press(&mut panel, Mt32Control::Part(n), false);
+        }
+        assert_eq!(panel.holding.len(), HOLD_LIMIT);
+        press(&mut panel, Mt32Control::Part(3), false);
+        assert!(panel.holding.is_empty(), "a fourth drops the lot");
     }
 
     /// Holding buttons on a unit that is off, then switching it on, is how
@@ -1287,13 +1282,14 @@ mod tests {
     fn buttons_held_through_a_power_on_ask_for_a_screen() {
         let rect = panel_rect(500);
         let master = Mt32Control::Function(Function::MasterVolume);
+        let vol = Mt32Control::Function(Function::Volume);
         // The unit is off: right-clicking holds, and any number at once.
         let start = |held: &[Mt32Control]| {
             let mut panel = Mt32Panel::default();
             panel.set_version("MT-32 v2.07 90-05-23".to_string());
-            for (i, &b) in held.iter().enumerate() {
-                // Either button holds one down on a unit that is off.
-                panel.press(b, i % 2 == 0, (0, 0), rect, false, None);
+            for &b in held {
+                // Right-clicking is what latches one, running or not.
+                panel.press(b, false, (0, 0), rect, false, None);
             }
             assert_eq!(panel.holding().len(), held.len(), "all of them are down");
             // And they light while they are held, so the chord can be seen
@@ -1323,8 +1319,59 @@ mod tests {
             "nothing is lit on it"
         );
 
-        // Nothing held, or the wrong set: it just starts.
-        for held in [vec![], vec![master], vec![Mt32Control::Part(0)]] {
+        // MASTER VOLUME on its own: the songs in the ROM. Which one it is
+        // showing is the window's to fill in, so it asks for one.
+        let mut demo = start(&[master]);
+        assert!(demo.playing_demo(), "it came up on ROM Play");
+        assert!(
+            demo.lcd().unwrap_or_default().starts_with("Chain Play"),
+            "offering the chain: {:?}",
+            demo.lcd()
+        );
+        assert_eq!(demo.demo_want(), None, "and waiting to be told");
+
+        // The numbers skip straight to a song; VOLUME replays the one it
+        // is on. SOUND GROUP stops, and it offers the chain again.
+        let press = |p: &mut Mt32Panel, c| p.press(c, true, (0, 0), rect, true, None);
+        press(&mut demo, Mt32Control::Part(2));
+        assert_eq!(demo.demo_want(), Some(DemoWant::Play(2)), "the third song");
+        demo.set_track_title("Adjarre".to_string());
+        assert_eq!(
+            demo.lcd().as_deref(),
+            Some("3:Adjarre       |100"),
+            "numbered as the manual numbers them"
+        );
+        press(&mut demo, vol);
+        assert_eq!(
+            demo.demo_want(),
+            Some(DemoWant::Play(2)),
+            "VOLUME replays it"
+        );
+
+        // A song that runs out rests a moment, then hands on to the next,
+        // round and round.
+        assert!(!demo.chain_ran_out(false), "resting between the two");
+        demo.ended_at = std::time::Instant::now().checked_sub(BETWEEN_SONGS);
+        assert!(demo.chain_ran_out(false), "it moved on");
+        assert_eq!(demo.demo_want(), Some(DemoWant::Play(3)));
+
+        press(&mut demo, Mt32Control::Function(Function::SoundGroup));
+        assert_eq!(demo.demo_want(), Some(DemoWant::Stop));
+        assert!(
+            demo.lcd().unwrap_or_default().starts_with("Chain Play"),
+            "back to offering the chain: {:?}",
+            demo.lcd()
+        );
+
+        // Nothing else on the panel answers while it is playing to itself.
+        press(&mut demo, Mt32Control::Function(Function::MasterVolume));
+        assert_eq!(demo.demo_want(), None, "MASTER VOLUME does nothing here");
+        demo.press(master, false, (0, 0), rect, true, None);
+        assert!(demo.holding.is_empty(), "and nothing latches");
+
+        // Nothing held, or a set that means nothing: it just starts. Only
+        // the buttons the screens use answer at all when it is off.
+        for held in [vec![], vec![Mt32Control::Part(0)]] {
             assert_eq!(start(&held).lcd(), None, "starts normally for {held:?}");
         }
     }
@@ -1432,6 +1479,8 @@ enum Mode {
 pub enum StartMode {
     /// PART 1 + PART 3 + MASTER VOLUME: what the control ROM calls itself.
     Version,
+    /// MASTER VOLUME on its own: the songs in the ROM, if it has any.
+    Demo,
 }
 
 impl StartMode {
@@ -1444,16 +1493,26 @@ impl StartMode {
                 Mt32Control::Part(2),
                 Mt32Control::Function(Function::MasterVolume),
             ],
+            StartMode::Demo => &[Mt32Control::Function(Function::MasterVolume)],
         }
     }
 
     /// Which screen a set of held buttons asks for, if any.
     fn from_held(held: &[Mt32Control]) -> Option<Self> {
-        [StartMode::Version].into_iter().find(|m| {
+        [StartMode::Version, StartMode::Demo].into_iter().find(|m| {
             let want = m.buttons();
             want.len() == held.len() && want.iter().all(|b| held.contains(b))
         })
     }
+}
+
+/// What ROM Play wants of the window, once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DemoWant {
+    /// Start this song, and say what it is called.
+    Play(usize),
+    /// Stop, and go back to what the engine was showing.
+    Stop,
 }
 
 /// A button held on the Select/Volume dial.
@@ -1474,6 +1533,11 @@ struct DialGrab {
 /// How long a button sits on the dial before it starts repeating.
 const DIAL_REPEAT_DELAY: std::time::Duration = std::time::Duration::from_millis(350);
 
+/// How long the chain rests between songs rather than running one straight
+/// into the next: the two hundred and forty ticks Munt's own player leaves,
+/// which at eighty a second is three of them.
+const BETWEEN_SONGS: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// The MT-32's front panel: which part it is showing, which buttons are
 /// down, and what it believes each editable value to be.
 ///
@@ -1482,9 +1546,10 @@ const DIAL_REPEAT_DELAY: std::time::Duration = std::time::Duration::from_millis(
 #[derive(Debug)]
 pub struct Mt32Panel {
     mode: Mode,
-    /// The button being held down, put there by right-clicking it. Only
-    /// MASTER VOLUME leads anywhere, which is the unit's own arrangement.
-    held: Option<Mt32Control>,
+    /// The button a plain click is lighting, until the mouse comes back up.
+    /// The unit's buttons are momentary: one does its work and comes
+    /// straight back out.
+    flash: Option<Mt32Control>,
     /// The part being shown, 0-7 for parts 1-8 and 8 for rhythm.
     part: usize,
     master_volume: u8,
@@ -1496,9 +1561,10 @@ pub struct Mt32Panel {
     /// the unit's other channel arrangement.
     channels_shifted: bool,
     dial: Option<DialGrab>,
-    /// Buttons being held while the unit is off. Held through a power-on
-    /// they ask for a start-up screen, so they are kept apart from `held`,
-    /// which is the one-at-a-time business of a running unit.
+    /// Buttons latched down by right-clicking them, which is the only way
+    /// to get one to stay in: up to three at once, since nothing the unit
+    /// does wants a fourth. Running, they reach a menu; switched off, a
+    /// start-up screen.
     holding: Vec<Mt32Control>,
     /// What the control ROM calls itself, for the screen that shows it.
     /// Empty until the window has read the image.
@@ -1506,13 +1572,20 @@ pub struct Mt32Panel {
     /// The screen the buttons held through a power-on asked for, waiting
     /// for the unit to come up and take it.
     pending_start: Option<StartMode>,
+    /// ROM Play: which song, what it is called while it plays, and what
+    /// the window has still to be told to do about it.
+    track: usize,
+    track_title: String,
+    want: Option<DemoWant>,
+    /// When the song that just finished did, while the chain rests.
+    ended_at: Option<std::time::Instant>,
 }
 
 impl Default for Mt32Panel {
     fn default() -> Self {
         Self {
             mode: Mode::Home,
-            held: None,
+            flash: None,
             part: 0,
             // The engine's own power-on values: full volume, parts at 80,
             // the first timbre, A = 442 Hz, room reverb.
@@ -1526,6 +1599,10 @@ impl Default for Mt32Panel {
             holding: Vec::new(),
             version: String::new(),
             pending_start: None,
+            track: 0,
+            track_title: String::new(),
+            want: None,
+            ended_at: None,
         }
     }
 }
@@ -1552,6 +1629,43 @@ impl Mt32Panel {
     /// keeps its copy to itself.
     pub fn set_version(&mut self, version: String) {
         self.version = version;
+    }
+
+    /// Hand on when a song runs out, which is what makes the chain a
+    /// chain. True when the panel wants drawing again.
+    pub fn chain_ran_out(&mut self, still_playing: bool) -> bool {
+        if still_playing || !self.playing_demo() || self.track_title.is_empty() {
+            return false;
+        }
+        // A moment's rest before the next one, rather than the two running
+        // together.
+        let Some(ended) = self.ended_at else {
+            self.ended_at = Some(std::time::Instant::now());
+            return false;
+        };
+        if ended.elapsed() < BETWEEN_SONGS {
+            return false;
+        }
+        self.ended_at = None;
+        self.track = (self.track + 1) % DEMO_TRACKS;
+        self.want = Some(DemoWant::Play(self.track));
+        true
+    }
+
+    /// What ROM Play wants doing, once.
+    pub fn demo_want(&mut self) -> Option<DemoWant> {
+        self.want.take()
+    }
+
+    /// What the song that started turned out to be called; empty for one
+    /// that stopped, or a ROM with none to play.
+    pub fn set_track_title(&mut self, title: String) {
+        self.track_title = title;
+    }
+
+    /// Whether the unit came up playing its own songs.
+    pub fn playing_demo(&self) -> bool {
+        matches!(self.mode, Mode::Started(StartMode::Demo))
     }
 
     /// Which buttons are being held on a unit that is switched off.
@@ -1585,69 +1699,65 @@ impl Mt32Panel {
         powered: bool,
         synth: Option<&mut crate::mt32::Mt32Synth>,
     ) -> PanelAction {
-        // A unit that is off does nothing except take note of what is being
-        // held on it, and come up into whatever that asks for. This is how
-        // its start-up screens are reached on the hardware: hold the
-        // buttons, then switch it on.
-        if !powered {
-            return self.press_while_off(control);
-        }
         // The dial is not a button: its two clicks step it either way.
         if control == Mt32Control::Dial {
             self.grab_dial(left, pos, rect, synth);
             return PanelAction::None;
         }
+        // The switch takes whatever is latched and lets go of it, the way a
+        // hand comes off the panel to reach it.
         if control == Mt32Control::Power {
+            self.pending_start = (!powered)
+                .then(|| StartMode::from_held(&self.holding))
+                .flatten();
+            self.holding.clear();
             return PanelAction::Power(true);
         }
-        // A start-up screen stays until the unit is asked for something
-        // else, which is any press at all.
+        // ROM Play has the panel to itself: the unit is not doing anything
+        // else, so nothing else answers while it is up.
+        if powered && self.playing_demo() {
+            self.flash = left.then_some(control);
+            self.holding.clear();
+            return self.press_in_rom_play(control);
+        }
+        // Right-clicking latches a button down. That is the only way to get
+        // one to stay in, and what the unit's combinations are made of.
+        if !left {
+            self.latch(control);
+            // Reaching what a combination names lets go of it again.
+            if powered {
+                if let Some(chord) = self.latched_chord() {
+                    self.holding.clear();
+                    return self.enter_chord(chord);
+                }
+            }
+            return PanelAction::None;
+        }
+        // A plain click is momentary: it lights while the mouse is down,
+        // does its work, and drops anything that was latched.
+        self.flash = Some(control);
+        self.holding.clear();
+        if !powered {
+            return PanelAction::None;
+        }
+        // The version screen goes away on any press.
         if matches!(self.mode, Mode::Started(_)) {
             self.release(synth);
             return PanelAction::None;
         }
-
-        // A pair is two buttons held down together, so both presses are
-        // right-clicks: MASTER VOLUME to take hold, then the button it is
-        // held with. A left click is a plain press and lets go of it.
-        let master = Mt32Control::Function(Function::MasterVolume);
-        if !left && self.held == Some(master) && control != master {
-            self.held = None;
-            return match chord_for(control) {
-                Some(chord) => self.enter_chord(chord),
-                None => PanelAction::None,
-            };
-        }
-
         // A pair waiting to be confirmed takes the next part press.
         if let (Mode::Confirm(chord), Mt32Control::Part(n)) = (self.mode, control) {
             return self.confirm_chord(chord, n, synth);
         }
-
-        if !left {
-            // Only MASTER VOLUME leads anywhere held down -- every one of
-            // the unit's pairs starts with it -- so holding anything else
-            // would light a button that could not do anything.
-            if control == master {
-                self.held = if self.held == Some(master) {
-                    None
-                } else {
-                    Some(master)
-                };
-            }
-            return PanelAction::None;
-        }
-
-        self.held = None;
         match control {
             // Pressing what is already showing goes back to the main
-            // screen, which is where the unit rests with nothing lit.
-            Mt32Control::Part(n) if self.part == n && self.mode != Mode::Home => {
+            // screen, which is where the unit rests.
+            Mt32Control::Part(n) if self.part == part_for_button(n) && self.mode != Mode::Home => {
                 self.release(synth);
             }
             Mt32Control::Function(f) if self.mode == Mode::Function(f) => self.release(synth),
             Mt32Control::Part(n) => {
-                self.part = n;
+                self.part = part_for_button(n);
                 self.mode = Mode::Function(Function::Volume);
             }
             Mt32Control::Function(f) => self.mode = Mode::Function(f),
@@ -1656,37 +1766,64 @@ impl Mt32Panel {
         PanelAction::None
     }
 
-    /// A press on a unit that is switched off.
-    ///
-    /// Either button holds one down, and any number can be held at once:
-    /// a unit that is off has no other use for a press, so there is nothing
-    /// for a plain one to mean instead. They light while they are held, the
-    /// way a hand on the panel can be seen. The power switch takes what is
-    /// held and lets go of it, as the hand comes off to reach it.
-    fn press_while_off(&mut self, control: Mt32Control) -> PanelAction {
-        match control {
-            Mt32Control::Power => {
-                self.pending_start = StartMode::from_held(&self.holding);
-                self.holding.clear();
-                PanelAction::Power(true)
-            }
-            Mt32Control::Dial => PanelAction::None,
-            button => {
-                if let Some(i) = self.holding.iter().position(|&h| h == button) {
-                    self.holding.remove(i);
-                } else {
-                    self.holding.push(button);
-                }
-                PanelAction::None
-            }
+    /// Let a plain click's button back out, as the mouse comes up.
+    pub fn release_press(&mut self) {
+        self.flash = None;
+    }
+
+    /// Latch a button down, or let it go if it already is. A fourth drops
+    /// the lot: nothing the unit does takes more than three, so a fourth is
+    /// a change of mind rather than a combination.
+    fn latch(&mut self, button: Mt32Control) {
+        if let Some(i) = self.holding.iter().position(|&h| h == button) {
+            self.holding.remove(i);
+        } else if self.holding.len() >= HOLD_LIMIT {
+            self.holding.clear();
+        } else {
+            self.holding.push(button);
         }
+    }
+
+    /// What is latched, if it names one of the unit's two-button functions:
+    /// MASTER VOLUME and one other, which is what all of them are.
+    fn latched_chord(&self) -> Option<Chord> {
+        let master = Mt32Control::Function(Function::MasterVolume);
+        let [a, b] = self.holding[..] else {
+            return None;
+        };
+        match (a, b) {
+            (m, other) | (other, m) if m == master => chord_for(other),
+            _ => None,
+        }
+    }
+
+    /// A press in ROM Play.
+    ///
+    /// VOLUME plays, the numbers skip straight to a song, SOUND GROUP
+    /// stops, and the dial is the master volume. Nothing else does
+    /// anything: the unit is playing to itself.
+    fn press_in_rom_play(&mut self, control: Mt32Control) -> PanelAction {
+        // Asking for a song is not waiting for one.
+        self.ended_at = None;
+        match control {
+            Mt32Control::Part(n) if n < DEMO_TRACKS => self.track = n,
+            Mt32Control::Function(Function::Volume) => {}
+            Mt32Control::Function(Function::SoundGroup) => {
+                self.track_title.clear();
+                self.want = Some(DemoWant::Stop);
+                return PanelAction::None;
+            }
+            _ => return PanelAction::None,
+        }
+        self.want = Some(DemoWant::Play(self.track));
+        PanelAction::None
     }
 
     /// Let the display go back to the engine, as the unit does when it
     /// returns to its main screen.
     fn release(&mut self, synth: Option<&mut crate::mt32::Mt32Synth>) {
         self.mode = Mode::Home;
-        self.held = None;
+        self.holding.clear();
         if let Some(synth) = synth {
             synth.show_main_display();
         }
@@ -1746,7 +1883,7 @@ impl Mt32Panel {
                     synth.show_main_display();
                 }
                 self.mode = Mode::Home;
-                self.held = None;
+                self.holding.clear();
                 PanelAction::Say(format!(
                     "Munt MT-32: parts 1-8 on channels {}-{}",
                     base + 1,
@@ -1855,6 +1992,9 @@ impl Mt32Panel {
     fn dial_target(&self) -> (u8, u8) {
         let part = self.part;
         match self.mode {
+            // Through the demo the dial is the master volume, wherever in
+            // it the unit has got to.
+            Mode::Started(StartMode::Demo) => (self.master_volume, 100),
             // A pair takes the dial over from either button's own meaning.
             Mode::Chord(Chord::MasterTune) => (self.master_tune, 127),
             Mode::Chord(Chord::ReverbMode) => (self.reverb_mode, 3),
@@ -1873,6 +2013,10 @@ impl Mt32Panel {
         use crate::mt32::addr;
         let part = self.part;
         let (address, value) = match self.mode {
+            Mode::Started(StartMode::Demo) => {
+                self.master_volume = value.min(100);
+                (addr::MASTER_VOLUME, self.master_volume)
+            }
             Mode::Chord(Chord::MasterTune) => {
                 self.master_tune = value.min(127);
                 (addr::MASTER_TUNE, self.master_tune)
@@ -1945,66 +2089,27 @@ impl Mt32Panel {
         }
     }
 
-    /// Which part buttons are lit: the one the panel is standing on, with 1,
-    /// 2 and 3 standing in for parts 6, 7 and 8, plus whichever a pair was
-    /// reached through. Nothing at rest -- the unit has no lamps.
+    /// Which part buttons are lit, and which function buttons.
+    ///
+    /// Only what is physically down: a button latched by right-clicking it,
+    /// or one lighting under a plain click while the mouse is still on it.
+    /// The unit's buttons are momentary and carry no lamps, so where it has
+    /// got to is read off its display, never off the panel.
     fn parts_lit(&self) -> [bool; 6] {
         let mut lit = [false; 6];
-        // Held down on a unit that is off, so a start-up chord can be seen
-        // as it is made rather than felt for.
-        for &down in &self.holding {
+        for down in self.holding.iter().chain(self.flash.iter()) {
             if let Mt32Control::Part(n) = down {
-                lit[n] = true;
+                lit[*n] = true;
             }
-        }
-        if let Some(Mt32Control::Part(n)) = self.held {
-            lit[n] = true;
-        }
-        match self.mode {
-            // Nothing is lit at rest, nor on a screen the unit came up
-            // into: the buttons that asked for it were let go of to reach
-            // the switch.
-            Mode::Home | Mode::Started(_) => {}
-            // A pair or a prompt lights the button it was reached through.
-            Mode::Chord(chord) | Mode::Confirm(chord) => {
-                if let Mt32Control::Part(n) = chord.partner() {
-                    lit[n] = true;
-                }
-            }
-            Mode::Function(f) if f != Function::MasterVolume => {
-                // Parts 1-5 and Rhythm are their own buttons; 6, 7 and 8
-                // show on the buttons that reach them, 1, 2 and 3.
-                let button = match self.part {
-                    p @ 0..=5 => p,
-                    p => p - 5,
-                };
-                lit[button.min(5)] = true;
-            }
-            Mode::Function(_) => {}
         }
         lit
     }
 
-    /// Which function buttons are lit. A pair lights MASTER VOLUME as well
-    /// as its partner, so all of the buttons that reached it are shown.
     fn functions_lit(&self) -> [bool; 4] {
         let mut lit = [false; 4];
-        for &down in &self.holding {
+        for down in self.holding.iter().chain(self.flash.iter()) {
             if let Mt32Control::Function(f) = down {
                 lit[f.index()] = true;
-            }
-        }
-        if let Some(Mt32Control::Function(f)) = self.held {
-            lit[f.index()] = true;
-        }
-        match self.mode {
-            Mode::Home | Mode::Started(_) => {}
-            Mode::Function(f) => lit[f.index()] = true,
-            Mode::Chord(chord) | Mode::Confirm(chord) => {
-                lit[Function::MasterVolume.index()] = true;
-                if let Mt32Control::Function(f) = chord.partner() {
-                    lit[f.index()] = true;
-                }
             }
         }
         lit
@@ -2019,6 +2124,17 @@ impl Mt32Panel {
             // What the unit came up showing, held until it is asked for
             // something else.
             Mode::Started(StartMode::Version) => return Some(self.version.clone()),
+            Mode::Started(StartMode::Demo) => {
+                // It offers the chain until something is playing, then says
+                // which song, numbered as the manual numbers them.
+                let left = match &self.track_title {
+                    t if t.is_empty() => "Chain Play".to_string(),
+                    t => format!("{}:{t}", self.track + 1),
+                };
+                // The volume rides at the right behind the unit's own
+                // delimiter, which is what it shows there.
+                return Some(format!("{left:<16}|{:>3}", self.master_volume));
+            }
             // The unit's own wording, and its own units: the tune reads in
             // hertz across 427.5 to 452.6.
             Mode::Chord(Chord::MasterTune) => {
@@ -2036,8 +2152,8 @@ impl Mt32Panel {
             Mode::Confirm(_) => return Some("Overflow Assign? [1]".to_string()),
             Mode::Function(f) => f,
         };
-        // Parts read 1-5 and R, as they are labelled.
-        let name = if self.part == 5 {
+        // Parts read 1-8, and the rhythm part reads R as it is labelled.
+        let name = if self.part == RHYTHM_PART {
             "R".to_string()
         } else {
             (self.part + 1).to_string()
