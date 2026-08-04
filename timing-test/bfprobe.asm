@@ -10,7 +10,8 @@
 ; measurement of the bit-field class exists in any emulator's calibration
 ; that we know of. These rows isolate: the register-form internal cost,
 ; the memory RMW cost by span (1 / 2 / 4 / 5 bytes), the dynamic-offset
-; form, the read-only forms, and the demo's exact nine-instruction inner
+; form, the read-only forms (row 10 supplying the three-byte span the
+; RMW rows do not cover), and the demo's exact nine-instruction inner
 ; loop, all with the DBcc alignment controlled (a taken DBcc at pc%4==0
 ; costs one clock more than at %4==2, see fwdprobe).
 ;
@@ -27,7 +28,7 @@
 ;   row  7  bfset (a0){7:32}           span 5,    %4=2
 ;   row  8  bfset (a0){d5:1}, d5=3     dynamic,   %4=2
 ;   row  9  bftst (a0){0:1}            read-only, %4=2
-;   row 10  bfextu (a0){4:16},d0       2-byte rd, %4=2
+;   row 10  bfextu (a0){4:16},d0       span 3,    %4=2
 ;   row 11  bfins d1,(a0){0:1}         insert,    %4=2
 ;   row 12  Roots II plot loop verbatim            %4=0  (the demo's)
 ;   row 13  Roots II plot loop verbatim            %4=2
@@ -46,7 +47,10 @@
 ; disk and fwdprobe exactly, validating the run. Copperline = with the
 ; m68k crate's bit-field operand and timing model calibrated to this
 ; column (m68k-rs PR #60; an unfixed crate reads far off on the memory
-; rows). FS-UAE 3.2.35 for reference.
+; rows). FS-UAE 3.2.35 for reference. Row 10 is the one row Copperline
+; misses on the high side: AddressBus has no three-byte transfer, so the
+; crate composes that span from a word and a byte and the host bills the
+; extra access. Every other row is within 0.3%.
 ;
 ;              REAL A1200           Copperline           FS-UAE
 ;   row  0     0E6B  9.01 clk       0E6C  9.02 clk       1006 10.02 clk
@@ -59,18 +63,30 @@
 ;   row  7     46E4 44.32           4677 44.05           3A22 36.35
 ;   row  8     2CF3 28.10           2CD1 28.02           204C 20.19
 ;   row  9     2696 24.12           266A 24.02           1337 12.01
-;   row 10     2CF2 28.10           2CD1 28.02           204C 20.19
+;   row 10     2CF2 28.10           2D11 28.17           204C 20.19
 ;   row 11     2CF2 28.10           2CD1 28.02           204C 20.19
 ;   row 12     872A 84.51           86D1 84.29           6D42 68.31
 ;   row 13     872C 84.51           86D3 84.29           6D43 68.31
 ;
 ; What the real column says (the first hardware measurement of the 020
 ; bit-field class we know of):
-; 1. Field spans of 1, 2 and 4 bytes cost EXACTLY the same (rows
-;    2/5/6/8/10/11 all 2CF2-2CF3): the operand is one long access, the
-;    MC68020UM note's model, which FS-UAE shares in shape. Byte-granular
-;    accesses (Copperline's pre-recalibration column) are wrong for
-;    multi-byte spans.
+; 1. Field spans of 1, 2, 3 and 4 bytes cost EXACTLY the same (rows
+;    2/5/6/8/10/11 all 2CF2-2CF3): the field is one operand cycle
+;    whatever it spans, the MC68020UM 8.2.14 model, which FS-UAE shares
+;    in shape. Byte-granular accesses (Copperline's pre-recalibration
+;    column) are wrong for multi-byte spans.
+;    These rows do NOT pin the operand's transfer width. The A1200
+;    moves any span up to four bytes across its 32-bit chip bus in a
+;    single cycle, so a byte, a word and a long all read the same here,
+;    and every row starts at CHIPT, which is longword aligned. Whether
+;    the processor transfers the spanned width (5.3.1 sizes a byte,
+;    word, three-byte or long operand) or always a long is therefore
+;    unmeasured by this disk. m68k-rs takes the spanned width, which is
+;    the choice that cannot make a neighbouring byte observable on a
+;    memory-mapped register or push a fault past the end of a mapped
+;    region. Distinguishing the two would need a 16-bit chip port (an
+;    OCS/ECS machine, where a long costs two cycles and a byte one) or
+;    a bus-signal capture.
 ; 2. The magnitude is higher than both emulators: a span-1..4 BFSET
 ;    loop is 28.10 clk (7.03 cck) against Copperline's 16.09 and
 ;    FS-UAE's 20.19. The five-byte span adds 16.2 clk (row 7), BFTST
